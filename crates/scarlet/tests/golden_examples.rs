@@ -218,7 +218,6 @@ suite! {
         http_client,
         // Multi-file: imports examples/lib/units.scrl and lib/report/table.scrl,
         // which imports `../units` relative to its own directory.
-        #[ignore = "needs the VM"]
         modules,
         // Algorithms, then the capstone: a lexer, parser and evaluator built
         // only from what the examples above teach. Read last.
@@ -237,9 +236,7 @@ suite! {
     // answer was.
     programs: [
         // Type system: HM inference, generalization, and monomorphisation.
-        #[ignore = "needs the VM"]
         inference,
-        #[ignore = "needs the VM"]
         generics_adversarial,
         // Pattern matching, equality, and the shapes values come in.
         #[ignore = "needs the VM"]

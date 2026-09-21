@@ -76,6 +76,22 @@ impl Value {
             .then_some(Value(TAG_INT | (n as u64 & PAYLOAD)))
     }
 
+    /// `x` as a Float. No Float is NaN or infinite (`docs/semantics.md`): an
+    /// answer too large stops at the largest Float, keeping its sign, and one
+    /// with no answer at all is `0.0`. So no float word ever looks tagged.
+    pub(crate) fn float(x: f64) -> Value {
+        let x = if x.is_nan() {
+            0.0
+        } else if x == f64::INFINITY {
+            f64::MAX
+        } else if x == f64::NEG_INFINITY {
+            f64::MIN
+        } else {
+            x
+        };
+        Value(x.to_bits())
+    }
+
     pub(crate) fn bool(b: bool) -> Value {
         if b { Value::TRUE } else { Value::FALSE }
     }
@@ -178,6 +194,17 @@ mod tests {
             Value::func(FuncIdx(u32::MAX)).view(),
             View::Func(FuncIdx(u32::MAX))
         );
+    }
+
+    #[test]
+    fn a_float_is_never_nan_or_infinite() {
+        assert_eq!(Value::float(f64::NAN).view(), View::Float(0.0));
+        assert_eq!(Value::float(f64::INFINITY).view(), View::Float(f64::MAX));
+        assert_eq!(
+            Value::float(f64::NEG_INFINITY).view(),
+            View::Float(f64::MIN)
+        );
+        assert_eq!(Value::float(-2.5).view(), View::Float(-2.5));
     }
 
     #[test]

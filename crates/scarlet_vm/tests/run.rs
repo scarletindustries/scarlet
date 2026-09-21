@@ -120,16 +120,19 @@ fn a_deep_recursion_uses_memory_not_the_rust_stack() {
 /// it stops the run, and the stop says what it needs.
 #[test]
 fn only_calling_an_unbuilt_function_stops_the_run() {
-    let src = "fn half() Float { 0.5 }\n\
+    let src = "fn bytes() Binary { <<1>> }\n\
                pub fn main() {\n\
                \tprintln(1)\n\
                }\n";
     prints(src, "1\n");
-    let calls = "fn half() Float { 0.5 }\n\
+    let calls = "fn bytes() Binary { <<1>> }\n\
                  pub fn main() {\n\
-                 \t_ = half()\n\
+                 \t_ = bytes()\n\
                  }\n";
-    assert_eq!(run(calls), Err(Stop::NotBuiltYet("Float".into())));
+    assert_eq!(
+        run(calls),
+        Err(Stop::NotBuiltYet("the operation BinaryFromInt".into()))
+    );
 }
 
 #[test]
@@ -765,5 +768,47 @@ fn the_first_built_ins_run() {
          \tprintln(array.reverse([1, 2, 3]))\n\
          }\n",
         "Some(\n  [1, 2]\n)\nas is\n5\n0\n3\n1000000000000\n-42\n9223372036854775808\n[10, 20, 30]\n[3, 2, 1]\n",
+    );
+}
+
+/// Floats follow `docs/semantics.md`: no NaN and no infinity, ever.
+#[test]
+fn floats_are_never_nan_or_infinite() {
+    prints(
+        "import scarlet/float\n\
+         fn double(x) { x + x }\n\
+         fn big(x Float, n Int) Float { if n == 0 { x } else { big(x * 10.0, n - 1) } }\n\
+         pub fn main() {\n\
+         \tprintln(1.5 + 2.25)\n\
+         \tprintln(1.0)\n\
+         \tprintln(0.1 + 0.2)\n\
+         \tprintln(-2.5 * 4.0)\n\
+         \tprintln(1.0 / 0.0)\n\
+         \tprintln(0.0 / 0.0)\n\
+         \tprintln(7.5 % 0.0)\n\
+         \tprintln(-7.5 % 2.0)\n\
+         \tprintln(big(1.0, 400))\n\
+         \tprintln(big(-1.0, 400))\n\
+         \tprintln(big(1.0, 400) > 1.0)\n\
+         \tprintln(0.0 == -0.0)\n\
+         \tprintln(2.5 < 3.0)\n\
+         \tprintln(double(1.25))\n\
+         \tprintln(double(3))\n\
+         \tn = 2.5\n\
+         \tprintln(-n)\n\
+         \tprintln('${Some(1.5)}')\n\
+         \tprintln(float.floor(-2.5))\n\
+         \tprintln(float.round(2.5))\n\
+         \tprintln(float.truncate(-2.9))\n\
+         \tprintln(float.floor(big(1.0, 20)))\n\
+         \tprintln(float.from_int(3))\n\
+         \tprintln(float.to_string(2.0))\n\
+         }\n",
+        &format!(
+            "3.75\n1.0\n0.30000000000000004\n-10.0\n0.0\n0.0\n7.5\n-1.5\n\
+             {max}.0\n-{max}.0\nTrue\nTrue\nTrue\n2.5\n6\n-2.5\nSome(1.5)\n-3\n3\n-2\n\
+             100000000000000000000\n3.0\n2.0\n",
+            max = f64::MAX
+        ),
     );
 }

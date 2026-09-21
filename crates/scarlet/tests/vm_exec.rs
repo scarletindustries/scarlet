@@ -11,7 +11,6 @@ run_case! {
     // expressions, in patterns (which must also match their plain spelling —
     // exhaustiveness keys on the digits, so `1_000` and `1000` are one arm),
     // and in floats.
-    #[ignore = "needs the VM"]
     digit_separators: (
         "pub fn main() {\n\
          \tprintln(1_000_000 + 1)\n\
@@ -85,7 +84,6 @@ run_case! {
     // only `Numeric`) compiles to the *unspecialized* `Op::Neg`, which dispatches on
     // the runtime tag. The same compiled function must negate an Int and a Float,
     // preserving the IEEE sign for the float.
-    #[ignore = "needs the VM"]
     generic_unary_neg_dispatches_on_runtime_tag: (
         "fn n(x) { -x }\n\
          pub fn main() {\n\
@@ -139,7 +137,6 @@ run_case! {
 
     // `Op::DivFloat` is total: `x / 0.0 == 0.0`, mirroring the integer
     // `x / 0 == 0` convention, rather than Infinity/NaN.
-    #[ignore = "needs the VM"]
     float_division_is_total: (
         "pub fn main() {\n\
          \tprintln(7.0 / 2.0)\n\
@@ -471,7 +468,6 @@ run_case! {
 
     // As above for Float. The `<=`/`>=` lines use equal operands, so a
     // strict-compare mislowering fails them.
-    #[ignore = "needs the VM"]
     typed_float_ordering_compares: (
         "pub fn main() {\n\
          \tprintln(1.5 < 2.5)\n\
@@ -489,7 +485,6 @@ run_case! {
     // A `Numeric`-constrained wrapper leaves the operand type unbound at emit
     // time, so the four bodies compile to the generic ops and must serve both
     // Int and Float callers, agreeing with the typed cases line for line.
-    #[ignore = "needs the VM"]
     generic_ordering_compare_dispatches_on_runtime_tag: (
         "fn lt(a, b) { a < b }\n\
          fn gt(a, b) { a > b }\n\

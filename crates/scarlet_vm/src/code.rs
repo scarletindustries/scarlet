@@ -29,6 +29,7 @@ use scarlet_ir::core_ir::{
 use scarlet_ir::intrinsic::Intrinsic;
 use scarlet_ir::tivec::{Idx, TiVec};
 
+use crate::float::NumOp;
 use crate::show::Types;
 use crate::value::Value;
 
@@ -80,6 +81,29 @@ pub(crate) enum Instr {
         b: Reg,
     },
     IntNeg {
+        dst: Reg,
+        a: Reg,
+    },
+    Float {
+        dst: Reg,
+        op: NumOp,
+        a: Reg,
+        b: Reg,
+    },
+    FloatNeg {
+        dst: Reg,
+        a: Reg,
+    },
+    /// An operator whose operands' type was only known as "a number" when
+    /// the program compiled: Int or Float arithmetic, picked when it runs,
+    /// and `+` of two strings.
+    Num {
+        dst: Reg,
+        op: NumOp,
+        a: Reg,
+        b: Reg,
+    },
+    Neg {
         dst: Reg,
         a: Reg,
     },
@@ -319,6 +343,10 @@ impl Instr {
             | Instr::SetGlobal { .. }
             | Instr::Int { .. }
             | Instr::IntNeg { .. }
+            | Instr::Float { .. }
+            | Instr::FloatNeg { .. }
+            | Instr::Num { .. }
+            | Instr::Neg { .. }
             | Instr::Println { .. }
             | Instr::ToString { .. }
             | Instr::Concat { .. }
@@ -799,6 +827,20 @@ impl<'c> Loader<'c> {
                 _ => Err(format!("{op:?} with other than two arguments")),
             }
         };
+        // A Float operation (`float`), or one on either kind of number.
+        let two = |op, float| -> Result<Instr, String> {
+            match args {
+                [a, b] => {
+                    let (a, b) = (Reg::of(*a), Reg::of(*b));
+                    Ok(if float {
+                        Instr::Float { dst, op, a, b }
+                    } else {
+                        Instr::Num { dst, op, a, b }
+                    })
+                }
+                _ => Err(format!("{op:?} with other than two arguments")),
+            }
+        };
         match op {
             PrimOp::IntAdd => int(IntOp::Add),
             PrimOp::IntSub => int(IntOp::Sub),
@@ -811,6 +853,34 @@ impl<'c> Loader<'c> {
             PrimOp::IntLe => int(IntOp::Le),
             PrimOp::IntGt => int(IntOp::Gt),
             PrimOp::IntGe => int(IntOp::Ge),
+            PrimOp::FloatAdd => two(NumOp::Add, true),
+            PrimOp::FloatSub => two(NumOp::Sub, true),
+            PrimOp::FloatMul => two(NumOp::Mul, true),
+            PrimOp::FloatDiv => two(NumOp::Div, true),
+            PrimOp::FloatLt => two(NumOp::Lt, true),
+            PrimOp::FloatLe => two(NumOp::Le, true),
+            PrimOp::FloatGt => two(NumOp::Gt, true),
+            PrimOp::FloatGe => two(NumOp::Ge, true),
+            PrimOp::Add => two(NumOp::Add, false),
+            PrimOp::Sub => two(NumOp::Sub, false),
+            PrimOp::Mul => two(NumOp::Mul, false),
+            PrimOp::Div => two(NumOp::Div, false),
+            PrimOp::Rem => two(NumOp::Rem, false),
+            PrimOp::Lt => two(NumOp::Lt, false),
+            PrimOp::Le => two(NumOp::Le, false),
+            PrimOp::Gt => two(NumOp::Gt, false),
+            PrimOp::Ge => two(NumOp::Ge, false),
+            PrimOp::FloatNeg | PrimOp::Neg => match args {
+                [a] => {
+                    let a = Reg::of(*a);
+                    Ok(if op == PrimOp::FloatNeg {
+                        Instr::FloatNeg { dst, a }
+                    } else {
+                        Instr::Neg { dst, a }
+                    })
+                }
+                _ => Err(format!("{op:?} with other than one argument")),
+            },
             PrimOp::ToString => match args {
                 [a] => Ok(Instr::ToString {
                     dst,
@@ -961,7 +1031,7 @@ impl<'c> Loader<'c> {
             Some(Const::Int(n)) => {
                 Value::int(*n).ok_or_else(|| format!("the constant {n} as a small Int"))
             }
-            Some(Const::Float(_)) => Err("Float".into()),
+            Some(Const::Float(f)) => Ok(Value::float(*f)),
             Some(Const::String(_)) => Err("String".into()),
             Some(Const::Binary { .. }) => Err("Binary".into()),
             None => Err(format!("constant c{i}, which the program does not have")),
@@ -976,7 +1046,13 @@ fn built(i: Intrinsic, argc: usize) -> bool {
         Intrinsic::StringInspect
         | Intrinsic::StringLength
         | Intrinsic::ArrayLength
-        | Intrinsic::IntToString => argc == 1,
+        | Intrinsic::IntToString
+        | Intrinsic::FloatFloor
+        | Intrinsic::FloatCeil
+        | Intrinsic::FloatRound
+        | Intrinsic::FloatTruncate
+        | Intrinsic::FloatFromInt
+        | Intrinsic::FloatToString => argc == 1,
         _ => false,
     }
 }

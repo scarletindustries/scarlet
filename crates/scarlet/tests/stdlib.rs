@@ -821,7 +821,6 @@ fn stdlib_binary_hex_byte() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn stdlib_float() {
     run_outputs(
         "import scarlet/float\n\

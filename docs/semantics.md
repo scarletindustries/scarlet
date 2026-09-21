@@ -42,19 +42,20 @@ A stdlib function must never make up a value to hide a failure. It returns a `Re
 **Decided: Erlang-style floats, with no NaN and no infinity.** A Float is an ordinary 64-bit IEEE float, stored inside the value word, so float arithmetic never allocates. That matters for numeric work such as game simulation. No operation ever produces NaN or infinity:
 
 - `x / 0.0` is `0.0`, the same as Int.
+- `x % 0.0` is `x`, the same as Int, so `a == b * (a / b) + a % b` holds for Floats too.
 - A result too large to represent stops at the largest float, ±1.7976931348623157e308. So order is kept: a product of large numbers still compares greater than `1.0`.
 - A result with no answer at all, like `0.0 / 0.0`, is `0.0`.
 
 Erlang crashes in these cases, and Scarlet gives a harmless value instead.
 
-**Built today:** every non-finite result becomes `0.0` (`scarlet_vm/src/bytecode/value.rs`, `Value::float`), and that includes overflow. So today an overflowed product compares *less* than `1.0`. The overflow rule is the part still to build.
+**Built**, all four (`scarlet_vm/src/float.rs`, and `Value::float`, which every Float goes through). `0.0 == -0.0`, as in IEEE. `float.floor`, `ceil`, `round` and `truncate` give the exact Int, however large, since an Int has no bounds.
 
 **Built:** there is no implicit conversion between Int and Float, so `1 + 1.5` is a type error.
 
 **Open:**
 
 - What `sqrt(-1.0)` returns, once maths functions exist.
-- A float literal too large to represent compiles to `0.0` today. It could become the largest float, or a compile error, as an oversized Int literal already is.
+- A float literal too large to represent is the largest float today, by the rule above. It could become a compile error instead, as an oversized Int literal already is.
 
 ## Arrays
 

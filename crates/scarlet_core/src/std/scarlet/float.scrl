@@ -1,19 +1,17 @@
-// The largest Int <= `f`, saturating at the Int bounds. Total: Float values
-// are canonicalized finite, so there is no NaN/infinity case.
+// The largest Int <= `f`, exactly: an Int has no bounds, and a Float is
+// never NaN or infinite, so every Float has one.
 @vm(float__floor)
 pub fn floor(f Float) Int
 
-// The smallest Int >= `f`, saturating at the Int bounds.
+// The smallest Int >= `f`, exactly.
 @vm(float__ceil)
 pub fn ceil(f Float) Int
 
-// The nearest Int to `f` (ties round away from zero), saturating at the Int
-// bounds.
+// The nearest Int to `f`, exactly (ties round away from zero).
 @vm(float__round)
 pub fn round(f Float) Int
 
-// `f` with its fractional part discarded (rounds toward zero), saturating at
-// the Int bounds.
+// `f` with its fractional part discarded (rounds toward zero), exactly.
 @vm(float__truncate)
 pub fn truncate(f Float) Int
 

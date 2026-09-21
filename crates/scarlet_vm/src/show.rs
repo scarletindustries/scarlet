@@ -100,7 +100,7 @@ fn value<'t>(
             None => return Err(Stop::NotBuiltYet("printing this value".into())),
         },
         View::Func(f) => function(code, f, out),
-        View::Float(_) => return Err(Stop::NotBuiltYet("printing a Float".into())),
+        View::Float(f) => out.extend_from_slice(crate::float::text(f).as_bytes()),
     }
     Ok(())
 }

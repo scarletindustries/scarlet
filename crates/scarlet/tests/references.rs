@@ -728,7 +728,6 @@ fn qualified_member_use_keeps_the_import_live_but_a_bare_import_still_warns() {
 /// before `imported_qualifiers`, or `b.x` on a parameter named `b` is rejected
 /// as "Module './b' has no member 'x'".
 #[test]
-#[ignore = "needs the VM"]
 fn a_local_shadows_an_import_qualifier() {
     let p = Project::new("shadow_qualifier");
     p.write("b.scrl", "pub fn add(a, b) {\n\ta + b\n}\n");

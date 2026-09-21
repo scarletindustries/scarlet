@@ -27,12 +27,13 @@ pub(crate) fn equal(heap: &Heap, a: Value, b: Value) -> bool {
 
 /// Compare one pair: decide it now, or queue what it holds.
 fn pair(heap: &Heap, a: Value, b: Value, todo: &mut Vec<(Value, Value)>) -> bool {
-    // Every value has one form, so the same word is the same value. The
-    // exception would be a float's two zeros, which floats will have to meet.
+    // Every value but a Float has one form, so the same word is the same
+    // value. A Float compares as a number, so its two zeros are equal.
     if a.bits() == b.bits() {
         return true;
     }
     match (a.view(), b.view()) {
+        (View::Float(x), View::Float(y)) => x == y,
         (View::Cell(x), View::Cell(y)) => cells(heap, x, y, todo),
         // Immediates, small Ints and functions with no captures are equal
         // only when they are the same word, which the check above decided.

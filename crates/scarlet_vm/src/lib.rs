@@ -23,6 +23,7 @@ mod bigint;
 mod code;
 mod eq;
 mod exec;
+mod float;
 mod heap;
 mod show;
 mod value;

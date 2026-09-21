@@ -13,14 +13,16 @@
 
 use std::io::Write;
 
+use num_traits::{FromPrimitive, ToPrimitive};
 use scarlet_ir::core_ir::{FuncIdx, VariantRef};
 use scarlet_ir::intrinsic::Intrinsic;
 
 use crate::Stop;
 use crate::array::{self, End, Seq};
 use crate::bigint::{self, Int};
-use crate::code::{Body, Code, Func, Instr, Reg};
+use crate::code::{Body, Code, Func, Instr, IntOp, Reg};
 use crate::eq;
+use crate::float::{self, NumOp};
 use crate::heap::{Full, Heap, Kind};
 use crate::show;
 use crate::value::{Value, View};
@@ -146,6 +148,34 @@ impl<'c, 'o> Machine<'c, 'o> {
                 Instr::IntNeg { dst, a } => {
                     let a = self.int(base, *a)?;
                     let v = bigint::neg(&mut self.heap, a).map_err(full)?;
+                    self.set(base, *dst, v);
+                }
+                Instr::Float { dst, op, a, b } => {
+                    let (a, b) = (self.float(base, *a)?, self.float(base, *b)?);
+                    self.set(base, *dst, float::op(*op, a, b));
+                }
+                Instr::FloatNeg { dst, a } => {
+                    let a = self.float(base, *a)?;
+                    self.set(base, *dst, Value::float(-a));
+                }
+                Instr::Num { dst, op, a, b } => {
+                    let v = self.num(*op, self.get(base, *a), self.get(base, *b))?;
+                    self.set(base, *dst, v);
+                }
+                Instr::Neg { dst, a } => {
+                    let a = self.get(base, *a);
+                    let v = match a.view() {
+                        View::Float(f) => Value::float(-f),
+                        View::Int(_)
+                        | View::Nil
+                        | View::Bool(_)
+                        | View::Func(_)
+                        | View::Cell(_)
+                        | View::Nullary(_) => {
+                            let a = self.int_of(a)?;
+                            bigint::neg(&mut self.heap, a).map_err(full)?
+                        }
+                    };
                     self.set(base, *dst, v);
                 }
                 Instr::Println { dst, arg } => {
@@ -369,8 +399,7 @@ impl<'c, 'o> Machine<'c, 'o> {
                     intrinsic,
                     args,
                 } => {
-                    let args: Vec<Value> = args.iter().map(|r| self.get(base, *r)).collect();
-                    let v = self.builtin(*intrinsic, &args)?;
+                    let v = self.builtin(*intrinsic, base, args)?;
                     self.set(base, *dst, v);
                 }
                 Instr::Equal { dst, a, b } => {
@@ -550,15 +579,16 @@ impl<'c, 'o> Machine<'c, 'o> {
         }
     }
 
-    /// What built-in `i` gives for `args`, which it only reads. The result
-    /// holds its own reference.
-    fn builtin(&mut self, i: Intrinsic, args: &[Value]) -> Result<Value, Stop> {
-        let &[v] = args else {
+    /// What built-in `i` gives for the values in `args`, which it only reads.
+    /// The result holds its own reference.
+    fn builtin(&mut self, i: Intrinsic, base: usize, args: &[Reg]) -> Result<Value, Stop> {
+        let &[r] = args else {
             return Err(Stop::BadProgram(format!(
                 "the built-in {i:?} called with {} arguments",
                 args.len()
             )));
         };
+        let v = self.get(base, r);
         match i {
             Intrinsic::StringInspect => {
                 let mut text = Vec::new();
@@ -582,6 +612,34 @@ impl<'c, 'o> Machine<'c, 'o> {
             Intrinsic::ArrayLength => {
                 let n = self.seq(v)?.len(&self.heap);
                 bigint::value(&mut self.heap, n.into()).map_err(full)
+            }
+            Intrinsic::FloatFloor
+            | Intrinsic::FloatCeil
+            | Intrinsic::FloatRound
+            | Intrinsic::FloatTruncate => {
+                let f = self.float_of(v)?;
+                let whole = match i {
+                    Intrinsic::FloatFloor => f.floor(),
+                    Intrinsic::FloatCeil => f.ceil(),
+                    Intrinsic::FloatRound => f.round(),
+                    _ => f.trunc(),
+                };
+                // A Float is finite, so every whole one is an exact Int.
+                let n = num_bigint::BigInt::from_f64(whole).unwrap_or_default();
+                bigint::value(&mut self.heap, n).map_err(full)
+            }
+            Intrinsic::FloatFromInt => {
+                let f = match self.int_of(v)? {
+                    Int::Small(n) => n as f64,
+                    Int::Big(n) => n.to_f64().unwrap_or(0.0),
+                };
+                Ok(Value::float(f))
+            }
+            Intrinsic::FloatToString => {
+                let text = float::text(self.float_of(v)?);
+                Ok(Value::cell(
+                    self.heap.string(text.as_bytes()).map_err(full)?,
+                ))
             }
             Intrinsic::IntToString => {
                 let text = match self.int_of(v)? {
@@ -817,6 +875,52 @@ impl<'c, 'o> Machine<'c, 'o> {
             | View::Cell(_)
             | View::Nullary(_) => false,
         }
+    }
+
+    fn float(&self, base: usize, r: Reg) -> Result<f64, Stop> {
+        self.float_of(self.get(base, r))
+    }
+
+    fn float_of(&self, v: Value) -> Result<f64, Stop> {
+        match v.view() {
+            View::Float(f) => Ok(f),
+            v @ (View::Int(_)
+            | View::Nil
+            | View::Bool(_)
+            | View::Func(_)
+            | View::Cell(_)
+            | View::Nullary(_)) => Err(Stop::BadProgram(format!("a Float operation on {v:?}"))),
+        }
+    }
+
+    /// `a op b` for an operator whose operands are both Ints, both Floats, or,
+    /// for `+`, both strings.
+    fn num(&mut self, op: NumOp, a: Value, b: Value) -> Result<Value, Stop> {
+        if let (View::Float(x), View::Float(y)) = (a.view(), b.view()) {
+            return Ok(float::op(op, x, y));
+        }
+        if op == NumOp::Add && self.is_string(a) && self.is_string(b) {
+            let mut text = Vec::new();
+            for s in [a, b] {
+                if let Some(cell) = s.as_cell() {
+                    self.heap.read_string(cell, &mut text);
+                }
+            }
+            return Ok(Value::cell(self.heap.string(&text).map_err(full)?));
+        }
+        let int = match op {
+            NumOp::Add => IntOp::Add,
+            NumOp::Sub => IntOp::Sub,
+            NumOp::Mul => IntOp::Mul,
+            NumOp::Div => IntOp::Div,
+            NumOp::Rem => IntOp::Rem,
+            NumOp::Lt => IntOp::Lt,
+            NumOp::Le => IntOp::Le,
+            NumOp::Gt => IntOp::Gt,
+            NumOp::Ge => IntOp::Ge,
+        };
+        let (a, b) = (self.int_of(a)?, self.int_of(b)?);
+        bigint::op(&mut self.heap, int, a, b).map_err(full)
     }
 
     fn int(&self, base: usize, r: Reg) -> Result<Int, Stop> {
