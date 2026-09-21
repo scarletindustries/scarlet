@@ -1,13 +1,14 @@
 name: Release
 
-env:
-  COMPILER_PATHS: crates/ Cargo.toml Cargo.lock VERSION
-
+# Run by hand from the Actions tab: "Run workflow", then canary or stable.
+#
+# The next version comes from the change files in `.changeset/`, which knope
+# reads (`knope.toml`). A stable release bumps VERSION, writes CHANGELOG.md,
+# deletes the change files, commits `release <version>`, tags `v<version>` and
+# pushes both, then builds from that tag. A canary previews the next version
+# and builds `<version>-canary.<date>` from the commit it ran on, committing
+# nothing.
 on:
-  push:
-    branches: [master]
-  schedule:
-    - cron: "0 2 * * *"
   workflow_dispatch:
     inputs:
       release_type:
@@ -23,70 +24,48 @@ permissions:
   contents: write
 
 jobs:
-  check-changes:
+  version:
     runs-on: ubuntu-latest
     outputs:
-      should_build: ${{ steps.check.outputs.should_build }}
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
       is_canary: ${{ steps.version.outputs.is_canary }}
+      ref: ${{ steps.version.outputs.ref }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Check for changes since last canary
-        id: check
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          if git rev-parse canary >/dev/null 2>&1; then
-            LAST_CANARY=$(git rev-list -n 1 canary)
-            CURRENT=$(git rev-parse HEAD)
-            if [ "$LAST_CANARY" = "$CURRENT" ]; then
-              echo "No changes since last canary build"
-              echo "should_build=false" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-
-            # For scheduled runs, only build if compiler source files changed
-            if [ "${{ github.event_name }}" = "schedule" ]; then
-              COMPILER_CHANGES=$(git diff --name-only "$LAST_CANARY" "$CURRENT" -- ${{ env.COMPILER_PATHS }} | wc -l)
-              if [ "$COMPILER_CHANGES" -eq 0 ]; then
-                echo "Scheduled run: no compiler changes since last canary"
-                echo "should_build=false" >> $GITHUB_OUTPUT
-                exit 0
-              fi
-            fi
-          fi
-
-          echo "should_build=true" >> $GITHUB_OUTPUT
+      - name: Install knope
+        uses: knope-dev/action@v2.1.2
+        with:
+          version: 0.23.0
 
       - name: Determine version
         id: version
-        if: steps.check.outputs.should_build == 'true'
         run: |
-          BASE_VERSION=$(cat VERSION)
-          RELEASE_TYPE="${{ github.event.inputs.release_type || 'canary' }}"
-
-          if [ "$RELEASE_TYPE" = "stable" ]; then
-            echo "version=$BASE_VERSION" >> $GITHUB_OUTPUT
-            echo "tag=v$BASE_VERSION" >> $GITHUB_OUTPUT
+          if [ "${{ inputs.release_type }}" = "stable" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            # Fails, and so stops the release, when there is no change file.
+            knope release
+            VERSION=$(cat VERSION)
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "tag=v$VERSION" >> $GITHUB_OUTPUT
             echo "is_canary=false" >> $GITHUB_OUTPUT
+            echo "ref=v$VERSION" >> $GITHUB_OUTPUT
           else
-            CANARY_VERSION="${BASE_VERSION}-canary.$(date -u +%Y%m%d.%H%M)"
-            echo "version=$CANARY_VERSION" >> $GITHUB_OUTPUT
-            echo "tag=$CANARY_VERSION" >> $GITHUB_OUTPUT
+            knope preview
+            VERSION="$(cat VERSION)-canary.$(date -u +%Y%m%d.%H%M)"
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "tag=$VERSION" >> $GITHUB_OUTPUT
             echo "is_canary=true" >> $GITHUB_OUTPUT
+            echo "ref=${{ github.sha }}" >> $GITHUB_OUTPUT
           fi
 
   build:
-    needs: check-changes
-    if: needs.check-changes.outputs.should_build == 'true'
+    needs: version
     strategy:
       matrix:
         include:
@@ -111,6 +90,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.ref }}
 
       - name: Install Rust (rust-toolchain.toml)
         run: |
@@ -126,7 +107,7 @@ jobs:
       # already contains `-canary.`; a local `cargo build` leaves VERSION as
       # `0.0.1` and appends `+git.<sha>` so `--version` can name the commit.
       - name: Update VERSION file
-        run: echo "${{ needs.check-changes.outputs.version }}" > VERSION
+        run: echo "${{ needs.version.outputs.version }}" > VERSION
 
       - name: Build (Release)
         run: cargo build --release --target ${{ matrix.target }}
@@ -219,9 +200,14 @@ jobs:
           security delete-keychain $RUNNER_TEMP/app-signing.keychain-db 2>/dev/null || true
 
   release:
-    needs: [check-changes, build]
+    needs: [version, build]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.ref }}
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -238,9 +224,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="${{ needs.check-changes.outputs.version }}"
-          TAG="${{ needs.check-changes.outputs.tag }}"
-          IS_CANARY="${{ needs.check-changes.outputs.is_canary }}"
+          VERSION="${{ needs.version.outputs.version }}"
+          TAG="${{ needs.version.outputs.tag }}"
+          IS_CANARY="${{ needs.version.outputs.is_canary }}"
 
           if [ "$IS_CANARY" = "true" ]; then
             gh release create "$TAG" \
@@ -259,10 +245,12 @@ jobs:
           curl -fsSL scarlet.industries/install.sh | bash
           \`\`\`" \
               --prerelease \
+              --target ${{ github.sha }} \
               release/*
 
-            gh release delete canary --repo ${{ github.repository }} --yes 2>/dev/null || true
-            git push origin :refs/tags/canary 2>/dev/null || true
+            # --cleanup-tag moves the `canary` tag too: without it the release
+            # below would reuse the old tag, still on the previous canary's commit.
+            gh release delete canary --repo ${{ github.repository }} --yes --cleanup-tag 2>/dev/null || true
             gh release create canary \
               --repo ${{ github.repository }} \
               --title "Latest Canary" \
@@ -272,8 +260,12 @@ jobs:
 
           For a specific version, use \`scarlet upgrade $VERSION\`" \
               --prerelease \
+              --target ${{ github.sha }} \
               release/*
           else
+            # This version's entry in CHANGELOG.md, which knope wrote from the
+            # change files: from its heading up to the next release's.
+            CHANGES=$(awk -v v="$VERSION" '$0 ~ "^## " v " " { on = 1; next } /^## / && on { exit } on' CHANGELOG.md)
             gh release create "$TAG" \
               --repo ${{ github.repository }} \
               --title "v$VERSION" \
@@ -283,6 +275,6 @@ jobs:
           \`\`\`
 
           ## Changelog
-          _Release notes for v$VERSION_" \
+          $CHANGES" \
               release/*
           fi

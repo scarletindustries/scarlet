@@ -1,0 +1,53 @@
+# Releases. Every change a user can see comes with a change file in
+# `.changeset/`, made with `knope document-change`: it says how big the change
+# is (`major`, `minor` or `patch`) and what it is, in a sentence or two. A
+# stable release reads them all, picks the next version by semver, writes it
+# to VERSION and the notes to CHANGELOG.md, and deletes the files.
+#
+# Below 1.0, a `major` (breaking) change bumps the middle number and anything
+# else bumps the last: 0.1.2 -> 0.2.0, then 0.2.0 -> 0.2.1.
+#
+# Commits are not read: only change files decide the version.
+
+[package]
+versioned_files = [{ path = "VERSION", regex = "^(?<version>\\d+\\.\\d+\\.\\d+)" }]
+changelog = "CHANGELOG.md"
+
+[changes]
+ignore_conventional_commits = true
+
+[[workflows]]
+name = "document-change"
+
+[[workflows.steps]]
+type = "CreateChangeFile"
+
+# The next version and its notes, without releasing it: what a stable release
+# would do to the files, and nothing more. The Release workflow's canary builds
+# from this and commits nothing.
+[[workflows]]
+name = "preview"
+
+[[workflows.steps]]
+type = "PrepareRelease"
+allow_empty = true
+
+# A stable release: the next version and its notes, committed, tagged and
+# pushed. There must be at least one change file to release.
+[[workflows]]
+name = "release"
+
+[[workflows.steps]]
+type = "PrepareRelease"
+
+[[workflows.steps]]
+type = "Command"
+command = "git commit -m \"release $version\""
+
+[[workflows.steps]]
+type = "Command"
+command = "git tag v$version"
+
+[[workflows.steps]]
+type = "Command"
+command = "git push origin HEAD v$version"
