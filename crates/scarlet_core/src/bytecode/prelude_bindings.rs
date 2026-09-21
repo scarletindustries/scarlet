@@ -71,6 +71,15 @@ impl CtorRef {
     };
 }
 
+impl From<CtorRef> for crate::core_ir::VariantRef {
+    fn from(c: CtorRef) -> Self {
+        crate::core_ir::VariantRef {
+            type_id: c.type_id,
+            variant_idx: c.variant_idx,
+        }
+    }
+}
+
 /// Why [`PreludeBindings::capture`] rejected the loaded prelude.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreludeCaptureError {

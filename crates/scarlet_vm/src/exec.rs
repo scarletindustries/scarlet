@@ -415,28 +415,25 @@ impl<'c, 'o> Machine<'c, 'o> {
                     let cell = array::concat(&mut self.heap, a, b).map_err(full)?;
                     self.set(base, *dst, Value::cell(cell));
                 }
+                Instr::ArrayIndex { dst, src, index } => {
+                    let found = self.index(self.get(base, *src), self.get(base, *index))?;
+                    let v = match found {
+                        Some(v) => {
+                            let v = self.share(v);
+                            let cell = self.heap.ctor(self.code.abi.some, &[v]).map_err(full)?;
+                            Value::cell(cell)
+                        }
+                        None => Value::nullary(self.code.abi.none),
+                    };
+                    self.set(base, *dst, v);
+                }
                 Instr::ArrayIndexOr {
                     dst,
                     src,
                     index,
                     default,
                 } => {
-                    let a = self.array(self.get(base, *src))?;
-                    let found = match self.get(base, *index).view() {
-                        View::Int(i) => usize::try_from(i)
-                            .ok()
-                            .and_then(|i| array::get(&self.heap, a, i)),
-                        // A big int is past the end of any array.
-                        View::Cell(cell) if self.heap.kind(cell) == Some(Kind::BigInt) => None,
-                        v @ (View::Float(_)
-                        | View::Nil
-                        | View::Bool(_)
-                        | View::Func(_)
-                        | View::Cell(_)
-                        | View::Nullary(_)) => {
-                            return Err(Stop::BadProgram(format!("an array indexed by {v:?}")));
-                        }
-                    };
+                    let found = self.index(self.get(base, *src), self.get(base, *index))?;
                     let v = found.unwrap_or(self.get(base, *default));
                     let v = self.share(v);
                     self.set(base, *dst, v);
@@ -480,6 +477,25 @@ impl<'c, 'o> Machine<'c, 'o> {
             _ => Err(Stop::BadProgram(format!(
                 "an array operation on {v:?}, which is not an array"
             ))),
+        }
+    }
+
+    /// Element `index` of the array `a`, with no reference added, or `None`
+    /// when it has none: past the end, negative, or a big int, which is past
+    /// the end of any array.
+    fn index(&self, a: Value, index: Value) -> Result<Option<Value>, Stop> {
+        let a = self.array(a)?;
+        match index.view() {
+            View::Int(i) => Ok(usize::try_from(i)
+                .ok()
+                .and_then(|i| array::get(&self.heap, a, i))),
+            View::Cell(cell) if self.heap.kind(cell) == Some(Kind::BigInt) => Ok(None),
+            v @ (View::Float(_)
+            | View::Nil
+            | View::Bool(_)
+            | View::Func(_)
+            | View::Cell(_)
+            | View::Nullary(_)) => Err(Stop::BadProgram(format!("an array indexed by {v:?}"))),
         }
     }
 

@@ -600,3 +600,25 @@ fn an_array_is_walked_built_and_joined() {
          20\n99\n99\n1\n99\n",
     );
 }
+
+/// `xs[i]` is an `Option`: `Some` of the element, or `None` past either end.
+#[test]
+fn indexing_an_array_gives_an_option() {
+    prints(
+        "pub fn main() {\n\
+         \txs = ['a', 'b', 'c']\n\
+         \tprintln(xs[0])\n\
+         \tprintln(xs[2])\n\
+         \tprintln(xs[3])\n\
+         \tprintln(xs[-1])\n\
+         \tprintln(xs[9223372036854775807])\n\
+         \tmatch xs[1] {\n\
+         \t\tSome(s) -> println('found ${s}')\n\
+         \t\tNone -> println('none')\n\
+         \t}\n\
+         \tprintln(xs[5] or 'default')\n\
+         \tprintln(xs[1 - 2] or 'computed')\n\
+         }\n",
+        "Some(a)\nSome(c)\nNone\nNone\nNone\nfound b\ndefault\ncomputed\n",
+    );
+}

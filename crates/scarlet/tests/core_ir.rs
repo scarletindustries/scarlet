@@ -949,6 +949,25 @@ fn every_constructor_has_names() {
         seen > 100,
         "only {seen} constructors: the stdlib did not compile in"
     );
+    for v in program.abi.variants() {
+        let names = program
+            .types
+            .get(&v.type_id)
+            .expect("the VM's constructors have names");
+        assert!(names.variants.get(usize::from(v.variant_idx)).is_some());
+    }
+    let option = program
+        .types
+        .get(&program.abi.some.type_id)
+        .expect("Option");
+    assert_eq!(option.name, "Option");
+    assert_eq!(
+        option
+            .variants
+            .get(usize::from(program.abi.none.variant_idx))
+            .map(|v| v.name.as_str()),
+        Some("None")
+    );
     let shape = program
         .types
         .values()

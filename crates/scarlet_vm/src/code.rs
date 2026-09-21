@@ -23,8 +23,8 @@
 use std::collections::HashMap;
 
 use scarlet_ir::core_ir::{
-    Atom, Callee, Const, CoreExpr, CoreFn, CorePat, FuncIdx, GlobalSlot, JoinId, Load, LocalId,
-    LoweredFn, PrimOp, Program, VariantRef,
+    Abi, Atom, Callee, Const, CoreExpr, CoreFn, CorePat, FuncIdx, GlobalSlot, JoinId, Load,
+    LocalId, LoweredFn, PrimOp, Program, VariantRef,
 };
 use scarlet_ir::intrinsic::Intrinsic;
 use scarlet_ir::tivec::{Idx, TiVec};
@@ -236,6 +236,13 @@ pub(crate) enum Instr {
         a: Reg,
         b: Reg,
     },
+    /// `xs[i]`: `Some` of element `index` of the array in `src`, or `None`
+    /// when it has none.
+    ArrayIndex {
+        dst: Reg,
+        src: Reg,
+        index: Reg,
+    },
     /// `xs[i] or d`: element `index` of the array in `src`, or `default`
     /// when it has none.
     ArrayIndexOr {
@@ -300,6 +307,7 @@ impl Instr {
             | Instr::ArrayPrepend { .. }
             | Instr::ArrayAppend { .. }
             | Instr::ArrayConcat { .. }
+            | Instr::ArrayIndex { .. }
             | Instr::ArrayIndexOr { .. }
             | Instr::Bad { .. } => None,
         }
@@ -364,6 +372,8 @@ pub(crate) struct Code {
     pub(crate) types: Types,
     /// Each function's source name, for showing a function value.
     pub(crate) names: TiVec<FuncIdx, String>,
+    /// The stdlib constructors the VM builds on its own.
+    pub(crate) abi: Abi,
 }
 
 pub(crate) fn load(program: &Program) -> Code {
@@ -388,6 +398,7 @@ pub(crate) fn load(program: &Program) -> Code {
         globals: program.globals,
         types: program.types.clone(),
         names,
+        abi: program.abi,
     }
 }
 
@@ -818,6 +829,14 @@ impl<'c> Loader<'c> {
                     b: Reg::of(*b),
                 }),
                 _ => Err("ArrayConcat with other than two arguments".into()),
+            },
+            PrimOp::ArrayIndex => match args {
+                [src, index] => Ok(Instr::ArrayIndex {
+                    dst,
+                    src: Reg::of(*src),
+                    index: Reg::of(*index),
+                }),
+                _ => Err("ArrayIndex with other than two arguments".into()),
             },
             PrimOp::ArrayIndexOr => match args {
                 [src, index, default] => Ok(Instr::ArrayIndexOr {

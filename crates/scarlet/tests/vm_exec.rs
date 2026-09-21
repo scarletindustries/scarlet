@@ -153,7 +153,6 @@ run_case! {
     ),
 
     // `Op::Index` yields `Option`: `None` out of bounds, not a wrap or panic.
-    #[ignore = "needs the VM"]
     array_index_yields_option: (
         "pub fn main() {\n\
          \txs = [10, 20, 30]\n\
@@ -661,7 +660,6 @@ run_case! {
 /// The fused op evaluates its default eagerly, so `lower` may only fuse a
 /// *pure* one. A call has an effect and must stay behind the lazy match.
 #[test]
-#[ignore = "needs the VM"]
 fn index_or_does_not_evaluate_an_impure_default() {
     run_outputs(
         "fn side() Int {\n\
@@ -680,7 +678,6 @@ fn index_or_does_not_evaluate_an_impure_default() {
 /// `False` is a nullary constructor, not a constant, so it exercises the
 /// pushed-default path a grid walk's `row[x] or False` depends on.
 #[test]
-#[ignore = "needs the VM"]
 fn index_or_covers_both_encodings_and_every_boundary() {
     run_outputs(
         "fn f(a Array(Int), i Int) Int { a[i] or -1 }\n\

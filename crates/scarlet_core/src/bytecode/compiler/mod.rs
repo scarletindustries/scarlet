@@ -49,7 +49,7 @@ use super::session::{RawRef, Watermark};
 use super::{PreludeBindings, TypeRef};
 use crate::ast;
 use crate::core_ir::{
-    Const, ConstId, CoreFn, FuncIdx, LoweredFn, Program, TypeNames, VariantNames,
+    Abi, Const, ConstId, CoreFn, FuncIdx, LoweredFn, Program, TypeNames, VariantNames,
 };
 use crate::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
 use crate::tivec::{Idx, TiVec};
@@ -1348,7 +1348,11 @@ impl Compiler {
             }
         }
         let inits = std::mem::take(&mut self.inits);
-        let types = self.type_names((&fns).into_iter().chain(&inits).chain([&toplevel]));
+        let abi = Abi {
+            some: self.prelude.some().into(),
+            none: self.prelude.none().into(),
+        };
+        let types = self.type_names((&fns).into_iter().chain(&inits).chain([&toplevel]), &abi);
         Some(Program {
             fns,
             consts: self.consts.clone(),
@@ -1357,15 +1361,18 @@ impl Compiler {
             main: self.main,
             globals: self.local_count as u32,
             types,
+            abi,
         })
     }
 
-    /// The names of every type a constructor in `bodies` belongs to.
+    /// The names of every type a constructor in `bodies`, or in `abi`,
+    /// belongs to.
     fn type_names<'a>(
         &self,
         bodies: impl Iterator<Item = &'a LoweredFn>,
+        abi: &Abi,
     ) -> BTreeMap<TypeId, TypeNames> {
-        let mut ids = BTreeSet::new();
+        let mut ids: BTreeSet<TypeId> = abi.variants().iter().map(|v| v.type_id).collect();
         for f in bodies {
             f.core.body.for_each_variant(|v| {
                 ids.insert(v.type_id);
@@ -4568,14 +4575,10 @@ impl Compiler {
 
     /// The prelude constructors Core IR spells as immediates.
     fn immediates(&self) -> crate::core_ir::immediates::Immediates {
-        let v = |c: crate::bytecode::CtorRef| crate::core_ir::VariantRef {
-            type_id: c.type_id,
-            variant_idx: c.variant_idx,
-        };
         crate::core_ir::immediates::Immediates {
-            true_: v(self.prelude.true_()),
-            false_: v(self.prelude.false_()),
-            nil: v(self.prelude.nil_ctor()),
+            true_: self.prelude.true_().into(),
+            false_: self.prelude.false_().into(),
+            nil: self.prelude.nil_ctor().into(),
         }
     }
 

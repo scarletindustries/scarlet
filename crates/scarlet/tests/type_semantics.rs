@@ -63,7 +63,6 @@ run_case! {
         "5\n",
     ),
 
-    #[ignore = "needs the VM"]
     constructor_is_first_class: (
         "fn map(f fn(a) b, xs Array(a)) Array(b) {\n\
          \tmatch xs {\n\
@@ -124,7 +123,6 @@ run_case! {
 }
 
 run_case! {
-    #[ignore = "needs the VM"]
     index_returns_option: (
         "pub fn main() {\n\
          \txs = [10, 20, 30]\n\
@@ -148,7 +146,6 @@ reject_case! {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn index_negative_returns_none() {
     // A negative index is rejected by `Op::Index`'s own `idx >= 0` guard, a
     // different path from the out-of-bounds `arr.get` returning `None`.

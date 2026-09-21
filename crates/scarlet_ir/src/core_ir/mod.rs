@@ -131,6 +131,24 @@ pub struct VariantRef {
     pub variant_idx: u16,
 }
 
+/// The stdlib constructors the VM builds on its own, like the `Some(x)` that
+/// `xs[i]` gives. The compiler says which constructor each one is; the VM
+/// knows nothing else about the stdlib's types.
+#[derive(Debug, Clone, Copy)]
+pub struct Abi {
+    /// `Some(value)`.
+    pub some: VariantRef,
+    /// `None`.
+    pub none: VariantRef,
+}
+
+impl Abi {
+    /// Every constructor here, so their types' names can travel with them.
+    pub fn variants(&self) -> [VariantRef; 2] {
+        [self.some, self.none]
+    }
+}
+
 /// What a type and its constructors are called, for anything that shows a
 /// value of it to a person: `Some(1)`, `Point{ x: 1, y: 2 }`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -484,8 +502,10 @@ pub struct Program {
     /// is below this.
     pub globals: u32,
     /// The names of every type the program builds or matches a constructor
-    /// of. Every [`VariantRef`] in the program has its type here.
+    /// of, or that the VM builds one of ([`Self::abi`]). Every [`VariantRef`]
+    /// in the program has its type here.
     pub types: BTreeMap<TypeId, TypeNames>,
+    pub abi: Abi,
 }
 
 // Printer for the golden tests in `crates/scarlet/tests/core_ir.rs`. Ids print as
