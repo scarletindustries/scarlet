@@ -11,11 +11,12 @@
 
 use scarlet_ir::core_ir::{
     Atom, Callee, Const, CoreExpr, CoreFn, FuncIdx, GlobalSlot, Load, LocalId, LoweredFn, PrimOp,
-    Program,
+    Program, VariantRef,
 };
 use scarlet_ir::intrinsic::Intrinsic;
 use scarlet_ir::tivec::{Idx, TiVec};
 
+use crate::show::Types;
 use crate::value::Value;
 
 /// A register: an index into the running function's frame.
@@ -82,6 +83,13 @@ pub(crate) enum Instr {
     Concat {
         dst: Reg,
         parts: Box<[Reg]>,
+    },
+    /// A new cell for constructor `variant`, holding `fields`. A constructor
+    /// with no fields is a [`Instr::Const`] instead: it needs no cell.
+    Ctor {
+        dst: Reg,
+        variant: VariantRef,
+        fields: Box<[Reg]>,
     },
     /// Perceus's last use of `reg`: give up its reference now rather than at
     /// the frame's end.
@@ -166,6 +174,7 @@ pub(crate) struct Code {
     pub(crate) toplevels: Vec<Func>,
     pub(crate) main: Option<FuncIdx>,
     pub(crate) globals: u32,
+    pub(crate) types: Types,
 }
 
 pub(crate) fn load(program: &Program) -> Code {
@@ -186,6 +195,7 @@ pub(crate) fn load(program: &Program) -> Code {
         toplevels,
         main: program.main,
         globals: program.globals,
+        types: program.types.clone(),
     }
 }
 
@@ -408,7 +418,21 @@ impl<'c> Loader<'c> {
                 _ => return Err("println with other than one argument".into()),
             },
             Atom::Intrinsic { intrinsic, .. } => return Err(format!("the built-in {intrinsic:?}")),
-            Atom::Ctor { .. } => return Err("constructors".into()),
+            // Perceus's `reuse` is a hint that `fields` may overwrite a cell
+            // just dropped. A fresh cell is always right, so it waits.
+            Atom::Ctor {
+                variant, fields, ..
+            } if fields.is_empty() => Instr::Const {
+                dst,
+                value: Value::nullary(*variant),
+            },
+            Atom::Ctor {
+                variant, fields, ..
+            } => Instr::Ctor {
+                dst,
+                variant: *variant,
+                fields: fields.iter().copied().map(Reg::of).collect(),
+            },
         };
         self.instrs.push(instr);
         Ok(())

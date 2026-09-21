@@ -50,7 +50,6 @@ fn relative_selective_and_alias() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn aliased_type_import_unifies_with_canonical() {
     // `import mod.{T as X}` must hydrate an annotation of `X` to the type's
     // canonical nominal name. Values carry the canonical name, so an

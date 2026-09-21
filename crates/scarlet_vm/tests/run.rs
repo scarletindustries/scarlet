@@ -219,3 +219,81 @@ fn a_closed_output_stops_the_run_quietly() {
         Err(Stop::OutputClosed)
     );
 }
+
+#[test]
+fn a_constructor_prints_as_it_is_written() {
+    prints(
+        "type Shape {\n\
+         \tCircle(radius Int)\n\
+         \tRect(w Int, h Int)\n\
+         \tDot\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(Circle(radius: 2))\n\
+         \tprintln(Rect(w: 3, h: 4))\n\
+         \tprintln(Dot)\n\
+         \tprintln(Some(1))\n\
+         \tprintln(Some(None))\n\
+         \tprintln(Err(Nil))\n\
+         \tprintln(Ok('fine'))\n\
+         \tprintln('${Some(True)} and ${None}')\n\
+         }\n",
+        "Circle(2)\nRect(3, 4)\nDot\nSome(1)\nSome(None)\nErr(Nil)\nOk(fine)\nSome(True) and None\n",
+    );
+}
+
+/// A constructor named after its own type is a record, and shows its labels.
+#[test]
+fn a_record_shows_its_labels() {
+    prints(
+        "type Point {\n\
+         \tPoint(x Int, y Int)\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(Point(x: 1, y: -2))\n\
+         }\n",
+        "Point{ x: 1, y: -2 }\n",
+    );
+}
+
+/// A constructor holding anything but small values takes a line per field,
+/// and what it holds is laid out the same way, one level in.
+#[test]
+fn a_nested_constructor_takes_a_line_per_field() {
+    prints(
+        "type Point {\n\
+         \tPoint(x Int, y Int)\n\
+         }\n\
+         type Seg {\n\
+         \tSeg(a Point, b Point)\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(Seg(a: Point(x: 1, y: 2), b: Point(x: 3, y: 4)))\n\
+         \tprintln(Some(Some(1)))\n\
+         \tprintln(Ok('a string of twenty or more'))\n\
+         }\n",
+        "Seg {\n  a: Point{ x: 1, y: 2 },\n  b: Point{ x: 3, y: 4 }\n}\n\
+         Some(\n  Some(1)\n)\n\
+         Ok(\n  a string of twenty or more\n)\n",
+    );
+}
+
+/// A list 100,000 long is built by a loop and freed when `main` ends, and
+/// neither takes a Rust call per link.
+#[test]
+fn a_long_list_is_built_and_freed() {
+    prints(
+        "type L {\n\
+         \tCons(h Int, t L)\n\
+         \tEnd\n\
+         }\n\
+         fn build(n Int, acc L) L {\n\
+         \tif n == 0 { acc } else { build(n - 1, Cons(n, acc)) }\n\
+         }\n\
+         pub fn main() {\n\
+         \t_l = build(100000, End)\n\
+         \tprintln(Cons(0, End))\n\
+         }\n",
+        "Cons(0, End)\n",
+    );
+}

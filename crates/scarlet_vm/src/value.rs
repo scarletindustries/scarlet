@@ -6,18 +6,21 @@
 //! one into `0.0` before it is kept). Such a word's top 16 bits say what it
 //! holds, and its low 48 bits hold it:
 //!
-//! | top 16 bits | holds                                         |
-//! |-------------|-----------------------------------------------|
-//! | `0xFFF9`    | a small Int, 48-bit two's complement          |
-//! | `0xFFFA`    | `Nil` (0), `False` (1) or `True` (2)          |
-//! | `0xFFFB`    | a function with no captures, by its `FuncIdx` |
-//! | `0xFFFC`    | a cell in the process's heap                  |
+//! | top 16 bits | holds                                          |
+//! |-------------|------------------------------------------------|
+//! | `0xFFF9`    | a small Int, 48-bit two's complement           |
+//! | `0xFFFA`    | `Nil` (0), `False` (1) or `True` (2)           |
+//! | `0xFFFB`    | a function with no captures, by its `FuncIdx`  |
+//! | `0xFFFC`    | a cell in the process's heap                   |
+//! | `0xFFFD`    | a constructor with no fields: variant and type |
 //!
-//! Every other word is a float.
+//! Every other word is a float. A constructor with no fields holds its
+//! variant in bits 32 to 47 and its type in bits 0 to 31.
 
 use std::fmt;
 
-use scarlet_ir::core_ir::FuncIdx;
+use scarlet_ir::TypeId;
+use scarlet_ir::core_ir::{FuncIdx, VariantRef};
 
 use crate::heap::Cell;
 
@@ -30,6 +33,7 @@ const TAG_INT: u64 = 0xFFF9_0000_0000_0000;
 const TAG_IMMEDIATE: u64 = 0xFFFA_0000_0000_0000;
 const TAG_FUNC: u64 = 0xFFFB_0000_0000_0000;
 const TAG_CELL: u64 = 0xFFFC_0000_0000_0000;
+const TAG_NULLARY: u64 = 0xFFFD_0000_0000_0000;
 
 /// The range a small Int covers. Outside it an Int is a big int, which the VM
 /// does not build yet.
@@ -56,6 +60,8 @@ pub(crate) enum View {
     Bool(bool),
     Func(FuncIdx),
     Cell(Cell),
+    /// A constructor with no fields, like `None`.
+    Nullary(VariantRef),
 }
 
 impl Value {
@@ -85,6 +91,22 @@ impl Value {
         Value(TAG_CELL | c.bits())
     }
 
+    /// A constructor with no fields, like `None`. It needs no heap cell: which
+    /// constructor it is, is the whole of it.
+    pub(crate) fn nullary(v: VariantRef) -> Value {
+        Value(TAG_NULLARY | u64::from(v.variant_idx) << 32 | u64::from(v.type_id.0 as u32))
+    }
+
+    /// The word itself, for storing in a heap cell.
+    pub(crate) fn bits(self) -> u64 {
+        self.0
+    }
+
+    /// A word [`Self::bits`] gave.
+    pub(crate) fn from_bits(bits: u64) -> Value {
+        Value(bits)
+    }
+
     /// The cell this value points at, if it is one.
     pub(crate) fn as_cell(self) -> Option<Cell> {
         (self.0 & TAG == TAG_CELL).then(|| Cell::from_bits(self.0 & PAYLOAD))
@@ -102,6 +124,10 @@ impl Value {
             TAG_INT => View::Int(((payload << 16) as i64) >> 16),
             TAG_FUNC => View::Func(FuncIdx(payload as u32)),
             TAG_CELL => View::Cell(Cell::from_bits(payload)),
+            TAG_NULLARY => View::Nullary(VariantRef {
+                type_id: TypeId(payload as u32 as i32),
+                variant_idx: (payload >> 32) as u16,
+            }),
             // Only the constructors above make a tagged word, so what is
             // left is an immediate.
             _ => {
@@ -152,6 +178,23 @@ mod tests {
             Value::func(FuncIdx(u32::MAX)).view(),
             View::Func(FuncIdx(u32::MAX))
         );
+    }
+
+    #[test]
+    fn a_nullary_constructor_keeps_its_type_and_variant() {
+        for (t, v) in [
+            (0, 0),
+            (263, 1),
+            (i32::MAX, u16::MAX),
+            (-1, 7),
+            (i32::MIN, 0),
+        ] {
+            let variant = VariantRef {
+                type_id: TypeId(t),
+                variant_idx: v,
+            };
+            assert_eq!(Value::nullary(variant).view(), View::Nullary(variant));
+        }
     }
 
     /// Every float Scarlet can store, which is every float but NaN, decodes

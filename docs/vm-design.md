@@ -161,14 +161,14 @@ The first VM PRs run one process on one thread. Processes come after the single-
 
 ## Order of work
 
-Each step is one PR or a few. Each PR removes the `#[ignore]` from exactly the tests it makes pass, so `cargo test -p scarlet -- --ignored` counts what's left: 311 after step 2, 301 after step 4, 300 after step 5, and 294 once Bool and Nil stopped being constructors. (Each count is one higher than first written: one Linux-only network test, which skips itself on a Mac, was parked late.)
+Each step is one PR or a few. Each PR removes the `#[ignore]` from exactly the tests it makes pass, so `cargo test -p scarlet -- --ignored` counts what's left: 311 after step 2, 301 after step 4, 300 after step 5, 294 once Bool and Nil stopped being constructors, and 293 once constructors were built. (Each count is one higher than first written: one Linux-only network test, which skips itself on a Mac, was parked late.)
 
 1. The `scarlet_ir` crate. **Done.**
 2. A VM that runs `pub fn main() { println(1 + 2) }`: the value word with small ints only, Int operations, calls, `Println`. `scarlet run` uses it. **Done.**
 3. Control flow: `If` and `LetJoin`. **Done.** `Match` and `LetCont`/`Goto` come with constructors, which most matches are over.
 4. The per-process heap and reference counting, so there is somewhere to put a heap value. **Done** for one process, with strings as the first heap value: the smallest one, and enough to run `examples/hello.scrl`. The limit comes with processes.
 5. Big ints. Moved up: when step 2 landed, 119 of the parked tests stopped at a 64-bit constant, most of them in a stdlib module's toplevel (`int.max_value` and the like), before the test's own code ran. **Done.** Those 119 then stopped one step later, at a constructor, so constructors are next. An Int *literal* past 64 bits is still a compile error, because the compiler keeps Int constants as `i64`; that is the compiler's to fix.
-6. Constructors, tuples, fields, then Perceus's `Drop` and reuse. The allocation-count tests come back here.
+6. Constructors, tuples, fields, then Perceus's `Drop` and reuse. The allocation-count tests come back here. Constructors are built, freed and printed: **done**. A constructor with fields is a heap cell, and one without is a value word of its own, like `True`. `match` is next: 62 of the parked tests stop at it, 16 more at the jumps between its cases (`LetCont`/`Goto`), and 14 at reading a record's field.
 7. Closures that capture, and calling a function value.
 8. Floats with the no-NaN rule.
 9. The rest of strings, then binaries (with binary patterns), arrays and maps.

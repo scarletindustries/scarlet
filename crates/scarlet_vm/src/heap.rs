@@ -11,7 +11,8 @@
 //!
 //! Every cell starts with one header word: its reference count, its kind, and
 //! its size in words. A cell is freed when its count reaches zero, and its
-//! space is kept on a free list for the next cell of the same size.
+//! space is kept on a free list for the next cell of the same size. Freeing a
+//! constructor gives up its fields' references too, and so on down.
 //!
 //! Chunks are words, not bytes, and cells are named by chunk and word rather
 //! than by address, so the heap needs no `unsafe` and moves with its process
@@ -20,6 +21,10 @@
 use std::collections::HashMap;
 
 use num_bigint::{BigInt, Sign};
+use scarlet_ir::TypeId;
+use scarlet_ir::core_ir::VariantRef;
+
+use crate::value::Value;
 
 /// Words in the first chunk: 2 KB.
 const FIRST_CHUNK_WORDS: usize = 256;
@@ -59,6 +64,10 @@ pub(crate) enum Kind {
     /// how many 64-bit digits follow, then the digits, least significant
     /// first.
     BigInt = 2,
+    /// A constructor with fields: a word holding its type (bits 0 to 31) and
+    /// variant (bits 32 to 47), then each field's value word, in order. Each
+    /// field holds one reference.
+    Ctor = 3,
 }
 
 /// A heap that has run out of the cells a [`Cell`] can name. It is a limit of
@@ -87,6 +96,9 @@ pub(crate) struct Heap {
     /// Freed small cells, by size in words, ready to be reused.
     free: HashMap<usize, Vec<Cell>>,
     live: usize,
+    /// The cells a [`Heap::release`] still has to give a reference up for.
+    /// Kept between calls so a release does not allocate.
+    dying: Vec<Cell>,
 }
 
 impl Heap {
@@ -162,12 +174,32 @@ impl Heap {
     }
 
     /// Drop one reference to `cell`, freeing it when that was the last.
+    ///
+    /// A freed constructor's fields each lose a reference in turn. They are
+    /// kept on a list rather than released by recursion, so freeing a list a
+    /// million cells long takes no more stack than freeing one cell.
     pub(crate) fn release(&mut self, cell: Cell) {
-        let h = self.word(cell, 0);
-        if count(h) > 1 {
-            self.set_word(cell, 0, h - 1);
-            return;
+        let mut dying = std::mem::take(&mut self.dying);
+        dying.push(cell);
+        while let Some(cell) = dying.pop() {
+            let h = self.word(cell, 0);
+            if count(h) > 1 {
+                self.set_word(cell, 0, h - 1);
+                continue;
+            }
+            if kind_bits(h) == Kind::Ctor as u64 {
+                for i in 2..size(h) {
+                    if let Some(field) = Value::from_bits(self.word(cell, i)).as_cell() {
+                        dying.push(field);
+                    }
+                }
+            }
+            self.free_cell(cell, h);
         }
+        self.dying = dying;
+    }
+
+    fn free_cell(&mut self, cell: Cell, h: u64) {
         self.live -= 1;
         let own = matches!(self.chunks.get(cell.chunk as usize), Some(Some(c)) if c.own);
         if own {
@@ -182,9 +214,10 @@ impl Heap {
     }
 
     pub(crate) fn kind(&self, cell: Cell) -> Option<Kind> {
-        match self.word(cell, 0) >> 32 & 0xFF {
+        match kind_bits(self.word(cell, 0)) {
             1 => Some(Kind::String),
             2 => Some(Kind::BigInt),
+            3 => Some(Kind::Ctor),
             _ => None,
         }
     }
@@ -199,6 +232,11 @@ impl Heap {
             self.set_word(cell, 2 + i, u64::from_le_bytes(word));
         }
         Ok(cell)
+    }
+
+    /// A string cell's length in bytes.
+    pub(crate) fn string_len(&self, cell: Cell) -> usize {
+        self.word(cell, 1) as usize
     }
 
     /// A string cell's bytes, appended to `out`.
@@ -237,6 +275,33 @@ impl Heap {
         BigInt::from_bytes_le(sign, &bytes)
     }
 
+    /// A new cell for constructor `v`, holding `fields`. Each field's
+    /// reference passes to the cell.
+    pub(crate) fn ctor(&mut self, v: VariantRef, fields: &[Value]) -> Result<Cell, Full> {
+        let cell = self.alloc(Kind::Ctor, 1 + fields.len())?;
+        let tag = u64::from(v.variant_idx) << 32 | u64::from(v.type_id.0 as u32);
+        self.set_word(cell, 1, tag);
+        for (i, f) in fields.iter().enumerate() {
+            self.set_word(cell, 2 + i, f.bits());
+        }
+        Ok(cell)
+    }
+
+    /// Which constructor a constructor cell is.
+    pub(crate) fn variant(&self, cell: Cell) -> VariantRef {
+        let tag = self.word(cell, 1);
+        VariantRef {
+            type_id: TypeId(tag as u32 as i32),
+            variant_idx: (tag >> 32) as u16,
+        }
+    }
+
+    /// A constructor cell's fields, in order. Reading one adds no reference.
+    pub(crate) fn fields(&self, cell: Cell) -> impl Iterator<Item = Value> + '_ {
+        let n = size(self.word(cell, 0)).saturating_sub(2);
+        (0..n).map(move |i| Value::from_bits(self.word(cell, 2 + i)))
+    }
+
     /// Cells not yet freed.
     #[cfg(test)]
     pub(crate) fn live(&self) -> usize {
@@ -267,6 +332,10 @@ fn header(count: u32, kind: Kind, size: usize) -> u64 {
 
 fn count(h: u64) -> u64 {
     h & 0xFFFF_FFFF
+}
+
+fn kind_bits(h: u64) -> u64 {
+    h >> 32 & 0xFF
 }
 
 fn size(h: u64) -> usize {
@@ -367,6 +436,44 @@ mod tests {
         let positive = -big;
         let cell = heap.big_int(&positive).expect("room");
         assert_eq!(heap.read_big_int(cell), positive);
+    }
+
+    #[test]
+    fn a_constructor_reads_back_its_variant_and_fields() {
+        let mut heap = Heap::default();
+        let v = VariantRef {
+            type_id: TypeId(263),
+            variant_idx: 0,
+        };
+        let one = Value::int(1).expect("small");
+        let cell = heap.ctor(v, &[one, Value::NIL]).expect("room");
+        assert_eq!(heap.kind(cell), Some(Kind::Ctor));
+        assert_eq!(heap.variant(cell), v);
+        let fields: Vec<_> = heap.fields(cell).map(Value::view).collect();
+        assert_eq!(fields, [one.view(), Value::NIL.view()]);
+    }
+
+    /// A chain of cells, each holding the next, is freed by one release, and
+    /// without a Rust call per link.
+    #[test]
+    fn freeing_a_constructor_frees_what_it_holds() {
+        let mut heap = Heap::default();
+        let v = VariantRef {
+            type_id: TypeId(1),
+            variant_idx: 0,
+        };
+        let mut tail = Value::NIL;
+        for _ in 0..1_000_000 {
+            tail = Value::cell(heap.ctor(v, &[tail]).expect("room"));
+        }
+        let shared = heap.string(b"shared").expect("room");
+        heap.share(shared);
+        let head = heap.ctor(v, &[tail, Value::cell(shared)]).expect("room");
+        assert_eq!(heap.live(), 1_000_002);
+        heap.release(head);
+        assert_eq!(heap.live(), 1, "only the string the test still holds");
+        heap.release(shared);
+        assert_eq!(heap.live(), 0);
     }
 
     #[test]

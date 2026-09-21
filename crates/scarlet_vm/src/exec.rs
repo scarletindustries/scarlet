@@ -19,6 +19,7 @@ use crate::Stop;
 use crate::bigint::{self, Int};
 use crate::code::{Body, Code, Func, Instr, Reg};
 use crate::heap::{Full, Heap, Kind};
+use crate::show;
 use crate::value::{Value, View};
 
 struct Frame<'c> {
@@ -173,6 +174,18 @@ impl<'c, 'o> Machine<'c, 'o> {
                     let s = Value::cell(self.heap.string(&text).map_err(full)?);
                     self.set(base, *dst, s);
                 }
+                Instr::Ctor {
+                    dst,
+                    variant,
+                    fields,
+                } => {
+                    let values: Vec<Value> = fields
+                        .iter()
+                        .map(|r| self.share(self.get(base, *r)))
+                        .collect();
+                    let cell = self.heap.ctor(*variant, &values).map_err(full)?;
+                    self.set(base, *dst, Value::cell(cell));
+                }
                 Instr::Drop { reg } => self.set(base, *reg, Value::NIL),
                 Instr::Call { dst, func, args } => {
                     let callee = self.body(*func)?;
@@ -210,7 +223,8 @@ impl<'c, 'o> Machine<'c, 'o> {
                     | View::Int(_)
                     | View::Nil
                     | View::Func(_)
-                    | View::Cell(_)) => {
+                    | View::Cell(_)
+                    | View::Nullary(_)) => {
                         return Err(Stop::NotBuiltYet(format!("a branch on {v:?}")));
                     }
                 },
@@ -291,28 +305,18 @@ impl<'c, 'o> Machine<'c, 'o> {
             View::Cell(cell) if self.heap.kind(cell) == Some(Kind::BigInt) => {
                 Ok(Int::Big(self.heap.read_big_int(cell)))
             }
-            v @ (View::Float(_) | View::Nil | View::Bool(_) | View::Func(_) | View::Cell(_)) => {
-                Err(Stop::NotBuiltYet(format!("an Int operation on {v:?}")))
-            }
+            v @ (View::Float(_)
+            | View::Nil
+            | View::Bool(_)
+            | View::Func(_)
+            | View::Cell(_)
+            | View::Nullary(_)) => Err(Stop::NotBuiltYet(format!("an Int operation on {v:?}"))),
         }
     }
 
     /// How `println` and `${x}` show a value.
     fn show(&self, v: Value, out: &mut Vec<u8>) -> Result<(), Stop> {
-        match v.view() {
-            View::Int(n) => out.extend_from_slice(n.to_string().as_bytes()),
-            View::Nil => out.extend_from_slice(b"Nil"),
-            View::Bool(true) => out.extend_from_slice(b"True"),
-            View::Bool(false) => out.extend_from_slice(b"False"),
-            View::Cell(cell) if self.is_string(v) => self.heap.read_string(cell, out),
-            View::Cell(cell) if self.heap.kind(cell) == Some(Kind::BigInt) => {
-                out.extend_from_slice(self.heap.read_big_int(cell).to_string().as_bytes());
-            }
-            View::Cell(_) => return Err(Stop::NotBuiltYet("printing this value".into())),
-            View::Float(_) => return Err(Stop::NotBuiltYet("printing a Float".into())),
-            View::Func(_) => return Err(Stop::NotBuiltYet("printing a function".into())),
-        }
-        Ok(())
+        show::show(&self.heap, &self.code.types, v, out)
     }
 
     /// Cells not yet freed.
@@ -410,6 +414,36 @@ mod tests {
              }\n",
         );
         assert_eq!(out, "True\n1\n");
+        assert_eq!(left, 0);
+    }
+
+    /// Constructors hold references to what is in them: a list's cells, the
+    /// strings in them, and a record kept in a global are all freed.
+    #[test]
+    fn constructors_and_what_they_hold_are_all_freed() {
+        let (out, left) = cells_left_after(
+            "type L {\n\
+             \tCons(h String, t L)\n\
+             \tEnd\n\
+             }\n\
+             type Point {\n\
+             \tPoint(x Int, y Int)\n\
+             }\n\
+             const origin = Point(x: 0, y: 0)\n\
+             fn build(n Int, acc L) L {\n\
+             \tif n == 0 { acc } else { build(n - 1, Cons('${n}', acc)) }\n\
+             }\n\
+             pub fn main() {\n\
+             \tprintln(build(2, End))\n\
+             \t_l = build(10000, End)\n\
+             \tprintln(origin)\n\
+             \tprintln(Some(origin))\n\
+             }\n",
+        );
+        assert_eq!(
+            out,
+            "Cons(\n  1,\n  Cons(2, End)\n)\nPoint{ x: 0, y: 0 }\nSome(\n  Point{ x: 0, y: 0 }\n)\n"
+        );
         assert_eq!(left, 0);
     }
 

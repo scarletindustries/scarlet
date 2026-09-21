@@ -22,6 +22,7 @@ mod bigint;
 mod code;
 mod exec;
 mod heap;
+mod show;
 mod value;
 
 use std::io::Write;
