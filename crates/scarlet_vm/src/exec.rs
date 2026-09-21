@@ -16,7 +16,7 @@ use std::io::Write;
 use scarlet_ir::core_ir::{FuncIdx, VariantRef};
 
 use crate::Stop;
-use crate::array::{self, End};
+use crate::array::{self, End, Seq};
 use crate::bigint::{self, Int};
 use crate::code::{Body, Code, Func, Instr, Reg};
 use crate::heap::{Full, Heap, Kind};
@@ -362,24 +362,28 @@ impl<'c, 'o> Machine<'c, 'o> {
                     let cell = array::from_values(&mut self.heap, &values).map_err(full)?;
                     self.set(base, *dst, Value::cell(cell));
                 }
+                Instr::Range { dst, start, end } => {
+                    let start = self.range_end(self.get(base, *start))?;
+                    let end = self.range_end(self.get(base, *end))?;
+                    let cell = array::range(&mut self.heap, start, end).map_err(full)?;
+                    self.set(base, *dst, Value::cell(cell));
+                }
                 Instr::ArrayLen { dst, src } => {
-                    let a = self.array(self.get(base, *src))?;
-                    let n = array::len(&self.heap, a);
+                    let n = self.seq(self.get(base, *src))?.len(&self.heap);
                     let v = bigint::value(&mut self.heap, n.into()).map_err(full)?;
                     self.set(base, *dst, v);
                 }
                 Instr::ArrayElem { dst, src, index } => {
-                    let a = self.array(self.get(base, *src))?;
-                    let Some(v) = array::get(&self.heap, a, usize::from(*index)) else {
+                    let s = self.seq(self.get(base, *src))?;
+                    let Some(v) = self.element(s, usize::from(*index))? else {
                         return Err(Stop::BadProgram(format!(
                             "element {index} read from an array with no such element"
                         )));
                     };
-                    let v = self.share(v);
                     self.set(base, *dst, v);
                 }
                 Instr::ArrayDrop { dst, src, n } => {
-                    let a = self.array(self.get(base, *src))?;
+                    let s = self.seq(self.get(base, *src))?;
                     let n = match self.get(base, *n).view() {
                         View::Int(n) if n >= 0 => n as usize,
                         v @ (View::Int(_)
@@ -394,26 +398,38 @@ impl<'c, 'o> Machine<'c, 'o> {
                             )));
                         }
                     };
-                    let cell = array::skip(&mut self.heap, a, n).map_err(full)?;
-                    self.set(base, *dst, Value::cell(cell));
+                    let cell = match s {
+                        Seq::Tree(a) => array::skip(&mut self.heap, a, n),
+                        Seq::Range { start, end } => {
+                            let n = (n as u64).min(array::range_len(start, end));
+                            array::range(&mut self.heap, start + n as i64, end)
+                        }
+                    };
+                    self.set(base, *dst, Value::cell(cell.map_err(full)?));
                 }
                 Instr::ArrayPrepend { dst, front, rest } => {
-                    let a = self.array(self.get(base, *rest))?;
+                    let s = self.seq(self.get(base, *rest))?;
+                    let a = self.tree(s)?;
                     let items = self.args(base, front);
-                    let cell = self.push_all(a, items.into_iter().rev(), End::Front)?;
-                    self.set(base, *dst, Value::cell(cell));
+                    let cell = self.push_all(a, items.into_iter().rev(), End::Front);
+                    self.heap.release(a);
+                    self.set(base, *dst, Value::cell(cell?));
                 }
                 Instr::ArrayAppend { dst, rest, back } => {
-                    let a = self.array(self.get(base, *rest))?;
+                    let s = self.seq(self.get(base, *rest))?;
+                    let a = self.tree(s)?;
                     let items = self.args(base, back);
-                    let cell = self.push_all(a, items.into_iter(), End::Back)?;
-                    self.set(base, *dst, Value::cell(cell));
+                    let cell = self.push_all(a, items.into_iter(), End::Back);
+                    self.heap.release(a);
+                    self.set(base, *dst, Value::cell(cell?));
                 }
                 Instr::ArrayConcat { dst, a, b } => {
-                    let a = self.array(self.get(base, *a))?;
-                    let b = self.array(self.get(base, *b))?;
-                    let cell = array::concat(&mut self.heap, a, b).map_err(full)?;
-                    self.set(base, *dst, Value::cell(cell));
+                    let (a, b) = (self.seq(self.get(base, *a))?, self.seq(self.get(base, *b))?);
+                    let (a, b) = (self.tree(a)?, self.tree(b)?);
+                    let cell = array::concat(&mut self.heap, a, b).map_err(full);
+                    self.heap.release(a);
+                    self.heap.release(b);
+                    self.set(base, *dst, Value::cell(cell?));
                 }
                 Instr::ArraySlice {
                     dst,
@@ -421,16 +437,22 @@ impl<'c, 'o> Machine<'c, 'o> {
                     start,
                     end,
                 } => {
-                    let a = self.array(self.get(base, *src))?;
+                    let s = self.seq(self.get(base, *src))?;
                     let bounds = (
                         self.position(self.get(base, *start))?,
                         self.position(self.get(base, *end))?,
                     );
-                    let cut = match bounds {
-                        (Some(start), Some(end)) => {
-                            array::slice(&mut self.heap, a, start, end).map_err(full)?
+                    let cut = match (s, bounds) {
+                        (Seq::Tree(a), (Some(from), Some(to))) => {
+                            array::slice(&mut self.heap, a, from, to).map_err(full)?
                         }
-                        _ => None,
+                        (Seq::Range { start, end }, (Some(from), Some(to)))
+                            if from <= to && to as u64 <= array::range_len(start, end) =>
+                        {
+                            let (from, to) = (start + from as i64, start + to as i64);
+                            Some(array::range(&mut self.heap, from, to).map_err(full)?)
+                        }
+                        (Seq::Tree(_) | Seq::Range { .. }, _) => None,
                     };
                     let v = match cut {
                         Some(cut) => self.heap.ctor(self.code.abi.ok, &[Value::cell(cut)]),
@@ -443,7 +465,6 @@ impl<'c, 'o> Machine<'c, 'o> {
                     let found = self.index(self.get(base, *src), self.get(base, *index))?;
                     let v = match found {
                         Some(v) => {
-                            let v = self.share(v);
                             let cell = self.heap.ctor(self.code.abi.some, &[v]).map_err(full)?;
                             Value::cell(cell)
                         }
@@ -458,8 +479,10 @@ impl<'c, 'o> Machine<'c, 'o> {
                     default,
                 } => {
                     let found = self.index(self.get(base, *src), self.get(base, *index))?;
-                    let v = found.unwrap_or(self.get(base, *default));
-                    let v = self.share(v);
+                    let v = match found {
+                        Some(v) => v,
+                        None => self.share(self.get(base, *default)),
+                    };
                     self.set(base, *dst, v);
                 }
                 Instr::Bad { why } => return Err(Stop::BadProgram((*why).into())),
@@ -494,23 +517,76 @@ impl<'c, 'o> Machine<'c, 'o> {
         }
     }
 
-    /// The array `v` holds.
-    fn array(&self, v: Value) -> Result<crate::heap::Cell, Stop> {
-        match v.as_cell() {
-            Some(cell) if self.heap.kind(cell) == Some(Kind::ArrayRoot) => Ok(cell),
-            _ => Err(Stop::BadProgram(format!(
-                "an array operation on {v:?}, which is not an array"
-            ))),
+    /// The array `v` holds: a tree or a range.
+    fn seq(&self, v: Value) -> Result<Seq, Stop> {
+        v.as_cell()
+            .and_then(|cell| array::seq(&self.heap, cell))
+            .ok_or_else(|| {
+                Stop::BadProgram(format!(
+                    "an array operation on {v:?}, which is not an array"
+                ))
+            })
+    }
+
+    /// Element `i` of `s`, holding its own reference, or `None` past the end.
+    /// A range's element is made from its start.
+    fn element(&mut self, s: Seq, i: usize) -> Result<Option<Value>, Stop> {
+        match s {
+            Seq::Tree(a) => Ok(array::get(&self.heap, a, i).map(|v| self.share(v))),
+            Seq::Range { start, end } if (i as u64) < array::range_len(start, end) => {
+                let n = i128::from(start) + i as i128;
+                Ok(Some(bigint::value(&mut self.heap, n.into()).map_err(full)?))
+            }
+            Seq::Range { .. } => Ok(None),
         }
     }
 
-    /// Element `index` of the array `a`, with no reference added, or `None`
+    /// `s` as a tree, holding one reference: the tree itself, or a range's
+    /// elements built into one.
+    fn tree(&mut self, s: Seq) -> Result<crate::heap::Cell, Stop> {
+        match s {
+            Seq::Tree(a) => {
+                self.heap.share(a);
+                Ok(a)
+            }
+            Seq::Range { start, end } => {
+                let mut items = Vec::new();
+                for n in start..end.max(start) {
+                    items.push(bigint::value(&mut self.heap, n.into()).map_err(full)?);
+                }
+                array::from_values(&mut self.heap, &items).map_err(full)
+            }
+        }
+    }
+
+    /// Element `index` of the array `a`, holding its own reference, or `None`
     /// when it has none.
-    fn index(&self, a: Value, index: Value) -> Result<Option<Value>, Stop> {
-        let a = self.array(a)?;
-        Ok(self
-            .position(index)?
-            .and_then(|i| array::get(&self.heap, a, i)))
+    fn index(&mut self, a: Value, index: Value) -> Result<Option<Value>, Stop> {
+        let s = self.seq(a)?;
+        match self.position(index)? {
+            Some(i) => self.element(s, i),
+            None => Ok(None),
+        }
+    }
+
+    /// A range's end as an `i64`. A range past 64 bits could not be walked in
+    /// any time a program has.
+    fn range_end(&self, v: Value) -> Result<i64, Stop> {
+        match v.view() {
+            View::Int(n) => Ok(n),
+            View::Cell(cell) if self.heap.kind(cell) == Some(Kind::BigInt) => {
+                num_traits::ToPrimitive::to_i64(&self.heap.read_big_int(cell))
+                    .ok_or_else(|| Stop::NotBuiltYet("a range with an end past 64 bits".into()))
+            }
+            v @ (View::Float(_)
+            | View::Nil
+            | View::Bool(_)
+            | View::Func(_)
+            | View::Cell(_)
+            | View::Nullary(_)) => Err(Stop::BadProgram(format!(
+                "a range whose end is {v:?}, not an Int"
+            ))),
+        }
     }
 
     /// The Int `v` as a position in an array, or `None` when it names none:
@@ -930,6 +1006,29 @@ mod tests {
              }\n",
         );
         assert_eq!(out, "6000\n1\n2000\n2000\n");
+        assert_eq!(left, 0);
+    }
+
+    /// A range holds no references, and one built into an array, big ints and
+    /// all, is freed like any array.
+    #[test]
+    fn ranges_and_the_arrays_made_from_them_are_all_freed() {
+        let (out, left) = cells_left_after(
+            "fn count(xs Array(Int), n Int) Int {\n\
+             \tmatch xs {\n\
+             \t\t[] -> n\n\
+             \t\t[_, ..t] -> count(t, n + 1)\n\
+             \t}\n\
+             }\n\
+             pub fn main() {\n\
+             \tr = 0..1000\n\
+             \tprintln(count([..r, 5], 0))\n\
+             \tprintln(count([..{ 9223372036854775000..9223372036854775007 }, ..r], 0))\n\
+             \tprintln(r[0..3])\n\
+             \tprintln(count(r, 0))\n\
+             }\n",
+        );
+        assert_eq!(out, "1001\n1007\nOk(\n  [0, 1, 2]\n)\n1000\n");
         assert_eq!(left, 0);
     }
 

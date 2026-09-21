@@ -82,6 +82,9 @@ pub(crate) enum Kind {
     ArrayRoot = 6,
     ArrayLeaf = 7,
     ArrayBranch = 8,
+    /// A range `start..end` of Ints: its two ends, as two's complement
+    /// words. It holds no references.
+    Range = 9,
 }
 
 /// A heap that has run out of the cells a [`Cell`] can name. It is a limit of
@@ -235,6 +238,7 @@ impl Heap {
             6 => Some(Kind::ArrayRoot),
             7 => Some(Kind::ArrayLeaf),
             8 => Some(Kind::ArrayBranch),
+            9 => Some(Kind::Range),
             _ => None,
         }
     }

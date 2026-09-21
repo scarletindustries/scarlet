@@ -195,6 +195,12 @@ pub(crate) enum Instr {
         src: Reg,
         index: u16,
     },
+    /// `start..end`: a range of Ints, which stores only its two ends.
+    Range {
+        dst: Reg,
+        start: Reg,
+        end: Reg,
+    },
     /// A new array of `elements`.
     Array {
         dst: Reg,
@@ -308,6 +314,7 @@ impl Instr {
             | Instr::Field { .. }
             | Instr::Tuple { .. }
             | Instr::Element { .. }
+            | Instr::Range { .. }
             | Instr::Array { .. }
             | Instr::ArrayLen { .. }
             | Instr::ArrayElem { .. }
@@ -787,6 +794,14 @@ impl<'c> Loader<'c> {
                     a: Reg::of(*a),
                 }),
                 _ => Err("IntNeg with other than one argument".into()),
+            },
+            PrimOp::MakeRange => match args {
+                [start, end] => Ok(Instr::Range {
+                    dst,
+                    start: Reg::of(*start),
+                    end: Reg::of(*end),
+                }),
+                _ => Err("MakeRange with other than two arguments".into()),
             },
             PrimOp::MakeArray => Ok(Instr::Array {
                 dst,

@@ -28,7 +28,6 @@ run_case! {
     // examples only index arrays (`numbers[0] or 0`); a lazy Range scrutinee takes
     // a distinct arm inside `Op::Index` (`range_elem` instead of `Seq::get`).
     // In-bounds yields the element; out-of-bounds yields the recovery value.
-    #[ignore = "needs the VM"]
     range_index_or_else: (
         "pub fn main() {\n\
          \tr = 5..10\n\
@@ -41,7 +40,6 @@ run_case! {
     // `range[i]` (no `or`) lowers to `Op::Index`, producing an Option. The Range
     // arm must offset from the start (`5 + 2 = 7`), and an out-of-bounds index must
     // read as `None`, not a wrapped value.
-    #[ignore = "needs the VM"]
     range_index_option: (
         "pub fn main() {\n\
          \tr = 5..10\n\
@@ -66,7 +64,6 @@ run_case! {
     // Matching a Range value against an array pattern `[h, ..t]` drives `Op::ElemAt`
     // (head) and `Op::SeqDrop` (tail) on a Range, not an Array. `SeqDrop` on a Range stays
     // O(1) (`s+n .. e`); reconstructing `[h, ..t]` must reproduce the full sequence.
-    #[ignore = "needs the VM"]
     match_range_with_array_pattern: (
         "pub fn main() {\n\
          \tr = 0..5\n\

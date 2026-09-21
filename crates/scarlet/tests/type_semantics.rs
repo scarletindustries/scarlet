@@ -178,7 +178,6 @@ fn slice_in_bounds_returns_subarray() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn range_as_value_materializes() {
     // A bare `start..end` is a first-class `Array(Int)`. A reversed range
     // saturates to length 0 rather than a negative length or a crash.

@@ -22,7 +22,7 @@ use scarlet_ir::TypeId;
 use scarlet_ir::core_ir::{FuncIdx, TypeNames, VariantNames, VariantRef};
 
 use crate::Stop;
-use crate::array;
+use crate::array::{self, Seq};
 use crate::code::Code;
 use crate::heap::{Cell, Heap, Kind};
 use crate::value::{Value, View};
@@ -91,6 +91,7 @@ fn value<'t>(
             Some(Kind::Closure) => function(code, heap.closure_func(cell), out),
             Some(Kind::Tuple) => tuple(heap, code, cell, layout, out, todo)?,
             Some(Kind::ArrayRoot) => array(heap, code, cell, layout, out, todo)?,
+            Some(Kind::Range) => range(heap, cell, layout, out)?,
             Some(Kind::ArrayLeaf | Kind::ArrayBranch) => {
                 return Err(Stop::BadProgram(
                     "a piece of an array's tree held as a value".into(),
@@ -243,7 +244,10 @@ fn array<'t>(
     match layout {
         Layout::Open(_) if elements.is_empty() => out.extend_from_slice(b"[]"),
         Layout::Open(n) if elements.iter().all(|e| small(heap, *e)) => {
-            six_to_a_line(heap, code, &elements, n, out)?;
+            six_to_a_line(elements.len(), n, out, |i, out| match elements.get(i) {
+                Some(e) => show(heap, code, *e, out),
+                None => Ok(()),
+            })?;
         }
         Layout::Open(n) => {
             out.push(b'[');
@@ -271,24 +275,57 @@ fn array<'t>(
     Ok(())
 }
 
-/// Small elements on one line when they fit in `LINE` columns, and six to a
-/// line, indented one past `n`, when they do not. The one-line try stops as
-/// soon as it is too wide, so no element is written more than twice.
+/// A range, `0..3`, shows as the array of its elements: `[0, 1, 2]`. Each
+/// element is written straight from the range's start, so none is built.
+fn range(heap: &Heap, cell: Cell, layout: Layout, out: &mut Vec<u8>) -> Result<(), Stop> {
+    let Some(Seq::Range { start, end }) = array::seq(heap, cell) else {
+        return Err(Stop::BadProgram("a range cell that is not a range".into()));
+    };
+    let count = array::range_len(start, end);
+    let item = |i: usize, out: &mut Vec<u8>| {
+        let n = i128::from(start) + i as i128;
+        out.extend_from_slice(n.to_string().as_bytes());
+        Ok(())
+    };
+    let count = usize::try_from(count).unwrap_or(usize::MAX);
+    match layout {
+        Layout::Open(_) if count == 0 => {
+            out.extend_from_slice(b"[]");
+            Ok(())
+        }
+        Layout::Open(n) => six_to_a_line(count, n, out, item),
+        Layout::Flat => {
+            out.push(b'[');
+            let r = (0..count).try_for_each(|i| {
+                if i > 0 {
+                    out.extend_from_slice(b", ");
+                }
+                item(i, out)
+            });
+            out.push(b']');
+            r
+        }
+    }
+}
+
+/// `count` small elements, each written by `item`, on one line when they fit
+/// in `LINE` columns, and six to a line, indented one past `n`, when they do
+/// not. The one-line try stops as soon as it is too wide, so no element is
+/// written more than twice.
 fn six_to_a_line(
-    heap: &Heap,
-    code: &Code,
-    elements: &[Value],
+    count: usize,
     n: usize,
     out: &mut Vec<u8>,
+    mut item: impl FnMut(usize, &mut Vec<u8>) -> Result<(), Stop>,
 ) -> Result<(), Stop> {
     let start = out.len();
     out.push(b'[');
     let mut fits = true;
-    for (i, e) in elements.iter().enumerate() {
+    for i in 0..count {
         if i > 0 {
             out.extend_from_slice(b", ");
         }
-        show(heap, code, *e, out)?;
+        item(i, out)?;
         if out.len() - start > LINE {
             fits = false;
             break;
@@ -303,14 +340,14 @@ fn six_to_a_line(
     out.truncate(start);
     out.push(b'[');
     line(out, n + 1);
-    for (i, e) in elements.iter().enumerate() {
+    for i in 0..count {
         if i > 0 {
             out.extend_from_slice(b", ");
             if i % 6 == 0 {
                 line(out, n + 1);
             }
         }
-        show(heap, code, *e, out)?;
+        item(i, out)?;
     }
     line(out, n);
     out.push(b']');
@@ -339,7 +376,12 @@ fn small(heap: &Heap, v: Value) -> bool {
             Some(Kind::String) => heap.string_len(cell) < SMALL_STRING,
             Some(Kind::BigInt | Kind::Closure) => true,
             Some(
-                Kind::Ctor | Kind::Tuple | Kind::ArrayRoot | Kind::ArrayLeaf | Kind::ArrayBranch,
+                Kind::Ctor
+                | Kind::Tuple
+                | Kind::ArrayRoot
+                | Kind::ArrayLeaf
+                | Kind::ArrayBranch
+                | Kind::Range,
             )
             | None => false,
         },
