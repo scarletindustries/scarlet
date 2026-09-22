@@ -147,6 +147,9 @@ pub struct Abi {
     /// `scarlet/binary.Radix`, when the program loads that module: the base
     /// `binary.parse_int` and `binary.from_int_ascii` are asked for.
     pub radix: Option<Radix>,
+    /// `scarlet/io.IoError`, when the program loads that module: what a file
+    /// read or write that failed says went wrong.
+    pub io: Option<IoErrors>,
 }
 
 /// The constructors of `scarlet/binary.Radix`.
@@ -156,12 +159,55 @@ pub struct Radix {
     pub hex: VariantRef,
 }
 
+/// The constructors of `scarlet/io.IoError` the VM builds, each named for the
+/// OS error it stands for.
+#[derive(Debug, Clone, Copy)]
+pub struct IoErrors {
+    /// These hold the path the operation was given.
+    pub not_found: VariantRef,
+    pub permission_denied: VariantRef,
+    pub already_exists: VariantRef,
+    pub not_a_directory: VariantRef,
+    pub is_a_directory: VariantRef,
+    pub read_only_filesystem: VariantRef,
+    pub filesystem_loop: VariantRef,
+    pub file_too_large: VariantRef,
+    /// These hold nothing.
+    pub storage_full: VariantRef,
+    pub quota_exceeded: VariantRef,
+    pub unaligned_binary: VariantRef,
+    /// Any other OS error: this holds its number.
+    pub errno: VariantRef,
+}
+
+impl IoErrors {
+    fn variants(&self) -> [VariantRef; 12] {
+        [
+            self.not_found,
+            self.permission_denied,
+            self.already_exists,
+            self.not_a_directory,
+            self.is_a_directory,
+            self.read_only_filesystem,
+            self.filesystem_loop,
+            self.file_too_large,
+            self.storage_full,
+            self.quota_exceeded,
+            self.unaligned_binary,
+            self.errno,
+        ]
+    }
+}
+
 impl Abi {
     /// Every constructor here, so their types' names can travel with them.
     pub fn variants(&self) -> Vec<VariantRef> {
         let mut all = vec![self.some, self.none, self.ok, self.err];
         if let Some(r) = self.radix {
             all.extend([r.dec, r.hex]);
+        }
+        if let Some(io) = self.io {
+            all.extend(io.variants());
         }
         all
     }

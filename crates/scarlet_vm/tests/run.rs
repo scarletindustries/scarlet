@@ -1,7 +1,7 @@
 //! Programs run end to end: compiled from Scarlet source, then run by the VM,
 //! checking exactly what they print.
 
-use scarlet_vm::Stop;
+use scarlet_vm::{Host, Stop};
 
 fn compile(src: &str) -> scarlet_core::core_ir::Program {
     let mut scanner = scarlet_core::scanner::new_scanner(src.to_string());
@@ -14,12 +14,28 @@ fn compile(src: &str) -> scarlet_core::core_ir::Program {
 
 fn run(src: &str) -> Result<String, Stop> {
     let mut out = Vec::new();
-    scarlet_vm::run(&compile(src), &mut out)?;
+    scarlet_vm::run(&compile(src), &Host::new(Vec::new(), Vec::new()), &mut out)?;
     Ok(String::from_utf8(out).expect("println writes UTF-8"))
 }
 
 fn prints(src: &str, want: &str) {
     assert_eq!(run(src).as_deref(), Ok(want), "{src}");
+}
+
+/// Run `src` in `host`'s world.
+fn prints_in(host: &Host, src: &str, want: &str) {
+    let mut out = Vec::new();
+    let ran = scarlet_vm::run(&compile(src), host, &mut out);
+    assert_eq!(ran, Ok(()), "{src}");
+    assert_eq!(String::from_utf8(out).expect("UTF-8"), want, "{src}");
+}
+
+/// A fresh directory for one test's files.
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("scarlet-vm-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    dir
 }
 
 #[test]
@@ -217,7 +233,7 @@ impl std::io::Write for Closed {
 fn a_closed_output_stops_the_run_quietly() {
     let program = compile("pub fn main() {\n\tprintln(1)\n}\n");
     assert_eq!(
-        scarlet_vm::run(&program, &mut Closed),
+        scarlet_vm::run(&program, &Host::new(Vec::new(), Vec::new()), &mut Closed),
         Err(Stop::OutputClosed)
     );
 }
@@ -1041,5 +1057,106 @@ fn a_key_is_found_by_any_equal_value() {
          \tprintln(one(inner, map.delete(inner, 1)))\n\
          }\n",
         "Some(found)\nSome(found)\nSome(found)\nSome(found)\nSome(found)\nSome(found)\nSome(found)\nSome(found)\nNone\nNone\nNone\n",
+    );
+}
+
+/// `os.argv` and `os.env` are what the host says. A name the OS lists twice
+/// is the first one's, as `getenv` has it.
+#[test]
+fn argv_and_env_come_from_the_host() {
+    let env = [("HOME", "/home/al"), ("LANG", "C"), ("HOME", "/elsewhere")];
+    let host = Host::new(
+        vec!["main.scrl".into(), "--fast".into(), "two words".into()],
+        env.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+    );
+    prints_in(
+        &host,
+        "import scarlet/os\n\
+         import scarlet/map\n\
+         pub fn main() {\n\
+         \tprintln(os.argv())\n\
+         \tprintln(os.get_env('HOME'))\n\
+         \tprintln(os.get_env('LANG'))\n\
+         \tprintln(os.get_env('NOT_SET'))\n\
+         \tprintln(map.size(os.env()))\n\
+         \tprintln(os.env() == os.env())\n\
+         }\n",
+        "[main.scrl, --fast, two words]\nSome(/home/al)\nSome(C)\nNone\n2\nTrue\n",
+    );
+}
+
+/// A file written is the file read back, and each way a path can fail is the
+/// `IoError` that names it, holding the path.
+#[test]
+fn files_read_and_write_and_fail_with_their_error() {
+    let dir = scratch("files");
+    let file = dir.join("a.txt");
+    std::fs::write(dir.join("plain"), "x").expect("a plain file");
+    let src = "import scarlet/io\n\
+         import scarlet/io.{NotFound, IsADirectory, NotADirectory, InvalidData, UnalignedBinary}\n\
+         fn say(r Result(a, io.IoError)) String {\n\
+         \tmatch r {\n\
+         \t\tOk(v) -> 'ok ${v}'\n\
+         \t\tErr(NotFound(p)) -> 'not found ${p}'\n\
+         \t\tErr(IsADirectory(p)) -> 'a directory ${p}'\n\
+         \t\tErr(NotADirectory(p)) -> 'not a directory ${p}'\n\
+         \t\tErr(InvalidData(p)) -> 'not text ${p}'\n\
+         \t\tErr(UnalignedBinary) -> 'not whole bytes'\n\
+         \t\tErr(e) -> 'another error ${e}'\n\
+         \t}\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(say(io.write_text('DIR/a.txt', 'hello')))\n\
+         \tprintln(say(io.read_text('DIR/a.txt')))\n\
+         \tprintln(say(io.write_file('DIR/a.txt', <<104, 105>>)))\n\
+         \tprintln(say(io.read_file('DIR/a.txt')))\n\
+         \tprintln(say(io.write_file('DIR/b.txt', <<1:4>>)))\n\
+         \tprintln(say(io.read_file('DIR/missing')))\n\
+         \tprintln(say(io.read_file('DIR')))\n\
+         \tprintln(say(io.write_text('DIR/no/such/dir', 'x')))\n\
+         \tprintln(say(io.read_file('DIR/plain/under')))\n\
+         \tprintln(say(io.write_file('DIR/x.bin', <<255>>)))\n\
+         \tprintln(say(io.read_text('DIR/x.bin')))\n\
+         }\n"
+    .replace("DIR", &dir.display().to_string());
+    let d = dir.display();
+    let want = format!(
+        "ok Nil\nok hello\nok Nil\nok <<104, 105>>\nnot whole bytes\n\
+         not found {d}/missing\na directory {d}\nnot found {d}/no/such/dir\n\
+         not a directory {d}/plain/under\nok Nil\nnot text {d}/x.bin\n"
+    );
+    prints_in(&Host::new(Vec::new(), Vec::new()), &src, &want);
+    assert_eq!(std::fs::read(&file).expect("written"), b"hi");
+    assert!(
+        !dir.join("b.txt").exists(),
+        "an unaligned write made a file"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The monotonic clock never goes back; the wall clock says it is after
+/// 2023. Random bytes come in the number asked for, and a negative number
+/// is an error.
+#[test]
+fn the_clocks_and_random_bytes_run() {
+    prints(
+        "import scarlet/time\n\
+         import scarlet/crypto\n\
+         import scarlet/binary\n\
+         pub fn main() {\n\
+         \tstart = time.monotonic()\n\
+         \tprintln(time.since_ms(time.monotonic(), start) >= 0)\n\
+         \tprintln(time.epoch_ms() > 1700000000000)\n\
+         \tprintln(match crypto.random_bytes(33) {\n\
+         \t\tOk(b) -> binary.byte_size(b)\n\
+         \t\tErr(Nil) -> -1\n\
+         \t})\n\
+         \tprintln(crypto.random_bytes(0))\n\
+         \tprintln(crypto.random_bytes(-1))\n\
+         \tprintln(crypto.random_bytes(16) == crypto.random_bytes(16))\n\
+         }\n",
+        "True\nTrue\n33\nOk(<<>>)\nErr(Nil)\nFalse\n",
     );
 }

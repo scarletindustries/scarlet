@@ -457,8 +457,12 @@ fn cmd_run(args: RunArgs) {
     let Some(program) = result.into_runnable() else {
         die("nothing to run: the compile produced no program");
     };
+    let argv = std::iter::once(args.entrypoint.clone())
+        .chain(args.args)
+        .collect();
+    let host = scarlet_vm::Host::of_this_process(argv);
     let mut out = io::BufWriter::new(io::stdout().lock());
-    let outcome = scarlet_vm::run(&program, &mut out);
+    let outcome = scarlet_vm::run(&program, &host, &mut out);
     // Flushed before any message, so the program's own output comes first.
     let flushed = out.flush();
     match outcome {

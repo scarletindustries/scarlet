@@ -27,6 +27,7 @@ mod exec;
 mod float;
 mod hash;
 mod heap;
+mod host;
 mod map;
 mod show;
 mod value;
@@ -34,6 +35,8 @@ mod value;
 use std::io::Write;
 
 use scarlet_ir::core_ir::Program;
+
+pub use host::Host;
 
 /// Why a run ended before the program did.
 #[derive(Debug, PartialEq, Eq)]
@@ -52,9 +55,9 @@ pub enum Stop {
     BadProgram(String),
 }
 
-/// Run `program`, writing what it prints to `out`.
-pub fn run(program: &Program, out: &mut dyn Write) -> Result<(), Stop> {
+/// Run `program` in `host`'s world, writing what it prints to `out`.
+pub fn run(program: &Program, host: &Host, out: &mut dyn Write) -> Result<(), Stop> {
     let code = code::load(program);
-    exec::Machine::new(&code, out).run()?;
+    exec::Machine::new(&code, host, out).run()?;
     Ok(())
 }

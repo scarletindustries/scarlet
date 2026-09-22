@@ -188,7 +188,6 @@ suite! {
         // Named tco.scrl: scarlet/internal.scrl's `stack_depth` doc points at it.
         #[ignore = "needs the VM"]
         tco,
-        #[ignore = "needs the VM"]
         errors,
         // Stdlib surface.
         collections,
@@ -328,7 +327,6 @@ suite! {
         // example the two combine to produce, and the single-run CSPRNG
         // checks (length, two draws differ, not a uniform fill). Not a
         // quality test, and not the JIT — see native_backend.rs.
-        #[ignore = "needs the VM"]
         crypto,
     ],
 

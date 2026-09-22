@@ -118,5 +118,5 @@ pub fn main() {
 	println('PATH is set: ${option.is_some(os.get_env('PATH'))}')
 	println('unset var: ${os.get_env('AL_DEFINITELY_UNSET')}')
 	println('env has PATH: ${map.has(os.env(), 'PATH')}')
-	println('env inspects as: ${string.inspect(os.env())}')
+	println('env is one map: ${os.env() == os.env()}')
 }

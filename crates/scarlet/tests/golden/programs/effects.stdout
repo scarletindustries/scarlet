@@ -22,4 +22,4 @@ argv is non-empty: True
 PATH is set: True
 unset var: None
 env has PATH: True
-env inspects as: <map env>
+env is one map: True

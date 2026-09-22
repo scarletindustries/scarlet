@@ -510,7 +510,6 @@ pub fn main() {
 /// once in the source would pass every in-process check and fail here.
 /// Collision of two honest 16-byte CSPRNG draws is 2^-128.
 #[test]
-#[ignore = "needs the VM"]
 fn random_bytes_is_not_a_fixed_seed() {
     let src = "import scarlet/binary
 import scarlet/crypto

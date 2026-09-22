@@ -10,6 +10,10 @@ num-bigint = "0.5"
 num-traits = "0.2"
 # `string.to_graphemes`: the extended grapheme clusters of UAX #29.
 unicode-segmentation = "1"
+# `crypto.random_bytes`: the OS's own random source.
+getrandom = "0.4"
+# The OS error numbers `scarlet/io.IoError` names.
+libc = "0.2"
 
 [dev-dependencies]
 # Tests write their programs in Scarlet and compile them. Only the tests see

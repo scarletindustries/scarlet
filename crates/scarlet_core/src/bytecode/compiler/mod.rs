@@ -49,8 +49,8 @@ use super::session::{RawRef, Watermark};
 use super::{PreludeBindings, TypeRef};
 use crate::ast;
 use crate::core_ir::{
-    Abi, Const, ConstId, CoreFn, FuncIdx, LoweredFn, Program, Radix, TypeNames, VariantNames,
-    VariantRef,
+    Abi, Const, ConstId, CoreFn, FuncIdx, IoErrors, LoweredFn, Program, Radix, TypeNames,
+    VariantNames, VariantRef,
 };
 use crate::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
 use crate::tivec::{Idx, TiVec};
@@ -1361,6 +1361,7 @@ impl Compiler {
             ok: self.prelude.ok().into(),
             err: self.prelude.err().into(),
             radix: self.radix(),
+            io: self.io_errors(),
         };
         let types = self.type_names((&fns).into_iter().chain(&inits).chain([&toplevel]), &abi);
         Some(Program {
@@ -1379,28 +1380,54 @@ impl Compiler {
     /// that module. A renamed constructor leaves it `None`, and the built-ins
     /// that read one then stop, rather than read the wrong base.
     fn radix(&self) -> Option<Radix> {
-        let path: ModulePath = ["scarlet", "binary"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let variant = self.stdlib_variants(&["scarlet", "binary"], "Radix")?;
+        Some(Radix {
+            dec: variant("Dec")?,
+            hex: variant("Hex")?,
+        })
+    }
+
+    /// `scarlet/io.IoError`'s constructors, by name, as [`Self::radix`].
+    fn io_errors(&self) -> Option<IoErrors> {
+        let variant = self.stdlib_variants(&["scarlet", "io"], "IoError")?;
+        Some(IoErrors {
+            not_found: variant("NotFound")?,
+            permission_denied: variant("PermissionDenied")?,
+            already_exists: variant("AlreadyExists")?,
+            not_a_directory: variant("NotADirectory")?,
+            is_a_directory: variant("IsADirectory")?,
+            read_only_filesystem: variant("ReadOnlyFilesystem")?,
+            filesystem_loop: variant("FilesystemLoop")?,
+            file_too_large: variant("FileTooLarge")?,
+            storage_full: variant("StorageFull")?,
+            quota_exceeded: variant("QuotaExceeded")?,
+            unaligned_binary: variant("UnalignedBinary")?,
+            errno: variant("Errno")?,
+        })
+    }
+
+    /// The constructors of the stdlib type `module.name`, looked up by their
+    /// names, when the program loaded that module.
+    fn stdlib_variants(
+        &self,
+        module: &[&str],
+        name: &str,
+    ) -> Option<impl Fn(&str) -> Option<VariantRef>> {
+        let path: ModulePath = module.iter().map(|s| s.to_string()).collect();
         let id = self
             .module_table
             .get(&ModuleKey::of(&path))?
             .types
-            .get("Radix")?
+            .get(name)?
             .info
             .id;
         let names = self.names_of_type(id);
-        let variant = |name: &str| {
+        Some(move |name: &str| {
             let idx = names.variants.iter().position(|v| v.name == name)?;
             Some(VariantRef {
                 type_id: id,
                 variant_idx: u16::try_from(idx).ok()?,
             })
-        };
-        Some(Radix {
-            dec: variant("Dec")?,
-            hex: variant("Hex")?,
         })
     }
 

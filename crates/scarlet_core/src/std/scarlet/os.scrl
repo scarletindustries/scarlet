@@ -9,9 +9,11 @@ import scarlet/map.{Map}
 @vm(os__argv)
 pub fn argv() Array(String)
 
-// The environment as a `Map(String, String)`. The map is a zero-copy live
-// view: no variables are read or copied until you look one up, so this is
-// cheap to call even when the environment is large.
+// The environment as a `Map(String, String)`: every variable whose name and
+// value are both valid UTF-8. A name the OS lists twice has its first value,
+// as the OS's own `getenv` gives. Nothing in a program changes its
+// environment, so the map is made once, the first time it is asked for, and
+// every call after returns that same map.
 @vm(os__env)
 pub fn env() Map(String, String)
 

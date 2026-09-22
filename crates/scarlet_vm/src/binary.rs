@@ -33,6 +33,10 @@ pub(crate) struct Bits {
     pub(crate) len: u64,
 }
 
+/// The most bytes a binary can hold: a cell's worth of words, less its header
+/// and the word holding its length.
+pub(crate) const MAX_BYTES: usize = (crate::heap::MAX_CELL_WORDS - 2) * 8;
+
 /// The bits `cell` holds, or `None` when it is not a binary.
 pub(crate) fn bits(heap: &Heap, cell: Cell) -> Option<Bits> {
     let d = heap.data(cell);

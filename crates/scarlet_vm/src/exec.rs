@@ -12,10 +12,12 @@
 //! whatever Perceus did or did not insert (`docs/vm-design.md`, "Memory").
 
 use std::io::Write;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use num_bigint::Sign;
 use num_traits::{FromPrimitive, ToPrimitive};
-use scarlet_ir::core_ir::{FuncIdx, VariantRef};
+use scarlet_ir::core_ir::{FuncIdx, IoErrors, VariantRef};
 use scarlet_ir::intrinsic::Intrinsic;
 
 use crate::Stop;
@@ -26,6 +28,7 @@ use crate::code::{BitsOp, Body, Code, Func, Instr, IntOp, Reg};
 use crate::eq;
 use crate::float::{self, NumOp};
 use crate::heap::{Cell, Full, Heap, Kind};
+use crate::host::Host;
 use crate::map;
 use crate::show;
 use crate::value::{Value, View};
@@ -43,22 +46,29 @@ struct Frame<'c> {
     env: Value,
 }
 
-pub(crate) struct Machine<'c, 'o> {
+pub(crate) struct Machine<'c, 'h, 'o> {
     code: &'c Code,
+    host: &'h Host,
     out: &'o mut dyn Write,
     heap: Heap,
     globals: Vec<Value>,
     regs: Vec<Value>,
+    /// `os.env` as a map, made the first time it is asked for. The
+    /// environment cannot change while the program runs, so every call after
+    /// shares this one.
+    env: Option<Cell>,
 }
 
-impl<'c, 'o> Machine<'c, 'o> {
-    pub(crate) fn new(code: &'c Code, out: &'o mut dyn Write) -> Self {
+impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
+    pub(crate) fn new(code: &'c Code, host: &'h Host, out: &'o mut dyn Write) -> Self {
         Machine {
             code,
+            host,
             out,
             heap: Heap::default(),
             globals: vec![Value::NIL; code.globals as usize],
             regs: Vec::new(),
+            env: None,
         }
     }
 
@@ -837,6 +847,85 @@ impl<'c, 'o> Machine<'c, 'o> {
                 let n = self.seq(v)?.len(&self.heap);
                 bigint::value(&mut self.heap, n.into()).map_err(full)
             }
+            Intrinsic::TimeMonotonic => {
+                let ms = self.host.monotonic_ms();
+                bigint::value(&mut self.heap, ms.into()).map_err(full)
+            }
+            // Negative before 1970: `duration_since` gives how far before as
+            // an error, and the sign goes back on.
+            Intrinsic::TimeEpochMs => {
+                let ms = match SystemTime::now().duration_since(UNIX_EPOCH) {
+                    Ok(after) => num_bigint::BigInt::from(after.as_millis()),
+                    Err(before) => -num_bigint::BigInt::from(before.duration().as_millis()),
+                };
+                bigint::value(&mut self.heap, ms).map_err(full)
+            }
+            // From the OS's own generator, never one of ours, and never
+            // zeros or anything else in place of bytes it did not give.
+            Intrinsic::CryptoRandomBytes => {
+                let n = match self.int_of(v)? {
+                    Int::Small(n) => usize::try_from(n).ok(),
+                    Int::Big(_) => None,
+                };
+                let Some(n) = n else {
+                    return self.err_nil();
+                };
+                if n > binary::MAX_BYTES {
+                    return Err(Stop::HeapFull);
+                }
+                let mut bytes = vec![0u8; n];
+                if getrandom::fill(&mut bytes).is_err() {
+                    return self.err_nil();
+                }
+                let cell = binary::make(&mut self.heap, &bytes, n as u64 * 8).map_err(full)?;
+                self.ok(Value::cell(cell))
+            }
+            Intrinsic::IoReadFile => {
+                let path = self.text_of(v)?;
+                match std::fs::read(path_of(&path)) {
+                    Ok(bytes) if bytes.len() > binary::MAX_BYTES => Err(Stop::HeapFull),
+                    Ok(bytes) => {
+                        let len = bytes.len() as u64 * 8;
+                        let cell = binary::make(&mut self.heap, &bytes, len).map_err(full)?;
+                        self.ok(Value::cell(cell))
+                    }
+                    Err(e) => self.io_error(&e, &path),
+                }
+            }
+            Intrinsic::IoWriteFile => {
+                let path = self.text_of(v)?;
+                let data = self.binary(arg(self, 1))?;
+                if data.len % 8 != 0 {
+                    let unaligned = self.io_errors()?.unaligned_binary;
+                    return self.err(Value::nullary(unaligned));
+                }
+                let bytes = binary::bytes(&self.heap, data);
+                match std::fs::write(path_of(&path), bytes) {
+                    Ok(()) => self.ok(Value::NIL),
+                    Err(e) => self.io_error(&e, &path),
+                }
+            }
+            Intrinsic::OsArgv => {
+                let mut items = Vec::with_capacity(self.host.argv().len());
+                for a in self.host.argv() {
+                    items.push(Value::cell(self.heap.string(a.as_bytes()).map_err(full)?));
+                }
+                Ok(Value::cell(
+                    array::from_values(&mut self.heap, &items).map_err(full)?,
+                ))
+            }
+            Intrinsic::OsEnv => {
+                let env = match self.env {
+                    Some(env) => env,
+                    None => {
+                        let env = self.env_map().map_err(full)?;
+                        self.env = Some(env);
+                        env
+                    }
+                };
+                self.heap.share(env);
+                Ok(Value::cell(env))
+            }
             Intrinsic::MapNew => Ok(Value::cell(map::empty(&mut self.heap).map_err(full)?)),
             Intrinsic::MapSet => {
                 let m = self.map(v)?;
@@ -1082,12 +1171,78 @@ impl<'c, 'o> Machine<'c, 'o> {
         Ok(Value::cell(cell))
     }
 
+    /// `Err(v)`, holding `v`'s reference.
+    fn err(&mut self, v: Value) -> Result<Value, Stop> {
+        let cell = self.heap.ctor(self.code.abi.err, &[v]).map_err(full)?;
+        Ok(Value::cell(cell))
+    }
+
     fn err_nil(&mut self) -> Result<Value, Stop> {
         let cell = self
             .heap
             .ctor(self.code.abi.err, &[Value::NIL])
             .map_err(full)?;
         Ok(Value::cell(cell))
+    }
+
+    /// The environment as a map. When a name is listed twice, the first
+    /// wins, as it does for the OS's own `getenv`.
+    fn env_map(&mut self) -> Result<Cell, Full> {
+        let mut env = map::empty(&mut self.heap)?;
+        for (name, value) in self.host.env() {
+            let k = Value::cell(self.heap.string(name.as_bytes())?);
+            let next = if map::get(&self.heap, env, k).is_some() {
+                None
+            } else {
+                let v = Value::cell(self.heap.string(value.as_bytes())?);
+                let next = map::set(&mut self.heap, env, k, v)?;
+                self.release(v);
+                Some(next)
+            };
+            self.release(k);
+            if let Some(next) = next {
+                self.heap.release(env);
+                env = next;
+            }
+        }
+        Ok(env)
+    }
+
+    fn io_errors(&self) -> Result<IoErrors, Stop> {
+        self.code.abi.io.ok_or_else(|| {
+            Stop::BadProgram("a file built-in, in a program with no `scarlet/io.IoError`".into())
+        })
+    }
+
+    /// `Err` of the `IoError` `e` stands for, about `path`.
+    fn io_error(&mut self, e: &std::io::Error, path: &[u8]) -> Result<Value, Stop> {
+        let io = self.io_errors()?;
+        let about_path = match e.raw_os_error() {
+            Some(libc::ENOENT) => Some(io.not_found),
+            Some(libc::EACCES) => Some(io.permission_denied),
+            Some(libc::EEXIST) => Some(io.already_exists),
+            Some(libc::ENOTDIR) => Some(io.not_a_directory),
+            Some(libc::EISDIR) => Some(io.is_a_directory),
+            Some(libc::EROFS) => Some(io.read_only_filesystem),
+            Some(libc::ELOOP) => Some(io.filesystem_loop),
+            Some(libc::EFBIG) => Some(io.file_too_large),
+            _ => None,
+        };
+        let error = match (about_path, e.raw_os_error()) {
+            (Some(variant), _) => {
+                let path = Value::cell(self.heap.string(path).map_err(full)?);
+                Value::cell(self.heap.ctor(variant, &[path]).map_err(full)?)
+            }
+            (None, Some(libc::ENOSPC)) => Value::nullary(io.storage_full),
+            (None, Some(libc::EDQUOT)) => Value::nullary(io.quota_exceeded),
+            // `-1` for an error that did not come from the OS.
+            (None, code) => {
+                let code =
+                    bigint::value(&mut self.heap, code.unwrap_or(-1).into()).map_err(full)?;
+                Value::cell(self.heap.ctor(io.errno, &[code]).map_err(full)?)
+            }
+        };
+        self.err(error)
     }
 
     /// The map `v` is.
@@ -1398,11 +1553,15 @@ impl<'c, 'o> Machine<'c, 'o> {
         self.heap.live()
     }
 
-    /// Release every global, so a test can see that nothing else is left.
+    /// Release every global, and `os.env`'s map, so a test can see that
+    /// nothing else is left.
     #[cfg(test)]
     fn release_globals(&mut self) {
         for v in std::mem::take(&mut self.globals) {
             self.release(v);
+        }
+        if let Some(env) = self.env.take() {
+            self.heap.release(env);
         }
     }
 }
@@ -1452,6 +1611,12 @@ fn ready(f: &Func) -> Result<&Body, Stop> {
     }
 }
 
+/// The path a string names. A Scarlet string is always UTF-8, so nothing is
+/// lost on the way.
+fn path_of(text: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(text).into_owned())
+}
+
 fn full(_: Full) -> Stop {
     Stop::HeapFull
 }
@@ -1463,6 +1628,10 @@ mod tests {
     /// Run `src`, then release everything a finished run still holds: the
     /// result and the globals. What is left is what reference counting lost.
     fn cells_left_after(src: &str) -> (String, usize) {
+        cells_left_after_in(&Host::new(Vec::new(), Vec::new()), src)
+    }
+
+    fn cells_left_after_in(host: &Host, src: &str) -> (String, usize) {
         let mut scanner = scarlet_core::scanner::new_scanner(src.to_string());
         let parsed = scarlet_core::parser::new_parser(&mut scanner).parse_program();
         let expr = scarlet_core::ast::Expression::BlockExpression(parsed.ast);
@@ -1471,7 +1640,7 @@ mod tests {
         let program = result.into_runnable().expect("a clean compile is runnable");
         let code = crate::code::load(&program);
         let mut out = Vec::new();
-        let mut m = Machine::new(&code, &mut out);
+        let mut m = Machine::new(&code, host, &mut out);
         let last = m.run().expect("the program runs");
         m.release(last);
         m.release_globals();
@@ -1740,6 +1909,37 @@ mod tests {
              }\n",
         );
         assert_eq!(out, "hi\nhi\n");
+        assert_eq!(left, 0);
+    }
+
+    /// `os.env`'s map is made once and shared, and what the host built-ins
+    /// hand out, errors included, holds its own references. All of it is
+    /// freed when the run ends.
+    #[test]
+    fn what_the_host_built_ins_make_is_all_freed() {
+        let env = vec![("A".into(), "1".into()), ("B".into(), "2".into())];
+        let host = Host::new(vec!["main.scrl".into(), "x".into()], env);
+        let (out, left) = cells_left_after_in(
+            &host,
+            "import scarlet/os\n\
+             import scarlet/io\n\
+             import scarlet/crypto\n\
+             import scarlet/map\n\
+             pub fn main() {\n\
+             \tprintln(os.get_env('A'))\n\
+             \tprintln(map.size(os.env()))\n\
+             \tprintln(os.argv())\n\
+             \tprintln(match io.read_file('/no/such/file') {\n\
+             \t\tOk(_) -> 'read'\n\
+             \t\tErr(_) -> 'failed'\n\
+             \t})\n\
+             \tprintln(match crypto.random_bytes(40) {\n\
+             \t\tOk(_) -> 'random'\n\
+             \t\tErr(Nil) -> 'none'\n\
+             \t})\n\
+             }\n",
+        );
+        assert_eq!(out, "Some(1)\n2\n[main.scrl, x]\nfailed\nrandom\n");
         assert_eq!(left, 0);
     }
 

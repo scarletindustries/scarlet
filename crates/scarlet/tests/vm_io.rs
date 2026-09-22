@@ -36,7 +36,6 @@ pub fn main() {{
 /// `io.write_text` then `io.read_text` round-trips, and the bytes land on
 /// disk.
 #[test]
-#[ignore = "needs the VM"]
 fn file_write_then_read_roundtrips() {
     let proj = Project::new("io_roundtrip");
     let data = proj.dir.join("out.txt");
@@ -270,7 +269,6 @@ fn tcp_read_within_returns_data() {
 /// Writing a bit-unaligned binary (`<<1:4>>`) to a file surfaces as
 /// `IoError::UnalignedBinary`, and the file is never created.
 #[test]
-#[ignore = "needs the VM"]
 fn file_write_unaligned_binary_errors() {
     let proj = Project::new("io_unaligned");
     let data = proj.dir.join("out.bin");
@@ -303,7 +301,6 @@ pub fn main() {
 /// Reading a missing path surfaces `IoError::NotFound(path)`, with the path
 /// carried in the variant rather than buried in a string.
 #[test]
-#[ignore = "needs the VM"]
 fn file_read_missing_path_errors() {
     let proj = Project::new("io_missing");
     let missing = proj.dir.join("does_not_exist.txt");

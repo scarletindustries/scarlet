@@ -35,6 +35,9 @@ const FIRST_CHUNK_WORDS: usize = 256;
 const CHUNK_BITS: u32 = 20;
 const WORD_BITS: u32 = 28;
 
+/// The most words one cell can take, its header's among them.
+pub(crate) const MAX_CELL_WORDS: usize = 1 << WORD_BITS;
+
 /// A cell: which chunk, and which word the cell's header is at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Cell {
