@@ -158,6 +158,12 @@ enum FieldMismatch {
     NotNominal,
     /// Variant list is empty, so no field can exist.
     NoVariants,
+    NotShared(NotShared),
+}
+
+/// Why a label the type does declare is still not one `.field` can read: the
+/// value may be a variant that lacks it, or holds it somewhere else.
+enum NotShared {
     MissingOn(StrId),
     PositionDiffers {
         variant: StrId,
@@ -3608,11 +3614,13 @@ impl Compiler {
 
             return match scheme.kind {
                 ValueKind::Constructor {
+                    type_id,
                     arity,
                     field_labels,
                     ..
                 } => self.compile_ctor_call(
                     name,
+                    type_id,
                     arity as usize,
                     field_labels,
                     inst_ty,
@@ -3944,6 +3952,7 @@ impl Compiler {
     fn compile_ctor_call(
         &mut self,
         variant_name: &str,
+        type_id: TypeId,
         arity: usize,
         field_labels_sl: ArenaSlice<pool::StrSlices>,
         inst_ty: Ty,
@@ -4046,6 +4055,8 @@ impl Compiler {
             let base_ty = self.compile_expr(e);
             regions[ai] = self.close_walk_region();
             self.engine.unify_at(result_ty, base_ty, e.span());
+            let unfilled = (0..arity).filter(|&i| slots.get(i).is_none_or(Option::is_none));
+            self.check_spread_fills(type_id, result_ty, field_labels_sl, unfilled, e.span());
         }
 
         for (i, slot_expr) in slots.iter().enumerate() {
@@ -4066,6 +4077,52 @@ impl Compiler {
         }
 
         result_ty
+    }
+
+    /// `C(..base, ...)` fills each field it leaves out with `base.field`, so
+    /// each of those has to be a field `base.field` could read: present on
+    /// every variant of the type, at the same position. On a type with one
+    /// variant that is every field. On a type with several it is only the
+    /// fields they all share, and a spread that leaves out any other is
+    /// refused, since which variant `base` is is not known until it runs.
+    fn check_spread_fills(
+        &mut self,
+        type_id: TypeId,
+        result_ty: Ty,
+        field_labels: ArenaSlice<pool::StrSlices>,
+        unfilled: impl Iterator<Item = usize>,
+        span: Span,
+    ) {
+        let resolved = self.engine.find(result_ty);
+        let (type_name, type_args) = match self.engine.node(resolved) {
+            TypeNode::Con { name, args, .. } => (
+                self.engine.str(name).to_string(),
+                self.engine.children_of(args).to_vec(),
+            ),
+            _ => return,
+        };
+        let Some(info) = self.env.lookup_type_info_by_id(type_id) else {
+            return;
+        };
+        let labels: SmallVec<[StrId; 4]> =
+            SmallVec::from_slice(self.engine.str_ids_of(field_labels));
+        for i in unfilled {
+            let Some(&label) = labels.get(i) else {
+                continue;
+            };
+            if let Err(FieldMismatch::NotShared(why)) =
+                self.field_in_variants(info, &type_args, label, Some(span))
+            {
+                let field = self.engine.str(label).to_string();
+                let why = self.not_shared(why, &type_name);
+                self.error(
+                    format!(
+                        "The spread cannot fill field '{field}', which {why}; write '{field}:' in the call"
+                    ),
+                    span,
+                );
+            }
+        }
     }
 
     // ========================================================================
@@ -4210,7 +4267,7 @@ impl Compiler {
                 .enumerate()
                 .find_map(|(i, f)| (f.label == field_id).then_some((i, f.ty)));
             let Some((i, fty)) = hit else {
-                return Err(FieldMismatch::MissingOn(v.name));
+                return Err(FieldMismatch::NotShared(NotShared::MissingOn(v.name)));
             };
             let substituted = self
                 .engine
@@ -4221,17 +4278,35 @@ impl Compiler {
                         self.engine.unify_at(existing, substituted, span);
                     }
                     if prev != i {
-                        return Err(FieldMismatch::PositionDiffers {
+                        return Err(FieldMismatch::NotShared(NotShared::PositionDiffers {
                             variant: v.name,
                             at: i,
                             expected: prev,
-                        });
+                        }));
                     }
                 }
                 None => found = Some((i, substituted)),
             }
         }
         found.ok_or(FieldMismatch::NoVariants)
+    }
+
+    /// The end of a sentence naming a field, saying why it is not shared.
+    fn not_shared(&self, why: NotShared, type_name: &str) -> String {
+        match why {
+            NotShared::MissingOn(variant) => format!(
+                "is not present on every variant of '{type_name}' (missing on '{}')",
+                self.engine.str(variant)
+            ),
+            NotShared::PositionDiffers {
+                variant,
+                at,
+                expected,
+            } => format!(
+                "is not at the same position in every variant of '{type_name}' (position {at} in '{}', expected {expected})",
+                self.engine.str(variant)
+            ),
+        }
     }
 
     /// Project `.field` out of a value. Because the runtime value's variant is
@@ -4289,29 +4364,9 @@ impl Compiler {
                     field_span,
                 );
             }
-            Err(FieldMismatch::MissingOn(variant)) => {
-                let variant = self.engine.str(variant).to_string();
-                return self.field_access_bail(
-                    format!(
-                        "Field '{}' is not present on every variant of '{}' (missing on '{}')",
-                        field, type_name, variant
-                    ),
-                    field_span,
-                );
-            }
-            Err(FieldMismatch::PositionDiffers {
-                variant,
-                at,
-                expected,
-            }) => {
-                let variant = self.engine.str(variant).to_string();
-                return self.field_access_bail(
-                    format!(
-                        "Field '{}' is not at the same position in every variant of '{}' (position {} in '{}', expected {})",
-                        field, type_name, at, variant, expected
-                    ),
-                    field_span,
-                );
+            Err(FieldMismatch::NotShared(why)) => {
+                let why = self.not_shared(why, &type_name);
+                return self.field_access_bail(format!("Field '{field}' {why}"), field_span);
             }
         };
         let qualified = format!("{}.{}", type_name, field);

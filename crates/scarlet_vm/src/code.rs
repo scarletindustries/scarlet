@@ -1097,15 +1097,14 @@ impl<'c> Loader<'c> {
                 }),
                 _ => Err("TupleField with other than one argument".into()),
             },
-            PrimOp::FieldUnchecked(index) => match args {
+            PrimOp::Field(index) => match args {
                 [src] => Ok(Instr::Field {
                     dst,
                     src: Reg::of(*src),
                     index,
                 }),
-                _ => Err("FieldUnchecked with other than one argument".into()),
+                _ => Err("Field with other than one argument".into()),
             },
-            other => Err(format!("the operation {other:?}")),
         }
     }
 

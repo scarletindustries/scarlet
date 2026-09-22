@@ -101,12 +101,9 @@ pub enum PrimOp {
     MakeTuple,
     /// `t.0`, `t.1` and so on: field `n` of a tuple.
     TupleField(u16),
-    /// Field `n` of a constructor value whose variant is only known at run
-    /// time (a projection out of a `..base` spread), checking the variant.
+    /// `r.x`: field `n` of a constructor value. The types have proved every
+    /// variant it could be holds that field at `n`.
     Field(u16),
-    /// `r.x`: field `n` of a constructor value whose variant the types have
-    /// already proved.
-    FieldUnchecked(u16),
 
     // --- Arrays ---
     /// An array of every arg, in order.

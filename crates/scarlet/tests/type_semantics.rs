@@ -456,7 +456,6 @@ run_case! {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn ctor_record_update_overrides_and_projects() {
     // Record-update builds a fresh value: `base` is left untouched.
     run_outputs(
@@ -470,6 +469,34 @@ fn ctor_record_update_overrides_and_projects() {
          }\n",
         "al\n19\n18\n",
     );
+}
+
+reject_case! {
+    /// `..base` fills a field it leaves out with `base.field`, so on a type
+    /// with several variants that field has to be on all of them.
+    ctor_record_update_refuses_a_field_another_variant_lacks: (
+        "type S {\n\tA(v Int, r Int)\n\tB(v Int)\n}\n\
+         pub fn main() {\n\
+         \tb = B(v: 1)\n\
+         \ta = A(..b)\n\
+         \tprintln('${a}')\n\
+         }\n",
+        "The spread cannot fill field 'r', which is not present on every variant of 'S' (missing on 'B')",
+    ),
+}
+
+reject_case! {
+    /// Nor may another variant hold it somewhere else: reading `base` by
+    /// position would then read the wrong field of a `B`.
+    ctor_record_update_refuses_a_field_at_another_position: (
+        "type S {\n\tA(x Int, y Int)\n\tB(y Int, x Int)\n}\n\
+         pub fn main() {\n\
+         \tb = B(y: 1, x: 2)\n\
+         \ta = A(..b, y: 3)\n\
+         \tprintln('${a}')\n\
+         }\n",
+        "The spread cannot fill field 'x', which is not at the same position in every variant of 'S' (position 1 in 'B', expected 0)",
+    ),
 }
 
 reject_case! {

@@ -2,8 +2,8 @@ fn main.main() -> :t0
   let %0:t1 = c0
   let %1:t1 = c1
   let %2:t2 = ctor 512.0(%0, %1)
-  let %3:t0 = FieldUnchecked(0)(%2)
-  let %4:t3 = FieldUnchecked(1)(%2)
+  let %3:t0 = Field(0)(%2)
+  let %4:t3 = Field(1)(%2)
   drop %2 [ctor:2]
   ret IntAdd(%3, %4)
 

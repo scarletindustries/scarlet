@@ -68,6 +68,15 @@ Erlang crashes in these cases, and Scarlet gives a harmless value instead.
 
 A slice is a `Result` rather than a shorter array, because a range that misses the array is a failure the caller should see, not one to hide by clamping. `binary.slice_bits` follows the same rule. The old VM crashed on an out-of-range slice instead.
 
+## Fields
+
+**Built: reading a field never needs to know the variant.**
+
+- `s.x` works when every variant of `s`'s type has a field `x`, at the same position and of the same type. A type with one variant meets this for all its fields.
+- `C(..s, y: 1)` builds a `C` with the fields you name, and fills each field you leave out with `s.field`. So each of those must be a field `s.field` could read. On a type with several variants that means only the fields they all share, and the compiler rejects a spread that leaves out any other, since it cannot know which variant `s` will be.
+
+The old compiler accepted any spread whose base had the same type, and the old VM read the fields by position, so `Circle(..square, r: 1)` could fill a Circle's `x` with the Square's `side`.
+
 ## Memory
 
 **Decided: reference counting, with Perceus.** There is no tracing garbage collector.

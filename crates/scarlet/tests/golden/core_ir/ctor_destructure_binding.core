@@ -9,8 +9,8 @@ fn main.g(%0:t0) -> :t1
       ret c0
 
 fn main.f(%0:t0) -> :t1
-  let %1:t2 = FieldUnchecked(0)(%0)
-  let %2:t3 = FieldUnchecked(1)(%0)
+  let %1:t2 = Field(0)(%0)
+  let %2:t3 = Field(1)(%0)
   drop %0
   let %3:t1 = call fn#0(%1)
   drop %1

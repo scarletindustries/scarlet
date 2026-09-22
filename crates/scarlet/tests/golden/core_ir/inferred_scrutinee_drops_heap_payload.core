@@ -9,7 +9,7 @@ fn main.f() -> :t0
       ret c1
     | 263.0(%3) ->
       drop %2 [ctor:1]
-      let %4:t3 = FieldUnchecked(0)(%3)
+      let %4:t3 = Field(0)(%3)
       drop %3
       let %5:t0 = c2
       ret IntAdd(%4, %5)

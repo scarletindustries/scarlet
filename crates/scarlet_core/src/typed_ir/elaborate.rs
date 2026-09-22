@@ -824,12 +824,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 let Some((idx, _)) = self.ctx.ctor_field(recv_ty, &field.name) else {
                     elaborator_bug("field access", pa.span)
                 };
-                TypedExpr::Field {
-                    ty,
-                    recv,
-                    idx,
-                    checked: false,
-                }
+                TypedExpr::Field { ty, recv, idx }
             }
         }
     }
@@ -998,8 +993,9 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// order; a `..base` spread fills every unsupplied slot with a projection
     /// out of `base`.
     ///
-    /// Spread projections always use the tag-checked form: Core carries no
-    /// variant-count facts, so a single-variant enum cannot be recognised here.
+    /// The check walk admits a spread only when every field it fills is one
+    /// `base.field` could read, the same position on every variant, so the
+    /// projections need no tag check.
     ///
     /// When any argument is labeled or spread, every supplied argument is bound
     /// to a `Let` in *source* order first, or reordering them into field order
@@ -1068,7 +1064,6 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                         ty: fty,
                         recv: Box::new(self.var(base.id)),
                         idx: i as u32,
-                        checked: true,
                     });
                 }
             }
@@ -1346,7 +1341,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
 
     /// `let (a, b) = e` / `let Point(x, y) = e`: bind the scrutinee, then one
     /// `Let` per projection. Exhaustiveness has proven the tag, so the field
-    /// reads are unchecked.
+    /// reads need no check.
     fn destructure(&mut self, pat: &ast::Pattern, init: &ast::Expression, out: &mut Vec<Frame>) {
         let value = self.expr(init);
         let scrut = self.new_bind(self.anon, value.ty());
@@ -1426,7 +1421,6 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                         ty: fty,
                         recv: Box::new(self.var(src)),
                         idx: i as u32,
-                        checked: false,
                     };
                     lets.push((b, proj));
                     self.irrefutable(sub, b.id, lets);

@@ -402,7 +402,6 @@ fn ctor_arg_diagnostics_come_out_in_declared_field_order() {
 /// A `..base` spread must unify the result type before any argument is checked,
 /// so a function-literal argument still gets a concrete parameter type.
 #[test]
-#[ignore = "needs the VM"]
 fn ctor_spread_solves_type_params_before_lambda_args_are_hinted() {
     common::run_outputs(
         "type Pair(a) {\n\tfst a\n\tsnd fn(a) a\n}\n\

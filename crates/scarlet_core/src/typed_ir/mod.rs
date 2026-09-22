@@ -300,15 +300,13 @@ pub enum TypedExpr {
         recv: Box<TypedExpr>,
         idx: u32,
     },
-    /// `recv.field`, with the field index the checker resolved.
-    ///
-    /// `checked` selects `GetField` over `GetFieldUnchecked`: only a projection
-    /// out of a `..base` spread has to verify the tag at runtime.
+    /// `recv.field`, with the field index the checker resolved. The checker
+    /// admits it only at a position every variant of the type agrees on, so
+    /// no read needs to know which variant `recv` is.
     Field {
         ty: RTy,
         recv: Box<TypedExpr>,
         idx: u32,
-        checked: bool,
     },
     /// `args` is exactly the variant's arity, in declared-field order. The
     /// elaborator has reordered labels and expanded `..base` spreads into

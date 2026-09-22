@@ -623,17 +623,9 @@ impl Lower {
                 let r = self.operand(recv);
                 Atom::prim(PrimOp::TupleField(idx16(*idx)), vec![r])
             }
-            TypedExpr::Field {
-                recv, idx, checked, ..
-            } => {
+            TypedExpr::Field { recv, idx, .. } => {
                 let r = self.operand(recv);
-                let i = idx16(*idx);
-                let op = if *checked {
-                    PrimOp::Field(i)
-                } else {
-                    PrimOp::FieldUnchecked(i)
-                };
-                Atom::prim(op, vec![r])
+                Atom::prim(PrimOp::Field(idx16(*idx)), vec![r])
             }
             TypedExpr::Ctor { variant, args, .. } => {
                 let fields = self.operands(args);

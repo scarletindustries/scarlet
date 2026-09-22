@@ -601,11 +601,10 @@ run_case! {
         "999\n3\n40\n",
     ),
 
-    // `.field` on a resolved record lowers to `Op::GetFieldUnchecked`. Three
-    // field indices pin the operand encoding; the `..p` spread projects the
-    // unnamed fields through the same op.
-    #[ignore = "needs the VM"]
-    record_field_access_unchecked: (
+    // `.field` on a record lowers to `Field(n)`. Three field indices pin the
+    // operand encoding; the `..p` spread reads the fields it leaves out
+    // through the same op.
+    record_field_access: (
         "type P {\n\tx Int\n\ty Int\n\tz Int\n}\n\
          pub fn main() {\n\
          \tp = P(x: 10, y: 20, z: 30)\n\
@@ -621,10 +620,7 @@ run_case! {
     ),
 
     // A field at the same position on every variant is read by index alone;
-    // the runtime tag varies across calls but `GetFieldUnchecked` must not
-    // consult it. Nominal typing makes the receiver always a resolved `Con`,
-    // so the checked `Op::GetField` fallback is unreachable from surface
-    // syntax and is pinned only indirectly, here.
+    // the runtime tag varies across calls and `Field` does not consult it.
     field_access_across_variants_ignores_runtime_tag: (
         "type S {\n\
          \tA(v Int, w Int)\n\
@@ -638,6 +634,21 @@ run_case! {
          \tprintln(sum(C(100, 200)))\n\
          }\n",
         "3\n30\n300\n",
+    ),
+
+    // A spread over a type with several variants fills only fields they all
+    // share, so it reads them by index whichever variant the base is.
+    spread_across_variants_reads_shared_fields: (
+        "type S {\n\
+         \tA(v Int, w Int, a Int)\n\
+         \tB(v Int, w Int)\n\
+         }\n\
+         fn grow(s S) S { A(..s, a: 3) }\n\
+         pub fn main() {\n\
+         \tprintln(grow(B(1, 2)))\n\
+         \tprintln(grow(A(10, 20, 30)))\n\
+         }\n",
+        "A(1, 2, 3)\nA(10, 20, 3)\n",
     ),
 }
 

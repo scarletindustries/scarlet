@@ -182,7 +182,6 @@ suite! {
         hello,
         control_flow,
         pattern_matching,
-        #[ignore = "needs the VM"]
         data_types,
         generics,
         closures,
@@ -244,13 +243,11 @@ suite! {
         enum_equality,
         // Field punning on constructor calls: `f(now:, self:)` desugars to
         // `f(now: now, self: self)` at parse time.
-        #[ignore = "needs the VM"]
         field_punning,
         // Evaluation: tail calls in constant stack, closure capture, and core
         // semantics.
         #[ignore = "needs the VM"]
         tco_and_closures,
-        #[ignore = "needs the VM"]
         semantics,
         // Numeric edges: i64 wrapping, boxed ints, float canonicalization,
         // exact decimals.
