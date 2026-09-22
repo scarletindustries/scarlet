@@ -901,3 +901,30 @@ fn the_rest_of_the_binary_module_runs() {
          True\nFalse\nTrue\nTrue\nTrue\n",
     );
 }
+
+#[test]
+fn the_string_built_ins_run() {
+    prints(
+        "import scarlet/int\n\
+         import scarlet/string\n\
+         pub fn main() {\n\
+         \tprintln(string.split('a,b,,c', ','))\n\
+         \tprintln(string.split('abc', ''))\n\
+         \tprintln(string.split('abc', 'x'))\n\
+         \tprintln(string.split('', ','))\n\
+         \tprintln(string.contains('hello', 'ell'))\n\
+         \tprintln(string.contains('hello', ''))\n\
+         \tprintln(string.contains('hello', 'z'))\n\
+         \tprintln('[${string.trim('  hi \\t\\n')}]')\n\
+         \tprintln(string.to_graphemes('e\\u{0301}a'))\n\
+         \tprintln(int.from_string('-42'))\n\
+         \tprintln(int.from_string('+007'))\n\
+         \tprintln(int.from_string('20O'))\n\
+         \tprintln(int.from_string(' 1'))\n\
+         \tprintln(int.from_string('-'))\n\
+         \tprintln(int.from_string('123456789012345678901234567890'))\n\
+         }\n",
+        "[a, b, , c]\n[a, b, c]\n[abc]\n[]\nTrue\nTrue\nFalse\n[hi]\n[e\u{0301}, a]\n\
+         Ok(-42)\nOk(7)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nOk(123456789012345678901234567890)\n",
+    );
+}

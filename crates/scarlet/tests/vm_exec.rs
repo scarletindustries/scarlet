@@ -113,7 +113,6 @@ run_case! {
     // `string.split` with a non-empty delimiter takes `Op::StrSplit`'s `split(&delim)`
     // arm (the empty-delimiter char-explode arm is the one stdlib_string covers).
     // Trailing/empty fields are preserved, so `'a,,b,'` splits into four parts.
-    #[ignore = "needs the VM"]
     string_split_nonempty_delimiter: (
         "import scarlet/string\n\
          pub fn main() {\n\

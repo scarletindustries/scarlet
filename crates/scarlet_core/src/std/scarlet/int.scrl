@@ -9,15 +9,10 @@ fn from_string_raw(s String) Option(Int)
 
 // The read side of `to_string`: an optional leading `+`/`-`, then one or more
 // ASCII digits, and nothing else. `Err(Nil)` on empty input (with or without
-// a bare sign), leading/trailing whitespace, a non-digit anywhere — including
-// a truncated tail such as `'20O'` — or a magnitude past Int's range.
-// Leading zeros are accepted: `'007'` is `7`.
-//
-// Total over everything `to_string` produces, `min_value` included: unlike
-// composing this from `binary.parse_int` plus a sign check, which parses the
-// magnitude unsigned and negates it afterwards, `min_value`'s magnitude
-// (9223372036854775808) does not fit a positive Int, so that approach cannot
-// round-trip it. This parses by accumulating negatively instead.
+// a bare sign), leading/trailing whitespace, or a non-digit anywhere —
+// including a truncated tail such as `'20O'`. Leading zeros are accepted:
+// `'007'` is `7`. An Int has no bounds, so no number of digits is too many,
+// and every string `to_string` makes reads back to the same Int.
 pub fn from_string(s String) Result(Int, Nil) {
 	match from_string_raw(s) {
 		Some(n) -> Ok(n)

@@ -746,6 +746,55 @@ impl<'c, 'o> Machine<'c, 'o> {
                 self.show(v, &mut text)?;
                 Ok(Value::cell(self.heap.string(&text).map_err(full)?))
             }
+            // Adjacent delimiters give empty pieces, and an empty `on` gives
+            // one piece per Unicode scalar value (`string.scrl`).
+            Intrinsic::StringSplit => {
+                let s = self.utf8_of(v)?;
+                let on = self.utf8_of(arg(self, 1))?;
+                let pieces: Vec<String> = if on.is_empty() {
+                    s.chars().map(String::from).collect()
+                } else {
+                    s.split(on.as_str()).map(String::from).collect()
+                };
+                self.strings(&pieces)
+            }
+            Intrinsic::StringContains => {
+                let (s, needle) = (self.utf8_of(v)?, self.utf8_of(arg(self, 1))?);
+                Ok(Value::bool(s.contains(needle.as_str())))
+            }
+            Intrinsic::StringTrim => {
+                let s = self.utf8_of(v)?;
+                Ok(Value::cell(
+                    self.heap.string(s.trim().as_bytes()).map_err(full)?,
+                ))
+            }
+            Intrinsic::StringToGraphemes => {
+                let s = self.utf8_of(v)?;
+                let pieces: Vec<String> =
+                    unicode_segmentation::UnicodeSegmentation::graphemes(s.as_str(), true)
+                        .map(String::from)
+                        .collect();
+                self.strings(&pieces)
+            }
+            // An optional sign, then one or more ASCII digits, and nothing
+            // else. An Int has no bounds, so no number of digits is too many.
+            Intrinsic::IntFromString => {
+                let s = self.utf8_of(v)?;
+                let digits = s.strip_prefix(['+', '-']).unwrap_or(&s);
+                let valid = !digits.is_empty() && digits.bytes().all(|c| c.is_ascii_digit());
+                let n = if valid {
+                    num_bigint::BigInt::parse_bytes(s.as_bytes(), 10)
+                } else {
+                    None
+                };
+                match n {
+                    Some(n) => {
+                        let n = bigint::value(&mut self.heap, n).map_err(full)?;
+                        self.some(n)
+                    }
+                    None => Ok(Value::nullary(self.code.abi.none)),
+                }
+            }
             Intrinsic::StringLength => {
                 let Some(cell) = v.as_cell().filter(|_| self.is_string(v)) else {
                     return Err(Stop::BadProgram(format!("`string.length` of {v:?}")));
@@ -909,6 +958,23 @@ impl<'c, 'o> Machine<'c, 'o> {
             Int::Big(n) if n.sign() == num_bigint::Sign::Minus => 0,
             Int::Big(_) => u64::MAX,
         })
+    }
+
+    /// The string `v`, as text. Every string the VM makes is UTF-8.
+    fn utf8_of(&self, v: Value) -> Result<String, Stop> {
+        String::from_utf8(self.text_of(v)?)
+            .map_err(|_| Stop::BadProgram("a string that is not UTF-8".into()))
+    }
+
+    /// A new array of new strings holding `pieces`.
+    fn strings(&mut self, pieces: &[String]) -> Result<Value, Stop> {
+        let mut items = Vec::with_capacity(pieces.len());
+        for p in pieces {
+            items.push(Value::cell(self.heap.string(p.as_bytes()).map_err(full)?));
+        }
+        Ok(Value::cell(
+            array::from_values(&mut self.heap, &items).map_err(full)?,
+        ))
     }
 
     /// The bytes of the string `v`.

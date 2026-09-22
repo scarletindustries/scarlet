@@ -194,7 +194,6 @@ suite! {
         // Stdlib surface.
         #[ignore = "needs the VM"]
         collections,
-        #[ignore = "needs the VM"]
         strings,
         #[ignore = "needs the VM"]
         numbers,

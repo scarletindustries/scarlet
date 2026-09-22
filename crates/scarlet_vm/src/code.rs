@@ -1140,7 +1140,11 @@ fn built(i: Intrinsic, argc: usize) -> bool {
         | Intrinsic::BinaryToString
         | Intrinsic::BinaryBitSize
         | Intrinsic::BinaryByteSize => 1,
-        Intrinsic::BinaryToAsciiLower => 1,
+        Intrinsic::BinaryToAsciiLower
+        | Intrinsic::StringTrim
+        | Intrinsic::StringToGraphemes
+        | Intrinsic::IntFromString => 1,
+        Intrinsic::StringSplit | Intrinsic::StringContains => 2,
         Intrinsic::BinaryAppend
         | Intrinsic::BinaryByteAt
         | Intrinsic::BinaryParseInt

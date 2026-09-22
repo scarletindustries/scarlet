@@ -881,6 +881,7 @@ dependencies = [
  "num-traits",
  "scarlet_core",
  "scarlet_ir",
+ "unicode-segmentation",
 ]
 
 [[package]]
