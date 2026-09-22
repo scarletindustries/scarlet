@@ -49,6 +49,27 @@ pub struct OrShape {
     pub(crate) err_has_payload: bool,
 }
 
+/// Where a field sits in a value of its receiver's type, found by the field's
+/// name.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FieldAt {
+    /// At this index in every variant, so a read needs no variant.
+    Same(u32),
+    /// At different indices in different variants: each variant's layout, one
+    /// per variant, so a read looks at the variant first.
+    PerVariant(Vec<VariantLayout>),
+}
+
+/// One variant of a receiver's type, as a read of one of its fields sees it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VariantLayout {
+    pub(crate) variant: VariantRef,
+    /// Every field's type, instantiated at the receiver's type arguments.
+    pub(crate) fields: Vec<Ty>,
+    /// Which of `fields` the read is after.
+    pub(crate) slot: u32,
+}
+
 /// Abort: the check walk did not answer a question elaboration had to ask, so
 /// the module's clean-module proof is wrong. `why` names the question, e.g.
 /// `"field access"`. No program reaches this — a user-facing error would have
@@ -107,8 +128,8 @@ pub trait ElabCtx: PreludeTys {
         member: &str,
         span: Span,
     ) -> Option<(Ty, Denotation)>;
-    /// Field index for `.field` on a receiver of `receiver` type.
-    fn ctor_field(&mut self, receiver: Ty, field: &str) -> Option<(u32, Ty)>;
+    /// Where `.field` sits in a receiver of `receiver` type.
+    fn ctor_field(&mut self, receiver: Ty, field: StrId) -> Option<FieldAt>;
     /// Declared field-label order of the variant `v` constructs.
     ///
     /// Keyed on the [`VariantRef`] the walk resolved, not on a source name:
@@ -810,22 +831,79 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             return self.value_of(den, sid, mty, ty, pa.span);
         }
         let recv_ty = self.peek_ty(pa.left.span());
-        let recv = Box::new(self.expr(&pa.left));
+        let recv = self.expr(&pa.left);
         match &pa.right {
             ast::PropertyKey::TupleIndex(num) => {
                 let Ok(idx) = num.value.parse::<u32>() else {
                     elaborator_bug("tuple index", pa.span)
                 };
-                TypedExpr::TupleIndex { ty, recv, idx }
+                TypedExpr::TupleIndex {
+                    ty,
+                    recv: Box::new(recv),
+                    idx,
+                }
             }
             ast::PropertyKey::Field(field) => {
-                // The check walk admits the access across every variant, so the
-                // tag needs no check.
-                let Some((idx, _)) = self.ctx.ctor_field(recv_ty, &field.name) else {
-                    elaborator_bug("field access", pa.span)
-                };
-                TypedExpr::Field { ty, recv, idx }
+                let label = self.ctx.intern(&field.name);
+                self.field(recv, recv_ty, label, ty, pa.span)
             }
+        }
+    }
+
+    /// `recv.label`, where `recv` has type `recv_ty` and the field has type
+    /// `ty`. The check walk admitted it because every variant has the field,
+    /// but they may hold it in different slots. When they agree it is one
+    /// read. When they don't it is the `match` a person would write: an arm
+    /// per variant, each binding that variant's slot.
+    fn field(
+        &mut self,
+        recv: TypedExpr,
+        recv_ty: Ty,
+        label: StrId,
+        ty: RTy,
+        at: Span,
+    ) -> TypedExpr {
+        let Some(place) = self.ctx.ctor_field(recv_ty, label) else {
+            elaborator_bug("field access", at)
+        };
+        let layouts = match place {
+            FieldAt::Same(idx) => {
+                return TypedExpr::Field {
+                    ty,
+                    recv: Box::new(recv),
+                    idx,
+                };
+            }
+            FieldAt::PerVariant(layouts) => layouts,
+        };
+        let scrut_ty = recv.ty();
+        let mut arms = Vec::with_capacity(layouts.len());
+        for layout in layouts {
+            let b = self.new_bind(self.anon, ty);
+            let mut fields = Vec::with_capacity(layout.fields.len());
+            for (j, &fty) in layout.fields.iter().enumerate() {
+                fields.push(if j == layout.slot as usize {
+                    TypedPat::Bind(b)
+                } else {
+                    TypedPat::Wild {
+                        ty: self.resolve(fty),
+                    }
+                });
+            }
+            arms.push(TypedArm {
+                pat: TypedPat::Ctor {
+                    ty: scrut_ty,
+                    variant: layout.variant,
+                    fields,
+                },
+                guard: None,
+                body: self.var(b.id),
+            });
+        }
+        TypedExpr::Match {
+            ty,
+            scrut: Box::new(recv),
+            arms,
         }
     }
 
@@ -993,9 +1071,9 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// order; a `..base` spread fills every unsupplied slot with a projection
     /// out of `base`.
     ///
-    /// The check walk admits a spread only when every field it fills is one
-    /// `base.field` could read, the same position on every variant, so the
-    /// projections need no tag check.
+    /// Each slot a spread fills is `base.field`, read by name exactly as a
+    /// written `.field` is: the check walk admits a spread only when every
+    /// field it fills is one `base.field` could read.
     ///
     /// When any argument is labeled or spread, every supplied argument is bound
     /// to a `Let` in *source* order first, or reordering them into field order
@@ -1017,7 +1095,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             .any(|a| !matches!(a, ast::CallArg::Positional(_)));
 
         let mut lets: Vec<(TypedBind, TypedExpr)> = Vec::new();
-        let mut spread: Option<TypedBind> = None;
+        let mut spread: Option<(TypedBind, Ty)> = None;
         let mut supplied: SmallVec<[(Option<StrId>, TypedExpr); 4]> =
             SmallVec::with_capacity(args.len());
         for a in args {
@@ -1038,15 +1116,17 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                     supplied.push((Some(sid), v));
                 }
                 ast::CallArg::Spread(e) => {
+                    let base_ty = self.peek_ty(e.span());
                     let v = self.expr(e);
                     let b = self.new_bind(self.anon, v.ty());
                     lets.push((b, v));
-                    spread = Some(b);
+                    spread = Some((b, base_ty));
                 }
             }
         }
 
-        let (by_pos, errors) = slot_labeled(&cp.slot_fields(), supplied);
+        let labels = cp.slot_fields();
+        let (by_pos, errors) = slot_labeled(&labels, supplied);
         if !errors.is_empty() {
             elaborator_bug("constructor arguments the check walk mis-slotted", at)
         }
@@ -1057,14 +1137,12 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 Some(v) => fields.push(v),
                 None => {
                     // A slot no argument filled reads from `..base`.
-                    let Some(base) = spread else {
+                    let (Some((base, base_ty)), Some(&Some(label))) = (spread, labels.get(i))
+                    else {
                         elaborator_bug("constructor field with no argument and no spread", at)
                     };
-                    fields.push(TypedExpr::Field {
-                        ty: fty,
-                        recv: Box::new(self.var(base.id)),
-                        idx: i as u32,
-                    });
+                    let recv = self.var(base.id);
+                    fields.push(self.field(recv, base_ty, label, fty, at));
                 }
             }
         }

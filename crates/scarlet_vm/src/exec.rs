@@ -1684,4 +1684,24 @@ mod tests {
         assert_eq!(out, "hi\nhi\n");
         assert_eq!(left, 0);
     }
+
+    /// A field held in different slots is read through a `match` on the
+    /// variant. The strings read, the values read from, and the ones a spread
+    /// builds are all freed.
+    #[test]
+    fn fields_read_by_name_are_all_freed() {
+        let (out, left) = cells_left_after(
+            "type S {\n\tA(name String, n Int, tag String)\n\tB(tag String, name String)\n}\n\
+             fn both(s S) String { '${s.name}/${s.tag}' }\n\
+             pub fn main() {\n\
+             \tb = B(tag: 'x', name: 'bee')\n\
+             \ta = A(..b, n: 1)\n\
+             \tprintln(both(b))\n\
+             \tprintln(both(a))\n\
+             \tprintln(both(A(..a, name: 'aye', n: 2)))\n\
+             }\n",
+        );
+        assert_eq!(out, "bee/x\nbee/x\naye/x\n");
+        assert_eq!(left, 0);
+    }
 }

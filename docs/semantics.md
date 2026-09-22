@@ -70,12 +70,14 @@ A slice is a `Result` rather than a shorter array, because a range that misses t
 
 ## Fields
 
-**Built: reading a field never needs to know the variant.**
+**Built: a field is found by its name.**
 
-- `s.x` works when every variant of `s`'s type has a field `x`, at the same position and of the same type. A type with one variant meets this for all its fields.
-- `C(..s, y: 1)` builds a `C` with the fields you name, and fills each field you leave out with `s.field`. So each of those must be a field `s.field` could read. On a type with several variants that means only the fields they all share, and the compiler rejects a spread that leaves out any other, since it cannot know which variant `s` will be.
+- `s.x` works when every variant of `s`'s type has a field named `x` of the same type. Where `x` sits in each variant does not matter, so reordering a variant's fields never breaks a `.x`. A type with one variant meets this for all its fields.
+- `C(..s, y: 1)` builds a `C` with the fields you name, and fills each field you leave out with `s.field`. So each of those must be a field `s.field` could read. On a type with several variants that means only the fields they all have, and the compiler rejects a spread that leaves out any other, since it cannot know which variant `s` will be.
 
-The old compiler accepted any spread whose base had the same type, and the old VM read the fields by position, so `Circle(..square, r: 1)` could fill a Circle's `x` with the Square's `side`.
+When every variant holds `x` in the same slot, `s.x` is one read. When they don't, the compiler writes the `match` a person would, one arm per variant.
+
+The old compiler accepted any spread whose base had the same type, and the old VM read the fields by position, so `Circle(..square, r: 1)` could fill a Circle's `x` with the Square's `side`. And `s.x` was refused when the variants held `x` in different slots.
 
 ## Memory
 

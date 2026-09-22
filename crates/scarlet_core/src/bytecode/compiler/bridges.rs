@@ -3,7 +3,7 @@
 //! elaborator never sees the compiler's fields.
 
 use super::*;
-use crate::typed_ir::PreludeTys;
+use crate::typed_ir::{FieldAt, PreludeTys, VariantLayout};
 
 impl PreludeTys for Compiler {
     /// The one bridge from a live inference `Ty` into the program's `RTy`
@@ -110,18 +110,46 @@ impl ElabCtx for Compiler {
         };
         Some((ty, den))
     }
-    fn ctor_field(&mut self, receiver: Ty, field: &str) -> Option<(u32, Ty)> {
+    fn ctor_field(&mut self, receiver: Ty, field: StrId) -> Option<FieldAt> {
         let resolved = self.engine.find(receiver);
         let (type_id, type_args) = match self.engine.node(resolved) {
             TypeNode::Con { id, args, .. } => (id, self.engine.children_of(args).to_vec()),
             _ => return None,
         };
         let info = self.env.lookup_type_info_by_id(type_id)?;
-        let field_id = self.engine.intern(field);
-        let (idx, fty) = self
-            .field_in_variants(info, &type_args, field_id, None)
-            .ok()?;
-        Some((idx as u32, fty))
+        let shared = self.field_in_variants(info, &type_args, field, None).ok()?;
+        if let Some(&first) = shared.slots.first()
+            && shared.slots.iter().all(|&s| s == first)
+        {
+            return Some(FieldAt::Same(first));
+        }
+        let variants = info.variants()?;
+        let mut layouts = Vec::with_capacity(shared.slots.len());
+        for (vi, &slot) in shared.slots.iter().enumerate() {
+            let v = *self.engine.variants_of(variants).get(vi)?;
+            let declared: SmallVec<[Ty; 4]> = self
+                .engine
+                .variant_fields_of(v.fields)
+                .iter()
+                .map(|f| f.ty)
+                .collect();
+            let fields = declared
+                .into_iter()
+                .map(|t| {
+                    self.engine
+                        .substitute_type_vars(t, info.type_params, &type_args)
+                })
+                .collect();
+            layouts.push(VariantLayout {
+                variant: crate::core_ir::VariantRef {
+                    type_id,
+                    variant_idx: u16::try_from(vi).ok()?,
+                },
+                fields,
+                slot,
+            });
+        }
+        Some(FieldAt::PerVariant(layouts))
     }
     /// Labels come off the type by `VariantRef`, not off the constructor's
     /// scheme by name: a `mod.Ctor(..)` bare name is not in `env`.

@@ -23,7 +23,8 @@ pub(crate) mod zonk;
 
 pub use elaborate::WalkStep;
 pub(crate) use elaborate::{
-    ElabCtx, OrShape, PreludeTys, elaborate_body, elaborate_toplevel, elaborator_bug,
+    ElabCtx, FieldAt, OrShape, PreludeTys, VariantLayout, elaborate_body, elaborate_toplevel,
+    elaborator_bug,
 };
 pub(crate) use eta::FnTable;
 pub(crate) use resolve::Denotation;
@@ -300,9 +301,9 @@ pub enum TypedExpr {
         recv: Box<TypedExpr>,
         idx: u32,
     },
-    /// `recv.field`, with the field index the checker resolved. The checker
-    /// admits it only at a position every variant of the type agrees on, so
-    /// no read needs to know which variant `recv` is.
+    /// Field `idx` of `recv`, where every variant `recv` could be holds it.
+    /// A `.field` whose variants hold it in different slots is a
+    /// [`TypedExpr::Match`] instead, which reads each variant's own.
     Field {
         ty: RTy,
         recv: Box<TypedExpr>,

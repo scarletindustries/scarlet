@@ -485,17 +485,31 @@ reject_case! {
     ),
 }
 
-reject_case! {
-    /// Nor may another variant hold it somewhere else: reading `base` by
-    /// position would then read the wrong field of a `B`.
-    ctor_record_update_refuses_a_field_at_another_position: (
+run_case! {
+    /// A field is found by its name, so it may sit in a different slot in
+    /// each variant: `a.x` is `b.x`, not whatever `B` holds first.
+    ctor_record_update_reads_fields_by_name: (
         "type S {\n\tA(x Int, y Int)\n\tB(y Int, x Int)\n}\n\
          pub fn main() {\n\
          \tb = B(y: 1, x: 2)\n\
          \ta = A(..b, y: 3)\n\
          \tprintln('${a}')\n\
+         \tprintln('${b.x} ${a.x}')\n\
          }\n",
-        "The spread cannot fill field 'x', which is not at the same position in every variant of 'S' (position 1 in 'B', expected 0)",
+        "A(2, 3)\n2 2\n",
+    ),
+}
+
+reject_case! {
+    /// By name, but still of one type: a `.x` that is an `Int` on one variant
+    /// and a `String` on another has no type to be.
+    field_access_refuses_a_field_whose_type_differs_by_variant: (
+        "type S {\n\tA(x Int)\n\tB(x String)\n}\n\
+         fn get(s S) Int { s.x }\n\
+         pub fn main() {\n\
+         \tprintln(get(A(1)))\n\
+         }\n",
+        "Type mismatch: expected 'Int', got 'String'",
     ),
 }
 

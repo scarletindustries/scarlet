@@ -636,8 +636,25 @@ run_case! {
         "3\n30\n300\n",
     ),
 
+    // A field in a different slot on each variant is read through a match on
+    // the variant, so each call reads the right one.
+    field_access_across_variants_finds_each_slot: (
+        "type S {\n\
+         \tA(v Int, w Int)\n\
+         \tB(w Int, v Int)\n\
+         \tC(pad Int, w Int, v Int)\n\
+         }\n\
+         fn diff(s S) Int { s.v - s.w }\n\
+         pub fn main() {\n\
+         \tprintln(diff(A(v: 10, w: 1)))\n\
+         \tprintln(diff(B(v: 20, w: 2)))\n\
+         \tprintln(diff(C(pad: 0, v: 30, w: 3)))\n\
+         }\n",
+        "9\n18\n27\n",
+    ),
+
     // A spread over a type with several variants fills only fields they all
-    // share, so it reads them by index whichever variant the base is.
+    // share, so it reads them by name whichever variant the base is.
     spread_across_variants_reads_shared_fields: (
         "type S {\n\
          \tA(v Int, w Int, a Int)\n\
