@@ -120,18 +120,20 @@ fn a_deep_recursion_uses_memory_not_the_rust_stack() {
 /// it stops the run, and the stop says what it needs.
 #[test]
 fn only_calling_an_unbuilt_function_stops_the_run() {
-    let src = "fn bytes() Binary { <<1>> }\n\
+    let src = "import scarlet/process\n\
+               fn me() process.Pid { process.self() }\n\
                pub fn main() {\n\
                \tprintln(1)\n\
                }\n";
     prints(src, "1\n");
-    let calls = "fn bytes() Binary { <<1>> }\n\
+    let calls = "import scarlet/process\n\
+                 fn me() process.Pid { process.self() }\n\
                  pub fn main() {\n\
-                 \t_ = bytes()\n\
+                 \t_ = me()\n\
                  }\n";
     assert_eq!(
         run(calls),
-        Err(Stop::NotBuiltYet("the operation BinaryFromInt".into()))
+        Err(Stop::NotBuiltYet("the built-in ProcessSelf".into()))
     );
 }
 
@@ -810,5 +812,56 @@ fn floats_are_never_nan_or_infinite() {
              100000000000000000000\n3.0\n2.0\n",
             max = f64::MAX
         ),
+    );
+}
+
+/// Binaries: literals of every segment kind, shown as the old VM showed
+/// them, taken apart by patterns, and the core of `scarlet/binary`.
+#[test]
+fn binaries_are_built_shown_and_matched() {
+    prints(
+        "import scarlet/binary\n\
+         fn describe(b Binary) String {\n\
+         \tmatch b {\n\
+         \t\t<<1, rest:binary>> -> 'one then ${rest}'\n\
+         \t\t<<n:size(16), _:binary>> -> 'a 16-bit ${n}'\n\
+         \t\t_ -> 'something else'\n\
+         \t}\n\
+         }\n\
+         fn first_char(b Binary) Int {\n\
+         \tmatch b {\n\
+         \t\t<<c:utf8, _:binary>> -> c\n\
+         \t\t_ -> -1\n\
+         \t}\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(<<1, 2, 3>>)\n\
+         \tprintln(<<>>)\n\
+         \tprintln(<<5:size(3)>>)\n\
+         \tprintln(<<255, 5:size(3)>>)\n\
+         \tprintln(<<-1:size(12)>>)\n\
+         \tprintln(<<'hi':utf8>>)\n\
+         \tprintln(<<1:size(4), 2:size(4)>>)\n\
+         \tprintln(describe(<<1, 7, 9>>))\n\
+         \tprintln(describe(<<2, 1>>))\n\
+         \tprintln(describe(<<2>>))\n\
+         \tprintln(first_char(<<'é':utf8>>))\n\
+         \tprintln(first_char(<<255>>))\n\
+         \tprintln(<<1, 2>> == <<1, 2>>)\n\
+         \tprintln(<<1, 2>> == <<1, 2, 0>>)\n\
+         \tprintln(binary.bit_size(<<1, 5:size(3)>>))\n\
+         \tprintln(binary.byte_size(<<1, 5:size(3)>>))\n\
+         \tprintln(binary.to_string(binary.from_string('héllo')))\n\
+         \tprintln(binary.to_string(<<255>>))\n\
+         \tprintln(binary.append(<<1>>, <<2, 3>>))\n\
+         \tprintln(binary.slice_bits(<<1, 2, 3>>, 8, 16))\n\
+         \tprintln(binary.slice_bits(<<1, 2, 3>>, 8, 17))\n\
+         \tprintln(binary.slice_bits(<<1, 2, 3>>, -1, 8))\n\
+         \tprintln(binary.slice_bytes(<<1, 2, 3>>, 1, 1) == Ok(<<2>>))\n\
+         \tprintln(binary.drop_bytes(<<1, 2, 3>>, 2))\n\
+         }\n",
+        "<<1, 2, 3>>\n<<>>\n<<5:size(3)>>\n<<255, 5:size(3)>>\n<<255, 15:size(4)>>\n<<104, 105>>\n<<18>>\n\
+         one then <<7, 9>>\na 16-bit 513\nsomething else\n233\n-1\nTrue\nFalse\n11\n2\n\
+         Ok(héllo)\nErr(Nil)\n<<1, 2, 3>>\nOk(<<2, 3>>)\nErr(Nil)\nErr(Nil)\nTrue\n<<3>>\n",
     );
 }

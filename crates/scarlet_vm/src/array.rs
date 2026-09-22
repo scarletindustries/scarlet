@@ -97,7 +97,9 @@ pub(crate) fn seq(heap: &Heap, cell: Cell) -> Option<Seq> {
         | Kind::Closure
         | Kind::Tuple
         | Kind::ArrayLeaf
-        | Kind::ArrayBranch => None,
+        | Kind::ArrayBranch
+        | Kind::Binary
+        | Kind::BinarySlice => None,
     }
 }
 
@@ -164,7 +166,9 @@ fn node(heap: &Heap, v: Value) -> Option<Node> {
         | Kind::Closure
         | Kind::Tuple
         | Kind::ArrayRoot
-        | Kind::Range => None,
+        | Kind::Range
+        | Kind::Binary
+        | Kind::BinarySlice => None,
     }
 }
 

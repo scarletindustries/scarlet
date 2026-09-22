@@ -125,7 +125,6 @@ run_case! {
     ),
 
     // `values_equal`'s Binary arm: compare structurally, byte for byte.
-    #[ignore = "needs the VM"]
     binary_value_equality: (
         "pub fn main() {\n\
          \tprintln(<<1, 2, 3>> == <<1, 2, 3>>)\n\

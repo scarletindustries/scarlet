@@ -388,7 +388,6 @@ fn stdlib_binary() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn stdlib_binary_runs() {
     run_outputs(
         "import scarlet/binary\n\
@@ -486,7 +485,6 @@ fn stdlib_binary_slice_units() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn stdlib_binary_slice_units_runs() {
     // Both units, over the same measured windows from T-208, side by side.
     run_outputs(
@@ -580,7 +578,6 @@ fn stdlib_binary_slice_units_runs() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn stdlib_binary_concat() {
     // Empty input is the identity of append; a first-element stub would
     // pass the singleton and fail the rest.

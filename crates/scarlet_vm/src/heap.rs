@@ -85,6 +85,11 @@ pub(crate) enum Kind {
     /// A range `start..end` of Ints: its two ends, as two's complement
     /// words. It holds no references.
     Range = 9,
+    /// A binary's bits, or a slice of another binary's
+    /// ([`crate::binary`]). A slice holds a reference to the binary it is a
+    /// slice of, in its first word.
+    Binary = 10,
+    BinarySlice = 11,
 }
 
 /// A heap that has run out of the cells a [`Cell`] can name. It is a limit of
@@ -239,6 +244,8 @@ impl Heap {
             7 => Some(Kind::ArrayLeaf),
             8 => Some(Kind::ArrayBranch),
             9 => Some(Kind::Range),
+            10 => Some(Kind::Binary),
+            11 => Some(Kind::BinarySlice),
             _ => None,
         }
     }
@@ -463,6 +470,8 @@ fn held(kind: u64, size: usize) -> std::ops::Range<usize> {
         3..size
     } else if k(Kind::ArrayBranch) {
         2 + size.saturating_sub(2) / 2..size
+    } else if k(Kind::BinarySlice) {
+        1..2
     } else {
         0..0
     }
