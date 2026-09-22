@@ -92,6 +92,14 @@ fn value<'t>(
             Some(Kind::Tuple) => tuple(heap, code, cell, layout, out, todo)?,
             Some(Kind::ArrayRoot) => array(heap, code, cell, layout, out, todo)?,
             Some(Kind::Range) => range(heap, cell, layout, out)?,
+            Some(Kind::Binary | Kind::BinarySlice) => match crate::binary::bits(heap, cell) {
+                Some(b) => out.extend_from_slice(crate::binary::text(heap, b).as_bytes()),
+                None => {
+                    return Err(Stop::BadProgram(
+                        "a binary cell that is not a binary".into(),
+                    ));
+                }
+            },
             Some(Kind::ArrayLeaf | Kind::ArrayBranch) => {
                 return Err(Stop::BadProgram(
                     "a piece of an array's tree held as a value".into(),
@@ -375,6 +383,10 @@ fn small(heap: &Heap, v: Value) -> bool {
         View::Cell(cell) => match heap.kind(cell) {
             Some(Kind::String) => heap.string_len(cell) < SMALL_STRING,
             Some(Kind::BigInt | Kind::Closure) => true,
+            // Up to 8 bytes, as the old VM had it.
+            Some(Kind::Binary | Kind::BinarySlice) => {
+                crate::binary::bits(heap, cell).is_some_and(|b| b.len.div_ceil(8) <= 8)
+            }
             Some(
                 Kind::Ctor
                 | Kind::Tuple

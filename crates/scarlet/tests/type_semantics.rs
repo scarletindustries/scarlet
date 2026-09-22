@@ -887,7 +887,6 @@ fn binary_string_literal_patterns() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn binary_string_literal_patterns_runs() {
     // A bare string-literal segment matches its UTF-8 bytes as a prefix
     // (Op::BinMatchPrefix); the rest binding is a zero-copy view.
@@ -1007,7 +1006,6 @@ fn binary_string_literal_patterns_runs() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn binary_literal_and_pattern_e2e() {
     // <<a, b>> pattern: scan→parse→compile→VM. 'A'=65, 'B'=66, sum=131.
     run_outputs(

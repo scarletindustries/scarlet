@@ -11,6 +11,7 @@
 //! first pair that differs.
 
 use crate::array::{self, Seq};
+use crate::binary;
 use crate::heap::{Cell, Heap, Kind};
 use crate::value::{Value, View};
 
@@ -55,6 +56,10 @@ fn cells(heap: &Heap, x: Cell, y: Cell, todo: &mut Vec<(Value, Value)>) -> bool 
     if let (Some(a), Some(b)) = (array::seq(heap, x), array::seq(heap, y)) {
         return arrays(heap, a, b, todo);
     }
+    // A slice equals a binary holding the same bits.
+    if let (Some(a), Some(b)) = (binary::bits(heap, x), binary::bits(heap, y)) {
+        return binary::equal(heap, a, b);
+    }
     let (Some(kx), Some(ky)) = (heap.kind(x), heap.kind(y)) else {
         return false;
     };
@@ -77,8 +82,14 @@ fn cells(heap: &Heap, x: Cell, y: Cell, todo: &mut Vec<(Value, Value)>) -> bool 
                 && queue(todo, captures(heap, x), captures(heap, y))
         }
         Kind::Tuple => queue(todo, heap.elements(x).collect(), heap.elements(y).collect()),
-        // Arrays were compared above; a tree's inner nodes are never values.
-        Kind::ArrayRoot | Kind::ArrayLeaf | Kind::ArrayBranch | Kind::Range => false,
+        // Arrays and binaries were compared above; a tree's inner nodes are
+        // never values.
+        Kind::ArrayRoot
+        | Kind::ArrayLeaf
+        | Kind::ArrayBranch
+        | Kind::Range
+        | Kind::Binary
+        | Kind::BinarySlice => false,
     }
 }
 

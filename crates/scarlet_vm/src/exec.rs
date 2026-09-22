@@ -20,7 +20,8 @@ use scarlet_ir::intrinsic::Intrinsic;
 use crate::Stop;
 use crate::array::{self, End, Seq};
 use crate::bigint::{self, Int};
-use crate::code::{Body, Code, Func, Instr, IntOp, Reg};
+use crate::binary::{self, Bits};
+use crate::code::{BitsOp, Body, Code, Func, Instr, IntOp, Reg};
 use crate::eq;
 use crate::float::{self, NumOp};
 use crate::heap::{Full, Heap, Kind};
@@ -115,6 +116,14 @@ impl<'c, 'o> Machine<'c, 'o> {
                 Instr::Str { dst, text } => {
                     let cell = self.heap.string(text).map_err(full)?;
                     self.set(base, *dst, Value::cell(cell));
+                }
+                Instr::BinaryConst { dst, bytes, len } => {
+                    let cell = binary::make(&mut self.heap, bytes, *len).map_err(full)?;
+                    self.set(base, *dst, Value::cell(cell));
+                }
+                Instr::Bits { dst, op, args } => {
+                    let v = self.bits_op(*op, base, args)?;
+                    self.set(base, *dst, v);
                 }
                 Instr::BigInt { dst, n } => {
                     let v = bigint::value(&mut self.heap, (*n).into()).map_err(full)?;
@@ -354,6 +363,21 @@ impl<'c, 'o> Machine<'c, 'o> {
                         frame.pc = *to as usize;
                     }
                 }
+                Instr::JumpUnlessBinary {
+                    src,
+                    bytes,
+                    len,
+                    to,
+                } => {
+                    let v = self.get(base, *src);
+                    let is = match v.as_cell().and_then(|c| binary::bits(&self.heap, c)) {
+                        Some(b) => b.len == *len && binary::bytes(&self.heap, b) == bytes.as_ref(),
+                        None => false,
+                    };
+                    if !is {
+                        frame.pc = *to as usize;
+                    }
+                }
                 Instr::Field { dst, src, index } => {
                     let field = match self.get(base, *src).as_cell() {
                         Some(cell) if self.heap.kind(cell) == Some(Kind::Ctor) => {
@@ -580,16 +604,61 @@ impl<'c, 'o> Machine<'c, 'o> {
     }
 
     /// What built-in `i` gives for the values in `args`, which it only reads.
-    /// The result holds its own reference.
+    /// The loader checked how many there are (`code::built`). The result
+    /// holds its own reference.
     fn builtin(&mut self, i: Intrinsic, base: usize, args: &[Reg]) -> Result<Value, Stop> {
-        let &[r] = args else {
-            return Err(Stop::BadProgram(format!(
-                "the built-in {i:?} called with {} arguments",
-                args.len()
-            )));
-        };
-        let v = self.get(base, r);
+        let arg = |m: &Self, k: usize| args.get(k).map_or(Value::NIL, |r| m.get(base, *r));
+        let v = arg(self, 0);
         match i {
+            Intrinsic::BinaryFromString => {
+                let text = self.text_of(v)?;
+                let cell = binary::make(&mut self.heap, &text, text.len() as u64 * 8);
+                Ok(Value::cell(cell.map_err(full)?))
+            }
+            Intrinsic::BinaryToString => {
+                let b = self.binary(v)?;
+                let text = binary::bytes(&self.heap, b);
+                match std::str::from_utf8(&text) {
+                    Ok(_) if b.len % 8 == 0 => {
+                        let s = Value::cell(self.heap.string(&text).map_err(full)?);
+                        self.ok(s)
+                    }
+                    _ => self.err_nil(),
+                }
+            }
+            Intrinsic::BinaryBitSize => {
+                let n = self.binary(v)?.len;
+                bigint::value(&mut self.heap, n.into()).map_err(full)
+            }
+            Intrinsic::BinaryByteSize => {
+                let n = self.binary(v)?.len.div_ceil(8);
+                bigint::value(&mut self.heap, n.into()).map_err(full)
+            }
+            Intrinsic::BinaryAppend => {
+                let (a, b) = (self.binary(v)?, self.binary(arg(self, 1))?);
+                let cell = binary::join(&mut self.heap, &[a, b]).map_err(full)?;
+                Ok(Value::cell(cell))
+            }
+            // A negative bound, or one past the end, is `Err(Nil)`, never a
+            // short read (`binary.scrl`).
+            Intrinsic::BinarySliceBits => {
+                let b = self.binary(v)?;
+                let (at, take) = (self.int_of(arg(self, 1))?, self.int_of(arg(self, 2))?);
+                let window = match (at, take) {
+                    (Int::Small(at), Int::Small(take)) if at >= 0 && take >= 0 => {
+                        let (at, take) = (at as u64, take as u64);
+                        (at + take <= b.len).then_some((at, take))
+                    }
+                    _ => None,
+                };
+                match window {
+                    Some((at, take)) => {
+                        let cut = binary::slice(&mut self.heap, b, at, take).map_err(full)?;
+                        self.ok(Value::cell(cut))
+                    }
+                    None => self.err_nil(),
+                }
+            }
             Intrinsic::StringInspect => {
                 let mut text = Vec::new();
                 self.show(v, &mut text)?;
@@ -652,6 +721,138 @@ impl<'c, 'o> Machine<'c, 'o> {
             }
             other => Err(Stop::NotBuiltYet(format!("the built-in {other:?}"))),
         }
+    }
+
+    /// A binary operation, with its arguments in the `PrimOp`'s order. A width
+    /// or position below zero counts as 0, and a segment wider than the binary
+    /// it takes from takes all of it, as in the old VM.
+    fn bits_op(&mut self, op: BitsOp, base: usize, args: &[Reg]) -> Result<Value, Stop> {
+        let arg = |m: &Self, k: usize| args.get(k).map_or(Value::NIL, |r| m.get(base, *r));
+        match op {
+            BitsOp::FromInt => {
+                let n = match self.int_of(arg(self, 0))? {
+                    Int::Small(n) => num_bigint::BigInt::from(n),
+                    Int::Big(n) => n,
+                };
+                let width = self.width(arg(self, 1))?;
+                if width > binary::MAX_BITS {
+                    return Err(Stop::HeapFull);
+                }
+                let bytes = binary::from_int(&n, width);
+                Ok(Value::cell(
+                    binary::make(&mut self.heap, &bytes, width).map_err(full)?,
+                ))
+            }
+            BitsOp::Take => {
+                let b = self.binary(arg(self, 0))?;
+                let take = self.width(arg(self, 1))?.min(b.len);
+                Ok(Value::cell(
+                    binary::slice(&mut self.heap, b, 0, take).map_err(full)?,
+                ))
+            }
+            BitsOp::FromString => {
+                let text = self.text_of(arg(self, 0))?;
+                let cell = binary::make(&mut self.heap, &text, text.len() as u64 * 8);
+                Ok(Value::cell(cell.map_err(full)?))
+            }
+            BitsOp::Concat => {
+                let parts = (0..args.len())
+                    .map(|k| self.binary(arg(self, k)))
+                    .collect::<Result<Vec<Bits>, Stop>>()?;
+                Ok(Value::cell(
+                    binary::join(&mut self.heap, &parts).map_err(full)?,
+                ))
+            }
+            BitsOp::BitSize => {
+                let n = self.binary(arg(self, 0))?.len;
+                bigint::value(&mut self.heap, n.into()).map_err(full)
+            }
+            BitsOp::View => {
+                let b = self.binary(arg(self, 0))?;
+                let (at, len) = (self.width(arg(self, 1))?, self.width(arg(self, 2))?);
+                if at.checked_add(len).is_none_or(|end| end > b.len) {
+                    return Err(Stop::BadProgram(format!(
+                        "a pattern read bits {at}..{at}+{len} of a binary {} long",
+                        b.len
+                    )));
+                }
+                Ok(Value::cell(
+                    binary::slice(&mut self.heap, b, at, len).map_err(full)?,
+                ))
+            }
+            BitsOp::MatchPrefix => {
+                let b = self.binary(arg(self, 0))?;
+                let at = self.width(arg(self, 1))?;
+                let prefix = self.binary(arg(self, 2))?;
+                Ok(Value::bool(binary::has_at(&self.heap, b, at, prefix)))
+            }
+            BitsOp::ReadUtf8 => {
+                let b = self.binary(arg(self, 0))?;
+                let at = self.width(arg(self, 1))?;
+                let (cp, took) = binary::read_utf8(&self.heap, b, at).unwrap_or((0, 0));
+                let (cp, took) = (i64::from(cp), took as i64);
+                let pair = [Value::int(cp), Value::int(took)];
+                let [Some(cp), Some(took)] = pair else {
+                    return Err(Stop::BadProgram("a code point past a small Int".into()));
+                };
+                Ok(Value::cell(self.heap.tuple(&[cp, took]).map_err(full)?))
+            }
+            BitsOp::ReadInt => {
+                let b = self.binary(arg(self, 0))?;
+                let (at, width) = (self.width(arg(self, 1))?, self.width(arg(self, 2))?);
+                if at.checked_add(width).is_none_or(|end| end > b.len) {
+                    return Err(Stop::BadProgram(format!(
+                        "a pattern read bits {at}..{at}+{width} of a binary {} long",
+                        b.len
+                    )));
+                }
+                let n = binary::read_uint(&self.heap, b, at, width);
+                bigint::value(&mut self.heap, n).map_err(full)
+            }
+        }
+    }
+
+    /// The binary `v` holds.
+    fn binary(&self, v: Value) -> Result<Bits, Stop> {
+        v.as_cell()
+            .and_then(|cell| binary::bits(&self.heap, cell))
+            .ok_or_else(|| Stop::BadProgram(format!("a binary operation on {v:?}")))
+    }
+
+    /// The Int `v` as a width or position in bits: 0 below zero, as in the
+    /// old VM, and past any binary when it does not fit 64 bits.
+    fn width(&self, v: Value) -> Result<u64, Stop> {
+        Ok(match self.int_of(v)? {
+            Int::Small(n) => u64::try_from(n).unwrap_or(0),
+            Int::Big(n) if n.sign() == num_bigint::Sign::Minus => 0,
+            Int::Big(_) => u64::MAX,
+        })
+    }
+
+    /// The bytes of the string `v`.
+    fn text_of(&self, v: Value) -> Result<Vec<u8>, Stop> {
+        match v.as_cell() {
+            Some(cell) if self.is_string(v) => {
+                let mut text = Vec::with_capacity(self.heap.string_len(cell));
+                self.heap.read_string(cell, &mut text);
+                Ok(text)
+            }
+            _ => Err(Stop::BadProgram(format!("a string operation on {v:?}"))),
+        }
+    }
+
+    /// `Ok(v)`, holding `v`'s reference.
+    fn ok(&mut self, v: Value) -> Result<Value, Stop> {
+        let cell = self.heap.ctor(self.code.abi.ok, &[v]).map_err(full)?;
+        Ok(Value::cell(cell))
+    }
+
+    fn err_nil(&mut self) -> Result<Value, Stop> {
+        let cell = self
+            .heap
+            .ctor(self.code.abi.err, &[Value::NIL])
+            .map_err(full)?;
+        Ok(Value::cell(cell))
     }
 
     /// The array `v` holds: a tree or a range.
@@ -1216,6 +1417,33 @@ mod tests {
              }\n",
         );
         assert_eq!(out, "1001\n1007\nOk(\n  [0, 1, 2]\n)\n1000\n");
+        assert_eq!(left, 0);
+    }
+
+    /// A slice of a binary holds its owner, so the owner lives as long as any
+    /// slice of it, and no longer: a binary walked a byte at a time by a
+    /// pattern, slices of slices and all, leaves nothing behind.
+    #[test]
+    fn binaries_and_their_slices_are_all_freed() {
+        let (out, left) = cells_left_after(
+            "import scarlet/binary\n\
+             fn count(b Binary, n Int) Int {\n\
+             \tmatch b {\n\
+             \t\t<<_, rest:binary>> -> count(rest, n + 1)\n\
+             \t\t_ -> n\n\
+             \t}\n\
+             }\n\
+             fn grow(n Int, acc Binary) Binary {\n\
+             \tif n == 0 { acc } else { grow(n - 1, <<acc:binary, n:size(8)>>) }\n\
+             }\n\
+             pub fn main() {\n\
+             \tb = grow(1000, <<>>)\n\
+             \tprintln(count(b, 0))\n\
+             \tkept = binary.slice_bits(b, 8, 16)\n\
+             \tprintln(kept)\n\
+             }\n",
+        );
+        assert_eq!(out, "1000\nOk(<<231, 230>>)\n");
         assert_eq!(left, 0);
     }
 

@@ -56,6 +56,19 @@ pub(crate) enum Instr {
         dst: Reg,
         text: Box<[u8]>,
     },
+    /// A new binary holding the first `len` bits of `bytes`. Made each time
+    /// it runs, like [`Instr::Str`].
+    BinaryConst {
+        dst: Reg,
+        bytes: Box<[u8]>,
+        len: u64,
+    },
+    /// A binary operation ([`BitsOp`]) on `args`.
+    Bits {
+        dst: Reg,
+        op: BitsOp,
+        args: Box<[Reg]>,
+    },
     /// A new big int holding `n`, for a constant past a small Int's range.
     /// Made each time it runs, like [`Instr::Str`].
     BigInt {
@@ -208,6 +221,14 @@ pub(crate) enum Instr {
         text: Box<[u8]>,
         to: u32,
     },
+    /// Continue at `to` unless `src` is the binary of the first `len` bits of
+    /// `bytes`.
+    JumpUnlessBinary {
+        src: Reg,
+        bytes: Box<[u8]>,
+        len: u64,
+        to: u32,
+    },
     /// A new tuple holding `elements`.
     Tuple {
         dst: Reg,
@@ -334,9 +355,12 @@ impl Instr {
             | Instr::JumpIfFalse { to, .. }
             | Instr::JumpUnlessVariant { to, .. }
             | Instr::JumpUnlessInt { to, .. }
-            | Instr::JumpUnlessStr { to, .. } => Some(to),
+            | Instr::JumpUnlessStr { to, .. }
+            | Instr::JumpUnlessBinary { to, .. } => Some(to),
             Instr::Const { .. }
             | Instr::Str { .. }
+            | Instr::BinaryConst { .. }
+            | Instr::Bits { .. }
             | Instr::BigInt { .. }
             | Instr::Move { .. }
             | Instr::GetGlobal { .. }
@@ -398,6 +422,29 @@ enum Dest {
 /// A jump target not placed yet. Every jump to it is patched when it is.
 #[derive(Clone, Copy)]
 struct Label(usize);
+
+/// A binary operation, one per Core IR binary `PrimOp`, with its arguments
+/// in the `PrimOp`'s order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BitsOp {
+    /// `<<v:size(b)>>` of an Int: its low `b` bits.
+    FromInt,
+    /// `<<v:size(b)>>` of a binary: its first `b` bits.
+    Take,
+    /// `<<s:utf8>>`: a string's bytes.
+    FromString,
+    /// A literal's segments, joined.
+    Concat,
+    BitSize,
+    /// `len` bits from bit `at`, shared, for a pattern.
+    View,
+    /// Whether the binary holds a prefix at bit `at`, for a pattern.
+    MatchPrefix,
+    /// The code point at bit `at` and how many bits it took, for a pattern.
+    ReadUtf8,
+    /// `width` bits from bit `at` as an unsigned Int, for a pattern.
+    ReadInt,
+}
 
 /// A two-operand Int operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -715,7 +762,15 @@ impl<'c> Loader<'c> {
                     self.jump(next, |to| Instr::JumpUnlessStr { src, text, to });
                 }
                 Some(Const::Float(_)) => return Err("matching a Float".into()),
-                Some(Const::Binary { .. }) => return Err("matching a Binary".into()),
+                Some(Const::Binary { bytes, bit_len }) => {
+                    let (bytes, len): (Box<[u8]>, u64) = (bytes.as_slice().into(), *bit_len);
+                    self.jump(next, |to| Instr::JumpUnlessBinary {
+                        src,
+                        bytes,
+                        len,
+                        to,
+                    });
+                }
                 None => {
                     return Err(format!(
                         "constant c{}, which the program does not have",
@@ -739,6 +794,11 @@ impl<'c> Loader<'c> {
                     text: text.as_bytes().into(),
                 },
                 Some(Const::Int(n)) if Value::int(*n).is_none() => Instr::BigInt { dst, n: *n },
+                Some(Const::Binary { bytes, bit_len }) => Instr::BinaryConst {
+                    dst,
+                    bytes: bytes.as_slice().into(),
+                    len: *bit_len,
+                },
                 _ => Instr::Const {
                     dst,
                     value: self.constant(c.index())?,
@@ -826,6 +886,16 @@ impl<'c> Loader<'c> {
                 }),
                 _ => Err(format!("{op:?} with other than two arguments")),
             }
+        };
+        let bits = |op, argc| -> Result<Instr, String> {
+            if args.len() != argc {
+                return Err(format!("{op:?} with other than {argc} arguments"));
+            }
+            Ok(Instr::Bits {
+                dst,
+                op,
+                args: args.iter().copied().map(Reg::of).collect(),
+            })
         };
         // A Float operation (`float`), or one on either kind of number.
         let two = |op, float| -> Result<Instr, String> {
@@ -917,6 +987,19 @@ impl<'c> Loader<'c> {
                 }),
                 _ => Err("Not with other than one argument".into()),
             },
+            PrimOp::BinaryFromInt => bits(BitsOp::FromInt, 2),
+            PrimOp::BinaryTake => bits(BitsOp::Take, 2),
+            PrimOp::BinaryFromString => bits(BitsOp::FromString, 1),
+            PrimOp::BinaryConcatMany => Ok(Instr::Bits {
+                dst,
+                op: BitsOp::Concat,
+                args: args.iter().copied().map(Reg::of).collect(),
+            }),
+            PrimOp::BinaryBitSize => bits(BitsOp::BitSize, 1),
+            PrimOp::BinaryView => bits(BitsOp::View, 3),
+            PrimOp::BinaryMatchPrefix => bits(BitsOp::MatchPrefix, 3),
+            PrimOp::BinaryReadUtf8 => bits(BitsOp::ReadUtf8, 2),
+            PrimOp::BinaryReadInt => bits(BitsOp::ReadInt, 3),
             PrimOp::MakeRange => match args {
                 [start, end] => Ok(Instr::Range {
                     dst,
@@ -1033,7 +1116,7 @@ impl<'c> Loader<'c> {
             }
             Some(Const::Float(f)) => Ok(Value::float(*f)),
             Some(Const::String(_)) => Err("String".into()),
-            Some(Const::Binary { .. }) => Err("Binary".into()),
+            Some(Const::Binary { .. }) => Err("a Binary as a plain value".into()),
             None => Err(format!("constant c{i}, which the program does not have")),
         }
     }
@@ -1042,7 +1125,7 @@ impl<'c> Loader<'c> {
 /// Whether the VM runs built-in `i` when called with `argc` arguments. A
 /// function calling any other still loads, and stops only when it runs.
 fn built(i: Intrinsic, argc: usize) -> bool {
-    match i {
+    let arity = match i {
         Intrinsic::StringInspect
         | Intrinsic::StringLength
         | Intrinsic::ArrayLength
@@ -1052,9 +1135,16 @@ fn built(i: Intrinsic, argc: usize) -> bool {
         | Intrinsic::FloatRound
         | Intrinsic::FloatTruncate
         | Intrinsic::FloatFromInt
-        | Intrinsic::FloatToString => argc == 1,
-        _ => false,
-    }
+        | Intrinsic::FloatToString
+        | Intrinsic::BinaryFromString
+        | Intrinsic::BinaryToString
+        | Intrinsic::BinaryBitSize
+        | Intrinsic::BinaryByteSize => 1,
+        Intrinsic::BinaryAppend => 2,
+        Intrinsic::BinarySliceBits => 3,
+        _ => return false,
+    };
+    argc == arity
 }
 
 /// One past the highest local `e` binds or reads.
