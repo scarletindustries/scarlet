@@ -25,7 +25,9 @@ mod code;
 mod eq;
 mod exec;
 mod float;
+mod hash;
 mod heap;
+mod map;
 mod show;
 mod value;
 

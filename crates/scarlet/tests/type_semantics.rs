@@ -1219,7 +1219,6 @@ fn field_access_through_a_module_fn_inferred_scrutinee() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn field_access_through_a_module_fn_inferred_scrutinee_runs() {
     run_outputs(
         FIELD_ACCESS_THROUGH_A_MODULE_FN_INFERRED_SCRUTINEE_SRC,

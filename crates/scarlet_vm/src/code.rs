@@ -1125,6 +1125,10 @@ impl<'c> Loader<'c> {
 /// function calling any other still loads, and stops only when it runs.
 fn built(i: Intrinsic, argc: usize) -> bool {
     let arity = match i {
+        Intrinsic::MapNew => 0,
+        Intrinsic::MapKeys | Intrinsic::MapValues | Intrinsic::MapSize | Intrinsic::MapToList => 1,
+        Intrinsic::MapGet | Intrinsic::MapHas | Intrinsic::MapDelete => 2,
+        Intrinsic::MapSet => 3,
         Intrinsic::StringInspect
         | Intrinsic::StringLength
         | Intrinsic::ArrayLength

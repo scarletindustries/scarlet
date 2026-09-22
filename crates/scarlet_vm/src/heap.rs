@@ -90,6 +90,12 @@ pub(crate) enum Kind {
     /// slice of, in its first word.
     Binary = 10,
     BinarySlice = 11,
+    /// A map's root, one of its nodes, or a list of keys whose whole hashes
+    /// are equal. [`crate::map`] has their layout. Each holds references in
+    /// every word after its first.
+    Map = 12,
+    MapNode = 13,
+    MapCollision = 14,
 }
 
 /// A heap that has run out of the cells a [`Cell`] can name. It is a limit of
@@ -246,6 +252,9 @@ impl Heap {
             9 => Some(Kind::Range),
             10 => Some(Kind::Binary),
             11 => Some(Kind::BinarySlice),
+            12 => Some(Kind::Map),
+            13 => Some(Kind::MapNode),
+            14 => Some(Kind::MapCollision),
             _ => None,
         }
     }
@@ -459,10 +468,16 @@ fn kind_bits(h: u64) -> u64 {
 /// The words of a cell of this kind and size that hold a value, and so a
 /// reference: after a constructor's or closure's tag word, all of a tuple or
 /// an array leaf, an array root's three parts (after its length and height),
-/// and an array branch's children (after its height and size table).
+/// an array branch's children (after its height and size table), and a map
+/// cell's every word after its first.
 fn held(kind: u64, size: usize) -> std::ops::Range<usize> {
     let k = |want: Kind| kind == want as u64;
-    if k(Kind::Ctor) || k(Kind::Closure) {
+    if k(Kind::Ctor)
+        || k(Kind::Closure)
+        || k(Kind::Map)
+        || k(Kind::MapNode)
+        || k(Kind::MapCollision)
+    {
         2..size
     } else if k(Kind::Tuple) || k(Kind::ArrayLeaf) {
         1..size

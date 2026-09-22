@@ -960,3 +960,86 @@ fn bitwise_operations_are_any_size() {
         "8\n14\n6\n-1\n-6\n255\n18446744073709551616\n1\n-4\n-4\n0\n-1\n8\n5\n2\n268435455\nTrue\nTrue\n",
     );
 }
+
+#[test]
+fn the_map_built_ins_run() {
+    prints(
+        "import scarlet/map\n\
+         pub fn main() {\n\
+         \tm = map.set(map.set(map.new(), 'a', 1), 'b', 2)\n\
+         \tprintln(map.get(m, 'a'))\n\
+         \tprintln(map.get(m, 'z'))\n\
+         \tprintln(map.has(m, 'b'))\n\
+         \tprintln(map.size(m))\n\
+         \tn = map.set(m, 'a', 10)\n\
+         \tprintln('${map.get(n, 'a')} ${map.get(m, 'a')} ${map.size(n)}')\n\
+         \tgone = map.delete(m, 'a')\n\
+         \tprintln('${map.has(gone, 'a')} ${map.has(m, 'a')} ${map.size(gone)}')\n\
+         \tprintln(map.size(map.delete(m, 'nope')))\n\
+         \tprintln(gone)\n\
+         \tprintln(map.keys(gone))\n\
+         \tprintln(map.values(gone))\n\
+         \tprintln(map.to_list(gone))\n\
+         \tprintln(map.new())\n\
+         \tprintln(map.delete(gone, 'b'))\n\
+         }\n",
+        "Some(1)\nNone\nTrue\n2\nSome(10) Some(1) 2\nFalse True 1\n2\n{b: 2}\n[b]\n[2]\n[\n  (b, 2)\n]\n{}\n{}\n",
+    );
+}
+
+/// A map's order depends on its entries alone, so two maps that are `==`
+/// list them the same, however they were built.
+#[test]
+fn equal_maps_are_in_the_same_order() {
+    prints(
+        "import scarlet/map\n\
+         import scarlet/array\n\
+         fn fill(m map.Map(Int, Int), from Int, to Int, step Int) map.Map(Int, Int) {\n\
+         \tif from == to { m } else { fill(map.set(m, from, from * 2), from + step, to, step) }\n\
+         }\n\
+         pub fn main() {\n\
+         \tup = fill(map.new(), 0, 500, 1)\n\
+         \tdown = fill(map.new(), 499, -1, -1)\n\
+         \tprintln(up == down)\n\
+         \tprintln(map.keys(up) == map.keys(down))\n\
+         \tprintln('${up}' == '${down}')\n\
+         \tfewer = map.delete(map.set(down, 1000, 0), 1000)\n\
+         \tprintln(fewer == up)\n\
+         \tprintln(map.to_list(fewer) == map.to_list(up))\n\
+         \tprintln(up == map.set(up, 7, 0))\n\
+         \tprintln(up == map.delete(up, 7))\n\
+         \tprintln(array.length(map.keys(up)))\n\
+         }\n",
+        "True\nTrue\nTrue\nTrue\nTrue\nFalse\nFalse\n500\n",
+    );
+}
+
+/// A key is found by any value `==` to it, however that value was made.
+#[test]
+fn a_key_is_found_by_any_equal_value() {
+    prints(
+        "import scarlet/map\n\
+         import scarlet/binary\n\
+         import scarlet/int\n\
+         type P { P(x Int, y String) }\n\
+         fn one(key k, look k) Option(String) { map.get(map.set(map.new(), key, 'found'), look) }\n\
+         pub fn main() {\n\
+         \tprintln(one(0..3, [0, 1, 2]))\n\
+         \tprintln(one(0.0, -0.0))\n\
+         \tprintln(match binary.slice_bits(<<1, 2, 3>>, 8, 16) {\n\
+         \t\tOk(b) -> one(<<2, 3>>, b)\n\
+         \t\tErr(Nil) -> None\n\
+         \t})\n\
+         \tprintln(one(int.bitwise_shift_left(1, 100), int.bitwise_shift_left(2, 99)))\n\
+         \tprintln(one((1, 'a'), (1, 'a')))\n\
+         \tprintln(one(P(1, 'p'), P(1, 'p')))\n\
+         \tprintln(one('abc', 'ab${'c'}'))\n\
+         \tinner = map.set(map.set(map.new(), 1, 'one'), 2, 'two')\n\
+         \tprintln(one(inner, map.set(map.set(map.new(), 2, 'two'), 1, 'one')))\n\
+         \tprintln(one(0..3, [0, 1]))\n\
+         \tprintln(one(P(1, 'p'), P(1, 'q')))\n\
+         \tprintln(one(inner, map.delete(inner, 1)))\n\
+         }\n",
+        "Some(found)\nSome(found)\nSome(found)\nSome(found)\nSome(found)\nSome(found)\nSome(found)\nSome(found)\nNone\nNone\nNone\n",
+    );
+}

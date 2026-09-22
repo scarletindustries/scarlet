@@ -191,7 +191,6 @@ suite! {
         #[ignore = "needs the VM"]
         errors,
         // Stdlib surface.
-        #[ignore = "needs the VM"]
         collections,
         strings,
         #[ignore = "needs the VM"]
@@ -218,7 +217,6 @@ suite! {
         // Algorithms, then the capstone: a lexer, parser and evaluator built
         // only from what the examples above teach. Read last.
         life,
-        #[ignore = "needs the VM"]
         interpreter,
         // Benchmarks scripts/bench*.sh also drives. Deterministic, so goldened
         // like any other example.
@@ -237,7 +235,6 @@ suite! {
         // Pattern matching, equality, and the shapes values come in.
         #[ignore = "needs the VM"]
         exhaustive_match,
-        #[ignore = "needs the VM"]
         tuples_and_records,
         #[ignore = "needs the VM"]
         enum_equality,

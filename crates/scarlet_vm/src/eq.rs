@@ -4,7 +4,8 @@
 //! Two values are equal when they hold the same thing: the same number,
 //! string, Bool or `Nil`; the same constructor with equal fields; tuples or
 //! arrays with equal elements, in order; the same function over equal
-//! captures. A range is an array of its Ints, so `0..3 == [0, 1, 2]`.
+//! captures; maps with the same keys, each bound to equal values. A range is
+//! an array of its Ints, so `0..3 == [0, 1, 2]`.
 //!
 //! The walk is a list of pairs still to compare rather than recursion, so two
 //! lists a million long compare without overflowing the stack. It stops at the
@@ -13,11 +14,17 @@
 use crate::array::{self, Seq};
 use crate::binary;
 use crate::heap::{Cell, Heap, Kind};
+use crate::map;
 use crate::value::{Value, View};
 
 /// Whether `a == b`.
 pub(crate) fn equal(heap: &Heap, a: Value, b: Value) -> bool {
-    let mut todo = vec![(a, b)];
+    // Empty until a pair holds other values, so comparing two that hold none,
+    // like two Ints or two strings, does not allocate.
+    let mut todo = Vec::new();
+    if !pair(heap, a, b, &mut todo) {
+        return false;
+    }
     while let Some((a, b)) = todo.pop() {
         if !pair(heap, a, b, &mut todo) {
             return false;
@@ -82,6 +89,13 @@ fn cells(heap: &Heap, x: Cell, y: Cell, todo: &mut Vec<(Value, Value)>) -> bool 
                 && queue(todo, captures(heap, x), captures(heap, y))
         }
         Kind::Tuple => queue(todo, heap.elements(x).collect(), heap.elements(y).collect()),
+        Kind::Map | Kind::MapNode | Kind::MapCollision => match map::equal_parts(heap, x, y) {
+            Some(pairs) => {
+                todo.extend(pairs.into_iter().rev());
+                true
+            }
+            None => false,
+        },
         // Arrays and binaries were compared above; a tree's inner nodes are
         // never values.
         Kind::ArrayRoot

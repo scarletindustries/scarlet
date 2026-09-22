@@ -79,6 +79,12 @@ When every variant holds `x` in the same slot, `s.x` is one read. When they don'
 
 The old compiler accepted any spread whose base had the same type, and the old VM read the fields by position, so `Circle(..square, r: 1)` could fill a Circle's `x` with the Square's `side`. And `s.x` was refused when the variants held `x` in different slots.
 
+## Maps
+
+**Built: a map's order depends only on what it holds.** `map.keys`, `map.values`, `map.to_list`, `map.fold` and printing list the entries of two maps that are `==` in the same order, however each was built, and in the same order on every run and every machine. The order follows the keys' hashes, so it looks shuffled, and no particular order is promised. The one exception is keys whose whole 64-bit hashes are equal, which a map keeps in the order they went in.
+
+**Built:** any value can be a key, and a key is found by any value `==` to it: `0..3` finds `[0, 1, 2]`, and a map finds an equal map built in another order.
+
 ## Memory
 
 **Decided: reference counting, with Perceus.** There is no tracing garbage collector.

@@ -100,9 +100,10 @@ fn value<'t>(
                     ));
                 }
             },
-            Some(Kind::ArrayLeaf | Kind::ArrayBranch) => {
+            Some(Kind::Map) => map(heap, cell, todo),
+            Some(Kind::ArrayLeaf | Kind::ArrayBranch | Kind::MapNode | Kind::MapCollision) => {
                 return Err(Stop::BadProgram(
-                    "a piece of an array's tree held as a value".into(),
+                    "a piece of an array's or a map's tree held as a value".into(),
                 ));
             }
             None => return Err(Stop::NotBuiltYet("printing this value".into())),
@@ -111,6 +112,25 @@ fn value<'t>(
         View::Float(f) => out.extend_from_slice(crate::float::text(f).as_bytes()),
     }
     Ok(())
+}
+
+/// A map shows as `{k: v, k: v}`, in the map's order, all on one line, as
+/// the old VM showed it.
+fn map(heap: &Heap, cell: Cell, todo: &mut Vec<Piece<'_>>) {
+    todo.push(Piece::Text("}"));
+    for (i, (k, v)) in crate::map::entries(heap, cell)
+        .into_iter()
+        .enumerate()
+        .rev()
+    {
+        todo.push(Piece::Value(v, Layout::Flat));
+        todo.push(Piece::Text(": "));
+        todo.push(Piece::Value(k, Layout::Flat));
+        if i > 0 {
+            todo.push(Piece::Text(", "));
+        }
+    }
+    todo.push(Piece::Text("{"));
 }
 
 /// A function shows as its name, `<fn#serve>`, whatever it captured.
@@ -393,7 +413,10 @@ fn small(heap: &Heap, v: Value) -> bool {
                 | Kind::ArrayRoot
                 | Kind::ArrayLeaf
                 | Kind::ArrayBranch
-                | Kind::Range,
+                | Kind::Range
+                | Kind::Map
+                | Kind::MapNode
+                | Kind::MapCollision,
             )
             | None => false,
         },

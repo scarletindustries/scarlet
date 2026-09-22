@@ -25,7 +25,8 @@ use crate::binary::{self, Bits};
 use crate::code::{BitsOp, Body, Code, Func, Instr, IntOp, Reg};
 use crate::eq;
 use crate::float::{self, NumOp};
-use crate::heap::{Full, Heap, Kind};
+use crate::heap::{Cell, Full, Heap, Kind};
+use crate::map;
 use crate::show;
 use crate::value::{Value, View};
 
@@ -836,6 +837,54 @@ impl<'c, 'o> Machine<'c, 'o> {
                 let n = self.seq(v)?.len(&self.heap);
                 bigint::value(&mut self.heap, n.into()).map_err(full)
             }
+            Intrinsic::MapNew => Ok(Value::cell(map::empty(&mut self.heap).map_err(full)?)),
+            Intrinsic::MapSet => {
+                let m = self.map(v)?;
+                let (key, value) = (arg(self, 1), arg(self, 2));
+                let cell = map::set(&mut self.heap, m, key, value).map_err(full)?;
+                Ok(Value::cell(cell))
+            }
+            Intrinsic::MapDelete => {
+                let (m, key) = (self.map(v)?, arg(self, 1));
+                let cell = map::delete(&mut self.heap, m, key).map_err(full)?;
+                Ok(Value::cell(cell))
+            }
+            Intrinsic::MapGet => {
+                let m = self.map(v)?;
+                match map::get(&self.heap, m, arg(self, 1)) {
+                    Some(found) => {
+                        let found = self.share(found);
+                        self.some(found)
+                    }
+                    None => Ok(Value::nullary(self.code.abi.none)),
+                }
+            }
+            Intrinsic::MapHas => {
+                let m = self.map(v)?;
+                Ok(Value::bool(map::get(&self.heap, m, arg(self, 1)).is_some()))
+            }
+            Intrinsic::MapSize => {
+                let n = map::size(&self.heap, self.map(v)?);
+                bigint::value(&mut self.heap, n.into()).map_err(full)
+            }
+            Intrinsic::MapKeys | Intrinsic::MapValues | Intrinsic::MapToList => {
+                let entries = map::entries(&self.heap, self.map(v)?);
+                let mut items = Vec::with_capacity(entries.len());
+                for (k, v) in entries {
+                    let item = match i {
+                        Intrinsic::MapKeys => self.share(k),
+                        Intrinsic::MapValues => self.share(v),
+                        _ => {
+                            let pair = [self.share(k), self.share(v)];
+                            Value::cell(self.heap.tuple(&pair).map_err(full)?)
+                        }
+                    };
+                    items.push(item);
+                }
+                Ok(Value::cell(
+                    array::from_values(&mut self.heap, &items).map_err(full)?,
+                ))
+            }
             Intrinsic::FloatFloor
             | Intrinsic::FloatCeil
             | Intrinsic::FloatRound
@@ -1039,6 +1088,15 @@ impl<'c, 'o> Machine<'c, 'o> {
             .ctor(self.code.abi.err, &[Value::NIL])
             .map_err(full)?;
         Ok(Value::cell(cell))
+    }
+
+    /// The map `v` is.
+    fn map(&self, v: Value) -> Result<Cell, Stop> {
+        v.as_cell()
+            .filter(|&cell| self.heap.kind(cell) == Some(Kind::Map))
+            .ok_or_else(|| {
+                Stop::BadProgram(format!("a map operation on {v:?}, which is not a map"))
+            })
     }
 
     /// The array `v` holds: a tree or a range.
@@ -1682,6 +1740,36 @@ mod tests {
              }\n",
         );
         assert_eq!(out, "hi\nhi\n");
+        assert_eq!(left, 0);
+    }
+
+    /// Every version of a map shares nodes with the one it came from, and
+    /// what a lookup or a listing hands out holds its own references. When
+    /// the run ends, all of it is freed.
+    #[test]
+    fn maps_and_what_they_hold_are_all_freed() {
+        let (out, left) = cells_left_after(
+            "import scarlet/map\n\
+             fn fill(m map.Map(String, String), n Int) map.Map(String, String) {\n\
+             \tif n == 0 { m } else { fill(map.set(m, 'k${n}', 'v${n}'), n - 1) }\n\
+             }\n\
+             fn drain(m map.Map(String, String), n Int) map.Map(String, String) {\n\
+             \tif n == 0 { m } else { drain(map.delete(m, 'k${n}'), n - 2) }\n\
+             }\n\
+             pub fn main() {\n\
+             \tfull = fill(map.new(), 400)\n\
+             \thalf = drain(full, 400)\n\
+             \tprintln('${map.size(full)} ${map.size(half)}')\n\
+             \tprintln(map.get(half, 'k7'))\n\
+             \tprintln(map.get(half, 'k8'))\n\
+             \t_keys = map.keys(half)\n\
+             \t_pairs = map.to_list(map.set(half, 'k7', 'again'))\n\
+             \tprintln(full == half)\n\
+             \tnested = map.set(map.new(), half, [full])\n\
+             \tprintln(map.has(nested, drain(full, 400)))\n\
+             }\n",
+        );
+        assert_eq!(out, "400 200\nSome(v7)\nNone\nFalse\nTrue\n");
         assert_eq!(left, 0);
     }
 
