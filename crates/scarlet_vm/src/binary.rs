@@ -129,6 +129,17 @@ pub(crate) fn bytes(heap: &Heap, b: Bits) -> Vec<u8> {
         .collect()
 }
 
+/// `b`'s whole bytes: a last byte that is not whole is left out, as the
+/// ASCII built-ins read it.
+pub(crate) fn whole_bytes(heap: &Heap, b: Bits) -> Vec<u8> {
+    (0..b.len / 8).map(|k| byte(heap, b, k * 8)).collect()
+}
+
+/// Whole byte `i` of `b`, or `None` past the last whole one.
+pub(crate) fn whole_byte(heap: &Heap, b: Bits, i: u64) -> Option<u8> {
+    (i < b.len / 8).then(|| byte(heap, b, i * 8))
+}
+
 /// Whether `a` and `b` hold the same bits.
 pub(crate) fn equal(heap: &Heap, a: Bits, b: Bits) -> bool {
     a.len == b.len && (0..a.len.div_ceil(8)).all(|k| byte(heap, a, k * 8) == byte(heap, b, k * 8))

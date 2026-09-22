@@ -1140,8 +1140,13 @@ fn built(i: Intrinsic, argc: usize) -> bool {
         | Intrinsic::BinaryToString
         | Intrinsic::BinaryBitSize
         | Intrinsic::BinaryByteSize => 1,
-        Intrinsic::BinaryAppend => 2,
-        Intrinsic::BinarySliceBits => 3,
+        Intrinsic::BinaryToAsciiLower => 1,
+        Intrinsic::BinaryAppend
+        | Intrinsic::BinaryByteAt
+        | Intrinsic::BinaryParseInt
+        | Intrinsic::BinaryEqIgnoreAsciiCase
+        | Intrinsic::BinaryFromIntAscii => 2,
+        Intrinsic::BinarySliceBits | Intrinsic::BinaryIndexOf => 3,
         _ => return false,
     };
     argc == arity

@@ -121,9 +121,11 @@ pub type Radix {
 @vm(binary__parse_int)
 fn parse_int_raw(b Binary, radix Radix) Option(Int)
 
-// Parse an ASCII integer in `radix`. A non-digit byte, empty input, or a
-// value that overflows Int is an `Err(Nil)` — a parse is a fallible
-// operation, so it returns Result per the stdlib convention.
+// Parse an ASCII integer in `radix`: digits only, with no sign. A non-digit
+// byte or empty input is an `Err(Nil)` — a parse is a fallible operation, so
+// it returns Result per the stdlib convention. An Int has no bounds, so no
+// number of digits is too many; a caller that wants a limit, like a
+// Content-Length, checks the Int it gets.
 pub fn parse_int(b Binary, radix Radix) Result(Int, Nil) {
 	match parse_int_raw(b, radix) {
 		Some(n) -> Ok(n)

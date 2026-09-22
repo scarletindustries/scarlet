@@ -639,6 +639,88 @@ impl<'c, 'o> Machine<'c, 'o> {
                 let cell = binary::join(&mut self.heap, &[a, b]).map_err(full)?;
                 Ok(Value::cell(cell))
             }
+            // The ASCII built-ins read whole bytes only, as the old VM's did:
+            // a last byte that is not whole is left out.
+            Intrinsic::BinaryByteAt => {
+                let b = self.binary(v)?;
+                let found = match self.int_of(arg(self, 1))? {
+                    Int::Small(i) => u64::try_from(i)
+                        .ok()
+                        .and_then(|i| binary::whole_byte(&self.heap, b, i)),
+                    Int::Big(_) => None,
+                };
+                let n = found.map_or(-1, i64::from);
+                bigint::value(&mut self.heap, n.into()).map_err(full)
+            }
+            // From `from`, clamped to the binary; an empty needle is found
+            // where the search starts.
+            Intrinsic::BinaryIndexOf => {
+                let hay = binary::whole_bytes(&self.heap, self.binary(v)?);
+                let needle = binary::whole_bytes(&self.heap, self.binary(arg(self, 1))?);
+                let from = match self.int_of(arg(self, 2))? {
+                    Int::Small(n) => usize::try_from(n).unwrap_or(0).min(hay.len()),
+                    Int::Big(n) if n.sign() == num_bigint::Sign::Minus => 0,
+                    Int::Big(_) => hay.len(),
+                };
+                let found = if needle.is_empty() {
+                    Some(from)
+                } else {
+                    hay.get(from..)
+                        .and_then(|rest| rest.windows(needle.len()).position(|w| w == needle))
+                        .map(|at| from + at)
+                };
+                match found {
+                    Some(at) => {
+                        let at = bigint::value(&mut self.heap, at.into()).map_err(full)?;
+                        self.some(at)
+                    }
+                    None => Ok(Value::nullary(self.code.abi.none)),
+                }
+            }
+            // Digits only, no sign: empty input or any other byte is `None`.
+            // An Int has no bounds, so no number is too large.
+            Intrinsic::BinaryParseInt => {
+                let digits = binary::whole_bytes(&self.heap, self.binary(v)?);
+                let base = self.radix(arg(self, 1))?;
+                let valid =
+                    !digits.is_empty() && digits.iter().all(|c| char::from(*c).is_digit(base));
+                let n = if valid {
+                    num_bigint::BigInt::parse_bytes(&digits, base)
+                } else {
+                    None
+                };
+                match n {
+                    Some(n) => {
+                        let n = bigint::value(&mut self.heap, n).map_err(full)?;
+                        self.some(n)
+                    }
+                    None => Ok(Value::nullary(self.code.abi.none)),
+                }
+            }
+            Intrinsic::BinaryEqIgnoreAsciiCase => {
+                let a = binary::whole_bytes(&self.heap, self.binary(v)?);
+                let b = binary::whole_bytes(&self.heap, self.binary(arg(self, 1))?);
+                Ok(Value::bool(a.eq_ignore_ascii_case(&b)))
+            }
+            Intrinsic::BinaryToAsciiLower => {
+                let mut bytes = binary::whole_bytes(&self.heap, self.binary(v)?);
+                bytes.make_ascii_lowercase();
+                let len = bytes.len() as u64 * 8;
+                Ok(Value::cell(
+                    binary::make(&mut self.heap, &bytes, len).map_err(full)?,
+                ))
+            }
+            // Lowercase hex, and a `-` before a negative number's digits.
+            Intrinsic::BinaryFromIntAscii => {
+                let n = match self.int_of(v)? {
+                    Int::Small(n) => num_bigint::BigInt::from(n),
+                    Int::Big(n) => n,
+                };
+                let text = n.to_str_radix(self.radix(arg(self, 1))?);
+                let len = text.len() as u64 * 8;
+                let cell = binary::make(&mut self.heap, text.as_bytes(), len);
+                Ok(Value::cell(cell.map_err(full)?))
+            }
             // A negative bound, or one past the end, is `Err(Nil)`, never a
             // short read (`binary.scrl`).
             Intrinsic::BinarySliceBits => {
@@ -839,6 +921,21 @@ impl<'c, 'o> Machine<'c, 'o> {
             }
             _ => Err(Stop::BadProgram(format!("a string operation on {v:?}"))),
         }
+    }
+
+    /// The base a `scarlet/binary.Radix` stands for.
+    fn radix(&self, v: Value) -> Result<u32, Stop> {
+        match (v.view(), self.code.abi.radix) {
+            (View::Nullary(r), Some(radix)) if r == radix.dec => Ok(10),
+            (View::Nullary(r), Some(radix)) if r == radix.hex => Ok(16),
+            _ => Err(Stop::BadProgram(format!("{v:?} as a `binary.Radix`"))),
+        }
+    }
+
+    /// `Some(v)`, holding `v`'s reference.
+    fn some(&mut self, v: Value) -> Result<Value, Stop> {
+        let cell = self.heap.ctor(self.code.abi.some, &[v]).map_err(full)?;
+        Ok(Value::cell(cell))
     }
 
     /// `Ok(v)`, holding `v`'s reference.

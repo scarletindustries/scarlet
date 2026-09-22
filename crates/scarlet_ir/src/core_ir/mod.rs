@@ -144,12 +144,26 @@ pub struct Abi {
     pub ok: VariantRef,
     /// `Err(error)`.
     pub err: VariantRef,
+    /// `scarlet/binary.Radix`, when the program loads that module: the base
+    /// `binary.parse_int` and `binary.from_int_ascii` are asked for.
+    pub radix: Option<Radix>,
+}
+
+/// The constructors of `scarlet/binary.Radix`.
+#[derive(Debug, Clone, Copy)]
+pub struct Radix {
+    pub dec: VariantRef,
+    pub hex: VariantRef,
 }
 
 impl Abi {
     /// Every constructor here, so their types' names can travel with them.
-    pub fn variants(&self) -> [VariantRef; 4] {
-        [self.some, self.none, self.ok, self.err]
+    pub fn variants(&self) -> Vec<VariantRef> {
+        let mut all = vec![self.some, self.none, self.ok, self.err];
+        if let Some(r) = self.radix {
+            all.extend([r.dec, r.hex]);
+        }
+        all
     }
 }
 

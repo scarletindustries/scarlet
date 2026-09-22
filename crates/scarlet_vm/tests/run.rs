@@ -865,3 +865,39 @@ fn binaries_are_built_shown_and_matched() {
          Ok(héllo)\nErr(Nil)\n<<1, 2, 3>>\nOk(<<2, 3>>)\nErr(Nil)\nErr(Nil)\nTrue\n<<3>>\n",
     );
 }
+
+/// The rest of `scarlet/binary`, with its edge cases.
+#[test]
+fn the_rest_of_the_binary_module_runs() {
+    prints(
+        "import scarlet/binary.{Dec, Hex}\n\
+         pub fn main() {\n\
+         \tb = <<'hello':utf8>>\n\
+         \tprintln(binary.byte_at(b, 0))\n\
+         \tprintln(binary.byte_at(b, 4))\n\
+         \tprintln(binary.byte_at(b, 5))\n\
+         \tprintln(binary.byte_at(b, -1))\n\
+         \tprintln(binary.byte_at(<<1, 5:size(3)>>, 1))\n\
+         \tprintln(binary.index_of(b, <<'l':utf8>>, 0))\n\
+         \tprintln(binary.index_of(b, <<'l':utf8>>, 3))\n\
+         \tprintln(binary.index_of(b, <<'z':utf8>>, 0))\n\
+         \tprintln(binary.index_of(b, <<>>, 2))\n\
+         \tprintln(binary.index_of(b, <<'h':utf8>>, 99))\n\
+         \tprintln(binary.parse_int(<<'1234':utf8>>, Dec))\n\
+         \tprintln(binary.parse_int(<<'ff':utf8>>, Hex))\n\
+         \tprintln(binary.parse_int(<<'FF':utf8>>, Hex))\n\
+         \tprintln(binary.parse_int(<<'12a':utf8>>, Dec))\n\
+         \tprintln(binary.parse_int(<<>>, Dec))\n\
+         \tprintln(binary.parse_int(<<'-1':utf8>>, Dec))\n\
+         \tprintln(binary.parse_int(<<'99999999999999999999':utf8>>, Dec))\n\
+         \tprintln(binary.eq_ignore_ascii_case(<<'Content-Length':utf8>>, <<'content-length':utf8>>))\n\
+         \tprintln(binary.eq_ignore_ascii_case(<<'ab':utf8>>, <<'abc':utf8>>))\n\
+         \tprintln(binary.to_ascii_lower(<<'HeLLo':utf8>>) == <<'hello':utf8>>)\n\
+         \tprintln(binary.from_int_ascii(255, Hex) == <<'ff':utf8>>)\n\
+         \tprintln(binary.from_int_ascii(-42, Dec) == <<'-42':utf8>>)\n\
+         }\n",
+        "104\n111\n-1\n-1\n-1\nSome(2)\nSome(3)\nNone\nSome(2)\nNone\n\
+         Ok(1234)\nOk(255)\nOk(255)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nOk(99999999999999999999)\n\
+         True\nFalse\nTrue\nTrue\nTrue\n",
+    );
+}

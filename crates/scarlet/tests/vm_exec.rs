@@ -219,7 +219,6 @@ run_case! {
 
     // Op::BinIndexOf: `from` is clamped into range and an empty needle matches
     // at the clamped start.
-    #[ignore = "needs the VM"]
     binary_index_of: (
         "import scarlet/binary\n\
          pub fn main() {\n\
@@ -274,7 +273,6 @@ run_case! {
     ),
 
     // Op::BinEqIgnoreAsciiCase: ASCII-case-insensitive header-name matching.
-    #[ignore = "needs the VM"]
     binary_eq_ignore_ascii_case: (
         "import scarlet/binary\n\
          pub fn main() {\n\
@@ -286,7 +284,6 @@ run_case! {
     ),
 
     // Op::BinToAsciiLower: non-letter bytes pass through.
-    #[ignore = "needs the VM"]
     binary_to_ascii_lower: (
         "import scarlet/binary\n\
          pub fn main() {\n\
@@ -296,7 +293,6 @@ run_case! {
     ),
 
     // Op::BinFromIntAscii: radix 10/16, lowercase hex, zero and negatives.
-    #[ignore = "needs the VM"]
     binary_from_int_ascii: (
         "import scarlet/binary.{Dec, Hex}\n\
          pub fn main() {\n\

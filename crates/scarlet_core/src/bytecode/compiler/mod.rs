@@ -49,7 +49,8 @@ use super::session::{RawRef, Watermark};
 use super::{PreludeBindings, TypeRef};
 use crate::ast;
 use crate::core_ir::{
-    Abi, Const, ConstId, CoreFn, FuncIdx, LoweredFn, Program, TypeNames, VariantNames,
+    Abi, Const, ConstId, CoreFn, FuncIdx, LoweredFn, Program, Radix, TypeNames, VariantNames,
+    VariantRef,
 };
 use crate::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
 use crate::tivec::{Idx, TiVec};
@@ -1353,6 +1354,7 @@ impl Compiler {
             none: self.prelude.none().into(),
             ok: self.prelude.ok().into(),
             err: self.prelude.err().into(),
+            radix: self.radix(),
         };
         let types = self.type_names((&fns).into_iter().chain(&inits).chain([&toplevel]), &abi);
         Some(Program {
@@ -1364,6 +1366,35 @@ impl Compiler {
             globals: self.local_count as u32,
             types,
             abi,
+        })
+    }
+
+    /// `scarlet/binary.Radix`'s constructors, by name, when the program loaded
+    /// that module. A renamed constructor leaves it `None`, and the built-ins
+    /// that read one then stop, rather than read the wrong base.
+    fn radix(&self) -> Option<Radix> {
+        let path: ModulePath = ["scarlet", "binary"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let id = self
+            .module_table
+            .get(&ModuleKey::of(&path))?
+            .types
+            .get("Radix")?
+            .info
+            .id;
+        let names = self.names_of_type(id);
+        let variant = |name: &str| {
+            let idx = names.variants.iter().position(|v| v.name == name)?;
+            Some(VariantRef {
+                type_id: id,
+                variant_idx: u16::try_from(idx).ok()?,
+            })
+        };
+        Some(Radix {
+            dec: variant("Dec")?,
+            hex: variant("Hex")?,
         })
     }
 

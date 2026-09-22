@@ -198,9 +198,7 @@ suite! {
         strings,
         #[ignore = "needs the VM"]
         numbers,
-        #[ignore = "needs the VM"]
         money,
-        #[ignore = "needs the VM"]
         wire_format,
         // Effects. Both bind a loopback listener on port 0, serve it
         // in-process, then close it, which wakes the parked acceptors with

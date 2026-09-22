@@ -231,7 +231,6 @@ run_case! {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn stdlib_decimal() {
     // Scale propagation: add aligns to the wider scale, mul sums scales.
     run_outputs(
@@ -607,7 +606,6 @@ fn stdlib_binary_concat() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn stdlib_binary_byte_at() {
     // byte_at is -1 out of bounds on both sides; a view reads through its
     // offset.

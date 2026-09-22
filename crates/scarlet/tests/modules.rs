@@ -653,7 +653,6 @@ fn an_alias_colliding_with_a_real_variant_does_not_capture_it() {
 /// the VM, so an alias-named `Hex` was a `Radix` the builtin did not
 /// recognise: `expected Radix, got 'Radix'`, exit 1.
 #[test]
-#[ignore = "needs the VM"]
 fn an_aliased_stdlib_constructor_reaches_a_vm_builtin() {
     let proj = Project::new("alias_ctor_stdlib");
     proj.write(
