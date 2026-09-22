@@ -798,7 +798,6 @@ fn stdlib_binary_ascii_builtins() {
 // is unreachable from it (T-197). The last line is the control: that
 // existing spelling must stay as it is.
 #[test]
-#[ignore = "needs the VM"]
 fn stdlib_binary_hex_byte() {
     run_outputs(
         "import scarlet/binary.{Hex}\n\
@@ -870,7 +869,6 @@ fn stdlib_float() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn stdlib_string() {
     // length counts codepoints, not bytes: 'héllo' is 5 chars, 6 bytes.
     // split with an empty delimiter takes the char-split branch. trim strips

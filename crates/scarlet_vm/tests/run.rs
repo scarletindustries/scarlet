@@ -928,3 +928,35 @@ fn the_string_built_ins_run() {
          Ok(-42)\nOk(7)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nOk(123456789012345678901234567890)\n",
     );
 }
+
+/// Bitwise operations treat an Int as an endless row of two's-complement
+/// bits, as `int.scrl` says: no bit ever falls off an end.
+#[test]
+fn bitwise_operations_are_any_size() {
+    prints(
+        "import scarlet/binary\n\
+         import scarlet/int\n\
+         pub fn main() {\n\
+         \tprintln(int.bitwise_and(12, 10))\n\
+         \tprintln(int.bitwise_or(12, 10))\n\
+         \tprintln(int.bitwise_xor(12, 10))\n\
+         \tprintln(int.bitwise_not(0))\n\
+         \tprintln(int.bitwise_not(5))\n\
+         \tprintln(int.bitwise_and(-1, 255))\n\
+         \tprintln(int.bitwise_shift_left(1, 64))\n\
+         \tprintln(int.bitwise_shift_left(3, -1))\n\
+         \tprintln(int.bitwise_shift_right(-8, 1))\n\
+         \tprintln(int.bitwise_shift_right(-7, 1))\n\
+         \tprintln(int.bitwise_shift_right(5, 100))\n\
+         \tprintln(int.bitwise_shift_right(-5, 100))\n\
+         \tprintln(int.bitwise_shift_right(1, -3))\n\
+         \tbig = int.bitwise_shift_left(1, 100)\n\
+         \tprintln(int.bitwise_and(big + 5, 7))\n\
+         \tprintln(int.bitwise_shift_right(big, 99))\n\
+         \tprintln(int.bitwise_and(int.bitwise_shift_right(-1, 4), int.bitwise_shift_left(1, 28) - 1))\n\
+         \tprintln(binary.hex_byte(13) == <<'0D':utf8>>)\n\
+         \tprintln(binary.hex_byte(255) == <<'FF':utf8>>)\n\
+         }\n",
+        "8\n14\n6\n-1\n-6\n255\n18446744073709551616\n1\n-4\n-4\n0\n-1\n8\n5\n2\n268435455\nTrue\nTrue\n",
+    );
+}

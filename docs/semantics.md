@@ -27,6 +27,8 @@ A stdlib function must never make up a value to hide a failure. It returns a `Re
 
 **Built: Int is arbitrary precision.** `+`, `-` and `*` always give the exact answer, so `int.max_value + 1` is `9223372036854775808`. An Int that fits in 48 bits stays inside the value word, and any other moves to the heap. An Int *literal* past 64 bits is still a compile error, because the compiler keeps Int constants as 64-bit numbers.
 
+**Built: bitwise operations are any size.** `int.bitwise_and`, `or`, `xor`, `not` and the shifts treat an Int as an endless row of two's-complement bits, as Erlang does: endless 0s above a non-negative Int, endless 1s above a negative one. No bit falls off an end, so `int.bitwise_shift_left(1, 64)` is `18446744073709551616`, and a right shift divides by a power of 2, rounding down.
+
 **Built: division.**
 
 - `/` truncates toward zero: `-7 / 2 == -3`.

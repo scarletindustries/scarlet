@@ -64,10 +64,11 @@ pub fn remainder(a Int, b Int) Result(Int, Nil) {
 
 // --- Bitwise ---------------------------------------------------------------
 //
-// Int is a 64-bit signed two's-complement integer — `min_value` and
-// `max_value` above are its exact bounds — so these operate on 64 bits and
-// there is no width to pick. All six are total: every input has a defined
-// answer and nothing traps.
+// An Int has no bounds, so these treat it as an endless row of two's-complement
+// bits: a non-negative Int has endless 0s above its highest set bit, and a
+// negative one endless 1s. That is Erlang's rule. No bit ever falls off an end,
+// so `bitwise_shift_left(1, 64)` is 18446744073709551616, not 0. All six are
+// total: every input has a defined answer and nothing traps.
 
 @vm(int__bitwise_and)
 pub fn bitwise_and(a Int, b Int) Int
@@ -78,56 +79,28 @@ pub fn bitwise_or(a Int, b Int) Int
 @vm(int__bitwise_xor)
 pub fn bitwise_xor(a Int, b Int) Int
 
-// The two's-complement complement, so it flips the sign bit along with the
-// other 63: `bitwise_not(0) == -1` and `bitwise_not(n) == 0 - n - 1`. Int is
-// signed with no unsigned counterpart, so complementing a small non-negative
-// number gives a negative one — to keep a result inside a byte or a 32-bit
-// field, mask it: `bitwise_and(bitwise_not(n), 255)`.
+// Every bit flipped, the endless ones above too: `bitwise_not(0) == -1` and
+// `bitwise_not(n) == 0 - n - 1`. So complementing a non-negative Int gives a
+// negative one; to keep a result inside a byte or a 32-bit field, mask it:
+// `bitwise_and(bitwise_not(n), 255)`.
 @vm(int__bitwise_not)
 pub fn bitwise_not(n Int) Int
 
-// Bits shifted off the top are discarded.
-//
-// A count of 64 or more shifts every bit out and gives 0. The count is NOT
-// masked to 6 bits the way C and most hardware shift instructions do, so
-// `bitwise_shift_left(1, 64)` is 0, not 1.
-//
-// A negative count shifts the other way by the same magnitude, so
-// `bitwise_shift_left(x, 0 - n) == bitwise_shift_right(x, n)` for every `n`
-// except `min_value`.
-//
-// `min_value` is the one count with no negation to appeal to: `0 - min_value`
-// wraps back to `min_value`, so both sides saturate their count to `max_value`
-// and land past the width in opposite directions. The left side shifts right
-// and keeps the sign; the right side shifts left and drops it. For a negative
-// `x` that is -1 against 0. Each side answers the call written correctly — it
-// is the identity between them that stops there.
+// `x` times 2^n, exactly: no bit is discarded. A negative count shifts right
+// instead, so `bitwise_shift_left(x, 0 - n) == bitwise_shift_right(x, n)` for
+// every `n`.
 @vm(int__bitwise_shift_left)
 pub fn bitwise_shift_left(x Int, n Int) Int
 
-// Arithmetic (sign-propagating), not logical: the sign bit is copied into the
-// vacated top bits, so `bitwise_shift_right(-8, 1) == -4` and a negative value
-// never becomes positive.
+// Arithmetic: `x` divided by 2^n and rounded down, so the sign is kept:
+// `bitwise_shift_right(-8, 1) == -4`, `bitwise_shift_right(-7, 1) == -4`, and a
+// negative value never becomes positive. Shifting past every bit leaves 0 for
+// a non-negative `x` and -1 for a negative one. A negative count shifts left
+// instead.
 //
-// For logical behaviour, shift first and clear the copied sign bits after.
-// For any `n` of 1 or more:
+// An Int has no top bit for a logical shift to clear. For one over a field `w`
+// bits wide, mask the result to the `w - n` bits the field keeps:
 //
-//	bitwise_and(bitwise_shift_right(x, n), bitwise_shift_right(max_value, n - 1))
-//
-// The second shift builds a mask of exactly the 64 - n bits a logical shift
-// keeps. On `min_value` with `n` of 3 the idiom gives 1152921504606846976,
-// against the -1152921504606846976 the bare arithmetic shift gives; on -1 with
-// `n` of 32 it gives 4294967295, against -1. At `n == 0` the mask is `0 - 2`
-// and clears bit 0, so start at 1.
-//
-// Masking the INPUT instead does not work, whatever the mask: no positive Int
-// preserves bit 63, because the only mask that would is 2^64 - 1, which is -1
-// and masks nothing. A mask of 255 on `min_value` shifted right by 3 gives 0
-// where the logical shift gives 1152921504606846976 — it discards the top bits
-// silently.
-//
-// Counts follow `bitwise_shift_left`: 64 or more shifts every bit out and
-// leaves the sign — 0 for a non-negative `x`, -1 for a negative one — and a
-// negative count shifts left instead.
+//	bitwise_and(bitwise_shift_right(x, n), bitwise_shift_left(1, w - n) - 1)
 @vm(int__bitwise_shift_right)
 pub fn bitwise_shift_right(x Int, n Int) Int

@@ -1143,8 +1143,15 @@ fn built(i: Intrinsic, argc: usize) -> bool {
         Intrinsic::BinaryToAsciiLower
         | Intrinsic::StringTrim
         | Intrinsic::StringToGraphemes
-        | Intrinsic::IntFromString => 1,
-        Intrinsic::StringSplit | Intrinsic::StringContains => 2,
+        | Intrinsic::IntFromString
+        | Intrinsic::IntBitwiseNot => 1,
+        Intrinsic::StringSplit
+        | Intrinsic::StringContains
+        | Intrinsic::IntBitwiseAnd
+        | Intrinsic::IntBitwiseOr
+        | Intrinsic::IntBitwiseXor
+        | Intrinsic::IntBitwiseShiftLeft
+        | Intrinsic::IntBitwiseShiftRight => 2,
         Intrinsic::BinaryAppend
         | Intrinsic::BinaryByteAt
         | Intrinsic::BinaryParseInt

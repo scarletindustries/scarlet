@@ -15,6 +15,10 @@ use crate::code::IntOp;
 use crate::heap::{Full, Heap};
 use crate::value::Value;
 
+/// The most bits one Int can have: a cell is at most 2^28 words of 64 bits.
+/// An Int wider than that is a full heap, not an Int.
+pub(crate) const MAX_BITS: u64 = (1 << 28) * 64;
+
 /// An Int operand, read out of its value.
 pub(crate) enum Int {
     Small(i64),
@@ -22,7 +26,7 @@ pub(crate) enum Int {
 }
 
 impl Int {
-    fn big(self) -> BigInt {
+    pub(crate) fn big(self) -> BigInt {
         match self {
             Int::Small(n) => BigInt::from(n),
             Int::Big(n) => n,

@@ -262,7 +262,6 @@ suite! {
         bitwise,
         // Hex (`0x`) and binary (`0b`) integer literals: magnitude parse,
         // i64 range, separators, match-pattern identity with decimal.
-        #[ignore = "needs the VM"]
         hex_literals,
         // The deterministic slice of the effectful stdlib. Everything is pinned
         // as a derived fact, never a clock reading or an env value.

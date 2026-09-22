@@ -13,6 +13,7 @@
 
 use std::io::Write;
 
+use num_bigint::Sign;
 use num_traits::{FromPrimitive, ToPrimitive};
 use scarlet_ir::core_ir::{FuncIdx, VariantRef};
 use scarlet_ir::intrinsic::Intrinsic;
@@ -795,6 +796,28 @@ impl<'c, 'o> Machine<'c, 'o> {
                     None => Ok(Value::nullary(self.code.abi.none)),
                 }
             }
+            // An Int as an endless row of two's-complement bits (`int.scrl`).
+            Intrinsic::IntBitwiseAnd | Intrinsic::IntBitwiseOr | Intrinsic::IntBitwiseXor => {
+                let (a, b) = (self.int_of(v)?.big(), self.int_of(arg(self, 1))?.big());
+                let n = match i {
+                    Intrinsic::IntBitwiseAnd => a & b,
+                    Intrinsic::IntBitwiseOr => a | b,
+                    _ => a ^ b,
+                };
+                bigint::value(&mut self.heap, n).map_err(full)
+            }
+            Intrinsic::IntBitwiseNot => {
+                let n = !self.int_of(v)?.big();
+                bigint::value(&mut self.heap, n).map_err(full)
+            }
+            // A negative count shifts the other way.
+            Intrinsic::IntBitwiseShiftLeft | Intrinsic::IntBitwiseShiftRight => {
+                let x = self.int_of(v)?.big();
+                let count = self.int_of(arg(self, 1))?.big();
+                let left = (i == Intrinsic::IntBitwiseShiftLeft) != (count.sign() == Sign::Minus);
+                let n = shift(x, left, &count.magnitude().clone().into())?;
+                bigint::value(&mut self.heap, n).map_err(full)
+            }
             Intrinsic::StringLength => {
                 let Some(cell) = v.as_cell().filter(|_| self.is_string(v)) else {
                     return Err(Stop::BadProgram(format!("`string.length` of {v:?}")));
@@ -1323,6 +1346,44 @@ impl<'c, 'o> Machine<'c, 'o> {
         for v in std::mem::take(&mut self.globals) {
             self.release(v);
         }
+    }
+}
+
+/// `x` shifted `count` bits, left (times 2^count, exactly) or right (divided
+/// by 2^count, rounded down). A left shift past what an Int can hold is a
+/// full heap; a right shift past every bit leaves 0 or -1, by `x`'s sign.
+fn shift(
+    x: num_bigint::BigInt,
+    left: bool,
+    count: &num_bigint::BigInt,
+) -> Result<num_bigint::BigInt, Stop> {
+    if x.sign() == Sign::NoSign {
+        return Ok(x);
+    }
+    let Some(count) = count.to_u64() else {
+        return if left {
+            Err(Stop::HeapFull)
+        } else {
+            Ok(if x.sign() == Sign::Minus {
+                (-1).into()
+            } else {
+                0.into()
+            })
+        };
+    };
+    if left {
+        if x.bits().saturating_add(count) > bigint::MAX_BITS {
+            return Err(Stop::HeapFull);
+        }
+        Ok(x << count)
+    } else if count > x.bits() {
+        Ok(if x.sign() == Sign::Minus {
+            (-1).into()
+        } else {
+            0.into()
+        })
+    } else {
+        Ok(x >> count)
     }
 }
 
