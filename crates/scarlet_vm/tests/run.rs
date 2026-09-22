@@ -1160,3 +1160,95 @@ fn the_clocks_and_random_bytes_run() {
         "True\nTrue\n33\nOk(<<>>)\nErr(Nil)\nFalse\n",
     );
 }
+
+/// `<<1, 2, 3>>`, to put bytes into a program's source.
+fn bytes_literal(bytes: &[u8]) -> String {
+    let parts: Vec<String> = bytes.iter().map(u8::to_string).collect();
+    format!("<<{}>>", parts.join(", "))
+}
+
+fn unhex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+        .collect()
+}
+
+/// The digests and the HMAC tag give the published answers (FIPS 180-2's
+/// `abc`, RFC 4231's second case), and a binary that is not whole bytes has
+/// none. `const_eq` compares bits: the old VM dropped a last partial byte, so
+/// `<<1, 2:4>>` and `<<1, 3:4>>` were equal. Signatures made here by aws-lc
+/// check out, and anything of the wrong shape does not.
+#[test]
+fn the_crypto_built_ins_run() {
+    use aws_lc_rs::rand::SystemRandom;
+    use aws_lc_rs::signature::{
+        ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair, Ed25519KeyPair, KeyPair,
+    };
+    let rng = SystemRandom::new();
+    let p256 = EcdsaKeyPair::generate(&ECDSA_P256_SHA256_ASN1_SIGNING).expect("a P-256 key");
+    let p256_sig = p256.sign(&rng, b"signed").expect("a P-256 signature");
+    let ed_doc = Ed25519KeyPair::generate_pkcs8(&rng).expect("an Ed25519 key");
+    let ed = Ed25519KeyPair::from_pkcs8(ed_doc.as_ref()).expect("an Ed25519 key");
+    let ed_sig = ed.sign(b"signed");
+    let src = "import scarlet/crypto\n\
+         import scarlet/binary\n\
+         pub fn main() {\n\
+         \tprintln(crypto.sha256(<<'abc'>>) == Ok(SHA256_ABC))\n\
+         \tprintln(crypto.sha512(<<'abc'>>) == Ok(SHA512_ABC))\n\
+         \tprintln(crypto.sha1(<<'abc'>>) == Ok(SHA1_ABC))\n\
+         \tprintln(crypto.hmac_sha256(<<'Jefe'>>, <<'what do ya want for nothing?'>>) == Ok(HMAC_JEFE))\n\
+         \tprintln(crypto.sha256(<<1:4>>))\n\
+         \tprintln(crypto.sha512(<<97, 1:4>>))\n\
+         \tprintln(crypto.hmac_sha256(<<1:4>>, <<>>))\n\
+         \tprintln(crypto.hmac_sha256(<<>>, <<1:4>>))\n\
+         \tprintln(crypto.const_eq(<<1, 2, 3>>, <<1, 2, 3>>))\n\
+         \tprintln(crypto.const_eq(<<1, 2, 3>>, <<1, 2, 4>>))\n\
+         \tprintln(crypto.const_eq(<<1, 2>>, <<1, 2, 3>>))\n\
+         \tprintln(crypto.const_eq(<<1, 2:4>>, <<1, 3:4>>))\n\
+         \tprintln(crypto.const_eq(<<1, 2:4>>, <<1, 2:4>>))\n\
+         \tprintln(crypto.const_eq(<<1:4>>, <<16>>))\n\
+         \tprintln(crypto.p256_verify(P256_KEY, <<'signed'>>, P256_SIG))\n\
+         \tprintln(crypto.p256_verify(P256_KEY, <<'signeD'>>, P256_SIG))\n\
+         \tprintln(crypto.p256_verify(<<4, 1, 2>>, <<'signed'>>, P256_SIG))\n\
+         \tprintln(crypto.p256_verify(P256_KEY, <<'signed', 1:4>>, P256_SIG))\n\
+         \tprintln(crypto.ed25519_verify(ED_KEY, <<'signed'>>, ED_SIG))\n\
+         \tprintln(crypto.ed25519_verify(ED_KEY, <<'signeD'>>, ED_SIG))\n\
+         \tprintln(crypto.ed25519_verify(ED_KEY, <<'signed'>>, <<1, 2, 3>>))\n\
+         \tprintln(crypto.ed25519_verify(ED_KEY, <<'signed'>>, P256_SIG))\n\
+         }\n"
+        .replace(
+            "SHA256_ABC",
+            &bytes_literal(&unhex(
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            )),
+        )
+        .replace(
+            "SHA512_ABC",
+            &bytes_literal(&unhex(
+                "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a\
+                 2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
+            )),
+        )
+        .replace(
+            "SHA1_ABC",
+            &bytes_literal(&unhex("a9993e364706816aba3e25717850c26c9cd0d89d")),
+        )
+        .replace(
+            "HMAC_JEFE",
+            &bytes_literal(&unhex(
+                "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
+            )),
+        )
+        .replace("P256_KEY", &bytes_literal(p256.public_key().as_ref()))
+        .replace("P256_SIG", &bytes_literal(p256_sig.as_ref()))
+        .replace("ED_KEY", &bytes_literal(ed.public_key().as_ref()))
+        .replace("ED_SIG", &bytes_literal(ed_sig.as_ref()));
+    prints(
+        &src,
+        "True\nTrue\nTrue\nTrue\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\n\
+         True\nFalse\nFalse\nFalse\nTrue\nFalse\n\
+         True\nFalse\nFalse\nFalse\n\
+         True\nFalse\nFalse\nFalse\n",
+    );
+}

@@ -12,6 +12,10 @@ num-traits = "0.2"
 unicode-segmentation = "1"
 # `crypto.random_bytes`: the OS's own random source.
 getrandom = "0.4"
+# `scarlet/crypto`'s digests, HMAC and signature checks: aws-lc, the crypto
+# rustls links for TLS. Without the default `ring-io` and `ring-sig-verify`,
+# which only add `ring`-shaped APIs this does not call.
+aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys", "alloc"] }
 # The OS error numbers `scarlet/io.IoError` names.
 libc = "0.2"
 

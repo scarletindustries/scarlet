@@ -86,6 +86,16 @@ fn challenge_ok(client_challenge String, expected Binary) Bool {
 	}
 }
 
+// Whether authenticator data's `rp_id_hash` is the SHA-256 of `rp_id`, in
+// constant time. An RP ID is a string, so it always has a digest; one without
+// would match nothing.
+fn rp_id_matches(rp_id_hash Binary, rp_id String) Bool {
+	match crypto.sha256(binary.from_string(rp_id)) {
+		Ok(expected) -> crypto.const_eq(rp_id_hash, expected)
+		Err(Nil) -> False
+	}
+}
+
 // ---------- authenticatorData ----------
 
 /** The fixed head of authenticator data (RFC-fixed offsets), plus, when the
@@ -204,7 +214,7 @@ pub fn verify_registration(
 		})
 		ad <- result.then(parse_auth_data(auth_bytes))
 		AuthData(rp_id_hash, user_present, sign_count, attested) = ad
-		if !crypto.const_eq(rp_id_hash, crypto.sha256(binary.from_string(rp_id))) {
+		if !rp_id_matches(rp_id_hash, rp_id) {
 			Err(RpIdMismatch)
 		} else if !user_present {
 			Err(UserNotPresent)
@@ -252,16 +262,23 @@ pub fn verify_authentication(
 	} else {
 		ad <- result.then(parse_auth_data(authenticator_data))
 		AuthData(rp_id_hash, user_present, sign_count, _) = ad
-		if !crypto.const_eq(rp_id_hash, crypto.sha256(binary.from_string(rp_id))) {
+		if !rp_id_matches(rp_id_hash, rp_id) {
 			Err(RpIdMismatch)
 		} else if !user_present {
 			Err(UserNotPresent)
 		} else {
-			// The one message construction the whole protocol turns on.
-			message = binary.append(authenticator_data, crypto.sha256(client_data_json))
-			ok = match algorithm {
-				Es256 -> crypto.p256_verify(public_key, message, signature)
-				EdDsa -> crypto.ed25519_verify(public_key, message, signature)
+			// The one message construction the whole protocol turns on. Client
+			// data that is not whole bytes has no digest to sign, so nothing
+			// can verify against it.
+			ok = match crypto.sha256(client_data_json) {
+				Ok(client_hash) -> {
+					message = binary.append(authenticator_data, client_hash)
+					match algorithm {
+						Es256 -> crypto.p256_verify(public_key, message, signature)
+						EdDsa -> crypto.ed25519_verify(public_key, message, signature)
+					}
+				}
+				Err(Nil) -> False
 			}
 			match ok {
 				True -> Ok(sign_count)

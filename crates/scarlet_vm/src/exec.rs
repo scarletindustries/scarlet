@@ -880,6 +880,66 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 let cell = binary::make(&mut self.heap, &bytes, n as u64 * 8).map_err(full)?;
                 self.ok(Value::cell(cell))
             }
+            // The digests and the tag are over bytes: a binary that is not
+            // whole bytes has none, rather than the digest of some bytes near
+            // it, which another binary would share.
+            Intrinsic::CryptoSha1 | Intrinsic::CryptoSha256 | Intrinsic::CryptoSha512 => {
+                let Some(m) = self.whole_bytes(v)? else {
+                    return self.err_nil();
+                };
+                let alg = match i {
+                    Intrinsic::CryptoSha1 => &aws_lc_rs::digest::SHA1_FOR_LEGACY_USE_ONLY,
+                    Intrinsic::CryptoSha256 => &aws_lc_rs::digest::SHA256,
+                    _ => &aws_lc_rs::digest::SHA512,
+                };
+                let digest = aws_lc_rs::digest::digest(alg, &m);
+                self.ok_bytes(digest.as_ref())
+            }
+            Intrinsic::CryptoHmacSha256 => {
+                let (Some(key), Some(msg)) =
+                    (self.whole_bytes(v)?, self.whole_bytes(arg(self, 1))?)
+                else {
+                    return self.err_nil();
+                };
+                let key = aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, &key);
+                let tag = aws_lc_rs::hmac::sign(&key, &msg);
+                self.ok_bytes(tag.as_ref())
+            }
+            // The same bits, compared in time that depends on the lengths
+            // alone. The last byte of each is padded with zeros the same way,
+            // so equal lengths and equal bytes are equal bits.
+            Intrinsic::CryptoConstEq => {
+                let (a, b) = (self.binary(v)?, self.binary(arg(self, 1))?);
+                let same = a.len == b.len
+                    && aws_lc_rs::constant_time::verify_slices_are_equal(
+                        &binary::bytes(&self.heap, a),
+                        &binary::bytes(&self.heap, b),
+                    )
+                    .is_ok();
+                Ok(Value::bool(same))
+            }
+            // A key, message or signature of the wrong shape, whole bytes or
+            // not, is a signature that does not check out.
+            Intrinsic::CryptoP256Verify | Intrinsic::CryptoEd25519Verify => {
+                let alg: &'static dyn aws_lc_rs::signature::VerificationAlgorithm = match i {
+                    Intrinsic::CryptoP256Verify => &aws_lc_rs::signature::ECDSA_P256_SHA256_ASN1,
+                    _ => &aws_lc_rs::signature::ED25519,
+                };
+                let parts = (
+                    self.whole_bytes(v)?,
+                    self.whole_bytes(arg(self, 1))?,
+                    self.whole_bytes(arg(self, 2))?,
+                );
+                let valid = match parts {
+                    (Some(key), Some(message), Some(sig)) => {
+                        aws_lc_rs::signature::UnparsedPublicKey::new(alg, key)
+                            .verify(&message, &sig)
+                            .is_ok()
+                    }
+                    _ => false,
+                };
+                Ok(Value::bool(valid))
+            }
             Intrinsic::IoReadFile => {
                 let path = self.text_of(v)?;
                 match std::fs::read(path_of(&path)) {
@@ -1243,6 +1303,18 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             }
         };
         self.err(error)
+    }
+
+    /// The bytes of the binary `v`, or `None` when it is not whole bytes.
+    fn whole_bytes(&self, v: Value) -> Result<Option<Vec<u8>>, Stop> {
+        let b = self.binary(v)?;
+        Ok((b.len % 8 == 0).then(|| binary::bytes(&self.heap, b)))
+    }
+
+    /// `Ok` of a new binary holding `bytes`.
+    fn ok_bytes(&mut self, bytes: &[u8]) -> Result<Value, Stop> {
+        let cell = binary::make(&mut self.heap, bytes, bytes.len() as u64 * 8).map_err(full)?;
+        self.ok(Value::cell(cell))
     }
 
     /// The map `v` is.

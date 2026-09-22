@@ -20,176 +20,29 @@
  * addressing), though on its own it is still neither a password hash nor a
  * MAC. Everything said about SHA-1 above stays true: protocol handshakes
  * only.
+ *
+ * The digests and the HMAC tag are over bytes, so a binary that is not a
+ * whole number of bytes (`<<1:4>>`) has none: they return `Err(Nil)` for it.
+ * Hashing the whole bytes and dropping the rest, or padding the last byte,
+ * would give two different binaries the same digest.
  */
 
 import scarlet/base64
 import scarlet/binary
-import scarlet/int
-
-// 2^32 - 1. Every intermediate here is a 32-bit unsigned quantity held in a
-// 64-bit signed Int, so each step that can carry past bit 31 masks with this.
-// Int has no unsigned counterpart and no 32-bit width, so the masking is the
-// only thing keeping the arithmetic inside SHA-1's word size.
-const MASK32 = 4294967295
+import scarlet/result
 
 // The RFC 6455 §1.3 handshake constant, appended to the client's
 // `Sec-WebSocket-Key` before hashing. Fixed by the spec; not a secret, and not
 // a salt.
 pub const websocket_guid = <<'258EAFA5-E914-47DA-95CA-C5AB0DC85B11'>>
 
-// SHA-1's five-word chaining state, and the same shape as the working
-// variables a-e inside the compression function.
-type State {
-	a Int
-	b Int
-	c Int
-	d Int
-	e Int
-}
-
-// Rotate left within 32 bits. `x` must already be masked to 32 bits: the
-// right shift is arithmetic, so a value with bit 63 set would smear the sign
-// into the bits being rotated in.
-fn rotl32(x Int, n Int) Int {
-	int.bitwise_and(
-		int.bitwise_or(int.bitwise_shift_left(x, n), int.bitwise_shift_right(x, 32 - n)),
-		MASK32,
-	)
-}
-
-// The big-endian 32-bit word at word index `i`. Reads bytes rather than
-// slicing so it stays allocation-free: `byte_at` is total and the callers
-// below only ever index inside a 64-byte block.
-fn word_at(b Binary, i Int) Int {
-	at = i * 4
-	int.bitwise_or(
-		int.bitwise_or(
-			int.bitwise_shift_left(binary.byte_at(b, at), 24),
-			int.bitwise_shift_left(binary.byte_at(b, at + 1), 16),
-		),
-		int.bitwise_or(
-			int.bitwise_shift_left(binary.byte_at(b, at + 2), 8),
-			binary.byte_at(b, at + 3),
-		),
-	)
-}
-
-fn zeros(n Int, acc Binary) Binary {
-	if n <= 0 {
-		acc
-	} else {
-		zeros(n - 1, binary.append(acc, <<0:8>>))
-	}
-}
-
-// The message with SHA-1's padding: a 1 bit (as the byte 128), then zero bits
-// until the length is 56 mod 64, then the original length in BITS as a
-// big-endian 64-bit integer. The result is always a whole number of 64-byte
-// blocks, which is the invariant `blocks` relies on.
-fn pad(m Binary) Binary {
-	size = binary.byte_size(m)
-	rem = { size + 1 } % 64
-	fill = if rem <= 56 {
-		56 - rem
-	} else {
-		120 - rem
-	}
-	bits = size * 8
-	binary.append(binary.append(binary.append(m, <<128:8>>), zeros(fill, <<>>)), <<bits:64>>)
-}
-
-// One 80-round compression over `win`, the 16-word message schedule window.
-//
-// At round `i`, `win` holds w[i]..w[i+15], so the round's own word is always
-// word 0 and the word appended is w[i+16]. That is the standard rolling-window
-// form of the schedule: it keeps 16 words instead of 80, and the last 16
-// rounds compute words nothing reads, which is harmless and cheaper than
-// branching to avoid it.
-fn compress(win Binary, i Int, w State) State {
-	if i >= 80 {
-		w
-	} else {
-		f = if i < 20 {
-			int.bitwise_or(int.bitwise_and(w.b, w.c), int.bitwise_and(int.bitwise_not(w.b), w.d))
-		} else if i < 40 {
-			int.bitwise_xor(int.bitwise_xor(w.b, w.c), w.d)
-		} else if i < 60 {
-			int.bitwise_or(
-				int.bitwise_or(int.bitwise_and(w.b, w.c), int.bitwise_and(w.b, w.d)),
-				int.bitwise_and(w.c, w.d),
-			)
-		} else {
-			int.bitwise_xor(int.bitwise_xor(w.b, w.c), w.d)
-		}
-		k = if i < 20 {
-			1518500249
-		} else if i < 40 {
-			1859775393
-		} else if i < 60 {
-			2400959708
-		} else {
-			3395469782
-		}
-		// Five 32-bit addends sum to at most 5 * (2^32 - 1) < 2^35, so the sum
-		// cannot reach Int's range before it is masked back to 32 bits.
-		t = int.bitwise_and(rotl32(w.a, 5) + f + w.e + k + word_at(win, 0), MASK32)
-		next = rotl32(
-			int.bitwise_xor(
-				int.bitwise_xor(word_at(win, 13), word_at(win, 8)),
-				int.bitwise_xor(word_at(win, 2), word_at(win, 0)),
-			),
-			1,
-		)
-		compress(
-			binary.append(binary.drop_bytes(win, 4), <<next:32>>),
-			i + 1,
-			State(t, w.a, rotl32(w.b, 30), w.c, w.d),
-		)
-	}
-}
-
-fn blocks(p Binary, at Int, size Int, h State) State {
-	if at >= size {
-		h
-	} else {
-		match binary.slice_bytes(p, at, 64) {
-			Ok(block) -> {
-				w = compress(block, 0, State(h.a, h.b, h.c, h.d, h.e))
-				blocks(
-					p,
-					at + 64,
-					size,
-					State(
-						int.bitwise_and(h.a + w.a, MASK32),
-						int.bitwise_and(h.b + w.b, MASK32),
-						int.bitwise_and(h.c + w.c, MASK32),
-						int.bitwise_and(h.d + w.d, MASK32),
-						int.bitwise_and(h.e + w.e, MASK32),
-					),
-				)
-			}
-			// Unreachable: `pad` returns a whole number of 64-byte blocks and
-			// `at` steps by 64 from 0, so the window is always inside `p`. The
-			// arm exists because Result has two of them.
-			Err(Nil) -> h
-		}
-	}
-}
-
-// The SHA-1 digest of `m`: 20 bytes, big-endian. Total — every input has a
-// digest, including the empty binary.
+// The SHA-1 digest of `m`: 20 bytes, big-endian. Every whole number of
+// bytes has one, the empty binary included; a binary that is not whole bytes
+// is `Err(Nil)`. aws-lc's, as the other digests are.
 //
 // Read the module doc before reaching for this.
-pub fn sha1(m Binary) Binary {
-	p = pad(m)
-	h = blocks(
-		p,
-		0,
-		binary.byte_size(p),
-		State(1732584193, 4023233417, 2562383102, 271733878, 3285377520),
-	)
-	<<h.a:32, h.b:32, h.c:32, h.d:32, h.e:32>>
-}
+@vm(crypto__sha1)
+pub fn sha1(m Binary) Result(Binary, Nil)
 
 // The `Sec-WebSocket-Accept` value a server owes for the client's
 // `Sec-WebSocket-Key`, per RFC 6455 §4.2.2: base64(sha1(key <> GUID)).
@@ -198,8 +51,8 @@ pub fn sha1(m Binary) Binary {
 // is concatenated as text and is NOT decoded first. A client compares this
 // against the header it received; a client that skips the comparison accepts
 // any server that answers 101.
-pub fn websocket_accept(key Binary) Binary {
-	base64.encode(sha1(binary.append(key, websocket_guid)))
+pub fn websocket_accept(key Binary) Result(Binary, Nil) {
+	result.map(sha1(binary.append(key, websocket_guid)), base64.encode)
 }
 
 // `n` bytes from the OS CSPRNG (`getrandom` / equivalent). `Err(Nil)` if
@@ -210,8 +63,9 @@ pub fn random_bytes(n Int) Result(Binary, Nil)
 
 
 
-// The SHA-256 digest of `m`: 32 bytes, big-endian. Total — every input has
-// a digest, including the empty binary.
+// The SHA-256 digest of `m`: 32 bytes, big-endian. Every whole number of
+// bytes has one, the empty binary included; a binary that is not whole bytes
+// is `Err(Nil)`.
 //
 // Unlike SHA-1 above, this one is fine to reach for on its own merits:
 // collision-resistant as far as anyone knows, and the hash OAuth's PKCE
@@ -219,22 +73,23 @@ pub fn random_bytes(n Int) Result(Binary, Nil)
 // the VM — the same crypto TLS already links. On its own it is still
 // neither a password hash nor a MAC; see `hmac_sha256` for the latter.
 @vm(crypto__sha256)
-pub fn sha256(m Binary) Binary
+pub fn sha256(m Binary) Result(Binary, Nil)
 
 // The SHA-512 digest of `m`: 64 bytes, big-endian. Same contract and
 // backing as `sha256`.
 @vm(crypto__sha512)
-pub fn sha512(m Binary) Binary
+pub fn sha512(m Binary) Result(Binary, Nil)
 
 // The HMAC-SHA-256 tag over `msg` under `key`: 32 bytes. This is the
 // message-authentication primitive: use it for signing tokens and cookies,
-// and compare tags with `const_eq`, never `==`.
+// and compare tags with `const_eq`, never `==`. `Err(Nil)` when either is
+// not a whole number of bytes.
 @vm(crypto__hmac_sha256)
-pub fn hmac_sha256(key Binary, msg Binary) Binary
+pub fn hmac_sha256(key Binary, msg Binary) Result(Binary, Nil)
 
-// Whether `a` and `b` are equal, in time that is a function of their
-// lengths alone. `==` on binaries exits at the first differing byte, which
-// leaks how much of a secret matched; this does not. Unequal lengths
+// Whether `a` and `b` hold the same bits, in time that is a function of
+// their lengths alone. `==` on binaries exits at the first differing byte,
+// which leaks how much of a secret matched; this does not. Unequal lengths
 // answer `False` immediately — a length is not the secret, its bytes are.
 @vm(crypto__const_eq)
 pub fn const_eq(a Binary, b Binary) Bool
@@ -243,8 +98,9 @@ pub fn const_eq(a Binary, b Binary) Bool
 // Whether `sig` is a valid ECDSA-P256-SHA256 signature of `message` under
 // `public_key`. The key is SEC1 uncompressed — `0x04` then the 32-byte x and
 // y — and `sig` is ASN.1 DER, which is the form WebAuthn's ES256 and most TLS
-// stacks produce. Total: a key or signature of the wrong shape is `False`,
-// never a crash, so a caller may pass bytes straight off the wire.
+// stacks produce. Total: a key, message or signature of the wrong shape, one
+// that is not whole bytes among them, is `False`, never a crash, so a caller
+// may pass bytes straight off the wire.
 @vm(crypto__p256_verify)
 pub fn p256_verify(public_key Binary, message Binary, sig Binary) Bool
 

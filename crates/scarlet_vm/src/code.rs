@@ -1130,8 +1130,13 @@ fn built(i: Intrinsic, argc: usize) -> bool {
         | Intrinsic::TimeEpochMs
         | Intrinsic::OsArgv
         | Intrinsic::OsEnv => 0,
-        Intrinsic::CryptoRandomBytes | Intrinsic::IoReadFile => 1,
-        Intrinsic::IoWriteFile => 2,
+        Intrinsic::CryptoRandomBytes
+        | Intrinsic::IoReadFile
+        | Intrinsic::CryptoSha1
+        | Intrinsic::CryptoSha256
+        | Intrinsic::CryptoSha512 => 1,
+        Intrinsic::IoWriteFile | Intrinsic::CryptoHmacSha256 | Intrinsic::CryptoConstEq => 2,
+        Intrinsic::CryptoP256Verify | Intrinsic::CryptoEd25519Verify => 3,
         Intrinsic::MapKeys | Intrinsic::MapValues | Intrinsic::MapSize | Intrinsic::MapToList => 1,
         Intrinsic::MapGet | Intrinsic::MapHas | Intrinsic::MapDelete => 2,
         Intrinsic::MapSet => 3,

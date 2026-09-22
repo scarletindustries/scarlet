@@ -133,6 +133,7 @@ intrinsics! {
     TimeMonotonic = "time__monotonic",
     TimeEpochMs = "time__epoch_ms",
     CryptoRandomBytes = "crypto__random_bytes",
+    CryptoSha1 = "crypto__sha1",
     CryptoSha256 = "crypto__sha256",
     CryptoSha512 = "crypto__sha512",
     CryptoHmacSha256 = "crypto__hmac_sha256",

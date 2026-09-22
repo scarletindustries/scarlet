@@ -22,6 +22,7 @@ import scarlet/base64
 import scarlet/binary
 import scarlet/crypto
 import scarlet/int
+import scarlet/result
 
 fn ok(b Bool) String {
 	if b { 'PASS' } else { 'FAIL' }
@@ -57,6 +58,21 @@ fn hex_from(b Binary, at Int, size Int, acc Binary) Binary {
 // mismatch unreadable in the golden.
 fn hex(b Binary) String {
 	text(hex_from(b, 0, binary.byte_size(b), <<>>))
+}
+
+// A digest as hex, or `no digest` for the binaries that have none.
+fn digest(r Result(Binary, Nil)) String {
+	match r {
+		Ok(b) -> hex(b)
+		Err(Nil) -> 'no digest'
+	}
+}
+
+fn digest_size(r Result(Binary, Nil)) Int {
+	match r {
+		Ok(b) -> binary.byte_size(b)
+		Err(Nil) -> -1
+	}
 }
 
 fn text(b Binary) String {
@@ -183,9 +199,9 @@ pub fn main() {
 
 	// --- sha1: published vectors ----------------------------------------------
 
-	println('sha1 empty: ${hex(crypto.sha1(<<>>))}')
-	println('sha1 abc: ${hex(crypto.sha1(<<'abc'>>))}')
-	println('sha1 fox: ${hex(crypto.sha1(<<'The quick brown fox jumps over the lazy dog'>>))}')
+	println('sha1 empty: ${digest(crypto.sha1(<<>>))}')
+	println('sha1 abc: ${digest(crypto.sha1(<<'abc'>>))}')
+	println('sha1 fox: ${digest(crypto.sha1(<<'The quick brown fox jumps over the lazy dog'>>))}')
 
 	// --- sha1: the padding boundary -------------------------------------------
 	//
@@ -195,24 +211,24 @@ pub fn main() {
 	// straddle it one block further out, where an off-by-one in the block walk
 	// rather than in the padding would show.
 
-	println('sha1 55a: ${hex(crypto.sha1(a_times(55)))}')
-	println('sha1 56a: ${hex(crypto.sha1(a_times(56)))}')
-	println('sha1 57a: ${hex(crypto.sha1(a_times(57)))}')
-	println('sha1 63a: ${hex(crypto.sha1(a_times(63)))}')
-	println('sha1 64a: ${hex(crypto.sha1(a_times(64)))}')
-	println('sha1 65a: ${hex(crypto.sha1(a_times(65)))}')
-	println('sha1 119a: ${hex(crypto.sha1(a_times(119)))}')
-	println('sha1 120a: ${hex(crypto.sha1(a_times(120)))}')
+	println('sha1 55a: ${digest(crypto.sha1(a_times(55)))}')
+	println('sha1 56a: ${digest(crypto.sha1(a_times(56)))}')
+	println('sha1 57a: ${digest(crypto.sha1(a_times(57)))}')
+	println('sha1 63a: ${digest(crypto.sha1(a_times(63)))}')
+	println('sha1 64a: ${digest(crypto.sha1(a_times(64)))}')
+	println('sha1 65a: ${digest(crypto.sha1(a_times(65)))}')
+	println('sha1 119a: ${digest(crypto.sha1(a_times(119)))}')
+	println('sha1 120a: ${digest(crypto.sha1(a_times(120)))}')
 
 	// A non-ASCII input, so the digest is over bytes and not over anything
 	// text-shaped.
-	println('sha1 all256: ${hex(crypto.sha1(every))}')
+	println('sha1 all256: ${digest(crypto.sha1(every))}')
 
 	// Digest length is fixed at 20 bytes regardless of input size.
 	println(
 		'sha1 length: ${ok(
-			binary.byte_size(crypto.sha1(<<>>)) == 20,
-		)} ${ok(binary.byte_size(crypto.sha1(every)) == 20)}',
+			digest_size(crypto.sha1(<<>>)) == 20,
+		)} ${ok(digest_size(crypto.sha1(every)) == 20)}',
 	)
 
 	// --- RFC 6455 §1.3: the worked example ------------------------------------
@@ -222,20 +238,31 @@ pub fn main() {
 	// all.
 
 	accept = crypto.websocket_accept(<<'dGhlIHNhbXBsZSBub25jZQ=='>>)
-	println('ws accept: ${text(accept)}')
-	println('ws accept matches: ${ok(accept == <<'s3pPLMBiTxaQ9kYGzzhZRbK+xOo='>>)}')
+	println(
+		'ws accept: ${match accept {
+			Ok(a) -> text(a)
+			Err(Nil) -> 'no accept'
+		}}',
+	)
+	println('ws accept matches: ${ok(accept == Ok(<<'s3pPLMBiTxaQ9kYGzzhZRbK+xOo='>>))}')
 
 	// The GUID is spelled once, in the module. A caller that appends its own
 	// copy must get the same answer.
-	manual = base64.encode(
+	manual = result.map(
 		crypto.sha1(
 			binary.append(
 				<<'dGhlIHNhbXBsZSBub25jZQ=='>>,
 				<<'258EAFA5-E914-47DA-95CA-C5AB0DC85B11'>>,
 			),
 		),
+		base64.encode,
 	)
 	println('ws accept manual: ${ok(manual == accept)}')
+
+	// A binary that is not whole bytes has no digest, rather than the digest
+	// of the whole bytes in it.
+	println('sha1 of 4 bits: ${digest(crypto.sha1(<<1:4>>))}')
+	println('sha1 of a byte and 4 bits: ${digest(crypto.sha1(<<97, 1:4>>))}')
 
 	// --- CSPRNG: what a single run can honestly assert -----------------------
 	//

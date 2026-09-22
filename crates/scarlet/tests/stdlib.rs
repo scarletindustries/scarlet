@@ -4,6 +4,22 @@
 mod common;
 use common::{check_ok, check_rejects, run_outputs};
 
+/// Every stdlib module compiles. A module is only checked when a program
+/// imports it, so without this, one that no running test imports could hold
+/// a type error nothing sees. Each goes under an alias of its own, so no two
+/// last segments clash.
+#[test]
+fn every_stdlib_module_compiles() {
+    let imports: String = scarlet_core::module::stdlib_modules()
+        .iter()
+        .filter(|path| path.len() > 1)
+        .enumerate()
+        .map(|(i, path)| format!("import {} as m{i}\n", path.join("/")))
+        .collect();
+    assert!(imports.lines().count() > 30, "found only:\n{imports}");
+    check_ok(&format!("{imports}\npub fn main() {{\n\tNil\n}}\n"));
+}
+
 #[test]
 fn stdlib_option() {
     run_outputs(

@@ -229,10 +229,16 @@ pub fn token(store Store, req_body Binary) Result(Json, String) {
 			None -> Err('code is unknown, used, or expired')
 			Some(g) -> {
 				Grant(_, scope, client_id, redirect_uri, pkce_challenge, _) = g
-				hashed = base64.url_encode(crypto.sha256(binary.from_string(verifier)))
+				// A verifier with no digest fails the check. It is a string, so it
+				// always has one, but an empty stand-in would match an empty
+				// challenge.
+				pkce_ok = match crypto.sha256(binary.from_string(verifier)) {
+					Ok(digest) -> crypto.const_eq(base64.url_encode(digest), binary.from_string(pkce_challenge))
+					Err(Nil) -> False
+				}
 				ok_client = { form.get(f, 'client_id') or client_id } == client_id
 				ok_redirect = { form.get(f, 'redirect_uri') or redirect_uri } == redirect_uri
-				if !crypto.const_eq(hashed, binary.from_string(pkce_challenge)) {
+				if !pkce_ok {
 					Err('PKCE verification failed')
 				} else if !ok_client || !ok_redirect {
 					Err('client_id or redirect_uri does not match the grant')
