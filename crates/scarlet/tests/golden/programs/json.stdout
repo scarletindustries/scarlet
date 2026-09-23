@@ -53,10 +53,11 @@ unpaired low          rejected
 valid surrogate pair  accepted
 invalid utf8          rejected
 i64 max               Some(9223372036854775807)
-i64 max + 1 as int    None
+i64 max + 1 as int    Some(9223372036854775808)
 i64 max + 1 as float  True
 i64 min               Some(-9223372036854775808)
 i64 max + 1 kind      Some(IntKind)
+past 64 bits          rejected
 1.0 as int            None
 dup first             Some(1)
 dup member count      2

@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use num_bigint::Sign;
 use num_traits::{FromPrimitive, ToPrimitive};
-use scarlet_ir::core_ir::{FuncIdx, IoErrors, VariantRef};
+use scarlet_ir::core_ir::{FuncIdx, IoErrors, JsonTypes, VariantRef};
 use scarlet_ir::intrinsic::Intrinsic;
 
 use crate::Stop;
@@ -29,6 +29,7 @@ use crate::eq;
 use crate::float::{self, NumOp};
 use crate::heap::{Cell, Full, Heap, Kind};
 use crate::host::Host;
+use crate::json;
 use crate::map;
 use crate::show;
 use crate::value::{Value, View};
@@ -940,6 +941,143 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 };
                 Ok(Value::bool(valid))
             }
+            Intrinsic::JsonParseBinary => {
+                let src = self.binary(v)?;
+                let parsed = if src.len % 8 == 0 {
+                    json::parse(&binary::bytes(&self.heap, src))
+                } else {
+                    Err(json::ParseError {
+                        offset: (src.len / 8) as usize,
+                        message: "input is not a whole number of bytes".into(),
+                    })
+                };
+                let types = self.json_types()?;
+                match parsed {
+                    Ok((tape, arena)) => {
+                        let arena = binary::make(&mut self.heap, &arena, arena.len() as u64 * 8);
+                        let arena = Value::cell(arena.map_err(full)?);
+                        let tape = binary::make(&mut self.heap, &tape, tape.len() as u64 * 8);
+                        let tape = Value::cell(tape.map_err(full)?);
+                        let root = Value::int(0).unwrap_or(Value::NIL);
+                        let doc = self
+                            .heap
+                            .ctor(types.doc, &[arena, tape, root])
+                            .map_err(full)?;
+                        self.ok(Value::cell(doc))
+                    }
+                    Err(e) => {
+                        let offset =
+                            bigint::value(&mut self.heap, e.offset.into()).map_err(full)?;
+                        let text = self.heap.string(e.message.as_bytes()).map_err(full)?;
+                        let error = self
+                            .heap
+                            .ctor(types.parse_error, &[offset, Value::cell(text)])
+                            .map_err(full)?;
+                        self.err(Value::cell(error))
+                    }
+                }
+            }
+            // -1 for a node the tape does not have: `scarlet/json` reads it.
+            Intrinsic::JsonKind | Intrinsic::JsonLen => {
+                let d = self.doc(v)?;
+                let t = self.tape(&d)?;
+                let n = match i {
+                    Intrinsic::JsonKind => t.kind(d.idx),
+                    _ => t.len(d.idx).and_then(|n| i64::try_from(n).ok()),
+                };
+                bigint::value(&mut self.heap, n.unwrap_or(-1).into()).map_err(full)
+            }
+            Intrinsic::JsonField | Intrinsic::JsonIndex => {
+                let d = self.doc(v)?;
+                let key = arg(self, 1);
+                let found = match i {
+                    Intrinsic::JsonField => {
+                        let name = self.text_of(key)?;
+                        self.tape(&d)?.field(d.idx, &name)
+                    }
+                    _ => match self.int_of(key)? {
+                        Int::Small(n) => usize::try_from(n)
+                            .ok()
+                            .and_then(|n| self.tape(&d).ok()?.element(d.idx, n)),
+                        Int::Big(_) => None,
+                    },
+                };
+                match found {
+                    Some(at) => {
+                        let doc = self.doc_at(&d, at)?;
+                        self.some(doc)
+                    }
+                    None => Ok(Value::nullary(self.code.abi.none)),
+                }
+            }
+            Intrinsic::JsonEntries => {
+                let d = self.doc(v)?;
+                let members = self.tape(&d)?.members(d.idx).unwrap_or_default();
+                let mut items = Vec::with_capacity(members.len());
+                for (key, at) in members {
+                    let key = Value::cell(self.heap.string(&key).map_err(full)?);
+                    let doc = self.doc_at(&d, at)?;
+                    items.push(Value::cell(self.heap.tuple(&[key, doc]).map_err(full)?));
+                }
+                Ok(Value::cell(
+                    array::from_values(&mut self.heap, &items).map_err(full)?,
+                ))
+            }
+            Intrinsic::JsonElements => {
+                let d = self.doc(v)?;
+                let ats = self.tape(&d)?.elements(d.idx).unwrap_or_default();
+                let mut items = Vec::with_capacity(ats.len());
+                for at in ats {
+                    items.push(self.doc_at(&d, at)?);
+                }
+                Ok(Value::cell(
+                    array::from_values(&mut self.heap, &items).map_err(full)?,
+                ))
+            }
+            Intrinsic::JsonString => {
+                let d = self.doc(v)?;
+                let text = self.tape(&d)?.string(d.idx);
+                match text.filter(|t| std::str::from_utf8(t).is_ok()) {
+                    Some(t) => {
+                        let s = Value::cell(self.heap.string(&t).map_err(full)?);
+                        self.some(s)
+                    }
+                    None => Ok(Value::nullary(self.code.abi.none)),
+                }
+            }
+            Intrinsic::JsonInt | Intrinsic::JsonIntText => {
+                let d = self.doc(v)?;
+                match self.tape(&d)?.int(d.idx) {
+                    Some(n) => {
+                        let found = match i {
+                            Intrinsic::JsonInt => bigint::value(&mut self.heap, n).map_err(full)?,
+                            _ => Value::cell(
+                                self.heap.string(n.to_string().as_bytes()).map_err(full)?,
+                            ),
+                        };
+                        self.some(found)
+                    }
+                    None => Ok(Value::nullary(self.code.abi.none)),
+                }
+            }
+            Intrinsic::JsonFloat => {
+                let d = self.doc(v)?;
+                match self.tape(&d)?.float(d.idx) {
+                    Some(f) => self.some(Value::float(f)),
+                    None => Ok(Value::nullary(self.code.abi.none)),
+                }
+            }
+            Intrinsic::JsonBool => {
+                let d = self.doc(v)?;
+                match self.tape(&d)?.bool(d.idx) {
+                    Some(b) => self.some(Value::bool(b)),
+                    None => Ok(Value::nullary(self.code.abi.none)),
+                }
+            }
+            Intrinsic::JsonEncode => {
+                let text = self.encode_json(v)?;
+                Ok(Value::cell(self.heap.string(&text).map_err(full)?))
+            }
             Intrinsic::IoReadFile => {
                 let path = self.text_of(v)?;
                 match std::fs::read(path_of(&path)) {
@@ -1303,6 +1441,153 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             }
         };
         self.err(error)
+    }
+
+    fn json_types(&self) -> Result<JsonTypes, Stop> {
+        self.code.abi.json.ok_or_else(|| {
+            Stop::BadProgram("a JSON built-in, in a program with no `scarlet/json` types".into())
+        })
+    }
+
+    /// The parts of the `Doc` `v`. Only `json.parse` makes one, so anything
+    /// else is a program the compiler should not have let through.
+    fn doc(&self, v: Value) -> Result<Doc, Stop> {
+        let types = self.json_types()?;
+        let not_a_doc = || Stop::BadProgram(format!("a JSON read of {v:?}, which is not a `Doc`"));
+        let cell = v.as_cell().ok_or_else(not_a_doc)?;
+        if self.heap.kind(cell) != Some(Kind::Ctor) || self.heap.variant(cell) != types.doc {
+            return Err(not_a_doc());
+        }
+        let field = |i| self.heap.field(cell, i).ok_or_else(not_a_doc);
+        let (arena, tape) = (field(0)?, field(1)?);
+        // A node past any tape, for an index no tape has: every read of it is
+        // `None`.
+        let idx = match self.int_of(field(2)?)? {
+            Int::Small(n) => usize::try_from(n).unwrap_or(usize::MAX),
+            Int::Big(_) => usize::MAX,
+        };
+        Ok(Doc { arena, tape, idx })
+    }
+
+    fn tape(&self, d: &Doc) -> Result<json::Tape<'_>, Stop> {
+        Ok(json::Tape {
+            heap: &self.heap,
+            tape: self.binary(d.tape)?,
+            arena: self.binary(d.arena)?,
+        })
+    }
+
+    /// A `Doc` over the same document as `d`, at node `idx`.
+    fn doc_at(&mut self, d: &Doc, idx: usize) -> Result<Value, Stop> {
+        let types = self.json_types()?;
+        let idx = bigint::value(&mut self.heap, idx.into()).map_err(full)?;
+        let (arena, tape) = (self.share(d.arena), self.share(d.tape));
+        let cell = self
+            .heap
+            .ctor(types.doc, &[arena, tape, idx])
+            .map_err(full)?;
+        Ok(Value::cell(cell))
+    }
+
+    /// The `scarlet/json.Json` tree `root`, as JSON text. The walk is a list
+    /// of what is still to write rather than recursion, so a tree nested a
+    /// million deep encodes without overflowing the stack.
+    fn encode_json(&self, root: Value) -> Result<Vec<u8>, Stop> {
+        enum Step {
+            Value(Value),
+            Key(Value),
+            Text(&'static [u8]),
+        }
+        let types = self.json_types()?;
+        let mut out = Vec::new();
+        let mut todo = vec![Step::Value(root)];
+        while let Some(step) = todo.pop() {
+            let v = match step {
+                Step::Text(t) => {
+                    out.extend_from_slice(t);
+                    continue;
+                }
+                Step::Key(k) => {
+                    json::write_string(&mut out, &String::from_utf8_lossy(&self.text_of(k)?));
+                    continue;
+                }
+                Step::Value(v) => v,
+            };
+            let not_json = || Stop::BadProgram(format!("{v:?} as a `Json` to encode"));
+            let cell = match v.view() {
+                View::Nullary(n) if n == types.null => {
+                    out.extend_from_slice(b"null");
+                    continue;
+                }
+                View::Cell(cell) if self.heap.kind(cell) == Some(Kind::Ctor) => cell,
+                View::Nullary(_)
+                | View::Cell(_)
+                | View::Int(_)
+                | View::Float(_)
+                | View::Nil
+                | View::Bool(_)
+                | View::Func(_) => return Err(not_json()),
+            };
+            let variant = self.heap.variant(cell);
+            let inner = self.heap.field(cell, 0).ok_or_else(not_json)?;
+            if variant == types.boolean {
+                let yes = matches!(inner.view(), View::Bool(true));
+                out.extend_from_slice(if yes { b"true" } else { b"false" });
+            } else if variant == types.integer {
+                let n = match self.int_of(inner)? {
+                    Int::Small(n) => n.to_string(),
+                    Int::Big(n) => n.to_string(),
+                };
+                out.extend_from_slice(n.as_bytes());
+            } else if variant == types.real {
+                json::write_float(&mut out, self.float_of(inner)?);
+            } else if variant == types.str {
+                json::write_string(&mut out, &String::from_utf8_lossy(&self.text_of(inner)?));
+            } else if variant == types.number {
+                // Text that is not a JSON number is `null`, rather than
+                // bytes that stop the whole document parsing at the far end.
+                let digits = self.text_of(inner)?;
+                if json::is_number(&digits) {
+                    out.extend_from_slice(&digits);
+                } else {
+                    out.extend_from_slice(b"null");
+                }
+            } else if variant == types.list || variant == types.object {
+                let Seq::Tree(items) = self.seq(inner)? else {
+                    return Err(not_json());
+                };
+                let items = array::elements(&self.heap, items);
+                let object = variant == types.object;
+                out.push(if object { b'{' } else { b'[' });
+                todo.push(Step::Text(if object { b"}" } else { b"]" }));
+                // Pushed last to first, so they come off in order, each
+                // after the comma before it.
+                for (i, item) in items.into_iter().enumerate().rev() {
+                    if object {
+                        let pair = item
+                            .as_cell()
+                            .filter(|&c| self.heap.kind(c) == Some(Kind::Tuple));
+                        let pair = pair.ok_or_else(not_json)?;
+                        let (Some(k), Some(value)) =
+                            (self.heap.element(pair, 0), self.heap.element(pair, 1))
+                        else {
+                            return Err(not_json());
+                        };
+                        todo.push(Step::Value(value));
+                        todo.push(Step::Text(b":"));
+                        todo.push(Step::Key(k));
+                    } else {
+                        todo.push(Step::Value(item));
+                    }
+                    if i > 0 {
+                        todo.push(Step::Text(b","));
+                    }
+                }
+            } else {
+                return Err(not_json());
+            }
+        }
+        Ok(out)
     }
 
     /// The bytes of the binary `v`, or `None` when it is not whole bytes.
@@ -1683,6 +1968,14 @@ fn ready(f: &Func) -> Result<&Body, Stop> {
     }
 }
 
+/// A `scarlet/json.Doc`, taken apart: the binaries it holds, borrowed, and
+/// the node it points at.
+struct Doc {
+    arena: Value,
+    tape: Value,
+    idx: usize,
+}
+
 /// The path a string names. A Scarlet string is always UTF-8, so nothing is
 /// lost on the way.
 fn path_of(text: &[u8]) -> PathBuf {
@@ -2012,6 +2305,38 @@ mod tests {
              }\n",
         );
         assert_eq!(out, "Some(1)\n2\n[main.scrl, x]\nfailed\nrandom\n");
+        assert_eq!(left, 0);
+    }
+
+    /// Every `Doc` a read hands out shares its document's tape and strings,
+    /// and a parse error holds its own message. When the run ends, all of it
+    /// is freed.
+    #[test]
+    fn what_json_makes_is_all_freed() {
+        let (out, left) = cells_left_after(
+            "import scarlet/json\n\
+             import scarlet/json.{Object, Str, List, Integer}\n\
+             pub fn main() {\n\
+             \tmatch json.parse('{\"a\": [1, {\"b\": \"deep\"}], \"c\": \"x\"}') {\n\
+             \t\tOk(d) -> {\n\
+             \t\t\tprintln(json.size(json.field(d, 'a') or d))\n\
+             \t\t\t_entries = json.entries(d)\n\
+             \t\t\t_elements = json.elements(json.field(d, 'a') or d)\n\
+             \t\t\tprintln(json.reencode(d))\n\
+             \t\t}\n\
+             \t\tErr(_) -> println('no')\n\
+             \t}\n\
+             \tprintln(match json.parse('[') {\n\
+             \t\tOk(_) -> 'parsed'\n\
+             \t\tErr(_) -> 'refused'\n\
+             \t})\n\
+             \tprintln(json.encode(Object([('k', List([Integer(1), Str('v')]))])))\n\
+             }\n",
+        );
+        assert_eq!(
+            out,
+            "2\n{\"a\":[1,{\"b\":\"deep\"}],\"c\":\"x\"}\nrefused\n{\"k\":[1,\"v\"]}\n"
+        );
         assert_eq!(left, 0);
     }
 

@@ -150,6 +150,9 @@ pub struct Abi {
     /// `scarlet/io.IoError`, when the program loads that module: what a file
     /// read or write that failed says went wrong.
     pub io: Option<IoErrors>,
+    /// `scarlet/json`'s types, when the program loads that module: what
+    /// `json.parse` gives and `json.encode` reads.
+    pub json: Option<JsonTypes>,
 }
 
 /// The constructors of `scarlet/binary.Radix`.
@@ -180,6 +183,41 @@ pub struct IoErrors {
     pub errno: VariantRef,
 }
 
+/// The constructors of `scarlet/json` the VM builds or reads.
+#[derive(Debug, Clone, Copy)]
+pub struct JsonTypes {
+    /// `Doc(arena, tape, idx)`: a parsed document, and every cursor into it.
+    pub doc: VariantRef,
+    /// `ParseError(offset, message)`.
+    pub parse_error: VariantRef,
+    /// `Json`'s, which `json.encode` writes out.
+    pub null: VariantRef,
+    pub boolean: VariantRef,
+    pub integer: VariantRef,
+    pub real: VariantRef,
+    pub str: VariantRef,
+    pub list: VariantRef,
+    pub object: VariantRef,
+    pub number: VariantRef,
+}
+
+impl JsonTypes {
+    fn variants(&self) -> [VariantRef; 10] {
+        [
+            self.doc,
+            self.parse_error,
+            self.null,
+            self.boolean,
+            self.integer,
+            self.real,
+            self.str,
+            self.list,
+            self.object,
+            self.number,
+        ]
+    }
+}
+
 impl IoErrors {
     fn variants(&self) -> [VariantRef; 12] {
         [
@@ -208,6 +246,9 @@ impl Abi {
         }
         if let Some(io) = self.io {
             all.extend(io.variants());
+        }
+        if let Some(json) = self.json {
+            all.extend(json.variants());
         }
         all
     }

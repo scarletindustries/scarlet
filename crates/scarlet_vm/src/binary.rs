@@ -129,6 +129,47 @@ fn byte(heap: &Heap, b: Bits, i: u64) -> u8 {
     }
 }
 
+/// Word `k` of `b`'s bytes, little-endian: bytes `8k` to `8k + 7`, the first
+/// in the lowest bits. `None` when it runs past `b`'s end. When `b` starts on
+/// a word of its owner, as a binary made whole does, this is that word as it
+/// is, so a JSON tape (`json.rs`) reads a node without copying the tape.
+pub(crate) fn word(heap: &Heap, b: Bits, k: u64) -> Option<u64> {
+    let end = k.checked_add(1)?.checked_mul(64)?;
+    if end > b.len {
+        return None;
+    }
+    if b.at.is_multiple_of(64) {
+        let at = usize::try_from(b.at / 64 + k).ok()?;
+        return heap.data(b.owner).get(1 + at).copied();
+    }
+    let mut bytes = [0u8; 8];
+    for (j, out) in bytes.iter_mut().enumerate() {
+        *out = byte(heap, b, k * 64 + j as u64 * 8);
+    }
+    Some(u64::from_le_bytes(bytes))
+}
+
+/// Bytes `from` to `from + n` of `b`, or `None` when they run past its end.
+pub(crate) fn byte_range(heap: &Heap, b: Bits, from: u64, n: u64) -> Option<Vec<u8>> {
+    if from.checked_add(n)?.checked_mul(8)? > b.len {
+        return None;
+    }
+    Some((from..from + n).map(|k| byte(heap, b, k * 8)).collect())
+}
+
+/// Whether bytes `from` to `from + text.len()` of `b` are `text`, read in
+/// place.
+pub(crate) fn bytes_are(heap: &Heap, b: Bits, from: u64, text: &[u8]) -> bool {
+    let fits = (text.len() as u64)
+        .checked_add(from)
+        .and_then(|end| end.checked_mul(8))
+        .is_some_and(|end| end <= b.len);
+    fits && text
+        .iter()
+        .zip(from..)
+        .all(|(&t, k)| byte(heap, b, k * 8) == t)
+}
+
 /// `b` as whole bytes, the last one padded with zero bits.
 pub(crate) fn bytes(heap: &Heap, b: Bits) -> Vec<u8> {
     (0..b.len.div_ceil(8))

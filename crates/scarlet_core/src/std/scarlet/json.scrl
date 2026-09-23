@@ -25,11 +25,10 @@ import scarlet/result
 //
 // - **Duplicate keys are kept.** `field` returns the first match; `entries`
 //   returns every member in document order, duplicates included.
-// - **An integer larger than an `Int`** — a JSON number above 9223372036854775807
-//   — has kind `Int` but no `Int` value: `int` returns `None` rather than a
-//   truncated one. Read it with `float` if an approximation will do, or with
-//   `int_text` for the digits. `to_json` keeps the digits, so a document
-//   carrying one survives `reencode` unchanged.
+// - **Every integer is an `Int`**, however large, since an `Int` has no bounds:
+//   `int` never truncates. Past 64 bits (below -9223372036854775808 or above
+//   18446744073709551615) the parser underneath has no integer to read one
+//   into, and the document does not parse.
 // - **An unpaired UTF-16 surrogate escape** such as `\ud800` is a parse error.
 //   RFC 8259 section 7 requires the pair. The SIMD parser underneath decodes a
 //   lone surrogate to a NUL character instead of refusing it, so `parse`
@@ -82,10 +81,8 @@ pub type Json {
 	Str(value String)
 	List(items Array(Json))
 	Object(members Array((String, Json)))
-	// A number carried as the digits that were on the wire, for the one value
-	// no other constructor can hold: a JSON integer above `Int` range.
-	// `to_json` produces this rather than a truncation or a rounded `Real`, so
-	// a document going through `reencode` keeps its 64-bit identifiers.
+	// A number written as these digits, verbatim: for a number a program holds
+	// as text, such as a decimal it must not round through a `Float`.
 	//
 	// `encode` writes `digits` verbatim when it is a JSON number, and `null`
 	// when it is not — a hand-built one that is not a number would otherwise
@@ -125,17 +122,16 @@ pub fn entries(d Doc) Array((String, Doc))
 @vm(json__string)
 pub fn string(d Doc) Option(String)
 
-// The integer at `d`. `None` for a float, and `None` for a JSON integer too
-// large for an `Int` — never a truncated value.
+// The integer at `d`. `None` for a float, or anything else that is not an
+// integer.
 @vm(json__int)
 pub fn int(d Doc) Option(Int)
 
-// The integer at `d` written in decimal, including the ones `int` refuses
-// because they do not fit. `None` for anything that is not an integer.
+// The integer at `d` written in decimal. `None` for anything that is not an
+// integer.
 //
-// This is for passing a number through unchanged when there is nothing to
-// decode it into — `to_json` is the caller that needs it. Reach for `int`
-// when you want a number to compute with.
+// This is for passing a number through as text. Reach for `int` when you
+// want a number to compute with.
 @vm(json__int_text)
 pub fn int_text(d Doc) Option(String)
 
@@ -216,10 +212,9 @@ pub fn to_json(d Doc) Json {
 	match kind(d) {
 		NullKind -> Null
 		BoolKind -> Boolean(option.unwrap(bool(d), False))
-		// An integer above `Int` range has kind `Int` and no `Int` value. The
-		// digits go through verbatim: a default here would have been `0`, and
-		// a `reencode` whose own doc offers it for passing a document through
-		// would have zeroed every 64-bit identifier in it.
+		// Every integer that parses is an `Int`. Were one ever not, its digits
+		// would go through verbatim: a default here would have been `0`, and a
+		// `reencode` would have zeroed every identifier it touched.
 		IntKind -> match int(d) {
 			Some(i) -> Integer(i)
 			None -> match int_text(d) {

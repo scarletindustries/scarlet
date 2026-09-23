@@ -18,6 +18,12 @@ getrandom = "0.4"
 aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys", "alloc"] }
 # The OS error numbers `scarlet/io.IoError` names.
 libc = "0.2"
+# `scarlet/json`'s parser: simdjson's Rust port, choosing its SIMD code for
+# the CPU it runs on. Without the default `serde_impl`, which pulls serde in
+# for an API this never calls; `swar-number-parsing` is a default it does use.
+simd-json = { version = "0.17", default-features = false, features = ["runtime-detection", "swar-number-parsing"] }
+# Finding the next backslash, for the lone-surrogate check in `json.rs`.
+memchr = "2"
 
 [dev-dependencies]
 # Tests write their programs in Scarlet and compile them. Only the tests see

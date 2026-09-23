@@ -245,8 +245,8 @@ pub fn string_value() Decoder(String) {
 	scalar('a string', '', json.string)
 }
 
-// A JSON integer. A number too large for an `Int` fails here rather than
-// arriving truncated — see `scarlet/json`.
+// A JSON integer, however large: an `Int` has no bounds. A float fails here,
+// even one with no fraction.
 pub fn int() Decoder(Int) {
 	scalar('an integer', 0, json.int)
 }

@@ -344,6 +344,9 @@ pub fn main() {
 	line('i64 max + 1 as float  ', read(big, fn(d) nth_is_float(d, 1)))
 	line('i64 min               ', read(big, fn(d) nth_int(d, 2)))
 	line('i64 max + 1 kind      ', read(big, fn(d) nth_kind(d, 1)))
+	// An Int has no bounds, so every integer that parses is one. Past 64 bits
+	// the parser underneath has no integer to read it into.
+	line('past 64 bits          ', outcome('[18446744073709551616]'))
 
 	// A float is not an Int, even when it is integral.
 	line('1.0 as int            ', read('[1.0]', fn(d) nth_int(d, 0)))

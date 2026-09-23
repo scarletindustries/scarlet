@@ -87,6 +87,11 @@ fn value<'t>(
             Some(Kind::BigInt) => {
                 out.extend_from_slice(heap.read_big_int(cell).to_string().as_bytes());
             }
+            // A `Doc` holds a whole document's tape and strings, and shows
+            // as what it points at instead.
+            Some(Kind::Ctor) if code.abi.json.is_some_and(|j| heap.variant(cell) == j.doc) => {
+                out.extend_from_slice(crate::json::doc_image(heap, cell).as_bytes());
+            }
             Some(Kind::Ctor) => ctor(heap, &code.types, cell, layout, out, todo),
             Some(Kind::Closure) => function(code, heap.closure_func(cell), out),
             Some(Kind::Tuple) => tuple(heap, code, cell, layout, out, todo)?,

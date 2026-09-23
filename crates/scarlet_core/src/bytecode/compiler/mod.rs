@@ -49,8 +49,8 @@ use super::session::{RawRef, Watermark};
 use super::{PreludeBindings, TypeRef};
 use crate::ast;
 use crate::core_ir::{
-    Abi, Const, ConstId, CoreFn, FuncIdx, IoErrors, LoweredFn, Program, Radix, TypeNames,
-    VariantNames, VariantRef,
+    Abi, Const, ConstId, CoreFn, FuncIdx, IoErrors, JsonTypes, LoweredFn, Program, Radix,
+    TypeNames, VariantNames, VariantRef,
 };
 use crate::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
 use crate::tivec::{Idx, TiVec};
@@ -1362,6 +1362,7 @@ impl Compiler {
             err: self.prelude.err().into(),
             radix: self.radix(),
             io: self.io_errors(),
+            json: self.json_types(),
         };
         let types = self.type_names((&fns).into_iter().chain(&inits).chain([&toplevel]), &abi);
         Some(Program {
@@ -1403,6 +1404,27 @@ impl Compiler {
             quota_exceeded: variant("QuotaExceeded")?,
             unaligned_binary: variant("UnalignedBinary")?,
             errno: variant("Errno")?,
+        })
+    }
+
+    /// `scarlet/json`'s `Doc`, `ParseError` and `Json` constructors, by name,
+    /// as [`Self::radix`].
+    fn json_types(&self) -> Option<JsonTypes> {
+        let module = ["scarlet", "json"];
+        let doc = self.stdlib_variants(&module, "Doc")?;
+        let parse_error = self.stdlib_variants(&module, "ParseError")?;
+        let json = self.stdlib_variants(&module, "Json")?;
+        Some(JsonTypes {
+            doc: doc("Doc")?,
+            parse_error: parse_error("ParseError")?,
+            null: json("Null")?,
+            boolean: json("Boolean")?,
+            integer: json("Integer")?,
+            real: json("Real")?,
+            str: json("Str")?,
+            list: json("List")?,
+            object: json("Object")?,
+            number: json("Number")?,
         })
     }
 

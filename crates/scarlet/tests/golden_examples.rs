@@ -311,7 +311,6 @@ suite! {
         // and present — that a partial update turns on. Also pins the
         // adversarial answers: 1e400, a lone surrogate, invalid UTF-8, the
         // 64-bit boundary, duplicate keys and deep nesting.
-        #[ignore = "needs the VM"]
         json,
         // scarlet/json/decode's own shape: a forty-member record written one
         // flat line per member, independent members accumulating their failures
@@ -319,7 +318,6 @@ suite! {
         // accumulation, one_of over 2 vs 2.0, and the two places where
         // accumulation is deliberately given up — `fail`, and `then`'s
         // dependent continuation.
-        #[ignore = "needs the VM"]
         decoders,
         // base64, SHA-1, and the OS CSPRNG: the RFC 4648 and FIPS 180-1
         // vectors, the SHA-1 block/length padding edges, base64's rejection

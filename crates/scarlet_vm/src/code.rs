@@ -1135,6 +1135,18 @@ fn built(i: Intrinsic, argc: usize) -> bool {
         | Intrinsic::CryptoSha1
         | Intrinsic::CryptoSha256
         | Intrinsic::CryptoSha512 => 1,
+        Intrinsic::JsonParseBinary
+        | Intrinsic::JsonKind
+        | Intrinsic::JsonLen
+        | Intrinsic::JsonEntries
+        | Intrinsic::JsonElements
+        | Intrinsic::JsonString
+        | Intrinsic::JsonInt
+        | Intrinsic::JsonIntText
+        | Intrinsic::JsonFloat
+        | Intrinsic::JsonBool
+        | Intrinsic::JsonEncode => 1,
+        Intrinsic::JsonField | Intrinsic::JsonIndex => 2,
         Intrinsic::IoWriteFile | Intrinsic::CryptoHmacSha256 | Intrinsic::CryptoConstEq => 2,
         Intrinsic::CryptoP256Verify | Intrinsic::CryptoEd25519Verify => 3,
         Intrinsic::MapKeys | Intrinsic::MapValues | Intrinsic::MapSize | Intrinsic::MapToList => 1,

@@ -1252,3 +1252,44 @@ fn the_crypto_built_ins_run() {
          True\nFalse\nFalse\nFalse\n",
     );
 }
+
+/// A parsed document is read in place: fields, elements, each kind of
+/// scalar, and an integer past `i64::MAX`, which an `Int` holds exactly. A
+/// `Doc` shows as what it points at, never the document. A `Json` tree
+/// encodes, a `Number` that is not one becoming `null`.
+#[test]
+fn the_json_built_ins_run() {
+    prints(
+        "import scarlet/json\n\
+         import scarlet/json.{Object, Str, Integer, List, Real, Boolean, Null, Number}\n\
+         pub fn main() {\n\
+         \tsrc = '{\"id\": 18446744073709551615, \"n\": -3, \"x\": 0.5, \"s\": \"a\\\\u00e9\", \"t\": [true, null], \"o\": {}}'\n\
+         \tmatch json.parse(src) {\n\
+         \t\tOk(d) -> {\n\
+         \t\t\tprintln('${d} ${json.size(d)}')\n\
+         \t\t\tprintln(json.int(json.field(d, 'id') or d))\n\
+         \t\t\tprintln(json.int_text(json.field(d, 'n') or d))\n\
+         \t\t\tprintln(json.float(json.field(d, 'x') or d))\n\
+         \t\t\tprintln(json.string(json.field(d, 's') or d))\n\
+         \t\t\tt = json.field(d, 't') or d\n\
+         \t\t\tprintln(json.bool(json.index(t, 0) or d))\n\
+         \t\t\tprintln(json.is_null(json.index(t, 1) or d))\n\
+         \t\t\tprintln(json.index(t, 2))\n\
+         \t\t\tprintln(json.field(d, 'missing'))\n\
+         \t\t\tprintln(json.size(json.field(d, 'o') or d))\n\
+         \t\t\tprintln(json.reencode(d))\n\
+         \t\t}\n\
+         \t\tErr(_) -> println('did not parse')\n\
+         \t}\n\
+         \tprintln(json.encode(List([Null, Boolean(True), Integer(-7), Real(1.0), Str('a\"b'), Object([('k', Number('1e9'))]), Number('x')])))\n\
+         \tprintln(match json.parse('[1,]') {\n\
+         \t\tOk(_) -> 'parsed'\n\
+         \t\tErr(_) -> 'refused'\n\
+         \t})\n\
+         }\n",
+        "<json object#0> 6\nSome(18446744073709551615)\nSome(-3)\nSome(0.5)\nSome(aé)\n\
+         Some(True)\nTrue\nNone\nNone\n0\n\
+         {\"id\":18446744073709551615,\"n\":-3,\"x\":0.5,\"s\":\"aé\",\"t\":[true,null],\"o\":{}}\n\
+         [null,true,-7,1.0,\"a\\\"b\",{\"k\":1e9},null]\nrefused\n",
+    );
+}
