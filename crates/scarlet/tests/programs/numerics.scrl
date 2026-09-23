@@ -3,12 +3,12 @@
 // The three number types are deliberately *total* — no arithmetic operation
 // traps, so every edge has a defined answer that this program pins:
 //
-//   Int   is exactly i64 and wraps on overflow. Division and modulo by zero
+//   Int   has no bounds: every result is exact. Division and modulo by zero
 //         are defined (`x / 0 == 0`, `x % 0 == x`); division truncates toward
 //         zero and the remainder takes the dividend's sign. Values outside the
 //         48-bit NaN-boxed small-int range are boxed, which must be invisible.
-//   Float canonicalizes every non-finite result to 0.0, so an overflow or a
-//         division by zero collapses rather than producing inf/NaN.
+//   Float is never NaN or infinite: division by zero is 0.0, and a result too
+//         large stops at the largest float (docs/semantics.md, "Floats").
 //   Decimal is exact scaled-integer arithmetic; its `eq` compares *numbers*
 //         where the built-in `==` compares the representation.
 
@@ -22,8 +22,8 @@ import scarlet/string
 // --- Int <-> String round trips -------------------------------------------
 
 // `int.to_string` goes one way; the other way runs through the binary parser,
-// which is strict: it rejects a sign, an empty string, trailing junk, and
-// anything that does not fit in an Int.
+// which is strict: it rejects a sign, an empty string and trailing junk. Any
+// run of digits fits, since an Int has no bounds.
 fn parse_int(s String) Result(Int, Nil) {
 	binary.parse_int(binary.from_string(s), Dec)
 }
@@ -39,14 +39,14 @@ fn parse_signed(s String) Result(Int, Nil) {
 }
 
 pub fn main() {
-	// --- Int: bounds, wrapping, boxing ---------------------------------------
+	// --- Int: past 64 bits, boxing -------------------------------------------
 
 	// `min_value` is spelled as a subtraction: 9223372036854775808 does not lex.
 	println('bounds: ${int.max_value} ${int.min_value}')
-	println('wrap up: ${int.max_value + 1}')
-	println('wrap down: ${int.min_value - 1}')
-	println('wrap mul: ${1000000000000000 * 1000000}')
-	println('wrap neg: ${0 - int.min_value}')
+	println('past max: ${int.max_value + 1}')
+	println('past min: ${int.min_value - 1}')
+	println('big mul: ${1000000000000000 * 1000000}')
+	println('neg min: ${0 - int.min_value}')
 
 	// 2^47 - 1 is the largest small (unboxed) Int; crossing it boxes the value on
 	// the heap, which arithmetic, equality and printing must not notice.
@@ -56,7 +56,7 @@ pub fn main() {
 	println('boxed round trip: ${9223372036854775807} ${9223372036854775807 - 1 + 1}')
 	println('boxed equality: ${boxed * 2 == 281474976710656}')
 
-	// abs saturates rather than wrapping back to a negative.
+	// abs is exact, `min_value` included.
 	println('abs: ${int.abs(-7)} ${int.abs(7)} ${int.abs(int.min_value)}')
 	println('max/min: ${int.max(3, 9)} ${int.min(3, 9)} ${int.max(-3, -9)}')
 	println('clamp: ${int.clamp(5, 0, 10)} ${int.clamp(50, 0, 10)} ${int.clamp(-50, 0, 10)}')
@@ -89,8 +89,8 @@ pub fn main() {
 	println('float big: ${float.from_int(int.max_value)}')
 
 	// No exponent literal syntax, so a huge magnitude is built by multiplying.
-	// 10^160 is finite and prints in full; 10^320 is not representable, and every
-	// non-finite result — infinity or NaN — canonicalizes to 0.0.
+	// 10^160 is finite and prints in full; 10^320 is past the largest float, so
+	// it stops there.
 	big = 100000000000000000000.0 * 100000000000000000000.0
 	println('float huge: ${big * big * big * big}')
 	println('float overflow: ${big * big * big * big * big * big * big * big}')
@@ -112,7 +112,7 @@ pub fn main() {
 	junk = string.inspect(parse_int('12abc'))
 	empty = string.inspect(parse_int(''))
 	println('parse rejects: ${signed} ${junk} ${empty}')
-	println('parse overflow: ${string.inspect(parse_int('9223372036854775808'))}')
+	println('parse past 64 bits: ${string.inspect(parse_int('9223372036854775808'))}')
 	println('signed round trip: ${string.inspect(parse_signed(int.to_string(-42)))}')
 	println('max round trip: ${string.inspect(parse_signed(int.to_string(int.max_value)))}')
 

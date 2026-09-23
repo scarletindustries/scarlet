@@ -224,10 +224,10 @@ fn u19_deep_else_if_chain_is_rejected_without_overflow() {
     check_rejects(&source, "too deep");
 }
 
-// U20: arithmetic is TOTAL. `x/0 = 0`, `x%0 = x`, overflow wraps, non-finite
-// float results collapse to 0.0. No panic, no abort, no non-zero exit.
+// U20: arithmetic is TOTAL. `x/0 = 0`, `x%0 = x`, an Int never overflows, and
+// a Float too large stops at the largest float. No panic, no abort, no non-zero
+// exit.
 #[test]
-#[ignore = "needs the VM"]
 fn u20_arithmetic_is_total_vm_never_exits() {
     // (expression, what `println` of it prints)
     let exact = [
@@ -240,9 +240,9 @@ fn u20_arithmetic_is_total_vm_never_exits() {
         ("7.5 % 2.0", "1.5\n"),
         ("7.5 % 0.0", "7.5\n"),
         ("{0.0 - 7.5} % 2.0", "-1.5\n"),
-        // Integer overflow wraps two's-complement, never traps.
-        ("9223372036854775807 + 1", "-9223372036854775808\n"),
-        ("9223372036854775807 * 2", "-2\n"),
+        // An Int has no bounds: past 64 bits it stays exact.
+        ("9223372036854775807 + 1", "9223372036854775808\n"),
+        ("9223372036854775807 * 2", "18446744073709551614\n"),
         // Signed division truncates toward zero; the remainder takes the sign
         // of the dividend. Grouping is `{expr}`, so `{0 - 7}` is the dividend.
         ("{0 - 7} / 2", "-3\n"),
@@ -253,9 +253,8 @@ fn u20_arithmetic_is_total_vm_never_exits() {
         run_outputs(&format!("pub fn main() {{\n\tprintln({expr})\n}}\n"), want);
     }
 
-    // Negating i64::MIN wraps back to itself; `int.abs` saturates to Int max.
-    // The literal exceeds the lexer's magnitude range, so reach i64::MIN via
-    // the wrapped `MAX + 1`.
+    // Past 64 bits, negating and `int.abs` are exact too. The literal exceeds
+    // the lexer's magnitude range, so reach 2^63 as `MAX + 1`.
     run_outputs(
         "pub fn main() {\n\
          \tm = 9223372036854775807 + 1\n\
@@ -266,28 +265,28 @@ fn u20_arithmetic_is_total_vm_never_exits() {
     run_outputs(
         "import scarlet/int\n\
          pub fn main() {\n\
-         \tm = 9223372036854775807 + 1\n\
+         \tm = 0 - 9223372036854775807 - 1\n\
          \tprintln(int.abs(m))\n\
          }\n",
-        "9223372036854775807\n",
+        "9223372036854775808\n",
     );
-    // Scarlet's value space has no Inf/NaN, so float overflow collapses to 0.0.
-    // e-notation does not lex, so reach Inf by repeated squaring.
+    // Scarlet's value space has no Inf/NaN, so a float too large stops at the
+    // largest one. e-notation does not lex, so get there by repeated squaring.
     run_outputs(
         "fn sq(x Float, n Int) Float { if n == 0 { x } else { sq(x * x, n - 1) } }\n\
          pub fn main() {\n\
          \tprintln(sq(10.0, 12))\n\
          }\n",
-        "0.0\n",
+        &format!("{}.0\n", f64::MAX),
     );
 
-    // 25! reduced mod 2^64 and reinterpreted as a signed i64.
+    // 25!, exactly.
     run_outputs(
         "fn f(n Int) Int { if n == 0 { 1 } else { n * f(n - 1) } }\n\
          pub fn main() {\n\
          \tprintln(f(25))\n\
          }\n",
-        "7034535277573963776\n",
+        "15511210043330985984000000\n",
     );
 }
 
@@ -296,7 +295,6 @@ run_case! {
     // `fn op(a, b)` generalizes to one body emitting `Op::Add`/`Lt`/... which
     // tag-dispatches at runtime. Calling each fn at BOTH Int and Float is what
     // proves the generic op is live; a specialized body could not serve both.
-    #[ignore = "needs the VM"]
     u20b_generic_polymorphic_numeric_ops_are_total: (
         "fn subtract(a, b) { a - b }\n\
          fn multiply(a, b) { a * b }\n\
@@ -330,7 +328,7 @@ run_case! {
          \tprintln(at_least(2, 5))\n\
          \tprintln(at_least(5.0, 5.0))\n\
          }\n",
-        "7\n1.5\n42\n3.0\n3\n3.5\n0\n0.0\n3\n4.0\n-9223372036854775808\n2\n7\n\
+        "7\n1.5\n42\n3.0\n3\n3.5\n0\n0.0\n3\n4.0\n9223372036854775808\n2\n7\n\
          True\nFalse\nTrue\nFalse\nTrue\nFalse\nFalse\nTrue\n",
     ),
 }

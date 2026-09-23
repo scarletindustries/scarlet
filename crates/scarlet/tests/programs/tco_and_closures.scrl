@@ -5,8 +5,7 @@
 // TailCall (an indirect call through a closure value). All three must run in
 // constant stack space, so every loop here recurses deep enough to blow a
 // frame-per-call stack and then reports `internal.stack_depth()` at the bottom:
-// three frames (the entry frame, main, and the single live frame) no matter
-// how deep.
+// two frames (main, and the single live frame) no matter how deep.
 //
 // The closure half pins capture-by-value at creation time, capture of bindings
 // born inside a branch, closures returned from functions, closures held in

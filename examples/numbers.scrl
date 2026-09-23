@@ -20,13 +20,11 @@ pub fn main() {
 	println('abs       ${int.abs(-42)}')
 	println('clamp     ${int.clamp(150, 0, 100)} ${int.clamp(-5, 0, 100)} ${int.clamp(50, 0, 100)}')
 
-	// Arithmetic wraps at the ends of the range.
+	// An Int has no bounds: past the 64-bit edges it keeps counting, exactly.
 	println('max_value ${int.max_value}')
 	println('min_value ${int.min_value}')
-	println('wrap      ${int.max_value + 1 == int.min_value}')
-
-	// int.abs saturates, since |min_value| does not fit.
-	println('abs(min)  ${int.abs(int.min_value) == int.max_value}')
+	println('past max  ${int.max_value + 1}')
+	println('abs(min)  ${int.abs(int.min_value)}')
 
 	println('boxed     ${140737488355327 + 1}')
 	println('boxed     ${9223372036854775807 - 1}')

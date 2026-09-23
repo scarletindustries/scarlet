@@ -1,4 +1,4 @@
 500000500000
-depth after 1 hop: 3
-depth after 1000000 hops: 3
+depth after 1 hop: 2
+depth after 1000000 hops: 2
 1000001 is even: False

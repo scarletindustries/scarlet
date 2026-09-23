@@ -367,6 +367,11 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                         frame.pc = *to as usize;
                     }
                 }
+                Instr::JumpUnlessFloat { src, x, to } => {
+                    if !matches!(self.get(base, *src).view(), View::Float(f) if f == *x) {
+                        frame.pc = *to as usize;
+                    }
+                }
                 Instr::JumpUnlessStr { src, text, to } => {
                     let v = self.get(base, *src);
                     let is = match v.as_cell() {
@@ -437,7 +442,16 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     intrinsic,
                     args,
                 } => {
-                    let v = self.builtin(*intrinsic, base, args)?;
+                    // The one built-in that asks about the run rather than its
+                    // arguments: how many frames are live, which only this
+                    // loop knows. A tail call reuses its frame, so a million
+                    // of them still count one.
+                    let v = match intrinsic {
+                        Intrinsic::InternalStackDepth => {
+                            bigint::value(&mut self.heap, frames.len().into()).map_err(full)?
+                        }
+                        _ => self.builtin(*intrinsic, base, args)?,
+                    };
                     self.set(base, *dst, v);
                 }
                 Instr::Equal { dst, a, b } => {

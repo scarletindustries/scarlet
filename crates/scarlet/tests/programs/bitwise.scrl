@@ -1,18 +1,20 @@
 // Integer bitwise ops: and, or, xor, not, and the two shifts.
 //
-// Int is a 64-bit signed two's-complement integer, so all six operate on 64
-// bits and the sign bit is an ordinary bit that happens to carry the sign.
-// Like the arithmetic ops they are TOTAL — every input has a defined answer
-// and nothing traps. The edges this pins are the ones where implementations
-// quietly disagree with each other:
+// An Int has no bounds, so all six treat it as an endless row of two's-
+// complement bits, as Erlang does: endless 0s above a non-negative Int, endless
+// 1s above a negative one (docs/semantics.md, "Integers"). No bit falls off an
+// end. Like the arithmetic ops they are TOTAL — every input has a defined
+// answer and nothing traps. The edges this pins are the ones where
+// implementations quietly disagree with each other:
 //
-//   shift count >= 64   shifts every bit out (0, or the sign for `shift_right`).
-//                       It is NOT masked to 6 bits as C and most hardware shift
-//                       instructions do, so `shift_left(1, 64)` is 0, not 1.
+//   shift_left          never loses a bit: `shift_left(1, 64)` is 2^64, not the
+//                       0 a 64-bit shift gives or the 1 of a count masked to 6
+//                       bits, as C and most hardware shift instructions do.
 //   negative count      shifts the other way by the same magnitude.
-//   shift_right         is ARITHMETIC: the sign propagates, so a negative value
-//                       never becomes positive.
-//   bitwise_not         complements the sign bit too, so `not 0 == -1`.
+//   shift_right         is ARITHMETIC: it divides by a power of 2, rounding
+//                       down, so the sign propagates and past every bit it
+//                       leaves 0 or -1.
+//   bitwise_not         is `-n - 1`, so `not 0 == -1`.
 //
 // Masks here stay decimal so this file pins the bitwise ops without depending
 // on hex-literal lexing (see hex_literals.scrl). The comment still gives the
@@ -75,8 +77,8 @@ pub fn main() {
 		)} ${ok(int.bitwise_xor(int.min_value, 0) == int.min_value)}',
 	)
 
-	// `not` round-trips, and equals `0 - n - 1` on every value including the bounds
-	// (where that arithmetic wraps and must still agree).
+	// `not` round-trips, and equals `0 - n - 1` on every value, the 64-bit edges
+	// included.
 	println(
 		'not round trip: ${ok(
 			int.bitwise_not(int.bitwise_not(12345)) == 12345,
@@ -103,12 +105,13 @@ pub fn main() {
 		)}',
 	)
 
-	// --- The sign bit ---------------------------------------------------------
+	// --- The 64-bit edges ------------------------------------------------------
 
-	// Bit 63 alone is int.min_value, so shifting 1 into it lands exactly there.
+	// `min_value` and `max_value` are the edges of 64 bits, not of an Int: bit 63
+	// alone is one past `max_value`, and the two edges still share no bit.
 	println(
-		'sign bit: ${ok(
-			int.bitwise_shift_left(1, 63) == int.min_value,
+		'bit 63: ${ok(
+			int.bitwise_shift_left(1, 63) == int.max_value + 1,
 		)} ${ok(
 			int.bitwise_and(int.min_value, int.max_value) == 0,
 		)} ${ok(int.bitwise_or(int.min_value, int.max_value) == -1)}',
@@ -138,7 +141,8 @@ pub fn main() {
 
 	// --- Shifting by the full width, and past it ------------------------------
 
-	// The masking trap: a 6-bit-masked count would make `shift_left(1, 64)` == 1.
+	// Nothing falls off: a 64-bit shift would make these 0, and a count masked
+	// to 6 bits would make the first 1.
 	println(
 		'shl 64: ${int.bitwise_shift_left(
 			1,
@@ -149,14 +153,14 @@ pub fn main() {
 		)} ${int.bitwise_shift_left(-1, 64)} ${int.bitwise_shift_left(int.max_value, 100)}',
 	)
 	println(
-		'shl width edge: ${ok(
-			int.bitwise_shift_left(1, 63) == int.min_value,
+		'shl keeps every bit: ${ok(
+			int.bitwise_shift_left(1, 64) == 2 * { int.max_value + 1 },
 		)} ${ok(
-			int.bitwise_shift_left(1, 64) == 0,
-		)} ${ok(int.bitwise_shift_left(1, int.max_value) == 0)}',
+			int.bitwise_shift_right(int.bitwise_shift_left(12345, 200), 200) == 12345,
+		)} ${ok(int.bitwise_shift_left(-3, 70) < int.min_value)}',
 	)
 
-	// Right shift past the width leaves the SIGN, not zero: 0 for non-negative,
+	// Right shift past every bit leaves the SIGN, not zero: 0 for non-negative,
 	// -1 for negative.
 	println(
 		'shr 64: ${int.bitwise_shift_right(
@@ -168,7 +172,7 @@ pub fn main() {
 		)} ${int.bitwise_shift_right(int.min_value, 64)} ${int.bitwise_shift_right(1, 100)}',
 	)
 	println(
-		'shr width edge: ${ok(
+		'shr past every bit: ${ok(
 			int.bitwise_shift_right(int.min_value, 63) == -1,
 		)} ${ok(
 			int.bitwise_shift_right(int.min_value, 64) == -1,
@@ -210,16 +214,13 @@ pub fn main() {
 		)} ${ok(int.bitwise_shift_left(-8, -1) == -4)}',
 	)
 
-	// int.min_value has no positive negation; saturating lands past the width,
-	// which is the same answer the exact magnitude would give.
+	// A huge negative count to `shift_left` is a right shift past every bit. (The
+	// other way round, a left shift by 2^63, is a number no memory holds, so the
+	// run stops with the heap full, as asking for that much memory does.)
 	println(
 		'most negative count: ${ok(
 			int.bitwise_shift_left(1, int.min_value) == 0,
-		)} ${ok(
-			int.bitwise_shift_left(-1, int.min_value) == -1,
-		)} ${ok(
-			int.bitwise_shift_right(1, int.min_value) == 0,
-		)} ${ok(int.bitwise_shift_right(-1, int.min_value) == 0)}',
+		)} ${ok(int.bitwise_shift_left(-1, int.min_value) == -1)}',
 	)
 
 	// --- Boxing must be invisible ---------------------------------------------

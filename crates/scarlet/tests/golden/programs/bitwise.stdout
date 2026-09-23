@@ -9,19 +9,19 @@ xor zero: PASS PASS
 not round trip: PASS PASS PASS
 not is -n-1: PASS PASS PASS
 de morgan: PASS PASS
-sign bit: PASS PASS PASS
+bit 63: PASS PASS PASS
 sign test: PASS PASS
 shl 0: PASS PASS PASS
 shr 0: PASS PASS PASS
-shl 64: 0 0 0 0
-shl width edge: PASS PASS PASS
+shl 64: 18446744073709551616 36893488147419103232 -18446744073709551616 11692013098647223344361828061502034755750757138432
+shl keeps every bit: PASS PASS PASS
 shr 64: 0 -1 -1 0
-shr width edge: PASS PASS PASS PASS
+shr past every bit: PASS PASS PASS PASS
 shr arithmetic: -4 4 -1 -4611686018427387904
 shr keeps sign: PASS PASS
 logical via mask: 15
 negative count: PASS PASS PASS
-most negative count: PASS PASS PASS PASS
+most negative count: PASS PASS
 boxed: PASS PASS PASS PASS
 boxed not: PASS PASS
 bitfield: 1099511627784 PASS PASS

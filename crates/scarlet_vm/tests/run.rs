@@ -1293,3 +1293,25 @@ fn the_json_built_ins_run() {
          [null,true,-7,1.0,\"a\\\"b\",{\"k\":1e9},null]\nrefused\n",
     );
 }
+
+/// A Float literal pattern matches as `==` does, so `-0.0` is `0.0`.
+#[test]
+fn a_float_pattern_matches_as_equality_does() {
+    prints(
+        "fn name(x Float) String {\n\
+         \tmatch x {\n\
+         \t\t0.0 -> 'zero'\n\
+         \t\t1.5 -> 'one and a half'\n\
+         \t\t_ -> 'other'\n\
+         \t}\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(name(0.0))\n\
+         \tprintln(name(-0.0))\n\
+         \tprintln(name(1.5))\n\
+         \tprintln(name(1.25 + 0.25))\n\
+         \tprintln(name(2.0))\n\
+         }\n",
+        "zero\nzero\none and a half\none and a half\nother\n",
+    );
+}

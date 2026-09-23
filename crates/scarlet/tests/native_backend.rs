@@ -112,7 +112,7 @@ pub fn main() {
 /// timer. The suspension must unwind through the native frame and the resume
 /// must find `x` — bound before the parking call, used after it — intact.
 #[test]
-#[ignore = "needs the VM"]
+#[ignore = "needs the JIT and processes"]
 fn native_caller_parks_and_resumes_through_interpreted_callee() {
     let src = "import scarlet/process
 
@@ -146,7 +146,7 @@ pub fn main() {
 /// like the interpreter's TailCallSelf, or the spinner starves the sibling
 /// and the output order inverts.
 #[test]
-#[ignore = "needs the VM"]
+#[ignore = "needs the JIT and processes"]
 fn fairness_native_self_tail_loop_yields_to_sibling() {
     let src = "import scarlet/process
 
@@ -180,7 +180,7 @@ pub fn main() {
 /// flips the running frame onto the fresh entry mid-loop. The debug line is
 /// the witness that the compile fired inside the single call.
 #[test]
-#[ignore = "needs the VM"]
+#[ignore = "needs the JIT"]
 fn single_call_loop_warms_and_flips_mid_run() {
     let src = "fn spin(n Int, acc Int) Int {
 \tif n == 0 { acc } else { spin(n - 1, acc + 1) }
@@ -223,7 +223,7 @@ pub fn main() {
 /// `make` warm here too, so a bare "some body warmed" witness is satisfied
 /// even when the body holding the match never leaves the interpreter.
 #[test]
-#[ignore = "needs the VM"]
+#[ignore = "needs the JIT"]
 fn a_warmed_aliased_match_agrees_across_the_warmup_boundary() {
     let src = "import ./color
 import ./color.{Color, Green as G}
@@ -262,11 +262,10 @@ pub fn main() {
     assert_warmed(&out.stderr, "hit");
 }
 
-/// (d) Int overflow spill past ±2^47, where Ints leave the NaN-box payload,
-/// and at the i64 wrap. The recursion warms both functions mid-run, so the
-/// pinned literals hold across the interp→native switch.
+/// (d) Int spill past ±2^47, where Ints leave the NaN-box payload, and past 64
+/// bits, where they stay exact. The recursion warms both functions mid-run, so
+/// the pinned literals hold across the interp→native switch.
 #[test]
-#[ignore = "needs the VM"]
 fn int_overflow_spill_prints_pinned_values() {
     let src = "fn fact(n Int, acc Int) Int {
 \tif n < 2 { acc } else { fact(n - 1, acc * n) }
@@ -291,12 +290,12 @@ pub fn main() {
         src,
         None,
         "2432902008176640000\n\
-         -8764578968847253504\n\
+         265252859812191058636308480000000\n\
          2880067194370816120\n\
-         3736710778780434371\n\
+         354224848179261915075\n\
          140737488355328\n\
          -140737488355329\n\
-         -6253480961458370395\n",
+         12193263112251181221\n",
     );
 }
 
@@ -389,7 +388,7 @@ fn assert_warmed(stderr: &str, name: &str) {
 /// The expected output is recomputed in Rust from the same recurrence, so a
 /// miscompile fails against ground truth rather than against a second run.
 #[test]
-#[ignore = "needs the VM"]
+#[ignore = "needs the JIT, and its answers assume 64-bit Ints"]
 fn bitwise_ops_survive_the_native_bridge() {
     let src = "import scarlet/int
 
@@ -443,7 +442,7 @@ pub fn main() {
 /// getrandom rather than another CSPRNG. The two-process test below is what
 /// refuses a fixed-seed userspace generator.
 #[test]
-#[ignore = "needs the VM"]
+#[ignore = "needs the JIT"]
 fn random_bytes_survives_the_native_bridge() {
     let src = "import scarlet/binary
 import scarlet/crypto
@@ -1086,7 +1085,7 @@ fn gen_program(r: &mut Rng) -> (String, String) {
 /// generator computed from the intended semantics. The seed is fixed, and a
 /// divergence panics with the program index and full source.
 #[test]
-#[ignore = "needs the VM"]
+#[ignore = "needs the JIT, and its answers assume 64-bit Ints"]
 fn fuzz_generated_programs_print_their_computed_values() {
     const SEED: u64 = 0x5eed_a10c_0de5_eed1;
     const PROGRAMS: usize = 200;
@@ -1141,7 +1140,7 @@ const WIRE_ROUNDS: i64 = 2_000;
 /// cannot see a fault symmetric across both), and decode's behaviour on
 /// hostile bytes (T-343). This test is about the bridge, not the codec.
 #[test]
-#[ignore = "needs the VM"]
+#[ignore = "needs the JIT and wire"]
 fn wire_ops_survive_the_native_bridge() {
     let src = "import scarlet/wire
 
@@ -1200,7 +1199,7 @@ pub fn main() {
 /// corruption, or truncation and single-byte mutation coverage — that is
 /// T-343. Here the only question is abort versus value.
 #[test]
-#[ignore = "needs the VM"]
+#[ignore = "needs the JIT and wire"]
 fn a_wire_decode_refusal_is_a_value_on_the_native_bridge_not_an_abort() {
     let src = "import scarlet/wire
 

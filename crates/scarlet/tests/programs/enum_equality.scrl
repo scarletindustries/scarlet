@@ -47,16 +47,15 @@ pub fn main() {
 	check('Int gte', True, 2 >= 2)
 	check('Float gt', True, 2.5 > 2.0)
 
-	// Int is a wrapping 64-bit integer. Values past the 48-bit small-int range
-	// spill to a boxed representation, and equality must see through the box.
+	// An Int has no bounds. Values past the 48-bit small-int range spill to a
+	// boxed representation, and past 64 bits to a bigger one; equality must see
+	// through both.
 	spilled = 140737488355327 + 1
 	check('boxed int equals literal', True, spilled == 140737488355328)
 	check('boxed int ne', True, spilled != 140737488355327)
-	// i64::MIN is not writable as a literal (the magnitude overflows), so name
-	// it by the wrap itself.
-	int_min = 9223372036854775807 + 1
-	check('i64 arithmetic wraps to MIN', True, int_min < 0)
-	check('wrap is exact', True, int_min - 1 == 9223372036854775807)
+	past = 9223372036854775807 + 1
+	check('past 64 bits keeps counting', True, past > 9223372036854775807)
+	check('past 64 bits is exact', True, past - 1 == 9223372036854775807)
 
 	// --- containers ----------------------------------------------------------------
 

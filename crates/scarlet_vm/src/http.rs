@@ -190,12 +190,17 @@ pub(crate) fn request(bytes: &[u8]) -> Request {
 
 /// Read a response head from the start of `bytes`.
 pub(crate) fn response(bytes: &[u8]) -> Response {
-    // No empty line may come first: a server that sends one before its status
-    // line has lost its place in the connection.
-    match bytes {
-        [] => return Response::NeedMore,
-        [b'\r' | b'\n', ..] => return Response::Bad(BadResponse::StatusLine),
-        _ => {}
+    // The status line first, by its own rules, so each way it can be wrong has
+    // its own answer, which `httparse`'s errors do not tell apart.
+    let Some(line_end) = memchr::memmem::find(bytes, b"\r\n") else {
+        return if bytes.len() > MAX_HEAD {
+            Response::Bad(BadResponse::TooLarge)
+        } else {
+            Response::NeedMore
+        };
+    };
+    if let Err(why) = status_line(&bytes[..line_end]) {
+        return Response::Bad(why);
     }
     let window = capped(bytes, 0);
     let mut slots = header_slots(window);
@@ -223,12 +228,8 @@ pub(crate) fn response(bytes: &[u8]) -> Response {
             Response::Bad(BadResponse::TooLarge)
         }
         Ok(httparse::Status::Partial) => Response::NeedMore,
-        // `HTTP/` and a version not spoken is a different answer from a line
-        // that is not a status line at all, as a server answering in another
-        // protocol would send.
-        Err(httparse::Error::Version) if bytes.starts_with(b"HTTP/") => {
-            Response::Bad(BadResponse::Version)
-        }
+        // The line passed `status_line`, so what `httparse` still refuses in it
+        // is a byte a reason may not hold.
         Err(httparse::Error::Version | httparse::Error::Status | httparse::Error::Token) => {
             Response::Bad(BadResponse::StatusLine)
         }
@@ -238,6 +239,35 @@ pub(crate) fn response(bytes: &[u8]) -> Response {
             | httparse::Error::NewLine
             | httparse::Error::TooManyHeaders,
         ) => Response::Bad(BadResponse::Field),
+    }
+}
+
+/// Check a status line, its CRLF taken off: `HTTP/1.x`, a space, three
+/// digits, then nothing or a space and a reason with no CR or LF in it. The
+/// space and reason may be left out: RFC 9112 section 4 wants the space, but
+/// enough servers leave it out that refusing a reply over a byte a client must
+/// ignore would be the wrong call.
+///
+/// A line with no room for a code, or that is not `HTTP/` at all (a server
+/// speaking another protocol, or a TLS record answering plain text), is not a
+/// status line; `HTTP/` and a version not spoken is a version.
+fn status_line(line: &[u8]) -> Result<(), BadResponse> {
+    let (Some(version), Some(b' '), Some(code)) = (line.get(..8), line.get(8), line.get(9..12))
+    else {
+        return Err(BadResponse::StatusLine);
+    };
+    match version {
+        b"HTTP/1.1" | b"HTTP/1.0" => {}
+        v if v.starts_with(b"HTTP/") => return Err(BadResponse::Version),
+        _ => return Err(BadResponse::StatusLine),
+    }
+    if !code.iter().all(u8::is_ascii_digit) {
+        return Err(BadResponse::StatusLine);
+    }
+    match line.get(12..) {
+        None | Some([]) => Ok(()),
+        Some([b' ', reason @ ..]) if !reason.iter().any(|&b| b == b'\r' || b == b'\n') => Ok(()),
+        Some(_) => Err(BadResponse::StatusLine),
     }
 }
 
@@ -602,6 +632,16 @@ mod tests {
             bad(b"HTTP/1.1 200 OK\r\nA: b\n\r\n"),
             Some(BadResponse::Field)
         );
+        assert_eq!(bad(b"HTTP/1.1\r\n\r\n"), Some(BadResponse::StatusLine));
+        assert_eq!(
+            bad(b"HTTP/1.1_200 OK\r\n\r\n"),
+            Some(BadResponse::StatusLine)
+        );
+        assert_eq!(
+            bad(b"HTTP/1.1 200 O\nK\r\n\r\n"),
+            Some(BadResponse::StatusLine)
+        );
+        assert!(matches!(response(b"HTTP/1.1 20"), Response::NeedMore));
     }
 
     #[test]

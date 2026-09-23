@@ -79,25 +79,26 @@ pub fn main() {
     );
 }
 
-/// The main process crashing is reported once, as the exit status, exactly
-/// as before fault isolation existed.
+/// A run that stops, here by asking for more heap than there is, fails the
+/// run and is reported once. Code has no other way to stop a run: failure is a
+/// value, and only a limit of the machine is not.
 #[test]
-#[ignore = "needs the VM"]
 fn a_main_crash_fails_the_run_and_is_reported_once() {
     let out = run(
         "main_crash",
-        r#"pub fn main() {
-	xs = [1, 2, 3]
+        r#"import scarlet/int
+
+pub fn main() {
 	println('before')
-	_ = xs[1..7]
+	_ = int.bitwise_shift_left(1, int.max_value)
 	println('after')
 }
 "#,
     );
-    assert_failed_with(&out, "[1..7]");
+    assert_failed_with(&out, "ran out of heap");
     assert_eq!(out.stdout, "before\n");
     assert_eq!(
-        out.stderr.matches("[1..7]").count(),
+        out.stderr.matches("ran out of heap").count(),
         1,
         "reported exactly once:\n{}",
         out.stderr

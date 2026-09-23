@@ -12,8 +12,8 @@ PASS Int gte
 PASS Float gt
 PASS boxed int equals literal
 PASS boxed int ne
-PASS i64 arithmetic wraps to MIN
-PASS wrap is exact
+PASS past 64 bits keeps counting
+PASS past 64 bits is exact
 PASS Array eq
 PASS Array ne on length
 PASS nested Array eq

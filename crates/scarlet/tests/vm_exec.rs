@@ -48,16 +48,16 @@ run_case! {
         "Some(7)\nNone\n",
     ),
 
-    // `range[a..b]` lowers to `Op::ArraySlice`. The Range arm keeps the result lazy
+    // `range[a..b]` lowers to `ArraySlice`. The Range arm keeps the result lazy
     // (`rs+start .. rs+end`) rather than materialising, so the slice of `5..10` at
-    // `[1..3]` is `[6, 7]`.
-    #[ignore = "needs the VM"]
+    // `[1..3]` is `Ok([6, 7])`, and one past the end is `Err(Nil)`.
     range_slice: (
         "pub fn main() {\n\
          \tr = 5..10\n\
-         \tprintln(r[1..3])\n\
+         \tprintln(r[1..3] or [])\n\
+         \tprintln(r[3..9])\n\
          }\n",
-        "[6, 7]\n",
+        "[6, 7]\nErr(Nil)\n",
     ),
 
     // Matching a Range value against an array pattern `[h, ..t]` drives `Op::ElemAt`
@@ -230,10 +230,8 @@ run_case! {
         "Some(1)\nSome(4)\nNone\nSome(3)\n",
     ),
 
-    // Op::BinParseInt must reject an overflowing value as `Err(Nil)`, never a
-    // wrapped int: Scarlet arithmetic wraps, and this is the request-smuggling
-    // defense.
-    #[ignore = "needs the VM"]
+    // `binary.parse_int` reads any run of digits exactly, since an Int has no
+    // bounds, and refuses anything else.
     binary_parse_int: (
         "import scarlet/binary.{Dec, Hex}\n\
          pub fn main() {\n\
@@ -244,14 +242,11 @@ run_case! {
          \tprintln(binary.parse_int(binary.from_string('12x'), Dec))\n\
          \tprintln(binary.parse_int(binary.from_string(''), Dec))\n\
          }\n",
-        "Ok(255)\nOk(255)\nOk(255)\nErr(Nil)\nErr(Nil)\nErr(Nil)\n",
+        "Ok(255)\nOk(255)\nOk(255)\nOk(99999999999999999999)\nErr(Nil)\nErr(Nil)\n",
     ),
 
-    // Op::IntFromString is the total inverse of `to_string`: unlike a
-    // hand-rolled "strip a sign, delegate to the unsigned digit walk" parse
-    // (which cannot represent `min_value`'s magnitude in a positive Int), it
-    // round-trips every value `to_string` produces, `min_value` included.
-    #[ignore = "needs the VM"]
+    // `int.from_string` is the total inverse of `to_string`: it round-trips
+    // every value `to_string` produces, however large.
     int_from_string: (
         "import scarlet/int\n\
          pub fn main() {\n\
@@ -268,7 +263,7 @@ run_case! {
          \tprintln(int.from_string(int.to_string(int.min_value)))\n\
          \tprintln(int.from_string(int.to_string(int.max_value)))\n\
          }\n",
-        "Ok(42)\nOk(0)\nOk(-42)\nOk(42)\nOk(7)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nOk(-9223372036854775808)\nOk(9223372036854775807)\n",
+        "Ok(42)\nOk(0)\nOk(-42)\nOk(42)\nOk(7)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nOk(9223372036854775808)\nOk(-9223372036854775808)\nOk(9223372036854775807)\n",
     ),
 
     // Op::BinEqIgnoreAsciiCase: ASCII-case-insensitive header-name matching.

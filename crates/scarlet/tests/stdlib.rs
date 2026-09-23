@@ -233,7 +233,7 @@ run_case! {
          \tprintln(int.clamp(5, 10, 0))\n\
          \tprintln(int.to_string(42))\n\
          }\n",
-        "7\n3\n5\n9223372036854775807\n10\n0\n42\n",
+        "7\n3\n5\n9223372036854775808\n10\n0\n42\n",
     ),
 
     stdlib_bool: (

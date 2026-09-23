@@ -186,13 +186,11 @@ suite! {
         generics,
         closures,
         // Named tco.scrl: scarlet/internal.scrl's `stack_depth` doc points at it.
-        #[ignore = "needs the VM"]
         tco,
         errors,
         // Stdlib surface.
         collections,
         strings,
-        #[ignore = "needs the VM"]
         numbers,
         money,
         wire_format,
@@ -232,26 +230,21 @@ suite! {
         inference,
         generics_adversarial,
         // Pattern matching, equality, and the shapes values come in.
-        #[ignore = "needs the VM"]
         exhaustive_match,
         tuples_and_records,
-        #[ignore = "needs the VM"]
         enum_equality,
         // Field punning on constructor calls: `f(now:, self:)` desugars to
         // `f(now: now, self: self)` at parse time.
         field_punning,
         // Evaluation: tail calls in constant stack, closure capture, and core
         // semantics.
-        #[ignore = "needs the VM"]
         tco_and_closures,
         semantics,
         // Numeric edges: i64 wrapping, boxed ints, float canonicalization,
         // exact decimals.
-        #[ignore = "needs the VM"]
         numerics,
         // Bitwise edges: the sign bit, shift counts at and past the 64-bit
         // width, negative counts, and arithmetic (not logical) right shift.
-        #[ignore = "needs the VM"]
         bitwise,
         // Hex (`0x`) and binary (`0b`) integer literals: magnitude parse,
         // i64 range, separators, match-pattern identity with decimal.

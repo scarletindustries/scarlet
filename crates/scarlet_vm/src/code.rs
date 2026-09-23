@@ -215,6 +215,13 @@ pub(crate) enum Instr {
         n: i64,
         to: u32,
     },
+    /// Continue at `to` unless `src` is the Float `x`, as `==` has it: the
+    /// two zeros match each other.
+    JumpUnlessFloat {
+        src: Reg,
+        x: f64,
+        to: u32,
+    },
     /// Continue at `to` unless `src` is the string `text`.
     JumpUnlessStr {
         src: Reg,
@@ -355,6 +362,7 @@ impl Instr {
             | Instr::JumpIfFalse { to, .. }
             | Instr::JumpUnlessVariant { to, .. }
             | Instr::JumpUnlessInt { to, .. }
+            | Instr::JumpUnlessFloat { to, .. }
             | Instr::JumpUnlessStr { to, .. }
             | Instr::JumpUnlessBinary { to, .. } => Some(to),
             Instr::Const { .. }
@@ -761,7 +769,10 @@ impl<'c> Loader<'c> {
                     let text: Box<[u8]> = text.as_bytes().into();
                     self.jump(next, |to| Instr::JumpUnlessStr { src, text, to });
                 }
-                Some(Const::Float(_)) => return Err("matching a Float".into()),
+                Some(Const::Float(x)) => {
+                    let x = *x;
+                    self.jump(next, |to| Instr::JumpUnlessFloat { src, x, to });
+                }
                 Some(Const::Binary { bytes, bit_len }) => {
                     let (bytes, len): (Box<[u8]>, u64) = (bytes.as_slice().into(), *bit_len);
                     self.jump(next, |to| Instr::JumpUnlessBinary {
@@ -1126,6 +1137,7 @@ impl<'c> Loader<'c> {
 fn built(i: Intrinsic, argc: usize) -> bool {
     let arity = match i {
         Intrinsic::MapNew
+        | Intrinsic::InternalStackDepth
         | Intrinsic::TimeMonotonic
         | Intrinsic::TimeEpochMs
         | Intrinsic::OsArgv

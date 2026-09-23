@@ -28,16 +28,16 @@ pub fn min(a Int, b Int) Int {
 	if a < b { a } else { b }
 }
 
+// The smallest and largest 64-bit Ints. An Int has no bounds, so these are
+// not its edges: they are for talking to what does have them, like a 64-bit
+// field in a file format.
 pub const min_value = 0 - 9223372036854775807 - 1
 
 pub const max_value = 9223372036854775807
 
-// Total: `abs` of Int min (whose negation does not fit in an Int) saturates
-// to Int max rather than wrapping back to a negative value.
+// The distance of `n` from 0. Exact for every Int, `min_value` included.
 pub fn abs(n Int) Int {
-	if n == min_value {
-		max_value
-	} else if n < 0 {
+	if n < 0 {
 		0 - n
 	} else {
 		n

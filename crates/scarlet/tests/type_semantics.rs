@@ -161,13 +161,12 @@ fn index_negative_returns_none() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn slice_in_bounds_returns_subarray() {
-    // A slice is an `Array(Int)`, not an `Option`.
+    // A slice is a `Result(Array(Int), Nil)`: `Ok` of the elements in range.
     run_outputs(
         "pub fn main() {\n\
          \txs = [10, 20, 30, 40, 50]\n\
-         \ts = xs[1..4]\n\
+         \ts = xs[1..4] or []\n\
          \tprintln(s)\n\
          \tprintln(s[0] or -1)\n\
          \tprintln(s[2] or -1)\n\

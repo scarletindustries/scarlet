@@ -1,9 +1,9 @@
 sum_to(1000000) = 500000500000
-self depth at 1000000: 3
+self depth at 1000000: 2
 ping(500001) = -500001
-mutual depth at 500000: 3
+mutual depth at 500000: 2
 indirect run(200000) = 400000
-indirect depth at 200000: 3
+indirect depth at 200000: 2
 depth(100000) = 100000
 fib(20) = 6765
 countdown: 3
