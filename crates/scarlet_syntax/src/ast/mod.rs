@@ -478,6 +478,9 @@ pub struct FunctionExpression {
 #[derive(Debug, Clone)]
 pub struct IfExpression {
     pub condition: Box<Expression>,
+    /// Written `if c then a else b`, rather than with a block after the
+    /// condition, so the formatter writes it back the same way.
+    pub(crate) then_keyword: bool,
     pub body: Box<Expression>,
     pub(crate) span: Span,
     pub else_body: Box<Expression>,

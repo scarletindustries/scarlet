@@ -832,6 +832,9 @@ impl Formatter {
             /// Where a comment between `else` and `if` attaches.
             if_span: Span,
             cond: &'a ast::Expression,
+            /// Written `then body`. `then { .. }` says no more than the
+            /// block alone, so it is written back as one.
+            then_keyword: bool,
             body: &'a ast::Expression,
         }
         let mut clauses: Vec<Clause> = Vec::new();
@@ -842,6 +845,8 @@ impl Formatter {
                     clauses.push(Clause {
                         if_span: i.span,
                         cond: &i.condition,
+                        then_keyword: i.then_keyword
+                            && !matches!(*i.body, ast::Expression::BlockExpression(_)),
                         body: &i.body,
                     });
                     cur = &i.else_body;
@@ -849,11 +854,61 @@ impl Formatter {
                 other => break other,
             }
         };
+        let cond_comment = clauses.iter().any(|c| self.has_comment_at(c.cond.span()));
+        let else_is_block = matches!(else_body, ast::Expression::BlockExpression(_));
+        let kw = |i: usize, clause: &Clause| {
+            // A comment between `else` and `if` attaches to the nested `if`
+            // token. The chain head's own trivia comes from the statement list.
+            if i == 0 {
+                text("if ")
+            } else {
+                d![
+                    text("else "),
+                    self.comments_before(clause.if_span),
+                    text("if ")
+                ]
+            }
+        };
+        // A bare branch after `then` or `else`. A comment above it puts it on
+        // a line of its own, indented under the keyword.
+        let bare = |word: &'static str, b: &ast::Expression| {
+            if self.has_comment_at(b.span()) {
+                d![
+                    text(word),
+                    nest(
+                        1,
+                        d![hardline(), self.comments_before(b.span()), self.expr(b)]
+                    )
+                ]
+            } else {
+                d![text(word), text(" "), self.expr(b)]
+            }
+        };
+        // `if a then x else if b then y else z`: on one line when it fits,
+        // else a clause a line, each after the first indented under it.
+        if clauses.iter().all(|c| c.then_keyword) && !else_is_block && !cond_comment {
+            let mut docs: Vec<Doc> = Vec::new();
+            for (i, clause) in clauses.iter().enumerate() {
+                docs.push(d![
+                    kw(i, clause),
+                    self.expr(clause.cond),
+                    text(" "),
+                    bare("then", clause.body),
+                ]);
+            }
+            let last = bare("else", else_body);
+            let rest: Vec<Doc> = docs
+                .drain(1..)
+                .chain([last])
+                .map(|d| d![line(), d])
+                .collect();
+            let first = docs.pop().unwrap_or_else(nil);
+            return group(d![first, nest(1, doc::concat(rest))]);
+        }
         // Only a ternary-shaped if/else stays on one line: no chain, no
         // comments, every branch a bare atom. Anything heavier breaks every
         // clause, so the whole reads symmetrically like `match`.
         let is_chain = clauses.len() > 1;
-        let cond_comment = clauses.iter().any(|c| self.has_comment_at(c.cond.span()));
         // A comment before a branch's `{` attaches to the brace token, and
         // such a branch cannot stay flat.
         let brace_comment = clauses.iter().any(|c| self.has_comment_at(c.body.span()))
@@ -861,7 +916,9 @@ impl Formatter {
         let trivial = !is_chain
             && !cond_comment
             && !brace_comment
-            && clauses.iter().all(|c| self.is_trivial_branch(c.body))
+            && clauses
+                .iter()
+                .all(|c| !c.then_keyword && self.is_trivial_branch(c.body))
             && self.is_trivial_branch(else_body);
         let body = |b: &ast::Expression| {
             if trivial {
@@ -872,31 +929,28 @@ impl Formatter {
         };
         let mut docs: Vec<Doc> = Vec::new();
         for (i, clause) in clauses.iter().enumerate() {
-            // A comment between `else` and `if` attaches to the nested `if`
-            // token. The chain head's own trivia comes from the statement list.
-            let kw = if i == 0 {
-                text("if ")
+            let branch = if clause.then_keyword {
+                bare("then", clause.body)
             } else {
-                d![
-                    text("else "),
-                    self.comments_before(clause.if_span),
-                    text("if ")
-                ]
+                d![self.comments_before(clause.body.span()), body(clause.body)]
             };
             docs.push(d![
-                kw,
+                kw(i, clause),
                 self.comments_before(clause.cond.span()),
                 self.expr(clause.cond),
                 text(" "),
-                self.comments_before(clause.body.span()),
-                body(clause.body),
+                branch,
             ]);
         }
-        docs.push(d![
-            text("else "),
-            self.comments_before(else_body.span()),
-            body(else_body)
-        ]);
+        docs.push(if else_is_block {
+            d![
+                text("else "),
+                self.comments_before(else_body.span()),
+                body(else_body)
+            ]
+        } else {
+            bare("else", else_body)
+        });
         if trivial {
             group(join(docs, line()))
         } else {
@@ -1374,6 +1428,50 @@ mod tests {
             out.contains("\t} else {\n\t\t'Scalene'\n\t}\n"),
             "got:\n{out}"
         );
+    }
+
+    #[test]
+    fn an_if_keeps_the_form_it_was_written_in() {
+        for src in [
+            "x = if a then 1 else 2\n",
+            "x = if a { 1 } else { 2 }\n",
+            "x = if a then f(1) else if b then g(2) else h(3)\n",
+            "fn f() {\n\tif is_admin(user) {\n\t\tthing()\n\t} else {\n\t\tother_thing()\n\t}\n}\n",
+            "fn f() {\n\tif is_admin(user) {\n\t\tthing()\n\t} else not_found()\n}\n",
+            "x = if a then 1 else {\n\ty = 2\n\ty\n}\n",
+            "x = if a then 1 else if b {\n\t2\n} else 3\n",
+        ] {
+            assert_eq!(fmt(src), src);
+        }
+    }
+
+    #[test]
+    fn a_comment_above_a_bare_branch_indents_it() {
+        let src = "x = if a then\n\t// one\n\t1\n\telse\n\t\t// two\n\t\t2\n";
+        assert_eq!(fmt("x = if a then\n// one\n1 else // two\n2\n"), src);
+        assert_round_trips(src);
+        let src = "fn f() {\n\tif a {\n\t\t1\n\t} else\n\t\t// two\n\t\tf(2)\n}\n";
+        assert_eq!(fmt(src), src);
+    }
+
+    #[test]
+    fn then_before_a_block_is_the_block() {
+        assert_eq!(
+            fmt("x = if a then { 1 } else { 2 }\n"),
+            "x = if a { 1 } else { 2 }\n"
+        );
+    }
+
+    #[test]
+    fn a_long_then_chain_puts_each_else_on_its_own_line() {
+        let long = "a".repeat(40);
+        let src = format!("x = if {long} then f(1) else if {long} then g(2) else h(3)\n");
+        let out = fmt(&src);
+        assert_eq!(
+            out,
+            format!("x = if {long} then f(1)\n\telse if {long} then g(2)\n\telse h(3)\n")
+        );
+        assert_round_trips(&out);
     }
 
     #[test]

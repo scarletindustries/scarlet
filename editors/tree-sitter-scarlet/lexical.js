@@ -19,4 +19,7 @@ module.exports = {
   // Contextual identifiers in << >> segment specs (parse_bin_spec).
   binSpecSized: ['size', 'bytes'],
   binSpecBare: ['binary', 'utf8'],
+  // token::THEN: a keyword only after an `if` condition
+  // (parse_if_expression), so it is not in `keywords`.
+  then: 'then',
 };

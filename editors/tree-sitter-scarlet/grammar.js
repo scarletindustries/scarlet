@@ -411,13 +411,20 @@ module.exports = grammar({
         field('name', alias(choice(...lex.binSpecBare), $.spec_identifier)),
       ),
 
+    // `if c then a else b`, or a block after the condition. Either branch
+    // runs on as far as an expression can, as parse_expression does.
     if_expression: ($) =>
-      seq(
-        kw('if'),
-        field('condition', $._expression),
-        field('consequence', $.block),
-        kw('else'),
-        field('alternative', choice($.if_expression, $.block)),
+      prec.right(
+        seq(
+          kw('if'),
+          field('condition', $._expression),
+          choice(
+            seq(lex.then, field('consequence', $._expression)),
+            field('consequence', $.block),
+          ),
+          kw('else'),
+          field('alternative', $._expression),
+        ),
       ),
 
     match_expression: ($) =>

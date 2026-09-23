@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use scarlet_syntax::scanner::ESCAPES;
-use scarlet_syntax::token::{Keyword, Kind};
+use scarlet_syntax::token::{Keyword, Kind, THEN};
 use serde_json::{Value, json};
 
 /// The contextual identifiers accepted as `<< expr:spec >>` segment specs.
@@ -833,6 +833,11 @@ fn tm_language() -> String {
                         "match": format!("\\b({})\\b", keyword_alternation(KeywordGroup::Control))
                     },
                     {
+                        "comment": "Contextual: a keyword after an if condition, a name after a dot.",
+                        "name": "keyword.control.scrl",
+                        "match": format!("(?<!\\.)\\b{THEN}\\b")
+                    },
+                    {
                         "name": "keyword.control.import.scrl",
                         "match": format!("\\b({})\\b", keyword_alternation(KeywordGroup::Import))
                     },
@@ -955,6 +960,9 @@ module.exports = {{
   // Contextual identifiers in << >> segment specs (parse_bin_spec).
   binSpecSized: [{sized}],
   binSpecBare: [{bare}],
+  // token::THEN: a keyword only after an `if` condition
+  // (parse_if_expression), so it is not in `keywords`.
+  then: '{THEN}',
 }};
 ",
         escape_class = escape_char_class(),

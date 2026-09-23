@@ -45,6 +45,10 @@ keywords! {
     As => "as",
 }
 
+/// Between an `if`'s condition and its branch. Not a keyword: the parser
+/// reads it as one only there, so `result.then` stays a name.
+pub const THEN: &str = "then";
+
 #[inline]
 pub fn match_keyword(s: &str) -> Option<Kind> {
     Keyword::parse(s).map(Kind::Keyword)

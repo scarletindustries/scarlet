@@ -2,7 +2,7 @@ use crate::ast;
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::scanner::Scanner;
 use crate::span::Span;
-use crate::token::{Keyword, Kind, Token, Trivia, is_type_name};
+use crate::token::{self, Keyword, Kind, Token, Trivia, is_type_name};
 
 type PResult<T> = Result<T, String>;
 
@@ -1224,23 +1224,37 @@ impl Parser {
         self.eat(Kind::Keyword(Keyword::If))?;
 
         let condition = self.parse_expression()?;
-        let body = self.parse_braced_body("'if' branch")?;
+        // `then` is a keyword only here, right after the condition: an
+        // expression can never go on with a name, so this is the one place
+        // it can mean anything, and `result.then` stays a function.
+        let then_keyword =
+            matches!(self.kind(), Kind::Identifier(ref name) if &**name == token::THEN);
+        let body = if then_keyword {
+            self.advance();
+            self.parse_expression()?
+        } else if self.kind() == Kind::PuncOpenBrace {
+            self.parse_expression()?
+        } else {
+            return Err("'if' needs `then` or a block `{ ... }` after its condition".to_string());
+        };
 
         if self.kind() != Kind::Keyword(Keyword::Else) {
             return Err("'if' requires an 'else' branch".to_string());
         }
         self.eat(Kind::Keyword(Keyword::Else))?;
-        // Through the guarded wrapper so each `else if` re-enters the depth
-        // guard; otherwise a long ladder recurses at constant depth and
-        // overflows the native stack.
+        // Any expression: `else { .. }`, `else if ..`, or `else not_found()`.
+        // An `else if` goes through the guarded wrapper so each rung re-enters
+        // the depth guard; otherwise a long ladder recurses at constant depth
+        // and overflows the native stack.
         let else_body = if self.kind() == Kind::Keyword(Keyword::If) {
             self.parse_if_expression()?
         } else {
-            self.parse_braced_body("'else' branch")?
+            self.parse_expression()?
         };
 
         Ok(ast::Expression::IfExpression(ast::IfExpression {
             condition: Box::new(condition),
+            then_keyword,
             body: Box::new(body),
             span: self.span_from(span),
             else_body: Box::new(else_body),
@@ -2997,12 +3011,18 @@ mod tests {
 
     #[test]
     fn test_block_body_diagnostics() {
-        // `if`/`else` branches and function bodies must be `{ ... }` blocks.
-        assert_has_error("x = if 1 < 2 5 else 6", "'if' branch must be a block");
-        assert_has_error("x = if 1 < 2 { 5 } else 6", "'else' branch must be a block");
+        // An `if` needs `then` or a block after its condition; a function
+        // body must be a block.
+        assert_has_error("x = if 1 < 2 5 else 6", "needs `then` or a block");
         assert_has_error("fn f() Int = 1", "Function body must be a block");
         // The well-formed shapes still parse cleanly.
         assert_no_errors("x = if 1 < 2 { 5 } else { 6 }");
+        assert_no_errors("x = if 1 < 2 then 5 else 6");
+        assert_no_errors("x = if 1 < 2 { 5 } else 6");
+        assert_no_errors("x = if a then 1 else if b then 2 else 3");
+        assert_no_errors("x = if a then { y = 1\n y } else f(2)");
+        // `then` after a dot is still a name: `result.then` is a function.
+        assert_no_errors("x = result.then(r, f)");
         assert_no_errors("fn f() Int { 1 }");
     }
 

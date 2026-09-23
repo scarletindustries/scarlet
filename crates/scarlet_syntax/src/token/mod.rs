@@ -4,7 +4,7 @@ mod kind;
 mod trivia;
 
 pub use ident::{is_name_continue, is_name_start, is_type_name};
-pub use keywords::{Keyword, match_keyword};
+pub use keywords::{Keyword, THEN, match_keyword};
 pub use kind::Kind;
 pub use trivia::Trivia;
 

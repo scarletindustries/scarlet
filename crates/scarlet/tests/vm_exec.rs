@@ -7,6 +7,34 @@ mod common;
 use common::run_outputs;
 
 run_case! {
+    // Both forms of `if`: `then` for one line, a block for more. `else` takes
+    // any expression, and the chain picks the first true condition. `then`
+    // after a dot is still a field.
+    if_then_and_blocks: (
+        "fn sign(n Int) String {\n\
+         \tif n < 0 then 'negative' else if n == 0 then 'zero' else 'positive'\n\
+         }\n\
+         fn describe(n Int) String {\n\
+         \tif n > 100 {\n\
+         \t\tlabel = 'big'\n\
+         \t\t'${label} ${n}'\n\
+         \t} else sign(n)\n\
+         }\n\
+         type Step {\n\
+         \tthen Int\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(sign(-3))\n\
+         \tprintln(sign(0))\n\
+         \tprintln(describe(500))\n\
+         \tprintln(describe(7))\n\
+         \tprintln(if True then 1 else 2 + 40)\n\
+         \tprintln(if False then 1 else 2 + 40)\n\
+         \tprintln(Step(then: 9).then)\n\
+         }\n",
+        "negative\nzero\nbig 500\npositive\n1\n42\n9\n",
+    ),
+
     // `_` separators in number literals are spelling only: the same value in
     // expressions, in patterns (which must also match their plain spelling —
     // exhaustiveness keys on the digits, so `1_000` and `1000` are one arm),

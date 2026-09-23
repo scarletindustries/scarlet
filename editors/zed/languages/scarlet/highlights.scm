@@ -18,7 +18,8 @@
   "}" @punctuation.special)
 
 ; Keywords (Keyword::ALL minus `in`, which is reserved but consumed by no
-; rule, so it has no token node)
+; rule, so it has no token node), and `then`, a keyword only after an `if`
+; condition
 [
   "fn"
   "import"
@@ -27,6 +28,7 @@
   "const"
   "if"
   "else"
+  "then"
   "or"
   "as"
 ] @keyword

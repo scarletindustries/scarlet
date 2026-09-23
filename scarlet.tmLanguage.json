@@ -498,6 +498,11 @@
           "name": "keyword.control.scrl"
         },
         {
+          "comment": "Contextual: a keyword after an if condition, a name after a dot.",
+          "match": "(?<!\\.)\\bthen\\b",
+          "name": "keyword.control.scrl"
+        },
+        {
           "match": "\\b(import|as)\\b",
           "name": "keyword.control.import.scrl"
         },
