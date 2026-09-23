@@ -152,14 +152,13 @@ pub fn main() {
 	show_parse('double space', <<'GET  HTTP/1.1\r\n\r\n'>>)
 	show_parse('empty target', <<'GET  / HTTP/1.1\r\n\r\n'>>)
 	show_parse('lowercase version', <<'GET / http/1.1\r\n\r\n'>>)
-	// A third space makes the version token `HTTP/1.1 extra`, so the reject lands on
-	// the version check (505) where RFC 9112 section 3 would say 400. It still
-	// rejects — never a parse — so the exact code is pinned here as-is, not fixed.
+	// A third space leaves `extra` after the version, which is not a request line:
+	// 400, as RFC 9112 section 3 says, not the 505 of a version not spoken.
 	show_parse('trailing junk on request line', <<'GET / HTTP/1.1 extra\r\n\r\n'>>)
 	// The line terminator is strictly CRLF. RFC 9112 section 2.2 permits accepting a
 	// bare LF, but a parser that does disagrees with every proxy that does not —
-	// that disagreement IS request smuggling. So a bare LF/CR never ends a line: the
-	// head simply never completes and the request starves out on the read deadline.
+	// that disagreement IS request smuggling. So a bare LF or CR is refused (400) at
+	// once, rather than left to wait out the read deadline.
 	show_parse('bare lf line ending', <<'GET / HTTP/1.1\nHost: x\n\n'>>)
 	show_parse('bare cr line ending', <<'GET / HTTP/1.1\rHost: x\r\r'>>)
 	// Leading empty lines before the request line are tolerated (for clients that
@@ -214,11 +213,10 @@ pub fn main() {
 		_ -> println('duplicate host: parse failed')
 	}
 
-	// Ingress accepts a NUL inside a field value — the head scanner does not
-	// validate value bytes — but egress refuses it: `headers.valid` is what the
-	// connection driver checks before a header block reaches the wire. Validation
-	// happens on serialize, not on parse; both halves of that contract are pinned
-	// together here.
+	// A NUL inside a field value is refused on the way in (400), as RFC 9110
+	// section 5.5 allows, and on the way out: `headers.valid` is what the
+	// connection driver checks before a header block reaches the wire. Both
+	// halves are pinned here.
 	nul_req = <<'GET / HTTP/1.1\r\nX-N: a\0b\r\n\r\n'>>
 	show_parse('nul in value parses', nul_req)
 	match h1.parse_request(nul_req, 0) {

@@ -25,6 +25,16 @@ pub(crate) enum Int {
     Big(BigInt),
 }
 
+/// The number in decimal, as `int.to_string` writes it.
+impl std::fmt::Display for Int {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Int::Small(n) => n.fmt(f),
+            Int::Big(n) => n.fmt(f),
+        }
+    }
+}
+
 impl Int {
     pub(crate) fn big(self) -> BigInt {
         match self {

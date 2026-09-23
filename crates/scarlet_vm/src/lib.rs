@@ -28,6 +28,7 @@ mod float;
 mod hash;
 mod heap;
 mod host;
+mod http;
 mod json;
 mod map;
 mod show;

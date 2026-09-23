@@ -162,12 +162,14 @@ pub type ResponseFraming {
 // yields Bad(status). A leading empty line before the request line is skipped
 // (RFC 7230 section 3.5).
 //
-// One native pass over the bytes; the returned method/target/header
-// names/values are zero-copy views into `buf`. Obs-fold and whitespace before
-// the field colon are rejected (400) — both are request-smuggling vectors —
-// a version other than HTTP/1.0 or HTTP/1.1 is rejected (505), and a head
-// larger than 64 KiB is rejected (431, or 414 when the request line itself
-// never ends) rather than buffered forever.
+// One native pass over the bytes, by `httparse` (the parser `hyper` uses);
+// the returned method/target/header names/values are zero-copy views into
+// `buf`. Obs-fold, whitespace before the field colon, a line ending in a bare
+// LF or CR, and a NUL in a field value are rejected (400) — each is a
+// request-smuggling vector — a version other than HTTP/1.0 or HTTP/1.1 is
+// rejected (505), and a head larger than 64 KiB is rejected (431, or 414 when
+// the request line itself never ends) rather than buffered forever. At most
+// four empty lines may come before the request line.
 @vm(http__parse_head)
 pub fn parse_request(buf Binary, off Int) Parsed
 
@@ -177,8 +179,8 @@ pub fn parse_request(buf Binary, off Int) Parsed
 // Chunked. Transfer-Encoding alongside Content-Length is a conflict (400);
 // any other transfer coding is unimplemented (501) — never silently ignored.
 // Multiple Content-Length fields, or a value that is not a strict run of
-// digits / overflows Int / carries a redundant leading zero ("007"), are all
-// rejected (400).
+// digits / is past 9223372036854775807 / carries a redundant leading zero
+// ("007"), are all rejected (400).
 @vm(http__framing)
 pub fn framing(hs Headers) Framing
 

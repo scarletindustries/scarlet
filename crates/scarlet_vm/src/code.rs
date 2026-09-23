@@ -1147,6 +1147,12 @@ fn built(i: Intrinsic, argc: usize) -> bool {
         | Intrinsic::JsonBool
         | Intrinsic::JsonEncode => 1,
         Intrinsic::JsonField | Intrinsic::JsonIndex => 2,
+        Intrinsic::HttpFraming | Intrinsic::HttpHeadersValid => 1,
+        Intrinsic::HttpParseHead
+        | Intrinsic::HttpParseResponseHead
+        | Intrinsic::HttpHeaderGet
+        | Intrinsic::HttpHeaderHas => 2,
+        Intrinsic::HttpChunkDecode | Intrinsic::HttpSerializeHead => 3,
         Intrinsic::IoWriteFile | Intrinsic::CryptoHmacSha256 | Intrinsic::CryptoConstEq => 2,
         Intrinsic::CryptoP256Verify | Intrinsic::CryptoEd25519Verify => 3,
         Intrinsic::MapKeys | Intrinsic::MapValues | Intrinsic::MapSize | Intrinsic::MapToList => 1,

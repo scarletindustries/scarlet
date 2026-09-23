@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use num_bigint::Sign;
 use num_traits::{FromPrimitive, ToPrimitive};
-use scarlet_ir::core_ir::{FuncIdx, IoErrors, JsonTypes, VariantRef};
+use scarlet_ir::core_ir::{FuncIdx, HttpTypes, IoErrors, JsonTypes, VariantRef};
 use scarlet_ir::intrinsic::Intrinsic;
 
 use crate::Stop;
@@ -29,6 +29,7 @@ use crate::eq;
 use crate::float::{self, NumOp};
 use crate::heap::{Cell, Full, Heap, Kind};
 use crate::host::Host;
+use crate::http;
 use crate::json;
 use crate::map;
 use crate::show;
@@ -1078,6 +1079,103 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 let text = self.encode_json(v)?;
                 Ok(Value::cell(self.heap.string(&text).map_err(full)?))
             }
+            Intrinsic::HttpParseHead | Intrinsic::HttpParseResponseHead => {
+                let buf = self.binary(v)?;
+                let off = self.offset(arg(self, 1), buf)?;
+                // Past the longest head there could be, and its empty lines.
+                let window =
+                    binary::bytes_from(&self.heap, buf, off as u64, http::MAX_HEAD as u64 + 16);
+                match i {
+                    Intrinsic::HttpParseHead => self.parsed_request(buf, off, &window),
+                    _ => self.parsed_response(buf, off, &window),
+                }
+            }
+            Intrinsic::HttpChunkDecode => {
+                let buf = self.binary(v)?;
+                let off = self.offset(arg(self, 1), buf)?;
+                let max = match self.int_of(arg(self, 2))? {
+                    Int::Small(n) => u64::try_from(n).unwrap_or(0),
+                    Int::Big(n) if n.sign() == Sign::Minus => 0,
+                    Int::Big(_) => u64::MAX,
+                };
+                let bytes = binary::bytes_from(&self.heap, buf, off as u64, u64::MAX);
+                self.chunk_body(buf, off, &bytes, max)
+            }
+            Intrinsic::HttpFraming => {
+                let types = self.http_types()?;
+                let (mut te, mut cl) = (Vec::new(), Vec::new());
+                for (name, value) in self.headers(v)? {
+                    let name = self.bytes_of(name)?;
+                    if name.eq_ignore_ascii_case(b"transfer-encoding") {
+                        te.push(self.bytes_of(value)?);
+                    } else if name.eq_ignore_ascii_case(b"content-length") {
+                        cl.push(self.bytes_of(value)?);
+                    }
+                }
+                let te: Vec<&[u8]> = te.iter().map(Vec::as_slice).collect();
+                let cl: Vec<&[u8]> = cl.iter().map(Vec::as_slice).collect();
+                match http::framing(&te, &cl) {
+                    http::Framing::NoBody => Ok(Value::nullary(types.no_body)),
+                    http::Framing::Chunked => Ok(Value::nullary(types.chunked)),
+                    http::Framing::Length(n) => {
+                        let n = bigint::value(&mut self.heap, n.into()).map_err(full)?;
+                        Ok(Value::cell(
+                            self.heap.ctor(types.length, &[n]).map_err(full)?,
+                        ))
+                    }
+                    http::Framing::Invalid(r) => self.with_status(types.framing_invalid, r),
+                }
+            }
+            Intrinsic::HttpHeaderGet | Intrinsic::HttpHeaderHas => {
+                let name = self.bytes_of(arg(self, 1))?;
+                let mut found = None;
+                for (n, value) in self.headers(v)? {
+                    if self.bytes_of(n)?.eq_ignore_ascii_case(&name) {
+                        found = Some(value);
+                        break;
+                    }
+                }
+                match (i, found) {
+                    (Intrinsic::HttpHeaderHas, found) => Ok(Value::bool(found.is_some())),
+                    (_, Some(value)) => {
+                        let value = self.share(value);
+                        self.some(value)
+                    }
+                    (_, None) => Ok(Value::nullary(self.code.abi.none)),
+                }
+            }
+            Intrinsic::HttpHeadersValid => {
+                let mut valid = true;
+                for (name, value) in self.headers(v)? {
+                    let (name, value) = (self.binary(name)?, self.binary(value)?);
+                    valid &= name.len % 8 == 0
+                        && value.len % 8 == 0
+                        && http::is_token(&binary::bytes(&self.heap, name))
+                        && http::is_safe_value(&binary::bytes(&self.heap, value));
+                }
+                Ok(Value::bool(valid))
+            }
+            Intrinsic::HttpSerializeHead => {
+                let code = self.int_of(v)?.to_string();
+                let reason = self.bytes_of(arg(self, 1))?;
+                let fields = self.headers(arg(self, 2))?;
+                let mut out = Vec::with_capacity(64 + reason.len() + fields.len() * 64);
+                out.extend_from_slice(b"HTTP/1.1 ");
+                out.extend_from_slice(code.as_bytes());
+                out.push(b' ');
+                out.extend_from_slice(&reason);
+                out.extend_from_slice(b"\r\n");
+                for (name, value) in fields {
+                    out.extend_from_slice(&self.bytes_of(name)?);
+                    out.extend_from_slice(b": ");
+                    out.extend_from_slice(&self.bytes_of(value)?);
+                    out.extend_from_slice(b"\r\n");
+                }
+                out.extend_from_slice(b"\r\n");
+                let cell =
+                    binary::make(&mut self.heap, &out, out.len() as u64 * 8).map_err(full)?;
+                Ok(Value::cell(cell))
+            }
             Intrinsic::IoReadFile => {
                 let path = self.text_of(v)?;
                 match std::fs::read(path_of(&path)) {
@@ -1201,10 +1299,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 ))
             }
             Intrinsic::IntToString => {
-                let text = match self.int_of(v)? {
-                    Int::Small(n) => n.to_string(),
-                    Int::Big(n) => n.to_string(),
-                };
+                let text = self.int_of(v)?.to_string();
                 Ok(Value::cell(
                     self.heap.string(text.as_bytes()).map_err(full)?,
                 ))
@@ -1534,10 +1629,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 let yes = matches!(inner.view(), View::Bool(true));
                 out.extend_from_slice(if yes { b"true" } else { b"false" });
             } else if variant == types.integer {
-                let n = match self.int_of(inner)? {
-                    Int::Small(n) => n.to_string(),
-                    Int::Big(n) => n.to_string(),
-                };
+                let n = self.int_of(inner)?.to_string();
                 out.extend_from_slice(n.as_bytes());
             } else if variant == types.real {
                 json::write_float(&mut out, self.float_of(inner)?);
@@ -1588,6 +1680,200 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             }
         }
         Ok(out)
+    }
+
+    fn http_types(&self) -> Result<HttpTypes, Stop> {
+        self.code.abi.http.ok_or_else(|| {
+            Stop::BadProgram(
+                "an HTTP built-in, in a program with no `scarlet/http/h1` types".into(),
+            )
+        })
+    }
+
+    /// The bytes of the binary `v`, the last one padded with zero bits.
+    fn bytes_of(&self, v: Value) -> Result<Vec<u8>, Stop> {
+        Ok(binary::bytes(&self.heap, self.binary(v)?))
+    }
+
+    /// The byte offset `v` into `buf`, as `h1`'s offsets are: clamped to the
+    /// buffer.
+    fn offset(&self, v: Value, buf: Bits) -> Result<usize, Stop> {
+        let whole = usize::try_from(buf.len / 8).unwrap_or(usize::MAX);
+        Ok(match self.int_of(v)? {
+            Int::Small(n) => usize::try_from(n).unwrap_or(0).min(whole),
+            Int::Big(n) if n.sign() == Sign::Minus => 0,
+            Int::Big(_) => whole,
+        })
+    }
+
+    /// The name and value of each `Header` in the `Headers` array `v`.
+    fn headers(&self, v: Value) -> Result<Vec<(Value, Value)>, Stop> {
+        let types = self.http_types()?;
+        let not_headers = || Stop::BadProgram(format!("{v:?} as `Headers`"));
+        let items = match self.seq(v)? {
+            Seq::Tree(t) => array::elements(&self.heap, t),
+            Seq::Range { start, end } if start >= end => Vec::new(),
+            Seq::Range { .. } => return Err(not_headers()),
+        };
+        let mut out = Vec::with_capacity(items.len());
+        for h in items {
+            let cell = h.as_cell().ok_or_else(not_headers)?;
+            if self.heap.kind(cell) != Some(Kind::Ctor) || self.heap.variant(cell) != types.header {
+                return Err(not_headers());
+            }
+            let (Some(name), Some(value)) = (self.heap.field(cell, 0), self.heap.field(cell, 1))
+            else {
+                return Err(not_headers());
+            };
+            out.push((name, value));
+        }
+        Ok(out)
+    }
+
+    /// Bytes `range` of the head at byte `off` of `buf`, as a slice of it.
+    fn view(
+        &mut self,
+        buf: Bits,
+        off: usize,
+        range: &std::ops::Range<usize>,
+    ) -> Result<Value, Stop> {
+        let from = (off + range.start) as u64 * 8;
+        let cell =
+            binary::slice(&mut self.heap, buf, from, range.len() as u64 * 8).map_err(full)?;
+        Ok(Value::cell(cell))
+    }
+
+    /// A header block's fields, as `Headers` of slices of `buf`.
+    fn fields(&mut self, buf: Bits, off: usize, block: &http::Block) -> Result<Value, Stop> {
+        let types = self.http_types()?;
+        let mut items = Vec::with_capacity(block.fields.len());
+        for f in &block.fields {
+            let name = self.view(buf, off, &f.name)?;
+            let value = self.view(buf, off, &f.value)?;
+            items.push(Value::cell(
+                self.heap.ctor(types.header, &[name, value]).map_err(full)?,
+            ));
+        }
+        Ok(Value::cell(
+            array::from_values(&mut self.heap, &items).map_err(full)?,
+        ))
+    }
+
+    /// The `HeadFlags` a block's tokens make.
+    fn head_flags(&mut self, flags: http::HeadFlags) -> Result<Value, Stop> {
+        let types = self.http_types()?;
+        let conn = match flags.conn {
+            http::ConnTokens::Neither => types.conn_neither,
+            http::ConnTokens::Close => types.conn_close,
+            http::ConnTokens::KeepAlive => types.conn_keep_alive,
+            http::ConnTokens::Both => types.conn_both,
+        };
+        let fields = [Value::nullary(conn), Value::bool(flags.expect_100_continue)];
+        Ok(Value::cell(
+            self.heap.ctor(types.head_flags, &fields).map_err(full)?,
+        ))
+    }
+
+    /// `variant(status)`: a refusal carrying the HTTP status it answers with.
+    fn with_status(&mut self, variant: VariantRef, r: http::Reject) -> Result<Value, Stop> {
+        let status = Value::int(r as i64).unwrap_or(Value::NIL);
+        Ok(Value::cell(
+            self.heap.ctor(variant, &[status]).map_err(full)?,
+        ))
+    }
+
+    /// The offset `off + n` into `buf`, as an Int.
+    fn consumed(&mut self, off: usize, n: usize) -> Result<Value, Stop> {
+        bigint::value(&mut self.heap, (off + n).into()).map_err(full)
+    }
+
+    /// `h1.Parsed`, for the request head at byte `off` of `buf`, whose bytes
+    /// from there are `window`.
+    fn parsed_request(&mut self, buf: Bits, off: usize, window: &[u8]) -> Result<Value, Stop> {
+        let types = self.http_types()?;
+        match http::request(window) {
+            http::Request::NeedMore => Ok(Value::nullary(types.parsed_need_more)),
+            http::Request::Bad(r) => self.with_status(types.parsed_bad, r),
+            http::Request::Done {
+                method,
+                target,
+                http11,
+                head,
+            } => {
+                let method = self.view(buf, off, &method)?;
+                let target = self.view(buf, off, &target)?;
+                let version = Value::nullary(if http11 { types.http11 } else { types.http10 });
+                let headers = self.fields(buf, off, &head)?;
+                let flags = self.head_flags(head.flags)?;
+                let consumed = self.consumed(off, head.end)?;
+                let fields = [method, target, version, headers, flags, consumed];
+                Ok(Value::cell(
+                    self.heap.ctor(types.parsed_done, &fields).map_err(full)?,
+                ))
+            }
+        }
+    }
+
+    /// `h1.ParsedResponse`, as [`Self::parsed_request`].
+    fn parsed_response(&mut self, buf: Bits, off: usize, window: &[u8]) -> Result<Value, Stop> {
+        let types = self.http_types()?;
+        let bad = |why: http::BadResponse| match why {
+            http::BadResponse::StatusLine => types.bad_status_line,
+            http::BadResponse::Version => types.bad_version,
+            http::BadResponse::Field => types.bad_field,
+            http::BadResponse::TooLarge => types.head_too_large,
+        };
+        match http::response(window) {
+            http::Response::NeedMore => Ok(Value::nullary(types.response_need_more)),
+            http::Response::Bad(why) => {
+                let why = Value::nullary(bad(why));
+                Ok(Value::cell(
+                    self.heap.ctor(types.response_bad, &[why]).map_err(full)?,
+                ))
+            }
+            http::Response::Done {
+                http11,
+                code,
+                reason,
+                head,
+            } => {
+                let version = Value::nullary(if http11 { types.http11 } else { types.http10 });
+                let code = Value::int(i64::from(code)).unwrap_or(Value::NIL);
+                let reason = self.view(buf, off, &reason)?;
+                let headers = self.fields(buf, off, &head)?;
+                let flags = self.head_flags(head.flags)?;
+                let consumed = self.consumed(off, head.end)?;
+                let fields = [version, code, reason, headers, flags, consumed];
+                Ok(Value::cell(
+                    self.heap.ctor(types.response_done, &fields).map_err(full)?,
+                ))
+            }
+        }
+    }
+
+    /// `h1.ChunkBody`, for the chunked body at byte `off` of `buf`, whose
+    /// bytes from there are `bytes`. The body is copied out once, when all of
+    /// it has arrived.
+    fn chunk_body(&mut self, buf: Bits, off: usize, bytes: &[u8], max: u64) -> Result<Value, Stop> {
+        let types = self.http_types()?;
+        match http::chunked(bytes, max) {
+            http::Chunked::NeedMore => Ok(Value::nullary(types.chunked_need_more)),
+            http::Chunked::Bad(r) => self.with_status(types.chunked_bad, r),
+            http::Chunked::Done { pieces, trailers } => {
+                let mut body = Vec::with_capacity(pieces.iter().map(|p| p.len()).sum());
+                for p in &pieces {
+                    body.extend_from_slice(bytes.get(p.clone()).unwrap_or(&[]));
+                }
+                let body = binary::make(&mut self.heap, &body, body.len() as u64 * 8);
+                let body = Value::cell(body.map_err(full)?);
+                let trailer_fields = self.fields(buf, off, &trailers)?;
+                let consumed = self.consumed(off, trailers.end)?;
+                let fields = [body, trailer_fields, consumed];
+                Ok(Value::cell(
+                    self.heap.ctor(types.chunked_done, &fields).map_err(full)?,
+                ))
+            }
+        }
     }
 
     /// The bytes of the binary `v`, or `None` when it is not whole bytes.
@@ -2337,6 +2623,37 @@ mod tests {
             out,
             "2\n{\"a\":[1,{\"b\":\"deep\"}],\"c\":\"x\"}\nrefused\n{\"k\":[1,\"v\"]}\n"
         );
+        assert_eq!(left, 0);
+    }
+
+    /// A parsed head's method, target and fields are slices of the buffer
+    /// read, sharing it, and a decoded chunked body is one copy. When the run
+    /// ends, all of it is freed.
+    #[test]
+    fn what_http_parsing_makes_is_all_freed() {
+        let (out, left) = cells_left_after(
+            "import scarlet/http/h1.{Done, ChunkedDone}\n\
+             import scarlet/http/h1\n\
+             import scarlet/http/headers\n\
+             import scarlet/binary\n\
+             pub fn main() {\n\
+             \treq = <<'POST /x HTTP/1.1\\r\\nHost: a\\r\\nTransfer-Encoding: chunked\\r\\n\\r\\n3\\r\\nabc\\r\\n0\\r\\n\\r\\n'>>\n\
+             \tmatch h1.parse_request(req, 0) {\n\
+             \t\tDone(method, _, _, hs, _, consumed) -> {\n\
+             \t\t\tprintln(binary.to_string(method))\n\
+             \t\t\tprintln(headers.get(hs, <<'host'>>))\n\
+             \t\t\tprintln(h1.framing(hs))\n\
+             \t\t\tprintln(binary.byte_size(h1.serialize_head(200, hs)))\n\
+             \t\t\tmatch h1.chunk_decode(req, consumed, 100) {\n\
+             \t\t\t\tChunkedDone(body, _, _) -> println(body)\n\
+             \t\t\t\t_ -> println('no body')\n\
+             \t\t\t}\n\
+             \t\t}\n\
+             \t\t_ -> println('no head')\n\
+             \t}\n\
+             }\n",
+        );
+        assert_eq!(out, "Ok(POST)\nSome(<<97>>)\nChunked\n56\n<<97, 98, 99>>\n");
         assert_eq!(left, 0);
     }
 

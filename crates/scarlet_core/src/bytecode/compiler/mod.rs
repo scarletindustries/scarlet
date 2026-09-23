@@ -49,8 +49,8 @@ use super::session::{RawRef, Watermark};
 use super::{PreludeBindings, TypeRef};
 use crate::ast;
 use crate::core_ir::{
-    Abi, Const, ConstId, CoreFn, FuncIdx, IoErrors, JsonTypes, LoweredFn, Program, Radix,
-    TypeNames, VariantNames, VariantRef,
+    Abi, Const, ConstId, CoreFn, FuncIdx, HttpTypes, IoErrors, JsonTypes, LoweredFn, Program,
+    Radix, TypeNames, VariantNames, VariantRef,
 };
 use crate::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
 use crate::tivec::{Idx, TiVec};
@@ -1363,6 +1363,7 @@ impl Compiler {
             radix: self.radix(),
             io: self.io_errors(),
             json: self.json_types(),
+            http: self.http_types(),
         };
         let types = self.type_names((&fns).into_iter().chain(&inits).chain([&toplevel]), &abi);
         Some(Program {
@@ -1425,6 +1426,49 @@ impl Compiler {
             list: json("List")?,
             object: json("Object")?,
             number: json("Number")?,
+        })
+    }
+
+    /// `scarlet/http/h1`'s and `scarlet/http/headers`' constructors, by name,
+    /// as [`Self::radix`].
+    fn http_types(&self) -> Option<HttpTypes> {
+        let h1 = ["scarlet", "http", "h1"];
+        let header = self.stdlib_variants(&["scarlet", "http", "headers"], "Header")?;
+        let version = self.stdlib_variants(&h1, "Version")?;
+        let flags = self.stdlib_variants(&h1, "HeadFlags")?;
+        let conn = self.stdlib_variants(&h1, "ConnTokens")?;
+        let parsed = self.stdlib_variants(&h1, "Parsed")?;
+        let response = self.stdlib_variants(&h1, "ParsedResponse")?;
+        let bad = self.stdlib_variants(&h1, "BadResponse")?;
+        let framing = self.stdlib_variants(&h1, "Framing")?;
+        let chunk = self.stdlib_variants(&h1, "ChunkBody")?;
+        Some(HttpTypes {
+            header: header("Header")?,
+            http10: version("Http10")?,
+            http11: version("Http11")?,
+            head_flags: flags("HeadFlags")?,
+            conn_neither: conn("ConnNeither")?,
+            conn_close: conn("ConnClose")?,
+            conn_keep_alive: conn("ConnKeepAlive")?,
+            conn_both: conn("ConnBoth")?,
+            parsed_done: parsed("Done")?,
+            parsed_need_more: parsed("NeedMore")?,
+            parsed_bad: parsed("Bad")?,
+            response_done: response("ResponseDone")?,
+            response_need_more: response("ResponseNeedMore")?,
+            response_bad: response("ResponseBad")?,
+            bad_status_line: bad("BadStatusLine")?,
+            bad_version: bad("BadVersion")?,
+            bad_field: bad("BadField")?,
+            head_too_large: bad("HeadTooLarge")?,
+            bad_framing: bad("BadFraming")?,
+            no_body: framing("NoBody")?,
+            length: framing("Length")?,
+            chunked: framing("Chunked")?,
+            framing_invalid: framing("Invalid")?,
+            chunked_done: chunk("ChunkedDone")?,
+            chunked_need_more: chunk("ChunkedNeedMore")?,
+            chunked_bad: chunk("ChunkedBad")?,
         })
     }
 

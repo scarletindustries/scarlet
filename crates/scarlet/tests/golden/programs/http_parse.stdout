@@ -11,9 +11,9 @@ leading space: Bad 400
 double space: Bad 400
 empty target: Bad 400
 lowercase version: Bad 505
-trailing junk on request line: Bad 505
-bare lf line ending: NeedMore
-bare cr line ending: NeedMore
+trailing junk on request line: Bad 400
+bare lf line ending: Bad 400
+bare cr line ending: Bad 400
 four leading crlfs: Done method=GET target=/ version=Http11 headers=0 consumed=26
 five leading crlfs: Bad 400
 
@@ -37,8 +37,8 @@ no colon rejected: Bad 400
 empty name rejected: Bad 400
 duplicate host: Done method=GET target=/ version=Http11 headers=2 consumed=36
 duplicate host: get returns first = a
-nul in value parses: Done method=GET target=/ version=Http11 headers=1 consumed=28
-nul in value: headers.valid = False
+nul in value parses: Bad 400
+nul in value: parse failed
 
 == header values survive zero-copy ==
 host (lower lookup): example.com

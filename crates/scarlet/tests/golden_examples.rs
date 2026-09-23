@@ -295,7 +295,6 @@ suite! {
         supervisors,
         // HTTP/1.1 surface. Locks the native scanners behind scarlet/http/h1 to the
         // sans-IO contract the Scarlet reference parser defined.
-        #[ignore = "needs the VM"]
         http_parse,
         // The HTTP CLIENT: response-head parsing, response body framing, URL
         // parsing, and the whole request/response path driven over an

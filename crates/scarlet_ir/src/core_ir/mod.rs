@@ -153,6 +153,8 @@ pub struct Abi {
     /// `scarlet/json`'s types, when the program loads that module: what
     /// `json.parse` gives and `json.encode` reads.
     pub json: Option<JsonTypes>,
+    /// `scarlet/http/h1`'s types, when the program loads that module.
+    pub http: Option<HttpTypes>,
 }
 
 /// The constructors of `scarlet/binary.Radix`.
@@ -181,6 +183,79 @@ pub struct IoErrors {
     pub unaligned_binary: VariantRef,
     /// Any other OS error: this holds its number.
     pub errno: VariantRef,
+}
+
+/// The constructors of `scarlet/http/h1` and `scarlet/http/headers` the VM
+/// builds or reads: what a parsed head, a body's framing and a decoded chunked
+/// body are.
+#[derive(Debug, Clone, Copy)]
+pub struct HttpTypes {
+    /// `headers.Header(name, value)`.
+    pub header: VariantRef,
+    /// `h1.Version`.
+    pub http10: VariantRef,
+    pub http11: VariantRef,
+    /// `h1.HeadFlags(conn, expect_100_continue)`, and `h1.ConnTokens`.
+    pub head_flags: VariantRef,
+    pub conn_neither: VariantRef,
+    pub conn_close: VariantRef,
+    pub conn_keep_alive: VariantRef,
+    pub conn_both: VariantRef,
+    /// `h1.Parsed`: a request head.
+    pub parsed_done: VariantRef,
+    pub parsed_need_more: VariantRef,
+    pub parsed_bad: VariantRef,
+    /// `h1.ParsedResponse`, and `h1.BadResponse`'s reasons.
+    pub response_done: VariantRef,
+    pub response_need_more: VariantRef,
+    pub response_bad: VariantRef,
+    pub bad_status_line: VariantRef,
+    pub bad_version: VariantRef,
+    pub bad_field: VariantRef,
+    pub head_too_large: VariantRef,
+    pub bad_framing: VariantRef,
+    /// `h1.Framing`.
+    pub no_body: VariantRef,
+    pub length: VariantRef,
+    pub chunked: VariantRef,
+    pub framing_invalid: VariantRef,
+    /// `h1.ChunkBody`.
+    pub chunked_done: VariantRef,
+    pub chunked_need_more: VariantRef,
+    pub chunked_bad: VariantRef,
+}
+
+impl HttpTypes {
+    fn variants(&self) -> [VariantRef; 26] {
+        [
+            self.header,
+            self.http10,
+            self.http11,
+            self.head_flags,
+            self.conn_neither,
+            self.conn_close,
+            self.conn_keep_alive,
+            self.conn_both,
+            self.parsed_done,
+            self.parsed_need_more,
+            self.parsed_bad,
+            self.response_done,
+            self.response_need_more,
+            self.response_bad,
+            self.bad_status_line,
+            self.bad_version,
+            self.bad_field,
+            self.head_too_large,
+            self.bad_framing,
+            self.no_body,
+            self.length,
+            self.chunked,
+            self.framing_invalid,
+            self.chunked_done,
+            self.chunked_need_more,
+            self.chunked_bad,
+        ]
+    }
 }
 
 /// The constructors of `scarlet/json` the VM builds or reads.
@@ -249,6 +324,9 @@ impl Abi {
         }
         if let Some(json) = self.json {
             all.extend(json.variants());
+        }
+        if let Some(http) = self.http {
+            all.extend(http.variants());
         }
         all
     }

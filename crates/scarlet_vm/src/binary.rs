@@ -157,6 +157,26 @@ pub(crate) fn byte_range(heap: &Heap, b: Bits, from: u64, n: u64) -> Option<Vec<
     Some((from..from + n).map(|k| byte(heap, b, k * 8)).collect())
 }
 
+/// Up to `n` whole bytes of `b` from byte `from`, fewer where it ends first.
+pub(crate) fn bytes_from(heap: &Heap, b: Bits, from: u64, n: u64) -> Vec<u8> {
+    let whole = b.len / 8;
+    let from = from.min(whole);
+    let end = from.saturating_add(n).min(whole);
+    if !b.at.is_multiple_of(8) {
+        return (from..end).map(|k| byte(heap, b, k * 8)).collect();
+    }
+    // Starting on a byte of the owner, each byte is one of its bytes as it is.
+    let d = heap.data(b.owner);
+    let base = b.at / 8;
+    (from..end)
+        .map(|k| {
+            let i = base + k;
+            d.get(1 + (i / 8) as usize)
+                .map_or(0, |w| (w >> (i % 8 * 8)) as u8)
+        })
+        .collect()
+}
+
 /// Whether bytes `from` to `from + text.len()` of `b` are `text`, read in
 /// place.
 pub(crate) fn bytes_are(heap: &Heap, b: Bits, from: u64, text: &[u8]) -> bool {

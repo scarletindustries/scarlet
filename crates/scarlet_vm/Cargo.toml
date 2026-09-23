@@ -24,6 +24,8 @@ libc = "0.2"
 simd-json = { version = "0.17", default-features = false, features = ["runtime-detection", "swar-number-parsing"] }
 # Finding the next backslash, for the lone-surrogate check in `json.rs`.
 memchr = "2"
+# `scarlet/http/h1`'s head parser: `hyper`'s, SIMD and allocation-free.
+httparse = "1"
 
 [dev-dependencies]
 # Tests write their programs in Scarlet and compile them. Only the tests see

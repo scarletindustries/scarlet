@@ -717,7 +717,6 @@ fn stdlib_http_builtins() {
 // `vm::http::has_token` and in Scarlet as `headers.contains_token`. This table
 // drives one set of cases through both and demands the same answer.
 #[test]
-#[ignore = "needs the VM"]
 fn native_and_al_token_matching_agree() {
     // (Connection value, does it carry the `close` token?)
     let cases: &[(&str, bool)] = &[
