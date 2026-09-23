@@ -201,7 +201,7 @@ println(f())              // 7
 
 ## Sequencing
 
-The typed IR is a prerequisite for the effects/comptime work in `docs/effects-comptime-spec.md`, whose Phase A0/A1/A2 assume a compiler that does not mutate itself mid-pass. Land this first.
+The typed IR is a prerequisite for effect typing (`docs/effects-design.md`), which assumes a compiler that does not mutate itself mid-pass. Land this first.
 
 ## Risks, ranked
 
