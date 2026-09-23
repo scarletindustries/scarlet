@@ -116,6 +116,10 @@ pub(crate) enum End {
 struct Root {
     len: usize,
     shift: usize,
+    /// Items at the front of `head` this array has left behind. Dropping from
+    /// the front moves this along and keeps the same leaf, so `[h, ..t]`
+    /// copies nothing; every other operation settles it back to 0.
+    offset: usize,
     head: Value,
     tree: Value,
     tail: Value,
@@ -136,10 +140,31 @@ fn root(heap: &Heap, cell: Cell) -> Root {
     Root {
         len: w(0) as usize,
         shift: w(1) as usize,
-        head: Value::from_bits(w(2)),
-        tree: Value::from_bits(w(3)),
-        tail: Value::from_bits(w(4)),
+        offset: w(2) as usize,
+        head: Value::from_bits(w(3)),
+        tree: Value::from_bits(w(4)),
+        tail: Value::from_bits(w(5)),
     }
+}
+
+/// The head's live items: what `offset` leaves of its leaf.
+fn head_items(heap: &Heap, r: &Root) -> Vec<Value> {
+    let items = slots(heap, r.head);
+    items.get(r.offset..).unwrap_or(&[]).to_vec()
+}
+
+/// A leaf of exactly the head's live items, owned, or `Nil` when there are
+/// none. Nothing left behind means the head itself, shared rather than copied.
+fn own_head(heap: &mut Heap, r: &Root) -> Result<Value, Full> {
+    if r.offset == 0 {
+        return Ok(own(heap, r.head));
+    }
+    let items = head_items(heap, r);
+    if items.is_empty() {
+        return Ok(Value::NIL);
+    }
+    let kept = own_all(heap, &items);
+    leaf(heap, &kept)
 }
 
 /// `v` as a node, or `None` for `Nil`.
@@ -204,11 +229,24 @@ fn new_root(
     tree: Value,
     tail: Value,
 ) -> Result<Cell, Full> {
+    root_at(heap, len, shift, 0, head, tree, tail)
+}
+
+fn root_at(
+    heap: &mut Heap,
+    len: usize,
+    shift: usize,
+    offset: usize,
+    head: Value,
+    tree: Value,
+    tail: Value,
+) -> Result<Cell, Full> {
     heap.make(
         Kind::ArrayRoot,
         &[
             len as u64,
             shift as u64,
+            offset as u64,
             head.bits(),
             tree.bits(),
             tail.bits(),
@@ -321,9 +359,9 @@ pub(crate) fn get(heap: &Heap, array: Cell, i: usize) -> Option<Value> {
     if i >= r.len {
         return None;
     }
-    let head_len = node_len(heap, r.head);
+    let head_len = node_len(heap, r.head) - r.offset;
     if i < head_len {
-        return slots(heap, r.head).get(i).copied();
+        return slots(heap, r.head).get(i + r.offset).copied();
     }
     let mut idx = i - head_len;
     let tree_len = node_len(heap, r.tree);
@@ -351,7 +389,7 @@ pub(crate) fn get(heap: &Heap, array: Cell, i: usize) -> Option<Value> {
 pub(crate) fn elements(heap: &Heap, array: Cell) -> Vec<Value> {
     let r = root(heap, array);
     let mut out = Vec::with_capacity(r.len);
-    out.extend(slots(heap, r.head));
+    out.extend(head_items(heap, &r));
     // A stack of nodes still to visit, last child first, so they pop in order.
     let mut todo = vec![r.tree];
     while let Some(n) = todo.pop() {
@@ -370,11 +408,13 @@ pub(crate) fn elements(heap: &Heap, array: Cell) -> Vec<Value> {
 /// tree as a finished leaf.
 pub(crate) fn push(heap: &mut Heap, array: Cell, x: Value, end: End) -> Result<Cell, Full> {
     let r = root(heap, array);
-    let (this, other) = match end {
-        End::Front => (r.head, r.tail),
-        End::Back => (r.tail, r.head),
+    // A head with items left behind is settled first: the leaf that goes into
+    // the tree, or that the new item joins, must hold only live items.
+    let settled = own_head(heap, &r)?;
+    let (this, this_items, other) = match end {
+        End::Front => (settled, head_items(heap, &r), r.tail),
+        End::Back => (r.tail, slots(heap, r.tail), settled),
     };
-    let this_items = slots(heap, this);
     let (tree, shift, new) = if this_items.is_empty() {
         (own(heap, r.tree), r.shift, leaf(heap, &[x])?)
     } else if this_items.len() < B {
@@ -389,6 +429,9 @@ pub(crate) fn push(heap: &mut Heap, array: Cell, x: Value, end: End) -> Result<C
         (tree, shift, leaf(heap, &[x])?)
     };
     let other = own(heap, other);
+    // `settled` is the head's own leaf when nothing was left behind, and the
+    // branches above each took their own reference to what they kept.
+    release(heap, settled);
     let (head, tail) = match end {
         End::Front => (new, other),
         End::Back => (other, new),
@@ -499,26 +542,26 @@ fn take(heap: &mut Heap, array: Cell, n: usize) -> Result<Cell, Full> {
         heap.share(array);
         return Ok(array);
     }
-    let head_items = slots(heap, r.head);
-    if n <= head_items.len() {
-        let kept = own_all(heap, head_items.get(..n).unwrap_or(&[]));
+    let front = head_items(heap, &r);
+    if n <= front.len() {
+        let kept = own_all(heap, front.get(..n).unwrap_or(&[]));
         let tail = leaf(heap, &kept)?;
         return new_root(heap, n, 0, Value::NIL, Value::NIL, tail);
     }
-    let m = n - head_items.len();
+    let m = n - front.len();
     let tree_len = node_len(heap, r.tree);
     if m <= tree_len {
         let cut = tree_take(heap, r.tree, m)?;
         let (tree, shift) = collapse(heap, cut, r.shift);
         let head = own(heap, r.head);
-        return new_root(heap, n, shift, head, tree, Value::NIL);
+        return root_at(heap, n, shift, r.offset, head, tree, Value::NIL);
     }
     let tail_items = slots(heap, r.tail);
     let kept = own_all(heap, tail_items.get(..m - tree_len).unwrap_or(&[]));
     let tail = leaf(heap, &kept)?;
     let head = own(heap, r.head);
     let tree = own(heap, r.tree);
-    new_root(heap, n, r.shift, head, tree, tail)
+    root_at(heap, n, r.shift, r.offset, head, tree, tail)
 }
 
 /// The elements from `start` up to but not including `end`, or `None` when
@@ -548,15 +591,37 @@ pub(crate) fn skip(heap: &mut Heap, array: Cell, n: usize) -> Result<Cell, Full>
     if n >= r.len {
         return empty(heap);
     }
-    let head_items = slots(heap, r.head);
-    if n < head_items.len() {
-        let kept = own_all(heap, head_items.get(n..).unwrap_or(&[]));
-        let head = leaf(heap, &kept)?;
+    let front = head_items(heap, &r);
+    if n < front.len() {
+        // The cheap `[h, ..t]`: the same head leaf, tree and tail, with `n`
+        // more items left behind. Nothing is copied.
+        let head = own(heap, r.head);
         let tree = own(heap, r.tree);
         let tail = own(heap, r.tail);
-        return new_root(heap, r.len - n, r.shift, head, tree, tail);
+        return root_at(heap, r.len - n, r.shift, r.offset + n, head, tree, tail);
     }
-    let m = n - head_items.len();
+    let m = n - front.len();
+    // The head is spent, so what is left comes out of the tree: move its
+    // leftmost leaf up to be the new head, whole and shared, and leave `m` of
+    // it behind. The tree is cut once for a leaf rather than once an element,
+    // so walking an array cuts it every `B` steps and the steps between are
+    // the offset above.
+    if let Some(first) = first_leaf(heap, r.tree)
+        && m < slots(heap, first).len()
+    {
+        let taken = slots(heap, first).len();
+        // `tree_drop` of a whole leaf that is the whole tree would leave an
+        // empty leaf behind, so a tree of one leaf becomes no tree at all.
+        let (tree, shift) = if taken == node_len(heap, r.tree) {
+            (Value::NIL, 0)
+        } else {
+            let cut = tree_drop(heap, r.tree, taken)?;
+            collapse(heap, cut, r.shift)
+        };
+        let head = own(heap, first);
+        let tail = own(heap, r.tail);
+        return root_at(heap, r.len - n, shift, m, head, tree, tail);
+    }
     let tree_len = node_len(heap, r.tree);
     if m < tree_len {
         let cut = tree_drop(heap, r.tree, m)?;
@@ -573,6 +638,17 @@ pub(crate) fn skip(heap: &mut Heap, array: Cell, n: usize) -> Result<Cell, Full>
         leaf(heap, &kept)?
     };
     new_root(heap, r.len - n, 0, Value::NIL, Value::NIL, tail)
+}
+
+/// The tree's leftmost leaf, borrowed, or `None` when there is no tree.
+fn first_leaf(heap: &Heap, n: Value) -> Option<Value> {
+    let mut n = n;
+    loop {
+        match node(heap, n)? {
+            Node::Leaf(_) => return Some(n),
+            Node::Branch { children, .. } => n = *children.first()?,
+        }
+    }
 }
 
 /// The first `m` elements of a tree node, `m` from 1 to its length.
@@ -654,11 +730,13 @@ pub(crate) fn concat(heap: &mut Heap, l: Cell, r: Cell) -> Result<Cell, Full> {
     } else {
         tree_push_leaf(heap, lr.tree, lr.shift, lr.tail, End::Back)?
     };
-    let (rtree, rshift) = if rr.head.as_cell().is_none() {
+    let rhead = own_head(heap, &rr)?;
+    let (rtree, rshift) = if rhead.as_cell().is_none() {
         (own(heap, rr.tree), rr.shift)
     } else {
-        tree_push_leaf(heap, rr.tree, rr.shift, rr.head, End::Front)?
+        tree_push_leaf(heap, rr.tree, rr.shift, rhead, End::Front)?
     };
+    release(heap, rhead);
     let (tree, shift) = if ltree.as_cell().is_none() {
         (rtree, rshift)
     } else if rtree.as_cell().is_none() {
@@ -675,7 +753,7 @@ pub(crate) fn concat(heap: &mut Heap, l: Cell, r: Cell) -> Result<Cell, Full> {
     };
     let head = own(heap, lr.head);
     let tail = own(heap, rr.tail);
-    new_root(heap, lr.len + rr.len, shift, head, tree, tail)
+    root_at(heap, lr.len + rr.len, shift, lr.offset, head, tree, tail)
 }
 
 /// The borrowed trees `l` and `r` merged into one or two owned nodes at the
@@ -832,6 +910,13 @@ mod tests {
             .collect()
     }
 
+    fn int(v: Value) -> Option<i64> {
+        match v.view() {
+            crate::value::View::Int(n) => Some(n),
+            _ => None,
+        }
+    }
+
     fn array_of(heap: &mut Heap, range: std::ops::Range<i64>) -> Cell {
         let items: Vec<Value> = range.map(|n| Value::int(n).expect("small")).collect();
         from_values(heap, &items).expect("room")
@@ -848,6 +933,10 @@ mod tests {
                 "a buffer of {n}"
             );
         }
+        assert!(
+            r.offset < node_len(heap, r.head).max(1),
+            "an offset past its leaf"
+        );
         let tree_len = if r.tree.as_cell().is_some() {
             check_node(heap, r.tree, r.shift)
         } else {
@@ -855,7 +944,7 @@ mod tests {
         };
         assert_eq!(
             r.len,
-            node_len(heap, r.head) + tree_len + node_len(heap, r.tail)
+            node_len(heap, r.head) - r.offset + tree_len + node_len(heap, r.tail)
         );
         assert_eq!(elements(heap, array).len(), r.len);
     }
@@ -963,6 +1052,95 @@ mod tests {
         for c in [a, tail, joined] {
             heap.release(c);
         }
+        assert_eq!(heap.live(), 0);
+    }
+
+    /// Walking an array one element at a time, the way `[h, ..t]` does. Each
+    /// step keeps the same leaf and moves the offset along, and the tree is
+    /// cut only when a leaf runs out, so the cells this makes are a small
+    /// multiple of the number of leaves rather than of the elements. Every
+    /// step still reads back as the plain list does, from either end and
+    /// through `get`.
+    #[test]
+    fn walking_an_array_from_the_front_copies_no_leaf() {
+        let mut heap = Heap::default();
+        let n = 1000;
+        let a = array_of(&mut heap, 0..n);
+        let mut cur = a;
+        heap.share(cur);
+        // Every leaf the walk reads from. A leaf it copied would be a cell of
+        // its own, so counting them is counting the copies.
+        let mut heads: Vec<Option<Cell>> = Vec::new();
+        for i in 0..n {
+            assert_eq!(get(&heap, cur, 0).and_then(int), Some(i), "head at {i}");
+            assert_eq!(len(&heap, cur), (n - i) as usize);
+            let head = root(&heap, cur).head.as_cell();
+            if heads.last() != Some(&head) {
+                heads.push(head);
+            }
+            let next = skip(&mut heap, cur, 1).expect("room");
+            check(&heap, next);
+            heap.release(cur);
+            cur = next;
+        }
+        assert_eq!(len(&heap, cur), 0);
+        heap.release(cur);
+        let leaves = (n as usize).div_ceil(B);
+        assert!(
+            heads.len() <= leaves + 1,
+            "{} leaves read for {leaves} in the array",
+            heads.len()
+        );
+        heap.release(a);
+        assert_eq!(heap.live(), 0);
+    }
+
+    /// An array partly walked is an ordinary array: what it left behind is
+    /// invisible to reading it, cutting it, joining it and pushing onto it,
+    /// and none of those reach past its own front.
+    #[test]
+    fn an_array_walked_part_way_behaves_like_the_rest_of_it() {
+        let mut heap = Heap::default();
+        let whole = array_of(&mut heap, 0..200);
+        let other = array_of(&mut heap, 200..260);
+        for k in [1, 5, 31, 32, 33, 40, 64, 100] {
+            let s = skip(&mut heap, whole, k).expect("room");
+            check(&heap, s);
+            let rest: Vec<i64> = (k as i64..200).collect();
+            assert_eq!(ints(&heap, s), rest, "skip {k}");
+            assert_eq!(get(&heap, s, 0).and_then(int), Some(k as i64));
+            assert_eq!(get(&heap, s, 3).and_then(int), Some(k as i64 + 3));
+
+            let t = take(&mut heap, s, 7).expect("room");
+            check(&heap, t);
+            assert_eq!(ints(&heap, t), rest[..7], "take after skip {k}");
+
+            let again = skip(&mut heap, s, 9).expect("room");
+            check(&heap, again);
+            assert_eq!(ints(&heap, again), rest[9..], "skip twice {k}");
+
+            let joined = concat(&mut heap, s, other).expect("room");
+            check(&heap, joined);
+            let want: Vec<i64> = rest.iter().copied().chain(200..260).collect();
+            assert_eq!(ints(&heap, joined), want, "concat after skip {k}");
+
+            let front =
+                push(&mut heap, s, Value::int(-1).expect("small"), End::Front).expect("room");
+            check(&heap, front);
+            let want: Vec<i64> = std::iter::once(-1).chain(rest.iter().copied()).collect();
+            assert_eq!(ints(&heap, front), want, "push front after skip {k}");
+
+            let back = push(&mut heap, s, Value::int(-1).expect("small"), End::Back).expect("room");
+            check(&heap, back);
+            let want: Vec<i64> = rest.iter().copied().chain(std::iter::once(-1)).collect();
+            assert_eq!(ints(&heap, back), want, "push back after skip {k}");
+
+            for c in [s, t, again, joined, front, back] {
+                heap.release(c);
+            }
+        }
+        heap.release(whole);
+        heap.release(other);
         assert_eq!(heap.live(), 0);
     }
 

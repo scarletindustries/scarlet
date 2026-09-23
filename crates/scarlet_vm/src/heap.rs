@@ -548,7 +548,7 @@ fn held(kind: u64, size: usize) -> std::ops::Range<usize> {
     } else if k(Kind::Tuple) || k(Kind::ArrayLeaf) {
         1..size
     } else if k(Kind::ArrayRoot) {
-        3..size
+        4..size
     } else if k(Kind::ArrayBranch) {
         2 + size.saturating_sub(2) / 2..size
     } else if k(Kind::BinarySlice) {
