@@ -18,3 +18,4 @@ pub mod cli;
 pub mod dis;
 pub mod lsp;
 pub mod repl;
+pub mod stop;

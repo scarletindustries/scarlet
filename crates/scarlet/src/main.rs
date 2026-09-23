@@ -463,19 +463,14 @@ fn cmd_run(args: RunArgs) {
     let host = scarlet_vm::Host::of_this_process(argv);
     let mut out = io::BufWriter::new(io::stdout().lock());
     let outcome = scarlet_vm::run(&program, &host, &mut out);
-    // Flushed before any message, so the program's own output comes first.
-    let flushed = out.flush();
-    match outcome {
-        Ok(()) if flushed.is_ok() => {}
-        // A closed pipe, like `| head`, is the reader leaving, not a failure.
-        Ok(()) | Err(scarlet_vm::Stop::OutputClosed) => {}
-        Err(scarlet_vm::Stop::NotBuiltYet(what)) => {
-            die(format!("cannot run: the new VM does not run {what} yet"))
-        }
-        Err(scarlet_vm::Stop::HeapFull) => die("the program ran out of heap"),
-        Err(scarlet_vm::Stop::BadProgram(what)) => die(format!(
-            "internal error: {what}. This is a bug in the compiler, not in the program"
-        )),
+    // Flushed before any message, so the program's own output comes first. A
+    // flush that fails is the reader leaving, like a pipe into `head`, which
+    // is not a failure of the program.
+    let _ = out.flush();
+    if let Err(stop) = outcome
+        && let Some(why) = scarlet::stop::message(&stop)
+    {
+        die(why);
     }
 }
 

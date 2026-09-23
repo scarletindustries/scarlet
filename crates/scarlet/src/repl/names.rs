@@ -150,6 +150,12 @@ impl Names {
         out
     }
 
+    /// Whether `name`, typed alone, is an imported module rather than a value
+    /// the session defined.
+    pub fn is_module(&self, name: &str) -> bool {
+        self.aliases.contains_key(name) && !self.defined.iter().any(|d| d == name)
+    }
+
     /// Candidates after `qualifier.`: that module's public exports.
     pub fn qualified(&mut self, qualifier: &str, prefix: &str) -> Vec<Candidate> {
         let Some(path) = self.aliases.get(qualifier).cloned() else {

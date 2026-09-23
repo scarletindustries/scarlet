@@ -8,6 +8,17 @@ reject_case! {
         "not exhaustive",
     ),
     unknown_identifier_is_error: ("pub fn main() {\n\tx = foo\n}\n", "Unknown identifier"),
+    // A stdlib module's name, used with no import, is that module: the error
+    // says which import it needs.
+    an_unimported_stdlib_module_names_its_import: (
+        "pub fn main() {\n\tprintln(int.abs(1))\n}\n",
+        "Unknown identifier 'int': it is the name of a stdlib module that is not imported. Add `import scarlet/int`",
+    ),
+    // A module is not a value: the error says so and shows a use of it.
+    a_module_is_not_a_value: (
+        "import scarlet/int\npub fn main() {\n\tprintln(int)\n}\n",
+        "'int' is the module `scarlet/int`, not a value. Use one of its members, like `int.abs`",
+    ),
     if_condition_must_be_bool:
         ("pub fn main() {\n\tprintln(if 1 { 2 } else { 3 })\n}\n", "Type mismatch"),
 

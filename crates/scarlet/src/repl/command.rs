@@ -67,7 +67,7 @@ const COMMANDS: &[Spec] = &[
     },
     Spec {
         name: "quit",
-        aliases: &["q"],
+        aliases: &["q", "exit"],
         arg: Arg::None,
         help: "leave the REPL",
     },
@@ -261,6 +261,8 @@ mod tests {
     fn an_alias_resolves_to_its_command() {
         assert!(matches!(parse(":t 1 + 1"), Some(Command::Type("1 + 1"))));
         assert!(matches!(parse(":q"), Some(Command::Quit)));
+        assert!(matches!(parse(":exit"), Some(Command::Quit)));
+        assert!(matches!(parse("/exit"), Some(Command::Quit)));
         assert!(matches!(parse(":?"), Some(Command::Help)));
     }
 

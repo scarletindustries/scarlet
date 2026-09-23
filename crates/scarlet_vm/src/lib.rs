@@ -63,3 +63,17 @@ pub fn run(program: &Program, host: &Host, out: &mut dyn Write) -> Result<(), St
     exec::Machine::new(&code, host, out).run()?;
     Ok(())
 }
+
+/// Run `program` as [`run`] does, and give the value it ends with as `println`
+/// shows it, or `None` when that value is `Nil`. The REPL runs each entry this
+/// way: the entry's last expression is the program's last value.
+pub fn run_showing(
+    program: &Program,
+    host: &Host,
+    out: &mut dyn Write,
+) -> Result<Option<String>, Stop> {
+    let code = code::load(program);
+    let mut machine = exec::Machine::new(&code, host, out);
+    let last = machine.run()?;
+    machine.shown(last)
+}

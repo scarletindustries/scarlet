@@ -3486,6 +3486,30 @@ impl Compiler {
         let name = &expr.name;
 
         let Some(scheme) = self.env.lookup(name) else {
+            // A module's name is not a value: say what it is and how to reach
+            // what is in it.
+            if let Some(key) = self.imported_qualifiers.get(name) {
+                let module = self.module_name(key);
+                // A function or value of it, to show the shape of a use.
+                let example = self.module_table.get(key).and_then(|m| {
+                    m.values
+                        .keys()
+                        .filter(|k| k.starts_with(|c: char| c.is_ascii_lowercase()))
+                        .min()
+                        .cloned()
+                });
+                let example = match example {
+                    Some(member) => format!(", like `{name}.{member}`"),
+                    None => String::new(),
+                };
+                self.error(
+                    format!(
+                        "'{name}' is the module `{module}`, not a value. Use one of its members{example}"
+                    ),
+                    expr.span,
+                );
+                return self.engine.fresh_var();
+            }
             if let Some(suggestion) = self.env.suggest_name(name) {
                 self.error(
                     format!(
@@ -4265,6 +4289,30 @@ impl Compiler {
             }
             _ => None,
         };
+
+        // `int.max(1, 2)` with no `import scarlet/int`: an unknown name that is
+        // a stdlib module's is that module, not yet imported. Say that, once,
+        // rather than an unknown identifier and then a field of an unknown type.
+        if let ast::Expression::Identifier(id) = expr.left.as_ref()
+            && self.env.lookup(&id.name).is_none()
+        {
+            let modules: Vec<String> = crate::module::stdlib_modules()
+                .into_iter()
+                .filter(|path| path.len() > 1 && path.last() == Some(&id.name))
+                .map(|path| format!("`import {}`", path.join("/")))
+                .collect();
+            if !modules.is_empty() {
+                self.error(
+                    format!(
+                        "Unknown identifier '{}': it is the name of a stdlib module that is not imported. Add {}",
+                        id.name,
+                        modules.join(" or ")
+                    ),
+                    id.span,
+                );
+                return self.engine.fresh_var();
+            }
+        }
 
         let left_ty = self.compile_expr(&expr.left);
 

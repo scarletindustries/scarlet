@@ -2190,6 +2190,19 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
         show::show(&self.heap, self.code, v, out)
     }
 
+    /// `v` as `println` shows it, or `None` for `Nil`. Gives up `v`'s
+    /// reference.
+    pub(crate) fn shown(&mut self, v: Value) -> Result<Option<String>, Stop> {
+        if v.bits() == Value::NIL.bits() {
+            return Ok(None);
+        }
+        let mut text = Vec::new();
+        let shown = self.show(v, &mut text);
+        self.release(v);
+        shown?;
+        Ok(Some(String::from_utf8_lossy(&text).into_owned()))
+    }
+
     /// Cells not yet freed.
     #[cfg(test)]
     fn live(&self) -> usize {

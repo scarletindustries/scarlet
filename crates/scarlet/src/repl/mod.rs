@@ -205,11 +205,18 @@ impl Session {
         format!("{}{}", self.imports, self.definitions)
     }
 
-    /// Compile the session's source plus `input` as one program. There is no
-    /// VM to run it on while the VM is rebuilt, so an entry that ends in an
-    /// expression says it was not evaluated; one that compiles still joins
-    /// the session, so its definitions stay usable.
+    /// Compile the session's source plus `input` as one program and run it,
+    /// printing the value unless it is `Nil` (a definition, or a call that ran
+    /// only for its output). An entry joins the session only when it ran: its
+    /// definitions are replayed ahead of every later entry, and one that
+    /// stopped would stop each of them too.
     fn eval(&mut self, input: &str) {
+        // A module's name alone is not a value, but at a prompt it is a fair
+        // question: what is in it.
+        let name = input.trim();
+        if self.names.borrow().is_module(name) {
+            return self.list_module(name);
+        }
         let program = match entry::parse(input) {
             Entry::Accepted(program) => program,
             Entry::Incomplete(diagnostics) | Entry::Rejected(diagnostics) => {
@@ -240,21 +247,62 @@ impl Session {
                 return;
             }
         }
-        if result.into_runnable().is_none() {
+        let Some(runnable) = result.into_runnable() else {
             // A successful non-check compile always produces a program, so
             // reaching here means the stdlib seed failed and was already
             // reported.
             return;
-        }
-        // Only an entry that ends in an expression has a value the user wrote.
-        if !parts.expressions.trim().is_empty() {
-            let p = &self.palette;
-            eprintln!("{}not evaluated: the VM is being rebuilt{}", p.dim, p.reset);
+        };
+        let host = scarlet_vm::Host::of_this_process(Vec::new());
+        let ran = {
+            let mut out = std::io::stdout().lock();
+            let ran = scarlet_vm::run_showing(&runnable, &host, &mut out);
+            let _ = std::io::Write::flush(&mut out);
+            ran
+        };
+        match ran {
+            // Only an entry that ends in an expression has a value the user
+            // wrote. What a definition leaves is the program's own, and
+            // printing it says nothing about the entry.
+            Ok(Some(shown)) if !parts.expressions.trim().is_empty() => println!("{shown}"),
+            Ok(_) => {}
+            Err(stop) => {
+                if let Some(why) = crate::stop::message(&stop) {
+                    eprintln!("{why}");
+                }
+                return;
+            }
         }
 
         self.names.borrow_mut().observe(&program);
         self.imports.push_str(&parts.imports);
         self.definitions.push_str(&parts.definitions);
+    }
+
+    /// What the imported module `alias` offers: its first few public names,
+    /// and how to see the rest.
+    fn list_module(&self, alias: &str) {
+        const SHOWN: usize = 15;
+        let mut members = self.names.borrow_mut().qualified(alias, "");
+        // Its functions and values first: what a module is for, ahead of the
+        // types and constructors that go with them.
+        members.sort_by_key(|m| m.name.starts_with(|c: char| c.is_ascii_uppercase()));
+        let p = &self.palette;
+        println!(
+            "{alias} is a module. It has {} public names:",
+            members.len()
+        );
+        for m in members.iter().take(SHOWN) {
+            println!("  {alias}.{}", m.display());
+        }
+        if members.len() > SHOWN {
+            println!(
+                "{}  and {} more: type `{alias}.` and press Tab to see them all{}",
+                p.dim,
+                members.len() - SHOWN,
+                p.reset
+            );
+        }
     }
 
     /// The inferred type of `expr`, from a throwaway checking session. Bound
