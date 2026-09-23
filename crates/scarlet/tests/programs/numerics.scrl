@@ -183,8 +183,7 @@ pub fn main() {
 	parsed = string.inspect(result.map(decimal.parse('19.99'), decimal.units))
 	println('parse: ${parsed} ${string.inspect(decimal.parse('.5'))}')
 	println('to_float: ${decimal.to_float(price)}')
-	from_float = result.map(decimal.from_float(0.125, 3), decimal.to_string)
-	println('from_float: ${string.inspect(from_float)}')
+	println('from_float: ${decimal.to_string(decimal.from_float(0.125, 3))}')
 
 	// --- Comparisons across types ---------------------------------------------
 

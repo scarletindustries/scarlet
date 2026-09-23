@@ -2,7 +2,6 @@
 
 import scarlet/array
 import scarlet/decimal.{Ceiling, Decimal, Down, Floor, HalfEven, HalfUp, Up}
-import scarlet/result
 
 type Usd {
 	amount Decimal
@@ -126,10 +125,9 @@ pub fn main() {
 	println('from_int         ${str(decimal.from_int(7))}')
 	println('')
 
-	approx = decimal.from_float(0.1 + 0.2, 2) or zero
 	println('to_float         ${decimal.to_float(d('19.99'))}')
-	println('from_float       ${str(approx)}')
-	println('from_float 20dp  ${result.is_err(decimal.from_float(1.5, 20))}')
+	println('from_float       ${str(decimal.from_float(0.1 + 0.2, 2))}')
+	println('from_float 20dp  ${str(decimal.from_float(0.1, 20))}')
 	println('')
 
 	third = decimal.div(d('10'), d('3'), 4) or zero
@@ -137,13 +135,10 @@ pub fn main() {
 
 	match decimal.div(d('10'), zero, 2) {
 		Ok(q) -> println('divided by zero? ${decimal.to_string(q)}')
-		Err(e) -> println('div by zero      ${e}')
+		Err(Nil) -> println('div by zero      Err(Nil)')
 	}
 
-	match decimal.div(d('10'), d('3'), 19) {
-		Ok(q) -> println('19 places?       ${decimal.to_string(q)}')
-		Err(e) -> println('places > 18      ${e}')
-	}
+	println('10 / 3 @ 30      ${str(decimal.div(d('10'), d('3'), 30) or zero)}')
 
 	println('')
 

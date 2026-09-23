@@ -34,11 +34,11 @@ from_int         7
 
 to_float         19.99
 from_float       0.30
-from_float 20dp  True
+from_float 20dp  0.10000000000000000555
 
 10 / 3 @ 4       3.3333
-div by zero      DividedByZero
-places > 18      ScaleOutOfRange
+div by zero      Err(Nil)
+10 / 3 @ 30      3.333333333333333333333333333333
 
 HalfEven	 2.345 -> 2.34	-2.345 -> -2.34
 HalfUp	 2.345 -> 2.35	-2.345 -> -2.35

@@ -1,24 +1,12 @@
 // Exact decimal arithmetic on a scaled integer, for money-like values.
 //
-// A `Decimal` is `units * 10^(-scale)`: `new(1999, 2)` is 19.99. The scale is
-// carried through arithmetic automatically — addition aligns scales,
-// multiplication adds them. The only operations that discard digits are `div`
-// and `round`, which take an explicit target scale and rounding mode.
+// A `Decimal` is `units * 10^(-scale)`: `new(1999, 2)` is 19.99. Addition
+// aligns scales and multiplication adds them, so only `div` and `round` drop
+// digits, at a scale and rounding mode you give. `units` is an `Int`, so
+// neither it nor the scale has a limit.
 //
-// The type is opaque: values can only be built through the functions here, so
-// downstream code can wrap it in its own opaque type for nominal safety:
-//
-//   pub opaque type Usd { Usd(amount Decimal) }
-//   pub fn usd(units Int) Usd { Usd(decimal.new(units, 2)) }
-//   pub fn add(a Usd, b Usd) Usd {
-//       match a { Usd(x) -> match b { Usd(y) -> Usd(decimal.add(x, y)) } }
-//   }
-//
-// `units` follows the language's Int semantics (64-bit, wrapping), so keep
-// magnitudes below 9.2 * 10^18 and scales at or below 18. Aligning scales in
-// `add`, `sub`, and `compare` multiplies units by 10^(scale difference), so
-// that product must also fit in 64 bits or it wraps. `parse` and `from_float`
-// return `Err(Nil)` on inputs that would overflow rather than wrapping.
+// The type is opaque, so code can wrap it in its own opaque type for nominal
+// safety: `pub opaque type Usd { Usd(amount Decimal) }`.
 
 import scarlet/binary.{Dec}
 import scarlet/float
@@ -97,48 +85,30 @@ pub fn mul(a Decimal, b Decimal) Decimal {
 	Decimal(units(a) * units(b), scale(a) + scale(b))
 }
 
-// Why `div` failed. `DividedByZero` is a zero divisor. `ScaleOutOfRange` is a
-// `places` whose magnitude exceeds 18 (the result must stay within the type's
-// |scale| <= 18 contract, as in `from_float`) or a rescale exponent
-// `places + scale(b) - scale(a)` above 18 (10^19 no longer fits in Int).
-pub type DivError {
-	DividedByZero
-	ScaleOutOfRange
-}
-
-// Quotient at the given scale, rounding half-to-even. A negative `places`
-// rounds the quotient to a multiple of 10^|places| at scale 0:
+// `a / b` at `places`, rounding half-to-even, or `Err(Nil)` when `b` is 0.
+// A negative `places` rounds to a multiple of 10^|places| at scale 0:
 // `div(from_int(1234), from_int(1), 0 - 2)` is 1200.
-pub fn div(a Decimal, b Decimal, places Int) Result(Decimal, DivError) {
+pub fn div(a Decimal, b Decimal, places Int) Result(Decimal, Nil) {
 	div_with(a, b, places, HalfEven)
 }
 
-pub fn div_with(a Decimal, b Decimal, places Int, mode Rounding) Result(Decimal, DivError) {
-	e = places + scale(b) - scale(a)
+pub fn div_with(a Decimal, b Decimal, places Int, mode Rounding) Result(Decimal, Nil) {
 	if is_zero(b) {
-		Err(DividedByZero)
-	} else if places > 18 || places < 0 - 18 || e > 18 {
-		Err(ScaleOutOfRange)
+		Err(Nil)
 	} else {
+		e = places + scale(b) - scale(a)
 		q = if e >= 0 {
 			div_units(units(a) * pow10(e), units(b), mode)
-		} else if e >= 0 - 18 {
-			div_units(units(a), units(b) * pow10(0 - e), mode)
-		} else if units(b) < 0 {
-			div_round_huge(0 - units(a), 0 - units(b), 0 - e, mode)
 		} else {
-			div_round_huge(units(a), units(b), 0 - e, mode)
+			div_units(units(a), units(b) * pow10(0 - e), mode)
 		}
 		Ok(at_places(q, places))
 	}
 }
 
-// Change the scale, rounding half-to-even when digits are dropped and
-// zero-padding when the scale grows: `round(new(2345, 3), 2)` is 2.34.
-// A negative `places` rounds to a multiple of 10^|places| at scale 0:
-// `round(new(1250, 0), 0 - 2)` is 1200. Below `places` of -18 the only
-// representable result is 0; a nonzero one (a ±10^|places| step, reachable
-// only from magnitudes at or above 5 * 10^18) wraps like any overflow.
+// Change the scale, rounding half-to-even or padding with zeros:
+// `round(new(2345, 3), 2)` is 2.34. A negative `places` rounds to a
+// multiple of 10^|places| at scale 0: `round(new(1250, 0), 0 - 2)` is 1200.
 pub fn round(d Decimal, places Int) Decimal {
 	round_with(d, places, HalfEven)
 }
@@ -147,10 +117,8 @@ pub fn round_with(d Decimal, places Int, mode Rounding) Decimal {
 	k = scale(d) - places
 	if k <= 0 {
 		Decimal(units(d) * pow10(0 - k), places)
-	} else if k <= 18 {
-		at_places(div_round(units(d), pow10(k), mode), places)
 	} else {
-		at_places(div_round_huge(units(d), 1, k, mode), places)
+		at_places(div_round(units(d), pow10(k), mode), places)
 	}
 }
 
@@ -235,10 +203,9 @@ pub fn normalize(d Decimal) Decimal {
 	}
 }
 
-// Accepts an optional sign, digits, and an optional fractional part:
-// '42', '-19.99', '+0.05'. The scale is the number of fractional digits.
-// Rejects anything else — including '.5', '1.', values that would overflow,
-// and more than 18 fractional digits.
+// An optional sign, digits, and an optional fraction: '42', '-19.99',
+// '+0.05'. The scale is the number of fraction digits. Anything else, like
+// '.5' or '1.', is `Err(Nil)`.
 pub fn parse(s String) Result(Decimal, Nil) {
 	b = binary.from_string(s)
 	first = binary.byte_at(b, 0)
@@ -271,28 +238,21 @@ pub fn to_float(d Decimal) Float {
 	float.from_int(units(d)) / float.from_int(pow10(scale(d)))
 }
 
-// `f` rounded to the nearest value at the given scale; `Err(Nil)` when the
-// resulting `units` would leave 64-bit Int range, or when |places| exceeds
-// 18 (10^19 no longer fits in `units`). A negative `places` rounds to a
-// multiple of 10^|places| at scale 0. Floats are approximate, so prefer
-// `parse` or `new` when exactness matters.
-pub fn from_float(f Float, places Int) Result(Decimal, Nil) {
-	if places > 18 || places < 0 - 18 {
-		Err(Nil)
+// The exact value of `f`, rounded at `places` with ties away from zero, as
+// `float.round` does. A Float is never NaN or infinite, so this cannot fail.
+// Floats are approximate, so prefer `parse` or `new` when exactness matters.
+pub fn from_float(f Float, places Int) Decimal {
+	round_with(exact(f, 0), places, HalfUp)
+}
+
+// `f * 2^k` is whole after at most 1074 doublings, each exact. Then `f` is
+// `n / 2^k`, which is `n * 5^k / 10^k`.
+fn exact(f Float, k Int) Decimal {
+	n = float.floor(f)
+	if float.from_int(n) == f {
+		Decimal(n * pow(5, k), k)
 	} else {
-		k = int.max(0 - places, 0)
-		scaled = if places < 0 {
-			f / float.from_int(pow10(k))
-		} else {
-			f * float.from_int(pow10(places))
-		}
-		// 9.2 * 10^18 sits safely below Int max, so rounding `scaled` (and,
-		// for negative `places`, scaling back up by 10^k) cannot wrap.
-		if float.abs(scaled) < 9200000000000000000.0 / float.from_int(pow10(k)) {
-			Ok(at_places(float.round(scaled), places))
-		} else {
-			Err(Nil)
-		}
+		exact(f * 2.0, k + 1)
 	}
 }
 
@@ -307,10 +267,18 @@ fn at_places(q Int, places Int) Decimal {
 }
 
 fn pow10(n Int) Int {
+	pow(10, n)
+}
+
+// `b^n` by squaring; 1 when `n <= 0`.
+fn pow(b Int, n Int) Int {
 	if n <= 0 {
 		1
+	} else if n % 2 == 0 {
+		h = pow(b, n / 2)
+		h * h
 	} else {
-		10 * pow10(n - 1)
+		b * pow(b, n - 1)
 	}
 }
 
@@ -334,13 +302,11 @@ fn parse_unsigned(b Binary) Option(Decimal) {
 fn parse_parts(whole Binary, frac Binary) Option(Decimal) {
 	k = binary.byte_size(frac)
 	match binary.parse_int(whole, Dec) {
-		Ok(w) if k <= 18 -> match binary.parse_int(frac, Dec) {
-			// w * 10^k + f overflows Int exactly when w exceeds
-			// (Int max - f) / 10^k; wrapping would corrupt the value.
-			Ok(f) if w <= { int.max_value - f } / pow10(k) -> Some(Decimal(w * pow10(k) + f, k))
-			_ -> None
+		Ok(w) -> match binary.parse_int(frac, Dec) {
+			Ok(f) -> Some(Decimal(w * pow10(k) + f, k))
+			Err(Nil) -> None
 		}
-		_ -> None
+		Err(Nil) -> None
 	}
 }
 
@@ -374,58 +340,19 @@ fn div_round(n Int, d Int, mode Rounding) Int {
 			} else {
 				q + 1
 			}
-			// Half-tie tests compare `r` against `d - r` rather than `2 * r`
-			// against `d`: with 0 <= r < d the subtraction never wraps, while
-			// doubling `r` would for divisors above 2^62 — inside the module's
-			// documented |units| range.
-			HalfUp -> if r >= d - r {
+			HalfUp -> if 2 * r >= d {
 				step_away(q, n)
 			} else {
 				q
 			}
-			HalfEven -> if r > d - r {
+			HalfEven -> if 2 * r > d {
 				step_away(q, n)
-			} else if r < d - r {
+			} else if 2 * r < d {
 				q
 			} else if q % 2 == 0 {
 				q
 			} else {
 				step_away(q, n)
-			}
-		}
-	}
-}
-
-// `n / (d * 10^k)` rounded per `mode`, for positive `d` and `k >= 19` —
-// exponents where materializing 10^k would wrap. The divisor exceeds every
-// representable |n|, so the truncated quotient is 0 and all of `n` is
-// remainder; only the direction of the rounding step is left to decide. The
-// half boundary `d * 5 * 10^(k-1)` sits inside Int range only at d == 1,
-// k == 19; everywhere else the remainder is below it and the Half modes
-// keep the quotient at 0.
-fn div_round_huge(n Int, d Int, k Int, mode Rounding) Int {
-	if n == 0 {
-		0
-	} else {
-		on_half = d == 1 && k == 19
-		match mode {
-			Down -> 0
-			Up -> step_away(0, n)
-			Floor -> if n < 0 {
-				0 - 1
-			} else {
-				0
-			}
-			Ceiling -> if n < 0 { 0 } else { 1 }
-			HalfUp -> if on_half && int.abs(n) >= 5 * pow10(18) {
-				step_away(0, n)
-			} else {
-				0
-			}
-			HalfEven -> if on_half && int.abs(n) > 5 * pow10(18) {
-				step_away(0, n)
-			} else {
-				0
 			}
 		}
 	}

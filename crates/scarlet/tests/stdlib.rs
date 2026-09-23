@@ -287,11 +287,10 @@ fn stdlib_decimal() {
          \tprintln(result.map(decimal.div(decimal.from_int(1), decimal.from_int(8), 4), decimal.to_string))\n\
          \tprintln(decimal.div(bill, decimal.from_int(0), 2))\n\
          }\n",
-        "Ok(33.33)\nOk(0.1250)\nErr(DividedByZero)\n",
+        "Ok(33.33)\nOk(0.1250)\nErr(Nil)\n",
     );
-    // Half-tie rounding with divisor units near Int max: `2 * r` would wrap
-    // at remainders past 2^62. The wrap-free `r` vs `d - r` comparison must
-    // agree with the small-scale equivalent of the same fraction.
+    // Half-tie rounding with big divisor units agrees with the same fraction
+    // at a small scale.
     run_outputs(
         "import scarlet/decimal.{HalfUp, HalfEven}\n\
          import scarlet/result\n\
@@ -326,8 +325,8 @@ fn stdlib_decimal() {
          }\n",
         "True\nLt\nTrue\n2\n1\nTrue\nTrue\n",
     );
-    // parse keeps the written scale and rejects malformed or Int-overflowing
-    // input instead of wrapping. -0.05 is the sign-on-zero-whole-part case.
+    // parse keeps the written scale, takes any number of digits, and rejects
+    // only malformed text. -0.05 is the sign-on-zero-whole-part case.
     run_outputs(
         "import scarlet/decimal\n\
          import scarlet/result\n\
@@ -341,10 +340,18 @@ fn stdlib_decimal() {
          \tprintln(decimal.parse('1.2.3'))\n\
          \tprintln(decimal.parse(''))\n\
          \tprintln(decimal.parse('-'))\n\
-         \tprintln(decimal.parse('9223372036854775807.99'))\n\
+         \tprintln(decimal.parse('--5'))\n\
+         \tprintln(decimal.parse('1.-5'))\n\
+         \ttext = fn(s) { result.map(decimal.parse(s), decimal.to_string) or 'Err' }\n\
+         \tprintln(text('9223372036854775807.99'))\n\
          \tprintln(result.map(decimal.parse('92233720368547758.07'), decimal.units))\n\
+         \tbig = '-123456789012345678901234567890.1234567890123456789012345'\n\
+         \tprintln(text(big))\n\
+         \tprintln(result.map(decimal.parse(big), decimal.scale))\n\
          }\n",
-        "Ok(19.99)\nOk(-0.05)\nOk(1.50)\nOk(42)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nOk(9223372036854775807)\n",
+        "Ok(19.99)\nOk(-0.05)\nOk(1.50)\nOk(42)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\n\
+         9223372036854775807.99\nOk(9223372036854775807)\n\
+         -123456789012345678901234567890.1234567890123456789012345\nOk(25)\n",
     );
     // Negative `places` rounds to a multiple of 10^|places| at scale 0.
     run_outputs(
@@ -358,9 +365,8 @@ fn stdlib_decimal() {
          }\n",
         "1200\n1230\n0\nOk(1200)\n",
     );
-    // Dropping more than 18 digits: 10^k would wrap, so the quotient regime
-    // is {-1, 0, 1} and is computed without it. div is Err(ScaleOutOfRange)
-    // once |places| or the rescale exponent exceeds 18.
+    // Any number of places, either way: past 18 digits was once refused,
+    // because 10^19 did not fit in a 64-bit Int.
     run_outputs(
         "import scarlet/decimal.{HalfUp, Up}\n\
          import scarlet/result\n\
@@ -372,24 +378,37 @@ fn stdlib_decimal() {
          \tprintln(decimal.to_string(decimal.round_with(decimal.new(1, 18), 0 - 1, Up)))\n\
          \tprintln(decimal.to_string(decimal.round_with(decimal.new(5000000000000000000, 18), 0 - 1, HalfUp)))\n\
          \tprintln(decimal.to_string(decimal.round(decimal.new(5000000000000000000, 18), 0 - 1)))\n\
-         \tprintln(decimal.div(decimal.from_int(1), decimal.from_int(1), 0 - 19))\n\
-         \tprintln(decimal.div(decimal.from_int(1), decimal.new(1, 18), 21))\n\
-         \tprintln(decimal.div(decimal.new(1, 12), decimal.from_int(1), 21))\n\
+         \tshow = fn(q) { result.map(q, decimal.to_string) or 'Err' }\n\
+         \tprintln(show(decimal.div(decimal.from_int(1), decimal.from_int(1), 0 - 19)))\n\
+         \tprintln(show(decimal.div(decimal.from_int(1), decimal.new(1, 18), 21)))\n\
+         \tprintln(show(decimal.div(decimal.new(1, 12), decimal.from_int(1), 21)))\n\
+         \tprintln(show(decimal.div(decimal.from_int(2), decimal.from_int(3), 30)))\n\
+         \tprintln(decimal.to_string(decimal.round(decimal.new(15, 0), 0 - 25)))\n\
+         \tprintln(decimal.to_string(decimal.round_with(decimal.new(5, 0), 0 - 25, Up)))\n\
          }\n",
-        "0\nOk(10)\n0\n0\n10\n10\n0\nErr(ScaleOutOfRange)\nErr(ScaleOutOfRange)\nErr(ScaleOutOfRange)\n",
+        "0\nOk(10)\n0\n0\n10\n10\n0\n0\n1000000000000000000.000000000000000000000\n\
+         0.000000000001000000000\n0.666666666666666666666666666667\n0\n\
+         10000000000000000000000000\n",
     );
-    // Float bridges are lossy; from_float is Err(Nil) rather than wrapping.
+    // from_float rounds the Float's exact value, so 0.1 at 20 places shows
+    // the binary error, and 2.675 rounds down. Ties go away from zero.
     run_outputs(
         "import scarlet/decimal\n\
-         import scarlet/result\n\
          pub fn main() {\n\
          \tprintln(decimal.to_float(decimal.new(25, 1)))\n\
-         \tprintln(result.map(decimal.from_float(2.5, 2), decimal.to_string))\n\
-         \tprintln(decimal.from_float(10000000000000000000.0, 2))\n\
-         \tprintln(decimal.from_float(0.5, 19))\n\
-         \tprintln(result.map(decimal.from_float(149.0, 0 - 1), decimal.to_string))\n\
+         \tstr = fn(f, places) { decimal.to_string(decimal.from_float(f, places)) }\n\
+         \tprintln(str(2.5, 2))\n\
+         \tprintln(str(100000000000000000000.0, 2))\n\
+         \tprintln(str(0.5, 19))\n\
+         \tprintln(str(149.0, 0 - 1))\n\
+         \tprintln(str(0.1, 20))\n\
+         \tprintln(str(2.675, 2))\n\
+         \tprintln(str(0.125, 2))\n\
+         \tprintln(str(0.0 - 0.125, 2))\n\
+         \tprintln(str(0.1 + 0.2, 2))\n\
          }\n",
-        "2.5\nOk(2.50)\nErr(Nil)\nErr(Nil)\nOk(150)\n",
+        "2.5\n2.50\n100000000000000000000.00\n0.5000000000000000000\n150\n\
+         0.10000000000000000555\n2.67\n0.13\n-0.13\n0.30\n",
     );
 }
 

@@ -54,7 +54,7 @@ round half up: 2.35
 round toward zero: -2.34
 round toward -inf: -2.35
 div: Ok(3.3333)
-div by zero: Err(DividedByZero)
+div by zero: Err(Nil)
 decimal.eq: True but == is False
 compare: Eq Gt
 lt/lte/gt/gte: True True True True
@@ -63,7 +63,7 @@ is_zero/is_negative/is_positive: True True True
 normalize: 1.5
 parse: Ok(1999) Err(Nil)
 to_float: 19.99
-from_float: Ok(0.125)
+from_float: 0.125
 int cmp: True True False True True True
 float cmp: True True False
 string eq: True True
