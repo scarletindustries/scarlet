@@ -239,15 +239,44 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     dst,
                     variant,
                     fields,
+                    reuse,
                 } => {
                     let values: Vec<Value> = fields
                         .iter()
                         .map(|r| self.share(self.get(base, *r)))
                         .collect();
-                    let cell = self.heap.ctor(*variant, &values).map_err(full)?;
+                    // Perceus reuse: the cell a `DropReuse` above hollowed
+                    // and left in `reuse`, moved out so the register no longer
+                    // holds it. Whatever else may be there is a value this
+                    // frame is done with, released as the register would have.
+                    let parked = reuse.map(|r| self.take(base, r));
+                    let fits = parked
+                        .and_then(|v| v.as_cell())
+                        .filter(|c| self.heap.fits_ctor(*c, values.len()));
+                    let cell = match fits {
+                        Some(cell) => {
+                            self.heap.ctor_in(cell, *variant, &values);
+                            cell
+                        }
+                        None => {
+                            if let Some(v) = parked {
+                                self.release(v);
+                            }
+                            self.heap.ctor(*variant, &values).map_err(full)?
+                        }
+                    };
                     self.set(base, *dst, Value::cell(cell));
                 }
                 Instr::Drop { reg } => self.set(base, *reg, Value::NIL),
+                Instr::DropReuse { reg } => {
+                    // The register keeps a hollowed cell and its one
+                    // reference, so one no constructor takes is freed with the
+                    // frame, like any other register.
+                    match self.get(base, *reg).as_cell() {
+                        Some(cell) if self.heap.hollow(cell) => {}
+                        _ => self.set(base, *reg, Value::NIL),
+                    }
+                }
                 Instr::Call { dst, func, args } => {
                     let callee = self.body(*func)?;
                     let values: Vec<Value> = args
@@ -304,7 +333,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 }
                 Instr::TailCallSelf { args } => {
                     let values = self.args(base, args);
-                    self.enter(frame.body, base, &values);
+                    self.again(frame.body, base, &values);
                     frame.pc = 0;
                 }
                 // The callee's closure gets its own reference before `enter`
@@ -449,6 +478,16 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     let v = match intrinsic {
                         Intrinsic::InternalStackDepth => {
                             bigint::value(&mut self.heap, frames.len().into()).map_err(full)?
+                        }
+                        // Read before the count of this call's own answer, so
+                        // asking does not change what it says.
+                        Intrinsic::InternalCellsMade => {
+                            let n = self.heap.made();
+                            bigint::value(&mut self.heap, n.into()).map_err(full)?
+                        }
+                        Intrinsic::InternalCellsReused => {
+                            let n = self.heap.reused();
+                            bigint::value(&mut self.heap, n.into()).map_err(full)?
                         }
                         _ => self.builtin(*intrinsic, base, args)?,
                     };
@@ -2074,6 +2113,31 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
         }
     }
 
+    /// Run `body` again in the same frame, for a call to self in tail
+    /// position. Like [`Self::enter`], except that the cells Perceus parked
+    /// for a constructor stay, so a loop overwrites the cell its last turn
+    /// gave up. Each is the only reference to a cell holding nothing, and the
+    /// register still owns it, so one the loop never takes is freed when the
+    /// frame really ends.
+    fn again(&mut self, body: &Body, base: usize, args: &[Value]) {
+        let top = base + body.regs as usize;
+        while self.regs.len() > top {
+            if let Some(v) = self.regs.pop() {
+                self.release(v);
+            }
+        }
+        self.regs.resize(top, Value::NIL);
+        for i in 0..body.regs {
+            let r = Reg(i);
+            if !body.carried.contains(&r) {
+                self.set(base, r, Value::NIL);
+            }
+        }
+        for (param, arg) in body.params.iter().zip(args) {
+            self.set(base, *param, *arg);
+        }
+    }
+
     fn get(&self, base: usize, r: Reg) -> Value {
         self.regs
             .get(base + r.0 as usize)
@@ -2087,6 +2151,15 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
         if let Some(slot) = self.regs.get_mut(base + r.0 as usize) {
             let old = std::mem::replace(slot, v);
             self.release(old);
+        }
+    }
+
+    /// The value in `r`, moved out: the register is emptied and gives up
+    /// nothing, so its one reference passes to the caller.
+    fn take(&mut self, base: usize, r: Reg) -> Value {
+        match self.regs.get_mut(base + r.0 as usize) {
+            Some(slot) => std::mem::replace(slot, Value::NIL),
+            None => Value::NIL,
         }
     }
 

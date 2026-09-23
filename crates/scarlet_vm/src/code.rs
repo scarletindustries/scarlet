@@ -20,7 +20,7 @@
 //! a lambda calling itself still sees its captures), and a function value in
 //! a register (`CallValue`). Each has a tail form that replaces the frame.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use scarlet_ir::core_ir::{
     Abi, Atom, Callee, Const, CoreExpr, CoreFn, CorePat, FuncIdx, GlobalSlot, JoinId, Load,
@@ -140,10 +140,20 @@ pub(crate) enum Instr {
         dst: Reg,
         variant: VariantRef,
         fields: Box<[Reg]>,
+        /// Perceus reuse: a register a [`Instr::DropReuse`] above left a
+        /// hollowed cell in, which this constructor overwrites rather than
+        /// allocating. Anything else there allocates.
+        reuse: Option<Reg>,
     },
     /// Perceus's last use of `reg`: give up its reference now rather than at
     /// the frame's end.
     Drop {
+        reg: Reg,
+    },
+    /// [`Instr::Drop`] of a cell a constructor below is paired with: when this
+    /// is the last reference, the allocation stays in `reg` to be overwritten
+    /// instead of freed.
+    DropReuse {
         reg: Reg,
     },
     Call {
@@ -384,6 +394,7 @@ impl Instr {
             | Instr::Concat { .. }
             | Instr::Ctor { .. }
             | Instr::Drop { .. }
+            | Instr::DropReuse { .. }
             | Instr::Call { .. }
             | Instr::TailCall { .. }
             | Instr::CallSelf { .. }
@@ -486,6 +497,10 @@ pub(crate) struct Body {
     /// Where each argument goes, in order.
     pub(crate) params: Box<[Reg]>,
     pub(crate) instrs: Box<[Instr]>,
+    /// Registers a constructor reuses. A call to self in tail position keeps
+    /// these, so a loop can overwrite the cell its last turn gave up; every
+    /// other register is released.
+    pub(crate) carried: Box<[Reg]>,
 }
 
 /// A whole loaded program.
@@ -536,6 +551,10 @@ fn load_fn(f: &LoweredFn, consts: &[Const], this: Option<FuncIdx>) -> Func {
             name: format!("{}.{}", f.module, f.name),
             regs,
             params: f.core.params.iter().map(|p| Reg::of(p.id)).collect(),
+            carried: reused_locals(&f.core.body)
+                .into_iter()
+                .map(Reg::of)
+                .collect(),
             instrs: instrs.into_boxed_slice(),
         }),
         Err(what) => Func::NotBuiltYet(what),
@@ -554,6 +573,8 @@ struct Loader<'c> {
     /// One past the highest register the function names. A value that no
     /// local holds, like a tail expression's, gets a register from here.
     next: u32,
+    /// Locals a constructor reuses, so their `Drop` hollows rather than frees.
+    reused: BTreeSet<LocalId>,
 }
 
 impl<'c> Loader<'c> {
@@ -566,6 +587,7 @@ impl<'c> Loader<'c> {
         Loader {
             consts,
             this,
+            reused: reused_locals(&f.body),
             instrs: Vec::new(),
             labels: Vec::new(),
             conts: HashMap::new(),
@@ -658,8 +680,11 @@ impl<'c> Loader<'c> {
                     e = body;
                 }
                 CoreExpr::Drop { local, body, .. } => {
-                    self.instrs.push(Instr::Drop {
-                        reg: Reg::of(*local),
+                    let reg = Reg::of(*local);
+                    self.instrs.push(if self.reused.contains(local) {
+                        Instr::DropReuse { reg }
+                    } else {
+                        Instr::Drop { reg }
                     });
                     e = body;
                 }
@@ -866,8 +891,8 @@ impl<'c> Loader<'c> {
                 }
             }
             Atom::Intrinsic { intrinsic, .. } => return Err(format!("the built-in {intrinsic:?}")),
-            // Perceus's `reuse` is a hint that `fields` may overwrite a cell
-            // just dropped. A fresh cell is always right, so it waits.
+            // A constructor with no fields is a value word, so there is no
+            // allocation for Perceus to reuse.
             Atom::Ctor {
                 variant, fields, ..
             } if fields.is_empty() => Instr::Const {
@@ -875,11 +900,14 @@ impl<'c> Loader<'c> {
                 value: Value::nullary(*variant),
             },
             Atom::Ctor {
-                variant, fields, ..
+                variant,
+                fields,
+                reuse,
             } => Instr::Ctor {
                 dst,
                 variant: *variant,
                 fields: fields.iter().copied().map(Reg::of).collect(),
+                reuse: reuse.map(Reg::of),
             },
         };
         self.instrs.push(instr);
@@ -1138,6 +1166,8 @@ fn built(i: Intrinsic, argc: usize) -> bool {
     let arity = match i {
         Intrinsic::MapNew
         | Intrinsic::InternalStackDepth
+        | Intrinsic::InternalCellsMade
+        | Intrinsic::InternalCellsReused
         | Intrinsic::TimeMonotonic
         | Intrinsic::TimeEpochMs
         | Intrinsic::OsArgv
@@ -1208,6 +1238,47 @@ fn built(i: Intrinsic, argc: usize) -> bool {
 }
 
 /// One past the highest local `e` binds or reads.
+/// Every local a constructor in `e` overwrites in place. `Atom`'s operand walk
+/// leaves `reuse` out on purpose — it names a cell to write over, not a value
+/// read — so this reads the atoms itself.
+fn reused_locals(e: &CoreExpr) -> BTreeSet<LocalId> {
+    let mut out = BTreeSet::new();
+    let mut note = |a: &Atom| {
+        if let Atom::Ctor {
+            reuse: Some(local), ..
+        } = a
+        {
+            out.insert(*local);
+        }
+    };
+    let mut stack = vec![e];
+    while let Some(e) = stack.pop() {
+        match e {
+            CoreExpr::Let { rhs, body, .. } => {
+                note(rhs);
+                stack.push(body);
+            }
+            CoreExpr::LetJoin { join, body, .. } => {
+                stack.push(join);
+                stack.push(body);
+            }
+            CoreExpr::LetCont { cont, body, .. } => {
+                stack.push(cont);
+                stack.push(body);
+            }
+            CoreExpr::Drop { body, .. } => stack.push(body),
+            CoreExpr::Match { arms, .. } => stack.extend(arms.iter().map(|(_, arm)| arm)),
+            CoreExpr::If { then, els, .. } => {
+                stack.push(then);
+                stack.push(els);
+            }
+            CoreExpr::Tail(atom) => note(atom),
+            CoreExpr::Goto(_) => {}
+        }
+    }
+    out
+}
+
 fn highest_local(e: &CoreExpr) -> u32 {
     let mut top = 0;
     let mut note = |l: LocalId| top = top.max(l.0 + 1);

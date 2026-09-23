@@ -117,6 +117,90 @@ fn a_tail_recursive_loop_of_a_million_steps_finishes() {
     );
 }
 
+/// Perceus reuse: a constructor whose cell nothing else holds any more is
+/// overwritten in place rather than allocated. Here the loop gives its pair up
+/// at the `match` and builds another on the way round, so one cell serves
+/// every turn. `scarlet/internal` counts both, so the test pins the saving
+/// rather than just the answer.
+#[test]
+fn a_loop_overwrites_the_cell_it_just_gave_up() {
+    prints(
+        "import scarlet/internal\n\
+         type Pair {\n\
+         \tPair(a Int, b Int)\n\
+         }\n\
+         fn spin(n Int, p Pair) Int {\n\
+         \tmatch p {\n\
+         \t\tPair(a, b) -> if n <= 0 then a + b else spin(n - 1, Pair(b, a + 1))\n\
+         \t}\n\
+         }\n\
+         pub fn main() {\n\
+         \tmade = internal.cells_made()\n\
+         \treused = internal.cells_reused()\n\
+         \tprintln(spin(1000, Pair(0, 0)))\n\
+         \tprintln(internal.cells_made() - made)\n\
+         \tprintln(internal.cells_reused() - reused)\n\
+         }\n",
+        "1000\n2\n999\n",
+    );
+}
+
+/// The cell is given up *after* the constructor here, so the only turn that
+/// can take it is the next one. That needs the cell to survive the call to
+/// self in tail position, which reuses the frame.
+#[test]
+fn a_loop_carries_its_cell_across_the_call_that_ends_it() {
+    prints(
+        "import scarlet/internal\n\
+         type Pair {\n\
+         \tPair(a Int, b Int)\n\
+         }\n\
+         fn go(n Int, acc Int) Int {\n\
+         \tp = Pair(n, n + 1)\n\
+         \ts = match p {\n\
+         \t\tPair(a, b) -> a + b\n\
+         \t}\n\
+         \tif n <= 0 then acc + s else go(n - 1, acc + s)\n\
+         }\n\
+         pub fn main() {\n\
+         \tmade = internal.cells_made()\n\
+         \treused = internal.cells_reused()\n\
+         \tprintln(go(1000, 0))\n\
+         \tprintln(internal.cells_made() - made)\n\
+         \tprintln(internal.cells_reused() - reused)\n\
+         }\n",
+        "1002001\n1\n1000\n",
+    );
+}
+
+/// Reuse waits on the last reference. The same loop with the pair kept in a
+/// list allocates every turn, and every pair still reads back as it was
+/// written: overwriting a cell something else holds would show up here.
+#[test]
+fn a_cell_something_else_holds_is_not_overwritten() {
+    prints(
+        "import scarlet/array\n\
+         import scarlet/internal\n\
+         type Pair {\n\
+         \tPair(a Int, b Int)\n\
+         }\n\
+         fn keep(n Int, ps Array(Pair)) Array(Pair) {\n\
+         \tif n <= 0 then ps else keep(n - 1, array.concat(ps, [Pair(n, n)]))\n\
+         }\n\
+         pub fn main() {\n\
+         \tmade = internal.cells_made()\n\
+         \tps = keep(100, [])\n\
+         \tprintln(array.fold(ps, 0, fn(t, p) {\n\
+         \t\tmatch p {\n\
+         \t\t\tPair(a, b) -> t + a + b\n\
+         \t\t}\n\
+         \t}))\n\
+         \tprintln(internal.cells_made() - made > 100)\n\
+         }\n",
+        "10100\nTrue\n",
+    );
+}
+
 /// Frames live on the VM's own stack, not Rust's, so a deep recursion that is
 /// not a tail call just uses memory: nothing overflows.
 #[test]

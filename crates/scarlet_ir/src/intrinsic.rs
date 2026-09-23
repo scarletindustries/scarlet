@@ -33,6 +33,8 @@ intrinsics! {
     Println = "println",
     StringInspect = "string__inspect",
     InternalStackDepth = "internal__stack_depth",
+    InternalCellsMade = "internal__cells_made",
+    InternalCellsReused = "internal__cells_reused",
     InternalLiveSubjects = "internal__live_subjects",
     InternalBlockingThreads = "internal__blocking_threads",
     IoReadFile = "io__read_file",

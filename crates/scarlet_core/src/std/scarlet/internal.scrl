@@ -6,6 +6,15 @@
 @vm(internal__stack_depth)
 pub fn stack_depth() Int
 
+// Heap cells this process has allocated over its whole life, and cells a
+// constructor overwrote in place instead of allocating, because nothing else
+// held them any more.
+@vm(internal__cells_made)
+pub fn cells_made() Int
+
+@vm(internal__cells_reused)
+pub fn cells_reused() Int
+
 // The number of mailboxes open across the whole program: every subject some
 // process still holds, plus every supervised worker's address. A subject is
 // reclaimed as soon as its owner lets go of it, so this stays flat through

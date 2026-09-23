@@ -127,6 +127,10 @@ pub(crate) struct Heap {
     /// Freed small cells, by size in words, ready to be reused.
     free: HashMap<usize, Vec<Cell>>,
     live: usize,
+    /// Cells taken from a chunk or a free list over this heap's life, and
+    /// cells a constructor overwrote in place instead (`internal.scrl`).
+    made: usize,
+    reused: usize,
     /// The cells a [`Heap::release`] still has to give a reference up for.
     /// Kept between calls so a release does not allocate.
     dying: Vec<Cell>,
@@ -146,6 +150,7 @@ impl Heap {
         };
         self.set_word(cell, 0, header(1, kind, size));
         self.live += 1;
+        self.made += 1;
         Ok(cell)
     }
 
@@ -226,6 +231,42 @@ impl Heap {
             self.free_cell(cell, h);
         }
         self.dying = dying;
+    }
+
+    /// Perceus's drop of a last reference: when nothing else holds `cell`,
+    /// give up everything it holds and keep the allocation, header and all,
+    /// for a constructor of the same size to overwrite. `false` when
+    /// something else holds it, which leaves it to an ordinary `release`.
+    ///
+    /// A field is emptied before it is released, so a hollowed cell is safe to
+    /// release again: it holds nothing. Emptying here rather than at the
+    /// constructor is what carries reuse down a chain — a callee sees its
+    /// argument as the last reference only because its caller gave up its own
+    /// first.
+    pub(crate) fn hollow(&mut self, cell: Cell) -> bool {
+        let h = self.word(cell, 0);
+        if count(h) != 1 {
+            return false;
+        }
+        for i in held(kind_bits(h), size(h)) {
+            let held = Value::from_bits(self.word(cell, i));
+            self.set_word(cell, i, Value::NIL.bits());
+            if let Some(c) = held.as_cell() {
+                self.release(c);
+            }
+        }
+        true
+    }
+
+    /// Whether a constructor of `fields` fields may be written over `cell`:
+    /// it must be a constructor cell of exactly that size, and nothing else
+    /// may hold it. Both are true of every cell [`Self::hollow`] kept, and the
+    /// count is read again here because a register holds its cell until
+    /// something overwrites it, so what a constructor finds there need not be
+    /// the one parked for it.
+    pub(crate) fn fits_ctor(&self, cell: Cell, fields: usize) -> bool {
+        let h = self.word(cell, 0);
+        count(h) == 1 && kind_bits(h) == Kind::Ctor as u64 && size(h) == fields + 2
     }
 
     fn free_cell(&mut self, cell: Cell, h: u64) {
@@ -329,12 +370,24 @@ impl Heap {
     /// reference passes to the cell.
     pub(crate) fn ctor(&mut self, v: VariantRef, fields: &[Value]) -> Result<Cell, Full> {
         let cell = self.alloc(Kind::Ctor, 1 + fields.len())?;
+        self.write_ctor(cell, v, fields);
+        Ok(cell)
+    }
+
+    /// Perceus reuse: the constructor `ctor` would build, written over a cell
+    /// [`Self::hollow`] emptied, which [`Self::fits_ctor`] says is the right
+    /// size. Its one reference stays, so it is the new constructor's.
+    pub(crate) fn ctor_in(&mut self, cell: Cell, v: VariantRef, fields: &[Value]) {
+        self.reused += 1;
+        self.write_ctor(cell, v, fields);
+    }
+
+    fn write_ctor(&mut self, cell: Cell, v: VariantRef, fields: &[Value]) {
         let tag = u64::from(v.variant_idx) << 32 | u64::from(v.type_id.0 as u32);
         self.set_word(cell, 1, tag);
         for (i, f) in fields.iter().enumerate() {
             self.set_word(cell, 2 + i, f.bits());
         }
-        Ok(cell)
     }
 
     /// Which constructor a constructor cell is.
@@ -436,6 +489,16 @@ impl Heap {
     #[cfg(test)]
     pub(crate) fn live(&self) -> usize {
         self.live
+    }
+
+    /// Cells this heap has allocated, and cells Perceus reuse saved it from
+    /// allocating. Both count over the heap's whole life.
+    pub(crate) fn made(&self) -> usize {
+        self.made
+    }
+
+    pub(crate) fn reused(&self) -> usize {
+        self.reused
     }
 
     fn word(&self, cell: Cell, i: usize) -> u64 {
