@@ -230,10 +230,17 @@ impl Compiler {
             None => match self.lookup_ctor(&name.name) {
                 Some(f) => f,
                 None => {
+                    let qualified = self.qualified_spellings(&name.name);
                     let msg = if self.env.lookup(&name.name).is_some() {
                         format!(
                             "'{}' is not a constructor and cannot be used in a pattern",
                             name.name
+                        )
+                    } else if !qualified.is_empty() {
+                        format!(
+                            "Unknown constructor '{}' in pattern. It is {}",
+                            name.name,
+                            qualified.join(" or ")
                         )
                     } else {
                         format!("Unknown constructor '{}' in pattern", name.name)

@@ -2387,7 +2387,7 @@ impl Compiler {
                         self.error(
                             format!(
                                 "constructor destructuring binding must be irrefutable; \
-                                 pattern does not cover {missing}"
+                                 pattern does not cover {missing}. Use `match` to handle it"
                             ),
                             cdb.span,
                         );
@@ -3482,6 +3482,24 @@ impl Compiler {
         }
     }
 
+    /// How to reach a constructor named `name` that is not in scope: through
+    /// each imported module that has one, as `alias.Name`.
+    fn qualified_spellings(&self, name: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .imported_qualifiers
+            .iter()
+            .filter(|(_, key)| {
+                self.module_table
+                    .get(key)
+                    .and_then(|m| m.values.get(name))
+                    .is_some_and(|v| matches!(v.scheme.kind, ValueKind::Constructor { .. }))
+            })
+            .map(|(alias, _)| format!("`{alias}.{name}`"))
+            .collect();
+        out.sort();
+        out
+    }
+
     fn compile_identifier(&mut self, expr: &ast::Identifier) -> Ty {
         let name = &expr.name;
 
@@ -3510,7 +3528,16 @@ impl Compiler {
                 );
                 return self.engine.fresh_var();
             }
-            if let Some(suggestion) = self.env.suggest_name(name) {
+            let qualified = self.qualified_spellings(name);
+            if !qualified.is_empty() {
+                self.error(
+                    format!(
+                        "Unknown identifier '{name}'. A constructor of that name is {}",
+                        qualified.join(" or ")
+                    ),
+                    expr.span,
+                );
+            } else if let Some(suggestion) = self.env.suggest_name(name) {
                 self.error(
                     format!(
                         "Unknown identifier '{}'. Closest match: '{}'.",

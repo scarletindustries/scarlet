@@ -2,6 +2,7 @@
 // and the ways both flow through functions, arrays, and map keys.
 
 import scarlet/map
+import scarlet/http/headers
 
 fn check(name String, expected Bool, actual Bool) Nil {
 	if expected == actual {
@@ -112,6 +113,10 @@ pub fn main() {
 	// A single-constructor type destructures without a match.
 	Point(px, py) = moved
 	check('record destructuring binding', True, px == 1 && py == 20)
+
+	// And through its module, when it is another module's.
+	headers.Header(name, value) = headers.Header(name: <<'host'>>, value: <<'a.test'>>)
+	check('qualified destructuring binding', True, name == <<'host'>> && value == <<'a.test'>>)
 
 	// Records and tuples nest into each other freely.
 	tagged = (p, [moved, p])

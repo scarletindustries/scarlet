@@ -251,6 +251,9 @@ pub struct TypedDiscard {
 /// that must pass exhaustiveness, so only single-constructor types qualify.
 #[derive(Debug, Clone)]
 pub struct CtorDestructuringBinding {
+    /// The module the constructor is reached through: `http` in
+    /// `http.Fixed(n, body) = e`.
+    pub(crate) qualifier: Option<Identifier>,
     pub(crate) name: Identifier,
     pub args: Vec<PatternArg>,
     pub(crate) rest: bool,
@@ -265,7 +268,7 @@ impl CtorDestructuringBinding {
     /// [`Pattern`] shape.
     pub fn as_pattern(&self) -> Pattern {
         Pattern::Constructor {
-            qualifier: None,
+            qualifier: self.qualifier.clone(),
             name: self.name.clone(),
             args: self.args.clone(),
             rest: self.rest,

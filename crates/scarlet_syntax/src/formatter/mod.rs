@@ -1189,6 +1189,16 @@ mod tests {
         }
     }
 
+    /// A constructor destructured through its module keeps its module: a
+    /// formatter that dropped it would name a constructor not in scope.
+    #[test]
+    fn a_qualified_ctor_binding_keeps_its_module() {
+        let src = "pub fn main() {\n\theaders.Header(name, value) = h\n\tname\n}\n";
+        let out = fmt(src);
+        assert!(out.contains("headers.Header(name, value) = h"), "{out}");
+        assert_round_trips(&out);
+    }
+
     #[track_caller]
     fn assert_round_trips(out: &str) {
         match format(out) {

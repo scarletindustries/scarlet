@@ -212,9 +212,12 @@ module.exports = grammar({
     typed_discard: ($) =>
       seq(field('type', $.type_identifier), '=', field('value', $._expression)),
 
-    // `Stat(files, ..) = walk(root)`: single-arm match sugar.
+    // `Stat(files, ..) = walk(root)`: single-arm match sugar, and
+    // `io.Stat(files, ..) = walk(root)` for a constructor reached through its
+    // module.
     ctor_binding: ($) =>
       seq(
+        optional(seq(field('module', $.identifier), '.')),
         field('constructor', $.type_identifier),
         token.immediate('('),
         optional($.pattern_arguments),

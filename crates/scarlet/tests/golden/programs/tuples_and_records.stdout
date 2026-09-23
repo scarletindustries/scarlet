@@ -24,6 +24,7 @@ PASS nested record field access
 PASS nested record eq
 PASS nested record update
 PASS record destructuring binding
+PASS qualified destructuring binding
 PASS record inside tuple
 PASS array of records in tuple
 PASS record update inside a fn

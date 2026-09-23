@@ -19,6 +19,22 @@ reject_case! {
         "import scarlet/int\npub fn main() {\n\tprintln(int)\n}\n",
         "'int' is the module `scarlet/int`, not a value. Use one of its members, like `int.abs`",
     ),
+    // A constructor destructured through its module, of a type with other
+    // constructors, can fail, so it is refused and `match` is named.
+    a_qualified_ctor_binding_must_be_irrefutable: (
+        "import scarlet/io\npub fn main() {\n\tio.NotFound(p) = io.PermissionDenied('x')\n\tprintln(p)\n}\n",
+        "must be irrefutable; pattern does not cover",
+    ),
+    // A constructor used by its bare name, when an imported module has it,
+    // names the module to reach it through: in a pattern and in an expression.
+    a_bare_constructor_in_a_pattern_names_its_module: (
+        "import scarlet/io\npub fn main() {\n\tmatch io.read_file('x') {\n\t\tErr(NotFound(p)) -> println(p)\n\t\t_ -> println('other')\n\t}\n}\n",
+        "Unknown constructor 'NotFound' in pattern. It is `io.NotFound`",
+    ),
+    a_bare_constructor_in_an_expression_names_its_module: (
+        "import scarlet/io\npub fn main() {\n\te = NotFound('x')\n\tprintln(e)\n}\n",
+        "Unknown identifier 'NotFound'. A constructor of that name is `io.NotFound`",
+    ),
     if_condition_must_be_bool:
         ("pub fn main() {\n\tprintln(if 1 { 2 } else { 3 })\n}\n", "Type mismatch"),
 

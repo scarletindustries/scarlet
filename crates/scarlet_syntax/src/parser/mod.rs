@@ -664,6 +664,11 @@ impl Parser {
             Kind::Identifier(_) if self.is_backpass_ahead() => {
                 return Ok(ast::Node::Statement(Box::new(self.parse_backpass()?)));
             }
+            Kind::Identifier(_) if self.is_qualified_ctor_destructuring() => {
+                return Ok(ast::Node::Statement(Box::new(
+                    self.parse_ctor_destructuring()?,
+                )));
+            }
             Kind::Identifier(name) if self.is_binding_ahead() => {
                 if is_type_name(&name) {
                     // Only commit to a statement when the token right after
@@ -2061,9 +2066,53 @@ impl Parser {
         }))
     }
 
+    /// Whether a `module.Ctor(..) = e` statement starts here: a module name, a
+    /// dot, a constructor name and its `(`, then an `=` after the matching `)`
+    /// on the same line. Without the `=` it is a call, `http.Fixed(1, b)`.
+    fn is_qualified_ctor_destructuring(&self) -> bool {
+        let kind = |i: usize| self.tokens.get(self.index + i).map(|t| &t.kind);
+        let (Some(Kind::Identifier(module)), Some(Kind::PuncDot), Some(Kind::Identifier(ctor))) =
+            (kind(0), kind(1), kind(2))
+        else {
+            return false;
+        };
+        if is_type_name(module) || !is_type_name(ctor) || kind(3) != Some(&Kind::PuncOpenParen) {
+            return false;
+        }
+        let mut depth = 0usize;
+        for (i, tok) in self.tokens.iter().enumerate().skip(self.index + 3) {
+            match tok.kind {
+                Kind::PuncOpenParen => depth += 1,
+                Kind::PuncCloseParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return self.tokens.get(i + 1).is_some_and(|next| {
+                            next.kind == Kind::PuncEquals
+                                && !next
+                                    .leading_trivia
+                                    .iter()
+                                    .any(|t| matches!(t, Trivia::Newline))
+                        });
+                    }
+                }
+                Kind::Eof => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+
     fn parse_ctor_destructuring(&mut self) -> PResult<ast::Statement> {
         let span = self.current_span();
-        // `parse_node`'s dispatch guarantees an uppercase identifier then `(`.
+        // `parse_node`'s dispatch guarantees a constructor name then `(`, with
+        // a module and a dot before it for `module.Ctor(..)`.
+        let qualifier = if self.peek_next() == Some(Kind::PuncDot) {
+            let module = self.eat_identifier("Expected module name")?;
+            self.eat(Kind::PuncDot)?;
+            Some(module)
+        } else {
+            None
+        };
         let name = self.eat_identifier("Expected constructor name")?;
         self.eat(Kind::PuncOpenParen)?;
         let (args, rest) = self.parse_pattern_args()?;
@@ -2073,6 +2122,7 @@ impl Parser {
         let init = self.parse_expression()?;
         Ok(ast::Statement::CtorDestructuringBinding(
             ast::CtorDestructuringBinding {
+                qualifier,
                 name,
                 args,
                 rest,
@@ -2679,6 +2729,26 @@ mod tests {
 
         assert_no_errors("Point(x, y) = origin");
         assert_no_errors("Wrapper(a, b, c) = make()");
+
+        // Through its module, as a constructor has to be written when it is
+        // not imported by name.
+        let r = parse("headers.Header(name, value) = h");
+        assert!(r.diagnostics.is_empty(), "{:#?}", r.diagnostics);
+        let ast::Node::Statement(s) = &r.ast.body[0] else {
+            panic!("expected statement, got {:#?}", r.ast.body[0])
+        };
+        let ast::Statement::CtorDestructuringBinding(cd) = s.as_ref() else {
+            panic!("expected CtorDestructuringBinding, got {:#?}", s)
+        };
+        assert_eq!(
+            cd.qualifier.as_ref().map(|q| q.name.as_str()),
+            Some("headers")
+        );
+        assert_eq!((cd.name.name.as_str(), cd.args.len()), ("Header", 2));
+        // With no `=` after it, the same shape is a call.
+        let r = parse("http.Fixed(1, b)");
+        assert!(r.diagnostics.is_empty(), "{:#?}", r.diagnostics);
+        assert!(matches!(r.ast.body[0], ast::Node::Expression(_)));
     }
 
     #[test]
