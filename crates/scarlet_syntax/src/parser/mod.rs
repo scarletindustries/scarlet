@@ -63,6 +63,15 @@ pub fn new_parser(s: &mut Scanner) -> Parser {
     new_parser_from_tokens(tokens, diags)
 }
 
+/// Where `op` sits on the precedence ladder, loosest first. Two operators on
+/// one level chain left to right: `a - b + c` is `(a - b) + c`.
+pub(crate) fn precedence_level(op: ast::BinaryOp) -> usize {
+    Parser::PRECEDENCE
+        .iter()
+        .position(|level| level.iter().any(|(_, o)| *o == op))
+        .unwrap_or(Parser::PRECEDENCE.len())
+}
+
 pub(crate) fn new_parser_from_tokens(
     mut tokens: Vec<Token>,
     scanner_diagnostics: Vec<Diagnostic>,

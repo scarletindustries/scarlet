@@ -10,9 +10,9 @@ use crate::token::{Kind, Token, Trivia};
 
 pub mod doc;
 use doc::{
-    Doc, block, delimited, delimited_commas_when_flat, delimited_hug, delimited_no_trailing, group,
-    group_willing, hard_braces, hard_list, hard_list_bare, hardline, hardlines, join, line, nest,
-    nil, text,
+    Doc, block, delimited, delimited_commas_when_flat, delimited_hug, delimited_hug_list,
+    delimited_no_trailing, group, group_willing, hard_braces, hard_list, hard_list_bare, hardline,
+    hardlines, join, line, nest, nil, text,
 };
 
 const MAX_WIDTH: isize = 100;
@@ -633,12 +633,7 @@ impl Formatter {
             }
             E::NumberLiteral(n) => text(n.value.clone()),
             E::Identifier(id) => text(id.name.clone()),
-            E::BinaryExpression(b) => group(d![
-                self.expr(&b.left),
-                text(format!(" {}", b.op.symbol())),
-                line(),
-                self.expr(&b.right),
-            ]),
+            E::BinaryExpression(b) => self.binary_chain(b),
             E::UnaryExpression(u) => {
                 // `- -x` must not collapse into `--x`: the scanner relexes
                 // `--` as the rejected decrement token, so the formatted
@@ -675,11 +670,15 @@ impl Formatter {
             E::FunctionCallExpression(c) => {
                 let args: Vec<Doc> = c.arguments.iter().map(|a| self.call_arg(a)).collect();
                 // A block-shaped final argument hugs the parentheses,
-                // `f(a, fn() { … })`, instead of one argument per line.
-                let parens = if c.arguments.last().is_some_and(arg_can_hug) {
-                    delimited_hug("(", args, ")")
-                } else {
-                    delimited("(", args, ")")
+                // `f(a, fn() { … })`, instead of one argument per line, and so
+                // does a final list, `Object([ … ])`, unless an earlier
+                // argument is a list too.
+                let parens = match c.arguments.split_last() {
+                    Some((last, _)) if arg_can_hug(last) => delimited_hug("(", args, ")"),
+                    Some((last, init)) if arg_is_list(last) && !init.iter().any(arg_is_list) => {
+                        delimited_hug_list("(", args, ")")
+                    }
+                    _ => delimited("(", args, ")"),
                 };
                 d![self.expr(&c.callee), parens]
             }
@@ -823,6 +822,31 @@ impl Formatter {
         } else {
             hard_braces(body)
         }
+    }
+
+    /// A chain of operators on one precedence level, `a || b || c`, is one
+    /// group: on one line, or every operand on its own line indented under
+    /// the first. The operator ends its line, since a line that starts with
+    /// `-` would parse as a new statement.
+    fn binary_chain(&self, b: &ast::BinaryExpression) -> Doc {
+        let level = parser::precedence_level(b.op);
+        let mut rest = Vec::new();
+        let mut cur = b;
+        let first = loop {
+            rest.push((cur.op, &*cur.right));
+            match &*cur.left {
+                ast::Expression::BinaryExpression(l) if parser::precedence_level(l.op) == level => {
+                    cur = l
+                }
+                left => break left,
+            }
+        };
+        let rest: Vec<Doc> = rest
+            .into_iter()
+            .rev()
+            .map(|(op, right)| d![text(format!(" {}", op.symbol())), line(), self.expr(right)])
+            .collect();
+        group(d![self.expr(first), nest(1, doc::concat(rest))])
     }
 
     fn if_chain(&self, e: &ast::Expression) -> Doc {
@@ -1208,6 +1232,20 @@ fn arg_can_hug(a: &ast::CallArg) -> bool {
     )
 }
 
+/// Whether a call argument is a list literal, which may hug the call's
+/// parentheses when it comes last.
+fn arg_is_list(a: &ast::CallArg) -> bool {
+    matches!(
+        a,
+        ast::CallArg::Positional(
+            ast::Expression::ArrayExpression(_) | ast::Expression::TupleExpression(_)
+        ) | ast::CallArg::Labeled {
+            value: ast::Expression::ArrayExpression(_) | ast::Expression::TupleExpression(_),
+            ..
+        }
+    )
+}
+
 /// Whether the formatted form of `e` begins with a `-` glyph. Walks the
 /// leftmost spine, mirroring which glyph the formatter emits first.
 fn starts_with_minus(e: &ast::Expression) -> bool {
@@ -1472,6 +1510,74 @@ mod tests {
             format!("x = if {long} then f(1)\n\telse if {long} then g(2)\n\telse h(3)\n")
         );
         assert_round_trips(&out);
+    }
+
+    #[test]
+    fn a_final_list_hugs_the_parens() {
+        let src = "x = Object([('resource', Str(resource_uri)), ('authorization_servers', List([Str(auth_server)])), ('scopes', texts(scopes))])\n";
+        let out = fmt(src);
+        assert_eq!(
+            out,
+            "x = Object([\n\t('resource', Str(resource_uri)),\n\t('authorization_servers', List([Str(auth_server)])),\n\t('scopes', texts(scopes)),\n])\n"
+        );
+        assert_round_trips(&out);
+        assert_eq!(fmt("x = Object([('a', 1)])\n"), "x = Object([('a', 1)])\n");
+        let out = fmt(&format!(
+            "x = f('{}', [{}])\n",
+            "a".repeat(40),
+            "b, ".repeat(30)
+        ));
+        assert!(
+            out.starts_with(&format!("x = f('{}', [\n\tb,\n", "a".repeat(40))),
+            "{out}"
+        );
+        assert_round_trips(&out);
+    }
+
+    #[test]
+    fn a_list_does_not_hug_when_the_head_does_not_fit() {
+        let head = "a".repeat(100);
+        let out = fmt(&format!("x = f({head}, [1, 2])\n"));
+        assert_eq!(out, format!("x = f(\n\t{head},\n\t[1, 2],\n)\n"));
+    }
+
+    #[test]
+    fn a_list_does_not_hug_after_another_list() {
+        let items = "item, ".repeat(12);
+        let out = fmt(&format!("x = f([{items}], [{items}])\n"));
+        assert!(out.starts_with("x = f(\n\t[item, "), "{out}");
+        assert_round_trips(&out);
+    }
+
+    #[test]
+    fn a_call_around_a_hugging_call_breaks_as_it_does_for_a_lambda() {
+        let out = fmt(&format!(
+            "x = Ok(Object([('{}', 1), ('b', 2)]))\n",
+            "a".repeat(80)
+        ));
+        assert!(out.starts_with("x = Ok(\n\tObject([\n\t\t('"), "{out}");
+        assert_round_trips(&out);
+    }
+
+    #[test]
+    fn an_operator_chain_breaks_every_operand() {
+        let src = "fn f(c Int) Bool {\n\tunreserved = { c >= 48 && c <= 57 } || { c >= 65 && c <= 90 } || { c >= 97 && c <= 122 } || c == 45 || c == 46 || c == 95 || c == 126\n\tunreserved\n}\n";
+        let out = fmt(src);
+        assert_eq!(
+            out,
+            "fn f(c Int) Bool {\n\tunreserved = { c >= 48 && c <= 57 } ||\n\t\t{ c >= 65 && c <= 90 } ||\n\t\t{ c >= 97 && c <= 122 } ||\n\t\tc == 45 ||\n\t\tc == 46 ||\n\t\tc == 95 ||\n\t\tc == 126\n\tunreserved\n}\n"
+        );
+        assert_round_trips(&out);
+        // `+` and `-` are one level, so they chain together; `*` binds
+        // tighter and stays whole.
+        let long = "a".repeat(30);
+        let out = fmt(&format!("x = {long} - {long} * 2 + {long} - 1\n"));
+        assert_eq!(
+            out,
+            format!("x = {long} -\n\t{long} * 2 +\n\t{long} -\n\t1\n")
+        );
+        assert_round_trips(&out);
+        assert_eq!(fmt("x = a || b && c\n"), "x = a || b && c\n");
     }
 
     #[test]

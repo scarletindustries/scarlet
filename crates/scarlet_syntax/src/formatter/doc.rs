@@ -45,9 +45,10 @@ enum DocInner {
         breaks: Breaks,
     },
     /// A hugged trailing item: the block-shaped last element of a delimited
-    /// list (`f(a, fn() { … })`). Width probes treat its hard newlines as the
-    /// natural end of the line rather than as proof that the enclosing content
-    /// cannot render flat. It always renders broken.
+    /// list (`f(a, fn() { … })`), or a final list (`f([ … ])`). Width probes
+    /// of the hugging group treat its first line break as the natural end of
+    /// the line rather than as proof that the group cannot render flat. It
+    /// always renders broken, so a list inside re-probes its own width.
     Hug(Box<Doc>),
     Concat(Vec<Doc>),
 }
@@ -363,6 +364,39 @@ pub(crate) fn delimited_hug(open: &'static str, mut items: Vec<Doc>, close: &'st
     })
 }
 
+/// Like `delimited_hug`, for a final list: when the whole does not fit on one
+/// line but the head up to the list's opening bracket does, the list breaks
+/// and its brackets hug the delimiters:
+///
+/// ```text
+/// Object([
+///     …
+/// ])
+/// ```
+///
+/// Otherwise every item gets its own line, as in `delimited`.
+pub(crate) fn delimited_hug_list(
+    open: &'static str,
+    mut items: Vec<Doc>,
+    close: &'static str,
+) -> Doc {
+    if items.iter().any(contains_hardline) {
+        return delimited_hug(open, items, close);
+    }
+    let Some(last) = items.pop() else {
+        return text(format!("{open}{close}"));
+    };
+    // Willing, so the hugging group's probe ends at the list's first break.
+    items.push(hug(group_willing(last)));
+    let body = join(items, d![text(","), line()]);
+    group(d![
+        text(open),
+        nest_if_broken(1, d![line0(), body]),
+        break_(",", ""),
+        text(close),
+    ])
+}
+
 /// Like `delimited`, but emits no trailing comma when broken across lines. For
 /// groups whose final element is a `..` rest marker: the parser rejects a comma
 /// after `..`, so a wrapped pattern must end `..\n<close>`.
@@ -462,7 +496,7 @@ pub(crate) fn layout(doc: &Doc, max_width: isize) -> String {
     let mut col: isize = 0;
     let mut work: VecDeque<(isize, Mode, &Doc)> = VecDeque::new();
     // Hoisted so every width probe reuses one allocation.
-    let mut probe: Vec<(isize, Mode, &Doc)> = Vec::new();
+    let mut probe: Vec<Probe> = Vec::new();
     work.push_back((0, Mode::Broken, doc));
 
     while let Some((indent, mode, d)) = work.pop_front() {
@@ -583,19 +617,20 @@ fn fits<'d>(
     mut remaining: isize,
     seed: (isize, Mode, &'d Doc),
     rest: &VecDeque<(isize, Mode, &'d Doc)>,
-    probe: &mut Vec<(isize, Mode, &'d Doc)>,
+    probe: &mut Vec<Probe<'d>>,
 ) -> bool {
     probe.clear();
-    probe.push(seed);
+    let (indent, mode, d) = seed;
+    probe.push((indent, mode, d, true));
     let mut rest = rest.iter();
     loop {
         if remaining < 0 {
             return false;
         }
-        let (indent, mode, d) = match probe.pop() {
+        let (indent, mode, d, own) = match probe.pop() {
             Some(entry) => entry,
             None => match rest.next() {
-                Some(entry) => *entry,
+                Some(&(indent, mode, d)) => (indent, mode, d, true),
                 None => return true,
             },
         };
@@ -612,11 +647,16 @@ fn fits<'d>(
                 Mode::Flat => return false,
                 Mode::Broken => return true,
             },
-            DocInner::Nest(i, inner) => probe.push((indent + i, mode, inner)),
+            DocInner::Nest(i, inner) => probe.push((indent + i, mode, inner, own)),
             // Nesting never affects a width probe: probes stop at the first
             // newline.
-            DocInner::NestIfBroken(_, inner) => probe.push((indent, mode, inner)),
-            DocInner::Hug(inner) => probe.push((indent, Mode::Broken, inner)),
+            DocInner::NestIfBroken(_, inner) => probe.push((indent, mode, inner, own)),
+            // Only the hugging group may end its line inside a hugged list.
+            // A group around it that renders flat renders the list flat too.
+            DocInner::Hug(inner) if !own && mode == Mode::Flat => {
+                probe.push((indent, Mode::Flat, inner, false))
+            }
+            DocInner::Hug(inner) => probe.push((indent, Mode::Broken, inner, own)),
             DocInner::Group { doc, breaks } => {
                 let m = match (mode, *breaks) {
                     (Mode::Flat, _) => Mode::Flat,
@@ -628,16 +668,20 @@ fn fits<'d>(
                     }
                     (Mode::Broken, Breaks::Reluctantly) => Mode::Flat,
                 };
-                probe.push((indent, m, doc));
+                probe.push((indent, m, doc, false));
             }
             DocInner::Concat(ds) => {
                 for d in ds.iter().rev() {
-                    probe.push((indent, mode, d));
+                    probe.push((indent, mode, d, own));
                 }
             }
         }
     }
 }
+
+/// A pending width-probe entry. `own` is whether it belongs to the probed
+/// group itself rather than to a group nested inside it.
+type Probe<'d> = (isize, Mode, &'d Doc, bool);
 
 #[cfg(test)]
 mod tests {
