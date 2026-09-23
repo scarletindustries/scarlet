@@ -1,29 +1,14 @@
-import scarlet/http/h1.{
-	Done,
-	NeedMore,
-	Bad,
-	NoBody,
-	Length,
-	Chunked,
-	Invalid,
-	ChunkedDone,
-	ChunkedNeedMore,
-	ChunkedBad,
-	Version,
-	Http10,
-	Http11,
-	HeadFlags,
-}
-import scarlet/http/body.{Body, Empty, Whole, Streaming}
-import scarlet/http/headers.{Header, Headers}
-import scarlet/net.{Server, Service}
-import scarlet/process.{Supervisor}
-import scarlet/net/socket.{Socket, Data, Closed}
-import scarlet/net/error.{NetError}
-import scarlet/binary.{Dec}
+import scarlet/http/h1
+import scarlet/http/body
+import scarlet/http/headers
+import scarlet/net
+import scarlet/process
+import scarlet/net/socket
+import scarlet/net/error
+import scarlet/binary
 import scarlet/int
 import scarlet/result
-import scarlet/time.{Instant}
+import scarlet/time
 
 // The HTTP/1.1 server core: the typed Request/Response surface a handler sees,
 // and the connection driver that frames requests off a socket and drives
@@ -56,20 +41,20 @@ pub type Request {
 	// origin-form path plus optional `?query`, but may also be `*` (OPTIONS) or
 	// an absolute URI. Use `path`/`query` to split origin-form.
 	target Binary
-	version Version
-	headers Headers
+	version h1.Version
+	headers headers.Headers
 	// The `Connection`/`Expect` answers the head parser recorded on its one pass
 	// over `headers`. Carried on the request so the message-control decisions
 	// (keep-alive, 100-continue) are field reads, and so they answer the header
 	// section exactly as it arrived — a handler rewriting `headers` cannot move
 	// them.
-	flags HeadFlags
+	flags h1.HeadFlags
 	// Trailer fields received after a chunked body. Kept separate from
 	// `headers`: RFC 9110 §6.5.1 forbids merging trailers into the header
 	// section for message-control decisions (Connection, Expect), so `flags`
 	// answers those from the head's fields alone.
-	trailers Headers
-	body Body
+	trailers headers.Headers
+	body body.Body
 }
 
 // How a response body is framed on the wire, carried by the type instead of
@@ -81,13 +66,13 @@ pub type Request {
 // connection by advertising one length and writing another; the framing
 // decision and the byte count live in the same value.
 pub type ResponseBody {
-	Fixed(len Int, b Body)
-	Unsized(b Body)
+	Fixed(len Int, b body.Body)
+	Unsized(b body.Body)
 }
 
 pub type Response {
 	status Int
-	headers Headers
+	headers headers.Headers
 	body ResponseBody
 }
 
@@ -97,9 +82,9 @@ pub type Response {
 type ReqHead {
 	method Binary
 	target Binary
-	version Version
-	headers Headers
-	flags HeadFlags
+	version h1.Version
+	headers headers.Headers
+	flags h1.HeadFlags
 }
 
 // The outcome of writing one response. `respond` owns the close decision
@@ -187,7 +172,7 @@ pub fn query(r Request) Binary {
 // connection stays alive), or connection-close on HTTP/1.0 (which has no
 // chunked encoding). A handler that knows its length should build a `Fixed`
 // body instead (e.g. via `text`); both keep the connection alive.
-pub fn ok(b Body) Response {
+pub fn ok(b body.Body) Response {
 	Response(status: 200, headers: [], body: Unsized(b))
 }
 
@@ -205,7 +190,7 @@ fn text_response(code Int, s String) Response {
 	bin = binary.from_string(s)
 	Response(
 		status: code,
-		headers: [Header(name: NAME_CONTENT_TYPE, value: VAL_TEXT_PLAIN)],
+		headers: [headers.Header(name: NAME_CONTENT_TYPE, value: VAL_TEXT_PLAIN)],
 		body: Fixed(binary.byte_size(bin), body.from_binary(bin)),
 	)
 }
@@ -217,7 +202,7 @@ pub fn with_header(r Response, name Binary, value Binary) Response {
 	Response(status: r.status, headers: headers.set(r.headers, name, value), body: r.body)
 }
 
-fn build_request(head ReqHead, trailers Headers, b Body) Request {
+fn build_request(head ReqHead, trailers headers.Headers, b body.Body) Request {
 	Request(
 		method: to_method(head.method),
 		target: head.target,
@@ -237,44 +222,44 @@ fn build_request(head ReqHead, trailers Headers, b Body) Request {
 // or reading a kernel-assigned port back with `net.local_addr`, and its
 // place in the process tree, where `process.count(service.connections)` is
 // the number of open connections.
-pub fn serve(host String, port Int, handler fn(Request) Response) Result(Service, NetError) {
+pub fn serve(host String, port Int, handler fn(Request) Response) Result(net.Service, error.NetError) {
 	net.serve(host, port, fn(sock) drive(sock, handler))
 }
 
 // As `serve`, declared inside an application's own supervisor, so the
 // server is stopped and restarted along with the rest of the tree.
 pub fn serve_in(
-	sup Supervisor,
+	sup process.Supervisor,
 	host String,
 	port Int,
 	handler fn(Request) Response,
-) Result(Service, NetError) {
+) Result(net.Service, error.NetError) {
 	net.serve_in(sup, host, port, fn(sock) drive(sock, handler))
 }
 
 // Serve connections from a listener the caller already bound — listen on
 // port 0, read the port back with net.local_addr, then hand the listener
 // over. `serve` is the listen-and-serve convenience on top of this.
-pub fn serve_on(server Server, handler fn(Request) Response) Service {
+pub fn serve_on(server net.Server, handler fn(Request) Response) net.Service {
 	net.serve_on(server, fn(sock) drive(sock, handler))
 }
 
 // Own one connection start-to-finish and always close it on the way out. The
 // loop itself never closes the socket: it returns to here, which closes once.
-fn drive(sock Socket, handler fn(Request) Response) Nil {
+fn drive(sock socket.Socket, handler fn(Request) Response) Nil {
 	serve_conn(sock, EMPTY, 0, head_deadline(), handler, []) or Nil
 	socket.close(sock) or Nil
 }
 
 // The absolute deadline for reading the next request head, taken once at the
 // top of each request cycle so partial reads never extend it.
-fn head_deadline() Instant {
+fn head_deadline() time.Instant {
 	time.deadline_in_ms(HEAD_TIMEOUT_MS)
 }
 
 // The absolute deadline for receiving the whole request body, taken once when
 // the framing is decided so partial reads never extend it.
-fn body_deadline() Instant {
+fn body_deadline() time.Instant {
 	time.deadline_in_ms(BODY_TIMEOUT_MS)
 }
 
@@ -293,29 +278,29 @@ fn body_deadline() Instant {
 // time instead of holding the connection open (TimedOut errs out through
 // `drive`, which closes).
 fn serve_conn(
-	sock Socket,
+	sock socket.Socket,
 	buf Binary,
 	off Int,
-	deadline Instant,
+	deadline time.Instant,
 	handler fn(Request) Response,
 	pending Array(Binary),
-) Result(Nil, NetError) {
+) Result(Nil, error.NetError) {
 	// An exhausted `buf` parses to NeedMore off an empty window; guarding that
 	// with an `off >= byte_size` test measured worse, so the parse is unconditional.
 	match h1.parse_request(buf, off) {
-		NeedMore -> {
+		h1.NeedMore -> {
 			_ <- result.then(flush(sock, pending))
 			match socket.read_until(sock, READ_SIZE, deadline) {
-				Ok(Data(more)) -> serve_conn(sock, carry(buf, off, more), 0, deadline, handler, [])
-				Ok(Closed) -> Ok(Nil)
+				Ok(socket.Data(more)) -> serve_conn(sock, carry(buf, off, more), 0, deadline, handler, [])
+				Ok(socket.Closed) -> Ok(Nil)
 				Err(e) -> Err(e)
 			}
 		}
-		Bad(status) -> {
+		h1.Bad(status) -> {
 			reject(sock, pending, status)
 			Ok(Nil)
 		}
-		Done(method, target, version, hdrs, flags, consumed) -> {
+		h1.Done(method, target, version, hdrs, flags, consumed) -> {
 			head = ReqHead(
 				method: method,
 				target: target,
@@ -331,13 +316,13 @@ fn serve_conn(
 // Refuse a request: flush anything still pending (so earlier pipelined
 // responses are not lost), then write a framed error response. The caller
 // stops its loop afterwards so the connection closes.
-fn reject(sock Socket, pending Array(Binary), status Int) Nil {
+fn reject(sock socket.Socket, pending Array(Binary), status Int) Nil {
 	flush(sock, pending) or Nil
 	write_error(sock, status)
 }
 
 // Write out accumulated response parts, if any, as one vectored write.
-fn flush(sock Socket, pending Array(Binary)) Result(Nil, NetError) {
+fn flush(sock socket.Socket, pending Array(Binary)) Result(Nil, error.NetError) {
 	match pending {
 		[] -> Ok(Nil)
 		_ -> {
@@ -362,19 +347,19 @@ fn carry(buf Binary, off Int, more Binary) Binary {
 
 // Decide framing, then deliver the body under the bounded-buffer model.
 fn handle(
-	sock Socket,
+	sock socket.Socket,
 	buf Binary,
 	consumed Int,
 	head ReqHead,
 	handler fn(Request) Response,
 	pending Array(Binary),
-) Result(Nil, NetError) {
+) Result(Nil, error.NetError) {
 	match h1.framing(head.headers) {
-		Invalid(status) -> {
+		h1.Invalid(status) -> {
 			reject(sock, pending, status)
 			Ok(Nil)
 		}
-		NoBody ->
+		h1.NoBody ->
 			respond_and_continue(
 				sock,
 				buf,
@@ -383,7 +368,7 @@ fn handle(
 				handler,
 				pending,
 			)
-		Length(n) -> if n > MAX_BODY {
+		h1.Length(n) -> if n > MAX_BODY {
 			reject(sock, pending, 413)
 			Ok(Nil)
 		} else {
@@ -398,7 +383,7 @@ fn handle(
 		}
 		// Chunked body: same flush-first reasoning as Content-Length, and the
 		// same absolute body deadline.
-		Chunked -> {
+		h1.Chunked -> {
 			deadline = body_deadline()
 			_ <- result.then(flush(sock, pending))
 			read_chunked_body(sock, buf, consumed, deadline, head, handler)
@@ -414,14 +399,14 @@ fn handle(
 // carried forward; if the body had to be read from the socket there is no such
 // leftover and the next request is read fresh.
 fn read_body(
-	sock Socket,
+	sock socket.Socket,
 	buf Binary,
 	consumed Int,
 	n Int,
-	deadline Instant,
+	deadline time.Instant,
 	head ReqHead,
 	handler fn(Request) Response,
-) Result(Nil, NetError) {
+) Result(Nil, error.NetError) {
 	_ <- result.then(maybe_continue(sock, head.flags))
 	avail = binary.byte_size(buf) - consumed
 	buffered = int.min(avail, n)
@@ -447,13 +432,13 @@ fn read_body(
 // dispatch. The 100-continue interim response (if asked for) goes out once,
 // before any body bytes are awaited.
 fn read_chunked_body(
-	sock Socket,
+	sock socket.Socket,
 	buf Binary,
 	off Int,
-	deadline Instant,
+	deadline time.Instant,
 	head ReqHead,
 	handler fn(Request) Response,
-) Result(Nil, NetError) {
+) Result(Nil, error.NetError) {
 	_ <- result.then(maybe_continue(sock, head.flags))
 	chunked_loop(sock, buf, off, deadline, head, handler)
 }
@@ -468,28 +453,28 @@ fn read_chunked_body(
 // terminator so pipelined requests carry forward through respond_and_continue
 // unchanged.
 fn chunked_loop(
-	sock Socket,
+	sock socket.Socket,
 	buf Binary,
 	off Int,
-	deadline Instant,
+	deadline time.Instant,
 	head ReqHead,
 	handler fn(Request) Response,
-) Result(Nil, NetError) {
+) Result(Nil, error.NetError) {
 	match h1.chunk_decode(buf, off, MAX_BODY) {
-		ChunkedNeedMore -> match socket.read_until(sock, READ_SIZE, deadline) {
-			Ok(Data(more)) ->
+		h1.ChunkedNeedMore -> match socket.read_until(sock, READ_SIZE, deadline) {
+			Ok(socket.Data(more)) ->
 				chunked_loop(sock, binary.append(buf, more), off, deadline, head, handler)
 			// Peer closed mid-body: there is no complete request to answer.
-			Ok(Closed) -> Ok(Nil)
+			Ok(socket.Closed) -> Ok(Nil)
 			Err(e) -> Err(e)
 		}
-		ChunkedBad(status) -> {
+		h1.ChunkedBad(status) -> {
 			write_error(sock, status)
 			Ok(Nil)
 		}
 		// Pending responses were flushed before the body was read, so this
 		// request starts a fresh batch.
-		ChunkedDone(decoded, trailers, consumed) ->
+		h1.ChunkedDone(decoded, trailers, consumed) ->
 			respond_and_continue(
 				sock,
 				buf,
@@ -503,7 +488,7 @@ fn chunked_loop(
 
 // Honor Expect: 100-continue by writing the interim response before the body
 // is read, so a client that waits for it will start sending.
-fn maybe_continue(sock Socket, f HeadFlags) Result(Nil, NetError) {
+fn maybe_continue(sock socket.Socket, f h1.HeadFlags) Result(Nil, error.NetError) {
 	if h1.want_100_continue(f) {
 		socket.write(sock, h1.serialize_head(100, []))
 	} else {
@@ -517,13 +502,13 @@ fn maybe_continue(sock Socket, f HeadFlags) Result(Nil, NetError) {
 // after the request body was fully read above — so the socket sits exactly at
 // the next request boundary and there is no unconsumed body to be misframed.
 fn respond_and_continue(
-	sock Socket,
+	sock socket.Socket,
 	leftover_buf Binary,
 	leftover_off Int,
 	req Request,
 	handler fn(Request) Response,
 	pending Array(Binary),
-) Result(Nil, NetError) {
+) Result(Nil, error.NetError) {
 	resp = handler(req)
 	close_after = h1.should_close(req.version, req.flags) || response_close(resp)
 	match respond(sock, pending, req.method, req.version, close_after, resp) {
@@ -566,13 +551,13 @@ fn respond_and_continue(
 // without ever counting body bytes, and `Content-Length: -1` is not a valid
 // field value (1*DIGIT) — a lenient client could desync on it.
 fn respond(
-	sock Socket,
+	sock socket.Socket,
 	pending Array(Binary),
 	method Method,
-	version Version,
+	version h1.Version,
 	close_after Bool,
 	resp Response,
-) Result(Sent, NetError) {
+) Result(Sent, error.NetError) {
 	if resp.status < 200 || resp.status > 999 {
 		replace_with_500(sock, pending)
 	} else if !headers.valid(resp.headers) {
@@ -597,7 +582,7 @@ fn respond(
 						b,
 					)
 				Unsized(b) -> match version {
-					Http11 -> {
+					h1.Http11 -> {
 						chunked = headers.set(hdrs, NAME_TRANSFER_ENCODING, VAL_CHUNKED)
 						_ <- result.then(flush(sock, pending))
 						match body.probe(sanitize_trailers(b)) {
@@ -623,7 +608,7 @@ fn respond(
 							}
 						}
 					}
-					Http10 -> {
+					h1.Http10 -> {
 						closing = headers.set(hdrs, NAME_CONNECTION, VAL_CLOSE)
 						_ <- result.then(flush(sock, pending))
 						match body.probe(b) {
@@ -655,7 +640,7 @@ fn respond(
 
 // Discard the handler's response and answer with a framed 500 instead,
 // closing the connection.
-fn replace_with_500(sock Socket, pending Array(Binary)) Result(Sent, NetError) {
+fn replace_with_500(sock socket.Socket, pending Array(Binary)) Result(Sent, error.NetError) {
 	reject(sock, pending, 500)
 	Ok(Close)
 }
@@ -665,7 +650,7 @@ fn replace_with_500(sock Socket, pending Array(Binary)) Result(Sent, NetError) {
 // boundary; a closing connection has no next boundary, so the batch is
 // flushed here and the result says Close — this is where `respond` makes
 // Sent's variants literal.
-fn finish_buffered(sock Socket, close_after Bool, parts Array(Binary)) Result(Sent, NetError) {
+fn finish_buffered(sock socket.Socket, close_after Bool, parts Array(Binary)) Result(Sent, error.NetError) {
 	if close_after {
 		_ <- result.then(flush(sock, parts))
 		Ok(Close)
@@ -678,7 +663,7 @@ fn finish_buffered(sock Socket, close_after Bool, parts Array(Binary)) Result(Se
 // handler put in the header list is dropped, and the real framing header is
 // re-derived from the ResponseBody constructor — so the advertised framing
 // can never disagree with the bytes actually written.
-fn strip_framing(hs Headers) Headers {
+fn strip_framing(hs headers.Headers) headers.Headers {
 	headers.delete(headers.delete(hs, NAME_CONTENT_LENGTH), NAME_TRANSFER_ENCODING)
 }
 
@@ -690,14 +675,14 @@ fn strip_framing(hs Headers) Headers {
 // the driver has decided to close, the final response advertises
 // `Connection: close` (RFC 9112 §9.6) so the client stops reusing the
 // connection instead of discovering the close on its next request.
-fn conn_headers(version Version, close_after Bool, hs Headers) Headers {
+fn conn_headers(version h1.Version, close_after Bool, hs headers.Headers) headers.Headers {
 	match version {
-		Http10 -> if close_after {
+		h1.Http10 -> if close_after {
 			hs
 		} else {
 			headers.set(hs, NAME_CONNECTION, VAL_KEEP_ALIVE)
 		}
-		Http11 -> if close_after {
+		h1.Http11 -> if close_after {
 			headers.set(hs, NAME_CONNECTION, VAL_CLOSE)
 		} else {
 			hs
@@ -709,7 +694,7 @@ fn conn_headers(version Version, close_after Bool, hs Headers) Headers {
 // length of the body a GET would have carried (RFC 9110 §8.6), so a Fixed
 // body's length is emitted even though its bytes are not; 204/304 stay
 // length-free.
-fn head_only_headers(method Method, hs Headers, b ResponseBody) Headers {
+fn head_only_headers(method Method, hs headers.Headers, b ResponseBody) headers.Headers {
 	match (method, b) {
 		(Head, Fixed(len, _)) -> with_length(hs, len)
 		_ -> hs
@@ -720,8 +705,8 @@ fn head_only_headers(method Method, hs Headers, b ResponseBody) Headers {
 // before every call), so a plain prepend is `headers.set`-equivalent without
 // walking and rebuilding the list. Field order is not significant (RFC 9110
 // §5.3 — only same-named fields are ordered).
-fn with_length(hs Headers, len Int) Headers {
-	[Header(name: NAME_CONTENT_LENGTH, value: binary.from_int_ascii(len, Dec)), ..hs]
+fn with_length(hs headers.Headers, len Int) headers.Headers {
+	[headers.Header(name: NAME_CONTENT_LENGTH, value: binary.from_int_ascii(len, binary.Dec)), ..hs]
 }
 
 // A Fixed body advertising a negative length — an unkeepable promise. respond
@@ -748,30 +733,30 @@ fn negative_fixed_length(b ResponseBody) Bool {
 // budgeted at the promised remainder, so an over-long stream is cut off at
 // the boundary: no byte past the advertised length is ever sent.
 fn buffer_body(
-	sock Socket,
+	sock socket.Socket,
 	pending Array(Binary),
 	close_after Bool,
 	status Int,
-	hdrs Headers,
+	hdrs headers.Headers,
 	len Int,
-	b Body,
-) Result(Sent, NetError) {
+	b body.Body,
+) Result(Sent, error.NetError) {
 	match body.take_buffered(b) {
 		// take_buffered only pulls, never writes: this is the body SOURCE
 		// failing while the sink is still untouched, so the framed 500 is
 		// deliverable (and carries the batched responses ahead of it out too).
 		Err(_) -> replace_with_500(sock, pending)
-		Ok(Empty) -> if len == 0 {
+		Ok(body.Empty) -> if len == 0 {
 			finish_buffered(sock, close_after, [..pending, h1.serialize_head(status, hdrs)])
 		} else {
 			replace_with_500(sock, pending)
 		}
-		Ok(Whole(data)) -> if binary.byte_size(data) == len {
+		Ok(body.Whole(data)) -> if binary.byte_size(data) == len {
 			finish_buffered(sock, close_after, [..pending, h1.serialize_head(status, hdrs), data])
 		} else {
 			replace_with_500(sock, pending)
 		}
-		Ok(Streaming(first, second, rest)) -> {
+		Ok(body.Streaming(first, second, rest)) -> {
 			got = binary.byte_size(first) + binary.byte_size(second)
 			if got > len {
 				replace_with_500(sock, pending)
@@ -802,7 +787,7 @@ fn buffer_body(
 // a trailer list failing headers.valid is dropped at the moment it surfaces —
 // dropping is always legal (trailers are optional metadata), while serializing
 // it would reopen the response-splitting hole the gate in `respond` closes.
-fn sanitize_trailers(b Body) Body {
+fn sanitize_trailers(b body.Body) body.Body {
 	fn() match body.pull(b) {
 		Ok(body.Chunk(data, next)) -> Ok(body.Chunk(data, sanitize_trailers(next)))
 		Ok(body.Done(trailers)) -> if headers.valid(trailers) {
@@ -832,10 +817,10 @@ fn response_close(resp Response) Bool {
 
 // Write a minimal framed error response (Content-Length: 0, Connection: close)
 // so the client sees the status; the caller then stops the loop and closes.
-fn write_error(sock Socket, status Int) Nil {
+fn write_error(sock socket.Socket, status Int) Nil {
 	hdrs = [
-		Header(name: NAME_CONTENT_LENGTH, value: ZERO),
-		Header(name: NAME_CONNECTION, value: VAL_CLOSE),
+		headers.Header(name: NAME_CONTENT_LENGTH, value: ZERO),
+		headers.Header(name: NAME_CONNECTION, value: VAL_CLOSE),
 	]
 	socket.write(sock, h1.serialize_head(status, hdrs)) or Nil
 }

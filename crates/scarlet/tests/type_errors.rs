@@ -382,7 +382,7 @@ ok_case! {
     // Each `Parsed` still answers for its own constructors and exhaustiveness.
     same_named_local_and_stdlib_types_coexist: (
         "import scarlet/binary\n\
-         import scarlet/http/h1.{Done, NeedMore, Bad}\n\
+         import scarlet/http/h1\n\
          type Parsed {\n\
          \tLocalDone(x Int)\n\
          \tLocalOther\n\
@@ -395,9 +395,9 @@ ok_case! {
          }\n\
          pub fn main() {\n\
          \tremote = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
-         \t\tDone(_, _, _, _, _, consumed) -> consumed\n\
-         \t\tNeedMore -> 0 - 1\n\
-         \t\tBad(s) -> s\n\
+         \t\th1.Done(_, _, _, _, _, consumed) -> consumed\n\
+         \t\th1.NeedMore -> 0 - 1\n\
+         \t\th1.Bad(s) -> s\n\
          \t}\n\
          \tprintln(remote + local_value(LocalDone(41)))\n\
          }\n",

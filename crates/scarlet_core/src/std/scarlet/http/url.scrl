@@ -1,4 +1,4 @@
-import scarlet/binary.{Dec}
+import scarlet/binary
 import scarlet/int
 import scarlet/result
 
@@ -102,7 +102,7 @@ pub fn authority(u Url) Binary {
 	if u.port == default_port(u.scheme) {
 		bracketed
 	} else {
-		binary.append(binary.append(bracketed, COLON), binary.from_int_ascii(u.port, Dec))
+		binary.append(binary.append(bracketed, COLON), binary.from_int_ascii(u.port, binary.Dec))
 	}
 }
 
@@ -238,7 +238,7 @@ fn port_of(port_text Binary, scheme Scheme) Result(Int, UrlError) {
 		if binary.byte_size(digits) == 0 || !all_digits(digits, 0, binary.byte_size(digits)) {
 			Err(BadPort(port_text))
 		} else {
-			match binary.parse_int(digits, Dec) {
+			match binary.parse_int(digits, binary.Dec) {
 				Ok(n) -> if n >= 1 && n <= 65535 {
 					Ok(n)
 				} else {

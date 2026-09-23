@@ -38,9 +38,7 @@ pub struct WorkspaceEdit {
 
 /// Result of `textDocument/prepareRename`.
 ///
-/// `def` is the hit's target as-is, deliberately not chased through
-/// [`ReferenceGraph::canonical`] / the `alias_of` edge: renaming the `Y` of
-/// `import a.{X as Y}` stays on `Y` and never rewrites `X`.
+/// `def` is the hit's target as-is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedRename {
     def: DefId,

@@ -5,9 +5,9 @@
 //   curl -i localhost:8080/nope
 
 import scarlet/binary
-import scarlet/http.{Fixed, Get, Post, Request, Response}
+import scarlet/http
 import scarlet/http/body
-import scarlet/http/headers.{Header}
+import scarlet/http/headers
 import scarlet/result
 
 const MAX_BODY = 8192
@@ -18,16 +18,16 @@ const VAL_TEXT = <<'text/plain; charset=utf-8'>>
 const VAL_AL = <<'al'>>
 
 // Fixed(len, body) ties the Content-Length to the bytes actually sent.
-fn respond(code Int, s String) Response {
+fn respond(code Int, s String) http.Response {
 	bin = binary.from_string(s)
-	Response(
+	http.Response(
 		status: code,
-		headers: [Header(name: NAME_CONTENT_TYPE, value: VAL_TEXT)],
-		body: Fixed(binary.byte_size(bin), body.from_binary(bin)),
+		headers: [headers.Header(name: NAME_CONTENT_TYPE, value: VAL_TEXT)],
+		body: http.Fixed(binary.byte_size(bin), body.from_binary(bin)),
 	)
 }
 
-fn hello(req Request) Response {
+fn hello(req http.Request) http.Response {
 	match binary.to_string(http.query(req)) {
 		Ok('') -> respond(200, 'hello, stranger\n')
 		Ok(q) -> respond(200, 'hello, ${q}\n')
@@ -35,26 +35,26 @@ fn hello(req Request) Response {
 	}
 }
 
-fn echo(req Request) Response {
+fn echo(req http.Request) http.Response {
 	match echo_text(req) {
 		Ok(text) -> respond(200, 'echo: ${text}\n')
 		Err(msg) -> respond(400, msg)
 	}
 }
 
-fn echo_text(req Request) Result(String, String) {
+fn echo_text(req http.Request) Result(String, String) {
 	bytes <- result.then(
 		result.map_err(body.collect(req.body, MAX_BODY), fn(e) 'read failed: ${e}\n'),
 	)
 	result.replace_err(binary.to_string(bytes), 'body is not utf-8\n')
 }
 
-fn route(req Request) Response {
+fn route(req http.Request) http.Response {
 	response = match (req.method, http.path(req)) {
-		(Get, <<'/'>>) -> respond(200, 'al http server\n')
-		(Get, <<'/hello'>>) -> hello(req)
-		(Post, <<'/echo'>>) -> echo(req)
-		(Get, _) | (Post, _) -> http.not_found()
+		(http.Get, <<'/'>>) -> respond(200, 'al http server\n')
+		(http.Get, <<'/hello'>>) -> hello(req)
+		(http.Post, <<'/echo'>>) -> echo(req)
+		(http.Get, _) | (http.Post, _) -> http.not_found()
 		_ -> respond(405, 'method not allowed\n')
 	}
 	http.with_header(response, NAME_SERVER, VAL_AL)

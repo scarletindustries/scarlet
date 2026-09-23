@@ -9,34 +9,23 @@
 import scarlet/array
 import scarlet/binary
 import scarlet/http
-import scarlet/http.{Request, Response}
 import scarlet/http/body
 import scarlet/process
-import scarlet/process.{
-	FactoryOf,
-	OneForOne,
-	Process,
-	Restarted,
-	Subject,
-	Supervised,
-	SupervisorOf,
-	Worker,
-}
 import scarlet/string
 
 // One process per room name.
 
 type RoomMsg {
 	Say(text String)
-	History(reply Subject(Array(String)))
+	History(reply process.Subject(Array(String)))
 	Crash
 }
 
-fn room(inbox Subject(RoomMsg), name String) Nil {
+fn room(inbox process.Subject(RoomMsg), name String) Nil {
 	room_loop(inbox, name, [])
 }
 
-fn room_loop(inbox Subject(RoomMsg), name String, history Array(String)) Nil {
+fn room_loop(inbox process.Subject(RoomMsg), name String, history Array(String)) Nil {
 	match process.receive(inbox) {
 		Say(text) -> room_loop(inbox, name, array.concat(history, [text]))
 		History(reply) -> {
@@ -53,14 +42,14 @@ fn room_loop(inbox Subject(RoomMsg), name String, history Array(String)) Nil {
 
 type StatsMsg {
 	Served
-	Report(reply Subject(Int))
+	Report(reply process.Subject(Int))
 }
 
-fn stats(inbox Subject(StatsMsg)) Nil {
+fn stats(inbox process.Subject(StatsMsg)) Nil {
 	stats_loop(inbox, 0)
 }
 
-fn stats_loop(inbox Subject(StatsMsg), served Int) Nil {
+fn stats_loop(inbox process.Subject(StatsMsg), served Int) Nil {
 	match process.receive(inbox) {
 		Served -> stats_loop(inbox, served + 1)
 		Report(reply) -> {
@@ -71,14 +60,14 @@ fn stats_loop(inbox Subject(StatsMsg), served Int) Nil {
 }
 
 // A request sent between restarts dies with the old process, so it times out.
-fn ask(target Subject(msg), make fn(Subject(reply)) msg) Result(reply, Nil) {
+fn ask(target process.Subject(msg), make fn(process.Subject(reply)) msg) Result(reply, Nil) {
 	inbox = process.subject()
 	process.send(target, make(inbox))
 	process.receive_within(inbox, 200)
 }
 
 // ?room=NAME, defaulting to lobby.
-fn room_named(rooms process.Factory(RoomMsg, String), req Request) Subject(RoomMsg) {
+fn room_named(rooms process.Factory(RoomMsg, String), req http.Request) process.Subject(RoomMsg) {
 	q = binary.to_string(http.query(req)) or ''
 	name = match string.split(q, '=') {
 		['room', n] -> string.trim(n)
@@ -87,7 +76,7 @@ fn room_named(rooms process.Factory(RoomMsg, String), req Request) Subject(RoomM
 	process.lookup_or_start(rooms, if name == '' { 'lobby' } else { name })
 }
 
-fn request_text(req Request) String {
+fn request_text(req http.Request) String {
 	match body.collect(req.body, 4096) {
 		Ok(bytes) -> binary.to_string(bytes) or ''
 		Err(_) -> ''
@@ -99,11 +88,11 @@ fn lines(xs Array(String)) String {
 }
 
 fn handle(
-	req Request,
+	req http.Request,
 	rooms process.Factory(RoomMsg, String),
-	counter Subject(StatsMsg),
-	app Supervised,
-) Response {
+	counter process.Subject(StatsMsg),
+	app process.Supervised,
+) http.Response {
 	process.send(counter, Served)
 	match http.path(req) {
 		<<'/say'>> -> {
@@ -127,23 +116,23 @@ fn handle(
 	}
 }
 
-fn render(node Supervised, indent String) String {
+fn render(node process.Supervised, indent String) String {
 	info = process.info(node)
 	line = match info.kind {
-		Process -> '${indent}process\n'
-		Worker(policy) ->
+		process.Process -> '${indent}process\n'
+		process.Worker(policy) ->
 			'${indent}worker ${string.inspect(policy)}, restarted ${info.restarts} times\n'
-		SupervisorOf(strategy) -> '${indent}supervisor ${string.inspect(strategy)}\n'
-		FactoryOf(members) ->
+		process.SupervisorOf(strategy) -> '${indent}supervisor ${string.inspect(strategy)}\n'
+		process.FactoryOf(members) ->
 			'${indent}factory ${string.inspect(members)}, ${process.count(node)} live\n'
 	}
 	array.fold(process.children(node), line, fn(out, child) out + render(child, indent + '  '))
 }
 
 pub fn main() Nil {
-	app <- process.root(OneForOne(restarts: 5, within_ms: 60_000))
+	app <- process.root(process.OneForOne(restarts: 5, within_ms: 60_000))
 	counter = process.permanent(app, stats)
-	rooms = process.factory(app, Restarted(restarts: 20, within_ms: 60_000), room)
+	rooms = process.factory(app, process.Restarted(restarts: 20, within_ms: 60_000), room)
 	match http.serve_in(app, '0.0.0.0', 8080, fn(req) handle(req, rooms, counter, app.supervised)) {
 		Ok(_) -> println('chat is up on http://localhost:8080')
 		Err(e) -> println('cannot serve: ${e}')

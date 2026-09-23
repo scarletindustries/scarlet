@@ -1,10 +1,10 @@
 import scarlet/net
-import scarlet/net/address.{SocketAddress}
-import scarlet/net/error.{NetError, UnexpectedEof}
-import scarlet/net/socket.{Socket, Read, Data, Closed}
+import scarlet/net/address
+import scarlet/net/error
+import scarlet/net/socket
 import scarlet/binary
 import scarlet/result
-import scarlet/time.{Instant}
+import scarlet/time
 
 // A TLS client connection, authenticated and encrypted. The value is only ever
 // constructed by the VM and carries no fields; it is an opaque handle into the
@@ -35,7 +35,7 @@ pub type TlsConnection
 // can write is not what catches it.
 pub type TlsSocket {
 	conn TlsConnection
-	peer SocketAddress
+	peer address.SocketAddress
 	server_name String
 }
 
@@ -78,7 +78,7 @@ pub type TlsError {
 	// certificate does not carry is a `HostnameMismatch` like any other name.
 	InvalidServerName
 	// The TCP connection underneath failed, before or during the exchange.
-	Transport(cause NetError)
+	Transport(cause error.NetError)
 }
 
 // Open a TLS connection to `host:port` and complete the handshake before
@@ -124,7 +124,7 @@ pub fn connect_within(host String, port Int, timeout_ms Int) Result(TlsSocket, T
 // alongside `connect_within`: three `_within` calls chained would bound each
 // step separately, and the call as a whole at three times the number the caller
 // wrote.
-pub fn connect_until(host String, port Int, deadline Instant) Result(TlsSocket, TlsError) {
+pub fn connect_until(host String, port Int, deadline time.Instant) Result(TlsSocket, TlsError) {
 	sock <- result.then(result.map_err(net.connect_until(host, port, deadline), Transport))
 	handshake_until(sock, host, deadline)
 }
@@ -148,7 +148,7 @@ pub fn connect_until(host String, port Int, deadline Instant) Result(TlsSocket, 
 // of the program. `handshake_within` is the bounded form, and is what to reach
 // for against anything that is not known to speak TLS.
 @vm(tls__handshake)
-pub fn handshake(sock Socket, server_name String) Result(TlsSocket, TlsError)
+pub fn handshake(sock socket.Socket, server_name String) Result(TlsSocket, TlsError)
 
 // Complete a TLS handshake as `handshake`, but wait no longer than
 // `timeout_ms` milliseconds. The deadline is captured once, here in Scarlet, as
@@ -159,7 +159,7 @@ pub fn handshake(sock Socket, server_name String) Result(TlsSocket, TlsError)
 // `Socket` passed in was already stale from the first attempt, and the TLS
 // handle is only ever handed out by success, so there is nothing left to retry
 // with. Reaching this means opening a new connection, not calling again.
-pub fn handshake_within(sock Socket, server_name String, timeout_ms Int) Result(TlsSocket, TlsError) {
+pub fn handshake_within(sock socket.Socket, server_name String, timeout_ms Int) Result(TlsSocket, TlsError) {
 	handshake_until(sock, server_name, time.add_ms(time.monotonic(), timeout_ms))
 }
 
@@ -167,12 +167,12 @@ pub fn handshake_within(sock Socket, server_name String, timeout_ms Int) Result(
 // `deadline` (from `time.monotonic()`). Use this rather than `handshake_within`
 // when one deadline covers several steps, so the handshake gets what is left of
 // the budget instead of a fresh copy of it.
-pub fn handshake_until(sock Socket, server_name String, deadline Instant) Result(TlsSocket, TlsError) {
+pub fn handshake_until(sock socket.Socket, server_name String, deadline time.Instant) Result(TlsSocket, TlsError) {
 	handshake_until_ms(sock, server_name, time.to_deadline_ms(deadline))
 }
 
 @vm(tls__handshake_until)
-fn handshake_until_ms(sock Socket, server_name String, deadline_ms Int) Result(TlsSocket, TlsError)
+fn handshake_until_ms(sock socket.Socket, server_name String, deadline_ms Int) Result(TlsSocket, TlsError)
 
 // Read whatever plaintext is available, up to `max` bytes. Parks the calling
 // process until at least one byte is decrypted or the peer closes.
@@ -191,7 +191,7 @@ fn handshake_until_ms(sock Socket, server_name String, deadline_ms Int) Result(T
 // above — which is what `read_exact` does, and why it is the one read here
 // that can report `Transport(UnexpectedEof)`.
 @vm(tls__read)
-pub fn read(c TlsSocket, max Int) Result(Read, TlsError)
+pub fn read(c TlsSocket, max Int) Result(socket.Read, TlsError)
 
 // Read exactly `count` bytes of plaintext, parking until they have all
 // arrived. Errs with `Transport(UnexpectedEof)` if the peer closes first. A
@@ -207,9 +207,9 @@ fn read_exact_loop(c TlsSocket, remaining Int, acc Binary) Result(Binary, TlsErr
 		Ok(acc)
 	} else {
 		match read(c, remaining) {
-			Ok(Data(b)) ->
+			Ok(socket.Data(b)) ->
 				read_exact_loop(c, remaining - binary.byte_size(b), binary.append(acc, b))
-			Ok(Closed) -> Err(Transport(UnexpectedEof))
+			Ok(socket.Closed) -> Err(Transport(error.UnexpectedEof))
 			Err(e) -> Err(e)
 		}
 	}
@@ -221,19 +221,19 @@ fn read_exact_loop(c TlsSocket, remaining Int, acc Binary) Result(Binary, TlsErr
 // spurious wakeup never resets the clock. Returns Ok(Data(b)) once bytes
 // decrypt, Ok(Closed) if the peer closes, or Err(Transport(TimedOut)) once
 // the deadline passes with no plaintext.
-pub fn read_within(c TlsSocket, max Int, timeout_ms Int) Result(Read, TlsError) {
+pub fn read_within(c TlsSocket, max Int, timeout_ms Int) Result(socket.Read, TlsError) {
 	read_until(c, max, time.add_ms(time.monotonic(), timeout_ms))
 }
 
 // Read up to `max` bytes of plaintext, parking until data decrypts or the
 // absolute Instant `deadline` (from `time.monotonic()`) is reached, at which
 // point it errs with Transport(TimedOut).
-pub fn read_until(c TlsSocket, max Int, deadline Instant) Result(Read, TlsError) {
+pub fn read_until(c TlsSocket, max Int, deadline time.Instant) Result(socket.Read, TlsError) {
 	read_until_ms(c, max, time.to_deadline_ms(deadline))
 }
 
 @vm(tls__read_until)
-fn read_until_ms(c TlsSocket, max Int, deadline_ms Int) Result(Read, TlsError)
+fn read_until_ms(c TlsSocket, max Int, deadline_ms Int) Result(socket.Read, TlsError)
 
 // Encrypt `data` and write it. Returns once the ciphertext has been handed to
 // the kernel, not merely buffered in the TLS session: a write that returned

@@ -5,7 +5,6 @@
 
 import scarlet/internal
 import scarlet/process
-import scarlet/process.{Subject}
 
 fn check(name String, expected Bool, actual Bool) Nil {
 	if expected == actual {
@@ -19,7 +18,7 @@ fn check(name String, expected Bool, actual Bool) Nil {
 // A quiet subject times out with Err(Nil); a served one returns Ok before the
 // deadline.
 
-fn wait_quiet(s Subject(Int)) String {
+fn wait_quiet(s process.Subject(Int)) String {
 	match process.receive_within(s, 30) {
 		Ok(_) -> 'message'
 		Err(Nil) -> 'timeout'
@@ -31,11 +30,11 @@ fn wait_quiet(s Subject(Int)) String {
 // through a bootstrap subject. Stop proves the mailbox drains in order.
 
 type Msg {
-	Add(n Int, reply Subject(Int))
-	Stop(done Subject(String))
+	Add(n Int, reply process.Subject(Int))
+	Stop(done process.Subject(String))
 }
 
-fn serve(inbox Subject(Msg), total Int) Nil {
+fn serve(inbox process.Subject(Msg), total Int) Nil {
 	match process.receive(inbox) {
 		Add(n, reply) -> {
 			process.send(reply, total + n)
@@ -48,12 +47,12 @@ fn serve(inbox Subject(Msg), total Int) Nil {
 // --- many senders, one aggregate ----------------------------------------------
 // Arrival order across processes is unspecified; the sum is not.
 
-fn shout(out Subject(Int), base Int) Nil {
+fn shout(out process.Subject(Int), base Int) Nil {
 	process.send(out, base)
 	process.send(out, base * 2)
 }
 
-fn drain(s Subject(Int), left Int, acc Int) Int {
+fn drain(s process.Subject(Int), left Int, acc Int) Int {
 	if left == 0 {
 		acc
 	} else {
@@ -66,7 +65,7 @@ fn drain(s Subject(Int), left Int, acc Int) Int {
 // U24), but a function builds a fresh subject per call, so it stays
 // polymorphic.
 
-fn fresh() Subject(msg) {
+fn fresh() process.Subject(msg) {
 	process.subject()
 }
 
@@ -214,7 +213,7 @@ pub fn main() {
 	println('cancel after firing: ok')
 }
 
-fn ask_repeatedly(server Subject(Msg), left Int, last Int) Int {
+fn ask_repeatedly(server process.Subject(Msg), left Int, last Int) Int {
 	if left == 0 {
 		last
 	} else {

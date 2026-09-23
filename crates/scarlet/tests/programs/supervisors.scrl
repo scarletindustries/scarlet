@@ -6,30 +6,6 @@
 
 import scarlet/array
 import scarlet/process
-import scarlet/process.{
-	Ask,
-	Disposable,
-	Exit,
-	Exited,
-	FactoryOf,
-	Gone,
-	Kill,
-	Killed,
-	Normal,
-	NoProcess,
-	OneForAll,
-	OneForOne,
-	Permanent,
-	Pid,
-	Process,
-	Restarted,
-	RestForOne,
-	Running,
-	Subject,
-	SupervisorOf,
-	Transient,
-	Worker,
-}
 
 fn check(name String, ok Bool) Nil {
 	if ok {
@@ -43,21 +19,21 @@ fn check(name String, ok Bool) Nil {
 
 type Req {
 	// Reply with the pid of the process serving this address right now.
-	Whoami(reply Subject(Pid))
+	Whoami(reply process.Subject(process.Pid))
 	// Ask the worker to return; what an `Ask` shutdown sends.
 	Close
 }
 
 // A worker that reports its name when it starts and when it is closed, so
 // the order in which a supervisor starts and stops things is observable.
-fn reporting(name String, log Subject(String)) fn(Subject(Req)) Nil {
+fn reporting(name String, log process.Subject(String)) fn(process.Subject(Req)) Nil {
 	fn(inbox) {
 		process.send(log, 'start ${name}')
 		serve(inbox, name, log)
 	}
 }
 
-fn serve(inbox Subject(Req), name String, log Subject(String)) Nil {
+fn serve(inbox process.Subject(Req), name String, log process.Subject(String)) Nil {
 	match process.receive(inbox) {
 		Whoami(reply) -> {
 			process.send(reply, process.self())
@@ -70,7 +46,7 @@ fn serve(inbox Subject(Req), name String, log Subject(String)) Nil {
 // The pid behind an address, retrying while it is between incarnations: a
 // request sent to a dead incarnation is dropped with it, so a client asks
 // again, exactly as it would of a slow server.
-fn whoami(addr Subject(Req)) Pid {
+fn whoami(addr process.Subject(Req)) process.Pid {
 	reply = process.subject()
 	process.send(addr, Whoami(reply))
 	match process.receive_within(reply, 20) {
@@ -80,7 +56,7 @@ fn whoami(addr Subject(Req)) Pid {
 }
 
 // Wait until the address is served by something other than `old`.
-fn await_restart(addr Subject(Req), old Pid) Pid {
+fn await_restart(addr process.Subject(Req), old process.Pid) process.Pid {
 	pid = whoami(addr)
 	if pid == old {
 		process.sleep(1)
@@ -91,7 +67,7 @@ fn await_restart(addr Subject(Req), old Pid) Pid {
 }
 
 // Drain `n` messages from the log.
-fn take(log Subject(String), n Int, acc Array(String)) Array(String) {
+fn take(log process.Subject(String), n Int, acc Array(String)) Array(String) {
 	if n == 0 {
 		acc
 	} else {
@@ -107,12 +83,12 @@ fn same_set(got Array(String), wanted Array(String)) Bool {
 // ---- factory members -------------------------------------------------------------------
 
 type Member {
-	Key(reply Subject(String))
-	MemberPid(reply Subject(Pid))
+	Key(reply process.Subject(String))
+	MemberPid(reply process.Subject(process.Pid))
 	Done
 }
 
-fn member(inbox Subject(Member), key String) Nil {
+fn member(inbox process.Subject(Member), key String) Nil {
 	match process.receive(inbox) {
 		Key(reply) -> {
 			process.send(reply, key)
@@ -126,7 +102,7 @@ fn member(inbox Subject(Member), key String) Nil {
 	}
 }
 
-fn member_key(addr Subject(Member)) String {
+fn member_key(addr process.Subject(Member)) String {
 	reply = process.subject()
 	process.send(addr, Key(reply))
 	match process.receive_within(reply, 20) {
@@ -135,7 +111,7 @@ fn member_key(addr Subject(Member)) String {
 	}
 }
 
-fn member_pid(addr Subject(Member)) Pid {
+fn member_pid(addr process.Subject(Member)) process.Pid {
 	reply = process.subject()
 	process.send(addr, MemberPid(reply))
 	match process.receive_within(reply, 20) {
@@ -144,7 +120,7 @@ fn member_pid(addr Subject(Member)) Pid {
 	}
 }
 
-fn await_member_restart(addr Subject(Member), old Pid) Pid {
+fn await_member_restart(addr process.Subject(Member), old process.Pid) process.Pid {
 	pid = member_pid(addr)
 	if pid == old {
 		process.sleep(1)
@@ -171,7 +147,7 @@ fn await_count(f process.Supervised, n Int, tries Int) Bool {
 
 fn scenarios() Nil {
 	log = process.subject()
-	app = process.supervisor(OneForOne(restarts: 100, within_ms: 60000))
+	app = process.supervisor(process.OneForOne(restarts: 100, within_ms: 60000))
 
 	// A permanent worker comes back at the same address.
 	a = process.permanent(app, reporting('a', log))
@@ -184,7 +160,7 @@ fn scenarios() Nil {
 	info = process.info(process.supervised(a))
 	check('info counts the restart', info.restarts == 1)
 	check('info names the policy', match info.kind {
-		Worker(Permanent) -> True
+		process.Worker(process.Permanent) -> True
 		_ -> False
 	})
 	check('info carries the current pid', info.pid == Some(a2))
@@ -199,10 +175,10 @@ fn scenarios() Nil {
 	check('the supervisor forgot it', process.count(app.supervised) == 1)
 
 	// One-for-all: siblings are closed in reverse order, then all restart.
-	group = process.supervisor_in(app, OneForAll(restarts: 10, within_ms: 60000))
-	g1 = process.worker(group, Permanent, Ask(Close, grace_ms: 1000), reporting('g1', log))
-	g2 = process.worker(group, Permanent, Ask(Close, grace_ms: 1000), reporting('g2', log))
-	g3 = process.worker(group, Permanent, Ask(Close, grace_ms: 1000), reporting('g3', log))
+	group = process.supervisor_in(app, process.OneForAll(restarts: 10, within_ms: 60000))
+	g1 = process.worker(group, process.Permanent, process.Ask(Close, grace_ms: 1000), reporting('g1', log))
+	g2 = process.worker(group, process.Permanent, process.Ask(Close, grace_ms: 1000), reporting('g2', log))
+	g3 = process.worker(group, process.Permanent, process.Ask(Close, grace_ms: 1000), reporting('g3', log))
 	_ = take(log, 3, [])
 	g1_pid = whoami(g1)
 	g2_pid = whoami(g2)
@@ -230,22 +206,22 @@ fn scenarios() Nil {
 		process.parent(process.supervised(g2)) == group.supervised,
 	)
 	check('the nested supervisor reports its strategy', match process.info(group.supervised).kind {
-		SupervisorOf(OneForAll(10, 60000)) -> True
+		process.SupervisorOf(process.OneForAll(10, 60000)) -> True
 		_ -> False
 	})
 	check(
 		'a top-level supervisor is declared under a plain process',
 		match process.info(process.parent(app.supervised)).kind {
-			Process -> True
+			process.Process -> True
 			_ -> False
 		},
 	)
 
 	// Rest-for-one: only the workers declared after the dead one move.
-	rest = process.supervisor_in(app, RestForOne(restarts: 10, within_ms: 60000))
-	r1 = process.worker(rest, Permanent, Ask(Close, grace_ms: 1000), reporting('r1', log))
-	r2 = process.worker(rest, Permanent, Ask(Close, grace_ms: 1000), reporting('r2', log))
-	r3 = process.worker(rest, Permanent, Ask(Close, grace_ms: 1000), reporting('r3', log))
+	rest = process.supervisor_in(app, process.RestForOne(restarts: 10, within_ms: 60000))
+	r1 = process.worker(rest, process.Permanent, process.Ask(Close, grace_ms: 1000), reporting('r1', log))
+	r2 = process.worker(rest, process.Permanent, process.Ask(Close, grace_ms: 1000), reporting('r2', log))
+	r3 = process.worker(rest, process.Permanent, process.Ask(Close, grace_ms: 1000), reporting('r3', log))
 	_ = take(log, 3, [])
 	r1_pid = whoami(r1)
 	r2_pid = whoami(r2)
@@ -267,7 +243,7 @@ fn scenarios() Nil {
 	)
 
 	// A factory: one member per key, restarted in place, keys freed on exit.
-	rooms = process.factory(app, Restarted(restarts: 10, within_ms: 60000), member)
+	rooms = process.factory(app, process.Restarted(restarts: 10, within_ms: 60000), member)
 	lobby = process.lookup_or_start(rooms, 'lobby')
 	check('a member knows its key', member_key(lobby) == 'lobby')
 	check('the same key finds the same member', process.lookup_or_start(rooms, 'lobby') == lobby)
@@ -276,7 +252,7 @@ fn scenarios() Nil {
 	check('an unknown key is nothing', process.lookup(rooms, 'nowhere') == None)
 	check('the factory counts its members', process.count(rooms.supervised) == 2)
 	check('and reports its kind', match process.info(rooms.supervised).kind {
-		FactoryOf(Restarted(10, 60000)) -> True
+		process.FactoryOf(process.Restarted(10, 60000)) -> True
 		_ -> False
 	})
 	lobby_pid = member_pid(lobby)
@@ -292,7 +268,7 @@ fn scenarios() Nil {
 	check('so the next request makes a new one', process.lookup_or_start(rooms, 'lobby') != lobby)
 
 	// Disposable members made without keys: what a server's connections are.
-	jobs = process.factory(app, Disposable, member)
+	jobs = process.factory(app, process.Disposable, member)
 	j1 = process.start_in(jobs, 'one')
 	j2 = process.start_in(jobs, 'two')
 	check('unkeyed members are counted', process.count(jobs.supervised) == 2)
@@ -301,7 +277,7 @@ fn scenarios() Nil {
 	process.send(j1, Done)
 	check('one finishing leaves the other', await_count(jobs.supervised, 1, 200))
 	check('a supervisor value reports its own kind', match process.info(app.supervised).kind {
-		SupervisorOf(OneForOne(100, 60000)) -> True
+		process.SupervisorOf(process.OneForOne(100, 60000)) -> True
 		_ -> False
 	})
 	check(
@@ -317,7 +293,7 @@ fn scenarios() Nil {
 		process.parent(main_entry) == main_entry
 	})
 	check('shutdown by Kill is the default', {
-		k = process.worker(app, Transient, Kill, reporting('k', log))
+		k = process.worker(app, process.Transient, process.Kill, reporting('k', log))
 		_ = take(log, 1, [])
 		process.send(k, Close)
 		take(log, 1, []) == ['close k']
@@ -335,15 +311,15 @@ fn scenarios() Nil {
 		'a watch reports the exit',
 		first.supervised == place &&
 		match first.ended {
-			Exited(Killed) -> True
+			process.Exited(process.Killed) -> True
 			_ -> False
 		},
 	)
-	check('and that it was restarted on the spot', first.status == Running)
+	check('and that it was restarted on the spot', first.status == process.Running)
 	_ = take(log, 1, [])
 	process.kill(whoami(w))
 	second = process.receive(events)
-	check('a watch survives the restart', second.status == Running)
+	check('a watch survives the restart', second.status == process.Running)
 	_ = take(log, 1, [])
 	process.unwatch(watch)
 	process.kill(whoami(w))
@@ -359,16 +335,16 @@ fn scenarios() Nil {
 	last = process.receive(events)
 	check(
 		'a final exit reports Gone',
-		last.status == Gone &&
+		last.status == process.Gone &&
 		match last.ended {
-			Exited(Normal) -> True
+			process.Exited(process.Normal) -> True
 			_ -> False
 		},
 	)
 	check('watching a place that is gone reports so at once', {
 		_ = process.watch(process.supervised(v), events, fn(e) e)
 		match process.receive(events) {
-			Exit(ended: Exited(NoProcess), status: Gone, ..) -> True
+			process.Exit(ended: process.Exited(process.NoProcess), status: process.Gone, ..) -> True
 			_ -> False
 		}
 	})
@@ -383,19 +359,19 @@ fn scenarios() Nil {
 	})
 	helper_place = process.supervised(process.receive(handoff))
 	check('a plain subject places its owner', match process.info(helper_place).kind {
-		Process -> True
+		process.Process -> True
 		_ -> False
 	})
 	_ = process.watch(helper_place, events, fn(e) e)
 	process.kill(helper)
 	check('a plain process reports its one exit', match process.receive(events) {
-		Exit(ended: Exited(Killed), status: Gone, ..) -> True
+		process.Exit(ended: process.Exited(process.Killed), status: process.Gone, ..) -> True
 		_ -> False
 	})
 
 	// An Ask shutdown is delivered ahead of a backlog.
-	pair = process.supervisor_in(app, OneForAll(restarts: 5, within_ms: 60000))
-	slow = process.worker(pair, Permanent, Ask(Close, grace_ms: 5000), slow_worker(log))
+	pair = process.supervisor_in(app, process.OneForAll(restarts: 5, within_ms: 60000))
+	slow = process.worker(pair, process.Permanent, process.Ask(Close, grace_ms: 5000), slow_worker(log))
 	trigger = process.permanent(pair, reporting('trigger', log))
 	_ = take(log, 2, [])
 	// Queue up slow work, then have the group stop the slow worker: the
@@ -411,14 +387,14 @@ fn scenarios() Nil {
 
 // A worker that counts the requests it has handled and reports the count
 // when closed; each request takes a while, so a backlog builds up.
-fn slow_worker(log Subject(String)) fn(Subject(Req)) Nil {
+fn slow_worker(log process.Subject(String)) fn(process.Subject(Req)) Nil {
 	fn(inbox) {
 		process.send(log, 'start slow')
 		slow_loop(inbox, log, 0)
 	}
 }
 
-fn slow_loop(inbox Subject(Req), log Subject(String), jobs Int) Nil {
+fn slow_loop(inbox process.Subject(Req), log process.Subject(String), jobs Int) Nil {
 	match process.receive(inbox) {
 		Whoami(reply) -> {
 			process.sleep(20)
@@ -431,8 +407,8 @@ fn slow_loop(inbox Subject(Req), log Subject(String), jobs Int) Nil {
 
 fn await_gone(entry process.Supervised, tries Int) Bool {
 	match process.info(entry).status {
-		Gone -> True
-		Running | process.Restarting -> if tries == 0 {
+		process.Gone -> True
+		process.Running | process.Restarting -> if tries == 0 {
 			False
 		} else {
 			process.sleep(1)

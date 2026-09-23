@@ -97,9 +97,6 @@ impl Names {
     }
 
     fn observe_import(&mut self, import: &ast::ImportDeclaration) {
-        for item in &import.items {
-            self.define(&item.alias.as_ref().unwrap_or(&item.name).name);
-        }
         let Some(last) = import.path.names.last() else {
             return;
         };

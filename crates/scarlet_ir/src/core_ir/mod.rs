@@ -381,12 +381,6 @@ pub enum Callee {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct GlobalSlot(pub i32);
 
-/// A slot in the *current* frame. A different index
-/// space from [`GlobalSlot`] and [`CaptureIdx`], kept distinct so the three
-/// cannot be swapped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct FrameSlot(pub i32);
-
 /// An index into the current closure's capture array.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CaptureIdx(pub i32);
@@ -394,8 +388,6 @@ pub struct CaptureIdx(pub i32);
 /// A value read from somewhere other than a core-IR local.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Load {
-    /// A raw frame slot the module walk assigned (a selective import).
-    Slot(FrameSlot),
     /// An entry-frame slot: a module-scope binding.
     Global(GlobalSlot),
     /// A value the current closure captured.
@@ -733,7 +725,6 @@ impl fmt::Display for Atom {
         match self {
             Atom::Local(l) => write!(f, "{l}"),
             Atom::Const(c) => write!(f, "{c}"),
-            Atom::Load(Load::Slot(s)) => write!(f, "slot{}", s.0),
             Atom::Load(Load::Global(g)) => write!(f, "global{}", g.0),
             Atom::Load(Load::Capture(c)) => write!(f, "capture{}", c.0),
             Atom::Load(Load::SelfClosure) => f.write_str("self"),

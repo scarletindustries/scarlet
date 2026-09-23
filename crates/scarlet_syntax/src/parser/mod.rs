@@ -2333,34 +2333,45 @@ impl Parser {
         }
 
         let mut alias: Option<ast::Identifier> = None;
-        let mut items: Vec<ast::ImportItem> = Vec::new();
-
         if self.kind() == Kind::Keyword(Keyword::As) {
             self.eat(Kind::Keyword(Keyword::As))?;
             alias = Some(self.eat_identifier("Expected alias after `as`")?);
         }
+        let path = ast::ImportPath { leading, names };
 
-        // Selective imports: `.{a, B, c as d}`
+        // Everything a module exports is reached through its name, so there
+        // is no `import m.{x}`. Say what to write instead, then skip the list
+        // and keep the import, so the error is the only one.
         if self.kind() == Kind::PuncDot && self.peek_next() == Some(Kind::PuncOpenBrace) {
+            let list_start = self.current_span();
             self.eat(Kind::PuncDot)?;
-            items = self.parse_comma_list(Kind::PuncOpenBrace, Kind::PuncCloseBrace, |p| {
-                let name = p.eat_identifier("Expected import item")?;
-                let mut item_alias: Option<ast::Identifier> = None;
-                if p.kind() == Kind::Keyword(Keyword::As) {
-                    p.eat(Kind::Keyword(Keyword::As))?;
-                    item_alias = Some(p.eat_identifier("Expected alias after `as`")?);
-                }
-                Ok(ast::ImportItem {
-                    name,
-                    alias: item_alias,
-                })
-            })?;
+            self.eat(Kind::PuncOpenBrace)?;
+            let qualifier = match &alias {
+                Some(a) => a.name.clone(),
+                None => path.names.last().cloned().unwrap_or_default(),
+            };
+            let item = match self.kind() {
+                Kind::Identifier(name) => name.to_string(),
+                _ => "name".to_string(),
+            };
+            while !matches!(self.kind(), Kind::PuncCloseBrace | Kind::Eof) {
+                self.advance();
+            }
+            if self.kind() == Kind::PuncCloseBrace {
+                self.advance();
+            }
+            let list = self.span_from(list_start);
+            self.error_at(
+                list,
+                format!(
+                    "Import the module and name it at the use: `import {path}`, then `{qualifier}.{item}`"
+                ),
+            );
         }
 
         Ok(ast::Statement::ImportDeclaration(ast::ImportDeclaration {
-            path: ast::ImportPath { leading, names },
+            path,
             alias,
-            items,
             path_span,
             span: self.span_from(import_span),
         }))
@@ -2996,7 +3007,6 @@ mod tests {
     fn test_import_pub() {
         assert_no_errors("import scarlet/json");
         assert_no_errors("import scarlet/json as j");
-        assert_no_errors("import scarlet/json.{a, B, c as d}");
         assert_no_errors("import ./helper");
         assert_no_errors("import ../shared/auth");
         assert_no_errors("pub fn f() { 1 }");
@@ -3010,6 +3020,24 @@ mod tests {
                 .iter()
                 .any(|d| d.message.contains("precede"))
         );
+    }
+
+    /// There is no `import m.{x}`: the error says what to write instead, named
+    /// through the alias when there is one.
+    #[test]
+    fn a_named_import_says_to_qualify_the_use() {
+        // One error, not a cascade: the list is skipped and the import kept.
+        let error = |src: &str| {
+            let result = parse(src);
+            assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
+            result.diagnostics[0].message.clone()
+        };
+        let message = error("import scarlet/list.{fold, map as m}\nx = 1");
+        assert!(message.contains("`import scarlet/list`"), "{message}");
+        assert!(message.contains("`list.fold`"), "{message}");
+        let message = error("import ./lib as l.{x}");
+        assert!(message.contains("`import ./lib`"), "{message}");
+        assert!(message.contains("`l.x`"), "{message}");
     }
 
     #[test]

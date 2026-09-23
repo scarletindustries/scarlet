@@ -1,46 +1,36 @@
 // An HTTP server and a hand-written client for it, in one program.
 
 import scarlet/array
-import scarlet/binary.{Dec}
-import scarlet/http.{Post, Request, Response}
-import scarlet/http/body.{
-	Body,
-	Chunk,
-	Complete,
-	DrainError,
-	Drained,
-	Overran,
-	Short,
-	SinkFailed,
-	SourceFailed,
-}
-import scarlet/http/h1.{Done, Length, NeedMore, Parsed}
-import scarlet/http/headers.{Header, Headers}
+import scarlet/binary
+import scarlet/http
+import scarlet/http/body
+import scarlet/http/h1
+import scarlet/http/headers
 import scarlet/int
-import scarlet/net.{Server}
+import scarlet/net
 import scarlet/net/address
-import scarlet/net/error.{NetError, UnexpectedEof}
-import scarlet/net/socket.{Closed, Data, Socket}
+import scarlet/net/error
+import scarlet/net/socket
 import scarlet/process
 import scarlet/result
 import scarlet/string
-import scarlet/time.{Instant}
+import scarlet/time
 
 const MAX_BODY = 8192
 
 // The server half.
 
-fn route(req Request) Response {
+fn route(req http.Request) http.Response {
 	match (req.method, http.path(req)) {
 		(_, <<'/'>>) -> http.text('root')
 		// http.ok has no known length, so it goes out chunked.
 		(_, <<'/stream'>>) -> http.ok(body.from_binary(<<'streamed'>>))
-		(Post, <<'/echo'>>) -> echo_reply(body.collect(req.body, MAX_BODY) or <<>>)
+		(http.Post, <<'/echo'>>) -> echo_reply(body.collect(req.body, MAX_BODY) or <<>>)
 		_ -> http.not_found()
 	}
 }
 
-fn echo_reply(bytes Binary) Response {
+fn echo_reply(bytes Binary) http.Response {
 	match binary.to_string(bytes) {
 		Ok(text) -> http.text('echo: ${text}')
 		Err(Nil) -> http.text('echo: <not utf-8>')
@@ -50,10 +40,10 @@ fn echo_reply(bytes Binary) Response {
 // The client half.
 
 // Connection: close makes the end of the stream the end of the response.
-fn read_to_close(conn Socket, acc Binary) Binary {
+fn read_to_close(conn socket.Socket, acc Binary) Binary {
 	match socket.read(conn, 65536) {
-		Ok(Data(bytes)) -> read_to_close(conn, binary.append(acc, bytes))
-		Ok(Closed) -> acc
+		Ok(socket.Data(bytes)) -> read_to_close(conn, binary.append(acc, bytes))
+		Ok(socket.Closed) -> acc
 		Err(_) -> acc
 	}
 }
@@ -89,46 +79,46 @@ const NAME_TE = <<'Transfer-Encoding'>>
 const VAL_CHUNKED = <<'chunked'>>
 
 fn fixed_head(n Int) Binary {
-	length = Header(name: NAME_LENGTH, value: binary.from_int_ascii(n, Dec))
+	length = headers.Header(name: NAME_LENGTH, value: binary.from_int_ascii(n, binary.Dec))
 	h1.serialize_head(200, [length])
 }
 
 fn chunked_head() Binary {
-	h1.serialize_head(200, [Header(name: NAME_TE, value: VAL_CHUNKED)])
+	h1.serialize_head(200, [headers.Header(name: NAME_TE, value: VAL_CHUNKED)])
 }
 
 // A Body is a thunk that yields one chunk and the rest.
-fn two_chunks() Body {
-	fn() Ok(Chunk(<<'first '>>, body.from_binary(<<'second'>>)))
+fn two_chunks() body.Body {
+	fn() Ok(body.Chunk(<<'first '>>, body.from_binary(<<'second'>>)))
 }
 
-fn budget_body() Body {
-	fn() Ok(Chunk(<<'five!'>>, body.from_binary(<<'more'>>)))
+fn budget_body() body.Body {
+	fn() Ok(body.Chunk(<<'five!'>>, body.from_binary(<<'more'>>)))
 }
 
-fn sent(what String, r Result(Nil, DrainError)) Nil {
+fn sent(what String, r Result(Nil, body.DrainError)) Nil {
 	match r {
 		Ok(Nil) -> Nil
-		Err(SourceFailed(e)) -> println('${what}: source failed: ${string.inspect(e)}')
-		Err(SinkFailed(e)) -> println('${what}: sink failed: ${string.inspect(e)}')
+		Err(body.SourceFailed(e)) -> println('${what}: source failed: ${string.inspect(e)}')
+		Err(body.SinkFailed(e)) -> println('${what}: sink failed: ${string.inspect(e)}')
 	}
 }
 
-fn counted(what String, r Result(Drained, DrainError)) Nil {
+fn counted(what String, r Result(body.Drained, body.DrainError)) Nil {
 	match r {
-		Ok(Complete) -> println('${what}: Complete')
-		Ok(Short(written)) -> println('${what}: Short(${written})')
-		Ok(Overran(written)) -> println('${what}: Overran(${written})')
-		Err(SourceFailed(e)) -> println('${what}: source failed: ${string.inspect(e)}')
-		Err(SinkFailed(e)) -> println('${what}: sink failed: ${string.inspect(e)}')
+		Ok(body.Complete) -> println('${what}: Complete')
+		Ok(body.Short(written)) -> println('${what}: Short(${written})')
+		Ok(body.Overran(written)) -> println('${what}: Overran(${written})')
+		Err(body.SourceFailed(e)) -> println('${what}: source failed: ${string.inspect(e)}')
+		Err(body.SinkFailed(e)) -> println('${what}: sink failed: ${string.inspect(e)}')
 	}
 }
 
-fn read_head(sock Socket, buf Binary, deadline Instant) Result((Binary, Parsed), NetError) {
+fn read_head(sock socket.Socket, buf Binary, deadline time.Instant) Result((Binary, h1.Parsed), error.NetError) {
 	match h1.parse_request(buf, 0) {
-		NeedMore -> match socket.read_until(sock, HEAD_READ, deadline) {
-			Ok(Data(chunk)) -> read_head(sock, binary.append(buf, chunk), deadline)
-			Ok(Closed) -> Err(UnexpectedEof)
+		h1.NeedMore -> match socket.read_until(sock, HEAD_READ, deadline) {
+			Ok(socket.Data(chunk)) -> read_head(sock, binary.append(buf, chunk), deadline)
+			Ok(socket.Closed) -> Err(error.UnexpectedEof)
 			Err(e) -> Err(e)
 		}
 		parsed -> Ok((buf, parsed))
@@ -137,14 +127,14 @@ fn read_head(sock Socket, buf Binary, deadline Instant) Result((Binary, Parsed),
 
 // One deadline for the whole body, so a slow peer cannot reset the clock.
 fn read_body(
-	sock Socket,
+	sock socket.Socket,
 	buf Binary,
 	consumed Int,
-	hs Headers,
-	deadline Instant,
-) Result(Binary, NetError) {
+	hs headers.Headers,
+	deadline time.Instant,
+) Result(Binary, error.NetError) {
 	match h1.framing(hs) {
-		Length(n) -> {
+		h1.Length(n) -> {
 			avail = binary.byte_size(buf) - consumed
 			buffered = int.min(avail, n)
 			head_bytes = binary.slice_bytes(buf, consumed, buffered) or <<>>
@@ -155,7 +145,7 @@ fn read_body(
 	}
 }
 
-fn respond(sock Socket, target Binary, payload Binary) Nil {
+fn respond(sock socket.Socket, target Binary, payload Binary) Nil {
 	match target {
 		<<'/pump'>> -> {
 			bin = binary.from_string('pumped ${binary.byte_size(payload)} bytes')
@@ -188,17 +178,17 @@ fn respond(sock Socket, target Binary, payload Binary) Nil {
 	}
 }
 
-fn serve_raw(sock Socket) Nil {
+fn serve_raw(sock socket.Socket) Nil {
 	deadline = time.add_ms(time.monotonic(), DEADLINE_MS)
 	match read_head(sock, <<>>, deadline) {
-		Ok((buf, Done(target: t, headers: hs, consumed: c, ..))) ->
+		Ok((buf, h1.Done(target: t, headers: hs, consumed: c, ..))) ->
 			respond(sock, t, read_body(sock, buf, c, hs, deadline) or <<>>)
 		_ -> Nil
 	}
 	socket.close(sock) or Nil
 }
 
-fn accept_loop(server Server) Nil {
+fn accept_loop(server net.Server) Nil {
 	match net.accept(server) {
 		Ok(Some(sock)) -> {
 			_ = process.spawn(fn() serve_raw(sock))
@@ -214,14 +204,14 @@ fn pump_payload() String {
 }
 
 // Listens on a spare loopback port, then runs the rest of the caller's block.
-fn bind_loopback(next fn(Int, Server) Nil) Nil {
+fn bind_loopback(next fn(Int, net.Server) Nil) Nil {
 	match loopback() {
 		Ok((port, server)) -> next(port, server)
 		Err(why) -> println(why)
 	}
 }
 
-fn loopback() Result((Int, Server), String) {
+fn loopback() Result((Int, net.Server), String) {
 	server <- result.then(result.map_err(net.listen('127.0.0.1', 0), fn(e) 'listen failed: ${e}'))
 	addr <- result.then(result.map_err(net.local_addr(server), fn(e) 'local_addr failed: ${e}'))
 	Ok((address.port(addr), server))

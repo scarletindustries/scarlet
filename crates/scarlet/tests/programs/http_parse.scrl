@@ -16,24 +16,13 @@ import scarlet/binary
 import scarlet/result
 import scarlet/string
 import scarlet/array
-import scarlet/http/h1.{
-	Done,
-	NeedMore,
-	Bad,
-	NoBody,
-	Length,
-	Chunked,
-	Invalid,
-	ChunkedDone,
-	ChunkedNeedMore,
-	ChunkedBad,
-}
+import scarlet/http/h1
 // Deliberately NOT importing `Done` from scarlet/http/body — it would clash with
 // h1's Parsed.Done. Body's terminator is matched qualified, as `body.Done`.
-import scarlet/http/body.{Body, Chunk, Empty, Whole, Streaming}
-import scarlet/http/headers.{Header, BadName, BadValue}
+import scarlet/http/body
+import scarlet/http/headers
 import scarlet/http/status
-import scarlet/net/error.{UnexpectedEof}
+import scarlet/net/error
 
 fn str(b Binary) String {
 	binary.to_string(b) or '<not utf8>'
@@ -88,49 +77,49 @@ fn grow(b Binary, n Int) Binary {
 
 fn show_parse(label String, input Binary) Nil {
 	out = match h1.parse_request(input, 0) {
-		Done(method, target, version, hdrs, _, consumed) ->
+		h1.Done(method, target, version, hdrs, _, consumed) ->
 			'Done method=${str(
 				method,
 			)} target=${str(
 				target,
 			)} version=${version} headers=${array.length(hdrs)} consumed=${consumed}'
-		NeedMore -> 'NeedMore'
-		Bad(status_code) -> 'Bad ${status_code}'
+		h1.NeedMore -> 'NeedMore'
+		h1.Bad(status_code) -> 'Bad ${status_code}'
 	}
 	println('${label}: ${out}')
 }
 
 fn show_framing(label String, input Binary) Nil {
 	out = match h1.parse_request(input, 0) {
-		Done(_, _, _, hdrs, _, _) -> match h1.framing(hdrs) {
-			NoBody -> 'NoBody'
-			Length(n) -> 'Length ${n}'
-			Chunked -> 'Chunked'
-			Invalid(s) -> 'Invalid ${s}'
+		h1.Done(_, _, _, hdrs, _, _) -> match h1.framing(hdrs) {
+			h1.NoBody -> 'NoBody'
+			h1.Length(n) -> 'Length ${n}'
+			h1.Chunked -> 'Chunked'
+			h1.Invalid(s) -> 'Invalid ${s}'
 		}
-		NeedMore -> 'parse: NeedMore'
-		Bad(s) -> 'parse: Bad ${s}'
+		h1.NeedMore -> 'parse: NeedMore'
+		h1.Bad(s) -> 'parse: Bad ${s}'
 	}
 	println('${label}: ${out}')
 }
 
 fn show_chunked(label String, input Binary, max Int) Nil {
 	out = match h1.chunk_decode(input, 0, max) {
-		ChunkedDone(decoded, trailers, consumed) ->
+		h1.ChunkedDone(decoded, trailers, consumed) ->
 			'Done body=${q(decoded)} trailers=${array.length(trailers)} consumed=${consumed}'
-		ChunkedNeedMore -> 'NeedMore'
-		ChunkedBad(status_code) -> 'Bad ${status_code}'
+		h1.ChunkedNeedMore -> 'NeedMore'
+		h1.ChunkedBad(status_code) -> 'Bad ${status_code}'
 	}
 	println('${label}: ${out}')
 }
 
 // A header list as `['Name=value', ...]` — one golden line per list.
-fn show_headers(label String, hs Array(Header)) Nil {
+fn show_headers(label String, hs Array(headers.Header)) Nil {
 	parts = array.map(hs, fn(f) '${str(f.name)}=${str(f.value)}')
 	println('${label}: ${list(parts)}')
 }
 
-fn show_collect(label String, b Body, max Int) Nil {
+fn show_collect(label String, b body.Body, max Int) Nil {
 	out = match body.collect(b, max) {
 		Ok(data) -> 'Ok ${q(data)}'
 		Err(e) -> 'Err ${string.inspect(e)}'
@@ -203,7 +192,7 @@ pub fn main() {
 	dup = <<'GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n'>>
 	show_parse('duplicate host', dup)
 	match h1.parse_request(dup, 0) {
-		Done(_, _, _, hdrs, _, _) -> {
+		h1.Done(_, _, _, hdrs, _, _) -> {
 			first = match headers.get(hdrs, <<'host'>>) {
 				Some(v) -> str(v)
 				None -> 'missing'
@@ -220,7 +209,7 @@ pub fn main() {
 	nul_req = <<'GET / HTTP/1.1\r\nX-N: a\0b\r\n\r\n'>>
 	show_parse('nul in value parses', nul_req)
 	match h1.parse_request(nul_req, 0) {
-		Done(_, _, _, hdrs, _, _) -> println('nul in value: headers.valid = ${headers.valid(hdrs)}')
+		h1.Done(_, _, _, hdrs, _, _) -> println('nul in value: headers.valid = ${headers.valid(hdrs)}')
 		_ -> println('nul in value: parse failed')
 	}
 
@@ -230,7 +219,7 @@ pub fn main() {
 		'GET /path HTTP/1.1\r\nHost: example.com\r\nX-Custom: hello world\r\nCookie: a=1; b=2\r\n\r\n',
 	>>
 	match h1.parse_request(req, 0) {
-		Done(_, _, _, hdrs, _, _) -> {
+		h1.Done(_, _, _, hdrs, _, _) -> {
 			host = match headers.get(hdrs, <<'host'>>) {
 				Some(v) -> str(v)
 				None -> 'missing'
@@ -258,9 +247,9 @@ pub fn main() {
 	// same-named field is deleted. Two disagreeing Content-Lengths is a smuggling
 	// vector, so "replace the first, leave the rest" would be a bug, not a nicety.
 	mut_hdrs = [
-		Header(name: <<'Host'>>, value: <<'a'>>),
-		Header(name: <<'Set-Cookie'>>, value: <<'x=1'>>),
-		Header(name: <<'host'>>, value: <<'b'>>),
+		headers.Header(name: <<'Host'>>, value: <<'a'>>),
+		headers.Header(name: <<'Set-Cookie'>>, value: <<'x=1'>>),
+		headers.Header(name: <<'host'>>, value: <<'b'>>),
 	]
 	show_headers('before', mut_hdrs)
 	show_headers('set HOST=z (dedups, keeps casing)', headers.set(mut_hdrs, <<'HOST'>>, <<'z'>>))
@@ -279,8 +268,8 @@ pub fn main() {
 	show_field = fn(label String, name String, value String) {
 		out = match headers.field(binary.from_string(name), binary.from_string(value)) {
 			Ok(f) -> 'Ok ${q(f.name)}=${q(f.value)}'
-			Err(BadName(n)) -> 'Err BadName ${q(n)}'
-			Err(BadValue(v)) -> 'Err BadValue ${q(v)}'
+			Err(headers.BadName(n)) -> 'Err BadName ${q(n)}'
+			Err(headers.BadValue(v)) -> 'Err BadValue ${q(v)}'
 		}
 		println('${label}: ${out}')
 	}
@@ -294,27 +283,27 @@ pub fn main() {
 	show_field('lf in value', 'X-Ok', 'a\nb')
 	show_field('nul in value', 'X-Ok', 'a\0b')
 
-	show_valid = fn(label String, hs Array(Header)) println('${label}: ${headers.valid(hs)}')
+	show_valid = fn(label String, hs Array(headers.Header)) println('${label}: ${headers.valid(hs)}')
 	show_valid('valid: empty list', [])
 	show_valid(
 		'valid: token name + clean value',
-		[Header(name: <<'X-Ok!#\$%*+-.^_|~'>>, value: <<'fine'>>)],
+		[headers.Header(name: <<'X-Ok!#\$%*+-.^_|~'>>, value: <<'fine'>>)],
 	)
-	show_valid('invalid: colon in name', [Header(name: <<'X:Bad'>>, value: <<'v'>>)])
-	show_valid('invalid: lf in value', [Header(name: <<'X-Ok'>>, value: <<'a\nb'>>)])
+	show_valid('invalid: colon in name', [headers.Header(name: <<'X:Bad'>>, value: <<'v'>>)])
+	show_valid('invalid: lf in value', [headers.Header(name: <<'X-Ok'>>, value: <<'a\nb'>>)])
 	show_valid(
 		'invalid: one bad field among good',
-		[Header(name: <<'Good'>>, value: <<'1'>>), Header(name: <<'Bad Name'>>, value: <<'2'>>)],
+		[headers.Header(name: <<'Good'>>, value: <<'1'>>), headers.Header(name: <<'Bad Name'>>, value: <<'2'>>)],
 	)
 
 	println('')
 	println('== pipelined requests ==')
 	pipelined = <<'GET /first HTTP/1.1\r\nHost: a\r\n\r\nGET /second HTTP/1.1\r\nHost: b\r\n\r\n'>>
 	match h1.parse_request(pipelined, 0) {
-		Done(_, target1, _, _, _, consumed1) -> {
+		h1.Done(_, target1, _, _, _, consumed1) -> {
 			println('first: ${str(target1)} (consumed ${consumed1})')
 			match h1.parse_request(pipelined, consumed1) {
-				Done(_, target2, _, _, _, consumed2) ->
+				h1.Done(_, target2, _, _, _, consumed2) ->
 					println('second: ${str(target2)} (consumed ${consumed2})')
 				_ -> println('second parse failed')
 			}
@@ -418,17 +407,17 @@ pub fn main() {
 		'POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\nGET /after HTTP/1.1\r\n\r\n',
 	>>
 	match h1.parse_request(chunked_req, 0) {
-		Done(_, target1, _, hdrs1, _, head_end) -> {
+		h1.Done(_, target1, _, hdrs1, _, head_end) -> {
 			f = match h1.framing(hdrs1) {
-				Chunked -> 'chunked'
+				h1.Chunked -> 'chunked'
 				_ -> 'other'
 			}
 			println('head: target=${str(target1)} framing=${f} consumed=${head_end}')
 			match h1.chunk_decode(chunked_req, head_end, 1048576) {
-				ChunkedDone(decoded, _, body_end) -> {
+				h1.ChunkedDone(decoded, _, body_end) -> {
 					println('body: ${str(decoded)} (ends at ${body_end})')
 					match h1.parse_request(chunked_req, body_end) {
-						Done(_, target2, _, _, _, _) ->
+						h1.Done(_, target2, _, _, _, _) ->
 							println('next pipelined request: ${str(target2)}')
 						_ -> println('next request parse failed')
 					}
@@ -448,7 +437,7 @@ pub fn main() {
 	old_both = <<'GET / HTTP/1.0\r\nConnection: close, keep-alive\r\n\r\n'>>
 	expect = <<'POST / HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n'>>
 	show_close = fn(label String, req2 Binary) match h1.parse_request(req2, 0) {
-		Done(_, _, version, _, flags, _) ->
+		h1.Done(_, _, version, _, flags, _) ->
 			println(
 				'${label}: close=${h1.should_close(
 					version,
@@ -467,9 +456,9 @@ pub fn main() {
 	println('')
 	println('== token list lookup ==')
 	list_hdrs = [
-		Header(name: <<'Connection'>>, value: <<'a,,b'>>),
-		Header(name: <<'X-Empty'>>, value: <<''>>),
-		Header(name: <<'X-Trailing'>>, value: <<'gzip,'>>),
+		headers.Header(name: <<'Connection'>>, value: <<'a,,b'>>),
+		headers.Header(name: <<'X-Empty'>>, value: <<''>>),
+		headers.Header(name: <<'X-Trailing'>>, value: <<'gzip,'>>),
 	]
 	show_token = fn(label String, name String, token String) {
 		got = headers.contains_token(list_hdrs, binary.from_string(name), binary.from_string(token))
@@ -493,8 +482,8 @@ pub fn main() {
 	println('')
 	println('== response head serialization ==')
 	resp_headers = [
-		Header(name: <<'Content-Type'>>, value: <<'text/plain'>>),
-		Header(name: <<'Content-Length'>>, value: <<'5'>>),
+		headers.Header(name: <<'Content-Type'>>, value: <<'text/plain'>>),
+		headers.Header(name: <<'Content-Length'>>, value: <<'5'>>),
 	]
 	println('200 + two fields: ${vis(h1.serialize_head(200, resp_headers))}')
 	println('404 + no fields: ${vis(h1.serialize_head(404, []))}')
@@ -505,7 +494,7 @@ pub fn main() {
 	println('== sans-IO bodies ==')
 	match body.pull(body.empty()) {
 		Ok(body.Done(trailers)) -> println('empty body: Done trailers=${array.length(trailers)}')
-		Ok(Chunk(_, _)) -> println('empty body: Chunk?!')
+		Ok(body.Chunk(_, _)) -> println('empty body: Chunk?!')
 		Err(e) -> println('empty body: Err ${string.inspect(e)}')
 	}
 	show_collect('from_binary round-trip', body.from_binary(<<'hello'>>), 1024)
@@ -515,18 +504,18 @@ pub fn main() {
 	show_collect('collect past max', body.from_binary(<<'hello'>>), 3)
 
 	// A bare closure IS a Body — the alias is transparent, so no wrapper is needed.
-	two_chunks = fn() Ok(Chunk(<<'ab'>>, fn() Ok(Chunk(<<'cd'>>, body.empty()))))
+	two_chunks = fn() Ok(body.Chunk(<<'ab'>>, fn() Ok(body.Chunk(<<'cd'>>, body.empty()))))
 	show_collect('hand-written two-chunk body', two_chunks, 1024)
-	show_collect('failing body propagates', fn() Err(UnexpectedEof), 1024)
+	show_collect('failing body propagates', fn() Err(error.UnexpectedEof), 1024)
 
 	three_chunks = fn() Ok(
-		Chunk(<<'ab'>>, fn() Ok(Chunk(<<'cd'>>, fn() Ok(Chunk(<<'ef'>>, body.empty()))))),
+		body.Chunk(<<'ab'>>, fn() Ok(body.Chunk(<<'cd'>>, fn() Ok(body.Chunk(<<'ef'>>, body.empty()))))),
 	)
-	show_buffered = fn(label String, b Body) {
+	show_buffered = fn(label String, b body.Body) {
 		out = match body.take_buffered(b) {
-			Ok(Empty) -> 'Empty'
-			Ok(Whole(data)) -> 'Whole ${q(data)}'
-			Ok(Streaming(first, second, rest)) -> {
+			Ok(body.Empty) -> 'Empty'
+			Ok(body.Whole(data)) -> 'Whole ${q(data)}'
+			Ok(body.Streaming(first, second, rest)) -> {
 				tail = match body.collect(rest, 1024) {
 					Ok(data) -> q(data)
 					Err(e) -> 'Err ${string.inspect(e)}'
@@ -540,7 +529,7 @@ pub fn main() {
 	show_buffered('take_buffered empty', body.empty())
 	show_buffered('take_buffered whole', body.from_binary(<<'hello'>>))
 	show_buffered('take_buffered streaming', three_chunks)
-	show_buffered('take_buffered of failing body', fn() Err(UnexpectedEof))
+	show_buffered('take_buffered of failing body', fn() Err(error.UnexpectedEof))
 
 	// `probe` pulls the first step without consuming it: the body it hands back
 	// replays that step, so a caller can learn the source produces BEFORE committing
@@ -549,7 +538,7 @@ pub fn main() {
 		Ok(replayed) -> show_collect('collect after probe', replayed, 1024)
 		Err(e) -> println('collect after probe: Err ${string.inspect(e)}')
 	}
-	match body.probe(fn() Err(UnexpectedEof)) {
+	match body.probe(fn() Err(error.UnexpectedEof)) {
 		Ok(_) -> println('probe of failing body: Ok?!')
 		Err(e) -> println('probe of failing body: Err ${string.inspect(e)}')
 	}
@@ -560,7 +549,7 @@ pub fn main() {
 	shown = array.map(methods, fn(name) {
 		req3 = <<'${name} / HTTP/1.1\r\n\r\n'>>
 		match h1.parse_request(req3, 0) {
-			Done(m, _, _, _, _, _) -> match m {
+			h1.Done(m, _, _, _, _, _) -> match m {
 				<<'GET'>> -> 'Get'
 				<<'POST'>> -> 'Post'
 				<<'PUT'>> -> 'Put'

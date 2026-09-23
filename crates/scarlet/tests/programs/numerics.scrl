@@ -12,8 +12,8 @@
 //   Decimal is exact scaled-integer arithmetic; its `eq` compares *numbers*
 //         where the built-in `==` compares the representation.
 
-import scarlet/binary.{Dec, Hex}
-import scarlet/decimal.{Down, Floor, HalfUp}
+import scarlet/binary
+import scarlet/decimal
 import scarlet/float
 import scarlet/int
 import scarlet/result
@@ -25,16 +25,16 @@ import scarlet/string
 // which is strict: it rejects a sign, an empty string and trailing junk. Any
 // run of digits fits, since an Int has no bounds.
 fn parse_int(s String) Result(Int, Nil) {
-	binary.parse_int(binary.from_string(s), Dec)
+	binary.parse_int(binary.from_string(s), binary.Dec)
 }
 
 fn parse_signed(s String) Result(Int, Nil) {
 	b = binary.from_string(s)
 	if binary.byte_size(b) > 0 && binary.byte_at(b, 0) == 45 {
 		rest = binary.drop_bytes(b, 1)
-		result.map(binary.parse_int(rest, Dec), fn(n) -n)
+		result.map(binary.parse_int(rest, binary.Dec), fn(n) -n)
 	} else {
-		binary.parse_int(b, Dec)
+		binary.parse_int(b, binary.Dec)
 	}
 }
 
@@ -123,8 +123,8 @@ pub fn main() {
 	println('from_string: ${string.inspect(int.from_string('42'))} ${string.inspect(int.from_string('-42'))} ${string.inspect(int.from_string('+7'))}')
 	println('from_string rejects: ${string.inspect(int.from_string(''))} ${string.inspect(int.from_string('12abc'))} ${string.inspect(int.from_string(' 1'))}')
 	println('from_string min round trip: ${string.inspect(int.from_string(int.to_string(int.min_value)))}')
-	println('hex: ${string.inspect(binary.to_string(binary.from_int_ascii(255, Hex)))}')
-	println('hex parse: ${string.inspect(binary.parse_int(<<'ff'>>, Hex))}')
+	println('hex: ${string.inspect(binary.to_string(binary.from_int_ascii(255, binary.Hex)))}')
+	println('hex parse: ${string.inspect(binary.parse_int(<<'ff'>>, binary.Hex))}')
 
 	// --- Decimal --------------------------------------------------------------
 
@@ -147,10 +147,10 @@ pub fn main() {
 	up_tie = decimal.to_string(decimal.round(decimal.new(2355, 3), 2))
 	println('round half even: ${down_tie} ${up_tie}')
 	println(
-		'round half up: ${decimal.to_string(decimal.round_with(decimal.new(2345, 3), 2, HalfUp))}',
+		'round half up: ${decimal.to_string(decimal.round_with(decimal.new(2345, 3), 2, decimal.HalfUp))}',
 	)
-	toward_zero = decimal.round_with(decimal.new(-2349, 3), 2, Down)
-	toward_neg_inf = decimal.round_with(decimal.new(-2341, 3), 2, Floor)
+	toward_zero = decimal.round_with(decimal.new(-2349, 3), 2, decimal.Down)
+	toward_neg_inf = decimal.round_with(decimal.new(-2341, 3), 2, decimal.Floor)
 	println('round toward zero: ${decimal.to_string(toward_zero)}')
 	println('round toward -inf: ${decimal.to_string(toward_neg_inf)}')
 

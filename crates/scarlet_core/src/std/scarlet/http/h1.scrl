@@ -1,4 +1,4 @@
-import scarlet/http/headers.{Headers}
+import scarlet/http/headers
 import scarlet/http/status
 
 // Sans-IO HTTP/1.1 message parsing, framing, and response-head serialization.
@@ -65,7 +65,7 @@ pub type Parsed {
 		method Binary
 		target Binary
 		version Version
-		headers Headers
+		headers headers.Headers
 		flags HeadFlags
 		consumed Int
 	)
@@ -92,7 +92,7 @@ pub type Framing {
 // decoded body, any trailer fields, and the offset just past the final CRLF —
 // the start of the next pipelined request.
 pub type ChunkBody {
-	ChunkedDone(body Binary, trailers Headers, consumed Int)
+	ChunkedDone(body Binary, trailers headers.Headers, consumed Int)
 	ChunkedNeedMore
 	ChunkedBad(status Int)
 }
@@ -132,7 +132,7 @@ pub type ParsedResponse {
 		version Version
 		code Int
 		reason Binary
-		headers Headers
+		headers headers.Headers
 		flags HeadFlags
 		consumed Int
 	)
@@ -182,7 +182,7 @@ pub fn parse_request(buf Binary, off Int) Parsed
 // digits / is past 9223372036854775807 / carries a redundant leading zero
 // ("007"), are all rejected (400).
 @vm(http__framing)
-pub fn framing(hs Headers) Framing
+pub fn framing(hs headers.Headers) Framing
 
 // Parse a response head out of `buf` starting at `off`. Incomplete input
 // yields ResponseNeedMore (read more and call again with the SAME offset); a
@@ -215,7 +215,7 @@ pub fn parse_response(buf Binary, off Int) ParsedResponse
 // it is framed — is deliberately NOT here: h1 never sees the request, and
 // taking a bare `Bool` for it would let a caller answer the wrong question
 // silently. The client that sent the method applies that rule itself.
-pub fn response_framing(hs Headers, code Int) ResponseFraming {
+pub fn response_framing(hs headers.Headers, code Int) ResponseFraming {
 	if code >= 100 && code < 200 || code == 204 || code == 304 {
 		BodyNone
 	} else {
@@ -248,9 +248,9 @@ pub fn chunk_decode(buf Binary, off Int, max Int) ChunkBody
 // that terminates the head. Native single-buffer assembly so the head can be
 // the first part of one vectored write alongside the body.
 @vm(http__serialize_head)
-fn serialize_head_with(code Int, reason Binary, hs Headers) Binary
+fn serialize_head_with(code Int, reason Binary, hs headers.Headers) Binary
 
-pub fn serialize_head(code Int, hs Headers) Binary {
+pub fn serialize_head(code Int, hs headers.Headers) Binary {
 	serialize_head_with(code, status.reason_phrase(code), hs)
 }
 

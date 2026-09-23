@@ -3,7 +3,6 @@
 // as a FAIL line, not as an unexplained value.
 
 import scarlet/decimal
-import scarlet/decimal.{Rounding, Down}
 
 fn check(name String, expected String, actual String) Nil {
 	if expected == actual {
@@ -128,10 +127,10 @@ fn shape_name(s Shape) String {
 
 // A constructor reached through its module qualifier, and the same
 // constructor imported by name — both denote one constructor.
-fn rounding_name(m Rounding) String {
+fn rounding_name(m decimal.Rounding) String {
 	match m {
 		decimal.HalfUp -> 'half-up'
-		Down -> 'down'
+		decimal.Down -> 'down'
 		_ -> 'other'
 	}
 }
@@ -284,7 +283,7 @@ pub fn main() {
 	check('ctor rest pattern', 'rect', shape_name(Rect(width: 1, height: 1)))
 
 	check('qualified ctor pattern', 'half-up', rounding_name(decimal.HalfUp))
-	check('imported ctor pattern', 'down', rounding_name(Down))
+	check('imported ctor pattern', 'down', rounding_name(decimal.Down))
 
 	check('literal in ctor payload', 'blank', triage(Text(body: '')))
 	check('binding after literal arm', 'text hi', triage(Text(body: 'hi')))

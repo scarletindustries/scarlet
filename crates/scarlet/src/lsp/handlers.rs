@@ -276,7 +276,7 @@ impl Workspace {
                     // positional edit order, so re-sort.
                     let mut added = false;
                     let stable = graph
-                        .canonical_definition(defid)
+                        .definition(defid)
                         .and_then(|d| crate::lsp::xrefs::StableDefId::of(graph, &uri, d));
                     for x in stable.iter().flat_map(|s| self.dependent_callers(&uri, s)) {
                         let edits = we.changes.entry(x.uri.clone()).or_default();

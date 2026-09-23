@@ -1,6 +1,6 @@
 # Visibility: what `pub` means, and why there is no `@internal`
 
-**A value is `pub` or it is private to the module it is written in, and there is nothing in between.** `export_value`/`export_type` in `crates/scarlet_core/src/bytecode/analysis.rs` are the whole of the rule: a `pub` name goes into the module interface's `values`/`types`, and anything else goes into `private_names`, so an importer gets `'X' is private in module 'Y'` rather than "no member 'X'". The three sites that read `private_names` — selective import, qualified member access, and qualified constructor patterns — are the only places visibility is enforced.
+**A value is `pub` or it is private to the module it is written in, and there is nothing in between.** `export_value`/`export_type` in `crates/scarlet_core/src/bytecode/analysis.rs` are the whole of the rule: a `pub` name goes into the module interface's `values`/`types`, and anything else goes into `private_names`, so an importer gets `'X' is private in module 'Y'` rather than "no member 'X'". The two sites that read `private_names`, qualified member access and qualified constructor patterns, are the only places visibility is enforced.
 
 A *type* has one more state: `pub opaque` publishes the type and withholds its constructors (`ctors_public = is_public && !opaque`). That is the tool for making a value unforgeable and unreadable from outside. It says nothing about who may call the functions beside it, which is where `@internal` would come in.
 

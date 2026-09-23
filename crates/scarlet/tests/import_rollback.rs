@@ -1,7 +1,7 @@
-//! Regression: an `IncrementalSession` must roll back the entry file's
-//! selective-import bindings between checks. `env.type_info` is a flat map, so
-//! a binding left above the `last_entry` watermark keeps resolving after the
-//! import is removed or renamed.
+//! Regression: an `IncrementalSession` must roll back the types the entry
+//! file's imports register (`lib.Color` for `import ./lib`) between checks.
+//! `env.type_info` is a flat map, so a binding left above the `last_entry`
+//! watermark keeps resolving after the import is removed or renamed.
 
 mod common;
 use common::{Project, checked_with, recheck};
@@ -23,33 +23,33 @@ fn assert_import_rolled_back(tag: &str, entry1: &str, entry2: &str, expected_dia
 }
 
 #[test]
-fn removed_selective_type_import_stops_resolving() {
+fn removed_import_stops_its_types_resolving() {
     assert_import_rolled_back(
         "importrollback",
-        "import ./lib.{Color}\npub fn paint(_c Color) Int { 1 }\n",
-        "pub fn paint(_c Color) Int { 1 }\n",
-        "Unknown type 'Color'",
+        "import ./lib\npub fn paint(_c lib.Color) Int { 1 }\n",
+        "pub fn paint(_c lib.Color) Int { 1 }\n",
+        "Unknown type 'lib.Color'",
     );
 }
 
 #[test]
-fn removed_aliased_type_import_stops_resolving() {
+fn renamed_import_stops_its_old_types_resolving() {
     assert_import_rolled_back(
         "importrollbackalias",
-        "import ./lib.{Color as Hue}\npub fn paint(_c Hue) Int { 1 }\n",
-        "pub fn paint(_c Hue) Int { 1 }\n",
-        "Unknown type 'Hue'",
+        "import ./lib as hue\npub fn paint(_c hue.Color) Int { 1 }\n",
+        "import ./lib as tint\npub fn paint(_c hue.Color) Int { 1 }\n",
+        "Unknown type 'hue.Color'",
     );
 }
 
 #[test]
-fn kept_selective_type_import_keeps_resolving_across_checks() {
-    // The rollback drops `Color` between checks, so each check must re-bind it
-    // from the cached module interface.
+fn kept_import_keeps_its_types_resolving_across_checks() {
+    // The rollback drops `lib.Color` between checks, so each check must
+    // re-bind it from the cached module interface.
     let p = Project::new("importrollbackkept");
     p.write("lib.scrl", "pub type Color { Color }\n");
 
-    let entry = "import ./lib.{Color}\npub fn paint(_c Color) Int { 1 }\n";
+    let entry = "import ./lib\npub fn paint(_c lib.Color) Int { 1 }\n";
     let mut s = checked_with(&p, entry);
     for i in 1..3 {
         let r = recheck(&mut s, &p, entry);

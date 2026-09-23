@@ -3,13 +3,11 @@
 // or a close, so the output is fixed.
 
 import scarlet/binary
-import scarlet/io.{NotFound}
-import scarlet/map.{Map}
+import scarlet/io
 import scarlet/map
-import scarlet/net/error.{NotConnected}
-import scarlet/net/socket.{Closed, Data}
+import scarlet/net/error
+import scarlet/net/socket
 import scarlet/os/port
-import scarlet/os/port.{Exited, Port, Signaled}
 import scarlet/process
 import scarlet/string
 
@@ -22,15 +20,15 @@ fn check(name String, ok Bool) Nil {
 }
 
 // Read until the child closes its stdout, accumulating.
-fn drain(p Port, acc Binary) Binary {
+fn drain(p port.Port, acc Binary) Binary {
 	match port.read(p, 4096) {
-		Ok(Data(b)) -> drain(p, binary.append(acc, b))
-		Ok(Closed) -> acc
+		Ok(socket.Data(b)) -> drain(p, binary.append(acc, b))
+		Ok(socket.Closed) -> acc
 		Err(_) -> acc
 	}
 }
 
-fn map_of(k String, v String) Map(String, String) {
+fn map_of(k String, v String) map.Map(String, String) {
 	map.set(map.new(), k, v)
 }
 
@@ -49,8 +47,8 @@ pub fn main() {
 				Err(_) -> True
 				Ok(_) -> False
 			})
-			check('close reports a clean exit', port.close(p) == Ok(Exited(0)))
-			check('closing again is NotConnected', port.close(p) == Err(NotConnected))
+			check('close reports a clean exit', port.close(p) == Ok(port.Exited(0)))
+			check('closing again is NotConnected', port.close(p) == Err(error.NotConnected))
 		}
 		Err(e) -> println('FAIL spawn cat: ${string.inspect(e)}')
 	}
@@ -60,8 +58,8 @@ pub fn main() {
 	match port.spawn('/bin/sh', ['-c', 'echo out; exit 3']) {
 		Ok(p) -> {
 			check('output is readable', drain(p, <<>>) == <<'out\n'>>)
-			check('read after exit is Closed', port.read(p, 10) == Ok(Closed))
-			check('close reports the exit code', port.close(p) == Ok(Exited(3)))
+			check('read after exit is Closed', port.read(p, 10) == Ok(socket.Closed))
+			check('close reports the exit code', port.close(p) == Ok(port.Exited(3)))
 		}
 		Err(e) -> println('FAIL spawn sh: ${string.inspect(e)}')
 	}
@@ -83,14 +81,14 @@ pub fn main() {
 
 	match port.spawn('sleep', ['30']) {
 		Ok(p) ->
-			check('a lingering child is terminated on close', port.close(p) == Ok(Signaled(15)))
+			check('a lingering child is terminated on close', port.close(p) == Ok(port.Signaled(15)))
 		Err(e) -> println('FAIL spawn sleep: ${string.inspect(e)}')
 	}
 
 	// --- a program that does not exist ------------------------------------------------
 
 	check('a missing program is NotFound', match port.spawn('/definitely/not/a/program', []) {
-		Err(NotFound(path)) -> path == '/definitely/not/a/program'
+		Err(io.NotFound(path)) -> path == '/definitely/not/a/program'
 		Err(_) -> False
 		Ok(_) -> False
 	})

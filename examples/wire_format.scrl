@@ -1,6 +1,6 @@
 // Bit syntax: `<<>>` builds and matches binaries field by field.
 
-import scarlet/binary.{Dec, Hex, Radix}
+import scarlet/binary
 import scarlet/result
 import scarlet/string
 
@@ -54,7 +54,7 @@ fn sample(payload Binary, eq Int, sp Int, gauge Bool) Result(Sample, Nil) {
 	name_bytes <- result.then(binary.slice_bytes(payload, 0, eq))
 	name <- result.then(binary.to_string(name_bytes))
 	digits <- result.then(binary.slice_bytes(payload, eq + 1, sp - eq - 1))
-	value <- result.then(binary.parse_int(digits, Dec))
+	value <- result.then(binary.parse_int(digits, binary.Dec))
 	unit <- result.then(binary.to_string(binary.drop_bytes(payload, sp + 1)))
 	Ok(Sample(name, value, unit, gauge))
 }
@@ -133,7 +133,7 @@ fn first_codepoint(b Binary) Option(Int) {
 	}
 }
 
-fn ascii(n Int, base Radix) String {
+fn ascii(n Int, base binary.Radix) String {
 	string.inspect(binary.from_int_ascii(n, base))
 }
 
@@ -223,13 +223,13 @@ pub fn main() {
 	println('byte_at 900:          ${binary.byte_at(headers, 900)}')
 
 	digits = binary.slice_bytes(headers, 16, 4)
-	println('parse_int(Dec):       ${result.then(digits, fn(b) binary.parse_int(b, Dec))}')
-	println('"ff" as Dec:          ${binary.parse_int(<<'ff'>>, Dec)}')
-	println('"ff" as Hex:          ${binary.parse_int(<<'ff'>>, Hex)}')
+	println('parse_int(Dec):       ${result.then(digits, fn(b) binary.parse_int(b, binary.Dec))}')
+	println('"ff" as Dec:          ${binary.parse_int(<<'ff'>>, binary.Dec)}')
+	println('"ff" as Hex:          ${binary.parse_int(<<'ff'>>, binary.Hex)}')
 
-	println('255 to Dec ascii:     ${ascii(255, Dec)}')
-	println('255 to Hex ascii:     ${ascii(255, Hex)}')
-	println('hex ascii round trip: ${binary.parse_int(binary.from_int_ascii(4210, Hex), Hex)}')
+	println('255 to Dec ascii:     ${ascii(255, binary.Dec)}')
+	println('255 to Hex ascii:     ${ascii(255, binary.Hex)}')
+	println('hex ascii round trip: ${binary.parse_int(binary.from_int_ascii(4210, binary.Hex), binary.Hex)}')
 
 	println('slice bits 0..4:      ${binary.slice_bits(headers, 0, 4)}')
 	println('slice bits 8000..8:   ${binary.slice_bits(headers, 8000, 8)}')

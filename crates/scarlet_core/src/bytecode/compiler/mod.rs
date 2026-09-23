@@ -56,8 +56,8 @@ use crate::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
 use crate::tivec::{Idx, TiVec};
 use crate::typed_ir::slots::{SlotError, slot_labeled};
 use crate::typed_ir::{
-    self, CaptureIdx, Denotation, ElabCtx, FnTable, FrameSlot, GlobalSlot, OrShape, PreludeTys,
-    RTy, ResolvedPool, TempTys, TypedExpr, TypedFn, TypedProgram, WalkStep, Zonker, pool_for,
+    self, CaptureIdx, Denotation, ElabCtx, FnTable, GlobalSlot, OrShape, PreludeTys, RTy,
+    ResolvedPool, TempTys, TypedExpr, TypedFn, TypedProgram, WalkStep, Zonker, pool_for,
 };
 use smallvec::SmallVec;
 
@@ -148,6 +148,16 @@ use clean::CleanModule;
 #[must_use]
 struct EntryToplevel {
     _priv: (),
+}
+
+/// Where [`Compiler::resolve_variable`] found a name.
+enum Place {
+    /// Bound in the function being compiled. The elaborator knows it by its
+    /// own `BindingId`, so it never asks where it is.
+    ThisFunction,
+    /// Reached from outside the function: a capture, a global, or the
+    /// function itself.
+    Outside(Denotation),
 }
 
 /// Why a nominal `.field` lookup failed. Carries enough of the offending
@@ -1780,18 +1790,17 @@ impl Compiler {
         }
     }
 
-    /// Where a name lives in the current frame, as the [`Denotation`] the typed
-    /// IR consumes. `None` when the frame does not bind it: a constructor, a
-    /// builtin, or (at a module toplevel) a declaration whose `locals` entry
-    /// `analyse_module` has already unwound.
-    fn resolve_variable(&mut self, name: StrId) -> Option<Denotation> {
+    /// Where a name in scope lives. `None` when nothing in scope binds it: a
+    /// constructor, a builtin, or (at a module toplevel) a declaration whose
+    /// `locals` entry `analyse_module` has already unwound.
+    fn resolve_variable(&mut self, name: StrId) -> Option<Place> {
         self.mark_used(name);
-        if let Some(entry) = self.locals.get(&name) {
-            return Some(Denotation::slot(FrameSlot(entry.slot)));
+        if self.locals.contains_key(&name) {
+            return Some(Place::ThisFunction);
         }
         if let Some(idx) = self.captures.get(&name) {
             debug_assert!(*idx >= 0, "capture index is a Vec index");
-            return Some(Denotation::capture(CaptureIdx(*idx)));
+            return Some(Place::Outside(Denotation::capture(CaptureIdx(*idx))));
         }
         // Search enclosing scopes innermost-first so inner bindings shadow
         // outer ones. The bottom of the stack (index 0) is always the entry
@@ -1819,19 +1828,21 @@ impl Compiler {
                     // slot so a value load emits `PushGlobal`; `PushSelf` would
                     // read the sentinel `captures` a `CallKnown` frame carries.
                     // `Denotation` fixes both halves together.
-                    return Some(if is_global {
+                    return Some(Place::Outside(if is_global {
                         Denotation::self_toplevel_fn(GlobalSlot(entry.slot))
                     } else {
                         Denotation::self_closure()
-                    });
+                    }));
                 }
                 if is_global {
-                    return Some(self.global_denotation(GlobalSlot(entry.slot)));
+                    return Some(Place::Outside(
+                        self.global_denotation(GlobalSlot(entry.slot)),
+                    ));
                 }
                 let capture_idx = self.capture_names.len() as i32;
                 self.captures.insert(name, capture_idx);
                 self.capture_names.push(name);
-                return Some(Denotation::capture(CaptureIdx(capture_idx)));
+                return Some(Place::Outside(Denotation::capture(CaptureIdx(capture_idx))));
             }
         }
         None
@@ -2096,7 +2107,7 @@ impl Compiler {
                 name,
                 doc,
                 false,
-                DefinitionKind::Value { alias_of: None },
+                DefinitionKind::Value,
             );
         }
     }
@@ -2528,136 +2539,6 @@ impl Compiler {
         }
 
         self.imported_qualifiers.insert(qualifier, key.clone());
-
-        // Per-item occurrences resolved through the imported module's
-        // interface. Collected with owned `DefinitionLocation`s / type names
-        // while `iface` borrows `module_table`, then turned into `DefId`s and
-        // recorded once that borrow has ended.
-        let mut item_refs: Vec<(Span, ReferenceKind, DefinitionLocation)> = Vec::new();
-        let mut type_item_refs: Vec<(Span, ReferenceKind, String)> = Vec::new();
-        for item in &imp.items {
-            let local_name = item
-                .alias
-                .as_ref()
-                .map(|a| a.name.clone())
-                .unwrap_or_else(|| item.name.name.clone());
-            let Some(iface) = self.module_table.get(&key) else {
-                continue;
-            };
-            // A record `type Foo {..}` exports *both* a same-named constructor
-            // value and the type itself. They are not mutually exclusive: bind
-            // and record each independently so importing the name serves
-            // value- *and* type-level resolution (goto-def / find-refs /
-            // rename) for both. Resolving the type via an `else if` after the
-            // value branch — as the old code did — made it unreachable for
-            // every record type, since the constructor value always matched
-            // first.
-            let val = iface.values.get(&item.name.name).cloned();
-            let typ = iface.types.get(&item.name.name).cloned();
-            let is_private = iface.private_names.contains(&item.name.name);
-            if let Some(ev) = val.clone() {
-                let vdef = ev.scheme.def;
-                // The `X` of `{X}` / `{X as Y}` always names the imported
-                // symbol, so it targets X's canonical def: goto-def chains to
-                // the real declaration and renaming X rewrites it. A binding
-                // token, not an evaluating use, hence `ImportItem`.
-                if let Some(dl) = vdef {
-                    item_refs.push((item.name.span, ReferenceKind::ImportItem, dl));
-                }
-                // An aliased item `{X as Y}` introduces a *new* local name Y.
-                // Mint Y its own DefId so its rename class is separate from X's:
-                // sharing X's def made renaming X rewrite Y's binder and every Y
-                // use to X's new name (name capture / broken compile), and made
-                // renaming a Y use escape into X's module. Y's env binding and the
-                // `Y` alias token target this local def; type/kind/slot are still
-                // inherited from X. The `Value` entity keeps it off the dead-code
-                // surface (the import's own unused-ness is reported on the
-                // `ModuleAlias`) and out of the symbol outline.
-                if let Some(a) = item.alias.as_ref() {
-                    let module = self.current_module_slice();
-                    let alias_dl = DefinitionLocation::new(a.span, module, EntityKind::Value);
-                    self.env.define(
-                        &local_name,
-                        Scheme {
-                            def: Some(alias_dl),
-                            ..ev.scheme
-                        },
-                    );
-                    let alias_defid = self.defid_of(alias_dl);
-                    let canonical = vdef.map(|dl| self.defid_of(dl));
-                    // goto-def / hover on Y chains to X's real declaration
-                    // via `alias_of`; rename and find-references stay on this
-                    // alias.
-                    let def = Definition::new(
-                        alias_defid.module,
-                        alias_defid.span,
-                        local_name.clone(),
-                        None,
-                        false,
-                        DefinitionKind::Value {
-                            alias_of: canonical,
-                        },
-                    );
-                    self.module_refs.add_definition(def);
-                    item_refs.push((a.span, ReferenceKind::Alias, alias_dl));
-                } else {
-                    self.env.define(&local_name, ev.scheme);
-                }
-                if let Some(slot) = ev.local_slot {
-                    let id = self.engine.intern(&local_name);
-                    self.bind_local(id, slot.0);
-                }
-            }
-            if let Some(et) = &typ {
-                // Bind the imported type unconditionally so annotation
-                // hydration resolves it through this module's env rather than
-                // residual global `type_info` left over from the dependency's
-                // own compile. Its canonical `Type` `DefId` is resolved
-                // (module-aware, after the loop) from the imported module's
-                // reference graph, never the constructor-clobbered
-                // `env.definitions`.
-                self.env.store_type_info(&local_name, et.info);
-                type_item_refs.push((
-                    item.name.span,
-                    ReferenceKind::ImportItem,
-                    item.name.name.clone(),
-                ));
-                if let Some(a) = item.alias.as_ref() {
-                    type_item_refs.push((a.span, ReferenceKind::Alias, item.name.name.clone()));
-                }
-            }
-            if val.is_none() && typ.is_none() {
-                if is_private {
-                    self.error(
-                        format!(
-                            "'{}' is private in module '{}'",
-                            item.name.name,
-                            self.module_name(&key)
-                        ),
-                        item.name.span,
-                    );
-                } else {
-                    self.error(
-                        format!(
-                            "Module '{}' has no member '{}'",
-                            self.module_name(&key),
-                            item.name.name
-                        ),
-                        item.name.span,
-                    );
-                }
-            }
-        }
-        for (occ, kind, dl) in item_refs {
-            let target = self.defid_of(dl);
-            self.record_ref(occ, kind, target);
-        }
-        for (occ, kind, tyname) in type_item_refs {
-            // The type's declaring module is the *resolved* file: looking it
-            // up under `imp.path` as written would miss the cache for a
-            // relative import and silently record nothing.
-            self.record_type_use(&canon, &tyname, occ, kind);
-        }
     }
 
     /// Load the module `path` names, relative to the *importing* module's

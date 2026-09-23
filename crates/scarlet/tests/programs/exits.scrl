@@ -3,7 +3,6 @@
 // which write to stderr, live in tests/vm_exits.rs.
 
 import scarlet/process
-import scarlet/process.{Down, Killed, NoProcess, Normal, Crashed, Pid, Subject}
 
 fn check(name String, ok Bool) Nil {
 	if ok {
@@ -13,18 +12,18 @@ fn check(name String, ok Bool) Nil {
 	}
 }
 
-fn reason(d Down) String {
+fn reason(d process.Down) String {
 	match d.reason {
-		Normal -> 'normal'
-		Killed -> 'killed'
-		NoProcess -> 'no process'
-		Crashed(_) -> 'crashed'
+		process.Normal -> 'normal'
+		process.Killed -> 'killed'
+		process.NoProcess -> 'no process'
+		process.Crashed(_) -> 'crashed'
 	}
 }
 
 // A child that stays alive until released, or until killed: its pid and its
 // release subject. `link` decides how it is spawned.
-fn parked(link Bool) (Pid, Subject(Nil)) {
+fn parked(link Bool) (process.Pid, process.Subject(Nil)) {
 	boot = process.subject()
 	pid = if link {
 		process.spawn(fn() wait_behind_gate(boot))
@@ -34,7 +33,7 @@ fn parked(link Bool) (Pid, Subject(Nil)) {
 	(pid, process.receive(boot))
 }
 
-fn wait_behind_gate(boot Subject(Subject(Nil))) Nil {
+fn wait_behind_gate(boot process.Subject(process.Subject(Nil))) Nil {
 	gate = process.subject()
 	process.send(boot, gate)
 	process.receive(gate)
@@ -45,15 +44,15 @@ fn wait_behind_gate(boot Subject(Subject(Nil))) Nil {
 // root -> middle -> leaf, all linked. Killing middle must end all three.
 
 type Tree {
-	Built(root Pid, middle Pid, leaf Pid)
-	Ended(who String, down Down)
+	Built(root process.Pid, middle process.Pid, leaf process.Pid)
+	Ended(who String, down process.Down)
 }
 
 fn wait_forever() Nil {
 	process.receive(process.subject())
 }
 
-fn collect(inbox Subject(Tree), left Int, killed Int) Int {
+fn collect(inbox process.Subject(Tree), left Int, killed Int) Int {
 	if left == 0 {
 		killed
 	} else {

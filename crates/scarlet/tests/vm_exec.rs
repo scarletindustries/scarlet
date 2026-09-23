@@ -261,14 +261,14 @@ run_case! {
     // `binary.parse_int` reads any run of digits exactly, since an Int has no
     // bounds, and refuses anything else.
     binary_parse_int: (
-        "import scarlet/binary.{Dec, Hex}\n\
+        "import scarlet/binary\n\
          pub fn main() {\n\
-         \tprintln(binary.parse_int(binary.from_string('255'), Dec))\n\
-         \tprintln(binary.parse_int(binary.from_string('ff'), Hex))\n\
-         \tprintln(binary.parse_int(binary.from_string('FF'), Hex))\n\
-         \tprintln(binary.parse_int(binary.from_string('99999999999999999999'), Dec))\n\
-         \tprintln(binary.parse_int(binary.from_string('12x'), Dec))\n\
-         \tprintln(binary.parse_int(binary.from_string(''), Dec))\n\
+         \tprintln(binary.parse_int(binary.from_string('255'), binary.Dec))\n\
+         \tprintln(binary.parse_int(binary.from_string('ff'), binary.Hex))\n\
+         \tprintln(binary.parse_int(binary.from_string('FF'), binary.Hex))\n\
+         \tprintln(binary.parse_int(binary.from_string('99999999999999999999'), binary.Dec))\n\
+         \tprintln(binary.parse_int(binary.from_string('12x'), binary.Dec))\n\
+         \tprintln(binary.parse_int(binary.from_string(''), binary.Dec))\n\
          }\n",
         "Ok(255)\nOk(255)\nOk(255)\nOk(99999999999999999999)\nErr(Nil)\nErr(Nil)\n",
     ),
@@ -316,13 +316,13 @@ run_case! {
 
     // Op::BinFromIntAscii: radix 10/16, lowercase hex, zero and negatives.
     binary_from_int_ascii: (
-        "import scarlet/binary.{Dec, Hex}\n\
+        "import scarlet/binary\n\
          pub fn main() {\n\
-         \tprintln(binary.to_string(binary.from_int_ascii(255, Dec)))\n\
-         \tprintln(binary.to_string(binary.from_int_ascii(255, Hex)))\n\
-         \tprintln(binary.to_string(binary.from_int_ascii(0, Dec)))\n\
-         \tprintln(binary.to_string(binary.from_int_ascii(0 - 42, Dec)))\n\
-         \tprintln(binary.parse_int(binary.from_int_ascii(4096, Hex), Hex))\n\
+         \tprintln(binary.to_string(binary.from_int_ascii(255, binary.Dec)))\n\
+         \tprintln(binary.to_string(binary.from_int_ascii(255, binary.Hex)))\n\
+         \tprintln(binary.to_string(binary.from_int_ascii(0, binary.Dec)))\n\
+         \tprintln(binary.to_string(binary.from_int_ascii(0 - 42, binary.Dec)))\n\
+         \tprintln(binary.parse_int(binary.from_int_ascii(4096, binary.Hex), binary.Hex))\n\
          }\n",
         "Ok(255)\nOk(ff)\nOk(0)\nOk(-42)\nOk(4096)\n",
     ),

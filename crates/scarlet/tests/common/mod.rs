@@ -549,12 +549,11 @@ pub trait SessionQueryExt {
 }
 
 impl SessionQueryExt for IncrementalSession {
-    /// goto-definition: the occurrence under the cursor, resolved through any
-    /// import alias to its canonical declaration.
+    /// goto-definition: the declaration the occurrence under the cursor names.
     fn definition(&self, module_or_uri: &str, line: i32, col: i32) -> Option<(ModulePath, Span)> {
         let g = self.reference_graph();
         let m = module_for(g, module_or_uri)?;
-        let id = g.canonical(g.def_id_at(m, line, col)?);
+        let id = g.def_id_at(m, line, col)?;
         Some((g.module_path(id.module)?.clone(), id.span))
     }
 

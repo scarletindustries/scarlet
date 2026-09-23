@@ -861,7 +861,6 @@ impl<'c> Loader<'c> {
                     why: "a toplevel reads itself as a closure",
                 },
             },
-            Atom::Load(Load::Slot(_)) => return Err("a raw frame slot".into()),
             Atom::Closure { func_idx, captures } if captures.is_empty() => Instr::Const {
                 dst,
                 value: Value::func(*func_idx),

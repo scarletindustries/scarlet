@@ -1119,9 +1119,9 @@ fn hover_shows_parameter_names_across_the_stdlib_blob() {
 /// A constructor's labels come from `ValueKind::Constructor.field_labels`.
 #[test]
 fn hover_shows_a_constructors_field_labels() {
-    let src = "import scarlet/io.{NotFound}\n\nfn f(e IoError) String {\n\tmatch e {\n\t\tNotFound(p) -> p\n\t\t_ -> ''\n\t}\n}\nprintln(1)\n";
+    let src = "import scarlet/io\n\nfn f(e io.IoError) String {\n\tmatch e {\n\t\tio.NotFound(p) -> p\n\t\t_ -> ''\n\t}\n}\nprintln(1)\n";
     let (_p, mut s, uri) = open_single("hover_ctor", src);
-    let md = hover_md(&mut s, &uri, 4, 4); // the `NotFound` pattern
+    let md = hover_md(&mut s, &uri, 4, 6); // the `NotFound` of `io.NotFound(p)`
     assert!(
         md.contains("fn(path String) IoError"),
         "constructor must show its field label, got:\n{md}"
@@ -1148,52 +1148,6 @@ fn hover_shows_a_declaration_doc_from_another_module() {
     assert!(
         md.contains("Join `parts` with `sep`."),
         "declaration doc must cross the module boundary, got:\n{md}"
-    );
-}
-
-/// With a selective import, the importer's persisted xrefs must carry the
-/// `{greet}` binding token as well as the call. Dropping the token leaves the
-/// import naming a symbol that no longer exists.
-#[test]
-fn rename_from_library_declaration_rewrites_selective_import_token() {
-    const LIB: &str = "pub fn greet() Int { 7 }\n";
-    const MAIN: &str = "import ./lib.{greet}\nx = greet()\nprintln(x)\n";
-    let p = Project::new("xmod_selective_rename");
-    p.write("lib.scrl", LIB);
-    p.write("main.scrl", MAIN);
-    let (mut s, lib_uri) = open(&p, "lib.scrl", LIB);
-    let main_uri = uri_of(&p, "main.scrl");
-
-    // Driven from greet's declaration in lib.scrl.
-    let (l, c) = cursor(LIB, "greet", 1, 1);
-    let resp = rename_at(&mut s, &lib_uri, l, c, "salute")
-        .expect("a rename driven from a library declaration must be allowed");
-    let changes = resp
-        .get("changes")
-        .and_then(Json::as_object)
-        .expect("a WorkspaceEdit with a `changes` map");
-
-    let main_edits = changes
-        .get(&main_uri)
-        .and_then(Json::as_array)
-        .unwrap_or_else(|| panic!("edits for main.scrl: {changes:?}"));
-    let mut starts: Vec<(i64, i64)> = main_edits
-        .iter()
-        .map(|e| {
-            (
-                e["range"]["start"]["line"].as_i64().unwrap(),
-                e["range"]["start"]["character"].as_i64().unwrap(),
-            )
-        })
-        .collect();
-    starts.sort_unstable();
-    // The `{greet}` import token (line 0) and the `greet()` call (line 1).
-    let tok = cursor(MAIN, "greet", 1, 0);
-    let call = cursor(MAIN, "greet", 2, 0);
-    assert_eq!(
-        starts,
-        vec![(tok.0 as i64, tok.1 as i64), (call.0 as i64, call.1 as i64)],
-        "main.scrl must rewrite the import's binding token and the call: {main_edits:?}"
     );
 }
 

@@ -204,12 +204,12 @@ pub fn main() {
     );
 }
 
-/// An aliased constructor's match arm, run hot. The alias tests in
-/// `modules.rs` all run cold, and cold is the one configuration where the two
-/// engines cannot be seen to disagree: with the ladder testing the name as
-/// the arm spelled it, the interpreted iterations fell to the catch-all and
-/// the compiled ones did not, so one program returned two answers inside one
-/// process, with no error on either stream.
+/// A qualified constructor's match arm beside a catch-all, run hot. The
+/// ladder tests in `modules.rs` all run cold, and cold is the one
+/// configuration where the two engines cannot be seen to disagree: a ladder
+/// that tested the wrong name sent the interpreted iterations to the
+/// catch-all and not the compiled ones, so one program returned two answers
+/// inside one process, with no error on either stream.
 ///
 /// `hit` is a separate body so it warms on call count, and 20,000 iterations
 /// put both sides of the threshold in the sum.
@@ -224,13 +224,12 @@ pub fn main() {
 /// even when the body holding the match never leaves the interpreter.
 #[test]
 #[ignore = "needs the JIT"]
-fn a_warmed_aliased_match_agrees_across_the_warmup_boundary() {
+fn a_warmed_qualified_match_agrees_across_the_warmup_boundary() {
     let src = "import ./color
-import ./color.{Color, Green as G}
 
-fn hit(c Color) Int {
+fn hit(c color.Color) Int {
 	match c {
-		G(_s) -> 1
+		color.Green(_s) -> 1
 		_ -> 0
 	}
 }
@@ -243,7 +242,7 @@ pub fn main() {
 	println(drive(20000, 0))
 }
 ";
-    let proj = Project::new("alias_warm");
+    let proj = Project::new("qual_warm");
     proj.write(
         "color.scrl",
         "pub type Color {\n\tRed\n\tGreen(shade Int)\n}\n\npub fn make(n Int) Color {\n\tif n % 2 == 0 { Red } else { Green(n) }\n}\n",
@@ -256,7 +255,7 @@ pub fn main() {
     // 10,000 odd `i` in 1..=20,000, so every `Green` and no `Red`.
     assert_eq!(
         out.stdout, "10000\n",
-        "an aliased arm must match the same constructors under both engines; stderr:\n{}",
+        "a qualified arm must match the same constructors under both engines; stderr:\n{}",
         out.stderr
     );
     assert_warmed(&out.stderr, "hit");

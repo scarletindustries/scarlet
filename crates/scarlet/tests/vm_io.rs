@@ -82,12 +82,12 @@ pub fn main() {
 fn tcp_echo_server_roundtrip() {
     let proj = Project::new("io_tcp");
     let src = listening_src(
-        "import scarlet/net/socket.{Data, Closed}\nimport scarlet/binary",
+        "import scarlet/net/socket\nimport scarlet/binary",
         r#"match net.accept(server) {
 	Ok(Some(sock)) -> {
 		println('peer ${address.to_string(sock.peer)}')
 		match socket.read(sock, 4096) {
-			Ok(Data(data)) -> match socket.write(sock, data) {
+			Ok(socket.Data(data)) -> match socket.write(sock, data) {
 				Ok(Nil) -> match socket.close(sock) {
 					Ok(Nil) -> match net.close(server) {
 						Ok(Nil) -> println('served')
@@ -97,7 +97,7 @@ fn tcp_echo_server_roundtrip() {
 				}
 				Err(e) -> println('write-failed: ${e}')
 			}
-			Ok(Closed) -> println('peer-closed')
+			Ok(socket.Closed) -> println('peer-closed')
 			Err(e) -> println('read-failed: ${e}')
 		}
 	}
@@ -240,14 +240,14 @@ fn tcp_read_within_times_out() {
 fn tcp_read_within_returns_data() {
     let proj = Project::new("io_read_within_data");
     let src = listening_src(
-        "import scarlet/net/socket.{Data, Closed}\nimport scarlet/binary",
+        "import scarlet/net/socket\nimport scarlet/binary",
         r#"match net.accept(server) {
 	Ok(Some(sock)) -> match socket.read_within(sock, 4096, 5000) {
-		Ok(Data(data)) -> match binary.to_string(data) {
+		Ok(socket.Data(data)) -> match binary.to_string(data) {
 			Ok(text) -> println('got: ${text}')
 			Err(Nil) -> println('not-utf8')
 		}
-		Ok(Closed) -> println('peer-closed')
+		Ok(socket.Closed) -> println('peer-closed')
 		Err(e) -> println('read-failed: ${e}')
 	}
 	Ok(None) -> println('accept-closed')
@@ -272,11 +272,11 @@ fn tcp_read_within_returns_data() {
 fn file_write_unaligned_binary_errors() {
     let proj = Project::new("io_unaligned");
     let data = proj.dir.join("out.bin");
-    let src = r#"import scarlet/io.{UnalignedBinary}
+    let src = r#"import scarlet/io
 
 pub fn main() {
 	match io.write_file('__PATH__', <<1:4>>) {
-		Err(UnalignedBinary) -> println('rejected')
+		Err(io.UnalignedBinary) -> println('rejected')
 		Err(_) -> println('wrong-error')
 		Ok(Nil) -> println('wrote')
 	}
@@ -304,12 +304,12 @@ pub fn main() {
 fn file_read_missing_path_errors() {
     let proj = Project::new("io_missing");
     let missing = proj.dir.join("does_not_exist.txt");
-    let src = r#"import scarlet/io.{NotFound}
+    let src = r#"import scarlet/io
 
 pub fn main() {
 	match io.read_text('__PATH__') {
 		Ok(_) -> println('read-ok')
-		Err(NotFound(p)) -> println('missing: ${p}')
+		Err(io.NotFound(p)) -> println('missing: ${p}')
 		Err(_) -> println('wrong-error')
 	}
 }
@@ -343,11 +343,11 @@ fn connect_refused_is_typed() {
         .port();
     let proj = Project::new("net_refused");
     let src = r#"import scarlet/net
-import scarlet/net/error.{ConnectionRefused}
+import scarlet/net/error
 
 pub fn main() {
 	match net.connect('127.0.0.1', __PORT__) {
-		Err(ConnectionRefused) -> println('refused')
+		Err(error.ConnectionRefused) -> println('refused')
 		Err(_) -> println('other-error')
 		Ok(_) -> println('connected')
 	}
@@ -742,11 +742,11 @@ pub fn main() {
 fn http_server_body_source_failure_yields_framed_500() {
     let proj = Project::new("io_http_source_500");
     let src = listening_src(
-        "import scarlet/http.{Response, Fixed, Unsized}\nimport scarlet/net/error.{UnexpectedEof}",
+        "import scarlet/http\nimport scarlet/net/error",
         r#"_ = http.serve_on(server, fn(req) {
 	match http.path(req) {
-		<<'/fixed'>> -> Response(status: 200, headers: [], body: Fixed(5, fn() Err(UnexpectedEof)))
-		<<'/unsized'>> -> Response(status: 200, headers: [], body: Unsized(fn() Err(UnexpectedEof)))
+		<<'/fixed'>> -> http.Response(status: 200, headers: [], body: http.Fixed(5, fn() Err(error.UnexpectedEof)))
+		<<'/unsized'>> -> http.Response(status: 200, headers: [], body: http.Unsized(fn() Err(error.UnexpectedEof)))
 		_ -> http.text('ok')
 	}
 })"#,
@@ -1176,7 +1176,7 @@ fn connect_addr_within_times_out_against_a_full_accept_queue() {
     let src = format!(
         r#"import scarlet/net
 import scarlet/net/address
-import scarlet/net/error.{{TimedOut}}
+import scarlet/net/error
 import scarlet/time
 import scarlet/string
 
@@ -1188,7 +1188,7 @@ pub fn main() {{
 				outcome = net.connect_addr_within(addr, {CONNECT_DEADLINE_MS})
 				ms = time.since_ms(time.monotonic(), started)
 				match outcome {{
-					Err(TimedOut) -> println('timed-out ${{ms}}')
+					Err(error.TimedOut) -> println('timed-out ${{ms}}')
 					Ok(_) -> println('connected ${{ms}}')
 					Err(e) -> println('other-error: ${{string.inspect(e)}}')
 				}}
@@ -1245,7 +1245,7 @@ fn connect_within_times_out_against_a_full_accept_queue() {
 
     let src = format!(
         r#"import scarlet/net
-import scarlet/net/error.{{TimedOut}}
+import scarlet/net/error
 import scarlet/time
 import scarlet/string
 
@@ -1254,7 +1254,7 @@ pub fn main() {{
 	outcome = net.connect_within('127.0.0.1', {port}, {CONNECT_DEADLINE_MS})
 	ms = time.since_ms(time.monotonic(), started)
 	match outcome {{
-		Err(TimedOut) -> println('timed-out ${{ms}}')
+		Err(error.TimedOut) -> println('timed-out ${{ms}}')
 		Ok(_) -> println('connected ${{ms}}')
 		Err(e) -> println('other-error: ${{string.inspect(e)}}')
 	}}
@@ -1311,12 +1311,12 @@ pub fn main() {{
 fn resolve_within_gives_up_on_a_deadline_that_beats_the_lookup() {
     let proj = Project::new("resolve_within");
     let src = r#"import scarlet/net
-import scarlet/net/error.{TimedOut}
+import scarlet/net/error
 import scarlet/string
 
 pub fn main() {
 	match net.resolve_within('localhost', 0) {
-		Err(TimedOut) -> println('timed-out')
+		Err(error.TimedOut) -> println('timed-out')
 		Ok(_) -> println('resolved')
 		Err(e) -> println('other-error: ${string.inspect(e)}')
 	}
@@ -1363,7 +1363,7 @@ pub fn main() {
 #[ignore = "needs the VM"]
 fn resolve_within_refuses_a_spent_budget_before_dispatching() {
     let src = r#"import scarlet/net
-import scarlet/net/error.{TimedOut}
+import scarlet/net/error
 import scarlet/process
 import scarlet/string
 
@@ -1377,7 +1377,7 @@ fn burn(n Int) Nil {
 pub fn main() {
 	_ = process.spawn(fn() { burn(400000) })
 	match net.resolve_within('localhost', 0) {
-		Err(TimedOut) -> println('timed-out')
+		Err(error.TimedOut) -> println('timed-out')
 		Ok(_) -> println('resolved')
 		Err(e) -> println('other-error: ${string.inspect(e)}')
 	}

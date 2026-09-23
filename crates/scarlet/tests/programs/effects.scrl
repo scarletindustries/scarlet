@@ -9,7 +9,7 @@
 
 import scarlet/array
 import scarlet/internal
-import scarlet/io.{IsADirectory, NotFound, UnalignedBinary}
+import scarlet/io
 import scarlet/map
 import scarlet/option
 import scarlet/os
@@ -38,13 +38,13 @@ pub fn main() {
 	// Each failure lands on its own variant, carrying the path it concerns.
 	match io.read_text(MISSING) {
 		Ok(_) -> println('missing: read a file that is not there')
-		Err(NotFound(path)) -> println('missing: NotFound(${path})')
+		Err(io.NotFound(path)) -> println('missing: NotFound(${path})')
 		Err(e) -> println('missing: ${e}')
 	}
 
 	match io.read_file('/tmp') {
 		Ok(_) -> println('directory: read a directory as a file')
-		Err(IsADirectory(path)) -> println('directory: IsADirectory(${path})')
+		Err(io.IsADirectory(path)) -> println('directory: IsADirectory(${path})')
 		Err(e) -> println('directory: ${e}')
 	}
 
@@ -62,7 +62,7 @@ pub fn main() {
 	// is refused before it opens the file, so the snapshot above still stands.
 	match io.write_file(SNAPSHOT, <<1:4>>) {
 		Ok(Nil) -> println('unaligned: wrote a half byte')
-		Err(UnalignedBinary) -> println('unaligned: UnalignedBinary')
+		Err(io.UnalignedBinary) -> println('unaligned: UnalignedBinary')
 		Err(e) -> println('unaligned: ${e}')
 	}
 	println('snapshot survived: ${io.read_file(SNAPSHOT) == Ok(<<'ALSNAP', 1:8, 2:16>>)}')

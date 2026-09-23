@@ -94,18 +94,9 @@ module.exports = grammar({
         field('module', $.identifier),
         repeat(seq('/', field('module', $.identifier))),
         optional(seq(kw('as'), field('alias', $.identifier))),
-        optional($.import_items),
       ),
 
     relative_segment: () => seq(choice('.', '..'), '/'),
-
-    import_items: ($) => seq('.', '{', commaSep1($.import_item), '}'),
-
-    import_item: ($) =>
-      seq(
-        field('name', choice($.identifier, $.type_identifier)),
-        optional(seq(kw('as'), field('alias', choice($.identifier, $.type_identifier)))),
-      ),
 
     function_declaration: ($) =>
       prec.right(seq(

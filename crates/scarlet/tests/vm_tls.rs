@@ -604,7 +604,7 @@ fn a_trusted_certificate_completes_the_handshake_and_moves_bytes() {
     let src = format!(
         r#"import scarlet/net
 import scarlet/net/tls
-import scarlet/net/socket.{{Data, Closed}}
+import scarlet/net/socket
 import scarlet/binary
 import scarlet/string
 
@@ -614,8 +614,8 @@ pub fn main() {{
             Ok(conn) -> {{
                 tls.write(conn, <<'ping'>>) or Nil
                 match tls.read(conn, 1024) {{
-                    Ok(Data(b)) -> println('read: ${{binary.to_string(b) or "<not utf-8>"}}')
-                    Ok(Closed) -> println('closed')
+                    Ok(socket.Data(b)) -> println('read: ${{binary.to_string(b) or "<not utf-8>"}}')
+                    Ok(socket.Closed) -> println('closed')
                     Err(e) -> println('read failed: ${{string.inspect(e)}}')
                 }}
                 tls.close(conn) or Nil
@@ -658,8 +658,8 @@ fn tls_read_within_times_out_as_transport_timed_out() {
 
     let src = format!(
         r#"import scarlet/net
-import scarlet/net/tls.{{Transport}}
-import scarlet/net/error.{{TimedOut}}
+import scarlet/net/tls
+import scarlet/net/error
 import scarlet/string
 
 pub fn main() {{
@@ -667,7 +667,7 @@ pub fn main() {{
         Ok(sock) -> match tls.handshake(sock, 'localhost') {{
             Ok(conn) -> {{
                 match tls.read_within(conn, 4096, 100) {{
-                    Err(Transport(TimedOut)) -> println('timed-out: Transport(TimedOut)')
+                    Err(tls.Transport(error.TimedOut)) -> println('timed-out: Transport(TimedOut)')
                     Ok(_) -> println('unexpected-data')
                     Err(e) -> println('other-error: ${{string.inspect(e)}}')
                 }}
@@ -721,14 +721,14 @@ fn tls_handshake_within_times_out_against_a_silent_peer() {
 
     let src = format!(
         r#"import scarlet/net
-import scarlet/net/tls.{{Transport}}
-import scarlet/net/error.{{TimedOut}}
+import scarlet/net/tls
+import scarlet/net/error
 import scarlet/string
 
 pub fn main() {{
     match net.connect('127.0.0.1', {port}) {{
         Ok(sock) -> match tls.handshake_within(sock, 'localhost', 200) {{
-            Err(Transport(TimedOut)) -> println('timed-out: Transport(TimedOut)')
+            Err(tls.Transport(error.TimedOut)) -> println('timed-out: Transport(TimedOut)')
             Ok(_) -> println('connected')
             Err(e) -> println('other-error: ${{string.inspect(e)}}')
         }}
@@ -772,7 +772,7 @@ fn tls_handshake_within_completes_against_a_live_peer() {
     let src = format!(
         r#"import scarlet/net
 import scarlet/net/tls
-import scarlet/net/socket.{{Data, Closed}}
+import scarlet/net/socket
 import scarlet/binary
 import scarlet/string
 
@@ -782,8 +782,8 @@ pub fn main() {{
             Ok(conn) -> {{
                 tls.write(conn, <<'ping'>>) or Nil
                 match tls.read(conn, 1024) {{
-                    Ok(Data(b)) -> println('read: ${{binary.to_string(b) or "<not utf-8>"}}')
-                    Ok(Closed) -> println('closed')
+                    Ok(socket.Data(b)) -> println('read: ${{binary.to_string(b) or "<not utf-8>"}}')
+                    Ok(socket.Closed) -> println('closed')
                     Err(e) -> println('read failed: ${{string.inspect(e)}}')
                 }}
                 tls.close(conn) or Nil
@@ -835,8 +835,8 @@ fn tls_connect_within_times_out_against_a_peer_that_never_accepts() {
     };
 
     let src = format!(
-        r#"import scarlet/net/tls.{{Transport}}
-import scarlet/net/error.{{TimedOut}}
+        r#"import scarlet/net/tls
+import scarlet/net/error
 import scarlet/time
 import scarlet/string
 
@@ -845,7 +845,7 @@ pub fn main() {{
     outcome = tls.connect_within('127.0.0.1', {port}, {CONNECT_DEADLINE_MS})
     ms = time.since_ms(time.monotonic(), started)
     match outcome {{
-        Err(Transport(TimedOut)) -> println('timed-out ${{ms}}')
+        Err(tls.Transport(error.TimedOut)) -> println('timed-out ${{ms}}')
         Ok(_) -> println('connected ${{ms}}')
         Err(e) -> println('other-error: ${{string.inspect(e)}}')
     }}
@@ -894,8 +894,8 @@ fn tls_connect_within_times_out_against_a_peer_that_never_speaks_tls() {
     let port = spawn_silent_peer();
 
     let src = format!(
-        r#"import scarlet/net/tls.{{Transport}}
-import scarlet/net/error.{{TimedOut}}
+        r#"import scarlet/net/tls
+import scarlet/net/error
 import scarlet/time
 import scarlet/string
 
@@ -904,7 +904,7 @@ pub fn main() {{
     outcome = tls.connect_within('127.0.0.1', {port}, {CONNECT_DEADLINE_MS})
     ms = time.since_ms(time.monotonic(), started)
     match outcome {{
-        Err(Transport(TimedOut)) -> println('timed-out ${{ms}}')
+        Err(tls.Transport(error.TimedOut)) -> println('timed-out ${{ms}}')
         Ok(_) -> println('connected ${{ms}}')
         Err(e) -> println('other-error: ${{string.inspect(e)}}')
     }}
@@ -954,7 +954,7 @@ fn tls_connect_until_completes_against_a_live_peer() {
 
     let src = format!(
         r#"import scarlet/net/tls
-import scarlet/net/socket.{{Data, Closed}}
+import scarlet/net/socket
 import scarlet/binary
 import scarlet/time
 import scarlet/string
@@ -965,8 +965,8 @@ pub fn main() {{
         Ok(conn) -> {{
             tls.write(conn, <<'ping'>>) or Nil
             match tls.read(conn, 1024) {{
-                Ok(Data(b)) -> println('read: ${{binary.to_string(b) or "<not utf-8>"}}')
-                Ok(Closed) -> println('closed')
+                Ok(socket.Data(b)) -> println('read: ${{binary.to_string(b) or "<not utf-8>"}}')
+                Ok(socket.Closed) -> println('closed')
                 Err(e) -> println('read failed: ${{string.inspect(e)}}')
             }}
             tls.close(conn) or Nil
@@ -999,11 +999,11 @@ fn https_send_until_times_out_against_a_silent_peer() {
         spawn_stalled_tls_server(leaf, 1, std::time::Duration::from_secs(30), Excess::Ignore);
 
     let src = format!(
-        r#"import scarlet/http/client.{{Request, Tls}}
+        r#"import scarlet/http/client
 import scarlet/http/url
 import scarlet/net
-import scarlet/net/error.{{TimedOut}}
-import scarlet/net/tls.{{Transport}}
+import scarlet/net/error
+import scarlet/net/tls
 import scarlet/string
 import scarlet/time
 
@@ -1014,9 +1014,9 @@ pub fn main() {{
                 Err(e) -> println('url failed: ${{string.inspect(e)}}')
                 Ok(u) -> {{
                     io = client.secure(conn)
-                    req = Request(method: <<'GET'>>, url: u, headers: [], body: <<>>)
+                    req = client.Request(method: <<'GET'>>, url: u, headers: [], body: <<>>)
                     match client.send_until(io, req, 1024, time.deadline_in_ms(200)) {{
-                        Err(Tls(Transport(TimedOut))) -> println('https-timeout: Tls(Transport(TimedOut))')
+                        Err(client.Tls(tls.Transport(error.TimedOut))) -> println('https-timeout: Tls(Transport(TimedOut))')
                         Ok(r) -> println('https-ok: ${{r.status}}')
                         Err(e) -> println('other: ${{string.inspect(e)}}')
                     }}
@@ -1059,11 +1059,11 @@ fn https_send_until_returns_a_response() {
     let port = spawn_tls_server(leaf, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
 
     let src = format!(
-        r#"import scarlet/http/client.{{Request, Tls}}
+        r#"import scarlet/http/client
 import scarlet/http/url
 import scarlet/net
-import scarlet/net/error.{{TimedOut}}
-import scarlet/net/tls.{{Transport}}
+import scarlet/net/error
+import scarlet/net/tls
 import scarlet/string
 import scarlet/time
 
@@ -1074,9 +1074,9 @@ pub fn main() {{
                 Err(e) -> println('url failed: ${{string.inspect(e)}}')
                 Ok(u) -> {{
                     io = client.secure(conn)
-                    req = Request(method: <<'GET'>>, url: u, headers: [], body: <<>>)
+                    req = client.Request(method: <<'GET'>>, url: u, headers: [], body: <<>>)
                     match client.send_until(io, req, 1024, time.deadline_in_ms(5000)) {{
-                        Err(Tls(Transport(TimedOut))) -> println('https-timeout: Tls(Transport(TimedOut))')
+                        Err(client.Tls(tls.Transport(error.TimedOut))) -> println('https-timeout: Tls(Transport(TimedOut))')
                         Ok(r) -> println('https-ok: ${{r.status}}')
                         Err(e) -> println('other: ${{string.inspect(e)}}')
                     }}
@@ -1114,7 +1114,7 @@ fn tls_read_within_returns_data() {
     let src = format!(
         r#"import scarlet/net
 import scarlet/net/tls
-import scarlet/net/socket.{{Data, Closed}}
+import scarlet/net/socket
 import scarlet/binary
 import scarlet/string
 
@@ -1124,8 +1124,8 @@ pub fn main() {{
             Ok(conn) -> {{
                 tls.write(conn, <<'ping'>>) or Nil
                 match tls.read_within(conn, 1024, 5000) {{
-                    Ok(Data(b)) -> println('read: ${{binary.to_string(b) or "<not utf-8>"}}')
-                    Ok(Closed) -> println('closed')
+                    Ok(socket.Data(b)) -> println('read: ${{binary.to_string(b) or "<not utf-8>"}}')
+                    Ok(socket.Closed) -> println('closed')
                     Err(e) -> println('read failed: ${{string.inspect(e)}}')
                 }}
                 tls.close(conn) or Nil
@@ -1232,12 +1232,12 @@ fn a_tls_op_survives_the_function_around_it_being_compiled() {
 
     let src = format!(
         r#"import scarlet/net
-import scarlet/net/tls.{{TlsSocket, TlsError}}
-import scarlet/net/socket.{{Data, Closed}}
+import scarlet/net/tls
+import scarlet/net/socket
 import scarlet/binary
 import scarlet/string
 
-fn send_n(c TlsSocket, b Binary, n Int) Result(Nil, TlsError) {{
+fn send_n(c tls.TlsSocket, b Binary, n Int) Result(Nil, tls.TlsError) {{
     if n <= 0 {{
         Ok(Nil)
     }} else {{
@@ -1248,13 +1248,13 @@ fn send_n(c TlsSocket, b Binary, n Int) Result(Nil, TlsError) {{
     }}
 }}
 
-fn recv_n(c TlsSocket, n Int, acc Int) Int {{
+fn recv_n(c tls.TlsSocket, n Int, acc Int) Int {{
     if n <= 0 {{
         acc
     }} else {{
         match tls.read(c, 1) {{
-            Ok(Data(b)) -> recv_n(c, n - 1, acc + binary.byte_size(b))
-            Ok(Closed) -> acc
+            Ok(socket.Data(b)) -> recv_n(c, n - 1, acc + binary.byte_size(b))
+            Ok(socket.Closed) -> acc
             Err(_) -> acc
         }}
     }}
@@ -1262,7 +1262,7 @@ fn recv_n(c TlsSocket, n Int, acc Int) Int {{
 
 // A 1 ms deadline against a peer that has not sent yet. The point is that
 // TlsReadUntil is dispatchable from a compiled body, not the timeout itself.
-fn timeout_n(c TlsSocket, n Int, acc Int) Int {{
+fn timeout_n(c tls.TlsSocket, n Int, acc Int) Int {{
     if n <= 0 {{
         acc
     }} else {{
@@ -1273,7 +1273,7 @@ fn timeout_n(c TlsSocket, n Int, acc Int) Int {{
     }}
 }}
 
-fn close_n(c TlsSocket, n Int) Nil {{
+fn close_n(c tls.TlsSocket, n Int) Nil {{
     if n <= 0 {{
         Nil
     }} else {{
@@ -1404,8 +1404,8 @@ fn a_large_tls_write_parks_and_resumes_without_duplicating_a_byte() {
 
     let src = format!(
         r#"import scarlet/net
-import scarlet/net/tls.{{TlsSocket, TlsError}}
-import scarlet/net/socket.{{Data, Closed}}
+import scarlet/net/tls
+import scarlet/net/socket
 import scarlet/binary
 import scarlet/string
 
@@ -1417,7 +1417,7 @@ fn grow(b Binary, n Int) Binary {{
     }}
 }}
 
-fn send_n(c TlsSocket, b Binary, n Int) Result(Nil, TlsError) {{
+fn send_n(c tls.TlsSocket, b Binary, n Int) Result(Nil, tls.TlsError) {{
     if n <= 0 {{
         Ok(Nil)
     }} else {{
@@ -1437,8 +1437,8 @@ pub fn main() {{
                 println('sending ${{binary.byte_size(payload)}} x {WRITES}')
                 match send_n(conn, payload, {WRITES}) {{
                     Ok(Nil) -> match tls.read(conn, 1024) {{
-                        Ok(Data(b)) -> println('reply: ${{binary.to_string(b) or "<not utf-8>"}}')
-                        Ok(Closed) -> println('reply: closed')
+                        Ok(socket.Data(b)) -> println('reply: ${{binary.to_string(b) or "<not utf-8>"}}')
+                        Ok(socket.Closed) -> println('reply: closed')
                         Err(e) -> println('read failed: ${{string.inspect(e)}}')
                     }}
                     Err(e) -> println('write failed: ${{string.inspect(e)}}')

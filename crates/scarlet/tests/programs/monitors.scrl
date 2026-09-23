@@ -3,7 +3,6 @@
 // negative case (a released monitor stays silent) is a generous timeout.
 
 import scarlet/process
-import scarlet/process.{Crashed, Down, Killed, NoProcess, Normal, Pid, Subject}
 
 fn check(name String, ok Bool) Nil {
 	if ok {
@@ -16,7 +15,7 @@ fn check(name String, ok Bool) Nil {
 // A child that stays alive until released: its pid, and the subject that
 // releases it. Only a subject's owner may receive on it, so the child makes
 // the gate itself and hands it back.
-fn parked() (Pid, Subject(Nil)) {
+fn parked() (process.Pid, process.Subject(Nil)) {
 	boot = process.subject()
 	pid = process.spawn(fn() {
 		gate = process.subject()
@@ -33,10 +32,10 @@ fn parked() (Pid, Subject(Nil)) {
 
 type Event {
 	Work(n Int)
-	WorkerDown(slot Int, down Down)
+	WorkerDown(slot Int, down process.Down)
 }
 
-fn drain(inbox Subject(Event), worker Pid, work Int) Int {
+fn drain(inbox process.Subject(Event), worker process.Pid, work Int) Int {
 	match process.receive(inbox) {
 		Work(n) -> drain(inbox, worker, work + n)
 		WorkerDown(slot, d) -> {
@@ -57,7 +56,7 @@ type Reply {
 	ServerDown
 }
 
-fn call(server Subject(Subject(Reply)), server_pid Pid) Reply {
+fn call(server process.Subject(process.Subject(Reply)), server_pid process.Pid) Reply {
 	reply = process.subject()
 	m = process.monitor(server_pid, reply, fn(_) ServerDown)
 	process.send(server, reply)
@@ -78,10 +77,10 @@ pub fn main() {
 	first = process.receive(downs)
 	check('down names the process', first.pid == child)
 	check('a returned process ended normally', match first.reason {
-		Normal -> True
-		NoProcess -> False
-		Killed -> False
-		Crashed(_) -> False
+		process.Normal -> True
+		process.NoProcess -> False
+		process.Killed -> False
+		process.Crashed(_) -> False
 	})
 
 	// --- monitoring a process that has already ended fires at once -----------------
@@ -97,10 +96,10 @@ pub fn main() {
 	late = process.receive(downs)
 	check('monitoring an ended pid still delivers', late.pid == gone)
 	check('and reports that it was already gone', match late.reason {
-		NoProcess -> True
-		Normal -> False
-		Killed -> False
-		Crashed(_) -> False
+		process.NoProcess -> True
+		process.Normal -> False
+		process.Killed -> False
+		process.Crashed(_) -> False
 	})
 
 	events = process.subject()

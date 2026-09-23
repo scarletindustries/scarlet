@@ -47,7 +47,6 @@
  * built as a tree under `root`, is when the tree has failed for good.
  */
 import scarlet/array
-import scarlet/time.{Instant}
 import scarlet/time
 
 // The identity of a process. Program-unique and never reused, so a Pid held
@@ -222,7 +221,7 @@ pub fn receive_within(s Subject(msg), timeout_ms Int) Result(msg, Nil) {
 
 // As `receive`, but errs with Nil once the absolute Instant `deadline`
 // (from `time.monotonic()`) is reached.
-pub fn receive_until(s Subject(msg), deadline Instant) Result(msg, Nil) {
+pub fn receive_until(s Subject(msg), deadline time.Instant) Result(msg, Nil) {
 	receive_until_ms(s, time.to_deadline_ms(deadline))
 }
 

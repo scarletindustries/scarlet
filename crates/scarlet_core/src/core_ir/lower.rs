@@ -579,9 +579,6 @@ impl Lower {
                     let id = self.local(b);
                     return (Atom::Local(id), self.bind_ty(id));
                 }
-                // A raw frame slot the module walk allocated for a selective
-                // import. Outside lower's `LocalId` space.
-                ValueRef::Slot(slot) => Atom::Load(Load::Slot(slot)),
                 ValueRef::Global(slot) => Atom::Load(Load::Global(slot)),
                 ValueRef::Capture(idx) => Atom::Load(Load::Capture(idx)),
                 ValueRef::SelfClosure => Atom::Load(Load::SelfClosure),

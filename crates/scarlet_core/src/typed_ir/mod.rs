@@ -48,7 +48,7 @@ impl std::fmt::Display for BindingId {
     }
 }
 
-pub use scarlet_ir::core_ir::{CaptureIdx, FrameSlot, GlobalSlot};
+pub use scarlet_ir::core_ir::{CaptureIdx, GlobalSlot};
 
 /// A name bound to a value, with the type the checker gave it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,11 +67,6 @@ pub struct TypedBind {
 pub enum ValueRef {
     /// A [`TypedBind`] in the current function.
     Local(BindingId),
-    /// ESCAPE HATCH: a raw frame slot the module walk assigned (a selective
-    /// `import mod.{x}` binding). Anchored to no [`BindingId`], because import
-    /// bindings are materialised by the module walk rather than by the
-    /// elaborator.
-    Slot(FrameSlot),
     /// An entry-frame slot. A top-level `fn` referenced as a *value* loads this
     /// way even inside itself; self-*calls* are [`TypedCallee::SelfRec`].
     Global(GlobalSlot),
@@ -698,7 +693,7 @@ mod tests {
         // `match xs { [_, _] -> 1, _ -> 0 }`
         let scrut = TypedExpr::Var {
             ty: arr_ty,
-            place: ValueRef::Slot(FrameSlot(0)),
+            place: ValueRef::Global(GlobalSlot(0)),
         };
         let arms = vec![
             TypedArm {

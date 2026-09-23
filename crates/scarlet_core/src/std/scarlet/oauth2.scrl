@@ -24,7 +24,7 @@ import scarlet/base64
 import scarlet/binary
 import scarlet/crypto
 import scarlet/http/form
-import scarlet/json.{Json, List, Object, Str}
+import scarlet/json
 import scarlet/option
 import scarlet/result
 import scarlet/string
@@ -54,20 +54,20 @@ pub type Store {
 	)
 }
 
-fn texts(values Array(String)) Json {
-	List(array.map(values, Str))
+fn texts(values Array(String)) json.Json {
+	json.List(array.map(values, json.Str))
 }
 
 // ---------- discovery ----------
 
 /** RFC 9728 Protected Resource Metadata: this resource, its authorization
  * server, its scopes. Mount at /.well-known/oauth-protected-resource. */
-pub fn resource_metadata(resource_uri String, auth_server String, scopes Array(String)) Json {
-	Object([
-		('resource', Str(resource_uri)),
-		('authorization_servers', List([Str(auth_server)])),
+pub fn resource_metadata(resource_uri String, auth_server String, scopes Array(String)) json.Json {
+	json.Object([
+		('resource', json.Str(resource_uri)),
+		('authorization_servers', json.List([json.Str(auth_server)])),
 		('scopes_supported', texts(scopes)),
-		('bearer_methods_supported', List([Str('header')])),
+		('bearer_methods_supported', json.List([json.Str('header')])),
 	])
 }
 
@@ -84,16 +84,16 @@ pub fn challenge(metadata_url String, scope String) String {
 /** RFC 8414 metadata for an AS under `issuer` (no trailing slash), with
  * its endpoints at `issuer`/oauth/{authorize,token,register}. Mount at
  * /.well-known/oauth-authorization-server. */
-pub fn metadata(issuer String, scopes Array(String)) Json {
-	Object([
-		('issuer', Str(issuer)),
-		('authorization_endpoint', Str('${issuer}/oauth/authorize')),
-		('token_endpoint', Str('${issuer}/oauth/token')),
-		('registration_endpoint', Str('${issuer}/oauth/register')),
-		('response_types_supported', List([Str('code')])),
-		('grant_types_supported', List([Str('authorization_code')])),
-		('code_challenge_methods_supported', List([Str('S256')])),
-		('token_endpoint_auth_methods_supported', List([Str('none')])),
+pub fn metadata(issuer String, scopes Array(String)) json.Json {
+	json.Object([
+		('issuer', json.Str(issuer)),
+		('authorization_endpoint', json.Str('${issuer}/oauth/authorize')),
+		('token_endpoint', json.Str('${issuer}/oauth/token')),
+		('registration_endpoint', json.Str('${issuer}/oauth/register')),
+		('response_types_supported', json.List([json.Str('code')])),
+		('grant_types_supported', json.List([json.Str('authorization_code')])),
+		('code_challenge_methods_supported', json.List([json.Str('S256')])),
+		('token_endpoint_auth_methods_supported', json.List([json.Str('none')])),
 		('scopes_supported', texts(scopes)),
 	])
 }
@@ -102,7 +102,7 @@ pub fn metadata(issuer String, scopes Array(String)) Json {
 
 /** Register a public client: remember its redirect uris, hand back the
  * metadata. No secret is issued — these are PKCE public clients. */
-pub fn register(store Store, req_body Binary) Result(Json, String) {
+pub fn register(store Store, req_body Binary) Result(json.Json, String) {
 	doc <- result.then(result.map_err(json.parse_binary(req_body), fn(_) 'body is not json'))
 	uris = match json.field(doc, 'redirect_uris') {
 		Some(list) -> array.fold(json.elements(list), [], fn(acc, u) {
@@ -119,12 +119,12 @@ pub fn register(store Store, req_body Binary) Result(Json, String) {
 			id = new_token()
 			Store(put_client, _, _, _, _, _) = store
 			put_client(id, join_spaced(uris))
-			Ok(Object([
-				('client_id', Str(id)),
+			Ok(json.Object([
+				('client_id', json.Str(id)),
 				('redirect_uris', texts(uris)),
-				('token_endpoint_auth_method', Str('none')),
-				('grant_types', List([Str('authorization_code')])),
-				('response_types', List([Str('code')])),
+				('token_endpoint_auth_method', json.Str('none')),
+				('grant_types', json.List([json.Str('authorization_code')])),
+				('response_types', json.List([json.Str('code')])),
 			]))
 		}
 	}
@@ -215,7 +215,7 @@ pub fn approve(store Store, areq AuthorizeReq, user String) String {
  * authentication — the verifier must hash to the challenge the code was
  * minted under, compared in constant time.
  */
-pub fn token(store Store, req_body Binary) Result(Json, String) {
+pub fn token(store Store, req_body Binary) Result(json.Json, String) {
 	f = form.decode(req_body)
 	code = form.get(f, 'code') or ''
 	verifier = form.get(f, 'code_verifier') or ''
@@ -245,10 +245,10 @@ pub fn token(store Store, req_body Binary) Result(Json, String) {
 				} else {
 					tok = new_token()
 					put_token(tok, g)
-					Ok(Object([
-						('access_token', Str(tok)),
-						('token_type', Str('Bearer')),
-						('scope', Str(scope)),
+					Ok(json.Object([
+						('access_token', json.Str(tok)),
+						('token_type', json.Str('Bearer')),
+						('scope', json.Str(scope)),
 					]))
 				}
 			}

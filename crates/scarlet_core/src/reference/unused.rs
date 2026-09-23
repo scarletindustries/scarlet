@@ -99,17 +99,11 @@ impl ReferenceGraph {
     /// anywhere. An import declaration's own `Import`/`Alias`/`Definition`
     /// occurrences never count as a use.
     ///
-    /// A `ModuleAlias` needs two extra edges, because neither way of using one
-    /// records a use-site occurrence pointing at the alias:
-    ///
-    /// * `import a/b` then `b.foo()`: the member targets the *remote* def, but
-    ///   the qualifier `b` records a [`ReferenceKind::Qualifier`] occurrence
-    ///   targeting this alias. Naming the alias itself is what stops a second
-    ///   alias of the same module from being kept alive by its sibling's use.
-    /// * `import a/b.{item}` then `item()`: the binding token is an
-    ///   [`ReferenceKind::ImportItem`] occurrence targeting the remote `item`,
-    ///   so a use site of that target is a genuine use. Containment in
-    ///   [`Definition::decl_span`] attributes each token to *this* import.
+    /// A `ModuleAlias` is used through a qualifier: in `import a/b` then
+    /// `b.foo()`, the member targets the *remote* def, but the qualifier `b`
+    /// records a [`ReferenceKind::Qualifier`] occurrence targeting this alias.
+    /// Naming the alias itself is what stops a second alias of the same module
+    /// from being kept alive by its sibling's use.
     fn has_real_use(&self, def: &Definition) -> bool {
         let refs = self.references_to(def.defid);
         let direct = refs.iter().any(|r| r.kind.is_use_site());
@@ -117,35 +111,8 @@ impl ReferenceGraph {
             return direct;
         }
         let decl_span = def.decl_span();
-        if refs
-            .iter()
+        refs.iter()
             .any(|r| r.kind == ReferenceKind::Qualifier && !r.span.within(&decl_span))
-        {
-            return true;
-        }
-        // Targets bound by this import: its `ImportItem` tokens, plus the local
-        // def minted for the `Y` of an `{X as Y}` item (an `Alias` occurrence
-        // inside the declaration).
-        let Some(mr) = self.modules.get(&def.defid.module) else {
-            return false;
-        };
-        let imported: HashSet<DefId> = mr
-            .occurrences()
-            .iter()
-            .map(|o| o.reference)
-            .filter(|r| {
-                matches!(r.kind, ReferenceKind::ImportItem | ReferenceKind::Alias)
-                    && r.target != def.defid
-                    && r.span.within(&decl_span)
-            })
-            .map(|r| r.target)
-            .collect();
-        !imported.is_empty()
-            && mr
-                .occurrences()
-                .iter()
-                .map(|o| o.reference)
-                .any(|r| imported.contains(&r.target) && r.kind.is_use_site())
     }
 
     /// `Hint` diagnostics for the entry module: unused private definitions and
@@ -212,7 +179,6 @@ mod tests {
     };
     use super::*;
     use crate::diagnostic::Severity;
-    use crate::span::Span;
 
     #[track_caller]
     fn sole_unused(g: &ReferenceGraph, m: ModuleId) -> Diagnostic {
@@ -373,111 +339,6 @@ mod tests {
         let g = g.finish();
 
         assert_eq!(sole_unused(&g, m).message, "unused import `util`");
-    }
-
-    #[test]
-    fn unused_diag_unqualified_import_item_used_keeps_import_live() {
-        // `import a/b.{used}` then `pub fn main() { used() }`. The binding
-        // token targets the *remote* `used`, and so does the call, so the
-        // import counts as used. The `Import` occurrence covers only the final
-        // module-name segment, too narrow to contain the binding — modelled
-        // here to prove that narrowing does not regress detection.
-        let build = |with_use: bool| {
-            let (mut g, m, _) = main_graph();
-            let lib = g.intern_module(&mp(&["a", "b"]));
-            let mut mr = ModuleReferences::new(m);
-            let alias = def(m, 1, 0, 18, EntityKind::ModuleAlias);
-            mr.add_definition(Definition::new(
-                alias.module,
-                alias.span,
-                "b",
-                None,
-                false,
-                stub_kind(alias),
-            ));
-            let remote_used = def(lib, 1, 3, 7, EntityKind::Function);
-            add_ref(&mut mr, None, (1, 9, 10), K::Import, alias);
-            add_ref(&mut mr, None, (1, 12, 16), K::ImportItem, remote_used);
-            let main = add_def(&mut mr, m, "main", 3, EntityKind::Function, true);
-            if with_use {
-                add_ref(
-                    &mut mr,
-                    Some(main),
-                    (3, 16, 20),
-                    K::Unqualified,
-                    remote_used,
-                );
-            }
-            g.insert_module(mr);
-            (g.finish(), m)
-        };
-
-        let (g, m) = build(true);
-        assert!(
-            g.unused_diagnostics(m).is_empty(),
-            "an import whose unqualified item is used must not be flagged"
-        );
-
-        // Drop the use: the check is still live, not just disabled.
-        let (g, m) = build(false);
-        assert_eq!(sole_unused(&g, m).message, "unused import `b`");
-    }
-
-    #[test]
-    fn unused_diag_aliased_selective_import_item_used_keeps_import_live() {
-        // `import ./util as u.{empty}` then `println(empty())`. The parser
-        // emits `as u` before `.{empty}`, so the alias's `defid.span` is just
-        // the `u` identifier and the item binding sits after it. Containment
-        // uses `decl_span`, the whole statement, which is why it still counts.
-        //
-        //   import ./util as u.{empty}
-        //   0      ^9   ^13 ^17^20   ^25
-        let build = |with_use: bool| {
-            let (mut g, m, _) = main_graph();
-            let lib = g.intern_module(&mp(&["util"]));
-
-            let alias = def(m, 1, 17, 18, EntityKind::ModuleAlias);
-            let mut mr = ModuleReferences::new(m);
-            let alias_def = Definition::new(
-                alias.module,
-                alias.span,
-                "u",
-                None,
-                false,
-                DefinitionKind::ModuleAlias {
-                    decl_span: Span::single_line(1, 0, 26),
-                    imports_module: Some(lib),
-                },
-            );
-            mr.add_definition(alias_def);
-            let remote_empty = def(lib, 2, 7, 12, EntityKind::Function);
-            add_ref(
-                &mut mr,
-                None,
-                (1, 9, 13),
-                K::Import,
-                def(lib, 1, 9, 13, EntityKind::ModuleAlias),
-            );
-            add_ref(&mut mr, None, (1, 17, 18), K::Alias, alias);
-            add_ref(&mut mr, None, (1, 20, 25), K::ImportItem, remote_empty);
-            if with_use {
-                add_ref(&mut mr, None, (2, 8, 13), K::Unqualified, remote_empty);
-            }
-            g.insert_module(mr);
-            (g.finish(), m, alias)
-        };
-
-        let (g, m, _) = build(true);
-        assert!(
-            g.unused_diagnostics(m).is_empty(),
-            "a used item from an aliased selective import must not be flagged"
-        );
-
-        // Drop the use: the widened boundary did not just disable the check.
-        let (g, m, alias) = build(false);
-        let d = sole_unused(&g, m);
-        assert_eq!(d.message, "unused import `u`");
-        assert_eq!(d.span, alias.span);
     }
 
     #[test]

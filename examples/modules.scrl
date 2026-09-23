@@ -3,11 +3,10 @@
 
 import scarlet/array
 import scarlet/result
-import ./lib/report/table
-import ./lib/units as units
-import ./lib/units.{ABSOLUTE_ZERO_C, Celsius, celsius as c}
+import ./lib/report/table as report
+import ./lib/units
 
-fn conversions(t Celsius) Array(String) {
+fn conversions(t units.Celsius) Array(String) {
 	fahrenheit = units.show_fahrenheit(units.to_fahrenheit(t))
 	// Kelvin is opaque: its constructor stays inside units, so to_kelvin is
 	// the only way in, and it can fail.
@@ -16,12 +15,18 @@ fn conversions(t Celsius) Array(String) {
 }
 
 pub fn main() {
-	// units. holds the whole module; the second import also pulls Celsius,
-	// ABSOLUTE_ZERO_C, and celsius (renamed c) into scope.
-	readings = [c(-40.0), c(0.0), c(21.5), c(100.0), c(-300.0)]
+	// Everything a module exports is reached through its name: `units.celsius`.
+	// `as` gives the module another name, as `report` for ./lib/report/table.
+	readings = [
+		units.celsius(-40.0),
+		units.celsius(0.0),
+		units.celsius(21.5),
+		units.celsius(100.0),
+		units.celsius(-300.0),
+	]
 
-	println('absolute zero: ${ABSOLUTE_ZERO_C}C')
+	println('absolute zero: ${units.ABSOLUTE_ZERO_C}C')
 
 	// units.round1 is not exported, so the caller cannot reach past the API.
-	array.each(readings, fn(t) println(table.row(t, conversions(t))))
+	array.each(readings, fn(t) println(report.row(t, conversions(t))))
 }

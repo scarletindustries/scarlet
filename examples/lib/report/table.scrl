@@ -7,16 +7,16 @@
 
 import scarlet/array
 import scarlet/string
-import ../units.{Celsius, show}
+import ../units
 
 const COLUMN = 12
 
 /** A row: the reading in the first column, then what it was converted into. */
-pub fn row(t Celsius, cells Array(String)) String {
+pub fn row(t units.Celsius, cells Array(String)) String {
 	match cells {
-		[] -> show(t)
+		[] -> units.show(t)
 		[first, ..rest] ->
-			array.fold(rest, pad(show(t)) + first, fn(line, cell) line + ' = ' + cell)
+			array.fold(rest, pad(units.show(t)) + first, fn(line, cell) line + ' = ' + cell)
 	}
 }
 

@@ -970,7 +970,7 @@ fn binaries_are_built_shown_and_matched() {
 #[test]
 fn the_rest_of_the_binary_module_runs() {
     prints(
-        "import scarlet/binary.{Dec, Hex}\n\
+        "import scarlet/binary\n\
          pub fn main() {\n\
          \tb = <<'hello':utf8>>\n\
          \tprintln(binary.byte_at(b, 0))\n\
@@ -983,18 +983,18 @@ fn the_rest_of_the_binary_module_runs() {
          \tprintln(binary.index_of(b, <<'z':utf8>>, 0))\n\
          \tprintln(binary.index_of(b, <<>>, 2))\n\
          \tprintln(binary.index_of(b, <<'h':utf8>>, 99))\n\
-         \tprintln(binary.parse_int(<<'1234':utf8>>, Dec))\n\
-         \tprintln(binary.parse_int(<<'ff':utf8>>, Hex))\n\
-         \tprintln(binary.parse_int(<<'FF':utf8>>, Hex))\n\
-         \tprintln(binary.parse_int(<<'12a':utf8>>, Dec))\n\
-         \tprintln(binary.parse_int(<<>>, Dec))\n\
-         \tprintln(binary.parse_int(<<'-1':utf8>>, Dec))\n\
-         \tprintln(binary.parse_int(<<'99999999999999999999':utf8>>, Dec))\n\
+         \tprintln(binary.parse_int(<<'1234':utf8>>, binary.Dec))\n\
+         \tprintln(binary.parse_int(<<'ff':utf8>>, binary.Hex))\n\
+         \tprintln(binary.parse_int(<<'FF':utf8>>, binary.Hex))\n\
+         \tprintln(binary.parse_int(<<'12a':utf8>>, binary.Dec))\n\
+         \tprintln(binary.parse_int(<<>>, binary.Dec))\n\
+         \tprintln(binary.parse_int(<<'-1':utf8>>, binary.Dec))\n\
+         \tprintln(binary.parse_int(<<'99999999999999999999':utf8>>, binary.Dec))\n\
          \tprintln(binary.eq_ignore_ascii_case(<<'Content-Length':utf8>>, <<'content-length':utf8>>))\n\
          \tprintln(binary.eq_ignore_ascii_case(<<'ab':utf8>>, <<'abc':utf8>>))\n\
          \tprintln(binary.to_ascii_lower(<<'HeLLo':utf8>>) == <<'hello':utf8>>)\n\
-         \tprintln(binary.from_int_ascii(255, Hex) == <<'ff':utf8>>)\n\
-         \tprintln(binary.from_int_ascii(-42, Dec) == <<'-42':utf8>>)\n\
+         \tprintln(binary.from_int_ascii(255, binary.Hex) == <<'ff':utf8>>)\n\
+         \tprintln(binary.from_int_ascii(-42, binary.Dec) == <<'-42':utf8>>)\n\
          }\n",
         "104\n111\n-1\n-1\n-1\nSome(2)\nSome(3)\nNone\nSome(2)\nNone\n\
          Ok(1234)\nOk(255)\nOk(255)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nOk(99999999999999999999)\n\
@@ -1179,15 +1179,14 @@ fn files_read_and_write_and_fail_with_their_error() {
     let file = dir.join("a.txt");
     std::fs::write(dir.join("plain"), "x").expect("a plain file");
     let src = "import scarlet/io\n\
-         import scarlet/io.{NotFound, IsADirectory, NotADirectory, InvalidData, UnalignedBinary}\n\
          fn say(r Result(a, io.IoError)) String {\n\
          \tmatch r {\n\
          \t\tOk(v) -> 'ok ${v}'\n\
-         \t\tErr(NotFound(p)) -> 'not found ${p}'\n\
-         \t\tErr(IsADirectory(p)) -> 'a directory ${p}'\n\
-         \t\tErr(NotADirectory(p)) -> 'not a directory ${p}'\n\
-         \t\tErr(InvalidData(p)) -> 'not text ${p}'\n\
-         \t\tErr(UnalignedBinary) -> 'not whole bytes'\n\
+         \t\tErr(io.NotFound(p)) -> 'not found ${p}'\n\
+         \t\tErr(io.IsADirectory(p)) -> 'a directory ${p}'\n\
+         \t\tErr(io.NotADirectory(p)) -> 'not a directory ${p}'\n\
+         \t\tErr(io.InvalidData(p)) -> 'not text ${p}'\n\
+         \t\tErr(io.UnalignedBinary) -> 'not whole bytes'\n\
          \t\tErr(e) -> 'another error ${e}'\n\
          \t}\n\
          }\n\
@@ -1345,7 +1344,6 @@ fn the_crypto_built_ins_run() {
 fn the_json_built_ins_run() {
     prints(
         "import scarlet/json\n\
-         import scarlet/json.{Object, Str, Integer, List, Real, Boolean, Null, Number}\n\
          pub fn main() {\n\
          \tsrc = '{\"id\": 18446744073709551615, \"n\": -3, \"x\": 0.5, \"s\": \"a\\\\u00e9\", \"t\": [true, null], \"o\": {}}'\n\
          \tmatch json.parse(src) {\n\
@@ -1365,7 +1363,7 @@ fn the_json_built_ins_run() {
          \t\t}\n\
          \t\tErr(_) -> println('did not parse')\n\
          \t}\n\
-         \tprintln(json.encode(List([Null, Boolean(True), Integer(-7), Real(1.0), Str('a\"b'), Object([('k', Number('1e9'))]), Number('x')])))\n\
+         \tprintln(json.encode(json.List([json.Null, json.Boolean(True), json.Integer(-7), json.Real(1.0), json.Str('a\"b'), json.Object([('k', json.Number('1e9'))]), json.Number('x')])))\n\
          \tprintln(match json.parse('[1,]') {\n\
          \t\tOk(_) -> 'parsed'\n\
          \t\tErr(_) -> 'refused'\n\

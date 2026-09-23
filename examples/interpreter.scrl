@@ -1,7 +1,7 @@
 // A tiny language: a lexer, a recursive-descent parser, and an evaluator.
 
 import scarlet/array
-import scarlet/binary.{Dec}
+import scarlet/binary
 import scarlet/map
 import scarlet/result
 import scarlet/string
@@ -69,7 +69,7 @@ fn take_word(chars Array(String)) (String, Array(String)) {
 
 // `12abc` is an error, not a variable.
 fn word_token(word String) Result(Token, String) {
-	match binary.parse_int(binary.from_string(word), Dec) {
+	match binary.parse_int(binary.from_string(word), binary.Dec) {
 		Ok(n) -> Ok(Number(n))
 		Err(Nil) -> if starts_with_digit(word) {
 			Err('bad number: ${word}')
@@ -81,7 +81,7 @@ fn word_token(word String) Result(Token, String) {
 
 fn starts_with_digit(word String) Bool {
 	match string.split(word, '') {
-		[first, ..] -> result.is_ok(binary.parse_int(binary.from_string(first), Dec))
+		[first, ..] -> result.is_ok(binary.parse_int(binary.from_string(first), binary.Dec))
 		[] -> False
 	}
 }

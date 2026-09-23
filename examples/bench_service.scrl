@@ -1,10 +1,10 @@
 // The benchmark workload: a login service with signed, stateless session cookies.
 // Routes: GET / (hello), POST /login, GET /me, POST /logout, GET /users/<id>.
 
-import scarlet/http.{Request, Response, Fixed, Get, Post}
-import scarlet/http/headers.{Header}
+import scarlet/http
+import scarlet/http/headers
 import scarlet/http/body
-import scarlet/binary.{Dec, Hex}
+import scarlet/binary
 import scarlet/map
 import scarlet/option
 import scarlet/os
@@ -163,20 +163,20 @@ const NAME_COOKIE = <<'Cookie'>>
 const VAL_JSON = <<'application/json'>>
 const VAL_TEXT = <<'text/plain; charset=utf-8'>>
 
-fn respond(code Int, content_type Binary, s String) Response {
+fn respond(code Int, content_type Binary, s String) http.Response {
 	bin = binary.from_string(s)
-	Response(
+	http.Response(
 		status: code,
-		headers: [Header(name: NAME_CONTENT_TYPE, value: content_type)],
-		body: Fixed(binary.byte_size(bin), body.from_binary(bin)),
+		headers: [headers.Header(name: NAME_CONTENT_TYPE, value: content_type)],
+		body: http.Fixed(binary.byte_size(bin), body.from_binary(bin)),
 	)
 }
 
-fn json(code Int, s String) Response {
+fn json(code Int, s String) http.Response {
 	respond(code, VAL_JSON, s)
 }
 
-fn unauthorized() Response {
+fn unauthorized() http.Response {
 	json(401, '{"error":"unauthorized"}')
 }
 
@@ -187,17 +187,17 @@ fn profile_json(u User) String {
 fn session_cookie(name String, sig Int) Binary {
 	binary.append(
 		binary.from_string('session=${name}.'),
-		binary.append(binary.from_int_ascii(sig, Hex), <<'; Path=/; HttpOnly'>>),
+		binary.append(binary.from_int_ascii(sig, binary.Hex), <<'; Path=/; HttpOnly'>>),
 	)
 }
 
 // Handlers
 
-fn verify_session(req Request, t Tables) Option(User) {
+fn verify_session(req http.Request, t Tables) Option(User) {
 	option.then(headers.get(req.headers, NAME_COOKIE), fn(raw) option.then(
 		cookie_get(raw, <<'session'>>),
 		fn(token) option.then(split_token(token), fn(parts) match parts {
-			(user, sig_bytes) -> match binary.parse_int(sig_bytes, Hex) {
+			(user, sig_bytes) -> match binary.parse_int(sig_bytes, binary.Hex) {
 				Ok(sig) if sig == sign(user) -> find_by_name(t, user)
 				_ -> None
 			}
@@ -215,7 +215,7 @@ fn split_token(token Binary) Option((Binary, Binary)) {
 	}
 }
 
-fn handle_login(req Request, t Tables) Response {
+fn handle_login(req http.Request, t Tables) http.Response {
 	match body.collect(req.body, 8192) {
 		Err(_) -> json(400, '{"error":"bad body"}')
 		Ok(
@@ -243,23 +243,23 @@ fn handle_login(req Request, t Tables) Response {
 	}
 }
 
-fn handle_me(req Request, t Tables) Response {
+fn handle_me(req http.Request, t Tables) http.Response {
 	match verify_session(req, t) {
 		None -> unauthorized()
 		Some(u) -> json(200, profile_json(u))
 	}
 }
 
-fn handle_logout() Response {
+fn handle_logout() http.Response {
 	http.with_header(json(200, '{"ok":true}'), NAME_SET_COOKIE, <<'session=; Path=/; Max-Age=0'>>)
 }
 
 const USERS_PREFIX = <<'/users/'>>
 const USERS_PREFIX_LEN = 7
 
-fn handle_user_by_id(path Binary, t Tables) Response {
+fn handle_user_by_id(path Binary, t Tables) http.Response {
 	rest = binary.drop_bytes(path, USERS_PREFIX_LEN)
-	user = match binary.parse_int(rest, Dec) {
+	user = match binary.parse_int(rest, binary.Dec) {
 		Ok(id) -> find_by_id(t, id)
 		Err(Nil) -> None
 	}
@@ -269,10 +269,10 @@ fn handle_user_by_id(path Binary, t Tables) Response {
 	}
 }
 
-fn route(req Request, t Tables) Response {
+fn route(req http.Request, t Tables) http.Response {
 	path = http.path(req)
 	match req.method {
-		Get -> match path {
+		http.Get -> match path {
 			<<'/'>> -> respond(200, VAL_TEXT, 'hello')
 			<<'/me'>> -> handle_me(req, t)
 			_ -> match binary.slice_bytes(path, 0, USERS_PREFIX_LEN) {
@@ -281,7 +281,7 @@ fn route(req Request, t Tables) Response {
 				_ -> json(404, '{"error":"not found"}')
 			}
 		}
-		Post -> match path {
+		http.Post -> match path {
 			<<'/login'>> -> handle_login(req, t)
 			<<'/logout'>> -> handle_logout()
 			_ -> json(404, '{"error":"not found"}')
@@ -292,7 +292,7 @@ fn route(req Request, t Tables) Response {
 
 fn port_arg() Int {
 	match os.argv() {
-		[_script, p, .._rest] -> binary.parse_int(binary.from_string(p), Dec) or DEFAULT_PORT
+		[_script, p, .._rest] -> binary.parse_int(binary.from_string(p), binary.Dec) or DEFAULT_PORT
 		_ -> DEFAULT_PORT
 	}
 }

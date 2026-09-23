@@ -225,7 +225,6 @@ fn a_closure_from_another_run_is_refused_with_other_run() {
     run_outputs(
         "import scarlet/binary\n\
          import scarlet/wire\n\
-         import scarlet/wire.{OtherRun}\n\
          fn apply(f fn(Int) Int, x Int) Int {\n\
          \tf(x)\n\
          }\n\
@@ -237,7 +236,7 @@ fn a_closure_from_another_run_is_refused_with_other_run() {
          \tzeros = <<0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0>>\n\
          \tmatch wire.decode(binary.concat([head, zeros, tail])) {\n\
          \t\tOk(g) -> println(apply(g, 1))\n\
-         \t\tErr(OtherRun(mine, theirs)) -> {\n\
+         \t\tErr(wire.OtherRun(mine, theirs)) -> {\n\
          \t\t\tprintln(binary.byte_size(mine) == 16)\n\
          \t\t\tprintln(theirs == zeros)\n\
          \t\t\tprintln(mine == theirs)\n\
@@ -260,7 +259,6 @@ fn a_tampered_function_index_is_malformed_not_a_panic() {
     run_outputs(
         "import scarlet/binary\n\
          import scarlet/wire\n\
-         import scarlet/wire.{Malformed}\n\
          fn apply(f fn(Int) Int, x Int) Int {\n\
          \tf(x)\n\
          }\n\
@@ -272,7 +270,7 @@ fn a_tampered_function_index_is_malformed_not_a_panic() {
          \tprintln(count == <<0>>)\n\
          \tmatch wire.decode(binary.concat([head, <<128, 128, 64>>, count])) {\n\
          \t\tOk(g) -> println(apply(g, 1))\n\
-         \t\tErr(Malformed(offset, what)) -> {\n\
+         \t\tErr(wire.Malformed(offset, what)) -> {\n\
          \t\t\tprintln(offset)\n\
          \t\t\tprintln(what)\n\
          \t\t}\n\
@@ -292,7 +290,6 @@ fn a_tampered_capture_count_is_malformed() {
     run_outputs(
         "import scarlet/binary\n\
          import scarlet/wire\n\
-         import scarlet/wire.{Malformed}\n\
          fn apply(f fn(Int) Int, x Int) Int {\n\
          \tf(x)\n\
          }\n\
@@ -302,7 +299,7 @@ fn a_tampered_capture_count_is_malformed() {
          \tup_to_count = binary.slice_bytes(bytes, 0, size - 1) or <<>>\n\
          \tmatch wire.decode(binary.concat([up_to_count, <<1, 11>>])) {\n\
          \t\tOk(g) -> println(apply(g, 1))\n\
-         \t\tErr(Malformed(offset, what)) -> {\n\
+         \t\tErr(wire.Malformed(offset, what)) -> {\n\
          \t\t\tprintln(offset == size - 1)\n\
          \t\t\tprintln(what)\n\
          \t\t}\n\
@@ -324,7 +321,6 @@ fn a_capture_count_short_of_the_functions_is_malformed() {
     run_outputs(
         "import scarlet/binary\n\
          import scarlet/wire\n\
-         import scarlet/wire.{Malformed}\n\
          fn apply(f fn(Int) Int, x Int) Int {\n\
          \tf(x)\n\
          }\n\
@@ -337,7 +333,7 @@ fn a_capture_count_short_of_the_functions_is_malformed() {
          \tup_to_count = binary.slice_bytes(bytes, 0, size - 3) or <<>>\n\
          \tmatch wire.decode(binary.concat([up_to_count, <<0>>])) {\n\
          \t\tOk(g) -> println(apply(g, 1))\n\
-         \t\tErr(Malformed(offset, what)) -> {\n\
+         \t\tErr(wire.Malformed(offset, what)) -> {\n\
          \t\t\tprintln(offset == size - 3)\n\
          \t\t\tprintln(what)\n\
          \t\t}\n\
@@ -357,7 +353,6 @@ fn a_tampered_capture_tag_is_malformed() {
     run_outputs(
         "import scarlet/binary\n\
          import scarlet/wire\n\
-         import scarlet/wire.{Malformed}\n\
          fn apply(f fn(Int) Int, x Int) Int {\n\
          \tf(x)\n\
          }\n\
@@ -370,7 +365,7 @@ fn a_tampered_capture_tag_is_malformed() {
          \tprintln(value == <<10>>)\n\
          \tmatch wire.decode(binary.concat([up_to_tag, <<255>>, value])) {\n\
          \t\tOk(g) -> println(apply(g, 1))\n\
-         \t\tErr(Malformed(offset, what)) -> {\n\
+         \t\tErr(wire.Malformed(offset, what)) -> {\n\
          \t\t\tprintln(offset == size - 2)\n\
          \t\t\tprintln(what)\n\
          \t\t}\n\

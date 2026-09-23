@@ -358,10 +358,10 @@ fn local_bindings_excluded_from_symbol_surfaces_but_stay_resolvable() {
 }
 
 const ALIAS_LIB: &str = "pub fn original() Int { 42 }\n";
-const ALIAS_MAIN: &str = "import ./lib.{original as alias}\n\
+const ALIAS_MAIN: &str = "import ./lib as alias\n\
 pub fn main() {\n\
-\tx = alias()\n\
-\ty = alias() + 1\n\
+\tx = alias.original()\n\
+\ty = alias.original() + 1\n\
 \tprintln(x + y)\n\
 }\n";
 
@@ -382,10 +382,9 @@ fn span_text(src: &str, sp: &Span) -> String {
 }
 
 #[test]
-fn rename_imported_symbol_does_not_capture_local_alias() {
-    // Renaming the imported `original` must rewrite only spans that spell
-    // `original`. Touching the `alias` binder or its uses would produce
-    // `{renamed as renamed}` — name capture that no longer compiles.
+fn rename_imported_symbol_does_not_touch_the_module_alias() {
+    // Renaming `original` must rewrite only spans that spell `original`: the
+    // member of `alias.original()`, never the qualifier or the whole access.
     let p = alias_project();
     let s = checked_with(&p, ALIAS_MAIN);
 
@@ -405,60 +404,13 @@ fn rename_imported_symbol_does_not_capture_local_alias() {
         let text = span_text(src, sp);
         assert_eq!(
             text, "original",
-            "rename of `original` must never rewrite `{text}` (at {m:?} {sp:?}); \
-             touching the alias binder or its uses captures the name"
-        );
-    }
-    assert_eq!(
-        spans.len(),
-        2,
-        "rename of `original` should cover its declaration and the import's \
-         `original` token only: {spans:?}"
-    );
-}
-
-#[test]
-fn rename_local_alias_does_not_touch_imported_symbol() {
-    // Renaming the local alias must rewrite only `alias` occurrences, all in
-    // the entry module.
-    let p = alias_project();
-    let s = checked_with(&p, ALIAS_MAIN);
-
-    // 2nd occurrence of `alias` is the first use (`x = alias()`).
-    let (l, c) = cursor(ALIAS_MAIN, "alias", 2, 1);
-
-    // Navigation is not split the way the rename class is: goto-def still
-    // chains through to `original` in lib.
-    let (gm, _) = s
-        .definition("main", l, c)
-        .expect("goto-def on the alias use resolves");
-    assert_eq!(
-        gm.last().map(String::as_str),
-        Some("lib"),
-        "goto-def on the alias must chain to the imported `original` in lib, got {gm:?}"
-    );
-
-    let (defid, _) = s
-        .prepare_rename("main", l, c)
-        .expect("a use of the local alias is resolvable for rename");
-
-    let spans = s.rename(defid);
-    for (m, sp) in &spans {
-        assert_eq!(
-            m.last().map(String::as_str),
-            Some("main"),
-            "alias rename escaped the entry module into {m:?}"
-        );
-        let text = span_text(ALIAS_MAIN, sp);
-        assert_eq!(
-            text, "alias",
-            "rename of the alias must only rewrite `alias`, got `{text}` at {sp:?}"
+            "rename of `original` must never rewrite `{text}` (at {m:?} {sp:?})"
         );
     }
     assert_eq!(
         spans.len(),
         3,
-        "alias rename should cover its binder and both uses: {spans:?}"
+        "rename of `original` should cover its declaration and both uses: {spans:?}"
     );
 }
 
@@ -609,12 +561,12 @@ fn constructor_in_match_pattern_is_a_graph_reference() {
 // through `IncrementalSession` exactly as through `al check`. A failure means
 // session hydration of the embedded stdlib blob mangled a declaration.
 const HTTP_ENTRY: &str = "import scarlet/binary\n\
-import scarlet/http/h1.{Done, NeedMore, Bad}\n\
+import scarlet/http/h1\n\
 pub fn main() {\n\
 \tr = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
-\t\tDone(_, _, _, _, _, consumed) -> consumed\n\
-\t\tNeedMore -> 0 - 1\n\
-\t\tBad(s) -> s\n\
+\t\th1.Done(_, _, _, _, _, consumed) -> consumed\n\
+\t\th1.NeedMore -> 0 - 1\n\
+\t\th1.Bad(s) -> s\n\
 \t}\n\
 \tprintln(r)\n\
 }\n";
@@ -781,59 +733,4 @@ fn one_used_constructor_is_enough_to_keep_the_type() {
     p.write("a.scrl", entry);
     let s = checked_with(&p, entry);
     assert_no_msg(&unused_msgs(&s), "unused type `Color`");
-}
-
-/// `import ./lib.{helper}` whose item is never mentioned again: the binding
-/// token in the import list is not a use, so the import is reported unused.
-/// Adding a real call unflags it, so the check is live rather than disabled.
-#[test]
-fn unused_selective_import_item_binding_token_is_not_a_use() {
-    let p = Project::new("selective_unused");
-    p.write("lib.scrl", "pub fn helper() Int { 7 }\n");
-    let entry = "import ./lib.{helper}\npub fn main() {\n\tprintln(1)\n}\n";
-    p.write("a.scrl", entry);
-    assert_msg_eq(
-        &unused_msgs(&checked_with(&p, entry)),
-        "unused import `lib`",
-    );
-
-    let p2 = Project::new("selective_used");
-    p2.write("lib.scrl", "pub fn helper() Int { 7 }\n");
-    let used = "import ./lib.{helper}\npub fn main() {\n\tprintln(helper())\n}\n";
-    p2.write("a.scrl", used);
-    assert_no_msg(&unused_msgs(&checked_with(&p2, used)), "unused import");
-}
-
-/// The `{helper}` binding token is still a reference site, so rename resolves
-/// from it and every rewritten span spells `helper`.
-#[test]
-fn rename_selective_import_item_rewrites_the_binding_token() {
-    let p = Project::new("selective_rename");
-    let lib = "pub fn helper() Int { 7 }\n";
-    p.write("lib.scrl", lib);
-    let entry = "import ./lib.{helper}\npub fn main() {\n\tx = helper()\n\tprintln(x)\n}\n";
-    p.write("a.scrl", entry);
-    let s = checked_with(&p, entry);
-
-    // Cursor on the binding token inside the import list.
-    let (l, c) = cursor(entry, "helper", 1, 1);
-    let (defid, _) = s
-        .prepare_rename("main", l, c)
-        .expect("the `{helper}` token resolves to lib's `helper`");
-    assert_eq!(defid.entity, EntityKind::Function);
-
-    let spans = s.rename(defid);
-    for (m, sp) in &spans {
-        let src = if m.last().map(String::as_str) == Some("lib") {
-            lib
-        } else {
-            entry
-        };
-        assert_eq!(span_text(src, sp), "helper", "at {m:?} {sp:?}");
-    }
-    assert_eq!(
-        spans.len(),
-        3,
-        "rename must cover the declaration, the import token and the use: {spans:?}"
-    );
 }

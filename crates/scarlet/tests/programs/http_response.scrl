@@ -16,22 +16,13 @@
 
 import scarlet/array
 import scarlet/binary
-import scarlet/http/client.{Io, Request}
-import scarlet/http/h1.{
-	BodyChunked,
-	BodyInvalid,
-	BodyLength,
-	BodyNone,
-	BodyUntilClose,
-	ResponseBad,
-	ResponseDone,
-	ResponseNeedMore,
-}
-import scarlet/http/headers.{Header}
+import scarlet/http/client
+import scarlet/http/h1
+import scarlet/http/headers
 import scarlet/int
 import scarlet/http/url
-import scarlet/net/socket.{Closed, Data, Read}
-import scarlet/process.{Subject}
+import scarlet/net/socket
+import scarlet/process
 import scarlet/result
 import scarlet/string
 
@@ -84,12 +75,12 @@ fn grow(b Binary, n Int) Binary {
 
 fn show_response(label String, input Binary) Nil {
 	out = match h1.parse_response(input, 0) {
-		ResponseDone(version, code, reason, hdrs, _, consumed) ->
+		h1.ResponseDone(version, code, reason, hdrs, _, consumed) ->
 			'Done version=${version} code=${code} reason=${q(
 				reason,
 			)} headers=${array.length(hdrs)} consumed=${consumed}'
-		ResponseNeedMore -> 'NeedMore'
-		ResponseBad(err) -> 'Bad ${err}'
+		h1.ResponseNeedMore -> 'NeedMore'
+		h1.ResponseBad(err) -> 'Bad ${err}'
 	}
 	println('${label}: ${out}')
 }
@@ -100,15 +91,15 @@ fn show_response(label String, input Binary) Nil {
 
 fn show_response_framing(label String, code Int, input Binary) Nil {
 	out = match h1.parse_response(input, 0) {
-		ResponseDone(_, _, _, hdrs, _, _) -> match h1.response_framing(hdrs, code) {
-			BodyNone -> 'BodyNone'
-			BodyLength(n) -> 'BodyLength ${n}'
-			BodyChunked -> 'BodyChunked'
-			BodyUntilClose -> 'BodyUntilClose'
-			BodyInvalid(err) -> 'BodyInvalid ${err}'
+		h1.ResponseDone(_, _, _, hdrs, _, _) -> match h1.response_framing(hdrs, code) {
+			h1.BodyNone -> 'BodyNone'
+			h1.BodyLength(n) -> 'BodyLength ${n}'
+			h1.BodyChunked -> 'BodyChunked'
+			h1.BodyUntilClose -> 'BodyUntilClose'
+			h1.BodyInvalid(err) -> 'BodyInvalid ${err}'
 		}
-		ResponseNeedMore -> 'parse: NeedMore'
-		ResponseBad(err) -> 'parse: Bad ${err}'
+		h1.ResponseNeedMore -> 'parse: NeedMore'
+		h1.ResponseBad(err) -> 'parse: Bad ${err}'
 	}
 	println('${label}: ${out}')
 }
@@ -138,28 +129,28 @@ fn show_url(text String) Nil {
 // lockstep.
 type Wire {
 	// Hand back up to `max` more scripted bytes, or Closed once spent.
-	Want(max Int, reply Subject(Read))
+	Want(max Int, reply process.Subject(socket.Read))
 	// Record bytes the client wrote.
 	Wrote(bytes Binary)
 	// Answer everything written so far.
-	Dump(reply Subject(Binary))
+	Dump(reply process.Subject(Binary))
 	// End the process, and say so. Acknowledged rather than fire-and-forget:
 	// a parked process keeps the whole program alive (the same trap
 	// `examples/sockets.scrl` documents for an unclosed listener), so the
 	// exchange must not finish until this one has actually gone.
-	Stop(reply Subject(Nil))
+	Stop(reply process.Subject(Nil))
 }
 
-fn wire_loop(inbox Subject(Wire), script Binary, written Binary) Nil {
+fn wire_loop(inbox process.Subject(Wire), script Binary, written Binary) Nil {
 	match process.receive(inbox) {
 		Want(max, reply) -> {
 			n = int.min(max, binary.byte_size(script))
 			if n <= 0 {
-				process.send(reply, Closed)
+				process.send(reply, socket.Closed)
 				wire_loop(inbox, script, written)
 			} else {
 				(chunk, rest) = binary.split_at_bytes(script, n)
-				process.send(reply, Data(chunk))
+				process.send(reply, socket.Data(chunk))
 				wire_loop(inbox, rest, written)
 			}
 		}
@@ -173,7 +164,7 @@ fn wire_loop(inbox Subject(Wire), script Binary, written Binary) Nil {
 }
 
 // Shut a scripted transport down and wait for it to be gone.
-fn stop(inbox Subject(Wire)) Nil {
+fn stop(inbox process.Subject(Wire)) Nil {
 	reply = process.subject()
 	process.send(inbox, Stop(reply))
 	process.receive(reply)
@@ -182,7 +173,7 @@ fn stop(inbox Subject(Wire)) Nil {
 // `chunk` bounds how much the transport hands over per read, so the client's
 // incremental paths (NeedMore, partial bodies) are exercised rather than
 // hidden behind one read that returns everything.
-fn scripted(script Binary) Subject(Wire) {
+fn scripted(script Binary) process.Subject(Wire) {
 	handshake = process.subject()
 	_ = process.spawn(fn() {
 		inbox = process.subject()
@@ -193,8 +184,8 @@ fn scripted(script Binary) Subject(Wire) {
 	inbox
 }
 
-fn wire_io(inbox Subject(Wire), chunk Int) Io {
-	Io(
+fn wire_io(inbox process.Subject(Wire), chunk Int) client.Io {
+	client.Io(
 		read: fn(max, _deadline) {
 			reply = process.subject()
 			process.send(inbox, Want(int.min(max, chunk), reply))
@@ -214,7 +205,7 @@ fn show_exchange(label String, req_url String, method Binary, script Binary, chu
 		Ok(u) -> {
 			inbox = scripted(script)
 			io = wire_io(inbox, chunk)
-			req = Request(method: method, url: u, headers: [], body: <<>>)
+			req = client.Request(method: method, url: u, headers: [], body: <<>>)
 			out = match client.send(io, req) {
 				Ok(r) ->
 					'${r.status} reason=${q(r.reason)} headers=${array.length(
@@ -237,7 +228,7 @@ fn show_bounded(label String, script Binary, max_body Int) Nil {
 		port: 80,
 		target: <<'/'>>,
 	)
-	req = Request(method: <<'GET'>>, url: u, headers: [], body: <<>>)
+	req = client.Request(method: <<'GET'>>, url: u, headers: [], body: <<>>)
 	out = match client.send_bounded(io, req, max_body) {
 		Ok(r) -> '${r.status} body=${q(r.body)}'
 		Err(e) -> 'Err ${string.inspect(e)}'
@@ -248,13 +239,13 @@ fn show_bounded(label String, script Binary, max_body Int) Nil {
 
 // The request head is asserted as bytes: the routing point may not quietly
 // change what goes on the wire.
-fn show_written(label String, req_url String, method Binary, extra Array(Header), body Binary) Nil {
+fn show_written(label String, req_url String, method Binary, extra Array(headers.Header), body Binary) Nil {
 	match url.parse(req_url) {
 		Err(e) -> println('${label}: url Err ${string.inspect(e)}')
 		Ok(u) -> {
 			inbox = scripted(<<'HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n'>>)
 			io = wire_io(inbox, 65536)
-			req = Request(method: method, url: u, headers: extra, body: body)
+			req = client.Request(method: method, url: u, headers: extra, body: body)
 			outcome = match client.send(io, req) {
 				Ok(r) -> 'sent, got ${r.status}'
 				Err(e) -> 'Err ${string.inspect(e)}'
@@ -324,7 +315,7 @@ pub fn main() {
 	println('== consumed threads to the body ==')
 	framed = <<'HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello-and-then-some'>>
 	match h1.parse_response(framed, 0) {
-		ResponseDone(_, _, _, _, _, consumed) -> {
+		h1.ResponseDone(_, _, _, _, _, consumed) -> {
 			// NOT an argued-unreachable arm. `5` is this case's advertised
 			// Content-Length, so a `consumed` that does not thread to the body
 			// is the exact failure this line exists to catch — it has to print
@@ -556,7 +547,7 @@ pub fn main() {
 		'POST with a body',
 		'http://example.com/e',
 		<<'POST'>>,
-		[Header(name: <<'Content-Type'>>, value: <<'text/plain'>>)],
+		[headers.Header(name: <<'Content-Type'>>, value: <<'text/plain'>>)],
 		<<'hi'>>,
 	)
 	// A caller-set Content-Length is REPLACED, not duplicated: two disagreeing
@@ -565,14 +556,14 @@ pub fn main() {
 		'caller-set Content-Length is replaced',
 		'http://example.com/e',
 		<<'POST'>>,
-		[Header(name: <<'content-length'>>, value: <<'999'>>)],
+		[headers.Header(name: <<'content-length'>>, value: <<'999'>>)],
 		<<'hi'>>,
 	)
 	show_written(
 		'caller-set Host is replaced',
 		'http://example.com/e',
 		<<'GET'>>,
-		[Header(name: <<'Host'>>, value: <<'evil.example'>>)],
+		[headers.Header(name: <<'Host'>>, value: <<'evil.example'>>)],
 		<<>>,
 	)
 	// A header value carrying CRLF would split the request head into two
@@ -581,14 +572,14 @@ pub fn main() {
 		'CRLF in a header value is refused',
 		'http://example.com/e',
 		<<'GET'>>,
-		[Header(name: <<'X-A'>>, value: <<'b\r\nX-Injected: yes'>>)],
+		[headers.Header(name: <<'X-A'>>, value: <<'b\r\nX-Injected: yes'>>)],
 		<<>>,
 	)
 	show_written(
 		'a header name that is not a token is refused',
 		'http://example.com/e',
 		<<'GET'>>,
-		[Header(name: <<'X A'>>, value: <<'b'>>)],
+		[headers.Header(name: <<'X A'>>, value: <<'b'>>)],
 		<<>>,
 	)
 

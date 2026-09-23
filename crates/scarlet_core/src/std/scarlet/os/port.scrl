@@ -20,19 +20,17 @@
  * killed. Nothing a child does can leave it running after its port is gone.
  */
 import scarlet/binary
-import scarlet/io.{IoError}
-import scarlet/map.{Map}
+import scarlet/io
 import scarlet/map
-import scarlet/net/error.{NetError, UnexpectedEof}
-import scarlet/net/socket.{Closed, Connection, Data, Read}
-import scarlet/time.{Instant}
+import scarlet/net/error
+import scarlet/net/socket
 import scarlet/time
 
 // A running child. `os_pid` is the child's operating-system process id, for
 // logs and diagnostics; the runtime owns the child, so there is nothing to do
 // with the number beyond reporting it.
 pub opaque type Port {
-	conn Connection
+	conn socket.Connection
 	os_pid Int
 }
 
@@ -51,40 +49,40 @@ pub type ExitStatus {
 // been started; a program that cannot be started is reported as the IoError
 // the operating system gave — NotFound(program), PermissionDenied(program),
 // or an Errno — and nothing is left running.
-pub fn spawn(program String, args Array(String)) Result(Port, IoError) {
+pub fn spawn(program String, args Array(String)) Result(Port, io.IoError) {
 	spawn_env(program, args, map.new())
 }
 
 // As `spawn`, with `env` added to the inherited environment; a variable named
 // in `env` overrides the inherited value.
-pub fn spawn_env(program String, args Array(String), env Map(String, String)) Result(Port, IoError) {
+pub fn spawn_env(program String, args Array(String), env map.Map(String, String)) Result(Port, io.IoError) {
 	spawn_with(program, args, map.to_list(env))
 }
 
 @vm(port__spawn)
-fn spawn_with(program String, args Array(String), env Array((String, String))) Result(Port, IoError)
+fn spawn_with(program String, args Array(String), env Array((String, String))) Result(Port, io.IoError)
 
 // Read whatever the child has written, up to `max` bytes, parking until at
 // least one byte arrives. `Ok(Closed)` means the child closed its stdout —
 // almost always because it exited; `close` then reports how.
 @vm(port__read)
-pub fn read(p Port, max Int) Result(Read, NetError)
+pub fn read(p Port, max Int) Result(socket.Read, error.NetError)
 
 // Read exactly `count` bytes, parking until they have all arrived. Errs with
 // UnexpectedEof if the child closes its stdout first. A `count` of zero or
 // less asks for nothing and returns Ok(<<>>) without touching the port.
-pub fn read_exact(p Port, count Int) Result(Binary, NetError) {
+pub fn read_exact(p Port, count Int) Result(Binary, error.NetError) {
 	read_exact_loop(p, count, <<>>)
 }
 
-fn read_exact_loop(p Port, remaining Int, acc Binary) Result(Binary, NetError) {
+fn read_exact_loop(p Port, remaining Int, acc Binary) Result(Binary, error.NetError) {
 	if remaining <= 0 {
 		Ok(acc)
 	} else {
 		match read(p, remaining) {
-			Ok(Data(b)) ->
+			Ok(socket.Data(b)) ->
 				read_exact_loop(p, remaining - binary.byte_size(b), binary.append(acc, b))
-			Ok(Closed) -> Err(UnexpectedEof)
+			Ok(socket.Closed) -> Err(error.UnexpectedEof)
 			Err(e) -> Err(e)
 		}
 	}
@@ -92,27 +90,27 @@ fn read_exact_loop(p Port, remaining Int, acc Binary) Result(Binary, NetError) {
 
 // As `read`, but gives up with Err(TimedOut) once `timeout_ms` milliseconds
 // have passed with nothing to read. The deadline is captured once, up front.
-pub fn read_within(p Port, max Int, timeout_ms Int) Result(Read, NetError) {
+pub fn read_within(p Port, max Int, timeout_ms Int) Result(socket.Read, error.NetError) {
 	read_until(p, max, time.add_ms(time.monotonic(), timeout_ms))
 }
 
 // As `read`, but errs with TimedOut once the absolute Instant `deadline`
 // (from `time.monotonic()`) is reached.
-pub fn read_until(p Port, max Int, deadline Instant) Result(Read, NetError) {
+pub fn read_until(p Port, max Int, deadline time.Instant) Result(socket.Read, error.NetError) {
 	read_until_ms(p, max, time.to_deadline_ms(deadline))
 }
 
 @vm(port__read_until)
-fn read_until_ms(p Port, max Int, deadline_ms Int) Result(Read, NetError)
+fn read_until_ms(p Port, max Int, deadline_ms Int) Result(socket.Read, error.NetError)
 
 // Write `data` to the child's stdin, parking while its pipe is full. A child
 // that has exited is reported as BrokenPipe.
 @vm(port__write)
-pub fn write(p Port, data Binary) Result(Nil, NetError)
+pub fn write(p Port, data Binary) Result(Nil, error.NetError)
 
 // Write every binary in `parts` to the child's stdin as one vectored write.
 @vm(port__write_parts)
-pub fn write_parts(p Port, parts Array(Binary)) Result(Nil, NetError)
+pub fn write_parts(p Port, parts Array(Binary)) Result(Nil, error.NetError)
 
 // Close the port and collect the child, parking until it has ended: its pipes
 // are closed at once, and it is signalled on the schedule described above if
@@ -121,4 +119,4 @@ pub fn write_parts(p Port, parts Array(Binary)) Result(Nil, NetError)
 // as closing a socket twice does. A process that must not wait — a supervisor
 // with other work — can spawn a process to do the closing.
 @vm(port__close)
-pub fn close(p Port) Result(ExitStatus, NetError)
+pub fn close(p Port) Result(ExitStatus, error.NetError)

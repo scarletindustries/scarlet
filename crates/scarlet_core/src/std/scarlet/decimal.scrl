@@ -8,7 +8,7 @@
 // The type is opaque, so code can wrap it in its own opaque type for nominal
 // safety: `pub opaque type Usd { Usd(amount Decimal) }`.
 
-import scarlet/binary.{Dec}
+import scarlet/binary
 import scarlet/float
 import scarlet/int
 import scarlet/option
@@ -292,7 +292,7 @@ fn tail(b Binary) Binary {
 
 fn parse_unsigned(b Binary) Option(Decimal) {
 	match binary.index_of(b, <<'.'>>, 0) {
-		None -> match binary.parse_int(b, Dec) {
+		None -> match binary.parse_int(b, binary.Dec) {
 			Ok(n) -> Some(Decimal(n, 0))
 			Err(Nil) -> None
 		}
@@ -305,8 +305,8 @@ fn parse_unsigned(b Binary) Option(Decimal) {
 
 fn parse_parts(whole Binary, frac Binary) Option(Decimal) {
 	k = binary.byte_size(frac)
-	match binary.parse_int(whole, Dec) {
-		Ok(w) -> match binary.parse_int(frac, Dec) {
+	match binary.parse_int(whole, binary.Dec) {
+		Ok(w) -> match binary.parse_int(frac, binary.Dec) {
 			Ok(f) -> Some(Decimal(w * pow10(k) + f, k))
 			Err(Nil) -> None
 		}

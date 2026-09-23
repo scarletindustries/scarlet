@@ -70,7 +70,11 @@ impl ElabCtx for Compiler {
         let place = self.resolve_variable(id);
         let den = match (Denotation::from_kind(kind), place) {
             (Some(fixed), _) => fixed,
-            (None, Some(place)) => place,
+            (None, Some(Place::Outside(den))) => den,
+            (None, Some(Place::ThisFunction)) => typed_ir::elaborator_bug(
+                "a name this function binds has no binding in the elaborator",
+                Span::DUMMY,
+            ),
             // `analyse_module` unwinds `self.locals` before `__main__`
             // elaborates, so a toplevel decl's own name is only findable on
             // its `ToplevelDecl`. Reached for an intra-SCC forward ref.

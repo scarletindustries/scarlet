@@ -1,32 +1,15 @@
 import scarlet/array
-import scarlet/binary.{Dec}
-import scarlet/http/h1.{
-	BadFraming,
-	BadResponse,
-	BodyChunked,
-	BodyInvalid,
-	BodyLength,
-	BodyNone,
-	BodyUntilClose,
-	ChunkedBad,
-	ChunkedDone,
-	ChunkedNeedMore,
-	HeadFlags,
-	ResponseBad,
-	ResponseDone,
-	ResponseFraming,
-	ResponseNeedMore,
-	Version,
-}
-import scarlet/http/headers.{Headers}
-import scarlet/http/url.{Http, Https, Url, UrlError}
+import scarlet/binary
+import scarlet/http/h1
+import scarlet/http/headers
+import scarlet/http/url
 import scarlet/int
 import scarlet/net
-import scarlet/net/error.{NetError, UnexpectedEof}
-import scarlet/net/socket.{Closed, Data, Read, Socket}
-import scarlet/net/tls.{TlsError, TlsSocket}
+import scarlet/net/error
+import scarlet/net/socket
+import scarlet/net/tls
 import scarlet/result
-import scarlet/time.{Instant}
+import scarlet/time
 
 // The HTTP/1.1 CLIENT: issue one request, read one response back.
 //
@@ -91,7 +74,7 @@ import scarlet/time.{Instant}
 
 // One transport operation each. Aliases rather than inline function types so
 // the three fields of `Io` cannot be given in the wrong order and typecheck.
-pub type Reader = fn(Int, Instant) Result(Read, ClientError)
+pub type Reader = fn(Int, time.Instant) Result(socket.Read, ClientError)
 
 pub type Writer = fn(Binary) Result(Nil, ClientError)
 
@@ -133,19 +116,19 @@ pub type Io {
 // arm to match, and no failure can arrive by two different routes.
 pub type ClientError {
 	// The URL string is not an absolute http(s) URL.
-	BadUrl(err UrlError)
+	BadUrl(err url.UrlError)
 	// A caller-supplied header field carries CR, LF or NUL, or a name that is
 	// not a token. Refused BEFORE the connection is opened: such a field would
 	// otherwise split the request head on the wire, which is how one request
 	// becomes two at a proxy.
 	BadRequestHeaders
 	// A cleartext (`http`) socket failure.
-	Transport(err NetError)
+	Transport(err error.NetError)
 	// A TLS (`https`) failure, certificate problems included.
-	Tls(err TlsError)
+	Tls(err tls.TlsError)
 	// The peer's response head is not HTTP/1.x, or its framing fields
 	// contradict each other.
-	MalformedResponse(err BadResponse)
+	MalformedResponse(err h1.BadResponse)
 	// The body exceeded the byte budget the request was sent under. Carries
 	// that budget, not the size, which was never measured — the read stops at
 	// the limit rather than buffering past it to find out.
@@ -164,16 +147,16 @@ pub type ClientError {
 // about a message that has already arrived. `Headers`, `Version` and
 // `HeadFlags` are shared with the server side unchanged.
 pub type Response {
-	version Version
+	version h1.Version
 	status Int
 	// The reason phrase exactly as it arrived, possibly empty. Present because
 	// a proxy has to forward it; RFC 9112 §4 says nothing may be decided on it.
 	reason Binary
-	headers Headers
+	headers headers.Headers
 	// The `Connection` tokens the head parser recorded, for
 	// `h1.should_close(r.version, r.flags)`. Read off the header section as it
 	// arrived, so rewriting `headers` cannot move them.
-	flags HeadFlags
+	flags h1.HeadFlags
 	body Binary
 }
 
@@ -185,10 +168,10 @@ pub type Request {
 	// routing a request it received; a client is writing one, and `Other(m)`
 	// would be an extra unwrap on every call.
 	method Binary
-	url Url
+	url url.Url
 	// Fields to send in addition to `Host`, `Content-Length` and `Connection`.
 	// Any of those three given here is overwritten, not duplicated.
-	headers Headers
+	headers headers.Headers
 	body Binary
 }
 
@@ -217,7 +200,7 @@ const HEAD = <<'HEAD'>>
 
 // An `Io` over a cleartext socket. Naming this is what choosing cleartext
 // looks like; there is no path from a URL to here except `url.Http`.
-pub fn plain(sock Socket) Io {
+pub fn plain(sock socket.Socket) Io {
 	Io(
 		read: fn(max, deadline) result.map_err(socket.read_until(sock, max, deadline), Transport),
 		write: fn(bytes) result.map_err(socket.write(sock, bytes), Transport),
@@ -226,7 +209,7 @@ pub fn plain(sock Socket) Io {
 }
 
 // An `Io` over an authenticated, encrypted connection.
-pub fn secure(sock TlsSocket) Io {
+pub fn secure(sock tls.TlsSocket) Io {
 	Io(
 		read: fn(max, deadline) result.map_err(tls.read_until(sock, max, deadline), Tls),
 		write: fn(bytes) result.map_err(tls.write(sock, bytes), Tls),
@@ -238,14 +221,14 @@ pub fn secure(sock TlsSocket) Io {
 // decides a transport: `https` opens TLS and verifies the certificate against
 // `u.host`, `http` opens a bare socket. Every caller above this is scheme-
 // agnostic, and no caller below it can be handed the wrong kind of handle.
-pub fn connect(u Url) Result(Io, ClientError) {
+pub fn connect(u url.Url) Result(Io, ClientError) {
 	match u.scheme {
-		Http -> result.map(result.map_err(net.connect(u.host, u.port), Transport), plain)
+		url.Http -> result.map(result.map_err(net.connect(u.host, u.port), Transport), plain)
 		// tls.connect verifies the certificate against the same `u.host` it
 		// dials. Passing anything else here — a pooled connection's remembered
 		// name, a Host header — is the confusion HostnameMismatch exists to
 		// catch, so the argument is the URL's own field and nothing else.
-		Https -> result.map(result.map_err(tls.connect(u.host, u.port), Tls), secure)
+		url.Https -> result.map(result.map_err(tls.connect(u.host, u.port), Tls), secure)
 	}
 }
 
@@ -258,7 +241,7 @@ pub fn fetch_bounded(req Request, max_body Int) Result(Response, ClientError) {
 	fetch_until(req, max_body, time.deadline_in_ms(READ_TIMEOUT_MS))
 }
 
-pub fn fetch_until(req Request, max_body Int, deadline Instant) Result(Response, ClientError) {
+pub fn fetch_until(req Request, max_body Int, deadline time.Instant) Result(Response, ClientError) {
 	io <- result.then(connect(req.url))
 	response = send_until(io, req, max_body, deadline)
 	// The connection is closed either way: the request said `Connection:
@@ -298,7 +281,7 @@ pub fn send_until(
 	io Io,
 	req Request,
 	max_body Int,
-	deadline Instant,
+	deadline time.Instant,
 ) Result(Response, ClientError) {
 	head <- result.then(serialize_request(req))
 	emit = io.write
@@ -331,7 +314,7 @@ fn serialize_request(req Request) Result(Binary, ClientError) {
 			headers.set(
 				headers.set(req.headers, NAME_HOST, url.authority(req.url)),
 				NAME_CONTENT_LENGTH,
-				binary.from_int_ascii(binary.byte_size(req.body), Dec),
+				binary.from_int_ascii(binary.byte_size(req.body), binary.Dec),
 			),
 			NAME_CONNECTION,
 			VAL_CLOSE,
@@ -360,13 +343,13 @@ fn read_response(
 	io Io,
 	method Binary,
 	max_body Int,
-	deadline Instant,
+	deadline time.Instant,
 ) Result(Response, ClientError) {
 	head <- result.then(read_head(io, EMPTY, max_body, deadline))
 	framing = if binary.eq_ignore_ascii_case(method, HEAD) {
 		// §6.3 rule 1, and the one rule h1 cannot apply: a response to HEAD
 		// has no body however its fields frame one. h1 never saw the request.
-		BodyNone
+		h1.BodyNone
 	} else {
 		h1.response_framing(head.headers, head.status)
 	}
@@ -388,17 +371,17 @@ fn read_response(
 // completes the head has usually brought body bytes with it, and dropping
 // them would deadlock a caller waiting for a body that already arrived.
 type Head {
-	version Version
+	version h1.Version
 	status Int
 	reason Binary
-	headers Headers
-	flags HeadFlags
+	headers headers.Headers
+	flags h1.HeadFlags
 	rest Binary
 }
 
-fn read_head(io Io, buf Binary, max_body Int, deadline Instant) Result(Head, ClientError) {
+fn read_head(io Io, buf Binary, max_body Int, deadline time.Instant) Result(Head, ClientError) {
 	match h1.parse_response(buf, 0) {
-		ResponseDone(version, code, reason, hs, flags, consumed) -> {
+		h1.ResponseDone(version, code, reason, hs, flags, consumed) -> {
 			rest = binary.drop_bytes(buf, consumed)
 			if code >= 100 && code < 200 {
 				// An interim response. It has no body and is not the answer,
@@ -420,8 +403,8 @@ fn read_head(io Io, buf Binary, max_body Int, deadline Instant) Result(Head, Cli
 				)
 			}
 		}
-		ResponseBad(err) -> Err(MalformedResponse(err))
-		ResponseNeedMore -> {
+		h1.ResponseBad(err) -> Err(MalformedResponse(err))
+		h1.ResponseNeedMore -> {
 			// The head shares the body's budget: a peer that never ends the
 			// head must not be able to make this buffer without limit.
 			more <- result.then(read_more(io, buf, max_body, deadline))
@@ -432,14 +415,14 @@ fn read_head(io Io, buf Binary, max_body Int, deadline Instant) Result(Head, Cli
 
 // One read appended to `buf`, refusing to grow past `limit`. A clean close
 // here is UnexpectedEof: every caller is mid-message and wanted more bytes.
-fn read_more(io Io, buf Binary, limit Int, deadline Instant) Result(Binary, ClientError) {
+fn read_more(io Io, buf Binary, limit Int, deadline time.Instant) Result(Binary, ClientError) {
 	if binary.byte_size(buf) >= limit {
 		Err(BodyTooLarge(limit))
 	} else {
 		pull = io.read
 		match pull(int.min(READ_SIZE, limit - binary.byte_size(buf)), deadline) {
-			Ok(Data(bytes)) -> Ok(binary.append(buf, bytes))
-			Ok(Closed) -> Err(Transport(UnexpectedEof))
+			Ok(socket.Data(bytes)) -> Ok(binary.append(buf, bytes))
+			Ok(socket.Closed) -> Err(Transport(error.UnexpectedEof))
 			Err(e) -> Err(e)
 		}
 	}
@@ -447,23 +430,23 @@ fn read_more(io Io, buf Binary, limit Int, deadline Instant) Result(Binary, Clie
 
 fn read_body(
 	io Io,
-	framing ResponseFraming,
+	framing h1.ResponseFraming,
 	rest Binary,
 	max_body Int,
-	deadline Instant,
+	deadline time.Instant,
 ) Result(Binary, ClientError) {
 	match framing {
-		BodyNone -> Ok(EMPTY)
-		BodyInvalid(err) -> Err(MalformedResponse(err))
-		BodyLength(n) -> if n > max_body {
+		h1.BodyNone -> Ok(EMPTY)
+		h1.BodyInvalid(err) -> Err(MalformedResponse(err))
+		h1.BodyLength(n) -> if n > max_body {
 			// Refused on the advertised length, before a byte is read: the
 			// point of the budget is not to buffer past it.
 			Err(BodyTooLarge(max_body))
 		} else {
 			read_exactly(io, rest, n, max_body, deadline)
 		}
-		BodyChunked -> read_chunked(io, rest, max_body, deadline)
-		BodyUntilClose -> read_to_close(io, rest, max_body, deadline)
+		h1.BodyChunked -> read_chunked(io, rest, max_body, deadline)
+		h1.BodyUntilClose -> read_to_close(io, rest, max_body, deadline)
 	}
 }
 
@@ -472,7 +455,7 @@ fn read_exactly(
 	buf Binary,
 	n Int,
 	limit Int,
-	deadline Instant,
+	deadline time.Instant,
 ) Result(Binary, ClientError) {
 	if binary.byte_size(buf) >= n {
 		// The guard above is one half of the bound and `framing` is the other:
@@ -483,7 +466,7 @@ fn read_exactly(
 		// only way to reach it is a length the framing should have refused.
 		match binary.slice_bytes(buf, 0, n) {
 			Ok(v) -> Ok(v)
-			Err(Nil) -> Err(MalformedResponse(BadFraming))
+			Err(Nil) -> Err(MalformedResponse(h1.BadFraming))
 		}
 	} else {
 		more <- result.then(read_more(io, buf, limit, deadline))
@@ -491,14 +474,14 @@ fn read_exactly(
 	}
 }
 
-fn read_chunked(io Io, buf Binary, limit Int, deadline Instant) Result(Binary, ClientError) {
+fn read_chunked(io Io, buf Binary, limit Int, deadline time.Instant) Result(Binary, ClientError) {
 	match h1.chunk_decode(buf, 0, limit) {
-		ChunkedDone(body, _, _) -> Ok(body)
+		h1.ChunkedDone(body, _, _) -> Ok(body)
 		// chunk_decode's status is the one a SERVER would answer with; a
 		// client reporting it would be inventing a status nobody asked for.
 		// Every one of them means the same thing here: the framing is a lie.
-		ChunkedBad(_) -> Err(MalformedResponse(BadFraming))
-		ChunkedNeedMore -> {
+		h1.ChunkedBad(_) -> Err(MalformedResponse(h1.BadFraming))
+		h1.ChunkedNeedMore -> {
 			more <- result.then(read_more(io, buf, limit, deadline))
 			read_chunked(io, more, limit, deadline)
 		}
@@ -509,14 +492,14 @@ fn read_chunked(io Io, buf Binary, limit Int, deadline Instant) Result(Binary, C
 // framing where that is true, and the reason it cannot be told apart from a
 // truncated transfer. `h1.response_framing` documents that; a caller who wants
 // the distinction needs a peer that frames its replies.
-fn read_to_close(io Io, buf Binary, limit Int, deadline Instant) Result(Binary, ClientError) {
+fn read_to_close(io Io, buf Binary, limit Int, deadline time.Instant) Result(Binary, ClientError) {
 	if binary.byte_size(buf) >= limit {
 		Err(BodyTooLarge(limit))
 	} else {
 		pull = io.read
 		match pull(int.min(READ_SIZE, limit - binary.byte_size(buf)), deadline) {
-			Ok(Data(bytes)) -> read_to_close(io, binary.append(buf, bytes), limit, deadline)
-			Ok(Closed) -> Ok(buf)
+			Ok(socket.Data(bytes)) -> read_to_close(io, binary.append(buf, bytes), limit, deadline)
+			Ok(socket.Closed) -> Ok(buf)
 			Err(e) -> Err(e)
 		}
 	}

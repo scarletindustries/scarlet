@@ -364,12 +364,6 @@ pub struct ConstructorField {
     pub(crate) span: Span,
 }
 
-#[derive(Debug, Clone)]
-pub struct ImportItem {
-    pub name: Identifier,
-    pub alias: Option<Identifier>,
-}
-
 /// The `.` / `..` in `import ../lib/util`. A distinct type, not a "." string
 /// in the name list, so a marker and a module name can never be confused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -433,7 +427,6 @@ impl std::fmt::Display for ImportPath {
 pub struct ImportDeclaration {
     pub path: ImportPath,
     pub alias: Option<Identifier>,
-    pub items: Vec<ImportItem>,
     /// Span of the final module-name path segment (e.g. `string` in `import scarlet/string`).
     pub path_span: Span,
     pub span: Span,

@@ -3,8 +3,8 @@
 // says why.
 
 import scarlet/array
-import scarlet/binary.{Dec}
-import scarlet/io.{NotFound}
+import scarlet/binary
+import scarlet/io
 import scarlet/option
 import scarlet/result
 import scarlet/string
@@ -23,7 +23,7 @@ fn parse_score(s String) Result(Int, ParseError) {
 		Err(Empty)
 	} else {
 		result.map_err(
-			binary.parse_int(binary.from_string(trimmed), Dec),
+			binary.parse_int(binary.from_string(trimmed), binary.Dec),
 			fn(_) NotANumber(trimmed),
 		)
 	}
@@ -101,7 +101,7 @@ pub fn main() {
 	// io errors are typed enums: NotFound carries the path it could not read.
 	match io.read_text('no-such-file.txt') {
 		Ok(contents) -> println('read ${string.length(contents)} chars')
-		Err(NotFound(path)) -> println('io        no such file: ${path}')
+		Err(io.NotFound(path)) -> println('io        no such file: ${path}')
 		Err(other) -> println('io        ${string.inspect(other)}')
 	}
 }

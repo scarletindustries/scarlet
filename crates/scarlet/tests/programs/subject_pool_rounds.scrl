@@ -10,7 +10,6 @@
 
 import scarlet/int
 import scarlet/process
-import scarlet/process.{Subject}
 
 type Health {
 	Healthy
@@ -28,11 +27,11 @@ type Task {
 
 type Request {
 	Run(job Job)
-	Ready(worker Subject(Task))
-	Stop(done Subject(Nil))
+	Ready(worker process.Subject(Task))
+	Stop(done process.Subject(Nil))
 }
 
-fn ask(gateway Subject(Request), next fn(Int) Result(a, String)) Result(a, String) {
+fn ask(gateway process.Subject(Request), next fn(Int) Result(a, String)) Result(a, String) {
 	reply = process.subject()
 	process.send(
 		gateway,
@@ -61,7 +60,7 @@ fn health(outcome Result(a, String)) Health {
 	}
 }
 
-fn labour(gateway Subject(Request), inbox Subject(Task), held Option(Int), seed Int) Nil {
+fn labour(gateway process.Subject(Request), inbox process.Subject(Task), held Option(Int), seed Int) Nil {
 	match process.receive(inbox) {
 		Quit -> Nil
 		Work(job) -> {
@@ -91,11 +90,11 @@ fn retain(lease Result(Int, String), verdict Health) Option(Int) {
 }
 
 fn serve(
-	gateway Subject(Request),
-	idle Array(Subject(Task)),
+	gateway process.Subject(Request),
+	idle Array(process.Subject(Task)),
 	queued Array(Job),
 	live Int,
-	closing Array(Subject(Nil)),
+	closing Array(process.Subject(Nil)),
 ) Nil {
 	if live == 0 {
 		each_send(closing)
@@ -129,7 +128,7 @@ fn serve(
 	}
 }
 
-fn quit_all(ws Array(Subject(Task))) Nil {
+fn quit_all(ws Array(process.Subject(Task))) Nil {
 	match ws {
 		[] -> Nil
 		[w, ..rest] -> {
@@ -139,7 +138,7 @@ fn quit_all(ws Array(Subject(Task))) Nil {
 	}
 }
 
-fn each_send(ds Array(Subject(Nil))) Nil {
+fn each_send(ds Array(process.Subject(Nil))) Nil {
 	match ds {
 		[] -> Nil
 		[d, ..rest] -> {
@@ -156,7 +155,7 @@ fn length_of(xs Array(a)) Int {
 	}
 }
 
-fn start() Subject(Request) {
+fn start() process.Subject(Request) {
 	boot = process.subject()
 	_ = process.spawn(fn() {
 		gateway = process.subject()
@@ -171,13 +170,13 @@ fn start() Subject(Request) {
 	process.receive(boot)
 }
 
-fn stop(gateway Subject(Request)) Nil {
+fn stop(gateway process.Subject(Request)) Nil {
 	done = process.subject()
 	process.send(gateway, Stop(done))
 	process.receive(done)
 }
 
-fn beat(gateway Subject(Request), left Int, ok Int) Int {
+fn beat(gateway process.Subject(Request), left Int, ok Int) Int {
 	if left == 0 {
 		ok
 	} else {
@@ -193,13 +192,13 @@ fn beat(gateway Subject(Request), left Int, ok Int) Int {
 	}
 }
 
-fn call_one(gateway Subject(Request), ack Subject(Nil), i Int) Nil {
+fn call_one(gateway process.Subject(Request), ack process.Subject(Nil), i Int) Nil {
 	tag = 'job-${int.to_string(i)}'
 	_ = ask(gateway, fn(v) Ok('${tag}:${int.to_string(v)}'))
 	process.send(ack, Nil)
 }
 
-fn collect(ack Subject(Nil), left Int) Nil {
+fn collect(ack process.Subject(Nil), left Int) Nil {
 	if left == 0 {
 		Nil
 	} else {
@@ -208,7 +207,7 @@ fn collect(ack Subject(Nil), left Int) Nil {
 	}
 }
 
-fn rounds(gateway Subject(Request), ack Subject(Nil), r Int, n Int) Nil {
+fn rounds(gateway process.Subject(Request), ack process.Subject(Nil), r Int, n Int) Nil {
 	if r > n {
 		Nil
 	} else {

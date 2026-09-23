@@ -16,18 +16,17 @@ fn run(tag: &str, src: &str) -> AlOutput {
 /// A counter worker whose `Boom` message crashes it, plus a client that
 /// retries across the restart gap.
 const COUNTER: &str = r#"import scarlet/process
-import scarlet/process.{Subject, OneForOne}
 
 type Msg {
-	Ping(reply Subject(Int))
+	Ping(reply process.Subject(Int))
 	Boom
 }
 
-fn serve(inbox Subject(Msg)) Nil {
+fn serve(inbox process.Subject(Msg)) Nil {
 	count(inbox, 0)
 }
 
-fn count(inbox Subject(Msg), n Int) Nil {
+fn count(inbox process.Subject(Msg), n Int) Nil {
 	match process.receive(inbox) {
 		Ping(reply) -> {
 			process.send(reply, n)
@@ -41,7 +40,7 @@ fn count(inbox Subject(Msg), n Int) Nil {
 	}
 }
 
-fn ping(c Subject(Msg)) Int {
+fn ping(c process.Subject(Msg)) Int {
 	reply = process.subject()
 	process.send(c, Ping(reply))
 	match process.receive_within(reply, 20) {
@@ -52,7 +51,7 @@ fn ping(c Subject(Msg)) Int {
 
 // Crash it `n` times, pausing so each crash lands on a fresh incarnation
 // rather than being dropped with the previous one's backlog.
-fn crash(c Subject(Msg), n Int) Nil {
+fn crash(c process.Subject(Msg), n Int) Nil {
 	if n > 0 {
 		process.send(c, Boom)
 		process.sleep(15)
@@ -71,7 +70,7 @@ fn a_crashing_worker_is_restarted_and_its_crash_reported() {
         &format!(
             "{COUNTER}
 pub fn main() {{
-	app <- process.root(OneForOne(restarts: 3, within_ms: 5000))
+	app <- process.root(process.OneForOne(restarts: 3, within_ms: 5000))
 	c = process.permanent(app, serve)
 	println('${{ping(c)}} ${{ping(c)}}')
 	crash(c, 1)
@@ -123,7 +122,7 @@ fn a_tree_outliving_its_declarer_still_fails_the_run_when_it_gives_up() {
         &format!(
             "{COUNTER}
 pub fn main() {{
-	app = process.supervisor(OneForOne(restarts: 1, within_ms: 5000))
+	app = process.supervisor(process.OneForOne(restarts: 1, within_ms: 5000))
 	c = process.permanent(app, serve)
 	_ = process.spawn_unlinked(fn() crash(c, 2))
 	println('main returning')
@@ -155,7 +154,7 @@ fn a_returned_main_leaves_its_tree_supervised() {
         &format!(
             "{COUNTER}
 pub fn main() {{
-	app = process.supervisor(OneForOne(restarts: 5, within_ms: 5000))
+	app = process.supervisor(process.OneForOne(restarts: 5, within_ms: 5000))
 	c = process.permanent(app, serve)
 	_ = process.spawn_unlinked(fn() {{
 		crash(c, 1)
@@ -179,8 +178,8 @@ fn a_nested_supervisor_that_gives_up_is_restarted_by_its_parent() {
         &format!(
             "{COUNTER}
 pub fn main() {{
-	app <- process.root(OneForOne(restarts: 2, within_ms: 5000))
-	inner = process.supervisor_in(app, OneForOne(restarts: 0, within_ms: 5000))
+	app <- process.root(process.OneForOne(restarts: 2, within_ms: 5000))
+	inner = process.supervisor_in(app, process.OneForOne(restarts: 0, within_ms: 5000))
 	c = process.permanent(inner, serve)
 	crash(c, 1)
 	println('served again by the restarted subtree: ${{ping(c)}}')
@@ -243,7 +242,7 @@ pub fn main() {{
 	// events after the helper has been killed by the escalation.
 	declared = process.subject()
 	_ = process.spawn_unlinked(fn() {{
-		inner = process.supervisor(OneForOne(restarts: 1, within_ms: 5000))
+		inner = process.supervisor(process.OneForOne(restarts: 1, within_ms: 5000))
 		c = process.permanent(inner, serve)
 		process.send(declared, (inner.supervised, c))
 		process.receive(process.subject())
@@ -271,7 +270,6 @@ fn only_the_creator_may_declare_into_a_supervisor() {
     let out = run(
         "creator_rule",
         r#"import scarlet/process
-import scarlet/process.{OneForOne, Crashed, Supervision}
 
 fn kill_repeatedly(sup process.Supervised, n Int) Nil {
 	if n > 0 {
@@ -290,7 +288,7 @@ fn kill_repeatedly(sup process.Supervised, n Int) Nil {
 }
 
 pub fn main() {
-	app = process.supervisor(OneForOne(restarts: 1, within_ms: 1000))
+	app = process.supervisor(process.OneForOne(restarts: 1, within_ms: 1000))
 	downs = process.subject()
 	intruder = process.spawn_unlinked(fn() {
 		_ = process.permanent(app, fn(inbox) process.receive(inbox))
@@ -298,7 +296,7 @@ pub fn main() {
 	})
 	_ = process.monitor(intruder, downs, fn(d) d)
 	match process.receive(downs).reason {
-		Crashed(Supervision(why)) -> println('refused: ${why}')
+		process.Crashed(process.Supervision(why)) -> println('refused: ${why}')
 		_ -> println('unexpected')
 	}
 	// The creator itself may, of course.
@@ -332,9 +330,7 @@ fn a_service_is_a_supervised_subtree() {
     let src = r#"import scarlet/net
 import scarlet/net/address
 import scarlet/net/socket
-import scarlet/net/socket.{Data, Closed}
 import scarlet/process
-import scarlet/process.{FactoryOf, Worker, Transient}
 import scarlet/array
 
 fn first(xs Array(String)) String {
@@ -349,7 +345,7 @@ fn first(xs Array(String)) String {
 // report is complete whatever the machine is doing.
 fn handle(sock socket.Socket, stop process.Subject(Nil)) Nil {
 	match socket.read(sock, 64) {
-		Ok(Data(b)) -> {
+		Ok(socket.Data(b)) -> {
 			if b == <<'crash'>> {
 				xs = [1]
 				_ = xs[0..2]
@@ -360,7 +356,7 @@ fn handle(sock socket.Socket, stop process.Subject(Nil)) Nil {
 				socket.write(sock, <<'ok'>>) or Nil
 			}
 		}
-		Ok(Closed) -> Nil
+		Ok(socket.Closed) -> Nil
 		Err(_) -> Nil
 	}
 }
@@ -374,8 +370,8 @@ pub fn main() {
 				service = net.serve_on(server, fn(sock) handle(sock, stop))
 				process.receive(stop)
 				kinds = array.map(process.children(service.supervised), fn(c) match process.info(c).kind {
-					FactoryOf(_) -> 'factory'
-					Worker(Transient) -> 'acceptor'
+					process.FactoryOf(_) -> 'factory'
+					process.Worker(process.Transient) -> 'acceptor'
 					_ -> 'other'
 				})
 				println('first child: ${first(kinds)}')

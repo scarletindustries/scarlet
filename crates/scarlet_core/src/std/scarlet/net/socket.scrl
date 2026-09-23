@@ -1,13 +1,13 @@
-import scarlet/net/address.{SocketAddress}
-import scarlet/net/error.{NetError, UnexpectedEof}
+import scarlet/net/address
+import scarlet/net/error
 import scarlet/binary
-import scarlet/time.{Instant}
+import scarlet/time
 
 pub type Connection
 
 pub type Socket {
 	conn Connection
-	peer SocketAddress
+	peer address.SocketAddress
 }
 
 // The outcome of a socket read that did not error at the OS level: either the
@@ -23,27 +23,27 @@ pub type Read {
 // Read whatever data is available, up to `max` bytes. Parks the calling
 // process until at least one byte arrives or the peer closes the connection.
 @vm(socket__read)
-pub fn read(c Socket, max Int) Result(Read, NetError)
+pub fn read(c Socket, max Int) Result(Read, error.NetError)
 
 // Read exactly `count` bytes, parking until they have all arrived. Errs with
 // UnexpectedEof if the peer closes the connection before `count` bytes have
 // been read. A `count` of zero or less asks for nothing and returns Ok(<<>>)
 // without touching the socket.
-pub fn read_exact(c Socket, count Int) Result(Binary, NetError) {
+pub fn read_exact(c Socket, count Int) Result(Binary, error.NetError) {
 	read_exact_loop(c, count, <<>>)
 }
 
 // The guard is `<= 0`, not `== 0`: `read` clamps its `max` to at least one
 // byte, so a negative `remaining` handed to it would drain the socket until
 // error or EOF instead of terminating.
-fn read_exact_loop(c Socket, remaining Int, acc Binary) Result(Binary, NetError) {
+fn read_exact_loop(c Socket, remaining Int, acc Binary) Result(Binary, error.NetError) {
 	if remaining <= 0 {
 		Ok(acc)
 	} else {
 		match read(c, remaining) {
 			Ok(Data(b)) ->
 				read_exact_loop(c, remaining - binary.byte_size(b), binary.append(acc, b))
-			Ok(Closed) -> Err(UnexpectedEof)
+			Ok(Closed) -> Err(error.UnexpectedEof)
 			Err(e) -> Err(e)
 		}
 	}
@@ -55,27 +55,27 @@ fn read_exact_loop(c Socket, remaining Int, acc Binary) Result(Binary, NetError)
 // spurious wakeup never resets the clock. Returns Ok(Data(b)) once bytes
 // arrive, Ok(Closed) if the peer closes the connection, or Err(TimedOut) once
 // the deadline passes with no data.
-pub fn read_within(c Socket, max Int, timeout_ms Int) Result(Read, NetError) {
+pub fn read_within(c Socket, max Int, timeout_ms Int) Result(Read, error.NetError) {
 	read_until(c, max, time.add_ms(time.monotonic(), timeout_ms))
 }
 
 // Read up to `max` bytes, parking until data arrives or the absolute Instant
 // `deadline` (from `time.monotonic()`) is reached, at which point it errs with
 // TimedOut.
-pub fn read_until(c Socket, max Int, deadline Instant) Result(Read, NetError) {
+pub fn read_until(c Socket, max Int, deadline time.Instant) Result(Read, error.NetError) {
 	read_until_ms(c, max, time.to_deadline_ms(deadline))
 }
 
 @vm(socket__read_until)
-fn read_until_ms(c Socket, max Int, deadline_ms Int) Result(Read, NetError)
+fn read_until_ms(c Socket, max Int, deadline_ms Int) Result(Read, error.NetError)
 
 @vm(socket__write)
-pub fn write(c Socket, data Binary) Result(Nil, NetError)
+pub fn write(c Socket, data Binary) Result(Nil, error.NetError)
 
 // Write every binary in `parts` as one vectored write: the pieces go to the
 // kernel in a single syscall without ever being concatenated.
 @vm(socket__write_parts)
-pub fn write_parts(c Socket, parts Array(Binary)) Result(Nil, NetError)
+pub fn write_parts(c Socket, parts Array(Binary)) Result(Nil, error.NetError)
 
 @vm(socket__close)
-pub fn close(c Socket) Result(Nil, NetError)
+pub fn close(c Socket) Result(Nil, error.NetError)

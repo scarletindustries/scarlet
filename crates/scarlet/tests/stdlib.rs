@@ -265,15 +265,15 @@ fn stdlib_decimal() {
     );
     // HalfEven is the default; a wider target scale zero-pads.
     run_outputs(
-        "import scarlet/decimal.{HalfUp, Down}\n\
+        "import scarlet/decimal\n\
          pub fn main() {\n\
          \tx = decimal.new(2345, 3)\n\
          \tprintln(decimal.to_string(decimal.round(x, 2)))\n\
          \tprintln(decimal.to_string(decimal.round(decimal.new(125, 3), 2)))\n\
          \tprintln(decimal.to_string(decimal.round(decimal.new(135, 3), 2)))\n\
-         \tprintln(decimal.to_string(decimal.round_with(x, 2, HalfUp)))\n\
-         \tprintln(decimal.to_string(decimal.round_with(decimal.neg(x), 2, HalfUp)))\n\
-         \tprintln(decimal.to_string(decimal.round_with(x, 2, Down)))\n\
+         \tprintln(decimal.to_string(decimal.round_with(x, 2, decimal.HalfUp)))\n\
+         \tprintln(decimal.to_string(decimal.round_with(decimal.neg(x), 2, decimal.HalfUp)))\n\
+         \tprintln(decimal.to_string(decimal.round_with(x, 2, decimal.Down)))\n\
          \tprintln(decimal.to_string(decimal.round(x, 5)))\n\
          }\n",
         "2.34\n0.12\n0.14\n2.35\n-2.35\n2.34\n2.34500\n",
@@ -292,20 +292,20 @@ fn stdlib_decimal() {
     // Half-tie rounding with big divisor units agrees with the same fraction
     // at a small scale.
     run_outputs(
-        "import scarlet/decimal.{HalfUp, HalfEven}\n\
+        "import scarlet/decimal\n\
          import scarlet/result\n\
          pub fn main() {\n\
          \tbig = decimal.from_int(9000000000000000000)\n\
          \tshow = fn(q) { result.map(q, decimal.to_string) }\n\
-         \tprintln(show(decimal.div_with(decimal.from_int(5000000000000000000), big, 0, HalfUp)))\n\
-         \tprintln(show(decimal.div_with(decimal.from_int(5), decimal.from_int(9), 0, HalfUp)))\n\
-         \tprintln(show(decimal.div_with(decimal.from_int(5000000000000000000), big, 0, HalfEven)))\n\
-         \tprintln(show(decimal.div_with(decimal.from_int(5), decimal.from_int(9), 0, HalfEven)))\n\
-         \tprintln(show(decimal.div_with(decimal.from_int(4000000000000000000), big, 0, HalfUp)))\n\
-         \tprintln(show(decimal.div_with(decimal.from_int(0 - 5000000000000000000), big, 0, HalfUp)))\n\
-         \tprintln(show(decimal.div_with(decimal.from_int(8999999999999999999), big, 0, HalfEven)))\n\
-         \tprintln(show(decimal.div_with(decimal.from_int(4500000000000000000), big, 0, HalfUp)))\n\
-         \tprintln(show(decimal.div_with(decimal.from_int(4500000000000000000), big, 0, HalfEven)))\n\
+         \tprintln(show(decimal.div_with(decimal.from_int(5000000000000000000), big, 0, decimal.HalfUp)))\n\
+         \tprintln(show(decimal.div_with(decimal.from_int(5), decimal.from_int(9), 0, decimal.HalfUp)))\n\
+         \tprintln(show(decimal.div_with(decimal.from_int(5000000000000000000), big, 0, decimal.HalfEven)))\n\
+         \tprintln(show(decimal.div_with(decimal.from_int(5), decimal.from_int(9), 0, decimal.HalfEven)))\n\
+         \tprintln(show(decimal.div_with(decimal.from_int(4000000000000000000), big, 0, decimal.HalfUp)))\n\
+         \tprintln(show(decimal.div_with(decimal.from_int(0 - 5000000000000000000), big, 0, decimal.HalfUp)))\n\
+         \tprintln(show(decimal.div_with(decimal.from_int(8999999999999999999), big, 0, decimal.HalfEven)))\n\
+         \tprintln(show(decimal.div_with(decimal.from_int(4500000000000000000), big, 0, decimal.HalfUp)))\n\
+         \tprintln(show(decimal.div_with(decimal.from_int(4500000000000000000), big, 0, decimal.HalfEven)))\n\
          }\n",
         "Ok(1)\nOk(1)\nOk(1)\nOk(1)\nOk(0)\nOk(-1)\nOk(1)\nOk(1)\nOk(0)\n",
     );
@@ -368,15 +368,15 @@ fn stdlib_decimal() {
     // Any number of places, either way: past 18 digits was once refused,
     // because 10^19 did not fit in a 64-bit Int.
     run_outputs(
-        "import scarlet/decimal.{HalfUp, Up}\n\
+        "import scarlet/decimal\n\
          import scarlet/result\n\
          pub fn main() {\n\
          \tprintln(decimal.to_string(decimal.round(decimal.new(123456789012345678, 18), 0 - 1)))\n\
          \tprintln(result.map(decimal.div(decimal.new(9000000000000000000, 18), decimal.from_int(1), 0 - 1), decimal.to_string))\n\
          \tprintln(decimal.to_string(decimal.round(decimal.new(1234, 0), 0 - 19)))\n\
          \tprintln(decimal.to_string(decimal.round(decimal.new(19, 1), 0 - 18)))\n\
-         \tprintln(decimal.to_string(decimal.round_with(decimal.new(1, 18), 0 - 1, Up)))\n\
-         \tprintln(decimal.to_string(decimal.round_with(decimal.new(5000000000000000000, 18), 0 - 1, HalfUp)))\n\
+         \tprintln(decimal.to_string(decimal.round_with(decimal.new(1, 18), 0 - 1, decimal.Up)))\n\
+         \tprintln(decimal.to_string(decimal.round_with(decimal.new(5000000000000000000, 18), 0 - 1, decimal.HalfUp)))\n\
          \tprintln(decimal.to_string(decimal.round(decimal.new(5000000000000000000, 18), 0 - 1)))\n\
          \tshow = fn(q) { result.map(q, decimal.to_string) or 'Err' }\n\
          \tprintln(show(decimal.div(decimal.from_int(1), decimal.from_int(1), 0 - 19)))\n\
@@ -384,7 +384,7 @@ fn stdlib_decimal() {
          \tprintln(show(decimal.div(decimal.new(1, 12), decimal.from_int(1), 21)))\n\
          \tprintln(show(decimal.div(decimal.from_int(2), decimal.from_int(3), 30)))\n\
          \tprintln(decimal.to_string(decimal.round(decimal.new(15, 0), 0 - 25)))\n\
-         \tprintln(decimal.to_string(decimal.round_with(decimal.new(5, 0), 0 - 25, Up)))\n\
+         \tprintln(decimal.to_string(decimal.round_with(decimal.new(5, 0), 0 - 25, decimal.Up)))\n\
          }\n",
         "0\nOk(10)\n0\n0\n10\n10\n0\n0\n1000000000000000000.000000000000000000000\n\
          0.000000000001000000000\n0.666666666666666666666666666667\n0\n\
@@ -433,8 +433,8 @@ fn stdlib_decimal() {
 #[test]
 fn stdlib_binary() {
     check_rejects(
-        "import scarlet/net/socket.{Socket}\n\
-         fn f(c Socket) Nil { socket.write(c, 'nope') or Nil }\n",
+        "import scarlet/net/socket\n\
+         fn f(c socket.Socket) Nil { socket.write(c, 'nope') or Nil }\n",
         "Type mismatch",
     );
 }
@@ -686,27 +686,27 @@ fn stdlib_http_builtins() {
     // tested in tests/programs/http_parse.scrl.
     check_ok(
         "import scarlet/binary\n\
-         import scarlet/http/h1.{Done, NeedMore, Bad, Http10, Http11}\n\
+         import scarlet/http/h1\n\
          pub fn main() {\n\
          \tr = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
-         \t\tDone(_, _, version, _, _, consumed) ->\n\
-         \t\t\tmatch version { Http10 -> 10 Http11 -> 11 } + consumed\n\
-         \t\tNeedMore -> 0\n\
-         \t\tBad(s) -> s\n\
+         \t\th1.Done(_, _, version, _, _, consumed) ->\n\
+         \t\t\tmatch version { h1.Http10 -> 10 h1.Http11 -> 11 } + consumed\n\
+         \t\th1.NeedMore -> 0\n\
+         \t\th1.Bad(s) -> s\n\
          \t}\n\
          \tprintln(r)\n\
          }\n",
     );
     check_ok(
         "import scarlet/binary\n\
-         import scarlet/http/h1.{Done, NoBody, Length, Chunked, Invalid}\n\
+         import scarlet/http/h1\n\
          pub fn main() {\n\
          \tr = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
-         \t\tDone(_, _, _, hdrs, _, _) -> match h1.framing(hdrs) {\n\
-         \t\t\tNoBody -> 0\n\
-         \t\t\tLength(n) -> n\n\
-         \t\t\tChunked -> 0 - 2\n\
-         \t\t\tInvalid(s) -> s\n\
+         \t\th1.Done(_, _, _, hdrs, _, _) -> match h1.framing(hdrs) {\n\
+         \t\t\th1.NoBody -> 0\n\
+         \t\t\th1.Length(n) -> n\n\
+         \t\t\th1.Chunked -> 0 - 2\n\
+         \t\t\th1.Invalid(s) -> s\n\
          \t\t}\n\
          \t\t_ -> 0 - 1\n\
          \t}\n\
@@ -715,16 +715,16 @@ fn stdlib_http_builtins() {
     );
     check_ok(
         "import scarlet/binary\n\
-         import scarlet/http/h1.{ChunkedDone, ChunkedNeedMore, ChunkedBad}\n\
+         import scarlet/http/h1\n\
          import scarlet/http/headers\n\
          pub fn main() {\n\
          \tr = match h1.chunk_decode(binary.from_string('5\\r\\nhello\\r\\n0\\r\\n\\r\\n'), 0, 1024) {\n\
-         \t\tChunkedDone(body, trailers, consumed) -> {\n\
+         \t\th1.ChunkedDone(body, trailers, consumed) -> {\n\
          \t\t\thas_sum = headers.has(trailers, binary.from_string('x-sum'))\n\
          \t\t\tif has_sum { consumed } else { binary.byte_size(body) + consumed }\n\
          \t\t}\n\
-         \t\tChunkedNeedMore -> 0\n\
-         \t\tChunkedBad(s) -> s\n\
+         \t\th1.ChunkedNeedMore -> 0\n\
+         \t\th1.ChunkedBad(s) -> s\n\
          \t}\n\
          \tprintln(r)\n\
          }\n",
@@ -732,17 +732,17 @@ fn stdlib_http_builtins() {
     check_ok(
         "import scarlet/binary\n\
          import scarlet/http/h1\n\
-         import scarlet/http/headers.{Header}\n\
+         import scarlet/http/headers\n\
          pub fn main() {\n\
-         \thead = h1.serialize_head(200, [Header(name: binary.from_string('A'), value: binary.from_string('b'))])\n\
+         \thead = h1.serialize_head(200, [headers.Header(name: binary.from_string('A'), value: binary.from_string('b'))])\n\
          \tprintln(binary.byte_size(head))\n\
          }\n",
     );
     check_ok(
         "import scarlet/binary\n\
-         import scarlet/http/headers.{Header}\n\
+         import scarlet/http/headers\n\
          pub fn main() {\n\
-         \ths = [Header(name: binary.from_string('Host'), value: binary.from_string('x'))]\n\
+         \ths = [headers.Header(name: binary.from_string('Host'), value: binary.from_string('x'))]\n\
          \tv = headers.get(hs, binary.from_string('host')) or binary.from_string('')\n\
          \tprintln(binary.to_string(v))\n\
          \tprintln(headers.has(hs, binary.from_string('HOST')))\n\
@@ -774,21 +774,21 @@ fn native_and_al_token_matching_agree() {
     for (value, expected) in cases {
         let source = format!(
             "import scarlet/binary\n\
-             import scarlet/http/h1.{{Done, ConnNeither, ConnClose, ConnKeepAlive, ConnBoth}}\n\
-             import scarlet/http/headers.{{Header}}\n\
+             import scarlet/http/h1\n\
+             import scarlet/http/headers\n\
              pub fn main() {{\n\
              \tname = binary.from_string('Connection')\n\
              \tvalue = binary.from_string('{value}')\n\
              \tnative = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\nConnection: {value}\\r\\n\\r\\n'), 0) {{\n\
-             \t\tDone(_, _, _, _, flags, _) -> match flags.conn {{\n\
-             \t\t\tConnClose -> True\n\
-             \t\t\tConnBoth -> True\n\
-             \t\t\tConnKeepAlive -> False\n\
-             \t\t\tConnNeither -> False\n\
+             \t\th1.Done(_, _, _, _, flags, _) -> match flags.conn {{\n\
+             \t\t\th1.ConnClose -> True\n\
+             \t\t\th1.ConnBoth -> True\n\
+             \t\t\th1.ConnKeepAlive -> False\n\
+             \t\t\th1.ConnNeither -> False\n\
              \t\t}}\n\
              \t\t_ -> False\n\
              \t}}\n\
-             \tal = headers.contains_token([Header(name: name, value: value)], name, binary.from_string('close'))\n\
+             \tal = headers.contains_token([headers.Header(name: name, value: value)], name, binary.from_string('close'))\n\
              \tprintln(native)\n\
              \tprintln(al)\n\
              }}\n"
@@ -816,9 +816,9 @@ fn stdlib_binary_ascii_builtins() {
     );
     // parse_int : (Binary, Radix) -> Result(Int, Nil)
     check_ok(
-        "import scarlet/binary.{Dec}\n\
+        "import scarlet/binary\n\
          pub fn main() {\n\
-         \tn = binary.parse_int(binary.from_string('42'), Dec) or 0\n\
+         \tn = binary.parse_int(binary.from_string('42'), binary.Dec) or 0\n\
          \tprintln(n)\n\
          }\n",
     );
@@ -838,9 +838,9 @@ fn stdlib_binary_ascii_builtins() {
     );
     // from_int_ascii : (Int, Radix) -> Binary
     check_ok(
-        "import scarlet/binary.{Hex}\n\
+        "import scarlet/binary\n\
          pub fn main() {\n\
-         \tprintln(binary.to_string(binary.from_int_ascii(255, Hex)))\n\
+         \tprintln(binary.to_string(binary.from_int_ascii(255, binary.Hex)))\n\
          }\n",
     );
 }
@@ -852,7 +852,7 @@ fn stdlib_binary_ascii_builtins() {
 #[test]
 fn stdlib_binary_hex_byte() {
     run_outputs(
-        "import scarlet/binary.{Hex}\n\
+        "import scarlet/binary\n\
          pub fn main() {\n\
          \tprintln(binary.to_string(binary.hex_byte(10)))\n\
          \tprintln(binary.to_string(binary.hex_byte(13)))\n\
@@ -860,7 +860,7 @@ fn stdlib_binary_hex_byte() {
          \tprintln(binary.to_string(binary.hex_byte(0)))\n\
          \tprintln(binary.to_string(binary.hex_byte(256)))\n\
          \tprintln(binary.to_string(binary.hex_byte(0 - 1)))\n\
-         \tprintln(binary.to_string(binary.from_int_ascii(13, Hex)))\n\
+         \tprintln(binary.to_string(binary.from_int_ascii(13, binary.Hex)))\n\
          }\n",
         "Ok(0A)\nOk(0D)\nOk(FF)\nOk(00)\nOk(00)\nOk(FF)\nOk(d)\n",
     );

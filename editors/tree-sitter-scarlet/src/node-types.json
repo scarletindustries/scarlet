@@ -2069,60 +2069,7 @@
       "required": false,
       "types": [
         {
-          "type": "import_items",
-          "named": true
-        },
-        {
           "type": "relative_segment",
-          "named": true
-        }
-      ]
-    }
-  },
-  {
-    "type": "import_item",
-    "named": true,
-    "fields": {
-      "alias": {
-        "multiple": false,
-        "required": false,
-        "types": [
-          {
-            "type": "identifier",
-            "named": true
-          },
-          {
-            "type": "type_identifier",
-            "named": true
-          }
-        ]
-      },
-      "name": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "identifier",
-            "named": true
-          },
-          {
-            "type": "type_identifier",
-            "named": true
-          }
-        ]
-      }
-    }
-  },
-  {
-    "type": "import_items",
-    "named": true,
-    "fields": {},
-    "children": {
-      "multiple": true,
-      "required": true,
-      "types": [
-        {
-          "type": "import_item",
           "named": true
         }
       ]

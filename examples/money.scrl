@@ -1,17 +1,17 @@
 // Money without floats: Decimal is exact, so 0.1 + 0.2 is 0.3.
 
 import scarlet/array
-import scarlet/decimal.{Ceiling, Decimal, Down, Floor, HalfEven, HalfUp, Up}
+import scarlet/decimal
 
 type Usd {
-	amount Decimal
+	amount decimal.Decimal
 }
 
 fn cents(n Int) Usd {
 	Usd(decimal.new(n, 2))
 }
 
-fn amount(u Usd) Decimal {
+fn amount(u Usd) decimal.Decimal {
 	Usd(d) = u
 	d
 }
@@ -28,23 +28,23 @@ fn show(u Usd) String {
 	'\$${decimal.to_string(amount(u))}'
 }
 
-fn d(s String) Decimal {
+fn d(s String) decimal.Decimal {
 	decimal.parse(s) or decimal.from_int(0)
 }
 
 // Rounds to cents with banker's rounding, the default.
-fn tax(u Usd, rate Decimal) Usd {
+fn tax(u Usd, rate decimal.Decimal) Usd {
 	Usd(decimal.round(decimal.mul(amount(u), rate), 2))
 }
 
 // Splits into n shares that sum back to the total. Leftover cents go first.
 fn split(total Usd, n Int) Array(Usd) {
-	base = decimal.div_with(amount(total), decimal.from_int(n), 2, Down) or decimal.from_int(0)
+	base = decimal.div_with(amount(total), decimal.from_int(n), 2, decimal.Down) or decimal.from_int(0)
 	leftover = decimal.units(decimal.sub(amount(total), decimal.mul(base, decimal.from_int(n))))
 	shares(base, leftover, n)
 }
 
-fn shares(base Decimal, extra Int, n Int) Array(Usd) {
+fn shares(base decimal.Decimal, extra Int, n Int) Array(Usd) {
 	if n == 0 {
 		[]
 	} else if extra > 0 {
@@ -145,12 +145,12 @@ pub fn main() {
 	// Every rounding mode on the same tie.
 	tie = d('2.345')
 	modes = [
-		('HalfEven', HalfEven),
-		('HalfUp', HalfUp),
-		('Down', Down),
-		('Up', Up),
-		('Floor', Floor),
-		('Ceiling', Ceiling),
+		('HalfEven', decimal.HalfEven),
+		('HalfUp', decimal.HalfUp),
+		('Down', decimal.Down),
+		('Up', decimal.Up),
+		('Floor', decimal.Floor),
+		('Ceiling', decimal.Ceiling),
 	]
 
 	array.each(modes, fn(m) match m {

@@ -3,38 +3,12 @@
 
 import scarlet/array
 import scarlet/binary
-import scarlet/binary.{Dec}
 import scarlet/http
-import scarlet/http.{Fixed, Get, Post, Request, Response, Unsized}
 import scarlet/http/body
-import scarlet/http/body.{Body, Chunk, Done}
-import scarlet/http/headers.{Header}
+import scarlet/http/headers
 import scarlet/map
-import scarlet/map.{Map}
 import scarlet/os
 import scarlet/process
-import scarlet/process.{
-	Disposable,
-	Down,
-	Exit,
-	FactoryOf,
-	Gone,
-	OneForAll,
-	OneForOne,
-	Permanent,
-	Pid,
-	Process,
-	RestForOne,
-	Restarted,
-	Restarting,
-	Running,
-	Subject,
-	Supervised,
-	SupervisorOf,
-	Temporary,
-	Transient,
-	Worker,
-}
 import scarlet/result
 import scarlet/string
 
@@ -48,28 +22,28 @@ const HEARTBEAT_MS = 15_000
 // The room
 
 type RoomMsg {
-	Join(who Pid, feed Subject(Feed))
+	Join(who process.Pid, feed process.Subject(Feed))
 	Say(name String, text String)
-	Left(down Down)
+	Left(down process.Down)
 	Crash
 }
 
 // What a tab hears: frames from the room, and the room exiting.
 type Feed {
 	Frame(bytes Binary)
-	RoomExit(exit Exit)
+	RoomExit(exit process.Exit)
 }
 
 type Room {
-	inbox Subject(RoomMsg)
-	place Supervised
-	members Map(Pid, Subject(Feed))
+	inbox process.Subject(RoomMsg)
+	place process.Supervised
+	members map.Map(process.Pid, process.Subject(Feed))
 	// The last HISTORY frames, oldest first.
 	history Array(Binary)
 	said Int
 }
 
-fn room(inbox Subject(RoomMsg)) Nil {
+fn room(inbox process.Subject(RoomMsg)) Nil {
 	room_loop(
 		Room(
 			inbox: inbox,
@@ -114,11 +88,11 @@ fn announce(r Room) Nil {
 }
 
 // The frame is one shared Binary, not a copy per tab.
-fn broadcast(members Map(Pid, Subject(Feed)), frame Binary) Nil {
+fn broadcast(members map.Map(process.Pid, process.Subject(Feed)), frame Binary) Nil {
 	map.fold(members, Nil, fn(_, _who, feed) process.send(feed, Frame(frame)))
 }
 
-fn replay(feed Subject(Feed), history Array(Binary)) Nil {
+fn replay(feed process.Subject(Feed), history Array(Binary)) Nil {
 	match history {
 		[] -> Nil
 		_ -> process.send(feed, Frame(binary.concat(history)))
@@ -164,20 +138,20 @@ const RESTARTED = sse(
 // The tree, as text
 
 // One line per node. Identical siblings collapse into one line with a count.
-fn render(node Supervised, indent String, me Supervised) Array(String) {
+fn render(node process.Supervised, indent String, me process.Supervised) Array(String) {
 	blocks = array.map(process.children(node), fn(child) render(child, indent + '  ', me))
 	array.fold(collapse(blocks), [indent + describe(node, me)], array.concat)
 }
 
-fn describe(node Supervised, me Supervised) String {
+fn describe(node process.Supervised, me process.Supervised) String {
 	info = process.info(node)
 	what = match info.kind {
-		Process -> 'process'
-		Worker(policy) if node == me -> 'room  ${policy_name(policy)} worker'
-		Worker(policy) -> '${policy_name(policy)} worker'
-		SupervisorOf(strategy) -> 'supervisor ' + strategy_name(strategy)
-		FactoryOf(Disposable) -> 'factory disposable, ${process.count(node)} live'
-		FactoryOf(Restarted(restarts, within_ms)) ->
+		process.Process -> 'process'
+		process.Worker(policy) if node == me -> 'room  ${policy_name(policy)} worker'
+		process.Worker(policy) -> '${policy_name(policy)} worker'
+		process.SupervisorOf(strategy) -> 'supervisor ' + strategy_name(strategy)
+		process.FactoryOf(process.Disposable) -> 'factory disposable, ${process.count(node)} live'
+		process.FactoryOf(process.Restarted(restarts, within_ms)) ->
 			'factory ${budget(restarts, within_ms)}, ${process.count(node)} live'
 	}
 	restarted = if info.restarts > 0 {
@@ -186,26 +160,26 @@ fn describe(node Supervised, me Supervised) String {
 		''
 	}
 	status = match info.status {
-		Running -> ''
-		Restarting -> ' (restarting)'
-		Gone -> ' (gone)'
+		process.Running -> ''
+		process.Restarting -> ' (restarting)'
+		process.Gone -> ' (gone)'
 	}
 	what + restarted + status
 }
 
 fn policy_name(policy process.Policy) String {
 	match policy {
-		Permanent -> 'permanent'
-		Transient -> 'transient'
-		Temporary -> 'temporary'
+		process.Permanent -> 'permanent'
+		process.Transient -> 'transient'
+		process.Temporary -> 'temporary'
 	}
 }
 
 fn strategy_name(strategy process.Strategy) String {
 	match strategy {
-		OneForOne(restarts, within_ms) -> 'one-for-one, ${budget(restarts, within_ms)}'
-		OneForAll(restarts, within_ms) -> 'one-for-all, ${budget(restarts, within_ms)}'
-		RestForOne(restarts, within_ms) -> 'rest-for-one, ${budget(restarts, within_ms)}'
+		process.OneForOne(restarts, within_ms) -> 'one-for-one, ${budget(restarts, within_ms)}'
+		process.OneForAll(restarts, within_ms) -> 'one-for-all, ${budget(restarts, within_ms)}'
+		process.RestForOne(restarts, within_ms) -> 'rest-for-one, ${budget(restarts, within_ms)}'
 	}
 }
 
@@ -230,52 +204,52 @@ fn collapse(blocks Array(Array(String))) Array(Array(String)) {
 
 // HTTP
 
-fn route(req Request, chat Subject(RoomMsg)) Response {
+fn route(req http.Request, chat process.Subject(RoomMsg)) http.Response {
 	match (req.method, http.path(req)) {
-		(Get, <<'/'>>) -> page()
-		(Get, <<'/events'>>) -> events(chat)
-		(Post, <<'/say'>>) -> match parse_say(req) {
+		(http.Get, <<'/'>>) -> page()
+		(http.Get, <<'/events'>>) -> events(chat)
+		(http.Post, <<'/say'>>) -> match parse_say(req) {
 			Ok(msg) -> send(chat, msg)
 			Err(bad) -> bad
 		}
-		(Post, <<'/crash'>>) -> send(chat, Crash)
+		(http.Post, <<'/crash'>>) -> send(chat, Crash)
 		_ -> http.not_found()
 	}
 }
 
-fn send(chat Subject(RoomMsg), msg RoomMsg) Response {
+fn send(chat process.Subject(RoomMsg), msg RoomMsg) http.Response {
 	process.send(chat, msg)
 	no_content()
 }
 
 // Runs in the connection's own process, so its body can receive on `feed`.
-fn events(chat Subject(RoomMsg)) Response {
+fn events(chat process.Subject(RoomMsg)) http.Response {
 	feed = process.subject()
 	_ = process.watch(process.supervised(chat), feed, RoomExit)
 	process.send(chat, Join(process.self(), feed))
-	Response(
+	http.Response(
 		status: 200,
 		headers: SSE_HEADERS,
-		body: Unsized(fn() Ok(Chunk(HELLO, live(chat, feed)))),
+		body: http.Unsized(fn() Ok(body.Chunk(HELLO, live(chat, feed)))),
 	)
 }
 
-fn live(chat Subject(RoomMsg), feed Subject(Feed)) Body {
+fn live(chat process.Subject(RoomMsg), feed process.Subject(Feed)) body.Body {
 	fn() match process.receive_within(feed, HEARTBEAT_MS) {
-		Ok(Frame(bytes)) -> Ok(Chunk(bytes, live(chat, feed)))
+		Ok(Frame(bytes)) -> Ok(body.Chunk(bytes, live(chat, feed)))
 		// Same address, new room: rejoin it.
-		Ok(RoomExit(Exit(status: Running, ..))) -> {
+		Ok(RoomExit(process.Exit(status: process.Running, ..))) -> {
 			process.send(chat, Join(process.self(), feed))
-			Ok(Chunk(RESTARTED, live(chat, feed)))
+			Ok(body.Chunk(RESTARTED, live(chat, feed)))
 		}
 		// The supervisor gave up, so the program is exiting.
-		Ok(RoomExit(_)) -> Ok(Done([]))
-		Err(Nil) -> Ok(Chunk(PING, live(chat, feed)))
+		Ok(RoomExit(_)) -> Ok(body.Done([]))
+		Err(Nil) -> Ok(body.Chunk(PING, live(chat, feed)))
 	}
 }
 
 // The body is a name, a newline, then the message.
-fn parse_say(req Request) Result(RoomMsg, Response) {
+fn parse_say(req http.Request) Result(RoomMsg, http.Response) {
 	bytes <- result.then(or_reply(body.collect(req.body, MAX_SAY), 413, 'too long'))
 	s <- result.then(or_reply(binary.to_string(bytes), 400, 'not utf-8'))
 	// A stray \r would end an SSE line early.
@@ -288,11 +262,11 @@ fn parse_say(req Request) Result(RoomMsg, Response) {
 	Ok(Say(name, message))
 }
 
-fn or_reply(r Result(a, e), status Int, why String) Result(a, Response) {
+fn or_reply(r Result(a, e), status Int, why String) Result(a, http.Response) {
 	result.map_err(r, fn(_) text(status, why))
 }
 
-fn field(s String, max Int, why String) Result(String, Response) {
+fn field(s String, max Int, why String) Result(String, http.Response) {
 	trimmed = string.trim(s)
 	if trimmed == '' || string.length(trimmed) > max {
 		Err(text(400, why))
@@ -315,28 +289,28 @@ fn join(parts Array(String), sep String) String {
 const NAME_CONTENT_TYPE = <<'Content-Type'>>
 const NAME_CACHE_CONTROL = <<'Cache-Control'>>
 const SSE_HEADERS = [
-	Header(name: NAME_CONTENT_TYPE, value: <<'text/event-stream'>>),
-	Header(name: NAME_CACHE_CONTROL, value: <<'no-cache'>>),
+	headers.Header(name: NAME_CONTENT_TYPE, value: <<'text/event-stream'>>),
+	headers.Header(name: NAME_CACHE_CONTROL, value: <<'no-cache'>>),
 ]
 
-fn page() Response {
-	Response(
+fn page() http.Response {
+	http.Response(
 		status: 200,
-		headers: [Header(name: NAME_CONTENT_TYPE, value: <<'text/html; charset=utf-8'>>)],
-		body: Fixed(binary.byte_size(PAGE), body.from_binary(PAGE)),
+		headers: [headers.Header(name: NAME_CONTENT_TYPE, value: <<'text/html; charset=utf-8'>>)],
+		body: http.Fixed(binary.byte_size(PAGE), body.from_binary(PAGE)),
 	)
 }
 
-fn no_content() Response {
-	Response(status: 204, headers: [], body: Fixed(0, body.empty()))
+fn no_content() http.Response {
+	http.Response(status: 204, headers: [], body: http.Fixed(0, body.empty()))
 }
 
-fn text(status Int, s String) Response {
+fn text(status Int, s String) http.Response {
 	bytes = binary.from_string(s)
-	Response(
+	http.Response(
 		status: status,
-		headers: [Header(name: NAME_CONTENT_TYPE, value: <<'text/plain; charset=utf-8'>>)],
-		body: Fixed(binary.byte_size(bytes), body.from_binary(bytes)),
+		headers: [headers.Header(name: NAME_CONTENT_TYPE, value: <<'text/plain; charset=utf-8'>>)],
+		body: http.Fixed(binary.byte_size(bytes), body.from_binary(bytes)),
 	)
 }
 
@@ -344,9 +318,9 @@ fn text(status Int, s String) Response {
 
 pub fn main() Nil {
 	// Past 10 crashes a minute the supervisor gives up and the program exits.
-	app <- process.root(OneForOne(restarts: 10, within_ms: 60_000))
+	app <- process.root(process.OneForOne(restarts: 10, within_ms: 60_000))
 	chat = process.permanent(app, room)
-	port = binary.parse_int(binary.from_string(os.get_env('PORT') or '8080'), Dec) or 8080
+	port = binary.parse_int(binary.from_string(os.get_env('PORT') or '8080'), binary.Dec) or 8080
 	match http.serve_in(app, '0.0.0.0', port, fn(req) route(req, chat)) {
 		Ok(_) -> println('chat is up on http://localhost:${port}')
 		Err(e) -> {

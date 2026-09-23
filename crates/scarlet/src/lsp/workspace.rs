@@ -220,8 +220,8 @@ impl Workspace {
     }
 
     /// Dependent-file callers of `def`, persisted across re-rooting because an
-    /// importer is never inside its imports' closure. Only reference sites:
-    /// real uses and selective-import `{item}` tokens, which rename rewrites.
+    /// importer is never inside its imports' closure. Only reference sites,
+    /// which rename rewrites.
     pub(super) fn dependent_callers<'a>(
         &'a self,
         uri: &str,
@@ -380,7 +380,7 @@ impl Workspace {
                                 // next edit shifts every span in it, and edges
                                 // filed under a span-carrying key would become
                                 // unreachable for rename and find-references.
-                                let d = g.canonical_definition(r.target)?;
+                                let d = g.definition(r.target)?;
                                 let key = super::xrefs::StableDefId::of(g, uri, d)?;
                                 Some((key, r.span, r.kind))
                             })

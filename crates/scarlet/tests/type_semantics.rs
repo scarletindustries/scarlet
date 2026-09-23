@@ -789,10 +789,10 @@ fn module_builtins_qualified_and_destructured() {
          }\n",
     );
     check_ok(
-        "import scarlet/net.{listen, Server}\n\
-         fn go(s Server) Nil { println(s) }\n\
+        "import scarlet/net\n\
+         fn go(s net.Server) Nil { println(s) }\n\
          pub fn main() {\n\
-         \tmatch listen('0.0.0.0', 8080) { Ok(s) -> go(s) Err(e) -> println(e) }\n\
+         \tmatch net.listen('0.0.0.0', 8080) { Ok(s) -> go(s) Err(e) -> println(e) }\n\
          }\n",
     );
     check_ok(

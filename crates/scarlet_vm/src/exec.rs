@@ -2713,7 +2713,6 @@ mod tests {
     fn what_json_makes_is_all_freed() {
         let (out, left) = cells_left_after(
             "import scarlet/json\n\
-             import scarlet/json.{Object, Str, List, Integer}\n\
              pub fn main() {\n\
              \tmatch json.parse('{\"a\": [1, {\"b\": \"deep\"}], \"c\": \"x\"}') {\n\
              \t\tOk(d) -> {\n\
@@ -2728,7 +2727,7 @@ mod tests {
              \t\tOk(_) -> 'parsed'\n\
              \t\tErr(_) -> 'refused'\n\
              \t})\n\
-             \tprintln(json.encode(Object([('k', List([Integer(1), Str('v')]))])))\n\
+             \tprintln(json.encode(json.Object([('k', json.List([json.Integer(1), json.Str('v')]))])))\n\
              }\n",
         );
         assert_eq!(
@@ -2744,20 +2743,19 @@ mod tests {
     #[test]
     fn what_http_parsing_makes_is_all_freed() {
         let (out, left) = cells_left_after(
-            "import scarlet/http/h1.{Done, ChunkedDone}\n\
-             import scarlet/http/h1\n\
+            "import scarlet/http/h1\n\
              import scarlet/http/headers\n\
              import scarlet/binary\n\
              pub fn main() {\n\
              \treq = <<'POST /x HTTP/1.1\\r\\nHost: a\\r\\nTransfer-Encoding: chunked\\r\\n\\r\\n3\\r\\nabc\\r\\n0\\r\\n\\r\\n'>>\n\
              \tmatch h1.parse_request(req, 0) {\n\
-             \t\tDone(method, _, _, hs, _, consumed) -> {\n\
+             \t\th1.Done(method, _, _, hs, _, consumed) -> {\n\
              \t\t\tprintln(binary.to_string(method))\n\
              \t\t\tprintln(headers.get(hs, <<'host'>>))\n\
              \t\t\tprintln(h1.framing(hs))\n\
              \t\t\tprintln(binary.byte_size(h1.serialize_head(200, hs)))\n\
              \t\t\tmatch h1.chunk_decode(req, consumed, 100) {\n\
-             \t\t\t\tChunkedDone(body, _, _) -> println(body)\n\
+             \t\t\t\th1.ChunkedDone(body, _, _) -> println(body)\n\
              \t\t\t\t_ -> println('no body')\n\
              \t\t\t}\n\
              \t\t}\n\

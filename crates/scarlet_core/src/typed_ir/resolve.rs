@@ -18,7 +18,7 @@ use crate::core_ir::{FuncIdx, VariantRef};
 use crate::types::ValueKind;
 use scarlet_types::intrinsic::Intrinsic;
 
-use super::{Arity, CaptureIdx, FrameSlot, GlobalSlot, RTy, TypedCallee, TypedExpr, ValueRef};
+use super::{Arity, CaptureIdx, GlobalSlot, RTy, TypedCallee, TypedExpr, ValueRef};
 
 /// How a statically-known function is *called*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,11 +80,6 @@ pub enum CallForm {
 }
 
 impl Denotation {
-    /// A raw frame slot the module walk assigned — see [`ValueRef::Slot`].
-    pub(crate) fn slot(slot: FrameSlot) -> Self {
-        Denotation(Den::Value(ValueRef::Slot(slot)))
-    }
-
     /// A module-scope value that is not a statically-known function.
     pub(crate) fn global(slot: GlobalSlot) -> Self {
         Denotation(Den::Value(ValueRef::Global(slot)))
@@ -278,14 +273,6 @@ mod tests {
                 place: ValueRef::Global(GlobalSlot(5)),
             })))
         );
-    }
-
-    /// A frame slot in resolved-name position is never a `BindingId`: the
-    /// elaborator's own binds are found before the walk is consulted.
-    #[test]
-    fn a_walk_frame_slot_is_the_escape_hatch() {
-        let d = Denotation::slot(FrameSlot(6));
-        assert_eq!(d.as_value(), ValueForm::Ref(ValueRef::Slot(FrameSlot(6))));
     }
 
     #[test]

@@ -366,22 +366,6 @@ impl Formatter {
                     out.push(text(" as "));
                     out.push(text(a.name.clone()));
                 }
-                if !s.items.is_empty() {
-                    let items: Vec<Doc> = s
-                        .items
-                        .iter()
-                        .map(|it| match &it.alias {
-                            Some(a) => d![
-                                text(it.name.name.clone()),
-                                text(" as "),
-                                text(a.name.clone())
-                            ],
-                            None => text(it.name.name.clone()),
-                        })
-                        .collect();
-                    out.push(text("."));
-                    out.push(delimited("{", items, "}"));
-                }
                 doc::concat(out)
             }
         }

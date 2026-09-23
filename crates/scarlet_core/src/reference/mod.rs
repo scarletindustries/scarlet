@@ -49,9 +49,6 @@ pub enum ReferenceKind {
     Import,
     /// The `as` alias in `import a/b as c` (binds a `ModuleAlias`).
     Alias,
-    /// The item-binding token in an import list, the `x` of `import a/b.{x}`.
-    /// A reference site for find-references and rename, never an evaluating use.
-    ImportItem,
     /// The defining occurrence itself, so goto-def on a declaration resolves to
     /// itself and find-references includes the definition.
     Definition,
@@ -66,12 +63,11 @@ impl ReferenceKind {
     }
 
     /// Whether find-references should list this occurrence. Wider than
-    /// [`is_use_site`](Self::is_use_site): the `b` of `b.add(..)` and the `x` of
-    /// `import a/b.{x}` spell a name rename must rewrite, though neither
-    /// evaluates anything. Binding occurrences stay out; the declaration is
-    /// added separately under `includeDeclaration`.
+    /// [`is_use_site`](Self::is_use_site): the `b` of `b.add(..)` spells a name
+    /// rename must rewrite, though it evaluates nothing. Binding occurrences
+    /// stay out; the declaration is added separately under `includeDeclaration`.
     pub fn is_reference_site(self) -> bool {
-        self.is_use_site() || matches!(self, ReferenceKind::Qualifier | ReferenceKind::ImportItem)
+        self.is_use_site() || self == ReferenceKind::Qualifier
     }
 }
 
@@ -166,13 +162,7 @@ impl DefId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DefinitionKind {
     /// A `let`/parameter/match binder — a local value.
-    Value {
-        /// For an import-alias binding (the `Y` of `import a.{X as Y}`), the
-        /// definition it stands for. goto-def and hover follow this chain,
-        /// while find-references and rename stay on the alias, so renaming `Y`
-        /// does not rewrite `X`. `None` for an ordinary binder.
-        alias_of: Option<DefId>,
-    },
+    Value,
     Function {
         /// Parameter names, for hover. Documentation only.
         param_names: Vec<String>,
@@ -208,7 +198,7 @@ impl DefinitionKind {
     /// `DefId.entity` of the definition carrying it.
     pub(crate) fn entity(&self) -> EntityKind {
         match self {
-            DefinitionKind::Value { .. } => EntityKind::Value,
+            DefinitionKind::Value => EntityKind::Value,
             DefinitionKind::Function { .. } => EntityKind::Function,
             DefinitionKind::Constant => EntityKind::Constant,
             DefinitionKind::Constructor { .. } => EntityKind::Constructor,
@@ -277,15 +267,6 @@ impl Definition {
         }
     }
 
-    /// For an import-alias binding, the definition it stands for. Otherwise
-    /// `None`.
-    fn alias_of(&self) -> Option<DefId> {
-        match self.kind {
-            DefinitionKind::Value { alias_of } => alias_of,
-            _ => None,
-        }
-    }
-
     /// The full extent of the declaration: the whole `import ...` statement
     /// for a module alias, the declaring identifier otherwise.
     fn decl_span(&self) -> Span {
@@ -293,7 +274,7 @@ impl Definition {
             DefinitionKind::ModuleAlias { decl_span, .. } => decl_span,
             // Named, not wildcarded: a new kind with its own declaration
             // extent must say so, as ModuleAlias did.
-            DefinitionKind::Value { .. }
+            DefinitionKind::Value
             | DefinitionKind::Function { .. }
             | DefinitionKind::Constant
             | DefinitionKind::Constructor { .. }
@@ -612,26 +593,10 @@ impl ReferenceGraph {
         self.modules.get(&id.module)?.definition(id)
     }
 
-    /// Follow an import-alias binding to the definition it stands for: the `Y`
-    /// of `import a.{X as Y}` resolves to `X`. goto-def and hover chain through
-    /// this; find-references and rename use the raw `DefId` so alias and target
-    /// stay separate rename classes. Bounded against an alias cycle.
-    pub fn canonical(&self, id: DefId) -> DefId {
-        let mut cur = id;
-        for _ in 0..16 {
-            match self.definition(cur).and_then(|d| d.alias_of()) {
-                Some(next) if next != cur => cur = next,
-                _ => break,
-            }
-        }
-        cur
-    }
-
-    /// goto-definition: the definition a position points at, across modules
-    /// and through any import alias.
+    /// goto-definition: the definition a position points at, across modules.
     pub fn definition_at(&self, module: ModuleId, line: i32, col: i32) -> Option<&Definition> {
         let target = self.modules.get(&module)?.resolve_position(line, col)?;
-        self.definition(self.canonical(target))
+        self.definition(target)
     }
 
     /// The doc comment of `module`, the `/** */` at line 0 of its source.
@@ -661,14 +626,6 @@ impl ReferenceGraph {
             .get(&module)
             .and_then(|m| m.cursor_hit(line, col))
             .is_some_and(|h| matches!(h.kind, ReferenceKind::Import))
-    }
-
-    /// The canonical definition a reference target resolves to, through any
-    /// import alias. The stable cross-file identity of a definition is its
-    /// (module, name, entity) triple, not its `DefId`: the span inside a
-    /// `DefId` moves with every edit to the defining file.
-    pub fn canonical_definition(&self, id: DefId) -> Option<&Definition> {
-        self.definition(self.canonical(id))
     }
 
     /// The raw `DefId` a position resolves to, without crossing to the owning
@@ -710,7 +667,7 @@ fn def(module: ModuleId, line: i32, c0: i32, c1: i32, kind: EntityKind) -> DefId
 #[cfg(test)]
 pub(crate) fn stub_kind(defid: DefId) -> DefinitionKind {
     match defid.entity {
-        EntityKind::Value => DefinitionKind::Value { alias_of: None },
+        EntityKind::Value => DefinitionKind::Value,
         EntityKind::Function => DefinitionKind::Function {
             param_names: Vec::new(),
         },

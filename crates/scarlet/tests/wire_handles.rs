@@ -26,11 +26,10 @@ use common::{Project, run_outputs};
 fn a_pid_round_trips_and_a_monitor_placed_through_the_copy_fires() {
     run_outputs(
         "import scarlet/process\n\
-         import scarlet/process.{Down, Normal}\n\
          import scarlet/wire\n\
          type Msg {\n\
          \tReady(gate process.Subject(Nil))\n\
-         \tEnded(down Down)\n\
+         \tEnded(down process.Down)\n\
          }\n\
          pub fn main() {\n\
          \tme = process.self()\n\
@@ -55,7 +54,7 @@ fn a_pid_round_trips_and_a_monitor_placed_through_the_copy_fires() {
          \t\t\tmatch process.receive(inbox) {\n\
          \t\t\t\tEnded(down) -> {\n\
          \t\t\t\t\tprintln(down.pid == worker)\n\
-         \t\t\t\t\tprintln(down.reason == Normal)\n\
+         \t\t\t\t\tprintln(down.reason == process.Normal)\n\
          \t\t\t\t}\n\
          \t\t\t\tReady(_) -> println('a second gate')\n\
          \t\t\t}\n\
@@ -196,7 +195,6 @@ pub fn main() {
 fn a_port_record_round_trips_and_the_copy_is_written_to() {
     run_outputs(
         "import scarlet/os/port\n\
-         import scarlet/os/port.{Exited}\n\
          import scarlet/wire\n\
          pub fn main() {\n\
          \tmatch port.spawn('cat', []) {\n\
@@ -205,7 +203,7 @@ fn a_port_record_round_trips_and_the_copy_is_written_to() {
          \t\t\t\tprintln(copy == p)\n\
          \t\t\t\tprintln(port.write(copy, <<'through the copy'>>) == Ok(Nil))\n\
          \t\t\t\tprintln(port.read_exact(p, 16) == Ok(<<'through the copy'>>))\n\
-         \t\t\t\tprintln(port.close(copy) == Ok(Exited(0)))\n\
+         \t\t\t\tprintln(port.close(copy) == Ok(port.Exited(0)))\n\
          \t\t\t}\n\
          \t\t\tErr(_) -> println('refused')\n\
          \t\t}\n\
@@ -228,7 +226,6 @@ fn a_handle_from_another_run_is_refused_with_other_run() {
         "import scarlet/binary\n\
          import scarlet/process\n\
          import scarlet/wire\n\
-         import scarlet/wire.{OtherRun}\n\
          pub fn main() {\n\
          \tme = process.self()\n\
          \tbytes = wire.encode(me)\n\
@@ -238,7 +235,7 @@ fn a_handle_from_another_run_is_refused_with_other_run() {
          \tzeros = <<0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0>>\n\
          \tmatch wire.decode(binary.concat([head, zeros, tail])) {\n\
          \t\tOk(p) -> println(p == me)\n\
-         \t\tErr(OtherRun(mine, theirs)) -> {\n\
+         \t\tErr(wire.OtherRun(mine, theirs)) -> {\n\
          \t\t\tprintln(binary.byte_size(mine) == 16)\n\
          \t\t\tprintln(theirs == zeros)\n\
          \t\t\tprintln(mine == theirs)\n\

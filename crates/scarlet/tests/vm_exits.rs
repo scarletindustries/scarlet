@@ -36,7 +36,6 @@ fn an_unlinked_crash_is_contained_and_typed() {
     let out = run(
         "contained",
         r#"import scarlet/process
-import scarlet/process.{Crashed, SliceOutOfBounds}
 
 fn third(xs Array(Int)) Int {
 	match xs[2] {
@@ -55,8 +54,8 @@ pub fn main() {
 	})
 	_ = process.monitor(worker, downs, fn(d) d)
 	match process.receive(downs).reason {
-		Crashed(SliceOutOfBounds(from, to, length)) -> println('crashed: slice ${from}..${to} of ${length}')
-		Crashed(_) -> println('crashed some other way')
+		process.Crashed(process.SliceOutOfBounds(from, to, length)) -> println('crashed: slice ${from}..${to} of ${length}')
+		process.Crashed(_) -> println('crashed some other way')
 		_ -> println('did not crash')
 	}
 	println('spawner still running: ${third(xs)}')
@@ -170,7 +169,6 @@ fn a_cascade_stops_at_an_unlinked_process() {
     let out = run(
         "boundary",
         r#"import scarlet/process
-import scarlet/process.{Killed}
 
 pub fn main() {
 	downs = process.subject()
@@ -185,7 +183,7 @@ pub fn main() {
 	})
 	_ = process.monitor(middle, downs, fn(d) d)
 	match process.receive(downs).reason {
-		Killed -> println('middle was killed by its child')
+		process.Killed -> println('middle was killed by its child')
 		_ -> println('unexpected reason')
 	}
 	println('main survived')
@@ -217,7 +215,6 @@ fn a_crashing_connection_handler_does_not_stop_the_server() {
     let src = r#"import scarlet/net
 import scarlet/net/address
 import scarlet/net/socket
-import scarlet/net/socket.{Data, Closed}
 import scarlet/process
 
 pub fn main() {
@@ -227,7 +224,7 @@ pub fn main() {
 			Ok(addr) -> {
 				_ = net.serve_on(server, fn(sock) {
 					match socket.read(sock, 16) {
-						Ok(Data(b)) -> {
+						Ok(socket.Data(b)) -> {
 							if b == <<'crash'>> {
 								_ = xs[0..9]
 								Nil
@@ -235,7 +232,7 @@ pub fn main() {
 								socket.write(sock, <<'served'>>) or Nil
 							}
 						}
-						Ok(Closed) -> Nil
+						Ok(socket.Closed) -> Nil
 						Err(_) -> Nil
 					}
 				})

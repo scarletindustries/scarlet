@@ -47,10 +47,10 @@ fn spawn_http_peer(reply: &'static [u8]) -> u16 {
 
 fn client_src(port: u16, deadline_ms: i64) -> String {
     format!(
-        r#"import scarlet/http/client.{{Request, Transport}}
+        r#"import scarlet/http/client
 import scarlet/http/url
 import scarlet/net
-import scarlet/net/error.{{TimedOut}}
+import scarlet/net/error
 import scarlet/string
 import scarlet/time
 
@@ -60,9 +60,9 @@ pub fn main() {{
 			Err(e) -> println('url failed: ${{string.inspect(e)}}')
 			Ok(u) -> {{
 				io = client.plain(sock)
-				req = Request(method: <<'GET'>>, url: u, headers: [], body: <<>>)
+				req = client.Request(method: <<'GET'>>, url: u, headers: [], body: <<>>)
 				match client.send_until(io, req, 1024, time.deadline_in_ms({deadline_ms})) {{
-					Err(Transport(TimedOut)) -> println('http-timeout: Transport(TimedOut)')
+					Err(client.Transport(error.TimedOut)) -> println('http-timeout: Transport(TimedOut)')
 					Ok(r) -> println('http-ok: ${{r.status}}')
 					Err(e) -> println('other: ${{string.inspect(e)}}')
 				}}
