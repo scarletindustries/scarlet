@@ -390,6 +390,24 @@ fn stdlib_decimal() {
          0.000000000001000000000\n0.666666666666666666666666666667\n0\n\
          10000000000000000000000000\n",
     );
+    // to_float rounds `units / 10^scale` once. Converting each side on its
+    // own clamped both past the largest Float, so 10^400 at 399 places read
+    // as 1.0. Too large stops at the largest Float, too small is 0.0, and
+    // 0.1 is the same Float the literal is.
+    run_outputs(
+        "import scarlet/decimal\n\
+         fn pow10(n Int) Int {\n\
+         \tif n <= 0 then 1 else 10 * pow10(n - 1)\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(decimal.to_float(decimal.new(pow10(400), 399)))\n\
+         \tprintln(decimal.to_float(decimal.new(0 - 1999, 2)))\n\
+         \tprintln(decimal.to_float(decimal.new(pow10(400), 0)) == decimal.to_float(decimal.new(pow10(500), 0)))\n\
+         \tprintln(decimal.to_float(decimal.new(1, 400)))\n\
+         \tprintln(decimal.to_float(decimal.new(1, 1)) == 0.1)\n\
+         }\n",
+        "10.0\n-19.99\nTrue\n0.0\nTrue\n",
+    );
     // from_float rounds the Float's exact value, so 0.1 at 20 places shows
     // the binary error, and 2.675 rounds down. Ties go away from zero.
     run_outputs(

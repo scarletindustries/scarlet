@@ -103,6 +103,7 @@ intrinsics! {
     FloatRound = "float__round",
     FloatTruncate = "float__truncate",
     FloatFromInt = "float__from_int",
+    FloatFromDecimal = "float__from_decimal",
     FloatToString = "float__to_string",
     ProcessSpawn = "process__spawn",
     ProcessSpawnUnlinked = "process__spawn_unlinked",

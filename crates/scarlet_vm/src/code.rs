@@ -1190,6 +1190,7 @@ fn built(i: Intrinsic, argc: usize) -> bool {
         | Intrinsic::IntFromString
         | Intrinsic::IntBitwiseNot => 1,
         Intrinsic::StringSplit
+        | Intrinsic::FloatFromDecimal
         | Intrinsic::StringContains
         | Intrinsic::IntBitwiseAnd
         | Intrinsic::IntBitwiseOr

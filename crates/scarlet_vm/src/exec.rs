@@ -1306,6 +1306,18 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 };
                 Ok(Value::float(f))
             }
+            // `units * 10^-scale`, rounded once. Rust's parser rounds to the
+            // nearest Float, subnormals included, and `Value::float` stops one
+            // too large at the largest Float.
+            Intrinsic::FloatFromDecimal => {
+                let units = self.int_of(v)?.big();
+                let scale = self.int_of(arg(self, 1))?.big();
+                let text = format!("{units}e{}", -scale);
+                let f = text
+                    .parse::<f64>()
+                    .map_err(|_| Stop::BadProgram(format!("`{text}` is not a float")))?;
+                Ok(Value::float(f))
+            }
             Intrinsic::FloatToString => {
                 let text = float::text(self.float_of(v)?);
                 Ok(Value::cell(

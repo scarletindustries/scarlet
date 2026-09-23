@@ -233,10 +233,14 @@ pub fn to_string(d Decimal) String {
 	}
 }
 
-// Nearest representable f64; exact only while units fits in 53 bits.
+// The nearest Float, rounded once. One too large to be a Float is the
+// largest Float, as in Float arithmetic.
 pub fn to_float(d Decimal) Float {
-	float.from_int(units(d)) / float.from_int(pow10(scale(d)))
+	from_decimal(units(d), scale(d))
 }
+
+@vm(float__from_decimal)
+fn from_decimal(units Int, scale Int) Float
 
 // The exact value of `f`, rounded at `places` with ties away from zero, as
 // `float.round` does. A Float is never NaN or infinite, so this cannot fail.
