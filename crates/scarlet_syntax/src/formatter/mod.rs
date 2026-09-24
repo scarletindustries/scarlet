@@ -1198,35 +1198,43 @@ fn escape_string(s: &str, quote: char) -> String {
     result
 }
 
-/// Whether a final call argument may hug the call's parentheses. Only
-/// block-shaped expressions do, so the closing paren can follow their closing
-/// brace. Everything else keeps the one-argument-per-line fallback.
-fn arg_can_hug(a: &ast::CallArg) -> bool {
-    let e = match a {
-        ast::CallArg::Positional(e) => e,
+/// The expression a call argument passes, whatever form the argument takes.
+fn arg_value(a: &ast::CallArg) -> &ast::Expression {
+    match a {
+        ast::CallArg::Positional(e) | ast::CallArg::Spread(e) => e,
         ast::CallArg::Labeled { value, .. } => value,
-        ast::CallArg::Spread(e) => e,
-    };
-    matches!(
-        e,
-        ast::Expression::FunctionExpression(_)
-            | ast::Expression::MatchExpression(_)
-            | ast::Expression::BlockExpression(_)
-            | ast::Expression::IfExpression(_)
-    )
+    }
 }
 
-/// Whether a call argument is a list literal, which may hug the call's
-/// parentheses when it comes last.
+/// Whether a final call argument may hug the call's parentheses: its own last
+/// line is a closing brace, so the closing paren can follow it. Everything
+/// else keeps the one-argument-per-line fallback.
+fn arg_can_hug(a: &ast::CallArg) -> bool {
+    ends_in_a_block(arg_value(a))
+}
+
+fn ends_in_a_block(e: &ast::Expression) -> bool {
+    match e {
+        ast::Expression::FunctionExpression(_)
+        | ast::Expression::MatchExpression(_)
+        | ast::Expression::BlockExpression(_)
+        | ast::Expression::IfExpression(_) => true,
+        // A call that hugs ends where its own last argument does, so the
+        // caller's paren may follow that one's: `Timer(waiting: spawn(fn() {
+        // … }))` closes three at once.
+        ast::Expression::FunctionCallExpression(c) => c.arguments.last().is_some_and(arg_can_hug),
+        _ => false,
+    }
+}
+
+/// Whether a call argument is written between a pair of delimiters, which may
+/// hug the call's parentheses when it comes last.
 fn arg_is_list(a: &ast::CallArg) -> bool {
     matches!(
-        a,
-        ast::CallArg::Positional(
-            ast::Expression::ArrayExpression(_) | ast::Expression::TupleExpression(_)
-        ) | ast::CallArg::Labeled {
-            value: ast::Expression::ArrayExpression(_) | ast::Expression::TupleExpression(_),
-            ..
-        }
+        arg_value(a),
+        ast::Expression::ArrayExpression(_)
+            | ast::Expression::TupleExpression(_)
+            | ast::Expression::BinaryLiteral(_)
     )
 }
 
@@ -1514,6 +1522,29 @@ mod tests {
         assert!(
             out.starts_with(&format!("x = f('{}', [\n\tb,\n", "a".repeat(40))),
             "{out}"
+        );
+        assert_round_trips(&out);
+    }
+
+    #[test]
+    fn a_final_binary_literal_hugs_the_parens() {
+        let src = "x = Ok(<<\n\t224 + int.bitwise_shift_right(code_point, 12):8,\n\t128 + int.bitwise_and(int.bitwise_shift_right(code_point, 6), 63):8,\n\t128 + int.bitwise_and(code_point, 63):8,\n>>)\n";
+        assert_eq!(fmt(src), src);
+        assert_round_trips(src);
+    }
+
+    /// A call that hugs may itself be hugged, so the parens close together
+    /// rather than each on its own line.
+    #[test]
+    fn a_final_call_that_hugs_is_hugged_too() {
+        let src = "x = Timer(waiting: spawn_unlinked(fn() {\n\tsleep(delay_ms)\n\tsend(subject, message)\n}))\n";
+        assert_eq!(fmt(src), src);
+        assert_round_trips(src);
+        // Not the last argument, so the fallback still breaks one per line.
+        let out = fmt("x = f(g(fn() {\n\tone()\n\ttwo()\n}), 2)\n");
+        assert_eq!(
+            out,
+            "x = f(\n\tg(fn() {\n\t\tone()\n\t\ttwo()\n\t}),\n\t2,\n)\n"
         );
         assert_round_trips(&out);
     }
