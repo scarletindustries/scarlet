@@ -13,37 +13,22 @@ pub fn bit_size(b Binary) Int
 @vm(binary__byte_size)
 pub fn byte_size(b Binary) Int
 
-// The window `b[at_bit .. at_bit+take_bits]`, in BITS. O(1): shares `b`'s
-// backing and copies nothing. A negative bound, or one that runs past
-// `bit_size(b)`, is `Err(Nil)` — never a short read.
-//
-// Every offset and length in this module states its unit in its own name,
-// because the two differ by a factor of 8 and a mistaken window is a valid
-// binary rather than a failure. There is deliberately no function called
-// `slice`: it used to mean bits, and a name that changed unit would leave
-// working code silently reading an eighth of what it asked for.
+// `take_bits` bits from bit `at_bit`, sharing `b` without copying. A window
+// past either end is `Err(Nil)`, never a short read. Each offset here names its
+// unit, bits or bytes, because a mix-up would still give a valid binary.
 @vm(binary__slice_bits)
 pub fn slice_bits(b Binary, at_bit Int, take_bits Int) Result(Binary, Nil)
 
-// The window `b[at .. at+len]`, in BYTES. O(1): shares `b`'s backing and
-// copies nothing. A negative bound, or one that runs past the end, is
-// `Err(Nil)`: a length that came off the wire is exactly the one that must
-// not fail quietly.
-//
-// `byte_size` rounds up, so the last byte of a binary whose bit length is not
-// a multiple of 8 is not addressable here — ask for it with `slice_bits`.
+// `len` bytes from byte `at`, sharing `b` without copying. A window past
+// either end is `Err(Nil)`. A last partial byte needs `slice_bits`.
 pub fn slice_bytes(b Binary, at Int, len Int) Result(Binary, Nil) {
 	slice_bits(b, at * 8, len * 8)
 }
 
-// Everything from byte `at` onwards. Total, and honestly so: past the end the
-// remainder really is `<<>>`, and a negative `at` drops nothing — there is no
-// requested length for the answer to fall short of, so nothing is swallowed.
-// Use it instead of `slice_bytes(b, at, byte_size(b) - at)`, which repeats the
-// bound the callee already knows.
+// Everything from byte `at` on: `<<>>` past the end, and all of `b` for a
+// negative `at`.
 pub fn drop_bytes(b Binary, at Int) Binary {
 	total = bit_size(b)
-	// Clamped before the ×8 so a huge `at` cannot wrap into a negative offset.
 	skip = if at <= 0 {
 		0
 	} else if at >= byte_size(b) {
@@ -56,24 +41,16 @@ pub fn drop_bytes(b Binary, at Int) Binary {
 	} else {
 		match slice_bits(b, skip, total - skip) {
 			Ok(v) -> v
-			// Unreachable: 0 <= skip < total == bit_size(b), so the window is
-			// exactly the tail. The arm exists because Result has two of them.
+			// Unreachable: the window is exactly the tail.
 			Err(Nil) -> <<>>
 		}
 	}
 }
 
-// Cut `b` at byte `at`, returning `(prefix, suffix)`. Total, and honestly so:
-// `at` is a position, not a length, so there is no requested size for either
-// half to fall short of. `at` is clamped to `[0, byte_size(b)]` — a negative
-// `at` takes nothing, past the end takes everything — and
-// `append(prefix, suffix) == b` holds for every `at`.
-//
-// Use it instead of `slice_bytes(b, 0, at)` plus `drop_bytes(b, at)` when a
-// position some other call already proved is inside `b`.
+// `b` cut at byte `at`, clamped to the binary, so
+// `append(prefix, suffix) == b` for every `at`.
 pub fn split_at_bytes(b Binary, at Int) (Binary, Binary) {
 	total = bit_size(b)
-	// Clamped before the ×8 so a huge `at` cannot wrap into a negative offset.
 	cut = if at <= 0 {
 		0
 	} else if at >= byte_size(b) {
@@ -86,8 +63,7 @@ pub fn split_at_bytes(b Binary, at Int) (Binary, Binary) {
 	} else {
 		match slice_bits(b, 0, cut) {
 			Ok(v) -> v
-			// Unreachable: 0 < cut <= total == bit_size(b), so the window is
-			// exactly the head. The arm exists because Result has two of them.
+			// Unreachable: the window is exactly the head.
 			Err(Nil) -> <<>>
 		}
 	}
@@ -97,7 +73,6 @@ pub fn split_at_bytes(b Binary, at Int) (Binary, Binary) {
 @vm(binary__append)
 pub fn append(a Binary, b Binary) Binary
 
-// Join `parts` in order. Empty input is `<<>>`.
 pub fn concat(parts Array(Binary)) Binary {
 	array.fold(parts, <<>>, fn(acc, p) append(acc, p))
 }
@@ -105,14 +80,11 @@ pub fn concat(parts Array(Binary)) Binary {
 @vm(binary__index_of)
 pub fn index_of(haystack Binary, needle Binary, from Int) Option(Int)
 
-// The byte at index `i`, or -1 when `i` is out of range. Total and
-// allocation-free, so byte-level scanners can probe without boxing an Option
-// per probe.
+// The byte at `i`, or -1 out of range. Not an Option, so a scanner allocates
+// nothing per byte.
 @vm(binary__byte_at)
 pub fn byte_at(b Binary, i Int) Int
 
-// The bases `parse_int` / `from_int_ascii` accept. A closed sum type, so a
-// caller cannot request base 8 (which used to silently render as base 10).
 pub type Radix {
 	Dec
 	Hex
@@ -121,11 +93,8 @@ pub type Radix {
 @vm(binary__parse_int)
 fn parse_int_raw(b Binary, radix Radix) Option(Int)
 
-// Parse an ASCII integer in `radix`: digits only, with no sign. A non-digit
-// byte or empty input is an `Err(Nil)` — a parse is a fallible operation, so
-// it returns Result per the stdlib convention. An Int has no bounds, so no
-// number of digits is too many; a caller that wants a limit, like a
-// Content-Length, checks the Int it gets.
+// ASCII digits only, with no sign. Any number of digits is fine, so a caller
+// that needs a limit checks the Int it gets.
 pub fn parse_int(b Binary, radix Radix) Result(Int, Nil) {
 	match parse_int_raw(b, radix) {
 		Some(n) -> Ok(n)
@@ -142,11 +111,8 @@ pub fn to_ascii_lower(b Binary) Binary
 @vm(binary__from_int_ascii)
 pub fn from_int_ascii(n Int, radix Radix) Binary
 
-// Two uppercase hex digits of the low 8 bits of `n`. Always exactly two
-// bytes: `hex_byte(13)` is `<<'0D'>>`, `hex_byte(255)` is `<<'FF'>>`.
-// `from_int_ascii(_, Hex)` is lowercase and drops the leading zero of a
-// value under 16, so a `%XX` encoder cannot use it. RFC 3986 §2.1 and
-// RFC 7230 both prefer uppercase.
+// Two uppercase hex digits of the low 8 bits of `n`: `hex_byte(13)` is
+// `<<'0D'>>`. For `%XX` escapes, which RFC 3986 §2.1 prefers uppercase.
 pub fn hex_byte(n Int) Binary {
 	b = int.bitwise_and(n, 255)
 	<<hex_digit(int.bitwise_shift_right(b, 4)):8, hex_digit(int.bitwise_and(b, 15)):8>>
@@ -154,7 +120,6 @@ pub fn hex_byte(n Int) Binary {
 
 fn hex_digit(n Int) Int {
 	if n < 10 {
-		// '0' is 48.
 		48 + n
 	} else {
 		// 'A' is 65, and this range starts at 10.

@@ -1,319 +1,33 @@
 /**
- * Values as bytes: encode turns a value into a Binary, decode reads one back
- * at the type the call site is used at.
+ * Values as bytes. `encode` turns any value into a Binary, and `decode` reads
+ * one back as the type the call site uses.
  *
- * Both are type-directed. The compiler knows the concrete type at every call
- * and emits a descriptor of it into the program, so decode never infers
- * anything from the bytes: Ok(x) is a value of exactly the type asked for, and
- * bad bytes are a DecodeError, never a wrong-shaped value and never a crash.
+ * The compiler puts a descriptor of that type into the program, so `decode`
+ * never guesses: `Ok(x)` is exactly the type asked for, and bad bytes are a
+ * `DecodeError`. Bytes follow a type's shape, not its name. Handles and
+ * closures only decode in the run that made them.
  *
- * That is also why encode is total and returns a plain Binary rather than a
- * Result: every value is encodable. The one refusal is about inference, not
- * about a value - a type variable at `decode` with nothing to fix it is
- * answered with "annotate the binding", because the descriptor is a function
- * of the static type and a polymorphic one has none.
- *
- * Everything encodes, as on BEAM, and the criterion throughout is
- * reconstructibility - never whether a value "has bytes". An opaque type
- * from another module crosses whenever its fields do, by its constructors,
- * and its invariants are that module's to re-check on the values it is
- * handed. Pid, Subject, Connection, TlsConnection and net.Server cross as
- * an identity - run, kind, number - that only the run that minted it can
- * use, the way a pid from another node is recognisably foreign on BEAM: a
- * handle decoded in the run that minted it IS that handle, `==` to the
- * original and reaching the same process, mailbox or socket, and a handle
- * from another run is refused at decode with OtherRun (below), carrying
- * both run identities. A closure crosses as the run that made it, its
- * function index and its captures, each capture carrying its own tag ("The
- * capture format" below), and decodes in that run to a closure `==` to the
- * original, running the same body over the same captures; from another run
- * it is OtherRun too, because a function index names a row in one program's
- * table and nothing else. A foreign handle or closure is refused at decode,
- * never admitted and found dead at use; and a closure does not cross
- * between two runs of one binary, which would need a program hash beside
- * the run identity.
- *
- * A type no value has - a `pub type Name` with no body that is none of the
- * five handles - is described rather than refused: an uninhabited node,
- * never written and never read, that stands only where the walk never goes
- * - the phantom argument of Tagged(Native), the element of an empty
- * Array(Native), the payload of a None. The bytes of such a record are its
- * other fields'.
- *
- * A decoded Subject is a handle to the mailbox and never a second owner of
- * it: only the process that called `subject()` can receive, and the mailbox
- * is reclaimed on that owner's terms whatever copies exist, exactly as for a
- * Subject that arrived in a message. A Port is an ordinary record over a
- * Connection and an Int and crosses as one; its stream comes back as a
- * port's stream, because the kind byte is the value's (below).
- *
- * Bytes are tied to a type's shape, not to its name. Two programs that declare
- * the same shape independently interoperate, and any change to the shape is a
- * SchemaMismatch rather than a silent misread.
- *
- * # The fingerprint
- *
- * "The same shape" is decided by a 64-bit fingerprint carried in every encoded
- * value and reported by SchemaMismatch. It is a compatibility surface between
- * separately compiled programs, so it is specified here rather than left to
- * the implementation: a second implementation that follows this section
- * produces the same numbers.
- *
- * The compiler describes a type as a finite table of nodes, each node a scalar
- * (Int, Float, String, Binary), a container (Array, Map, Tuple) or a Data node
- * listing the constructors. A child is an index into that table, which is how a
- * recursive type is finite: List(Int)'s Cons.tail is the index of the List(Int)
- * node itself. The table is laid out by a walk from the root, and the
- * fingerprint hashes it in index order, so nothing recurses.
- *
- * The hash is FNV-1a over 64-bit words:
- *
- *   mix(h, v) = (h XOR v) * 0x100000001b3, mod 2^64
- *
- * starting from h = mix(0xcbf29ce484222325, VERSION), where VERSION is 3.
- * Then mix in the node count, then the root's index, then each node in index
- * order. A name is mixed as its length followed by its UTF-8 bytes, one byte
- * per mix - length first, so ('ab', 'c') and ('a', 'bc') do not collide.
- *
- * Each node mixes a kind tag first: Int 1, Float 2, String 3, Binary 4,
- * Array 5 then the element's index, Map 6 then key and value indices, Tuple 7
- * then the element count and each index, Data 8 then the constructor count and,
- * per constructor in declared order: its tag, its name, its field count, and
- * per field the label and the field type's index. Identity 9 then the handle
- * kind (the table below), then the type-argument count and each argument's
- * index - so Pid and Connection differ, and Subject(Int) and Subject(String)
- * differ, even though none of those names is folded and a Subject's bytes are
- * the same whatever it carries. Closure 10 then the parameter count, each
- * parameter's index, then the return's index - so fn(Int) Int and
- * fn(String) Int differ, and fn(Int) Int and fn() Int differ, though a
- * closure's bytes hold none of its signature. Uninhabited 14, the tag alone:
- * a type no value has has no structure, and every such type is one node, as
- * every Int is. 11, 12 and 13 are not node kinds and are not free: the
- * capture format below numbers its tags from this table and holds them for
- * Nil, Bool and Range, so that the two tables are one number space and a
- * number means one thing wherever it is read. The next free number in
- * either table is 15.
- *
- * The handle kind is one byte, and the table is a stable wire surface: a
- * kind keeps its number forever and a new one takes the next free number.
- * It is NOT a type id, which is minted per compile and means nothing to a
- * peer. The four socket kinds carry the runtime's own socket-kind numbers.
- *
- *   Connection 0   a TCP stream (scarlet/net/socket.Connection)
- *   Listener   1   a listening socket (scarlet/net.Server)
- *   Port       2   a child process's stdio, which has no type of its own:
- *                  scarlet/os/port.Port's stream field is a Connection
- *   Tls        3   an encrypted stream (scarlet/net/tls.TlsConnection)
- *   Pid        4   a process identity (scarlet/process.Pid)
- *   Subject    5   a mailbox (scarlet/process.Subject)
- *
- * The descriptor names the kind the STATIC type has, so a descriptor never
- * says Port; the byte on the wire is the kind the VALUE carries, so a Port's
- * stream writes 2 under a descriptor that says 0, and a decoder accepts 2
- * where 0 is described. No other pair is admitted: Tls under Connection is
- * Malformed, because the type system keeps Socket and TlsSocket apart and
- * the wire must not reunite them.
- *
- * INCLUDED, so each of these is a schema change: node kinds, the order of
- * constructors, constructor names, field labels, field types, a handle's
- * kind and type arguments, and a function's parameter and return types.
- *
- * EXCLUDED, so none of these is: the type's own name, and the module it is
- * declared in. Renaming a type or moving it between modules leaves every peer
- * talking, and two programs that declare the same shape under different names
- * agree without ever having shared a declaration.
- *
- * CHANGING THIS ALGORITHM MEANS BUMPING THE FORMAT VERSION BYTE, and bumping
- * VERSION above with it - the same byte "The byte format" below reads. The
- * fingerprint travels in every message: an algorithm change that left the
- * version alone would surface at a peer as a SchemaMismatch on a type nobody
- * had touched. "Changing" is exactly that: a change that alters an output
- * some peer already holds - a tag renumbered, a fold reordered, a word added
- * to an existing row - bumps. A change that only ADDS an output, giving a
- * fingerprint or a byte layout to a type that had none because it refused,
- * does not: no number any peer holds moves, so nothing can be misread.
- *
- * Version history, as what a reader of the bytes needs to know:
- *
- *   1  kind tags 1-8, no identity row. Written by the canary builds
- *      0.0.1-canary.20260820.2050 through 0.0.1-canary.20260822.2154.
- *   2  Identity 9 and the identity row.
- *   3  Closure 10, the closure row and the capture format. Added under 3
- *      without a bump, by the rule above: Uninhabited 14, and Bool under the
- *      typed encoder (a 3 writer without it produced no valid Bool bytes).
- *
- * Bytes from 1 or 2 are NotWire to a 3 reader rather than misread.
- *
- * # The byte format
- *
- * Little-endian throughout, and no per-value type tags: the descriptor drives
- * structure on both sides, so the bytes hold only what the descriptor cannot
- * already supply. A second implementation that follows this section produces
- * the same bytes, same bar as the fingerprint above.
- *
- *   value := magic "SW" . version u8 . fingerprint u64 . body
- *
- * `version` is VERSION from the fingerprint algorithm above - one byte, one
- * definition, read by both sections. `fingerprint` is the 64-bit hash of the
- * root type, computed as specified there. A magic other than "SW", or a
- * version this runtime does not read, is NotWire; a fingerprint that parses
- * but disagrees with the reader's own is SchemaMismatch(expected, found) -
- * both sides carried, so a log line can say which end changed.
- *
- * `body` holds the value, laid out by the root node's kind and then, for a
- * container or Data node, recursively by each child's:
- *
- *   Int     zigzag LEB128                  (Int is 64-bit; nothing outside i64 exists)
- *   Float   8 bytes, f64 bits
- *   String  len LEB128, then that many UTF-8 bytes
- *   Binary  bit_len LEB128, then ceil(bit_len / 8) bytes (bit-level binaries round-trip)
- *   Array   count LEB128, then that many elements
- *   Map     count LEB128, then that many key/value pairs
- *   Tuple   its elements, in order (arity comes from the descriptor, not the bytes)
- *   Data    variant LEB128, then that constructor's fields - the variant is
- *           omitted entirely when the type has exactly one, so a record costs
- *           only its fields and Nil is zero bytes
- *   Identity  run 16 bytes, then kind u8, then id LEB128. `run` is the
- *           identity of the run that minted the handle: 128 bits from the OS
- *           CSPRNG, minted once per run, written most significant byte first
- *           and compared as bytes. `kind` is from the table above, and is the
- *           value's kind. `id` is the handle's number: a pid or mailbox id as
- *           the runtime holds it, a socket's 32-bit id zero-extended
- *   Closure   run 16 bytes, then func_idx LEB128, then capture_count LEB128,
- *           then that many captures in the capture format below. `run` is
- *           as for Identity. `func_idx` is the row of the program's function
- *           table the closure runs, zero-extended; `capture_count` is the
- *           number of words it closed over, which the static type does not
- *           fix and the bytes therefore must
- *   Uninhabited  nothing. No value of the type exists, so the node is never
- *           written: it stands only where the walk never goes, and a decoder
- *           steered into one by a forged count or variant tag reports
- *           Malformed at that byte. To the count guard it costs one byte -
- *           a row that cannot exist is one byte it will never have - so a
- *           count of them the input cannot cover is refused before anything
- *           is queued, rather than capped as a zero-cost element would be
- *
- * A count is checked against the bytes actually remaining before anything is
- * allocated - a short input claiming a huge count is Malformed(offset, what),
- * never an allocation. A complete value followed by more bytes is
- * TrailingBytes(count), reported rather than ignored, because a caller that
- * framed its own messages has lost sync. Input shorter than the value it
- * claims to hold is Truncated.
- *
- * An identity is judged in three steps, in the order its bytes can be wrong.
- * A kind the descriptor does not admit is Malformed whatever run wrote it.
- * A run that is not the reader's is OtherRun(expected, found), both
- * identities carried, the reader's own first - SchemaMismatch cannot say
- * this, because two runs of one binary have one fingerprint. An id the
- * handle's form cannot hold (past 2^48 for a pid or mailbox, past 2^32 for a
- * socket) is Malformed rather than masked into some other handle's number.
- *
- * A closure is judged in the order its bytes can be wrong, too. The run
- * first: a function index means nothing in another program, so another
- * run's is OtherRun before anything is read against this program's table.
- * Then, before any capture is read or anything built: the index must name a
- * row of the table, that row's arity must be the type's parameter count, and
- * its capture count must be the count the bytes claim - each otherwise
- * Malformed, naming which. The table is what a call indexes without
- * checking, so these are judged here rather than discovered at the first
- * call. Then the captures, by the format below.
- *
- * # The capture format
- *
- * A closure's captures are the one place the descriptor cannot drive:
- * fn(Int) Int is the static type of every lambda of that signature, and a
- * closure is a function index over capture words whose count and kinds the
- * type does not fix. So the captures are a self-describing island inside the
- * typed format, BEAM's shape: one tag byte per value, then the payload the
- * tag's row gives. The tags are a stable wire surface like the handle kinds
- * - a tag keeps its number forever and a new one takes the next free number
- * - and they are the fingerprint's node kind numbers where a node kind
- * exists, so the two tables read as one. Nil, Bool and Range have no node
- * kind (Bool is Data to a descriptor and an immediate to the runtime; Nil
- * here is the runtime's own nil word, which the prelude's Nil - a
- * one-constructor cell, Data to both - is not; a range is an Array(Int)
- * that stores no elements) and take the numbers after, 11 to 13.
- * Uninhabited is 14 rather than a reuse of them, so a new tag in either
- * table takes 15.
- *
- *    1  Int      zigzag LEB128. One row for both runtime forms: a boxed
- *                integer is an Int outside 48 bits and nothing more
- *    2  Float    8 bytes, f64 bits
- *    3  String   len LEB128, then that many UTF-8 bytes
- *    4  Binary   bit_len LEB128, then ceil(bit_len / 8) bytes
- *    5  Array    count LEB128, then that many captures
- *    6  Map      count LEB128, then that many key/value pairs, each half a
- *                capture
- *    7  Tuple    count LEB128, then that many captures - no descriptor to
- *                carry the arity, so the bytes do
- *    8  Data     type_id zigzag LEB128, variant LEB128, the type's name and
- *                the constructor's name as Strings, label_count LEB128 and
- *                that many label Strings, then field_count LEB128 and that
- *                many captures. The names travel because the program has no
- *                table from a constructor's identity back to them, and the
- *                identity means something because the run gate holds
- *    9  Handle   the Identity row: run 16 bytes, kind u8, id LEB128. Judged
- *                as a described handle is, except that every kind in the
- *                table is admitted - there is no descriptor to say which
- *   10  Closure  func_idx LEB128, capture_count LEB128, then that many
- *                captures. No run in front: the enclosing row's run already
- *                gated everything under it. Index and count are judged
- *                against the table as the described closure's are; there is
- *                no arity to judge, since a capture has no type
- *   11  Nil      nothing
- *   12  Bool     one byte, 0 or 1; anything else is Malformed
- *   13  Range    start zigzag LEB128, then end zigzag LEB128 - the bounds,
- *                not the elements. A described range is written as the
- *                array it equals because the descriptor asked for one; a
- *                capture has no descriptor, so it is written as it is
- *
- * Every count here is guarded at one byte per element - the tag each must at
- * least carry - before anything is allocated, as the typed walk's counts are
- * guarded by each element's minimum. A tag not in the table is Malformed at
- * the tag's offset.
- *
- * What this format does NOT do, stated rather than implied: it describes a
- * capture's form, not its fitness for the body that will read it. The
- * function table records how many words a body closes over and nothing
- * about their kinds, so a capture forged to another form decodes and is
- * found at use, by the body's typed instructions - which treat a word of
- * the wrong kind as a proof violation, not as a Scarlet error. The run
- * identity is the trust boundary that makes this acceptable: only this
- * run's own encoder writes these bytes, and a forger holding this run's
- * bytes already holds this run. Closing it means a per-function capture
- * layout beside capture_count, or a capture-shape hash folded into the
- * closure row; either is a later ticket.
+ * The byte format is in docs/wire-format.md.
  */
 
-// A value of any encodable type as bytes. Total: a type this cannot encode
-// is rejected when the program is compiled.
 @vm(wire__encode)
 pub fn encode(value a) Binary
 
-// The value `bytes` holds, as the type this call is used at. The type must
-// be known where `decode` is called; `Ok` is a well-formed value of it.
+// The type must be known where `decode` is called.
 @vm(wire__decode)
 pub fn decode(bytes Binary) Result(a, DecodeError)
 
 pub type DecodeError {
-	// Fewer bytes than the value needs.
 	Truncated
-	// Not produced by `wire.encode` (bad magic), or by a format version this
-	// runtime does not read.
+	// Not from `wire.encode`, or from a format version this runtime can't read.
 	NotWire
-	// Encoded from a type of a different shape. Both fingerprints, so a log
-	// line can say which side changed.
+	// Written from a type of another shape. Both fingerprints.
 	SchemaMismatch(expected Int, found Int)
-	// Well-framed bytes that do not hold a value of the type: a variant tag
-	// out of range, a string that is not UTF-8, a count larger than the
-	// remaining input. `offset` is the byte it went wrong at.
+	// Bytes that don't hold a value of the type. `offset` is where it went wrong.
 	Malformed(offset Int, what String)
-	// A complete value followed by more bytes. Reported rather than ignored,
-	// because a caller that framed its own messages has lost sync.
+	// A whole value followed by more bytes: a caller framing messages lost sync.
 	TrailingBytes(count Int)
-	// A handle (Pid, Subject, connection, listener) or a closure minted by
-	// another run of a program, which this run has no table to look it up
-	// in. Both run identities, 16 bytes each: `expected` is this run's,
-	// `found` is the one the bytes carry.
+	// A handle or closure from another run. `expected` is this run's identity,
+	// `found` the one in the bytes.
 	OtherRun(expected Binary, found Binary)
 }

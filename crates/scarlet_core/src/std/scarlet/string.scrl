@@ -1,17 +1,7 @@
 /**
- * Immutable Unicode strings.
- *
- * Strings are UTF-8 text values. Indexing is not offered; `length` and
- * `split` work in Unicode scalar values, so multi-byte characters are never
- * cut in half.
- *
- * `to_graphemes` and `replace` work at different granularities on purpose.
- * `replace` is a plain scalar-value substring replace — the same unit as
- * `split`/`contains`/`length` — so a CRLF pair stays two scalar values and
- * `replace(s, "\r", "")` always finds a bare `\r`, cluster or no cluster.
- * `to_graphemes` is the one function in this module that reasons about
- * grapheme clusters, for callers who need user-perceived characters (e.g.
- * counting or reversing what a person would call "one character").
+ * UTF-8 strings. There is no indexing. Everything here counts Unicode scalar
+ * values, so no character is cut in half, except `to_graphemes`, which gives
+ * what a person would call characters.
  */
 
 import scarlet/array
@@ -19,36 +9,28 @@ import scarlet/binary
 import scarlet/int
 import scarlet/result
 
-// The debug rendering of any value — what `println` prints: composites
-// (arrays, maps, constructors) show their structure, strings are inserted
-// as-is. For a specific format, prefer the value's own `to_string`.
+// Any value as `println` prints it.
 @vm(string__inspect)
 pub fn inspect(x a) String
 
-// The pieces of `s` between occurrences of `on`. Adjacent delimiters yield
-// empty pieces; an empty `on` splits into one piece per Unicode scalar value.
+// Adjacent delimiters give empty pieces. An empty `on` splits into single
+// scalar values.
 @vm(string__split)
 pub fn split(s String, on String) Array(String)
 
-// The number of Unicode scalar values in `s` — not bytes. O(n): the string
-// is walked, not measured.
+// Unicode scalar values, not bytes. O(n).
 @vm(string__length)
 pub fn length(s String) Int
 
-// Whether `needle` occurs as a substring of `s`. An empty needle is always
-// found.
+// An empty needle is always found.
 @vm(string__contains)
 pub fn contains(s String, needle String) Bool
 
-// `s` with Unicode whitespace removed from both ends.
 @vm(string__trim)
 pub fn trim(s String) String
 
-// `s` with every non-overlapping occurrence of `pattern` swapped for
-// `replacement`, left to right — split on `pattern`, then glue the pieces
-// back together with `replacement` between them. An empty `pattern` behaves
-// like `split`'s: `replacement` lands between every scalar value, never
-// before the first or after the last.
+// Every occurrence of `pattern`, left to right. An empty `pattern` puts
+// `replacement` between every two scalar values.
 pub fn replace(s String, pattern String, replacement String) String {
 	match split(s, pattern) {
 		[] -> s
@@ -56,18 +38,13 @@ pub fn replace(s String, pattern String, replacement String) String {
 	}
 }
 
-// `s` split into its extended grapheme clusters (UAX #29) — what a person
-// would call "one character": a base scalar value plus any combining marks,
-// or one member of a ZWJ sequence, joined into a single piece. Unlike
-// `split`, this never divides a multi-scalar cluster.
+// The extended grapheme clusters of `s` (UAX #29): a base and its combining
+// marks, or a whole ZWJ sequence, stay one piece.
 @vm(string__to_graphemes)
 pub fn to_graphemes(s String) Array(String)
 
-// The UTF-8 encoding of `code_point`, or `Err(Nil)` if it does not name a
-// Unicode scalar value: negative, past U+10FFFF (1114111), or a UTF-16
-// surrogate half (U+D800..U+DFFF, 55296..57343) — none of which stands
-// alone in UTF-8. No opcode needed: every branch is a `<<..:8>>` binary
-// literal over bits `bitwise_and`/`bitwise_shift_right` already expose.
+// `Err(Nil)` if `code_point` is not a scalar value: negative, past U+10FFFF,
+// or a surrogate (U+D800..U+DFFF, 55296..57343).
 fn encode_scalar_value(code_point Int) Result(Binary, Nil) {
 	if code_point < 0 || code_point > 1114111 {
 		Err(Nil)
@@ -96,18 +73,17 @@ fn encode_scalar_value(code_point Int) Result(Binary, Nil) {
 	}
 }
 
-// `code_points` rendered as a `String`, one Unicode scalar value at a time,
-// in the order given — the inverse direction from decoding one code point
-// out of a `Binary`. `Err(Nil)` if any entry is not a Unicode scalar value
-// (see `encode_scalar_value`). Gleam calls its version
-// `string.from_utf_codepoints`.
+// `Err(Nil)` if any of them is not a Unicode scalar value.
 pub fn from_code_points(code_points Array(Int)) Result(String, Nil) {
 	result.then(
-		array.fold(code_points, Ok(<<>>), fn(acc, cp) {
-			result.then(acc, fn(bytes) {
-				result.map(encode_scalar_value(cp), fn(next) binary.append(bytes, next))
-			})
-		}),
+		array.fold(
+			code_points,
+			Ok(<<>>),
+			fn(acc, cp) result.then(
+				acc,
+				fn(bytes) result.map(encode_scalar_value(cp), fn(next) binary.append(bytes, next)),
+			),
+		),
 		fn(bytes) binary.to_string(bytes),
 	)
 }

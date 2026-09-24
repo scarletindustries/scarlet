@@ -1,47 +1,37 @@
-// Typed errors for network and socket operations. Three kinds of variant live
-// here: the errno-mirroring ones (TimedOut through PermissionDenied, plus the
-// Errno catch-all), which the VM maps from the raw OS errno (names mirror
-// Rust's std::io::ErrorKind); UnexpectedEof and MessageTooLarge, raised by Scarlet
-// stdlib protocol code; and UnalignedBinary and InvalidPort, raised by the VM
-// itself. Either way a caller `match`es the exact failure rather than parsing
-// a message string.
+// A network error. Most variants are an OS errno, named as in Rust's
+// `std::io::ErrorKind`. `Errno` carries any errno without its own variant.
 pub type NetError {
-	// No data (or no connection) arrived before the deadline. (ETIMEDOUT)
+	// ETIMEDOUT, or a deadline passed.
 	TimedOut
-	// The peer actively refused the connection. (ECONNREFUSED)
+	// ECONNREFUSED
 	ConnectionRefused
-	// The peer reset an established connection. (ECONNRESET)
+	// ECONNRESET
 	ConnectionReset
-	// The connection was aborted (locally or by the network). (ECONNABORTED)
+	// ECONNABORTED
 	ConnectionAborted
-	// The socket is not connected. (ENOTCONN)
+	// ENOTCONN
 	NotConnected
-	// The write end found the read end gone. (EPIPE)
+	// EPIPE
 	BrokenPipe
-	// The local address is already bound by another socket. (EADDRINUSE)
+	// EADDRINUSE
 	AddrInUse
-	// The requested local address is not available on this host. (EADDRNOTAVAIL)
+	// EADDRNOTAVAIL
 	AddrNotAvailable
-	// The local network interface is down. (ENETDOWN)
+	// ENETDOWN
 	NetworkDown
-	// No route to the destination network. (ENETUNREACH)
+	// ENETUNREACH
 	NetworkUnreachable
-	// No route to the destination host. (EHOSTUNREACH)
+	// EHOSTUNREACH
 	HostUnreachable
-	// The operation was not permitted (e.g. binding a privileged port). (EACCES)
+	// EACCES, such as binding a privileged port.
 	PermissionDenied
-	// The peer closed the connection before a required number of bytes arrived.
+	// The peer closed before enough bytes arrived.
 	UnexpectedEof
-	// A message or body exceeded the maximum size the reader will buffer;
-	// carries that limit in bytes.
+	// A message was bigger than the reader will buffer, `limit` bytes.
 	MessageTooLarge(limit Int)
-	// A write was handed a binary that is not a whole number of bytes.
+	// A write was given a binary that is not whole bytes.
 	UnalignedBinary
-	// A port number outside 0..=65535 was passed to listen/connect. Raised by
-	// the Scarlet wrappers before the VM is reached: an opaque `SocketAddress`
-	// cannot carry an out-of-range port, so this is checked at construction.
+	// A port outside 0..=65535.
 	InvalidPort
-	// An OS error with no dedicated variant above, carrying its raw errno so it
-	// is still matchable — never a string.
 	Errno(code Int)
 }

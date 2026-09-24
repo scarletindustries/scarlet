@@ -1,17 +1,12 @@
 /**
- * `application/x-www-form-urlencoded`, both directions: the encoding HTML
- * forms POST in and query strings carry (WHATWG URL §5).
- *
- * `decode` is forgiving the way the format demands — a malformed percent
- * escape is passed through as literal bytes rather than rejected, because
- * that is what every consumer of forms has always done. `pct_encode` is the
- * strict half: everything outside RFC 3986's unreserved set is escaped, so
- * its output survives any URL position.
+ * `application/x-www-form-urlencoded`, both ways: what HTML forms POST and
+ * query strings carry (WHATWG URL §5). `decode` is forgiving: a bad percent
+ * escape is kept as literal bytes, as every form reader does. `pct_encode` is
+ * strict: everything outside RFC 3986's unreserved set is escaped.
  */
 
 import scarlet/array
 import scarlet/binary
-import scarlet/int
 import scarlet/option
 
 fn hex_val(c Int) Int {
@@ -73,8 +68,13 @@ fn pct_encode_from(b Binary, at Int, acc Binary) Binary {
 		acc
 	} else {
 		c = binary.byte_at(b, at)
-		unreserved = { c >= 48 && c <= 57 } || { c >= 65 && c <= 90 } || { c >= 97 && c <= 122 } ||
-			c == 45 || c == 46 || c == 95 || c == 126
+		unreserved = { c >= 48 && c <= 57 } ||
+			{ c >= 65 && c <= 90 } ||
+			{ c >= 97 && c <= 122 } ||
+			c == 45 ||
+			c == 46 ||
+			c == 95 ||
+			c == 126
 		next = if unreserved {
 			binary.append(acc, <<c:8>>)
 		} else {
@@ -88,22 +88,20 @@ fn pct_encode_from(b Binary, at Int, acc Binary) Binary {
  * segment with no `=` contributes nothing. */
 pub fn decode(b Binary) Array((String, String)) {
 	text = binary.to_string(b) or ''
-	array.fold(string_split(text), [], fn(acc, pair) {
-		match split_once(pair) {
-			Some((k, v)) -> [
+	array.fold(string_split(text), [], fn(acc, pair) match split_once(pair) {
+		Some((k, v)) ->
+			[
 				..acc,
 				(
 					binary.to_string(pct_decode(binary.from_string(k))) or '',
 					binary.to_string(pct_decode(binary.from_string(v))) or '',
 				),
 			]
-			None -> acc
-		}
+		None -> acc
 	})
 }
 
-// `string.split` lives in a module this one would rather not import for two
-// call shapes; the splits here are byte-exact on '&' and the first '='.
+// Byte splits on '&' and the first '=', so no need for scarlet/string.
 fn string_split(text String) Array(String) {
 	splits(binary.from_string(text), 0, 0, [])
 }

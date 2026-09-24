@@ -1,40 +1,23 @@
 import scarlet/http/headers
 import scarlet/http/status
 
-// Sans-IO HTTP/1.1 message parsing, framing, and response-head serialization.
+// HTTP/1.1 without I/O: parse request and response heads, decide body
+// framing, and write response heads. It works on a Binary and offsets, never a
+// socket, and hands back views into the caller's buffer. scarlet/http imports
+// this, never the other way.
 //
-// Everything here operates on a `Binary` read buffer plus `Int` offsets: it
-// never touches a socket and never allocates beyond the zero-copy views it
-// hands back (slices over the caller's buffer). It deliberately does NOT
-// import scarlet/http — the typed Request/Response live there and that module
-// imports this one; keeping h1 on raw bytes + offsets is what keeps the layer
-// acyclic. `parse_request` returns the raw pieces (method/target/version/
-// headers/consumed-offset); the caller maps them onto its own types.
-//
-// The byte scanning itself — finding the CRLF/SP/colon boundaries, building
-// the field views, the RFC 7230 §3.3.3 framing precedence — runs as native VM
-// builtins: one
-// op per request head instead of one op per byte. Every protocol DECISION
-// (keep-alive, 100-continue, how to frame the response) stays in Scarlet, here and
-// in scarlet/http.
+// The byte scanning runs natively (httparse), one call per head. Every
+// protocol decision, like keep-alive or 100-continue, stays in Scarlet.
 
-// The HTTP/1.x minor version on the wire. HTTP/2 speaks a different framing
-// layer entirely and never reaches this parser, so it is deliberately absent —
-// a `Version` value proves the message was HTTP/1.0 or HTTP/1.1.
+// HTTP/1.0 or HTTP/1.1. HTTP/2 frames differently and never reaches here.
 pub type Version {
 	Http10
 	Http11
 }
 
-// Which `Connection` tokens the head carried, as one value rather than one
-// Bool per token: the pair is a single field's token set, so neither half is
-// separately assignable. `Connection` is a repeatable token list (RFC 9110
-// §7.6.1), so a peer can genuinely send both — `ConnBoth` is a state the
-// parser witnesses, not a contradiction, and recording it keeps the RFC 9112
-// §9.3 precedence in `should_close` rather than in the parser.
-//
-// Mirrors the VM's `ConnTokens` across the ABI; the two are one boundary in
-// two languages and change together.
+// The `Connection` tokens a head carried. A peer can send both (RFC 9110
+// §7.6.1), so `ConnBoth` is real; `should_close` decides what it means.
+// Mirrors the VM's `ConnTokens`: change them together.
 pub type ConnTokens {
 	ConnNeither
 	ConnClose
@@ -42,24 +25,15 @@ pub type ConnTokens {
 	ConnBoth
 }
 
-// The `Connection` and `Expect` token-list answers, recorded by the head
-// parser during the single pass it already makes over every field. They are
-// the raw tokens found, not a decision: `close` beating `keep_alive` and the
-// per-version default stay in `should_close` below. Recording them at parse
-// time is what keeps `should_close`/`want_100_continue` field reads instead of
-// a fresh walk of the whole header list each.
-//
-// Only the request head's own fields contribute. A chunked body's trailer
-// block never does: trailers carry no connection or expectation semantics
-// (RFC 9110 §6.5.1).
+// The `Connection` and `Expect` tokens, found in the head parser's one pass
+// over the fields. Trailers never add to them (RFC 9110 §6.5.1).
 pub opaque type HeadFlags {
 	conn ConnTokens
 	expect_100_continue Bool
 }
 
-// The outcome of parsing one request head out of `buf` starting at an offset.
-// `Done` threads the consumed-offset so the connection loop can resume parsing
-// the next pipelined request from exactly where this one ended.
+// One parsed request head. `consumed` is where the next pipelined request
+// starts.
 pub type Parsed {
 	Done(
 		method Binary
@@ -73,11 +47,9 @@ pub type Parsed {
 	Bad(status Int)
 }
 
-// How a message body is framed, after applying RFC 7230 section 3.3.3
-// precedence and the smuggling rejects. Content-Length and chunked
-// transfer-encoding are both supported; any other Transfer-Encoding is
-// rejected (501) rather than silently ignored (ignoring a transfer coding is
-// a classic request-smuggling vector).
+// How a request body is framed (RFC 7230 §3.3.3). A Transfer-Encoding other
+// than chunked is refused with 501, not ignored: ignoring one allows request
+// smuggling.
 pub type Framing {
 	NoBody
 	Length(n Int)
@@ -85,48 +57,34 @@ pub type Framing {
 	Invalid(status Int)
 }
 
-// The outcome of decoding a chunked transfer-encoded body out of `buf`
-// starting at an offset. Mirrors `Parsed`'s incremental contract:
-// `ChunkedNeedMore` means the buffer does not yet hold the whole body — read
-// more bytes and call again with the same offset. `ChunkedDone` carries the
-// decoded body, any trailer fields, and the offset just past the final CRLF —
-// the start of the next pipelined request.
+// One chunked body decode. On ChunkedNeedMore, read more and call again with
+// the same offset. `consumed` is just past the final CRLF.
 pub type ChunkBody {
 	ChunkedDone(body Binary, trailers headers.Headers, consumed Int)
 	ChunkedNeedMore
 	ChunkedBad(status Int)
 }
 
-// Why a RESPONSE head was refused. Deliberately not a status code: `Parsed.Bad`
-// carries one because a server that rejects a request answers with it, and a
-// client reading a reply has nobody to answer. A number here would be a status
-// the caller could only invent.
+// Why a response head was refused. Not a status code: a client has no one to
+// answer.
 pub type BadResponse {
 	// The status line is not `HTTP/1.x SP <3 digits> [SP reason]`. Includes a
 	// three-byte code that is not three digits, and a line with no space.
 	BadStatusLine
 	// The version is well-formed but is neither HTTP/1.0 nor HTTP/1.1.
 	BadVersion
-	// A header field is malformed: no colon, whitespace before the colon, or an
-	// obs-fold continuation line. Same grammar and same rejects as the request
-	// head — one scanner answers both.
+	// A malformed field: no colon, space before the colon, or obs-fold. The same
+	// rules as a request head.
 	BadField
 	// The head exceeded the 64 KiB cap rather than being buffered forever.
 	HeadTooLarge
-	// Content-Length and Transfer-Encoding disagree, or a transfer coding other
-	// than `chunked` was used. Raised by `response_framing`, never by the head
-	// parser, which does not look at framing fields.
+	// Content-Length and Transfer-Encoding disagree, or a coding other than
+	// chunked. Only `response_framing` gives this.
 	BadFraming
 }
 
-// The outcome of parsing one response head out of `buf` at an offset. Mirrors
-// `Parsed`'s incremental contract and threads `consumed` the same way, so a
-// client can find the body's first byte without rescanning.
-//
-// `reason` is the reason phrase exactly as it arrived, and may be empty: RFC
-// 9112 §4 allows an empty phrase and says a client MUST ignore its content.
-// It is carried because a proxy has to forward it, not because a decision may
-// be made on it.
+// One parsed response head, like `Parsed`. `reason` may be empty, and a
+// client must not act on it (RFC 9112 §4); it is kept so a proxy can forward it.
 pub type ParsedResponse {
 	ResponseDone(
 		version Version
@@ -140,81 +98,40 @@ pub type ParsedResponse {
 	ResponseBad(err BadResponse)
 }
 
-// How a RESPONSE body is framed (RFC 9112 §6.3). A response is not a request
-// with the arrow reversed: absent framing fields mean "no body" on a request
-// and "body runs until the connection closes" on a response, so reusing
-// `Framing` here would silently truncate every close-framed reply to empty.
-// That is the whole reason this is a separate type.
+// How a response body is framed (RFC 9112 §6.3). Unlike a request, no
+// framing fields means the body runs until close, so this is not `Framing`.
 pub type ResponseFraming {
 	// No body may follow, whatever the fields said: 1xx, 204 and 304.
 	BodyNone
 	BodyLength(n Int)
 	BodyChunked
-	// No framing fields: the body ends when the peer closes. The connection
-	// cannot be reused, and a truncated read is indistinguishable from a
-	// complete one — which is why a client should prefer a framed reply.
+	// No framing fields: the body ends at close. A cut-short body looks whole,
+	// so prefer a framed reply.
 	BodyUntilClose
 	BodyInvalid(err BadResponse)
 }
 
-// Parse a request head out of `buf` starting at `off`. Incomplete input yields
-// NeedMore (read more and call again with the same offset); a malformed head
-// yields Bad(status). A leading empty line before the request line is skipped
-// (RFC 7230 section 3.5).
-//
-// One native pass over the bytes, by `httparse` (the parser `hyper` uses);
-// the returned method/target/header names/values are zero-copy views into
-// `buf`. Obs-fold, whitespace before the field colon, a line ending in a bare
-// LF or CR, and a NUL in a field value are rejected (400) — each is a
-// request-smuggling vector — a version other than HTTP/1.0 or HTTP/1.1 is
-// rejected (505), and a head larger than 64 KiB is rejected (431, or 414 when
-// the request line itself never ends) rather than buffered forever. At most
-// four empty lines may come before the request line.
+// Parse a request head from `buf` at `off`; on NeedMore, read more and retry.
+// Up to four empty lines may come first. Refused: obs-fold, space before a
+// colon, bare CR or LF, NUL (400); not HTTP/1.x (505); over 64 KiB (431, 414).
 @vm(http__parse_head)
 pub fn parse_request(buf Binary, off Int) Parsed
 
-// Determine body framing from the request headers, enforcing RFC 7230 section
-// 3.3.3 precedence and the MUST-reject smuggling conflicts. `Transfer-Encoding:
-// chunked` (the only/final coding, case-insensitive) frames the body as
-// Chunked. Transfer-Encoding alongside Content-Length is a conflict (400);
-// any other transfer coding is unimplemented (501) — never silently ignored.
-// Multiple Content-Length fields, or a value that is not a strict run of
-// digits / is past 9223372036854775807 / carries a redundant leading zero
-// ("007"), are all rejected (400).
+// Request body framing (RFC 7230 §3.3.3). Refused: Transfer-Encoding with
+// Content-Length (400), a coding other than chunked (501), and more than one
+// Content-Length, or one that is not plain digits, too big, or like "007" (400).
 @vm(http__framing)
 pub fn framing(hs headers.Headers) Framing
 
-// Parse a response head out of `buf` starting at `off`. Incomplete input
-// yields ResponseNeedMore (read more and call again with the SAME offset); a
-// malformed head yields ResponseBad.
-//
-// The status line is `HTTP/1.x SP <3 digits> [SP reason]`; the header block
-// after it is the same block, scanned by the same native code, as a request
-// head's — so obs-fold, whitespace before the field colon and a 64 KiB head
-// are refused here for the same reasons and at the same byte offsets. Header
-// names/values and `reason` are zero-copy views into `buf`.
-//
-// Unlike `parse_request` this does NOT skip leading empty lines. The leniency
-// there is RFC 7230 §3.5's allowance for a client that sends a stray CRLF
-// after a previous request's body; a server sending one before a status line
-// is a framing error, and swallowing it would hide a desynchronized
-// connection — the exact failure a pipelining client must notice.
+// Parse a response head from `buf` at `off`; on ResponseNeedMore, read more
+// and retry. Fields follow the request rules. Unlike a request, no empty line
+// may come first: from a server, that means the connection is out of step.
 @vm(http__parse_response_head)
 pub fn parse_response(buf Binary, off Int) ParsedResponse
 
-// Body framing for a RESPONSE with status `code` and header fields `hs`,
-// applying RFC 9112 §6.3 on top of the shared §3.3.3 precedence that
-// `framing` already enforces (so the smuggling conflicts are rejected once,
-// in one place, for both directions).
-//
-// The rules that differ from a request: 1xx, 204 and 304 never have a body
-// whatever the fields claim, and a response with no framing field at all is
-// framed by connection close rather than being empty.
-//
-// The remaining §6.3 rule — a response to a HEAD request has no body, however
-// it is framed — is deliberately NOT here: h1 never sees the request, and
-// taking a bare `Bool` for it would let a caller answer the wrong question
-// silently. The client that sent the method applies that rule itself.
+// Response body framing (RFC 9112 §6.3): 1xx, 204 and 304 have no body, and
+// no framing fields means the body ends at close. A response to HEAD has no
+// body either, but h1 never sees the request, so the client checks that.
 pub fn response_framing(hs headers.Headers, code Int) ResponseFraming {
 	if code >= 100 && code < 200 || code == 204 || code == 304 {
 		BodyNone
@@ -228,25 +145,14 @@ pub fn response_framing(hs headers.Headers, code Int) ResponseFraming {
 	}
 }
 
-// Decode a chunked transfer-encoded body from `buf` starting at `off`,
-// refusing to decode more than `max` body bytes (413). Each chunk is
-// "<hex-size>[;extensions]CRLF <data> CRLF"; extensions are ignored. A
-// zero-size chunk terminates the body, optionally followed by a trailer
-// header block (same grammar and smuggling rejects as the request head,
-// capped like the head -> 431) and the final blank line. A malformed or
-// over-long size line, or chunk data not followed by CRLF, is rejected (400)
-// — the decoder never resynchronizes after a framing lie.
-//
-// One native pass over the buffered bytes per call. The decoded body comes
-// back as one owned Binary: the keep-alive-safe bounded-buffer model — the
-// caller never hands a half-consumed socket to a handler.
+// Decode a chunked body from `buf` at `off`, at most `max` bytes (413). Chunk
+// extensions are ignored. A bad size line, or data not followed by CRLF, is
+// refused (400). Trailers follow the head rules (431 when too big).
 @vm(http__chunk_decode)
 pub fn chunk_decode(buf Binary, off Int, max Int) ChunkBody
 
-// Serialize a status line + header block as one contiguous binary:
-// "HTTP/1.1 <status> <reason>\r\n", the rendered headers, then the blank line
-// that terminates the head. Native single-buffer assembly so the head can be
-// the first part of one vectored write alongside the body.
+// The status line, the headers and the blank line, as one Binary, so it can
+// lead a vectored write.
 @vm(http__serialize_head)
 fn serialize_head_with(code Int, reason Binary, hs headers.Headers) Binary
 
@@ -254,32 +160,21 @@ pub fn serialize_head(code Int, hs headers.Headers) Binary {
 	serialize_head_with(code, status.reason_phrase(code), hs)
 }
 
-// Whether the connection must close after this message. The `close` option
-// wins whenever present, regardless of version (RFC 9112 §9.3). Otherwise
-// HTTP/1.0 defaults to close unless `Connection: keep-alive`; HTTP/1.1
-// defaults to keep-alive. `Connection` is a token list (RFC 9110 §7.6.1), so
-// `keep-alive, Upgrade` still keeps an HTTP/1.0 connection alive.
-// The tokens themselves were found by the head parser (`HeadFlags`), so this
-// is the decision only — no second walk of the header list.
-//
-// One arm per token set, so each verdict stands on its own rather than on
-// having tested `close` first: a fifth state could not be added without the
-// exhaustiveness checker naming this match.
+// Whether to close after this message: always on `close` (RFC 9112 §9.3),
+// else HTTP/1.0 closes unless `keep-alive` and HTTP/1.1 stays open. One arm
+// per token set, so a new state must be handled here.
 pub fn should_close(version Version, f HeadFlags) Bool {
 	match f.conn {
 		ConnClose -> True
 		ConnBoth -> True
 		ConnKeepAlive -> False
-		ConnNeither ->
-			match version {
-				Http11 -> False
-				Http10 -> True
-			}
+		ConnNeither -> match version {
+			Http11 -> False
+			Http10 -> True
+		}
 	}
 }
 
-// Whether the client asked the server to send an interim 100 response before
-// it streams the request body (`Expect: 100-continue`).
 pub fn want_100_continue(f HeadFlags) Bool {
 	f.expect_100_continue
 }

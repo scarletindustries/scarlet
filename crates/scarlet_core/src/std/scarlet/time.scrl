@@ -1,24 +1,11 @@
 /**
- * Time. Two clocks, and they are not interchangeable.
+ * Two clocks, not to be mixed up.
  *
- * monotonic() returns an Instant representing "now" on a clock that only ever
- * moves forward - it is unaffected by wall-clock adjustments (NTP steps, leap
- * seconds, the user changing the system time) - so it is the right primitive
- * for measuring durations, computing deadlines, and timing out I/O.
+ * `monotonic()` only moves forward, so it is the one for durations and
+ * deadlines. Its `Instant` is opaque, so nothing else can pass for a deadline.
  *
- * Instant is opaque: it can only be obtained from monotonic() (or its deadline
- * form, deadline_in_ms) and only moved with add_ms / compared with since_ms, so
- * a wall-clock ms count or a bare duration cannot be passed where an absolute
- * monotonic deadline is expected.
- *
- * epoch_ms() reads the other clock: the system's wall clock, which is the one
- * that says what date it is and therefore the only one that can be compared
- * with a timestamp someone else produced. It is settable, so it can step in
- * either direction, and the difference between two readings is not an elapsed
- * time. It is a plain Int and not an Instant for exactly that reason: every
- * deadline the stdlib takes from a caller is an Instant, so a wall-clock reading
- * cannot be passed as one. What the type does not stop is handing it to a
- * _within function, which takes a relative timeout and would read it as one.
+ * `epoch_ms()` is the wall clock: the date, for timestamps that leave the
+ * program. It can jump either way, so never measure a duration with it.
  */
 
 pub opaque type Instant {
@@ -32,40 +19,32 @@ pub fn monotonic() Instant {
 	Instant(monotonic_ms())
 }
 
-// The instant `ms` milliseconds after `t`. Use this to compute a deadline.
 pub fn add_ms(t Instant, ms Int) Instant {
 	match t {
 		Instant(n) -> Instant(n + ms)
 	}
 }
 
-// The instant `ms` milliseconds from now: the deadline every I/O call wants,
-// named once. `add_ms(monotonic(), ms)` says the same thing but reads the clock
-// into an Instant only to take it straight back apart.
+// The deadline `ms` milliseconds from now.
 pub fn deadline_in_ms(ms Int) Instant {
 	Instant(monotonic_ms() + ms)
 }
 
-// Milliseconds elapsed from `earlier` to `later`; negative if `later` is
-// actually before `earlier`.
+// Milliseconds from `earlier` to `later`, negative if `later` is before it.
 pub fn since_ms(later Instant, earlier Instant) Int {
 	match (later, earlier) {
 		(Instant(a), Instant(b)) -> a - b
 	}
 }
 
-// Unwrap to raw monotonic ms for the @vm boundary. Prefer add_ms / since_ms.
+// Raw monotonic milliseconds, for the VM's built-ins. Prefer `since_ms`.
 pub fn to_deadline_ms(t Instant) Int {
 	match t {
 		Instant(n) -> n
 	}
 }
 
-// Milliseconds since the Unix epoch, 1970-01-01T00:00:00Z; negative before it.
-// This is the clock to read when the number leaves the program or arrives from
-// outside it - a timestamp in a header, a log line, an id that encodes when it
-// was minted. It is not the clock to measure with: it can be stepped by the
-// operator or by NTP, so subtracting two readings can give a negative or a
-// wildly wrong duration. monotonic() is what durations and deadlines are for.
+// Milliseconds since 1970-01-01T00:00:00Z, negative before it. It can jump, so
+// use `monotonic()` for durations.
 @vm(time__epoch_ms)
 pub fn epoch_ms() Int

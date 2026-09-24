@@ -71,17 +71,11 @@ const rp_loop_detected = <<'Loop Detected'>>
 const rp_not_extended = <<'Not Extended'>>
 const rp_network_auth_required = <<'Network Authentication Required'>>
 
-// Unknown / unregistered codes get an empty reason phrase, which is a valid
-// (zero-length) reason-phrase in the status line per RFC 9110 section 15.
+// Unknown codes get an empty reason phrase, which RFC 9110 §15 allows.
 const rp_unknown = <<>>
 
-// The reason phrase for a status code, e.g. 404 -> "Not Found". Returns an
-// empty binary for codes not in the registry.
-//
-// An Int match compiles to a chain of compares tested in source order, and
-// this one runs on every response head the server serves, so the handful of
-// codes a server emits at volume are tested before the rest of the registry
-// (which follows in its own order).
+// The reason phrase for a code, like 404 -> "Not Found", or empty if unknown.
+// Common codes come first: the match tests in order, on every response.
 pub fn reason_phrase(code Int) Binary {
 	match code {
 		200 -> rp_ok

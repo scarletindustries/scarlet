@@ -1,44 +1,25 @@
 /**
- * Base64 as RFC 4648 §4 defines it: the standard alphabet (`A`-`Z`, `a`-`z`,
- * `0`-`9`, `+`, `/`) with `=` padding, so output length is always a multiple
- * of four.
+ * Base64 (RFC 4648). `encode` is §4: `+`, `/` and `=` padding. `url_encode`
+ * is §5: `-`, `_` and no padding, as URLs, JWTs and PKCE carry.
  *
- * This is an encoding, not a cipher — it hides nothing. It is here because the
- * byte-oriented protocols the stdlib already speaks carry binary in text
- * fields: HTTP basic credentials, `data:` URIs, and the WebSocket opening
- * handshake, whose `Sec-WebSocket-Key` and `Sec-WebSocket-Accept` are both
- * base64 (RFC 6455 §1.3).
- *
- * `decode` is strict. It accepts exactly what `encode` produces and rejects
- * everything else: a length that is not a multiple of four, a character
- * outside the alphabet, padding anywhere but the end, and non-zero bits in the
- * discarded tail of a padded group. Strictness is the point — the same bytes
- * decoding two ways is how a signature check is bypassed, so there is
- * deliberately no lenient mode and no whitespace skipping. Callers holding
- * MIME text with line breaks must strip them first.
- *
- * `url_encode`/`url_decode` are RFC 4648 §5: `-` and `_` in place of `+` and
- * `/`, and no padding at all — the form URLs, JWTs, and OAuth's PKCE
- * challenge (RFC 7636 §4.2) carry. The same strictness applies: `url_decode`
- * rejects standard-alphabet characters, any `=`, an impossible length
- * (4n+1), and non-zero fill bits in a partial tail.
+ * Decoding is strict: it takes exactly what the encoder writes and nothing
+ * else, with no whitespace skipping. Bytes that decode two ways are how a
+ * signature check gets bypassed. Strip MIME line breaks first.
  */
 
 import scarlet/binary
 import scarlet/int
 
-// The alphabet, as arithmetic rather than a table: the five ranges are
-// contiguous in ASCII, so a comparison chain maps a 6-bit value to its
-// character without allocating a lookup binary per call.
+// Arithmetic rather than a table, so no lookup binary per call.
 fn digit(v Int) Int {
 	if v < 26 {
 		// 'A' is 65.
 		65 + v
 	} else if v < 52 {
-		// 'a' is 97, and this range starts at 26.
+		// 'a' is 97.
 		71 + v
 	} else if v < 62 {
-		// '0' is 48, and this range starts at 52.
+		// '0' is 48.
 		v - 4
 	} else if v == 62 {
 		// '+'
@@ -49,9 +30,7 @@ fn digit(v Int) Int {
 	}
 }
 
-// The inverse of `digit`, or -1 for any byte outside the alphabet. The
-// sentinel is checked at every call site before use; `Option` here would box
-// one value per input character for a value that is never stored.
+// -1 outside the alphabet, rather than an `Option` boxed per character.
 fn undigit(c Int) Int {
 	if c >= 65 && c <= 90 {
 		c - 65
@@ -68,8 +47,6 @@ fn undigit(c Int) Int {
 	}
 }
 
-// `b` in base64. Total: every binary has an encoding, and the empty binary
-// encodes to the empty binary rather than to padding.
 pub fn encode(b Binary) Binary {
 	encode_from(b, 0, binary.byte_size(b), <<>>)
 }
@@ -80,8 +57,7 @@ fn encode_from(b Binary, at Int, size Int, acc Binary) Binary {
 		acc
 	} else if left == 1 {
 		b0 = binary.byte_at(b, at)
-		// 8 bits into two 6-bit digits: the low 4 bits of the second are the
-		// zero fill RFC 4648 §3.5 requires, and `decode` rejects them non-zero.
+		// The low 4 bits of the second digit are the zero fill of RFC 4648 §3.5.
 		d0 = int.bitwise_shift_right(b0, 2)
 		d1 = int.bitwise_shift_left(int.bitwise_and(b0, 3), 4)
 		binary.append(acc, <<digit(d0):8, digit(d1):8, 61:8, 61:8>>)
@@ -114,8 +90,7 @@ fn encode_from(b Binary, at Int, size Int, acc Binary) Binary {
 	}
 }
 
-// The bytes `b` encodes, or `Err(Nil)` if `b` is not exactly what `encode`
-// produces. See the module doc for what "exactly" rules out.
+// `Err(Nil)` unless `b` is exactly what `encode` writes.
 pub fn decode(b Binary) Result(Binary, Nil) {
 	size = binary.byte_size(b)
 	if size % 4 != 0 {
@@ -135,9 +110,8 @@ fn decode_from(b Binary, at Int, size Int, acc Binary) Result(Binary, Nil) {
 		c3 = binary.byte_at(b, at + 3)
 		v0 = undigit(c0)
 		v1 = undigit(c1)
-		// Padding is legal only in the final group, and only in the last two
-		// positions. `last` is what makes an interior `=` an error rather than
-		// a short decode that silently drops the rest of the input.
+		// Padding only in the last two places of the last group. Without `last`,
+		// an `=` in the middle would silently drop the rest of the input.
 		last = at + 4 >= size
 		if v0 < 0 || v1 < 0 {
 			Err(Nil)
@@ -180,7 +154,6 @@ fn decode_from(b Binary, at Int, size Int, acc Binary) Result(Binary, Nil) {
 	}
 }
 
-
 // §5's alphabet differs from §4's only in the last two digits.
 fn url_digit(v Int) Int {
 	if v == 62 {
@@ -200,16 +173,13 @@ fn url_undigit(c Int) Int {
 	} else if c == 95 {
 		63
 	} else if c == 43 || c == 47 {
-		// The §4 digits for 62 and 63 are NOT part of this alphabet; mapping
-		// them would make one value decodable two ways across the two forms.
+		// §4's `+` and `/` are refused, so no input decodes two ways.
 		0 - 1
 	} else {
 		undigit(c)
 	}
 }
 
-// `b` in unpadded url-safe base64 (RFC 4648 §5). Total, and the empty binary
-// encodes to the empty binary.
 pub fn url_encode(b Binary) Binary {
 	url_encode_from(b, 0, binary.byte_size(b), <<>>)
 }
@@ -247,21 +217,21 @@ fn url_encode_from(b Binary, at Int, size Int, acc Binary) Binary {
 			int.bitwise_shift_right(b2, 6),
 		)
 		d3 = int.bitwise_and(b2, 63)
-		next = binary.append(
-			acc,
-			<<url_digit(d0):8, url_digit(d1):8, url_digit(d2):8, url_digit(d3):8>>,
-		)
+		next = binary.append(acc, <<
+			url_digit(d0):8,
+			url_digit(d1):8,
+			url_digit(d2):8,
+			url_digit(d3):8,
+		>>)
 		url_encode_from(b, at + 3, size, next)
 	}
 }
 
-// The bytes `b` url-encodes, or `Err(Nil)` if `b` is not exactly what
-// `url_encode` produces.
+// `Err(Nil)` unless `b` is exactly what `url_encode` writes.
 pub fn url_decode(b Binary) Result(Binary, Nil) {
 	size = binary.byte_size(b)
 	if size % 4 == 1 {
-		// One digit holds six bits: not enough for a byte, so no input of
-		// this length is the encoding of anything.
+		// One digit is six bits, less than a byte, so this length encodes nothing.
 		Err(Nil)
 	} else {
 		url_decode_from(b, 0, size, <<>>)

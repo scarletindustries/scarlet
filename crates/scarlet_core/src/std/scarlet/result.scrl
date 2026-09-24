@@ -12,9 +12,8 @@ pub fn map_err(r Result(a, e), f fn(e) e2) Result(a, e2) {
 	}
 }
 
-// Swap the contentless error of a `Result(_, Nil)` for a meaningful one. The
-// input error is pinned to Nil like `unwrap`'s: replacing an error that
-// carries data would silently discard it — consume those with `map_err`.
+// Gives a `Result(_, Nil)` a real error. Only for `Nil` errors, so that no
+// error with data in it is dropped by accident; use `map_err` for those.
 pub fn replace_err(r Result(a, Nil), err e) Result(a, e) {
 	match r {
 		Ok(a) -> Ok(a)
@@ -29,9 +28,8 @@ pub fn then(r Result(a, e), f fn(a) Result(b, e)) Result(b, e) {
 	}
 }
 
-// Unwrap a result that has a Nil error type. The error is not generic
-// intentionally, as it is usually a mistake to be ignoring
-// error values. Most of the time you would want to consume them.
+// Only for `Nil` errors, on purpose: dropping an error that carries data is
+// usually a mistake.
 pub fn unwrap(r Result(a, Nil), default a) a {
 	match r {
 		Ok(a) -> a
@@ -39,9 +37,7 @@ pub fn unwrap(r Result(a, Nil), default a) a {
 	}
 }
 
-// Lazily unwrap a result that has a Nil error type. The error is not generic
-// intentionally, as it is usually a mistake to be ignoring
-// error values. Most of the time you would want to consume them.
+// Like `unwrap`, but only calls `default` on an error.
 pub fn unwrap_lazy(r Result(a, Nil), default fn() a) a {
 	match r {
 		Ok(a) -> a

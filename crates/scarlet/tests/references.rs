@@ -185,8 +185,16 @@ fn stdlib_import_path_is_tracked() {
         "the alias binding is owned by the importing (entry) module"
     );
 
-    // Goto-def must land on the real `pub fn length` in src/std/scarlet/array.scrl
-    // (0-based line 49).
+    // Goto-def must land on the real `pub fn length` in src/std/scarlet/array.scrl.
+    // Its line is read from the file rather than written here, so editing a
+    // comment above it cannot fail this test for the wrong reason.
+    let array_scrl = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../scarlet_core/src/std/scarlet/array.scrl");
+    let src = std::fs::read_to_string(&array_scrl).expect("the stdlib array module");
+    let decl = src
+        .lines()
+        .position(|line| line.starts_with("pub fn length"))
+        .expect("a `pub fn length` declaration") as i32;
     let (l, c) = cursor(entry, "length", 1, 1);
     let (m, span) = s
         .definition("main", l, c)
@@ -198,7 +206,7 @@ fn stdlib_import_path_is_tracked() {
     );
     assert_eq!(
         (span.start_line, span.start_column, span.end_column),
-        (49, 7, 13),
+        (decl, 7, 13),
         "must land on the real `length` declaration span, got {span:?}"
     );
     // One canonical DefId spans the synthesised stdlib definition and the

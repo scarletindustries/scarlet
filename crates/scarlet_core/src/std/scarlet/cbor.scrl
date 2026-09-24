@@ -1,18 +1,10 @@
 /**
- * CBOR (RFC 8949) decoding, the subset the byte-oriented protocols the
- * stdlib speaks actually carry: unsigned and negative integers, byte and
- * text strings, arrays, and maps. This is enough for a COSE key and a
- * WebAuthn attestation object; it is not a general CBOR library.
+ * CBOR (RFC 8949) decoding: only the subset COSE keys and WebAuthn carry.
+ * That is integers, byte and text strings, arrays and maps.
  *
- * What is deliberately absent: floats, tags, indefinite-length items, and
- * the simple values beyond none of which appear in COSE or WebAuthn. An
- * input using them is a `Malformed`, not a silent partial parse — the same
- * strictness `base64.decode` keeps, and for the same reason: a decoder that
- * guesses is a decoder an attacker steers.
- *
- * Map keys are kept as `Value`s, not coerced to strings, because COSE keys
- * are negative and positive integers (`kty` is 1, `alg` is 3, the EC
- * coordinates are -2 and -3). `map_get` looks one up by an integer label.
+ * Floats, tags and indefinite lengths are `Unsupported`, never guessed at.
+ * Map keys stay `Value`s, since COSE labels are integers (`alg` is 3, the EC
+ * coordinates are -2 and -3).
  */
 
 import scarlet/array
@@ -23,7 +15,7 @@ import scarlet/option
 
 pub type Value {
 	Uint(value Int)
-	/** A CBOR negative integer, as its actual (negative) value. */
+	/** As its actual, negative, value. */
 	Nint(value Int)
 	Bytes(value Binary)
 	Text(value String)
@@ -32,16 +24,14 @@ pub type Value {
 }
 
 pub type Error {
-	/** The input ended inside an item. */
 	Truncated
 	/** A major type or additional-info this subset does not decode. */
 	Unsupported(at Int)
-	/** A text string that was not valid UTF-8. */
 	NotUtf8(at Int)
 }
 
-/** Decode exactly one CBOR item from the front of `b`, and reject trailing
- * bytes. Use `decode_prefix` when more may follow. */
+/** Exactly one item, with nothing after it. Use `decode_prefix` when more may
+ * follow. */
 pub fn decode(b Binary) Result(Value, Error) {
 	v <- result.then(decode_prefix(b, 0))
 	(value, at) = v
@@ -52,7 +42,7 @@ pub fn decode(b Binary) Result(Value, Error) {
 	}
 }
 
-/** Decode one item starting at `at`; return it and the offset just past it. */
+/** The item at `at`, and the offset just past it. */
 pub fn decode_prefix(b Binary, at Int) Result((Value, Int), Error) {
 	if at >= binary.byte_size(b) {
 		Err(Truncated)
@@ -66,8 +56,7 @@ pub fn decode_prefix(b Binary, at Int) Result((Value, Int), Error) {
 	}
 }
 
-// The integer argument an item carries: `info` itself for 0-23, or the next
-// 1/2/4/8 bytes for 24-27. Returns the value and the offset past it.
+// `info` itself for 0-23, or the next 1, 2, 4 or 8 bytes for 24-27.
 fn argument(b Binary, at Int, info Int) Result((Int, Int), Error) {
 	if info < 24 {
 		Ok((info, at))
@@ -158,8 +147,8 @@ fn read_map(b Binary, at Int, left Int, acc Array((Value, Value))) Result((Value
 	}
 }
 
-/** The value for integer label `label` in a `Map`, matching both `Uint` and
- * `Nint` keys so a COSE lookup for -2 finds it. */
+/** The value for an integer label, as COSE keys use. Matches `Uint` and `Nint`
+ * keys. */
 pub fn map_get(v Value, label Int) Option(Value) {
 	match v {
 		Map(entries) -> option.map(
@@ -184,8 +173,7 @@ fn key_int(v Value) Option(Int) {
 	}
 }
 
-/** The value for text label `label` in a `Map` — for the text-keyed maps
- * (the WebAuthn attestation object), as opposed to COSE's integer keys. */
+/** The value for a text label, as the WebAuthn attestation object uses. */
 pub fn text_map_get(v Value, label String) Option(Value) {
 	match v {
 		Map(entries) -> option.map(
@@ -205,7 +193,6 @@ pub fn text_map_get(v Value, label String) Option(Value) {
 	}
 }
 
-/** The bytes of a `Bytes`, else `None`. */
 pub fn as_bytes(v Value) Option(Binary) {
 	match v {
 		Bytes(b) -> Some(b)
@@ -213,7 +200,6 @@ pub fn as_bytes(v Value) Option(Binary) {
 	}
 }
 
-/** The text of a `Text`, else `None`. */
 pub fn as_text(v Value) Option(String) {
 	match v {
 		Text(s) -> Some(s)

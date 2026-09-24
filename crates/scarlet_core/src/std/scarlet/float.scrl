@@ -1,17 +1,16 @@
-// The largest Int <= `f`, exactly: an Int has no bounds, and a Float is
-// never NaN or infinite, so every Float has one.
+// Exact for every Float: an Int has no bounds, and a Float is never NaN or
+// infinite.
 @vm(float__floor)
 pub fn floor(f Float) Int
 
-// The smallest Int >= `f`, exactly.
 @vm(float__ceil)
 pub fn ceil(f Float) Int
 
-// The nearest Int to `f`, exactly (ties round away from zero).
+// Ties round away from zero.
 @vm(float__round)
 pub fn round(f Float) Int
 
-// `f` with its fractional part discarded (rounds toward zero), exactly.
+// Rounds toward zero.
 @vm(float__truncate)
 pub fn truncate(f Float) Int
 

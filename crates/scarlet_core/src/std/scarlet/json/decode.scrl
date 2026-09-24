@@ -1,132 +1,57 @@
 import scarlet/binary
-// Aliased because `int` is also a combinator below, and a local binding
-// shadows an imported module of the same name.
+// Aliased: `int` and `field` are also functions here.
 import scarlet/int as integer
 import scarlet/json
-// Aliased because `field` is also a combinator below, and a local binding
-// shadows an imported module of the same name. Callers of this module are
-// unaffected: they import `scarlet/json/field` and write `field.update`.
 import scarlet/json/field as presence
 
-// Turning a parsed document into your own types.
-//
-// A `Decoder(a)` reads a `Doc` and produces an `a` or a list of failures. Each
-// failure carries the path it happened at, so a bad member in a two-hundred
-// member payload names itself instead of reporting "decode failed".
-//
-// Decoders read straight off the `Doc`. Nothing materialises a tree on the
-// way, so a decoder that reads six members costs six members.
-//
-// ## Writing one
-//
-// `take` is bind-shaped, so a record is one line per member and there is no
-// arity ceiling:
+// Turning a parsed document into your own types. A `Decoder(a)` reads a `Doc`
+// and gives an `a`, or every failure with the path it happened at.
 //
 //     fn user() Decoder(User) {
 //         id <- decode.take('id', decode.int_string())
-//         name <- decode.take('username', decode.string_value())
 //         nick <- decode.take_optional('nickname', decode.string_value())
-//         decode.succeed(User(id: id, name: name, nickname: nick))
+//         decode.succeed(User(id: id, nickname: nick))
 //     }
 //
-// All three members are checked even when the first one is wrong, so a
-// malformed payload reports every bad member at once rather than one per
-// attempt. `also` does the same for a decoder that is not a member lookup.
-//
-// ## No placeholder, ever
-//
-// Nothing here asks the caller for a value of the type being decoded. Two
-// separate reasons, and both are worth knowing because losing either one
-// brings the placeholder back:
-//
-//   - `fail(expected)` produces `Decoder(a)` for any `a` without an `a`,
-//     because the value channel is `Result(a, Array(Failure))` and `Err`
-//     inhabits that for every `a`. A decoder whose value channel is an
-//     unconditional `a` cannot do this, and that is the whole cause of the
-//     placeholder in decoder libraries that have one.
-//   - Deciding to keep going after a failure does need a value of the failed
-//     decoder's type — see `Recovery`. It comes from the decoder, not from
-//     the caller: primitives carry their own, every combinator derives one
-//     from its parts, and `fail` answers `Halt`.
-//
-// ## Accumulating and stopping
-//
-// `map2` accumulates unconditionally: both decoders are named up front, so
-// neither has to be built from the other's value. `take`/`also` accumulate
-// through a `Recovery`, and stop at a decoder that has none. `then` never
-// accumulates, and that is correct rather than a limitation — its
-// continuation genuinely depends on the value, so failures found past a bad
-// discriminant would belong to a branch the payload never selected.
-//
-// ## Optional members
-//
-// `optional_field` returns `Field(a)`, not `Option(a)`. Absent, null and
-// present are three states and collapsing the first two corrupts partial
-// updates — see `scarlet/json/field`, which is where the reasoning and the
-// eliminators live.
+// Every member is checked even after one fails. `then` is the exception: what
+// comes next depends on the value, so it stops at the first failure.
 
-// One step of the path to a value inside a document.
 pub type Segment {
 	Key(name String)
 	At(index Int)
 }
 
-// What the document actually held where a failure happened.
-//
-// Three constructors rather than a free string, because "no such member" is a
-// state and not a description: written as text it is indistinguishable from a
-// value that happens to read that way, and nothing stops the two spellings
-// drifting apart. `FoundKind` can only be built from a kind the document
-// reported, so it cannot disagree with the document either.
+// What the document held where a failure happened.
 pub type Found {
 	FoundKind(kind json.Kind)
 	FoundAbsent
-	// The right kind, the wrong content — a quoted integer that is not one.
+	// The right kind, the wrong content: a quoted integer that is not one.
 	FoundText(text String)
 }
 
-// One thing that was wrong, and where.
-//
-// `expected` stays a `String` on purpose. `found` is a property of the
-// document and so is closed; `expected` is a property of the decoder and is
-// open — a caller's own decoder wants "a positive integer" — so a closed type
-// would only add an escape hatch that every caller-written decoder takes.
+// `expected` is a `String` because a caller's own decoder may want anything,
+// such as "a positive integer".
 pub type Failure {
 	path Array(Segment)
 	expected String
 	found Found
 }
 
-// What a decoder can still offer once it has already failed, so that the
-// members after it are checked instead of being masked by the first error.
-//
-// This is the whole of the placeholder question, and the caller is not in it:
-// primitives carry their own value, every combinator derives one from its
-// parts, and `fail` — which has no `a` to offer and must not be made to
-// invent one — answers `Halt`. A recovered value never reaches the caller:
-// any run that consults one returns `Err`.
+// A stand-in value after a failure, so the members after it still get checked.
+// It never reaches the caller: a run that uses one returns `Err`. `fail` has
+// no value to offer, so it answers `Halt`.
 type Recovery(a) {
 	Resume(value a)
 	Halt
 }
 
-// Reads a `Doc`, or says what was wrong with it. Opaque so the path
-// construction and the recovery value stay implementation details: build
-// decoders with the combinators here and run them with `run`.
-//
-// A successful decode never builds a path. Combinators that name a member or
-// index prepend that segment onto failures coming out of the inner decoder,
-// so `Failure.path` exists only when something was actually wrong.
-//
-// `resume` is a thunk because it is only forced on a failure path. Forcing it
-// eagerly would build the whole of the rest of a `take` chain once per member
-// on the success path.
+// A path is only built on failure. `resume` is a thunk so a success never
+// builds the rest of a `take` chain once per member.
 pub opaque type Decoder(a) {
 	step fn(json.Doc) Result(a, Array(Failure))
 	resume fn() Recovery(a)
 }
 
-// Decode a document.
 pub fn run(dec Decoder(a), doc json.Doc) Result(a, Array(Failure)) {
 	run_at(dec, doc)
 }
@@ -136,12 +61,11 @@ fn run_at(dec Decoder(a), doc json.Doc) Result(a, Array(Failure)) {
 	step(doc)
 }
 
-// Prepend `seg` onto every failure. Called only after an inner decoder has
-// already failed — a successful field or list element never builds a path.
 fn prefix_path(fs Array(Failure), seg Segment) Array(Failure) {
 	match fs {
 		[] -> []
-		[Failure(path, expected, found), ..tail] -> [Failure([seg, ..path], expected, found), ..prefix_path(tail, seg)]
+		[Failure(path, expected, found), ..tail] ->
+			[Failure([seg, ..path], expected, found), ..prefix_path(tail, seg)]
 	}
 }
 
@@ -150,7 +74,7 @@ fn recovery(dec Decoder(a)) Recovery(a) {
 	resume()
 }
 
-// Render a path as `.field.list[3].name`, or `<root>` for the top level.
+// `.field.list[3].name`, or `<root>` for the top level.
 pub fn path_to_string(path Array(Segment)) String {
 	match path {
 		[] -> '<root>'
@@ -178,7 +102,6 @@ pub fn failure_to_string(f Failure) String {
 	'${path_to_string(path)}: expected ${expected}, found ${found_to_string(found)}'
 }
 
-// Every failure, one per line.
 pub fn failures_to_string(fs Array(Failure)) String {
 	match fs {
 		[] -> ''
@@ -197,7 +120,6 @@ pub fn found_to_string(f Found) String {
 	}
 }
 
-// The name of what a `Doc` holds, for the `found` half of a failure.
 fn kind_to_string(k json.Kind) String {
 	match k {
 		json.NullKind -> 'null'
@@ -214,23 +136,17 @@ fn one_failure(expected String, d json.Doc) Array(Failure) {
 	[Failure([], expected, FoundKind(json.kind(d)))]
 }
 
-// A decoder that ignores the document and succeeds.
 pub fn succeed(value a) Decoder(a) {
 	Decoder(step: fn(_doc) Ok(value), resume: fn() Resume(value))
 }
 
-// A decoder that always fails, naming what it wanted.
-//
-// No placeholder: `Err` inhabits `Result(a, Array(Failure))` without an `a`,
-// and `Halt` inhabits `Recovery(a)` without one either.
+// Always fails, naming what it wanted. It needs no `a`, and stops the members
+// after it from being checked.
 pub fn fail(expected String) Decoder(a) {
 	Decoder(step: fn(doc) Err(one_failure(expected, doc)), resume: fn() Halt)
 }
 
-// `resume_with` is the one place in the module where a value of the decoded
-// type is written down rather than derived, and it is written by the library
-// for a closed set of JSON scalars. It is unreachable from outside: a caller
-// cannot build a `Decoder` except through the combinators here.
+// The one place a stand-in value is written down rather than derived.
 fn scalar(expected String, resume_with a, read fn(json.Doc) Option(a)) Decoder(a) {
 	Decoder(
 		step: fn(doc) match read(doc) {
@@ -245,8 +161,7 @@ pub fn string_value() Decoder(String) {
 	scalar('a string', '', json.string)
 }
 
-// A JSON integer, however large: an `Int` has no bounds. A float fails here,
-// even one with no fraction.
+// A float fails here, even one with no fraction.
 pub fn int() Decoder(Int) {
 	scalar('an integer', 0, json.int)
 }
@@ -259,16 +174,8 @@ pub fn bool() Decoder(Bool) {
 	scalar('a boolean', False, json.bool)
 }
 
-// A 64-bit integer that arrived as a JSON *string*.
-//
-// JSON numbers cannot hold a full 64-bit identifier without losing precision
-// in implementations that read every number as a double, so protocols that
-// use them — Discord snowflakes among them — send them quoted. This decodes
-// the quoted form; `int` decodes a genuine JSON number.
-//
-// A leading `-` is accepted, so the range is the whole of `Int` and not only
-// its positive half. `+` is not: JSON has no leading plus on a number and a
-// quoted integer is the same integer in quotes.
+// An integer sent as a JSON string, as protocols do for 64-bit ids (Discord
+// snowflakes) that a double would round. A leading `-` is fine, `+` is not.
 pub fn int_string() Decoder(Int) {
 	Decoder(
 		step: fn(doc) match json.string(doc) {
@@ -282,13 +189,8 @@ pub fn int_string() Decoder(Int) {
 	)
 }
 
-// `int.from_string` reaches `int.min_value`; composing `binary.parse_int`
-// with a sign peel cannot, because that magnitude has no positive Int.
-// `+` is refused here: JSON has no leading plus, and `int.from_string`
-// accepts one. `byte_at` is -1 past the end, so an empty string falls
-// through and fails in `from_string`.
+// `int.from_string` takes a leading `+`, and JSON has none. 43 is `+`.
 fn parse_signed(s String) Result(Int, Nil) {
-	// 43 is `+`.
 	if binary.byte_at(binary.from_string(s), 0) == 43 {
 		Err(Nil)
 	} else {
@@ -296,7 +198,7 @@ fn parse_signed(s String) Result(Int, Nil) {
 	}
 }
 
-// `null`, decoded as a value of your choosing.
+// `null`, decoded as `value`.
 pub fn null_as(value a) Decoder(a) {
 	Decoder(
 		step: fn(doc) if json.is_null(doc) {
@@ -308,7 +210,6 @@ pub fn null_as(value a) Decoder(a) {
 	)
 }
 
-// Transform a decoder's result.
 pub fn map(dec Decoder(a), f fn(a) b) Decoder(b) {
 	Decoder(step, resume) = dec
 	Decoder(
@@ -323,13 +224,8 @@ pub fn map(dec Decoder(a), f fn(a) b) Decoder(b) {
 	)
 }
 
-// Choose the next decoder from what the last one produced.
-//
-// Sequential and short-circuiting, and deliberately so: the continuation
-// depends on the value, so anything found after a failure here would have
-// been read by whichever branch a substitute value happened to select. Use
-// `take`/`also` for members that do not depend on each other, which is where
-// accumulation belongs.
+// Stops at the first failure: the next decoder depends on the value, so past
+// a failure it would be a guess. Use `take` for members that don't.
 pub fn then(dec Decoder(a), f fn(a) Decoder(b)) Decoder(b) {
 	Decoder(step, resume) = dec
 	Decoder(
@@ -344,19 +240,8 @@ pub fn then(dec Decoder(a), f fn(a) Decoder(b)) Decoder(b) {
 	)
 }
 
-// Run `dec`, hand its value to the rest of the decoder, and keep checking the
-// rest even when `dec` failed.
-//
-// This is the combinator the module is shaped around, because backpassing
-// makes it one flat line per member with no arity ceiling:
-//
-//     id <- decode.also(decode.field('id', decode.int_string()))
-//
-// When `dec` fails, its `Recovery` supplies a stand-in so that the rest can be
-// built and run, and its failures are appended to `dec`'s. The stand-in never
-// escapes: this returns `Err` whenever `dec` failed, whatever the rest did
-// with it. A `dec` that answers `Halt` — one built from `fail` — stops here,
-// which is the one case where accumulation is given up rather than chosen.
+// Hands `dec`'s value to the rest, and checks the rest even if `dec` failed,
+// using its stand-in value. Always `Err` if `dec` failed. Stops at `fail`.
 pub fn also(dec Decoder(a), k fn(a) Decoder(b)) Decoder(b) {
 	Decoder(step, resume) = dec
 	Decoder(
@@ -377,13 +262,12 @@ pub fn also(dec Decoder(a), k fn(a) Decoder(b)) Decoder(b) {
 	)
 }
 
-// A required member, handed to the rest of the decoder. `also` over `field`.
+// `also` over `field`.
 pub fn take(name String, inner Decoder(a), k fn(a) Decoder(b)) Decoder(b) {
 	also(field(name, inner), k)
 }
 
-// A member that may be absent, may be null, or may hold a value, handed to
-// the rest of the decoder as a `Field(a)`. `also` over `optional_field`.
+// `also` over `optional_field`.
 pub fn take_optional(
 	name String,
 	inner Decoder(a),
@@ -392,10 +276,7 @@ pub fn take_optional(
 	also(optional_field(name, inner), k)
 }
 
-// Combine two decoders, keeping BOTH sets of failures.
-//
-// Unlike `also` this needs no recovery value at all: both decoders are named
-// up front, so neither has to be built from the other's value.
+// Keeps both sets of failures, with no stand-in value needed.
 pub fn map2(d1 Decoder(a), d2 Decoder(b), f fn(a, b) c) Decoder(c) {
 	Decoder(s1, r1) = d1
 	Decoder(s2, r2) = d2
@@ -413,11 +294,8 @@ pub fn map2(d1 Decoder(a), d2 Decoder(b), f fn(a, b) c) Decoder(c) {
 	)
 }
 
-// Narrow a decoder to the values that satisfy `ok`.
-//
-// The refinement that keeps its type, and so keeps its recovery: prefer it to
-// `then(dec, fn(v) if ok(v) { succeed(v) } else { fail(expected) })`, which
-// halts accumulation at the first member that uses it.
+// Only values that satisfy `ok`. Better than doing it with `then`, which stops
+// checking the members after it.
 pub fn guard(dec Decoder(a), ok fn(a) Bool, expected String) Decoder(a) {
 	Decoder(step, resume) = dec
 	Decoder(
@@ -433,9 +311,8 @@ pub fn guard(dec Decoder(a), ok fn(a) Bool, expected String) Decoder(a) {
 	)
 }
 
-// A required member, decoded with `inner`. A member that is missing is a
-// failure; a member that is `null` is passed to `inner`, which will fail
-// unless it is a decoder that accepts null.
+// A required member. A `null` one goes to `inner`, which fails unless it
+// takes null.
 pub fn field(name String, inner Decoder(a)) Decoder(a) {
 	Decoder(step, resume) = inner
 	Decoder(
@@ -451,17 +328,8 @@ pub fn field(name String, inner Decoder(a)) Decoder(a) {
 	)
 }
 
-// The member `name` of `doc`, or the failure that `doc` is not an object at
-// all. `Ok(None)` is the one case left: an object with no such member.
-//
-// `json.field` answers `None` to both questions, and every combinator that
-// reads a member has to separate them. `field` did it and `optional_field`
-// did not, so a decoder built only from optional fields succeeded against an
-// array, a string or a bare number — every field reported absent, which for a
-// partial update reads as "change nothing" and for `with_default` overwrites
-// held state. An instrument whose job is to report every failure was reporting
-// success for input of entirely the wrong shape. Both go through here now, so
-// the two combinators cannot drift apart again.
+// `json.field` is `None` both for a missing member and for a non-object. This
+// splits them, so a decoder of only optional fields can't accept an array.
 fn member(doc json.Doc, name String) Result(Option(json.Doc), Array(Failure)) {
 	match json.field(doc, name) {
 		Some(child) -> Ok(Some(child))
@@ -472,20 +340,8 @@ fn member(doc json.Doc, name String) Result(Option(json.Doc), Array(Failure)) {
 	}
 }
 
-// A member that may be absent, may be null, or may hold a value.
-//
-// The result is `Field(a)`, not `Option(a)`, and that is the point: absent
-// means "unchanged" and null means "cleared", and a decoder that returns
-// `Option` has thrown that difference away before the caller ever sees it.
-// Consume the result with `field.update` or `field.fold`.
-//
-// Optional is about the member, not about the document. A `doc` that is not
-// an object is a failure here exactly as it is in `field` — otherwise a
-// decoder with no required fields accepts anything at all.
-//
-// Its recovery is `absent` whatever `inner` is, because `Field(a)` is
-// inhabited without an `a`. So an optional member never stops accumulation,
-// even when the decoder inside it would.
+// Absent, null or present, as a `Field(a)`: absent means "unchanged" and null
+// means "cleared", which `Option` would lose. A non-object still fails.
 pub fn optional_field(name String, inner Decoder(a)) Decoder(presence.Field(a)) {
 	Decoder(step, _) = inner
 	Decoder(
@@ -505,8 +361,6 @@ pub fn optional_field(name String, inner Decoder(a)) Decoder(presence.Field(a)) 
 	)
 }
 
-// Every element of an array, each decoded with `inner`. Element failures
-// accumulate and carry their index.
 pub fn list(inner Decoder(a)) Decoder(Array(a)) {
 	Decoder(step, _) = inner
 	Decoder(
@@ -514,7 +368,6 @@ pub fn list(inner Decoder(a)) Decoder(Array(a)) {
 			json.ArrayKind -> collect_list(step, json.elements(doc), 0, [], [])
 			_ -> Err(one_failure('an array', doc))
 		},
-		// An array of nothing needs nothing of `inner`.
 		resume: fn() Resume([]),
 	)
 }
@@ -538,9 +391,7 @@ fn collect_list(
 	}
 }
 
-// Every member of an object, each value decoded with `inner`. An association
-// list rather than a `Map`, because JSON preserves member order and duplicate
-// keys and a map does not.
+// A list, not a `Map`, to keep member order and duplicate keys.
 pub fn dict(inner Decoder(a)) Decoder(Array((String, a))) {
 	Decoder(step, _) = inner
 	Decoder(
@@ -570,13 +421,8 @@ fn collect_dict(
 	}
 }
 
-// The first decoder that succeeds. If all of them fail, every failure is
-// reported — a union that matched nothing should say what each arm wanted.
-//
-// The first alternative is a parameter of its own so that "no alternatives"
-// is not something this can be run with. `one_of([])` used to type-check and
-// then fail at decode time with a failure describing the decoder rather than
-// the document.
+// The first that succeeds, or every failure. `first` is its own parameter so
+// there is always at least one.
 pub fn one_of(first Decoder(a), rest Array(Decoder(a))) Decoder(a) {
 	Decoder(
 		step: fn(doc) match run_at(first, doc) {
@@ -601,8 +447,7 @@ fn try_each(
 	}
 }
 
-// A union discriminated by a string member. `pick` chooses the decoder for the
-// tag it is given, or `Err(Nil)` for a tag it does not know.
+// A union told apart by a string member. `pick` is `Err(Nil)` for an unknown tag.
 pub fn tagged(tag String, pick fn(String) Result(Decoder(a), Nil)) Decoder(a) {
 	then(field(tag, string_value()), fn(t) match pick(t) {
 		Ok(dec) -> dec
@@ -610,7 +455,6 @@ pub fn tagged(tag String, pick fn(String) Result(Decoder(a), Nil)) Decoder(a) {
 	})
 }
 
-// A union discriminated by an integer member, as most binary-ish protocols do.
 pub fn tagged_int(tag String, pick fn(Int) Result(Decoder(a), Nil)) Decoder(a) {
 	then(field(tag, int()), fn(t) match pick(t) {
 		Ok(dec) -> dec
@@ -625,8 +469,7 @@ fn unknown_tag(tag String, found String) Decoder(a) {
 	)
 }
 
-// Decode at a path of member names, for reaching one value out of a nested
-// document without spelling out a decoder per level.
+// Decode at a path of member names.
 pub fn at(path_names Array(String), inner Decoder(a)) Decoder(a) {
 	match path_names {
 		[] -> inner
@@ -634,13 +477,8 @@ pub fn at(path_names Array(String), inner Decoder(a)) Decoder(a) {
 	}
 }
 
-// Succeed with `default` when the member is absent OR null.
-//
-// This is the collapse, and it is spelled out on purpose: it takes the value
-// to use, so nothing is silently dropped, and its name says what it does. Use
-// it for a field with a genuine default. Do NOT use it to apply a partial
-// update — `field.update` is that, and it keeps the current value where this
-// one would overwrite it with `default`.
+// `default` when the member is absent or null. Not for partial updates:
+// `field.update` keeps the current value, where this would overwrite it.
 pub fn with_default(name String, inner Decoder(a), default a) Decoder(a) {
 	map(optional_field(name, inner), fn(f) presence.fold(f, fn() default, fn() default, fn(x) x))
 }

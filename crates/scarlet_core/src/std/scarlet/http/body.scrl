@@ -5,25 +5,16 @@ import scarlet/net/error
 import scarlet/http/headers
 import scarlet/time
 
-// The socket read size for the streaming readers below: large enough that a
-// full body arrives in a handful of pulls, small enough that a slow consumer
-// never has more than one chunk of memory pinned.
+// Few pulls for a whole body, and a slow reader pins only one chunk.
 const READ_SIZE = 65536
 const CRLF = <<'\r\n'>>
 const ZERO = <<'0'>>
 // 0-size chunk + empty trailer block: the terminator for a trailer-free body.
 const LAST_CHUNK = <<'0\r\n\r\n'>>
 
-// A message body as a pull thunk: calling it advances the stream by one step,
-// returning the next chunk plus its own continuation, or the end of the body
-// with any trailers. The continuation lives *inside* the result so a body is a
-// plain `fn() Result(Pull, NetError)` — a transparent alias, never a nominal
-// wrapper, so there is no per-chunk allocation beyond the chunk itself. Errors
-// are `NetError` to pass socket failures through verbatim.
-//
-// `Pull` and `Body` are mutually recursive and must stay in one module: the
-// continuation in `Chunk` is a `Body`, and a `Body` yields a `Pull`. Splitting
-// them would force an import cycle, which the compiler rejects.
+// A body is a pull thunk: each call gives the next chunk and the rest of the
+// body, or Done with any trailers. `Pull` and `Body` refer to each other, so
+// they must share a module.
 pub type Pull {
 	Chunk(data Binary, next Body)
 	Done(trailers Array(headers.Header))
@@ -31,29 +22,18 @@ pub type Pull {
 
 pub type Body = fn() Result(Pull, error.NetError)
 
-// A body that yields nothing — one step straight to Done with no trailers.
 pub fn empty() Body {
 	fn() Ok(Done([]))
 }
 
-// A body that yields `b` as a single chunk, then ends. A zero-length `b` still
-// produces one (empty) chunk before Done.
+// `b` as one chunk, even when it is empty.
 pub fn from_binary(b Binary) Body {
 	fn() Ok(Chunk(b, empty()))
 }
 
-// A Content-Length-framed reader over `reader`: yields exactly `n` more bytes
-// across as many chunks as the socket hands back, then Done. `n` is threaded
-// immutably — the socket fd is the real cursor — and capped at 64 KiB per read.
-// A non-positive `n` yields Done without touching the socket (the same `n <= 0`
-// termination socket.read_exact documents): this is a pub entry point, so a
-// caller passing a raw parsed header value straight through must not spin the
-// reader forever on a negative count. A peer close before `n` is reached is an
-// error (UnexpectedEof), not a clean end. `deadline` is the ONE absolute
-// deadline for the whole body, taken by the caller when the framing was
-// decided: every read counts against it, so a peer dribbling a byte per read
-// cannot keep resetting the clock — once the deadline passes the next read
-// errs with TimedOut.
+// Exactly `n` more bytes from `reader`, then Done; a close before that is
+// UnexpectedEof. `n <= 0` reads nothing. Every read counts against the one
+// `deadline`, so a peer sending a byte at a time runs out of time.
 pub fn content_length(reader socket.Socket, n Int, deadline time.Instant) Body {
 	fn() if n <= 0 {
 		Ok(Done([]))
@@ -67,7 +47,6 @@ pub fn content_length(reader socket.Socket, n Int, deadline time.Instant) Body {
 	}
 }
 
-// Advance a body by one step. A body is just a thunk; this names the operation.
 pub fn pull(b Body) Result(Pull, error.NetError) {
 	b()
 }
@@ -82,14 +61,8 @@ pub type Buffered {
 	Streaming(first Binary, second Binary, rest Body)
 }
 
-// Dissect a body without writing it anywhere. A body that is already a single
-// in-memory chunk comes back as `Whole(data)` so the caller can batch those
-// bytes with other writes; a body that keeps producing chunks comes back as
-// `Streaming` so the caller can drain it for real. This is what lets a server
-// coalesce a batch of pipelined buffered responses into one vectored write
-// while still streaming the responses that need it. Because this never
-// writes, its Err is by construction a SOURCE failure — the caller's sink is
-// untouched and still usable for an error response.
+// Find out whether a body is one chunk in memory (to batch with other writes)
+// or a real stream (to drain). It never writes, so an Err is always the body's.
 pub fn take_buffered(b Body) Result(Buffered, error.NetError) {
 	match pull(b) {
 		Err(e) -> Err(e)
@@ -102,13 +75,8 @@ pub fn take_buffered(b Body) Result(Buffered, error.NetError) {
 	}
 }
 
-// Pull a body's first step without consuming it: the returned body replays
-// that step and then continues as before. Lets a caller find out whether the
-// source produces at all BEFORE committing any bytes (e.g. a response head)
-// to the wire — a source that fails on its very first pull surfaces here,
-// while the sink is still untouched and an error response is still
-// deliverable. Like take_buffered, this never writes, so its Err is by
-// construction a source failure.
+// Pull the first step early, so a body that fails at once is found before any
+// bytes are written. The returned body replays that step. Never writes.
 pub fn probe(b Body) Result(Body, error.NetError) {
 	match pull(b) {
 		Ok(step) -> Ok(fn() Ok(step))
@@ -116,41 +84,28 @@ pub fn probe(b Body) Result(Body, error.NetError) {
 	}
 }
 
-// Which side of a drain failed. A drain couples a SOURCE (the body's pull
-// thunk) to a SINK (the socket): the recovery differs by side — a failed
-// source leaves the socket itself healthy, while a failed sink leaves nothing
-// deliverable — so the error names the side instead of collapsing both into
-// one NetError the caller cannot tell apart.
+// Which side of a drain failed. After a source failure the socket still
+// works; after a sink failure nothing more can be sent.
 pub type DrainError {
-	// The body's pull thunk failed. The socket is untouched by this error,
-	// though bytes written by EARLIER steps of the same drain may already be
-	// on the wire — the caller knows whether the head had gone out.
+	// The body failed. Bytes from earlier steps may already be on the wire.
 	SourceFailed(err error.NetError)
 	// A socket write failed; the connection is unusable.
 	SinkFailed(err error.NetError)
 }
 
-// Pump a whole body out to `sock`: pull a chunk, write it, recurse. The write
-// parks on backpressure, so a slow consumer naturally rate-limits the source —
-// the next chunk is not pulled until the previous one has drained. Nothing is
-// buffered: memory stays O(chunk). Trailers on Done are dropped — a raw
-// (non-chunked) body has no wire representation for them.
+// Write a whole body to `sock`, a chunk at a time. A slow reader slows the
+// pulls, and memory stays at one chunk. Trailers are dropped: a raw body
+// cannot carry them.
 pub fn drain(body Body, sock socket.Socket) Result(Nil, DrainError) {
 	drain_prefixed([], body, sock)
 }
 
-// Like `drain`, but `head` (a serialized response head) rides in the same
-// vectored write as the first body chunk: a buffered single-chunk response
-// (http.text) reaches the kernel in exactly ONE syscall, head and body
-// together. Subsequent chunks drain as usual.
+// Like `drain`, with `head` in the same write as the first chunk.
 pub fn drain_with_head(head Binary, body Body, sock socket.Socket) Result(Nil, DrainError) {
 	drain_prefixed([head], body, sock)
 }
 
-// The single drain worker. `prefix` is whatever bytes must precede the first
-// write — the response head on the first call, `[]` after — so the head rides
-// the same vectored write as the first chunk (or as Done, if the body is
-// empty) without a separate code path per case.
+// `prefix` goes in the first write, and is `[]` after.
 fn drain_prefixed(prefix Array(Binary), body Body, sock socket.Socket) Result(Nil, DrainError) {
 	match pull(body) {
 		Ok(Chunk(data, next)) -> match socket.write_parts(sock, [..prefix, data]) {
@@ -168,9 +123,7 @@ fn drain_prefixed(prefix Array(Binary), body Body, sock socket.Socket) Result(Ni
 	}
 }
 
-// The outcome of `drain_counted`: how the body squared with the byte budget
-// it was drained under. One variant per case the caller must handle, instead
-// of a bare count the caller would have to compare against the budget itself.
+// How a counted drain ended, against its budget.
 pub type Drained {
 	// The body ended having written exactly the budget.
 	Complete
@@ -181,15 +134,18 @@ pub type Drained {
 	Overran(written Int)
 }
 
-// Like `drain`, but bounded by a byte budget: writes at most `limit` bytes and
-// reports how the body squared with that budget. A chunk that would push past
-// the budget is NOT written — the caller (who already advertised the length on
-// the wire) sees `Overran` without a single unpromised byte having been sent.
+// Like `drain`, but writes at most `limit` bytes. A chunk that would pass the
+// limit is not written, so no byte past an advertised length goes out.
 pub fn drain_counted(body Body, sock socket.Socket, limit Int) Result(Drained, DrainError) {
 	drain_counted_from(body, sock, limit, 0)
 }
 
-fn drain_counted_from(body Body, sock socket.Socket, limit Int, written Int) Result(Drained, DrainError) {
+fn drain_counted_from(
+	body Body,
+	sock socket.Socket,
+	limit Int,
+	written Int,
+) Result(Drained, DrainError) {
 	match pull(body) {
 		Ok(Chunk(data, next)) -> {
 			total = written + binary.byte_size(data)
@@ -211,33 +167,24 @@ fn drain_counted_from(body Body, sock socket.Socket, limit Int, written Int) Res
 	}
 }
 
-// Pump a body out to `sock` framed as chunked transfer-encoding: each non-empty
-// chunk becomes "<hex-size>\r\n<data>\r\n"; the stream ends with "0\r\n\r\n", or
-// "0\r\n<trailers>\r\n" when Done carries trailers. One vectored write per chunk
-// (no concatenation of the payload). An empty chunk is SKIPPED, never emitted —
-// a zero-size chunk is the end-of-body marker, so writing one mid-stream would
-// truncate the body. Like `drain`, the write parks on backpressure, so a slow
-// consumer rate-limits the source. Lets an unknown-length body keep the
-// connection alive on HTTP/1.1 instead of framing by close.
+// Write a body with chunked framing, so a body of unknown length can keep an
+// HTTP/1.1 connection open. Empty chunks are skipped: a zero-size chunk would
+// end the body.
 pub fn drain_chunked(body Body, sock socket.Socket) Result(Nil, DrainError) {
 	drain_chunked_prefixed([], body, sock)
 }
 
-// Like `drain_chunked`, but `head` (a serialized response head) rides in the
-// same vectored write as the first chunk's framing — one syscall for head +
-// first chunk, then the stream drains as usual. Empty leading chunks are
-// skipped with the head still pending; a body that ends without producing a
-// chunk writes head + terminator together.
+// Like `drain_chunked`, with `head` in the same write as the first chunk.
 pub fn drain_chunked_with_head(head Binary, body Body, sock socket.Socket) Result(Nil, DrainError) {
 	drain_chunked_prefixed([head], body, sock)
 }
 
-// The single chunked-drain worker. `prefix` is threaded exactly like
-// `drain_prefixed`: it prepends the first vectored write (head + first chunk,
-// or head + terminator for an empty body) and is `[]` thereafter. Keeping this
-// as one function means the empty-chunk skip and the trailer terminator are
-// implemented once, not once per with_head variant.
-fn drain_chunked_prefixed(prefix Array(Binary), body Body, sock socket.Socket) Result(Nil, DrainError) {
+// `prefix` goes in the first write, as in `drain_prefixed`.
+fn drain_chunked_prefixed(
+	prefix Array(Binary),
+	body Body,
+	sock socket.Socket,
+) Result(Nil, DrainError) {
 	match pull(body) {
 		Ok(Chunk(data, next)) -> match binary.byte_size(data) {
 			0 -> drain_chunked_prefixed(prefix, next, sock)
@@ -263,10 +210,8 @@ fn drain_chunked_prefixed(prefix Array(Binary), body Body, sock socket.Socket) R
 	}
 }
 
-// Buffer a whole body into one binary, refusing to grow past `max` bytes. The
-// cap is a denial-of-service guard: the size is checked before each append, so
-// an over-long body errs (MessageTooLarge) without ever materializing past the
-// limit. Done returns whatever has accumulated; trailers are discarded.
+// Read a whole body into one Binary, at most `max` bytes (MessageTooLarge).
+// The size is checked before each append, so it never grows past `max`.
 pub fn collect(body Body, max Int) Result(Binary, error.NetError) {
 	collect_into(body, max, <<>>)
 }

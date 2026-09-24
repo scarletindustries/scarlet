@@ -19,12 +19,9 @@ pub opaque type Decimal {
 	scale Int
 }
 
-// How to resolve digits discarded by `div` and `round`.
-//
-// `HalfEven` (banker's rounding) is the default used by `div` and `round`:
-// ties go to the even neighbour, so repeated rounding doesn't drift. `HalfUp`
-// is schoolbook rounding (ties away from zero). `Down`/`Up` truncate toward /
-// away from zero; `Floor`/`Ceiling` toward negative / positive infinity.
+// How `div_with` and `round_with` drop digits. `div` and `round` use
+// `HalfEven`, which sends ties to the even neighbour so repeated rounding
+// doesn't drift; `HalfUp` sends them away from zero.
 pub type Rounding {
 	HalfEven
 	HalfUp

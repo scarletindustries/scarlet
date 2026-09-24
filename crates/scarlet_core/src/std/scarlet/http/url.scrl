@@ -2,45 +2,22 @@ import scarlet/binary
 import scarlet/int
 import scarlet/result
 
-// Absolute HTTP and HTTPS URLs, parsed once into the four things a client
-// actually needs: which transport to open, where to open it, what name to
-// verify a certificate against, and what to put on the request line.
+// Absolute http and https URLs, parsed once into what a client needs: the
+// transport, the host and port, and the request target. The scheme is a value,
+// so `https` picks TLS in one `match` (`scarlet/http/client.connect`).
 //
-// The scheme is a VALUE, not a prefix test. `https` selecting TLS is then one
-// `match` in one place (`scarlet/http/client.connect`) rather than a
-// `starts_with('https')` at every call site, each of which is its own chance
-// to get the comparison, the case, or the default port wrong. A `Url` that
-// exists has already been decided.
-//
-// Relative references are deliberately not parsed and not resolved. A client
-// with no redirect following has nothing to resolve them against, and a
-// resolver that quietly treats `/a/b` as a host is how a request goes to the
-// wrong machine.
+// Relative references are not parsed: with no redirects there is nothing to
+// resolve them against.
 
-// The transports this client knows how to open. A closed sum: `ftp://` cannot
-// be represented, so it is refused at parse time rather than at connect time
-// with a socket already open.
+// The transports the client can open. `ftp://` is refused when parsing.
 pub type Scheme {
 	Http
 	Https
 }
 
-// An absolute http(s) URL.
-//
-// `host` is both the TCP destination and, for `Https`, the name the
-// certificate is checked against — one field, because a client that connects
-// to one name and verifies another is the confusion TLS exists to prevent.
-// An IPv6 literal is stored WITHOUT its brackets, which is the form
-// `net.connect` wants; `authority` puts them back for the `Host` field.
-//
-// `port` is always explicit, never a sentinel for "the default": the caller
-// that pools connections keys on it, and a key that is sometimes 0 and
-// sometimes 443 for the same peer is two entries for one connection.
-//
-// `target` is the origin-form request target — path plus `?query`, never
-// empty, with any `#fragment` already removed. A fragment is not part of what
-// is sent (RFC 9110 §7.1), so it is dropped here rather than being carried to
-// a place where forgetting to drop it puts it on the wire.
+// An absolute http(s) URL. `host` is where to connect and, for `Https`, the
+// name the certificate must match; an IPv6 host has no brackets. `port` is
+// always set. `target` is the path and `?query`, never empty, with no fragment.
 pub type Url {
 	scheme Scheme
 	host String
@@ -50,8 +27,7 @@ pub type Url {
 
 // Why a string is not a URL this client can use.
 pub type UrlError {
-	// No `://`. A relative reference lands here: there is nothing to resolve
-	// it against.
+	// No `://`, as in a relative reference.
 	MissingScheme
 	// A well-formed absolute URL in a scheme with no transport here.
 	UnsupportedScheme(scheme Binary)
@@ -59,10 +35,8 @@ pub type UrlError {
 	EmptyHost
 	// The `:port` is empty, not a run of decimal digits, or outside 1..=65535.
 	BadPort(text Binary)
-	// `http://user:pass@host/`. Refused rather than ignored: the credentials
-	// are in the string because the caller meant them to be used, and a parser
-	// that silently drops them sends an unauthenticated request that looks
-	// like it should have worked. RFC 9110 §4.2.4 deprecates the form.
+	// `http://user:pass@host/`. Refused, not ignored: dropping the credentials
+	// would send a request the caller did not mean (RFC 9110 §4.2.4).
 	UserInfoUnsupported
 	// `http://[::1/` — a bracketed host with no closing bracket.
 	UnclosedIpv6
@@ -89,10 +63,8 @@ pub fn default_port(s Scheme) Int {
 	}
 }
 
-// The `Host` field value for `u`: the host, bracketed again if it is an IPv6
-// literal, and `:port` only when the port is not the scheme's default (RFC
-// 9110 §7.2). Derived on demand rather than stored, so it cannot drift out of
-// agreement with the three fields it is computed from.
+// The `Host` value: the host, bracketed if IPv6, with `:port` only when it is
+// not the default (RFC 9110 §7.2).
 pub fn authority(u Url) Binary {
 	host = binary.from_string(u.host)
 	bracketed = match binary.index_of(host, COLON, 0) {
@@ -115,12 +87,7 @@ pub fn parse(text String) Result(Url, UrlError) {
 	authority_start = sep + 3
 	size = binary.byte_size(b)
 	authority_end = first_of(b, authority_start, size)
-	// `first_of` is a `min` of positions each of which is either an `index_of`
-	// hit at or after `authority_start` or `size` itself, so
-	// `authority_start <= authority_end <= size`; and `b` came from
-	// `from_string`, so `size` bytes is the whole of it. The Err arm cannot
-	// fire — again an argument in a comment, T-286. The fallback is loud:
-	// an empty authority is `EmptyHost`.
+	// Cannot fail: `authority_start <= authority_end <= size`.
 	authority = match binary.slice_bytes(b, authority_start, authority_end - authority_start) {
 		Ok(a) -> a
 		Err(Nil) -> EMPTY
@@ -131,9 +98,7 @@ pub fn parse(text String) Result(Url, UrlError) {
 	Ok(Url(scheme: scheme, host: host, port: port, target: target_of(b, authority_end, size)))
 }
 
-// The offset of `://`, or MissingScheme. Searched from 0: a scheme is
-// `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`, so it can never contain a
-// slash, and the FIRST `://` is therefore always the scheme's.
+// A scheme cannot contain a slash, so the first `://` is always the scheme's.
 fn scheme_sep(b Binary) Result(Int, UrlError) {
 	match binary.index_of(b, SCHEME_SEP, 0) {
 		Some(i) -> Ok(i)
@@ -151,10 +116,8 @@ fn scheme_of(s Binary) Result(Scheme, UrlError) {
 	}
 }
 
-// Where the authority ends: the first `/`, `?` or `#` at or after `from`, or
-// `size`. All three start something that is not part of the authority, and
-// taking the earliest is what stops a `?` before the first `/`
-// (`http://h?q=1`) from being read as part of the host.
+// Where the authority ends: the first `/`, `?` or `#`, or `size`. The earliest,
+// so `http://h?q=1` does not read `?q=1` as part of the host.
 fn first_of(b Binary, from Int, size Int) Int {
 	int.min(
 		at_or(b, SLASH, from, size),
@@ -169,9 +132,7 @@ fn at_or(b Binary, needle Binary, from Int, fallback Int) Int {
 	}
 }
 
-// The host and the raw `:port` text of an authority, before either is
-// validated. Two Binaries would typecheck in either order at every call site;
-// naming them does not.
+// The host and the raw `:port` text, not yet checked.
 type HostPort {
 	host Binary
 	port_text Binary
@@ -197,10 +158,8 @@ fn split_bracketed(authority Binary) Result(HostPort, UrlError) {
 			(up_to_close, _) = binary.split_at_bytes(authority, close)
 			(_, inside) = binary.split_at_bytes(up_to_close, 1)
 			rest = binary.drop_bytes(authority, close + 1)
-			// After `]` the authority is over: either nothing, or `:port`.
-			// Anything else (`[::1]x`) is a malformed port region, not a host,
-			// so it is reported as one instead of falling through to a
-			// misleading EmptyHost.
+			// After `]` comes nothing or `:port`. Anything else is a bad port, not an
+			// empty host.
 			if binary.byte_size(rest) == 0 {
 				Ok(HostPort(host: inside, port_text: EMPTY))
 			} else if binary.byte_at(rest, 0) == 58 {
@@ -212,9 +171,6 @@ fn split_bracketed(authority Binary) Result(HostPort, UrlError) {
 	}
 }
 
-// `port_text` is EMPTY both when there was no colon and when the colon was
-// followed by nothing; the two are told apart by `has_port`, because
-// `http://h:/` must be a BadPort and `http://h/` must not.
 fn split_at_colon(authority Binary, colon Option(Int)) HostPort {
 	match colon {
 		None -> HostPort(host: authority, port_text: EMPTY)
@@ -225,16 +181,14 @@ fn split_at_colon(authority Binary, colon Option(Int)) HostPort {
 	}
 }
 
-// The port text arrives WITH its leading colon when there was one, so that
-// "absent" and "present but empty" are different binaries rather than the
-// same one plus a flag.
+// `port_text` keeps its colon, so no port and an empty one (`http://h:/`, a
+// BadPort) are told apart.
 fn port_of(port_text Binary, scheme Scheme) Result(Int, UrlError) {
 	if binary.byte_size(port_text) == 0 {
 		Ok(default_port(scheme))
 	} else {
 		digits = binary.drop_bytes(port_text, 1)
-		// `parse_int` is not enough on its own: the digit run is checked here
-		// so a sign or whitespace it might accept cannot become a port.
+		// Digits only: `parse_int` might accept a sign.
 		if binary.byte_size(digits) == 0 || !all_digits(digits, 0, binary.byte_size(digits)) {
 			Err(BadPort(port_text))
 		} else {
@@ -271,17 +225,11 @@ fn host_of(host Binary) Result(String, UrlError) {
 	}
 }
 
-// Everything from the end of the authority to the fragment, defaulted to `/`.
-// A URL whose path is empty or starts straight at the query (`http://h?q=1`)
-// still has to put a path on the request line.
+// From the end of the authority to the fragment, or `/` when that is empty or
+// starts at `?`.
 fn target_of(b Binary, from Int, size Int) Binary {
 	end = at_or(b, HASH, from, size)
-	// `from` is where the authority ended and `end` is either an `index_of`
-	// hit at or after it or `size`, so `from <= end <= size`; `b` came from
-	// `from_string`, so `size` bytes is the whole of it. The Err arm cannot
-	// fire — an argument in a comment rather than a type, T-286. This is the
-	// one fallback here that is quiet rather than loud: an empty window
-	// becomes `ROOT`, exactly as a genuinely empty path does.
+	// Cannot fail: `from <= end <= size`.
 	raw = match binary.slice_bytes(b, from, end - from) {
 		Ok(v) -> v
 		Err(Nil) -> EMPTY

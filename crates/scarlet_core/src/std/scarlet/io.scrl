@@ -1,35 +1,33 @@
 import scarlet/binary
 import scarlet/result
 
-// Typed errors for filesystem operations, mirroring Rust's std::io::ErrorKind
-// (the POSIX/errno failure set). Path-bearing variants carry the path they
-// concern so a caller can report or recover without re-deriving it.
+// A file error. Most variants are an OS errno, named as in Rust's
+// `std::io::ErrorKind`. `Errno` carries any errno without its own variant.
 pub type IoError {
-	// No file or directory at this path. (ENOENT)
+	// ENOENT
 	NotFound(path String)
-	// The process lacks permission for this path. (EACCES)
+	// EACCES
 	PermissionDenied(path String)
-	// A file already exists where one was required to be new. (EEXIST)
+	// EEXIST
 	AlreadyExists(path String)
-	// A path component used as a directory is not one. (ENOTDIR)
+	// ENOTDIR
 	NotADirectory(path String)
-	// The path is a directory where a file was expected. (EISDIR)
+	// EISDIR
 	IsADirectory(path String)
-	// The filesystem is mounted read-only. (EROFS)
+	// EROFS
 	ReadOnlyFilesystem(path String)
-	// Too many symbolic links while resolving the path. (ELOOP)
+	// ELOOP: too many symbolic links.
 	FilesystemLoop(path String)
-	// The file's contents are not valid for the operation (e.g. not UTF-8).
+	// The contents do not suit the call, such as text that is not UTF-8.
 	InvalidData(path String)
-	// No space left on the device. (ENOSPC)
+	// ENOSPC
 	StorageFull
-	// The user's disk quota is exhausted. (EDQUOT)
+	// EDQUOT
 	QuotaExceeded
-	// The file is larger than the filesystem or process allows. (EFBIG)
+	// EFBIG
 	FileTooLarge(path String)
-	// A write was handed a binary that is not a whole number of bytes.
+	// A write was given a binary that is not whole bytes.
 	UnalignedBinary
-	// An OS error with no dedicated variant above, carrying its raw errno.
 	Errno(code Int)
 }
 

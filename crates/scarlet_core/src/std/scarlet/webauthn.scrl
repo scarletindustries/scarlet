@@ -1,23 +1,12 @@
 /**
- * WebAuthn (W3C Level 3) server-side verification: the two checks a relying
- * party runs, and nothing it does not. `verify_registration` reads a
- * `navigator.credentials.create` response and returns the credential to
- * store; `verify_authentication` reads a `navigator.credentials.get`
- * response and confirms it against a stored credential.
+ * WebAuthn (W3C Level 3) checks for a relying party. `verify_registration`
+ * reads a `navigator.credentials.create` response and gives the credential
+ * to store. `verify_authentication` checks a `navigator.credentials.get`
+ * response against it.
  *
- * The heavy lifting is `scarlet/cbor` (the attestation object and COSE key)
- * and `scarlet/crypto` (the signature). What is left here is the protocol:
- * the clientDataJSON checks, the authenticator-data layout, and the one
- * message construction — `authenticatorData || sha256(clientDataJSON)` —
- * that the signature is over.
- *
- * Scope, deliberately: only the `none` and `packed`-self attestation paths
- * matter to a relying party that trusts the platform to hold the key, so
- * the attestation *statement* is not verified — the credential public key
- * is taken from the authenticator data and every later assertion is checked
- * against it, which is the property that actually secures the account.
- * Only ES256 (-7) and EdDSA (-8) algorithms are accepted. `signCount` is
- * returned, not enforced: cloning detection is the caller's policy.
+ * The attestation statement is not verified: the key comes from the
+ * authenticator data, and every later sign-in is checked against it. Only
+ * ES256 and EdDSA. `signCount` is returned, not enforced.
  */
 
 import scarlet/base64
@@ -29,15 +18,18 @@ import scarlet/json
 import scarlet/option
 import scarlet/result
 
-/** A stored credential: what registration yields and authentication needs. */
+/** What registration gives and authentication needs. */
 pub type Credential {
-	Credential(id Binary, public_key Binary, algorithm Algorithm, sign_count Int)
+	id Binary
+	public_key Binary
+	algorithm Algorithm
+	sign_count Int
 }
 
 pub type Algorithm {
-	/** ECDSA P-256 with SHA-256 (COSE -7). `public_key` is SEC1 uncompressed. */
+	/** COSE -7. `public_key` is SEC1 uncompressed. */
 	Es256
-	/** Ed25519 (COSE -8). `public_key` is the 32-byte point. */
+	/** COSE -8. `public_key` is the 32-byte point. */
 	EdDsa
 }
 
@@ -54,12 +46,12 @@ pub type Error {
 	BadSignature
 }
 
-// ---------- clientDataJSON ----------
+// clientDataJSON
 
-// The three fields a relying party checks, read from the client data. Origin
-// and challenge are compared by the caller-facing functions below.
 type ClientData {
-	ClientData(kind String, challenge String, origin String)
+	kind String
+	challenge String
+	origin String
 }
 
 fn parse_client_data(client_data_json Binary) Result(ClientData, Error) {
@@ -77,8 +69,7 @@ fn field(doc json.Doc, name String) Result(String, Error) {
 	}
 }
 
-// The challenge in clientDataJSON is base64url without padding; compare it to
-// the raw bytes the server issued by decoding it, in constant time.
+// The challenge is unpadded base64url. Compared decoded, in constant time.
 fn challenge_ok(client_challenge String, expected Binary) Bool {
 	match base64.url_decode(binary.from_string(client_challenge)) {
 		Ok(got) -> crypto.const_eq(got, expected)
@@ -86,9 +77,6 @@ fn challenge_ok(client_challenge String, expected Binary) Bool {
 	}
 }
 
-// Whether authenticator data's `rp_id_hash` is the SHA-256 of `rp_id`, in
-// constant time. An RP ID is a string, so it always has a digest; one without
-// would match nothing.
 fn rp_id_matches(rp_id_hash Binary, rp_id String) Bool {
 	match crypto.sha256(binary.from_string(rp_id)) {
 		Ok(expected) -> crypto.const_eq(rp_id_hash, expected)
@@ -96,12 +84,14 @@ fn rp_id_matches(rp_id_hash Binary, rp_id String) Bool {
 	}
 }
 
-// ---------- authenticatorData ----------
+// authenticatorData
 
-/** The fixed head of authenticator data (RFC-fixed offsets), plus, when the
- * AT flag is set, the attested credential. */
+/** Its fixed head, plus the attested credential when the AT flag is set. */
 type AuthData {
-	AuthData(rp_id_hash Binary, user_present Bool, sign_count Int, attested Option((Binary, cbor.Value)))
+	rp_id_hash Binary
+	user_present Bool
+	sign_count Int
+	attested Option((Binary, cbor.Value))
 }
 
 fn parse_auth_data(auth Binary) Result(AuthData, Error) {
@@ -112,28 +102,43 @@ fn parse_auth_data(auth Binary) Result(AuthData, Error) {
 		flags = binary.byte_at(auth, 32)
 		user_present = int.bitwise_and(flags, 1) == 1
 		attested_flag = int.bitwise_and(flags, 64) == 64
-		sign_count = { binary.byte_at(auth, 33) * 16777216 } + { binary.byte_at(auth, 34) * 65536 } +
-			{ binary.byte_at(auth, 35) * 256 } + binary.byte_at(auth, 36)
+		sign_count = { binary.byte_at(auth, 33) * 16777216 } +
+			{ binary.byte_at(auth, 34) * 65536 } +
+			{ binary.byte_at(auth, 35) * 256 } +
+			binary.byte_at(auth, 36)
 		if !attested_flag {
-			Ok(AuthData(rp_id_hash: rp_id_hash, user_present: user_present, sign_count: sign_count, attested: None))
+			Ok(
+				AuthData(
+					rp_id_hash: rp_id_hash,
+					user_present: user_present,
+					sign_count: sign_count,
+					attested: None,
+				),
+			)
 		} else if binary.byte_size(auth) < 55 {
 			Err(BadCredential)
 		} else {
-			// aaguid[16] at 37, then credentialIdLength[2], then the id, then
-			// the COSE key as the remaining bytes.
+			// aaguid[16] at 37, credentialIdLength[2], the id, then the COSE key.
 			id_len = { binary.byte_at(auth, 53) * 256 } + binary.byte_at(auth, 54)
 			if binary.byte_size(auth) < 55 + id_len {
 				Err(BadCredential)
 			} else {
 				cred_id = binary.slice_bytes(auth, 55, id_len) or <<>>
-				key_bytes = binary.slice_bytes(auth, 55 + id_len, binary.byte_size(auth) - { 55 + id_len }) or <<>>
+				key_bytes = binary.slice_bytes(
+					auth,
+					55 + id_len,
+					binary.byte_size(auth) - { 55 + id_len },
+				) or <<>>
 				match cbor.decode(key_bytes) {
-					Ok(key) -> Ok(AuthData(
-						rp_id_hash: rp_id_hash,
-						user_present: user_present,
-						sign_count: sign_count,
-						attested: Some((cred_id, key)),
-					))
+					Ok(key) ->
+						Ok(
+							AuthData(
+								rp_id_hash: rp_id_hash,
+								user_present: user_present,
+								sign_count: sign_count,
+								attested: Some((cred_id, key)),
+							),
+						)
 					Err(_) -> Err(BadCredential)
 				}
 			}
@@ -141,8 +146,7 @@ fn parse_auth_data(auth Binary) Result(AuthData, Error) {
 	}
 }
 
-// A COSE key -> (algorithm, verify-ready public key). ES256's key becomes
-// SEC1 uncompressed (0x04 || x || y); EdDSA's is the 32-byte point as given.
+// ES256's key becomes SEC1 uncompressed (0x04, x, y). EdDSA's is used as is.
 fn cose_key(key cbor.Value) Result((Algorithm, Binary), Error) {
 	alg <- result.then(match option.then(cbor.map_get(key, 3), cbor_int) {
 		Some(a) -> Ok(a)
@@ -183,14 +187,10 @@ fn cbor_int(v cbor.Value) Option(Int) {
 	}
 }
 
-// ---------- registration ----------
+// Registration
 
-/**
- * Verify a `navigator.credentials.create` response and return the credential
- * to store. `attestation_object` and `client_data_json` are the raw bytes
- * from the browser; `challenge` is what the server issued; `rp_id` and
- * `origin` are the relying party's own values.
- */
+/** A `navigator.credentials.create` response, as raw bytes from the browser.
+ * `challenge` is what the server issued. Gives the credential to store. */
 pub fn verify_registration(
 	attestation_object Binary,
 	client_data_json Binary,
@@ -208,10 +208,12 @@ pub fn verify_registration(
 		Err(OriginMismatch)
 	} else {
 		att <- result.then(result.map_err(cbor.decode(attestation_object), fn(_) BadAttestation))
-		auth_bytes <- result.then(match option.then(cbor.text_map_get(att, 'authData'), cbor.as_bytes) {
-			Some(b) -> Ok(b)
-			None -> Err(BadAttestation)
-		})
+		auth_bytes <- result.then(
+			match option.then(cbor.text_map_get(att, 'authData'), cbor.as_bytes) {
+				Some(b) -> Ok(b)
+				None -> Err(BadAttestation)
+			},
+		)
 		ad <- result.then(parse_auth_data(auth_bytes))
 		AuthData(rp_id_hash, user_present, sign_count, attested) = ad
 		if !rp_id_matches(rp_id_hash, rp_id) {
@@ -224,23 +226,25 @@ pub fn verify_registration(
 				Some((cred_id, key)) -> {
 					parsed <- result.then(cose_key(key))
 					(alg, pk) = parsed
-					Ok(Credential(id: cred_id, public_key: pk, algorithm: alg, sign_count: sign_count))
+					Ok(
+						Credential(
+							id: cred_id,
+							public_key: pk,
+							algorithm: alg,
+							sign_count: sign_count,
+						),
+					)
 				}
 			}
 		}
 	}
 }
 
-// ---------- authentication ----------
+// Authentication
 
-/**
- * Verify a `navigator.credentials.get` response against a stored credential.
- * `authenticator_data`, `client_data_json`, and `signature` are the raw
- * bytes from the browser; `challenge` is what the server issued; `cred` is
- * what `verify_registration` stored. On success returns the new `signCount`,
- * for the caller to compare against the stored one if it enforces cloning
- * detection.
- */
+/** A `navigator.credentials.get` response, as raw bytes from the browser,
+ * against what `verify_registration` gave. Gives the new `signCount`, to
+ * compare with the stored one if the caller checks for cloned keys. */
 pub fn verify_authentication(
 	authenticator_data Binary,
 	client_data_json Binary,
@@ -267,9 +271,7 @@ pub fn verify_authentication(
 		} else if !user_present {
 			Err(UserNotPresent)
 		} else {
-			// The one message construction the whole protocol turns on. Client
-			// data that is not whole bytes has no digest to sign, so nothing
-			// can verify against it.
+			// The signature is over authenticatorData || sha256(clientDataJSON).
 			ok = match crypto.sha256(client_data_json) {
 				Ok(client_hash) -> {
 					message = binary.append(authenticator_data, client_hash)

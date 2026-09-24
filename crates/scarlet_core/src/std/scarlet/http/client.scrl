@@ -11,116 +11,39 @@ import scarlet/net/tls
 import scarlet/result
 import scarlet/time
 
-// The HTTP/1.1 CLIENT: issue one request, read one response back.
+// The HTTP/1.1 client: send one request, read one response back.
 //
-// `scarlet/http` is the server half — it accepts connections and drives
-// handlers. This is the other direction, and it is a separate module rather
-// than more of that one because nothing is shared between them but the
-// sans-IO parsing in `scarlet/http/h1`, which both import one-way.
+// It runs over an `Io`: read, write and close closures over one open
+// connection. `plain` makes one from a `Socket`, `secure` from a `TlsSocket`,
+// so the request and response code is written once for both, and tests can
+// run it over a Binary with no network.
 //
-// ---------------------------------------------------------------------------
-// Two transports, one request/response path
-// ---------------------------------------------------------------------------
-//
-// `Socket` and `TlsSocket` are DIFFERENT types on purpose (see
-// `scarlet/net/tls`): `socket.write` refusing a `TlsSocket` is what makes
-// "wrote the password to the cleartext half" a compile error. Everything above
-// the transport — the request head, the response parse, the body framing — is
-// identical for both and must exist once.
-//
-// The client therefore takes an `Io`: three closures over ONE already-open
-// connection. `plain` builds one from a `Socket` and `secure` from a
-// `TlsSocket`. The distinction survives — you still cannot hand a `TlsSocket`
-// to `socket.write`, and choosing cleartext still means naming `plain` — while
-// `send` below is written once.
-//
-// The two shapes not taken:
-//
-//   * Duplicating `send` per transport. The response reader is where the
-//     framing bugs live, and two copies is two places for a smuggling reject
-//     to be fixed in one of.
-//   * A `Transport { Plain(Socket) Secure(TlsSocket) }` sum matched at each
-//     read and write. It keeps the types and costs three small matches, so it
-//     is not absurd — but it is closed. `Io` is open, and the thing that
-//     immediately buys is a transport backed by a Binary instead of a socket,
-//     which is how the whole request/response path is tested with no network
-//     at all (`crates/scarlet/tests/programs/http_response.scrl`). Adding a
-//     `Fake` arm to a production sum type to get the same reach is a test hook
-//     shipped in the protocol. What shape 3 gives up is stated on `Io` below:
-//     the sum type would prove all three operations address one connection,
-//     and `Io` cannot.
-//
-// ---------------------------------------------------------------------------
-// What this client does not do
-// ---------------------------------------------------------------------------
-//
-// No connection pooling: every request opens a connection and sends
-// `Connection: close`. For `https` that means a full handshake per request,
-// which dominates the request cost — the TLS session cache makes the second
-// one a resumption, not a saving of the round trip to open TCP.
-//
-// No redirect following, no cookies, no retry, no automatic decompression.
-// Each is a policy a caller may not want taken on its behalf, and none of them
-// can be added later in a way a caller cannot opt out of.
-//
-// One read deadline for the whole exchange, taken once as an absolute Instant
-// and threaded through every transport read. `plain` and `secure` honour it
-// via `read_until`, so a peer that never sends — or dribbles a byte per read
-// — runs out of time instead of parking forever. `send`/`fetch` use
-// `READ_TIMEOUT_MS`; `send_until`/`fetch_until` take a caller Instant. The
-// Instant lives on `Reader` rather than as a fourth Io operation so every
-// read is a deadline read, and a test double that does not care about time
-// ignores the argument.
+// No connection pooling: each request opens a connection and sends
+// `Connection: close`. No redirects, cookies, retries or decompression. One
+// read deadline covers the whole exchange.
 
-// One transport operation each. Aliases rather than inline function types so
-// the three fields of `Io` cannot be given in the wrong order and typecheck.
 pub type Reader = fn(Int, time.Instant) Result(socket.Read, ClientError)
 
 pub type Writer = fn(Binary) Result(Nil, ClientError)
 
 pub type Closer = fn() Result(Nil, ClientError)
 
-// An open connection, whatever it is made of.
-//
-// THE INVARIANT THE TYPE DOES NOT CARRY: all three closures must address the
-// same connection. `plain` and `secure` each close over one handle, so every
-// `Io` this module builds satisfies it; an `Io` built anywhere else is the
-// builder's to get right.
-//
-// It is stated here rather than enforced because Scarlet cannot enforce it
-// today. The shape that would is
-//
-//     pub type Io(h) { handle h, read fn(h, Int, Instant) .., write .., close .. }
-//
-// where all three operations take the record's own handle and cannot reach a
-// second one. But then `Io(Socket)` and `Io(TlsSocket)` are different types
-// and `connect` — whose entire job is to return one type for either scheme —
-// has no return type to write. Closing over the handle is the encoding of the
-// existential Scarlet has no syntax for. Filed as T-217.
-//
-// Making the type opaque was tried and reverted: it would leave `plain` and
-// `secure` as the only doors, which also shuts out an `Io` backed by a Binary,
-// and that is the one thing this shape was chosen for.
+// An open connection. All three closures must address the same one. The type
+// cannot enforce that; `plain` and `secure` always do.
 pub type Io {
 	read Reader
 	write Writer
 	close Closer
 }
 
-// Why a request failed.
-//
-// A cleartext failure is always `Transport`, a TLS failure is always `Tls` —
-// including a TLS connection's socket-level failures, which stay wrapped as
-// `Tls(Transport(..))` rather than being unwrapped into the top-level
-// `Transport`. One representation per scheme: `u.scheme` tells a caller which
-// arm to match, and no failure can arrive by two different routes.
+// Why a request failed. A cleartext failure is always `Transport` and a TLS
+// one always `Tls`, socket failures under TLS included, so `u.scheme` says
+// which to match.
 pub type ClientError {
 	// The URL string is not an absolute http(s) URL.
 	BadUrl(err url.UrlError)
-	// A caller-supplied header field carries CR, LF or NUL, or a name that is
-	// not a token. Refused BEFORE the connection is opened: such a field would
-	// otherwise split the request head on the wire, which is how one request
-	// becomes two at a proxy.
+	// A header has CR, LF or NUL, or a name that is not a token. Refused before
+	// connecting: it could split the request in two at a proxy.
 	BadRequestHeaders
 	// A cleartext (`http`) socket failure.
 	Transport(err error.NetError)
@@ -129,23 +52,14 @@ pub type ClientError {
 	// The peer's response head is not HTTP/1.x, or its framing fields
 	// contradict each other.
 	MalformedResponse(err h1.BadResponse)
-	// The body exceeded the byte budget the request was sent under. Carries
-	// that budget, not the size, which was never measured — the read stops at
-	// the limit rather than buffering past it to find out.
+	// The body passed the byte budget. Carries the budget: the read stops
+	// there, so the real size is never known.
 	BodyTooLarge(limit Int)
 }
 
-// A response, whole. The body is buffered rather than streamed, matching how
-// `scarlet/http` already delivers request bodies to a handler and for the same
-// reason: a caller never holds a half-consumed connection, so nothing can be
-// misframed as the next message.
-//
-// `scarlet/http.Response` is deliberately NOT reused. Its `body` is a
-// `ResponseBody`, whose `Fixed`/`Unsized` distinction is a promise the SENDER
-// makes so the driver can frame and verify the bytes it is about to write.
-// Nothing is being written here, and reusing the type would state a promise
-// about a message that has already arrived. `Headers`, `Version` and
-// `HeadFlags` are shared with the server side unchanged.
+// A whole response. The body is read in full, so a caller never holds a
+// half-read connection. Not `scarlet/http.Response`, whose body framing is a
+// promise made by a sender.
 pub type Response {
 	version h1.Version
 	status Int
@@ -153,20 +67,14 @@ pub type Response {
 	// a proxy has to forward it; RFC 9112 §4 says nothing may be decided on it.
 	reason Binary
 	headers headers.Headers
-	// The `Connection` tokens the head parser recorded, for
-	// `h1.should_close(r.version, r.flags)`. Read off the header section as it
-	// arrived, so rewriting `headers` cannot move them.
+	// The `Connection` tokens as the head arrived, for `h1.should_close`.
 	flags h1.HeadFlags
 	body Binary
 }
 
-// One request. `url` decides the transport, the host, the port and the
-// request target, so none of the four can disagree with the others.
+// One request. `url` decides the transport, host, port and target.
 pub type Request {
-	// The method as wire bytes — `<<'GET'>>`. Bytes rather than
-	// `scarlet/http.Method` because that type exists to be MATCHED by a server
-	// routing a request it received; a client is writing one, and `Other(m)`
-	// would be an extra unwrap on every call.
+	// Wire bytes, like `<<'GET'>>`.
 	method Binary
 	url url.Url
 	// Fields to send in addition to `Host`, `Content-Length` and `Connection`.
@@ -179,13 +87,10 @@ pub type Request {
 // refused before a byte of it is read; an unadvertised one stops at the limit.
 pub const MAX_BODY = 8388608
 
-// How long `send`/`fetch` wait for the peer, as one absolute deadline taken
-// at the start of the exchange. Matches the server's head/body window so a
-// hanging peer is cut off on the same clock in both directions. A caller that
-// needs a different bound uses `send_until` / `fetch_until`.
+// How long `send` and `fetch` wait, as one deadline for the whole exchange.
+// `send_until` and `fetch_until` take your own.
 pub const READ_TIMEOUT_MS = 30000
 
-// How much to ask the transport for per read.
 const READ_SIZE = 65536
 
 const CRLF = <<'\r\n'>>
@@ -198,8 +103,7 @@ const VAL_CLOSE = <<'close'>>
 const EMPTY = <<>>
 const HEAD = <<'HEAD'>>
 
-// An `Io` over a cleartext socket. Naming this is what choosing cleartext
-// looks like; there is no path from a URL to here except `url.Http`.
+// An `Io` over a cleartext socket.
 pub fn plain(sock socket.Socket) Io {
 	Io(
 		read: fn(max, deadline) result.map_err(socket.read_until(sock, max, deadline), Transport),
@@ -217,17 +121,13 @@ pub fn secure(sock tls.TlsSocket) Io {
 	)
 }
 
-// THE ROUTING POINT. The one place in the standard library where a scheme
-// decides a transport: `https` opens TLS and verifies the certificate against
-// `u.host`, `http` opens a bare socket. Every caller above this is scheme-
-// agnostic, and no caller below it can be handed the wrong kind of handle.
+// The one place a scheme picks a transport: `https` opens TLS and checks the
+// certificate against `u.host`, `http` opens a plain socket.
 pub fn connect(u url.Url) Result(Io, ClientError) {
 	match u.scheme {
 		url.Http -> result.map(result.map_err(net.connect(u.host, u.port), Transport), plain)
-		// tls.connect verifies the certificate against the same `u.host` it
-		// dials. Passing anything else here — a pooled connection's remembered
-		// name, a Host header — is the confusion HostnameMismatch exists to
-		// catch, so the argument is the URL's own field and nothing else.
+		// Pass the host we dial and nothing else, or HostnameMismatch cannot
+		// catch a mix-up.
 		url.Https -> result.map(result.map_err(tls.connect(u.host, u.port), Tls), secure)
 	}
 }
@@ -244,13 +144,8 @@ pub fn fetch_bounded(req Request, max_body Int) Result(Response, ClientError) {
 pub fn fetch_until(req Request, max_body Int, deadline time.Instant) Result(Response, ClientError) {
 	io <- result.then(connect(req.url))
 	response = send_until(io, req, max_body, deadline)
-	// The connection is closed either way: the request said `Connection:
-	// close`, so it is not reusable even when the exchange succeeded, and a
-	// failed exchange leaves it in an unknown state. The close result is
-	// dropped ON PURPOSE — the response is already in hand, and reporting a
-	// failure to send a FIN as a failure of the request would turn a complete
-	// answer into an error. This is the one discarded error in the module and
-	// it is discarded here, once, rather than at each of the six exits above.
+	// Close either way: after `Connection: close` it can't be reused. A failed
+	// close is ignored, since the response is already in hand.
 	shut = io.close
 	match shut() {
 		Ok(Nil) -> response
@@ -264,11 +159,8 @@ pub fn get(url_text String) Result(Response, ClientError) {
 	fetch(Request(method: <<'GET'>>, url: u, headers: [], body: EMPTY))
 }
 
-// Send `req` over an already-open `io` and read the response back.
-//
-// Separate from `fetch` so a caller that has its own connection — a CONNECT
-// tunnel, a unix socket, a test double — can use the whole request/response
-// path without this module opening anything.
+// Send `req` over an open `io` and read the response back. For a caller with
+// its own connection, like a tunnel or a test double.
 pub fn send(io Io, req Request) Result(Response, ClientError) {
 	send_bounded(io, req, MAX_BODY)
 }
@@ -286,26 +178,15 @@ pub fn send_until(
 	head <- result.then(serialize_request(req))
 	emit = io.write
 	sent <- result.then(emit(binary.append(head, req.body)))
-	// `sent` is Nil. Bound rather than discarded: a discarded Result is a
-	// failure nobody observes, and a request whose bytes never left is not a
-	// request whose response is worth waiting for.
+	// `sent` is Nil: matched, so no Result is dropped.
 	match sent {
 		Nil -> read_response(io, req.method, max_body, deadline)
 	}
 }
 
-// The request head as wire bytes, with `Host`, `Content-Length` and
-// `Connection` set by us.
-//
-// `headers.set` (not `append`) for all three: it replaces the first match
-// case-insensitively and DELETES every later same-named field, so a caller
-// passing its own `Content-Length` gets ours and exactly one of them. Two
-// disagreeing Content-Length fields is a request-smuggling vector, and a
-// caller-set one is the likeliest way to get two.
-//
-// The caller's fields are validated first, on the fields as given: a name that
-// is not a token or a value carrying CR/LF/NUL would end the head early and
-// turn one request into two at any proxy in the path.
+// The request head. `headers.set` puts in our own `Host`, `Content-Length`
+// and `Connection`, dropping any the caller gave, since two Content-Lengths
+// allow request smuggling. Invalid caller fields are refused first.
 fn serialize_request(req Request) Result(Binary, ClientError) {
 	if !headers.valid(req.headers) {
 		Err(BadRequestHeaders)
@@ -319,18 +200,7 @@ fn serialize_request(req Request) Result(Binary, ClientError) {
 			NAME_CONNECTION,
 			VAL_CLOSE,
 		)
-		Ok(
-			concat([
-				req.method,
-				SP,
-				req.url.target,
-				SP,
-				HTTP11,
-				CRLF,
-				..headers.render(hs),
-				CRLF,
-			]),
-		)
+		Ok(concat([req.method, SP, req.url.target, SP, HTTP11, CRLF, ..headers.render(hs), CRLF]))
 	}
 }
 
@@ -366,10 +236,8 @@ fn read_response(
 	)
 }
 
-// A parsed response head plus the bytes already read past it. `rest` exists
-// because one transport read is not a message boundary: the first read that
-// completes the head has usually brought body bytes with it, and dropping
-// them would deadlock a caller waiting for a body that already arrived.
+// A response head, plus the bytes read past it: the read that finished the
+// head often brought body bytes too.
 type Head {
 	version h1.Version
 	status Int
@@ -384,11 +252,8 @@ fn read_head(io Io, buf Binary, max_body Int, deadline time.Instant) Result(Head
 		h1.ResponseDone(version, code, reason, hs, flags, consumed) -> {
 			rest = binary.drop_bytes(buf, consumed)
 			if code >= 100 && code < 200 {
-				// An interim response. It has no body and is not the answer,
-				// so it is dropped and the real head is parsed from what
-				// follows it. A server may send these unsolicited (RFC 9110
-				// §15.2), so a client that treated the first head as the
-				// answer would return `100 Continue` as the result.
+				// A 1xx interim response is not the answer (RFC 9110 §15.2): skip
+				// it and parse the next head.
 				read_head(io, rest, max_body, deadline)
 			} else {
 				Ok(
@@ -439,8 +304,7 @@ fn read_body(
 		h1.BodyNone -> Ok(EMPTY)
 		h1.BodyInvalid(err) -> Err(MalformedResponse(err))
 		h1.BodyLength(n) -> if n > max_body {
-			// Refused on the advertised length, before a byte is read: the
-			// point of the budget is not to buffer past it.
+			// Refused before a byte is read.
 			Err(BodyTooLarge(max_body))
 		} else {
 			read_exactly(io, rest, n, max_body, deadline)
@@ -458,12 +322,8 @@ fn read_exactly(
 	deadline time.Instant,
 ) Result(Binary, ClientError) {
 	if binary.byte_size(buf) >= n {
-		// The guard above is one half of the bound and `framing` is the other:
-		// it rejects a negative Content-Length as `Invalid` before it can
-		// become `BodyLength`, so `0 <= n <= byte_size(buf)` and the Err arm
-		// cannot fire. An argument in a comment rather than a type — T-286.
-		// The arm is still an error rather than a truncated body, because the
-		// only way to reach it is a length the framing should have refused.
+		// Cannot fail: framing refuses a negative length, so
+		// `0 <= n <= byte_size(buf)`.
 		match binary.slice_bytes(buf, 0, n) {
 			Ok(v) -> Ok(v)
 			Err(Nil) -> Err(MalformedResponse(h1.BadFraming))
@@ -477,9 +337,8 @@ fn read_exactly(
 fn read_chunked(io Io, buf Binary, limit Int, deadline time.Instant) Result(Binary, ClientError) {
 	match h1.chunk_decode(buf, 0, limit) {
 		h1.ChunkedDone(body, _, _) -> Ok(body)
-		// chunk_decode's status is the one a SERVER would answer with; a
-		// client reporting it would be inventing a status nobody asked for.
-		// Every one of them means the same thing here: the framing is a lie.
+		// The status is the one a server would answer with. Here they all
+		// mean the framing is wrong.
 		h1.ChunkedBad(_) -> Err(MalformedResponse(h1.BadFraming))
 		h1.ChunkedNeedMore -> {
 			more <- result.then(read_more(io, buf, limit, deadline))
@@ -488,10 +347,8 @@ fn read_chunked(io Io, buf Binary, limit Int, deadline time.Instant) Result(Bina
 	}
 }
 
-// The close-framed case. A clean close IS the end of the body here — the only
-// framing where that is true, and the reason it cannot be told apart from a
-// truncated transfer. `h1.response_framing` documents that; a caller who wants
-// the distinction needs a peer that frames its replies.
+// Close-framed: a clean close ends the body, so a cut-short body looks the
+// same as a whole one.
 fn read_to_close(io Io, buf Binary, limit Int, deadline time.Instant) Result(Binary, ClientError) {
 	if binary.byte_size(buf) >= limit {
 		Err(BodyTooLarge(limit))

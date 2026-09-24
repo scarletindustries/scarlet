@@ -6,69 +6,42 @@ import scarlet/time
 import scarlet/process
 import scarlet/string
 
-// A TCP server. The value is only ever constructed by the VM, and has no values.
-// It's an opaque pointer to the internal value in the VM. See [`al_vm::vm::io::VM::tcp_listen`]
+// A listening TCP socket. Only the VM makes one.
 pub type Server
 
-// Bind a listener to an already-resolved address. The port is validated to be
-// in 0..=65535 and the bind never blocks the scheduler (the address is already
-// an IP literal — no name resolution happens here).
 @vm(net__listen)
 pub fn listen_addr(addr address.SocketAddress) Result(Server, error.NetError)
 
-// Bind a listener to `host:port`. Hostnames are resolved off-scheduler via
-// `resolve` before binding, so a name that requires DNS never stalls the
-// scheduler thread. IP literals resolve synchronously.
+// Binds a listener to `host:port`, resolving `host` first with `resolve`.
 pub fn listen(host String, port Int) Result(Server, error.NetError) {
 	ip <- result.then(resolve(host))
 	addr <- result.then(result.replace_err(address.socket_address(ip, port), error.InvalidPort))
 	listen_addr(addr)
 }
 
-// Take the next incoming connection off the listener's queue, parking the
-// calling process until one arrives. Accept yields the stream of a listener's
-// connections, so its three outcomes are an iterator's: `Ok(Some(sock))` is
-// the next connection, `Ok(None)` is the end of the stream — the `Server` was
-// closed with `close`, which this and every later accept report — and
-// `Err(e)` is a kernel accept failure. Shutdown is not an error: an accept
-// loop exits on `Ok(None)`.
+// The next connection, parking until one arrives. `Ok(None)` means the
+// `Server` was closed, and an accept loop stops there. `Err` is a failed
+// accept.
 @vm(net__accept)
 pub fn accept(s Server) Result(Option(socket.Socket), error.NetError)
 
-// A running server: the listener, and the server's place in the process
-// tree. `net.close(service.server)` stops accepting — the acceptors end and
-// open connections finish on their own; `process.count(service.connections)`
-// is the number of connections open right now, and
-// `process.children(service.supervised)` shows the acceptors and the
-// connection factory, as `serve` declares them.
+// A running server. `net.close(service.server)` stops accepting, and open
+// connections finish on their own. `process.count(service.connections)` is
+// the number of open connections.
 pub type Service {
 	server Server
 	supervised process.Supervised
 	connections process.Supervised
 }
 
-// Listen on host:port and serve connections across every CPU core in parallel.
-//
-// One listening socket, one accept queue, an acceptor on every core: the
-// kernel hands each connection to exactly one acceptor, so no core can be
-// starved and no connection can be routed where nobody accepts. Every
-// connection is handled on the core that accepted it, by `handler`, in a
-// process of its own.
-//
-// The server is a subtree of the process tree, declared under a supervisor
-// of its own that `serve` creates for the calling process: a factory whose
-// members are the connections — one ends when its handler returns or
-// crashes, taking the connection with it and nothing else — and the
-// acceptors, restarted on their own cores if one fails; acceptors failing
-// faster than a few times a second means the listener is broken, and the
-// supervisor gives up as any supervisor does. To place the server inside an
-// application's own tree instead, use `serve_in`. A bind failure is `Err`.
+// Listens on `host:port` and runs `handler` for each connection in a process
+// of its own, with an acceptor on every core. A handler that crashes ends only
+// its own connection. Use `serve_in` to put the server in your own tree.
 pub fn serve(host String, port Int, handler fn(socket.Socket) Nil) Result(Service, error.NetError) {
 	serve_in(process.supervisor(ACCEPTOR_BUDGET), host, port, handler)
 }
 
-// As `serve`, declaring the server's subtree inside `sup`, so that it is
-// started, stopped and restarted with the rest of the application's tree.
+// As `serve`, with the server's subtree inside `sup`.
 pub fn serve_in(
 	sup process.Supervisor,
 	host String,
@@ -79,28 +52,20 @@ pub fn serve_in(
 	Ok(serve_on_in(sup, server, handler))
 }
 
-// Serve a listener already bound with `listen` — bind on port 0, read the
-// port back with `local_addr`, then serve. Nothing here can fail: the bind
-// was the fallible step.
+// Serves a listener already bound with `listen`, for example on port 0 with
+// the port read back by `local_addr`.
 pub fn serve_on(server Server, handler fn(socket.Socket) Nil) Service {
 	serve_on_in(process.supervisor(ACCEPTOR_BUDGET), server, handler)
 }
 
-// As `serve_on`, inside `sup`. The layout every server has:
-//
-//	sup
-//	└─ server        supervisor (acceptor budget)
-//	   ├─ connections   factory of disposable members, one per connection
-//	   └─ acceptor ×N   transient, one pinned to each core
-//
-// The factory is declared first, so it is stopped last: stopping the server
-// stops accepting before it closes what was accepted.
+// As `serve_on`, inside `sup`. The connection factory is declared before the
+// acceptors, so it is stopped after them: a stopping server stops accepting
+// before it closes what it accepted.
 pub fn serve_on_in(sup process.Supervisor, server Server, handler fn(socket.Socket) Nil) Service {
 	me = process.supervisor_in(sup, ACCEPTOR_BUDGET)
 	connections = process.factory(me, process.Disposable, fn(_inbox, sock) {
-		// The connection was accepted by, and so belongs to, the acceptor;
-		// it becomes this process's first thing, so that it closes when this
-		// process ends — however that happens.
+		// The acceptor owns the socket until this, so that it closes when this
+		// process ends, however it ends.
 		give(sock, process.self())
 		handler(sock)
 	})
@@ -108,40 +73,19 @@ pub fn serve_on_in(sup process.Supervisor, server Server, handler fn(socket.Sock
 	Service(server: server, supervised: me.supervised, connections: connections.supervised)
 }
 
-// One server's acceptors are its own affair; a listener that cannot accept
-// at all makes every acceptor fail at once, which this exhausts within a
-// second or two whatever the core count, so the failure surfaces instead of
+// A listener that cannot accept makes every acceptor fail at once. This budget
+// runs out within a second or two, so the failure moves up the tree instead of
 // being retried for ever.
 const ACCEPTOR_BUDGET = process.OneForOne(restarts: 10, within_ms: 5000)
 
-// Make `to` the process whose end closes `sock`. `to` must be on the core
-// that holds the socket — the connection's own handler process, started on
-// the core that accepted it, is the one caller.
+// Makes `to` the process whose end closes `sock`. `to` must be on the core
+// that holds the socket.
 @vm(net__give)
 fn give(sock socket.Socket, to process.Pid) Nil
 
-// The per-core accept loop: accept a connection, start a member of the
-// connection factory for it, loop. A member starts on the core that
-// declared it, so the handler begins on the core whose poller holds the
-// socket. Every core's acceptor drains the listener's single shared queue —
-// spreading the accepts is a locality preference, not a correctness need.
-//
-// A per-connection accept failure (ECONNABORTED, ECONNRESET, an unmapped errno
-// such as EMFILE/EPROTO) means one incoming connection was lost, not that the
-// listening socket is dead — the loop retries. ENETDOWN/ENETUNREACH/
-// EHOSTUNREACH are per-connection too: accept(2) documents them as
-// already-pending errors of the ACCEPTED connection — one that died in the
-// queue — not as listener death, so they retry as well. An unmapped errno is
-// usually descriptor exhaustion (EMFILE/ENFILE), where accept fails without
-// dequeuing anything, so that retry backs off for 100ms first — retrying
-// immediately would spin this core at full speed against the same full
-// descriptor table. `Ok(None)` is the shutdown a `net.close` delivers to
-// parked acceptors: the acceptor returns, which for a transient worker
-// means it is done. Any other failure is one this loop has no answer to: it
-// is reported, and the acceptor has itself killed, which is how a transient
-// worker asks to be restarted — a fresh acceptor on a healthy listener
-// carries on; on a broken one the restarts exhaust the server's budget and
-// the failure moves up the tree.
+// The network errors are ones accept(2) reports for a connection that died in
+// the queue, not a dead listener, so they retry. An unmapped errno is usually
+// EMFILE, which dequeues nothing, so it waits 100ms rather than spin.
 fn accept_loop(server Server, connections process.Factory(Nil, socket.Socket)) Nil {
 	match accept(server) {
 		Ok(Some(sock)) -> {
@@ -165,58 +109,20 @@ fn accept_loop(server Server, connections process.Factory(Nil, socket.Socket)) N
 	}
 }
 
-// Resolve `host` to an `IpAddress`. IP literals pass through unchanged; hostname
-// resolution (getaddrinfo) runs on the blocking thread pool so it never stalls
-// the scheduler. That split is why the bounded forms below can answer a literal
-// on a budget they would refuse a hostname on: only the hostname has to wait.
+// An IP literal passes through. A hostname is looked up with getaddrinfo, off
+// the scheduler's threads.
 @vm(net__resolve)
 pub fn resolve(host String) Result(address.IpAddress, error.NetError)
 
-// Resolve as `resolve`, but wait no longer than `timeout_ms` milliseconds,
-// erring with `TimedOut` once it passes.
-//
-// A budget already spent when the call is made errs `TimedOut` without
-// starting a lookup at all, so a `timeout_ms` of 0 is specified to time out
-// for a hostname. An IP literal needs no lookup and is still `Ok` on any
-// budget: the bound is on the wait, not on work that never waits.
-//
-// The other half is guaranteed too, as of T-644: once a lookup has been
-// dispatched, the deadline still wins if it has already passed by the time
-// the answer comes back — the scheduler checks its expired timers before it
-// drains finished pool jobs, so a resolve that finishes late errs `TimedOut`
-// rather than being delivered as `Ok`. `timeout_ms` is a ceiling on how long
-// the caller waits, not merely a bound on how long this is willing to start
-// waiting.
-//
-// Unlike `connect_addr_within`, this is the only bound a resolve has: whether
-// `getaddrinfo` ever gives up is the platform resolver's business, not the
-// caller's, and it is not configurable from here. Measured on macOS 26.5.2
-// (arm64): a name that no resolver answers costs 5.0 s on the mDNS path, and a
-// nameserver that answers nothing at all was not reproducible without root, so
-// no upper bound on the unicast path is claimed.
-//
-// Giving up is giving up on the wait only, not the work: a dispatched lookup
-// is not cancellable and runs to completion on its pool thread regardless,
-// holding it for the remainder — its answer just arrives too late to be
-// delivered and is discarded, the same way a connect whose deadline already
-// fired discards the connect that finishes after it. A budget spent before
-// the call is the one case that costs no pool thread, because nothing is
-// dispatched.
+// As `resolve`, but `Err(TimedOut)` after `timeout_ms`, even if the lookup
+// answers later. An IP literal is `Ok` on any budget. A lookup cannot be
+// cancelled, so a late one still runs to the end and is thrown away.
 pub fn resolve_within(host String, timeout_ms Int) Result(address.IpAddress, error.NetError) {
 	resolve_until(host, time.add_ms(time.monotonic(), timeout_ms))
 }
 
-// Resolve as `resolve_within`, giving up at the absolute Instant `deadline`
-// (from `time.monotonic()`). Use this rather than `resolve_within` when one
-// deadline covers several steps, so the resolve gets what is left of the
-// budget instead of a fresh copy of it.
-//
-// A `deadline` the earlier steps already used up is the ordinary case here,
-// not an edge one: it errs `TimedOut` for a hostname without starting a
-// lookup, and still answers an IP literal, exactly as `resolve_within` does
-// on a `timeout_ms` of 0. The same bound applies too — a lookup that has
-// been dispatched still errs `TimedOut` if `deadline` passes before the
-// answer does, even though the lookup itself keeps running to completion.
+// As `resolve_within`, with a `deadline` from `time.monotonic()`, for when one
+// deadline covers several steps.
 pub fn resolve_until(host String, deadline time.Instant) Result(address.IpAddress, error.NetError) {
 	resolve_until_ms(host, time.to_deadline_ms(deadline))
 }
@@ -224,84 +130,63 @@ pub fn resolve_until(host String, deadline time.Instant) Result(address.IpAddres
 @vm(net__resolve_until)
 fn resolve_until_ms(host String, deadline_ms Int) Result(address.IpAddress, error.NetError)
 
-// Open a connection to a remote host. `host` may be an IP address or a
-// hostname; the hostname is resolved off-scheduler via `resolve`, then the
-// connection is established with the calling process parked — neither step
-// blocks the scheduler.
-//
-// This carries no deadline of its own. `connect_within` and `connect_until`
-// are the bounded siblings, and an IP literal skips resolution entirely — a
-// caller holding one and wanting an address-only bound can also reach for
-// `connect_addr_within` instead.
+// Connects to `host:port`, resolving `host` first with `resolve`. It has no
+// deadline of its own: see `connect_within`.
 pub fn connect(host String, port Int) Result(socket.Socket, error.NetError) {
 	ip <- result.then(resolve(host))
 	addr <- result.then(result.replace_err(address.socket_address(ip, port), error.InvalidPort))
 	connect_addr(addr)
 }
 
-// Open a connection to a remote host as `connect`, but wait no longer than
-// `timeout_ms` milliseconds for both steps together.
+// As `connect`, but waits at most `timeout_ms` for the resolve and the connect
+// together.
 pub fn connect_within(host String, port Int, timeout_ms Int) Result(socket.Socket, error.NetError) {
 	connect_until(host, port, time.add_ms(time.monotonic(), timeout_ms))
 }
 
-// Connect as `connect_within`, giving up at the absolute Instant `deadline`
-// (from `time.monotonic()`). Use this rather than `connect_within` when one
-// deadline covers several steps, so the connect gets what is left of the
-// budget instead of a fresh copy of it.
-//
-// The resolve and the connect share `deadline` rather than each getting a
-// fresh copy of it, exactly as `connect_addr_until` shares one Instant across
-// its own steps: a hostname that eats most of the budget resolving leaves the
-// connect little of it, rather than a full `timeout_ms` of its own.
-pub fn connect_until(host String, port Int, deadline time.Instant) Result(socket.Socket, error.NetError) {
+// As `connect_within`, with a `deadline` from `time.monotonic()`, for when one
+// deadline covers several steps.
+pub fn connect_until(
+	host String,
+	port Int,
+	deadline time.Instant,
+) Result(socket.Socket, error.NetError) {
 	ip <- result.then(resolve_until(host, deadline))
 	addr <- result.then(result.replace_err(address.socket_address(ip, port), error.InvalidPort))
 	connect_addr_until(addr, deadline)
 }
 
-// Connect to an already-resolved address. Useful to resolve once and connect
-// many times, or to connect to an `IpAddress` obtained elsewhere. The port is
-// validated to be in 0..=65535.
 @vm(net__connect)
 pub fn connect_addr(addr address.SocketAddress) Result(socket.Socket, error.NetError)
 
-// Connect to an already-resolved address as `connect_addr`, but wait no longer
-// than `timeout_ms` milliseconds. Errs with `TimedOut` once it passes, and the
-// half-open connection is dropped rather than left to finish unobserved.
-//
-// This lowers a ceiling that already exists rather than creating one. An
-// unanswered connect does not hang for ever: the kernel gives up on its own —
-// measured at 75.0 s on Darwin, the `net.inet.tcp.keepinit` timer — and
-// `connect_addr` reports that as `Err(TimedOut)`. A `timeout_ms` above the
-// kernel's own is therefore inert. Short deadlines are what this adds.
-//
-// `connect_within` bounds the host-resolving form the same way. Reach for
-// this one directly when an address is already in hand, so resolving it again
-// is not wasted work.
-pub fn connect_addr_within(addr address.SocketAddress, timeout_ms Int) Result(socket.Socket, error.NetError) {
+// As `connect_addr`, but `Err(TimedOut)` after `timeout_ms`. The kernel gives
+// up on its own after about 75 s on Darwin, so a longer timeout does nothing.
+pub fn connect_addr_within(
+	addr address.SocketAddress,
+	timeout_ms Int,
+) Result(socket.Socket, error.NetError) {
 	connect_addr_until(addr, time.add_ms(time.monotonic(), timeout_ms))
 }
 
-// Connect as `connect_addr_within`, giving up at the absolute Instant
-// `deadline` (from `time.monotonic()`). Use this rather than
-// `connect_addr_within` when one deadline covers several steps, so the connect
-// gets what is left of the budget instead of a fresh copy of it.
-pub fn connect_addr_until(addr address.SocketAddress, deadline time.Instant) Result(socket.Socket, error.NetError) {
+// As `connect_addr_within`, with a `deadline` from `time.monotonic()`.
+pub fn connect_addr_until(
+	addr address.SocketAddress,
+	deadline time.Instant,
+) Result(socket.Socket, error.NetError) {
 	connect_addr_until_ms(addr, time.to_deadline_ms(deadline))
 }
 
 @vm(net__connect_until)
-fn connect_addr_until_ms(addr address.SocketAddress, deadline_ms Int) Result(socket.Socket, error.NetError)
+fn connect_addr_until_ms(
+	addr address.SocketAddress,
+	deadline_ms Int,
+) Result(socket.Socket, error.NetError)
 
-// The address the listener is actually bound to. This is how the kernel-
-// assigned port is read back after binding port 0.
+// The address the listener is bound to, such as the port the kernel chose for
+// port 0.
 @vm(net__local_addr)
 pub fn local_addr(s Server) Result(address.SocketAddress, error.NetError)
 
-// Shut the listener down. Closing a `Server` wakes every process parked in
-// `accept` and makes that call — and every later `accept` — return
-// `Ok(None)`, the end-of-stream signal the `serve` acceptors (and any
-// hand-rolled accept loop) exit on.
+// Every `accept` on it, parked or later, returns `Ok(None)`.
 @vm(net__close)
 pub fn close(s Server) Result(Nil, error.NetError)

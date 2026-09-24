@@ -1,110 +1,58 @@
 /**
- * Cryptographic primitives a protocol the stdlib speaks names by name.
+ * Digests, HMAC, signature checks and random bytes, all bound to aws-lc and
+ * the OS rather than written here.
  *
- * SHA-1 is here ONLY because two of those protocols require it. It is NOT
- * collision-resistant — a chosen-prefix collision has been public since
- * 2017 — so it must never be used for signatures, certificates, password
- * storage, or deduplicating attacker-supplied content. Its one legitimate
- * use is a protocol that specifies it as a fixed handshake constant, where
- * the security argument does not rest on collision resistance: the
- * WebSocket opening handshake (RFC 6455 §1.3), where `Sec-WebSocket-Accept`
- * is `base64(sha1(key <> GUID))` and its job is to prove the server
- * understood the upgrade, not to authenticate anyone.
- *
- * `random_bytes` is the OS CSPRNG. RFC 6455's frame mask and the client's
- * `Sec-WebSocket-Key` have to be unpredictable; a userspace PRNG, even a
- * good one seeded once at boot, is not this function.
- *
- * SHA-256 is the one general-purpose hash here: fine wherever a
- * collision-resistant digest is called for (PKCE's S256 challenge, content
- * addressing), though on its own it is still neither a password hash nor a
- * MAC. Everything said about SHA-1 above stays true: protocol handshakes
- * only.
- *
- * The digests and the HMAC tag are over bytes, so a binary that is not a
- * whole number of bytes (`<<1:4>>`) has none: they return `Err(Nil)` for it.
- * Hashing the whole bytes and dropping the rest, or padding the last byte,
- * would give two different binaries the same digest.
+ * SHA-1 is broken for collisions. It is here only for fixed protocol
+ * constants like the WebSocket handshake, never for signatures, passwords or
+ * untrusted content. Digests are over whole bytes: a binary like `<<1:4>>` is
+ * `Err(Nil)`, since padding it would give two binaries one digest.
  */
 
 import scarlet/base64
 import scarlet/binary
 import scarlet/result
 
-// The RFC 6455 §1.3 handshake constant, appended to the client's
-// `Sec-WebSocket-Key` before hashing. Fixed by the spec; not a secret, and not
-// a salt.
+// RFC 6455 §1.3's handshake constant. Not a secret and not a salt.
 pub const websocket_guid = <<'258EAFA5-E914-47DA-95CA-C5AB0DC85B11'>>
 
-// The SHA-1 digest of `m`: 20 bytes, big-endian. Every whole number of
-// bytes has one, the empty binary included; a binary that is not whole bytes
-// is `Err(Nil)`. aws-lc's, as the other digests are.
-//
-// Read the module doc before reaching for this.
+// 20 bytes. Only for protocols that require it: see the module doc.
 @vm(crypto__sha1)
 pub fn sha1(m Binary) Result(Binary, Nil)
 
-// The `Sec-WebSocket-Accept` value a server owes for the client's
-// `Sec-WebSocket-Key`, per RFC 6455 §4.2.2: base64(sha1(key <> GUID)).
-//
-// `key` is the raw header value as it appeared on the wire, still base64 — it
-// is concatenated as text and is NOT decoded first. A client compares this
-// against the header it received; a client that skips the comparison accepts
-// any server that answers 101.
+// The `Sec-WebSocket-Accept` for a `Sec-WebSocket-Key` (RFC 6455 §4.2.2).
+// `key` is the header as sent, still base64: it is not decoded first.
 pub fn websocket_accept(key Binary) Result(Binary, Nil) {
 	result.map(sha1(binary.append(key, websocket_guid)), base64.encode)
 }
 
-// `n` bytes from the OS CSPRNG (`getrandom` / equivalent). `Err(Nil)` if
-// `n` is negative or the host source fails. Never a userspace generator,
-// and never silent zeros (or any other stand-in) on failure.
+// `n` bytes from the OS's secure random source. `Err(Nil)` if `n` is negative
+// or the source fails, never zeros.
 @vm(crypto__random_bytes)
 pub fn random_bytes(n Int) Result(Binary, Nil)
 
-
-
-// The SHA-256 digest of `m`: 32 bytes, big-endian. Every whole number of
-// bytes has one, the empty binary included; a binary that is not whole bytes
-// is `Err(Nil)`.
-//
-// Unlike SHA-1 above, this one is fine to reach for on its own merits:
-// collision-resistant as far as anyone knows, and the hash OAuth's PKCE
-// (S256), TLS 1.3, and most content addressing specify. Backed by aws-lc in
-// the VM — the same crypto TLS already links. On its own it is still
-// neither a password hash nor a MAC; see `hmac_sha256` for the latter.
+// 32 bytes. Not a password hash, and not a MAC: that is `hmac_sha256`.
 @vm(crypto__sha256)
 pub fn sha256(m Binary) Result(Binary, Nil)
 
-// The SHA-512 digest of `m`: 64 bytes, big-endian. Same contract and
-// backing as `sha256`.
+// 64 bytes.
 @vm(crypto__sha512)
 pub fn sha512(m Binary) Result(Binary, Nil)
 
-// The HMAC-SHA-256 tag over `msg` under `key`: 32 bytes. This is the
-// message-authentication primitive: use it for signing tokens and cookies,
-// and compare tags with `const_eq`, never `==`. `Err(Nil)` when either is
-// not a whole number of bytes.
+// A 32-byte tag, for signing tokens and cookies. Compare tags with
+// `const_eq`, never `==`.
 @vm(crypto__hmac_sha256)
 pub fn hmac_sha256(key Binary, msg Binary) Result(Binary, Nil)
 
-// Whether `a` and `b` hold the same bits, in time that is a function of
-// their lengths alone. `==` on binaries exits at the first differing byte,
-// which leaks how much of a secret matched; this does not. Unequal lengths
-// answer `False` immediately — a length is not the secret, its bytes are.
+// Equal, in time that depends only on the lengths. `==` stops at the first
+// difference, which leaks how much of a secret matched.
 @vm(crypto__const_eq)
 pub fn const_eq(a Binary, b Binary) Bool
 
-
-// Whether `sig` is a valid ECDSA-P256-SHA256 signature of `message` under
-// `public_key`. The key is SEC1 uncompressed — `0x04` then the 32-byte x and
-// y — and `sig` is ASN.1 DER, which is the form WebAuthn's ES256 and most TLS
-// stacks produce. Total: a key, message or signature of the wrong shape, one
-// that is not whole bytes among them, is `False`, never a crash, so a caller
-// may pass bytes straight off the wire.
+// ECDSA P-256 with SHA-256, as WebAuthn's ES256 uses. The key is SEC1
+// uncompressed (`0x04`, x, y) and `sig` is DER. Anything malformed is `False`.
 @vm(crypto__p256_verify)
 pub fn p256_verify(public_key Binary, message Binary, sig Binary) Bool
 
-// Whether `sig` is a valid Ed25519 signature of `message` under the 32-byte
-// `public_key`. Total, on the same terms as `p256_verify`.
+// `public_key` is 32 bytes. Anything malformed is `False`.
 @vm(crypto__ed25519_verify)
 pub fn ed25519_verify(public_key Binary, message Binary, sig Binary) Bool

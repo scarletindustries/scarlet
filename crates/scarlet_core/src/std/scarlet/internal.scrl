@@ -1,32 +1,25 @@
 /**
- * VM introspection hooks; unstable, for debugging — not a stable API.
+ * VM introspection, for debugging and tests. Not a stable API.
  */
 
-// The number of stack frames in the calling process — see examples/tco.scrl.
+// Stack frames in the calling process.
 @vm(internal__stack_depth)
 pub fn stack_depth() Int
 
-// Heap cells this process has allocated over its whole life, and cells a
-// constructor overwrote in place instead of allocating, because nothing else
-// held them any more.
+// Cells this process has allocated over its whole life, and cells a
+// constructor overwrote in place instead, because nothing else held them.
 @vm(internal__cells_made)
 pub fn cells_made() Int
 
 @vm(internal__cells_reused)
 pub fn cells_reused() Int
 
-// The number of mailboxes open across the whole program: every subject some
-// process still holds, plus every supervised worker's address. A subject is
-// reclaimed as soon as its owner lets go of it, so this stays flat through
-// any number of request/reply exchanges — see tests/programs/messages.scrl.
+// Mailboxes open across the program: every subject still held, plus every
+// supervised worker's address.
 @vm(internal__live_subjects)
 pub fn live_subjects() Int
 
-// Blocking-pool worker threads alive across the whole program: the OS threads
-// that carry file, DNS and subprocess operations so a scheduler thread never
-// blocks. The pool is elastic — it starts empty, grows on demand up to
-// SCARLET_BLOCKING_THREADS (512), and lets idle workers above a warm floor
-// exit — so this is a live number, not a constant. Reports threads that exist,
-// busy plus parked; see tests/programs/effects.scrl.
+// Threads alive in the pool that runs file, DNS and subprocess calls, busy or
+// idle. It grows on demand up to SCARLET_BLOCKING_THREADS (512).
 @vm(internal__blocking_threads)
 pub fn blocking_threads() Int

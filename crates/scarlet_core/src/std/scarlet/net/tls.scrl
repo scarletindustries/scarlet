@@ -6,48 +6,22 @@ import scarlet/binary
 import scarlet/result
 import scarlet/time
 
-// A TLS client connection, authenticated and encrypted. The value is only ever
-// constructed by the VM and carries no fields; it is an opaque handle into the
-// owning scheduler's connection table.
-//
-// It is a DIFFERENT type from `scarlet/net/socket.Connection`, and that is the
-// whole point. A cleartext socket and an encrypted one are not one type with a
-// flag: `socket.write` does not accept a `TlsSocket` and `tls.write` does not
-// accept a `Socket`, so "wrote the password to the unencrypted half" is a type
-// error at compile time rather than a packet capture at review time. The VM
-// carries the same distinction in the handle's kind, so the two cannot be
-// confused even by a handle that outlives its upgrade.
+// A TLS client connection. A separate type from a cleartext socket, so
+// writing to the unencrypted one by mistake is a type error.
 pub type TlsConnection
 
-// An established TLS connection to `peer`.
-//
-// `server_name` is the name `handshake` was given, on a value `handshake`
-// built. It is not evidence. The constructor is public and the fields are
-// readable, so `TlsSocket(c.conn, c.peer, 'attacker.example')` compiles and
-// reads back the name it was handed, over a connection verified as something
-// else entirely.
-//
-// A connection pool must therefore key on the name it passed to `handshake`
-// itself, never on a name read off a `TlsSocket` it was given. The certificate
-// is checked against that argument and against nothing else. Reusing a
-// connection opened for one host to talk to another is the confusion
-// `HostnameMismatch` exists to catch, and a key taken from a field any caller
-// can write is not what catches it.
+// `server_name` is only what `handshake` was given, and anyone can build a
+// `TlsSocket`, so it proves nothing. A connection pool must key on the name it
+// passed to `handshake` itself.
 pub type TlsSocket {
 	conn TlsConnection
 	peer address.SocketAddress
 	server_name String
 }
 
-// Why a TLS connection failed. Certificate problems are separated from
-// transport problems on purpose: a caller may reasonably retry `Transport`,
-// and must never retry its way past `CertificateUnknownIssuer`.
-//
-// There is deliberately no variant for "verification was skipped" and no
-// argument that disables it. A TLS client that can be talked into accepting
-// any certificate is worse than no TLS client, because it still looks like it
-// works. If a test needs to trust a private CA, it adds that CA to the trust
-// store the machine already has; it does not ask the language to stop checking.
+// A caller may retry `Transport`, never a certificate error. On purpose, there
+// is no way to skip verification: to trust a private CA, add it to the
+// machine's trust store.
 pub type TlsError {
 	// The chain did not end at a trusted root.
 	CertificateUnknownIssuer
@@ -56,152 +30,88 @@ pub type TlsError {
 	CertificateNotYetValid
 	// The issuer published the certificate as revoked.
 	CertificateRevoked
-	// The chain verified, but it was not issued for the name we asked for.
-	// This is the failure a caller who pooled a connection under the wrong key
-	// sees, and it is not retryable.
+	// The chain verified, but not for the name asked for.
 	HostnameMismatch
-	// The certificate is malformed, uses a signature algorithm that is refused,
-	// or fails a check with no more specific variant.
+	// Malformed, a refused signature algorithm, or any other failed check.
 	BadCertificate
-	// The peer is not speaking TLS, or is speaking a version or cipher suite
-	// this client refuses. Includes a peer that answered a TLS ClientHello with
-	// plaintext, which is what connecting to an `http` port with `tls` looks
-	// like from here.
+	// The peer does not speak TLS, or only a version or cipher suite this
+	// refuses. It is what connecting to a plain `http` port looks like.
 	ProtocolError
-	// The peer sent a fatal alert, or the handshake failed for a reason that is
-	// not a certificate problem.
+	// A fatal alert, or a handshake failure that is not about the certificate.
 	HandshakeFailed
-	// `server_name` is neither a DNS name nor an IP address — an empty or
-	// malformed name such as `bad_name!` — so there is nothing a certificate
-	// could be checked against. An IP literal does NOT land here: it is
-	// verified against the certificate's IP SANs, and an address the
-	// certificate does not carry is a `HostnameMismatch` like any other name.
+	// `server_name` is neither a DNS name nor an IP address. An IP address is
+	// checked against the certificate's IP SANs.
 	InvalidServerName
-	// The TCP connection underneath failed, before or during the exchange.
 	Transport(cause error.NetError)
 }
 
-// Open a TLS connection to `host:port` and complete the handshake before
-// returning. `host` is both the address to connect to and the name the
-// certificate is verified against.
-//
-// The handshake is finished here rather than lazily on first read, so a
-// certificate failure is reported by the call that made the connection instead
-// of surfacing later at an unrelated `read`.
-//
-// Sessions are cached in memory for the life of the program and shared across
-// every Scarlet process in it, so a second connection to a host this program
-// has already reached resumes rather than starting a full handshake. The cache
-// is never written to disk: a session ticket is key material, and persisting it
-// is not a decision a runtime should take on a program's behalf. Nothing is
-// therefore resumed across separate runs of a program.
-//
-// This call carries no deadline of its own, and each of its three steps is
-// left to whatever floor the platform imposes: an unanswered TCP connect gives
-// up after 75.0 s on Darwin (the `net.inet.tcp.keepinit` timer, measured), and
-// a peer that accepts and then never speaks TLS parks the handshake for the
-// life of the program. `connect_within` is the bounded form, and is what to
-// reach for against anything not known to be healthy.
+// Connects and finishes the handshake, verifying the certificate against
+// `host`. Sessions are cached in memory, never on disk. No deadline: a peer
+// that never speaks TLS parks it for good, so prefer `connect_within`.
 pub fn connect(host String, port Int) Result(TlsSocket, TlsError) {
 	sock <- result.then(result.map_err(net.connect(host, port), Transport))
 	handshake(sock, host)
 }
 
-// Open a TLS connection as `connect`, but wait no longer than `timeout_ms`
-// milliseconds for all three steps together. The deadline is captured once,
-// here in Scarlet, as an absolute monotonic timestamp, so an internal re-run on
-// a spurious wakeup never resets the clock. Errs with `Transport(TimedOut)`
-// once it passes, whichever step was outstanding.
+// As `connect`, but `Err(Transport(TimedOut))` after `timeout_ms`, for all
+// three steps together.
 pub fn connect_within(host String, port Int, timeout_ms Int) Result(TlsSocket, TlsError) {
 	connect_until(host, port, time.add_ms(time.monotonic(), timeout_ms))
 }
 
-// Open a TLS connection as `connect`, giving up at the absolute Instant
-// `deadline` (from `time.monotonic()`).
-//
-// All three steps share this one Instant, so each gets what the steps before it
-// left rather than a fresh copy of the budget. That is why this exists
-// alongside `connect_within`: three `_within` calls chained would bound each
-// step separately, and the call as a whole at three times the number the caller
-// wrote.
+// As `connect_within`, with a `deadline` from `time.monotonic()`, shared by
+// all three steps.
 pub fn connect_until(host String, port Int, deadline time.Instant) Result(TlsSocket, TlsError) {
 	sock <- result.then(result.map_err(net.connect_until(host, port, deadline), Transport))
 	handshake_until(sock, host, deadline)
 }
 
-// Complete a TLS handshake over an already-connected socket, verifying the
-// peer against `server_name`.
-//
-// This is the one door into `TlsSocket`, and it consumes the cleartext
-// `Socket`: the VM re-keys the connection under a TLS handle, so the `Socket`
-// that was passed in is stale afterwards and every cleartext operation on it
-// errs with `NotConnected`. That is what stops a caller from holding on to the
-// plaintext handle and writing around the encryption.
-//
-// It is public because `connect` is not the only way to arrive at a socket
-// that must be secured — a proxied `CONNECT` tunnel and a `STARTTLS` upgrade
-// both hand you a live cleartext socket that has to become a TLS one.
-// It parks until the exchange finishes, with no deadline of its own. A peer
-// that accepts the TCP connection and then never answers the ClientHello — a
-// line protocol whose parser swallows the bytes, a middlebox that opens the
-// connection before it has a backend — parks the calling process for the life
-// of the program. `handshake_within` is the bounded form, and is what to reach
-// for against anything that is not known to speak TLS.
+// A TLS handshake over a connected socket, such as a STARTTLS upgrade. It
+// consumes `sock`: every cleartext call on it errs with `NotConnected` after.
+// No deadline: prefer `handshake_within`.
 @vm(tls__handshake)
 pub fn handshake(sock socket.Socket, server_name String) Result(TlsSocket, TlsError)
 
-// Complete a TLS handshake as `handshake`, but wait no longer than
-// `timeout_ms` milliseconds. The deadline is captured once, here in Scarlet, as
-// an absolute monotonic timestamp, so an internal re-run on a spurious wakeup
-// never resets the clock. Errs with `Transport(TimedOut)` once it passes.
-//
-// A timeout closes the connection, exactly as a failed handshake does: the
-// `Socket` passed in was already stale from the first attempt, and the TLS
-// handle is only ever handed out by success, so there is nothing left to retry
-// with. Reaching this means opening a new connection, not calling again.
-pub fn handshake_within(sock socket.Socket, server_name String, timeout_ms Int) Result(TlsSocket, TlsError) {
+// As `handshake`, but `Err(Transport(TimedOut))` after `timeout_ms`. A timeout
+// closes the connection, so there is nothing to retry on.
+pub fn handshake_within(
+	sock socket.Socket,
+	server_name String,
+	timeout_ms Int,
+) Result(TlsSocket, TlsError) {
 	handshake_until(sock, server_name, time.add_ms(time.monotonic(), timeout_ms))
 }
 
-// Complete a TLS handshake as `handshake`, giving up at the absolute Instant
-// `deadline` (from `time.monotonic()`). Use this rather than `handshake_within`
-// when one deadline covers several steps, so the handshake gets what is left of
-// the budget instead of a fresh copy of it.
-pub fn handshake_until(sock socket.Socket, server_name String, deadline time.Instant) Result(TlsSocket, TlsError) {
+// As `handshake_within`, with a `deadline` from `time.monotonic()`.
+pub fn handshake_until(
+	sock socket.Socket,
+	server_name String,
+	deadline time.Instant,
+) Result(TlsSocket, TlsError) {
 	handshake_until_ms(sock, server_name, time.to_deadline_ms(deadline))
 }
 
 @vm(tls__handshake_until)
-fn handshake_until_ms(sock socket.Socket, server_name String, deadline_ms Int) Result(TlsSocket, TlsError)
+fn handshake_until_ms(
+	sock socket.Socket,
+	server_name String,
+	deadline_ms Int,
+) Result(TlsSocket, TlsError)
 
-// Read whatever plaintext is available, up to `max` bytes. Parks the calling
-// process until at least one byte is decrypted or the peer closes.
-//
-// `max` bounds the PLAINTEXT handed back, not the ciphertext read from the
-// socket. A TLS record is decrypted whole or not at all, so a read that returns
-// fewer bytes than arrived has the remainder buffered and ready, not lost.
-//
-// `Closed` does NOT prove the stream ended on purpose. A peer that sends data
-// and then tears the TCP connection down without a `close_notify` arrives here
-// as `Closed`, indistinguishable from an orderly shutdown, so a truncation
-// attack is not detectable at this call. `close`'s own documentation argues
-// that `close_notify` is what lets a peer tell the two apart; that holds for
-// the alert this client SENDS and not for the one it receives. A caller that
-// needs the distinction must carry a length or a terminator in the protocol
-// above — which is what `read_exact` does, and why it is the one read here
-// that can report `Transport(UnexpectedEof)`.
+// Up to `max` bytes of plaintext, parking until some arrive. `Closed` does not
+// prove the peer meant to stop: a cut connection looks the same. Use a length
+// or a terminator, as `read_exact` does, when that matters.
 @vm(tls__read)
 pub fn read(c TlsSocket, max Int) Result(socket.Read, TlsError)
 
-// Read exactly `count` bytes of plaintext, parking until they have all
-// arrived. Errs with `Transport(UnexpectedEof)` if the peer closes first. A
-// `count` of zero or less returns Ok(<<>>) without touching the connection.
+// Exactly `count` bytes, or `Err(Transport(UnexpectedEof))` if the peer closes
+// first.
 pub fn read_exact(c TlsSocket, count Int) Result(Binary, TlsError) {
 	read_exact_loop(c, count, <<>>)
 }
 
-// The guard is `<= 0`, not `== 0`: `read` clamps `max` to at least one byte,
-// so a negative `remaining` would drain the connection instead of terminating.
+// `<= 0`, not `== 0`: `read` reads at least one byte, so a negative
+// `remaining` would drain the connection.
 fn read_exact_loop(c TlsSocket, remaining Int, acc Binary) Result(Binary, TlsError) {
 	if remaining <= 0 {
 		Ok(acc)
@@ -215,19 +125,13 @@ fn read_exact_loop(c TlsSocket, remaining Int, acc Binary) Result(Binary, TlsErr
 	}
 }
 
-// Read whatever plaintext is available, up to `max` bytes, but wait no longer
-// than `timeout_ms` milliseconds. The deadline is captured once, here in
-// Scarlet, as an absolute monotonic timestamp, so an internal re-run on a
-// spurious wakeup never resets the clock. Returns Ok(Data(b)) once bytes
-// decrypt, Ok(Closed) if the peer closes, or Err(Transport(TimedOut)) once
-// the deadline passes with no plaintext.
+// As `read`, but `Err(Transport(TimedOut))` after `timeout_ms` with no
+// plaintext.
 pub fn read_within(c TlsSocket, max Int, timeout_ms Int) Result(socket.Read, TlsError) {
 	read_until(c, max, time.add_ms(time.monotonic(), timeout_ms))
 }
 
-// Read up to `max` bytes of plaintext, parking until data decrypts or the
-// absolute Instant `deadline` (from `time.monotonic()`) is reached, at which
-// point it errs with Transport(TimedOut).
+// As `read_within`, with a `deadline` from `time.monotonic()`.
 pub fn read_until(c TlsSocket, max Int, deadline time.Instant) Result(socket.Read, TlsError) {
 	read_until_ms(c, max, time.to_deadline_ms(deadline))
 }
@@ -235,25 +139,12 @@ pub fn read_until(c TlsSocket, max Int, deadline time.Instant) Result(socket.Rea
 @vm(tls__read_until)
 fn read_until_ms(c TlsSocket, max Int, deadline_ms Int) Result(socket.Read, TlsError)
 
-// Encrypt `data` and write it. Returns once the ciphertext has been handed to
-// the kernel, not merely buffered in the TLS session: a write that returned
-// `Ok` cannot be still sitting in userspace waiting for a later call to push
-// it, which would deadlock a caller that writes a request and then parks
-// reading the reply.
+// Returns once the ciphertext reaches the kernel, so a caller that writes and
+// then waits for a reply cannot deadlock on bytes still in the TLS session.
 @vm(tls__write)
 pub fn write(c TlsSocket, data Binary) Result(Nil, TlsError)
 
-// Send a `close_notify` alert and close the connection. The alert is what tells
-// the peer the stream ended on purpose; without it a peer cannot tell an
-// orderly shutdown from a truncation attack, and well-behaved ones report an
-// error.
-//
-// The connection closes either way, and the result says whether the peer was
-// told. `Err(Transport(..))` means the alert did not reach the kernel — a
-// socket already full is the usual reason — so the peer sees the stream stop
-// without an alert and may report a truncation. There is nothing to retry: the
-// connection is gone by the time this returns, and calling again finds no
-// handle. What the error buys is knowing which of the two shutdowns the peer
-// saw.
+// Sends `close_notify` and closes. It closes either way: `Err` only means the
+// peer was not told, and may see a truncation.
 @vm(tls__close)
 pub fn close(c TlsSocket) Result(Nil, TlsError)
