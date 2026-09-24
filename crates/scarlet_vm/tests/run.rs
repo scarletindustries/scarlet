@@ -141,7 +141,46 @@ fn a_loop_overwrites_the_cell_it_just_gave_up() {
          \tprintln(internal.cells_made() - made)\n\
          \tprintln(internal.cells_reused() - reused)\n\
          }\n",
-        "1000\n2\n999\n",
+        "1000\n1\n1000\n",
+    );
+}
+
+/// Reuse across a call, which needs the call to be a move: the caller hands
+/// over its own reference, so the callee is the only holder and may overwrite
+/// the cell. Every `Cons` of the new list is the matching one of the old,
+/// written over, so the walk allocates nothing at all.
+#[test]
+fn a_walk_over_a_list_overwrites_the_list_it_reads() {
+    prints(
+        "import scarlet/internal\n\
+         type List {\n\
+         \tCons(head Int, tail List)\n\
+         \tEmpty\n\
+         }\n\
+         fn build(n Int, acc List) List {\n\
+         \tif n <= 0 then acc else build(n - 1, Cons(n, acc))\n\
+         }\n\
+         fn add_one(xs List) List {\n\
+         \tmatch xs {\n\
+         \t\tCons(h, t) -> Cons(h + 1, add_one(t))\n\
+         \t\tEmpty -> Empty\n\
+         \t}\n\
+         }\n\
+         fn sum(xs List, acc Int) Int {\n\
+         \tmatch xs {\n\
+         \t\tCons(h, t) -> sum(t, acc + h)\n\
+         \t\tEmpty -> acc\n\
+         \t}\n\
+         }\n\
+         pub fn main() {\n\
+         \txs = build(1000, Empty)\n\
+         \tmade = internal.cells_made()\n\
+         \treused = internal.cells_reused()\n\
+         \tprintln(sum(add_one(xs), 0))\n\
+         \tprintln(internal.cells_made() - made)\n\
+         \tprintln(internal.cells_reused() - reused)\n\
+         }\n",
+        "501500\n0\n1000\n",
     );
 }
 

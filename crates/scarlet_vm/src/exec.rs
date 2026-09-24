@@ -24,7 +24,7 @@ use crate::Stop;
 use crate::array::{self, End, Seq};
 use crate::bigint::{self, Int};
 use crate::binary::{self, Bits};
-use crate::code::{BitsOp, Body, Code, Func, Instr, IntOp, Reg};
+use crate::code::{Arg, BitsOp, Body, Code, Func, Instr, IntOp, Reg};
 use crate::eq;
 use crate::float::{self, NumOp};
 use crate::heap::{Cell, Full, Heap, Kind};
@@ -279,10 +279,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 }
                 Instr::Call { dst, func, args } => {
                     let callee = self.body(*func)?;
-                    let values: Vec<Value> = args
-                        .iter()
-                        .map(|r| self.share(self.get(base, *r)))
-                        .collect();
+                    let values = self.call_args(base, args);
                     let new_base = base + frame.body.regs as usize;
                     self.enter(callee, new_base, &values);
                     frames.push(Frame {
@@ -294,7 +291,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     });
                 }
                 Instr::CallSelf { dst, args } => {
-                    let values = self.args(base, args);
+                    let values = self.call_args(base, args);
                     let body = frame.body;
                     let env = self.share(frame.env);
                     let new_base = base + body.regs as usize;
@@ -309,7 +306,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 }
                 Instr::CallValue { dst, callee, args } => {
                     let (body, env) = self.callee(self.get(base, *callee), args.len())?;
-                    let values = self.args(base, args);
+                    let values = self.call_args(base, args);
                     let new_base = base + frame.body.regs as usize;
                     self.enter(body, new_base, &values);
                     frames.push(Frame {
@@ -324,7 +321,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 // written as tail recursion runs in constant space.
                 Instr::TailCall { func, args } => {
                     let callee = self.body(*func)?;
-                    let values = self.args(base, args);
+                    let values = self.call_args(base, args);
                     self.enter(callee, base, &values);
                     let old = std::mem::replace(&mut frame.env, Value::NIL);
                     self.release(old);
@@ -332,7 +329,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     frame.pc = 0;
                 }
                 Instr::TailCallSelf { args } => {
-                    let values = self.args(base, args);
+                    let values = self.call_args(base, args);
                     self.again(frame.body, base, &values);
                     frame.pc = 0;
                 }
@@ -341,7 +338,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 // only other holder.
                 Instr::TailCallValue { callee, args } => {
                     let (body, env) = self.callee(self.get(base, *callee), args.len())?;
-                    let values = self.args(base, args);
+                    let values = self.call_args(base, args);
                     self.enter(body, base, &values);
                     let old = std::mem::replace(&mut frame.env, env);
                     self.release(old);
@@ -2073,6 +2070,22 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     fn args(&mut self, base: usize, regs: &[Reg]) -> Vec<Value> {
         regs.iter()
             .map(|r| self.share(self.get(base, *r)))
+            .collect()
+    }
+
+    /// The values a call passes. A moved argument hands over the reference its
+    /// register holds and leaves it empty, so the callee is the only holder;
+    /// every other one is shared. Read in order, because a register a later
+    /// argument moves may be one an earlier one still reads.
+    fn call_args(&mut self, base: usize, args: &[Arg]) -> Vec<Value> {
+        args.iter()
+            .map(|a| {
+                if a.moved {
+                    self.take(base, a.reg)
+                } else {
+                    self.share(self.get(base, a.reg))
+                }
+            })
             .collect()
     }
 

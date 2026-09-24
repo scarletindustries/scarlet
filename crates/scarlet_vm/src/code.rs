@@ -43,6 +43,21 @@ impl Reg {
     }
 }
 
+/// An argument a call passes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Arg {
+    pub(crate) reg: Reg,
+    /// The call takes the reference the register holds, rather than adding
+    /// one: this is the last the frame does with it ([`moves_on_last_use`]).
+    pub(crate) moved: bool,
+}
+
+impl Arg {
+    fn shared(reg: Reg) -> Arg {
+        Arg { reg, moved: false }
+    }
+}
+
 /// One instruction. `dst` is the register it writes.
 #[derive(Debug, Clone)]
 pub(crate) enum Instr {
@@ -159,29 +174,29 @@ pub(crate) enum Instr {
     Call {
         dst: Reg,
         func: FuncIdx,
-        args: Box<[Reg]>,
+        args: Box<[Arg]>,
     },
     TailCall {
         func: FuncIdx,
-        args: Box<[Reg]>,
+        args: Box<[Arg]>,
     },
     /// A call to the function running now, as the same closure.
     CallSelf {
         dst: Reg,
-        args: Box<[Reg]>,
+        args: Box<[Arg]>,
     },
     TailCallSelf {
-        args: Box<[Reg]>,
+        args: Box<[Arg]>,
     },
     /// A call to the function value in `callee`, with or without captures.
     CallValue {
         dst: Reg,
         callee: Reg,
-        args: Box<[Reg]>,
+        args: Box<[Arg]>,
     },
     TailCallValue {
         callee: Reg,
-        args: Box<[Reg]>,
+        args: Box<[Arg]>,
     },
     /// A new closure cell running `func` over `captures`. A function with no
     /// captures is a [`Instr::Const`] instead: it needs no cell.
@@ -597,6 +612,7 @@ impl<'c> Loader<'c> {
 
     fn body(mut self, f: &CoreFn) -> Result<(u32, Vec<Instr>), String> {
         self.expr(&f.body, Dest::Return)?;
+        moves_on_last_use(&mut self.instrs);
         Ok((self.next, self.instrs))
     }
 
@@ -636,7 +652,11 @@ impl<'c> Loader<'c> {
 
     /// The call instruction for `callee`, in tail position or not.
     fn call(&self, dst: Option<Reg>, callee: &Callee, args: &[LocalId]) -> Instr {
-        let args: Box<[Reg]> = args.iter().copied().map(Reg::of).collect();
+        let args: Box<[Arg]> = args
+            .iter()
+            .copied()
+            .map(|a| Arg::shared(Reg::of(a)))
+            .collect();
         match (callee, dst) {
             (Callee::Known(func), Some(dst)) => Instr::Call {
                 dst,
@@ -1238,6 +1258,61 @@ fn built(i: Intrinsic, argc: usize) -> bool {
 }
 
 /// One past the highest local `e` binds or reads.
+/// A call followed by the `Drop` of one of its own arguments hands the callee
+/// the reference the register holds, rather than adding one and giving it up
+/// after the call returns. The callee then sees a value nothing else holds,
+/// which is what lets it overwrite the cell rather than allocate.
+///
+/// The `Drop` stays where it is: the register it names is empty by the time it
+/// runs, so it does nothing, and a jump that lands on it without the call
+/// having run still finds the value and releases it. A `DropReuse` is left
+/// alone, so a cell this frame has already paired with a constructor of its
+/// own stays here.
+fn moves_on_last_use(instrs: &mut [Instr]) {
+    for i in 0..instrs.len() {
+        let (dst, argc) = match instrs.get(i) {
+            Some(
+                Instr::Call { dst, args, .. }
+                | Instr::CallSelf { dst, args }
+                | Instr::CallValue { dst, args, .. },
+            ) => (*dst, args.len()),
+            _ => continue,
+        };
+        // The run of drops that follows, which is where this call's own
+        // arguments die.
+        let mut dying: Vec<Reg> = Vec::new();
+        for next in instrs.get(i + 1..).into_iter().flatten() {
+            match next {
+                Instr::Drop { reg } => dying.push(*reg),
+                _ => break,
+            }
+        }
+        if dying.is_empty() {
+            continue;
+        }
+        let Some(
+            Instr::Call { args, .. } | Instr::CallSelf { args, .. } | Instr::CallValue { args, .. },
+        ) = instrs.get_mut(i)
+        else {
+            continue;
+        };
+        for reg in dying {
+            if dst == reg {
+                continue;
+            }
+            // The last position holding it: an earlier one still reads the
+            // register, so only one of them may take what it holds.
+            if let Some(last) = (0..argc)
+                .rev()
+                .find(|&k| args.get(k).is_some_and(|a| a.reg == reg))
+                && let Some(a) = args.get_mut(last)
+            {
+                a.moved = true;
+            }
+        }
+    }
+}
+
 /// Every local a constructor in `e` overwrites in place. `Atom`'s operand walk
 /// leaves `reuse` out on purpose — it names a cell to write over, not a value
 /// read — so this reads the atoms itself.
