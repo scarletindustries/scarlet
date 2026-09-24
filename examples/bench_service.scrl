@@ -54,7 +54,6 @@ fn sign(user Binary) Int {
 	checksum(binary.append(SECRET, user))
 }
 
-
 fn make_user(i Int) User {
 	name = 'user${i}'
 	User(
@@ -94,7 +93,6 @@ fn build_tables(i Int, n Int, t Tables) Tables {
 	}
 }
 
-
 const AMP = <<'&'>>
 const EQ = <<'='>>
 const SEMI = <<';'>>
@@ -128,7 +126,9 @@ fn scan_pairs(
 		None -> n
 	}
 	match binary.index_of(b, EQ, start) {
-		Some(e) -> match (
+		Some(
+			e,
+		) -> match (
 			binary.slice_bytes(b, start, e - start),
 			binary.slice_bytes(b, e + 1, end - e - 1),
 		) {
@@ -276,8 +276,8 @@ fn route(req http.Request, t Tables) http.Response {
 			<<'/'>> -> respond(200, VAL_TEXT, 'hello')
 			<<'/me'>> -> handle_me(req, t)
 			_ -> match binary.slice_bytes(path, 0, USERS_PREFIX_LEN) {
-				Ok(prefix) if prefix == USERS_PREFIX &&
-					binary.byte_size(path) > USERS_PREFIX_LEN -> handle_user_by_id(path, t)
+				Ok(prefix) if prefix == USERS_PREFIX && binary.byte_size(path) > USERS_PREFIX_LEN ->
+					handle_user_by_id(path, t)
 				_ -> json(404, '{"error":"not found"}')
 			}
 		}

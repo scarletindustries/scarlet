@@ -29,16 +29,11 @@ type Request {
 
 fn ask(gateway process.Subject(Request), next fn(Int) Result(a, String)) Result(a, String) {
 	reply = process.subject()
-	process.send(
-		gateway,
-		Run(
-			job: Job(run: fn(lease) {
-				outcome = bind(lease, next)
-				process.send(reply, outcome)
-				health(outcome)
-			}),
-		),
-	)
+	process.send(gateway, Run(job: Job(run: fn(lease) {
+		outcome = bind(lease, next)
+		process.send(reply, outcome)
+		health(outcome)
+	})))
 	process.receive(reply)
 }
 
@@ -56,7 +51,12 @@ fn health(outcome Result(a, String)) Health {
 	}
 }
 
-fn labour(gateway process.Subject(Request), inbox process.Subject(Task), held Option(Int), seed Int) Nil {
+fn labour(
+	gateway process.Subject(Request),
+	inbox process.Subject(Task),
+	held Option(Int),
+	seed Int,
+) Nil {
 	match process.receive(inbox) {
 		Quit -> Nil
 		Work(job) -> {

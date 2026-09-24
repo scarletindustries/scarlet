@@ -114,7 +114,11 @@ fn counted(what String, r Result(body.Drained, body.DrainError)) Nil {
 	}
 }
 
-fn read_head(sock socket.Socket, buf Binary, deadline time.Instant) Result((Binary, h1.Parsed), error.NetError) {
+fn read_head(
+	sock socket.Socket,
+	buf Binary,
+	deadline time.Instant,
+) Result((Binary, h1.Parsed), error.NetError) {
 	match h1.parse_request(buf, 0) {
 		h1.NeedMore -> match socket.read_until(sock, HEAD_READ, deadline) {
 			Ok(socket.Data(chunk)) -> read_head(sock, binary.append(buf, chunk), deadline)

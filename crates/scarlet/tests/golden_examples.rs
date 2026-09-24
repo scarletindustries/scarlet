@@ -349,6 +349,48 @@ suite! {
     ],
 }
 
+/// People read these to learn how Scarlet is written, so they stay exactly as
+/// `scarlet fmt` writes them, as the stdlib does.
+#[test]
+fn every_example_and_program_is_formatted() {
+    let mut unformatted: Vec<String> = Vec::new();
+    for dir in [examples_dir(), programs_dir()] {
+        let mut entries: Vec<PathBuf> = walk(&dir);
+        entries.sort();
+        for path in entries {
+            let src = std::fs::read_to_string(&path).expect("a source file");
+            let same = matches!(
+                scarlet::formatter::format(&src),
+                scarlet::formatter::FormatResult::Formatted { output } if output == src
+            );
+            if !same {
+                unformatted.push(path.display().to_string());
+            }
+        }
+    }
+    assert!(
+        unformatted.is_empty(),
+        "not formatted; run `scarlet fmt examples crates/scarlet/tests/programs`: {unformatted:?}"
+    );
+}
+
+/// Every `.scrl` under `dir`, at any depth.
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(walk(&path));
+        } else if path.extension().is_some_and(|e| e == "scrl") {
+            out.push(path);
+        }
+    }
+    out
+}
+
 // The timing-free "it still runs" check the bench scripts depend on.
 #[test]
 fn bench_runs() {

@@ -215,7 +215,12 @@ fn describe(tokens Array(Token), env map.Map(String, Int)) Result(String, String
 	'${show(e)} = ${v}'
 }
 
-fn bind(env map.Map(String, Int), line String, name String, rest Array(Token)) map.Map(String, Int) {
+fn bind(
+	env map.Map(String, Int),
+	line String,
+	name String,
+	rest Array(Token),
+) map.Map(String, Int) {
 	match result.then(parse(rest), fn(e) evaluate(e, env)) {
 		Ok(v) -> {
 			report(line, Ok('${name} = ${v}'))

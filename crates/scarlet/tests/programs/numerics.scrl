@@ -76,8 +76,16 @@ pub fn main() {
 
 	// The checked forms answer `Err(Nil)` for a zero divisor and otherwise
 	// agree with the operators, sign rules included.
-	println('checked div: ${string.inspect(int.divide(p7, p2))} ${string.inspect(int.divide(n7, p2))} ${string.inspect(int.divide(p7, 0))}')
-	println('checked rem: ${string.inspect(int.remainder(p7, p2))} ${string.inspect(int.remainder(n7, p2))} ${string.inspect(int.remainder(p7, 0))}')
+	println(
+		'checked div: ${string.inspect(
+			int.divide(p7, p2),
+		)} ${string.inspect(int.divide(n7, p2))} ${string.inspect(int.divide(p7, 0))}',
+	)
+	println(
+		'checked rem: ${string.inspect(
+			int.remainder(p7, p2),
+		)} ${string.inspect(int.remainder(n7, p2))} ${string.inspect(int.remainder(p7, 0))}',
+	)
 
 	// --- Float: formatting and non-finite collapse ----------------------------
 
@@ -120,9 +128,21 @@ pub fn main() {
 	// unlike it, round-trips `min_value`: its magnitude has no positive Int
 	// to delegate the unsigned parse to, which `parse_signed`'s
 	// strip-the-sign-then-negate scheme cannot represent.
-	println('from_string: ${string.inspect(int.from_string('42'))} ${string.inspect(int.from_string('-42'))} ${string.inspect(int.from_string('+7'))}')
-	println('from_string rejects: ${string.inspect(int.from_string(''))} ${string.inspect(int.from_string('12abc'))} ${string.inspect(int.from_string(' 1'))}')
-	println('from_string min round trip: ${string.inspect(int.from_string(int.to_string(int.min_value)))}')
+	println(
+		'from_string: ${string.inspect(
+			int.from_string('42'),
+		)} ${string.inspect(int.from_string('-42'))} ${string.inspect(int.from_string('+7'))}',
+	)
+	println(
+		'from_string rejects: ${string.inspect(
+			int.from_string(''),
+		)} ${string.inspect(int.from_string('12abc'))} ${string.inspect(int.from_string(' 1'))}',
+	)
+	println(
+		'from_string min round trip: ${string.inspect(
+			int.from_string(int.to_string(int.min_value)),
+		)}',
+	)
 	println('hex: ${string.inspect(binary.to_string(binary.from_int_ascii(255, binary.Hex)))}')
 	println('hex parse: ${string.inspect(binary.parse_int(<<'ff'>>, binary.Hex))}')
 
@@ -147,7 +167,9 @@ pub fn main() {
 	up_tie = decimal.to_string(decimal.round(decimal.new(2355, 3), 2))
 	println('round half even: ${down_tie} ${up_tie}')
 	println(
-		'round half up: ${decimal.to_string(decimal.round_with(decimal.new(2345, 3), 2, decimal.HalfUp))}',
+		'round half up: ${decimal.to_string(
+			decimal.round_with(decimal.new(2345, 3), 2, decimal.HalfUp),
+		)}',
 	)
 	toward_zero = decimal.round_with(decimal.new(-2349, 3), 2, decimal.Down)
 	toward_neg_inf = decimal.round_with(decimal.new(-2341, 3), 2, decimal.Floor)

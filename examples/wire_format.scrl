@@ -229,7 +229,12 @@ pub fn main() {
 
 	println('255 to Dec ascii:     ${ascii(255, binary.Dec)}')
 	println('255 to Hex ascii:     ${ascii(255, binary.Hex)}')
-	println('hex ascii round trip: ${binary.parse_int(binary.from_int_ascii(4210, binary.Hex), binary.Hex)}')
+	println(
+		'hex ascii round trip: ${binary.parse_int(
+			binary.from_int_ascii(4210, binary.Hex),
+			binary.Hex,
+		)}',
+	)
 
 	println('slice bits 0..4:      ${binary.slice_bits(headers, 0, 4)}')
 	println('slice bits 8000..8:   ${binary.slice_bits(headers, 8000, 8)}')

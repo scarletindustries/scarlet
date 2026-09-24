@@ -176,9 +176,24 @@ fn scenarios() Nil {
 
 	// One-for-all: siblings are closed in reverse order, then all restart.
 	group = process.supervisor_in(app, process.OneForAll(restarts: 10, within_ms: 60000))
-	g1 = process.worker(group, process.Permanent, process.Ask(Close, grace_ms: 1000), reporting('g1', log))
-	g2 = process.worker(group, process.Permanent, process.Ask(Close, grace_ms: 1000), reporting('g2', log))
-	g3 = process.worker(group, process.Permanent, process.Ask(Close, grace_ms: 1000), reporting('g3', log))
+	g1 = process.worker(
+		group,
+		process.Permanent,
+		process.Ask(Close, grace_ms: 1000),
+		reporting('g1', log),
+	)
+	g2 = process.worker(
+		group,
+		process.Permanent,
+		process.Ask(Close, grace_ms: 1000),
+		reporting('g2', log),
+	)
+	g3 = process.worker(
+		group,
+		process.Permanent,
+		process.Ask(Close, grace_ms: 1000),
+		reporting('g3', log),
+	)
 	_ = take(log, 3, [])
 	g1_pid = whoami(g1)
 	g2_pid = whoami(g2)
@@ -219,9 +234,24 @@ fn scenarios() Nil {
 
 	// Rest-for-one: only the workers declared after the dead one move.
 	rest = process.supervisor_in(app, process.RestForOne(restarts: 10, within_ms: 60000))
-	r1 = process.worker(rest, process.Permanent, process.Ask(Close, grace_ms: 1000), reporting('r1', log))
-	r2 = process.worker(rest, process.Permanent, process.Ask(Close, grace_ms: 1000), reporting('r2', log))
-	r3 = process.worker(rest, process.Permanent, process.Ask(Close, grace_ms: 1000), reporting('r3', log))
+	r1 = process.worker(
+		rest,
+		process.Permanent,
+		process.Ask(Close, grace_ms: 1000),
+		reporting('r1', log),
+	)
+	r2 = process.worker(
+		rest,
+		process.Permanent,
+		process.Ask(Close, grace_ms: 1000),
+		reporting('r2', log),
+	)
+	r3 = process.worker(
+		rest,
+		process.Permanent,
+		process.Ask(Close, grace_ms: 1000),
+		reporting('r3', log),
+	)
 	_ = take(log, 3, [])
 	r1_pid = whoami(r1)
 	r2_pid = whoami(r2)
@@ -235,11 +265,13 @@ fn scenarios() Nil {
 	check('the earlier sibling was not touched', whoami(r1) == r1_pid)
 	check(
 		'children lists every worker',
-		array.map(process.children(rest.supervised), fn(
-			c,
-		) c == process.supervised(r1) || c == process.supervised(r2) ||
-		c == process.supervised(r3)) ==
-		[True, True, True],
+		array.map(
+			process.children(rest.supervised),
+			fn(c) c == process.supervised(r1) ||
+				c == process.supervised(r2) ||
+				c == process.supervised(r3),
+		) ==
+			[True, True, True],
 	)
 
 	// A factory: one member per key, restarted in place, keys freed on exit.
@@ -310,10 +342,10 @@ fn scenarios() Nil {
 	check(
 		'a watch reports the exit',
 		first.supervised == place &&
-		match first.ended {
-			process.Exited(process.Killed) -> True
-			_ -> False
-		},
+			match first.ended {
+				process.Exited(process.Killed) -> True
+				_ -> False
+			},
 	)
 	check('and that it was restarted on the spot', first.status == process.Running)
 	_ = take(log, 1, [])
@@ -336,10 +368,10 @@ fn scenarios() Nil {
 	check(
 		'a final exit reports Gone',
 		last.status == process.Gone &&
-		match last.ended {
-			process.Exited(process.Normal) -> True
-			_ -> False
-		},
+			match last.ended {
+				process.Exited(process.Normal) -> True
+				_ -> False
+			},
 	)
 	check('watching a place that is gone reports so at once', {
 		_ = process.watch(process.supervised(v), events, fn(e) e)
@@ -371,7 +403,12 @@ fn scenarios() Nil {
 
 	// An Ask shutdown is delivered ahead of a backlog.
 	pair = process.supervisor_in(app, process.OneForAll(restarts: 5, within_ms: 60000))
-	slow = process.worker(pair, process.Permanent, process.Ask(Close, grace_ms: 5000), slow_worker(log))
+	slow = process.worker(
+		pair,
+		process.Permanent,
+		process.Ask(Close, grace_ms: 5000),
+		slow_worker(log),
+	)
 	trigger = process.permanent(pair, reporting('trigger', log))
 	_ = take(log, 2, [])
 	// Queue up slow work, then have the group stop the slow worker: the

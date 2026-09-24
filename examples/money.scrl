@@ -39,7 +39,12 @@ fn tax(u Usd, rate decimal.Decimal) Usd {
 
 // Splits into n shares that sum back to the total. Leftover cents go first.
 fn split(total Usd, n Int) Array(Usd) {
-	base = decimal.div_with(amount(total), decimal.from_int(n), 2, decimal.Down) or decimal.from_int(0)
+	base = decimal.div_with(
+		amount(total),
+		decimal.from_int(n),
+		2,
+		decimal.Down,
+	) or decimal.from_int(0)
 	leftover = decimal.units(decimal.sub(amount(total), decimal.mul(base, decimal.from_int(n))))
 	shares(base, leftover, n)
 }

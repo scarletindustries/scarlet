@@ -98,10 +98,10 @@ pub fn main() {
 	println(
 		'de morgan: ${ok(
 			int.bitwise_not(int.bitwise_and(12345, 6789)) ==
-			int.bitwise_or(int.bitwise_not(12345), int.bitwise_not(6789)),
+				int.bitwise_or(int.bitwise_not(12345), int.bitwise_not(6789)),
 		)} ${ok(
 			int.bitwise_not(int.bitwise_or(-12345, 6789)) ==
-			int.bitwise_and(int.bitwise_not(-12345), int.bitwise_not(6789)),
+				int.bitwise_and(int.bitwise_not(-12345), int.bitwise_not(6789)),
 		)}',
 	)
 
@@ -279,7 +279,7 @@ pub fn main() {
 					int.bitwise_or(int.bitwise_shift_left(b2, 8), b3),
 				),
 			) ==
-			key,
+				key,
 		)}',
 	)
 }

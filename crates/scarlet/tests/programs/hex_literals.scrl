@@ -26,9 +26,7 @@ pub fn main() {
 	println('hex: ${0xFF} ${0xff} ${0X10}')
 	println('bin: ${0b1010} ${0B11} ${0b0}')
 	println('sep: ${0xDE_AD_BE_EF} ${0b1111_0000}')
-	println(
-		'eq: ${ok(0xFF == 255)} ${ok(0b1111 == 15)} ${ok(0xDE_AD_BE_EF == 3735928559)}',
-	)
+	println('eq: ${ok(0xFF == 255)} ${ok(0b1111 == 15)} ${ok(0xDE_AD_BE_EF == 3735928559)}')
 	println('neg: ${-0xFF} ${ok(-0xFF == -255)} ${ok(-0b1010 == -10)}')
 	println(
 		'max: ${ok(

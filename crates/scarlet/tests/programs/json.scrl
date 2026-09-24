@@ -364,17 +364,15 @@ pub fn main() {
 	println('')
 	println('-- encode and round trip --')
 
-	built = json.Object(
-		[
-			('name', json.Str('ada')),
-			('id', json.Integer(1070000000000000001)),
-			('score', json.Real(9.5)),
-			('active', json.Boolean(True)),
-			('tags', json.List([json.Str('a'), json.Str('b')])),
-			('nickname', json.Null),
-			('empty', json.Object([])),
-		],
-	)
+	built = json.Object([
+		('name', json.Str('ada')),
+		('id', json.Integer(1070000000000000001)),
+		('score', json.Real(9.5)),
+		('active', json.Boolean(True)),
+		('tags', json.List([json.Str('a'), json.Str('b')])),
+		('nickname', json.Null),
+		('empty', json.Object([])),
+	])
 
 	line('encoded       ', json.encode(built))
 

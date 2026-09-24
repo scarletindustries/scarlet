@@ -45,10 +45,10 @@ fn hex_from(b Binary, at Int, size Int, acc Binary) Binary {
 			b,
 			at + 1,
 			size,
-			binary.append(
-				acc,
-				<<nibble(int.bitwise_shift_right(v, 4)):8, nibble(int.bitwise_and(v, 15)):8>>,
-			),
+			binary.append(acc, <<
+				nibble(int.bitwise_shift_right(v, 4)):8,
+				nibble(int.bitwise_and(v, 15)):8,
+			>>),
 		)
 	}
 }

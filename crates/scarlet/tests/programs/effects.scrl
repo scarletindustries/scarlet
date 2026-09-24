@@ -98,7 +98,10 @@ pub fn main() {
 	epoch_start = time.epoch_ms()
 	println('epoch is after 2024: ${epoch_start > 1704067200000}')
 	println('epoch is before 2100: ${epoch_start < 4102444800000}')
-	println('epoch is not the monotonic clock: ${epoch_start - time.to_deadline_ms(start) > 1704067200000}')
+	println(
+		'epoch is not the monotonic clock: ${epoch_start - time.to_deadline_ms(start) >
+			1704067200000}',
+	)
 
 	process.sleep(50)
 	println('slept at least 50ms: ${time.since_ms(time.monotonic(), start) >= 50}')

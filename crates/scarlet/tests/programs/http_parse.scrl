@@ -170,10 +170,9 @@ pub fn main() {
 	// line was not the problem, so this is 431, not 414.
 	show_parse(
 		'header block past 64k',
-		binary.append(
-			binary.append(<<'GET / HTTP/1.1\r\n'>>, grow(<<'X-Pad: pad\r\n'>>, 70000)),
-			<<'\r\n'>>,
-		),
+		binary.append(binary.append(<<'GET / HTTP/1.1\r\n'>>, grow(<<'X-Pad: pad\r\n'>>, 70000)), <<
+			'\r\n',
+		>>),
 	)
 
 	println('')
@@ -209,7 +208,8 @@ pub fn main() {
 	nul_req = <<'GET / HTTP/1.1\r\nX-N: a\0b\r\n\r\n'>>
 	show_parse('nul in value parses', nul_req)
 	match h1.parse_request(nul_req, 0) {
-		h1.Done(_, _, _, hdrs, _, _) -> println('nul in value: headers.valid = ${headers.valid(hdrs)}')
+		h1.Done(_, _, _, hdrs, _, _) ->
+			println('nul in value: headers.valid = ${headers.valid(hdrs)}')
 		_ -> println('nul in value: parse failed')
 	}
 
@@ -283,18 +283,19 @@ pub fn main() {
 	show_field('lf in value', 'X-Ok', 'a\nb')
 	show_field('nul in value', 'X-Ok', 'a\0b')
 
-	show_valid = fn(label String, hs Array(headers.Header)) println('${label}: ${headers.valid(hs)}')
+	show_valid = fn(label String, hs Array(
+		headers.Header,
+	)) println('${label}: ${headers.valid(hs)}')
 	show_valid('valid: empty list', [])
-	show_valid(
-		'valid: token name + clean value',
-		[headers.Header(name: <<'X-Ok!#\$%*+-.^_|~'>>, value: <<'fine'>>)],
-	)
+	show_valid('valid: token name + clean value', [
+		headers.Header(name: <<'X-Ok!#\$%*+-.^_|~'>>, value: <<'fine'>>),
+	])
 	show_valid('invalid: colon in name', [headers.Header(name: <<'X:Bad'>>, value: <<'v'>>)])
 	show_valid('invalid: lf in value', [headers.Header(name: <<'X-Ok'>>, value: <<'a\nb'>>)])
-	show_valid(
-		'invalid: one bad field among good',
-		[headers.Header(name: <<'Good'>>, value: <<'1'>>), headers.Header(name: <<'Bad Name'>>, value: <<'2'>>)],
-	)
+	show_valid('invalid: one bad field among good', [
+		headers.Header(name: <<'Good'>>, value: <<'1'>>),
+		headers.Header(name: <<'Bad Name'>>, value: <<'2'>>),
+	])
 
 	println('')
 	println('== pipelined requests ==')
@@ -324,44 +325,36 @@ pub fn main() {
 	// `5 5` is the internal-space trick: a value a lenient parser reads as 5 and a
 	// stricter one as 55 — a length disagreement between two hops is a smuggle.
 	show_framing('spaced cl rejected', <<'POST / HTTP/1.1\r\nContent-Length: 5 5\r\n\r\n'>>)
-	show_framing(
-		'overflow rejected',
-		<<'POST / HTTP/1.1\r\nContent-Length: 99999999999999999999\r\n\r\n'>>,
-	)
-	show_framing(
-		'duplicate cl rejected',
-		<<'POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\n'>>,
-	)
+	show_framing('overflow rejected', <<
+		'POST / HTTP/1.1\r\nContent-Length: 99999999999999999999\r\n\r\n',
+	>>)
+	show_framing('duplicate cl rejected', <<
+		'POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\n',
+	>>)
 	show_framing('te chunked', <<'POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n'>>)
-	show_framing(
-		'te chunked case-insensitive',
-		<<'POST / HTTP/1.1\r\ntransfer-encoding: CHUNKED\r\n\r\n'>>,
-	)
+	show_framing('te chunked case-insensitive', <<
+		'POST / HTTP/1.1\r\ntransfer-encoding: CHUNKED\r\n\r\n',
+	>>)
 	// The head parser trims OWS around a value, so a padded `chunked` still frames.
-	show_framing(
-		'te chunked with ows',
-		<<'POST / HTTP/1.1\r\nTransfer-Encoding:  chunked \r\n\r\n'>>,
-	)
+	show_framing('te chunked with ows', <<
+		'POST / HTTP/1.1\r\nTransfer-Encoding:  chunked \r\n\r\n',
+	>>)
 	show_framing('te gzip unimplemented', <<'POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n'>>)
-	show_framing(
-		'te coding list unimplemented',
-		<<'POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n'>>,
-	)
-	show_framing(
-		'te identity unimplemented',
-		<<'POST / HTTP/1.1\r\nTransfer-Encoding: identity\r\n\r\n'>>,
-	)
+	show_framing('te coding list unimplemented', <<
+		'POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n',
+	>>)
+	show_framing('te identity unimplemented', <<
+		'POST / HTTP/1.1\r\nTransfer-Encoding: identity\r\n\r\n',
+	>>)
 	show_framing('empty te unimplemented', <<'POST / HTTP/1.1\r\nTransfer-Encoding:\r\n\r\n'>>)
 	// Even two IDENTICAL `chunked` fields are refused: a repeated Transfer-Encoding
 	// is exactly the shape a front-end/back-end framing disagreement is built from.
-	show_framing(
-		'repeated te chunked unimplemented',
-		<<'POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n'>>,
-	)
-	show_framing(
-		'te + cl conflict',
-		<<'POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n'>>,
-	)
+	show_framing('repeated te chunked unimplemented', <<
+		'POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n',
+	>>)
+	show_framing('te + cl conflict', <<
+		'POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n',
+	>>)
 
 	println('')
 	println('== chunked body decode ==')
@@ -509,7 +502,10 @@ pub fn main() {
 	show_collect('failing body propagates', fn() Err(error.UnexpectedEof), 1024)
 
 	three_chunks = fn() Ok(
-		body.Chunk(<<'ab'>>, fn() Ok(body.Chunk(<<'cd'>>, fn() Ok(body.Chunk(<<'ef'>>, body.empty()))))),
+		body.Chunk(
+			<<'ab'>>,
+			fn() Ok(body.Chunk(<<'cd'>>, fn() Ok(body.Chunk(<<'ef'>>, body.empty())))),
+		),
 	)
 	show_buffered = fn(label String, b body.Body) {
 		out = match body.take_buffered(b) {

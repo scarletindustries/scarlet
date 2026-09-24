@@ -81,7 +81,10 @@ pub fn main() {
 
 	match port.spawn('sleep', ['30']) {
 		Ok(p) ->
-			check('a lingering child is terminated on close', port.close(p) == Ok(port.Signaled(15)))
+			check(
+				'a lingering child is terminated on close',
+				port.close(p) == Ok(port.Signaled(15)),
+			)
 		Err(e) -> println('FAIL spawn sleep: ${string.inspect(e)}')
 	}
 

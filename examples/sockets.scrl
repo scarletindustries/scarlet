@@ -35,7 +35,9 @@ fn serve_one(sock socket.Socket) Nil {
 
 fn read_frame(sock socket.Socket) Result(Binary, error.NetError) {
 	head <- result.then(socket.read_exact(sock, HEADER_BYTES))
-	length <- result.then(result.replace_err(binary.parse_int(head, binary.Dec), error.UnexpectedEof))
+	length <- result.then(
+		result.replace_err(binary.parse_int(head, binary.Dec), error.UnexpectedEof),
+	)
 	socket.read_exact(sock, length)
 }
 

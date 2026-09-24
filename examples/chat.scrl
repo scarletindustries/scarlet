@@ -130,10 +130,9 @@ fn tree_frame(r Room) Binary {
 
 const HELLO = <<'retry: 1000\n\n'>>
 const PING = <<': ping\n\n'>>
-const RESTARTED = sse(
-	'system',
-	['the room process crashed and was restarted; this tab rejoined it'],
-)
+const RESTARTED = sse('system', [
+	'the room process crashed and was restarted; this tab rejoined it',
+])
 
 // The tree, as text
 
