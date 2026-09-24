@@ -453,6 +453,11 @@ impl Formatter {
         let list =
             if author_header_line.is_some_and(|line| self.params_broken_by_author(line, params)) {
                 hard_list("(", ps, ")")
+            } else if name.is_none() {
+                // A lambda's parameters stay on one line. They are short, and
+                // breaking them buys a few columns at the cost of burying the
+                // `fn` that says what the argument is.
+                d![text("("), join(ps, text(", ")), text(")")]
             } else {
                 delimited("(", ps, ")")
             };
@@ -1526,6 +1531,22 @@ mod tests {
         assert_round_trips(&out);
     }
 
+    /// A lambda's parameters never go one per line: that buries the `fn`
+    /// under its own arguments and reads as a call rather than a function.
+    #[test]
+    fn a_lambdas_parameters_stay_on_one_line() {
+        let src = "x = array.fold(\n\tcode_points,\n\tzero,\n\tfn(acc, cp) result.then(\n\t\tacc,\n\t\tfn(bytes) result.map(encode_scalar_value(cp), fn(next) binary.append(bytes, next)),\n\t),\n)\n";
+        assert_eq!(fmt(src), src);
+        assert_round_trips(src);
+        // A named function still breaks its parameters when the line is long.
+        let long = "a".repeat(40);
+        let out = fmt(&format!("fn f({long} Int, {long} Int) Int {{\n\t1\n}}\n"));
+        assert_eq!(
+            out,
+            format!("fn f(\n\t{long} Int,\n\t{long} Int,\n) Int {{\n\t1\n}}\n")
+        );
+    }
+
     #[test]
     fn a_final_binary_literal_hugs_the_parens() {
         let src = "x = Ok(<<\n\t224 + int.bitwise_shift_right(code_point, 12):8,\n\t128 + int.bitwise_and(int.bitwise_shift_right(code_point, 6), 63):8,\n\t128 + int.bitwise_and(code_point, 63):8,\n>>)\n";
@@ -2115,13 +2136,12 @@ mod tests {
 
     /// The T-155 family: a lambda as the last call argument whose body is a
     /// bare wrapping expression. Same HardLine-then-hug flip as
-    /// `lambda_inside_interpolation_is_idempotent`, no string involved.
+    /// `lambda_inside_interpolation_is_idempotent`, no string involved. A
+    /// lambda's parameters no longer wrap at all, so the flip has nowhere to
+    /// start; what is left to hold is that each still re-formats to itself.
     fn assert_trailing_lambda_wraps_and_is_fixed(src: &str) {
         let out = fmt(src);
-        assert!(
-            out.contains("fn(\n"),
-            "expected lambda params to wrap, otherwise this is not the trigger:\n{out}"
-        );
+        assert!(!out.contains("fn(\n"), "lambda params wrapped:\n{out}");
         assert_round_trips(&out);
     }
 
