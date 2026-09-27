@@ -910,6 +910,10 @@ impl<'c> Loader<'c> {
                 }
             }
             Atom::Intrinsic { intrinsic, .. } => return Err(format!("the built-in {intrinsic:?}")),
+            // The compiler describes the type a wire call crosses at, and the
+            // program carries that descriptor; the walks that read it are not
+            // built yet.
+            Atom::Wire { op, .. } => return Err(format!("wire.{op}")),
             // A constructor with no fields is a value word, so there is no
             // allocation for Perceus to reuse.
             Atom::Ctor {

@@ -29,9 +29,10 @@ use super::{
     TypedExpr, TypedFn, TypedInterpPart, TypedPat, ValueRef,
 };
 use crate::ast;
-use crate::core_ir::{ConstId, FuncIdx, PrimOp, VariantRef};
+use crate::core_ir::{ConstId, FuncIdx, PrimOp, VariantRef, WireDescIdx, WireOp};
 use crate::span::Span;
 use crate::types::{Prim, StrId, Ty};
+use scarlet_types::intrinsic::Intrinsic;
 
 /// One scheduled node of a block: its index in the block's `body`, and — for a
 /// top-level `fn`/`const` — the entry-frame slot its binding must land in.
@@ -178,6 +179,19 @@ pub trait ElabCtx: PreludeTys {
     fn or_shape(&mut self, lhs_ty: Ty) -> Option<OrShape>;
 
     fn ty_nil(&mut self) -> Ty;
+
+    /// The descriptor a `wire.encode`/`wire.decode` call carries, as its index
+    /// in `Program.wire`, for the type that call crosses the wire at.
+    ///
+    /// `None` when the type cannot be described, which has already been
+    /// reported at `at` and so denies the module.
+    fn wire_descriptor(
+        &mut self,
+        pool: &mut ResolvedPool,
+        ty: RTy,
+        op: WireOp,
+        at: Span,
+    ) -> Option<WireDescIdx>;
 }
 
 /// One step of the check walk, recorded in entry order and replayed
@@ -668,7 +682,43 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         let Some(f) = f else {
             elaborator_bug("eta-expansion of a non-function", at)
         };
+        let target = self.eta_wire_target(target, &f, at);
         eta_wrapper(self.fns, name, self.eta_param, target, &f)
+    }
+
+    /// `array.map(xs, wire.encode)` reaches the VM through a wrapper rather
+    /// than a direct call, so [`Self::wire_callee`] never sees it. The wrapper
+    /// is minted per use with the use site's instantiated type, which is what
+    /// makes the descriptor readable here at all — `f` is that type.
+    ///
+    /// Leaving it undescribed is not inert: the wrapper would call a wire
+    /// builtin with no descriptor, which is a program the compiler wrote and
+    /// only the VM could refuse.
+    fn eta_wire_target(&mut self, target: EtaTarget, f: &FnRTy, at: Span) -> EtaTarget {
+        let EtaTarget::Builtin { intrinsic } = target else {
+            return target;
+        };
+        let (op, crossed) = match intrinsic {
+            Intrinsic::WireEncode => {
+                let Some(&arg) = f.params().first() else {
+                    elaborator_bug("wire.encode eta-expanded at no argument", at)
+                };
+                (WireOp::Encode, arg)
+            }
+            // Same spine as the direct call: `decode`'s declared result is
+            // `Result(a, DecodeError)`, so the payload is its first argument.
+            Intrinsic::WireDecode => {
+                let Some(payload) = self.pool.con_arg(f.ret(), 0) else {
+                    elaborator_bug("wire.decode eta-expanded at a non-Result", at)
+                };
+                (WireOp::Decode, payload)
+            }
+            _ => return EtaTarget::Builtin { intrinsic },
+        };
+        match self.ctx.wire_descriptor(&mut *self.pool, crossed, op, at) {
+            Some(desc) => EtaTarget::Wire { op, desc },
+            None => EtaTarget::Builtin { intrinsic },
+        }
     }
 
     /// An operator that denotes a [`PrimOp`]. `op` is a [`ValueBinop`], so
@@ -949,6 +999,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                     }
                 })
                 .collect::<Vec<_>>();
+            let callee = self.wire_callee(callee, &args, ty, at);
             return TypedExpr::Call { ty, callee, args };
         }
         let Some(labels) = param_labels else {
@@ -996,6 +1047,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 None => elaborator_bug("call parameter with no argument", at),
             }
         }
+        let callee = self.wire_callee(callee, &out, ty, at);
         wrap_lets(
             lets,
             TypedExpr::Call {
@@ -1004,6 +1056,46 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 args: out,
             },
         )
+    }
+
+    /// Describe the type a `wire.encode`/`wire.decode` call crosses at,
+    /// leaving every other callee alone.
+    ///
+    /// A refusal has already reported an error at the call, which denies the
+    /// module, so the callee is left as the plain builtin it was: nothing
+    /// downstream runs on a denied module.
+    fn wire_callee(
+        &mut self,
+        callee: TypedCallee,
+        args: &[TypedExpr],
+        ty: RTy,
+        at: Span,
+    ) -> TypedCallee {
+        let TypedCallee::Builtin { intrinsic } = callee else {
+            return callee;
+        };
+        let (op, crossed) = match intrinsic {
+            Intrinsic::WireEncode => {
+                let Some(arg) = args.first() else {
+                    elaborator_bug("wire.encode with no argument", at)
+                };
+                (WireOp::Encode, arg.ty())
+            }
+            // `decode`'s declared result is `Result(a, DecodeError)`, so the
+            // call's own type is always that spine and the payload is its
+            // first argument — whatever inference did or did not solve `a` to.
+            Intrinsic::WireDecode => {
+                let Some(payload) = self.pool.con_arg(ty, 0) else {
+                    elaborator_bug("wire.decode whose result is not a Result", at)
+                };
+                (WireOp::Decode, payload)
+            }
+            _ => return TypedCallee::Builtin { intrinsic },
+        };
+        match self.ctx.wire_descriptor(&mut *self.pool, crossed, op, at) {
+            Some(desc) => TypedCallee::Wire { op, desc },
+            None => TypedCallee::Builtin { intrinsic },
+        }
     }
 
     fn callee(&mut self, e: &ast::Expression) -> Callee {
@@ -1662,7 +1754,12 @@ fn bound_subst(pool: &ResolvedPool, ret: RTy, at: RTy) -> HashMap<u32, RTy> {
 /// Rebuild `t` with every `Bound(i)` in `m` replaced. A node containing no
 /// substituted variable is returned as-is, so a concrete field type costs no
 /// allocation.
-fn subst_rty(pool: &mut ResolvedPool, t: RTy, m: &HashMap<u32, RTy>) -> RTy {
+///
+/// Visible to `typed_ir` because [`super::wire`] instantiates a constructor's
+/// declared field types at the arguments the type was applied to, and a second
+/// implementation of substitution is a second thing to keep in step with the
+/// pool's node kinds.
+pub(crate) fn subst_rty(pool: &mut ResolvedPool, t: RTy, m: &HashMap<u32, RTy>) -> RTy {
     if m.is_empty() {
         return t;
     }

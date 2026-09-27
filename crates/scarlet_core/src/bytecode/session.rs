@@ -233,6 +233,10 @@ impl Compiler {
         // at the end of a module's compile, and a rewound compile's init code
         // must not run as part of the next one.
         self.inits.clear();
+        // A wire descriptor is a constant of one compile, named by a
+        // `WireDescIdx` an `Atom::Wire` in that compile's code carries. A
+        // survivor would be numbered against code that no longer exists.
+        self.wire_descs.truncate(0);
         self.entry_toplevel = None;
         self.main = None;
 

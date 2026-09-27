@@ -759,13 +759,20 @@ mod ctor_visibility_survives_on_the_type {
 }
 
 /// `scarlet/wire`'s declaration surface: the two `@vm` keys reach the core IR
-/// as their intrinsics.
+/// as described wire atoms.
 mod wire_surface {
-    use crate::core_ir::Atom;
+    use crate::core_ir::{Atom, WireDescIdx, WireOp};
     use scarlet_types::intrinsic::Intrinsic;
 
+    /// A wire call reaches Core IR as [`Atom::Wire`] carrying a descriptor,
+    /// never as the bare intrinsic: the descriptor IS the call, and a wire
+    /// atom without one would compile clean and be refusable only at run time.
+    ///
+    /// Both calls here cross at `Int`, so both must name the *same* entry —
+    /// the dedup is on the descriptor, and two call sites at one type
+    /// describing it twice is the ordinary case rather than the exotic one.
     #[test]
-    fn a_wire_call_reaches_the_core_ir_as_its_intrinsic() {
+    fn a_wire_call_reaches_the_core_ir_with_its_descriptor() {
         let r = super::compile_script(
             "import scarlet/wire\n\
              b = wire.encode(1)\n\
@@ -780,18 +787,44 @@ mod wire_surface {
             r.diagnostics,
         );
         let program = r.into_runnable().expect("a clean compile is runnable");
-        let calls: Vec<Intrinsic> = super::atoms(&program.toplevel.core.body)
+        let intrinsics: Vec<Intrinsic> = super::atoms(&program.toplevel.core.body)
             .into_iter()
-            .filter_map(|a| {
-                if let Atom::Intrinsic { intrinsic, .. } = a {
-                    Some(*intrinsic)
-                } else {
-                    None
-                }
+            .filter_map(|a| match a {
+                Atom::Intrinsic { intrinsic, .. } => Some(*intrinsic),
+                _ => None,
             })
             .collect();
-        assert!(calls.contains(&Intrinsic::WireEncode), "{calls:?}");
-        assert!(calls.contains(&Intrinsic::WireDecode), "{calls:?}");
+        assert!(
+            !intrinsics.contains(&Intrinsic::WireEncode)
+                && !intrinsics.contains(&Intrinsic::WireDecode),
+            "a wire call must not lower to a bare intrinsic: {intrinsics:?}"
+        );
+
+        let wires: Vec<(WireOp, WireDescIdx)> = super::atoms(&program.toplevel.core.body)
+            .into_iter()
+            .filter_map(|a| match a {
+                Atom::Wire { op, desc, .. } => Some((*op, *desc)),
+                _ => None,
+            })
+            .collect();
+        let ops: Vec<WireOp> = wires.iter().map(|(op, _)| *op).collect();
+        assert!(ops.contains(&WireOp::Encode), "{ops:?}");
+        assert!(ops.contains(&WireOp::Decode), "{ops:?}");
+
+        let descs: Vec<WireDescIdx> = wires.iter().map(|(_, d)| *d).collect();
+        assert_eq!(
+            descs.first(),
+            descs.last(),
+            "both calls cross at Int, so both name one descriptor: {descs:?}"
+        );
+        for d in &descs {
+            let desc = program.wire.get(*d).expect("the index names a descriptor");
+            assert_eq!(
+                desc.node(desc.root()),
+                Some(&scarlet_ir::wire::Node::Int),
+                "the descriptor is the type the call crosses at"
+            );
+        }
     }
 }
 

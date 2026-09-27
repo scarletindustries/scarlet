@@ -166,6 +166,18 @@ impl TypeInfo {
         self.type_params.len as usize
     }
 
+    /// What this type was declared as.
+    ///
+    /// Exhaustive rather than one accessor per body, for a caller that must
+    /// treat all four differently: `scarlet/wire`'s descriptor builder looks
+    /// an alias through, describes a `Custom` by its constructors, answers an
+    /// `External` by identity or as uninhabited, and reports `Unresolved` as a
+    /// compiler bug. A new body must break that match rather than be
+    /// silently mis-described.
+    pub fn body(&self) -> TypeBody {
+        self.body
+    }
+
     /// The variant slice when the body is `Custom`.
     pub fn variants(&self) -> Option<ArenaSlice<pool::Variants>> {
         match self.body {
