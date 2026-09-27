@@ -79,6 +79,16 @@ fn binding_bug(b: BindingId, why: &str) -> ! {
     panic!("internal compiler error: {b} {why}. Report this as a compiler bug.")
 }
 
+/// A `wire` call reached lowering with no argument. Both ops take exactly one,
+/// and the check walk types the call against that arity before elaboration
+/// mints the callee, so no program reaches this.
+#[allow(clippy::panic)]
+#[cold]
+#[inline(never)]
+fn wire_call_without_a_value() -> ! {
+    panic!("internal compiler error: a wire call with no value. Report this as a compiler bug.")
+}
+
 /// Lower a whole typechecked module.
 ///
 /// Module-scope decls come back pinned: a toplevel `Let` whose
@@ -697,6 +707,17 @@ impl Lower {
                 Atom::Intrinsic {
                     intrinsic: *intrinsic,
                     args,
+                }
+            }
+            TypedCallee::Wire { op, desc } => {
+                let args = self.operands(args);
+                let Some(&arg) = args.first() else {
+                    wire_call_without_a_value()
+                };
+                Atom::Wire {
+                    op: *op,
+                    desc: *desc,
+                    arg,
                 }
             }
             TypedCallee::Dynamic(f) => {

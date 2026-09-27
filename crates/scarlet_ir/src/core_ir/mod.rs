@@ -95,6 +95,11 @@ newtype_index!(
     pub struct FuncIdx("fn#")
 );
 
+newtype_index!(
+    /// Index into [`Program::wire`].
+    pub struct WireDescIdx("wire#")
+);
+
 /// A typed local binding. Its [`RTy`] indexes the elaborator's `ResolvedPool`,
 /// where an unsolved inference variable is unrepresentable, so Perceus cannot
 /// be handed a type that answers `is_heap` `false` because inference lost it.
@@ -434,6 +439,34 @@ pub enum Atom {
         callee: Callee,
         args: Vec<LocalId>,
     },
+    /// `wire.encode` / `wire.decode`, which are type-directed rather than
+    /// ordinary builtins: `desc` names the descriptor of the type the value
+    /// crosses at, which the elaborator built and put in [`Program::wire`].
+    /// Its own atom rather than an [`Atom::Intrinsic`] argument, for the same
+    /// reason [`Atom::Ctor`] is one — the descriptor is not a value.
+    Wire {
+        op: WireOp,
+        desc: WireDescIdx,
+        arg: LocalId,
+    },
+}
+
+/// Which of the two wire calls an [`Atom::Wire`] is. Both refuse exactly the
+/// same types, and each reads the descriptor the same way; this chooses which
+/// direction the walk runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WireOp {
+    Encode,
+    Decode,
+}
+
+impl fmt::Display for WireOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            WireOp::Encode => "encode",
+            WireOp::Decode => "decode",
+        })
+    }
 }
 
 impl Atom {
@@ -454,6 +487,7 @@ impl Atom {
                 Callee::Local(id) => (args, Some(*id)),
                 Callee::Known(_) | Callee::Self_ => (args, None),
             },
+            Atom::Wire { arg, .. } => (&[], Some(*arg)),
         };
         pushed.iter().copied().chain(trailing)
     }
@@ -681,6 +715,12 @@ pub struct Program {
     /// in the program has its type here.
     pub types: BTreeMap<TypeId, TypeNames>,
     pub abi: Abi,
+    /// The type descriptors [`Atom::Wire`] names, one per distinct shape a
+    /// wire call in this program crosses at. Two call sites at one type share
+    /// an entry: the elaborator dedups on the descriptor itself, never on its
+    /// fingerprint, which excludes a type's identity and so is shared by two
+    /// different types of one shape.
+    pub wire: TiVec<WireDescIdx, crate::wire::Desc>,
 }
 
 // Printer for the golden tests in `crates/scarlet/tests/core_ir.rs`. Ids print as
@@ -763,6 +803,7 @@ impl fmt::Display for Atom {
                 write_locals(f, args)?;
                 f.write_str(")")
             }
+            Atom::Wire { op, desc, arg } => write!(f, "wire.{op}[{desc}]({arg})"),
         }
     }
 }

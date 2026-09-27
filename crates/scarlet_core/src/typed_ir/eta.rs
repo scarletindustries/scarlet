@@ -56,11 +56,13 @@ impl FnRTy {
         self.ty
     }
 
-    fn params(&self) -> &[RTy] {
+    /// Visible to `typed_ir` because elaboration reads the use site's
+    /// instantiated signature to describe an eta-expanded `wire` call.
+    pub(crate) fn params(&self) -> &[RTy] {
         &self.params
     }
 
-    fn ret(&self) -> RTy {
+    pub(crate) fn ret(&self) -> RTy {
         self.ret
     }
 
@@ -130,6 +132,11 @@ pub(crate) fn eta_wrapper(
         EtaTarget::Builtin { intrinsic } => TypedExpr::Call {
             ty: ret,
             callee: TypedCallee::Builtin { intrinsic },
+            args,
+        },
+        EtaTarget::Wire { op, desc } => TypedExpr::Call {
+            ty: ret,
+            callee: TypedCallee::Wire { op, desc },
             args,
         },
     };

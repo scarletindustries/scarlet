@@ -14,7 +14,7 @@
 //! [`Denotation::self_closure`] is the *nested lambda* case, where the frame is
 //! a real closure frame and `PushSelf` is correct.
 
-use crate::core_ir::{FuncIdx, VariantRef};
+use crate::core_ir::{FuncIdx, VariantRef, WireDescIdx, WireOp};
 use crate::types::ValueKind;
 use scarlet_types::intrinsic::Intrinsic;
 
@@ -67,6 +67,10 @@ pub enum EtaTarget {
     Ctor { variant: VariantRef, arity: Arity },
     /// Arity comes from the instantiated function type via `FnRTy`.
     Builtin { intrinsic: Intrinsic },
+    /// A `wire` builtin whose descriptor elaboration has already built, from
+    /// the use site's instantiated type. Minted only by `Elab::eta`, never by
+    /// a denotation: a descriptor needs a type, and a denotation has none.
+    Wire { op: WireOp, desc: WireDescIdx },
 }
 
 /// A name in callee position.

@@ -18,6 +18,7 @@ pub mod elaborate_pat;
 pub mod eta;
 pub mod resolve;
 pub mod rty;
+pub mod wire;
 pub(crate) use scarlet_types::slots;
 pub(crate) mod zonk;
 
@@ -31,7 +32,7 @@ pub(crate) use resolve::Denotation;
 pub use rty::{Arity, RSlice, RTy, ResolvedNode, ResolvedPool};
 pub(crate) use zonk::{Zonker, pool_for};
 
-use crate::core_ir::{ConstId, FuncIdx, PrimOp, VariantRef};
+use crate::core_ir::{ConstId, FuncIdx, PrimOp, VariantRef, WireDescIdx, WireOp};
 use crate::types::StrId;
 use scarlet_types::intrinsic::Intrinsic;
 
@@ -85,6 +86,10 @@ pub enum TypedCallee {
     SelfRec,
     /// A `@vm` builtin: the call *is* the intrinsic.
     Builtin { intrinsic: Intrinsic },
+    /// `wire.encode` / `wire.decode`, which are type-directed rather than
+    /// ordinary builtins: `desc` names the descriptor of the type this call
+    /// crosses at, built during elaboration so a refusal reaches `check`.
+    Wire { op: WireOp, desc: WireDescIdx },
     /// A closure value computed at runtime.
     Dynamic(Box<TypedExpr>),
 }

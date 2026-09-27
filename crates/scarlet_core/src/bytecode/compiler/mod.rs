@@ -50,7 +50,7 @@ use super::{PreludeBindings, TypeRef};
 use crate::ast;
 use crate::core_ir::{
     Abi, Const, ConstId, CoreFn, FuncIdx, HttpTypes, IoErrors, JsonTypes, LoweredFn, Program,
-    Radix, TypeNames, VariantNames, VariantRef,
+    Radix, TypeNames, VariantNames, VariantRef, WireDescIdx,
 };
 use crate::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
 use crate::tivec::{Idx, TiVec};
@@ -407,6 +407,11 @@ pub struct Compiler {
     /// constant) so `reset_to`'s pool truncate needs no paired invalidation —
     /// a stale entry just misses.
     const_dedup: HashMap<Const, ConstId>,
+    /// Every distinct type descriptor a `wire` call in this compile crosses
+    /// at, handed to [`Program::wire`] once the program is lowered. Dropped by
+    /// `reset_to` rather than truncated: a descriptor names a call site, and a
+    /// rewound compile's call sites are gone.
+    pub(super) wire_descs: TiVec<WireDescIdx, scarlet_ir::wire::Desc>,
     pub(super) locals: HashMap<StrId, LocalSlot>,
     /// Scoped-symbol-table undo log. Every mutation of `locals` made inside an
     /// open block scope appends `(name, previous entry)`; `pop_local_scope`
@@ -1061,6 +1066,7 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         main: None,
         consts: Vec::new(),
         const_dedup: HashMap::new(),
+        wire_descs: TiVec::new(),
         locals: HashMap::new(),
         undo_log: vec![],
         scope_marks: vec![],
@@ -1385,6 +1391,7 @@ impl Compiler {
             globals: self.local_count as u32,
             types,
             abi,
+            wire: self.wire_descs.clone(),
         })
     }
 

@@ -3,7 +3,9 @@
 //! elaborator never sees the compiler's fields.
 
 use super::*;
-use crate::typed_ir::{FieldAt, PreludeTys, VariantLayout};
+use crate::core_ir::WireOp;
+use crate::typed_ir::{FieldAt, PreludeTys, VariantLayout, wire};
+use scarlet_types::types::TypeBody;
 
 impl PreludeTys for Compiler {
     /// The one bridge from a live inference `Ty` into the program's `RTy`
@@ -251,5 +253,186 @@ impl ElabCtx for Compiler {
     }
     fn ty_nil(&mut self) -> Ty {
         Compiler::ty_nil(self)
+    }
+
+    /// **The type is read here, and here is after the whole module's check
+    /// walk.** `analyse_module` finishes before any body is elaborated, so a
+    /// `decode` whose payload is fixed only by a later `match` — which is the
+    /// ordinary way one is written — is already solved by the time this runs.
+    /// Asking any earlier describes an unresolved variable and refuses, and
+    /// the refusal reads as "type is not known" on a program that is perfectly
+    /// well typed.
+    fn wire_descriptor(
+        &mut self,
+        pool: &mut ResolvedPool,
+        ty: RTy,
+        op: WireOp,
+        at: Span,
+    ) -> Option<WireDescIdx> {
+        let desc = match wire::build_desc(pool, &mut *self, ty) {
+            Ok(desc) => desc,
+            Err(refusal) => {
+                let msg = refusal.message(&*self, pool, op);
+                self.error(msg, at);
+                return None;
+            }
+        };
+        let rt = desc.to_runtime();
+        // Two call sites at one type describe it twice, and both must reach
+        // the same entry. Descriptor equality is the right key and the
+        // fingerprint is NOT: the fingerprint deliberately excludes the type's
+        // identity, so two different types of one shape share it while naming
+        // different constructors, and deduping on it would hand one type's
+        // call site the other's.
+        if let Some(i) = (&self.wire_descs).into_iter().position(|d| *d == rt) {
+            return Some(WireDescIdx::from_usize(i));
+        }
+        Some(self.wire_descs.push(rt))
+    }
+}
+
+/// The declaration half of the descriptor builder's seam. Everything it
+/// answers comes off `env`/`engine`; nothing here decides encodability, which
+/// is [`wire`]'s alone.
+impl wire::WireCtx for Compiler {
+    fn nominal(&mut self, pool: &mut ResolvedPool, id: TypeId) -> wire::Nominal {
+        // The structural primitives answer first. `Int`, `Array`, `Map` and
+        // the rest are declared with no body, so reading the body would report
+        // every one of them as uninhabited and write nothing for an `Int`.
+        if let Some(b) = self.wire_builtin(id) {
+            return wire::Nominal::Builtin(b);
+        }
+        let Some(info) = self.env.lookup_type_info_by_id(id) else {
+            wire::wire_bug("a type the checker admitted but never registered")
+        };
+        match info.body() {
+            TypeBody::External => match self.wire_handle(id) {
+                Some(kind) => wire::Nominal::Handle(kind),
+                None => wire::Nominal::Uninhabited,
+            },
+            // A body is attached by the pass that declares it, and an imported
+            // declaration is exported only after its own body is. Elaboration,
+            // the only caller, starts once every pass has run, so a body still
+            // in this state is the checker's bug; describing it as anything
+            // would write nothing for a value that exists.
+            TypeBody::Unresolved => wire::wire_bug("a type whose body is not yet hydrated"),
+            TypeBody::Alias { target } => wire::Nominal::Alias(self.resolve_rty(pool, target)),
+            TypeBody::Custom { variants, .. } => {
+                // Copied out of the arena first: interning a field type
+                // reborrows the engine.
+                let vs = self.engine.variants_of(variants).to_vec();
+                let ctors = vs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        let declared: Vec<(StrId, Ty)> = self
+                            .engine
+                            .variant_fields_of(v.fields)
+                            .iter()
+                            .map(|f| (f.label, f.ty))
+                            .collect();
+                        let fields = declared
+                            .into_iter()
+                            .map(|(label, t)| (label, self.resolve_rty(pool, t)))
+                            .collect();
+                        wire::CtorDecl::new(
+                            VariantRef {
+                                type_id: id,
+                                // The variant slice's own length is a `u16`,
+                                // so an index into it cannot overflow one.
+                                variant_idx: i as u16,
+                            },
+                            v.name,
+                            fields,
+                        )
+                    })
+                    .collect();
+                wire::Nominal::Data { ctors }
+            }
+        }
+    }
+
+    fn name(&self, s: StrId) -> String {
+        self.engine.str(s).to_string()
+    }
+
+    fn type_name(&self, id: TypeId) -> String {
+        match self.env.lookup_type_info_by_id(id) {
+            Some(info) => self.engine.str(info.name).to_string(),
+            // Only reachable from a refusal's rendered type, where a name
+            // nobody registered reads better than an abort on the error path.
+            None => format!("<type {}>", id.0),
+        }
+    }
+}
+
+impl Compiler {
+    /// The six types the wire format writes structurally rather than as a
+    /// tagged constructor.
+    ///
+    /// Identity is the prelude's own binding, never a name: a user's
+    /// `type Map(k, v)` is a different type from `scarlet/map`'s and must be
+    /// described by its constructors. `Map` is late-bound, so this answers
+    /// `None` for it until `scarlet/map` has loaded — which is also the first
+    /// moment a value of it can exist.
+    fn wire_builtin(&self, id: TypeId) -> Option<wire::Builtin> {
+        let p = &self.prelude;
+        if p.int().is(id) {
+            Some(wire::Builtin::Int)
+        } else if p.float().is(id) {
+            Some(wire::Builtin::Float)
+        } else if p.string().is(id) {
+            Some(wire::Builtin::String)
+        } else if p.binary().is(id) {
+            Some(wire::Builtin::Binary)
+        } else if p.array().is(id) {
+            Some(wire::Builtin::Array)
+        } else if p.map().is(id) {
+            Some(wire::Builtin::Map)
+        } else {
+            None
+        }
+    }
+
+    /// The five host-backed stdlib types the wire format writes as an
+    /// identity, or `None` for a bodiless type that is not one of them.
+    ///
+    /// Identity is the declaring module's own binding, resolved through the
+    /// module table and never a name: a user's `pub type Pid` is a different
+    /// type and stays bodiless. `Port` is absent on purpose — it is a record
+    /// over a `Connection`, and the runtime kind its stream carries is the
+    /// value's to write (see [`scarlet_ir::wire::HandleKind`]).
+    fn wire_handle(&mut self, id: TypeId) -> Option<wire::HandleKind> {
+        const HANDLES: &[(&[&str], &str, wire::HandleKind)] = &[
+            (&["scarlet", "process"], "Pid", wire::HandleKind::Pid),
+            (
+                &["scarlet", "process"],
+                "Subject",
+                wire::HandleKind::Subject,
+            ),
+            (
+                &["scarlet", "net", "socket"],
+                "Connection",
+                wire::HandleKind::Connection,
+            ),
+            (&["scarlet", "net"], "Server", wire::HandleKind::Listener),
+            (
+                &["scarlet", "net", "tls"],
+                "TlsConnection",
+                wire::HandleKind::Tls,
+            ),
+        ];
+        for &(module, name, kind) in HANDLES {
+            let path: ModulePath = module.iter().map(|s| s.to_string()).collect();
+            // A module this compile never loaded declares no type a value of
+            // `id` could have, so a miss here is not a miss on `id`.
+            let Some(iface) = self.module_table.get(&ModuleKey::of(&path)) else {
+                continue;
+            };
+            if iface.types.get(name).is_some_and(|et| et.info.id == id) {
+                return Some(kind);
+            }
+        }
+        None
     }
 }

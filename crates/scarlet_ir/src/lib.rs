@@ -23,6 +23,7 @@ pub mod core_ir;
 pub mod intrinsic;
 pub mod rty;
 pub mod tivec;
+pub mod wire;
 
 /// A nominal type's identity: which `type` declaration a value or pattern
 /// belongs to. A constructor is a `TypeId` plus a variant index, so the VM
