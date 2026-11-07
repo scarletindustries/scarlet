@@ -21,7 +21,7 @@ type Token {
 // Single-character tokens. Numbers and names are runs of word_chars.
 const punctuation = ['+', '-', '*', '/', '(', ')', '=']
 
-const word_chars = string.split('abcdefghijklmnopqrstuvwxyz0123456789_', '')
+const word_chars = string::split('abcdefghijklmnopqrstuvwxyz0123456789_', '')
 
 fn symbol(c String) Token {
 	match c {
@@ -36,17 +36,17 @@ fn symbol(c String) Token {
 }
 
 fn lex(source String) Result(Array(Token), String) {
-	scan(string.split(source, ''))
+	scan(string::split(source, ''))
 }
 
 fn scan(chars Array(String)) Result(Array(Token), String) {
 	match chars {
 		[] -> Ok([])
 		[' ', ..rest] -> scan(rest)
-		[c, ..rest] if array.contains(punctuation, c) -> prepend(symbol(c), scan(rest))
-		[c, ..] if array.contains(word_chars, c) -> {
+		[c, ..rest] if array::contains(punctuation, c) -> prepend(symbol(c), scan(rest))
+		[c, ..] if array::contains(word_chars, c) -> {
 			(word, rest) = take_word(chars)
-			t <- result.then(word_token(word))
+			t <- result::then(word_token(word))
 			prepend(t, scan(rest))
 		}
 		[c, ..] -> Err('unexpected character: ${c}')
@@ -54,12 +54,12 @@ fn scan(chars Array(String)) Result(Array(Token), String) {
 }
 
 fn prepend(t Token, rest Result(Array(Token), String)) Result(Array(Token), String) {
-	result.map(rest, fn(ts) [t, ..ts])
+	result::map(rest, fn(ts) [t, ..ts])
 }
 
 fn take_word(chars Array(String)) (String, Array(String)) {
 	match chars {
-		[c, ..rest] if array.contains(word_chars, c) -> {
+		[c, ..rest] if array::contains(word_chars, c) -> {
 			(tail, left) = take_word(rest)
 			(c + tail, left)
 		}
@@ -69,7 +69,7 @@ fn take_word(chars Array(String)) (String, Array(String)) {
 
 // `12abc` is an error, not a variable.
 fn word_token(word String) Result(Token, String) {
-	match binary.parse_int(binary.from_string(word), binary.Dec) {
+	match binary::parse_int(binary::from_string(word), binary::Dec) {
 		Ok(n) -> Ok(Number(n))
 		Err(Nil) -> if starts_with_digit(word) {
 			Err('bad number: ${word}')
@@ -80,8 +80,8 @@ fn word_token(word String) Result(Token, String) {
 }
 
 fn starts_with_digit(word String) Bool {
-	match string.split(word, '') {
-		[first, ..] -> result.is_ok(binary.parse_int(binary.from_string(first), binary.Dec))
+	match string::split(word, '') {
+		[first, ..] -> result::is_ok(binary::parse_int(binary::from_string(first), binary::Dec))
 		[] -> False
 	}
 }
@@ -102,25 +102,25 @@ type Expr {
 type Parsed = Result((Expr, Array(Token)), String)
 
 fn expression(tokens Array(Token)) Parsed {
-	result.then(term(tokens), fn(s) more_terms(s.0, s.1))
+	result::then(term(tokens), fn(s) more_terms(s.0, s.1))
 }
 
 fn more_terms(left Expr, tokens Array(Token)) Parsed {
 	match tokens {
-		[Plus, ..rest] -> result.then(term(rest), fn(s) more_terms(Add(left, s.0), s.1))
-		[Minus, ..rest] -> result.then(term(rest), fn(s) more_terms(Sub(left, s.0), s.1))
+		[Plus, ..rest] -> result::then(term(rest), fn(s) more_terms(Add(left, s.0), s.1))
+		[Minus, ..rest] -> result::then(term(rest), fn(s) more_terms(Sub(left, s.0), s.1))
 		_ -> Ok((left, tokens))
 	}
 }
 
 fn term(tokens Array(Token)) Parsed {
-	result.then(factor(tokens), fn(s) more_factors(s.0, s.1))
+	result::then(factor(tokens), fn(s) more_factors(s.0, s.1))
 }
 
 fn more_factors(left Expr, tokens Array(Token)) Parsed {
 	match tokens {
-		[Star, ..rest] -> result.then(factor(rest), fn(s) more_factors(Mul(left, s.0), s.1))
-		[Slash, ..rest] -> result.then(factor(rest), fn(s) more_factors(Div(left, s.0), s.1))
+		[Star, ..rest] -> result::then(factor(rest), fn(s) more_factors(Mul(left, s.0), s.1))
+		[Slash, ..rest] -> result::then(factor(rest), fn(s) more_factors(Div(left, s.0), s.1))
 		_ -> Ok((left, tokens))
 	}
 }
@@ -131,28 +131,28 @@ fn factor(tokens Array(Token)) Parsed {
 		[Number(n), ..rest] -> Ok((Lit(n), rest))
 		[Name(x), ..rest] -> Ok((Var(x), rest))
 		[Open, ..rest] -> {
-			pair <- result.then(expression(rest))
+			pair <- result::then(expression(rest))
 			match pair {
 				(inner, [Close, ..after]) -> Ok((inner, after))
 				_ -> Err('missing closing )')
 			}
 		}
-		[t, ..] -> Err('unexpected ${string.inspect(t)}')
+		[t, ..] -> Err('unexpected ${string::inspect(t)}')
 	}
 }
 
 fn parse(tokens Array(Token)) Result(Expr, String) {
-	pair <- result.then(expression(tokens))
+	pair <- result::then(expression(tokens))
 	match pair {
 		(e, []) -> Ok(e)
-		(_, [t, ..]) -> Err('unexpected ${string.inspect(t)} after the expression')
+		(_, [t, ..]) -> Err('unexpected ${string::inspect(t)} after the expression')
 	}
 }
 
-fn evaluate(e Expr, env map.Map(String, Int)) Result(Int, String) {
+fn evaluate(e Expr, env map::Map(String, Int)) Result(Int, String) {
 	match e {
 		Lit(n) -> Ok(n)
-		Var(name) -> match map.get(env, name) {
+		Var(name) -> match map::get(env, name) {
 			Some(v) -> Ok(v)
 			None -> Err('undefined variable: ${name}')
 		}
@@ -166,11 +166,11 @@ fn evaluate(e Expr, env map.Map(String, Int)) Result(Int, String) {
 fn combine(
 	l Expr,
 	r Expr,
-	env map.Map(String, Int),
+	env map::Map(String, Int),
 	op fn(Int, Int) Result(Int, String),
 ) Result(Int, String) {
-	a <- result.then(evaluate(l, env))
-	b <- result.then(evaluate(r, env))
+	a <- result::then(evaluate(l, env))
+	b <- result::then(evaluate(r, env))
 	op(a, b)
 }
 
@@ -195,7 +195,7 @@ fn show(e Expr) String {
 }
 
 // `name = expression` binds a variable. Anything else is evaluated and printed.
-fn run_line(env map.Map(String, Int), line String) map.Map(String, Int) {
+fn run_line(env map::Map(String, Int), line String) map::Map(String, Int) {
 	match lex(line) {
 		Err(m) -> {
 			report(line, Err(m))
@@ -209,22 +209,22 @@ fn run_line(env map.Map(String, Int), line String) map.Map(String, Int) {
 	}
 }
 
-fn describe(tokens Array(Token), env map.Map(String, Int)) Result(String, String) {
-	e <- result.then(parse(tokens))
-	v <- result.map(evaluate(e, env))
+fn describe(tokens Array(Token), env map::Map(String, Int)) Result(String, String) {
+	e <- result::then(parse(tokens))
+	v <- result::map(evaluate(e, env))
 	'${show(e)} = ${v}'
 }
 
 fn bind(
-	env map.Map(String, Int),
+	env map::Map(String, Int),
 	line String,
 	name String,
 	rest Array(Token),
-) map.Map(String, Int) {
-	match result.then(parse(rest), fn(e) evaluate(e, env)) {
+) map::Map(String, Int) {
+	match result::then(parse(rest), fn(e) evaluate(e, env)) {
 		Ok(v) -> {
 			report(line, Ok('${name} = ${v}'))
-			map.set(env, name, v)
+			map::set(env, name, v)
 		}
 		Err(m) -> {
 			report(line, Err(m))
@@ -255,5 +255,5 @@ const session = [
 ]
 
 pub fn main() {
-	_ = array.fold(session, map.new(), run_line)
+	_ = array::fold(session, map::new(), run_line)
 }

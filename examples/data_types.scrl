@@ -35,7 +35,7 @@ fn walk(e Entry) Stat {
 	match e {
 		File(_, size) -> Stat(files: 1, dirs: 0, bytes: size)
 		Dir(_, entries) -> {
-			totals = array.fold(entries, EMPTY, fn(acc, child) merge(acc, walk(child)))
+			totals = array::fold(entries, EMPTY, fn(acc, child) merge(acc, walk(child)))
 			// ..totals spreads the record; the field after it overrides that one.
 			Stat(..totals, dirs: totals.dirs + 1)
 		}
@@ -47,7 +47,7 @@ fn render(e Entry, indent String) Nil {
 		File(name, size) -> println('${indent}${name}  ${size}b')
 		Dir(name, entries) -> {
 			println('${indent}${name}/')
-			array.each(entries, fn(child) render(child, '${indent}  '))
+			array::each(entries, fn(child) render(child, '${indent}  '))
 		}
 	}
 }
@@ -68,14 +68,14 @@ fn find(e Entry, want Path) Option(Entry) {
 fn find_first(entries Listing, want Path) Option(Entry) {
 	match entries {
 		[] -> None
-		[head, ..rest] -> option.or_else(find(head, want), fn() find_first(rest, want))
+		[head, ..rest] -> option::or_else(find(head, want), fn() find_first(rest, want))
 	}
 }
 
 fn label(e Entry) String {
 	match e {
 		File(name, size) -> 'file ${name} of ${size}b'
-		Dir(name, entries) -> 'dir ${name} with ${array.length(entries)} entries'
+		Dir(name, entries) -> 'dir ${name} with ${array::length(entries)} entries'
 	}
 }
 
@@ -99,7 +99,7 @@ pub fn main() {
 	println('${files} files, ${dirs} dirs, ${bytes} bytes')
 
 	// inspect renders enums and records too.
-	println(string.inspect(walk(root)))
+	println(string::inspect(walk(root)))
 
 	println(match find(root, 'lib.al') {
 		Some(e) -> label(e)

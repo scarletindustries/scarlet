@@ -58,7 +58,7 @@ pub fn main() {
 	// Rebinding a name shadows the earlier one; an annotation goes before the =.
 	units = 4
 	units = units + 2
-	restock Int = int.max(units * 2, 12)
+	restock Int = int::max(units * 2, 12)
 	println('ordered ${units}, restocking ${restock}')
 
 	// Boolean operators short-circuit, and ! negates.
@@ -68,12 +68,12 @@ pub fn main() {
 	println('can ship: ${can_ship}, credit ${-FLAT_SHIPPING_CENTS}')
 
 	// A range is an array: 0..5 is 0, 1, 2, 3, 4.
-	tiers = array.map(0..5, fn(i) discount_percent(i * 25))
-	println('tiers ${string.inspect(tiers)}')
+	tiers = array::map(0..5, fn(i) discount_percent(i * 25))
+	println('tiers ${string::inspect(tiers)}')
 
 	// Indexing yields an Option; or supplies the value for a missing slot.
 	println('largest tier ${tiers[4] or -1}, off the end ${tiers[9] or -1}')
 
 	// Binding a call to Nil marks it as run for effect.
-	Nil = println('order placed: ${string.length('shipped') > 0}')
+	Nil = println('order placed: ${string::length('shipped') > 0}')
 }

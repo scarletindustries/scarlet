@@ -10,12 +10,12 @@ import scarlet/string
 pub type Server
 
 @vm(net__listen)
-pub fn listen_addr(addr address.SocketAddress) Result(Server, error.NetError)
+pub fn listen_addr(addr address::SocketAddress) Result(Server, error::NetError)
 
 // Binds a listener to `host:port`, resolving `host` first with `resolve`.
-pub fn listen(host String, port Int) Result(Server, error.NetError) {
-	ip <- result.then(resolve(host))
-	addr <- result.then(result.replace_err(address.socket_address(ip, port), error.InvalidPort))
+pub fn listen(host String, port Int) Result(Server, error::NetError) {
+	ip <- result::then(resolve(host))
+	addr <- result::then(result::replace_err(address::socket_address(ip, port), error::InvalidPort))
 	listen_addr(addr)
 }
 
@@ -23,88 +23,96 @@ pub fn listen(host String, port Int) Result(Server, error.NetError) {
 // `Server` was closed, and an accept loop stops there. `Err` is a failed
 // accept.
 @vm(net__accept)
-pub fn accept(s Server) Result(Option(socket.Socket), error.NetError)
+pub fn accept(s Server) Result(Option(socket::Socket), error::NetError)
 
 // A running server. `net.close(service.server)` stops accepting, and open
-// connections finish on their own. `process.count(service.connections)` is
+// connections finish on their own. `process::count(service.connections)` is
 // the number of open connections.
 pub type Service {
 	server Server
-	supervised process.Supervised
-	connections process.Supervised
+	supervised process::Supervised
+	connections process::Supervised
 }
 
 // Listens on `host:port` and runs `handler` for each connection in a process
 // of its own, with an acceptor on every core. A handler that crashes ends only
 // its own connection. Use `serve_in` to put the server in your own tree.
-pub fn serve(host String, port Int, handler fn(socket.Socket) Nil) Result(Service, error.NetError) {
-	serve_in(process.supervisor(ACCEPTOR_BUDGET), host, port, handler)
+pub fn serve(
+	host String,
+	port Int,
+	handler fn(socket::Socket) Nil,
+) Result(Service, error::NetError) {
+	serve_in(process::supervisor(ACCEPTOR_BUDGET), host, port, handler)
 }
 
 // As `serve`, with the server's subtree inside `sup`.
 pub fn serve_in(
-	sup process.Supervisor,
+	sup process::Supervisor,
 	host String,
 	port Int,
-	handler fn(socket.Socket) Nil,
-) Result(Service, error.NetError) {
-	server <- result.then(listen(host, port))
+	handler fn(socket::Socket) Nil,
+) Result(Service, error::NetError) {
+	server <- result::then(listen(host, port))
 	Ok(serve_on_in(sup, server, handler))
 }
 
 // Serves a listener already bound with `listen`, for example on port 0 with
 // the port read back by `local_addr`.
-pub fn serve_on(server Server, handler fn(socket.Socket) Nil) Service {
-	serve_on_in(process.supervisor(ACCEPTOR_BUDGET), server, handler)
+pub fn serve_on(server Server, handler fn(socket::Socket) Nil) Service {
+	serve_on_in(process::supervisor(ACCEPTOR_BUDGET), server, handler)
 }
 
 // As `serve_on`, inside `sup`. The connection factory is declared before the
 // acceptors, so it is stopped after them: a stopping server stops accepting
 // before it closes what it accepted.
-pub fn serve_on_in(sup process.Supervisor, server Server, handler fn(socket.Socket) Nil) Service {
-	me = process.supervisor_in(sup, ACCEPTOR_BUDGET)
-	connections = process.factory(me, process.Disposable, fn(_inbox, sock) {
+pub fn serve_on_in(sup process::Supervisor, server Server, handler fn(socket::Socket) Nil) Service {
+	me = process::supervisor_in(sup, ACCEPTOR_BUDGET)
+	connections = process::factory(me, process::Disposable, fn(_inbox, sock) {
 		// The acceptor owns the socket until this, so that it closes when this
 		// process ends, however it ends.
-		give(sock, process.self())
+		give(sock, process::self())
 		handler(sock)
 	})
-	process.worker_per_scheduler(me, process.Transient, fn(_inbox) accept_loop(server, connections))
+	process::worker_per_scheduler(
+		me,
+		process::Transient,
+		fn(_inbox) accept_loop(server, connections),
+	)
 	Service(server: server, supervised: me.supervised, connections: connections.supervised)
 }
 
 // A listener that cannot accept makes every acceptor fail at once. This budget
 // runs out within a second or two, so the failure moves up the tree instead of
 // being retried for ever.
-const ACCEPTOR_BUDGET = process.OneForOne(restarts: 10, within_ms: 5000)
+const ACCEPTOR_BUDGET = process::OneForOne(restarts: 10, within_ms: 5000)
 
 // Makes `to` the process whose end closes `sock`. `to` must be on the core
 // that holds the socket.
 @vm(net__give)
-fn give(sock socket.Socket, to process.Pid) Nil
+fn give(sock socket::Socket, to process::Pid) Nil
 
 // The network errors are ones accept(2) reports for a connection that died in
 // the queue, not a dead listener, so they retry. An unmapped errno is usually
 // EMFILE, which dequeues nothing, so it waits 100ms rather than spin.
-fn accept_loop(server Server, connections process.Factory(Nil, socket.Socket)) Nil {
+fn accept_loop(server Server, connections process::Factory(Nil, socket::Socket)) Nil {
 	match accept(server) {
 		Ok(Some(sock)) -> {
-			_ = process.start_in(connections, sock)
+			_ = process::start_in(connections, sock)
 			accept_loop(server, connections)
 		}
 		Ok(None) -> Nil
-		Err(error.ConnectionAborted)
-		| Err(error.ConnectionReset)
-		| Err(error.NetworkDown)
-		| Err(error.NetworkUnreachable)
-		| Err(error.HostUnreachable) -> accept_loop(server, connections)
-		Err(error.Errno(_)) -> {
-			process.sleep(100)
+		Err(error::ConnectionAborted)
+		| Err(error::ConnectionReset)
+		| Err(error::NetworkDown)
+		| Err(error::NetworkUnreachable)
+		| Err(error::HostUnreachable) -> accept_loop(server, connections)
+		Err(error::Errno(_)) -> {
+			process::sleep(100)
 			accept_loop(server, connections)
 		}
 		Err(e) -> {
-			println('accept failed: ${string.inspect(e)}')
-			process.kill(process.self())
+			println('accept failed: ${string::inspect(e)}')
+			process::kill(process::self())
 		}
 	}
 }
@@ -112,81 +120,88 @@ fn accept_loop(server Server, connections process.Factory(Nil, socket.Socket)) N
 // An IP literal passes through. A hostname is looked up with getaddrinfo, off
 // the scheduler's threads.
 @vm(net__resolve)
-pub fn resolve(host String) Result(address.IpAddress, error.NetError)
+pub fn resolve(host String) Result(address::IpAddress, error::NetError)
 
 // As `resolve`, but `Err(TimedOut)` after `timeout_ms`, even if the lookup
 // answers later. An IP literal is `Ok` on any budget. A lookup cannot be
 // cancelled, so a late one still runs to the end and is thrown away.
-pub fn resolve_within(host String, timeout_ms Int) Result(address.IpAddress, error.NetError) {
-	resolve_until(host, time.add_ms(time.monotonic(), timeout_ms))
+pub fn resolve_within(host String, timeout_ms Int) Result(address::IpAddress, error::NetError) {
+	resolve_until(host, time::add_ms(time::monotonic(), timeout_ms))
 }
 
-// As `resolve_within`, with a `deadline` from `time.monotonic()`, for when one
+// As `resolve_within`, with a `deadline` from `time::monotonic()`, for when one
 // deadline covers several steps.
-pub fn resolve_until(host String, deadline time.Instant) Result(address.IpAddress, error.NetError) {
-	resolve_until_ms(host, time.to_deadline_ms(deadline))
+pub fn resolve_until(
+	host String,
+	deadline time::Instant,
+) Result(address::IpAddress, error::NetError) {
+	resolve_until_ms(host, time::to_deadline_ms(deadline))
 }
 
 @vm(net__resolve_until)
-fn resolve_until_ms(host String, deadline_ms Int) Result(address.IpAddress, error.NetError)
+fn resolve_until_ms(host String, deadline_ms Int) Result(address::IpAddress, error::NetError)
 
 // Connects to `host:port`, resolving `host` first with `resolve`. It has no
 // deadline of its own: see `connect_within`.
-pub fn connect(host String, port Int) Result(socket.Socket, error.NetError) {
-	ip <- result.then(resolve(host))
-	addr <- result.then(result.replace_err(address.socket_address(ip, port), error.InvalidPort))
+pub fn connect(host String, port Int) Result(socket::Socket, error::NetError) {
+	ip <- result::then(resolve(host))
+	addr <- result::then(result::replace_err(address::socket_address(ip, port), error::InvalidPort))
 	connect_addr(addr)
 }
 
 // As `connect`, but waits at most `timeout_ms` for the resolve and the connect
 // together.
-pub fn connect_within(host String, port Int, timeout_ms Int) Result(socket.Socket, error.NetError) {
-	connect_until(host, port, time.add_ms(time.monotonic(), timeout_ms))
+pub fn connect_within(
+	host String,
+	port Int,
+	timeout_ms Int,
+) Result(socket::Socket, error::NetError) {
+	connect_until(host, port, time::add_ms(time::monotonic(), timeout_ms))
 }
 
-// As `connect_within`, with a `deadline` from `time.monotonic()`, for when one
+// As `connect_within`, with a `deadline` from `time::monotonic()`, for when one
 // deadline covers several steps.
 pub fn connect_until(
 	host String,
 	port Int,
-	deadline time.Instant,
-) Result(socket.Socket, error.NetError) {
-	ip <- result.then(resolve_until(host, deadline))
-	addr <- result.then(result.replace_err(address.socket_address(ip, port), error.InvalidPort))
+	deadline time::Instant,
+) Result(socket::Socket, error::NetError) {
+	ip <- result::then(resolve_until(host, deadline))
+	addr <- result::then(result::replace_err(address::socket_address(ip, port), error::InvalidPort))
 	connect_addr_until(addr, deadline)
 }
 
 @vm(net__connect)
-pub fn connect_addr(addr address.SocketAddress) Result(socket.Socket, error.NetError)
+pub fn connect_addr(addr address::SocketAddress) Result(socket::Socket, error::NetError)
 
 // As `connect_addr`, but `Err(TimedOut)` after `timeout_ms`. The kernel gives
 // up on its own after about 75 s on Darwin, so a longer timeout does nothing.
 pub fn connect_addr_within(
-	addr address.SocketAddress,
+	addr address::SocketAddress,
 	timeout_ms Int,
-) Result(socket.Socket, error.NetError) {
-	connect_addr_until(addr, time.add_ms(time.monotonic(), timeout_ms))
+) Result(socket::Socket, error::NetError) {
+	connect_addr_until(addr, time::add_ms(time::monotonic(), timeout_ms))
 }
 
-// As `connect_addr_within`, with a `deadline` from `time.monotonic()`.
+// As `connect_addr_within`, with a `deadline` from `time::monotonic()`.
 pub fn connect_addr_until(
-	addr address.SocketAddress,
-	deadline time.Instant,
-) Result(socket.Socket, error.NetError) {
-	connect_addr_until_ms(addr, time.to_deadline_ms(deadline))
+	addr address::SocketAddress,
+	deadline time::Instant,
+) Result(socket::Socket, error::NetError) {
+	connect_addr_until_ms(addr, time::to_deadline_ms(deadline))
 }
 
 @vm(net__connect_until)
 fn connect_addr_until_ms(
-	addr address.SocketAddress,
+	addr address::SocketAddress,
 	deadline_ms Int,
-) Result(socket.Socket, error.NetError)
+) Result(socket::Socket, error::NetError)
 
 // The address the listener is bound to, such as the port the kernel chose for
 // port 0.
 @vm(net__local_addr)
-pub fn local_addr(s Server) Result(address.SocketAddress, error.NetError)
+pub fn local_addr(s Server) Result(address::SocketAddress, error::NetError)
 
 // Every `accept` on it, parked or later, returns `Ok(None)`.
 @vm(net__close)
-pub fn close(s Server) Result(Nil, error.NetError)
+pub fn close(s Server) Result(Nil, error::NetError)

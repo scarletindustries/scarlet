@@ -61,6 +61,8 @@
 (call_expression
   function: (field_expression
     field: (type_identifier) @constructor))
+(module_expression
+  member: (type_identifier) @constructor)
 
 ; Modules
 (import_declaration
@@ -70,6 +72,10 @@
 (named_type
   module: (identifier) @namespace)
 (ctor_pattern
+  module: (identifier) @namespace)
+(ctor_binding
+  module: (identifier) @namespace)
+(module_expression
   module: (identifier) @namespace)
 
 ; Record fields and labels
@@ -92,6 +98,9 @@
 (call_expression
   function: (field_expression
     field: (identifier) @function))
+(call_expression
+  function: (module_expression
+    member: (identifier) @function))
 
 ; Attributes: @vm(...), @test, ...
 (attribute

@@ -12,17 +12,17 @@ import ../units
 const COLUMN = 12
 
 /** A row: the reading in the first column, then what it was converted into. */
-pub fn row(t units.Celsius, cells Array(String)) String {
+pub fn row(t units::Celsius, cells Array(String)) String {
 	match cells {
-		[] -> units.show(t)
+		[] -> units::show(t)
 		[first, ..rest] ->
-			array.fold(rest, pad(units.show(t)) + first, fn(line, cell) line + ' = ' + cell)
+			array::fold(rest, pad(units::show(t)) + first, fn(line, cell) line + ' = ' + cell)
 	}
 }
 
 // Pad to COLUMN scalars so the second column lines up whatever precedes it.
 fn pad(cell String) String {
-	if string.length(cell) >= COLUMN {
+	if string::length(cell) >= COLUMN {
 		cell
 	} else {
 		pad(cell + ' ')

@@ -54,5 +54,5 @@ pub fn show_kelvin(t Kelvin) String {
 
 // No pub: round1 is private to this module.
 fn round1(x Float) Float {
-	float.from_int(float.round(x * 10.0)) / 10.0
+	float::from_int(float::round(x * 10.0)) / 10.0
 }

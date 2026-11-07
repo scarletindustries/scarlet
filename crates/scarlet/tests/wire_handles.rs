@@ -28,33 +28,33 @@ fn a_pid_round_trips_and_a_monitor_placed_through_the_copy_fires() {
         "import scarlet/process\n\
          import scarlet/wire\n\
          type Msg {\n\
-         \tReady(gate process.Subject(Nil))\n\
-         \tEnded(down process.Down)\n\
+         \tReady(gate process::Subject(Nil))\n\
+         \tEnded(down process::Down)\n\
          }\n\
          pub fn main() {\n\
-         \tme = process.self()\n\
-         \tprintln(match wire.decode(wire.encode(me)) {\n\
+         \tme = process::self()\n\
+         \tprintln(match wire::decode(wire::encode(me)) {\n\
          \t\tOk(p) -> p == me\n\
          \t\tErr(_) -> False\n\
          \t})\n\
-         \tinbox = process.subject()\n\
-         \tworker = process.spawn(fn() {\n\
-         \t\tgate = process.subject()\n\
-         \t\tprocess.send(inbox, Ready(gate))\n\
-         \t\tprocess.receive(gate)\n\
+         \tinbox = process::subject()\n\
+         \tworker = process::spawn(fn() {\n\
+         \t\tgate = process::subject()\n\
+         \t\tprocess::send(inbox, Ready(gate))\n\
+         \t\tprocess::receive(gate)\n\
          \t})\n\
-         \tmatch wire.decode(wire.encode(worker)) {\n\
+         \tmatch wire::decode(wire::encode(worker)) {\n\
          \t\tOk(pid) -> {\n\
          \t\t\tprintln(pid == worker)\n\
-         \t\t\t_ = process.monitor(pid, inbox, fn(d) Ended(d))\n\
-         \t\t\tmatch process.receive(inbox) {\n\
-         \t\t\t\tReady(gate) -> process.send(gate, Nil)\n\
+         \t\t\t_ = process::monitor(pid, inbox, fn(d) Ended(d))\n\
+         \t\t\tmatch process::receive(inbox) {\n\
+         \t\t\t\tReady(gate) -> process::send(gate, Nil)\n\
          \t\t\t\tEnded(_) -> println('ended before it was told to')\n\
          \t\t\t}\n\
-         \t\t\tmatch process.receive(inbox) {\n\
+         \t\t\tmatch process::receive(inbox) {\n\
          \t\t\t\tEnded(down) -> {\n\
          \t\t\t\t\tprintln(down.pid == worker)\n\
-         \t\t\t\t\tprintln(down.reason == process.Normal)\n\
+         \t\t\t\t\tprintln(down.reason == process::Normal)\n\
          \t\t\t\t}\n\
          \t\t\t\tReady(_) -> println('a second gate')\n\
          \t\t\t}\n\
@@ -76,12 +76,12 @@ fn a_subject_round_trips_and_a_message_sent_through_the_copy_arrives() {
         "import scarlet/process\n\
          import scarlet/wire\n\
          pub fn main() {\n\
-         \ts = process.subject()\n\
-         \tmatch wire.decode(wire.encode(s)) {\n\
+         \ts = process::subject()\n\
+         \tmatch wire::decode(wire::encode(s)) {\n\
          \t\tOk(copy) -> {\n\
          \t\t\tprintln(copy == s)\n\
-         \t\t\tprocess.send(copy, 'through the copy')\n\
-         \t\t\tprintln(process.receive(s) == 'through the copy')\n\
+         \t\t\tprocess::send(copy, 'through the copy')\n\
+         \t\t\tprintln(process::receive(s) == 'through the copy')\n\
          \t\t}\n\
          \t\tErr(_) -> println('refused')\n\
          \t}\n\
@@ -99,7 +99,7 @@ fn a_subject_three_levels_down_round_trips() {
         "import scarlet/process\n\
          import scarlet/wire\n\
          pub type Inner {\n\
-         \tInner(reply process.Subject(String))\n\
+         \tInner(reply process::Subject(String))\n\
          }\n\
          pub type Middle {\n\
          \tMiddle(inner Inner)\n\
@@ -107,15 +107,15 @@ fn a_subject_three_levels_down_round_trips() {
          pub type Outer {\n\
          \tOuter(mid Middle)\n\
          }\n\
-         fn reply_of(o Outer) process.Subject(String) {\n\
+         fn reply_of(o Outer) process::Subject(String) {\n\
          \to.mid.inner.reply\n\
          }\n\
          pub fn main() {\n\
-         \treply = process.subject()\n\
-         \tmatch wire.decode(wire.encode(Outer(Middle(Inner(reply))))) {\n\
+         \treply = process::subject()\n\
+         \tmatch wire::decode(wire::encode(Outer(Middle(Inner(reply))))) {\n\
          \t\tOk(back) -> {\n\
-         \t\t\tprocess.send(reply_of(back), 'three levels down')\n\
-         \t\t\tprintln(process.receive(reply))\n\
+         \t\t\tprocess::send(reply_of(back), 'three levels down')\n\
+         \t\t\tprintln(process::receive(reply))\n\
          \t\t}\n\
          \t\tErr(_) -> println('refused')\n\
          \t}\n\
@@ -141,19 +141,19 @@ import scarlet/result
 import scarlet/wire
 
 pub fn main() {
-	match net.listen('127.0.0.1', 0) {
+	match net::listen('127.0.0.1', 0) {
 		Ok(server) -> {
-			println('listening ${result.map(net.local_addr(server), address.to_string) or '?'}')
-			match wire.decode(wire.encode(server)) {
+			println('listening ${result::map(net::local_addr(server), address::to_string) or '?'}')
+			match wire::decode(wire::encode(server)) {
 				Ok(listener) -> {
 					println(listener == server)
-					match net.accept(listener) {
-						Ok(Some(sock)) -> match wire.decode(wire.encode(sock)) {
+					match net::accept(listener) {
+						Ok(Some(sock)) -> match wire::decode(wire::encode(sock)) {
 							Ok(copy) -> {
 								println(copy == sock)
-								println(address.to_string(copy.peer) == address.to_string(sock.peer))
-								match socket.write(copy, binary.from_string('through the copy')) {
-									Ok(Nil) -> match socket.close(copy) {
+								println(address::to_string(copy.peer) == address::to_string(sock.peer))
+								match socket::write(copy, binary::from_string('through the copy')) {
+									Ok(Nil) -> match socket::close(copy) {
 										Ok(Nil) -> println('served')
 										Err(e) -> println('close-failed: ${e}')
 									}
@@ -197,13 +197,13 @@ fn a_port_record_round_trips_and_the_copy_is_written_to() {
         "import scarlet/os/port\n\
          import scarlet/wire\n\
          pub fn main() {\n\
-         \tmatch port.spawn('cat', []) {\n\
-         \t\tOk(p) -> match wire.decode(wire.encode(p)) {\n\
+         \tmatch port::spawn('cat', []) {\n\
+         \t\tOk(p) -> match wire::decode(wire::encode(p)) {\n\
          \t\t\tOk(copy) -> {\n\
          \t\t\t\tprintln(copy == p)\n\
-         \t\t\t\tprintln(port.write(copy, <<'through the copy'>>) == Ok(Nil))\n\
-         \t\t\t\tprintln(port.read_exact(p, 16) == Ok(<<'through the copy'>>))\n\
-         \t\t\t\tprintln(port.close(copy) == Ok(port.Exited(0)))\n\
+         \t\t\t\tprintln(port::write(copy, <<'through the copy'>>) == Ok(Nil))\n\
+         \t\t\t\tprintln(port::read_exact(p, 16) == Ok(<<'through the copy'>>))\n\
+         \t\t\t\tprintln(port::close(copy) == Ok(port::Exited(0)))\n\
          \t\t\t}\n\
          \t\t\tErr(_) -> println('refused')\n\
          \t\t}\n\
@@ -227,16 +227,16 @@ fn a_handle_from_another_run_is_refused_with_other_run() {
          import scarlet/process\n\
          import scarlet/wire\n\
          pub fn main() {\n\
-         \tme = process.self()\n\
-         \tbytes = wire.encode(me)\n\
-         \tsize = binary.byte_size(bytes)\n\
-         \thead = binary.slice_bytes(bytes, 0, 11) or <<>>\n\
-         \ttail = binary.slice_bytes(bytes, 27, size - 27) or <<>>\n\
+         \tme = process::self()\n\
+         \tbytes = wire::encode(me)\n\
+         \tsize = binary::byte_size(bytes)\n\
+         \thead = binary::slice_bytes(bytes, 0, 11) or <<>>\n\
+         \ttail = binary::slice_bytes(bytes, 27, size - 27) or <<>>\n\
          \tzeros = <<0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0>>\n\
-         \tmatch wire.decode(binary.concat([head, zeros, tail])) {\n\
+         \tmatch wire::decode(binary::concat([head, zeros, tail])) {\n\
          \t\tOk(p) -> println(p == me)\n\
-         \t\tErr(wire.OtherRun(mine, theirs)) -> {\n\
-         \t\t\tprintln(binary.byte_size(mine) == 16)\n\
+         \t\tErr(wire::OtherRun(mine, theirs)) -> {\n\
+         \t\t\tprintln(binary::byte_size(mine) == 16)\n\
          \t\t\tprintln(theirs == zeros)\n\
          \t\t\tprintln(mine == theirs)\n\
          \t\t}\n\

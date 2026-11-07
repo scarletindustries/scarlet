@@ -39,19 +39,19 @@ fn mix(h Int, b Int) Int {
 }
 
 fn checksum(b Binary) Int {
-	fold_bytes(b, 0, binary.byte_size(b), FNV_SEED)
+	fold_bytes(b, 0, binary::byte_size(b), FNV_SEED)
 }
 
 fn fold_bytes(b Binary, i Int, n Int, h Int) Int {
 	if i == n {
 		h
 	} else {
-		fold_bytes(b, i + 1, n, mix(h, binary.byte_at(b, i)))
+		fold_bytes(b, i + 1, n, mix(h, binary::byte_at(b, i)))
 	}
 }
 
 fn sign(user Binary) Int {
-	checksum(binary.append(SECRET, user))
+	checksum(binary::append(SECRET, user))
 }
 
 fn make_user(i Int) User {
@@ -60,21 +60,21 @@ fn make_user(i Int) User {
 		id: i,
 		name: name,
 		email: '${name}@example.com',
-		pw_hash: checksum(binary.from_string('pw-${i}')),
+		pw_hash: checksum(binary::from_string('pw-${i}')),
 	)
 }
 
 type Tables {
-	by_name map.Map(Binary, User)
-	by_id map.Map(Int, User)
+	by_name map::Map(Binary, User)
+	by_id map::Map(Int, User)
 }
 
 fn find_by_name(t Tables, name Binary) Option(User) {
-	map.get(t.by_name, name)
+	map::get(t.by_name, name)
 }
 
 fn find_by_id(t Tables, id Int) Option(User) {
-	map.get(t.by_id, id)
+	map::get(t.by_id, id)
 }
 
 fn build_tables(i Int, n Int, t Tables) Tables {
@@ -86,8 +86,8 @@ fn build_tables(i Int, n Int, t Tables) Tables {
 			i + 1,
 			n,
 			Tables(
-				by_name: map.set(t.by_name, binary.from_string(u.name), u),
-				by_id: map.set(t.by_id, u.id, u),
+				by_name: map::set(t.by_name, binary::from_string(u.name), u),
+				by_id: map::set(t.by_id, u.id, u),
 			),
 		)
 	}
@@ -100,11 +100,11 @@ const DOT = <<'.'>>
 const SP = 32
 
 fn form_get(b Binary, key Binary) Option(Binary) {
-	scan_pairs(b, 0, binary.byte_size(b), key, AMP, False)
+	scan_pairs(b, 0, binary::byte_size(b), key, AMP, False)
 }
 
 fn cookie_get(b Binary, name Binary) Option(Binary) {
-	scan_pairs(b, 0, binary.byte_size(b), name, SEMI, True)
+	scan_pairs(b, 0, binary::byte_size(b), name, SEMI, True)
 }
 
 // The first value whose key matches, in `sep`-delimited `k=v` pairs.
@@ -121,16 +121,16 @@ fn scan_pairs(
 	} else {
 		from
 	}
-	end = match binary.index_of(b, sep, start) {
+	end = match binary::index_of(b, sep, start) {
 		Some(i) -> i
 		None -> n
 	}
-	match binary.index_of(b, EQ, start) {
+	match binary::index_of(b, EQ, start) {
 		Some(
 			e,
 		) -> match (
-			binary.slice_bytes(b, start, e - start),
-			binary.slice_bytes(b, e + 1, end - e - 1),
+			binary::slice_bytes(b, start, e - start),
+			binary::slice_bytes(b, e + 1, end - e - 1),
 		) {
 			(Ok(k), Ok(v)) if e < end && k == key -> Some(v)
 			_ -> next_pair(b, end, n, key, sep, skip_sp)
@@ -148,7 +148,7 @@ fn next_pair(b Binary, end Int, n Int, key Binary, sep Binary, skip_sp Bool) Opt
 }
 
 fn skip_spaces(b Binary, i Int, n Int) Int {
-	if i < n && binary.byte_at(b, i) == SP {
+	if i < n && binary::byte_at(b, i) == SP {
 		skip_spaces(b, i + 1, n)
 	} else {
 		i
@@ -163,20 +163,20 @@ const NAME_COOKIE = <<'Cookie'>>
 const VAL_JSON = <<'application/json'>>
 const VAL_TEXT = <<'text/plain; charset=utf-8'>>
 
-fn respond(code Int, content_type Binary, s String) http.Response {
-	bin = binary.from_string(s)
-	http.Response(
+fn respond(code Int, content_type Binary, s String) http::Response {
+	bin = binary::from_string(s)
+	http::Response(
 		status: code,
-		headers: [headers.Header(name: NAME_CONTENT_TYPE, value: content_type)],
-		body: http.Fixed(binary.byte_size(bin), body.from_binary(bin)),
+		headers: [headers::Header(name: NAME_CONTENT_TYPE, value: content_type)],
+		body: http::Fixed(binary::byte_size(bin), body::from_binary(bin)),
 	)
 }
 
-fn json(code Int, s String) http.Response {
+fn json(code Int, s String) http::Response {
 	respond(code, VAL_JSON, s)
 }
 
-fn unauthorized() http.Response {
+fn unauthorized() http::Response {
 	json(401, '{"error":"unauthorized"}')
 }
 
@@ -185,19 +185,19 @@ fn profile_json(u User) String {
 }
 
 fn session_cookie(name String, sig Int) Binary {
-	binary.append(
-		binary.from_string('session=${name}.'),
-		binary.append(binary.from_int_ascii(sig, binary.Hex), <<'; Path=/; HttpOnly'>>),
+	binary::append(
+		binary::from_string('session=${name}.'),
+		binary::append(binary::from_int_ascii(sig, binary::Hex), <<'; Path=/; HttpOnly'>>),
 	)
 }
 
 // Handlers
 
-fn verify_session(req http.Request, t Tables) Option(User) {
-	option.then(headers.get(req.headers, NAME_COOKIE), fn(raw) option.then(
+fn verify_session(req http::Request, t Tables) Option(User) {
+	option::then(headers::get(req.headers, NAME_COOKIE), fn(raw) option::then(
 		cookie_get(raw, <<'session'>>),
-		fn(token) option.then(split_token(token), fn(parts) match parts {
-			(user, sig_bytes) -> match binary.parse_int(sig_bytes, binary.Hex) {
+		fn(token) option::then(split_token(token), fn(parts) match parts {
+			(user, sig_bytes) -> match binary::parse_int(sig_bytes, binary::Hex) {
 				Ok(sig) if sig == sign(user) -> find_by_name(t, user)
 				_ -> None
 			}
@@ -206,30 +206,30 @@ fn verify_session(req http.Request, t Tables) Option(User) {
 }
 
 fn split_token(token Binary) Option((Binary, Binary)) {
-	match binary.index_of(token, DOT, 0) {
-		Some(i) -> match binary.slice_bytes(token, 0, i) {
-			Ok(head) -> Some((head, binary.drop_bytes(token, i + 1)))
+	match binary::index_of(token, DOT, 0) {
+		Some(i) -> match binary::slice_bytes(token, 0, i) {
+			Ok(head) -> Some((head, binary::drop_bytes(token, i + 1)))
 			Err(Nil) -> None
 		}
 		None -> None
 	}
 }
 
-fn handle_login(req http.Request, t Tables) http.Response {
-	match body.collect(req.body, 8192) {
+fn handle_login(req http::Request, t Tables) http::Response {
+	match body::collect(req.body, 8192) {
 		Err(_) -> json(400, '{"error":"bad body"}')
 		Ok(
 			raw,
-		) -> match option.then(
+		) -> match option::then(
 			form_get(raw, <<'user'>>),
-			fn(u) option.map(form_get(raw, <<'password'>>), fn(p) (u, p)),
+			fn(u) option::map(form_get(raw, <<'password'>>), fn(p) (u, p)),
 		) {
 			None -> json(400, '{"error":"missing user or password"}')
 			Some(creds) -> match creds {
 				(user, password) -> match find_by_name(t, user) {
 					None -> unauthorized()
 					Some(u) -> if checksum(password) == u.pw_hash {
-						http.with_header(
+						http::with_header(
 							json(200, '{"ok":true,"user":"${u.name}"}'),
 							NAME_SET_COOKIE,
 							session_cookie(u.name, sign(user)),
@@ -243,23 +243,23 @@ fn handle_login(req http.Request, t Tables) http.Response {
 	}
 }
 
-fn handle_me(req http.Request, t Tables) http.Response {
+fn handle_me(req http::Request, t Tables) http::Response {
 	match verify_session(req, t) {
 		None -> unauthorized()
 		Some(u) -> json(200, profile_json(u))
 	}
 }
 
-fn handle_logout() http.Response {
-	http.with_header(json(200, '{"ok":true}'), NAME_SET_COOKIE, <<'session=; Path=/; Max-Age=0'>>)
+fn handle_logout() http::Response {
+	http::with_header(json(200, '{"ok":true}'), NAME_SET_COOKIE, <<'session=; Path=/; Max-Age=0'>>)
 }
 
 const USERS_PREFIX = <<'/users/'>>
 const USERS_PREFIX_LEN = 7
 
-fn handle_user_by_id(path Binary, t Tables) http.Response {
-	rest = binary.drop_bytes(path, USERS_PREFIX_LEN)
-	user = match binary.parse_int(rest, binary.Dec) {
+fn handle_user_by_id(path Binary, t Tables) http::Response {
+	rest = binary::drop_bytes(path, USERS_PREFIX_LEN)
+	user = match binary::parse_int(rest, binary::Dec) {
 		Ok(id) -> find_by_id(t, id)
 		Err(Nil) -> None
 	}
@@ -269,19 +269,21 @@ fn handle_user_by_id(path Binary, t Tables) http.Response {
 	}
 }
 
-fn route(req http.Request, t Tables) http.Response {
-	path = http.path(req)
+fn route(req http::Request, t Tables) http::Response {
+	path = http::path(req)
 	match req.method {
-		http.Get -> match path {
+		http::Get -> match path {
 			<<'/'>> -> respond(200, VAL_TEXT, 'hello')
 			<<'/me'>> -> handle_me(req, t)
-			_ -> match binary.slice_bytes(path, 0, USERS_PREFIX_LEN) {
-				Ok(prefix) if prefix == USERS_PREFIX && binary.byte_size(path) > USERS_PREFIX_LEN ->
+			_ -> match binary::slice_bytes(path, 0, USERS_PREFIX_LEN) {
+				Ok(
+					prefix,
+				) if prefix == USERS_PREFIX && binary::byte_size(path) > USERS_PREFIX_LEN ->
 					handle_user_by_id(path, t)
 				_ -> json(404, '{"error":"not found"}')
 			}
 		}
-		http.Post -> match path {
+		http::Post -> match path {
 			<<'/login'>> -> handle_login(req, t)
 			<<'/logout'>> -> handle_logout()
 			_ -> json(404, '{"error":"not found"}')
@@ -291,19 +293,20 @@ fn route(req http.Request, t Tables) http.Response {
 }
 
 fn port_arg() Int {
-	match os.argv() {
-		[_script, p, .._rest] -> binary.parse_int(binary.from_string(p), binary.Dec) or DEFAULT_PORT
+	match os::argv() {
+		[_script, p, .._rest] ->
+			binary::parse_int(binary::from_string(p), binary::Dec) or DEFAULT_PORT
 		_ -> DEFAULT_PORT
 	}
 }
 
 pub fn main() {
-	tables = build_tables(0, USER_COUNT, Tables(by_name: map.new(), by_id: map.new()))
+	tables = build_tables(0, USER_COUNT, Tables(by_name: map::new(), by_id: map::new()))
 	port = port_arg()
 
 	println('bench_service listening on http://127.0.0.1:${port} (${USER_COUNT} users)')
 
-	match http.serve('127.0.0.1', port, fn(req) route(req, tables)) {
+	match http::serve('127.0.0.1', port, fn(req) route(req, tables)) {
 		Ok(_) -> Nil
 		Err(e) -> println('serve failed: ${e}')
 	}

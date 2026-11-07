@@ -27,7 +27,7 @@ import ./lib
 import scarlet/array
 
 pub fn main() {
-\tprintln(array.map([lib.one()], fn(x Int) x + 1))
+\tprintln(array::map([lib::one()], fn(x Int) x + 1))
 }
 ";
 
@@ -53,7 +53,7 @@ pub fn main() {
 fn hover_is_stable_across_many_rewinds() {
     let p = Project::new("arena_rewind_hover");
     p.write("lib.scrl", "pub fn one() Int { 1 }\n");
-    let entry = "import ./lib\nconst v = lib.one()\npub fn main() {\n\tprintln(v)\n}\n";
+    let entry = "import ./lib\nconst v = lib::one()\npub fn main() {\n\tprintln(v)\n}\n";
 
     let mut s = IncrementalSession::new();
     let mut seen: Option<String> = None;
@@ -89,7 +89,7 @@ const k = 10
 
 pub fn main() {
 \tg = fn(y Int) y * k
-\tprintln(g(lib.go(2)))
+\tprintln(g(lib::go(2)))
 }
 ";
 
@@ -123,7 +123,7 @@ fn edit_and_revert_returns_to_the_same_arena_state() {
         "lib.scrl",
         "pub type Pair = (Int, Int)\npub fn mk() Pair { (1, 2) }\n",
     );
-    let entry = "import ./lib\npub fn main() {\n\tprintln(lib.mk())\n}\n";
+    let entry = "import ./lib\npub fn main() {\n\tprintln(lib::mk())\n}\n";
 
     let mut s = IncrementalSession::new();
     assert!(s.check(&parse(entry), Some(&p.dir)).success());

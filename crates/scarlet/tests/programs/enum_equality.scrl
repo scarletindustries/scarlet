@@ -68,9 +68,9 @@ pub fn main() {
 	check('Array of Tuple eq', True, [(1, 'a')] == [(1, 'a')])
 
 	// Maps compare by contents, not insertion order.
-	m1 = map.from_list([('a', 1), ('b', 2)])
-	m2 = map.from_list([('b', 2), ('a', 1)])
-	m3 = map.from_list([('a', 1)])
+	m1 = map::from_list([('a', 1), ('b', 2)])
+	m2 = map::from_list([('b', 2), ('a', 1)])
+	m3 = map::from_list([('a', 1)])
 	check('Map eq ignores insertion order', True, m1 == m2)
 	check('Map ne on size', True, m1 != m3)
 
@@ -88,16 +88,16 @@ pub fn main() {
 	er1 Result(Int, String) = Err('x')
 	check('Result eq', True, ok1 == ok2)
 	check('Result ne across variants', True, ok1 != er1)
-	check('Order eq', True, decimal.compare(decimal.from_int(1), decimal.from_int(2)) == Lt)
+	check('Order eq', True, decimal::compare(decimal::from_int(1), decimal::from_int(2)) == Lt)
 
 	// --- where structural equality is NOT the semantic one -------------------------
 
 	// A Decimal carries (units, scale), so 1.10 and 1.1 are structurally distinct
-	// even though they are numerically equal. `decimal.eq` is the numeric answer;
+	// even though they are numerically equal. `decimal::eq` is the numeric answer;
 	// `==` is the structural one. Both are correct — for different questions.
-	d_scaled = decimal.parse('1.10') or decimal.from_int(0)
-	d_plain = decimal.parse('1.1') or decimal.from_int(0)
+	d_scaled = decimal::parse('1.10') or decimal::from_int(0)
+	d_plain = decimal::parse('1.1') or decimal::from_int(0)
 	check('Decimal == is structural', False, d_scaled == d_plain)
-	check('decimal.eq is numeric', True, decimal.eq(d_scaled, d_plain))
-	check('normalize makes them structurally equal', True, decimal.normalize(d_scaled) == d_plain)
+	check('decimal::eq is numeric', True, decimal::eq(d_scaled, d_plain))
+	check('normalize makes them structurally equal', True, decimal::normalize(d_scaled) == d_plain)
 }

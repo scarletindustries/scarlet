@@ -233,7 +233,7 @@ impl LspServer {
                 "capabilities": {
                     "textDocumentSync": 1,
                     "hoverProvider": true,
-                    "completionProvider": { "triggerCharacters": ["."] },
+                    "completionProvider": { "triggerCharacters": [":"] },
                     "definitionProvider": true,
                     "referencesProvider": true,
                     "renameProvider": { "prepareProvider": true },

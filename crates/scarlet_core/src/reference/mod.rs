@@ -36,9 +36,9 @@ pub use scarlet_types::types::EntityKind;
 /// How a name is being used at an occurrence site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReferenceKind {
-    /// `module.member` — qualified through an import alias.
+    /// `module::member` — qualified through an import alias.
     Qualified,
-    /// The `module` half of a `module.member` access, targeting the
+    /// The `module` half of a `module::member` access, targeting the
     /// `ModuleAlias` definition. Not a use site, since a qualifier never
     /// evaluates its target, but the unused-import check treats an alias as
     /// live when one occurs outside its own declaration.

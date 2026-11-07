@@ -4,7 +4,7 @@
 // itself), TailCallKnown (a known non-self function: mutual recursion), and
 // TailCall (an indirect call through a closure value). All three must run in
 // constant stack space, so every loop here recurses deep enough to blow a
-// frame-per-call stack and then reports `internal.stack_depth()` at the bottom:
+// frame-per-call stack and then reports `internal::stack_depth()` at the bottom:
 // two frames (main, and the single live frame) no matter how deep.
 //
 // The closure half pins capture-by-value at creation time, capture of bindings
@@ -28,7 +28,7 @@ fn sum_to(n Int, acc Int) Int {
 
 fn self_depth(n Int) Int {
 	if n == 0 {
-		internal.stack_depth()
+		internal::stack_depth()
 	} else {
 		self_depth(n - 1)
 	}
@@ -54,7 +54,7 @@ fn pong(n Int, acc Int) Int {
 
 fn mutual_depth_a(n Int) Int {
 	if n == 0 {
-		internal.stack_depth()
+		internal::stack_depth()
 	} else {
 		mutual_depth_b(n - 1)
 	}
@@ -62,7 +62,7 @@ fn mutual_depth_a(n Int) Int {
 
 fn mutual_depth_b(n Int) Int {
 	if n == 0 {
-		internal.stack_depth()
+		internal::stack_depth()
 	} else {
 		mutual_depth_a(n - 1)
 	}
@@ -89,7 +89,7 @@ fn run(s Stepper, n Int, acc Int) Int {
 // accumulator: an indirect tail call must not grow the stack either.
 fn run_depth(s Stepper, n Int, acc Int) Int {
 	if n == 0 {
-		internal.stack_depth() + acc
+		internal::stack_depth() + acc
 	} else {
 		s.step(s, n - 1, acc)
 	}
@@ -212,12 +212,12 @@ pub fn main() {
 
 	// Closures in an array, applied by map; each one captured a different `k`.
 	steps = [adder(1), double, compose(adder(2), double)]
-	applied = array.map(steps, fn(f) f(10))
-	println('array of closures: ${string.inspect(applied)}')
+	applied = array::map(steps, fn(f) f(10))
+	println('array of closures: ${string::inspect(applied)}')
 
 	// A closure held in a record field, reached from a match arm.
 	holder = Stepper(step: fn(s Stepper, n Int, acc Int) run(s, n, acc))
-	picked = match option.is_some(Some(holder)) {
+	picked = match option::is_some(Some(holder)) {
 		True -> run(holder, 3, 100)
 		False -> 0
 	}
@@ -226,7 +226,7 @@ pub fn main() {
 	// Recursion through a captured fn value, and a top-level fn passed by name.
 	println('twice: ${twice(add10, 1)} ${twice(double, 3)} ${twice(fn(x) x * x, 3)}')
 
-	println('constructor as value: ${string.inspect(array.map([1, 2], wrap))}')
+	println('constructor as value: ${string::inspect(array::map([1, 2], wrap))}')
 
 	println('done')
 }

@@ -226,7 +226,7 @@ enum Overwrite {
 /// index order is never perturbed); `Some` an in-place overwrite (restored).
 ///
 /// A module's names — its imports, its own type heads, the mangled
-/// `qualifier.Name` keys — are visible only while that module compiles.
+/// `qualifier::Name` keys — are visible only while that module compiles.
 /// Without this log they would stay in the flat maps for the rest of the
 /// compile, letting a later module resolve a name it never imported (which
 /// `scarlet check` then accepts where a single-file LSP check errors). The
@@ -454,7 +454,7 @@ impl TypeEnv {
 
     /// Close the innermost module frame, removing every by-name entry the
     /// module registered — its imports, its own type heads and toplevel
-    /// values, the mangled `qualifier.Name` keys — and restoring what they
+    /// values, the mangled `qualifier::Name` keys — and restoring what they
     /// overwrote. Scopes opened inside the frame are balanced by now; entries
     /// above the recorded `scope_undo` mark were attributed to a scope that
     /// was already open at frame entry, so they unwind with the frame.
@@ -689,12 +689,12 @@ impl TypeEnv {
         self.type_info.get(name).copied()
     }
 
-    /// Every qualified spelling (`map.Map`) under which a type named `name`
+    /// Every qualified spelling (`map::Map`) under which a type named `name`
     /// is in scope, sorted. An import registers each of its module's types
-    /// under `qualifier.Name`, so these are exactly the spellings that would
+    /// under `qualifier::Name`, so these are exactly the spellings that would
     /// resolve where the bare `name` did not.
     pub(crate) fn qualified_spellings(&self, name: &str) -> Vec<String> {
-        let suffix = format!(".{name}");
+        let suffix = format!("::{name}");
         let mut out: Vec<String> = self
             .type_info
             .keys()

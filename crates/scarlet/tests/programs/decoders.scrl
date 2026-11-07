@@ -21,21 +21,21 @@ fn line(label String, value String) Nil {
 
 // Decode and report how many failures came back, then each of them. The count
 // is the point: an API that stops at the first bad member always prints 1.
-fn failures(src String, dec decode.Decoder(a)) String {
-	match json.parse(src) {
-		Err(e) -> 'parse error: ${json.parse_error_message(e)}'
-		Ok(d) -> match decode.run(dec, d) {
+fn failures(src String, dec decode::Decoder(a)) String {
+	match json::parse(src) {
+		Err(e) -> 'parse error: ${json::parse_error_message(e)}'
+		Ok(d) -> match decode::run(dec, d) {
 			Ok(_) -> 'decoded'
-			Err(fs) -> '${array.length(fs)}: ${decode.failures_to_string(fs)}'
+			Err(fs) -> '${array::length(fs)}: ${decode::failures_to_string(fs)}'
 		}
 	}
 }
 
-fn decoded(src String, dec decode.Decoder(a)) String {
-	match json.parse(src) {
-		Err(e) -> 'parse error: ${json.parse_error_message(e)}'
-		Ok(d) -> match decode.run(dec, d) {
-			Err(fs) -> 'decode error: ${decode.failures_to_string(fs)}'
+fn decoded(src String, dec decode::Decoder(a)) String {
+	match json::parse(src) {
+		Err(e) -> 'parse error: ${json::parse_error_message(e)}'
+		Ok(d) -> match decode::run(dec, d) {
+			Err(fs) -> 'decode error: ${decode::failures_to_string(fs)}'
 			Ok(v) -> '${v}'
 		}
 	}
@@ -47,13 +47,13 @@ fn decoded(src String, dec decode.Decoder(a)) String {
 type Message {
 	id Int
 	channel_id Int
-	guild_id field.Field(Int)
+	guild_id field::Field(Int)
 	author_id Int
 	author_name String
 	author_bot Bool
 	content String
 	timestamp String
-	edited_timestamp field.Field(String)
+	edited_timestamp field::Field(String)
 	tts Bool
 	mention_everyone Bool
 	mentions Array(Int)
@@ -63,72 +63,72 @@ type Message {
 	reaction_counts Array(Int)
 	nonce String
 	pinned Bool
-	webhook_id field.Field(Int)
+	webhook_id field::Field(Int)
 	kind Int
-	application_id field.Field(Int)
-	reference_id field.Field(Int)
+	application_id field::Field(Int)
+	reference_id field::Field(Int)
 	flags Int
-	thread_id field.Field(Int)
+	thread_id field::Field(Int)
 	component_ids Array(Int)
 	sticker_ids Array(Int)
 	position Int
-	member_nick field.Field(String)
+	member_nick field::Field(String)
 	member_roles Array(Int)
-	referenced_message_id field.Field(Int)
+	referenced_message_id field::Field(Int)
 	resolved_user_ids Array(Int)
-	poll_question field.Field(String)
+	poll_question field::Field(String)
 	call_participants Array(Int)
-	interaction_id field.Field(Int)
-	interaction_name field.Field(String)
-	application_name field.Field(String)
-	role_subscription field.Field(String)
-	purchase_kind field.Field(String)
+	interaction_id field::Field(Int)
+	interaction_name field::Field(String)
+	application_name field::Field(String)
+	role_subscription field::Field(String)
+	purchase_kind field::Field(String)
 	snapshot_ids Array(Int)
 	ping_count Int
 }
 
-fn message() decode.Decoder(Message) {
-	id <- decode.take('id', decode.int_string())
-	channel_id <- decode.take('channel_id', decode.int_string())
-	guild_id <- decode.take_optional('guild_id', decode.int_string())
-	author_id <- decode.take('author_id', decode.int_string())
-	author_name <- decode.take('author_name', decode.string_value())
-	author_bot <- decode.take('author_bot', decode.bool())
-	content <- decode.take('content', decode.string_value())
-	timestamp <- decode.take('timestamp', decode.string_value())
-	edited_timestamp <- decode.take_optional('edited_timestamp', decode.string_value())
-	tts <- decode.take('tts', decode.bool())
-	mention_everyone <- decode.take('mention_everyone', decode.bool())
-	mentions <- decode.take('mentions', decode.list(decode.int_string()))
-	mention_roles <- decode.take('mention_roles', decode.list(decode.int_string()))
-	attachment_ids <- decode.take('attachment_ids', decode.list(decode.int_string()))
-	embed_titles <- decode.take('embed_titles', decode.list(decode.string_value()))
-	reaction_counts <- decode.take('reaction_counts', decode.list(decode.int()))
-	nonce <- decode.take('nonce', decode.string_value())
-	pinned <- decode.take('pinned', decode.bool())
-	webhook_id <- decode.take_optional('webhook_id', decode.int_string())
-	kind <- decode.take('type', decode.int())
-	application_id <- decode.take_optional('application_id', decode.int_string())
-	reference_id <- decode.take_optional('reference_id', decode.int_string())
-	flags <- decode.take('flags', decode.int())
-	thread_id <- decode.take_optional('thread_id', decode.int_string())
-	component_ids <- decode.take('component_ids', decode.list(decode.int_string()))
-	sticker_ids <- decode.take('sticker_ids', decode.list(decode.int_string()))
-	position <- decode.take('position', decode.int())
-	member_nick <- decode.take_optional('member_nick', decode.string_value())
-	member_roles <- decode.take('member_roles', decode.list(decode.int_string()))
-	referenced_message_id <- decode.take_optional('referenced_message_id', decode.int_string())
-	resolved_user_ids <- decode.take('resolved_user_ids', decode.list(decode.int_string()))
-	poll_question <- decode.take_optional('poll_question', decode.string_value())
-	call_participants <- decode.take('call_participants', decode.list(decode.int_string()))
-	interaction_id <- decode.take_optional('interaction_id', decode.int_string())
-	interaction_name <- decode.take_optional('interaction_name', decode.string_value())
-	application_name <- decode.take_optional('application_name', decode.string_value())
-	role_subscription <- decode.take_optional('role_subscription', decode.string_value())
-	purchase_kind <- decode.take_optional('purchase_kind', decode.string_value())
-	snapshot_ids <- decode.take('snapshot_ids', decode.list(decode.int_string()))
-	ping_count <- decode.take('ping_count', decode.int())
-	decode.succeed(
+fn message() decode::Decoder(Message) {
+	id <- decode::take('id', decode::int_string())
+	channel_id <- decode::take('channel_id', decode::int_string())
+	guild_id <- decode::take_optional('guild_id', decode::int_string())
+	author_id <- decode::take('author_id', decode::int_string())
+	author_name <- decode::take('author_name', decode::string_value())
+	author_bot <- decode::take('author_bot', decode::bool())
+	content <- decode::take('content', decode::string_value())
+	timestamp <- decode::take('timestamp', decode::string_value())
+	edited_timestamp <- decode::take_optional('edited_timestamp', decode::string_value())
+	tts <- decode::take('tts', decode::bool())
+	mention_everyone <- decode::take('mention_everyone', decode::bool())
+	mentions <- decode::take('mentions', decode::list(decode::int_string()))
+	mention_roles <- decode::take('mention_roles', decode::list(decode::int_string()))
+	attachment_ids <- decode::take('attachment_ids', decode::list(decode::int_string()))
+	embed_titles <- decode::take('embed_titles', decode::list(decode::string_value()))
+	reaction_counts <- decode::take('reaction_counts', decode::list(decode::int()))
+	nonce <- decode::take('nonce', decode::string_value())
+	pinned <- decode::take('pinned', decode::bool())
+	webhook_id <- decode::take_optional('webhook_id', decode::int_string())
+	kind <- decode::take('type', decode::int())
+	application_id <- decode::take_optional('application_id', decode::int_string())
+	reference_id <- decode::take_optional('reference_id', decode::int_string())
+	flags <- decode::take('flags', decode::int())
+	thread_id <- decode::take_optional('thread_id', decode::int_string())
+	component_ids <- decode::take('component_ids', decode::list(decode::int_string()))
+	sticker_ids <- decode::take('sticker_ids', decode::list(decode::int_string()))
+	position <- decode::take('position', decode::int())
+	member_nick <- decode::take_optional('member_nick', decode::string_value())
+	member_roles <- decode::take('member_roles', decode::list(decode::int_string()))
+	referenced_message_id <- decode::take_optional('referenced_message_id', decode::int_string())
+	resolved_user_ids <- decode::take('resolved_user_ids', decode::list(decode::int_string()))
+	poll_question <- decode::take_optional('poll_question', decode::string_value())
+	call_participants <- decode::take('call_participants', decode::list(decode::int_string()))
+	interaction_id <- decode::take_optional('interaction_id', decode::int_string())
+	interaction_name <- decode::take_optional('interaction_name', decode::string_value())
+	application_name <- decode::take_optional('application_name', decode::string_value())
+	role_subscription <- decode::take_optional('role_subscription', decode::string_value())
+	purchase_kind <- decode::take_optional('purchase_kind', decode::string_value())
+	snapshot_ids <- decode::take('snapshot_ids', decode::list(decode::int_string()))
+	ping_count <- decode::take('ping_count', decode::int())
+	decode::succeed(
 		Message(
 			id: id,
 			channel_id: channel_id,
@@ -181,19 +181,19 @@ fn wide(id String, tts String) String {
 }
 
 fn summarise(m Message) String {
-	nick = field.fold(m.member_nick, fn() 'absent', fn() 'null', fn(v) 'present(${v})')
-	ref = field.fold(m.referenced_message_id, fn() 'absent', fn() 'null', fn(v) 'present(${v})')
-	guild = field.fold(m.guild_id, fn() 'absent', fn() 'null', fn(v) 'present(${v})')
-	'${m.id} ${m.content} mentions=${array.length(
+	nick = field::fold(m.member_nick, fn() 'absent', fn() 'null', fn(v) 'present(${v})')
+	ref = field::fold(m.referenced_message_id, fn() 'absent', fn() 'null', fn(v) 'present(${v})')
+	guild = field::fold(m.guild_id, fn() 'absent', fn() 'null', fn(v) 'present(${v})')
+	'${m.id} ${m.content} mentions=${array::length(
 		m.mentions,
 	)} guild=${guild} nick=${nick} ref=${ref}'
 }
 
 fn wide_summary(src String) String {
-	match json.parse(src) {
-		Err(e) -> 'parse error: ${json.parse_error_message(e)}'
-		Ok(d) -> match decode.run(message(), d) {
-			Err(fs) -> '${array.length(fs)}: ${decode.failures_to_string(fs)}'
+	match json::parse(src) {
+		Err(e) -> 'parse error: ${json::parse_error_message(e)}'
+		Ok(d) -> match decode::run(message(), d) {
+			Err(fs) -> '${array::length(fs)}: ${decode::failures_to_string(fs)}'
 			Ok(m) -> summarise(m)
 		}
 	}
@@ -210,47 +210,47 @@ type Row {
 	h String
 }
 
-fn row() decode.Decoder(Row) {
-	a <- decode.take('a', decode.int())
-	b <- decode.take('b', decode.string_value())
-	c <- decode.take('c', decode.bool())
-	d <- decode.take('d', decode.int())
-	e <- decode.take('e', decode.string_value())
-	f <- decode.take('f', decode.bool())
-	g <- decode.take('g', decode.int())
-	h <- decode.take('h', decode.string_value())
-	decode.succeed(Row(a: a, b: b, c: c, d: d, e: e, f: f, g: g, h: h))
+fn row() decode::Decoder(Row) {
+	a <- decode::take('a', decode::int())
+	b <- decode::take('b', decode::string_value())
+	c <- decode::take('c', decode::bool())
+	d <- decode::take('d', decode::int())
+	e <- decode::take('e', decode::string_value())
+	f <- decode::take('f', decode::bool())
+	g <- decode::take('g', decode::int())
+	h <- decode::take('h', decode::string_value())
+	decode::succeed(Row(a: a, b: b, c: c, d: d, e: e, f: f, g: g, h: h))
 }
 
 type Patch {
 	id Int
-	nick field.Field(String)
-	topic field.Field(String)
+	nick field::Field(String)
+	topic field::Field(String)
 }
 
-fn patch() decode.Decoder(Patch) {
-	id <- decode.take('id', decode.int())
-	nick <- decode.take_optional('nick', decode.string_value())
-	topic <- decode.take_optional('topic', decode.string_value())
-	decode.succeed(Patch(id: id, nick: nick, topic: topic))
+fn patch() decode::Decoder(Patch) {
+	id <- decode::take('id', decode::int())
+	nick <- decode::take_optional('nick', decode::string_value())
+	topic <- decode::take_optional('topic', decode::string_value())
+	decode::succeed(Patch(id: id, nick: nick, topic: topic))
 }
 
-fn state(f field.Field(String)) String {
-	field.fold(f, fn() 'absent', fn() 'null', fn(v) 'present(${v})')
+fn state(f field::Field(String)) String {
+	field::fold(f, fn() 'absent', fn() 'null', fn(v) 'present(${v})')
 }
 
 fn applied(src String) String {
-	match json.parse(src) {
-		Err(e) -> 'parse error: ${json.parse_error_message(e)}'
-		Ok(d) -> match decode.run(patch(), d) {
-			Err(fs) -> '${array.length(fs)}: ${decode.failures_to_string(fs)}'
-			Ok(p) -> '${state(p.nick)} -> ${field.update(p.nick, Some('held'))}'
+	match json::parse(src) {
+		Err(e) -> 'parse error: ${json::parse_error_message(e)}'
+		Ok(d) -> match decode::run(patch(), d) {
+			Err(fs) -> '${array::length(fs)}: ${decode::failures_to_string(fs)}'
+			Ok(p) -> '${state(p.nick)} -> ${field::update(p.nick, Some('held'))}'
 		}
 	}
 }
 
-fn loose_int() decode.Decoder(Int) {
-	decode.one_of(decode.int(), [decode.map(decode.float(), fn(f) float.round(f))])
+fn loose_int() decode::Decoder(Int) {
+	decode::one_of(decode::int(), [decode::map(decode::float(), fn(f) float::round(f))])
 }
 
 type Pair {
@@ -258,21 +258,21 @@ type Pair {
 	w Int
 }
 
-fn pair() decode.Decoder(Pair) {
-	v <- decode.take('v', loose_int())
-	w <- decode.take('w', loose_int())
-	decode.succeed(Pair(v: v, w: w))
+fn pair() decode::Decoder(Pair) {
+	v <- decode::take('v', loose_int())
+	w <- decode::take('w', loose_int())
+	decode::succeed(Pair(v: v, w: w))
 }
 
 // Neither of these is handed a `String` or a `Message` to stand in for the
 // answer. `Err` inhabits `Result(a, Array(Failure))` for every `a`, and the
 // recovery channel has a `Halt` that inhabits `Recovery(a)` for every `a`.
-fn refuse_string() decode.Decoder(String) {
-	decode.fail('a string this program approves of')
+fn refuse_string() decode::Decoder(String) {
+	decode::fail('a string this program approves of')
 }
 
-fn refuse_message() decode.Decoder(Message) {
-	decode.fail('a message this program approves of')
+fn refuse_message() decode::Decoder(Message) {
+	decode::fail('a message this program approves of')
 }
 
 // The price, stated: a decoder with no recovery stops accumulation there.
@@ -283,31 +283,31 @@ type Three {
 	c Int
 }
 
-fn halting() decode.Decoder(Three) {
-	a <- decode.also(refuse_string())
-	b <- decode.take('b', decode.int())
-	c <- decode.take('c', decode.int())
-	decode.succeed(Three(a: a, b: b, c: c))
+fn halting() decode::Decoder(Three) {
+	a <- decode::also(refuse_string())
+	b <- decode::take('b', decode::int())
+	c <- decode::take('c', decode::int())
+	decode::succeed(Three(a: a, b: b, c: c))
 }
 
-fn guarded() decode.Decoder(Pair) {
-	v <- decode.take('v', decode.guard(decode.int(), fn(n) n > 0, 'a positive integer'))
-	w <- decode.take('w', decode.guard(decode.int(), fn(n) n > 0, 'a positive integer'))
-	decode.succeed(Pair(v: v, w: w))
+fn guarded() decode::Decoder(Pair) {
+	v <- decode::take('v', decode::guard(decode::int(), fn(n) n > 0, 'a positive integer'))
+	w <- decode::take('w', decode::guard(decode::int(), fn(n) n > 0, 'a positive integer'))
+	decode::succeed(Pair(v: v, w: w))
 }
 
-fn positive_or_fail() decode.Decoder(Int) {
-	decode.then(decode.int(), fn(n) if n > 0 {
-		decode.succeed(n)
+fn positive_or_fail() decode::Decoder(Int) {
+	decode::then(decode::int(), fn(n) if n > 0 {
+		decode::succeed(n)
 	} else {
-		decode.fail('a positive integer')
+		decode::fail('a positive integer')
 	})
 }
 
-fn thenned() decode.Decoder(Pair) {
-	v <- decode.take('v', positive_or_fail())
-	w <- decode.take('w', positive_or_fail())
-	decode.succeed(Pair(v: v, w: w))
+fn thenned() decode::Decoder(Pair) {
+	v <- decode::take('v', positive_or_fail())
+	w <- decode::take('w', positive_or_fail())
+	decode::succeed(Pair(v: v, w: w))
 }
 
 type Event {
@@ -315,16 +315,16 @@ type Event {
 	Beat(seq Int)
 }
 
-fn pick(t String) Result(decode.Decoder(Event), Nil) {
+fn pick(t String) Result(decode::Decoder(Event), Nil) {
 	match t {
-		'CHAT' -> Ok(decode.map(decode.field('text', decode.string_value()), fn(c) Chat(c)))
-		'BEAT' -> Ok(decode.map(decode.field('seq', decode.int()), fn(s) Beat(s)))
+		'CHAT' -> Ok(decode::map(decode::field('text', decode::string_value()), fn(c) Chat(c)))
+		'BEAT' -> Ok(decode::map(decode::field('seq', decode::int()), fn(s) Beat(s)))
 		_ -> Err(Nil)
 	}
 }
 
-fn event() decode.Decoder(Event) {
-	decode.tagged('t', pick)
+fn event() decode::Decoder(Event) {
+	decode::tagged('t', pick)
 }
 
 pub fn main() {

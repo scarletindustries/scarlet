@@ -36,7 +36,7 @@ pub fn has(h Headers, name Binary) Bool
 pub fn set(h Headers, name Binary, value Binary) Headers {
 	match h {
 		[] -> [Header(name: name, value: value)]
-		[field, ..rest] -> if binary.eq_ignore_ascii_case(field.name, name) {
+		[field, ..rest] -> if binary::eq_ignore_ascii_case(field.name, name) {
 			[Header(name: field.name, value: value), ..delete(rest, name)]
 		} else {
 			[field, ..set(rest, name, value)]
@@ -57,7 +57,7 @@ pub fn delete(h Headers, name Binary) Headers {
 fn delete_walk(h Headers, name Binary) Headers {
 	match h {
 		[] -> []
-		[field, ..rest] -> if binary.eq_ignore_ascii_case(field.name, name) {
+		[field, ..rest] -> if binary::eq_ignore_ascii_case(field.name, name) {
 			delete_walk(rest, name)
 		} else {
 			[field, ..delete_walk(rest, name)]
@@ -95,11 +95,11 @@ pub fn valid(h Headers) Bool
 
 // A field name must be a non-empty RFC 9110 token (§5.6.2).
 fn valid_name(name Binary) Bool {
-	binary.byte_size(name) > 0 && token_bytes_from(name, 0, binary.byte_size(name))
+	binary::byte_size(name) > 0 && token_bytes_from(name, 0, binary::byte_size(name))
 }
 
 fn token_bytes_from(name Binary, i Int, len Int) Bool {
-	i >= len || is_token_byte(binary.byte_at(name, i)) && token_bytes_from(name, i + 1, len)
+	i >= len || is_token_byte(binary::byte_at(name, i)) && token_bytes_from(name, i + 1, len)
 }
 
 // ALPHA, DIGIT, and !#$%&'*+-.^_`|~ (RFC 9110 §5.6.2). One flat test, since
@@ -126,7 +126,7 @@ fn valid_value(value Binary) Bool {
 }
 
 fn lacks(v Binary, byte Binary) Bool {
-	match binary.index_of(v, byte, 0) {
+	match binary::index_of(v, byte, 0) {
 		Some(_) -> False
 		None -> True
 	}
@@ -143,7 +143,7 @@ fn token_walk(h Headers, name Binary, token Binary) Bool {
 	match h {
 		[] -> False
 		[field, ..rest] -> {
-			hit = binary.eq_ignore_ascii_case(field.name, name) && has_token(field.value, token)
+			hit = binary::eq_ignore_ascii_case(field.name, name) && has_token(field.value, token)
 			if hit {
 				True
 			} else {
@@ -154,7 +154,7 @@ fn token_walk(h Headers, name Binary, token Binary) Bool {
 }
 
 fn has_token(v Binary, token Binary) Bool {
-	value_has_token(v, 0, binary.byte_size(v), token)
+	value_has_token(v, 0, binary::byte_size(v), token)
 }
 
 // Whether `v[lo..hi]` is `token`, ignoring case. An empty element never
@@ -163,15 +163,15 @@ fn element_is(v Binary, lo Int, hi Int, token Binary) Bool {
 	if hi <= lo {
 		False
 	} else {
-		match binary.slice_bytes(v, lo, hi - lo) {
-			Ok(e) -> binary.eq_ignore_ascii_case(e, token)
+		match binary::slice_bytes(v, lo, hi - lo) {
+			Ok(e) -> binary::eq_ignore_ascii_case(e, token)
 			Err(Nil) -> False
 		}
 	}
 }
 
 fn value_has_token(v Binary, from Int, len Int, token Binary) Bool {
-	to = match binary.index_of(v, comma, from) {
+	to = match binary::index_of(v, comma, from) {
 		Some(i) -> i
 		None -> len
 	}
@@ -187,7 +187,7 @@ fn value_has_token(v Binary, from Int, len Int, token Binary) Bool {
 }
 
 fn skip_ows(v Binary, i Int, hi Int) Int {
-	if i < hi && is_ows(binary.byte_at(v, i)) {
+	if i < hi && is_ows(binary::byte_at(v, i)) {
 		skip_ows(v, i + 1, hi)
 	} else {
 		i
@@ -195,7 +195,7 @@ fn skip_ows(v Binary, i Int, hi Int) Int {
 }
 
 fn trim_ows(v Binary, lo Int, i Int) Int {
-	if i > lo && is_ows(binary.byte_at(v, i - 1)) {
+	if i > lo && is_ows(binary::byte_at(v, i - 1)) {
 		trim_ows(v, lo, i - 1)
 	} else {
 		i

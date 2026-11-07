@@ -919,7 +919,7 @@ fn every_constructor_has_names() {
                \tDot\n\
                }\n\
                pub fn main() {\n\
-               \tprintln(string.inspect(Circle(radius: 1)))\n\
+               \tprintln(string::inspect(Circle(radius: 1)))\n\
                }\n";
     let r = scarlet::bytecode::compile(&parse(src), None);
     assert!(r.success(), "{:?}", r.diagnostics);

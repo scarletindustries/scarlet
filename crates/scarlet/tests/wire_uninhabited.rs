@@ -30,10 +30,10 @@ fn a_record_with_a_phantom_bodiless_argument_round_trips() {
          }\n\
          pub fn main() {\n\
          \tt = tag(7)\n\
-         \tbytes = wire.encode(t)\n\
-         \tprintln(binary.byte_size(bytes))\n\
-         \tprintln(binary.slice_bytes(bytes, 11, 1) == Ok(<<14>>))\n\
-         \tmatch wire.decode(bytes) {\n\
+         \tbytes = wire::encode(t)\n\
+         \tprintln(binary::byte_size(bytes))\n\
+         \tprintln(binary::slice_bytes(bytes, 11, 1) == Ok(<<14>>))\n\
+         \tmatch wire::decode(bytes) {\n\
          \t\tOk(back) -> {\n\
          \t\t\tprintln(back == t)\n\
          \t\t\tprintln(back.value)\n\
@@ -60,21 +60,21 @@ fn an_empty_array_of_a_bodiless_type_round_trips_and_forged_counts_are_malformed
          fn empty() Array(Native) {\n\
          \t[]\n\
          }\n\
-         fn report(r Result(Array(Native), wire.DecodeError), xs Array(Native)) {\n\
+         fn report(r Result(Array(Native), wire::DecodeError), xs Array(Native)) {\n\
          \tmatch r {\n\
          \t\tOk(back) -> println(back == xs)\n\
-         \t\tErr(wire.Malformed(at, what)) -> println('${at} ${what}')\n\
+         \t\tErr(wire::Malformed(at, what)) -> println('${at} ${what}')\n\
          \t\tErr(_) -> println('some other refusal')\n\
          \t}\n\
          }\n\
          pub fn main() {\n\
          \txs = empty()\n\
-         \tbytes = wire.encode(xs)\n\
-         \tprintln(binary.byte_size(bytes))\n\
-         \treport(wire.decode(bytes), xs)\n\
-         \thead = binary.slice_bytes(bytes, 0, 11) or <<>>\n\
-         \treport(wire.decode(binary.concat([head, <<1>>])), xs)\n\
-         \treport(wire.decode(binary.concat([head, <<1, 0>>])), xs)\n\
+         \tbytes = wire::encode(xs)\n\
+         \tprintln(binary::byte_size(bytes))\n\
+         \treport(wire::decode(bytes), xs)\n\
+         \thead = binary::slice_bytes(bytes, 0, 11) or <<>>\n\
+         \treport(wire::decode(binary::concat([head, <<1>>])), xs)\n\
+         \treport(wire::decode(binary::concat([head, <<1, 0>>])), xs)\n\
          }\n",
         "12\nTrue\n11 count is larger than the remaining input can hold\n\
          12 no value of this type can exist\n",
@@ -94,20 +94,20 @@ fn none_of_a_bodiless_type_round_trips_and_a_forged_some_is_malformed() {
          fn absent() Option(Native) {\n\
          \tNone\n\
          }\n\
-         fn report(r Result(Option(Native), wire.DecodeError), n Option(Native)) {\n\
+         fn report(r Result(Option(Native), wire::DecodeError), n Option(Native)) {\n\
          \tmatch r {\n\
          \t\tOk(back) -> println(back == n)\n\
-         \t\tErr(wire.Malformed(at, what)) -> println('${at} ${what}')\n\
+         \t\tErr(wire::Malformed(at, what)) -> println('${at} ${what}')\n\
          \t\tErr(_) -> println('some other refusal')\n\
          \t}\n\
          }\n\
          pub fn main() {\n\
          \tn = absent()\n\
-         \tbytes = wire.encode(n)\n\
-         \tprintln(binary.slice_bytes(bytes, 11, 1) == Ok(<<1>>))\n\
-         \treport(wire.decode(bytes), n)\n\
-         \thead = binary.slice_bytes(bytes, 0, 11) or <<>>\n\
-         \treport(wire.decode(binary.concat([head, <<0>>])), n)\n\
+         \tbytes = wire::encode(n)\n\
+         \tprintln(binary::slice_bytes(bytes, 11, 1) == Ok(<<1>>))\n\
+         \treport(wire::decode(bytes), n)\n\
+         \thead = binary::slice_bytes(bytes, 0, 11) or <<>>\n\
+         \treport(wire::decode(binary::concat([head, <<0>>])), n)\n\
          }\n",
         "True\nTrue\n12 no value of this type can exist\n",
     );
@@ -126,13 +126,13 @@ fn decode_at_a_bodiless_type_is_malformed_rather_than_a_value_or_a_panic() {
     run_outputs(
         "import scarlet/wire\n\
          pub type Native\n\
-         fn read(b Binary) Result(Native, wire.DecodeError) {\n\
-         \twire.decode(b)\n\
+         fn read(b Binary) Result(Native, wire::DecodeError) {\n\
+         \twire::decode(b)\n\
          }\n\
          pub fn main() {\n\
          \tmatch read(<<'SW', 3, 255, 196, 235, 248, 135, 151, 201, 245>>) {\n\
          \t\tOk(_) -> println('a value of a type that has none')\n\
-         \t\tErr(wire.Malformed(at, what)) -> println('${at} ${what}')\n\
+         \t\tErr(wire::Malformed(at, what)) -> println('${at} ${what}')\n\
          \t\tErr(_) -> println('some other refusal')\n\
          \t}\n\
          }\n",

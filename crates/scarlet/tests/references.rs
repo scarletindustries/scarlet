@@ -15,15 +15,15 @@ use common::{
 };
 
 const C_SRC: &str = "pub fn shared() Int { 42 }\n";
-const B_SRC: &str = "import ./c\npub fn bridge() Int { c.shared() + 1 }\n";
+const B_SRC: &str = "import ./c\npub fn bridge() Int { c::shared() + 1 }\n";
 // Entry uses a def in B, a def in C (also used by B), and a stdlib def.
 const ENTRY: &str = "import ./b\n\
 import ./c\n\
 import scarlet/array\n\
 pub fn main() {\n\
-\tx = b.bridge()\n\
-\ty = c.shared()\n\
-\tz = array.length([1, 2, 3])\n\
+\tx = b::bridge()\n\
+\ty = c::shared()\n\
+\tz = array::length([1, 2, 3])\n\
 \tprintln(x + y + z)\n\
 }\n";
 
@@ -62,7 +62,7 @@ fn cross_module_goto_def_use_in_a_def_in_b() {
     let (l, c) = cursor(ENTRY, "bridge", 1, 1);
     let (m, span) = s
         .definition("main", l, c)
-        .expect("b.bridge resolves to a definition");
+        .expect("b::bridge resolves to a definition");
     assert_eq!(m.last().map(String::as_str), Some("b"));
     assert!(span.start_line >= 0 && span.start_column >= 0);
 
@@ -71,7 +71,7 @@ fn cross_module_goto_def_use_in_a_def_in_b() {
     let (l, c) = cursor(ENTRY, "shared", 1, 1);
     let (m, _) = s
         .definition("main", l, c)
-        .expect("c.shared resolves to a definition");
+        .expect("c::shared resolves to a definition");
     assert_eq!(m.last().map(String::as_str), Some("c"));
 
     // goto-def on a declaration name resolves to itself (B's `bridge`).
@@ -169,7 +169,7 @@ fn stdlib_import_path_is_tracked() {
     // imports too.
     let p = Project::new("stdlib");
     let entry =
-        "import scarlet/array\npub fn main() {\n\tz = array.length([1, 2, 3])\n\tprintln(z)\n}\n";
+        "import scarlet/array\npub fn main() {\n\tz = array::length([1, 2, 3])\n\tprintln(z)\n}\n";
     p.write("a.scrl", entry);
     let s = checked_with(&p, entry);
 
@@ -198,7 +198,7 @@ fn stdlib_import_path_is_tracked() {
     let (l, c) = cursor(entry, "length", 1, 1);
     let (m, span) = s
         .definition("main", l, c)
-        .expect("array.length resolves into the scarlet/array stdlib module");
+        .expect("array::length resolves into the scarlet/array stdlib module");
     assert_eq!(
         m,
         vec!["scarlet".to_string(), "array".to_string()],
@@ -276,7 +276,7 @@ fn incremental_edit_b_keeps_refs_then_invalidate_drops_reverse_edges() {
     // Edit B's body only, keeping `bridge`.
     p.write(
         "b.scrl",
-        "import ./c\npub fn bridge() Int { c.shared() + 100 }\n",
+        "import ./c\npub fn bridge() Int { c::shared() + 100 }\n",
     );
     let r = s.check(&parse(ENTRY), Some(&p.dir));
     assert!(r.success(), "after B edit: {:?}", r.diagnostics);
@@ -304,7 +304,7 @@ fn incremental_edit_b_keeps_refs_then_invalidate_drops_reverse_edges() {
 
     // B drops `bridge`: the graph rebuild must leave no dangling reverse edge.
     p.write("b.scrl", "pub fn other() Int { 7 }\n");
-    let entry2 = "import ./b\npub fn main() {\n\tprintln(b.other())\n}\n";
+    let entry2 = "import ./b\npub fn main() {\n\tprintln(b::other())\n}\n";
     p.write("a.scrl", entry2);
     let r = s.check(&parse(entry2), Some(&p.dir));
     assert!(r.success(), "after B invalidation: {:?}", r.diagnostics);
@@ -368,8 +368,8 @@ fn local_bindings_excluded_from_symbol_surfaces_but_stay_resolvable() {
 const ALIAS_LIB: &str = "pub fn original() Int { 42 }\n";
 const ALIAS_MAIN: &str = "import ./lib as alias\n\
 pub fn main() {\n\
-\tx = alias.original()\n\
-\ty = alias.original() + 1\n\
+\tx = alias::original()\n\
+\ty = alias::original() + 1\n\
 \tprintln(x + y)\n\
 }\n";
 
@@ -429,7 +429,7 @@ fn unused_one_of_two_plain_qualified_imports_is_flagged() {
     let p = Project::new("twoimp");
     p.write("c.scrl", "pub fn shared() Int { 42 }\n");
     p.write("d.scrl", "pub fn helper() Int { 7 }\n");
-    let entry = "import ./c\nimport ./d\npub fn main() {\n\tx = d.helper()\n\tprintln(x)\n}\n";
+    let entry = "import ./c\nimport ./d\npub fn main() {\n\tx = d::helper()\n\tprintln(x)\n}\n";
     p.write("a.scrl", entry);
 
     let s = checked_with(&p, entry);
@@ -571,10 +571,10 @@ fn constructor_in_match_pattern_is_a_graph_reference() {
 const HTTP_ENTRY: &str = "import scarlet/binary\n\
 import scarlet/http/h1\n\
 pub fn main() {\n\
-\tr = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
-\t\th1.Done(_, _, _, _, _, consumed) -> consumed\n\
-\t\th1.NeedMore -> 0 - 1\n\
-\t\th1.Bad(s) -> s\n\
+\tr = match h1::parse_request(binary::from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
+\t\th1::Done(_, _, _, _, _, consumed) -> consumed\n\
+\t\th1::NeedMore -> 0 - 1\n\
+\t\th1::Bad(s) -> s\n\
 \t}\n\
 \tprintln(r)\n\
 }\n";
@@ -607,7 +607,7 @@ fn session_recheck_keeps_stdlib_types_intact() {
 // `Header` to real enum types rather than collapsing them to a builtin.
 const HTTP_HELLO_ENTRY: &str = "import scarlet/http\n\
 pub fn main() {\n\
-\tmatch http.serve('127.0.0.1', 8080, fn(_req) http.text('hi')) {\n\
+\tmatch http::serve('127.0.0.1', 8080, fn(_req) http::text('hi')) {\n\
 \t\tOk(_) -> Nil\n\
 \t\tErr(e) -> println(e)\n\
 \t}\n\
@@ -655,7 +655,7 @@ fn entry_type_shadowing_stdlib_name_is_undone_on_next_check() {
     let r2 = s.check(&parse(HTTP_ENTRY), Some(&p.dir));
     assert!(
         r2.success(),
-        "h1.Parsed corrupted by an earlier entry's shadowing type alias: {:?}",
+        "h1::Parsed corrupted by an earlier entry's shadowing type alias: {:?}",
         r2.diagnostics
     );
 
@@ -676,7 +676,7 @@ fn qualified_member_use_keeps_the_import_live_but_a_bare_import_still_warns() {
     let p = Project::new("qualifier_liveness");
     p.write("c.scrl", C_SRC);
     p.write("d.scrl", C_SRC);
-    let entry = "import ./c\nimport ./d\npub fn main() {\n\tprintln(c.shared())\n}\n";
+    let entry = "import ./c\nimport ./d\npub fn main() {\n\tprintln(c::shared())\n}\n";
     p.write("a.scrl", entry);
 
     let msgs = unused_msgs(&checked_with(&p, entry));
@@ -684,11 +684,10 @@ fn qualified_member_use_keeps_the_import_live_but_a_bare_import_still_warns() {
     assert_msg_eq(&msgs, "unused import `d`");
 }
 
-/// A local binding shadows an import's qualifier. Scope must be consulted
-/// before `imported_qualifiers`, or `b.x` on a parameter named `b` is rejected
-/// as "Module './b' has no member 'x'".
+/// A parameter may share its name with an import. `b.x` reads the
+/// parameter's field and `b::add` reaches the module; neither hides the other.
 #[test]
-fn a_local_shadows_an_import_qualifier() {
+fn a_local_named_like_an_import_keeps_both() {
     let p = Project::new("shadow_qualifier");
     p.write("b.scrl", "pub fn add(a, b) {\n\ta + b\n}\n");
     p.write(
@@ -704,10 +703,9 @@ fn a_local_shadows_an_import_qualifier() {
          }\n\
          \n\
          pub fn main() {\n\
-         \tprintln(f(Point(41, 1)) + b.add(1, 0))\n\
+         \tprintln(f(Point(41, 1)) + b::add(1, 0))\n\
          }\n",
     );
-    // `b.x` reads the parameter's field; `b.add` still reaches the module.
     common::run_project_outputs(&p, "run", "a.scrl", "42\n");
 }
 

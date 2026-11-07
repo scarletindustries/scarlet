@@ -48,11 +48,13 @@ module.exports = grammar({
     // `Foo(x) = e` vs the call `Foo(x)`.
     [$.binding, $._primary_expression],
     [$.ctor_binding, $._primary_expression],
+    [$.ctor_binding, $.module_expression],
     // Pattern/expression twins: a GLR fork inside `(...)`, `[...]`, or
     // `<<...>>` stays alive until the `=` (or its absence) after the closing
     // delimiter decides destructuring vs literal.
     [$._pattern_atom, $._primary_expression],
     [$._primary_expression, $.ctor_pattern],
+    [$.module_expression, $.ctor_pattern],
     [$._primary_expression, $._number_pattern],
     [$._primary_expression, $.negative_number],
     [$._primary_expression, $.rest_pattern],
@@ -178,7 +180,7 @@ module.exports = grammar({
 
     named_type: ($) =>
       seq(
-        optional(seq(field('module', $.identifier), '.')),
+        optional(seq(field('module', $.identifier), '::')),
         field('name', $.type_identifier),
         optional(seq(token.immediate('('), commaSep1($._type), ')')),
       ),
@@ -204,11 +206,11 @@ module.exports = grammar({
       seq(field('type', $.type_identifier), '=', field('value', $._expression)),
 
     // `Stat(files, ..) = walk(root)`: single-arm match sugar, and
-    // `io.Stat(files, ..) = walk(root)` for a constructor reached through its
+    // `io::Stat(files, ..) = walk(root)` for a constructor reached through its
     // module.
     ctor_binding: ($) =>
       seq(
-        optional(seq(field('module', $.identifier), '.')),
+        optional(seq(field('module', $.identifier), '::')),
         field('constructor', $.type_identifier),
         token.immediate('('),
         optional($.pattern_arguments),
@@ -357,8 +359,17 @@ module.exports = grammar({
         ),
       ),
 
+    // `c::member`: a value, function or constructor of an imported module.
+    module_expression: ($) =>
+      seq(
+        field('module', $.identifier),
+        '::',
+        field('member', choice($.identifier, $.type_identifier)),
+      ),
+
     _primary_expression: ($) =>
       choice(
+        $.module_expression,
         $.number,
         $.string,
         $.identifier,
@@ -464,7 +475,7 @@ module.exports = grammar({
 
     ctor_pattern: ($) =>
       seq(
-        optional(seq(field('module', $.identifier), '.')),
+        optional(seq(field('module', $.identifier), '::')),
         field('name', $.type_identifier),
         optional(seq(token.immediate('('), optional($.pattern_arguments), ')')),
       ),

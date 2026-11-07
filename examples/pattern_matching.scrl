@@ -74,7 +74,7 @@ fn batch(codes Array(Int)) String {
 		[] -> 'empty batch'
 		[only] -> 'single ${only}'
 		[first, second] -> 'pair ${first}, ${second}'
-		[first, ..rest] -> 'first ${first} + ${string.inspect(rest)}'
+		[first, ..rest] -> 'first ${first} + ${string::inspect(rest)}'
 	}
 }
 
@@ -89,10 +89,10 @@ pub fn main() {
 		Scroll(dy: -30),
 		Quit,
 	]
-	array.each(events, fn(e) println(describe(e)))
+	array::each(events, fn(e) println(describe(e)))
 
-	array.each([200, 302, 404, 503, 100], fn(c) println('${c}: ${status_class(c)}'))
-	array.each(['GET', 'PATCH', 'DELETE', 'TRACE'], fn(m) println('${m} -> ${effect(m)}'))
+	array::each([200, 302, 404, 503, 100], fn(c) println('${c}: ${status_class(c)}'))
+	array::each(['GET', 'PATCH', 'DELETE', 'TRACE'], fn(m) println('${m} -> ${effect(m)}'))
 
 	println(quadrant(Point(x: 4, y: -2)))
 	println(batch([]))

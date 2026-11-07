@@ -8,8 +8,8 @@ use scarlet::reference::EntityKind;
 mod common;
 use common::{Project, SessionQueryExt, cursor, module_key, parse};
 
-const A_SRC: &str = "import ./b\npub fn main() {\n\tprintln(b.b())\n}\n";
-const B_SRC: &str = "import ./c\npub fn b() Int { c.val() + 1 }\n";
+const A_SRC: &str = "import ./b\npub fn main() {\n\tprintln(b::b())\n}\n";
+const B_SRC: &str = "import ./c\npub fn b() Int { c::val() + 1 }\n";
 const C_SRC: &str = "pub fn val() Int { 1 }\n";
 
 /// Write the A→B→C chain to a fresh project and run the initial `check`,
@@ -47,7 +47,7 @@ fn three_module_incremental() {
     );
 
     // Change b only: c stays cached.
-    p.write("b.scrl", "import ./c\npub fn b() Int { c.val() + 100 }\n");
+    p.write("b.scrl", "import ./c\npub fn b() Int { c::val() + 100 }\n");
     let r = s.check(&parse(A_SRC), Some(&p.dir));
     assert!(r.success(), "b-changed: {:?}", r.diagnostics);
     assert_eq!(s.compile_count(), 5, "b-change recompiles b only; c cached");
@@ -139,7 +139,7 @@ fn unrelated_module_keeps_type_id_base() {
     let p = Project::new("idbase");
     p.write("x.scrl", "pub type X { X }\npub fn f() X { X }\n");
     p.write("y.scrl", "pub type Y { Y }\npub fn g() Y { Y }\n");
-    let entry = "import ./x\nimport ./y\npub fn main() {\n\t_ = x.f()\n\t_ = y.g()\n}\n";
+    let entry = "import ./x\nimport ./y\npub fn main() {\n\t_ = x::f()\n\t_ = y::g()\n}\n";
 
     let mut s = IncrementalSession::new();
     let r = s.check(&parse(entry), Some(&p.dir));
@@ -179,12 +179,12 @@ fn query_api_resolves_across_the_module_chain() {
     let (_p, s) = fresh_three_module_session("queryapi");
 
     let (l, c) = cursor(A_SRC, "b()", 1, 0);
-    let (m, _) = s.definition("main", l, c).expect("b.b() resolves");
+    let (m, _) = s.definition("main", l, c).expect("b::b() resolves");
     assert_eq!(m.last().map(String::as_str), Some("b"));
 
     let (hn, _, _) = s
         .hover(Some(&scarlet::module::ModuleKey::main()), l, c)
-        .expect("hover at b.b()");
+        .expect("hover at b::b()");
     assert_eq!(hn, "b");
 
     assert!(
@@ -221,13 +221,13 @@ fn edit_b_keeps_refs_then_invalidation_drops_reverse_edges() {
     let n0 = s.compile_count();
 
     // Edit B's body only, keeping the signature.
-    p.write("b.scrl", "import ./c\npub fn b() Int { c.val() + 41 }\n");
+    p.write("b.scrl", "import ./c\npub fn b() Int { c::val() + 41 }\n");
     let r = s.check(&parse(A_SRC), Some(&p.dir));
     assert!(r.success(), "after B edit: {:?}", r.diagnostics);
     assert!(s.compile_count() > n0, "B recompiled");
     let (m1, _) = s
         .definition("main", l, c)
-        .expect("b.b() still resolves after editing B");
+        .expect("b::b() still resolves after editing B");
     assert_eq!(m1.last().map(String::as_str), Some("b"));
     let (bdef1, _) = s.prepare_rename("main", l, c).expect("b DefId after edit");
     assert!(
@@ -238,8 +238,8 @@ fn edit_b_keeps_refs_then_invalidation_drops_reverse_edges() {
     );
 
     // B no longer declares `b`: the rebuilt graph must retain no stale edge.
-    let entry2 = "import ./b\npub fn main() {\n\tprintln(b.gone())\n}\n";
-    p.write("b.scrl", "import ./c\npub fn gone() Int { c.val() }\n");
+    let entry2 = "import ./b\npub fn main() {\n\tprintln(b::gone())\n}\n";
+    p.write("b.scrl", "import ./c\npub fn gone() Int { c::val() }\n");
     p.write("a.scrl", entry2);
     let r = s.check(&parse(entry2), Some(&p.dir));
     assert!(r.success(), "after invalidation: {:?}", r.diagnostics);
@@ -288,7 +288,7 @@ fn recompile_id_overflow_recovers_with_stable_ranges() {
     let p = Project::new("idoverflow");
     p.write("big.scrl", &big_module_src(SMALL_TYPE_COUNT, 1));
     p.write("y.scrl", "pub type Y { Y }\npub fn g() Y { Y }\n");
-    let entry = "import ./big\nimport ./y\npub fn main() {\n\t_ = big.f()\n\t_ = y.g()\n}\n";
+    let entry = "import ./big\nimport ./y\npub fn main() {\n\t_ = big::f()\n\t_ = y::g()\n}\n";
 
     let mut s = IncrementalSession::new();
 

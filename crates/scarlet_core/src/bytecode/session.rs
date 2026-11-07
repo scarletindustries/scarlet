@@ -617,10 +617,10 @@ impl IncrementalSession {
     fn compile_entry(&mut self, expr: &ast::Expression) {
         if let ast::Expression::BlockExpression(block) = expr {
             // `env.type_info` is a flat map, not a scope stack, so an import's
-            // `m.Type` entries are not confined to the throwaway scope the way a
+            // `m::Type` entries are not confined to the throwaway scope the way a
             // value binding is. Capture the env position before the imports run
             // so `last_entry` excludes them; otherwise a removed or renamed
-            // import keeps resolving `m.Type` to a stale `TypeInfo` with no
+            // import keeps resolving `m::Type` to a stale `TypeInfo` with no
             // diagnostic. The journal position rolls back with it, which is
             // what restores a stdlib type the entry shadowed.
             let pre_import = self.c.env.watermark();

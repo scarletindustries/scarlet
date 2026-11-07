@@ -22,7 +22,7 @@ pub fn sha1(m Binary) Result(Binary, Nil)
 // The `Sec-WebSocket-Accept` for a `Sec-WebSocket-Key` (RFC 6455 §4.2.2).
 // `key` is the header as sent, still base64: it is not decoded first.
 pub fn websocket_accept(key Binary) Result(Binary, Nil) {
-	result.map(sha1(binary.append(key, websocket_guid)), base64.encode)
+	result::map(sha1(binary::append(key, websocket_guid)), base64::encode)
 }
 
 // `n` bytes from the OS's secure random source. `Err(Nil)` if `n` is negative

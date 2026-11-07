@@ -11,29 +11,29 @@ reject_case! {
     // A stdlib module's name, used with no import, is that module: the error
     // says which import it needs.
     an_unimported_stdlib_module_names_its_import: (
-        "pub fn main() {\n\tprintln(int.abs(1))\n}\n",
-        "Unknown identifier 'int': it is the name of a stdlib module that is not imported. Add `import scarlet/int`",
+        "pub fn main() {\n\tprintln(int::abs(1))\n}\n",
+        "Unknown module 'int': it is the name of a stdlib module that is not imported. Add `import scarlet/int`",
     ),
     // A module is not a value: the error says so and shows a use of it.
     a_module_is_not_a_value: (
         "import scarlet/int\npub fn main() {\n\tprintln(int)\n}\n",
-        "'int' is the module `scarlet/int`, not a value. Use one of its members, like `int.abs`",
+        "'int' is the module `scarlet/int`, not a value. Use one of its members, like `int::abs`",
     ),
     // A constructor destructured through its module, of a type with other
     // constructors, can fail, so it is refused and `match` is named.
     a_qualified_ctor_binding_must_be_irrefutable: (
-        "import scarlet/io\npub fn main() {\n\tio.NotFound(p) = io.PermissionDenied('x')\n\tprintln(p)\n}\n",
+        "import scarlet/io\npub fn main() {\n\tio::NotFound(p) = io::PermissionDenied('x')\n\tprintln(p)\n}\n",
         "must be irrefutable; pattern does not cover",
     ),
     // A constructor used by its bare name, when an imported module has it,
     // names the module to reach it through: in a pattern and in an expression.
     a_bare_constructor_in_a_pattern_names_its_module: (
-        "import scarlet/io\npub fn main() {\n\tmatch io.read_file('x') {\n\t\tErr(NotFound(p)) -> println(p)\n\t\t_ -> println('other')\n\t}\n}\n",
-        "Unknown constructor 'NotFound' in pattern. It is `io.NotFound`",
+        "import scarlet/io\npub fn main() {\n\tmatch io::read_file('x') {\n\t\tErr(NotFound(p)) -> println(p)\n\t\t_ -> println('other')\n\t}\n}\n",
+        "Unknown constructor 'NotFound' in pattern. It is `io::NotFound`",
     ),
     a_bare_constructor_in_an_expression_names_its_module: (
         "import scarlet/io\npub fn main() {\n\te = NotFound('x')\n\tprintln(e)\n}\n",
-        "Unknown identifier 'NotFound'. A constructor of that name is `io.NotFound`",
+        "Unknown identifier 'NotFound'. A constructor of that name is `io::NotFound`",
     ),
     if_condition_must_be_bool:
         ("pub fn main() {\n\tprintln(if 1 { 2 } else { 3 })\n}\n", "Type mismatch"),
@@ -369,7 +369,7 @@ reject_case! {
          \tLocalOther\n\
          }\n\
          fn f() Parsed {\n\
-         \th1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0)\n\
+         \th1::parse_request(binary::from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0)\n\
          }\n\
          pub fn main() {\n\
          \tprintln(f())\n\
@@ -394,10 +394,10 @@ ok_case! {
          \t}\n\
          }\n\
          pub fn main() {\n\
-         \tremote = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
-         \t\th1.Done(_, _, _, _, _, consumed) -> consumed\n\
-         \t\th1.NeedMore -> 0 - 1\n\
-         \t\th1.Bad(s) -> s\n\
+         \tremote = match h1::parse_request(binary::from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
+         \t\th1::Done(_, _, _, _, _, consumed) -> consumed\n\
+         \t\th1::NeedMore -> 0 - 1\n\
+         \t\th1::Bad(s) -> s\n\
          \t}\n\
          \tprintln(remote + local_value(LocalDone(41)))\n\
          }\n",
@@ -441,60 +441,45 @@ fn ctor_spread_solves_type_params_before_lambda_args_are_hinted() {
     );
 }
 
-// A top-level value declaration shadows an imported module qualifier
-// (`resolve_qualified_member` checks `env` before `imported_qualifiers`), so
-// `name.member` resolves through the declaration. Both the decl site and a
-// failed member access must say so.
-reject_case! {
-    shadowing_fn_failed_field_access_names_the_shadowed_module: (
-        "import scarlet/http\n\npub fn http() {\n    http.Unsized\n}\n",
-        "'http' here is a local binding that shadows the imported module 'scarlet/http'",
-    ),
-    fn_shadowing_import_qualifier_gets_decl_site_hint: (
-        "import scarlet/http\n\npub fn http() {\n    http.Unsized\n}\n",
-        "'http' shadows the imported module 'scarlet/http'",
-    ),
-}
-
+// A top-level value may share its name with an imported module: `::` reaches
+// the module and a bare name or `.` reaches the value, so neither hides the
+// other.
 ok_case! {
-    // The decl-site shadow warning is a hint, not an error: a module that
-    // never touches the shadowed qualifier still checks.
-    shadowing_import_qualifier_alone_is_not_an_error: (
-        "import scarlet/http\n\npub fn http() {\n    2\n}\n",
+    a_fn_named_like_an_import_does_not_hide_it: (
+        "import scarlet/http\n\npub fn http() {\n    http::Unsized\n}\n",
     ),
-    // Renaming the value away from the qualifier restores qualified access.
-    qualified_member_access_works_when_not_shadowed: (
-        "import scarlet/http\n\npub fn serve() {\n    http.Unsized\n}\n",
+    qualified_member_access_works_beside_a_plain_name: (
+        "import scarlet/http\n\npub fn serve() {\n    http::Unsized\n}\n",
     ),
 }
 
-// Qualified type identifiers: `module.Type` resolves through the mangled
-// `qualifier.Name` keys `process_import` registers for every public type of
+// Qualified type identifiers: `module::Type` resolves through the mangled
+// `qualifier::Name` keys `process_import` registers for every public type of
 // an imported module.
 ok_case! {
     qualified_type_in_alias_position: (
-        "import scarlet/http\n\ntype C = http.Method\n\npub fn new() {\n    2\n}\n",
+        "import scarlet/http\n\ntype C = http::Method\n\npub fn new() {\n    2\n}\n",
     ),
     qualified_type_in_annotation_position: (
-        "import scarlet/http\n\npub fn f(m http.Method) http.Method {\n    m\n}\n",
+        "import scarlet/http\n\npub fn f(m http::Method) http::Method {\n    m\n}\n",
     ),
     qualified_type_through_import_alias: (
-        "import scarlet/http as h\n\ntype C = h.Method\n\npub fn new() {\n    2\n}\n",
+        "import scarlet/http as h\n\ntype C = h::Method\n\npub fn new() {\n    2\n}\n",
     ),
 }
 
 reject_case! {
     unknown_qualified_type_names_module_and_member: (
-        "import scarlet/http\n\ntype C = http.Nope\n",
-        "Unknown type 'http.Nope'. Import 'http' and verify it exports a type 'Nope'.",
+        "import scarlet/http\n\ntype C = http::Nope\n",
+        "Unknown type 'http::Nope'. Import 'http' and verify it exports a type 'Nope'.",
     ),
     qualified_type_arity_error_uses_qualified_name: (
-        "import scarlet/http\n\ntype C = http.Method(Int)\n",
-        "Type 'http.Method' expects 0 type arguments, got 1",
+        "import scarlet/http\n\ntype C = http::Method(Int)\n",
+        "Type 'http::Method' expects 0 type arguments, got 1",
     ),
     unimported_qualifier_in_type_position_is_unknown: (
-        "type C = http.Method\n",
-        "Unknown type 'http.Method'",
+        "type C = http::Method\n",
+        "Unknown type 'http::Method'",
     ),
 }
 
@@ -506,13 +491,13 @@ reject_case! {
     /// `Failure.found` is a `Found` and not free text, so a decoder cannot put
     /// a sentence where the document's shape belongs.
     decode_failure_found_rejects_free_text: (
-        "import scarlet/json/decode\n\ndecode.Failure([], 'a thing', 'a string')\n",
+        "import scarlet/json/decode\n\ndecode::Failure([], 'a thing', 'a string')\n",
         "expected 'Found', got 'String'",
     ),
     /// `one_of` takes its first alternative separately, so a union with nothing
     /// to try is not a decoder that can be built.
     decode_one_of_rejects_no_alternatives: (
-        "import scarlet/json/decode\n\ndecode.one_of([])\n",
+        "import scarlet/json/decode\n\ndecode::one_of([])\n",
         "Expected 2 argument(s), got 1",
     ),
 }
@@ -591,7 +576,7 @@ const FN_FIELD: &str = "import scarlet/wire\n\
                         \tHandler(name String, run fn(Int) Int)\n\
                         }\n\
                         pub fn main() {\n\
-                        \tprintln(wire.encode(Handler('h', fn(x) { x + 1 })))\n\
+                        \tprintln(wire::encode(Handler('h', fn(x) { x + 1 })))\n\
                         }\n";
 
 ok_case! {
@@ -620,8 +605,8 @@ fn wire_names_the_whole_path_down_to_the_refusing_type() {
     let all = wire_rejects(
         "import scarlet/map\n\
          import scarlet/wire\n\
-         fn send(o (Int, map.Map(String, Array(a)))) Binary {\n\
-         \twire.encode(o)\n\
+         fn send(o (Int, map::Map(String, Array(a)))) Binary {\n\
+         \twire::encode(o)\n\
          }\n\
          pub fn main() {\n\
          \t_ = send\n\
@@ -651,7 +636,7 @@ const TAGGED_NATIVE: &str = "import scarlet/wire\n\
                              \tTagged(n)\n\
                              }\n\
                              pub fn main() {\n\
-                             \tprintln(wire.encode(tag(7)))\n\
+                             \tprintln(wire::encode(tag(7)))\n\
                              }\n";
 
 ok_case! {
@@ -671,7 +656,7 @@ ok_case! {
 mod unknown_payload {
     use super::wire_rejects;
 
-    const WANTED: &str = "the type `wire.decode` produces here is not known; annotate the binding";
+    const WANTED: &str = "the type `wire::decode` produces here is not known; annotate the binding";
 
     #[test]
     #[ignore = "waits for the wire redesign: check stopped refusing wire types in #50"]
@@ -679,7 +664,7 @@ mod unknown_payload {
         wire_rejects(
             "import scarlet/wire\n\
              fn read(b Binary) {\n\
-             \tmatch wire.decode(b) {\n\
+             \tmatch wire::decode(b) {\n\
              \t\tOk(v) -> Some(v)\n\
              \t\tErr(_) -> None\n\
              \t}\n\
@@ -703,7 +688,7 @@ mod unknown_payload {
         wire_rejects(
             "import scarlet/wire\n\
              fn read(b Binary, fallback a) a {\n\
-             \tmatch wire.decode(b) {\n\
+             \tmatch wire::decode(b) {\n\
              \t\tOk(v) -> v\n\
              \t\tErr(_) -> fallback\n\
              \t}\n\
@@ -739,13 +724,13 @@ mod opaque_from_another_module {
         run_outputs(
             "import scarlet/decimal\n\
              import scarlet/wire\n\
-             fn report(d decimal.Decimal, back decimal.Decimal) {\n\
+             fn report(d decimal::Decimal, back decimal::Decimal) {\n\
              \tprintln(back == d)\n\
-             \tprintln(decimal.to_string(back))\n\
+             \tprintln(decimal::to_string(back))\n\
              }\n\
              pub fn main() {\n\
-             \td = decimal.new(1999, 2)\n\
-             \tmatch wire.decode(wire.encode(d)) {\n\
+             \td = decimal::new(1999, 2)\n\
+             \tmatch wire::decode(wire::encode(d)) {\n\
              \t\tOk(back) -> report(d, back)\n\
              \t\tErr(_) -> println('err')\n\
              \t}\n\
@@ -763,9 +748,9 @@ mod opaque_from_another_module {
             "import scarlet/decimal\n\
              import scarlet/wire\n\
              pub fn main() {\n\
-             \tbytes = wire.encode(decimal.new(1, 2))\n\
-             \tprintln(match wire.decode(bytes) {\n\
-             \t\tOk(d) -> decimal.units(d) * 10 + decimal.scale(d)\n\
+             \tbytes = wire::encode(decimal::new(1, 2))\n\
+             \tprintln(match wire::decode(bytes) {\n\
+             \t\tOk(d) -> decimal::units(d) * 10 + decimal::scale(d)\n\
              \t\tErr(_) -> 0 - 1\n\
              \t})\n\
              }\n",
@@ -778,7 +763,7 @@ ok_case! {
     /// The inside-the-module half of the opaque pair: a module encodes its
     /// OWN opaque type the way every type is encoded, by its constructors.
     a_module_may_encode_its_own_opaque_type: (
-        "import scarlet/binary\nimport scarlet/wire\npub opaque type Token {\n\tToken(id Int)\n}\npub fn main() {\n\tprintln(binary.byte_size(wire.encode(Token(1))))\n}\n"
+        "import scarlet/binary\nimport scarlet/wire\npub opaque type Token {\n\tToken(id Int)\n}\npub fn main() {\n\tprintln(binary::byte_size(wire::encode(Token(1))))\n}\n"
     ),
 }
 
@@ -790,17 +775,17 @@ fn a_bare_type_from_an_imported_module_points_at_its_qualified_name() {
         "import scarlet/map\n\
          fn f(_m Map(String, Int)) Int { 0 }\n\
          pub fn main() {\n\
-         \tprintln(f(map.new()))\n\
+         \tprintln(f(map::new()))\n\
          }\n",
-        "Unknown type 'Map'. Did you mean 'map.Map'?",
+        "Unknown type 'Map'. Did you mean 'map::Map'?",
     );
     check_rejects(
         "import scarlet/map as m\n\
          fn f(_m Map(String, Int)) Int { 0 }\n\
          pub fn main() {\n\
-         \tprintln(f(m.new()))\n\
+         \tprintln(f(m::new()))\n\
          }\n",
-        "Did you mean 'm.Map'?",
+        "Did you mean 'm::Map'?",
     );
 }
 

@@ -74,7 +74,7 @@ pub fn split_at_bytes(b Binary, at Int) (Binary, Binary) {
 pub fn append(a Binary, b Binary) Binary
 
 pub fn concat(parts Array(Binary)) Binary {
-	array.fold(parts, <<>>, fn(acc, p) append(acc, p))
+	array::fold(parts, <<>>, fn(acc, p) append(acc, p))
 }
 
 @vm(binary__index_of)
@@ -114,8 +114,8 @@ pub fn from_int_ascii(n Int, radix Radix) Binary
 // Two uppercase hex digits of the low 8 bits of `n`: `hex_byte(13)` is
 // `<<'0D'>>`. For `%XX` escapes, which RFC 3986 §2.1 prefers uppercase.
 pub fn hex_byte(n Int) Binary {
-	b = int.bitwise_and(n, 255)
-	<<hex_digit(int.bitwise_shift_right(b, 4)):8, hex_digit(int.bitwise_and(b, 15)):8>>
+	b = int::bitwise_and(n, 255)
+	<<hex_digit(int::bitwise_shift_right(b, 4)):8, hex_digit(int::bitwise_and(b, 15)):8>>
 }
 
 fn hex_digit(n Int) Int {

@@ -55,16 +55,16 @@ import scarlet/string
 import scarlet/time
 
 pub fn main() {{
-	match net.connect('127.0.0.1', {port}) {{
-		Ok(sock) -> match url.parse('http://127.0.0.1/') {{
-			Err(e) -> println('url failed: ${{string.inspect(e)}}')
+	match net::connect('127.0.0.1', {port}) {{
+		Ok(sock) -> match url::parse('http://127.0.0.1/') {{
+			Err(e) -> println('url failed: ${{string::inspect(e)}}')
 			Ok(u) -> {{
-				io = client.plain(sock)
-				req = client.Request(method: <<'GET'>>, url: u, headers: [], body: <<>>)
-				match client.send_until(io, req, 1024, time.deadline_in_ms({deadline_ms})) {{
-					Err(client.Transport(error.TimedOut)) -> println('http-timeout: Transport(TimedOut)')
+				io = client::plain(sock)
+				req = client::Request(method: <<'GET'>>, url: u, headers: [], body: <<>>)
+				match client::send_until(io, req, 1024, time::deadline_in_ms({deadline_ms})) {{
+					Err(client::Transport(error::TimedOut)) -> println('http-timeout: Transport(TimedOut)')
 					Ok(r) -> println('http-ok: ${{r.status}}')
-					Err(e) -> println('other: ${{string.inspect(e)}}')
+					Err(e) -> println('other: ${{string::inspect(e)}}')
 				}}
 				shut = io.close
 				shut() or Nil

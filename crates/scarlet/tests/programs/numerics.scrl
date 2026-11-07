@@ -21,20 +21,20 @@ import scarlet/string
 
 // --- Int <-> String round trips -------------------------------------------
 
-// `int.to_string` goes one way; the other way runs through the binary parser,
+// `int::to_string` goes one way; the other way runs through the binary parser,
 // which is strict: it rejects a sign, an empty string and trailing junk. Any
 // run of digits fits, since an Int has no bounds.
 fn parse_int(s String) Result(Int, Nil) {
-	binary.parse_int(binary.from_string(s), binary.Dec)
+	binary::parse_int(binary::from_string(s), binary::Dec)
 }
 
 fn parse_signed(s String) Result(Int, Nil) {
-	b = binary.from_string(s)
-	if binary.byte_size(b) > 0 && binary.byte_at(b, 0) == 45 {
-		rest = binary.drop_bytes(b, 1)
-		result.map(binary.parse_int(rest, binary.Dec), fn(n) -n)
+	b = binary::from_string(s)
+	if binary::byte_size(b) > 0 && binary::byte_at(b, 0) == 45 {
+		rest = binary::drop_bytes(b, 1)
+		result::map(binary::parse_int(rest, binary::Dec), fn(n) -n)
 	} else {
-		binary.parse_int(b, binary.Dec)
+		binary::parse_int(b, binary::Dec)
 	}
 }
 
@@ -42,11 +42,11 @@ pub fn main() {
 	// --- Int: past 64 bits, boxing -------------------------------------------
 
 	// `min_value` is spelled as a subtraction: 9223372036854775808 does not lex.
-	println('bounds: ${int.max_value} ${int.min_value}')
-	println('past max: ${int.max_value + 1}')
-	println('past min: ${int.min_value - 1}')
+	println('bounds: ${int::max_value} ${int::min_value}')
+	println('past max: ${int::max_value + 1}')
+	println('past min: ${int::min_value - 1}')
 	println('big mul: ${1000000000000000 * 1000000}')
-	println('neg min: ${0 - int.min_value}')
+	println('neg min: ${0 - int::min_value}')
 
 	// 2^47 - 1 is the largest small (unboxed) Int; crossing it boxes the value on
 	// the heap, which arithmetic, equality and printing must not notice.
@@ -57,9 +57,9 @@ pub fn main() {
 	println('boxed equality: ${boxed * 2 == 281474976710656}')
 
 	// abs is exact, `min_value` included.
-	println('abs: ${int.abs(-7)} ${int.abs(7)} ${int.abs(int.min_value)}')
-	println('max/min: ${int.max(3, 9)} ${int.min(3, 9)} ${int.max(-3, -9)}')
-	println('clamp: ${int.clamp(5, 0, 10)} ${int.clamp(50, 0, 10)} ${int.clamp(-50, 0, 10)}')
+	println('abs: ${int::abs(-7)} ${int::abs(7)} ${int::abs(int::min_value)}')
+	println('max/min: ${int::max(3, 9)} ${int::min(3, 9)} ${int::max(-3, -9)}')
+	println('clamp: ${int::clamp(5, 0, 10)} ${int::clamp(50, 0, 10)} ${int::clamp(-50, 0, 10)}')
 
 	// --- Int: total division, truncation, remainder sign ----------------------
 
@@ -77,14 +77,14 @@ pub fn main() {
 	// The checked forms answer `Err(Nil)` for a zero divisor and otherwise
 	// agree with the operators, sign rules included.
 	println(
-		'checked div: ${string.inspect(
-			int.divide(p7, p2),
-		)} ${string.inspect(int.divide(n7, p2))} ${string.inspect(int.divide(p7, 0))}',
+		'checked div: ${string::inspect(
+			int::divide(p7, p2),
+		)} ${string::inspect(int::divide(n7, p2))} ${string::inspect(int::divide(p7, 0))}',
 	)
 	println(
-		'checked rem: ${string.inspect(
-			int.remainder(p7, p2),
-		)} ${string.inspect(int.remainder(n7, p2))} ${string.inspect(int.remainder(p7, 0))}',
+		'checked rem: ${string::inspect(
+			int::remainder(p7, p2),
+		)} ${string::inspect(int::remainder(n7, p2))} ${string::inspect(int::remainder(p7, 0))}',
 	)
 
 	// --- Float: formatting and non-finite collapse ----------------------------
@@ -94,7 +94,7 @@ pub fn main() {
 	// Int.
 	println('float fmt: ${2.0} ${0.5} ${-0.0}')
 	println('float repr: ${0.1 + 0.2} ${1.0 / 3.0}')
-	println('float big: ${float.from_int(int.max_value)}')
+	println('float big: ${float::from_int(int::max_value)}')
 
 	// No exponent literal syntax, so a huge magnitude is built by multiplying.
 	// 10^160 is finite and prints in full; 10^320 is past the largest float, so
@@ -105,107 +105,109 @@ pub fn main() {
 	println('float div zero: ${1.0 / 0.0} ${0.0 / 0.0} ${-1.0 / 0.0}')
 	println('float mod zero: ${1.5 % 0.0}')
 
-	println('floor: ${float.floor(2.7)} ${float.floor(-2.7)}')
-	println('ceil: ${float.ceil(2.1)} ${float.ceil(-2.1)}')
-	println('round ties: ${float.round(2.5)} ${float.round(3.5)} ${float.round(-1.5)}')
-	println('truncate: ${float.truncate(2.9)} ${float.truncate(-2.9)}')
-	println('float abs: ${float.abs(-2.5)} ${float.abs(0.0)}')
-	println('float max/min: ${float.max(1.5, 1.25)} ${float.min(1.5, 1.25)}')
-	println('float.to_string: ${float.to_string(1.0)} ${float.to_string(0.25)}')
-	println('from_int: ${float.from_int(3)} ${float.from_int(-3)}')
+	println('floor: ${float::floor(2.7)} ${float::floor(-2.7)}')
+	println('ceil: ${float::ceil(2.1)} ${float::ceil(-2.1)}')
+	println('round ties: ${float::round(2.5)} ${float::round(3.5)} ${float::round(-1.5)}')
+	println('truncate: ${float::truncate(2.9)} ${float::truncate(-2.9)}')
+	println('float abs: ${float::abs(-2.5)} ${float::abs(0.0)}')
+	println('float max/min: ${float::max(1.5, 1.25)} ${float::min(1.5, 1.25)}')
+	println('float::to_string: ${float::to_string(1.0)} ${float::to_string(0.25)}')
+	println('from_int: ${float::from_int(3)} ${float::from_int(-3)}')
 
-	println('to_string: ${int.to_string(0)} ${int.to_string(-42)} ${int.to_string(int.min_value)}')
-	println('parse: ${string.inspect(parse_int('42'))} ${string.inspect(parse_int('0'))}')
-	signed = string.inspect(parse_int('-42'))
-	junk = string.inspect(parse_int('12abc'))
-	empty = string.inspect(parse_int(''))
+	println(
+		'to_string: ${int::to_string(0)} ${int::to_string(-42)} ${int::to_string(int::min_value)}',
+	)
+	println('parse: ${string::inspect(parse_int('42'))} ${string::inspect(parse_int('0'))}')
+	signed = string::inspect(parse_int('-42'))
+	junk = string::inspect(parse_int('12abc'))
+	empty = string::inspect(parse_int(''))
 	println('parse rejects: ${signed} ${junk} ${empty}')
-	println('parse past 64 bits: ${string.inspect(parse_int('9223372036854775808'))}')
-	println('signed round trip: ${string.inspect(parse_signed(int.to_string(-42)))}')
-	println('max round trip: ${string.inspect(parse_signed(int.to_string(int.max_value)))}')
+	println('parse past 64 bits: ${string::inspect(parse_int('9223372036854775808'))}')
+	println('signed round trip: ${string::inspect(parse_signed(int::to_string(-42)))}')
+	println('max round trip: ${string::inspect(parse_signed(int::to_string(int::max_value)))}')
 
-	// `int.from_string` is the stdlib version of `parse_signed` above, and
+	// `int::from_string` is the stdlib version of `parse_signed` above, and
 	// unlike it, round-trips `min_value`: its magnitude has no positive Int
 	// to delegate the unsigned parse to, which `parse_signed`'s
 	// strip-the-sign-then-negate scheme cannot represent.
 	println(
-		'from_string: ${string.inspect(
-			int.from_string('42'),
-		)} ${string.inspect(int.from_string('-42'))} ${string.inspect(int.from_string('+7'))}',
+		'from_string: ${string::inspect(
+			int::from_string('42'),
+		)} ${string::inspect(int::from_string('-42'))} ${string::inspect(int::from_string('+7'))}',
 	)
 	println(
-		'from_string rejects: ${string.inspect(
-			int.from_string(''),
-		)} ${string.inspect(int.from_string('12abc'))} ${string.inspect(int.from_string(' 1'))}',
+		'from_string rejects: ${string::inspect(
+			int::from_string(''),
+		)} ${string::inspect(int::from_string('12abc'))} ${string::inspect(int::from_string(' 1'))}',
 	)
 	println(
-		'from_string min round trip: ${string.inspect(
-			int.from_string(int.to_string(int.min_value)),
+		'from_string min round trip: ${string::inspect(
+			int::from_string(int::to_string(int::min_value)),
 		)}',
 	)
-	println('hex: ${string.inspect(binary.to_string(binary.from_int_ascii(255, binary.Hex)))}')
-	println('hex parse: ${string.inspect(binary.parse_int(<<'ff'>>, binary.Hex))}')
+	println('hex: ${string::inspect(binary::to_string(binary::from_int_ascii(255, binary::Hex)))}')
+	println('hex parse: ${string::inspect(binary::parse_int(<<'ff'>>, binary::Hex))}')
 
 	// --- Decimal --------------------------------------------------------------
 
-	price = decimal.new(1999, 2)
-	println('decimal: ${decimal.to_string(price)}')
-	println('parts: units=${decimal.units(price)} scale=${decimal.scale(price)}')
-	println('from_int: ${decimal.to_string(decimal.from_int(7))}')
+	price = decimal::new(1999, 2)
+	println('decimal: ${decimal::to_string(price)}')
+	println('parts: units=${decimal::units(price)} scale=${decimal::scale(price)}')
+	println('from_int: ${decimal::to_string(decimal::from_int(7))}')
 
 	// Multiplication adds scales; addition aligns them.
-	println('mul: ${decimal.to_string(decimal.mul(price, decimal.from_int(3)))}')
-	println('add: ${decimal.to_string(decimal.add(price, decimal.new(1, 2)))}')
-	println('sub: ${decimal.to_string(decimal.sub(price, decimal.new(2000, 2)))}')
-	negated = decimal.to_string(decimal.neg(price))
-	absolute = decimal.to_string(decimal.abs(decimal.new(-1999, 2)))
+	println('mul: ${decimal::to_string(decimal::mul(price, decimal::from_int(3)))}')
+	println('add: ${decimal::to_string(decimal::add(price, decimal::new(1, 2)))}')
+	println('sub: ${decimal::to_string(decimal::sub(price, decimal::new(2000, 2)))}')
+	negated = decimal::to_string(decimal::neg(price))
+	absolute = decimal::to_string(decimal::abs(decimal::new(-1999, 2)))
 	println('neg/abs: ${negated} ${absolute}')
 
 	// Rounding is banker's by default: a tie goes to the even neighbour, so 2.345
 	// rounds down to 2.34 and 2.355 rounds up to 2.36.
-	down_tie = decimal.to_string(decimal.round(decimal.new(2345, 3), 2))
-	up_tie = decimal.to_string(decimal.round(decimal.new(2355, 3), 2))
+	down_tie = decimal::to_string(decimal::round(decimal::new(2345, 3), 2))
+	up_tie = decimal::to_string(decimal::round(decimal::new(2355, 3), 2))
 	println('round half even: ${down_tie} ${up_tie}')
 	println(
-		'round half up: ${decimal.to_string(
-			decimal.round_with(decimal.new(2345, 3), 2, decimal.HalfUp),
+		'round half up: ${decimal::to_string(
+			decimal::round_with(decimal::new(2345, 3), 2, decimal::HalfUp),
 		)}',
 	)
-	toward_zero = decimal.round_with(decimal.new(-2349, 3), 2, decimal.Down)
-	toward_neg_inf = decimal.round_with(decimal.new(-2341, 3), 2, decimal.Floor)
-	println('round toward zero: ${decimal.to_string(toward_zero)}')
-	println('round toward -inf: ${decimal.to_string(toward_neg_inf)}')
+	toward_zero = decimal::round_with(decimal::new(-2349, 3), 2, decimal::Down)
+	toward_neg_inf = decimal::round_with(decimal::new(-2341, 3), 2, decimal::Floor)
+	println('round toward zero: ${decimal::to_string(toward_zero)}')
+	println('round toward -inf: ${decimal::to_string(toward_neg_inf)}')
 
-	div = decimal.div(decimal.from_int(10), decimal.from_int(3), 4)
-	println('div: ${string.inspect(result.map(div, decimal.to_string))}')
-	by_zero = decimal.div(decimal.from_int(1), decimal.from_int(0), 2)
-	println('div by zero: ${string.inspect(result.map(by_zero, decimal.to_string))}')
+	div = decimal::div(decimal::from_int(10), decimal::from_int(3), 4)
+	println('div: ${string::inspect(result::map(div, decimal::to_string))}')
+	by_zero = decimal::div(decimal::from_int(1), decimal::from_int(0), 2)
+	println('div by zero: ${string::inspect(result::map(by_zero, decimal::to_string))}')
 
 	// Numeric comparison sees through scale; the built-in `==` does not, because it
 	// compares the representation (units and scale).
-	tenths = decimal.new(15, 1)
-	thousandths = decimal.new(1500, 3)
-	println('decimal.eq: ${decimal.eq(tenths, thousandths)} but == is ${tenths == thousandths}')
-	same = string.inspect(decimal.compare(tenths, thousandths))
-	bigger = string.inspect(decimal.compare(price, tenths))
+	tenths = decimal::new(15, 1)
+	thousandths = decimal::new(1500, 3)
+	println('decimal::eq: ${decimal::eq(tenths, thousandths)} but == is ${tenths == thousandths}')
+	same = string::inspect(decimal::compare(tenths, thousandths))
+	bigger = string::inspect(decimal::compare(price, tenths))
 	println('compare: ${same} ${bigger}')
-	lt = decimal.lt(tenths, price)
-	lte = decimal.lte(tenths, thousandths)
-	gt = decimal.gt(price, tenths)
-	gte = decimal.gte(tenths, thousandths)
+	lt = decimal::lt(tenths, price)
+	lte = decimal::lte(tenths, thousandths)
+	gt = decimal::gt(price, tenths)
+	gte = decimal::gte(tenths, thousandths)
 	println('lt/lte/gt/gte: ${lt} ${lte} ${gt} ${gte}')
-	smallest = decimal.to_string(decimal.min(tenths, price))
-	largest = decimal.to_string(decimal.max(tenths, price))
+	smallest = decimal::to_string(decimal::min(tenths, price))
+	largest = decimal::to_string(decimal::max(tenths, price))
 	println('min/max: ${smallest} ${largest}')
-	zero = decimal.is_zero(decimal.new(0, 4))
-	negative = decimal.is_negative(decimal.neg(price))
-	positive = decimal.is_positive(price)
+	zero = decimal::is_zero(decimal::new(0, 4))
+	negative = decimal::is_negative(decimal::neg(price))
+	positive = decimal::is_positive(price)
 	println('is_zero/is_negative/is_positive: ${zero} ${negative} ${positive}')
-	println('normalize: ${decimal.to_string(decimal.normalize(decimal.new(1500, 3)))}')
-	parsed = string.inspect(result.map(decimal.parse('19.99'), decimal.units))
-	println('parse: ${parsed} ${string.inspect(decimal.parse('.5'))}')
-	println('to_float: ${decimal.to_float(price)}')
-	println('from_float: ${decimal.to_string(decimal.from_float(0.125, 3))}')
+	println('normalize: ${decimal::to_string(decimal::normalize(decimal::new(1500, 3)))}')
+	parsed = string::inspect(result::map(decimal::parse('19.99'), decimal::units))
+	println('parse: ${parsed} ${string::inspect(decimal::parse('.5'))}')
+	println('to_float: ${decimal::to_float(price)}')
+	println('from_float: ${decimal::to_string(decimal::from_float(0.125, 3))}')
 
 	// --- Comparisons across types ---------------------------------------------
 
@@ -216,5 +218,5 @@ pub fn main() {
 	println('float cmp: ${1.5 < 2.5} ${-0.0 == 0.0} ${0.1 + 0.2 == 0.3}')
 	println('string eq: ${'abc' == 'abc'} ${'abc' != 'abd'}')
 	println('bool eq: ${True == True} ${True != False}')
-	println('mixed by hand: ${float.from_int(2) == 2.0} ${float.floor(2.5) == 2}')
+	println('mixed by hand: ${float::from_int(2) == 2.0} ${float::floor(2.5) == 2}')
 }

@@ -6,27 +6,27 @@ import scarlet/result
 import ./lib/report/table as report
 import ./lib/units
 
-fn conversions(t units.Celsius) Array(String) {
-	fahrenheit = units.show_fahrenheit(units.to_fahrenheit(t))
+fn conversions(t units::Celsius) Array(String) {
+	fahrenheit = units::show_fahrenheit(units::to_fahrenheit(t))
 	// Kelvin is opaque: its constructor stays inside units, so to_kelvin is
 	// the only way in, and it can fail.
-	kelvin = result.map(units.to_kelvin(t), units.show_kelvin) or why -> 'no Kelvin (${why})'
+	kelvin = result::map(units::to_kelvin(t), units::show_kelvin) or why -> 'no Kelvin (${why})'
 	[fahrenheit, kelvin]
 }
 
 pub fn main() {
-	// Everything a module exports is reached through its name: `units.celsius`.
+	// Everything a module exports is reached through its name: `units::celsius`.
 	// `as` gives the module another name, as `report` for ./lib/report/table.
 	readings = [
-		units.celsius(-40.0),
-		units.celsius(0.0),
-		units.celsius(21.5),
-		units.celsius(100.0),
-		units.celsius(-300.0),
+		units::celsius(-40.0),
+		units::celsius(0.0),
+		units::celsius(21.5),
+		units::celsius(100.0),
+		units::celsius(-300.0),
 	]
 
-	println('absolute zero: ${units.ABSOLUTE_ZERO_C}C')
+	println('absolute zero: ${units::ABSOLUTE_ZERO_C}C')
 
-	// units.round1 is not exported, so the caller cannot reach past the API.
-	array.each(readings, fn(t) println(report.row(t, conversions(t))))
+	// units::round1 is not exported, so the caller cannot reach past the API.
+	array::each(readings, fn(t) println(report::row(t, conversions(t))))
 }

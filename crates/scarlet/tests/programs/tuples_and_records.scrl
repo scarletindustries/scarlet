@@ -88,9 +88,9 @@ pub fn main() {
 	rows = [(1, 'one'), (2, 'two')]
 	check('tuple inside array', True, rows[1] == Some((2, 'two')))
 
-	grid = map.from_list([((0, 0), 'origin'), ((1, 2), 'here')])
-	check('tuple as map key', True, map.get(grid, (1, 2)) == Some('here'))
-	check('tuple key miss', True, map.get(grid, (9, 9)) == None)
+	grid = map::from_list([((0, 0), 'origin'), ((1, 2), 'here')])
+	check('tuple as map key', True, map::get(grid, (1, 2)) == Some('here'))
+	check('tuple key miss', True, map::get(grid, (9, 9)) == None)
 
 	p = Point(x: 1, y: 2)
 	check('record field access', True, p.x == 1 && p.y == 2)
@@ -115,7 +115,7 @@ pub fn main() {
 	check('record destructuring binding', True, px == 1 && py == 20)
 
 	// And through its module, when it is another module's.
-	headers.Header(name, value) = headers.Header(name: <<'host'>>, value: <<'a.test'>>)
+	headers::Header(name, value) = headers::Header(name: <<'host'>>, value: <<'a.test'>>)
 	check('qualified destructuring binding', True, name == <<'host'>> && value == <<'a.test'>>)
 
 	// Records and tuples nest into each other freely.

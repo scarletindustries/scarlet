@@ -33,9 +33,9 @@ pub type Error {
 /** Exactly one item, with nothing after it. Use `decode_prefix` when more may
  * follow. */
 pub fn decode(b Binary) Result(Value, Error) {
-	v <- result.then(decode_prefix(b, 0))
+	v <- result::then(decode_prefix(b, 0))
 	(value, at) = v
-	if at == binary.byte_size(b) {
+	if at == binary::byte_size(b) {
 		Ok(value)
 	} else {
 		Err(Unsupported(at))
@@ -44,13 +44,13 @@ pub fn decode(b Binary) Result(Value, Error) {
 
 /** The item at `at`, and the offset just past it. */
 pub fn decode_prefix(b Binary, at Int) Result((Value, Int), Error) {
-	if at >= binary.byte_size(b) {
+	if at >= binary::byte_size(b) {
 		Err(Truncated)
 	} else {
-		ib = binary.byte_at(b, at)
-		major = int.bitwise_shift_right(ib, 5)
-		info = int.bitwise_and(ib, 31)
-		head <- result.then(argument(b, at + 1, info))
+		ib = binary::byte_at(b, at)
+		major = int::bitwise_shift_right(ib, 5)
+		info = int::bitwise_and(ib, 31)
+		head <- result::then(argument(b, at + 1, info))
 		(arg, body) = head
 		read_item(b, major, arg, body, at)
 	}
@@ -75,7 +75,7 @@ fn argument(b Binary, at Int, info Int) Result((Int, Int), Error) {
 }
 
 fn be(b Binary, at Int, n Int) Result((Int, Int), Error) {
-	if at + n > binary.byte_size(b) {
+	if at + n > binary::byte_size(b) {
 		Err(Truncated)
 	} else {
 		Ok((be_from(b, at, n, 0), at + n))
@@ -86,7 +86,7 @@ fn be_from(b Binary, at Int, left Int, acc Int) Int {
 	if left <= 0 {
 		acc
 	} else {
-		be_from(b, at + 1, left - 1, acc * 256 + binary.byte_at(b, at))
+		be_from(b, at + 1, left - 1, acc * 256 + binary::byte_at(b, at))
 	}
 }
 
@@ -98,11 +98,11 @@ fn read_item(b Binary, major Int, arg Int, body Int, start Int) Result((Value, I
 	} else if major == 2 {
 		bytes(b, body, arg, fn(slice) Bytes(slice))
 	} else if major == 3 {
-		if body + arg > binary.byte_size(b) {
+		if body + arg > binary::byte_size(b) {
 			Err(Truncated)
 		} else {
-			slice = binary.slice_bytes(b, body, arg) or <<>>
-			match binary.to_string(slice) {
+			slice = binary::slice_bytes(b, body, arg) or <<>>
+			match binary::to_string(slice) {
 				Ok(s) -> Ok((Text(s), body + arg))
 				Err(Nil) -> Err(NotUtf8(start))
 			}
@@ -118,10 +118,10 @@ fn read_item(b Binary, major Int, arg Int, body Int, start Int) Result((Value, I
 }
 
 fn bytes(b Binary, at Int, n Int, wrap fn(Binary) Value) Result((Value, Int), Error) {
-	if at + n > binary.byte_size(b) {
+	if at + n > binary::byte_size(b) {
 		Err(Truncated)
 	} else {
-		Ok((wrap(binary.slice_bytes(b, at, n) or <<>>), at + n))
+		Ok((wrap(binary::slice_bytes(b, at, n) or <<>>), at + n))
 	}
 }
 
@@ -129,7 +129,7 @@ fn read_list(b Binary, at Int, left Int, acc Array(Value)) Result((Value, Int), 
 	if left <= 0 {
 		Ok((List(acc), at))
 	} else {
-		item <- result.then(decode_prefix(b, at))
+		item <- result::then(decode_prefix(b, at))
 		(value, next) = item
 		read_list(b, next, left - 1, [..acc, value])
 	}
@@ -139,9 +139,9 @@ fn read_map(b Binary, at Int, left Int, acc Array((Value, Value))) Result((Value
 	if left <= 0 {
 		Ok((Map(acc), at))
 	} else {
-		key <- result.then(decode_prefix(b, at))
+		key <- result::then(decode_prefix(b, at))
 		(k, after_key) = key
-		val <- result.then(decode_prefix(b, after_key))
+		val <- result::then(decode_prefix(b, after_key))
 		(v, after_val) = val
 		read_map(b, after_val, left - 1, [..acc, (k, v)])
 	}
@@ -151,8 +151,8 @@ fn read_map(b Binary, at Int, left Int, acc Array((Value, Value))) Result((Value
  * keys. */
 pub fn map_get(v Value, label Int) Option(Value) {
 	match v {
-		Map(entries) -> option.map(
-			array.find(entries, fn(e) {
+		Map(entries) -> option::map(
+			array::find(entries, fn(e) {
 				(k, _) = e
 				key_int(k) == Some(label)
 			}),
@@ -176,8 +176,8 @@ fn key_int(v Value) Option(Int) {
 /** The value for a text label, as the WebAuthn attestation object uses. */
 pub fn text_map_get(v Value, label String) Option(Value) {
 	match v {
-		Map(entries) -> option.map(
-			array.find(entries, fn(e) {
+		Map(entries) -> option::map(
+			array::find(entries, fn(e) {
 				(k, _) = e
 				match k {
 					Text(t) -> t == label

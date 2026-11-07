@@ -178,6 +178,7 @@ fn desugar_expr(e: &mut Expression) {
         Expression::BlockExpression(b) => desugar_body(&mut b.body),
         Expression::ErrorNode(_)
         | Expression::Identifier(_)
+        | Expression::ModuleAccessExpression(_)
         | Expression::NumberLiteral(_)
         | Expression::StringLiteral(_) => {}
         Expression::FunctionCallExpression(c) => {

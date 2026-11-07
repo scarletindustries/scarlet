@@ -22,9 +22,6 @@ pub enum DiagnosticCode {
     TypeError,
     ModuleError,
     UnusedBinding,
-    /// A value binding takes over the name of an imported module qualifier,
-    /// making `name.member` resolve through the binding instead of the module.
-    ShadowedImport,
     /// Secondary note pointing at another location (e.g. "first defined here").
     RelatedLocation,
 }

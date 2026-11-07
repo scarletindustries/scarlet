@@ -370,8 +370,8 @@ fn bug2_shadowed_binding_resolves_inner_then_outer() {
 const BUG3_HELPER: &str = "pub fn greet() String {\n\x20 'hi'\n}\n";
 const BUG3_MAIN: &str = "import ./helper\n\
 import scarlet/string\n\
-x = helper.greet()\n\
-y = string.length(x)\n\
+x = helper::greet()\n\
+y = string::length(x)\n\
 println(y)\n";
 
 /// A two-file project with `main.scrl` open, ready to query its imports.
@@ -567,7 +567,7 @@ fn workspace_symbol_query_skips_locals_keeps_decls() {
 // `lib.scrl` declares `greet`; `main.scrl` imports it and calls `lib.greet()`.
 
 const XMOD_LIB: &str = "pub fn greet() Int { 7 }\n";
-const XMOD_MAIN: &str = "import ./lib\nx = lib.greet()\nprintln(x)\n";
+const XMOD_MAIN: &str = "import ./lib\nx = lib::greet()\nprintln(x)\n";
 
 /// Open both files as client tabs, lib first, so `main.scrl` is the
 /// last-analysed entry.
@@ -667,7 +667,7 @@ fn assert_refs_span_lib_and_main(
     assert_eq!(
         location_in(&arr, main_uri),
         main_use,
-        "the main.scrl location must cover the `greet` of `lib.greet()`: {arr:?}"
+        "the main.scrl location must cover the `greet` of `lib::greet()`: {arr:?}"
     );
 
     let no_decl = refs_at(s, query_uri, l, c, false);
@@ -712,7 +712,7 @@ fn assert_rename_spans_lib_and_main(resp: &Json, main_uri: &str, lib_uri: &str, 
     one_at(
         edits_for(main_uri),
         main_use,
-        "main.scrl rewrite at the `greet` of `lib.greet()`",
+        "main.scrl rewrite at the `greet` of `lib::greet()`",
     );
 
     for (uri, edits) in changes {
@@ -736,7 +736,7 @@ fn cross_module_goto_def_returns_the_other_files_uri() {
     let def = s.definition_response(&pos(&main_uri, l, c));
     assert!(
         !def.is_null(),
-        "cross-module goto-def on `lib.greet()` must resolve, got null"
+        "cross-module goto-def on `lib::greet()` must resolve, got null"
     );
 
     let target = def["uri"]
@@ -841,7 +841,7 @@ fn rename_after_library_edit_still_rewrites_dependent_callers() {
     assert_eq!(
         main_edits.len(),
         1,
-        "exactly the `greet` of `lib.greet()`: {main_edits:?}"
+        "exactly the `greet` of `lib::greet()`: {main_edits:?}"
     );
 }
 
@@ -899,7 +899,7 @@ fn position_query_reroot_stages_diagnostics_for_open_file() {
 /// The `/** */` at line 0 is `b.scrl`'s module doc, not `add`'s.
 const MODDOC_B: &str = "/**\n * Adds numbers together.\n */\npub fn add(a, b) {\n  a + b\n}\n";
 
-const MODDOC_A: &str = "import ./b\n\nprintln(b.add(10, 20))\n";
+const MODDOC_A: &str = "import ./b\n\nprintln(b::add(10, 20))\n";
 
 /// The `a.scrl` + `b.scrl` demo pair, opened as `a.scrl`.
 fn moddoc_project() -> (Project, Workspace, String) {
@@ -922,7 +922,7 @@ fn hover_on_module_alias_shows_the_module_doc() {
     let (_p, mut s, uri) = moddoc_project();
 
     // The `b` of `b.add(10, 20)`, a `Qualifier` occurrence on the import.
-    let (l, c) = cursor(MODDOC_A, "b.add", 1, 0);
+    let (l, c) = cursor(MODDOC_A, "b::add", 1, 0);
     let md = hover_md(&mut s, &uri, l, c);
     assert!(
         md.contains("Adds numbers together."),
@@ -952,14 +952,14 @@ fn goto_def_on_module_alias_opens_the_module_file() {
     let (_p, mut s, uri) = moddoc_project();
 
     // The `b` of `b.add(10, 20)` opens b.scrl at 0:0.
-    let (l, c) = cursor(MODDOC_A, "b.add", 1, 0);
+    let (l, c) = cursor(MODDOC_A, "b::add", 1, 0);
     let def = s.definition_response(&pos(&uri, l, c));
     let target = def["uri"]
         .as_str()
         .unwrap_or_else(|| panic!("goto-def on a module alias must open a file, got {def}"));
     assert!(
         target.ends_with("b.scrl"),
-        "`b.add(..)` must jump to b.scrl, got {target}"
+        "`b::add(..)` must jump to b.scrl, got {target}"
     );
     assert_eq!(def["range"]["start"]["line"].as_i64(), Some(0));
     assert_eq!(def["range"]["start"]["character"].as_i64(), Some(0));
@@ -999,7 +999,7 @@ pub fn get(b Point) Int {\n\
 \x20 b.x\n\
 }\n\
 p = Point(41)\n\
-println(get(p) + b.add(0, 1))\n";
+println(get(p) + b::add(0, 1))\n";
 
 #[test]
 fn qualifier_occurrence_respects_a_shadowing_local() {
@@ -1031,8 +1031,8 @@ fn qualifier_occurrence_respects_a_shadowing_local() {
         "a shadowed `b` is not a module qualifier: {md:?}"
     );
 
-    // …while the genuinely-qualified `b.add` at top level still is one.
-    let (l, c) = cursor(SHADOW_A, "b.add", 1, 0);
+    // …while the `b` of `b::add` is the module.
+    let (l, c) = cursor(SHADOW_A, "b::add", 1, 0);
     let md = hover_md(&mut s, &uri, l, c);
     assert!(
         md.contains("*module*") && md.contains("Adds numbers together."),
@@ -1046,7 +1046,7 @@ fn qualifier_occurrence_respects_a_shadowing_local() {
 fn find_refs_on_module_alias_lists_the_qualifier() {
     let (_p, mut s, uri) = moddoc_project();
 
-    let (l, c) = cursor(MODDOC_A, "b.add", 1, 0);
+    let (l, c) = cursor(MODDOC_A, "b::add", 1, 0);
     let refs = refs_at(&mut s, &uri, l, c, false);
     let items = refs
         .as_array()
@@ -1054,7 +1054,7 @@ fn find_refs_on_module_alias_lists_the_qualifier() {
     assert_eq!(
         items.len(),
         1,
-        "the sole reference to alias `b` is the qualifier of `b.add`: {items:?}"
+        "the sole reference to alias `b` is the qualifier of `b::add`: {items:?}"
     );
     assert_eq!(items[0]["range"]["start"]["line"].as_i64(), Some(l as i64));
     assert_eq!(
@@ -1071,14 +1071,14 @@ fn find_refs_on_module_alias_lists_the_qualifier() {
 /// module doc reaches hover only through `synth_refs_from_interface`.
 #[test]
 fn hover_on_a_stdlib_module_alias_shows_its_module_doc() {
-    let src = "import scarlet/process as s\n\ns.spawn(fn() { Nil })\n";
+    let src = "import scarlet/process as s\n\ns::spawn(fn() { Nil })\n";
     let (_p, mut w, uri) = open_single("stdlib_moddoc", src);
 
-    let (l, c) = cursor(src, "s.spawn", 1, 0);
+    let (l, c) = cursor(src, "s::spawn", 1, 0);
     let md = hover_md(&mut w, &uri, l, c);
     assert!(
         md.contains("*module*"),
-        "the `s` of `s.spawn(..)` names a module: {md:?}"
+        "the `s` of `s::spawn(..)` names a module: {md:?}"
     );
     assert!(
         md.contains("Processes, message passing, and the supervision tree."),
@@ -1107,7 +1107,7 @@ fn hover_shows_a_functions_parameter_names() {
 /// source, so this only passes if `SExport` carries the names.
 #[test]
 fn hover_shows_parameter_names_across_the_stdlib_blob() {
-    let src = "import scarlet/io\n\nprintln(io.read_text('x') or e -> '')\n";
+    let src = "import scarlet/io\n\nprintln(io::read_text('x') or e -> '')\n";
     let (_p, mut s, uri) = open_single("hover_blob", src);
     let md = hover_md(&mut s, &uri, 2, 12); // inside `read_text`
     assert!(
@@ -1119,9 +1119,9 @@ fn hover_shows_parameter_names_across_the_stdlib_blob() {
 /// A constructor's labels come from `ValueKind::Constructor.field_labels`.
 #[test]
 fn hover_shows_a_constructors_field_labels() {
-    let src = "import scarlet/io\n\nfn f(e io.IoError) String {\n\tmatch e {\n\t\tio.NotFound(p) -> p\n\t\t_ -> ''\n\t}\n}\nprintln(1)\n";
+    let src = "import scarlet/io\n\nfn f(e io::IoError) String {\n\tmatch e {\n\t\tio::NotFound(p) -> p\n\t\t_ -> ''\n\t}\n}\nprintln(1)\n";
     let (_p, mut s, uri) = open_single("hover_ctor", src);
-    let md = hover_md(&mut s, &uri, 4, 6); // the `NotFound` of `io.NotFound(p)`
+    let md = hover_md(&mut s, &uri, 4, 6); // the `NotFound` of `io::NotFound(p)`
     assert!(
         md.contains("fn(path String) IoError"),
         "constructor must show its field label, got:\n{md}"
@@ -1137,10 +1137,10 @@ fn hover_shows_a_declaration_doc_from_another_module() {
         "lib.scrl",
         "/** Text helpers. */\n\n/** Join `parts` with `sep`. */\npub fn join(parts Array(String), sep String) String {\n\t'x'\n}\n",
     );
-    let src = "import ./lib\n\nprintln(lib.join(['a'], ','))\n";
+    let src = "import ./lib\n\nprintln(lib::join(['a'], ','))\n";
     p.write("main.scrl", src);
     let (mut s, uri) = open(&p, "main.scrl", src);
-    let md = hover_md(&mut s, &uri, 2, 12); // inside `join`
+    let md = hover_md(&mut s, &uri, 2, 14); // inside `join`
     assert!(
         md.contains("fn(parts Array(String), sep String)"),
         "labels must cross the module boundary, got:\n{md}"
@@ -1151,9 +1151,9 @@ fn hover_shows_a_declaration_doc_from_another_module() {
     );
 }
 
-// `textDocument/completion`: after `alias.` the imported module's public
+// `textDocument/completion`: after `alias::` the imported module's public
 // exports appear; a bare position lists the module's own top-level
-// declarations; a dot after a non-module value yields the empty list.
+// declarations; a `::` after a non-module name yields the empty list.
 
 /// Completion labels at (`l`, `c`), sorted as the server returns them.
 fn completion_labels(s: &mut Workspace, uri: &str, l: i32, c: i32) -> Vec<String> {
@@ -1165,23 +1165,23 @@ fn completion_labels(s: &mut Workspace, uri: &str, l: i32, c: i32) -> Vec<String
         .collect()
 }
 
-const COMP_STDLIB: &str = "import scarlet/string\nx = string.\n";
+const COMP_STDLIB: &str = "import scarlet/string\nx = string::\n";
 
 #[test]
 fn completion_after_stdlib_alias_dot_lists_exports() {
     let (_p, mut s, uri) = open_single("comp_std", COMP_STDLIB);
 
-    // Cursor right after the trailing dot; the statement is a parse error the
-    // recovering parser drops, which completion must survive.
-    let labels = completion_labels(&mut s, &uri, 1, 11);
+    // Cursor right after the trailing `::`; the statement is a parse error
+    // the recovering parser drops, which completion must survive.
+    let labels = completion_labels(&mut s, &uri, 1, 12);
     assert!(
         labels.iter().any(|l| l == "length"),
-        "`string.` must offer scarlet/string's `length`, got {labels:?}"
+        "`string::` must offer scarlet/string's `length`, got {labels:?}"
     );
 }
 
 const COMP_HELPER: &str = "pub fn greet() String {\n\x20 'hi'\n}\nfn hidden() Int { 1 }\n";
-const COMP_MAIN: &str = "import ./helper\nz = helper.\n";
+const COMP_MAIN: &str = "import ./helper\nz = helper::\n";
 
 #[test]
 fn completion_after_file_module_alias_dot_lists_pub_exports_only() {
@@ -1190,10 +1190,10 @@ fn completion_after_file_module_alias_dot_lists_pub_exports_only() {
     p.write("main.scrl", COMP_MAIN);
     let (mut s, uri) = open(&p, "main.scrl", COMP_MAIN);
 
-    let labels = completion_labels(&mut s, &uri, 1, 11);
+    let labels = completion_labels(&mut s, &uri, 1, 12);
     assert!(
         labels.iter().any(|l| l == "greet"),
-        "`helper.` must offer the pub `greet`, got {labels:?}"
+        "`helper::` must offer the pub `greet`, got {labels:?}"
     );
     assert!(
         !labels.iter().any(|l| l == "hidden"),

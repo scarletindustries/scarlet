@@ -29,65 +29,65 @@ pub fn main() {
 	// Each one also runs on a blocking-pool thread rather than a scheduler thread,
 	// and the pool is built lazily: no io has happened yet, so it has no threads.
 
-	println('pool starts empty: ${internal.blocking_threads() == 0}')
+	println('pool starts empty: ${internal::blocking_threads() == 0}')
 
-	println('write: ${io.write_text(PATH, 'ledger v1')}')
-	println('read back: ${io.read_text(PATH) or '<failed>'}')
-	println('round trip: ${io.read_text(PATH) == Ok('ledger v1')}')
+	println('write: ${io::write_text(PATH, 'ledger v1')}')
+	println('read back: ${io::read_text(PATH) or '<failed>'}')
+	println('round trip: ${io::read_text(PATH) == Ok('ledger v1')}')
 
 	// Each failure lands on its own variant, carrying the path it concerns.
-	match io.read_text(MISSING) {
+	match io::read_text(MISSING) {
 		Ok(_) -> println('missing: read a file that is not there')
-		Err(io.NotFound(path)) -> println('missing: NotFound(${path})')
+		Err(io::NotFound(path)) -> println('missing: NotFound(${path})')
 		Err(e) -> println('missing: ${e}')
 	}
 
-	match io.read_file('/tmp') {
+	match io::read_file('/tmp') {
 		Ok(_) -> println('directory: read a directory as a file')
-		Err(io.IsADirectory(path)) -> println('directory: IsADirectory(${path})')
+		Err(io::IsADirectory(path)) -> println('directory: IsADirectory(${path})')
 		Err(e) -> println('directory: ${e}')
 	}
 
 	// A file is bytes, not text: write_file takes a Binary and read_file hands one
 	// back, so a frame written to disk comes apart under the same binary pattern
 	// that would read it off a socket.
-	println('write bytes: ${io.write_file(SNAPSHOT, <<'ALSNAP', 1:8, 2:16>>)}')
-	match io.read_file(SNAPSHOT) {
+	println('write bytes: ${io::write_file(SNAPSHOT, <<'ALSNAP', 1:8, 2:16>>)}')
+	match io::read_file(SNAPSHOT) {
 		Ok(<<'ALSNAP', version:8, count:16>>) -> println('snapshot: v${version}, ${count} samples')
-		Ok(b) -> println('snapshot: unrecognized ${string.inspect(b)}')
+		Ok(b) -> println('snapshot: unrecognized ${string::inspect(b)}')
 		Err(e) -> println('snapshot: ${e}')
 	}
 
 	// A binary that is not a whole number of bytes has no on-disk form. The write
 	// is refused before it opens the file, so the snapshot above still stands.
-	match io.write_file(SNAPSHOT, <<1:4>>) {
+	match io::write_file(SNAPSHOT, <<1:4>>) {
 		Ok(Nil) -> println('unaligned: wrote a half byte')
-		Err(io.UnalignedBinary) -> println('unaligned: UnalignedBinary')
+		Err(io::UnalignedBinary) -> println('unaligned: UnalignedBinary')
 		Err(e) -> println('unaligned: ${e}')
 	}
-	println('snapshot survived: ${io.read_file(SNAPSHOT) == Ok(<<'ALSNAP', 1:8, 2:16>>)}')
+	println('snapshot survived: ${io::read_file(SNAPSHOT) == Ok(<<'ALSNAP', 1:8, 2:16>>)}')
 
 	// Those reads and writes built the pool, so it is no longer empty. Only the
 	// growth is pinned: how many threads it took is the machine's business, and
 	// the pool is free to reuse one worker for every operation above. Nothing
 	// here witnesses the SCARLET_BLOCKING_THREADS ceiling being reached — that
 	// needs operations that stay outstanding, and every one of these completes.
-	println('pool grew for file io: ${internal.blocking_threads() > 0}')
+	println('pool grew for file io: ${internal::blocking_threads() > 0}')
 
 	// --- scarlet/time ---------------------------------------------------------------
 	// An Instant is opaque and its numeric value is nobody's business; what the
 	// module promises is arithmetic on it, and a clock that never runs backwards.
 
-	start = time.monotonic()
-	deadline = time.add_ms(start, 250)
-	println('add_ms then since_ms: ${time.since_ms(deadline, start)}')
-	println('since_ms is signed: ${time.since_ms(start, deadline)}')
-	println('monotonic never rewinds: ${time.since_ms(time.monotonic(), start) >= 0}')
+	start = time::monotonic()
+	deadline = time::add_ms(start, 250)
+	println('add_ms then since_ms: ${time::since_ms(deadline, start)}')
+	println('since_ms is signed: ${time::since_ms(start, deadline)}')
+	println('monotonic never rewinds: ${time::since_ms(time::monotonic(), start) >= 0}')
 
 	// to_deadline_ms is the escape hatch to raw monotonic ms for a @vm boundary
 	// that wants a number; the number itself is the machine's, only the difference
 	// between two of them is ours to print.
-	println('deadline in raw ms: ${time.to_deadline_ms(deadline) - time.to_deadline_ms(start)}')
+	println('deadline in raw ms: ${time::to_deadline_ms(deadline) - time::to_deadline_ms(start)}')
 
 	// The wall clock is a second clock and not a rebased first one, and these
 	// bounds are what say so. Both are fixed dates, so nothing printed here is a
@@ -95,31 +95,31 @@ pub fn main() {
 	// bound and one taken in microseconds over the second, and a reading off the
 	// monotonic clock — milliseconds into this process — fails the first and the
 	// third. 1704067200000 is 2024-01-01T00:00:00Z, 4102444800000 is 2100-01-01.
-	epoch_start = time.epoch_ms()
+	epoch_start = time::epoch_ms()
 	println('epoch is after 2024: ${epoch_start > 1704067200000}')
 	println('epoch is before 2100: ${epoch_start < 4102444800000}')
 	println(
-		'epoch is not the monotonic clock: ${epoch_start - time.to_deadline_ms(start) >
+		'epoch is not the monotonic clock: ${epoch_start - time::to_deadline_ms(start) >
 			1704067200000}',
 	)
 
-	process.sleep(50)
-	println('slept at least 50ms: ${time.since_ms(time.monotonic(), start) >= 50}')
+	process::sleep(50)
+	println('slept at least 50ms: ${time::since_ms(time::monotonic(), start) >= 50}')
 
 	// A clock frozen at any plausible constant passes all three bounds above, so
 	// only an advance refutes one. The floor is 10 rather than 50, and there is
 	// no ceiling, because this is the settable clock: it may be slewed or stepped
 	// while the sleep runs, which is the whole reason it is not the clock the
 	// line above measures with.
-	println('epoch advanced over the sleep: ${time.epoch_ms() - epoch_start >= 10}')
+	println('epoch advanced over the sleep: ${time::epoch_ms() - epoch_start >= 10}')
 
 	// --- scarlet/process ------------------------------------------------------------
 	// argv[0] is the script's path and env values are the machine's, so what gets
 	// printed is derived from them, never the values themselves.
 
-	println('argv is non-empty: ${array.length(os.argv()) > 0}')
-	println('PATH is set: ${option.is_some(os.get_env('PATH'))}')
-	println('unset var: ${os.get_env('AL_DEFINITELY_UNSET')}')
-	println('env has PATH: ${map.has(os.env(), 'PATH')}')
-	println('env is one map: ${os.env() == os.env()}')
+	println('argv is non-empty: ${array::length(os::argv()) > 0}')
+	println('PATH is set: ${option::is_some(os::get_env('PATH'))}')
+	println('unset var: ${os::get_env('AL_DEFINITELY_UNSET')}')
+	println('env has PATH: ${map::has(os::env(), 'PATH')}')
+	println('env is one map: ${os::env() == os::env()}')
 }

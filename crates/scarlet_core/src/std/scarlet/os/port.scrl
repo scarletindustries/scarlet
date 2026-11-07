@@ -16,7 +16,7 @@ import scarlet/time
 
 // A running child. `os_pid` is only for logs: the runtime owns the child.
 pub opaque type Port {
-	conn socket.Connection
+	conn socket::Connection
 	os_pid Int
 }
 
@@ -29,17 +29,17 @@ pub type ExitStatus {
 // Starts `program` with `args` and the inherited environment. A name is looked
 // up on the PATH, as a shell does. A program that cannot start is the OS's
 // `IoError`, and nothing is left running.
-pub fn spawn(program String, args Array(String)) Result(Port, io.IoError) {
-	spawn_env(program, args, map.new())
+pub fn spawn(program String, args Array(String)) Result(Port, io::IoError) {
+	spawn_env(program, args, map::new())
 }
 
 // As `spawn`, with `env` added over the inherited environment.
 pub fn spawn_env(
 	program String,
 	args Array(String),
-	env map.Map(String, String),
-) Result(Port, io.IoError) {
-	spawn_with(program, args, map.to_list(env))
+	env map::Map(String, String),
+) Result(Port, io::IoError) {
+	spawn_with(program, args, map::to_list(env))
 }
 
 @vm(port__spawn)
@@ -47,55 +47,55 @@ fn spawn_with(
 	program String,
 	args Array(String),
 	env Array((String, String)),
-) Result(Port, io.IoError)
+) Result(Port, io::IoError)
 
 // Up to `max` bytes of the child's stdout. `Ok(Closed)` almost always means it
 // exited, and `close` says how.
 @vm(port__read)
-pub fn read(p Port, max Int) Result(socket.Read, error.NetError)
+pub fn read(p Port, max Int) Result(socket::Read, error::NetError)
 
 // Exactly `count` bytes, or `Err(UnexpectedEof)` if the child closes its
 // stdout first.
-pub fn read_exact(p Port, count Int) Result(Binary, error.NetError) {
+pub fn read_exact(p Port, count Int) Result(Binary, error::NetError) {
 	read_exact_loop(p, count, <<>>)
 }
 
-fn read_exact_loop(p Port, remaining Int, acc Binary) Result(Binary, error.NetError) {
+fn read_exact_loop(p Port, remaining Int, acc Binary) Result(Binary, error::NetError) {
 	if remaining <= 0 {
 		Ok(acc)
 	} else {
 		match read(p, remaining) {
-			Ok(socket.Data(b)) ->
-				read_exact_loop(p, remaining - binary.byte_size(b), binary.append(acc, b))
-			Ok(socket.Closed) -> Err(error.UnexpectedEof)
+			Ok(socket::Data(b)) ->
+				read_exact_loop(p, remaining - binary::byte_size(b), binary::append(acc, b))
+			Ok(socket::Closed) -> Err(error::UnexpectedEof)
 			Err(e) -> Err(e)
 		}
 	}
 }
 
 // As `read`, but `Err(TimedOut)` after `timeout_ms` with nothing to read.
-pub fn read_within(p Port, max Int, timeout_ms Int) Result(socket.Read, error.NetError) {
-	read_until(p, max, time.add_ms(time.monotonic(), timeout_ms))
+pub fn read_within(p Port, max Int, timeout_ms Int) Result(socket::Read, error::NetError) {
+	read_until(p, max, time::add_ms(time::monotonic(), timeout_ms))
 }
 
-// As `read_within`, with a `deadline` from `time.monotonic()`.
-pub fn read_until(p Port, max Int, deadline time.Instant) Result(socket.Read, error.NetError) {
-	read_until_ms(p, max, time.to_deadline_ms(deadline))
+// As `read_within`, with a `deadline` from `time::monotonic()`.
+pub fn read_until(p Port, max Int, deadline time::Instant) Result(socket::Read, error::NetError) {
+	read_until_ms(p, max, time::to_deadline_ms(deadline))
 }
 
 @vm(port__read_until)
-fn read_until_ms(p Port, max Int, deadline_ms Int) Result(socket.Read, error.NetError)
+fn read_until_ms(p Port, max Int, deadline_ms Int) Result(socket::Read, error::NetError)
 
 // Parks while the pipe is full. A child that has exited is `BrokenPipe`.
 @vm(port__write)
-pub fn write(p Port, data Binary) Result(Nil, error.NetError)
+pub fn write(p Port, data Binary) Result(Nil, error::NetError)
 
 // One vectored write of every part, without joining them first.
 @vm(port__write_parts)
-pub fn write_parts(p Port, parts Array(Binary)) Result(Nil, error.NetError)
+pub fn write_parts(p Port, parts Array(Binary)) Result(Nil, error::NetError)
 
 // Closes the port and parks until the child has ended, signalling it as the
 // module doc says. Parked reads and writes fail at once. Closing twice is
 // `NotConnected`.
 @vm(port__close)
-pub fn close(p Port) Result(ExitStatus, error.NetError)
+pub fn close(p Port) Result(ExitStatus, error::NetError)

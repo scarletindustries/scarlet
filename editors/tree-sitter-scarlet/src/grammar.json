@@ -985,7 +985,7 @@
                 },
                 {
                   "type": "STRING",
-                  "value": "."
+                  "value": "::"
                 }
               ]
             },
@@ -1216,7 +1216,7 @@
                 },
                 {
                   "type": "STRING",
-                  "value": "."
+                  "value": "::"
                 }
               ]
             },
@@ -1993,9 +1993,47 @@
         ]
       }
     },
+    "module_expression": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "FIELD",
+          "name": "module",
+          "content": {
+            "type": "SYMBOL",
+            "name": "identifier"
+          }
+        },
+        {
+          "type": "STRING",
+          "value": "::"
+        },
+        {
+          "type": "FIELD",
+          "name": "member",
+          "content": {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "SYMBOL",
+                "name": "identifier"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "type_identifier"
+              }
+            ]
+          }
+        }
+      ]
+    },
     "_primary_expression": {
       "type": "CHOICE",
       "members": [
+        {
+          "type": "SYMBOL",
+          "name": "module_expression"
+        },
         {
           "type": "SYMBOL",
           "name": "number"
@@ -2708,7 +2746,7 @@
                 },
                 {
                   "type": "STRING",
-                  "value": "."
+                  "value": "::"
                 }
               ]
             },
@@ -3412,11 +3450,19 @@
       "_primary_expression"
     ],
     [
+      "ctor_binding",
+      "module_expression"
+    ],
+    [
       "_pattern_atom",
       "_primary_expression"
     ],
     [
       "_primary_expression",
+      "ctor_pattern"
+    ],
+    [
+      "module_expression",
       "ctor_pattern"
     ],
     [

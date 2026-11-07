@@ -293,11 +293,11 @@ impl Session {
             members.len()
         );
         for m in members.iter().take(SHOWN) {
-            println!("  {alias}.{}", m.display());
+            println!("  {alias}::{}", m.display());
         }
         if members.len() > SHOWN {
             println!(
-                "{}  and {} more: type `{alias}.` and press Tab to see them all{}",
+                "{}  and {} more: type `{alias}::` and press Tab to see them all{}",
                 p.dim,
                 members.len() - SHOWN,
                 p.reset

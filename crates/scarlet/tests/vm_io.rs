@@ -21,9 +21,9 @@ import scarlet/result
 {extra_imports}
 
 pub fn main() {{
-	match net.listen('127.0.0.1', 0) {{
+	match net::listen('127.0.0.1', 0) {{
 		Ok(server) -> {{
-			println('listening ${{result.map(net.local_addr(server), address.to_string) or '?'}}')
+			println('listening ${{result::map(net::local_addr(server), address::to_string) or '?'}}')
 {body}
 		}}
 		Err(e) -> println('listen-failed: ${{e}}')
@@ -43,9 +43,9 @@ fn file_write_then_read_roundtrips() {
 
 pub fn main() {
 	path = '__PATH__'
-	match io.write_text(path, 'hello-io') {
+	match io::write_text(path, 'hello-io') {
 		Err(e) -> println('WRITE-FAILED: ${e}')
-		Ok(Nil) -> match io.read_text(path) {
+		Ok(Nil) -> match io::read_text(path) {
 			Ok(s) -> println('roundtrip: ${s}')
 			Err(e) -> println('READ-FAILED: ${e}')
 		}
@@ -83,13 +83,13 @@ fn tcp_echo_server_roundtrip() {
     let proj = Project::new("io_tcp");
     let src = listening_src(
         "import scarlet/net/socket\nimport scarlet/binary",
-        r#"match net.accept(server) {
+        r#"match net::accept(server) {
 	Ok(Some(sock)) -> {
-		println('peer ${address.to_string(sock.peer)}')
-		match socket.read(sock, 4096) {
-			Ok(socket.Data(data)) -> match socket.write(sock, data) {
-				Ok(Nil) -> match socket.close(sock) {
-					Ok(Nil) -> match net.close(server) {
+		println('peer ${address::to_string(sock.peer)}')
+		match socket::read(sock, 4096) {
+			Ok(socket::Data(data)) -> match socket::write(sock, data) {
+				Ok(Nil) -> match socket::close(sock) {
+					Ok(Nil) -> match net::close(server) {
 						Ok(Nil) -> println('served')
 						Err(e) -> println('close-server-failed: ${e}')
 					}
@@ -97,7 +97,7 @@ fn tcp_echo_server_roundtrip() {
 				}
 				Err(e) -> println('write-failed: ${e}')
 			}
-			Ok(socket.Closed) -> println('peer-closed')
+			Ok(socket::Closed) -> println('peer-closed')
 			Err(e) -> println('read-failed: ${e}')
 		}
 	}
@@ -144,16 +144,16 @@ import scarlet/net/socket
 import scarlet/binary
 
 pub fn main() {
-	match net.listen('127.0.0.1', 0) {
-		Ok(server) -> match net.local_addr(server) {
+	match net::listen('127.0.0.1', 0) {
+		Ok(server) -> match net::local_addr(server) {
 			Ok(addr) -> {
-				_ = process.spawn(fn() {
-					match net.accept(server) {
-						Ok(Some(sock)) -> match socket.read_exact(sock, 5) {
-							Ok(first) -> match socket.read_exact(sock, 6) {
+				_ = process::spawn(fn() {
+					match net::accept(server) {
+						Ok(Some(sock)) -> match socket::read_exact(sock, 5) {
+							Ok(first) -> match socket::read_exact(sock, 6) {
 								Ok(second) -> {
-									socket.write_parts(sock, [first, second]) or Nil
-									socket.close(sock) or Nil
+									socket::write_parts(sock, [first, second]) or Nil
+									socket::close(sock) or Nil
 								}
 								Err(e) -> println('server read2 failed: ${e}')
 							}
@@ -164,18 +164,18 @@ pub fn main() {
 					}
 				})
 
-				match net.connect('127.0.0.1', addr.port) {
+				match net::connect('127.0.0.1', addr.port) {
 					Ok(conn) -> {
-						socket.write(conn, binary.from_string('hello')) or Nil
-						socket.write(conn, binary.from_string(' world')) or Nil
-						match socket.read_exact(conn, 11) {
-							Ok(data) -> match binary.to_string(data) {
+						socket::write(conn, binary::from_string('hello')) or Nil
+						socket::write(conn, binary::from_string(' world')) or Nil
+						match socket::read_exact(conn, 11) {
+							Ok(data) -> match binary::to_string(data) {
 								Ok(text) -> println('echoed: ${text}')
 								Err(Nil) -> println('not utf8')
 							}
 							Err(e) -> println('client read failed: ${e}')
 						}
-						socket.close(conn) or Nil
+						socket::close(conn) or Nil
 					}
 					Err(e) -> println('connect failed: ${e}')
 				}
@@ -208,8 +208,8 @@ fn tcp_read_within_times_out() {
     let proj = Project::new("io_read_within_timeout");
     let src = listening_src(
         "import scarlet/net/socket",
-        r#"match net.accept(server) {
-	Ok(Some(sock)) -> match socket.read_within(sock, 4096, 150) {
+        r#"match net::accept(server) {
+	Ok(Some(sock)) -> match socket::read_within(sock, 4096, 150) {
 		Ok(_) -> println('unexpected-data')
 		Err(e) -> println('timed-out: ${e}')
 	}
@@ -241,13 +241,13 @@ fn tcp_read_within_returns_data() {
     let proj = Project::new("io_read_within_data");
     let src = listening_src(
         "import scarlet/net/socket\nimport scarlet/binary",
-        r#"match net.accept(server) {
-	Ok(Some(sock)) -> match socket.read_within(sock, 4096, 5000) {
-		Ok(socket.Data(data)) -> match binary.to_string(data) {
+        r#"match net::accept(server) {
+	Ok(Some(sock)) -> match socket::read_within(sock, 4096, 5000) {
+		Ok(socket::Data(data)) -> match binary::to_string(data) {
 			Ok(text) -> println('got: ${text}')
 			Err(Nil) -> println('not-utf8')
 		}
-		Ok(socket.Closed) -> println('peer-closed')
+		Ok(socket::Closed) -> println('peer-closed')
 		Err(e) -> println('read-failed: ${e}')
 	}
 	Ok(None) -> println('accept-closed')
@@ -275,8 +275,8 @@ fn file_write_unaligned_binary_errors() {
     let src = r#"import scarlet/io
 
 pub fn main() {
-	match io.write_file('__PATH__', <<1:4>>) {
-		Err(io.UnalignedBinary) -> println('rejected')
+	match io::write_file('__PATH__', <<1:4>>) {
+		Err(io::UnalignedBinary) -> println('rejected')
 		Err(_) -> println('wrong-error')
 		Ok(Nil) -> println('wrote')
 	}
@@ -307,9 +307,9 @@ fn file_read_missing_path_errors() {
     let src = r#"import scarlet/io
 
 pub fn main() {
-	match io.read_text('__PATH__') {
+	match io::read_text('__PATH__') {
 		Ok(_) -> println('read-ok')
-		Err(io.NotFound(p)) -> println('missing: ${p}')
+		Err(io::NotFound(p)) -> println('missing: ${p}')
 		Err(_) -> println('wrong-error')
 	}
 }
@@ -346,8 +346,8 @@ fn connect_refused_is_typed() {
 import scarlet/net/error
 
 pub fn main() {
-	match net.connect('127.0.0.1', __PORT__) {
-		Err(error.ConnectionRefused) -> println('refused')
+	match net::connect('127.0.0.1', __PORT__) {
+		Err(error::ConnectionRefused) -> println('refused')
 		Err(_) -> println('other-error')
 		Ok(_) -> println('connected')
 	}
@@ -378,17 +378,17 @@ fn file_read_offloads_to_blocking_pool() {
 import scarlet/process
 
 fn reader() fn() Nil {
-	fn() match io.read_text('__PATH__') {
+	fn() match io::read_text('__PATH__') {
 		Ok(_) -> println('ok')
 		Err(_) -> println('err')
 	}
 }
 
 pub fn main() {
-	_ = process.spawn(reader())
-	_ = process.spawn(reader())
-	_ = process.spawn(reader())
-	match io.read_text('__PATH__') {
+	_ = process::spawn(reader())
+	_ = process::spawn(reader())
+	_ = process::spawn(reader())
+	match io::read_text('__PATH__') {
 		Ok(_) -> println('ok')
 		Err(_) -> println('err')
 	}
@@ -417,8 +417,8 @@ fn dns_resolve_runs_on_pool() {
 import scarlet/process
 
 pub fn main() {
-	_ = process.spawn(fn() Nil)
-	match net.resolve('localhost') {
+	_ = process::spawn(fn() Nil)
+	match net::resolve('localhost') {
 		Ok(_) -> println('resolved')
 		Err(_) -> println('err')
 	}
@@ -522,7 +522,7 @@ fn http_server_get_and_keepalive() {
     let proj = Project::new("io_http");
     let src = listening_src(
         "import scarlet/http",
-        "_ = http.serve_on(server, fn(_req) http.text('Hello from scarlet/http!'))",
+        "_ = http::serve_on(server, fn(_req) http::text('Hello from scarlet/http!'))",
     );
 
     let srv = spawn_al_server(&proj, &src);
@@ -552,14 +552,14 @@ fn http_server_chunked_post_roundtrip() {
     let proj = Project::new("io_http_chunked");
     let src = listening_src(
         "import scarlet/http\nimport scarlet/http/body\nimport scarlet/http/headers\nimport scarlet/binary",
-        r#"_ = http.serve_on(server, fn(req) {
-	collected = body.collect(req.body, 1048576) or <<>>
-	echoed = binary.to_string(collected) or '<not-utf8>'
-	trailer = match headers.get(req.trailers, <<'x-checksum'>>) {
-		Some(v) -> binary.to_string(v) or '?'
+        r#"_ = http::serve_on(server, fn(req) {
+	collected = body::collect(req.body, 1048576) or <<>>
+	echoed = binary::to_string(collected) or '<not-utf8>'
+	trailer = match headers::get(req.trailers, <<'x-checksum'>>) {
+		Some(v) -> binary::to_string(v) or '?'
 		None -> 'none'
 	}
-	http.text('body=[${echoed}] trailer=[${trailer}]')
+	http::text('body=[${echoed}] trailer=[${trailer}]')
 })"#,
     );
 
@@ -637,7 +637,7 @@ fn http_server_connection_close_semantics() {
     let proj = Project::new("io_http_close");
     let src = listening_src(
         "import scarlet/http",
-        "_ = http.serve_on(server, fn(_req) http.text('bye'))",
+        "_ = http::serve_on(server, fn(_req) http::text('bye'))",
     );
     let srv = spawn_al_server(&proj, &src);
     let mut tmp = [0u8; 64];
@@ -702,25 +702,25 @@ import scarlet/time
 
 fn outcome(collected) {
 	match collected {
-		Ok(b) -> if binary.byte_size(b) == 0 { 'empty' } else { 'bytes' }
+		Ok(b) -> if binary::byte_size(b) == 0 { 'empty' } else { 'bytes' }
 		Err(_) -> 'error'
 	}
 }
 
 pub fn main() {
-	match net.listen('127.0.0.1', 0) {
+	match net::listen('127.0.0.1', 0) {
 		Err(_) -> println('listen failed')
-		Ok(server) -> match net.local_addr(server) {
+		Ok(server) -> match net::local_addr(server) {
 			Err(_) -> println('local_addr failed')
-			Ok(addr) -> match net.connect_addr(addr) {
+			Ok(addr) -> match net::connect_addr(addr) {
 				Err(_) -> println('connect failed')
-				Ok(_client) -> match net.accept(server) {
+				Ok(_client) -> match net::accept(server) {
 					Err(_) -> println('accept failed')
 					Ok(None) -> println('accept closed')
 					Ok(Some(conn)) -> {
-						deadline = time.add_ms(time.monotonic(), 250)
-						zero = outcome(body.collect(body.content_length(conn, 0, deadline), 16))
-						neg = outcome(body.collect(body.content_length(conn, 0 - 1, deadline), 16))
+						deadline = time::add_ms(time::monotonic(), 250)
+						zero = outcome(body::collect(body::content_length(conn, 0, deadline), 16))
+						neg = outcome(body::collect(body::content_length(conn, 0 - 1, deadline), 16))
 						println('${zero} ${neg}')
 					}
 				}
@@ -743,11 +743,11 @@ fn http_server_body_source_failure_yields_framed_500() {
     let proj = Project::new("io_http_source_500");
     let src = listening_src(
         "import scarlet/http\nimport scarlet/net/error",
-        r#"_ = http.serve_on(server, fn(req) {
-	match http.path(req) {
-		<<'/fixed'>> -> http.Response(status: 200, headers: [], body: http.Fixed(5, fn() Err(error.UnexpectedEof)))
-		<<'/unsized'>> -> http.Response(status: 200, headers: [], body: http.Unsized(fn() Err(error.UnexpectedEof)))
-		_ -> http.text('ok')
+        r#"_ = http::serve_on(server, fn(req) {
+	match http::path(req) {
+		<<'/fixed'>> -> http::Response(status: 200, headers: [], body: http::Fixed(5, fn() Err(error::UnexpectedEof)))
+		<<'/unsized'>> -> http::Response(status: 200, headers: [], body: http::Unsized(fn() Err(error::UnexpectedEof)))
+		_ -> http::text('ok')
 	}
 })"#,
     );
@@ -865,22 +865,22 @@ fn burn(n Int) Int {
 }
 
 pub fn main() {
-	match net.listen('127.0.0.1', 0) {
-		Ok(server) -> match net.local_addr(server) {
+	match net::listen('127.0.0.1', 0) {
+		Ok(server) -> match net::local_addr(server) {
 			Ok(addr) -> {
-				_ = process.spawn(fn() {
-					match net.accept(server) {
+				_ = process::spawn(fn() {
+					match net::accept(server) {
 						Ok(Some(c)) -> {
-							socket.write(c, binary.from_string('pong')) or Nil
-							socket.close(c) or Nil
+							socket::write(c, binary::from_string('pong')) or Nil
+							socket::close(c) or Nil
 						}
 						Ok(None) -> println('accept closed')
 						Err(e) -> println('accept failed: ${e}')
 					}
 				})
 				println('warm ${burn(25)}')
-				match net.connect('127.0.0.1', addr.port) {
-					Ok(c) -> match socket.read_exact(c, 4) {
+				match net::connect('127.0.0.1', addr.port) {
+					Ok(c) -> match socket::read_exact(c, 4) {
 						Ok(_) -> println('got pong')
 						Err(e) -> println('read failed: ${e}')
 					}
@@ -924,17 +924,17 @@ fn burn(n Int) Int {
 }
 
 pub fn main() {
-	match net.listen('127.0.0.1', 0) {
+	match net::listen('127.0.0.1', 0) {
 		Ok(server) -> {
-			_ = process.spawn(fn() {
-				match net.accept(server) {
+			_ = process::spawn(fn() {
+				match net::accept(server) {
 					Ok(Some(_)) -> println('unexpected accept')
 					Ok(None) -> println('accept ended')
 					Err(e) -> println('accept failed: ${e}')
 				}
 			})
 			println('warm ${burn(25)}')
-			net.close(server) or Nil
+			net::close(server) or Nil
 			println('closed')
 		}
 		Err(e) -> println('listen failed: ${e}')
@@ -964,17 +964,17 @@ import scarlet/net
 import scarlet/net/socket
 
 pub fn main() {
-	match net.listen('127.0.0.1', 0) {
-		Ok(server) -> match net.local_addr(server) {
+	match net::listen('127.0.0.1', 0) {
+		Ok(server) -> match net::local_addr(server) {
 			Ok(addr) -> {
-				_ = process.spawn(fn() {
-					match net.connect('127.0.0.1', addr.port) {
+				_ = process::spawn(fn() {
+					match net::connect('127.0.0.1', addr.port) {
 						Ok(_) -> println('child connected')
 						Err(e) -> println('connect failed: ${e}')
 					}
 				})
-				match net.accept(server) {
-					Ok(Some(peer)) -> match socket.read_exact(peer, 1) {
+				match net::accept(server) {
+					Ok(Some(peer)) -> match socket::read_exact(peer, 1) {
 						Ok(_) -> println('unexpected data')
 						Err(_) -> println('peer closed')
 					}
@@ -1007,25 +1007,25 @@ import scarlet/net
 import scarlet/net/socket
 
 pub fn main() {
-	match net.listen('127.0.0.1', 0) {
-		Ok(server) -> match net.local_addr(server) {
+	match net::listen('127.0.0.1', 0) {
+		Ok(server) -> match net::local_addr(server) {
 			Ok(addr) -> {
-				_ = process.spawn(fn() {
-					match net.accept(server) {
+				_ = process::spawn(fn() {
+					match net::accept(server) {
 						Ok(_) -> Nil
 						Err(_) -> Nil
 					}
 				})
-				match net.connect('127.0.0.1', addr.port) {
+				match net::connect('127.0.0.1', addr.port) {
 					Ok(conn) -> {
-						_ = process.spawn(fn() {
-							match socket.read_exact(conn, 1) {
+						_ = process::spawn(fn() {
+							match socket::read_exact(conn, 1) {
 								Ok(_) -> println('unexpected data')
 								Err(_) -> println('reader failed')
 							}
 						})
-						process.sleep(50)
-						socket.close(conn) or Nil
+						process::sleep(50)
+						socket::close(conn) or Nil
 						println('closed')
 					}
 					Err(e) -> println('connect failed: ${e}')
@@ -1061,26 +1061,26 @@ import scarlet/net/socket
 import scarlet/binary
 
 pub fn main() {
-	match net.listen('127.0.0.1', 0) {
-		Ok(server) -> match net.local_addr(server) {
+	match net::listen('127.0.0.1', 0) {
+		Ok(server) -> match net::local_addr(server) {
 			Ok(addr) -> {
-				_ = process.spawn(fn() {
-					match net.accept(server) {
+				_ = process::spawn(fn() {
+					match net::accept(server) {
 						Ok(Some(peer)) -> {
-							process.sleep(150)
-							socket.write(peer, binary.from_string('x')) or Nil
+							process::sleep(150)
+							socket::write(peer, binary::from_string('x')) or Nil
 						}
 						Ok(None) -> Nil
 						Err(_) -> Nil
 					}
 				})
-				match net.connect('127.0.0.1', addr.port) {
+				match net::connect('127.0.0.1', addr.port) {
 					Ok(conn) -> {
-						_ = process.spawn(fn() {
-							socket.write(conn, binary.from_string('w')) or Nil
+						_ = process::spawn(fn() {
+							socket::write(conn, binary::from_string('w')) or Nil
 							println('writer done')
 						})
-						match socket.read_exact(conn, 1) {
+						match socket::read_exact(conn, 1) {
 							Ok(_) -> println('reader got byte')
 							Err(e) -> println('reader failed: ${e}')
 						}
@@ -1119,12 +1119,12 @@ import scarlet/net/socket
 import scarlet/binary
 
 pub fn main() {
-	match net.listen('127.0.0.1', 0) {
-		Ok(server) -> match net.local_addr(server) {
+	match net::listen('127.0.0.1', 0) {
+		Ok(server) -> match net::local_addr(server) {
 			Ok(addr) -> {
 				println('listening ${addr.port}')
-				_ = net.serve_on(server, fn(sock) {
-					socket.write(sock, binary.from_string('hi')) or Nil
+				_ = net::serve_on(server, fn(sock) {
+					socket::write(sock, binary::from_string('hi')) or Nil
 				})
 			}
 			Err(e) -> println('addr failed: ${e}')
@@ -1181,16 +1181,16 @@ import scarlet/time
 import scarlet/string
 
 pub fn main() {{
-	match address.parse('127.0.0.1') {{
-		Ok(ip) -> match address.socket_address(ip, {port}) {{
+	match address::parse('127.0.0.1') {{
+		Ok(ip) -> match address::socket_address(ip, {port}) {{
 			Ok(addr) -> {{
-				started = time.monotonic()
-				outcome = net.connect_addr_within(addr, {CONNECT_DEADLINE_MS})
-				ms = time.since_ms(time.monotonic(), started)
+				started = time::monotonic()
+				outcome = net::connect_addr_within(addr, {CONNECT_DEADLINE_MS})
+				ms = time::since_ms(time::monotonic(), started)
 				match outcome {{
-					Err(error.TimedOut) -> println('timed-out ${{ms}}')
+					Err(error::TimedOut) -> println('timed-out ${{ms}}')
 					Ok(_) -> println('connected ${{ms}}')
-					Err(e) -> println('other-error: ${{string.inspect(e)}}')
+					Err(e) -> println('other-error: ${{string::inspect(e)}}')
 				}}
 			}}
 			Err(Nil) -> println('bad address')
@@ -1250,13 +1250,13 @@ import scarlet/time
 import scarlet/string
 
 pub fn main() {{
-	started = time.monotonic()
-	outcome = net.connect_within('127.0.0.1', {port}, {CONNECT_DEADLINE_MS})
-	ms = time.since_ms(time.monotonic(), started)
+	started = time::monotonic()
+	outcome = net::connect_within('127.0.0.1', {port}, {CONNECT_DEADLINE_MS})
+	ms = time::since_ms(time::monotonic(), started)
 	match outcome {{
-		Err(error.TimedOut) -> println('timed-out ${{ms}}')
+		Err(error::TimedOut) -> println('timed-out ${{ms}}')
 		Ok(_) -> println('connected ${{ms}}')
-		Err(e) -> println('other-error: ${{string.inspect(e)}}')
+		Err(e) -> println('other-error: ${{string::inspect(e)}}')
 	}}
 }}
 "#
@@ -1315,14 +1315,14 @@ import scarlet/net/error
 import scarlet/string
 
 pub fn main() {
-	match net.resolve_within('localhost', 0) {
-		Err(error.TimedOut) -> println('timed-out')
+	match net::resolve_within('localhost', 0) {
+		Err(error::TimedOut) -> println('timed-out')
 		Ok(_) -> println('resolved')
-		Err(e) -> println('other-error: ${string.inspect(e)}')
+		Err(e) -> println('other-error: ${string::inspect(e)}')
 	}
-	match net.resolve_within('localhost', 60000) {
+	match net::resolve_within('localhost', 60000) {
 		Ok(_) -> println('control-resolved')
-		Err(e) -> println('control-error: ${string.inspect(e)}')
+		Err(e) -> println('control-error: ${string::inspect(e)}')
 	}
 }
 "#;
@@ -1375,15 +1375,15 @@ fn burn(n Int) Nil {
 }
 
 pub fn main() {
-	_ = process.spawn(fn() { burn(400000) })
-	match net.resolve_within('localhost', 0) {
-		Err(error.TimedOut) -> println('timed-out')
+	_ = process::spawn(fn() { burn(400000) })
+	match net::resolve_within('localhost', 0) {
+		Err(error::TimedOut) -> println('timed-out')
 		Ok(_) -> println('resolved')
-		Err(e) -> println('other-error: ${string.inspect(e)}')
+		Err(e) -> println('other-error: ${string::inspect(e)}')
 	}
-	match net.resolve_within('127.0.0.1', 0) {
+	match net::resolve_within('127.0.0.1', 0) {
 		Ok(_) -> println('literal-ok')
-		Err(e) -> println('literal-error: ${string.inspect(e)}')
+		Err(e) -> println('literal-error: ${string::inspect(e)}')
 	}
 }
 "#;

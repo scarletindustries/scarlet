@@ -35,7 +35,7 @@ fn a_closure_capturing_an_int_and_a_string_round_trips_and_is_called() {
          \tn = 5\n\
          \ts = 'x'\n\
          \tf = fn(a) { '${s}${a + n}' }\n\
-         \tmatch wire.decode(wire.encode(f)) {\n\
+         \tmatch wire::decode(wire::encode(f)) {\n\
          \t\tOk(g) -> {\n\
          \t\t\tprintln(apply(g, 1))\n\
          \t\t\tprintln(apply(g, 1) == apply(f, 1))\n\
@@ -61,26 +61,26 @@ fn a_closure_capturing_every_value_form_round_trips_and_is_called() {
          type P {\n\
          \tP(x Int, name String)\n\
          }\n\
-         fn call(f fn() (P, Array(Int), map.Map(String, Int), Bool, Nil, Float, Int, Array(Int))) (P, Array(Int), map.Map(String, Int), Bool, Nil, Float, Int, Array(Int)) {\n\
+         fn call(f fn() (P, Array(Int), map::Map(String, Int), Bool, Nil, Float, Int, Array(Int))) (P, Array(Int), map::Map(String, Int), Bool, Nil, Float, Int, Array(Int)) {\n\
          \tf()\n\
          }\n\
          pub fn main() {\n\
          \tp = P(1, 'p')\n\
          \txs = [1, 2, 3]\n\
-         \tm = map.set(map.new(), 'k', 7)\n\
+         \tm = map::set(map::new(), 'k', 7)\n\
          \tb = True\n\
          \tz = Nil\n\
          \tfl = 1.5\n\
          \tbig = 9223372036854775807\n\
          \tr = 0..3\n\
          \tf = fn() { (p, xs, m, b, z, fl, big, r) }\n\
-         \tmatch wire.decode(wire.encode(f)) {\n\
+         \tmatch wire::decode(wire::encode(f)) {\n\
          \t\tOk(g) -> match call(g) {\n\
          \t\t\t(P(x, name), ys, m2, b2, Nil, fl2, big2, r2) -> {\n\
          \t\t\t\tprintln(x + 1)\n\
          \t\t\t\tprintln(name)\n\
          \t\t\t\tprintln(ys == [1, 2, 3])\n\
-         \t\t\t\tprintln(map.get(m2, 'k') == Some(7))\n\
+         \t\t\t\tprintln(map::get(m2, 'k') == Some(7))\n\
          \t\t\t\tprintln(b2)\n\
          \t\t\t\tprintln(fl2)\n\
          \t\t\t\tprintln(big2 == 9223372036854775807)\n\
@@ -109,7 +109,7 @@ fn a_closure_capturing_a_closure_round_trips_and_is_called_through_both() {
          \tn = 3\n\
          \tadd = fn(x) { x + n }\n\
          \ttwice = fn(x) { add(add(x)) }\n\
-         \tmatch wire.decode(wire.encode(twice)) {\n\
+         \tmatch wire::decode(wire::encode(twice)) {\n\
          \t\tOk(g) -> {\n\
          \t\t\tprintln(apply(g, 1))\n\
          \t\t\tprintln(apply(g, 10) == apply(twice, 10))\n\
@@ -134,22 +134,22 @@ fn a_closure_capturing_a_subject_and_a_pid_round_trips_and_the_copies_are_used()
          fn run(f fn() Nil) Nil {\n\
          \tf()\n\
          }\n\
-         fn check(f fn(process.Pid) Bool, p process.Pid) Bool {\n\
+         fn check(f fn(process::Pid) Bool, p process::Pid) Bool {\n\
          \tf(p)\n\
          }\n\
          pub fn main() {\n\
-         \tinbox = process.subject()\n\
-         \tsend_hi = fn() { process.send(inbox, 'through the copy') }\n\
-         \tmatch wire.decode(wire.encode(send_hi)) {\n\
+         \tinbox = process::subject()\n\
+         \tsend_hi = fn() { process::send(inbox, 'through the copy') }\n\
+         \tmatch wire::decode(wire::encode(send_hi)) {\n\
          \t\tOk(g) -> {\n\
          \t\t\trun(g)\n\
-         \t\t\tprintln(process.receive(inbox))\n\
+         \t\t\tprintln(process::receive(inbox))\n\
          \t\t}\n\
          \t\tErr(_) -> println('refused')\n\
          \t}\n\
-         \tme = process.self()\n\
+         \tme = process::self()\n\
          \tis_me = fn(p) { p == me }\n\
-         \tmatch wire.decode(wire.encode(is_me)) {\n\
+         \tmatch wire::decode(wire::encode(is_me)) {\n\
          \t\tOk(g) -> println(check(g, me))\n\
          \t\tErr(_) -> println('refused')\n\
          \t}\n\
@@ -172,11 +172,11 @@ fn a_zero_capture_closure_round_trips_and_is_called() {
          \ta * 2\n\
          }\n\
          pub fn main() {\n\
-         \tmatch wire.decode(wire.encode(helper)) {\n\
+         \tmatch wire::decode(wire::encode(helper)) {\n\
          \t\tOk(g) -> println(apply(g, 3))\n\
          \t\tErr(_) -> println('refused')\n\
          \t}\n\
-         \tmatch wire.decode(wire.encode(fn(x) { x + 1 })) {\n\
+         \tmatch wire::decode(wire::encode(fn(x) { x + 1 })) {\n\
          \t\tOk(g) -> println(apply(g, 3))\n\
          \t\tErr(_) -> println('refused')\n\
          \t}\n\
@@ -204,7 +204,7 @@ fn a_record_with_a_fn_field_round_trips_and_the_field_is_called() {
          pub fn main() {\n\
          \tk = 40\n\
          \th = Handler('h', fn(x) { x + k })\n\
-         \tmatch wire.decode(wire.encode(h)) {\n\
+         \tmatch wire::decode(wire::encode(h)) {\n\
          \t\tOk(back) -> {\n\
          \t\t\tprintln(name_of(back))\n\
          \t\t\tprintln(fire(back, 2))\n\
@@ -229,15 +229,15 @@ fn a_closure_from_another_run_is_refused_with_other_run() {
          \tf(x)\n\
          }\n\
          pub fn main() {\n\
-         \tbytes = wire.encode(fn(x) { x + 1 })\n\
-         \tsize = binary.byte_size(bytes)\n\
-         \thead = binary.slice_bytes(bytes, 0, 11) or <<>>\n\
-         \ttail = binary.slice_bytes(bytes, 27, size - 27) or <<>>\n\
+         \tbytes = wire::encode(fn(x) { x + 1 })\n\
+         \tsize = binary::byte_size(bytes)\n\
+         \thead = binary::slice_bytes(bytes, 0, 11) or <<>>\n\
+         \ttail = binary::slice_bytes(bytes, 27, size - 27) or <<>>\n\
          \tzeros = <<0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0>>\n\
-         \tmatch wire.decode(binary.concat([head, zeros, tail])) {\n\
+         \tmatch wire::decode(binary::concat([head, zeros, tail])) {\n\
          \t\tOk(g) -> println(apply(g, 1))\n\
-         \t\tErr(wire.OtherRun(mine, theirs)) -> {\n\
-         \t\t\tprintln(binary.byte_size(mine) == 16)\n\
+         \t\tErr(wire::OtherRun(mine, theirs)) -> {\n\
+         \t\t\tprintln(binary::byte_size(mine) == 16)\n\
          \t\t\tprintln(theirs == zeros)\n\
          \t\t\tprintln(mine == theirs)\n\
          \t\t}\n\
@@ -263,14 +263,14 @@ fn a_tampered_function_index_is_malformed_not_a_panic() {
          \tf(x)\n\
          }\n\
          pub fn main() {\n\
-         \tbytes = wire.encode(fn(x) { x + 1 })\n\
-         \tsize = binary.byte_size(bytes)\n\
-         \thead = binary.slice_bytes(bytes, 0, 27) or <<>>\n\
-         \tcount = binary.slice_bytes(bytes, size - 1, 1) or <<>>\n\
+         \tbytes = wire::encode(fn(x) { x + 1 })\n\
+         \tsize = binary::byte_size(bytes)\n\
+         \thead = binary::slice_bytes(bytes, 0, 27) or <<>>\n\
+         \tcount = binary::slice_bytes(bytes, size - 1, 1) or <<>>\n\
          \tprintln(count == <<0>>)\n\
-         \tmatch wire.decode(binary.concat([head, <<128, 128, 64>>, count])) {\n\
+         \tmatch wire::decode(binary::concat([head, <<128, 128, 64>>, count])) {\n\
          \t\tOk(g) -> println(apply(g, 1))\n\
-         \t\tErr(wire.Malformed(offset, what)) -> {\n\
+         \t\tErr(wire::Malformed(offset, what)) -> {\n\
          \t\t\tprintln(offset)\n\
          \t\t\tprintln(what)\n\
          \t\t}\n\
@@ -294,12 +294,12 @@ fn a_tampered_capture_count_is_malformed() {
          \tf(x)\n\
          }\n\
          pub fn main() {\n\
-         \tbytes = wire.encode(fn(x) { x + 1 })\n\
-         \tsize = binary.byte_size(bytes)\n\
-         \tup_to_count = binary.slice_bytes(bytes, 0, size - 1) or <<>>\n\
-         \tmatch wire.decode(binary.concat([up_to_count, <<1, 11>>])) {\n\
+         \tbytes = wire::encode(fn(x) { x + 1 })\n\
+         \tsize = binary::byte_size(bytes)\n\
+         \tup_to_count = binary::slice_bytes(bytes, 0, size - 1) or <<>>\n\
+         \tmatch wire::decode(binary::concat([up_to_count, <<1, 11>>])) {\n\
          \t\tOk(g) -> println(apply(g, 1))\n\
-         \t\tErr(wire.Malformed(offset, what)) -> {\n\
+         \t\tErr(wire::Malformed(offset, what)) -> {\n\
          \t\t\tprintln(offset == size - 1)\n\
          \t\t\tprintln(what)\n\
          \t\t}\n\
@@ -326,14 +326,14 @@ fn a_capture_count_short_of_the_functions_is_malformed() {
          }\n\
          pub fn main() {\n\
          \tn = 5\n\
-         \tbytes = wire.encode(fn(x) { x + n })\n\
-         \tsize = binary.byte_size(bytes)\n\
-         \tcount = binary.slice_bytes(bytes, size - 3, 1) or <<>>\n\
+         \tbytes = wire::encode(fn(x) { x + n })\n\
+         \tsize = binary::byte_size(bytes)\n\
+         \tcount = binary::slice_bytes(bytes, size - 3, 1) or <<>>\n\
          \tprintln(count == <<1>>)\n\
-         \tup_to_count = binary.slice_bytes(bytes, 0, size - 3) or <<>>\n\
-         \tmatch wire.decode(binary.concat([up_to_count, <<0>>])) {\n\
+         \tup_to_count = binary::slice_bytes(bytes, 0, size - 3) or <<>>\n\
+         \tmatch wire::decode(binary::concat([up_to_count, <<0>>])) {\n\
          \t\tOk(g) -> println(apply(g, 1))\n\
-         \t\tErr(wire.Malformed(offset, what)) -> {\n\
+         \t\tErr(wire::Malformed(offset, what)) -> {\n\
          \t\t\tprintln(offset == size - 3)\n\
          \t\t\tprintln(what)\n\
          \t\t}\n\
@@ -358,14 +358,14 @@ fn a_tampered_capture_tag_is_malformed() {
          }\n\
          pub fn main() {\n\
          \tn = 5\n\
-         \tbytes = wire.encode(fn(x) { x + n })\n\
-         \tsize = binary.byte_size(bytes)\n\
-         \tup_to_tag = binary.slice_bytes(bytes, 0, size - 2) or <<>>\n\
-         \tvalue = binary.slice_bytes(bytes, size - 1, 1) or <<>>\n\
+         \tbytes = wire::encode(fn(x) { x + n })\n\
+         \tsize = binary::byte_size(bytes)\n\
+         \tup_to_tag = binary::slice_bytes(bytes, 0, size - 2) or <<>>\n\
+         \tvalue = binary::slice_bytes(bytes, size - 1, 1) or <<>>\n\
          \tprintln(value == <<10>>)\n\
-         \tmatch wire.decode(binary.concat([up_to_tag, <<255>>, value])) {\n\
+         \tmatch wire::decode(binary::concat([up_to_tag, <<255>>, value])) {\n\
          \t\tOk(g) -> println(apply(g, 1))\n\
-         \t\tErr(wire.Malformed(offset, what)) -> {\n\
+         \t\tErr(wire::Malformed(offset, what)) -> {\n\
          \t\t\tprintln(offset == size - 2)\n\
          \t\t\tprintln(what)\n\
          \t\t}\n\

@@ -84,7 +84,7 @@ impl Workspace {
             return empty;
         };
         // The completion prefix comes from the buffer, not the graph: a
-        // trailing `alias.` is a parse error the recovering parser dropped, so
+        // trailing `alias::` is a parse error the recovering parser dropped, so
         // no occurrence exists at the cursor to resolve.
         let qualifier = self.documents.get(&uri).and_then(|text| {
             let line_text = text.lines().nth(line as usize)?;
@@ -93,9 +93,7 @@ impl Workspace {
 
         let mut items: Vec<Json> = match qualifier {
             Some(q) => {
-                // Only a module alias completes as a qualifier. A record value
-                // before the dot would need field completion, which needs the
-                // expression's inferred type — not wired up yet.
+                // Only a module alias can come before `::`.
                 let Some(target) = graph
                     .module_refs(mid)
                     .map_or(&[][..], |mr| mr.defs_named(&q))

@@ -25,6 +25,7 @@ pub enum Kind {
     PuncBackArrow,
     PuncComma,
     PuncColon,
+    PuncColonColon,
     PuncSemicolon,
     PuncDot,
     PuncDotdot,
@@ -69,6 +70,8 @@ impl Kind {
             Kind::PuncArrow,
             Kind::PuncBackArrow,
             Kind::PuncComma,
+            // Before `:`, so a first-match consumer reads `::` whole.
+            Kind::PuncColonColon,
             Kind::PuncColon,
             Kind::PuncSemicolon,
             Kind::PuncDot,
@@ -126,6 +129,7 @@ impl fmt::Display for Kind {
             Kind::PuncBackArrow => "<-",
             Kind::PuncComma => ",",
             Kind::PuncColon => ":",
+            Kind::PuncColonColon => "::",
             Kind::PuncSemicolon => ";",
             Kind::PuncDot => ".",
             Kind::PuncDotdot => "..",
@@ -194,6 +198,7 @@ mod tests {
                 | Kind::PuncBackArrow
                 | Kind::PuncComma
                 | Kind::PuncColon
+                | Kind::PuncColonColon
                 | Kind::PuncSemicolon
                 | Kind::PuncDot
                 | Kind::PuncDotdot

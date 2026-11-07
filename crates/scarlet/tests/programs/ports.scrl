@@ -20,16 +20,16 @@ fn check(name String, ok Bool) Nil {
 }
 
 // Read until the child closes its stdout, accumulating.
-fn drain(p port.Port, acc Binary) Binary {
-	match port.read(p, 4096) {
-		Ok(socket.Data(b)) -> drain(p, binary.append(acc, b))
-		Ok(socket.Closed) -> acc
+fn drain(p port::Port, acc Binary) Binary {
+	match port::read(p, 4096) {
+		Ok(socket::Data(b)) -> drain(p, binary::append(acc, b))
+		Ok(socket::Closed) -> acc
 		Err(_) -> acc
 	}
 }
 
-fn map_of(k String, v String) map.Map(String, String) {
-	map.set(map.new(), k, v)
+fn map_of(k String, v String) map::Map(String, String) {
+	map::set(map::new(), k, v)
 }
 
 pub fn main() {
@@ -37,61 +37,61 @@ pub fn main() {
 	// cat echoes stdin to stdout and exits on end of input, so closing the port
 	// is what ends it, and close reports a clean exit.
 
-	match port.spawn('cat', []) {
+	match port::spawn('cat', []) {
 		Ok(p) -> {
 			check('os pid is reported', p.os_pid > 0)
-			check('write succeeds', port.write(p, <<'hello '>>) == Ok(Nil))
-			check('write_parts succeeds', port.write_parts(p, [<<'port'>>, <<'s\n'>>]) == Ok(Nil))
-			check('cat echoes what was written', port.read_exact(p, 12) == Ok(<<'hello ports\n'>>))
-			check('nothing more within the timeout', match port.read_within(p, 10, 30) {
+			check('write succeeds', port::write(p, <<'hello '>>) == Ok(Nil))
+			check('write_parts succeeds', port::write_parts(p, [<<'port'>>, <<'s\n'>>]) == Ok(Nil))
+			check('cat echoes what was written', port::read_exact(p, 12) == Ok(<<'hello ports\n'>>))
+			check('nothing more within the timeout', match port::read_within(p, 10, 30) {
 				Err(_) -> True
 				Ok(_) -> False
 			})
-			check('close reports a clean exit', port.close(p) == Ok(port.Exited(0)))
-			check('closing again is NotConnected', port.close(p) == Err(error.NotConnected))
+			check('close reports a clean exit', port::close(p) == Ok(port::Exited(0)))
+			check('closing again is NotConnected', port::close(p) == Err(error::NotConnected))
 		}
-		Err(e) -> println('FAIL spawn cat: ${string.inspect(e)}')
+		Err(e) -> println('FAIL spawn cat: ${string::inspect(e)}')
 	}
 
 	// --- exit codes and output ------------------------------------------------------
 
-	match port.spawn('/bin/sh', ['-c', 'echo out; exit 3']) {
+	match port::spawn('/bin/sh', ['-c', 'echo out; exit 3']) {
 		Ok(p) -> {
 			check('output is readable', drain(p, <<>>) == <<'out\n'>>)
-			check('read after exit is Closed', port.read(p, 10) == Ok(socket.Closed))
-			check('close reports the exit code', port.close(p) == Ok(port.Exited(3)))
+			check('read after exit is Closed', port::read(p, 10) == Ok(socket::Closed))
+			check('close reports the exit code', port::close(p) == Ok(port::Exited(3)))
 		}
-		Err(e) -> println('FAIL spawn sh: ${string.inspect(e)}')
+		Err(e) -> println('FAIL spawn sh: ${string::inspect(e)}')
 	}
 
 	// --- environment ----------------------------------------------------------------
 
 	env = map_of('PORT_TEST_GREETING', 'hi from the parent')
-	match port.spawn_env('/bin/sh', ['-c', 'echo "\$PORT_TEST_GREETING"'], env) {
+	match port::spawn_env('/bin/sh', ['-c', 'echo "\$PORT_TEST_GREETING"'], env) {
 		Ok(p) -> {
 			check('env reaches the child', drain(p, <<>>) == <<'hi from the parent\n'>>)
-			_ = port.close(p)
+			_ = port::close(p)
 		}
-		Err(e) -> println('FAIL spawn with env: ${string.inspect(e)}')
+		Err(e) -> println('FAIL spawn with env: ${string::inspect(e)}')
 	}
 
 	// --- a child that ignores end of input is terminated ------------------------------
 	// sleep never reads stdin, so closing the pipes does nothing; close waits out
 	// the grace period and terminates it, and says so.
 
-	match port.spawn('sleep', ['30']) {
+	match port::spawn('sleep', ['30']) {
 		Ok(p) ->
 			check(
 				'a lingering child is terminated on close',
-				port.close(p) == Ok(port.Signaled(15)),
+				port::close(p) == Ok(port::Signaled(15)),
 			)
-		Err(e) -> println('FAIL spawn sleep: ${string.inspect(e)}')
+		Err(e) -> println('FAIL spawn sleep: ${string::inspect(e)}')
 	}
 
 	// --- a program that does not exist ------------------------------------------------
 
-	check('a missing program is NotFound', match port.spawn('/definitely/not/a/program', []) {
-		Err(io.NotFound(path)) -> path == '/definitely/not/a/program'
+	check('a missing program is NotFound', match port::spawn('/definitely/not/a/program', []) {
+		Err(io::NotFound(path)) -> path == '/definitely/not/a/program'
 		Err(_) -> False
 		Ok(_) -> False
 	})
@@ -101,11 +101,11 @@ pub fn main() {
 	// closes the pipes and collects the child in the background; what is pinned
 	// here is that the program still exits, promptly, with the child gone.
 
-	done = process.subject()
-	_ = process.spawn(fn() match port.spawn('cat', []) {
-		Ok(_) -> process.send(done, True)
-		Err(_) -> process.send(done, False)
+	done = process::subject()
+	_ = process::spawn(fn() match port::spawn('cat', []) {
+		Ok(_) -> process::send(done, True)
+		Err(_) -> process::send(done, False)
 	})
-	check('a port spawned by a process that then ends is cleaned up', process.receive(done))
+	check('a port spawned by a process that then ends is cleaned up', process::receive(done))
 	println('done')
 }

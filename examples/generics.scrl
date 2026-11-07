@@ -68,20 +68,20 @@ pub fn main() {
 	println('twice shouting: ${twice(fn(s) '${s}!', 'go')}')
 
 	// b is Int here, so size_then_double is fn(String) Int.
-	size_then_double = compose(fn(n) n * 2, fn(s) string.length(s))
+	size_then_double = compose(fn(n) n * 2, fn(s) string::length(s))
 	println('size_then_double(claude) = ${size_then_double('claude')}')
 
 	pair = Pair(first: 'one', second: 1)
-	println('${string.inspect(pair)} swapped is ${string.inspect(swap(pair))}')
+	println('${string::inspect(pair)} swapped is ${string::inspect(swap(pair))}')
 
 	stack = push(push(push(Empty, 1), 2), 3)
-	println('stack ${string.inspect(to_array(stack))}')
-	println('first ${string.inspect(first_of(to_array(stack)))}')
-	println('first of nothing ${string.inspect(first_of(to_array(Empty)))}')
+	println('stack ${string::inspect(to_array(stack))}')
+	println('first ${string::inspect(first_of(to_array(stack)))}')
+	println('first of nothing ${string::inspect(first_of(to_array(Empty)))}')
 
 	check Validate = positive
-	println('${string.inspect(check(7))} / ${string.inspect(check(-1))}')
+	println('${string::inspect(check(7))} / ${string::inspect(check(-1))}')
 
-	sizes Bag(Int) = array.map(['al', 'claude', 'inference'], fn(s) string.length(s))
-	println('sizes ${string.inspect(sizes)}')
+	sizes Bag(Int) = array::map(['al', 'claude', 'inference'], fn(s) string::length(s))
+	println('sizes ${string::inspect(sizes)}')
 }

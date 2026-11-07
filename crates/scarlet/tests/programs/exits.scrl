@@ -12,31 +12,31 @@ fn check(name String, ok Bool) Nil {
 	}
 }
 
-fn reason(d process.Down) String {
+fn reason(d process::Down) String {
 	match d.reason {
-		process.Normal -> 'normal'
-		process.Killed -> 'killed'
-		process.NoProcess -> 'no process'
-		process.Crashed(_) -> 'crashed'
+		process::Normal -> 'normal'
+		process::Killed -> 'killed'
+		process::NoProcess -> 'no process'
+		process::Crashed(_) -> 'crashed'
 	}
 }
 
 // A child that stays alive until released, or until killed: its pid and its
 // release subject. `link` decides how it is spawned.
-fn parked(link Bool) (process.Pid, process.Subject(Nil)) {
-	boot = process.subject()
+fn parked(link Bool) (process::Pid, process::Subject(Nil)) {
+	boot = process::subject()
 	pid = if link {
-		process.spawn(fn() wait_behind_gate(boot))
+		process::spawn(fn() wait_behind_gate(boot))
 	} else {
-		process.spawn_unlinked(fn() wait_behind_gate(boot))
+		process::spawn_unlinked(fn() wait_behind_gate(boot))
 	}
-	(pid, process.receive(boot))
+	(pid, process::receive(boot))
 }
 
-fn wait_behind_gate(boot process.Subject(process.Subject(Nil))) Nil {
-	gate = process.subject()
-	process.send(boot, gate)
-	process.receive(gate)
+fn wait_behind_gate(boot process::Subject(process::Subject(Nil))) Nil {
+	gate = process::subject()
+	process::send(boot, gate)
+	process::receive(gate)
 }
 
 // --- a kill spreads over links, in both directions -------------------------------------
@@ -44,19 +44,19 @@ fn wait_behind_gate(boot process.Subject(process.Subject(Nil))) Nil {
 // root -> middle -> leaf, all linked. Killing middle must end all three.
 
 type Tree {
-	Built(root process.Pid, middle process.Pid, leaf process.Pid)
-	Ended(who String, down process.Down)
+	Built(root process::Pid, middle process::Pid, leaf process::Pid)
+	Ended(who String, down process::Down)
 }
 
 fn wait_forever() Nil {
-	process.receive(process.subject())
+	process::receive(process::subject())
 }
 
-fn collect(inbox process.Subject(Tree), left Int, killed Int) Int {
+fn collect(inbox process::Subject(Tree), left Int, killed Int) Int {
 	if left == 0 {
 		killed
 	} else {
-		match process.receive(inbox) {
+		match process::receive(inbox) {
 			Ended(_, d) -> collect(inbox, left - 1, if reason(d) == 'killed' {
 				killed + 1
 			} else {
@@ -68,42 +68,42 @@ fn collect(inbox process.Subject(Tree), left Int, killed Int) Int {
 }
 
 pub fn main() {
-	downs = process.subject()
+	downs = process::subject()
 
 	// --- kill ends a parked process, and its monitor says so ---------------------------
 
 	(victim, _) = parked(False)
-	_ = process.monitor(victim, downs, fn(d) d)
-	process.kill(victim)
-	check('a killed process reports Killed', reason(process.receive(downs)) == 'killed')
+	_ = process::monitor(victim, downs, fn(d) d)
+	process::kill(victim)
+	check('a killed process reports Killed', reason(process::receive(downs)) == 'killed')
 
 	// --- killing what has already ended is nothing -----------------------------------------
 
-	process.kill(victim)
-	_ = process.monitor(victim, downs, fn(d) d)
-	check('killing an ended pid is a no-op', reason(process.receive(downs)) == 'no process')
+	process::kill(victim)
+	_ = process::monitor(victim, downs, fn(d) d)
+	check('killing an ended pid is a no-op', reason(process::receive(downs)) == 'no process')
 
-	tree = process.subject()
-	_ = process.spawn_unlinked(fn() {
+	tree = process::subject()
+	_ = process::spawn_unlinked(fn() {
 		// This is root. middle is its linked child and builds leaf as its own
 		// linked child; both then wait for ever, until the cascade ends them.
-		built = process.subject()
-		middle = process.spawn(fn() {
+		built = process::subject()
+		middle = process::spawn(fn() {
 			(leaf, _) = parked(True)
-			process.send(built, leaf)
+			process::send(built, leaf)
 			wait_forever()
 		})
-		leaf = process.receive(built)
-		process.send(tree, Built(process.self(), middle, leaf))
+		leaf = process::receive(built)
+		process::send(tree, Built(process::self(), middle, leaf))
 		wait_forever()
 	})
 
-	match process.receive(tree) {
+	match process::receive(tree) {
 		Built(root, middle, leaf) -> {
-			_ = process.monitor(root, tree, fn(d) Ended('root', d))
-			_ = process.monitor(middle, tree, fn(d) Ended('middle', d))
-			_ = process.monitor(leaf, tree, fn(d) Ended('leaf', d))
-			process.kill(middle)
+			_ = process::monitor(root, tree, fn(d) Ended('root', d))
+			_ = process::monitor(middle, tree, fn(d) Ended('middle', d))
+			_ = process::monitor(leaf, tree, fn(d) Ended('leaf', d))
+			process::kill(middle)
 			check('a kill takes the whole linked tree with it', collect(tree, 3, 0) == 3)
 		}
 		Ended(_, _) -> println('FAIL tree was never built')
@@ -116,30 +116,30 @@ pub fn main() {
 	// parent (unlinked from us) spawns a linked child, then returns. The child
 	// must still be alive afterwards: we can release it and see it end normally.
 
-	handoff = process.subject()
-	parent = process.spawn_unlinked(fn() {
+	handoff = process::subject()
+	parent = process::spawn_unlinked(fn() {
 		(child, gate) = parked(True)
-		process.send(handoff, (child, gate))
+		process::send(handoff, (child, gate))
 	})
 	// Monitored before it can have run: it starts only once this process parks.
-	_ = process.monitor(parent, downs, fn(d) d)
-	(child, gate) = process.receive(handoff)
-	check('the parent returned', reason(process.receive(downs)) == 'normal')
-	_ = process.monitor(child, downs, fn(d) d)
-	process.send(gate, Nil)
+	_ = process::monitor(parent, downs, fn(d) d)
+	(child, gate) = process::receive(handoff)
+	check('the parent returned', reason(process::receive(downs)) == 'normal')
+	_ = process::monitor(child, downs, fn(d) d)
+	process::send(gate, Nil)
 	check(
 		'its linked child outlived it and ended normally',
-		reason(process.receive(downs)) == 'normal',
+		reason(process::receive(downs)) == 'normal',
 	)
 
 	// --- a process may kill itself -----------------------------------------------------------
 
 	// The process returns in the same slice as its kill; the kill still wins.
-	suicide = process.spawn_unlinked(fn() process.kill(process.self()))
-	_ = process.monitor(suicide, downs, fn(d) d)
+	suicide = process::spawn_unlinked(fn() process::kill(process::self()))
+	_ = process::monitor(suicide, downs, fn(d) d)
 	check(
 		'self-kill reports Killed even though it returned',
-		reason(process.receive(downs)) == 'killed',
+		reason(process::receive(downs)) == 'killed',
 	)
 	println('done')
 }

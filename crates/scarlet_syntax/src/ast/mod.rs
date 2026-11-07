@@ -137,7 +137,7 @@ pub enum TypeKind {
 
 #[derive(Debug, Clone)]
 pub struct NamedType {
-    /// Module qualifier of a `module.Type` reference; `None` for a bare name.
+    /// Module qualifier of a `module::Type` reference; `None` for a bare name.
     pub qualifier: Option<Identifier>,
     pub identifier: Identifier,
     pub type_args: Vec<TypeIdentifier>,
@@ -252,7 +252,7 @@ pub struct TypedDiscard {
 #[derive(Debug, Clone)]
 pub struct CtorDestructuringBinding {
     /// The module the constructor is reached through: `http` in
-    /// `http.Fixed(n, body) = e`.
+    /// `http::Fixed(n, body) = e`.
     pub(crate) qualifier: Option<Identifier>,
     pub(crate) name: Identifier,
     pub args: Vec<PatternArg>,
@@ -568,6 +568,16 @@ pub struct PropertyAccessExpression {
     pub span: Span,
 }
 
+/// `module::member`: a value, function or constructor reached through an
+/// imported module's name. Distinct from [`PropertyAccessExpression`], so a
+/// module name never has to be told apart from a value of the same name.
+#[derive(Debug, Clone)]
+pub struct ModuleAccessExpression {
+    pub module: Identifier,
+    pub member: Identifier,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone)]
 pub struct FunctionCallExpression {
     pub callee: Box<Expression>,
@@ -662,7 +672,7 @@ pub enum Pattern {
         name: Identifier,
     },
     Constructor {
-        /// `io` in `io.NotFound(path)`. `None` when the constructor is in
+        /// `io` in `io::NotFound(path)`. `None` when the constructor is in
         /// scope; both spellings denote the same constructor.
         qualifier: Option<Identifier>,
         name: Identifier,
@@ -855,6 +865,7 @@ pub enum Expression {
     IfExpression(IfExpression),
     InterpolatedString(InterpolatedString),
     MatchExpression(MatchExpression),
+    ModuleAccessExpression(ModuleAccessExpression),
     NumberLiteral(NumberLiteral),
     OrExpression(OrExpression),
     PipeExpression(PipeExpression),
@@ -868,7 +879,7 @@ pub enum Expression {
 impl_span!(
     Expression: ArrayExpression, ArrayIndexExpression, BinaryExpression, BinaryLiteral,
     BlockExpression, ErrorNode, FunctionCallExpression, FunctionExpression, Identifier,
-    IfExpression, InterpolatedString, MatchExpression, NumberLiteral, OrExpression,
+    IfExpression, InterpolatedString, MatchExpression, ModuleAccessExpression, NumberLiteral, OrExpression,
     PipeExpression, PropertyAccessExpression, RangeExpression, StringLiteral, TupleExpression,
     UnaryExpression,
 );

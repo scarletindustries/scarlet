@@ -4,56 +4,56 @@ import scarlet/array
 import scarlet/decimal
 
 type Usd {
-	amount decimal.Decimal
+	amount decimal::Decimal
 }
 
 fn cents(n Int) Usd {
-	Usd(decimal.new(n, 2))
+	Usd(decimal::new(n, 2))
 }
 
-fn amount(u Usd) decimal.Decimal {
+fn amount(u Usd) decimal::Decimal {
 	Usd(d) = u
 	d
 }
 
 fn add(a Usd, b Usd) Usd {
-	Usd(decimal.add(amount(a), amount(b)))
+	Usd(decimal::add(amount(a), amount(b)))
 }
 
 fn times(u Usd, n Int) Usd {
-	Usd(decimal.mul(amount(u), decimal.from_int(n)))
+	Usd(decimal::mul(amount(u), decimal::from_int(n)))
 }
 
 fn show(u Usd) String {
-	'\$${decimal.to_string(amount(u))}'
+	'\$${decimal::to_string(amount(u))}'
 }
 
-fn d(s String) decimal.Decimal {
-	decimal.parse(s) or decimal.from_int(0)
+fn d(s String) decimal::Decimal {
+	decimal::parse(s) or decimal::from_int(0)
 }
 
 // Rounds to cents with banker's rounding, the default.
-fn tax(u Usd, rate decimal.Decimal) Usd {
-	Usd(decimal.round(decimal.mul(amount(u), rate), 2))
+fn tax(u Usd, rate decimal::Decimal) Usd {
+	Usd(decimal::round(decimal::mul(amount(u), rate), 2))
 }
 
 // Splits into n shares that sum back to the total. Leftover cents go first.
 fn split(total Usd, n Int) Array(Usd) {
-	base = decimal.div_with(
+	base = decimal::div_with(
 		amount(total),
-		decimal.from_int(n),
+		decimal::from_int(n),
 		2,
-		decimal.Down,
-	) or decimal.from_int(0)
-	leftover = decimal.units(decimal.sub(amount(total), decimal.mul(base, decimal.from_int(n))))
+		decimal::Down,
+	) or decimal::from_int(0)
+	leftover = decimal::units(decimal::sub(amount(total), decimal::mul(base, decimal::from_int(n))))
 	shares(base, leftover, n)
 }
 
-fn shares(base decimal.Decimal, extra Int, n Int) Array(Usd) {
+fn shares(base decimal::Decimal, extra Int, n Int) Array(Usd) {
 	if n == 0 {
 		[]
 	} else if extra > 0 {
-		[Usd(decimal.add(base, decimal.new(1, 2))), ..shares(base, extra - 1, n - 1)]
+		[Usd(decimal::add(base, decimal::new(1, 2))), ..shares(base, extra - 1, n - 1)]
 	} else {
 		[Usd(base), ..shares(base, 0, n - 1)]
 	}
@@ -70,7 +70,7 @@ fn line_total(i Item) Usd {
 }
 
 pub fn main() {
-	println('0.1 + 0.2 = ${decimal.to_string(decimal.add(d('0.1'), d('0.2')))}')
+	println('0.1 + 0.2 = ${decimal::to_string(decimal::add(d('0.1'), d('0.2')))}')
 	println('')
 
 	items = [
@@ -79,12 +79,12 @@ pub fn main() {
 		Item(name: 'orange juice', price: cents(599), qty: 3),
 	]
 
-	array.each(
+	array::each(
 		items,
 		fn(i) println('${i.qty} x ${i.name} @ ${show(i.price)} = ${show(line_total(i))}'),
 	)
 
-	subtotal = array.fold(items, cents(0), fn(acc, i) add(acc, line_total(i)))
+	subtotal = array::fold(items, cents(0), fn(acc, i) add(acc, line_total(i)))
 	sales_tax = tax(subtotal, d('0.08875'))
 	total = add(subtotal, sales_tax)
 
@@ -95,73 +95,73 @@ pub fn main() {
 
 	println('')
 	println('split 3 ways:')
-	array.each(split(total, 3), fn(share) println('  ${show(share)}'))
-	check = array.fold(split(total, 3), cents(0), fn(acc, s) add(acc, s))
+	array::each(split(total, 3), fn(share) println('  ${show(share)}'))
+	check = array::fold(split(total, 3), cents(0), fn(acc, s) add(acc, s))
 	println('shares sum back to ${show(check)}')
 	println('')
 
-	// == compares representation, not value. Use decimal.eq.
+	// == compares representation, not value. Use decimal::eq.
 	println('1.50 == 1.5      ${d('1.50') == d('1.5')}')
-	println('decimal.eq       ${decimal.eq(d('1.50'), d('1.5'))}')
-	println('decimal.compare  ${decimal.compare(d('1.50'), d('1.5'))}')
+	println('decimal::eq       ${decimal::eq(d('1.50'), d('1.5'))}')
+	println('decimal::compare  ${decimal::compare(d('1.50'), d('1.5'))}')
 	println('')
 
 	a = d('19.99')
 	b = d('5.00')
-	str = decimal.to_string
-	println('lt lte           ${decimal.lt(a, b)} ${decimal.lte(a, b)}')
-	println('gt gte           ${decimal.gt(a, b)} ${decimal.gte(a, b)}')
-	println('min max          ${str(decimal.min(a, b))} ${str(decimal.max(a, b))}')
-	println('neg abs          ${str(decimal.neg(a))} ${str(decimal.abs(decimal.neg(a)))}')
+	str = decimal::to_string
+	println('lt lte           ${decimal::lt(a, b)} ${decimal::lte(a, b)}')
+	println('gt gte           ${decimal::gt(a, b)} ${decimal::gte(a, b)}')
+	println('min max          ${str(decimal::min(a, b))} ${str(decimal::max(a, b))}')
+	println('neg abs          ${str(decimal::neg(a))} ${str(decimal::abs(decimal::neg(a)))}')
 
-	zero = decimal.new(0, 2)
-	println('is_zero          ${decimal.is_zero(zero)} ${decimal.is_zero(a)}')
-	println('is_negative      ${decimal.is_negative(decimal.neg(a))} ${decimal.is_negative(a)}')
-	println('is_positive      ${decimal.is_positive(a)} ${decimal.is_positive(decimal.neg(a))}')
+	zero = decimal::new(0, 2)
+	println('is_zero          ${decimal::is_zero(zero)} ${decimal::is_zero(a)}')
+	println('is_negative      ${decimal::is_negative(decimal::neg(a))} ${decimal::is_negative(a)}')
+	println('is_positive      ${decimal::is_positive(a)} ${decimal::is_positive(decimal::neg(a))}')
 	println('')
 
 	stored = d('12.3400')
-	println('units, scale     ${decimal.units(stored)} @ ${decimal.scale(stored)}')
-	rebuilt = decimal.new(decimal.units(stored), decimal.scale(stored))
+	println('units, scale     ${decimal::units(stored)} @ ${decimal::scale(stored)}')
+	rebuilt = decimal::new(decimal::units(stored), decimal::scale(stored))
 	println('rebuilt          ${str(rebuilt)}')
-	println('normalize        ${str(decimal.normalize(stored))}')
+	println('normalize        ${str(decimal::normalize(stored))}')
 
-	println('new(5, -3)       ${str(decimal.new(5, -3))}')
-	println('from_int         ${str(decimal.from_int(7))}')
+	println('new(5, -3)       ${str(decimal::new(5, -3))}')
+	println('from_int         ${str(decimal::from_int(7))}')
 	println('')
 
-	println('to_float         ${decimal.to_float(d('19.99'))}')
-	println('from_float       ${str(decimal.from_float(0.1 + 0.2, 2))}')
-	println('from_float 20dp  ${str(decimal.from_float(0.1, 20))}')
+	println('to_float         ${decimal::to_float(d('19.99'))}')
+	println('from_float       ${str(decimal::from_float(0.1 + 0.2, 2))}')
+	println('from_float 20dp  ${str(decimal::from_float(0.1, 20))}')
 	println('')
 
-	third = decimal.div(d('10'), d('3'), 4) or zero
+	third = decimal::div(d('10'), d('3'), 4) or zero
 	println('10 / 3 @ 4       ${str(third)}')
 
-	match decimal.div(d('10'), zero, 2) {
-		Ok(q) -> println('divided by zero? ${decimal.to_string(q)}')
+	match decimal::div(d('10'), zero, 2) {
+		Ok(q) -> println('divided by zero? ${decimal::to_string(q)}')
 		Err(Nil) -> println('div by zero      Err(Nil)')
 	}
 
-	println('10 / 3 @ 30      ${str(decimal.div(d('10'), d('3'), 30) or zero)}')
+	println('10 / 3 @ 30      ${str(decimal::div(d('10'), d('3'), 30) or zero)}')
 
 	println('')
 
 	// Every rounding mode on the same tie.
 	tie = d('2.345')
 	modes = [
-		('HalfEven', decimal.HalfEven),
-		('HalfUp', decimal.HalfUp),
-		('Down', decimal.Down),
-		('Up', decimal.Up),
-		('Floor', decimal.Floor),
-		('Ceiling', decimal.Ceiling),
+		('HalfEven', decimal::HalfEven),
+		('HalfUp', decimal::HalfUp),
+		('Down', decimal::Down),
+		('Up', decimal::Up),
+		('Floor', decimal::Floor),
+		('Ceiling', decimal::Ceiling),
 	]
 
-	array.each(modes, fn(m) match m {
+	array::each(modes, fn(m) match m {
 		(name, mode) -> {
-			up = decimal.to_string(decimal.round_with(tie, 2, mode))
-			down = decimal.to_string(decimal.round_with(decimal.neg(tie), 2, mode))
+			up = decimal::to_string(decimal::round_with(tie, 2, mode))
+			down = decimal::to_string(decimal::round_with(decimal::neg(tie), 2, mode))
 			println('${name}\t 2.345 -> ${up}\t-2.345 -> ${down}')
 		}
 	})

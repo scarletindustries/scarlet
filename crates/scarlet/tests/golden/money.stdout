@@ -15,8 +15,8 @@ split 3 ways:
 shares sum back to $32.90
 
 1.50 == 1.5      False
-decimal.eq       True
-decimal.compare  Eq
+decimal::eq       True
+decimal::compare  Eq
 
 lt lte           False False
 gt gte           True True

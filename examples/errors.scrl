@@ -16,14 +16,14 @@ type ParseError {
 	NotANumber(text String)
 }
 
-// map_err lifts binary.parse_int's bare Result(Int, Nil) into our own error type.
+// map_err lifts binary::parse_int's bare Result(Int, Nil) into our own error type.
 fn parse_score(s String) Result(Int, ParseError) {
-	trimmed = string.trim(s)
-	if string.length(trimmed) == 0 {
+	trimmed = string::trim(s)
+	if string::length(trimmed) == 0 {
 		Err(Empty)
 	} else {
-		result.map_err(
-			binary.parse_int(binary.from_string(trimmed), binary.Dec),
+		result::map_err(
+			binary::parse_int(binary::from_string(trimmed), binary::Dec),
 			fn(_) NotANumber(trimmed),
 		)
 	}
@@ -45,9 +45,9 @@ fn validate(n Int) Result(Int, ParseError) {
 	}
 }
 
-// `<-` hands the rest of the block to result.then: it runs only on Ok.
+// `<-` hands the rest of the block to result::then: it runs only on Ok.
 fn checked(s String) Result(Int, ParseError) {
-	n <- result.then(parse_score(s))
+	n <- result::then(parse_score(s))
 	validate(n)
 }
 
@@ -55,36 +55,36 @@ pub fn main() {
 	users = ['ada', 'grace', 'alan']
 
 	// Absence: find, indexing, and lookups all hand back an Option.
-	found = array.find(users, fn(u) string.contains(u, 'ra'))
-	missing = array.find(users, fn(u) u == 'linus')
+	found = array::find(users, fn(u) string::contains(u, 'ra'))
+	missing = array::find(users, fn(u) u == 'linus')
 
-	println('is_some   ${option.is_some(found)} ${option.is_some(missing)}')
-	println('is_none   ${option.is_none(found)} ${option.is_none(missing)}')
-	println('map       ${option.map(found, string.length)}')
-	println('unwrap    ${option.unwrap(found, 'nobody')} ${option.unwrap(missing, 'nobody')}')
+	println('is_some   ${option::is_some(found)} ${option::is_some(missing)}')
+	println('is_none   ${option::is_none(found)} ${option::is_none(missing)}')
+	println('map       ${option::map(found, string::length)}')
+	println('unwrap    ${option::unwrap(found, 'nobody')} ${option::unwrap(missing, 'nobody')}')
 
 	// then chains a lookup that may itself find nothing; or_else supplies a
 	// lazy alternative.
-	initial = option.then(found, fn(u) string.split(u, '')[0])
-	println('then      ${option.unwrap(initial, '?')}')
-	println('or_else   ${option.unwrap(option.or_else(missing, fn() Some('anonymous')), '?')}')
+	initial = option::then(found, fn(u) string::split(u, '')[0])
+	println('then      ${option::unwrap(initial, '?')}')
+	println('or_else   ${option::unwrap(option::or_else(missing, fn() Some('anonymous')), '?')}')
 
 	// or unwraps an Option, or falls back to a value, in one expression.
 	println('or        ${users[9] or 'out of range'}')
 	println('')
 
-	array.each([' 42 ', '', 'abc'], fn(s) println('parse     ${show(parse_score(s))}'))
+	array::each([' 42 ', '', 'abc'], fn(s) println('parse     ${show(parse_score(s))}'))
 
 	good = parse_score('42')
 	bad = parse_score('abc')
 
-	println('is_ok     ${result.is_ok(good)} ${result.is_ok(bad)}')
-	println('is_err    ${result.is_err(good)} ${result.is_err(bad)}')
-	println('map       ${show(result.map(good, fn(n) n * 2))}')
+	println('is_ok     ${result::is_ok(good)} ${result::is_ok(bad)}')
+	println('is_err    ${result::is_err(good)} ${result::is_err(bad)}')
+	println('map       ${show(result::map(good, fn(n) n * 2))}')
 	println('or        ${good or 0} ${bad or 0}')
 
-	println('then      ${show(result.then(good, validate))}')
-	array.each(['900', 'abc'], fn(s) println('then      ${show(checked(s))}'))
+	println('then      ${show(result::then(good, validate))}')
+	array::each(['900', 'abc'], fn(s) println('then      ${show(checked(s))}'))
 
 	// or's receiver form binds the error, so recovery can act on why it failed.
 	score = parse_score('oops') or e -> {
@@ -99,9 +99,9 @@ pub fn main() {
 	println('')
 
 	// io errors are typed enums: NotFound carries the path it could not read.
-	match io.read_text('no-such-file.txt') {
-		Ok(contents) -> println('read ${string.length(contents)} chars')
-		Err(io.NotFound(path)) -> println('io        no such file: ${path}')
-		Err(other) -> println('io        ${string.inspect(other)}')
+	match io::read_text('no-such-file.txt') {
+		Ok(contents) -> println('read ${string::length(contents)} chars')
+		Err(io::NotFound(path)) -> println('io        no such file: ${path}')
+		Err(other) -> println('io        ${string::inspect(other)}')
 	}
 }

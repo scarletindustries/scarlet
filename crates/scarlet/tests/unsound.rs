@@ -266,7 +266,7 @@ fn u20_arithmetic_is_total_vm_never_exits() {
         "import scarlet/int\n\
          pub fn main() {\n\
          \tm = 0 - 9223372036854775807 - 1\n\
-         \tprintln(int.abs(m))\n\
+         \tprintln(int::abs(m))\n\
          }\n",
         "9223372036854775808\n",
     );
@@ -434,9 +434,9 @@ reject_case! {
     u24_subject_binding_does_not_generalize: (
         "import scarlet/process\n\
          pub fn main() {\n\
-         \ts = process.subject()\n\
-         \tprocess.send(s, 1)\n\
-         \tprocess.send(s, 'text')\n\
+         \ts = process::subject()\n\
+         \tprocess::send(s, 1)\n\
+         \tprocess::send(s, 'text')\n\
          }\n",
         "Type mismatch: expected 'Int', got 'String'",
     ),
@@ -450,12 +450,12 @@ fn u25_foreign_receive_is_a_clean_error() {
     run_rejects(
         "import scarlet/process\n\
          pub fn main() {\n\
-         \tmine = process.subject()\n\
-         \t_ = process.spawn(fn() {\n\
-         \t\tprintln(process.receive(mine))\n\
+         \tmine = process::subject()\n\
+         \t_ = process::spawn(fn() {\n\
+         \t\tprintln(process::receive(mine))\n\
          \t})\n\
-         \tprocess.sleep(50)\n\
-         \tprocess.send(mine, 1)\n\
+         \tprocess::sleep(50)\n\
+         \tprocess::send(mine, 1)\n\
          }\n",
         "only the process that created a subject may receive on it",
     );

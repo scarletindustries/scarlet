@@ -25,12 +25,12 @@ fn true_false_and_nil_round_trip_and_the_tag_is_the_declared_index() {
         "import scarlet/binary\n\
          import scarlet/wire\n\
          pub fn main() {\n\
-         \tprintln(wire.decode(wire.encode(True)) == Ok(True))\n\
-         \tprintln(wire.decode(wire.encode(False)) == Ok(False))\n\
-         \tprintln(wire.decode(wire.encode(Nil)) == Ok(Nil))\n\
-         \tprintln(binary.slice_bytes(wire.encode(True), 11, 1) == Ok(<<0>>))\n\
-         \tprintln(binary.slice_bytes(wire.encode(False), 11, 1) == Ok(<<1>>))\n\
-         \tprintln(binary.byte_size(wire.encode(Nil)))\n\
+         \tprintln(wire::decode(wire::encode(True)) == Ok(True))\n\
+         \tprintln(wire::decode(wire::encode(False)) == Ok(False))\n\
+         \tprintln(wire::decode(wire::encode(Nil)) == Ok(Nil))\n\
+         \tprintln(binary::slice_bytes(wire::encode(True), 11, 1) == Ok(<<0>>))\n\
+         \tprintln(binary::slice_bytes(wire::encode(False), 11, 1) == Ok(<<1>>))\n\
+         \tprintln(binary::byte_size(wire::encode(Nil)))\n\
          }\n",
         "True\nTrue\nTrue\nTrue\nTrue\n11\n",
     );
@@ -50,7 +50,7 @@ fn a_record_with_a_bool_field_and_an_array_of_bools_round_trip() {
          }\n\
          pub fn main() {\n\
          \tf = Flag(True, 3)\n\
-         \tmatch wire.decode(wire.encode(f)) {\n\
+         \tmatch wire::decode(wire::encode(f)) {\n\
          \t\tOk(back) -> {\n\
          \t\t\tprintln(back == f)\n\
          \t\t\tprintln(if back.on { back.n } else { 0 })\n\
@@ -58,7 +58,7 @@ fn a_record_with_a_bool_field_and_an_array_of_bools_round_trip() {
          \t\tErr(_) -> println('refused')\n\
          \t}\n\
          \txs = [True, False, True]\n\
-         \tmatch wire.decode(wire.encode(xs)) {\n\
+         \tmatch wire::decode(wire::encode(xs)) {\n\
          \t\tOk(ys) -> {\n\
          \t\t\tprintln(ys == xs)\n\
          \t\t\tprintln(ys == [True, True, True])\n\

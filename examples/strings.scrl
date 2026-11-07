@@ -8,7 +8,7 @@ import scarlet/string
 fn join(parts Array(String), sep String) String {
 	match parts {
 		[] -> ''
-		[h, ..t] -> array.fold(t, h, fn(acc, p) acc + sep + p)
+		[h, ..t] -> array::fold(t, h, fn(acc, p) acc + sep + p)
 	}
 }
 
@@ -25,41 +25,41 @@ pub fn main() {
 	println("tab:\there\nquote:'q'\tprice:\t\$5")
 
 	// An empty separator splits into scalars.
-	println('${string.split('a,b,c', ',')}')
-	println('${string.split('one -> two -> three', ' -> ')}')
-	println('${string.split('héllo', '')}')
+	println('${string::split('a,b,c', ',')}')
+	println('${string::split('one -> two -> three', ' -> ')}')
+	println('${string::split('héllo', '')}')
 
-	println('${string.split('a,,b', ',')}')
-	println('${string.split('a,,b', ';')}')
+	println('${string::split('a,,b', ',')}')
+	println('${string::split('a,,b', ';')}')
 
 	// length counts scalars, not bytes.
 	text = 'héllo'
-	scalars = string.length(text)
-	bytes = binary.byte_size(binary.from_string(text))
+	scalars = string::length(text)
+	bytes = binary::byte_size(binary::from_string(text))
 	println('${text}: ${scalars} scalars, ${bytes} bytes')
 
-	println('contains  ${string.contains(text, 'llo')} ${string.contains(text, 'z')}')
-	println('trim      [${string.trim('  padded \t\n')}]')
+	println('contains  ${string::contains(text, 'llo')} ${string::contains(text, 'z')}')
+	println('trim      [${string::trim('  padded \t\n')}]')
 
-	println('inspect   ${string.inspect([1, 2, 3])} ${string.inspect(Some('x'))}')
+	println('inspect   ${string::inspect([1, 2, 3])} ${string::inspect(Some('x'))}')
 
 	line = '  the quick   brown  fox  '
-	words = array.filter(string.split(string.trim(line), ' '), fn(w) string.length(w) > 0)
-	longest = array.fold(
+	words = array::filter(string::split(string::trim(line), ' '), fn(w) string::length(w) > 0)
+	longest = array::fold(
 		words,
 		'',
-		fn(best, w) if string.length(w) > string.length(best) { w } else { best },
+		fn(best, w) if string::length(w) > string::length(best) { w } else { best },
 	)
 	println('words     ${words}')
 	println('longest   ${longest}')
 
 	joined = join(words, ', ')
 	println('join      ${joined}')
-	println('resplit   ${string.split(joined, ', ') == words}')
+	println('resplit   ${string::split(joined, ', ') == words}')
 
 	// scarlet/binary works on the raw bytes.
 	raw = <<'AL'>>
-	all_upper = array.all(0..binary.byte_size(raw), fn(i) binary.byte_at(raw, i) < 91)
-	println('bytes     ${binary.byte_at(raw, 0)} ${binary.byte_at(raw, 1)}')
+	all_upper = array::all(0..binary::byte_size(raw), fn(i) binary::byte_at(raw, i) < 91)
+	println('bytes     ${binary::byte_at(raw, 0)} ${binary::byte_at(raw, 1)}')
 	println('upper?    ${all_upper}')
 }

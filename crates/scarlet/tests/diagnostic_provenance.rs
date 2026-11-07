@@ -25,7 +25,7 @@ const LIB_SRC: &str = "pub fn broken() Int {\n  \"not an int\"\n}\n";
 
 /// The entry's second line sits at the same span as lib's error, so a snippet
 /// sliced from the wrong file still looks plausible.
-const ENTRY_SRC: &str = "import ./lib\npub fn probe() Int { lib.broken() }\n";
+const ENTRY_SRC: &str = "import ./lib\npub fn probe() Int { lib::broken() }\n";
 
 fn check_project(p: &Project, entry_src: &str) -> bytecode::CompileResult {
     let mut sc = scanner::new_scanner(entry_src.to_string());

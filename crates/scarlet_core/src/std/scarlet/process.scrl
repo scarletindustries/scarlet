@@ -112,13 +112,13 @@ pub fn receive(s Subject(msg)) msg
 
 // As `receive`, but `Err(Nil)` after `timeout_ms` milliseconds.
 pub fn receive_within(s Subject(msg), timeout_ms Int) Result(msg, Nil) {
-	receive_until(s, time.add_ms(time.monotonic(), timeout_ms))
+	receive_until(s, time::add_ms(time::monotonic(), timeout_ms))
 }
 
-// As `receive`, but `Err(Nil)` once `deadline` (from `time.monotonic()`)
+// As `receive`, but `Err(Nil)` once `deadline` (from `time::monotonic()`)
 // passes.
-pub fn receive_until(s Subject(msg), deadline time.Instant) Result(msg, Nil) {
-	receive_until_ms(s, time.to_deadline_ms(deadline))
+pub fn receive_until(s Subject(msg), deadline time::Instant) Result(msg, Nil) {
+	receive_until_ms(s, time::to_deadline_ms(deadline))
 }
 
 @vm(process__receive_until)
@@ -355,13 +355,13 @@ fn parent_id(id Int) Int
 // What is declared under `s`, in declaration order (a factory's members in
 // no order). A snapshot.
 pub fn children(s Supervised) Array(Supervised) {
-	array.map(children_ids(s.id), fn(id) Supervised(id: id))
+	array::map(children_ids(s.id), fn(id) Supervised(id: id))
 }
 
 @vm(process__children)
 fn children_ids(id Int) Array(Int)
 
-// `array.length(children(s))`, without building the array.
+// `array::length(children(s))`, without building the array.
 pub fn count(s Supervised) Int {
 	count_of(s.id)
 }

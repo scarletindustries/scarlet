@@ -35,5 +35,5 @@ PASS Result eq
 PASS Result ne across variants
 PASS Order eq
 PASS Decimal == is structural
-PASS decimal.eq is numeric
+PASS decimal::eq is numeric
 PASS normalize makes them structurally equal

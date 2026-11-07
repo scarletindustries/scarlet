@@ -60,7 +60,7 @@ pub fn scale(d Decimal) Int {
 }
 
 pub fn add(a Decimal, b Decimal) Decimal {
-	s = int.max(scale(a), scale(b))
+	s = int::max(scale(a), scale(b))
 	Decimal(units(a) * pow10(s - scale(a)) + units(b) * pow10(s - scale(b)), s)
 }
 
@@ -73,7 +73,7 @@ pub fn neg(d Decimal) Decimal {
 }
 
 pub fn abs(d Decimal) Decimal {
-	Decimal(int.abs(units(d)), scale(d))
+	Decimal(int::abs(units(d)), scale(d))
 }
 
 // Exact product; the result scale is the sum of the operand scales.
@@ -123,7 +123,7 @@ pub fn round_with(d Decimal, places Int, mode Rounding) Decimal {
 // `Eq` — built-in `==` would say otherwise, because it compares the
 // representation (units and scale), not the number.
 pub fn compare(a Decimal, b Decimal) Order {
-	s = int.max(scale(a), scale(b))
+	s = int::max(scale(a), scale(b))
 	ua = units(a) * pow10(s - scale(a))
 	ub = units(b) * pow10(s - scale(b))
 	if ua < ub {
@@ -204,10 +204,10 @@ pub fn normalize(d Decimal) Decimal {
 // '+0.05'. The scale is the number of fraction digits. Anything else, like
 // '.5' or '1.', is `Err(Nil)`.
 pub fn parse(s String) Result(Decimal, Nil) {
-	b = binary.from_string(s)
-	first = binary.byte_at(b, 0)
+	b = binary::from_string(s)
+	first = binary::byte_at(b, 0)
 	parsed = if first == 45 {
-		option.map(parse_unsigned(tail(b)), neg)
+		option::map(parse_unsigned(tail(b)), neg)
 	} else if first == 43 {
 		parse_unsigned(tail(b))
 	} else {
@@ -221,12 +221,12 @@ pub fn parse(s String) Result(Decimal, Nil) {
 
 pub fn to_string(d Decimal) String {
 	if scale(d) == 0 {
-		int.to_string(units(d))
+		int::to_string(units(d))
 	} else {
 		sign = if units(d) < 0 { '-' } else { '' }
-		mag = int.abs(units(d))
+		mag = int::abs(units(d))
 		p = pow10(scale(d))
-		'${sign}${mag / p}.${pad_zeros(int.to_string(mag % p), scale(d))}'
+		'${sign}${mag / p}.${pad_zeros(int::to_string(mag % p), scale(d))}'
 	}
 }
 
@@ -240,7 +240,7 @@ pub fn to_float(d Decimal) Float {
 fn from_decimal(units Int, scale Int) Float
 
 // The exact value of `f`, rounded at `places` with ties away from zero, as
-// `float.round` does. A Float is never NaN or infinite, so this cannot fail.
+// `float::round` does. A Float is never NaN or infinite, so this cannot fail.
 // Floats are approximate, so prefer `parse` or `new` when exactness matters.
 pub fn from_float(f Float, places Int) Decimal {
 	round_with(exact(f, 0), places, HalfUp)
@@ -249,8 +249,8 @@ pub fn from_float(f Float, places Int) Decimal {
 // `f * 2^k` is whole after at most 1074 doublings, each exact. Then `f` is
 // `n / 2^k`, which is `n * 5^k / 10^k`.
 fn exact(f Float, k Int) Decimal {
-	n = float.floor(f)
-	if float.from_int(n) == f {
+	n = float::floor(f)
+	if float::from_int(n) == f {
 		Decimal(n * pow(5, k), k)
 	} else {
 		exact(f * 2.0, k + 1)
@@ -284,26 +284,26 @@ fn pow(b Int, n Int) Int {
 }
 
 fn tail(b Binary) Binary {
-	binary.drop_bytes(b, 1)
+	binary::drop_bytes(b, 1)
 }
 
 fn parse_unsigned(b Binary) Option(Decimal) {
-	match binary.index_of(b, <<'.'>>, 0) {
-		None -> match binary.parse_int(b, binary.Dec) {
+	match binary::index_of(b, <<'.'>>, 0) {
+		None -> match binary::parse_int(b, binary::Dec) {
 			Ok(n) -> Some(Decimal(n, 0))
 			Err(Nil) -> None
 		}
 		Some(i) -> {
-			(whole, rest) = binary.split_at_bytes(b, i)
-			parse_parts(whole, binary.drop_bytes(rest, 1))
+			(whole, rest) = binary::split_at_bytes(b, i)
+			parse_parts(whole, binary::drop_bytes(rest, 1))
 		}
 	}
 }
 
 fn parse_parts(whole Binary, frac Binary) Option(Decimal) {
-	k = binary.byte_size(frac)
-	match binary.parse_int(whole, binary.Dec) {
-		Ok(w) -> match binary.parse_int(frac, binary.Dec) {
+	k = binary::byte_size(frac)
+	match binary::parse_int(whole, binary::Dec) {
+		Ok(w) -> match binary::parse_int(frac, binary::Dec) {
 			Ok(f) -> Some(Decimal(w * pow10(k) + f, k))
 			Err(Nil) -> None
 		}
@@ -312,7 +312,7 @@ fn parse_parts(whole Binary, frac Binary) Option(Decimal) {
 }
 
 fn pad_zeros(s String, width Int) String {
-	if string.length(s) >= width {
+	if string::length(s) >= width {
 		s
 	} else {
 		pad_zeros('0${s}', width)
@@ -324,7 +324,7 @@ fn pad_zeros(s String, width Int) String {
 // "away from zero" is a step of `sign(n)`.
 fn div_round(n Int, d Int, mode Rounding) Int {
 	q = n / d
-	r = int.abs(n % d)
+	r = int::abs(n % d)
 	if r == 0 {
 		q
 	} else {

@@ -35,37 +35,37 @@ pub type Request {
 	// As on the wire (RFC 9112 §3.2): usually a path and `?query`, but it may be
 	// `*` or an absolute URI. `path` and `query` split the usual form.
 	target Binary
-	version h1.Version
-	headers headers.Headers
+	version h1::Version
+	headers headers::Headers
 	// `Connection` and `Expect`, read once from the header section as it
 	// arrived, so a handler that rewrites `headers` cannot change them.
-	flags h1.HeadFlags
+	flags h1::HeadFlags
 	// Fields after a chunked body. Kept apart from `headers`: RFC 9110 §6.5.1
 	// says they must not decide Connection or Expect.
-	trailers headers.Headers
-	body body.Body
+	trailers headers::Headers
+	body body::Body
 }
 
 // How a response body is framed. `Fixed` promises exactly `len` bytes: the
 // driver writes Content-Length and checks the count. `Unsized` is chunked on
 // HTTP/1.1, and ends with the connection on HTTP/1.0.
 pub type ResponseBody {
-	Fixed(len Int, b body.Body)
-	Unsized(b body.Body)
+	Fixed(len Int, b body::Body)
+	Unsized(b body::Body)
 }
 
 pub type Response {
 	status Int
-	headers headers.Headers
+	headers headers::Headers
 	body ResponseBody
 }
 
 type ReqHead {
 	method Binary
 	target Binary
-	version h1.Version
-	headers headers.Headers
-	flags h1.HeadFlags
+	version h1::Version
+	headers headers::Headers
+	flags h1::HeadFlags
 }
 
 // What writing one response decided. KeepAlive carries the bytes still
@@ -112,9 +112,9 @@ fn to_method(m Binary) Method {
 
 // The target up to the first `?`, or all of it.
 pub fn path(r Request) Binary {
-	match binary.index_of(r.target, QUESTION, 0) {
+	match binary::index_of(r.target, QUESTION, 0) {
 		// `i` is inside `r.target`, so this cannot fail.
-		Some(i) -> match binary.slice_bytes(r.target, 0, i) {
+		Some(i) -> match binary::slice_bytes(r.target, 0, i) {
 			Ok(p) -> p
 			Err(Nil) -> EMPTY
 		}
@@ -124,15 +124,15 @@ pub fn path(r Request) Binary {
 
 // The target after the first `?`, or empty.
 pub fn query(r Request) Binary {
-	match binary.index_of(r.target, QUESTION, 0) {
-		Some(i) -> binary.drop_bytes(r.target, i + 1)
+	match binary::index_of(r.target, QUESTION, 0) {
+		Some(i) -> binary::drop_bytes(r.target, i + 1)
 		None -> EMPTY
 	}
 }
 
 // A 200 with a body of unknown length: chunked on HTTP/1.1, closed after on
 // HTTP/1.0. If you know the length, use a `Fixed` body, as `text` does.
-pub fn ok(b body.Body) Response {
+pub fn ok(b body::Body) Response {
 	Response(status: 200, headers: [], body: Unsized(b))
 }
 
@@ -146,20 +146,20 @@ pub fn text(s String) Response {
 }
 
 fn text_response(code Int, s String) Response {
-	bin = binary.from_string(s)
+	bin = binary::from_string(s)
 	Response(
 		status: code,
-		headers: [headers.Header(name: NAME_CONTENT_TYPE, value: VAL_TEXT_PLAIN)],
-		body: Fixed(binary.byte_size(bin), body.from_binary(bin)),
+		headers: [headers::Header(name: NAME_CONTENT_TYPE, value: VAL_TEXT_PLAIN)],
+		body: Fixed(binary::byte_size(bin), body::from_binary(bin)),
 	)
 }
 
 // Set a header: afterwards exactly one field is named `name`.
 pub fn with_header(r Response, name Binary, value Binary) Response {
-	Response(status: r.status, headers: headers.set(r.headers, name, value), body: r.body)
+	Response(status: r.status, headers: headers::set(r.headers, name, value), body: r.body)
 }
 
-fn build_request(head ReqHead, trailers headers.Headers, b body.Body) Request {
+fn build_request(head ReqHead, trailers headers::Headers, b body::Body) Request {
 	Request(
 		method: to_method(head.method),
 		target: head.target,
@@ -178,67 +178,67 @@ pub fn serve(
 	host String,
 	port Int,
 	handler fn(Request) Response,
-) Result(net.Service, error.NetError) {
-	net.serve(host, port, fn(sock) drive(sock, handler))
+) Result(net::Service, error::NetError) {
+	net::serve(host, port, fn(sock) drive(sock, handler))
 }
 
 // As `serve`, inside your own supervisor, so it stops and restarts with it.
 pub fn serve_in(
-	sup process.Supervisor,
+	sup process::Supervisor,
 	host String,
 	port Int,
 	handler fn(Request) Response,
-) Result(net.Service, error.NetError) {
-	net.serve_in(sup, host, port, fn(sock) drive(sock, handler))
+) Result(net::Service, error::NetError) {
+	net::serve_in(sup, host, port, fn(sock) drive(sock, handler))
 }
 
 // Serve on a listener you already bound, say on port 0 to read the port back.
-pub fn serve_on(server net.Server, handler fn(Request) Response) net.Service {
-	net.serve_on(server, fn(sock) drive(sock, handler))
+pub fn serve_on(server net::Server, handler fn(Request) Response) net::Service {
+	net::serve_on(server, fn(sock) drive(sock, handler))
 }
 
 // Serve one connection, and close it once on the way out.
-fn drive(sock socket.Socket, handler fn(Request) Response) Nil {
+fn drive(sock socket::Socket, handler fn(Request) Response) Nil {
 	serve_conn(sock, EMPTY, 0, head_deadline(), handler, []) or Nil
-	socket.close(sock) or Nil
+	socket::close(sock) or Nil
 }
 
-fn head_deadline() time.Instant {
-	time.deadline_in_ms(HEAD_TIMEOUT_MS)
+fn head_deadline() time::Instant {
+	time::deadline_in_ms(HEAD_TIMEOUT_MS)
 }
 
-fn body_deadline() time.Instant {
-	time.deadline_in_ms(BODY_TIMEOUT_MS)
+fn body_deadline() time::Instant {
+	time::deadline_in_ms(BODY_TIMEOUT_MS)
 }
 
 // The keep-alive loop. `buf` from `off` holds bytes read but not yet parsed.
 // `pending` holds responses not yet written. They go out as one write at the
 // next read, so N pipelined requests cost one read and one write.
 fn serve_conn(
-	sock socket.Socket,
+	sock socket::Socket,
 	buf Binary,
 	off Int,
-	deadline time.Instant,
+	deadline time::Instant,
 	handler fn(Request) Response,
 	pending Array(Binary),
-) Result(Nil, error.NetError) {
+) Result(Nil, error::NetError) {
 	// No check for an empty window first: parsing one gives NeedMore, and the
 	// check measured slower.
-	match h1.parse_request(buf, off) {
-		h1.NeedMore -> {
-			_ <- result.then(flush(sock, pending))
-			match socket.read_until(sock, READ_SIZE, deadline) {
-				Ok(socket.Data(more)) ->
+	match h1::parse_request(buf, off) {
+		h1::NeedMore -> {
+			_ <- result::then(flush(sock, pending))
+			match socket::read_until(sock, READ_SIZE, deadline) {
+				Ok(socket::Data(more)) ->
 					serve_conn(sock, carry(buf, off, more), 0, deadline, handler, [])
-				Ok(socket.Closed) -> Ok(Nil)
+				Ok(socket::Closed) -> Ok(Nil)
 				Err(e) -> Err(e)
 			}
 		}
-		h1.Bad(status) -> {
+		h1::Bad(status) -> {
 			reject(sock, pending, status)
 			Ok(Nil)
 		}
-		h1.Done(method, target, version, hdrs, flags, consumed) -> {
+		h1::Done(method, target, version, hdrs, flags, consumed) -> {
 			head = ReqHead(
 				method: method,
 				target: target,
@@ -252,16 +252,16 @@ fn serve_conn(
 }
 
 // Flush earlier pipelined responses, then write an error. The caller closes.
-fn reject(sock socket.Socket, pending Array(Binary), status Int) Nil {
+fn reject(sock socket::Socket, pending Array(Binary), status Int) Nil {
 	flush(sock, pending) or Nil
 	write_error(sock, status)
 }
 
-fn flush(sock socket.Socket, pending Array(Binary)) Result(Nil, error.NetError) {
+fn flush(sock socket::Socket, pending Array(Binary)) Result(Nil, error::NetError) {
 	match pending {
 		[] -> Ok(Nil)
 		_ -> {
-			_ <- result.then(socket.write_parts(sock, pending))
+			_ <- result::then(socket::write_parts(sock, pending))
 			Ok(Nil)
 		}
 	}
@@ -270,49 +270,49 @@ fn flush(sock socket.Socket, pending Array(Binary)) Result(Nil, error.NetError) 
 // The unread tail of `buf`, then `more`. With no tail, `more` is used as it
 // is, with no copy.
 fn carry(buf Binary, off Int, more Binary) Binary {
-	if binary.byte_size(buf) - off == 0 {
+	if binary::byte_size(buf) - off == 0 {
 		more
 	} else {
-		binary.append(binary.drop_bytes(buf, off), more)
+		binary::append(binary::drop_bytes(buf, off), more)
 	}
 }
 
 fn handle(
-	sock socket.Socket,
+	sock socket::Socket,
 	buf Binary,
 	consumed Int,
 	head ReqHead,
 	handler fn(Request) Response,
 	pending Array(Binary),
-) Result(Nil, error.NetError) {
-	match h1.framing(head.headers) {
-		h1.Invalid(status) -> {
+) Result(Nil, error::NetError) {
+	match h1::framing(head.headers) {
+		h1::Invalid(status) -> {
 			reject(sock, pending, status)
 			Ok(Nil)
 		}
-		h1.NoBody ->
+		h1::NoBody ->
 			respond_and_continue(
 				sock,
 				buf,
 				consumed,
-				build_request(head, [], body.empty()),
+				build_request(head, [], body::empty()),
 				handler,
 				pending,
 			)
-		h1.Length(n) -> if n > MAX_BODY {
+		h1::Length(n) -> if n > MAX_BODY {
 			reject(sock, pending, 413)
 			Ok(Nil)
 		} else {
 			deadline = body_deadline()
 			// Flush first: the client may wait for those responses before it sends
 			// the body.
-			_ <- result.then(flush(sock, pending))
+			_ <- result::then(flush(sock, pending))
 			read_body(sock, buf, consumed, n, deadline, head, handler)
 		}
 		// Flush first, as for Content-Length.
-		h1.Chunked -> {
+		h1::Chunked -> {
 			deadline = body_deadline()
-			_ <- result.then(flush(sock, pending))
+			_ <- result::then(flush(sock, pending))
 			read_chunked_body(sock, buf, consumed, deadline, head, handler)
 		}
 	}
@@ -321,26 +321,26 @@ fn handle(
 // Read the whole Content-Length body, then run the handler. Bytes already
 // in `buf` are used first. What follows the body in `buf` is the next request.
 fn read_body(
-	sock socket.Socket,
+	sock socket::Socket,
 	buf Binary,
 	consumed Int,
 	n Int,
-	deadline time.Instant,
+	deadline time::Instant,
 	head ReqHead,
 	handler fn(Request) Response,
-) Result(Nil, error.NetError) {
-	_ <- result.then(maybe_continue(sock, head.flags))
-	avail = binary.byte_size(buf) - consumed
-	buffered = int.min(avail, n)
+) Result(Nil, error::NetError) {
+	_ <- result::then(maybe_continue(sock, head.flags))
+	avail = binary::byte_size(buf) - consumed
+	buffered = int::min(avail, n)
 	// Cannot fail: the window ends inside `buf`.
-	head_bytes = match binary.slice_bytes(buf, consumed, buffered) {
+	head_bytes = match binary::slice_bytes(buf, consumed, buffered) {
 		Ok(v) -> v
 		Err(Nil) -> <<>>
 	}
 	need = n - buffered
-	tail <- result.then(body.collect(body.content_length(sock, need, deadline), MAX_BODY))
+	tail <- result::then(body::collect(body::content_length(sock, need, deadline), MAX_BODY))
 	// `pending` was flushed before the body was read.
-	req = build_request(head, [], body.from_binary(binary.append(head_bytes, tail)))
+	req = build_request(head, [], body::from_binary(binary::append(head_bytes, tail)))
 	if avail > n {
 		respond_and_continue(sock, buf, consumed + n, req, handler, [])
 	} else {
@@ -350,14 +350,14 @@ fn read_body(
 
 // Answer 100-continue once, then read a chunked body.
 fn read_chunked_body(
-	sock socket.Socket,
+	sock socket::Socket,
 	buf Binary,
 	off Int,
-	deadline time.Instant,
+	deadline time::Instant,
 	head ReqHead,
 	handler fn(Request) Response,
-) Result(Nil, error.NetError) {
-	_ <- result.then(maybe_continue(sock, head.flags))
+) Result(Nil, error::NetError) {
+	_ <- result::then(maybe_continue(sock, head.flags))
 	chunked_loop(sock, buf, off, deadline, head, handler)
 }
 
@@ -365,32 +365,32 @@ fn read_chunked_body(
 // same offset. The decoder caps the size at MAX_BODY (413), and `consumed` is
 // the first byte after the body, where a pipelined request would start.
 fn chunked_loop(
-	sock socket.Socket,
+	sock socket::Socket,
 	buf Binary,
 	off Int,
-	deadline time.Instant,
+	deadline time::Instant,
 	head ReqHead,
 	handler fn(Request) Response,
-) Result(Nil, error.NetError) {
-	match h1.chunk_decode(buf, off, MAX_BODY) {
-		h1.ChunkedNeedMore -> match socket.read_until(sock, READ_SIZE, deadline) {
-			Ok(socket.Data(more)) ->
-				chunked_loop(sock, binary.append(buf, more), off, deadline, head, handler)
+) Result(Nil, error::NetError) {
+	match h1::chunk_decode(buf, off, MAX_BODY) {
+		h1::ChunkedNeedMore -> match socket::read_until(sock, READ_SIZE, deadline) {
+			Ok(socket::Data(more)) ->
+				chunked_loop(sock, binary::append(buf, more), off, deadline, head, handler)
 			// Peer closed mid-body: there is no complete request to answer.
-			Ok(socket.Closed) -> Ok(Nil)
+			Ok(socket::Closed) -> Ok(Nil)
 			Err(e) -> Err(e)
 		}
-		h1.ChunkedBad(status) -> {
+		h1::ChunkedBad(status) -> {
 			write_error(sock, status)
 			Ok(Nil)
 		}
 		// `pending` was flushed before the body was read.
-		h1.ChunkedDone(decoded, trailers, consumed) ->
+		h1::ChunkedDone(decoded, trailers, consumed) ->
 			respond_and_continue(
 				sock,
 				buf,
 				consumed,
-				build_request(head, trailers, body.from_binary(decoded)),
+				build_request(head, trailers, body::from_binary(decoded)),
 				handler,
 				[],
 			)
@@ -398,9 +398,9 @@ fn chunked_loop(
 }
 
 // A client that sent Expect: 100-continue waits for this before the body.
-fn maybe_continue(sock socket.Socket, f h1.HeadFlags) Result(Nil, error.NetError) {
-	if h1.want_100_continue(f) {
-		socket.write(sock, h1.serialize_head(100, []))
+fn maybe_continue(sock socket::Socket, f h1::HeadFlags) Result(Nil, error::NetError) {
+	if h1::want_100_continue(f) {
+		socket::write(sock, h1::serialize_head(100, []))
 	} else {
 		Ok(Nil)
 	}
@@ -409,15 +409,15 @@ fn maybe_continue(sock socket.Socket, f h1.HeadFlags) Result(Nil, error.NetError
 // Run the handler and write the response. This is the only place the
 // connection is reused, and only after the whole request body was read.
 fn respond_and_continue(
-	sock socket.Socket,
+	sock socket::Socket,
 	leftover_buf Binary,
 	leftover_off Int,
 	req Request,
 	handler fn(Request) Response,
 	pending Array(Binary),
-) Result(Nil, error.NetError) {
+) Result(Nil, error::NetError) {
 	resp = handler(req)
-	close_after = h1.should_close(req.version, req.flags) || response_close(resp)
+	close_after = h1::should_close(req.version, req.flags) || response_close(resp)
 	match respond(sock, pending, req.method, req.version, close_after, resp) {
 		Err(e) -> Err(e)
 		Ok(Close) -> Ok(Nil)
@@ -430,23 +430,23 @@ fn respond_and_continue(
 // Buffered responses join `pending`; streaming ones flush it, then write. A
 // bad status, invalid headers or a negative length become a 500 and a close.
 fn respond(
-	sock socket.Socket,
+	sock socket::Socket,
 	pending Array(Binary),
 	method Method,
-	version h1.Version,
+	version h1::Version,
 	close_after Bool,
 	resp Response,
-) Result(Sent, error.NetError) {
+) Result(Sent, error::NetError) {
 	if resp.status < 200 || resp.status > 999 {
 		replace_with_500(sock, pending)
-	} else if !headers.valid(resp.headers) {
+	} else if !headers::valid(resp.headers) {
 		replace_with_500(sock, pending)
 	} else if negative_fixed_length(resp.body) {
 		replace_with_500(sock, pending)
 	} else {
 		hdrs = conn_headers(version, close_after, strip_framing(resp.headers))
 		if suppress_body(method, resp.status) {
-			head = h1.serialize_head(resp.status, head_only_headers(method, hdrs, resp.body))
+			head = h1::serialize_head(resp.status, head_only_headers(method, hdrs, resp.body))
 			finish_buffered(sock, close_after, [..pending, head])
 		} else {
 			match resp.body {
@@ -461,44 +461,44 @@ fn respond(
 						b,
 					)
 				Unsized(b) -> match version {
-					h1.Http11 -> {
-						chunked = headers.set(hdrs, NAME_TRANSFER_ENCODING, VAL_CHUNKED)
-						_ <- result.then(flush(sock, pending))
-						match body.probe(sanitize_trailers(b)) {
+					h1::Http11 -> {
+						chunked = headers::set(hdrs, NAME_TRANSFER_ENCODING, VAL_CHUNKED)
+						_ <- result::then(flush(sock, pending))
+						match body::probe(sanitize_trailers(b)) {
 							// The body failed before the head was written, so a 500 can
 							// still go out.
 							Err(_) -> replace_with_500(sock, [])
 							Ok(
 								probed,
-							) -> match body.drain_chunked_with_head(
-								h1.serialize_head(resp.status, chunked),
+							) -> match body::drain_chunked_with_head(
+								h1::serialize_head(resp.status, chunked),
 								probed,
 								sock,
 							) {
 								Ok(Nil) -> finish_buffered(sock, close_after, [])
 								// The head is out: abort, so the peer sees the body cut short.
-								Err(body.SourceFailed(e)) -> Err(e)
-								Err(body.SinkFailed(e)) -> Err(e)
+								Err(body::SourceFailed(e)) -> Err(e)
+								Err(body::SinkFailed(e)) -> Err(e)
 							}
 						}
 					}
-					h1.Http10 -> {
-						closing = headers.set(hdrs, NAME_CONNECTION, VAL_CLOSE)
-						_ <- result.then(flush(sock, pending))
-						match body.probe(b) {
+					h1::Http10 -> {
+						closing = headers::set(hdrs, NAME_CONNECTION, VAL_CLOSE)
+						_ <- result::then(flush(sock, pending))
+						match body::probe(b) {
 							// As above: the head is not out yet.
 							Err(_) -> replace_with_500(sock, [])
 							Ok(
 								probed,
-							) -> match body.drain_with_head(
-								h1.serialize_head(resp.status, closing),
+							) -> match body::drain_with_head(
+								h1::serialize_head(resp.status, closing),
 								probed,
 								sock,
 							) {
 								Ok(Nil) -> Ok(Close)
 								// Abort. On HTTP/1.0 the peer cannot tell this from a whole body.
-								Err(body.SourceFailed(e)) -> Err(e)
-								Err(body.SinkFailed(e)) -> Err(e)
+								Err(body::SourceFailed(e)) -> Err(e)
+								Err(body::SinkFailed(e)) -> Err(e)
 							}
 						}
 					}
@@ -508,7 +508,7 @@ fn respond(
 	}
 }
 
-fn replace_with_500(sock socket.Socket, pending Array(Binary)) Result(Sent, error.NetError) {
+fn replace_with_500(sock socket::Socket, pending Array(Binary)) Result(Sent, error::NetError) {
 	reject(sock, pending, 500)
 	Ok(Close)
 }
@@ -516,12 +516,12 @@ fn replace_with_500(sock socket.Socket, pending Array(Binary)) Result(Sent, erro
 // On keep-alive the parts wait for the next write. On close there is no
 // next write, so they are flushed now.
 fn finish_buffered(
-	sock socket.Socket,
+	sock socket::Socket,
 	close_after Bool,
 	parts Array(Binary),
-) Result(Sent, error.NetError) {
+) Result(Sent, error::NetError) {
 	if close_after {
-		_ <- result.then(flush(sock, parts))
+		_ <- result::then(flush(sock, parts))
 		Ok(Close)
 	} else {
 		Ok(KeepAlive(parts))
@@ -530,21 +530,21 @@ fn finish_buffered(
 
 // The driver writes the framing headers itself, from the ResponseBody, so
 // any the handler set are dropped.
-fn strip_framing(hs headers.Headers) headers.Headers {
-	headers.delete(headers.delete(hs, NAME_CONTENT_LENGTH), NAME_TRANSFER_ENCODING)
+fn strip_framing(hs headers::Headers) headers::Headers {
+	headers::delete(headers::delete(hs, NAME_CONTENT_LENGTH), NAME_TRANSFER_ENCODING)
 }
 
 // HTTP/1.0 closes by default, so keeping one alive must say `keep-alive`.
 // HTTP/1.1 stays open by default, so closing must say `close` (RFC 9112 §9.6).
-fn conn_headers(version h1.Version, close_after Bool, hs headers.Headers) headers.Headers {
+fn conn_headers(version h1::Version, close_after Bool, hs headers::Headers) headers::Headers {
 	match version {
-		h1.Http10 -> if close_after {
+		h1::Http10 -> if close_after {
 			hs
 		} else {
-			headers.set(hs, NAME_CONNECTION, VAL_KEEP_ALIVE)
+			headers::set(hs, NAME_CONNECTION, VAL_KEEP_ALIVE)
 		}
-		h1.Http11 -> if close_after {
-			headers.set(hs, NAME_CONNECTION, VAL_CLOSE)
+		h1::Http11 -> if close_after {
+			headers::set(hs, NAME_CONNECTION, VAL_CLOSE)
 		} else {
 			hs
 		}
@@ -553,7 +553,7 @@ fn conn_headers(version h1.Version, close_after Bool, hs headers.Headers) header
 
 // A HEAD response still gives the length a GET would have (RFC 9110 §8.6).
 // 204 and 304 give none.
-fn head_only_headers(method Method, hs headers.Headers, b ResponseBody) headers.Headers {
+fn head_only_headers(method Method, hs headers::Headers, b ResponseBody) headers::Headers {
 	match (method, b) {
 		(Head, Fixed(len, _)) -> with_length(hs, len)
 		_ -> hs
@@ -562,8 +562,11 @@ fn head_only_headers(method Method, hs headers.Headers, b ResponseBody) headers.
 
 // A plain prepend: strip_framing already removed Content-Length, and field
 // order doesn't matter (RFC 9110 §5.3).
-fn with_length(hs headers.Headers, len Int) headers.Headers {
-	[headers.Header(name: NAME_CONTENT_LENGTH, value: binary.from_int_ascii(len, binary.Dec)), ..hs]
+fn with_length(hs headers::Headers, len Int) headers::Headers {
+	[
+		headers::Header(name: NAME_CONTENT_LENGTH, value: binary::from_int_ascii(len, binary::Dec)),
+		..hs,
+	]
 }
 
 // Checked before writing: a HEAD response would put `Content-Length: -1` on
@@ -579,58 +582,58 @@ fn negative_fixed_length(b ResponseBody) Bool {
 // `pending`; a stream flushes and drains, cut off at `len`. A mismatch before
 // the head is written is a 500; after it, the connection must close.
 fn buffer_body(
-	sock socket.Socket,
+	sock socket::Socket,
 	pending Array(Binary),
 	close_after Bool,
 	status Int,
-	hdrs headers.Headers,
+	hdrs headers::Headers,
 	len Int,
-	b body.Body,
-) Result(Sent, error.NetError) {
-	match body.take_buffered(b) {
+	b body::Body,
+) Result(Sent, error::NetError) {
+	match body::take_buffered(b) {
 		// Only pulled so far, nothing written, so a 500 can still go out.
 		Err(_) -> replace_with_500(sock, pending)
-		Ok(body.Empty) -> if len == 0 {
-			finish_buffered(sock, close_after, [..pending, h1.serialize_head(status, hdrs)])
+		Ok(body::Empty) -> if len == 0 {
+			finish_buffered(sock, close_after, [..pending, h1::serialize_head(status, hdrs)])
 		} else {
 			replace_with_500(sock, pending)
 		}
-		Ok(body.Whole(data)) -> if binary.byte_size(data) == len {
-			finish_buffered(sock, close_after, [..pending, h1.serialize_head(status, hdrs), data])
+		Ok(body::Whole(data)) -> if binary::byte_size(data) == len {
+			finish_buffered(sock, close_after, [..pending, h1::serialize_head(status, hdrs), data])
 		} else {
 			replace_with_500(sock, pending)
 		}
-		Ok(body.Streaming(first, second, rest)) -> {
-			got = binary.byte_size(first) + binary.byte_size(second)
+		Ok(body::Streaming(first, second, rest)) -> {
+			got = binary::byte_size(first) + binary::byte_size(second)
 			if got > len {
 				replace_with_500(sock, pending)
 			} else {
-				_ <- result.then(
-					flush(sock, [..pending, h1.serialize_head(status, hdrs), first, second]),
+				_ <- result::then(
+					flush(sock, [..pending, h1::serialize_head(status, hdrs), first, second]),
 				)
-				match body.drain_counted(rest, sock, len - got) {
+				match body::drain_counted(rest, sock, len - got) {
 					// The head is out: abort, so the peer sees the body cut short.
-					Err(body.SourceFailed(e)) -> Err(e)
-					Err(body.SinkFailed(e)) -> Err(e)
-					Ok(body.Complete) -> finish_buffered(sock, close_after, [])
+					Err(body::SourceFailed(e)) -> Err(e)
+					Err(body::SinkFailed(e)) -> Err(e)
+					Ok(body::Complete) -> finish_buffered(sock, close_after, [])
 					// Closing is the only way to keep the next response in frame.
-					Ok(body.Short(_)) -> Ok(Close)
-					Ok(body.Overran(_)) -> Ok(Close)
+					Ok(body::Short(_)) -> Ok(Close)
+					Ok(body::Overran(_)) -> Ok(Close)
 				}
 			}
 		}
 	}
 }
 
-// Drop trailers that fail headers.valid: written, they could split the
+// Drop trailers that fail headers::valid: written, they could split the
 // response. Trailers are optional, so dropping them is always allowed.
-fn sanitize_trailers(b body.Body) body.Body {
-	fn() match body.pull(b) {
-		Ok(body.Chunk(data, next)) -> Ok(body.Chunk(data, sanitize_trailers(next)))
-		Ok(body.Done(trailers)) -> if headers.valid(trailers) {
-			Ok(body.Done(trailers))
+fn sanitize_trailers(b body::Body) body::Body {
+	fn() match body::pull(b) {
+		Ok(body::Chunk(data, next)) -> Ok(body::Chunk(data, sanitize_trailers(next)))
+		Ok(body::Done(trailers)) -> if headers::valid(trailers) {
+			Ok(body::Done(trailers))
 		} else {
-			Ok(body.Done([]))
+			Ok(body::Done([]))
 		}
 		Err(e) -> Err(e)
 	}
@@ -646,14 +649,14 @@ fn suppress_body(method Method, status Int) Bool {
 
 // `Connection` is a token list, so `close` may be one of several.
 fn response_close(resp Response) Bool {
-	headers.contains_token(resp.headers, NAME_CONNECTION, VAL_CLOSE)
+	headers::contains_token(resp.headers, NAME_CONNECTION, VAL_CLOSE)
 }
 
 // A minimal error response, so the client sees the status before the close.
-fn write_error(sock socket.Socket, status Int) Nil {
+fn write_error(sock socket::Socket, status Int) Nil {
 	hdrs = [
-		headers.Header(name: NAME_CONTENT_LENGTH, value: ZERO),
-		headers.Header(name: NAME_CONNECTION, value: VAL_CLOSE),
+		headers::Header(name: NAME_CONTENT_LENGTH, value: ZERO),
+		headers::Header(name: NAME_CONNECTION, value: VAL_CLOSE),
 	]
-	socket.write(sock, h1.serialize_head(status, hdrs)) or Nil
+	socket::write(sock, h1::serialize_head(status, hdrs)) or Nil
 }

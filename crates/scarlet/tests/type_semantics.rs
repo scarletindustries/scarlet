@@ -785,20 +785,20 @@ fn module_builtins_qualified_and_destructured() {
     check_ok(
         "import scarlet/net\n\
          pub fn main() {\n\
-         \tmatch net.listen('0.0.0.0', 8080) { Ok(s) -> println(s) Err(e) -> println(e) }\n\
+         \tmatch net::listen('0.0.0.0', 8080) { Ok(s) -> println(s) Err(e) -> println(e) }\n\
          }\n",
     );
     check_ok(
         "import scarlet/net\n\
-         fn go(s net.Server) Nil { println(s) }\n\
+         fn go(s net::Server) Nil { println(s) }\n\
          pub fn main() {\n\
-         \tmatch net.listen('0.0.0.0', 8080) { Ok(s) -> go(s) Err(e) -> println(e) }\n\
+         \tmatch net::listen('0.0.0.0', 8080) { Ok(s) -> go(s) Err(e) -> println(e) }\n\
          }\n",
     );
     check_ok(
         "import scarlet/io\n\
          pub fn main() {\n\
-         \tx = io.read_text('a') or ''\n\
+         \tx = io::read_text('a') or ''\n\
          \tprintln(x)\n\
          }\n",
     );
@@ -916,7 +916,7 @@ fn binary_string_literal_patterns() {
     check_rejects(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tr = match binary.from_string('AB') {\n\
+         \tr = match binary::from_string('AB') {\n\
          \t\t<<'AB':16>> -> 1\n\
          \t\t_ -> 0\n\
          \t}\n\
@@ -933,8 +933,8 @@ fn binary_string_literal_patterns_runs() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tr = match binary.from_string('GET /index.html') {\n\
-         \t\t<<'GET ', ..rest>> -> binary.to_string(rest)\n\
+         \tr = match binary::from_string('GET /index.html') {\n\
+         \t\t<<'GET ', ..rest>> -> binary::to_string(rest)\n\
          \t\t_ -> Err(Nil)\n\
          \t}\n\
          \tprintln(r)\n\
@@ -945,7 +945,7 @@ fn binary_string_literal_patterns_runs() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tr = match binary.from_string('POST /x') {\n\
+         \tr = match binary::from_string('POST /x') {\n\
          \t\t<<'POST ':utf8, ..>> -> 1\n\
          \t\t_ -> 0\n\
          \t}\n\
@@ -963,9 +963,9 @@ fn binary_string_literal_patterns_runs() {
          \t}\n\
          }\n\
          pub fn main() {\n\
-         \tprintln(is_get(binary.from_string('GET')))\n\
-         \tprintln(is_get(binary.from_string('GETX')))\n\
-         \tprintln(is_get(binary.from_string('GE')))\n\
+         \tprintln(is_get(binary::from_string('GET')))\n\
+         \tprintln(is_get(binary::from_string('GETX')))\n\
+         \tprintln(is_get(binary::from_string('GE')))\n\
          }\n",
         "True\nFalse\nFalse\n",
     );
@@ -973,7 +973,7 @@ fn binary_string_literal_patterns_runs() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tr = match binary.from_string('DELETE /v') {\n\
+         \tr = match binary::from_string('DELETE /v') {\n\
          \t\t<<'GET ', ..>> -> 'get'\n\
          \t\t<<'DELETE /very/long/path/that/overruns', ..>> -> 'overrun'\n\
          \t\t<<'DELETE ', ..>> -> 'delete'\n\
@@ -987,7 +987,7 @@ fn binary_string_literal_patterns_runs() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tr = match binary.from_string('HTTP/1.1') {\n\
+         \tr = match binary::from_string('HTTP/1.1') {\n\
          \t\t<<'HTTP/1.', minor>> -> minor - 48\n\
          \t\t_ -> 0 - 1\n\
          \t}\n\
@@ -999,8 +999,8 @@ fn binary_string_literal_patterns_runs() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tr = match binary.from_string('héllo world') {\n\
-         \t\t<<'héllo ', ..rest>> -> binary.to_string(rest)\n\
+         \tr = match binary::from_string('héllo world') {\n\
+         \t\t<<'héllo ', ..rest>> -> binary::to_string(rest)\n\
          \t\t_ -> Err(Nil)\n\
          \t}\n\
          \tprintln(r)\n\
@@ -1011,8 +1011,8 @@ fn binary_string_literal_patterns_runs() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tr = match binary.from_string('\\r\\nrest') {\n\
-         \t\t<<13, 10, ..rest>> -> binary.byte_size(rest)\n\
+         \tr = match binary::from_string('\\r\\nrest') {\n\
+         \t\t<<13, 10, ..rest>> -> binary::byte_size(rest)\n\
          \t\t_ -> 0 - 1\n\
          \t}\n\
          \tprintln(r)\n\
@@ -1037,9 +1037,9 @@ fn binary_string_literal_patterns_runs() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tprintln(<<'hi there'>> == binary.from_string('hi there'))\n\
-         \tprintln(<<'AB', 67, 'D'>> == binary.from_string('ABCD'))\n\
-         \tprintln(binary.bit_size(<<''>>))\n\
+         \tprintln(<<'hi there'>> == binary::from_string('hi there'))\n\
+         \tprintln(<<'AB', 67, 'D'>> == binary::from_string('ABCD'))\n\
+         \tprintln(binary::bit_size(<<''>>))\n\
          }\n",
         "True\nTrue\n0\n",
     );
@@ -1051,7 +1051,7 @@ fn binary_literal_and_pattern_e2e() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tr = match binary.from_string('AB') {\n\
+         \tr = match binary::from_string('AB') {\n\
          \t\t<<a, b>> -> a + b\n\
          \t\t_ -> 0\n\
          \t}\n\
@@ -1063,7 +1063,7 @@ fn binary_literal_and_pattern_e2e() {
     run_outputs(
         "import scarlet/string\n\
          pub fn main() {\n\
-         \tprintln(string.inspect(<<1:4, 2:4>>))\n\
+         \tprintln(string::inspect(<<1:4, 2:4>>))\n\
          }\n",
         "<<18>>\n",
     );
@@ -1166,8 +1166,8 @@ fn a_branch_after_an_eta_wrapper_jumps_to_the_right_place() {
     let src = "import scarlet/array\n\
                type W { W(v Int) }\n\
                fn pick(xs Array(Int)) Int {\n\
-               \tws = array.map(xs, W)\n\
-               \tif array.length(ws) > 2 { 111 } else { 222 }\n\
+               \tws = array::map(xs, W)\n\
+               \tif array::length(ws) > 2 { 111 } else { 222 }\n\
                }\n\
                pub fn main() {\n\
                \tprintln(pick([1]))\n\
@@ -1202,14 +1202,14 @@ fn field_access_through_a_constructor_inferred_scrutinee_runs() {
 
 const FIELD_ACCESS_THROUGH_A_MODULE_FN_INFERRED_SCRUTINEE_SRC: &str = "import scarlet/map\n\
                type User { User(id Int, name String) }\n\
-               fn f(m map.Map(Binary, User)) Int {\n\
-               \tmatch map.get(m, <<'a'>>) {\n\
+               fn f(m map::Map(Binary, User)) Int {\n\
+               \tmatch map::get(m, <<'a'>>) {\n\
                \t\tNone -> 0\n\
                \t\tSome(u) -> u.id\n\
                \t}\n\
                }\n\
                pub fn main() {\n\
-               \tprintln(f(map.set(map.new(), <<'a'>>, User(7, 'al'))))\n\
+               \tprintln(f(map::set(map::new(), <<'a'>>, User(7, 'al'))))\n\
                }\n";
 
 #[test]

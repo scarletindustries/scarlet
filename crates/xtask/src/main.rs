@@ -211,6 +211,7 @@ fn classify(kind: &Kind) -> TokenClass {
         Kind::PuncComma => TokenClass::Punctuation("punctuation.separator.comma.scrl"),
         Kind::PuncColon => TokenClass::Punctuation("punctuation.separator.colon.scrl"),
         Kind::PuncDot => TokenClass::Punctuation("punctuation.accessor.scrl"),
+        Kind::PuncColonColon => TokenClass::Punctuation("punctuation.accessor.module.scrl"),
         Kind::PuncOpenParen => TokenClass::Punctuation("punctuation.section.parens.begin.scrl"),
         Kind::PuncCloseParen => TokenClass::Punctuation("punctuation.section.parens.end.scrl"),
         Kind::PuncOpenBrace => TokenClass::Punctuation("punctuation.section.braces.begin.scrl"),
@@ -865,11 +866,11 @@ fn tm_language() -> String {
                 ]
             },
             "module-qualified-access": {
-                "comment": "module.name access (lowercase qualifier)",
-                "match": "\\b([a-z_][a-zA-Z0-9_]*)(\\.)(?=[A-Za-z_])",
+                "comment": "module::name access",
+                "match": "\\b([a-z_][a-zA-Z0-9_]*)(::)(?=[A-Za-z_])",
                 "captures": {
                     "1": { "name": "entity.name.namespace.scrl" },
-                    "2": { "name": "punctuation.accessor.scrl" }
+                    "2": { "name": "punctuation.accessor.module.scrl" }
                 }
             },
             "constructor-call": {
@@ -888,7 +889,7 @@ fn tm_language() -> String {
             },
             "labeled-argument": {
                 "comment": "Labeled call argument: label: value",
-                "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s*(:)",
+                "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s*(:)(?!:)",
                 "captures": {
                     "1": { "name": "variable.parameter.label.scrl" },
                     "2": { "name": "punctuation.separator.colon.scrl" }

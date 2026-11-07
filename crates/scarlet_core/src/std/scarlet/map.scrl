@@ -36,7 +36,7 @@ pub fn to_list(m Map(k, v)) Array((k, v))
 
 // On a repeated key, the later entry wins.
 pub fn from_list(entries Array((k, v))) Map(k, v) {
-	array.fold(entries, new(), fn(acc, entry) match entry {
+	array::fold(entries, new(), fn(acc, entry) match entry {
 		(key, value) -> set(acc, key, value)
 	})
 }
@@ -44,7 +44,7 @@ pub fn from_list(entries Array((k, v))) Map(k, v) {
 // Calls `f` with the accumulator, key and value of each entry, in the same
 // order as `keys`.
 pub fn fold(m Map(k, v), init r, f fn(r, k, v) r) r {
-	array.fold(to_list(m), init, fn(acc, entry) match entry {
+	array::fold(to_list(m), init, fn(acc, entry) match entry {
 		(key, value) -> f(acc, key, value)
 	})
 }

@@ -15,14 +15,14 @@ fn check(name String, ok Bool) Nil {
 // A child that stays alive until released: its pid, and the subject that
 // releases it. Only a subject's owner may receive on it, so the child makes
 // the gate itself and hands it back.
-fn parked() (process.Pid, process.Subject(Nil)) {
-	boot = process.subject()
-	pid = process.spawn(fn() {
-		gate = process.subject()
-		process.send(boot, gate)
-		process.receive(gate)
+fn parked() (process::Pid, process::Subject(Nil)) {
+	boot = process::subject()
+	pid = process::spawn(fn() {
+		gate = process::subject()
+		process::send(boot, gate)
+		process::receive(gate)
 	})
-	(pid, process.receive(boot))
+	(pid, process::receive(boot))
 }
 
 // --- the notice is wrapped into the receiver's own message type -----------------
@@ -32,11 +32,11 @@ fn parked() (process.Pid, process.Subject(Nil)) {
 
 type Event {
 	Work(n Int)
-	WorkerDown(slot Int, down process.Down)
+	WorkerDown(slot Int, down process::Down)
 }
 
-fn drain(inbox process.Subject(Event), worker process.Pid, work Int) Int {
-	match process.receive(inbox) {
+fn drain(inbox process::Subject(Event), worker process::Pid, work Int) Int {
+	match process::receive(inbox) {
 		Work(n) -> drain(inbox, worker, work + n)
 		WorkerDown(slot, d) -> {
 			check('down tagged with the slot', slot == 7)
@@ -56,12 +56,12 @@ type Reply {
 	ServerDown
 }
 
-fn call(server process.Subject(process.Subject(Reply)), server_pid process.Pid) Reply {
-	reply = process.subject()
-	m = process.monitor(server_pid, reply, fn(_) ServerDown)
-	process.send(server, reply)
-	answer = process.receive(reply)
-	process.demonitor(m)
+fn call(server process::Subject(process::Subject(Reply)), server_pid process::Pid) Reply {
+	reply = process::subject()
+	m = process::monitor(server_pid, reply, fn(_) ServerDown)
+	process::send(server, reply)
+	answer = process::receive(reply)
+	process::demonitor(m)
 	answer
 }
 
@@ -70,17 +70,17 @@ pub fn main() {
 	// The child is parked, so the monitor is certainly placed before it ends.
 	// The notice is a message of the parent's own type: here, just the Down.
 
-	downs = process.subject()
+	downs = process::subject()
 	(child, go) = parked()
-	_ = process.monitor(child, downs, fn(d) d)
-	process.send(go, Nil)
-	first = process.receive(downs)
+	_ = process::monitor(child, downs, fn(d) d)
+	process::send(go, Nil)
+	first = process::receive(downs)
 	check('down names the process', first.pid == child)
 	check('a returned process ended normally', match first.reason {
-		process.Normal -> True
-		process.NoProcess -> False
-		process.Killed -> False
-		process.Crashed(_) -> False
+		process::Normal -> True
+		process::NoProcess -> False
+		process::Killed -> False
+		process::Crashed(_) -> False
 	})
 
 	// --- monitoring a process that has already ended fires at once -----------------
@@ -88,57 +88,57 @@ pub fn main() {
 	// monitor is then placed on a pid that no longer exists, and must fire rather
 	// than wait for ever.
 
-	ended = process.subject()
-	gone = process.spawn(fn() process.send(ended, Nil))
-	process.receive(ended)
-	process.sleep(20)
-	_ = process.monitor(gone, downs, fn(d) d)
-	late = process.receive(downs)
+	ended = process::subject()
+	gone = process::spawn(fn() process::send(ended, Nil))
+	process::receive(ended)
+	process::sleep(20)
+	_ = process::monitor(gone, downs, fn(d) d)
+	late = process::receive(downs)
 	check('monitoring an ended pid still delivers', late.pid == gone)
 	check('and reports that it was already gone', match late.reason {
-		process.NoProcess -> True
-		process.Normal -> False
-		process.Killed -> False
-		process.Crashed(_) -> False
+		process::NoProcess -> True
+		process::Normal -> False
+		process::Killed -> False
+		process::Crashed(_) -> False
 	})
 
-	events = process.subject()
+	events = process::subject()
 	(worker, release) = parked()
-	_ = process.monitor(worker, events, fn(d) WorkerDown(7, d))
-	process.send(events, Work(1))
-	process.send(events, Work(2))
-	process.send(release, Nil)
+	_ = process::monitor(worker, events, fn(d) WorkerDown(7, d))
+	process::send(events, Work(1))
+	process::send(events, Work(2))
+	process::send(release, Nil)
 
 	check('traffic before the down was seen first', drain(events, worker, 0) == 3)
 
 	// --- two monitors, two notices ---------------------------------------------------
 
 	(twice, hold) = parked()
-	_ = process.monitor(twice, downs, fn(d) d)
-	_ = process.monitor(twice, downs, fn(d) d)
-	process.send(hold, Nil)
-	a = process.receive(downs)
-	b = process.receive(downs)
+	_ = process::monitor(twice, downs, fn(d) d)
+	_ = process::monitor(twice, downs, fn(d) d)
+	process::send(hold, Nil)
+	a = process::receive(downs)
+	b = process::receive(downs)
 	check('each monitor delivers its own notice', a.pid == twice && b.pid == twice)
 
 	// --- a released monitor stays silent ---------------------------------------------
 
 	(quiet, hold2) = parked()
-	m = process.monitor(quiet, downs, fn(d) d)
-	process.demonitor(m)
-	process.send(hold2, Nil)
-	check('demonitor before the end delivers nothing', match process.receive_within(downs, 100) {
+	m = process::monitor(quiet, downs, fn(d) d)
+	process::demonitor(m)
+	process::send(hold2, Nil)
+	check('demonitor before the end delivers nothing', match process::receive_within(downs, 100) {
 		Ok(_) -> False
 		Err(Nil) -> True
 	})
 
-	boot = process.subject()
-	server = process.spawn(fn() {
-		requests = process.subject()
-		process.send(boot, requests)
-		process.send(process.receive(requests), Answer(42))
+	boot = process::subject()
+	server = process::spawn(fn() {
+		requests = process::subject()
+		process::send(boot, requests)
+		process::send(process::receive(requests), Answer(42))
 	})
-	requests = process.receive(boot)
+	requests = process::receive(boot)
 	check('a live server answers', match call(requests, server) {
 		Answer(n) -> n == 42
 		ServerDown -> False
@@ -152,15 +152,15 @@ pub fn main() {
 	// Nothing observable is delivered; what is pinned is that the target's later
 	// end, and the program's exit, are clean. `watched` outlives its watcher.
 
-	watcher_done = process.subject()
+	watcher_done = process::subject()
 	(watched, let_go) = parked()
-	_ = process.spawn(fn() {
-		scratch = process.subject()
-		_ = process.monitor(watched, scratch, fn(d) d)
-		process.send(watcher_done, Nil)
+	_ = process::spawn(fn() {
+		scratch = process::subject()
+		_ = process::monitor(watched, scratch, fn(d) d)
+		process::send(watcher_done, Nil)
 	})
-	process.receive(watcher_done)
-	process.sleep(20)
-	process.send(let_go, Nil)
+	process::receive(watcher_done)
+	process::sleep(20)
+	process::send(let_go, Nil)
 	println('done')
 }

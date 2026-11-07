@@ -90,7 +90,7 @@ fn cpu_bound_smoke(tag: &str, schedulers: u32, spawns: u64, base: u64, modulo: u
 }}
 
 pub fn main() {{
-	array.each(1..{end}, fn(i) {{ _ = process.spawn(fn() work(i)) }})
+	array::each(1..{end}, fn(i) {{ _ = process::spawn(fn() work(i)) }})
 	println('main done')
 }}
 "#,
@@ -136,8 +136,8 @@ fn deep_recursive_worker_survives_two_schedulers() {
         "sched2_deep",
         2,
         r#"pub fn main() {
-	_ = process.spawn(fn() println('deep ${fib(26)}'))
-	array.each(1..6, fn(i) { _ = process.spawn(fn() println('light ${i} ${fib(18)}')) })
+	_ = process::spawn(fn() println('deep ${fib(26)}'))
+	array::each(1..6, fn(i) { _ = process::spawn(fn() println('light ${i} ${fib(18)}')) })
 }
 "#,
     );
@@ -168,7 +168,7 @@ fn work(label, tag, i) {
 }
 
 pub fn main() {
-	array.each(1..9, fn(i) { _ = process.spawn(fn() work(labels[i % 4] or '?', banner, i)) })
+	array::each(1..9, fn(i) { _ = process::spawn(fn() work(labels[i % 4] or '?', banner, i)) })
 	println('main done')
 }
 "#,

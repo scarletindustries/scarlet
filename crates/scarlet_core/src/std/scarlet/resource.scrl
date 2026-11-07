@@ -14,7 +14,7 @@ pub fn with(acquire fn() r, release fn(r) Nil, next fn(r) a) a {
 // `with` for an `acquire` that can fail. Its `Err` comes back as it is, and
 // `next` does not run.
 pub fn try_with(acquire fn() Result(r, e), release fn(r) Nil, next fn(r) a) Result(a, e) {
-	resource <- result.map(acquire())
+	resource <- result::map(acquire())
 	result = next(resource)
 	release(resource)
 	result

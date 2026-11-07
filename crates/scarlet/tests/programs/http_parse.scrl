@@ -3,8 +3,8 @@
 // serialization, and the pull-based body reader — including every smuggling
 // reject. Pure functions over binaries and thunks, no sockets, so the whole
 // protocol surface is golden-testable. The native (VM-builtin) scanners behind
-// h1.parse_request / h1.framing / h1.chunk_decode / h1.serialize_head /
-// headers.get / headers.has / headers.valid must keep producing exactly these
+// h1::parse_request / h1::framing / h1::chunk_decode / h1::serialize_head /
+// headers::get / headers::has / headers::valid must keep producing exactly these
 // results.
 //
 // scarlet/http/body's socket-bound half (content_length, drain*, DrainError) is the
@@ -18,34 +18,34 @@ import scarlet/string
 import scarlet/array
 import scarlet/http/h1
 // Deliberately NOT importing `Done` from scarlet/http/body — it would clash with
-// h1's Parsed.Done. Body's terminator is matched qualified, as `body.Done`.
+// h1's Parsed.Done. Body's terminator is matched qualified, as `body::Done`.
 import scarlet/http/body
 import scarlet/http/headers
 import scarlet/http/status
 import scarlet/net/error
 
 fn str(b Binary) String {
-	binary.to_string(b) or '<not utf8>'
+	binary::to_string(b) or '<not utf8>'
 }
 
 // Render a binary with its control bytes escaped, so a CRLF-bearing wire blob —
 // or a header value carrying the very bytes that must never reach the wire —
-// stays on ONE golden line. `string.inspect` of a String does not escape, so a
+// stays on ONE golden line. `string::inspect` of a String does not escape, so a
 // raw CR/LF/NUL would otherwise split the line and hide the vector it is testing.
 fn vis(b Binary) String {
-	vis_from(b, 0, binary.byte_size(b), '')
+	vis_from(b, 0, binary::byte_size(b), '')
 }
 
 fn vis_from(b Binary, i Int, len Int, acc String) String {
 	if i >= len {
 		acc
 	} else {
-		piece = match binary.byte_at(b, i) {
+		piece = match binary::byte_at(b, i) {
 			13 -> '\\r'
 			10 -> '\\n'
 			9 -> '\\t'
 			0 -> '\\0'
-			_ -> result.then(binary.slice_bytes(b, i, 1), binary.to_string) or '?'
+			_ -> result::then(binary::slice_bytes(b, i, 1), binary::to_string) or '?'
 		}
 		vis_from(b, i + 1, len, '${acc}${piece}')
 	}
@@ -56,73 +56,73 @@ fn q(b Binary) String {
 	'"${vis(b)}"'
 }
 
-// Join for display. `string.inspect` of a long array wraps across lines; a
+// Join for display. `string::inspect` of a long array wraps across lines; a
 // vector per golden LINE is what makes a diff readable, so join by hand.
 fn list(parts Array(String)) String {
 	match parts {
 		[] -> '[]'
-		[head, ..rest] -> '[${array.fold(rest, head, fn(acc, p) '${acc}, ${p}')}]'
+		[head, ..rest] -> '[${array::fold(rest, head, fn(acc, p) '${acc}, ${p}')}]'
 	}
 }
 
-// Doubling grower: there is no binary.repeat, and the head-size caps need a
+// Doubling grower: there is no binary::repeat, and the head-size caps need a
 // buffer bigger than the parser's 64 KiB window.
 fn grow(b Binary, n Int) Binary {
-	if binary.byte_size(b) >= n {
+	if binary::byte_size(b) >= n {
 		b
 	} else {
-		grow(binary.append(b, b), n)
+		grow(binary::append(b, b), n)
 	}
 }
 
 fn show_parse(label String, input Binary) Nil {
-	out = match h1.parse_request(input, 0) {
-		h1.Done(method, target, version, hdrs, _, consumed) ->
+	out = match h1::parse_request(input, 0) {
+		h1::Done(method, target, version, hdrs, _, consumed) ->
 			'Done method=${str(
 				method,
 			)} target=${str(
 				target,
-			)} version=${version} headers=${array.length(hdrs)} consumed=${consumed}'
-		h1.NeedMore -> 'NeedMore'
-		h1.Bad(status_code) -> 'Bad ${status_code}'
+			)} version=${version} headers=${array::length(hdrs)} consumed=${consumed}'
+		h1::NeedMore -> 'NeedMore'
+		h1::Bad(status_code) -> 'Bad ${status_code}'
 	}
 	println('${label}: ${out}')
 }
 
 fn show_framing(label String, input Binary) Nil {
-	out = match h1.parse_request(input, 0) {
-		h1.Done(_, _, _, hdrs, _, _) -> match h1.framing(hdrs) {
-			h1.NoBody -> 'NoBody'
-			h1.Length(n) -> 'Length ${n}'
-			h1.Chunked -> 'Chunked'
-			h1.Invalid(s) -> 'Invalid ${s}'
+	out = match h1::parse_request(input, 0) {
+		h1::Done(_, _, _, hdrs, _, _) -> match h1::framing(hdrs) {
+			h1::NoBody -> 'NoBody'
+			h1::Length(n) -> 'Length ${n}'
+			h1::Chunked -> 'Chunked'
+			h1::Invalid(s) -> 'Invalid ${s}'
 		}
-		h1.NeedMore -> 'parse: NeedMore'
-		h1.Bad(s) -> 'parse: Bad ${s}'
+		h1::NeedMore -> 'parse: NeedMore'
+		h1::Bad(s) -> 'parse: Bad ${s}'
 	}
 	println('${label}: ${out}')
 }
 
 fn show_chunked(label String, input Binary, max Int) Nil {
-	out = match h1.chunk_decode(input, 0, max) {
-		h1.ChunkedDone(decoded, trailers, consumed) ->
-			'Done body=${q(decoded)} trailers=${array.length(trailers)} consumed=${consumed}'
-		h1.ChunkedNeedMore -> 'NeedMore'
-		h1.ChunkedBad(status_code) -> 'Bad ${status_code}'
+	out = match h1::chunk_decode(input, 0, max) {
+		h1::ChunkedDone(decoded, trailers, consumed) ->
+			'Done body=${q(decoded)} trailers=${array::length(trailers)} consumed=${consumed}'
+		h1::ChunkedNeedMore -> 'NeedMore'
+		h1::ChunkedBad(status_code) -> 'Bad ${status_code}'
 	}
 	println('${label}: ${out}')
 }
 
 // A header list as `['Name=value', ...]` — one golden line per list.
-fn show_headers(label String, hs Array(headers.Header)) Nil {
-	parts = array.map(hs, fn(f) '${str(f.name)}=${str(f.value)}')
+fn show_headers(label String, hs Array(headers::Header)) Nil {
+	parts = array::map(hs, fn(f) '${str(f.name)}=${str(f.value)}')
 	println('${label}: ${list(parts)}')
 }
 
-fn show_collect(label String, b body.Body, max Int) Nil {
-	out = match body.collect(b, max) {
+fn show_collect(label String, b body::Body, max Int) Nil {
+	out = match body::collect(b, max) {
 		Ok(data) -> 'Ok ${q(data)}'
-		Err(e) -> 'Err ${string.inspect(e)}'
+		Err(e) -> 'Err ${string::inspect(e)}'
 	}
 	println('${label}: ${out}')
 }
@@ -170,9 +170,10 @@ pub fn main() {
 	// line was not the problem, so this is 431, not 414.
 	show_parse(
 		'header block past 64k',
-		binary.append(binary.append(<<'GET / HTTP/1.1\r\n'>>, grow(<<'X-Pad: pad\r\n'>>, 70000)), <<
-			'\r\n',
-		>>),
+		binary::append(
+			binary::append(<<'GET / HTTP/1.1\r\n'>>, grow(<<'X-Pad: pad\r\n'>>, 70000)),
+			<<'\r\n'>>,
+		),
 	)
 
 	println('')
@@ -190,9 +191,9 @@ pub fn main() {
 	// (see `framing`). Both survive in order, and `get` answers with the first.
 	dup = <<'GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n'>>
 	show_parse('duplicate host', dup)
-	match h1.parse_request(dup, 0) {
-		h1.Done(_, _, _, hdrs, _, _) -> {
-			first = match headers.get(hdrs, <<'host'>>) {
+	match h1::parse_request(dup, 0) {
+		h1::Done(_, _, _, hdrs, _, _) -> {
+			first = match headers::get(hdrs, <<'host'>>) {
 				Some(v) -> str(v)
 				None -> 'missing'
 			}
@@ -202,14 +203,14 @@ pub fn main() {
 	}
 
 	// A NUL inside a field value is refused on the way in (400), as RFC 9110
-	// section 5.5 allows, and on the way out: `headers.valid` is what the
+	// section 5.5 allows, and on the way out: `headers::valid` is what the
 	// connection driver checks before a header block reaches the wire. Both
 	// halves are pinned here.
 	nul_req = <<'GET / HTTP/1.1\r\nX-N: a\0b\r\n\r\n'>>
 	show_parse('nul in value parses', nul_req)
-	match h1.parse_request(nul_req, 0) {
-		h1.Done(_, _, _, hdrs, _, _) ->
-			println('nul in value: headers.valid = ${headers.valid(hdrs)}')
+	match h1::parse_request(nul_req, 0) {
+		h1::Done(_, _, _, hdrs, _, _) ->
+			println('nul in value: headers::valid = ${headers::valid(hdrs)}')
 		_ -> println('nul in value: parse failed')
 	}
 
@@ -218,24 +219,24 @@ pub fn main() {
 	req = <<
 		'GET /path HTTP/1.1\r\nHost: example.com\r\nX-Custom: hello world\r\nCookie: a=1; b=2\r\n\r\n',
 	>>
-	match h1.parse_request(req, 0) {
-		h1.Done(_, _, _, hdrs, _, _) -> {
-			host = match headers.get(hdrs, <<'host'>>) {
+	match h1::parse_request(req, 0) {
+		h1::Done(_, _, _, hdrs, _, _) -> {
+			host = match headers::get(hdrs, <<'host'>>) {
 				Some(v) -> str(v)
 				None -> 'missing'
 			}
-			cookie = match headers.get(hdrs, <<'COOKIE'>>) {
+			cookie = match headers::get(hdrs, <<'COOKIE'>>) {
 				Some(v) -> str(v)
 				None -> 'missing'
 			}
-			missing = match headers.get(hdrs, <<'x-missing'>>) {
+			missing = match headers::get(hdrs, <<'x-missing'>>) {
 				Some(_) -> 'found?!'
 				None -> 'missing'
 			}
 			println('host (lower lookup): ${host}')
 			println('cookie (upper lookup): ${cookie}')
 			println('x-missing: ${missing}')
-			println('has x-custom: ${headers.has(hdrs, <<'X-CUSTOM'>>)}')
+			println('has x-custom: ${headers::has(hdrs, <<'X-CUSTOM'>>)}')
 		}
 		_ -> println('parse failed')
 	}
@@ -247,29 +248,29 @@ pub fn main() {
 	// same-named field is deleted. Two disagreeing Content-Lengths is a smuggling
 	// vector, so "replace the first, leave the rest" would be a bug, not a nicety.
 	mut_hdrs = [
-		headers.Header(name: <<'Host'>>, value: <<'a'>>),
-		headers.Header(name: <<'Set-Cookie'>>, value: <<'x=1'>>),
-		headers.Header(name: <<'host'>>, value: <<'b'>>),
+		headers::Header(name: <<'Host'>>, value: <<'a'>>),
+		headers::Header(name: <<'Set-Cookie'>>, value: <<'x=1'>>),
+		headers::Header(name: <<'host'>>, value: <<'b'>>),
 	]
 	show_headers('before', mut_hdrs)
-	show_headers('set HOST=z (dedups, keeps casing)', headers.set(mut_hdrs, <<'HOST'>>, <<'z'>>))
-	show_headers('set absent appends', headers.set(mut_hdrs, <<'X-New'>>, <<'1'>>))
-	show_headers('delete host (case-insensitive, all)', headers.delete(mut_hdrs, <<'HoSt'>>))
-	show_headers('delete absent is identity', headers.delete(mut_hdrs, <<'X-Nope'>>))
+	show_headers('set HOST=z (dedups, keeps casing)', headers::set(mut_hdrs, <<'HOST'>>, <<'z'>>))
+	show_headers('set absent appends', headers::set(mut_hdrs, <<'X-New'>>, <<'1'>>))
+	show_headers('delete host (case-insensitive, all)', headers::delete(mut_hdrs, <<'HoSt'>>))
+	show_headers('delete absent is identity', headers::delete(mut_hdrs, <<'X-Nope'>>))
 	show_headers(
 		'append keeps duplicates in order',
-		headers.append(mut_hdrs, <<'Set-Cookie'>>, <<'y=2'>>),
+		headers::append(mut_hdrs, <<'Set-Cookie'>>, <<'y=2'>>),
 	)
-	println('render parts: ${list(array.map(headers.render(mut_hdrs), fn(p) q(p)))}')
-	println('render of empty: ${list(array.map(headers.render([]), fn(p) q(p)))}')
+	println('render parts: ${list(array::map(headers::render(mut_hdrs), fn(p) q(p)))}')
+	println('render of empty: ${list(array::map(headers::render([]), fn(p) q(p)))}')
 
 	println('')
 	println('== header validation ==')
 	show_field = fn(label String, name String, value String) {
-		out = match headers.field(binary.from_string(name), binary.from_string(value)) {
+		out = match headers::field(binary::from_string(name), binary::from_string(value)) {
 			Ok(f) -> 'Ok ${q(f.name)}=${q(f.value)}'
-			Err(headers.BadName(n)) -> 'Err BadName ${q(n)}'
-			Err(headers.BadValue(v)) -> 'Err BadValue ${q(v)}'
+			Err(headers::BadName(n)) -> 'Err BadName ${q(n)}'
+			Err(headers::BadValue(v)) -> 'Err BadValue ${q(v)}'
 		}
 		println('${label}: ${out}')
 	}
@@ -284,27 +285,27 @@ pub fn main() {
 	show_field('nul in value', 'X-Ok', 'a\0b')
 
 	show_valid = fn(label String, hs Array(
-		headers.Header,
-	)) println('${label}: ${headers.valid(hs)}')
+		headers::Header,
+	)) println('${label}: ${headers::valid(hs)}')
 	show_valid('valid: empty list', [])
 	show_valid('valid: token name + clean value', [
-		headers.Header(name: <<'X-Ok!#\$%*+-.^_|~'>>, value: <<'fine'>>),
+		headers::Header(name: <<'X-Ok!#\$%*+-.^_|~'>>, value: <<'fine'>>),
 	])
-	show_valid('invalid: colon in name', [headers.Header(name: <<'X:Bad'>>, value: <<'v'>>)])
-	show_valid('invalid: lf in value', [headers.Header(name: <<'X-Ok'>>, value: <<'a\nb'>>)])
+	show_valid('invalid: colon in name', [headers::Header(name: <<'X:Bad'>>, value: <<'v'>>)])
+	show_valid('invalid: lf in value', [headers::Header(name: <<'X-Ok'>>, value: <<'a\nb'>>)])
 	show_valid('invalid: one bad field among good', [
-		headers.Header(name: <<'Good'>>, value: <<'1'>>),
-		headers.Header(name: <<'Bad Name'>>, value: <<'2'>>),
+		headers::Header(name: <<'Good'>>, value: <<'1'>>),
+		headers::Header(name: <<'Bad Name'>>, value: <<'2'>>),
 	])
 
 	println('')
 	println('== pipelined requests ==')
 	pipelined = <<'GET /first HTTP/1.1\r\nHost: a\r\n\r\nGET /second HTTP/1.1\r\nHost: b\r\n\r\n'>>
-	match h1.parse_request(pipelined, 0) {
-		h1.Done(_, target1, _, _, _, consumed1) -> {
+	match h1::parse_request(pipelined, 0) {
+		h1::Done(_, target1, _, _, _, consumed1) -> {
 			println('first: ${str(target1)} (consumed ${consumed1})')
-			match h1.parse_request(pipelined, consumed1) {
-				h1.Done(_, target2, _, _, _, consumed2) ->
+			match h1::parse_request(pipelined, consumed1) {
+				h1::Done(_, target2, _, _, _, consumed2) ->
 					println('second: ${str(target2)} (consumed ${consumed2})')
 				_ -> println('second parse failed')
 			}
@@ -382,7 +383,7 @@ pub fn main() {
 	// an unbounded "size" it has no data to back.
 	show_chunked(
 		'size line past 4k rejected',
-		binary.append(grow(<<'F'>>, 5000), <<'\r\nx\r\n0\r\n\r\n'>>),
+		binary::append(grow(<<'F'>>, 5000), <<'\r\nx\r\n0\r\n\r\n'>>),
 		1048576,
 	)
 	show_chunked(
@@ -399,18 +400,18 @@ pub fn main() {
 	chunked_req = <<
 		'POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\nGET /after HTTP/1.1\r\n\r\n',
 	>>
-	match h1.parse_request(chunked_req, 0) {
-		h1.Done(_, target1, _, hdrs1, _, head_end) -> {
-			f = match h1.framing(hdrs1) {
-				h1.Chunked -> 'chunked'
+	match h1::parse_request(chunked_req, 0) {
+		h1::Done(_, target1, _, hdrs1, _, head_end) -> {
+			f = match h1::framing(hdrs1) {
+				h1::Chunked -> 'chunked'
 				_ -> 'other'
 			}
 			println('head: target=${str(target1)} framing=${f} consumed=${head_end}')
-			match h1.chunk_decode(chunked_req, head_end, 1048576) {
-				h1.ChunkedDone(decoded, _, body_end) -> {
+			match h1::chunk_decode(chunked_req, head_end, 1048576) {
+				h1::ChunkedDone(decoded, _, body_end) -> {
 					println('body: ${str(decoded)} (ends at ${body_end})')
-					match h1.parse_request(chunked_req, body_end) {
-						h1.Done(_, target2, _, _, _, _) ->
+					match h1::parse_request(chunked_req, body_end) {
+						h1::Done(_, target2, _, _, _, _) ->
 							println('next pipelined request: ${str(target2)}')
 						_ -> println('next request parse failed')
 					}
@@ -429,13 +430,13 @@ pub fn main() {
 	old_plain = <<'GET / HTTP/1.0\r\n\r\n'>>
 	old_both = <<'GET / HTTP/1.0\r\nConnection: close, keep-alive\r\n\r\n'>>
 	expect = <<'POST / HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n'>>
-	show_close = fn(label String, req2 Binary) match h1.parse_request(req2, 0) {
-		h1.Done(_, _, version, _, flags, _) ->
+	show_close = fn(label String, req2 Binary) match h1::parse_request(req2, 0) {
+		h1::Done(_, _, version, _, flags, _) ->
 			println(
-				'${label}: close=${h1.should_close(
+				'${label}: close=${h1::should_close(
 					version,
 					flags,
-				)} want100=${h1.want_100_continue(flags)}',
+				)} want100=${h1::want_100_continue(flags)}',
 			)
 		_ -> println('${label}: parse failed')
 	}
@@ -449,12 +450,16 @@ pub fn main() {
 	println('')
 	println('== token list lookup ==')
 	list_hdrs = [
-		headers.Header(name: <<'Connection'>>, value: <<'a,,b'>>),
-		headers.Header(name: <<'X-Empty'>>, value: <<''>>),
-		headers.Header(name: <<'X-Trailing'>>, value: <<'gzip,'>>),
+		headers::Header(name: <<'Connection'>>, value: <<'a,,b'>>),
+		headers::Header(name: <<'X-Empty'>>, value: <<''>>),
+		headers::Header(name: <<'X-Trailing'>>, value: <<'gzip,'>>),
 	]
 	show_token = fn(label String, name String, token String) {
-		got = headers.contains_token(list_hdrs, binary.from_string(name), binary.from_string(token))
+		got = headers::contains_token(
+			list_hdrs,
+			binary::from_string(name),
+			binary::from_string(token),
+		)
 		println('${label}: ${got}')
 	}
 	show_token('a in a,,b', 'Connection', 'a')
@@ -470,82 +475,82 @@ pub fn main() {
 	// the registry (IANA lists it as Unused), so it gets the same empty phrase as
 	// any unassigned code — an empty reason-phrase is valid per RFC 9110 section 15.
 	codes = [100, 200, 204, 301, 400, 404, 418, 431, 500, 503, 599]
-	array.each(codes, fn(code) println('${code}: ${q(status.reason_phrase(code))}'))
+	array::each(codes, fn(code) println('${code}: ${q(status::reason_phrase(code))}'))
 
 	println('')
 	println('== response head serialization ==')
 	resp_headers = [
-		headers.Header(name: <<'Content-Type'>>, value: <<'text/plain'>>),
-		headers.Header(name: <<'Content-Length'>>, value: <<'5'>>),
+		headers::Header(name: <<'Content-Type'>>, value: <<'text/plain'>>),
+		headers::Header(name: <<'Content-Length'>>, value: <<'5'>>),
 	]
-	println('200 + two fields: ${vis(h1.serialize_head(200, resp_headers))}')
-	println('404 + no fields: ${vis(h1.serialize_head(404, []))}')
+	println('200 + two fields: ${vis(h1::serialize_head(200, resp_headers))}')
+	println('404 + no fields: ${vis(h1::serialize_head(404, []))}')
 	// An unregistered code still serializes: empty reason phrase, trailing SP kept.
-	println('599 unregistered: ${vis(h1.serialize_head(599, []))}')
+	println('599 unregistered: ${vis(h1::serialize_head(599, []))}')
 
 	println('')
 	println('== sans-IO bodies ==')
-	match body.pull(body.empty()) {
-		Ok(body.Done(trailers)) -> println('empty body: Done trailers=${array.length(trailers)}')
-		Ok(body.Chunk(_, _)) -> println('empty body: Chunk?!')
-		Err(e) -> println('empty body: Err ${string.inspect(e)}')
+	match body::pull(body::empty()) {
+		Ok(body::Done(trailers)) -> println('empty body: Done trailers=${array::length(trailers)}')
+		Ok(body::Chunk(_, _)) -> println('empty body: Chunk?!')
+		Err(e) -> println('empty body: Err ${string::inspect(e)}')
 	}
-	show_collect('from_binary round-trip', body.from_binary(<<'hello'>>), 1024)
-	show_collect('from_binary empty', body.from_binary(<<>>), 1024)
+	show_collect('from_binary round-trip', body::from_binary(<<'hello'>>), 1024)
+	show_collect('from_binary empty', body::from_binary(<<>>), 1024)
 	// The cap is checked before each append, so an over-long body errs without ever
 	// materializing past the limit.
-	show_collect('collect past max', body.from_binary(<<'hello'>>), 3)
+	show_collect('collect past max', body::from_binary(<<'hello'>>), 3)
 
 	// A bare closure IS a Body — the alias is transparent, so no wrapper is needed.
-	two_chunks = fn() Ok(body.Chunk(<<'ab'>>, fn() Ok(body.Chunk(<<'cd'>>, body.empty()))))
+	two_chunks = fn() Ok(body::Chunk(<<'ab'>>, fn() Ok(body::Chunk(<<'cd'>>, body::empty()))))
 	show_collect('hand-written two-chunk body', two_chunks, 1024)
-	show_collect('failing body propagates', fn() Err(error.UnexpectedEof), 1024)
+	show_collect('failing body propagates', fn() Err(error::UnexpectedEof), 1024)
 
 	three_chunks = fn() Ok(
-		body.Chunk(
+		body::Chunk(
 			<<'ab'>>,
-			fn() Ok(body.Chunk(<<'cd'>>, fn() Ok(body.Chunk(<<'ef'>>, body.empty())))),
+			fn() Ok(body::Chunk(<<'cd'>>, fn() Ok(body::Chunk(<<'ef'>>, body::empty())))),
 		),
 	)
-	show_buffered = fn(label String, b body.Body) {
-		out = match body.take_buffered(b) {
-			Ok(body.Empty) -> 'Empty'
-			Ok(body.Whole(data)) -> 'Whole ${q(data)}'
-			Ok(body.Streaming(first, second, rest)) -> {
-				tail = match body.collect(rest, 1024) {
+	show_buffered = fn(label String, b body::Body) {
+		out = match body::take_buffered(b) {
+			Ok(body::Empty) -> 'Empty'
+			Ok(body::Whole(data)) -> 'Whole ${q(data)}'
+			Ok(body::Streaming(first, second, rest)) -> {
+				tail = match body::collect(rest, 1024) {
 					Ok(data) -> q(data)
-					Err(e) -> 'Err ${string.inspect(e)}'
+					Err(e) -> 'Err ${string::inspect(e)}'
 				}
 				'Streaming first=${q(first)} second=${q(second)} rest=${tail}'
 			}
-			Err(e) -> 'Err ${string.inspect(e)}'
+			Err(e) -> 'Err ${string::inspect(e)}'
 		}
 		println('${label}: ${out}')
 	}
-	show_buffered('take_buffered empty', body.empty())
-	show_buffered('take_buffered whole', body.from_binary(<<'hello'>>))
+	show_buffered('take_buffered empty', body::empty())
+	show_buffered('take_buffered whole', body::from_binary(<<'hello'>>))
 	show_buffered('take_buffered streaming', three_chunks)
-	show_buffered('take_buffered of failing body', fn() Err(error.UnexpectedEof))
+	show_buffered('take_buffered of failing body', fn() Err(error::UnexpectedEof))
 
 	// `probe` pulls the first step without consuming it: the body it hands back
 	// replays that step, so a caller can learn the source produces BEFORE committing
 	// a response head to the wire.
-	match body.probe(body.from_binary(<<'hello'>>)) {
+	match body::probe(body::from_binary(<<'hello'>>)) {
 		Ok(replayed) -> show_collect('collect after probe', replayed, 1024)
-		Err(e) -> println('collect after probe: Err ${string.inspect(e)}')
+		Err(e) -> println('collect after probe: Err ${string::inspect(e)}')
 	}
-	match body.probe(fn() Err(error.UnexpectedEof)) {
+	match body::probe(fn() Err(error::UnexpectedEof)) {
 		Ok(_) -> println('probe of failing body: Ok?!')
-		Err(e) -> println('probe of failing body: Err ${string.inspect(e)}')
+		Err(e) -> println('probe of failing body: Err ${string::inspect(e)}')
 	}
 
 	println('')
 	println('== method dispatch via binary patterns ==')
 	methods = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS', 'BREW']
-	shown = array.map(methods, fn(name) {
+	shown = array::map(methods, fn(name) {
 		req3 = <<'${name} / HTTP/1.1\r\n\r\n'>>
-		match h1.parse_request(req3, 0) {
-			h1.Done(m, _, _, _, _, _) -> match m {
+		match h1::parse_request(req3, 0) {
+			h1::Done(m, _, _, _, _, _) -> match m {
 				<<'GET'>> -> 'Get'
 				<<'POST'>> -> 'Post'
 				<<'PUT'>> -> 'Put'

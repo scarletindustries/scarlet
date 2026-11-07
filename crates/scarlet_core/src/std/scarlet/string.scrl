@@ -34,7 +34,7 @@ pub fn trim(s String) String
 pub fn replace(s String, pattern String, replacement String) String {
 	match split(s, pattern) {
 		[] -> s
-		[first, ..rest] -> array.fold(rest, first, fn(acc, piece) acc + replacement + piece)
+		[first, ..rest] -> array::fold(rest, first, fn(acc, piece) acc + replacement + piece)
 	}
 }
 
@@ -54,36 +54,36 @@ fn encode_scalar_value(code_point Int) Result(Binary, Nil) {
 		Ok(<<code_point:8>>)
 	} else if code_point <= 2047 {
 		Ok(<<
-			192 + int.bitwise_shift_right(code_point, 6):8,
-			128 + int.bitwise_and(code_point, 63):8,
+			192 + int::bitwise_shift_right(code_point, 6):8,
+			128 + int::bitwise_and(code_point, 63):8,
 		>>)
 	} else if code_point <= 65535 {
 		Ok(<<
-			224 + int.bitwise_shift_right(code_point, 12):8,
-			128 + int.bitwise_and(int.bitwise_shift_right(code_point, 6), 63):8,
-			128 + int.bitwise_and(code_point, 63):8,
+			224 + int::bitwise_shift_right(code_point, 12):8,
+			128 + int::bitwise_and(int::bitwise_shift_right(code_point, 6), 63):8,
+			128 + int::bitwise_and(code_point, 63):8,
 		>>)
 	} else {
 		Ok(<<
-			240 + int.bitwise_shift_right(code_point, 18):8,
-			128 + int.bitwise_and(int.bitwise_shift_right(code_point, 12), 63):8,
-			128 + int.bitwise_and(int.bitwise_shift_right(code_point, 6), 63):8,
-			128 + int.bitwise_and(code_point, 63):8,
+			240 + int::bitwise_shift_right(code_point, 18):8,
+			128 + int::bitwise_and(int::bitwise_shift_right(code_point, 12), 63):8,
+			128 + int::bitwise_and(int::bitwise_shift_right(code_point, 6), 63):8,
+			128 + int::bitwise_and(code_point, 63):8,
 		>>)
 	}
 }
 
 // `Err(Nil)` if any of them is not a Unicode scalar value.
 pub fn from_code_points(code_points Array(Int)) Result(String, Nil) {
-	result.then(
-		array.fold(
+	result::then(
+		array::fold(
 			code_points,
 			Ok(<<>>),
-			fn(acc, cp) result.then(
+			fn(acc, cp) result::then(
 				acc,
-				fn(bytes) result.map(encode_scalar_value(cp), fn(next) binary.append(bytes, next)),
+				fn(bytes) result::map(encode_scalar_value(cp), fn(next) binary::append(bytes, next)),
 			),
 		),
-		fn(bytes) binary.to_string(bytes),
+		fn(bytes) binary::to_string(bytes),
 	)
 }

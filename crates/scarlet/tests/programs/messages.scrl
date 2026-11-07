@@ -18,8 +18,8 @@ fn check(name String, expected Bool, actual Bool) Nil {
 // A quiet subject times out with Err(Nil); a served one returns Ok before the
 // deadline.
 
-fn wait_quiet(s process.Subject(Int)) String {
-	match process.receive_within(s, 30) {
+fn wait_quiet(s process::Subject(Int)) String {
+	match process::receive_within(s, 30) {
 		Ok(_) -> 'message'
 		Err(Nil) -> 'timeout'
 	}
@@ -30,33 +30,33 @@ fn wait_quiet(s process.Subject(Int)) String {
 // through a bootstrap subject. Stop proves the mailbox drains in order.
 
 type Msg {
-	Add(n Int, reply process.Subject(Int))
-	Stop(done process.Subject(String))
+	Add(n Int, reply process::Subject(Int))
+	Stop(done process::Subject(String))
 }
 
-fn serve(inbox process.Subject(Msg), total Int) Nil {
-	match process.receive(inbox) {
+fn serve(inbox process::Subject(Msg), total Int) Nil {
+	match process::receive(inbox) {
 		Add(n, reply) -> {
-			process.send(reply, total + n)
+			process::send(reply, total + n)
 			serve(inbox, total + n)
 		}
-		Stop(done) -> process.send(done, 'served ${total}')
+		Stop(done) -> process::send(done, 'served ${total}')
 	}
 }
 
 // --- many senders, one aggregate ----------------------------------------------
 // Arrival order across processes is unspecified; the sum is not.
 
-fn shout(out process.Subject(Int), base Int) Nil {
-	process.send(out, base)
-	process.send(out, base * 2)
+fn shout(out process::Subject(Int), base Int) Nil {
+	process::send(out, base)
+	process::send(out, base * 2)
 }
 
-fn drain(s process.Subject(Int), left Int, acc Int) Int {
+fn drain(s process::Subject(Int), left Int, acc Int) Int {
 	if left == 0 {
 		acc
 	} else {
-		drain(s, left - 1, acc + process.receive(s))
+		drain(s, left - 1, acc + process::receive(s))
 	}
 }
 
@@ -65,8 +65,8 @@ fn drain(s process.Subject(Int), left Int, acc Int) Int {
 // U24), but a function builds a fresh subject per call, so it stays
 // polymorphic.
 
-fn fresh() process.Subject(msg) {
-	process.subject()
+fn fresh() process::Subject(msg) {
+	process::subject()
 }
 
 // --- timers ---------------------------------------------------------------------
@@ -94,84 +94,84 @@ pub fn main() {
 	// --- identity and FIFO on one subject -----------------------------------------
 	// A subject equals only itself, and messages from one sender arrive in order.
 
-	inbox = process.subject()
-	process.send(inbox, 1)
-	process.send(inbox, 2)
-	process.send(inbox, 3)
+	inbox = process::subject()
+	process::send(inbox, 1)
+	process::send(inbox, 2)
+	process::send(inbox, 3)
 	check('subject eq self', True, inbox == inbox)
-	check('fifo first', True, process.receive(inbox) == 1)
-	check('fifo second', True, process.receive(inbox) == 2)
-	check('fifo third', True, process.receive(inbox) == 3)
+	check('fifo first', True, process::receive(inbox) == 1)
+	check('fifo second', True, process::receive(inbox) == 2)
+	check('fifo third', True, process::receive(inbox) == 3)
 
 	// --- payloads are copied whole ------------------------------------------------
 	// A message is deep-copied at send; structure and equality survive the trip.
 
-	parcels = process.subject()
-	process.send(parcels, (7, 'seven', [1, 2, 3]))
-	check('structured payload', True, process.receive(parcels) == (7, 'seven', [1, 2, 3]))
+	parcels = process::subject()
+	process::send(parcels, (7, 'seven', [1, 2, 3]))
+	check('structured payload', True, process::receive(parcels) == (7, 'seven', [1, 2, 3]))
 
-	blobs = process.subject()
-	process.send(blobs, <<1, 2, 3>>)
-	check('binary payload', True, process.receive(blobs) == <<1, 2, 3>>)
+	blobs = process::subject()
+	process::send(blobs, <<1, 2, 3>>)
+	check('binary payload', True, process::receive(blobs) == <<1, 2, 3>>)
 
 	// --- a blocking receive parks, a send wakes -----------------------------------
 	// The child sleeps first, so main is parked in receive when the send lands.
 
-	wake = process.subject()
-	_ = process.spawn(fn() {
-		process.sleep(10)
-		process.send(wake, 'from the child')
+	wake = process::subject()
+	_ = process::spawn(fn() {
+		process::sleep(10)
+		process::send(wake, 'from the child')
 	})
-	println('cross-process: ${process.receive(wake)}')
+	println('cross-process: ${process::receive(wake)}')
 
-	check('receive_within times out', True, wait_quiet(process.subject()) == 'timeout')
+	check('receive_within times out', True, wait_quiet(process::subject()) == 'timeout')
 
-	slowpoke = process.subject()
-	_ = process.spawn(fn() {
-		process.sleep(10)
-		process.send(slowpoke, 7)
+	slowpoke = process::subject()
+	_ = process::spawn(fn() {
+		process::sleep(10)
+		process::send(slowpoke, 7)
 	})
-	check('receive_within delivers', True, process.receive_within(slowpoke, 5000) == Ok(7))
+	check('receive_within delivers', True, process::receive_within(slowpoke, 5000) == Ok(7))
 
-	boot = process.subject()
-	_ = process.spawn(fn() {
-		server_inbox = process.subject()
-		process.send(boot, server_inbox)
+	boot = process::subject()
+	_ = process::spawn(fn() {
+		server_inbox = process::subject()
+		process::send(boot, server_inbox)
 		serve(server_inbox, 0)
 	})
-	server = process.receive(boot)
+	server = process::receive(boot)
 
-	reply = process.subject()
-	process.send(server, Add(5, reply))
-	println('add 5 -> ${process.receive(reply)}')
-	process.send(server, Add(37, reply))
-	println('add 37 -> ${process.receive(reply)}')
+	reply = process::subject()
+	process::send(server, Add(5, reply))
+	println('add 5 -> ${process::receive(reply)}')
+	process::send(server, Add(37, reply))
+	println('add 37 -> ${process::receive(reply)}')
 
-	done = process.subject()
-	process.send(server, Stop(done))
-	println('stop -> ${process.receive(done)}')
+	done = process::subject()
+	process::send(server, Stop(done))
+	println('stop -> ${process::receive(done)}')
 
-	tally = process.subject()
-	_ = process.spawn(fn() shout(tally, 10))
-	_ = process.spawn(fn() shout(tally, 100))
-	_ = process.spawn(fn() shout(tally, 1000))
+	tally = process::subject()
+	_ = process::spawn(fn() shout(tally, 10))
+	_ = process::spawn(fn() shout(tally, 100))
+	_ = process::spawn(fn() shout(tally, 1000))
 	check('every send arrives', True, drain(tally, 6, 0) == 3330)
 
 	ints = fresh()
 	texts = fresh()
-	process.send(ints, 1)
-	process.send(texts, 'text')
-	println('fresh subjects: ${process.receive(ints)} ${process.receive(texts)}')
+	process::send(ints, 1)
+	process::send(texts, 'text')
+	println('fresh subjects: ${process::receive(ints)} ${process::receive(texts)}')
 
 	// --- a subject dies with its owner --------------------------------------------
 	// The child hands its own subject out and finishes; a later send to it is
 	// dropped, not an error.
 
-	graveyard = process.subject()
-	_ = process.spawn(fn() process.send(graveyard, process.subject()))
-	orphan = process.receive(graveyard)
-	process.sleep(30)
-	process.send(orphan, 99)
+	graveyard = process::subject()
+	_ = process::spawn(fn() process::send(graveyard, process::subject()))
+	orphan = process::receive(graveyard)
+	process::sleep(30)
+	process::send(orphan, 99)
 	println('send to a dead subject: ok')
 
 	// --- a subject dies when its owner lets go of it -------------------------------
@@ -180,45 +180,45 @@ pub fn main() {
 	// the mailbox count exactly where it started. (Reference counting frees
 	// the handle at its last use; freeing the handle closes the mailbox.)
 
-	counter_boot = process.subject()
-	_ = process.spawn(fn() {
-		counter_inbox = process.subject()
-		process.send(counter_boot, counter_inbox)
+	counter_boot = process::subject()
+	_ = process::spawn(fn() {
+		counter_inbox = process::subject()
+		process::send(counter_boot, counter_inbox)
 		serve(counter_inbox, 0)
 	})
-	counter = process.receive(counter_boot)
-	before = internal.live_subjects()
+	counter = process::receive(counter_boot)
+	before = internal::live_subjects()
 	check('a thousand request/replies add up', True, ask_repeatedly(counter, 1000, 0) == 1000)
-	check('and leave no mailboxes behind', True, internal.live_subjects() == before)
-	stopped = process.subject()
-	process.send(counter, Stop(stopped))
-	_ = process.receive(stopped)
+	check('and leave no mailboxes behind', True, internal::live_subjects() == before)
+	stopped = process::subject()
+	process::send(counter, Stop(stopped))
+	_ = process::receive(stopped)
 
 	// --- send_after fires, and cancel_timer stops one that has not ------------------
 
 	timed = fresh()
-	_ = process.send_after(timed, 5, 7)
-	check('send_after delivers', True, carried(process.receive_within(timed, 2000), 7))
+	_ = process::send_after(timed, 5, 7)
+	check('send_after delivers', True, carried(process::receive_within(timed, 2000), 7))
 
 	quiet = fresh()
-	process.cancel_timer(process.send_after(quiet, 40, 9))
-	check('cancel_timer stops it', False, arrived(process.receive_within(quiet, 200)))
+	process::cancel_timer(process::send_after(quiet, 40, 9))
+	check('cancel_timer stops it', False, arrived(process::receive_within(quiet, 200)))
 
 	// A zero delay still crosses between two processes, and cancelling a timer
 	// that has already fired does nothing.
 	instant = fresh()
-	spent = process.send_after(instant, 0, 1)
-	check('a zero delay still arrives', True, carried(process.receive_within(instant, 2000), 1))
-	process.cancel_timer(spent)
+	spent = process::send_after(instant, 0, 1)
+	check('a zero delay still arrives', True, carried(process::receive_within(instant, 2000), 1))
+	process::cancel_timer(spent)
 	println('cancel after firing: ok')
 }
 
-fn ask_repeatedly(server process.Subject(Msg), left Int, last Int) Int {
+fn ask_repeatedly(server process::Subject(Msg), left Int, last Int) Int {
 	if left == 0 {
 		last
 	} else {
-		reply = process.subject()
-		process.send(server, Add(1, reply))
-		ask_repeatedly(server, left - 1, process.receive(reply))
+		reply = process::subject()
+		process::send(server, Add(1, reply))
+		ask_repeatedly(server, left - 1, process::receive(reply))
 	}
 }

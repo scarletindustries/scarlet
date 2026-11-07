@@ -23,7 +23,7 @@ pub type Segment {
 
 // What the document held where a failure happened.
 pub type Found {
-	FoundKind(kind json.Kind)
+	FoundKind(kind json::Kind)
 	FoundAbsent
 	// The right kind, the wrong content: a quoted integer that is not one.
 	FoundText(text String)
@@ -48,15 +48,15 @@ type Recovery(a) {
 // A path is only built on failure. `resume` is a thunk so a success never
 // builds the rest of a `take` chain once per member.
 pub opaque type Decoder(a) {
-	step fn(json.Doc) Result(a, Array(Failure))
+	step fn(json::Doc) Result(a, Array(Failure))
 	resume fn() Recovery(a)
 }
 
-pub fn run(dec Decoder(a), doc json.Doc) Result(a, Array(Failure)) {
+pub fn run(dec Decoder(a), doc json::Doc) Result(a, Array(Failure)) {
 	run_at(dec, doc)
 }
 
-fn run_at(dec Decoder(a), doc json.Doc) Result(a, Array(Failure)) {
+fn run_at(dec Decoder(a), doc json::Doc) Result(a, Array(Failure)) {
 	Decoder(step, _) = dec
 	step(doc)
 }
@@ -120,20 +120,20 @@ pub fn found_to_string(f Found) String {
 	}
 }
 
-fn kind_to_string(k json.Kind) String {
+fn kind_to_string(k json::Kind) String {
 	match k {
-		json.NullKind -> 'null'
-		json.BoolKind -> 'a boolean'
-		json.IntKind -> 'an integer'
-		json.FloatKind -> 'a float'
-		json.StringKind -> 'a string'
-		json.ArrayKind -> 'an array'
-		json.ObjectKind -> 'an object'
+		json::NullKind -> 'null'
+		json::BoolKind -> 'a boolean'
+		json::IntKind -> 'an integer'
+		json::FloatKind -> 'a float'
+		json::StringKind -> 'a string'
+		json::ArrayKind -> 'an array'
+		json::ObjectKind -> 'an object'
 	}
 }
 
-fn one_failure(expected String, d json.Doc) Array(Failure) {
-	[Failure([], expected, FoundKind(json.kind(d)))]
+fn one_failure(expected String, d json::Doc) Array(Failure) {
+	[Failure([], expected, FoundKind(json::kind(d)))]
 }
 
 pub fn succeed(value a) Decoder(a) {
@@ -147,7 +147,7 @@ pub fn fail(expected String) Decoder(a) {
 }
 
 // The one place a stand-in value is written down rather than derived.
-fn scalar(expected String, resume_with a, read fn(json.Doc) Option(a)) Decoder(a) {
+fn scalar(expected String, resume_with a, read fn(json::Doc) Option(a)) Decoder(a) {
 	Decoder(
 		step: fn(doc) match read(doc) {
 			Some(v) -> Ok(v)
@@ -158,27 +158,27 @@ fn scalar(expected String, resume_with a, read fn(json.Doc) Option(a)) Decoder(a
 }
 
 pub fn string_value() Decoder(String) {
-	scalar('a string', '', json.string)
+	scalar('a string', '', json::string)
 }
 
 // A float fails here, even one with no fraction.
 pub fn int() Decoder(Int) {
-	scalar('an integer', 0, json.int)
+	scalar('an integer', 0, json::int)
 }
 
 pub fn float() Decoder(Float) {
-	scalar('a number', 0.0, json.float)
+	scalar('a number', 0.0, json::float)
 }
 
 pub fn bool() Decoder(Bool) {
-	scalar('a boolean', False, json.bool)
+	scalar('a boolean', False, json::bool)
 }
 
 // An integer sent as a JSON string, as protocols do for 64-bit ids (Discord
 // snowflakes) that a double would round. A leading `-` is fine, `+` is not.
 pub fn int_string() Decoder(Int) {
 	Decoder(
-		step: fn(doc) match json.string(doc) {
+		step: fn(doc) match json::string(doc) {
 			None -> Err(one_failure('a quoted integer', doc))
 			Some(s) -> match parse_signed(s) {
 				Ok(n) -> Ok(n)
@@ -191,17 +191,17 @@ pub fn int_string() Decoder(Int) {
 
 // `int.from_string` takes a leading `+`, and JSON has none. 43 is `+`.
 fn parse_signed(s String) Result(Int, Nil) {
-	if binary.byte_at(binary.from_string(s), 0) == 43 {
+	if binary::byte_at(binary::from_string(s), 0) == 43 {
 		Err(Nil)
 	} else {
-		integer.from_string(s)
+		integer::from_string(s)
 	}
 }
 
 // `null`, decoded as `value`.
 pub fn null_as(value a) Decoder(a) {
 	Decoder(
-		step: fn(doc) if json.is_null(doc) {
+		step: fn(doc) if json::is_null(doc) {
 			Ok(value)
 		} else {
 			Err(one_failure('null', doc))
@@ -271,7 +271,7 @@ pub fn take(name String, inner Decoder(a), k fn(a) Decoder(b)) Decoder(b) {
 pub fn take_optional(
 	name String,
 	inner Decoder(a),
-	k fn(presence.Field(a)) Decoder(b),
+	k fn(presence::Field(a)) Decoder(b),
 ) Decoder(b) {
 	also(optional_field(name, inner), k)
 }
@@ -328,13 +328,13 @@ pub fn field(name String, inner Decoder(a)) Decoder(a) {
 	)
 }
 
-// `json.field` is `None` both for a missing member and for a non-object. This
+// `json::field` is `None` both for a missing member and for a non-object. This
 // splits them, so a decoder of only optional fields can't accept an array.
-fn member(doc json.Doc, name String) Result(Option(json.Doc), Array(Failure)) {
-	match json.field(doc, name) {
+fn member(doc json::Doc, name String) Result(Option(json::Doc), Array(Failure)) {
+	match json::field(doc, name) {
 		Some(child) -> Ok(Some(child))
-		None -> match json.kind(doc) {
-			json.ObjectKind -> Ok(None)
+		None -> match json::kind(doc) {
+			json::ObjectKind -> Ok(None)
 			k -> Err([Failure([Key(name)], 'a member named "${name}"', FoundKind(k))])
 		}
 	}
@@ -342,30 +342,30 @@ fn member(doc json.Doc, name String) Result(Option(json.Doc), Array(Failure)) {
 
 // Absent, null or present, as a `Field(a)`: absent means "unchanged" and null
 // means "cleared", which `Option` would lose. A non-object still fails.
-pub fn optional_field(name String, inner Decoder(a)) Decoder(presence.Field(a)) {
+pub fn optional_field(name String, inner Decoder(a)) Decoder(presence::Field(a)) {
 	Decoder(step, _) = inner
 	Decoder(
 		step: fn(doc) match member(doc, name) {
 			Err(e) -> Err(e)
-			Ok(None) -> Ok(presence.absent())
-			Ok(Some(child)) -> if json.is_null(child) {
-				Ok(presence.null())
+			Ok(None) -> Ok(presence::absent())
+			Ok(Some(child)) -> if json::is_null(child) {
+				Ok(presence::null())
 			} else {
 				match step(child) {
-					Ok(v) -> Ok(presence.present(v))
+					Ok(v) -> Ok(presence::present(v))
 					Err(e) -> Err(prefix_path(e, Key(name)))
 				}
 			}
 		},
-		resume: fn() Resume(presence.absent()),
+		resume: fn() Resume(presence::absent()),
 	)
 }
 
 pub fn list(inner Decoder(a)) Decoder(Array(a)) {
 	Decoder(step, _) = inner
 	Decoder(
-		step: fn(doc) match json.kind(doc) {
-			json.ArrayKind -> collect_list(step, json.elements(doc), 0, [], [])
+		step: fn(doc) match json::kind(doc) {
+			json::ArrayKind -> collect_list(step, json::elements(doc), 0, [], [])
 			_ -> Err(one_failure('an array', doc))
 		},
 		resume: fn() Resume([]),
@@ -373,8 +373,8 @@ pub fn list(inner Decoder(a)) Decoder(Array(a)) {
 }
 
 fn collect_list(
-	step fn(json.Doc) Result(a, Array(Failure)),
-	items Array(json.Doc),
+	step fn(json::Doc) Result(a, Array(Failure)),
+	items Array(json::Doc),
 	i Int,
 	oks Array(a),
 	errs Array(Failure),
@@ -395,8 +395,8 @@ fn collect_list(
 pub fn dict(inner Decoder(a)) Decoder(Array((String, a))) {
 	Decoder(step, _) = inner
 	Decoder(
-		step: fn(doc) match json.kind(doc) {
-			json.ObjectKind -> collect_dict(step, json.entries(doc), [], [])
+		step: fn(doc) match json::kind(doc) {
+			json::ObjectKind -> collect_dict(step, json::entries(doc), [], [])
 			_ -> Err(one_failure('an object', doc))
 		},
 		resume: fn() Resume([]),
@@ -404,8 +404,8 @@ pub fn dict(inner Decoder(a)) Decoder(Array((String, a))) {
 }
 
 fn collect_dict(
-	step fn(json.Doc) Result(a, Array(Failure)),
-	items Array((String, json.Doc)),
+	step fn(json::Doc) Result(a, Array(Failure)),
+	items Array((String, json::Doc)),
 	oks Array((String, a)),
 	errs Array(Failure),
 ) Result(Array((String, a)), Array(Failure)) {
@@ -435,7 +435,7 @@ pub fn one_of(first Decoder(a), rest Array(Decoder(a))) Decoder(a) {
 
 fn try_each(
 	decoders Array(Decoder(a)),
-	doc json.Doc,
+	doc json::Doc,
 	errs Array(Failure),
 ) Result(a, Array(Failure)) {
 	match decoders {
@@ -480,5 +480,5 @@ pub fn at(path_names Array(String), inner Decoder(a)) Decoder(a) {
 // `default` when the member is absent or null. Not for partial updates:
 // `field.update` keeps the current value, where this would overwrite it.
 pub fn with_default(name String, inner Decoder(a), default a) Decoder(a) {
-	map(optional_field(name, inner), fn(f) presence.fold(f, fn() default, fn() default, fn(x) x))
+	map(optional_field(name, inner), fn(f) presence::fold(f, fn() default, fn() default, fn(x) x))
 }

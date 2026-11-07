@@ -132,7 +132,7 @@ mod tests {
     fn a_named_listing_reaches_into_the_stdlib() {
         let src = "import scarlet/string\n\
                    pub fn main() {\n\
-                   \tprintln(string.replace('a', 'a', 'b'))\n\
+                   \tprintln(string::replace('a', 'a', 'b'))\n\
                    }\n";
         let text = listing(&program(src), Filter::Named("replace")).expect("replace exists");
         assert!(text.contains("fn scarlet/string.replace("), "{text}");

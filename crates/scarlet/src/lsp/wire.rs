@@ -135,22 +135,21 @@ fn is_ident_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-/// The qualifier of a `q.<partial>` access the completion cursor sits in: skip
-/// back over the identifier being typed, require a `.`, then read the
+/// The qualifier of a `q::<partial>` access the completion cursor sits in:
+/// skip back over the identifier being typed, require a `::`, then read the
 /// identifier before it. `None` when the cursor is not in a qualified-access
-/// position; that includes a float literal's dot (`3.`), whose "qualifier"
-/// starts with a digit. `col` counts characters, matching how the rest of the
-/// server treats LSP columns.
+/// position. `col` counts characters, matching how the rest of the server
+/// treats LSP columns.
 pub(super) fn qualifier_before(line: &str, col: usize) -> Option<String> {
     let chars: Vec<char> = line.chars().collect();
     let mut i = col.min(chars.len());
     while i > 0 && is_ident_char(chars[i - 1]) {
         i -= 1;
     }
-    if i == 0 || chars[i - 1] != '.' {
+    if i < 2 || chars[i - 1] != ':' || chars[i - 2] != ':' {
         return None;
     }
-    let end = i - 1;
+    let end = i - 2;
     let mut start = end;
     while start > 0 && is_ident_char(chars[start - 1]) {
         start -= 1;
@@ -282,14 +281,14 @@ mod tests {
     use super::{clean_doc_comment, qualifier_before};
 
     #[test]
-    fn qualifier_found_right_after_the_dot() {
-        assert_eq!(qualifier_before("x = http.", 9), Some("http".to_string()));
+    fn qualifier_found_right_after_the_colons() {
+        assert_eq!(qualifier_before("x = http::", 10), Some("http".to_string()));
     }
 
     #[test]
     fn qualifier_found_mid_partial_word() {
         assert_eq!(
-            qualifier_before("x = http.ge", 11),
+            qualifier_before("x = http::ge", 12),
             Some("http".to_string())
         );
     }
@@ -300,18 +299,23 @@ mod tests {
     }
 
     #[test]
-    fn float_literal_dot_is_not_a_qualifier() {
-        assert_eq!(qualifier_before("x = 3.", 6), None);
+    fn a_field_access_is_not_a_qualifier() {
+        assert_eq!(qualifier_before("x = rec.", 8), None);
     }
 
     #[test]
-    fn lone_leading_dot_has_no_qualifier() {
-        assert_eq!(qualifier_before(".", 1), None);
+    fn a_type_annotation_colon_is_not_a_qualifier() {
+        assert_eq!(qualifier_before("fn f(a: ", 8), None);
+    }
+
+    #[test]
+    fn lone_leading_colons_have_no_qualifier() {
+        assert_eq!(qualifier_before("::", 2), None);
     }
 
     #[test]
     fn column_past_end_of_line_clamps() {
-        assert_eq!(qualifier_before("a.", 99), Some("a".to_string()));
+        assert_eq!(qualifier_before("a::", 99), Some("a".to_string()));
     }
 
     #[test]

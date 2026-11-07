@@ -91,7 +91,7 @@ fn leaf(n Int) Int {
 
 fn middle(n Int) Int {
 \txs = [n, n + n]
-\tleaf(array.length(xs) + n)
+\tleaf(array::length(xs) + n)
 }
 
 fn outer(n Int) Int {
@@ -117,7 +117,7 @@ fn native_caller_parks_and_resumes_through_interpreted_callee() {
     let src = "import scarlet/process
 
 fn pause(n Int) Int {
-\tprocess.sleep(1)
+\tprocess::sleep(1)
 \tn + 1
 }
 
@@ -159,10 +159,10 @@ fn kick(n Int) Int {
 }
 
 pub fn main() {
-\t_ = process.spawn(fn() {
+\t_ = process::spawn(fn() {
 \t\tprintln(kick(10) + spin(20000000, 0))
 \t})
-\t_ = process.spawn(fn() {
+\t_ = process::spawn(fn() {
 \t\tprintln('sibling progressed')
 \t})
 }
@@ -227,15 +227,15 @@ pub fn main() {
 fn a_warmed_qualified_match_agrees_across_the_warmup_boundary() {
     let src = "import ./color
 
-fn hit(c color.Color) Int {
+fn hit(c color::Color) Int {
 	match c {
-		color.Green(_s) -> 1
+		color::Green(_s) -> 1
 		_ -> 0
 	}
 }
 
 fn drive(i Int, acc Int) Int {
-	if i == 0 { acc } else { drive(i - 1, acc + hit(color.make(i))) }
+	if i == 0 { acc } else { drive(i - 1, acc + hit(color::make(i))) }
 }
 
 pub fn main() {
@@ -392,17 +392,17 @@ fn bitwise_ops_survive_the_native_bridge() {
     let src = "import scarlet/int
 
 fn rotor(n Int, acc Int) Int {
-\ta = int.bitwise_not(acc)
-\thi = int.bitwise_shift_left(a, 7)
-\tlo = int.bitwise_and(int.bitwise_shift_right(a, 57), 127)
-\tnext = int.bitwise_xor(int.bitwise_or(hi, lo), n)
+\ta = int::bitwise_not(acc)
+\thi = int::bitwise_shift_left(a, 7)
+\tlo = int::bitwise_and(int::bitwise_shift_right(a, 57), 127)
+\tnext = int::bitwise_xor(int::bitwise_or(hi, lo), n)
 \tif n == 0 { acc } else { rotor(n - 1, next) }
 }
 
 fn mixer(n Int, acc Int) Int {
-\ta = int.bitwise_or(acc, 4919131752989213764)
-\tb = int.bitwise_and(a, 0 - 3689348814741910324)
-\tnext = int.bitwise_xor(b, n)
+\ta = int::bitwise_or(acc, 4919131752989213764)
+\tb = int::bitwise_and(a, 0 - 3689348814741910324)
+\tnext = int::bitwise_xor(b, n)
 \tif n == 0 { acc } else { mixer(n - 1, next) }
 }
 
@@ -447,8 +447,8 @@ fn random_bytes_survives_the_native_bridge() {
 import scarlet/crypto
 
 fn take(n Int) Int {
-\tmatch crypto.random_bytes(n) {
-\t\tOk(b) -> binary.byte_size(b)
+\tmatch crypto::random_bytes(n) {
+\t\tOk(b) -> binary::byte_size(b)
 \t\tErr(Nil) -> 0 - 1
 \t}
 }
@@ -465,7 +465,7 @@ fn walk(i Int, n Int) Int {
 }
 
 fn pair(_n Int) Bool {
-\tmatch (crypto.random_bytes(16), crypto.random_bytes(16)) {
+\tmatch (crypto::random_bytes(16), crypto::random_bytes(16)) {
 \t\t(Ok(a), Ok(b)) -> a != b
 \t\t(_, _) -> False
 \t}
@@ -514,7 +514,7 @@ import scarlet/crypto
 
 fn dump(b Binary, i Int, size Int) {
 \tif i < size {
-\t\tprintln(binary.byte_at(b, i))
+\t\tprintln(binary::byte_at(b, i))
 \t\tdump(b, i + 1, size)
 \t} else {
 \t\tNil
@@ -522,8 +522,8 @@ fn dump(b Binary, i Int, size Int) {
 }
 
 pub fn main() {
-\tmatch crypto.random_bytes(16) {
-\t\tOk(b) -> dump(b, 0, binary.byte_size(b))
+\tmatch crypto::random_bytes(16) {
+\t\tOk(b) -> dump(b, 0, binary::byte_size(b))
 \t\tErr(Nil) -> println('FAIL')
 \t}
 }
@@ -1148,8 +1148,8 @@ pub type Tag {
 }
 
 fn churn(n Int, acc Int) Int {
-\tbytes = wire.encode(Tag(n, 'x'))
-\tnext = match wire.decode(bytes) {
+\tbytes = wire::encode(Tag(n, 'x'))
+\tnext = match wire::decode(bytes) {
 \t\tOk(Tag(m, _)) -> acc + m
 \t\tErr(_) -> 0 - 1
 \t}
@@ -1203,7 +1203,7 @@ fn a_wire_decode_refusal_is_a_value_on_the_native_bridge_not_an_abort() {
     let src = "import scarlet/wire
 
 fn churn(n Int, acc Int) Int {
-\tnext = match wire.decode(<<1, 2, 3>>) {
+\tnext = match wire::decode(<<1, 2, 3>>) {
 \t\tOk(v) -> acc + v
 \t\tErr(_) -> acc + 1
 \t}

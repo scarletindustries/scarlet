@@ -95,7 +95,7 @@ fn check_buffer_as(text: &str, module: Vec<String>) -> Vec<String> {
 #[test]
 fn synthetic_entry_importing_result_first() {
     let diags = check_buffer_as(
-        "import scarlet/result\n\npub fn f(r Result(Int, Nil)) Int {\n\tresult.unwrap(r, 0)\n}\n",
+        "import scarlet/result\n\npub fn f(r Result(Int, Nil)) Int {\n\tresult::unwrap(r, 0)\n}\n",
         vec!["scarlet".into(), "zzz".into()],
     );
     assert!(diags.is_empty(), "phantom diagnostics: {diags:#?}");
@@ -104,7 +104,7 @@ fn synthetic_entry_importing_result_first() {
 #[test]
 fn synthetic_entry_importing_option_first() {
     let diags = check_buffer_as(
-        "import scarlet/option\n\npub fn f(o Option(Int)) Int {\n\toption.unwrap(o, 0)\n}\n",
+        "import scarlet/option\n\npub fn f(o Option(Int)) Int {\n\toption::unwrap(o, 0)\n}\n",
         vec!["scarlet".into(), "zzz".into()],
     );
     assert!(diags.is_empty(), "phantom diagnostics: {diags:#?}");

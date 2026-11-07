@@ -39,7 +39,7 @@ pub type Parsed {
 		method Binary
 		target Binary
 		version Version
-		headers headers.Headers
+		headers headers::Headers
 		flags HeadFlags
 		consumed Int
 	)
@@ -60,7 +60,7 @@ pub type Framing {
 // One chunked body decode. On ChunkedNeedMore, read more and call again with
 // the same offset. `consumed` is just past the final CRLF.
 pub type ChunkBody {
-	ChunkedDone(body Binary, trailers headers.Headers, consumed Int)
+	ChunkedDone(body Binary, trailers headers::Headers, consumed Int)
 	ChunkedNeedMore
 	ChunkedBad(status Int)
 }
@@ -90,7 +90,7 @@ pub type ParsedResponse {
 		version Version
 		code Int
 		reason Binary
-		headers headers.Headers
+		headers headers::Headers
 		flags HeadFlags
 		consumed Int
 	)
@@ -121,7 +121,7 @@ pub fn parse_request(buf Binary, off Int) Parsed
 // Content-Length (400), a coding other than chunked (501), and more than one
 // Content-Length, or one that is not plain digits, too big, or like "007" (400).
 @vm(http__framing)
-pub fn framing(hs headers.Headers) Framing
+pub fn framing(hs headers::Headers) Framing
 
 // Parse a response head from `buf` at `off`; on ResponseNeedMore, read more
 // and retry. Fields follow the request rules. Unlike a request, no empty line
@@ -132,7 +132,7 @@ pub fn parse_response(buf Binary, off Int) ParsedResponse
 // Response body framing (RFC 9112 §6.3): 1xx, 204 and 304 have no body, and
 // no framing fields means the body ends at close. A response to HEAD has no
 // body either, but h1 never sees the request, so the client checks that.
-pub fn response_framing(hs headers.Headers, code Int) ResponseFraming {
+pub fn response_framing(hs headers::Headers, code Int) ResponseFraming {
 	if code >= 100 && code < 200 || code == 204 || code == 304 {
 		BodyNone
 	} else {
@@ -154,10 +154,10 @@ pub fn chunk_decode(buf Binary, off Int, max Int) ChunkBody
 // The status line, the headers and the blank line, as one Binary, so it can
 // lead a vectored write.
 @vm(http__serialize_head)
-fn serialize_head_with(code Int, reason Binary, hs headers.Headers) Binary
+fn serialize_head_with(code Int, reason Binary, hs headers::Headers) Binary
 
-pub fn serialize_head(code Int, hs headers.Headers) Binary {
-	serialize_head_with(code, status.reason_phrase(code), hs)
+pub fn serialize_head(code Int, hs headers::Headers) Binary {
+	serialize_head_with(code, status::reason_phrase(code), hs)
 }
 
 // Whether to close after this message: always on `close` (RFC 9112 §9.3),

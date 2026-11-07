@@ -1,8 +1,8 @@
 import scarlet/io
 
-io.read_text('./does-not-exist.txt') or err -> {
+io::read_text('./does-not-exist.txt') or err -> {
 	match err {
-		io.NotFound(path) -> println('couldnt find ${path}')
+		io::NotFound(path) -> println('couldnt find ${path}')
 		_ -> println(err)
 	}
 

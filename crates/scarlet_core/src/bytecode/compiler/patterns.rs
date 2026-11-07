@@ -167,7 +167,7 @@ impl Compiler {
         CtorLookup::from_scheme(*self.env.lookup(name)?)
     }
 
-    /// Resolve `io.NotFound` through the module qualifier. Every `None` path
+    /// Resolve `io::NotFound` through the module qualifier. Every `None` path
     /// has already reported its own diagnostic, so the caller must only
     /// short-circuit, never report again.
     fn lookup_ctor_qualified(&mut self, qual: &str, name: &str, span: Span) -> Option<CtorLookup> {
@@ -202,7 +202,7 @@ impl Compiler {
                 let module = self.module_name(&key);
                 self.error(
                     format!(
-                        "'{module}.{name}' is not a constructor and cannot be used in a pattern"
+                        "'{module}::{name}' is not a constructor and cannot be used in a pattern"
                     ),
                     span,
                 );

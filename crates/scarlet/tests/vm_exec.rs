@@ -144,9 +144,9 @@ run_case! {
     string_split_nonempty_delimiter: (
         "import scarlet/string\n\
          pub fn main() {\n\
-         \tprintln(string.split('a,b,c', ','))\n\
-         \tprintln(string.split('a,,b,', ','))\n\
-         \tprintln(string.split('nodelim', 'X'))\n\
+         \tprintln(string::split('a,b,c', ','))\n\
+         \tprintln(string::split('a,,b,', ','))\n\
+         \tprintln(string::split('nodelim', 'X'))\n\
          }\n",
         "[a, b, c]\n[a, , b, ]\n[nodelim]\n",
     ),
@@ -249,11 +249,11 @@ run_case! {
     binary_index_of: (
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \th = binary.from_string('abcabc')\n\
-         \tprintln(binary.index_of(h, binary.from_string('bc'), 0))\n\
-         \tprintln(binary.index_of(h, binary.from_string('bc'), 2))\n\
-         \tprintln(binary.index_of(h, binary.from_string('xy'), 0))\n\
-         \tprintln(binary.index_of(h, binary.from_string(''), 3))\n\
+         \th = binary::from_string('abcabc')\n\
+         \tprintln(binary::index_of(h, binary::from_string('bc'), 0))\n\
+         \tprintln(binary::index_of(h, binary::from_string('bc'), 2))\n\
+         \tprintln(binary::index_of(h, binary::from_string('xy'), 0))\n\
+         \tprintln(binary::index_of(h, binary::from_string(''), 3))\n\
          }\n",
         "Some(1)\nSome(4)\nNone\nSome(3)\n",
     ),
@@ -263,12 +263,12 @@ run_case! {
     binary_parse_int: (
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tprintln(binary.parse_int(binary.from_string('255'), binary.Dec))\n\
-         \tprintln(binary.parse_int(binary.from_string('ff'), binary.Hex))\n\
-         \tprintln(binary.parse_int(binary.from_string('FF'), binary.Hex))\n\
-         \tprintln(binary.parse_int(binary.from_string('99999999999999999999'), binary.Dec))\n\
-         \tprintln(binary.parse_int(binary.from_string('12x'), binary.Dec))\n\
-         \tprintln(binary.parse_int(binary.from_string(''), binary.Dec))\n\
+         \tprintln(binary::parse_int(binary::from_string('255'), binary::Dec))\n\
+         \tprintln(binary::parse_int(binary::from_string('ff'), binary::Hex))\n\
+         \tprintln(binary::parse_int(binary::from_string('FF'), binary::Hex))\n\
+         \tprintln(binary::parse_int(binary::from_string('99999999999999999999'), binary::Dec))\n\
+         \tprintln(binary::parse_int(binary::from_string('12x'), binary::Dec))\n\
+         \tprintln(binary::parse_int(binary::from_string(''), binary::Dec))\n\
          }\n",
         "Ok(255)\nOk(255)\nOk(255)\nOk(99999999999999999999)\nErr(Nil)\nErr(Nil)\n",
     ),
@@ -278,18 +278,18 @@ run_case! {
     int_from_string: (
         "import scarlet/int\n\
          pub fn main() {\n\
-         \tprintln(int.from_string('42'))\n\
-         \tprintln(int.from_string('0'))\n\
-         \tprintln(int.from_string('-42'))\n\
-         \tprintln(int.from_string('+42'))\n\
-         \tprintln(int.from_string('007'))\n\
-         \tprintln(int.from_string(''))\n\
-         \tprintln(int.from_string('-'))\n\
-         \tprintln(int.from_string('12x'))\n\
-         \tprintln(int.from_string(' 42'))\n\
-         \tprintln(int.from_string('9223372036854775808'))\n\
-         \tprintln(int.from_string(int.to_string(int.min_value)))\n\
-         \tprintln(int.from_string(int.to_string(int.max_value)))\n\
+         \tprintln(int::from_string('42'))\n\
+         \tprintln(int::from_string('0'))\n\
+         \tprintln(int::from_string('-42'))\n\
+         \tprintln(int::from_string('+42'))\n\
+         \tprintln(int::from_string('007'))\n\
+         \tprintln(int::from_string(''))\n\
+         \tprintln(int::from_string('-'))\n\
+         \tprintln(int::from_string('12x'))\n\
+         \tprintln(int::from_string(' 42'))\n\
+         \tprintln(int::from_string('9223372036854775808'))\n\
+         \tprintln(int::from_string(int::to_string(int::min_value)))\n\
+         \tprintln(int::from_string(int::to_string(int::max_value)))\n\
          }\n",
         "Ok(42)\nOk(0)\nOk(-42)\nOk(42)\nOk(7)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nOk(9223372036854775808)\nOk(-9223372036854775808)\nOk(9223372036854775807)\n",
     ),
@@ -298,9 +298,9 @@ run_case! {
     binary_eq_ignore_ascii_case: (
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \ta = binary.from_string('Content-Length')\n\
-         \tprintln(binary.eq_ignore_ascii_case(a, binary.from_string('content-length')))\n\
-         \tprintln(binary.eq_ignore_ascii_case(binary.from_string('abc'), binary.from_string('abd')))\n\
+         \ta = binary::from_string('Content-Length')\n\
+         \tprintln(binary::eq_ignore_ascii_case(a, binary::from_string('content-length')))\n\
+         \tprintln(binary::eq_ignore_ascii_case(binary::from_string('abc'), binary::from_string('abd')))\n\
          }\n",
         "True\nFalse\n",
     ),
@@ -309,7 +309,7 @@ run_case! {
     binary_to_ascii_lower: (
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tprintln(binary.to_string(binary.to_ascii_lower(binary.from_string('AbC-123'))))\n\
+         \tprintln(binary::to_string(binary::to_ascii_lower(binary::from_string('AbC-123'))))\n\
          }\n",
         "Ok(abc-123)\n",
     ),
@@ -318,11 +318,11 @@ run_case! {
     binary_from_int_ascii: (
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tprintln(binary.to_string(binary.from_int_ascii(255, binary.Dec)))\n\
-         \tprintln(binary.to_string(binary.from_int_ascii(255, binary.Hex)))\n\
-         \tprintln(binary.to_string(binary.from_int_ascii(0, binary.Dec)))\n\
-         \tprintln(binary.to_string(binary.from_int_ascii(0 - 42, binary.Dec)))\n\
-         \tprintln(binary.parse_int(binary.from_int_ascii(4096, binary.Hex), binary.Hex))\n\
+         \tprintln(binary::to_string(binary::from_int_ascii(255, binary::Dec)))\n\
+         \tprintln(binary::to_string(binary::from_int_ascii(255, binary::Hex)))\n\
+         \tprintln(binary::to_string(binary::from_int_ascii(0, binary::Dec)))\n\
+         \tprintln(binary::to_string(binary::from_int_ascii(0 - 42, binary::Dec)))\n\
+         \tprintln(binary::parse_int(binary::from_int_ascii(4096, binary::Hex), binary::Hex))\n\
          }\n",
         "Ok(255)\nOk(ff)\nOk(0)\nOk(-42)\nOk(4096)\n",
     ),
@@ -785,7 +785,7 @@ run_case! {
     builtin_bound_to_a_local_is_callable: (
         "import scarlet/string\n\
          pub fn main() {\n\
-         \tf = string.length\n\
+         \tf = string::length\n\
          \tprintln(f('abc'))\n\
          }\n",
         "3\n",
@@ -794,7 +794,7 @@ run_case! {
         "import scarlet/array\n\
          import scarlet/string\n\
          pub fn main() {\n\
-         \tprintln(array.map(['a', 'bb', 'ccc'], string.length))\n\
+         \tprintln(array::map(['a', 'bb', 'ccc'], string::length))\n\
          }\n",
         "[1, 2, 3]\n",
     ),
@@ -803,7 +803,7 @@ run_case! {
     bare_builtin_as_value_is_callable: (
         "import scarlet/array\n\
          pub fn main() {\n\
-         \teach = array.each\n\
+         \teach = array::each\n\
          \teach([1, 2], println)\n\
          }\n",
         "1\n2\n",
@@ -820,7 +820,7 @@ run_case! {
         "import scarlet/array\n\
          import scarlet/string\n\
          fn lens(xs Array(String)) Array(Int) {\n\
-         \tarray.map(xs, string.length)\n\
+         \tarray::map(xs, string::length)\n\
          }\n\
          pub fn main() {\n\
          \tprintln(lens(['a', 'bb', 'ccc']))\n\
@@ -831,15 +831,15 @@ run_case! {
         "import scarlet/array\n\
          type W { W(v Int) }\n\
          fn wrap(xs Array(Int)) Array(W) {\n\
-         \tarray.map(xs, W)\n\
+         \tarray::map(xs, W)\n\
          }\n\
          fn total(ws Array(W)) Int {\n\
-         \tarray.fold(ws, 0, fn(a, w) match w {\n\
+         \tarray::fold(ws, 0, fn(a, w) match w {\n\
          \t\tW(v) -> a + v\n\
          \t})\n\
          }\n\
          pub fn main() {\n\
-         \tprintln(array.length(wrap([1, 2, 3])))\n\
+         \tprintln(array::length(wrap([1, 2, 3])))\n\
          \tprintln(total(wrap([4, 5, 6])))\n\
          }\n",
         "3\n15\n",
@@ -853,7 +853,7 @@ run_case! {
     // HOW THE PAYLOAD IS PINNED, and the first attempt was wrong: a downstream
     // `match` on the fold does NOT reach the wrapper. Measured — `rs =
     // array.map(bs, wire.decode)` with an `Ok(S(n))` arm further down is still
-    // refused with "the type `wire.decode` produces here is not known", because
+    // refused with "the type `wire::decode` produces here is not known", because
     // inference does not flow back into the eta wrapper's return type. It is
     // pinned here by `decode_all`'s monomorphic signature instead, which fixes
     // `a` to `S` at the point the wrapper is minted.
@@ -867,12 +867,12 @@ run_case! {
         "import scarlet/array\n\
          import scarlet/wire\n\
          type S { S(n Int) }\n\
-         fn decode_all(bs Array(Binary)) Array(Result(S, wire.DecodeError)) {\n\
-         \tarray.map(bs, wire.decode)\n\
+         fn decode_all(bs Array(Binary)) Array(Result(S, wire::DecodeError)) {\n\
+         \tarray::map(bs, wire::decode)\n\
          }\n\
          pub fn main() {\n\
-         \tbs = array.map([S(3), S(4)], wire.encode)\n\
-         \tprintln(array.fold(decode_all(bs), 0, fn(acc, r) match r {\n\
+         \tbs = array::map([S(3), S(4)], wire::encode)\n\
+         \tprintln(array::fold(decode_all(bs), 0, fn(acc, r) match r {\n\
          \t\tOk(S(n)) -> acc + n\n\
          \t\tErr(_) -> 0 - 1\n\
          \t}))\n\
@@ -892,20 +892,20 @@ run_case! {
     an_opaque_json_doc_round_trips_through_wire: (
         "import scarlet/json\n\
          import scarlet/wire\n\
-         fn n_of(d json.Doc) Int {\n\
-         \tmatch json.field(d, 'n') {\n\
-         \t\tSome(v) -> json.int(v) or 0 - 1\n\
+         fn n_of(d json::Doc) Int {\n\
+         \tmatch json::field(d, 'n') {\n\
+         \t\tSome(v) -> json::int(v) or 0 - 1\n\
          \t\tNone -> 0 - 2\n\
          \t}\n\
          }\n\
-         fn through_wire(doc json.Doc) Int {\n\
-         \tmatch wire.decode(wire.encode(doc)) {\n\
+         fn through_wire(doc json::Doc) Int {\n\
+         \tmatch wire::decode(wire::encode(doc)) {\n\
          \t\tOk(back) -> n_of(back) + 1\n\
          \t\tErr(_) -> 0 - 3\n\
          \t}\n\
          }\n\
          pub fn main() {\n\
-         \tprintln(match json.parse('{\"m\": 7, \"n\": 41}') {\n\
+         \tprintln(match json::parse('{\"m\": 7, \"n\": 41}') {\n\
          \t\tOk(doc) -> through_wire(doc)\n\
          \t\tErr(_) -> 0 - 4\n\
          \t})\n\

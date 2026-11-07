@@ -353,7 +353,7 @@ impl Scanner {
             b'!' => self.punc2(b'=', Kind::PuncNotEqual, Kind::PuncExclamationMark),
             b'?' => self.new_token(Kind::PuncQuestionMark),
             b'@' => self.new_token(Kind::PuncAt),
-            b':' => self.new_token(Kind::PuncColon),
+            b':' => self.punc2(b':', Kind::PuncColonColon, Kind::PuncColon),
             b'>' => match self.peek_char() {
                 b'=' => {
                     self.incr_pos();
@@ -955,8 +955,9 @@ mod tests {
 
     #[test]
     fn test_punctuation() {
-        let ks =
-            kinds(", ( ) { } [ ] ; . .. -> + ++ - -- * / % ! != ? : = == > >= < <= << >> && || |");
+        let ks = kinds(
+            ", ( ) { } [ ] ; . .. -> + ++ - -- * / % ! != ? : :: = == > >= < <= << >> && || |",
+        );
         assert_eq!(
             ks,
             vec![
@@ -982,6 +983,7 @@ mod tests {
                 PuncNotEqual,
                 PuncQuestionMark,
                 PuncColon,
+                PuncColonColon,
                 PuncEquals,
                 PuncEqualsComparator,
                 PuncGt,

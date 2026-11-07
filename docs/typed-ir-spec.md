@@ -177,8 +177,8 @@ Both are live regression tests today; they must still pass, and they must pass *
 import scarlet/array
 type W { W(v Int) }
 fn pick(xs Array(Int)) Int {
-	ws = array.map(xs, W)
-	if array.length(ws) > 2 { 111 } else { 222 }
+	ws = array::map(xs, W)
+	if array::length(ws) > 2 { 111 } else { 222 }
 }
 println(pick([1]))        // 222
 println(pick([1, 2, 3]))  // 111

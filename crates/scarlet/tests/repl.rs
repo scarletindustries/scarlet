@@ -103,7 +103,7 @@ fn a_multi_line_entry_still_evaluates() {
 /// session is typed in whatever order the user thinks of things.
 #[test]
 fn an_import_after_a_definition_still_resolves() {
-    let out = repl("const s = 'a,b'\nimport scarlet/string\nprintln(string.split(s, ','))\n");
+    let out = repl("const s = 'a,b'\nimport scarlet/string\nprintln(string::split(s, ','))\n");
     assert!(out.contains('b'), "want the split, got:\n{out}");
 }
 
@@ -143,7 +143,7 @@ fn a_session_round_trips_through_save_and_load() {
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let path = dir.join("session.scrl");
     let saved = repl(&format!(
-        "import scarlet/string\nfn size(s String) Int {{ string.length(s) }}\n:save {}\n",
+        "import scarlet/string\nfn size(s String) Int {{ string::length(s) }}\n:save {}\n",
         path.display()
     ));
     assert!(saved.contains("wrote"), "{saved}");
@@ -189,7 +189,7 @@ fn reset_says_it_ran() {
 /// the unused-binding check must not reject the entry that binds it.
 #[test]
 fn a_binding_used_by_a_later_entry_is_not_called_unused() {
-    let (out, err) = session("import scarlet/http\nserve = http.serve\nprintln(serve)\n");
+    let (out, err) = session("import scarlet/http\nserve = http::serve\nprintln(serve)\n");
     assert!(!err.contains("unused"), "{err}");
     assert!(out.contains("<fn#serve>"), "{out}{err}");
 }
@@ -208,7 +208,7 @@ fn an_entry_after_a_binding_still_evaluates() {
 /// leaves behind is a compiler artifact.
 #[test]
 fn a_binding_entry_prints_nothing() {
-    let (out, _) = session("import scarlet/http\nserve = http.serve\n");
+    let (out, _) = session("import scarlet/http\nserve = http::serve\n");
     assert!(
         !out.lines().any(|l| l.trim() == "0"),
         "printed the binding's stack leftover:\n{out}"
@@ -223,11 +223,11 @@ fn a_module_name_alone_lists_what_is_in_it() {
     assert!(out.contains("int is a module"), "{out}");
     let first = out
         .lines()
-        .find(|l| l.trim_start().starts_with("int."))
+        .find(|l| l.trim_start().starts_with("int::"))
         .unwrap_or("");
     assert_eq!(
         first.trim(),
-        "int.abs(n)",
+        "int::abs(n)",
         "want the functions first:\n{out}"
     );
     assert!(out.contains("and 1 more"), "{out}");
@@ -246,7 +246,7 @@ fn exit_leaves_the_repl() {
 #[test]
 fn a_stopped_entry_says_why_and_the_session_goes_on() {
     let (out, err) =
-        session("import scarlet/int\nint.bitwise_shift_left(1, int.max_value)\n1 + 1\n");
+        session("import scarlet/int\nint::bitwise_shift_left(1, int::max_value)\n1 + 1\n");
     assert!(err.contains("ran out of heap"), "{err}");
     assert!(out.lines().any(|l| l.trim() == "2"), "{out}");
 }

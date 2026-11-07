@@ -1510,7 +1510,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
         match (v.view(), self.code.abi.radix) {
             (View::Nullary(r), Some(radix)) if r == radix.dec => Ok(10),
             (View::Nullary(r), Some(radix)) if r == radix.hex => Ok(16),
-            _ => Err(Stop::BadProgram(format!("{v:?} as a `binary.Radix`"))),
+            _ => Err(Stop::BadProgram(format!("{v:?} as a `binary::Radix`"))),
         }
     }
 
@@ -2666,7 +2666,7 @@ mod tests {
              pub fn main() {\n\
              \tb = grow(1000, <<>>)\n\
              \tprintln(count(b, 0))\n\
-             \tkept = binary.slice_bits(b, 8, 16)\n\
+             \tkept = binary::slice_bits(b, 8, 16)\n\
              \tprintln(kept)\n\
              }\n",
         );
@@ -2702,14 +2702,14 @@ mod tests {
              import scarlet/crypto\n\
              import scarlet/map\n\
              pub fn main() {\n\
-             \tprintln(os.get_env('A'))\n\
-             \tprintln(map.size(os.env()))\n\
-             \tprintln(os.argv())\n\
-             \tprintln(match io.read_file('/no/such/file') {\n\
+             \tprintln(os::get_env('A'))\n\
+             \tprintln(map::size(os::env()))\n\
+             \tprintln(os::argv())\n\
+             \tprintln(match io::read_file('/no/such/file') {\n\
              \t\tOk(_) -> 'read'\n\
              \t\tErr(_) -> 'failed'\n\
              \t})\n\
-             \tprintln(match crypto.random_bytes(40) {\n\
+             \tprintln(match crypto::random_bytes(40) {\n\
              \t\tOk(_) -> 'random'\n\
              \t\tErr(Nil) -> 'none'\n\
              \t})\n\
@@ -2727,20 +2727,20 @@ mod tests {
         let (out, left) = cells_left_after(
             "import scarlet/json\n\
              pub fn main() {\n\
-             \tmatch json.parse('{\"a\": [1, {\"b\": \"deep\"}], \"c\": \"x\"}') {\n\
+             \tmatch json::parse('{\"a\": [1, {\"b\": \"deep\"}], \"c\": \"x\"}') {\n\
              \t\tOk(d) -> {\n\
-             \t\t\tprintln(json.size(json.field(d, 'a') or d))\n\
-             \t\t\t_entries = json.entries(d)\n\
-             \t\t\t_elements = json.elements(json.field(d, 'a') or d)\n\
-             \t\t\tprintln(json.reencode(d))\n\
+             \t\t\tprintln(json::size(json::field(d, 'a') or d))\n\
+             \t\t\t_entries = json::entries(d)\n\
+             \t\t\t_elements = json::elements(json::field(d, 'a') or d)\n\
+             \t\t\tprintln(json::reencode(d))\n\
              \t\t}\n\
              \t\tErr(_) -> println('no')\n\
              \t}\n\
-             \tprintln(match json.parse('[') {\n\
+             \tprintln(match json::parse('[') {\n\
              \t\tOk(_) -> 'parsed'\n\
              \t\tErr(_) -> 'refused'\n\
              \t})\n\
-             \tprintln(json.encode(json.Object([('k', json.List([json.Integer(1), json.Str('v')]))])))\n\
+             \tprintln(json::encode(json::Object([('k', json::List([json::Integer(1), json::Str('v')]))])))\n\
              }\n",
         );
         assert_eq!(
@@ -2761,14 +2761,14 @@ mod tests {
              import scarlet/binary\n\
              pub fn main() {\n\
              \treq = <<'POST /x HTTP/1.1\\r\\nHost: a\\r\\nTransfer-Encoding: chunked\\r\\n\\r\\n3\\r\\nabc\\r\\n0\\r\\n\\r\\n'>>\n\
-             \tmatch h1.parse_request(req, 0) {\n\
-             \t\th1.Done(method, _, _, hs, _, consumed) -> {\n\
-             \t\t\tprintln(binary.to_string(method))\n\
-             \t\t\tprintln(headers.get(hs, <<'host'>>))\n\
-             \t\t\tprintln(h1.framing(hs))\n\
-             \t\t\tprintln(binary.byte_size(h1.serialize_head(200, hs)))\n\
-             \t\t\tmatch h1.chunk_decode(req, consumed, 100) {\n\
-             \t\t\t\th1.ChunkedDone(body, _, _) -> println(body)\n\
+             \tmatch h1::parse_request(req, 0) {\n\
+             \t\th1::Done(method, _, _, hs, _, consumed) -> {\n\
+             \t\t\tprintln(binary::to_string(method))\n\
+             \t\t\tprintln(headers::get(hs, <<'host'>>))\n\
+             \t\t\tprintln(h1::framing(hs))\n\
+             \t\t\tprintln(binary::byte_size(h1::serialize_head(200, hs)))\n\
+             \t\t\tmatch h1::chunk_decode(req, consumed, 100) {\n\
+             \t\t\t\th1::ChunkedDone(body, _, _) -> println(body)\n\
              \t\t\t\t_ -> println('no body')\n\
              \t\t\t}\n\
              \t\t}\n\
@@ -2787,23 +2787,23 @@ mod tests {
     fn maps_and_what_they_hold_are_all_freed() {
         let (out, left) = cells_left_after(
             "import scarlet/map\n\
-             fn fill(m map.Map(String, String), n Int) map.Map(String, String) {\n\
-             \tif n == 0 { m } else { fill(map.set(m, 'k${n}', 'v${n}'), n - 1) }\n\
+             fn fill(m map::Map(String, String), n Int) map::Map(String, String) {\n\
+             \tif n == 0 { m } else { fill(map::set(m, 'k${n}', 'v${n}'), n - 1) }\n\
              }\n\
-             fn drain(m map.Map(String, String), n Int) map.Map(String, String) {\n\
-             \tif n == 0 { m } else { drain(map.delete(m, 'k${n}'), n - 2) }\n\
+             fn drain(m map::Map(String, String), n Int) map::Map(String, String) {\n\
+             \tif n == 0 { m } else { drain(map::delete(m, 'k${n}'), n - 2) }\n\
              }\n\
              pub fn main() {\n\
-             \tfull = fill(map.new(), 400)\n\
+             \tfull = fill(map::new(), 400)\n\
              \thalf = drain(full, 400)\n\
-             \tprintln('${map.size(full)} ${map.size(half)}')\n\
-             \tprintln(map.get(half, 'k7'))\n\
-             \tprintln(map.get(half, 'k8'))\n\
-             \t_keys = map.keys(half)\n\
-             \t_pairs = map.to_list(map.set(half, 'k7', 'again'))\n\
+             \tprintln('${map::size(full)} ${map::size(half)}')\n\
+             \tprintln(map::get(half, 'k7'))\n\
+             \tprintln(map::get(half, 'k8'))\n\
+             \t_keys = map::keys(half)\n\
+             \t_pairs = map::to_list(map::set(half, 'k7', 'again'))\n\
              \tprintln(full == half)\n\
-             \tnested = map.set(map.new(), half, [full])\n\
-             \tprintln(map.has(nested, drain(full, 400)))\n\
+             \tnested = map::set(map::new(), half, [full])\n\
+             \tprintln(map::has(nested, drain(full, 400)))\n\
              }\n",
         );
         assert_eq!(out, "400 200\nSome(v7)\nNone\nFalse\nTrue\n");

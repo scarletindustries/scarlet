@@ -30,24 +30,24 @@ fn hex_digit(n Int) Int {
 }
 
 fn pct_decode_from(b Binary, at Int, acc Binary) Binary {
-	size = binary.byte_size(b)
+	size = binary::byte_size(b)
 	if at >= size {
 		acc
 	} else {
-		c = binary.byte_at(b, at)
+		c = binary::byte_at(b, at)
 		if c == 43 {
 			// '+' is a space in form encoding.
-			pct_decode_from(b, at + 1, binary.append(acc, <<32:8>>))
+			pct_decode_from(b, at + 1, binary::append(acc, <<32:8>>))
 		} else if c == 37 && at + 2 < size {
-			hi = hex_val(binary.byte_at(b, at + 1))
-			lo = hex_val(binary.byte_at(b, at + 2))
+			hi = hex_val(binary::byte_at(b, at + 1))
+			lo = hex_val(binary::byte_at(b, at + 2))
 			if hi < 0 || lo < 0 {
-				pct_decode_from(b, at + 1, binary.append(acc, <<c:8>>))
+				pct_decode_from(b, at + 1, binary::append(acc, <<c:8>>))
 			} else {
-				pct_decode_from(b, at + 3, binary.append(acc, <<{ hi * 16 + lo }:8>>))
+				pct_decode_from(b, at + 3, binary::append(acc, <<{ hi * 16 + lo }:8>>))
 			}
 		} else {
-			pct_decode_from(b, at + 1, binary.append(acc, <<c:8>>))
+			pct_decode_from(b, at + 1, binary::append(acc, <<c:8>>))
 		}
 	}
 }
@@ -60,14 +60,14 @@ pub fn pct_decode(b Binary) Binary {
 /** `s` escaped for any URL position: RFC 3986 unreserved bytes pass, the
  * rest become `%XX`. Total; non-UTF-8 input cannot arise from a String. */
 pub fn pct_encode(s String) String {
-	binary.to_string(pct_encode_from(binary.from_string(s), 0, <<>>)) or ''
+	binary::to_string(pct_encode_from(binary::from_string(s), 0, <<>>)) or ''
 }
 
 fn pct_encode_from(b Binary, at Int, acc Binary) Binary {
-	if at >= binary.byte_size(b) {
+	if at >= binary::byte_size(b) {
 		acc
 	} else {
-		c = binary.byte_at(b, at)
+		c = binary::byte_at(b, at)
 		unreserved = { c >= 48 && c <= 57 } ||
 			{ c >= 65 && c <= 90 } ||
 			{ c >= 97 && c <= 122 } ||
@@ -76,9 +76,9 @@ fn pct_encode_from(b Binary, at Int, acc Binary) Binary {
 			c == 95 ||
 			c == 126
 		next = if unreserved {
-			binary.append(acc, <<c:8>>)
+			binary::append(acc, <<c:8>>)
 		} else {
-			binary.append(acc, <<37:8, hex_digit(c / 16):8, hex_digit(c % 16):8>>)
+			binary::append(acc, <<37:8, hex_digit(c / 16):8, hex_digit(c % 16):8>>)
 		}
 		pct_encode_from(b, at + 1, next)
 	}
@@ -87,14 +87,14 @@ fn pct_encode_from(b Binary, at Int, acc Binary) Binary {
 /** `a=1&b=2` (query string or form body) as pairs, in order, decoded. A
  * segment with no `=` contributes nothing. */
 pub fn decode(b Binary) Array((String, String)) {
-	text = binary.to_string(b) or ''
-	array.fold(string_split(text), [], fn(acc, pair) match split_once(pair) {
+	text = binary::to_string(b) or ''
+	array::fold(string_split(text), [], fn(acc, pair) match split_once(pair) {
 		Some((k, v)) ->
 			[
 				..acc,
 				(
-					binary.to_string(pct_decode(binary.from_string(k))) or '',
-					binary.to_string(pct_decode(binary.from_string(v))) or '',
+					binary::to_string(pct_decode(binary::from_string(k))) or '',
+					binary::to_string(pct_decode(binary::from_string(v))) or '',
 				),
 			]
 		None -> acc
@@ -103,14 +103,14 @@ pub fn decode(b Binary) Array((String, String)) {
 
 // Byte splits on '&' and the first '=', so no need for scarlet/string.
 fn string_split(text String) Array(String) {
-	splits(binary.from_string(text), 0, 0, [])
+	splits(binary::from_string(text), 0, 0, [])
 }
 
 fn splits(b Binary, from Int, at Int, acc Array(String)) Array(String) {
-	size = binary.byte_size(b)
+	size = binary::byte_size(b)
 	if at >= size {
 		[..acc, segment(b, from, at)]
-	} else if binary.byte_at(b, at) == 38 {
+	} else if binary::byte_at(b, at) == 38 {
 		splits(b, at + 1, at + 1, [..acc, segment(b, from, at)])
 	} else {
 		splits(b, from, at + 1, acc)
@@ -118,22 +118,22 @@ fn splits(b Binary, from Int, at Int, acc Array(String)) Array(String) {
 }
 
 fn segment(b Binary, from Int, to Int) String {
-	match binary.slice_bytes(b, from, to - from) {
-		Ok(s) -> binary.to_string(s) or ''
+	match binary::slice_bytes(b, from, to - from) {
+		Ok(s) -> binary::to_string(s) or ''
 		Err(Nil) -> ''
 	}
 }
 
 fn split_once(pair String) Option((String, String)) {
-	b = binary.from_string(pair)
-	at <- option.then(binary.index_of(b, <<'='>>, 0))
-	Some((segment(b, 0, at), segment(b, at + 1, binary.byte_size(b))))
+	b = binary::from_string(pair)
+	at <- option::then(binary::index_of(b, <<'='>>, 0))
+	Some((segment(b, 0, at), segment(b, at + 1, binary::byte_size(b))))
 }
 
 /** The first value for `key`, in a `decode` result. */
 pub fn get(pairs Array((String, String)), key String) Option(String) {
-	option.map(
-		array.find(pairs, fn(p) {
+	option::map(
+		array::find(pairs, fn(p) {
 			(k, _) = p
 			k == key
 		}),

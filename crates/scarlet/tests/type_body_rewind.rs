@@ -20,10 +20,10 @@ fn cached_module_type_bodies_survive_rewinds() {
     let entry = |k: i64| {
         format!(
             "import ./lib\n\n\
-             fn get(b lib.Box(Int)) Int {{\n\tmatch b {{\n\t\tlib.Mk(v) -> v\n\t}}\n}}\n\
-             fn first(p lib.Pair(Int)) Int {{ p.0 }}\n\
-             fn peek(b lib.Box(Int)) Int {{ b.v }}\n\n\
-             pub fn main() {{\n\tprintln(get(lib.wrap({k})) + first((2, 3)) + peek(lib.wrap({k})))\n}}\n"
+             fn get(b lib::Box(Int)) Int {{\n\tmatch b {{\n\t\tlib::Mk(v) -> v\n\t}}\n}}\n\
+             fn first(p lib::Pair(Int)) Int {{ p.0 }}\n\
+             fn peek(b lib::Box(Int)) Int {{ b.v }}\n\n\
+             pub fn main() {{\n\tprintln(get(lib::wrap({k})) + first((2, 3)) + peek(lib::wrap({k})))\n}}\n"
         )
     };
 

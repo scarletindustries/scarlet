@@ -57,7 +57,7 @@ use crate::tivec::{Idx, TiVec};
 use crate::typed_ir::slots::{SlotError, slot_labeled};
 use crate::typed_ir::{
     self, CaptureIdx, Denotation, ElabCtx, FnTable, GlobalSlot, OrShape, PreludeTys, RTy,
-    ResolvedPool, TempTys, TypedExpr, TypedFn, TypedProgram, WalkStep, Zonker, pool_for,
+    ResolvedPool, TempTys, TypedExpr, TypedFn, TypedProgram, Zonker, pool_for,
 };
 use smallvec::SmallVec;
 
@@ -614,12 +614,9 @@ pub struct Compiler {
     /// reserves a slot on entry (so the order is pre-order) and the elaborator
     /// enters exactly the expressions the walk entered, in the same order. Both
     /// walks skip the same nodes — the `RangeExpression` of a slice, a
-    /// `module.member` qualifier, a simple callee — and both visit constructor
-    /// arguments in source order. The one skip that is a *decision* rather than
-    /// a syntactic fact — is `name.field` a module member? — is recorded as a
-    /// [`WalkStep::Qualified`] rather than re-derived, because the env it
-    /// depends on has moved on by the time a deferred body is elaborated.
-    /// `elaborate_fn` asserts the region is fully consumed, so a divergence
+    /// `module::member` access, a simple callee — and both visit constructor
+    /// arguments in source order. Every skip is a syntactic fact, so neither
+    /// walk has to tell the other what it decided. `elaborate_fn` asserts the region is fully consumed, so a divergence
     /// cannot pass silently.
     ///
     /// This is the region currently being filled. A function body opens its own
@@ -630,10 +627,10 @@ pub struct Compiler {
     /// module toplevel's own region, drained by whoever elaborates that
     /// toplevel. Cleared by `reset_to`, whose engine rewind would otherwise
     /// leave dangling `Ty` indices.
-    pub(super) walk_tys: Vec<WalkStep>,
+    pub(super) walk_tys: Vec<Ty>,
     /// The regions of the bodies enclosing the one being walked, innermost last.
     /// Parked, not indexed: only [`Compiler::walk_tys`] is ever written to.
-    pub(super) walk_tys_stack: Vec<Vec<WalkStep>>,
+    pub(super) walk_tys_stack: Vec<Vec<Ty>>,
     /// Function bodies whose typecheck walk has finished but whose Core
     /// pipeline (`lower`→`perceus`) is deferred until the enclosing
     /// declaration group has been generalized. See
@@ -732,14 +729,14 @@ fn pattern_unroll_depth(p: &ast::Pattern) -> usize {
     }
 }
 
-fn walk_region_is_filled(region: &[WalkStep]) -> bool {
-    !region.contains(&WalkStep::Ty(WALK_TY_PENDING))
+fn walk_region_is_filled(region: &[Ty]) -> bool {
+    !region.contains(&WALK_TY_PENDING)
 }
 
 /// A `close_walk_region` with no matching `open_walk_region` — a broken walk
 /// invariant. Aborts, in release as well as debug: restoring the wrong region
 /// would silently hand a body another body's types — the desync
-/// [`WalkStep`] exists to make impossible.
+/// walk regions exist to make impossible.
 #[allow(clippy::panic)]
 #[cold]
 #[inline(never)]
@@ -845,7 +842,7 @@ struct DeferredBody {
     /// This body's walk region: the type of every expression the check walk
     /// entered while walking `body`, in entry order, the root's first. The
     /// elaborator consumes it positionally. See [`Compiler::walk_tys`].
-    walk_tys: Vec<WalkStep>,
+    walk_tys: Vec<Ty>,
     /// The lambdas written directly inside this body, moved out of
     /// [`Compiler::frame_closures`] the moment the walk of this body finished.
     /// Swapped back in for its elaboration and dropped with it.
@@ -900,7 +897,7 @@ struct ParkedBody {
     param_binds: Vec<(StrId, Ty)>,
     body: ast::Expression,
     body_ty: Ty,
-    walk_tys: Vec<WalkStep>,
+    walk_tys: Vec<Ty>,
     closures: Vec<ClosureSite>,
 }
 
@@ -945,28 +942,17 @@ enum TopKind {
     Module,
 }
 
-/// Outcome of resolving a `module.member` property-access shape against the
-/// imported qualifiers. Three-state because the callee and value positions
-/// diverge on the failure modes: a non-qualified shape is recoverable (the
-/// caller falls through to its general path), whereas a failed member lookup
-/// has already been diagnosed and must short-circuit.
-enum QualifiedMember<'a> {
-    /// Not a `qualifier.member` shape (or the qualifier is not imported).
-    NotQualified,
-    /// A qualified shape whose member lookup failed; `lookup_module_member`
-    /// has already emitted the diagnostic.
-    LookupFailed,
-    Resolved {
-        module_key: ModuleKey,
-        member_name: &'a str,
-        member_span: Span,
-        scheme: Scheme,
-        /// Whether the member has a runtime binding (an entry-frame slot).
-        has_binding: bool,
-    },
+/// A `module::member` access whose member the check walk found.
+struct QualifiedMember<'a> {
+    module_key: ModuleKey,
+    member_name: &'a str,
+    member_span: Span,
+    scheme: Scheme,
+    /// Whether the member has a runtime binding (an entry-frame slot).
+    has_binding: bool,
 }
 
-/// A callee that resolved to a plain name or a qualified `module.member`:
+/// A callee that resolved to a plain name or a qualified `module::member`:
 /// the looked-up scheme plus everything `compile_call` needs to dispatch on
 /// the scheme's `ValueKind` and render diagnostics about the callee.
 struct ResolvedCallee<'a> {
@@ -1145,7 +1131,7 @@ impl Compiler {
     }
 }
 
-/// The head of a constructor pattern: `NotFound`, or `io.NotFound` reached
+/// The head of a constructor pattern: `NotFound`, or `io::NotFound` reached
 /// through a module qualifier. One thing, so it travels as one argument.
 struct CtorHead<'a> {
     qualifier: Option<&'a ast::Identifier>,
@@ -1896,25 +1882,6 @@ impl Compiler {
             .push(Diagnostic::hint(sp, DiagnosticCode::RelatedLocation, msg));
     }
 
-    /// Pass-0 heads-up when a top-level value declaration takes over the name
-    /// of an imported module qualifier: `name.member` in this module now
-    /// resolves through the declaration, not the module.
-    pub(super) fn warn_shadowed_qualifier(&mut self, ident: &ast::Identifier) {
-        let Some(key) = self.imported_qualifiers.get(&ident.name) else {
-            return;
-        };
-        let module = self.module_name(&key.clone());
-        self.engine.diagnostics.push(Diagnostic::hint(
-            ident.span,
-            DiagnosticCode::ShadowedImport,
-            format!(
-                "'{}' shadows the imported module '{module}': '{}.member' now refers \
-                 to this declaration, not the module",
-                ident.name, ident.name
-            ),
-        ));
-    }
-
     fn unused_binding(&mut self, name: &str, sp: Span) {
         if self.unused_bindings == UnusedBindings::Ignore {
             return;
@@ -2169,7 +2136,7 @@ impl Compiler {
                 None => ReferenceKind::Unqualified,
             };
             self.record_type_use(&path, &name, hit.span, kind);
-            // A `module.Type` occurrence names the import through its
+            // A `module::Type` occurrence names the import through its
             // qualifier, exactly like a `module.value` use: record the
             // `Qualifier` occurrence so the import counts as used and the
             // qualifier resolves under hover / goto-def.
@@ -2519,10 +2486,10 @@ impl Compiler {
             );
         }
 
-        // Every public type of the module is reachable as `qualifier.Name` in
-        // type position. Register each under the mangled `qualifier.Name` key
+        // Every public type of the module is reachable as `qualifier::Name` in
+        // type position. Register each under the mangled `qualifier::Name` key
         // the hydrator probes for a qualified reference; type names cannot
-        // contain '.', so these keys never collide with local declarations.
+        // contain ':', so these keys never collide with local declarations.
         let qualified_types: Vec<(String, _)> = self
             .module_table
             .get(&key)
@@ -2530,7 +2497,7 @@ impl Compiler {
                 iface
                     .types
                     .iter()
-                    .map(|(n, et)| (format!("{qualifier}.{n}"), et.info))
+                    .map(|(n, et)| (format!("{qualifier}::{n}"), et.info))
                     .collect()
             })
             .unwrap_or_default();
@@ -3068,7 +3035,7 @@ impl Compiler {
     /// Claim this expression's position in the current region before its
     /// children claim theirs, so the region is a pre-order listing.
     fn reserve_walk_ty(&mut self) -> usize {
-        self.walk_tys.push(WalkStep::Ty(WALK_TY_PENDING));
+        self.walk_tys.push(WALK_TY_PENDING);
         self.walk_tys.len() - 1
     }
 
@@ -3080,14 +3047,7 @@ impl Compiler {
     /// region desync this table exists to make impossible, and swallowing the
     /// write would let a `WALK_TY_PENDING` reach the elaborator.
     fn fill_walk_ty(&mut self, slot: usize, ty: Ty) {
-        self.walk_tys[slot] = WalkStep::Ty(ty);
-    }
-
-    /// Record the check walk's `module.member` verdict for the `left.right`
-    /// shape it is looking at. Consumed by `Elab::qualified`, which must not
-    /// re-derive it — see [`WalkStep::Qualified`].
-    fn record_walk_qualified(&mut self, qualified: bool) {
-        self.walk_tys.push(WalkStep::Qualified(qualified));
+        self.walk_tys[slot] = ty;
     }
 
     /// Park the enclosing body's region and start a fresh one for the body about
@@ -3099,7 +3059,7 @@ impl Compiler {
 
     /// Close the region [`Self::open_walk_region`] opened, returning it and
     /// restoring the enclosing body's.
-    fn close_walk_region(&mut self) -> Vec<WalkStep> {
+    fn close_walk_region(&mut self) -> Vec<Ty> {
         let Some(outer) = self.walk_tys_stack.pop() else {
             walk_region_underflow();
         };
@@ -3114,7 +3074,7 @@ impl Compiler {
     /// Take the module toplevel's region: everything the walk typed outside a
     /// function body. Every module's walk fills it and exactly one elaboration
     /// drains it, so it is empty again for the next.
-    fn take_toplevel_walk_tys(&mut self) -> Vec<WalkStep> {
+    fn take_toplevel_walk_tys(&mut self) -> Vec<Ty> {
         debug_assert!(
             self.walk_tys_stack.is_empty(),
             "a function body's walk region leaked into the module toplevel's"
@@ -3270,6 +3230,7 @@ impl Compiler {
             }
             ast::Expression::FunctionCallExpression(fc) => self.compile_call(fc),
             ast::Expression::PropertyAccessExpression(pa) => self.compile_property_access(pa),
+            ast::Expression::ModuleAccessExpression(ma) => self.compile_module_access(ma),
             ast::Expression::OrExpression(oe) => self.compile_or(oe),
             ast::Expression::PipeExpression(p) => {
                 // Desugared away before type checking (`compile_with`/
@@ -3364,7 +3325,7 @@ impl Compiler {
     }
 
     /// How to reach a constructor named `name` that is not in scope: through
-    /// each imported module that has one, as `alias.Name`.
+    /// each imported module that has one, as `alias::Name`.
     fn qualified_spellings(&self, name: &str) -> Vec<String> {
         let mut out: Vec<String> = self
             .imported_qualifiers
@@ -3375,7 +3336,7 @@ impl Compiler {
                     .and_then(|m| m.values.get(name))
                     .is_some_and(|v| matches!(v.scheme.kind, ValueKind::Constructor { .. }))
             })
-            .map(|(alias, _)| format!("`{alias}.{name}`"))
+            .map(|(alias, _)| format!("`{alias}::{name}`"))
             .collect();
         out.sort();
         out
@@ -3398,7 +3359,7 @@ impl Compiler {
                         .cloned()
                 });
                 let example = match example {
-                    Some(member) => format!(", like `{name}.{member}`"),
+                    Some(member) => format!(", like `{name}::{member}`"),
                     None => String::new(),
                 };
                 self.error(
@@ -3679,8 +3640,13 @@ impl Compiler {
         }
 
         // Arbitrary callee expression: compile it first so we have its type
-        // for argument hints.
-        let callee_ty = self.compile_expr(&expr.callee);
+        // for argument hints. A `module::member` callee only gets here when
+        // `resolve_simple_callee` has already reported it, so check just the
+        // arguments rather than report it twice.
+        let callee_ty = match expr.callee.as_ref() {
+            ast::Expression::ModuleAccessExpression(_) => self.engine.fresh_var(),
+            callee => self.compile_expr(callee),
+        };
         self.compile_call_args(callee_ty, None, &expr.arguments, expr.span)
     }
 
@@ -3857,69 +3823,58 @@ impl Compiler {
         }
     }
 
-    /// Resolve a `module.member` property-access shape against the imported
-    /// qualifiers: look the member up, note whether it has a runtime binding,
-    /// and record the `Qualified` value-use. Shared by the callee position
-    /// (`resolve_simple_callee`) and the value position
-    /// (`compile_property_access`), which diverge only on how they treat the
-    /// two failure modes — see [`QualifiedMember`].
+    /// Resolve `module::member`: look the member up, note whether it has a
+    /// runtime binding, and record the `Qualified` value-use. Shared by the
+    /// callee position (`resolve_simple_callee`) and the value position
+    /// (`compile_module_access`). `None` means the access has already been
+    /// diagnosed.
     ///
-    /// The verdict is recorded into the walk region on the way out: whether the
-    /// qualifier was entered is the one traversal decision the elaborator cannot
-    /// re-derive, because it turns on `self.env` as it stands *here* and a
-    /// deferred body is elaborated long after. Both call sites go through this
-    /// wrapper, and `Elab::qualified` consumes exactly one verdict per call, so
-    /// the two walks cannot disagree.
-    fn resolve_qualified_member<'a>(
+    /// The module name is looked up among the imports only. A value binding of
+    /// the same name cannot shadow it, because `.` and `::` never overlap.
+    fn resolve_module_access<'a>(
         &mut self,
-        pa: &'a ast::PropertyAccessExpression,
-    ) -> QualifiedMember<'a> {
-        let out = self.resolve_qualified_member_inner(pa);
-        // `LookupFailed` also skipped the qualifier — but it emitted a
-        // diagnostic, so no `CleanModule` proof and no elaboration.
-        self.record_walk_qualified(!matches!(out, QualifiedMember::NotQualified));
-        out
-    }
-
-    fn resolve_qualified_member_inner<'a>(
-        &mut self,
-        pa: &'a ast::PropertyAccessExpression,
-    ) -> QualifiedMember<'a> {
-        let ast::Expression::Identifier(left) = pa.left.as_ref() else {
-            return QualifiedMember::NotQualified;
+        ma: &'a ast::ModuleAccessExpression,
+    ) -> Option<QualifiedMember<'a>> {
+        let Some(module_key) = self.imported_qualifiers.get(&ma.module.name).cloned() else {
+            self.unknown_module(&ma.module);
+            return None;
         };
-        // An import binds its qualifier at module scope; any value binding of
-        // the same name — a top-level decl, a parameter, a `let`, a match
-        // binder — shadows it. `env` holds exactly those bindings (the
-        // qualifier itself never enters it), so a hit here means `left` names a
-        // value and `left.member` is an ordinary field access, not a qualified
-        // module member. Checked before the `imported_qualifiers` probe so the
-        // shadowed case records no `Qualified`/`Qualifier` occurrence either.
-        if self.env.lookup(&left.name).is_some() {
-            return QualifiedMember::NotQualified;
-        }
-        let Some(module_key) = self.imported_qualifiers.get(&left.name).cloned() else {
-            return QualifiedMember::NotQualified;
-        };
-        let ast::PropertyKey::Field(member) = &pa.right else {
-            return QualifiedMember::NotQualified;
-        };
-        let Some((scheme, slot)) =
-            self.lookup_module_member(&module_key, &member.name, member.span)
-        else {
-            return QualifiedMember::LookupFailed;
-        };
+        let member = &ma.member;
+        let (scheme, slot) = self.lookup_module_member(&module_key, &member.name, member.span)?;
         // The member is not in unqualified scope, so resolve the occurrence
         // through the imported scheme's canonical `def`.
         self.record_value_use(scheme.def, member.span, ReferenceKind::Qualified);
-        self.record_qualifier_use(left);
-        QualifiedMember::Resolved {
+        self.record_qualifier_use(&ma.module);
+        Some(QualifiedMember {
             module_key,
             member_name: &member.name,
             member_span: member.span,
             scheme,
             has_binding: slot.is_some(),
-        }
+        })
+    }
+
+    /// `name::member` where `name` is not an imported module. When a stdlib
+    /// module goes by that name, say which import brings it in.
+    fn unknown_module(&mut self, name: &ast::Identifier) {
+        let modules: Vec<String> = crate::module::stdlib_modules()
+            .into_iter()
+            .filter(|path| path.len() > 1 && path.last() == Some(&name.name))
+            .map(|path| format!("`import {}`", path.join("/")))
+            .collect();
+        let msg = if modules.is_empty() {
+            format!(
+                "Unknown module '{}'. Import it before reaching into it with `::`",
+                name.name
+            )
+        } else {
+            format!(
+                "Unknown module '{}': it is the name of a stdlib module that is not imported. Add {}",
+                name.name,
+                modules.join(" or ")
+            )
+        };
+        self.module_error(msg, name.span);
     }
 
     /// Best-effort resolution of a callee expression that is a plain name (or
@@ -3945,26 +3900,17 @@ impl Compiler {
                     qualifier: None,
                 })
             }
-            // Qualified callee `module.member()`. Both failure modes mean "no
-            // simple callee" (a failed lookup has already been diagnosed by
-            // `resolve_qualified_member`).
-            ast::Expression::PropertyAccessExpression(pa) => {
-                match self.resolve_qualified_member(pa) {
-                    QualifiedMember::NotQualified | QualifiedMember::LookupFailed => None,
-                    QualifiedMember::Resolved {
-                        module_key,
-                        member_name,
-                        member_span,
-                        scheme,
-                        has_binding,
-                    } => Some(ResolvedCallee {
-                        name: member_name,
-                        span: member_span,
-                        scheme,
-                        has_binding,
-                        qualifier: Some(module_key),
-                    }),
-                }
+            // Qualified callee `module::member()`. A failed lookup has already
+            // been diagnosed, so it is "no simple callee" too.
+            ast::Expression::ModuleAccessExpression(ma) => {
+                let m = self.resolve_module_access(ma)?;
+                Some(ResolvedCallee {
+                    name: m.member_name,
+                    span: m.member_span,
+                    scheme: m.scheme,
+                    has_binding: m.has_binding,
+                    qualifier: Some(m.module_key),
+                })
             }
             _ => None,
         }
@@ -4071,7 +4017,7 @@ impl Compiler {
             return result_ty;
         }
 
-        let mut regions: Vec<Vec<WalkStep>> = vec![Vec::new(); args.len()];
+        let mut regions: Vec<Vec<Ty>> = vec![Vec::new(); args.len()];
 
         // Record-update: the base is unified with the constructor's result
         // type; the per-field projection is Core's job.
@@ -4154,72 +4100,43 @@ impl Compiler {
     // Property access
     // ========================================================================
 
-    fn compile_property_access(&mut self, expr: &ast::PropertyAccessExpression) -> Ty {
-        // `module.member` qualified access (no call — calls are handled in
-        // compile_call via resolve_simple_callee).
-        match self.resolve_qualified_member(expr) {
-            QualifiedMember::NotQualified => {}
-            QualifiedMember::LookupFailed => return self.engine.fresh_var(),
-            QualifiedMember::Resolved {
-                module_key,
-                member_name,
-                member_span,
-                scheme,
-                has_binding,
-            } => {
-                let ty = self.engine.instantiate(&scheme, &self.rigid_ids);
-                self.record(member_name, ty, member_span, None);
-                // Rendered lazily: the qualifier only reaches a diagnostic on
-                // the no-runtime-binding path, so the common (bound) case
-                // skips the display-name lookup entirely.
-                let module = (!has_binding).then(|| self.module_name(&module_key));
-                self.check_named_value(
-                    member_name,
-                    module.as_deref(),
-                    member_span,
-                    scheme.kind,
-                    has_binding,
-                );
-                return ty;
-            }
-        }
-
-        // A `name.field` shape whose `name` is an imported qualifier can only
-        // fall through to here shadowed by a value binding (an unshadowed
-        // qualifier resolves or fails above). Remember the name so a failed
-        // field lookup can say what actually happened instead of leaving the
-        // user staring at the shadowing value's type.
-        let shadowing_qualifier = match (expr.left.as_ref(), &expr.right) {
-            (ast::Expression::Identifier(id), ast::PropertyKey::Field(_))
-                if self.imported_qualifiers.contains_key(&id.name) =>
-            {
-                Some(id.name.clone())
-            }
-            _ => None,
+    /// `module::member` in value position. Calls are handled in
+    /// `compile_call`, through `resolve_simple_callee`.
+    fn compile_module_access(&mut self, expr: &ast::ModuleAccessExpression) -> Ty {
+        let Some(m) = self.resolve_module_access(expr) else {
+            return self.engine.fresh_var();
         };
+        let ty = self.engine.instantiate(&m.scheme, &self.rigid_ids);
+        self.record(m.member_name, ty, m.member_span, None);
+        // Rendered lazily: the qualifier only reaches a diagnostic on the
+        // no-runtime-binding path, so the common (bound) case skips the
+        // display-name lookup entirely.
+        let module = (!m.has_binding).then(|| self.module_name(&m.module_key));
+        self.check_named_value(
+            m.member_name,
+            module.as_deref(),
+            m.member_span,
+            m.scheme.kind,
+            m.has_binding,
+        );
+        ty
+    }
 
-        // `int.max(1, 2)` with no `import scarlet/int`: an unknown name that is
-        // a stdlib module's is that module, not yet imported. Say that, once,
-        // rather than an unknown identifier and then a field of an unknown type.
-        if let ast::Expression::Identifier(id) = expr.left.as_ref()
+    fn compile_property_access(&mut self, expr: &ast::PropertyAccessExpression) -> Ty {
+        // `c.f` where `c` is an imported module and not a value: point at `::`.
+        if let (ast::Expression::Identifier(id), ast::PropertyKey::Field(field)) =
+            (expr.left.as_ref(), &expr.right)
             && self.env.lookup(&id.name).is_none()
+            && self.imported_qualifiers.contains_key(&id.name)
         {
-            let modules: Vec<String> = crate::module::stdlib_modules()
-                .into_iter()
-                .filter(|path| path.len() > 1 && path.last() == Some(&id.name))
-                .map(|path| format!("`import {}`", path.join("/")))
-                .collect();
-            if !modules.is_empty() {
-                self.error(
-                    format!(
-                        "Unknown identifier '{}': it is the name of a stdlib module that is not imported. Add {}",
-                        id.name,
-                        modules.join(" or ")
-                    ),
-                    id.span,
-                );
-                return self.engine.fresh_var();
-            }
+            self.error(
+                format!(
+                    "'{0}' is a module, not a value. Reach its members with `::`, like `{0}::{1}`",
+                    id.name, field.name
+                ),
+                id.span,
+            );
+            return self.engine.fresh_var();
         }
 
         let left_ty = self.compile_expr(&expr.left);
@@ -4262,21 +4179,7 @@ impl Compiler {
             }
             // `value.field` — labelled field shared by every variant.
             ast::PropertyKey::Field(field) => {
-                let before = self.engine.diagnostics.len();
-                let ty = self.compile_field_access(left_ty, &field.name, field.span);
-                if let Some(name) = shadowing_qualifier
-                    && self.engine.diagnostics.len() > before
-                {
-                    let module = self.module_name(&self.imported_qualifiers[&name]);
-                    if let Some(d) = self.engine.diagnostics.last_mut() {
-                        d.message.push_str(&format!(
-                            "; '{name}' here is a local binding that shadows \
-                             the imported module '{module}'. Rename one of them \
-                             (e.g. 'import {module} as ...') to reach the module."
-                        ));
-                    }
-                }
-                ty
+                self.compile_field_access(left_ty, &field.name, field.span)
             }
         }
     }
@@ -4741,7 +4644,7 @@ impl Compiler {
         param_binds: &[(StrId, Ty)],
         body: &ast::Expression,
         body_ty: Ty,
-        walk_tys: &[WalkStep],
+        walk_tys: &[Ty],
         func_idx: FuncIdx,
     ) {
         use crate::core_ir::perceus;

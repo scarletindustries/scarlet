@@ -271,7 +271,6 @@ impl Compiler {
                             ast::Declaration::Function(fd) => {
                                 self.validate_attributes(&fd.attributes, in_stdlib, AttrTarget::Fn);
                                 if !check_duplicate(self, &mut seen_values, &fd.identifier) {
-                                    self.warn_shadowed_qualifier(&fd.identifier);
                                     // `@vm` fns carry no Scarlet body: siphon them
                                     // off so every surviving `Decl::Fn` holds
                                     // a real expression body.
@@ -298,7 +297,6 @@ impl Compiler {
                             }
                             ast::Declaration::Const(cb) => {
                                 if !check_duplicate(self, &mut seen_values, &cb.identifier) {
-                                    self.warn_shadowed_qualifier(&cb.identifier);
                                     decls.push(Decl::Const {
                                         cb,
                                         is_pub: is_public,
@@ -1099,7 +1097,7 @@ fn check_reserved(c: &mut Compiler, id: &ast::Identifier, in_prelude: bool) {
 fn collect_type_ast_deps<'a>(t: &'a ast::TypeIdentifier, out: &mut Vec<&'a str>) {
     match &t.kind {
         ast::TypeKind::NamedType(nt) => {
-            // A qualified `module.Type` lives in another module, so it can
+            // A qualified `module::Type` lives in another module, so it can
             // never be a dependency edge onto a local declaration; pushing
             // the bare member name would alias any same-named local type.
             if nt.qualifier.is_none() {
@@ -1219,7 +1217,11 @@ impl<'a, 'g> RefWalker<'a, 'g> {
         match e {
             E::Identifier(id) => self.referenced(&id.name),
 
-            E::NumberLiteral(_) | E::StringLiteral(_) | E::ErrorNode(_) => {}
+            // A module member is not a local name.
+            E::NumberLiteral(_)
+            | E::StringLiteral(_)
+            | E::ErrorNode(_)
+            | E::ModuleAccessExpression(_) => {}
 
             E::BinaryLiteral(bl) => {
                 for seg in &bl.segments {

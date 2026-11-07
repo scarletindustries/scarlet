@@ -66,50 +66,53 @@ pub fn default_port(s Scheme) Int {
 // The `Host` value: the host, bracketed if IPv6, with `:port` only when it is
 // not the default (RFC 9110 §7.2).
 pub fn authority(u Url) Binary {
-	host = binary.from_string(u.host)
-	bracketed = match binary.index_of(host, COLON, 0) {
-		Some(_) -> binary.append(binary.append(LBRACKET, host), RBRACKET)
+	host = binary::from_string(u.host)
+	bracketed = match binary::index_of(host, COLON, 0) {
+		Some(_) -> binary::append(binary::append(LBRACKET, host), RBRACKET)
 		None -> host
 	}
 	if u.port == default_port(u.scheme) {
 		bracketed
 	} else {
-		binary.append(binary.append(bracketed, COLON), binary.from_int_ascii(u.port, binary.Dec))
+		binary::append(
+			binary::append(bracketed, COLON),
+			binary::from_int_ascii(u.port, binary::Dec),
+		)
 	}
 }
 
 // Parse an absolute `http://` or `https://` URL.
 pub fn parse(text String) Result(Url, UrlError) {
-	b = binary.from_string(text)
-	sep <- result.then(scheme_sep(b))
-	(scheme_text, _) = binary.split_at_bytes(b, sep)
-	scheme <- result.then(scheme_of(scheme_text))
+	b = binary::from_string(text)
+	sep <- result::then(scheme_sep(b))
+	(scheme_text, _) = binary::split_at_bytes(b, sep)
+	scheme <- result::then(scheme_of(scheme_text))
 	authority_start = sep + 3
-	size = binary.byte_size(b)
+	size = binary::byte_size(b)
 	authority_end = first_of(b, authority_start, size)
 	// Cannot fail: `authority_start <= authority_end <= size`.
-	authority = match binary.slice_bytes(b, authority_start, authority_end - authority_start) {
+	authority = match binary::slice_bytes(b, authority_start, authority_end - authority_start) {
 		Ok(a) -> a
 		Err(Nil) -> EMPTY
 	}
-	pair <- result.then(split_host_port(authority))
-	port <- result.then(port_of(pair.port_text, scheme))
-	host <- result.then(host_of(pair.host))
+	pair <- result::then(split_host_port(authority))
+	port <- result::then(port_of(pair.port_text, scheme))
+	host <- result::then(host_of(pair.host))
 	Ok(Url(scheme: scheme, host: host, port: port, target: target_of(b, authority_end, size)))
 }
 
 // A scheme cannot contain a slash, so the first `://` is always the scheme's.
 fn scheme_sep(b Binary) Result(Int, UrlError) {
-	match binary.index_of(b, SCHEME_SEP, 0) {
+	match binary::index_of(b, SCHEME_SEP, 0) {
 		Some(i) -> Ok(i)
 		None -> Err(MissingScheme)
 	}
 }
 
 fn scheme_of(s Binary) Result(Scheme, UrlError) {
-	if binary.eq_ignore_ascii_case(s, HTTPS) {
+	if binary::eq_ignore_ascii_case(s, HTTPS) {
 		Ok(Https)
-	} else if binary.eq_ignore_ascii_case(s, HTTP) {
+	} else if binary::eq_ignore_ascii_case(s, HTTP) {
 		Ok(Http)
 	} else {
 		Err(UnsupportedScheme(s))
@@ -119,14 +122,14 @@ fn scheme_of(s Binary) Result(Scheme, UrlError) {
 // Where the authority ends: the first `/`, `?` or `#`, or `size`. The earliest,
 // so `http://h?q=1` does not read `?q=1` as part of the host.
 fn first_of(b Binary, from Int, size Int) Int {
-	int.min(
+	int::min(
 		at_or(b, SLASH, from, size),
-		int.min(at_or(b, QUESTION, from, size), at_or(b, HASH, from, size)),
+		int::min(at_or(b, QUESTION, from, size), at_or(b, HASH, from, size)),
 	)
 }
 
 fn at_or(b Binary, needle Binary, from Int, fallback Int) Int {
-	match binary.index_of(b, needle, from) {
+	match binary::index_of(b, needle, from) {
 		Some(i) -> i
 		None -> fallback
 	}
@@ -139,12 +142,12 @@ type HostPort {
 }
 
 fn split_host_port(authority Binary) Result(HostPort, UrlError) {
-	match binary.index_of(authority, AT, 0) {
+	match binary::index_of(authority, AT, 0) {
 		Some(_) -> Err(UserInfoUnsupported)
-		None -> if binary.byte_at(authority, 0) == 91 {
+		None -> if binary::byte_at(authority, 0) == 91 {
 			split_bracketed(authority)
 		} else {
-			Ok(split_at_colon(authority, binary.index_of(authority, COLON, 0)))
+			Ok(split_at_colon(authority, binary::index_of(authority, COLON, 0)))
 		}
 	}
 }
@@ -152,17 +155,17 @@ fn split_host_port(authority Binary) Result(HostPort, UrlError) {
 // `[v6]` or `[v6]:port`. The port colon is the one AFTER the bracket: an IPv6
 // literal is full of colons, so searching from 0 would split the address.
 fn split_bracketed(authority Binary) Result(HostPort, UrlError) {
-	match binary.index_of(authority, RBRACKET, 0) {
+	match binary::index_of(authority, RBRACKET, 0) {
 		None -> Err(UnclosedIpv6)
 		Some(close) -> {
-			(up_to_close, _) = binary.split_at_bytes(authority, close)
-			(_, inside) = binary.split_at_bytes(up_to_close, 1)
-			rest = binary.drop_bytes(authority, close + 1)
+			(up_to_close, _) = binary::split_at_bytes(authority, close)
+			(_, inside) = binary::split_at_bytes(up_to_close, 1)
+			rest = binary::drop_bytes(authority, close + 1)
 			// After `]` comes nothing or `:port`. Anything else is a bad port, not an
 			// empty host.
-			if binary.byte_size(rest) == 0 {
+			if binary::byte_size(rest) == 0 {
 				Ok(HostPort(host: inside, port_text: EMPTY))
-			} else if binary.byte_at(rest, 0) == 58 {
+			} else if binary::byte_at(rest, 0) == 58 {
 				Ok(HostPort(host: inside, port_text: rest))
 			} else {
 				Err(BadPort(rest))
@@ -175,7 +178,7 @@ fn split_at_colon(authority Binary, colon Option(Int)) HostPort {
 	match colon {
 		None -> HostPort(host: authority, port_text: EMPTY)
 		Some(i) -> {
-			(host, port_text) = binary.split_at_bytes(authority, i)
+			(host, port_text) = binary::split_at_bytes(authority, i)
 			HostPort(host: host, port_text: port_text)
 		}
 	}
@@ -184,15 +187,15 @@ fn split_at_colon(authority Binary, colon Option(Int)) HostPort {
 // `port_text` keeps its colon, so no port and an empty one (`http://h:/`, a
 // BadPort) are told apart.
 fn port_of(port_text Binary, scheme Scheme) Result(Int, UrlError) {
-	if binary.byte_size(port_text) == 0 {
+	if binary::byte_size(port_text) == 0 {
 		Ok(default_port(scheme))
 	} else {
-		digits = binary.drop_bytes(port_text, 1)
+		digits = binary::drop_bytes(port_text, 1)
 		// Digits only: `parse_int` might accept a sign.
-		if binary.byte_size(digits) == 0 || !all_digits(digits, 0, binary.byte_size(digits)) {
+		if binary::byte_size(digits) == 0 || !all_digits(digits, 0, binary::byte_size(digits)) {
 			Err(BadPort(port_text))
 		} else {
-			match binary.parse_int(digits, binary.Dec) {
+			match binary::parse_int(digits, binary::Dec) {
 				Ok(n) -> if n >= 1 && n <= 65535 {
 					Ok(n)
 				} else {
@@ -205,7 +208,7 @@ fn port_of(port_text Binary, scheme Scheme) Result(Int, UrlError) {
 }
 
 fn all_digits(b Binary, i Int, len Int) Bool {
-	i >= len || is_digit(binary.byte_at(b, i)) && all_digits(b, i + 1, len)
+	i >= len || is_digit(binary::byte_at(b, i)) && all_digits(b, i + 1, len)
 }
 
 fn is_digit(byte Int) Bool {
@@ -213,10 +216,10 @@ fn is_digit(byte Int) Bool {
 }
 
 fn host_of(host Binary) Result(String, UrlError) {
-	if binary.byte_size(host) == 0 {
+	if binary::byte_size(host) == 0 {
 		Err(EmptyHost)
 	} else {
-		match binary.to_string(host) {
+		match binary::to_string(host) {
 			Ok(s) -> Ok(s)
 			// A host that is not UTF-8 is not a name anything can resolve or
 			// verify a certificate against.
@@ -230,14 +233,14 @@ fn host_of(host Binary) Result(String, UrlError) {
 fn target_of(b Binary, from Int, size Int) Binary {
 	end = at_or(b, HASH, from, size)
 	// Cannot fail: `from <= end <= size`.
-	raw = match binary.slice_bytes(b, from, end - from) {
+	raw = match binary::slice_bytes(b, from, end - from) {
 		Ok(v) -> v
 		Err(Nil) -> EMPTY
 	}
-	if binary.byte_size(raw) == 0 {
+	if binary::byte_size(raw) == 0 {
 		ROOT
-	} else if binary.byte_at(raw, 0) == 63 {
-		binary.append(ROOT, raw)
+	} else if binary::byte_at(raw, 0) == 63 {
+		binary::append(ROOT, raw)
 	} else {
 		raw
 	}

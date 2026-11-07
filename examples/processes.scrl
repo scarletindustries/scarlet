@@ -7,35 +7,35 @@ import scarlet/time
 
 // A spawned closure returns Nil: a result has to be printed, sent, or stored.
 fn worker(id Int, work_ms Int) Nil {
-	process.sleep(work_ms)
+	process::sleep(work_ms)
 	println('worker ${id} finished after ${work_ms}ms')
 }
 
-// time.monotonic only moves forward, so it survives a wall-clock adjustment.
+// time::monotonic only moves forward, so it survives a wall-clock adjustment.
 fn timed(label String) Nil {
-	start = time.monotonic()
-	process.sleep(5)
-	elapsed = time.since_ms(time.monotonic(), start)
+	start = time::monotonic()
+	process::sleep(5)
+	elapsed = time::since_ms(time::monotonic(), start)
 	println('${label}: slept at least 5ms: ${elapsed >= 5}')
 }
 
 pub fn main() {
 	println('spawning four workers')
 
-	_ = process.spawn(fn() worker(1, 40))
-	_ = process.spawn(fn() worker(2, 10))
-	_ = process.spawn(fn() worker(3, 30))
-	_ = process.spawn(fn() worker(4, 20))
+	_ = process::spawn(fn() worker(1, 40))
+	_ = process::spawn(fn() worker(2, 10))
+	_ = process::spawn(fn() worker(3, 30))
+	_ = process::spawn(fn() worker(4, 20))
 
 	// A Pid identifies a process but is not a mailbox; sending goes through a
 	// Subject (tests/programs/messages.scrl). Every process here is linked to
 	// this one, so any of their crashes would end this process too;
-	// process.spawn_unlinked + process.monitor decouples that (monitors.scrl).
-	child = process.spawn(fn() println('child sees itself as ${process.self()}'))
-	println('parent spawned ${child}; the parent itself is ${process.self()}')
-	println('a pid equals only itself: ${child == child} ${child == process.self()}')
+	// process::spawn_unlinked + process::monitor decouples that (monitors.scrl).
+	child = process::spawn(fn() println('child sees itself as ${process::self()}'))
+	println('parent spawned ${child}; the parent itself is ${process::self()}')
+	println('a pid equals only itself: ${child == child} ${child == process::self()}')
 
-	_ = process.spawn(fn() timed('sleeper'))
+	_ = process::spawn(fn() timed('sleeper'))
 
 	println('main process done, the others keep the program up')
 }

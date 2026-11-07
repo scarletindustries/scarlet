@@ -26,9 +26,9 @@ fn assert_import_rolled_back(tag: &str, entry1: &str, entry2: &str, expected_dia
 fn removed_import_stops_its_types_resolving() {
     assert_import_rolled_back(
         "importrollback",
-        "import ./lib\npub fn paint(_c lib.Color) Int { 1 }\n",
-        "pub fn paint(_c lib.Color) Int { 1 }\n",
-        "Unknown type 'lib.Color'",
+        "import ./lib\npub fn paint(_c lib::Color) Int { 1 }\n",
+        "pub fn paint(_c lib::Color) Int { 1 }\n",
+        "Unknown type 'lib::Color'",
     );
 }
 
@@ -36,9 +36,9 @@ fn removed_import_stops_its_types_resolving() {
 fn renamed_import_stops_its_old_types_resolving() {
     assert_import_rolled_back(
         "importrollbackalias",
-        "import ./lib as hue\npub fn paint(_c hue.Color) Int { 1 }\n",
-        "import ./lib as tint\npub fn paint(_c hue.Color) Int { 1 }\n",
-        "Unknown type 'hue.Color'",
+        "import ./lib as hue\npub fn paint(_c hue::Color) Int { 1 }\n",
+        "import ./lib as tint\npub fn paint(_c hue::Color) Int { 1 }\n",
+        "Unknown type 'hue::Color'",
     );
 }
 
@@ -49,7 +49,7 @@ fn kept_import_keeps_its_types_resolving_across_checks() {
     let p = Project::new("importrollbackkept");
     p.write("lib.scrl", "pub type Color { Color }\n");
 
-    let entry = "import ./lib\npub fn paint(_c lib.Color) Int { 1 }\n";
+    let entry = "import ./lib\npub fn paint(_c lib::Color) Int { 1 }\n";
     let mut s = checked_with(&p, entry);
     for i in 1..3 {
         let r = recheck(&mut s, &p, entry);

@@ -477,9 +477,9 @@ mod qualified_ctor_pattern_occurrences {
     #[test]
     fn qualified_ctor_pattern_records_qualified_plus_qualifier() {
         let src = "import scarlet/io\n\
-            x = match io.read_text(\"nope\") {\n\
+            x = match io::read_text(\"nope\") {\n\
             \x20 Ok(s) -> s\n\
-            \x20 Err(io.NotFound(p)) -> p\n\
+            \x20 Err(io::NotFound(p)) -> p\n\
             \x20 Err(_) -> \"other\"\n\
             }\n\
             println(x)\n";
@@ -768,8 +768,8 @@ mod wire_surface {
     fn a_wire_call_reaches_the_core_ir_as_its_intrinsic() {
         let r = super::compile_script(
             "import scarlet/wire\n\
-             b = wire.encode(1)\n\
-             match wire.decode(b) {\n\
+             b = wire::encode(1)\n\
+             match wire::decode(b) {\n\
              \x20 Ok(n) -> n\n\
              \x20 Err(_) -> 0\n\
              }\n",
@@ -884,7 +884,7 @@ mod function_modules {
         let src = "import scarlet/array\n\
                    fn map(x Int) Int { x + 1 }\n\
                    pub fn main() {\n\
-                   \tprintln(array.map([map(1)], map))\n\
+                   \tprintln(array::map([map(1)], map))\n\
                    }\n";
         let result = compile(&ast::Expression::BlockExpression(parse_ok(src)), None);
         let program = result.into_runnable().expect("the snippet compiles");

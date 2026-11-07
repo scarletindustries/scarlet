@@ -180,23 +180,6 @@ pub trait ElabCtx: PreludeTys {
     fn ty_nil(&mut self) -> Ty;
 }
 
-/// One step of the check walk, recorded in entry order and replayed
-/// positionally by the elaborator.
-///
-/// The two walks traverse the same AST and the elaborator is only correct if it
-/// enters exactly the nodes the walk entered. Both recorded facts are things it
-/// must not re-derive: the type of a node, and whether a `name.field` shape is a
-/// qualified module member (whose qualifier neither walk enters) or a field
-/// access (whose receiver both do).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WalkStep {
-    /// The type the walk inferred for the expression it entered here.
-    Ty(Ty),
-    /// The walk's verdict on a `left.right` shape: `true` when it resolved to a
-    /// module member and skipped `left`, `false` when it is a field access.
-    Qualified(bool),
-}
-
 /// Elaborate `body` into a [`TypedFn`]. Eta wrappers the body needs are
 /// appended to `fns`.
 ///
@@ -212,7 +195,7 @@ pub(crate) fn elaborate_body<C: ElabCtx>(
     params: &[(StrId, Ty)],
     body: &ast::Expression,
     ret_ty: Ty,
-    walk_tys: &[WalkStep],
+    walk_tys: &[Ty],
 ) -> TypedFn {
     elaborate_fn(ctx, pool, fns, name, params, ret_ty, walk_tys, |el| {
         el.expr_as(body, ret_ty)
@@ -228,7 +211,7 @@ pub(crate) fn elaborate_toplevel<C: ElabCtx>(
     name: StrId,
     block: &ast::BlockExpression,
     ret_ty: Ty,
-    walk_tys: &[WalkStep],
+    walk_tys: &[Ty],
 ) -> TypedFn {
     elaborate_fn(ctx, pool, fns, name, &[], ret_ty, walk_tys, |el| {
         el.block(block, ret_ty)
@@ -243,7 +226,7 @@ fn elaborate_fn<C: ElabCtx>(
     name: StrId,
     params: &[(StrId, Ty)],
     ret_ty: Ty,
-    walk_tys: &[WalkStep],
+    walk_tys: &[Ty],
     f: impl FnOnce(&mut Elab<'_, C>) -> TypedExpr,
 ) -> TypedFn {
     let mut el = Elab::new(ctx, pool, fns, walk_tys);
@@ -281,7 +264,7 @@ pub struct Elab<'a, C: ElabCtx> {
     fns: &'a mut FnTable,
     /// What the check walk saw in this body, in the order it saw it. Read
     /// strictly in order — never indexed by span, never searched.
-    walk_tys: &'a [WalkStep],
+    walk_tys: &'a [Ty],
     /// How much of [`Self::walk_tys`] has been consumed. `elaborate_fn` checks
     /// it reached the end.
     cursor: usize,
@@ -323,7 +306,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         ctx: &'a mut C,
         pool: &'a mut ResolvedPool,
         fns: &'a mut FnTable,
-        walk_tys: &'a [WalkStep],
+        walk_tys: &'a [Ty],
     ) -> Self {
         let anon = StrId::NONE;
         let eta_param = ctx.intern("_");
@@ -360,34 +343,18 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// to enter. Called exactly once per entered expression, which is what
     /// keeps the two walks in step.
     fn take_ty(&mut self, at: Span) -> Ty {
-        let Some(&WalkStep::Ty(t)) = self.walk_tys.get(self.cursor) else {
+        let Some(&t) = self.walk_tys.get(self.cursor) else {
             elaborator_bug("expression with no inferred type", at)
         };
         self.cursor += 1;
         t
     }
 
-    /// The verdict the check walk recorded for the `left.right` shape this walk
-    /// is looking at: `true` when `left` names an imported module and neither
-    /// walk enters it.
-    ///
-    /// Never re-derive this. The decision turns on the value env at the point
-    /// of the access — `import ./one` followed by `one = Box(..)` makes a later
-    /// `one.go` a field read — and that env has moved on by the time a deferred
-    /// body is elaborated.
-    fn take_qualified(&mut self, at: Span) -> bool {
-        let Some(&WalkStep::Qualified(q)) = self.walk_tys.get(self.cursor) else {
-            elaborator_bug("property access with no recorded qualifier verdict", at)
-        };
-        self.cursor += 1;
-        q
-    }
-
     /// The type of the expression the walk enters *next*, without consuming it.
     /// Valid only where the check walk entered that sub-expression first: a
     /// property access's receiver, an `or`'s left side, a `match` scrutinee.
     fn peek_ty(&mut self, at: Span) -> Ty {
-        let Some(&WalkStep::Ty(t)) = self.walk_tys.get(self.cursor) else {
+        let Some(&t) = self.walk_tys.get(self.cursor) else {
             elaborator_bug("sub-expression with no inferred type", at)
         };
         t
@@ -547,6 +514,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 TypedExpr::Tuple { ty, elems }
             }
             E::PropertyAccessExpression(pa) => self.property(pa, own),
+            E::ModuleAccessExpression(ma) => self.module_access(ma, own),
             E::FunctionCallExpression(fc) => self.call(fc, own),
             E::RangeExpression(re) => {
                 let ty = self.resolve(own);
@@ -794,42 +762,28 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         TypedExpr::BinLit { ty, segs }
     }
 
-    /// `qualifier.member` as a module reference, or `None` when it is an
-    /// ordinary field access.
-    ///
-    /// Every call here must correspond to a `resolve_qualified_member` call in
-    /// the check walk, in the same order: a property access entered as an
-    /// expression, and a call's property-access callee.
-    fn qualified(
-        &mut self,
-        left: &ast::Expression,
-        right: &ast::PropertyKey,
-        at: Span,
-    ) -> Option<(Ty, Denotation, StrId)> {
-        if !self.take_qualified(at) {
-            return None;
-        }
-        let (ast::Expression::Identifier(qual), ast::PropertyKey::Field(member)) = (left, right)
-        else {
-            elaborator_bug("qualified member on a non-`name.field` shape", at)
-        };
-        let Some((mty, den)) = self
+    /// `module::member`, resolved the way the check walk resolved it. Neither
+    /// walk enters the module name: it is not an expression.
+    fn qualified(&mut self, ma: &ast::ModuleAccessExpression) -> (Ty, Denotation) {
+        let member = &ma.member;
+        let Some(res) = self
             .ctx
-            .resolve_qualified(&qual.name, &member.name, member.span)
+            .resolve_qualified(&ma.module.name, &member.name, member.span)
         else {
-            elaborator_bug("qualified member the check walk resolved", at)
+            elaborator_bug("module member the check walk resolved", ma.span)
         };
-        let sid = self.ctx.intern(&member.name);
-        Some((mty, den, sid))
+        res
+    }
+
+    fn module_access(&mut self, ma: &ast::ModuleAccessExpression, own: Ty) -> TypedExpr {
+        let ty = self.resolve(own);
+        let (mty, den) = self.qualified(ma);
+        let sid = self.ctx.intern(&ma.member.name);
+        self.value_of(den, sid, mty, ty, ma.span)
     }
 
     fn property(&mut self, pa: &ast::PropertyAccessExpression, own: Ty) -> TypedExpr {
         let ty = self.resolve(own);
-        // A module reference: the check walk never entered the qualifier, so
-        // neither does this.
-        if let Some((mty, den, sid)) = self.qualified(&pa.left, &pa.right, pa.span) {
-            return self.value_of(den, sid, mty, ty, pa.span);
-        }
         let recv_ty = self.peek_ty(pa.left.span());
         let recv = self.expr(&pa.left);
         match &pa.right {
@@ -1025,21 +979,12 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 let labels = self.ctx.fn_param_labels(None, &id.name);
                 self.resolved_callee(res, labels, id.span)
             }
-            E::PropertyAccessExpression(pa) => {
-                if let Some((mty, den, _)) = self.qualified(&pa.left, &pa.right, pa.span) {
-                    // `qualified` accepted the shape, so both halves are names.
-                    let labels = match (&*pa.left, &pa.right) {
-                        (E::Identifier(q), ast::PropertyKey::Field(m)) => {
-                            self.ctx.fn_param_labels(Some(&q.name), &m.name)
-                        }
-                        _ => None,
-                    };
-                    return self.resolved_callee(Some((mty, den)), labels, pa.span);
-                }
-                Callee::Value {
-                    callee: TypedCallee::Dynamic(Box::new(self.expr(e))),
-                    param_labels: None,
-                }
+            E::ModuleAccessExpression(ma) => {
+                let res = self.qualified(ma);
+                let labels = self
+                    .ctx
+                    .fn_param_labels(Some(&ma.module.name), &ma.member.name);
+                self.resolved_callee(Some(res), labels, ma.span)
             }
             _ => Callee::Value {
                 callee: TypedCallee::Dynamic(Box::new(self.expr(e))),

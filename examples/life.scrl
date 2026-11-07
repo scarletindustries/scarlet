@@ -9,7 +9,7 @@ const generations = 4
 
 // 0..height is an Array(Int), so this is two nested maps.
 fn make_grid(cell fn(Int, Int) Bool) Array(Array(Bool)) {
-	array.map(0..height, fn(y) array.map(0..width, fn(x) cell(x, y)))
+	array::map(0..height, fn(y) array::map(0..width, fn(x) cell(x, y)))
 }
 
 fn cell_at(grid Array(Array(Bool)), x Int, y Int) Bool {
@@ -20,7 +20,7 @@ fn cell_at(grid Array(Array(Bool)), x Int, y Int) Bool {
 const neighborhood = [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)]
 
 fn live_neighbors(grid Array(Array(Bool)), x Int, y Int) Int {
-	array.length(array.filter(neighborhood, fn(offset) cell_at(grid, x + offset.0, y + offset.1)))
+	array::length(array::filter(neighborhood, fn(offset) cell_at(grid, x + offset.0, y + offset.1)))
 }
 
 fn next_cell(alive Bool, neighbors Int) Bool {
@@ -36,11 +36,11 @@ fn step(grid Array(Array(Bool))) Array(Array(Bool)) {
 }
 
 fn render(grid Array(Array(Bool))) String {
-	array.fold(grid, '', fn(text, row) text + render_row(row) + '\n')
+	array::fold(grid, '', fn(text, row) text + render_row(row) + '\n')
 }
 
 fn render_row(row Array(Bool)) String {
-	array.fold(row, '', fn(line, alive) line + if alive { '#' } else { '.' })
+	array::fold(row, '', fn(line, alive) line + if alive { '#' } else { '.' })
 }
 
 fn run(grid Array(Array(Bool)), gen Int) Nil {
@@ -57,5 +57,5 @@ fn run(grid Array(Array(Bool)), gen Int) Nil {
 const glider = [(1, 0), (2, 1), (0, 2), (1, 2), (2, 2)]
 
 pub fn main() {
-	run(make_grid(fn(x, y) array.contains(glider, (x, y))), 0)
+	run(make_grid(fn(x, y) array::contains(glider, (x, y))), 0)
 }

@@ -17,123 +17,131 @@ import scarlet/string
 
 type RoomMsg {
 	Say(text String)
-	History(reply process.Subject(Array(String)))
+	History(reply process::Subject(Array(String)))
 	Crash
 }
 
-fn room(inbox process.Subject(RoomMsg), name String) Nil {
+fn room(inbox process::Subject(RoomMsg), name String) Nil {
 	room_loop(inbox, name, [])
 }
 
-fn room_loop(inbox process.Subject(RoomMsg), name String, history Array(String)) Nil {
-	match process.receive(inbox) {
-		Say(text) -> room_loop(inbox, name, array.concat(history, [text]))
+fn room_loop(inbox process::Subject(RoomMsg), name String, history Array(String)) Nil {
+	match process::receive(inbox) {
+		Say(text) -> room_loop(inbox, name, array::concat(history, [text]))
 		History(reply) -> {
-			process.send(reply, history)
+			process::send(reply, history)
 			room_loop(inbox, name, history)
 		}
 		Crash -> {
 			// Killing this process ends it; the factory starts a fresh one at
 			// the same address.
-			process.kill(process.self())
+			process::kill(process::self())
 		}
 	}
 }
 
 type StatsMsg {
 	Served
-	Report(reply process.Subject(Int))
+	Report(reply process::Subject(Int))
 }
 
-fn stats(inbox process.Subject(StatsMsg)) Nil {
+fn stats(inbox process::Subject(StatsMsg)) Nil {
 	stats_loop(inbox, 0)
 }
 
-fn stats_loop(inbox process.Subject(StatsMsg), served Int) Nil {
-	match process.receive(inbox) {
+fn stats_loop(inbox process::Subject(StatsMsg), served Int) Nil {
+	match process::receive(inbox) {
 		Served -> stats_loop(inbox, served + 1)
 		Report(reply) -> {
-			process.send(reply, served)
+			process::send(reply, served)
 			stats_loop(inbox, served)
 		}
 	}
 }
 
 // A request sent between restarts dies with the old process, so it times out.
-fn ask(target process.Subject(msg), make fn(process.Subject(reply)) msg) Result(reply, Nil) {
-	inbox = process.subject()
-	process.send(target, make(inbox))
-	process.receive_within(inbox, 200)
+fn ask(target process::Subject(msg), make fn(process::Subject(reply)) msg) Result(reply, Nil) {
+	inbox = process::subject()
+	process::send(target, make(inbox))
+	process::receive_within(inbox, 200)
 }
 
 // ?room=NAME, defaulting to lobby.
-fn room_named(rooms process.Factory(RoomMsg, String), req http.Request) process.Subject(RoomMsg) {
-	q = binary.to_string(http.query(req)) or ''
-	name = match string.split(q, '=') {
-		['room', n] -> string.trim(n)
+fn room_named(
+	rooms process::Factory(RoomMsg, String),
+	req http::Request,
+) process::Subject(RoomMsg) {
+	q = binary::to_string(http::query(req)) or ''
+	name = match string::split(q, '=') {
+		['room', n] -> string::trim(n)
 		_ -> 'lobby'
 	}
-	process.lookup_or_start(rooms, if name == '' { 'lobby' } else { name })
+	process::lookup_or_start(rooms, if name == '' { 'lobby' } else { name })
 }
 
-fn request_text(req http.Request) String {
-	match body.collect(req.body, 4096) {
-		Ok(bytes) -> binary.to_string(bytes) or ''
+fn request_text(req http::Request) String {
+	match body::collect(req.body, 4096) {
+		Ok(bytes) -> binary::to_string(bytes) or ''
 		Err(_) -> ''
 	}
 }
 
 fn lines(xs Array(String)) String {
-	array.fold(xs, '', fn(out, x) out + x + '\n')
+	array::fold(xs, '', fn(out, x) out + x + '\n')
 }
 
 fn handle(
-	req http.Request,
-	rooms process.Factory(RoomMsg, String),
-	counter process.Subject(StatsMsg),
-	app process.Supervised,
-) http.Response {
-	process.send(counter, Served)
-	match http.path(req) {
+	req http::Request,
+	rooms process::Factory(RoomMsg, String),
+	counter process::Subject(StatsMsg),
+	app process::Supervised,
+) http::Response {
+	process::send(counter, Served)
+	match http::path(req) {
 		<<'/say'>> -> {
-			process.send(room_named(rooms, req), Say(request_text(req)))
-			http.text('said\n')
+			process::send(room_named(rooms, req), Say(request_text(req)))
+			http::text('said\n')
 		}
 		<<'/history'>> -> match ask(room_named(rooms, req), History) {
-			Ok(history) -> http.text(lines(history))
-			Err(Nil) -> http.text('room is restarting, try again\n')
+			Ok(history) -> http::text(lines(history))
+			Err(Nil) -> http::text('room is restarting, try again\n')
 		}
 		<<'/crash'>> -> {
-			process.send(room_named(rooms, req), Crash)
-			http.text('crashed it\n')
+			process::send(room_named(rooms, req), Crash)
+			http::text('crashed it\n')
 		}
 		<<'/stats'>> -> match ask(counter, Report) {
-			Ok(n) -> http.text('${n} requests served by this incarnation\n')
-			Err(Nil) -> http.text('stats is restarting\n')
+			Ok(n) -> http::text('${n} requests served by this incarnation\n')
+			Err(Nil) -> http::text('stats is restarting\n')
 		}
-		<<'/tree'>> -> http.text(render(app, ''))
-		_ -> http.not_found()
+		<<'/tree'>> -> http::text(render(app, ''))
+		_ -> http::not_found()
 	}
 }
 
-fn render(node process.Supervised, indent String) String {
-	info = process.info(node)
+fn render(node process::Supervised, indent String) String {
+	info = process::info(node)
 	line = match info.kind {
-		process.Process -> '${indent}process\n'
-		process.Worker(policy) ->
-			'${indent}worker ${string.inspect(policy)}, restarted ${info.restarts} times\n'
-		process.SupervisorOf(strategy) -> '${indent}supervisor ${string.inspect(strategy)}\n'
-		process.FactoryOf(members) ->
-			'${indent}factory ${string.inspect(members)}, ${process.count(node)} live\n'
+		process::Process -> '${indent}process\n'
+		process::Worker(policy) ->
+			'${indent}worker ${string::inspect(policy)}, restarted ${info.restarts} times\n'
+		process::SupervisorOf(strategy) -> '${indent}supervisor ${string::inspect(strategy)}\n'
+		process::FactoryOf(members) ->
+			'${indent}factory ${string::inspect(members)}, ${process::count(node)} live\n'
 	}
-	array.fold(process.children(node), line, fn(out, child) out + render(child, indent + '  '))
+	array::fold(process::children(node), line, fn(out, child) out + render(child, indent + '  '))
 }
 
 pub fn main() Nil {
-	app <- process.root(process.OneForOne(restarts: 5, within_ms: 60_000))
-	counter = process.permanent(app, stats)
-	rooms = process.factory(app, process.Restarted(restarts: 20, within_ms: 60_000), room)
-	match http.serve_in(app, '0.0.0.0', 8080, fn(req) handle(req, rooms, counter, app.supervised)) {
+	app <- process::root(process::OneForOne(restarts: 5, within_ms: 60_000))
+	counter = process::permanent(app, stats)
+	rooms = process::factory(app, process::Restarted(restarts: 20, within_ms: 60_000), room)
+	match http::serve_in(
+		app,
+		'0.0.0.0',
+		8080,
+		fn(req) handle(req, rooms, counter, app.supervised),
+	) {
 		Ok(_) -> println('chat is up on http://localhost:8080')
 		Err(e) -> println('cannot serve: ${e}')
 	}

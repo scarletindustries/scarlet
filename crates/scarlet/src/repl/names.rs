@@ -153,7 +153,7 @@ impl Names {
         self.aliases.contains_key(name) && !self.defined.iter().any(|d| d == name)
     }
 
-    /// Candidates after `qualifier.`: that module's public exports.
+    /// Candidates after `qualifier::`: that module's public exports.
     pub fn qualified(&mut self, qualifier: &str, prefix: &str) -> Vec<Candidate> {
         let Some(path) = self.aliases.get(qualifier).cloned() else {
             return Vec::new();
@@ -234,7 +234,7 @@ mod tests {
         assert!(names.qualified("nope", "").is_empty(), "unknown qualifier");
     }
 
-    /// `http.Post` is a constructor of an exported type, not a value export:
+    /// `http::Post` is a constructor of an exported type, not a value export:
     /// the name list has to reach into the type to find it.
     #[test]
     fn a_constructor_completes_behind_its_modules_alias() {

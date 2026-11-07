@@ -52,7 +52,7 @@ fn chunks(n Int, per Int, acc Int) Int {
 }
 
 fn pipeline() Result(Int, Step) {
-	per <- result.then(first_step())
+	per <- result::then(first_step())
 	println('SECOND STEP RAN')
 	Ok(chunks(8, per, 0))
 }
@@ -81,8 +81,8 @@ fn write(tag String) Result(Nil, Step) {
 }
 
 fn both() Result(Nil, Step) {
-	_ <- result.then(write('a'))
-	_ <- result.then(write('b'))
+	_ <- result::then(write('a'))
+	_ <- result::then(write('b'))
 	Ok(Nil)
 }
 
@@ -135,7 +135,7 @@ fn failed_step_does_not_run_a_continuation_that_would_not_end() {
     );
     assert!(
         !out.contains("SECOND STEP RAN"),
-        "the continuation of a failed `result.then` ran\noutput:\n{out}"
+        "the continuation of a failed `result::then` ran\noutput:\n{out}"
     );
     assert_eq!(out, "short-circuited\ndone\n", "output:\n{out}");
 }

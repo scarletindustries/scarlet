@@ -16,7 +16,7 @@ fn sum_to(n Int, acc Int) Int {
 // Recurse hops times and report the live frame count at the bottom.
 fn depth_after(hops Int) Int {
 	if hops == 0 {
-		internal.stack_depth()
+		internal::stack_depth()
 	} else {
 		depth_after(hops - 1)
 	}

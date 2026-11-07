@@ -27,24 +27,24 @@ import scarlet/result
 import scarlet/string
 
 fn str(b Binary) String {
-	binary.to_string(b) or '<not utf8>'
+	binary::to_string(b) or '<not utf8>'
 }
 
 // Control bytes escaped so a CRLF-bearing blob stays on ONE golden line.
 fn vis(b Binary) String {
-	vis_from(b, 0, binary.byte_size(b), '')
+	vis_from(b, 0, binary::byte_size(b), '')
 }
 
 fn vis_from(b Binary, i Int, len Int, acc String) String {
 	if i >= len {
 		acc
 	} else {
-		piece = match binary.byte_at(b, i) {
+		piece = match binary::byte_at(b, i) {
 			13 -> '\\r'
 			10 -> '\\n'
 			9 -> '\\t'
 			0 -> '\\0'
-			_ -> result.then(binary.slice_bytes(b, i, 1), binary.to_string) or '?'
+			_ -> result::then(binary::slice_bytes(b, i, 1), binary::to_string) or '?'
 		}
 		vis_from(b, i + 1, len, '${acc}${piece}')
 	}
@@ -57,49 +57,49 @@ fn q(b Binary) String {
 fn list(parts Array(String)) String {
 	match parts {
 		[] -> '[]'
-		[head, ..rest] -> '[${array.fold(rest, head, fn(acc, p) '${acc}, ${p}')}]'
+		[head, ..rest] -> '[${array::fold(rest, head, fn(acc, p) '${acc}, ${p}')}]'
 	}
 }
 
 fn grow(b Binary, n Int) Binary {
-	if binary.byte_size(b) >= n {
+	if binary::byte_size(b) >= n {
 		b
 	} else {
-		grow(binary.append(b, b), n)
+		grow(binary::append(b, b), n)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// 1. h1.parse_response
+// 1. h1::parse_response
 // ---------------------------------------------------------------------------
 
 fn show_response(label String, input Binary) Nil {
-	out = match h1.parse_response(input, 0) {
-		h1.ResponseDone(version, code, reason, hdrs, _, consumed) ->
+	out = match h1::parse_response(input, 0) {
+		h1::ResponseDone(version, code, reason, hdrs, _, consumed) ->
 			'Done version=${version} code=${code} reason=${q(
 				reason,
-			)} headers=${array.length(hdrs)} consumed=${consumed}'
-		h1.ResponseNeedMore -> 'NeedMore'
-		h1.ResponseBad(err) -> 'Bad ${err}'
+			)} headers=${array::length(hdrs)} consumed=${consumed}'
+		h1::ResponseNeedMore -> 'NeedMore'
+		h1::ResponseBad(err) -> 'Bad ${err}'
 	}
 	println('${label}: ${out}')
 }
 
 // ---------------------------------------------------------------------------
-// 2. h1.response_framing — where a response is NOT a request
+// 2. h1::response_framing — where a response is NOT a request
 // ---------------------------------------------------------------------------
 
 fn show_response_framing(label String, code Int, input Binary) Nil {
-	out = match h1.parse_response(input, 0) {
-		h1.ResponseDone(_, _, _, hdrs, _, _) -> match h1.response_framing(hdrs, code) {
-			h1.BodyNone -> 'BodyNone'
-			h1.BodyLength(n) -> 'BodyLength ${n}'
-			h1.BodyChunked -> 'BodyChunked'
-			h1.BodyUntilClose -> 'BodyUntilClose'
-			h1.BodyInvalid(err) -> 'BodyInvalid ${err}'
+	out = match h1::parse_response(input, 0) {
+		h1::ResponseDone(_, _, _, hdrs, _, _) -> match h1::response_framing(hdrs, code) {
+			h1::BodyNone -> 'BodyNone'
+			h1::BodyLength(n) -> 'BodyLength ${n}'
+			h1::BodyChunked -> 'BodyChunked'
+			h1::BodyUntilClose -> 'BodyUntilClose'
+			h1::BodyInvalid(err) -> 'BodyInvalid ${err}'
 		}
-		h1.ResponseNeedMore -> 'parse: NeedMore'
-		h1.ResponseBad(err) -> 'parse: Bad ${err}'
+		h1::ResponseNeedMore -> 'parse: NeedMore'
+		h1::ResponseBad(err) -> 'parse: Bad ${err}'
 	}
 	println('${label}: ${out}')
 }
@@ -109,12 +109,12 @@ fn show_response_framing(label String, code Int, input Binary) Nil {
 // ---------------------------------------------------------------------------
 
 fn show_url(text String) Nil {
-	out = match url.parse(text) {
+	out = match url::parse(text) {
 		Ok(u) ->
 			'${u.scheme} host=${u.host} port=${u.port} target=${q(
 				u.target,
-			)} host-field=${q(url.authority(u))}'
-		Err(e) -> 'Err ${string.inspect(e)}'
+			)} host-field=${q(url::authority(u))}'
+		Err(e) -> 'Err ${string::inspect(e)}'
 	}
 	println('${text} -> ${out}')
 }
@@ -129,70 +129,70 @@ fn show_url(text String) Nil {
 // lockstep.
 type Wire {
 	// Hand back up to `max` more scripted bytes, or Closed once spent.
-	Want(max Int, reply process.Subject(socket.Read))
+	Want(max Int, reply process::Subject(socket::Read))
 	// Record bytes the client wrote.
 	Wrote(bytes Binary)
 	// Answer everything written so far.
-	Dump(reply process.Subject(Binary))
+	Dump(reply process::Subject(Binary))
 	// End the process, and say so. Acknowledged rather than fire-and-forget:
 	// a parked process keeps the whole program alive (the same trap
 	// `examples/sockets.scrl` documents for an unclosed listener), so the
 	// exchange must not finish until this one has actually gone.
-	Stop(reply process.Subject(Nil))
+	Stop(reply process::Subject(Nil))
 }
 
-fn wire_loop(inbox process.Subject(Wire), script Binary, written Binary) Nil {
-	match process.receive(inbox) {
+fn wire_loop(inbox process::Subject(Wire), script Binary, written Binary) Nil {
+	match process::receive(inbox) {
 		Want(max, reply) -> {
-			n = int.min(max, binary.byte_size(script))
+			n = int::min(max, binary::byte_size(script))
 			if n <= 0 {
-				process.send(reply, socket.Closed)
+				process::send(reply, socket::Closed)
 				wire_loop(inbox, script, written)
 			} else {
-				(chunk, rest) = binary.split_at_bytes(script, n)
-				process.send(reply, socket.Data(chunk))
+				(chunk, rest) = binary::split_at_bytes(script, n)
+				process::send(reply, socket::Data(chunk))
 				wire_loop(inbox, rest, written)
 			}
 		}
-		Wrote(bytes) -> wire_loop(inbox, script, binary.append(written, bytes))
+		Wrote(bytes) -> wire_loop(inbox, script, binary::append(written, bytes))
 		Dump(reply) -> {
-			process.send(reply, written)
+			process::send(reply, written)
 			wire_loop(inbox, script, written)
 		}
-		Stop(reply) -> process.send(reply, Nil)
+		Stop(reply) -> process::send(reply, Nil)
 	}
 }
 
 // Shut a scripted transport down and wait for it to be gone.
-fn stop(inbox process.Subject(Wire)) Nil {
-	reply = process.subject()
-	process.send(inbox, Stop(reply))
-	process.receive(reply)
+fn stop(inbox process::Subject(Wire)) Nil {
+	reply = process::subject()
+	process::send(inbox, Stop(reply))
+	process::receive(reply)
 }
 
 // `chunk` bounds how much the transport hands over per read, so the client's
 // incremental paths (NeedMore, partial bodies) are exercised rather than
 // hidden behind one read that returns everything.
-fn scripted(script Binary) process.Subject(Wire) {
-	handshake = process.subject()
-	_ = process.spawn(fn() {
-		inbox = process.subject()
-		process.send(handshake, inbox)
+fn scripted(script Binary) process::Subject(Wire) {
+	handshake = process::subject()
+	_ = process::spawn(fn() {
+		inbox = process::subject()
+		process::send(handshake, inbox)
 		wire_loop(inbox, script, <<>>)
 	})
-	inbox = process.receive(handshake)
+	inbox = process::receive(handshake)
 	inbox
 }
 
-fn wire_io(inbox process.Subject(Wire), chunk Int) client.Io {
-	client.Io(
+fn wire_io(inbox process::Subject(Wire), chunk Int) client::Io {
+	client::Io(
 		read: fn(max, _deadline) {
-			reply = process.subject()
-			process.send(inbox, Want(int.min(max, chunk), reply))
-			Ok(process.receive(reply))
+			reply = process::subject()
+			process::send(inbox, Want(int::min(max, chunk), reply))
+			Ok(process::receive(reply))
 		},
 		write: fn(bytes) {
-			process.send(inbox, Wrote(bytes))
+			process::send(inbox, Wrote(bytes))
 			Ok(Nil)
 		},
 		close: fn() Ok(Nil),
@@ -200,18 +200,18 @@ fn wire_io(inbox process.Subject(Wire), chunk Int) client.Io {
 }
 
 fn show_exchange(label String, req_url String, method Binary, script Binary, chunk Int) Nil {
-	match url.parse(req_url) {
-		Err(e) -> println('${label}: url Err ${string.inspect(e)}')
+	match url::parse(req_url) {
+		Err(e) -> println('${label}: url Err ${string::inspect(e)}')
 		Ok(u) -> {
 			inbox = scripted(script)
 			io = wire_io(inbox, chunk)
-			req = client.Request(method: method, url: u, headers: [], body: <<>>)
-			out = match client.send(io, req) {
+			req = client::Request(method: method, url: u, headers: [], body: <<>>)
+			out = match client::send(io, req) {
 				Ok(r) ->
 					'${r.status} reason=${q(
 						r.reason,
-					)} headers=${array.length(r.headers)} body=${q(r.body)}'
-				Err(e) -> 'Err ${string.inspect(e)}'
+					)} headers=${array::length(r.headers)} body=${q(r.body)}'
+				Err(e) -> 'Err ${string::inspect(e)}'
 			}
 			stop(inbox)
 			println('${label}: ${out}')
@@ -222,13 +222,13 @@ fn show_exchange(label String, req_url String, method Binary, script Binary, chu
 fn show_bounded(label String, script Binary, max_body Int) Nil {
 	inbox = scripted(script)
 	io = wire_io(inbox, 65536)
-	u = url.parse(
+	u = url::parse(
 		'http://example.com/a',
-	) or url.Url(scheme: url.Http, host: 'x', port: 80, target: <<'/'>>)
-	req = client.Request(method: <<'GET'>>, url: u, headers: [], body: <<>>)
-	out = match client.send_bounded(io, req, max_body) {
+	) or url::Url(scheme: url::Http, host: 'x', port: 80, target: <<'/'>>)
+	req = client::Request(method: <<'GET'>>, url: u, headers: [], body: <<>>)
+	out = match client::send_bounded(io, req, max_body) {
 		Ok(r) -> '${r.status} body=${q(r.body)}'
-		Err(e) -> 'Err ${string.inspect(e)}'
+		Err(e) -> 'Err ${string::inspect(e)}'
 	}
 	stop(inbox)
 	println('${label}: ${out}')
@@ -240,22 +240,22 @@ fn show_written(
 	label String,
 	req_url String,
 	method Binary,
-	extra Array(headers.Header),
+	extra Array(headers::Header),
 	body Binary,
 ) Nil {
-	match url.parse(req_url) {
-		Err(e) -> println('${label}: url Err ${string.inspect(e)}')
+	match url::parse(req_url) {
+		Err(e) -> println('${label}: url Err ${string::inspect(e)}')
 		Ok(u) -> {
 			inbox = scripted(<<'HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n'>>)
 			io = wire_io(inbox, 65536)
-			req = client.Request(method: method, url: u, headers: extra, body: body)
-			outcome = match client.send(io, req) {
+			req = client::Request(method: method, url: u, headers: extra, body: body)
+			outcome = match client::send(io, req) {
 				Ok(r) -> 'sent, got ${r.status}'
-				Err(e) -> 'Err ${string.inspect(e)}'
+				Err(e) -> 'Err ${string::inspect(e)}'
 			}
-			reply = process.subject()
-			process.send(inbox, Dump(reply))
-			wrote = process.receive(reply)
+			reply = process::subject()
+			process::send(inbox, Dump(reply))
+			wrote = process::receive(reply)
 			stop(inbox)
 			println('${label}: ${outcome}')
 			println('  wrote: ${q(wrote)}')
@@ -325,19 +325,19 @@ pub fn main() {
 	// The 64 KiB head cap measures from the status line, exactly as a request
 	// head's does from the request line.
 	big = grow(<<'X-Pad: 0123456789012345678901234567890123456789012345678901234\r\n'>>, 70000)
-	show_response('head over 64 KiB', binary.append(<<'HTTP/1.1 200 OK\r\n'>>, big))
+	show_response('head over 64 KiB', binary::append(<<'HTTP/1.1 200 OK\r\n'>>, big))
 	show_response('no CRLF anywhere, over cap', grow(<<'HTTP/1.1 200 OKKKKKKK'>>, 70000))
 
 	println('')
 	println('== consumed threads to the body ==')
 	framed = <<'HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello-and-then-some'>>
-	match h1.parse_response(framed, 0) {
-		h1.ResponseDone(_, _, _, _, _, consumed) -> {
+	match h1::parse_response(framed, 0) {
+		h1::ResponseDone(_, _, _, _, _, consumed) -> {
 			// NOT an argued-unreachable arm. `5` is this case's advertised
 			// Content-Length, so a `consumed` that does not thread to the body
 			// is the exact failure this line exists to catch — it has to print
 			// as an error rather than as an empty window.
-			body = match binary.slice_bytes(framed, consumed, 5) {
+			body = match binary::slice_bytes(framed, consumed, 5) {
 				Ok(v) -> q(v)
 				Err(Nil) -> 'OUT OF RANGE'
 			}
@@ -349,7 +349,7 @@ pub fn main() {
 	println('')
 	println('== response framing ==')
 	// THE ASYMMETRY: no framing field means "no body" on a request and "until the
-	// connection closes" on a response. Reusing h1.framing here would truncate
+	// connection closes" on a response. Reusing h1::framing here would truncate
 	// every close-framed reply to empty.
 	show_response_framing('no framing fields -> until close', 200, <<'HTTP/1.1 200 OK\r\n\r\n'>>)
 	show_response_framing('content-length', 200, <<'HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\n'>>)
@@ -368,7 +368,7 @@ pub fn main() {
 		'HTTP/1.1 199 Early\r\nContent-Length: 4\r\n\r\n',
 	>>)
 	show_response_framing('200 is not', 200, <<'HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n'>>)
-	// The smuggling conflicts are rejected once, in h1.framing, for both
+	// The smuggling conflicts are rejected once, in h1::framing, for both
 	// directions — a response cannot claim both framings either.
 	show_response_framing('content-length AND chunked', 200, <<
 		'HTTP/1.1 200 OK\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n',
@@ -545,7 +545,7 @@ pub fn main() {
 	// A close-framed body has no advertised length, so the budget stops the read.
 	show_bounded(
 		'close-framed body over budget',
-		binary.append(<<'HTTP/1.1 200 OK\r\n\r\n'>>, grow(<<'padpadpa'>>, 200)),
+		binary::append(<<'HTTP/1.1 200 OK\r\n\r\n'>>, grow(<<'padpadpa'>>, 200)),
 		64,
 	)
 
@@ -560,7 +560,7 @@ pub fn main() {
 		'POST with a body',
 		'http://example.com/e',
 		<<'POST'>>,
-		[headers.Header(name: <<'Content-Type'>>, value: <<'text/plain'>>)],
+		[headers::Header(name: <<'Content-Type'>>, value: <<'text/plain'>>)],
 		<<'hi'>>,
 	)
 	// A caller-set Content-Length is REPLACED, not duplicated: two disagreeing
@@ -569,14 +569,14 @@ pub fn main() {
 		'caller-set Content-Length is replaced',
 		'http://example.com/e',
 		<<'POST'>>,
-		[headers.Header(name: <<'content-length'>>, value: <<'999'>>)],
+		[headers::Header(name: <<'content-length'>>, value: <<'999'>>)],
 		<<'hi'>>,
 	)
 	show_written(
 		'caller-set Host is replaced',
 		'http://example.com/e',
 		<<'GET'>>,
-		[headers.Header(name: <<'Host'>>, value: <<'evil.example'>>)],
+		[headers::Header(name: <<'Host'>>, value: <<'evil.example'>>)],
 		<<>>,
 	)
 	// A header value carrying CRLF would split the request head into two
@@ -585,25 +585,25 @@ pub fn main() {
 		'CRLF in a header value is refused',
 		'http://example.com/e',
 		<<'GET'>>,
-		[headers.Header(name: <<'X-A'>>, value: <<'b\r\nX-Injected: yes'>>)],
+		[headers::Header(name: <<'X-A'>>, value: <<'b\r\nX-Injected: yes'>>)],
 		<<>>,
 	)
 	show_written(
 		'a header name that is not a token is refused',
 		'http://example.com/e',
 		<<'GET'>>,
-		[headers.Header(name: <<'X A'>>, value: <<'b'>>)],
+		[headers::Header(name: <<'X A'>>, value: <<'b'>>)],
 		<<>>,
 	)
 
 	println('')
 	println('== url errors reach the client surface ==')
-	match client.get('nonsense') {
-		Ok(_) -> println('client.get of a non-URL: Ok?!')
-		Err(e) -> println('client.get of a non-URL: Err ${string.inspect(e)}')
+	match client::get('nonsense') {
+		Ok(_) -> println('client::get of a non-URL: Ok?!')
+		Err(e) -> println('client::get of a non-URL: Err ${string::inspect(e)}')
 	}
-	match client.get('ftp://example.com/a') {
-		Ok(_) -> println('client.get of ftp: Ok?!')
-		Err(e) -> println('client.get of ftp: Err ${string.inspect(e)}')
+	match client::get('ftp://example.com/a') {
+		Ok(_) -> println('client::get of ftp: Ok?!')
+		Err(e) -> println('client::get of ftp: Err ${string::inspect(e)}')
 	}
 }

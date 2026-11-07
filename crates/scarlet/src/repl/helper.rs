@@ -200,9 +200,9 @@ fn complete_source(line: &str, pos: usize, names: &mut Names) -> (usize, Vec<Pai
     let Some((start, word)) = word_before(line, pos) else {
         return (pos, Vec::new());
     };
-    match word.rsplit_once('.') {
+    match word.rsplit_once("::") {
         Some((qualifier, member)) => (
-            start + qualifier.len() + 1,
+            start + qualifier.len() + 2,
             pairs(names.qualified(qualifier, member)),
         ),
         None => (start, pairs(names.bare(word))),
@@ -219,19 +219,26 @@ fn pairs(candidates: Vec<Candidate>) -> Vec<Pair> {
         .collect()
 }
 
-/// The identifier ending at `pos`, with any `qualifier.` prefix, and where it
+/// The identifier ending at `pos`, with any `qualifier::` prefix, and where it
 /// starts. `None` where no name can begin — inside a number literal — as
 /// against an empty word at a boundary, which completes to everything in
 /// scope.
 fn word_before(line: &str, pos: usize) -> Option<(usize, &str)> {
     let pos = pos.min(line.len());
     let bytes = line.as_bytes();
-    let mut start = pos;
-    while start > 0 && {
-        let b = bytes[start - 1];
-        is_name_continue(b) || b == b'.'
-    } {
-        start -= 1;
+    let name_start = |mut i: usize| {
+        while i > 0 && is_name_continue(bytes[i - 1]) {
+            i -= 1;
+        }
+        i
+    };
+    let mut start = name_start(pos);
+    // One `qualifier::` in front of the member being typed.
+    if start >= 2 && &bytes[start - 2..start] == b"::" {
+        let q = name_start(start - 2);
+        if q < start - 2 {
+            start = q;
+        }
     }
     if start < pos && !bytes.get(start).copied().is_some_and(is_name_start) {
         return None;
@@ -284,7 +291,7 @@ mod tests {
     fn the_ghost_text_is_what_tab_would_insert() {
         assert_eq!(hint("printl", Names::default()).as_deref(), Some("n"));
         assert_eq!(
-            hint("http.Del", observed("import scarlet/http")).as_deref(),
+            hint("http::Del", observed("import scarlet/http")).as_deref(),
             Some("ete")
         );
     }
@@ -316,9 +323,9 @@ mod tests {
         let helper = ScarletHelper::new(crate::term::Palette::for_stdout(), names);
         let history = rustyline::history::MemHistory::new();
         let ctx = Context::new(&history);
-        let line = "http.Del";
+        let line = "http::Del";
         let (start, items) = helper.complete(line, line.len(), &ctx).expect("complete");
-        assert_eq!(start, "http.".len());
+        assert_eq!(start, "http::".len());
         assert_eq!(
             items.into_iter().map(|p| p.replacement).collect::<Vec<_>>(),
             vec!["Delete".to_string()]

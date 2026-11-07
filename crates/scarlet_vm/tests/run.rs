@@ -135,11 +135,11 @@ fn a_loop_overwrites_the_cell_it_just_gave_up() {
          \t}\n\
          }\n\
          pub fn main() {\n\
-         \tmade = internal.cells_made()\n\
-         \treused = internal.cells_reused()\n\
+         \tmade = internal::cells_made()\n\
+         \treused = internal::cells_reused()\n\
          \tprintln(spin(1000, Pair(0, 0)))\n\
-         \tprintln(internal.cells_made() - made)\n\
-         \tprintln(internal.cells_reused() - reused)\n\
+         \tprintln(internal::cells_made() - made)\n\
+         \tprintln(internal::cells_reused() - reused)\n\
          }\n",
         "1000\n1\n1000\n",
     );
@@ -174,11 +174,11 @@ fn a_walk_over_a_list_overwrites_the_list_it_reads() {
          }\n\
          pub fn main() {\n\
          \txs = build(1000, Empty)\n\
-         \tmade = internal.cells_made()\n\
-         \treused = internal.cells_reused()\n\
+         \tmade = internal::cells_made()\n\
+         \treused = internal::cells_reused()\n\
          \tprintln(sum(add_one(xs), 0))\n\
-         \tprintln(internal.cells_made() - made)\n\
-         \tprintln(internal.cells_reused() - reused)\n\
+         \tprintln(internal::cells_made() - made)\n\
+         \tprintln(internal::cells_reused() - reused)\n\
          }\n",
         "501500\n0\n1000\n",
     );
@@ -202,11 +202,11 @@ fn a_loop_carries_its_cell_across_the_call_that_ends_it() {
          \tif n <= 0 then acc + s else go(n - 1, acc + s)\n\
          }\n\
          pub fn main() {\n\
-         \tmade = internal.cells_made()\n\
-         \treused = internal.cells_reused()\n\
+         \tmade = internal::cells_made()\n\
+         \treused = internal::cells_reused()\n\
          \tprintln(go(1000, 0))\n\
-         \tprintln(internal.cells_made() - made)\n\
-         \tprintln(internal.cells_reused() - reused)\n\
+         \tprintln(internal::cells_made() - made)\n\
+         \tprintln(internal::cells_reused() - reused)\n\
          }\n",
         "1002001\n1\n1000\n",
     );
@@ -224,17 +224,17 @@ fn a_cell_something_else_holds_is_not_overwritten() {
          \tPair(a Int, b Int)\n\
          }\n\
          fn keep(n Int, ps Array(Pair)) Array(Pair) {\n\
-         \tif n <= 0 then ps else keep(n - 1, array.concat(ps, [Pair(n, n)]))\n\
+         \tif n <= 0 then ps else keep(n - 1, array::concat(ps, [Pair(n, n)]))\n\
          }\n\
          pub fn main() {\n\
-         \tmade = internal.cells_made()\n\
+         \tmade = internal::cells_made()\n\
          \tps = keep(100, [])\n\
-         \tprintln(array.fold(ps, 0, fn(t, p) {\n\
+         \tprintln(array::fold(ps, 0, fn(t, p) {\n\
          \t\tmatch p {\n\
          \t\t\tPair(a, b) -> t + a + b\n\
          \t\t}\n\
          \t}))\n\
-         \tprintln(internal.cells_made() - made > 100)\n\
+         \tprintln(internal::cells_made() - made > 100)\n\
          }\n",
         "10100\nTrue\n",
     );
@@ -260,13 +260,13 @@ fn a_deep_recursion_uses_memory_not_the_rust_stack() {
 #[test]
 fn only_calling_an_unbuilt_function_stops_the_run() {
     let src = "import scarlet/process\n\
-               fn me() process.Pid { process.self() }\n\
+               fn me() process::Pid { process::self() }\n\
                pub fn main() {\n\
                \tprintln(1)\n\
                }\n";
     prints(src, "1\n");
     let calls = "import scarlet/process\n\
-                 fn me() process.Pid { process.self() }\n\
+                 fn me() process::Pid { process::self() }\n\
                  pub fn main() {\n\
                  \t_ = me()\n\
                  }\n";
@@ -897,16 +897,16 @@ fn the_first_built_ins_run() {
          import scarlet/int\n\
          import scarlet/string\n\
          pub fn main() {\n\
-         \tprintln(string.inspect(Some([1, 2])))\n\
-         \tprintln(string.inspect('as is'))\n\
-         \tprintln(string.length('héllo'))\n\
-         \tprintln(string.length(''))\n\
-         \tprintln(array.length([1, 2, 3]))\n\
-         \tprintln(array.length(0..1000000000000))\n\
-         \tprintln(int.to_string(-42))\n\
-         \tprintln(int.to_string(9223372036854775807 + 1))\n\
-         \tprintln(array.map([1, 2, 3], fn(x) { x * 10 }))\n\
-         \tprintln(array.reverse([1, 2, 3]))\n\
+         \tprintln(string::inspect(Some([1, 2])))\n\
+         \tprintln(string::inspect('as is'))\n\
+         \tprintln(string::length('héllo'))\n\
+         \tprintln(string::length(''))\n\
+         \tprintln(array::length([1, 2, 3]))\n\
+         \tprintln(array::length(0..1000000000000))\n\
+         \tprintln(int::to_string(-42))\n\
+         \tprintln(int::to_string(9223372036854775807 + 1))\n\
+         \tprintln(array::map([1, 2, 3], fn(x) { x * 10 }))\n\
+         \tprintln(array::reverse([1, 2, 3]))\n\
          }\n",
         "Some(\n  [1, 2]\n)\nas is\n5\n0\n3\n1000000000000\n-42\n9223372036854775808\n[10, 20, 30]\n[3, 2, 1]\n",
     );
@@ -938,12 +938,12 @@ fn floats_are_never_nan_or_infinite() {
          \tn = 2.5\n\
          \tprintln(-n)\n\
          \tprintln('${Some(1.5)}')\n\
-         \tprintln(float.floor(-2.5))\n\
-         \tprintln(float.round(2.5))\n\
-         \tprintln(float.truncate(-2.9))\n\
-         \tprintln(float.floor(big(1.0, 20)))\n\
-         \tprintln(float.from_int(3))\n\
-         \tprintln(float.to_string(2.0))\n\
+         \tprintln(float::floor(-2.5))\n\
+         \tprintln(float::round(2.5))\n\
+         \tprintln(float::truncate(-2.9))\n\
+         \tprintln(float::floor(big(1.0, 20)))\n\
+         \tprintln(float::from_int(3))\n\
+         \tprintln(float::to_string(2.0))\n\
          }\n",
         &format!(
             "3.75\n1.0\n0.30000000000000004\n-10.0\n0.0\n0.0\n7.5\n-1.5\n\
@@ -988,16 +988,16 @@ fn binaries_are_built_shown_and_matched() {
          \tprintln(first_char(<<255>>))\n\
          \tprintln(<<1, 2>> == <<1, 2>>)\n\
          \tprintln(<<1, 2>> == <<1, 2, 0>>)\n\
-         \tprintln(binary.bit_size(<<1, 5:size(3)>>))\n\
-         \tprintln(binary.byte_size(<<1, 5:size(3)>>))\n\
-         \tprintln(binary.to_string(binary.from_string('héllo')))\n\
-         \tprintln(binary.to_string(<<255>>))\n\
-         \tprintln(binary.append(<<1>>, <<2, 3>>))\n\
-         \tprintln(binary.slice_bits(<<1, 2, 3>>, 8, 16))\n\
-         \tprintln(binary.slice_bits(<<1, 2, 3>>, 8, 17))\n\
-         \tprintln(binary.slice_bits(<<1, 2, 3>>, -1, 8))\n\
-         \tprintln(binary.slice_bytes(<<1, 2, 3>>, 1, 1) == Ok(<<2>>))\n\
-         \tprintln(binary.drop_bytes(<<1, 2, 3>>, 2))\n\
+         \tprintln(binary::bit_size(<<1, 5:size(3)>>))\n\
+         \tprintln(binary::byte_size(<<1, 5:size(3)>>))\n\
+         \tprintln(binary::to_string(binary::from_string('héllo')))\n\
+         \tprintln(binary::to_string(<<255>>))\n\
+         \tprintln(binary::append(<<1>>, <<2, 3>>))\n\
+         \tprintln(binary::slice_bits(<<1, 2, 3>>, 8, 16))\n\
+         \tprintln(binary::slice_bits(<<1, 2, 3>>, 8, 17))\n\
+         \tprintln(binary::slice_bits(<<1, 2, 3>>, -1, 8))\n\
+         \tprintln(binary::slice_bytes(<<1, 2, 3>>, 1, 1) == Ok(<<2>>))\n\
+         \tprintln(binary::drop_bytes(<<1, 2, 3>>, 2))\n\
          }\n",
         "<<1, 2, 3>>\n<<>>\n<<5:size(3)>>\n<<255, 5:size(3)>>\n<<255, 15:size(4)>>\n<<104, 105>>\n<<18>>\n\
          one then <<7, 9>>\na 16-bit 513\nsomething else\n233\n-1\nTrue\nFalse\n11\n2\n\
@@ -1012,28 +1012,28 @@ fn the_rest_of_the_binary_module_runs() {
         "import scarlet/binary\n\
          pub fn main() {\n\
          \tb = <<'hello':utf8>>\n\
-         \tprintln(binary.byte_at(b, 0))\n\
-         \tprintln(binary.byte_at(b, 4))\n\
-         \tprintln(binary.byte_at(b, 5))\n\
-         \tprintln(binary.byte_at(b, -1))\n\
-         \tprintln(binary.byte_at(<<1, 5:size(3)>>, 1))\n\
-         \tprintln(binary.index_of(b, <<'l':utf8>>, 0))\n\
-         \tprintln(binary.index_of(b, <<'l':utf8>>, 3))\n\
-         \tprintln(binary.index_of(b, <<'z':utf8>>, 0))\n\
-         \tprintln(binary.index_of(b, <<>>, 2))\n\
-         \tprintln(binary.index_of(b, <<'h':utf8>>, 99))\n\
-         \tprintln(binary.parse_int(<<'1234':utf8>>, binary.Dec))\n\
-         \tprintln(binary.parse_int(<<'ff':utf8>>, binary.Hex))\n\
-         \tprintln(binary.parse_int(<<'FF':utf8>>, binary.Hex))\n\
-         \tprintln(binary.parse_int(<<'12a':utf8>>, binary.Dec))\n\
-         \tprintln(binary.parse_int(<<>>, binary.Dec))\n\
-         \tprintln(binary.parse_int(<<'-1':utf8>>, binary.Dec))\n\
-         \tprintln(binary.parse_int(<<'99999999999999999999':utf8>>, binary.Dec))\n\
-         \tprintln(binary.eq_ignore_ascii_case(<<'Content-Length':utf8>>, <<'content-length':utf8>>))\n\
-         \tprintln(binary.eq_ignore_ascii_case(<<'ab':utf8>>, <<'abc':utf8>>))\n\
-         \tprintln(binary.to_ascii_lower(<<'HeLLo':utf8>>) == <<'hello':utf8>>)\n\
-         \tprintln(binary.from_int_ascii(255, binary.Hex) == <<'ff':utf8>>)\n\
-         \tprintln(binary.from_int_ascii(-42, binary.Dec) == <<'-42':utf8>>)\n\
+         \tprintln(binary::byte_at(b, 0))\n\
+         \tprintln(binary::byte_at(b, 4))\n\
+         \tprintln(binary::byte_at(b, 5))\n\
+         \tprintln(binary::byte_at(b, -1))\n\
+         \tprintln(binary::byte_at(<<1, 5:size(3)>>, 1))\n\
+         \tprintln(binary::index_of(b, <<'l':utf8>>, 0))\n\
+         \tprintln(binary::index_of(b, <<'l':utf8>>, 3))\n\
+         \tprintln(binary::index_of(b, <<'z':utf8>>, 0))\n\
+         \tprintln(binary::index_of(b, <<>>, 2))\n\
+         \tprintln(binary::index_of(b, <<'h':utf8>>, 99))\n\
+         \tprintln(binary::parse_int(<<'1234':utf8>>, binary::Dec))\n\
+         \tprintln(binary::parse_int(<<'ff':utf8>>, binary::Hex))\n\
+         \tprintln(binary::parse_int(<<'FF':utf8>>, binary::Hex))\n\
+         \tprintln(binary::parse_int(<<'12a':utf8>>, binary::Dec))\n\
+         \tprintln(binary::parse_int(<<>>, binary::Dec))\n\
+         \tprintln(binary::parse_int(<<'-1':utf8>>, binary::Dec))\n\
+         \tprintln(binary::parse_int(<<'99999999999999999999':utf8>>, binary::Dec))\n\
+         \tprintln(binary::eq_ignore_ascii_case(<<'Content-Length':utf8>>, <<'content-length':utf8>>))\n\
+         \tprintln(binary::eq_ignore_ascii_case(<<'ab':utf8>>, <<'abc':utf8>>))\n\
+         \tprintln(binary::to_ascii_lower(<<'HeLLo':utf8>>) == <<'hello':utf8>>)\n\
+         \tprintln(binary::from_int_ascii(255, binary::Hex) == <<'ff':utf8>>)\n\
+         \tprintln(binary::from_int_ascii(-42, binary::Dec) == <<'-42':utf8>>)\n\
          }\n",
         "104\n111\n-1\n-1\n-1\nSome(2)\nSome(3)\nNone\nSome(2)\nNone\n\
          Ok(1234)\nOk(255)\nOk(255)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nOk(99999999999999999999)\n\
@@ -1047,21 +1047,21 @@ fn the_string_built_ins_run() {
         "import scarlet/int\n\
          import scarlet/string\n\
          pub fn main() {\n\
-         \tprintln(string.split('a,b,,c', ','))\n\
-         \tprintln(string.split('abc', ''))\n\
-         \tprintln(string.split('abc', 'x'))\n\
-         \tprintln(string.split('', ','))\n\
-         \tprintln(string.contains('hello', 'ell'))\n\
-         \tprintln(string.contains('hello', ''))\n\
-         \tprintln(string.contains('hello', 'z'))\n\
-         \tprintln('[${string.trim('  hi \\t\\n')}]')\n\
-         \tprintln(string.to_graphemes('e\\u{0301}a'))\n\
-         \tprintln(int.from_string('-42'))\n\
-         \tprintln(int.from_string('+007'))\n\
-         \tprintln(int.from_string('20O'))\n\
-         \tprintln(int.from_string(' 1'))\n\
-         \tprintln(int.from_string('-'))\n\
-         \tprintln(int.from_string('123456789012345678901234567890'))\n\
+         \tprintln(string::split('a,b,,c', ','))\n\
+         \tprintln(string::split('abc', ''))\n\
+         \tprintln(string::split('abc', 'x'))\n\
+         \tprintln(string::split('', ','))\n\
+         \tprintln(string::contains('hello', 'ell'))\n\
+         \tprintln(string::contains('hello', ''))\n\
+         \tprintln(string::contains('hello', 'z'))\n\
+         \tprintln('[${string::trim('  hi \\t\\n')}]')\n\
+         \tprintln(string::to_graphemes('e\\u{0301}a'))\n\
+         \tprintln(int::from_string('-42'))\n\
+         \tprintln(int::from_string('+007'))\n\
+         \tprintln(int::from_string('20O'))\n\
+         \tprintln(int::from_string(' 1'))\n\
+         \tprintln(int::from_string('-'))\n\
+         \tprintln(int::from_string('123456789012345678901234567890'))\n\
          }\n",
         "[a, b, , c]\n[a, b, c]\n[abc]\n[]\nTrue\nTrue\nFalse\n[hi]\n[e\u{0301}, a]\n\
          Ok(-42)\nOk(7)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nOk(123456789012345678901234567890)\n",
@@ -1076,25 +1076,25 @@ fn bitwise_operations_are_any_size() {
         "import scarlet/binary\n\
          import scarlet/int\n\
          pub fn main() {\n\
-         \tprintln(int.bitwise_and(12, 10))\n\
-         \tprintln(int.bitwise_or(12, 10))\n\
-         \tprintln(int.bitwise_xor(12, 10))\n\
-         \tprintln(int.bitwise_not(0))\n\
-         \tprintln(int.bitwise_not(5))\n\
-         \tprintln(int.bitwise_and(-1, 255))\n\
-         \tprintln(int.bitwise_shift_left(1, 64))\n\
-         \tprintln(int.bitwise_shift_left(3, -1))\n\
-         \tprintln(int.bitwise_shift_right(-8, 1))\n\
-         \tprintln(int.bitwise_shift_right(-7, 1))\n\
-         \tprintln(int.bitwise_shift_right(5, 100))\n\
-         \tprintln(int.bitwise_shift_right(-5, 100))\n\
-         \tprintln(int.bitwise_shift_right(1, -3))\n\
-         \tbig = int.bitwise_shift_left(1, 100)\n\
-         \tprintln(int.bitwise_and(big + 5, 7))\n\
-         \tprintln(int.bitwise_shift_right(big, 99))\n\
-         \tprintln(int.bitwise_and(int.bitwise_shift_right(-1, 4), int.bitwise_shift_left(1, 28) - 1))\n\
-         \tprintln(binary.hex_byte(13) == <<'0D':utf8>>)\n\
-         \tprintln(binary.hex_byte(255) == <<'FF':utf8>>)\n\
+         \tprintln(int::bitwise_and(12, 10))\n\
+         \tprintln(int::bitwise_or(12, 10))\n\
+         \tprintln(int::bitwise_xor(12, 10))\n\
+         \tprintln(int::bitwise_not(0))\n\
+         \tprintln(int::bitwise_not(5))\n\
+         \tprintln(int::bitwise_and(-1, 255))\n\
+         \tprintln(int::bitwise_shift_left(1, 64))\n\
+         \tprintln(int::bitwise_shift_left(3, -1))\n\
+         \tprintln(int::bitwise_shift_right(-8, 1))\n\
+         \tprintln(int::bitwise_shift_right(-7, 1))\n\
+         \tprintln(int::bitwise_shift_right(5, 100))\n\
+         \tprintln(int::bitwise_shift_right(-5, 100))\n\
+         \tprintln(int::bitwise_shift_right(1, -3))\n\
+         \tbig = int::bitwise_shift_left(1, 100)\n\
+         \tprintln(int::bitwise_and(big + 5, 7))\n\
+         \tprintln(int::bitwise_shift_right(big, 99))\n\
+         \tprintln(int::bitwise_and(int::bitwise_shift_right(-1, 4), int::bitwise_shift_left(1, 28) - 1))\n\
+         \tprintln(binary::hex_byte(13) == <<'0D':utf8>>)\n\
+         \tprintln(binary::hex_byte(255) == <<'FF':utf8>>)\n\
          }\n",
         "8\n14\n6\n-1\n-6\n255\n18446744073709551616\n1\n-4\n-4\n0\n-1\n8\n5\n2\n268435455\nTrue\nTrue\n",
     );
@@ -1105,22 +1105,22 @@ fn the_map_built_ins_run() {
     prints(
         "import scarlet/map\n\
          pub fn main() {\n\
-         \tm = map.set(map.set(map.new(), 'a', 1), 'b', 2)\n\
-         \tprintln(map.get(m, 'a'))\n\
-         \tprintln(map.get(m, 'z'))\n\
-         \tprintln(map.has(m, 'b'))\n\
-         \tprintln(map.size(m))\n\
-         \tn = map.set(m, 'a', 10)\n\
-         \tprintln('${map.get(n, 'a')} ${map.get(m, 'a')} ${map.size(n)}')\n\
-         \tgone = map.delete(m, 'a')\n\
-         \tprintln('${map.has(gone, 'a')} ${map.has(m, 'a')} ${map.size(gone)}')\n\
-         \tprintln(map.size(map.delete(m, 'nope')))\n\
+         \tm = map::set(map::set(map::new(), 'a', 1), 'b', 2)\n\
+         \tprintln(map::get(m, 'a'))\n\
+         \tprintln(map::get(m, 'z'))\n\
+         \tprintln(map::has(m, 'b'))\n\
+         \tprintln(map::size(m))\n\
+         \tn = map::set(m, 'a', 10)\n\
+         \tprintln('${map::get(n, 'a')} ${map::get(m, 'a')} ${map::size(n)}')\n\
+         \tgone = map::delete(m, 'a')\n\
+         \tprintln('${map::has(gone, 'a')} ${map::has(m, 'a')} ${map::size(gone)}')\n\
+         \tprintln(map::size(map::delete(m, 'nope')))\n\
          \tprintln(gone)\n\
-         \tprintln(map.keys(gone))\n\
-         \tprintln(map.values(gone))\n\
-         \tprintln(map.to_list(gone))\n\
-         \tprintln(map.new())\n\
-         \tprintln(map.delete(gone, 'b'))\n\
+         \tprintln(map::keys(gone))\n\
+         \tprintln(map::values(gone))\n\
+         \tprintln(map::to_list(gone))\n\
+         \tprintln(map::new())\n\
+         \tprintln(map::delete(gone, 'b'))\n\
          }\n",
         "Some(1)\nNone\nTrue\n2\nSome(10) Some(1) 2\nFalse True 1\n2\n{b: 2}\n[b]\n[2]\n[\n  (b, 2)\n]\n{}\n{}\n",
     );
@@ -1133,21 +1133,21 @@ fn equal_maps_are_in_the_same_order() {
     prints(
         "import scarlet/map\n\
          import scarlet/array\n\
-         fn fill(m map.Map(Int, Int), from Int, to Int, step Int) map.Map(Int, Int) {\n\
-         \tif from == to { m } else { fill(map.set(m, from, from * 2), from + step, to, step) }\n\
+         fn fill(m map::Map(Int, Int), from Int, to Int, step Int) map::Map(Int, Int) {\n\
+         \tif from == to { m } else { fill(map::set(m, from, from * 2), from + step, to, step) }\n\
          }\n\
          pub fn main() {\n\
-         \tup = fill(map.new(), 0, 500, 1)\n\
-         \tdown = fill(map.new(), 499, -1, -1)\n\
+         \tup = fill(map::new(), 0, 500, 1)\n\
+         \tdown = fill(map::new(), 499, -1, -1)\n\
          \tprintln(up == down)\n\
-         \tprintln(map.keys(up) == map.keys(down))\n\
+         \tprintln(map::keys(up) == map::keys(down))\n\
          \tprintln('${up}' == '${down}')\n\
-         \tfewer = map.delete(map.set(down, 1000, 0), 1000)\n\
+         \tfewer = map::delete(map::set(down, 1000, 0), 1000)\n\
          \tprintln(fewer == up)\n\
-         \tprintln(map.to_list(fewer) == map.to_list(up))\n\
-         \tprintln(up == map.set(up, 7, 0))\n\
-         \tprintln(up == map.delete(up, 7))\n\
-         \tprintln(array.length(map.keys(up)))\n\
+         \tprintln(map::to_list(fewer) == map::to_list(up))\n\
+         \tprintln(up == map::set(up, 7, 0))\n\
+         \tprintln(up == map::delete(up, 7))\n\
+         \tprintln(array::length(map::keys(up)))\n\
          }\n",
         "True\nTrue\nTrue\nTrue\nTrue\nFalse\nFalse\n500\n",
     );
@@ -1161,23 +1161,23 @@ fn a_key_is_found_by_any_equal_value() {
          import scarlet/binary\n\
          import scarlet/int\n\
          type P { P(x Int, y String) }\n\
-         fn one(key k, look k) Option(String) { map.get(map.set(map.new(), key, 'found'), look) }\n\
+         fn one(key k, look k) Option(String) { map::get(map::set(map::new(), key, 'found'), look) }\n\
          pub fn main() {\n\
          \tprintln(one(0..3, [0, 1, 2]))\n\
          \tprintln(one(0.0, -0.0))\n\
-         \tprintln(match binary.slice_bits(<<1, 2, 3>>, 8, 16) {\n\
+         \tprintln(match binary::slice_bits(<<1, 2, 3>>, 8, 16) {\n\
          \t\tOk(b) -> one(<<2, 3>>, b)\n\
          \t\tErr(Nil) -> None\n\
          \t})\n\
-         \tprintln(one(int.bitwise_shift_left(1, 100), int.bitwise_shift_left(2, 99)))\n\
+         \tprintln(one(int::bitwise_shift_left(1, 100), int::bitwise_shift_left(2, 99)))\n\
          \tprintln(one((1, 'a'), (1, 'a')))\n\
          \tprintln(one(P(1, 'p'), P(1, 'p')))\n\
          \tprintln(one('abc', 'ab${'c'}'))\n\
-         \tinner = map.set(map.set(map.new(), 1, 'one'), 2, 'two')\n\
-         \tprintln(one(inner, map.set(map.set(map.new(), 2, 'two'), 1, 'one')))\n\
+         \tinner = map::set(map::set(map::new(), 1, 'one'), 2, 'two')\n\
+         \tprintln(one(inner, map::set(map::set(map::new(), 2, 'two'), 1, 'one')))\n\
          \tprintln(one(0..3, [0, 1]))\n\
          \tprintln(one(P(1, 'p'), P(1, 'q')))\n\
-         \tprintln(one(inner, map.delete(inner, 1)))\n\
+         \tprintln(one(inner, map::delete(inner, 1)))\n\
          }\n",
         "Some(found)\nSome(found)\nSome(found)\nSome(found)\nSome(found)\nSome(found)\nSome(found)\nSome(found)\nNone\nNone\nNone\n",
     );
@@ -1199,12 +1199,12 @@ fn argv_and_env_come_from_the_host() {
         "import scarlet/os\n\
          import scarlet/map\n\
          pub fn main() {\n\
-         \tprintln(os.argv())\n\
-         \tprintln(os.get_env('HOME'))\n\
-         \tprintln(os.get_env('LANG'))\n\
-         \tprintln(os.get_env('NOT_SET'))\n\
-         \tprintln(map.size(os.env()))\n\
-         \tprintln(os.env() == os.env())\n\
+         \tprintln(os::argv())\n\
+         \tprintln(os::get_env('HOME'))\n\
+         \tprintln(os::get_env('LANG'))\n\
+         \tprintln(os::get_env('NOT_SET'))\n\
+         \tprintln(map::size(os::env()))\n\
+         \tprintln(os::env() == os::env())\n\
          }\n",
         "[main.scrl, --fast, two words]\nSome(/home/al)\nSome(C)\nNone\n2\nTrue\n",
     );
@@ -1218,29 +1218,29 @@ fn files_read_and_write_and_fail_with_their_error() {
     let file = dir.join("a.txt");
     std::fs::write(dir.join("plain"), "x").expect("a plain file");
     let src = "import scarlet/io\n\
-         fn say(r Result(a, io.IoError)) String {\n\
+         fn say(r Result(a, io::IoError)) String {\n\
          \tmatch r {\n\
          \t\tOk(v) -> 'ok ${v}'\n\
-         \t\tErr(io.NotFound(p)) -> 'not found ${p}'\n\
-         \t\tErr(io.IsADirectory(p)) -> 'a directory ${p}'\n\
-         \t\tErr(io.NotADirectory(p)) -> 'not a directory ${p}'\n\
-         \t\tErr(io.InvalidData(p)) -> 'not text ${p}'\n\
-         \t\tErr(io.UnalignedBinary) -> 'not whole bytes'\n\
+         \t\tErr(io::NotFound(p)) -> 'not found ${p}'\n\
+         \t\tErr(io::IsADirectory(p)) -> 'a directory ${p}'\n\
+         \t\tErr(io::NotADirectory(p)) -> 'not a directory ${p}'\n\
+         \t\tErr(io::InvalidData(p)) -> 'not text ${p}'\n\
+         \t\tErr(io::UnalignedBinary) -> 'not whole bytes'\n\
          \t\tErr(e) -> 'another error ${e}'\n\
          \t}\n\
          }\n\
          pub fn main() {\n\
-         \tprintln(say(io.write_text('DIR/a.txt', 'hello')))\n\
-         \tprintln(say(io.read_text('DIR/a.txt')))\n\
-         \tprintln(say(io.write_file('DIR/a.txt', <<104, 105>>)))\n\
-         \tprintln(say(io.read_file('DIR/a.txt')))\n\
-         \tprintln(say(io.write_file('DIR/b.txt', <<1:4>>)))\n\
-         \tprintln(say(io.read_file('DIR/missing')))\n\
-         \tprintln(say(io.read_file('DIR')))\n\
-         \tprintln(say(io.write_text('DIR/no/such/dir', 'x')))\n\
-         \tprintln(say(io.read_file('DIR/plain/under')))\n\
-         \tprintln(say(io.write_file('DIR/x.bin', <<255>>)))\n\
-         \tprintln(say(io.read_text('DIR/x.bin')))\n\
+         \tprintln(say(io::write_text('DIR/a.txt', 'hello')))\n\
+         \tprintln(say(io::read_text('DIR/a.txt')))\n\
+         \tprintln(say(io::write_file('DIR/a.txt', <<104, 105>>)))\n\
+         \tprintln(say(io::read_file('DIR/a.txt')))\n\
+         \tprintln(say(io::write_file('DIR/b.txt', <<1:4>>)))\n\
+         \tprintln(say(io::read_file('DIR/missing')))\n\
+         \tprintln(say(io::read_file('DIR')))\n\
+         \tprintln(say(io::write_text('DIR/no/such/dir', 'x')))\n\
+         \tprintln(say(io::read_file('DIR/plain/under')))\n\
+         \tprintln(say(io::write_file('DIR/x.bin', <<255>>)))\n\
+         \tprintln(say(io::read_text('DIR/x.bin')))\n\
          }\n"
     .replace("DIR", &dir.display().to_string());
     let d = dir.display();
@@ -1268,16 +1268,16 @@ fn the_clocks_and_random_bytes_run() {
          import scarlet/crypto\n\
          import scarlet/binary\n\
          pub fn main() {\n\
-         \tstart = time.monotonic()\n\
-         \tprintln(time.since_ms(time.monotonic(), start) >= 0)\n\
-         \tprintln(time.epoch_ms() > 1700000000000)\n\
-         \tprintln(match crypto.random_bytes(33) {\n\
-         \t\tOk(b) -> binary.byte_size(b)\n\
+         \tstart = time::monotonic()\n\
+         \tprintln(time::since_ms(time::monotonic(), start) >= 0)\n\
+         \tprintln(time::epoch_ms() > 1700000000000)\n\
+         \tprintln(match crypto::random_bytes(33) {\n\
+         \t\tOk(b) -> binary::byte_size(b)\n\
          \t\tErr(Nil) -> -1\n\
          \t})\n\
-         \tprintln(crypto.random_bytes(0))\n\
-         \tprintln(crypto.random_bytes(-1))\n\
-         \tprintln(crypto.random_bytes(16) == crypto.random_bytes(16))\n\
+         \tprintln(crypto::random_bytes(0))\n\
+         \tprintln(crypto::random_bytes(-1))\n\
+         \tprintln(crypto::random_bytes(16) == crypto::random_bytes(16))\n\
          }\n",
         "True\nTrue\n33\nOk(<<>>)\nErr(Nil)\nFalse\n",
     );
@@ -1316,28 +1316,28 @@ fn the_crypto_built_ins_run() {
     let src = "import scarlet/crypto\n\
          import scarlet/binary\n\
          pub fn main() {\n\
-         \tprintln(crypto.sha256(<<'abc'>>) == Ok(SHA256_ABC))\n\
-         \tprintln(crypto.sha512(<<'abc'>>) == Ok(SHA512_ABC))\n\
-         \tprintln(crypto.sha1(<<'abc'>>) == Ok(SHA1_ABC))\n\
-         \tprintln(crypto.hmac_sha256(<<'Jefe'>>, <<'what do ya want for nothing?'>>) == Ok(HMAC_JEFE))\n\
-         \tprintln(crypto.sha256(<<1:4>>))\n\
-         \tprintln(crypto.sha512(<<97, 1:4>>))\n\
-         \tprintln(crypto.hmac_sha256(<<1:4>>, <<>>))\n\
-         \tprintln(crypto.hmac_sha256(<<>>, <<1:4>>))\n\
-         \tprintln(crypto.const_eq(<<1, 2, 3>>, <<1, 2, 3>>))\n\
-         \tprintln(crypto.const_eq(<<1, 2, 3>>, <<1, 2, 4>>))\n\
-         \tprintln(crypto.const_eq(<<1, 2>>, <<1, 2, 3>>))\n\
-         \tprintln(crypto.const_eq(<<1, 2:4>>, <<1, 3:4>>))\n\
-         \tprintln(crypto.const_eq(<<1, 2:4>>, <<1, 2:4>>))\n\
-         \tprintln(crypto.const_eq(<<1:4>>, <<16>>))\n\
-         \tprintln(crypto.p256_verify(P256_KEY, <<'signed'>>, P256_SIG))\n\
-         \tprintln(crypto.p256_verify(P256_KEY, <<'signeD'>>, P256_SIG))\n\
-         \tprintln(crypto.p256_verify(<<4, 1, 2>>, <<'signed'>>, P256_SIG))\n\
-         \tprintln(crypto.p256_verify(P256_KEY, <<'signed', 1:4>>, P256_SIG))\n\
-         \tprintln(crypto.ed25519_verify(ED_KEY, <<'signed'>>, ED_SIG))\n\
-         \tprintln(crypto.ed25519_verify(ED_KEY, <<'signeD'>>, ED_SIG))\n\
-         \tprintln(crypto.ed25519_verify(ED_KEY, <<'signed'>>, <<1, 2, 3>>))\n\
-         \tprintln(crypto.ed25519_verify(ED_KEY, <<'signed'>>, P256_SIG))\n\
+         \tprintln(crypto::sha256(<<'abc'>>) == Ok(SHA256_ABC))\n\
+         \tprintln(crypto::sha512(<<'abc'>>) == Ok(SHA512_ABC))\n\
+         \tprintln(crypto::sha1(<<'abc'>>) == Ok(SHA1_ABC))\n\
+         \tprintln(crypto::hmac_sha256(<<'Jefe'>>, <<'what do ya want for nothing?'>>) == Ok(HMAC_JEFE))\n\
+         \tprintln(crypto::sha256(<<1:4>>))\n\
+         \tprintln(crypto::sha512(<<97, 1:4>>))\n\
+         \tprintln(crypto::hmac_sha256(<<1:4>>, <<>>))\n\
+         \tprintln(crypto::hmac_sha256(<<>>, <<1:4>>))\n\
+         \tprintln(crypto::const_eq(<<1, 2, 3>>, <<1, 2, 3>>))\n\
+         \tprintln(crypto::const_eq(<<1, 2, 3>>, <<1, 2, 4>>))\n\
+         \tprintln(crypto::const_eq(<<1, 2>>, <<1, 2, 3>>))\n\
+         \tprintln(crypto::const_eq(<<1, 2:4>>, <<1, 3:4>>))\n\
+         \tprintln(crypto::const_eq(<<1, 2:4>>, <<1, 2:4>>))\n\
+         \tprintln(crypto::const_eq(<<1:4>>, <<16>>))\n\
+         \tprintln(crypto::p256_verify(P256_KEY, <<'signed'>>, P256_SIG))\n\
+         \tprintln(crypto::p256_verify(P256_KEY, <<'signeD'>>, P256_SIG))\n\
+         \tprintln(crypto::p256_verify(<<4, 1, 2>>, <<'signed'>>, P256_SIG))\n\
+         \tprintln(crypto::p256_verify(P256_KEY, <<'signed', 1:4>>, P256_SIG))\n\
+         \tprintln(crypto::ed25519_verify(ED_KEY, <<'signed'>>, ED_SIG))\n\
+         \tprintln(crypto::ed25519_verify(ED_KEY, <<'signeD'>>, ED_SIG))\n\
+         \tprintln(crypto::ed25519_verify(ED_KEY, <<'signed'>>, <<1, 2, 3>>))\n\
+         \tprintln(crypto::ed25519_verify(ED_KEY, <<'signed'>>, P256_SIG))\n\
          }\n"
         .replace(
             "SHA256_ABC",
@@ -1385,25 +1385,25 @@ fn the_json_built_ins_run() {
         "import scarlet/json\n\
          pub fn main() {\n\
          \tsrc = '{\"id\": 18446744073709551615, \"n\": -3, \"x\": 0.5, \"s\": \"a\\\\u00e9\", \"t\": [true, null], \"o\": {}}'\n\
-         \tmatch json.parse(src) {\n\
+         \tmatch json::parse(src) {\n\
          \t\tOk(d) -> {\n\
-         \t\t\tprintln('${d} ${json.size(d)}')\n\
-         \t\t\tprintln(json.int(json.field(d, 'id') or d))\n\
-         \t\t\tprintln(json.int_text(json.field(d, 'n') or d))\n\
-         \t\t\tprintln(json.float(json.field(d, 'x') or d))\n\
-         \t\t\tprintln(json.string(json.field(d, 's') or d))\n\
-         \t\t\tt = json.field(d, 't') or d\n\
-         \t\t\tprintln(json.bool(json.index(t, 0) or d))\n\
-         \t\t\tprintln(json.is_null(json.index(t, 1) or d))\n\
-         \t\t\tprintln(json.index(t, 2))\n\
-         \t\t\tprintln(json.field(d, 'missing'))\n\
-         \t\t\tprintln(json.size(json.field(d, 'o') or d))\n\
-         \t\t\tprintln(json.reencode(d))\n\
+         \t\t\tprintln('${d} ${json::size(d)}')\n\
+         \t\t\tprintln(json::int(json::field(d, 'id') or d))\n\
+         \t\t\tprintln(json::int_text(json::field(d, 'n') or d))\n\
+         \t\t\tprintln(json::float(json::field(d, 'x') or d))\n\
+         \t\t\tprintln(json::string(json::field(d, 's') or d))\n\
+         \t\t\tt = json::field(d, 't') or d\n\
+         \t\t\tprintln(json::bool(json::index(t, 0) or d))\n\
+         \t\t\tprintln(json::is_null(json::index(t, 1) or d))\n\
+         \t\t\tprintln(json::index(t, 2))\n\
+         \t\t\tprintln(json::field(d, 'missing'))\n\
+         \t\t\tprintln(json::size(json::field(d, 'o') or d))\n\
+         \t\t\tprintln(json::reencode(d))\n\
          \t\t}\n\
          \t\tErr(_) -> println('did not parse')\n\
          \t}\n\
-         \tprintln(json.encode(json.List([json.Null, json.Boolean(True), json.Integer(-7), json.Real(1.0), json.Str('a\"b'), json.Object([('k', json.Number('1e9'))]), json.Number('x')])))\n\
-         \tprintln(match json.parse('[1,]') {\n\
+         \tprintln(json::encode(json::List([json::Null, json::Boolean(True), json::Integer(-7), json::Real(1.0), json::Str('a\"b'), json::Object([('k', json::Number('1e9'))]), json::Number('x')])))\n\
+         \tprintln(match json::parse('[1,]') {\n\
          \t\tOk(_) -> 'parsed'\n\
          \t\tErr(_) -> 'refused'\n\
          \t})\n\

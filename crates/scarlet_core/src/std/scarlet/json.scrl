@@ -98,7 +98,7 @@ pub fn parse_binary(src Binary) Result(Doc, ParseError) {
 }
 
 pub fn parse(src String) Result(Doc, ParseError) {
-	parse_binary_raw(binary.from_string(src))
+	parse_binary_raw(binary::from_string(src))
 }
 
 // `kind_raw` is -1 for a tape that does not decode. That must read as the kind
@@ -138,7 +138,7 @@ pub fn elements(d Doc) Array(Doc)
 pub fn to_json(d Doc) Json {
 	match kind(d) {
 		NullKind -> Null
-		BoolKind -> Boolean(option.unwrap(bool(d), False))
+		BoolKind -> Boolean(option::unwrap(bool(d), False))
 		// Never `0` as a default: a `reencode` would zero every id it touched.
 		IntKind -> match int(d) {
 			Some(i) -> Integer(i)
@@ -147,8 +147,8 @@ pub fn to_json(d Doc) Json {
 				None -> Null
 			}
 		}
-		FloatKind -> Real(option.unwrap(float(d), 0.0))
-		StringKind -> Str(option.unwrap(string(d), ''))
+		FloatKind -> Real(option::unwrap(float(d), 0.0))
+		StringKind -> Str(option::unwrap(string(d), ''))
 		ArrayKind -> List(array_map_to_json(elements(d)))
 		ObjectKind -> Object(entries_to_json(entries(d)))
 	}

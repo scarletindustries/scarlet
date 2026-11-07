@@ -45,17 +45,17 @@ fn third(xs Array(Int)) Int {
 }
 
 pub fn main() {
-	downs = process.subject()
+	downs = process::subject()
 	xs = [1, 2, 3]
-	worker = process.spawn_unlinked(fn() {
+	worker = process::spawn_unlinked(fn() {
 		// An out-of-range slice is the simplest way to crash on purpose.
 		_ = xs[0..9]
 		Nil
 	})
-	_ = process.monitor(worker, downs, fn(d) d)
-	match process.receive(downs).reason {
-		process.Crashed(process.SliceOutOfBounds(from, to, length)) -> println('crashed: slice ${from}..${to} of ${length}')
-		process.Crashed(_) -> println('crashed some other way')
+	_ = process::monitor(worker, downs, fn(d) d)
+	match process::receive(downs).reason {
+		process::Crashed(process::SliceOutOfBounds(from, to, length)) -> println('crashed: slice ${from}..${to} of ${length}')
+		process::Crashed(_) -> println('crashed some other way')
 		_ -> println('did not crash')
 	}
 	println('spawner still running: ${third(xs)}')
@@ -89,7 +89,7 @@ fn a_main_crash_fails_the_run_and_is_reported_once() {
 
 pub fn main() {
 	println('before')
-	_ = int.bitwise_shift_left(1, int.max_value)
+	_ = int::bitwise_shift_left(1, int::max_value)
 	println('after')
 }
 "#,
@@ -116,12 +116,12 @@ fn a_linked_childs_crash_kills_main() {
 
 pub fn main() {
 	xs = [1, 2, 3]
-	_ = process.spawn(fn() {
+	_ = process::spawn(fn() {
 		_ = xs[2..8]
 		Nil
 	})
 	// Blocked for ever: only the link can end this process.
-	_ = process.receive(process.subject())
+	_ = process::receive(process::subject())
 	println('unreachable')
 }
 "#,
@@ -147,7 +147,7 @@ fn a_main_crash_kills_linked_workers() {
 
 pub fn main() {
 	// Linked to main; would otherwise keep the program alive for a minute.
-	_ = process.spawn(fn() process.sleep(60000))
+	_ = process::spawn(fn() process::sleep(60000))
 	xs = [1]
 	_ = xs[0..5]
 }
@@ -171,19 +171,19 @@ fn a_cascade_stops_at_an_unlinked_process() {
         r#"import scarlet/process
 
 pub fn main() {
-	downs = process.subject()
+	downs = process::subject()
 	xs = [1, 2]
-	middle = process.spawn_unlinked(fn() {
+	middle = process::spawn_unlinked(fn() {
 		// Linked to middle: its crash kills middle, and stops there.
-		_ = process.spawn(fn() {
+		_ = process::spawn(fn() {
 			_ = xs[0..3]
 			Nil
 		})
-		process.receive(process.subject())
+		process::receive(process::subject())
 	})
-	_ = process.monitor(middle, downs, fn(d) d)
-	match process.receive(downs).reason {
-		process.Killed -> println('middle was killed by its child')
+	_ = process::monitor(middle, downs, fn(d) d)
+	match process::receive(downs).reason {
+		process::Killed -> println('middle was killed by its child')
 		_ -> println('unexpected reason')
 	}
 	println('main survived')
@@ -219,26 +219,26 @@ import scarlet/process
 
 pub fn main() {
 	xs = [1, 2, 3]
-	match net.listen('127.0.0.1', 0) {
-		Ok(server) -> match net.local_addr(server) {
+	match net::listen('127.0.0.1', 0) {
+		Ok(server) -> match net::local_addr(server) {
 			Ok(addr) -> {
-				_ = net.serve_on(server, fn(sock) {
-					match socket.read(sock, 16) {
-						Ok(socket.Data(b)) -> {
+				_ = net::serve_on(server, fn(sock) {
+					match socket::read(sock, 16) {
+						Ok(socket::Data(b)) -> {
 							if b == <<'crash'>> {
 								_ = xs[0..9]
 								Nil
 							} else {
-								socket.write(sock, <<'served'>>) or Nil
+								socket::write(sock, <<'served'>>) or Nil
 							}
 						}
-						Ok(socket.Closed) -> Nil
+						Ok(socket::Closed) -> Nil
 						Err(_) -> Nil
 					}
 				})
-				println('listening ${address.to_string(addr)}')
+				println('listening ${address::to_string(addr)}')
 				// Keep serving until told to stop; the test drives connections.
-				process.sleep(20000)
+				process::sleep(20000)
 			}
 			Err(_) -> println('no addr')
 		}

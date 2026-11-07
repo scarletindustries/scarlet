@@ -17,10 +17,10 @@ const LAST_CHUNK = <<'0\r\n\r\n'>>
 // they must share a module.
 pub type Pull {
 	Chunk(data Binary, next Body)
-	Done(trailers Array(headers.Header))
+	Done(trailers Array(headers::Header))
 }
 
-pub type Body = fn() Result(Pull, error.NetError)
+pub type Body = fn() Result(Pull, error::NetError)
 
 pub fn empty() Body {
 	fn() Ok(Done([]))
@@ -34,20 +34,20 @@ pub fn from_binary(b Binary) Body {
 // Exactly `n` more bytes from `reader`, then Done; a close before that is
 // UnexpectedEof. `n <= 0` reads nothing. Every read counts against the one
 // `deadline`, so a peer sending a byte at a time runs out of time.
-pub fn content_length(reader socket.Socket, n Int, deadline time.Instant) Body {
+pub fn content_length(reader socket::Socket, n Int, deadline time::Instant) Body {
 	fn() if n <= 0 {
 		Ok(Done([]))
 	} else {
-		match socket.read_until(reader, int.min(n, READ_SIZE), deadline) {
-			Ok(socket.Data(chunk)) ->
-				Ok(Chunk(chunk, content_length(reader, n - binary.byte_size(chunk), deadline)))
-			Ok(socket.Closed) -> Err(error.UnexpectedEof)
+		match socket::read_until(reader, int::min(n, READ_SIZE), deadline) {
+			Ok(socket::Data(chunk)) ->
+				Ok(Chunk(chunk, content_length(reader, n - binary::byte_size(chunk), deadline)))
+			Ok(socket::Closed) -> Err(error::UnexpectedEof)
 			Err(e) -> Err(e)
 		}
 	}
 }
 
-pub fn pull(b Body) Result(Pull, error.NetError) {
+pub fn pull(b Body) Result(Pull, error::NetError) {
 	b()
 }
 
@@ -63,7 +63,7 @@ pub type Buffered {
 
 // Find out whether a body is one chunk in memory (to batch with other writes)
 // or a real stream (to drain). It never writes, so an Err is always the body's.
-pub fn take_buffered(b Body) Result(Buffered, error.NetError) {
+pub fn take_buffered(b Body) Result(Buffered, error::NetError) {
 	match pull(b) {
 		Err(e) -> Err(e)
 		Ok(Done(_)) -> Ok(Empty)
@@ -77,7 +77,7 @@ pub fn take_buffered(b Body) Result(Buffered, error.NetError) {
 
 // Pull the first step early, so a body that fails at once is found before any
 // bytes are written. The returned body replays that step. Never writes.
-pub fn probe(b Body) Result(Body, error.NetError) {
+pub fn probe(b Body) Result(Body, error::NetError) {
 	match pull(b) {
 		Ok(step) -> Ok(fn() Ok(step))
 		Err(e) -> Err(e)
@@ -88,33 +88,33 @@ pub fn probe(b Body) Result(Body, error.NetError) {
 // works; after a sink failure nothing more can be sent.
 pub type DrainError {
 	// The body failed. Bytes from earlier steps may already be on the wire.
-	SourceFailed(err error.NetError)
+	SourceFailed(err error::NetError)
 	// A socket write failed; the connection is unusable.
-	SinkFailed(err error.NetError)
+	SinkFailed(err error::NetError)
 }
 
 // Write a whole body to `sock`, a chunk at a time. A slow reader slows the
 // pulls, and memory stays at one chunk. Trailers are dropped: a raw body
 // cannot carry them.
-pub fn drain(body Body, sock socket.Socket) Result(Nil, DrainError) {
+pub fn drain(body Body, sock socket::Socket) Result(Nil, DrainError) {
 	drain_prefixed([], body, sock)
 }
 
 // Like `drain`, with `head` in the same write as the first chunk.
-pub fn drain_with_head(head Binary, body Body, sock socket.Socket) Result(Nil, DrainError) {
+pub fn drain_with_head(head Binary, body Body, sock socket::Socket) Result(Nil, DrainError) {
 	drain_prefixed([head], body, sock)
 }
 
 // `prefix` goes in the first write, and is `[]` after.
-fn drain_prefixed(prefix Array(Binary), body Body, sock socket.Socket) Result(Nil, DrainError) {
+fn drain_prefixed(prefix Array(Binary), body Body, sock socket::Socket) Result(Nil, DrainError) {
 	match pull(body) {
-		Ok(Chunk(data, next)) -> match socket.write_parts(sock, [..prefix, data]) {
+		Ok(Chunk(data, next)) -> match socket::write_parts(sock, [..prefix, data]) {
 			Ok(Nil) -> drain_prefixed([], next, sock)
 			Err(e) -> Err(SinkFailed(e))
 		}
 		Ok(Done(_)) -> match prefix {
 			[] -> Ok(Nil)
-			_ -> match socket.write_parts(sock, prefix) {
+			_ -> match socket::write_parts(sock, prefix) {
 				Ok(Nil) -> Ok(Nil)
 				Err(e) -> Err(SinkFailed(e))
 			}
@@ -136,23 +136,23 @@ pub type Drained {
 
 // Like `drain`, but writes at most `limit` bytes. A chunk that would pass the
 // limit is not written, so no byte past an advertised length goes out.
-pub fn drain_counted(body Body, sock socket.Socket, limit Int) Result(Drained, DrainError) {
+pub fn drain_counted(body Body, sock socket::Socket, limit Int) Result(Drained, DrainError) {
 	drain_counted_from(body, sock, limit, 0)
 }
 
 fn drain_counted_from(
 	body Body,
-	sock socket.Socket,
+	sock socket::Socket,
 	limit Int,
 	written Int,
 ) Result(Drained, DrainError) {
 	match pull(body) {
 		Ok(Chunk(data, next)) -> {
-			total = written + binary.byte_size(data)
+			total = written + binary::byte_size(data)
 			if total > limit {
 				Ok(Overran(written))
 			} else {
-				match socket.write(sock, data) {
+				match socket::write(sock, data) {
 					Ok(Nil) -> drain_counted_from(next, sock, limit, total)
 					Err(e) -> Err(SinkFailed(e))
 				}
@@ -170,12 +170,16 @@ fn drain_counted_from(
 // Write a body with chunked framing, so a body of unknown length can keep an
 // HTTP/1.1 connection open. Empty chunks are skipped: a zero-size chunk would
 // end the body.
-pub fn drain_chunked(body Body, sock socket.Socket) Result(Nil, DrainError) {
+pub fn drain_chunked(body Body, sock socket::Socket) Result(Nil, DrainError) {
 	drain_chunked_prefixed([], body, sock)
 }
 
 // Like `drain_chunked`, with `head` in the same write as the first chunk.
-pub fn drain_chunked_with_head(head Binary, body Body, sock socket.Socket) Result(Nil, DrainError) {
+pub fn drain_chunked_with_head(
+	head Binary,
+	body Body,
+	sock socket::Socket,
+) Result(Nil, DrainError) {
 	drain_chunked_prefixed([head], body, sock)
 }
 
@@ -183,14 +187,14 @@ pub fn drain_chunked_with_head(head Binary, body Body, sock socket.Socket) Resul
 fn drain_chunked_prefixed(
 	prefix Array(Binary),
 	body Body,
-	sock socket.Socket,
+	sock socket::Socket,
 ) Result(Nil, DrainError) {
 	match pull(body) {
-		Ok(Chunk(data, next)) -> match binary.byte_size(data) {
+		Ok(Chunk(data, next)) -> match binary::byte_size(data) {
 			0 -> drain_chunked_prefixed(prefix, next, sock)
 			size -> {
-				header = binary.append(binary.from_int_ascii(size, binary.Hex), CRLF)
-				match socket.write_parts(sock, [..prefix, header, data, CRLF]) {
+				header = binary::append(binary::from_int_ascii(size, binary::Hex), CRLF)
+				match socket::write_parts(sock, [..prefix, header, data, CRLF]) {
 					Ok(Nil) -> drain_chunked_prefixed([], next, sock)
 					Err(e) -> Err(SinkFailed(e))
 				}
@@ -199,9 +203,9 @@ fn drain_chunked_prefixed(
 		Ok(Done(trailers)) -> {
 			terminator = match trailers {
 				[] -> [LAST_CHUNK]
-				_ -> [ZERO, CRLF, ..headers.render(trailers), CRLF]
+				_ -> [ZERO, CRLF, ..headers::render(trailers), CRLF]
 			}
-			match socket.write_parts(sock, [..prefix, ..terminator]) {
+			match socket::write_parts(sock, [..prefix, ..terminator]) {
 				Ok(Nil) -> Ok(Nil)
 				Err(e) -> Err(SinkFailed(e))
 			}
@@ -212,16 +216,16 @@ fn drain_chunked_prefixed(
 
 // Read a whole body into one Binary, at most `max` bytes (MessageTooLarge).
 // The size is checked before each append, so it never grows past `max`.
-pub fn collect(body Body, max Int) Result(Binary, error.NetError) {
+pub fn collect(body Body, max Int) Result(Binary, error::NetError) {
 	collect_into(body, max, <<>>)
 }
 
-fn collect_into(body Body, max Int, acc Binary) Result(Binary, error.NetError) {
+fn collect_into(body Body, max Int, acc Binary) Result(Binary, error::NetError) {
 	match pull(body) {
-		Ok(Chunk(data, next)) -> if binary.byte_size(acc) + binary.byte_size(data) > max {
-			Err(error.MessageTooLarge(max))
+		Ok(Chunk(data, next)) -> if binary::byte_size(acc) + binary::byte_size(data) > max {
+			Err(error::MessageTooLarge(max))
 		} else {
-			collect_into(next, max, binary.append(acc, data))
+			collect_into(next, max, binary::append(acc, data))
 		}
 		Ok(Done(_)) -> Ok(acc)
 		Err(e) -> Err(e)

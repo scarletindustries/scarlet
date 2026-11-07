@@ -526,7 +526,7 @@
         }
       },
       "comment": "Labeled call argument: label: value",
-      "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s*(:)"
+      "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s*(:)(?!:)"
     },
     "module-qualified-access": {
       "captures": {
@@ -534,11 +534,11 @@
           "name": "entity.name.namespace.scrl"
         },
         "2": {
-          "name": "punctuation.accessor.scrl"
+          "name": "punctuation.accessor.module.scrl"
         }
       },
-      "comment": "module.name access (lowercase qualifier)",
-      "match": "\\b([a-z_][a-zA-Z0-9_]*)(\\.)(?=[A-Za-z_])"
+      "comment": "module::name access",
+      "match": "\\b([a-z_][a-zA-Z0-9_]*)(::)(?=[A-Za-z_])"
     },
     "numbers": {
       "comment": "Scanner::scan_number. Hex (`0x`) and binary (`0b`) first so they are not split into `0` + identifier. `_` is a digit separator only between two digits of that radix.",
@@ -614,6 +614,10 @@
         {
           "match": ",",
           "name": "punctuation.separator.comma.scrl"
+        },
+        {
+          "match": "::",
+          "name": "punctuation.accessor.module.scrl"
         },
         {
           "match": ":",

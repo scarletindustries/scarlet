@@ -25,9 +25,9 @@ fn stdlib_option() {
     run_outputs(
         "import scarlet/option\n\
          pub fn main() {\n\
-         \tprintln(option.map(Some(5), fn(x) x * 2))\n\
-         \tprintln(option.unwrap(None, 99))\n\
-         \tprintln(option.is_some(Some(1)))\n\
+         \tprintln(option::map(Some(5), fn(x) x * 2))\n\
+         \tprintln(option::unwrap(None, 99))\n\
+         \tprintln(option::is_some(Some(1)))\n\
          }\n",
         "Some(10)\n99\nTrue\n",
     );
@@ -35,8 +35,8 @@ fn stdlib_option() {
     run_outputs(
         "import scarlet/option\n\
          pub fn main() {\n\
-         \tprintln(option.then(Some(5), fn(x) Some(x + 1)))\n\
-         \tprintln(option.then(None, fn(x) Some(x + 1)))\n\
+         \tprintln(option::then(Some(5), fn(x) Some(x + 1)))\n\
+         \tprintln(option::then(None, fn(x) Some(x + 1)))\n\
          }\n",
         "Some(6)\nNone\n",
     );
@@ -44,16 +44,16 @@ fn stdlib_option() {
     run_outputs(
         "import scarlet/option\n\
          pub fn main() {\n\
-         \tprintln(option.or_else(Some(1), fn() Some(2)))\n\
-         \tprintln(option.or_else(None, fn() Some(2)))\n\
+         \tprintln(option::or_else(Some(1), fn() Some(2)))\n\
+         \tprintln(option::or_else(None, fn() Some(2)))\n\
          }\n",
         "Some(1)\nSome(2)\n",
     );
     run_outputs(
         "import scarlet/option\n\
          pub fn main() {\n\
-         \tprintln(option.is_none(None))\n\
-         \tprintln(option.is_none(Some(1)))\n\
+         \tprintln(option::is_none(None))\n\
+         \tprintln(option::is_none(Some(1)))\n\
          }\n",
         "True\nFalse\n",
     );
@@ -61,9 +61,9 @@ fn stdlib_option() {
     run_outputs(
         "import scarlet/option\n\
          pub fn main() {\n\
-         \tprintln(option.map(None, fn(x) x * 2))\n\
-         \tprintln(option.unwrap(Some(5), 99))\n\
-         \tprintln(option.is_some(None))\n\
+         \tprintln(option::map(None, fn(x) x * 2))\n\
+         \tprintln(option::unwrap(Some(5), 99))\n\
+         \tprintln(option::is_some(None))\n\
          }\n",
         "None\n5\nFalse\n",
     );
@@ -74,8 +74,8 @@ fn stdlib_result() {
     run_outputs(
         "import scarlet/result\n\
          pub fn main() {\n\
-         \tprintln(result.map(Ok(5), fn(x) x + 1))\n\
-         \tprintln(result.map_err(Err('bad'), fn(e) '${e}!'))\n\
+         \tprintln(result::map(Ok(5), fn(x) x + 1))\n\
+         \tprintln(result::map_err(Err('bad'), fn(e) '${e}!'))\n\
          }\n",
         "Ok(6)\nErr(bad!)\n",
     );
@@ -83,8 +83,8 @@ fn stdlib_result() {
     run_outputs(
         "import scarlet/result\n\
          pub fn main() {\n\
-         \tprintln(result.then(Ok(5), fn(x) Ok(x + 1)))\n\
-         \tprintln(result.then(Err('e'), fn(x) Ok(x + 1)))\n\
+         \tprintln(result::then(Ok(5), fn(x) Ok(x + 1)))\n\
+         \tprintln(result::then(Err('e'), fn(x) Ok(x + 1)))\n\
          }\n",
         "Ok(6)\nErr(e)\n",
     );
@@ -93,8 +93,8 @@ fn stdlib_result() {
     run_outputs(
         "import scarlet/result\n\
          pub fn main() {\n\
-         \tprintln(result.unwrap(Ok(5), 0))\n\
-         \tprintln(result.unwrap(Err(Nil), 99))\n\
+         \tprintln(result::unwrap(Ok(5), 0))\n\
+         \tprintln(result::unwrap(Err(Nil), 99))\n\
          }\n",
         "5\n99\n",
     );
@@ -103,18 +103,18 @@ fn stdlib_result() {
     run_outputs(
         "import scarlet/result\n\
          pub fn main() {\n\
-         \tprintln(result.replace_err(Ok(5), 'boom'))\n\
-         \tprintln(result.replace_err(Err(Nil), 'boom'))\n\
+         \tprintln(result::replace_err(Ok(5), 'boom'))\n\
+         \tprintln(result::replace_err(Err(Nil), 'boom'))\n\
          }\n",
         "Ok(5)\nErr(boom)\n",
     );
     run_outputs(
         "import scarlet/result\n\
          pub fn main() {\n\
-         \tprintln(result.is_ok(Ok(1)))\n\
-         \tprintln(result.is_ok(Err('x')))\n\
-         \tprintln(result.is_err(Err('x')))\n\
-         \tprintln(result.is_err(Ok(1)))\n\
+         \tprintln(result::is_ok(Ok(1)))\n\
+         \tprintln(result::is_ok(Err('x')))\n\
+         \tprintln(result::is_err(Err('x')))\n\
+         \tprintln(result::is_err(Ok(1)))\n\
          }\n",
         "True\nFalse\nTrue\nFalse\n",
     );
@@ -122,8 +122,8 @@ fn stdlib_result() {
     run_outputs(
         "import scarlet/result\n\
          pub fn main() {\n\
-         \tprintln(result.map(Err('e'), fn(x) x + 1))\n\
-         \tprintln(result.map_err(Ok(5), fn(e) e))\n\
+         \tprintln(result::map(Err('e'), fn(x) x + 1))\n\
+         \tprintln(result::map_err(Ok(5), fn(e) e))\n\
          }\n",
         "Err(e)\nOk(5)\n",
     );
@@ -135,7 +135,7 @@ fn stdlib_resource() {
     run_outputs(
         "import scarlet/resource\n\
          pub fn main() {\n\
-         \tr = resource.with(fn() 10, fn(c) println('release ${c}'), fn(c) c * 2)\n\
+         \tr = resource::with(fn() 10, fn(c) println('release ${c}'), fn(c) c * 2)\n\
          \tprintln(r)\n\
          }\n",
         "release 10\n20\n",
@@ -145,8 +145,8 @@ fn stdlib_resource() {
     run_outputs(
         "import scarlet/resource\n\
          pub fn main() {\n\
-         \tprintln(resource.try_with(fn() Ok(1), fn(c) println('release ${c}'), fn(c) c + 1))\n\
-         \tprintln(resource.try_with(fn() Err(Nil), fn(_) println('never'), fn(c Int) c))\n\
+         \tprintln(resource::try_with(fn() Ok(1), fn(c) println('release ${c}'), fn(c) c + 1))\n\
+         \tprintln(resource::try_with(fn() Err(Nil), fn(_) println('never'), fn(c Int) c))\n\
          }\n",
         "release 1\nOk(2)\nErr(Nil)\n",
     );
@@ -155,7 +155,7 @@ fn stdlib_resource() {
     run_outputs(
         "import scarlet/resource\n\
          fn demo() Nil {\n\
-         \tconn <- resource.with(fn() 7, fn(_) Nil)\n\
+         \tconn <- resource::with(fn() 7, fn(_) Nil)\n\
          \tprintln('conn ${conn}')\n\
          }\n\
          pub fn main() {\n\
@@ -170,29 +170,29 @@ fn stdlib_array() {
     run_outputs(
         "import scarlet/array\n\
          pub fn main() {\n\
-         \tprintln(array.map([1, 2, 3], fn(x) x * 10))\n\
-         \tprintln(array.filter([1, 2, 3, 4], fn(x) x > 2))\n\
-         \tprintln(array.fold([1, 2, 3, 4], 0, fn(a, b) a + b))\n\
-         \tprintln(array.reverse([1, 2, 3]))\n\
-         \tprintln(array.contains([1, 2, 3], 2))\n\
+         \tprintln(array::map([1, 2, 3], fn(x) x * 10))\n\
+         \tprintln(array::filter([1, 2, 3, 4], fn(x) x > 2))\n\
+         \tprintln(array::fold([1, 2, 3, 4], 0, fn(a, b) a + b))\n\
+         \tprintln(array::reverse([1, 2, 3]))\n\
+         \tprintln(array::contains([1, 2, 3], 2))\n\
          }\n",
         "[10, 20, 30]\n[3, 4]\n10\n[3, 2, 1]\nTrue\n",
     );
     run_outputs(
         "import scarlet/array\n\
          pub fn main() {\n\
-         \tprintln(array.find([1, 2, 3], fn(x) x > 1))\n\
-         \tprintln(array.find([1, 2, 3], fn(x) x > 9))\n\
+         \tprintln(array::find([1, 2, 3], fn(x) x > 1))\n\
+         \tprintln(array::find([1, 2, 3], fn(x) x > 9))\n\
          }\n",
         "Some(2)\nNone\n",
     );
     run_outputs(
         "import scarlet/array\n\
          pub fn main() {\n\
-         \tprintln(array.any([1, 2, 3], fn(x) x > 2))\n\
-         \tprintln(array.any([1, 2, 3], fn(x) x > 9))\n\
-         \tprintln(array.all([2, 4, 6], fn(x) x % 2 == 0))\n\
-         \tprintln(array.all([2, 3], fn(x) x % 2 == 0))\n\
+         \tprintln(array::any([1, 2, 3], fn(x) x > 2))\n\
+         \tprintln(array::any([1, 2, 3], fn(x) x > 9))\n\
+         \tprintln(array::all([2, 4, 6], fn(x) x % 2 == 0))\n\
+         \tprintln(array::all([2, 3], fn(x) x % 2 == 0))\n\
          }\n",
         "True\nFalse\nTrue\nFalse\n",
     );
@@ -200,12 +200,12 @@ fn stdlib_array() {
     run_outputs(
         "import scarlet/array\n\
          pub fn main() {\n\
-         \tprintln(array.map([], fn(x) x * 10))\n\
-         \tprintln(array.filter([], fn(x) x > 2))\n\
-         \tprintln(array.fold([], 0, fn(a, b) a + b))\n\
-         \tprintln(array.length([]))\n\
-         \tprintln(array.reverse([]))\n\
-         \tprintln(array.contains([1, 2], 9))\n\
+         \tprintln(array::map([], fn(x) x * 10))\n\
+         \tprintln(array::filter([], fn(x) x > 2))\n\
+         \tprintln(array::fold([], 0, fn(a, b) a + b))\n\
+         \tprintln(array::length([]))\n\
+         \tprintln(array::reverse([]))\n\
+         \tprintln(array::contains([1, 2], 9))\n\
          }\n",
         "[]\n[]\n0\n0\n[]\nFalse\n",
     );
@@ -213,9 +213,9 @@ fn stdlib_array() {
     run_outputs(
         "import scarlet/array\n\
          pub fn main() {\n\
-         \tf = array.length\n\
+         \tf = array::length\n\
          \tprintln(f([1, 2, 3]))\n\
-         \tprintln(array.map([[1], [2, 3], []], array.length))\n\
+         \tprintln(array::map([[1], [2, 3], []], array::length))\n\
          }\n",
         "3\n[1, 2, 0]\n",
     );
@@ -225,13 +225,13 @@ run_case! {
     stdlib_int: (
         "import scarlet/int\n\
          pub fn main() {\n\
-         \tprintln(int.max(3, 7))\n\
-         \tprintln(int.min(3, 7))\n\
-         \tprintln(int.abs(0 - 5))\n\
-         \tprintln(int.abs(0 - 9223372036854775807 - 1))\n\
-         \tprintln(int.clamp(99, 0, 10))\n\
-         \tprintln(int.clamp(5, 10, 0))\n\
-         \tprintln(int.to_string(42))\n\
+         \tprintln(int::max(3, 7))\n\
+         \tprintln(int::min(3, 7))\n\
+         \tprintln(int::abs(0 - 5))\n\
+         \tprintln(int::abs(0 - 9223372036854775807 - 1))\n\
+         \tprintln(int::clamp(99, 0, 10))\n\
+         \tprintln(int::clamp(5, 10, 0))\n\
+         \tprintln(int::to_string(42))\n\
          }\n",
         "7\n3\n5\n9223372036854775808\n10\n0\n42\n",
     ),
@@ -239,8 +239,8 @@ run_case! {
     stdlib_bool: (
         "import scarlet/bool\n\
          pub fn main() {\n\
-         \tprintln(bool.negate(True))\n\
-         \tprintln(bool.to_string(False))\n\
+         \tprintln(bool::negate(True))\n\
+         \tprintln(bool::to_string(False))\n\
          }\n",
         "False\nFalse\n",
     ),
@@ -252,14 +252,14 @@ fn stdlib_decimal() {
     run_outputs(
         "import scarlet/decimal\n\
          pub fn main() {\n\
-         \ta = decimal.new(1999, 2)\n\
-         \tprintln(decimal.to_string(decimal.add(a, decimal.new(1, 2))))\n\
-         \tprintln(decimal.to_string(decimal.sub(a, decimal.new(1, 2))))\n\
-         \tprintln(decimal.to_string(decimal.mul(a, decimal.from_int(3))))\n\
-         \tprintln(decimal.to_string(decimal.mul(decimal.new(15, 1), decimal.new(25, 2))))\n\
-         \tprintln(decimal.units(a))\n\
-         \tprintln(decimal.scale(a))\n\
-         \tprintln(decimal.to_string(decimal.new(5, 0 - 3)))\n\
+         \ta = decimal::new(1999, 2)\n\
+         \tprintln(decimal::to_string(decimal::add(a, decimal::new(1, 2))))\n\
+         \tprintln(decimal::to_string(decimal::sub(a, decimal::new(1, 2))))\n\
+         \tprintln(decimal::to_string(decimal::mul(a, decimal::from_int(3))))\n\
+         \tprintln(decimal::to_string(decimal::mul(decimal::new(15, 1), decimal::new(25, 2))))\n\
+         \tprintln(decimal::units(a))\n\
+         \tprintln(decimal::scale(a))\n\
+         \tprintln(decimal::to_string(decimal::new(5, 0 - 3)))\n\
          }\n",
         "20.00\n19.98\n59.97\n0.375\n1999\n2\n5000\n",
     );
@@ -267,14 +267,14 @@ fn stdlib_decimal() {
     run_outputs(
         "import scarlet/decimal\n\
          pub fn main() {\n\
-         \tx = decimal.new(2345, 3)\n\
-         \tprintln(decimal.to_string(decimal.round(x, 2)))\n\
-         \tprintln(decimal.to_string(decimal.round(decimal.new(125, 3), 2)))\n\
-         \tprintln(decimal.to_string(decimal.round(decimal.new(135, 3), 2)))\n\
-         \tprintln(decimal.to_string(decimal.round_with(x, 2, decimal.HalfUp)))\n\
-         \tprintln(decimal.to_string(decimal.round_with(decimal.neg(x), 2, decimal.HalfUp)))\n\
-         \tprintln(decimal.to_string(decimal.round_with(x, 2, decimal.Down)))\n\
-         \tprintln(decimal.to_string(decimal.round(x, 5)))\n\
+         \tx = decimal::new(2345, 3)\n\
+         \tprintln(decimal::to_string(decimal::round(x, 2)))\n\
+         \tprintln(decimal::to_string(decimal::round(decimal::new(125, 3), 2)))\n\
+         \tprintln(decimal::to_string(decimal::round(decimal::new(135, 3), 2)))\n\
+         \tprintln(decimal::to_string(decimal::round_with(x, 2, decimal::HalfUp)))\n\
+         \tprintln(decimal::to_string(decimal::round_with(decimal::neg(x), 2, decimal::HalfUp)))\n\
+         \tprintln(decimal::to_string(decimal::round_with(x, 2, decimal::Down)))\n\
+         \tprintln(decimal::to_string(decimal::round(x, 5)))\n\
          }\n",
         "2.34\n0.12\n0.14\n2.35\n-2.35\n2.34\n2.34500\n",
     );
@@ -282,10 +282,10 @@ fn stdlib_decimal() {
         "import scarlet/decimal\n\
          import scarlet/result\n\
          pub fn main() {\n\
-         \tbill = decimal.new(10000, 2)\n\
-         \tprintln(result.map(decimal.div(bill, decimal.from_int(3), 2), decimal.to_string))\n\
-         \tprintln(result.map(decimal.div(decimal.from_int(1), decimal.from_int(8), 4), decimal.to_string))\n\
-         \tprintln(decimal.div(bill, decimal.from_int(0), 2))\n\
+         \tbill = decimal::new(10000, 2)\n\
+         \tprintln(result::map(decimal::div(bill, decimal::from_int(3), 2), decimal::to_string))\n\
+         \tprintln(result::map(decimal::div(decimal::from_int(1), decimal::from_int(8), 4), decimal::to_string))\n\
+         \tprintln(decimal::div(bill, decimal::from_int(0), 2))\n\
          }\n",
         "Ok(33.33)\nOk(0.1250)\nErr(Nil)\n",
     );
@@ -295,17 +295,17 @@ fn stdlib_decimal() {
         "import scarlet/decimal\n\
          import scarlet/result\n\
          pub fn main() {\n\
-         \tbig = decimal.from_int(9000000000000000000)\n\
-         \tshow = fn(q) { result.map(q, decimal.to_string) }\n\
-         \tprintln(show(decimal.div_with(decimal.from_int(5000000000000000000), big, 0, decimal.HalfUp)))\n\
-         \tprintln(show(decimal.div_with(decimal.from_int(5), decimal.from_int(9), 0, decimal.HalfUp)))\n\
-         \tprintln(show(decimal.div_with(decimal.from_int(5000000000000000000), big, 0, decimal.HalfEven)))\n\
-         \tprintln(show(decimal.div_with(decimal.from_int(5), decimal.from_int(9), 0, decimal.HalfEven)))\n\
-         \tprintln(show(decimal.div_with(decimal.from_int(4000000000000000000), big, 0, decimal.HalfUp)))\n\
-         \tprintln(show(decimal.div_with(decimal.from_int(0 - 5000000000000000000), big, 0, decimal.HalfUp)))\n\
-         \tprintln(show(decimal.div_with(decimal.from_int(8999999999999999999), big, 0, decimal.HalfEven)))\n\
-         \tprintln(show(decimal.div_with(decimal.from_int(4500000000000000000), big, 0, decimal.HalfUp)))\n\
-         \tprintln(show(decimal.div_with(decimal.from_int(4500000000000000000), big, 0, decimal.HalfEven)))\n\
+         \tbig = decimal::from_int(9000000000000000000)\n\
+         \tshow = fn(q) { result::map(q, decimal::to_string) }\n\
+         \tprintln(show(decimal::div_with(decimal::from_int(5000000000000000000), big, 0, decimal::HalfUp)))\n\
+         \tprintln(show(decimal::div_with(decimal::from_int(5), decimal::from_int(9), 0, decimal::HalfUp)))\n\
+         \tprintln(show(decimal::div_with(decimal::from_int(5000000000000000000), big, 0, decimal::HalfEven)))\n\
+         \tprintln(show(decimal::div_with(decimal::from_int(5), decimal::from_int(9), 0, decimal::HalfEven)))\n\
+         \tprintln(show(decimal::div_with(decimal::from_int(4000000000000000000), big, 0, decimal::HalfUp)))\n\
+         \tprintln(show(decimal::div_with(decimal::from_int(0 - 5000000000000000000), big, 0, decimal::HalfUp)))\n\
+         \tprintln(show(decimal::div_with(decimal::from_int(8999999999999999999), big, 0, decimal::HalfEven)))\n\
+         \tprintln(show(decimal::div_with(decimal::from_int(4500000000000000000), big, 0, decimal::HalfUp)))\n\
+         \tprintln(show(decimal::div_with(decimal::from_int(4500000000000000000), big, 0, decimal::HalfEven)))\n\
          }\n",
         "Ok(1)\nOk(1)\nOk(1)\nOk(1)\nOk(0)\nOk(-1)\nOk(1)\nOk(1)\nOk(0)\n",
     );
@@ -313,15 +313,15 @@ fn stdlib_decimal() {
     run_outputs(
         "import scarlet/decimal\n\
          pub fn main() {\n\
-         \ta = decimal.new(15, 1)\n\
-         \tb = decimal.new(1500, 3)\n\
-         \tprintln(decimal.eq(a, b))\n\
-         \tprintln(decimal.compare(decimal.new(0 - 1, 2), decimal.from_int(0)))\n\
-         \tprintln(decimal.lt(a, decimal.new(16, 1)))\n\
-         \tprintln(decimal.to_string(decimal.max(a, decimal.new(2, 0))))\n\
-         \tprintln(decimal.scale(decimal.normalize(b)))\n\
-         \tprintln(decimal.is_negative(decimal.neg(a)))\n\
-         \tprintln(decimal.is_zero(decimal.new(0, 5)))\n\
+         \ta = decimal::new(15, 1)\n\
+         \tb = decimal::new(1500, 3)\n\
+         \tprintln(decimal::eq(a, b))\n\
+         \tprintln(decimal::compare(decimal::new(0 - 1, 2), decimal::from_int(0)))\n\
+         \tprintln(decimal::lt(a, decimal::new(16, 1)))\n\
+         \tprintln(decimal::to_string(decimal::max(a, decimal::new(2, 0))))\n\
+         \tprintln(decimal::scale(decimal::normalize(b)))\n\
+         \tprintln(decimal::is_negative(decimal::neg(a)))\n\
+         \tprintln(decimal::is_zero(decimal::new(0, 5)))\n\
          }\n",
         "True\nLt\nTrue\n2\n1\nTrue\nTrue\n",
     );
@@ -331,23 +331,23 @@ fn stdlib_decimal() {
         "import scarlet/decimal\n\
          import scarlet/result\n\
          pub fn main() {\n\
-         \tprintln(result.map(decimal.parse('19.99'), decimal.to_string))\n\
-         \tprintln(result.map(decimal.parse('-0.05'), decimal.to_string))\n\
-         \tprintln(result.map(decimal.parse('+1.50'), decimal.to_string))\n\
-         \tprintln(result.map(decimal.parse('42'), decimal.to_string))\n\
-         \tprintln(decimal.parse('1.'))\n\
-         \tprintln(decimal.parse('.5'))\n\
-         \tprintln(decimal.parse('1.2.3'))\n\
-         \tprintln(decimal.parse(''))\n\
-         \tprintln(decimal.parse('-'))\n\
-         \tprintln(decimal.parse('--5'))\n\
-         \tprintln(decimal.parse('1.-5'))\n\
-         \ttext = fn(s) { result.map(decimal.parse(s), decimal.to_string) or 'Err' }\n\
+         \tprintln(result::map(decimal::parse('19.99'), decimal::to_string))\n\
+         \tprintln(result::map(decimal::parse('-0.05'), decimal::to_string))\n\
+         \tprintln(result::map(decimal::parse('+1.50'), decimal::to_string))\n\
+         \tprintln(result::map(decimal::parse('42'), decimal::to_string))\n\
+         \tprintln(decimal::parse('1.'))\n\
+         \tprintln(decimal::parse('.5'))\n\
+         \tprintln(decimal::parse('1.2.3'))\n\
+         \tprintln(decimal::parse(''))\n\
+         \tprintln(decimal::parse('-'))\n\
+         \tprintln(decimal::parse('--5'))\n\
+         \tprintln(decimal::parse('1.-5'))\n\
+         \ttext = fn(s) { result::map(decimal::parse(s), decimal::to_string) or 'Err' }\n\
          \tprintln(text('9223372036854775807.99'))\n\
-         \tprintln(result.map(decimal.parse('92233720368547758.07'), decimal.units))\n\
+         \tprintln(result::map(decimal::parse('92233720368547758.07'), decimal::units))\n\
          \tbig = '-123456789012345678901234567890.1234567890123456789012345'\n\
          \tprintln(text(big))\n\
-         \tprintln(result.map(decimal.parse(big), decimal.scale))\n\
+         \tprintln(result::map(decimal::parse(big), decimal::scale))\n\
          }\n",
         "Ok(19.99)\nOk(-0.05)\nOk(1.50)\nOk(42)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\n\
          9223372036854775807.99\nOk(9223372036854775807)\n\
@@ -358,10 +358,10 @@ fn stdlib_decimal() {
         "import scarlet/decimal\n\
          import scarlet/result\n\
          pub fn main() {\n\
-         \tprintln(decimal.to_string(decimal.round(decimal.new(1250, 0), 0 - 2)))\n\
-         \tprintln(decimal.to_string(decimal.round(decimal.new(12345, 1), 0 - 1)))\n\
-         \tprintln(decimal.scale(decimal.round(decimal.new(1250, 0), 0 - 2)))\n\
-         \tprintln(result.map(decimal.div(decimal.from_int(1234), decimal.from_int(1), 0 - 2), decimal.to_string))\n\
+         \tprintln(decimal::to_string(decimal::round(decimal::new(1250, 0), 0 - 2)))\n\
+         \tprintln(decimal::to_string(decimal::round(decimal::new(12345, 1), 0 - 1)))\n\
+         \tprintln(decimal::scale(decimal::round(decimal::new(1250, 0), 0 - 2)))\n\
+         \tprintln(result::map(decimal::div(decimal::from_int(1234), decimal::from_int(1), 0 - 2), decimal::to_string))\n\
          }\n",
         "1200\n1230\n0\nOk(1200)\n",
     );
@@ -371,20 +371,20 @@ fn stdlib_decimal() {
         "import scarlet/decimal\n\
          import scarlet/result\n\
          pub fn main() {\n\
-         \tprintln(decimal.to_string(decimal.round(decimal.new(123456789012345678, 18), 0 - 1)))\n\
-         \tprintln(result.map(decimal.div(decimal.new(9000000000000000000, 18), decimal.from_int(1), 0 - 1), decimal.to_string))\n\
-         \tprintln(decimal.to_string(decimal.round(decimal.new(1234, 0), 0 - 19)))\n\
-         \tprintln(decimal.to_string(decimal.round(decimal.new(19, 1), 0 - 18)))\n\
-         \tprintln(decimal.to_string(decimal.round_with(decimal.new(1, 18), 0 - 1, decimal.Up)))\n\
-         \tprintln(decimal.to_string(decimal.round_with(decimal.new(5000000000000000000, 18), 0 - 1, decimal.HalfUp)))\n\
-         \tprintln(decimal.to_string(decimal.round(decimal.new(5000000000000000000, 18), 0 - 1)))\n\
-         \tshow = fn(q) { result.map(q, decimal.to_string) or 'Err' }\n\
-         \tprintln(show(decimal.div(decimal.from_int(1), decimal.from_int(1), 0 - 19)))\n\
-         \tprintln(show(decimal.div(decimal.from_int(1), decimal.new(1, 18), 21)))\n\
-         \tprintln(show(decimal.div(decimal.new(1, 12), decimal.from_int(1), 21)))\n\
-         \tprintln(show(decimal.div(decimal.from_int(2), decimal.from_int(3), 30)))\n\
-         \tprintln(decimal.to_string(decimal.round(decimal.new(15, 0), 0 - 25)))\n\
-         \tprintln(decimal.to_string(decimal.round_with(decimal.new(5, 0), 0 - 25, decimal.Up)))\n\
+         \tprintln(decimal::to_string(decimal::round(decimal::new(123456789012345678, 18), 0 - 1)))\n\
+         \tprintln(result::map(decimal::div(decimal::new(9000000000000000000, 18), decimal::from_int(1), 0 - 1), decimal::to_string))\n\
+         \tprintln(decimal::to_string(decimal::round(decimal::new(1234, 0), 0 - 19)))\n\
+         \tprintln(decimal::to_string(decimal::round(decimal::new(19, 1), 0 - 18)))\n\
+         \tprintln(decimal::to_string(decimal::round_with(decimal::new(1, 18), 0 - 1, decimal::Up)))\n\
+         \tprintln(decimal::to_string(decimal::round_with(decimal::new(5000000000000000000, 18), 0 - 1, decimal::HalfUp)))\n\
+         \tprintln(decimal::to_string(decimal::round(decimal::new(5000000000000000000, 18), 0 - 1)))\n\
+         \tshow = fn(q) { result::map(q, decimal::to_string) or 'Err' }\n\
+         \tprintln(show(decimal::div(decimal::from_int(1), decimal::from_int(1), 0 - 19)))\n\
+         \tprintln(show(decimal::div(decimal::from_int(1), decimal::new(1, 18), 21)))\n\
+         \tprintln(show(decimal::div(decimal::new(1, 12), decimal::from_int(1), 21)))\n\
+         \tprintln(show(decimal::div(decimal::from_int(2), decimal::from_int(3), 30)))\n\
+         \tprintln(decimal::to_string(decimal::round(decimal::new(15, 0), 0 - 25)))\n\
+         \tprintln(decimal::to_string(decimal::round_with(decimal::new(5, 0), 0 - 25, decimal::Up)))\n\
          }\n",
         "0\nOk(10)\n0\n0\n10\n10\n0\n0\n1000000000000000000.000000000000000000000\n\
          0.000000000001000000000\n0.666666666666666666666666666667\n0\n\
@@ -400,11 +400,11 @@ fn stdlib_decimal() {
          \tif n <= 0 then 1 else 10 * pow10(n - 1)\n\
          }\n\
          pub fn main() {\n\
-         \tprintln(decimal.to_float(decimal.new(pow10(400), 399)))\n\
-         \tprintln(decimal.to_float(decimal.new(0 - 1999, 2)))\n\
-         \tprintln(decimal.to_float(decimal.new(pow10(400), 0)) == decimal.to_float(decimal.new(pow10(500), 0)))\n\
-         \tprintln(decimal.to_float(decimal.new(1, 400)))\n\
-         \tprintln(decimal.to_float(decimal.new(1, 1)) == 0.1)\n\
+         \tprintln(decimal::to_float(decimal::new(pow10(400), 399)))\n\
+         \tprintln(decimal::to_float(decimal::new(0 - 1999, 2)))\n\
+         \tprintln(decimal::to_float(decimal::new(pow10(400), 0)) == decimal::to_float(decimal::new(pow10(500), 0)))\n\
+         \tprintln(decimal::to_float(decimal::new(1, 400)))\n\
+         \tprintln(decimal::to_float(decimal::new(1, 1)) == 0.1)\n\
          }\n",
         "10.0\n-19.99\nTrue\n0.0\nTrue\n",
     );
@@ -413,8 +413,8 @@ fn stdlib_decimal() {
     run_outputs(
         "import scarlet/decimal\n\
          pub fn main() {\n\
-         \tprintln(decimal.to_float(decimal.new(25, 1)))\n\
-         \tstr = fn(f, places) { decimal.to_string(decimal.from_float(f, places)) }\n\
+         \tprintln(decimal::to_float(decimal::new(25, 1)))\n\
+         \tstr = fn(f, places) { decimal::to_string(decimal::from_float(f, places)) }\n\
          \tprintln(str(2.5, 2))\n\
          \tprintln(str(100000000000000000000.0, 2))\n\
          \tprintln(str(0.5, 19))\n\
@@ -434,7 +434,7 @@ fn stdlib_decimal() {
 fn stdlib_binary() {
     check_rejects(
         "import scarlet/net/socket\n\
-         fn f(c socket.Socket) Nil { socket.write(c, 'nope') or Nil }\n",
+         fn f(c socket::Socket) Nil { socket::write(c, 'nope') or Nil }\n",
         "Type mismatch",
     );
 }
@@ -444,10 +444,10 @@ fn stdlib_binary_runs() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tb = binary.from_string('hi')\n\
-         \tprintln(binary.to_string(b))\n\
-         \tprintln(binary.bit_size(b))\n\
-         \tprintln(binary.byte_size(b))\n\
+         \tb = binary::from_string('hi')\n\
+         \tprintln(binary::to_string(b))\n\
+         \tprintln(binary::bit_size(b))\n\
+         \tprintln(binary::byte_size(b))\n\
          \tprintln(b)\n\
          }\n",
         "Ok(hi)\n16\n2\n<<104, 105>>\n",
@@ -455,12 +455,12 @@ fn stdlib_binary_runs() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tb = binary.from_string('ABC')\n\
-         \tprintln(binary.slice_bits(b, 8, 8))\n\
-         \tprintln(binary.slice_bits(b, 0, 99))\n\
-         \tjoined = binary.append(binary.from_string('AB'), binary.from_string('C'))\n\
-         \tprintln(binary.to_string(joined))\n\
-         \tprintln(binary.bit_size(binary.slice_bits(b, 0, 5) or binary.from_string('')))\n\
+         \tb = binary::from_string('ABC')\n\
+         \tprintln(binary::slice_bits(b, 8, 8))\n\
+         \tprintln(binary::slice_bits(b, 0, 99))\n\
+         \tjoined = binary::append(binary::from_string('AB'), binary::from_string('C'))\n\
+         \tprintln(binary::to_string(joined))\n\
+         \tprintln(binary::bit_size(binary::slice_bits(b, 0, 5) or binary::from_string('')))\n\
          }\n",
         "Ok(<<66>>)\nErr(Nil)\nOk(ABC)\n5\n",
     );
@@ -483,8 +483,8 @@ fn stdlib_binary_runs() {
         "import scarlet/binary\n\
          import scarlet/string\n\
          pub fn main() {\n\
-         \tsrc = binary.from_string('ABCDE')\n\
-         \tprintln(string.inspect(<<src:bytes(3)>>))\n\
+         \tsrc = binary::from_string('ABCDE')\n\
+         \tprintln(string::inspect(<<src:bytes(3)>>))\n\
          }\n",
         "<<65, 66, 67>>\n",
     );
@@ -492,8 +492,8 @@ fn stdlib_binary_runs() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tprintln(binary.to_string(<<255>>))\n\
-         \tprintln(binary.to_string(<<1:4>>))\n\
+         \tprintln(binary::to_string(<<255>>))\n\
+         \tprintln(binary::to_string(<<1:4>>))\n\
          }\n",
         "Err(Nil)\nErr(Nil)\n",
     );
@@ -501,7 +501,7 @@ fn stdlib_binary_runs() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tprintln(binary.byte_size(<<1:4>>))\n\
+         \tprintln(binary::byte_size(<<1:4>>))\n\
          }\n",
         "1\n",
     );
@@ -509,7 +509,7 @@ fn stdlib_binary_runs() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tprintln(binary.slice_bits(binary.from_string('ABC'), 0 - 1, 8))\n\
+         \tprintln(binary::slice_bits(binary::from_string('ABC'), 0 - 1, 8))\n\
          }\n",
         "Err(Nil)\n",
     );
@@ -529,7 +529,7 @@ fn stdlib_binary_slice_units() {
     // callers meaning the other one would keep compiling.
     check_rejects(
         "import scarlet/binary\n\
-         pub fn main() { println(binary.slice(<<1, 2, 3, 4, 5>>, 0, 2)) }\n",
+         pub fn main() { println(binary::slice(<<1, 2, 3, 4, 5>>, 0, 2)) }\n",
         // Spelled out: bare `slice` is a substring of `slice_bits`, so the
         // loose form would pass on a diagnostic about a different name.
         "has no member 'slice'",
@@ -543,12 +543,12 @@ fn stdlib_binary_slice_units_runs() {
         "import scarlet/binary\n\
          pub fn main() {\n\
          \tb = <<1, 2, 3, 4, 5>>\n\
-         \tprintln(binary.slice_bytes(b, 0, 2))\n\
-         \tprintln(binary.slice_bits(b, 0, 2))\n\
-         \tprintln(binary.slice_bytes(b, 1, 2))\n\
-         \tprintln(binary.slice_bits(b, 8, 16))\n\
-         \tprintln(binary.slice_bytes(b, 0, 5))\n\
-         \tprintln(binary.slice_bits(b, 0, 40))\n\
+         \tprintln(binary::slice_bytes(b, 0, 2))\n\
+         \tprintln(binary::slice_bits(b, 0, 2))\n\
+         \tprintln(binary::slice_bytes(b, 1, 2))\n\
+         \tprintln(binary::slice_bits(b, 8, 16))\n\
+         \tprintln(binary::slice_bytes(b, 0, 5))\n\
+         \tprintln(binary::slice_bits(b, 0, 40))\n\
          }\n",
         "Ok(<<1, 2>>)\nOk(<<0:size(2)>>)\nOk(<<2, 3>>)\nOk(<<2, 3>>)\n\
          Ok(<<1, 2, 3, 4, 5>>)\nOk(<<1, 2, 3, 4, 5>>)\n",
@@ -561,11 +561,11 @@ fn stdlib_binary_slice_units_runs() {
         "import scarlet/binary\n\
          pub fn main() {\n\
          \tb = <<1, 2, 3, 4, 5>>\n\
-         \tprintln(binary.slice_bytes(b, 4, 1))\n\
-         \tprintln(binary.slice_bytes(b, 4, 2))\n\
-         \tprintln(binary.slice_bytes(b, 5, 1))\n\
-         \tprintln(binary.slice_bytes(b, 0 - 1, 2))\n\
-         \tprintln(binary.slice_bytes(b, 5, 0 - 4))\n\
+         \tprintln(binary::slice_bytes(b, 4, 1))\n\
+         \tprintln(binary::slice_bytes(b, 4, 2))\n\
+         \tprintln(binary::slice_bytes(b, 5, 1))\n\
+         \tprintln(binary::slice_bytes(b, 0 - 1, 2))\n\
+         \tprintln(binary::slice_bytes(b, 5, 0 - 4))\n\
          }\n",
         "Ok(<<5>>)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\n",
     );
@@ -576,9 +576,9 @@ fn stdlib_binary_slice_units_runs() {
         "import scarlet/binary\n\
          pub fn main() {\n\
          \tb = <<1, 2:4>>\n\
-         \tprintln(binary.byte_size(b))\n\
-         \tprintln(binary.slice_bytes(b, 0, 2))\n\
-         \tprintln(binary.slice_bits(b, 8, 4))\n\
+         \tprintln(binary::byte_size(b))\n\
+         \tprintln(binary::slice_bytes(b, 0, 2))\n\
+         \tprintln(binary::slice_bits(b, 8, 4))\n\
          }\n",
         "2\nErr(Nil)\nOk(<<2:size(4)>>)\n",
     );
@@ -591,12 +591,12 @@ fn stdlib_binary_slice_units_runs() {
          import scarlet/string\n\
          pub fn main() {\n\
          \tb = <<1, 2, 3, 4, 5>>\n\
-         \tprintln(string.inspect(binary.drop_bytes(b, 0)))\n\
-         \tprintln(string.inspect(binary.drop_bytes(b, 3)))\n\
-         \tprintln(string.inspect(binary.drop_bytes(b, 5)))\n\
-         \tprintln(string.inspect(binary.drop_bytes(b, 900)))\n\
-         \tprintln(string.inspect(binary.drop_bytes(b, 0 - 2)))\n\
-         \tprintln(binary.bit_size(binary.drop_bytes(<<1, 2:4>>, 1)))\n\
+         \tprintln(string::inspect(binary::drop_bytes(b, 0)))\n\
+         \tprintln(string::inspect(binary::drop_bytes(b, 3)))\n\
+         \tprintln(string::inspect(binary::drop_bytes(b, 5)))\n\
+         \tprintln(string::inspect(binary::drop_bytes(b, 900)))\n\
+         \tprintln(string::inspect(binary::drop_bytes(b, 0 - 2)))\n\
+         \tprintln(binary::bit_size(binary::drop_bytes(<<1, 2:4>>, 1)))\n\
          }\n",
         "<<1, 2, 3, 4, 5>>\n<<4, 5>>\n<<>>\n<<>>\n<<1, 2, 3, 4, 5>>\n4\n",
     );
@@ -610,10 +610,10 @@ fn stdlib_binary_slice_units_runs() {
          pub fn main() {\n\
          \tb = <<1, 2, 3, 4, 5>>\n\
          \tshow = fn(at) {\n\
-         \t\tpair = binary.split_at_bytes(b, at)\n\
-         \t\tprintln(string.inspect(pair.0))\n\
-         \t\tprintln(string.inspect(pair.1))\n\
-         \t\tprintln(binary.append(pair.0, pair.1) == b)\n\
+         \t\tpair = binary::split_at_bytes(b, at)\n\
+         \t\tprintln(string::inspect(pair.0))\n\
+         \t\tprintln(string::inspect(pair.1))\n\
+         \t\tprintln(binary::append(pair.0, pair.1) == b)\n\
          \t}\n\
          \tshow(0 - 3)\n\
          \tshow(0)\n\
@@ -637,10 +637,10 @@ fn stdlib_binary_concat() {
         "import scarlet/binary\n\
          import scarlet/string\n\
          pub fn main() {\n\
-         \tprintln(string.inspect(binary.concat([])))\n\
-         \tprintln(string.inspect(binary.concat([<<1, 2>>])))\n\
-         \tprintln(string.inspect(binary.concat([<<1, 2>>, <<3>>, <<4, 5>>])))\n\
-         \tprintln(string.inspect(binary.concat([<<>>, <<9>>, <<>>])))\n\
+         \tprintln(string::inspect(binary::concat([])))\n\
+         \tprintln(string::inspect(binary::concat([<<1, 2>>])))\n\
+         \tprintln(string::inspect(binary::concat([<<1, 2>>, <<3>>, <<4, 5>>])))\n\
+         \tprintln(string::inspect(binary::concat([<<>>, <<9>>, <<>>])))\n\
          }\n",
         "<<>>\n<<1, 2>>\n<<1, 2, 3, 4, 5>>\n<<9>>\n",
     );
@@ -651,8 +651,8 @@ fn stdlib_binary_concat() {
         "import scarlet/binary\n\
          pub fn main() {\n\
          \tb = <<1, 2, 3, 4, 5>>\n\
-         \tpair = binary.split_at_bytes(b, 2)\n\
-         \tprintln(binary.concat([pair.0, pair.1]) == b)\n\
+         \tpair = binary::split_at_bytes(b, 2)\n\
+         \tprintln(binary::concat([pair.0, pair.1]) == b)\n\
          }\n",
         "True\n",
     );
@@ -665,16 +665,16 @@ fn stdlib_binary_byte_at() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tb = binary.from_string('AZ')\n\
-         \tprintln(binary.byte_at(b, 0))\n\
-         \tprintln(binary.byte_at(b, 1))\n\
-         \tprintln(binary.byte_at(b, 2))\n\
-         \tprintln(binary.byte_at(b, 0 - 1))\n\
+         \tb = binary::from_string('AZ')\n\
+         \tprintln(binary::byte_at(b, 0))\n\
+         \tprintln(binary::byte_at(b, 1))\n\
+         \tprintln(binary::byte_at(b, 2))\n\
+         \tprintln(binary::byte_at(b, 0 - 1))\n\
          \ttail = match b {\n\
          \t\t<<_, ..rest>> -> rest\n\
          \t\t_ -> b\n\
          \t}\n\
-         \tprintln(binary.byte_at(tail, 0))\n\
+         \tprintln(binary::byte_at(tail, 0))\n\
          }\n",
         "65\n90\n-1\n-1\n90\n",
     );
@@ -688,11 +688,11 @@ fn stdlib_http_builtins() {
         "import scarlet/binary\n\
          import scarlet/http/h1\n\
          pub fn main() {\n\
-         \tr = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
-         \t\th1.Done(_, _, version, _, _, consumed) ->\n\
-         \t\t\tmatch version { h1.Http10 -> 10 h1.Http11 -> 11 } + consumed\n\
-         \t\th1.NeedMore -> 0\n\
-         \t\th1.Bad(s) -> s\n\
+         \tr = match h1::parse_request(binary::from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
+         \t\th1::Done(_, _, version, _, _, consumed) ->\n\
+         \t\t\tmatch version { h1::Http10 -> 10 h1::Http11 -> 11 } + consumed\n\
+         \t\th1::NeedMore -> 0\n\
+         \t\th1::Bad(s) -> s\n\
          \t}\n\
          \tprintln(r)\n\
          }\n",
@@ -701,12 +701,12 @@ fn stdlib_http_builtins() {
         "import scarlet/binary\n\
          import scarlet/http/h1\n\
          pub fn main() {\n\
-         \tr = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
-         \t\th1.Done(_, _, _, hdrs, _, _) -> match h1.framing(hdrs) {\n\
-         \t\t\th1.NoBody -> 0\n\
-         \t\t\th1.Length(n) -> n\n\
-         \t\t\th1.Chunked -> 0 - 2\n\
-         \t\t\th1.Invalid(s) -> s\n\
+         \tr = match h1::parse_request(binary::from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
+         \t\th1::Done(_, _, _, hdrs, _, _) -> match h1::framing(hdrs) {\n\
+         \t\t\th1::NoBody -> 0\n\
+         \t\t\th1::Length(n) -> n\n\
+         \t\t\th1::Chunked -> 0 - 2\n\
+         \t\t\th1::Invalid(s) -> s\n\
          \t\t}\n\
          \t\t_ -> 0 - 1\n\
          \t}\n\
@@ -718,13 +718,13 @@ fn stdlib_http_builtins() {
          import scarlet/http/h1\n\
          import scarlet/http/headers\n\
          pub fn main() {\n\
-         \tr = match h1.chunk_decode(binary.from_string('5\\r\\nhello\\r\\n0\\r\\n\\r\\n'), 0, 1024) {\n\
-         \t\th1.ChunkedDone(body, trailers, consumed) -> {\n\
-         \t\t\thas_sum = headers.has(trailers, binary.from_string('x-sum'))\n\
-         \t\t\tif has_sum { consumed } else { binary.byte_size(body) + consumed }\n\
+         \tr = match h1::chunk_decode(binary::from_string('5\\r\\nhello\\r\\n0\\r\\n\\r\\n'), 0, 1024) {\n\
+         \t\th1::ChunkedDone(body, trailers, consumed) -> {\n\
+         \t\t\thas_sum = headers::has(trailers, binary::from_string('x-sum'))\n\
+         \t\t\tif has_sum { consumed } else { binary::byte_size(body) + consumed }\n\
          \t\t}\n\
-         \t\th1.ChunkedNeedMore -> 0\n\
-         \t\th1.ChunkedBad(s) -> s\n\
+         \t\th1::ChunkedNeedMore -> 0\n\
+         \t\th1::ChunkedBad(s) -> s\n\
          \t}\n\
          \tprintln(r)\n\
          }\n",
@@ -734,18 +734,18 @@ fn stdlib_http_builtins() {
          import scarlet/http/h1\n\
          import scarlet/http/headers\n\
          pub fn main() {\n\
-         \thead = h1.serialize_head(200, [headers.Header(name: binary.from_string('A'), value: binary.from_string('b'))])\n\
-         \tprintln(binary.byte_size(head))\n\
+         \thead = h1::serialize_head(200, [headers::Header(name: binary::from_string('A'), value: binary::from_string('b'))])\n\
+         \tprintln(binary::byte_size(head))\n\
          }\n",
     );
     check_ok(
         "import scarlet/binary\n\
          import scarlet/http/headers\n\
          pub fn main() {\n\
-         \ths = [headers.Header(name: binary.from_string('Host'), value: binary.from_string('x'))]\n\
-         \tv = headers.get(hs, binary.from_string('host')) or binary.from_string('')\n\
-         \tprintln(binary.to_string(v))\n\
-         \tprintln(headers.has(hs, binary.from_string('HOST')))\n\
+         \ths = [headers::Header(name: binary::from_string('Host'), value: binary::from_string('x'))]\n\
+         \tv = headers::get(hs, binary::from_string('host')) or binary::from_string('')\n\
+         \tprintln(binary::to_string(v))\n\
+         \tprintln(headers::has(hs, binary::from_string('HOST')))\n\
          }\n",
     );
 }
@@ -777,18 +777,18 @@ fn native_and_al_token_matching_agree() {
              import scarlet/http/h1\n\
              import scarlet/http/headers\n\
              pub fn main() {{\n\
-             \tname = binary.from_string('Connection')\n\
-             \tvalue = binary.from_string('{value}')\n\
-             \tnative = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\nConnection: {value}\\r\\n\\r\\n'), 0) {{\n\
-             \t\th1.Done(_, _, _, _, flags, _) -> match flags.conn {{\n\
-             \t\t\th1.ConnClose -> True\n\
-             \t\t\th1.ConnBoth -> True\n\
-             \t\t\th1.ConnKeepAlive -> False\n\
-             \t\t\th1.ConnNeither -> False\n\
+             \tname = binary::from_string('Connection')\n\
+             \tvalue = binary::from_string('{value}')\n\
+             \tnative = match h1::parse_request(binary::from_string('GET / HTTP/1.1\\r\\nConnection: {value}\\r\\n\\r\\n'), 0) {{\n\
+             \t\th1::Done(_, _, _, _, flags, _) -> match flags.conn {{\n\
+             \t\t\th1::ConnClose -> True\n\
+             \t\t\th1::ConnBoth -> True\n\
+             \t\t\th1::ConnKeepAlive -> False\n\
+             \t\t\th1::ConnNeither -> False\n\
              \t\t}}\n\
              \t\t_ -> False\n\
              \t}}\n\
-             \tal = headers.contains_token([headers.Header(name: name, value: value)], name, binary.from_string('close'))\n\
+             \tal = headers::contains_token([headers::Header(name: name, value: value)], name, binary::from_string('close'))\n\
              \tprintln(native)\n\
              \tprintln(al)\n\
              }}\n"
@@ -810,7 +810,7 @@ fn stdlib_binary_ascii_builtins() {
     check_ok(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \ti = binary.index_of(binary.from_string('abc'), binary.from_string('b'), 0) or 0\n\
+         \ti = binary::index_of(binary::from_string('abc'), binary::from_string('b'), 0) or 0\n\
          \tprintln(i)\n\
          }\n",
     );
@@ -818,7 +818,7 @@ fn stdlib_binary_ascii_builtins() {
     check_ok(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tn = binary.parse_int(binary.from_string('42'), binary.Dec) or 0\n\
+         \tn = binary::parse_int(binary::from_string('42'), binary::Dec) or 0\n\
          \tprintln(n)\n\
          }\n",
     );
@@ -826,21 +826,21 @@ fn stdlib_binary_ascii_builtins() {
     check_ok(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tprintln(binary.eq_ignore_ascii_case(binary.from_string('A'), binary.from_string('a')))\n\
+         \tprintln(binary::eq_ignore_ascii_case(binary::from_string('A'), binary::from_string('a')))\n\
          }\n",
     );
     // to_ascii_lower : (Binary) -> Binary
     check_ok(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tprintln(binary.to_string(binary.to_ascii_lower(binary.from_string('AB'))))\n\
+         \tprintln(binary::to_string(binary::to_ascii_lower(binary::from_string('AB'))))\n\
          }\n",
     );
     // from_int_ascii : (Int, Radix) -> Binary
     check_ok(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tprintln(binary.to_string(binary.from_int_ascii(255, binary.Hex)))\n\
+         \tprintln(binary::to_string(binary::from_int_ascii(255, binary::Hex)))\n\
          }\n",
     );
 }
@@ -854,13 +854,13 @@ fn stdlib_binary_hex_byte() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
-         \tprintln(binary.to_string(binary.hex_byte(10)))\n\
-         \tprintln(binary.to_string(binary.hex_byte(13)))\n\
-         \tprintln(binary.to_string(binary.hex_byte(255)))\n\
-         \tprintln(binary.to_string(binary.hex_byte(0)))\n\
-         \tprintln(binary.to_string(binary.hex_byte(256)))\n\
-         \tprintln(binary.to_string(binary.hex_byte(0 - 1)))\n\
-         \tprintln(binary.to_string(binary.from_int_ascii(13, binary.Hex)))\n\
+         \tprintln(binary::to_string(binary::hex_byte(10)))\n\
+         \tprintln(binary::to_string(binary::hex_byte(13)))\n\
+         \tprintln(binary::to_string(binary::hex_byte(255)))\n\
+         \tprintln(binary::to_string(binary::hex_byte(0)))\n\
+         \tprintln(binary::to_string(binary::hex_byte(256)))\n\
+         \tprintln(binary::to_string(binary::hex_byte(0 - 1)))\n\
+         \tprintln(binary::to_string(binary::from_int_ascii(13, binary::Hex)))\n\
          }\n",
         "Ok(0A)\nOk(0D)\nOk(FF)\nOk(00)\nOk(00)\nOk(FF)\nOk(d)\n",
     );
@@ -871,22 +871,22 @@ fn stdlib_float() {
     run_outputs(
         "import scarlet/float\n\
          pub fn main() {\n\
-         \tprintln(float.round(2.7))\n\
-         \tprintln(float.floor(2.7))\n\
-         \tprintln(float.ceil(2.1))\n\
-         \tprintln(float.truncate(2.9))\n\
-         \tprintln(float.from_int(5))\n\
-         \tprintln(float.to_string(3.14))\n\
+         \tprintln(float::round(2.7))\n\
+         \tprintln(float::floor(2.7))\n\
+         \tprintln(float::ceil(2.1))\n\
+         \tprintln(float::truncate(2.9))\n\
+         \tprintln(float::from_int(5))\n\
+         \tprintln(float::to_string(3.14))\n\
          }\n",
         "3\n2\n3\n2\n5.0\n3.14\n",
     );
     run_outputs(
         "import scarlet/float\n\
          pub fn main() {\n\
-         \tprintln(float.abs(0.0 - 2.5))\n\
-         \tprintln(float.abs(-0.0))\n\
-         \tprintln(float.min(1.5, 3.2))\n\
-         \tprintln(float.max(1.5, 3.2))\n\
+         \tprintln(float::abs(0.0 - 2.5))\n\
+         \tprintln(float::abs(-0.0))\n\
+         \tprintln(float::min(1.5, 3.2))\n\
+         \tprintln(float::max(1.5, 3.2))\n\
          }\n",
         "2.5\n0.0\n1.5\n3.2\n",
     );
@@ -911,10 +911,10 @@ fn stdlib_float() {
     run_outputs(
         "import scarlet/float\n\
          pub fn main() {\n\
-         \tprintln(float.floor(0.0 - 2.7))\n\
-         \tprintln(float.ceil(0.0 - 2.1))\n\
-         \tprintln(float.round(0.0 - 2.5))\n\
-         \tprintln(float.truncate(0.0 - 2.9))\n\
+         \tprintln(float::floor(0.0 - 2.7))\n\
+         \tprintln(float::ceil(0.0 - 2.1))\n\
+         \tprintln(float::round(0.0 - 2.5))\n\
+         \tprintln(float::truncate(0.0 - 2.9))\n\
          }\n",
         "-3\n-2\n-3\n-2\n",
     );
@@ -928,12 +928,12 @@ fn stdlib_string() {
     run_outputs(
         "import scarlet/string\n\
          pub fn main() {\n\
-         \tprintln(string.length('héllo'))\n\
-         \tprintln(string.split('abc', ''))\n\
-         \tprintln(string.contains('abc', 'z'))\n\
-         \tprintln(string.trim('\\t\\nhi\\n\\t'))\n\
-         \tprintln(string.inspect('hi'))\n\
-         \tprintln(string.inspect(42))\n\
+         \tprintln(string::length('héllo'))\n\
+         \tprintln(string::split('abc', ''))\n\
+         \tprintln(string::contains('abc', 'z'))\n\
+         \tprintln(string::trim('\\t\\nhi\\n\\t'))\n\
+         \tprintln(string::inspect('hi'))\n\
+         \tprintln(string::inspect(42))\n\
          }\n",
         "5\n[a, b, c]\nFalse\nhi\nhi\n42\n",
     );
@@ -943,9 +943,9 @@ fn stdlib_string() {
     run_outputs(
         "import scarlet/string\n\
          pub fn main() {\n\
-         \tprintln(string.replace('a-b-c', '-', '_'))\n\
-         \tprintln(string.replace('abc', 'z', 'Q'))\n\
-         \tprintln(string.replace('a\\r\\nb', '\\r', ''))\n\
+         \tprintln(string::replace('a-b-c', '-', '_'))\n\
+         \tprintln(string::replace('abc', 'z', 'Q'))\n\
+         \tprintln(string::replace('a\\r\\nb', '\\r', ''))\n\
          }\n",
         "a_b_c\nabc\na\nb\n",
     );
@@ -957,10 +957,10 @@ fn stdlib_string() {
         "import scarlet/array\n\
          import scarlet/string\n\
          pub fn main() {\n\
-         \tprintln(string.length('e\u{0301}b'))\n\
-         \tprintln(array.length(string.to_graphemes('e\u{0301}b')))\n\
-         \tprintln(string.length('\u{1F469}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}'))\n\
-         \tprintln(array.length(string.to_graphemes('\u{1F469}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}')))\n\
+         \tprintln(string::length('e\u{0301}b'))\n\
+         \tprintln(array::length(string::to_graphemes('e\u{0301}b')))\n\
+         \tprintln(string::length('\u{1F469}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}'))\n\
+         \tprintln(array::length(string::to_graphemes('\u{1F469}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}')))\n\
          }\n",
         "3\n2\n7\n1\n",
     );
@@ -974,11 +974,11 @@ fn stdlib_string() {
         "import scarlet/string\n\
          pub fn main() {\n\
          \tprintln('\\u{E9}')\n\
-         \tprintln(string.length('\\u{E9}'))\n\
+         \tprintln(string::length('\\u{E9}'))\n\
          \tprintln('\\u{1F469}')\n\
-         \tprintln(string.length('\\u{1F469}'))\n\
+         \tprintln(string::length('\\u{1F469}'))\n\
          \tprintln('a\\u{0301}')\n\
-         \tprintln(string.length('a\\u{0301}'))\n\
+         \tprintln(string::length('a\\u{0301}'))\n\
          }\n",
         "\u{E9}\n1\n\u{1F469}\n1\na\u{0301}\n2\n",
     );
@@ -989,13 +989,13 @@ fn stdlib_string() {
     run_outputs(
         "import scarlet/string\n\
          pub fn main() {\n\
-         \tprintln(string.from_code_points([233]))\n\
-         \tprintln(string.from_code_points([128105]))\n\
-         \tprintln(string.from_code_points([104, 105]))\n\
-         \tprintln(string.from_code_points([]))\n\
-         \tprintln(string.from_code_points([1114112]))\n\
-         \tprintln(string.from_code_points([55296]))\n\
-         \tprintln(string.from_code_points([-1]))\n\
+         \tprintln(string::from_code_points([233]))\n\
+         \tprintln(string::from_code_points([128105]))\n\
+         \tprintln(string::from_code_points([104, 105]))\n\
+         \tprintln(string::from_code_points([]))\n\
+         \tprintln(string::from_code_points([1114112]))\n\
+         \tprintln(string::from_code_points([55296]))\n\
+         \tprintln(string::from_code_points([-1]))\n\
          }\n",
         "Ok(\u{E9})\nOk(\u{1F469})\nOk(hi)\nOk()\nErr(Nil)\nErr(Nil)\nErr(Nil)\n",
     );

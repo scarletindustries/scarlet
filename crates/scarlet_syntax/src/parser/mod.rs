@@ -876,6 +876,11 @@ impl Parser {
                 Kind::PuncDot => {
                     expr = self.parse_dot_expression(expr)?;
                 }
+                // A bare module name before `::` was taken by the primary
+                // expression, so anything reaching here is not one.
+                Kind::PuncColonColon => {
+                    return Err("Only an imported module's name can come before `::`".to_string());
+                }
                 Kind::PuncOpenParen => {
                     // A newline before `(` ends the postfix chain, so `f`
                     // then `(a, b)` is two expressions, not a call (P7).
@@ -968,7 +973,12 @@ impl Parser {
             Kind::InterpStringStart => self.parse_interpolated_string()?,
             Kind::LiteralNumber(_) => self.parse_number_expression()?,
             Kind::Identifier(_) => {
-                ast::Expression::Identifier(self.eat_identifier("Expected identifier")?)
+                let id = self.eat_identifier("Expected identifier")?;
+                if self.kind() == Kind::PuncColonColon {
+                    self.parse_module_access(id)?
+                } else {
+                    ast::Expression::Identifier(id)
+                }
             }
             Kind::PuncOpenParen => self.parse_tuple()?,
             Kind::PuncOpenBrace => self.parse_block_expression()?,
@@ -1454,14 +1464,6 @@ impl Parser {
         self.with_recursion_guard(Self::parse_pattern_atom_inner)
     }
 
-    /// Whether the token after the current one is an uppercase name. Tells
-    /// `io.NotFound` from any other dotted form.
-    fn peek_is_type_name(&self) -> bool {
-        self.tokens
-            .get(self.index + 1)
-            .is_some_and(|t| matches!(&t.kind, Kind::Identifier(n) if is_type_name(n)))
-    }
-
     /// The shared tail of a constructor pattern: the optional argument list.
     fn finish_ctor_pattern(
         &mut self,
@@ -1505,12 +1507,9 @@ impl Parser {
             Kind::Identifier(_) => {
                 let id_span = self.current_span();
                 let name = self.eat_name("Expected pattern")?;
-                // `io.NotFound(path)`: a ctor reached through a module
-                // qualifier, so it need not be imported by name. `p.field` is
-                // not a pattern, so nothing else can look like this.
-                if !is_type_name(&name) && self.kind() == Kind::PuncDot && self.peek_is_type_name()
-                {
-                    self.eat(Kind::PuncDot)?;
+                // `io::NotFound(path)`: a ctor reached through a module
+                // qualifier, so it need not be imported by name.
+                if self.eat_module_separator(&name)? {
                     let q = ast::Identifier {
                         name,
                         span: id_span,
@@ -1830,14 +1829,13 @@ impl Parser {
         let span = self.current_span();
         let name = self.eat_name("Expected type name")?;
 
-        // `module.Type` — the first name is an import qualifier, the second
+        // `module::Type` — the first name is an import qualifier, the second
         // names the type inside that module.
         let mut qualifier: Option<ast::Identifier> = None;
         let mut identifier = ast::Identifier { name, span };
-        if self.kind() == Kind::PuncDot {
-            self.eat(Kind::PuncDot)?;
+        if self.eat_module_separator(&identifier.name)? {
             let member_span = self.current_span();
-            let member = self.eat_name("Expected type name after '.'")?;
+            let member = self.eat_name("Expected type name after `::`")?;
             qualifier = Some(identifier);
             identifier = ast::Identifier {
                 name: member,
@@ -2089,17 +2087,17 @@ impl Parser {
         }))
     }
 
-    /// Whether a `module.Ctor(..) = e` statement starts here: a module name, a
-    /// dot, a constructor name and its `(`, then an `=` after the matching `)`
-    /// on the same line. Without the `=` it is a call, `http.Fixed(1, b)`.
+    /// Whether a `module::Ctor(..) = e` statement starts here: a module name,
+    /// `::`, a constructor name and its `(`, then an `=` after the matching `)`
+    /// on the same line. Without the `=` it is a call, `http::Fixed(1, b)`.
     fn is_qualified_ctor_destructuring(&self) -> bool {
         let kind = |i: usize| self.tokens.get(self.index + i).map(|t| &t.kind);
-        let (Some(Kind::Identifier(module)), Some(Kind::PuncDot), Some(Kind::Identifier(ctor))) =
+        let (Some(Kind::Identifier(_)), Some(Kind::PuncColonColon), Some(Kind::Identifier(ctor))) =
             (kind(0), kind(1), kind(2))
         else {
             return false;
         };
-        if is_type_name(module) || !is_type_name(ctor) || kind(3) != Some(&Kind::PuncOpenParen) {
+        if !is_type_name(ctor) || kind(3) != Some(&Kind::PuncOpenParen) {
             return false;
         }
         let mut depth = 0usize;
@@ -2128,10 +2126,10 @@ impl Parser {
     fn parse_ctor_destructuring(&mut self) -> PResult<ast::Statement> {
         let span = self.current_span();
         // `parse_node`'s dispatch guarantees a constructor name then `(`, with
-        // a module and a dot before it for `module.Ctor(..)`.
-        let qualifier = if self.peek_next() == Some(Kind::PuncDot) {
+        // a module and `::` before it for `module::Ctor(..)`.
+        let qualifier = if self.peek_next() == Some(Kind::PuncColonColon) {
             let module = self.eat_identifier("Expected module name")?;
-            self.eat(Kind::PuncDot)?;
+            self.eat(Kind::PuncColonColon)?;
             Some(module)
         } else {
             None
@@ -2364,7 +2362,7 @@ impl Parser {
             self.error_at(
                 list,
                 format!(
-                    "Import the module and name it at the use: `import {path}`, then `{qualifier}.{item}`"
+                    "Import the module and name it at the use: `import {path}`, then `{qualifier}::{item}`"
                 ),
             );
         }
@@ -2375,6 +2373,49 @@ impl Parser {
             path_span,
             span: self.span_from(import_span),
         }))
+    }
+
+    /// Eat the `::` after a module name in a type or a constructor pattern.
+    /// `http.Method` can only mean `http::Method` there, since neither has a
+    /// value for `.` to read a field of, so it is reported and read as `::`
+    /// rather than left to fail on the next token.
+    fn eat_module_separator(&mut self, module: &str) -> PResult<bool> {
+        match self.kind() {
+            Kind::PuncColonColon => {
+                self.eat(Kind::PuncColonColon)?;
+                Ok(true)
+            }
+            Kind::PuncDot => {
+                let next = self.tokens.get(self.index + 1).map(|t| &t.kind);
+                let Some(Kind::Identifier(member)) = next else {
+                    return Ok(false);
+                };
+                if !is_type_name(member) {
+                    return Ok(false);
+                }
+                let msg = format!(
+                    "Reach a module's type or constructor with `::`, like `{module}::{member}`"
+                );
+                let span = self.current_span();
+                self.error_at(span, msg);
+                self.eat(Kind::PuncDot)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn parse_module_access(&mut self, module: ast::Identifier) -> PResult<ast::Expression> {
+        self.eat(Kind::PuncColonColon)?;
+        let span = self.current_span();
+        let name = self.eat_name("Expected a module member after `::`")?;
+        Ok(ast::Expression::ModuleAccessExpression(
+            ast::ModuleAccessExpression {
+                span: module.span.union(&span),
+                module,
+                member: ast::Identifier { name, span },
+            },
+        ))
     }
 
     fn parse_dot_expression(&mut self, left: ast::Expression) -> PResult<ast::Expression> {
@@ -2766,7 +2807,7 @@ mod tests {
 
         // Through its module, as a constructor has to be written when it is
         // not imported by name.
-        let r = parse("headers.Header(name, value) = h");
+        let r = parse("headers::Header(name, value) = h");
         assert!(r.diagnostics.is_empty(), "{:#?}", r.diagnostics);
         let ast::Node::Statement(s) = &r.ast.body[0] else {
             panic!("expected statement, got {:#?}", r.ast.body[0])
@@ -2780,9 +2821,52 @@ mod tests {
         );
         assert_eq!((cd.name.name.as_str(), cd.args.len()), ("Header", 2));
         // With no `=` after it, the same shape is a call.
-        let r = parse("http.Fixed(1, b)");
+        let r = parse("http::Fixed(1, b)");
         assert!(r.diagnostics.is_empty(), "{:#?}", r.diagnostics);
         assert!(matches!(r.ast.body[0], ast::Node::Expression(_)));
+    }
+
+    #[test]
+    fn module_access_is_its_own_node() {
+        let r = parse("c::f(1)");
+        assert!(r.diagnostics.is_empty(), "{:#?}", r.diagnostics);
+        let ast::Node::Expression(ast::Expression::FunctionCallExpression(call)) = &r.ast.body[0]
+        else {
+            panic!("expected a call, got {:#?}", r.ast.body[0])
+        };
+        let ast::Expression::ModuleAccessExpression(ma) = call.callee.as_ref() else {
+            panic!("expected a module access, got {:#?}", call.callee)
+        };
+        assert_eq!(
+            (ma.module.name.as_str(), ma.member.name.as_str()),
+            ("c", "f")
+        );
+
+        // `.` after a module member is an ordinary field read on its value.
+        let r = parse("c::origin.x");
+        assert!(r.diagnostics.is_empty(), "{:#?}", r.diagnostics);
+        assert!(matches!(
+            &r.ast.body[0],
+            ast::Node::Expression(ast::Expression::PropertyAccessExpression(pa))
+                if matches!(pa.left.as_ref(), ast::Expression::ModuleAccessExpression(_))
+        ));
+    }
+
+    #[test]
+    fn only_a_name_comes_before_colons() {
+        assert_has_error(
+            "a.b::c",
+            "Only an imported module's name can come before `::`",
+        );
+        assert_has_error(
+            "a::b::c",
+            "Only an imported module's name can come before `::`",
+        );
+        assert_has_error(
+            "f()::c",
+            "Only an imported module's name can come before `::`",
+        );
+        assert_has_error("x = c::", "Expected a module member after `::`");
     }
 
     #[test]
@@ -2988,10 +3072,14 @@ mod tests {
 
     #[test]
     fn test_qualified_types() {
-        assert_no_errors("type C = http.Method");
-        assert_no_errors("type C = mod.Wrapper(Int)");
-        assert_no_errors("fn f(m http.Method) http.Method { m }");
-        assert_no_errors("fn g(xs fn(a) mod.Out) { xs }");
+        assert_no_errors("type C = http::Method");
+        assert_no_errors("type C = mod::Wrapper(Int)");
+        assert_no_errors("fn f(m http::Method) http::Method { m }");
+        assert_no_errors("fn g(xs fn(a) mod::Out) { xs }");
+        assert_has_error(
+            "type C = http.Method",
+            "Reach a module's type or constructor with `::`, like `http::Method`",
+        );
     }
 
     #[test]
@@ -3034,10 +3122,10 @@ mod tests {
         };
         let message = error("import scarlet/list.{fold, map as m}\nx = 1");
         assert!(message.contains("`import scarlet/list`"), "{message}");
-        assert!(message.contains("`list.fold`"), "{message}");
+        assert!(message.contains("`list::fold`"), "{message}");
         let message = error("import ./lib as l.{x}");
         assert!(message.contains("`import ./lib`"), "{message}");
-        assert!(message.contains("`l.x`"), "{message}");
+        assert!(message.contains("`l::x`"), "{message}");
     }
 
     #[test]
@@ -3076,8 +3164,15 @@ mod tests {
         // Recovery that synchronizes to the arm's `->` must consume it and
         // parse the body, not loop re-erroring on the same token. A lowercase
         // member cannot be a constructor, so that case still needs recovery.
-        assert_no_errors("match x { net.V6(ip) -> 1 }");
-        assert_single_error("match x { net.v6(ip) -> 1 }", "Expected '->', got '.'");
+        assert_no_errors("match x { net::V6(ip) -> 1 }");
+        assert_single_error(
+            "match x { net::v6(ip) -> 1 }",
+            "Constructor name 'v6' must start with an uppercase letter",
+        );
+        assert_single_error(
+            "match x { net.V6(ip) -> 1 }",
+            "Reach a module's type or constructor with `::`, like `net::V6`",
+        );
         assert_single_error("match x { a if + -> 1 }", "Unexpected '+'");
         assert_single_error("match x { -> 1 }", "Unexpected '->' in pattern");
         // Constructor fields on one line need commas; a newline separates too.

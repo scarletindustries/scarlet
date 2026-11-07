@@ -19,7 +19,7 @@ const HANDLER: &str = "import scarlet/wire\n\
                        \tHandler(name String, run fn(Int) Int)\n\
                        }\n\
                        pub fn main() {\n\
-                       \tprintln(wire.encode(Handler('h', fn(x) { x + 1 })))\n\
+                       \tprintln(wire::encode(Handler('h', fn(x) { x + 1 })))\n\
                        }\n";
 
 /// A record over a user-declared bodiless type, which no VM table backs: a
@@ -32,7 +32,7 @@ const NATIVE: &str = "import scarlet/wire\n\
                       \tHandler(name String, raw Native)\n\
                       }\n\
                       fn send(h Handler) Binary {\n\
-                      \twire.encode(h)\n\
+                      \twire::encode(h)\n\
                       }\n\
                       pub fn main() {\n\
                       \t_ = send\n\
@@ -43,7 +43,7 @@ const NATIVE: &str = "import scarlet/wire\n\
 /// is reached through.
 const GENERIC: &str = "import scarlet/wire\n\
                        fn send(xs Array(a)) Binary {\n\
-                       \twire.encode(xs)\n\
+                       \twire::encode(xs)\n\
                        }\n\
                        pub fn main() {\n\
                        \t_ = send\n\
@@ -56,8 +56,8 @@ const GENERIC: &str = "import scarlet/wire\n\
 /// anything `import scarlet/os/port` brought in.
 const PORT: &str = "import scarlet/os/port\n\
                     import scarlet/wire\n\
-                    fn send(p port.Port) Binary {\n\
-                    \twire.encode(p)\n\
+                    fn send(p port::Port) Binary {\n\
+                    \twire::encode(p)\n\
                     }\n\
                     pub fn main() {\n\
                     \t_ = send\n\
@@ -69,7 +69,7 @@ const EVENT: &str = "import scarlet/wire\n\
                      \tLeft(who String)\n\
                      }\n\
                      pub fn main() {\n\
-                     \tprintln(wire.encode(Left('a')))\n\
+                     \tprintln(wire::encode(Left('a')))\n\
                      }\n";
 
 fn messages(r: &scarlet::bytecode::CompileResult) -> String {
@@ -169,7 +169,7 @@ fn the_repl_reports_an_unconstrained_decode() {
     {
         let mut stdin = child.stdin.take().expect("stdin");
         stdin
-            .write_all(b"import scarlet/wire\nwire.decode(<<1>>)\n")
+            .write_all(b"import scarlet/wire\nwire::decode(<<1>>)\n")
             .expect("write stdin");
     }
     let out = common::wait_or_kill(child, common::CHILD_TIMEOUT_SECS);
@@ -179,7 +179,7 @@ fn the_repl_reports_an_unconstrained_decode() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        all.contains("the type `wire.decode` produces here is not known"),
+        all.contains("the type `wire::decode` produces here is not known"),
         "got: {all}"
     );
 }
@@ -190,7 +190,7 @@ fn the_repl_reports_an_unconstrained_decode() {
 const SUBJECT_DEEP: &str = "import scarlet/process\n\
                             import scarlet/wire\n\
                             pub type Inner {\n\
-                            \tInner(reply process.Subject(String))\n\
+                            \tInner(reply process::Subject(String))\n\
                             }\n\
                             pub type Middle {\n\
                             \tMiddle(inner Inner)\n\
@@ -199,7 +199,7 @@ const SUBJECT_DEEP: &str = "import scarlet/process\n\
                             \tOuter(mid Middle)\n\
                             }\n\
                             pub fn main() {\n\
-                            \tprintln(wire.encode(Outer(Middle(Inner(process.subject())))))\n\
+                            \tprintln(wire::encode(Outer(Middle(Inner(process::subject())))))\n\
                             }\n";
 
 #[test]
@@ -227,8 +227,8 @@ fn the_refusal_path_survives_to_the_session_check_path() {
         &parse(
             "import scarlet/map\n\
              import scarlet/wire\n\
-             fn send(o (Int, map.Map(String, Array(a)))) Binary {\n\
-             \twire.encode(o)\n\
+             fn send(o (Int, map::Map(String, Array(a)))) Binary {\n\
+             \twire::encode(o)\n\
              }\n\
              pub fn main() {\n\
              \t_ = send\n\

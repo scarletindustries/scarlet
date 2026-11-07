@@ -11,8 +11,8 @@ pub fn argv() Array(String)
 // Every variable whose name and value are valid UTF-8. A name listed twice has
 // its first value, as `getenv` gives. The map is made once, on the first call.
 @vm(os__env)
-pub fn env() map.Map(String, String)
+pub fn env() map::Map(String, String)
 
 pub fn get_env(key String) Option(String) {
-	map.get(env(), key)
+	map::get(env(), key)
 }

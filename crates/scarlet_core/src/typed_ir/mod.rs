@@ -21,7 +21,6 @@ pub mod rty;
 pub(crate) use scarlet_types::slots;
 pub(crate) mod zonk;
 
-pub use elaborate::WalkStep;
 pub(crate) use elaborate::{
     ElabCtx, FieldAt, OrShape, PreludeTys, VariantLayout, elaborate_body, elaborate_toplevel,
     elaborator_bug,

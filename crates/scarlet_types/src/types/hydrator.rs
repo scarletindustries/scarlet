@@ -21,7 +21,7 @@ pub struct TypeRefHit {
     /// Owning module path, interned in `InferEngine.str_slices`.
     pub module: ArenaSlice<pool::StrSlices>,
     /// `(name, span)` of the module qualifier when the occurrence was written
-    /// `module.Type`; the drain records a `Qualifier` occurrence from it so
+    /// `module::Type`; the drain records a `Qualifier` occurrence from it so
     /// the import registers as used and the qualifier resolves in the editor.
     pub qualifier: Option<(StrId, Span)>,
 }
@@ -219,12 +219,12 @@ impl Hydrator {
         }
 
         // Imported modules register their public types under the mangled
-        // `qualifier.Name` key (see `process_import`), so a qualified
+        // `qualifier::Name` key (see `process_import`), so a qualified
         // reference resolves through the same table as a bare one. Type names
-        // cannot contain '.', so mangled keys never collide with local types.
+        // cannot contain ':', so mangled keys never collide with local types.
         let (lookup_key, display) = match &nt.qualifier {
             Some(q) => {
-                let full = format!("{}.{}", q.name, name);
+                let full = format!("{}::{}", q.name, name);
                 (full.clone(), full)
             }
             None => (name.clone(), name.clone()),
@@ -275,7 +275,7 @@ impl Hydrator {
 
 /// "Unknown type" for a bare name, pointing at the qualified spelling when an
 /// import does export a type by that name: `Map` after `import scarlet/map`
-/// is `map.Map`.
+/// is `map::Map`.
 fn unknown_bare_type(env: &TypeEnv, name: &str) -> String {
     let quoted: Vec<String> = env
         .qualified_spellings(name)

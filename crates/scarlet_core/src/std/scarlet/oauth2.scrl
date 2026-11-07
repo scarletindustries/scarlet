@@ -38,19 +38,19 @@ pub type Store {
 	get_token fn(String) Option(Grant)
 }
 
-fn texts(values Array(String)) json.Json {
-	json.List(array.map(values, json.Str))
+fn texts(values Array(String)) json::Json {
+	json::List(array::map(values, json::Str))
 }
 
 // Discovery
 
 /** RFC 9728 metadata. Serve it at /.well-known/oauth-protected-resource. */
-pub fn resource_metadata(resource_uri String, auth_server String, scopes Array(String)) json.Json {
-	json.Object([
-		('resource', json.Str(resource_uri)),
-		('authorization_servers', json.List([json.Str(auth_server)])),
+pub fn resource_metadata(resource_uri String, auth_server String, scopes Array(String)) json::Json {
+	json::Object([
+		('resource', json::Str(resource_uri)),
+		('authorization_servers', json::List([json::Str(auth_server)])),
 		('scopes_supported', texts(scopes)),
-		('bearer_methods_supported', json.List([json.Str('header')])),
+		('bearer_methods_supported', json::List([json::Str('header')])),
 	])
 }
 
@@ -67,16 +67,16 @@ pub fn challenge(metadata_url String, scope String) String {
 /** RFC 8414 metadata, with endpoints at `issuer`/oauth/authorize, /token and
  * /register. `issuer` has no trailing slash. Serve it at
  * /.well-known/oauth-authorization-server. */
-pub fn metadata(issuer String, scopes Array(String)) json.Json {
-	json.Object([
-		('issuer', json.Str(issuer)),
-		('authorization_endpoint', json.Str('${issuer}/oauth/authorize')),
-		('token_endpoint', json.Str('${issuer}/oauth/token')),
-		('registration_endpoint', json.Str('${issuer}/oauth/register')),
-		('response_types_supported', json.List([json.Str('code')])),
-		('grant_types_supported', json.List([json.Str('authorization_code')])),
-		('code_challenge_methods_supported', json.List([json.Str('S256')])),
-		('token_endpoint_auth_methods_supported', json.List([json.Str('none')])),
+pub fn metadata(issuer String, scopes Array(String)) json::Json {
+	json::Object([
+		('issuer', json::Str(issuer)),
+		('authorization_endpoint', json::Str('${issuer}/oauth/authorize')),
+		('token_endpoint', json::Str('${issuer}/oauth/token')),
+		('registration_endpoint', json::Str('${issuer}/oauth/register')),
+		('response_types_supported', json::List([json::Str('code')])),
+		('grant_types_supported', json::List([json::Str('authorization_code')])),
+		('code_challenge_methods_supported', json::List([json::Str('S256')])),
+		('token_endpoint_auth_methods_supported', json::List([json::Str('none')])),
 		('scopes_supported', texts(scopes)),
 	])
 }
@@ -84,10 +84,10 @@ pub fn metadata(issuer String, scopes Array(String)) json.Json {
 // Registration
 
 /** Registers a public client and gives back its metadata. No secret. */
-pub fn register(store Store, req_body Binary) Result(json.Json, String) {
-	doc <- result.then(result.map_err(json.parse_binary(req_body), fn(_) 'body is not json'))
-	uris = match json.field(doc, 'redirect_uris') {
-		Some(list) -> array.fold(json.elements(list), [], fn(acc, u) match json.string(u) {
+pub fn register(store Store, req_body Binary) Result(json::Json, String) {
+	doc <- result::then(result::map_err(json::parse_binary(req_body), fn(_) 'body is not json'))
+	uris = match json::field(doc, 'redirect_uris') {
+		Some(list) -> array::fold(json::elements(list), [], fn(acc, u) match json::string(u) {
 			Some(t) -> [..acc, t]
 			None -> acc
 		})
@@ -100,12 +100,12 @@ pub fn register(store Store, req_body Binary) Result(json.Json, String) {
 			Store(put_client, _, _, _, _, _) = store
 			put_client(id, join_spaced(uris))
 			Ok(
-				json.Object([
-					('client_id', json.Str(id)),
+				json::Object([
+					('client_id', json::Str(id)),
 					('redirect_uris', texts(uris)),
-					('token_endpoint_auth_method', json.Str('none')),
-					('grant_types', json.List([json.Str('authorization_code')])),
-					('response_types', json.List([json.Str('code')])),
+					('token_endpoint_auth_method', json::Str('none')),
+					('grant_types', json::List([json::Str('authorization_code')])),
+					('response_types', json::List([json::Str('code')])),
 				]),
 			)
 		}
@@ -113,7 +113,7 @@ pub fn register(store Store, req_body Binary) Result(json.Json, String) {
 }
 
 fn join_spaced(xs Array(String)) String {
-	array.fold(xs, '', fn(acc, x) match acc {
+	array::fold(xs, '', fn(acc, x) match acc {
 		'' -> x
 		_ -> '${acc} ${x}'
 	})
@@ -134,18 +134,18 @@ pub type AuthorizeReq {
 /** The query of a `GET /authorize`. The redirect uri must be one the client
  * registered: a code sent anywhere else is a stolen code. */
 pub fn parse_authorize(store Store, query_bytes Binary) Result(AuthorizeReq, String) {
-	q = form.decode(query_bytes)
-	client_id = form.get(q, 'client_id') or ''
-	redirect_uri = form.get(q, 'redirect_uri') or ''
-	pkce_challenge = form.get(q, 'code_challenge') or ''
-	method = form.get(q, 'code_challenge_method') or ''
+	q = form::decode(query_bytes)
+	client_id = form::get(q, 'client_id') or ''
+	redirect_uri = form::get(q, 'redirect_uri') or ''
+	pkce_challenge = form::get(q, 'code_challenge') or ''
+	method = form::get(q, 'code_challenge_method') or ''
 	Store(_, get_client, _, _, _, _) = store
 	registered = get_client(client_id) or ''
 	if client_id == '' || redirect_uri == '' {
 		Err('client_id and redirect_uri are required')
-	} else if !array.contains(string.split(registered, ' '), redirect_uri) {
+	} else if !array::contains(string::split(registered, ' '), redirect_uri) {
 		Err('redirect_uri is not registered for this client')
-	} else if { form.get(q, 'response_type') or '' } != 'code' {
+	} else if { form::get(q, 'response_type') or '' } != 'code' {
 		Err('only response_type=code is supported')
 	} else if method != 'S256' || pkce_challenge == '' {
 		Err('PKCE S256 is required')
@@ -154,10 +154,10 @@ pub fn parse_authorize(store Store, query_bytes Binary) Result(AuthorizeReq, Str
 			AuthorizeReq(
 				client_id: client_id,
 				redirect_uri: redirect_uri,
-				state: form.get(q, 'state') or '',
+				state: form::get(q, 'state') or '',
 				challenge: pkce_challenge,
-				scope: form.get(q, 'scope') or '',
-				resource: form.get(q, 'resource') or '',
+				scope: form::get(q, 'scope') or '',
+				resource: form::get(q, 'resource') or '',
 			),
 		)
 	}
@@ -179,22 +179,22 @@ pub fn approve(store Store, areq AuthorizeReq, user String) String {
 			resource: resource,
 		),
 	)
-	sep = match string.contains(redirect_uri, '?') {
+	sep = match string::contains(redirect_uri, '?') {
 		True -> '&'
 		False -> '?'
 	}
-	'${redirect_uri}${sep}code=${form.pct_encode(code)}&state=${form.pct_encode(state)}'
+	'${redirect_uri}${sep}code=${form::pct_encode(code)}&state=${form::pct_encode(state)}'
 }
 
 // Token
 
 /** `POST /token`: a code for a bearer token. PKCE is the client's proof: the
  * verifier must hash to the code's challenge. */
-pub fn token(store Store, req_body Binary) Result(json.Json, String) {
-	f = form.decode(req_body)
-	code = form.get(f, 'code') or ''
-	verifier = form.get(f, 'code_verifier') or ''
-	if { form.get(f, 'grant_type') or '' } != 'authorization_code' {
+pub fn token(store Store, req_body Binary) Result(json::Json, String) {
+	f = form::decode(req_body)
+	code = form::get(f, 'code') or ''
+	verifier = form::get(f, 'code_verifier') or ''
+	if { form::get(f, 'grant_type') or '' } != 'authorization_code' {
 		Err('only grant_type=authorization_code is supported')
 	} else if code == '' || verifier == '' {
 		Err('code and code_verifier are required')
@@ -205,16 +205,16 @@ pub fn token(store Store, req_body Binary) Result(json.Json, String) {
 			Some(g) -> {
 				Grant(_, scope, client_id, redirect_uri, pkce_challenge, _) = g
 				// No empty stand-in on `Err`: it would match an empty challenge.
-				pkce_ok = match crypto.sha256(binary.from_string(verifier)) {
+				pkce_ok = match crypto::sha256(binary::from_string(verifier)) {
 					Ok(digest) ->
-						crypto.const_eq(
-							base64.url_encode(digest),
-							binary.from_string(pkce_challenge),
+						crypto::const_eq(
+							base64::url_encode(digest),
+							binary::from_string(pkce_challenge),
 						)
 					Err(Nil) -> False
 				}
-				ok_client = { form.get(f, 'client_id') or client_id } == client_id
-				ok_redirect = { form.get(f, 'redirect_uri') or redirect_uri } == redirect_uri
+				ok_client = { form::get(f, 'client_id') or client_id } == client_id
+				ok_redirect = { form::get(f, 'redirect_uri') or redirect_uri } == redirect_uri
 				if !pkce_ok {
 					Err('PKCE verification failed')
 				} else if !ok_client || !ok_redirect {
@@ -223,10 +223,10 @@ pub fn token(store Store, req_body Binary) Result(json.Json, String) {
 					tok = new_token()
 					put_token(tok, g)
 					Ok(
-						json.Object([
-							('access_token', json.Str(tok)),
-							('token_type', json.Str('Bearer')),
-							('scope', json.Str(scope)),
+						json::Object([
+							('access_token', json::Str(tok)),
+							('token_type', json::Str('Bearer')),
+							('scope', json::Str(scope)),
 						]),
 					)
 				}
@@ -243,5 +243,5 @@ pub fn bearer(store Store, token_text String) Option(Grant) {
 
 // 32 random bytes, url-safe, for tokens, codes and client ids.
 fn new_token() String {
-	binary.to_string(base64.url_encode(crypto.random_bytes(32) or <<>>)) or ''
+	binary::to_string(base64::url_encode(crypto::random_bytes(32) or <<>>)) or ''
 }

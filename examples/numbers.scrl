@@ -15,34 +15,38 @@ pub fn main() {
 	println('7 % 3     ${7 % 3}')
 	println('-7 % 3    ${-7 % 3}')
 
-	println('max       ${int.max(3, 9)}')
-	println('min       ${int.min(3, 9)}')
-	println('abs       ${int.abs(-42)}')
-	println('clamp     ${int.clamp(150, 0, 100)} ${int.clamp(-5, 0, 100)} ${int.clamp(50, 0, 100)}')
+	println('max       ${int::max(3, 9)}')
+	println('min       ${int::min(3, 9)}')
+	println('abs       ${int::abs(-42)}')
+	println(
+		'clamp     ${int::clamp(150, 0, 100)} ${int::clamp(-5, 0, 100)} ${int::clamp(50, 0, 100)}',
+	)
 
 	// An Int has no bounds: past the 64-bit edges it keeps counting, exactly.
-	println('max_value ${int.max_value}')
-	println('min_value ${int.min_value}')
-	println('past max  ${int.max_value + 1}')
-	println('abs(min)  ${int.abs(int.min_value)}')
+	println('max_value ${int::max_value}')
+	println('min_value ${int::min_value}')
+	println('past max  ${int::max_value + 1}')
+	println('abs(min)  ${int::abs(int::min_value)}')
 
 	println('boxed     ${140737488355327 + 1}')
 	println('boxed     ${9223372036854775807 - 1}')
 	println('')
 
 	// Float is a 64-bit double. from_int goes in; floor, ceil, round, truncate come out.
-	println('from_int  ${float.to_string(float.from_int(3))}')
-	println('floor     ${float.floor(2.7)} ${float.floor(-2.7)}')
-	println('ceil      ${float.ceil(2.1)} ${float.ceil(-2.1)}')
-	println('truncate  ${float.truncate(2.7)} ${float.truncate(-2.7)}')
+	println('from_int  ${float::to_string(float::from_int(3))}')
+	println('floor     ${float::floor(2.7)} ${float::floor(-2.7)}')
+	println('ceil      ${float::ceil(2.1)} ${float::ceil(-2.1)}')
+	println('truncate  ${float::truncate(2.7)} ${float::truncate(-2.7)}')
 
 	// round breaks ties away from zero.
-	println('round     ${float.round(2.5)} ${float.round(-2.5)} ${float.round(2.4)}')
+	println('round     ${float::round(2.5)} ${float::round(-2.5)} ${float::round(2.4)}')
 
 	println(
-		'max/min   ${float.to_string(float.max(1.5, 2.5))} ${float.to_string(float.min(1.5, 2.5))}',
+		'max/min   ${float::to_string(
+			float::max(1.5, 2.5),
+		)} ${float::to_string(float::min(1.5, 2.5))}',
 	)
-	println('abs       ${float.to_string(float.abs(-1.5))}')
+	println('abs       ${float::to_string(float::abs(-1.5))}')
 
 	// 0.1 is not exact in a double. money.scrl uses scarlet/decimal instead.
 	println('0.1 + 0.2 ${0.1 + 0.2}')
@@ -53,8 +57,8 @@ pub fn main() {
 	// Bool is a two-constructor enum, not an Int.
 	println('&& ||     ${True && False} ${True || False}')
 	println('!         ${!True}')
-	println('negate    ${bool.negate(False)}')
-	println('to_string ${bool.to_string(True) + '/' + bool.to_string(False)}')
+	println('negate    ${bool::negate(False)}')
+	println('to_string ${bool::to_string(True) + '/' + bool::to_string(False)}')
 
 	println('guard     ${safe_div(10, 0)} ${safe_div(10, 3)}')
 }

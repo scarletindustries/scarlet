@@ -7,7 +7,7 @@
 // is decimal 8. Hex/bin floats are not a thing: `0xFF.5` is `0xFF` then `.5`.
 //
 // Range is i64, same as decimal:
-//   0x7FFFFFFFFFFFFFFF == int.max_value            (ok)
+//   0x7FFFFFFFFFFFFFFF == int::max_value            (ok)
 //   0x8000000000000000                             (compile error: out of range)
 //   9223372036854775808                            (same error, decimal)
 // i64::MIN cannot be written as a positive-magnitude literal in any base.
@@ -30,7 +30,7 @@ pub fn main() {
 	println('neg: ${-0xFF} ${ok(-0xFF == -255)} ${ok(-0b1010 == -10)}')
 	println(
 		'max: ${ok(
-			0x7FFFFFFFFFFFFFFF == int.max_value,
+			0x7FFFFFFFFFFFFFFF == int::max_value,
 		)} ${ok(0x7FFF_FFFF_FFFF_FFFF == 9223372036854775807)}',
 	)
 
@@ -51,7 +51,7 @@ pub fn main() {
 		}}',
 	)
 	println(
-		'min pattern: ${match int.min_value {
+		'min pattern: ${match int::min_value {
 			-0x8000000000000000 -> 'min'
 			_ -> 'no'
 		}}',
@@ -59,6 +59,6 @@ pub fn main() {
 
 	// The WebSocket masking key the bitwise suite had to write as 3735928559.
 	key = 0xDEADBEEF
-	mask_byte = int.bitwise_and(int.bitwise_shift_right(key, 24), 0xFF)
+	mask_byte = int::bitwise_and(int::bitwise_shift_right(key, 24), 0xFF)
 	println('ws: ${key} ${mask_byte} ${ok(mask_byte == 0xDE)}')
 }

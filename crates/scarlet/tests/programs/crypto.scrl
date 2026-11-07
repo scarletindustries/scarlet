@@ -40,14 +40,14 @@ fn hex_from(b Binary, at Int, size Int, acc Binary) Binary {
 	if at >= size {
 		acc
 	} else {
-		v = binary.byte_at(b, at)
+		v = binary::byte_at(b, at)
 		hex_from(
 			b,
 			at + 1,
 			size,
-			binary.append(acc, <<
-				nibble(int.bitwise_shift_right(v, 4)):8,
-				nibble(int.bitwise_and(v, 15)):8,
+			binary::append(acc, <<
+				nibble(int::bitwise_shift_right(v, 4)):8,
+				nibble(int::bitwise_and(v, 15)):8,
 			>>),
 		)
 	}
@@ -57,7 +57,7 @@ fn hex_from(b Binary, at Int, size Int, acc Binary) Binary {
 // published vector is written in; comparing raw binaries would make a
 // mismatch unreadable in the golden.
 fn hex(b Binary) String {
-	text(hex_from(b, 0, binary.byte_size(b), <<>>))
+	text(hex_from(b, 0, binary::byte_size(b), <<>>))
 }
 
 // A digest as hex, or `no digest` for the binaries that have none.
@@ -70,20 +70,20 @@ fn digest(r Result(Binary, Nil)) String {
 
 fn digest_size(r Result(Binary, Nil)) Int {
 	match r {
-		Ok(b) -> binary.byte_size(b)
+		Ok(b) -> binary::byte_size(b)
 		Err(Nil) -> -1
 	}
 }
 
 fn text(b Binary) String {
-	match binary.to_string(b) {
+	match binary::to_string(b) {
 		Ok(s) -> s
 		Err(Nil) -> 'NOT-UTF8'
 	}
 }
 
 fn head(b Binary, n Int) String {
-	match binary.slice_bytes(b, 0, n) {
+	match binary::slice_bytes(b, 0, n) {
 		Ok(h) -> text(h)
 		Err(Nil) -> 'SHORT'
 	}
@@ -93,7 +93,7 @@ fn repeat(n Int, unit Binary, acc Binary) Binary {
 	if n <= 0 {
 		acc
 	} else {
-		repeat(n - 1, unit, binary.append(acc, unit))
+		repeat(n - 1, unit, binary::append(acc, unit))
 	}
 }
 
@@ -107,26 +107,26 @@ fn all_bytes(n Int, acc Binary) Binary {
 	if n > 255 {
 		acc
 	} else {
-		all_bytes(n + 1, binary.append(acc, <<n:8>>))
+		all_bytes(n + 1, binary::append(acc, <<n:8>>))
 	}
 }
 
 fn decodes_to(encoded Binary, expected Binary) Bool {
-	match base64.decode(encoded) {
+	match base64::decode(encoded) {
 		Ok(got) -> got == expected
 		Err(Nil) -> False
 	}
 }
 
 fn rejects(encoded Binary) Bool {
-	match base64.decode(encoded) {
+	match base64::decode(encoded) {
 		Ok(_) -> False
 		Err(Nil) -> True
 	}
 }
 
 fn round_trips(b Binary) Bool {
-	decodes_to(base64.encode(b), b)
+	decodes_to(base64::encode(b), b)
 }
 
 pub fn main() {
@@ -135,13 +135,13 @@ pub fn main() {
 	// The whole point of these seven is the padding: they walk every input
 	// length mod 3, so a `=` miscounted by one shows up immediately.
 
-	println('b64 empty: "${text(base64.encode(<<>>))}"')
-	println('b64 f: ${text(base64.encode(<<'f'>>))}')
-	println('b64 fo: ${text(base64.encode(<<'fo'>>))}')
-	println('b64 foo: ${text(base64.encode(<<'foo'>>))}')
-	println('b64 foob: ${text(base64.encode(<<'foob'>>))}')
-	println('b64 fooba: ${text(base64.encode(<<'fooba'>>))}')
-	println('b64 foobar: ${text(base64.encode(<<'foobar'>>))}')
+	println('b64 empty: "${text(base64::encode(<<>>))}"')
+	println('b64 f: ${text(base64::encode(<<'f'>>))}')
+	println('b64 fo: ${text(base64::encode(<<'fo'>>))}')
+	println('b64 foo: ${text(base64::encode(<<'foo'>>))}')
+	println('b64 foob: ${text(base64::encode(<<'foob'>>))}')
+	println('b64 fooba: ${text(base64::encode(<<'fooba'>>))}')
+	println('b64 foobar: ${text(base64::encode(<<'foobar'>>))}')
 
 	// --- base64: decode is encode's inverse -----------------------------------
 
@@ -160,7 +160,7 @@ pub fn main() {
 	// above — this is the only case that covers them.
 	every = all_bytes(0, <<>>)
 	println('b64 all256 roundtrip: ${ok(round_trips(every))}')
-	println('b64 all256 head: ${head(base64.encode(every), 44)}')
+	println('b64 all256 head: ${head(base64::encode(every), 44)}')
 
 	// --- base64: decode is strict ---------------------------------------------
 	//
@@ -199,9 +199,9 @@ pub fn main() {
 
 	// --- sha1: published vectors ----------------------------------------------
 
-	println('sha1 empty: ${digest(crypto.sha1(<<>>))}')
-	println('sha1 abc: ${digest(crypto.sha1(<<'abc'>>))}')
-	println('sha1 fox: ${digest(crypto.sha1(<<'The quick brown fox jumps over the lazy dog'>>))}')
+	println('sha1 empty: ${digest(crypto::sha1(<<>>))}')
+	println('sha1 abc: ${digest(crypto::sha1(<<'abc'>>))}')
+	println('sha1 fox: ${digest(crypto::sha1(<<'The quick brown fox jumps over the lazy dog'>>))}')
 
 	// --- sha1: the padding boundary -------------------------------------------
 	//
@@ -211,24 +211,24 @@ pub fn main() {
 	// straddle it one block further out, where an off-by-one in the block walk
 	// rather than in the padding would show.
 
-	println('sha1 55a: ${digest(crypto.sha1(a_times(55)))}')
-	println('sha1 56a: ${digest(crypto.sha1(a_times(56)))}')
-	println('sha1 57a: ${digest(crypto.sha1(a_times(57)))}')
-	println('sha1 63a: ${digest(crypto.sha1(a_times(63)))}')
-	println('sha1 64a: ${digest(crypto.sha1(a_times(64)))}')
-	println('sha1 65a: ${digest(crypto.sha1(a_times(65)))}')
-	println('sha1 119a: ${digest(crypto.sha1(a_times(119)))}')
-	println('sha1 120a: ${digest(crypto.sha1(a_times(120)))}')
+	println('sha1 55a: ${digest(crypto::sha1(a_times(55)))}')
+	println('sha1 56a: ${digest(crypto::sha1(a_times(56)))}')
+	println('sha1 57a: ${digest(crypto::sha1(a_times(57)))}')
+	println('sha1 63a: ${digest(crypto::sha1(a_times(63)))}')
+	println('sha1 64a: ${digest(crypto::sha1(a_times(64)))}')
+	println('sha1 65a: ${digest(crypto::sha1(a_times(65)))}')
+	println('sha1 119a: ${digest(crypto::sha1(a_times(119)))}')
+	println('sha1 120a: ${digest(crypto::sha1(a_times(120)))}')
 
 	// A non-ASCII input, so the digest is over bytes and not over anything
 	// text-shaped.
-	println('sha1 all256: ${digest(crypto.sha1(every))}')
+	println('sha1 all256: ${digest(crypto::sha1(every))}')
 
 	// Digest length is fixed at 20 bytes regardless of input size.
 	println(
 		'sha1 length: ${ok(
-			digest_size(crypto.sha1(<<>>)) == 20,
-		)} ${ok(digest_size(crypto.sha1(every)) == 20)}',
+			digest_size(crypto::sha1(<<>>)) == 20,
+		)} ${ok(digest_size(crypto::sha1(every)) == 20)}',
 	)
 
 	// --- RFC 6455 §1.3: the worked example ------------------------------------
@@ -237,7 +237,7 @@ pub fn main() {
 	// vector that ties both modules together, and the reason SHA-1 is here at
 	// all.
 
-	accept = crypto.websocket_accept(<<'dGhlIHNhbXBsZSBub25jZQ=='>>)
+	accept = crypto::websocket_accept(<<'dGhlIHNhbXBsZSBub25jZQ=='>>)
 	println(
 		'ws accept: ${match accept {
 			Ok(a) -> text(a)
@@ -248,21 +248,21 @@ pub fn main() {
 
 	// The GUID is spelled once, in the module. A caller that appends its own
 	// copy must get the same answer.
-	manual = result.map(
-		crypto.sha1(
-			binary.append(
+	manual = result::map(
+		crypto::sha1(
+			binary::append(
 				<<'dGhlIHNhbXBsZSBub25jZQ=='>>,
 				<<'258EAFA5-E914-47DA-95CA-C5AB0DC85B11'>>,
 			),
 		),
-		base64.encode,
+		base64::encode,
 	)
 	println('ws accept manual: ${ok(manual == accept)}')
 
 	// A binary that is not whole bytes has no digest, rather than the digest
 	// of the whole bytes in it.
-	println('sha1 of 4 bits: ${digest(crypto.sha1(<<1:4>>))}')
-	println('sha1 of a byte and 4 bits: ${digest(crypto.sha1(<<97, 1:4>>))}')
+	println('sha1 of 4 bits: ${digest(crypto::sha1(<<1:4>>))}')
+	println('sha1 of a byte and 4 bits: ${digest(crypto::sha1(<<97, 1:4>>))}')
 
 	// --- CSPRNG: what a single run can honestly assert -----------------------
 	//
@@ -280,29 +280,29 @@ pub fn main() {
 }
 
 fn random_len(n Int) Bool {
-	match crypto.random_bytes(n) {
-		Ok(b) -> binary.byte_size(b) == n
+	match crypto::random_bytes(n) {
+		Ok(b) -> binary::byte_size(b) == n
 		Err(Nil) -> False
 	}
 }
 
 fn random_rejects(n Int) Bool {
-	match crypto.random_bytes(n) {
+	match crypto::random_bytes(n) {
 		Ok(_) -> False
 		Err(Nil) -> True
 	}
 }
 
 fn two_differ() Bool {
-	match (crypto.random_bytes(16), crypto.random_bytes(16)) {
+	match (crypto::random_bytes(16), crypto::random_bytes(16)) {
 		(Ok(a), Ok(b)) -> a != b
 		(_, _) -> False
 	}
 }
 
 fn not_uniform_byte() Bool {
-	match crypto.random_bytes(16) {
-		Ok(b) -> differs_from_first(b, 1, binary.byte_size(b), binary.byte_at(b, 0))
+	match crypto::random_bytes(16) {
+		Ok(b) -> differs_from_first(b, 1, binary::byte_size(b), binary::byte_at(b, 0))
 		Err(Nil) -> False
 	}
 }
@@ -310,7 +310,7 @@ fn not_uniform_byte() Bool {
 fn differs_from_first(b Binary, i Int, size Int, first Int) Bool {
 	if i >= size {
 		False
-	} else if binary.byte_at(b, i) != first {
+	} else if binary::byte_at(b, i) != first {
 		True
 	} else {
 		differs_from_first(b, i + 1, size, first)

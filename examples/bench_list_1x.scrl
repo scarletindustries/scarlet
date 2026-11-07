@@ -16,11 +16,11 @@ pub fn main() {
 	n = 500000
 	xs = [..{ 0..n }, ..[]]
 
-	a = array.fold(xs, 0, fn(p, q) p + q)
-	b = array.length(xs)
-	c = array.contains(xs, -1)
-	r = array.reverse(xs)
-	d = array.length(r)
+	a = array::fold(xs, 0, fn(p, q) p + q)
+	b = array::length(xs)
+	c = array::contains(xs, -1)
+	r = array::reverse(xs)
+	d = array::length(r)
 	e = idx(xs, n - 1, 0)
 
 	println(a + b + d + e + { if c { 1 } else { 0 } })

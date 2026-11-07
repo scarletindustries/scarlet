@@ -23,18 +23,18 @@ type Task {
 
 type Request {
 	Run(job Job)
-	Ready(worker process.Subject(Task))
-	Stop(done process.Subject(Nil))
+	Ready(worker process::Subject(Task))
+	Stop(done process::Subject(Nil))
 }
 
-fn ask(gateway process.Subject(Request), next fn(Int) Result(a, String)) Result(a, String) {
-	reply = process.subject()
-	process.send(gateway, Run(job: Job(run: fn(lease) {
+fn ask(gateway process::Subject(Request), next fn(Int) Result(a, String)) Result(a, String) {
+	reply = process::subject()
+	process::send(gateway, Run(job: Job(run: fn(lease) {
 		outcome = bind(lease, next)
-		process.send(reply, outcome)
+		process::send(reply, outcome)
 		health(outcome)
 	})))
-	process.receive(reply)
+	process::receive(reply)
 }
 
 fn bind(r Result(Int, String), f fn(Int) Result(a, String)) Result(a, String) {
@@ -52,12 +52,12 @@ fn health(outcome Result(a, String)) Health {
 }
 
 fn labour(
-	gateway process.Subject(Request),
-	inbox process.Subject(Task),
+	gateway process::Subject(Request),
+	inbox process::Subject(Task),
 	held Option(Int),
 	seed Int,
 ) Nil {
-	match process.receive(inbox) {
+	match process::receive(inbox) {
 		Quit -> Nil
 		Work(job) -> {
 			lease = match held {
@@ -65,7 +65,7 @@ fn labour(
 				None -> Ok(seed + 1)
 			}
 			kept = retain(lease, run(job, lease))
-			process.send(gateway, Ready(inbox))
+			process::send(gateway, Ready(inbox))
 			labour(gateway, inbox, kept, seed + 1)
 		}
 	}
@@ -86,32 +86,32 @@ fn retain(lease Result(Int, String), verdict Health) Option(Int) {
 }
 
 fn serve(
-	gateway process.Subject(Request),
-	idle Array(process.Subject(Task)),
+	gateway process::Subject(Request),
+	idle Array(process::Subject(Task)),
 	queued Array(Job),
 	live Int,
-	closing Array(process.Subject(Nil)),
+	closing Array(process::Subject(Nil)),
 ) Nil {
 	if live == 0 {
 		each_send(closing)
 	} else {
-		match process.receive(gateway) {
+		match process::receive(gateway) {
 			Run(job) -> match idle {
 				[worker, ..rest] -> {
-					process.send(worker, Work(job))
+					process::send(worker, Work(job))
 					serve(gateway, rest, queued, live, closing)
 				}
 				[] -> serve(gateway, idle, [job, ..queued], live, closing)
 			}
 			Ready(worker) -> match queued {
 				[job, ..rest] -> {
-					process.send(worker, Work(job))
+					process::send(worker, Work(job))
 					serve(gateway, idle, rest, live, closing)
 				}
 				[] -> match closing {
 					[] -> serve(gateway, [worker, ..idle], queued, live, closing)
 					_ -> {
-						process.send(worker, Quit)
+						process::send(worker, Quit)
 						serve(gateway, idle, queued, live - 1, closing)
 					}
 				}
@@ -124,21 +124,21 @@ fn serve(
 	}
 }
 
-fn quit_all(ws Array(process.Subject(Task))) Nil {
+fn quit_all(ws Array(process::Subject(Task))) Nil {
 	match ws {
 		[] -> Nil
 		[w, ..rest] -> {
-			process.send(w, Quit)
+			process::send(w, Quit)
 			quit_all(rest)
 		}
 	}
 }
 
-fn each_send(ds Array(process.Subject(Nil))) Nil {
+fn each_send(ds Array(process::Subject(Nil))) Nil {
 	match ds {
 		[] -> Nil
 		[d, ..rest] -> {
-			process.send(d, Nil)
+			process::send(d, Nil)
 			each_send(rest)
 		}
 	}
@@ -151,28 +151,28 @@ fn length_of(xs Array(a)) Int {
 	}
 }
 
-fn start() process.Subject(Request) {
-	boot = process.subject()
-	_ = process.spawn(fn() {
-		gateway = process.subject()
-		_ = process.spawn(fn() {
-			inbox = process.subject()
-			process.send(gateway, Ready(inbox))
+fn start() process::Subject(Request) {
+	boot = process::subject()
+	_ = process::spawn(fn() {
+		gateway = process::subject()
+		_ = process::spawn(fn() {
+			inbox = process::subject()
+			process::send(gateway, Ready(inbox))
 			labour(gateway, inbox, None, 0)
 		})
-		process.send(boot, gateway)
+		process::send(boot, gateway)
 		serve(gateway, [], [], 1, [])
 	})
-	process.receive(boot)
+	process::receive(boot)
 }
 
-fn stop(gateway process.Subject(Request)) Nil {
-	done = process.subject()
-	process.send(gateway, Stop(done))
-	process.receive(done)
+fn stop(gateway process::Subject(Request)) Nil {
+	done = process::subject()
+	process::send(gateway, Stop(done))
+	process::receive(done)
 }
 
-fn beat(gateway process.Subject(Request), left Int, ok Int) Int {
+fn beat(gateway process::Subject(Request), left Int, ok Int) Int {
 	if left == 0 {
 		ok
 	} else {

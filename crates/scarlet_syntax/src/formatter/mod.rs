@@ -671,6 +671,7 @@ impl Formatter {
                 };
                 d![self.expr(&c.callee), parens]
             }
+            E::ModuleAccessExpression(m) => text(format!("{}::{}", m.module.name, m.member.name)),
             E::PropertyAccessExpression(p) => {
                 let key = match &p.right {
                     ast::PropertyKey::Field(id) => text(id.name.clone()),
@@ -1092,10 +1093,10 @@ impl Formatter {
                 rest,
                 ..
             } => {
-                // Dropping the qualifier changes the program: `io.NotFound`
+                // Dropping the qualifier changes the program: `io::NotFound`
                 // resolves through the module, `NotFound` needs an import.
                 let head = match qualifier {
-                    Some(q) => format!("{}.{}", q.name, name.name),
+                    Some(q) => format!("{}::{}", q.name, name.name),
                     None => name.name.clone(),
                 };
                 if args.is_empty() && !*rest {
@@ -1154,7 +1155,7 @@ impl Formatter {
             }
             ast::TypeKind::NamedType(n) => {
                 let name = match &n.qualifier {
-                    Some(q) => format!("{}.{}", q.name, n.identifier.name),
+                    Some(q) => format!("{}::{}", q.name, n.identifier.name),
                     None => n.identifier.name.clone(),
                 };
                 if n.type_args.is_empty() {
@@ -1282,9 +1283,9 @@ mod tests {
     /// formatter that dropped it would name a constructor not in scope.
     #[test]
     fn a_qualified_ctor_binding_keeps_its_module() {
-        let src = "pub fn main() {\n\theaders.Header(name, value) = h\n\tname\n}\n";
+        let src = "pub fn main() {\n\theaders::Header(name, value) = h\n\tname\n}\n";
         let out = fmt(src);
-        assert!(out.contains("headers.Header(name, value) = h"), "{out}");
+        assert!(out.contains("headers::Header(name, value) = h"), "{out}");
         assert_round_trips(&out);
     }
 
@@ -1877,14 +1878,14 @@ mod tests {
         assert_round_trips(&out);
     }
 
-    /// Dropping a pattern's module qualifier changes the program: `io.NotFound`
+    /// Dropping a pattern's module qualifier changes the program: `io::NotFound`
     /// resolves through the module, `NotFound` needs an import.
     #[test]
     fn a_qualified_constructor_pattern_keeps_its_qualifier() {
-        let src = "match e {\n\tio.NotFound(path) -> path\n\tio.Denied -> 'no'\n\t_ -> ''\n}\n";
+        let src = "match e {\n\tio::NotFound(path) -> path\n\tio::Denied -> 'no'\n\t_ -> ''\n}\n";
         let out = fmt(src);
-        assert!(out.contains("io.NotFound(path)"), "{out}");
-        assert!(out.contains("io.Denied"), "{out}");
+        assert!(out.contains("io::NotFound(path)"), "{out}");
+        assert!(out.contains("io::Denied"), "{out}");
         assert_round_trips(&out);
     }
 
