@@ -1,4 +1,4 @@
-//! Pattern elaboration: `ast::Pattern` → [`TypedPat`], `ast::MatchArm` →
+//! Pattern elaboration: `ast::Pattern` → [`TypedPat`], [`CArm`] →
 //! [`TypedArm`].
 //!
 //! The resolution half of `core_ir::lower`'s pattern machinery; `lower` keeps
@@ -33,6 +33,7 @@ use crate::core_ir::VariantRef;
 use crate::span::Span;
 use crate::types::StrId;
 
+use super::checked::{CArm, CExpr};
 use super::rty::{Arity, RTy};
 use super::slots::{Slots, slot_labeled};
 use super::{PatRest, TypedArm, TypedBinPatSeg, TypedBind, TypedExpr, TypedPat, elaborator_bug};
@@ -142,23 +143,20 @@ pub trait PatCtx {
     /// Element type of the array type `t`.
     fn array_elem_ty(&mut self, t: RTy) -> RTy;
 
-    /// Elaborate an expression: a `<<v:size(n)>>` width, a guard, an arm body.
-    fn expr(&mut self, e: &ast::Expression) -> TypedExpr;
+    /// Elaborate a checked expression: a `<<v:size(n)>>` width, a guard, an
+    /// arm body.
+    fn expr(&mut self, e: &CExpr) -> TypedExpr;
 }
 
 /// Elaborate the arms of a `match` whose scrutinee has type `scrut`.
 ///
 /// Each arm opens its own name scope: the pattern's binds are visible to the
 /// guard and the body and to nothing else.
-pub(crate) fn elaborate_arms<C: PatCtx>(
-    cx: &mut C,
-    scrut: RTy,
-    arms: &[ast::MatchArm],
-) -> Vec<TypedArm> {
+pub(crate) fn elaborate_arms<C: PatCtx>(cx: &mut C, scrut: RTy, arms: &[CArm]) -> Vec<TypedArm> {
     arms.iter()
         .map(|arm| {
             let mark = cx.scope_mark();
-            let pat = elaborate_pattern(cx, &arm.pattern, scrut);
+            let pat = elaborate_pattern(cx, &arm.pattern.pattern, &arm.pattern.sizes, scrut);
             let guard = arm.guard.as_ref().map(|g| cx.expr(g));
             let body = cx.expr(&arm.body);
             cx.scope_reset(mark);
@@ -169,13 +167,26 @@ pub(crate) fn elaborate_arms<C: PatCtx>(
 
 /// Elaborate one pattern against a scrutinee of type `scrut`. Binds it
 /// introduces stay in scope; the caller decides when to drop them.
-fn elaborate_pattern<C: PatCtx>(cx: &mut C, p: &ast::Pattern, scrut: RTy) -> TypedPat {
-    PatElab {
+///
+/// `sizes` are the pattern's checked size expressions, in the order the
+/// pattern visits them, which is the order its segments are elaborated in.
+fn elaborate_pattern<C: PatCtx>(
+    cx: &mut C,
+    p: &ast::Pattern,
+    sizes: &[CExpr],
+    scrut: RTy,
+) -> TypedPat {
+    let mut el = PatElab {
         cx,
+        sizes: sizes.iter(),
         bound: HashMap::new(),
         seen: HashSet::new(),
+    };
+    let pat = el.pat(p, scrut);
+    if el.sizes.next().is_some() {
+        elaborator_bug("pattern size the pattern has no segment for", p.span())
     }
-    .pat(p, scrut)
+    pat
 }
 
 /// Slot a constructor's pattern args into declared-field order, so a slot
@@ -263,6 +274,8 @@ fn collect_rest(rest: &PatRest, out: &mut Vec<TypedBind>) {
 
 struct PatElab<'c, C: PatCtx> {
     cx: &'c mut C,
+    /// The pattern's checked size expressions not yet claimed by a segment.
+    sizes: std::slice::Iter<'c, CExpr>,
     /// Names already bound in this pattern. A later or-alternative re-binds
     /// the same names onto the same [`BindingId`], which is the one-variable-
     /// per-name rule the single-body [`TypedArm`] needs.
@@ -475,8 +488,14 @@ impl<C: PatCtx> PatElab<'_, C> {
             let bits = self.cx.int_const(width);
             return TypedBinPatSeg::Utf8Literal { bytes, bits };
         }
-        // Width before value, matching the check walk's visit order.
-        match seg_bits(&mut *self.cx, &seg.spec) {
+        let size = match seg.spec.size_expr() {
+            Some(_) => match self.sizes.next() {
+                Some(e) => Some(e),
+                None => elaborator_bug("pattern size the check walk did not type", seg.span),
+            },
+            None => None,
+        };
+        match seg_bits(&mut *self.cx, &seg.spec, size, seg.span) {
             SpecWidth::Utf8 => {
                 // `BinReadUtf8` yields the codepoint as an `Int`.
                 let int_t = self.cx.ty_int();
@@ -515,19 +534,27 @@ pub enum SpecWidth {
 /// elaboration so the two cannot drift. `lower` reads each width as a plain
 /// `Int` expression and never re-derives the default or the unit.
 ///
+/// `size` is the checked form of `spec`'s size expression, and is present
+/// exactly when `spec` has one.
+///
 /// The `:bytes` scale multiplies with `Op::MulInt`: both operands are `Int`
 /// by construction (the width expression is checked `Int`, the scale is a
 /// synthesised `Int` constant), so the typed op applies even though the
 /// checker never saw the node.
-pub(crate) fn seg_bits<C: PatCtx>(cx: &mut C, spec: &ast::BinSpec) -> SpecWidth {
-    match spec {
-        ast::BinSpec::Int { bits: Some(e) } => SpecWidth::Int(cx.expr(e)),
-        ast::BinSpec::Int { bits: None } => {
+pub(crate) fn seg_bits<C: PatCtx>(
+    cx: &mut C,
+    spec: &ast::BinSpec,
+    size: Option<&CExpr>,
+    at: Span,
+) -> SpecWidth {
+    match (spec, size) {
+        (ast::BinSpec::Int { bits: Some(_) }, Some(e)) => SpecWidth::Int(cx.expr(e)),
+        (ast::BinSpec::Int { bits: None }, None) => {
             let ty = cx.ty_int();
             let value = cx.int_const(8);
             SpecWidth::Int(TypedExpr::Const { ty, value })
         }
-        ast::BinSpec::Binary { bytes: Some(e) } => {
+        (ast::BinSpec::Binary { bytes: Some(_) }, Some(e)) => {
             let ty = cx.ty_int();
             let v = cx.expr(e);
             let eight = cx.int_const(8);
@@ -538,8 +565,9 @@ pub(crate) fn seg_bits<C: PatCtx>(cx: &mut C, spec: &ast::BinSpec) -> SpecWidth 
                 rhs: Box::new(TypedExpr::Const { ty, value: eight }),
             }))
         }
-        ast::BinSpec::Binary { bytes: None } => SpecWidth::Bytes(None),
-        ast::BinSpec::Utf8 => SpecWidth::Utf8,
+        (ast::BinSpec::Binary { bytes: None }, None) => SpecWidth::Bytes(None),
+        (ast::BinSpec::Utf8, None) => SpecWidth::Utf8,
+        _ => elaborator_bug("segment size and its checked expression disagree", at),
     }
 }
 
@@ -550,6 +578,7 @@ mod tests {
     use crate::span::Span;
     use crate::type_def::TypeId;
     use crate::typed_ir::BindingId;
+    use crate::typed_ir::checked::{CKind, CPattern};
     use crate::typed_ir::rty::ResolvedPool;
     use crate::types::PrimIds;
 
@@ -697,8 +726,22 @@ mod tests {
             self.pool.con_arg(t, 0).unwrap_or(self.int)
         }
 
-        fn expr(&mut self, _e: &ast::Expression) -> TypedExpr {
+        fn expr(&mut self, _e: &CExpr) -> TypedExpr {
             TypedExpr::Nil { ty: self.int }
+        }
+    }
+
+    fn pat_of<C: PatCtx>(cx: &mut C, p: &ast::Pattern, scrut: RTy) -> TypedPat {
+        elaborate_pattern(cx, p, &[], scrut)
+    }
+
+    /// A checked number literal. The test context elaborates every expression
+    /// to `Nil`, so its type is never read.
+    fn checked_num(v: i64) -> CExpr {
+        CExpr {
+            ty: crate::types::Ty(0),
+            span: Span::DUMMY,
+            kind: CKind::Number(num(v)),
         }
     }
 
@@ -754,7 +797,7 @@ mod tests {
         let arr = cx.arr(int);
         cx.ctor("W", 3, &["a", "b", "c"], &[int, user, arr]);
 
-        let p = elaborate_pattern(
+        let p = pat_of(
             &mut cx,
             &ctor_pat("W", vec![lab("c", var("z"))], false),
             user,
@@ -782,7 +825,7 @@ mod tests {
         let user = cx.user();
         cx.ctor("Cons", 0, &["head", "tail"], &[int, user]);
 
-        let p = elaborate_pattern(&mut cx, &ctor_pat("Cons", vec![pos(var("h"))], true), user);
+        let p = pat_of(&mut cx, &ctor_pat("Cons", vec![pos(var("h"))], true), user);
         let TypedPat::Ctor { fields, .. } = p else {
             panic!("expected Ctor")
         };
@@ -797,7 +840,7 @@ mod tests {
         let mut cx = Ctx::new();
         let user = cx.user();
         cx.ctor("Nil", 1, &[], &[]);
-        let p = elaborate_pattern(&mut cx, &ctor_pat("Nil", vec![], false), user);
+        let p = pat_of(&mut cx, &ctor_pat("Nil", vec![], false), user);
         assert_eq!(
             p,
             TypedPat::Ctor {
@@ -819,7 +862,7 @@ mod tests {
     fn an_unresolved_constructor_aborts_rather_than_wildcarding() {
         let mut cx = Ctx::new();
         let user = cx.user();
-        let _ = elaborate_pattern(&mut cx, &ctor_pat("Nope", vec![], false), user);
+        let _ = pat_of(&mut cx, &ctor_pat("Nope", vec![], false), user);
     }
 
     /// A `field_tys`/`labels` desync must abort. Guessing `Nil` loses
@@ -834,7 +877,7 @@ mod tests {
         // Two labels, one field type: the desync `CtorPat::from_parts` catches.
         cx.ctor("Bad", 0, &["a", "b"], &[int]);
 
-        let _ = elaborate_pattern(
+        let _ = pat_of(
             &mut cx,
             &ctor_pat("Bad", vec![pos(var("x")), pos(var("y"))], false),
             user,
@@ -851,7 +894,7 @@ mod tests {
         let int = cx.int;
         let user = cx.user();
         cx.ctor("W", 0, &["a"], &[int]);
-        let _ = elaborate_pattern(
+        let _ = pat_of(
             &mut cx,
             &ctor_pat("W", vec![lab("nope", var("x"))], false),
             user,
@@ -866,7 +909,7 @@ mod tests {
         let int = cx.int;
         let user = cx.user();
         cx.ctor("W", 0, &["a"], &[int]);
-        let _ = elaborate_pattern(
+        let _ = pat_of(
             &mut cx,
             &ctor_pat("W", vec![pos(var("x")), pos(var("y"))], false),
             user,
@@ -892,7 +935,7 @@ mod tests {
             ],
             span: Span::DUMMY,
         };
-        let _ = elaborate_pattern(&mut cx, &p, arr);
+        let _ = pat_of(&mut cx, &p, arr);
     }
 
     /// `arity`, `labels` and `field_tys` all agree, or `from_parts` aborts.
@@ -960,7 +1003,7 @@ mod tests {
             ],
             span: Span::DUMMY,
         };
-        let p = elaborate_pattern(&mut cx, &ap, arr);
+        let p = pat_of(&mut cx, &ap, arr);
         let TypedPat::Array {
             ty,
             elem_ty,
@@ -1000,14 +1043,14 @@ mod tests {
             elements: vec![ast::ArrayPatternElement::Pattern(wild())],
             span: Span::DUMMY,
         };
-        match elaborate_pattern(&mut cx, &discard, arr) {
+        match pat_of(&mut cx, &discard, arr) {
             TypedPat::Array { rest, prefix, .. } => {
                 assert_eq!(rest, PatRest::Discard);
                 assert!(prefix.is_empty());
             }
             other => panic!("{other:?}"),
         }
-        match elaborate_pattern(&mut cx, &exact, arr) {
+        match pat_of(&mut cx, &exact, arr) {
             TypedPat::Array { rest, prefix, .. } => {
                 assert_eq!(rest, PatRest::None);
                 assert_eq!(prefix.len(), 1);
@@ -1020,7 +1063,7 @@ mod tests {
     fn literals_and_ranges_pool_const_ids() {
         let mut cx = Ctx::new();
         let int = cx.int;
-        let lit = elaborate_pattern(
+        let lit = pat_of(
             &mut cx,
             &ast::Pattern::Literal(ast::PatternLiteral::Number(num(7))),
             int,
@@ -1032,7 +1075,7 @@ mod tests {
                 value: ConstId(0)
             }
         );
-        let rng = elaborate_pattern(
+        let rng = pat_of(
             &mut cx,
             &ast::Pattern::Range {
                 start: num(1),
@@ -1065,7 +1108,7 @@ mod tests {
             rest: vec![ctor_pat("Wrap", vec![pos(var("x"))], false)],
             span: Span::DUMMY,
         };
-        let p = elaborate_pattern(&mut cx, &or, user);
+        let p = pat_of(&mut cx, &or, user);
         let binds = pat_binds(&p);
         // One `x`, however many alternatives mention it.
         assert_eq!(binds.len(), 1);
@@ -1101,7 +1144,7 @@ mod tests {
             elements: vec![var("x"), var("x")],
             span: Span::DUMMY,
         };
-        let _ = elaborate_pattern(&mut cx, &p, tup);
+        let _ = pat_of(&mut cx, &p, tup);
     }
 
     /// Only the cross-alternative re-bind is sanctioned reuse; binding a name
@@ -1119,7 +1162,7 @@ mod tests {
             rest: vec![ctor_pat("Pair", vec![pos(var("x")), pos(var("x"))], false)],
             span: Span::DUMMY,
         };
-        let _ = elaborate_pattern(&mut cx, &or, user);
+        let _ = pat_of(&mut cx, &or, user);
     }
 
     /// `(A(x) | B(x), x)` repeats `x` within the one alternative the whole
@@ -1142,7 +1185,7 @@ mod tests {
             elements: vec![or, var("x")],
             span: Span::DUMMY,
         };
-        let _ = elaborate_pattern(&mut cx, &p, tup_ty);
+        let _ = pat_of(&mut cx, &p, tup_ty);
     }
 
     /// The check walk exempts `_` from the once-per-alternative rule, and the
@@ -1174,7 +1217,7 @@ mod tests {
             elements: vec![arr_rest("_"), arr_rest("_"), bin_rest],
             span: Span::DUMMY,
         };
-        let p = elaborate_pattern(&mut cx, &p, tup_ty);
+        let p = pat_of(&mut cx, &p, tup_ty);
         assert_eq!(cx.binds.len(), 0);
         let TypedPat::Tuple { elems, .. } = &p else {
             panic!("expected Tuple")
@@ -1199,17 +1242,17 @@ mod tests {
     fn each_arm_opens_its_own_scope() {
         let mut cx = Ctx::new();
         let int = cx.int;
+        let arm = |guard: Option<CExpr>, body: CExpr| CArm {
+            pattern: CPattern {
+                pattern: var("a"),
+                sizes: Vec::new(),
+            },
+            guard,
+            body,
+        };
         let arms = vec![
-            ast::MatchArm {
-                pattern: var("a"),
-                guard: None,
-                body: ast::Expression::NumberLiteral(num(1)),
-            },
-            ast::MatchArm {
-                pattern: var("a"),
-                guard: Some(ast::Expression::NumberLiteral(num(2))),
-                body: ast::Expression::NumberLiteral(num(3)),
-            },
+            arm(None, checked_num(1)),
+            arm(Some(checked_num(2)), checked_num(3)),
         ];
         let out = elaborate_arms(&mut cx, int, &arms);
         assert_eq!(out.len(), 2);
@@ -1270,7 +1313,7 @@ mod tests {
             zero,
             segs,
             rest,
-        } = elaborate_pattern(&mut cx, &p, bin_t)
+        } = elaborate_pattern(&mut cx, &p, &[checked_num(2)], bin_t)
         else {
             panic!("expected Bin")
         };
@@ -1337,7 +1380,7 @@ mod tests {
             rest: None,
             span: Span::DUMMY,
         };
-        let TypedPat::Bin { segs, rest, .. } = elaborate_pattern(&mut cx, &p, bin_t) else {
+        let TypedPat::Bin { segs, rest, .. } = pat_of(&mut cx, &p, bin_t) else {
             panic!("expected Bin")
         };
         assert_eq!(rest, PatRest::None);
@@ -1357,7 +1400,7 @@ mod tests {
             elements: vec![var("a"), var("b")],
             span: Span::DUMMY,
         };
-        let TypedPat::Tuple { elems, .. } = elaborate_pattern(&mut cx, &p, tup) else {
+        let TypedPat::Tuple { elems, .. } = pat_of(&mut cx, &p, tup) else {
             panic!("expected Tuple")
         };
         assert_eq!(elems[0].ty(), int);

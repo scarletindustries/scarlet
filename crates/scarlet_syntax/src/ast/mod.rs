@@ -442,7 +442,7 @@ pub struct MatchArm {
 pub struct MatchExpression {
     pub subject: Box<Expression>,
     pub arms: Vec<MatchArm>,
-    pub span: Span,
+    pub(crate) span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -450,7 +450,7 @@ pub struct OrExpression {
     pub expression: Box<Expression>,
     pub receiver: Option<Identifier>,
     pub body: Box<Expression>,
-    pub span: Span,
+    pub(crate) span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -471,7 +471,7 @@ pub struct BinaryExpression {
 pub struct PipeExpression {
     pub left: Box<Expression>,
     pub right: Box<Expression>,
-    pub span: Span,
+    pub(crate) span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -517,7 +517,7 @@ pub enum PropertyKey {
 pub struct PropertyAccessExpression {
     pub left: Box<Expression>,
     pub right: PropertyKey,
-    pub span: Span,
+    pub(crate) span: Span,
 }
 
 /// `module::member`: a value, function or constructor reached through an
@@ -527,7 +527,7 @@ pub struct PropertyAccessExpression {
 pub struct ModuleAccessExpression {
     pub module: Identifier,
     pub member: Identifier,
-    pub span: Span,
+    pub(crate) span: Span,
 }
 
 #[derive(Debug, Clone)]

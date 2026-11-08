@@ -1,4 +1,4 @@
-//! AST → Typed IR: the elaborator's skeleton and its expression arms.
+//! Checked tree → Typed IR: the elaborator's skeleton and its expression arms.
 //!
 //! Resolution only — which field index, which variant, which callee, which
 //! typed opcode. Evaluation order (ANF) is `core_ir::lower`'s job. Patterns are
@@ -17,6 +17,10 @@ use std::collections::HashMap;
 use smallvec::SmallVec;
 
 use super::binop::{BinopKind, ShortCircuitOp, ValueBinop, specialize_binop};
+use super::checked::{
+    CArg, CArm, CArrayElem, CBinSeg, CCallee, CExpr, CInterpPart, CKind, CNode, ClosureFact,
+    NameAt, NameFact,
+};
 use super::elaborate_pat::{
     CtorPat, PatCtx, SpecWidth, elaborate_arms, seg_bits, slot_pattern_args,
 };
@@ -120,7 +124,7 @@ pub trait ElabCtx: PreludeTys {
     /// `(instantiated scheme, denotation)`.
     fn resolve_ctor(&mut self, name: &str) -> Option<(Ty, Denotation)>;
     /// The type of the module's own top-level `fn` declaration `name`.
-    fn toplevel_fn_ty(&mut self, name: &str) -> Option<Ty>;
+    fn toplevel_fn_ty(&mut self, name: StrId) -> Option<Ty>;
     /// One of this module's own top-level declarations, for a name the module
     /// toplevel reaches before the declaration's statement binds it.
     fn decl_denotation(&self, name: StrId) -> Option<Denotation>;
@@ -164,56 +168,11 @@ pub trait ElabCtx: PreludeTys {
     fn ty_nil(&mut self) -> Ty;
 }
 
-/// One step of the check walk, recorded in the order it walked and read back
-/// in that order by the elaborator, which never re-derives what the walk
-/// decided.
-#[derive(Debug, Clone)]
-pub enum WalkStep {
-    /// The type of an expression the walk entered.
-    Ty(Ty),
-    /// What a name denotes, where the walk met it: a value use, or a callee.
-    Name(NameFact),
-    /// A `fn(...)` expression: its function slot and how its captures load.
-    Closure(ClosureFact),
-}
-
-/// A name as the check walk resolved it, in the frame that was live then.
-#[derive(Debug, Clone)]
-pub struct NameFact {
-    /// The name's type at this use, as the walk instantiated it.
-    pub(crate) ty: Ty,
-    pub(crate) at: NameAt,
-    /// The declared parameter labels when the name is a module `fn` called
-    /// here, `None` for every other name. Labels are refused on anything else.
-    pub(crate) param_labels: Option<Vec<StrId>>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum NameAt {
-    /// Bound by the body being elaborated, so the elaborator's own scope has
-    /// it. At a module toplevel it may instead be a declaration the toplevel
-    /// reaches before the declaration's statement.
-    Bound,
-    /// Anything else, fixed by the walk. A module-scope value may still turn
-    /// out to be a known function once every body has its slot.
-    Den(Denotation),
-}
-
-/// A lambda as the check walk closed it.
-#[derive(Debug, Clone)]
-pub struct ClosureFact {
-    pub(crate) func_idx: FuncIdx,
-    /// Every captured name, in capture-index order, with how it loads in the
-    /// enclosing body.
-    pub(crate) captures: Vec<(StrId, NameFact)>,
-}
-
 /// Elaborate `body` into a [`TypedFn`]. Eta wrappers the body needs are
 /// appended to `fns`.
 ///
-/// A module block goes through [`elaborate_toplevel`] instead: the check walk
-/// never entered the block node itself, so `walk_tys` does not start with its
-/// type.
+/// `toplevel` is set for a bare-expression program, whose body is the module
+/// toplevel; a module block goes through [`elaborate_toplevel`] instead.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn elaborate_body<C: ElabCtx>(
     ctx: &mut C,
@@ -221,29 +180,29 @@ pub(crate) fn elaborate_body<C: ElabCtx>(
     fns: &mut FnTable,
     name: StrId,
     params: &[(StrId, Ty)],
-    body: &ast::Expression,
+    body: &CExpr,
     ret_ty: Ty,
-    walk: &[WalkStep],
     toplevel: bool,
 ) -> TypedFn {
-    elaborate_fn(ctx, pool, fns, name, params, ret_ty, walk, toplevel, |el| {
+    elaborate_fn(ctx, pool, fns, name, params, ret_ty, toplevel, |el| {
         el.expr_as(body, ret_ty)
     })
 }
 
-/// Elaborate a module's top level: an imported module's initialiser.
-/// [`elaborate_body`] with no parameters, over a `BlockExpression`.
+/// Elaborate a module's top level: the block's `nodes`, at their source
+/// indices, which its declarations are scheduled by.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn elaborate_toplevel<C: ElabCtx>(
     ctx: &mut C,
     pool: &mut ResolvedPool,
     fns: &mut FnTable,
     name: StrId,
-    block: &ast::BlockExpression,
+    nodes: &[CNode],
+    span: Span,
     ret_ty: Ty,
-    walk: &[WalkStep],
 ) -> TypedFn {
-    elaborate_fn(ctx, pool, fns, name, &[], ret_ty, walk, true, |el| {
-        el.block(block, ret_ty)
+    elaborate_fn(ctx, pool, fns, name, &[], ret_ty, true, |el| {
+        el.block(nodes, ret_ty, span)
     })
 }
 
@@ -255,11 +214,10 @@ fn elaborate_fn<C: ElabCtx>(
     name: StrId,
     params: &[(StrId, Ty)],
     ret_ty: Ty,
-    walk: &[WalkStep],
     toplevel: bool,
     f: impl FnOnce(&mut Elab<'_, C>) -> TypedExpr,
 ) -> TypedFn {
-    let mut el = Elab::new(ctx, pool, fns, walk, toplevel);
+    let mut el = Elab::new(ctx, pool, fns, toplevel);
     let ret = el.resolve(ret_ty);
     let params: Vec<TypedBind> = params
         .iter()
@@ -271,11 +229,6 @@ fn elaborate_fn<C: ElabCtx>(
         })
         .collect();
     let body = f(&mut el);
-    // A leftover entry means one walk visited a node the other did not, which
-    // silently mistypes everything after it.
-    if el.cursor != el.walk.len() {
-        elaborator_bug("body left the check walk's steps unconsumed", Span::DUMMY);
-    }
     TypedFn {
         name,
         params,
@@ -285,19 +238,13 @@ fn elaborate_fn<C: ElabCtx>(
     }
 }
 
-/// The elaboration walk. Holds the name scope and the dense `BindingId` table;
-/// everything else it asks [`ElabCtx`] for.
+/// The elaboration of one body's checked tree. Holds the name scope and the
+/// dense `BindingId` table; everything else it asks [`ElabCtx`] for.
 pub struct Elab<'a, C: ElabCtx> {
     ctx: &'a mut C,
     pool: &'a mut ResolvedPool,
     /// The program's function table. Eta wrappers are appended here.
     fns: &'a mut FnTable,
-    /// What the check walk saw in this body, in the order it saw it. Read
-    /// strictly in order — never indexed by span, never searched.
-    walk: &'a [WalkStep],
-    /// How much of [`Self::walk`] has been consumed. `elaborate_fn` checks it
-    /// reached the end.
-    cursor: usize,
     /// Next `BindingId` to mint. `TypedFn::binds` is this at the end.
     next_bind: u32,
     /// Resolved type of each bind, indexed by `BindingId.0`.
@@ -333,7 +280,6 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         ctx: &'a mut C,
         pool: &'a mut ResolvedPool,
         fns: &'a mut FnTable,
-        walk: &'a [WalkStep],
         toplevel: bool,
     ) -> Self {
         let anon = StrId::NONE;
@@ -344,8 +290,6 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             ctx,
             pool,
             fns,
-            walk,
-            cursor: 0,
             next_bind: 0,
             binds: Vec::new(),
             names: Vec::new(),
@@ -366,45 +310,6 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// Bridge an inference `Ty` into the pool.
     fn resolve(&mut self, t: Ty) -> RTy {
         self.ctx.resolve_rty(&mut *self.pool, t)
-    }
-
-    /// The type the check walk inferred for the expression this walk is about
-    /// to enter. Called exactly once per entered expression, which is what
-    /// keeps the two walks in step.
-    fn take_ty(&mut self, at: Span) -> Ty {
-        let Some(&WalkStep::Ty(t)) = self.walk.get(self.cursor) else {
-            elaborator_bug("expression with no inferred type", at)
-        };
-        self.cursor += 1;
-        t
-    }
-
-    /// The type of the expression the walk enters *next*, without consuming it.
-    /// Valid only where the check walk entered that sub-expression first: a
-    /// property access's receiver, an `or`'s left side, a `match` scrutinee.
-    fn peek_ty(&mut self, at: Span) -> Ty {
-        let Some(&WalkStep::Ty(t)) = self.walk.get(self.cursor) else {
-            elaborator_bug("sub-expression with no inferred type", at)
-        };
-        t
-    }
-
-    /// What the check walk resolved the name it met here to.
-    fn take_name(&mut self, at: Span) -> NameFact {
-        let Some(WalkStep::Name(fact)) = self.walk.get(self.cursor) else {
-            elaborator_bug("name with no recorded resolution", at)
-        };
-        self.cursor += 1;
-        fact.clone()
-    }
-
-    /// The function slot and captures the check walk gave the lambda here.
-    fn take_closure(&mut self, at: Span) -> ClosureFact {
-        let Some(WalkStep::Closure(fact)) = self.walk.get(self.cursor) else {
-            elaborator_bug("lambda with no recorded closure", at)
-        };
-        self.cursor += 1;
-        fact.clone()
     }
 
     /// The denotation of a name this body's own scope does not bind. A
@@ -526,115 +431,125 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
 
     /// Elaborate `e` where the surrounding context fixes the result type — a
     /// function's tail, an `if` arm, a `match` arm's body. Control-flow forms
-    /// take `result_ty` rather than their own inferred type, because a function
-    /// body's block has no type of its own to recover.
-    fn expr_as(&mut self, e: &ast::Expression, result_ty: Ty) -> TypedExpr {
-        let own = self.take_ty(e.span());
-        self.dispatch(e, own, result_ty)
+    /// take `result_ty` rather than their own inferred type: a block's own type
+    /// is its tail's, and a module toplevel's is `Nil`, but what the context
+    /// wants out of it is the type the result must have.
+    fn expr_as(&mut self, e: &CExpr, result_ty: Ty) -> TypedExpr {
+        self.dispatch(e, result_ty)
     }
 
     /// Elaborate `e` in value position: its type is the one the check walk
     /// inferred for it.
-    fn expr(&mut self, e: &ast::Expression) -> TypedExpr {
-        let own = self.take_ty(e.span());
-        self.dispatch(e, own, own)
+    fn expr(&mut self, e: &CExpr) -> TypedExpr {
+        self.dispatch(e, e.ty)
     }
 
-    /// `own` is `e`'s own inferred type; `result` is the type the context wants
-    /// out of it. They differ only for a control-flow form under [`expr_as`],
-    /// where `own` is unused.
-    ///
-    /// [`expr_as`]: Self::expr_as
-    fn dispatch(&mut self, e: &ast::Expression, own: Ty, result: Ty) -> TypedExpr {
-        use ast::Expression as E;
-        match e {
-            E::BlockExpression(be) => self.block(be, result),
-            E::IfExpression(ie) => self.if_expr(ie, result),
-            E::MatchExpression(me) => self.match_expr(me, result),
-            E::OrExpression(oe) => self.or_expr(oe, result),
-            E::BinaryExpression(be) => match BinopKind::of(be.op) {
-                BinopKind::ShortCircuit(sc) => self.short_circuit(be, sc, result),
-                BinopKind::Value(op) => self.binary(be, op, own),
+    /// `result` is the type the context wants out of `e`. It differs from
+    /// `e.ty` only for a control-flow form under [`Self::expr_as`].
+    fn dispatch(&mut self, e: &CExpr, result: Ty) -> TypedExpr {
+        let own = e.ty;
+        let span = e.span;
+        match &e.kind {
+            CKind::Block(nodes) => self.block(nodes, result, span),
+            CKind::If { cond, then, els } => self.if_expr(cond, then, els, result),
+            CKind::Match { subject, arms } => self.match_expr(subject, arms, result, span),
+            CKind::Or {
+                lhs,
+                receiver,
+                body,
+            } => self.or_expr(lhs, *receiver, body, result, span),
+            CKind::Binary { op, left, right } => match BinopKind::of(*op) {
+                BinopKind::ShortCircuit(sc) => self.short_circuit(left, right, sc, result),
+                BinopKind::Value(op) => self.binary(left, right, op, own),
             },
 
-            E::NumberLiteral(n) => {
+            CKind::Number(n) => {
                 let ty = self.resolve(own);
                 let value = self.ctx.number_const(n);
                 TypedExpr::Const { ty, value }
             }
-            E::StringLiteral(s) => {
+            CKind::String(s) => {
                 let ty = self.resolve(own);
-                let value = self.ctx.string_const(&s.value);
+                let value = self.ctx.string_const(s);
                 TypedExpr::Const { ty, value }
             }
-            E::Identifier(id) => self.ident(id, own),
-            E::UnaryExpression(ue) => self.unary(ue, own),
-            E::TupleExpression(te) => {
+            CKind::Name { name, fact } => self.ident(*name, fact, own, span),
+            CKind::Member { name, fact } => self.module_access(*name, fact, own, span),
+            CKind::Unary { op, operand } => self.unary(*op, operand, own),
+            CKind::Tuple(elems) => {
                 let ty = self.resolve(own);
-                let elems = te.elements.iter().map(|el| self.expr(el)).collect();
+                let elems = elems.iter().map(|el| self.expr(el)).collect();
                 TypedExpr::Tuple { ty, elems }
             }
-            E::PropertyAccessExpression(pa) => self.property(pa, own),
-            E::ModuleAccessExpression(ma) => self.module_access(ma, own),
-            E::FunctionCallExpression(fc) => self.call(fc, own),
-            E::RangeExpression(re) => {
+            CKind::Field { recv, label } => {
                 let ty = self.resolve(own);
-                let start = Box::new(self.expr(&re.start));
-                let end = Box::new(self.expr(&re.end));
-                TypedExpr::Range { ty, start, end }
+                let recv_ty = recv.ty;
+                let recv = self.expr(recv);
+                self.field(recv, recv_ty, *label, ty, span)
             }
-            E::ArrayIndexExpression(ai) => {
+            CKind::TupleIndex { recv, idx } => {
                 let ty = self.resolve(own);
-                let recv = Box::new(self.expr(&ai.expression));
-                match ai.index.as_ref() {
-                    E::RangeExpression(r) => TypedExpr::Slice {
-                        ty,
-                        recv,
-                        start: Box::new(self.expr(&r.start)),
-                        end: Box::new(self.expr(&r.end)),
-                    },
-                    // `Index` yields `Option(elem)`, which is what lets
-                    // `xs[i] or d` resolve.
-                    other => TypedExpr::Index {
-                        ty,
-                        recv,
-                        index: Box::new(self.expr(other)),
-                    },
+                let recv = Box::new(self.expr(recv));
+                TypedExpr::TupleIndex {
+                    ty,
+                    recv,
+                    idx: *idx,
                 }
             }
-            E::ArrayExpression(ae) => {
+            CKind::Call { callee, args } => self.call(callee, args, own, span),
+            CKind::Range { start, end } => {
                 let ty = self.resolve(own);
-                let elems = ae
-                    .elements
+                let start = Box::new(self.expr(start));
+                let end = Box::new(self.expr(end));
+                TypedExpr::Range { ty, start, end }
+            }
+            CKind::Slice { recv, start, end } => {
+                let ty = self.resolve(own);
+                let recv = Box::new(self.expr(recv));
+                TypedExpr::Slice {
+                    ty,
+                    recv,
+                    start: Box::new(self.expr(start)),
+                    end: Box::new(self.expr(end)),
+                }
+            }
+            // `Index` yields `Option(elem)`, which is what lets `xs[i] or d`
+            // resolve.
+            CKind::Index { recv, index } => {
+                let ty = self.resolve(own);
+                let recv = Box::new(self.expr(recv));
+                TypedExpr::Index {
+                    ty,
+                    recv,
+                    index: Box::new(self.expr(index)),
+                }
+            }
+            CKind::Array(elems) => {
+                let ty = self.resolve(own);
+                let elems = elems
                     .iter()
                     .map(|el| match el {
-                        ast::ArrayElement::Expression(ex) => TypedArrayElem::Elem(self.expr(ex)),
-                        ast::ArrayElement::SpreadElement(sp) => {
-                            TypedArrayElem::Spread(self.expr(&sp.expression))
-                        }
+                        CArrayElem::Elem(ex) => TypedArrayElem::Elem(self.expr(ex)),
+                        CArrayElem::Spread(ex) => TypedArrayElem::Spread(self.expr(ex)),
                     })
                     .collect();
                 TypedExpr::Array { ty, elems }
             }
-            E::InterpolatedString(is) => self.interp(is, own),
-            E::FunctionExpression(fe) => {
+            CKind::Interp(parts) => self.interp(parts, own),
+            CKind::Closure(fact) => {
                 let ty = self.resolve(own);
-                self.closure(fe.span, ty)
+                self.closure(fact, ty, span)
             }
-            E::BinaryLiteral(bl) => self.binary_literal(bl, own),
-            E::ErrorNode(err) => elaborator_bug("error node", err.span),
-            // `crate::desugar` rewrites every pipe into a call before type
-            // checking (`compile_with`/`check_impl`), so elaboration — which
-            // only ever runs on that already-desugared tree — never sees one.
-            E::PipeExpression(p) => elaborator_bug("pipe expression", p.span),
+            CKind::BinaryLiteral(segs) => self.binary_literal(segs, own),
+            CKind::Error => elaborator_bug("expression the check walk rejected", span),
         }
     }
 
-    fn if_expr(&mut self, ie: &ast::IfExpression, result_ty: Ty) -> TypedExpr {
+    fn if_expr(&mut self, cond: &CExpr, then: &CExpr, els: &CExpr, result_ty: Ty) -> TypedExpr {
         let ty = self.resolve(result_ty);
-        let cond = Box::new(self.expr(&ie.condition));
-        let then = Box::new(self.expr_as(&ie.body, result_ty));
-        let els = Box::new(self.expr_as(&ie.else_body, result_ty));
+        let cond = Box::new(self.expr(cond));
+        let then = Box::new(self.expr_as(then, result_ty));
+        let els = Box::new(self.expr_as(els, result_ty));
         TypedExpr::If {
             ty,
             cond,
@@ -643,21 +558,20 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         }
     }
 
-    /// An identifier that is not a bound local: a nullary constructor, a
-    /// first-class constructor/builtin, or a global/capture load.
-    fn ident(&mut self, id: &ast::Identifier, own: Ty) -> TypedExpr {
-        let fact = self.take_name(id.span);
-        let sid = self.ctx.intern(&id.name);
-        if let Some(bid) = self.lookup_name(sid) {
+    /// An identifier: a local, or else a nullary constructor, a first-class
+    /// constructor/builtin, or a global/capture load.
+    fn ident(&mut self, name: StrId, fact: &NameFact, own: Ty, span: Span) -> TypedExpr {
+        if let Some(bid) = self.lookup_name(name) {
             return self.var(bid);
         }
         let ty = self.resolve(own);
-        let den = self.denotation(sid, fact.at, id.span);
-        self.value_of(den, sid, fact.ty, ty, id.span)
+        let den = self.denotation(name, fact.at, span);
+        self.value_of(den, name, fact.ty, ty, span)
     }
 
     /// A resolved name in value position. `ty` is the use site's solved type;
-    /// `scheme` is the name's type as the check walk instantiated it, and is only consulted when `ty` cannot type the node.
+    /// `scheme` is the name's type as the check walk instantiated it, and is
+    /// only consulted when `ty` cannot type the node.
     fn value_of(
         &mut self,
         den: Denotation,
@@ -702,10 +616,10 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// `&&`/`||` cannot arrive here — [`BinopKind::of`] routes them to
     /// [`Self::short_circuit`]. That is what lets `specialize_binop` return a
     /// `PrimOp` and not an option.
-    fn binary(&mut self, be: &ast::BinaryExpression, op: ValueBinop, own: Ty) -> TypedExpr {
+    fn binary(&mut self, left: &CExpr, right: &CExpr, op: ValueBinop, own: Ty) -> TypedExpr {
         let ty = self.resolve(own);
-        let lhs = self.expr(&be.left);
-        let rhs = self.expr(&be.right);
+        let lhs = self.expr(left);
+        let rhs = self.expr(right);
         // `None` is a genuinely polymorphic operand (`fn add(a, b) { a + b }`
         // is `Addable a => (a, a) -> a`); the dynamic op is correct there.
         let prim = self.pool.prim_of(lhs.ty());
@@ -721,23 +635,24 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// elaborated against the join's result type because it is a branch.
     fn short_circuit(
         &mut self,
-        be: &ast::BinaryExpression,
+        left: &CExpr,
+        right: &CExpr,
         op: ShortCircuitOp,
         result_ty: Ty,
     ) -> TypedExpr {
         let ty = self.resolve(result_ty);
-        let lhs = Box::new(self.expr(&be.left));
-        let rhs = Box::new(self.expr_as(&be.right, result_ty));
+        let lhs = Box::new(self.expr(left));
+        let rhs = Box::new(self.expr_as(right, result_ty));
         match op {
             ShortCircuitOp::And => TypedExpr::And { ty, lhs, rhs },
             ShortCircuitOp::Or => TypedExpr::Or { ty, lhs, rhs },
         }
     }
 
-    fn unary(&mut self, ue: &ast::UnaryExpression, own: Ty) -> TypedExpr {
+    fn unary(&mut self, op: ast::UnaryOp, operand: &CExpr, own: Ty) -> TypedExpr {
         let ty = self.resolve(own);
-        let operand = self.expr(&ue.expression);
-        let op = match ue.op {
+        let operand = self.expr(operand);
+        let op = match op {
             ast::UnaryOp::Not => PrimOp::Not,
             ast::UnaryOp::Neg => match self.pool.prim_of(operand.ty()) {
                 Some(Prim::Int) => PrimOp::IntNeg,
@@ -752,39 +667,35 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         }
     }
 
-    fn interp(&mut self, is: &ast::InterpolatedString, own: Ty) -> TypedExpr {
+    fn interp(&mut self, parts: &[CInterpPart], own: Ty) -> TypedExpr {
         let ty = self.resolve(own);
-        if is.parts.is_empty() {
+        if parts.is_empty() {
             let value = self.ctx.string_const("");
             return TypedExpr::Const { ty, value };
         }
-        let parts = is
-            .parts
+        let parts = parts
             .iter()
             .map(|p| match p {
-                ast::InterpPart::Literal(sl) => {
-                    TypedInterpPart::Str(self.ctx.string_const(&sl.value))
-                }
-                ast::InterpPart::Expr(ex) => TypedInterpPart::Expr(self.expr(ex)),
+                CInterpPart::Literal(s) => TypedInterpPart::Str(self.ctx.string_const(s)),
+                CInterpPart::Expr(ex) => TypedInterpPart::Expr(self.expr(ex)),
             })
             .collect();
         TypedExpr::Interp { ty, parts }
     }
 
     /// A `fn(...) { ... }` expression: the body is already checked, parked and
-    /// assigned a `func_idx`, and the walk recorded its free-name set. A named
-    /// `fn` *declaration* goes through `fn_of_global` instead.
-    fn closure(&mut self, span: Span, ty: RTy) -> TypedExpr {
-        let fact = self.take_closure(span);
+    /// assigned a `func_idx`, and the walk recorded how each capture loads here.
+    /// A named `fn` *declaration* goes through `fn_of_global` instead.
+    fn closure(&mut self, fact: &ClosureFact, ty: RTy, span: Span) -> TypedExpr {
         let mut captures = Vec::with_capacity(fact.captures.len());
-        for (cn, cap) in fact.captures {
-            if let Some(bid) = self.lookup_name(cn) {
+        for (cn, cap) in &fact.captures {
+            if let Some(bid) = self.lookup_name(*cn) {
                 captures.push(self.var(bid));
                 continue;
             }
-            let den = self.denotation(cn, cap.at, span);
+            let den = self.denotation(*cn, cap.at, span);
             let cty = self.resolve(cap.ty);
-            captures.push(self.value_of(den, cn, cap.ty, cty, span));
+            captures.push(self.value_of(den, *cn, cap.ty, cty, span));
         }
         TypedExpr::Closure {
             ty,
@@ -793,20 +704,17 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         }
     }
 
-    fn binary_literal(&mut self, bl: &ast::BinaryLiteral, own: Ty) -> TypedExpr {
+    fn binary_literal(&mut self, segs: &[CBinSeg], own: Ty) -> TypedExpr {
         let ty = self.resolve(own);
-        if bl.segments.is_empty() {
+        if segs.is_empty() {
             let value = self.ctx.binary_const(vec![], 0);
             return TypedExpr::Const { ty, value };
         }
-        let segs = bl
-            .segments
+        let segs = segs
             .iter()
             .map(|seg| {
-                // Value before width, matching the check walk's visit order
-                // (patterns visit width first — see `PatElab::bin_seg`).
                 let value = self.expr(&seg.value);
-                match seg_bits(self, &seg.spec) {
+                match seg_bits(self, &seg.spec, seg.size.as_ref(), seg.value.span) {
                     SpecWidth::Int(bits) => TypedBinSeg::Int { value, bits },
                     SpecWidth::Bytes(bits) => TypedBinSeg::Binary { value, bits },
                     SpecWidth::Utf8 => TypedBinSeg::Utf8 { value },
@@ -816,34 +724,12 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         TypedExpr::BinLit { ty, segs }
     }
 
-    fn module_access(&mut self, ma: &ast::ModuleAccessExpression, own: Ty) -> TypedExpr {
-        let fact = self.take_name(ma.span);
+    /// `module::member` in value position. Never a local: `::` reaches only
+    /// into a module.
+    fn module_access(&mut self, name: StrId, fact: &NameFact, own: Ty, span: Span) -> TypedExpr {
         let ty = self.resolve(own);
-        let sid = self.ctx.intern(&ma.member.name);
-        let den = self.denotation(sid, fact.at, ma.span);
-        self.value_of(den, sid, fact.ty, ty, ma.span)
-    }
-
-    fn property(&mut self, pa: &ast::PropertyAccessExpression, own: Ty) -> TypedExpr {
-        let ty = self.resolve(own);
-        let recv_ty = self.peek_ty(pa.left.span());
-        let recv = self.expr(&pa.left);
-        match &pa.right {
-            ast::PropertyKey::TupleIndex(num) => {
-                let Ok(idx) = num.value.parse::<u32>() else {
-                    elaborator_bug("tuple index", pa.span)
-                };
-                TypedExpr::TupleIndex {
-                    ty,
-                    recv: Box::new(recv),
-                    idx,
-                }
-            }
-            ast::PropertyKey::Field(field) => {
-                let label = self.ctx.intern(&field.name);
-                self.field(recv, recv_ty, label, ty, pa.span)
-            }
-        }
+        let den = self.denotation(name, fact.at, span);
+        self.value_of(den, name, fact.ty, ty, span)
     }
 
     /// `recv.label`, where `recv` has type `recv_ty` and the field has type
@@ -903,16 +789,16 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         }
     }
 
-    fn call(&mut self, fc: &ast::FunctionCallExpression, own: Ty) -> TypedExpr {
+    fn call(&mut self, callee: &CCallee, args: &[CArg], own: Ty, at: Span) -> TypedExpr {
         let ty = self.resolve(own);
         // Resolve the callee first so labeled/spread constructor calls route to
         // `ctor_call` before their arguments are reordered.
-        match self.callee(&fc.callee) {
-            Callee::Ctor { scheme, den } => self.ctor_call(scheme, den, &fc.arguments, ty, fc.span),
+        match self.callee(callee) {
+            Callee::Ctor { scheme, den } => self.ctor_call(scheme, den, args, ty, at),
             Callee::Value {
                 callee,
                 param_labels,
-            } => self.value_call(callee, param_labels, &fc.arguments, ty, fc.span),
+            } => self.value_call(callee, param_labels, args, ty, at),
         }
     }
 
@@ -928,19 +814,16 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         &mut self,
         callee: TypedCallee,
         param_labels: Option<Vec<StrId>>,
-        args: &[ast::CallArg],
+        args: &[CArg],
         ty: RTy,
         at: Span,
     ) -> TypedExpr {
-        if args
-            .iter()
-            .all(|a| matches!(a, ast::CallArg::Positional(_)))
-        {
+        if args.iter().all(|a| matches!(a, CArg::Positional(_))) {
             let args = args
                 .iter()
                 .map(|a| match a {
-                    ast::CallArg::Positional(e) => self.expr(e),
-                    ast::CallArg::Labeled { .. } | ast::CallArg::Spread(_) => {
+                    CArg::Positional(e) => self.expr(e),
+                    CArg::Labeled { .. } | CArg::Spread(_) => {
                         elaborator_bug("non-positional argument on a positional call", at)
                     }
                 })
@@ -959,20 +842,19 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             SmallVec::with_capacity(args.len());
         for a in args {
             match a {
-                ast::CallArg::Positional(e) => {
+                CArg::Positional(e) => {
                     let v = self.expr(e);
                     let v = self.spill(v, &mut lets);
                     supplied.push((None, v));
                 }
-                ast::CallArg::Labeled { label, value, .. } => {
-                    let sid = self.ctx.intern(&label.name);
+                CArg::Labeled { label, value } => {
                     let v = self.expr(value);
                     let v = self.spill(v, &mut lets);
-                    supplied.push((Some(sid), v));
+                    supplied.push((Some(*label), v));
                 }
                 // Only a constructor call takes a spread; the check walk has
                 // refused this one.
-                ast::CallArg::Spread(_) => {
+                CArg::Spread(_) => {
                     elaborator_bug("spread argument on a non-constructor callee", at)
                 }
             }
@@ -1002,13 +884,10 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         )
     }
 
-    fn callee(&mut self, e: &ast::Expression) -> Callee {
-        use ast::Expression as E;
-        match e {
-            E::Identifier(id) => {
-                let fact = self.take_name(id.span);
-                let sid = self.ctx.intern(&id.name);
-                if let Some(bid) = self.lookup_name(sid) {
+    fn callee(&mut self, callee: &CCallee) -> Callee {
+        match callee {
+            CCallee::Name { name, fact, span } => {
+                if let Some(bid) = self.lookup_name(*name) {
                     // A binding in scope shadows any module `fn` of that name,
                     // exactly as it does for the check walk's `env` lookup, and
                     // carries no parameter names.
@@ -1018,16 +897,14 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                         param_labels: None,
                     };
                 }
-                let den = self.denotation(sid, fact.at, id.span);
-                self.resolved_callee(fact.ty, den, fact.param_labels)
+                let den = self.denotation(*name, fact.at, *span);
+                self.resolved_callee(fact.ty, den, fact.param_labels.clone())
             }
-            E::ModuleAccessExpression(ma) => {
-                let fact = self.take_name(ma.span);
-                let sid = self.ctx.intern(&ma.member.name);
-                let den = self.denotation(sid, fact.at, ma.span);
-                self.resolved_callee(fact.ty, den, fact.param_labels)
+            CCallee::Member { name, fact, span } => {
+                let den = self.denotation(*name, fact.at, *span);
+                self.resolved_callee(fact.ty, den, fact.param_labels.clone())
             }
-            _ => Callee::Value {
+            CCallee::Expr(e) => Callee::Value {
                 callee: TypedCallee::Dynamic(Box::new(self.expr(e))),
                 param_labels: None,
             },
@@ -1065,7 +942,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         &mut self,
         scheme: Ty,
         den: Denotation,
-        args: &[ast::CallArg],
+        args: &[CArg],
         ty: RTy,
         at: Span,
     ) -> TypedExpr {
@@ -1073,9 +950,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             elaborator_bug("unresolved constructor", at)
         };
         let arity = cp.arity();
-        let reorders = args
-            .iter()
-            .any(|a| !matches!(a, ast::CallArg::Positional(_)));
+        let reorders = args.iter().any(|a| !matches!(a, CArg::Positional(_)));
 
         let mut lets: Vec<(TypedBind, TypedExpr)> = Vec::new();
         let mut spread: Option<(TypedBind, Ty)> = None;
@@ -1083,7 +958,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             SmallVec::with_capacity(args.len());
         for a in args {
             match a {
-                ast::CallArg::Positional(e) => {
+                CArg::Positional(e) => {
                     let v = self.expr(e);
                     let v = if reorders {
                         self.spill(v, &mut lets)
@@ -1092,18 +967,16 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                     };
                     supplied.push((None, v));
                 }
-                ast::CallArg::Labeled { label, value, .. } => {
-                    let sid = self.ctx.intern(&label.name);
+                CArg::Labeled { label, value } => {
                     let v = self.expr(value);
                     let v = self.spill(v, &mut lets);
-                    supplied.push((Some(sid), v));
+                    supplied.push((Some(*label), v));
                 }
-                ast::CallArg::Spread(e) => {
-                    let base_ty = self.peek_ty(e.span());
+                CArg::Spread(e) => {
                     let v = self.expr(e);
                     let b = self.new_bind(self.anon, v.ty());
                     lets.push((b, v));
-                    spread = Some((b, base_ty));
+                    spread = Some((b, e.ty));
                 }
             }
         }
@@ -1148,13 +1021,20 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// `expr or body` (with optional receiver). There is no `Or`-expression in
     /// the typed IR: this emits the `Match` the `Option`/`Result` variants
     /// describe.
-    fn or_expr(&mut self, oe: &ast::OrExpression, result_ty: Ty) -> TypedExpr {
+    fn or_expr(
+        &mut self,
+        lhs: &CExpr,
+        receiver: Option<StrId>,
+        body: &CExpr,
+        result_ty: Ty,
+        span: Span,
+    ) -> TypedExpr {
         let ty = self.resolve(result_ty);
-        let lhs_ty = self.peek_ty(oe.expression.span());
+        let lhs_ty = lhs.ty;
         let lhs_rty = self.resolve(lhs_ty);
-        let lhs = self.expr(&oe.expression);
+        let lhs = self.expr(lhs);
         let Some(shape) = self.ctx.or_shape(lhs_ty) else {
-            elaborator_bug("or-expression on non-Option/Result", oe.span)
+            elaborator_bug("or-expression on non-Option/Result", span)
         };
         // Success arm: `Ok(v)`/`Some(v)` → v.
         let ok_bind = self.new_bind(self.anon, ty);
@@ -1163,23 +1043,19 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             // The payload type must be the real `E`: `err` may be a heap value
             // the recovery body drops.
             let Some(ety) = self.pool.con_arg(lhs_rty, 1) else {
-                elaborator_bug("or-expression on a non-generic Result", oe.span)
+                elaborator_bug("or-expression on a non-generic Result", span)
             };
-            let name = match &oe.receiver {
-                Some(r) => self.ctx.intern(&r.name),
-                None => self.anon,
-            };
-            let err_bind = self.new_bind(name, ety);
+            let err_bind = self.new_bind(receiver.unwrap_or(self.anon), ety);
             // The receiver is in scope for the recovery body and nothing else.
             let mark = self.names.len();
-            if oe.receiver.is_some() {
+            if let Some(name) = receiver {
                 self.bind_name(name, err_bind.id);
             }
-            let body = self.expr_as(&oe.body, result_ty);
+            let body = self.expr_as(body, result_ty);
             self.names.truncate(mark);
             (vec![TypedPat::Bind(err_bind)], body)
         } else {
-            (vec![], self.expr_as(&oe.body, result_ty))
+            (vec![], self.expr_as(body, result_ty))
         };
         TypedExpr::Match {
             ty,
@@ -1207,15 +1083,20 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         }
     }
 
-    fn match_expr(&mut self, me: &ast::MatchExpression, result_ty: Ty) -> TypedExpr {
+    fn match_expr(
+        &mut self,
+        subject: &CExpr,
+        arms: &[CArm],
+        result_ty: Ty,
+        span: Span,
+    ) -> TypedExpr {
         let ty = self.resolve(result_ty);
-        let scrut_ty = self.peek_ty(me.subject.span());
-        let scrut_rty = self.resolve(scrut_ty);
-        let scrut = Box::new(self.expr(&me.subject));
+        let scrut_rty = self.resolve(subject.ty);
+        let scrut = Box::new(self.expr(subject));
         // Save and restore rather than assign: an arm body may hold a nested
         // `match`, and an error raised after it still names this one.
-        let outer = std::mem::replace(&mut self.pat_span, me.span);
-        let arms = elaborate_arms(self, scrut_rty, &me.arms);
+        let outer = std::mem::replace(&mut self.pat_span, span);
+        let arms = elaborate_arms(self, scrut_rty, arms);
         self.pat_span = outer;
         TypedExpr::Match { ty, scrut, arms }
     }
@@ -1224,20 +1105,20 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// expression, or [`TypedExpr::Nil`] when it ends in a statement.
     ///
     /// See [`Frame`] for why the spine is assembled flat and folded once.
-    fn block(&mut self, be: &ast::BlockExpression, result_ty: Ty) -> TypedExpr {
+    fn block(&mut self, nodes: &[CNode], result_ty: Ty, span: Span) -> TypedExpr {
         let is_top = std::mem::replace(&mut self.at_toplevel, false);
         // Module toplevel: `fn`/`const` decls are order-free and mutually
         // recursive, so they run in the check walk's dependency (SCC) order.
         // Raw source order would read a forward reference before it is stored.
         let seq: Vec<Step> = if is_top {
-            self.decl_schedule(be.body.len(), be.span)
+            self.decl_schedule(nodes.len(), span)
         } else {
-            (0..be.body.len()).map(|i| (i, None)).collect()
+            (0..nodes.len()).map(|i| (i, None)).collect()
         };
         let mark = self.names.len();
         // Only this block's own statements bind globals.
         let outer = std::mem::replace(&mut self.module_scope, is_top);
-        let e = self.block_nodes(&seq, &be.body, result_ty, be.span);
+        let e = self.block_nodes(&seq, nodes, result_ty, span);
         self.module_scope = outer;
         self.names.truncate(mark);
         e
@@ -1256,7 +1137,8 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         for &(idx, slot) in &decls {
             // Either abort is a silent miscompile if it is allowed through: a
             // duplicate initialises two globals from one node, and an
-            // out-of-range index means the walks disagree about the module.
+            // out-of-range index means the checker and the elaborator disagree
+            // about the module.
             match placed.get_mut(idx) {
                 Some(p) if !*p => *p = true,
                 Some(_) => elaborator_bug("toplevel decl scheduled twice", span),
@@ -1277,7 +1159,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     fn block_nodes(
         &mut self,
         seq: &[Step],
-        body: &[ast::Node],
+        nodes: &[CNode],
         result_ty: Ty,
         span: Span,
     ) -> TypedExpr {
@@ -1288,19 +1170,17 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 // Block ended in a statement, or was empty.
                 break self.nil_expr();
             };
-            let Some(node) = body.get(idx) else {
+            let Some(node) = nodes.get(idx) else {
                 elaborator_bug("block schedule index out of range", span)
             };
-            match node {
-                ast::Node::Expression(e) if steps.peek().is_none() => {
-                    break self.expr_as(e, result_ty);
-                }
-                ast::Node::Expression(e) => {
-                    let effect = self.expr(e);
-                    spine.push(Frame::Seq(effect));
-                }
-                ast::Node::Statement(s) => self.statement(s, global, &mut spine),
+            // A trailing expression is the block's value; anything else,
+            // including an expression before the end, is a statement.
+            if let CNode::Expr(e) = node
+                && steps.peek().is_none()
+            {
+                break self.expr_as(e, result_ty);
             }
+            self.statement(node, global, &mut spine);
         };
         spine
             .into_iter()
@@ -1324,74 +1204,65 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// the entry-frame slot [`Self::decl_schedule`] paired with this node:
     /// `Some` only for a top-level `fn`/`const`. A `let` takes its slot from
     /// [`Self::scoped_bind`] instead.
-    fn statement(&mut self, s: &ast::Statement, global: Option<GlobalSlot>, out: &mut Vec<Frame>) {
-        match s {
-            ast::Statement::Binding(b) => match b.name() {
-                Some(ident) => {
-                    let sid = self.ctx.intern(&ident.name);
-                    let init = self.expr(&b.init);
+    fn statement(&mut self, node: &CNode, global: Option<GlobalSlot>, out: &mut Vec<Frame>) {
+        match node {
+            CNode::Expr(e) | CNode::Effect(e) => {
+                let effect = self.expr(e);
+                out.push(Frame::Seq(effect));
+            }
+            CNode::Binding { pattern, init } => match &pattern.pattern {
+                ast::Pattern::Var { name } => {
+                    let sid = self.ctx.intern(&name.name);
+                    let init = self.expr(init);
                     // A module-scope `let` needs a pinned bind: already-compiled
                     // lambdas read it via `PushGlobal <slot>`.
                     let bind = self.scoped_bind(sid, init.ty());
                     self.bind_name(sid, bind.id);
                     out.push(Frame::Let(bind, init));
                 }
-                None => self.destructure(&b.pattern, &b.init, out),
+                pat => self.destructure(pat, init, out),
             },
-            ast::Statement::Declaration { decl, .. } => match decl.as_ref() {
-                // Types are erased; the walk already registered the ctors.
-                ast::Declaration::Type(_) => {}
-                // `@vm` fns carry no Scarlet body and no runtime binding.
-                ast::Declaration::Function(fd) if matches!(fd.body, ast::FnBody::Vm(_)) => {}
-                ast::Declaration::Function(fd) => {
-                    // A `fn` declaration is not an expression, so the walk
-                    // recorded no type for its span; its scheme is in the env.
-                    let Some(fn_ty) = self.ctx.toplevel_fn_ty(&fd.identifier.name) else {
-                        elaborator_bug("unbound fn declaration", fd.span)
-                    };
-                    let fr = self.resolve(fn_ty);
-                    let sid = self.ctx.intern(&fd.identifier.name);
-                    // The bind comes first: its `GlobalSlot` is the decl's
-                    // identity, and the closure it initialises is whatever
-                    // function the walk emitted for that slot.
-                    let bind = self.decl_bind(sid, fr, global);
-                    let Some(func_idx) = bind.global.and_then(|g| self.ctx.fn_of_global(g)) else {
-                        elaborator_bug("fn declaration with no emitted body", fd.span)
-                    };
-                    let init = TypedExpr::Closure {
-                        ty: fr,
-                        func_idx,
-                        captures: Vec::new(),
-                    };
-                    self.bind_name(sid, bind.id);
-                    out.push(Frame::Let(bind, init));
-                }
-                ast::Declaration::Const(cb) => {
-                    // A `const` gets its own bind even when its init is a bare
-                    // identifier: fn bodies address it by its own entry-frame
-                    // slot, distinct from whatever it aliases.
-                    let init = self.expr(&cb.init);
-                    let sid = self.ctx.intern(&cb.identifier.name);
-                    let bind = self.decl_bind(sid, init.ty(), global);
-                    self.bind_name(sid, bind.id);
-                    out.push(Frame::Let(bind, init));
-                }
-            },
-            // Imports were resolved by the check walk.
-            ast::Statement::ImportDeclaration(_) => {}
-            // Desugared away before elaboration; a survivor was already
-            // rejected by the parser. Keep the call for its effects.
-            ast::Statement::Backpass(bp) => {
-                let effect = self.expr(&bp.call);
-                out.push(Frame::Seq(effect));
+            CNode::Fn { name, span } => {
+                // A `fn` declaration is not an expression, so the walk built no
+                // node with its type; its scheme is in the env.
+                let Some(fn_ty) = self.ctx.toplevel_fn_ty(*name) else {
+                    elaborator_bug("unbound fn declaration", *span)
+                };
+                let fr = self.resolve(fn_ty);
+                // The bind comes first: its `GlobalSlot` is the decl's
+                // identity, and the closure it initialises is whatever
+                // function the walk emitted for that slot.
+                let bind = self.decl_bind(*name, fr, global);
+                let Some(func_idx) = bind.global.and_then(|g| self.ctx.fn_of_global(g)) else {
+                    elaborator_bug("fn declaration with no emitted body", *span)
+                };
+                let init = TypedExpr::Closure {
+                    ty: fr,
+                    func_idx,
+                    captures: Vec::new(),
+                };
+                self.bind_name(*name, bind.id);
+                out.push(Frame::Let(bind, init));
             }
+            CNode::Const { name, init } => {
+                // A `const` gets its own bind even when its init is a bare
+                // identifier: fn bodies address it by its own entry-frame
+                // slot, distinct from whatever it aliases.
+                let init = self.expr(init);
+                let bind = self.decl_bind(*name, init.ty(), global);
+                self.bind_name(*name, bind.id);
+                out.push(Frame::Let(bind, init));
+            }
+            // Types are erased and imports resolved by the check walk; a `@vm`
+            // fn carries no Scarlet body and no runtime binding.
+            CNode::Nothing => {}
         }
     }
 
     /// `let (a, b) = e` / `let Point(x, y) = e`: bind the scrutinee, then one
     /// `Let` per projection. Exhaustiveness has proven the tag, so the field
     /// reads need no check.
-    fn destructure(&mut self, pat: &ast::Pattern, init: &ast::Expression, out: &mut Vec<Frame>) {
+    fn destructure(&mut self, pat: &ast::Pattern, init: &CExpr, out: &mut Vec<Frame>) {
         let value = self.expr(init);
         let scrut = self.new_bind(self.anon, value.ty());
         let mut lets = vec![(scrut, value)];
@@ -1562,7 +1433,7 @@ impl<C: ElabCtx> PatCtx for Elab<'_, C> {
         }
     }
 
-    fn expr(&mut self, e: &ast::Expression) -> TypedExpr {
+    fn expr(&mut self, e: &CExpr) -> TypedExpr {
         Elab::expr(self, e)
     }
 }

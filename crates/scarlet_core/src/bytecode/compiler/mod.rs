@@ -60,8 +60,8 @@ use crate::typed_ir::checked::{
 use crate::typed_ir::slots::{SlotError, slot_labeled};
 use crate::typed_ir::{
     self, CaptureIdx, ClosureFact, Denotation, ElabCtx, FnTable, GlobalSlot, NameAt, NameFact,
-    OrShape, PreludeTys, RTy, ResolvedPool, TempTys, TypedExpr, TypedFn, TypedProgram, WalkStep,
-    Zonker, pool_for,
+    OrShape, PreludeTys, RTy, ResolvedPool, TempTys, TypedExpr, TypedFn, TypedProgram, Zonker,
+    pool_for,
 };
 use smallvec::SmallVec;
 
@@ -114,11 +114,11 @@ mod clean {
     /// through the gate above.)
     ///
     /// A body the walk rejected is therefore never elaborated; it is closed out
-    /// empty, which is what the fused pipeline always did. In particular
-    /// `Elab::poison` — which fires when the check walk left an expression with
-    /// no recorded type, exactly what a rejected subtree looks like — cannot be
-    /// reached from a module that already reported a type error, so a plain
-    /// type error never turns into a compiler-bug report.
+    /// empty, which is what the fused pipeline always did. In particular the
+    /// elaborator's abort on a `CKind::Error` node — exactly what a rejected
+    /// subtree looks like in the checked tree — cannot be reached from a
+    /// module that already reported a type error, so a plain type error never
+    /// turns into a compiler-bug report.
     ///
     /// Neither `Copy` nor `Clone`, and taken by value: cleanliness established
     /// before one elaboration says nothing about the state after it, since an
@@ -567,38 +567,6 @@ pub struct Compiler {
     /// from `scarlet.sca` rather than mirrored in Rust. `@vm` functions are
     /// deliberately excluded — `println` is shadowable.
     pub(super) reserved: BTreeSet<String>,
-    /// The type the check walk inferred for every expression it entered, in
-    /// entry order, one region per elaboration unit.
-    ///
-    /// The elaborator consumes it *positionally* — [`Elab::take_ty`] pops the
-    /// next entry as it enters the next expression — rather than looking a span
-    /// up. Re-deriving the type instead would reinstantiate constructor and
-    /// module-function schemes, producing unresolved vars where the walk had a
-    /// concrete `Con`; keying on `Span` instead let one module's expression
-    /// answer for another's at the same line/column, since a `Span` carries no
-    /// file id.
-    ///
-    /// The invariant is a traversal one, not a naming one: `compile_expr`
-    /// reserves a slot on entry (so the order is pre-order) and the elaborator
-    /// enters exactly the expressions the walk entered, in the same order. Both
-    /// walks skip the same nodes — the `RangeExpression` of a slice, a
-    /// `module::member` access, a simple callee — and both visit constructor
-    /// arguments in source order. Every skip is a syntactic fact, so neither
-    /// walk has to tell the other what it decided. `elaborate_fn` asserts the region is fully consumed, so a divergence
-    /// cannot pass silently.
-    ///
-    /// This is the region currently being filled. A function body opens its own
-    /// ([`Self::compile_fn_body`], which hands it to that body's
-    /// [`ParkedBody`]) and parks the enclosing one in
-    /// [`Compiler::walk_tys_stack`], so a nested lambda's types never mix into
-    /// the enclosing body's region. What is left when no body is open is the
-    /// module toplevel's own region, drained by whoever elaborates that
-    /// toplevel. Cleared by `reset_to`, whose engine rewind would otherwise
-    /// leave dangling `Ty` indices.
-    pub(super) walk_tys: Vec<WalkStep>,
-    /// The regions of the bodies enclosing the one being walked, innermost last.
-    /// Parked, not indexed: only [`Compiler::walk_tys`] is ever written to.
-    pub(super) walk_tys_stack: Vec<Vec<WalkStep>>,
     /// Function bodies whose typecheck walk has finished but whose Core
     /// pipeline (`lower`→`perceus`) is deferred until the enclosing
     /// declaration group has been generalized. See
@@ -640,15 +608,6 @@ struct LoweredBody {
     pool: Rc<ResolvedPool>,
 }
 
-/// The value a [`Compiler::walk_tys`] slot holds between its reservation (on
-/// entering an expression) and its fill (on leaving it). No `Ty` ever takes this
-/// value: it indexes the engine's node arena, which cannot reach `u32::MAX`
-/// entries. A slot can only still hold it if `compile_expr_inner` unwound.
-const WALK_TY_PENDING: Ty = Ty(u32::MAX);
-
-/// A region with no unfilled slot left in it. Checked wherever a region leaves
-/// the compiler for the elaborator: a `WALK_TY_PENDING` that got that far would
-/// index the engine's node arena out of bounds.
 /// How many levels of a recursive type's variant tables exhaustiveness must
 /// see for these patterns: the deepest constructor nesting, with wildcards and
 /// bindings costing nothing. One extra level is added at the call sites so
@@ -683,26 +642,6 @@ fn pattern_unroll_depth(p: &ast::Pattern) -> usize {
         ast::Pattern::Literal(_) | ast::Pattern::Range { .. } | ast::Pattern::Binary { .. } => 1,
         ast::Pattern::Var { .. } => 0,
     }
-}
-
-fn walk_region_is_filled(region: &[WalkStep]) -> bool {
-    !region
-        .iter()
-        .any(|s| matches!(s, WalkStep::Ty(t) if *t == WALK_TY_PENDING))
-}
-
-/// A `close_walk_region` with no matching `open_walk_region` — a broken walk
-/// invariant. Aborts, in release as well as debug: restoring the wrong region
-/// would silently hand a body another body's types — the desync
-/// walk regions exist to make impossible.
-#[allow(clippy::panic)]
-#[cold]
-#[inline(never)]
-fn walk_region_underflow() -> ! {
-    panic!(
-        "internal compiler error: close_walk_region without matching open_walk_region. \
-         Report this as a compiler bug."
-    )
 }
 
 /// Toplevel elaboration finished with module-scope slots still queued — the
@@ -774,20 +713,10 @@ fn function_reserved_during_elaboration() -> ! {
 struct DeferredBody {
     name: StrId,
     param_binds: Vec<(StrId, Ty)>,
-    /// Cloned rather than borrowed: `Compiler` carries no `'ast` lifetime and
-    /// the deferral outlives the `&ast::Expression` `compile_fn_body` is
-    /// handed. The clone preserves spans, so this body's own
-    /// [`DeferredBody::closures`] still key against it, and preserves shape, so
-    /// [`DeferredBody::walk_tys`] still lines up with it.
-    body: ast::Expression,
-    /// What the check walk built for `body`.
-    #[allow(dead_code)]
-    checked: CExpr,
+    /// What the check walk built for the body: every node with the type it
+    /// inferred, and every name and lambda with what it resolved to.
+    body: CExpr,
     body_ty: Ty,
-    /// This body's walk region: the type of every expression the check walk
-    /// entered while walking `body`, in entry order, the root's first. The
-    /// elaborator consumes it positionally. See [`Compiler::walk_tys`].
-    walk_tys: Vec<WalkStep>,
     /// The function slot this body fills in. Reserved by `finish_fn_frame` in
     /// *both* modes: a [`ClosureFact`] and `global_to_func` record it, and
     /// `lower` bakes it into `Atom::Closure`/`Callee::Known`, all of which
@@ -808,10 +737,8 @@ struct DeferredBody {
 struct ParkedBody {
     name: StrId,
     param_binds: Vec<(StrId, Ty)>,
-    body: ast::Expression,
-    checked: CExpr,
+    body: CExpr,
     body_ty: Ty,
-    walk_tys: Vec<WalkStep>,
 }
 
 /// A name resolved to a constructor, as `type_ctor_pattern` needs it: the
@@ -1004,8 +931,6 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         stdlib_source_root: None,
         prelude: PreludeBindings::default(),
         reserved: BTreeSet::new(),
-        walk_tys: Vec::new(),
-        walk_tys_stack: Vec::new(),
         deferred_bodies: Vec::new(),
         defer_depth: 0,
     }
@@ -1049,6 +974,13 @@ impl Compiler {
 struct CtorHead<'a> {
     qualifier: Option<&'a ast::Identifier>,
     name: &'a ast::Identifier,
+}
+
+/// What the check walk built for an entry: a module block's nodes, or a bare
+/// expression.
+enum CheckedEntry {
+    Module(Vec<CNode>, Span),
+    Expr(CExpr),
 }
 
 /// The one compile. Every entry point above is a named [`CompileOptions`].
@@ -1097,6 +1029,7 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
         }
     }
     let top_ty;
+    let checked;
     // The `main` a program starts at; `None` for a check, a script, a
     // module, or a program with no usable `main` (which is then not clean).
     let mut entered = None;
@@ -1115,7 +1048,8 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
         // by a ctor use bails on `unbound callee` and the module toplevel
         // never gets Core. Popped after it.
         c.env.push_scope();
-        c.analyse_module(block, None);
+        let nodes = c.analyse_module(block, None);
+        checked = CheckedEntry::Module(nodes, block.span);
         top_ty = c.ty_nil();
         if as_module.is_none() && module_scope == ModuleScope::DeclarationsOnly {
             entered = c.program_entry(block, check_only, expr.span());
@@ -1134,7 +1068,9 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
         // expression program can still contain lambdas, and none of them may
         // lower while the expression is being typechecked.
         c.begin_deferred_elaboration();
-        top_ty = c.compile_expr(expr).ty;
+        let body = c.compile_expr(expr);
+        top_ty = body.ty;
+        checked = CheckedEntry::Expr(body);
         c.end_deferred_elaboration();
         c.check_nil_discards();
         c.pop_local_scope();
@@ -1160,26 +1096,18 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
     // Elaboration and lowering run under `check_only` too. A well-typed
     // program the front half cannot handle has to be reported by
     // `scarlet check`, not left to blow up at `scarlet run`.
-    // Drained whether or not the entry elaborates, so a `check` that bailed
-    // leaves nothing behind for the next compile on this `Compiler`.
-    let walk_tys = c.take_toplevel_walk_tys();
     // Stays `None` unless the recording below actually happens, which is what
     // keeps a rejected or check-only compile from handing back a `Program`
     // that runs the stdlib init and nothing else.
     let mut entry = None;
     if let Some(clean) = c.clean_module() {
         let name = c.engine.intern("__main__");
-        let lowered = c.elaborate_then_materialize(clean, None, |c, pool, fns| {
-            // A module block was walked statement-by-statement, so nothing
-            // recorded a type for the block itself; a bare expression *was*
-            // entered by `compile_expr`, so its region starts with its own.
-            match expr {
-                ast::Expression::BlockExpression(block) => {
-                    typed_ir::elaborate_toplevel(c, pool, fns, name, block, top_ty, &walk_tys)
-                }
-                _ => {
-                    typed_ir::elaborate_body(c, pool, fns, name, &[], expr, top_ty, &walk_tys, true)
-                }
+        let lowered = c.elaborate_then_materialize(clean, None, |c, pool, fns| match &checked {
+            CheckedEntry::Module(nodes, span) => {
+                typed_ir::elaborate_toplevel(c, pool, fns, name, nodes, *span, top_ty)
+            }
+            CheckedEntry::Expr(body) => {
+                typed_ir::elaborate_body(c, pool, fns, name, &[], body, top_ty, true)
             }
         });
         if !check_only {
@@ -2661,8 +2589,8 @@ impl Compiler {
         self.toplevel_binds.clear();
         self.toplevel_decls.clear();
         self.env.push_scope();
-        self.analyse_module(block, Some(&mut iface));
-        self.lower_module_init(&key, block);
+        let nodes = self.analyse_module(block, Some(&mut iface));
+        self.lower_module_init(&key, &nodes, block.span);
         self.env.pop_scope();
         // Record actual type-id consumption so `id_high_water` tracks real
         // usage and a reused-range spill past `MODULE_TYPE_ID_RANGE` raises
@@ -2792,10 +2720,7 @@ impl Compiler {
 
     /// Elaborate and lower a just-analysed module toplevel to Core and record
     /// it, exactly as `compile_with` does for `__main__`.
-    fn lower_module_init(&mut self, key: &ModuleKey, block: &ast::BlockExpression) {
-        // This module's toplevel walk region, drained whether or not it is
-        // elaborated: the next module's walk must start from an empty one.
-        let walk_tys = self.take_toplevel_walk_tys();
+    fn lower_module_init(&mut self, key: &ModuleKey, nodes: &[CNode], span: Span) {
         let Some(clean) = self.clean_module() else {
             return;
         };
@@ -2805,7 +2730,7 @@ impl Compiler {
         // the front half cannot handle is a diagnostic rather than a crash at
         // `scarlet run`.
         let lowered = self.elaborate_then_materialize(clean, None, |c, pool, fns| {
-            typed_ir::elaborate_toplevel(c, pool, fns, name, block, nil, &walk_tys)
+            typed_ir::elaborate_toplevel(c, pool, fns, name, nodes, span, nil)
         });
         if !self.check_only {
             self.record_toplevel(lowered, TopKind::Module);
@@ -2848,78 +2773,19 @@ impl Compiler {
     // Expressions
     // ========================================================================
 
-    /// Typecheck `expr`, appending the type it inferred to the current walk
-    /// region in *entry* order.
+    /// Typecheck `expr` and build its node in the checked tree.
     ///
-    /// The recording is what lets the elaborator — which walks the same AST
-    /// straight after this one, on the same engine — use the typechecker's
-    /// answer rather than re-deriving one. It must stay total over expressions:
-    /// every `Expression` the elaborator can reach is typed here, and the two
-    /// walks enter them in the same order (see [`Compiler::walk_tys`]).
+    /// The tree is what lets the elaborator use the typechecker's answers
+    /// rather than re-derive them: re-instantiating a constructor or module
+    /// function scheme would produce unresolved vars where the walk had a
+    /// concrete `Con`.
     pub(super) fn compile_expr(&mut self, expr: &ast::Expression) -> CExpr {
-        let slot = self.reserve_walk_ty();
         let (ty, kind) = self.compile_expr_inner(expr);
-        self.fill_walk_ty(slot, ty);
         CExpr {
             ty,
             span: expr.span(),
             kind,
         }
-    }
-
-    /// Claim this expression's position in the current region before its
-    /// children claim theirs, so the region is a pre-order listing.
-    fn reserve_walk_ty(&mut self) -> usize {
-        self.walk_tys.push(WalkStep::Ty(WALK_TY_PENDING));
-        self.walk_tys.len() - 1
-    }
-
-    /// Fill the slot [`Self::reserve_walk_ty`] claimed. `compile_expr_inner` may
-    /// have opened and closed a nested region (a lambda body), but it always
-    /// puts the one it found back, so the slot still addresses it.
-    ///
-    /// Indexes rather than probes: a slot outside the current region is the
-    /// region desync this table exists to make impossible, and swallowing the
-    /// write would let a `WALK_TY_PENDING` reach the elaborator.
-    fn fill_walk_ty(&mut self, slot: usize, ty: Ty) {
-        self.walk_tys[slot] = WalkStep::Ty(ty);
-    }
-
-    /// Park the enclosing body's region and start a fresh one for the body about
-    /// to be walked.
-    fn open_walk_region(&mut self) {
-        let outer = std::mem::take(&mut self.walk_tys);
-        self.walk_tys_stack.push(outer);
-    }
-
-    /// Close the region [`Self::open_walk_region`] opened, returning it and
-    /// restoring the enclosing body's.
-    fn close_walk_region(&mut self) -> Vec<WalkStep> {
-        let Some(outer) = self.walk_tys_stack.pop() else {
-            walk_region_underflow();
-        };
-        let region = std::mem::replace(&mut self.walk_tys, outer);
-        debug_assert!(
-            walk_region_is_filled(&region),
-            "walk region closed with an unfilled slot"
-        );
-        region
-    }
-
-    /// Take the module toplevel's region: everything the walk typed outside a
-    /// function body. Every module's walk fills it and exactly one elaboration
-    /// drains it, so it is empty again for the next.
-    fn take_toplevel_walk_tys(&mut self) -> Vec<WalkStep> {
-        debug_assert!(
-            self.walk_tys_stack.is_empty(),
-            "a function body's walk region leaked into the module toplevel's"
-        );
-        let region = std::mem::take(&mut self.walk_tys);
-        debug_assert!(
-            walk_region_is_filled(&region),
-            "module toplevel walk region has an unfilled slot"
-        );
-        region
     }
 
     fn compile_expr_inner(&mut self, expr: &ast::Expression) -> (Ty, CKind) {
@@ -3150,11 +3016,6 @@ impl Compiler {
                 && params.len as usize == fe.params.len()
             {
                 let params: Vec<Ty> = self.engine.children_of(params).to_vec();
-                // This path bypasses `compile_expr`, so claim the lambda's slot
-                // in the walk region here — before its body opens a region of
-                // its own — or the elaborator's next `take_ty` reads the type of
-                // whatever expression follows.
-                let slot = self.reserve_walk_ty();
                 self.engine.enter_level();
                 let (ty, closure) = self.compile_function_common(
                     &fe.params,
@@ -3163,7 +3024,6 @@ impl Compiler {
                     Some(params.clone()),
                 );
                 self.engine.leave_level();
-                self.fill_walk_ty(slot, ty);
                 return CExpr {
                     ty,
                     span: fe.span,
@@ -3310,7 +3170,6 @@ impl Compiler {
             at,
             param_labels: None,
         };
-        self.walk_tys.push(WalkStep::Name(fact.clone()));
         self.check_named_value(name, None, expr.span, kind, bound);
         (ty, CKind::Name { name: id, fact })
     }
@@ -3505,15 +3364,12 @@ impl Compiler {
         }) = self.resolve_simple_callee(&expr.callee)
         {
             let inst_ty = self.engine.instantiate(&scheme, &self.rigid_ids);
-            // Before the arguments, which the elaborator also walks after the
-            // callee.
             let param_labels = self.param_labels_of(scheme.kind);
             let fact = NameFact {
                 ty: inst_ty,
                 at,
                 param_labels,
             };
-            self.walk_tys.push(WalkStep::Name(fact.clone()));
             let id = self.engine.intern(name);
             let callee = match qualifier {
                 None => CCallee::Name {
@@ -3615,10 +3471,9 @@ impl Compiler {
     /// admits labelled arguments; the rest still refuse them. Spread stays
     /// constructor-only either way.
     ///
-    /// Both walks visit the arguments in *source* order, so the permutation a
+    /// The arguments are checked in *source* order, so the permutation a
     /// labelled call needs is applied to the parameter *types* here and to the
-    /// emitted argument vector in `Elab::value_call` — never to this traversal,
-    /// which is what `walk_tys` is recorded in. Both sides take it from
+    /// emitted argument vector in `Elab::value_call`. Both sides take it from
     /// [`slot_labeled`] over this one slice, so the order the arguments are
     /// checked in and the order they are passed in cannot disagree.
     fn compile_call_args(
@@ -3920,8 +3775,8 @@ impl Compiler {
         // Partition the arguments into a spread base (at most one) and a map
         // of explicitly-supplied fields keyed by their declared position. Each
         // expression is paired with its source-argument index so a slotted
-        // value structurally remembers which `args[i]` it came from — the
-        // walk sub-regions below are spliced back by that index.
+        // value structurally remembers which `args[i]` it came from, and its
+        // checked node goes back to that argument.
         let mut spread: Option<(usize, &ast::Expression)> = None;
         for (i, arg) in args.iter().enumerate() {
             if let ast::CallArg::Spread(e) = arg {
@@ -3957,55 +3812,23 @@ impl Compiler {
             },
         );
 
-        // Two orders have to hold at once, so the walk splits them.
-        //
-        // *Checking* runs spread-first and then in declared-field order, as it
-        // always has: the spread's `unify_at` solves `result_ty` (and with it
-        // the constructor's type params) before any `compile_expr_with_hint`
-        // pushes a parameter type into a function-literal argument, and the
-        // diagnostics a mistyped argument raises come out in field order.
-        //
-        // *Recording* is source order: the elaborator's `ctor_call` spills the
-        // arguments into `Let`s in source order before reordering them, and the
-        // walk region is consumed positionally. So each argument is checked into
-        // a sub-region of its own, and the sub-regions are spliced back in
-        // source order below.
+        // Checking runs spread-first and then in declared-field order: the
+        // spread's `unify_at` solves `result_ty` (and with it the constructor's
+        // type params) before any `compile_expr_with_hint` pushes a parameter
+        // type into a function-literal argument, and the diagnostics a
+        // mistyped argument raises come out in field order. The checked nodes
+        // still go back in source order, which is the order the elaborator
+        // spills them in.
         //
         // An argument `slot_ctor_args` did not place is an arity or label error
-        // it has already reported — left unchecked, and contributing no region,
-        // exactly as before.
+        // it has already reported, and is left unchecked.
         let slots = &by_pos[..(field_labels_sl.len as usize).min(by_pos.len())];
         let mut checked: Vec<Option<CExpr>> = (0..args.len()).map(|_| None).collect();
-
-        // All-positional: `slot_ctor_args` placed `args[i]` in slot `i`, so the
-        // two orders already coincide and no sub-region is needed. This is every
-        // ctor call that does not name a field or spread a base.
-        if args
-            .iter()
-            .all(|a| matches!(a, ast::CallArg::Positional(_)))
-        {
-            for (i, slot_expr) in slots.iter().enumerate() {
-                let Some(&(ai, value)) = *slot_expr else {
-                    continue;
-                };
-                let expected = param_tys.get(i).copied();
-                let v = self.compile_expr_with_hint(value, expected);
-                if let Some(p) = expected {
-                    self.engine.unify_at(p, v.ty, value.span());
-                }
-                checked[ai] = Some(v);
-            }
-            return (result_ty, self.ctor_args(args, checked));
-        }
-
-        let mut regions: Vec<Vec<WalkStep>> = vec![Vec::new(); args.len()];
 
         // Record-update: the base is unified with the constructor's result
         // type; the per-field projection is Core's job.
         if let Some((ai, e)) = spread {
-            self.open_walk_region();
             let base = self.compile_expr(e);
-            regions[ai] = self.close_walk_region();
             self.engine.unify_at(result_ty, base.ty, e.span());
             checked[ai] = Some(base);
             let unfilled = (0..arity).filter(|&i| slots.get(i).is_none_or(Option::is_none));
@@ -4017,17 +3840,11 @@ impl Compiler {
                 continue;
             };
             let expected = param_tys.get(i).copied();
-            self.open_walk_region();
             let v = self.compile_expr_with_hint(value, expected);
-            regions[ai] = self.close_walk_region();
             if let Some(p) = expected {
                 self.engine.unify_at(p, v.ty, value.span());
             }
             checked[ai] = Some(v);
-        }
-
-        for region in regions {
-            self.walk_tys.extend(region);
         }
 
         (result_ty, self.ctor_args(args, checked))
@@ -4123,7 +3940,6 @@ impl Compiler {
             at: m.at,
             param_labels: None,
         };
-        self.walk_tys.push(WalkStep::Name(fact.clone()));
         self.record(m.member_name, ty, m.member_span, None);
         // Rendered lazily: the qualifier only reaches a diagnostic on the
         // no-runtime-binding path, so the common (bound) case skips the
@@ -4466,13 +4282,8 @@ impl Compiler {
         // (via `compile_function_common`) and park their own bodies + reserve
         // their slots before we reserve ours.
         let params_end = self.local_count;
-        // This body's own walk region: its expressions, and none of the
-        // enclosing frame's. A nested lambda opens another one here, so its
-        // types never land in ours.
-        self.open_walk_region();
         let checked = self.compile_expr(body);
         let body_ty = checked.ty;
-        let walk_tys = self.close_walk_region();
         // The walk still bumped `local_count` for the pattern binds it
         // reserved; those slots are dead, so rewind to the param watermark.
         self.local_count = params_end;
@@ -4495,10 +4306,8 @@ impl Compiler {
         let parked = ParkedBody {
             name,
             param_binds,
-            body: body.clone(),
-            checked,
+            body: checked,
             body_ty,
-            walk_tys,
         };
         (body_ty, parked)
     }
@@ -4675,25 +4484,14 @@ impl Compiler {
         clean: CleanModule,
         name: StrId,
         param_binds: &[(StrId, Ty)],
-        body: &ast::Expression,
+        body: &CExpr,
         body_ty: Ty,
-        walk_tys: &[WalkStep],
         func_idx: FuncIdx,
     ) {
         use crate::core_ir::perceus;
         let LoweredBody { core, pool, .. } =
             self.elaborate_then_materialize(clean, Some(func_idx), |c, pool, fns| {
-                typed_ir::elaborate_body(
-                    c,
-                    pool,
-                    fns,
-                    name,
-                    param_binds,
-                    body,
-                    body_ty,
-                    walk_tys,
-                    false,
-                )
+                typed_ir::elaborate_body(c, pool, fns, name, param_binds, body, body_ty, false)
             });
         if self.check_only {
             return;
@@ -4769,7 +4567,7 @@ impl Compiler {
     }
 
     /// Elaborate a parked body. Everything it needs about names and closures
-    /// the walk recorded in `walk_tys`, so no frame state is restored for it.
+    /// is on the checked tree, so no frame state is restored for it.
     fn elaborate_deferred(&mut self, d: DeferredBody, clean: CleanModule) {
         self.elaborate_body(
             clean,
@@ -4777,7 +4575,6 @@ impl Compiler {
             &d.param_binds,
             &d.body,
             d.body_ty,
-            &d.walk_tys,
             d.func_idx,
         );
     }
@@ -4825,10 +4622,9 @@ impl Compiler {
             None => body_ty,
         };
 
+        // `finish_fn_frame` restored the enclosing frame, so the closure is as
+        // that frame sees it, and it is that frame's elaboration that builds it.
         let closure = self.finish_fn_frame(saved, body_emit);
-        // `finish_fn_frame` restored the enclosing frame, so this lands in that
-        // frame's walk, which is the one whose elaboration builds the closure.
-        self.walk_tys.push(WalkStep::Closure(closure.clone()));
         (self.engine.mk_fun(&param_tys, ret_ty), closure)
     }
 
@@ -4936,8 +4732,7 @@ impl Compiler {
     /// Close out a function body: reserve its function slot, park it as a
     /// [`DeferredBody`], and restore the enclosing frame and type-env. Returns
     /// the closure as the enclosing frame sees it: the slot, and how each
-    /// capture loads there, which `compile_function_common` records in the
-    /// enclosing frame's walk.
+    /// capture loads there, which goes on the enclosing frame's checked tree.
     ///
     /// Nothing is lowered here: the body is lowered in pass 6, after the walk.
     fn finish_fn_frame(&mut self, saved: FnFrame, parked: ParkedBody) -> ClosureFact {
@@ -4956,17 +4751,13 @@ impl Compiler {
             name: body_name,
             param_binds,
             body,
-            checked,
             body_ty,
-            walk_tys,
         } = parked;
         self.deferred_bodies.push(DeferredBody {
             name: body_name,
             param_binds,
             body,
-            checked,
             body_ty,
-            walk_tys,
             func_idx,
         });
 

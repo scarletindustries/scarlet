@@ -16,24 +16,22 @@
 //! segment's size) are checked like any other and kept beside it, in the order
 //! the pattern visits them.
 
-// Built by the check walk; the elaborator does not read it yet.
-#![allow(dead_code)]
-
 use scarlet_syntax::ast;
 use scarlet_syntax::span::Span;
 
-use super::{ClosureFact, NameFact};
+use super::Denotation;
+use crate::core_ir::FuncIdx;
 use crate::types::{StrId, Ty};
 
 #[derive(Debug, Clone)]
-pub(crate) struct CExpr {
+pub struct CExpr {
     pub(crate) ty: Ty,
     pub(crate) span: Span,
     pub(crate) kind: CKind,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum CKind {
+pub enum CKind {
     Number(ast::NumberLiteral),
     String(String),
     Interp(Vec<CInterpPart>),
@@ -108,13 +106,13 @@ pub(crate) enum CKind {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum CInterpPart {
+pub enum CInterpPart {
     Literal(String),
     Expr(CExpr),
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct CBinSeg {
+pub struct CBinSeg {
     pub(crate) value: CExpr,
     pub(crate) spec: ast::BinSpec,
     /// The checked size expression, when the spec has one.
@@ -122,7 +120,7 @@ pub(crate) struct CBinSeg {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum CArrayElem {
+pub enum CArrayElem {
     Elem(CExpr),
     Spread(CExpr),
 }
@@ -130,7 +128,7 @@ pub(crate) enum CArrayElem {
 /// A call's callee. A name is resolved where it stands, never checked as an
 /// expression of its own.
 #[derive(Debug, Clone)]
-pub(crate) enum CCallee {
+pub enum CCallee {
     Name {
         name: StrId,
         fact: NameFact,
@@ -146,28 +144,28 @@ pub(crate) enum CCallee {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum CArg {
+pub enum CArg {
     Positional(CExpr),
     Labeled { label: StrId, value: CExpr },
     Spread(CExpr),
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct CPattern {
+pub struct CPattern {
     pub(crate) pattern: ast::Pattern,
     /// The pattern's size expressions, in the order the pattern visits them.
     pub(crate) sizes: Vec<CExpr>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct CArm {
+pub struct CArm {
     pub(crate) pattern: CPattern,
     pub(crate) guard: Option<CExpr>,
     pub(crate) body: CExpr,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum CNode {
+pub enum CNode {
     Expr(CExpr),
     /// `pattern = init`. A plain name is a pattern too.
     Binding {
@@ -189,4 +187,35 @@ pub(crate) enum CNode {
     Effect(CExpr),
     /// A type declaration, an import, a `@vm` fn: nothing to elaborate.
     Nothing,
+}
+
+/// A name as the check walk resolved it, in the frame that was live then.
+#[derive(Debug, Clone)]
+pub struct NameFact {
+    /// The name's type at this use, as the walk instantiated it.
+    pub(crate) ty: Ty,
+    pub(crate) at: NameAt,
+    /// The declared parameter labels when the name is a module `fn` called
+    /// here, `None` for every other name. Labels are refused on anything else.
+    pub(crate) param_labels: Option<Vec<StrId>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum NameAt {
+    /// Bound by the body being elaborated, so the elaborator's own scope has
+    /// it. At a module toplevel it may instead be a declaration the toplevel
+    /// reaches before the declaration's statement.
+    Bound,
+    /// Anything else, fixed by the walk. A module-scope value may still turn
+    /// out to be a known function once every body has its slot.
+    Den(Denotation),
+}
+
+/// A lambda as the check walk closed it.
+#[derive(Debug, Clone)]
+pub struct ClosureFact {
+    pub(crate) func_idx: FuncIdx,
+    /// Every captured name, in capture-index order, with how it loads in the
+    /// enclosing body.
+    pub(crate) captures: Vec<(StrId, NameFact)>,
 }

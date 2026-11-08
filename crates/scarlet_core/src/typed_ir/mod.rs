@@ -22,9 +22,10 @@ pub mod rty;
 pub(crate) use scarlet_types::slots;
 pub(crate) mod zonk;
 
+pub(crate) use checked::{ClosureFact, NameAt, NameFact};
 pub(crate) use elaborate::{
-    ClosureFact, ElabCtx, FieldAt, NameAt, NameFact, OrShape, PreludeTys, VariantLayout, WalkStep,
-    elaborate_body, elaborate_toplevel, elaborator_bug,
+    ElabCtx, FieldAt, OrShape, PreludeTys, VariantLayout, elaborate_body, elaborate_toplevel,
+    elaborator_bug,
 };
 pub(crate) use eta::FnTable;
 pub(crate) use resolve::Denotation;

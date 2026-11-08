@@ -236,10 +236,6 @@ impl Compiler {
         self.entry_toplevel = None;
         self.main = None;
 
-        // Recorded expression types hold `Ty` indices into the arena just
-        // rewound; the next compile's typecheck walk re-records them all.
-        self.walk_tys.clear();
-        self.walk_tys_stack.clear();
         // `toplevel_binds` is positional: a survivor would hand the next
         // module-scope bind someone else's slot, silently.
         self.toplevel_decls.clear();

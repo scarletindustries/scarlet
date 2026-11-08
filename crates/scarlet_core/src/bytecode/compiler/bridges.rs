@@ -63,8 +63,9 @@ impl ElabCtx for Compiler {
         let ty = self.engine.instantiate(scheme, &self.rigid_ids);
         Some((ty, den))
     }
-    fn toplevel_fn_ty(&mut self, name: &str) -> Option<Ty> {
-        let scheme = self.env.lookup(name)?;
+    fn toplevel_fn_ty(&mut self, name: StrId) -> Option<Ty> {
+        let name = self.engine.str(name).to_string();
+        let scheme = self.env.lookup(&name)?;
         Some(self.engine.instantiate(scheme, &self.rigid_ids))
     }
     fn decl_denotation(&self, name: StrId) -> Option<Denotation> {
