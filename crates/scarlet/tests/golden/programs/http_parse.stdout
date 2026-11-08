@@ -38,7 +38,7 @@ empty name rejected: Bad 400
 duplicate host: Done method=GET target=/ version=Http11 headers=2 consumed=36
 duplicate host: get returns first = a
 nul in value parses: Bad 400
-nul in value: parse failed
+nul in value: parse failed with 400
 
 == header values survive zero-copy ==
 host (lower lookup): example.com

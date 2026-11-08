@@ -38,14 +38,40 @@ pub fn main() {
 	// Each failure lands on its own variant, carrying the path it concerns.
 	match io::read_text(MISSING) {
 		Ok(_) -> println('missing: read a file that is not there')
-		Err(io::NotFound(path)) -> println('missing: NotFound(${path})')
-		Err(e) -> println('missing: ${e}')
+		Err(e) -> match e {
+			io::NotFound(path) -> println('missing: NotFound(${path})')
+			io::PermissionDenied(_)
+			| io::AlreadyExists(_)
+			| io::NotADirectory(_)
+			| io::IsADirectory(_)
+			| io::ReadOnlyFilesystem(_)
+			| io::FilesystemLoop(_)
+			| io::InvalidData(_)
+			| io::StorageFull
+			| io::QuotaExceeded
+			| io::FileTooLarge(_)
+			| io::UnalignedBinary
+			| io::Errno(_) -> println('missing: ${e}')
+		}
 	}
 
 	match io::read_file('/tmp') {
 		Ok(_) -> println('directory: read a directory as a file')
-		Err(io::IsADirectory(path)) -> println('directory: IsADirectory(${path})')
-		Err(e) -> println('directory: ${e}')
+		Err(e) -> match e {
+			io::IsADirectory(path) -> println('directory: IsADirectory(${path})')
+			io::NotFound(_)
+			| io::PermissionDenied(_)
+			| io::AlreadyExists(_)
+			| io::NotADirectory(_)
+			| io::ReadOnlyFilesystem(_)
+			| io::FilesystemLoop(_)
+			| io::InvalidData(_)
+			| io::StorageFull
+			| io::QuotaExceeded
+			| io::FileTooLarge(_)
+			| io::UnalignedBinary
+			| io::Errno(_) -> println('directory: ${e}')
+		}
 	}
 
 	// A file is bytes, not text: write_file takes a Binary and read_file hands one
@@ -62,8 +88,21 @@ pub fn main() {
 	// is refused before it opens the file, so the snapshot above still stands.
 	match io::write_file(SNAPSHOT, <<1:4>>) {
 		Ok(Nil) -> println('unaligned: wrote a half byte')
-		Err(io::UnalignedBinary) -> println('unaligned: UnalignedBinary')
-		Err(e) -> println('unaligned: ${e}')
+		Err(e) -> match e {
+			io::UnalignedBinary -> println('unaligned: UnalignedBinary')
+			io::NotFound(_)
+			| io::PermissionDenied(_)
+			| io::AlreadyExists(_)
+			| io::NotADirectory(_)
+			| io::IsADirectory(_)
+			| io::ReadOnlyFilesystem(_)
+			| io::FilesystemLoop(_)
+			| io::InvalidData(_)
+			| io::StorageFull
+			| io::QuotaExceeded
+			| io::FileTooLarge(_)
+			| io::Errno(_) -> println('unaligned: ${e}')
+		}
 	}
 	println('snapshot survived: ${io::read_file(SNAPSHOT) == Ok(<<'ALSNAP', 1:8, 2:16>>)}')
 

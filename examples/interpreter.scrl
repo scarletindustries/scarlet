@@ -128,16 +128,20 @@ fn more_factors(left Expr, tokens Array(Token)) Parsed {
 fn factor(tokens Array(Token)) Parsed {
 	match tokens {
 		[] -> Err('unexpected end of input')
-		[Number(n), ..rest] -> Ok((Lit(n), rest))
-		[Name(x), ..rest] -> Ok((Var(x), rest))
-		[Open, ..rest] -> {
-			pair <- result::then(expression(rest))
-			match pair {
-				(inner, [Close, ..after]) -> Ok((inner, after))
-				_ -> Err('missing closing )')
+		[t, ..rest] -> match t {
+			Number(n) -> Ok((Lit(n), rest))
+			Name(x) -> Ok((Var(x), rest))
+			Open -> {
+				pair <- result::then(expression(rest))
+				match pair {
+					(inner, [Close, ..after]) -> Ok((inner, after))
+					(_, []) -> Err('missing closing )')
+					(_, [Number(_) | Name(_) | Plus | Minus | Star | Slash | Open | Assign, ..]) ->
+						Err('missing closing )')
+				}
 			}
+			Plus | Minus | Star | Slash | Close | Assign -> Err('unexpected ${string::inspect(t)}')
 		}
-		[t, ..] -> Err('unexpected ${string::inspect(t)}')
 	}
 }
 

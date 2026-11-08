@@ -1282,21 +1282,3 @@ fn or_receiver_binds_a_heap_error_payload() {
 fn or_receiver_binds_a_heap_error_payload_runs() {
     run_outputs(OR_RECEIVER_BINDS_A_HEAP_ERROR_PAYLOAD_SRC, "9\n");
 }
-
-// T-148: `@exhaustive` is opt-in and only forbids a wildcard/bare-binder arm
-// from covering variants it does not name — everything else about the type
-// works exactly as it does without the attribute.
-run_case! {
-    /// Every variant named explicitly: `@exhaustive` has nothing to refuse.
-    exhaustive_type_with_every_variant_named_runs: (
-        "@exhaustive\ntype Color {\n\tRed\n\tGreen\n\tBlue\n}\n\
-         pub fn main() {\n\
-         \tprintln(match Green {\n\
-         \t\tRed -> 0\n\
-         \t\tGreen -> 1\n\
-         \t\tBlue -> 2\n\
-         \t})\n\
-         }\n",
-        "1\n",
-    ),
-}

@@ -431,7 +431,7 @@ pub fn watch(s Supervised, notify Subject(msg), wrap fn(Exit) msg) Watch {
 			send(notify, wrap(Exit(supervised: s, ended: Exited(NoProcess), status: Gone)))
 			OnPlace(s, 0)
 		}
-		Info(..) ->
+		Info(kind: Worker(_) | SupervisorOf(_) | FactoryOf(_), ..) ->
 			OnPlace(
 				s,
 				watch_place(s.id, fn(description) send(notify, wrap(decode_exit(description)))),

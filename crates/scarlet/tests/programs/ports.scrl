@@ -92,7 +92,20 @@ pub fn main() {
 
 	check('a missing program is NotFound', match port::spawn('/definitely/not/a/program', []) {
 		Err(io::NotFound(path)) -> path == '/definitely/not/a/program'
-		Err(_) -> False
+		Err(
+			io::PermissionDenied(_)
+			| io::AlreadyExists(_)
+			| io::NotADirectory(_)
+			| io::IsADirectory(_)
+			| io::ReadOnlyFilesystem(_)
+			| io::FilesystemLoop(_)
+			| io::InvalidData(_)
+			| io::StorageFull
+			| io::QuotaExceeded
+			| io::FileTooLarge(_)
+			| io::UnalignedBinary
+			| io::Errno(_),
+		) -> False
 		Ok(_) -> False
 	})
 

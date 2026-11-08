@@ -154,22 +154,22 @@ pub fn map_get(v Value, label Int) Option(Value) {
 		Map(entries) -> option::map(
 			array::find(entries, fn(e) {
 				(k, _) = e
-				key_int(k) == Some(label)
+				as_int(k) == Some(label)
 			}),
 			fn(e) {
 				(_, val) = e
 				val
 			},
 		)
-		_ -> None
+		Uint(_) | Nint(_) | Bytes(_) | Text(_) | List(_) -> None
 	}
 }
 
-fn key_int(v Value) Option(Int) {
+pub fn as_int(v Value) Option(Int) {
 	match v {
 		Uint(n) -> Some(n)
 		Nint(n) -> Some(n)
-		_ -> None
+		Bytes(_) | Text(_) | List(_) | Map(_) -> None
 	}
 }
 
@@ -179,30 +179,27 @@ pub fn text_map_get(v Value, label String) Option(Value) {
 		Map(entries) -> option::map(
 			array::find(entries, fn(e) {
 				(k, _) = e
-				match k {
-					Text(t) -> t == label
-					_ -> False
-				}
+				k == Text(label)
 			}),
 			fn(e) {
 				(_, val) = e
 				val
 			},
 		)
-		_ -> None
+		Uint(_) | Nint(_) | Bytes(_) | Text(_) | List(_) -> None
 	}
 }
 
 pub fn as_bytes(v Value) Option(Binary) {
 	match v {
 		Bytes(b) -> Some(b)
-		_ -> None
+		Uint(_) | Nint(_) | Text(_) | List(_) | Map(_) -> None
 	}
 }
 
 pub fn as_text(v Value) Option(String) {
 	match v {
 		Text(s) -> Some(s)
-		_ -> None
+		Uint(_) | Nint(_) | Bytes(_) | List(_) | Map(_) -> None
 	}
 }

@@ -226,7 +226,7 @@ fn describe(e process::Exit) String {{
 	what = match e.ended {{
 		process::GaveUp(restarts, within_ms) -> 'gave up (${{restarts}} in ${{within_ms}}ms)'
 		process::Exited(process::Killed) -> 'removed'
-		process::Exited(_) -> 'exited'
+		process::Exited(process::Normal | process::NoProcess | process::Crashed(_)) -> 'exited'
 	}}
 	after = match e.status {{
 		process::Restarting -> 'restarting'
@@ -297,7 +297,10 @@ pub fn main() {
 	_ = process::monitor(intruder, downs, fn(d) d)
 	match process::receive(downs).reason {
 		process::Crashed(process::Supervision(why)) -> println('refused: ${why}')
-		_ -> println('unexpected')
+		process::Crashed(process::IndexOutOfBounds(..) | process::SliceOutOfBounds(..) | process::ForeignReceive | process::TypeMismatch(..))
+		| process::Normal
+		| process::NoProcess
+		| process::Killed -> println('unexpected')
 	}
 	// The creator itself may, of course.
 	_ = process::permanent(app, fn(inbox) process::receive(inbox))
@@ -372,7 +375,7 @@ pub fn main() {
 				kinds = array::map(process::children(service.supervised), fn(c) match process::info(c).kind {
 					process::FactoryOf(_) -> 'factory'
 					process::Worker(process::Transient) -> 'acceptor'
-					_ -> 'other'
+					process::Process | process::SupervisorOf(_) -> 'other'
 				})
 				println('first child: ${first(kinds)}')
 				println('acceptors: ${array::length(array::filter(kinds, fn(k) k == 'acceptor'))}')

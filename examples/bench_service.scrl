@@ -132,8 +132,12 @@ fn scan_pairs(
 			binary::slice_bytes(b, start, e - start),
 			binary::slice_bytes(b, e + 1, end - e - 1),
 		) {
-			(Ok(k), Ok(v)) if e < end && k == key -> Some(v)
-			_ -> next_pair(b, end, n, key, sep, skip_sp)
+			(Ok(k), Ok(v)) -> if e < end && k == key {
+				Some(v)
+			} else {
+				next_pair(b, end, n, key, sep, skip_sp)
+			}
+			(Err(Nil), _) | (Ok(_), Err(Nil)) -> next_pair(b, end, n, key, sep, skip_sp)
 		}
 		None -> None
 	}
@@ -198,8 +202,12 @@ fn verify_session(req http::Request, t Tables) Option(User) {
 		cookie_get(raw, <<'session'>>),
 		fn(token) option::then(split_token(token), fn(parts) match parts {
 			(user, sig_bytes) -> match binary::parse_int(sig_bytes, binary::Hex) {
-				Ok(sig) if sig == sign(user) -> find_by_name(t, user)
-				_ -> None
+				Ok(sig) -> if sig == sign(user) {
+					find_by_name(t, user)
+				} else {
+					None
+				}
+				Err(Nil) -> None
 			}
 		}),
 	))
@@ -278,9 +286,13 @@ fn route(req http::Request, t Tables) http::Response {
 			_ -> match binary::slice_bytes(path, 0, USERS_PREFIX_LEN) {
 				Ok(
 					prefix,
-				) if prefix == USERS_PREFIX && binary::byte_size(path) > USERS_PREFIX_LEN ->
+				) -> if prefix == USERS_PREFIX && binary::byte_size(path) > USERS_PREFIX_LEN {
 					handle_user_by_id(path, t)
-				_ -> json(404, '{"error":"not found"}')
+				} else {
+					json(404, '{"error":"not found"}')
+				}
+				// The path is shorter than the prefix.
+				Err(Nil) -> json(404, '{"error":"not found"}')
 			}
 		}
 		http::Post -> match path {
@@ -288,7 +300,8 @@ fn route(req http::Request, t Tables) http::Response {
 			<<'/logout'>> -> handle_logout()
 			_ -> json(404, '{"error":"not found"}')
 		}
-		_ -> json(405, '{"error":"method not allowed"}')
+		http::Put | http::Delete | http::Patch | http::Head | http::Options | http::Other(_) ->
+			json(405, '{"error":"method not allowed"}')
 	}
 }
 

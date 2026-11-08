@@ -331,7 +331,8 @@ pub fn main() {
 	println('')
 	println('== consumed threads to the body ==')
 	framed = <<'HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello-and-then-some'>>
-	match h1::parse_response(framed, 0) {
+	parsed = h1::parse_response(framed, 0)
+	match parsed {
 		h1::ResponseDone(_, _, _, _, _, consumed) -> {
 			// NOT an argued-unreachable arm. `5` is this case's advertised
 			// Content-Length, so a `consumed` that does not thread to the body
@@ -343,7 +344,7 @@ pub fn main() {
 			}
 			println('body starts at ${consumed}: ${body}')
 		}
-		other -> println('unexpected: ${other}')
+		h1::ResponseNeedMore | h1::ResponseBad(_) -> println('unexpected: ${parsed}')
 	}
 
 	println('')

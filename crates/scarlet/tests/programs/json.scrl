@@ -100,17 +100,19 @@ fn nickname(src String) Outcome(field::Field(String)) {
 // it, present replaces it. Nothing here can wipe the held value by accident,
 // because `update` is handed the value it must preserve.
 fn after(src String) String {
-	match nickname(src) {
+	outcome = nickname(src)
+	match outcome {
 		Parsed(f) -> '${field::update(f, held())}'
-		other -> show(other)
+		NotParsed(_) | NotDecoded(_) -> show(outcome)
 	}
 }
 
 // The states are distinguishable in their own right, not only through update.
 fn state(src String) String {
-	match nickname(src) {
+	outcome = nickname(src)
+	match outcome {
 		Parsed(f) -> field::fold(f, fn() 'absent', fn() 'null', fn(v) 'present(${v})')
-		other -> show(other)
+		NotParsed(_) | NotDecoded(_) -> show(outcome)
 	}
 }
 

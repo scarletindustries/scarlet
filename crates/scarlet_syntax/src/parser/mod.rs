@@ -1662,7 +1662,7 @@ impl Parser {
                         name: label.clone(),
                     }
                 } else {
-                    self.parse_pattern_range()?
+                    self.parse_pattern()?
                 };
                 args.push(ast::PatternArg::Labeled {
                     label,
@@ -1670,7 +1670,7 @@ impl Parser {
                     punned,
                 });
             } else {
-                let pattern = self.parse_pattern_range()?;
+                let pattern = self.parse_pattern()?;
                 args.push(ast::PatternArg::Positional(pattern));
             }
 

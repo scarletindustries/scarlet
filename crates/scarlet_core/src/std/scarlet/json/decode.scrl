@@ -289,7 +289,7 @@ pub fn map2(d1 Decoder(a), d2 Decoder(b), f fn(a, b) c) Decoder(c) {
 		},
 		resume: fn() match (r1(), r2()) {
 			(Resume(a), Resume(b)) -> Resume(f(a, b))
-			_ -> Halt
+			(Halt, _) | (Resume(_), Halt) -> Halt
 		},
 	)
 }
@@ -333,9 +333,18 @@ pub fn field(name String, inner Decoder(a)) Decoder(a) {
 fn member(doc json::Doc, name String) Result(Option(json::Doc), Array(Failure)) {
 	match json::field(doc, name) {
 		Some(child) -> Ok(Some(child))
-		None -> match json::kind(doc) {
-			json::ObjectKind -> Ok(None)
-			k -> Err([Failure([Key(name)], 'a member named "${name}"', FoundKind(k))])
+		None -> {
+			kind = json::kind(doc)
+			match kind {
+				json::ObjectKind -> Ok(None)
+				json::NullKind
+				| json::BoolKind
+				| json::IntKind
+				| json::FloatKind
+				| json::StringKind
+				| json::ArrayKind ->
+					Err([Failure([Key(name)], 'a member named "${name}"', FoundKind(kind))])
+			}
 		}
 	}
 }
@@ -366,7 +375,12 @@ pub fn list(inner Decoder(a)) Decoder(Array(a)) {
 	Decoder(
 		step: fn(doc) match json::kind(doc) {
 			json::ArrayKind -> collect_list(step, json::elements(doc), 0, [], [])
-			_ -> Err(one_failure('an array', doc))
+			json::NullKind
+			| json::BoolKind
+			| json::IntKind
+			| json::FloatKind
+			| json::StringKind
+			| json::ObjectKind -> Err(one_failure('an array', doc))
 		},
 		resume: fn() Resume([]),
 	)
@@ -397,7 +411,12 @@ pub fn dict(inner Decoder(a)) Decoder(Array((String, a))) {
 	Decoder(
 		step: fn(doc) match json::kind(doc) {
 			json::ObjectKind -> collect_dict(step, json::entries(doc), [], [])
-			_ -> Err(one_failure('an object', doc))
+			json::NullKind
+			| json::BoolKind
+			| json::IntKind
+			| json::FloatKind
+			| json::StringKind
+			| json::ArrayKind -> Err(one_failure('an object', doc))
 		},
 		resume: fn() Resume([]),
 	)

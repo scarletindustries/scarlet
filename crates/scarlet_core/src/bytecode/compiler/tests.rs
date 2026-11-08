@@ -480,7 +480,7 @@ mod qualified_ctor_pattern_occurrences {
             x = match io::read_text(\"nope\") {\n\
             \x20 Ok(s) -> s\n\
             \x20 Err(io::NotFound(p)) -> p\n\
-            \x20 Err(_) -> \"other\"\n\
+            \x20 Err(io::PermissionDenied(_) | io::AlreadyExists(_) | io::NotADirectory(_) | io::IsADirectory(_) | io::ReadOnlyFilesystem(_) | io::FilesystemLoop(_) | io::InvalidData(_) | io::StorageFull | io::QuotaExceeded | io::FileTooLarge(_) | io::UnalignedBinary | io::Errno(_)) -> \"other\"\n\
             }\n\
             println(x)\n";
         let c = collect(src);

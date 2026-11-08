@@ -277,7 +277,7 @@ fn file_write_unaligned_binary_errors() {
 pub fn main() {
 	match io::write_file('__PATH__', <<1:4>>) {
 		Err(io::UnalignedBinary) -> println('rejected')
-		Err(_) -> println('wrong-error')
+		Err(io::NotFound(_) | io::PermissionDenied(_) | io::AlreadyExists(_) | io::NotADirectory(_) | io::IsADirectory(_) | io::ReadOnlyFilesystem(_) | io::FilesystemLoop(_) | io::InvalidData(_) | io::StorageFull | io::QuotaExceeded | io::FileTooLarge(_) | io::Errno(_)) -> println('wrong-error')
 		Ok(Nil) -> println('wrote')
 	}
 }
@@ -310,7 +310,7 @@ pub fn main() {
 	match io::read_text('__PATH__') {
 		Ok(_) -> println('read-ok')
 		Err(io::NotFound(p)) -> println('missing: ${p}')
-		Err(_) -> println('wrong-error')
+		Err(io::PermissionDenied(_) | io::AlreadyExists(_) | io::NotADirectory(_) | io::IsADirectory(_) | io::ReadOnlyFilesystem(_) | io::FilesystemLoop(_) | io::InvalidData(_) | io::StorageFull | io::QuotaExceeded | io::FileTooLarge(_) | io::UnalignedBinary | io::Errno(_)) -> println('wrong-error')
 	}
 }
 "#
@@ -348,7 +348,7 @@ import scarlet/net/error
 pub fn main() {
 	match net::connect('127.0.0.1', __PORT__) {
 		Err(error::ConnectionRefused) -> println('refused')
-		Err(_) -> println('other-error')
+		Err(error::TimedOut | error::ConnectionReset | error::ConnectionAborted | error::NotConnected | error::BrokenPipe | error::AddrInUse | error::AddrNotAvailable | error::NetworkDown | error::NetworkUnreachable | error::HostUnreachable | error::PermissionDenied | error::UnexpectedEof | error::MessageTooLarge(_) | error::UnalignedBinary | error::InvalidPort | error::Errno(_)) -> println('other-error')
 		Ok(_) -> println('connected')
 	}
 }
@@ -1188,9 +1188,11 @@ pub fn main() {{
 				outcome = net::connect_addr_within(addr, {CONNECT_DEADLINE_MS})
 				ms = time::since_ms(time::monotonic(), started)
 				match outcome {{
-					Err(error::TimedOut) -> println('timed-out ${{ms}}')
 					Ok(_) -> println('connected ${{ms}}')
-					Err(e) -> println('other-error: ${{string::inspect(e)}}')
+					Err(e) -> match e {{
+						error::TimedOut -> println('timed-out ${{ms}}')
+						error::ConnectionRefused | error::ConnectionReset | error::ConnectionAborted | error::NotConnected | error::BrokenPipe | error::AddrInUse | error::AddrNotAvailable | error::NetworkDown | error::NetworkUnreachable | error::HostUnreachable | error::PermissionDenied | error::UnexpectedEof | error::MessageTooLarge(_) | error::UnalignedBinary | error::InvalidPort | error::Errno(_) -> println('other-error: ${{string::inspect(e)}}')
+					}}
 				}}
 			}}
 			Err(Nil) -> println('bad address')
@@ -1254,9 +1256,11 @@ pub fn main() {{
 	outcome = net::connect_within('127.0.0.1', {port}, {CONNECT_DEADLINE_MS})
 	ms = time::since_ms(time::monotonic(), started)
 	match outcome {{
-		Err(error::TimedOut) -> println('timed-out ${{ms}}')
 		Ok(_) -> println('connected ${{ms}}')
-		Err(e) -> println('other-error: ${{string::inspect(e)}}')
+		Err(e) -> match e {{
+			error::TimedOut -> println('timed-out ${{ms}}')
+			error::ConnectionRefused | error::ConnectionReset | error::ConnectionAborted | error::NotConnected | error::BrokenPipe | error::AddrInUse | error::AddrNotAvailable | error::NetworkDown | error::NetworkUnreachable | error::HostUnreachable | error::PermissionDenied | error::UnexpectedEof | error::MessageTooLarge(_) | error::UnalignedBinary | error::InvalidPort | error::Errno(_) -> println('other-error: ${{string::inspect(e)}}')
+		}}
 	}}
 }}
 "#
@@ -1316,9 +1320,11 @@ import scarlet/string
 
 pub fn main() {
 	match net::resolve_within('localhost', 0) {
-		Err(error::TimedOut) -> println('timed-out')
 		Ok(_) -> println('resolved')
-		Err(e) -> println('other-error: ${string::inspect(e)}')
+		Err(e) -> match e {
+			error::TimedOut -> println('timed-out')
+			error::ConnectionRefused | error::ConnectionReset | error::ConnectionAborted | error::NotConnected | error::BrokenPipe | error::AddrInUse | error::AddrNotAvailable | error::NetworkDown | error::NetworkUnreachable | error::HostUnreachable | error::PermissionDenied | error::UnexpectedEof | error::MessageTooLarge(_) | error::UnalignedBinary | error::InvalidPort | error::Errno(_) -> println('other-error: ${string::inspect(e)}')
+		}
 	}
 	match net::resolve_within('localhost', 60000) {
 		Ok(_) -> println('control-resolved')
@@ -1377,9 +1383,11 @@ fn burn(n Int) Nil {
 pub fn main() {
 	_ = process::spawn(fn() { burn(400000) })
 	match net::resolve_within('localhost', 0) {
-		Err(error::TimedOut) -> println('timed-out')
 		Ok(_) -> println('resolved')
-		Err(e) -> println('other-error: ${string::inspect(e)}')
+		Err(e) -> match e {
+			error::TimedOut -> println('timed-out')
+			error::ConnectionRefused | error::ConnectionReset | error::ConnectionAborted | error::NotConnected | error::BrokenPipe | error::AddrInUse | error::AddrNotAvailable | error::NetworkDown | error::NetworkUnreachable | error::HostUnreachable | error::PermissionDenied | error::UnexpectedEof | error::MessageTooLarge(_) | error::UnalignedBinary | error::InvalidPort | error::Errno(_) -> println('other-error: ${string::inspect(e)}')
+		}
 	}
 	match net::resolve_within('127.0.0.1', 0) {
 		Ok(_) -> println('literal-ok')

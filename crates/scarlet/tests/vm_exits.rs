@@ -55,8 +55,9 @@ pub fn main() {
 	_ = process::monitor(worker, downs, fn(d) d)
 	match process::receive(downs).reason {
 		process::Crashed(process::SliceOutOfBounds(from, to, length)) -> println('crashed: slice ${from}..${to} of ${length}')
-		process::Crashed(_) -> println('crashed some other way')
-		_ -> println('did not crash')
+		process::Crashed(process::IndexOutOfBounds(..) | process::ForeignReceive | process::TypeMismatch(..) | process::Supervision(_)) ->
+			println('crashed some other way')
+		process::Normal | process::NoProcess | process::Killed -> println('did not crash')
 	}
 	println('spawner still running: ${third(xs)}')
 }
@@ -184,7 +185,7 @@ pub fn main() {
 	_ = process::monitor(middle, downs, fn(d) d)
 	match process::receive(downs).reason {
 		process::Killed -> println('middle was killed by its child')
-		_ -> println('unexpected reason')
+		process::Normal | process::NoProcess | process::Crashed(_) -> println('unexpected reason')
 	}
 	println('main survived')
 }

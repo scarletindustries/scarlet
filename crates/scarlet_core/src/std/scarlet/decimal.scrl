@@ -138,35 +138,35 @@ pub fn compare(a Decimal, b Decimal) Order {
 pub fn eq(a Decimal, b Decimal) Bool {
 	match compare(a, b) {
 		Eq -> True
-		_ -> False
+		Lt | Gt -> False
 	}
 }
 
 pub fn lt(a Decimal, b Decimal) Bool {
 	match compare(a, b) {
 		Lt -> True
-		_ -> False
+		Eq | Gt -> False
 	}
 }
 
 pub fn lte(a Decimal, b Decimal) Bool {
 	match compare(a, b) {
 		Gt -> False
-		_ -> True
+		Lt | Eq -> True
 	}
 }
 
 pub fn gt(a Decimal, b Decimal) Bool {
 	match compare(a, b) {
 		Gt -> True
-		_ -> False
+		Lt | Eq -> False
 	}
 }
 
 pub fn gte(a Decimal, b Decimal) Bool {
 	match compare(a, b) {
 		Lt -> False
-		_ -> True
+		Eq | Gt -> True
 	}
 }
 

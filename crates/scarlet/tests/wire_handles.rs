@@ -240,7 +240,7 @@ fn a_handle_from_another_run_is_refused_with_other_run() {
          \t\t\tprintln(theirs == zeros)\n\
          \t\t\tprintln(mine == theirs)\n\
          \t\t}\n\
-         \t\tErr(_) -> println('some other refusal')\n\
+         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(_) | wire::Malformed(_) | wire::TrailingBytes(_)) -> println('some other refusal')\n\
          \t}\n\
          }\n",
         "True\nTrue\nFalse\n",

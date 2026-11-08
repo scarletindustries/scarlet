@@ -5062,8 +5062,6 @@ impl Compiler {
         }
 
         if !any_pattern_err {
-            self.check_must_name_variants(subject_ty, &m.arms);
-
             let depth = m
                 .arms
                 .iter()
@@ -5101,6 +5099,19 @@ impl Compiler {
                             .to_string(),
                         arm.pattern.span(),
                     );
+                } else if let Some(missing) = um.catch_all(&all_pats[..i], &all_pats[i]) {
+                    // A catch-all may only stand for values that cannot be
+                    // listed. Over named variants it would silently take any
+                    // variant added later, so the arms have to name them.
+                    self.error(
+                        format!(
+                            "This pattern stands for {}. Name {} instead, like `{} ->`",
+                            missing.join(", "),
+                            if missing.len() == 1 { "it" } else { "them" },
+                            missing.join(" | ")
+                        ),
+                        arm.pattern.span(),
+                    );
                 }
                 if arm.guard.is_none() {
                     um.push(&all_pats[i]);
@@ -5109,108 +5120,6 @@ impl Compiler {
         }
 
         result_ty
-    }
-
-    /// `@exhaustive` (T-148): when `subject_ty` names a type declared with
-    /// the attribute, a wildcard/bare-binder arm may not stand in for
-    /// variants it does not name — the whole point being that a reviewer
-    /// sees every state a match collapses, rather than a `_` a later variant
-    /// silently falls into.
-    ///
-    /// Scoped to the match's own subject type only: a wildcard nested inside
-    /// a constructor's field pattern is unaffected. Every site T-148 cites
-    /// (`Field`, `Parsed`, `Framing`, `ChunkBody`, `IoError`, `NetError`)
-    /// matches its type directly, so the narrower check is the one this
-    /// ticket needs; a column-general version would have to thread the flag
-    /// through `Type`/`RcType` in `scarlet_types::exhaustiveness` instead of
-    /// reading it once here.
-    fn check_must_name_variants(&mut self, subject_ty: Ty, arms: &[ast::MatchArm]) {
-        let r = self.engine.find(subject_ty);
-        let TypeNode::Con { id, .. } = self.engine.node(r) else {
-            return;
-        };
-        let Some(info) = self.env.lookup_type_info_by_id(id) else {
-            return;
-        };
-        if !info.must_name_variants() {
-            return;
-        }
-        // `must_name_variants() == true` only for `TypeBody::Custom`, which
-        // always carries variants — but fall through rather than assume it.
-        let Some(variants) = info.variants() else {
-            return;
-        };
-        let variants = self.engine.variants_of(variants).to_vec();
-
-        let mut seen = vec![false; variants.len()];
-        let mut wildcard_spans: Vec<Span> = Vec::new();
-        for arm in arms {
-            // A guard may be false at runtime, so a guarded arm names
-            // nothing here — the same rule the exhaustiveness matrix uses
-            // for `unguarded` above.
-            if arm.guard.is_some() {
-                continue;
-            }
-            self.collect_must_name_coverage(&arm.pattern, &mut seen, &mut wildcard_spans);
-        }
-        if wildcard_spans.is_empty() {
-            return;
-        }
-        let missing: Vec<&str> = variants
-            .iter()
-            .zip(&seen)
-            .filter(|&(_, &covered)| !covered)
-            .map(|(v, _)| self.engine.str(v.name))
-            .collect();
-        if missing.is_empty() {
-            return;
-        }
-        let type_name = self.engine.str(info.name).to_string();
-        let message = format!(
-            "'{type_name}' is @exhaustive; a wildcard arm may not stand in for its remaining \
-             variant(s): {}",
-            missing.join(", ")
-        );
-        for span in wildcard_spans {
-            self.error(message.clone(), span);
-        }
-    }
-
-    /// Walk one arm's top-level pattern for [`Self::check_must_name_variants`]:
-    /// mark each constructor it names in `seen`, and record a span for each
-    /// wildcard/bare-binder found. `type_pattern` has already confirmed every
-    /// constructor here belongs to the subject type, so `variant_index` (the
-    /// same resolver the exhaustiveness matrix lowers patterns through)
-    /// cannot land on a foreign type's variant.
-    fn collect_must_name_coverage(
-        &self,
-        pattern: &ast::Pattern,
-        seen: &mut [bool],
-        wildcard_spans: &mut Vec<Span>,
-    ) {
-        match pattern {
-            ast::Pattern::Var { .. } => wildcard_spans.push(pattern.span()),
-            ast::Pattern::Constructor {
-                qualifier, name, ..
-            } => {
-                let qualifier = qualifier.as_ref().map(|q| q.name.as_str());
-                if let Some(idx) = self.variant_index(qualifier, &name.name)
-                    && idx < seen.len()
-                {
-                    seen[idx] = true;
-                }
-            }
-            ast::Pattern::Or { first, rest, .. } => {
-                self.collect_must_name_coverage(first, seen, wildcard_spans);
-                for p in rest {
-                    self.collect_must_name_coverage(p, seen, wildcard_spans);
-                }
-            }
-            // Tuple/Array/Binary/Literal/Range: none can name a variant of a
-            // nominal type, so `type_pattern` has already rejected any of
-            // these as the top-level pattern of an arm over `subject_ty`.
-            _ => {}
-        }
     }
 
     /// Bind a pattern's freshly-typed names (populated by `type_pattern`):

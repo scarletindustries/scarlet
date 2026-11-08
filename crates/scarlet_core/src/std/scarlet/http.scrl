@@ -556,7 +556,8 @@ fn conn_headers(version h1::Version, close_after Bool, hs headers::Headers) head
 fn head_only_headers(method Method, hs headers::Headers, b ResponseBody) headers::Headers {
 	match (method, b) {
 		(Head, Fixed(len, _)) -> with_length(hs, len)
-		_ -> hs
+		(Head, Unsized(_)) -> hs
+		(Get | Post | Put | Delete | Patch | Options | Other(_), _) -> hs
 	}
 }
 
@@ -643,7 +644,7 @@ fn sanitize_trailers(b body::Body) body::Body {
 fn suppress_body(method Method, status Int) Bool {
 	match method {
 		Head -> True
-		_ -> status == 204 || status == 304
+		Get | Post | Put | Delete | Patch | Options | Other(_) -> status == 204 || status == 304
 	}
 }
 

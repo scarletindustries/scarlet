@@ -148,7 +148,7 @@ fn parse_auth_data(auth Binary) Result(AuthData, Error) {
 
 // ES256's key becomes SEC1 uncompressed (0x04, x, y). EdDSA's is used as is.
 fn cose_key(key cbor::Value) Result((Algorithm, Binary), Error) {
-	alg <- result::then(match option::then(cbor::map_get(key, 3), cbor_int) {
+	alg <- result::then(match option::then(cbor::map_get(key, 3), cbor::as_int) {
 		Some(a) -> Ok(a)
 		None -> Err(UnsupportedAlgorithm)
 	})
@@ -176,14 +176,6 @@ fn cose_bytes(key cbor::Value, label Int) Result(Binary, Error) {
 	match option::then(cbor::map_get(key, label), cbor::as_bytes) {
 		Some(b) -> Ok(b)
 		None -> Err(BadCredential)
-	}
-}
-
-fn cbor_int(v cbor::Value) Option(Int) {
-	match v {
-		cbor::Uint(n) -> Some(n)
-		cbor::Nint(n) -> Some(n)
-		_ -> None
 	}
 }
 

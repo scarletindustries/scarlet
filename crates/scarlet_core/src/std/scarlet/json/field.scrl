@@ -8,7 +8,6 @@
 // `Option` would merge the first two and wipe data. `Field` is opaque so it
 // can't be merged by accident: use `update`, or `fold` for one branch each.
 
-@exhaustive
 pub opaque type Field(a) {
 	Absent
 	Null

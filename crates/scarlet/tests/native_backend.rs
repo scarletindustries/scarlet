@@ -230,7 +230,7 @@ fn a_warmed_qualified_match_agrees_across_the_warmup_boundary() {
 fn hit(c color::Color) Int {
 	match c {
 		color::Green(_s) -> 1
-		_ -> 0
+		color::Red -> 0
 	}
 }
 
@@ -467,7 +467,7 @@ fn walk(i Int, n Int) Int {
 fn pair(_n Int) Bool {
 \tmatch (crypto::random_bytes(16), crypto::random_bytes(16)) {
 \t\t(Ok(a), Ok(b)) -> a != b
-\t\t(_, _) -> False
+\t\t(Err(Nil), _) | (Ok(_), Err(Nil)) -> False
 \t}
 }
 

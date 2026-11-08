@@ -77,9 +77,26 @@ fn past_close(server_addr address::SocketAddress) Nil {
 		Ok(sock) -> {
 			socket::write(sock, <<'0002ab'>>) or Nil
 			match socket::read_exact(sock, 1024) {
-				Err(error::UnexpectedEof) -> println('read_exact past close: UnexpectedEof')
 				Ok(_) -> println('read_exact: unexpectedly satisfied')
-				Err(e) -> println('read_exact: ${string::inspect(e)}')
+				Err(e) -> match e {
+					error::UnexpectedEof -> println('read_exact past close: UnexpectedEof')
+					error::TimedOut
+					| error::ConnectionRefused
+					| error::ConnectionReset
+					| error::ConnectionAborted
+					| error::NotConnected
+					| error::BrokenPipe
+					| error::AddrInUse
+					| error::AddrNotAvailable
+					| error::NetworkDown
+					| error::NetworkUnreachable
+					| error::HostUnreachable
+					| error::PermissionDenied
+					| error::MessageTooLarge(_)
+					| error::UnalignedBinary
+					| error::InvalidPort
+					| error::Errno(_) -> println('read_exact: ${string::inspect(e)}')
+				}
 			}
 			socket::close(sock) or Nil
 		}
@@ -93,18 +110,52 @@ fn timeouts(server_addr address::SocketAddress) Nil {
 		Ok(sock) -> {
 			deadline = time::add_ms(time::monotonic(), 50)
 			match socket::read_until(sock, 16, deadline) {
-				Err(error::TimedOut) -> println('read_until: deadline passed')
 				Ok(_) -> println('read_until: unexpected data')
-				Err(e) -> println('read_until: ${string::inspect(e)}')
+				Err(e) -> match e {
+					error::TimedOut -> println('read_until: deadline passed')
+					error::ConnectionRefused
+					| error::ConnectionReset
+					| error::ConnectionAborted
+					| error::NotConnected
+					| error::BrokenPipe
+					| error::AddrInUse
+					| error::AddrNotAvailable
+					| error::NetworkDown
+					| error::NetworkUnreachable
+					| error::HostUnreachable
+					| error::PermissionDenied
+					| error::UnexpectedEof
+					| error::MessageTooLarge(_)
+					| error::UnalignedBinary
+					| error::InvalidPort
+					| error::Errno(_) -> println('read_until: ${string::inspect(e)}')
+				}
 			}
 			start = time::monotonic()
 			match socket::read_within(sock, 16, 50) {
-				Err(error::TimedOut) -> {
-					elapsed = time::since_ms(time::monotonic(), start)
-					println('read_within: waited out the 50ms: ${elapsed >= 50}')
-				}
 				Ok(_) -> println('read_within: unexpected data')
-				Err(e) -> println('read_within: ${string::inspect(e)}')
+				Err(e) -> match e {
+					error::TimedOut -> {
+						elapsed = time::since_ms(time::monotonic(), start)
+						println('read_within: waited out the 50ms: ${elapsed >= 50}')
+					}
+					error::ConnectionRefused
+					| error::ConnectionReset
+					| error::ConnectionAborted
+					| error::NotConnected
+					| error::BrokenPipe
+					| error::AddrInUse
+					| error::AddrNotAvailable
+					| error::NetworkDown
+					| error::NetworkUnreachable
+					| error::HostUnreachable
+					| error::PermissionDenied
+					| error::UnexpectedEof
+					| error::MessageTooLarge(_)
+					| error::UnalignedBinary
+					| error::InvalidPort
+					| error::Errno(_) -> println('read_within: ${string::inspect(e)}')
+				}
 			}
 			socket::close(sock) or Nil
 		}
@@ -139,8 +190,25 @@ fn run() Result(Nil, String) {
 
 	match net::connect('127.0.0.1', 70000) {
 		Ok(_) -> println('connected on a port that cannot exist')
-		Err(error::InvalidPort) -> println('connect to port 70000: InvalidPort')
-		Err(e) -> println('connect failed: ${string::inspect(e)}')
+		Err(e) -> match e {
+			error::InvalidPort -> println('connect to port 70000: InvalidPort')
+			error::TimedOut
+			| error::ConnectionRefused
+			| error::ConnectionReset
+			| error::ConnectionAborted
+			| error::NotConnected
+			| error::BrokenPipe
+			| error::AddrInUse
+			| error::AddrNotAvailable
+			| error::NetworkDown
+			| error::NetworkUnreachable
+			| error::HostUnreachable
+			| error::PermissionDenied
+			| error::UnexpectedEof
+			| error::MessageTooLarge(_)
+			| error::UnalignedBinary
+			| error::Errno(_) -> println('connect failed: ${string::inspect(e)}')
+		}
 	}
 
 	// Port 0 lets the kernel pick a free port.

@@ -708,7 +708,7 @@ fn stdlib_http_builtins() {
          \t\t\th1::Chunked -> 0 - 2\n\
          \t\t\th1::Invalid(s) -> s\n\
          \t\t}\n\
-         \t\t_ -> 0 - 1\n\
+         \t\th1::NeedMore | h1::Bad(_) -> 0 - 1\n\
          \t}\n\
          \tprintln(r)\n\
          }\n",
@@ -786,7 +786,7 @@ fn native_and_al_token_matching_agree() {
              \t\t\th1::ConnKeepAlive -> False\n\
              \t\t\th1::ConnNeither -> False\n\
              \t\t}}\n\
-             \t\t_ -> False\n\
+             \t\th1::NeedMore | h1::Bad(_) -> False\n\
              \t}}\n\
              \tal = headers::contains_token([headers::Header(name: name, value: value)], name, binary::from_string('close'))\n\
              \tprintln(native)\n\

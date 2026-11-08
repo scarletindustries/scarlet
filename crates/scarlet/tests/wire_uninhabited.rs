@@ -64,7 +64,7 @@ fn an_empty_array_of_a_bodiless_type_round_trips_and_forged_counts_are_malformed
          \tmatch r {\n\
          \t\tOk(back) -> println(back == xs)\n\
          \t\tErr(wire::Malformed(at, what)) -> println('${at} ${what}')\n\
-         \t\tErr(_) -> println('some other refusal')\n\
+         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(_) | wire::TrailingBytes(_) | wire::OtherRun(_)) -> println('some other refusal')\n\
          \t}\n\
          }\n\
          pub fn main() {\n\
@@ -98,7 +98,7 @@ fn none_of_a_bodiless_type_round_trips_and_a_forged_some_is_malformed() {
          \tmatch r {\n\
          \t\tOk(back) -> println(back == n)\n\
          \t\tErr(wire::Malformed(at, what)) -> println('${at} ${what}')\n\
-         \t\tErr(_) -> println('some other refusal')\n\
+         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(_) | wire::TrailingBytes(_) | wire::OtherRun(_)) -> println('some other refusal')\n\
          \t}\n\
          }\n\
          pub fn main() {\n\
@@ -133,7 +133,7 @@ fn decode_at_a_bodiless_type_is_malformed_rather_than_a_value_or_a_panic() {
          \tmatch read(<<'SW', 3, 255, 196, 235, 248, 135, 151, 201, 245>>) {\n\
          \t\tOk(_) -> println('a value of a type that has none')\n\
          \t\tErr(wire::Malformed(at, what)) -> println('${at} ${what}')\n\
-         \t\tErr(_) -> println('some other refusal')\n\
+         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(_) | wire::TrailingBytes(_) | wire::OtherRun(_)) -> println('some other refusal')\n\
          \t}\n\
          }\n",
         "11 no value of this type can exist\n",

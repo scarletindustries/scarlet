@@ -1226,7 +1226,7 @@ fn files_read_and_write_and_fail_with_their_error() {
          \t\tErr(io::NotADirectory(p)) -> 'not a directory ${p}'\n\
          \t\tErr(io::InvalidData(p)) -> 'not text ${p}'\n\
          \t\tErr(io::UnalignedBinary) -> 'not whole bytes'\n\
-         \t\tErr(e) -> 'another error ${e}'\n\
+         \t\tErr(io::PermissionDenied(_) | io::AlreadyExists(_) | io::ReadOnlyFilesystem(_) | io::FilesystemLoop(_) | io::StorageFull | io::QuotaExceeded | io::FileTooLarge(_) | io::Errno(_)) -> 'another error'\n\
          \t}\n\
          }\n\
          pub fn main() {\n\

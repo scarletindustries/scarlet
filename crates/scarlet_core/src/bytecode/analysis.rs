@@ -830,22 +830,12 @@ impl Compiler {
             },
         ) = (&td.body, pt)
         else {
-            // Aliases and externals have no variants to collapse, so
-            // '@exhaustive' on one would silently do nothing.
-            if let Some(a) = td.attributes.iter().find(|a| a.name.name == "exhaustive") {
-                self.error(
-                    "'@exhaustive' requires a type with variants, not an alias or external type"
-                        .to_string(),
-                    a.span,
-                );
-            }
             // Aliases and externals have no constructors; just export the type info.
             let ti = export_id.and_then(|id| self.env.lookup_type_info_by_id(id));
             export_type(iface.as_deref_mut(), &td.identifier.name, is_public, ti);
             return;
         };
         let ctors_public = is_public && !*opaque;
-        let must_name_variants = td.attributes.iter().any(|a| a.name.name == "exhaustive");
 
         let type_name = &td.identifier.name;
         let m = self.current_module_slice();
@@ -958,7 +948,6 @@ impl Compiler {
             TypeBody::Custom {
                 variants,
                 ctors_public,
-                must_name_variants,
             },
         );
 
@@ -993,24 +982,6 @@ impl Compiler {
                         // decide whether '@vm' is legal on it.
                         AttrTarget::Type => {
                             self.error("'@vm' may only be used on functions".to_string(), a.span);
-                        }
-                    }
-                }
-                // T-148: forbids a wildcard/bare-binder arm on a match over
-                // this type, so a variant can never be silently merged with
-                // another. Not stdlib-only: the class it guards against is
-                // general, not a property of the embedded modules.
-                "exhaustive" => {
-                    if !a.args().is_empty() {
-                        self.error("'@exhaustive' takes no arguments".to_string(), a.span);
-                    }
-                    match on {
-                        AttrTarget::Type => {}
-                        AttrTarget::Fn => {
-                            self.error(
-                                "'@exhaustive' may only be used on types".to_string(),
-                                a.span,
-                            );
                         }
                     }
                 }

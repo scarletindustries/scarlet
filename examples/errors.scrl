@@ -101,7 +101,20 @@ pub fn main() {
 	// io errors are typed enums: NotFound carries the path it could not read.
 	match io::read_text('no-such-file.txt') {
 		Ok(contents) -> println('read ${string::length(contents)} chars')
-		Err(io::NotFound(path)) -> println('io        no such file: ${path}')
-		Err(other) -> println('io        ${string::inspect(other)}')
+		Err(e) -> match e {
+			io::NotFound(path) -> println('io        no such file: ${path}')
+			io::PermissionDenied(path) -> println('io        not allowed to read: ${path}')
+			io::AlreadyExists(_)
+			| io::NotADirectory(_)
+			| io::IsADirectory(_)
+			| io::ReadOnlyFilesystem(_)
+			| io::FilesystemLoop(_)
+			| io::InvalidData(_)
+			| io::StorageFull
+			| io::QuotaExceeded
+			| io::FileTooLarge(_)
+			| io::UnalignedBinary
+			| io::Errno(_) -> println('io        ${string::inspect(e)}')
+		}
 	}
 }

@@ -133,12 +133,6 @@ pub enum TypeBody {
         /// precompiled stdlib blob so an importer reads the same answer the
         /// declaring module computed.
         ctors_public: bool,
-        /// `@exhaustive` was declared on this type: a match on it may not use
-        /// a wildcard/bare-binder arm to stand in for variants it does not
-        /// name (T-148). Same reasons as `ctors_public` for living here
-        /// rather than the head: only a body with variants can be collapsed,
-        /// and a precompiled stdlib type must answer the same as its source.
-        must_name_variants: bool,
     },
     /// `type Name(params) = Target`
     Alias { target: Ty },
@@ -187,19 +181,6 @@ impl TypeInfo {
             TypeBody::Custom { ctors_public, .. } => Some(ctors_public),
             _ => None,
         }
-    }
-
-    /// Whether `@exhaustive` was declared on this type (T-148). `false`,
-    /// never `None`, for anything without variants to name — an alias or an
-    /// external type has nothing a wildcard arm could collapse.
-    pub fn must_name_variants(&self) -> bool {
-        matches!(
-            self.body,
-            TypeBody::Custom {
-                must_name_variants: true,
-                ..
-            }
-        )
     }
 }
 

@@ -131,7 +131,7 @@ fn rounding_name(m decimal::Rounding) String {
 	match m {
 		decimal::HalfUp -> 'half-up'
 		decimal::Down -> 'down'
-		_ -> 'other'
+		decimal::HalfEven | decimal::Up | decimal::Floor | decimal::Ceiling -> 'other'
 	}
 }
 
@@ -177,7 +177,7 @@ fn deep(t ((Int, Int), (Bool, String))) String {
 	match t {
 		((1, 2), (True, s)) -> 'exact ${s}'
 		((_, _), (False, _)) -> 'false'
-		(inner, _) -> 'other ${inner}'
+		(inner, (True, _)) -> 'other ${inner}'
 	}
 }
 

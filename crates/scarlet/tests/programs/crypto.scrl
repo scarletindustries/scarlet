@@ -296,7 +296,7 @@ fn random_rejects(n Int) Bool {
 fn two_differ() Bool {
 	match (crypto::random_bytes(16), crypto::random_bytes(16)) {
 		(Ok(a), Ok(b)) -> a != b
-		(_, _) -> False
+		(Err(Nil), _) | (Ok(_), Err(Nil)) -> False
 	}
 }
 

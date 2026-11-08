@@ -2769,10 +2769,10 @@ mod tests {
              \t\t\tprintln(binary::byte_size(h1::serialize_head(200, hs)))\n\
              \t\t\tmatch h1::chunk_decode(req, consumed, 100) {\n\
              \t\t\t\th1::ChunkedDone(body, _, _) -> println(body)\n\
-             \t\t\t\t_ -> println('no body')\n\
+             \t\t\t\th1::ChunkedNeedMore | h1::ChunkedBad(_) -> println('no body')\n\
              \t\t\t}\n\
              \t\t}\n\
-             \t\t_ -> println('no head')\n\
+             \t\th1::NeedMore | h1::Bad(_) -> println('no head')\n\
              \t}\n\
              }\n",
         );

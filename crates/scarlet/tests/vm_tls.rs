@@ -667,9 +667,11 @@ pub fn main() {{
         Ok(sock) -> match tls::handshake(sock, 'localhost') {{
             Ok(conn) -> {{
                 match tls::read_within(conn, 4096, 100) {{
-                    Err(tls::Transport(error::TimedOut)) -> println('timed-out: Transport(TimedOut)')
                     Ok(_) -> println('unexpected-data')
-                    Err(e) -> println('other-error: ${{string::inspect(e)}}')
+                    Err(e) -> match e {{
+                        tls::Transport(error::TimedOut) -> println('timed-out: Transport(TimedOut)')
+                        tls::Transport(error::ConnectionRefused | error::ConnectionReset | error::ConnectionAborted | error::NotConnected | error::BrokenPipe | error::AddrInUse | error::AddrNotAvailable | error::NetworkDown | error::NetworkUnreachable | error::HostUnreachable | error::PermissionDenied | error::UnexpectedEof | error::MessageTooLarge(_) | error::UnalignedBinary | error::InvalidPort | error::Errno(_)) | tls::CertificateUnknownIssuer | tls::CertificateExpired | tls::CertificateNotYetValid | tls::CertificateRevoked | tls::HostnameMismatch | tls::BadCertificate | tls::ProtocolError | tls::HandshakeFailed | tls::InvalidServerName -> println('other-error: ${{string::inspect(e)}}')
+                    }}
                 }}
                 tls::close(conn) or Nil
             }}
@@ -728,9 +730,11 @@ import scarlet/string
 pub fn main() {{
     match net::connect('127.0.0.1', {port}) {{
         Ok(sock) -> match tls::handshake_within(sock, 'localhost', 200) {{
-            Err(tls::Transport(error::TimedOut)) -> println('timed-out: Transport(TimedOut)')
             Ok(_) -> println('connected')
-            Err(e) -> println('other-error: ${{string::inspect(e)}}')
+            Err(e) -> match e {{
+                tls::Transport(error::TimedOut) -> println('timed-out: Transport(TimedOut)')
+                tls::Transport(error::ConnectionRefused | error::ConnectionReset | error::ConnectionAborted | error::NotConnected | error::BrokenPipe | error::AddrInUse | error::AddrNotAvailable | error::NetworkDown | error::NetworkUnreachable | error::HostUnreachable | error::PermissionDenied | error::UnexpectedEof | error::MessageTooLarge(_) | error::UnalignedBinary | error::InvalidPort | error::Errno(_)) | tls::CertificateUnknownIssuer | tls::CertificateExpired | tls::CertificateNotYetValid | tls::CertificateRevoked | tls::HostnameMismatch | tls::BadCertificate | tls::ProtocolError | tls::HandshakeFailed | tls::InvalidServerName -> println('other-error: ${{string::inspect(e)}}')
+            }}
         }}
         Err(e) -> println('connect failed: ${{string::inspect(e)}}')
     }}
@@ -845,9 +849,11 @@ pub fn main() {{
     outcome = tls::connect_within('127.0.0.1', {port}, {CONNECT_DEADLINE_MS})
     ms = time::since_ms(time::monotonic(), started)
     match outcome {{
-        Err(tls::Transport(error::TimedOut)) -> println('timed-out ${{ms}}')
         Ok(_) -> println('connected ${{ms}}')
-        Err(e) -> println('other-error: ${{string::inspect(e)}}')
+        Err(e) -> match e {{
+            tls::Transport(error::TimedOut) -> println('timed-out ${{ms}}')
+            tls::Transport(error::ConnectionRefused | error::ConnectionReset | error::ConnectionAborted | error::NotConnected | error::BrokenPipe | error::AddrInUse | error::AddrNotAvailable | error::NetworkDown | error::NetworkUnreachable | error::HostUnreachable | error::PermissionDenied | error::UnexpectedEof | error::MessageTooLarge(_) | error::UnalignedBinary | error::InvalidPort | error::Errno(_)) | tls::CertificateUnknownIssuer | tls::CertificateExpired | tls::CertificateNotYetValid | tls::CertificateRevoked | tls::HostnameMismatch | tls::BadCertificate | tls::ProtocolError | tls::HandshakeFailed | tls::InvalidServerName -> println('other-error: ${{string::inspect(e)}}')
+        }}
     }}
 }}
 "#
@@ -904,9 +910,11 @@ pub fn main() {{
     outcome = tls::connect_within('127.0.0.1', {port}, {CONNECT_DEADLINE_MS})
     ms = time::since_ms(time::monotonic(), started)
     match outcome {{
-        Err(tls::Transport(error::TimedOut)) -> println('timed-out ${{ms}}')
         Ok(_) -> println('connected ${{ms}}')
-        Err(e) -> println('other-error: ${{string::inspect(e)}}')
+        Err(e) -> match e {{
+            tls::Transport(error::TimedOut) -> println('timed-out ${{ms}}')
+            tls::Transport(error::ConnectionRefused | error::ConnectionReset | error::ConnectionAborted | error::NotConnected | error::BrokenPipe | error::AddrInUse | error::AddrNotAvailable | error::NetworkDown | error::NetworkUnreachable | error::HostUnreachable | error::PermissionDenied | error::UnexpectedEof | error::MessageTooLarge(_) | error::UnalignedBinary | error::InvalidPort | error::Errno(_)) | tls::CertificateUnknownIssuer | tls::CertificateExpired | tls::CertificateNotYetValid | tls::CertificateRevoked | tls::HostnameMismatch | tls::BadCertificate | tls::ProtocolError | tls::HandshakeFailed | tls::InvalidServerName -> println('other-error: ${{string::inspect(e)}}')
+        }}
     }}
 }}
 "#
@@ -1016,9 +1024,13 @@ pub fn main() {{
                     io = client::secure(conn)
                     req = client::Request(method: <<'GET'>>, url: u, headers: [], body: <<>>)
                     match client::send_until(io, req, 1024, time::deadline_in_ms(200)) {{
-                        Err(client::Tls(tls::Transport(error::TimedOut))) -> println('https-timeout: Tls(Transport(TimedOut))')
                         Ok(r) -> println('https-ok: ${{r.status}}')
-                        Err(e) -> println('other: ${{string::inspect(e)}}')
+                        Err(e) -> match e {{
+                            client::Tls(tls::Transport(error::TimedOut)) -> println('https-timeout: Tls(Transport(TimedOut))')
+                            client::Tls(tls::Transport(error::ConnectionRefused | error::ConnectionReset | error::ConnectionAborted | error::NotConnected | error::BrokenPipe | error::AddrInUse | error::AddrNotAvailable | error::NetworkDown | error::NetworkUnreachable | error::HostUnreachable | error::PermissionDenied | error::UnexpectedEof | error::MessageTooLarge(..) | error::UnalignedBinary | error::InvalidPort | error::Errno(..)))
+                            | client::Tls(tls::CertificateUnknownIssuer | tls::CertificateExpired | tls::CertificateNotYetValid | tls::CertificateRevoked | tls::HostnameMismatch | tls::BadCertificate | tls::ProtocolError | tls::HandshakeFailed | tls::InvalidServerName)
+                            | client::BadUrl(..) | client::BadRequestHeaders | client::Transport(..) | client::MalformedResponse(..) | client::BodyTooLarge(..) -> println('other: ${{string::inspect(e)}}')
+                        }}
                     }}
                     shut = io.close
                     shut() or Nil
@@ -1076,9 +1088,13 @@ pub fn main() {{
                     io = client::secure(conn)
                     req = client::Request(method: <<'GET'>>, url: u, headers: [], body: <<>>)
                     match client::send_until(io, req, 1024, time::deadline_in_ms(5000)) {{
-                        Err(client::Tls(tls::Transport(error::TimedOut))) -> println('https-timeout: Tls(Transport(TimedOut))')
                         Ok(r) -> println('https-ok: ${{r.status}}')
-                        Err(e) -> println('other: ${{string::inspect(e)}}')
+                        Err(e) -> match e {{
+                            client::Tls(tls::Transport(error::TimedOut)) -> println('https-timeout: Tls(Transport(TimedOut))')
+                            client::Tls(tls::Transport(error::ConnectionRefused | error::ConnectionReset | error::ConnectionAborted | error::NotConnected | error::BrokenPipe | error::AddrInUse | error::AddrNotAvailable | error::NetworkDown | error::NetworkUnreachable | error::HostUnreachable | error::PermissionDenied | error::UnexpectedEof | error::MessageTooLarge(..) | error::UnalignedBinary | error::InvalidPort | error::Errno(..)))
+                            | client::Tls(tls::CertificateUnknownIssuer | tls::CertificateExpired | tls::CertificateNotYetValid | tls::CertificateRevoked | tls::HostnameMismatch | tls::BadCertificate | tls::ProtocolError | tls::HandshakeFailed | tls::InvalidServerName)
+                            | client::BadUrl(..) | client::BadRequestHeaders | client::Transport(..) | client::MalformedResponse(..) | client::BodyTooLarge(..) -> println('other: ${{string::inspect(e)}}')
+                        }}
                     }}
                     shut = io.close
                     shut() or Nil

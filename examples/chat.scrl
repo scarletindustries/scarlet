@@ -213,7 +213,17 @@ fn route(req http::Request, chat process::Subject(RoomMsg)) http::Response {
 			Err(bad) -> bad
 		}
 		(http::Post, <<'/crash'>>) -> send(chat, Crash)
-		_ -> http::not_found()
+		(
+			http::Get
+			| http::Post
+			| http::Put
+			| http::Delete
+			| http::Patch
+			| http::Head
+			| http::Options
+			| http::Other(_),
+			_,
+		) -> http::not_found()
 	}
 }
 
@@ -242,8 +252,11 @@ fn live(chat process::Subject(RoomMsg), feed process::Subject(Feed)) body::Body 
 			process::send(chat, Join(process::self(), feed))
 			Ok(body::Chunk(RESTARTED, live(chat, feed)))
 		}
-		// The supervisor gave up, so the program is exiting.
-		Ok(RoomExit(_)) -> Ok(body::Done([]))
+		// Gone: the supervisor gave up, so the program is exiting. Restarting:
+		// the room is not back yet. Either way the stream ends, and a browser's
+		// EventSource reconnects on its own.
+		Ok(RoomExit(process::Exit(status: process::Restarting | process::Gone, ..))) ->
+			Ok(body::Done([]))
 		Err(Nil) -> Ok(body::Chunk(PING, live(chat, feed)))
 	}
 }

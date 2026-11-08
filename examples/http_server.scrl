@@ -55,7 +55,8 @@ fn route(req http::Request) http::Response {
 		(http::Get, <<'/hello'>>) -> hello(req)
 		(http::Post, <<'/echo'>>) -> echo(req)
 		(http::Get, _) | (http::Post, _) -> http::not_found()
-		_ -> respond(405, 'method not allowed\n')
+		(http::Put | http::Delete | http::Patch | http::Head | http::Options | http::Other(_), _) ->
+			respond(405, 'method not allowed\n')
 	}
 	http::with_header(response, NAME_SERVER, VAL_AL)
 }

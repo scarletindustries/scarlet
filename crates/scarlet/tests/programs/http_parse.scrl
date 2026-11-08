@@ -199,7 +199,8 @@ pub fn main() {
 			}
 			println('duplicate host: get returns first = ${first}')
 		}
-		_ -> println('duplicate host: parse failed')
+		h1::NeedMore -> println('duplicate host: parse needs more input')
+		h1::Bad(status) -> println('duplicate host: parse failed with ${status}')
 	}
 
 	// A NUL inside a field value is refused on the way in (400), as RFC 9110
@@ -211,7 +212,8 @@ pub fn main() {
 	match h1::parse_request(nul_req, 0) {
 		h1::Done(_, _, _, hdrs, _, _) ->
 			println('nul in value: headers::valid = ${headers::valid(hdrs)}')
-		_ -> println('nul in value: parse failed')
+		h1::NeedMore -> println('nul in value: parse needs more input')
+		h1::Bad(status) -> println('nul in value: parse failed with ${status}')
 	}
 
 	println('')
@@ -238,7 +240,8 @@ pub fn main() {
 			println('x-missing: ${missing}')
 			println('has x-custom: ${headers::has(hdrs, <<'X-CUSTOM'>>)}')
 		}
-		_ -> println('parse failed')
+		h1::NeedMore -> println('parse needs more input')
+		h1::Bad(status) -> println('parse failed with ${status}')
 	}
 
 	println('')
@@ -307,10 +310,12 @@ pub fn main() {
 			match h1::parse_request(pipelined, consumed1) {
 				h1::Done(_, target2, _, _, _, consumed2) ->
 					println('second: ${str(target2)} (consumed ${consumed2})')
-				_ -> println('second parse failed')
+				h1::NeedMore -> println('second parse needs more input')
+				h1::Bad(status) -> println('second parse failed with ${status}')
 			}
 		}
-		_ -> println('first parse failed')
+		h1::NeedMore -> println('first parse needs more input')
+		h1::Bad(status) -> println('first parse failed with ${status}')
 	}
 
 	println('')
@@ -404,7 +409,7 @@ pub fn main() {
 		h1::Done(_, target1, _, hdrs1, _, head_end) -> {
 			f = match h1::framing(hdrs1) {
 				h1::Chunked -> 'chunked'
-				_ -> 'other'
+				h1::NoBody | h1::Length(_) | h1::Invalid(_) -> 'other'
 			}
 			println('head: target=${str(target1)} framing=${f} consumed=${head_end}')
 			match h1::chunk_decode(chunked_req, head_end, 1048576) {
@@ -413,13 +418,16 @@ pub fn main() {
 					match h1::parse_request(chunked_req, body_end) {
 						h1::Done(_, target2, _, _, _, _) ->
 							println('next pipelined request: ${str(target2)}')
-						_ -> println('next request parse failed')
+						h1::NeedMore -> println('next request parse needs more input')
+						h1::Bad(status) -> println('next request parse failed with ${status}')
 					}
 				}
-				_ -> println('body decode failed')
+				h1::ChunkedNeedMore -> println('body decode needs more input')
+				h1::ChunkedBad(status) -> println('body decode failed with ${status}')
 			}
 		}
-		_ -> println('head parse failed')
+		h1::NeedMore -> println('head parse needs more input')
+		h1::Bad(status) -> println('head parse failed with ${status}')
 	}
 
 	println('')
@@ -438,7 +446,8 @@ pub fn main() {
 					flags,
 				)} want100=${h1::want_100_continue(flags)}',
 			)
-		_ -> println('${label}: parse failed')
+		h1::NeedMore -> println('${label}: parse needs more input')
+		h1::Bad(status) -> println('${label}: parse failed with ${status}')
 	}
 	show_close('http11 default', keep)
 	show_close('http11 close', close)
@@ -560,7 +569,8 @@ pub fn main() {
 				<<'OPTIONS'>> -> 'Options'
 				_ -> 'Other(${str(m)})'
 			}
-			_ -> 'parse failed'
+			h1::NeedMore -> 'parse needs more input'
+			h1::Bad(status) -> 'parse failed with ${status}'
 		}
 	})
 	println(list(shown))

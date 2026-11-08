@@ -46,7 +46,7 @@ fn parse_payload(payload Binary, flags Int) Result(Sample, String) {
 	match (binary::index_of(payload, <<'='>>, 0), binary::index_of(payload, <<' '>>, 0)) {
 		(Some(eq), Some(sp)) ->
 			result::replace_err(sample(payload, eq, sp, flags == GAUGE), 'malformed payload')
-		_ -> Err('payload is not name=value unit')
+		(None, _) | (Some(_), None) -> Err('payload is not name=value unit')
 	}
 }
 

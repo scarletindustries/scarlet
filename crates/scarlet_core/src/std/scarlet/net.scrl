@@ -91,9 +91,6 @@ const ACCEPTOR_BUDGET = process::OneForOne(restarts: 10, within_ms: 5000)
 @vm(net__give)
 fn give(sock socket::Socket, to process::Pid) Nil
 
-// The network errors are ones accept(2) reports for a connection that died in
-// the queue, not a dead listener, so they retry. An unmapped errno is usually
-// EMFILE, which dequeues nothing, so it waits 100ms rather than spin.
 fn accept_loop(server Server, connections process::Factory(Nil, socket::Socket)) Nil {
 	match accept(server) {
 		Ok(Some(sock)) -> {
@@ -101,16 +98,40 @@ fn accept_loop(server Server, connections process::Factory(Nil, socket::Socket))
 			accept_loop(server, connections)
 		}
 		Ok(None) -> Nil
-		Err(error::ConnectionAborted)
-		| Err(error::ConnectionReset)
-		| Err(error::NetworkDown)
-		| Err(error::NetworkUnreachable)
-		| Err(error::HostUnreachable) -> accept_loop(server, connections)
-		Err(error::Errno(_)) -> {
+		Err(e) -> accept_failed(e, server, connections)
+	}
+}
+
+// The network errors are ones accept(2) reports for a connection that died in
+// the queue, not a dead listener, so they retry. An unmapped errno is usually
+// EMFILE, which dequeues nothing, so it waits 100ms rather than spin. The rest
+// mean the listener itself is broken, so the loop stops.
+fn accept_failed(
+	e error::NetError,
+	server Server,
+	connections process::Factory(Nil, socket::Socket),
+) Nil {
+	match e {
+		error::ConnectionAborted
+		| error::ConnectionReset
+		| error::NetworkDown
+		| error::NetworkUnreachable
+		| error::HostUnreachable -> accept_loop(server, connections)
+		error::Errno(_) -> {
 			process::sleep(100)
 			accept_loop(server, connections)
 		}
-		Err(e) -> {
+		error::TimedOut
+		| error::ConnectionRefused
+		| error::NotConnected
+		| error::BrokenPipe
+		| error::AddrInUse
+		| error::AddrNotAvailable
+		| error::PermissionDenied
+		| error::UnexpectedEof
+		| error::MessageTooLarge(_)
+		| error::UnalignedBinary
+		| error::InvalidPort -> {
 			println('accept failed: ${string::inspect(e)}')
 			process::kill(process::self())
 		}

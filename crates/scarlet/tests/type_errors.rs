@@ -502,39 +502,53 @@ reject_case! {
     ),
 }
 
-// T-148: `@exhaustive` forbids a wildcard/bare-binder arm from standing in
-// for variants a match on that type does not name.
+// A catch-all may only stand for values that cannot be listed. Once a match
+// names some variants of a value, it names them all, so a variant added later
+// cannot fall silently into an arm written before it existed.
 reject_case! {
-    exhaustive_type_wildcard_arm_is_rejected: (
-        "@exhaustive\ntype Color {\n\tRed\n\tGreen\n\tBlue\n}\npub fn main() {\n\tprintln(match Red {\n\t\tRed -> 1\n\t\t_ -> 2\n\t})\n}\n",
-        "'Color' is @exhaustive; a wildcard arm may not stand in for its remaining variant(s): Green, Blue",
+    a_wildcard_may_not_stand_for_named_variants: (
+        "type Color {\n\tRed\n\tGreen\n\tBlue\n}\npub fn main() {\n\tprintln(match Red {\n\t\tRed -> 1\n\t\t_ -> 2\n\t})\n}\n",
+        "This pattern stands for Green, Blue. Name them instead, like `Green | Blue ->`",
     ),
-    /// A bare binder (`c -> ..`) is the same hole as `_`, not a different one.
-    exhaustive_type_bare_binder_arm_is_rejected: (
-        "@exhaustive\ntype Color {\n\tRed\n\tGreen\n\tBlue\n}\npub fn main() {\n\tprintln(match Red {\n\t\tRed -> 1\n\t\t_c -> 2\n\t})\n}\n",
-        "'Color' is @exhaustive; a wildcard arm may not stand in for its remaining variant(s): Green, Blue",
+    /// A bare name is the same hole as `_`, not a different one.
+    a_bare_name_may_not_stand_for_named_variants: (
+        "type Color {\n\tRed\n\tGreen\n\tBlue\n}\npub fn main() {\n\tprintln(match Red {\n\t\tRed -> 1\n\t\tc -> show(c)\n\t})\n}\nfn show(c Color) Int { 2 }\n",
+        "This pattern stands for Green, Blue",
     ),
-    /// An alias or an external type has no variants to collapse, so the
-    /// attribute would silently do nothing rather than guard anything.
-    exhaustive_attribute_on_alias_is_rejected: (
-        "@exhaustive\ntype Meters = Int\n",
-        "'@exhaustive' requires a type with variants, not an alias or external type",
+    /// A guarded arm still names its variant.
+    a_guarded_arm_still_names_its_variant: (
+        "pub fn main() {\n\tprintln(match Some(1) {\n\t\tSome(n) if n > 0 -> n\n\t\t_ -> 0\n\t})\n}\n",
+        "This pattern stands for None",
     ),
-    exhaustive_attribute_on_function_is_rejected: (
-        "@exhaustive\nfn f() Int { 1 }\n",
-        "'@exhaustive' may only be used on types",
+    /// Inside a tuple, the rule applies to each column the arms split.
+    a_wildcard_in_a_tuple_column_is_held_to_it_too: (
+        "pub fn main() {\n\tprintln(match (True, 1) {\n\t\t(True, n) -> n\n\t\t(_, _) -> 0\n\t})\n}\n",
+        "This pattern stands for False",
     ),
-    exhaustive_attribute_takes_no_arguments: (
-        "@exhaustive(oops)\ntype Color {\n\tRed\n\tGreen\n}\npub fn main() {\n\tprintln(match Red {\n\t\tRed -> 1\n\t\tGreen -> 2\n\t})\n}\n",
-        "'@exhaustive' takes no arguments",
-    ),
-    /// A wildcard that covers nothing left (every variant already named
-    /// before it) is not a T-148 violation — the ordinary "unreachable
-    /// pattern" check still catches it as dead code, same as on any other
-    /// type, and T-148's own check must not also fire and mask it.
-    exhaustive_type_wildcard_covering_nothing_is_unreachable_not_a_t148_error: (
-        "@exhaustive\ntype Color {\n\tRed\n\tGreen\n}\npub fn main() {\n\tprintln(match Red {\n\t\tRed -> 0\n\t\tGreen -> 1\n\t\t_ -> 2\n\t})\n}\n",
+    /// A wildcard that covers nothing left is dead code, reported as that.
+    a_wildcard_covering_nothing_is_unreachable: (
+        "type Color {\n\tRed\n\tGreen\n}\npub fn main() {\n\tprintln(match Red {\n\t\tRed -> 0\n\t\tGreen -> 1\n\t\t_ -> 2\n\t})\n}\n",
         "unreachable",
+    ),
+    /// `@exhaustive` is gone: the rule it opted into is now every match's.
+    the_exhaustive_attribute_is_unknown: (
+        "@exhaustive\ntype Color {\n\tRed\n\tGreen\n\tBlue\n}\n",
+        "Unknown attribute '@exhaustive'",
+    ),
+}
+
+ok_case! {
+    /// A wildcard over a whole value nobody split is "I don't care".
+    a_wildcard_over_an_unsplit_value_is_fine: (
+        "pub fn main() {\n\tprintln(match (Some(1), 2) {\n\t\t(Some(_), n) -> n\n\t\t(None, _) -> 0\n\t})\n}\n",
+    ),
+    /// Numbers, strings and binaries cannot be listed, so `_` stays.
+    a_wildcard_over_values_that_cannot_be_listed_is_fine: (
+        "pub fn main() {\n\tprintln(match 3 {\n\t\t1 -> 'one'\n\t\t_ -> 'many'\n\t})\n}\n",
+    ),
+    /// An or-pattern inside a constructor names its variants in place.
+    an_or_pattern_inside_a_constructor_names_them: (
+        "type Color {\n\tRed\n\tGreen\n\tBlue\n}\npub fn main() {\n\tprintln(match Some(Red) {\n\t\tSome(Red) -> 1\n\t\tSome(Green | Blue) -> 2\n\t\tNone -> 3\n\t})\n}\n",
     ),
 }
 

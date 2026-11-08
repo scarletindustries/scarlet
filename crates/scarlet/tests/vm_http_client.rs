@@ -62,9 +62,11 @@ pub fn main() {{
 				io = client::plain(sock)
 				req = client::Request(method: <<'GET'>>, url: u, headers: [], body: <<>>)
 				match client::send_until(io, req, 1024, time::deadline_in_ms({deadline_ms})) {{
-					Err(client::Transport(error::TimedOut)) -> println('http-timeout: Transport(TimedOut)')
 					Ok(r) -> println('http-ok: ${{r.status}}')
-					Err(e) -> println('other: ${{string::inspect(e)}}')
+					Err(e) -> match e {{
+						client::Transport(error::TimedOut) -> println('http-timeout: Transport(TimedOut)')
+						client::Transport(error::ConnectionRefused | error::ConnectionReset | error::ConnectionAborted | error::NotConnected | error::BrokenPipe | error::AddrInUse | error::AddrNotAvailable | error::NetworkDown | error::NetworkUnreachable | error::HostUnreachable | error::PermissionDenied | error::UnexpectedEof | error::MessageTooLarge(_) | error::UnalignedBinary | error::InvalidPort | error::Errno(_)) | client::BadUrl(_) | client::BadRequestHeaders | client::Tls(_) | client::MalformedResponse(_) | client::BodyTooLarge(_) -> println('other: ${{string::inspect(e)}}')
+					}}
 				}}
 				shut = io.close
 				shut() or Nil

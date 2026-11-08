@@ -119,15 +119,6 @@ pub struct Attribute {
     pub span: Span,
 }
 
-impl Attribute {
-    /// `args` is `pub(crate)` because only the parser builds one; a consumer
-    /// outside this crate (`@exhaustive`'s arity check, in `scarlet_core`)
-    /// only ever needs to read it back.
-    pub fn args(&self) -> &[Identifier] {
-        &self.args
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum TypeKind {
     NamedType(NamedType),

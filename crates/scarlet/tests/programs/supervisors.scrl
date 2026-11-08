@@ -159,10 +159,7 @@ fn scenarios() Nil {
 	check('and says so when it starts', take(log, 1, []) == ['start a'])
 	info = process::info(process::supervised(a))
 	check('info counts the restart', info.restarts == 1)
-	check('info names the policy', match info.kind {
-		process::Worker(process::Permanent) -> True
-		_ -> False
-	})
+	check('info names the policy', info.kind == process::Worker(process::Permanent))
 	check('info carries the current pid', info.pid == Some(a2))
 
 	// A transient worker that returns is finished.
@@ -220,16 +217,13 @@ fn scenarios() Nil {
 		'and the worker a child of the nested supervisor',
 		process::parent(process::supervised(g2)) == group.supervised,
 	)
-	check('the nested supervisor reports its strategy', match process::info(group.supervised).kind {
-		process::SupervisorOf(process::OneForAll(10, 60000)) -> True
-		_ -> False
-	})
+	check(
+		'the nested supervisor reports its strategy',
+		process::info(group.supervised).kind == process::SupervisorOf(process::OneForAll(10, 60000)),
+	)
 	check(
 		'a top-level supervisor is declared under a plain process',
-		match process::info(process::parent(app.supervised)).kind {
-			process::Process -> True
-			_ -> False
-		},
+		process::info(process::parent(app.supervised)).kind == process::Process,
 	)
 
 	// Rest-for-one: only the workers declared after the dead one move.
@@ -283,10 +277,10 @@ fn scenarios() Nil {
 	check('another key is another member', process::lookup_or_start(rooms, 'ops') != lobby)
 	check('an unknown key is nothing', process::lookup(rooms, 'nowhere') == None)
 	check('the factory counts its members', process::count(rooms.supervised) == 2)
-	check('and reports its kind', match process::info(rooms.supervised).kind {
-		process::FactoryOf(process::Restarted(10, 60000)) -> True
-		_ -> False
-	})
+	check(
+		'and reports its kind',
+		process::info(rooms.supervised).kind == process::FactoryOf(process::Restarted(10, 60000)),
+	)
 	lobby_pid = member_pid(lobby)
 	process::kill(lobby_pid)
 	check(
@@ -308,10 +302,10 @@ fn scenarios() Nil {
 	check('but are not in the key index', process::lookup(jobs, 'one') == None)
 	process::send(j1, Done)
 	check('one finishing leaves the other', await_count(jobs.supervised, 1, 200))
-	check('a supervisor value reports its own kind', match process::info(app.supervised).kind {
-		process::SupervisorOf(process::OneForOne(100, 60000)) -> True
-		_ -> False
-	})
+	check(
+		'a supervisor value reports its own kind',
+		process::info(app.supervised).kind == process::SupervisorOf(process::OneForOne(100, 60000)),
+	)
 	check(
 		'the application holds every subtree declared into it',
 		process::count(app.supervised) == 5,
@@ -341,11 +335,7 @@ fn scenarios() Nil {
 	first = process::receive(events)
 	check(
 		'a watch reports the exit',
-		first.supervised == place &&
-			match first.ended {
-				process::Exited(process::Killed) -> True
-				_ -> False
-			},
+		first.supervised == place && first.ended == process::Exited(process::Killed),
 	)
 	check('and that it was restarted on the spot', first.status == process::Running)
 	_ = take(log, 1, [])
@@ -367,19 +357,12 @@ fn scenarios() Nil {
 	last = process::receive(events)
 	check(
 		'a final exit reports Gone',
-		last.status == process::Gone &&
-			match last.ended {
-				process::Exited(process::Normal) -> True
-				_ -> False
-			},
+		last.status == process::Gone && last.ended == process::Exited(process::Normal),
 	)
 	check('watching a place that is gone reports so at once', {
 		_ = process::watch(process::supervised(v), events, fn(e) e)
-		match process::receive(events) {
-			process::Exit(ended: process::Exited(process::NoProcess), status: process::Gone, ..) ->
-				True
-			_ -> False
-		}
+		exit = process::receive(events)
+		exit.ended == process::Exited(process::NoProcess) && exit.status == process::Gone
 	})
 
 	// Watching a plain process is monitoring it: a subject it owns locates
@@ -391,16 +374,14 @@ fn scenarios() Nil {
 		process::receive(mine)
 	})
 	helper_place = process::supervised(process::receive(handoff))
-	check('a plain subject places its owner', match process::info(helper_place).kind {
-		process::Process -> True
-		_ -> False
-	})
+	check('a plain subject places its owner', process::info(helper_place).kind == process::Process)
 	_ = process::watch(helper_place, events, fn(e) e)
 	process::kill(helper)
-	check('a plain process reports its one exit', match process::receive(events) {
-		process::Exit(ended: process::Exited(process::Killed), status: process::Gone, ..) -> True
-		_ -> False
-	})
+	exit = process::receive(events)
+	check(
+		'a plain process reports its one exit',
+		exit.ended == process::Exited(process::Killed) && exit.status == process::Gone,
+	)
 
 	// An Ask shutdown is delivered ahead of a backlog.
 	pair = process::supervisor_in(app, process::OneForAll(restarts: 5, within_ms: 60000))

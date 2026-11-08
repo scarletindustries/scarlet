@@ -436,6 +436,59 @@ fn is_useful(m: &PatternMatrix, pats: &PatStack, types: &TypeStack) -> bool {
     }
 }
 
+/// The variants a wildcard in `pats` stands in for: a `_` (or bare name) in a
+/// column of a type with named variants, where the rows of `m` name some of
+/// them but not all. A wildcard over a whole value nobody split, or over a
+/// type whose values cannot be listed (numbers, strings, array lengths), is
+/// not one.
+fn catch_all(m: &PatternMatrix, pats: &PatStack, types: &TypeStack) -> Option<Vec<CtorInfo>> {
+    let (first_pat, rest_pats) = pats.split()?;
+    let (first_type, rest_types) = types.split()?;
+    let type_ctors = get_type_ctors(first_type);
+    match first_pat {
+        Pat::Wildcard => {
+            let seen = m.first_col_ctors();
+            let complete = is_complete(&seen, &type_ctors);
+            if complete {
+                // Every variant is named somewhere, so look inside each.
+                return type_ctors.ctors.iter().find_map(|ctor| {
+                    let new_pats = PatStack::prepend_n(Pat::Wildcard, ctor.arity, rest_pats);
+                    let new_types = TypeStack::prepend(&ctor.types, rest_types);
+                    catch_all(&m.specialize(ctor), &new_pats, &new_types)
+                });
+            }
+            let named = !m.rows.is_empty() && type_ctors.ctors.iter().any(|c| seen.contains(c.id));
+            if named && matches!(first_type, RcType::Named(_)) {
+                return Some(
+                    type_ctors
+                        .ctors
+                        .iter()
+                        .filter(|c| !seen.contains(c.id))
+                        .cloned()
+                        .collect(),
+                );
+            }
+            catch_all(&m.default_matrix(), rest_pats, rest_types)
+        }
+        Pat::Ctor { id, args } => {
+            let fallback;
+            let ctor_info = match type_ctors.find(*id) {
+                Some(c) => c,
+                None => {
+                    fallback = CtorInfo::opaque(*id, args.len());
+                    &fallback
+                }
+            };
+            let new_pats = PatStack::prepend(args, rest_pats);
+            let new_types = TypeStack::prepend(&ctor_info.types, rest_types);
+            catch_all(&m.specialize(ctor_info), &new_pats, &new_types)
+        }
+        Pat::Or { patterns } => patterns
+            .iter()
+            .find_map(|p| catch_all(m, &PatStack::cons(p.clone(), rest_pats.clone()), types)),
+    }
+}
+
 fn find_witness_vec(m: &PatternMatrix, types: &TypeStack) -> Option<Vec<Pat>> {
     let Some((first_type, rest_types)) = types.split() else {
         return if m.is_empty() { Some(vec![]) } else { None };
@@ -804,6 +857,36 @@ impl UsefulnessMatrix {
         self.matrix.rows.push(PatStack::one(pat.clone()));
     }
 
+    /// The variants `pat` covers with a wildcard although `earlier` arms name
+    /// others of the same value, rendered as patterns (`Absent`, `Present(..)`).
+    /// `earlier` is every arm before `pat`, guarded or not: a guarded arm
+    /// still names the variant it is about.
+    pub fn catch_all<'a>(
+        &self,
+        earlier: impl IntoIterator<Item = &'a Pat>,
+        pat: &Pat,
+    ) -> Option<Vec<String>> {
+        let mut matrix = PatternMatrix::default();
+        for p in earlier {
+            matrix.rows.push(PatStack::one(p.clone()));
+        }
+        let types = TypeStack::one(self.subject_type.clone());
+        let missing = catch_all(&matrix, &PatStack::one(pat.clone()), &types)?;
+        Some(
+            missing
+                .iter()
+                .map(|c| {
+                    let name = self.interner.name(c.id);
+                    if c.arity == 0 {
+                        name.to_string()
+                    } else {
+                        format!("{name}(..)")
+                    }
+                })
+                .collect(),
+        )
+    }
+
     /// A rendered witness pattern the given arms fail to cover, or `None` if
     /// they are exhaustive. The arms passed here form their own matrix; this
     /// checker's incremental matrix is not consulted.
@@ -931,6 +1014,88 @@ mod tests {
             "Letter",
             vec![("A", vec![]), ("B", vec![]), ("C", vec![])],
         )
+    }
+
+    /// What the last of `pats` stands for, given the arms before it.
+    fn catch_all_of(pats: &[SPat], t: &Type) -> Option<Vec<String>> {
+        let mut um = UsefulnessMatrix::new(t.clone());
+        let ipats: Vec<Pat> = pats.iter().map(|p| um.intern(p)).collect();
+        let (last, earlier) = ipats.split_last()?;
+        um.catch_all(earlier, last)
+    }
+
+    #[test]
+    fn a_wildcard_after_a_named_variant_stands_for_the_rest() {
+        let pats = [ctor("A", vec![]), SPat::Wildcard];
+        assert_eq!(
+            catch_all_of(&pats, &enum3()),
+            Some(vec!["B".into(), "C".into()])
+        );
+    }
+
+    #[test]
+    fn a_lone_wildcard_stands_for_nothing_named() {
+        assert_eq!(catch_all_of(&[SPat::Wildcard], &enum3()), None);
+    }
+
+    #[test]
+    fn naming_every_variant_leaves_no_catch_all() {
+        let rest = SPat::Or {
+            patterns: vec![ctor("B", vec![]), ctor("C", vec![])],
+        };
+        assert_eq!(catch_all_of(&[ctor("A", vec![]), rest], &enum3()), None);
+    }
+
+    /// `Some(_)` ignores the payload; nobody split it, so it is not a catch-all.
+    #[test]
+    fn a_wildcard_inside_an_unsplit_field_is_fine() {
+        let t = t_option(enum3());
+        let pats = [ctor("None", vec![]), ctor("Some", vec![SPat::Wildcard])];
+        assert_eq!(catch_all_of(&pats, &t), None);
+    }
+
+    #[test]
+    fn a_wildcard_inside_a_split_field_stands_for_the_rest() {
+        let t = t_option(enum3());
+        let pats = [
+            ctor("Some", vec![ctor("A", vec![])]),
+            ctor("Some", vec![SPat::Wildcard]),
+        ];
+        assert_eq!(catch_all_of(&pats, &t), Some(vec!["B".into(), "C".into()]));
+    }
+
+    /// The rule follows each tuple column the arms split.
+    #[test]
+    fn a_tuple_wildcard_stands_for_the_columns_split_before_it() {
+        let t = t_tuple(vec![t_bool(), t_int()]);
+        let tn = tuple_ctor_name(2);
+        let pats = [
+            ctor(&tn, vec![ctor("True", vec![]), SPat::Wildcard]),
+            SPat::Wildcard,
+        ];
+        assert_eq!(catch_all_of(&pats, &t), Some(vec!["False".into()]));
+    }
+
+    /// Values that cannot be listed keep their `_`.
+    #[test]
+    fn an_int_wildcard_after_literals_is_fine() {
+        let pats = [ctor("1", vec![]), SPat::Wildcard];
+        assert_eq!(catch_all_of(&pats, &t_int()), None);
+    }
+
+    /// An array's `[]` and `[_, ..]` are lengths, which cannot be listed.
+    #[test]
+    fn an_array_wildcard_after_the_empty_array_is_fine() {
+        let t = type_def::t_array(t_bool());
+        let pats = [ctor("[]", vec![]), SPat::Wildcard];
+        assert_eq!(catch_all_of(&pats, &t), None);
+    }
+
+    #[test]
+    fn a_payload_variant_renders_with_its_dots() {
+        let t = t_option(t_int());
+        let pats = [ctor("None", vec![]), SPat::Wildcard];
+        assert_eq!(catch_all_of(&pats, &t), Some(vec!["Some(..)".into()]));
     }
 
     #[test]

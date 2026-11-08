@@ -439,63 +439,64 @@ fn a_qualified_constructor_destructures_irrefutably() {
 const COLOR_MAKE_SRC: &str =
     "pub type Color {\n\tRed\n\tGreen(shade Int)\n}\n\npub fn make(n Int) Color {\n\tGreen(n)\n}\n";
 
-/// Three variants, so a catch-all arm stays reachable alongside an arm that
-/// covers only one of them.
+/// Three variants, so an or-pattern can name two and leave one for its own arm.
 const HUE_SRC: &str = "pub type Hue {\n\tRed\n\tGreen(shade Int)\n\tBlue\n}\n\npub fn make(n Int) Hue {\n\tGreen(n)\n}\n";
 
-/// A match with a catch-all arm is not exhaustive-by-heads, so it lowers to
-/// the test ladder rather than the tag switch. The ladder must test for the
+/// A guarded arm makes a match not exhaustive by heads, so it lowers to the
+/// test ladder rather than the tag switch. The ladder must test for the
 /// variant the qualified head resolves to, for a value returned by the
 /// declaring module and for one built here.
-///
-/// The tests above omit a catch-all, so they all take the switch and none of
-/// them can see this.
 #[test]
-fn a_qualified_arm_matches_beside_a_catch_all() {
-    let proj = Project::new("qual_ctor_catchall");
+fn a_qualified_arm_matches_on_the_test_ladder() {
+    let proj = Project::new("qual_ctor_ladder");
     proj.write("color.scrl", COLOR_MAKE_SRC);
     proj.write(
         "main.scrl",
-        "import ./color\n\npub fn main() {\n\tmatch color::make(9) {\n\t\tcolor::Green(s) -> println(s)\n\t\t_ -> println(0)\n\t}\n\tmatch color::Green(4) {\n\t\tcolor::Green(s) -> println(s)\n\t\t_ -> println(0)\n\t}\n}\n",
+        "import ./color\n\npub fn main() {\n\tmatch color::make(9) {\n\t\tcolor::Green(s) if s > 0 -> println(s)\n\t\tcolor::Green(_) | color::Red -> println(0)\n\t}\n\tmatch color::Green(4) {\n\t\tcolor::Green(s) if s > 0 -> println(s)\n\t\tcolor::Green(_) | color::Red -> println(0)\n\t}\n}\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "9\n4\n");
 }
 
-/// A bare binding arm is a catch-all too, and takes the same ladder. This is
-/// the shape that broke RESP3 pub/sub: `other -> ...` after a module's head.
+/// A bare name after a qualified head stands for the variants nobody named.
+/// That shape once broke RESP3 pub/sub; now it is refused, naming them.
 #[test]
-fn a_qualified_arm_matches_beside_a_bare_binding_catch_all() {
+fn a_bare_binding_after_a_qualified_head_is_refused() {
     let proj = Project::new("qual_ctor_binding_catchall");
     proj.write("color.scrl", COLOR_MAKE_SRC);
     proj.write(
         "main.scrl",
         "import ./color\n\npub fn main() {\n\tx = color::make(7)\n\tmatch x {\n\t\tcolor::Green(s) -> println(s)\n\t\tother -> println(other)\n\t}\n}\n",
     );
-    run_project_outputs(&proj, "run", "main.scrl", "7\n");
+    project_rejects(
+        &proj,
+        "check",
+        "main.scrl",
+        &["This pattern stands for Red. Name it instead, like `Red ->`"],
+    );
 }
 
 /// A qualified head nested inside a tuple pattern reaches the ladder through a
 /// different lowering path than a top-level head, and resolves the same way.
+/// The `Int` column is what keeps it off the switch.
 #[test]
-fn a_qualified_head_matches_nested_beside_a_catch_all() {
+fn a_qualified_head_matches_nested_on_the_test_ladder() {
     let proj = Project::new("qual_ctor_nested_catchall");
     proj.write("hue.scrl", HUE_SRC);
     proj.write(
         "main.scrl",
-        "import ./hue\n\npub fn main() {\n\tn = (hue::make(9), 1)\n\tmatch n {\n\t\t(hue::Green(s), 1) -> println(s)\n\t\t_ -> println(0)\n\t}\n}\n",
+        "import ./hue\n\npub fn main() {\n\tn = (hue::make(9), 1)\n\tmatch n {\n\t\t(hue::Green(s), 1) -> println(s)\n\t\t(hue::Green(_), _) | (hue::Red | hue::Blue, _) -> println(0)\n\t}\n}\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "9\n");
 }
 
-/// A qualified head as one alternative of an or-pattern. `Hue`'s third variant
-/// keeps the catch-all reachable, so the match still takes the ladder.
+/// A qualified head as one alternative of an or-pattern.
 #[test]
-fn a_qualified_head_matches_in_an_or_pattern_beside_a_catch_all() {
+fn a_qualified_head_matches_in_an_or_pattern() {
     let proj = Project::new("qual_ctor_or_catchall");
     proj.write("hue.scrl", HUE_SRC);
     proj.write(
         "main.scrl",
-        "import ./hue\n\npub fn main() {\n\to = hue::make(4)\n\tmatch o {\n\t\thue::Green(_s) | hue::Red -> println(1)\n\t\t_ -> println(0)\n\t}\n}\n",
+        "import ./hue\n\npub fn main() {\n\to = hue::make(4)\n\tmatch o {\n\t\thue::Green(_s) | hue::Red -> println(1)\n\t\thue::Blue -> println(0)\n\t}\n}\n",
     );
     run_project_outputs(&proj, "run", "main.scrl", "1\n");
 }
