@@ -54,6 +54,9 @@ use crate::core_ir::{
 };
 use crate::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
 use crate::tivec::{Idx, TiVec};
+use crate::typed_ir::checked::{
+    CArg, CArm, CArrayElem, CBinSeg, CCallee, CExpr, CInterpPart, CKind, CNode, CPattern,
+};
 use crate::typed_ir::slots::{SlotError, slot_labeled};
 use crate::typed_ir::{
     self, CaptureIdx, ClosureFact, Denotation, ElabCtx, FnTable, GlobalSlot, NameAt, NameFact,
@@ -777,6 +780,9 @@ struct DeferredBody {
     /// [`DeferredBody::closures`] still key against it, and preserves shape, so
     /// [`DeferredBody::walk_tys`] still lines up with it.
     body: ast::Expression,
+    /// What the check walk built for `body`.
+    #[allow(dead_code)]
+    checked: CExpr,
     body_ty: Ty,
     /// This body's walk region: the type of every expression the check walk
     /// entered while walking `body`, in entry order, the root's first. The
@@ -803,6 +809,7 @@ struct ParkedBody {
     name: StrId,
     param_binds: Vec<(StrId, Ty)>,
     body: ast::Expression,
+    checked: CExpr,
     body_ty: Ty,
     walk_tys: Vec<WalkStep>,
 }
@@ -1127,7 +1134,7 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
         // expression program can still contain lambdas, and none of them may
         // lower while the expression is being typechecked.
         c.begin_deferred_elaboration();
-        top_ty = c.compile_expr(expr);
+        top_ty = c.compile_expr(expr).ty;
         c.end_deferred_elaboration();
         c.check_nil_discards();
         c.pop_local_scope();
@@ -2072,13 +2079,16 @@ impl Compiler {
     // Node dispatch
     // ========================================================================
 
-    pub(super) fn compile_node(&mut self, node: &ast::Node) -> Ty {
+    pub(super) fn compile_node(&mut self, node: &ast::Node) -> (Ty, CNode) {
         match node {
             ast::Node::Statement(s) => {
-                self.compile_statement(s);
-                self.ty_nil()
+                let n = self.compile_statement(s);
+                (self.ty_nil(), n)
             }
-            ast::Node::Expression(e) => self.compile_expr(e),
+            ast::Node::Expression(e) => {
+                let e = self.compile_expr(e);
+                (e.ty, CNode::Expr(e))
+            }
         }
     }
 
@@ -2086,10 +2096,17 @@ impl Compiler {
     // Statements
     // ========================================================================
 
-    fn compile_statement(&mut self, stmt: &ast::Statement) {
+    fn compile_statement(&mut self, stmt: &ast::Statement) -> CNode {
         match stmt {
             ast::Statement::Binding(b) => match b.name() {
-                Some(ident) => self.compile_name_binding(b, ident),
+                Some(ident) => {
+                    let init = self.compile_name_binding(b, ident);
+                    let pattern = CPattern {
+                        pattern: b.pattern.clone(),
+                        sizes: Vec::new(),
+                    };
+                    CNode::Binding { pattern, init }
+                }
                 None => self.compile_destructuring(b),
             },
             ast::Statement::Declaration { decl, .. } => {
@@ -2104,23 +2121,23 @@ impl Compiler {
                     format!("{kind} declarations are only allowed at the top level"),
                     sp,
                 );
+                CNode::Nothing
             }
-            ast::Statement::ImportDeclaration(_) => {
-                // Imports are processed at the start of compilation, before
-                // walking the body. By the time we reach one here it's already
-                // been resolved (or rejected) — nothing left to do.
-            }
+            // Imports are processed at the start of compilation, before
+            // walking the body. By the time we reach one here it's already
+            // been resolved (or rejected) — nothing left to do.
+            ast::Statement::ImportDeclaration(_) => CNode::Nothing,
             ast::Statement::Backpass(bp) => {
                 // Desugared away before compilation; one can only survive a
                 // parser rejection (e.g. at module top level), which already
                 // errored. Type the call so its own diagnostics still surface.
-                self.compile_expr(&bp.call);
+                CNode::Effect(self.compile_expr(&bp.call))
             }
         }
     }
 
     /// `x = e` or `x Type = e`.
-    fn compile_name_binding(&mut self, vb: &ast::Binding, ident: &ast::Identifier) {
+    fn compile_name_binding(&mut self, vb: &ast::Binding, ident: &ast::Identifier) -> CExpr {
         let name = ident.name.clone();
         let name_id = self.engine.intern(&name);
 
@@ -2161,7 +2178,8 @@ impl Compiler {
         } else {
             self.next_fn_self_name.take()
         };
-        let init_ty = self.compile_expr_with_hint(&vb.init, annot_ty);
+        let init = self.compile_expr_with_hint(&vb.init, annot_ty);
+        let init_ty = init.ty;
         self.next_fn_self_name = saved_self;
 
         self.engine.unify_at(self_ty, init_ty, vb.init.span());
@@ -2193,19 +2211,25 @@ impl Compiler {
         if defer_slot {
             self.get_or_create_local(&name);
         }
+        init
     }
 
     /// `(a, b) = e`, `Point(x:, ..) = e`: typed like a one-arm `match`, and the
     /// one arm has to cover every value, so only a pattern that cannot fail
     /// is a binding.
-    fn compile_destructuring(&mut self, b: &ast::Binding) {
-        let init_ty = self.compile_expr(&b.init);
+    fn compile_destructuring(&mut self, b: &ast::Binding) -> CNode {
+        let init = self.compile_expr(&b.init);
+        let init_ty = init.ty;
         let mut pb = PatternBindings::new();
         let typed_ok = self.type_pattern(&b.pattern, init_ty, &mut pb.sink());
         self.bind_pattern_initials(&pb);
-        self.type_pattern_sizes(&b.pattern);
+        let pattern = CPattern {
+            pattern: b.pattern.clone(),
+            sizes: self.type_pattern_sizes(&b.pattern),
+        };
+        let node = CNode::Binding { pattern, init };
         if !typed_ok {
-            return;
+            return node;
         }
         let depth = pattern_unroll_depth(&b.pattern) + 1;
         let resolved = self
@@ -2222,6 +2246,7 @@ impl Compiler {
                 b.pattern.span(),
             );
         }
+        node
     }
 
     // ========================================================================
@@ -2831,11 +2856,15 @@ impl Compiler {
     /// answer rather than re-deriving one. It must stay total over expressions:
     /// every `Expression` the elaborator can reach is typed here, and the two
     /// walks enter them in the same order (see [`Compiler::walk_tys`]).
-    pub(super) fn compile_expr(&mut self, expr: &ast::Expression) -> Ty {
+    pub(super) fn compile_expr(&mut self, expr: &ast::Expression) -> CExpr {
         let slot = self.reserve_walk_ty();
-        let ty = self.compile_expr_inner(expr);
+        let (ty, kind) = self.compile_expr_inner(expr);
         self.fill_walk_ty(slot, ty);
-        ty
+        CExpr {
+            ty,
+            span: expr.span(),
+            kind,
+        }
     }
 
     /// Claim this expression's position in the current region before its
@@ -2893,16 +2922,18 @@ impl Compiler {
         region
     }
 
-    fn compile_expr_inner(&mut self, expr: &ast::Expression) -> Ty {
+    fn compile_expr_inner(&mut self, expr: &ast::Expression) -> (Ty, CKind) {
         match expr {
             ast::Expression::BinaryLiteral(bl) => self.compile_binary_literal(bl),
             ast::Expression::BlockExpression(be) => {
                 self.push_block_scope();
                 let mut last_ty = self.ty_nil();
+                let mut nodes = Vec::with_capacity(be.body.len());
 
                 for (i, node) in be.body.iter().enumerate() {
                     let is_last = i == be.body.len() - 1;
-                    let ty = self.compile_node(node);
+                    let (ty, cnode) = self.compile_node(node);
+                    nodes.push(cnode);
 
                     if is_last {
                         last_ty = ty;
@@ -2926,33 +2957,40 @@ impl Compiler {
                 }
 
                 self.pop_block_scope();
-                last_ty
+                (last_ty, CKind::Block(nodes))
             }
             ast::Expression::NumberLiteral(nl) => {
                 // `const_number` is the single source of the int/float split
                 // (and of the overflow diagnostic); the elaborator pools the
                 // constant itself.
                 let c = self.const_number(nl);
-                if matches!(c, Const::Float(_)) {
+                let ty = if matches!(c, Const::Float(_)) {
                     self.engine.icon_float()
                 } else {
                     self.ty_int()
-                }
+                };
+                (ty, CKind::Number(nl.clone()))
             }
-            ast::Expression::StringLiteral(_) => self.ty_string(),
+            ast::Expression::StringLiteral(sl) => {
+                (self.ty_string(), CKind::String(sl.value.clone()))
+            }
             ast::Expression::InterpolatedString(is) => {
-                for part in &is.parts {
-                    if let ast::InterpPart::Expr(e) = part {
-                        self.compile_expr(e);
-                    }
-                }
-                self.ty_string()
+                let parts = is
+                    .parts
+                    .iter()
+                    .map(|part| match part {
+                        ast::InterpPart::Literal(sl) => CInterpPart::Literal(sl.value.clone()),
+                        ast::InterpPart::Expr(e) => CInterpPart::Expr(self.compile_expr(e)),
+                    })
+                    .collect();
+                (self.ty_string(), CKind::Interp(parts))
             }
             ast::Expression::Identifier(id) => self.compile_identifier(id),
             ast::Expression::BinaryExpression(be) => self.compile_binary(be),
             ast::Expression::UnaryExpression(ue) => {
-                let inner_ty = self.compile_expr(&ue.expression);
-                match ue.op {
+                let operand = self.compile_expr(&ue.expression);
+                let inner_ty = operand.ty;
+                let ty = match ue.op {
                     ast::UnaryOp::Not => {
                         let b = self.ty_bool();
                         self.engine.unify_at(b, inner_ty, ue.expression.span());
@@ -2963,75 +3001,96 @@ impl Compiler {
                         self.engine.unify_at(result, inner_ty, ue.expression.span());
                         result
                     }
-                }
+                };
+                let kind = CKind::Unary {
+                    op: ue.op,
+                    operand: Box::new(operand),
+                };
+                (ty, kind)
             }
             ast::Expression::IfExpression(ie) => {
-                let cond_ty = self.compile_expr(&ie.condition);
+                let cond = self.compile_expr(&ie.condition);
                 let b = self.ty_bool();
-                self.engine.unify_at(b, cond_ty, ie.condition.span());
-                let then_ty = self.compile_expr(&ie.body);
-                let else_ty = self.compile_expr(&ie.else_body);
+                self.engine.unify_at(b, cond.ty, ie.condition.span());
+                let then = self.compile_expr(&ie.body);
+                let els = self.compile_expr(&ie.else_body);
 
                 let ret = self.engine.fresh_var();
                 self.engine
-                    .unify_at(ret, then_ty, type_defining_span(&ie.body));
+                    .unify_at(ret, then.ty, type_defining_span(&ie.body));
                 self.engine
-                    .unify_at(ret, else_ty, type_defining_span(&ie.else_body));
-                ret
+                    .unify_at(ret, els.ty, type_defining_span(&ie.else_body));
+                let kind = CKind::If {
+                    cond: Box::new(cond),
+                    then: Box::new(then),
+                    els: Box::new(els),
+                };
+                (ret, kind)
             }
             ast::Expression::MatchExpression(me) => self.compile_match(me),
             ast::Expression::ArrayExpression(ae) => self.compile_array(ae),
             ast::Expression::TupleExpression(te) => {
-                let mut elem_tys: Vec<Ty> = Vec::with_capacity(te.elements.len());
-                for elem in &te.elements {
-                    elem_tys.push(self.compile_expr(elem));
-                }
-                self.engine.mk_tuple(&elem_tys)
+                let elems: Vec<CExpr> = te.elements.iter().map(|e| self.compile_expr(e)).collect();
+                let elem_tys: Vec<Ty> = elems.iter().map(|e| e.ty).collect();
+                (self.engine.mk_tuple(&elem_tys), CKind::Tuple(elems))
             }
             ast::Expression::ArrayIndexExpression(aie) => {
-                let arr_ty = self.compile_expr(&aie.expression);
+                let recv = self.compile_expr(&aie.expression);
                 let elem_var = self.engine.fresh_var();
                 let arr_expected = self.ty_array(elem_var);
                 self.engine
-                    .unify_at(arr_expected, arr_ty, aie.expression.span());
+                    .unify_at(arr_expected, recv.ty, aie.expression.span());
 
                 if let ast::Expression::RangeExpression(r) = aie.index.as_ref() {
-                    let start_ty = self.compile_expr(&r.start);
-                    let end_ty = self.compile_expr(&r.end);
+                    let start = self.compile_expr(&r.start);
+                    let end = self.compile_expr(&r.end);
                     let int_t = self.ty_int();
-                    self.engine.unify_at(int_t, start_ty, r.start.span());
-                    self.engine.unify_at(int_t, end_ty, r.end.span());
+                    self.engine.unify_at(int_t, start.ty, r.start.span());
+                    self.engine.unify_at(int_t, end.ty, r.end.span());
                     // A slice can fail, when its range is not inside the
                     // array, so it is a `Result`, as `binary.slice_bits` is.
                     let slice = self.ty_array(elem_var);
                     let nil = self.ty_nil();
-                    self.ty_result(slice, nil)
+                    let kind = CKind::Slice {
+                        recv: Box::new(recv),
+                        start: Box::new(start),
+                        end: Box::new(end),
+                    };
+                    (self.ty_result(slice, nil), kind)
                 } else {
-                    let idx_ty = self.compile_expr(&aie.index);
+                    let index = self.compile_expr(&aie.index);
                     let int_t = self.ty_int();
-                    self.engine.unify_at(int_t, idx_ty, aie.index.span());
-                    self.ty_option(elem_var)
+                    self.engine.unify_at(int_t, index.ty, aie.index.span());
+                    let kind = CKind::Index {
+                        recv: Box::new(recv),
+                        index: Box::new(index),
+                    };
+                    (self.ty_option(elem_var), kind)
                 }
             }
             ast::Expression::RangeExpression(re) => {
-                let start_ty = self.compile_expr(&re.start);
-                let end_ty = self.compile_expr(&re.end);
+                let start = self.compile_expr(&re.start);
+                let end = self.compile_expr(&re.end);
                 let int_t = self.ty_int();
-                self.engine.unify_at(int_t, start_ty, re.start.span());
-                self.engine.unify_at(int_t, end_ty, re.end.span());
+                self.engine.unify_at(int_t, start.ty, re.start.span());
+                self.engine.unify_at(int_t, end.ty, re.end.span());
                 let i = self.ty_int();
-                self.ty_array(i)
+                let kind = CKind::Range {
+                    start: Box::new(start),
+                    end: Box::new(end),
+                };
+                (self.ty_array(i), kind)
             }
             ast::Expression::FunctionExpression(fe) => {
                 self.engine.enter_level();
-                let ty = self.compile_function_common(
+                let (ty, closure) = self.compile_function_common(
                     &fe.params,
                     &fe.body,
                     fe.return_type.as_ref(),
                     None,
                 );
                 self.engine.leave_level();
-                ty
+                (ty, CKind::Closure(closure))
             }
             ast::Expression::FunctionCallExpression(fc) => self.compile_call(fc),
             ast::Expression::PropertyAccessExpression(pa) => self.compile_property_access(pa),
@@ -3045,9 +3104,9 @@ impl Compiler {
                 // instead of panicking.
                 self.compile_expr(&p.left);
                 self.compile_expr(&p.right);
-                self.engine.fresh_var()
+                (self.engine.fresh_var(), CKind::Error)
             }
-            ast::Expression::ErrorNode(err) => self.error_node(err),
+            ast::Expression::ErrorNode(err) => (self.error_node(err), CKind::Error),
         }
     }
 
@@ -3082,7 +3141,7 @@ impl Compiler {
         &mut self,
         expr: &ast::Expression,
         hint: Option<Ty>,
-    ) -> Ty {
+    ) -> CExpr {
         if let Some(h) = hint
             && let ast::Expression::FunctionExpression(fe) = expr
         {
@@ -3097,7 +3156,7 @@ impl Compiler {
                 // whatever expression follows.
                 let slot = self.reserve_walk_ty();
                 self.engine.enter_level();
-                let ty = self.compile_function_common(
+                let (ty, closure) = self.compile_function_common(
                     &fe.params,
                     &fe.body,
                     fe.return_type.as_ref(),
@@ -3105,7 +3164,11 @@ impl Compiler {
                 );
                 self.engine.leave_level();
                 self.fill_walk_ty(slot, ty);
-                return ty;
+                return CExpr {
+                    ty,
+                    span: fe.span,
+                    kind: CKind::Closure(closure),
+                };
             }
         }
         self.compile_expr(expr)
@@ -3165,7 +3228,7 @@ impl Compiler {
         out
     }
 
-    fn compile_identifier(&mut self, expr: &ast::Identifier) -> Ty {
+    fn compile_identifier(&mut self, expr: &ast::Identifier) -> (Ty, CKind) {
         let name = &expr.name;
 
         let Some(scheme) = self.env.lookup(name) else {
@@ -3191,7 +3254,7 @@ impl Compiler {
                     ),
                     expr.span,
                 );
-                return self.engine.fresh_var();
+                return (self.engine.fresh_var(), CKind::Error);
             }
             let qualified = self.qualified_spellings(name);
             if !qualified.is_empty() {
@@ -3213,7 +3276,7 @@ impl Compiler {
             } else {
                 self.error(format!("Unknown identifier '{}'", name), expr.span);
             }
-            return self.engine.fresh_var();
+            return (self.engine.fresh_var(), CKind::Error);
         };
 
         let ty = self.engine.instantiate(scheme, &self.rigid_ids);
@@ -3237,18 +3300,19 @@ impl Compiler {
                 ),
             };
             self.error(msg, expr.span);
-            return ty;
+            return (ty, CKind::Error);
         }
 
         let id = self.engine.intern(name);
         let (at, bound) = self.name_at(id, kind);
-        self.walk_tys.push(WalkStep::Name(NameFact {
+        let fact = NameFact {
             ty,
             at,
             param_labels: None,
-        }));
+        };
+        self.walk_tys.push(WalkStep::Name(fact.clone()));
         self.check_named_value(name, None, expr.span, kind, bound);
-        ty
+        (ty, CKind::Name { name: id, fact })
     }
 
     /// Once a module's inference is final, reject any `_`-prefixed binder that
@@ -3305,22 +3369,27 @@ impl Compiler {
     // Binary ops
     // ========================================================================
 
-    fn compile_binary(&mut self, expr: &ast::BinaryExpression) -> Ty {
+    fn compile_binary(&mut self, expr: &ast::BinaryExpression) -> (Ty, CKind) {
         use ast::BinaryOp;
+        let node = |left: CExpr, right: CExpr| CKind::Binary {
+            op: expr.op,
+            left: Box::new(left),
+            right: Box::new(right),
+        };
         let (constraint, is_cmp) = match expr.op {
             BinaryOp::And | BinaryOp::Or => {
-                let l_ty = self.compile_expr(&expr.left);
+                let left = self.compile_expr(&expr.left);
                 let b = self.ty_bool();
-                self.engine.unify_at(b, l_ty, expr.left.span());
-                let r_ty = self.compile_expr(&expr.right);
-                self.engine.unify_at(b, r_ty, expr.right.span());
-                return self.ty_bool();
+                self.engine.unify_at(b, left.ty, expr.left.span());
+                let right = self.compile_expr(&expr.right);
+                self.engine.unify_at(b, right.ty, expr.right.span());
+                return (self.ty_bool(), node(left, right));
             }
             BinaryOp::Eq | BinaryOp::Ne => {
-                let l_ty = self.compile_expr(&expr.left);
-                let r_ty = self.compile_expr(&expr.right);
-                self.engine.unify_at(l_ty, r_ty, expr.span);
-                return self.ty_bool();
+                let left = self.compile_expr(&expr.left);
+                let right = self.compile_expr(&expr.right);
+                self.engine.unify_at(left.ty, right.ty, expr.span);
+                return (self.ty_bool(), node(left, right));
             }
             BinaryOp::Add => (Constraint::Addable, false),
             BinaryOp::Sub => (Constraint::Numeric, false),
@@ -3331,12 +3400,13 @@ impl Compiler {
                 (Constraint::Numeric, true)
             }
         };
-        let l_ty = self.compile_expr(&expr.left);
-        let r_ty = self.compile_expr(&expr.right);
+        let left = self.compile_expr(&expr.left);
+        let right = self.compile_expr(&expr.right);
         let operand = self.engine.fresh_constrained_var(constraint);
-        self.engine.unify_at(operand, l_ty, expr.left.span());
-        self.engine.unify_at(operand, r_ty, expr.right.span());
-        if is_cmp { self.ty_bool() } else { operand }
+        self.engine.unify_at(operand, left.ty, expr.left.span());
+        self.engine.unify_at(operand, right.ty, expr.right.span());
+        let ty = if is_cmp { self.ty_bool() } else { operand };
+        (ty, node(left, right))
     }
 
     // ========================================================================
@@ -3346,27 +3416,33 @@ impl Compiler {
     /// Type-check a `<<v:size:kind, ..>>` literal. Every segment's value (and
     /// its runtime size expression) is checked against the kind's expected
     /// type; the encoding itself is Core's job.
-    fn compile_binary_literal(&mut self, bl: &ast::BinaryLiteral) -> Ty {
+    fn compile_binary_literal(&mut self, bl: &ast::BinaryLiteral) -> (Ty, CKind) {
+        let mut segs = Vec::with_capacity(bl.segments.len());
         for seg in &bl.segments {
-            let vty = self.compile_expr(&seg.value);
+            let value = self.compile_expr(&seg.value);
             let expected = match seg.spec {
                 ast::BinSpec::Int { .. } => self.ty_int(),
                 ast::BinSpec::Binary { .. } => self.ty_binary(),
                 ast::BinSpec::Utf8 => self.ty_string(),
             };
-            self.engine.unify_at(expected, vty, seg.value.span());
-            self.type_seg_size(seg.spec.size_expr());
+            self.engine.unify_at(expected, value.ty, seg.value.span());
+            let size = self.type_seg_size(seg.spec.size_expr());
+            segs.push(CBinSeg {
+                value,
+                spec: seg.spec.clone(),
+                size,
+            });
         }
-        self.ty_binary()
+        (self.ty_binary(), CKind::BinaryLiteral(segs))
     }
 
     /// A segment's size expression is a runtime `Int`, not a binding.
-    fn type_seg_size(&mut self, size: Option<&ast::Expression>) {
-        if let Some(e) = size {
-            let ety = self.compile_expr(e);
-            let int_ty = self.ty_int();
-            self.engine.unify_at(int_ty, ety, e.span());
-        }
+    fn type_seg_size(&mut self, size: Option<&ast::Expression>) -> Option<CExpr> {
+        let e = size?;
+        let size = self.compile_expr(e);
+        let int_ty = self.ty_int();
+        self.engine.unify_at(int_ty, size.ty, e.span());
+        Some(size)
     }
 
     // ========================================================================
@@ -3375,38 +3451,46 @@ impl Compiler {
 
     /// Compile a run of non-spread array elements, unifying each with the
     /// array's element type variable.
-    fn compile_array_run(&mut self, elems: &[ast::ArrayElement], elem_var: Ty) {
+    fn compile_array_run(
+        &mut self,
+        elems: &[ast::ArrayElement],
+        elem_var: Ty,
+        out: &mut Vec<CArrayElem>,
+    ) {
         for elem in elems {
             if let ast::ArrayElement::Expression(e) = elem {
-                let ty = self.compile_expr(e);
-                self.engine.unify_at(elem_var, ty, type_defining_span(e));
+                let el = self.compile_expr(e);
+                self.engine.unify_at(elem_var, el.ty, type_defining_span(e));
+                out.push(CArrayElem::Elem(el));
             }
         }
     }
 
-    fn compile_array(&mut self, expr: &ast::ArrayExpression) -> Ty {
+    fn compile_array(&mut self, expr: &ast::ArrayExpression) -> (Ty, CKind) {
         let elem_var = self.engine.fresh_var();
+        let mut elems = Vec::with_capacity(expr.elements.len());
         let mut run_start = 0usize;
         for (i, e) in expr.elements.iter().enumerate() {
             let ast::ArrayElement::SpreadElement(spread) = e else {
                 continue;
             };
-            self.compile_array_run(&expr.elements[run_start..i], elem_var);
+            self.compile_array_run(&expr.elements[run_start..i], elem_var, &mut elems);
             run_start = i + 1;
             let inner = &spread.expression;
-            let spread_ty = self.compile_expr(inner);
+            let spread = self.compile_expr(inner);
             let expected = self.ty_array(elem_var);
-            self.engine.unify_at(expected, spread_ty, inner.span());
+            self.engine.unify_at(expected, spread.ty, inner.span());
+            elems.push(CArrayElem::Spread(spread));
         }
-        self.compile_array_run(&expr.elements[run_start..], elem_var);
-        self.ty_array(elem_var)
+        self.compile_array_run(&expr.elements[run_start..], elem_var, &mut elems);
+        (self.ty_array(elem_var), CKind::Array(elems))
     }
 
     // ========================================================================
     // Function call
     // ========================================================================
 
-    fn compile_call(&mut self, expr: &ast::FunctionCallExpression) -> Ty {
+    fn compile_call(&mut self, expr: &ast::FunctionCallExpression) -> (Ty, CKind) {
         // Resolve the callee to a name + scheme + load action without emitting
         // anything yet. This lets us dispatch on `ValueKind` for constructors
         // and builtins, and use the callee's known type to push hints into
@@ -3424,11 +3508,25 @@ impl Compiler {
             // Before the arguments, which the elaborator also walks after the
             // callee.
             let param_labels = self.param_labels_of(scheme.kind);
-            self.walk_tys.push(WalkStep::Name(NameFact {
+            let fact = NameFact {
                 ty: inst_ty,
                 at,
                 param_labels,
-            }));
+            };
+            self.walk_tys.push(WalkStep::Name(fact.clone()));
+            let id = self.engine.intern(name);
+            let callee = match qualifier {
+                None => CCallee::Name {
+                    name: id,
+                    fact,
+                    span: name_span,
+                },
+                Some(_) => CCallee::Member {
+                    name: id,
+                    fact,
+                    span: name_span,
+                },
+            };
             // Hover-only here; the graph occurrence (with the correct
             // Unqualified/Qualified kind) is emitted in `resolve_simple_callee`.
             // Skip the doc map probe + clone on the non-LSP path, where
@@ -3436,21 +3534,24 @@ impl Compiler {
             let doc = self.doc_if_collecting(name);
             self.record(name, inst_ty, name_span, doc);
 
-            return match scheme.kind {
+            let (ty, args) = match scheme.kind {
                 ValueKind::Constructor {
                     type_id,
                     arity,
                     field_labels,
                     ..
-                } => self.compile_ctor_call(
-                    name,
-                    type_id,
-                    arity as usize,
-                    field_labels,
-                    inst_ty,
-                    &expr.arguments,
-                    expr.span,
-                ),
+                } => {
+                    let (ty, args) = self.compile_ctor_call(
+                        name,
+                        type_id,
+                        arity as usize,
+                        field_labels,
+                        inst_ty,
+                        &expr.arguments,
+                        expr.span,
+                    );
+                    (ty, Some(args))
+                }
                 ValueKind::Builtin { .. } => {
                     self.compile_call_args(inst_ty, None, &expr.arguments, expr.span)
                 }
@@ -3475,21 +3576,37 @@ impl Compiler {
                     ret
                 }
             };
+            return match args {
+                Some(args) => (ty, CKind::Call { callee, args }),
+                None => (ty, CKind::Error),
+            };
         }
 
         // Arbitrary callee expression: compile it first so we have its type
         // for argument hints. A `module::member` callee only gets here when
         // `resolve_simple_callee` has already reported it, so check just the
         // arguments rather than report it twice.
-        let callee_ty = match expr.callee.as_ref() {
-            ast::Expression::ModuleAccessExpression(_) => self.engine.fresh_var(),
-            callee => self.compile_expr(callee),
+        let callee = match expr.callee.as_ref() {
+            ast::Expression::ModuleAccessExpression(_) => None,
+            callee => Some(self.compile_expr(callee)),
         };
-        self.compile_call_args(callee_ty, None, &expr.arguments, expr.span)
+        let callee_ty = match &callee {
+            Some(c) => c.ty,
+            None => self.engine.fresh_var(),
+        };
+        let (ty, args) = self.compile_call_args(callee_ty, None, &expr.arguments, expr.span);
+        match (callee, args) {
+            (Some(callee), Some(args)) => {
+                let callee = CCallee::Expr(Box::new(callee));
+                (ty, CKind::Call { callee, args })
+            }
+            _ => (ty, CKind::Error),
+        }
     }
 
     /// Type-check and emit an argument list against a callee type using
-    /// `match_fun_type`.
+    /// `match_fun_type`. The arguments come back in source order, or `None`
+    /// when the callee is not a function at all.
     ///
     /// `param_labels` is the callee's declared parameter names when it is a
     /// module `fn` reached by name, and `None` for every other callee — a local
@@ -3510,7 +3627,7 @@ impl Compiler {
         param_labels: Option<ArenaSlice<pool::StrSlices>>,
         args: &[ast::CallArg],
         call_span: Span,
-    ) -> Ty {
+    ) -> (Ty, Option<Vec<CArg>>) {
         let (params, ret) = match self.engine.match_fun_type(callee_ty, args.len()) {
             Ok(pr) => pr,
             Err(MatchFunTypeError::IncorrectArity {
@@ -3537,7 +3654,7 @@ impl Compiler {
                 for arg in args {
                     self.compile_call_arg_value(arg);
                 }
-                return self.engine.fresh_var();
+                return (self.engine.fresh_var(), None);
             }
         };
 
@@ -3551,10 +3668,16 @@ impl Compiler {
             _ => (0..args.len()).map(Some).collect(),
         };
 
+        let mut out = Vec::with_capacity(args.len());
         for (i, arg) in args.iter().enumerate() {
             let hint = param_of_arg[i].and_then(|p| params.get(p).cloned());
-            let (arg_ty, arg_span) = match arg {
-                ast::CallArg::Positional(e) => (self.compile_expr_with_hint(e, hint), e.span()),
+            let (value, arg_span) = match arg {
+                ast::CallArg::Positional(e) => {
+                    let v = self.compile_expr_with_hint(e, hint);
+                    let ty = v.ty;
+                    out.push(CArg::Positional(v));
+                    (ty, e.span())
+                }
                 ast::CallArg::Labeled { label, value, .. } => {
                     if param_labels.is_none() {
                         self.error(
@@ -3564,7 +3687,11 @@ impl Compiler {
                             label.span,
                         );
                     }
-                    (self.compile_expr_with_hint(value, hint), value.span())
+                    let v = self.compile_expr_with_hint(value, hint);
+                    let ty = v.ty;
+                    let label = self.engine.intern(&label.name);
+                    out.push(CArg::Labeled { label, value: v });
+                    (ty, value.span())
                 }
                 ast::CallArg::Spread(e) => {
                     self.error(
@@ -3572,15 +3699,18 @@ impl Compiler {
                             .to_string(),
                         e.span(),
                     );
-                    (self.compile_expr(e), e.span())
+                    let v = self.compile_expr(e);
+                    let ty = v.ty;
+                    out.push(CArg::Spread(v));
+                    (ty, e.span())
                 }
             };
             if let Some(p) = hint {
-                self.engine.unify_at(p, arg_ty, arg_span);
+                self.engine.unify_at(p, value, arg_span);
             }
         }
 
-        ret
+        (ret, Some(out))
     }
 
     /// Map each source argument to the parameter it fills, reporting a label
@@ -3653,7 +3783,7 @@ impl Compiler {
         out
     }
 
-    fn compile_call_arg_value(&mut self, arg: &ast::CallArg) -> Ty {
+    fn compile_call_arg_value(&mut self, arg: &ast::CallArg) -> CExpr {
         match arg {
             ast::CallArg::Positional(e) => self.compile_expr(e),
             ast::CallArg::Labeled { value, .. } => self.compile_expr(value),
@@ -3778,7 +3908,7 @@ impl Compiler {
         inst_ty: Ty,
         args: &[ast::CallArg],
         call_span: Span,
-    ) -> Ty {
+    ) -> (Ty, Vec<CArg>) {
         // The instantiated scheme is `IFun{params, ret}` for arity>0 or `ICon`
         // for arity==0. Extract param/result types.
         let r = self.engine.find(inst_ty);
@@ -3845,6 +3975,7 @@ impl Compiler {
         // it has already reported — left unchecked, and contributing no region,
         // exactly as before.
         let slots = &by_pos[..(field_labels_sl.len as usize).min(by_pos.len())];
+        let mut checked: Vec<Option<CExpr>> = (0..args.len()).map(|_| None).collect();
 
         // All-positional: `slot_ctor_args` placed `args[i]` in slot `i`, so the
         // two orders already coincide and no sub-region is needed. This is every
@@ -3854,16 +3985,17 @@ impl Compiler {
             .all(|a| matches!(a, ast::CallArg::Positional(_)))
         {
             for (i, slot_expr) in slots.iter().enumerate() {
-                let Some(&(_, value)) = *slot_expr else {
+                let Some(&(ai, value)) = *slot_expr else {
                     continue;
                 };
                 let expected = param_tys.get(i).copied();
-                let ty = self.compile_expr_with_hint(value, expected);
+                let v = self.compile_expr_with_hint(value, expected);
                 if let Some(p) = expected {
-                    self.engine.unify_at(p, ty, value.span());
+                    self.engine.unify_at(p, v.ty, value.span());
                 }
+                checked[ai] = Some(v);
             }
-            return result_ty;
+            return (result_ty, self.ctor_args(args, checked));
         }
 
         let mut regions: Vec<Vec<WalkStep>> = vec![Vec::new(); args.len()];
@@ -3872,9 +4004,10 @@ impl Compiler {
         // type; the per-field projection is Core's job.
         if let Some((ai, e)) = spread {
             self.open_walk_region();
-            let base_ty = self.compile_expr(e);
+            let base = self.compile_expr(e);
             regions[ai] = self.close_walk_region();
-            self.engine.unify_at(result_ty, base_ty, e.span());
+            self.engine.unify_at(result_ty, base.ty, e.span());
+            checked[ai] = Some(base);
             let unfilled = (0..arity).filter(|&i| slots.get(i).is_none_or(Option::is_none));
             self.check_spread_fills(type_id, result_ty, field_labels_sl, unfilled, e.span());
         }
@@ -3885,18 +4018,47 @@ impl Compiler {
             };
             let expected = param_tys.get(i).copied();
             self.open_walk_region();
-            let ty = self.compile_expr_with_hint(value, expected);
+            let v = self.compile_expr_with_hint(value, expected);
             regions[ai] = self.close_walk_region();
             if let Some(p) = expected {
-                self.engine.unify_at(p, ty, value.span());
+                self.engine.unify_at(p, v.ty, value.span());
             }
+            checked[ai] = Some(v);
         }
 
         for region in regions {
             self.walk_tys.extend(region);
         }
 
-        result_ty
+        (result_ty, self.ctor_args(args, checked))
+    }
+
+    /// A constructor call's arguments in source order, from the values the
+    /// check walk produced for them, `checked[i]` for `args[i]`. An argument
+    /// with no value is one `slot_ctor_args` refused and has reported.
+    fn ctor_args(&mut self, args: &[ast::CallArg], checked: Vec<Option<CExpr>>) -> Vec<CArg> {
+        args.iter()
+            .zip(checked)
+            .map(|(a, v)| {
+                let span = match a {
+                    ast::CallArg::Positional(e) | ast::CallArg::Spread(e) => e.span(),
+                    ast::CallArg::Labeled { value, .. } => value.span(),
+                };
+                let v = v.unwrap_or_else(|| CExpr {
+                    ty: self.engine.fresh_var(),
+                    span,
+                    kind: CKind::Error,
+                });
+                match a {
+                    ast::CallArg::Positional(_) => CArg::Positional(v),
+                    ast::CallArg::Labeled { label, .. } => CArg::Labeled {
+                        label: self.engine.intern(&label.name),
+                        value: v,
+                    },
+                    ast::CallArg::Spread(_) => CArg::Spread(v),
+                }
+            })
+            .collect()
     }
 
     /// `C(..base, ...)` fills each field it leaves out with `base.field`, so
@@ -3951,16 +4113,17 @@ impl Compiler {
 
     /// `module::member` in value position. Calls are handled in
     /// `compile_call`, through `resolve_simple_callee`.
-    fn compile_module_access(&mut self, expr: &ast::ModuleAccessExpression) -> Ty {
+    fn compile_module_access(&mut self, expr: &ast::ModuleAccessExpression) -> (Ty, CKind) {
         let Some(m) = self.resolve_module_access(expr) else {
-            return self.engine.fresh_var();
+            return (self.engine.fresh_var(), CKind::Error);
         };
         let ty = self.engine.instantiate(&m.scheme, &self.rigid_ids);
-        self.walk_tys.push(WalkStep::Name(NameFact {
+        let fact = NameFact {
             ty,
             at: m.at,
             param_labels: None,
-        }));
+        };
+        self.walk_tys.push(WalkStep::Name(fact.clone()));
         self.record(m.member_name, ty, m.member_span, None);
         // Rendered lazily: the qualifier only reaches a diagnostic on the
         // no-runtime-binding path, so the common (bound) case skips the
@@ -3973,10 +4136,11 @@ impl Compiler {
             m.scheme.kind,
             m.has_binding,
         );
-        ty
+        let name = self.engine.intern(m.member_name);
+        (ty, CKind::Member { name, fact })
     }
 
-    fn compile_property_access(&mut self, expr: &ast::PropertyAccessExpression) -> Ty {
+    fn compile_property_access(&mut self, expr: &ast::PropertyAccessExpression) -> (Ty, CKind) {
         // `c.f` where `c` is an imported module and not a value: point at `::`.
         if let (ast::Expression::Identifier(id), ast::PropertyKey::Field(field)) =
             (expr.left.as_ref(), &expr.right)
@@ -3990,10 +4154,11 @@ impl Compiler {
                 ),
                 id.span,
             );
-            return self.engine.fresh_var();
+            return (self.engine.fresh_var(), CKind::Error);
         }
 
-        let left_ty = self.compile_expr(&expr.left);
+        let recv = self.compile_expr(&expr.left);
+        let left_ty = recv.ty;
 
         match &expr.right {
             // `tuple.N` index.
@@ -4005,15 +4170,21 @@ impl Compiler {
                             format!("Tuple index must be an integer, got '{}'", num.value),
                             num.span,
                         );
-                        return self.engine.fresh_var();
+                        return (self.engine.fresh_var(), CKind::Error);
                     }
                 };
 
                 let resolved = self.engine.find(left_ty);
                 if let TypeNode::Tuple { elems } = self.engine.node(resolved) {
                     let elements = self.engine.children_of(elems);
-                    if (index as usize) < elements.len() {
-                        return elements[index as usize];
+                    if let Ok(idx) = u32::try_from(index)
+                        && let Some(&ty) = elements.get(idx as usize)
+                    {
+                        let kind = CKind::TupleIndex {
+                            recv: Box::new(recv),
+                            idx,
+                        };
+                        return (ty, kind);
                     }
                     self.error(
                         format!(
@@ -4023,17 +4194,22 @@ impl Compiler {
                         ),
                         num.span,
                     );
-                    return self.engine.fresh_var();
+                    return (self.engine.fresh_var(), CKind::Error);
                 }
                 self.error(
                     format!("Cannot index .{} on non-tuple type", index),
                     num.span,
                 );
-                self.engine.fresh_var()
+                (self.engine.fresh_var(), CKind::Error)
             }
             // `value.field` — labelled field shared by every variant.
             ast::PropertyKey::Field(field) => {
-                self.compile_field_access(left_ty, &field.name, field.span)
+                let ty = self.compile_field_access(left_ty, &field.name, field.span);
+                let kind = CKind::Field {
+                    recv: Box::new(recv),
+                    label: self.engine.intern(&field.name),
+                };
+                (ty, kind)
             }
         }
     }
@@ -4178,8 +4354,9 @@ impl Compiler {
     // Or expression (Option/Result unwrapping)
     // ========================================================================
 
-    fn compile_or(&mut self, expr: &ast::OrExpression) -> Ty {
-        let left_ty = self.compile_expr(&expr.expression);
+    fn compile_or(&mut self, expr: &ast::OrExpression) -> (Ty, CKind) {
+        let lhs = self.compile_expr(&expr.expression);
+        let left_ty = lhs.ty;
         let resolved = self.engine.find(left_ty);
 
         let success_var = self.engine.fresh_var();
@@ -4219,7 +4396,7 @@ impl Compiler {
             self.push_block_scope();
             let _ = self.compile_expr(&expr.body);
             self.pop_block_scope();
-            return self.engine.fresh_var();
+            return (self.engine.fresh_var(), CKind::Error);
         };
 
         let expected = match &err_var {
@@ -4238,12 +4415,17 @@ impl Compiler {
             self.get_or_create_local(&recv.name);
             self.register_local_binding(&recv.name, e, recv.span);
         }
-        let body_ty = self.compile_expr(&expr.body);
+        let body = self.compile_expr(&expr.body);
         self.pop_block_scope();
         self.engine
-            .unify_at(success_var, body_ty, type_defining_span(&expr.body));
+            .unify_at(success_var, body.ty, type_defining_span(&expr.body));
 
-        success_var
+        let kind = CKind::Or {
+            lhs: Box::new(lhs),
+            receiver: expr.receiver.as_ref().map(|r| self.engine.intern(&r.name)),
+            body: Box::new(body),
+        };
+        (success_var, kind)
     }
 
     // ========================================================================
@@ -4288,7 +4470,8 @@ impl Compiler {
         // enclosing frame's. A nested lambda opens another one here, so its
         // types never land in ours.
         self.open_walk_region();
-        let body_ty = self.compile_expr(body);
+        let checked = self.compile_expr(body);
+        let body_ty = checked.ty;
         let walk_tys = self.close_walk_region();
         // The walk still bumped `local_count` for the pattern binds it
         // reserved; those slots are dead, so rewind to the param watermark.
@@ -4313,6 +4496,7 @@ impl Compiler {
             name,
             param_binds,
             body: body.clone(),
+            checked,
             body_ty,
             walk_tys,
         };
@@ -4609,7 +4793,7 @@ impl Compiler {
         body: &ast::Expression,
         return_annot: Option<&ast::TypeIdentifier>,
         param_hints: Option<Vec<Ty>>,
-    ) -> Ty {
+    ) -> (Ty, ClosureFact) {
         let saved = self.enter_fn_frame(None);
 
         // A lambda's annotation type-variables share scope with each other but
@@ -4644,8 +4828,8 @@ impl Compiler {
         let closure = self.finish_fn_frame(saved, body_emit);
         // `finish_fn_frame` restored the enclosing frame, so this lands in that
         // frame's walk, which is the one whose elaboration builds the closure.
-        self.walk_tys.push(WalkStep::Closure(closure));
-        self.engine.mk_fun(&param_tys, ret_ty)
+        self.walk_tys.push(WalkStep::Closure(closure.clone()));
+        (self.engine.mk_fun(&param_tys, ret_ty), closure)
     }
 
     /// Compile a top-level `fn` whose parameter and return types were already
@@ -4772,6 +4956,7 @@ impl Compiler {
             name: body_name,
             param_binds,
             body,
+            checked,
             body_ty,
             walk_tys,
         } = parked;
@@ -4779,6 +4964,7 @@ impl Compiler {
             name: body_name,
             param_binds,
             body,
+            checked,
             body_ty,
             walk_tys,
             func_idx,
@@ -4827,11 +5013,13 @@ impl Compiler {
     // Pattern matching
     // ========================================================================
 
-    fn compile_match(&mut self, m: &ast::MatchExpression) -> Ty {
-        let subject_ty = self.compile_expr(&m.subject);
+    fn compile_match(&mut self, m: &ast::MatchExpression) -> (Ty, CKind) {
+        let subject = self.compile_expr(&m.subject);
+        let subject_ty = subject.ty;
         let result_ty = self.engine.fresh_var();
         let mut any_pattern_err = false;
         let mut b = PatternBindings::new();
+        let mut arms = Vec::with_capacity(m.arms.len());
 
         for arm in &m.arms {
             self.push_block_scope();
@@ -4841,21 +5029,34 @@ impl Compiler {
                 any_pattern_err = true;
             }
             self.bind_pattern_initials(&b);
-            self.type_pattern_sizes(&arm.pattern);
+            let pattern = CPattern {
+                pattern: arm.pattern.clone(),
+                sizes: self.type_pattern_sizes(&arm.pattern),
+            };
 
-            if let Some(guard) = &arm.guard {
-                let guard_ty = self.compile_expr(guard);
+            let guard = arm.guard.as_ref().map(|guard| {
+                let g = self.compile_expr(guard);
                 let bool_ty = self.ty_bool();
                 self.engine
-                    .unify_at(bool_ty, guard_ty, type_defining_span(guard));
-            }
+                    .unify_at(bool_ty, g.ty, type_defining_span(guard));
+                g
+            });
 
-            let body_ty = self.compile_expr(&arm.body);
+            let body = self.compile_expr(&arm.body);
             self.engine
-                .unify_at(result_ty, body_ty, type_defining_span(&arm.body));
+                .unify_at(result_ty, body.ty, type_defining_span(&arm.body));
 
             self.pop_block_scope();
+            arms.push(CArm {
+                pattern,
+                guard,
+                body,
+            });
         }
+        let kind = CKind::Match {
+            subject: Box::new(subject),
+            arms,
+        };
 
         if !any_pattern_err {
             let depth = m
@@ -4915,7 +5116,7 @@ impl Compiler {
             }
         }
 
-        result_ty
+        (result_ty, kind)
     }
 
     /// Bind a pattern's freshly-typed names (populated by `type_pattern`):
@@ -4942,16 +5143,17 @@ impl Compiler {
     /// name an earlier segment's binding (`<<n:8, body:bytes(n)>>`), so this
     /// runs *after* [`Self::bind_pattern_initials`] has brought the pattern's
     /// names into scope.
-    fn type_pattern_sizes(&mut self, p: &ast::Pattern) {
+    fn type_pattern_sizes(&mut self, p: &ast::Pattern) -> Vec<CExpr> {
         let mut sizes: Vec<&ast::Expression> = Vec::new();
         p.for_each_binder(ast::OrAlternatives::All, &mut |b| {
             if let ast::PatternBinder::SizeExpr(e) = b {
                 sizes.push(e);
             }
         });
-        for e in sizes {
-            self.type_seg_size(Some(e));
-        }
+        sizes
+            .into_iter()
+            .filter_map(|e| self.type_seg_size(Some(e)))
+            .collect()
     }
 
     /// Single source of truth turning a numeric literal's source text into a

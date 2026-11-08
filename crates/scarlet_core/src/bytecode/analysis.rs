@@ -48,6 +48,7 @@ use crate::reference::{DefId, DefinitionKind};
 use crate::span::Span;
 use crate::type_def::TypeId;
 use crate::typed_ir::GlobalSlot;
+use crate::typed_ir::checked::CNode;
 use crate::types::{
     AddedTypeVar, AnnotationContext, ArenaSlice, DefinitionLocation, EntityKind, Hydrator, Scheme,
     StrId, Ty, TypeBody, TypeInfo, TypeParam, ValueKind, Variant, VariantField, pool,
@@ -188,9 +189,10 @@ impl Compiler {
     /// when rejected so the rest of the file is still analysed and reported.
     fn push_non_decl<'a>(
         &mut self,
+        idx: usize,
         node: &'a ast::Node,
         in_module: bool,
-        others: &mut Vec<&'a ast::Node>,
+        others: &mut Vec<(usize, &'a ast::Node)>,
     ) {
         if in_module {
             self.error(
@@ -204,7 +206,7 @@ impl Compiler {
                 node.span(),
             );
         }
-        others.push(node);
+        others.push((idx, node));
     }
 
     /// Analyse a module body. When `iface` is `Some` the module is being
@@ -216,11 +218,14 @@ impl Compiler {
     /// the entry-file caller keeps them visible across the later `lower_body`
     /// on `__main__`. Import callers bracket the call with their own
     /// `push_scope`/`pop_scope`.
+    ///
+    /// Returns what the walk built for each of the block's nodes, at the
+    /// node's index in the block.
     pub(super) fn analyse_module(
         &mut self,
         block: &ast::BlockExpression,
         mut iface: Option<&mut ModuleInterface>,
-    ) {
+    ) -> Vec<CNode> {
         self.push_local_scope();
 
         // Pass 0 — partition + reserved/duplicate name checks.
@@ -230,7 +235,8 @@ impl Compiler {
         let mut dup_ctors: Vec<Vec<bool>> = Vec::new();
         let mut decls: Vec<Decl<'_>> = Vec::new();
         let mut vm_fns: Vec<(&ast::FunctionDeclaration, bool, Intrinsic)> = Vec::new();
-        let mut other_nodes: Vec<&ast::Node> = Vec::new();
+        let mut other_nodes: Vec<(usize, &ast::Node)> = Vec::new();
+        let mut nodes: Vec<CNode> = (0..block.body.len()).map(|_| CNode::Nothing).collect();
 
         let in_prelude = self.current_module == module::scarlet_prelude();
         let mut seen_types: HashMap<&str, Span> = HashMap::new();
@@ -309,10 +315,10 @@ impl Compiler {
                     ast::Statement::ImportDeclaration(_) => {
                         // Already handled by `process_imports`.
                     }
-                    _ => self.push_non_decl(node, iface.is_some(), &mut other_nodes),
+                    _ => self.push_non_decl(node_idx, node, iface.is_some(), &mut other_nodes),
                 },
                 ast::Node::Expression(_) => {
-                    self.push_non_decl(node, iface.is_some(), &mut other_nodes)
+                    self.push_non_decl(node_idx, node, iface.is_some(), &mut other_nodes)
                 }
             }
         }
@@ -530,6 +536,10 @@ impl Compiler {
 
                         self.env.store_doc_opt(name, &fd.doc);
                         self.record(name, fn_ty, fd.identifier.span, fd.doc.clone());
+                        nodes[decls[idx].node()] = CNode::Fn {
+                            name: name_id,
+                            span: fd.span,
+                        };
                         // Nothing to record for the toplevel spine:
                         // `compile_declared_function` keyed this body under the
                         // slot the spine stores it into, and a top-level fn
@@ -540,17 +550,22 @@ impl Compiler {
                         let name = &cb.identifier.name;
                         self.emit_def(*dl, name, cb.doc.clone(), *is_pub, DefinitionKind::Constant);
                         let owner = self.owner_defid(cb.identifier.span, EntityKind::Constant);
-                        let final_ty = self.with_owner(owner, |c| {
+                        let (final_ty, init) = self.with_owner(owner, |c| {
                             let mut h = Hydrator::new(AnnotationContext::Signature);
                             let annot_ty = cb.typ.as_ref().map(|t| c.hydrate(&mut h, t));
-                            let init_ty = c.compile_expr_with_hint(&cb.init, annot_ty);
-                            if let Some(a) = annot_ty {
-                                c.engine.unify_at(a, init_ty, cb.identifier.span);
+                            let init = c.compile_expr_with_hint(&cb.init, annot_ty);
+                            let ty = if let Some(a) = annot_ty {
+                                c.engine.unify_at(a, init.ty, cb.identifier.span);
                                 a
                             } else {
-                                init_ty
-                            }
+                                init.ty
+                            };
+                            (ty, init)
                         });
+                        nodes[decls[idx].node()] = CNode::Const {
+                            name: name_id,
+                            init,
+                        };
                         self.env.store_doc_opt(name, &cb.doc);
                         self.record(name, final_ty, cb.identifier.span, cb.doc.clone());
                         inferred.push((idx, final_ty));
@@ -614,8 +629,8 @@ impl Compiler {
         // this order. Nested walks re-enter `compile_node` from here but push
         // `outer_scopes`/`scope_marks`, which `bind_local` also checks.
         let outer_walk = std::mem::replace(&mut self.walking_module_statements, true);
-        for node in &other_nodes {
-            let _ty = self.compile_node(node);
+        for &(idx, node) in &other_nodes {
+            nodes[idx] = self.compile_node(node).1;
         }
         self.walking_module_statements = outer_walk;
 
@@ -626,6 +641,7 @@ impl Compiler {
         self.check_nil_discards();
 
         self.pop_local_scope();
+        nodes
     }
 
     fn hydrate_type_params(

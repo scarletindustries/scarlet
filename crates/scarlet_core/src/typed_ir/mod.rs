@@ -13,6 +13,7 @@
 //! (docs/core-ir-spec.md §IR).
 
 pub(crate) mod binop;
+pub mod checked;
 pub mod elaborate;
 pub mod elaborate_pat;
 pub mod eta;
