@@ -22,8 +22,8 @@ pub(crate) use scarlet_types::slots;
 pub(crate) mod zonk;
 
 pub(crate) use elaborate::{
-    ElabCtx, FieldAt, OrShape, PreludeTys, VariantLayout, elaborate_body, elaborate_toplevel,
-    elaborator_bug,
+    ClosureFact, ElabCtx, FieldAt, NameAt, NameFact, OrShape, PreludeTys, VariantLayout, WalkStep,
+    elaborate_body, elaborate_toplevel, elaborator_bug,
 };
 pub(crate) use eta::FnTable;
 pub(crate) use resolve::Denotation;

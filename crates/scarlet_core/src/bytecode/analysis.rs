@@ -464,10 +464,9 @@ impl Compiler {
         // walks is parked in `deferred_bodies`; the Core pipeline drains them
         // in one loop afterwards, when every var any SCC would solve is solved.
         //
-        // A parked body's scope snapshot is not enough on its own:
-        // `resolve_name` re-reads `self.env` at drain time, and a toplevel
-        // `let` overwrites a same-scope binding in place. `pin_deferred_env`
-        // below freezes the env the decl walk saw.
+        // A parked body reads nothing back from the env at drain time: the
+        // walk recorded what each name it met resolved to, so a toplevel `let`
+        // that rebinds a name later cannot change a body walked earlier.
         self.begin_deferred_elaboration();
         // Filled positionally as each SCC generalizes. Tarjan covers every
         // node, so every entry is `Some` by the export loop below.
@@ -610,13 +609,6 @@ impl Compiler {
         }
 
         // Other nodes (let bindings, bare expressions) — linear walk.
-        //
-        // The parked decl bodies have not lowered yet, and a `let` here may
-        // shadow a name one of them resolved (`println = 5` after a decl that
-        // calls `println`). Freeze the env they were walked against.
-        if !other_nodes.is_empty() {
-            self.pin_deferred_env();
-        }
         // The only walk allowed to fill the positional `toplevel_binds` queue;
         // the toplevel elaboration drains it against exactly these nodes, in
         // this order. Nested walks re-enter `compile_node` from here but push

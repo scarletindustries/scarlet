@@ -106,7 +106,6 @@ pub trait PreludeTys {
 /// [`PreludeTys::resolve_rty`].
 pub trait ElabCtx: PreludeTys {
     fn intern(&mut self, s: &str) -> StrId;
-    fn str(&self, id: StrId) -> &str;
 
     /// Parse-and-pool a numeric literal.
     fn number_const(&mut self, lit: &ast::NumberLiteral) -> ConstId;
@@ -117,9 +116,14 @@ pub trait ElabCtx: PreludeTys {
     /// Pool a `Binary` constant with the given raw bytes and bit length.
     fn binary_const(&mut self, bytes: Vec<u8>, bit_len: u64) -> ConstId;
 
-    /// Resolve a call/value name to `(instantiated_ty, denotation)`, or `None`
-    /// when unbound.
-    fn resolve_name(&mut self, name: &str) -> Option<(Ty, Denotation)>;
+    /// A constructor named by its bare name in a pattern, as
+    /// `(instantiated scheme, denotation)`.
+    fn resolve_ctor(&mut self, name: &str) -> Option<(Ty, Denotation)>;
+    /// The type of the module's own top-level `fn` declaration `name`.
+    fn toplevel_fn_ty(&mut self, name: &str) -> Option<Ty>;
+    /// One of this module's own top-level declarations, for a name the module
+    /// toplevel reaches before the declaration's statement binds it.
+    fn decl_denotation(&self, name: StrId) -> Option<Denotation>;
     /// Resolve a `qualifier.member` name. `span` is the member's, for the
     /// internal-error report.
     fn resolve_qualified(
@@ -136,23 +140,6 @@ pub trait ElabCtx: PreludeTys {
     /// `mod.Ctor(..)` is not in scope under its bare name, so a name lookup
     /// would miss a constructor the check walk accepted.
     fn ctor_labels(&mut self, v: VariantRef) -> Option<Vec<StrId>>;
-    /// Declared parameter-label order of the module `fn` a callee names, or
-    /// `None` when the callee is not one — a local binding holding a function,
-    /// a `@vm` builtin, an arbitrary expression — none of which has parameter
-    /// names at the call site, and all of which the check walk refuses a label
-    /// on.
-    ///
-    /// Keyed on the same `qual`/`name` pair the callee's own
-    /// [`Self::resolve_name`] / [`Self::resolve_qualified`] resolved, so the
-    /// labels cannot come from a different declaration than the callee did.
-    ///
-    /// An unrecorded label list reads as `None`: `ValueKind::ModuleFn` mints an
-    /// empty slice for "not recorded", never for "takes no parameters".
-    fn fn_param_labels(&mut self, qual: Option<&str>, name: &str) -> Option<Vec<StrId>>;
-    /// The `(func_idx, captures)` the check walk assigned to the
-    /// `FunctionExpression` at `span`, which must be written directly inside
-    /// the body being elaborated.
-    fn closure(&mut self, span: Span) -> Option<(FuncIdx, Vec<StrId>)>;
     /// The function body the check walk emitted for the top-level `fn`
     /// declaration bound at `slot`. `None` for a slot holding a plain value.
     fn fn_of_global(&self, slot: GlobalSlot) -> Option<FuncIdx>;
@@ -160,15 +147,12 @@ pub trait ElabCtx: PreludeTys {
     /// module block's `body`, entry-frame slot)`, in SCC-visit order.
     ///
     /// Order matters: a forward-referenced `const` must be stored before it is
-    /// read, so decls are not walked in source order. Empty when there is no
-    /// module toplevel to schedule (including a function body's outermost
-    /// block), which degenerates to source order with no globals.
-    fn toplevel_decls(&self) -> Vec<(usize, GlobalSlot)> {
-        Vec::new()
-    }
+    /// read, so decls are not walked in source order. Only asked while
+    /// elaborating a module toplevel.
+    fn toplevel_decls(&self) -> Vec<(usize, GlobalSlot)>;
     /// The entry-frame slot the module walk allocated for the *next*
-    /// module-scope `let`/destructured binding, or `None` outside a module
-    /// toplevel.
+    /// module-scope `let`/destructured binding. Only asked while elaborating a
+    /// module toplevel.
     ///
     /// Each call consumes one binding, in the order both walks visit the
     /// module's statements. That is what gives `x = 1; f = fn() x; x = 2` a
@@ -178,6 +162,50 @@ pub trait ElabCtx: PreludeTys {
     fn or_shape(&mut self, lhs_ty: Ty) -> Option<OrShape>;
 
     fn ty_nil(&mut self) -> Ty;
+}
+
+/// One step of the check walk, recorded in the order it walked and read back
+/// in that order by the elaborator, which never re-derives what the walk
+/// decided.
+#[derive(Debug, Clone)]
+pub enum WalkStep {
+    /// The type of an expression the walk entered.
+    Ty(Ty),
+    /// What a name denotes, where the walk met it: a value use, or a callee.
+    Name(NameFact),
+    /// A `fn(...)` expression: its function slot and how its captures load.
+    Closure(ClosureFact),
+}
+
+/// A name as the check walk resolved it, in the frame that was live then.
+#[derive(Debug, Clone)]
+pub struct NameFact {
+    /// The name's type at this use, as the walk instantiated it.
+    pub(crate) ty: Ty,
+    pub(crate) at: NameAt,
+    /// The declared parameter labels when the name is a module `fn` called
+    /// here, `None` for every other name. Labels are refused on anything else.
+    pub(crate) param_labels: Option<Vec<StrId>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum NameAt {
+    /// Bound by the body being elaborated, so the elaborator's own scope has
+    /// it. At a module toplevel it may instead be a declaration the toplevel
+    /// reaches before the declaration's statement.
+    Bound,
+    /// Anything else, fixed by the walk. A module-scope value may still turn
+    /// out to be a known function once every body has its slot.
+    Den(Denotation),
+}
+
+/// A lambda as the check walk closed it.
+#[derive(Debug, Clone)]
+pub struct ClosureFact {
+    pub(crate) func_idx: FuncIdx,
+    /// Every captured name, in capture-index order, with how it loads in the
+    /// enclosing body.
+    pub(crate) captures: Vec<(StrId, NameFact)>,
 }
 
 /// Elaborate `body` into a [`TypedFn`]. Eta wrappers the body needs are
@@ -195,9 +223,10 @@ pub(crate) fn elaborate_body<C: ElabCtx>(
     params: &[(StrId, Ty)],
     body: &ast::Expression,
     ret_ty: Ty,
-    walk_tys: &[Ty],
+    walk: &[WalkStep],
+    toplevel: bool,
 ) -> TypedFn {
-    elaborate_fn(ctx, pool, fns, name, params, ret_ty, walk_tys, |el| {
+    elaborate_fn(ctx, pool, fns, name, params, ret_ty, walk, toplevel, |el| {
         el.expr_as(body, ret_ty)
     })
 }
@@ -211,9 +240,9 @@ pub(crate) fn elaborate_toplevel<C: ElabCtx>(
     name: StrId,
     block: &ast::BlockExpression,
     ret_ty: Ty,
-    walk_tys: &[Ty],
+    walk: &[WalkStep],
 ) -> TypedFn {
-    elaborate_fn(ctx, pool, fns, name, &[], ret_ty, walk_tys, |el| {
+    elaborate_fn(ctx, pool, fns, name, &[], ret_ty, walk, true, |el| {
         el.block(block, ret_ty)
     })
 }
@@ -226,10 +255,11 @@ fn elaborate_fn<C: ElabCtx>(
     name: StrId,
     params: &[(StrId, Ty)],
     ret_ty: Ty,
-    walk_tys: &[Ty],
+    walk: &[WalkStep],
+    toplevel: bool,
     f: impl FnOnce(&mut Elab<'_, C>) -> TypedExpr,
 ) -> TypedFn {
-    let mut el = Elab::new(ctx, pool, fns, walk_tys);
+    let mut el = Elab::new(ctx, pool, fns, walk, toplevel);
     let ret = el.resolve(ret_ty);
     let params: Vec<TypedBind> = params
         .iter()
@@ -243,8 +273,8 @@ fn elaborate_fn<C: ElabCtx>(
     let body = f(&mut el);
     // A leftover entry means one walk visited a node the other did not, which
     // silently mistypes everything after it.
-    if el.cursor != el.walk_tys.len() {
-        elaborator_bug("body left the check walk's types unconsumed", Span::DUMMY);
+    if el.cursor != el.walk.len() {
+        elaborator_bug("body left the check walk's steps unconsumed", Span::DUMMY);
     }
     TypedFn {
         name,
@@ -264,9 +294,9 @@ pub struct Elab<'a, C: ElabCtx> {
     fns: &'a mut FnTable,
     /// What the check walk saw in this body, in the order it saw it. Read
     /// strictly in order — never indexed by span, never searched.
-    walk_tys: &'a [Ty],
-    /// How much of [`Self::walk_tys`] has been consumed. `elaborate_fn` checks
-    /// it reached the end.
+    walk: &'a [WalkStep],
+    /// How much of [`Self::walk`] has been consumed. `elaborate_fn` checks it
+    /// reached the end.
     cursor: usize,
     /// Next `BindingId` to mint. `TypedFn::binds` is this at the end.
     next_bind: u32,
@@ -283,13 +313,10 @@ pub struct Elab<'a, C: ElabCtx> {
     /// Every eta wrapper's parameters share this name; it is only displayed.
     eta_param: StrId,
     nil: RTy,
-    /// True until the first [`Self::block`] call. Gates decl scheduling and
-    /// [`Self::module_scope`].
-    ///
-    /// It also starts `true` for a function body, whose outermost block is not
-    /// a module toplevel. That is harmless: whether a name is really
-    /// module-scope is [`ElabCtx::next_global_slot`]'s answer, and deciding it
-    /// here instead would drop the entry module's globals on the floor.
+    /// Whether this body is a module toplevel, entry script included.
+    toplevel: bool,
+    /// True, in a toplevel, until the first [`Self::block`] call. Gates decl
+    /// scheduling and [`Self::module_scope`].
     at_toplevel: bool,
     /// True while walking the statements of a toplevel block. A nested block
     /// clears it and restores it after, so in `x = { y = 1; y }` `y` is never
@@ -306,7 +333,8 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         ctx: &'a mut C,
         pool: &'a mut ResolvedPool,
         fns: &'a mut FnTable,
-        walk_tys: &'a [Ty],
+        walk: &'a [WalkStep],
+        toplevel: bool,
     ) -> Self {
         let anon = StrId::NONE;
         let eta_param = ctx.intern("_");
@@ -316,7 +344,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             ctx,
             pool,
             fns,
-            walk_tys,
+            walk,
             cursor: 0,
             next_bind: 0,
             binds: Vec::new(),
@@ -324,7 +352,8 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             anon,
             eta_param,
             nil,
-            at_toplevel: true,
+            toplevel,
+            at_toplevel: toplevel,
             module_scope: false,
             pat_span: Span::DUMMY,
         }
@@ -343,7 +372,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// to enter. Called exactly once per entered expression, which is what
     /// keeps the two walks in step.
     fn take_ty(&mut self, at: Span) -> Ty {
-        let Some(&t) = self.walk_tys.get(self.cursor) else {
+        let Some(&WalkStep::Ty(t)) = self.walk.get(self.cursor) else {
             elaborator_bug("expression with no inferred type", at)
         };
         self.cursor += 1;
@@ -354,10 +383,42 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// Valid only where the check walk entered that sub-expression first: a
     /// property access's receiver, an `or`'s left side, a `match` scrutinee.
     fn peek_ty(&mut self, at: Span) -> Ty {
-        let Some(&t) = self.walk_tys.get(self.cursor) else {
+        let Some(&WalkStep::Ty(t)) = self.walk.get(self.cursor) else {
             elaborator_bug("sub-expression with no inferred type", at)
         };
         t
+    }
+
+    /// What the check walk resolved the name it met here to.
+    fn take_name(&mut self, at: Span) -> NameFact {
+        let Some(WalkStep::Name(fact)) = self.walk.get(self.cursor) else {
+            elaborator_bug("name with no recorded resolution", at)
+        };
+        self.cursor += 1;
+        fact.clone()
+    }
+
+    /// The function slot and captures the check walk gave the lambda here.
+    fn take_closure(&mut self, at: Span) -> ClosureFact {
+        let Some(WalkStep::Closure(fact)) = self.walk.get(self.cursor) else {
+            elaborator_bug("lambda with no recorded closure", at)
+        };
+        self.cursor += 1;
+        fact.clone()
+    }
+
+    /// The denotation of a name this body's own scope does not bind. A
+    /// module-scope value is promoted to the known function its slot holds,
+    /// which a sibling walked later may only now have.
+    fn denotation(&mut self, name: StrId, at: NameAt, span: Span) -> Denotation {
+        match at {
+            NameAt::Den(den) => den.promoted(|slot| self.ctx.fn_of_global(slot)),
+            NameAt::Bound if self.toplevel => match self.ctx.decl_denotation(name) {
+                Some(den) => den,
+                None => elaborator_bug("toplevel name resolves to no decl and no binding", span),
+            },
+            NameAt::Bound => elaborator_bug("a name this body binds has no binding", span),
+        }
     }
 
     fn int_rty(&mut self) -> RTy {
@@ -373,7 +434,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// The bare-name path. Qualified constructors go through [`Self::ctor_of`];
     /// `mod.C(x)` is not a pattern the parser accepts.
     fn ctor_at(&mut self, name: &str, at: RTy, span: Span) -> Option<CtorPat> {
-        let (scheme, den) = self.ctx.resolve_name(name)?;
+        let (scheme, den) = self.ctx.resolve_ctor(name)?;
         self.ctor_of(scheme, den, at, span)
     }
 
@@ -585,20 +646,18 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// An identifier that is not a bound local: a nullary constructor, a
     /// first-class constructor/builtin, or a global/capture load.
     fn ident(&mut self, id: &ast::Identifier, own: Ty) -> TypedExpr {
+        let fact = self.take_name(id.span);
         let sid = self.ctx.intern(&id.name);
         if let Some(bid) = self.lookup_name(sid) {
             return self.var(bid);
         }
         let ty = self.resolve(own);
-        let Some((fn_ty, den)) = self.ctx.resolve_name(&id.name) else {
-            elaborator_bug("unbound identifier", id.span)
-        };
-        self.value_of(den, sid, fn_ty, ty, id.span)
+        let den = self.denotation(sid, fact.at, id.span);
+        self.value_of(den, sid, fact.ty, ty, id.span)
     }
 
     /// A resolved name in value position. `ty` is the use site's solved type;
-    /// `scheme` is the freshly instantiated, unsolved type `resolve_name`
-    /// returned, and is only consulted when `ty` cannot type the node.
+    /// `scheme` is the name's type as the check walk instantiated it, and is only consulted when `ty` cannot type the node.
     fn value_of(
         &mut self,
         den: Denotation,
@@ -716,25 +775,20 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// assigned a `func_idx`, and the walk recorded its free-name set. A named
     /// `fn` *declaration* goes through `fn_of_global` instead.
     fn closure(&mut self, span: Span, ty: RTy) -> TypedExpr {
-        let Some((func_idx, cap_names)) = self.ctx.closure(span) else {
-            elaborator_bug("nested closure", span)
-        };
-        let mut captures = Vec::with_capacity(cap_names.len());
-        for cn in cap_names {
+        let fact = self.take_closure(span);
+        let mut captures = Vec::with_capacity(fact.captures.len());
+        for (cn, cap) in fact.captures {
             if let Some(bid) = self.lookup_name(cn) {
                 captures.push(self.var(bid));
                 continue;
             }
-            let name = self.ctx.str(cn).to_owned();
-            let Some((t, den)) = self.ctx.resolve_name(&name) else {
-                elaborator_bug("nested closure capture", span)
-            };
-            let cty = self.resolve(t);
-            captures.push(self.value_of(den, cn, t, cty, span));
+            let den = self.denotation(cn, cap.at, span);
+            let cty = self.resolve(cap.ty);
+            captures.push(self.value_of(den, cn, cap.ty, cty, span));
         }
         TypedExpr::Closure {
             ty,
-            func_idx,
+            func_idx: fact.func_idx,
             captures,
         }
     }
@@ -762,24 +816,12 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         TypedExpr::BinLit { ty, segs }
     }
 
-    /// `module::member`, resolved the way the check walk resolved it. Neither
-    /// walk enters the module name: it is not an expression.
-    fn qualified(&mut self, ma: &ast::ModuleAccessExpression) -> (Ty, Denotation) {
-        let member = &ma.member;
-        let Some(res) = self
-            .ctx
-            .resolve_qualified(&ma.module.name, &member.name, member.span)
-        else {
-            elaborator_bug("module member the check walk resolved", ma.span)
-        };
-        res
-    }
-
     fn module_access(&mut self, ma: &ast::ModuleAccessExpression, own: Ty) -> TypedExpr {
+        let fact = self.take_name(ma.span);
         let ty = self.resolve(own);
-        let (mty, den) = self.qualified(ma);
         let sid = self.ctx.intern(&ma.member.name);
-        self.value_of(den, sid, mty, ty, ma.span)
+        let den = self.denotation(sid, fact.at, ma.span);
+        self.value_of(den, sid, fact.ty, ty, ma.span)
     }
 
     fn property(&mut self, pa: &ast::PropertyAccessExpression, own: Ty) -> TypedExpr {
@@ -964,6 +1006,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         use ast::Expression as E;
         match e {
             E::Identifier(id) => {
+                let fact = self.take_name(id.span);
                 let sid = self.ctx.intern(&id.name);
                 if let Some(bid) = self.lookup_name(sid) {
                     // A binding in scope shadows any module `fn` of that name,
@@ -975,16 +1018,14 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                         param_labels: None,
                     };
                 }
-                let res = self.ctx.resolve_name(&id.name);
-                let labels = self.ctx.fn_param_labels(None, &id.name);
-                self.resolved_callee(res, labels, id.span)
+                let den = self.denotation(sid, fact.at, id.span);
+                self.resolved_callee(fact.ty, den, fact.param_labels)
             }
             E::ModuleAccessExpression(ma) => {
-                let res = self.qualified(ma);
-                let labels = self
-                    .ctx
-                    .fn_param_labels(Some(&ma.module.name), &ma.member.name);
-                self.resolved_callee(Some(res), labels, ma.span)
+                let fact = self.take_name(ma.span);
+                let sid = self.ctx.intern(&ma.member.name);
+                let den = self.denotation(sid, fact.at, ma.span);
+                self.resolved_callee(fact.ty, den, fact.param_labels)
             }
             _ => Callee::Value {
                 callee: TypedCallee::Dynamic(Box::new(self.expr(e))),
@@ -995,13 +1036,10 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
 
     fn resolved_callee(
         &mut self,
-        res: Option<(Ty, Denotation)>,
+        fn_ty: Ty,
+        den: Denotation,
         param_labels: Option<Vec<StrId>>,
-        at: Span,
     ) -> Callee {
-        let Some((fn_ty, den)) = res else {
-            elaborator_bug("unbound callee", at)
-        };
         let sig = self.resolve(fn_ty);
         match den.as_callee(sig) {
             CallForm::Ctor => Callee::Ctor { scheme: fn_ty, den },
@@ -1308,7 +1346,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 ast::Declaration::Function(fd) => {
                     // A `fn` declaration is not an expression, so the walk
                     // recorded no type for its span; its scheme is in the env.
-                    let Some((fn_ty, _)) = self.ctx.resolve_name(&fd.identifier.name) else {
+                    let Some(fn_ty) = self.ctx.toplevel_fn_ty(&fd.identifier.name) else {
                         elaborator_bug("unbound fn declaration", fd.span)
                     };
                     let fr = self.resolve(fn_ty);

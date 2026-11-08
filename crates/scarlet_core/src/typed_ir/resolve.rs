@@ -117,6 +117,18 @@ impl Denotation {
         })
     }
 
+    /// A module-scope value promoted to the known function `fn_at` says its
+    /// slot holds. Every other denotation is returned as it is.
+    pub(crate) fn promoted(self, fn_at: impl FnOnce(GlobalSlot) -> Option<FuncIdx>) -> Self {
+        let Den::Value(ValueRef::Global(slot)) = self.0 else {
+            return self;
+        };
+        match fn_at(slot) {
+            Some(func_idx) => Self::known_fn(slot, func_idx),
+            None => self,
+        }
+    }
+
     fn ctor(variant: VariantRef, arity: Arity) -> Self {
         Denotation(Den::Ctor { variant, arity })
     }

@@ -334,8 +334,8 @@ mod perceus_drop {
 ///
 /// `CleanModule` is why `lower` and `perceus` need no poison arm: they
 /// take a `TypedProgram`, which only `elaborate_body`/`elaborate_toplevel` can
-/// build. `Elab` aborts when `resolve_name` returns `None`, so without the
-/// gate an ordinary type error would abort the compiler.
+/// build. `Elab` aborts when the walk recorded no resolution for a name, so
+/// without the gate an ordinary type error would abort the compiler.
 mod clean_module_gate {
     use super::super::*;
     use super::parse_ok;

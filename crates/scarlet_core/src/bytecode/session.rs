@@ -240,9 +240,6 @@ impl Compiler {
         // rewound; the next compile's typecheck walk re-records them all.
         self.walk_tys.clear();
         self.walk_tys_stack.clear();
-        // A `ClosureSite` holds a `func_idx` and `StrId`s into pools truncated
-        // above.
-        self.frame_closures.clear();
         // `toplevel_binds` is positional: a survivor would hand the next
         // module-scope bind someone else's slot, silently.
         self.toplevel_decls.clear();

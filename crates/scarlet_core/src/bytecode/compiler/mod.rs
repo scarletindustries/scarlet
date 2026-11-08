@@ -56,8 +56,9 @@ use crate::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
 use crate::tivec::{Idx, TiVec};
 use crate::typed_ir::slots::{SlotError, slot_labeled};
 use crate::typed_ir::{
-    self, CaptureIdx, Denotation, ElabCtx, FnTable, GlobalSlot, OrShape, PreludeTys, RTy,
-    ResolvedPool, TempTys, TypedExpr, TypedFn, TypedProgram, Zonker, pool_for,
+    self, CaptureIdx, ClosureFact, Denotation, ElabCtx, FnTable, GlobalSlot, NameAt, NameFact,
+    OrShape, PreludeTys, RTy, ResolvedPool, TempTys, TypedExpr, TypedFn, TypedProgram, WalkStep,
+    Zonker, pool_for,
 };
 use smallvec::SmallVec;
 
@@ -332,9 +333,6 @@ struct FnFrame {
     capture_names: Vec<StrId>,
     rigid_ids: HashSet<i32>,
     binding: Option<StrId>,
-    /// The enclosing frame's [`Compiler::frame_closures`], parked for the
-    /// duration of the inner walk so the inner frame accumulates only its own.
-    closures: Vec<ClosureSite>,
 }
 
 /// Per-module compiler state snapshotted on entry to a submodule body by
@@ -353,22 +351,6 @@ struct ModuleFrame {
     /// `locals_frame_marks`). Recorded at enter so a `retain_namespaces`
     /// toggle can never unbalance the pop.
     scoped: bool,
-}
-
-/// Compiler frame state parked by `enter_elab_frame` while a [`DeferredBody`]'s
-/// snapshot is swapped in for its elaboration, and restored wholesale by
-/// `leave_elab_frame`. Mirrors [`ModuleFrame`]: adding a field the elaboration
-/// must see means one line here plus one swap/restore in the enter/leave pair,
-/// not two hand-written `mem::replace` calls to keep paired at both ends of
-/// `elaborate_deferred`.
-struct ElabFrame {
-    outer_scopes: Vec<Scope>,
-    locals: HashMap<StrId, LocalSlot>,
-    captures: HashMap<StrId, i32>,
-    capture_names: Vec<StrId>,
-    rigid_ids: HashSet<i32>,
-    current_binding: Option<StrId>,
-    frame_closures: Vec<ClosureSite>,
 }
 
 // `bool_cluster` fires on the four bool fields below, and the answer is that
@@ -582,23 +564,6 @@ pub struct Compiler {
     /// from `scarlet.sca` rather than mirrored in Rust. `@vm` functions are
     /// deliberately excluded — `println` is shadowable.
     pub(super) reserved: BTreeSet<String>,
-    /// The `fn(...) {...}` expressions written *directly inside the frame being
-    /// walked* — one [`ClosureSite`] each, in the order the walk closed them.
-    ///
-    /// The frame owns its sites, not the compiler: [`Self::enter_fn_frame`]
-    /// parks the enclosing frame's list and hands the new frame an empty one,
-    /// [`Self::compile_fn_body`] moves the walked frame's list into its
-    /// [`ParkedBody`], and [`Self::elaborate_deferred`] swaps that list back
-    /// in for exactly the elaboration of that body. Entry-frame sites (a lambda
-    /// in a toplevel `let` or `const`) accumulate here across the module walk
-    /// and are dropped once that module's toplevel has been elaborated, so no
-    /// two modules' sites are ever live at once.
-    ///
-    /// That ownership is what a `HashMap<Span, _>` on the compiler could not
-    /// have: a `Span` carries no file id, so a global table let one module's
-    /// lambda answer for another's at the same offset, and its `func_idx`/
-    /// `StrId`s outlived the arenas they indexed (`reset_to`).
-    pub(super) frame_closures: Vec<ClosureSite>,
     /// The type the check walk inferred for every expression it entered, in
     /// entry order, one region per elaboration unit.
     ///
@@ -627,10 +592,10 @@ pub struct Compiler {
     /// module toplevel's own region, drained by whoever elaborates that
     /// toplevel. Cleared by `reset_to`, whose engine rewind would otherwise
     /// leave dangling `Ty` indices.
-    pub(super) walk_tys: Vec<Ty>,
+    pub(super) walk_tys: Vec<WalkStep>,
     /// The regions of the bodies enclosing the one being walked, innermost last.
     /// Parked, not indexed: only [`Compiler::walk_tys`] is ever written to.
-    pub(super) walk_tys_stack: Vec<Vec<Ty>>,
+    pub(super) walk_tys_stack: Vec<Vec<WalkStep>>,
     /// Function bodies whose typecheck walk has finished but whose Core
     /// pipeline (`lower`→`perceus`) is deferred until the enclosing
     /// declaration group has been generalized. See
@@ -640,18 +605,6 @@ pub struct Compiler {
     /// pipeline inline when this is zero (REPL entries, top-level `let`s and
     /// bare expressions, which are walked outside `analyse_module`'s Pass 5).
     defer_depth: u32,
-    /// `(number of bodies parked so far, the value env as those bodies saw it)`,
-    /// set by [`Self::pin_deferred_env`] at the end of the declaration walk.
-    ///
-    /// A `DeferredBody` snapshots the *frame* (`outer_scopes`, `captures`, the
-    /// self-name) but not `self.env`, and `resolve_name` re-queries the live
-    /// env at drain time for a name's `Ty` and `ValueKind`. The drain now runs
-    /// after the toplevel `let` walk, and `TypeEnv::define` overwrites a
-    /// same-scope binding in place, so without this pin a toplevel `let` would
-    /// re-point a name a declared body already resolved to a builtin,
-    /// constructor or sibling decl (`println = 5` after `fn g() { println(x) }`
-    /// turned the callee into a self-call).
-    deferred_env_pin: Option<(usize, TypeEnv)>,
 }
 
 /// One body, elaborated into a whole-module [`TypedProgram`] that the Core
@@ -729,8 +682,10 @@ fn pattern_unroll_depth(p: &ast::Pattern) -> usize {
     }
 }
 
-fn walk_region_is_filled(region: &[Ty]) -> bool {
-    !region.contains(&WALK_TY_PENDING)
+fn walk_region_is_filled(region: &[WalkStep]) -> bool {
+    !region
+        .iter()
+        .any(|s| matches!(s, WalkStep::Ty(t) if *t == WALK_TY_PENDING))
 }
 
 /// A `close_walk_region` with no matching `open_walk_region` — a broken walk
@@ -802,22 +757,6 @@ fn function_reserved_during_elaboration() -> ! {
     )
 }
 
-/// A `fn(...) {...}` expression the walk closed over: the function slot its
-/// body was reserved at, and the names its frame captured — in the order a
-/// `Load::Capture` indexes them.
-///
-/// Lives in the enclosing frame's [`Compiler::frame_closures`], because that is
-/// the frame whose elaboration has to build the `Atom::Closure`: the capture
-/// *values* are loads in the enclosing scope, not the lambda's.
-pub(super) struct ClosureSite {
-    /// Which lambda. The AST carries no node id, so a span is the only identity
-    /// a node has; within one body it is a unique one, and a site is only ever
-    /// looked up while elaborating the body it was recorded in.
-    at: Span,
-    func_idx: crate::core_ir::FuncIdx,
-    captures: Vec<StrId>,
-}
-
 /// A function body parked between its typecheck walk and its elaboration.
 ///
 /// The walk fixes everything about the body except its *types*: which
@@ -842,44 +781,12 @@ struct DeferredBody {
     /// This body's walk region: the type of every expression the check walk
     /// entered while walking `body`, in entry order, the root's first. The
     /// elaborator consumes it positionally. See [`Compiler::walk_tys`].
-    walk_tys: Vec<Ty>,
-    /// The lambdas written directly inside this body, moved out of
-    /// [`Compiler::frame_closures`] the moment the walk of this body finished.
-    /// Swapped back in for its elaboration and dropped with it.
-    closures: Vec<ClosureSite>,
+    walk_tys: Vec<WalkStep>,
     /// The function slot this body fills in. Reserved by `finish_fn_frame` in
-    /// *both* modes: a [`ClosureSite`] and `global_to_func` record it, and
+    /// *both* modes: a [`ClosureFact`] and `global_to_func` record it, and
     /// `lower` bakes it into `Atom::Closure`/`Callee::Known`, all of which
     /// happen under `check_only` too.
     func_idx: FuncIdx,
-    /// The frame state `resolve_name` needs: a captured name must resolve to
-    /// the same `Denotation::capture` index the walk assigned it, and a
-    /// self-reference to the same self-closure/self-toplevel-fn denotation.
-    captures: HashMap<StrId, i32>,
-    capture_names: Vec<StrId>,
-    rigid_ids: HashSet<i32>,
-    binding: Option<StrId>,
-    /// The enclosing frames' locals, exactly as `resolve_variable` saw them
-    /// during the walk (module scope at index 0, then one entry per
-    /// intervening fn frame). Restored wholesale at elaboration time.
-    ///
-    /// Truncating this to the module scope is *not* sound, even though every
-    /// name reached through an intervening frame was captured by the walk:
-    /// `current_binding == Some(name)` short-circuits before the capture is
-    /// recorded, so a recursive local lambda whose self-name shadows a
-    /// module-scope decl would re-resolve to `SelfGlobal(module_slot)` — a
-    /// global load of the wrong value where the walk resolved the closure
-    /// itself.
-    outer_scopes: Vec<Scope>,
-    /// Type-env entries `lower`'s `resolve_name` would otherwise miss: the
-    /// enclosing frames' scopes are long popped by elaboration time. Only two
-    /// classes of name can reach `resolve_name` from outside the module scope —
-    /// a captured binding, and the frame's own self-name (`current_binding`,
-    /// which resolves to `Self_`/`SelfGlobal` rather than being captured).
-    /// Everything else the body mentions is either bound by `lower` itself
-    /// (params, `let`s, pattern binds) or lives at module scope, which is still
-    /// open. Re-pushed as one scope around the `lower` call.
-    capture_env: Vec<(String, Scheme)>,
 }
 
 /// The walk half of a [`DeferredBody`]: everything [`Compiler::compile_fn_body`]
@@ -897,8 +804,7 @@ struct ParkedBody {
     param_binds: Vec<(StrId, Ty)>,
     body: ast::Expression,
     body_ty: Ty,
-    walk_tys: Vec<Ty>,
-    closures: Vec<ClosureSite>,
+    walk_tys: Vec<WalkStep>,
 }
 
 /// A name resolved to a constructor, as `type_ctor_pattern` needs it: the
@@ -950,6 +856,7 @@ struct QualifiedMember<'a> {
     scheme: Scheme,
     /// Whether the member has a runtime binding (an entry-frame slot).
     has_binding: bool,
+    at: NameAt,
 }
 
 /// A callee that resolved to a plain name or a qualified `module::member`:
@@ -959,8 +866,9 @@ struct ResolvedCallee<'a> {
     name: &'a str,
     span: Span,
     scheme: Scheme,
-    /// Whether the callee has a runtime binding (see `Compiler::has_binding`).
+    /// Whether the callee has a runtime binding (see `Compiler::name_at`).
     has_binding: bool,
+    at: NameAt,
     /// The module a qualified callee resolved through. Diagnostics render it
     /// with `Compiler::module_name` — the user-visible name, never the key.
     qualifier: Option<ModuleKey>,
@@ -1089,12 +997,10 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         stdlib_source_root: None,
         prelude: PreludeBindings::default(),
         reserved: BTreeSet::new(),
-        frame_closures: Vec::new(),
         walk_tys: Vec::new(),
         walk_tys_stack: Vec::new(),
         deferred_bodies: Vec::new(),
         defer_depth: 0,
-        deferred_env_pin: None,
     }
 }
 
@@ -1264,12 +1170,11 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
                 ast::Expression::BlockExpression(block) => {
                     typed_ir::elaborate_toplevel(c, pool, fns, name, block, top_ty, &walk_tys)
                 }
-                _ => typed_ir::elaborate_body(c, pool, fns, name, &[], expr, top_ty, &walk_tys),
+                _ => {
+                    typed_ir::elaborate_body(c, pool, fns, name, &[], expr, top_ty, &walk_tys, true)
+                }
             }
         });
-        // The entry frame's own lambdas have been read; the last consumer of
-        // `frame_closures` in this compile is done with it.
-        c.frame_closures.clear();
         if !check_only {
             entry = c.record_toplevel(lowered, TopKind::Entry { entered });
         }
@@ -1680,9 +1585,6 @@ impl Compiler {
     /// must not take a module-scope slot. Only a module toplevel runs with no
     /// enclosing frame.
     fn take_global_slot(&mut self) -> Option<GlobalSlot> {
-        if !self.outer_scopes.is_empty() {
-            return None;
-        }
         self.toplevel_binds.pop_front()
     }
 
@@ -2866,18 +2768,12 @@ impl Compiler {
     /// Elaborate and lower a just-analysed module toplevel to Core and record
     /// it, exactly as `compile_with` does for `__main__`.
     fn lower_module_init(&mut self, key: &ModuleKey, block: &ast::BlockExpression) {
-        // This module's toplevel lambdas, and nobody else's. Taken (not merely
-        // read) so the next module's toplevel — whose `Span`s are numbered from
-        // its own file — cannot find one of ours at the same offset. Dropped on
-        // the early return too: an unelaborated toplevel has no reader.
-        let sites = std::mem::take(&mut self.frame_closures);
         // This module's toplevel walk region, drained whether or not it is
         // elaborated: the next module's walk must start from an empty one.
         let walk_tys = self.take_toplevel_walk_tys();
         let Some(clean) = self.clean_module() else {
             return;
         };
-        self.frame_closures = sites;
         let name = self.engine.intern(key.as_str());
         let nil = self.ty_nil();
         // Elaborated and lowered even under `check_only` so a module toplevel
@@ -2886,7 +2782,6 @@ impl Compiler {
         let lowered = self.elaborate_then_materialize(clean, None, |c, pool, fns| {
             typed_ir::elaborate_toplevel(c, pool, fns, name, block, nil, &walk_tys)
         });
-        self.frame_closures.clear();
         if !self.check_only {
             self.record_toplevel(lowered, TopKind::Module);
         }
@@ -2946,7 +2841,7 @@ impl Compiler {
     /// Claim this expression's position in the current region before its
     /// children claim theirs, so the region is a pre-order listing.
     fn reserve_walk_ty(&mut self) -> usize {
-        self.walk_tys.push(WALK_TY_PENDING);
+        self.walk_tys.push(WalkStep::Ty(WALK_TY_PENDING));
         self.walk_tys.len() - 1
     }
 
@@ -2958,7 +2853,7 @@ impl Compiler {
     /// region desync this table exists to make impossible, and swallowing the
     /// write would let a `WALK_TY_PENDING` reach the elaborator.
     fn fill_walk_ty(&mut self, slot: usize, ty: Ty) {
-        self.walk_tys[slot] = ty;
+        self.walk_tys[slot] = WalkStep::Ty(ty);
     }
 
     /// Park the enclosing body's region and start a fresh one for the body about
@@ -2970,7 +2865,7 @@ impl Compiler {
 
     /// Close the region [`Self::open_walk_region`] opened, returning it and
     /// restoring the enclosing body's.
-    fn close_walk_region(&mut self) -> Vec<Ty> {
+    fn close_walk_region(&mut self) -> Vec<WalkStep> {
         let Some(outer) = self.walk_tys_stack.pop() else {
             walk_region_underflow();
         };
@@ -2985,7 +2880,7 @@ impl Compiler {
     /// Take the module toplevel's region: everything the walk typed outside a
     /// function body. Every module's walk fills it and exactly one elaboration
     /// drains it, so it is empty again for the next.
-    fn take_toplevel_walk_tys(&mut self) -> Vec<Ty> {
+    fn take_toplevel_walk_tys(&mut self) -> Vec<WalkStep> {
         debug_assert!(
             self.walk_tys_stack.is_empty(),
             "a function body's walk region leaked into the module toplevel's"
@@ -3134,7 +3029,6 @@ impl Compiler {
                     &fe.body,
                     fe.return_type.as_ref(),
                     None,
-                    fe.span,
                 );
                 self.engine.leave_level();
                 ty
@@ -3208,7 +3102,6 @@ impl Compiler {
                     &fe.body,
                     fe.return_type.as_ref(),
                     Some(params.clone()),
-                    fe.span,
                 );
                 self.engine.leave_level();
                 self.fill_walk_ty(slot, ty);
@@ -3222,16 +3115,35 @@ impl Compiler {
     // Identifier
     // ========================================================================
 
-    /// Does this value reference have a runtime binding? `Local`/`ModuleFn`
-    /// resolve the variable (with the usual `mark_used` + capture side
-    /// effects), while constructors and builtins have no plain runtime binding.
-    fn has_binding(&mut self, name: &str, kind: &ValueKind) -> bool {
+    /// What a name denotes, decided here, in the frame that binds it, and
+    /// recorded for the elaborator, which never resolves a name itself. Also
+    /// says whether the name has a runtime binding.
+    ///
+    /// A `Local`/`ModuleFn` resolves the variable, with the usual `mark_used`
+    /// and capture side effects. A constructor or builtin is fixed by its kind
+    /// and has no plain runtime binding.
+    fn name_at(&mut self, id: StrId, kind: ValueKind) -> (NameAt, bool) {
+        if let Some(den) = Denotation::from_kind(kind) {
+            return (NameAt::Den(den), false);
+        }
+        match self.resolve_variable(id) {
+            Some(Place::ThisFunction) => (NameAt::Bound, true),
+            Some(Place::Outside(den)) => (NameAt::Den(den), true),
+            // `analyse_module` unwinds `self.locals` before a module toplevel
+            // elaborates, so there a decl is found by name.
+            None if self.outer_scopes.is_empty() => (NameAt::Bound, false),
+            None => (NameAt::Den(Denotation::self_closure()), false),
+        }
+    }
+
+    /// The declared parameter labels of a module `fn`. An empty slice is "not
+    /// recorded", never "takes no parameters", so it refuses any label.
+    fn param_labels_of(&self, kind: ValueKind) -> Option<Vec<StrId>> {
         match kind {
-            ValueKind::Local | ValueKind::ModuleFn { .. } => {
-                let id = self.engine.intern(name);
-                self.resolve_variable(id).is_some()
+            ValueKind::ModuleFn { param_labels } if param_labels.len > 0 => {
+                Some(self.engine.str_ids_of(param_labels).to_vec())
             }
-            _ => false,
+            _ => None,
         }
     }
 
@@ -3328,7 +3240,13 @@ impl Compiler {
             return ty;
         }
 
-        let bound = self.has_binding(name, &kind);
+        let id = self.engine.intern(name);
+        let (at, bound) = self.name_at(id, kind);
+        self.walk_tys.push(WalkStep::Name(NameFact {
+            ty,
+            at,
+            param_labels: None,
+        }));
         self.check_named_value(name, None, expr.span, kind, bound);
         ty
     }
@@ -3498,10 +3416,19 @@ impl Compiler {
             span: name_span,
             scheme,
             has_binding,
+            at,
             qualifier,
         }) = self.resolve_simple_callee(&expr.callee)
         {
             let inst_ty = self.engine.instantiate(&scheme, &self.rigid_ids);
+            // Before the arguments, which the elaborator also walks after the
+            // callee.
+            let param_labels = self.param_labels_of(scheme.kind);
+            self.walk_tys.push(WalkStep::Name(NameFact {
+                ty: inst_ty,
+                at,
+                param_labels,
+            }));
             // Hover-only here; the graph occurrence (with the correct
             // Unqualified/Qualified kind) is emitted in `resolve_simple_callee`.
             // Skip the doc map probe + clone on the non-LSP path, where
@@ -3756,12 +3683,20 @@ impl Compiler {
         // through the imported scheme's canonical `def`.
         self.record_value_use(scheme.def, member.span, ReferenceKind::Qualified);
         self.record_qualifier_use(&ma.module);
+        // A member with neither a fixed denotation nor a slot has no runtime
+        // binding, which `check_named_value` reports, so nothing elaborates it.
+        let at = match (Denotation::from_kind(scheme.kind), slot) {
+            (Some(den), _) => NameAt::Den(den),
+            (None, Some(slot)) => NameAt::Den(self.global_denotation(slot)),
+            (None, None) => NameAt::Bound,
+        };
         Some(QualifiedMember {
             module_key,
             member_name: &member.name,
             member_span: member.span,
             scheme,
             has_binding: slot.is_some(),
+            at,
         })
     }
 
@@ -3799,7 +3734,8 @@ impl Compiler {
         match callee {
             ast::Expression::Identifier(id) => {
                 let scheme = *self.env.lookup(&id.name)?;
-                let has_binding = self.has_binding(&id.name, &scheme.kind);
+                let sid = self.engine.intern(&id.name);
+                let (at, has_binding) = self.name_at(sid, scheme.kind);
                 // This path bypasses `compile_identifier`, so it is the genuine
                 // unqualified-use seam for calls.
                 self.record_value_use(scheme.def, id.span, ReferenceKind::Unqualified);
@@ -3808,6 +3744,7 @@ impl Compiler {
                     span: id.span,
                     scheme,
                     has_binding,
+                    at,
                     qualifier: None,
                 })
             }
@@ -3820,6 +3757,7 @@ impl Compiler {
                     span: m.member_span,
                     scheme: m.scheme,
                     has_binding: m.has_binding,
+                    at: m.at,
                     qualifier: Some(m.module_key),
                 })
             }
@@ -3928,7 +3866,7 @@ impl Compiler {
             return result_ty;
         }
 
-        let mut regions: Vec<Vec<Ty>> = vec![Vec::new(); args.len()];
+        let mut regions: Vec<Vec<WalkStep>> = vec![Vec::new(); args.len()];
 
         // Record-update: the base is unified with the constructor's result
         // type; the per-field projection is Core's job.
@@ -4018,6 +3956,11 @@ impl Compiler {
             return self.engine.fresh_var();
         };
         let ty = self.engine.instantiate(&m.scheme, &self.rigid_ids);
+        self.walk_tys.push(WalkStep::Name(NameFact {
+            ty,
+            at: m.at,
+            param_labels: None,
+        }));
         self.record(m.member_name, ty, m.member_span, None);
         // Rendered lazily: the qualifier only reaches a diagnostic on the
         // no-runtime-binding path, so the common (bound) case skips the
@@ -4372,11 +4315,6 @@ impl Compiler {
             body: body.clone(),
             body_ty,
             walk_tys,
-            // Everything the walk of *this* body just recorded: the lambdas
-            // written directly inside it. Taken here rather than in
-            // `finish_fn_frame`, which has already handed the enclosing frame
-            // its own list back.
-            closures: std::mem::take(&mut self.frame_closures),
         };
         (body_ty, parked)
     }
@@ -4555,13 +4493,23 @@ impl Compiler {
         param_binds: &[(StrId, Ty)],
         body: &ast::Expression,
         body_ty: Ty,
-        walk_tys: &[Ty],
+        walk_tys: &[WalkStep],
         func_idx: FuncIdx,
     ) {
         use crate::core_ir::perceus;
         let LoweredBody { core, pool, .. } =
             self.elaborate_then_materialize(clean, Some(func_idx), |c, pool, fns| {
-                typed_ir::elaborate_body(c, pool, fns, name, param_binds, body, body_ty, walk_tys)
+                typed_ir::elaborate_body(
+                    c,
+                    pool,
+                    fns,
+                    name,
+                    param_binds,
+                    body,
+                    body_ty,
+                    walk_tys,
+                    false,
+                )
             });
         if self.check_only {
             return;
@@ -4610,30 +4558,6 @@ impl Compiler {
         self.defer_depth += 1;
     }
 
-    /// Freeze the value env for every body parked so far, to be restored around
-    /// their elaboration in [`Self::end_deferred_elaboration`].
-    ///
-    /// Called once, between the declaration walk and the toplevel `let`/bare-
-    /// expression walk. The frame snapshot a `DeferredBody` carries fixes only
-    /// the *load* a free name lowers to; its `Ty` and `ValueKind` still come
-    /// from `self.env` at drain time, and a toplevel `let` rebinds in place.
-    /// Bodies parked *after* this point (lambdas bound by those very `let`s)
-    /// need the live env and keep it: they may reference an earlier toplevel
-    /// bind that `resolve_variable` resolves to a global rather than a
-    /// capture, so it is reachable only through `env`.
-    pub(super) fn pin_deferred_env(&mut self) {
-        // One pin per drain: an imported module is compiled by `process_imports`
-        // *before* its importer opens a region, so `analyse_module` never nests
-        // inside another's deferral and a second pin would name body indices
-        // from a region that is not the one being closed.
-        debug_assert_eq!(self.defer_depth, 1, "pin outside the module's own region");
-        debug_assert!(self.deferred_env_pin.is_none(), "deferred env pinned twice");
-        if self.deferred_bodies.is_empty() {
-            return;
-        }
-        self.deferred_env_pin = Some((self.deferred_bodies.len(), self.env.clone()));
-    }
-
     /// Close the region opened by [`Self::begin_deferred_elaboration`] and, at
     /// depth zero, run the Core pipeline over every parked body in walk order
     /// — innermost closure first. This is the module's whole `lower`→`perceus`
@@ -4645,19 +4569,7 @@ impl Compiler {
             return;
         }
         let bodies = std::mem::take(&mut self.deferred_bodies);
-        // Bodies parked before `pin_deferred_env` (the declaration walk's)
-        // elaborate against the env that walk saw; the rest (lambdas the
-        // toplevel `let` walk parked) against the live one. See the pin's docs.
-        let (pinned_upto, mut live_env) = match self.deferred_env_pin.take() {
-            Some((n, pinned)) => (n, Some(std::mem::replace(&mut self.env, pinned))),
-            None => (0, None),
-        };
-        for (i, d) in bodies.into_iter().enumerate() {
-            if i == pinned_upto
-                && let Some(live) = live_env.take()
-            {
-                self.env = live;
-            }
+        for d in bodies {
             // Re-proved per body, not once for the run: `elaborate_deferred`
             // consumes the proof, and an internal error raised while lowering
             // one body poisons the module for the next.
@@ -4670,15 +4582,11 @@ impl Compiler {
                 self.elaborate_deferred(d, clean);
             }
         }
-        // Every parked body was pre-pin: hand the live env back. Lowering reads
-        // the env, never writes it, so the pinned copy is dropped unexamined.
-        if let Some(live) = live_env {
-            self.env = live;
-        }
     }
 
-    fn elaborate_deferred(&mut self, mut d: DeferredBody, clean: CleanModule) {
-        let saved = self.enter_elab_frame(&mut d);
+    /// Elaborate a parked body. Everything it needs about names and closures
+    /// the walk recorded in `walk_tys`, so no frame state is restored for it.
+    fn elaborate_deferred(&mut self, d: DeferredBody, clean: CleanModule) {
         self.elaborate_body(
             clean,
             d.name,
@@ -4688,67 +4596,6 @@ impl Compiler {
             &d.walk_tys,
             d.func_idx,
         );
-        self.leave_elab_frame(saved);
-    }
-
-    /// Swap a [`DeferredBody`]'s frame snapshot into the compiler for its
-    /// elaboration, parking the current state in the returned [`ElabFrame`].
-    ///
-    /// `resolve_name` reads the frame: a captured name must land on the
-    /// `Denotation::capture` index the walk assigned it, a module-scope decl
-    /// must still look like a global, and the frame's self-name must resolve
-    /// to the same self-closure/self-toplevel-fn shape. The last of those is not
-    /// answered by `captures` — `resolve_variable` short-circuits on
-    /// `current_binding` while scanning `outer_scopes` — so the whole chain
-    /// is restored, not just the module scope.
-    fn enter_elab_frame(&mut self, d: &mut DeferredBody) -> ElabFrame {
-        self.env.push_scope();
-        for (name, scheme) in &d.capture_env {
-            self.env.define(name, *scheme);
-        }
-        ElabFrame {
-            outer_scopes: std::mem::replace(
-                &mut self.outer_scopes,
-                std::mem::take(&mut d.outer_scopes),
-            ),
-            locals: std::mem::take(&mut self.locals),
-            captures: std::mem::replace(&mut self.captures, std::mem::take(&mut d.captures)),
-            capture_names: std::mem::replace(
-                &mut self.capture_names,
-                std::mem::take(&mut d.capture_names),
-            ),
-            rigid_ids: std::mem::replace(&mut self.rigid_ids, std::mem::take(&mut d.rigid_ids)),
-            current_binding: std::mem::replace(&mut self.current_binding, d.binding.take()),
-            // The lambdas this body wrote. `ElabCtx::closure` only ever asks
-            // about a node in the body it is elaborating, so this is the whole
-            // universe of answers for the elaboration — and the enclosing
-            // frame's sites (or the module toplevel's, still waiting to be
-            // elaborated) are safe from being read by it.
-            frame_closures: std::mem::replace(
-                &mut self.frame_closures,
-                std::mem::take(&mut d.closures),
-            ),
-        }
-    }
-
-    fn leave_elab_frame(&mut self, saved: ElabFrame) {
-        self.env.pop_scope();
-        let ElabFrame {
-            outer_scopes,
-            locals,
-            captures,
-            capture_names,
-            rigid_ids,
-            current_binding,
-            frame_closures,
-        } = saved;
-        self.outer_scopes = outer_scopes;
-        self.locals = locals;
-        self.captures = captures;
-        self.capture_names = capture_names;
-        self.rigid_ids = rigid_ids;
-        self.current_binding = current_binding;
-        self.frame_closures = frame_closures;
     }
 
     /// Compile a `fn(...) { ... }` expression. `param_hints` is `Some` when
@@ -4756,17 +4603,12 @@ impl Compiler {
     /// types are known; in that case any unannotated parameter is given the
     /// hinted type rather than a fresh var so the body can immediately do
     /// field access etc.
-    ///
-    /// `span` is the lambda's own span: the [`ClosureSite`] recorded under it
-    /// belongs to the frame this runs in — the one whose elaboration builds the
-    /// `Atom::Closure` and evaluates its captures.
     fn compile_function_common(
         &mut self,
         params: &[ast::FunctionParameter],
         body: &ast::Expression,
         return_annot: Option<&ast::TypeIdentifier>,
         param_hints: Option<Vec<Ty>>,
-        span: Span,
     ) -> Ty {
         let saved = self.enter_fn_frame(None);
 
@@ -4799,14 +4641,10 @@ impl Compiler {
             None => body_ty,
         };
 
-        let (func_idx, captures) = self.finish_fn_frame(saved, body_emit);
+        let closure = self.finish_fn_frame(saved, body_emit);
         // `finish_fn_frame` restored the enclosing frame, so this lands in that
-        // frame's site list — the one its elaboration will read.
-        self.frame_closures.push(ClosureSite {
-            at: span,
-            func_idx,
-            captures,
-        });
+        // frame's walk, which is the one whose elaboration builds the closure.
+        self.walk_tys.push(WalkStep::Closure(closure));
         self.engine.mk_fun(&param_tys, ret_ty)
     }
 
@@ -4848,7 +4686,7 @@ impl Compiler {
         // `finish_fn_frame` reserved it; take it from there rather than
         // re-deriving it from `fns.len()`, which is only the same number by
         // accident of nothing else having reserved since.
-        let (func_idx, _) = self.finish_fn_frame(saved, body_emit);
+        let func_idx = self.finish_fn_frame(saved, body_emit).func_idx;
         self.global_to_func.insert(global_slot, func_idx);
         self.engine.mk_fun(&param_tys, ret_ty)
     }
@@ -4886,7 +4724,6 @@ impl Compiler {
                     std::mem::replace(&mut self.current_binding, self.next_fn_self_name.take())
                 }
             },
-            closures: std::mem::take(&mut self.frame_closures),
         }
     }
 
@@ -4912,52 +4749,31 @@ impl Compiler {
         self.register_local_binding(&p.identifier.name, ty, p.identifier.span);
     }
 
-    /// Close out a function body: reserve its function slot, combine the
-    /// walk half ([`ParkedBody`]) with the frame state that just became final
-    /// into the complete [`DeferredBody`], and restore the enclosing frame
-    /// and type-env. Returns the assigned `func_idx` and captured-name set so
-    /// `compile_function_common` can record a [`ClosureSite`] in the enclosing
-    /// frame.
+    /// Close out a function body: reserve its function slot, park it as a
+    /// [`DeferredBody`], and restore the enclosing frame and type-env. Returns
+    /// the closure as the enclosing frame sees it: the slot, and how each
+    /// capture loads there, which `compile_function_common` records in the
+    /// enclosing frame's walk.
     ///
     /// Nothing is lowered here: the body is lowered in pass 6, after the walk.
-    fn finish_fn_frame(&mut self, saved: FnFrame, parked: ParkedBody) -> (FuncIdx, Vec<StrId>) {
-        // The frame's own name/rigids/captures, taken before the enclosing
-        // frame's are moved back over them: a parked body needs them at
-        // elaboration time to resolve its captures and self-reference exactly
-        // as the walk did.
-        let frame_binding = std::mem::replace(&mut self.current_binding, saved.binding);
-        let frame_rigids = std::mem::replace(&mut self.rigid_ids, saved.rigid_ids);
-        let frame_captures = std::mem::replace(&mut self.captures, saved.captures);
-        // The inner frame's own sites left with its `DeferredBody`
-        // (`compile_fn_body`); hand the enclosing frame its list back so the
-        // lambda this closes out can be recorded into it.
-        self.frame_closures = saved.closures;
+    fn finish_fn_frame(&mut self, saved: FnFrame, parked: ParkedBody) -> ClosureFact {
+        self.current_binding = saved.binding;
+        self.rigid_ids = saved.rigid_ids;
+        self.captures = saved.captures;
         self.env.pop_scope();
         self.pop_unused_scope();
 
         let captured = std::mem::replace(&mut self.capture_names, saved.capture_names);
         // Reserve the body's slot now, so the `func_idx` that the
-        // `ClosureSite` and `global_to_func` are about to record is the one the
+        // `ClosureFact` and `global_to_func` are about to record is the one the
         // elaborated body fills in.
         let func_idx = self.fns.push(None);
-        // Read after `env.pop_scope()`: a captured name is by
-        // definition bound in an *enclosing* frame's scope, which is
-        // still open here but gone by elaboration time.
-        let capture_env = captured
-            .iter()
-            .chain(frame_binding.iter())
-            .filter_map(|&n| {
-                let s = self.engine.str(n).to_string();
-                self.env.lookup(&s).map(|&sc| (s, sc))
-            })
-            .collect();
         let ParkedBody {
             name: body_name,
             param_binds,
             body,
             body_ty,
             walk_tys,
-            closures,
         } = parked;
         self.deferred_bodies.push(DeferredBody {
             name: body_name,
@@ -4965,17 +4781,7 @@ impl Compiler {
             body,
             body_ty,
             walk_tys,
-            closures,
             func_idx,
-            captures: frame_captures,
-            capture_names: captured.clone(),
-            rigid_ids: frame_rigids,
-            binding: frame_binding,
-            // Read before the `outer_scopes.pop()` below: this is the exact
-            // scope chain `resolve_variable` walked, and nothing mutates an
-            // outer frame's map while an inner frame is open.
-            outer_scopes: self.outer_scopes.clone(),
-            capture_env,
         });
 
         // `enter_fn_frame` pushed the enclosing frame's locals; move them back.
@@ -4992,11 +4798,29 @@ impl Compiler {
         // Re-resolving each capture in the *enclosing* frame is load-bearing:
         // `resolve_variable` promotes a name this body captured from further
         // out into the enclosing frame's own capture set, so transitive
-        // captures chain outwards.
-        for &cap_name in &captured {
-            let _ = self.resolve_variable(cap_name);
-        }
-        (func_idx, captured)
+        // captures chain outwards. It is also how each capture loads where the
+        // closure is built, so the result is what the elaborator reads.
+        let captures = captured
+            .iter()
+            .map(|&cap_name| {
+                let name = self.engine.str(cap_name).to_string();
+                let scheme = self.env.lookup(&name).copied();
+                let (at, ty) = match scheme {
+                    Some(scheme) => (
+                        self.name_at(cap_name, scheme.kind).0,
+                        self.engine.instantiate(&scheme, &self.rigid_ids),
+                    ),
+                    None => (NameAt::Bound, self.engine.fresh_var()),
+                };
+                let fact = NameFact {
+                    ty,
+                    at,
+                    param_labels: None,
+                };
+                (cap_name, fact)
+            })
+            .collect();
+        ClosureFact { func_idx, captures }
     }
 
     // ========================================================================

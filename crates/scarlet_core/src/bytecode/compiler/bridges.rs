@@ -42,9 +42,6 @@ impl ElabCtx for Compiler {
     fn intern(&mut self, s: &str) -> StrId {
         self.engine.intern(s)
     }
-    fn str(&self, id: StrId) -> &str {
-        self.engine.str(id)
-    }
     // Safe mid-elaboration: the pool is `ConstId`-addressed, so pooling moves
     // no address.
     fn number_const(&mut self, lit: &ast::NumberLiteral) -> crate::core_ir::ConstId {
@@ -60,34 +57,18 @@ impl ElabCtx for Compiler {
     fn binary_const(&mut self, bytes: Vec<u8>, bit_len: u64) -> crate::core_ir::ConstId {
         self.const_binary(bytes, bit_len)
     }
-    fn resolve_name(&mut self, name: &str) -> Option<(Ty, Denotation)> {
+    fn resolve_ctor(&mut self, name: &str) -> Option<(Ty, Denotation)> {
         let scheme = self.env.lookup(name)?;
-        let kind = scheme.kind;
+        let den = Denotation::from_kind(scheme.kind)?;
         let ty = self.engine.instantiate(scheme, &self.rigid_ids);
-        let id = self.engine.intern(name);
-        // Called even for constructors and builtins, for its side effects:
-        // marking the name used, and recording a capture.
-        let place = self.resolve_variable(id);
-        let den = match (Denotation::from_kind(kind), place) {
-            (Some(fixed), _) => fixed,
-            (None, Some(Place::Outside(den))) => den,
-            (None, Some(Place::ThisFunction)) => typed_ir::elaborator_bug(
-                "a name this function binds has no binding in the elaborator",
-                Span::DUMMY,
-            ),
-            // `analyse_module` unwinds `self.locals` before `__main__`
-            // elaborates, so a toplevel decl's own name is only findable on
-            // its `ToplevelDecl`. Reached for an intra-SCC forward ref.
-            (None, None) if self.outer_scopes.is_empty() => match self.decl_denotation(id) {
-                Some(den) => den,
-                None => typed_ir::elaborator_bug(
-                    "toplevel name resolves to no decl and no binding",
-                    Span::DUMMY,
-                ),
-            },
-            (None, None) => Denotation::self_closure(),
-        };
         Some((ty, den))
+    }
+    fn toplevel_fn_ty(&mut self, name: &str) -> Option<Ty> {
+        let scheme = self.env.lookup(name)?;
+        Some(self.engine.instantiate(scheme, &self.rigid_ids))
+    }
+    fn decl_denotation(&self, name: StrId) -> Option<Denotation> {
+        Compiler::decl_denotation(self, name)
     }
     fn resolve_qualified(
         &mut self,
@@ -172,40 +153,6 @@ impl ElabCtx for Compiler {
                 .collect(),
         )
     }
-    /// Labels come off the callee's own scheme, found by the same lookup
-    /// [`ElabCtx::resolve_name`] / [`ElabCtx::resolve_qualified`] used for its
-    /// denotation, so the two cannot answer for different declarations.
-    fn fn_param_labels(&mut self, qual: Option<&str>, name: &str) -> Option<Vec<StrId>> {
-        let kind = match qual {
-            None => self.env.lookup(name)?.kind,
-            // Same lookup `resolve_qualified` uses for the callee's own
-            // denotation: qualifier -> module key -> exported scheme. Reading
-            // the labels off that scheme, not a second table, is what keeps
-            // this answer for the same declaration `resolve_qualified` named.
-            Some(q) => {
-                let key = self.imported_qualifiers.get(q)?.clone();
-                let iface = self.module_table.get(&key)?;
-                iface.values.get(name)?.scheme.kind
-            }
-        };
-        let ValueKind::ModuleFn { param_labels } = kind else {
-            return None;
-        };
-        // Empty is "not recorded", never "takes no parameters", so it refuses
-        // the label rather than slotting it against nothing.
-        if param_labels.len == 0 {
-            return None;
-        }
-        Some(self.engine.str_ids_of(param_labels).to_vec())
-    }
-    fn closure(&mut self, span: Span) -> Option<(crate::core_ir::FuncIdx, Vec<StrId>)> {
-        // A scan over the frame's own lambdas, a handful at most. A table
-        // keyed by span would collide across modules.
-        self.frame_closures
-            .iter()
-            .find(|s| s.at == span)
-            .map(|s| (s.func_idx, s.captures.clone()))
-    }
     fn fn_of_global(&self, slot: GlobalSlot) -> Option<crate::core_ir::FuncIdx> {
         self.global_to_func.get(&slot).copied()
     }
@@ -213,12 +160,6 @@ impl ElabCtx for Compiler {
         self.take_global_slot()
     }
     fn toplevel_decls(&self) -> Vec<(usize, GlobalSlot)> {
-        // A fn body's outermost block takes the same code path but is not a
-        // module toplevel: its node indices address its own body. Only a
-        // module toplevel runs with no enclosing frame.
-        if !self.outer_scopes.is_empty() {
-            return Vec::new();
-        }
         self.toplevel_decls
             .iter()
             .map(|d| (d.node, d.slot))
