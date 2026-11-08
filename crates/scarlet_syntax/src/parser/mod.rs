@@ -663,40 +663,26 @@ impl Parser {
                     self.parse_attributed_declaration(doc, Vec::new())?,
                 )));
             }
-            Kind::PuncOpenParen => {
-                if self.is_tuple_destructuring() {
-                    return Ok(ast::Node::Statement(Box::new(
-                        self.parse_tuple_destructuring()?,
-                    )));
-                }
+            Kind::PuncOpenParen if self.is_tuple_destructuring() => {
+                return Ok(ast::Node::Statement(Box::new(self.parse_binding()?)));
             }
             Kind::Identifier(_) if self.is_backpass_ahead() => {
                 return Ok(ast::Node::Statement(Box::new(self.parse_backpass()?)));
             }
             Kind::Identifier(_) if self.is_qualified_ctor_destructuring() => {
-                return Ok(ast::Node::Statement(Box::new(
-                    self.parse_ctor_destructuring()?,
-                )));
+                return Ok(ast::Node::Statement(Box::new(self.parse_binding()?)));
             }
-            Kind::Identifier(name) if self.is_binding_ahead() => {
-                if is_type_name(&name) {
-                    // Only commit to a statement when the token right after
-                    // the name is `=` or `(`; anything else (`Foo.Bar = ..`)
-                    // falls through to expression parsing.
-                    match self.peek_next() {
-                        Some(Kind::PuncEquals) => {
-                            return Ok(ast::Node::Statement(Box::new(self.parse_typed_discard()?)));
-                        }
-                        Some(Kind::PuncOpenParen) => {
-                            return Ok(ast::Node::Statement(Box::new(
-                                self.parse_ctor_destructuring()?,
-                            )));
-                        }
-                        _ => {}
-                    }
-                } else {
-                    return Ok(ast::Node::Statement(Box::new(self.parse_binding()?)));
-                }
+            // An uppercase name only starts a binding as `Ctor = e` or
+            // `Ctor(..) = e`; anything else falls through to an expression.
+            Kind::Identifier(name)
+                if self.is_binding_ahead()
+                    && (!is_type_name(&name)
+                        || matches!(
+                            self.peek_next(),
+                            Some(Kind::PuncEquals | Kind::PuncOpenParen)
+                        )) =>
+            {
+                return Ok(ast::Node::Statement(Box::new(self.parse_binding()?)));
             }
             _ => {}
         }
@@ -1669,8 +1655,20 @@ impl Parser {
             {
                 let label = self.eat_identifier("Expected pattern label")?;
                 self.eat(Kind::PuncColon)?;
-                let pattern = self.parse_pattern_range()?;
-                args.push(ast::PatternArg::Labeled { label, pattern });
+                // `name:` with nothing after it binds the field to `name`.
+                let punned = matches!(self.kind(), Kind::PuncComma | Kind::PuncCloseParen);
+                let pattern = if punned {
+                    ast::Pattern::Var {
+                        name: label.clone(),
+                    }
+                } else {
+                    self.parse_pattern_range()?
+                };
+                args.push(ast::PatternArg::Labeled {
+                    label,
+                    pattern,
+                    punned,
+                });
             } else {
                 let pattern = self.parse_pattern_range()?;
                 args.push(ast::PatternArg::Positional(pattern));
@@ -2058,35 +2056,6 @@ impl Parser {
         false
     }
 
-    fn parse_tuple_destructuring(&mut self) -> PResult<ast::Statement> {
-        let span = self.current_span();
-        let patterns = self.parse_comma_list(Kind::PuncOpenParen, Kind::PuncCloseParen, |p| {
-            p.parse_pattern_atom()
-        })?;
-        self.eat(Kind::PuncEquals)?;
-        let init = self.parse_expression()?;
-
-        Ok(ast::Statement::TupleDestructuringBinding(
-            ast::TupleDestructuringBinding {
-                patterns,
-                init,
-                span: self.span_from(span),
-            },
-        ))
-    }
-
-    fn parse_typed_discard(&mut self) -> PResult<ast::Statement> {
-        let span = self.current_span();
-        let ty_name = self.eat_identifier("Expected type name")?;
-        self.eat(Kind::PuncEquals)?;
-        let init = self.parse_expression()?;
-        Ok(ast::Statement::TypedDiscard(ast::TypedDiscard {
-            ty_name,
-            init,
-            span: self.span_from(span),
-        }))
-    }
-
     /// Whether a `module::Ctor(..) = e` statement starts here: a module name,
     /// `::`, a constructor name and its `(`, then an `=` after the matching `)`
     /// on the same line. Without the `=` it is a call, `http::Fixed(1, b)`.
@@ -2123,40 +2092,6 @@ impl Parser {
         false
     }
 
-    fn parse_ctor_destructuring(&mut self) -> PResult<ast::Statement> {
-        let span = self.current_span();
-        // `parse_node`'s dispatch guarantees a constructor name then `(`, with
-        // a module and `::` before it for `module::Ctor(..)`.
-        let qualifier = if self.peek_next() == Some(Kind::PuncColonColon) {
-            let module = self.eat_identifier("Expected module name")?;
-            self.eat(Kind::PuncColonColon)?;
-            Some(module)
-        } else {
-            None
-        };
-        let name = self.eat_identifier("Expected constructor name")?;
-        self.eat(Kind::PuncOpenParen)?;
-        let (args, rest) = self.parse_pattern_args()?;
-        self.eat(Kind::PuncCloseParen)?;
-        let pattern_span = self.span_from(span);
-        self.eat(Kind::PuncEquals)?;
-        let init = self.parse_expression()?;
-        Ok(ast::Statement::CtorDestructuringBinding(
-            ast::CtorDestructuringBinding {
-                qualifier,
-                name,
-                args,
-                rest,
-                pattern_span,
-                init,
-                span: self.span_from(span),
-            },
-        ))
-    }
-
-    /// `a, b <- call(args)`. Statement position only; the desugarer later
-    /// feeds the rest of the enclosing block to the call as a trailing
-    /// function argument, so the RHS must syntactically be a call.
     fn parse_backpass(&mut self) -> PResult<ast::Statement> {
         let span = self.current_span();
         let mut binders = vec![self.parse_backpass_binder()?];
@@ -2199,26 +2134,28 @@ impl Parser {
         Ok(id)
     }
 
+    /// `pattern [Type] = init`. A plain name may carry a type, `x Int = 5`;
+    /// any other pattern takes the type from its constructor or its parts.
     fn parse_binding(&mut self) -> PResult<ast::Statement> {
         let doc = self.extract_doc_comment();
         let span = self.current_span();
-        let name = self.eat_name("Expected identifier")?;
+        let pattern = self.parse_pattern()?;
 
         let mut typ: Option<ast::TypeIdentifier> = None;
-        if self.is_type_start() {
+        if matches!(pattern, ast::Pattern::Var { .. }) && self.is_type_start() {
             typ = Some(self.parse_type_identifier()?);
         }
 
         self.eat(Kind::PuncEquals)?;
         let init = self.parse_expression()?;
 
-        Ok(ast::Statement::VariableBinding(ast::VariableBinding {
+        Ok(ast::Statement::Binding(Box::new(ast::Binding {
             doc,
-            identifier: ast::Identifier { name, span },
+            pattern,
             typ,
             init,
             span: self.span_from(span),
-        }))
+        })))
     }
 
     fn parse_attributed_declaration(
@@ -2773,53 +2710,60 @@ mod tests {
         assert_no_errors("const PI = 3.14");
     }
 
-    #[test]
-    fn test_typed_discard() {
-        let r = parse("Nil = println('x')");
+    fn binding(src: &str) -> ast::Binding {
+        let r = parse(src);
         assert!(r.diagnostics.is_empty(), "{:#?}", r.diagnostics);
         let ast::Node::Statement(s) = &r.ast.body[0] else {
             panic!("expected statement, got {:#?}", r.ast.body[0])
         };
-        let ast::Statement::TypedDiscard(td) = s.as_ref() else {
-            panic!("expected TypedDiscard, got {:#?}", s)
+        let ast::Statement::Binding(b) = s.as_ref() else {
+            panic!("expected a binding, got {:#?}", s)
         };
-        assert_eq!(td.ty_name.name, "Nil");
-
-        assert_no_errors("Int = 5");
-        assert_no_errors("String = 'hi'");
+        (**b).clone()
     }
 
     #[test]
-    fn test_ctor_destructuring() {
-        let r = parse("Some(x) = Some(1)");
-        assert!(r.diagnostics.is_empty(), "{:#?}", r.diagnostics);
-        let ast::Node::Statement(s) = &r.ast.body[0] else {
-            panic!("expected statement, got {:#?}", r.ast.body[0])
+    fn every_binding_is_a_pattern() {
+        let b = binding("x Int = 5");
+        assert_eq!(b.name().map(|n| n.name.as_str()), Some("x"));
+        assert!(b.typ.is_some());
+
+        let b = binding("_ Nil = println('x')");
+        assert_eq!(b.name().map(|n| n.name.as_str()), Some("_"));
+        assert!(b.typ.is_some());
+
+        assert!(matches!(
+            binding("(a, b) = t").pattern,
+            ast::Pattern::Tuple { .. }
+        ));
+        assert!(matches!(
+            binding("Nil = println('x')").pattern,
+            ast::Pattern::Constructor { .. }
+        ));
+
+        let b = binding("Some(x) = Some(1)");
+        let ast::Pattern::Constructor { name, args, .. } = &b.pattern else {
+            panic!("expected a constructor pattern, got {:#?}", b.pattern)
         };
-        let ast::Statement::CtorDestructuringBinding(cd) = s.as_ref() else {
-            panic!("expected CtorDestructuringBinding, got {:#?}", s)
-        };
-        assert_eq!(cd.name.name, "Some");
-        assert_eq!(cd.args.len(), 1);
+        assert_eq!((name.name.as_str(), args.len()), ("Some", 1));
 
         assert_no_errors("Point(x, y) = origin");
         assert_no_errors("Wrapper(a, b, c) = make()");
 
         // Through its module, as a constructor has to be written when it is
         // not imported by name.
-        let r = parse("headers::Header(name, value) = h");
-        assert!(r.diagnostics.is_empty(), "{:#?}", r.diagnostics);
-        let ast::Node::Statement(s) = &r.ast.body[0] else {
-            panic!("expected statement, got {:#?}", r.ast.body[0])
+        let b = binding("headers::Header(name, value) = h");
+        let ast::Pattern::Constructor {
+            qualifier,
+            name,
+            args,
+            ..
+        } = &b.pattern
+        else {
+            panic!("expected a constructor pattern, got {:#?}", b.pattern)
         };
-        let ast::Statement::CtorDestructuringBinding(cd) = s.as_ref() else {
-            panic!("expected CtorDestructuringBinding, got {:#?}", s)
-        };
-        assert_eq!(
-            cd.qualifier.as_ref().map(|q| q.name.as_str()),
-            Some("headers")
-        );
-        assert_eq!((cd.name.name.as_str(), cd.args.len()), ("Header", 2));
+        assert_eq!(qualifier.as_ref().map(|q| q.name.as_str()), Some("headers"));
+        assert_eq!((name.name.as_str(), args.len()), ("Header", 2));
         // With no `=` after it, the same shape is a call.
         let r = parse("http::Fixed(1, b)");
         assert!(r.diagnostics.is_empty(), "{:#?}", r.diagnostics);
@@ -2933,11 +2877,36 @@ mod tests {
     }
 
     #[test]
+    fn a_label_alone_binds_the_field_to_its_name() {
+        let b = binding("User(name:, age: a, ..) = u");
+        let ast::Pattern::Constructor { args, rest, .. } = &b.pattern else {
+            panic!("expected a constructor pattern, got {:#?}", b.pattern)
+        };
+        assert!(*rest);
+        let [
+            ast::PatternArg::Labeled {
+                pattern: ast::Pattern::Var { name: n },
+                punned: true,
+                ..
+            },
+            ast::PatternArg::Labeled {
+                pattern: ast::Pattern::Var { name: a },
+                punned: false,
+                ..
+            },
+        ] = args.as_slice()
+        else {
+            panic!("unexpected args {args:#?}")
+        };
+        assert_eq!((n.name.as_str(), a.name.as_str()), ("name", "a"));
+    }
+
+    #[test]
     fn test_spaced_less_than_minus_is_still_comparison() {
         let r = assert_no_errors("{\nx = a < -b\nx\n}");
         assert!(matches!(
             first_block_node(&r),
-            ast::Node::Statement(s) if matches!(s.as_ref(), ast::Statement::VariableBinding(_))
+            ast::Node::Statement(s) if matches!(s.as_ref(), ast::Statement::Binding(_))
         ));
     }
 
@@ -3303,8 +3272,8 @@ mod tests {
         let ast::Node::Statement(stmt) = &result.ast.body[0] else {
             panic!("expected statement")
         };
-        let ast::Statement::VariableBinding(vb) = stmt.as_ref() else {
-            panic!("expected variable binding")
+        let ast::Statement::Binding(vb) = stmt.as_ref() else {
+            panic!("expected a binding")
         };
         let ast::Expression::BinaryLiteral(bl) = &vb.init else {
             panic!("expected BinaryLiteral, got {:?}", vb.init)

@@ -130,20 +130,10 @@ fn desugar_statement(s: &mut Statement) {
             Declaration::Type(_) => {}
         },
         Statement::ImportDeclaration(_) => {}
-        Statement::TupleDestructuringBinding(t) => {
-            for p in &mut t.patterns {
-                desugar_pattern(p);
-            }
-            desugar_expr(&mut t.init);
+        Statement::Binding(b) => {
+            desugar_pattern(&mut b.pattern);
+            desugar_expr(&mut b.init);
         }
-        Statement::TypedDiscard(t) => desugar_expr(&mut t.init),
-        Statement::CtorDestructuringBinding(c) => {
-            for a in &mut c.args {
-                desugar_pattern_arg(a);
-            }
-            desugar_expr(&mut c.init);
-        }
-        Statement::VariableBinding(v) => desugar_expr(&mut v.init),
         // `desugar_body` consumed every backpass this walk can reach; one
         // here survived a parser rejection (top level), so only its call's
         // own subtree is left to clean.

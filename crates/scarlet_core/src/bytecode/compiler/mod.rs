@@ -2192,108 +2192,10 @@ impl Compiler {
 
     fn compile_statement(&mut self, stmt: &ast::Statement) {
         match stmt {
-            ast::Statement::VariableBinding(vb) => {
-                let name = vb.identifier.name.clone();
-                let name_id = self.engine.intern(&name);
-
-                // At module scope a re-binding gets a fresh slot (see
-                // `get_or_create_local`), so the slot must be allocated *after*
-                // the initializer compiles — otherwise the name would already
-                // resolve to the new, still-uninitialised slot and an init that
-                // reads the prior binding (e.g. `x = x + 1`) would read garbage.
-                // The prior binding stays in scope across the init, which also
-                // drives `Self_` resolution for a self-recursive lambda. A first
-                // binding still reserves its slot up front so a self-recursive
-                // lambda can resolve its own (not-yet-bound) name through the
-                // entry frame.
-                let defer_slot = self.outer_scopes.is_empty() && self.locals.contains_key(&name_id);
-                if !defer_slot {
-                    self.get_or_create_local(&name);
-                }
-
-                let annot_ty = vb.typ.as_ref().map(|a| self.hydrate_annotation(a));
-
-                self.engine.enter_level();
-                let self_ty = self.engine.fresh_var();
-                let init_is_fn = matches!(vb.init, ast::Expression::FunctionExpression(_));
-                // Only pre-bind for recursive lambdas. For any other init, exposing
-                // the name to its own initializer lets `x = x` infer ⊥ and generalize
-                // to ∀A.A, which is unsound.
-                if init_is_fn {
-                    self.env.define(&name, mono(self_ty));
-                }
-
-                // Deliver the self-name to the lambda's own frame via a one-shot
-                // consumed by its `enter_fn_frame` — NOT by mutating
-                // `current_binding` here, which leaks into nested / HOF-arg
-                // lambdas and mis-resolves their calls to the enclosing fn as
-                // Self_ (emitting CallSelf against the wrong, live frame).
-                let saved_self = if init_is_fn {
-                    self.next_fn_self_name.replace(name_id)
-                } else {
-                    self.next_fn_self_name.take()
-                };
-                let init_ty = self.compile_expr_with_hint(&vb.init, annot_ty);
-                self.next_fn_self_name = saved_self;
-
-                self.engine.unify_at(self_ty, init_ty, vb.init.span());
-                self.engine.leave_level();
-
-                let final_ty = if let Some(a) = annot_ty {
-                    self.engine
-                        .unify_at(a, init_ty, type_defining_span(&vb.init));
-                    a
-                } else {
-                    init_ty
-                };
-
-                let restricted = self.restricted_generalization_cons();
-                let scheme = self.engine.generalize_restricted(final_ty, &restricted);
-                let m = self.current_module_slice();
-                self.env.define_at(
-                    &name,
-                    scheme,
-                    DefinitionLocation::new(vb.identifier.span, m, EntityKind::Value),
-                );
-                self.track_binding(&name, vb.identifier.span);
-                if let Some(doc) = &vb.doc {
-                    self.env.store_doc(&name, doc.clone());
-                }
-                self.record(&name, final_ty, vb.identifier.span, vb.doc.clone());
-                self.emit_value_def(vb.identifier.span, &name, vb.doc.clone());
-
-                if defer_slot {
-                    self.get_or_create_local(&name);
-                }
-            }
-            ast::Statement::TupleDestructuringBinding(tdb) => {
-                let init_ty = self.compile_expr(&tdb.init);
-
-                let mut elem_vars: Vec<Ty> = Vec::with_capacity(tdb.patterns.len());
-                for _ in 0..tdb.patterns.len() {
-                    elem_vars.push(self.engine.fresh_var());
-                }
-                let tup = self.engine.mk_tuple(&elem_vars);
-                self.engine.unify_at(tup, init_ty, tdb.init.span());
-
-                let mut b = PatternBindings::new();
-                for (i, pattern) in tdb.patterns.iter().enumerate() {
-                    // No usefulness check runs here — the refutability check
-                    // below is syntactic, so an ill-typed pattern is harmless.
-                    let _ = self.type_pattern(pattern, elem_vars[i], &mut b.sink());
-                }
-                self.bind_pattern_initials(&b);
-
-                for pattern in &tdb.patterns {
-                    self.type_pattern_sizes(pattern);
-                    if pattern_is_refutable(pattern) {
-                        self.error(
-                            "Destructuring binding pattern must be irrefutable".to_string(),
-                            pattern.span(),
-                        );
-                    }
-                }
-            }
+            ast::Statement::Binding(b) => match b.name() {
+                Some(ident) => self.compile_name_binding(b, ident),
+                None => self.compile_destructuring(b),
+            },
             ast::Statement::Declaration { decl, .. } => {
                 // Top-level declarations are handled by `analyse_module`; reaching
                 // one here means it's nested inside an expression block.
@@ -2307,71 +2209,6 @@ impl Compiler {
                     sp,
                 );
             }
-            ast::Statement::TypedDiscard(td) => {
-                // `UpperIdent = expr`: assert the init has the named 0-arg type
-                // and discard the value. A bare `UpperIdent` here names a
-                // *type*, not a value; if the name resolves to a constructor
-                // but not a type (`Some = ...`, `Ok = ...`), say so directly
-                // rather than letting the hydrator report "Unknown type".
-                let name = &td.ty_name.name;
-                let expected = if self.env.lookup_type_info(name).is_none()
-                    && matches!(
-                        self.env.lookup(name).map(|s| s.kind),
-                        Some(ValueKind::Constructor { .. })
-                    ) {
-                    self.error(format!("'{name}' is not a type"), td.ty_name.span);
-                    self.engine.fresh_var()
-                } else {
-                    // Hydrate the name as a no-arg annotation — the hydrator
-                    // rejects unknown names and arity misuse, and records the
-                    // type occurrence for the reference graph.
-                    let ann = ast::TypeIdentifier {
-                        kind: ast::TypeKind::NamedType(ast::NamedType {
-                            qualifier: None,
-                            identifier: td.ty_name.clone(),
-                            type_args: Vec::new(),
-                        }),
-                        span: td.ty_name.span,
-                    };
-                    self.hydrate_annotation(&ann)
-                };
-                let init_ty = self.compile_expr_with_hint(&td.init, Some(expected));
-                self.engine
-                    .unify_at(expected, init_ty, type_defining_span(&td.init));
-            }
-            ast::Statement::CtorDestructuringBinding(cdb) => {
-                // `Ctor(p1, ..) = expr` — an irrefutable single-arm destructure.
-                // Lowered like a one-arm match: type the pattern against the
-                // init, bind its names, then require the single pattern to be
-                // exhaustive (so only single-constructor types qualify; a
-                // multi-constructor or nested-optional pattern is refutable).
-                let init_ty = self.compile_expr(&cdb.init);
-                let pattern = cdb.as_pattern();
-
-                let mut b = PatternBindings::new();
-                let typed_ok = self.type_pattern(&pattern, init_ty, &mut b.sink());
-
-                self.bind_pattern_initials(&b);
-                self.type_pattern_sizes(&pattern);
-
-                if typed_ok {
-                    let depth = pattern_unroll_depth(&pattern) + 1;
-                    let resolved =
-                        self.engine
-                            .resolve_for_patterns(init_ty, Some(&self.env), depth);
-                    let mut um = UsefulnessMatrix::new(resolved);
-                    let pat = um.lower(&pattern, self);
-                    if let Some(missing) = um.find_missing(&[pat]) {
-                        self.error(
-                            format!(
-                                "constructor destructuring binding must be irrefutable; \
-                                 pattern does not cover {missing}. Use `match` to handle it"
-                            ),
-                            cdb.span,
-                        );
-                    }
-                }
-            }
             ast::Statement::ImportDeclaration(_) => {
                 // Imports are processed at the start of compilation, before
                 // walking the body. By the time we reach one here it's already
@@ -2383,6 +2220,111 @@ impl Compiler {
                 // errored. Type the call so its own diagnostics still surface.
                 self.compile_expr(&bp.call);
             }
+        }
+    }
+
+    /// `x = e` or `x Type = e`.
+    fn compile_name_binding(&mut self, vb: &ast::Binding, ident: &ast::Identifier) {
+        let name = ident.name.clone();
+        let name_id = self.engine.intern(&name);
+
+        // At module scope a re-binding gets a fresh slot (see
+        // `get_or_create_local`), so the slot must be allocated *after*
+        // the initializer compiles — otherwise the name would already
+        // resolve to the new, still-uninitialised slot and an init that
+        // reads the prior binding (e.g. `x = x + 1`) would read garbage.
+        // The prior binding stays in scope across the init, which also
+        // drives `Self_` resolution for a self-recursive lambda. A first
+        // binding still reserves its slot up front so a self-recursive
+        // lambda can resolve its own (not-yet-bound) name through the
+        // entry frame.
+        let defer_slot = self.outer_scopes.is_empty() && self.locals.contains_key(&name_id);
+        if !defer_slot {
+            self.get_or_create_local(&name);
+        }
+
+        let annot_ty = vb.typ.as_ref().map(|a| self.hydrate_annotation(a));
+
+        self.engine.enter_level();
+        let self_ty = self.engine.fresh_var();
+        let init_is_fn = matches!(vb.init, ast::Expression::FunctionExpression(_));
+        // Only pre-bind for recursive lambdas. For any other init, exposing
+        // the name to its own initializer lets `x = x` infer ⊥ and generalize
+        // to ∀A.A, which is unsound.
+        if init_is_fn {
+            self.env.define(&name, mono(self_ty));
+        }
+
+        // Deliver the self-name to the lambda's own frame via a one-shot
+        // consumed by its `enter_fn_frame` — NOT by mutating
+        // `current_binding` here, which leaks into nested / HOF-arg
+        // lambdas and mis-resolves their calls to the enclosing fn as
+        // Self_ (emitting CallSelf against the wrong, live frame).
+        let saved_self = if init_is_fn {
+            self.next_fn_self_name.replace(name_id)
+        } else {
+            self.next_fn_self_name.take()
+        };
+        let init_ty = self.compile_expr_with_hint(&vb.init, annot_ty);
+        self.next_fn_self_name = saved_self;
+
+        self.engine.unify_at(self_ty, init_ty, vb.init.span());
+        self.engine.leave_level();
+
+        let final_ty = if let Some(a) = annot_ty {
+            self.engine
+                .unify_at(a, init_ty, type_defining_span(&vb.init));
+            a
+        } else {
+            init_ty
+        };
+
+        let restricted = self.restricted_generalization_cons();
+        let scheme = self.engine.generalize_restricted(final_ty, &restricted);
+        let m = self.current_module_slice();
+        self.env.define_at(
+            &name,
+            scheme,
+            DefinitionLocation::new(ident.span, m, EntityKind::Value),
+        );
+        self.track_binding(&name, ident.span);
+        if let Some(doc) = &vb.doc {
+            self.env.store_doc(&name, doc.clone());
+        }
+        self.record(&name, final_ty, ident.span, vb.doc.clone());
+        self.emit_value_def(ident.span, &name, vb.doc.clone());
+
+        if defer_slot {
+            self.get_or_create_local(&name);
+        }
+    }
+
+    /// `(a, b) = e`, `Point(x:, ..) = e`: typed like a one-arm `match`, and the
+    /// one arm has to cover every value, so only a pattern that cannot fail
+    /// is a binding.
+    fn compile_destructuring(&mut self, b: &ast::Binding) {
+        let init_ty = self.compile_expr(&b.init);
+        let mut pb = PatternBindings::new();
+        let typed_ok = self.type_pattern(&b.pattern, init_ty, &mut pb.sink());
+        self.bind_pattern_initials(&pb);
+        self.type_pattern_sizes(&b.pattern);
+        if !typed_ok {
+            return;
+        }
+        let depth = pattern_unroll_depth(&b.pattern) + 1;
+        let resolved = self
+            .engine
+            .resolve_for_patterns(init_ty, Some(&self.env), depth);
+        let mut um = UsefulnessMatrix::new(resolved);
+        let pat = um.lower(&b.pattern, self);
+        if let Some(missing) = um.find_missing(&[pat]) {
+            self.error(
+                format!(
+                    "A binding's pattern must match every value, and this one misses {missing}. \
+                     Use `match` to handle it"
+                ),
+                b.pattern.span(),
+            );
         }
     }
 
@@ -2870,10 +2812,7 @@ impl Compiler {
                     | ast::Declaration::Const(_) => None,
                 },
                 ast::Statement::ImportDeclaration(_)
-                | ast::Statement::TupleDestructuringBinding(_)
-                | ast::Statement::TypedDiscard(_)
-                | ast::Statement::CtorDestructuringBinding(_)
-                | ast::Statement::VariableBinding(_)
+                | ast::Statement::Binding(_)
                 | ast::Statement::Backpass(_) => None,
             },
             ast::Node::Expression(_) => None,
@@ -5330,20 +5269,6 @@ impl Compiler {
 // ============================================================================
 // Free helpers
 // ============================================================================
-
-/// Whether matching `p` can fail on a value of its own type. Only wildcards,
-/// bare names, and tuples of those are irrefutable; a constructor pattern is
-/// refutable even for a single-variant type (the tag is still tested), and an
-/// or-pattern is refutable exactly when its last alternative is. Used by the
-/// destructuring-binding statements, which require an irrefutable pattern.
-fn pattern_is_refutable(p: &ast::Pattern) -> bool {
-    match p {
-        ast::Pattern::Var { .. } => false,
-        ast::Pattern::Tuple { elements, .. } => elements.iter().any(pattern_is_refutable),
-        ast::Pattern::Or { first, rest, .. } => pattern_is_refutable(rest.last().unwrap_or(first)),
-        _ => true,
-    }
-}
 
 /// The span that "defines" the type of an expression for error reporting:
 /// for a block, the last node (recursively); otherwise the expression's own

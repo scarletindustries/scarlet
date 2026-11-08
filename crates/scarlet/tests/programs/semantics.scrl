@@ -227,7 +227,7 @@ pub fn main() {
 	// The type named on the left is checked like any other annotation, so a discard
 	// is also an assertion about what came back — `Int = three(...)` says so.
 	Nil = println('typed discard runs its expression')
-	Int = three(1, 2, 3)
+	_ Int = three(1, 2, 3)
 	_ = three(1, 2, 3)
 
 	pair = (1, 'one')

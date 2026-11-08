@@ -54,8 +54,6 @@
   name: (type_identifier) @constructor)
 (ctor_pattern
   name: (type_identifier) @constructor)
-(ctor_binding
-  constructor: (type_identifier) @constructor)
 (call_expression
   function: (type_identifier) @constructor)
 (call_expression
@@ -72,8 +70,6 @@
 (named_type
   module: (identifier) @namespace)
 (ctor_pattern
-  module: (identifier) @namespace)
-(ctor_binding
   module: (identifier) @namespace)
 (module_expression
   module: (identifier) @namespace)

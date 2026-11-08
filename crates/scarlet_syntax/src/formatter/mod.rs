@@ -317,32 +317,14 @@ impl Formatter {
 
     fn statement(&self, stmt: &ast::Statement) -> Doc {
         match stmt {
-            ast::Statement::VariableBinding(s) => {
+            ast::Statement::Binding(s) => {
                 let ty = match &s.typ {
                     Some(t) => d![text(" "), self.type_(t)],
                     None => nil(),
                 };
                 d![
-                    text(s.identifier.name.clone()),
+                    self.pattern(&s.pattern),
                     ty,
-                    text(" = "),
-                    self.expr(&s.init)
-                ]
-            }
-            ast::Statement::TupleDestructuringBinding(s) => {
-                let pats: Vec<Doc> = s.patterns.iter().map(|p| self.pattern(p)).collect();
-                d![delimited("(", pats, ")"), text(" = "), self.expr(&s.init)]
-            }
-            ast::Statement::TypedDiscard(s) => {
-                d![
-                    text(s.ty_name.name.clone()),
-                    text(" = "),
-                    self.expr(&s.init)
-                ]
-            }
-            ast::Statement::CtorDestructuringBinding(s) => {
-                d![
-                    self.pattern(&s.as_pattern()),
                     text(" = "),
                     self.expr(&s.init)
                 ]
@@ -1106,7 +1088,12 @@ impl Formatter {
                     .iter()
                     .map(|a| match a {
                         ast::PatternArg::Positional(p) => self.pattern(p),
-                        ast::PatternArg::Labeled { label, pattern } => {
+                        ast::PatternArg::Labeled {
+                            label,
+                            punned: true,
+                            ..
+                        } => text(format!("{}:", label.name)),
+                        ast::PatternArg::Labeled { label, pattern, .. } => {
                             d![text(label.name.clone()), text(": "), self.pattern(pattern)]
                         }
                     })
@@ -1286,6 +1273,14 @@ mod tests {
         let src = "pub fn main() {\n\theaders::Header(name, value) = h\n\tname\n}\n";
         let out = fmt(src);
         assert!(out.contains("headers::Header(name, value) = h"), "{out}");
+        assert_round_trips(&out);
+    }
+
+    #[test]
+    fn a_label_alone_in_a_pattern_stays_alone() {
+        let src = "pub fn main() {\n\tUser(name:, age: a, ..) = u\n\tname\n}\n";
+        let out = fmt(src);
+        assert!(out.contains("User(name:, age: a, ..) = u"), "{out}");
         assert_round_trips(&out);
     }
 

@@ -236,6 +236,12 @@ impl Compiler {
                             "'{}' is not a constructor and cannot be used in a pattern",
                             name.name
                         )
+                    } else if self.env.lookup_type_info(&name.name).is_some() {
+                        format!(
+                            "'{0}' is a type, not a constructor. To check a value's type and \
+                             drop it, write `_ {0} = value`",
+                            name.name
+                        )
                     } else if !qualified.is_empty() {
                         format!(
                             "Unknown constructor '{}' in pattern. It is {}",
@@ -289,7 +295,7 @@ impl Compiler {
                     field_labels,
                     args.iter().map(|a| match a {
                         ast::PatternArg::Positional(p) => (None, p, p.span()),
-                        ast::PatternArg::Labeled { label, pattern } => {
+                        ast::PatternArg::Labeled { label, pattern, .. } => {
                             (Some(label), pattern, label.span)
                         }
                     }),

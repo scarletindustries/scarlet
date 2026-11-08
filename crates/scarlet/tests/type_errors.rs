@@ -23,7 +23,7 @@ reject_case! {
     // constructors, can fail, so it is refused and `match` is named.
     a_qualified_ctor_binding_must_be_irrefutable: (
         "import scarlet/io\npub fn main() {\n\tio::NotFound(p) = io::PermissionDenied('x')\n\tprintln(p)\n}\n",
-        "must be irrefutable; pattern does not cover",
+        "A binding's pattern must match every value, and this one misses",
     ),
     // A constructor used by its bare name, when an imported module has it,
     // names the module to reach it through: in a pattern and in an expression.
@@ -325,7 +325,7 @@ reject_case! {
     /// The tuple path. The constructor path emits a different message.
     refutable_tuple_destructuring_binding_is_error: (
         "pub fn main() {\n\t(x, 1) = (1, 2)\n\tprintln(x)\n}\n",
-        "Destructuring binding pattern must be irrefutable",
+        "A binding's pattern must match every value, and this one misses",
     ),
 }
 

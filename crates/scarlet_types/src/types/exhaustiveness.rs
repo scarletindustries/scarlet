@@ -661,7 +661,7 @@ fn lower_pattern(
                         .collect();
                     let supplied = args.iter().map(|a| match a {
                         ast::PatternArg::Positional(p) => (None, p),
-                        ast::PatternArg::Labeled { label, pattern } => {
+                        ast::PatternArg::Labeled { label, pattern, .. } => {
                             (Some(label.name.as_str()), pattern)
                         }
                     });
@@ -1317,6 +1317,7 @@ mod tests {
                         span: scarlet_syntax::span::Span::DUMMY,
                     },
                     pattern,
+                    punned: false,
                 })
                 .collect(),
             rest,

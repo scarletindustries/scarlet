@@ -448,24 +448,10 @@ fn walk_statement<'a>(
     match statement {
         ast::Statement::Declaration { decl, .. } => walk_decl(decl, types, matches),
         ast::Statement::ImportDeclaration(_) => {}
-        ast::Statement::TupleDestructuringBinding(b) => {
-            for p in &b.patterns {
-                walk_pattern(p, types, matches);
-            }
+        ast::Statement::Binding(b) => {
+            walk_pattern(&b.pattern, types, matches);
             walk_expr(&b.init, types, matches);
         }
-        ast::Statement::TypedDiscard(b) => walk_expr(&b.init, types, matches),
-        ast::Statement::CtorDestructuringBinding(b) => {
-            for arg in &b.args {
-                let p = match arg {
-                    ast::PatternArg::Positional(p)
-                    | ast::PatternArg::Labeled { pattern: p, .. } => p,
-                };
-                walk_pattern(p, types, matches);
-            }
-            walk_expr(&b.init, types, matches);
-        }
-        ast::Statement::VariableBinding(b) => walk_expr(&b.init, types, matches),
         ast::Statement::Backpass(b) => walk_expr(&b.call, types, matches),
     }
 }

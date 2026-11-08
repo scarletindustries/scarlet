@@ -193,7 +193,7 @@ pub(crate) fn slot_pattern_args<'p, C: PatCtx>(
 ) -> Slots<&'p ast::Pattern> {
     let supplied = args.iter().map(|a| match a {
         ast::PatternArg::Positional(p) => (None, p),
-        ast::PatternArg::Labeled { label, pattern } => (Some(cx.intern(&label.name)), pattern),
+        ast::PatternArg::Labeled { label, pattern, .. } => (Some(cx.intern(&label.name)), pattern),
     });
     let (by_pos, errors) = slot_labeled(fields, supplied);
     if !errors.is_empty() {
@@ -742,6 +742,7 @@ mod tests {
         ast::PatternArg::Labeled {
             label: ident(l),
             pattern: p,
+            punned: false,
         }
     }
 

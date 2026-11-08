@@ -1288,29 +1288,18 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// [`Self::scoped_bind`] instead.
     fn statement(&mut self, s: &ast::Statement, global: Option<GlobalSlot>, out: &mut Vec<Frame>) {
         match s {
-            ast::Statement::VariableBinding(vb) => {
-                let sid = self.ctx.intern(&vb.identifier.name);
-                let init = self.expr(&vb.init);
-                // A module-scope `let` needs a pinned bind: already-compiled
-                // lambdas read it via `PushGlobal <slot>`.
-                let bind = self.scoped_bind(sid, init.ty());
-                self.bind_name(sid, bind.id);
-                out.push(Frame::Let(bind, init));
-            }
-            ast::Statement::TypedDiscard(td) => {
-                let effect = self.expr(&td.init);
-                out.push(Frame::Seq(effect));
-            }
-            ast::Statement::TupleDestructuringBinding(tb) => {
-                let pat = ast::Pattern::Tuple {
-                    elements: tb.patterns.clone(),
-                    span: tb.span,
-                };
-                self.destructure(&pat, &tb.init, out);
-            }
-            ast::Statement::CtorDestructuringBinding(cb) => {
-                self.destructure(&cb.as_pattern(), &cb.init, out);
-            }
+            ast::Statement::Binding(b) => match b.name() {
+                Some(ident) => {
+                    let sid = self.ctx.intern(&ident.name);
+                    let init = self.expr(&b.init);
+                    // A module-scope `let` needs a pinned bind: already-compiled
+                    // lambdas read it via `PushGlobal <slot>`.
+                    let bind = self.scoped_bind(sid, init.ty());
+                    self.bind_name(sid, bind.id);
+                    out.push(Frame::Let(bind, init));
+                }
+                None => self.destructure(&b.pattern, &b.init, out),
+            },
             ast::Statement::Declaration { decl, .. } => match decl.as_ref() {
                 // Types are erased; the walk already registered the ctors.
                 ast::Declaration::Type(_) => {}
@@ -1353,8 +1342,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             // Imports were resolved by the check walk.
             ast::Statement::ImportDeclaration(_) => {}
             // Desugared away before elaboration; a survivor was already
-            // rejected by the parser. Keep the call for its effects, like
-            // `TypedDiscard`.
+            // rejected by the parser. Keep the call for its effects.
             ast::Statement::Backpass(bp) => {
                 let effect = self.expr(&bp.call);
                 out.push(Frame::Seq(effect));

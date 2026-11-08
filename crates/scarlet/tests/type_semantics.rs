@@ -1,7 +1,7 @@
 //! Type-system and language-semantics coverage: `type` declarations,
 //! constructors as values, exhaustiveness, refutability, `or`/field/`if`
 //! typing, rigid type variables, record update, match guards, or-patterns,
-//! binary patterns, typed discard. Stdlib runtime goldens live in
+//! binary patterns, bindings. Stdlib runtime goldens live in
 //! `tests/stdlib.rs`; opcode-level VM execution lives in `tests/vm_exec.rs`.
 
 mod common;
@@ -1116,7 +1116,7 @@ reject_case! {
          \tSome(x) = Some(1)\n\
          \tprintln(x)\n\
          }\n",
-        "refutable",
+        "must match every value",
     ),
     ctor_destructure_nested_refutable_rejected: (
         "type Box { Box(value Option(Int)) }\n\
@@ -1124,37 +1124,54 @@ reject_case! {
          \tBox(Some(n)) = Box(Some(1))\n\
          \tprintln(n)\n\
          }\n",
-        "refutable",
+        "must match every value",
     ),
 }
 
 run_case! {
-    typed_discard_nil_println_ok: (
+    nil_binding_runs_its_init: (
         "pub fn main() {\n\
          \tNil = println('x')\n\
          }\n",
         "x\n",
     ),
+    typed_underscore_runs_its_init: (
+        "pub fn main() {\n\
+         \t_ Nil = println('x')\n\
+         }\n",
+        "x\n",
+    ),
+    a_label_alone_binds_the_field: (
+        "type User {\n\
+         \tname String\n\
+         \tage Int\n\
+         }\n\
+         pub fn main() {\n\
+         \tUser(age:, ..) = User(name: 'a', age: 3)\n\
+         \tprintln(age)\n\
+         }\n",
+        "3\n",
+    ),
 }
 
 reject_case! {
-    typed_discard_string_int_mismatch: (
+    typed_underscore_string_int_mismatch: (
         "pub fn main() {\n\
-         \tString = 5\n\
+         \t_ String = 5\n\
          }\n",
         "Type mismatch: expected 'String', got 'Int'",
     ),
-    typed_discard_int_string_mismatch: (
+    a_type_name_is_not_a_pattern: (
         "pub fn main() {\n\
          \tInt = 'a'\n\
          }\n",
-        "Type mismatch: expected 'Int', got 'String'",
+        "'Int' is a type, not a constructor. To check a value's type and drop it, write `_ Int = value`",
     ),
-    typed_discard_constructor_is_not_a_type: (
+    a_binding_must_match_every_value: (
         "pub fn main() {\n\
-         \tSome = 1\n\
+         \tNone = None\n\
          }\n",
-        "'Some' is not a type",
+        "A binding's pattern must match every value, and this one misses Some(_)",
     ),
 }
 

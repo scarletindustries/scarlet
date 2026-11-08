@@ -212,13 +212,27 @@ impl UnaryOp {
     }
 }
 
+/// `pattern [Type] = init`: the one binding statement. `x = e` and
+/// `x Int = e` bind a name; `(a, b) = e`, `Point(x:, ..) = e` and `Nil = e`
+/// take a value apart, and the pattern must match every value of its type.
 #[derive(Debug, Clone)]
-pub struct VariableBinding {
+pub struct Binding {
     pub doc: Option<String>,
-    pub identifier: Identifier,
+    pub pattern: Pattern,
     pub typ: Option<TypeIdentifier>,
     pub init: Expression,
     pub(crate) span: Span,
+}
+
+impl Binding {
+    /// The name a plain `x = e` binds, or `None` when the pattern takes the
+    /// value apart.
+    pub fn name(&self) -> Option<&Identifier> {
+        match &self.pattern {
+            Pattern::Var { name } => Some(name),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -228,53 +242,6 @@ pub struct ConstBinding {
     pub typ: Option<TypeIdentifier>,
     pub init: Expression,
     pub span: Span,
-}
-
-#[derive(Debug, Clone)]
-pub struct TupleDestructuringBinding {
-    pub patterns: Vec<Pattern>,
-    pub init: Expression,
-    pub span: Span,
-}
-
-/// `UpperIdent = expr` at statement position: assert `expr` has the named type
-/// and discard the value. The name must resolve to a 0-arg type, not a
-/// constructor.
-#[derive(Debug, Clone)]
-pub struct TypedDiscard {
-    pub ty_name: Identifier,
-    pub init: Expression,
-    pub(crate) span: Span,
-}
-
-/// `Ctor(p1, ..) = expr` at statement position. Lowered to a one-arm match
-/// that must pass exhaustiveness, so only single-constructor types qualify.
-#[derive(Debug, Clone)]
-pub struct CtorDestructuringBinding {
-    /// The module the constructor is reached through: `http` in
-    /// `http::Fixed(n, body) = e`.
-    pub(crate) qualifier: Option<Identifier>,
-    pub(crate) name: Identifier,
-    pub args: Vec<PatternArg>,
-    pub(crate) rest: bool,
-    /// Span of just the `Ctor(args)` head, not the `= init` tail.
-    pub(crate) pattern_span: Span,
-    pub init: Expression,
-    pub span: Span,
-}
-
-impl CtorDestructuringBinding {
-    /// Re-materialise the constructor pattern for consumers of the general
-    /// [`Pattern`] shape.
-    pub fn as_pattern(&self) -> Pattern {
-        Pattern::Constructor {
-            qualifier: self.qualifier.clone(),
-            name: self.name.clone(),
-            args: self.args.clone(),
-            rest: self.rest,
-            span: self.pattern_span,
-        }
-    }
 }
 
 /// `a, b <- call(args)`: backpassing. Sugar for appending the rest of the
@@ -439,10 +406,7 @@ pub enum Statement {
         public: bool,
     },
     ImportDeclaration(ImportDeclaration),
-    TupleDestructuringBinding(TupleDestructuringBinding),
-    TypedDiscard(TypedDiscard),
-    CtorDestructuringBinding(CtorDestructuringBinding),
-    VariableBinding(VariableBinding),
+    Binding(Box<Binding>),
     Backpass(BackpassBinding),
 }
 
@@ -451,10 +415,7 @@ impl Statement {
         match self {
             Statement::Declaration { decl, .. } => decl.span(),
             Statement::ImportDeclaration(x) => x.span,
-            Statement::TupleDestructuringBinding(x) => x.span,
-            Statement::TypedDiscard(x) => x.span,
-            Statement::CtorDestructuringBinding(x) => x.span,
-            Statement::VariableBinding(x) => x.span,
+            Statement::Binding(x) => x.span,
             Statement::Backpass(x) => x.span,
         }
     }
@@ -716,7 +677,14 @@ pub enum PatternLiteral {
 #[derive(Debug, Clone)]
 pub enum PatternArg {
     Positional(Pattern),
-    Labeled { label: Identifier, pattern: Pattern },
+    Labeled {
+        label: Identifier,
+        pattern: Pattern,
+        /// True for `label:` with nothing after it, which binds the field to
+        /// a name of its own. The parser fills `pattern` with that name, so
+        /// only the formatter reads this, to write it back the same way.
+        punned: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -932,7 +900,7 @@ mod tests {
         );
 
         let mut saw_tuple = false;
-        let mut saw_typed_discard = false;
+        let mut saw_ctor = false;
         let mut count = 0;
         for node in &r.ast.body {
             if let Node::Statement(s) = node {
@@ -944,15 +912,19 @@ mod tests {
                 );
                 count += 1;
                 match s.as_ref() {
-                    Statement::TupleDestructuringBinding(_) => saw_tuple = true,
-                    Statement::TypedDiscard(_) => saw_typed_discard = true,
+                    Statement::Binding(b) if matches!(b.pattern, Pattern::Tuple { .. }) => {
+                        saw_tuple = true
+                    }
+                    Statement::Binding(b) if matches!(b.pattern, Pattern::Constructor { .. }) => {
+                        saw_ctor = true
+                    }
                     _ => {}
                 }
             }
         }
         assert!(count >= 6, "expected every statement kind, saw {count}");
-        assert!(saw_tuple, "no tuple-destructuring statement parsed");
-        assert!(saw_typed_discard, "no typed-discard statement parsed");
+        assert!(saw_tuple, "no tuple binding parsed");
+        assert!(saw_ctor, "no constructor binding parsed");
     }
 
     #[test]

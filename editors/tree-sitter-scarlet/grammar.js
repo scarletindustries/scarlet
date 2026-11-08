@@ -47,8 +47,6 @@ module.exports = grammar({
     // separate from expressions: `x Foo = e` vs `x` then `Foo = e`, and
     // `Foo(x) = e` vs the call `Foo(x)`.
     [$.binding, $._primary_expression],
-    [$.ctor_binding, $._primary_expression],
-    [$.ctor_binding, $.module_expression],
     // Pattern/expression twins: a GLR fork inside `(...)`, `[...]`, or
     // `<<...>>` stays alive until the `=` (or its absence) after the closing
     // delimiter decides destructuring vs literal.
@@ -73,9 +71,6 @@ module.exports = grammar({
         $.type_declaration,
         $.const_declaration,
         $.binding,
-        $.tuple_binding,
-        $.typed_discard,
-        $.ctor_binding,
         $.backpass,
         $._expression,
       ),
@@ -190,31 +185,12 @@ module.exports = grammar({
 
     // Statements -------------------------------------------------------------
 
+    // `pattern [Type] = value`: every binding. `x Int = 5` binds a name;
+    // `(a, b) = t` and `io::Stat(files, ..) = walk(root)` take a value apart.
     binding: ($) =>
       seq(
-        field('name', $.identifier),
+        field('pattern', choice($.identifier, $.ctor_pattern, $.tuple_pattern)),
         optional(field('type', $._type)),
-        '=',
-        field('value', $._expression),
-      ),
-
-    tuple_binding: ($) =>
-      seq('(', commaSep1($._pattern), ')', '=', field('value', $._expression)),
-
-    // `Nil = println('x')`: assert-and-discard of a zero-arg type.
-    typed_discard: ($) =>
-      seq(field('type', $.type_identifier), '=', field('value', $._expression)),
-
-    // `Stat(files, ..) = walk(root)`: single-arm match sugar, and
-    // `io::Stat(files, ..) = walk(root)` for a constructor reached through its
-    // module.
-    ctor_binding: ($) =>
-      seq(
-        optional(seq(field('module', $.identifier), '::')),
-        field('constructor', $.type_identifier),
-        token.immediate('('),
-        optional($.pattern_arguments),
-        ')',
         '=',
         field('value', $._expression),
       ),
@@ -485,7 +461,8 @@ module.exports = grammar({
     _pattern_argument: ($) => choice($.labeled_pattern, $._pattern, $.rest_pattern),
 
     labeled_pattern: ($) =>
-      prec(1, seq(field('label', $.identifier), ':', field('pattern', $._pattern))),
+      // `name:` alone binds the field to `name`.
+      prec(1, seq(field('label', $.identifier), ':', optional(field('pattern', $._pattern)))),
 
     // `..` / `..rest`: remaining fields, elements, or bytes.
     rest_pattern: ($) => prec.right(seq('..', optional(field('binder', $.identifier)))),

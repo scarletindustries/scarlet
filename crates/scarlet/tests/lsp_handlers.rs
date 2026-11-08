@@ -1231,3 +1231,27 @@ fn completion_after_non_module_dot_is_empty() {
         "a dot after a plain value must offer nothing, got {labels:?}"
     );
 }
+
+/// Inside the stdlib tree, a module qualifier opens that module's source.
+#[test]
+fn goto_def_on_stdlib_module_qualifier_opens_its_file() {
+    let std_dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../scarlet_core/src/std/scarlet");
+    let http = std_dir.join("http.scrl");
+    let src = std::fs::read_to_string(&http).expect("the stdlib http module");
+    let mut s = Workspace::new();
+    let uri = format!("file://{}", http.display());
+    s.open_document(&uri, &src);
+
+    let (l, c) = cursor(&src, "error::NetError", 1, 0);
+    let def = s.definition_response(&pos(&uri, l, c));
+    let target = def["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("goto-def on `error::` must open a file, got {def}"));
+    assert!(
+        target.ends_with("scarlet/net/error.scrl"),
+        "`error::NetError` must jump to net/error.scrl, got {target}"
+    );
+    assert_eq!(def["range"]["start"]["line"].as_i64(), Some(0));
+    assert_eq!(def["range"]["start"]["character"].as_i64(), Some(0));
+}

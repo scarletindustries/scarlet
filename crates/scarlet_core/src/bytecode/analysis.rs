@@ -1348,15 +1348,9 @@ impl<'a, 'g> RefWalker<'a, 'g> {
         match n {
             ast::Node::Expression(e) => self.expr(e),
             ast::Node::Statement(s) => match s.as_ref() {
-                ast::Statement::VariableBinding(vb) => {
-                    self.expr(&vb.init);
-                    self.define(&vb.identifier.name);
-                }
-                ast::Statement::TupleDestructuringBinding(tdb) => {
-                    self.expr(&tdb.init);
-                    for p in &tdb.patterns {
-                        self.pattern(p);
-                    }
+                ast::Statement::Binding(b) => {
+                    self.expr(&b.init);
+                    self.pattern(&b.pattern);
                 }
                 ast::Statement::Declaration { decl, .. } => match decl.as_ref() {
                     ast::Declaration::Const(cb) => {
@@ -1376,18 +1370,6 @@ impl<'a, 'g> RefWalker<'a, 'g> {
                     }
                     ast::Declaration::Type(_) => {}
                 },
-                ast::Statement::TypedDiscard(td) => {
-                    self.expr(&td.init);
-                }
-                ast::Statement::CtorDestructuringBinding(cdb) => {
-                    self.expr(&cdb.init);
-                    for arg in &cdb.args {
-                        self.pattern(match arg {
-                            ast::PatternArg::Positional(p) => p,
-                            ast::PatternArg::Labeled { pattern, .. } => pattern,
-                        });
-                    }
-                }
                 ast::Statement::ImportDeclaration(_) => {}
                 // Desugared away before this walk; a survivor was already
                 // rejected by the parser. Walk the call, then the binders,

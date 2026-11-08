@@ -74,7 +74,14 @@ impl Names {
             };
             match stmt.as_ref() {
                 ast::Statement::Declaration { decl, .. } => self.observe_declaration(decl),
-                ast::Statement::VariableBinding(b) => self.define(&b.identifier.name),
+                ast::Statement::Binding(b) => {
+                    b.pattern
+                        .for_each_binder(ast::OrAlternatives::All, &mut |binder| {
+                            if let ast::PatternBinder::Name(id) = binder {
+                                self.define(&id.name);
+                            }
+                        })
+                }
                 ast::Statement::ImportDeclaration(i) => self.observe_import(i),
                 _ => {}
             }

@@ -151,12 +151,13 @@ impl Workspace {
         let Some((graph, mid)) = self.graph_module(&uri) else {
             return Json::Null;
         };
-        // A position naming a module jumps to that module's file at 0:0.
-        // Embedded `scarlet/*` modules have no file and yield null. Without this the
-        // cursor would resolve to the alias binding, which spans the whole
-        // `import` declaration — a no-op self-jump.
+        // A position naming a module jumps to that module's file at 0:0. A
+        // `scarlet/*` module opens its source when the stdlib tree is on disk
+        // next to the open file, and is null when it is only embedded. Without
+        // this the cursor would resolve to the alias binding, which spans the
+        // whole `import` declaration — a no-op self-jump.
         if let Some(import_mod) = graph.module_named_at(mid, line, col) {
-            return match reference::module_uri(graph, import_mod).ok() {
+            return match uri_for(graph, &uri, import_mod) {
                 Some(u) => json!({
                     "uri": u,
                     "range": {
