@@ -420,34 +420,34 @@ mod clean_module_gate {
     }
 }
 
-mod toplevel_slot_queue {
+mod toplevel_slots {
     use super::super::*;
     use super::parse_ok;
 
-    /// `toplevel_binds` is positional, so only a module's own statement list
-    /// may fill it. Depth alone does not identify that walk: a bare-expression
-    /// program runs with `scope_marks` empty, so an arm's pattern binding
-    /// would sit at "module depth" and steal the next `let`'s slot.
+    /// Only a module's own statement walk gives a binding a module-scope slot.
+    /// Depth alone does not identify that walk: a bare-expression program runs
+    /// with `scope_marks` empty, so an arm's pattern binding would sit at
+    /// "module depth" and take a global slot it must not have.
     #[test]
-    fn only_the_module_statement_walk_queues_a_slot() {
+    fn only_the_module_statement_walk_takes_a_slot() {
         let mut c = new_compiler(None, true);
         c.push_block_scope();
         let a = c.engine.intern("a");
         c.bind_local(a, 7);
         assert!(
-            c.toplevel_binds.is_empty(),
-            "a binding made outside the module statement walk was queued"
+            c.binding_globals.is_empty(),
+            "a binding made outside the module statement walk took a slot"
         );
 
         c.walking_module_statements = true;
         let b = c.engine.intern("b");
         c.bind_local(b, 8);
-        assert_eq!(c.toplevel_binds.pop_front(), Some(GlobalSlot(8)));
+        assert_eq!(c.binding_globals.pop(), Some((b, GlobalSlot(8))));
     }
 
     /// The bare-expression entry point. Its outermost block is an arm body,
-    /// which the elaborator treats as a module toplevel and lets drain the
-    /// queue, so the arm's pattern bindings must never have reached it.
+    /// which the elaborator treats as a module toplevel, so the arm's pattern
+    /// bindings must not take module-scope slots.
     #[test]
     fn a_bare_match_expression_compiles_without_stealing_a_pattern_slot() {
         let src = "match Some(1) { Some(v) -> { w = v + 1\n v + w }\n None -> 0 }";

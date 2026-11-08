@@ -236,10 +236,8 @@ impl Compiler {
         self.entry_toplevel = None;
         self.main = None;
 
-        // `toplevel_binds` is positional: a survivor would hand the next
-        // module-scope bind someone else's slot, silently.
         self.toplevel_decls.clear();
-        self.toplevel_binds.clear();
+        self.binding_globals.clear();
         self.walking_module_statements = false;
 
         self.undo_log.clear();
@@ -618,10 +616,8 @@ impl IncrementalSession {
             // what restores a stdlib type the entry shadowed.
             let pre_import = self.c.env.watermark();
             self.c.process_imports(block);
-            // The imports left their own module-scope binds on these positional
-            // per-compile channels; a shadowing entry-file bind must not dequeue
-            // an import's slot.
-            self.c.toplevel_binds.clear();
+            // The imports left their own decls behind; the entry file's start
+            // empty.
             self.c.toplevel_decls.clear();
             // Must precede the watermark capture below.
             self.c.bump_type_ids_past_reserved();

@@ -154,14 +154,6 @@ pub trait ElabCtx: PreludeTys {
     /// read, so decls are not walked in source order. Only asked while
     /// elaborating a module toplevel.
     fn toplevel_decls(&self) -> Vec<(usize, GlobalSlot)>;
-    /// The entry-frame slot the module walk allocated for the *next*
-    /// module-scope `let`/destructured binding. Only asked while elaborating a
-    /// module toplevel.
-    ///
-    /// Each call consumes one binding, in the order both walks visit the
-    /// module's statements. That is what gives `x = 1; f = fn() x; x = 2` a
-    /// distinct slot per binding without keying on the name.
-    fn next_global_slot(&mut self) -> Option<GlobalSlot>;
     /// `Option`/`Result` shape for `expr or default`.
     fn or_shape(&mut self, lhs_ty: Ty) -> Option<OrShape>;
 
@@ -263,12 +255,8 @@ pub struct Elab<'a, C: ElabCtx> {
     /// Whether this body is a module toplevel, entry script included.
     toplevel: bool,
     /// True, in a toplevel, until the first [`Self::block`] call. Gates decl
-    /// scheduling and [`Self::module_scope`].
+    /// scheduling.
     at_toplevel: bool,
-    /// True while walking the statements of a toplevel block. A nested block
-    /// clears it and restores it after, so in `x = { y = 1; y }` `y` is never
-    /// mistaken for a module-scope binding.
-    module_scope: bool,
     /// Span of the `match` whose arms are being elaborated. The [`PatCtx`] seam
     /// carries no spans, so this is the only location an internal error raised
     /// from a pattern query can be attributed to.
@@ -298,7 +286,6 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             nil,
             toplevel,
             at_toplevel: toplevel,
-            module_scope: false,
             pat_span: Span::DUMMY,
         }
     }
@@ -382,18 +369,6 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             ty,
             global: None,
         }
-    }
-
-    /// A bind for a module-scope `let`: it takes the next entry-frame slot the
-    /// check walk queued, so def and use carry the same [`GlobalSlot`]. A
-    /// destructured name takes its slot in [`Self::irrefutable`] instead, and a
-    /// declaration's rides on its [`ElabCtx::toplevel_decls`] record.
-    fn scoped_bind(&mut self, name: StrId, ty: RTy) -> TypedBind {
-        let mut b = self.new_bind(name, ty);
-        if self.module_scope {
-            b.global = self.ctx.next_global_slot();
-        }
-        b
     }
 
     /// A bind for a top-level declaration, pinned to the slot its
@@ -1116,10 +1091,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             (0..nodes.len()).map(|i| (i, None)).collect()
         };
         let mark = self.names.len();
-        // Only this block's own statements bind globals.
-        let outer = std::mem::replace(&mut self.module_scope, is_top);
         let e = self.block_nodes(&seq, nodes, result_ty, span);
-        self.module_scope = outer;
         self.names.truncate(mark);
         e
     }
@@ -1210,17 +1182,20 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 let effect = self.expr(e);
                 out.push(Frame::Seq(effect));
             }
-            CNode::Binding { pattern, init } => match &pattern.pattern {
+            CNode::Binding {
+                pattern,
+                init,
+                globals,
+            } => match &pattern.pattern {
                 ast::Pattern::Var { name } => {
                     let sid = self.ctx.intern(&name.name);
                     let init = self.expr(init);
-                    // A module-scope `let` needs a pinned bind: already-compiled
-                    // lambdas read it via `PushGlobal <slot>`.
-                    let bind = self.scoped_bind(sid, init.ty());
+                    let mut bind = self.new_bind(sid, init.ty());
+                    bind.global = global_of(globals, sid);
                     self.bind_name(sid, bind.id);
                     out.push(Frame::Let(bind, init));
                 }
-                pat => self.destructure(pat, init, out),
+                pat => self.destructure(pat, init, globals, out),
             },
             CNode::Fn { name, span } => {
                 // A `fn` declaration is not an expression, so the walk built no
@@ -1262,11 +1237,17 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// `let (a, b) = e` / `let Point(x, y) = e`: bind the scrutinee, then one
     /// `Let` per projection. Exhaustiveness has proven the tag, so the field
     /// reads need no check.
-    fn destructure(&mut self, pat: &ast::Pattern, init: &CExpr, out: &mut Vec<Frame>) {
+    fn destructure(
+        &mut self,
+        pat: &ast::Pattern,
+        init: &CExpr,
+        globals: &[(StrId, GlobalSlot)],
+        out: &mut Vec<Frame>,
+    ) {
         let value = self.expr(init);
         let scrut = self.new_bind(self.anon, value.ty());
         let mut lets = vec![(scrut, value)];
-        self.irrefutable(pat, scrut.id, &mut lets);
+        self.irrefutable(pat, scrut.id, globals, &mut lets);
         out.extend(lets.into_iter().map(|(b, e)| Frame::Let(b, e)));
     }
 
@@ -1276,6 +1257,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         &mut self,
         pat: &ast::Pattern,
         src: BindingId,
+        globals: &[(StrId, GlobalSlot)],
         lets: &mut Vec<(TypedBind, TypedExpr)>,
     ) {
         let src_ty = self.bind_ty(src);
@@ -1296,9 +1278,9 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 let Some((b, _)) = lets.iter_mut().find(|(b, _)| b.id == src) else {
                     elaborator_bug("destructured name with no projection bind", name.span)
                 };
-                if self.module_scope {
+                if let Some(slot) = global_of(globals, sid) {
                     b.name = sid;
-                    b.global = self.ctx.next_global_slot();
+                    b.global = Some(slot);
                 }
             }
             ast::Pattern::Tuple { elements, span } => {
@@ -1313,7 +1295,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                         idx: i as u32,
                     };
                     lets.push((b, proj));
-                    self.irrefutable(sub, b.id, lets);
+                    self.irrefutable(sub, b.id, globals, lets);
                 }
             }
             ast::Pattern::Constructor {
@@ -1343,7 +1325,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                         idx: i as u32,
                     };
                     lets.push((b, proj));
-                    self.irrefutable(sub, b.id, lets);
+                    self.irrefutable(sub, b.id, globals, lets);
                 }
             }
             // `let`/`(a, b) =` bind irrefutably: the check walk rejects a
@@ -1470,6 +1452,11 @@ enum Frame {
 
 /// Fold `lets` around `tail`: the first pushed `Let` is the outermost, so the
 /// spine's evaluation order is push order.
+/// The module-scope slot the check walk gave `name` in this binding.
+fn global_of(globals: &[(StrId, GlobalSlot)], name: StrId) -> Option<GlobalSlot> {
+    globals.iter().find(|(n, _)| *n == name).map(|&(_, g)| g)
+}
+
 fn wrap_lets(lets: Vec<(TypedBind, TypedExpr)>, tail: TypedExpr) -> TypedExpr {
     let mut e = tail;
     for (bind, init) in lets.into_iter().rev() {

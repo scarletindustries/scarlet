@@ -157,9 +157,6 @@ impl ElabCtx for Compiler {
     fn fn_of_global(&self, slot: GlobalSlot) -> Option<crate::core_ir::FuncIdx> {
         self.global_to_func.get(&slot).copied()
     }
-    fn next_global_slot(&mut self) -> Option<GlobalSlot> {
-        self.take_global_slot()
-    }
     fn toplevel_decls(&self) -> Vec<(usize, GlobalSlot)> {
         self.toplevel_decls
             .iter()

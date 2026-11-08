@@ -41,7 +41,7 @@
 //!   a scope replays only the bindings it actually shadowed, never a map
 //!   snapshot.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -452,26 +452,16 @@ pub struct Compiler {
     /// forward *reference* loads with `PushGlobal`. Definition and use read the
     /// same field of the same record, so they cannot disagree.
     pub(super) toplevel_decls: Vec<ToplevelDecl>,
-    /// Entry-frame slots for module-scope binds that are *not* declarations —
-    /// top-level `let`s and destructured names — in binding order. Unlike
-    /// [`Self::locals`] this is not unwound by `pop_local_scope`, so it
-    /// survives `analyse_module`'s scope pop and reaches the toplevel
-    /// elaboration, which drains it in the order it was filled: both walks
-    /// visit the module's statements in source order. A queue rather than a
-    /// map because a name may be rebound (`x = 10; f = fn() x; x = 20`) and
-    /// each binding needs its own slot — the closures compiled in between
-    /// load distinct slots — so a name is not an identity here, and nothing
-    /// downstream ever maps one back to a slot. Cleared to entry-file scope
-    /// once the imports are compiled.
-    pub(super) toplevel_binds: VecDeque<GlobalSlot>,
-    /// True only while `analyse_module` walks a module's own statement list,
-    /// the single walk whose bindings the toplevel elaboration mirrors. The
-    /// queue above is positional, so *any* other walk that fed it would hand
-    /// the elaborator a slot belonging to a different binding. Being a global
-    /// ([`Compiler::binds_a_global`]) does not say this on its own: imports,
-    /// the prelude's slot seeds and `fn`/`const` declarations are all globals
-    /// bound outside the statement walk, and each reaches the elaborator by a
-    /// route of its own.
+    /// The names the binding being checked has bound at module scope, with
+    /// their entry-frame slots. [`Compiler::compile_statement`] moves them onto
+    /// that binding's [`CNode::Binding`], so a slot travels with the binding
+    /// it belongs to and nothing pairs them up by order later.
+    pub(super) binding_globals: Vec<(StrId, GlobalSlot)>,
+    /// True only while `analyse_module` walks a module's own statement list.
+    /// Being a global ([`Compiler::binds_a_global`]) does not say this on its
+    /// own: imports, the prelude's slot seeds and `fn`/`const` declarations
+    /// are all globals bound outside the statement walk, and each reaches the
+    /// elaborator by a route of its own.
     pub(super) walking_module_statements: bool,
     /// Memo for [`ElabCtx::resolve_rty`], keyed by union-find root: one pool
     /// node per solved type, for the whole `TypedProgram` the current
@@ -644,16 +634,15 @@ fn pattern_unroll_depth(p: &ast::Pattern) -> usize {
     }
 }
 
-/// Toplevel elaboration finished with module-scope slots still queued — the
-/// check walk and the elaborator disagreed about which statements bind at
-/// module scope. Aborts, in release as well as debug: every bind after the
-/// point of disagreement would silently land in the wrong global slot.
+/// A module-scope slot was bound outside any binding statement, so no
+/// binding carries it to the elaborator and its global is never stored.
+/// Aborts, in release as well as debug: only a compiler bug binds one there.
 #[allow(clippy::panic)]
 #[cold]
 #[inline(never)]
 fn unclaimed_toplevel_slots(n: usize) -> ! {
     panic!(
-        "internal compiler error: toplevel elaboration left {n} module-scope slot(s) unclaimed. \
+        "internal compiler error: {n} module-scope slot(s) bound outside a binding. \
          Report this as a compiler bug."
     )
 }
@@ -901,7 +890,7 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         local_count: 0,
         global_to_func: HashMap::new(),
         toplevel_decls: Vec::new(),
-        toplevel_binds: VecDeque::new(),
+        binding_globals: Vec::new(),
         walking_module_statements: false,
         rty_cache: HashMap::new(),
         captures: HashMap::new(),
@@ -1036,11 +1025,6 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
     if let ast::Expression::BlockExpression(block) = expr {
         c.process_imports(block);
         c.bump_type_ids_past_reserved();
-        // `toplevel_binds` accumulated every imported module's bindings during
-        // `process_imports`; those modules' toplevels are already recorded, so
-        // drop them so a shadowing entry-file bind doesn't dequeue an import's
-        // slot.
-        c.toplevel_binds.clear();
         c.toplevel_decls.clear();
         // Entry-file env scope: opened here (not inside `analyse_module`) so
         // the constructor/fn/const schemes it defines stay visible through
@@ -1076,11 +1060,8 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
         c.pop_local_scope();
         // A bare expression has no module statement walk, but its outermost
         // *block* (an `if` arm, say) is still the first one the elaborator
-        // sees, so it is elaborated as though it were a module toplevel and
-        // will try to drain the queue. Nothing this compile queued belongs to
-        // it: seeds and imports bind no name the expression can rebind, and no
-        // walk above ran with `walking_module_statements` set.
-        c.toplevel_binds.clear();
+        // sees, so it is elaborated as though it were a module toplevel.
+        // Nothing this compile declared belongs to it.
         c.toplevel_decls.clear();
     }
 
@@ -1489,7 +1470,7 @@ impl Compiler {
     fn bind_local(&mut self, name: StrId, slot: i32) {
         self.bind_local_raw(name, slot);
         if self.walking_module_statements && self.binds_a_global() {
-            self.toplevel_binds.push_back(GlobalSlot(slot));
+            self.binding_globals.push((name, GlobalSlot(slot)));
         }
     }
 
@@ -1498,29 +1479,13 @@ impl Compiler {
     /// Unlike [`Self::get_or_create_local`] this never reuses an existing
     /// binding's slot — a module-scope rebind must not alias the slot a
     /// closure already captured by reference — and it does not queue the slot
-    /// on [`Self::toplevel_binds`]: a declaration's slot reaches the
+    /// on [`Self::binding_globals`]: a declaration's slot reaches the
     /// elaborator on its own [`ToplevelDecl`] record instead.
     pub(super) fn alloc_decl_slot(&mut self, name: &str) -> GlobalSlot {
         let id = self.engine.intern(name);
         let idx = self.alloc_temp();
         self.bind_local_raw(id, idx);
         GlobalSlot(idx)
-    }
-
-    /// Take the entry-frame slot [`Self::bind_local`] queued for the next
-    /// module-scope `let`/destructured binding. Consumed in binding order, and
-    /// the toplevel elaboration visits those bindings in exactly the order the
-    /// check walk bound them — both walk the module's statements in source
-    /// order — so a rebound name (`x = 1; f = fn() x; x = 2`) hands each
-    /// binding its own slot. No name is involved: the caller stamps the slot
-    /// onto the binding it is building ([`crate::typed_ir::TypedBind::global`],
-    /// then `CoreBind::global`), and no later pass maps a name back to a slot.
-    ///
-    /// Per-fn body elaboration also walks an outermost block; a `let x` there
-    /// must not take a module-scope slot. Only a module toplevel runs with no
-    /// enclosing frame.
-    fn take_global_slot(&mut self) -> Option<GlobalSlot> {
-        self.toplevel_binds.pop_front()
     }
 
     #[inline]
@@ -1629,7 +1594,7 @@ impl Compiler {
         //
         // A local bound in a nested block/if/match scope at module level is
         // *not* a global: it is an ordinary toplevel temp (only
-        // module-scope-depth binds are queued on `toplevel_binds`, see
+        // module-scope-depth binds land on `binding_globals`, see
         // `bind_local`), and nothing guarantees it is stored before a global
         // load of it runs. Such a
         // name is captured by value like any other enclosing local — exactly
@@ -2026,17 +1991,26 @@ impl Compiler {
 
     fn compile_statement(&mut self, stmt: &ast::Statement) -> CNode {
         match stmt {
-            ast::Statement::Binding(b) => match b.name() {
-                Some(ident) => {
-                    let init = self.compile_name_binding(b, ident);
-                    let pattern = CPattern {
-                        pattern: b.pattern.clone(),
-                        sizes: Vec::new(),
-                    };
-                    CNode::Binding { pattern, init }
+            ast::Statement::Binding(b) => {
+                let mark = self.binding_globals.len();
+                let (pattern, init) = match b.name() {
+                    Some(ident) => {
+                        let init = self.compile_name_binding(b, ident);
+                        let pattern = CPattern {
+                            pattern: b.pattern.clone(),
+                            sizes: Vec::new(),
+                        };
+                        (pattern, init)
+                    }
+                    None => self.compile_destructuring(b),
+                };
+                let globals = self.binding_globals.split_off(mark);
+                CNode::Binding {
+                    pattern,
+                    init,
+                    globals,
                 }
-                None => self.compile_destructuring(b),
-            },
+            }
             ast::Statement::Declaration { decl, .. } => {
                 // Top-level declarations are handled by `analyse_module`; reaching
                 // one here means it's nested inside an expression block.
@@ -2145,7 +2119,7 @@ impl Compiler {
     /// `(a, b) = e`, `Point(x:, ..) = e`: typed like a one-arm `match`, and the
     /// one arm has to cover every value, so only a pattern that cannot fail
     /// is a binding.
-    fn compile_destructuring(&mut self, b: &ast::Binding) -> CNode {
+    fn compile_destructuring(&mut self, b: &ast::Binding) -> (CPattern, CExpr) {
         let init = self.compile_expr(&b.init);
         let init_ty = init.ty;
         let mut pb = PatternBindings::new();
@@ -2155,9 +2129,8 @@ impl Compiler {
             pattern: b.pattern.clone(),
             sizes: self.type_pattern_sizes(&b.pattern),
         };
-        let node = CNode::Binding { pattern, init };
         if !typed_ok {
-            return node;
+            return (pattern, init);
         }
         let depth = pattern_unroll_depth(&b.pattern) + 1;
         let resolved = self
@@ -2174,7 +2147,7 @@ impl Compiler {
                 b.pattern.span(),
             );
         }
-        node
+        (pattern, init)
     }
 
     // ========================================================================
@@ -2583,10 +2556,9 @@ impl Compiler {
         let base = reservation.base();
         self.env.set_next_type_id(base);
         let watermark = self.watermark();
-        // `toplevel_binds`/`toplevel_decls` drive the Core toplevel lower
-        // below; reset them so they carry only *this* module's binds, not
-        // those of the dependencies `process_imports` just compiled.
-        self.toplevel_binds.clear();
+        // `toplevel_decls` drives the Core toplevel lower below; reset it so it
+        // carries only *this* module's decls, not those of the dependencies
+        // `process_imports` just compiled.
         self.toplevel_decls.clear();
         self.env.push_scope();
         let nodes = self.analyse_module(block, Some(&mut iface));
@@ -2683,13 +2655,10 @@ impl Compiler {
     /// place it is minted, so it cannot outrun the recording it stands for.
     fn record_toplevel(&mut self, lowered: LoweredBody, kind: TopKind) -> Option<EntryToplevel> {
         use crate::core_ir::perceus;
-        // The elaboration that produced `lowered` drained the queue the check
-        // walk filled. A leftover means the two walks disagreed about which
-        // statements bind at module scope — the failure the old name-keyed map
-        // could not represent, and one that silently mis-slots every bind after
-        // the point of disagreement.
-        if !self.toplevel_binds.is_empty() {
-            unclaimed_toplevel_slots(self.toplevel_binds.len());
+        // Every module-scope slot left on a binding's node. One still here was
+        // bound by something that is not a binding statement.
+        if !self.binding_globals.is_empty() {
+            unclaimed_toplevel_slots(self.binding_globals.len());
         }
         let LoweredBody {
             name,

@@ -19,7 +19,7 @@
 use scarlet_syntax::ast;
 use scarlet_syntax::span::Span;
 
-use super::Denotation;
+use super::{Denotation, GlobalSlot};
 use scarlet_ir::core_ir::FuncIdx;
 use scarlet_types::types::{StrId, Ty};
 
@@ -171,6 +171,11 @@ pub enum CNode {
     Binding {
         pattern: CPattern,
         init: CExpr,
+        /// The entry-frame slot of each name this binding binds at module
+        /// scope, which lambdas already checked read it from. Empty for a
+        /// binding anywhere else. A pattern binds a name once, so the name is
+        /// the key.
+        globals: Vec<(StrId, GlobalSlot)>,
     },
     /// A top-level `fn` with a body. Its body is elaborated on its own, so
     /// only its name is needed here.
