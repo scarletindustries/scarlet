@@ -12,9 +12,9 @@
 //! only `&mut FnTable` and returns a [`FuncIdx`], never an address; the wrapper
 //! is an ordinary [`TypedFn`] emitted by the same loop as every other function.
 
-use crate::core_ir::FuncIdx;
-use crate::tivec::TiVec;
-use crate::types::StrId;
+use scarlet_ir::core_ir::FuncIdx;
+use scarlet_ir::tivec::TiVec;
+use scarlet_types::types::StrId;
 
 use super::resolve::EtaTarget;
 use super::{
@@ -153,10 +153,10 @@ pub(crate) fn eta_wrapper(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core_ir::VariantRef;
-    use crate::type_def::TypeId;
-    use crate::types::PrimIds;
+    use scarlet_ir::core_ir::VariantRef;
     use scarlet_types::intrinsic::Intrinsic;
+    use scarlet_types::type_def::TypeId;
+    use scarlet_types::types::PrimIds;
 
     const NAME: StrId = StrId(1);
     const PARAM: StrId = StrId(2);

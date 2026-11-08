@@ -12,12 +12,12 @@
 #![forbid(unsafe_code)]
 
 pub mod bytecode;
-pub mod core_ir;
+pub use scarlet_lower as core_ir;
 pub mod lint;
 pub mod module;
 pub mod reference;
+pub use scarlet_elaborate as typed_ir;
 pub use scarlet_ir::tivec;
-pub mod typed_ir;
 
 // Re-exported at their historical paths so `scarlet_core::parser`,
 // `scarlet_core::types` etc. keep naming one definition.

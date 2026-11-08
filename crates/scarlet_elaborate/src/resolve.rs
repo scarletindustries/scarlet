@@ -14,9 +14,9 @@
 //! [`Denotation::self_closure`] is the *nested lambda* case, where the frame is
 //! a real closure frame and `PushSelf` is correct.
 
-use crate::core_ir::{FuncIdx, VariantRef};
-use crate::types::ValueKind;
+use scarlet_ir::core_ir::{FuncIdx, VariantRef};
 use scarlet_types::intrinsic::Intrinsic;
+use scarlet_types::types::ValueKind;
 
 use super::{Arity, CaptureIdx, GlobalSlot, RTy, TypedCallee, TypedExpr, ValueRef};
 
@@ -81,17 +81,17 @@ pub enum CallForm {
 
 impl Denotation {
     /// A module-scope value that is not a statically-known function.
-    pub(crate) fn global(slot: GlobalSlot) -> Self {
+    pub fn global(slot: GlobalSlot) -> Self {
         Denotation(Den::Value(ValueRef::Global(slot)))
     }
 
-    pub(crate) fn capture(idx: CaptureIdx) -> Self {
+    pub fn capture(idx: CaptureIdx) -> Self {
         Denotation(Den::Value(ValueRef::Capture(idx)))
     }
 
     /// A top-level `fn` other than the one being elaborated. Called by index,
     /// loaded from its entry-frame slot.
-    pub(crate) fn known_fn(slot: GlobalSlot, func_idx: FuncIdx) -> Self {
+    pub fn known_fn(slot: GlobalSlot, func_idx: FuncIdx) -> Self {
         Denotation(Den::Fn {
             place: ValueRef::Global(slot),
             target: FnTarget::Known(func_idx),
@@ -101,7 +101,7 @@ impl Denotation {
     /// The top-level `fn` currently being elaborated. `CallSelf` when called,
     /// `PushGlobal slot` when loaded — never `PushSelf`, because a `CallKnown`
     /// frame's `captures` is a sentinel.
-    pub(crate) fn self_toplevel_fn(slot: GlobalSlot) -> Self {
+    pub fn self_toplevel_fn(slot: GlobalSlot) -> Self {
         Denotation(Den::Fn {
             place: ValueRef::Global(slot),
             target: FnTarget::SelfRec,
@@ -110,7 +110,7 @@ impl Denotation {
 
     /// A nested lambda referring to itself. Its frame is a real closure frame,
     /// so `PushSelf` is the right value load.
-    pub(crate) fn self_closure() -> Self {
+    pub fn self_closure() -> Self {
         Denotation(Den::Fn {
             place: ValueRef::SelfClosure,
             target: FnTarget::SelfRec,
@@ -149,7 +149,7 @@ impl Denotation {
     /// constructor with cannot reach codegen. It used to be the one field read
     /// off the binding, which is how an aliased import put `G` where `Green`
     /// belonged.
-    pub(crate) fn from_kind(kind: ValueKind) -> Option<Self> {
+    pub fn from_kind(kind: ValueKind) -> Option<Self> {
         match kind {
             ValueKind::Constructor {
                 type_id,
@@ -214,8 +214,8 @@ impl Denotation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::type_def::TypeId;
-    use crate::types::{ArenaSlice, StrId};
+    use scarlet_types::type_def::TypeId;
+    use scarlet_types::types::{ArenaSlice, StrId};
 
     const TY: RTy = RTy(7);
 
@@ -350,7 +350,7 @@ mod tests {
             variant_idx: 1,
             variant_name: StrId(11),
             arity: 0,
-            field_labels: crate::types::ArenaSlice::EMPTY,
+            field_labels: scarlet_types::types::ArenaSlice::EMPTY,
         })
         .expect("a constructor's kind fixes its denotation");
         assert_eq!(d.as_value(), ValueForm::Ctor(variant()));
@@ -362,7 +362,7 @@ mod tests {
     fn a_builtins_kind_fixes_its_denotation() {
         let d = Denotation::from_kind(ValueKind::Builtin {
             intrinsic: Intrinsic::StringLength,
-            param_labels: crate::types::ArenaSlice::EMPTY,
+            param_labels: scarlet_types::types::ArenaSlice::EMPTY,
         })
         .expect("a builtin's kind fixes its denotation");
         assert_eq!(d, Denotation::builtin(Intrinsic::StringLength));

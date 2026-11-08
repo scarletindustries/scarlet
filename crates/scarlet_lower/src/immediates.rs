@@ -12,14 +12,14 @@
 //! constructor: it never marks one's drop as a cell to reuse.
 
 use super::{Atom, CoreExpr, CoreFn, CorePat, LocalId, VariantRef};
-use crate::typed_ir::RTy;
+use scarlet_elaborate::RTy;
 
 /// The prelude's constructors that are immediates.
 #[derive(Clone, Copy)]
-pub(crate) struct Immediates {
-    pub(crate) true_: VariantRef,
-    pub(crate) false_: VariantRef,
-    pub(crate) nil: VariantRef,
+pub struct Immediates {
+    pub true_: VariantRef,
+    pub false_: VariantRef,
+    pub nil: VariantRef,
 }
 
 /// What a pattern tests a Bool or Nil for.
@@ -77,7 +77,7 @@ impl Immediates {
 }
 
 /// Rewrite `f` in place.
-pub(crate) fn rewrite(f: &mut CoreFn, im: &Immediates) {
+pub fn rewrite(f: &mut CoreFn, im: &Immediates) {
     let mut work = vec![&mut f.body];
     while let Some(e) = work.pop() {
         if let CoreExpr::Match { arms, .. } = e
@@ -176,7 +176,7 @@ fn arm_went_missing(on_true: usize, on_false: usize) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core_ir::testkit::{bind, func, local, vref};
+    use crate::testkit::{bind, func, local, vref};
 
     fn im() -> Immediates {
         Immediates {

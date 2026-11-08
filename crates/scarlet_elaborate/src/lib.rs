@@ -12,36 +12,36 @@
 //! patterns keep their nesting for `lower` to flatten into `CorePat` heads
 //! (docs/core-ir-spec.md §IR).
 
-pub(crate) mod binop;
+pub mod binop;
 pub mod checked;
 pub mod elaborate;
 pub mod elaborate_pat;
 pub mod eta;
 pub mod resolve;
 pub mod rty;
-pub(crate) use scarlet_types::slots;
-pub(crate) mod zonk;
+pub use scarlet_types::slots;
+pub mod zonk;
 
-pub(crate) use checked::{ClosureFact, NameAt, NameFact};
-pub(crate) use elaborate::{
+pub use checked::{ClosureFact, NameAt, NameFact};
+pub use elaborate::{
     ElabCtx, FieldAt, OrShape, PreludeTys, VariantLayout, elaborate_body, elaborate_toplevel,
     elaborator_bug,
 };
-pub(crate) use eta::FnTable;
-pub(crate) use resolve::Denotation;
+pub use eta::FnTable;
+pub use resolve::Denotation;
 pub use rty::{Arity, RSlice, RTy, ResolvedNode, ResolvedPool};
-pub(crate) use zonk::{Zonker, pool_for};
+pub use zonk::{Zonker, pool_for};
 
-use crate::core_ir::{ConstId, FuncIdx, PrimOp, VariantRef};
-use crate::types::StrId;
+use scarlet_ir::core_ir::{ConstId, FuncIdx, PrimOp, VariantRef};
 use scarlet_types::intrinsic::Intrinsic;
+use scarlet_types::types::StrId;
 
 /// A binding introduced by a `TypedFn`'s parameter list, a `let`, or a
 /// pattern. Dense within its function: `BindingId(i)` for `i < TypedFn::binds`.
 /// Distinct from `core_ir::LocalId` — `lower` mints those in ANF evaluation
 /// order and maps this onto them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct BindingId(pub(crate) u32);
+pub struct BindingId(pub u32);
 
 impl std::fmt::Display for BindingId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -54,12 +54,12 @@ pub use scarlet_ir::core_ir::{CaptureIdx, GlobalSlot};
 /// A name bound to a value, with the type the checker gave it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypedBind {
-    pub(crate) id: BindingId,
-    pub(crate) name: StrId,
-    pub(crate) ty: RTy,
+    pub id: BindingId,
+    pub name: StrId,
+    pub ty: RTy,
     /// `Some(slot)` when this binding is module-level and must land in that
     /// entry-frame slot, because fn bodies read it from there.
-    pub(crate) global: Option<GlobalSlot>,
+    pub global: Option<GlobalSlot>,
 }
 
 /// Where a value reference reads from at runtime. Name resolution is finished:
@@ -203,7 +203,7 @@ pub enum TypedPat {
 }
 
 impl TypedPat {
-    pub(crate) fn ty(&self) -> RTy {
+    pub fn ty(&self) -> RTy {
         match self {
             TypedPat::Wild { ty }
             | TypedPat::Lit { ty, .. }
@@ -221,9 +221,9 @@ impl TypedPat {
 /// One arm of a `match`. Exhaustiveness has already been proven.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedArm {
-    pub(crate) pat: TypedPat,
-    pub(crate) guard: Option<TypedExpr>,
-    pub(crate) body: TypedExpr,
+    pub pat: TypedPat,
+    pub guard: Option<TypedExpr>,
+    pub body: TypedExpr,
 }
 
 /// A typechecked expression. Every node carries its resolved type.
@@ -375,7 +375,7 @@ pub enum TypedExpr {
 impl TypedExpr {
     /// The resolved type of this expression. Every arm is a field read, so this
     /// never recurses and never walks a `Let` spine.
-    pub(crate) fn ty(&self) -> RTy {
+    pub fn ty(&self) -> RTy {
         match self {
             TypedExpr::Const { ty, .. }
             | TypedExpr::Nil { ty }
@@ -410,17 +410,17 @@ impl TypedExpr {
 /// [`TypedProgram::fns`]; a `TypedFn` never contains another.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedFn {
-    pub(crate) name: StrId,
-    pub(crate) params: Vec<TypedBind>,
-    pub(crate) ret: RTy,
-    pub(crate) body: TypedExpr,
+    pub name: StrId,
+    pub params: Vec<TypedBind>,
+    pub ret: RTy,
+    pub body: TypedExpr,
     /// Number of [`BindingId`]s minted in this function, params included, so a
     /// consumer can size a dense `BindingId → LocalId` map with a `Vec`.
     ///
     /// The counter is per function, not global: a nested closure is a separate
     /// [`TypedFn`] whose ids restart at zero and which reaches an enclosing
     /// binding through [`ValueRef::Capture`].
-    pub(crate) binds: u32,
+    pub binds: u32,
 }
 
 /// A whole module, typechecked. The only input `lower` takes.
@@ -439,16 +439,16 @@ pub struct TypedProgram {
     /// Top-level functions, nested closures, and eta-wrappers, indexed by the
     /// [`FuncIdx`] every [`TypedCallee::Known`] and [`TypedExpr::Closure`]
     /// carries.
-    pub(crate) fns: Vec<TypedFn>,
+    pub fns: Vec<TypedFn>,
     /// The module's initialiser — top-level declarations in dependency order
     /// followed by its statements. `params` is empty.
-    pub(crate) toplevel: TypedFn,
+    pub toplevel: TypedFn,
     /// The arena every [`RTy`] in the program indexes. Append-only during
     /// elaboration, immutable afterwards. `lower` never reads it; `perceus`
     /// reads it for `is_heap`, and `emit` erases types entirely.
-    pub(crate) pool: ResolvedPool,
+    pub pool: ResolvedPool,
     /// Types for the locals `lower` mints that no source expression names.
-    pub(crate) temps: TempTys,
+    pub temps: TempTys,
 }
 
 /// The handful of [`RTy`]s `lower` needs for the temporaries it introduces —
@@ -461,12 +461,12 @@ pub struct TypedProgram {
 /// and `Bool` is a nominal non-primitive and so heap-shaped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TempTys {
-    pub(crate) int: RTy,
-    pub(crate) bool: RTy,
-    pub(crate) string: RTy,
-    pub(crate) binary: RTy,
+    pub int: RTy,
+    pub bool: RTy,
+    pub string: RTy,
+    pub binary: RTy,
     /// `(Int, Int)` — `Op::BinReadUtf8`'s `(codepoint, bits)` result.
-    pub(crate) int_pair: RTy,
+    pub int_pair: RTy,
 }
 
 impl TempTys {
@@ -476,7 +476,7 @@ impl TempTys {
     /// `Binary` stay outside `PrimIds` and [`ResolvedPool::is_heap`] answers
     /// `true` for them. `int_pair` has no prelude `Ty` — the source language
     /// never spells `Op::BinReadUtf8`'s result — so it is built structurally.
-    pub(crate) fn intern<C: PreludeTys>(ctx: &mut C, pool: &mut ResolvedPool) -> TempTys {
+    pub fn intern<C: PreludeTys>(ctx: &mut C, pool: &mut ResolvedPool) -> TempTys {
         let t = ctx.ty_int();
         let int = ctx.resolve_rty(pool, t);
         let t = ctx.ty_bool();
@@ -493,253 +493,5 @@ impl TempTys {
             binary,
             int_pair,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core_ir::lower;
-    use crate::type_def::TypeId;
-    use crate::types::{InferEngine, NullaryPrim, Prim, PrimIds, StrId, Ty, new_engine};
-
-    /// `Bool` and `Binary` are ordinary nominal types, so their ids fall
-    /// outside [`PrimIds`].
-    const BOOL_ID: TypeId = TypeId(5);
-    const BINARY_ID: TypeId = TypeId(6);
-
-    /// A [`PreludeTys`] over a real [`InferEngine`], seeded the way the prelude
-    /// seeds one.
-    struct PreludeCtx {
-        eng: InferEngine,
-    }
-
-    impl PreludeCtx {
-        fn new() -> PreludeCtx {
-            let mut eng = new_engine();
-            eng.set_prim_ids(PrimIds {
-                int: TypeId(1),
-                float: TypeId(2),
-                string: TypeId(3),
-                array: TypeId(4),
-            });
-            PreludeCtx { eng }
-        }
-    }
-
-    impl PreludeTys for PreludeCtx {
-        fn resolve_rty(&mut self, pool: &mut ResolvedPool, t: Ty) -> RTy {
-            Zonker::new(&self.eng).zonk_or_opaque(pool, t).0
-        }
-        fn ty_int(&mut self) -> Ty {
-            let id = self.eng.prim_ids().int;
-            self.eng.nullary_con(NullaryPrim::Int, id, "Int")
-        }
-        fn ty_string(&mut self) -> Ty {
-            let id = self.eng.prim_ids().string;
-            self.eng.nullary_con(NullaryPrim::String, id, "String")
-        }
-        fn ty_bool(&mut self) -> Ty {
-            self.eng.nullary_con(NullaryPrim::Bool, BOOL_ID, "Bool")
-        }
-        fn ty_binary(&mut self) -> Ty {
-            self.eng
-                .nullary_con(NullaryPrim::Binary, BINARY_ID, "Binary")
-        }
-    }
-
-    /// A prelude that gave `Bool` a `PrimIds` id would silently stop `perceus`
-    /// emitting `Drop`s for it. This is the assertion that fails.
-    #[test]
-    fn interned_temps_are_the_shapes_perceus_expects() {
-        let mut ctx = PreludeCtx::new();
-        let mut pool = ResolvedPool::new(ctx.eng.prim_ids());
-        let t = TempTys::intern(&mut ctx, &mut pool);
-
-        assert!(
-            pool.is_heap(t.bool),
-            "Bool is nominal: perceus must Drop it"
-        );
-        assert!(
-            pool.is_heap(t.binary),
-            "Binary is nominal: perceus must Drop it"
-        );
-        assert!(pool.is_heap(t.int_pair), "a tuple is always a heap cell");
-        assert!(!pool.is_heap(t.int));
-        assert!(!pool.is_heap(t.string));
-
-        assert_eq!(pool.prim_of(t.int), Some(Prim::Int));
-        assert_eq!(pool.prim_of(t.string), Some(Prim::String));
-        assert!(matches!(pool.node(t.int_pair), ResolvedNode::Tuple { elems } if elems.len == 2));
-    }
-
-    /// A pool holding the five [`TempTys`] nodes with the shapes
-    /// [`TempTys::intern`] gives them, but reachable without an `ElabCtx`.
-    fn pool_and_temps() -> (ResolvedPool, TempTys) {
-        let mut p = ResolvedPool::new(PrimIds::default());
-        let prims = p.prims();
-        let int = p.mk_con(prims.int, &[]);
-        let boolean = p.mk_con(TypeId(100), &[]);
-        let string = p.mk_con(prims.string, &[]);
-        let binary = p.mk_con(TypeId(101), &[]);
-        let int_pair = p.mk_tuple(&[int, int]);
-        (
-            p,
-            TempTys {
-                int,
-                bool: boolean,
-                string,
-                binary,
-                int_pair,
-            },
-        )
-    }
-
-    fn nullary(name: StrId, ret: RTy, body: TypedExpr) -> TypedFn {
-        TypedFn {
-            name,
-            params: Vec::new(),
-            ret,
-            body,
-            binds: 0,
-        }
-    }
-
-    /// `TypedProgram::consts` is not a second pool that emit merges: lowering
-    /// preserves every `ConstId` in it.
-    #[test]
-    fn typed_program_consts_are_stable_ids() {
-        let (pool, temps) = pool_and_temps();
-        let int = temps.int;
-        let p = TypedProgram {
-            fns: vec![nullary(
-                StrId::NONE,
-                int,
-                TypedExpr::Const {
-                    ty: int,
-                    value: ConstId(1),
-                },
-            )],
-            toplevel: nullary(
-                StrId::NONE,
-                int,
-                TypedExpr::Const {
-                    ty: int,
-                    value: ConstId(0),
-                },
-            ),
-            pool,
-            temps,
-        };
-
-        // Every constant lives in the compiler's one pool, and `lower` has
-        // none of its own: an id the elaborator minted names the same constant
-        // after lowering.
-        let out = format!("{}", lower::lower(&p));
-        assert!(out.contains("ret c1\n"), "the fn's constant:\n{out}");
-        assert!(
-            out.ends_with("toplevel:\n  ret c0\n"),
-            "the toplevel's constant:\n{out}"
-        );
-    }
-
-    /// A builtin call reaches the core IR as a call to that same intrinsic.
-    #[test]
-    fn a_builtin_call_reaches_the_core_ir_as_its_intrinsic() {
-        let (pool, temps) = pool_and_temps();
-        let binary = temps.binary;
-        let p = TypedProgram {
-            fns: Vec::new(),
-            toplevel: nullary(
-                StrId::NONE,
-                binary,
-                TypedExpr::Call {
-                    ty: binary,
-                    callee: TypedCallee::Builtin {
-                        intrinsic: Intrinsic::StringLength,
-                    },
-                    args: vec![TypedExpr::Const {
-                        ty: binary,
-                        value: ConstId(0),
-                    }],
-                },
-            ),
-            pool,
-            temps,
-        };
-
-        let out = lower::lower(&p);
-        let rendered = out.toplevel.to_string();
-        assert!(
-            rendered.contains("StringLength"),
-            "the intrinsic must survive lowering, got: {rendered}"
-        );
-    }
-
-    /// The constants `lower` needs but no source literal spells (here an array
-    /// pattern's length check) are carried on the node, so the pool cannot grow
-    /// during lowering.
-    #[test]
-    fn lower_cannot_mint_a_constant_the_elaborator_did_not_pool() {
-        let (pool, temps) = pool_and_temps();
-        let int = temps.int;
-        let array = {
-            let mut pool = pool;
-            let prims = pool.prims();
-            let a = pool.mk_con(prims.array, &[int]);
-            (pool, a)
-        };
-        let (pool, arr_ty) = array;
-
-        // `match xs { [_, _] -> 1, _ -> 0 }`
-        let scrut = TypedExpr::Var {
-            ty: arr_ty,
-            place: ValueRef::Global(GlobalSlot(0)),
-        };
-        let arms = vec![
-            TypedArm {
-                pat: TypedPat::Array {
-                    ty: arr_ty,
-                    elem_ty: int,
-                    len: ConstId(0),
-                    prefix: vec![TypedPat::Wild { ty: int }, TypedPat::Wild { ty: int }],
-                    rest: PatRest::None,
-                },
-                guard: None,
-                body: TypedExpr::Const {
-                    ty: int,
-                    value: ConstId(1),
-                },
-            },
-            TypedArm {
-                pat: TypedPat::Wild { ty: arr_ty },
-                guard: None,
-                body: TypedExpr::Const {
-                    ty: int,
-                    value: ConstId(2),
-                },
-            },
-        ];
-        let p = TypedProgram {
-            fns: Vec::new(),
-            toplevel: nullary(
-                StrId::NONE,
-                int,
-                TypedExpr::Match {
-                    ty: int,
-                    scrut: Box::new(scrut),
-                    arms,
-                },
-            ),
-            pool,
-            temps,
-        };
-
-        // The array arm's length check compares against `TypedPat::Array`'s
-        // pooled `len`, `c0`: `lower` has no pool to mint a constant into, so
-        // every constant it emits is one the elaborator already pooled.
-        let out = format!("{}", lower::lower(&p));
-        assert!(out.contains("c0"), "the length check:\n{out}");
-        assert!(!out.contains("c3"), "a constant nobody pooled:\n{out}");
     }
 }

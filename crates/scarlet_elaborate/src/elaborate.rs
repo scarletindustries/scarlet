@@ -32,10 +32,10 @@ use super::{
     BindingId, GlobalSlot, TypedArm, TypedArrayElem, TypedBinSeg, TypedBind, TypedCallee,
     TypedExpr, TypedFn, TypedInterpPart, TypedPat, ValueRef,
 };
-use crate::ast;
-use crate::core_ir::{ConstId, FuncIdx, PrimOp, VariantRef};
-use crate::span::Span;
-use crate::types::{Prim, StrId, Ty};
+use scarlet_ir::core_ir::{ConstId, FuncIdx, PrimOp, VariantRef};
+use scarlet_syntax::ast;
+use scarlet_syntax::span::Span;
+use scarlet_types::types::{Prim, StrId, Ty};
 
 /// One scheduled node of a block: its index in the block's `body`, and — for a
 /// top-level `fn`/`const` — the entry-frame slot its binding must land in.
@@ -45,12 +45,12 @@ type Step = (usize, Option<GlobalSlot>);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OrShape {
     /// The failure variant (`None`/`Err`).
-    pub(crate) fail: VariantRef,
+    pub fail: VariantRef,
     /// The success variant (`Some`/`Ok`), always arity 1.
-    pub(crate) ok: VariantRef,
+    pub ok: VariantRef,
     /// Whether the failure variant carries a payload (`Result` yes, `Option`
     /// no).
-    pub(crate) err_has_payload: bool,
+    pub err_has_payload: bool,
 }
 
 /// Where a field sits in a value of its receiver's type, found by the field's
@@ -67,11 +67,11 @@ pub enum FieldAt {
 /// One variant of a receiver's type, as a read of one of its fields sees it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VariantLayout {
-    pub(crate) variant: VariantRef,
+    pub variant: VariantRef,
     /// Every field's type, instantiated at the receiver's type arguments.
-    pub(crate) fields: Vec<Ty>,
+    pub fields: Vec<Ty>,
     /// Which of `fields` the read is after.
-    pub(crate) slot: u32,
+    pub slot: u32,
 }
 
 /// Abort: the check walk did not answer a question elaboration had to ask, so
@@ -81,7 +81,7 @@ pub struct VariantLayout {
 #[allow(clippy::panic)]
 #[cold]
 #[inline(never)]
-pub(crate) fn elaborator_bug(why: &'static str, span: Span) -> ! {
+pub fn elaborator_bug(why: &'static str, span: Span) -> ! {
     panic!(
         "internal compiler error: {why} at {span:?} is well-typed but was not elaborated. \
          Report this as a compiler bug."
@@ -174,7 +174,7 @@ pub trait ElabCtx: PreludeTys {
 /// `toplevel` is set for a bare-expression program, whose body is the module
 /// toplevel; a module block goes through [`elaborate_toplevel`] instead.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn elaborate_body<C: ElabCtx>(
+pub fn elaborate_body<C: ElabCtx>(
     ctx: &mut C,
     pool: &mut ResolvedPool,
     fns: &mut FnTable,
@@ -192,7 +192,7 @@ pub(crate) fn elaborate_body<C: ElabCtx>(
 /// Elaborate a module's top level: the block's `nodes`, at their source
 /// indices, which its declarations are scheduled by.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn elaborate_toplevel<C: ElabCtx>(
+pub fn elaborate_toplevel<C: ElabCtx>(
     ctx: &mut C,
     pool: &mut ResolvedPool,
     fns: &mut FnTable,
@@ -1540,8 +1540,8 @@ fn subst_rty(pool: &mut ResolvedPool, t: RTy, m: &HashMap<u32, RTy>) -> RTy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::type_def::TypeId;
-    use crate::types::PrimIds;
+    use scarlet_types::type_def::TypeId;
+    use scarlet_types::types::PrimIds;
 
     fn pool() -> ResolvedPool {
         ResolvedPool::new(PrimIds {

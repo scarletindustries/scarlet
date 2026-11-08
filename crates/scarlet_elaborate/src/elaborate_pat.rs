@@ -26,12 +26,12 @@ use std::collections::{HashMap, HashSet};
 
 use smallvec::SmallVec;
 
-use crate::ast;
-use crate::core_ir::ConstId;
-use crate::core_ir::PrimOp;
-use crate::core_ir::VariantRef;
-use crate::span::Span;
-use crate::types::StrId;
+use scarlet_ir::core_ir::ConstId;
+use scarlet_ir::core_ir::PrimOp;
+use scarlet_ir::core_ir::VariantRef;
+use scarlet_syntax::ast;
+use scarlet_syntax::span::Span;
+use scarlet_types::types::StrId;
 
 use super::checked::{CArm, CExpr};
 use super::rty::{Arity, RTy};
@@ -215,7 +215,7 @@ pub(crate) fn slot_pattern_args<'p, C: PatCtx>(
 
 /// Every [`TypedBind`] `p` introduces, in left-to-right order, each listed
 /// once however many or-alternatives mention it.
-pub(crate) fn pat_binds(p: &TypedPat) -> Vec<TypedBind> {
+pub fn pat_binds(p: &TypedPat) -> Vec<TypedBind> {
     let mut out = Vec::new();
     collect_binds(p, &mut out);
     out
@@ -574,13 +574,13 @@ pub(crate) fn seg_bits<C: PatCtx>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core_ir::Const;
-    use crate::span::Span;
-    use crate::type_def::TypeId;
-    use crate::typed_ir::BindingId;
-    use crate::typed_ir::checked::{CKind, CPattern};
-    use crate::typed_ir::rty::ResolvedPool;
-    use crate::types::PrimIds;
+    use crate::BindingId;
+    use crate::checked::{CKind, CPattern};
+    use crate::rty::ResolvedPool;
+    use scarlet_ir::core_ir::Const;
+    use scarlet_syntax::span::Span;
+    use scarlet_types::type_def::TypeId;
+    use scarlet_types::types::PrimIds;
 
     const INT: TypeId = TypeId(1);
     const FLOAT: TypeId = TypeId(2);
@@ -739,7 +739,7 @@ mod tests {
     /// to `Nil`, so its type is never read.
     fn checked_num(v: i64) -> CExpr {
         CExpr {
-            ty: crate::types::Ty(0),
+            ty: scarlet_types::types::Ty(0),
             span: Span::DUMMY,
             kind: CKind::Number(num(v)),
         }

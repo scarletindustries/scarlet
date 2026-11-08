@@ -8,7 +8,7 @@
 //! no `&mut` and no `Result`, because everything it would have to ask for is
 //! already a field: a type is an [`RTy`], a name is a [`ValueRef`], a callee is
 //! a [`TypedCallee`]. Upstream is not total, though: a broken invariant reaches
-//! [`crate::typed_ir::elaborator_bug`], which aborts rather than diagnosing.
+//! [`scarlet_elaborate::elaborator_bug`], which aborts rather than diagnosing.
 //!
 //! ## Builder discipline
 //!
@@ -48,12 +48,12 @@ use super::{
     Atom, Callee, ConstId, CoreBind, CoreExpr, CoreFn, CorePat, CoreProgram, JoinId, Load, LocalId,
     PrimOp,
 };
-use crate::tivec::TiVec;
-use crate::typed_ir::{
+use scarlet_elaborate::{
     BindingId, PatRest, RTy, TempTys, TypedArm, TypedArrayElem, TypedBinPatSeg, TypedBinSeg,
     TypedBind, TypedCallee, TypedExpr, TypedFn, TypedInterpPart, TypedPat, TypedProgram, ValueRef,
 };
-use crate::types::StrId;
+use scarlet_ir::tivec::TiVec;
+use scarlet_types::types::StrId;
 
 /// Checked narrowing for a [`PrimOp`] field or element index. Overflow aborts:
 /// silently truncating would address the wrong field.
@@ -86,7 +86,7 @@ fn binding_bug(b: BindingId, why: &str) -> ! {
 /// [`CoreBind::global`], recoverable via [`CoreExpr::toplevel_globals`]. The
 /// pairing comes from the `TypedBind`, so it cannot drift from the
 /// `PushGlobal slot` already-emitted fn bodies use.
-pub(crate) fn lower(p: &TypedProgram) -> CoreProgram {
+pub fn lower(p: &TypedProgram) -> CoreProgram {
     let mut fns = Vec::with_capacity(p.fns.len());
     for (i, f) in p.fns.iter().enumerate() {
         let f = lower_fn(p.temps, f);
@@ -1511,5 +1511,5 @@ fn nested_fallible(p: &TypedPat) -> bool {
 /// locals a binding alternative mints, so only a bind-free or-pattern shares
 /// its commit path as a join (see [`Lower::or_alternatives`]).
 fn pat_binds(p: &TypedPat) -> bool {
-    !crate::typed_ir::elaborate_pat::pat_binds(p).is_empty()
+    !scarlet_elaborate::elaborate_pat::pat_binds(p).is_empty()
 }

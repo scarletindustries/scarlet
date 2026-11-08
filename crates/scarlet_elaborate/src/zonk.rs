@@ -28,12 +28,12 @@ use std::collections::HashMap;
 use smallvec::SmallVec;
 
 use super::rty::{RTy, ResolvedPool};
-use crate::types::{InferEngine, Ty, TypeNode};
+use scarlet_types::types::{InferEngine, Ty, TypeNode};
 
 /// Copies inference types into a [`ResolvedPool`], memoising per resolved `Ty`
 /// so a spine shared by many expressions is allocated once. Bound indices are
 /// numbered per `Zonker`, never across.
-pub(crate) struct Zonker<'e> {
+pub struct Zonker<'e> {
     eng: &'e InferEngine,
     /// Keyed by the *representative* `Ty`, so `find_ref`-equal types share a
     /// node. The bool is the `invented` bit, carried so a memo hit reports
@@ -47,7 +47,7 @@ pub(crate) struct Zonker<'e> {
 }
 
 impl<'e> Zonker<'e> {
-    pub(crate) fn new(eng: &'e InferEngine) -> Self {
+    pub fn new(eng: &'e InferEngine) -> Self {
         Zonker {
             eng,
             memo: HashMap::new(),
@@ -73,7 +73,7 @@ impl<'e> Zonker<'e> {
     /// The `bool` is true when an opaque `Bound` was invented anywhere in the
     /// spine. A caller caching across zonkers must not keep such a node: the
     /// variable may be solved by a later body.
-    pub(crate) fn zonk_or_opaque(&mut self, pool: &mut ResolvedPool, t: Ty) -> (RTy, bool) {
+    pub fn zonk_or_opaque(&mut self, pool: &mut ResolvedPool, t: Ty) -> (RTy, bool) {
         self.resolve(pool, t)
     }
 
@@ -123,7 +123,7 @@ impl<'e> Zonker<'e> {
     fn zonk_children(
         &mut self,
         pool: &mut ResolvedPool,
-        sl: crate::types::ArenaSlice<crate::types::pool::Children>,
+        sl: scarlet_types::types::ArenaSlice<scarlet_types::types::pool::Children>,
     ) -> (SmallVec<[RTy; 4]>, bool) {
         // Copied out of the engine's arena first: `resolve` reborrows `self`.
         let kids: SmallVec<[Ty; 4]> = self.eng.children_of(sl).into();
@@ -139,16 +139,16 @@ impl<'e> Zonker<'e> {
 }
 
 /// A pool sized for the engine that will feed it, so `prim_of` stays honest.
-pub(crate) fn pool_for(eng: &InferEngine) -> ResolvedPool {
+pub fn pool_for(eng: &InferEngine) -> ResolvedPool {
     ResolvedPool::new(eng.prim_ids())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::type_def::TypeId;
-    use crate::typed_ir::rty::ResolvedNode;
-    use crate::types::{Prim, PrimIds, new_engine};
+    use crate::rty::ResolvedNode;
+    use scarlet_types::type_def::TypeId;
+    use scarlet_types::types::{Prim, PrimIds, new_engine};
 
     fn is_bound(n: ResolvedNode) -> bool {
         matches!(n, ResolvedNode::Bound(_))
@@ -174,10 +174,7 @@ mod tests {
         let mut pool = pool_for(&e);
         let (r, invented) = Zonker::new(&e).zonk_or_opaque(&mut pool, f);
         assert!(!invented, "a concrete spine invents nothing");
-        assert_eq!(
-            crate::typed_ir::Arity::of(pool.fun_params(r)),
-            crate::typed_ir::Arity(1)
-        );
+        assert_eq!(crate::Arity::of(pool.fun_params(r)), crate::Arity(1));
         let p0 = pool.fun_params(r)[0];
         assert_eq!(pool.con_args(p0).len(), 1);
         assert_eq!(pool.prim_of(pool.con_arg(p0, 0).unwrap()), Some(Prim::Int));

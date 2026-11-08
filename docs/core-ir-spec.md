@@ -6,7 +6,7 @@
 
 Phase 2 (Perceus on the AST walker) regressed bench_typed 0.61→0.77 because last-use is unknowable during a forward AST emit — it hedged with Nop holes on every read. ANF makes last-use a trivial linear scan. Koka, Lean (LCNF), Swift (SIL), OCaml (Lambda) all put Perceus/ARC/mode-inference on exactly this shape of IR.
 
-## The IR (`crates/scarlet_core/src/core_ir/mod.rs`)
+## The IR (`crates/scarlet_lower/src/lib.rs`)
 
 ```rust
 pub struct CoreFn {

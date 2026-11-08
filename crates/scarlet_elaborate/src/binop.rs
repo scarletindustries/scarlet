@@ -1,9 +1,9 @@
 //! Source binary operator → [`PrimOp`] selection, specialised against the operand
 //! type elaboration resolved.
 
-use crate::ast::BinaryOp;
-use crate::core_ir::PrimOp;
-use crate::types::Prim;
+use scarlet_ir::core_ir::PrimOp;
+use scarlet_syntax::ast::BinaryOp;
+use scarlet_types::types::Prim;
 
 /// A binary operator that denotes a [`PrimOp`].
 ///
@@ -12,7 +12,7 @@ use crate::types::Prim;
 /// `Option`. The only constructor is [`BinopKind::of`], which routes the two
 /// short-circuiting forms to [`ShortCircuitOp`] instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ValueBinop {
+pub enum ValueBinop {
     Add,
     Sub,
     Mul,
@@ -29,7 +29,7 @@ pub(crate) enum ValueBinop {
 /// The two branching binary forms. Their operands are a condition and a branch
 /// arm, so the elaborator builds `TypedExpr::And`/`Or`, not `TypedExpr::Binary`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ShortCircuitOp {
+pub enum ShortCircuitOp {
     And,
     Or,
 }
@@ -37,7 +37,7 @@ pub(crate) enum ShortCircuitOp {
 /// Which of the two a source [`BinaryOp`] is. Total, and the sole constructor
 /// of [`ValueBinop`], so holding one proves the operator is not `&&`/`||`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BinopKind {
+pub enum BinopKind {
     Value(ValueBinop),
     ShortCircuit(ShortCircuitOp),
 }

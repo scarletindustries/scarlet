@@ -20,14 +20,14 @@ use scarlet_syntax::ast;
 use scarlet_syntax::span::Span;
 
 use super::Denotation;
-use crate::core_ir::FuncIdx;
-use crate::types::{StrId, Ty};
+use scarlet_ir::core_ir::FuncIdx;
+use scarlet_types::types::{StrId, Ty};
 
 #[derive(Debug, Clone)]
 pub struct CExpr {
-    pub(crate) ty: Ty,
-    pub(crate) span: Span,
-    pub(crate) kind: CKind,
+    pub ty: Ty,
+    pub span: Span,
+    pub kind: CKind,
 }
 
 #[derive(Debug, Clone)]
@@ -113,10 +113,10 @@ pub enum CInterpPart {
 
 #[derive(Debug, Clone)]
 pub struct CBinSeg {
-    pub(crate) value: CExpr,
-    pub(crate) spec: ast::BinSpec,
+    pub value: CExpr,
+    pub spec: ast::BinSpec,
     /// The checked size expression, when the spec has one.
-    pub(crate) size: Option<CExpr>,
+    pub size: Option<CExpr>,
 }
 
 #[derive(Debug, Clone)]
@@ -152,16 +152,16 @@ pub enum CArg {
 
 #[derive(Debug, Clone)]
 pub struct CPattern {
-    pub(crate) pattern: ast::Pattern,
+    pub pattern: ast::Pattern,
     /// The pattern's size expressions, in the order the pattern visits them.
-    pub(crate) sizes: Vec<CExpr>,
+    pub sizes: Vec<CExpr>,
 }
 
 #[derive(Debug, Clone)]
 pub struct CArm {
-    pub(crate) pattern: CPattern,
-    pub(crate) guard: Option<CExpr>,
-    pub(crate) body: CExpr,
+    pub pattern: CPattern,
+    pub guard: Option<CExpr>,
+    pub body: CExpr,
 }
 
 #[derive(Debug, Clone)]
@@ -193,11 +193,11 @@ pub enum CNode {
 #[derive(Debug, Clone)]
 pub struct NameFact {
     /// The name's type at this use, as the walk instantiated it.
-    pub(crate) ty: Ty,
-    pub(crate) at: NameAt,
+    pub ty: Ty,
+    pub at: NameAt,
     /// The declared parameter labels when the name is a module `fn` called
     /// here, `None` for every other name. Labels are refused on anything else.
-    pub(crate) param_labels: Option<Vec<StrId>>,
+    pub param_labels: Option<Vec<StrId>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -214,8 +214,8 @@ pub enum NameAt {
 /// A lambda as the check walk closed it.
 #[derive(Debug, Clone)]
 pub struct ClosureFact {
-    pub(crate) func_idx: FuncIdx,
+    pub func_idx: FuncIdx,
     /// Every captured name, in capture-index order, with how it loads in the
     /// enclosing body.
-    pub(crate) captures: Vec<(StrId, NameFact)>,
+    pub captures: Vec<(StrId, NameFact)>,
 }

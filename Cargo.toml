@@ -4,6 +4,8 @@ members = [
     "crates/scarlet_ir",
     "crates/scarlet_vm",
     "crates/scarlet_types",
+    "crates/scarlet_elaborate",
+    "crates/scarlet_lower",
     "crates/scarlet_core",
     "crates/scarlet",
     "crates/xtask",

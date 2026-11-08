@@ -193,7 +193,7 @@ println(f())              // 7
 ## Acceptance
 
 1. `lower`'s signature takes no `&mut` and returns no `Result`. `LowerError` and `DiagnosticCode::InternalError` are deleted.
-2. `grep -c 'fresh_var()' crates/scarlet_core/src/core_ir/lower.rs` → 0, because it does not have an engine. (This is an *outcome* of the signature, not a rule to satisfy.)
+2. `grep -c 'fresh_var()' crates/scarlet_lower/src/lower.rs` → 0, because it does not have an engine. (This is an *outcome* of the signature, not a rule to satisfy.)
 3. No `emit` path produces an absolute address; `link` is the only place addresses are written.
 4. All tests green (currently 727+). Both regressions above green.
 5. `cargo clippy --all-targets` → 0 errors, 0 warnings. `cargo fmt --check` clean.

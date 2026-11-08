@@ -918,6 +918,18 @@ dependencies = [
  "indexmap",
  "percent-encoding",
  "petgraph",
+ "scarlet_elaborate",
+ "scarlet_ir",
+ "scarlet_lower",
+ "scarlet_syntax",
+ "scarlet_types",
+ "smallvec",
+]
+
+[[package]]
+name = "scarlet_elaborate"
+version = "0.1.0"
+dependencies = [
  "scarlet_ir",
  "scarlet_syntax",
  "scarlet_types",
@@ -927,6 +939,17 @@ dependencies = [
 [[package]]
 name = "scarlet_ir"
 version = "0.1.0"
+
+[[package]]
+name = "scarlet_lower"
+version = "0.1.0"
+dependencies = [
+ "scarlet_elaborate",
+ "scarlet_ir",
+ "scarlet_syntax",
+ "scarlet_types",
+ "smallvec",
+]
 
 [[package]]
 name = "scarlet_syntax"
