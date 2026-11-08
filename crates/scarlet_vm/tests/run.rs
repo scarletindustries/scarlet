@@ -1436,3 +1436,47 @@ fn a_float_pattern_matches_as_equality_does() {
         "zero\nzero\none and a half\none and a half\nother\n",
     );
 }
+
+/// A name's init reads the binding the name had before it, whether that
+/// binding is in an outer block of the same body or in an enclosing function.
+#[test]
+fn a_rebinding_init_reads_the_binding_it_shadows() {
+    prints(
+        "pub fn main() {\n\
+         \tx = 5\n\
+         \tg = fn() {\n\
+         \t\tx = x + 1\n\
+         \t\tx\n\
+         \t}\n\
+         \ty = if x > 1 {\n\
+         \t\tx = x + 10\n\
+         \t\tx\n\
+         \t} else { 0 }\n\
+         \tprintln(g())\n\
+         \tprintln(y)\n\
+         \tprintln(x)\n\
+         }\n",
+        "6\n15\n5\n",
+    );
+}
+
+/// A segment's size reads the pattern's names bound left of it, and an outer
+/// binding for a name the pattern only binds later.
+#[test]
+fn a_segment_size_sees_only_the_names_bound_before_it() {
+    prints(
+        "pub fn main() {\n\
+         \tn = 1\n\
+         \tr = match <<2, 2, 1, 9>> {\n\
+         \t\t<<a:bytes(n), n:8, b:bytes(n)>> -> {\n\
+         \t\t\tprintln(a)\n\
+         \t\t\tprintln(b)\n\
+         \t\t\tn\n\
+         \t\t}\n\
+         \t\t_ -> 0\n\
+         \t}\n\
+         \tprintln(r)\n\
+         }\n",
+        "<<2>>\n<<1, 9>>\n2\n",
+    );
+}

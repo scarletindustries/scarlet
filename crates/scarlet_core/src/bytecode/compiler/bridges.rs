@@ -68,8 +68,8 @@ impl ElabCtx for Compiler {
         let scheme = self.env.lookup(&name)?;
         Some(self.engine.instantiate(scheme, &self.rigid_ids))
     }
-    fn decl_denotation(&self, name: StrId) -> Option<Denotation> {
-        Compiler::decl_denotation(self, name)
+    fn decl_denotation(&self, binder: BinderId) -> Option<Denotation> {
+        Compiler::decl_denotation(self, binder)
     }
     fn resolve_qualified(
         &mut self,

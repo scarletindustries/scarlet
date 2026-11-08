@@ -17,12 +17,13 @@
 //!
 //! `Cons(x, _) | Wrap(x)` binds one `x`. The arm's guard and body are one
 //! tree, so which [`BindingId`] a name means must not depend on which
-//! alternative matched: the first occurrence mints it and every occurrence in
-//! a later alternative reuses it. A repeat *within* one alternative
-//! (`Pair(x, x)`) is what that reuse must never absorb; the check walk rejects
-//! it, so elaboration aborts on one.
+//! alternative matched. The check walk gave the name one binder across the
+//! alternatives: the first occurrence mints its [`BindingId`] and every
+//! occurrence in a later alternative reuses it. A repeat *within* one
+//! alternative (`Pair(x, x)`) is what that reuse must never absorb; the check
+//! walk rejects it, so elaboration aborts on one.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use smallvec::SmallVec;
 
@@ -33,7 +34,8 @@ use scarlet_syntax::ast;
 use scarlet_syntax::span::Span;
 use scarlet_types::types::StrId;
 
-use super::checked::{CArm, CExpr};
+use super::checked::{BinderId, CArm, CExpr, CPattern};
+use super::elaborate::binder_of;
 use super::rty::{Arity, RTy};
 use super::slots::{Slots, slot_labeled};
 use super::{PatRest, TypedArm, TypedBinPatSeg, TypedBind, TypedExpr, TypedPat, elaborator_bug};
@@ -115,12 +117,9 @@ impl CtorPat {
 pub trait PatCtx {
     fn intern(&mut self, name: &str) -> StrId;
 
-    /// Mint a fresh [`BindingId`] for `name` and bring it into scope for the
-    /// rest of the pattern, its guard, and its body.
-    fn bind(&mut self, name: StrId, ty: RTy) -> TypedBind;
-    fn scope_mark(&mut self) -> usize;
-    /// Drop every name bound since `mark`.
-    fn scope_reset(&mut self, mark: usize);
+    /// The bind for `binder`: a fresh [`BindingId`] the first time, and the
+    /// same one again for a later or-alternative's occurrence of it.
+    fn bind(&mut self, binder: BinderId, name: StrId, ty: RTy) -> TypedBind;
 
     fn number_const(&mut self, lit: &ast::NumberLiteral) -> ConstId;
     fn string_const(&mut self, s: &str) -> ConstId;
@@ -149,42 +148,34 @@ pub trait PatCtx {
 }
 
 /// Elaborate the arms of a `match` whose scrutinee has type `scrut`.
-///
-/// Each arm opens its own name scope: the pattern's binds are visible to the
-/// guard and the body and to nothing else.
 pub(crate) fn elaborate_arms<C: PatCtx>(cx: &mut C, scrut: RTy, arms: &[CArm]) -> Vec<TypedArm> {
     arms.iter()
         .map(|arm| {
-            let mark = cx.scope_mark();
-            let pat = elaborate_pattern(cx, &arm.pattern.pattern, &arm.pattern.sizes, scrut);
+            let pat = elaborate_pattern(cx, &arm.pattern, scrut);
             let guard = arm.guard.as_ref().map(|g| cx.expr(g));
             let body = cx.expr(&arm.body);
-            cx.scope_reset(mark);
             TypedArm { pat, guard, body }
         })
         .collect()
 }
 
-/// Elaborate one pattern against a scrutinee of type `scrut`. Binds it
-/// introduces stay in scope; the caller decides when to drop them.
+/// Elaborate one pattern against a scrutinee of type `scrut`.
 ///
-/// `sizes` are the pattern's checked size expressions, in the order the
-/// pattern visits them, which is the order its segments are elaborated in.
-fn elaborate_pattern<C: PatCtx>(
-    cx: &mut C,
-    p: &ast::Pattern,
-    sizes: &[CExpr],
-    scrut: RTy,
-) -> TypedPat {
+/// The pattern's size expressions are elaborated in the order the pattern
+/// visits them, which is the order the check walk kept them in.
+fn elaborate_pattern<C: PatCtx>(cx: &mut C, p: &CPattern, scrut: RTy) -> TypedPat {
     let mut el = PatElab {
         cx,
-        sizes: sizes.iter(),
-        bound: HashMap::new(),
+        sizes: p.sizes.iter(),
+        binders: &p.binders,
         seen: HashSet::new(),
     };
-    let pat = el.pat(p, scrut);
+    let pat = el.pat(&p.pattern, scrut);
     if el.sizes.next().is_some() {
-        elaborator_bug("pattern size the pattern has no segment for", p.span())
+        elaborator_bug(
+            "pattern size the pattern has no segment for",
+            p.pattern.span(),
+        )
     }
     pat
 }
@@ -276,11 +267,9 @@ struct PatElab<'c, C: PatCtx> {
     cx: &'c mut C,
     /// The pattern's checked size expressions not yet claimed by a segment.
     sizes: std::slice::Iter<'c, CExpr>,
-    /// Names already bound in this pattern. A later or-alternative re-binds
-    /// the same names onto the same [`BindingId`], which is the one-variable-
-    /// per-name rule the single-body [`TypedArm`] needs.
-    bound: HashMap<StrId, TypedBind>,
-    /// Names bound in the *current* or-alternative. `bound` alone cannot tell
+    /// The binder of each name the pattern binds.
+    binders: &'c [(StrId, BinderId)],
+    /// Names bound in the *current* or-alternative. A binder alone cannot tell
     /// a legitimate cross-alternative re-bind from `Pair(x, x)`.
     seen: HashSet<StrId>,
 }
@@ -295,14 +284,8 @@ impl<C: PatCtx> PatElab<'_, C> {
         if !self.seen.insert(sid) {
             elaborator_bug("duplicate binding in pattern alternative", span)
         }
-        match self.bound.get(&sid) {
-            Some(b) => *b,
-            None => {
-                let b = self.cx.bind(sid, ty);
-                self.bound.insert(sid, b);
-                b
-            }
-        }
+        let binder = binder_of(self.binders, sid, span);
+        self.cx.bind(binder, sid, ty)
     }
 
     /// A `..name` rest binder. The parser leaves a `.._` rest as a binding
@@ -354,7 +337,7 @@ impl<C: PatCtx> PatElab<'_, C> {
             ast::Pattern::Array { elements, span } => self.array(elements, scrut, *span),
             ast::Pattern::Binary { segments, rest, .. } => self.bin(segments, rest.as_ref(), scrut),
             ast::Pattern::Or { first, rest, .. } => {
-                // `bound` is shared across alternatives (the bind-once rule),
+                // A binder is shared across alternatives (the bind-once rule),
                 // but `seen` restarts from the enclosing names per
                 // alternative, so only a repeat within one alternative trips
                 // `bind`. What the alternatives bound folds back in after:
@@ -575,12 +558,13 @@ pub(crate) fn seg_bits<C: PatCtx>(
 mod tests {
     use super::*;
     use crate::BindingId;
-    use crate::checked::{CKind, CPattern};
+    use crate::checked::CKind;
     use crate::rty::ResolvedPool;
     use scarlet_ir::core_ir::Const;
     use scarlet_syntax::span::Span;
     use scarlet_types::type_def::TypeId;
     use scarlet_types::types::PrimIds;
+    use std::collections::HashMap;
 
     const INT: TypeId = TypeId(1);
     const FLOAT: TypeId = TypeId(2);
@@ -596,7 +580,8 @@ mod tests {
         names: Vec<String>,
         consts: Vec<Const>,
         binds: Vec<TypedBind>,
-        scope: Vec<StrId>,
+        bound: HashMap<BinderId, TypedBind>,
+        next_binder: u32,
         ctors: HashMap<String, (u16, Vec<&'static str>, Vec<RTy>)>,
         int: RTy,
         binary: RTy,
@@ -617,7 +602,8 @@ mod tests {
                 names: Vec::new(),
                 consts: Vec::new(),
                 binds: Vec::new(),
-                scope: Vec::new(),
+                bound: HashMap::new(),
+                next_binder: 0,
                 ctors: HashMap::new(),
                 int,
                 binary,
@@ -630,6 +616,32 @@ mod tests {
 
         fn user(&mut self) -> RTy {
             self.pool.mk_con(USER, &[])
+        }
+
+        /// `p` as the check walk would hand it over: one fresh binder per name
+        /// it binds, or-alternatives sharing one.
+        fn checked(&mut self, p: &ast::Pattern, sizes: Vec<CExpr>) -> CPattern {
+            let mut names = Vec::new();
+            p.for_each_binder(ast::OrAlternatives::All, &mut |b| {
+                if let ast::PatternBinder::Name(id) = b
+                    && !id.name.starts_with('_')
+                {
+                    names.push(id.name.clone());
+                }
+            });
+            let mut binders: Vec<(StrId, BinderId)> = Vec::new();
+            for n in names {
+                let sid = self.intern(&n);
+                if binders.iter().all(|(s, _)| *s != sid) {
+                    binders.push((sid, BinderId(self.next_binder)));
+                    self.next_binder += 1;
+                }
+            }
+            CPattern {
+                pattern: p.clone(),
+                sizes,
+                binders,
+            }
         }
 
         /// Declare `name` as variant `idx`.
@@ -650,7 +662,10 @@ mod tests {
             }
         }
 
-        fn bind(&mut self, name: StrId, ty: RTy) -> TypedBind {
+        fn bind(&mut self, binder: BinderId, name: StrId, ty: RTy) -> TypedBind {
+            if let Some(b) = self.bound.get(&binder) {
+                return *b;
+            }
             let b = TypedBind {
                 id: BindingId(self.binds.len() as u32),
                 name,
@@ -658,16 +673,8 @@ mod tests {
                 global: None,
             };
             self.binds.push(b);
-            self.scope.push(name);
+            self.bound.insert(binder, b);
             b
-        }
-
-        fn scope_mark(&mut self) -> usize {
-            self.scope.len()
-        }
-
-        fn scope_reset(&mut self, mark: usize) {
-            self.scope.truncate(mark);
         }
 
         fn number_const(&mut self, lit: &ast::NumberLiteral) -> ConstId {
@@ -731,8 +738,9 @@ mod tests {
         }
     }
 
-    fn pat_of<C: PatCtx>(cx: &mut C, p: &ast::Pattern, scrut: RTy) -> TypedPat {
-        elaborate_pattern(cx, p, &[], scrut)
+    fn pat_of(cx: &mut Ctx, p: &ast::Pattern, scrut: RTy) -> TypedPat {
+        let p = cx.checked(p, Vec::new());
+        elaborate_pattern(cx, &p, scrut)
     }
 
     /// A checked number literal. The test context elaborates every expression
@@ -1239,14 +1247,11 @@ mod tests {
     }
 
     #[test]
-    fn each_arm_opens_its_own_scope() {
+    fn each_arm_binds_its_own_names() {
         let mut cx = Ctx::new();
         let int = cx.int;
-        let arm = |guard: Option<CExpr>, body: CExpr| CArm {
-            pattern: CPattern {
-                pattern: var("a"),
-                sizes: Vec::new(),
-            },
+        let mut arm = |guard: Option<CExpr>, body: CExpr| CArm {
+            pattern: cx.checked(&var("a"), Vec::new()),
             guard,
             body,
         };
@@ -1258,11 +1263,10 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert!(out[0].guard.is_none());
         assert!(out[1].guard.is_some());
-        // Distinct arms, distinct bindings: the reuse map is per-pattern.
+        // Distinct arms, distinct binders, distinct bindings.
         assert_eq!(cx.binds.len(), 2);
         assert_eq!(cx.binds[0].id, BindingId(0));
         assert_eq!(cx.binds[1].id, BindingId(1));
-        assert!(cx.scope.is_empty());
     }
 
     fn seg(value: ast::Pattern, spec: ast::BinSpec) -> ast::BinSegmentPat {
@@ -1307,13 +1311,14 @@ mod tests {
             }),
             span: Span::DUMMY,
         };
+        let p = cx.checked(&p, vec![checked_num(2)]);
 
         let TypedPat::Bin {
             ty,
             zero,
             segs,
             rest,
-        } = elaborate_pattern(&mut cx, &p, &[checked_num(2)], bin_t)
+        } = elaborate_pattern(&mut cx, &p, bin_t)
         else {
             panic!("expected Bin")
         };

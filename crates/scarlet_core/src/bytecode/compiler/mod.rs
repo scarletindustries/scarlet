@@ -55,7 +55,7 @@ use crate::core_ir::{
 use crate::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
 use crate::tivec::{Idx, TiVec};
 use crate::typed_ir::checked::{
-    CArg, CArm, CArrayElem, CBinSeg, CCallee, CExpr, CInterpPart, CKind, CNode, CPattern,
+    BinderId, CArg, CArm, CArrayElem, CBinSeg, CCallee, CExpr, CInterpPart, CKind, CNode, CPattern,
 };
 use crate::typed_ir::slots::{SlotError, slot_labeled};
 use crate::typed_ir::{
@@ -156,9 +156,9 @@ struct EntryToplevel {
 
 /// Where [`Compiler::resolve_variable`] found a name.
 enum Place {
-    /// Bound in the function being compiled. The elaborator knows it by its
-    /// own `BindingId`, so it never asks where it is.
-    ThisFunction,
+    /// Bound in the function being compiled, by this binding. The elaborator
+    /// knows it by its own `BindingId`, so it never asks where it is.
+    ThisFunction(BinderId),
     /// Reached from outside the function: a capture, a global, or the
     /// function itself.
     Outside(Denotation),
@@ -298,6 +298,11 @@ pub(super) struct LocalSlot {
     /// by [`Compiler::binds_a_global`]; `resolve_variable` must read this
     /// rather than re-derive it from `depth`.
     is_global: bool,
+    /// The binding a use of the name in this frame means. A slot reserved
+    /// before its binding is complete (a `let` whose init is still being
+    /// walked, a pattern name left of a size expression) keeps the binding
+    /// the name meant before; `None` when there was none in this frame.
+    binder: Option<BinderId>,
 }
 
 /// One top-level `fn`/`const` declaration of the module currently being
@@ -312,10 +317,10 @@ pub(super) struct LocalSlot {
 pub(super) struct ToplevelDecl {
     /// Index of the declaration's node in the module block's `body`.
     pub(super) node: usize,
-    /// Interned declaration name. Read only to resolve a forward *reference*
-    /// to this decl from inside the toplevel spine — the AST spells a name, so
-    /// something must translate it — and the answer is this record's `slot`.
-    pub(super) name: StrId,
+    /// The declaration's binder in the module toplevel. Read only to resolve
+    /// a forward *reference* to this decl from inside the toplevel spine, and
+    /// the answer is this record's `slot`.
+    pub(super) binder: BinderId,
     /// The entry-frame slot Pass 3 allocated for the declaration.
     pub(super) slot: GlobalSlot,
 }
@@ -336,6 +341,7 @@ struct FnFrame {
     capture_names: Vec<StrId>,
     rigid_ids: HashSet<i32>,
     binding: Option<StrId>,
+    next_binder: u32,
 }
 
 /// Per-module compiler state snapshotted on entry to a submodule body by
@@ -430,6 +436,9 @@ pub struct Compiler {
     pub(super) nil_discards: Vec<(String, Ty, Span)>,
     pub(super) outer_scopes: Vec<Scope>,
     pub(super) local_count: i32,
+    /// The next [`BinderId`] of the body being walked. Saved and restarted
+    /// from zero around every function body and module toplevel.
+    pub(super) next_binder: u32,
     /// Global slot → [`FuncIdx`] for every top-level `fn`
     /// that has already been compiled. Populated by `compile_declared_function`
     /// after `finish_fn_frame` assigns the `func_idx`; consulted by
@@ -701,7 +710,7 @@ fn function_reserved_during_elaboration() -> ! {
 /// there. No field is ever back-patched.
 struct DeferredBody {
     name: StrId,
-    param_binds: Vec<(StrId, Ty)>,
+    param_binds: Vec<(StrId, BinderId, Ty)>,
     /// What the check walk built for the body: every node with the type it
     /// inferred, and every name and lambda with what it resolved to.
     body: CExpr,
@@ -725,7 +734,7 @@ struct DeferredBody {
 /// `analyse_module`'s pass 6.
 struct ParkedBody {
     name: StrId,
-    param_binds: Vec<(StrId, Ty)>,
+    param_binds: Vec<(StrId, BinderId, Ty)>,
     body: CExpr,
     body_ty: Ty,
 }
@@ -888,6 +897,7 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         nil_discards: vec![],
         outer_scopes: vec![],
         local_count: 0,
+        next_binder: 0,
         global_to_func: HashMap::new(),
         toplevel_decls: Vec::new(),
         binding_globals: Vec::new(),
@@ -1422,11 +1432,15 @@ impl Compiler {
     /// restore it. Outside any open block scope there is nothing to unwind, so
     /// the log entry is skipped (the binding is captured by the next scope's
     /// mark instead).
+    ///
+    /// The new entry keeps the binding the name meant until
+    /// [`Self::publish_local`] gives it its own.
     fn bind_local_raw(&mut self, name: StrId, slot: i32) {
         let entry = LocalSlot {
             slot,
             depth: self.scope_marks.len() as u32,
             is_global: self.binds_a_global(),
+            binder: self.locals.get(&name).and_then(|e| e.binder),
         };
         let prev = self.locals.insert(name, entry);
         if !self.scope_marks.is_empty() {
@@ -1481,11 +1495,25 @@ impl Compiler {
     /// closure already captured by reference — and it does not queue the slot
     /// on [`Self::binding_globals`]: a declaration's slot reaches the
     /// elaborator on its own [`ToplevelDecl`] record instead.
-    pub(super) fn alloc_decl_slot(&mut self, name: &str) -> GlobalSlot {
+    pub(super) fn alloc_decl_slot(&mut self, name: &str) -> (GlobalSlot, BinderId) {
         let id = self.engine.intern(name);
         let idx = self.alloc_temp();
         self.bind_local_raw(id, idx);
-        GlobalSlot(idx)
+        (GlobalSlot(idx), self.publish_local(id))
+    }
+
+    /// Make `name`'s slot, already reserved, mean a new binding from here on,
+    /// and return that binding's [`BinderId`]. Uses walked before this, and
+    /// the binding's own init, still mean whatever the name meant before.
+    fn publish_local(&mut self, name: StrId) -> BinderId {
+        let binder = BinderId(self.next_binder);
+        self.next_binder += 1;
+        // The entry was made in the current scope, so the undo log already
+        // restores what it displaced.
+        if let Some(entry) = self.locals.get_mut(&name) {
+            entry.binder = Some(binder);
+        }
+        binder
     }
 
     #[inline]
@@ -1573,12 +1601,12 @@ impl Compiler {
     }
 
     /// Where a name in scope lives. `None` when nothing in scope binds it: a
-    /// constructor, a builtin, or (at a module toplevel) a declaration whose
-    /// `locals` entry `analyse_module` has already unwound.
+    /// constructor, a builtin, or a name whose only binding is not made yet.
     fn resolve_variable(&mut self, name: StrId) -> Option<Place> {
         self.mark_used(name);
-        if self.locals.contains_key(&name) {
-            return Some(Place::ThisFunction);
+        // A slot reserved for a binding not yet made is not in scope.
+        if let Some(binder) = self.locals.get(&name).and_then(|e| e.binder) {
+            return Some(Place::ThisFunction(binder));
         }
         if let Some(idx) = self.captures.get(&name) {
             debug_assert!(*idx >= 0, "capture index is a Vec index");
@@ -1643,8 +1671,8 @@ impl Compiler {
     /// off the same [`ToplevelDecl`] record whose `slot` the elaborated
     /// definition is pinned to. A linear scan over the module's own decls: a
     /// handful, walked once per forward reference.
-    fn decl_denotation(&self, name: StrId) -> Option<Denotation> {
-        let decl = self.toplevel_decls.iter().find(|d| d.name == name)?;
+    fn decl_denotation(&self, binder: BinderId) -> Option<Denotation> {
+        let decl = self.toplevel_decls.iter().find(|d| d.binder == binder)?;
         Some(self.global_denotation(decl.slot))
     }
 
@@ -1995,10 +2023,11 @@ impl Compiler {
                 let mark = self.binding_globals.len();
                 let (pattern, init) = match b.name() {
                     Some(ident) => {
-                        let init = self.compile_name_binding(b, ident);
+                        let (init, binder) = self.compile_name_binding(b, ident);
                         let pattern = CPattern {
                             pattern: b.pattern.clone(),
                             sizes: Vec::new(),
+                            binders: vec![(self.engine.intern(&ident.name), binder)],
                         };
                         (pattern, init)
                     }
@@ -2038,8 +2067,12 @@ impl Compiler {
         }
     }
 
-    /// `x = e` or `x Type = e`.
-    fn compile_name_binding(&mut self, vb: &ast::Binding, ident: &ast::Identifier) -> CExpr {
+    /// `x = e` or `x Type = e`. Returns the init and the binding's binder.
+    fn compile_name_binding(
+        &mut self,
+        vb: &ast::Binding,
+        ident: &ast::Identifier,
+    ) -> (CExpr, BinderId) {
         let name = ident.name.clone();
         let name_id = self.engine.intern(&name);
 
@@ -2113,7 +2146,7 @@ impl Compiler {
         if defer_slot {
             self.get_or_create_local(&name);
         }
-        init
+        (init, self.publish_local(name_id))
     }
 
     /// `(a, b) = e`, `Point(x:, ..) = e`: typed like a one-arm `match`, and the
@@ -2124,11 +2157,7 @@ impl Compiler {
         let init_ty = init.ty;
         let mut pb = PatternBindings::new();
         let typed_ok = self.type_pattern(&b.pattern, init_ty, &mut pb.sink());
-        self.bind_pattern_initials(&pb);
-        let pattern = CPattern {
-            pattern: b.pattern.clone(),
-            sizes: self.type_pattern_sizes(&b.pattern),
-        };
+        let pattern = self.bind_pattern(&b.pattern, &pb);
         if !typed_ok {
             return (pattern, init);
         }
@@ -3019,11 +3048,9 @@ impl Compiler {
             return (NameAt::Den(den), false);
         }
         match self.resolve_variable(id) {
-            Some(Place::ThisFunction) => (NameAt::Bound, true),
+            Some(Place::ThisFunction(binder)) => (NameAt::Local(binder), true),
             Some(Place::Outside(den)) => (NameAt::Den(den), true),
-            // `analyse_module` unwinds `self.locals` before a module toplevel
-            // elaborates, so there a decl is found by name.
-            None if self.outer_scopes.is_empty() => (NameAt::Bound, false),
+            None if self.outer_scopes.is_empty() => (NameAt::Unbound, false),
             None => (NameAt::Den(Denotation::self_closure()), false),
         }
     }
@@ -3642,7 +3669,7 @@ impl Compiler {
         let at = match (Denotation::from_kind(scheme.kind), slot) {
             (Some(den), _) => NameAt::Den(den),
             (None, Some(slot)) => NameAt::Den(self.global_denotation(slot)),
-            (None, None) => NameAt::Bound,
+            (None, None) => NameAt::Unbound,
         };
         Some(QualifiedMember {
             module_key,
@@ -4194,11 +4221,14 @@ impl Compiler {
         // Failure branch: the recovery body, with the `Err` payload bound to
         // the receiver when there is one.
         self.push_block_scope();
+        let mut receiver = None;
         if let Some(e) = err_var
             && let Some(recv) = &expr.receiver
         {
             self.get_or_create_local(&recv.name);
             self.register_local_binding(&recv.name, e, recv.span);
+            let sid = self.engine.intern(&recv.name);
+            receiver = Some((sid, self.publish_local(sid)));
         }
         let body = self.compile_expr(&expr.body);
         self.pop_block_scope();
@@ -4207,7 +4237,7 @@ impl Compiler {
 
         let kind = CKind::Or {
             lhs: Box::new(lhs),
-            receiver: expr.receiver.as_ref().map(|r| self.engine.intern(&r.name)),
+            receiver,
             body: Box::new(body),
         };
         (success_var, kind)
@@ -4245,6 +4275,7 @@ impl Compiler {
         &mut self,
         params: &[ast::FunctionParameter],
         param_tys: &[Ty],
+        param_binders: &[BinderId],
         body: &ast::Expression,
     ) -> (Ty, ParkedBody) {
         // Typecheck walk. Nested closures encountered here re-enter this fn
@@ -4267,10 +4298,11 @@ impl Compiler {
         let name = self
             .current_binding
             .unwrap_or_else(|| self.engine.intern("__anon__"));
-        let param_binds: Vec<(StrId, Ty)> = params
+        let param_binds: Vec<(StrId, BinderId, Ty)> = params
             .iter()
+            .zip(param_binders)
             .zip(param_tys)
-            .map(|(p, &ty)| (self.engine.intern(&p.identifier.name), ty))
+            .map(|((p, &binder), &ty)| (self.engine.intern(&p.identifier.name), binder, ty))
             .collect();
         let parked = ParkedBody {
             name,
@@ -4452,7 +4484,7 @@ impl Compiler {
         &mut self,
         clean: CleanModule,
         name: StrId,
-        param_binds: &[(StrId, Ty)],
+        param_binds: &[(StrId, BinderId, Ty)],
         body: &CExpr,
         body_ty: Ty,
         func_idx: FuncIdx,
@@ -4566,6 +4598,7 @@ impl Compiler {
         // are local to the lambda; mint them via a fresh hydrator.
         let mut hydrator = Hydrator::new(AnnotationContext::Signature);
         let mut param_tys: Vec<Ty> = Vec::with_capacity(params.len());
+        let mut binders: Vec<BinderId> = Vec::with_capacity(params.len());
         for (i, param) in params.iter().enumerate() {
             let p_ty = match &param.typ {
                 Some(annot) => self.hydrate(&mut hydrator, annot),
@@ -4575,12 +4608,12 @@ impl Compiler {
                 },
             };
             param_tys.push(p_ty);
-            self.bind_param(param, p_ty);
+            binders.push(self.bind_param(param, p_ty));
         }
         // Any tyvars the hydrator minted are rigid for the body.
         self.rigid_ids.extend(hydrator.rigid_ids().iter().copied());
 
-        let (body_ty, body_emit) = self.compile_fn_body(params, &param_tys, body);
+        let (body_ty, body_emit) = self.compile_fn_body(params, &param_tys, &binders, body);
         let ret_ty = match return_annot {
             Some(rt) => {
                 let annot_ty = self.hydrate(&mut hydrator, rt);
@@ -4620,11 +4653,13 @@ impl Compiler {
     ) -> Ty {
         let saved = self.enter_fn_frame(Some(name));
         self.rigid_ids = hydrator.rigid_ids().clone();
-        for (param, p_ty) in params.iter().zip(param_tys.iter()) {
-            self.bind_param(param, *p_ty);
-        }
+        let binders: Vec<BinderId> = params
+            .iter()
+            .zip(param_tys.iter())
+            .map(|(param, p_ty)| self.bind_param(param, *p_ty))
+            .collect();
 
-        let (body_ty, body_emit) = self.compile_fn_body(params, &param_tys, body);
+        let (body_ty, body_emit) = self.compile_fn_body(params, &param_tys, &binders, body);
         self.engine
             .unify_at(ret_ty, body_ty, type_defining_span(body));
 
@@ -4661,6 +4696,7 @@ impl Compiler {
             captures: std::mem::take(&mut self.captures),
             capture_names: std::mem::take(&mut self.capture_names),
             rigid_ids: self.rigid_ids.clone(),
+            next_binder: std::mem::replace(&mut self.next_binder, 0),
             binding: match binding_id {
                 Some(id) => self.current_binding.replace(id),
                 None => {
@@ -4693,9 +4729,11 @@ impl Compiler {
         self.emit_value_def(sp, name, None);
     }
 
-    fn bind_param(&mut self, p: &ast::FunctionParameter, ty: Ty) {
+    fn bind_param(&mut self, p: &ast::FunctionParameter, ty: Ty) -> BinderId {
         self.get_or_create_local(&p.identifier.name);
         self.register_local_binding(&p.identifier.name, ty, p.identifier.span);
+        let sid = self.engine.intern(&p.identifier.name);
+        self.publish_local(sid)
     }
 
     /// Close out a function body: reserve its function slot, park it as a
@@ -4707,6 +4745,7 @@ impl Compiler {
     fn finish_fn_frame(&mut self, saved: FnFrame, parked: ParkedBody) -> ClosureFact {
         self.current_binding = saved.binding;
         self.rigid_ids = saved.rigid_ids;
+        self.next_binder = saved.next_binder;
         self.captures = saved.captures;
         self.env.pop_scope();
         self.pop_unused_scope();
@@ -4756,7 +4795,7 @@ impl Compiler {
                         self.name_at(cap_name, scheme.kind).0,
                         self.engine.instantiate(&scheme, &self.rigid_ids),
                     ),
-                    None => (NameAt::Bound, self.engine.fresh_var()),
+                    None => (NameAt::Unbound, self.engine.fresh_var()),
                 };
                 let fact = NameFact {
                     ty,
@@ -4788,11 +4827,7 @@ impl Compiler {
             if !self.type_pattern(&arm.pattern, subject_ty, &mut b.sink()) {
                 any_pattern_err = true;
             }
-            self.bind_pattern_initials(&b);
-            let pattern = CPattern {
-                pattern: arm.pattern.clone(),
-                sizes: self.type_pattern_sizes(&arm.pattern),
-            };
+            let pattern = self.bind_pattern(&arm.pattern, &b);
 
             let guard = arm.guard.as_ref().map(|guard| {
                 let g = self.compile_expr(guard);
@@ -4879,13 +4914,28 @@ impl Compiler {
         (result_ty, kind)
     }
 
+    /// Bind the names of pattern `p`, typed by `type_pattern` into `b`, and
+    /// check its size expressions: the pattern as the elaborator needs it.
+    fn bind_pattern(&mut self, p: &ast::Pattern, b: &PatternBindings) -> CPattern {
+        let names = self.bind_pattern_initials(b);
+        let (sizes, binders) = self.type_pattern_sizes(p, names);
+        CPattern {
+            pattern: p.clone(),
+            sizes,
+            binders,
+        }
+    }
+
     /// Bind a pattern's freshly-typed names (populated by `type_pattern`):
     /// reserve a local slot for each and funnel it through
-    /// [`Self::register_local_binding`].
-    fn bind_pattern_initials(&mut self, b: &PatternBindings) {
+    /// [`Self::register_local_binding`]. Returns the names, which
+    /// [`Self::type_pattern_sizes`] then brings into scope.
+    fn bind_pattern_initials(&mut self, b: &PatternBindings) -> Vec<StrId> {
+        let mut names = Vec::new();
         for (name, (ty, sp)) in b.bindings() {
             self.get_or_create_local(name);
             self.register_local_binding(name, *ty, *sp);
+            names.push(self.engine.intern(name));
         }
         // Write-only (`_`-prefixed) binders go through the same registration
         // so hover and go-to-definition see them; `compile_identifier` rejects
@@ -4896,24 +4946,45 @@ impl Compiler {
             self.register_local_binding(name, *ty, *sp);
             self.nil_discards.push((name.to_string(), *ty, *sp));
         }
+        names
     }
 
     /// Type-check the runtime size expressions of every `<<..>>` segment in
-    /// `p`. They are operands, not binders, and a later segment's size may
-    /// name an earlier segment's binding (`<<n:8, body:bytes(n)>>`), so this
-    /// runs *after* [`Self::bind_pattern_initials`] has brought the pattern's
-    /// names into scope.
-    fn type_pattern_sizes(&mut self, p: &ast::Pattern) -> Vec<CExpr> {
-        let mut sizes: Vec<&ast::Expression> = Vec::new();
-        p.for_each_binder(ast::OrAlternatives::All, &mut |b| {
-            if let ast::PatternBinder::SizeExpr(e) = b {
-                sizes.push(e);
+    /// `p`, and bring the pattern's `names` into scope as the pattern reaches
+    /// them. A size expression is an operand, not a binder, and may name an
+    /// earlier segment's binding (`<<n:8, body:bytes(n)>>`), but not a later
+    /// one's: that name still means what it meant outside the pattern.
+    ///
+    /// Returns the checked sizes, in the order the pattern visits them, and
+    /// each name's binder.
+    fn type_pattern_sizes(
+        &mut self,
+        p: &ast::Pattern,
+        names: Vec<StrId>,
+    ) -> (Vec<CExpr>, Vec<(StrId, BinderId)>) {
+        let mut order: Vec<ast::PatternBinder<'_>> = Vec::new();
+        p.for_each_binder(ast::OrAlternatives::All, &mut |b| order.push(b));
+        let mut binders: Vec<(StrId, BinderId)> = Vec::with_capacity(names.len());
+        let mut sizes = Vec::new();
+        for b in order {
+            match b {
+                ast::PatternBinder::Name(id) => {
+                    let sid = self.engine.intern(&id.name);
+                    if names.contains(&sid) && binders.iter().all(|(n, _)| *n != sid) {
+                        binders.push((sid, self.publish_local(sid)));
+                    }
+                }
+                ast::PatternBinder::SizeExpr(e) => sizes.extend(self.type_seg_size(Some(e))),
             }
-        });
-        sizes
-            .into_iter()
-            .filter_map(|e| self.type_seg_size(Some(e)))
-            .collect()
+        }
+        // `type_pattern` reaches every name the walk above does, so this is
+        // only a guard against the two disagreeing.
+        for sid in names {
+            if binders.iter().all(|(n, _)| *n != sid) {
+                binders.push((sid, self.publish_local(sid)));
+            }
+        }
+        (sizes, binders)
     }
 
     /// Single source of truth turning a numeric literal's source text into a

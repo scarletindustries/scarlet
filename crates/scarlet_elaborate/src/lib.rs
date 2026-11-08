@@ -22,7 +22,7 @@ pub mod rty;
 pub use scarlet_types::slots;
 pub mod zonk;
 
-pub use checked::{ClosureFact, NameAt, NameFact};
+pub use checked::{BinderId, ClosureFact, NameAt, NameFact};
 pub use elaborate::{
     ElabCtx, FieldAt, OrShape, PreludeTys, VariantLayout, elaborate_body, elaborate_toplevel,
     elaborator_bug,

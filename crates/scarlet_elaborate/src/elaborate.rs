@@ -18,8 +18,8 @@ use smallvec::SmallVec;
 
 use super::binop::{BinopKind, ShortCircuitOp, ValueBinop, specialize_binop};
 use super::checked::{
-    CArg, CArm, CArrayElem, CBinSeg, CCallee, CExpr, CInterpPart, CKind, CNode, ClosureFact,
-    NameAt, NameFact,
+    BinderId, CArg, CArm, CArrayElem, CBinSeg, CCallee, CExpr, CInterpPart, CKind, CNode,
+    ClosureFact, NameAt, NameFact,
 };
 use super::elaborate_pat::{
     CtorPat, PatCtx, SpecWidth, elaborate_arms, seg_bits, slot_pattern_args,
@@ -125,9 +125,9 @@ pub trait ElabCtx: PreludeTys {
     fn resolve_ctor(&mut self, name: &str) -> Option<(Ty, Denotation)>;
     /// The type of the module's own top-level `fn` declaration `name`.
     fn toplevel_fn_ty(&mut self, name: StrId) -> Option<Ty>;
-    /// One of this module's own top-level declarations, for a name the module
-    /// toplevel reaches before the declaration's statement binds it.
-    fn decl_denotation(&self, name: StrId) -> Option<Denotation>;
+    /// One of this module's own top-level declarations, by its binder, for a
+    /// use the module toplevel reaches before the declaration's statement.
+    fn decl_denotation(&self, binder: BinderId) -> Option<Denotation>;
     /// Resolve a `qualifier.member` name. `span` is the member's, for the
     /// internal-error report.
     fn resolve_qualified(
@@ -171,7 +171,7 @@ pub fn elaborate_body<C: ElabCtx>(
     pool: &mut ResolvedPool,
     fns: &mut FnTable,
     name: StrId,
-    params: &[(StrId, Ty)],
+    params: &[(StrId, BinderId, Ty)],
     body: &CExpr,
     ret_ty: Ty,
     toplevel: bool,
@@ -204,7 +204,7 @@ fn elaborate_fn<C: ElabCtx>(
     pool: &mut ResolvedPool,
     fns: &mut FnTable,
     name: StrId,
-    params: &[(StrId, Ty)],
+    params: &[(StrId, BinderId, Ty)],
     ret_ty: Ty,
     toplevel: bool,
     f: impl FnOnce(&mut Elab<'_, C>) -> TypedExpr,
@@ -213,10 +213,10 @@ fn elaborate_fn<C: ElabCtx>(
     let ret = el.resolve(ret_ty);
     let params: Vec<TypedBind> = params
         .iter()
-        .map(|&(nm, ty)| {
+        .map(|&(nm, binder, ty)| {
             let t = el.resolve(ty);
             let b = el.new_bind(nm, t);
-            el.bind_name(nm, b.id);
+            el.bind_local(binder, b.id);
             b
         })
         .collect();
@@ -230,8 +230,9 @@ fn elaborate_fn<C: ElabCtx>(
     }
 }
 
-/// The elaboration of one body's checked tree. Holds the name scope and the
-/// dense `BindingId` table; everything else it asks [`ElabCtx`] for.
+/// The elaboration of one body's checked tree. Holds the dense `BindingId`
+/// table and what each of the body's binders was bound to; everything else it
+/// asks [`ElabCtx`] for.
 pub struct Elab<'a, C: ElabCtx> {
     ctx: &'a mut C,
     pool: &'a mut ResolvedPool,
@@ -241,9 +242,10 @@ pub struct Elab<'a, C: ElabCtx> {
     next_bind: u32,
     /// Resolved type of each bind, indexed by `BindingId.0`.
     binds: Vec<RTy>,
-    /// `StrId → BindingId` for source-named binds in scope. A stack, so
-    /// shadowing is push/pop and lookup is a reverse scan.
-    names: Vec<(StrId, BindingId)>,
+    /// The bind each of the body's binders was elaborated to, indexed by
+    /// `BinderId.0`. A binder is one binding, so an entry is set once, when
+    /// its binding is reached.
+    locals: Vec<Option<BindingId>>,
     /// [`StrId::NONE`]: binds no source name reaches (an argument spill, a tuple
     /// projection, an `or`-expression's unwrapped payload). `lower` reads it
     /// back off [`TypedBind::name`] to tell an operand temp it may collapse
@@ -280,7 +282,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             fns,
             next_bind: 0,
             binds: Vec::new(),
-            names: Vec::new(),
+            locals: Vec::new(),
             anon,
             eta_param,
             nil,
@@ -299,17 +301,32 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         self.ctx.resolve_rty(&mut *self.pool, t)
     }
 
-    /// The denotation of a name this body's own scope does not bind. A
-    /// module-scope value is promoted to the known function its slot holds,
-    /// which a sibling walked later may only now have.
-    fn denotation(&mut self, name: StrId, at: NameAt, span: Span) -> Denotation {
-        match at {
-            NameAt::Den(den) => den.promoted(|slot| self.ctx.fn_of_global(slot)),
-            NameAt::Bound if self.toplevel => match self.ctx.decl_denotation(name) {
-                Some(den) => den,
-                None => elaborator_bug("toplevel name resolves to no decl and no binding", span),
+    /// What a name refers to: one of this body's binds, or a denotation from
+    /// outside it. A module-scope value is promoted to the known function its
+    /// slot holds, which a sibling walked later may only now have.
+    fn name_ref(&mut self, at: NameAt, span: Span) -> NameRef {
+        let den = match at {
+            NameAt::Local(binder) => match self.local(binder) {
+                Some(id) => return NameRef::Bind(id),
+                None if self.toplevel => match self.ctx.decl_denotation(binder) {
+                    Some(den) => den,
+                    None => {
+                        elaborator_bug("toplevel name resolves to no decl and no binding", span)
+                    }
+                },
+                None => elaborator_bug("a name this body binds has no binding", span),
             },
-            NameAt::Bound => elaborator_bug("a name this body binds has no binding", span),
+            NameAt::Den(den) => den,
+            NameAt::Unbound => elaborator_bug("a name with no runtime binding", span),
+        };
+        NameRef::Den(den.promoted(|slot| self.ctx.fn_of_global(slot)))
+    }
+
+    /// A denotation from outside this body; never one of its own binds.
+    fn denotation(&mut self, at: NameAt, span: Span) -> Denotation {
+        match self.name_ref(at, span) {
+            NameRef::Den(den) => den,
+            NameRef::Bind(_) => elaborator_bug("a module member bound as a local", span),
         }
     }
 
@@ -380,16 +397,18 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         b
     }
 
-    fn bind_name(&mut self, name: StrId, id: BindingId) {
-        self.names.push((name, id));
+    fn bind_local(&mut self, binder: BinderId, id: BindingId) {
+        let i = binder.0 as usize;
+        if self.locals.len() <= i {
+            self.locals.resize(i + 1, None);
+        }
+        if let Some(slot) = self.locals.get_mut(i) {
+            *slot = Some(id);
+        }
     }
 
-    fn lookup_name(&self, name: StrId) -> Option<BindingId> {
-        self.names
-            .iter()
-            .rev()
-            .find(|(n, _)| *n == name)
-            .map(|&(_, id)| id)
+    fn local(&self, binder: BinderId) -> Option<BindingId> {
+        self.locals.get(binder.0 as usize).copied().flatten()
     }
 
     #[allow(clippy::indexing_slicing)]
@@ -536,11 +555,11 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// An identifier: a local, or else a nullary constructor, a first-class
     /// constructor/builtin, or a global/capture load.
     fn ident(&mut self, name: StrId, fact: &NameFact, own: Ty, span: Span) -> TypedExpr {
-        if let Some(bid) = self.lookup_name(name) {
-            return self.var(bid);
-        }
+        let den = match self.name_ref(fact.at, span) {
+            NameRef::Bind(id) => return self.var(id),
+            NameRef::Den(den) => den,
+        };
         let ty = self.resolve(own);
-        let den = self.denotation(name, fact.at, span);
         self.value_of(den, name, fact.ty, ty, span)
     }
 
@@ -664,11 +683,13 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     fn closure(&mut self, fact: &ClosureFact, ty: RTy, span: Span) -> TypedExpr {
         let mut captures = Vec::with_capacity(fact.captures.len());
         for (cn, cap) in &fact.captures {
-            if let Some(bid) = self.lookup_name(*cn) {
-                captures.push(self.var(bid));
-                continue;
-            }
-            let den = self.denotation(*cn, cap.at, span);
+            let den = match self.name_ref(cap.at, span) {
+                NameRef::Bind(id) => {
+                    captures.push(self.var(id));
+                    continue;
+                }
+                NameRef::Den(den) => den,
+            };
             let cty = self.resolve(cap.ty);
             captures.push(self.value_of(den, *cn, cap.ty, cty, span));
         }
@@ -703,7 +724,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// into a module.
     fn module_access(&mut self, name: StrId, fact: &NameFact, own: Ty, span: Span) -> TypedExpr {
         let ty = self.resolve(own);
-        let den = self.denotation(name, fact.at, span);
+        let den = self.denotation(fact.at, span);
         self.value_of(den, name, fact.ty, ty, span)
     }
 
@@ -861,22 +882,16 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
 
     fn callee(&mut self, callee: &CCallee) -> Callee {
         match callee {
-            CCallee::Name { name, fact, span } => {
-                if let Some(bid) = self.lookup_name(*name) {
-                    // A binding in scope shadows any module `fn` of that name,
-                    // exactly as it does for the check walk's `env` lookup, and
-                    // carries no parameter names.
-                    let callee = TypedCallee::Dynamic(Box::new(self.var(bid)));
-                    return Callee::Value {
-                        callee,
-                        param_labels: None,
-                    };
-                }
-                let den = self.denotation(*name, fact.at, *span);
-                self.resolved_callee(fact.ty, den, fact.param_labels.clone())
-            }
-            CCallee::Member { name, fact, span } => {
-                let den = self.denotation(*name, fact.at, *span);
+            CCallee::Name { fact, span, .. } => match self.name_ref(fact.at, *span) {
+                // A local carries no parameter names.
+                NameRef::Bind(id) => Callee::Value {
+                    callee: TypedCallee::Dynamic(Box::new(self.var(id))),
+                    param_labels: None,
+                },
+                NameRef::Den(den) => self.resolved_callee(fact.ty, den, fact.param_labels.clone()),
+            },
+            CCallee::Member { fact, span, .. } => {
+                let den = self.denotation(fact.at, *span);
                 self.resolved_callee(fact.ty, den, fact.param_labels.clone())
             }
             CCallee::Expr(e) => Callee::Value {
@@ -999,7 +1014,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     fn or_expr(
         &mut self,
         lhs: &CExpr,
-        receiver: Option<StrId>,
+        receiver: Option<(StrId, BinderId)>,
         body: &CExpr,
         result_ty: Ty,
         span: Span,
@@ -1020,14 +1035,15 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             let Some(ety) = self.pool.con_arg(lhs_rty, 1) else {
                 elaborator_bug("or-expression on a non-generic Result", span)
             };
-            let err_bind = self.new_bind(receiver.unwrap_or(self.anon), ety);
-            // The receiver is in scope for the recovery body and nothing else.
-            let mark = self.names.len();
-            if let Some(name) = receiver {
-                self.bind_name(name, err_bind.id);
-            }
+            let err_bind = match receiver {
+                Some((name, binder)) => {
+                    let b = self.new_bind(name, ety);
+                    self.bind_local(binder, b.id);
+                    b
+                }
+                None => self.new_bind(self.anon, ety),
+            };
             let body = self.expr_as(body, result_ty);
-            self.names.truncate(mark);
             (vec![TypedPat::Bind(err_bind)], body)
         } else {
             (vec![], self.expr_as(body, result_ty))
@@ -1090,10 +1106,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         } else {
             (0..nodes.len()).map(|i| (i, None)).collect()
         };
-        let mark = self.names.len();
-        let e = self.block_nodes(&seq, nodes, result_ty, span);
-        self.names.truncate(mark);
-        e
+        self.block_nodes(&seq, nodes, result_ty, span)
     }
 
     /// The module's decls first, in SCC-visit order and each carrying the
@@ -1189,15 +1202,16 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             } => match &pattern.pattern {
                 ast::Pattern::Var { name } => {
                     let sid = self.ctx.intern(&name.name);
+                    let binder = binder_of(&pattern.binders, sid, name.span);
                     let init = self.expr(init);
                     let mut bind = self.new_bind(sid, init.ty());
                     bind.global = global_of(globals, sid);
-                    self.bind_name(sid, bind.id);
+                    self.bind_local(binder, bind.id);
                     out.push(Frame::Let(bind, init));
                 }
-                pat => self.destructure(pat, init, globals, out),
+                pat => self.destructure(pat, &pattern.binders, init, globals, out),
             },
-            CNode::Fn { name, span } => {
+            CNode::Fn { name, binder, span } => {
                 // A `fn` declaration is not an expression, so the walk built no
                 // node with its type; its scheme is in the env.
                 let Some(fn_ty) = self.ctx.toplevel_fn_ty(*name) else {
@@ -1216,16 +1230,16 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                     func_idx,
                     captures: Vec::new(),
                 };
-                self.bind_name(*name, bind.id);
+                self.bind_local(*binder, bind.id);
                 out.push(Frame::Let(bind, init));
             }
-            CNode::Const { name, init } => {
+            CNode::Const { name, binder, init } => {
                 // A `const` gets its own bind even when its init is a bare
                 // identifier: fn bodies address it by its own entry-frame
                 // slot, distinct from whatever it aliases.
                 let init = self.expr(init);
                 let bind = self.decl_bind(*name, init.ty(), global);
-                self.bind_name(*name, bind.id);
+                self.bind_local(*binder, bind.id);
                 out.push(Frame::Let(bind, init));
             }
             // Types are erased and imports resolved by the check walk; a `@vm`
@@ -1240,6 +1254,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     fn destructure(
         &mut self,
         pat: &ast::Pattern,
+        binders: &[(StrId, BinderId)],
         init: &CExpr,
         globals: &[(StrId, GlobalSlot)],
         out: &mut Vec<Frame>,
@@ -1247,7 +1262,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         let value = self.expr(init);
         let scrut = self.new_bind(self.anon, value.ty());
         let mut lets = vec![(scrut, value)];
-        self.irrefutable(pat, scrut.id, globals, &mut lets);
+        self.irrefutable(pat, scrut.id, binders, globals, &mut lets);
         out.extend(lets.into_iter().map(|(b, e)| Frame::Let(b, e)));
     }
 
@@ -1257,6 +1272,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         &mut self,
         pat: &ast::Pattern,
         src: BindingId,
+        binders: &[(StrId, BinderId)],
         globals: &[(StrId, GlobalSlot)],
         lets: &mut Vec<(TypedBind, TypedExpr)>,
     ) {
@@ -1267,7 +1283,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             ast::Pattern::Var { name } if name.name.starts_with('_') => {}
             ast::Pattern::Var { name } => {
                 let sid = self.ctx.intern(&name.name);
-                self.bind_name(sid, src);
+                self.bind_local(binder_of(binders, sid, name.span), src);
                 // A local needs nothing more: names resolve by `BindingId`, so
                 // the projection bind can stay anonymous and collapsible.
                 //
@@ -1295,7 +1311,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                         idx: i as u32,
                     };
                     lets.push((b, proj));
-                    self.irrefutable(sub, b.id, globals, lets);
+                    self.irrefutable(sub, b.id, binders, globals, lets);
                 }
             }
             ast::Pattern::Constructor {
@@ -1325,7 +1341,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                         idx: i as u32,
                     };
                     lets.push((b, proj));
-                    self.irrefutable(sub, b.id, globals, lets);
+                    self.irrefutable(sub, b.id, binders, globals, lets);
                 }
             }
             // `let`/`(a, b) =` bind irrefutably: the check walk rejects a
@@ -1342,18 +1358,18 @@ impl<C: ElabCtx> PatCtx for Elab<'_, C> {
         self.ctx.intern(name)
     }
 
-    fn bind(&mut self, name: StrId, ty: RTy) -> TypedBind {
+    fn bind(&mut self, binder: BinderId, name: StrId, ty: RTy) -> TypedBind {
+        if let Some(id) = self.local(binder) {
+            return TypedBind {
+                id,
+                name,
+                ty: self.bind_ty(id),
+                global: None,
+            };
+        }
         let b = self.new_bind(name, ty);
-        self.bind_name(name, b.id);
+        self.bind_local(binder, b.id);
         b
-    }
-
-    fn scope_mark(&mut self) -> usize {
-        self.names.len()
-    }
-
-    fn scope_reset(&mut self, mark: usize) {
-        self.names.truncate(mark);
     }
 
     fn number_const(&mut self, lit: &ast::NumberLiteral) -> ConstId {
@@ -1420,6 +1436,13 @@ impl<C: ElabCtx> PatCtx for Elab<'_, C> {
     }
 }
 
+/// What a name in this body refers to.
+enum NameRef {
+    /// One of the body's own binds.
+    Bind(BindingId),
+    Den(Denotation),
+}
+
 /// A callee, or the constructor whose arguments must be slotted before it can
 /// be one. Keeping these apart stops `ctor_call` from having to invent a
 /// placeholder [`TypedCallee`].
@@ -1450,13 +1473,21 @@ enum Frame {
     Seq(TypedExpr),
 }
 
-/// Fold `lets` around `tail`: the first pushed `Let` is the outermost, so the
-/// spine's evaluation order is push order.
 /// The module-scope slot the check walk gave `name` in this binding.
 fn global_of(globals: &[(StrId, GlobalSlot)], name: StrId) -> Option<GlobalSlot> {
     globals.iter().find(|(n, _)| *n == name).map(|&(_, g)| g)
 }
 
+/// The binder the check walk gave `name` in this pattern.
+pub(crate) fn binder_of(binders: &[(StrId, BinderId)], name: StrId, span: Span) -> BinderId {
+    match binders.iter().find(|(n, _)| *n == name) {
+        Some(&(_, b)) => b,
+        None => elaborator_bug("a pattern name with no binder", span),
+    }
+}
+
+/// Fold `lets` around `tail`: the first pushed `Let` is the outermost, so the
+/// spine's evaluation order is push order.
 fn wrap_lets(lets: Vec<(TypedBind, TypedExpr)>, tail: TypedExpr) -> TypedExpr {
     let mut e = tail;
     for (bind, init) in lets.into_iter().rev() {

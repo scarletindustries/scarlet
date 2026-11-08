@@ -389,6 +389,23 @@ mod clean_module_gate {
         );
     }
 
+    /// A segment's size cannot read a name its own pattern binds later, and
+    /// with nothing outside the pattern to read either, that is an error, not
+    /// a body the elaborator finds unbound.
+    #[test]
+    fn a_size_naming_a_later_segment_is_reported() {
+        let ds = diagnose(
+            "fn f(b Binary) Int {\n\
+             \x20 match b {\n\
+             \x20   <<x:bytes(n), n:8>> -> if x == <<>> { n } else { 0 }\n\
+             \x20   _ -> 0\n\
+             \x20 }\n\
+             }\n\
+             f(<<1, 2>>)\n",
+        );
+        assert_eq!(codes(&ds), vec![DiagnosticCode::TypeError], "{ds:#?}");
+    }
+
     /// `Expression::ErrorNode` is the only form with nothing to elaborate. The
     /// check walk denies it the `CleanModule` proof, so a plain syntax error
     /// cannot surface as a compiler bug from the elaborator.

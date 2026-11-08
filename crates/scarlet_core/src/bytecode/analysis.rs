@@ -48,7 +48,7 @@ use crate::reference::{DefId, DefinitionKind};
 use crate::span::Span;
 use crate::type_def::TypeId;
 use crate::typed_ir::GlobalSlot;
-use crate::typed_ir::checked::CNode;
+use crate::typed_ir::checked::{BinderId, CNode};
 use crate::types::{
     AddedTypeVar, AnnotationContext, ArenaSlice, DefinitionLocation, EntityKind, Hydrator, Scheme,
     StrId, Ty, TypeBody, TypeInfo, TypeParam, ValueKind, Variant, VariantField, pool,
@@ -96,6 +96,7 @@ enum Prepared<'a> {
         fd: &'a ast::FunctionDeclaration,
         is_pub: bool,
         slot: GlobalSlot,
+        binder: BinderId,
         /// The declaration's identity, built once and reused by Pass 5's
         /// `emit_def`/`defid_of` and by the post-generalisation `scheme.def`,
         /// so definition and scheme cannot land on different locations.
@@ -109,6 +110,7 @@ enum Prepared<'a> {
         cb: &'a ast::ConstBinding,
         is_pub: bool,
         slot: GlobalSlot,
+        binder: BinderId,
         /// See `Prepared::Fn::dl`.
         dl: DefinitionLocation,
     },
@@ -142,6 +144,11 @@ impl<'a> Prepared<'a> {
     fn slot(&self) -> GlobalSlot {
         match self {
             Prepared::Fn { slot, .. } | Prepared::Const { slot, .. } => *slot,
+        }
+    }
+    fn binder(&self) -> BinderId {
+        match self {
+            Prepared::Fn { binder, .. } | Prepared::Const { binder, .. } => *binder,
         }
     }
     fn dl(&self) -> DefinitionLocation {
@@ -226,6 +233,9 @@ impl Compiler {
         block: &ast::BlockExpression,
         mut iface: Option<&mut ModuleInterface>,
     ) -> Vec<CNode> {
+        // The module toplevel is a body of its own, so its binders count from
+        // zero.
+        let outer_binder = std::mem::replace(&mut self.next_binder, 0);
         self.push_local_scope();
 
         // Pass 0 — partition + reserved/duplicate name checks.
@@ -396,7 +406,7 @@ impl Compiler {
         // hang a slot on, go through that queue.
         let mut prepared: Vec<Prepared> = Vec::with_capacity(decls.len());
         for d in &decls {
-            let slot = self.alloc_decl_slot(d.name());
+            let (slot, binder) = self.alloc_decl_slot(d.name());
             let p = match *d {
                 Decl::Fn {
                     fd, is_pub, body, ..
@@ -432,6 +442,7 @@ impl Compiler {
                         fd,
                         is_pub,
                         slot,
+                        binder,
                         dl,
                         body,
                         param_tys,
@@ -446,6 +457,7 @@ impl Compiler {
                         cb,
                         is_pub,
                         slot,
+                        binder,
                         dl,
                     }
                 }
@@ -487,9 +499,10 @@ impl Compiler {
                 // dependencies first and a forward-referenced `const` is
                 // stored before it is read.
                 let name_id = self.engine.intern(prepared[idx].name());
+                let binder = prepared[idx].binder();
                 self.toplevel_decls.push(ToplevelDecl {
                     node: decls[idx].node(),
-                    name: name_id,
+                    binder,
                     slot: prepared[idx].slot(),
                 });
                 match &prepared[idx] {
@@ -502,6 +515,7 @@ impl Compiler {
                         param_tys,
                         ret_ty,
                         hydrator,
+                        ..
                     } => {
                         let name = &fd.identifier.name;
                         let dl = *dl;
@@ -538,6 +552,7 @@ impl Compiler {
                         self.record(name, fn_ty, fd.identifier.span, fd.doc.clone());
                         nodes[decls[idx].node()] = CNode::Fn {
                             name: name_id,
+                            binder,
                             span: fd.span,
                         };
                         // Nothing to record for the toplevel spine:
@@ -564,6 +579,7 @@ impl Compiler {
                         });
                         nodes[decls[idx].node()] = CNode::Const {
                             name: name_id,
+                            binder,
                             init,
                         };
                         self.env.store_doc_opt(name, &cb.doc);
@@ -641,6 +657,7 @@ impl Compiler {
         self.check_nil_discards();
 
         self.pop_local_scope();
+        self.next_binder = outer_binder;
         nodes
     }
 

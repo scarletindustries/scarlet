@@ -11,6 +11,10 @@
 //! only final once its whole SCC has been generalized, and the decisions that
 //! need them (which binop, which field slot, which `or` shape) wait for that.
 //!
+//! Every local binding the walk made has a [`BinderId`], recorded where the
+//! binding is made and on every use the walk resolved to it, so the elaborator
+//! never looks a name up by its spelling.
+//!
 //! Patterns stay as the source wrote them, because the elaborator reads only
 //! the pattern and its scrutinee's type. The expressions inside one (a binary
 //! segment's size) are checked like any other and kept beside it, in the order
@@ -94,7 +98,8 @@ pub enum CKind {
     },
     Or {
         lhs: Box<CExpr>,
-        receiver: Option<StrId>,
+        /// The `Err` payload's name and binder, when the source names one.
+        receiver: Option<(StrId, BinderId)>,
         body: Box<CExpr>,
     },
     /// The nodes stay at the indices the source gave them: a module toplevel
@@ -155,6 +160,10 @@ pub struct CPattern {
     pub pattern: ast::Pattern,
     /// The pattern's size expressions, in the order the pattern visits them.
     pub sizes: Vec<CExpr>,
+    /// The binder of each name the pattern binds. A pattern binds a name once,
+    /// across all the alternatives of an or-pattern too, so the name is the
+    /// key. `_`-prefixed names are never read and have none.
+    pub binders: Vec<(StrId, BinderId)>,
 }
 
 #[derive(Debug, Clone)]
@@ -181,10 +190,12 @@ pub enum CNode {
     /// only its name is needed here.
     Fn {
         name: StrId,
+        binder: BinderId,
         span: Span,
     },
     Const {
         name: StrId,
+        binder: BinderId,
         init: CExpr,
     },
     /// A statement evaluated only for its effect: a backpass the desugarer
@@ -205,15 +216,24 @@ pub struct NameFact {
     pub param_labels: Option<Vec<StrId>>,
 }
 
+/// One local binding of one body: a parameter, a name a binding statement or
+/// a pattern binds, an `or` receiver, or a module's own top-level declaration.
+/// Each binding gets its own, so a name bound twice has two. Unique within the
+/// body that binds it, and counted from zero there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BinderId(pub u32);
+
 #[derive(Debug, Clone, Copy)]
 pub enum NameAt {
-    /// Bound by the body being elaborated, so the elaborator's own scope has
-    /// it. At a module toplevel it may instead be a declaration the toplevel
-    /// reaches before the declaration's statement.
-    Bound,
+    /// Bound by the body being elaborated. At a module toplevel it may be a
+    /// declaration the toplevel reaches before the declaration's statement.
+    Local(BinderId),
     /// Anything else, fixed by the walk. A module-scope value may still turn
     /// out to be a known function once every body has its slot.
     Den(Denotation),
+    /// Nothing at runtime binds it. The walk has reported an error for it, so
+    /// it is never elaborated.
+    Unbound,
 }
 
 /// A lambda as the check walk closed it.
