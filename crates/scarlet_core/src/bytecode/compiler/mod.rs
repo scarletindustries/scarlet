@@ -1290,12 +1290,6 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
 }
 
 impl Compiler {
-    /// The prelude bindings `register_prelude` established.
-    #[cfg(test)]
-    pub(crate) fn prelude_bindings(&self) -> PreludeBindings {
-        self.prelude.clone()
-    }
-
     pub(super) fn is_reserved(&self, name: &str) -> bool {
         self.reserved.contains(name)
     }
@@ -2582,29 +2576,7 @@ impl Compiler {
             self.module_table.record_dependent(&imp, &key);
         }
         self.module_table.record_dependent(&key, &importer);
-        self.bind_late_prelude(&key);
         Some((canon, key))
-    }
-
-    /// Bind any late prelude type `key` defines (see `prelude_bindings`'s
-    /// `late_types`), which `PreludeBindings::capture` could not: it runs
-    /// before any stdlib module loads.
-    ///
-    /// Runs once, when `key` is first compiled. The cache-hit exit above skips
-    /// it, because the binding was made on that first compile.
-    fn bind_late_prelude(&mut self, key: &ModuleKey) {
-        let Compiler {
-            prelude,
-            module_table,
-            ..
-        } = self;
-        let Some(iface) = module_table.get(key) else {
-            return;
-        };
-        prelude.bind_late(key.as_str(), |name| {
-            let ti = &iface.types.get(name)?.info;
-            Some((ti.id, ti.arity()))
-        });
     }
 
     /// Run `f` with [`Self::retain_namespaces`] set: module compiles inside it
