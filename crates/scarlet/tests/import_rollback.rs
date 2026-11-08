@@ -9,7 +9,7 @@ use common::{Project, checked_with, recheck};
 /// `entry1` must check clean; `entry2` must then fail with `expected_diag`.
 fn assert_import_rolled_back(tag: &str, entry1: &str, entry2: &str, expected_diag: &str) {
     let p = Project::new(tag);
-    p.write("lib.scrl", "pub type Color { Color }\n");
+    p.write("lib.sca", "pub type Color { Color }\n");
 
     let mut s = checked_with(&p, entry1);
 
@@ -47,7 +47,7 @@ fn kept_import_keeps_its_types_resolving_across_checks() {
     // The rollback drops `lib.Color` between checks, so each check must
     // re-bind it from the cached module interface.
     let p = Project::new("importrollbackkept");
-    p.write("lib.scrl", "pub type Color { Color }\n");
+    p.write("lib.sca", "pub type Color { Color }\n");
 
     let entry = "import ./lib\npub fn paint(_c lib::Color) Int { 1 }\n";
     let mut s = checked_with(&p, entry);

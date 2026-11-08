@@ -4,7 +4,7 @@
 // Structural rules transcribed from crates/scarlet_syntax/src/parser; the
 // lexical layer (keywords, escapes, literal shapes) is generated into
 // lexical.js by `cargo xtask gen-editor-syntax`. `bun run corpus` checks the
-// grammar against every .scrl file in the repo.
+// grammar against every .sca file in the repo.
 
 'use strict';
 

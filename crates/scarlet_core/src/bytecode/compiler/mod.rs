@@ -572,14 +572,14 @@ pub struct Compiler {
     /// `/private/var/.../lib`.
     module_display: HashMap<ModuleKey, String>,
     pub(super) base_dir: Option<PathBuf>,
-    /// When set, `scarlet/...` imports resolve to `.scrl` files under this directory
+    /// When set, `scarlet/...` imports resolve to `.sca` files under this directory
     /// (the in-repo `src/std`) instead of the embedded snapshot, so a session
     /// editing the stdlib compiles it like any other on-disk module tree.
     pub(super) stdlib_source_root: Option<PathBuf>,
     pub(super) prelude: PreludeBindings,
     /// Names user code may not redefine. Populated from the prelude module's
     /// interface (every exported type and constructor) so the set is derived
-    /// from `scrl.scrl` rather than mirrored in Rust. `@vm` functions are
+    /// from `scarlet.sca` rather than mirrored in Rust. `@vm` functions are
     /// deliberately excluded — `println` is shadowable.
     pub(super) reserved: BTreeSet<String>,
     /// The `fn(...) {...}` expressions written *directly inside the frame being
@@ -1020,7 +1020,7 @@ pub fn check(expr: &ast::Expression, base_dir: Option<&Path>) -> CompileResult {
 }
 
 /// Analyse a file *as* a specific stdlib module (used when editing
-/// `src/std/**/*.scrl` inside the Scarlet repo so the LSP/CLI doesn't report
+/// `src/std/**/*.sca` inside the Scarlet repo so the LSP/CLI doesn't report
 /// `@vm is stdlib-only` / `Result is reserved`). Always check-only.
 pub fn check_as_module(
     expr: &ast::Expression,
@@ -2455,8 +2455,8 @@ impl Compiler {
     ///
     /// Resolution happens **before** the cache is consulted, and the key comes
     /// from the file we resolved to — never from `path` as written. Keying on
-    /// the written path made `./b` mean one module program-wide: a `sub/mid.scrl`
-    /// importing `./b` silently received the root's `b.scrl`. See
+    /// the written path made `./b` mean one module program-wide: a `sub/mid.sca`
+    /// importing `./b` silently received the root's `b.sca`. See
     /// `module::file_module_path`.
     /// How to name a module in a diagnostic: the path the importer wrote
     /// (`./lib`), falling back to the module's own last segment. Never the

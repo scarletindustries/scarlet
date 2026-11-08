@@ -683,7 +683,7 @@ fn stdlib_binary_byte_at() {
 #[test]
 fn stdlib_http_builtins() {
     // These pin the call-site types of the native h1 ops; behaviour is golden
-    // tested in tests/programs/http_parse.scrl.
+    // tested in tests/programs/http_parse.sca.
     check_ok(
         "import scarlet/binary\n\
          import scarlet/http/h1\n\

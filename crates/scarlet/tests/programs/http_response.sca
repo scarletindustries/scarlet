@@ -136,7 +136,7 @@ type Wire {
 	Dump(reply process::Subject(Binary))
 	// End the process, and say so. Acknowledged rather than fire-and-forget:
 	// a parked process keeps the whole program alive (the same trap
-	// `examples/sockets.scrl` documents for an unclosed listener), so the
+	// `examples/sockets.sca` documents for an unclosed listener), so the
 	// exchange must not finish until this one has actually gone.
 	Stop(reply process::Subject(Nil))
 }

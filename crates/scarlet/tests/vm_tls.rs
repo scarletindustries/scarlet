@@ -341,9 +341,9 @@ fn project_dir(tag: &str) -> PathBuf {
 /// empty string.
 fn run_bounded(tag: &str, src: &str, trust: Option<&str>, secs: u64) -> (Option<i32>, String) {
     let dir = project_dir(tag);
-    let entry = dir.join("main.scrl");
+    let entry = dir.join("main.sca");
     std::fs::write(&entry, src).expect("write program");
-    std::fs::write(dir.join("package.scrl"), "name = 'tls_test'\n").expect("write package");
+    std::fs::write(dir.join("package.sca"), "name = 'tls_test'\n").expect("write package");
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_scarlet"));
     cmd.arg("run")

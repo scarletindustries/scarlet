@@ -5,7 +5,7 @@
 # (e.g. HTTP wire output), so they must never be eol-normalized.
 crates/al/tests/golden/** -text
 
-*.scrl linguist-language=Rust
+*.sca linguist-language=Rust
 
 # Generated artifacts: collapsed in GitHub diffs, excluded from language
 # stats. tree-sitter output is rebuilt by `bun run generate`; lexical.js and

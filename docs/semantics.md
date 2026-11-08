@@ -19,7 +19,7 @@ Each rule is marked:
 Under this rule, every way code can still crash a process is a bug. Today there are two:
 
 - a `receive` on a subject that another process created (`scarlet_vm/src/vm/mailbox.rs`)
-- a supervision declaration that the tree refuses (`Crash.Supervision` in `std/scarlet/process.scrl`)
+- a supervision declaration that the tree refuses (`Crash.Supervision` in `std/scarlet/process.sca`)
 
 A stdlib function must never make up a value to hide a failure. It returns a `Result` instead.
 

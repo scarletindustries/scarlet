@@ -3,8 +3,8 @@
     {
       "name": "scarlet",
       "camelcase": "Scarlet",
-      "scope": "source.scrl",
-      "file-types": ["scrl"],
+      "scope": "source.sca",
+      "file-types": ["sca"],
       "injection-regex": "^scarlet$"
     }
   ],

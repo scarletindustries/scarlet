@@ -16,9 +16,9 @@ const C_SRC: &str = "pub fn val() Int { 1 }\n";
 /// asserting the baseline: exactly b + c compile fresh.
 fn fresh_three_module_session(tag: &str) -> (Project, IncrementalSession) {
     let p = Project::new(tag);
-    p.write("c.scrl", C_SRC);
-    p.write("b.scrl", B_SRC);
-    p.write("a.scrl", A_SRC);
+    p.write("c.sca", C_SRC);
+    p.write("b.sca", B_SRC);
+    p.write("a.sca", A_SRC);
 
     let mut s = IncrementalSession::new();
     let r = s.check(&parse(A_SRC), Some(&p.dir));
@@ -37,7 +37,7 @@ fn three_module_incremental() {
     assert_eq!(s.compile_count(), 2, "no module recompile on unchanged");
 
     // Change c: b is a dependent, so both recompile.
-    p.write("c.scrl", "pub fn val() Int { 2 }\n");
+    p.write("c.sca", "pub fn val() Int { 2 }\n");
     let r = s.check(&parse(A_SRC), Some(&p.dir));
     assert!(r.success(), "c-changed: {:?}", r.diagnostics);
     assert_eq!(
@@ -47,19 +47,19 @@ fn three_module_incremental() {
     );
 
     // Change b only: c stays cached.
-    p.write("b.scrl", "import ./c\npub fn b() Int { c::val() + 100 }\n");
+    p.write("b.sca", "import ./c\npub fn b() Int { c::val() + 100 }\n");
     let r = s.check(&parse(A_SRC), Some(&p.dir));
     assert!(r.success(), "b-changed: {:?}", r.diagnostics);
     assert_eq!(s.compile_count(), 5, "b-change recompiles b only; c cached");
 
     // A type error in c is reported.
-    p.write("c.scrl", "pub fn val() Int { 'nope' }\n");
+    p.write("c.sca", "pub fn val() Int { 'nope' }\n");
     let r = s.check(&parse(A_SRC), Some(&p.dir));
     assert!(!r.success(), "expected type error in c");
     assert_eq!(s.compile_count(), 7);
 
     // Fix c.
-    p.write("c.scrl", "pub fn val() Int { 3 }\n");
+    p.write("c.sca", "pub fn val() Int { 3 }\n");
     let r = s.check(&parse(A_SRC), Some(&p.dir));
     assert!(r.success(), "fixed: {:?}", r.diagnostics);
     assert_eq!(s.compile_count(), 9);
@@ -71,7 +71,7 @@ fn overlay_preferred_over_disk() {
 
     // Unsaved buffer with a type error; disk is unchanged.
     s.set_overlay(
-        p.dir.join("c.scrl"),
+        p.dir.join("c.sca"),
         "pub fn val() Int { 'oops' }\n".to_string(),
     );
     let r = s.check(&parse(A_SRC), Some(&p.dir));
@@ -90,7 +90,7 @@ fn overlay_preferred_over_disk() {
 #[test]
 fn invalidate_path_drops_overlay_and_force_evicts() {
     let (p, mut s) = fresh_three_module_session("invalidate");
-    let cpath = p.dir.join("c.scrl");
+    let cpath = p.dir.join("c.sca");
 
     // Control: with the disk untouched nothing recompiles, so the next bump
     // can only come from invalidate_path.
@@ -137,8 +137,8 @@ fn invalidate_path_drops_overlay_and_force_evicts() {
 fn unrelated_module_keeps_type_id_base() {
     // x and y are independent; editing x must not shift y's type-id range.
     let p = Project::new("idbase");
-    p.write("x.scrl", "pub type X { X }\npub fn f() X { X }\n");
-    p.write("y.scrl", "pub type Y { Y }\npub fn g() Y { Y }\n");
+    p.write("x.sca", "pub type X { X }\npub fn f() X { X }\n");
+    p.write("y.sca", "pub type Y { Y }\npub fn g() Y { Y }\n");
     let entry = "import ./x\nimport ./y\npub fn main() {\n\t_ = x::f()\n\t_ = y::g()\n}\n";
 
     let mut s = IncrementalSession::new();
@@ -146,29 +146,29 @@ fn unrelated_module_keeps_type_id_base() {
     assert!(r.success(), "initial: {:?}", r.diagnostics);
 
     let x0 = s
-        .module_id_base(&module_key(&p.dir, "x.scrl"))
+        .module_id_base(&module_key(&p.dir, "x.sca"))
         .expect("x has an id_base");
     let y0 = s
-        .module_id_base(&module_key(&p.dir, "y.scrl"))
+        .module_id_base(&module_key(&p.dir, "y.sca"))
         .expect("y has an id_base");
     assert_eq!(x0.0 % MODULE_TYPE_ID_RANGE, 0, "id_base is range-aligned");
     assert_ne!(x0, y0, "distinct modules get distinct ranges");
 
     // Add a second type to x.
     p.write(
-        "x.scrl",
+        "x.sca",
         "pub type X { X }\npub type X2 { X2 }\npub fn f() X { X }\n",
     );
     let r = s.check(&parse(entry), Some(&p.dir));
     assert!(r.success(), "after x edit: {:?}", r.diagnostics);
 
     assert_eq!(
-        s.module_id_base(&module_key(&p.dir, "x.scrl")),
+        s.module_id_base(&module_key(&p.dir, "x.sca")),
         Some(x0),
         "x reuses its original id_base on recompile"
     );
     assert_eq!(
-        s.module_id_base(&module_key(&p.dir, "y.scrl")),
+        s.module_id_base(&module_key(&p.dir, "y.sca")),
         Some(y0),
         "y keeps its id_base even though it was compiled after x"
     );
@@ -221,7 +221,7 @@ fn edit_b_keeps_refs_then_invalidation_drops_reverse_edges() {
     let n0 = s.compile_count();
 
     // Edit B's body only, keeping the signature.
-    p.write("b.scrl", "import ./c\npub fn b() Int { c::val() + 41 }\n");
+    p.write("b.sca", "import ./c\npub fn b() Int { c::val() + 41 }\n");
     let r = s.check(&parse(A_SRC), Some(&p.dir));
     assert!(r.success(), "after B edit: {:?}", r.diagnostics);
     assert!(s.compile_count() > n0, "B recompiled");
@@ -239,8 +239,8 @@ fn edit_b_keeps_refs_then_invalidation_drops_reverse_edges() {
 
     // B no longer declares `b`: the rebuilt graph must retain no stale edge.
     let entry2 = "import ./b\npub fn main() {\n\tprintln(b::gone())\n}\n";
-    p.write("b.scrl", "import ./c\npub fn gone() Int { c::val() }\n");
-    p.write("a.scrl", entry2);
+    p.write("b.sca", "import ./c\npub fn gone() Int { c::val() }\n");
+    p.write("a.sca", entry2);
     let r = s.check(&parse(entry2), Some(&p.dir));
     assert!(r.success(), "after invalidation: {:?}", r.diagnostics);
     assert!(
@@ -250,17 +250,17 @@ fn edit_b_keeps_refs_then_invalidation_drops_reverse_edges() {
     );
 }
 
-/// Type heads `big.scrl` declares once grown. One id each, deliberately well
+/// Type heads `big.sca` declares once grown. One id each, deliberately well
 /// above `MODULE_TYPE_ID_RANGE` so a reused range spills past its reservation
 /// into the sibling module's block.
 const BIG_TYPE_COUNT: i32 = MODULE_TYPE_ID_RANGE + 44;
 
-/// Type heads `big.scrl` declares initially. Under `MODULE_TYPE_ID_RANGE`, so
+/// Type heads `big.sca` declares initially. Under `MODULE_TYPE_ID_RANGE`, so
 /// the first compile fits and `y` lands in the very next block — which is what
 /// the later spill collides with.
 const SMALL_TYPE_COUNT: i32 = 10;
 
-/// `big.scrl`: `type_count` single-constructor types, `f` to keep the entry
+/// `big.sca`: `type_count` single-constructor types, `f` to keep the entry
 /// referencing it, and `tweak` so the source changes even between two equal
 /// type counts.
 fn big_module_src(type_count: i32, tweak: i32) -> String {
@@ -286,8 +286,8 @@ fn big_module_src(type_count: i32, tweak: i32) -> String {
 #[test]
 fn recompile_id_overflow_recovers_with_stable_ranges() {
     let p = Project::new("idoverflow");
-    p.write("big.scrl", &big_module_src(SMALL_TYPE_COUNT, 1));
-    p.write("y.scrl", "pub type Y { Y }\npub fn g() Y { Y }\n");
+    p.write("big.sca", &big_module_src(SMALL_TYPE_COUNT, 1));
+    p.write("y.sca", "pub type Y { Y }\npub fn g() Y { Y }\n");
     let entry = "import ./big\nimport ./y\npub fn main() {\n\t_ = big::f()\n\t_ = y::g()\n}\n";
 
     let mut s = IncrementalSession::new();
@@ -299,11 +299,11 @@ fn recompile_id_overflow_recovers_with_stable_ranges() {
     assert_eq!(s.compile_count(), 2, "big + y compile on first check");
 
     let big0 = s
-        .module_id_base(&module_key(&p.dir, "big.scrl"))
+        .module_id_base(&module_key(&p.dir, "big.sca"))
         .expect("big has an id_base")
         .0;
     let y0 = s
-        .module_id_base(&module_key(&p.dir, "y.scrl"))
+        .module_id_base(&module_key(&p.dir, "y.sca"))
         .expect("y has an id_base")
         .0;
     assert_eq!(
@@ -324,7 +324,7 @@ fn recompile_id_overflow_recovers_with_stable_ranges() {
     // Grow big past 256 heads: the recompile reuses big's id_base, so the
     // spill overlaps y's block and raises `id_range_overflow`. The same
     // `check` then invalidates all, resets the bases and re-runs once.
-    p.write("big.scrl", &big_module_src(BIG_TYPE_COUNT, 2));
+    p.write("big.sca", &big_module_src(BIG_TYPE_COUNT, 2));
     let r = s.check(&parse(entry), Some(&p.dir));
     assert!(
         r.success(),
@@ -339,11 +339,11 @@ fn recompile_id_overflow_recovers_with_stable_ranges() {
     );
 
     let big1 = s
-        .module_id_base(&module_key(&p.dir, "big.scrl"))
+        .module_id_base(&module_key(&p.dir, "big.sca"))
         .expect("big id_base after recovery")
         .0;
     let y1 = s
-        .module_id_base(&module_key(&p.dir, "y.scrl"))
+        .module_id_base(&module_key(&p.dir, "y.sca"))
         .expect("y id_base after recovery")
         .0;
     assert_eq!(
@@ -374,7 +374,7 @@ fn recompile_id_overflow_recovers_with_stable_ranges() {
     // An unrelated edit after recovery: big is a cache hit, so its usage is
     // never re-noted and there is no second overflow.
     p.write(
-        "y.scrl",
+        "y.sca",
         "pub type Y { Y }\npub fn g() Y { Y }\npub fn h() Int { 7 }\n",
     );
     let r = s.check(&parse(entry), Some(&p.dir));
@@ -389,13 +389,13 @@ fn recompile_id_overflow_recovers_with_stable_ranges() {
         "only y recompiles on the unrelated edit; big is a cache hit"
     );
     assert_eq!(
-        s.module_id_base(&module_key(&p.dir, "big.scrl"))
+        s.module_id_base(&module_key(&p.dir, "big.sca"))
             .map(|t| t.0),
         Some(big0),
         "big id_base remains stable after a later unrelated edit"
     );
     assert_eq!(
-        s.module_id_base(&module_key(&p.dir, "y.scrl")).map(|t| t.0),
+        s.module_id_base(&module_key(&p.dir, "y.sca")).map(|t| t.0),
         Some(y1),
         "y keeps its post-recovery id_base after a later unrelated edit"
     );

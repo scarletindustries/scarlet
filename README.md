@@ -34,8 +34,8 @@ curl -fsSL scarlet.industries/install.sh | bash
 ```
 
 ```
-scarlet run <file.scrl>         Run a program
+scarlet run <file.sca>         Run a program
 scarlet repl                    Start an interactive REPL
-scarlet check <file.scrl>       Type-check without running
+scarlet check <file.sca>       Type-check without running
 scarlet fmt [path]              Format source files
 ```

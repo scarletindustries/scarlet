@@ -2587,7 +2587,7 @@ mod tests {
         );
     }
 
-    /// Every program in the repo's two .scrl corpora must parse cleanly. Globbed
+    /// Every program in the repo's two .sca corpora must parse cleanly. Globbed
     /// rather than listed so curating the corpus cannot break the build.
     #[test]
     fn parses_every_corpus_program() {
@@ -2599,12 +2599,12 @@ mod tests {
         ] {
             for entry in std::fs::read_dir(&dir).unwrap() {
                 let path = entry.unwrap().path();
-                if path.extension().and_then(|s| s.to_str()) != Some("scrl") {
+                if path.extension().and_then(|s| s.to_str()) != Some("sca") {
                     continue;
                 }
                 let name = path.file_name().unwrap().to_string_lossy().into_owned();
-                // a.scarlet/b.scrl are the LSP import-demo scratch pair; they may be mid-edit.
-                if name == "a.scrl" || name == "b.scrl" {
+                // a.scarlet/b.sca are the LSP import-demo scratch pair; they may be mid-edit.
+                if name == "a.sca" || name == "b.sca" {
                     continue;
                 }
                 let src = std::fs::read_to_string(&path).unwrap();

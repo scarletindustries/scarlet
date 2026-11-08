@@ -7,7 +7,7 @@
   "private": true,
   "scripts": {
     "generate": "tree-sitter generate",
-    "corpus": "find ../.. -name '*.scrl' -not -path '*/target/*' -not -path '*/node_modules/*' -not -path '*/.git/*' | xargs tree-sitter parse -q"
+    "corpus": "find ../.. -name '*.sca' -not -path '*/target/*' -not -path '*/node_modules/*' -not -path '*/.git/*' | xargs tree-sitter parse -q"
   },
   "devDependencies": {
     "tree-sitter-cli": "^0.25.8"

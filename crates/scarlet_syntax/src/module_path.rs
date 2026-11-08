@@ -76,12 +76,15 @@ impl std::fmt::Display for ModuleKey {
     }
 }
 
+/// The extension of a Scarlet source file, without its dot.
+pub const SOURCE_EXTENSION: &str = "sca";
+
 /// The identity of an on-disk module: the segments of its absolute path with
-/// `.scrl` stripped. `path.last()` is still the module's name.
+/// `.sca` stripped. `path.last()` is still the module's name.
 ///
 /// The first segment is the root marker (empty on Unix, the drive/UNC prefix
 /// on Windows) and keeps a resolved path distinct from a stdlib path or a
-/// bare name. Do not drop it: without it `C:\proj\b.scrl` and `D:\proj\b.scrl`
+/// bare name. Do not drop it: without it `C:\proj\b.sca` and `D:\proj\b.sca`
 /// collide on one key.
 ///
 /// Errs with [`ResolveError::UnresolvablePath`] when `p` has no absolute
@@ -110,7 +113,9 @@ pub fn file_module_path(p: &Path) -> Result<ModulePath, ResolveError> {
         }
     }
     if let Some(last) = out.last_mut()
-        && let Some(stem) = last.strip_suffix(".scrl")
+        && let Some(stem) = last
+            .strip_suffix(SOURCE_EXTENSION)
+            .and_then(|s| s.strip_suffix('.'))
     {
         *last = stem.to_string();
     }

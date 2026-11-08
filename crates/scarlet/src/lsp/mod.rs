@@ -252,7 +252,7 @@ impl LspServer {
 
     fn handle_initialized(&self) {
         // didChangeWatchedFiles has no static registration in the LSP spec, so
-        // ask for the .scrl watch dynamically. External edits (git checkout,
+        // ask for the .sca watch dynamically. External edits (git checkout,
         // formatter) must invalidate the incremental session.
         self.send_request(
             json!("scarlet/watchers"),
@@ -262,7 +262,7 @@ impl LspServer {
                     "id": "scarlet/didChangeWatchedFiles",
                     "method": "workspace/didChangeWatchedFiles",
                     "registerOptions": {
-                        "watchers": [{ "globPattern": "**/*.scrl" }]
+                        "watchers": [{ "globPattern": format!("**/*.{}", crate::module::SOURCE_EXTENSION) }]
                     }
                 }]
             }),

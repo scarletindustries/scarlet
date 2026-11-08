@@ -113,7 +113,7 @@ impl RootState {
     }
 
     /// A root for the in-repo stdlib source tree itself: the session compiles
-    /// `scarlet/...` modules from the `.scrl` files under `stdlib_root` rather than
+    /// `scarlet/...` modules from the `.sca` files under `stdlib_root` rather than
     /// the copy embedded in the binary, which may be stale against the files
     /// being edited, so stdlib sources get the same hover / goto-def /
     /// references fidelity as user code.

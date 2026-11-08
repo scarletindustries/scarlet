@@ -1,8 +1,8 @@
 /**
  * Column formatting for a table of temperature readings.
  *
- * `../units` steps up out of this directory to examples/lib/units.scrl, the
- * same module examples/modules.scrl reaches as `./lib/units`.
+ * `../units` steps up out of this directory to examples/lib/units.sca, the
+ * same module examples/modules.sca reaches as `./lib/units`.
  */
 
 import scarlet/array

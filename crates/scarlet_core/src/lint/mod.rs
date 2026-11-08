@@ -1,9 +1,9 @@
-//! `scarlet lint` — the `.scrl` half of the illegal-state sweep.
+//! `scarlet lint` — the `.sca` half of the illegal-state sweep.
 //!
 //! Mordant's `bool_cluster` reads Rust and reports a struct whose `n` `bool`
 //! fields admit `2^n` states when fewer are legal. Nothing read the Scarlet
-//! side, so a type declared in `.scrl` was invisible to it — the first sweep's
-//! one genuine hit was the then-current `http/h1.scrl` `HeadFlags` (three
+//! side, so a type declared in `.sca` was invisible to it — the first sweep's
+//! one genuine hit was the then-current `http/h1.sca` `HeadFlags` (three
 //! Bools; T-310 later collapsed it). This reports the same shape: a
 //! constructor carrying several `Bool` fields.
 //!
@@ -19,7 +19,7 @@
 //! only one was a genuine illegal state (`HeadFlags`); the other two are
 //! decoder test fixtures whose width is the property under test. Re-measured on
 //! this repo alone, it is 2 findings, both those fixtures in
-//! `tests/programs/decoders.scrl`, so a default-on warning's precision here
+//! `tests/programs/decoders.sca`, so a default-on warning's precision here
 //! would be 0/2.
 //!
 //! It parses with the compiler's own scanner and parser rather than matching
@@ -47,7 +47,7 @@
 //!   ABI is in that position and carries no syntactic mark, so it cannot be
 //!   filtered here and must be triaged by reading.
 //! - **Prose-carried invariants.** An invariant stated in a comment and carried
-//!   by no type has no syntactic mark. A word scan of `.scrl` comments hits
+//!   by no type has no syntactic mark. A word scan of `.sca` comments hits
 //!   module-behaviour prose (`never modified`, `always close`) at the same rate
 //!   as a real invariant, and the measured instances (T-286, T-309) live next to
 //!   expressions, not on type declarations. Not instrumented; re-read by hand
@@ -56,6 +56,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::ast;
+use crate::module::SOURCE_EXTENSION;
 use crate::parser::new_parser;
 use crate::scanner::new_scanner;
 use crate::token::{Keyword, Kind};
@@ -96,7 +97,7 @@ pub struct Census {
     type_decls: usize,
 }
 
-/// Roots are taken as given, so the census can be pointed at the other `.scrl`
+/// Roots are taken as given, so the census can be pointed at the other `.sca`
 /// corpora (`madder`, `website`) without the tool knowing they exist. The
 /// driver defaults them to the working directory: as an xtask this defaulted to
 /// `CARGO_MANIFEST_DIR`'s repo root, which in a released binary would name the
@@ -105,7 +106,7 @@ pub fn run(roots: &[PathBuf], min_bools: usize) -> Census {
     let mut census = Census::default();
     let mut paths = Vec::new();
     for root in roots {
-        collect_scrl(root, &mut paths);
+        collect_sources(root, &mut paths);
     }
     paths.sort();
     for path in paths {
@@ -121,9 +122,9 @@ pub fn run(roots: &[PathBuf], min_bools: usize) -> Census {
     census
 }
 
-fn collect_scrl(dir: &Path, out: &mut Vec<PathBuf>) {
+fn collect_sources(dir: &Path, out: &mut Vec<PathBuf>) {
     if dir.is_file() {
-        if dir.extension().is_some_and(|e| e == "scrl") {
+        if dir.extension().is_some_and(|e| e == SOURCE_EXTENSION) {
             out.push(dir.to_path_buf());
         }
         return;
@@ -141,8 +142,8 @@ fn collect_scrl(dir: &Path, out: &mut Vec<PathBuf>) {
             if matches!(name.as_ref(), "target" | "node_modules" | ".git") {
                 continue;
             }
-            collect_scrl(&path, out);
-        } else if path.extension().is_some_and(|e| e == "scrl") {
+            collect_sources(&path, out);
+        } else if path.extension().is_some_and(|e| e == SOURCE_EXTENSION) {
             out.push(path);
         }
     }
@@ -400,7 +401,7 @@ pub(crate) fn states(n: usize) -> String {
 pub fn report(census: &Census, min_bools: usize) -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "scrl-census: constructors with >= {min_bools} Bool fields\n\n"
+        "scarlet lint: constructors with >= {min_bools} Bool fields\n\n"
     ));
     for finding in &census.findings {
         let name = if finding.type_name == finding.ctor_name {
@@ -451,7 +452,7 @@ mod tests {
     fn census_of(source: &str) -> Census {
         let mut census = Census::default();
         inspect(
-            Path::new("test.scrl"),
+            Path::new("test.sca"),
             source,
             DEFAULT_MIN_BOOLS,
             &mut census,
@@ -467,7 +468,7 @@ mod tests {
     }
 
     /// The shape the census exists to find. The fixture keeps three Bools
-    /// even though T-310 collapsed the `h1.scrl` type that motivated it —
+    /// even though T-310 collapsed the `h1.sca` type that motivated it —
     /// this tests the finder, not the current spelling.
     #[test]
     fn finds_a_bool_cluster() {

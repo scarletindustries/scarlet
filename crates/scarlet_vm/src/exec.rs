@@ -786,7 +786,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 Ok(Value::cell(cell.map_err(full)?))
             }
             // A negative bound, or one past the end, is `Err(Nil)`, never a
-            // short read (`binary.scrl`).
+            // short read (`binary.sca`).
             Intrinsic::BinarySliceBits => {
                 let b = self.binary(v)?;
                 let (at, take) = (self.int_of(arg(self, 1))?, self.int_of(arg(self, 2))?);
@@ -811,7 +811,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 Ok(Value::cell(self.heap.string(&text).map_err(full)?))
             }
             // Adjacent delimiters give empty pieces, and an empty `on` gives
-            // one piece per Unicode scalar value (`string.scrl`).
+            // one piece per Unicode scalar value (`string.sca`).
             Intrinsic::StringSplit => {
                 let s = self.utf8_of(v)?;
                 let on = self.utf8_of(arg(self, 1))?;
@@ -859,7 +859,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     None => Ok(Value::nullary(self.code.abi.none)),
                 }
             }
-            // An Int as an endless row of two's-complement bits (`int.scrl`).
+            // An Int as an endless row of two's-complement bits (`int.sca`).
             Intrinsic::IntBitwiseAnd | Intrinsic::IntBitwiseOr | Intrinsic::IntBitwiseXor => {
                 let (a, b) = (self.int_of(v)?.big(), self.int_of(arg(self, 1))?.big());
                 let n = match i {
@@ -2694,7 +2694,7 @@ mod tests {
     #[test]
     fn what_the_host_built_ins_make_is_all_freed() {
         let env = vec![("A".into(), "1".into()), ("B".into(), "2".into())];
-        let host = Host::new(vec!["main.scrl".into(), "x".into()], env);
+        let host = Host::new(vec!["main.sca".into(), "x".into()], env);
         let (out, left) = cells_left_after_in(
             &host,
             "import scarlet/os\n\
@@ -2715,7 +2715,7 @@ mod tests {
              \t})\n\
              }\n",
         );
-        assert_eq!(out, "Some(1)\n2\n[main.scrl, x]\nfailed\nrandom\n");
+        assert_eq!(out, "Some(1)\n2\n[main.sca, x]\nfailed\nrandom\n");
         assert_eq!(left, 0);
     }
 

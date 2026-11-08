@@ -68,23 +68,23 @@
         {
           "captures": {
             "1": {
-              "name": "punctuation.definition.attribute.scrl"
+              "name": "punctuation.definition.attribute.sca"
             },
             "2": {
-              "name": "entity.name.function.decorator.scrl"
+              "name": "entity.name.function.decorator.sca"
             },
             "3": {
-              "name": "punctuation.brackets.round.scrl"
+              "name": "punctuation.brackets.round.sca"
             },
             "4": {
-              "name": "string.unquoted.attribute.scrl"
+              "name": "string.unquoted.attribute.sca"
             },
             "5": {
-              "name": "punctuation.brackets.round.scrl"
+              "name": "punctuation.brackets.round.sca"
             }
           },
           "match": "(@)([a-zA-Z_][a-zA-Z0-9_]*)(\\()?([a-zA-Z_][a-zA-Z0-9_]*)?(\\))?",
-          "name": "meta.attribute.scrl"
+          "name": "meta.attribute.sca"
         }
       ]
     },
@@ -94,12 +94,12 @@
           "patterns": [
             {
               "match": "\\b[a-z_][a-zA-Z0-9_]*\\b",
-              "name": "variable.other.scrl"
+              "name": "variable.other.sca"
             }
           ]
         },
         "2": {
-          "name": "keyword.operator.backpass.scrl"
+          "name": "keyword.operator.backpass.sca"
         }
       },
       "comment": "Backpass statement: binder(s) <- call(...)",
@@ -109,14 +109,14 @@
       "begin": "<<",
       "beginCaptures": {
         "0": {
-          "name": "punctuation.definition.binary.begin.scrl"
+          "name": "punctuation.definition.binary.begin.sca"
         }
       },
       "comment": "Bit-string literal or pattern: <<expr:spec, ..rest>>. The spec names are contextual identifiers, not keywords.",
       "end": ">>",
       "endCaptures": {
         "0": {
-          "name": "punctuation.definition.binary.end.scrl"
+          "name": "punctuation.definition.binary.end.sca"
         }
       },
       "patterns": [
@@ -132,10 +132,10 @@
         {
           "captures": {
             "1": {
-              "name": "punctuation.separator.colon.scrl"
+              "name": "punctuation.separator.colon.sca"
             },
             "2": {
-              "name": "storage.type.binary-spec.scrl"
+              "name": "storage.type.binary-spec.sca"
             }
           },
           "match": "(:)\\s*(size|bytes)(?=\\s*\\()"
@@ -143,17 +143,17 @@
         {
           "captures": {
             "1": {
-              "name": "punctuation.separator.colon.scrl"
+              "name": "punctuation.separator.colon.sca"
             },
             "2": {
-              "name": "storage.type.binary-spec.scrl"
+              "name": "storage.type.binary-spec.sca"
             }
           },
           "match": "(:)\\s*(binary|utf8)\\b"
         },
         {
           "match": "\\.\\.",
-          "name": "keyword.operator.spread.scrl"
+          "name": "keyword.operator.spread.sca"
         },
         {
           "include": "#constants"
@@ -175,7 +175,7 @@
         },
         {
           "match": "\\b[a-z_][a-zA-Z0-9_]*\\b",
-          "name": "variable.other.scrl"
+          "name": "variable.other.sca"
         },
         {
           "include": "#punctuation"
@@ -186,37 +186,37 @@
       "patterns": [
         {
           "match": "//.*$",
-          "name": "comment.line.double-slash.scrl"
+          "name": "comment.line.double-slash.sca"
         },
         {
           "begin": "/\\*\\*(?!/)",
           "comment": "`/**` opens a doc comment, but `/**/` does not.",
           "end": "\\*/",
-          "name": "comment.block.documentation.scrl"
+          "name": "comment.block.documentation.sca"
         },
         {
           "begin": "/\\*",
           "end": "\\*/",
-          "name": "comment.block.scrl"
+          "name": "comment.block.sca"
         }
       ]
     },
     "const-definition": {
       "captures": {
         "1": {
-          "name": "storage.modifier.visibility.scrl"
+          "name": "storage.modifier.visibility.sca"
         },
         "2": {
-          "name": "keyword.other.const.scrl"
+          "name": "keyword.other.const.sca"
         },
         "3": {
-          "name": "entity.name.function.scrl"
+          "name": "entity.name.function.sca"
         },
         "4": {
-          "name": "entity.name.type.scrl"
+          "name": "entity.name.type.sca"
         },
         "5": {
-          "name": "keyword.operator.assignment.scrl"
+          "name": "keyword.operator.assignment.sca"
         }
       },
       "comment": "The declared name is scoped like a fn declaration name so themes colour toplevel value declarations uniformly.",
@@ -227,18 +227,18 @@
       "patterns": [
         {
           "match": "\\b(True|False)\\b",
-          "name": "constant.language.boolean.scrl"
+          "name": "constant.language.boolean.sca"
         },
         {
           "match": "\\bNil\\b",
-          "name": "constant.language.nil.scrl"
+          "name": "constant.language.nil.sca"
         }
       ]
     },
     "constructor-call": {
       "captures": {
         "1": {
-          "name": "entity.name.function.constructor.scrl"
+          "name": "entity.name.function.constructor.sca"
         }
       },
       "comment": "Constructor invocation / pattern: Uppercase optionally followed by (",
@@ -249,10 +249,10 @@
         {
           "captures": {
             "1": {
-              "name": "variable.other.member.scrl"
+              "name": "variable.other.member.sca"
             },
             "2": {
-              "name": "entity.name.type.scrl"
+              "name": "entity.name.type.sca"
             }
           },
           "comment": "Field label + concrete type",
@@ -261,10 +261,10 @@
         {
           "captures": {
             "1": {
-              "name": "variable.other.member.scrl"
+              "name": "variable.other.member.sca"
             },
             "2": {
-              "name": "variable.other.type.scrl"
+              "name": "variable.other.type.sca"
             }
           },
           "comment": "Field label + type parameter",
@@ -272,11 +272,11 @@
         },
         {
           "match": "\\b[A-Z][a-zA-Z0-9_]*\\b",
-          "name": "entity.name.type.scrl"
+          "name": "entity.name.type.sca"
         },
         {
           "match": ",",
-          "name": "punctuation.separator.comma.scrl"
+          "name": "punctuation.separator.comma.sca"
         },
         {
           "include": "#punctuation"
@@ -286,7 +286,7 @@
     "function-call": {
       "captures": {
         "1": {
-          "name": "entity.name.function.scrl"
+          "name": "entity.name.function.sca"
         }
       },
       "comment": "Function calls",
@@ -296,13 +296,13 @@
       "begin": "\\b(pub\\s+)?(fn)\\s+([a-z_][a-zA-Z0-9_]*)",
       "beginCaptures": {
         "1": {
-          "name": "storage.modifier.visibility.scrl"
+          "name": "storage.modifier.visibility.sca"
         },
         "2": {
-          "name": "keyword.other.fn.scrl"
+          "name": "keyword.other.fn.sca"
         },
         "3": {
-          "name": "entity.name.function.scrl"
+          "name": "entity.name.function.sca"
         }
       },
       "end": "(?=\\{|\\n|$)",
@@ -318,15 +318,15 @@
         },
         {
           "match": "\\bfn\\b",
-          "name": "keyword.other.fn.scrl"
+          "name": "keyword.other.fn.sca"
         },
         {
           "match": "\\b[A-Z][a-zA-Z0-9_]*\\b",
-          "name": "entity.name.type.scrl"
+          "name": "entity.name.type.sca"
         },
         {
           "match": "\\b[a-z_][a-zA-Z0-9_]*\\b",
-          "name": "variable.other.type.scrl"
+          "name": "variable.other.type.sca"
         }
       ]
     },
@@ -334,14 +334,14 @@
       "begin": "\\G\\s*(\\()",
       "beginCaptures": {
         "1": {
-          "name": "punctuation.definition.parameters.begin.scrl"
+          "name": "punctuation.definition.parameters.begin.sca"
         }
       },
       "comment": "The param list opens immediately after the function name (\\G) and closes at the matching paren. Nested type-argument parens are consumed by #type-args so the inner ) of e.g. Option(a) cannot end the list early.",
       "end": "\\)",
       "endCaptures": {
         "0": {
-          "name": "punctuation.definition.parameters.end.scrl"
+          "name": "punctuation.definition.parameters.end.sca"
         }
       },
       "patterns": [
@@ -354,10 +354,10 @@
         {
           "captures": {
             "1": {
-              "name": "variable.parameter.scrl"
+              "name": "variable.parameter.sca"
             },
             "2": {
-              "name": "entity.name.type.scrl"
+              "name": "entity.name.type.sca"
             }
           },
           "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s+([A-Z][a-zA-Z0-9_]*)\\b"
@@ -365,10 +365,10 @@
         {
           "captures": {
             "1": {
-              "name": "variable.parameter.scrl"
+              "name": "variable.parameter.sca"
             },
             "2": {
-              "name": "keyword.other.fn.scrl"
+              "name": "keyword.other.fn.sca"
             }
           },
           "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s+(fn)\\b"
@@ -376,21 +376,21 @@
         {
           "captures": {
             "1": {
-              "name": "variable.parameter.scrl"
+              "name": "variable.parameter.sca"
             },
             "2": {
-              "name": "variable.other.type.scrl"
+              "name": "variable.other.type.sca"
             }
           },
           "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s+([a-z_][a-zA-Z0-9_]*)\\b"
         },
         {
           "match": "\\b[a-z_][a-zA-Z0-9_]*\\b",
-          "name": "variable.parameter.scrl"
+          "name": "variable.parameter.sca"
         },
         {
           "match": ",",
-          "name": "punctuation.separator.comma.scrl"
+          "name": "punctuation.separator.comma.sca"
         }
       ]
     },
@@ -399,17 +399,17 @@
       "end": "\\)",
       "endCaptures": {
         "0": {
-          "name": "punctuation.definition.typeparameters.end.scrl"
+          "name": "punctuation.definition.typeparameters.end.sca"
         }
       },
       "patterns": [
         {
           "match": "\\b[a-z_][a-zA-Z0-9_]*\\b",
-          "name": "variable.other.type.scrl"
+          "name": "variable.other.type.sca"
         },
         {
           "match": ",",
-          "name": "punctuation.separator.comma.scrl"
+          "name": "punctuation.separator.comma.sca"
         }
       ]
     },
@@ -417,30 +417,30 @@
       "begin": "\\b(import)\\b",
       "beginCaptures": {
         "1": {
-          "name": "keyword.control.import.scrl"
+          "name": "keyword.control.import.sca"
         }
       },
       "end": "(?=$|\\n)",
       "patterns": [
         {
           "match": "\\b(as)\\b",
-          "name": "keyword.control.import.scrl"
+          "name": "keyword.control.import.sca"
         },
         {
           "match": "/",
-          "name": "punctuation.separator.path.scrl"
+          "name": "punctuation.separator.path.sca"
         },
         {
           "match": "\\b[A-Z][a-zA-Z0-9_]*\\b",
-          "name": "entity.name.type.scrl"
+          "name": "entity.name.type.sca"
         },
         {
           "match": "\\b[a-z_][a-zA-Z0-9_]*\\b",
-          "name": "entity.name.namespace.scrl"
+          "name": "entity.name.namespace.sca"
         },
         {
           "match": "\\.",
-          "name": "punctuation.accessor.scrl"
+          "name": "punctuation.accessor.sca"
         },
         {
           "include": "#punctuation"
@@ -484,7 +484,7 @@
         },
         {
           "match": "\\b[a-z_][a-zA-Z0-9_]*\\b",
-          "name": "variable.other.scrl"
+          "name": "variable.other.sca"
         },
         {
           "include": "#punctuation"
@@ -495,34 +495,34 @@
       "patterns": [
         {
           "match": "\\b(in|match|if|else|or)\\b",
-          "name": "keyword.control.scrl"
+          "name": "keyword.control.sca"
         },
         {
           "comment": "Contextual: a keyword after an if condition, a name after a dot.",
           "match": "(?<!\\.)\\bthen\\b",
-          "name": "keyword.control.scrl"
+          "name": "keyword.control.sca"
         },
         {
           "match": "\\b(import|as)\\b",
-          "name": "keyword.control.import.scrl"
+          "name": "keyword.control.import.sca"
         },
         {
           "match": "\\b(pub|opaque)\\b",
-          "name": "storage.modifier.visibility.scrl"
+          "name": "storage.modifier.visibility.sca"
         },
         {
           "match": "\\b(fn|type|const)\\b",
-          "name": "keyword.other.scrl"
+          "name": "keyword.other.sca"
         }
       ]
     },
     "labeled-argument": {
       "captures": {
         "1": {
-          "name": "variable.parameter.label.scrl"
+          "name": "variable.parameter.label.sca"
         },
         "2": {
-          "name": "punctuation.separator.colon.scrl"
+          "name": "punctuation.separator.colon.sca"
         }
       },
       "comment": "Labeled call argument: label: value",
@@ -531,10 +531,10 @@
     "module-qualified-access": {
       "captures": {
         "1": {
-          "name": "entity.name.namespace.scrl"
+          "name": "entity.name.namespace.sca"
         },
         "2": {
-          "name": "punctuation.accessor.module.scrl"
+          "name": "punctuation.accessor.module.sca"
         }
       },
       "comment": "module::name access",
@@ -545,19 +545,19 @@
       "patterns": [
         {
           "match": "\\b0[xX][0-9A-Fa-f]+(?:_[0-9A-Fa-f]+)*\\b",
-          "name": "constant.numeric.hex.scrl"
+          "name": "constant.numeric.hex.sca"
         },
         {
           "match": "\\b0[bB][01]+(?:_[01]+)*\\b",
-          "name": "constant.numeric.binary.scrl"
+          "name": "constant.numeric.binary.sca"
         },
         {
           "match": "\\b\\d+(?:_\\d+)*\\.\\d+(?:_\\d+)*\\b",
-          "name": "constant.numeric.float.scrl"
+          "name": "constant.numeric.float.sca"
         },
         {
           "match": "\\b\\d+(?:_\\d+)*\\b",
-          "name": "constant.numeric.integer.scrl"
+          "name": "constant.numeric.integer.sca"
         }
       ]
     },
@@ -565,47 +565,47 @@
       "patterns": [
         {
           "match": "(\\+\\+|--|;|\\?)",
-          "name": "invalid.illegal.unsupported-operator.scrl"
+          "name": "invalid.illegal.unsupported-operator.sca"
         },
         {
           "match": "(->)",
-          "name": "keyword.operator.arrow.scrl"
+          "name": "keyword.operator.arrow.sca"
         },
         {
           "match": "(<-)",
-          "name": "keyword.operator.backpass.scrl"
+          "name": "keyword.operator.backpass.sca"
         },
         {
           "match": "(\\.\\.)",
-          "name": "keyword.operator.spread.scrl"
+          "name": "keyword.operator.spread.sca"
         },
         {
           "match": "(!=|<=|==|>=|<|>)",
-          "name": "keyword.operator.comparison.scrl"
+          "name": "keyword.operator.comparison.sca"
         },
         {
           "match": "(&&|\\|\\||!)",
-          "name": "keyword.operator.logical.scrl"
+          "name": "keyword.operator.logical.sca"
         },
         {
           "match": "(\\|>)",
-          "name": "keyword.operator.pipe.scrl"
+          "name": "keyword.operator.pipe.sca"
         },
         {
           "match": "(\\|)",
-          "name": "keyword.operator.pattern.scrl"
+          "name": "keyword.operator.pattern.sca"
         },
         {
           "match": "(%|\\*|\\+|-|\\/)",
-          "name": "keyword.operator.arithmetic.scrl"
+          "name": "keyword.operator.arithmetic.sca"
         },
         {
           "match": "(=)",
-          "name": "keyword.operator.assignment.scrl"
+          "name": "keyword.operator.assignment.sca"
         },
         {
           "match": "(@)",
-          "name": "keyword.operator.attribute.scrl"
+          "name": "keyword.operator.attribute.sca"
         }
       ]
     },
@@ -613,43 +613,43 @@
       "patterns": [
         {
           "match": ",",
-          "name": "punctuation.separator.comma.scrl"
+          "name": "punctuation.separator.comma.sca"
         },
         {
           "match": "::",
-          "name": "punctuation.accessor.module.scrl"
+          "name": "punctuation.accessor.module.sca"
         },
         {
           "match": ":",
-          "name": "punctuation.separator.colon.scrl"
+          "name": "punctuation.separator.colon.sca"
         },
         {
           "match": "\\.",
-          "name": "punctuation.accessor.scrl"
+          "name": "punctuation.accessor.sca"
         },
         {
           "match": "\\(",
-          "name": "punctuation.section.parens.begin.scrl"
+          "name": "punctuation.section.parens.begin.sca"
         },
         {
           "match": "\\)",
-          "name": "punctuation.section.parens.end.scrl"
+          "name": "punctuation.section.parens.end.sca"
         },
         {
           "match": "\\{",
-          "name": "punctuation.section.braces.begin.scrl"
+          "name": "punctuation.section.braces.begin.sca"
         },
         {
           "match": "\\}",
-          "name": "punctuation.section.braces.end.scrl"
+          "name": "punctuation.section.braces.end.sca"
         },
         {
           "match": "\\[",
-          "name": "punctuation.section.brackets.begin.scrl"
+          "name": "punctuation.section.brackets.begin.sca"
         },
         {
           "match": "\\]",
-          "name": "punctuation.section.brackets.end.scrl"
+          "name": "punctuation.section.brackets.end.sca"
         }
       ]
     },
@@ -658,30 +658,30 @@
         {
           "begin": "'",
           "end": "'|$",
-          "name": "string.quoted.single.scrl",
+          "name": "string.quoted.single.sca",
           "patterns": [
             {
               "match": "\\\\[ntr0\"'\\\\$]",
-              "name": "constant.character.escape.scrl"
+              "name": "constant.character.escape.sca"
             },
             {
               "match": "\\\\.",
-              "name": "invalid.illegal.escape.scrl"
+              "name": "invalid.illegal.escape.sca"
             },
             {
               "begin": "\\$\\{",
               "beginCaptures": {
                 "0": {
-                  "name": "punctuation.section.interpolation.begin.scrl"
+                  "name": "punctuation.section.interpolation.begin.sca"
                 }
               },
               "end": "\\}",
               "endCaptures": {
                 "0": {
-                  "name": "punctuation.section.interpolation.end.scrl"
+                  "name": "punctuation.section.interpolation.end.sca"
                 }
               },
-              "name": "meta.interpolation.scrl",
+              "name": "meta.interpolation.sca",
               "patterns": [
                 {
                   "include": "#interpolation-expression"
@@ -690,37 +690,37 @@
             },
             {
               "match": "\\$[a-zA-Z_][a-zA-Z0-9_]*",
-              "name": "variable.other.interpolation.scrl"
+              "name": "variable.other.interpolation.sca"
             }
           ]
         },
         {
           "begin": "\"",
           "end": "\"|$",
-          "name": "string.quoted.double.scrl",
+          "name": "string.quoted.double.sca",
           "patterns": [
             {
               "match": "\\\\[ntr0\"'\\\\$]",
-              "name": "constant.character.escape.scrl"
+              "name": "constant.character.escape.sca"
             },
             {
               "match": "\\\\.",
-              "name": "invalid.illegal.escape.scrl"
+              "name": "invalid.illegal.escape.sca"
             },
             {
               "begin": "\\$\\{",
               "beginCaptures": {
                 "0": {
-                  "name": "punctuation.section.interpolation.begin.scrl"
+                  "name": "punctuation.section.interpolation.begin.sca"
                 }
               },
               "end": "\\}",
               "endCaptures": {
                 "0": {
-                  "name": "punctuation.section.interpolation.end.scrl"
+                  "name": "punctuation.section.interpolation.end.sca"
                 }
               },
-              "name": "meta.interpolation.scrl",
+              "name": "meta.interpolation.sca",
               "patterns": [
                 {
                   "include": "#interpolation-expression"
@@ -729,7 +729,7 @@
             },
             {
               "match": "\\$[a-zA-Z_][a-zA-Z0-9_]*",
-              "name": "variable.other.interpolation.scrl"
+              "name": "variable.other.interpolation.sca"
             }
           ]
         }
@@ -739,14 +739,14 @@
       "begin": "\\(",
       "beginCaptures": {
         "0": {
-          "name": "punctuation.definition.typeparameters.begin.scrl"
+          "name": "punctuation.definition.typeparameters.begin.sca"
         }
       },
       "comment": "Balanced ( ... ) for a parametrized/fn type. Recursive so Option(List(a)) and Result(a, e) nest correctly.",
       "end": "\\)",
       "endCaptures": {
         "0": {
-          "name": "punctuation.definition.typeparameters.end.scrl"
+          "name": "punctuation.definition.typeparameters.end.sca"
         }
       },
       "patterns": [
@@ -755,22 +755,22 @@
         },
         {
           "match": "\\bfn\\b",
-          "name": "keyword.other.fn.scrl"
+          "name": "keyword.other.fn.sca"
         },
         {
           "match": "\\b[A-Z][a-zA-Z0-9_]*\\b",
-          "name": "entity.name.type.scrl"
+          "name": "entity.name.type.sca"
         },
         {
           "include": "#type-args"
         },
         {
           "match": "\\b[a-z_][a-zA-Z0-9_]*\\b",
-          "name": "variable.other.type.scrl"
+          "name": "variable.other.type.sca"
         },
         {
           "match": ",",
-          "name": "punctuation.separator.comma.scrl"
+          "name": "punctuation.separator.comma.sca"
         }
       ]
     },
@@ -778,7 +778,7 @@
       "begin": "\\{",
       "beginCaptures": {
         "0": {
-          "name": "punctuation.definition.type.begin.scrl"
+          "name": "punctuation.definition.type.begin.sca"
         }
       },
       "end": "(?=\\})",
@@ -790,17 +790,17 @@
           "begin": "\\b([A-Z][a-zA-Z0-9_]*)\\s*(\\()",
           "beginCaptures": {
             "1": {
-              "name": "entity.name.function.constructor.scrl"
+              "name": "entity.name.function.constructor.sca"
             },
             "2": {
-              "name": "punctuation.definition.parameters.begin.scrl"
+              "name": "punctuation.definition.parameters.begin.sca"
             }
           },
           "comment": "Constructor with payload: Ctor(label Type, ...)",
           "end": "\\)",
           "endCaptures": {
             "0": {
-              "name": "punctuation.definition.parameters.end.scrl"
+              "name": "punctuation.definition.parameters.end.sca"
             }
           },
           "patterns": [
@@ -812,7 +812,7 @@
         {
           "comment": "Nullary constructor",
           "match": "\\b[A-Z][a-zA-Z0-9_]*\\b",
-          "name": "entity.name.function.constructor.scrl"
+          "name": "entity.name.function.constructor.sca"
         },
         {
           "include": "#field-decl"
@@ -824,27 +824,27 @@
         {
           "captures": {
             "1": {
-              "name": "storage.modifier.visibility.scrl"
+              "name": "storage.modifier.visibility.sca"
             },
             "2": {
-              "name": "storage.modifier.visibility.scrl"
+              "name": "storage.modifier.visibility.sca"
             },
             "3": {
-              "name": "keyword.other.type.scrl"
+              "name": "keyword.other.type.sca"
             },
             "4": {
-              "name": "entity.name.type.scrl"
+              "name": "entity.name.type.sca"
             },
             "5": {
               "patterns": [
                 {
                   "match": "\\b[a-z_][a-zA-Z0-9_]*\\b",
-                  "name": "variable.other.type.scrl"
+                  "name": "variable.other.type.sca"
                 }
               ]
             },
             "6": {
-              "name": "keyword.operator.assignment.scrl"
+              "name": "keyword.operator.assignment.sca"
             }
           },
           "comment": "type alias: type Name(params) = Type",
@@ -853,22 +853,22 @@
         {
           "captures": {
             "1": {
-              "name": "storage.modifier.visibility.scrl"
+              "name": "storage.modifier.visibility.sca"
             },
             "2": {
-              "name": "storage.modifier.visibility.scrl"
+              "name": "storage.modifier.visibility.sca"
             },
             "3": {
-              "name": "keyword.other.type.scrl"
+              "name": "keyword.other.type.sca"
             },
             "4": {
-              "name": "entity.name.type.scrl"
+              "name": "entity.name.type.sca"
             },
             "5": {
               "patterns": [
                 {
                   "match": "\\b[a-z_][a-zA-Z0-9_]*\\b",
-                  "name": "variable.other.type.scrl"
+                  "name": "variable.other.type.sca"
                 }
               ]
             }
@@ -880,26 +880,26 @@
           "begin": "\\b(pub\\s+)?(opaque\\s+)?(type)\\s+([A-Z][a-zA-Z0-9_]*)(?:\\s*(\\())?",
           "beginCaptures": {
             "1": {
-              "name": "storage.modifier.visibility.scrl"
+              "name": "storage.modifier.visibility.sca"
             },
             "2": {
-              "name": "storage.modifier.visibility.scrl"
+              "name": "storage.modifier.visibility.sca"
             },
             "3": {
-              "name": "keyword.other.type.scrl"
+              "name": "keyword.other.type.sca"
             },
             "4": {
-              "name": "entity.name.type.scrl"
+              "name": "entity.name.type.sca"
             },
             "5": {
-              "name": "punctuation.definition.typeparameters.begin.scrl"
+              "name": "punctuation.definition.typeparameters.begin.sca"
             }
           },
           "comment": "type definition: type Name(params) { ... }",
           "end": "\\}",
           "endCaptures": {
             "0": {
-              "name": "punctuation.definition.type.end.scrl"
+              "name": "punctuation.definition.type.end.sca"
             }
           },
           "patterns": [
@@ -921,25 +921,25 @@
         {
           "comment": "Standalone type name",
           "match": "\\b[A-Z][a-zA-Z0-9_]*\\b",
-          "name": "entity.name.type.scrl"
+          "name": "entity.name.type.sca"
         }
       ]
     },
     "variable-with-type": {
       "captures": {
         "1": {
-          "name": "variable.other.scrl"
+          "name": "variable.other.sca"
         },
         "2": {
-          "name": "entity.name.type.scrl"
+          "name": "entity.name.type.sca"
         },
         "3": {
-          "name": "keyword.operator.assignment.scrl"
+          "name": "keyword.operator.assignment.sca"
         }
       },
       "comment": "Variable declaration with type annotation: name Type = ...",
       "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s+([A-Z][a-zA-Z0-9_]*)\\s*(=)"
     }
   },
-  "scopeName": "source.scrl"
+  "scopeName": "source.sca"
 }

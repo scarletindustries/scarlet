@@ -4,7 +4,7 @@
 
 [Scarlet](https://scarlet.industries) language support for Zed.
 
-- Registers the Scarlet language for `.scrl` files: comments, brackets, tab indentation.
+- Registers the Scarlet language for `.sca` files: comments, brackets, tab indentation.
 - Diagnostics, completions, and formatting from the Scarlet language server (`scarlet lsp`).
 
 Zed syntax highlighting requires a tree-sitter grammar. Scarlet has none. Language server features do not require one.

@@ -2,7 +2,7 @@
 //! else, is reported to stderr, is observable through monitors as a typed
 //! reason, and spreads over links — up to and including main, which is what
 //! turns an uncontained crash into a failing exit status. The crash-free
-//! half of this (kill, links) is `tests/programs/exits.scrl`.
+//! half of this (kill, links) is `tests/programs/exits.sca`.
 
 mod common;
 

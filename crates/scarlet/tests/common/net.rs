@@ -126,11 +126,11 @@ pub fn connect(port: u16) -> TcpStream {
     stream
 }
 
-/// Write `src` to `server.scrl` in `proj`, spawn `al run` on it, and wait for
+/// Write `src` to `server.sca` in `proj`, spawn `al run` on it, and wait for
 /// the announced port. `src` must bind `127.0.0.1:0` and print
 /// `listening <ip>:<port>` as its first line.
 pub fn spawn_al_server(proj: &Project, src: &str) -> AlServer {
-    let prog = proj.dir.join("server.scrl");
+    let prog = proj.dir.join("server.sca");
     std::fs::write(&prog, src).unwrap();
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_scarlet"))

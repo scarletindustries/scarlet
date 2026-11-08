@@ -1,6 +1,6 @@
 //! Handles to every prelude type and constructor the compiler may know about.
-//! Captured once after `src/std/scrl.scrl` loads; later identity checks compare
-//! ids here, never string literals. Drift in `scrl.scrl` becomes a `capture` error
+//! Captured once after `src/std/scarlet.sca` loads; later identity checks compare
+//! ids here, never string literals. Drift in `scarlet.sca` becomes a `capture` error
 //! rather than a confused unify failure downstream.
 
 use crate::type_def::TypeId;
@@ -147,7 +147,7 @@ impl std::fmt::Display for PreludeCaptureError {
 }
 
 /// Declares every `PreludeBindings` field once. Expands to the struct, its
-/// all-zero `Default` (needed while `scrl.scrl` itself is being analysed),
+/// all-zero `Default` (needed while `scarlet.sca` itself is being analysed),
 /// `capture()`, and the field iterators `build.rs` walks to bake `const
 /// PRELUDE`.
 macro_rules! prelude_bindings {

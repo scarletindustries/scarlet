@@ -208,33 +208,33 @@ fn classify(kind: &Kind) -> TokenClass {
         | Kind::PuncMinusminus
         | Kind::PuncSemicolon
         | Kind::PuncQuestionMark => TokenClass::Operator(OpGroup::Invalid),
-        Kind::PuncComma => TokenClass::Punctuation("punctuation.separator.comma.scrl"),
-        Kind::PuncColon => TokenClass::Punctuation("punctuation.separator.colon.scrl"),
-        Kind::PuncDot => TokenClass::Punctuation("punctuation.accessor.scrl"),
-        Kind::PuncColonColon => TokenClass::Punctuation("punctuation.accessor.module.scrl"),
-        Kind::PuncOpenParen => TokenClass::Punctuation("punctuation.section.parens.begin.scrl"),
-        Kind::PuncCloseParen => TokenClass::Punctuation("punctuation.section.parens.end.scrl"),
-        Kind::PuncOpenBrace => TokenClass::Punctuation("punctuation.section.braces.begin.scrl"),
-        Kind::PuncCloseBrace => TokenClass::Punctuation("punctuation.section.braces.end.scrl"),
-        Kind::PuncOpenBracket => TokenClass::Punctuation("punctuation.section.brackets.begin.scrl"),
-        Kind::PuncCloseBracket => TokenClass::Punctuation("punctuation.section.brackets.end.scrl"),
+        Kind::PuncComma => TokenClass::Punctuation("punctuation.separator.comma.sca"),
+        Kind::PuncColon => TokenClass::Punctuation("punctuation.separator.colon.sca"),
+        Kind::PuncDot => TokenClass::Punctuation("punctuation.accessor.sca"),
+        Kind::PuncColonColon => TokenClass::Punctuation("punctuation.accessor.module.sca"),
+        Kind::PuncOpenParen => TokenClass::Punctuation("punctuation.section.parens.begin.sca"),
+        Kind::PuncCloseParen => TokenClass::Punctuation("punctuation.section.parens.end.sca"),
+        Kind::PuncOpenBrace => TokenClass::Punctuation("punctuation.section.braces.begin.sca"),
+        Kind::PuncCloseBrace => TokenClass::Punctuation("punctuation.section.braces.end.sca"),
+        Kind::PuncOpenBracket => TokenClass::Punctuation("punctuation.section.brackets.begin.sca"),
+        Kind::PuncCloseBracket => TokenClass::Punctuation("punctuation.section.brackets.end.sca"),
     }
 }
 
 fn op_group_scope(group: OpGroup) -> &'static str {
     match group {
-        OpGroup::Invalid => "invalid.illegal.unsupported-operator.scrl",
-        OpGroup::Arrow => "keyword.operator.arrow.scrl",
-        OpGroup::Backpass => "keyword.operator.backpass.scrl",
+        OpGroup::Invalid => "invalid.illegal.unsupported-operator.sca",
+        OpGroup::Arrow => "keyword.operator.arrow.sca",
+        OpGroup::Backpass => "keyword.operator.backpass.sca",
         // Historical scope name; `..` is both range and spread.
-        OpGroup::Range => "keyword.operator.spread.scrl",
-        OpGroup::Comparison => "keyword.operator.comparison.scrl",
-        OpGroup::Logical => "keyword.operator.logical.scrl",
-        OpGroup::Pipe => "keyword.operator.pipe.scrl",
-        OpGroup::PatternAlternation => "keyword.operator.pattern.scrl",
-        OpGroup::Arithmetic => "keyword.operator.arithmetic.scrl",
-        OpGroup::Assignment => "keyword.operator.assignment.scrl",
-        OpGroup::Attribute => "keyword.operator.attribute.scrl",
+        OpGroup::Range => "keyword.operator.spread.sca",
+        OpGroup::Comparison => "keyword.operator.comparison.sca",
+        OpGroup::Logical => "keyword.operator.logical.sca",
+        OpGroup::Pipe => "keyword.operator.pipe.sca",
+        OpGroup::PatternAlternation => "keyword.operator.pattern.sca",
+        OpGroup::Arithmetic => "keyword.operator.arithmetic.sca",
+        OpGroup::Assignment => "keyword.operator.assignment.sca",
+        OpGroup::Attribute => "keyword.operator.attribute.sca",
     }
 }
 
@@ -329,28 +329,28 @@ fn escape_char_class() -> String {
 fn tm_language() -> String {
     let k = Keyword::text;
     let escape_rule = json!({
-        "name": "constant.character.escape.scrl",
+        "name": "constant.character.escape.sca",
         "match": format!("\\\\[{}]", escape_char_class()),
     });
     let bad_escape_rule = json!({
-        "name": "invalid.illegal.escape.scrl",
+        "name": "invalid.illegal.escape.sca",
         "match": "\\\\.",
     });
     let interpolation_region = json!({
-        "name": "meta.interpolation.scrl",
+        "name": "meta.interpolation.sca",
         "begin": "\\$\\{",
         "end": "\\}",
-        "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.scrl" } },
-        "endCaptures": { "0": { "name": "punctuation.section.interpolation.end.scrl" } },
+        "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.sca" } },
+        "endCaptures": { "0": { "name": "punctuation.section.interpolation.end.sca" } },
         "patterns": [{ "include": "#interpolation-expression" }]
     });
     let interpolation_shorthand = json!({
-        "name": "variable.other.interpolation.scrl",
+        "name": "variable.other.interpolation.sca",
         "match": "\\$[a-zA-Z_][a-zA-Z0-9_]*",
     });
     let string_body = |quote: &str| -> Value {
         json!({
-            "name": format!("string.quoted.{}.scrl", if quote == "'" { "single" } else { "double" }),
+            "name": format!("string.quoted.{}.sca", if quote == "'" { "single" } else { "double" }),
             "begin": quote,
             "end": format!("{quote}|$"),
             "patterns": [
@@ -367,7 +367,7 @@ fn tm_language() -> String {
 
     let grammar = json!({
         "name": "Scarlet",
-        "scopeName": "source.scrl",
+        "scopeName": "source.sca",
         "patterns": [
             { "include": "#comments" },
             { "include": "#attributes" },
@@ -394,14 +394,14 @@ fn tm_language() -> String {
             "attributes": {
                 "patterns": [
                     {
-                        "name": "meta.attribute.scrl",
+                        "name": "meta.attribute.sca",
                         "match": "(@)([a-zA-Z_][a-zA-Z0-9_]*)(\\()?([a-zA-Z_][a-zA-Z0-9_]*)?(\\))?",
                         "captures": {
-                            "1": { "name": "punctuation.definition.attribute.scrl" },
-                            "2": { "name": "entity.name.function.decorator.scrl" },
-                            "3": { "name": "punctuation.brackets.round.scrl" },
-                            "4": { "name": "string.unquoted.attribute.scrl" },
-                            "5": { "name": "punctuation.brackets.round.scrl" }
+                            "1": { "name": "punctuation.definition.attribute.sca" },
+                            "2": { "name": "entity.name.function.decorator.sca" },
+                            "3": { "name": "punctuation.brackets.round.sca" },
+                            "4": { "name": "string.unquoted.attribute.sca" },
+                            "5": { "name": "punctuation.brackets.round.sca" }
                         }
                     }
                 ]
@@ -409,17 +409,17 @@ fn tm_language() -> String {
             "comments": {
                 "patterns": [
                     {
-                        "name": "comment.line.double-slash.scrl",
+                        "name": "comment.line.double-slash.sca",
                         "match": "//.*$"
                     },
                     {
                         "comment": "`/**` opens a doc comment, but `/**/` does not.",
-                        "name": "comment.block.documentation.scrl",
+                        "name": "comment.block.documentation.sca",
                         "begin": "/\\*\\*(?!/)",
                         "end": "\\*/"
                     },
                     {
-                        "name": "comment.block.scrl",
+                        "name": "comment.block.sca",
                         "begin": "/\\*",
                         "end": "\\*/"
                     }
@@ -432,19 +432,19 @@ fn tm_language() -> String {
                 "comment": "Scanner::scan_number. Hex (`0x`) and binary (`0b`) first so they are not split into `0` + identifier. `_` is a digit separator only between two digits of that radix.",
                 "patterns": [
                     {
-                        "name": "constant.numeric.hex.scrl",
+                        "name": "constant.numeric.hex.sca",
                         "match": "\\b0[xX][0-9A-Fa-f]+(?:_[0-9A-Fa-f]+)*\\b"
                     },
                     {
-                        "name": "constant.numeric.binary.scrl",
+                        "name": "constant.numeric.binary.sca",
                         "match": "\\b0[bB][01]+(?:_[01]+)*\\b"
                     },
                     {
-                        "name": "constant.numeric.float.scrl",
+                        "name": "constant.numeric.float.sca",
                         "match": "\\b\\d+(?:_\\d+)*\\.\\d+(?:_\\d+)*\\b"
                     },
                     {
-                        "name": "constant.numeric.integer.scrl",
+                        "name": "constant.numeric.integer.sca",
                         "match": "\\b\\d+(?:_\\d+)*\\b"
                     }
                 ]
@@ -453,8 +453,8 @@ fn tm_language() -> String {
                 "comment": "Bit-string literal or pattern: <<expr:spec, ..rest>>. The spec names are contextual identifiers, not keywords.",
                 "begin": "<<",
                 "end": ">>",
-                "beginCaptures": { "0": { "name": "punctuation.definition.binary.begin.scrl" } },
-                "endCaptures": { "0": { "name": "punctuation.definition.binary.end.scrl" } },
+                "beginCaptures": { "0": { "name": "punctuation.definition.binary.begin.sca" } },
+                "endCaptures": { "0": { "name": "punctuation.definition.binary.end.sca" } },
                 "patterns": [
                     { "include": "#comments" },
                     { "include": "#strings" },
@@ -462,19 +462,19 @@ fn tm_language() -> String {
                     {
                         "match": format!("(:)\\s*({sized_specs})(?=\\s*\\()"),
                         "captures": {
-                            "1": { "name": "punctuation.separator.colon.scrl" },
-                            "2": { "name": "storage.type.binary-spec.scrl" }
+                            "1": { "name": "punctuation.separator.colon.sca" },
+                            "2": { "name": "storage.type.binary-spec.sca" }
                         }
                     },
                     {
                         "match": format!("(:)\\s*({bare_specs})\\b"),
                         "captures": {
-                            "1": { "name": "punctuation.separator.colon.scrl" },
-                            "2": { "name": "storage.type.binary-spec.scrl" }
+                            "1": { "name": "punctuation.separator.colon.sca" },
+                            "2": { "name": "storage.type.binary-spec.sca" }
                         }
                     },
                     {
-                        "name": "keyword.operator.spread.scrl",
+                        "name": "keyword.operator.spread.sca",
                         "match": "\\.\\."
                     },
                     { "include": "#constants" },
@@ -484,7 +484,7 @@ fn tm_language() -> String {
                     { "include": "#types" },
                     { "include": "#operators" },
                     {
-                        "name": "variable.other.scrl",
+                        "name": "variable.other.sca",
                         "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
                     },
                     { "include": "#punctuation" }
@@ -504,7 +504,7 @@ fn tm_language() -> String {
                     { "include": "#types" },
                     { "include": "#operators" },
                     {
-                        "name": "variable.other.scrl",
+                        "name": "variable.other.sca",
                         "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
                     },
                     { "include": "#punctuation" }
@@ -513,28 +513,28 @@ fn tm_language() -> String {
             "import-statement": {
                 "begin": format!("\\b({})\\b", k(Keyword::Import)),
                 "beginCaptures": {
-                    "1": { "name": "keyword.control.import.scrl" }
+                    "1": { "name": "keyword.control.import.sca" }
                 },
                 "end": "(?=$|\\n)",
                 "patterns": [
                     {
-                        "name": "keyword.control.import.scrl",
+                        "name": "keyword.control.import.sca",
                         "match": format!("\\b({})\\b", k(Keyword::As))
                     },
                     {
-                        "name": "punctuation.separator.path.scrl",
+                        "name": "punctuation.separator.path.sca",
                         "match": "/"
                     },
                     {
-                        "name": "entity.name.type.scrl",
+                        "name": "entity.name.type.sca",
                         "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
                     },
                     {
-                        "name": "entity.name.namespace.scrl",
+                        "name": "entity.name.namespace.sca",
                         "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
                     },
                     {
-                        "name": "punctuation.accessor.scrl",
+                        "name": "punctuation.accessor.sca",
                         "match": "\\."
                     },
                     { "include": "#punctuation" }
@@ -549,19 +549,19 @@ fn tm_language() -> String {
                             pub = k(Keyword::Pub), opaque = k(Keyword::Opaque), type_ = k(Keyword::Type)
                         ),
                         "captures": {
-                            "1": { "name": "storage.modifier.visibility.scrl" },
-                            "2": { "name": "storage.modifier.visibility.scrl" },
-                            "3": { "name": "keyword.other.type.scrl" },
-                            "4": { "name": "entity.name.type.scrl" },
+                            "1": { "name": "storage.modifier.visibility.sca" },
+                            "2": { "name": "storage.modifier.visibility.sca" },
+                            "3": { "name": "keyword.other.type.sca" },
+                            "4": { "name": "entity.name.type.sca" },
                             "5": {
                                 "patterns": [
                                     {
-                                        "name": "variable.other.type.scrl",
+                                        "name": "variable.other.type.sca",
                                         "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
                                     }
                                 ]
                             },
-                            "6": { "name": "keyword.operator.assignment.scrl" }
+                            "6": { "name": "keyword.operator.assignment.sca" }
                         }
                     },
                     {
@@ -571,14 +571,14 @@ fn tm_language() -> String {
                             pub = k(Keyword::Pub), opaque = k(Keyword::Opaque), type_ = k(Keyword::Type)
                         ),
                         "captures": {
-                            "1": { "name": "storage.modifier.visibility.scrl" },
-                            "2": { "name": "storage.modifier.visibility.scrl" },
-                            "3": { "name": "keyword.other.type.scrl" },
-                            "4": { "name": "entity.name.type.scrl" },
+                            "1": { "name": "storage.modifier.visibility.sca" },
+                            "2": { "name": "storage.modifier.visibility.sca" },
+                            "3": { "name": "keyword.other.type.sca" },
+                            "4": { "name": "entity.name.type.sca" },
                             "5": {
                                 "patterns": [
                                     {
-                                        "name": "variable.other.type.scrl",
+                                        "name": "variable.other.type.sca",
                                         "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
                                     }
                                 ]
@@ -592,15 +592,15 @@ fn tm_language() -> String {
                             pub = k(Keyword::Pub), opaque = k(Keyword::Opaque), type_ = k(Keyword::Type)
                         ),
                         "beginCaptures": {
-                            "1": { "name": "storage.modifier.visibility.scrl" },
-                            "2": { "name": "storage.modifier.visibility.scrl" },
-                            "3": { "name": "keyword.other.type.scrl" },
-                            "4": { "name": "entity.name.type.scrl" },
-                            "5": { "name": "punctuation.definition.typeparameters.begin.scrl" }
+                            "1": { "name": "storage.modifier.visibility.sca" },
+                            "2": { "name": "storage.modifier.visibility.sca" },
+                            "3": { "name": "keyword.other.type.sca" },
+                            "4": { "name": "entity.name.type.sca" },
+                            "5": { "name": "punctuation.definition.typeparameters.begin.sca" }
                         },
                         "end": "\\}",
                         "endCaptures": {
-                            "0": { "name": "punctuation.definition.type.end.scrl" }
+                            "0": { "name": "punctuation.definition.type.end.sca" }
                         },
                         "patterns": [
                             { "include": "#comments" },
@@ -614,15 +614,15 @@ fn tm_language() -> String {
                 "begin": "(?<=\\()",
                 "end": "\\)",
                 "endCaptures": {
-                    "0": { "name": "punctuation.definition.typeparameters.end.scrl" }
+                    "0": { "name": "punctuation.definition.typeparameters.end.sca" }
                 },
                 "patterns": [
                     {
-                        "name": "variable.other.type.scrl",
+                        "name": "variable.other.type.sca",
                         "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
                     },
                     {
-                        "name": "punctuation.separator.comma.scrl",
+                        "name": "punctuation.separator.comma.sca",
                         "match": ","
                     }
                 ]
@@ -630,7 +630,7 @@ fn tm_language() -> String {
             "type-body": {
                 "begin": "\\{",
                 "beginCaptures": {
-                    "0": { "name": "punctuation.definition.type.begin.scrl" }
+                    "0": { "name": "punctuation.definition.type.begin.sca" }
                 },
                 "end": "(?=\\})",
                 "patterns": [
@@ -639,18 +639,18 @@ fn tm_language() -> String {
                         "comment": "Constructor with payload: Ctor(label Type, ...)",
                         "begin": "\\b([A-Z][a-zA-Z0-9_]*)\\s*(\\()",
                         "beginCaptures": {
-                            "1": { "name": "entity.name.function.constructor.scrl" },
-                            "2": { "name": "punctuation.definition.parameters.begin.scrl" }
+                            "1": { "name": "entity.name.function.constructor.sca" },
+                            "2": { "name": "punctuation.definition.parameters.begin.sca" }
                         },
                         "end": "\\)",
                         "endCaptures": {
-                            "0": { "name": "punctuation.definition.parameters.end.scrl" }
+                            "0": { "name": "punctuation.definition.parameters.end.sca" }
                         },
                         "patterns": [{ "include": "#field-decl" }]
                     },
                     {
                         "comment": "Nullary constructor",
-                        "name": "entity.name.function.constructor.scrl",
+                        "name": "entity.name.function.constructor.sca",
                         "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
                     },
                     { "include": "#field-decl" }
@@ -662,24 +662,24 @@ fn tm_language() -> String {
                         "comment": "Field label + concrete type",
                         "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s+([A-Z][a-zA-Z0-9_]*)\\b",
                         "captures": {
-                            "1": { "name": "variable.other.member.scrl" },
-                            "2": { "name": "entity.name.type.scrl" }
+                            "1": { "name": "variable.other.member.sca" },
+                            "2": { "name": "entity.name.type.sca" }
                         }
                     },
                     {
                         "comment": "Field label + type parameter",
                         "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s+([a-z_][a-zA-Z0-9_]*)\\b",
                         "captures": {
-                            "1": { "name": "variable.other.member.scrl" },
-                            "2": { "name": "variable.other.type.scrl" }
+                            "1": { "name": "variable.other.member.sca" },
+                            "2": { "name": "variable.other.type.sca" }
                         }
                     },
                     {
-                        "name": "entity.name.type.scrl",
+                        "name": "entity.name.type.sca",
                         "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
                     },
                     {
-                        "name": "punctuation.separator.comma.scrl",
+                        "name": "punctuation.separator.comma.sca",
                         "match": ","
                     },
                     { "include": "#punctuation" }
@@ -691,9 +691,9 @@ fn tm_language() -> String {
                     pub = k(Keyword::Pub), fn_ = k(Keyword::Fn)
                 ),
                 "beginCaptures": {
-                    "1": { "name": "storage.modifier.visibility.scrl" },
-                    "2": { "name": "keyword.other.fn.scrl" },
-                    "3": { "name": "entity.name.function.scrl" }
+                    "1": { "name": "storage.modifier.visibility.sca" },
+                    "2": { "name": "keyword.other.fn.sca" },
+                    "3": { "name": "entity.name.function.sca" }
                 },
                 "end": "(?=\\{|\\n|$)",
                 "patterns": [
@@ -701,15 +701,15 @@ fn tm_language() -> String {
                     { "include": "#function-params" },
                     { "include": "#type-args" },
                     {
-                        "name": "keyword.other.fn.scrl",
+                        "name": "keyword.other.fn.sca",
                         "match": format!("\\b{}\\b", k(Keyword::Fn))
                     },
                     {
-                        "name": "entity.name.type.scrl",
+                        "name": "entity.name.type.sca",
                         "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
                     },
                     {
-                        "name": "variable.other.type.scrl",
+                        "name": "variable.other.type.sca",
                         "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
                     }
                 ]
@@ -718,11 +718,11 @@ fn tm_language() -> String {
                 "comment": "The param list opens immediately after the function name (\\G) and closes at the matching paren. Nested type-argument parens are consumed by #type-args so the inner ) of e.g. Option(a) cannot end the list early.",
                 "begin": "\\G\\s*(\\()",
                 "beginCaptures": {
-                    "1": { "name": "punctuation.definition.parameters.begin.scrl" }
+                    "1": { "name": "punctuation.definition.parameters.begin.sca" }
                 },
                 "end": "\\)",
                 "endCaptures": {
-                    "0": { "name": "punctuation.definition.parameters.end.scrl" }
+                    "0": { "name": "punctuation.definition.parameters.end.sca" }
                 },
                 "patterns": [
                     { "include": "#comments" },
@@ -730,30 +730,30 @@ fn tm_language() -> String {
                     {
                         "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s+([A-Z][a-zA-Z0-9_]*)\\b",
                         "captures": {
-                            "1": { "name": "variable.parameter.scrl" },
-                            "2": { "name": "entity.name.type.scrl" }
+                            "1": { "name": "variable.parameter.sca" },
+                            "2": { "name": "entity.name.type.sca" }
                         }
                     },
                     {
                         "match": format!("\\b([a-z_][a-zA-Z0-9_]*)\\s+({})\\b", k(Keyword::Fn)),
                         "captures": {
-                            "1": { "name": "variable.parameter.scrl" },
-                            "2": { "name": "keyword.other.fn.scrl" }
+                            "1": { "name": "variable.parameter.sca" },
+                            "2": { "name": "keyword.other.fn.sca" }
                         }
                     },
                     {
                         "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s+([a-z_][a-zA-Z0-9_]*)\\b",
                         "captures": {
-                            "1": { "name": "variable.parameter.scrl" },
-                            "2": { "name": "variable.other.type.scrl" }
+                            "1": { "name": "variable.parameter.sca" },
+                            "2": { "name": "variable.other.type.sca" }
                         }
                     },
                     {
-                        "name": "variable.parameter.scrl",
+                        "name": "variable.parameter.sca",
                         "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
                     },
                     {
-                        "name": "punctuation.separator.comma.scrl",
+                        "name": "punctuation.separator.comma.sca",
                         "match": ","
                     }
                 ]
@@ -762,29 +762,29 @@ fn tm_language() -> String {
                 "comment": "Balanced ( ... ) for a parametrized/fn type. Recursive so Option(List(a)) and Result(a, e) nest correctly.",
                 "begin": "\\(",
                 "beginCaptures": {
-                    "0": { "name": "punctuation.definition.typeparameters.begin.scrl" }
+                    "0": { "name": "punctuation.definition.typeparameters.begin.sca" }
                 },
                 "end": "\\)",
                 "endCaptures": {
-                    "0": { "name": "punctuation.definition.typeparameters.end.scrl" }
+                    "0": { "name": "punctuation.definition.typeparameters.end.sca" }
                 },
                 "patterns": [
                     { "include": "#comments" },
                     {
-                        "name": "keyword.other.fn.scrl",
+                        "name": "keyword.other.fn.sca",
                         "match": format!("\\b{}\\b", k(Keyword::Fn))
                     },
                     {
-                        "name": "entity.name.type.scrl",
+                        "name": "entity.name.type.sca",
                         "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
                     },
                     { "include": "#type-args" },
                     {
-                        "name": "variable.other.type.scrl",
+                        "name": "variable.other.type.sca",
                         "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
                     },
                     {
-                        "name": "punctuation.separator.comma.scrl",
+                        "name": "punctuation.separator.comma.sca",
                         "match": ","
                     }
                 ]
@@ -796,20 +796,20 @@ fn tm_language() -> String {
                     pub = k(Keyword::Pub), const_ = k(Keyword::Const)
                 ),
                 "captures": {
-                    "1": { "name": "storage.modifier.visibility.scrl" },
-                    "2": { "name": "keyword.other.const.scrl" },
-                    "3": { "name": "entity.name.function.scrl" },
-                    "4": { "name": "entity.name.type.scrl" },
-                    "5": { "name": "keyword.operator.assignment.scrl" }
+                    "1": { "name": "storage.modifier.visibility.sca" },
+                    "2": { "name": "keyword.other.const.sca" },
+                    "3": { "name": "entity.name.function.sca" },
+                    "4": { "name": "entity.name.type.sca" },
+                    "5": { "name": "keyword.operator.assignment.sca" }
                 }
             },
             "variable-with-type": {
                 "comment": "Variable declaration with type annotation: name Type = ...",
                 "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s+([A-Z][a-zA-Z0-9_]*)\\s*(=)",
                 "captures": {
-                    "1": { "name": "variable.other.scrl" },
-                    "2": { "name": "entity.name.type.scrl" },
-                    "3": { "name": "keyword.operator.assignment.scrl" }
+                    "1": { "name": "variable.other.sca" },
+                    "2": { "name": "entity.name.type.sca" },
+                    "3": { "name": "keyword.operator.assignment.sca" }
                 }
             },
             "backpass-binding": {
@@ -819,35 +819,35 @@ fn tm_language() -> String {
                     "1": {
                         "patterns": [
                             {
-                                "name": "variable.other.scrl",
+                                "name": "variable.other.sca",
                                 "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
                             }
                         ]
                     },
-                    "2": { "name": "keyword.operator.backpass.scrl" }
+                    "2": { "name": "keyword.operator.backpass.sca" }
                 }
             },
             "keywords": {
                 "patterns": [
                     {
-                        "name": "keyword.control.scrl",
+                        "name": "keyword.control.sca",
                         "match": format!("\\b({})\\b", keyword_alternation(KeywordGroup::Control))
                     },
                     {
                         "comment": "Contextual: a keyword after an if condition, a name after a dot.",
-                        "name": "keyword.control.scrl",
+                        "name": "keyword.control.sca",
                         "match": format!("(?<!\\.)\\b{THEN}\\b")
                     },
                     {
-                        "name": "keyword.control.import.scrl",
+                        "name": "keyword.control.import.sca",
                         "match": format!("\\b({})\\b", keyword_alternation(KeywordGroup::Import))
                     },
                     {
-                        "name": "storage.modifier.visibility.scrl",
+                        "name": "storage.modifier.visibility.sca",
                         "match": format!("\\b({})\\b", keyword_alternation(KeywordGroup::Modifier))
                     },
                     {
-                        "name": "keyword.other.scrl",
+                        "name": "keyword.other.sca",
                         "match": format!("\\b({})\\b", keyword_alternation(KeywordGroup::Declaration))
                     }
                 ]
@@ -856,11 +856,11 @@ fn tm_language() -> String {
                 "comment": "Prelude constructors themes expect as language constants.",
                 "patterns": [
                     {
-                        "name": "constant.language.boolean.scrl",
+                        "name": "constant.language.boolean.sca",
                         "match": "\\b(True|False)\\b"
                     },
                     {
-                        "name": "constant.language.nil.scrl",
+                        "name": "constant.language.nil.sca",
                         "match": "\\bNil\\b"
                     }
                 ]
@@ -869,37 +869,37 @@ fn tm_language() -> String {
                 "comment": "module::name access",
                 "match": "\\b([a-z_][a-zA-Z0-9_]*)(::)(?=[A-Za-z_])",
                 "captures": {
-                    "1": { "name": "entity.name.namespace.scrl" },
-                    "2": { "name": "punctuation.accessor.module.scrl" }
+                    "1": { "name": "entity.name.namespace.sca" },
+                    "2": { "name": "punctuation.accessor.module.sca" }
                 }
             },
             "constructor-call": {
                 "comment": "Constructor invocation / pattern: Uppercase optionally followed by (",
                 "match": "\\b([A-Z][a-zA-Z0-9_]*)(?=\\s*\\()",
                 "captures": {
-                    "1": { "name": "entity.name.function.constructor.scrl" }
+                    "1": { "name": "entity.name.function.constructor.sca" }
                 }
             },
             "function-call": {
                 "comment": "Function calls",
                 "match": "\\b([a-z_][a-zA-Z0-9_]*)(?=\\s*\\()",
                 "captures": {
-                    "1": { "name": "entity.name.function.scrl" }
+                    "1": { "name": "entity.name.function.sca" }
                 }
             },
             "labeled-argument": {
                 "comment": "Labeled call argument: label: value",
                 "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s*(:)(?!:)",
                 "captures": {
-                    "1": { "name": "variable.parameter.label.scrl" },
-                    "2": { "name": "punctuation.separator.colon.scrl" }
+                    "1": { "name": "variable.parameter.label.sca" },
+                    "2": { "name": "punctuation.separator.colon.sca" }
                 }
             },
             "types": {
                 "patterns": [
                     {
                         "comment": "Standalone type name",
-                        "name": "entity.name.type.scrl",
+                        "name": "entity.name.type.sca",
                         "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
                     }
                 ]

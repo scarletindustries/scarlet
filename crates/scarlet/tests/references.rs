@@ -29,9 +29,9 @@ pub fn main() {\n\
 
 fn project() -> Project {
     let p = Project::new("xmod");
-    p.write("c.scrl", C_SRC);
-    p.write("b.scrl", B_SRC);
-    p.write("a.scrl", ENTRY);
+    p.write("c.sca", C_SRC);
+    p.write("b.sca", B_SRC);
+    p.write("a.sca", ENTRY);
     p
 }
 
@@ -170,7 +170,7 @@ fn stdlib_import_path_is_tracked() {
     let p = Project::new("stdlib");
     let entry =
         "import scarlet/array\npub fn main() {\n\tz = array::length([1, 2, 3])\n\tprintln(z)\n}\n";
-    p.write("a.scrl", entry);
+    p.write("a.sca", entry);
     let s = checked_with(&p, entry);
 
     let main = s.document_symbols("main");
@@ -185,12 +185,12 @@ fn stdlib_import_path_is_tracked() {
         "the alias binding is owned by the importing (entry) module"
     );
 
-    // Goto-def must land on the real `pub fn length` in src/std/scarlet/array.scrl.
+    // Goto-def must land on the real `pub fn length` in src/std/scarlet/array.sca.
     // Its line is read from the file rather than written here, so editing a
     // comment above it cannot fail this test for the wrong reason.
-    let array_scrl = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../scarlet_core/src/std/scarlet/array.scrl");
-    let src = std::fs::read_to_string(&array_scrl).expect("the stdlib array module");
+    let array_source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../scarlet_core/src/std/scarlet/array.sca");
+    let src = std::fs::read_to_string(&array_source).expect("the stdlib array module");
     let decl = src
         .lines()
         .position(|line| line.starts_with("pub fn length"))
@@ -234,7 +234,7 @@ fn stdlib_import_path_is_tracked() {
     // The unused-import rule reaches stdlib imports too.
     let p2 = Project::new("stdlib_unused");
     let unused = "import scarlet/array\npub fn main() {\n\tprintln(1)\n}\n";
-    p2.write("a.scrl", unused);
+    p2.write("a.sca", unused);
     let s2 = checked_with(&p2, unused);
     assert_msg_eq(&unused_msgs(&s2), "unused import `array`");
 }
@@ -242,10 +242,10 @@ fn stdlib_import_path_is_tracked() {
 #[test]
 fn unused_import_and_dead_private_def_hints() {
     let p = Project::new("unused");
-    p.write("c.scrl", C_SRC);
+    p.write("c.sca", C_SRC);
     // `import ./c` is never used; `deadpriv` is a private, uncalled fn.
     let entry = "import ./c\nfn deadpriv() Int { 0 }\npub fn main() {\n\tprintln(1)\n}\n";
-    p.write("a.scrl", entry);
+    p.write("a.sca", entry);
 
     let s = checked_with(&p, entry);
     let msgs = unused_msgs(&s);
@@ -275,7 +275,7 @@ fn incremental_edit_b_keeps_refs_then_invalidate_drops_reverse_edges() {
 
     // Edit B's body only, keeping `bridge`.
     p.write(
-        "b.scrl",
+        "b.sca",
         "import ./c\npub fn bridge() Int { c::shared() + 100 }\n",
     );
     let r = s.check(&parse(ENTRY), Some(&p.dir));
@@ -303,9 +303,9 @@ fn incremental_edit_b_keeps_refs_then_invalidate_drops_reverse_edges() {
     );
 
     // B drops `bridge`: the graph rebuild must leave no dangling reverse edge.
-    p.write("b.scrl", "pub fn other() Int { 7 }\n");
+    p.write("b.sca", "pub fn other() Int { 7 }\n");
     let entry2 = "import ./b\npub fn main() {\n\tprintln(b::other())\n}\n";
-    p.write("a.scrl", entry2);
+    p.write("a.sca", entry2);
     let r = s.check(&parse(entry2), Some(&p.dir));
     assert!(r.success(), "after B invalidation: {:?}", r.diagnostics);
     assert!(
@@ -325,7 +325,7 @@ fn local_bindings_excluded_from_symbol_surfaces_but_stay_resolvable() {
     let p = Project::new("symsurface");
     let entry = "fn calc(base Int) Int {\n\tscaled = base * 2\n\tscaled + 1\n}\n\
                  pub fn main() {\n\tx = calc(10)\n\tprintln(x)\n}\n";
-    p.write("a.scrl", entry);
+    p.write("a.sca", entry);
     let s = checked_with(&p, entry);
 
     let doc = s.document_symbols("main");
@@ -375,8 +375,8 @@ pub fn main() {\n\
 
 fn alias_project() -> Project {
     let p = Project::new("alias_rename");
-    p.write("lib.scrl", ALIAS_LIB);
-    p.write("a.scrl", ALIAS_MAIN);
+    p.write("lib.sca", ALIAS_LIB);
+    p.write("a.sca", ALIAS_MAIN);
     p
 }
 
@@ -427,10 +427,10 @@ fn rename_imported_symbol_does_not_touch_the_module_alias() {
 #[test]
 fn unused_one_of_two_plain_qualified_imports_is_flagged() {
     let p = Project::new("twoimp");
-    p.write("c.scrl", "pub fn shared() Int { 42 }\n");
-    p.write("d.scrl", "pub fn helper() Int { 7 }\n");
+    p.write("c.sca", "pub fn shared() Int { 42 }\n");
+    p.write("d.sca", "pub fn helper() Int { 7 }\n");
     let entry = "import ./c\nimport ./d\npub fn main() {\n\tx = d::helper()\n\tprintln(x)\n}\n";
-    p.write("a.scrl", entry);
+    p.write("a.sca", entry);
 
     let s = checked_with(&p, entry);
     let msgs = unused_msgs(&s);
@@ -534,7 +534,7 @@ fn assert_nav(
 #[test]
 fn navigation_on_constructor_type_constant_and_field() {
     let p = Project::new("nav_entities");
-    p.write("a.scrl", NAV_SRC);
+    p.write("a.sca", NAV_SRC);
     let s = checked_with(&p, NAV_SRC);
 
     // Value position `chosen = Red`.
@@ -558,7 +558,7 @@ fn constructor_in_match_pattern_is_a_graph_reference() {
                pub fn main() {\n\
                \tprintln(f(Right))\n\
                }\n";
-    p.write("a.scrl", src);
+    p.write("a.sca", src);
     let s = checked_with(&p, src);
 
     // 2nd `Left` is the match-arm pattern occurrence.
@@ -582,7 +582,7 @@ pub fn main() {\n\
 #[test]
 fn session_checks_http_h1_program_clean() {
     let p = Project::new("http_session");
-    p.write("a.scrl", HTTP_ENTRY);
+    p.write("a.sca", HTTP_ENTRY);
     checked_with(&p, HTTP_ENTRY);
 }
 
@@ -591,7 +591,7 @@ fn session_checks_http_h1_program_clean() {
 #[test]
 fn session_recheck_keeps_stdlib_types_intact() {
     let p = Project::new("http_session_recheck");
-    p.write("a.scrl", HTTP_ENTRY);
+    p.write("a.sca", HTTP_ENTRY);
 
     let mut s = checked_with(&p, "pub fn main() {\n\tprintln(1)\n}\n");
     let r2 = s.check(&parse(HTTP_ENTRY), Some(&p.dir));
@@ -616,8 +616,8 @@ pub fn main() {\n\
 #[test]
 fn session_hydrates_h1_after_http_in_earlier_check() {
     let p = Project::new("http_session_order");
-    p.write("a.scrl", HTTP_HELLO_ENTRY);
-    p.write("b.scrl", HTTP_ENTRY);
+    p.write("a.sca", HTTP_HELLO_ENTRY);
+    p.write("b.sca", HTTP_ENTRY);
 
     // Hydrates http + headers, then h1 directly.
     let mut s = checked_with(&p, HTTP_HELLO_ENTRY);
@@ -645,8 +645,8 @@ pub fn main() {\n\
 #[test]
 fn entry_type_shadowing_stdlib_name_is_undone_on_next_check() {
     let p = Project::new("type_shadow");
-    p.write("a.scrl", SHADOWING_ENTRY);
-    p.write("b.scrl", HTTP_ENTRY);
+    p.write("a.sca", SHADOWING_ENTRY);
+    p.write("b.sca", HTTP_ENTRY);
 
     let mut s = checked_with(&p, SHADOWING_ENTRY);
 
@@ -674,10 +674,10 @@ fn entry_type_shadowing_stdlib_name_is_undone_on_next_check() {
 #[test]
 fn qualified_member_use_keeps_the_import_live_but_a_bare_import_still_warns() {
     let p = Project::new("qualifier_liveness");
-    p.write("c.scrl", C_SRC);
-    p.write("d.scrl", C_SRC);
+    p.write("c.sca", C_SRC);
+    p.write("d.sca", C_SRC);
     let entry = "import ./c\nimport ./d\npub fn main() {\n\tprintln(c::shared())\n}\n";
-    p.write("a.scrl", entry);
+    p.write("a.sca", entry);
 
     let msgs = unused_msgs(&checked_with(&p, entry));
     assert_no_msg(&msgs, "unused import `c`");
@@ -689,9 +689,9 @@ fn qualified_member_use_keeps_the_import_live_but_a_bare_import_still_warns() {
 #[test]
 fn a_local_named_like_an_import_keeps_both() {
     let p = Project::new("shadow_qualifier");
-    p.write("b.scrl", "pub fn add(a, b) {\n\ta + b\n}\n");
+    p.write("b.sca", "pub fn add(a, b) {\n\ta + b\n}\n");
     p.write(
-        "a.scrl",
+        "a.sca",
         "import ./b\n\
          \n\
          type Point {\n\
@@ -706,7 +706,7 @@ fn a_local_named_like_an_import_keeps_both() {
          \tprintln(f(Point(41, 1)) + b::add(1, 0))\n\
          }\n",
     );
-    common::run_project_outputs(&p, "run", "a.scrl", "42\n");
+    common::run_project_outputs(&p, "run", "a.sca", "42\n");
 }
 
 /// `Config(name: 'x')` names the constructor, never the type, so reachability
@@ -716,7 +716,7 @@ fn a_used_constructor_keeps_its_type_alive() {
     let p = Project::new("unused_ctor_type");
     let entry = "type Config {\n\tname String\n}\n\npub const config = Config(name: 'x')\n\n\
                  pub fn main() {\n\tprintln(config.name)\n}\n";
-    p.write("a.scrl", entry);
+    p.write("a.sca", entry);
     let s = checked_with(&p, entry);
     assert_no_msg(&unused_msgs(&s), "unused type `Config`");
 }
@@ -726,7 +726,7 @@ fn a_used_constructor_keeps_its_type_alive() {
 fn a_type_nobody_constructs_is_still_unused() {
     let p = Project::new("unused_ghost_type");
     let entry = "type Ghost {\n\tn Int\n}\n\npub fn main() {\n\tprintln(1)\n}\n";
-    p.write("a.scrl", entry);
+    p.write("a.sca", entry);
     let s = checked_with(&p, entry);
     assert_has_msg(&unused_msgs(&s), "unused type `Ghost`");
 }
@@ -736,7 +736,7 @@ fn a_type_nobody_constructs_is_still_unused() {
 fn one_used_constructor_is_enough_to_keep_the_type() {
     let p = Project::new("unused_one_ctor");
     let entry = "type Color {\n\tRed\n\tGreen\n}\n\npub fn main() {\n\tc = Red\n\tprintln(c)\n}\n";
-    p.write("a.scrl", entry);
+    p.write("a.sca", entry);
     let s = checked_with(&p, entry);
     assert_no_msg(&unused_msgs(&s), "unused type `Color`");
 }

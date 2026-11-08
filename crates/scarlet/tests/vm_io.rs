@@ -819,7 +819,7 @@ fn http_server_body_source_failure_yields_framed_500() {
 /// never a hung suite.
 fn run_with_schedulers(tag: &str, src: &str, schedulers: u32, secs: u64) -> (Option<i32>, String) {
     let proj = Project::new(tag);
-    let prog = proj.dir.join("prog.scrl");
+    let prog = proj.dir.join("prog.sca");
     std::fs::write(&prog, src).unwrap();
     let child = std::process::Command::new(env!("CARGO_BIN_EXE_scarlet"))
         .arg("run")

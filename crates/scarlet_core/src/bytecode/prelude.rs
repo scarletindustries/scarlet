@@ -1,10 +1,10 @@
-//! Prelude bootstrap: load `src/std/scrl.scrl` through the ordinary module
+//! Prelude bootstrap: load `src/std/scarlet.sca` through the ordinary module
 //! pipeline so its names are visible in every Scarlet program without an import.
 //! Nothing here redefines a prelude type in Rust.
 //!
 //! Runs once per compiler, before any user code. It ends in
 //! `PreludeBindings::capture`, a strict typed snapshot of every prelude name
-//! the compiler relies on, so a drifted `scrl.scrl` fails here instead of
+//! the compiler relies on, so a drifted `scarlet.sca` fails here instead of
 //! surfacing as a confused unify error downstream.
 
 use super::PreludeBindings;

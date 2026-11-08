@@ -1,9 +1,11 @@
 use include_dir::{Dir, include_dir};
 
+use super::SOURCE_EXTENSION;
+
 static STD: Dir = include_dir!("$CARGO_MANIFEST_DIR/src/std");
 
 pub(crate) fn lookup(path: &str) -> Option<&'static str> {
-    STD.get_file(format!("{path}.scrl"))
+    STD.get_file(format!("{path}.{SOURCE_EXTENSION}"))
         .and_then(|f| f.contents_utf8())
 }
 
@@ -11,12 +13,13 @@ pub(crate) fn lookup(path: &str) -> Option<&'static str> {
 /// with: `scarlet`, `scarlet/string`, `scarlet/net/tls`, ...
 pub(crate) fn module_paths() -> Vec<super::ModulePath> {
     let mut out: Vec<super::ModulePath> = STD
-        .find("**/*.scrl")
+        .find(&format!("**/*.{SOURCE_EXTENSION}"))
         .into_iter()
         .flatten()
         .filter_map(|entry| entry.as_file())
         .filter_map(|file| {
-            let path = file.path().to_str()?.strip_suffix(".scrl")?;
+            let path = file.path().with_extension("");
+            let path = path.to_str()?;
             Some(path.split('/').map(str::to_string).collect())
         })
         .collect();
@@ -34,7 +37,7 @@ mod tests {
     #[test]
     fn the_stdlib_is_formatted() {
         let unformatted: Vec<String> = STD
-            .find("**/*.scrl")
+            .find("**/*.sca")
             .into_iter()
             .flatten()
             .filter_map(|entry| entry.as_file())

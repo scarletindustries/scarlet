@@ -60,7 +60,7 @@ Later passes slot in at step 2: `mode_infer(core)` sets `region`; a `simplify(co
 - Core is per-function; a `CoreProgram` holds `Vec<CoreFn>` + constants + module toplevel.
 - Loop-carried reuse: perceus pass on a tail-recursive `CoreFn` may pair a `Drop` at end-of-body with a `Ctor` at start-of-body (same frame after `TailCallSelf`); VM's `collapse_tail_frame` must NOT drain reuse slots for self-tail-calls.
 - Printer: `impl Display for CoreExpr` for debugging + golden tests (`crates/scarlet/tests/core_ir.rs` — snapshot Core for a few programs).
-- Bench gate: after perceus pass is on, `examples/bench_typed.scrl` must be ≤ 0.61s (Phase 1) AND `dot_loop` must show measurable reuse (alloc counter << 2M).
+- Bench gate: after perceus pass is on, `examples/bench_typed.sca` must be ≤ 0.61s (Phase 1) AND `dot_loop` must show measurable reuse (alloc counter << 2M).
 
 ## Prior art to consult
 

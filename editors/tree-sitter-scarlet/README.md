@@ -24,6 +24,6 @@ bun run corpus
 ```
 
 `bun run generate` rebuilds `src/` after a change to `grammar.js`. `bun run
-corpus` parses every `.scrl` file in the repository and fails on any error
+corpus` parses every `.sca` file in the repository and fails on any error
 node. CI runs both. `cargo test -p xtask` fails while `lexical.js` or the
 tmLanguage is stale. The grammar tracks the compiler or the build fails.

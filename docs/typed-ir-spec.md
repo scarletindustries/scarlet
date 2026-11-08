@@ -163,7 +163,7 @@ If at T5 it turns out `lower` still needs an escape hatch, that is the most inte
 ## Constraints — outcomes, not tokens
 
 - **Correctness over compile speed.** A slower `Scarlet build` is acceptable and expected. Say how much slower.
-- **The interpreter must not regress.** `examples/bench_typed.scrl`, `examples/bench_map.scrl`, and an amplified `fib(36)`+`count(8e7)` must hold. This work is compile-time only, so a runtime change is a bug — except where recovering lost typed opcodes makes it *faster*, which is a win worth reporting.
+- **The interpreter must not regress.** `examples/bench_typed.sca`, `examples/bench_map.sca`, and an amplified `fib(36)`+`count(8e7)` must hold. This work is compile-time only, so a runtime change is a bug — except where recovering lost typed opcodes makes it *faster*, which is a win worth reporting.
 - Recovering the typed opcodes that `fresh_var()` was suppressing may change the emitted instruction mix. That is the point. Report before/after opcode histograms for an inferred-type function.
 - **Every guard must be a type, an exhaustive match, or a behavioural test.** Never a test that greps source text. Never a hardcoded list of symbol names. A previous attempt produced `const COLD_INLINE_NEVER_HANDLERS: &[&str]` plus a `.rs`-file scanner; it was reverted.
 - Do not weaken, skip, or delete a test. Do not add a cargo feature. Do not bypass git hooks.

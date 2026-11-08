@@ -44,7 +44,7 @@ fn check_stdlib_file(rel: &str, module: Vec<String>) -> Vec<String> {
 #[test]
 fn resource_as_module_is_clean() {
     let diags = check_stdlib_file(
-        "scarlet/resource.scrl",
+        "scarlet/resource.sca",
         vec!["scarlet".into(), "resource".into()],
     );
     assert!(diags.is_empty(), "phantom diagnostics: {diags:#?}");
@@ -53,7 +53,7 @@ fn resource_as_module_is_clean() {
 #[test]
 fn decimal_as_module_is_clean() {
     let diags = check_stdlib_file(
-        "scarlet/decimal.scrl",
+        "scarlet/decimal.sca",
         vec!["scarlet".into(), "decimal".into()],
     );
     assert!(diags.is_empty(), "phantom diagnostics: {diags:#?}");
@@ -62,7 +62,7 @@ fn decimal_as_module_is_clean() {
 #[test]
 fn http_body_as_module_is_clean() {
     let diags = check_stdlib_file(
-        "scarlet/http/body.scrl",
+        "scarlet/http/body.sca",
         vec!["scarlet".into(), "http".into(), "body".into()],
     );
     assert!(diags.is_empty(), "phantom diagnostics: {diags:#?}");
@@ -112,12 +112,12 @@ fn synthetic_entry_importing_option_first() {
 
 #[test]
 fn io_as_module_is_clean() {
-    let diags = check_stdlib_file("scarlet/io.scrl", vec!["scarlet".into(), "io".into()]);
+    let diags = check_stdlib_file("scarlet/io.sca", vec!["scarlet".into(), "io".into()]);
     assert!(diags.is_empty(), "phantom diagnostics: {diags:#?}");
 }
 
 #[test]
 fn net_as_module_is_clean() {
-    let diags = check_stdlib_file("scarlet/net.scrl", vec!["scarlet".into(), "net".into()]);
+    let diags = check_stdlib_file("scarlet/net.sca", vec!["scarlet".into(), "net".into()]);
     assert!(diags.is_empty(), "phantom diagnostics: {diags:#?}");
 }

@@ -15,7 +15,7 @@ mod common;
 use common::run_outputs;
 
 /// Each polarity, and `Nil`. The tag is pinned as a byte too: `True` is
-/// variant 0 because `scarlet.scrl` declares it first, so the body of
+/// variant 0 because `scarlet.sca` declares it first, so the body of
 /// `wire.encode(True)` is the single byte 0 behind the eleven-byte header,
 /// and `Nil` — one constructor — has no body at all.
 #[test]

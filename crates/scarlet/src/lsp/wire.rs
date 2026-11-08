@@ -234,7 +234,7 @@ fn stdlib_file(m: &ModulePath, near: &Path) -> Option<PathBuf> {
     for seg in m {
         p.push(seg);
     }
-    p.set_extension("scrl");
+    p.set_extension(module::SOURCE_EXTENSION);
     p.is_file().then_some(p)
 }
 

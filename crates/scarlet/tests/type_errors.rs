@@ -484,7 +484,7 @@ reject_case! {
 }
 
 // Two `scarlet/json/decode` shapes the type system holds shut. Both are pinned
-// here rather than in `tests/programs/json.scrl` because neither program gets
+// here rather than in `tests/programs/json.sca` because neither program gets
 // far enough to print anything — the golden run can only witness decoders that
 // compile.
 reject_case! {

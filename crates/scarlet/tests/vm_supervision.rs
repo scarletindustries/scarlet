@@ -1,7 +1,7 @@
 //! Supervision cases that write to stderr or decide the exit status: crash
 //! restarts, budgets giving up, what that does to the process that declared
 //! the tree, and the creator rule. The stderr-quiet behaviour is
-//! `tests/programs/supervisors.scrl`.
+//! `tests/programs/supervisors.sca`.
 
 mod common;
 

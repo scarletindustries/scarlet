@@ -344,8 +344,8 @@ mod tests {
     fn cross_module_rename_keyed_by_uri() {
         let (g, lib, app, helper) = workspace();
         let mut map = HashMap::new();
-        map.insert(lib, "file:///proj/sub/lib.scrl");
-        map.insert(app, "file:///proj/main.scrl");
+        map.insert(lib, "file:///proj/sub/lib.sca");
+        map.insert(app, "file:///proj/main.sca");
 
         let we = g
             .rename_with(helper, "renamed", resolver(&map))
@@ -354,12 +354,12 @@ mod tests {
         assert_eq!(we.changes.len(), 2);
 
         // Decl span + the Definition occurrence dedupe to one edit.
-        let lib_edits = &we.changes["file:///proj/sub/lib.scrl"];
+        let lib_edits = &we.changes["file:///proj/sub/lib.sca"];
         assert_eq!(lib_edits.len(), 1);
         assert_eq!(lib_edits[0].span, Span::single_line(0, 3, 9));
         assert_eq!(lib_edits[0].new_text, "renamed");
 
-        let app_edits = &we.changes["file:///proj/main.scrl"];
+        let app_edits = &we.changes["file:///proj/main.sca"];
         assert_eq!(app_edits.len(), 2);
         assert_eq!(app_edits[0].span, Span::single_line(2, 8, 14));
         assert_eq!(app_edits[1].span, Span::single_line(3, 8, 14));
@@ -392,9 +392,9 @@ mod tests {
         let g = g.finish();
 
         let mut map = HashMap::new();
-        map.insert(m, "file:///main.scrl");
+        map.insert(m, "file:///main.sca");
         let we = g.rename_with(foo, "bar", resolver(&map)).expect("ok");
-        let edits = &we.changes["file:///main.scrl"];
+        let edits = &we.changes["file:///main.sca"];
         assert_eq!(edits.len(), 2, "declaration + the one use");
         assert_eq!(edits[0].span, Span::single_line(0, 3, 6));
         assert_eq!(edits[1].span, Span::single_line(5, 4, 7));
@@ -476,7 +476,7 @@ mod tests {
             RenameError::NotRenameable(NotRenameableReason::ModuleAlias)
         );
         assert_eq!(
-            g.rename(alias, "renamed", Some((m, "file:///main.scrl")))
+            g.rename(alias, "renamed", Some((m, "file:///main.sca")))
                 .unwrap_err(),
             RenameError::NotRenameable(NotRenameableReason::ModuleAlias)
         );
@@ -492,8 +492,8 @@ mod tests {
     fn rename_rejects_invalid_new_names() {
         let (g, lib, app, helper) = workspace();
         let mut map = HashMap::new();
-        map.insert(lib, "file:///lib.scrl");
-        map.insert(app, "file:///main.scrl");
+        map.insert(lib, "file:///lib.sca");
+        map.insert(app, "file:///main.sca");
         for bad in ["", "1abc", "has space", "fn", "match", "a-b", "x!"] {
             let e = g.rename_with(helper, bad, resolver(&map)).unwrap_err();
             assert!(
@@ -514,7 +514,7 @@ mod tests {
         let (g, lib, _app, helper) = workspace();
         // Only lib resolves, so the app uses cannot be located.
         let mut map = HashMap::new();
-        map.insert(lib, "file:///lib.scrl");
+        map.insert(lib, "file:///lib.sca");
         let err = g
             .rename_with(helper, "renamed", resolver(&map))
             .unwrap_err();
@@ -542,10 +542,10 @@ mod tests {
         let (g, _lib, app, _helper) = workspace();
         let run = def(app, 0, 3, 6, EntityKind::Function);
         let we = g
-            .rename(run, "go", Some((app, "file:///proj/main.scrl")))
+            .rename(run, "go", Some((app, "file:///proj/main.sca")))
             .expect("entry-pinned rename ok");
         assert_eq!(we.changes.len(), 1);
-        let edits = &we.changes["file:///proj/main.scrl"];
+        let edits = &we.changes["file:///proj/main.sca"];
         assert_eq!(edits[0].span, Span::single_line(0, 3, 6));
         assert_eq!(edits[0].new_text, "go");
     }
@@ -587,9 +587,9 @@ mod tests {
     fn record_shorthand_rename_from_type_rewrites_ctor_uses() {
         let (g, m, ty, _ctor) = record_shorthand();
         let mut map = HashMap::new();
-        map.insert(m, "file:///main.scrl");
+        map.insert(m, "file:///main.sca");
         let we = g.rename_with(ty, "Settings", resolver(&map)).expect("ok");
-        let edits = &we.changes["file:///main.scrl"];
+        let edits = &we.changes["file:///main.sca"];
         assert_eq!(edits.len(), 3, "decl + type use + ctor use, got {edits:?}");
         assert_eq!(edits[0].span, Span::single_line(0, 5, 11));
         assert_eq!(edits[1].span, Span::single_line(3, 10, 16));
@@ -601,9 +601,9 @@ mod tests {
     fn record_shorthand_rename_from_ctor_rewrites_type_uses() {
         let (g, m, _ty, ctor) = record_shorthand();
         let mut map = HashMap::new();
-        map.insert(m, "file:///main.scrl");
+        map.insert(m, "file:///main.sca");
         let we = g.rename_with(ctor, "Settings", resolver(&map)).expect("ok");
-        let edits = &we.changes["file:///main.scrl"];
+        let edits = &we.changes["file:///main.sca"];
         assert_eq!(edits.len(), 3, "decl + type use + ctor use, got {edits:?}");
         assert_eq!(edits[0].span, Span::single_line(0, 5, 11));
         assert_eq!(edits[1].span, Span::single_line(3, 10, 16));
@@ -647,16 +647,16 @@ mod tests {
         let g = g.finish();
 
         let mut map = HashMap::new();
-        map.insert(m, "file:///main.scrl");
+        map.insert(m, "file:///main.sca");
 
         let we = g.rename_with(ty, "Form", resolver(&map)).expect("ok");
-        let edits = &we.changes["file:///main.scrl"];
+        let edits = &we.changes["file:///main.sca"];
         assert_eq!(edits.len(), 2, "type decl + type use only, got {edits:?}");
         assert_eq!(edits[0].span, Span::single_line(0, 5, 10));
         assert_eq!(edits[1].span, Span::single_line(6, 10, 15));
 
         let we = g.rename_with(a, "C", resolver(&map)).expect("ok");
-        let edits = &we.changes["file:///main.scrl"];
+        let edits = &we.changes["file:///main.sca"];
         assert_eq!(edits.len(), 2, "ctor decl + ctor use only, got {edits:?}");
         assert_eq!(edits[0].span, Span::single_line(1, 2, 3));
         assert_eq!(edits[1].span, Span::single_line(4, 8, 9));

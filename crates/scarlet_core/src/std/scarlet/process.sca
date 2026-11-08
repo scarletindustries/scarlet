@@ -6,7 +6,7 @@
  * receive on. A crash ends only its own process, but `spawn` links the two,
  * so a failure nobody planned for spreads until a supervisor handles it.
  * A supervisor restarts a worker at the same address. See
- * examples/supervision.scrl.
+ * examples/supervision.sca.
  */
 import scarlet/array
 import scarlet/time
@@ -144,7 +144,7 @@ pub fn cancel_timer(t Timer) Nil {
 }
 
 // Supervision. A worker's address is a Subject that stays valid across its
-// restarts. See examples/supervision.scrl.
+// restarts. See examples/supervision.sca.
 
 // How a supervisor restarts its workers. More than `restarts` restarts within
 // `within_ms` and it gives up, stopping all its children.

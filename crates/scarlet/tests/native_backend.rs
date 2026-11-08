@@ -59,7 +59,7 @@ fn run(proj: &Project, name: &str, src: &str, schedulers: Option<u32>) -> AlOutp
 /// One run must succeed, keep stderr empty, and print exactly `expected`.
 fn assert_prints(tag: &str, src: &str, schedulers: Option<u32>, expected: &str) {
     let proj = Project::new(tag);
-    let out = run(&proj, "prog.scrl", src, schedulers);
+    let out = run(&proj, "prog.sca", src, schedulers);
     assert!(
         out.success,
         "[{tag}] run failed (exit {:?}) for:\n{src}\n--- stdout ---\n{}--- stderr ---\n{}",
@@ -191,7 +191,7 @@ pub fn main() {
 }
 ";
     let proj = Project::new("midloop_warm");
-    let path = proj.dir.join("prog.scrl");
+    let path = proj.dir.join("prog.sca");
     std::fs::write(&path, src).unwrap();
     let path = path.to_string_lossy().into_owned();
     let out = run_al_env(&["run", &path], &[("SCARLET_NATIVE_DEBUG", "1")]);
@@ -244,10 +244,10 @@ pub fn main() {
 ";
     let proj = Project::new("qual_warm");
     proj.write(
-        "color.scrl",
+        "color.sca",
         "pub type Color {\n\tRed\n\tGreen(shade Int)\n}\n\npub fn make(n Int) Color {\n\tif n % 2 == 0 { Red } else { Green(n) }\n}\n",
     );
-    let path = proj.dir.join("prog.scrl");
+    let path = proj.dir.join("prog.sca");
     std::fs::write(&path, src).unwrap();
     let path = path.to_string_lossy().into_owned();
     let out = run_al_env(&["run", &path], &[("SCARLET_NATIVE_DEBUG", "1")]);
@@ -360,7 +360,7 @@ fn assert_warmed(stderr: &str, name: &str) {
 
 /// (e) The integer bitwise ops across the interp→native switch. They lower as
 /// `OpCoverage::Bridge`, so a wrong arm in `run_bridge_op` is invisible to the
-/// interpreter-only golden program (`bitwise.scrl` compiles only `ok`), and
+/// interpreter-only golden program (`bitwise.sca` compiles only `ok`), and
 /// this test is the only thing holding the interpreter and the JIT together on
 /// these six ops.
 ///
@@ -421,7 +421,7 @@ pub fn main() {
     );
 
     let proj = Project::new("bitwise_bridge");
-    let path = proj.dir.join("prog.scrl");
+    let path = proj.dir.join("prog.sca");
     std::fs::write(&path, src).unwrap();
     let path = path.to_string_lossy().into_owned();
     let out = run_al_env(&["run", &path], &[("SCARLET_NATIVE_DEBUG", "1")]);
@@ -490,7 +490,7 @@ pub fn main() {
 }
 ";
     let proj = Project::new("random_bytes_bridge");
-    let path = proj.dir.join("prog.scrl");
+    let path = proj.dir.join("prog.sca");
     std::fs::write(&path, src).unwrap();
     let path = path.to_string_lossy().into_owned();
     let out = run_al_env(&["run", &path], &[("SCARLET_NATIVE_DEBUG", "1")]);
@@ -529,8 +529,8 @@ pub fn main() {
 }
 ";
     let proj = Project::new("random_bytes_seed");
-    let a = run(&proj, "a.scrl", src, None);
-    let b = run(&proj, "b.scrl", src, None);
+    let a = run(&proj, "a.sca", src, None);
+    let b = run(&proj, "b.sca", src, None);
     assert!(a.success, "first run failed:\n{}", a.stderr);
     assert!(b.success, "second run failed:\n{}", b.stderr);
     assert_ne!(
@@ -1092,7 +1092,7 @@ fn fuzz_generated_programs_print_their_computed_values() {
     let proj = Project::new("native_fuzz");
     for i in 0..PROGRAMS {
         let (src, expected) = gen_program(&mut r);
-        let out = run(&proj, "fuzz.scrl", &src, None);
+        let out = run(&proj, "fuzz.sca", &src, None);
         assert!(
             out.success && out.stderr.is_empty(),
             "fuzz #{i} (seed {SEED:#x}): run failed:\n{src}\n\
@@ -1168,7 +1168,7 @@ pub fn main() {
     let expected = format!("{}\n", (0..=WIRE_ROUNDS).sum::<i64>());
 
     let proj = Project::new("wire_bridge");
-    let path = proj.dir.join("prog.scrl");
+    let path = proj.dir.join("prog.sca");
     std::fs::write(&path, src).unwrap();
     let path = path.to_string_lossy().into_owned();
     let out = run_al_env(&["run", &path], &[("SCARLET_NATIVE_DEBUG", "1")]);
@@ -1221,7 +1221,7 @@ pub fn main() {
     let expected = format!("{}\n", WIRE_ROUNDS + 1);
 
     let proj = Project::new("wire_bridge_refusal");
-    let path = proj.dir.join("prog.scrl");
+    let path = proj.dir.join("prog.sca");
     std::fs::write(&path, src).unwrap();
     let path = path.to_string_lossy().into_owned();
     let out = run_al_env(&["run", &path], &[("SCARLET_NATIVE_DEBUG", "1")]);

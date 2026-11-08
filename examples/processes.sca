@@ -28,9 +28,9 @@ pub fn main() {
 	_ = process::spawn(fn() worker(4, 20))
 
 	// A Pid identifies a process but is not a mailbox; sending goes through a
-	// Subject (tests/programs/messages.scrl). Every process here is linked to
+	// Subject (tests/programs/messages.sca). Every process here is linked to
 	// this one, so any of their crashes would end this process too;
-	// process::spawn_unlinked + process::monitor decouples that (monitors.scrl).
+	// process::spawn_unlinked + process::monitor decouples that (monitors.sca).
 	child = process::spawn(fn() println('child sees itself as ${process::self()}'))
 	println('parent spawned ${child}; the parent itself is ${process::self()}')
 	println('a pid equals only itself: ${child == child} ${child == process::self()}')

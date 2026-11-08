@@ -17,7 +17,7 @@
 //   bitwise_not         is `-n - 1`, so `not 0 == -1`.
 //
 // Masks here stay decimal so this file pins the bitwise ops without depending
-// on hex-literal lexing (see hex_literals.scrl). The comment still gives the
+// on hex-literal lexing (see hex_literals.sca). The comment still gives the
 // hex where that is what makes the value readable.
 
 import scarlet/int

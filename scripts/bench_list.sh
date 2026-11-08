@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Airtight O(n^2) -> O(n) gate for the list/sequence path.
 #
-# bench_list_{1x,2x,4x}.scrl are identical programs at sizes N, 2N, 4N.
+# bench_list_{1x,2x,4x}.sca are identical programs at sizes N, 2N, 4N.
 # The per-doubling time ratio is scale-invariant and intrinsic to the
 # algorithm's complexity class:
 #
@@ -22,9 +22,9 @@ best() {
   echo "$best"
 }
 
-t1=$(best examples/bench_list_1x.scrl)
-t2=$(best examples/bench_list_2x.scrl)
-t4=$(best examples/bench_list_4x.scrl)
+t1=$(best examples/bench_list_1x.sca)
+t2=$(best examples/bench_list_2x.sca)
+t4=$(best examples/bench_list_4x.sca)
 
 echo "bench_list_1x_real_seconds $t1"
 echo "bench_list_2x_real_seconds $t2"

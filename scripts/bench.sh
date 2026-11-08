@@ -11,7 +11,7 @@
 #   scripts/bench.sh                      # measure, print one line per program
 #   scripts/bench.sh --save before.txt    # record a baseline
 #   scripts/bench.sh --baseline before.txt  # measure and diff against it
-#   scripts/bench.sh --reps 9 examples/bench_map.scrl   # override
+#   scripts/bench.sh --reps 9 examples/bench_map.sca   # override
 #
 # Reports the *best* of N wall-clock runs: the minimum is the least
 # noise-contaminated estimate of the work actually done, and the thing that
@@ -40,7 +40,7 @@ done
 # arithmetic loops that typed-opcode recovery should speed up, and the map
 # workload that exercises the Perceus `Drop`/`Reuse` paths.
 if [[ ${#PROGRAMS[@]} -eq 0 ]]; then
-  PROGRAMS=(examples/bench_heavy.scrl examples/bench_typed.scrl examples/bench_map.scrl)
+  PROGRAMS=(examples/bench_heavy.sca examples/bench_typed.sca examples/bench_map.sca)
 fi
 
 cargo build --release >/dev/null 2>&1

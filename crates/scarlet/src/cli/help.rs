@@ -13,12 +13,12 @@ const DOCS: &str = "https://scarlet.industries";
 /// Hand-maintained: clap can describe flags but not show idiomatic usage.
 fn examples_for(sub: &str) -> &'static [&'static str] {
     match sub {
-        "run" => &["scarlet run hello.scrl", "scarlet run server.scrl"],
-        "check" => &["scarlet check src/main.scrl"],
+        "run" => &["scarlet run hello.sca", "scarlet run server.sca"],
+        "check" => &["scarlet check src/main.sca"],
         "fmt" => &[
             "scarlet fmt .",
             "scarlet fmt --check src/",
-            "scarlet fmt --stdin < a.scrl",
+            "scarlet fmt --stdin < a.sca",
         ],
         _ => &[],
     }
@@ -26,7 +26,7 @@ fn examples_for(sub: &str) -> &'static [&'static str] {
 
 fn root_examples() -> &'static [&'static str] {
     &[
-        "scarlet run hello.scrl",
+        "scarlet run hello.sca",
         "scarlet check src/",
         "scarlet fmt --check .",
     ]

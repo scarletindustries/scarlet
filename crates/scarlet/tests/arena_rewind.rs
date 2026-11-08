@@ -20,7 +20,7 @@ use common::{Project, module_key, parse};
 #[test]
 fn stdlib_prefix_survives_repeated_rewinds() {
     let p = Project::new("arena_rewind_prefix");
-    p.write("lib.scrl", "pub fn one() Int { 1 }\n");
+    p.write("lib.sca", "pub fn one() Int { 1 }\n");
 
     let entry = "\
 import ./lib
@@ -35,7 +35,7 @@ pub fn main() {
     for i in 0..10 {
         // Vary the imported module so `check` rewinds to its watermark, not
         // just the entry's.
-        p.write("lib.scrl", &format!("pub fn one() Int {{ {} }}\n", i + 1));
+        p.write("lib.sca", &format!("pub fn one() Int {{ {} }}\n", i + 1));
         let r = s.check(&parse(entry), Some(&p.dir));
         assert!(
             r.success(),
@@ -52,7 +52,7 @@ pub fn main() {
 #[test]
 fn hover_is_stable_across_many_rewinds() {
     let p = Project::new("arena_rewind_hover");
-    p.write("lib.scrl", "pub fn one() Int { 1 }\n");
+    p.write("lib.sca", "pub fn one() Int { 1 }\n");
     let entry = "import ./lib\nconst v = lib::one()\npub fn main() {\n\tprintln(v)\n}\n";
 
     let mut s = IncrementalSession::new();
@@ -80,7 +80,7 @@ fn hover_is_stable_across_many_rewinds() {
 fn closures_survive_an_invalidation_cascade() {
     let p = Project::new("arena_rewind_closures");
     p.write(
-        "lib.scrl",
+        "lib.sca",
         "pub fn go(n Int) Int {\n  f = fn(x Int) x + n\n  f(1)\n}\n",
     );
     let entry = "\
@@ -101,7 +101,7 @@ pub fn main() {
         // Touch the module so it and the entry recompile against a rewound
         // arena; the closure body moves under the same span.
         p.write(
-            "lib.scrl",
+            "lib.sca",
             &format!("pub fn go(n Int) Int {{\n  f = fn(x Int) x + n + {i}\n  f(1)\n}}\n"),
         );
         let r = s.check(&parse(entry), Some(&p.dir));
@@ -120,7 +120,7 @@ pub fn main() {
 fn edit_and_revert_returns_to_the_same_arena_state() {
     let p = Project::new("arena_rewind_revert");
     p.write(
-        "lib.scrl",
+        "lib.sca",
         "pub type Pair = (Int, Int)\npub fn mk() Pair { (1, 2) }\n",
     );
     let entry = "import ./lib\npub fn main() {\n\tprintln(lib::mk())\n}\n";
@@ -129,21 +129,21 @@ fn edit_and_revert_returns_to_the_same_arena_state() {
     assert!(s.check(&parse(entry), Some(&p.dir)).success());
     // Keyed by canonical identity, never the `./lib` spelling: a written-path
     // lookup would always be `None` and the assertion below vacuous.
-    let lib = module_key(&p.dir, "lib.scrl");
+    let lib = module_key(&p.dir, "lib.sca");
     let base_before = s.module_id_base(&lib);
     assert!(
         base_before.is_some(),
-        "lib.scrl was compiled, so it has a range"
+        "lib.sca was compiled, so it has a range"
     );
 
     p.write(
-        "lib.scrl",
+        "lib.sca",
         "pub type Pair = (Int, Int)\npub fn mk() Pair { (3, 4) }\n",
     );
     assert!(s.check(&parse(entry), Some(&p.dir)).success());
 
     p.write(
-        "lib.scrl",
+        "lib.sca",
         "pub type Pair = (Int, Int)\npub fn mk() Pair { (1, 2) }\n",
     );
     let r = s.check(&parse(entry), Some(&p.dir));

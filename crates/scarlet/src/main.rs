@@ -84,7 +84,7 @@ struct RunArgs {
 #[derive(Args)]
 struct LintArgs {
     /// Paths to survey (default: the working directory). Taken as given, so
-    /// this can be pointed at another `.scrl` corpus.
+    /// this can be pointed at another `.sca` corpus.
     paths: Vec<PathBuf>,
     /// Report constructors carrying at least this many `Bool` fields.
     #[arg(
@@ -127,7 +127,7 @@ enum FileAction {
 enum FmtTarget {
     /// `--stdin`: format stdin and print the result. Takes no path.
     Stdin,
-    /// Walk `path` (default `.`) for `.scrl` files and apply `action` to each.
+    /// Walk `path` (default `.`) for `.sca` files and apply `action` to each.
     Files {
         path: Option<String>,
         action: FileAction,
@@ -267,7 +267,9 @@ fn compile_source(
 fn find_scarlet_files(path: &str) -> io::Result<Vec<PathBuf>> {
     let p = Path::new(path);
     if p.is_file() {
-        if path.ends_with(".scrl") {
+        if p.extension()
+            .is_some_and(|e| e == scarlet::module::SOURCE_EXTENSION)
+        {
             return Ok(vec![p.to_path_buf()]);
         }
         return Ok(vec![]);
@@ -281,7 +283,7 @@ fn find_scarlet_files(path: &str) -> io::Result<Vec<PathBuf>> {
     }
 
     let mut files = Vec::new();
-    scarlet::module::collect_scrl_files(p, &mut files);
+    scarlet::module::collect_source_files(p, &mut files);
     Ok(files)
 }
 
@@ -425,7 +427,7 @@ fn main() -> process::ExitCode {
     process::ExitCode::SUCCESS
 }
 
-/// The `.scrl` illegal-state census. It prints what the corpus contains and
+/// The `.sca` illegal-state census. It prints what the corpus contains and
 /// exits 0 either way — `scarlet_core::lint`'s module doc carries the
 /// measurement behind this being a command you run rather than a warning the
 /// compiler emits by default.
@@ -525,7 +527,7 @@ fn cmd_fmt(args: FmtArgs) {
     let files = find_scarlet_files(path).unwrap_or_else(|e| die(e));
 
     if files.is_empty() {
-        println!("No .scrl files found");
+        println!("No .{} files found", scarlet::module::SOURCE_EXTENSION);
         return;
     }
 

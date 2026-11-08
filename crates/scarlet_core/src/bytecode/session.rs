@@ -404,7 +404,7 @@ impl IncrementalSession {
         Self::with_stdlib_root(None)
     }
 
-    /// A session that compiles the stdlib from the `.scrl` sources under
+    /// A session that compiles the stdlib from the `.sca` sources under
     /// `stdlib_root` (the in-repo `src/std`) instead of the embedded copy.
     /// Used when editing the stdlib itself: every `scarlet/...` module is then
     /// an ordinary on-disk `File` module — compiled, cached, hashed and
@@ -506,7 +506,7 @@ impl IncrementalSession {
 
     /// [`check`](Self::check), analysing the buffer *as* the given module
     /// rather than as `main`. Used by a from-source stdlib session so an open
-    /// `src/std/**/*.scrl` file keeps its canonical `scarlet/...` identity: `@vm` is
+    /// `src/std/**/*.sca` file keeps its canonical `scarlet/...` identity: `@vm` is
     /// legal, prelude-redefinition rules apply, and every def/occurrence/hover
     /// fact is keyed under the module its importers reference.
     pub fn check_as(
@@ -543,7 +543,7 @@ impl IncrementalSession {
             // A previous prelude-as-entry check tore the seed down. Rebuild
             // the session outright — byte-for-byte the fresh-session state,
             // with none of the partially-rewound world to reason about. Rare
-            // (only after editing `scrl.scrl` and switching file), so the full
+            // (only after editing `scarlet.sca` and switching file), so the full
             // stdlib recompile it implies is acceptable.
             *self = Self::with_stdlib_root(self.c.stdlib_source_root.clone());
         }

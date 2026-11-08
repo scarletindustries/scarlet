@@ -128,7 +128,7 @@ pub(crate) struct Heap {
     free: HashMap<usize, Vec<Cell>>,
     live: usize,
     /// Cells taken from a chunk or a free list over this heap's life, and
-    /// cells a constructor overwrote in place instead (`internal.scrl`).
+    /// cells a constructor overwrote in place instead (`internal.sca`).
     made: usize,
     reused: usize,
     /// The cells a [`Heap::release`] still has to give a reference up for.

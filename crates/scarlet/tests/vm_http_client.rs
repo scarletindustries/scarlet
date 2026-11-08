@@ -89,9 +89,9 @@ fn run_bounded(tag: &str, src: &str, secs: u64) -> (Option<i32>, String) {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).expect("mkdir");
-    let entry = dir.join("main.scrl");
+    let entry = dir.join("main.sca");
     std::fs::write(&entry, src).expect("write program");
-    std::fs::write(dir.join("package.scrl"), "name = 'http_client_test'\n").expect("write package");
+    std::fs::write(dir.join("package.sca"), "name = 'http_client_test'\n").expect("write package");
     let out = wait_or_kill(
         Command::new(env!("CARGO_BIN_EXE_scarlet"))
             .arg("run")

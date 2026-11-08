@@ -11,12 +11,12 @@ const UTIL_SRC: &str =
 #[test]
 fn relative_qualified() {
     let proj = Project::new("rel_qual");
-    proj.write("util.scrl", UTIL_SRC);
+    proj.write("util.sca", UTIL_SRC);
     proj.write(
-        "main.scrl",
+        "main.sca",
         "import ./util\n\npub fn main() {\n\tprintln(util::quote('hi'))\n}\n",
     );
-    run_project_outputs(&proj, "run", "main.scrl", "\"hi\"\n");
+    run_project_outputs(&proj, "run", "main.sca", "\"hi\"\n");
 }
 
 #[test]
@@ -27,15 +27,15 @@ fn labelled_args_on_a_qualified_call_take_declared_order() {
     // same-typed parameters and an order-revealing body, so source order and
     // declared order give different answers while both type-check.
     let proj = Project::new("qual_labels");
-    proj.write("math.scrl", "pub fn diff(a Int, b Int) Int { a - b }\n");
+    proj.write("math.sca", "pub fn diff(a Int, b Int) Int { a - b }\n");
     proj.write(
-        "main.scrl",
+        "main.sca",
         "import ./math\nimport ./math as m\n\npub fn main() {\n\
          \tprintln(math::diff(b: 2, a: 1))\n\
          \tprintln(m::diff(b: 10, a: 4))\n\
          }\n",
     );
-    run_project_outputs(&proj, "run", "main.scrl", "-1\n-6\n");
+    run_project_outputs(&proj, "run", "main.sca", "-1\n-6\n");
 }
 
 #[test]
@@ -44,84 +44,84 @@ fn aliased_module_type_unifies_with_canonical() {
     // nominal name. Values carry the canonical name, so an annotation spelled
     // through the alias would never unify with one.
     let proj = Project::new("alias_type");
-    proj.write("lib.scrl", "pub type Color {\n\tRed\n\tGreen\n\tBlue\n}\n");
+    proj.write("lib.sca", "pub type Color {\n\tRed\n\tGreen\n\tBlue\n}\n");
     proj.write(
-        "main.scrl",
+        "main.sca",
         "import ./lib as l\n\nfn id(c l::Color) l::Color { c }\n\npub fn main() {\n\tprintln(id(l::Red))\n}\n",
     );
-    run_project_outputs(&proj, "run", "main.scrl", "Red\n");
+    run_project_outputs(&proj, "run", "main.sca", "Red\n");
 }
 
 #[test]
 fn relative_import() {
     let proj = Project::new("rel_imp");
-    proj.write("helper.scrl", "pub fn greet() String { 'hello' }\n");
+    proj.write("helper.sca", "pub fn greet() String { 'hello' }\n");
     proj.write(
-        "main.scrl",
+        "main.sca",
         "import ./helper\n\npub fn main() {\n\tprintln(helper::greet())\n}\n",
     );
-    run_project_outputs(&proj, "run", "main.scrl", "hello\n");
+    run_project_outputs(&proj, "run", "main.sca", "hello\n");
 }
 
 #[test]
 fn private_is_not_importable() {
     let proj = Project::new("priv");
-    proj.write("helper.scrl", "fn secret() { 'x' }\npub fn ok() { 'y' }\n");
+    proj.write("helper.sca", "fn secret() { 'x' }\npub fn ok() { 'y' }\n");
 
     proj.write(
-        "main_qual.scrl",
+        "main_qual.sca",
         "import ./helper\n\npub fn main() {\n\tprintln(helper::secret())\n}\n",
     );
-    project_rejects(&proj, "run", "main_qual.scrl", &["private"]);
+    project_rejects(&proj, "run", "main_qual.sca", &["private"]);
 }
 
 #[test]
 fn opaque_type_hides_constructors() {
     let proj = Project::new("opaque");
     proj.write(
-        "id.scrl",
+        "id.sca",
         "pub opaque type Id { Id(n Int) }\n\
          pub fn make(n Int) Id { Id(n) }\n\
          pub fn get(i Id) Int { match i { Id(n) -> n } }\n",
     );
 
     proj.write(
-        "ok.scrl",
+        "ok.sca",
         "import ./id\n\
          fn use(i id::Id) Int { id::get(i) }\n\
          pub fn main() {\n\
          \tprintln(use(id::make(42)))\n\
          }\n",
     );
-    run_project_outputs(&proj, "run", "ok.scrl", "42\n");
+    run_project_outputs(&proj, "run", "ok.sca", "42\n");
 
     proj.write(
-        "bad_qual.scrl",
+        "bad_qual.sca",
         "import ./id\n\npub fn main() {\n\t_ = id::Id(1)\n}\n",
     );
-    project_rejects(&proj, "check", "bad_qual.scrl", &["private", "opaque"]);
+    project_rejects(&proj, "check", "bad_qual.sca", &["private", "opaque"]);
 }
 
 #[test]
 fn external_type_allowed_in_user_code() {
     let proj = Project::new("ext");
-    proj.write("handle.scrl", "pub type Handle\n");
+    proj.write("handle.sca", "pub type Handle\n");
     proj.write(
-        "main.scrl",
+        "main.sca",
         "import ./handle\nfn id(h handle::Handle) handle::Handle { h }\n",
     );
-    let r = run_al("check", &proj.dir.join("main.scrl"));
+    let r = run_al("check", &proj.dir.join("main.sca"));
     assert!(r.success, "out={} err={}", r.stdout, r.stderr);
 }
 
 #[test]
 fn unknown_module() {
     let proj = Project::new("unknown_mod");
-    proj.write("main.scrl", "import scarlet/nope\n");
+    proj.write("main.sca", "import scarlet/nope\n");
     project_rejects(
         &proj,
         "run",
-        "main.scrl",
+        "main.sca",
         &["no such stdlib module scarlet/nope"],
     );
 }
@@ -136,17 +136,17 @@ run_case! {
 #[test]
 fn cycle_detection() {
     let proj = Project::new("cycle");
-    proj.write("a.scrl", "import ./b\npub fn fa() { 1 }\n");
-    proj.write("b.scrl", "import ./a\npub fn fb() { 2 }\n");
-    project_rejects(&proj, "run", "a.scrl", &["cycle", "circular"]);
+    proj.write("a.sca", "import ./b\npub fn fa() { 1 }\n");
+    proj.write("b.sca", "import ./a\npub fn fb() { 2 }\n");
+    project_rejects(&proj, "run", "a.sca", &["cycle", "circular"]);
 }
 
 #[test]
 fn query_api_cross_module_goto_def_and_symbols() {
     let proj = Project::new("qapi_xmod");
-    proj.write("util.scrl", UTIL_SRC);
+    proj.write("util.sca", UTIL_SRC);
     let entry = "import ./util\n\npub fn main() {\n\tprintln(util::quote('hi'))\n}\n";
-    proj.write("main.scrl", entry);
+    proj.write("main.sca", entry);
     let s = checked_with(&proj, entry);
 
     let (l, c) = cursor(entry, "quote", 1, 0);
@@ -156,7 +156,7 @@ fn query_api_cross_module_goto_def_and_symbols() {
     assert_eq!(m.last().map(String::as_str), Some("util"));
     assert!(span.end_column > span.start_column, "real decl span");
 
-    let util_path = proj.dir.join("util.scrl");
+    let util_path = proj.dir.join("util.sca");
     let mut names: Vec<String> = s
         .document_symbols(&util_path.to_string_lossy())
         .into_iter()
@@ -184,9 +184,9 @@ fn query_api_cross_module_goto_def_and_symbols() {
 #[test]
 fn query_api_alias_imports_resolve() {
     let proj = Project::new("qapi_alias");
-    proj.write("util.scrl", UTIL_SRC);
+    proj.write("util.sca", UTIL_SRC);
     let entry = "import ./util as u\n\npub fn main() {\n\tprintln(u::empty())\n\tprintln(u::quote('x'))\n}\n";
-    proj.write("main.scrl", entry);
+    proj.write("main.sca", entry);
     let s = checked_with(&proj, entry);
 
     let (l, c) = cursor(entry, "empty", 1, 0);
@@ -218,15 +218,15 @@ fn query_api_alias_imports_resolve() {
 #[test]
 fn module_top_level_executable_code_is_error() {
     let proj = Project::new("mod_toplevel_exec");
-    proj.write("lib.scrl", "pub fn ok() Int { 1 }\nprintln(99)\n");
+    proj.write("lib.sca", "pub fn ok() Int { 1 }\nprintln(99)\n");
     proj.write(
-        "main.scrl",
+        "main.sca",
         "import ./lib\n\npub fn main() {\n\tprintln(lib::ok())\n}\n",
     );
     project_rejects(
         &proj,
         "run",
-        "main.scrl",
+        "main.sca",
         &["Modules may only contain declarations at the top level"],
     );
 }
@@ -235,15 +235,15 @@ fn module_top_level_executable_code_is_error() {
 #[test]
 fn qualified_import_unknown_member_is_error() {
     let proj = Project::new("mod_qual_unknown");
-    proj.write("lib.scrl", "pub fn ok() Int { 1 }\n");
+    proj.write("lib.sca", "pub fn ok() Int { 1 }\n");
     proj.write(
-        "main.scrl",
+        "main.sca",
         "import ./lib\n\npub fn main() {\n\tlib::nope()\n}\n",
     );
     project_rejects(
         &proj,
         "run",
-        "main.scrl",
+        "main.sca",
         &["Module './lib' has no member 'nope'"],
     );
 }
@@ -255,30 +255,30 @@ fn qualified_import_unknown_member_is_error() {
 fn a_value_named_like_a_module_does_not_hide_it() {
     let proj = Project::new("qual_shadow");
     proj.write(
-        "one.scrl",
+        "one.sca",
         "pub const go = 7
 ",
     );
     proj.write(
-        "main.scrl",
+        "main.sca",
         "import ./one\n\ntype Box {\n\tgo Int\n}\n\npub fn main() {\n\tg = fn() { one::go }\n\tone = Box(9)\n\tprintln(g())\n\tprintln(one.go)\n\tprintln(one::go)\n}\n",
     );
-    run_project_outputs(&proj, "run", "main.scrl", "7\n9\n7\n");
+    run_project_outputs(&proj, "run", "main.sca", "7\n9\n7\n");
 }
 
 /// `.` on a module's name is not a member access: say to use `::`.
 #[test]
 fn a_dot_on_a_module_points_at_colons() {
     let proj = Project::new("qual_dot");
-    proj.write("lib.scrl", "pub fn ok() Int { 1 }\n");
+    proj.write("lib.sca", "pub fn ok() Int { 1 }\n");
     proj.write(
-        "main.scrl",
+        "main.sca",
         "import ./lib\n\npub fn main() {\n\tprintln(lib.ok())\n}\n",
     );
     project_rejects(
         &proj,
         "check",
-        "main.scrl",
+        "main.sca",
         &["'lib' is a module, not a value. Reach its members with `::`, like `lib::ok`"],
     );
 }
@@ -287,33 +287,30 @@ fn a_dot_on_a_module_points_at_colons() {
 #[test]
 fn colons_on_an_unknown_module_name_it() {
     let proj = Project::new("qual_unknown_module");
-    proj.write(
-        "main.scrl",
-        "pub fn main() {\n\tx = 1\n\tprintln(x::y)\n}\n",
-    );
-    project_rejects(&proj, "check", "main.scrl", &["Unknown module 'x'"]);
+    proj.write("main.sca", "pub fn main() {\n\tx = 1\n\tprintln(x::y)\n}\n");
+    project_rejects(&proj, "check", "main.sca", &["Unknown module 'x'"]);
 }
 
 // A module is the file it resolved to, never the import as written. Keying the
-// module cache on the spelling made the first `b.scrl` loaded win program-wide,
+// module cache on the spelling made the first `b.sca` loaded win program-wide,
 // and nothing failed loudly — the wrong module was simply used.
 
-/// `sub/mid.scrl` imports `./b`, which must be `sub/b.scrl`, not the root's.
+/// `sub/mid.sca` imports `./b`, which must be `sub/b.sca`, not the root's.
 #[test]
 fn same_named_modules_in_different_directories_are_distinct() {
     let proj = Project::new("mod_identity");
     std::fs::create_dir_all(proj.dir.join("sub")).unwrap();
-    proj.write("b.scrl", "pub fn who() String {\n\t'ROOT'\n}\n");
-    proj.write("sub/b.scrl", "pub fn who() String {\n\t'SUB'\n}\n");
+    proj.write("b.sca", "pub fn who() String {\n\t'ROOT'\n}\n");
+    proj.write("sub/b.sca", "pub fn who() String {\n\t'SUB'\n}\n");
     proj.write(
-        "sub/mid.scrl",
+        "sub/mid.sca",
         "import ./b\n\npub fn go() String {\n\tb::who()\n}\n",
     );
     proj.write(
-        "main.scrl",
+        "main.sca",
         "import ./b\nimport ./sub/mid\n\npub fn main() {\n\tprintln(b::who())\n\tprintln(mid::go())\n}\n",
     );
-    run_project_outputs(&proj, "run", "main.scrl", "ROOT\nSUB\n");
+    run_project_outputs(&proj, "run", "main.sca", "ROOT\nSUB\n");
 }
 
 /// The same file reached by two different spellings (`./b` from the root and
@@ -322,16 +319,16 @@ fn same_named_modules_in_different_directories_are_distinct() {
 fn one_file_reached_two_ways_is_one_module() {
     let proj = Project::new("mod_identity_alias");
     std::fs::create_dir_all(proj.dir.join("sub")).unwrap();
-    proj.write("b.scrl", "pub fn who() String {\n\t'ROOT'\n}\n");
+    proj.write("b.sca", "pub fn who() String {\n\t'ROOT'\n}\n");
     proj.write(
-        "sub/mid.scrl",
+        "sub/mid.sca",
         "import ../b\n\npub fn go() String {\n\tb::who()\n}\n",
     );
     proj.write(
-        "main.scrl",
+        "main.sca",
         "import ./b\nimport ./sub/mid\n\npub fn main() {\n\tprintln(b::who())\n\tprintln(mid::go())\n}\n",
     );
-    run_project_outputs(&proj, "run", "main.scrl", "ROOT\nROOT\n");
+    run_project_outputs(&proj, "run", "main.sca", "ROOT\nROOT\n");
 }
 
 /// A missing relative import must not be satisfied by a same-named file in
@@ -340,38 +337,38 @@ fn one_file_reached_two_ways_is_one_module() {
 fn a_module_in_another_directory_does_not_satisfy_a_relative_import() {
     let proj = Project::new("mod_identity_missing");
     std::fs::create_dir_all(proj.dir.join("sub")).unwrap();
-    proj.write("sub/b.scrl", "pub fn who() String {\n\t'SUB'\n}\n");
-    // `./b` from the root: `sub/b.scrl` must NOT satisfy it.
+    proj.write("sub/b.sca", "pub fn who() String {\n\t'SUB'\n}\n");
+    // `./b` from the root: `sub/b.sca` must NOT satisfy it.
     proj.write(
-        "main.scrl",
+        "main.sca",
         "import ./b\n\npub fn main() {\n\tprintln(b::who())\n}\n",
     );
-    project_rejects(&proj, "check", "main.scrl", &["file not found"]);
+    project_rejects(&proj, "check", "main.sca", &["file not found"]);
 }
 
-/// A type in `sub/b.scrl` and one in `b.scrl` are different types even though both
+/// A type in `sub/b.sca` and one in `b.sca` are different types even though both
 /// modules are spelled `./b`. A shared cache entry would unify them.
 #[test]
 fn same_named_modules_do_not_share_types() {
     let proj = Project::new("mod_identity_types");
     std::fs::create_dir_all(proj.dir.join("sub")).unwrap();
     proj.write(
-        "b.scrl",
+        "b.sca",
         "pub type T {\n\tT(n Int)\n}\n\npub fn make() T {\n\tT(1)\n}\n\npub fn get(t T) Int {\n\tt.n\n}\n",
     );
     proj.write(
-        "sub/b.scrl",
+        "sub/b.sca",
         "pub type T {\n\tT(s String)\n}\n\npub fn make() T {\n\tT('x')\n}\n\npub fn get(t T) String {\n\tt.s\n}\n",
     );
     proj.write(
-        "sub/mid.scrl",
+        "sub/mid.sca",
         "import ./b\n\npub fn go() String {\n\tb::get(b::make())\n}\n",
     );
     proj.write(
-        "main.scrl",
+        "main.sca",
         "import ./b\nimport ./sub/mid\n\npub fn main() {\n\tprintln(b::get(b::make()))\n\tprintln(mid::go())\n}\n",
     );
-    run_project_outputs(&proj, "run", "main.scrl", "1\nx\n");
+    run_project_outputs(&proj, "run", "main.sca", "1\nx\n");
 }
 
 // `match e { io.NotFound(path) -> … }` reaches a constructor through its own
@@ -383,12 +380,12 @@ const COLOR_SRC: &str = "pub type Color {\n\tRed\n\tGreen(shade Int)\n}\n";
 #[test]
 fn a_qualified_constructor_pattern_matches() {
     let proj = Project::new("qual_pat");
-    proj.write("color.scrl", COLOR_SRC);
+    proj.write("color.sca", COLOR_SRC);
     proj.write(
-        "main.scrl",
+        "main.sca",
         "import ./color\n\nfn v(c color::Color) Int {\n\tmatch c {\n\t\tcolor::Red -> 0\n\t\tcolor::Green(s) -> s\n\t}\n}\n\npub fn main() {\n\tprintln(v(color::Green(3)))\n\tprintln(v(color::Red))\n}\n",
     );
-    run_project_outputs(&proj, "run", "main.scrl", "3\n0\n");
+    run_project_outputs(&proj, "run", "main.sca", "3\n0\n");
 }
 
 /// Two qualifiers for one module denote the same constructors, so
@@ -396,12 +393,12 @@ fn a_qualified_constructor_pattern_matches() {
 #[test]
 fn constructors_through_two_qualifiers_are_the_same_constructor() {
     let proj = Project::new("qual_pat_mixed");
-    proj.write("color.scrl", COLOR_SRC);
+    proj.write("color.sca", COLOR_SRC);
     proj.write(
-        "main.scrl",
+        "main.sca",
         "import ./color\nimport ./color as c\n\nfn v(k color::Color) Int {\n\tmatch k {\n\t\tc::Red -> 0\n\t\tcolor::Green(s) -> s\n\t}\n}\n\npub fn main() {\n\tprintln(v(color::Green(9)))\n}\n",
     );
-    run_project_outputs(&proj, "run", "main.scrl", "9\n");
+    run_project_outputs(&proj, "run", "main.sca", "9\n");
 }
 
 /// Exhaustiveness resolves a constructor against the scrutinee's own variants,
@@ -409,12 +406,12 @@ fn constructors_through_two_qualifiers_are_the_same_constructor() {
 #[test]
 fn a_qualified_pattern_is_seen_by_exhaustiveness() {
     let proj = Project::new("qual_pat_exh");
-    proj.write("color.scrl", COLOR_SRC);
+    proj.write("color.sca", COLOR_SRC);
     proj.write(
-        "main.scrl",
+        "main.sca",
         "import ./color\n\nfn v(c color::Color) Int {\n\tmatch c {\n\t\tcolor::Red -> 0\n\t}\n}\n\npub fn main() {\n\tprintln(v(color::Red))\n}\n",
     );
-    project_rejects(&proj, "check", "main.scrl", &["not exhaustive", "Green"]);
+    project_rejects(&proj, "check", "main.sca", &["not exhaustive", "Green"]);
 }
 
 /// The irrefutability check on a destructuring binding lowers its pattern
@@ -424,14 +421,14 @@ fn a_qualified_pattern_is_seen_by_exhaustiveness() {
 fn a_qualified_constructor_destructures_irrefutably() {
     let proj = Project::new("qual_ctor_destructure");
     proj.write(
-        "pair.scrl",
+        "pair.sca",
         "pub type Pair {\n\tPair(a Int, b Int)\n}\n\npub fn make(x Int, y Int) Pair {\n\tPair(x, y)\n}\n",
     );
     proj.write(
-        "main.scrl",
+        "main.sca",
         "import ./pair\n\npub fn main() {\n\tpair::Pair(a, b) = pair::Pair(1, 2)\n\tprintln(a + b)\n\tpair::Pair(c, d) = pair::make(3, 4)\n\tprintln(c + d)\n}\n",
     );
-    run_project_outputs(&proj, "run", "main.scrl", "3\n7\n");
+    run_project_outputs(&proj, "run", "main.sca", "3\n7\n");
 }
 
 /// `Color`, plus a constructor function in the declaring module, so a
@@ -449,12 +446,12 @@ const HUE_SRC: &str = "pub type Hue {\n\tRed\n\tGreen(shade Int)\n\tBlue\n}\n\np
 #[test]
 fn a_qualified_arm_matches_on_the_test_ladder() {
     let proj = Project::new("qual_ctor_ladder");
-    proj.write("color.scrl", COLOR_MAKE_SRC);
+    proj.write("color.sca", COLOR_MAKE_SRC);
     proj.write(
-        "main.scrl",
+        "main.sca",
         "import ./color\n\npub fn main() {\n\tmatch color::make(9) {\n\t\tcolor::Green(s) if s > 0 -> println(s)\n\t\tcolor::Green(_) | color::Red -> println(0)\n\t}\n\tmatch color::Green(4) {\n\t\tcolor::Green(s) if s > 0 -> println(s)\n\t\tcolor::Green(_) | color::Red -> println(0)\n\t}\n}\n",
     );
-    run_project_outputs(&proj, "run", "main.scrl", "9\n4\n");
+    run_project_outputs(&proj, "run", "main.sca", "9\n4\n");
 }
 
 /// A bare name after a qualified head stands for the variants nobody named.
@@ -462,15 +459,15 @@ fn a_qualified_arm_matches_on_the_test_ladder() {
 #[test]
 fn a_bare_binding_after_a_qualified_head_is_refused() {
     let proj = Project::new("qual_ctor_binding_catchall");
-    proj.write("color.scrl", COLOR_MAKE_SRC);
+    proj.write("color.sca", COLOR_MAKE_SRC);
     proj.write(
-        "main.scrl",
+        "main.sca",
         "import ./color\n\npub fn main() {\n\tx = color::make(7)\n\tmatch x {\n\t\tcolor::Green(s) -> println(s)\n\t\tother -> println(other)\n\t}\n}\n",
     );
     project_rejects(
         &proj,
         "check",
-        "main.scrl",
+        "main.sca",
         &["This pattern stands for Red. Name it instead, like `Red ->`"],
     );
 }
@@ -481,24 +478,24 @@ fn a_bare_binding_after_a_qualified_head_is_refused() {
 #[test]
 fn a_qualified_head_matches_nested_on_the_test_ladder() {
     let proj = Project::new("qual_ctor_nested_catchall");
-    proj.write("hue.scrl", HUE_SRC);
+    proj.write("hue.sca", HUE_SRC);
     proj.write(
-        "main.scrl",
+        "main.sca",
         "import ./hue\n\npub fn main() {\n\tn = (hue::make(9), 1)\n\tmatch n {\n\t\t(hue::Green(s), 1) -> println(s)\n\t\t(hue::Green(_), _) | (hue::Red | hue::Blue, _) -> println(0)\n\t}\n}\n",
     );
-    run_project_outputs(&proj, "run", "main.scrl", "9\n");
+    run_project_outputs(&proj, "run", "main.sca", "9\n");
 }
 
 /// A qualified head as one alternative of an or-pattern.
 #[test]
 fn a_qualified_head_matches_in_an_or_pattern() {
     let proj = Project::new("qual_ctor_or_catchall");
-    proj.write("hue.scrl", HUE_SRC);
+    proj.write("hue.sca", HUE_SRC);
     proj.write(
-        "main.scrl",
+        "main.sca",
         "import ./hue\n\npub fn main() {\n\to = hue::make(4)\n\tmatch o {\n\t\thue::Green(_s) | hue::Red -> println(1)\n\t\thue::Blue -> println(0)\n\t}\n}\n",
     );
-    run_project_outputs(&proj, "run", "main.scrl", "1\n");
+    run_project_outputs(&proj, "run", "main.sca", "1\n");
 }
 
 /// Resolving the head through the declaration must not make a dead arm look
@@ -506,12 +503,12 @@ fn a_qualified_head_matches_in_an_or_pattern() {
 #[test]
 fn a_catch_all_before_a_qualified_arm_is_still_unreachable() {
     let proj = Project::new("qual_ctor_catchall_first");
-    proj.write("hue.scrl", HUE_SRC);
+    proj.write("hue.sca", HUE_SRC);
     proj.write(
-        "main.scrl",
+        "main.sca",
         "import ./hue\n\npub fn main() {\n\tc = hue::make(3)\n\tmatch c {\n\t\t_ -> println(0)\n\t\thue::Green(_s) -> println(1)\n\t}\n}\n",
     );
-    project_rejects(&proj, "check", "main.scrl", &["unreachable"]);
+    project_rejects(&proj, "check", "main.sca", &["unreachable"]);
 }
 
 /// A module alias is a spelling, not an identity. A value built through it is
@@ -520,12 +517,12 @@ fn a_catch_all_before_a_qualified_arm_is_still_unreachable() {
 #[test]
 fn a_module_alias_does_not_change_a_constructed_value_identity() {
     let proj = Project::new("alias_ctor_value_identity");
-    proj.write("color.scrl", COLOR_MAKE_SRC);
+    proj.write("color.sca", COLOR_MAKE_SRC);
     proj.write(
-        "main.scrl",
+        "main.sca",
         "import ./color\nimport ./color as c\n\npub fn main() {\n\tprintln(c::Green(9))\n\tprintln(c::Green(9) == color::Green(9))\n\tprintln(c::Green(9) == color::make(9))\n}\n",
     );
-    run_project_outputs(&proj, "run", "main.scrl", "Green(9)\nTrue\nTrue\n");
+    run_project_outputs(&proj, "run", "main.sca", "Green(9)\nTrue\nTrue\n");
 }
 
 /// A stdlib constructor's `variant_name` is written into the static blob by
@@ -539,27 +536,27 @@ fn a_module_alias_does_not_change_a_constructed_value_identity() {
 fn a_stdlib_constructor_through_an_alias_reaches_a_vm_builtin() {
     let proj = Project::new("alias_ctor_stdlib");
     proj.write(
-        "main.scrl",
+        "main.sca",
         "import scarlet/binary as b\n\npub fn main() {\n\tprintln(b::from_int_ascii(255, b::Hex))\n}\n",
     );
-    run_project_outputs(&proj, "run", "main.scrl", "<<102, 102>>\n");
+    run_project_outputs(&proj, "run", "main.sca", "<<102, 102>>\n");
 }
 
 /// Labelled arguments and `..` work through a qualifier, as they do bare.
 #[test]
 fn a_qualified_pattern_takes_labels_and_rest() {
     let proj = Project::new("qual_pat_args");
-    proj.write("color.scrl", COLOR_SRC);
+    proj.write("color.sca", COLOR_SRC);
     proj.write(
-        "lab.scrl",
+        "lab.sca",
         "import ./color\n\nfn v(c color::Color) Int {\n\tmatch c {\n\t\tcolor::Red -> 0\n\t\tcolor::Green(shade: s) -> s\n\t}\n}\n\npub fn main() {\n\tprintln(v(color::Green(5)))\n}\n",
     );
-    run_project_outputs(&proj, "run", "lab.scrl", "5\n");
+    run_project_outputs(&proj, "run", "lab.sca", "5\n");
     proj.write(
-        "rest.scrl",
+        "rest.sca",
         "import ./color\n\nfn v(c color::Color) Int {\n\tmatch c {\n\t\tcolor::Red -> 0\n\t\tcolor::Green(..) -> 1\n\t}\n}\n\npub fn main() {\n\tprintln(v(color::Green(5)))\n}\n",
     );
-    run_project_outputs(&proj, "run", "rest.scrl", "1\n");
+    run_project_outputs(&proj, "run", "rest.sca", "1\n");
 }
 
 /// An `opaque` type's constructor is not reachable by qualifier, exactly as it
@@ -568,14 +565,14 @@ fn a_qualified_pattern_takes_labels_and_rest() {
 fn a_qualified_pattern_cannot_reach_an_opaque_constructor() {
     let proj = Project::new("qual_pat_opaque");
     proj.write(
-        "id.scrl",
+        "id.sca",
         "pub opaque type Id {\n\tId(n Int)\n}\n\npub fn make(n Int) Id {\n\tId(n)\n}\n",
     );
     proj.write(
-        "main.scrl",
+        "main.sca",
         "import ./id\n\nfn get(i Id) Int {\n\tmatch i {\n\t\tid::Id(n) -> n\n\t}\n}\n\npub fn main() {\n\tprintln(get(id::make(7)))\n}\n",
     );
-    project_rejects(&proj, "check", "main.scrl", &["private"]);
+    project_rejects(&proj, "check", "main.sca", &["private"]);
 }
 
 /// Every failure must produce a diagnostic. A silent `None` leaves the module
@@ -584,26 +581,26 @@ fn a_qualified_pattern_cannot_reach_an_opaque_constructor() {
 #[test]
 fn a_bad_qualified_pattern_is_a_diagnostic_not_a_crash() {
     let proj = Project::new("qual_pat_bad");
-    proj.write("color.scrl", COLOR_SRC);
+    proj.write("color.sca", COLOR_SRC);
     proj.write(
-        "unknown_qual.scrl",
+        "unknown_qual.sca",
         "import ./color\n\nfn v(c color::Color) Int {\n\tmatch c {\n\t\tnope::Red -> 0\n\t\t_ -> 1\n\t}\n}\n\npub fn main() {\n\tprintln(v(color::Red))\n}\n",
     );
     project_rejects(
         &proj,
         "check",
-        "unknown_qual.scrl",
+        "unknown_qual.sca",
         &["Unknown module qualifier"],
     );
 
     proj.write(
-        "unknown_member.scrl",
+        "unknown_member.sca",
         "import ./color\n\nfn v(c color::Color) Int {\n\tmatch c {\n\t\tcolor::Purple -> 0\n\t\t_ -> 1\n\t}\n}\n\npub fn main() {\n\tprintln(v(color::Red))\n}\n",
     );
     project_rejects(
         &proj,
         "check",
-        "unknown_member.scrl",
+        "unknown_member.sca",
         &["has no constructor"],
     );
 }

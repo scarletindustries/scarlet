@@ -24,7 +24,7 @@
   },
   "keywords": [
     "scarlet",
-    "scrl",
+    "sca",
     "language-server",
     "lsp",
     "formatter"
@@ -43,10 +43,10 @@
         "id": "scarlet",
         "aliases": [
           "Scarlet",
-          "scrl"
+          "sca"
         ],
         "extensions": [
-          ".scrl"
+          ".sca"
         ],
         "configuration": "./language-configuration.json"
       }
@@ -54,7 +54,7 @@
     "grammars": [
       {
         "language": "scarlet",
-        "scopeName": "source.scrl",
+        "scopeName": "source.sca",
         "path": "./syntaxes/scarlet.tmLanguage.json"
       }
     ],

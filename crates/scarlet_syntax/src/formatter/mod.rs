@@ -1311,7 +1311,7 @@ mod tests {
         ] {
             for entry in std::fs::read_dir(&dir).unwrap() {
                 let path = entry.unwrap().path();
-                if path.extension().and_then(|s| s.to_str()) != Some("scrl") {
+                if path.extension().and_then(|s| s.to_str()) != Some("sca") {
                     continue;
                 }
                 let name = path.file_name().unwrap().to_string_lossy().into_owned();

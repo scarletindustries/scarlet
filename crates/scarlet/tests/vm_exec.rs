@@ -734,7 +734,7 @@ fn index_or_covers_both_encodings_and_every_boundary() {
     );
 }
 
-/// `examples/bench_typed.scrl` is the typed-opcode workload. Its output is
+/// `examples/bench_typed.sca` is the typed-opcode workload. Its output is
 /// pinned here; its speed is not gated anywhere.
 ///
 /// The spec's ≤610ms wall-clock gate was removed deliberately: it timed a debug
@@ -743,7 +743,7 @@ fn index_or_covers_both_encodings_and_every_boundary() {
 #[test]
 fn bench_typed_output_is_pinned() {
     let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/bench_typed.scrl");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/bench_typed.sca");
     let out = common::run_al("run", &path);
     assert!(out.success, "bench_typed failed:\n{}", out.combined());
     assert_eq!(out.stdout, "1048576\nTrue\n1000009000022000000\n");

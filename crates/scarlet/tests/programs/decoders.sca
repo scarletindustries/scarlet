@@ -6,7 +6,7 @@ import scarlet/json/field
 
 // The decoder API at the scale it exists for.
 //
-// `json.scrl` covers the parser and the presence states. This file covers the
+// `json.sca` covers the parser and the presence states. This file covers the
 // shape of `scarlet/json/decode` itself: that a record decoder is one flat
 // line per member with no arity ceiling, that independent members accumulate
 // their failures instead of masking each other, and that nothing anywhere

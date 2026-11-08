@@ -36,10 +36,10 @@ fn run_file(source: &Path, name: &str) -> String {
     out.stdout
 }
 
-/// `al run` `<src_dir>/<name>.scrl` and diff stdout against
+/// `al run` `<src_dir>/<name>.sca` and diff stdout against
 /// `<golden_dir>/<name>.stdout`.
 fn assert_golden_in(src_dir: &Path, golden_dir: &Path, name: &str) {
-    let got = run_file(&src_dir.join(format!("{name}.scrl")), name);
+    let got = run_file(&src_dir.join(format!("{name}.sca")), name);
     let golden = golden_dir.join(format!("{name}.stdout"));
     let want = std::fs::read_to_string(&golden)
         .unwrap_or_else(|e| panic!("missing golden for {name}: {e}"));
@@ -54,7 +54,7 @@ fn assert_example_checks(name: &str) {
 }
 
 fn assert_checks(src_dir: &Path, name: &str) {
-    let out = run_al("check", &src_dir.join(format!("{name}.scrl")));
+    let out = run_al("check", &src_dir.join(format!("{name}.sca")));
     if !out.success {
         panic!(
             "al check {name} exited {:?}\nstdout:\n{}\nstderr:\n{}",
@@ -63,14 +63,14 @@ fn assert_checks(src_dir: &Path, name: &str) {
     }
 }
 
-/// Every `.scrl` in a source dir is either wired into the suite or listed as
+/// Every `.sca` in a source dir is either wired into the suite or listed as
 /// untested, and every golden belongs to a wired program. Subdirectories are
 /// skipped: `examples/lib/` holds modules that exist to be imported, and
 /// `golden/core_ir/` belongs to `core_ir.rs`.
 fn assert_dir_wired(src_dir: &Path, golden_dir: &Path, wired: &[String], goldens: &[String]) {
     for entry in std::fs::read_dir(src_dir).expect("source dir") {
         let path = entry.expect("dir entry").path();
-        if path.extension().and_then(|s| s.to_str()) != Some("scrl") {
+        if path.extension().and_then(|s| s.to_str()) != Some("sca") {
             continue;
         }
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
@@ -95,15 +95,15 @@ fn assert_dir_wired(src_dir: &Path, golden_dir: &Path, wired: &[String], goldens
     }
 }
 
-// Each name is both the `.scrl` file's stem and the generated test's name, so it
+// Each name is both the `.sca` file's stem and the generated test's name, so it
 // must be a valid Rust identifier and unique across all four lists.
 //
-//   examples  — examples/<n>.scrl          run, diff against golden/<n>.stdout
-//   programs  — tests/programs/<n>.scrl    run, diff against golden/programs/<n>.stdout
-//   checks    — examples/<n>.scrl          `al check` only, output is not deterministic
-//   untested  — examples/<n>.scrl          deliberately outside the suite
+//   examples  — examples/<n>.sca          run, diff against golden/<n>.stdout
+//   programs  — tests/programs/<n>.sca    run, diff against golden/programs/<n>.stdout
+//   checks    — examples/<n>.sca          `al check` only, output is not deterministic
+//   untested  — examples/<n>.sca          deliberately outside the suite
 //
-// `suite_is_exhaustive` closes the loop: a new `.scrl` in either source dir with
+// `suite_is_exhaustive` closes the loop: a new `.sca` in either source dir with
 // no entry here fails, and so does a golden left behind by a deleted program.
 macro_rules! suite {
     (
@@ -149,17 +149,17 @@ macro_rules! suite {
             let mut examples: Vec<String> = Vec::new();
             let mut example_goldens: Vec<String> = Vec::new();
             $(
-                examples.push(format!("{}.scrl", stringify!($example)));
+                examples.push(format!("{}.sca", stringify!($example)));
                 example_goldens.push(format!("{}.stdout", stringify!($example)));
             )*
-            $( examples.push(format!("{}.scrl", stringify!($check))); )*
+            $( examples.push(format!("{}.sca", stringify!($check))); )*
             $( examples.push($untested.to_string()); )*
             assert_dir_wired(&examples_dir(), &golden_dir(), &examples, &example_goldens);
 
             let mut programs: Vec<String> = Vec::new();
             let mut program_goldens: Vec<String> = Vec::new();
             $(
-                programs.push(format!("{}.scrl", stringify!($program)));
+                programs.push(format!("{}.sca", stringify!($program)));
                 program_goldens.push(format!("{}.stdout", stringify!($program)));
             )*
             assert_dir_wired(
@@ -185,7 +185,7 @@ suite! {
         data_types,
         generics,
         closures,
-        // Named tco.scrl: scarlet/internal.scrl's `stack_depth` doc points at it.
+        // Named tco.sca: scarlet/internal.sca's `stack_depth` doc points at it.
         tco,
         errors,
         // Stdlib surface.
@@ -203,12 +203,12 @@ suite! {
         //
         // `http_client` does that twice, the second time against a hand-rolled
         // connection driver, which is the only coverage of scarlet/http/body's
-        // socket-bound half — sans-IO http_parse.scrl cannot reach it.
+        // socket-bound half — sans-IO http_parse.sca cannot reach it.
         #[ignore = "needs the VM"]
         sockets,
         #[ignore = "needs the VM"]
         http_client,
-        // Multi-file: imports examples/lib/units.scrl and lib/report/table.scrl,
+        // Multi-file: imports examples/lib/units.sca and lib/report/table.sca,
         // which imports `../units` relative to its own directory.
         modules,
         // Algorithms, then the capstone: a lexer, parser and evaluator built
@@ -337,15 +337,15 @@ suite! {
     // Perf infrastructure driven from outside this file (scripts/bench*.sh, and
     // `vm_exec::bench_typed_output_is_pinned`), plus the scratch pair.
     untested: [
-        "bench_heavy.scrl",
-        "bench_list_1x.scrl",
-        "bench_list_2x.scrl",
-        "bench_list_4x.scrl",
-        "bench_map.scrl",
-        "bench_service.scrl",
-        "bench_typed.scrl",
-        "a.scrl",
-        "b.scrl",
+        "bench_heavy.sca",
+        "bench_list_1x.sca",
+        "bench_list_2x.sca",
+        "bench_list_4x.sca",
+        "bench_map.sca",
+        "bench_service.sca",
+        "bench_typed.sca",
+        "a.sca",
+        "b.sca",
     ],
 }
 
@@ -374,7 +374,7 @@ fn every_example_and_program_is_formatted() {
     );
 }
 
-/// Every `.scrl` under `dir`, at any depth.
+/// Every `.sca` under `dir`, at any depth.
 fn walk(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -384,7 +384,7 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
         let path = entry.path();
         if path.is_dir() {
             out.extend(walk(&path));
-        } else if path.extension().is_some_and(|e| e == "scrl") {
+        } else if path.extension().is_some_and(|e| e == "sca") {
             out.push(path);
         }
     }
@@ -394,5 +394,5 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
 // The timing-free "it still runs" check the bench scripts depend on.
 #[test]
 fn bench_runs() {
-    run_file(&examples_dir().join("bench.scrl"), "bench");
+    run_file(&examples_dir().join("bench.sca"), "bench");
 }

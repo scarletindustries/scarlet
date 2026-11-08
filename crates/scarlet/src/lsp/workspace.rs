@@ -36,7 +36,7 @@ fn owning_root(workspace_roots: &[PathBuf], path: &Path) -> (PathBuf, bool) {
 }
 
 pub struct Workspace {
-    /// Every known `.scrl` buffer's text, keyed by URI. Text only: the session's
+    /// Every known `.sca` buffer's text, keyed by URI. Text only: the session's
     /// reference graph answers hover / goto-def / find-refs / rename.
     pub(super) documents: HashMap<String, String>,
     /// Roots reported by the client, used to bucket files into sessions.
@@ -239,7 +239,7 @@ impl Workspace {
         self.analyze_text(uri, text)
     }
 
-    /// One-time recursive scan of every workspace root for `.scrl` files.
+    /// One-time recursive scan of every workspace root for `.sca` files.
     /// Without it, a file outside the open file's import closure is never
     /// compiled and its references stay invisible to workspace-wide queries.
     fn ensure_workspace_scanned(&mut self) {
@@ -253,13 +253,13 @@ impl Workspace {
         }
     }
 
-    /// Index every non-stdlib `.scrl` file under `root` into `documents` and warm
+    /// Index every non-stdlib `.sca` file under `root` into `documents` and warm
     /// its session. Stdlib files are already seeded into every session, so
     /// re-checking them here would be pure latency. Idempotent, so it is safe
     /// to call again for a folder added after the initial scan latched.
     pub(super) fn index_root(&mut self, root: &Path) {
         let mut files = Vec::new();
-        module::collect_scrl_files(root, &mut files);
+        module::collect_source_files(root, &mut files);
         for path in files {
             if module::detect_stdlib_module(&path).is_some() {
                 continue;

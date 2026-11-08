@@ -15,7 +15,7 @@
 //! property of the callee, and this pass runs before imports resolve. All 19
 //! backpasses in the stdlib are over `result.then`/`result.map`, and 10 bind
 //! `_` — so a syntactic "independent, therefore combine" rule would reorder
-//! exactly the `http.scrl` writes whose comments say the ordering is
+//! exactly the `http.sca` writes whose comments say the ordering is
 //! load-bearing.
 //! `crates/scarlet/tests/backpass_sequencing.rs` fails if that changes; T-211
 //! carries the argument.

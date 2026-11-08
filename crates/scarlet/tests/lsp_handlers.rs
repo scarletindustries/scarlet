@@ -52,12 +52,12 @@ fn open(p: &Project, name: &str, src: &str) -> (Workspace, String) {
     (s, uri)
 }
 
-/// Open `src` as `a.scrl` in a fresh project. The `Project` comes back so its
+/// Open `src` as `a.sca` in a fresh project. The `Project` comes back so its
 /// temp dir outlives the server.
 fn open_single(tag: &str, src: &str) -> (Project, Workspace, String) {
     let p = Project::new(tag);
-    p.write("a.scrl", src);
-    let (s, uri) = open(&p, "a.scrl", src);
+    p.write("a.sca", src);
+    let (s, uri) = open(&p, "a.sca", src);
     (p, s, uri)
 }
 
@@ -374,12 +374,12 @@ x = helper::greet()\n\
 y = string::length(x)\n\
 println(y)\n";
 
-/// A two-file project with `main.scrl` open, ready to query its imports.
+/// A two-file project with `main.sca` open, ready to query its imports.
 fn bug3_project() -> (Project, Workspace, String) {
     let p = Project::new("b3_import");
-    p.write("helper.scrl", BUG3_HELPER);
-    p.write("main.scrl", BUG3_MAIN);
-    let (s, uri) = open(&p, "main.scrl", BUG3_MAIN);
+    p.write("helper.sca", BUG3_HELPER);
+    p.write("main.sca", BUG3_MAIN);
+    let (s, uri) = open(&p, "main.sca", BUG3_MAIN);
     (p, s, uri)
 }
 
@@ -387,15 +387,15 @@ fn bug3_project() -> (Project, Workspace, String) {
 fn bug3_goto_def_on_import_segment_opens_the_module() {
     let (_p, mut s, uri) = bug3_project();
 
-    // The `helper` segment opens helper.scrl, not the importing line.
+    // The `helper` segment opens helper.sca, not the importing line.
     let (l, c) = cursor(BUG3_MAIN, "helper", 1, 1); // 1st `helper` = the path
     let def = s.definition_response(&pos(&uri, l, c));
     let target = def["uri"]
         .as_str()
         .unwrap_or_else(|| panic!("goto-def on an import segment must open a file, got {def}"));
     assert!(
-        target.ends_with("helper.scrl"),
-        "`import ./helper` must jump to helper.scrl, got {target}"
+        target.ends_with("helper.sca"),
+        "`import ./helper` must jump to helper.sca, got {target}"
     );
 
     // Embedded stdlib has no editable file, so never fabricate a location.
@@ -564,21 +564,21 @@ fn workspace_symbol_query_skips_locals_keeps_decls() {
 
 // Cross-module handler surface, which the single-file tests above never reach:
 // `uri_for`'s cross-module branch, and a `changes` map keyed by two file URIs.
-// `lib.scrl` declares `greet`; `main.scrl` imports it and calls `lib.greet()`.
+// `lib.sca` declares `greet`; `main.sca` imports it and calls `lib.greet()`.
 
 const XMOD_LIB: &str = "pub fn greet() Int { 7 }\n";
 const XMOD_MAIN: &str = "import ./lib\nx = lib::greet()\nprintln(x)\n";
 
-/// Open both files as client tabs, lib first, so `main.scrl` is the
+/// Open both files as client tabs, lib first, so `main.sca` is the
 /// last-analysed entry.
 fn xmod_project() -> (Project, Workspace, String, String) {
     let p = Project::new("xmod_handler");
-    p.write("lib.scrl", XMOD_LIB);
-    p.write("main.scrl", XMOD_MAIN);
+    p.write("lib.sca", XMOD_LIB);
+    p.write("main.sca", XMOD_MAIN);
     let mut s = Workspace::new();
     s.add_workspace_root(p.dir.clone());
-    let lib_uri = uri_of(&p, "lib.scrl");
-    let main_uri = uri_of(&p, "main.scrl");
+    let lib_uri = uri_of(&p, "lib.sca");
+    let main_uri = uri_of(&p, "main.sca");
     s.open_document(&lib_uri, XMOD_LIB);
     s.open_document(&main_uri, XMOD_MAIN);
     (p, s, main_uri, lib_uri)
@@ -596,7 +596,7 @@ fn location_in(arr: &[Json], want: &str) -> (i64, i64) {
 }
 
 /// Query references on `greet` from `query_uri` with `includeDeclaration` and
-/// assert the URIs span exactly lib.scrl and main.scrl. Returns the locations and
+/// assert the URIs span exactly lib.sca and main.sca. Returns the locations and
 /// the queried position so callers can layer on more assertions.
 fn assert_refs_uris_span_lib_and_main(
     s: &mut Workspace,
@@ -620,13 +620,13 @@ fn assert_refs_uris_span_lib_and_main(
     assert_eq!(
         uris,
         [lib_uri, main_uri].into_iter().collect(),
-        "find-refs must span exactly lib.scrl and main.scrl, got {uris:?}"
+        "find-refs must span exactly lib.sca and main.sca, got {uris:?}"
     );
     (arr.clone(), l, c)
 }
 
-/// The declaration identifier in lib.scrl, and the `greet` token of
-/// `lib.greet()` in main.scrl.
+/// The declaration identifier in lib.sca, and the `greet` token of
+/// `lib.greet()` in main.sca.
 fn greet_spans() -> ((i64, i64), (i64, i64)) {
     let at = |src| {
         let (l, c) = cursor(src, "greet", 1, 0);
@@ -641,7 +641,7 @@ fn one_at(items: &[Json], want: (i64, i64), what: &str) {
     assert_eq!(start(&items[0]), want, "{what} span: {items:?}");
 }
 
-/// Exactly two locations, the lib.scrl declaration and the main.scrl use, never the
+/// Exactly two locations, the lib.sca declaration and the main.sca use, never the
 /// `lib` qualifier. Re-querying without `includeDeclaration` leaves only the
 /// use, as an array.
 fn assert_refs_span_lib_and_main(
@@ -655,19 +655,19 @@ fn assert_refs_span_lib_and_main(
     assert_eq!(
         arr.len(),
         2,
-        "expected the use in main.scrl + the decl in lib.scrl, got {arr:?}"
+        "expected the use in main.sca + the decl in lib.sca, got {arr:?}"
     );
 
     let (lib_decl, main_use) = greet_spans();
     assert_eq!(
         location_in(&arr, lib_uri),
         lib_decl,
-        "the lib.scrl location must cover greet's declaration span: {arr:?}"
+        "the lib.sca location must cover greet's declaration span: {arr:?}"
     );
     assert_eq!(
         location_in(&arr, main_uri),
         main_use,
-        "the main.scrl location must cover the `greet` of `lib::greet()`: {arr:?}"
+        "the main.sca location must cover the `greet` of `lib::greet()`: {arr:?}"
     );
 
     let no_decl = refs_at(s, query_uri, l, c, false);
@@ -677,16 +677,16 @@ fn assert_refs_span_lib_and_main(
     one_at(
         arr2,
         main_use,
-        "main.scrl use once the declaration is dropped",
+        "main.sca use once the declaration is dropped",
     );
     assert_eq!(
         arr2[0]["uri"].as_str(),
         Some(main_uri),
-        "the surviving location is the use in main.scrl, the declaration is gone: {arr2:?}"
+        "the surviving location is the use in main.sca, the declaration is gone: {arr2:?}"
     );
 }
 
-/// The `changes` map is keyed by lib.scrl and main.scrl, each with one edit at
+/// The `changes` map is keyed by lib.sca and main.sca, each with one edit at
 /// `greet`, never at the `lib` qualifier, each substituting `new_name`.
 fn assert_rename_spans_lib_and_main(resp: &Json, main_uri: &str, lib_uri: &str, new_name: &str) {
     let changes = resp
@@ -698,7 +698,7 @@ fn assert_rename_spans_lib_and_main(resp: &Json, main_uri: &str, lib_uri: &str, 
     assert_eq!(
         keys,
         [lib_uri, main_uri].into_iter().collect(),
-        "changes must be keyed by lib.scrl and main.scrl exactly, got {keys:?}"
+        "changes must be keyed by lib.sca and main.sca exactly, got {keys:?}"
     );
 
     let (lib_decl, main_use) = greet_spans();
@@ -708,11 +708,11 @@ fn assert_rename_spans_lib_and_main(resp: &Json, main_uri: &str, lib_uri: &str, 
             .and_then(Json::as_array)
             .unwrap_or_else(|| panic!("edits for {uri}"))
     };
-    one_at(edits_for(lib_uri), lib_decl, "lib.scrl declaration rewrite");
+    one_at(edits_for(lib_uri), lib_decl, "lib.sca declaration rewrite");
     one_at(
         edits_for(main_uri),
         main_use,
-        "main.scrl rewrite at the `greet` of `lib::greet()`",
+        "main.sca rewrite at the `greet` of `lib::greet()`",
     );
 
     for (uri, edits) in changes {
@@ -730,7 +730,7 @@ fn assert_rename_spans_lib_and_main(resp: &Json, main_uri: &str, lib_uri: &str, 
 fn cross_module_goto_def_returns_the_other_files_uri() {
     let (_p, mut s, main_uri, lib_uri) = xmod_project();
 
-    // The `greet` of `lib.greet()` must resolve to lib.scrl, a different file
+    // The `greet` of `lib.greet()` must resolve to lib.sca, a different file
     // from the one the request came from.
     let (l, c) = cursor(XMOD_MAIN, "greet", 1, 1);
     let def = s.definition_response(&pos(&main_uri, l, c));
@@ -743,12 +743,12 @@ fn cross_module_goto_def_returns_the_other_files_uri() {
         .as_str()
         .unwrap_or_else(|| panic!("goto-def must carry a uri, got {def}"));
     assert!(
-        target.ends_with("lib.scrl"),
-        "cross-module goto-def must open lib.scrl, got {target}"
+        target.ends_with("lib.sca"),
+        "cross-module goto-def must open lib.sca, got {target}"
     );
     assert_eq!(
         target, lib_uri,
-        "the returned uri must be lib.scrl's exact uri (uri_for's module_uri branch)"
+        "the returned uri must be lib.sca's exact uri (uri_for's module_uri branch)"
     );
     assert_ne!(
         target, main_uri,
@@ -760,7 +760,7 @@ fn cross_module_goto_def_returns_the_other_files_uri() {
     assert_eq!(
         start(&def),
         (decl.0 as i64, decl.1 as i64),
-        "goto-def must land on greet's declaration span in lib.scrl, got {def}"
+        "goto-def must land on greet's declaration span in lib.sca, got {def}"
     );
 }
 
@@ -768,7 +768,7 @@ fn cross_module_goto_def_returns_the_other_files_uri() {
 fn cross_module_rename_rewrites_decl_and_use_across_two_files() {
     let (_p, mut s, main_uri, lib_uri) = xmod_project();
 
-    // Driven from the qualified use in main.scrl, so `changes` is keyed by two
+    // Driven from the qualified use in main.sca, so `changes` is keyed by two
     // distinct file URIs.
     let (l, c) = cursor(XMOD_MAIN, "greet", 1, 1);
     let resp = rename_at(&mut s, &main_uri, l, c, "salute")
@@ -788,15 +788,15 @@ fn cross_module_find_references_spans_decl_and_use_across_files() {
 }
 
 // The mirror of the tests above: the query starts at the declaration in the
-// imported file. That re-roots compilation to lib.scrl, and main.scrl imports
-// lib.scrl rather than the reverse, so main.scrl falls outside lib.scrl's import
+// imported file. That re-roots compilation to lib.sca, and main.sca imports
+// lib.sca rather than the reverse, so main.sca falls outside lib.sca's import
 // closure and its reverse edge must come from persisted xrefs.
 
 #[test]
 fn find_references_from_library_declaration_includes_dependent_callers() {
     let (_p, mut s, main_uri, lib_uri) = xmod_project();
 
-    // Cursor on greet's declaration in lib.scrl.
+    // Cursor on greet's declaration in lib.sca.
     assert_refs_span_lib_and_main(&mut s, &lib_uri, &main_uri, &lib_uri);
 }
 
@@ -804,24 +804,24 @@ fn find_references_from_library_declaration_includes_dependent_callers() {
 fn rename_from_library_declaration_rewrites_dependent_callers() {
     let (_p, mut s, main_uri, lib_uri) = xmod_project();
 
-    // Driven from greet's declaration in lib.scrl.
+    // Driven from greet's declaration in lib.sca.
     let (l, c) = cursor(XMOD_LIB, "greet", 1, 1);
     let resp = rename_at(&mut s, &lib_uri, l, c, "salute")
         .expect("a rename driven from a library declaration must be allowed");
     assert_rename_spans_lib_and_main(&resp, &main_uri, &lib_uri, "salute");
 }
 
-/// The staleness regression: edit lib.scrl so every span in it shifts, THEN
+/// The staleness regression: edit lib.sca so every span in it shifts, THEN
 /// rename from the moved declaration. The persisted reverse edge for
-/// main.scrl was recorded before the edit; a span-carrying key would miss it
-/// and the rename would silently drop main.scrl's call site, breaking the
+/// main.sca was recorded before the edit; a span-carrying key would miss it
+/// and the rename would silently drop main.sca's call site, breaking the
 /// workspace with no diagnostic. The xref key must survive the edit.
 #[test]
 fn rename_after_library_edit_still_rewrites_dependent_callers() {
     let (_p, mut s, main_uri, lib_uri) = xmod_project();
 
-    // Simulate didChange: a blank line prepended to lib.scrl moves greet's
-    // declaration down one line. main.scrl stays open but un-reanalysed.
+    // Simulate didChange: a blank line prepended to lib.sca moves greet's
+    // declaration down one line. main.sca stays open but un-reanalysed.
     let edited = "\npub fn greet() Int { 7 }\n";
     s.open_document(&lib_uri, edited);
 
@@ -834,7 +834,7 @@ fn rename_after_library_edit_still_rewrites_dependent_callers() {
         .expect("a WorkspaceEdit with a `changes` map");
     assert!(
         changes.contains_key(main_uri.as_str()),
-        "the dependent caller in main.scrl must be rewritten after lib.scrl \
+        "the dependent caller in main.sca must be rewritten after lib.sca \
          was edited; dropping it silently breaks the workspace: {changes:?}"
     );
     let main_edits = changes[main_uri.as_str()].as_array().expect("edits array");
@@ -847,16 +847,16 @@ fn rename_after_library_edit_still_rewrites_dependent_callers() {
 
 #[test]
 fn find_references_from_library_declaration_when_only_library_is_open() {
-    // main.scrl is never opened as a tab, so only the one-time workspace scan
+    // main.sca is never opened as a tab, so only the one-time workspace scan
     // analyses it. The reverse edge must be recorded then, not just when an
     // importer happens to be the entry at query time.
     let p = Project::new("xmod_lib_only");
-    p.write("lib.scrl", XMOD_LIB);
-    p.write("main.scrl", XMOD_MAIN);
+    p.write("lib.sca", XMOD_LIB);
+    p.write("main.sca", XMOD_MAIN);
     let mut s = Workspace::new();
     s.add_workspace_root(p.dir.clone());
-    let lib_uri = uri_of(&p, "lib.scrl");
-    let main_uri = uri_of(&p, "main.scrl");
+    let lib_uri = uri_of(&p, "lib.sca");
+    let main_uri = uri_of(&p, "main.sca");
     s.open_document(&lib_uri, XMOD_LIB);
 
     // Only the URI set: what matters is that the never-opened caller appears.
@@ -872,7 +872,7 @@ fn position_query_reroot_stages_diagnostics_for_open_file() {
     // Both open; entry is main (last opened). Nothing staged yet.
     assert!(s.take_pending_diagnostics().is_empty());
 
-    // Hover in lib.scrl re-roots the entry to lib, so lib's diags stage.
+    // Hover in lib.sca re-roots the entry to lib, so lib's diags stage.
     let (l, c) = cursor(XMOD_LIB, "greet", 1, 1);
     s.hover_response(&pos(&lib_uri, l, c));
     let staged = s.take_pending_diagnostics();
@@ -896,17 +896,17 @@ fn position_query_reroot_stages_diagnostics_for_open_file() {
     );
 }
 
-/// The `/** */` at line 0 is `b.scrl`'s module doc, not `add`'s.
+/// The `/** */` at line 0 is `b.sca`'s module doc, not `add`'s.
 const MODDOC_B: &str = "/**\n * Adds numbers together.\n */\npub fn add(a, b) {\n  a + b\n}\n";
 
 const MODDOC_A: &str = "import ./b\n\nprintln(b::add(10, 20))\n";
 
-/// The `a.scrl` + `b.scrl` demo pair, opened as `a.scrl`.
+/// The `a.sca` + `b.sca` demo pair, opened as `a.sca`.
 fn moddoc_project() -> (Project, Workspace, String) {
     let p = Project::new("moddoc");
-    p.write("b.scrl", MODDOC_B);
-    p.write("a.scrl", MODDOC_A);
-    let (s, uri) = open(&p, "a.scrl", MODDOC_A);
+    p.write("b.sca", MODDOC_B);
+    p.write("a.sca", MODDOC_A);
+    let (s, uri) = open(&p, "a.sca", MODDOC_A);
     (p, s, uri)
 }
 
@@ -926,7 +926,7 @@ fn hover_on_module_alias_shows_the_module_doc() {
     let md = hover_md(&mut s, &uri, l, c);
     assert!(
         md.contains("Adds numbers together."),
-        "hover on the `b` qualifier must render b.scrl's module doc, got {md:?}"
+        "hover on the `b` qualifier must render b.sca's module doc, got {md:?}"
     );
     assert!(md.contains("*module*"), "…and name it a module: {md:?}");
 
@@ -951,15 +951,15 @@ fn hover_on_module_alias_shows_the_module_doc() {
 fn goto_def_on_module_alias_opens_the_module_file() {
     let (_p, mut s, uri) = moddoc_project();
 
-    // The `b` of `b.add(10, 20)` opens b.scrl at 0:0.
+    // The `b` of `b.add(10, 20)` opens b.sca at 0:0.
     let (l, c) = cursor(MODDOC_A, "b::add", 1, 0);
     let def = s.definition_response(&pos(&uri, l, c));
     let target = def["uri"]
         .as_str()
         .unwrap_or_else(|| panic!("goto-def on a module alias must open a file, got {def}"));
     assert!(
-        target.ends_with("b.scrl"),
-        "`b::add(..)` must jump to b.scrl, got {target}"
+        target.ends_with("b.sca"),
+        "`b::add(..)` must jump to b.sca, got {target}"
     );
     assert_eq!(def["range"]["start"]["line"].as_i64(), Some(0));
     assert_eq!(def["range"]["start"]["character"].as_i64(), Some(0));
@@ -1004,9 +1004,9 @@ println(get(p) + b::add(0, 1))\n";
 #[test]
 fn qualifier_occurrence_respects_a_shadowing_local() {
     let p = Project::new("shadow_qualifier");
-    p.write("b.scrl", MODDOC_B);
-    p.write("a.scrl", SHADOW_A);
-    let (mut s, uri) = open(&p, "a.scrl", SHADOW_A);
+    p.write("b.sca", MODDOC_B);
+    p.write("a.sca", SHADOW_A);
+    let (mut s, uri) = open(&p, "a.sca", SHADOW_A);
 
     // The `b` of `b.x` inside `get` is a parameter, not the module alias.
     let (l, c) = cursor(SHADOW_A, "b.x", 1, 0);
@@ -1015,8 +1015,8 @@ fn qualifier_occurrence_respects_a_shadowing_local() {
         .as_str()
         .unwrap_or_else(|| panic!("goto-def on a shadowed name must resolve, got {def}"));
     assert!(
-        target.ends_with("a.scrl"),
-        "the shadowed `b` must resolve to the local parameter in a.scrl, got {target}"
+        target.ends_with("a.sca"),
+        "the shadowed `b` must resolve to the local parameter in a.sca, got {target}"
     );
     let (param_l, param_c) = cursor(SHADOW_A, "b Point", 1, 0);
     assert_eq!(def["range"]["start"]["line"].as_i64(), Some(param_l as i64));
@@ -1134,12 +1134,12 @@ fn hover_shows_a_constructors_field_labels() {
 fn hover_shows_a_declaration_doc_from_another_module() {
     let p = Project::new("hover_xmod_doc");
     p.write(
-        "lib.scrl",
+        "lib.sca",
         "/** Text helpers. */\n\n/** Join `parts` with `sep`. */\npub fn join(parts Array(String), sep String) String {\n\t'x'\n}\n",
     );
     let src = "import ./lib\n\nprintln(lib::join(['a'], ','))\n";
-    p.write("main.scrl", src);
-    let (mut s, uri) = open(&p, "main.scrl", src);
+    p.write("main.sca", src);
+    let (mut s, uri) = open(&p, "main.sca", src);
     let md = hover_md(&mut s, &uri, 2, 14); // inside `join`
     assert!(
         md.contains("fn(parts Array(String), sep String)"),
@@ -1186,9 +1186,9 @@ const COMP_MAIN: &str = "import ./helper\nz = helper::\n";
 #[test]
 fn completion_after_file_module_alias_dot_lists_pub_exports_only() {
     let p = Project::new("comp_file");
-    p.write("helper.scrl", COMP_HELPER);
-    p.write("main.scrl", COMP_MAIN);
-    let (mut s, uri) = open(&p, "main.scrl", COMP_MAIN);
+    p.write("helper.sca", COMP_HELPER);
+    p.write("main.sca", COMP_MAIN);
+    let (mut s, uri) = open(&p, "main.sca", COMP_MAIN);
 
     let labels = completion_labels(&mut s, &uri, 1, 12);
     assert!(
@@ -1237,7 +1237,7 @@ fn completion_after_non_module_dot_is_empty() {
 fn goto_def_on_stdlib_module_qualifier_opens_its_file() {
     let std_dir =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../scarlet_core/src/std/scarlet");
-    let http = std_dir.join("http.scrl");
+    let http = std_dir.join("http.sca");
     let src = std::fs::read_to_string(&http).expect("the stdlib http module");
     let mut s = Workspace::new();
     let uri = format!("file://{}", http.display());
@@ -1249,8 +1249,8 @@ fn goto_def_on_stdlib_module_qualifier_opens_its_file() {
         .as_str()
         .unwrap_or_else(|| panic!("goto-def on `error::` must open a file, got {def}"));
     assert!(
-        target.ends_with("scarlet/net/error.scrl"),
-        "`error::NetError` must jump to net/error.scrl, got {target}"
+        target.ends_with("scarlet/net/error.sca"),
+        "`error::NetError` must jump to net/error.sca, got {target}"
     );
     assert_eq!(def["range"]["start"]["line"].as_i64(), Some(0));
     assert_eq!(def["range"]["start"]["character"].as_i64(), Some(0));

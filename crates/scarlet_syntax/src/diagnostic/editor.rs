@@ -199,17 +199,17 @@ mod tests {
 
     #[test]
     fn url_path_is_percent_encoded() {
-        let url = build_editor_url(Editor::Vscode, "/Users/me/My Project/a#b.scrl", 3, 7);
-        assert_eq!(url, "vscode://file/Users/me/My%20Project/a%23b%2Escrl:3:7");
-        let url = build_editor_url(jetbrains("idea"), "/tmp/a b?.scrl", 1, 1);
-        assert_eq!(url, "idea://open?file=/tmp/a%20b%3F%2Escrl&line=1&column=1");
+        let url = build_editor_url(Editor::Vscode, "/Users/me/My Project/a#b.sca", 3, 7);
+        assert_eq!(url, "vscode://file/Users/me/My%20Project/a%23b%2Esca:3:7");
+        let url = build_editor_url(jetbrains("idea"), "/tmp/a b?.sca", 1, 1);
+        assert_eq!(url, "idea://open?file=/tmp/a%20b%3F%2Esca&line=1&column=1");
     }
 
     #[test]
     fn jetbrains_url_uses_detected_product_scheme() {
-        let url = build_editor_url(jetbrains("pycharm"), "/tmp/a.scrl", 2, 3);
-        assert_eq!(url, "pycharm://open?file=/tmp/a%2Escrl&line=2&column=3");
-        let url = build_editor_url(jetbrains("clion"), "/tmp/a.scrl", 2, 3);
-        assert_eq!(url, "clion://open?file=/tmp/a%2Escrl&line=2&column=3");
+        let url = build_editor_url(jetbrains("pycharm"), "/tmp/a.sca", 2, 3);
+        assert_eq!(url, "pycharm://open?file=/tmp/a%2Esca&line=2&column=3");
+        let url = build_editor_url(jetbrains("clion"), "/tmp/a.sca", 2, 3);
+        assert_eq!(url, "clion://open?file=/tmp/a%2Esca&line=2&column=3");
     }
 }

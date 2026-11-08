@@ -4,7 +4,7 @@
 
 [Scarlet](https://scarlet.industries) language support for Visual Studio Code.
 
-- Syntax highlighting for `.scrl` files.
+- Syntax highlighting for `.sca` files.
 - Diagnostics and completions from the Scarlet language server (`scarlet lsp`).
 - Document formatting through `scarlet fmt --stdin`.
 

@@ -13,7 +13,7 @@ use common::wait_or_kill;
 /// The wall-clock cap only turns a scheduler deadlock into a failure instead
 /// of a hung CI job; no assertion depends on how fast the run finishes.
 fn run_al_with_schedulers(proj: &Project, src: &str, schedulers: u32) -> String {
-    let prog = proj.dir.join("prog.scrl");
+    let prog = proj.dir.join("prog.sca");
     std::fs::write(&prog, src).unwrap();
 
     let child = Command::new(env!("CARGO_BIN_EXE_scarlet"))

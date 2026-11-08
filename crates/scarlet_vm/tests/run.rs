@@ -1069,7 +1069,7 @@ fn the_string_built_ins_run() {
 }
 
 /// Bitwise operations treat an Int as an endless row of two's-complement
-/// bits, as `int.scrl` says: no bit ever falls off an end.
+/// bits, as `int.sca` says: no bit ever falls off an end.
 #[test]
 fn bitwise_operations_are_any_size() {
     prints(
@@ -1189,7 +1189,7 @@ fn a_key_is_found_by_any_equal_value() {
 fn argv_and_env_come_from_the_host() {
     let env = [("HOME", "/home/al"), ("LANG", "C"), ("HOME", "/elsewhere")];
     let host = Host::new(
-        vec!["main.scrl".into(), "--fast".into(), "two words".into()],
+        vec!["main.sca".into(), "--fast".into(), "two words".into()],
         env.iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
@@ -1206,7 +1206,7 @@ fn argv_and_env_come_from_the_host() {
          \tprintln(map::size(os::env()))\n\
          \tprintln(os::env() == os::env())\n\
          }\n",
-        "[main.scrl, --fast, two words]\nSome(/home/al)\nSome(C)\nNone\n2\nTrue\n",
+        "[main.sca, --fast, two words]\nSome(/home/al)\nSome(C)\nNone\n2\nTrue\n",
     );
 }
 

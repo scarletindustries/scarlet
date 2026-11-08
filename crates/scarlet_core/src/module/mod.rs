@@ -17,8 +17,8 @@ mod stdlib;
 // carries the key of the module it points into. Re-exported here, where
 // resolution mints the keys.
 pub use scarlet_syntax::module_path::{
-    ModuleKey, ModulePath, ResolveError, file_module_path, is_resolved_file, is_stdlib,
-    main_module, scarlet_prelude,
+    ModuleKey, ModulePath, ResolveError, SOURCE_EXTENSION, file_module_path, is_resolved_file,
+    is_stdlib, main_module, scarlet_prelude,
 };
 
 /// Every module the embedded stdlib holds, sorted by the path an import names
@@ -56,7 +56,7 @@ pub fn detect_stdlib_module(file: &Path) -> Option<ModulePath> {
     let file = file.canonicalize().ok()?;
     let std_root = find_stdlib_root(&file)?;
     let rel = file.strip_prefix(&std_root).ok()?;
-    // src/std/scarlet.scrl -> ["scarlet"]; src/std/scarlet/net.scrl -> ["scarlet","net"]
+    // src/std/scarlet.sca -> ["scarlet"]; src/std/scarlet/net.sca -> ["scarlet","net"]
     let mut segs: ModulePath = rel
         .with_extension("")
         .components()
@@ -72,11 +72,11 @@ pub fn detect_stdlib_module(file: &Path) -> Option<ModulePath> {
     Some(segs)
 }
 
-/// Recursively collect every `.scrl` source file under `dir` into `out`.
+/// Recursively collect every `.sca` source file under `dir` into `out`.
 /// Skips dotdirs, `target` and `node_modules`, and ignores unreadable entries
 /// rather than aborting. Reads `file_type()` so symlinks are never followed
 /// and a symlink cycle cannot wedge the walk.
-pub fn collect_scrl_files(dir: &Path, out: &mut Vec<PathBuf>) {
+pub fn collect_source_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -91,8 +91,10 @@ pub fn collect_scrl_files(dir: &Path, out: &mut Vec<PathBuf>) {
             if name.starts_with('.') || matches!(name.as_ref(), "target" | "node_modules") {
                 continue;
             }
-            collect_scrl_files(&path, out);
-        } else if ft.is_file() && path.extension().and_then(|e| e.to_str()) == Some("scrl") {
+            collect_source_files(&path, out);
+        } else if ft.is_file()
+            && path.extension().and_then(|e| e.to_str()) == Some(SOURCE_EXTENSION)
+        {
             out.push(path);
         }
     }
@@ -571,7 +573,7 @@ fn resolve(path: &ImportPath, base_dir: Option<&Path>) -> Result<ResolvedModule,
 }
 
 /// [`resolve_with`] resolves with an optional on-disk stdlib source root. When set and the
-/// path is a stdlib module whose `.scrl` file exists under the root, the module
+/// path is a stdlib module whose `.sca` file exists under the root, the module
 /// resolves as a regular `File` source — identity unchanged — so a session
 /// editing the stdlib itself compiles, caches and invalidates stdlib modules
 /// exactly like any other on-disk module instead of reading the embedded
@@ -597,10 +599,10 @@ pub(crate) fn resolve_with(
         for name in &path.names {
             p.push(name);
         }
-        // Append `.scrl` rather than `set_extension`, which would replace
-        // anything after a dot in the module name (`./b.v2` -> `b.scrl`).
+        // Append `.sca` rather than `set_extension`, which would replace
+        // anything after a dot in the module name (`./b.v2` -> `b.sca`).
         if let Some(name) = p.file_name().map(|n| n.to_string_lossy().into_owned()) {
-            p.set_file_name(format!("{name}.scrl"));
+            p.set_file_name(format!("{name}.{SOURCE_EXTENSION}"));
         }
         if p.is_file() {
             let canon = file_module_path(&p)?;
@@ -634,7 +636,10 @@ fn resolve_canonical_with(
         let key = ModuleKey::of(path);
         // Rebuild with the platform separator; the key's '/'-join form is
         // cache identity only.
-        let p = PathBuf::from(format!("{}.scrl", path.join(std::path::MAIN_SEPARATOR_STR)));
+        let p = PathBuf::from(format!(
+            "{}.{SOURCE_EXTENSION}",
+            path.join(std::path::MAIN_SEPARATOR_STR)
+        ));
         return if p.is_file() {
             Ok(ResolvedModule {
                 source: ModuleSource::File(p),
@@ -656,7 +661,7 @@ fn resolve_canonical_with(
             for seg in path {
                 p.push(seg);
             }
-            p.set_extension("scrl");
+            p.set_extension(SOURCE_EXTENSION);
             if p.is_file() {
                 return Ok(ResolvedModule {
                     source: ModuleSource::File(p),
@@ -704,14 +709,14 @@ mod tests {
     fn detect_stdlib_module_resolves_repo_std_files() {
         let array = Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/std/scarlet/array.scrl"
+            "/src/std/scarlet/array.sca"
         ));
         assert_eq!(
             detect_stdlib_module(array),
             Some(vec!["scarlet".to_string(), "array".to_string()])
         );
 
-        let prelude = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/std/scarlet.scrl"));
+        let prelude = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/std/scarlet.sca"));
         assert_eq!(
             detect_stdlib_module(prelude),
             Some(vec!["scarlet".to_string()])
@@ -725,39 +730,39 @@ mod tests {
         assert_eq!(detect_stdlib_module(marker), None);
 
         // A path with no stdlib root above it resolves to nothing.
-        let outside = unique_dir("detect_outside").join("foo.scrl");
+        let outside = unique_dir("detect_outside").join("foo.sca");
         std::fs::write(&outside, "x = 1").unwrap();
         assert_eq!(detect_stdlib_module(&outside), None);
     }
 
     #[test]
-    fn collect_scrl_files_filters_and_recurses() {
+    fn collect_source_files_filters_and_recurses() {
         let root = unique_dir("collect");
-        std::fs::write(root.join("a.scrl"), "").unwrap();
+        std::fs::write(root.join("a.sca"), "").unwrap();
         std::fs::write(root.join("b.txt"), "").unwrap();
         std::fs::create_dir_all(root.join("sub")).unwrap();
-        std::fs::write(root.join("sub/c.scrl"), "").unwrap();
+        std::fs::write(root.join("sub/c.sca"), "").unwrap();
         std::fs::create_dir_all(root.join(".hidden")).unwrap();
-        std::fs::write(root.join(".hidden/d.scrl"), "").unwrap();
+        std::fs::write(root.join(".hidden/d.sca"), "").unwrap();
         std::fs::create_dir_all(root.join("target")).unwrap();
-        std::fs::write(root.join("target/e.scrl"), "").unwrap();
+        std::fs::write(root.join("target/e.sca"), "").unwrap();
         std::fs::create_dir_all(root.join("node_modules")).unwrap();
-        std::fs::write(root.join("node_modules/f.scrl"), "").unwrap();
+        std::fs::write(root.join("node_modules/f.sca"), "").unwrap();
 
         let mut out = Vec::new();
-        collect_scrl_files(&root, &mut out);
+        collect_source_files(&root, &mut out);
         let names: HashSet<String> = out
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(
             names,
-            HashSet::from(["a.scrl".to_string(), "c.scrl".to_string()]),
-            "should collect only a.scrl and sub/c.scrl; got {out:?}"
+            HashSet::from(["a.sca".to_string(), "c.sca".to_string()]),
+            "should collect only a.sca and sub/c.sca; got {out:?}"
         );
 
         let mut missing = Vec::new();
-        collect_scrl_files(&root.join("does-not-exist"), &mut missing);
+        collect_source_files(&root.join("does-not-exist"), &mut missing);
         assert!(missing.is_empty());
 
         let _ = std::fs::remove_dir_all(&root);
@@ -791,9 +796,9 @@ mod tests {
         ));
 
         let base = unique_dir("resolve");
-        std::fs::write(base.join("foo.scrl"), "").unwrap();
-        std::fs::write(base.join("bar.scrl"), "").unwrap();
-        std::fs::write(base.join("b.v2.scrl"), "").unwrap();
+        std::fs::write(base.join("foo.sca"), "").unwrap();
+        std::fs::write(base.join("bar.sca"), "").unwrap();
+        std::fs::write(base.join("b.v2.sca"), "").unwrap();
         std::fs::create_dir_all(base.join("sub")).unwrap();
 
         match resolve(&rel(&[RelSeg::CurrentDir], &["foo"]), Some(&base)) {
@@ -802,9 +807,9 @@ mod tests {
                 canon,
                 key,
             }) => {
-                assert_eq!(p, base.join("foo.scrl"));
-                assert_eq!(canon, file_module_path(&base.join("foo.scrl")).unwrap());
-                assert_eq!(key, ModuleKey::for_file(&base.join("foo.scrl")));
+                assert_eq!(p, base.join("foo.sca"));
+                assert_eq!(canon, file_module_path(&base.join("foo.sca")).unwrap());
+                assert_eq!(key, ModuleKey::for_file(&base.join("foo.sca")));
             }
             other => panic!("expected ./foo to resolve to a file, got {other:?}"),
         }
@@ -815,7 +820,7 @@ mod tests {
             Ok(ResolvedModule {
                 source: ModuleSource::File(p),
                 ..
-            }) => assert_eq!(p, base.join("bar.scrl")),
+            }) => assert_eq!(p, base.join("bar.sca")),
             other => panic!("expected ../bar to resolve, got {other:?}"),
         }
         // A dot in the module name is part of the name.
@@ -823,11 +828,11 @@ mod tests {
             Ok(ResolvedModule {
                 source: ModuleSource::File(p),
                 ..
-            }) => assert_eq!(p, base.join("b.v2.scrl")),
-            other => panic!("expected ./b.v2 to resolve to b.v2.scrl, got {other:?}"),
+            }) => assert_eq!(p, base.join("b.v2.sca")),
+            other => panic!("expected ./b.v2 to resolve to b.v2.sca, got {other:?}"),
         }
         match resolve(&rel(&[RelSeg::CurrentDir], &["ghost"]), Some(&base)) {
-            Err(ResolveError::FileNotFound(p)) => assert_eq!(p, base.join("ghost.scrl")),
+            Err(ResolveError::FileNotFound(p)) => assert_eq!(p, base.join("ghost.sca")),
             other => panic!("expected ./ghost to be FileNotFound, got {other:?}"),
         }
         assert!(matches!(
@@ -835,11 +840,11 @@ mod tests {
             Err(ResolveError::BareName(_))
         ));
 
-        match resolve_canonical(&file_module_path(&base.join("foo.scrl")).unwrap()) {
+        match resolve_canonical(&file_module_path(&base.join("foo.sca")).unwrap()) {
             Ok(ResolvedModule {
                 source: ModuleSource::File(p),
                 ..
-            }) => assert_eq!(p, std::path::absolute(base.join("foo.scrl")).unwrap()),
+            }) => assert_eq!(p, std::path::absolute(base.join("foo.sca")).unwrap()),
             other => panic!("expected canonical path to resolve, got {other:?}"),
         }
 
@@ -870,7 +875,7 @@ mod tests {
             origin: ModuleOrigin::File {
                 source_hash: 0,
                 stat: None,
-                path: PathBuf::from(format!("/{name}.scrl")),
+                path: PathBuf::from(format!("/{name}.sca")),
                 refs: Rc::new(ModuleReferences::new(crate::reference::ModuleId(0))),
             },
             watermark,
@@ -936,7 +941,7 @@ mod tests {
         assert!(!t.source_changed(&stat));
 
         let dir = unique_dir("srcchanged");
-        let path = dir.join("m.scrl");
+        let path = dir.join("m.sca");
         let body = "x = 1\n";
         std::fs::write(&path, body).unwrap();
         let cm = CachedModule {

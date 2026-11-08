@@ -11,7 +11,7 @@ use common::{Project, parse};
 fn cached_module_type_bodies_survive_rewinds() {
     let p = Project::new("type_body_rewind");
     p.write(
-        "lib.scrl",
+        "lib.sca",
         "pub type Box(a) {\n\tMk(v a)\n}\npub type Pair(a) = (a, a)\npub fn wrap(x Int) Box(Int) { Mk(x) }\n",
     );
 

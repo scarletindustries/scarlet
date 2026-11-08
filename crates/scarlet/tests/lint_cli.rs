@@ -1,4 +1,4 @@
-//! `scarlet lint` — the CLI half of the `.scrl` illegal-state census.
+//! `scarlet lint` — the CLI half of the `.sca` illegal-state census.
 //!
 //! The census used to be `cargo xtask scrl-census` and is now
 //! `scarlet_core::lint`, so every assertion here drives the real binary rather
@@ -25,7 +25,7 @@ fn fixture(name: &str, source: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("scarlet_lint_{name}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create fixture dir");
-    fs::write(dir.join("fixture.scrl"), source).expect("write fixture");
+    fs::write(dir.join("fixture.sca"), source).expect("write fixture");
     dir
 }
 

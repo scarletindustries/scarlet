@@ -1,6 +1,6 @@
 name = "Scarlet"
 grammar = "scarlet"
-path_suffixes = ["scrl"]
+path_suffixes = ["sca"]
 line_comments = ["// "]
 block_comment = ["/* ", " */"]
 autoclose_before = ";:.,=}])>"

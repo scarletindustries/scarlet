@@ -20,14 +20,14 @@ fn hash_str(s: &str) -> u64 {
     h.finish()
 }
 
-/// Write `source` to a uniquely-named temp `.scrl` file and return its path.
+/// Write `source` to a uniquely-named temp `.sca` file and return its path.
 /// The pid separates test binaries and the thread-id hash separates parallel
 /// threads; same-thread tests run sequentially, so that pair is enough.
 fn write_temp(source: &str) -> std::path::PathBuf {
     let mut tmp = std::env::temp_dir();
     let pid = std::process::id();
     let tid = format!("{:?}", std::thread::current().id());
-    tmp.push(format!("scarlet_{pid}_{}.scrl", hash_str(&tid)));
+    tmp.push(format!("scarlet_{pid}_{}.sca", hash_str(&tid)));
     let mut f = std::fs::File::create(&tmp).expect("create temp file");
     f.write_all(source.as_bytes()).expect("write temp file");
     tmp
@@ -390,9 +390,9 @@ impl Project {
         fs::create_dir_all(&dir).unwrap();
         Project { dir }
     }
-    /// Write `src` to `prog.scrl` inside the project and `al run` it.
+    /// Write `src` to `prog.sca` inside the project and `al run` it.
     pub fn run(&self, src: &str) -> AlOutput {
-        let p = self.dir.join("prog.scrl");
+        let p = self.dir.join("prog.sca");
         std::fs::write(&p, src).unwrap();
         run_al("run", &p)
     }

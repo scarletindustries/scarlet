@@ -8,7 +8,7 @@
 //! `==` against nothing and these against less. The capture forms are the
 //! runtime's, not the type system's: `Bool` and `Nil` are immediates, a big
 //! integer is boxed, a range stores no elements, a record carries its names —
-//! and each has a row of its own in `wire.scrl`'s capture table.
+//! and each has a row of its own in `wire.sca`'s capture table.
 //!
 //! The tampering tests cut the bytes by position. A closure row is the
 //! eleven-byte header, the sixteen-byte run, then the function index as a

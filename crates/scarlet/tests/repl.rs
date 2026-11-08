@@ -141,7 +141,7 @@ fn reset_forgets_the_session() {
 fn a_session_round_trips_through_save_and_load() {
     let dir = std::env::temp_dir().join(format!("scarlet_repl_save_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create temp dir");
-    let path = dir.join("session.scrl");
+    let path = dir.join("session.sca");
     let saved = repl(&format!(
         "import scarlet/string\nfn size(s String) Int {{ string::length(s) }}\n:save {}\n",
         path.display()

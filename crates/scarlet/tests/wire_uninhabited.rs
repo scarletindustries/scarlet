@@ -114,7 +114,7 @@ fn none_of_a_bodiless_type_round_trips_and_a_forged_some_is_malformed() {
 }
 
 /// `decode` typed at the bodiless type itself. No program can produce its
-/// header, so the test does, from `wire.scrl`'s fingerprint specification:
+/// header, so the test does, from `wire.sca`'s fingerprint specification:
 /// version 3, one node, root 0, tag 14 alone is `0xf5c99787f8ebc4ff`, written
 /// little-endian behind `SW` 3. The same number is pinned in the descriptor
 /// builder's own tests, so a disagreement between the two instruments fails

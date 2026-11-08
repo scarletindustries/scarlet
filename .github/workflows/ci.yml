@@ -51,7 +51,7 @@ jobs:
       - name: Generated parser is current
         run: bun run generate && git diff --exit-code src grammar.js
 
-      # The grammar-vs-parser sync check: every .scrl the compiler's own
+      # The grammar-vs-parser sync check: every .sca the compiler's own
       # corpus accepts must parse without an error node.
       - name: Corpus
         run: bun run corpus

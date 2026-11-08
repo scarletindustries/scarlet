@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Load-drive examples/bench_service.scrl and print requests/sec + p99 per endpoint.
+# Load-drive examples/bench_service.sca and print requests/sec + p99 per endpoint.
 #
 #   scripts/bench_service.sh ./target/release/scarlet [duration] [connections]
 #
@@ -15,7 +15,7 @@ CONNS=${3:-32}
 [[ -x $BIN ]] || { echo "not executable: $BIN" >&2; exit 1; }
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-SERVICE=$ROOT/examples/bench_service.scrl
+SERVICE=$ROOT/examples/bench_service.sca
 OHA=${OHA:-/opt/homebrew/bin/oha}
 [[ -x $OHA ]] || OHA=$(command -v oha)
 
@@ -25,13 +25,13 @@ cleanup() {
     kill "$SRV_PID" 2>/dev/null || true
     wait "$SRV_PID" 2>/dev/null || true
   fi
-  pkill -f 'bench_service\.scrl' 2>/dev/null || true
+  pkill -f 'bench_service\.sca' 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
 # A leaked server from an earlier run would answer on the port we are about to
 # probe and silently benchmark the wrong binary.
-pkill -f 'bench_service\.scrl' 2>/dev/null || true
+pkill -f 'bench_service\.sca' 2>/dev/null || true
 sleep 0.3
 
 # A free port, from the kernel.

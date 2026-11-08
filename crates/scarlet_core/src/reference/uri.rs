@@ -70,16 +70,16 @@ mod tests {
     #[test]
     fn path_to_uri_percent_encodes() {
         assert_eq!(
-            path_to_uri(Path::new("/My Proj/foo.scrl")),
-            "file:///My%20Proj/foo.scrl"
+            path_to_uri(Path::new("/My Proj/foo.sca")),
+            "file:///My%20Proj/foo.sca"
         );
         assert_eq!(
-            path_to_uri(Path::new("/plain/foo.scrl")),
-            "file:///plain/foo.scrl"
+            path_to_uri(Path::new("/plain/foo.sca")),
+            "file:///plain/foo.sca"
         );
         assert_eq!(
-            path_to_uri(Path::new("/a+b/c:d(e)'!.scrl")),
-            "file:///a%2Bb/c%3Ad%28e%29%27%21.scrl"
+            path_to_uri(Path::new("/a+b/c:d(e)'!.sca")),
+            "file:///a%2Bb/c%3Ad%28e%29%27%21.sca"
         );
     }
 
@@ -101,7 +101,7 @@ mod tests {
     fn module_uri_resolves_canonical_file() {
         let dir = std::env::temp_dir().join(format!("al_uri_test_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        let file = dir.join("helpers.scrl");
+        let file = dir.join("helpers.sca");
         std::fs::write(&file, "pub fn x() { 1 }\n").expect("write temp module");
 
         let mut g = ReferenceGraphBuilder::new();
@@ -110,7 +110,7 @@ mod tests {
         let g = g.finish();
         let uri = module_uri(&g, m).expect("canonical module resolves");
         assert!(uri.starts_with("file://"));
-        assert!(uri.ends_with("helpers.scrl"));
+        assert!(uri.ends_with("helpers.sca"));
         assert_eq!(uri, path_to_uri(&std::path::absolute(&file).unwrap()));
 
         let _ = std::fs::remove_file(&file);
