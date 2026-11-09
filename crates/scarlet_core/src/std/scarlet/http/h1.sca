@@ -36,12 +36,12 @@ pub opaque type HeadFlags {
 // starts.
 pub type Parsed {
 	Done(
-		method Binary
-		target Binary
-		version Version
-		headers headers::Headers
-		flags HeadFlags
-		consumed Int
+		method Binary,
+		target Binary,
+		version Version,
+		headers headers::Headers,
+		flags HeadFlags,
+		consumed Int,
 	)
 	NeedMore
 	Bad(status Int)
@@ -89,12 +89,12 @@ pub type BadResponse {
 // it.
 pub type ParsedResponse {
 	ResponseDone(
-		version Version
-		code Int
-		reason Binary
-		headers headers::Headers
-		flags HeadFlags
-		consumed Int
+		version Version,
+		code Int,
+		reason Binary,
+		headers headers::Headers,
+		flags HeadFlags,
+		consumed Int,
 	)
 	ResponseNeedMore
 	ResponseBad(err BadResponse)

@@ -554,7 +554,7 @@ fn constructor_in_match_pattern_is_a_graph_reference() {
     // a value position, so this pins `type_ctor_pattern`'s `record_value_use`.
     let p = Project::new("ctor_pattern_ref");
     let src = "type Side {\n\tLeft\n\tRight\n}\n\
-               fn f(x Side) Int { match x { Left -> 1 Right -> 2 } }\n\
+               fn f(x Side) Int { match x { Left -> 1\n Right -> 2 } }\n\
                pub fn main() {\n\
                \tprintln(f(Right))\n\
                }\n";

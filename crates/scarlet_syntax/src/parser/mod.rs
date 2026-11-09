@@ -96,7 +96,7 @@ pub(crate) fn new_parser_from_tokens(
         });
     }
     Parser {
-        tokens,
+        tokens: token::insert_line_ends(tokens),
         index: 0,
         diagnostics: scanner_diagnostics,
         context_stack: vec![ParseContext::TopLevel],
@@ -237,6 +237,20 @@ impl Parser {
         let ctx = self.current_context();
 
         while self.kind() != Kind::Eof {
+            // A line end in a list of lines closes the broken item, so the next
+            // one starts right after it.
+            if self.kind() == Kind::LineEnd
+                && matches!(
+                    ctx,
+                    ParseContext::TopLevel
+                        | ParseContext::Block
+                        | ParseContext::TypeDef
+                        | ParseContext::MatchArms
+                )
+            {
+                self.advance();
+                return SyncOutcome::AtItem;
+            }
             let delim: Option<(Kind, &[Kind])> = match ctx {
                 ParseContext::TopLevel => {
                     if matches!(
@@ -400,13 +414,6 @@ impl Parser {
         self.tokens.get(self.index + 1).map(|t| t.kind.clone())
     }
 
-    fn has_newline_before_current(&self) -> bool {
-        self.cur()
-            .leading_trivia
-            .iter()
-            .any(|t| matches!(t, Trivia::Newline))
-    }
-
     /// The first `/** */` in the current token's leading trivia. If that token
     /// also donated the module doc, the declaration takes the next one, so a
     /// file opening with both keeps both.
@@ -461,9 +468,9 @@ impl Parser {
     /// Parses the items in a type body, one per line. `noun` names them in
     /// the error.
     ///
-    /// The newline is the separator, not just allowed whitespace, so source
-    /// can't drift from what `scarlet fmt` writes. A comma between items is an
-    /// error, because each item already shows where it ends.
+    /// The line end is the separator, so source can't drift from what
+    /// `scarlet fmt` writes. A comma between items is an error, because each
+    /// item already shows where it ends.
     fn parse_line_separated_list<T>(
         &mut self,
         close: Kind,
@@ -471,33 +478,40 @@ impl Parser {
         mut item: impl FnMut(&mut Self) -> PResult<T>,
     ) -> PResult<Vec<T>> {
         let mut items = Vec::new();
-        let mut prev_end_line: Option<i32> = None;
         while self.kind() != close && self.kind() != Kind::Eof {
             if self.kind() == Kind::PuncComma {
                 return Err(Box::new(ParseError::CommaBetweenLines(noun)));
             }
-            if prev_end_line == Some(self.current_span().start_line) {
-                return Err(Box::new(ParseError::SameLine(noun)));
-            }
             items.push(item(self)?);
-            prev_end_line = Some(self.prev_token_end_line);
+            self.end_line_item(&close, noun)?;
         }
         Ok(items)
     }
 
-    /// Constructor fields. Adjacent fields must be *separated*, and a newline
-    /// separates as well as a comma does:
+    /// After an item of a `{ }` list or the file: a line end must come next,
+    /// unless the list closes here.
+    fn end_line_item(&mut self, close: &Kind, noun: LineItem) -> PResult<()> {
+        match self.kind() {
+            Kind::LineEnd => {
+                self.eat(Kind::LineEnd)?;
+                Ok(())
+            }
+            Kind::Eof => Ok(()),
+            k if k == *close => Ok(()),
+            _ => Err(Box::new(ParseError::SameLine(noun))),
+        }
+    }
+
+    /// Constructor fields, separated by commas. Line breaks inside the
+    /// brackets are only spacing, so they can't separate fields:
     ///
     /// ```text
-    /// Normie(username String, age Int)     // one line: comma
-    /// Done(                                // broken: the newline is enough
-    ///     method Binary
-    ///     target Binary
+    /// Normie(username String, age Int)
+    /// Done(
+    ///     method Binary,
+    ///     target Binary,
     /// )
     /// ```
-    ///
-    /// Only a same-line list without commas is rejected: nothing would mark
-    /// where one field ends.
     fn parse_field_list<T>(
         &mut self,
         close: Kind,
@@ -513,9 +527,6 @@ impl Parser {
             if self.kind() == close {
                 break;
             }
-            if self.current_span().start_line > self.prev_token_end_line {
-                continue; // a newline separates
-            }
             return Err(Box::new(ParseError::FieldsWithoutCommas));
         }
         Ok(items)
@@ -525,7 +536,7 @@ impl Parser {
         is_type_start_token(self.cur())
     }
 
-    // Looks ahead for an `=` at depth 0 before a newline at depth 0. That
+    // Looks ahead for an `=` at depth 0 before a line end at depth 0. That
     // tells a binding (`x Type =`, `x =`) from an expression (`xs[0]`,
     // `Ctor(args)`). Guessing from whether a type starts here would misfire on
     // uppercase constructors and `(` tuple types.
@@ -534,16 +545,18 @@ impl Parser {
         let mut i = self.index + 1;
         while i < self.tokens.len() {
             let tok = &self.tokens[i];
-            if depth == 0
-                && tok
-                    .leading_trivia
-                    .iter()
-                    .any(|t| matches!(t, Trivia::Newline))
-            {
+            if depth == 0 && tok.kind == Kind::LineEnd {
                 return false;
             }
             match tok.kind {
                 Kind::PuncOpenParen | Kind::PuncOpenBracket | Kind::PuncOpenBrace => depth += 1,
+                // A closer with nothing open ends the enclosing block, and the
+                // statement with it.
+                Kind::PuncCloseParen | Kind::PuncCloseBracket | Kind::PuncCloseBrace
+                    if depth == 0 =>
+                {
+                    return false;
+                }
                 Kind::PuncCloseParen | Kind::PuncCloseBracket | Kind::PuncCloseBrace => depth -= 1,
                 Kind::PuncEquals if depth == 0 => return true,
                 Kind::PuncEqualsComparator if depth == 0 => return false,
@@ -558,18 +571,10 @@ impl Parser {
     // Looks ahead on this line for a `<-` outside any brackets, which makes
     // the statement a backpass: its binders are patterns, like the left of
     // `=`. An `=`, a block, or the end of the line first means it is
-    // something else: a binding, a call, a comparison. A newline inside
-    // brackets doesn't end the line, so `(a,\n b) <- f()` is still a backpass.
+    // something else: a binding, a call, a comparison.
     fn is_backpass_ahead(&self) -> bool {
         let mut depth = 0usize;
-        for (i, tok) in self.tokens.iter().enumerate().skip(self.index) {
-            let starts_line = tok
-                .leading_trivia
-                .iter()
-                .any(|t| matches!(t, Trivia::Newline));
-            if i > self.index && starts_line && depth == 0 {
-                return false;
-            }
+        for tok in self.tokens.iter().skip(self.index) {
             match tok.kind {
                 Kind::PuncOpenParen | Kind::PuncOpenBracket | Kind::BinOpen => depth += 1,
                 Kind::PuncCloseParen | Kind::PuncCloseBracket | Kind::BinClose => {
@@ -579,7 +584,7 @@ impl Parser {
                     depth = d;
                 }
                 Kind::PuncBackArrow if depth == 0 => return true,
-                Kind::PuncEquals | Kind::PuncOpenBrace | Kind::Eof => return false,
+                Kind::PuncEquals | Kind::PuncOpenBrace | Kind::LineEnd | Kind::Eof => return false,
                 _ => {}
             }
         }
@@ -608,7 +613,10 @@ impl Parser {
                     if !is_import {
                         seen_non_import = true;
                     }
-                    body.push(node)
+                    body.push(node);
+                    if let Err(err) = self.end_line_item(&Kind::Eof, LineItem::Declaration) {
+                        self.add_error(&err);
+                    }
                 }
                 Err(err) => {
                     // TopLevel has no closing delimiter, so the outcome is always AtItem.
@@ -801,11 +809,6 @@ impl Parser {
             .find(|(k, _)| *k == self.kind())
             .map(|(k, op)| (k.clone(), *op))
         {
-            // A `-` on a fresh line starts a new unary expression rather than
-            // continuing an additive chain (P4).
-            if tok == Kind::PuncMinus && self.has_newline_before_current() {
-                break;
-            }
             self.eat(tok)?;
             let right = next(self)?;
             let span = self.span_from(left.span());
@@ -875,11 +878,6 @@ impl Parser {
                     return Err(Box::new(ParseError::QualifierNotModule));
                 }
                 Kind::PuncOpenParen => {
-                    // A newline before `(` ends the postfix chain, so `f`
-                    // then `(a, b)` is two expressions, not a call (P7).
-                    if self.has_newline_before_current() {
-                        break;
-                    }
                     let start = expr.span();
                     let arguments = self.parse_call_args()?;
                     let span = self.span_from(start);
@@ -890,9 +888,6 @@ impl Parser {
                     });
                 }
                 Kind::PuncOpenBracket => {
-                    if self.has_newline_before_current() {
-                        break;
-                    }
                     let start = expr.span();
                     self.eat(Kind::PuncOpenBracket)?;
                     let index = self.parse_expression()?;
@@ -1002,7 +997,13 @@ impl Parser {
         while self.kind() != Kind::PuncCloseBrace && self.kind() != Kind::Eof {
             let span = self.current_span();
             match self.parse_node() {
-                Ok(node) => body.push(node),
+                Ok(node) => {
+                    body.push(node);
+                    if let Err(err) = self.end_line_item(&Kind::PuncCloseBrace, LineItem::Statement)
+                    {
+                        self.add_error(&err);
+                    }
+                }
                 Err(err) => {
                     let (node, outcome) = self.recover_node(err, span);
                     body.push(node);
@@ -1232,6 +1233,12 @@ impl Parser {
             matches!(self.kind(), Kind::Identifier(ref name) if &**name == token::THEN);
         let body = if then_keyword {
             self.advance();
+            // `then` is a name to the line-end rule, which can't know it is a
+            // keyword here, so a branch on the next line gets a line end
+            // before it. The branch belongs to the `if` all the same.
+            if self.kind() == Kind::LineEnd {
+                self.advance();
+            }
             self.parse_expression()?
         } else if self.kind() == Kind::PuncOpenBrace {
             self.parse_expression()?
@@ -1364,6 +1371,8 @@ impl Parser {
             if self.kind() == Kind::PuncComma {
                 self.add_error(&ParseError::CommaBetweenArms);
                 self.eat(Kind::PuncComma)?;
+            } else if let Err(err) = self.end_line_item(&Kind::PuncCloseBrace, LineItem::Arm) {
+                self.add_error(&err);
             }
         }
 
@@ -1458,7 +1467,7 @@ impl Parser {
         }
         let mut args: Vec<ast::PatternArg> = Vec::new();
         let mut rest = false;
-        if self.kind() == Kind::PuncOpenParen && !self.has_newline_before_current() {
+        if self.kind() == Kind::PuncOpenParen {
             self.eat(Kind::PuncOpenParen)?;
             let (parsed_args, parsed_rest) = self.parse_pattern_args()?;
             args = parsed_args;
@@ -1827,7 +1836,7 @@ impl Parser {
         }
 
         let mut type_args: Vec<ast::TypeIdentifier> = Vec::new();
-        if self.kind() == Kind::PuncOpenParen && !self.has_newline_before_current() {
+        if self.kind() == Kind::PuncOpenParen {
             type_args = self.parse_comma_list(Kind::PuncOpenParen, Kind::PuncCloseParen, |p| {
                 p.parse_type_identifier()
             })?;
@@ -2009,9 +2018,7 @@ impl Parser {
         }))
     }
 
-    // Whether an `=` follows the matching `)` on the same line. This is the
-    // same newline rule as `is_binding_ahead`: `(a, b)` with `=` on the next
-    // line is a tuple expression, then a separate node that errors.
+    // Whether an `=` follows the matching `)`.
     fn is_tuple_destructuring(&self) -> bool {
         let mut depth = 0;
         let mut i = self.index;
@@ -2023,12 +2030,10 @@ impl Parser {
             } else if tok.kind == Kind::PuncCloseParen {
                 depth -= 1;
                 if depth == 0 {
-                    return i + 1 < self.tokens.len()
-                        && self.tokens[i + 1].kind == Kind::PuncEquals
-                        && !self.tokens[i + 1]
-                            .leading_trivia
-                            .iter()
-                            .any(|t| matches!(t, Trivia::Newline));
+                    return self
+                        .tokens
+                        .get(i + 1)
+                        .is_some_and(|next| next.kind == Kind::PuncEquals);
                 }
             } else if tok.kind == Kind::Eof {
                 return false;
@@ -2039,8 +2044,8 @@ impl Parser {
     }
 
     /// Whether a `module::Ctor(..) = e` statement starts here: a module name,
-    /// `::`, a constructor name and its `(`, then an `=` after the matching `)`
-    /// on the same line. Without the `=` it is a call, `http::Fixed(1, b)`.
+    /// `::`, a constructor name and its `(`, then an `=` after the matching `)`.
+    /// Without the `=` it is a call, `http::Fixed(1, b)`.
     fn is_qualified_ctor_destructuring(&self) -> bool {
         let kind = |i: usize| self.tokens.get(self.index + i).map(|t| &t.kind);
         let (Some(Kind::Identifier(_)), Some(Kind::PuncColonColon), Some(Kind::Identifier(ctor))) =
@@ -2058,13 +2063,10 @@ impl Parser {
                 Kind::PuncCloseParen => {
                     depth -= 1;
                     if depth == 0 {
-                        return self.tokens.get(i + 1).is_some_and(|next| {
-                            next.kind == Kind::PuncEquals
-                                && !next
-                                    .leading_trivia
-                                    .iter()
-                                    .any(|t| matches!(t, Trivia::Newline))
-                        });
+                        return self
+                            .tokens
+                            .get(i + 1)
+                            .is_some_and(|next| next.kind == Kind::PuncEquals);
                     }
                 }
                 Kind::Eof => return false,
@@ -2192,6 +2194,9 @@ impl Parser {
         let mut attrs = Vec::new();
         while self.kind() == Kind::PuncAt {
             attrs.push(self.parse_attribute()?);
+            if self.kind() == Kind::LineEnd {
+                self.eat(Kind::LineEnd)?;
+            }
         }
         Ok(attrs)
     }
@@ -3029,16 +3034,34 @@ mod tests {
     }
 
     #[test]
-    fn test_newline_before_equals_is_not_a_binding() {
-        // A depth-0 newline before `=` ends the statement: the left-hand side
-        // parses as an expression and the stray `=` errors.
-        let r = parse("x\n= 1");
-        assert!(!r.diagnostics.is_empty(), "expected an error for stray `=`");
-        assert!(matches!(r.ast.body[0], ast::Node::Expression(_)));
+    fn a_line_starting_with_equals_continues_a_binding() {
+        // No statement starts with `=`, so the line break before it is only
+        // spacing.
+        for src in ["{\nx\n= 1\nx\n}", "{\n(a, b)\n= (1, 2)\na\n}"] {
+            let r = assert_no_errors(src);
+            assert!(
+                matches!(first_block_node(&r), ast::Node::Statement(_)),
+                "{src}"
+            );
+        }
+    }
 
-        let r = parse("(a, b)\n= (1, 2)");
-        assert!(!r.diagnostics.is_empty(), "expected an error for stray `=`");
-        assert!(matches!(r.ast.body[0], ast::Node::Expression(_)));
+    #[test]
+    fn statements_on_one_line_are_an_error() {
+        assert_single_error("{\nx = 1 y = 2\ny\n}", "Put each statement on its own line");
+        assert_single_error(
+            "match x {\nA -> 1 B -> 2\n}",
+            "Put each match arm on its own line",
+        );
+    }
+
+    #[test]
+    fn a_line_break_inside_brackets_is_only_spacing() {
+        // Each of these was a parse error, or two statements, when the parser
+        // looked at line breaks itself.
+        assert_no_errors("{\nf(\n1\n-2\n)\n}");
+        assert_no_errors("{\nxs[\n0\n]\n}");
+        assert_no_errors("{\n[\nf\n(1)\n]\n}");
     }
 
     #[test]
@@ -3161,12 +3184,17 @@ mod tests {
             "Expected an expression, but found '+'",
         );
         assert_single_error("match x { -> 1 }", "Expected a pattern, but found '->'");
-        // Constructor fields on one line need commas; a newline separates too.
+        // Constructor fields need commas. A line break in the brackets is only
+        // spacing, so it can't separate them.
         assert_no_errors("type P {\n\tP(a Int, b Int)\n}\n");
-        assert_no_errors("type P {\n\tP(\n\t\ta Int\n\t\tb Int\n\t)\n}\n");
+        assert_no_errors("type P {\n\tP(\n\t\ta Int,\n\t\tb Int,\n\t)\n}\n");
         assert_has_error(
             "type P {\n\tP(a Int b Int)\n}\n",
-            "Separate fields on one line with commas",
+            "Separate fields with commas",
+        );
+        assert_has_error(
+            "type P {\n\tP(\n\t\ta Int\n\t\tb Int\n\t)\n}\n",
+            "Separate fields with commas",
         );
         assert_no_errors("fn f(x (Int, Int)) Int { 1 }");
         assert_no_errors("match (1, 2) { (a, b) -> a }");

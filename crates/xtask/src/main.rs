@@ -176,6 +176,7 @@ fn classify(kind: &Kind) -> TokenClass {
     match kind {
         // These carry a payload or mark a position, so they aren't in the fixed-spelling list.
         Kind::Eof
+        | Kind::LineEnd
         | Kind::Error(_)
         | Kind::Identifier(_)
         | Kind::LiteralNumber(_)

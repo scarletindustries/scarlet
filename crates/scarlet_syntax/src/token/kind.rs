@@ -9,6 +9,9 @@ use super::keywords::Keyword;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Kind {
     Eof,
+    /// A line break that ends a statement. The scanner never makes one: the
+    /// parser inserts them, by the rule in `line_end`.
+    LineEnd,
     Error(Rc<str>),
     Identifier(Rc<str>),
     LiteralNumber(Rc<str>),
@@ -113,6 +116,7 @@ impl fmt::Display for Kind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
             Kind::Eof => "EOF",
+            Kind::LineEnd => "end of line",
             Kind::Error(s)
             | Kind::Identifier(s)
             | Kind::LiteralNumber(s)
@@ -179,6 +183,7 @@ mod tests {
             match kind {
                 // These have no fixed spelling: they carry text or mark a position.
                 Kind::Eof
+                | Kind::LineEnd
                 | Kind::Error(_)
                 | Kind::Identifier(_)
                 | Kind::LiteralNumber(_)

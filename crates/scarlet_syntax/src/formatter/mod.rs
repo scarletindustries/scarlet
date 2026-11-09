@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::ast;
 use crate::d;
@@ -9,10 +9,10 @@ use crate::span::Span;
 use crate::token::{Kind, Token, Trivia};
 
 pub mod doc;
+mod verify;
 use doc::{
-    Doc, block, delimited, delimited_commas_when_flat, delimited_hug, delimited_hug_list,
-    delimited_no_trailing, group, group_willing, hard_braces, hard_list, hard_list_bare, hardline,
-    hardlines, join, line, nest, nil, text,
+    Doc, block, delimited, delimited_hug, delimited_hug_list, delimited_no_trailing, group,
+    group_willing, hard_braces, hard_list, hardline, hardlines, join, line, nest, nil, text,
 };
 
 const MAX_WIDTH: isize = 100;
@@ -32,9 +32,8 @@ pub enum FormatResult {
     CommentsLost {
         comment: String,
     },
-    /// A formatter bug: the output does not re-parse into a program with the
-    /// same number of top-level nodes. No output; callers must leave the source
-    /// untouched.
+    /// A formatter bug: the output is not the same program as the input. No
+    /// output; callers must leave the source untouched.
     OutputInvalid {
         detail: String,
     },
@@ -56,6 +55,12 @@ fn comment_census(tokens: &[Token]) -> HashMap<String, usize> {
 }
 
 pub fn format(input: &str) -> FormatResult {
+    format_at(input, MAX_WIDTH)
+}
+
+/// `format` with lines up to `width` columns. Tests use narrow widths to make
+/// layout take every line break it can.
+fn format_at(input: &str, width: isize) -> FormatResult {
     let mut s = scanner::new_scanner(input.to_string());
     let (scanned_tokens, scanner_diagnostics) = s.scan_all();
 
@@ -101,18 +106,44 @@ pub fn format(input: &str) -> FormatResult {
         dotdot_before,
     };
     let body = f.program(&result.ast, &eof_trivia);
-    let mut output = doc::layout(&body, MAX_WIDTH);
-    while output.ends_with('\n') {
-        output.pop();
-    }
-    output.push('\n');
+
+    // Lay out, then read the output back with the real scanner and compare
+    // it to the doc's meaning (see `verify`). A line end that layout added is
+    // undone by keeping the breaks that made it flat. Each round keeps at
+    // least one more break flat, so this ends.
+    let reference = doc::layout_keeping_flat(&body, width, &doc::KeepFlat::All);
+    let (reference_tokens, _) = scanner::new_scanner(reference.text).scan_all();
+    let mut keep_flat = BTreeSet::new();
+    let (output, rescanned_tokens, rescan_diagnostics) = loop {
+        let layout =
+            doc::layout_keeping_flat(&body, width, &doc::KeepFlat::These(keep_flat.clone()));
+        let mut output = layout.text.clone();
+        while output.ends_with('\n') {
+            output.pop();
+        }
+        output.push('\n');
+        let mut rescan = scanner::new_scanner(output.clone());
+        let (tokens, diagnostics) = rescan.scan_all();
+        match verify::compare(&reference_tokens, &tokens, &layout) {
+            verify::Verdict::Same => break (output, tokens, diagnostics),
+            verify::Verdict::KeepFlat(ids) => {
+                let before = keep_flat.len();
+                keep_flat.extend(ids);
+                if keep_flat.len() == before {
+                    return FormatResult::OutputInvalid {
+                        detail: "layout keeps adding the same line end".to_string(),
+                    };
+                }
+            }
+            verify::Verdict::Different(detail) => {
+                return FormatResult::OutputInvalid { detail };
+            }
+        }
+    };
 
     // Postcondition: every input comment made it into the output. Comparing
     // trivia to trivia, never raw substrings, so a string literal that looks
     // like a comment cannot mask a real loss.
-    let mut rescan = scanner::new_scanner(output.clone());
-    let (rescanned_tokens, rescan_diagnostics) = rescan.scan_all();
-
     if !expected_comments.is_empty() {
         let actual_comments = comment_census(&rescanned_tokens);
         for (comment, &count) in &expected_comments {
@@ -124,9 +155,10 @@ pub fn format(input: &str) -> FormatResult {
         }
     }
 
-    // Postcondition: the output scans and parses into the same number of
-    // top-level nodes. `- -x` collapsing to the rejected `--` token was a real
-    // bug of this shape, and it must never overwrite valid source in place.
+    // `verify` proved the output means what the doc means. The doc is built
+    // from the input's AST, and this checks that it means a program at all,
+    // with the same top-level items. `- -x` rendering as the rejected `--`
+    // token was a real bug of this shape.
     let rp = parser::new_parser_from_tokens(rescanned_tokens, rescan_diagnostics);
     let reparsed = rp.parse_program();
     if let Some(d) = reparsed
@@ -559,12 +591,11 @@ impl Formatter {
             .map(|f| d![text(f.label.name.clone()), text(" "), self.type_(&f.typ)])
             .collect();
         // Four or more fields always go one per line: a wide constructor can
-        // fit under MAX_WIDTH and still be unreadable. A broken list needs no
-        // commas, and the parser accepts either form.
+        // fit under MAX_WIDTH and still be unreadable.
         let list = if fields.len() >= FIELDS_PER_LINE {
-            hard_list_bare("(", fields, ")")
+            hard_list("(", fields, ")")
         } else {
-            delimited_commas_when_flat("(", fields, ")")
+            delimited("(", fields, ")")
         };
         d![text(c.identifier.name.clone()), list]
     }
@@ -1305,6 +1336,60 @@ mod tests {
             }
             FormatResult::OutputInvalid { detail } => {
                 panic!("re-format produced invalid output ({detail}):\n{out}")
+            }
+        }
+    }
+
+    /// Every `.sca` file in the repo, formatted at widths so narrow that layout
+    /// breaks every line it can. Each must come out as a valid program that
+    /// formats again. (It need not be a fixed point: at a width this narrow,
+    /// list items measure differently once their list is broken.)
+    #[test]
+    fn every_line_break_is_safe() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files = Vec::new();
+        let mut dirs = vec![
+            root.join("examples"),
+            root.join("crates/scarlet/tests/programs"),
+            root.join("crates/scarlet_core/src/std"),
+        ];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().and_then(|s| s.to_str()) == Some("sca") {
+                    files.push(path);
+                }
+            }
+        }
+        assert!(files.len() > 50, "found only {} files", files.len());
+        for path in files {
+            let name = path.display();
+            let src = std::fs::read_to_string(&path).unwrap();
+            for width in [0, 20, 40, 60] {
+                let once = match format_at(&src, width) {
+                    FormatResult::Formatted { output } => output,
+                    FormatResult::ParseFailed { .. } => break,
+                    FormatResult::CommentsLost { comment } => {
+                        panic!("{name} at width {width} lost the comment `{comment}`")
+                    }
+                    FormatResult::OutputInvalid { detail } => {
+                        panic!("{name} at width {width}: {detail}")
+                    }
+                };
+                match format_at(&once, width) {
+                    FormatResult::Formatted { .. } => {}
+                    FormatResult::ParseFailed { errors } => {
+                        panic!("{name} at width {width} does not re-parse: {errors:?}\n{once}")
+                    }
+                    FormatResult::CommentsLost { comment } => {
+                        panic!("{name} at width {width} then lost the comment `{comment}`")
+                    }
+                    FormatResult::OutputInvalid { detail } => {
+                        panic!("{name} at width {width} then: {detail}")
+                    }
+                }
             }
         }
     }

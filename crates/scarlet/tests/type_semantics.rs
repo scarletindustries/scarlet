@@ -770,13 +770,13 @@ fn nested_ctor_pattern_exhaustive() {
     // `resolve_icon`'s cycle guard must not leak across sibling type arguments.
     check_ok(
         "pub fn main() {\n\
-         \tmatch Ok(Nil) { Ok(Nil) -> println('y') Err(e) -> println(e) }\n\
+         \tmatch Ok(Nil) { Ok(Nil) -> println('y')\n Err(e) -> println(e) }\n\
          }\n",
     );
     check_ok(
         "type T {\n\tA\n\tB\n}\n\
          pub fn main() {\n\
-         \tmatch Ok(A) { Ok(A) -> println('a') Ok(B) -> println('b') Err(e) -> println(e) }\n\
+         \tmatch Ok(A) { Ok(A) -> println('a')\n Ok(B) -> println('b')\n Err(e) -> println(e) }\n\
          }\n",
     );
 }
@@ -786,14 +786,14 @@ fn module_builtins_qualified_and_destructured() {
     check_ok(
         "import scarlet/net\n\
          pub fn main() {\n\
-         \tmatch net::listen('0.0.0.0', 8080) { Ok(s) -> println(s) Err(e) -> println(e) }\n\
+         \tmatch net::listen('0.0.0.0', 8080) { Ok(s) -> println(s)\n Err(e) -> println(e) }\n\
          }\n",
     );
     check_ok(
         "import scarlet/net\n\
          fn go(s net::Server) Nil { println(s) }\n\
          pub fn main() {\n\
-         \tmatch net::listen('0.0.0.0', 8080) { Ok(s) -> go(s) Err(e) -> println(e) }\n\
+         \tmatch net::listen('0.0.0.0', 8080) { Ok(s) -> go(s)\n Err(e) -> println(e) }\n\
          }\n",
     );
     check_ok(

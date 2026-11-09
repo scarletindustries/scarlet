@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
 use unicode_width::UnicodeWidthChar;
 
@@ -25,11 +25,13 @@ enum DocInner {
     /// Unlike `HardLine` it emits no indent, because the text's continuation
     /// lines must render verbatim.
     RawNewline,
-    /// Soft break. Flat → `unbroken`; broken → `broken` then newline+indent.
+    /// Soft break. Flat, it is a space or nothing. Broken, it is a newline and
+    /// the indent, after a `,` when it ends a list. Nothing else can go here,
+    /// so a soft break can only change spacing and trailing commas: the
+    /// tokens `verify` lets differ.
     Break {
-        broken: &'static str,
-        unbroken: &'static str,
-        width: isize,
+        flat: FlatBreak,
+        trailing_comma: bool,
     },
     /// `n` hard newlines. Forces every enclosing group to break.
     HardLine(usize),
@@ -133,23 +135,49 @@ fn single_line_text(s: Cow<'static, str>) -> Doc {
     Doc(DocInner::Text { s, width })
 }
 
+/// What a soft break prints when its group is flat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlatBreak {
+    Space,
+    Nothing,
+}
+
+impl FlatBreak {
+    fn text(self) -> &'static str {
+        match self {
+            FlatBreak::Space => " ",
+            FlatBreak::Nothing => "",
+        }
+    }
+
+    fn width(self) -> isize {
+        match self {
+            FlatBreak::Space => 1,
+            FlatBreak::Nothing => 0,
+        }
+    }
+}
+
 /// Soft break: " " when flat, newline when broken.
 pub(crate) fn line() -> Doc {
-    break_("", " ")
+    break_(false, FlatBreak::Space)
 }
 
 /// Soft break: "" when flat, newline when broken.
 fn line0() -> Doc {
-    break_("", "")
+    break_(false, FlatBreak::Nothing)
 }
 
-/// Soft break that emits `broken` (e.g. ",") before the newline when broken,
-/// and `unbroken` when flat.
-fn break_(broken: &'static str, unbroken: &'static str) -> Doc {
+/// The end of a list: nothing when flat, and a trailing comma before the
+/// newline when broken.
+fn trailing_comma() -> Doc {
+    break_(true, FlatBreak::Nothing)
+}
+
+fn break_(trailing_comma: bool, flat: FlatBreak) -> Doc {
     Doc(DocInner::Break {
-        broken,
-        unbroken,
-        width: str_width(unbroken),
+        flat,
+        trailing_comma,
     })
 }
 
@@ -327,7 +355,7 @@ fn delimited_with(
 /// `open i0, i1, ... close` on one line, or one item per line indented one tab
 /// with a trailing comma.
 pub(crate) fn delimited(open: &'static str, items: Vec<Doc>, close: &'static str) -> Doc {
-    delimited_with(open, items, close, d![text(","), line()], break_(",", ""))
+    delimited_with(open, items, close, d![text(","), line()], trailing_comma())
 }
 
 /// Like `delimited`, but a final item that provably renders across multiple
@@ -357,7 +385,7 @@ pub(crate) fn delimited_hug(open: &'static str, mut items: Vec<Doc>, close: &'st
         doc: Box::new(d![
             text(open),
             nest_if_broken(1, d![line0(), body]),
-            break_(",", ""),
+            trailing_comma(),
             text(close),
         ]),
         breaks: Breaks::Hugging,
@@ -392,7 +420,7 @@ pub(crate) fn delimited_hug_list(
     group(d![
         text(open),
         nest_if_broken(1, d![line0(), body]),
-        break_(",", ""),
+        trailing_comma(),
         text(close),
     ])
 }
@@ -417,38 +445,6 @@ pub(crate) fn block(body: Doc) -> Doc {
         Breaks::Willingly,
         d![text("{"), nest(1, d![line(), body]), line(), text("}")],
     )
-}
-
-/// Always broken one per line, with **no** separators, because the newline is
-/// the separator. Used for a constructor field list that is too long to read
-/// flat.
-pub(crate) fn hard_list_bare(open: &'static str, items: Vec<Doc>, close: &'static str) -> Doc {
-    if items.is_empty() {
-        return d![text(open), text(close)];
-    }
-    let mut parts = Vec::new();
-    for (i, it) in items.into_iter().enumerate() {
-        if i > 0 {
-            parts.push(hardline());
-        }
-        parts.push(it);
-    }
-    d![
-        text(open),
-        nest(1, d![hardline(), concat(parts)]),
-        hardline(),
-        text(close)
-    ]
-}
-
-/// Comma-separated when the list fits on one line; one per line with **no**
-/// commas when it breaks. The parser accepts either.
-pub(crate) fn delimited_commas_when_flat(
-    open: &'static str,
-    items: Vec<Doc>,
-    close: &'static str,
-) -> Doc {
-    delimited_with(open, items, close, break_("", ", "), line0())
 }
 
 /// A delimited list always broken one-per-line, with a trailing comma:
@@ -492,8 +488,48 @@ pub(crate) fn hard_braces(body: Doc) -> Doc {
     ]
 }
 
-pub(crate) fn layout(doc: &Doc, max_width: isize) -> String {
+#[cfg(test)]
+fn layout(doc: &Doc, max_width: isize) -> String {
+    layout_keeping_flat(doc, max_width, &KeepFlat::These(BTreeSet::new())).text
+}
+
+/// A rendered doc, and where each of its newlines came from.
+pub(crate) struct Layout {
+    pub(crate) text: String,
+    /// One entry per newline in `text`, in order: the soft break that made
+    /// it, or `None` for a hard newline.
+    pub(crate) newlines: Vec<Option<BreakId>>,
+}
+
+/// A soft break in a doc, named by its place among the doc's soft breaks in
+/// document order. Layout visits every node once and in that order, so the
+/// same doc always numbers its breaks the same way, whatever it decides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct BreakId(usize);
+
+/// Which soft breaks layout must render flat, whatever their group decides.
+pub(crate) enum KeepFlat {
+    These(BTreeSet<BreakId>),
+    /// Every one. What's left is the doc's own tokens and hard newlines: what
+    /// the formatter means, before any choice about width.
+    All,
+}
+
+impl KeepFlat {
+    fn contains(&self, id: BreakId) -> bool {
+        match self {
+            KeepFlat::These(ids) => ids.contains(&id),
+            KeepFlat::All => true,
+        }
+    }
+}
+
+/// Lays out `doc`, rendering the soft breaks in `flat` as if their groups
+/// were flat.
+pub(crate) fn layout_keeping_flat(doc: &Doc, max_width: isize, flat: &KeepFlat) -> Layout {
     let mut out = String::new();
+    let mut newlines: Vec<Option<BreakId>> = Vec::new();
+    let mut next_break = 0usize;
     let mut col: isize = 0;
     let mut work: VecDeque<(isize, Mode, &Doc)> = VecDeque::new();
     // Hoisted so every width probe reuses one allocation.
@@ -508,21 +544,27 @@ pub(crate) fn layout(doc: &Doc, max_width: isize) -> String {
                 col += width;
             }
             DocInner::Break {
-                broken,
-                unbroken,
-                width,
-            } => match mode {
-                Mode::Flat => {
-                    out.push_str(unbroken);
-                    col += width;
-                }
-                Mode::Broken => {
-                    out.push_str(broken);
+                flat: flat_text,
+                trailing_comma,
+            } => {
+                let id = BreakId(next_break);
+                next_break += 1;
+                if mode == Mode::Flat || flat.contains(id) {
+                    out.push_str(flat_text.text());
+                    col += flat_text.width();
+                } else {
+                    if *trailing_comma {
+                        out.push(',');
+                    }
                     emit_newline(&mut out, indent);
+                    newlines.push(Some(id));
                     col = indent * TAB_WIDTH;
                 }
-            },
+            }
             DocInner::HardLine(n) => {
+                for _ in 0..*n {
+                    newlines.push(None);
+                }
                 for _ in 1..*n {
                     out.push('\n');
                 }
@@ -532,6 +574,7 @@ pub(crate) fn layout(doc: &Doc, max_width: isize) -> String {
             DocInner::RawNewline => {
                 // No indent: the continuation line renders verbatim.
                 out.push('\n');
+                newlines.push(None);
                 col = 0;
             }
             DocInner::Nest(i, inner) => {
@@ -580,7 +623,10 @@ pub(crate) fn layout(doc: &Doc, max_width: isize) -> String {
             }
         }
     }
-    out
+    Layout {
+        text: out,
+        newlines,
+    }
 }
 
 fn emit_newline(out: &mut String, indent: isize) {
@@ -638,8 +684,8 @@ fn fits<'d>(
         match &d.0 {
             DocInner::Nil => {}
             DocInner::Text { width, .. } => remaining -= width,
-            DocInner::Break { width, .. } => match mode {
-                Mode::Flat => remaining -= width,
+            DocInner::Break { flat, .. } => match mode {
+                Mode::Flat => remaining -= flat.width(),
                 Mode::Broken => return true,
             },
             DocInner::HardLine(_) | DocInner::RawNewline => match mode {
@@ -692,7 +738,7 @@ mod tests {
         group(d![
             text(open),
             nest(1, d![line0(), text(arg)]),
-            break_(",", ""),
+            trailing_comma(),
             text(")"),
         ])
     }
@@ -721,7 +767,7 @@ mod tests {
                 1,
                 d![line0(), text("aaaaa"), text(","), line(), text("bbbbb")]
             ),
-            break_(",", ""),
+            trailing_comma(),
             text("]"),
         ]);
         assert_eq!(layout(&d, 80), "[aaaaa, bbbbb]");
@@ -876,7 +922,7 @@ mod tests {
         let outer = group(d![
             text("["),
             nest(1, d![line0(), call(), text(","), line(), text("x")]),
-            break_(",", ""),
+            trailing_comma(),
             text("]"),
         ]);
         assert_eq!(

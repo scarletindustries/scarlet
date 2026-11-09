@@ -697,7 +697,7 @@ fn stdlib_http_builtins() {
          pub fn main() {\n\
          \tr = match h1::parse_request(binary::from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
          \t\th1::Done(_, _, version, _, _, consumed) ->\n\
-         \t\t\tmatch version { h1::Http10 -> 10 h1::Http11 -> 11 } + consumed\n\
+         \t\t\tmatch version { h1::Http10 -> 10\n h1::Http11 -> 11 } + consumed\n\
          \t\th1::NeedMore -> 0\n\
          \t\th1::Bad(s) -> s\n\
          \t}\n\

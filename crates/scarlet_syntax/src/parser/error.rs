@@ -115,6 +115,9 @@ pub enum Expected {
 pub enum LineItem {
     Field,
     Constructor,
+    Statement,
+    Arm,
+    Declaration,
 }
 
 /// What came before a declaration keyword that was not there.
@@ -149,7 +152,7 @@ impl fmt::Display for ParseError {
             ),
             ParseError::SameLine(item) => write!(f, "Put each {item} on its own line"),
             ParseError::FieldsWithoutCommas => {
-                f.write_str("Separate fields on one line with commas, like `Name(a Int, b String)`")
+                f.write_str("Separate fields with commas, like `Name(a Int, b String)`")
             }
             ParseError::CommaBetweenArms => {
                 f.write_str("Match arms go on separate lines, without a `,` between them")
@@ -302,6 +305,9 @@ impl fmt::Display for LineItem {
         f.write_str(match self {
             LineItem::Field => "field",
             LineItem::Constructor => "constructor",
+            LineItem::Statement => "statement",
+            LineItem::Arm => "match arm",
+            LineItem::Declaration => "declaration",
         })
     }
 }

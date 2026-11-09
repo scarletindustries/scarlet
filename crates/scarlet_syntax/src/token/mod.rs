@@ -1,11 +1,14 @@
 mod ident;
 mod keywords;
 mod kind;
+mod line_end;
 mod trivia;
 
 pub use ident::{is_name_continue, is_name_start, is_type_name};
 pub use keywords::{Keyword, THEN, match_keyword};
 pub use kind::Kind;
+pub(crate) use line_end::insert_line_ends;
+pub(crate) use line_end::line_ends;
 pub use trivia::Trivia;
 
 use crate::span::Span;
