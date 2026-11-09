@@ -385,7 +385,7 @@ impl Compiler {
             scheme,
         } = ctor;
 
-        let inst = self.engine.instantiate(&scheme, &self.rigid_ids);
+        let inst = self.engine.instantiate(&scheme, &self.frames.current.rigid);
         if self.collect_hover_facts {
             let qualified = format!("{}.{}", self.engine.str(type_name), name.name);
             let doc = self.doc_if_collecting(&qualified);

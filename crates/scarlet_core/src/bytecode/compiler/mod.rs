@@ -60,9 +60,8 @@ use crate::typed_ir::checked::{
 };
 use crate::typed_ir::slots::{SlotError, slot_labeled};
 use crate::typed_ir::{
-    self, CaptureIdx, ClosureFact, Denotation, ElabCtx, FnTable, GlobalSlot, NameAt, NameFact,
-    OrShape, PreludeTys, RTy, ResolvedPool, TempTys, TypedExpr, TypedFn, TypedProgram, Zonker,
-    pool_for,
+    self, ClosureFact, Denotation, ElabCtx, FnTable, GlobalSlot, NameAt, NameFact, OrShape,
+    PreludeTys, RTy, ResolvedPool, TempTys, TypedExpr, TypedFn, TypedProgram, Zonker, pool_for,
 };
 use smallvec::SmallVec;
 
@@ -84,6 +83,7 @@ use crate::types::{
 };
 
 mod bridges;
+pub(super) mod frame;
 mod patterns;
 #[cfg(test)]
 mod tests;
@@ -276,16 +276,8 @@ impl CompileResult {
 // Compiler — single-pass: HM type inference + elaboration
 // ============================================================================
 
-/// An enclosing function frame's locals, moved here wholesale by
-/// `enter_fn_frame` and moved back by `finish_fn_frame`. Holding the map
-/// itself (rather than a name→slot copy) makes the frame push/pop O(1).
-#[derive(Clone)]
-pub(super) struct Scope {
-    locals: HashMap<StrId, LocalSlot>,
-}
-
 /// A live local binding: the stack slot it occupies plus the block-scope
-/// nesting depth (`scope_marks.len()`) at which it was bound. The depth lets
+/// nesting depth (its frame's `scope_marks.len()`) at which it was bound. The depth lets
 /// `get_or_create_local` decide in O(1) whether a re-binding shadows an
 /// enclosing scope (depth strictly shallower than the current scope ⇒ a fresh
 /// slot must be allocated so the outer value survives the block) or simply
@@ -326,30 +318,11 @@ pub(super) struct ToplevelDecl {
     pub(super) slot: GlobalSlot,
 }
 
-/// Compiler state snapshotted on entry to a nested function body and restored
-/// by `finish_fn_frame` once the body has been walked and parked.
-struct FnFrame {
-    /// `undo_log`/`scope_marks` lengths at frame entry. A nested body's
-    /// param/local bindings live in the *enclosing* scope's mark range (no
-    /// `push_local_scope` wraps bare params), so `finish_fn_frame` truncates
-    /// back to these — `locals` is restored wholesale from `outer_scopes`, so
-    /// the inner frame's undo entries must be discarded, never replayed
-    /// against the parent map.
-    undo_base: usize,
-    marks_base: usize,
-    local_count: i32,
-    captures: HashMap<StrId, i32>,
-    capture_names: Vec<StrId>,
-    rigid_ids: HashSet<i32>,
-    binding: Option<StrId>,
-    next_binder: u32,
-}
-
 /// Per-module compiler state snapshotted on entry to a submodule body by
-/// `enter_module_frame` and restored by `leave_module_frame`. Mirrors
-/// `FnFrame`: adding a per-module field means one line here plus one
-/// swap/restore in the enter/leave pair, not two hand-written
-/// `mem::replace` calls to remember at both ends of `compile_module_body`.
+/// `enter_module_frame` and restored by `leave_module_frame`. Adding a
+/// per-module field means one line here plus one swap/restore in the
+/// enter/leave pair, not two hand-written `mem::replace` calls to remember at
+/// both ends of `compile_module_body`.
 struct ModuleFrame {
     module: ModulePath,
     module_key: ModuleKey,
@@ -399,17 +372,8 @@ pub struct Compiler {
     /// constant) so `reset_to`'s pool truncate needs no paired invalidation —
     /// a stale entry just misses.
     const_dedup: HashMap<Const, ConstId>,
-    pub(super) locals: HashMap<StrId, LocalSlot>,
-    /// Scoped-symbol-table undo log. Every mutation of `locals` made inside an
-    /// open block scope appends `(name, previous entry)`; `pop_local_scope`
-    /// unwinds back to the entering scope's mark, restoring (or removing) each
-    /// touched name. Replaces snapshotting the whole `locals` map on every
-    /// block/if-arm/match-arm/lambda entry: cost is now O(bindings actually
-    /// shadowed) instead of O(scopes × live locals).
-    pub(super) undo_log: Vec<(StrId, Option<LocalSlot>)>,
-    /// `undo_log` length captured at each `push_local_scope`; `pop_local_scope`
-    /// unwinds the log down to the popped mark.
-    pub(super) scope_marks: Vec<usize>,
+    /// The bodies the walk is inside, the current one first.
+    pub(super) frames: frame::Frames,
     /// Depth-0 `locals` binds made while a module frame is open — a module's
     /// import items bind below its local scope, so `undo_log` never sees them.
     /// `leave_module_frame` replays this so an import's binding is scoped to
@@ -435,11 +399,6 @@ pub struct Compiler {
     /// system knows is `Nil` hides nothing, so the explicit `Nil` pattern is
     /// required instead. Drained by [`Compiler::check_nil_discards`].
     pub(super) nil_discards: Vec<(String, Ty, Span)>,
-    pub(super) outer_scopes: Vec<Scope>,
-    pub(super) local_count: i32,
-    /// The next [`BinderId`] of the body being walked. Saved and restarted
-    /// from zero around every function body and module toplevel.
-    pub(super) next_binder: u32,
     /// Global slot → [`FuncIdx`] for every top-level `fn`
     /// that has already been compiled. Populated by `compile_declared_function`
     /// after `finish_fn_frame` assigns the `func_idx`; consulted by
@@ -477,9 +436,6 @@ pub struct Compiler {
     /// node per solved type, for the whole `TypedProgram` the current
     /// `elaborate` call is building. Cleared there, with the pool.
     rty_cache: HashMap<Ty, RTy>,
-    pub(super) captures: HashMap<StrId, i32>,
-    pub(super) capture_names: Vec<StrId>,
-    pub(super) current_binding: Option<StrId>,
     /// One-shot self-name handed to the next `enter_fn_frame(None)` so a
     /// `name = fn(...)` binding's lambda can self-recurse, without leaking the
     /// enclosing fn's binding into unrelated (e.g. HOF-arg) lambdas.
@@ -495,10 +451,6 @@ pub struct Compiler {
     // --- Type inference state ---
     pub(super) engine: InferEngine,
     pub(super) env: TypeEnv,
-    /// Generic var ids rigid for the body being checked (a `fn` annotation's
-    /// type parameters). `instantiate` callers pass it so those ids are not
-    /// freshened inside the body.
-    pub(super) rigid_ids: HashSet<i32>,
     pub(super) recorded: Vec<RawRef>,
     /// Transient reference-graph collector for the module *currently* being
     /// analysed (entry file, or a submodule between the save/restore dance in
@@ -859,30 +811,21 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         main: None,
         consts: Vec::new(),
         const_dedup: HashMap::new(),
-        locals: HashMap::new(),
-        undo_log: vec![],
-        scope_marks: vec![],
+        frames: frame::Frames::toplevel(HashMap::new(), 0),
         locals_frame_undo: vec![],
         locals_frame_marks: vec![],
         retain_namespaces: false,
         unused: vec![],
         nil_discards: vec![],
-        outer_scopes: vec![],
-        local_count: 0,
-        next_binder: 0,
         global_to_func: HashMap::new(),
         toplevel_decls: Vec::new(),
         binding_globals: Vec::new(),
         walking_module_statements: false,
         rty_cache: HashMap::new(),
-        captures: HashMap::new(),
-        capture_names: vec![],
-        current_binding: None,
         next_fn_self_name: None,
         current_owner: None,
         engine: new_engine(),
         env: new_env(),
-        rigid_ids: HashSet::new(),
         recorded: vec![],
         module_refs: main_refs,
         check_only,
@@ -1169,7 +1112,7 @@ impl Compiler {
             inits,
             toplevel,
             main: self.main,
-            globals: self.local_count as u32,
+            globals: self.frames.current.slots as u32,
             types,
             abi,
         })
@@ -1373,13 +1316,14 @@ impl Compiler {
 
     fn get_or_create_local(&mut self, name: &str) -> i32 {
         let id = self.engine.intern(name);
-        if let Some(entry) = self.locals.get(&id).copied() {
+        let frame = &self.frames.current;
+        if let Some(entry) = frame.locals.get(&id).copied() {
             // Reuse only if this slot was bound in the *current* block scope.
             // If it was bound at a strictly shallower depth it is inherited
             // from an enclosing scope, and shadowing must allocate a fresh
             // slot so the outer value survives the block.
             let inherited =
-                !self.scope_marks.is_empty() && entry.depth < self.scope_marks.len() as u32;
+                !frame.scope_marks.is_empty() && entry.depth < frame.scope_marks.len() as u32;
             // At module scope (no enclosing fn frame) a re-binding must also
             // get a fresh slot. Top-level bindings live in the entry frame, so
             // a closure that captured one resolves it to `Global(slot)` and
@@ -1388,12 +1332,12 @@ impl Compiler {
             // with-shadowing — each binding is distinct — so the earlier
             // binding must survive. Nested scopes capture by value at
             // `MakeClosure` time, so same-scope reuse is safe there.
-            let module_scope = self.outer_scopes.is_empty();
+            let module_scope = self.frames.at_toplevel();
             if !inherited && !module_scope {
                 return entry.slot;
             }
         }
-        let idx = self.alloc_temp();
+        let idx = self.frames.current.alloc_slot();
         self.bind_local(id, idx);
         idx
     }
@@ -1412,16 +1356,19 @@ impl Compiler {
     /// The new entry keeps the binding the name meant until
     /// [`Self::publish_local`] gives it its own.
     fn bind_local_raw(&mut self, name: StrId, slot: i32) {
+        let is_global = self.binds_a_global();
+        let at_toplevel = self.frames.at_toplevel();
+        let frame = &mut self.frames.current;
         let entry = LocalSlot {
             slot,
-            depth: self.scope_marks.len() as u32,
-            is_global: self.binds_a_global(),
-            binder: self.locals.get(&name).and_then(|e| e.binder),
+            depth: frame.scope_marks.len() as u32,
+            is_global,
+            binder: frame.locals.get(&name).and_then(|e| e.binder),
         };
-        let prev = self.locals.insert(name, entry);
-        if !self.scope_marks.is_empty() {
-            self.undo_log.push((name, prev));
-        } else if !self.locals_frame_marks.is_empty() {
+        let prev = frame.locals.insert(name, entry);
+        if !frame.scope_marks.is_empty() {
+            frame.undo_log.push((name, prev));
+        } else if at_toplevel && !self.locals_frame_marks.is_empty() {
             self.locals_frame_undo.push((name, prev));
         }
     }
@@ -1442,7 +1389,7 @@ impl Compiler {
     /// opens a matching scope of its own, so a `let` inside one of its nested
     /// blocks is a frame temp there too.
     fn binds_a_global(&self) -> bool {
-        self.outer_scopes.is_empty() && self.scope_marks.len() <= 1
+        self.frames.at_toplevel() && self.frames.current.scope_marks.len() <= 1
     }
 
     /// [`Self::bind_local_raw`], plus: if this is a module-scope binding,
@@ -1473,7 +1420,7 @@ impl Compiler {
     /// elaborator on its own [`ToplevelDecl`] record instead.
     pub(super) fn alloc_decl_slot(&mut self, name: &str) -> (GlobalSlot, BinderId) {
         let id = self.engine.intern(name);
-        let idx = self.alloc_temp();
+        let idx = self.frames.current.alloc_slot();
         self.bind_local_raw(id, idx);
         (GlobalSlot(idx), self.publish_local(id))
     }
@@ -1482,44 +1429,39 @@ impl Compiler {
     /// and return that binding's [`BinderId`]. Uses walked before this, and
     /// the binding's own init, still mean whatever the name meant before.
     fn publish_local(&mut self, name: StrId) -> BinderId {
-        let binder = BinderId(self.next_binder);
-        self.next_binder += 1;
+        let frame = &mut self.frames.current;
+        let binder = frame.mint_binder();
         // The entry was made in the current scope, so the undo log already
         // restores what it displaced.
-        if let Some(entry) = self.locals.get_mut(&name) {
+        if let Some(entry) = frame.locals.get_mut(&name) {
             entry.binder = Some(binder);
         }
         binder
     }
 
-    #[inline]
-    fn alloc_temp(&mut self) -> i32 {
-        let idx = self.local_count;
-        self.local_count += 1;
-        idx
-    }
-
     pub(super) fn push_local_scope(&mut self) {
-        self.scope_marks.push(self.undo_log.len());
+        let frame = &mut self.frames.current;
+        frame.scope_marks.push(frame.undo_log.len());
         self.unused.push(HashMap::new());
     }
 
     pub(super) fn pop_local_scope(&mut self) {
-        if let Some(mark) = self.scope_marks.pop() {
+        let frame = &mut self.frames.current;
+        if let Some(mark) = frame.scope_marks.pop() {
             // Unwind in reverse bind order so a name shadowed twice in the
             // same scope lands back on its pre-scope entry. `mark` is a length
             // captured at the matching push, so it never exceeds the log.
             debug_assert!(
-                mark <= self.undo_log.len(),
+                mark <= frame.undo_log.len(),
                 "unbalanced push/pop_local_scope"
             );
-            for (name, prev) in self.undo_log.drain(mark..).rev() {
+            for (name, prev) in frame.undo_log.drain(mark..).rev() {
                 match prev {
                     Some(entry) => {
-                        self.locals.insert(name, entry);
+                        frame.locals.insert(name, entry);
                     }
                     None => {
-                        self.locals.remove(&name);
+                        frame.locals.remove(&name);
                     }
                 }
             }
@@ -1581,12 +1523,12 @@ impl Compiler {
     fn resolve_variable(&mut self, name: StrId) -> Option<Place> {
         self.mark_used(name);
         // A slot reserved for a binding not yet made is not in scope.
-        if let Some(binder) = self.locals.get(&name).and_then(|e| e.binder) {
+        let frame = &self.frames.current;
+        if let Some(binder) = frame.locals.get(&name).and_then(|e| e.binder) {
             return Some(Place::ThisFunction(binder));
         }
-        if let Some(idx) = self.captures.get(&name) {
-            debug_assert!(*idx >= 0, "capture index is a Vec index");
-            return Some(Place::Outside(Denotation::capture(CaptureIdx(*idx))));
+        if let Some(idx) = frame.captures.get(name) {
+            return Some(Place::Outside(Denotation::capture(idx)));
         }
         // Search enclosing scopes innermost-first so inner bindings shadow
         // outer ones. The bottom of the stack (index 0) is always the entry
@@ -1606,10 +1548,10 @@ impl Compiler {
         // decided once, by [`Self::binds_a_global`], and recorded on the
         // binding; re-deriving it here from `depth` is how the loader and the
         // binder came to disagree on the bare-expression entry path.
-        for (i, scope) in self.outer_scopes.iter().enumerate().rev() {
-            if let Some(entry) = scope.locals.get(&name) {
+        for (i, outer) in self.frames.outer().iter().enumerate().rev() {
+            if let Some(entry) = outer.locals.get(&name) {
                 let is_global = i == 0 && entry.is_global;
-                if self.current_binding == Some(name) {
+                if frame.self_name == Some(name) {
                     // A top-level fn's self-name resolves to its entry-frame
                     // slot so a value load emits `PushGlobal`; `PushSelf` would
                     // read the sentinel `captures` a `CallKnown` frame carries.
@@ -1625,10 +1567,8 @@ impl Compiler {
                         self.global_denotation(GlobalSlot(entry.slot)),
                     ));
                 }
-                let capture_idx = self.capture_names.len() as i32;
-                self.captures.insert(name, capture_idx);
-                self.capture_names.push(name);
-                return Some(Place::Outside(Denotation::capture(CaptureIdx(capture_idx))));
+                let idx = self.frames.current.captures.add(name);
+                return Some(Place::Outside(Denotation::capture(idx)));
             }
         }
         None
@@ -2065,7 +2005,8 @@ impl Compiler {
         // binding still reserves its slot up front so a self-recursive
         // lambda can resolve its own (not-yet-bound) name through the
         // entry frame.
-        let defer_slot = self.outer_scopes.is_empty() && self.locals.contains_key(&name_id);
+        let defer_slot =
+            self.frames.at_toplevel() && self.frames.current.locals.contains_key(&name_id);
         if !defer_slot {
             self.get_or_create_local(&name);
         }
@@ -2462,10 +2403,12 @@ impl Compiler {
             // No compiler scope may span a module frame: imports (the only
             // depth-0 binds inside a frame) are processed before the module's
             // own local scope opens.
-            debug_assert!(self.scope_marks.is_empty());
+            debug_assert!(self.frames.current.scope_marks.is_empty());
             self.env.push_module_frame();
-            self.locals_frame_marks
-                .push((self.locals_frame_undo.len(), self.undo_log.len()));
+            self.locals_frame_marks.push((
+                self.locals_frame_undo.len(),
+                self.frames.current.undo_log.len(),
+            ));
         }
         ModuleFrame {
             module: std::mem::replace(&mut self.current_module, path),
@@ -2497,23 +2440,16 @@ impl Compiler {
             // `undo_log` mark were attributed to a scope already open at
             // frame entry, so they unwind here too.
             if let Some((fmark, umark)) = self.locals_frame_marks.pop() {
-                for (name, prev) in self.undo_log.drain(umark..).rev() {
+                let frame = &mut self.frames.current;
+                let undone = frame.undo_log.drain(umark..).rev();
+                let undone = undone.chain(self.locals_frame_undo.drain(fmark..).rev());
+                for (name, prev) in undone {
                     match prev {
                         Some(p) => {
-                            self.locals.insert(name, p);
+                            frame.locals.insert(name, p);
                         }
                         None => {
-                            self.locals.remove(&name);
-                        }
-                    }
-                }
-                for (name, prev) in self.locals_frame_undo.drain(fmark..).rev() {
-                    match prev {
-                        Some(p) => {
-                            self.locals.insert(name, p);
-                        }
-                        None => {
-                            self.locals.remove(&name);
+                            frame.locals.remove(&name);
                         }
                     }
                 }
@@ -3029,7 +2965,7 @@ impl Compiler {
         match self.resolve_variable(id) {
             Some(Place::ThisFunction(binder)) => (NameAt::Local(binder), true),
             Some(Place::Outside(den)) => (NameAt::Den(den), true),
-            None if self.outer_scopes.is_empty() => (NameAt::Unbound, false),
+            None if self.frames.at_toplevel() => (NameAt::Unbound, false),
             None => (NameAt::Den(Denotation::self_closure()), false),
         }
     }
@@ -3114,7 +3050,7 @@ impl Compiler {
             return (self.engine.fresh_var(), CKind::Error);
         };
 
-        let ty = self.engine.instantiate(scheme, &self.rigid_ids);
+        let ty = self.engine.instantiate(scheme, &self.frames.current.rigid);
         let kind = scheme.kind;
         let def = scheme.def;
         // `record` discards everything on the non-LSP path (see its early
@@ -3338,7 +3274,7 @@ impl Compiler {
             qualifier,
         }) = self.resolve_simple_callee(&expr.callee)
         {
-            let inst_ty = self.engine.instantiate(&scheme, &self.rigid_ids);
+            let inst_ty = self.engine.instantiate(&scheme, &self.frames.current.rigid);
             let param_labels = self.param_labels_of(scheme.kind);
             let fact = NameFact {
                 ty: inst_ty,
@@ -3909,7 +3845,9 @@ impl Compiler {
         let Some(m) = self.resolve_module_access(expr) else {
             return (self.engine.fresh_var(), CKind::Error);
         };
-        let ty = self.engine.instantiate(&m.scheme, &self.rigid_ids);
+        let ty = self
+            .engine
+            .instantiate(&m.scheme, &self.frames.current.rigid);
         let fact = NameFact {
             ty,
             at: m.at,
@@ -4260,12 +4198,12 @@ impl Compiler {
         // Typecheck walk. Nested closures encountered here re-enter this fn
         // (via `compile_function_common`) and park their own bodies + reserve
         // their slots before we reserve ours.
-        let params_end = self.local_count;
+        let params_end = self.frames.current.slots;
         let checked = self.compile_expr(body);
         let body_ty = checked.ty;
-        // The walk still bumped `local_count` for the pattern binds it
-        // reserved; those slots are dead, so rewind to the param watermark.
-        self.local_count = params_end;
+        // The walk still handed out slots for the pattern binds it reserved;
+        // those slots are dead, so rewind to the params.
+        self.frames.current.slots = params_end;
         debug_assert!(
             self.defer_depth > 0,
             "every function body must be walked inside a deferral region: \
@@ -4275,7 +4213,9 @@ impl Compiler {
         // drain time, where `CleanModule` cannot be minted for it: the
         // elaborator is never shown a subtree the checker rejected.
         let name = self
-            .current_binding
+            .frames
+            .current
+            .self_name
             .unwrap_or_else(|| self.engine.intern("__anon__"));
         let param_binds: Vec<(StrId, BinderId, Ty)> = params
             .iter()
@@ -4590,7 +4530,10 @@ impl Compiler {
             binders.push(self.bind_param(param, p_ty));
         }
         // Any tyvars the hydrator minted are rigid for the body.
-        self.rigid_ids.extend(hydrator.rigid_ids().iter().copied());
+        self.frames
+            .current
+            .rigid
+            .extend(hydrator.rigid_ids().iter().copied());
 
         let (body_ty, body_emit) = self.compile_fn_body(params, &param_tys, &binders, body);
         let ret_ty = match return_annot {
@@ -4631,7 +4574,7 @@ impl Compiler {
         hydrator: &Hydrator,
     ) -> Ty {
         let saved = self.enter_fn_frame(Some(name));
-        self.rigid_ids = hydrator.rigid_ids().clone();
+        self.frames.current.rigid = hydrator.rigid_ids().clone();
         let binders: Vec<BinderId> = params
             .iter()
             .zip(param_tys.iter())
@@ -4654,41 +4597,20 @@ impl Compiler {
         self.engine.mk_fun(&param_tys, ret_ty)
     }
 
-    /// Snapshot the enclosing frame's state, push a fresh inner frame, and
-    /// open a new type-env scope.
-    fn enter_fn_frame(&mut self, binding: Option<&str>) -> FnFrame {
-        let binding_id = binding.map(|n| self.engine.intern(n));
-        // The enclosing frame's locals already map any preallocated
-        // entry-frame slots (analysis.rs Pass 3); moving the map into
-        // `outer_scopes` as-is lets a nested lambda resolve the enclosing fn
-        // name through outer_scopes[0] at the right slot (depth is irrelevant
-        // for outer-scope resolution). `finish_fn_frame` moves it back.
-        self.outer_scopes.push(Scope {
-            locals: std::mem::take(&mut self.locals),
-        });
+    /// Start walking a nested body, and open a new type-env scope for it.
+    ///
+    /// A lambda has no name to call itself by unless it is the init of a
+    /// `name = fn(..)` binding, which leaves that name in `next_fn_self_name`.
+    /// It must not inherit the enclosing body's: a lambda passed to a
+    /// higher-order function and calling the enclosing `fn` would call itself.
+    fn enter_fn_frame(&mut self, binding: Option<&str>) -> frame::Entered {
+        let self_name = match binding {
+            Some(n) => Some(self.engine.intern(n)),
+            None => self.next_fn_self_name.take(),
+        };
         self.env.push_scope();
         self.unused.push(HashMap::new());
-        FnFrame {
-            undo_base: self.undo_log.len(),
-            marks_base: self.scope_marks.len(),
-            local_count: std::mem::replace(&mut self.local_count, 0),
-            captures: std::mem::take(&mut self.captures),
-            capture_names: std::mem::take(&mut self.capture_names),
-            rigid_ids: self.rigid_ids.clone(),
-            next_binder: std::mem::replace(&mut self.next_binder, 0),
-            binding: match binding_id {
-                Some(id) => self.current_binding.replace(id),
-                None => {
-                    // A lambda / fn-expression has no self-name UNLESS it is the
-                    // RHS of a `name = fn(...)` binding, which stashes that name
-                    // in `next_fn_self_name` (consumed one-shot here). Inheriting
-                    // the enclosing fn's `current_binding` is wrong: a HOF-arg
-                    // lambda calling the enclosing fn would mis-resolve to Self_
-                    // and emit CallSelf against the lambda's own live frame.
-                    std::mem::replace(&mut self.current_binding, self.next_fn_self_name.take())
-                }
-            },
-        }
+        self.frames.enter(self_name)
     }
 
     /// Register a freshly-typed local binding into the type environment, the
@@ -4721,15 +4643,11 @@ impl Compiler {
     /// capture loads there, which goes on the enclosing frame's checked tree.
     ///
     /// Nothing is lowered here: the body is lowered in pass 6, after the walk.
-    fn finish_fn_frame(&mut self, saved: FnFrame, parked: ParkedBody) -> ClosureFact {
-        self.current_binding = saved.binding;
-        self.rigid_ids = saved.rigid_ids;
-        self.next_binder = saved.next_binder;
-        self.captures = saved.captures;
+    fn finish_fn_frame(&mut self, entered: frame::Entered, parked: ParkedBody) -> ClosureFact {
+        let captured = self.frames.leave(entered).captures.into_names();
         self.env.pop_scope();
         self.pop_unused_scope();
 
-        let captured = std::mem::replace(&mut self.capture_names, saved.capture_names);
         // Reserve the body's slot now, so the `func_idx` that the
         // `ClosureFact` and `global_to_func` are about to record is the one the
         // elaborated body fills in.
@@ -4748,17 +4666,6 @@ impl Compiler {
             func_idx,
         });
 
-        // `enter_fn_frame` pushed the enclosing frame's locals; move them back.
-        if let Some(scope) = self.outer_scopes.pop() {
-            self.locals = scope.locals;
-        }
-        // `locals` is restored wholesale, so the inner frame's undo entries
-        // (params bound in the enclosing mark range, never wrapped by a
-        // `push_local_scope`) must be dropped, not replayed against the parent.
-        self.undo_log.truncate(saved.undo_base);
-        self.scope_marks.truncate(saved.marks_base);
-        self.local_count = saved.local_count;
-
         // Re-resolving each capture in the *enclosing* frame is load-bearing:
         // `resolve_variable` promotes a name this body captured from further
         // out into the enclosing frame's own capture set, so transitive
@@ -4772,7 +4679,7 @@ impl Compiler {
                 let (at, ty) = match scheme {
                     Some(scheme) => (
                         self.name_at(cap_name, scheme.kind).0,
-                        self.engine.instantiate(&scheme, &self.rigid_ids),
+                        self.engine.instantiate(&scheme, &self.frames.current.rigid),
                     ),
                     None => (NameAt::Unbound, self.engine.fresh_var()),
                 };

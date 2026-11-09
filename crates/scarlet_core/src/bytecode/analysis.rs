@@ -235,7 +235,7 @@ impl Compiler {
     ) -> Vec<CNode> {
         // The module toplevel is a body of its own, so its binders count from
         // zero.
-        let outer_binder = std::mem::replace(&mut self.next_binder, 0);
+        let outer_binder = std::mem::replace(&mut self.frames.current.next_binder, 0);
         self.push_local_scope();
 
         // Pass 0 — partition + reserved/duplicate name checks.
@@ -657,7 +657,7 @@ impl Compiler {
         self.check_nil_discards();
 
         self.pop_local_scope();
-        self.next_binder = outer_binder;
+        self.frames.current.next_binder = outer_binder;
         nodes
     }
 

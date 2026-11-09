@@ -60,7 +60,7 @@ impl ElabCtx for Compiler {
     fn toplevel_fn_ty(&mut self, name: StrId) -> Option<Ty> {
         let name = self.engine.str(name).to_string();
         let scheme = self.env.lookup(&name)?;
-        Some(self.engine.instantiate(scheme, &self.rigid_ids))
+        Some(self.engine.instantiate(scheme, &self.frames.current.rigid))
     }
     fn decl_denotation(&self, binder: BinderId) -> Option<Denotation> {
         Compiler::decl_denotation(self, binder)

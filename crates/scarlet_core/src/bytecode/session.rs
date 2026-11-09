@@ -179,7 +179,7 @@ impl Compiler {
             env: self.env.watermark(),
             functions: self.fns.len(),
             constants: self.consts.len(),
-            local_count: self.local_count,
+            local_count: self.frames.current.slots,
         }
     }
 
@@ -213,14 +213,17 @@ impl Compiler {
         self.env.push_scope();
         self.fns.truncate(functions);
         self.consts.truncate(constants);
-        self.local_count = local_count;
         self.global_to_func.retain(|_, fi| fi.index() < functions);
         // Survivors are watermark-preserved entry-frame slots. Depth normalises
         // to 0 so the next opened scope treats them as inherited. The `StrId`
         // key must also survive the strings truncation: an aliased selective
         // import can bind a post-watermark key to a pre-watermark slot, and a
         // dangling key would collide with whatever re-interns at that index.
-        self.locals.retain(|&k, v| {
+        //
+        // Everything else a body keeps (captures, binders, open blocks,
+        // rigid type variables) starts over with a fresh toplevel frame.
+        let mut locals = std::mem::take(&mut self.frames.current.locals);
+        locals.retain(|&k, v| {
             if v.slot < local_count && k.idx() < engine.strings {
                 v.depth = 0;
                 true
@@ -228,6 +231,7 @@ impl Compiler {
                 false
             }
         });
+        self.frames = super::compiler::frame::Frames::toplevel(locals, local_count);
 
         // Lowered toplevels are dropped, never truncated: they are recorded
         // at the end of a module's compile, and a rewound compile's init code
@@ -240,19 +244,11 @@ impl Compiler {
         self.binding_globals.clear();
         self.walking_module_statements = false;
 
-        self.undo_log.clear();
-        self.scope_marks.clear();
-        self.next_binder = 0;
         self.unused.clear();
         // Queued entries hold `Ty` indices into the arena just rewound.
         self.nil_discards.clear();
-        self.outer_scopes.clear();
-        self.captures.clear();
-        self.capture_names.clear();
-        self.current_binding = None;
         self.next_fn_self_name = None;
         self.current_owner = None;
-        self.rigid_ids.clear();
         self.recorded.clear();
         // `ref_interner` is deliberately not cleared, so `DefId`s in surviving
         // `CachedModule.module_refs` keep resolving to stable `ModuleId`s.
