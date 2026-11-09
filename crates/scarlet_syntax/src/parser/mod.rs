@@ -558,7 +558,8 @@ impl Parser {
     // Looks ahead on this line for a `<-` outside any brackets, which makes
     // the statement a backpass: its binders are patterns, like the left of
     // `=`. An `=`, a block, or the end of the line first means it is
-    // something else: a binding, a call, a comparison.
+    // something else: a binding, a call, a comparison. A newline inside
+    // brackets doesn't end the line, so `(a,\n b) <- f()` is still a backpass.
     fn is_backpass_ahead(&self) -> bool {
         let mut depth = 0usize;
         for (i, tok) in self.tokens.iter().enumerate().skip(self.index) {
@@ -566,7 +567,7 @@ impl Parser {
                 .leading_trivia
                 .iter()
                 .any(|t| matches!(t, Trivia::Newline));
-            if i > self.index && starts_line {
+            if i > self.index && starts_line && depth == 0 {
                 return false;
             }
             match tok.kind {
@@ -2859,6 +2860,15 @@ mod tests {
         // `a<-g(1)` lexes as ident `<-` call, not `a < -g(1)`.
         let r = assert_no_errors("{\na<-g(1)\na\n}");
         assert_backpass(first_block_node(&r), &["a"]);
+    }
+
+    #[test]
+    fn a_backpass_pattern_can_wrap_inside_brackets() {
+        let r = assert_no_errors("{\n(\n\ta,\n\tb,\n) <- h(2)\na + b\n}");
+        let ast::Node::Statement(s) = first_block_node(&r) else {
+            panic!("expected a statement");
+        };
+        assert!(matches!(s.as_ref(), ast::Statement::Backpass(_)), "{s:#?}");
     }
 
     /// The left of `<-` is a pattern, like the left of `=`.

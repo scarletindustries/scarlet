@@ -1285,6 +1285,12 @@ mod tests {
         assert_round_trips(&out);
     }
 
+    #[test]
+    fn a_long_backpass_pattern_wraps_and_re_parses() {
+        let src = "fn f(r Result((Int, Int), Nil)) Result(Int, Nil) {\n\t(aaaaaaaaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb) <- result::then(result::map_err(r, fn(e) e))\n\tOk(aaaaaaaaaaaaaaaaaaaaaa + bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)\n}\n";
+        assert_round_trips(&fmt(src));
+    }
+
     #[track_caller]
     fn assert_round_trips(out: &str) {
         match format(out) {
