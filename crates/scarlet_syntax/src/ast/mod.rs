@@ -240,11 +240,12 @@ pub struct ConstBinding {
 /// rewritten away by [`crate::desugar`] before type checking. `call` is
 /// always a [`FunctionCallExpression`], because the parser rejects anything
 /// else.
-/// A `_` binder is an [`Identifier`] named `_`, matching how a discarded
-/// function parameter is spelled.
+///
+/// Each binder is a pattern, like the left of `=`: `Nil <- f()`,
+/// `(a, b) <- g()`. It has to match every value, as a binding's does.
 #[derive(Debug, Clone)]
 pub struct BackpassBinding {
-    pub binders: Vec<Identifier>,
+    pub binders: Vec<Pattern>,
     pub call: Expression,
     pub(crate) span: Span,
 }

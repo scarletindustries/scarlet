@@ -198,8 +198,8 @@ module.exports = grammar({
     // `a, b <- call(args)` desugars to `call(args, fn(a, b) { rest })`.
     backpass: ($) =>
       seq(
-        field('binder', $.identifier),
-        repeat(seq(',', field('binder', $.identifier))),
+        field('binder', $._pattern),
+        repeat(seq(',', field('binder', $._pattern))),
         '<-',
         field('call', $.call_expression),
       ),

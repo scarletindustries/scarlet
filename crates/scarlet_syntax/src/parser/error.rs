@@ -75,9 +75,6 @@ pub enum ParseError {
     BackpassOr,
     BackpassNotCall,
     BackpassAtTopLevel,
-    BackpassBinderUppercase {
-        name: String,
-    },
 }
 
 /// What a parser step wanted to read when it found something else.
@@ -103,7 +100,6 @@ pub enum Expected {
     DeclaredTypeName,
     FieldLabel,
     ConstName,
-    BinderName,
     AttributeName,
     AttributeArgument,
     ImportedModule,
@@ -262,10 +258,6 @@ impl fmt::Display for ParseError {
                 "Backpassing is not allowed at the top level of a module. Use it inside a \
                  function or a block",
             ),
-            ParseError::BackpassBinderUppercase { name } => write!(
-                f,
-                "A backpass can only bind plain names or `_`, but found '{name}'"
-            ),
         }
     }
 }
@@ -293,7 +285,6 @@ impl fmt::Display for Expected {
             Expected::DeclaredTypeName => "Expected a type name after `type`",
             Expected::FieldLabel => "Expected a field label",
             Expected::ConstName => "Expected a constant name",
-            Expected::BinderName => "Expected a name to bind",
             Expected::AttributeName => "Expected an attribute name after `@`",
             Expected::AttributeArgument => "Expected an attribute argument",
             Expected::ImportedModule => "Expected a module name after `import`",

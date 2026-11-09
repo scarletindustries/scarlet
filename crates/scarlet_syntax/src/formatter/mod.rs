@@ -335,7 +335,7 @@ impl Formatter {
                     if i > 0 {
                         parts.push(text(", "));
                     }
-                    parts.push(text(b.name.clone()));
+                    parts.push(self.pattern(b));
                 }
                 parts.push(text(" <- "));
                 parts.push(self.expr(&s.call));
@@ -1434,6 +1434,9 @@ mod tests {
             ("backpass_discard_binder",
              "fn f() Int {\n\t_ <- g(1)\n\t0\n}\n",
              "fn f() Int {\n\t_ <- g(1)\n\t0\n}\n"),
+            ("backpass_pattern_binders",
+             "fn f() Int {\n\tNil <- g(1)\n\t(a,b) <- h(2)\n\ta + b\n}\n",
+             "fn f() Int {\n\tNil <- g(1)\n\t(a, b) <- h(2)\n\ta + b\n}\n"),
             ("comment_preserved_above_fn",
              "// hello\nfn a() Int { 1 }\n",
              "// hello\nfn a() Int {\n\t1\n}\n"),

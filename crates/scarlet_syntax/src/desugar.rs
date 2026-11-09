@@ -74,7 +74,13 @@ fn desugar_body(body: &mut Vec<Node>) {
 /// `call(args)` plus the nodes after the statement → `call(args, fn(..) {
 /// rest })`. A backpass ending its block passes an empty continuation: the
 /// lambda body is an empty block, which evaluates to Nil.
-fn rebuild_backpass(bp: BackpassBinding, rest: Vec<Node>) -> Expression {
+///
+/// A binder that is a plain name a body may read becomes the parameter
+/// itself. Any other binder (a pattern, or a write-only `_name`) becomes a
+/// parameter no source can spell, bound to the pattern at the top of the body
+/// like any other binding: `Nil <- f()` is `f(fn(p) { Nil = p .. })`, so it
+/// gets the same checks `Nil = p` does.
+fn rebuild_backpass(bp: BackpassBinding, mut rest: Vec<Node>) -> Expression {
     let BackpassBinding {
         binders,
         mut call,
@@ -86,20 +92,41 @@ fn rebuild_backpass(bp: BackpassBinding, rest: Vec<Node>) -> Expression {
             (Some(f), Some(l)) => f.span().union(&l.span()),
             _ => span,
         };
-        let params = binders
-            .into_iter()
-            .map(|identifier| FunctionParameter {
+        let mut params = Vec::with_capacity(binders.len());
+        let mut bindings = Vec::new();
+        for (i, pattern) in binders.into_iter().enumerate() {
+            let identifier = match plain_name(pattern) {
+                Ok(name) => name,
+                Err(pattern) => {
+                    let param = Identifier {
+                        name: format!("<backpass {i}>"),
+                        span: pattern.span(),
+                    };
+                    bindings.push(Node::Statement(Box::new(Statement::Binding(Box::new(
+                        Binding {
+                            doc: None,
+                            span: pattern.span(),
+                            pattern,
+                            typ: None,
+                            init: Expression::Identifier(param.clone()),
+                        },
+                    )))));
+                    param
+                }
+            };
+            params.push(FunctionParameter {
                 identifier,
                 typ: None,
-            })
-            .collect();
+            });
+        }
+        bindings.append(&mut rest);
         fc.arguments
             .push(CallArg::Positional(Expression::FunctionExpression(
                 FunctionExpression {
                     return_type: None,
                     params,
                     body: Box::new(Expression::BlockExpression(BlockExpression {
-                        body: rest,
+                        body: bindings,
                         span: body_span,
                     })),
                     span,
@@ -107,6 +134,22 @@ fn rebuild_backpass(bp: BackpassBinding, rest: Vec<Node>) -> Expression {
             )));
     }
     call
+}
+
+/// The binder as a parameter name, when it is a plain name a body may read.
+/// Anything else, a pattern or a write-only `_name`, comes back to be bound.
+fn plain_name(pattern: Pattern) -> Result<Identifier, Pattern> {
+    match pattern {
+        Pattern::Var { name } if !name.name.starts_with('_') => Ok(name),
+        other @ (Pattern::Var { .. }
+        | Pattern::Constructor { .. }
+        | Pattern::Tuple { .. }
+        | Pattern::Array { .. }
+        | Pattern::Binary { .. }
+        | Pattern::Literal(_)
+        | Pattern::Or { .. }
+        | Pattern::Range { .. }) => Err(other),
+    }
 }
 
 fn desugar_node(node: &mut Node) {

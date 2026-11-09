@@ -1119,7 +1119,7 @@
           "name": "binder",
           "content": {
             "type": "SYMBOL",
-            "name": "identifier"
+            "name": "_pattern"
           }
         },
         {
@@ -1136,7 +1136,7 @@
                 "name": "binder",
                 "content": {
                   "type": "SYMBOL",
-                  "name": "identifier"
+                  "name": "_pattern"
                 }
               }
             ]

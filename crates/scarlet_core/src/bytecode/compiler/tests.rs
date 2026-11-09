@@ -427,6 +427,43 @@ mod clean_module_gate {
         assert_eq!(codes(&ds), vec![DiagnosticCode::TypeError], "{ds:#?}");
     }
 
+    /// A backpass binder has to match every value, like a binding's pattern.
+    #[test]
+    fn a_refutable_backpass_binder_is_refused() {
+        let ds = diagnose(
+            "fn then(r Result(a, e), f fn(a) Result(b, e)) Result(b, e) {\n\
+             \x20 match r { Ok(v) -> f(v)\n Err(x) -> Err(x) }\n\
+             }\n\
+             fn run() Result(Int, Nil) {\n\
+             \x20 Some(x) <- then(Ok(Some(1)))\n\
+             \x20 Ok(x)\n\
+             }\n",
+        );
+        assert!(
+            ds.iter().any(|d| d.message.contains("misses None")),
+            "{ds:#?}"
+        );
+    }
+
+    /// `_ <-` over a `Nil` is held to the rule `_` is held to everywhere:
+    /// write the explicit `Nil` pattern.
+    #[test]
+    fn a_discarding_backpass_over_nil_asks_for_nil() {
+        let ds = diagnose(
+            "fn then(r Result(a, e), f fn(a) Result(b, e)) Result(b, e) {\n\
+             \x20 match r { Ok(v) -> f(v)\n Err(x) -> Err(x) }\n\
+             }\n\
+             fn run() Result(Int, Nil) {\n\
+             \x20 _ <- then(Ok(Nil))\n\
+             \x20 Ok(1)\n\
+             }\n",
+        );
+        assert!(
+            ds.iter().any(|d| d.message.contains("always matches Nil")),
+            "{ds:#?}"
+        );
+    }
+
     /// `Expression::ErrorNode` is the only form with nothing to elaborate. The
     /// check walk denies it the `CleanModule` proof, so a plain syntax error
     /// cannot surface as a compiler bug from the elaborator.

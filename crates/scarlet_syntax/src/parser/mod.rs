@@ -555,37 +555,31 @@ impl Parser {
         false
     }
 
-    // Looks ahead for `ident (, ident)* <-` on one line, which starts a
-    // backpass statement. Anything else (a lone `<` comparison, a binding, a
-    // call) falls through to the other statement and expression paths.
+    // Looks ahead on this line for a `<-` outside any brackets, which makes
+    // the statement a backpass: its binders are patterns, like the left of
+    // `=`. An `=`, a block, or the end of the line first means it is
+    // something else: a binding, a call, a comparison.
     fn is_backpass_ahead(&self) -> bool {
-        let mut i = self.index;
-        while matches!(
-            self.tokens.get(i).map(|t| &t.kind),
-            Some(Kind::Identifier(_))
-        ) {
-            if i > self.index
-                && self.tokens[i]
-                    .leading_trivia
-                    .iter()
-                    .any(|t| matches!(t, Trivia::Newline))
-            {
-                return false;
-            }
-            let Some(next) = self.tokens.get(i + 1) else {
-                return false;
-            };
-            if next
+        let mut depth = 0usize;
+        for (i, tok) in self.tokens.iter().enumerate().skip(self.index) {
+            let starts_line = tok
                 .leading_trivia
                 .iter()
-                .any(|t| matches!(t, Trivia::Newline))
-            {
+                .any(|t| matches!(t, Trivia::Newline));
+            if i > self.index && starts_line {
                 return false;
             }
-            match next.kind {
-                Kind::PuncBackArrow => return true,
-                Kind::PuncComma => i += 2,
-                _ => return false,
+            match tok.kind {
+                Kind::PuncOpenParen | Kind::PuncOpenBracket | Kind::BinOpen => depth += 1,
+                Kind::PuncCloseParen | Kind::PuncCloseBracket | Kind::BinClose => {
+                    let Some(d) = depth.checked_sub(1) else {
+                        return false;
+                    };
+                    depth = d;
+                }
+                Kind::PuncBackArrow if depth == 0 => return true,
+                Kind::PuncEquals | Kind::PuncOpenBrace | Kind::Eof => return false,
+                _ => {}
             }
         }
         false
@@ -675,11 +669,11 @@ impl Parser {
                     self.parse_attributed_declaration(doc, Vec::new())?,
                 )));
             }
+            _ if self.is_backpass_ahead() => {
+                return Ok(ast::Node::Statement(Box::new(self.parse_backpass()?)));
+            }
             Kind::PuncOpenParen if self.is_tuple_destructuring() => {
                 return Ok(ast::Node::Statement(Box::new(self.parse_binding()?)));
-            }
-            Kind::Identifier(_) if self.is_backpass_ahead() => {
-                return Ok(ast::Node::Statement(Box::new(self.parse_backpass()?)));
             }
             Kind::Identifier(_) if self.is_qualified_ctor_destructuring() => {
                 return Ok(ast::Node::Statement(Box::new(self.parse_binding()?)));
@@ -2108,14 +2102,8 @@ impl Parser {
         }))
     }
 
-    fn parse_backpass_binder(&mut self) -> PResult<ast::Identifier> {
-        let id = self.eat_identifier(Expected::BinderName)?;
-        if id.name != "_" && is_type_name(&id.name) {
-            return Err(Box::new(ParseError::BackpassBinderUppercase {
-                name: id.name,
-            }));
-        }
-        Ok(id)
+    fn parse_backpass_binder(&mut self) -> PResult<ast::Pattern> {
+        self.parse_pattern()
     }
 
     /// `pattern [Type] = init`. A plain name may carry a type, `x Int = 5`;
@@ -2832,7 +2820,14 @@ mod tests {
         let ast::Statement::Backpass(bp) = s.as_ref() else {
             panic!("expected Backpass, got {s:#?}");
         };
-        let names: Vec<&str> = bp.binders.iter().map(|b| b.name.as_str()).collect();
+        let names: Vec<&str> = bp
+            .binders
+            .iter()
+            .map(|b| match b {
+                ast::Pattern::Var { name } => name.name.as_str(),
+                other => panic!("expected a plain binder, got {other:#?}"),
+            })
+            .collect();
         assert_eq!(names, binders);
         assert!(
             matches!(bp.call, ast::Expression::FunctionCallExpression(_)),
@@ -2864,6 +2859,30 @@ mod tests {
         // `a<-g(1)` lexes as ident `<-` call, not `a < -g(1)`.
         let r = assert_no_errors("{\na<-g(1)\na\n}");
         assert_backpass(first_block_node(&r), &["a"]);
+    }
+
+    /// The left of `<-` is a pattern, like the left of `=`.
+    #[test]
+    fn a_backpass_binds_patterns() {
+        let r = assert_no_errors("{\nNil <- g(1)\n(a, b) <- h(2)\na + b\n}");
+        let binders = |node: &ast::Node| match node {
+            ast::Node::Statement(s) => match s.as_ref() {
+                ast::Statement::Backpass(bp) => bp.binders.clone(),
+                other => panic!("expected Backpass, got {other:#?}"),
+            },
+            other => panic!("expected statement, got {other:#?}"),
+        };
+        let ast::Node::Expression(ast::Expression::BlockExpression(block)) = &r.ast.body[0] else {
+            panic!("expected a top-level block, got {:#?}", r.ast.body[0])
+        };
+        assert!(matches!(
+            binders(&block.body[0])[..],
+            [ast::Pattern::Constructor { .. }]
+        ));
+        assert!(matches!(
+            binders(&block.body[1])[..],
+            [ast::Pattern::Tuple { .. }]
+        ));
     }
 
     #[test]
@@ -2931,14 +2950,6 @@ mod tests {
         assert_has_error(
             "x <- g(1)\nx\n",
             "Backpassing is not allowed at the top level of a module",
-        );
-    }
-
-    #[test]
-    fn test_backpass_binders_must_be_plain() {
-        assert_has_error(
-            "{\nSome <- g(1)\n0\n}",
-            "A backpass can only bind plain names or `_`",
         );
     }
 

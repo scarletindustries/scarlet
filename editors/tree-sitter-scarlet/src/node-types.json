@@ -283,7 +283,43 @@
         "required": true,
         "types": [
           {
+            "type": "array_pattern",
+            "named": true
+          },
+          {
+            "type": "binary_pattern",
+            "named": true
+          },
+          {
+            "type": "ctor_pattern",
+            "named": true
+          },
+          {
             "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "negative_number",
+            "named": true
+          },
+          {
+            "type": "number",
+            "named": true
+          },
+          {
+            "type": "or_pattern",
+            "named": true
+          },
+          {
+            "type": "range_pattern",
+            "named": true
+          },
+          {
+            "type": "string",
+            "named": true
+          },
+          {
+            "type": "tuple_pattern",
             "named": true
           }
         ]

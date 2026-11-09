@@ -4,7 +4,7 @@
 //! This is the *statement-order* guarantee of `<-`, and the stdlib depends on
 //! it. Every one of the 19 backpass statements in `crates/scarlet_core/src/std`
 //! is over `result.then`/`result.map`, and 10 of them bind `_`. One is
-//! `_ <- result.then(flush(sock, pending))` in `http.sca`, whose own comment
+//! `Nil <- result::then(flush(sock, pending))` in `http.sca`, whose own comment
 //! says the pending bytes must reach the wire before the request body is
 //! awaited, or the peer deadlocks. A lowering that ran the second step anyway
 //! would break these silently, because the binder they don't mention is
@@ -66,7 +66,7 @@ pub fn main() {
 }
 "#;
 
-/// Two `_ <-` steps in a row, neither mentioning the other's binder, which is
+/// Two `Nil <-` steps in a row, neither mentioning the other's binder, which is
 /// the `http.sca` shape. The second writes before it fails, so running it after
 /// the first failed is visible in stdout without needing a timeout.
 const TWO_INDEPENDENT_WRITES: &str = r#"import scarlet/result
@@ -81,8 +81,8 @@ fn write(tag String) Result(Nil, Step) {
 }
 
 fn both() Result(Nil, Step) {
-	_ <- result::then(write('a'))
-	_ <- result::then(write('b'))
+	Nil <- result::then(write('a'))
+	Nil <- result::then(write('b'))
 	Ok(Nil)
 }
 
@@ -146,7 +146,7 @@ fn a_second_independent_step_does_not_run_after_the_first_fails() {
     assert_eq!(code, Some(0), "output:\n{out}");
     assert!(
         !out.contains("write b"),
-        "the second `_ <-` step ran after the first failed. Neither continuation mentions \
+        "the second `Nil <-` step ran after the first failed. Neither continuation mentions \
          `_`, which is what makes these two look independent\noutput:\n{out}"
     );
     assert_eq!(out, "write a\nshort-circuited\n", "output:\n{out}");

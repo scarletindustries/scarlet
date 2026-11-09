@@ -2098,6 +2098,14 @@ impl ModuleChecker<'_> {
         let restricted = self.c.restricted_generalization_cons();
         let scheme = self.c.engine.generalize_restricted(final_ty, &restricted);
         let binder = self.bind_local(&ident.name, final_ty, scheme, ident.span, vb.doc.clone());
+        // A write-only name discards its value, like `_` in a pattern, and is
+        // held to the same rule: a value known to be `Nil` is matched by the
+        // explicit `Nil` pattern. A written type (`_ Nil = e`) already says
+        // what is dropped, and stops compiling if that changes.
+        if ident.name.starts_with('_') && vb.typ.is_none() {
+            self.nil_discards
+                .push((ident.name.clone(), final_ty, ident.span));
+        }
         (init, binder)
     }
 

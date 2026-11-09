@@ -1403,7 +1403,7 @@ impl<'a, 'g> RefWalker<'a, 'g> {
                 ast::Statement::Backpass(bp) => {
                     self.expr(&bp.call);
                     for b in &bp.binders {
-                        self.define(&b.name);
+                        self.pattern(b);
                     }
                 }
             },

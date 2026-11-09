@@ -233,7 +233,7 @@ fn serve_conn(
 	// NeedMore and the check measured slower.
 	match h1::parse_request(buf, off) {
 		h1::NeedMore -> {
-			_ <- result::then(flush(sock, pending))
+			Nil <- result::then(flush(sock, pending))
 			match socket::read_until(sock, READ_SIZE, deadline) {
 				Ok(socket::Data(more)) ->
 					serve_conn(sock, carry(buf, off, more), 0, deadline, handler, [])
@@ -269,7 +269,7 @@ fn flush(sock socket::Socket, pending Array(Binary)) Result(Nil, error::NetError
 	match pending {
 		[] -> Ok(Nil)
 		_ -> {
-			_ <- result::then(socket::write_parts(sock, pending))
+			Nil <- result::then(socket::write_parts(sock, pending))
 			Ok(Nil)
 		}
 	}
@@ -314,13 +314,13 @@ fn handle(
 			deadline = body_deadline()
 			// Flush first, because the client may wait for those responses
 			// before it sends the body.
-			_ <- result::then(flush(sock, pending))
+			Nil <- result::then(flush(sock, pending))
 			read_body(sock, buf, consumed, n, deadline, head, handler)
 		}
 		// Flush first, as for Content-Length.
 		h1::Chunked -> {
 			deadline = body_deadline()
-			_ <- result::then(flush(sock, pending))
+			Nil <- result::then(flush(sock, pending))
 			read_chunked_body(sock, buf, consumed, deadline, head, handler)
 		}
 	}
@@ -337,7 +337,7 @@ fn read_body(
 	head ReqHead,
 	handler fn(Request) Response,
 ) Result(Nil, error::NetError) {
-	_ <- result::then(maybe_continue(sock, head.flags))
+	Nil <- result::then(maybe_continue(sock, head.flags))
 	avail = binary::byte_size(buf) - consumed
 	buffered = int::min(avail, n)
 	// This can't fail, because the window ends inside `buf`.
@@ -365,7 +365,7 @@ fn read_chunked_body(
 	head ReqHead,
 	handler fn(Request) Response,
 ) Result(Nil, error::NetError) {
-	_ <- result::then(maybe_continue(sock, head.flags))
+	Nil <- result::then(maybe_continue(sock, head.flags))
 	chunked_loop(sock, buf, off, deadline, head, handler)
 }
 
@@ -474,7 +474,7 @@ fn respond(
 				Unsized(b) -> match version {
 					h1::Http11 -> {
 						chunked = headers::set(hdrs, NAME_TRANSFER_ENCODING, VAL_CHUNKED)
-						_ <- result::then(flush(sock, pending))
+						Nil <- result::then(flush(sock, pending))
 						match body::probe(sanitize_trailers(b)) {
 							// The body failed before the head was written, so a 500 can
 							// still go out.
@@ -496,7 +496,7 @@ fn respond(
 					}
 					h1::Http10 -> {
 						closing = headers::set(hdrs, NAME_CONNECTION, VAL_CLOSE)
-						_ <- result::then(flush(sock, pending))
+						Nil <- result::then(flush(sock, pending))
 						match body::probe(b) {
 							// As above, the head isn't out yet.
 							Err(_) -> replace_with_500(sock, [])
@@ -533,7 +533,7 @@ fn finish_buffered(
 	parts Array(Binary),
 ) Result(Sent, error::NetError) {
 	if close_after {
-		_ <- result::then(flush(sock, parts))
+		Nil <- result::then(flush(sock, parts))
 		Ok(Close)
 	} else {
 		Ok(KeepAlive(parts))
@@ -623,7 +623,7 @@ fn buffer_body(
 			if got > len {
 				replace_with_500(sock, pending)
 			} else {
-				_ <- result::then(
+				Nil <- result::then(
 					flush(sock, [..pending, h1::serialize_head(status, hdrs), first, second]),
 				)
 				match body::drain_counted(rest, sock, len - got) {

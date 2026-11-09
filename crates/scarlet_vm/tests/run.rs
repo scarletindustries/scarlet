@@ -1500,3 +1500,28 @@ fn a_segment_size_naming_its_own_value_reads_the_outer_binding() {
         "1\n",
     );
 }
+
+/// A backpass binds a pattern: `Nil` for a step that returns nothing, a tuple
+/// taken apart in place.
+#[test]
+fn a_backpass_binds_a_pattern() {
+    prints(
+        "import scarlet/result\n\
+         fn check(n Int) Result(Nil, String) {\n\
+         \tif n > 0 { Ok(Nil) } else { Err('bad') }\n\
+         }\n\
+         fn pair(n Int) Result((Int, Int), String) {\n\
+         \tOk((n, n + 1))\n\
+         }\n\
+         fn run(n Int) Result(Int, String) {\n\
+         \tNil <- result::then(check(n))\n\
+         \t(a, b) <- result::then(pair(n))\n\
+         \tOk(a + b)\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(run(3))\n\
+         \tprintln(run(0))\n\
+         }\n",
+        "Ok(7)\nErr(bad)\n",
+    );
+}
