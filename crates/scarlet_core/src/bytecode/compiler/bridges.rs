@@ -5,7 +5,7 @@
 use super::*;
 use crate::typed_ir::{FieldAt, PreludeTys, VariantLayout};
 
-impl PreludeTys for Compiler {
+impl PreludeTys for ModuleChecker<'_> {
     /// The one bridge from a live inference `Ty` into the program's `RTy`
     /// pool. Total: an unsolved variable becomes a fresh `Bound`.
     ///
@@ -14,64 +14,68 @@ impl PreludeTys for Compiler {
     /// fully solved types may be cached: a variable unsolved now can be solved
     /// by a later body. Keyed by union-find root; cleared with the pool.
     fn resolve_rty(&mut self, pool: &mut ResolvedPool, t: Ty) -> RTy {
-        let root = self.engine.find(t);
-        if let Some(&r) = self.rty_cache.get(&root) {
+        let root = self.c.engine.find(t);
+        if let Some(&r) = self.c.rty_cache.get(&root) {
             return r;
         }
-        let (r, invented) = Zonker::new(&self.engine).zonk_or_opaque(pool, root);
+        let (r, invented) = Zonker::new(&self.c.engine).zonk_or_opaque(pool, root);
         if !invented {
-            self.rty_cache.insert(root, r);
+            self.c.rty_cache.insert(root, r);
         }
         r
     }
     fn ty_bool(&mut self) -> Ty {
-        Compiler::ty_bool(self)
+        self.c.ty_bool()
     }
     fn ty_int(&mut self) -> Ty {
-        Compiler::ty_int(self)
+        self.c.ty_int()
     }
     fn ty_string(&mut self) -> Ty {
-        Compiler::ty_string(self)
+        self.c.ty_string()
     }
     fn ty_binary(&mut self) -> Ty {
-        Compiler::ty_binary(self)
+        self.c.ty_binary()
     }
 }
 
-impl ElabCtx for Compiler {
+impl ElabCtx for ModuleChecker<'_> {
     fn intern(&mut self, s: &str) -> StrId {
-        self.engine.intern(s)
+        self.c.engine.intern(s)
     }
     // Safe mid-elaboration: the pool is `ConstId`-addressed, so pooling moves
     // no address.
     fn number_const(&mut self, lit: &ast::NumberLiteral) -> crate::core_ir::ConstId {
-        let c = self.const_number(lit);
-        self.add_constant(c)
+        let c = self.c.const_number(lit);
+        self.c.add_constant(c)
     }
     fn string_const(&mut self, s: &str) -> crate::core_ir::ConstId {
-        self.const_str(s)
+        self.c.const_str(s)
     }
     fn int_const(&mut self, i: i64) -> crate::core_ir::ConstId {
-        self.const_int(i)
+        self.c.const_int(i)
     }
     fn binary_const(&mut self, bytes: Vec<u8>, bit_len: u64) -> crate::core_ir::ConstId {
-        self.const_binary(bytes, bit_len)
+        self.c.const_binary(bytes, bit_len)
     }
     fn toplevel_fn_ty(&mut self, name: StrId) -> Option<Ty> {
-        let name = self.engine.str(name).to_string();
-        let scheme = self.env.lookup(&name)?;
-        Some(self.engine.instantiate(scheme, &self.frames.current.rigid))
+        let name = self.c.engine.str(name).to_string();
+        let scheme = self.c.env.lookup(&name)?;
+        Some(
+            self.c
+                .engine
+                .instantiate(scheme, &self.frames.current.rigid),
+        )
     }
     fn decl_denotation(&self, binder: BinderId) -> Option<Denotation> {
-        Compiler::decl_denotation(self, binder)
+        ModuleChecker::decl_denotation(self, binder)
     }
     fn ctor_field(&mut self, receiver: Ty, field: StrId) -> Option<FieldAt> {
-        let resolved = self.engine.find(receiver);
-        let (type_id, type_args) = match self.engine.node(resolved) {
-            TypeNode::Con { id, args, .. } => (id, self.engine.children_of(args).to_vec()),
+        let resolved = self.c.engine.find(receiver);
+        let (type_id, type_args) = match self.c.engine.node(resolved) {
+            TypeNode::Con { id, args, .. } => (id, self.c.engine.children_of(args).to_vec()),
             _ => return None,
         };
-        let info = self.env.lookup_type_info_by_id(type_id)?;
+        let info = self.c.env.lookup_type_info_by_id(type_id)?;
         let shared = self.field_in_variants(info, &type_args, field, None).ok()?;
         if let Some(&first) = shared.slots.first()
             && shared.slots.iter().all(|&s| s == first)
@@ -81,8 +85,9 @@ impl ElabCtx for Compiler {
         let variants = info.variants()?;
         let mut layouts = Vec::with_capacity(shared.slots.len());
         for (vi, &slot) in shared.slots.iter().enumerate() {
-            let v = *self.engine.variants_of(variants).get(vi)?;
+            let v = *self.c.engine.variants_of(variants).get(vi)?;
             let declared: SmallVec<[Ty; 4]> = self
+                .c
                 .engine
                 .variant_fields_of(v.fields)
                 .iter()
@@ -91,7 +96,8 @@ impl ElabCtx for Compiler {
             let fields = declared
                 .into_iter()
                 .map(|t| {
-                    self.engine
+                    self.c
+                        .engine
                         .substitute_type_vars(t, info.type_params, &type_args)
                 })
                 .collect();
@@ -109,14 +115,16 @@ impl ElabCtx for Compiler {
     /// Labels come off the type by `VariantRef`, not off the constructor's
     /// scheme by name: a `mod.Ctor(..)` bare name is not in `env`.
     fn ctor_labels(&mut self, v: crate::core_ir::VariantRef) -> Option<Vec<StrId>> {
-        let info = self.env.lookup_type_info_by_id(v.type_id)?;
+        let info = self.c.env.lookup_type_info_by_id(v.type_id)?;
         let variants = info.variants()?;
         let variant = *self
+            .c
             .engine
             .variants_of(variants)
             .get(v.variant_idx as usize)?;
         Some(
-            self.engine
+            self.c
+                .engine
                 .variant_fields_of(variant.fields)
                 .iter()
                 .map(|f| f.label)
@@ -124,7 +132,7 @@ impl ElabCtx for Compiler {
         )
     }
     fn fn_of_global(&self, slot: GlobalSlot) -> Option<crate::core_ir::FuncIdx> {
-        self.global_to_func.get(&slot).copied()
+        self.c.global_to_func.get(&slot).copied()
     }
     fn toplevel_decls(&self) -> Vec<(usize, GlobalSlot)> {
         self.toplevel_decls
@@ -134,14 +142,14 @@ impl ElabCtx for Compiler {
     }
     fn or_shape(&mut self, lhs_ty: Ty) -> Option<OrShape> {
         use crate::core_ir::VariantRef;
-        let resolved = self.engine.find(lhs_ty);
-        let TypeNode::Con { id, .. } = self.engine.node(resolved) else {
+        let resolved = self.c.engine.find(lhs_ty);
+        let TypeNode::Con { id, .. } = self.c.engine.node(resolved) else {
             return None;
         };
-        let (ok, fail, err_has_payload) = if self.prelude.option().is(id) {
-            (self.prelude.some(), self.prelude.none(), false)
-        } else if self.prelude.result().is(id) {
-            (self.prelude.ok(), self.prelude.err(), true)
+        let (ok, fail, err_has_payload) = if self.c.prelude.option().is(id) {
+            (self.c.prelude.some(), self.c.prelude.none(), false)
+        } else if self.c.prelude.result().is(id) {
+            (self.c.prelude.ok(), self.c.prelude.err(), true)
         } else {
             return None;
         };
@@ -158,6 +166,6 @@ impl ElabCtx for Compiler {
         })
     }
     fn ty_nil(&mut self) -> Ty {
-        Compiler::ty_nil(self)
+        self.c.ty_nil()
     }
 }

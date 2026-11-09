@@ -23,7 +23,13 @@ impl Compiler {
         // The prelude's residue IS the ambient namespace ("Type heads need no
         // rescue" above depends on it), so its compile must not be
         // frame-scoped like an ordinary module's.
-        let loaded = self.with_retained_namespaces(|c| c.load_module(&path, at));
+        // Nothing imports the prelude; it is loaded as though the entry did.
+        let entry = module::ModuleKey::main();
+        let importer = super::compiler::Importer {
+            dir: None,
+            key: &entry,
+        };
+        let loaded = self.with_retained_namespaces(|c| c.load_module(&path, at, &importer));
         let Some((_, key)) = loaded else {
             return;
         };

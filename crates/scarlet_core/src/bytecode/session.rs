@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use super::compiler::{CompileResult, Compiler, new_compiler};
+use super::compiler::{CompileResult, Compiler, Importer, ModuleChecker, new_compiler};
 use crate::ast;
 use crate::module::{self, ModulePath};
 use crate::reference::{ModuleId, ModuleReferences, ReferenceGraph, ReferenceGraphBuilder};
@@ -179,7 +179,7 @@ impl Compiler {
             env: self.env.watermark(),
             functions: self.fns.len(),
             constants: self.consts.len(),
-            local_count: self.frames.current.slots,
+            local_count: self.slots,
         }
     }
 
@@ -214,17 +214,7 @@ impl Compiler {
         self.fns.truncate(functions);
         self.consts.truncate(constants);
         self.global_to_func.retain(|_, fi| fi.index() < functions);
-        // Survivors are watermark-preserved entry-frame slots, and they all
-        // land in the fresh frame's root block. The `StrId`
-        // key must also survive the strings truncation: an aliased selective
-        // import can bind a post-watermark key to a pre-watermark slot, and a
-        // dangling key would collide with whatever re-interns at that index.
-        //
-        // Everything else a body keeps (captures, binders, open blocks,
-        // rigid type variables) starts over with a fresh toplevel frame.
-        let mut locals = self.frames.current.take_names();
-        locals.retain(|&k, v| v.slot < local_count && k.idx() < engine.strings);
-        self.frames = super::compiler::frame::Frames::toplevel(locals, local_count);
+        self.slots = local_count;
 
         // Lowered toplevels are dropped, never truncated: they are recorded
         // at the end of a module's compile, and a rewound compile's init code
@@ -233,23 +223,11 @@ impl Compiler {
         self.entry_toplevel = None;
         self.main = None;
 
-        self.toplevel_decls.clear();
-        self.binding_globals.clear();
-        self.walking_module_statements = false;
-
-        // Queued entries hold `Ty` indices into the arena just rewound.
-        self.nil_discards.clear();
-        self.next_fn_self_name = None;
-        self.current_owner = None;
         self.recorded.clear();
         // `ref_interner` is deliberately not cleared, so `DefId`s in surviving
         // `CachedModule.module_refs` keep resolving to stable `ModuleId`s.
         let main_id = self.ref_interner.intern(&module::main_module());
-        self.module_refs = ModuleReferences::new(main_id);
-        self.imported_qualifiers.clear();
-        self.current_module = module::main_module();
-        self.current_module_key = module::ModuleKey::main();
-        self.module_path_slice = None;
+        self.entry_refs = ModuleReferences::new(main_id);
         // `str_slices` was just rewound, so an `ArenaSlice` may now denote a
         // different path than it did last compile.
         self.defid_module_memo.clear();
@@ -301,7 +279,7 @@ impl Compiler {
 
         // The entry file's own refs must be copied: the collector is reused for
         // the next check.
-        graph.insert(Rc::new(self.module_refs.clone()));
+        graph.insert(Rc::new(self.entry_refs.clone()));
 
         graph.finish()
     }
@@ -394,7 +372,7 @@ impl IncrementalSession {
     }
 
     fn with_stdlib_root(stdlib_root: Option<std::path::PathBuf>) -> Self {
-        let mut c = new_compiler(None, true);
+        let mut c = new_compiler(true);
         c.collect_hover_facts = true;
         c.stdlib_source_root = stdlib_root;
         let bare = c.watermark();
@@ -556,22 +534,16 @@ impl IncrementalSession {
         if !prelude_self {
             self.rewind_to(floor);
         }
-        self.c.base_dir = base_dir.map(|p| p.to_path_buf());
 
-        // Entry identity. Set on every check — never left over from the
-        // previous one — and the entry's reference collector is re-keyed to
-        // match, so its defs land under the module id importers target.
-        self.c.current_module = entry_module.clone();
-        self.c.current_module_key = if prelude_self || module::is_stdlib(&entry_module) {
+        // Entry identity, from this check alone: its defs land under the
+        // module id importers target.
+        let entry_key = if prelude_self || module::is_stdlib(&entry_module) {
             module::ModuleKey::for_stdlib(&entry_module)
         } else {
             module::ModuleKey::main()
         };
-        self.c.module_path_slice = None;
-        let entry_mid = self.c.ref_interner.intern(&entry_module);
-        self.c.module_refs = ModuleReferences::new(entry_mid);
 
-        self.compile_entry(expr);
+        self.compile_entry(expr, &entry_module, &entry_key, base_dir);
 
         // Overflow fallback: a recompiled module spilled past its reused id
         // range and may have collided with a sibling's block. Evict everything,
@@ -584,7 +556,7 @@ impl IncrementalSession {
             self.c.module_table.reset_id_bases();
             self.rewind_to(w);
             self.last_entry = None;
-            self.compile_entry(expr);
+            self.compile_entry(expr, &entry_module, &entry_key, base_dir);
         }
         let (result, facts) = self.c.snapshot_result();
         self.graph = result.references.clone();
@@ -593,38 +565,23 @@ impl IncrementalSession {
     }
 
     /// Compile the entry expression and capture its `last_entry` watermark.
-    fn compile_entry(&mut self, expr: &ast::Expression) {
-        if let ast::Expression::BlockExpression(block) = expr {
-            // `env.type_info` is a flat map, not a scope stack, so an import's
-            // `m::Type` entries are not confined to the throwaway scope the way a
-            // value binding is. Capture the env position before the imports run
-            // so `last_entry` excludes them; otherwise a removed or renamed
-            // import keeps resolving `m::Type` to a stale `TypeInfo` with no
-            // diagnostic. The journal position rolls back with it, which is
-            // what restores a stdlib type the entry shadowed.
-            let pre_import = self.c.env.watermark();
-            self.c.process_imports(block);
-            // The imports left their own decls behind; the entry file's start
-            // empty.
-            self.c.toplevel_decls.clear();
-            // Must precede the watermark capture below.
-            self.c.bump_type_ids_past_reserved();
-            let mut wm = self.c.watermark();
-            wm.env.type_info = pre_import.type_info;
-            wm.env.journal = pre_import.journal;
-            self.last_entry = Some(wm);
-            self.c.env.push_scope();
-            self.c.analyse_module(block, None);
-            self.c.env.pop_scope();
-        } else {
-            self.last_entry = Some(self.c.watermark());
-            // A bare-expression entry can still contain lambdas, and no body may
-            // lower or emit during the typecheck walk. `analyse_module` brackets
-            // its own walk; this path must bracket this one.
-            self.c.begin_deferred_elaboration();
-            self.c.compile_expr(expr);
-            self.c.end_deferred_elaboration();
-        }
+    fn compile_entry(
+        &mut self,
+        expr: &ast::Expression,
+        path: &ModulePath,
+        key: &module::ModuleKey,
+        base_dir: Option<&Path>,
+    ) {
+        let importer = Importer { dir: base_dir, key };
+        let loaded = self.c.load_entry_imports(expr, &importer);
+        // What the entry imports sits below this line and survives the next
+        // check; the entry's own contributions sit above it.
+        self.last_entry = Some(self.c.watermark());
+        let mut checker = ModuleChecker::new(&mut self.c, path.clone(), key.clone());
+        checker.c.env.push_scope();
+        checker.check_entry(expr, loaded);
+        checker.c.env.pop_scope();
+        self.c.entry_refs = checker.finish();
     }
 
     /// Resolve a module key to its interned `ModuleId`; `None` means the entry
@@ -798,7 +755,7 @@ mod tests {
     /// code must not run as part of the next one.
     #[test]
     fn reset_to_rewinds_functions_and_consts_and_drops_toplevels() {
-        let mut c = new_compiler(None, false);
+        let mut c = new_compiler(false);
         let pool = Rc::new(crate::typed_ir::ResolvedPool::new(PrimIds::default()));
         let top = LoweredFn::new(
             crate::module::ModuleKey::main().to_string(),

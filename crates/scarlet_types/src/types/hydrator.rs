@@ -219,7 +219,7 @@ impl Hydrator {
         }
 
         // Imported modules register their public types under the mangled
-        // `qualifier::Name` key (see `process_import`), so a qualified
+        // `qualifier::Name` key (see `bind_import`), so a qualified
         // reference resolves through the same table as a bare one. Type names
         // cannot contain ':', so mangled keys never collide with local types.
         let (lookup_key, display) = match &nt.qualifier {

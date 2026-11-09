@@ -3,12 +3,12 @@
 //! [`Program`]: every function body, every module's top level, and `main`.
 //!
 //! Function bodies go through the Core IR pipeline: the fused
-//! [`Compiler::compile_expr`] walk runs first for type inference (a type that
+//! [`ModuleChecker::compile_expr`] walk runs first for type inference (a type that
 //! unification just resolved is immediately available so elaboration can pick
 //! typed operations — `IntAdd` over `Add` — and pattern lowering can consult
 //! variant layouts), then the typechecked body is elaborated, lowered to
 //! [`crate::core_ir`] ANF and run through Core→Core passes (Perceus reuse,
-//! later mode inference). See [`Compiler::compile_fn_body`] and
+//! later mode inference). See [`ModuleChecker::compile_fn_body`] and
 //! `docs/core-ir-spec.md`.
 //!
 //! Module top level is the exception: declarations are mutually
@@ -21,8 +21,8 @@
 //!   [`check_as_module`]): scoping and inference state in one struct,
 //!   documented field by field; the pass itself (`compile_node` /
 //!   `compile_expr` and friends, one method per AST form); and the Core IR
-//!   orchestration ([`Compiler::compile_fn_body`]).
-//! - **`patterns.rs`** — pattern type-checking: [`Compiler::type_pattern`]
+//!   orchestration ([`ModuleChecker::compile_fn_body`]).
+//! - **`patterns.rs`** — pattern type-checking: [`ModuleChecker::type_pattern`]
 //!   plus constructor lookup and argument slotting.
 //! - **`bridges.rs`** — the [`ElabCtx`] impl through which the elaborator
 //!   speaks to this compilation.
@@ -104,7 +104,7 @@ mod clean {
     /// `lower`: `typed_ir::elaborate_body`/`elaborate_toplevel` are the only
     /// constructors of a [`TypedFn`](crate::typed_ir::TypedFn), hence of the
     /// [`TypedProgram`](crate::typed_ir::TypedProgram) that `lower` consumes,
-    /// and [`Compiler::elaborate_then_materialize`](super::Compiler::elaborate_then_materialize)
+    /// and [`ModuleChecker::elaborate_then_materialize`](super::ModuleChecker::elaborate_then_materialize)
     /// is the only place in this compiler that calls them. It consumes a
     /// `CleanModule`, and [`CleanModule::mint`] is the only way to make one.
     ///
@@ -143,7 +143,7 @@ use clean::CleanModule;
 /// user's program is actually in the `Program`, not just the stdlib init that
 /// precedes it.
 ///
-/// Minted only by [`Compiler::record_toplevel`] on its `Entry` path, and the
+/// Minted only by [`ModuleChecker::record_toplevel`] on its `Entry` path, and the
 /// only way to reach [`CompileResult::into_runnable`]. Without it, a compile
 /// that rejected the module could still hand back a program that runs the
 /// stdlib and nothing else — which does not fail, it silently evaluates to
@@ -154,7 +154,7 @@ struct EntryToplevel {
     _priv: (),
 }
 
-/// Where [`Compiler::resolve_variable`] found a name.
+/// Where [`ModuleChecker::resolve_variable`] found a name.
 enum Place {
     /// Bound in the function being compiled, by this binding. The elaborator
     /// knows it by its own `BindingId`, so it never asks where it is.
@@ -279,10 +279,10 @@ impl CompileResult {
 /// means.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct LocalSlot {
-    pub(super) slot: i32,
+    slot: i32,
     /// This name lives in the entry frame, so a nested body loads it with
     /// `PushGlobal <slot>` instead of capturing it. Decided once at bind time
-    /// by [`Compiler::binds_a_global`]; `resolve_variable` must read this
+    /// by [`ModuleChecker::binds_a_global`]; `resolve_variable` must read this
     /// rather than re-derive it from where the binding sits.
     is_global: bool,
     /// The binding a use of the name in this frame means. A slot reserved
@@ -312,25 +312,6 @@ pub(super) struct ToplevelDecl {
     pub(super) slot: GlobalSlot,
 }
 
-/// Per-module compiler state snapshotted on entry to a submodule body by
-/// `enter_module_frame` and restored by `leave_module_frame`. Adding a
-/// per-module field means one line here plus one swap/restore in the
-/// enter/leave pair, not two hand-written `mem::replace` calls to remember at
-/// both ends of `compile_module_body`.
-struct ModuleFrame {
-    module: ModulePath,
-    module_key: ModuleKey,
-    module_path_slice: Option<ArenaSlice<pool::StrSlices>>,
-    imported_qualifiers: HashMap<String, ModuleKey>,
-    base_dir: Option<PathBuf>,
-    module_refs: ModuleReferences,
-    /// What to close the module's imports with: the module base it replaced
-    /// in the toplevel frame. `None` when the module's namespace was not
-    /// scoped (prelude registration). Recorded at enter so a
-    /// `retain_namespaces` toggle can never unbalance the pop.
-    scoped: Option<usize>,
-}
-
 // `bool_cluster` fires on the four bool fields below, and the answer is that
 // all 16 states are legal: there is no illegal combination for an enum to
 // name. They are knobs on four unrelated subsystems — pipeline truncation,
@@ -343,8 +324,10 @@ struct ModuleFrame {
 // this struct that did carry an invariant are already enums — see
 // [`UnusedBindings`] and [`ModuleScope`]; these four carry none between them.
 #[cfg_attr(mordant, allow(bool_cluster))]
+/// What lives as long as one compile, or one editor session: the module
+/// table, the type store, and everything compiled so far. A module's own
+/// state lives on its [`ModuleChecker`] instead.
 pub struct Compiler {
-    // --- Lowered program ---
     /// Every function this compile reserved, indexed by [`FuncIdx`], and filled
     /// once its body is lowered. A slot stays `None` under `check_only` and
     /// in a module that failed; [`Self::finish_program`] only builds a
@@ -367,17 +350,10 @@ pub struct Compiler {
     /// constant) so `reset_to`'s pool truncate needs no paired invalidation —
     /// a stale entry just misses.
     const_dedup: HashMap<Const, ConstId>,
-    /// The bodies the walk is inside, the current one first.
-    pub(super) frames: frame::Frames,
-    /// Stdlib bootstrap (prelude registration) compiles at root on purpose: the flat by-name residue it leaves *is*
-    /// the ambient stdlib namespace. While set, `enter_module_frame` skips
-    /// namespace scoping. User modules always compile with it unset.
+    /// Set only while the prelude compiles: the by-name env entries it leaves
+    /// *are* the ambient stdlib namespace, so its [`ModuleChecker`] does not
+    /// undo them when it finishes. User modules always compile with it unset.
     retain_namespaces: bool,
-    /// `_`-prefixed pattern binders whose discarded type must be re-examined
-    /// once inference for the module is final: discarding a value the type
-    /// system knows is `Nil` hides nothing, so the explicit `Nil` pattern is
-    /// required instead. Drained by [`Compiler::check_nil_discards`].
-    pub(super) nil_discards: Vec<(String, Ty, Span)>,
     /// Global slot → [`FuncIdx`] for every top-level `fn`
     /// that has already been compiled. Populated by `compile_declared_function`
     /// after `finish_fn_frame` assigns the `func_idx`; consulted by
@@ -387,56 +363,13 @@ pub struct Compiler {
     /// A miss (forward ref within an SCC, or a non-fn global) falls back to the
     /// value call.
     pub(super) global_to_func: HashMap<GlobalSlot, crate::core_ir::FuncIdx>,
-    /// This module's own top-level `fn`/`const` declarations, in Pass 5
-    /// SCC-visit order (leaves first). Cleared to entry-file scope once the
-    /// imports are compiled.
-    ///
-    /// One record serves both halves of the toplevel elaboration. The
-    /// [`ToplevelDecl::node`] index *schedules* the spine: the elaborator walks
-    /// the module block's decl nodes in this order, not source order, so a
-    /// forward-referenced `const` is stored before it is read. The
-    /// [`ToplevelDecl::slot`] on that same record is the entry-frame slot the
-    /// decl's `TypedBind::global` is pinned to, and the one an intra-SCC
-    /// forward *reference* loads with `PushGlobal`. Definition and use read the
-    /// same field of the same record, so they cannot disagree.
-    pub(super) toplevel_decls: Vec<ToplevelDecl>,
-    /// The names the binding being checked has bound at module scope, with
-    /// their entry-frame slots. [`Compiler::compile_statement`] moves them onto
-    /// that binding's [`CNode::Binding`], so a slot travels with the binding
-    /// it belongs to and nothing pairs them up by order later.
-    pub(super) binding_globals: Vec<(StrId, GlobalSlot)>,
-    /// True only while `analyse_module` walks a module's own statement list.
-    /// Being a global ([`Compiler::binds_a_global`]) does not say this on its
-    /// own: imports, the prelude's slot seeds and `fn`/`const` declarations
-    /// are all globals bound outside the statement walk, and each reaches the
-    /// elaborator by a route of its own.
-    pub(super) walking_module_statements: bool,
     /// Memo for [`ElabCtx::resolve_rty`], keyed by union-find root: one pool
     /// node per solved type, for the whole `TypedProgram` the current
     /// `elaborate` call is building. Cleared there, with the pool.
     rty_cache: HashMap<Ty, RTy>,
-    /// One-shot self-name handed to the next `enter_fn_frame(None)` so a
-    /// `name = fn(...)` binding's lambda can self-recurse, without leaking the
-    /// enclosing fn's binding into unrelated (e.g. HOF-arg) lambdas.
-    pub(super) next_fn_self_name: Option<StrId>,
-    /// The definition whose body is currently being compiled, used as the
-    /// `owner` of every reference-graph occurrence emitted while it is set
-    /// (the def→def edge channel for dead-code reachability). `None` at module
-    /// top level so genuine executed code roots its references; set/restored
-    /// around each `fn`/`const`/`type` body in the single-pass traversal and
-    /// spans nested lambdas (a lambda has no `DefId`, so its body's references
-    /// belong to the enclosing definition).
-    pub(super) current_owner: Option<DefId>,
-    // --- Type inference state ---
     pub(super) engine: InferEngine,
     pub(super) env: TypeEnv,
     pub(super) recorded: Vec<RawRef>,
-    /// Transient reference-graph collector for the module *currently* being
-    /// analysed (entry file, or a submodule between the save/restore dance in
-    /// `compile_module_body`). The typecheck/infer pass emits definitions and
-    /// references into this; `compile_module_body` moves the finished set into
-    /// the module's `CachedModule`. Reset by `reset_to` like `recorded`.
-    pub(super) module_refs: ModuleReferences,
     check_only: bool,
     /// Whether to buffer per-occurrence `RawRef`s and resolve them into the
     /// `HoverFact` table in `finalize_references`. Only `IncrementalSession`
@@ -458,22 +391,12 @@ pub struct Compiler {
     /// ids are stable across `reset_to` (the watermark sits past the static
     /// stdlib), so the memo survives a session's rewinds.
     restricted_gen_cons: Option<HashSet<TypeId>>,
-    // --- Module state ---
     pub(super) module_table: ModuleTable,
     /// Append-only `ModulePath` ↔ `ModuleId` interner backing every `DefId`.
     /// Persistent across `reset_to`/incremental recompiles (like
     /// `module_table`) so a `DefId` minted in one `check` still resolves after
     /// later modules are added or evicted; ids are reused across recompiles.
     pub(super) ref_interner: ModuleInterner,
-    pub(super) current_module: ModulePath,
-    /// `current_module`'s canonical cache key, maintained in lockstep with it
-    /// (swapped by `enter_module_frame`, reset alongside it) so per-module
-    /// bookkeeping never re-derives a key from a possibly-unresolved path.
-    pub(super) current_module_key: ModuleKey,
-    /// Memo of `current_module` interned into `engine.str_slices`; invalidated
-    /// (set to `None`) whenever `current_module` is swapped in
-    /// `enter_module_frame`.
-    pub(super) module_path_slice: Option<ArenaSlice<pool::StrSlices>>,
     /// Memo of a module-path `ArenaSlice` → its interned `ModuleId`. The
     /// `str_slices` pool is append-only within a compile, so a given
     /// `ArenaSlice` always denotes the same path (hence the same id); cleared
@@ -481,13 +404,10 @@ pub struct Compiler {
     /// `defid_of`/`record` skip the per-occurrence `strs_of` + key-join
     /// allocations and string-hash probe on the per-keystroke recompile.
     pub(super) defid_module_memo: HashMap<ArenaSlice<pool::StrSlices>, ModuleId>,
-    /// Qualifier name in this file → the imported module's canonical key.
-    pub(super) imported_qualifiers: HashMap<String, ModuleKey>,
     /// canonical module key -> the import path as the user wrote it. Identity
     /// is the resolved file; diagnostics must still say `./lib`, not
     /// `/private/var/.../lib`.
     module_display: HashMap<ModuleKey, String>,
-    pub(super) base_dir: Option<PathBuf>,
     /// When set, `scarlet/...` imports resolve to `.sca` files under this directory
     /// (the in-repo `src/std`) instead of the embedded snapshot, so a session
     /// editing the stdlib compiles it like any other on-disk module tree.
@@ -498,6 +418,76 @@ pub struct Compiler {
     /// from `scarlet.sca` rather than mirrored in Rust. `@vm` functions are
     /// deliberately excluded — `println` is shadowable.
     pub(super) reserved: BTreeSet<String>,
+    /// The entry-frame slots every module's toplevel has handed out so far.
+    /// Each module's toplevel frame starts counting here.
+    pub(super) slots: i32,
+    /// What the entry module's check recorded for the reference graph.
+    pub(super) entry_refs: ModuleReferences,
+}
+
+/// One module's body, being checked. Made fresh once the modules it imports
+/// are compiled, and gone when the module is done, so nothing about one
+/// module can leak into the next.
+pub struct ModuleChecker<'c> {
+    pub(super) c: &'c mut Compiler,
+    /// Whether this module's by-name env entries are undone when it is done:
+    /// false only while the prelude, whose names every module sees, compiles.
+    scoped: bool,
+    /// The bodies the walk is inside, the current one first.
+    pub(super) frames: frame::Frames,
+    /// `_`-prefixed pattern binders whose discarded type must be re-examined
+    /// once inference for the module is final: discarding a value the type
+    /// system knows is `Nil` hides nothing, so the explicit `Nil` pattern is
+    /// required instead. Drained by [`ModuleChecker::check_nil_discards`].
+    nil_discards: Vec<(String, Ty, Span)>,
+    /// This module's own top-level `fn`/`const` declarations, in Pass 5
+    /// SCC-visit order (leaves first). Cleared to entry-file scope once the
+    /// imports are compiled.
+    ///
+    /// One record serves both halves of the toplevel elaboration. The
+    /// [`ToplevelDecl::node`] index *schedules* the spine: the elaborator walks
+    /// the module block's decl nodes in this order, not source order, so a
+    /// forward-referenced `const` is stored before it is read. The
+    /// [`ToplevelDecl::slot`] on that same record is the entry-frame slot the
+    /// decl's `TypedBind::global` is pinned to, and the one an intra-SCC
+    /// forward *reference* loads with `PushGlobal`. Definition and use read the
+    /// same field of the same record, so they cannot disagree.
+    pub(super) toplevel_decls: Vec<ToplevelDecl>,
+    /// The names the binding being checked has bound at module scope, with
+    /// their entry-frame slots. [`ModuleChecker::compile_statement`] moves them onto
+    /// that binding's [`CNode::Binding`], so a slot travels with the binding
+    /// it belongs to and nothing pairs them up by order later.
+    binding_globals: Vec<(StrId, GlobalSlot)>,
+    /// True only while `analyse_module` walks a module's own statement list.
+    /// Being a global ([`ModuleChecker::binds_a_global`]) does not say this on its
+    /// own: imports, the prelude's slot seeds and `fn`/`const` declarations
+    /// are all globals bound outside the statement walk, and each reaches the
+    /// elaborator by a route of its own.
+    pub(super) walking_module_statements: bool,
+    /// One-shot self-name handed to the next `enter_fn_frame(None)` so a
+    /// `name = fn(...)` binding's lambda can self-recurse, without leaking the
+    /// enclosing fn's binding into unrelated (e.g. HOF-arg) lambdas.
+    next_fn_self_name: Option<StrId>,
+    /// The definition whose body is currently being compiled, used as the
+    /// `owner` of every reference-graph occurrence emitted while it is set
+    /// (the def→def edge channel for dead-code reachability). `None` at module
+    /// top level so genuine executed code roots its references; set/restored
+    /// around each `fn`/`const`/`type` body in the single-pass traversal and
+    /// spans nested lambdas (a lambda has no `DefId`, so its body's references
+    /// belong to the enclosing definition).
+    pub(super) current_owner: Option<DefId>,
+    /// The definitions and references this module records for the reference
+    /// graph. [`Self::finish`] hands them over: onto the module's
+    /// `CachedModule`, or to [`Compiler::entry_refs`] for the entry.
+    module_refs: ModuleReferences,
+    pub(super) current_module: ModulePath,
+    /// `current_module`'s canonical cache key, so per-module bookkeeping never
+    /// re-derives a key from a possibly-unresolved path.
+    current_module_key: ModuleKey,
+    /// Memo of `current_module` interned into `engine.str_slices`.
+    pub(super) module_path_slice: Option<ArenaSlice<pool::StrSlices>>,
+    /// Qualifier name in this file → the imported module's canonical key.
+    imported_qualifiers: HashMap<String, ModuleKey>,
     /// Function bodies whose typecheck walk has finished but whose Core
     /// pipeline (`lower`→`perceus`) is deferred until the enclosing
     /// declaration group has been generalized. See
@@ -601,7 +591,7 @@ fn function_reserved_during_elaboration() -> ! {
 /// has been inferred and generalized, so `lower` — the pass that reads them —
 /// runs last, off this record.
 ///
-/// Built whole in exactly one place, [`Compiler::finish_fn_frame`], from the
+/// Built whole in exactly one place, [`ModuleChecker::finish_fn_frame`], from the
 /// walk half ([`ParkedBody`]) plus the frame half that only becomes final
 /// there. No field is ever back-patched.
 struct DeferredBody {
@@ -618,9 +608,9 @@ struct DeferredBody {
     func_idx: FuncIdx,
 }
 
-/// The walk half of a [`DeferredBody`]: everything [`Compiler::compile_fn_body`]
+/// The walk half of a [`DeferredBody`]: everything [`ModuleChecker::compile_fn_body`]
 /// knows about the body it just typechecked, carried by value to the matching
-/// [`Compiler::finish_fn_frame`], which adds the frame half (captures,
+/// [`ModuleChecker::finish_fn_frame`], which adds the frame half (captures,
 /// `func_idx`) and pushes the complete `DeferredBody`.
 ///
 /// There is exactly one outcome, and that is the point: the typecheck walk
@@ -672,7 +662,7 @@ impl CtorLookup {
     }
 }
 
-/// Which toplevel [`Compiler::record_toplevel`] is recording: the entry file's
+/// Which toplevel [`ModuleChecker::record_toplevel`] is recording: the entry file's
 /// or an imported module's.
 enum TopKind {
     /// `__main__`: the program's own toplevel, and the `main` it starts at when
@@ -780,9 +770,9 @@ pub fn check_as_module(
     )
 }
 
-pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compiler {
+pub(crate) fn new_compiler(check_only: bool) -> Compiler {
     let mut ref_interner = ModuleInterner::new();
-    let main_refs = ModuleReferences::new(ref_interner.intern(&module::main_module()));
+    let entry_refs = ModuleReferences::new(ref_interner.intern(&module::main_module()));
     Compiler {
         fns: TiVec::new(),
         inits: Vec::new(),
@@ -790,20 +780,12 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         main: None,
         consts: Vec::new(),
         const_dedup: HashMap::new(),
-        frames: frame::Frames::toplevel(HashMap::new(), 0),
         retain_namespaces: false,
-        nil_discards: vec![],
         global_to_func: HashMap::new(),
-        toplevel_decls: Vec::new(),
-        binding_globals: Vec::new(),
-        walking_module_statements: false,
         rty_cache: HashMap::new(),
-        next_fn_self_name: None,
-        current_owner: None,
         engine: new_engine(),
         env: new_env(),
         recorded: vec![],
-        module_refs: main_refs,
         check_only,
         collect_hover_facts: false,
         unused_bindings: UnusedBindings::Report,
@@ -812,21 +794,67 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         module_table: ModuleTable::new(),
         module_display: HashMap::new(),
         ref_interner,
-        current_module: module::main_module(),
-        current_module_key: ModuleKey::main(),
-        module_path_slice: None,
         defid_module_memo: HashMap::new(),
-        imported_qualifiers: HashMap::new(),
-        base_dir: base_dir.map(|p| p.to_path_buf()),
         stdlib_source_root: None,
         prelude: PreludeBindings::default(),
         reserved: BTreeSet::new(),
-        deferred_bodies: Vec::new(),
-        defer_depth: 0,
+        slots: 0,
+        entry_refs,
     }
 }
 
-impl Compiler {
+/// The module doing an import: where its relative imports resolve from, and
+/// the key the imported module records as a dependent.
+pub(crate) struct Importer<'a> {
+    pub(crate) dir: Option<&'a Path>,
+    pub(crate) key: &'a ModuleKey,
+}
+
+impl<'c> ModuleChecker<'c> {
+    /// Start checking the module `path`, whose identity is `key`. Every module
+    /// it imports must already be compiled.
+    pub(crate) fn new(c: &'c mut Compiler, path: ModulePath, key: ModuleKey) -> ModuleChecker<'c> {
+        // A module's by-name env entries are its own, so they are undone when
+        // it is done. The prelude's are kept on purpose: they are the
+        // ambient namespace every module sees.
+        let scoped = !c.retain_namespaces;
+        if scoped {
+            c.env.push_module_frame();
+        }
+        let module_refs = ModuleReferences::new(c.ref_interner.intern(&path));
+        let frames = frame::Frames::toplevel(HashMap::new(), c.slots);
+        ModuleChecker {
+            c,
+            frames,
+            nil_discards: Vec::new(),
+            toplevel_decls: Vec::new(),
+            binding_globals: Vec::new(),
+            walking_module_statements: false,
+            next_fn_self_name: None,
+            current_owner: None,
+            module_refs,
+            current_module: path,
+            current_module_key: key,
+            module_path_slice: None,
+            imported_qualifiers: HashMap::new(),
+            deferred_bodies: Vec::new(),
+            defer_depth: 0,
+            scoped,
+        }
+    }
+
+    /// Finish the module, handing back what it recorded for the reference
+    /// graph.
+    pub(crate) fn finish(self) -> ModuleReferences {
+        self.c.slots = self.frames.current.slots;
+        if self.scoped {
+            self.c.env.pop_module_frame();
+        }
+        self.module_refs
+    }
+}
+
+impl ModuleChecker<'_> {
     /// The `DefId` of the `Type` named `name` declared in module `path`, read
     /// from the reference graph's own definitions — the single source of truth.
     ///
@@ -854,7 +882,7 @@ impl Compiler {
         if *path == self.current_module {
             pick(&self.module_refs, name)
         } else {
-            pick(self.module_table.module_refs_by_path(path)?, name)
+            pick(self.c.module_table.module_refs_by_path(path)?, name)
         }
     }
 }
@@ -872,7 +900,7 @@ struct CtorPattern<'a> {
 
 /// What the check walk built for an entry: a module block's nodes, or a bare
 /// expression.
-enum CheckedEntry {
+pub(crate) enum CheckedEntry {
     Module(Vec<CNode>, Span),
     Expr(CExpr),
 }
@@ -893,19 +921,22 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
     crate::desugar::desugar_expression(&mut expr);
     let expr = &expr;
 
-    let mut c = new_compiler(base_dir, check_only);
+    let mut c = new_compiler(check_only);
     c.unused_bindings = unused_bindings;
     c.module_scope = module_scope;
-    if let Some(m) = as_module.clone() {
-        // `as_module` is always a stdlib path (see `check_as_module`), whose
-        // written form is its canonical identity.
-        c.current_module_key = ModuleKey::for_stdlib(&m);
-        c.current_module = m;
-        // The user is editing stdlib source, so sibling `scarlet/...` imports must
-        // resolve to the on-disk files next to it, not the stale embedded
-        // snapshot.
-        c.stdlib_source_root = base_dir.and_then(module::find_stdlib_root);
-    }
+    let (entry_path, entry_key) = match as_module.clone() {
+        Some(m) => {
+            // The user is editing stdlib source, so sibling `scarlet/...`
+            // imports must resolve to the on-disk files next to it, not the
+            // stale embedded snapshot.
+            c.stdlib_source_root = base_dir.and_then(module::find_stdlib_root);
+            // `as_module` is always a stdlib path (see `check_as_module`),
+            // whose written form is its canonical identity.
+            let key = ModuleKey::for_stdlib(&m);
+            (m, key)
+        }
+        None => (module::main_module(), ModuleKey::main()),
+    };
 
     // When analysing the prelude file itself, don't load the prelude on top of
     // it (that would make every type a redefinition of itself). Other stdlib
@@ -922,53 +953,29 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
             );
         }
     }
-    let top_ty;
-    let checked;
+
+    let importer = Importer {
+        dir: base_dir,
+        key: &entry_key,
+    };
+    let loaded = c.load_entry_imports(expr, &importer);
+    let mut m = ModuleChecker::new(&mut c, entry_path, entry_key.clone());
+    // Entry-file env scope: opened here (not inside `analyse_module`) so the
+    // constructor/fn/const schemes it defines stay visible through the
+    // toplevel elaboration below — otherwise a `type` decl followed by a ctor
+    // use bails on `unbound callee` and the module toplevel never gets Core.
+    m.c.env.push_scope();
+    let (checked, top_ty) = m.check_entry(expr, loaded);
     // The `main` a program starts at; `None` for a check, a script, a
     // module, or a program with no usable `main` (which is then not clean).
-    let mut entered = None;
-    if let ast::Expression::BlockExpression(block) = expr {
-        c.process_imports(block);
-        c.bump_type_ids_past_reserved();
-        c.toplevel_decls.clear();
-        // Entry-file env scope: opened here (not inside `analyse_module`) so
-        // the constructor/fn/const schemes it defines stay visible through
-        // the toplevel elaboration below — otherwise a `type` decl followed
-        // by a ctor use bails on `unbound callee` and the module toplevel
-        // never gets Core. Popped after it.
-        c.env.push_scope();
-        let nodes = c.analyse_module(block, None);
-        checked = CheckedEntry::Module(nodes, block.span);
-        top_ty = c.ty_nil();
-        if as_module.is_none() && module_scope == ModuleScope::DeclarationsOnly {
-            entered = c.program_entry(block, check_only, expr.span());
+    let entered = match (expr, &as_module) {
+        (ast::Expression::BlockExpression(block), None)
+            if module_scope == ModuleScope::DeclarationsOnly =>
+        {
+            m.program_entry(block, check_only, expr.span())
         }
-    } else {
-        c.env.push_scope();
-        // `analyse_module` opens a local scope around a module's statements, so
-        // its nested blocks bind at depth 2 and are frame temps, not globals.
-        // A bare expression has no statement walk, so open the same scope here:
-        // without it a `let` in the expression's first nested block (an `if`
-        // arm) would sit at the module's own depth, `resolve_variable` would
-        // call it a global, and a lambda would load a global slot that
-        // `bind_local` never queued and the elaborator therefore never pins.
-        c.push_local_scope();
-        // The same phase boundary `analyse_module` puts around its walk: a bare
-        // expression program can still contain lambdas, and none of them may
-        // lower while the expression is being typechecked.
-        c.begin_deferred_elaboration();
-        let body = c.compile_expr(expr);
-        top_ty = body.ty;
-        checked = CheckedEntry::Expr(body);
-        c.end_deferred_elaboration();
-        c.check_nil_discards();
-        c.pop_local_scope();
-        // A bare expression has no module statement walk, but its outermost
-        // *block* (an `if` arm, say) is still the first one the elaborator
-        // sees, so it is elaborated as though it were a module toplevel.
-        // Nothing this compile declared belongs to it.
-        c.toplevel_decls.clear();
-    }
+        _ => None,
+    };
 
     // Elaborate the module toplevel and lower it into Core, like every other
     // function body (docs/core-ir-spec.md §Pipeline step 3). The elaborator
@@ -986,21 +993,22 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
     // keeps a rejected or check-only compile from handing back a `Program`
     // that runs the stdlib init and nothing else.
     let mut entry = None;
-    if let Some(clean) = c.clean_module() {
-        let name = c.engine.intern("__main__");
-        let lowered = c.elaborate_then_materialize(clean, None, |c, pool, fns| match &checked {
+    if let Some(clean) = m.c.clean_module() {
+        let name = m.c.engine.intern("__main__");
+        let lowered = m.elaborate_then_materialize(clean, None, |m, pool, fns| match &checked {
             CheckedEntry::Module(nodes, span) => {
-                typed_ir::elaborate_toplevel(c, pool, fns, name, nodes, *span, top_ty)
+                typed_ir::elaborate_toplevel(m, pool, fns, name, nodes, *span, top_ty)
             }
             CheckedEntry::Expr(body) => {
-                typed_ir::elaborate_body(c, pool, fns, name, &[], body, top_ty, true)
+                typed_ir::elaborate_body(m, pool, fns, name, &[], body, top_ty, true)
             }
         });
         if !check_only {
-            entry = c.record_toplevel(lowered, TopKind::Entry { entered });
+            entry = m.record_toplevel(lowered, TopKind::Entry { entered });
         }
     }
-    c.env.pop_scope();
+    m.c.env.pop_scope();
+    c.entry_refs = m.finish();
 
     let program = match entry {
         Some(_) => c.finish_program(),
@@ -1012,6 +1020,58 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
         entry,
         diagnostics: c.engine.diagnostics,
         references,
+    }
+}
+
+impl Compiler {
+    /// Compile what the entry file imports. A bare-expression entry imports
+    /// nothing.
+    pub(crate) fn load_entry_imports(
+        &mut self,
+        expr: &ast::Expression,
+        importer: &Importer<'_>,
+    ) -> Vec<Option<(ModulePath, ModuleKey)>> {
+        let ast::Expression::BlockExpression(block) = expr else {
+            return Vec::new();
+        };
+        let loaded = self.load_imports(block, importer);
+        self.bump_type_ids_past_reserved();
+        loaded
+    }
+}
+
+impl ModuleChecker<'_> {
+    /// Check the entry file: a module's statements, or a bare expression.
+    /// `loaded` is what [`Compiler::load_entry_imports`] compiled for it.
+    pub(crate) fn check_entry(
+        &mut self,
+        expr: &ast::Expression,
+        loaded: Vec<Option<(ModulePath, ModuleKey)>>,
+    ) -> (CheckedEntry, Ty) {
+        if let ast::Expression::BlockExpression(block) = expr {
+            self.bind_imports(block, loaded);
+            let nodes = self.analyse_module(block, None);
+            return (CheckedEntry::Module(nodes, block.span), self.c.ty_nil());
+        }
+        // `analyse_module` opens a local scope around a module's statements,
+        // so its nested blocks bind at depth 2 and are frame temps, not
+        // globals. A bare expression has no statement walk, so open the same
+        // scope here: without it a `let` in the expression's first nested
+        // block (an `if` arm) would sit at the module's own depth,
+        // `resolve_variable` would call it a global, and a lambda would load a
+        // global slot that `bind_local` never queued and the elaborator
+        // therefore never pins.
+        self.push_local_scope();
+        // The same phase boundary `analyse_module` puts around its walk: a bare
+        // expression program can still contain lambdas, and none of them may
+        // lower while the expression is being typechecked.
+        self.begin_deferred_elaboration();
+        let body = self.compile_expr(expr);
+        self.end_deferred_elaboration();
+        self.check_nil_discards();
+        self.pop_local_scope();
+        let ty = body.ty;
+        (CheckedEntry::Expr(body), ty)
     }
 }
 
@@ -1088,7 +1148,7 @@ impl Compiler {
             inits,
             toplevel,
             main: self.main,
-            globals: self.frames.current.slots as u32,
+            globals: self.slots as u32,
             types,
             abi,
         })
@@ -1289,9 +1349,11 @@ impl Compiler {
     fn const_binary(&mut self, bytes: Vec<u8>, bit_len: u64) -> ConstId {
         self.add_constant(Const::Binary { bytes, bit_len })
     }
+}
 
+impl ModuleChecker<'_> {
     fn get_or_create_local(&mut self, name: &str) -> i32 {
-        let id = self.engine.intern(name);
+        let id = self.c.engine.intern(name);
         if let Some((entry, inherited)) = self.frames.current.lookup(id) {
             // Reuse only if this slot was bound in the *current* block. One
             // inherited from an enclosing block must survive it, so shadowing
@@ -1336,11 +1398,10 @@ impl Compiler {
     /// Whether a binding made *now* lands in the entry frame — the one
     /// definition of "global" the compiler has.
     ///
-    /// `at_toplevel` says no function frame is open, and a module depth of at
-    /// most 1 says we are in the module's own statements: `analyse_module`
-    /// opens exactly one block, imports and the prelude's slot seeds bind
-    /// below it, and every nested block/`if`/`match` at module level opens
-    /// another. Both halves of
+    /// `at_toplevel` says no function frame is open, and a depth of at most 1
+    /// says we are in the module's own statements: `analyse_module` opens
+    /// exactly one block, and every nested block/`if`/`match` at module level
+    /// opens another. Both halves of
     /// the global question — [`Self::bind_local`]'s queue and
     /// `resolve_variable`'s `PushGlobal` — are derived from this, recorded once
     /// on [`LocalSlot::is_global`], so they cannot drift apart.
@@ -1349,7 +1410,7 @@ impl Compiler {
     /// opens a matching scope of its own, so a `let` inside one of its nested
     /// blocks is a frame temp there too.
     fn binds_a_global(&self) -> bool {
-        self.frames.at_toplevel() && self.frames.current.module_depth() <= 1
+        self.frames.at_toplevel() && self.frames.current.depth() <= 1
     }
 
     /// [`Self::bind_local_raw`], plus: if this is a module-scope binding,
@@ -1379,7 +1440,7 @@ impl Compiler {
     /// on [`Self::binding_globals`]: a declaration's slot reaches the
     /// elaborator on its own [`ToplevelDecl`] record instead.
     pub(super) fn alloc_decl_slot(&mut self, name: &str) -> (GlobalSlot, BinderId) {
-        let id = self.engine.intern(name);
+        let id = self.c.engine.intern(name);
         let idx = self.frames.current.alloc_slot();
         self.bind_local_raw(id, idx);
         (GlobalSlot(idx), self.publish_local(id))
@@ -1410,13 +1471,13 @@ impl Compiler {
     /// Open a lexical block scope: pushes a fresh type-env scope and a local
     /// undo mark in lockstep. Must be matched by `pop_block_scope`.
     fn push_block_scope(&mut self) {
-        self.env.push_scope();
+        self.c.env.push_scope();
         self.push_local_scope();
     }
 
     fn pop_block_scope(&mut self) {
         self.pop_local_scope();
-        self.env.pop_scope();
+        self.c.env.pop_scope();
     }
 
     /// Record a let/param/match binding for unused-variable checking. Names
@@ -1427,9 +1488,9 @@ impl Compiler {
         if name.starts_with('_') {
             return;
         }
-        let id = self.engine.intern(name);
+        let id = self.c.engine.intern(name);
         if let Some(prev_sp) = self.frames.current.track(id, sp) {
-            self.unused_binding(name, prev_sp);
+            self.c.unused_binding(name, prev_sp);
         }
     }
 
@@ -1441,8 +1502,8 @@ impl Compiler {
         let mut leftover: Vec<(StrId, Span)> = unused.into_iter().collect();
         leftover.sort_by_key(|(_, sp)| (sp.start_line, sp.start_column));
         for (id, sp) in leftover {
-            let name = self.engine.str(id).to_string();
-            self.unused_binding(&name, sp);
+            let name = self.c.engine.str(id).to_string();
+            self.c.unused_binding(&name, sp);
         }
     }
 
@@ -1505,7 +1566,7 @@ impl Compiler {
     /// A module-scope value at `slot`: a known top-level `fn` if one has been
     /// registered for that slot, an opaque global otherwise.
     fn global_denotation(&self, slot: GlobalSlot) -> Denotation {
-        match self.global_to_func.get(&slot) {
+        match self.c.global_to_func.get(&slot) {
             Some(&func_idx) => Denotation::known_fn(slot, func_idx),
             None => Denotation::global(slot),
         }
@@ -1519,7 +1580,9 @@ impl Compiler {
         let decl = self.toplevel_decls.iter().find(|d| d.binder == binder)?;
         Some(self.global_denotation(decl.slot))
     }
+}
 
+impl Compiler {
     // ========================================================================
     // Diagnostics & LSP recording
     // ========================================================================
@@ -1560,12 +1623,14 @@ impl Compiler {
             format!("'{name}' is unused; prefix with '_' to ignore"),
         ));
     }
+}
 
+impl ModuleChecker<'_> {
     /// Probe the doc map for `name`, but only while collecting hover facts.
     /// On the non-LSP path `record` discards the doc, so skip the clone.
     fn doc_if_collecting(&self, name: &str) -> Option<String> {
-        if self.collect_hover_facts {
-            self.env.lookup_doc(name)
+        if self.c.collect_hover_facts {
+            self.c.env.lookup_doc(name)
         } else {
             None
         }
@@ -1575,11 +1640,11 @@ impl Compiler {
         // Hover facts are only consumed by `IncrementalSession` (the LSP). On
         // the free `compile`/`check` path they are resolved then discarded, so
         // skip the `name.to_string()` + `RawRef` buffering entirely there.
-        if !self.collect_hover_facts {
+        if !self.c.collect_hover_facts {
             return;
         }
         let module = self.current_module_id();
-        self.recorded.push(RawRef {
+        self.c.recorded.push(RawRef {
             span: sp,
             name: name.to_string(),
             ty,
@@ -1587,7 +1652,9 @@ impl Compiler {
             module,
         });
     }
+}
 
+impl Compiler {
     /// Resolve a module-path `ArenaSlice` to its stable `ModuleId`, memoised on
     /// the `Copy` slice. The `str_slices` pool is append-only within a compile,
     /// so a given slice always denotes the same path (hence the same id); the
@@ -1605,13 +1672,15 @@ impl Compiler {
         self.defid_module_memo.insert(sl, id);
         id
     }
+}
 
+impl ModuleChecker<'_> {
     /// The interned `ModuleId` of `current_module`, reusing the memoised
     /// module-path slice so the hot recording path neither clones the
     /// `ModulePath` nor re-interns it.
     fn current_module_id(&mut self) -> ModuleId {
         let sl = self.current_module_slice();
-        self.module_id_of_slice(sl)
+        self.c.module_id_of_slice(sl)
     }
 
     /// Resolve an env-side [`DefinitionLocation`] (declaring span + module
@@ -1621,7 +1690,7 @@ impl Compiler {
     /// reconstructed single-line so a definition's `DefId` is bit-identical to
     /// the `DefId` every occurrence of it targets.
     pub(super) fn defid_of(&mut self, dl: DefinitionLocation) -> DefId {
-        let module = self.module_id_of_slice(dl.module);
+        let module = self.c.module_id_of_slice(dl.module);
         DefId::new(module, dl.span(), dl.entity)
     }
 
@@ -1673,7 +1742,7 @@ impl Compiler {
     /// find-references / rename / unused-import are unaffected: the alias's
     /// liveness rides on the member's own `Qualified` occurrence, which the
     /// caller records. The alias `Definition` was registered under the
-    /// qualifier's name by `process_import`, so no extra bookkeeping is needed
+    /// qualifier's name by `bind_import`, so no extra bookkeeping is needed
     /// to find it; an unknown qualifier records nothing.
     fn record_qualifier_use(&mut self, qualifier: &ast::Identifier) {
         if let Some(alias) = self
@@ -1735,7 +1804,7 @@ impl Compiler {
     /// locals, and `EntityKind::Value` defs are ignored by the dead-code pass,
     /// so the `collect_hover_facts` gate keeps this off the hot path.
     fn emit_value_def(&mut self, sp: Span, name: &str, doc: Option<String>) {
-        if self.collect_hover_facts {
+        if self.c.collect_hover_facts {
             let m = self.current_module_slice();
             self.emit_def(
                 DefinitionLocation::new(sp, m, EntityKind::Value),
@@ -1746,7 +1815,9 @@ impl Compiler {
             );
         }
     }
+}
 
+impl Compiler {
     /// Thin wrappers over the engine's `mk_con` for prelude types, fed by the
     /// captured `PreludeBindings` so the type identity (not just the name
     /// string) is the source of truth where it matters. The nullary ones go
@@ -1784,7 +1855,9 @@ impl Compiler {
     fn ty_result(&mut self, ok: Ty, err: Ty) -> Ty {
         self.ty_prelude(self.prelude.result(), &[ok, err])
     }
+}
 
+impl ModuleChecker<'_> {
     /// Hydrate a type annotation through `h`, recording any error and falling
     /// back to a fresh tyvar so inference can continue. Every type name the
     /// hydrator resolved is drained as an `Unqualified` occurrence of that
@@ -1795,10 +1868,10 @@ impl Compiler {
     /// occurrence and its declaration share one `DefId`. Recording-only: the
     /// returned `Ty` is byte-for-byte what the old code returned.
     pub(super) fn hydrate(&mut self, h: &mut Hydrator, t: &ast::TypeIdentifier) -> Ty {
-        let result = h.type_from_ast(t, &self.env, &mut self.engine);
+        let result = h.type_from_ast(t, &self.c.env, &mut self.c.engine);
         for hit in h.take_type_refs() {
-            let path = self.engine.strs_of(hit.module);
-            let name = self.engine.str(hit.name).to_string();
+            let path = self.c.engine.strs_of(hit.module);
+            let name = self.c.engine.str(hit.name).to_string();
             let kind = match hit.qualifier {
                 Some(_) => ReferenceKind::Qualified,
                 None => ReferenceKind::Unqualified,
@@ -1810,7 +1883,7 @@ impl Compiler {
             // qualifier resolves under hover / goto-def.
             if let Some((qid, qspan)) = hit.qualifier {
                 let q = ast::Identifier {
-                    name: self.engine.str(qid).to_string(),
+                    name: self.c.engine.str(qid).to_string(),
                     span: qspan,
                 };
                 self.record_qualifier_use(&q);
@@ -1819,8 +1892,8 @@ impl Compiler {
         match result {
             Ok(ty) => ty,
             Err(d) => {
-                self.engine.diagnostics.push(d);
-                self.engine.fresh_var()
+                self.c.engine.diagnostics.push(d);
+                self.c.engine.fresh_var()
             }
         }
     }
@@ -1829,7 +1902,7 @@ impl Compiler {
     pub(super) fn hydrate_opt(&mut self, h: &mut Hydrator, t: Option<&ast::TypeIdentifier>) -> Ty {
         match t {
             Some(t) => self.hydrate(h, t),
-            None => self.engine.fresh_var(),
+            None => self.c.engine.fresh_var(),
         }
     }
 
@@ -1848,7 +1921,7 @@ impl Compiler {
         match node {
             ast::Node::Statement(s) => {
                 let n = self.compile_statement(s);
-                (self.ty_nil(), n)
+                (self.c.ty_nil(), n)
             }
             ast::Node::Expression(e) => {
                 let e = self.compile_expr(e);
@@ -1872,7 +1945,7 @@ impl Compiler {
                             ty: init.ty,
                             span: ident.span,
                             kind: CPatKind::Bind {
-                                name: self.engine.intern(&ident.name),
+                                name: self.c.engine.intern(&ident.name),
                                 binder,
                             },
                         };
@@ -1895,7 +1968,7 @@ impl Compiler {
                     ast::Declaration::Type(td) => ("type", td.span),
                     ast::Declaration::Const(cb) => ("const", cb.span),
                 };
-                self.error(
+                self.c.error(
                     format!("{kind} declarations are only allowed at the top level"),
                     sp,
                 );
@@ -1921,7 +1994,7 @@ impl Compiler {
         ident: &ast::Identifier,
     ) -> (CExpr, BinderId) {
         let name = ident.name.clone();
-        let name_id = self.engine.intern(&name);
+        let name_id = self.c.engine.intern(&name);
 
         // At module scope a re-binding gets a fresh slot (see
         // `get_or_create_local`), so the slot must be allocated *after*
@@ -1940,14 +2013,14 @@ impl Compiler {
 
         let annot_ty = vb.typ.as_ref().map(|a| self.hydrate_annotation(a));
 
-        self.engine.enter_level();
-        let self_ty = self.engine.fresh_var();
+        self.c.engine.enter_level();
+        let self_ty = self.c.engine.fresh_var();
         let init_is_fn = matches!(vb.init, ast::Expression::FunctionExpression(_));
         // Only pre-bind for recursive lambdas. For any other init, exposing
         // the name to its own initializer lets `x = x` infer ⊥ and generalize
         // to ∀A.A, which is unsound.
         if init_is_fn {
-            self.env.define(&name, mono(self_ty));
+            self.c.env.define(&name, mono(self_ty));
         }
 
         // Deliver the self-name to the lambda's own frame via a one-shot
@@ -1964,28 +2037,29 @@ impl Compiler {
         let init_ty = init.ty;
         self.next_fn_self_name = saved_self;
 
-        self.engine.unify_at(self_ty, init_ty, vb.init.span());
-        self.engine.leave_level();
+        self.c.engine.unify_at(self_ty, init_ty, vb.init.span());
+        self.c.engine.leave_level();
 
         let final_ty = if let Some(a) = annot_ty {
-            self.engine
+            self.c
+                .engine
                 .unify_at(a, init_ty, type_defining_span(&vb.init));
             a
         } else {
             init_ty
         };
 
-        let restricted = self.restricted_generalization_cons();
-        let scheme = self.engine.generalize_restricted(final_ty, &restricted);
+        let restricted = self.c.restricted_generalization_cons();
+        let scheme = self.c.engine.generalize_restricted(final_ty, &restricted);
         let m = self.current_module_slice();
-        self.env.define_at(
+        self.c.env.define_at(
             &name,
             scheme,
             DefinitionLocation::new(ident.span, m, EntityKind::Value),
         );
         self.track_binding(&name, ident.span);
         if let Some(doc) = &vb.doc {
-            self.env.store_doc(&name, doc.clone());
+            self.c.env.store_doc(&name, doc.clone());
         }
         self.record(&name, final_ty, ident.span, vb.doc.clone());
         self.emit_value_def(ident.span, &name, vb.doc.clone());
@@ -2010,12 +2084,13 @@ impl Compiler {
         }
         let depth = unroll_depth(&pattern) + 1;
         let resolved = self
+            .c
             .engine
-            .resolve_for_patterns(init_ty, Some(&self.env), depth);
+            .resolve_for_patterns(init_ty, Some(&self.c.env), depth);
         let mut um = UsefulnessMatrix::new(resolved);
         let pat = um.lower(&pattern);
         if let Some(missing) = um.find_missing(&[pat]) {
-            self.error(
+            self.c.error(
                 format!(
                     "A binding's pattern must match every value, and this one misses {missing}. \
                      Use `match` to handle it"
@@ -2030,39 +2105,40 @@ impl Compiler {
     // Modules
     // ========================================================================
 
-    pub(super) fn process_imports(&mut self, block: &ast::BlockExpression) {
-        for node in &block.body {
-            let ast::Node::Statement(stmt) = node else {
-                break;
-            };
-            let ast::Statement::ImportDeclaration(imp) = stmt.as_ref() else {
-                break;
-            };
-            self.process_import(imp);
+    /// Bind the module's imports, each already compiled by
+    /// [`Compiler::load_imports`], which handed back `loaded` in the same
+    /// order.
+    fn bind_imports(
+        &mut self,
+        block: &ast::BlockExpression,
+        loaded: Vec<Option<(ModulePath, ModuleKey)>>,
+    ) {
+        for (imp, loaded) in import_decls(block).zip(loaded) {
+            if let Some((canon, key)) = loaded {
+                self.bind_import(imp, canon, key);
+            }
         }
     }
+}
 
+impl Compiler {
     /// A cache-hit dependency reserved its id range but contributed nothing to
     /// `next_type_id` this pass, so bump the entry file past every reserved
     /// block before it allocates any of its own type ids.
-    pub(super) fn bump_type_ids_past_reserved(&mut self) {
+    fn bump_type_ids_past_reserved(&mut self) {
         let hw = self.module_table.id_high_water();
         let cur = self.env.next_type_id();
         if hw > cur {
             self.env.set_next_type_id(hw);
         }
     }
+}
 
-    fn process_import(&mut self, imp: &ast::ImportDeclaration) {
-        // `canon` is the module's identity — the file it resolved to. Every
-        // downstream key (module table, reference interner, qualifier map) must
-        // use it, never `imp.path`, which is only how *this* file spelled it.
-        let Some((canon, key)) = self.load_module(&imp.path, imp.span) else {
-            return;
-        };
-        self.module_display
-            .insert(key.clone(), imp.path.to_string());
-
+impl ModuleChecker<'_> {
+    /// `canon` is the module's identity — the file it resolved to. Every
+    /// downstream key (module table, reference interner, qualifier map) must
+    /// use it, never `imp.path`, which is only how *this* file spelled it.
+    fn bind_import(&mut self, imp: &ast::ImportDeclaration, canon: ModulePath, key: ModuleKey) {
         // The default qualifier is the last module-name segment; relative
         // markers live in `path.leading`, so they can't be picked up here.
         let qualifier = imp
@@ -2091,8 +2167,8 @@ impl Compiler {
         // geometry.
         let alias_span = imp.alias.as_ref().map_or(imp.span, |a| a.span);
         let cur_path = self.current_module.clone();
-        let cur_mid = self.ref_interner.intern(&cur_path);
-        let imported_mid = self.ref_interner.intern(&canon);
+        let cur_mid = self.c.ref_interner.intern(&cur_path);
+        let imported_mid = self.c.ref_interner.intern(&canon);
         let alias_defid = DefId::new(cur_mid, alias_span, EntityKind::ModuleAlias);
         self.module_refs.add_definition(Definition::new(
             cur_mid,
@@ -2131,6 +2207,7 @@ impl Compiler {
         // the hydrator probes for a qualified reference; type names cannot
         // contain ':', so these keys never collide with local declarations.
         let qualified_types: Vec<(String, _)> = self
+            .c
             .module_table
             .get(&key)
             .map(|iface| {
@@ -2142,12 +2219,14 @@ impl Compiler {
             })
             .unwrap_or_default();
         for (mangled, ti) in qualified_types {
-            self.env.store_type_info(&mangled, ti);
+            self.c.env.store_type_info(&mangled, ti);
         }
 
         self.imported_qualifiers.insert(qualifier, key.clone());
     }
+}
 
+impl Compiler {
     /// Load the module `path` names, relative to the *importing* module's
     /// directory, and return its canonical identity.
     ///
@@ -2166,47 +2245,63 @@ impl Compiler {
         })
     }
 
+    /// Compile every module `block` imports, in order, before the importer's
+    /// own check starts. `None` for an import that failed to load, which has
+    /// already been reported.
+    fn load_imports(
+        &mut self,
+        block: &ast::BlockExpression,
+        importer: &Importer<'_>,
+    ) -> Vec<Option<(ModulePath, ModuleKey)>> {
+        import_decls(block)
+            .map(|imp| {
+                let loaded = self.load_module(&imp.path, imp.span, importer)?;
+                self.module_display
+                    .insert(loaded.1.clone(), imp.path.to_string());
+                Some(loaded)
+            })
+            .collect()
+    }
+
     pub(crate) fn load_module(
         &mut self,
         path: &ast::ImportPath,
         at: Span,
+        importer: &Importer<'_>,
     ) -> Option<(ModulePath, ModuleKey)> {
-        let resolved = match module::resolve_with(
-            path,
-            self.base_dir.as_deref(),
-            self.stdlib_source_root.as_deref(),
-        ) {
-            Ok(r) => r,
-            // These two get richer, import-syntax-aware guidance than
-            // `ResolveError`'s shared Display wording provides.
-            Err(ResolveError::BareName(p)) => {
-                self.module_error(
-                    format!(
-                        "Unknown module '{p}' — package imports are not yet supported; \
+        let resolved =
+            match module::resolve_with(path, importer.dir, self.stdlib_source_root.as_deref()) {
+                Ok(r) => r,
+                // These two get richer, import-syntax-aware guidance than
+                // `ResolveError`'s shared Display wording provides.
+                Err(ResolveError::BareName(p)) => {
+                    self.module_error(
+                        format!(
+                            "Unknown module '{p}' — package imports are not yet supported; \
                          use a relative path like `./{p}`"
-                    ),
-                    at,
-                );
-                return None;
-            }
-            Err(ResolveError::NoBaseDir) => {
-                self.module_error(
-                    "Relative imports are not allowed without a file context (e.g. REPL)"
-                        .to_string(),
-                    at,
-                );
-                return None;
-            }
-            Err(e) => {
-                self.module_error(e.to_string(), at);
-                return None;
-            }
-        };
+                        ),
+                        at,
+                    );
+                    return None;
+                }
+                Err(ResolveError::NoBaseDir) => {
+                    self.module_error(
+                        "Relative imports are not allowed without a file context (e.g. REPL)"
+                            .to_string(),
+                        at,
+                    );
+                    return None;
+                }
+                Err(e) => {
+                    self.module_error(e.to_string(), at);
+                    return None;
+                }
+            };
 
         // The identity of an on-disk module is the file it resolved to;
         // `resolve` already minted the canonical path + key from it.
         let module::ResolvedModule { source, canon, key } = resolved;
-        let importer = self.current_module_key.clone();
+        let importer = importer.key.clone();
         if self.module_table.get(&key).is_some() {
             self.module_table.record_dependent(&key, &importer);
             return Some((canon, key));
@@ -2294,61 +2389,6 @@ impl Compiler {
         out
     }
 
-    /// Snapshot the enclosing module's per-module state into a `ModuleFrame`
-    /// and swap in fresh state for compiling `path`'s body. A fresh
-    /// `ModuleReferences` collector is installed (the typecheck pass populates
-    /// it; `leave_module_frame` moves the result out for the caller to store
-    /// on the module's `CachedModule`). `module_path_slice` is a memo of
-    /// `current_module`, so it is cleared rather than carried over.
-    fn enter_module_frame(
-        &mut self,
-        path: ModulePath,
-        key: ModuleKey,
-        base_dir: Option<PathBuf>,
-    ) -> ModuleFrame {
-        let mid = self.ref_interner.intern(&path);
-        let scoped = (!self.retain_namespaces).then(|| {
-            self.env.push_module_frame();
-            self.frames.current.open_module()
-        });
-        ModuleFrame {
-            module: std::mem::replace(&mut self.current_module, path),
-            module_key: std::mem::replace(&mut self.current_module_key, key),
-            module_path_slice: self.module_path_slice.take(),
-            imported_qualifiers: std::mem::take(&mut self.imported_qualifiers),
-            base_dir: std::mem::replace(&mut self.base_dir, base_dir),
-            module_refs: std::mem::replace(&mut self.module_refs, ModuleReferences::new(mid)),
-            scoped,
-        }
-    }
-
-    /// Restore the snapshotted per-module state and return the just-compiled
-    /// module's collected references (the `module_refs` value that was live
-    /// between enter and leave).
-    fn leave_module_frame(&mut self, old: ModuleFrame) -> ModuleReferences {
-        let ModuleFrame {
-            module,
-            module_key,
-            module_path_slice,
-            imported_qualifiers,
-            base_dir,
-            module_refs,
-            scoped,
-        } = old;
-        if let Some(outer_base) = scoped {
-            // Unwind the module's namespace: its env by-name entries and its
-            // import items.
-            self.frames.current.close_module(outer_base);
-            self.env.pop_module_frame();
-        }
-        self.current_module = module;
-        self.current_module_key = module_key;
-        self.module_path_slice = module_path_slice;
-        self.imported_qualifiers = imported_qualifiers;
-        self.base_dir = base_dir;
-        std::mem::replace(&mut self.module_refs, module_refs)
-    }
-
     fn compile_module_body(
         &mut self,
         path: ModulePath,
@@ -2359,50 +2399,53 @@ impl Compiler {
     ) -> (CompiledBody, Vec<ModuleKey>) {
         let mut iface = ModuleInterface::new(path.clone());
         iface.doc = doc.clone();
-        // Everything pushed from here until `leave_module_frame` was raised
-        // while *this* module (or one of its dependencies, which stamp their
-        // own ranges first in the `process_imports` recursion) was current, so
+        // Everything pushed from here on was raised while this module (or one
+        // of its imports, which stamp their own first) was being compiled, so
         // its spans point into this module's text, not the entry file's.
         let diag_mark = self.engine.diagnostics.len();
-        let old = self.enter_module_frame(path, key.clone(), base_dir);
-        // The fresh collector installed above belongs to this module, so its
-        // doc goes here rather than on the enclosing module's.
-        self.module_refs.set_doc(doc);
-
-        self.process_imports(block);
-        let imports: Vec<ModuleKey> = self.imported_qualifiers.values().cloned().collect();
+        // A module is interned before the modules it imports, so module ids
+        // follow the order modules are reached in.
+        self.ref_interner.intern(&path);
+        let loaded = self.load_imports(
+            block,
+            &Importer {
+                dir: base_dir.as_deref(),
+                key: &key,
+            },
+        );
+        let imports: Vec<ModuleKey> = loaded.iter().flatten().map(|(_, k)| k.clone()).collect();
         // Reserve (or reuse) this module's stable 256-aligned type-id range
         // *before* the watermark is captured, so the captured watermark's
         // `env.next_type_id == base`. On invalidation `reset_to`/`truncate_to`
         // restores `next_type_id` from that watermark, putting the module back
         // at its own range start — editing one module never shifts another's
-        // ids. Deps have already loaded (and reserved their ranges) via the
-        // `process_imports` recursion above, so the floor (current
-        // `next_type_id`) already sits past every stdlib + dependency id.
-        // `key` is the same key `load_module` caches this module under.
+        // ids. Its imports have already reserved their ranges, so the floor
+        // (current `next_type_id`) already sits past every stdlib + dependency
+        // id. `key` is the same key `load_module` caches this module under.
         let floor = self.env.next_type_id();
         let reservation = self.module_table.id_base_for(&key, floor);
         let base = reservation.base();
         self.env.set_next_type_id(base);
         let watermark = self.watermark();
-        // `toplevel_decls` drives the Core toplevel lower below; reset it so it
-        // carries only *this* module's decls, not those of the dependencies
-        // `process_imports` just compiled.
-        self.toplevel_decls.clear();
-        self.env.push_scope();
-        let nodes = self.analyse_module(block, Some(&mut iface));
-        self.lower_module_init(&key, &nodes, block.span);
-        self.env.pop_scope();
+
+        let mut checker = ModuleChecker::new(self, path, key.clone());
+        checker.module_refs.set_doc(doc);
+        checker.bind_imports(block, loaded);
+        checker.c.env.push_scope();
+        let nodes = checker.analyse_module(block, Some(&mut iface));
+        checker.lower_module_init(&key, &nodes, block.span);
+        checker.c.env.pop_scope();
+        let refs = checker.finish();
+
         // Record actual type-id consumption so `id_high_water` tracks real
         // usage and a reused-range spill past `MODULE_TYPE_ID_RANGE` raises
         // `id_range_overflow` for the invalidate-all/reset recovery path.
         let used = self.env.next_type_id().0 - base.0;
         reservation.note_usage(&mut self.module_table, used);
 
-        let refs = self.leave_module_frame(old);
         // Stamp provenance on every diagnostic this module's compile produced.
-        // Dependencies compiled inside our range have already stamped theirs,
-        // so only still-unstamped (entry-relative) ones become ours.
+        // Its imports have already stamped theirs, so only still-unstamped
+        // (entry-relative) ones become ours.
         for d in &mut self.engine.diagnostics[diag_mark..] {
             if d.source.is_none() {
                 d.source = Some(key.clone());
@@ -2417,7 +2460,9 @@ impl Compiler {
             imports,
         )
     }
+}
 
+impl ModuleChecker<'_> {
     /// The function a program starts at. Validates the entry file's `main`
     /// — `pub`, no parameters — whenever there is one, so `check` reports a
     /// malformed entry point too, and requires one when the program is going
@@ -2447,7 +2492,7 @@ impl Compiler {
         });
         let Some((node, fd, public)) = main else {
             if !check_only {
-                self.error(
+                self.c.error(
                     "No `main` function: a program starts at `pub fn main()`".to_string(),
                     Span::point(module_span.start_line, module_span.start_column),
                 );
@@ -2456,14 +2501,14 @@ impl Compiler {
         };
         let mut usable = true;
         if !public {
-            self.error(
+            self.c.error(
                 "`main` must be public: a program starts at `pub fn main()`".to_string(),
                 fd.identifier.span,
             );
             usable = false;
         }
         if !fd.params.is_empty() {
-            self.error(
+            self.c.error(
                 "`main` takes no parameters (arguments are read with `os.argv()`)".to_string(),
                 fd.identifier.span,
             );
@@ -2475,7 +2520,7 @@ impl Compiler {
         // Compiled by `analyse_module` unless its body failed, in which case
         // the module is not clean and nothing runs anyway.
         let slot = self.toplevel_decls.iter().find(|d| d.node == node)?.slot;
-        self.global_to_func.get(&slot).copied()
+        self.c.global_to_func.get(&slot).copied()
     }
 
     /// Perceus a just-lowered toplevel and record it: an imported module's
@@ -2500,17 +2545,17 @@ impl Compiler {
         // last use in the program.
         let top = perceus::keep_globals(perceus::perceus(&pool, top));
         if std::env::var("CORE_DBG").is_ok() {
-            eprintln!("=== {}\n{top}", self.engine.str(name));
+            eprintln!("=== {}\n{top}", self.c.engine.str(name));
         }
         let lowered = self.lowered_fn(name, top, pool);
         match kind {
             TopKind::Module => {
-                self.inits.push(lowered);
+                self.c.inits.push(lowered);
                 None
             }
             TopKind::Entry { entered } => {
-                self.entry_toplevel = Some(lowered);
-                self.main = entered;
+                self.c.entry_toplevel = Some(lowered);
+                self.c.main = entered;
                 Some(EntryToplevel { _priv: () })
             }
         }
@@ -2519,18 +2564,18 @@ impl Compiler {
     /// Elaborate and lower a just-analysed module toplevel to Core and record
     /// it, exactly as `compile_with` does for `__main__`.
     fn lower_module_init(&mut self, key: &ModuleKey, nodes: &[CNode], span: Span) {
-        let Some(clean) = self.clean_module() else {
+        let Some(clean) = self.c.clean_module() else {
             return;
         };
-        let name = self.engine.intern(key.as_str());
-        let nil = self.ty_nil();
+        let name = self.c.engine.intern(key.as_str());
+        let nil = self.c.ty_nil();
         // Elaborated and lowered even under `check_only` so a module toplevel
         // the front half cannot handle is a diagnostic rather than a crash at
         // `scarlet run`.
         let lowered = self.elaborate_then_materialize(clean, None, |c, pool, fns| {
             typed_ir::elaborate_toplevel(c, pool, fns, name, nodes, span, nil)
         });
-        if !self.check_only {
+        if !self.c.check_only {
             self.record_toplevel(lowered, TopKind::Module);
         }
     }
@@ -2544,22 +2589,23 @@ impl Compiler {
         member: &str,
         member_span: Span,
     ) -> Option<(Scheme, Option<GlobalSlot>)> {
-        let Some(iface) = self.module_table.get(module_key) else {
-            self.module_error(format!("Module '{module_key}' is not loaded"), member_span);
+        let Some(iface) = self.c.module_table.get(module_key) else {
+            self.c
+                .module_error(format!("Module '{module_key}' is not loaded"), member_span);
             return None;
         };
         if let Some(ev) = iface.values.get(member).cloned() {
             return Some((ev.scheme, ev.local_slot));
         }
         let private = iface.private_names.contains(member);
-        let name = self.module_name(module_key);
+        let name = self.c.module_name(module_key);
         if private {
-            self.error(
+            self.c.error(
                 format!("'{member}' is private in module '{name}'"),
                 member_span,
             );
         } else {
-            self.error(
+            self.c.error(
                 format!("Module '{name}' has no member '{member}'"),
                 member_span,
             );
@@ -2577,7 +2623,7 @@ impl Compiler {
     /// rather than re-derive them: re-instantiating a constructor or module
     /// function scheme would produce unresolved vars where the walk had a
     /// concrete `Con`.
-    pub(super) fn compile_expr(&mut self, expr: &ast::Expression) -> CExpr {
+    fn compile_expr(&mut self, expr: &ast::Expression) -> CExpr {
         let (ty, kind) = self.compile_expr_inner(expr);
         CExpr {
             ty,
@@ -2591,7 +2637,7 @@ impl Compiler {
             ast::Expression::BinaryLiteral(bl) => self.compile_binary_literal(bl),
             ast::Expression::BlockExpression(be) => {
                 self.push_block_scope();
-                let mut last_ty = self.ty_nil();
+                let mut last_ty = self.c.ty_nil();
                 let mut nodes = Vec::with_capacity(be.body.len());
 
                 for (i, node) in be.body.iter().enumerate() {
@@ -2602,15 +2648,15 @@ impl Compiler {
                     if is_last {
                         last_ty = ty;
                     } else if matches!(node, ast::Node::Expression(_)) {
-                        let resolved = self.engine.find(ty);
+                        let resolved = self.c.engine.find(ty);
                         let is_nil = matches!(
-                            self.engine.node(resolved),
-                            TypeNode::Con { id, .. } if self.prelude.nil().is(id)
+                            self.c.engine.node(resolved),
+                            TypeNode::Con { id, .. } if self.c.prelude.nil().is(id)
                         );
-                        let is_var = matches!(self.engine.node(resolved), TypeNode::Var(_));
+                        let is_var = matches!(self.c.engine.node(resolved), TypeNode::Var(_));
                         if !is_nil && !is_var {
-                            let ty_str = self.engine.type_to_str(ty);
-                            self.error(
+                            let ty_str = self.c.engine.type_to_str(ty);
+                            self.c.error(
                                 format!(
                                     "Expression of type '{ty_str}' must be consumed. Assign it to a variable or use '_ = ...' to discard"
                                 ),
@@ -2627,16 +2673,16 @@ impl Compiler {
                 // `const_number` is the single source of the int/float split
                 // (and of the overflow diagnostic); the elaborator pools the
                 // constant itself.
-                let c = self.const_number(nl);
+                let c = self.c.const_number(nl);
                 let ty = if matches!(c, Const::Float(_)) {
-                    self.engine.icon_float()
+                    self.c.engine.icon_float()
                 } else {
-                    self.ty_int()
+                    self.c.ty_int()
                 };
                 (ty, CKind::Number(nl.clone()))
             }
             ast::Expression::StringLiteral(sl) => {
-                (self.ty_string(), CKind::String(sl.value.clone()))
+                (self.c.ty_string(), CKind::String(sl.value.clone()))
             }
             ast::Expression::InterpolatedString(is) => {
                 let parts = is
@@ -2647,7 +2693,7 @@ impl Compiler {
                         ast::InterpPart::Expr(e) => CInterpPart::Expr(self.compile_expr(e)),
                     })
                     .collect();
-                (self.ty_string(), CKind::Interp(parts))
+                (self.c.ty_string(), CKind::Interp(parts))
             }
             ast::Expression::Identifier(id) => self.compile_identifier(id),
             ast::Expression::BinaryExpression(be) => self.compile_binary(be),
@@ -2656,13 +2702,15 @@ impl Compiler {
                 let inner_ty = operand.ty;
                 let ty = match ue.op {
                     ast::UnaryOp::Not => {
-                        let b = self.ty_bool();
-                        self.engine.unify_at(b, inner_ty, ue.expression.span());
-                        self.ty_bool()
+                        let b = self.c.ty_bool();
+                        self.c.engine.unify_at(b, inner_ty, ue.expression.span());
+                        self.c.ty_bool()
                     }
                     ast::UnaryOp::Neg => {
-                        let result = self.engine.fresh_constrained_var(Constraint::Numeric);
-                        self.engine.unify_at(result, inner_ty, ue.expression.span());
+                        let result = self.c.engine.fresh_constrained_var(Constraint::Numeric);
+                        self.c
+                            .engine
+                            .unify_at(result, inner_ty, ue.expression.span());
                         result
                     }
                 };
@@ -2674,15 +2722,17 @@ impl Compiler {
             }
             ast::Expression::IfExpression(ie) => {
                 let cond = self.compile_expr(&ie.condition);
-                let b = self.ty_bool();
-                self.engine.unify_at(b, cond.ty, ie.condition.span());
+                let b = self.c.ty_bool();
+                self.c.engine.unify_at(b, cond.ty, ie.condition.span());
                 let then = self.compile_expr(&ie.body);
                 let els = self.compile_expr(&ie.else_body);
 
-                let ret = self.engine.fresh_var();
-                self.engine
+                let ret = self.c.engine.fresh_var();
+                self.c
+                    .engine
                     .unify_at(ret, then.ty, type_defining_span(&ie.body));
-                self.engine
+                self.c
+                    .engine
                     .unify_at(ret, els.ty, type_defining_span(&ie.else_body));
                 let kind = CKind::If {
                     cond: Box::new(cond),
@@ -2696,64 +2746,65 @@ impl Compiler {
             ast::Expression::TupleExpression(te) => {
                 let elems: Vec<CExpr> = te.elements.iter().map(|e| self.compile_expr(e)).collect();
                 let elem_tys: Vec<Ty> = elems.iter().map(|e| e.ty).collect();
-                (self.engine.mk_tuple(&elem_tys), CKind::Tuple(elems))
+                (self.c.engine.mk_tuple(&elem_tys), CKind::Tuple(elems))
             }
             ast::Expression::ArrayIndexExpression(aie) => {
                 let recv = self.compile_expr(&aie.expression);
-                let elem_var = self.engine.fresh_var();
-                let arr_expected = self.ty_array(elem_var);
-                self.engine
+                let elem_var = self.c.engine.fresh_var();
+                let arr_expected = self.c.ty_array(elem_var);
+                self.c
+                    .engine
                     .unify_at(arr_expected, recv.ty, aie.expression.span());
 
                 if let ast::Expression::RangeExpression(r) = aie.index.as_ref() {
                     let start = self.compile_expr(&r.start);
                     let end = self.compile_expr(&r.end);
-                    let int_t = self.ty_int();
-                    self.engine.unify_at(int_t, start.ty, r.start.span());
-                    self.engine.unify_at(int_t, end.ty, r.end.span());
+                    let int_t = self.c.ty_int();
+                    self.c.engine.unify_at(int_t, start.ty, r.start.span());
+                    self.c.engine.unify_at(int_t, end.ty, r.end.span());
                     // A slice can fail, when its range is not inside the
                     // array, so it is a `Result`, as `binary.slice_bits` is.
-                    let slice = self.ty_array(elem_var);
-                    let nil = self.ty_nil();
+                    let slice = self.c.ty_array(elem_var);
+                    let nil = self.c.ty_nil();
                     let kind = CKind::Slice {
                         recv: Box::new(recv),
                         start: Box::new(start),
                         end: Box::new(end),
                     };
-                    (self.ty_result(slice, nil), kind)
+                    (self.c.ty_result(slice, nil), kind)
                 } else {
                     let index = self.compile_expr(&aie.index);
-                    let int_t = self.ty_int();
-                    self.engine.unify_at(int_t, index.ty, aie.index.span());
+                    let int_t = self.c.ty_int();
+                    self.c.engine.unify_at(int_t, index.ty, aie.index.span());
                     let kind = CKind::Index {
                         recv: Box::new(recv),
                         index: Box::new(index),
                     };
-                    (self.ty_option(elem_var), kind)
+                    (self.c.ty_option(elem_var), kind)
                 }
             }
             ast::Expression::RangeExpression(re) => {
                 let start = self.compile_expr(&re.start);
                 let end = self.compile_expr(&re.end);
-                let int_t = self.ty_int();
-                self.engine.unify_at(int_t, start.ty, re.start.span());
-                self.engine.unify_at(int_t, end.ty, re.end.span());
-                let i = self.ty_int();
+                let int_t = self.c.ty_int();
+                self.c.engine.unify_at(int_t, start.ty, re.start.span());
+                self.c.engine.unify_at(int_t, end.ty, re.end.span());
+                let i = self.c.ty_int();
                 let kind = CKind::Range {
                     start: Box::new(start),
                     end: Box::new(end),
                 };
-                (self.ty_array(i), kind)
+                (self.c.ty_array(i), kind)
             }
             ast::Expression::FunctionExpression(fe) => {
-                self.engine.enter_level();
+                self.c.engine.enter_level();
                 let (ty, closure) = self.compile_function_common(
                     &fe.params,
                     &fe.body,
                     fe.return_type.as_ref(),
                     None,
                 );
-                self.engine.leave_level();
+                self.c.engine.leave_level();
                 (ty, CKind::Closure(closure))
             }
             ast::Expression::FunctionCallExpression(fc) => self.compile_call(fc),
@@ -2768,7 +2819,7 @@ impl Compiler {
                 // instead of panicking.
                 self.compile_expr(&p.left);
                 self.compile_expr(&p.right);
-                (self.engine.fresh_var(), CKind::Error)
+                (self.c.engine.fresh_var(), CKind::Error)
             }
             ast::Expression::ErrorNode(err) => (self.error_node(err), CKind::Error),
         }
@@ -2786,14 +2837,14 @@ impl Compiler {
     /// unelaborable form in the language a checked error rather than a bug
     /// report from a later pass.
     fn error_node(&mut self, err: &ast::ErrorNode) -> Ty {
-        if self.clean_module().is_some() {
-            self.engine.diagnostics.push(Diagnostic::error(
+        if self.c.clean_module().is_some() {
+            self.c.engine.diagnostics.push(Diagnostic::error(
                 err.span,
                 DiagnosticCode::ParseError,
                 err.message.clone(),
             ));
         }
-        self.engine.fresh_var()
+        self.c.engine.fresh_var()
     }
 
     /// Compile an expression with an optional expected-type hint. The hint is
@@ -2809,19 +2860,19 @@ impl Compiler {
         if let Some(h) = hint
             && let ast::Expression::FunctionExpression(fe) = expr
         {
-            let resolved = self.engine.find(h);
-            if let TypeNode::Fun { params, .. } = self.engine.node(resolved)
+            let resolved = self.c.engine.find(h);
+            if let TypeNode::Fun { params, .. } = self.c.engine.node(resolved)
                 && params.len as usize == fe.params.len()
             {
-                let params: Vec<Ty> = self.engine.children_of(params).to_vec();
-                self.engine.enter_level();
+                let params: Vec<Ty> = self.c.engine.children_of(params).to_vec();
+                self.c.engine.enter_level();
                 let (ty, closure) = self.compile_function_common(
                     &fe.params,
                     &fe.body,
                     fe.return_type.as_ref(),
                     Some(params.clone()),
                 );
-                self.engine.leave_level();
+                self.c.engine.leave_level();
                 return CExpr {
                     ty,
                     span: fe.span,
@@ -2860,7 +2911,7 @@ impl Compiler {
     fn param_labels_of(&self, kind: ValueKind) -> Option<Vec<StrId>> {
         match kind {
             ValueKind::ModuleFn { param_labels } if param_labels.len > 0 => {
-                Some(self.engine.str_ids_of(param_labels).to_vec())
+                Some(self.c.engine.str_ids_of(param_labels).to_vec())
             }
             _ => None,
         }
@@ -2873,7 +2924,8 @@ impl Compiler {
             .imported_qualifiers
             .iter()
             .filter(|(_, key)| {
-                self.module_table
+                self.c
+                    .module_table
                     .get(key)
                     .and_then(|m| m.values.get(name))
                     .is_some_and(|v| matches!(v.scheme.kind, ValueKind::Constructor { .. }))
@@ -2887,13 +2939,13 @@ impl Compiler {
     fn compile_identifier(&mut self, expr: &ast::Identifier) -> (Ty, CKind) {
         let name = &expr.name;
 
-        let Some(scheme) = self.env.lookup(name) else {
+        let Some(scheme) = self.c.env.lookup(name) else {
             // A module's name is not a value: say what it is and how to reach
             // what is in it.
             if let Some(key) = self.imported_qualifiers.get(name) {
-                let module = self.module_name(key);
+                let module = self.c.module_name(key);
                 // A function or value of it, to show the shape of a use.
-                let example = self.module_table.get(key).and_then(|m| {
+                let example = self.c.module_table.get(key).and_then(|m| {
                     m.values
                         .keys()
                         .filter(|k| k.starts_with(|c: char| c.is_ascii_lowercase()))
@@ -2904,25 +2956,25 @@ impl Compiler {
                     Some(member) => format!(", like `{name}::{member}`"),
                     None => String::new(),
                 };
-                self.error(
+                self.c.error(
                     format!(
                         "'{name}' is the module `{module}`, not a value. Use one of its members{example}"
                     ),
                     expr.span,
                 );
-                return (self.engine.fresh_var(), CKind::Error);
+                return (self.c.engine.fresh_var(), CKind::Error);
             }
             let qualified = self.qualified_spellings(name);
             if !qualified.is_empty() {
-                self.error(
+                self.c.error(
                     format!(
                         "Unknown identifier '{name}'. A constructor of that name is {}",
                         qualified.join(" or ")
                     ),
                     expr.span,
                 );
-            } else if let Some(suggestion) = self.env.suggest_name(name) {
-                self.error(
+            } else if let Some(suggestion) = self.c.env.suggest_name(name) {
+                self.c.error(
                     format!(
                         "Unknown identifier '{}'. Closest match: '{}'.",
                         name, suggestion
@@ -2930,12 +2982,16 @@ impl Compiler {
                     expr.span,
                 );
             } else {
-                self.error(format!("Unknown identifier '{}'", name), expr.span);
+                self.c
+                    .error(format!("Unknown identifier '{}'", name), expr.span);
             }
-            return (self.engine.fresh_var(), CKind::Error);
+            return (self.c.engine.fresh_var(), CKind::Error);
         };
 
-        let ty = self.engine.instantiate(scheme, &self.frames.current.rigid);
+        let ty = self
+            .c
+            .engine
+            .instantiate(scheme, &self.frames.current.rigid);
         let kind = scheme.kind;
         let def = scheme.def;
         // `record` discards everything on the non-LSP path (see its early
@@ -2955,11 +3011,11 @@ impl Compiler {
                     "'{name}' is marked unused by its '_' prefix and cannot be read; rename it to '{stripped}'"
                 ),
             };
-            self.error(msg, expr.span);
+            self.c.error(msg, expr.span);
             return (ty, CKind::Error);
         }
 
-        let id = self.engine.intern(name);
+        let id = self.c.engine.intern(name);
         let (at, bound) = self.name_at(id, kind);
         let fact = NameFact {
             ty,
@@ -2977,10 +3033,10 @@ impl Compiler {
     pub(super) fn check_nil_discards(&mut self) {
         let checks = std::mem::take(&mut self.nil_discards);
         for (name, ty, sp) in checks {
-            let rep = self.engine.find(ty);
-            if matches!(self.engine.node(rep), TypeNode::Con { id, .. } if self.prelude.nil().is(id))
+            let rep = self.c.engine.find(ty);
+            if matches!(self.c.engine.node(rep), TypeNode::Con { id, .. } if self.c.prelude.nil().is(id))
             {
-                self.error(
+                self.c.error(
                     format!(
                         "'{name}' always matches Nil here; write the explicit 'Nil' pattern instead"
                     ),
@@ -2995,7 +3051,7 @@ impl Compiler {
             Some(m) => format!("'{name}' in module '{m}' has no runtime binding"),
             None => format!("'{name}' has a type but no runtime binding here"),
         };
-        self.error(msg, sp);
+        self.c.error(msg, sp);
     }
 
     /// Diagnose a named value used in value position. Constructors and
@@ -3034,17 +3090,17 @@ impl Compiler {
         let (constraint, is_cmp) = match expr.op {
             BinaryOp::And | BinaryOp::Or => {
                 let left = self.compile_expr(&expr.left);
-                let b = self.ty_bool();
-                self.engine.unify_at(b, left.ty, expr.left.span());
+                let b = self.c.ty_bool();
+                self.c.engine.unify_at(b, left.ty, expr.left.span());
                 let right = self.compile_expr(&expr.right);
-                self.engine.unify_at(b, right.ty, expr.right.span());
-                return (self.ty_bool(), node(left, right));
+                self.c.engine.unify_at(b, right.ty, expr.right.span());
+                return (self.c.ty_bool(), node(left, right));
             }
             BinaryOp::Eq | BinaryOp::Ne => {
                 let left = self.compile_expr(&expr.left);
                 let right = self.compile_expr(&expr.right);
-                self.engine.unify_at(left.ty, right.ty, expr.span);
-                return (self.ty_bool(), node(left, right));
+                self.c.engine.unify_at(left.ty, right.ty, expr.span);
+                return (self.c.ty_bool(), node(left, right));
             }
             BinaryOp::Add => (Constraint::Addable, false),
             BinaryOp::Sub => (Constraint::Numeric, false),
@@ -3057,10 +3113,10 @@ impl Compiler {
         };
         let left = self.compile_expr(&expr.left);
         let right = self.compile_expr(&expr.right);
-        let operand = self.engine.fresh_constrained_var(constraint);
-        self.engine.unify_at(operand, left.ty, expr.left.span());
-        self.engine.unify_at(operand, right.ty, expr.right.span());
-        let ty = if is_cmp { self.ty_bool() } else { operand };
+        let operand = self.c.engine.fresh_constrained_var(constraint);
+        self.c.engine.unify_at(operand, left.ty, expr.left.span());
+        self.c.engine.unify_at(operand, right.ty, expr.right.span());
+        let ty = if is_cmp { self.c.ty_bool() } else { operand };
         (ty, node(left, right))
     }
 
@@ -3076,11 +3132,11 @@ impl Compiler {
         for seg in &bl.segments {
             let value = self.compile_expr(&seg.value);
             let expected = match seg.spec {
-                ast::BinSpec::Int { .. } => self.ty_int(),
-                ast::BinSpec::Binary { .. } => self.ty_binary(),
-                ast::BinSpec::Utf8 => self.ty_string(),
+                ast::BinSpec::Int { .. } => self.c.ty_int(),
+                ast::BinSpec::Binary { .. } => self.c.ty_binary(),
+                ast::BinSpec::Utf8 => self.c.ty_string(),
             };
-            self.engine.unify_at(expected, value.ty, seg.value.span());
+            self.c.engine.unify_at(expected, value.ty, seg.value.span());
             let width = match &seg.spec {
                 ast::BinSpec::Int { bits } => CWidth::Int(self.type_seg_size(bits.as_ref())),
                 ast::BinSpec::Binary { bytes } => CWidth::Bytes(self.type_seg_size(bytes.as_ref())),
@@ -3088,15 +3144,15 @@ impl Compiler {
             };
             segs.push(CBinSeg { value, width });
         }
-        (self.ty_binary(), CKind::BinaryLiteral(segs))
+        (self.c.ty_binary(), CKind::BinaryLiteral(segs))
     }
 
     /// A segment's size expression is a runtime `Int`, not a binding.
     fn type_seg_size(&mut self, size: Option<&ast::Expression>) -> Option<CExpr> {
         let e = size?;
         let size = self.compile_expr(e);
-        let int_ty = self.ty_int();
-        self.engine.unify_at(int_ty, size.ty, e.span());
+        let int_ty = self.c.ty_int();
+        self.c.engine.unify_at(int_ty, size.ty, e.span());
         Some(size)
     }
 
@@ -3115,14 +3171,16 @@ impl Compiler {
         for elem in elems {
             if let ast::ArrayElement::Expression(e) = elem {
                 let el = self.compile_expr(e);
-                self.engine.unify_at(elem_var, el.ty, type_defining_span(e));
+                self.c
+                    .engine
+                    .unify_at(elem_var, el.ty, type_defining_span(e));
                 out.push(CArrayElem::Elem(el));
             }
         }
     }
 
     fn compile_array(&mut self, expr: &ast::ArrayExpression) -> (Ty, CKind) {
-        let elem_var = self.engine.fresh_var();
+        let elem_var = self.c.engine.fresh_var();
         let mut elems = Vec::with_capacity(expr.elements.len());
         let mut run_start = 0usize;
         for (i, e) in expr.elements.iter().enumerate() {
@@ -3133,12 +3191,12 @@ impl Compiler {
             run_start = i + 1;
             let inner = &spread.expression;
             let spread = self.compile_expr(inner);
-            let expected = self.ty_array(elem_var);
-            self.engine.unify_at(expected, spread.ty, inner.span());
+            let expected = self.c.ty_array(elem_var);
+            self.c.engine.unify_at(expected, spread.ty, inner.span());
             elems.push(CArrayElem::Spread(spread));
         }
         self.compile_array_run(&expr.elements[run_start..], elem_var, &mut elems);
-        (self.ty_array(elem_var), CKind::Array(elems))
+        (self.c.ty_array(elem_var), CKind::Array(elems))
     }
 
     // ========================================================================
@@ -3159,14 +3217,17 @@ impl Compiler {
             qualifier,
         }) = self.resolve_simple_callee(&expr.callee)
         {
-            let inst_ty = self.engine.instantiate(&scheme, &self.frames.current.rigid);
+            let inst_ty = self
+                .c
+                .engine
+                .instantiate(&scheme, &self.frames.current.rigid);
             let param_labels = self.param_labels_of(scheme.kind);
             let fact = NameFact {
                 ty: inst_ty,
                 at,
                 param_labels,
             };
-            let id = self.engine.intern(name);
+            let id = self.c.engine.intern(name);
             let callee = match qualifier {
                 None => CCallee::Name {
                     name: id,
@@ -3222,7 +3283,7 @@ impl Compiler {
                     };
                     let ret = self.compile_call_args(inst_ty, labels, &expr.arguments, expr.span);
                     if !has_binding {
-                        let module = qualifier.as_ref().map(|k| self.module_name(k));
+                        let module = qualifier.as_ref().map(|k| self.c.module_name(k));
                         self.no_runtime_binding(name, module.as_deref(), name_span);
                     }
                     ret
@@ -3244,7 +3305,7 @@ impl Compiler {
         };
         let callee_ty = match &callee {
             Some(c) => c.ty,
-            None => self.engine.fresh_var(),
+            None => self.c.engine.fresh_var(),
         };
         let (ty, args) = self.compile_call_args(callee_ty, None, &expr.arguments, expr.span);
         match (callee, args) {
@@ -3279,7 +3340,7 @@ impl Compiler {
         args: &[ast::CallArg],
         call_span: Span,
     ) -> (Ty, Option<Vec<CArg>>) {
-        let (params, ret) = match self.engine.match_fun_type(callee_ty, args.len()) {
+        let (params, ret) = match self.c.engine.match_fun_type(callee_ty, args.len()) {
             Ok(pr) => pr,
             Err(MatchFunTypeError::IncorrectArity {
                 expected,
@@ -3287,15 +3348,15 @@ impl Compiler {
                 params,
                 ret,
             }) => {
-                self.error(
+                self.c.error(
                     format!("Expected {} argument(s), got {}", expected, given),
                     call_span,
                 );
                 (params, ret)
             }
             Err(MatchFunTypeError::NotFn { ty }) => {
-                let s = self.engine.type_to_str(ty);
-                self.error(
+                let s = self.c.engine.type_to_str(ty);
+                self.c.error(
                     format!(
                         "This value of type '{}' is not a function and cannot be called",
                         s
@@ -3305,7 +3366,7 @@ impl Compiler {
                 for arg in args {
                     self.compile_call_arg_value(arg);
                 }
-                return (self.engine.fresh_var(), None);
+                return (self.c.engine.fresh_var(), None);
             }
         };
 
@@ -3331,7 +3392,7 @@ impl Compiler {
                 }
                 ast::CallArg::Labeled { label, value, .. } => {
                     if param_labels.is_none() {
-                        self.error(
+                        self.c.error(
                             "Labelled arguments need a callee whose parameter names are known: \
                              a constructor, or a function named directly"
                                 .to_string(),
@@ -3340,12 +3401,12 @@ impl Compiler {
                     }
                     let v = self.compile_expr_with_hint(value, hint);
                     let ty = v.ty;
-                    let label = self.engine.intern(&label.name);
+                    let label = self.c.engine.intern(&label.name);
                     out.push(CArg::Labeled { label, value: v });
                     (ty, value.span())
                 }
                 ast::CallArg::Spread(e) => {
-                    self.error(
+                    self.c.error(
                         "Spread arguments are only allowed in constructor record-update calls"
                             .to_string(),
                         e.span(),
@@ -3357,7 +3418,7 @@ impl Compiler {
                 }
             };
             if let Some(p) = hint {
-                self.engine.unify_at(p, value, arg_span);
+                self.c.engine.unify_at(p, value, arg_span);
             }
         }
 
@@ -3382,7 +3443,7 @@ impl Compiler {
             .filter_map(|(i, a)| match a {
                 ast::CallArg::Positional(e) => Some((None, (i, e.span()))),
                 ast::CallArg::Labeled { label, .. } => {
-                    Some((Some(self.engine.intern(&label.name)), (i, label.span)))
+                    Some((Some(self.c.engine.intern(&label.name)), (i, label.span)))
                 }
                 // Spread is refused by the caller and fills no parameter.
                 ast::CallArg::Spread(_) => None,
@@ -3391,6 +3452,7 @@ impl Compiler {
         // One slot per declared parameter, both sized and named from this one
         // slice, so there is no second width for a label table to drift from.
         let names: Vec<Option<StrId>> = self
+            .c
             .engine
             .str_ids_of(param_labels)
             .iter()
@@ -3402,9 +3464,9 @@ impl Compiler {
                 // An arity error `match_fun_type` has already reported.
                 SlotError::ExtraPositional(_) => {}
                 SlotError::UnknownLabel(label, (_, span)) => {
-                    let available = self.engine.strs_of(param_labels).join(", ");
-                    let label = self.engine.str(label).to_string();
-                    self.error(
+                    let available = self.c.engine.strs_of(param_labels).join(", ");
+                    let label = self.c.engine.str(label).to_string();
+                    self.c.error(
                         format!(
                             "This function has no parameter '{}'. Available: {}",
                             label, available
@@ -3414,11 +3476,12 @@ impl Compiler {
                 }
                 SlotError::Duplicate((_, span), param) => {
                     let dup = self
+                        .c
                         .engine
                         .str_ids_of(param_labels)
                         .get(param)
-                        .map_or("_".to_string(), |&id| self.engine.str(id).to_string());
-                    self.error(
+                        .map_or("_".to_string(), |&id| self.c.engine.str(id).to_string());
+                    self.c.error(
                         format!("Parameter '{}' is specified more than once", dup),
                         span,
                     );
@@ -3501,7 +3564,7 @@ impl Compiler {
                 modules.join(" or ")
             )
         };
-        self.module_error(msg, name.span);
+        self.c.module_error(msg, name.span);
     }
 
     /// Best-effort resolution of a callee expression that is a plain name (or
@@ -3514,8 +3577,8 @@ impl Compiler {
     ) -> Option<ResolvedCallee<'a>> {
         match callee {
             ast::Expression::Identifier(id) => {
-                let scheme = *self.env.lookup(&id.name)?;
-                let sid = self.engine.intern(&id.name);
+                let scheme = *self.c.env.lookup(&id.name)?;
+                let sid = self.c.engine.intern(&id.name);
                 let (at, has_binding) = self.name_at(sid, scheme.kind);
                 // This path bypasses `compile_identifier`, so it is the genuine
                 // unqualified-use seam for calls.
@@ -3562,9 +3625,9 @@ impl Compiler {
     ) -> (Ty, Vec<CArg>) {
         // The instantiated scheme is `IFun{params, ret}` for arity>0 or `ICon`
         // for arity==0. Extract param/result types.
-        let r = self.engine.find(inst_ty);
-        let (param_tys, result_ty) = match self.engine.node(r) {
-            TypeNode::Fun { params, ret } => (self.engine.children_of(params).to_vec(), ret),
+        let r = self.c.engine.find(inst_ty);
+        let (param_tys, result_ty) = match self.c.engine.node(r) {
+            TypeNode::Fun { params, ret } => (self.c.engine.children_of(params).to_vec(), ret),
             _ => (vec![], r),
         };
 
@@ -3577,7 +3640,7 @@ impl Compiler {
         for (i, arg) in args.iter().enumerate() {
             if let ast::CallArg::Spread(e) = arg {
                 if spread.is_some() {
-                    self.error(
+                    self.c.error(
                         "Constructor call may have at most one spread".to_string(),
                         e.span(),
                     );
@@ -3625,7 +3688,7 @@ impl Compiler {
         // type; the per-field projection is Core's job.
         if let Some((ai, e)) = spread {
             let base = self.compile_expr(e);
-            self.engine.unify_at(result_ty, base.ty, e.span());
+            self.c.engine.unify_at(result_ty, base.ty, e.span());
             checked[ai] = Some(base);
             let unfilled = (0..arity).filter(|&i| slots.get(i).is_none_or(Option::is_none));
             self.check_spread_fills(type_id, result_ty, field_labels_sl, unfilled, e.span());
@@ -3638,7 +3701,7 @@ impl Compiler {
             let expected = param_tys.get(i).copied();
             let v = self.compile_expr_with_hint(value, expected);
             if let Some(p) = expected {
-                self.engine.unify_at(p, v.ty, value.span());
+                self.c.engine.unify_at(p, v.ty, value.span());
             }
             checked[ai] = Some(v);
         }
@@ -3658,14 +3721,14 @@ impl Compiler {
                     ast::CallArg::Labeled { value, .. } => value.span(),
                 };
                 let v = v.unwrap_or_else(|| CExpr {
-                    ty: self.engine.fresh_var(),
+                    ty: self.c.engine.fresh_var(),
                     span,
                     kind: CKind::Error,
                 });
                 match a {
                     ast::CallArg::Positional(_) => CArg::Positional(v),
                     ast::CallArg::Labeled { label, .. } => CArg::Labeled {
-                        label: self.engine.intern(&label.name),
+                        label: self.c.engine.intern(&label.name),
                         value: v,
                     },
                     ast::CallArg::Spread(_) => CArg::Spread(v),
@@ -3688,19 +3751,19 @@ impl Compiler {
         unfilled: impl Iterator<Item = usize>,
         span: Span,
     ) {
-        let resolved = self.engine.find(result_ty);
-        let (type_name, type_args) = match self.engine.node(resolved) {
+        let resolved = self.c.engine.find(result_ty);
+        let (type_name, type_args) = match self.c.engine.node(resolved) {
             TypeNode::Con { name, args, .. } => (
-                self.engine.str(name).to_string(),
-                self.engine.children_of(args).to_vec(),
+                self.c.engine.str(name).to_string(),
+                self.c.engine.children_of(args).to_vec(),
             ),
             _ => return,
         };
-        let Some(info) = self.env.lookup_type_info_by_id(type_id) else {
+        let Some(info) = self.c.env.lookup_type_info_by_id(type_id) else {
             return;
         };
         let labels: SmallVec<[StrId; 4]> =
-            SmallVec::from_slice(self.engine.str_ids_of(field_labels));
+            SmallVec::from_slice(self.c.engine.str_ids_of(field_labels));
         for i in unfilled {
             let Some(&label) = labels.get(i) else {
                 continue;
@@ -3708,9 +3771,9 @@ impl Compiler {
             if let Err(FieldMismatch::MissingOn(variant)) =
                 self.field_in_variants(info, &type_args, label, Some(span))
             {
-                let field = self.engine.str(label).to_string();
+                let field = self.c.engine.str(label).to_string();
                 let why = self.missing_on(variant, &type_name);
-                self.error(
+                self.c.error(
                     format!(
                         "The spread cannot fill field '{field}', which {why}; write '{field}:' in the call"
                     ),
@@ -3728,9 +3791,10 @@ impl Compiler {
     /// `compile_call`, through `resolve_simple_callee`.
     fn compile_module_access(&mut self, expr: &ast::ModuleAccessExpression) -> (Ty, CKind) {
         let Some(m) = self.resolve_module_access(expr) else {
-            return (self.engine.fresh_var(), CKind::Error);
+            return (self.c.engine.fresh_var(), CKind::Error);
         };
         let ty = self
+            .c
             .engine
             .instantiate(&m.scheme, &self.frames.current.rigid);
         let fact = NameFact {
@@ -3742,7 +3806,7 @@ impl Compiler {
         // Rendered lazily: the qualifier only reaches a diagnostic on the
         // no-runtime-binding path, so the common (bound) case skips the
         // display-name lookup entirely.
-        let module = (!m.has_binding).then(|| self.module_name(&m.module_key));
+        let module = (!m.has_binding).then(|| self.c.module_name(&m.module_key));
         self.check_named_value(
             m.member_name,
             module.as_deref(),
@@ -3750,7 +3814,7 @@ impl Compiler {
             m.scheme.kind,
             m.has_binding,
         );
-        let name = self.engine.intern(m.member_name);
+        let name = self.c.engine.intern(m.member_name);
         (ty, CKind::Member { name, fact })
     }
 
@@ -3758,17 +3822,17 @@ impl Compiler {
         // `c.f` where `c` is an imported module and not a value: point at `::`.
         if let (ast::Expression::Identifier(id), ast::PropertyKey::Field(field)) =
             (expr.left.as_ref(), &expr.right)
-            && self.env.lookup(&id.name).is_none()
+            && self.c.env.lookup(&id.name).is_none()
             && self.imported_qualifiers.contains_key(&id.name)
         {
-            self.error(
+            self.c.error(
                 format!(
                     "'{0}' is a module, not a value. Reach its members with `::`, like `{0}::{1}`",
                     id.name, field.name
                 ),
                 id.span,
             );
-            return (self.engine.fresh_var(), CKind::Error);
+            return (self.c.engine.fresh_var(), CKind::Error);
         }
 
         let recv = self.compile_expr(&expr.left);
@@ -3780,17 +3844,17 @@ impl Compiler {
                 let index = match num.value.parse::<i32>() {
                     Ok(i) => i,
                     Err(_) => {
-                        self.error(
+                        self.c.error(
                             format!("Tuple index must be an integer, got '{}'", num.value),
                             num.span,
                         );
-                        return (self.engine.fresh_var(), CKind::Error);
+                        return (self.c.engine.fresh_var(), CKind::Error);
                     }
                 };
 
-                let resolved = self.engine.find(left_ty);
-                if let TypeNode::Tuple { elems } = self.engine.node(resolved) {
-                    let elements = self.engine.children_of(elems);
+                let resolved = self.c.engine.find(left_ty);
+                if let TypeNode::Tuple { elems } = self.c.engine.node(resolved) {
+                    let elements = self.c.engine.children_of(elems);
                     if let Ok(idx) = u32::try_from(index)
                         && let Some(&ty) = elements.get(idx as usize)
                     {
@@ -3800,7 +3864,7 @@ impl Compiler {
                         };
                         return (ty, kind);
                     }
-                    self.error(
+                    self.c.error(
                         format!(
                             "Tuple index {} out of bounds (tuple has {} elements)",
                             index,
@@ -3808,20 +3872,20 @@ impl Compiler {
                         ),
                         num.span,
                     );
-                    return (self.engine.fresh_var(), CKind::Error);
+                    return (self.c.engine.fresh_var(), CKind::Error);
                 }
-                self.error(
+                self.c.error(
                     format!("Cannot index .{} on non-tuple type", index),
                     num.span,
                 );
-                (self.engine.fresh_var(), CKind::Error)
+                (self.c.engine.fresh_var(), CKind::Error)
             }
             // `value.field` — labelled field shared by every variant.
             ast::PropertyKey::Field(field) => {
                 let ty = self.compile_field_access(left_ty, &field.name, field.span);
                 let kind = CKind::Field {
                     recv: Box::new(recv),
-                    label: self.engine.intern(&field.name),
+                    label: self.c.engine.intern(&field.name),
                 };
                 (ty, kind)
             }
@@ -3830,8 +3894,8 @@ impl Compiler {
 
     /// compile_field_access error path: report and yield a fresh tyvar.
     fn field_access_bail(&mut self, msg: String, span: Span) -> Ty {
-        self.error(msg, span);
-        self.engine.fresh_var()
+        self.c.error(msg, span);
+        self.c.engine.fresh_var()
     }
 
     /// Single source of truth for the nominal `.field` lookup, by name: where
@@ -3856,8 +3920,9 @@ impl Compiler {
         // each entry out by index instead of `to_vec()`ing the slices to
         // survive the `&mut engine` calls in the loop body.
         for vi in 0..variants.len as usize {
-            let v = self.engine.variants_of(variants)[vi];
+            let v = self.c.engine.variants_of(variants)[vi];
             let hit = self
+                .c
                 .engine
                 .variant_fields_of(v.fields)
                 .iter()
@@ -3868,12 +3933,13 @@ impl Compiler {
             };
             slots.push(i as u32);
             let substituted = self
+                .c
                 .engine
                 .substitute_type_vars(fty, info.type_params, type_args);
             match ty {
                 Some(existing) => {
                     if let Some(span) = unify_span {
-                        self.engine.unify_at(existing, substituted, span);
+                        self.c.engine.unify_at(existing, substituted, span);
                     }
                 }
                 None => ty = Some(substituted),
@@ -3887,7 +3953,7 @@ impl Compiler {
     fn missing_on(&self, variant: StrId, type_name: &str) -> String {
         format!(
             "is not present on every variant of '{type_name}' (missing on '{}')",
-            self.engine.str(variant)
+            self.c.engine.str(variant)
         )
     }
 
@@ -3896,16 +3962,16 @@ impl Compiler {
     /// the receiver type carries a label of that name and at the same type,
     /// wherever in the variant it sits.
     ///
-    /// Delegates the walk to [`Compiler::field_in_variants`], which lower also
+    /// Delegates the walk to [`ModuleChecker::field_in_variants`], which lower also
     /// uses, so the typecheck-approved slot index and the emitted `TupleIndex`
     /// can never disagree.
     fn compile_field_access(&mut self, receiver_ty: Ty, field: &str, field_span: Span) -> Ty {
-        let resolved = self.engine.find(receiver_ty);
-        let (type_id, type_name, type_args) = match self.engine.node(resolved) {
+        let resolved = self.c.engine.find(receiver_ty);
+        let (type_id, type_name, type_args) = match self.c.engine.node(resolved) {
             TypeNode::Con { id, name, args } => (
                 id,
-                self.engine.str(name).to_string(),
-                self.engine.children_of(args).to_vec(),
+                self.c.engine.str(name).to_string(),
+                self.c.engine.children_of(args).to_vec(),
             ),
             TypeNode::Var(_) => {
                 return self.field_access_bail(
@@ -3917,7 +3983,7 @@ impl Compiler {
                 );
             }
             _ => {
-                let s = self.engine.type_to_str(resolved);
+                let s = self.c.engine.type_to_str(resolved);
                 return self.field_access_bail(
                     format!("Type '{}' has no field '{}'", s, field),
                     field_span,
@@ -3928,19 +3994,19 @@ impl Compiler {
         // Nominal lookup: the receiver's variants come from the type the Con
         // node identifies, never from whatever same-named type a flat name
         // lookup would find first.
-        let Some(info) = self.env.lookup_type_info_by_id(type_id) else {
+        let Some(info) = self.c.env.lookup_type_info_by_id(type_id) else {
             return self.field_access_bail(
                 format!("Type '{}' has no field '{}'", type_name, field),
                 field_span,
             );
         };
 
-        let field_id = self.engine.intern(field);
+        let field_id = self.c.engine.intern(field);
         let result_ty = match self.field_in_variants(info, &type_args, field_id, Some(field_span)) {
             Ok(field) => field.ty,
             // A variant list with no variants at all: nothing to project, and
             // the empty type was already diagnosed at its declaration.
-            Err(FieldMismatch::NoVariants) => self.engine.fresh_var(),
+            Err(FieldMismatch::NoVariants) => self.c.engine.fresh_var(),
             Err(FieldMismatch::NotNominal) => {
                 return self.field_access_bail(
                     format!("Type '{}' has no accessible fields", type_name),
@@ -3959,7 +4025,7 @@ impl Compiler {
         // shadow it), so resolving it here is safe and keeps goto-def /
         // find-references / rename working for record fields, and feeds the
         // field-level dead-code reachability walk.
-        let fdef = self.env.lookup_definition(&qualified);
+        let fdef = self.c.env.lookup_definition(&qualified);
         self.record_value_use(fdef, field_span, ReferenceKind::Unqualified);
         result_ty
     }
@@ -3971,34 +4037,34 @@ impl Compiler {
     fn compile_or(&mut self, expr: &ast::OrExpression) -> (Ty, CKind) {
         let lhs = self.compile_expr(&expr.expression);
         let left_ty = lhs.ty;
-        let resolved = self.engine.find(left_ty);
+        let resolved = self.c.engine.find(left_ty);
 
-        let success_var = self.engine.fresh_var();
+        let success_var = self.c.engine.fresh_var();
 
         // Determine which prelude type the LHS is. The Con node carries its
         // nominal id, so user-defined types that happen to be called
         // "Option"/"Result" can never match.
-        let lhs_type_id = match self.engine.node(resolved) {
+        let lhs_type_id = match self.c.engine.node(resolved) {
             TypeNode::Con { id, .. } => id,
             _ => TypeId::NONE,
         };
 
         // Option and Result differ only in the expected ICon and whether the
         // failure case carries a bindable payload (`err_var`).
-        let err_var = if self.prelude.option().is(lhs_type_id) {
+        let err_var = if self.c.prelude.option().is(lhs_type_id) {
             if let Some(recv) = &expr.receiver {
-                self.error(
+                self.c.error(
                     "'or' on an Option does not bind a value (the failure case carries nothing)"
                         .to_string(),
                     recv.span,
                 );
             }
             None::<Ty>
-        } else if self.prelude.result().is(lhs_type_id) {
-            Some(self.engine.fresh_var())
+        } else if self.c.prelude.result().is(lhs_type_id) {
+            Some(self.c.engine.fresh_var())
         } else {
-            let s = self.engine.type_to_str(left_ty);
-            self.error(
+            let s = self.c.engine.type_to_str(left_ty);
+            self.c.error(
                 format!(
                     "'or' requires the left side to be Option(_) or Result(_, _), got '{}'",
                     s
@@ -4010,14 +4076,15 @@ impl Compiler {
             self.push_block_scope();
             let _ = self.compile_expr(&expr.body);
             self.pop_block_scope();
-            return (self.engine.fresh_var(), CKind::Error);
+            return (self.c.engine.fresh_var(), CKind::Error);
         };
 
         let expected = match &err_var {
-            Some(e) => self.ty_result(success_var, *e),
-            None => self.ty_option(success_var),
+            Some(e) => self.c.ty_result(success_var, *e),
+            None => self.c.ty_option(success_var),
         };
-        self.engine
+        self.c
+            .engine
             .unify_at(expected, left_ty, expr.expression.span());
 
         // Failure branch: the recovery body, with the `Err` payload bound to
@@ -4029,12 +4096,13 @@ impl Compiler {
         {
             self.get_or_create_local(&recv.name);
             self.register_local_binding(&recv.name, e, recv.span);
-            let sid = self.engine.intern(&recv.name);
+            let sid = self.c.engine.intern(&recv.name);
             receiver = Some((sid, self.publish_local(sid)));
         }
         let body = self.compile_expr(&expr.body);
         self.pop_block_scope();
-        self.engine
+        self.c
+            .engine
             .unify_at(success_var, body.ty, type_defining_span(&expr.body));
 
         let kind = CKind::Or {
@@ -4101,12 +4169,12 @@ impl Compiler {
             .frames
             .current
             .self_name
-            .unwrap_or_else(|| self.engine.intern("__anon__"));
+            .unwrap_or_else(|| self.c.engine.intern("__anon__"));
         let param_binds: Vec<(StrId, BinderId, Ty)> = params
             .iter()
             .zip(param_binders)
             .zip(param_tys)
-            .map(|((p, &binder), &ty)| (self.engine.intern(&p.identifier.name), binder, ty))
+            .map(|((p, &binder), &ty)| (self.c.engine.intern(&p.identifier.name), binder, ty))
             .collect();
         let parked = ParkedBody {
             name,
@@ -4146,7 +4214,7 @@ impl Compiler {
         let crate::core_ir::CoreProgram {
             mut fns, toplevel, ..
         } = crate::core_ir::lower::lower(&program);
-        let im = self.immediates();
+        let im = self.c.immediates();
         for f in &mut fns {
             crate::core_ir::immediates::rewrite(f, &im);
         }
@@ -4185,12 +4253,12 @@ impl Compiler {
         at: Option<crate::core_ir::FuncIdx>,
         build: impl FnOnce(&mut Self, &mut ResolvedPool, &mut FnTable) -> TypedFn,
     ) -> Elaborated {
-        let eta_base = self.fns.len();
-        let mut pool = pool_for(&self.engine);
+        let eta_base = self.c.fns.len();
+        let mut pool = pool_for(&self.c.engine);
         // `RTy`s name nodes of `pool`, so the memo dies with the previous one.
-        self.rty_cache.clear();
+        self.c.rty_cache.clear();
         let temps = TempTys::intern(self, &mut pool);
-        let nil_ty = self.ty_nil();
+        let nil_ty = self.c.ty_nil();
         let nil = PreludeTys::resolve_rty(self, &mut pool, nil_ty);
         // The `fns` entries an earlier body already owns. Never lowered into
         // anything the caller reads — they exist so the next `FnTable::push`
@@ -4209,11 +4277,11 @@ impl Compiler {
 
         let built = build(self, &mut pool, &mut fns);
 
-        if self.fns.len() != eta_base {
+        if self.c.fns.len() != eta_base {
             function_reserved_during_elaboration();
         }
         for _ in fns.tail_from(FuncIdx::from_usize(eta_base)) {
-            self.fns.push(None);
+            self.c.fns.push(None);
         }
 
         let toplevel = match at {
@@ -4246,11 +4314,13 @@ impl Compiler {
         use crate::core_ir::perceus;
         for (i, (name, w)) in wrappers.into_iter().enumerate() {
             let core = perceus::perceus(pool, w);
-            self.fns[FuncIdx::from_usize(base + i)] =
+            self.c.fns[FuncIdx::from_usize(base + i)] =
                 Some(self.lowered_fn(name, core, Rc::clone(pool)));
         }
     }
+}
 
+impl Compiler {
     /// The prelude constructors Core IR spells as immediates.
     fn immediates(&self) -> crate::core_ir::immediates::Immediates {
         crate::core_ir::immediates::Immediates {
@@ -4259,14 +4329,16 @@ impl Compiler {
             nil: self.prelude.nil_ctor().into(),
         }
     }
+}
 
+impl ModuleChecker<'_> {
     /// Package a finished body for the [`Program`]. Called while the module
     /// that owns the body is the one being compiled, which is what makes
     /// `current_module_key` its module.
     fn lowered_fn(&self, name: StrId, core: CoreFn, pool: Rc<ResolvedPool>) -> LoweredFn {
         LoweredFn::new(
             self.current_module_key.to_string(),
-            self.engine.str(name).to_string(),
+            self.c.engine.str(name).to_string(),
             core,
             pool,
         )
@@ -4298,14 +4370,14 @@ impl Compiler {
             self.elaborate_then_materialize(clean, Some(func_idx), |c, pool, fns| {
                 typed_ir::elaborate_body(c, pool, fns, name, param_binds, body, body_ty, false)
             });
-        if self.check_only {
+        if self.c.check_only {
             return;
         }
         let core = perceus::perceus(&pool, core);
         if std::env::var("CORE_DBG").is_ok() {
-            eprintln!("=== {}\n{core}", self.engine.str(name));
+            eprintln!("=== {}\n{core}", self.c.engine.str(name));
         }
-        self.fns[func_idx] = Some(self.lowered_fn(name, core, pool));
+        self.c.fns[func_idx] = Some(self.lowered_fn(name, core, pool));
     }
 
     /// Open the elaboration phase boundary: every function body walked until
@@ -4365,7 +4437,7 @@ impl Compiler {
             // the parked bodies may reference names inference never resolved,
             // and there is no typed IR to lower. Their slots stay empty, and a
             // module with an error builds no program.
-            if let Some(clean) = self.clean_module() {
+            if let Some(clean) = self.c.clean_module() {
                 self.elaborate_deferred(d, clean);
             }
         }
@@ -4408,7 +4480,7 @@ impl Compiler {
                 Some(annot) => self.hydrate(&mut hydrator, annot),
                 None => match &param_hints {
                     Some(h) if i < h.len() => h[i],
-                    _ => self.engine.fresh_var(),
+                    _ => self.c.engine.fresh_var(),
                 },
             };
             param_tys.push(p_ty);
@@ -4424,7 +4496,8 @@ impl Compiler {
         let ret_ty = match return_annot {
             Some(rt) => {
                 let annot_ty = self.hydrate(&mut hydrator, rt);
-                self.engine
+                self.c
+                    .engine
                     .unify_at(annot_ty, body_ty, type_defining_span(body));
                 annot_ty
             }
@@ -4434,7 +4507,7 @@ impl Compiler {
         // `finish_fn_frame` restored the enclosing frame, so the closure is as
         // that frame sees it, and it is that frame's elaboration that builds it.
         let closure = self.finish_fn_frame(saved, body_emit);
-        (self.engine.mk_fun(&param_tys, ret_ty), closure)
+        (self.c.engine.mk_fun(&param_tys, ret_ty), closure)
     }
 
     /// Compile a top-level `fn` whose parameter and return types were already
@@ -4467,7 +4540,8 @@ impl Compiler {
             .collect();
 
         let (body_ty, body_emit) = self.compile_fn_body(params, &param_tys, &binders, body);
-        self.engine
+        self.c
+            .engine
             .unify_at(ret_ty, body_ty, type_defining_span(body));
 
         // `global_to_func` is how the module toplevel's elaboration finds this
@@ -4478,8 +4552,8 @@ impl Compiler {
         // re-deriving it from `fns.len()`, which is only the same number by
         // accident of nothing else having reserved since.
         let func_idx = self.finish_fn_frame(saved, body_emit).func_idx;
-        self.global_to_func.insert(global_slot, func_idx);
-        self.engine.mk_fun(&param_tys, ret_ty)
+        self.c.global_to_func.insert(global_slot, func_idx);
+        self.c.engine.mk_fun(&param_tys, ret_ty)
     }
 
     /// Start walking a nested body, and open a new type-env scope for it.
@@ -4490,10 +4564,10 @@ impl Compiler {
     /// higher-order function and calling the enclosing `fn` would call itself.
     fn enter_fn_frame(&mut self, binding: Option<&str>) -> frame::Entered {
         let self_name = match binding {
-            Some(n) => Some(self.engine.intern(n)),
+            Some(n) => Some(self.c.engine.intern(n)),
             None => self.next_fn_self_name.take(),
         };
-        self.env.push_scope();
+        self.c.env.push_scope();
         self.frames.enter(self_name)
     }
 
@@ -4504,7 +4578,7 @@ impl Compiler {
     /// after reserving its slot with `get_or_create_local`.
     fn register_local_binding(&mut self, name: &str, ty: Ty, sp: Span) {
         let m = self.current_module_slice();
-        self.env.define_at(
+        self.c.env.define_at(
             name,
             mono(ty),
             DefinitionLocation::new(sp, m, EntityKind::Value),
@@ -4517,7 +4591,7 @@ impl Compiler {
     fn bind_param(&mut self, p: &ast::FunctionParameter, ty: Ty) -> BinderId {
         self.get_or_create_local(&p.identifier.name);
         self.register_local_binding(&p.identifier.name, ty, p.identifier.span);
-        let sid = self.engine.intern(&p.identifier.name);
+        let sid = self.c.engine.intern(&p.identifier.name);
         self.publish_local(sid)
     }
 
@@ -4530,13 +4604,13 @@ impl Compiler {
     fn finish_fn_frame(&mut self, entered: frame::Entered, parked: ParkedBody) -> ClosureFact {
         let mut finished = self.frames.leave(entered);
         let captured = std::mem::take(&mut finished.captures).into_names();
-        self.env.pop_scope();
+        self.c.env.pop_scope();
         self.report_unused(finished.into_root());
 
         // Reserve the body's slot now, so the `func_idx` that the
         // `ClosureFact` and `global_to_func` are about to record is the one the
         // elaborated body fills in.
-        let func_idx = self.fns.push(None);
+        let func_idx = self.c.fns.push(None);
         let ParkedBody {
             name: body_name,
             param_binds,
@@ -4559,14 +4633,16 @@ impl Compiler {
         let captures = captured
             .iter()
             .map(|&cap_name| {
-                let name = self.engine.str(cap_name).to_string();
-                let scheme = self.env.lookup(&name).copied();
+                let name = self.c.engine.str(cap_name).to_string();
+                let scheme = self.c.env.lookup(&name).copied();
                 let (at, ty) = match scheme {
                     Some(scheme) => (
                         self.name_at(cap_name, scheme.kind).0,
-                        self.engine.instantiate(&scheme, &self.frames.current.rigid),
+                        self.c
+                            .engine
+                            .instantiate(&scheme, &self.frames.current.rigid),
                     ),
-                    None => (NameAt::Unbound, self.engine.fresh_var()),
+                    None => (NameAt::Unbound, self.c.engine.fresh_var()),
                 };
                 let fact = NameFact {
                     ty,
@@ -4586,7 +4662,7 @@ impl Compiler {
     fn compile_match(&mut self, m: &ast::MatchExpression) -> (Ty, CKind) {
         let subject = self.compile_expr(&m.subject);
         let subject_ty = subject.ty;
-        let result_ty = self.engine.fresh_var();
+        let result_ty = self.c.engine.fresh_var();
         let mut any_pattern_err = false;
         let mut b = PatternBindings::new();
         let mut arms = Vec::with_capacity(m.arms.len());
@@ -4601,14 +4677,16 @@ impl Compiler {
 
             let guard = arm.guard.as_ref().map(|guard| {
                 let g = self.compile_expr(guard);
-                let bool_ty = self.ty_bool();
-                self.engine
+                let bool_ty = self.c.ty_bool();
+                self.c
+                    .engine
                     .unify_at(bool_ty, g.ty, type_defining_span(guard));
                 g
             });
 
             let body = self.compile_expr(&arm.body);
-            self.engine
+            self.c
+                .engine
                 .unify_at(result_ty, body.ty, type_defining_span(&arm.body));
 
             self.pop_block_scope();
@@ -4626,8 +4704,9 @@ impl Compiler {
                 .unwrap_or(0)
                 + 1;
             let resolved_subj =
-                self.engine
-                    .resolve_for_patterns(subject_ty, Some(&self.env), depth);
+                self.c
+                    .engine
+                    .resolve_for_patterns(subject_ty, Some(&self.c.env), depth);
             let mut um = UsefulnessMatrix::new(resolved_subj);
             let all_pats: Vec<Pat> = arms.iter().map(|arm| um.lower(&arm.pattern)).collect();
             // Guarded arms don't contribute to exhaustiveness (the guard may be
@@ -4639,14 +4718,14 @@ impl Compiler {
                 .filter(|(arm, _)| arm.guard.is_none())
                 .map(|(_, p)| p);
             if let Some(missing) = um.find_missing(unguarded) {
-                self.error(
+                self.c.error(
                     format!("Match is not exhaustive, missing: {}", missing),
                     m.subject.span(),
                 );
             }
             for (i, arm) in m.arms.iter().enumerate() {
                 if !um.is_useful(&all_pats[i]) {
-                    self.error(
+                    self.c.error(
                         "This pattern is unreachable; a previous pattern matches the same values"
                             .to_string(),
                         arm.pattern.span(),
@@ -4655,7 +4734,7 @@ impl Compiler {
                     // A catch-all may only stand for values that cannot be
                     // listed. Over named variants it would silently take any
                     // variant added later, so the arms have to name them.
-                    self.error(
+                    self.c.error(
                         format!(
                             "This pattern stands for {}. Name {} instead, like `{} ->`",
                             missing.join(", "),
@@ -4677,7 +4756,9 @@ impl Compiler {
         };
         (result_ty, kind)
     }
+}
 
+impl Compiler {
     /// Single source of truth turning a numeric literal's source text into a
     /// [`Const`]. On i64 overflow / malformed input it emits a real diagnostic
     /// via [`Compiler::error`] and then returns a kind-preserving recovery
@@ -4698,6 +4779,17 @@ impl Compiler {
 // ============================================================================
 // Free helpers
 // ============================================================================
+
+/// A module's imports: the `import` statements it starts with.
+fn import_decls(block: &ast::BlockExpression) -> impl Iterator<Item = &ast::ImportDeclaration> {
+    block.body.iter().map_while(|node| match node {
+        ast::Node::Statement(stmt) => match stmt.as_ref() {
+            ast::Statement::ImportDeclaration(imp) => Some(imp),
+            _ => None,
+        },
+        ast::Node::Expression(_) => None,
+    })
+}
 
 /// The span that "defines" the type of an expression for error reporting:
 /// for a block, the last node (recursively); otherwise the expression's own

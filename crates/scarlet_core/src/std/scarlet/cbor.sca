@@ -167,8 +167,7 @@ pub fn map_get(v Value, label Int) Option(Value) {
 
 pub fn as_int(v Value) Option(Int) {
 	match v {
-		Uint(n) -> Some(n)
-		Nint(n) -> Some(n)
+		Uint(n) | Nint(n) -> Some(n)
 		Bytes(_) | Text(_) | List(_) | Map(_) -> None
 	}
 }

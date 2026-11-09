@@ -434,7 +434,7 @@ impl ModuleTable {
     }
 
     /// Lowest type id not covered by any allocated range. The entry module's
-    /// `next_type_id` is bumped to at least this after `process_imports`, so it
+    /// `next_type_id` is bumped to at least this once its imports are compiled, so it
     /// clears blocks whose owners were cache hits and contributed nothing to
     /// `next_type_id` this pass.
     pub(crate) fn id_high_water(&self) -> TypeId {

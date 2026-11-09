@@ -41,7 +41,7 @@ use petgraph::Directed;
 use petgraph::algo::tarjan_scc;
 use petgraph::stable_graph::{NodeIndex, StableGraph};
 
-use super::compiler::{Compiler, ToplevelDecl};
+use super::compiler::{Compiler, ModuleChecker, ToplevelDecl};
 use crate::ast;
 use crate::module::{self, ExportedType, ExportedValue, ModuleInterface};
 use crate::reference::{DefId, DefinitionKind};
@@ -190,7 +190,7 @@ struct FnSig {
     fn_ty: Ty,
 }
 
-impl Compiler {
+impl ModuleChecker<'_> {
     /// Keep a non-declaration node, erroring first unless this is a script
     /// (the REPL's entry; see [`super::ModuleScope`]). The node is kept even
     /// when rejected so the rest of the file is still analysed and reported.
@@ -202,12 +202,12 @@ impl Compiler {
         others: &mut Vec<(usize, &'a ast::Node)>,
     ) {
         if in_module {
-            self.error(
+            self.c.error(
                 "Modules may only contain declarations at the top level".to_string(),
                 node.span(),
             );
-        } else if self.module_scope == super::ModuleScope::DeclarationsOnly {
-            self.error(
+        } else if self.c.module_scope == super::ModuleScope::DeclarationsOnly {
+            self.c.error(
                 "Statements are not allowed at module scope: a program's code goes inside `pub fn main()`"
                     .to_string(),
                 node.span(),
@@ -266,14 +266,14 @@ impl Compiler {
                                     in_stdlib,
                                     AttrTarget::Type,
                                 );
-                                let dup = check_duplicate(self, &mut seen_types, &td.identifier);
-                                check_reserved(self, &td.identifier, in_prelude);
+                                let dup = check_duplicate(self.c, &mut seen_types, &td.identifier);
+                                check_reserved(self.c, &td.identifier, in_prelude);
                                 let mut dups: Vec<bool> = Vec::new();
                                 if let ast::TypeBody::Variants { ctors, .. } = &td.body {
                                     for ctor in ctors {
-                                        check_reserved(self, &ctor.identifier, in_prelude);
+                                        check_reserved(self.c, &ctor.identifier, in_prelude);
                                         dups.push(check_duplicate(
-                                            self,
+                                            self.c,
                                             &mut seen_values,
                                             &ctor.identifier,
                                         ));
@@ -286,7 +286,7 @@ impl Compiler {
                             }
                             ast::Declaration::Function(fd) => {
                                 self.validate_attributes(&fd.attributes, in_stdlib, AttrTarget::Fn);
-                                if !check_duplicate(self, &mut seen_values, &fd.identifier) {
+                                if !check_duplicate(self.c, &mut seen_values, &fd.identifier) {
                                     // `@vm` fns carry no Scarlet body: siphon them
                                     // off so every surviving `Decl::Fn` holds
                                     // a real expression body.
@@ -296,7 +296,7 @@ impl Compiler {
                                                 Some(intrinsic) => {
                                                     vm_fns.push((fd, is_public, intrinsic))
                                                 }
-                                                None => self.error(
+                                                None => self.c.error(
                                                     format!("unknown @vm builtin '{}'", key.name),
                                                     key.span,
                                                 ),
@@ -312,7 +312,7 @@ impl Compiler {
                                 }
                             }
                             ast::Declaration::Const(cb) => {
-                                if !check_duplicate(self, &mut seen_values, &cb.identifier) {
+                                if !check_duplicate(self.c, &mut seen_values, &cb.identifier) {
                                     decls.push(Decl::Const {
                                         cb,
                                         is_pub: is_public,
@@ -323,7 +323,7 @@ impl Compiler {
                         }
                     }
                     ast::Statement::ImportDeclaration(_) => {
-                        // Already handled by `process_imports`.
+                        // Already compiled by `load_imports` and bound by `bind_imports`.
                     }
                     _ => self.push_non_decl(node_idx, node, iface.is_some(), &mut other_nodes),
                 },
@@ -342,14 +342,15 @@ impl Compiler {
                 continue;
             }
             let (h, type_params, param_tys) = self.hydrate_type_params(&td.type_params);
-            let name_id = self.engine.intern(&td.identifier.name);
+            let name_id = self.c.engine.intern(&td.identifier.name);
             let module = self.current_module_slice();
             let type_id =
-                self.env
+                self.c
+                    .env
                     .register_type_head(&td.identifier.name, name_id, module, type_params);
             self.store_and_emit_def(&td.identifier, &td.doc, DefinitionKind::Type, *is_public);
             if matches!(td.body, ast::TypeBody::External) {
-                self.env.set_type_body(type_id, TypeBody::External);
+                self.c.env.set_type_body(type_id, TypeBody::External);
             }
             prepared_types.push(PreparedType::Head {
                 type_id,
@@ -377,16 +378,16 @@ impl Compiler {
                 .iter()
                 .map(|p| p.identifier.name.clone())
                 .collect();
-            let mut scheme = self.engine.generalize_top(fn_ty);
+            let mut scheme = self.c.engine.generalize_top(fn_ty);
             scheme.kind = ValueKind::Builtin {
                 intrinsic,
-                param_labels: self.engine.intern_slice(&params),
+                param_labels: self.c.engine.intern_slice(&params),
             };
             let m = self.current_module_slice();
             let dl = DefinitionLocation::new(fd.identifier.span, m, EntityKind::Function);
             scheme.def = Some(dl);
-            self.env.define_at(name, scheme, dl);
-            self.env.store_doc_opt(name, &fd.doc);
+            self.c.env.define_at(name, scheme, dl);
+            self.c.env.store_doc_opt(name, &fd.doc);
             self.emit_def(
                 dl,
                 name,
@@ -427,8 +428,8 @@ impl Compiler {
                         .iter()
                         .map(|p| p.identifier.name.clone())
                         .collect();
-                    let param_labels = self.engine.intern_slice(&names);
-                    self.env.define_at(
+                    let param_labels = self.c.engine.intern_slice(&names);
+                    self.c.env.define_at(
                         &fd.identifier.name,
                         Scheme {
                             quantified: ArenaSlice::EMPTY,
@@ -490,7 +491,7 @@ impl Compiler {
         // node, so every entry is `Some` by the export loop below.
         let mut final_schemes: Vec<Option<Scheme>> = vec![None; prepared.len()];
         for scc in &sccs {
-            self.engine.enter_level();
+            self.c.engine.enter_level();
             let mut inferred: Vec<(usize, Ty)> = Vec::with_capacity(scc.len());
 
             for &idx in scc {
@@ -498,7 +499,7 @@ impl Compiler {
                 // SCC-visit order, so the elaborated spine initialises
                 // dependencies first and a forward-referenced `const` is
                 // stored before it is read.
-                let name_id = self.engine.intern(prepared[idx].name());
+                let name_id = self.c.engine.intern(prepared[idx].name());
                 let binder = prepared[idx].binder();
                 self.toplevel_decls.push(ToplevelDecl {
                     node: decls[idx].node(),
@@ -536,8 +537,8 @@ impl Compiler {
                         // def→def edges. Spans nested lambdas too: a lambda has
                         // no `DefId` of its own.
                         let owner = self.owner_defid(fd.identifier.span, EntityKind::Function);
-                        let fn_ty = self.with_owner(owner, |c| {
-                            c.compile_declared_function(
+                        let fn_ty = self.with_owner(owner, |checker| {
+                            checker.compile_declared_function(
                                 name,
                                 *slot,
                                 &fd.params,
@@ -548,7 +549,7 @@ impl Compiler {
                             )
                         });
 
-                        self.env.store_doc_opt(name, &fd.doc);
+                        self.c.env.store_doc_opt(name, &fd.doc);
                         self.record(name, fn_ty, fd.identifier.span, fd.doc.clone());
                         nodes[decls[idx].node()] = CNode::Fn {
                             name: name_id,
@@ -565,12 +566,12 @@ impl Compiler {
                         let name = &cb.identifier.name;
                         self.emit_def(*dl, name, cb.doc.clone(), *is_pub, DefinitionKind::Constant);
                         let owner = self.owner_defid(cb.identifier.span, EntityKind::Constant);
-                        let (final_ty, init) = self.with_owner(owner, |c| {
+                        let (final_ty, init) = self.with_owner(owner, |checker| {
                             let mut h = Hydrator::new(AnnotationContext::Signature);
-                            let annot_ty = cb.typ.as_ref().map(|t| c.hydrate(&mut h, t));
-                            let init = c.compile_expr_with_hint(&cb.init, annot_ty);
+                            let annot_ty = cb.typ.as_ref().map(|t| checker.hydrate(&mut h, t));
+                            let init = checker.compile_expr_with_hint(&cb.init, annot_ty);
                             let ty = if let Some(a) = annot_ty {
-                                c.engine.unify_at(a, init.ty, cb.identifier.span);
+                                checker.c.engine.unify_at(a, init.ty, cb.identifier.span);
                                 a
                             } else {
                                 init.ty
@@ -582,14 +583,14 @@ impl Compiler {
                             binder,
                             init,
                         };
-                        self.env.store_doc_opt(name, &cb.doc);
+                        self.c.env.store_doc_opt(name, &cb.doc);
                         self.record(name, final_ty, cb.identifier.span, cb.doc.clone());
                         inferred.push((idx, final_ty));
                     }
                 }
             }
 
-            self.engine.leave_level();
+            self.c.engine.leave_level();
 
             for (idx, ty) in inferred {
                 let p = &prepared[idx];
@@ -598,10 +599,10 @@ impl Compiler {
                 // Function declarations are values; their vars all sit under
                 // the arrow, where the guard quantifies as before.
                 let mut scheme = if p.is_const() {
-                    let restricted = self.restricted_generalization_cons();
-                    self.engine.generalize_top_restricted(ty, &restricted)
+                    let restricted = self.c.restricted_generalization_cons();
+                    self.c.engine.generalize_top_restricted(ty, &restricted)
                 } else {
-                    self.engine.generalize_top(ty)
+                    self.c.engine.generalize_top(ty)
                 };
                 scheme.def = Some(p.dl());
                 if p.is_const() {
@@ -614,10 +615,10 @@ impl Compiler {
                     // outside the body resolves against — carries none.
                     let names = p.param_names();
                     scheme.kind = ValueKind::ModuleFn {
-                        param_labels: self.engine.intern_slice(&names),
+                        param_labels: self.c.engine.intern_slice(&names),
                     };
                 }
-                self.env.define(p.name(), scheme);
+                self.c.env.define(p.name(), scheme);
                 final_schemes[idx] = Some(scheme);
             }
         }
@@ -669,17 +670,18 @@ impl Compiler {
         let mut param_tys: Vec<Ty> = Vec::with_capacity(params.len());
         for tp in params {
             let AddedTypeVar { ty, id, duplicate } =
-                h.add_type_variable(&tp.name, &mut self.engine);
+                h.add_type_variable(&tp.name, &mut self.c.engine);
             if duplicate {
-                self.error(format!("Duplicate type parameter '{}'", tp.name), tp.span);
+                self.c
+                    .error(format!("Duplicate type parameter '{}'", tp.name), tp.span);
             }
             type_params.push(TypeParam {
-                name: self.engine.intern(&tp.name),
+                name: self.c.engine.intern(&tp.name),
                 id,
             });
             param_tys.push(ty);
         }
-        (h, self.engine.push_type_params(&type_params), param_tys)
+        (h, self.c.engine.push_type_params(&type_params), param_tys)
     }
 
     /// Intern the current module path as a `str_slices` slice. Memoised so a
@@ -689,7 +691,7 @@ impl Compiler {
             return sl;
         }
         let segs = self.current_module.clone();
-        let sl = self.engine.intern_slice(&segs);
+        let sl = self.c.engine.intern_slice(&segs);
         self.module_path_slice = Some(sl);
         sl
     }
@@ -705,8 +707,8 @@ impl Compiler {
         is_pub: bool,
     ) {
         let dl = DefinitionLocation::new(id.span, self.current_module_slice(), kind.entity());
-        self.env.store_definition(&id.name, dl);
-        self.env.store_doc_opt(&id.name, doc);
+        self.c.env.store_definition(&id.name, dl);
+        self.c.env.store_doc_opt(&id.name, doc);
         self.emit_def(dl, &id.name, doc.clone(), is_pub, kind);
     }
 
@@ -727,7 +729,7 @@ impl Compiler {
             param_tys.push(self.hydrate_opt(&mut hydrator, p.typ.as_ref()));
         }
         let ret_ty = self.hydrate_opt(&mut hydrator, fd.return_type.as_ref());
-        let fn_ty = self.engine.mk_fun(&param_tys, ret_ty);
+        let fn_ty = self.c.engine.mk_fun(&param_tys, ret_ty);
         FnSig {
             hydrator,
             param_tys,
@@ -793,7 +795,7 @@ impl Compiler {
             if cyclic {
                 for node in &component {
                     if let Some(&(_, td, _, _)) = by_idx.get(node) {
-                        self.error(
+                        self.c.error(
                             format!("Recursive type alias '{}'", td.identifier.name),
                             td.identifier.span,
                         );
@@ -805,19 +807,22 @@ impl Compiler {
                 continue;
             };
             let (mut h, type_params, _) = self.hydrate_type_params(&td.type_params);
-            let name_id = self.engine.intern(&td.identifier.name);
+            let name_id = self.c.engine.intern(&td.identifier.name);
             let module = self.current_module_slice();
             let type_id =
-                self.env
+                self.c
+                    .env
                     .register_type_head(&td.identifier.name, name_id, module, type_params);
             let owner = self.owner_defid(td.identifier.span, EntityKind::Type);
-            let target = self.with_owner(owner, |c| c.hydrate(&mut h, rhs));
+            let target = self.with_owner(owner, |checker| checker.hydrate(&mut h, rhs));
             // Store the target CLOSED (`Var(param_id)` → `Bound(idx)`): the
             // body outlives incremental rewinds, which clear the engine's
             // `vars` table, and the exported interface copies this `TypeInfo`
             // by value before Pass 3.5's `export_type`.
-            let target = self.engine.close_body(target, type_params);
-            self.env.set_type_body(type_id, TypeBody::Alias { target });
+            let target = self.c.engine.close_body(target, type_params);
+            self.c
+                .env
+                .set_type_body(type_id, TypeBody::Alias { target });
             prepared_types[decl_idx] = PreparedType::Alias {
                 type_id: Some(type_id),
             };
@@ -855,7 +860,7 @@ impl Compiler {
         ) = (&td.body, pt)
         else {
             // Aliases and externals have no constructors; just export the type info.
-            let ti = export_id.and_then(|id| self.env.lookup_type_info_by_id(id));
+            let ti = export_id.and_then(|id| self.c.env.lookup_type_info_by_id(id));
             export_type(iface.as_deref_mut(), &td.identifier.name, is_public, ti);
             return;
         };
@@ -869,7 +874,7 @@ impl Compiler {
         // references owned by this type, giving the dead-code walk type→type
         // edges.
         let owner = self.owner_defid(td.identifier.span, EntityKind::Type);
-        self.with_owner(owner, |c| {
+        self.with_owner(owner, |checker| {
             for (ctor, _) in ctors.iter().zip(dup_ctors).filter(|&(_, dup)| !dup) {
                 // Index into the surviving variants, not the source ctor list:
                 // dropped duplicates must not leave holes in the
@@ -880,8 +885,8 @@ impl Compiler {
                 let mut label_ids: Vec<StrId> = Vec::with_capacity(ctor.fields.len());
 
                 for f in &ctor.fields {
-                    let ity = c.hydrate(&mut h, &f.typ);
-                    let label = c.engine.intern(&f.label.name);
+                    let ity = checker.hydrate(&mut h, &f.typ);
+                    let label = checker.c.engine.intern(&f.label.name);
                     field_itys.push(ity);
                     // Stored CLOSED (`Var(param_id)` → `Bound(idx)`) so it
                     // never references the engine's transient `vars` table,
@@ -889,14 +894,14 @@ impl Compiler {
                     // still generalizes over the open `ity`.
                     field_defs.push(VariantField {
                         label,
-                        ty: c.engine.close_body(ity, type_params),
+                        ty: checker.c.engine.close_body(ity, type_params),
                     });
                     label_ids.push(label);
 
                     let qualified = format!("{}.{}", ctor.identifier.name, f.label.name);
                     let field_dl = DefinitionLocation::new(f.label.span, m, EntityKind::Field);
-                    c.env.store_definition(&qualified, field_dl);
-                    c.emit_def(
+                    checker.c.env.store_definition(&qualified, field_dl);
+                    checker.emit_def(
                         field_dl,
                         &f.label.name,
                         None,
@@ -905,25 +910,28 @@ impl Compiler {
                     );
                 }
 
-                let fields = c.engine.push_variant_fields(&field_defs);
+                let fields = checker.c.engine.push_variant_fields(&field_defs);
                 // One interned name for the variant, shared by the type's
                 // variant table and the constructor's own scheme, so a use
                 // site never has to re-derive it from the name it was bound
                 // under — which an alias changes.
-                let variant_name = c.engine.intern(&ctor.identifier.name);
+                let variant_name = checker.c.engine.intern(&ctor.identifier.name);
                 variants.push(Variant {
                     name: variant_name,
                     fields,
                 });
-                let field_labels = c.engine.push_str_ids(&label_ids);
+                let field_labels = checker.c.engine.push_str_ids(&label_ids);
 
-                let result_ty = c.engine.mk_con_id(type_id, type_name_id, &param_generics);
+                let result_ty = checker
+                    .c
+                    .engine
+                    .mk_con_id(type_id, type_name_id, &param_generics);
                 let ctor_ty = if field_itys.is_empty() {
                     result_ty
                 } else {
-                    c.engine.mk_fun(&field_itys, result_ty)
+                    checker.c.engine.mk_fun(&field_itys, result_ty)
                 };
-                let mut scheme = c.engine.generalize_top(ctor_ty);
+                let mut scheme = checker.c.engine.generalize_top(ctor_ty);
                 scheme.kind = ValueKind::Constructor {
                     type_name: type_name_id,
                     type_id,
@@ -940,17 +948,17 @@ impl Compiler {
                 scheme.def = Some(ctor_dl);
 
                 let name = &ctor.identifier.name;
-                c.env.define(name, scheme);
+                checker.c.env.define(name, scheme);
                 // Mirror the field labels into the graph and the export so
                 // hover can render `NotFound fn(path String) IoError` without
                 // reaching back into the engine's string pool.
-                let labels = c.engine.strs_of(field_labels);
+                let labels = checker.c.engine.strs_of(field_labels);
                 // `Config(name: 'x')` names the constructor, never the type,
                 // so without the `ctor_of` edge every single-constructor type
                 // reads as unused.
                 let type_dl = DefinitionLocation::new(td.identifier.span, m, EntityKind::Type);
-                let type_defid = c.defid_of(type_dl);
-                c.store_and_emit_def(
+                let type_defid = checker.defid_of(type_dl);
+                checker.store_and_emit_def(
                     &ctor.identifier,
                     &ctor.doc,
                     DefinitionKind::Constructor {
@@ -966,8 +974,8 @@ impl Compiler {
             }
         });
 
-        let variants = self.engine.push_variants(&variants);
-        self.env.set_type_body(
+        let variants = self.c.engine.push_variants(&variants);
+        self.c.env.set_type_body(
             type_id,
             TypeBody::Custom {
                 variants,
@@ -975,7 +983,7 @@ impl Compiler {
             },
         );
 
-        let ti = self.env.lookup_type_info_by_id(type_id);
+        let ti = self.c.env.lookup_type_info_by_id(type_id);
         export_type(iface.as_deref_mut(), type_name, is_public, ti);
     }
 }
@@ -986,7 +994,7 @@ enum AttrTarget {
     Type,
 }
 
-impl Compiler {
+impl ModuleChecker<'_> {
     /// Reject unknown attributes, attributes on the wrong target, and any
     /// attribute outside the embedded stdlib. Arity is not checked here: the
     /// parser already rejects a `@vm` fn with anything but one arg.
@@ -995,7 +1003,7 @@ impl Compiler {
             match a.name.name.as_str() {
                 "vm" => {
                     if !in_stdlib {
-                        self.error(
+                        self.c.error(
                             "'@vm' is only allowed in the standard library".to_string(),
                             a.span,
                         );
@@ -1005,12 +1013,14 @@ impl Compiler {
                         // Named, not negated: a new attribute target must
                         // decide whether '@vm' is legal on it.
                         AttrTarget::Type => {
-                            self.error("'@vm' may only be used on functions".to_string(), a.span);
+                            self.c
+                                .error("'@vm' may only be used on functions".to_string(), a.span);
                         }
                     }
                 }
                 other => {
-                    self.error(format!("Unknown attribute '@{other}'"), a.span);
+                    self.c
+                        .error(format!("Unknown attribute '@{other}'"), a.span);
                 }
             }
         }

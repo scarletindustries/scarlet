@@ -94,7 +94,7 @@ impl StrId {
     pub const NONE: StrId = StrId(u32::MAX);
 
     #[inline]
-    pub const fn idx(self) -> usize {
+    const fn idx(self) -> usize {
         self.0 as usize
     }
 }
@@ -486,7 +486,7 @@ pub struct EnginePoolWatermark {
     // watermarks picking the earliest-compiled module.
     nodes: usize,
     children: usize,
-    pub strings: usize,
+    strings: usize,
     quants: usize,
     str_slices: usize,
     type_params: usize,

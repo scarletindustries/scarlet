@@ -110,8 +110,17 @@ fn drops(e: &crate::core_ir::CoreExpr) -> Vec<crate::core_ir::LocalId> {
 /// `collect_hover_facts` on so occurrence collection fires. A script, for
 /// the reason `compile_script` is.
 fn collect(src: &str) -> super::Compiler {
+    collect_with(src, |_| ()).0
+}
+
+/// [`collect`], also handing back what `inspect` reads off the entry's
+/// checker before it finishes, while the entry's own names are still in scope.
+fn collect_with<R>(
+    src: &str,
+    inspect: impl FnOnce(&super::ModuleChecker<'_>) -> R,
+) -> (super::Compiler, R) {
     let block = parse_ok(src);
-    let mut c = super::new_compiler(None, true);
+    let mut c = super::new_compiler(true);
     c.collect_hover_facts = true;
     c.module_scope = super::ModuleScope::Script;
     c.register_prelude();
@@ -120,16 +129,25 @@ fn collect(src: &str) -> super::Compiler {
         "prelude failed to load: {:?}",
         c.engine.diagnostics,
     );
-    c.process_imports(&block);
-    c.env.push_scope();
-    c.analyse_module(&block, None);
-    c.env.pop_scope();
+    let entry = crate::module::ModuleKey::main();
+    let importer = super::Importer {
+        dir: None,
+        key: &entry,
+    };
+    let loaded = c.load_imports(&block, &importer);
+    let mut m = super::ModuleChecker::new(&mut c, crate::module::main_module(), entry.clone());
+    m.bind_imports(&block, loaded);
+    m.c.env.push_scope();
+    m.analyse_module(&block, None);
+    let seen = inspect(&m);
+    m.c.env.pop_scope();
+    c.entry_refs = m.finish();
     assert!(
         !crate::diagnostic::has_errors(&c.engine.diagnostics),
         "snippet failed to compile: {:?}",
         c.engine.diagnostics,
     );
-    c
+    (c, seen)
 }
 
 mod local_binders_as_definitions {
@@ -144,7 +162,7 @@ mod local_binders_as_definitions {
 
     /// The single `DefId` declared under `name` in the entry collector.
     fn sole_def(c: &Compiler, name: &str) -> DefId {
-        let defs = c.module_refs.defs_named(name);
+        let defs = c.entry_refs.defs_named(name);
         assert_eq!(
             defs.len(),
             1,
@@ -155,7 +173,7 @@ mod local_binders_as_definitions {
 
     /// Whether any recorded occurrence is an unqualified use of `target`.
     fn has_use(c: &Compiler, target: DefId) -> bool {
-        c.module_refs
+        c.entry_refs
             .occurrences()
             .iter()
             .map(|o| o.reference)
@@ -187,7 +205,7 @@ mod local_binders_as_definitions {
             let d = sole_def(&c, name);
             assert_eq!(d.entity, EntityKind::Value, "`{name}` is not a Value def");
             assert!(
-                c.module_refs.definition(d).is_some(),
+                c.entry_refs.definition(d).is_some(),
                 "`{name}` binder was not registered as a graph Definition",
             );
             // Closes the goto-def chain: occurrence -> target -> definition().
@@ -202,12 +220,12 @@ mod local_binders_as_definitions {
         let v = sole_def(&c, "v");
 
         let target = c
-            .module_refs
+            .entry_refs
             .resolve_position(2, 2)
             .expect("cursor on the `v` use resolves to a target");
         assert_eq!(target, v);
         assert!(
-            c.module_refs.definition(target).is_some(),
+            c.entry_refs.definition(target).is_some(),
             "use resolved to a target with no Definition record",
         );
     }
@@ -218,16 +236,16 @@ mod local_binders_as_definitions {
         // before the second binder lands) sees the outer binder and the
         // trailing `x` sees the inner.
         let c = collect("fn f(s Int) Int {\n  x = s\n  x = x\n  x\n}\n");
-        let mut defs = c.module_refs.defs_named("x").to_vec();
+        let mut defs = c.entry_refs.defs_named("x").to_vec();
         assert_eq!(defs.len(), 2, "expected outer + inner `x`, got {defs:?}");
         defs.sort_by_key(|d| d.span.start_line);
         let (outer, inner) = (defs[0], defs[1]);
         assert_ne!(outer, inner);
-        assert!(c.module_refs.definition(outer).is_some());
-        assert!(c.module_refs.definition(inner).is_some());
+        assert!(c.entry_refs.definition(outer).is_some());
+        assert!(c.entry_refs.definition(inner).is_some());
 
-        assert_eq!(c.module_refs.resolve_position(2, 6), Some(outer));
-        assert_eq!(c.module_refs.resolve_position(3, 2), Some(inner));
+        assert_eq!(c.entry_refs.resolve_position(2, 6), Some(outer));
+        assert_eq!(c.entry_refs.resolve_position(3, 2), Some(inner));
     }
 }
 
@@ -447,19 +465,20 @@ mod toplevel_slots {
     /// "module depth" and take a global slot it must not have.
     #[test]
     fn only_the_module_statement_walk_takes_a_slot() {
-        let mut c = new_compiler(None, true);
-        c.push_block_scope();
-        let a = c.engine.intern("a");
-        c.bind_local(a, 7);
+        let mut c = new_compiler(true);
+        let mut m = ModuleChecker::new(&mut c, crate::module::main_module(), ModuleKey::main());
+        m.push_block_scope();
+        let a = m.c.engine.intern("a");
+        m.bind_local(a, 7);
         assert!(
-            c.binding_globals.is_empty(),
+            m.binding_globals.is_empty(),
             "a binding made outside the module statement walk took a slot"
         );
 
-        c.walking_module_statements = true;
-        let b = c.engine.intern("b");
-        c.bind_local(b, 8);
-        assert_eq!(c.binding_globals.pop(), Some((b, GlobalSlot(8))));
+        m.walking_module_statements = true;
+        let b = m.c.engine.intern("b");
+        m.bind_local(b, 8);
+        assert_eq!(m.binding_globals.pop(), Some((b, GlobalSlot(8))));
     }
 
     /// The bare-expression entry point. Its outermost block is an arm body,
@@ -506,7 +525,7 @@ mod qualified_ctor_pattern_occurrences {
         // body's `p` on that line are ordinary Unqualified occurrences; the
         // call's own pair is on line 1, outside the filter.
         let on_pattern: Vec<Reference> = c
-            .module_refs
+            .entry_refs
             .occurrences()
             .iter()
             .map(|o| o.reference)
@@ -529,7 +548,7 @@ mod qualified_ctor_pattern_occurrences {
         );
 
         let alias = c
-            .module_refs
+            .entry_refs
             .defs_named("io")
             .iter()
             .find(|d| d.entity == EntityKind::ModuleAlias)
@@ -735,10 +754,12 @@ mod ctor_visibility_survives_on_the_type {
     //! aggregate over them would be carried by whichever happened to be
     //! wrong last.
 
-    use super::collect;
+    use super::collect_with;
 
     fn ctors_public(src: &str, ty: &str) -> Option<bool> {
-        collect(src).env.lookup_type_info(ty)?.ctors_public()
+        collect_with(src, |m| m.c.env.lookup_type_info(ty))
+            .1?
+            .ctors_public()
     }
 
     #[test]

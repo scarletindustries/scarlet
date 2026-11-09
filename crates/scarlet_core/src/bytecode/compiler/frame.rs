@@ -103,9 +103,6 @@ pub(in crate::bytecode) struct Frame {
     /// Never empty. `blocks[0]` is the body's own level: its parameters, or
     /// for the module toplevel, the root every module sees.
     blocks: Vec<Block>,
-    /// In the module toplevel, the index of the block holding the current
-    /// module's imports. The module's own statements are the block after it.
-    module_base: usize,
     /// Slots handed out so far.
     pub(in crate::bytecode) slots: i32,
     /// The next [`BinderId`]. Binders count from zero in every body.
@@ -124,8 +121,8 @@ pub(in crate::bytecode) struct Frame {
 pub(in crate::bytecode) struct Block {
     names: HashMap<StrId, LocalSlot>,
     /// The names bound here and not read yet, with where they were bound.
-    /// `None` for a block whose names are never reported unused: the module
-    /// root, and a module's imports.
+    /// `None` for the module toplevel's own level, whose names are never
+    /// reported unused.
     pub(in crate::bytecode) unused: Option<HashMap<StrId, Span>>,
 }
 
@@ -142,7 +139,6 @@ impl Frame {
     fn with_root(root: Block, slots: i32) -> Frame {
         Frame {
             blocks: vec![root],
-            module_base: 0,
             slots,
             next_binder: 0,
             captures: Captures::default(),
@@ -184,10 +180,9 @@ impl Frame {
         self.innermost().names.insert(name, entry);
     }
 
-    /// The blocks open inside the current module's own statements, counting
-    /// the statements' block itself.
-    pub(in crate::bytecode) fn module_depth(&self) -> usize {
-        self.blocks.len() - 1 - self.module_base
+    /// The blocks open in this body, beyond its own level.
+    pub(in crate::bytecode) fn depth(&self) -> usize {
+        self.blocks.len() - 1
     }
 
     /// Note that `name` was bound at `span`. Returns where an earlier binding
@@ -215,32 +210,6 @@ impl Frame {
     /// The body's own level, for a body that is finished.
     pub(in crate::bytecode) fn into_root(mut self) -> Block {
         self.blocks.swap_remove(0)
-    }
-
-    /// Open a block for a module's imports. Returns what to hand
-    /// [`Self::close_module`] when the module is done.
-    pub(in crate::bytecode) fn open_module(&mut self) -> usize {
-        self.blocks.push(Block {
-            names: HashMap::new(),
-            unused: None,
-        });
-        std::mem::replace(&mut self.module_base, self.blocks.len() - 1)
-    }
-
-    /// Drop the module's imports, and everything bound since it opened.
-    pub(in crate::bytecode) fn close_module(&mut self, outer_base: usize) {
-        self.blocks.truncate(self.module_base);
-        self.module_base = outer_base;
-    }
-
-    /// Every name in scope, for a session keeping the toplevel across
-    /// compiles. Innermost bindings win.
-    pub(in crate::bytecode) fn take_names(&mut self) -> HashMap<StrId, LocalSlot> {
-        let mut names = HashMap::new();
-        for block in self.blocks.drain(..) {
-            names.extend(block.names);
-        }
-        names
     }
 
     fn innermost(&mut self) -> &mut Block {
