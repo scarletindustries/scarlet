@@ -750,7 +750,7 @@ fn cmd_upgrade(version: Option<String>) -> Result<(), UpgradeError> {
     {
         Ok(o) if o.status.success() => {
             let v = String::from_utf8_lossy(&o.stdout);
-            let v = v.trim().strip_prefix("al ").unwrap_or(v.trim());
+            let v = v.trim().strip_prefix("scarlet ").unwrap_or(v.trim());
             println!("Upgraded to {v}");
         }
         _ => println!("Upgrade complete"),

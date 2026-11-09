@@ -82,9 +82,9 @@ fn header(xs Array(Int)) String {
 	}
 }
 
-// A bare `_` arm is a catch-all and the parser accepts it, but it is not the
-// canonical spelling: the formatter rewrites `_ ->` to `_ ->`, so that is
-// what an or-pattern's fallback looks like once the file is formatted.
+// A bare `_` arm is the catch-all, and the formatter leaves it as it is.
+// The parser refuses `else ->`, so `_` is the only way to write the fallback
+// after an or-pattern.
 fn parity(n Int) String {
 	match n {
 		0 | 2 | 4 -> 'even digit'
