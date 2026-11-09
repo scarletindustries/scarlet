@@ -16,11 +16,11 @@
   "homepage": "https://scarlet.industries",
   "repository": {
     "type": "git",
-    "url": "https://github.com/scarletindustries/language",
+    "url": "https://github.com/scarletindustries/scarlet",
     "directory": "editors/vscode"
   },
   "bugs": {
-    "url": "https://github.com/scarletindustries/language/issues"
+    "url": "https://github.com/scarletindustries/scarlet/issues"
   },
   "keywords": [
     "scarlet",

@@ -83,9 +83,25 @@ pub fn metadata(issuer String, scopes Array(String)) json::Json {
 
 // Registration
 
+/** Why `register` refused a client. */
+pub type RegisterError {
+	/** The body is not JSON. */
+	BodyNotJson
+	/** The body names no `redirect_uris`. */
+	MissingRedirectUris
+}
+
+/** The RFC 7591 §3.2.2 `error` value for a refused registration. */
+pub fn register_error_code(e RegisterError) String {
+	match e {
+		BodyNotJson -> 'invalid_client_metadata'
+		MissingRedirectUris -> 'invalid_redirect_uri'
+	}
+}
+
 /** Registers a public client and gives back its metadata. No secret. */
-pub fn register(store Store, req_body Binary) Result(json::Json, String) {
-	doc <- result::then(result::map_err(json::parse_binary(req_body), fn(_) 'body is not json'))
+pub fn register(store Store, req_body Binary) Result(json::Json, RegisterError) {
+	doc <- result::then(result::map_err(json::parse_binary(req_body), fn(_) BodyNotJson))
 	uris = match json::field(doc, 'redirect_uris') {
 		Some(list) -> array::fold(json::elements(list), [], fn(acc, u) match json::string(u) {
 			Some(t) -> [..acc, t]
@@ -94,7 +110,7 @@ pub fn register(store Store, req_body Binary) Result(json::Json, String) {
 		None -> []
 	}
 	match uris {
-		[] -> Err('redirect_uris is required')
+		[] -> Err(MissingRedirectUris)
 		_ -> {
 			id = new_token()
 			Store(put_client, _, _, _, _, _) = store
@@ -131,9 +147,33 @@ pub type AuthorizeReq {
 	resource String
 }
 
+/** Why `parse_authorize` refused a request. */
+pub type AuthorizeError {
+	/** `client_id` or `redirect_uri` is missing. */
+	MissingClient
+	/** The redirect uri is not one this client registered. */
+	UnregisteredRedirectUri
+	/** `response_type` is not `code`. */
+	UnsupportedResponseType
+	/** There is no `code_challenge`, or its method is not `S256`. */
+	PkceRequired
+}
+
+/** The RFC 6749 §4.1.2.1 `error` value for a refused request. Do not send
+ * `MissingClient` or `UnregisteredRedirectUri` to the redirect uri: it is not
+ * trusted. Show the error to the user instead. */
+pub fn authorize_error_code(e AuthorizeError) String {
+	match e {
+		MissingClient -> 'invalid_request'
+		UnregisteredRedirectUri -> 'invalid_request'
+		UnsupportedResponseType -> 'unsupported_response_type'
+		PkceRequired -> 'invalid_request'
+	}
+}
+
 /** The query of a `GET /authorize`. The redirect uri must be one the client
  * registered: a code sent anywhere else is a stolen code. */
-pub fn parse_authorize(store Store, query_bytes Binary) Result(AuthorizeReq, String) {
+pub fn parse_authorize(store Store, query_bytes Binary) Result(AuthorizeReq, AuthorizeError) {
 	q = form::decode(query_bytes)
 	client_id = form::get(q, 'client_id') or ''
 	redirect_uri = form::get(q, 'redirect_uri') or ''
@@ -142,13 +182,13 @@ pub fn parse_authorize(store Store, query_bytes Binary) Result(AuthorizeReq, Str
 	Store(_, get_client, _, _, _, _) = store
 	registered = get_client(client_id) or ''
 	if client_id == '' || redirect_uri == '' {
-		Err('client_id and redirect_uri are required')
+		Err(MissingClient)
 	} else if !array::contains(string::split(registered, ' '), redirect_uri) {
-		Err('redirect_uri is not registered for this client')
+		Err(UnregisteredRedirectUri)
 	} else if { form::get(q, 'response_type') or '' } != 'code' {
-		Err('only response_type=code is supported')
+		Err(UnsupportedResponseType)
 	} else if method != 'S256' || pkce_challenge == '' {
-		Err('PKCE S256 is required')
+		Err(PkceRequired)
 	} else {
 		Ok(
 			AuthorizeReq(
@@ -188,20 +228,45 @@ pub fn approve(store Store, areq AuthorizeReq, user String) String {
 
 // Token
 
+/** Why `token` refused a code. */
+pub type TokenError {
+	/** `grant_type` is not `authorization_code`. */
+	UnsupportedGrantType
+	/** `code` or `code_verifier` is missing. */
+	MissingCode
+	/** The code is unknown, already used, or expired. */
+	UnknownCode
+	/** The verifier does not hash to the code's challenge. */
+	PkceFailed
+	/** `client_id` or `redirect_uri` is not the one the code was issued to. */
+	GrantMismatch
+}
+
+/** The RFC 6749 §5.2 `error` value for a refused code. */
+pub fn token_error_code(e TokenError) String {
+	match e {
+		UnsupportedGrantType -> 'unsupported_grant_type'
+		MissingCode -> 'invalid_request'
+		UnknownCode -> 'invalid_grant'
+		PkceFailed -> 'invalid_grant'
+		GrantMismatch -> 'invalid_grant'
+	}
+}
+
 /** `POST /token`: a code for a bearer token. PKCE is the client's proof: the
  * verifier must hash to the code's challenge. */
-pub fn token(store Store, req_body Binary) Result(json::Json, String) {
+pub fn token(store Store, req_body Binary) Result(json::Json, TokenError) {
 	f = form::decode(req_body)
 	code = form::get(f, 'code') or ''
 	verifier = form::get(f, 'code_verifier') or ''
 	if { form::get(f, 'grant_type') or '' } != 'authorization_code' {
-		Err('only grant_type=authorization_code is supported')
+		Err(UnsupportedGrantType)
 	} else if code == '' || verifier == '' {
-		Err('code and code_verifier are required')
+		Err(MissingCode)
 	} else {
 		Store(_, _, _, take_code, put_token, _) = store
 		match take_code(code) {
-			None -> Err('code is unknown, used, or expired')
+			None -> Err(UnknownCode)
 			Some(g) -> {
 				Grant(_, scope, client_id, redirect_uri, pkce_challenge, _) = g
 				// No empty stand-in on `Err`: it would match an empty challenge.
@@ -216,9 +281,9 @@ pub fn token(store Store, req_body Binary) Result(json::Json, String) {
 				ok_client = { form::get(f, 'client_id') or client_id } == client_id
 				ok_redirect = { form::get(f, 'redirect_uri') or redirect_uri } == redirect_uri
 				if !pkce_ok {
-					Err('PKCE verification failed')
+					Err(PkceFailed)
 				} else if !ok_client || !ok_redirect {
-					Err('client_id or redirect_uri does not match the grant')
+					Err(GrantMismatch)
 				} else {
 					tok = new_token()
 					put_token(tok, g)
