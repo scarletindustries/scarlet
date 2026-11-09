@@ -146,7 +146,7 @@ impl fmt::Display for ParseError {
             ParseError::UnexpectedInInterpolation(got) => {
                 write!(f, "Unexpected '{got}' inside an interpolated string")
             }
-            ParseError::ScannerError => f.write_str("This text could not be read"),
+            ParseError::ScannerError => f.write_str("This text can't be read"),
             ParseError::CommaBetweenLines(item) => write!(
                 f,
                 "Put each {item} on its own line, without a `,` between them"
@@ -230,19 +230,17 @@ impl fmt::Display for ParseError {
                 write!(f, "Type name '{name}' must start with an uppercase letter")
             }
             ParseError::VmWithoutReturnType => {
-                f.write_str("@vm functions must declare a return type")
+                f.write_str("A @vm function must declare its return type")
             }
-            ParseError::VmWithBody => f.write_str("@vm functions cannot have a body"),
+            ParseError::VmWithBody => f.write_str("A @vm function can't have a body"),
             ParseError::VmArity => {
                 f.write_str("@vm takes exactly one argument, the VM op key, like @vm(add)")
             }
-            ParseError::OpaqueAlias => f.write_str("`opaque` cannot be applied to a type alias"),
+            ParseError::OpaqueAlias => f.write_str("A type alias can't be `opaque`"),
             ParseError::OpaqueWithoutConstructors => {
                 f.write_str("An `opaque` type must have constructors to hide")
             }
-            ParseError::OpaqueNotType => {
-                f.write_str("`opaque` may only be applied to `type` declarations")
-            }
+            ParseError::OpaqueNotType => f.write_str("Only a `type` declaration can be `opaque`"),
             ParseError::EmptyTypeDefinition => {
                 f.write_str("A type definition needs at least one constructor")
             }
@@ -250,15 +248,15 @@ impl fmt::Display for ParseError {
                 "Each constructor field needs a label. Write `label Type`, like `name String`",
             ),
             ParseError::AttributesOnConst => {
-                f.write_str("Attributes are not allowed on `const` declarations")
+                f.write_str("A `const` declaration can't have attributes")
             }
             ParseError::ExpectedDeclaration { after, got } => write!(
                 f,
                 "Expected `fn`, `type` or `const` after {after}, but found '{got}'"
             ),
-            ParseError::BackpassOr => f.write_str("`or` is not allowed on a backpass statement"),
+            ParseError::BackpassOr => f.write_str("A backpass statement can't have `or`"),
             ParseError::BackpassNotCall => {
-                f.write_str("backpassing requires a function call on the right of `<-`")
+                f.write_str("A backpass needs a function call on the right of `<-`")
             }
             ParseError::BackpassAtTopLevel => f.write_str(
                 "Backpassing is not allowed at the top level of a module. Use it inside a \

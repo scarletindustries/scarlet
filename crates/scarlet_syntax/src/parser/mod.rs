@@ -8,8 +8,8 @@ mod error;
 
 pub use error::{DeclarationLead, Expected, LineItem, ParseError};
 
-// Boxed so every frame on the recursive descent carries a pointer, not the
-// whole error: unboxed, `test_deep_nesting_does_not_overflow` overflows.
+// The error is boxed so each frame of the recursive descent only carries a
+// pointer. Without the box, `test_deep_nesting_does_not_overflow` overflows.
 type PResult<T> = Result<T, Box<ParseError>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2904,11 +2904,11 @@ mod tests {
     fn test_backpass_rhs_must_be_a_call() {
         assert_has_error(
             "{\nx <- 5\nx\n}",
-            "backpassing requires a function call on the right of `<-`",
+            "A backpass needs a function call on the right of `<-`",
         );
         assert_has_error(
             "{\nx <- y\nx\n}",
-            "backpassing requires a function call on the right of `<-`",
+            "A backpass needs a function call on the right of `<-`",
         );
     }
 
@@ -2916,7 +2916,7 @@ mod tests {
     fn test_backpass_rejects_or_suffix() {
         assert_has_error(
             "{\nx <- g(1) or 0\nx\n}",
-            "`or` is not allowed on a backpass statement",
+            "A backpass statement can't have `or`",
         );
     }
 
@@ -3156,7 +3156,7 @@ mod tests {
         // `@vm` ops are bodyless intrinsics.
         assert_has_error(
             "@vm(add)\nfn f(a Int) Int { a }",
-            "@vm functions cannot have a body",
+            "A @vm function can't have a body",
         );
         // `@vm` carries exactly one arg, enforced at parse time so
         // `FnBody::Vm` always holds it.
@@ -3173,18 +3173,15 @@ mod tests {
             "pub opaque type T",
             "`opaque` type must have constructors to hide",
         );
-        assert_has_error(
-            "pub opaque type T = Int",
-            "`opaque` cannot be applied to a type alias",
-        );
+        assert_has_error("pub opaque type T = Int", "A type alias can't be `opaque`");
         assert_has_error(
             "pub opaque fn f() Nil { Nil }",
-            "`opaque` may only be applied to `type`",
+            "Only a `type` declaration can be `opaque`",
         );
-        // Attributes are not allowed on `const`.
+        // A `const` declaration can't have attributes.
         assert_has_error(
             "@vm(x)\nconst PI = 3",
-            "Attributes are not allowed on `const`",
+            "A `const` declaration can't have attributes",
         );
         assert_has_error("pub x = 1", "after `pub`");
         // The message must not mention a `pub` the user never wrote.

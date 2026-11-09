@@ -312,7 +312,7 @@ pub(crate) enum Reason {
     TooLarge(TooLarge),
 }
 
-/// Which 32-bit bound a document is past.
+/// Which 32-bit limit a document went over.
 #[derive(Debug)]
 pub(crate) enum TooLarge {
     Nodes,
@@ -320,7 +320,7 @@ pub(crate) enum TooLarge {
 }
 
 impl Reason {
-    /// The `scarlet/json.ParseReason` this is.
+    /// Returns the `scarlet/json.ParseReason` constructor for this reason.
     pub(crate) fn variant(&self, r: &ParseReasons) -> VariantRef {
         use simd_json::ErrorType as E;
         match self {

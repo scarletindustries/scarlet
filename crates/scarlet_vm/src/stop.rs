@@ -1,5 +1,5 @@
-//! Why a run stops before its program does, as values. The words are written
-//! only when a stop is shown.
+//! Why a run stops before its program ends. Each reason is a value, and its
+//! words are only written when a stop is shown.
 
 use std::fmt;
 

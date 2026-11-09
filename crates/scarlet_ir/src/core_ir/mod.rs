@@ -267,9 +267,9 @@ pub struct JsonTypes {
     pub doc: VariantRef,
     /// `ParseError(offset, reason)`.
     pub parse_error: VariantRef,
-    /// `ParseReason`'s, the `reason` a `ParseError` carries.
+    /// The constructors of `ParseReason`, which a `ParseError` carries as its `reason`.
     pub reasons: ParseReasons,
-    /// `Json`'s, which `json.encode` writes out.
+    /// The constructors of `Json`, which `json.encode` writes out.
     pub null: VariantRef,
     pub boolean: VariantRef,
     pub integer: VariantRef,
@@ -280,7 +280,7 @@ pub struct JsonTypes {
     pub number: VariantRef,
 }
 
-/// `scarlet/json.ParseReason`'s constructors: why a document did not parse.
+/// The constructors of `scarlet/json.ParseReason`, which says why a document didn't parse.
 #[derive(Debug, Clone, Copy)]
 pub struct ParseReasons {
     pub unexpected_end: VariantRef,
