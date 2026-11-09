@@ -182,7 +182,7 @@ fn query_api_resolves_across_the_module_chain() {
     let (m, _) = s.definition("main", l, c).expect("b::b() resolves");
     assert_eq!(m.last().map(String::as_str), Some("b"));
 
-    let (hn, _, _) = s
+    let (hn, _) = s
         .hover(Some(&scarlet::module::ModuleKey::main()), l, c)
         .expect("hover at b::b()");
     assert_eq!(hn, "b");

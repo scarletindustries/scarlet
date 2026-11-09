@@ -396,7 +396,6 @@ impl ModuleChecker<'_> {
             let dl = DefinitionLocation::new(fd.identifier.span, m, EntityKind::Function);
             scheme.def = Some(dl);
             self.declare(name, scheme, None);
-            self.c.env.store_doc_opt(name, &fd.doc);
             self.emit_def(
                 dl,
                 name,
@@ -406,7 +405,7 @@ impl ModuleChecker<'_> {
                     param_names: params.clone(),
                 },
             );
-            self.record(name, scheme.ty, fd.identifier.span, fd.doc.clone());
+            self.record(name, scheme.ty, fd.identifier.span);
             export_value(iface.as_deref_mut(), name, is_pub, scheme, None);
         }
 
@@ -564,8 +563,7 @@ impl ModuleChecker<'_> {
                             )
                         });
 
-                        self.c.env.store_doc_opt(name, &fd.doc);
-                        self.record(name, fn_ty, fd.identifier.span, fd.doc.clone());
+                        self.record(name, fn_ty, fd.identifier.span);
                         nodes[decls[idx].node()] = CNode::Fn {
                             name: name_id,
                             binder,
@@ -599,8 +597,7 @@ impl ModuleChecker<'_> {
                             binder,
                             init,
                         };
-                        self.c.env.store_doc_opt(name, &cb.doc);
-                        self.record(name, final_ty, cb.identifier.span, cb.doc.clone());
+                        self.record(name, final_ty, cb.identifier.span);
                         inferred.push((idx, final_ty));
                     }
                 }
@@ -714,8 +711,7 @@ impl ModuleChecker<'_> {
         sl
     }
 
-    /// Record a named declaration. Its definition location and doc go into the
-    /// env, along with the matching graph definition. The entity comes from
+    /// Record a named declaration as a graph definition. The entity comes from
     /// `kind`, so the record and its payload can't disagree.
     fn store_and_emit_def(
         &mut self,
@@ -725,8 +721,6 @@ impl ModuleChecker<'_> {
         is_pub: bool,
     ) {
         let dl = DefinitionLocation::new(id.span, self.current_module_slice(), kind.entity());
-        self.c.env.store_definition(&id.name, dl);
-        self.c.env.store_doc_opt(&id.name, doc);
         self.emit_def(dl, &id.name, doc.clone(), is_pub, kind);
     }
 
@@ -922,9 +916,13 @@ impl ModuleChecker<'_> {
                     });
                     label_ids.push(label);
 
-                    let qualified = format!("{}.{}", ctor.identifier.name, f.label.name);
                     let field_dl = DefinitionLocation::new(f.label.span, m, EntityKind::Field);
-                    checker.c.env.store_definition(&qualified, field_dl);
+                    // Variants that share a label share the field: the first
+                    // one declared is where it is defined.
+                    checker
+                        .field_defs
+                        .entry((type_id, label))
+                        .or_insert(field_dl);
                     checker.emit_def(
                         field_dl,
                         &f.label.name,

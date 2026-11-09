@@ -476,6 +476,9 @@ pub struct ModuleChecker<'c> {
     /// The values the module itself declares, by name, in the order it
     /// declares them.
     names: IndexMap<StrId, ModuleValue>,
+    /// Where each field of the module's own types is defined, by its type and
+    /// label.
+    pub(super) field_defs: HashMap<(TypeId, StrId), DefinitionLocation>,
     /// The definition whose body is being compiled. It is the `owner` of every
     /// reference-graph occurrence emitted while it is set, which is how
     /// dead-code reachability gets its edges between definitions. It is `None`
@@ -846,6 +849,7 @@ impl<'c> ModuleChecker<'c> {
             walking_module_statements: false,
             next_fn_self_name: None,
             names: IndexMap::new(),
+            field_defs: HashMap::new(),
             current_owner: None,
             module_refs,
             current_module: path,
@@ -1418,10 +1422,7 @@ impl ModuleChecker<'_> {
             },
         );
         self.track_binding(name, span);
-        if let Some(doc) = &doc {
-            self.c.env.store_doc(name, doc.clone());
-        }
-        self.record(name, ty, span, doc.clone());
+        self.record(name, ty, span);
         self.emit_value_def(span, name, doc);
         binder
     }
@@ -1639,17 +1640,7 @@ impl Compiler {
 }
 
 impl ModuleChecker<'_> {
-    /// Look up `name` in the doc map, but only while collecting hover facts.
-    /// Anywhere else `record` throws the doc away, so skip the clone.
-    fn doc_if_collecting(&self, name: &str) -> Option<String> {
-        if self.c.collect_hover_facts {
-            self.c.env.lookup_doc(name)
-        } else {
-            None
-        }
-    }
-
-    pub(super) fn record(&mut self, name: &str, ty: Ty, sp: Span, doc: Option<String>) {
+    pub(super) fn record(&mut self, name: &str, ty: Ty, sp: Span) {
         // Only `IncrementalSession` (the LSP) uses hover facts. On the free
         // `compile` and `check` path they would be resolved and then thrown
         // away, so skip the `name.to_string()` and the `RawRef` buffering
@@ -1662,7 +1653,6 @@ impl ModuleChecker<'_> {
             span: sp,
             name: name.to_string(),
             ty,
-            doc,
             module,
         });
     }
@@ -2975,8 +2965,7 @@ impl ModuleChecker<'_> {
         let def = scheme.def;
         // Outside the LSP, `record` throws everything away (see its early
         // return), so skip looking up and cloning the doc there.
-        let doc = self.doc_if_collecting(name);
-        self.record(name, ty, expr.span, doc);
+        self.record(name, ty, expr.span);
         self.record_value_use(def, expr.span, ReferenceKind::Unqualified);
 
         // Locals that start with `_` can't be read. The prefix says the value
@@ -3197,10 +3186,7 @@ impl ModuleChecker<'_> {
             };
             // This is only for hover. `resolve_simple_callee` emits the graph
             // occurrence, with the right `Unqualified` or `Qualified` kind.
-            // Outside the LSP, `record` throws the doc away (see its early
-            // return), so skip looking it up and cloning it there.
-            let doc = self.doc_if_collecting(name);
-            self.record(name, inst_ty, name_span, doc);
+            self.record(name, inst_ty, name_span);
 
             let (ty, args) = match scheme.kind {
                 ValueKind::Constructor {
@@ -3760,7 +3746,7 @@ impl ModuleChecker<'_> {
             at: m.at,
             param_labels: None,
         };
-        self.record(m.member_name, ty, m.member_span, None);
+        self.record(m.member_name, ty, m.member_span);
         // A constructor or builtin needs no binding, because the elaborator
         // builds a nullary value or an eta wrapper for it (see `typed_ir::eta`).
         let needs_binding = matches!(m.scheme.kind, ValueKind::Local | ValueKind::ModuleFn { .. });
@@ -3978,13 +3964,11 @@ impl ModuleChecker<'_> {
             }
         };
         let qualified = format!("{}.{}", type_name, field);
-        let doc = self.doc_if_collecting(&qualified);
-        self.record(&qualified, result_ty, field_span, doc);
-        // `Type.field` is a dotted key in `env.definitions` that no local can
-        // shadow, so resolving it here is safe. It keeps goto-def,
-        // find-references and rename working for record fields, and feeds the
-        // dead-code reachability walk for fields.
-        let fdef = self.c.env.lookup_definition(&qualified);
+        self.record(&qualified, result_ty, field_span);
+        // Keeps goto-def, find-references and rename working for record
+        // fields, and feeds the dead-code reachability walk for fields. Only
+        // this module's own types' fields have a definition here.
+        let fdef = self.field_defs.get(&(type_id, field_id)).copied();
         self.record_value_use(fdef, field_span, ReferenceKind::Unqualified);
         result_ty
     }

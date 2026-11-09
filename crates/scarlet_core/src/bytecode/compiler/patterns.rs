@@ -402,8 +402,7 @@ impl ModuleChecker<'_> {
             .instantiate(&scheme, &self.frames.current.rigid);
         if self.c.collect_hover_facts {
             let qualified = format!("{}.{}", self.c.engine.str(type_name), name.name);
-            let doc = self.doc_if_collecting(&qualified);
-            self.record(&qualified, inst, name.span, doc);
+            self.record(&qualified, inst, name.span);
         }
         // A qualified pattern records the member use AND a use of the module
         // alias, so the unused-import check and rename see modules that are

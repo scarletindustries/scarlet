@@ -25,7 +25,6 @@ pub(super) struct RawRef {
     pub(super) span: Span,
     pub(super) name: String,
     pub(super) ty: Ty,
-    pub(super) doc: Option<String>,
     /// Interned when `record` runs, so `finalize_references` doesn't have to
     /// intern the path again for each occurrence.
     pub(super) module: ModuleId,
@@ -49,7 +48,6 @@ pub struct HoverFact {
     span: Span,
     name: String,
     ty: Type,
-    doc: Option<String>,
 }
 
 /// A snapshot of every compiler structure that only grows, taken at module
@@ -137,8 +135,6 @@ fn env_field_min(a: EnvWatermark, b: EnvWatermark) -> EnvWatermark {
     EnvWatermark {
         type_info: a.type_info.min(b.type_info),
         type_info_by_id: a.type_info_by_id.min(b.type_info_by_id),
-        definitions: a.definitions.min(b.definitions),
-        docs: a.docs.min(b.docs),
         journal: a.journal.min(b.journal),
         next_type_id: a.next_type_id.min(b.next_type_id),
     }
@@ -150,8 +146,6 @@ fn env_field_max(a: EnvWatermark, b: EnvWatermark) -> EnvWatermark {
     EnvWatermark {
         type_info: a.type_info.max(b.type_info),
         type_info_by_id: a.type_info_by_id.max(b.type_info_by_id),
-        definitions: a.definitions.max(b.definitions),
-        docs: a.docs.max(b.docs),
         journal: a.journal.max(b.journal),
         next_type_id: a.next_type_id.max(b.next_type_id),
     }
@@ -315,7 +309,6 @@ impl Compiler {
                 span: r.span,
                 name: r.name,
                 ty,
-                doc: r.doc,
             });
         }
         (Rc::new(graph), facts)
@@ -619,14 +612,14 @@ impl IncrementalSession {
         module_key: Option<&module::ModuleKey>,
         line: i32,
         col: i32,
-    ) -> Option<(String, Type, Option<String>)> {
+    ) -> Option<(String, Type)> {
         let m = self.module_for(module_key)?;
         let f = self
             .type_facts
             .iter()
             .filter(|f| f.module == m && f.span.contains(line, col))
             .min_by_key(|f| f.span.width())?;
-        Some((f.name.clone(), f.ty.clone(), f.doc.clone()))
+        Some((f.name.clone(), f.ty.clone()))
     }
 
     /// What the module at `path` exports, types first. If no check has imported
@@ -692,16 +685,12 @@ mod tests {
         let env_a = EnvWatermark {
             type_info: 9,
             type_info_by_id: 2,
-            definitions: 8,
-            docs: 1,
             journal: 7,
             next_type_id: TypeId(4),
         };
         let env_b = EnvWatermark {
             type_info: 6,
             type_info_by_id: 2,
-            definitions: 4,
-            docs: 2,
             journal: 3,
             next_type_id: TypeId(9),
         };
@@ -718,8 +707,6 @@ mod tests {
         let want_min = EnvWatermark {
             type_info: 6,
             type_info_by_id: 2,
-            definitions: 4,
-            docs: 1,
             journal: 3,
             next_type_id: TypeId(4),
         };
@@ -729,8 +716,6 @@ mod tests {
         let want_max = EnvWatermark {
             type_info: 9,
             type_info_by_id: 2,
-            definitions: 8,
-            docs: 2,
             journal: 7,
             next_type_id: TypeId(9),
         };
@@ -746,7 +731,6 @@ mod tests {
         let newer = Watermark {
             functions: 10,
             env: EnvWatermark {
-                docs: 4,
                 ..EnvWatermark::default()
             },
             ..Watermark::default()

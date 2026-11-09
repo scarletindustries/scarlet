@@ -326,7 +326,7 @@ impl Session {
         let line = i32::try_from(replay.lines().count()).unwrap_or(0);
         let column = i32::try_from("const ".len()).unwrap_or(0);
         match session.hover(None, line, column) {
-            Some((_, ty, _)) => println!("{expr}  {}{ty}{}", self.palette.bold, self.palette.reset),
+            Some((_, ty)) => println!("{expr}  {}{ty}{}", self.palette.bold, self.palette.reset),
             None => eprintln!("no type was inferred for that expression"),
         }
     }

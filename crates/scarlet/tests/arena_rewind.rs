@@ -60,7 +60,7 @@ fn hover_is_stable_across_many_rewinds() {
     for i in 0..8 {
         let r = s.check(&parse(entry), Some(&p.dir));
         assert!(r.success(), "check {i}: {:?}", r.diagnostics);
-        let (name, ty, _) = s
+        let (name, ty) = s
             .hover(Some(&scarlet::module::ModuleKey::main()), 1, 6)
             .unwrap_or_else(|| panic!("no hover fact on check {i}"));
         let rendered = format!("{name}: {ty}");

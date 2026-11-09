@@ -200,8 +200,6 @@ impl TypeInfo {
 enum Overwrite {
     TypeInfo(String, TypeInfo),
     TypeInfoById(TypeId, TypeInfo),
-    Definition(String, DefinitionLocation),
-    Doc(String, String),
 }
 
 /// One change by name made while a module frame was open.
@@ -220,8 +218,6 @@ enum Overwrite {
 #[derive(Debug, Clone)]
 enum FrameUndo {
     TypeInfo(String, Option<TypeInfo>),
-    Definition(String, Option<DefinitionLocation>),
-    Doc(String, Option<String>),
 }
 
 #[derive(Debug, Clone)]
@@ -239,8 +235,6 @@ pub struct TypeEnv {
     /// Each id is handed out once, so no clash of names can overwrite an entry
     /// here.
     type_info_by_id: IndexMap<TypeId, TypeInfo>,
-    definitions: IndexMap<String, DefinitionLocation>,
-    docs: IndexMap<String, String>,
     /// The log of in-place overwrites to replay. See [`Overwrite`].
     journal: Vec<Overwrite>,
     /// The log of changes by name made inside module frames, to replay. See
@@ -266,23 +260,13 @@ impl TypeEnv {
         let frame_inserts = |f: fn(&FrameUndo) -> bool| {
             self.frame_undo
                 .iter()
-                .filter(|u| {
-                    f(u) && matches!(
-                        u,
-                        FrameUndo::TypeInfo(_, None)
-                            | FrameUndo::Definition(_, None)
-                            | FrameUndo::Doc(_, None)
-                    )
-                })
+                .filter(|u| f(u) && matches!(u, FrameUndo::TypeInfo(_, None)))
                 .count()
         };
         EnvWatermark {
             type_info: self.type_info.len()
                 - frame_inserts(|u| matches!(u, FrameUndo::TypeInfo(..))),
             type_info_by_id: self.type_info_by_id.len(),
-            definitions: self.definitions.len()
-                - frame_inserts(|u| matches!(u, FrameUndo::Definition(..))),
-            docs: self.docs.len() - frame_inserts(|u| matches!(u, FrameUndo::Doc(..))),
             journal: self.journal.len(),
             next_type_id: self.next_type_id,
         }
@@ -309,19 +293,11 @@ impl TypeEnv {
                 Some(Overwrite::TypeInfoById(id, ti)) => {
                     self.type_info_by_id.insert(id, ti);
                 }
-                Some(Overwrite::Definition(name, dl)) => {
-                    self.definitions.insert(name, dl);
-                }
-                Some(Overwrite::Doc(name, doc)) => {
-                    self.docs.insert(name, doc);
-                }
                 None => break,
             }
         }
         self.type_info.truncate(w.type_info);
         self.type_info_by_id.truncate(w.type_info_by_id);
-        self.definitions.truncate(w.definitions);
-        self.docs.truncate(w.docs);
         self.next_type_id = w.next_type_id;
     }
 }
@@ -333,8 +309,6 @@ impl TypeEnv {
 pub struct EnvWatermark {
     pub type_info: usize,
     pub type_info_by_id: usize,
-    pub definitions: usize,
-    pub docs: usize,
     pub journal: usize,
     pub next_type_id: TypeId,
 }
@@ -346,8 +320,6 @@ impl Default for EnvWatermark {
         EnvWatermark {
             type_info: 0,
             type_info_by_id: 0,
-            definitions: 0,
-            docs: 0,
             journal: 0,
             next_type_id: TypeId(1),
         }
@@ -358,8 +330,6 @@ pub fn new_env() -> TypeEnv {
     TypeEnv {
         type_info: IndexMap::new(),
         type_info_by_id: IndexMap::new(),
-        definitions: IndexMap::new(),
-        docs: IndexMap::new(),
         journal: Vec::new(),
         frame_undo: Vec::new(),
         frame_marks: Vec::new(),
@@ -404,56 +374,8 @@ impl TypeEnv {
                     let popped = self.type_info.pop();
                     debug_assert_eq!(popped.map(|(n, _)| n), Some(name));
                 }
-                FrameUndo::Definition(name, Some(dl)) => {
-                    self.definitions.insert(name, dl);
-                }
-                FrameUndo::Definition(name, None) => {
-                    let popped = self.definitions.pop();
-                    debug_assert_eq!(popped.map(|(n, _)| n), Some(name));
-                }
-                FrameUndo::Doc(name, Some(doc)) => {
-                    self.docs.insert(name, doc);
-                }
-                FrameUndo::Doc(name, None) => {
-                    let popped = self.docs.pop();
-                    debug_assert_eq!(popped.map(|(n, _)| n), Some(name));
-                }
             }
         }
-    }
-
-    pub fn store_doc(&mut self, name: &str, doc: String) {
-        if self.in_module_frame() {
-            self.frame_undo.push(FrameUndo::Doc(
-                name.to_string(),
-                self.docs.get(name).cloned(),
-            ));
-        } else if let Some(old) = self.docs.get(name) {
-            self.journal
-                .push(Overwrite::Doc(name.to_string(), old.clone()));
-        }
-        self.docs.insert(name.to_string(), doc);
-    }
-
-    pub fn store_doc_opt(&mut self, name: &str, doc: &Option<String>) {
-        if let Some(d) = doc {
-            self.store_doc(name, d.clone());
-        }
-    }
-
-    /// Insert a definition location, journaling any overwrite of an existing
-    /// entry so `truncate_to` can restore it.
-    pub fn store_definition(&mut self, name: &str, loc: DefinitionLocation) {
-        if self.in_module_frame() {
-            self.frame_undo.push(FrameUndo::Definition(
-                name.to_string(),
-                self.definitions.get(name).copied(),
-            ));
-        } else if let Some(old) = self.definitions.get(name) {
-            self.journal
-                .push(Overwrite::Definition(name.to_string(), *old));
-        }
-        self.definitions.insert(name.to_string(), loc);
     }
 
     /// Insert or replace a type's info under `name`, and keep the by-id
@@ -476,14 +398,6 @@ impl TypeEnv {
             self.journal.push(Overwrite::TypeInfoById(ti.id, *old));
         }
         self.type_info_by_id.insert(ti.id, ti);
-    }
-
-    pub fn lookup_doc(&self, name: &str) -> Option<String> {
-        self.docs.get(name).cloned()
-    }
-
-    pub fn lookup_definition(&self, name: &str) -> Option<DefinitionLocation> {
-        self.definitions.get(name).copied()
     }
 
     /// Pass 1: register a type's head with an `Unresolved` body and give it an

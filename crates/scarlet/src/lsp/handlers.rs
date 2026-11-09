@@ -51,7 +51,7 @@ impl Workspace {
             && let Some(def) = graph.definition_at(mid, line, col)
         {
             let signature = match &typed {
-                Some((_, ty, _)) => format!("{} {}", def.name, labelled(ty, def.param_names())),
+                Some((_, ty)) => format!("{} {}", def.name, labelled(ty, def.param_names())),
                 None => def.name.clone(),
             };
             let mut value = format!(
@@ -114,7 +114,7 @@ impl Workspace {
                             .and_then(|(s, k)| {
                                 s.hover(Some(k), d.span().start_line, d.span().start_column)
                             })
-                            .map(|(_, ty, _)| labelled(&ty, d.param_names()));
+                            .map(|(_, ty)| labelled(&ty, d.param_names()));
                         completion_item(d, detail)
                     })
                     .collect()
@@ -128,7 +128,7 @@ impl Workspace {
                     let detail = self
                         .session_for(&uri)
                         .and_then(|s| s.hover(None, d.span().start_line, d.span().start_column))
-                        .map(|(_, ty, _)| labelled(&ty, d.param_names()));
+                        .map(|(_, ty)| labelled(&ty, d.param_names()));
                     completion_item(d, detail)
                 })
                 .collect(),
