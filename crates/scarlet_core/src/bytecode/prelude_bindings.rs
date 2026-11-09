@@ -4,7 +4,7 @@
 //! rather than a confused unify failure downstream.
 
 use crate::type_def::TypeId;
-use crate::types::{Scheme, TypeEnv, ValueKind};
+use crate::types::{Scheme, TypeInfo, ValueKind};
 
 /// Prelude type and constructor names. The ONLY place these strings may appear
 /// in compiler-side Rust. The four primitive names come from
@@ -166,15 +166,15 @@ macro_rules! prelude_bindings {
             #[cfg(test)]
             const TYPE_NAMES: &[(&str, usize)] = &[$( (names::$tn, $ta) ),*];
 
-            /// Capture the prelude's types from `env` and its constructors
-            /// through `value`, which answers what a prelude value name means.
+            /// Capture the prelude's types through `type_named` and its
+            /// constructors through `value`, which answer what a prelude type
+            /// or value name means.
             pub fn capture(
-                env: &TypeEnv,
+                type_named: impl Fn(&str) -> Option<TypeInfo>,
                 value: impl Fn(&str) -> Option<Scheme>,
             ) -> Result<Self, PreludeCaptureError> {
                 let ty = |name: &'static str, expected: usize| -> Result<TypeRef, PreludeCaptureError> {
-                    let ti = env
-                        .lookup_type_info(name)
+                    let ti = type_named(name)
                         .ok_or(PreludeCaptureError::MissingType(name))?;
                     if ti.arity() != expected {
                         return Err(PreludeCaptureError::TypeArity {
@@ -269,27 +269,56 @@ prelude_bindings! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ArenaSlice, StrId, Ty, new_env};
+    use crate::types::{ArenaSlice, StrId, Ty, TypeRegistry, new_registry};
+    use std::collections::HashMap;
+
+    /// Prelude types by name, the way a test sets them up.
+    struct Types {
+        registry: TypeRegistry,
+        names: HashMap<&'static str, TypeId>,
+    }
+
+    impl Types {
+        fn new() -> Types {
+            Types {
+                registry: new_registry(),
+                names: HashMap::new(),
+            }
+        }
+
+        fn add(&mut self, name: &'static str, arity: usize) -> TypeId {
+            let id = self.registry.register_type_head(
+                StrId(0),
+                ArenaSlice::EMPTY,
+                ArenaSlice::new(0, arity as u16),
+            );
+            self.names.insert(name, id);
+            id
+        }
+
+        fn named(&self) -> impl Fn(&str) -> Option<TypeInfo> + '_ {
+            |name| {
+                self.names
+                    .get(name)
+                    .and_then(|&id| self.registry.lookup_type_info_by_id(id))
+            }
+        }
+    }
 
     #[test]
     fn capture_on_empty_env_reports_missing_type() {
-        let env = new_env();
-        let err = PreludeBindings::capture(&env, no_values).unwrap_err();
+        let env = Types::new();
+        let err = PreludeBindings::capture(env.named(), no_values).unwrap_err();
         assert_eq!(err, PreludeCaptureError::MissingType(names::INT));
         assert_eq!(err.to_string(), "prelude: type 'Int' is required");
     }
 
     /// Every prelude type at the right arity, but no constructors.
-    fn env_with_prelude_types() -> (crate::types::TypeEnv, TypeId) {
-        let mut env = new_env();
+    fn env_with_prelude_types() -> (Types, TypeId) {
+        let mut env = Types::new();
         let mut bool_id = TypeId::NONE;
         for &(n, arity) in PreludeBindings::TYPE_NAMES {
-            let id = env.register_type_head(
-                n,
-                StrId(0),
-                ArenaSlice::EMPTY,
-                ArenaSlice::new(0, arity as u16),
-            );
+            let id = env.add(n, arity);
             if n == names::BOOL {
                 bool_id = id;
             }
@@ -326,7 +355,7 @@ mod tests {
     #[test]
     fn missing_ctor_message() {
         let (env, _) = env_with_prelude_types();
-        let err = PreludeBindings::capture(&env, no_values).unwrap_err();
+        let err = PreludeBindings::capture(env.named(), no_values).unwrap_err();
         assert_eq!(err, PreludeCaptureError::MissingCtor(names::TRUE));
         assert_eq!(err.to_string(), "prelude: constructor 'True' is required");
     }
@@ -336,7 +365,7 @@ mod tests {
     #[test]
     fn ctor_shape_mismatch_message() {
         let (env, bool_id) = env_with_prelude_types();
-        let err = PreludeBindings::capture(&env, true_ctor(bool_id, 1)).unwrap_err();
+        let err = PreludeBindings::capture(env.named(), true_ctor(bool_id, 1)).unwrap_err();
         assert_eq!(
             err,
             PreludeCaptureError::CtorShape {
@@ -363,7 +392,7 @@ mod tests {
     fn ctor_not_a_constructor_message() {
         let (env, _) = env_with_prelude_types();
         let not_a_ctor = |name: &str| (name == names::TRUE).then(|| crate::types::mono(Ty::NONE));
-        let err = PreludeBindings::capture(&env, not_a_ctor).unwrap_err();
+        let err = PreludeBindings::capture(env.named(), not_a_ctor).unwrap_err();
         assert_eq!(
             err,
             PreludeCaptureError::CtorShape {
@@ -384,11 +413,11 @@ mod tests {
     /// the first time an array literal is typed.
     #[test]
     fn type_arity_mismatch_message() {
-        let mut env = new_env();
+        let mut env = Types::new();
         for &(n, _) in PreludeBindings::TYPE_NAMES {
-            env.register_type_head(n, StrId(0), ArenaSlice::EMPTY, ArenaSlice::EMPTY);
+            env.add(n, 0);
         }
-        let err = PreludeBindings::capture(&env, no_values).unwrap_err();
+        let err = PreludeBindings::capture(env.named(), no_values).unwrap_err();
         assert_eq!(
             err,
             PreludeCaptureError::TypeArity {

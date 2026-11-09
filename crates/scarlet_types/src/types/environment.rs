@@ -190,62 +190,20 @@ impl TypeInfo {
     }
 }
 
-/// One in-place replacement of an entry that already existed. The flat maps
-/// roll back by truncating to a length, which can't undo a replacement,
-/// because `IndexMap::insert` keeps the entry at its original index, which may
-/// be below the watermark. Without this journal, an entry file that declares
-/// `type Parsed` would overwrite the stdlib's `Parsed` for the rest of an LSP
-/// session. `truncate_to` replays these newest first before it truncates.
-#[derive(Debug, Clone)]
-enum Overwrite {
-    TypeInfo(String, TypeInfo),
-    TypeInfoById(TypeId, TypeInfo),
-}
-
-/// One change by name made while a module frame was open.
-/// [`TypeEnv::pop_module_frame`] replays these newest first. `None` records a
-/// new key, which the pop removes. By then it's always the map's last entry, so
-/// index order never changes. `Some` records an overwrite, which the pop
-/// restores.
+/// Every nominal type the compile has registered, by id: the identity
+/// `TypeNode::Con` carries. What a type *name* means is a module's own
+/// business; this only answers what a type *is*.
 ///
-/// A module's names (its imports, its own type heads and the mangled
-/// `qualifier::Name` keys) are visible only while that module compiles.
-/// Without this log they'd stay in the flat maps for the rest of the compile.
-/// A later module could then resolve a name it never imported, and
-/// `scarlet check` would accept code that a single-file LSP check rejects. The
-/// by-id type registry is deliberately NOT covered, because ids are the global
-/// identity that already-hydrated annotations carry across modules.
+/// It only grows, except that a type's body is filled in once, while the
+/// module that declares it compiles. A watermark is taken before a module
+/// compiles, so rolling back to one is truncation by length.
 #[derive(Debug, Clone)]
-enum FrameUndo {
-    TypeInfo(String, Option<TypeInfo>),
-}
-
-#[derive(Debug, Clone)]
-pub struct TypeEnv {
-    /// Every map here is private. An overwrite MUST go through the methods
-    /// that journal it (`store_type_info`, `store_definition`, `store_doc`),
-    /// or `truncate_to` can't restore the entry it replaced.
-    ///
-    /// Looks types up by SOURCE name. Only annotation resolution uses it,
-    /// because lexical shadowing is the right behaviour there.
-    /// Exhaustiveness, field access and hover must use `type_info_by_id`
-    /// instead.
-    type_info: IndexMap<String, TypeInfo>,
-    /// Looks types up by NOMINAL id, the identity `TypeNode::Con` carries.
-    /// Each id is handed out once, so no clash of names can overwrite an entry
-    /// here.
-    type_info_by_id: IndexMap<TypeId, TypeInfo>,
-    /// The log of in-place overwrites to replay. See [`Overwrite`].
-    journal: Vec<Overwrite>,
-    /// The log of changes by name made inside module frames, to replay. See
-    /// [`FrameUndo`].
-    frame_undo: Vec<FrameUndo>,
-    /// `frame_undo.len()` as it was at each `push_module_frame`.
-    frame_marks: Vec<usize>,
+pub struct TypeRegistry {
+    types: IndexMap<TypeId, TypeInfo>,
     next_type_id: TypeId,
 }
 
-impl TypeEnv {
+impl TypeRegistry {
     pub fn next_type_id(&self) -> TypeId {
         self.next_type_id
     }
@@ -253,174 +211,34 @@ impl TypeEnv {
         self.next_type_id = id;
     }
 
-    pub fn watermark(&self) -> EnvWatermark {
-        // A `None` frame-undo entry is a key that's removed when its module
-        // frame pops, so it's temporary in the same way as a `None` scope-undo
-        // entry. Subtract both to get the size each map keeps.
-        let frame_inserts = |f: fn(&FrameUndo) -> bool| {
-            self.frame_undo
-                .iter()
-                .filter(|u| f(u) && matches!(u, FrameUndo::TypeInfo(_, None)))
-                .count()
-        };
-        EnvWatermark {
-            type_info: self.type_info.len()
-                - frame_inserts(|u| matches!(u, FrameUndo::TypeInfo(..))),
-            type_info_by_id: self.type_info_by_id.len(),
-            journal: self.journal.len(),
+    pub fn watermark(&self) -> RegistryWatermark {
+        RegistryWatermark {
+            types: self.types.len(),
             next_type_id: self.next_type_id,
         }
     }
 
-    pub fn truncate_to(&mut self, w: &EnvWatermark) {
-        // Invalidation runs between compiles, after every module frame has
-        // closed. We unwind anyway, so the truncations by length below never
-        // see a leftover frame entry.
-        debug_assert!(
-            self.frame_marks.is_empty(),
-            "truncate_to inside a module frame"
-        );
-        self.frame_marks.clear();
-        self.unwind_frame_undo(0);
-        // Replay newest first, so when a key was overwritten several times its
-        // oldest value wins. A restored entry above the truncation point is
-        // removed again below.
-        while self.journal.len() > w.journal {
-            match self.journal.pop() {
-                Some(Overwrite::TypeInfo(name, ti)) => {
-                    self.type_info.insert(name, ti);
-                }
-                Some(Overwrite::TypeInfoById(id, ti)) => {
-                    self.type_info_by_id.insert(id, ti);
-                }
-                None => break,
-            }
-        }
-        self.type_info.truncate(w.type_info);
-        self.type_info_by_id.truncate(w.type_info_by_id);
+    pub fn truncate_to(&mut self, w: &RegistryWatermark) {
+        self.types.truncate(w.types);
         self.next_type_id = w.next_type_id;
-    }
-}
-
-/// The point [`TypeEnv::truncate_to`] rolls back to. It's deliberately not
-/// `Ord`. `Watermark`'s ordering key leaves it out, so these fields can change
-/// without changing which module `Watermark::earlier` picks on invalidation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EnvWatermark {
-    pub type_info: usize,
-    pub type_info_by_id: usize,
-    pub journal: usize,
-    pub next_type_id: TypeId,
-}
-
-/// Written by hand, not derived, so `next_type_id` matches [`new_env`]'s first
-/// id of 1. A derive would put the `TypeId::NONE` sentinel here.
-impl Default for EnvWatermark {
-    fn default() -> Self {
-        EnvWatermark {
-            type_info: 0,
-            type_info_by_id: 0,
-            journal: 0,
-            next_type_id: TypeId(1),
-        }
-    }
-}
-
-pub fn new_env() -> TypeEnv {
-    TypeEnv {
-        type_info: IndexMap::new(),
-        type_info_by_id: IndexMap::new(),
-        journal: Vec::new(),
-        frame_undo: Vec::new(),
-        frame_marks: Vec::new(),
-        next_type_id: TypeId(1),
-    }
-}
-
-impl TypeEnv {
-    /// Open a module frame. Until the matching [`Self::pop_module_frame`],
-    /// every change by name is recorded as a [`FrameUndo`] and undone at the
-    /// pop. See `FrameUndo` for why.
-    pub fn push_module_frame(&mut self) {
-        self.frame_marks.push(self.frame_undo.len());
-    }
-
-    /// Close the innermost module frame. This removes every by-name entry the
-    /// module registered (its imports' `qualifier::Name` keys, and its own
-    /// type heads, definitions and docs) and restores whatever they
-    /// overwrote.
-    pub fn pop_module_frame(&mut self) {
-        debug_assert!(!self.frame_marks.is_empty(), "unbalanced pop_module_frame");
-        let Some(mark) = self.frame_marks.pop() else {
-            return;
-        };
-        self.unwind_frame_undo(mark);
-    }
-
-    fn in_module_frame(&self) -> bool {
-        !self.frame_marks.is_empty()
-    }
-
-    /// Replay `frame_undo` down to `mark`, newest first. By the time an
-    /// inserted key's record is replayed, it's always the map's last entry, so
-    /// removing it is a pop from the end and index order never changes.
-    fn unwind_frame_undo(&mut self, mark: usize) {
-        for u in self.frame_undo.drain(mark..).rev() {
-            match u {
-                FrameUndo::TypeInfo(name, Some(ti)) => {
-                    self.type_info.insert(name, ti);
-                }
-                FrameUndo::TypeInfo(name, None) => {
-                    let popped = self.type_info.pop();
-                    debug_assert_eq!(popped.map(|(n, _)| n), Some(name));
-                }
-            }
-        }
-    }
-
-    /// Insert or replace a type's info under `name`, and keep the by-id
-    /// registry in step. Outside a module frame, an overwrite is journaled so
-    /// `truncate_to` can restore it. Inside one, the by-name entry belongs to
-    /// the frame instead, because a module's type names must not outlive its
-    /// compile. The by-id entry is global either way.
-    pub fn store_type_info(&mut self, name: &str, ti: TypeInfo) {
-        if self.in_module_frame() {
-            self.frame_undo.push(FrameUndo::TypeInfo(
-                name.to_string(),
-                self.type_info.get(name).copied(),
-            ));
-        } else if let Some(old) = self.type_info.get(name) {
-            self.journal
-                .push(Overwrite::TypeInfo(name.to_string(), *old));
-        }
-        self.type_info.insert(name.to_string(), ti);
-        if let Some(old) = self.type_info_by_id.get(&ti.id) {
-            self.journal.push(Overwrite::TypeInfoById(ti.id, *old));
-        }
-        self.type_info_by_id.insert(ti.id, ti);
     }
 
     /// Pass 1: register a type's head with an `Unresolved` body and give it an
     /// id. `set_type_body` fills in the body once every head in the module is
     /// visible, which is what lets type bodies refer to each other.
-    ///
-    /// `name` MUST be the string `name_id` was interned from. The by-name and
-    /// by-id registries are kept in step, so a mismatch would let the two
-    /// lookups find different `TypeInfo`s.
     pub fn register_type_head(
         &mut self,
-        name: &str,
-        name_id: StrId,
+        name: StrId,
         module: ArenaSlice<pool::StrSlices>,
         type_params: ArenaSlice<pool::TypeParams>,
     ) -> TypeId {
         let id = self.next_type_id;
         self.next_type_id.0 += 1;
-        self.store_type_info(
-            name,
+        self.types.insert(
+            id,
             TypeInfo {
                 id,
-                name: name_id,
+                name,
                 module,
                 type_params,
                 body: TypeBody::Unresolved,
@@ -430,66 +248,46 @@ impl TypeEnv {
     }
 
     /// Passes 2 and 4: attach a hydrated body to a head that
-    /// [`register_type_head`](Self::register_type_head) registered, found by
-    /// nominal id. It goes through the by-id registry because names in the
-    /// by-name map can be shadowed, so changing an entry through it could
-    /// attach the body to whichever type of that name was analysed last.
-    /// Panics if the head was never registered, because that's a bug in the
-    /// order of passes, not a user error.
+    /// [`register_type_head`](Self::register_type_head) registered. Panics if
+    /// the head was never registered, because that's a bug in the order of
+    /// passes, not a user error.
     #[allow(clippy::panic)]
     pub fn set_type_body(&mut self, id: TypeId, body: TypeBody) {
         let entry = self
-            .type_info_by_id
+            .types
             .get_mut(&id)
             .unwrap_or_else(|| panic!("set_type_body: type id {id} head not registered"));
-        // The head may itself be a journaled entry from before the watermark.
-        // Journaling its value from before the body keeps the order right:
-        // head, then body, then restore.
-        let old = *entry;
         entry.body = body;
-        self.journal.push(Overwrite::TypeInfoById(id, old));
-        let in_frame = !self.frame_marks.is_empty();
-        for (name, by_name) in self.type_info.iter_mut().filter(|(_, ti)| ti.id == id) {
-            let old_by_name = *by_name;
-            by_name.body = body;
-            // This follows `store_type_info`. A by-name entry changed inside a
-            // module frame is restored when the frame pops, so journaling it
-            // too would bring the name back on a later `truncate_to`.
-            if in_frame {
-                self.frame_undo
-                    .push(FrameUndo::TypeInfo(name.clone(), Some(old_by_name)));
-            } else {
-                self.journal
-                    .push(Overwrite::TypeInfo(name.clone(), old_by_name));
-            }
+    }
+
+    /// The type with nominal id `id`.
+    pub fn lookup_type_info_by_id(&self, id: TypeId) -> Option<TypeInfo> {
+        self.types.get(&id).copied()
+    }
+}
+
+/// Rollback payload for [`TypeRegistry::truncate_to`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegistryWatermark {
+    pub types: usize,
+    pub next_type_id: TypeId,
+}
+
+/// Hand-written, not derived, so `next_type_id` matches [`new_registry`]'s
+/// starting id of 1: a derive would manufacture the `TypeId::NONE` sentinel.
+impl Default for RegistryWatermark {
+    fn default() -> Self {
+        RegistryWatermark {
+            types: 0,
+            next_type_id: TypeId(1),
         }
     }
+}
 
-    pub fn lookup_type_info(&self, name: &str) -> Option<TypeInfo> {
-        self.type_info.get(name).copied()
-    }
-
-    /// Every qualified spelling (`map::Map`) under which a type called `name`
-    /// is in scope, sorted. An import registers each of its module's types
-    /// under `qualifier::Name`, so these are exactly the spellings that would
-    /// resolve where the bare `name` didn't.
-    pub(crate) fn qualified_spellings(&self, name: &str) -> Vec<String> {
-        let suffix = format!("::{name}");
-        let mut out: Vec<String> = self
-            .type_info
-            .keys()
-            .filter(|k| k.ends_with(&suffix))
-            .cloned()
-            .collect();
-        out.sort();
-        out
-    }
-
-    /// Look a type up by the nominal id `TypeNode::Con` carries. This is the
-    /// only correct way to ask for a type's variants or fields, because in the
-    /// by-name map, whichever type of that name was analysed last can shadow it.
-    pub fn lookup_type_info_by_id(&self, id: TypeId) -> Option<TypeInfo> {
-        self.type_info_by_id.get(&id).copied()
+pub fn new_registry() -> TypeRegistry {
+    TypeRegistry {
+        types: IndexMap::new(),
+        next_type_id: TypeId(1),
     }
 }
 

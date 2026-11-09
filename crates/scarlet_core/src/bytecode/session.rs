@@ -16,7 +16,7 @@ use crate::reference::{ModuleId, ModuleReferences, ReferenceGraph, ReferenceGrap
 use crate::span::Span;
 use crate::tivec::Idx;
 use crate::type_def::{Type, TypeId};
-use crate::types::{EnginePoolWatermark, EnvWatermark, Ty, ValueKind};
+use crate::types::{EnginePoolWatermark, RegistryWatermark, Ty, ValueKind};
 
 /// One buffered name occurrence. It holds the *live* `Ty`, because we only
 /// resolve it once every unification has settled.
@@ -55,12 +55,12 @@ pub struct HoverFact {
 ///
 /// Pick between two watermarks with [`earlier`](Self::earlier) or
 /// [`later`](Self::later), never `Ord::min` or `max`, because those drop an
-/// `env` payload on a tie. If you add a field, you have to rewind it in
+/// `types` payload on a tie. If you add a field, you have to rewind it in
 /// [`Compiler::reset_to`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Watermark {
     engine: EnginePoolWatermark,
-    env: EnvWatermark,
+    types: RegistryWatermark,
     functions: usize,
     constants: usize,
     local_count: i32,
@@ -78,16 +78,16 @@ impl Watermark {
 
     /// The key watermarks compare by. Every field is the length of a pool that
     /// only grows or a counter that only goes up, so an earlier watermark
-    /// compares `<=` a later one. `env` is left out because it is data for the
+    /// compares `<=` a later one. `types` is left out because it is data for the
     /// rollback, not a position, so its fields can change without changing this
-    /// order. That means equal keys can hide different env payloads, which is
+    /// order. That means equal keys can hide different `types` payloads, which is
     /// why `earlier` and `later` merge them on a tie.
     fn ord_key(&self) -> (EnginePoolWatermark, usize, usize, i32) {
         // Destructure every field, so a new one has to be put in or left out of
         // the order on purpose.
         let Watermark {
             engine,
-            env: _,
+            types: _,
             functions,
             constants,
             local_count,
@@ -97,22 +97,22 @@ impl Watermark {
 
     /// Whichever of two watermarks was compiled first, whatever order you pass
     /// them in. Use this, not `Ord::min`. On an `ord_key` tie, `min` picks by
-    /// argument order and quietly throws away one env payload, which can leave
-    /// the env not truncated far enough with stale entries in it. This keeps
+    /// argument order and quietly throws away one `types` payload, which can leave
+    /// the type registry not truncated far enough with stale entries in it. This keeps
     /// the deeper rollback of each field instead.
     pub(crate) fn earlier(self, other: Self) -> Self {
         match self.ord_key().cmp(&other.ord_key()) {
             std::cmp::Ordering::Less => self,
             std::cmp::Ordering::Greater => other,
             std::cmp::Ordering::Equal => Watermark {
-                env: env_field_min(self.env, other.env),
+                types: types_field_min(self.types, other.types),
                 ..self
             },
         }
     }
 
-    /// The mirror of `earlier`, which keeps the shallower env of each field on
-    /// a tie. We use it to stop a rewind at the seed. Truncating the env below
+    /// The mirror of `earlier`, which keeps the shallower `types` of each field on
+    /// a tie. We use it to stop a rewind at the seed. Truncating the type registry below
     /// the seed's payload would leave dangling stdlib bindings whose pools
     /// survived.
     fn later(self, other: Self) -> Self {
@@ -120,33 +120,29 @@ impl Watermark {
             std::cmp::Ordering::Less => other,
             std::cmp::Ordering::Greater => self,
             std::cmp::Ordering::Equal => Watermark {
-                env: env_field_max(self.env, other.env),
+                types: types_field_max(self.types, other.types),
                 ..self
             },
         }
     }
 }
 
-/// The `min` of two env rollback payloads, field by field. That is the deeper
+/// The `min` of two type-registry rollback payloads, field by field. That is the deeper
 /// rollback in every field, which is the safe direction for
-/// `TypeEnv::truncate_to`. It is written out one field at a time so a new
-/// `EnvWatermark` field won't compile until someone picks which way it merges.
-fn env_field_min(a: EnvWatermark, b: EnvWatermark) -> EnvWatermark {
-    EnvWatermark {
-        type_info: a.type_info.min(b.type_info),
-        type_info_by_id: a.type_info_by_id.min(b.type_info_by_id),
-        journal: a.journal.min(b.journal),
+/// `TypeRegistry::truncate_to`. It is written out one field at a time so a new
+/// `RegistryWatermark` field won't compile until someone picks which way it merges.
+fn types_field_min(a: RegistryWatermark, b: RegistryWatermark) -> RegistryWatermark {
+    RegistryWatermark {
+        types: a.types.min(b.types),
         next_type_id: a.next_type_id.min(b.next_type_id),
     }
 }
 
-/// The mirror of [`env_field_min`], which is the shallower rollback in every
+/// The mirror of [`types_field_min`], which is the shallower rollback in every
 /// field.
-fn env_field_max(a: EnvWatermark, b: EnvWatermark) -> EnvWatermark {
-    EnvWatermark {
-        type_info: a.type_info.max(b.type_info),
-        type_info_by_id: a.type_info_by_id.max(b.type_info_by_id),
-        journal: a.journal.max(b.journal),
+fn types_field_max(a: RegistryWatermark, b: RegistryWatermark) -> RegistryWatermark {
+    RegistryWatermark {
+        types: a.types.max(b.types),
         next_type_id: a.next_type_id.max(b.next_type_id),
     }
 }
@@ -172,7 +168,7 @@ impl Compiler {
     pub(crate) fn watermark(&self) -> Watermark {
         Watermark {
             engine: self.engine.pool_watermark(),
-            env: self.env.watermark(),
+            types: self.types.watermark(),
             functions: self.fns.len(),
             constants: self.consts.len(),
             local_count: self.slots,
@@ -195,14 +191,14 @@ impl Compiler {
     fn reset_to(&mut self, w: &Watermark) {
         let Watermark {
             engine,
-            env,
+            types,
             functions,
             constants,
             local_count,
         } = *w;
 
         self.engine.truncate_to(&engine);
-        self.env.truncate_to(&env);
+        self.types.truncate_to(&types);
         self.fns.truncate(functions);
         self.consts.truncate(constants);
         self.global_to_func.retain(|_, fi| fi.index() < functions);
@@ -299,7 +295,7 @@ impl Compiler {
             let ty = match memo.get(&rep) {
                 Some(t) => t.clone(),
                 None => {
-                    let t = self.engine.resolve(r.ty, Some(&self.env));
+                    let t = self.engine.resolve(r.ty, Some(&self.types));
                     memo.insert(rep, t.clone());
                     t
                 }
@@ -676,51 +672,43 @@ mod tests {
     use crate::core_ir::{Atom, Const, CoreExpr, CoreFn, LoweredFn};
     use crate::type_def::TypeId;
     use crate::typed_ir::RTy;
-    use crate::types::{EnvWatermark, PrimIds};
+    use crate::types::{PrimIds, RegistryWatermark};
 
-    /// Watermarks with equal `ord_key` can carry different env payloads.
+    /// Watermarks with equal `ord_key` can carry different `types` payloads.
     /// `earlier` must be symmetric and merge them toward the deeper rollback.
     #[test]
     fn earlier_merges_env_payloads_on_ord_key_ties() {
-        let env_a = EnvWatermark {
-            type_info: 9,
-            type_info_by_id: 2,
-            journal: 7,
+        let env_a = RegistryWatermark {
+            types: 9,
             next_type_id: TypeId(4),
         };
-        let env_b = EnvWatermark {
-            type_info: 6,
-            type_info_by_id: 2,
-            journal: 3,
+        let env_b = RegistryWatermark {
+            types: 6,
             next_type_id: TypeId(9),
         };
         let a = Watermark {
-            env: env_a,
+            types: env_a,
             ..Watermark::default()
         };
         let b = Watermark {
-            env: env_b,
+            types: env_b,
             ..Watermark::default()
         };
         assert_eq!(a, b, "test premise: equal ord_key despite differing envs");
 
-        let want_min = EnvWatermark {
-            type_info: 6,
-            type_info_by_id: 2,
-            journal: 3,
+        let want_min = RegistryWatermark {
+            types: 6,
             next_type_id: TypeId(4),
         };
-        assert_eq!(a.earlier(b).env, want_min);
-        assert_eq!(b.earlier(a).env, want_min);
+        assert_eq!(a.earlier(b).types, want_min);
+        assert_eq!(b.earlier(a).types, want_min);
 
-        let want_max = EnvWatermark {
-            type_info: 9,
-            type_info_by_id: 2,
-            journal: 7,
+        let want_max = RegistryWatermark {
+            types: 9,
             next_type_id: TypeId(9),
         };
-        assert_eq!(a.later(b).env, want_max);
-        assert_eq!(b.later(a).env, want_max);
+        assert_eq!(a.later(b).types, want_max);
+        assert_eq!(b.later(a).types, want_max);
     }
 
     /// When there's no tie, `earlier` and `later` follow `Ord` and keep the
@@ -730,15 +718,16 @@ mod tests {
         let older = Watermark::default();
         let newer = Watermark {
             functions: 10,
-            env: EnvWatermark {
-                ..EnvWatermark::default()
+            types: RegistryWatermark {
+                types: 4,
+                ..RegistryWatermark::default()
             },
             ..Watermark::default()
         };
-        assert_eq!(older.earlier(newer).env, older.env);
-        assert_eq!(newer.earlier(older).env, older.env);
-        assert_eq!(older.later(newer).env, newer.env);
-        assert_eq!(newer.later(older).env, newer.env);
+        assert_eq!(older.earlier(newer).types, older.types);
+        assert_eq!(newer.earlier(older).types, older.types);
+        assert_eq!(older.later(newer).types, newer.types);
+        assert_eq!(newer.later(older).types, newer.types);
     }
 
     /// `reset_to` rewinds the function table and the constant pool to the

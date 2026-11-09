@@ -352,13 +352,10 @@ impl ModuleChecker<'_> {
             let (h, type_params, param_tys) = self.hydrate_type_params(&td.type_params);
             let name_id = self.c.engine.intern(&td.identifier.name);
             let module = self.current_module_slice();
-            let type_id =
-                self.c
-                    .env
-                    .register_type_head(&td.identifier.name, name_id, module, type_params);
+            let type_id = self.declare_type(&td.identifier.name, name_id, module, type_params);
             self.store_and_emit_def(&td.identifier, &td.doc, DefinitionKind::Type, *is_public);
             if matches!(td.body, ast::TypeBody::External) {
-                self.c.env.set_type_body(type_id, TypeBody::External);
+                self.c.types.set_type_body(type_id, TypeBody::External);
             }
             prepared_types.push(PreparedType::Head {
                 type_id,
@@ -825,10 +822,7 @@ impl ModuleChecker<'_> {
             let (mut h, type_params, _) = self.hydrate_type_params(&td.type_params);
             let name_id = self.c.engine.intern(&td.identifier.name);
             let module = self.current_module_slice();
-            let type_id =
-                self.c
-                    .env
-                    .register_type_head(&td.identifier.name, name_id, module, type_params);
+            let type_id = self.declare_type(&td.identifier.name, name_id, module, type_params);
             let owner = self.owner_defid(td.identifier.span, EntityKind::Type);
             let target = self.with_owner(owner, |checker| checker.hydrate(&mut h, rhs));
             // Store the target CLOSED (`Var(param_id)` → `Bound(idx)`). The
@@ -837,7 +831,7 @@ impl ModuleChecker<'_> {
             // by value before `export_type` in Pass 3.5.
             let target = self.c.engine.close_body(target, type_params);
             self.c
-                .env
+                .types
                 .set_type_body(type_id, TypeBody::Alias { target });
             prepared_types[decl_idx] = PreparedType::Alias {
                 type_id: Some(type_id),
@@ -877,7 +871,7 @@ impl ModuleChecker<'_> {
         else {
             // Aliases and external types have no constructors, so just export
             // the type info.
-            let ti = export_id.and_then(|id| self.c.env.lookup_type_info_by_id(id));
+            let ti = export_id.and_then(|id| self.c.types.lookup_type_info_by_id(id));
             export_type(iface.as_deref_mut(), &td.identifier.name, is_public, ti);
             return;
         };
@@ -997,7 +991,7 @@ impl ModuleChecker<'_> {
         });
 
         let variants = self.c.engine.push_variants(&variants);
-        self.c.env.set_type_body(
+        self.c.types.set_type_body(
             type_id,
             TypeBody::Custom {
                 variants,
@@ -1005,7 +999,7 @@ impl ModuleChecker<'_> {
             },
         );
 
-        let ti = self.c.env.lookup_type_info_by_id(type_id);
+        let ti = self.c.types.lookup_type_info_by_id(type_id);
         export_type(iface.as_deref_mut(), type_name, is_public, ti);
     }
 }

@@ -5,7 +5,9 @@ use std::marker::PhantomData;
 use indexmap::{IndexMap, IndexSet};
 use smallvec::SmallVec;
 
-use super::environment::{DefinitionLocation, TypeBody, TypeEnv, TypeParam, Variant, VariantField};
+use super::environment::{
+    DefinitionLocation, TypeBody, TypeParam, TypeRegistry, Variant, VariantField,
+};
 use crate::intrinsic::Intrinsic;
 use crate::type_def::{
     FieldDef, PrimitiveKind, Type, TypeId, prim_names as pn, t_array, t_float, t_int, t_string,
@@ -1642,7 +1644,7 @@ impl InferEngine {
 
     // --- Resolution: Ty -> type_def::Type ---
 
-    pub fn resolve(&mut self, ty: Ty, env: Option<&TypeEnv>) -> Type {
+    pub fn resolve(&mut self, ty: Ty, env: Option<&TypeRegistry>) -> Type {
         let mut path = ResolvePath::default();
         self.resolve_inner(ty, env, &mut path)
     }
@@ -1653,7 +1655,12 @@ impl InferEngine {
     /// recursive use inside `Cons(head, tail)` resolves with no variants and
     /// reads as an infinite type, so a two-level match on a list or tree that
     /// really is exhaustive gets rejected.
-    pub fn resolve_for_patterns(&mut self, ty: Ty, env: Option<&TypeEnv>, depth: usize) -> Type {
+    pub fn resolve_for_patterns(
+        &mut self,
+        ty: Ty,
+        env: Option<&TypeRegistry>,
+        depth: usize,
+    ) -> Type {
         let mut path = ResolvePath {
             stack: Vec::new(),
             same_limit: depth.clamp(1, MAX_SAME_INSTANCE_UNROLL),
@@ -1661,7 +1668,12 @@ impl InferEngine {
         self.resolve_inner(ty, env, &mut path)
     }
 
-    fn resolve_inner(&mut self, ty: Ty, env: Option<&TypeEnv>, path: &mut ResolvePath) -> Type {
+    fn resolve_inner(
+        &mut self,
+        ty: Ty,
+        env: Option<&TypeRegistry>,
+        path: &mut ResolvePath,
+    ) -> Type {
         let r = self.find(ty);
         match self.node(r) {
             TypeNode::Var(id) => {
@@ -1711,7 +1723,7 @@ impl InferEngine {
         id: TypeId,
         name: &str,
         args: ArenaSlice<pool::Children>,
-        env: Option<&TypeEnv>,
+        env: Option<&TypeRegistry>,
         path: &mut ResolvePath,
     ) -> Type {
         // Int, Float and String are declared external in the prelude, but must

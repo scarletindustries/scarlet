@@ -368,7 +368,13 @@ impl ModuleChecker<'_> {
                             "'{}' is not a constructor and cannot be used in a pattern",
                             name.name
                         )
-                    } else if self.c.env.lookup_type_info(&name.name).is_some() {
+                    } else if crate::types::TypeNames::type_named(
+                        &self.type_scope(),
+                        None,
+                        &name.name,
+                    )
+                    .is_some()
+                    {
                         format!(
                             "'{0}' is a type, not a constructor. To check a value's type and \
                              drop it, write `_ {0} = value`",

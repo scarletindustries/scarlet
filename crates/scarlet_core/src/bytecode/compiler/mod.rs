@@ -80,8 +80,8 @@ use crate::type_def::TypeId;
 use crate::types::{
     AnnotationContext, ArenaSlice, Bound, Constraint, DefinitionLocation, EntityKind, Hydrator,
     InferEngine, MatchFunTypeError, NullaryPrim, Pat, PatternBindings, PatternSink, Scheme, StrId,
-    Ty, TypeEnv, TypeInfo, TypeNode, UsefulnessMatrix, ValueKind, mono, new_engine, new_env, pool,
-    unroll_depth,
+    Ty, TypeInfo, TypeNode, TypeRegistry, UsefulnessMatrix, ValueKind, mono, new_engine,
+    new_registry, pool, unroll_depth,
 };
 
 mod bridges;
@@ -270,6 +270,44 @@ impl CompileResult {
 // Compiler: HM type inference and elaboration in a single pass
 // ============================================================================
 
+/// What type names mean in one module: its own types, then the prelude's,
+/// and `alias::Name` through the imported module's interface.
+pub(super) struct TypeScope<'a> {
+    own: &'a IndexMap<String, TypeId>,
+    imports: &'a HashMap<String, ModuleKey>,
+    prelude: &'a IndexMap<String, TypeId>,
+    registry: &'a TypeRegistry,
+    table: &'a ModuleTable,
+}
+
+impl crate::types::TypeNames for TypeScope<'_> {
+    fn type_named(&self, qualifier: Option<&str>, name: &str) -> Option<TypeInfo> {
+        let id = match qualifier {
+            Some(q) => {
+                let key = self.imports.get(q)?;
+                self.table.get(key)?.types.get(name)?.info.id
+            }
+            None => *self.own.get(name).or_else(|| self.prelude.get(name))?,
+        };
+        self.registry.lookup_type_info_by_id(id)
+    }
+
+    fn qualified_spellings(&self, name: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .imports
+            .iter()
+            .filter(|(_, key)| {
+                self.table
+                    .get(key)
+                    .is_some_and(|iface| iface.types.contains_key(name))
+            })
+            .map(|(q, _)| format!("{q}::{name}"))
+            .collect();
+        out.sort();
+        out
+    }
+}
+
 /// A value the module itself declares, under the module's own name for it: a
 /// `fn` or `const`, a constructor of one of its types, or an `@vm` builtin.
 #[derive(Clone, Copy, Debug)]
@@ -347,11 +385,6 @@ pub struct Compiler {
     /// truncating the pool in `reset_to` doesn't need to clear this too. A
     /// stale entry just misses.
     const_dedup: HashMap<Const, ConstId>,
-    /// Set only while the prelude compiles. The by-name env entries the prelude
-    /// leaves behind *are* the stdlib namespace every program sees, so its
-    /// [`ModuleChecker`] doesn't undo them when it finishes. User modules
-    /// always compile with this unset.
-    retain_namespaces: bool,
     /// Global slot → [`FuncIdx`] for every top-level `fn` compiled so far.
     /// `compile_declared_function` fills it in after `finish_fn_frame` assigns
     /// the `func_idx`. `global_denotation` reads it to choose between
@@ -366,7 +399,7 @@ pub struct Compiler {
     /// with the pool.
     rty_cache: HashMap<Ty, RTy>,
     pub(super) engine: InferEngine,
-    pub(super) env: TypeEnv,
+    pub(super) types: TypeRegistry,
     pub(super) recorded: Vec<RawRef>,
     check_only: bool,
     /// Whether to buffer a `RawRef` for each occurrence and resolve them into
@@ -420,6 +453,8 @@ pub struct Compiler {
     /// The values every module sees without an import: the prelude's, by
     /// name, in the order the prelude declares them.
     pub(super) prelude_values: IndexMap<StrId, Scheme>,
+    /// The types every module sees without an import: the prelude's.
+    pub(super) prelude_types: IndexMap<String, TypeId>,
     /// The entry-frame slots every module's toplevel has handed out so far.
     /// Each module's toplevel frame starts counting here.
     pub(super) slots: i32,
@@ -432,10 +467,6 @@ pub struct Compiler {
 /// so nothing about one module can leak into the next.
 pub struct ModuleChecker<'c> {
     pub(super) c: &'c mut Compiler,
-    /// Whether this module's by-name env entries are undone when it is done. It
-    /// is false only while the prelude compiles, because every module sees its
-    /// names.
-    scoped: bool,
     /// The bodies the walk is inside, the current one first.
     frames: frame::Frames,
     /// Pattern binders starting with `_` whose discarded type has to be looked
@@ -476,6 +507,8 @@ pub struct ModuleChecker<'c> {
     /// The values the module itself declares, by name, in the order it
     /// declares them.
     names: IndexMap<StrId, ModuleValue>,
+    /// The types the module itself declares, by name.
+    type_names: IndexMap<String, TypeId>,
     /// Where each field of the module's own types is defined, by its type and
     /// label.
     pub(super) field_defs: HashMap<(TypeId, StrId), DefinitionLocation>,
@@ -796,11 +829,10 @@ pub(crate) fn new_compiler(check_only: bool) -> Compiler {
         main: None,
         consts: Vec::new(),
         const_dedup: HashMap::new(),
-        retain_namespaces: false,
         global_to_func: HashMap::new(),
         rty_cache: HashMap::new(),
         engine: new_engine(),
-        env: new_env(),
+        types: new_registry(),
         recorded: vec![],
         check_only,
         collect_hover_facts: false,
@@ -815,6 +847,7 @@ pub(crate) fn new_compiler(check_only: bool) -> Compiler {
         prelude: PreludeBindings::default(),
         reserved: BTreeSet::new(),
         prelude_values: IndexMap::new(),
+        prelude_types: IndexMap::new(),
         slots: 0,
         entry_refs,
     }
@@ -831,13 +864,6 @@ impl<'c> ModuleChecker<'c> {
     /// Start checking the module `path`, whose identity is `key`. Every module
     /// it imports must already be compiled.
     pub(crate) fn new(c: &'c mut Compiler, path: ModulePath, key: ModuleKey) -> ModuleChecker<'c> {
-        // A module's by-name env entries are its own, so they are undone when
-        // it is done. The prelude's are kept on purpose, because they are the
-        // namespace every module sees.
-        let scoped = !c.retain_namespaces;
-        if scoped {
-            c.env.push_module_frame();
-        }
         let module_refs = ModuleReferences::new(c.ref_interner.intern(&path));
         let frames = frame::Frames::toplevel(c.slots);
         ModuleChecker {
@@ -849,6 +875,7 @@ impl<'c> ModuleChecker<'c> {
             walking_module_statements: false,
             next_fn_self_name: None,
             names: IndexMap::new(),
+            type_names: IndexMap::new(),
             field_defs: HashMap::new(),
             current_owner: None,
             module_refs,
@@ -858,7 +885,6 @@ impl<'c> ModuleChecker<'c> {
             imported_qualifiers: HashMap::new(),
             deferred_bodies: Vec::new(),
             defer_depth: 0,
-            scoped,
         }
     }
 
@@ -866,9 +892,6 @@ impl<'c> ModuleChecker<'c> {
     /// graph.
     pub(crate) fn finish(self) -> ModuleReferences {
         self.c.slots = self.frames.globals;
-        if self.scoped {
-            self.c.env.pop_module_frame();
-        }
         self.module_refs
     }
 }
@@ -1323,7 +1346,7 @@ impl Compiler {
 
     fn names_of_type(&self, id: TypeId) -> TypeNames {
         let Some((info, variants)) = self
-            .env
+            .types
             .lookup_type_info_by_id(id)
             .and_then(|info| Some((info, info.variants()?)))
         else {
@@ -1448,6 +1471,33 @@ impl ModuleChecker<'_> {
         DeclSite {
             slot: self.frames.alloc_global(),
             binder: self.frames.current.mint_binder(),
+        }
+    }
+
+    /// Register a type the module itself declares, under `name`.
+    pub(super) fn declare_type(
+        &mut self,
+        name: &str,
+        name_id: StrId,
+        module: ArenaSlice<pool::StrSlices>,
+        type_params: ArenaSlice<pool::TypeParams>,
+    ) -> TypeId {
+        let id = self
+            .c
+            .types
+            .register_type_head(name_id, module, type_params);
+        self.type_names.insert(name.to_string(), id);
+        id
+    }
+
+    /// What type names mean in this module.
+    fn type_scope(&self) -> TypeScope<'_> {
+        TypeScope {
+            own: &self.type_names,
+            imports: &self.imported_qualifiers,
+            prelude: &self.c.prelude_types,
+            registry: &self.c.types,
+            table: &self.c.module_table,
         }
     }
 
@@ -1875,7 +1925,14 @@ impl ModuleChecker<'_> {
     /// declaration share one `DefId`. This only records, and the `Ty` it
     /// returns is exactly what it would be without the recording.
     pub(super) fn hydrate(&mut self, h: &mut Hydrator, t: &ast::TypeIdentifier) -> Ty {
-        let result = h.type_from_ast(t, &self.c.env, &mut self.c.engine);
+        let scope = TypeScope {
+            own: &self.type_names,
+            imports: &self.imported_qualifiers,
+            prelude: &self.c.prelude_types,
+            registry: &self.c.types,
+            table: &self.c.module_table,
+        };
+        let result = h.type_from_ast(t, &scope, &mut self.c.engine);
         for hit in h.take_type_refs() {
             let path = self.c.engine.strs_of(hit.module);
             let name = self.c.engine.str(hit.name).to_string();
@@ -2060,7 +2117,7 @@ impl ModuleChecker<'_> {
         let resolved = self
             .c
             .engine
-            .resolve_for_patterns(init_ty, Some(&self.c.env), depth);
+            .resolve_for_patterns(init_ty, Some(&self.c.types), depth);
         let mut um = UsefulnessMatrix::new(resolved);
         let pat = um.lower(&pattern);
         if let Some(missing) = um.find_missing(&[pat]) {
@@ -2100,9 +2157,9 @@ impl Compiler {
     /// every reserved range before it allocates any type ids of its own.
     fn bump_type_ids_past_reserved(&mut self) {
         let hw = self.module_table.id_high_water();
-        let cur = self.env.next_type_id();
+        let cur = self.types.next_type_id();
         if hw > cur {
-            self.env.set_next_type_id(hw);
+            self.types.set_next_type_id(hw);
         }
     }
 }
@@ -2174,27 +2231,6 @@ impl ModuleChecker<'_> {
                 None,
                 Reference::new(a.span, ReferenceKind::Alias, alias_defid),
             );
-        }
-
-        // Every public type of the module can be named as `qualifier::Name`
-        // where a type goes. Register each one under the combined
-        // `qualifier::Name` key that the hydrator looks for on a qualified
-        // reference. Type names can't contain ':', so these keys never clash
-        // with local declarations.
-        let qualified_types: Vec<(String, _)> = self
-            .c
-            .module_table
-            .get(&key)
-            .map(|iface| {
-                iface
-                    .types
-                    .iter()
-                    .map(|(n, et)| (format!("{qualifier}::{n}"), et.info))
-                    .collect()
-            })
-            .unwrap_or_default();
-        for (mangled, ti) in qualified_types {
-            self.c.env.store_type_info(&mangled, ti);
         }
 
         self.imported_qualifiers.insert(qualifier, key.clone());
@@ -2358,18 +2394,6 @@ impl Compiler {
         Some((canon, key))
     }
 
-    /// Run `f` with [`Self::retain_namespaces`] set. Modules compiled inside it
-    /// leave their by-name entries at the root instead of scoping them to their
-    /// frame. This is only for loading the stdlib at startup, so see the
-    /// field's doc.
-    pub(crate) fn with_retained_namespaces<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
-        let prev = self.retain_namespaces;
-        self.retain_namespaces = true;
-        let out = f(self);
-        self.retain_namespaces = prev;
-        out
-    }
-
     fn compile_module_body(
         &mut self,
         path: ModulePath,
@@ -2404,10 +2428,10 @@ impl Compiler {
         // ranges, so the floor (the current `next_type_id`) is already past
         // every stdlib and dependency id. `key` is the same key that
         // `load_module` caches this module under.
-        let floor = self.env.next_type_id();
+        let floor = self.types.next_type_id();
         let reservation = self.module_table.id_base_for(&key, floor);
         let base = reservation.base();
-        self.env.set_next_type_id(base);
+        self.types.set_next_type_id(base);
         let watermark = self.watermark();
 
         let mut checker = ModuleChecker::new(self, path, key.clone());
@@ -2421,7 +2445,7 @@ impl Compiler {
         // follows real usage, and a reused range that spills past
         // `MODULE_TYPE_ID_RANGE` sets `id_range_overflow` for the recovery path
         // that invalidates and resets everything.
-        let used = self.env.next_type_id().0 - base.0;
+        let used = self.types.next_type_id().0 - base.0;
         reservation.note_usage(&mut self.module_table, used);
 
         // Stamp provenance on every diagnostic this module's compile produced.
@@ -3703,7 +3727,7 @@ impl ModuleChecker<'_> {
             ),
             _ => return,
         };
-        let Some(info) = self.c.env.lookup_type_info_by_id(type_id) else {
+        let Some(info) = self.c.types.lookup_type_info_by_id(type_id) else {
             return;
         };
         let labels: SmallVec<[StrId; 4]> =
@@ -3939,7 +3963,7 @@ impl ModuleChecker<'_> {
         // Look up by identity. The receiver's variants come from the type the
         // `Con` node identifies, never from whatever type with the same name a
         // flat lookup by name would find first.
-        let Some(info) = self.c.env.lookup_type_info_by_id(type_id) else {
+        let Some(info) = self.c.types.lookup_type_info_by_id(type_id) else {
             return self.field_access_bail(
                 format!("Type '{}' has no field '{}'", type_name, field),
                 field_span,
@@ -4632,7 +4656,7 @@ impl ModuleChecker<'_> {
             let resolved_subj =
                 self.c
                     .engine
-                    .resolve_for_patterns(subject_ty, Some(&self.c.env), depth);
+                    .resolve_for_patterns(subject_ty, Some(&self.c.types), depth);
             let mut um = UsefulnessMatrix::new(resolved_subj);
             let all_pats: Vec<Pat> = arms.iter().map(|arm| um.lower(&arm.pattern)).collect();
             // Guarded arms don't count towards exhaustiveness (the guard may be

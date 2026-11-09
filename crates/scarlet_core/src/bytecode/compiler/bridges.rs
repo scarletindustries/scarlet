@@ -75,7 +75,7 @@ impl ElabCtx for ModuleChecker<'_> {
             TypeNode::Con { id, args, .. } => (id, self.c.engine.children_of(args).to_vec()),
             _ => return None,
         };
-        let info = self.c.env.lookup_type_info_by_id(type_id)?;
+        let info = self.c.types.lookup_type_info_by_id(type_id)?;
         let shared = self.field_in_variants(info, &type_args, field, None).ok()?;
         if let Some(&first) = shared.slots.first()
             && shared.slots.iter().all(|&s| s == first)
@@ -115,7 +115,7 @@ impl ElabCtx for ModuleChecker<'_> {
     /// Read the labels off the type by `VariantRef`, not off the constructor's
     /// scheme by name, because the bare name in `mod.Ctor(..)` is not in `env`.
     fn ctor_labels(&mut self, v: crate::core_ir::VariantRef) -> Option<Vec<StrId>> {
-        let info = self.c.env.lookup_type_info_by_id(v.type_id)?;
+        let info = self.c.types.lookup_type_info_by_id(v.type_id)?;
         let variants = info.variants()?;
         let variant = *self
             .c

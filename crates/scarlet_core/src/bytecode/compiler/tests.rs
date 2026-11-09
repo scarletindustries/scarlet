@@ -761,9 +761,11 @@ mod ctor_visibility_survives_on_the_type {
     use super::collect_with;
 
     fn ctors_public(src: &str, ty: &str) -> Option<bool> {
-        collect_with(src, |m| m.c.env.lookup_type_info(ty))
-            .1?
-            .ctors_public()
+        collect_with(src, |m| {
+            crate::types::TypeNames::type_named(&m.type_scope(), None, ty)
+        })
+        .1?
+        .ctors_public()
     }
 
     #[test]

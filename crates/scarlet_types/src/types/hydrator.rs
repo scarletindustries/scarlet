@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use smallvec::SmallVec;
 
-use super::{ArenaSlice, InferEngine, StrId, Ty, TypeBody, TypeEnv, pool};
+use super::{ArenaSlice, InferEngine, StrId, Ty, TypeBody, TypeInfo, pool};
 use scarlet_syntax::ast;
 use scarlet_syntax::diagnostic::{Diagnostic, DiagnosticCode};
 use scarlet_syntax::span::Span;
@@ -86,6 +86,16 @@ pub struct AddedTypeVar {
     pub duplicate: bool,
 }
 
+/// What a type name means where an annotation is read.
+pub trait TypeNames {
+    /// The type `name` names, reached through the module alias `qualifier`
+    /// when the source wrote one (`map::Map`).
+    fn type_named(&self, qualifier: Option<&str>, name: &str) -> Option<TypeInfo>;
+    /// Every `alias::Name` spelling that would name a type called `name`,
+    /// sorted.
+    fn qualified_spellings(&self, name: &str) -> Vec<String>;
+}
+
 impl Hydrator {
     pub fn new(context: AnnotationContext) -> Self {
         Self {
@@ -133,16 +143,16 @@ impl Hydrator {
     pub fn type_from_ast(
         &mut self,
         t: &ast::TypeIdentifier,
-        env: &TypeEnv,
+        types: &dyn TypeNames,
         engine: &mut InferEngine,
     ) -> Result<Ty, Diagnostic> {
         match &t.kind {
-            ast::TypeKind::NamedType(nt) => self.named_type(nt, t.span, env, engine),
+            ast::TypeKind::NamedType(nt) => self.named_type(nt, t.span, types, engine),
 
             ast::TypeKind::TupleType(tt) => {
                 let mut elements: SmallVec<[Ty; 4]> = SmallVec::with_capacity(tt.elements.len());
                 for el in &tt.elements {
-                    elements.push(self.type_from_ast(el, env, engine)?);
+                    elements.push(self.type_from_ast(el, types, engine)?);
                 }
                 Ok(engine.mk_tuple(&elements))
             }
@@ -150,10 +160,10 @@ impl Hydrator {
             ast::TypeKind::FunctionType(ft) => {
                 let mut params: SmallVec<[Ty; 4]> = SmallVec::with_capacity(ft.params.len());
                 for p in &ft.params {
-                    params.push(self.type_from_ast(p, env, engine)?);
+                    params.push(self.type_from_ast(p, types, engine)?);
                 }
                 let ret = match &ft.return_type {
-                    Some(r) => self.type_from_ast(r, env, engine)?,
+                    Some(r) => self.type_from_ast(r, types, engine)?,
                     // A missing return type means "infer it". But nothing is
                     // inferred in a type definition, so a fresh variable there
                     // would escape with nothing constraining it.
@@ -178,7 +188,7 @@ impl Hydrator {
         &mut self,
         nt: &ast::NamedType,
         span: Span,
-        env: &TypeEnv,
+        types: &dyn TypeNames,
         engine: &mut InferEngine,
     ) -> Result<Ty, Diagnostic> {
         let name = &nt.identifier.name;
@@ -200,7 +210,7 @@ impl Hydrator {
 
         let mut arg_tys: SmallVec<[Ty; 4]> = SmallVec::with_capacity(nt.type_args.len());
         for ta in &nt.type_args {
-            arg_tys.push(self.type_from_ast(ta, env, engine)?);
+            arg_tys.push(self.type_from_ast(ta, types, engine)?);
         }
 
         // Lowercase identifiers are type variables.
@@ -222,19 +232,13 @@ impl Hydrator {
             return Ok(t);
         }
 
-        // Imported modules register their public types under the mangled key
-        // `qualifier::Name` (see `bind_import`), so a qualified reference
-        // resolves through the same table as a bare one. Type names can't
-        // contain ':', so mangled keys never collide with local types.
-        let (lookup_key, display) = match &nt.qualifier {
-            Some(q) => {
-                let full = format!("{}::{}", q.name, name);
-                (full.clone(), full)
-            }
-            None => (name.clone(), name.clone()),
+        let qualifier = nt.qualifier.as_ref().map(|q| q.name.as_str());
+        let display = match qualifier {
+            Some(q) => format!("{q}::{name}"),
+            None => name.clone(),
         };
 
-        match env.lookup_type_info(&lookup_key) {
+        match types.type_named(qualifier, name) {
             Some(ti) => {
                 let arity = ti.arity();
                 if arg_tys.len() != arity {
@@ -271,7 +275,7 @@ impl Hydrator {
                         "Unknown type '{display}'. Check that '{}' is imported and exports a type called '{}'.",
                         q.name, name
                     ),
-                    None => unknown_bare_type(env, name),
+                    None => unknown_bare_type(types, name),
                 },
             )),
         }
@@ -281,8 +285,8 @@ impl Hydrator {
 /// The "Unknown type" message for a bare name. When an import does export a
 /// type by that name, it points at the qualified spelling: `Map` after
 /// `import scarlet/map` is `map::Map`.
-fn unknown_bare_type(env: &TypeEnv, name: &str) -> String {
-    let quoted: Vec<String> = env
+fn unknown_bare_type(types: &dyn TypeNames, name: &str) -> String {
+    let quoted: Vec<String> = types
         .qualified_spellings(name)
         .iter()
         .map(|s| format!("'{s}'"))

@@ -17,16 +17,13 @@ impl Compiler {
     pub(crate) fn register_prelude(&mut self) {
         let at = Span::DUMMY;
         let path = crate::ast::ImportPath::canonical(module::scarlet_prelude());
-        // The prelude's type entries, by name, are the namespace every program
-        // sees for types. So unlike an ordinary module, its compile must not
-        // undo them. Nothing imports the prelude, so we load it as though the
-        // entry did.
+        // Nothing imports the prelude, so we load it as though the entry did.
         let entry = module::ModuleKey::main();
         let importer = super::compiler::Importer {
             dir: None,
             key: &entry,
         };
-        let loaded = self.with_retained_namespaces(|c| c.load_module(&path, at, &importer));
+        let loaded = self.load_module(&path, at, &importer);
         let Some((_, key)) = loaded else {
             return;
         };
@@ -35,9 +32,12 @@ impl Compiler {
             .module_table
             .get(&key)
             .expect("load_module succeeded so prelude must be in module_table");
-        for name in iface.types.keys() {
+        let mut types = indexmap::IndexMap::new();
+        for (name, et) in &iface.types {
             self.reserved.insert(name.clone());
+            types.insert(name.clone(), et.info.id);
         }
+        self.prelude_types = types;
         let mut values = indexmap::IndexMap::new();
         for (name, ev) in &iface.values {
             if matches!(ev.scheme.kind, ValueKind::Constructor { .. }) {
@@ -57,7 +57,14 @@ impl Compiler {
                 .and_then(|id| prelude_values.get(&id))
                 .copied()
         };
-        match PreludeBindings::capture(&self.env, value) {
+        let registry = &self.types;
+        let prelude_types = &self.prelude_types;
+        let ty = |name: &str| {
+            prelude_types
+                .get(name)
+                .and_then(|&id| registry.lookup_type_info_by_id(id))
+        };
+        match PreludeBindings::capture(ty, value) {
             Ok(b) => {
                 self.prelude = b;
                 self.engine.set_prim_ids(self.prelude.prim_ids());
