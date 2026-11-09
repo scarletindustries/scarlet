@@ -239,10 +239,8 @@ impl ModuleChecker<'_> {
     ) -> (Option<(StrId, BinderId)>, bool) {
         match b.bind(&id.name, ty, id.span, &mut self.c.engine) {
             Bound::Fresh(index) => {
-                self.get_or_create_local(&id.name);
-                self.register_local_binding(&id.name, ty, id.span);
                 let sid = self.c.engine.intern(&id.name);
-                let binder = self.publish_local(sid);
+                let binder = self.bind_mono(&id.name, ty, id.span);
                 debug_assert_eq!(index, binders.len(), "pattern binders out of step");
                 binders.push(binder);
                 (Some((sid, binder)), true)
@@ -251,11 +249,12 @@ impl ModuleChecker<'_> {
                 let sid = self.c.engine.intern(&id.name);
                 (binders.get(index).map(|&binder| (sid, binder)), true)
             }
-            // Register it so hover and go-to-definition see it. Nothing reads
-            // it, so it has no slot, and its discarded type is checked again
+            // Bind it like any name, so hover and go-to-definition see it and
+            // a read of it says it is write-only. Nothing may read it, so the
+            // pattern keeps no binder for it, and its discarded type is checked again
             // once inference is final.
             Bound::WriteOnly => {
-                self.register_local_binding(&id.name, ty, id.span);
+                self.bind_mono(&id.name, ty, id.span);
                 self.nil_discards.push((id.name.clone(), ty, id.span));
                 (None, true)
             }
@@ -280,7 +279,7 @@ impl ModuleChecker<'_> {
 
     /// Resolve a constructor name in scope to a [`CtorLookup`].
     fn lookup_ctor(&self, name: &str) -> Option<CtorLookup> {
-        CtorLookup::from_scheme(*self.c.env.lookup(name)?)
+        CtorLookup::from_scheme(self.scheme_of(self.c.engine.lookup_str(name)?)?)
     }
 
     /// Resolve `io::NotFound` through the module qualifier. Every path that
@@ -358,7 +357,13 @@ impl ModuleChecker<'_> {
                 Some(f) => f,
                 None => {
                     let qualified = self.qualified_spellings(&name.name);
-                    let msg = if self.c.env.lookup(&name.name).is_some() {
+                    let is_value = self
+                        .c
+                        .engine
+                        .lookup_str(&name.name)
+                        .and_then(|id| self.scheme_of(id))
+                        .is_some();
+                    let msg = if is_value {
                         format!(
                             "'{}' is not a constructor and cannot be used in a pattern",
                             name.name

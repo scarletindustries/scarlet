@@ -42,7 +42,7 @@ use petgraph::Directed;
 use petgraph::algo::tarjan_scc;
 use petgraph::stable_graph::{NodeIndex, StableGraph};
 
-use super::compiler::{Compiler, ModuleChecker, ToplevelDecl};
+use super::compiler::{Compiler, DeclSite, ModuleChecker, ToplevelDecl};
 use crate::ast;
 use crate::module::{self, ExportedType, ExportedValue, ModuleInterface};
 use crate::reference::{DefId, DefinitionKind};
@@ -119,10 +119,17 @@ enum Prepared<'a> {
 }
 
 impl<'a> Prepared<'a> {
+    /// Where the declaration lives.
+    fn site(&self) -> DeclSite {
+        match *self {
+            Prepared::Fn { slot, binder, .. } | Prepared::Const { slot, binder, .. } => {
+                DeclSite { slot, binder }
+            }
+        }
+    }
+
     /// A function's parameter names in declaration order, or empty for anything
-    /// else. They become the `param_labels` of the function's final `ModuleFn`
-    /// scheme, which labelled calls are checked against, and the names hover
-    /// shows.
+    /// else. They are only documentation: see `ExportedValue::param_names`.
     fn param_names(&self) -> Vec<String> {
         match self {
             Prepared::Fn { fd, .. } => fd
@@ -225,12 +232,6 @@ impl ModuleChecker<'_> {
     /// compiled as an import and its `pub` items are recorded in the interface.
     /// When it is `None`, this is the entry module.
     ///
-    /// The caller owns the enclosing `env` scope. This walk defines value
-    /// schemes into whatever scope is current when it starts and doesn't pop
-    /// it, so the entry file's caller keeps them visible through the toplevel
-    /// elaboration of `__main__` afterwards. Callers for imports wrap the call
-    /// in their own `push_scope` and `pop_scope`.
-    ///
     /// Returns what the walk built for each of the block's nodes, at that
     /// node's index in the block.
     pub(super) fn analyse_module(
@@ -240,8 +241,7 @@ impl ModuleChecker<'_> {
     ) -> Vec<CNode> {
         // The module toplevel is a body of its own, so its binders count from
         // zero.
-        let outer_binder = std::mem::replace(&mut self.frames.current.next_binder, 0);
-        self.push_local_scope();
+        self.open_block();
 
         // Pass 0 sorts the nodes and checks for reserved and duplicate names.
         let mut type_decls: Vec<(&ast::TypeDeclaration, bool)> = Vec::new();
@@ -395,7 +395,7 @@ impl ModuleChecker<'_> {
             let m = self.current_module_slice();
             let dl = DefinitionLocation::new(fd.identifier.span, m, EntityKind::Function);
             scheme.def = Some(dl);
-            self.c.env.define_at(name, scheme, dl);
+            self.declare(name, scheme, None);
             self.c.env.store_doc_opt(name, &fd.doc);
             self.emit_def(
                 dl,
@@ -410,13 +410,14 @@ impl ModuleChecker<'_> {
             export_value(iface.as_deref_mut(), name, is_pub, scheme, None);
         }
 
-        // Don't use `get_or_create_local` here. A declaration's slot reaches
-        // the toplevel elaboration through `toplevel_decls`, not through the
+        // Don't use `bind_local` here. A declaration's slot reaches the
+        // toplevel elaboration through `toplevel_decls`, not through the
         // module-scope binding queue. Only plain and destructuring bindings,
         // which have no `Decl` to hang a slot on, go through that queue.
         let mut prepared: Vec<Prepared> = Vec::with_capacity(decls.len());
         for d in &decls {
-            let (slot, binder) = self.alloc_decl_slot(d.name());
+            let site = self.alloc_decl();
+            let (slot, binder) = (site.slot, site.binder);
             let p = match *d {
                 Decl::Fn {
                     fd, is_pub, body, ..
@@ -438,7 +439,7 @@ impl ModuleChecker<'_> {
                         .map(|p| p.identifier.name.clone())
                         .collect();
                     let param_labels = self.c.engine.intern_slice(&names);
-                    self.c.env.define_at(
+                    self.declare(
                         &fd.identifier.name,
                         Scheme {
                             quantified: ArenaSlice::EMPTY,
@@ -446,7 +447,7 @@ impl ModuleChecker<'_> {
                             kind: ValueKind::ModuleFn { param_labels },
                             def: Some(dl),
                         },
-                        dl,
+                        Some(site),
                     );
                     Prepared::Fn {
                         fd,
@@ -634,7 +635,7 @@ impl ModuleChecker<'_> {
                         param_labels: self.c.engine.intern_slice(&names),
                     };
                 }
-                self.c.env.define(p.name(), scheme);
+                self.declare(p.name(), scheme, Some(p.site()));
                 final_schemes[idx] = Some(scheme);
             }
         }
@@ -674,8 +675,7 @@ impl ModuleChecker<'_> {
         self.end_deferred_elaboration();
         self.check_nil_discards();
 
-        self.pop_local_scope();
-        self.frames.current.next_binder = outer_binder;
+        self.close_block();
         nodes
     }
 
@@ -972,7 +972,7 @@ impl ModuleChecker<'_> {
                 scheme.def = Some(ctor_dl);
 
                 let name = &ctor.identifier.name;
-                checker.c.env.define(name, scheme);
+                checker.declare(name, scheme, None);
                 // Copy the field labels into the graph and the export, so hover
                 // can show `NotFound fn(path String) IoError` without going
                 // back to the engine's string pool.

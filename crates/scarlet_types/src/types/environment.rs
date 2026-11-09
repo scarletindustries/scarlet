@@ -1,6 +1,6 @@
 use indexmap::IndexMap;
 
-use super::infer::{ArenaSlice, Scheme, StrId, Ty, pool};
+use super::infer::{ArenaSlice, StrId, Ty, pool};
 use crate::type_def::TypeId;
 use scarlet_syntax::span::Span;
 
@@ -198,9 +198,6 @@ impl TypeInfo {
 /// session. `truncate_to` replays these newest first before it truncates.
 #[derive(Debug, Clone)]
 enum Overwrite {
-    /// A root-scope `define` that replaced an existing entry. A define inside
-    /// an open scope rolls back through `scope_undo` instead.
-    Binding(String, Scheme),
     TypeInfo(String, TypeInfo),
     TypeInfoById(TypeId, TypeInfo),
     Definition(String, DefinitionLocation),
@@ -222,7 +219,6 @@ enum Overwrite {
 /// identity that already-hydrated annotations carry across modules.
 #[derive(Debug, Clone)]
 enum FrameUndo {
-    Binding(String, Option<Scheme>),
     TypeInfo(String, Option<TypeInfo>),
     Definition(String, Option<DefinitionLocation>),
     Doc(String, Option<String>),
@@ -230,22 +226,10 @@ enum FrameUndo {
 
 #[derive(Debug, Clone)]
 pub struct TypeEnv {
-    /// A flat map from name to scheme. Nested scopes live in the `scope_undo`
-    /// log below instead of a stack of maps, one per scope, so an empty scope
-    /// allocates nothing and `lookup` is one hash probe. `Compiler::locals`
-    /// works the same way.
-    ///
     /// Every map here is private. An overwrite MUST go through the methods
-    /// that journal it (`define`, `store_type_info`, `store_definition`,
-    /// `store_doc`), or `truncate_to` can't restore the entry it replaced.
-    bindings: IndexMap<String, Scheme>,
-    /// For every `define` made while a scope is open, the entry's index and
-    /// its previous value. `pop_scope` replays these newest first. `Some`
-    /// restores the value in place, and `None` pops the entry, which is always
-    /// the last one, so index order never changes.
-    scope_undo: Vec<(usize, Option<Scheme>)>,
-    /// `scope_undo.len()` as it was at each `push_scope`.
-    scope_marks: Vec<usize>,
+    /// that journal it (`store_type_info`, `store_definition`, `store_doc`),
+    /// or `truncate_to` can't restore the entry it replaced.
+    ///
     /// Looks types up by SOURCE name. Only annotation resolution uses it,
     /// because lexical shadowing is the right behaviour there.
     /// Exhaustiveness, field access and hover must use `type_info_by_id`
@@ -262,13 +246,8 @@ pub struct TypeEnv {
     /// The log of changes by name made inside module frames, to replay. See
     /// [`FrameUndo`].
     frame_undo: Vec<FrameUndo>,
-    /// `(frame_undo.len(), scope_undo.len())` as they were at each
-    /// `push_module_frame`. The `scope_undo` mark is there for the session's
-    /// throwaway import scope. A define made *during* the frame, but recorded
-    /// against a scope that was already open when the frame began, still
-    /// belongs to the frame, so `pop_module_frame` drains `scope_undo` down to
-    /// the mark.
-    frame_marks: Vec<(usize, usize)>,
+    /// `frame_undo.len()` as it was at each `push_module_frame`.
+    frame_marks: Vec<usize>,
     next_type_id: TypeId,
 }
 
@@ -290,8 +269,7 @@ impl TypeEnv {
                 .filter(|u| {
                     f(u) && matches!(
                         u,
-                        FrameUndo::Binding(_, None)
-                            | FrameUndo::TypeInfo(_, None)
+                        FrameUndo::TypeInfo(_, None)
                             | FrameUndo::Definition(_, None)
                             | FrameUndo::Doc(_, None)
                     )
@@ -299,12 +277,6 @@ impl TypeEnv {
                 .count()
         };
         EnvWatermark {
-            // Every `None` undo entry is a key added while a nested scope was
-            // open. Subtracting them gives `bindings.len()` as it would be
-            // after popping every scope, which is the root layer that stays.
-            root_scope: self.bindings.len()
-                - self.scope_undo.iter().filter(|(_, p)| p.is_none()).count()
-                - frame_inserts(|u| matches!(u, FrameUndo::Binding(..))),
             type_info: self.type_info.len()
                 - frame_inserts(|u| matches!(u, FrameUndo::TypeInfo(..))),
             type_info_by_id: self.type_info_by_id.len(),
@@ -319,23 +291,11 @@ impl TypeEnv {
     pub fn truncate_to(&mut self, w: &EnvWatermark) {
         // Invalidation runs between compiles, after every module frame has
         // closed. We unwind anyway, so the truncations by length below never
-        // see a leftover frame entry. Scopes go first, because they nest
-        // inside frames, so their entries are the newer ones.
+        // see a leftover frame entry.
         debug_assert!(
             self.frame_marks.is_empty(),
             "truncate_to inside a module frame"
         );
-        // Unwind the whole undo log, so `bindings` holds only the root scope.
-        self.scope_marks.clear();
-        for (idx, prev) in self.scope_undo.drain(..).rev() {
-            match prev {
-                Some(s) => self.bindings[idx] = s,
-                None => {
-                    debug_assert_eq!(idx + 1, self.bindings.len());
-                    self.bindings.pop();
-                }
-            }
-        }
         self.frame_marks.clear();
         self.unwind_frame_undo(0);
         // Replay newest first, so when a key was overwritten several times its
@@ -343,9 +303,6 @@ impl TypeEnv {
         // removed again below.
         while self.journal.len() > w.journal {
             match self.journal.pop() {
-                Some(Overwrite::Binding(name, s)) => {
-                    self.bindings.insert(name, s);
-                }
                 Some(Overwrite::TypeInfo(name, ti)) => {
                     self.type_info.insert(name, ti);
                 }
@@ -361,7 +318,6 @@ impl TypeEnv {
                 None => break,
             }
         }
-        self.bindings.truncate(w.root_scope);
         self.type_info.truncate(w.type_info);
         self.type_info_by_id.truncate(w.type_info_by_id);
         self.definitions.truncate(w.definitions);
@@ -375,7 +331,6 @@ impl TypeEnv {
 /// without changing which module `Watermark::earlier` picks on invalidation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnvWatermark {
-    pub root_scope: usize,
     pub type_info: usize,
     pub type_info_by_id: usize,
     pub definitions: usize,
@@ -389,7 +344,6 @@ pub struct EnvWatermark {
 impl Default for EnvWatermark {
     fn default() -> Self {
         EnvWatermark {
-            root_scope: 0,
             type_info: 0,
             type_info_by_id: 0,
             definitions: 0,
@@ -402,9 +356,6 @@ impl Default for EnvWatermark {
 
 pub fn new_env() -> TypeEnv {
     TypeEnv {
-        bindings: IndexMap::new(),
-        scope_undo: Vec::new(),
-        scope_marks: Vec::new(),
         type_info: IndexMap::new(),
         type_info_by_id: IndexMap::new(),
         definitions: IndexMap::new(),
@@ -417,55 +368,23 @@ pub fn new_env() -> TypeEnv {
 }
 
 impl TypeEnv {
-    pub fn push_scope(&mut self) {
-        self.scope_marks.push(self.scope_undo.len());
-    }
-
-    pub fn pop_scope(&mut self) {
-        debug_assert!(!self.scope_marks.is_empty(), "unbalanced pop_scope");
-        if let Some(mark) = self.scope_marks.pop() {
-            for (idx, prev) in self.scope_undo.drain(mark..).rev() {
-                match prev {
-                    Some(s) => self.bindings[idx] = s,
-                    None => {
-                        debug_assert_eq!(idx + 1, self.bindings.len());
-                        self.bindings.pop();
-                    }
-                }
-            }
-        }
-    }
-
     /// Open a module frame. Until the matching [`Self::pop_module_frame`],
-    /// every change by name made outside an open scope is recorded as a
-    /// [`FrameUndo`] and undone at the pop. See `FrameUndo` for why.
+    /// every change by name is recorded as a [`FrameUndo`] and undone at the
+    /// pop. See `FrameUndo` for why.
     pub fn push_module_frame(&mut self) {
-        self.frame_marks
-            .push((self.frame_undo.len(), self.scope_undo.len()));
+        self.frame_marks.push(self.frame_undo.len());
     }
 
     /// Close the innermost module frame. This removes every by-name entry the
-    /// module registered (its imports, its own type heads and top-level
-    /// values, and the mangled `qualifier::Name` keys) and restores whatever
-    /// they overwrote. Scopes opened inside the frame are balanced by now.
-    /// Entries above the recorded `scope_undo` mark were recorded against a
-    /// scope that was already open when the frame began, so they unwind with
-    /// the frame.
+    /// module registered (its imports' `qualifier::Name` keys, and its own
+    /// type heads, definitions and docs) and restores whatever they
+    /// overwrote.
     pub fn pop_module_frame(&mut self) {
         debug_assert!(!self.frame_marks.is_empty(), "unbalanced pop_module_frame");
-        let Some((fmark, smark)) = self.frame_marks.pop() else {
+        let Some(mark) = self.frame_marks.pop() else {
             return;
         };
-        for (idx, prev) in self.scope_undo.drain(smark..).rev() {
-            match prev {
-                Some(s) => self.bindings[idx] = s,
-                None => {
-                    debug_assert_eq!(idx + 1, self.bindings.len());
-                    self.bindings.pop();
-                }
-            }
-        }
-        self.unwind_frame_undo(fmark);
+        self.unwind_frame_undo(mark);
     }
 
     fn in_module_frame(&self) -> bool {
@@ -478,13 +397,6 @@ impl TypeEnv {
     fn unwind_frame_undo(&mut self, mark: usize) {
         for u in self.frame_undo.drain(mark..).rev() {
             match u {
-                FrameUndo::Binding(name, Some(s)) => {
-                    self.bindings.insert(name, s);
-                }
-                FrameUndo::Binding(name, None) => {
-                    let popped = self.bindings.pop();
-                    debug_assert_eq!(popped.map(|(n, _)| n), Some(name));
-                }
                 FrameUndo::TypeInfo(name, Some(ti)) => {
                     self.type_info.insert(name, ti);
                 }
@@ -508,43 +420,6 @@ impl TypeEnv {
                 }
             }
         }
-    }
-
-    pub fn define(&mut self, name: &str, scheme: Scheme) {
-        // Look the name up by reference first, so shadowing an existing name
-        // never allocates a new key `String`.
-        let (idx, prev) = if let Some((idx, _, slot)) = self.bindings.get_full_mut(name) {
-            (idx, Some(std::mem::replace(slot, scheme)))
-        } else {
-            let (idx, _) = self.bindings.insert_full(name.to_string(), scheme);
-            (idx, None)
-        };
-        if !self.scope_marks.is_empty() {
-            self.scope_undo.push((idx, prev));
-        } else if self.in_module_frame() {
-            self.frame_undo
-                .push(FrameUndo::Binding(name.to_string(), prev));
-        } else if let Some(prev) = prev {
-            // Truncating by length can't undo an in-place replacement, so
-            // journal it. This path is rare, because every define inside a
-            // function body has a scope open.
-            self.journal
-                .push(Overwrite::Binding(name.to_string(), prev));
-        }
-    }
-
-    pub fn define_at(&mut self, name: &str, scheme: Scheme, loc: DefinitionLocation) {
-        self.define(
-            name,
-            Scheme {
-                def: Some(loc),
-                ..scheme
-            },
-        );
-    }
-
-    pub fn lookup(&self, name: &str) -> Option<&Scheme> {
-        self.bindings.get(name)
     }
 
     pub fn store_doc(&mut self, name: &str, doc: String) {
@@ -608,11 +483,6 @@ impl TypeEnv {
     }
 
     pub fn lookup_definition(&self, name: &str) -> Option<DefinitionLocation> {
-        if let Some(scheme) = self.bindings.get(name)
-            && let Some(def) = scheme.def
-        {
-            return Some(def);
-        }
         self.definitions.get(name).copied()
     }
 
@@ -707,23 +577,23 @@ impl TypeEnv {
     pub fn lookup_type_info_by_id(&self, id: TypeId) -> Option<TypeInfo> {
         self.type_info_by_id.get(&id).copied()
     }
+}
 
-    pub fn suggest_name(&self, name: &str) -> Option<String> {
-        let mut best: Option<&String> = None;
-        // This is rustc's rule: accept an edit distance up to max(len, 3) / 3.
-        // `best_dist` is an exclusive bound, hence the `+ 1`.
-        let mut best_dist = std::cmp::max(name.chars().count(), 3) / 3 + 1;
-
-        for candidate in self.bindings.keys() {
-            let dist = levenshtein(name, candidate);
-            if dist < best_dist {
-                best_dist = dist;
-                best = Some(candidate);
-            }
+/// The candidate closest to `name` by edit distance, if any is close enough
+/// to be what was meant. Ties go to the earliest candidate.
+pub fn closest_name<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    let mut best: Option<&str> = None;
+    // This is rustc's rule: accept an edit distance up to max(len, 3) / 3.
+    // `best_dist` is an exclusive bound, hence the `+ 1`.
+    let mut best_dist = std::cmp::max(name.chars().count(), 3) / 3 + 1;
+    for candidate in candidates {
+        let dist = levenshtein(name, candidate);
+        if dist < best_dist {
+            best_dist = dist;
+            best = Some(candidate);
         }
-
-        best.cloned()
     }
+    best
 }
 
 fn levenshtein(a: &str, b: &str) -> usize {
@@ -765,45 +635,4 @@ fn levenshtein(a: &str, b: &str) -> usize {
     }
 
     prev[b.len()]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::super::infer::mono;
-    use super::*;
-
-    // Truncating by length alone can't undo an in-place replacement.
-    #[test]
-    fn truncate_to_restores_overwritten_root_binding() {
-        let mut env = new_env();
-        env.define("x", mono(Ty(1)));
-        let w = env.watermark();
-
-        env.define("x", mono(Ty(2))); // no scope open: root-scope overwrite
-        assert_eq!(env.lookup("x").unwrap().ty, Ty(2));
-
-        env.truncate_to(&w);
-        assert_eq!(
-            env.lookup("x").unwrap().ty,
-            Ty(1),
-            "clobbered root binding must be restored"
-        );
-    }
-
-    // An overwrite inside an open scope rolls back through `scope_undo` and
-    // must NOT be double-restored by the journal.
-    #[test]
-    fn scoped_overwrite_still_rolls_back_via_scope_undo() {
-        let mut env = new_env();
-        env.define("x", mono(Ty(1)));
-        let w = env.watermark();
-
-        env.push_scope();
-        env.define("x", mono(Ty(2)));
-        env.pop_scope();
-        assert_eq!(env.lookup("x").unwrap().ty, Ty(1));
-
-        env.truncate_to(&w);
-        assert_eq!(env.lookup("x").unwrap().ty, Ty(1));
-    }
 }

@@ -135,7 +135,6 @@ impl Watermark {
 /// `EnvWatermark` field won't compile until someone picks which way it merges.
 fn env_field_min(a: EnvWatermark, b: EnvWatermark) -> EnvWatermark {
     EnvWatermark {
-        root_scope: a.root_scope.min(b.root_scope),
         type_info: a.type_info.min(b.type_info),
         type_info_by_id: a.type_info_by_id.min(b.type_info_by_id),
         definitions: a.definitions.min(b.definitions),
@@ -149,7 +148,6 @@ fn env_field_min(a: EnvWatermark, b: EnvWatermark) -> EnvWatermark {
 /// field.
 fn env_field_max(a: EnvWatermark, b: EnvWatermark) -> EnvWatermark {
     EnvWatermark {
-        root_scope: a.root_scope.max(b.root_scope),
         type_info: a.type_info.max(b.type_info),
         type_info_by_id: a.type_info_by_id.max(b.type_info_by_id),
         definitions: a.definitions.max(b.definitions),
@@ -211,11 +209,6 @@ impl Compiler {
 
         self.engine.truncate_to(&engine);
         self.env.truncate_to(&env);
-        // Push a throwaway scope for this compile's imports. The root scope
-        // rewinds by length, which can't undo a `define` that overwrote a name
-        // in place, so an import that shadows a prelude name must never touch
-        // the root scope.
-        self.env.push_scope();
         self.fns.truncate(functions);
         self.consts.truncate(constants);
         self.global_to_func.retain(|_, fi| fi.index() < functions);
@@ -507,6 +500,9 @@ impl IncrementalSession {
         if prelude_self {
             self.c.module_table.invalidate_all();
             self.c.reset_to(&self.bare);
+            // `bare` is from before the prelude loaded, so its values name
+            // strings the rewind just dropped.
+            self.c.prelude_values.clear();
             self.seeded = false;
             self.last_entry = None;
         } else if !self.seeded {
@@ -593,9 +589,7 @@ impl IncrementalSession {
         // check. What the entry adds itself sits above it.
         self.last_entry = Some(self.c.watermark());
         let mut checker = ModuleChecker::new(&mut self.c, path.clone(), key.clone());
-        checker.c.env.push_scope();
         checker.check_entry(expr, loaded);
-        checker.c.env.pop_scope();
         self.c.entry_refs = checker.finish();
     }
 
@@ -696,7 +690,6 @@ mod tests {
     #[test]
     fn earlier_merges_env_payloads_on_ord_key_ties() {
         let env_a = EnvWatermark {
-            root_scope: 3,
             type_info: 9,
             type_info_by_id: 2,
             definitions: 8,
@@ -705,7 +698,6 @@ mod tests {
             next_type_id: TypeId(4),
         };
         let env_b = EnvWatermark {
-            root_scope: 5,
             type_info: 6,
             type_info_by_id: 2,
             definitions: 4,
@@ -724,7 +716,6 @@ mod tests {
         assert_eq!(a, b, "test premise: equal ord_key despite differing envs");
 
         let want_min = EnvWatermark {
-            root_scope: 3,
             type_info: 6,
             type_info_by_id: 2,
             definitions: 4,
@@ -736,7 +727,6 @@ mod tests {
         assert_eq!(b.earlier(a).env, want_min);
 
         let want_max = EnvWatermark {
-            root_scope: 5,
             type_info: 9,
             type_info_by_id: 2,
             definitions: 8,
@@ -756,7 +746,7 @@ mod tests {
         let newer = Watermark {
             functions: 10,
             env: EnvWatermark {
-                root_scope: 4,
+                docs: 4,
                 ..EnvWatermark::default()
             },
             ..Watermark::default()

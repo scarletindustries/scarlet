@@ -587,6 +587,12 @@ impl InferEngine {
         StrId(self.strings.insert_full(s.to_string()).0 as u32)
     }
 
+    /// `s`'s id if it has been interned. A string never interned names
+    /// nothing, so a lookup by it can stop here.
+    pub fn lookup_str(&self, s: &str) -> Option<StrId> {
+        self.strings.get_index_of(s).map(|i| StrId(i as u32))
+    }
+
     #[inline]
     pub fn str(&self, id: StrId) -> &str {
         &self.strings[id.idx()]

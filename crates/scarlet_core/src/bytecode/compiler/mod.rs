@@ -64,6 +64,7 @@ use crate::typed_ir::{
     self, ClosureFact, Denotation, ElabCtx, FnTable, GlobalSlot, NameAt, NameFact, OrShape,
     PreludeTys, RTy, ResolvedPool, TempTys, TypedExpr, TypedFn, TypedProgram, Zonker, pool_for,
 };
+use indexmap::IndexMap;
 use smallvec::SmallVec;
 
 use crate::module::{
@@ -154,16 +155,6 @@ use clean::CleanModule;
 #[must_use]
 struct EntryToplevel {
     _priv: (),
-}
-
-/// Where [`ModuleChecker::resolve_variable`] found a name.
-enum Place {
-    /// Bound in the function being compiled, by this binding. The elaborator
-    /// knows it by its own `BindingId`, so it never asks where it is.
-    ThisFunction(BinderId),
-    /// Reached from outside the function, as a capture, a global, or the
-    /// function itself.
-    Outside(Denotation),
 }
 
 /// Why looking up a `.field` on a nominal type failed. It carries enough of the
@@ -279,23 +270,23 @@ impl CompileResult {
 // Compiler: HM type inference and elaboration in a single pass
 // ============================================================================
 
-/// A local binding in scope: the stack slot it uses, and what a use of it
-/// means.
+/// A value the module itself declares, under the module's own name for it: a
+/// `fn` or `const`, a constructor of one of its types, or an `@vm` builtin.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct LocalSlot {
-    slot: i32,
-    /// This name lives in the entry frame, so a nested body loads it with
-    /// `PushGlobal <slot>` instead of capturing it.
-    /// [`ModuleChecker::binds_a_global`] decides this once, when the name is
-    /// bound. `resolve_variable` must read this and not work it out again from
-    /// where the binding sits.
-    is_global: bool,
-    /// The binding that a use of the name in this frame means. A slot reserved
-    /// before its binding is complete (a binding whose initialiser is still
-    /// being walked, or a pattern name left of a size expression) keeps the
-    /// binding the name meant before. It is `None` when there was none in this
-    /// frame.
-    binder: Option<BinderId>,
+pub(super) struct ModuleValue {
+    scheme: Scheme,
+    /// Where a `fn` or `const` lives. A constructor or builtin has no runtime
+    /// binding: its scheme's kind says what it is.
+    decl: Option<DeclSite>,
+}
+
+/// Where one of the module's own `fn`/`const` declarations lives.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct DeclSite {
+    /// The entry-frame slot the toplevel stores it in.
+    pub(super) slot: GlobalSlot,
+    /// Its binder in the module toplevel.
+    pub(super) binder: BinderId,
 }
 
 /// One top-level `fn` or `const` declaration of the module being compiled, in
@@ -363,7 +354,7 @@ pub struct Compiler {
     retain_namespaces: bool,
     /// Global slot → [`FuncIdx`] for every top-level `fn` compiled so far.
     /// `compile_declared_function` fills it in after `finish_fn_frame` assigns
-    /// the `func_idx`. `resolve_variable` reads it to choose between
+    /// the `func_idx`. `global_denotation` reads it to choose between
     /// [`Denotation::known_fn`] and [`Denotation::global`], which lets Core
     /// call a known top-level function directly (`Callee::Known`) instead of
     /// loading it and calling the value. A miss (a forward reference inside an
@@ -426,6 +417,9 @@ pub struct Compiler {
     /// `scarlet.sca` and isn't copied into Rust. `@vm` functions are left out
     /// on purpose, so you can shadow `println`.
     pub(super) reserved: BTreeSet<String>,
+    /// The values every module sees without an import: the prelude's, by
+    /// name, in the order the prelude declares them.
+    pub(super) prelude_values: IndexMap<StrId, Scheme>,
     /// The entry-frame slots every module's toplevel has handed out so far.
     /// Each module's toplevel frame starts counting here.
     pub(super) slots: i32,
@@ -443,7 +437,7 @@ pub struct ModuleChecker<'c> {
     /// names.
     scoped: bool,
     /// The bodies the walk is inside, the current one first.
-    pub(super) frames: frame::Frames,
+    frames: frame::Frames,
     /// Pattern binders starting with `_` whose discarded type has to be looked
     /// at again once the module's inference is final. Discarding a value the
     /// type system knows is `Nil` hides nothing, so the explicit `Nil` pattern
@@ -474,11 +468,14 @@ pub struct ModuleChecker<'c> {
     /// declarations are all globals bound outside the statement walk, and each
     /// reaches the elaborator by its own route.
     pub(super) walking_module_statements: bool,
-    /// A name handed to the next `enter_fn_frame(None)` only, so the lambda in
-    /// a `name = fn(...)` binding can call itself, without leaking the
-    /// enclosing function's binding into unrelated lambdas (such as one passed
-    /// as an argument).
-    next_fn_self_name: Option<StrId>,
+    /// A name, and its type, handed to the next `enter_fn_frame(None)` only, so
+    /// the lambda in a `name = fn(...)` binding can call itself, without
+    /// leaking the enclosing function's binding into unrelated lambdas (such as
+    /// one passed as an argument).
+    next_fn_self_name: Option<(StrId, Ty)>,
+    /// The values the module itself declares, by name, in the order it
+    /// declares them.
+    names: IndexMap<StrId, ModuleValue>,
     /// The definition whose body is being compiled. It is the `owner` of every
     /// reference-graph occurrence emitted while it is set, which is how
     /// dead-code reachability gets its edges between definitions. It is `None`
@@ -704,12 +701,13 @@ struct ResolvedCallee<'a> {
     name: &'a str,
     span: Span,
     scheme: Scheme,
-    /// Whether the callee has a runtime binding (see `Compiler::name_at`).
-    has_binding: bool,
     at: NameAt,
     /// The module a qualified callee resolved through. Diagnostics show it with
     /// `Compiler::module_name`, which is the name the user sees, never the key.
     qualifier: Option<ModuleKey>,
+    /// Whether the callee has a runtime binding. Only a qualified member can
+    /// lack one: a module member with no entry-frame slot.
+    has_binding: bool,
 }
 
 struct CompiledBody {
@@ -813,6 +811,7 @@ pub(crate) fn new_compiler(check_only: bool) -> Compiler {
         stdlib_source_root: None,
         prelude: PreludeBindings::default(),
         reserved: BTreeSet::new(),
+        prelude_values: IndexMap::new(),
         slots: 0,
         entry_refs,
     }
@@ -837,7 +836,7 @@ impl<'c> ModuleChecker<'c> {
             c.env.push_module_frame();
         }
         let module_refs = ModuleReferences::new(c.ref_interner.intern(&path));
-        let frames = frame::Frames::toplevel(HashMap::new(), c.slots);
+        let frames = frame::Frames::toplevel(c.slots);
         ModuleChecker {
             c,
             frames,
@@ -846,6 +845,7 @@ impl<'c> ModuleChecker<'c> {
             binding_globals: Vec::new(),
             walking_module_statements: false,
             next_fn_self_name: None,
+            names: IndexMap::new(),
             current_owner: None,
             module_refs,
             current_module: path,
@@ -861,7 +861,7 @@ impl<'c> ModuleChecker<'c> {
     /// Finish the module, handing back what it recorded for the reference
     /// graph.
     pub(crate) fn finish(self) -> ModuleReferences {
-        self.c.slots = self.frames.current.slots;
+        self.c.slots = self.frames.globals;
         if self.scoped {
             self.c.env.pop_module_frame();
         }
@@ -978,12 +978,6 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
     };
     let loaded = c.load_entry_imports(expr, &importer);
     let mut m = ModuleChecker::new(&mut c, entry_path, entry_key.clone());
-    // Open the entry file's env scope here, not inside `analyse_module`, so the
-    // constructor, function and const schemes it defines stay visible through
-    // the toplevel elaboration below. Otherwise a `type` declaration followed
-    // by a use of its constructor fails with `unbound callee`, and the module
-    // toplevel never gets Core.
-    m.c.env.push_scope();
     let (checked, top_ty) = m.check_entry(expr, loaded);
     // The `main` a program starts at. It is `None` for a check, a script, a
     // module, or a program with no usable `main` (which then isn't clean).
@@ -1031,7 +1025,6 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
             entry = m.record_toplevel(lowered, TopKind::Entry { entered });
         }
     }
-    m.c.env.pop_scope();
     c.entry_refs = m.finish();
 
     let program = match entry {
@@ -1078,15 +1071,9 @@ impl ModuleChecker<'_> {
             let nodes = self.analyse_module(block, None);
             return (CheckedEntry::Module(nodes, block.span), self.c.ty_nil());
         }
-        // `analyse_module` opens a local scope around a module's statements, so
-        // its nested blocks bind at depth 2 and are frame temporaries, not
-        // globals. A bare expression has no statement walk, so open the same
-        // scope here. Without it, a binding in the expression's first nested
-        // block (an `if` arm) would sit at the module's own depth. Then
-        // `resolve_variable` would call it a global, and a lambda would load a
-        // global slot that `bind_local` never queued, so the elaborator never
-        // pins it.
-        self.push_local_scope();
+        // Open the block `analyse_module` opens around a module's statements,
+        // so the expression's names are reported when nothing reads them.
+        self.open_block();
         // Put the same phase boundary around this that `analyse_module` puts
         // around its walk. A program that is a bare expression can still
         // contain lambdas, and none of them may be lowered while the expression
@@ -1095,7 +1082,7 @@ impl ModuleChecker<'_> {
         let body = self.compile_expr(expr);
         self.end_deferred_elaboration();
         self.check_nil_discards();
-        self.pop_local_scope();
+        self.close_block();
         let ty = body.ty;
         (CheckedEntry::Expr(body), ty)
     }
@@ -1392,136 +1379,93 @@ impl Compiler {
 }
 
 impl ModuleChecker<'_> {
-    fn get_or_create_local(&mut self, name: &str) -> i32 {
+    /// Bind `name` in the current block, to a value of `scheme` bound at
+    /// `span`: the one way a body gets a local. The binding is made whole, so
+    /// uses walked before this, and the binding's own init, still mean
+    /// whatever the name meant before.
+    ///
+    /// A binding the module's own statement walk makes at the module's own
+    /// depth also takes an entry-frame slot, queued for the toplevel
+    /// elaboration on [`Self::binding_globals`]. A module's `fn`/`const`
+    /// declarations are not locals: [`Self::declare`] has them.
+    fn bind_local(
+        &mut self,
+        name: &str,
+        ty: Ty,
+        scheme: Scheme,
+        span: Span,
+        doc: Option<String>,
+    ) -> BinderId {
         let id = self.c.engine.intern(name);
-        if let Some((entry, inherited)) = self.frames.current.lookup(id) {
-            // Only reuse the slot if it was bound in the *current* block. One
-            // inherited from an enclosing block must outlive it, so shadowing
-            // allocates a fresh slot.
-            //
-            // At module scope (with no enclosing function frame), binding the
-            // name again must also get a fresh slot. Top-level bindings live in
-            // the entry frame, so a closure that captured one resolves it to
-            // `Global(slot)` and reads that slot when it is called. Reusing the
-            // slot for the shadowing binding would overwrite the value the
-            // closure sees. Scarlet is immutable with shadowing, so each
-            // binding is distinct and the earlier one must survive. Nested
-            // scopes capture by value at `MakeClosure` time, so reusing a slot
-            // in the same scope is safe there.
-            let module_scope = self.frames.at_toplevel();
-            if !inherited && !module_scope {
-                return entry.slot;
-            }
-        }
-        let idx = self.frames.current.alloc_slot();
-        self.bind_local(id, idx);
-        idx
-    }
-
-    /// Bind `name` to `slot` in the current scope without publishing the slot
-    /// to the toplevel elaboration. This is all the binding needed for anything
-    /// whose slot the elaborator learns another way: a top-level declaration
-    /// (whose slot travels on its [`ToplevelDecl`]) and every binding inside a
-    /// function frame.
-    ///
-    /// The new entry keeps the binding the name meant until
-    /// [`Self::publish_local`] gives it its own.
-    fn bind_local_raw(&mut self, name: StrId, slot: i32) {
-        let is_global = self.binds_a_global();
-        let frame = &mut self.frames.current;
-        let entry = LocalSlot {
-            slot,
-            is_global,
-            binder: frame.lookup(name).and_then(|(e, _)| e.binder),
+        let global = (self.walking_module_statements && self.binds_a_global()).then(|| {
+            let slot = self.frames.alloc_global();
+            self.binding_globals.push((id, slot));
+            slot
+        });
+        let m = self.current_module_slice();
+        let def = DefinitionLocation::new(span, m, EntityKind::Value);
+        let binder = self.frames.current.mint_binder();
+        let scheme = Scheme {
+            def: Some(def),
+            ..scheme
         };
-        frame.insert(name, entry);
+        self.frames.current.insert(
+            id,
+            frame::Local {
+                scheme,
+                binder,
+                global,
+            },
+        );
+        self.track_binding(name, span);
+        if let Some(doc) = &doc {
+            self.c.env.store_doc(name, doc.clone());
+        }
+        self.record(name, ty, span, doc.clone());
+        self.emit_value_def(span, name, doc);
+        binder
     }
 
-    /// Whether a binding made *now* lands in the entry frame. This is the only
-    /// definition of "global" the compiler has.
-    ///
-    /// `at_toplevel` says no function frame is open, and a depth of at most 1
-    /// says we are in the module's own statements. `analyse_module` opens
-    /// exactly one block, and every nested block, `if` or `match` at module
-    /// level opens another. Both halves of the global question come from this:
-    /// [`Self::bind_local`]'s queue and the `PushGlobal` in `resolve_variable`.
-    /// It is recorded once on [`LocalSlot::is_global`], so they can't drift
-    /// apart.
-    ///
-    /// Note that the entry path for a bare expression (`compile` on something
-    /// that isn't a `BlockExpression`) opens a matching scope of its own, so a
-    /// binding inside one of its nested blocks is a frame temporary there too.
+    /// [`Self::bind_local`] for a binding that is not generalized: a
+    /// parameter, a pattern name, an `or` receiver.
+    fn bind_mono(&mut self, name: &str, ty: Ty, span: Span) -> BinderId {
+        self.bind_local(name, ty, mono(ty), span, None)
+    }
+
+    /// Whether a binding made *now* is in the module's own statements. That
+    /// means no function frame is open, and the depth is at most the one block
+    /// `analyse_module` opens around them. Every nested block, `if` or `match`
+    /// at module level opens another.
     fn binds_a_global(&self) -> bool {
         self.frames.at_toplevel() && self.frames.current.depth() <= 1
     }
 
-    /// [`Self::bind_local_raw`], and if this is a module-scope binding, also
-    /// queue its slot for the toplevel elaboration.
-    ///
-    /// The queue outlives `analyse_module`'s `pop_local_scope`, but the name's
-    /// block doesn't. Only bindings made by the module's own statement walk
-    /// ([`Self::walking_module_statements`]) at the module's own local-scope
-    /// depth count. The extra `walking_module_statements` check isn't a second
-    /// definition of "global". The queue goes by position, and the other
-    /// globals (imports, prelude seeds, and `fn` and `const` declarations)
-    /// reach the elaborator another way, through slots already stored or their
-    /// own [`ToplevelDecl`]. They must not be taken off the queue as if they
-    /// were the module's bindings.
-    fn bind_local(&mut self, name: StrId, slot: i32) {
-        self.bind_local_raw(name, slot);
-        if self.walking_module_statements && self.binds_a_global() {
-            self.binding_globals.push((name, GlobalSlot(slot)));
+    /// Give one of the module's own `fn`/`const` declarations its entry-frame
+    /// slot and its binder in the toplevel. Its scheme comes later, from
+    /// [`Self::declare`].
+    pub(super) fn alloc_decl(&mut self) -> DeclSite {
+        DeclSite {
+            slot: self.frames.alloc_global(),
+            binder: self.frames.current.mint_binder(),
         }
     }
 
-    /// Allocate the entry-frame slot for a top-level `fn` or `const`
-    /// declaration.
-    ///
-    /// Unlike [`Self::get_or_create_local`], this never reuses an existing
-    /// binding's slot, because binding a name again at module scope must not
-    /// share the slot a closure already captured by reference. It also doesn't
-    /// queue the slot on [`Self::binding_globals`], because a declaration's
-    /// slot reaches the elaborator on its own [`ToplevelDecl`] record.
-    pub(super) fn alloc_decl_slot(&mut self, name: &str) -> (GlobalSlot, BinderId) {
+    /// Name a value the module itself declares, or give it its final scheme.
+    pub(super) fn declare(&mut self, name: &str, scheme: Scheme, decl: Option<DeclSite>) {
         let id = self.c.engine.intern(name);
-        let idx = self.frames.current.alloc_slot();
-        self.bind_local_raw(id, idx);
-        (GlobalSlot(idx), self.publish_local(id))
+        self.names.insert(id, ModuleValue { scheme, decl });
     }
 
-    /// Make `name`'s slot, which is already reserved, mean a new binding from
-    /// here on, and return that binding's [`BinderId`]. Uses walked before
-    /// this, and the binding's own initialiser, still mean whatever the name
-    /// meant before.
-    fn publish_local(&mut self, name: StrId) -> BinderId {
-        let frame = &mut self.frames.current;
-        let binder = frame.mint_binder();
-        if let Some(entry) = frame.lookup_mut(name) {
-            entry.binder = Some(binder);
-        }
-        binder
-    }
-
-    pub(super) fn push_local_scope(&mut self) {
+    /// Open a block. Must be matched by [`Self::close_block`].
+    pub(super) fn open_block(&mut self) {
         self.frames.current.open_block();
     }
 
-    pub(super) fn pop_local_scope(&mut self) {
+    /// Close the innermost block, reporting the names in it nothing read.
+    pub(super) fn close_block(&mut self) {
         if let Some(block) = self.frames.current.close_block() {
             self.report_unused(block);
         }
-    }
-
-    /// Open a lexical block scope. This pushes a fresh type-env scope and a
-    /// local undo mark together, and must be matched by `pop_block_scope`.
-    fn push_block_scope(&mut self) {
-        self.c.env.push_scope();
-        self.push_local_scope();
-    }
-
-    fn pop_block_scope(&mut self) {
-        self.pop_local_scope();
-        self.c.env.pop_scope();
     }
 
     /// Record a binding, parameter or match binding for the unused-variable
@@ -1551,62 +1495,85 @@ impl ModuleChecker<'_> {
         }
     }
 
-    /// Where a name in scope lives. It is `None` when nothing in scope binds
-    /// it, which is the case for a constructor, a builtin, or a name whose only
-    /// binding isn't made yet.
-    fn resolve_variable(&mut self, name: StrId) -> Option<Place> {
+    /// What the value name `name` means here: its scheme, and where it lives
+    /// at runtime. The current body's locals come first, then its own name,
+    /// then the bodies around it, then the module's own values, then the
+    /// prelude's. A name read from a body around this one is captured on the
+    /// way, unless it is a module toplevel binding, which is loaded from its
+    /// entry-frame slot when the read runs.
+    fn resolve_name(&mut self, name: StrId) -> Option<(Scheme, NameAt)> {
         self.frames.mark_used(name);
-        // A slot reserved for a binding that isn't made yet is not in scope.
         let frame = &self.frames.current;
-        if let Some(binder) = frame.lookup(name).and_then(|(e, _)| e.binder) {
-            return Some(Place::ThisFunction(binder));
+        if let Some(local) = frame.lookup(name) {
+            return Some((local.scheme, NameAt::Local(local.binder)));
         }
         if let Some(idx) = frame.captures.get(name) {
-            return Some(Place::Outside(Denotation::capture(idx)));
+            let (_, local) = self.frames.outer_local(name)?;
+            return Some((local.scheme, NameAt::Den(Denotation::capture(idx))));
         }
-        // Search the enclosing scopes from the innermost out, so inner bindings
-        // shadow outer ones. The bottom of the stack (index 0) is always the
-        // entry frame, and its *module-scope* locals are the program's globals.
-        // So a nested function loads them (`Load::Global`) when it is called,
-        // instead of capturing them by value. This is what makes top-level
-        // functions that call each other work, because the other function's
-        // slot is read when the call happens, not when the closure is made.
-        //
-        // A local bound in a nested block, `if` or `match` scope at module
-        // level is *not* a global. It is an ordinary toplevel temporary (only
-        // bindings at module-scope depth go on `binding_globals`, see
-        // `bind_local`), and nothing makes sure it is stored before a global
-        // load of it runs. So a name like that is captured by value like any
-        // other enclosing local, just as it would be inside a function body.
-        // [`Self::binds_a_global`] decided once which of the two a name is, and
-        // recorded it on the binding. Working it out again here from `depth` is
-        // how the loader and the binder came to disagree on the entry path for
-        // bare expressions.
-        for (i, outer) in self.frames.outer().iter().enumerate().rev() {
-            if let Some((entry, _)) = outer.lookup(name) {
-                let is_global = i == 0 && entry.is_global;
-                if frame.self_name == Some(name) {
-                    // A top-level function's own name resolves to its
-                    // entry-frame slot, so loading it as a value emits
-                    // `PushGlobal`. `PushSelf` would read the placeholder
-                    // `captures` that a `CallKnown` frame carries. `Denotation`
-                    // fixes both halves together.
-                    return Some(Place::Outside(if is_global {
-                        Denotation::self_toplevel_fn(GlobalSlot(entry.slot))
-                    } else {
-                        Denotation::self_closure()
-                    }));
-                }
-                if is_global {
-                    return Some(Place::Outside(
-                        self.global_denotation(GlobalSlot(entry.slot)),
-                    ));
-                }
-                let idx = self.frames.current.captures.add(name);
-                return Some(Place::Outside(Denotation::capture(idx)));
+        match frame.self_name {
+            Some(frame::SelfName::Lambda(n, ty)) if n == name => {
+                return Some((mono(ty), NameAt::Den(Denotation::self_closure())));
             }
+            // A top-level fn calls itself through its entry-frame slot, so a
+            // value load reads the slot; `PushSelf` would read the sentinel
+            // `captures` a `CallKnown` frame carries.
+            Some(frame::SelfName::Decl(n)) if n == name => {
+                let v = self.names.get(&name)?;
+                let at = match v.decl {
+                    Some(d) => Denotation::self_toplevel_fn(d.slot),
+                    None => Denotation::self_closure(),
+                };
+                return Some((v.scheme, NameAt::Den(at)));
+            }
+            _ => {}
         }
-        None
+        if let Some((depth, local)) = self.frames.outer_local(name) {
+            let at = match local.global {
+                Some(slot) if depth == 0 => self.global_denotation(slot),
+                _ => Denotation::capture(self.frames.current.captures.add(name)),
+            };
+            return Some((local.scheme, NameAt::Den(at)));
+        }
+        if let Some(v) = self.names.get(&name) {
+            let at = match v.decl {
+                Some(d) if self.frames.at_toplevel() => NameAt::Local(d.binder),
+                Some(d) => NameAt::Den(self.global_denotation(d.slot)),
+                None => NameAt::Den(Denotation::from_kind(v.scheme.kind)?),
+            };
+            return Some((v.scheme, at));
+        }
+        let scheme = *self.c.prelude_values.get(&name)?;
+        Some((scheme, NameAt::Den(Denotation::from_kind(scheme.kind)?)))
+    }
+
+    /// The scheme `name` has here, read without resolving where it lives: no
+    /// capture, no use recorded.
+    fn scheme_of(&self, name: StrId) -> Option<Scheme> {
+        if let Some(local) = self.frames.current.lookup(name) {
+            return Some(local.scheme);
+        }
+        if let Some((_, local)) = self.frames.outer_local(name) {
+            return Some(local.scheme);
+        }
+        self.names
+            .get(&name)
+            .map(|v| v.scheme)
+            .or_else(|| self.c.prelude_values.get(&name).copied())
+    }
+
+    /// The visible value name closest to `name`, for "did you mean".
+    fn suggest_name(&self, name: &str) -> Option<String> {
+        let engine = &self.c.engine;
+        let candidates = self
+            .c
+            .prelude_values
+            .keys()
+            .chain(self.names.keys())
+            .copied()
+            .chain(self.frames.names())
+            .map(|id| engine.str(id));
+        crate::types::closest_name(name, candidates).map(str::to_string)
     }
 
     /// A module-scope value at `slot`. It is a known top-level `fn` if one has
@@ -2041,49 +2008,27 @@ impl ModuleChecker<'_> {
     }
 
     /// `x = e` or `x Type = e`. Returns the initialiser and the binding's
-    /// binder.
+    /// binder. The name is bound once the initialiser is checked, so the
+    /// initialiser still reads whatever the name meant before (`x = x + 1`).
+    /// A lambda initialiser may call itself by the name.
     fn compile_name_binding(
         &mut self,
         vb: &ast::Binding,
         ident: &ast::Identifier,
     ) -> (CExpr, BinderId) {
-        let name = ident.name.clone();
-        let name_id = self.c.engine.intern(&name);
-
-        // At module scope, binding a name again gets a fresh slot (see
-        // `get_or_create_local`). So the slot must be allocated *after* the
-        // initialiser compiles. Otherwise the name would already resolve to the
-        // new slot, which isn't initialised yet, and an initialiser that reads
-        // the earlier binding (like `x = x + 1`) would read garbage. The
-        // earlier binding stays in scope across the initialiser, which also
-        // drives `Self_` resolution for a lambda that calls itself. A first
-        // binding still reserves its slot up front, so a lambda that calls
-        // itself can resolve its own name, not yet bound, through the entry
-        // frame.
-        let defer_slot = self.frames.at_toplevel() && self.frames.current.lookup(name_id).is_some();
-        if !defer_slot {
-            self.get_or_create_local(&name);
-        }
-
+        let name_id = self.c.engine.intern(&ident.name);
         let annot_ty = vb.typ.as_ref().map(|a| self.hydrate_annotation(a));
 
         self.c.engine.enter_level();
         let self_ty = self.c.engine.fresh_var();
-        let init_is_fn = matches!(vb.init, ast::Expression::FunctionExpression(_));
-        // Only bind the name early for recursive lambdas. For any other
-        // initialiser, letting it see its own name lets `x = x` infer ⊥ and
-        // generalise to ∀A.A, which is unsound.
-        if init_is_fn {
-            self.c.env.define(&name, mono(self_ty));
-        }
-
         // Hand the name to the lambda's own frame through a value that its
         // `enter_fn_frame` uses up once. Setting it on the current frame would
         // leak into nested lambdas and lambdas passed as arguments, and resolve
         // their calls to the enclosing function as `Self_`, which emits
         // `CallSelf` against the wrong, live frame.
+        let init_is_fn = matches!(vb.init, ast::Expression::FunctionExpression(_));
         let saved_self = if init_is_fn {
-            self.next_fn_self_name.replace(name_id)
+            self.next_fn_self_name.replace((name_id, self_ty))
         } else {
             self.next_fn_self_name.take()
         };
@@ -2105,23 +2050,8 @@ impl ModuleChecker<'_> {
 
         let restricted = self.c.restricted_generalization_cons();
         let scheme = self.c.engine.generalize_restricted(final_ty, &restricted);
-        let m = self.current_module_slice();
-        self.c.env.define_at(
-            &name,
-            scheme,
-            DefinitionLocation::new(ident.span, m, EntityKind::Value),
-        );
-        self.track_binding(&name, ident.span);
-        if let Some(doc) = &vb.doc {
-            self.c.env.store_doc(&name, doc.clone());
-        }
-        self.record(&name, final_ty, ident.span, vb.doc.clone());
-        self.emit_value_def(ident.span, &name, vb.doc.clone());
-
-        if defer_slot {
-            self.get_or_create_local(&name);
-        }
-        (init, self.publish_local(name_id))
+        let binder = self.bind_local(&ident.name, final_ty, scheme, ident.span, vb.doc.clone());
+        (init, binder)
     }
 
     /// `(a, b) = e` or `Point(x:, ..) = e`. This is typed like a `match` with
@@ -2493,10 +2423,8 @@ impl Compiler {
         let mut checker = ModuleChecker::new(self, path, key.clone());
         checker.module_refs.set_doc(doc);
         checker.bind_imports(block, loaded);
-        checker.c.env.push_scope();
         let nodes = checker.analyse_module(block, Some(&mut iface));
         checker.lower_module_init(&key, &nodes, block.span);
-        checker.c.env.pop_scope();
         let refs = checker.finish();
 
         // Record how many type ids the module really used, so `id_high_water`
@@ -2702,7 +2630,7 @@ impl ModuleChecker<'_> {
         match expr {
             ast::Expression::BinaryLiteral(bl) => self.compile_binary_literal(bl),
             ast::Expression::BlockExpression(be) => {
-                self.push_block_scope();
+                self.open_block();
                 let mut last_ty = self.c.ty_nil();
                 let mut nodes = Vec::with_capacity(be.body.len());
 
@@ -2732,7 +2660,7 @@ impl ModuleChecker<'_> {
                     }
                 }
 
-                self.pop_block_scope();
+                self.close_block();
                 (last_ty, CKind::Block(nodes))
             }
             ast::Expression::NumberLiteral(nl) => {
@@ -2955,25 +2883,6 @@ impl ModuleChecker<'_> {
     // Identifier
     // ========================================================================
 
-    /// What a name means. It is decided here, in the frame that binds it, and
-    /// recorded for the elaborator, which never resolves a name itself. It also
-    /// says whether the name has a runtime binding.
-    ///
-    /// A `Local` or `ModuleFn` resolves the variable, with the usual
-    /// `mark_used` and capture side effects. A constructor or builtin is fixed
-    /// by its kind and has no plain runtime binding.
-    fn name_at(&mut self, id: StrId, kind: ValueKind) -> (NameAt, bool) {
-        if let Some(den) = Denotation::from_kind(kind) {
-            return (NameAt::Den(den), false);
-        }
-        match self.resolve_variable(id) {
-            Some(Place::ThisFunction(binder)) => (NameAt::Local(binder), true),
-            Some(Place::Outside(den)) => (NameAt::Den(den), true),
-            None if self.frames.at_toplevel() => (NameAt::Unbound, false),
-            None => (NameAt::Den(Denotation::self_closure()), false),
-        }
-    }
-
     /// The declared parameter labels of a module `fn`. An empty slice means
     /// "not recorded", never "takes no parameters", so it refuses any label.
     fn param_labels_of(&self, kind: ValueKind) -> Option<Vec<StrId>> {
@@ -3006,8 +2915,9 @@ impl ModuleChecker<'_> {
 
     fn compile_identifier(&mut self, expr: &ast::Identifier) -> (Ty, CKind) {
         let name = &expr.name;
+        let id = self.c.engine.intern(name);
 
-        let Some(scheme) = self.c.env.lookup(name) else {
+        let Some((scheme, at)) = self.resolve_name(id) else {
             // A module's name isn't a value, so say what it is and how to reach
             // what's in it.
             if let Some(key) = self.imported_qualifiers.get(name) {
@@ -3042,7 +2952,7 @@ impl ModuleChecker<'_> {
                     ),
                     expr.span,
                 );
-            } else if let Some(suggestion) = self.c.env.suggest_name(name) {
+            } else if let Some(suggestion) = self.suggest_name(name) {
                 self.c.error(
                     format!(
                         "Unknown identifier '{}'. Did you mean '{}'?",
@@ -3060,7 +2970,7 @@ impl ModuleChecker<'_> {
         let ty = self
             .c
             .engine
-            .instantiate(scheme, &self.frames.current.rigid);
+            .instantiate(&scheme, &self.frames.current.rigid);
         let kind = scheme.kind;
         let def = scheme.def;
         // Outside the LSP, `record` throws everything away (see its early
@@ -3084,14 +2994,11 @@ impl ModuleChecker<'_> {
             return (ty, CKind::Error);
         }
 
-        let id = self.c.engine.intern(name);
-        let (at, bound) = self.name_at(id, kind);
         let fact = NameFact {
             ty,
             at,
             param_labels: None,
         };
-        self.check_named_value(name, None, expr.span, kind, bound);
         (ty, CKind::Name { name: id, fact })
     }
 
@@ -3115,34 +3022,13 @@ impl ModuleChecker<'_> {
         }
     }
 
-    fn no_runtime_binding(&mut self, name: &str, qualifier: Option<&str>, sp: Span) {
-        let msg = match qualifier {
-            Some(m) => format!("'{name}' in module '{m}' has no runtime binding"),
-            None => format!("'{name}' has a type but no runtime binding here"),
-        };
-        self.c.error(msg, sp);
-    }
-
-    /// Check a named value used where a value goes. Constructors and builtins
-    /// are fine, because the elaborator builds a nullary value or an eta
-    /// wrapper for them (see `typed_ir::eta`). A `Local` or `ModuleFn` with no
-    /// runtime binding is an error.
-    fn check_named_value(
-        &mut self,
-        name: &str,
-        qualifier: Option<&str>,
-        sp: Span,
-        kind: ValueKind,
-        has_binding: bool,
-    ) {
-        match kind {
-            ValueKind::Constructor { .. } | ValueKind::Builtin { .. } => {}
-            ValueKind::Local | ValueKind::ModuleFn { .. } => {
-                if !has_binding {
-                    self.no_runtime_binding(name, qualifier, sp);
-                }
-            }
-        }
+    /// A module member whose interface gives it a type but no entry-frame
+    /// slot.
+    fn no_runtime_binding(&mut self, name: &str, module: &str, sp: Span) {
+        self.c.error(
+            format!("'{name}' in module '{module}' has no runtime binding"),
+            sp,
+        );
     }
 
     // ========================================================================
@@ -3351,9 +3237,9 @@ impl ModuleChecker<'_> {
                         _ => None,
                     };
                     let ret = self.compile_call_args(inst_ty, labels, &expr.arguments, expr.span);
-                    if !has_binding {
-                        let module = qualifier.as_ref().map(|k| self.c.module_name(k));
-                        self.no_runtime_binding(name, module.as_deref(), name_span);
+                    if let (false, Some(key)) = (has_binding, &qualifier) {
+                        let module = self.c.module_name(key);
+                        self.no_runtime_binding(name, &module, name_span);
                     }
                     ret
                 }
@@ -3648,9 +3534,8 @@ impl ModuleChecker<'_> {
     ) -> Option<ResolvedCallee<'a>> {
         match callee {
             ast::Expression::Identifier(id) => {
-                let scheme = *self.c.env.lookup(&id.name)?;
                 let sid = self.c.engine.intern(&id.name);
-                let (at, has_binding) = self.name_at(sid, scheme.kind);
+                let (scheme, at) = self.resolve_name(sid)?;
                 // This path skips `compile_identifier`, so this is where an
                 // unqualified use in a call really gets recorded.
                 self.record_value_use(scheme.def, id.span, ReferenceKind::Unqualified);
@@ -3658,9 +3543,9 @@ impl ModuleChecker<'_> {
                     name: &id.name,
                     span: id.span,
                     scheme,
-                    has_binding,
                     at,
                     qualifier: None,
+                    has_binding: true,
                 })
             }
             // A qualified callee, `module::member()`. A failed lookup was
@@ -3876,17 +3761,13 @@ impl ModuleChecker<'_> {
             param_labels: None,
         };
         self.record(m.member_name, ty, m.member_span, None);
-        // Work this out only when needed. The qualifier only reaches a
-        // diagnostic when there's no runtime binding, so the usual case, where
-        // there is one, skips looking up the display name.
-        let module = (!m.has_binding).then(|| self.c.module_name(&m.module_key));
-        self.check_named_value(
-            m.member_name,
-            module.as_deref(),
-            m.member_span,
-            m.scheme.kind,
-            m.has_binding,
-        );
+        // A constructor or builtin needs no binding, because the elaborator
+        // builds a nullary value or an eta wrapper for it (see `typed_ir::eta`).
+        let needs_binding = matches!(m.scheme.kind, ValueKind::Local | ValueKind::ModuleFn { .. });
+        if needs_binding && !m.has_binding {
+            let module = self.c.module_name(&m.module_key);
+            self.no_runtime_binding(m.member_name, &module, m.member_span);
+        }
         let name = self.c.engine.intern(m.member_name);
         (ty, CKind::Member { name, fact })
     }
@@ -3896,7 +3777,9 @@ impl ModuleChecker<'_> {
         // `::`.
         if let (ast::Expression::Identifier(id), ast::PropertyKey::Field(field)) =
             (expr.left.as_ref(), &expr.right)
-            && self.c.env.lookup(&id.name).is_none()
+            && (self.c.engine.lookup_str(&id.name))
+                .and_then(|n| self.scheme_of(n))
+                .is_none()
             && self.imported_qualifiers.contains_key(&id.name)
         {
             self.c.error(
@@ -4149,9 +4032,9 @@ impl ModuleChecker<'_> {
             );
             // Recover as well as we can, by still type-checking the body so
             // later errors don't pile up.
-            self.push_block_scope();
+            self.open_block();
             let _ = self.compile_expr(&expr.body);
-            self.pop_block_scope();
+            self.close_block();
             return (self.c.engine.fresh_var(), CKind::Error);
         };
 
@@ -4165,18 +4048,16 @@ impl ModuleChecker<'_> {
 
         // The failure branch is the recovery body, with the `Err` payload bound
         // to the receiver when there is one.
-        self.push_block_scope();
+        self.open_block();
         let mut receiver = None;
         if let Some(e) = err_var
             && let Some(recv) = &expr.receiver
         {
-            self.get_or_create_local(&recv.name);
-            self.register_local_binding(&recv.name, e, recv.span);
             let sid = self.c.engine.intern(&recv.name);
-            receiver = Some((sid, self.publish_local(sid)));
+            receiver = Some((sid, self.bind_mono(&recv.name, e, recv.span)));
         }
         let body = self.compile_expr(&expr.body);
-        self.pop_block_scope();
+        self.close_block();
         self.c
             .engine
             .unify_at(success_var, body.ty, type_defining_span(&expr.body));
@@ -4229,12 +4110,8 @@ impl ModuleChecker<'_> {
         // The typecheck walk. Nested closures found here come back into this
         // function (through `compile_function_common`), park their own bodies
         // and reserve their slots before we reserve ours.
-        let params_end = self.frames.current.slots;
         let checked = self.compile_expr(body);
         let body_ty = checked.ty;
-        // The walk still handed out slots for the pattern bindings it reserved.
-        // Those slots are dead, so rewind to the parameters.
-        self.frames.current.slots = params_end;
         debug_assert!(
             self.defer_depth > 0,
             "every function body must be walked inside a deferral region: \
@@ -4248,6 +4125,7 @@ impl ModuleChecker<'_> {
             .frames
             .current
             .self_name
+            .map(frame::SelfName::name)
             .unwrap_or_else(|| self.c.engine.intern("__anon__"));
         let param_binds: Vec<(StrId, BinderId, Ty)> = params
             .iter()
@@ -4639,43 +4517,26 @@ impl ModuleChecker<'_> {
         self.c.engine.mk_fun(&param_tys, ret_ty)
     }
 
-    /// Start walking a nested body, and open a new type-env scope for it.
+    /// Start walking a nested body. A top-level `fn` calls itself by its
+    /// `decl` name.
     ///
     /// A lambda has no name to call itself by unless it is the initialiser of a
     /// `name = fn(..)` binding, which leaves that name in `next_fn_self_name`.
     /// It must not inherit the enclosing body's name, or a lambda passed to a
     /// higher-order function that calls the enclosing `fn` would call itself.
-    fn enter_fn_frame(&mut self, binding: Option<&str>) -> frame::Entered {
-        let self_name = match binding {
-            Some(n) => Some(self.c.engine.intern(n)),
-            None => self.next_fn_self_name.take(),
+    fn enter_fn_frame(&mut self, decl: Option<&str>) -> frame::Entered {
+        let self_name = match decl {
+            Some(n) => Some(frame::SelfName::Decl(self.c.engine.intern(n))),
+            None => self
+                .next_fn_self_name
+                .take()
+                .map(|(n, ty)| frame::SelfName::Lambda(n, ty)),
         };
-        self.c.env.push_scope();
         self.frames.enter(self_name)
     }
 
-    /// Register a local binding that was just typed in the type environment,
-    /// the dead-code and reference graph, and the hover record, then emit its
-    /// value definition. These steps must stay together, so every place that
-    /// binds a local (parameters, pattern names, the `or` receiver) goes
-    /// through here after reserving its slot with `get_or_create_local`.
-    fn register_local_binding(&mut self, name: &str, ty: Ty, sp: Span) {
-        let m = self.current_module_slice();
-        self.c.env.define_at(
-            name,
-            mono(ty),
-            DefinitionLocation::new(sp, m, EntityKind::Value),
-        );
-        self.track_binding(name, sp);
-        self.record(name, ty, sp, None);
-        self.emit_value_def(sp, name, None);
-    }
-
     fn bind_param(&mut self, p: &ast::FunctionParameter, ty: Ty) -> BinderId {
-        self.get_or_create_local(&p.identifier.name);
-        self.register_local_binding(&p.identifier.name, ty, p.identifier.span);
-        let sid = self.c.engine.intern(&p.identifier.name);
-        self.publish_local(sid)
+        self.bind_mono(&p.identifier.name, ty, p.identifier.span)
     }
 
     /// Close out a function body. This reserves its function slot, parks it as
@@ -4688,7 +4549,6 @@ impl ModuleChecker<'_> {
     fn finish_fn_frame(&mut self, entered: frame::Entered, parked: ParkedBody) -> ClosureFact {
         let mut finished = self.frames.leave(entered);
         let captured = std::mem::take(&mut finished.captures).into_names();
-        self.c.env.pop_scope();
         self.report_unused(finished.into_root());
 
         // Reserve the body's slot now, so the `func_idx` that the `ClosureFact`
@@ -4710,18 +4570,16 @@ impl ModuleChecker<'_> {
         });
 
         // Resolving each capture again in the *enclosing* frame matters.
-        // `resolve_variable` moves a name this body captured from further out
+        // `resolve_name` moves a name this body captured from further out
         // into the enclosing frame's own capture set, so captures chain
         // outwards through every level. It is also how each capture loads where
         // the closure is built, so the result is what the elaborator reads.
         let captures = captured
             .iter()
             .map(|&cap_name| {
-                let name = self.c.engine.str(cap_name).to_string();
-                let scheme = self.c.env.lookup(&name).copied();
-                let (at, ty) = match scheme {
-                    Some(scheme) => (
-                        self.name_at(cap_name, scheme.kind).0,
+                let (at, ty) = match self.resolve_name(cap_name) {
+                    Some((scheme, at)) => (
+                        at,
                         self.c
                             .engine
                             .instantiate(&scheme, &self.frames.current.rigid),
@@ -4752,7 +4610,7 @@ impl ModuleChecker<'_> {
         let mut arms = Vec::with_capacity(m.arms.len());
 
         for arm in &m.arms {
-            self.push_block_scope();
+            self.open_block();
 
             b.clear();
             let (pattern, ok) =
@@ -4773,7 +4631,7 @@ impl ModuleChecker<'_> {
                 .engine
                 .unify_at(result_ty, body.ty, type_defining_span(&arm.body));
 
-            self.pop_block_scope();
+            self.close_block();
             arms.push(CArm {
                 pattern,
                 guard,

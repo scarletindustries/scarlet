@@ -166,7 +166,12 @@ macro_rules! prelude_bindings {
             #[cfg(test)]
             const TYPE_NAMES: &[(&str, usize)] = &[$( (names::$tn, $ta) ),*];
 
-            pub fn capture(env: &TypeEnv) -> Result<Self, PreludeCaptureError> {
+            /// Capture the prelude's types from `env` and its constructors
+            /// through `value`, which answers what a prelude value name means.
+            pub fn capture(
+                env: &TypeEnv,
+                value: impl Fn(&str) -> Option<Scheme>,
+            ) -> Result<Self, PreludeCaptureError> {
                 let ty = |name: &'static str, expected: usize| -> Result<TypeRef, PreludeCaptureError> {
                     let ti = env
                         .lookup_type_info(name)
@@ -181,22 +186,22 @@ macro_rules! prelude_bindings {
                     Ok(TypeRef { id: ti.id, name })
                 };
                 let ctor = |name: &'static str, of: &TypeRef, arity: u16| -> Result<CtorRef, PreludeCaptureError> {
-                    match env.lookup(name) {
+                    match value(name) {
                         Some(Scheme {
                             kind: ValueKind::Constructor { type_id, variant_idx, arity: a, .. },
                             ..
                         }) => {
-                            if *type_id == of.id && *a == arity {
+                            if type_id == of.id && a == arity {
                                 Ok(CtorRef {
-                                    type_id: *type_id,
-                                    variant_idx: *variant_idx,
+                                    type_id,
+                                    variant_idx,
                                 })
                             } else {
                                 Err(PreludeCaptureError::CtorShape {
                                     name,
                                     of: of.name,
                                     expected_arity: arity,
-                                    found: CtorFound::Constructor { of: *type_id, arity: *a },
+                                    found: CtorFound::Constructor { of: type_id, arity: a },
                                 })
                             }
                         }
@@ -269,7 +274,7 @@ mod tests {
     #[test]
     fn capture_on_empty_env_reports_missing_type() {
         let env = new_env();
-        let err = PreludeBindings::capture(&env).unwrap_err();
+        let err = PreludeBindings::capture(&env, no_values).unwrap_err();
         assert_eq!(err, PreludeCaptureError::MissingType(names::INT));
         assert_eq!(err.to_string(), "prelude: type 'Int' is required");
     }
@@ -292,10 +297,15 @@ mod tests {
         (env, bool_id)
     }
 
-    fn define_true_ctor(env: &mut crate::types::TypeEnv, type_id: TypeId, arity: u16) {
-        env.define(
-            names::TRUE,
-            Scheme {
+    /// No prelude values at all.
+    fn no_values(_: &str) -> Option<Scheme> {
+        None
+    }
+
+    /// `True` as a constructor of `type_id` taking `arity` fields.
+    fn true_ctor(type_id: TypeId, arity: u16) -> impl Fn(&str) -> Option<Scheme> {
+        move |name| {
+            (name == names::TRUE).then_some(Scheme {
                 quantified: ArenaSlice::EMPTY,
                 ty: Ty::NONE,
                 kind: ValueKind::Constructor {
@@ -307,8 +317,8 @@ mod tests {
                     field_labels: ArenaSlice::EMPTY,
                 },
                 def: None,
-            },
-        );
+            })
+        }
     }
 
     /// A deleted prelude constructor must surface as a clean compile error,
@@ -316,7 +326,7 @@ mod tests {
     #[test]
     fn missing_ctor_message() {
         let (env, _) = env_with_prelude_types();
-        let err = PreludeBindings::capture(&env).unwrap_err();
+        let err = PreludeBindings::capture(&env, no_values).unwrap_err();
         assert_eq!(err, PreludeCaptureError::MissingCtor(names::TRUE));
         assert_eq!(err.to_string(), "prelude: constructor 'True' is required");
     }
@@ -325,9 +335,8 @@ mod tests {
     /// what was expected.
     #[test]
     fn ctor_shape_mismatch_message() {
-        let (mut env, bool_id) = env_with_prelude_types();
-        define_true_ctor(&mut env, bool_id, 1);
-        let err = PreludeBindings::capture(&env).unwrap_err();
+        let (env, bool_id) = env_with_prelude_types();
+        let err = PreludeBindings::capture(&env, true_ctor(bool_id, 1)).unwrap_err();
         assert_eq!(
             err,
             PreludeCaptureError::CtorShape {
@@ -352,9 +361,9 @@ mod tests {
     /// `True` shadowed by a non-constructor binding.
     #[test]
     fn ctor_not_a_constructor_message() {
-        let (mut env, _) = env_with_prelude_types();
-        env.define(names::TRUE, crate::types::mono(Ty::NONE));
-        let err = PreludeBindings::capture(&env).unwrap_err();
+        let (env, _) = env_with_prelude_types();
+        let not_a_ctor = |name: &str| (name == names::TRUE).then(|| crate::types::mono(Ty::NONE));
+        let err = PreludeBindings::capture(&env, not_a_ctor).unwrap_err();
         assert_eq!(
             err,
             PreludeCaptureError::CtorShape {
@@ -379,7 +388,7 @@ mod tests {
         for &(n, _) in PreludeBindings::TYPE_NAMES {
             env.register_type_head(n, StrId(0), ArenaSlice::EMPTY, ArenaSlice::EMPTY);
         }
-        let err = PreludeBindings::capture(&env).unwrap_err();
+        let err = PreludeBindings::capture(&env, no_values).unwrap_err();
         assert_eq!(
             err,
             PreludeCaptureError::TypeArity {

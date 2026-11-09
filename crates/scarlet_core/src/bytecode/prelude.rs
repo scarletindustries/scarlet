@@ -15,15 +15,12 @@ use crate::types::ValueKind;
 
 impl Compiler {
     pub(crate) fn register_prelude(&mut self) {
-        // `analyse_module` defines the value schemes into a scope it pops, so
-        // pull them back out of the recorded interface into the root scope.
-        // Type heads don't need this, because they land in the flat `env.type_info`.
         let at = Span::DUMMY;
         let path = crate::ast::ImportPath::canonical(module::scarlet_prelude());
-        // What the prelude leaves behind is the namespace every program sees,
-        // and the note above about type heads depends on that. So unlike an
-        // ordinary module, its compile must not be scoped to a frame.
-        // Nothing imports the prelude, so we load it as though the entry did.
+        // The prelude's type entries, by name, are the namespace every program
+        // sees for types. So unlike an ordinary module, its compile must not
+        // undo them. Nothing imports the prelude, so we load it as though the
+        // entry did.
         let entry = module::ModuleKey::main();
         let importer = super::compiler::Importer {
             dir: None,
@@ -41,16 +38,26 @@ impl Compiler {
         for name in iface.types.keys() {
             self.reserved.insert(name.clone());
         }
+        let mut values = indexmap::IndexMap::new();
         for (name, ev) in &iface.values {
             if matches!(ev.scheme.kind, ValueKind::Constructor { .. }) {
                 self.reserved.insert(name.clone());
             }
-            self.env.define(name, ev.scheme);
+            values.insert(self.engine.intern(name), ev.scheme);
         }
+        self.prelude_values = values;
 
         // Every identity check in the compiler compares against these refs
         // rather than matching strings.
-        match PreludeBindings::capture(&self.env) {
+        let engine = &self.engine;
+        let prelude_values = &self.prelude_values;
+        let value = |name: &str| {
+            engine
+                .lookup_str(name)
+                .and_then(|id| prelude_values.get(&id))
+                .copied()
+        };
+        match PreludeBindings::capture(&self.env, value) {
             Ok(b) => {
                 self.prelude = b;
                 self.engine.set_prim_ids(self.prelude.prim_ids());

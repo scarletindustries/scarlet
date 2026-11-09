@@ -137,10 +137,8 @@ fn collect_with<R>(
     let loaded = c.load_imports(&block, &importer);
     let mut m = super::ModuleChecker::new(&mut c, crate::module::main_module(), entry.clone());
     m.bind_imports(&block, loaded);
-    m.c.env.push_scope();
     m.analyse_module(&block, None);
     let seen = inspect(&m);
-    m.c.env.pop_scope();
     c.entry_refs = m.finish();
     assert!(
         !crate::diagnostic::has_errors(&c.engine.diagnostics),
@@ -152,7 +150,7 @@ fn collect_with<R>(
 
 mod local_binders_as_definitions {
     //! Local binders (bindings, parameters, pattern binders and `or` receivers)
-    //! must be registered as graph `Definition`s, not just typed in the env.
+    //! must be registered as graph `Definition`s, not just typed.
     //! Without the record, `ReferenceGraph::definition(target)` returns `None`
     //! and goto-def, find-references and hover don't work on any local. This
     //! only happens when `collect_hover_facts` is on, so `scarlet run` and
@@ -473,18 +471,18 @@ mod toplevel_slots {
     fn only_the_module_statement_walk_takes_a_slot() {
         let mut c = new_compiler(true);
         let mut m = ModuleChecker::new(&mut c, crate::module::main_module(), ModuleKey::main());
-        m.push_block_scope();
-        let a = m.c.engine.intern("a");
-        m.bind_local(a, 7);
+        m.open_block();
+        let ty = m.c.engine.fresh_var();
+        m.bind_mono("a", ty, Span::DUMMY);
         assert!(
             m.binding_globals.is_empty(),
             "a binding made outside the module statement walk took a slot"
         );
 
         m.walking_module_statements = true;
+        m.bind_mono("b", ty, Span::DUMMY);
         let b = m.c.engine.intern("b");
-        m.bind_local(b, 8);
-        assert_eq!(m.binding_globals.pop(), Some((b, GlobalSlot(8))));
+        assert_eq!(m.binding_globals.pop(), Some((b, GlobalSlot(0))));
     }
 
     /// The entry point for a bare expression. Its outermost block is an arm

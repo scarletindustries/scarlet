@@ -1190,7 +1190,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             },
             CNode::Fn { name, binder, span } => {
                 // A `fn` declaration is not an expression, so the walk built no
-                // node with its type. Its scheme is in the environment.
+                // node with its type. Its scheme is the module's.
                 let Some(fn_ty) = self.ctx.toplevel_fn_ty(*name) else {
                     elaborator_bug("unbound fn declaration", *span)
                 };

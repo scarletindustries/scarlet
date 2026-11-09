@@ -11,8 +11,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::{LocalSlot, Span, StrId};
-use crate::typed_ir::{BinderId, CaptureIdx};
+use indexmap::IndexMap;
+
+use super::{Scheme, Span, StrId, Ty};
+use crate::typed_ir::{BinderId, CaptureIdx, GlobalSlot};
 
 /// The bodies the walk is inside, innermost first. Never empty: the module
 /// toplevel is always there.
@@ -22,6 +24,10 @@ pub(in crate::bytecode) struct Frames {
     /// The bodies around it, innermost last. `outer[0]`, when there is one,
     /// is the module toplevel.
     outer: Vec<Frame>,
+    /// Entry-frame slots handed out so far, by this module and every module
+    /// compiled before it: the toplevel bindings of every module share the
+    /// entry frame.
+    pub(in crate::bytecode) globals: i32,
 }
 
 /// Proof that a frame was entered, which [`Frames::leave`] takes back. Holding
@@ -30,24 +36,25 @@ pub(in crate::bytecode) struct Frames {
 pub(in crate::bytecode) struct Entered(());
 
 impl Frames {
-    /// The module toplevel, whose root block already holds `names`, in
-    /// `slots` slots.
-    pub(in crate::bytecode) fn toplevel(names: HashMap<StrId, LocalSlot>, slots: i32) -> Frames {
+    /// A module's toplevel, whose bindings take entry-frame slots from
+    /// `globals` on.
+    pub(in crate::bytecode) fn toplevel(globals: i32) -> Frames {
         let root = Block {
-            names,
+            names: IndexMap::new(),
             unused: None,
         };
         Frames {
-            current: Frame::with_root(root, slots),
+            current: Frame::with_root(root),
             outer: Vec::new(),
+            globals,
         }
     }
 
     /// Start walking a nested body. `self_name` is the name the body can call
     /// itself by, if it has one. Type variables rigid around it stay rigid in
     /// it.
-    pub(in crate::bytecode) fn enter(&mut self, self_name: Option<StrId>) -> Entered {
-        let mut inner = Frame::with_root(Block::reporting(), 0);
+    pub(in crate::bytecode) fn enter(&mut self, self_name: Option<SelfName>) -> Entered {
+        let mut inner = Frame::with_root(Block::reporting());
         inner.self_name = self_name;
         inner.rigid = self.current.rigid.clone();
         self.outer.push(std::mem::replace(&mut self.current, inner));
@@ -68,9 +75,30 @@ impl Frames {
         self.outer.is_empty()
     }
 
-    /// The bodies around the current one, innermost last.
-    pub(in crate::bytecode) fn outer(&self) -> &[Frame] {
-        &self.outer
+    /// The binding `name` has in a body around the current one, with that
+    /// body's depth: 0 is the module toplevel.
+    pub(in crate::bytecode) fn outer_local(&self, name: StrId) -> Option<(usize, Local)> {
+        self.outer
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(i, f)| f.lookup(name).map(|l| (i, *l)))
+    }
+
+    /// Hand out the next entry-frame slot.
+    pub(in crate::bytecode) fn alloc_global(&mut self) -> GlobalSlot {
+        self.globals += 1;
+        GlobalSlot(self.globals - 1)
+    }
+
+    /// Every name the current body and the bodies around it bind, outermost
+    /// first.
+    pub(in crate::bytecode) fn names(&self) -> impl Iterator<Item = StrId> + '_ {
+        self.outer
+            .iter()
+            .chain(std::iter::once(&self.current))
+            .flat_map(|f| f.blocks.iter())
+            .flat_map(|b| b.names.keys().copied())
     }
 
     /// Note a read of `name`, so it is not reported unused. A body may read a
@@ -98,20 +126,47 @@ fn left_the_toplevel() -> ! {
     panic!("internal compiler error: left the module toplevel. Report this as a compiler bug.")
 }
 
+/// The name a body can call itself by.
+#[derive(Clone, Copy)]
+pub(in crate::bytecode) enum SelfName {
+    /// A top-level `fn`: the module's own entry for it says what it is.
+    Decl(StrId),
+    /// The lambda a `name = fn(..)` binding makes, whose type is still being
+    /// inferred. Nothing else may read a name before it is bound: `x = x`
+    /// would infer ⊥ and generalize to ∀A.A, which is unsound.
+    Lambda(StrId, Ty),
+}
+
+impl SelfName {
+    pub(in crate::bytecode) fn name(self) -> StrId {
+        match self {
+            SelfName::Decl(n) | SelfName::Lambda(n, _) => n,
+        }
+    }
+}
+
+/// What one name a body binds means.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::bytecode) struct Local {
+    pub(in crate::bytecode) scheme: Scheme,
+    pub(in crate::bytecode) binder: BinderId,
+    /// The entry-frame slot, for a binding the module's own statements make
+    /// at its toplevel. A body nested in the toplevel loads the binding from
+    /// there instead of capturing it.
+    pub(in crate::bytecode) global: Option<GlobalSlot>,
+}
+
 /// One body being checked.
 pub(in crate::bytecode) struct Frame {
     /// Never empty. `blocks[0]` is the body's own level: its parameters, or
-    /// for the module toplevel, the root every module sees.
+    /// the module toplevel's own names.
     blocks: Vec<Block>,
-    /// Slots handed out so far.
-    pub(in crate::bytecode) slots: i32,
     /// The next [`BinderId`]. Binders count from zero in every body.
-    pub(in crate::bytecode) next_binder: u32,
+    next_binder: u32,
     /// Names from enclosing bodies this body reads.
     pub(in crate::bytecode) captures: Captures,
-    /// The name this body calls itself by: a `fn`'s name, or the name a
-    /// `name = fn(..)` binding gives its lambda.
-    pub(in crate::bytecode) self_name: Option<StrId>,
+    /// The name this body calls itself by.
+    pub(in crate::bytecode) self_name: Option<SelfName>,
     /// Type variable ids that are rigid in this body: an annotation's type
     /// parameters, which `instantiate` must not freshen.
     pub(in crate::bytecode) rigid: HashSet<i32>,
@@ -119,7 +174,8 @@ pub(in crate::bytecode) struct Frame {
 
 /// One block's names.
 pub(in crate::bytecode) struct Block {
-    names: HashMap<StrId, LocalSlot>,
+    /// In the order the block binds them.
+    names: IndexMap<StrId, Local>,
     /// The names bound here and not read yet, with where they were bound.
     /// `None` for the module toplevel's own level, whose names are never
     /// reported unused.
@@ -129,17 +185,16 @@ pub(in crate::bytecode) struct Block {
 impl Block {
     fn reporting() -> Block {
         Block {
-            names: HashMap::new(),
+            names: IndexMap::new(),
             unused: Some(HashMap::new()),
         }
     }
 }
 
 impl Frame {
-    fn with_root(root: Block, slots: i32) -> Frame {
+    fn with_root(root: Block) -> Frame {
         Frame {
             blocks: vec![root],
-            slots,
             next_binder: 0,
             captures: Captures::default(),
             self_name: None,
@@ -147,37 +202,20 @@ impl Frame {
         }
     }
 
-    pub(in crate::bytecode) fn alloc_slot(&mut self) -> i32 {
-        self.slots += 1;
-        self.slots - 1
-    }
-
     pub(in crate::bytecode) fn mint_binder(&mut self) -> BinderId {
         self.next_binder += 1;
         BinderId(self.next_binder - 1)
     }
 
-    /// What `name` means in this body, and whether that binding was made in
-    /// an enclosing block rather than the innermost one.
-    pub(in crate::bytecode) fn lookup(&self, name: StrId) -> Option<(LocalSlot, bool)> {
-        let innermost = self.blocks.len() - 1;
-        self.blocks
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(i, b)| b.names.get(&name).map(|&e| (e, i < innermost)))
-    }
-
-    pub(in crate::bytecode) fn lookup_mut(&mut self, name: StrId) -> Option<&mut LocalSlot> {
-        self.blocks
-            .iter_mut()
-            .rev()
-            .find_map(|b| b.names.get_mut(&name))
+    /// What `name` means in this body.
+    pub(in crate::bytecode) fn lookup(&self, name: StrId) -> Option<&Local> {
+        self.blocks.iter().rev().find_map(|b| b.names.get(&name))
     }
 
     /// Bind `name` in the innermost block.
-    pub(in crate::bytecode) fn insert(&mut self, name: StrId, entry: LocalSlot) {
-        self.innermost().names.insert(name, entry);
+    pub(in crate::bytecode) fn insert(&mut self, name: StrId, entry: Local) {
+        let last = self.blocks.len() - 1;
+        self.blocks[last].names.insert(name, entry);
     }
 
     /// The blocks open in this body, beyond its own level.
@@ -210,11 +248,6 @@ impl Frame {
     /// The body's own level, for a body that is finished.
     pub(in crate::bytecode) fn into_root(mut self) -> Block {
         self.blocks.swap_remove(0)
-    }
-
-    fn innermost(&mut self) -> &mut Block {
-        let last = self.blocks.len() - 1;
-        &mut self.blocks[last]
     }
 }
 

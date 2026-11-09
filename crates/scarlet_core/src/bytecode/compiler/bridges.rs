@@ -59,12 +59,11 @@ impl ElabCtx for ModuleChecker<'_> {
         self.c.const_binary(bytes, bit_len)
     }
     fn toplevel_fn_ty(&mut self, name: StrId) -> Option<Ty> {
-        let name = self.c.engine.str(name).to_string();
-        let scheme = self.c.env.lookup(&name)?;
+        let scheme = self.names.get(&name)?.scheme;
         Some(
             self.c
                 .engine
-                .instantiate(scheme, &self.frames.current.rigid),
+                .instantiate(&scheme, &self.frames.current.rigid),
         )
     }
     fn decl_denotation(&self, binder: BinderId) -> Option<Denotation> {
