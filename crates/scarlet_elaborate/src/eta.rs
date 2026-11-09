@@ -1,16 +1,17 @@
-//! Eta wrappers: a constructor or builtin used as a first-class value.
+//! Eta wrappers let a constructor or builtin be used as a first-class value.
+//! Eta expansion means wrapping `f` as `fn(x) { f(x) }`.
 //!
-//! `array.map(xs, W)` passes the constructor `W` where a `fn(Int) W` is wanted;
-//! `array.fold(xs, 0, add)` passes a `@vm` builtin where a closure is wanted.
-//! Neither is a runtime value on its own, so both get a synthesised
+//! `array.map(xs, W)` passes the constructor `W` where a `fn(Int) W` is
+//! wanted, and `array.fold(xs, 0, add)` passes a `@vm` builtin where a closure
+//! is wanted. Neither is a runtime value on its own, so both get a generated
 //! `fn(a0..aN-1) { <apply>(a0..aN-1) }`.
 //!
-//! This module synthesises functions and must never emit code. Writing the
-//! wrapper's instructions into `Program::code` mid-pass shifts the base address
-//! the enclosing body's jumps were computed against, so a branch after
-//! `array.map(xs, W)` lands on a stale address. [`eta_wrapper`] therefore takes
-//! only `&mut FnTable` and returns a [`FuncIdx`], never an address; the wrapper
-//! is an ordinary [`TypedFn`] emitted by the same loop as every other function.
+//! This module only adds functions to the table and never writes code.
+//! [`eta_wrapper`] takes only `&mut FnTable` and gives back a closure that
+//! names the wrapper by [`FuncIdx`], never by address. The wrapper is an
+//! ordinary [`TypedFn`], lowered by the same loop as every other function.
+//! (When the compiler wrote bytecode directly, writing a wrapper in the middle
+//! of a body shifted the addresses that body's jumps were computed against.)
 
 use scarlet_ir::core_ir::FuncIdx;
 use scarlet_ir::tivec::TiVec;
@@ -22,9 +23,9 @@ use super::{
     ValueRef,
 };
 
-/// [`TypedProgram::fns`] under construction, and the only minter of a
-/// [`FuncIdx`]. Indexing by `FuncIdx` rather than `usize` is what stops a
-/// wrapper being numbered against one table and appended to another.
+/// [`TypedProgram::fns`] while it's being built, and the only thing that mints
+/// a [`FuncIdx`]. Indexing by `FuncIdx` rather than `usize` stops a wrapper
+/// being numbered against one table and appended to another.
 ///
 /// [`TypedProgram::fns`]: super::TypedProgram::fns
 pub type FnTable = TiVec<FuncIdx, TypedFn>;
@@ -39,7 +40,7 @@ pub struct FnRTy {
 }
 
 impl FnRTy {
-    /// `None` when `ty` is not a function type.
+    /// Returns `None` when `ty` is not a function type.
     pub(crate) fn of(pool: &ResolvedPool, ty: RTy) -> Option<FnRTy> {
         match pool.node(ty) {
             ResolvedNode::Fun { params, ret } => Some(FnRTy {
@@ -51,7 +52,6 @@ impl FnRTy {
         }
     }
 
-    /// The function type itself.
     fn ty(&self) -> RTy {
         self.ty
     }
@@ -70,19 +70,19 @@ impl FnRTy {
 }
 
 /// Append `fn(a0..aN-1) { <target>(a0..aN-1) }` to `fns` and return the
-/// zero-capture [`TypedExpr::Closure`] that names it.
+/// [`TypedExpr::Closure`], with no captures, that names it.
 ///
 /// `name` is the source name of the constructor or builtin, so stack traces
-/// read `W`. `param_name` is display-only; the body addresses parameters by
-/// [`BindingId`].
+/// read `W`. `param_name` is only for display, because the body refers to
+/// parameters by [`BindingId`].
 ///
-/// A nullary constructor never reaches here: `resolve` classifies it as
-/// [`super::ValueForm::Ctor`].
+/// A constructor with no fields never gets here, because `resolve` classifies
+/// it as [`super::ValueForm::Ctor`].
 ///
 /// # Panics
 ///
-/// If the constructor's declared field count disagrees with the instantiated
-/// function type's arity.
+/// Panics if the constructor's declared field count disagrees with the
+/// instantiated function type's arity.
 pub(crate) fn eta_wrapper(
     fns: &mut FnTable,
     name: StrId,
@@ -90,7 +90,7 @@ pub(crate) fn eta_wrapper(
     target: EtaTarget,
     fn_ty: &FnRTy,
 ) -> TypedExpr {
-    // A fresh function, so its `BindingId` space starts at zero.
+    // This is a new function, so its `BindingId`s start at zero.
     let params: Vec<TypedBind> = fn_ty
         .params()
         .iter()
@@ -113,9 +113,10 @@ pub(crate) fn eta_wrapper(
 
     let body = match target {
         EtaTarget::Ctor { variant, arity } => {
-            // Not a debug_assert: a type that disagrees with the declaration
-            // builds a `MakeEnumPayload` of the wrong width and silently
-            // corrupts the heap. Runs once per eta site, at compile time.
+            // This is not a debug_assert, because a type that disagrees with
+            // the declaration builds a constructor of the wrong width and
+            // silently corrupts the heap. It runs once per eta site, at
+            // compile time.
             assert_eq!(
                 arity,
                 fn_ty.arity(),

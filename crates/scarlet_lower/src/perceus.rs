@@ -1,25 +1,27 @@
-//! Perceus reference-count insertion on Core IR: the frame-limited
-//! drop-guided algorithm of Lorenzen & Leijen (ICFP'22, Fig. 5) as a Core→Core
-//! pass. ANF makes last-use a linear backward scan.
+//! Perceus is the pass that adds reference counting to Core IR. It decides
+//! where each heap value is released, and lets a constructor reuse the memory
+//! of a value that was just released. This is the frame-limited, drop-guided
+//! algorithm of Lorenzen & Leijen (ICFP'22, Fig. 5), run as a pass from Core
+//! IR to Core IR. In ANF, finding a value's last use is one backward scan.
 //!
-//!  1. Backward liveness inserts `Drop` after each heap bind's last read.
-//!     `If`/`Match` joins equalise ownership so every path releases every owned
-//!     slot exactly once (Fig. 5's Δ-rule).
-//!  2. A forward walk pairs each `Drop` token with a later same-shape `Ctor`
-//!     through a LIFO stack, forked at branches.
-//!  3. The reuse walk runs a second time seeded with the intersection of the
-//!     first run's back-edge token sets, so a tail-self-recursive loop can
-//!     reuse the previous iteration's cells.
+//!  1. A backward liveness walk inserts a `Drop` after each heap bind's last
+//!     read. Where `If` and `Match` branches join, ownership is evened out so
+//!     every path releases every owned slot exactly once (Fig. 5's Δ-rule).
+//!  2. A forward walk pairs each `Drop` token with a later `Ctor` of the same
+//!     shape, using a last-in-first-out stack that is copied at branches.
+//!  3. The reuse walk runs a second time, starting from the tokens every
+//!     back edge of the first run had, so a loop written as a tail call to
+//!     itself can reuse the previous turn's cells.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{Atom, Callee, CoreBind, CoreExpr, CoreFn, CorePat, JoinId, LocalId, ReuseShape};
 use scarlet_elaborate::{RTy, ResolvedPool};
 
-/// Run Perceus on a single lowered function. `pool` is consulted only to
-/// classify a bind's `ty` as heap-shaped and to read a tuple's width. Its types
-/// are resolved by construction, so no unsolved variable can reach here and
-/// make `is_heap` answer `false` by accident.
+/// Run Perceus on one lowered function. `pool` is only used to check whether a
+/// bind's `ty` is a heap type and to read a tuple's width. Its types are always
+/// resolved, so no unsolved variable can get here and make `is_heap` answer
+/// `false` by accident.
 pub fn perceus(pool: &ResolvedPool, f: CoreFn) -> CoreFn {
     let CoreFn {
         params,
@@ -31,8 +33,8 @@ pub fn perceus(pool: &ResolvedPool, f: CoreFn) -> CoreFn {
         cx.record_bind(p, None);
     }
     let (body, live) = cx.drop_pass(body);
-    // Params are owned on entry; any not read by the body drop at its head so
-    // the frame's release count still balances.
+    // Params are owned on entry. Any the body doesn't read drop at its head,
+    // so the frame still releases everything it owns.
     let dead_params: Vec<LocalId> = params
         .iter()
         .map(|p| p.id)
@@ -46,37 +48,38 @@ pub fn perceus(pool: &ResolvedPool, f: CoreFn) -> CoreFn {
     }
 }
 
-/// Locals live at a program point. `BTreeSet` so drop insertion order, and
-/// thus golden snapshots, is deterministic.
+/// The locals live at a program point. It's a `BTreeSet` so the order drops
+/// are inserted in, and so the golden snapshots, never changes between runs.
 type Live = BTreeSet<LocalId>;
 
-/// A hollowed cell available for a downstream same-shape `Ctor` to overwrite.
+/// A released cell that a later `Ctor` of the same shape can overwrite.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Token {
     slot: LocalId,
     shape: ReuseShape,
-    /// Loop-carried from a previous iteration via [`ReuseWalk::back_edge_seed`].
-    /// Its slot may be bound inside an arbitrary branch, so the only site sure
-    /// to have it in scope is the `Let` binding that same id. Carried tokens
-    /// therefore pair by self-slot only, never the LIFO shape fallback.
+    /// Carried over from a previous turn of a loop by
+    /// [`ReuseWalk::back_edge_seed`]. Its slot may be bound inside any branch,
+    /// so the only place sure to have it in scope is the `Let` that binds the
+    /// same id. So a carried token only pairs with its own slot, never through
+    /// the fallback that matches by shape.
     carried: bool,
 }
 
 struct Perceus<'p> {
     pool: &'p ResolvedPool,
-    /// Every bind's resolved type, for the heap-shape gate on `Drop`.
+    /// Every bind's resolved type, used to decide whether it needs a `Drop`.
     ty: BTreeMap<LocalId, RTy>,
-    /// Allocation shape of a bind when its rhs proves one. Locals with no entry
-    /// drop with `shape: None` and are never offered for reuse.
+    /// A bind's allocation shape, when its right-hand side proves one. Locals
+    /// with no entry drop with `shape: None` and are never offered for reuse.
     shape: BTreeMap<LocalId, ReuseShape>,
-    /// Live-in set of each `LetCont`'s continuation, recorded when the
-    /// `LetCont` is peeled — before its body, which holds every `Goto` to it —
-    /// so a `Goto` can always look its target up here.
+    /// The set of locals live on entry to each `LetCont`'s continuation. It is
+    /// recorded when the `LetCont` is peeled, which is before its body, where
+    /// every `Goto` to it is. So a `Goto` can always look its target up here.
     cont_live: BTreeMap<JoinId, Live>,
 }
 
-/// One `Let`/`LetJoin` peeled off the spine, awaiting its body's live set to
-/// decide which drops go between rhs and body.
+/// One `Let` or `LetJoin` peeled off the spine. It waits for its body's live
+/// set to decide which drops go between the right-hand side and the body.
 struct SpineLet {
     bind: CoreBind,
     rhs_live: Live,
@@ -86,23 +89,25 @@ struct SpineLet {
 /// One node peeled off the spine by [`Perceus::drop_pass`].
 enum SpineFrame {
     Let(SpineLet),
-    /// A `LetCont` whose continuation was drop-processed at peel time. It is
-    /// rebuilt around the body with no drops of its own: the continuation's
-    /// live-ins reach the enclosing live set through the `Goto`s to it.
+    /// A `LetCont` whose continuation got its drops when it was peeled. It is
+    /// rebuilt around the body with no drops of its own, because the
+    /// continuation's live locals reach the enclosing live set through the
+    /// `Goto`s to it.
     Cont {
         id: JoinId,
         cont: CoreExpr,
     },
 }
 
-/// The rhs of a peeled [`SpineLet`].
+/// The right-hand side of a peeled [`SpineLet`].
 enum SpineRhs {
     Atom(Atom),
-    /// A `LetJoin`'s rhs is a whole `CoreExpr`, treated opaquely for liveness:
-    /// `rhs_live` is `join_live(join)` and no drops are inserted inside it.
-    /// A heap temp born inside a join is therefore held to the end of the
-    /// enclosing frame and never becomes a reuse token. Still sound: the VM
-    /// clones on `PushLocal` and releases on `StoreLocal`/frame teardown.
+    /// A `LetJoin`'s right-hand side is a whole `CoreExpr`, which liveness
+    /// treats as a black box. `rhs_live` is `join_live(join)`, and no drops
+    /// are inserted inside it. So a heap temporary made inside a join is held
+    /// until the enclosing frame ends and never becomes a reuse token. This is
+    /// still sound, because the VM releases every register a frame still
+    /// holds when the frame returns.
     Join(Box<CoreExpr>),
 }
 
@@ -123,16 +128,18 @@ impl<'p> Perceus<'p> {
         }
     }
 
-    /// Whether the local's type allocates a Perceus-managed heap cell. A local
-    /// with no recorded type was never bound by this pass, so it owns nothing.
+    /// Whether the local's type allocates a heap cell that Perceus manages. A
+    /// local with no recorded type was never bound by this pass, so it owns
+    /// nothing.
     fn is_heap_local(&self, id: LocalId) -> bool {
         self.ty.get(&id).is_some_and(|&t| self.pool.is_heap(t))
     }
 
-    /// Transform `e`, returning `(e', live)` where `live` is the outer-scope
-    /// locals `e'` reads and so the caller's responsibility. Drops are inserted
-    /// for locals that go dead inside `e`. The spine is walked iteratively so a
-    /// long straight-line body does not recurse on the Rust stack.
+    /// Transform `e` and return `(e', live)`, where `live` is the locals from
+    /// outer scopes that `e'` reads, which the caller is responsible for.
+    /// Drops are inserted for locals that die inside `e`. The spine is walked
+    /// in a loop, so a long straight-line body doesn't recurse on the Rust
+    /// stack.
     fn drop_pass(&mut self, mut e: CoreExpr) -> (CoreExpr, Live) {
         let mut spine: Vec<SpineFrame> = Vec::new();
         let (mut body, mut live) = loop {
@@ -158,7 +165,7 @@ impl<'p> Perceus<'p> {
                     e = *body;
                 }
                 CoreExpr::LetCont { id, cont, body } => {
-                    // Transformed before the body so its live-in set is known at
+                    // Transform this before the body, so its live set is known at
                     // every `Goto(id)` the body contains.
                     let (cont, cont_live) = self.drop_pass(*cont);
                     self.cont_live.insert(id, cont_live);
@@ -166,7 +173,8 @@ impl<'p> Perceus<'p> {
                     e = *body;
                 }
                 CoreExpr::Drop { body, .. } => {
-                    // Strip and re-derive, so the pass is safe to rerun.
+                    // Remove existing drops and work them out again, so the
+                    // pass is safe to run twice.
                     e = *body;
                 }
                 // A tail call gives up every reference its frame still holds
@@ -177,11 +185,12 @@ impl<'p> Perceus<'p> {
                     break (CoreExpr::Tail(a), live);
                 }
                 CoreExpr::Goto(id) => {
-                    // The edge hands the cont ownership of exactly its live-in
-                    // set. Treating the `Goto` as a terminal reading that set
-                    // makes the backward pass drop everything else before the
-                    // jump, so no local is released both before an edge and
-                    // inside the cont, or on neither.
+                    // The edge hands the continuation ownership of exactly the
+                    // locals live on its entry. Treating the `Goto` as an end
+                    // that reads that set makes the backward pass drop
+                    // everything else before the jump. So no local is released
+                    // both before an edge and inside the continuation, or on
+                    // neither.
                     let live = self
                         .cont_live
                         .get(&id)
@@ -230,9 +239,10 @@ impl<'p> Perceus<'p> {
                     continue;
                 }
             };
-            // Newly dead here: rhs operands whose last read is this one, plus
-            // the bind itself if the body never reads it. They drop between rhs
-            // and body, as early as Perceus permits, so reuse tokens are hot.
+            // These die here: operands whose last read is this right-hand side,
+            // plus the bind itself if the body never reads it. They drop
+            // between the right-hand side and the body, as early as Perceus
+            // allows, so their cells are free for reuse as soon as possible.
             let mut dead: Vec<LocalId> = frame
                 .rhs_live
                 .iter()
@@ -274,9 +284,9 @@ impl<'p> Perceus<'p> {
             dead_binders: Vec<LocalId>,
             scrut_shape: Option<ReuseShape>,
         }
-        // The match reads `scrut`; each arm then owns it. `scrut` is live-in to
-        // the Match but is not propagated into `live_union` from the arms: it
-        // drops at each arm head unless that arm re-reads it.
+        // The match reads `scrut`, and then each arm owns it. `scrut` is live
+        // on entry to the Match, but the arms don't add it to `live_union`. It
+        // drops at the head of each arm unless that arm reads it again.
         let mut live_union = Live::new();
         let mut lowered: Vec<Arm> = Vec::with_capacity(arms.len());
         for (pat, body) in arms {
@@ -320,8 +330,8 @@ impl<'p> Perceus<'p> {
         (CoreExpr::Match { scrut, arms, ty }, live)
     }
 
-    /// Register the locals a pattern binds. Returns the scrutinee's shape: a
-    /// `Ctor` arm proves an arity, other patterns pass through what it had.
+    /// Record the locals a pattern binds, and return the scrutinee's shape. A
+    /// `Ctor` arm proves an arity, and other patterns pass on what it had.
     fn record_pat(&mut self, pat: &CorePat, scrut: LocalId) -> (Vec<LocalId>, Option<ReuseShape>) {
         match pat {
             CorePat::Wild | CorePat::Lit(_) => (Vec::new(), self.shape.get(&scrut).copied()),
@@ -342,10 +352,11 @@ impl<'p> Perceus<'p> {
         }
     }
 
-    /// Prefix `body` with `Drop{x}` for each heap-shaped `x` in `dead`, in
-    /// reverse so the textual order matches `dead`. Non-heap locals are skipped:
-    /// `Op::Drop` on an unboxed prim is a no-op that still costs dispatch.
-    /// `arm_scrut` overrides the recorded shape for one id.
+    /// Put `Drop{x}` in front of `body` for each heap-typed `x` in `dead`,
+    /// going in reverse so the printed order matches `dead`. Locals that
+    /// aren't on the heap are skipped, because dropping an unboxed primitive
+    /// does nothing but still costs an instruction. `arm_scrut` overrides the
+    /// recorded shape for one id.
     fn wrap_drops(
         &mut self,
         dead: &[LocalId],
@@ -370,22 +381,22 @@ impl<'p> Perceus<'p> {
     }
 }
 
-/// State of one function's reuse walk. Built fresh per [`reuse_pass`], so a
-/// walk never observes another function's back-edge token sets.
+/// The state of one function's reuse walk. Each [`reuse_pass`] builds a new
+/// one, so a walk never sees another function's back-edge token sets.
 struct ReuseWalk {
-    /// Token sets reaching each `Tail(Call{Self_})` in the current walk.
+    /// The token sets that reach each `Tail(Call{Self_})` in the current walk.
     self_tails: Vec<Vec<Token>>,
 }
 
-/// Frame-limited reuse over the drop-annotated body, with a second seeded walk
-/// for loop-carried tokens on tail-self-recursive bodies.
+/// Frame-limited reuse over the body once it has its drops. A second walk
+/// handles tokens carried round a loop, for a body that tail-calls itself.
 fn reuse_pass(mut body: CoreExpr) -> CoreExpr {
     let mut walk = ReuseWalk {
         self_tails: Vec::new(),
     };
     walk.pair(&mut body, &mut Vec::new());
-    // Only tokens present at *every* self-tail dominate the loop head. The
-    // runtime `into_reuse_addr` debug-assert on rc==1 relies on that.
+    // Only tokens present at *every* tail call to self are sure to be there at
+    // the top of the loop, so only those are safe to carry round it.
     if let Some(mut seed) = walk.back_edge_seed() {
         walk.pair(&mut body, &mut seed);
     }
@@ -393,7 +404,7 @@ fn reuse_pass(mut body: CoreExpr) -> CoreExpr {
 }
 
 impl ReuseWalk {
-    /// Consumes `self_tails`, so a later walk cannot mix in stale snapshots.
+    /// This takes `self_tails`, so a later walk can't mix in old snapshots.
     fn back_edge_seed(&mut self) -> Option<Vec<Token>> {
         let tails = std::mem::take(&mut self.self_tails);
         let first = tails.first()?;
@@ -408,15 +419,16 @@ impl ReuseWalk {
         (!seed.is_empty()).then_some(seed)
     }
 
-    /// LIFO reuse pairing over `e`. `avail` is the stack of hollowed cells
-    /// dominating the current point; forked (cloned) at branches, cleared at
-    /// non-tail calls, snapshotted at self-tails.
+    /// Pair drops with constructors over `e`, last in first out. `avail` is the
+    /// stack of released cells sure to exist at the current point. It is
+    /// copied at branches, cleared before a `LetJoin`, and recorded at each
+    /// tail call to self.
     fn pair(&mut self, mut e: &mut CoreExpr, avail: &mut Vec<Token>) {
         loop {
             match e {
                 CoreExpr::Drop { local, shape, body } => {
-                    // A 0-payload cell has nothing to reuse: the header is the
-                    // whole allocation.
+                    // A cell with no fields has nothing to reuse, because the
+                    // header is the whole allocation.
                     if let Some(s) = *shape
                         && s.fields > 0
                     {
@@ -429,15 +441,16 @@ impl ReuseWalk {
                     e = body;
                 }
                 CoreExpr::Let { bind, rhs, body } => {
-                    // A non-tail `Call` in `rhs` does NOT invalidate tokens: the
-                    // parked cell lives in this frame's slot, untouched by the
-                    // callee. Frame-limited (ICFP'22 §4) constrains reuse to
-                    // this frame; it does not fence intra-frame call sites.
+                    // A non-tail `Call` in `rhs` does NOT invalidate tokens,
+                    // because the parked cell lives in this frame's slot and
+                    // the callee can't touch it. Frame-limited (ICFP'22 §4)
+                    // keeps reuse inside this frame, but calls made inside the
+                    // frame don't block it.
                     if let Atom::Ctor { fields, reuse, .. } = rhs {
                         let want = ReuseShape::ctor(fields.len());
-                        // Prefer this bind's own slot: `StoreLocal` is about to
-                        // overwrite it, so a same-slot token must be consumed
-                        // here or discarded by the retain below.
+                        // Prefer this bind's own slot. This `Let` is about to
+                        // overwrite it, so a token for that slot must be used
+                        // here or be thrown away by the retain below.
                         let i = avail
                             .iter()
                             .rposition(|t| t.slot == bind.id && t.shape == want)
@@ -446,22 +459,23 @@ impl ReuseWalk {
                             *reuse = Some(avail.remove(i).slot);
                         }
                     }
-                    // The slot now holds a live value; a token for it would read
-                    // that, not a hollowed cell.
+                    // The slot now holds a live value, and a token for it
+                    // would read that instead of a released cell.
                     avail.retain(|t| t.slot != bind.id);
                     e = body;
                 }
                 CoreExpr::LetJoin { body, .. } => {
-                    // A join may contain a `Call` on some path; clear rather
-                    // than walk into it.
+                    // A join may contain a `Call` on some path, so clear the
+                    // stack instead of walking into it.
                     avail.clear();
                     e = body;
                 }
                 CoreExpr::LetCont { cont, body, .. } => {
-                    // A shared cont is entered from many `Goto` edges, and a
-                    // token parked on one edge may be a live slot on another, so
-                    // it starts with an empty stack. Declaring a cont executes
-                    // nothing, so the body's `avail` is untouched.
+                    // A shared continuation is entered from many `Goto` edges,
+                    // and a token parked on one edge may be a live slot on
+                    // another, so it starts with an empty stack. Declaring a
+                    // continuation runs nothing, so the body's `avail` is left
+                    // alone.
                     self.pair(cont, &mut Vec::new());
                     e = body;
                 }
@@ -493,22 +507,24 @@ impl ReuseWalk {
                         } => {
                             self.self_tails.push(avail.clone());
                         }
-                        // A self-tail filter: every other atom, current or
-                        // future, is by definition not a self tail call.
+                        // This only looks for tail calls to self. Every other
+                        // atom, now or later, is not one.
                         #[allow(unknown_lints, wildcard_over_own_enum)]
                         _ => {}
                     }
                     return;
                 }
-                // Tokens die at the edge: the target cont starts empty.
+                // Tokens die at the edge, because the target continuation
+                // starts empty.
                 CoreExpr::Goto(_) => return,
             }
         }
     }
 }
 
-/// Free locals of an atom. A duplicate operand (`add(x, x)`) collapses; the
-/// VM's `PushLocal` dup keeps RC correct.
+/// The free locals of an atom. A repeated operand, as in `add(x, x)`, is
+/// counted once. The VM takes a reference for each operand it passes on, so
+/// the count stays right.
 fn atom_live(a: &Atom) -> Live {
     let mut live = Live::new();
     a.for_each_operand(|id| {
@@ -517,12 +533,14 @@ fn atom_live(a: &Atom) -> Live {
     live
 }
 
-/// Free locals of a `LetJoin` rhs, so `drop_pass` can treat the join as an
-/// opaque atom for liveness. Drops go around a join, never inside it.
+/// The free locals of a `LetJoin`'s right-hand side, so `drop_pass` can treat
+/// the join as a black box for liveness. Drops go around a join, never inside
+/// it.
 fn join_live(e: &CoreExpr) -> Live {
-    /// The spine is walked iteratively so recursion depth is branch nesting,
-    /// never spine length. Ids bound on this spine collect in `scope` and pop
-    /// before returning, so a sibling branch never sees them.
+    /// The spine is walked in a loop, so recursion only goes as deep as the
+    /// branches nest, never as long as the spine. Ids bound on this spine
+    /// collect in `scope` and are removed before returning, so a sibling
+    /// branch never sees them.
     fn go(mut e: &CoreExpr, live: &mut Live, bound: &mut Live) {
         let mut scope: Vec<LocalId> = Vec::new();
         loop {
@@ -546,7 +564,8 @@ fn join_live(e: &CoreExpr) -> Live {
                     e = body;
                 }
                 CoreExpr::LetCont { cont, body, .. } => {
-                    // Collected at the declaration, so a `Goto` adds nothing.
+                    // This is collected at the declaration, so a `Goto` adds
+                    // nothing.
                     go(cont, live, bound);
                     e = body;
                 }
@@ -604,9 +623,9 @@ fn set_diff(a: &Live, b: &Live) -> Vec<LocalId> {
     a.difference(b).copied().collect()
 }
 
-/// A `Goto` whose join was never peeled is a lowering bug. Proceeding with an
-/// empty live-in set would drop locals the continuation still reads, so abort
-/// in release too, like emit's `unbound_join`.
+/// A `Goto` whose join was never peeled is a lowering bug. Carrying on with an
+/// empty live set would drop locals the continuation still reads, so this
+/// aborts in release builds too.
 #[allow(clippy::panic)]
 #[cold]
 #[inline(never)]
@@ -617,12 +636,12 @@ fn unscoped_goto(id: JoinId) -> ! {
     )
 }
 
-/// Take a module toplevel's pinned globals back out of Perceus's hands: no
-/// `Drop` releases one, and no `Ctor` reuses one's cell.
+/// Take a module toplevel's pinned globals back out of Perceus's hands, so no
+/// `Drop` releases one and no `Ctor` reuses one's cell.
 ///
-/// Perceus sees only the toplevel, where a global's last read is not its last
-/// use: function bodies read it through `Load::Global` for as long as the
-/// program runs. Releasing or overwriting it at the toplevel's last read would
+/// Perceus only sees the toplevel, where a global's last read is not its last
+/// use, because function bodies read it through `Load::Global` for as long as
+/// the program runs. Releasing or overwriting it at the toplevel's last read would
 /// free a value the program still holds.
 pub fn keep_globals(mut f: CoreFn) -> CoreFn {
     let pinned: BTreeSet<LocalId> = f
@@ -637,8 +656,8 @@ pub fn keep_globals(mut f: CoreFn) -> CoreFn {
     f
 }
 
-/// [`keep_globals`]'s walk. Iterative along each spine and recursive only into
-/// branches, so a long toplevel costs no stack depth.
+/// The walk for [`keep_globals`]. It loops along each spine and only recurses
+/// into branches, so a long toplevel costs no stack depth.
 fn spare(mut e: &mut CoreExpr, pinned: &BTreeSet<LocalId>) {
     loop {
         if let CoreExpr::Drop { local, body, .. } = &mut *e
@@ -689,8 +708,9 @@ fn spare_atom(a: &mut Atom, pinned: &BTreeSet<LocalId>) {
     }
 }
 
-/// Known allocation shape of a `Let`'s rhs. Only a `Ctor` rhs proves a shape;
-/// `Call`/`PrimOp` results have no statically-known arity.
+/// The known allocation shape of a `Let`'s right-hand side. Only a `Ctor`
+/// proves a shape, because the arity of a `Call` or `PrimOp` result isn't
+/// known at compile time.
 fn ctor_shape(a: &Atom) -> Option<ReuseShape> {
     match a {
         Atom::Ctor { fields, .. } => Some(ReuseShape::ctor(fields.len())),
@@ -707,17 +727,19 @@ mod tests {
     use scarlet_types::type_def::TypeId;
     use scarlet_types::types::PrimIds;
 
-    /// The same arena the elaborator hands `perceus` in the real pipeline.
+    /// The same kind of arena the elaborator hands `perceus` in the real
+    /// pipeline.
     fn pool() -> ResolvedPool {
         ResolvedPool::new(PrimIds::default())
     }
 
-    /// A nominal, non-primitive type: heap-shaped, unknown allocation width.
+    /// A nominal type that isn't a primitive, so it lives on the heap and its
+    /// allocation width is unknown.
     fn con(p: &mut ResolvedPool, id: i32) -> RTy {
         p.mk_con(TypeId(id), &[])
     }
 
-    /// The unboxed `Int` — heap-shaped `false`, so no `Drop`.
+    /// The unboxed `Int`. It isn't on the heap, so it gets no `Drop`.
     fn int_ty(p: &mut ResolvedPool) -> RTy {
         let int = p.prims().int;
         p.mk_con(int, &[])
@@ -792,12 +814,9 @@ mod tests {
         }
     }
 
-    /// `map` shape: match xs { Cons(h,t) -> Cons(h+h, self t) | Nil -> Nil }.
-    /// The Cons arm's tail Cons reuses `%0` across the recursive call; the Nil
-    /// arm's arity-0 ctor does not pair.
-    /// A toplevel keeps every value it pins to a global: Perceus's drop of
-    /// one and a constructor's reuse of its cell both go, while a plain
-    /// temporary's drop stays.
+    /// A toplevel keeps every value it pins to a global. Perceus's drop of one
+    /// and a constructor's reuse of its cell both go, but a plain temporary's
+    /// drop stays.
     #[test]
     fn keep_globals_spares_pinned_globals_only() {
         let mut pool = pool();
@@ -848,6 +867,10 @@ mod tests {
         );
     }
 
+    /// The shape of `map`:
+    /// `match xs { Cons(h,t) -> Cons(h+h, self t) | Nil -> Nil }`. The Cons
+    /// arm's tail Cons reuses `%0` across the recursive call, and the Nil arm's
+    /// constructor has no fields, so it doesn't pair.
     #[test]
     fn map_reuse_across_call_and_arm_shape() {
         let mut pool = pool();
@@ -910,8 +933,8 @@ mod tests {
         assert!(find_drop(&arms[1].1, local(0)));
     }
 
-    /// Straight-line `match xs { Cons(h,t) -> Cons(h,t) }`: the arity-2 tail
-    /// Cons reuses the scrutinee dropped at the arm head.
+    /// Straight-line `match xs { Cons(h,t) -> Cons(h,t) }`. The two-field Cons
+    /// at the tail reuses the scrutinee dropped at the arm head.
     #[test]
     fn match_scrutinee_reused_in_arm() {
         let mut pool = pool();
@@ -936,9 +959,9 @@ mod tests {
         assert_eq!(ctor_reuses(&f.body), vec![Some(local(0))], "{}", f.body);
     }
 
-    /// `dot_loop` shape: two 3-arity ctors, consumed by a Call, then a
-    /// tail-self recursion. Loop-carried reuse pairs each ctor with the
-    /// previous iteration's dropped cell.
+    /// The shape of `dot_loop`: two constructors with three fields each, used by
+    /// a Call, then a tail call to self. Reuse carried round the loop pairs
+    /// each constructor with the cell the previous turn dropped.
     #[test]
     fn loop_carried_reuse_across_tail_self() {
         let mut pool = pool();
@@ -1002,7 +1025,7 @@ mod tests {
         }
     }
 
-    /// Without a self-tail edge nothing loop-carries.
+    /// Without a tail call to self, nothing is carried round a loop.
     #[test]
     fn no_loop_carry_without_tail_self() {
         let mut pool = pool();
@@ -1037,8 +1060,8 @@ mod tests {
         assert_eq!(count_drops(&f.body), 0);
     }
 
-    /// A heap local from a `Call` rhs still drops, but with `shape: None`
-    /// (unknown arity), so it never pairs.
+    /// A heap local bound to a `Call` result still drops, but with
+    /// `shape: None` because its arity is unknown, so it never pairs.
     #[test]
     fn call_result_drops_without_shape() {
         let mut pool = pool();
@@ -1103,9 +1126,10 @@ mod tests {
         assert_eq!(count_drops(els), 1, "els drops %0 at head");
     }
 
-    /// A rigid quantified variable has unknown representation, is handled
-    /// dynamically, and emits no `Drop`. It is the only non-heap answer that is
-    /// not a primitive; a dead nominal bind still drops.
+    /// A rigid quantified variable's representation is unknown, so it is
+    /// handled at runtime and gets no `Drop`. It is the only type that isn't a
+    /// primitive and still counts as not on the heap. A dead nominal bind still
+    /// drops.
     #[test]
     fn bound_is_not_heap_but_a_nominal_is() {
         let mut pool = pool();
@@ -1161,9 +1185,9 @@ mod tests {
         );
     }
 
-    /// Ownership equalisation across `Goto` edges: `%0` is live into the shared
-    /// cont, `%2` is not. Every owned local is released exactly once on every
-    /// path, before the edge or inside the cont, never both.
+    /// Ownership evens out across `Goto` edges. `%0` is live into the shared
+    /// continuation and `%2` isn't. Every owned local is released exactly once
+    /// on every path, before the edge or inside the continuation, never both.
     #[test]
     fn goto_edges_equalise_ownership() {
         let mut pool = pool();
@@ -1211,8 +1235,8 @@ mod tests {
         assert!(!find_drop(els, local(2)), "els returns %2:\n{}", f.body);
     }
 
-    /// A local whose last use is inside the shared cont drops there, once, and
-    /// no edge drops it before its `Goto`.
+    /// A local whose last use is inside the shared continuation drops there,
+    /// once, and no edge drops it before its `Goto`.
     #[test]
     fn drop_inside_shared_cont_not_on_edges() {
         let mut pool = pool();
@@ -1257,7 +1281,7 @@ mod tests {
     }
 
     /// A token parked before the `LetCont` pairs on the fallthrough path but
-    /// never inside the cont, whose token stack starts empty.
+    /// never inside the continuation, whose token stack starts empty.
     #[test]
     fn cont_enters_with_empty_reuse_stack() {
         let mut pool = pool();

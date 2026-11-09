@@ -4,14 +4,15 @@
 
 [Scarlet](https://scarlet.industries) language support for Zed.
 
-- Registers the Scarlet language for `.sca` files: comments, brackets, tab indentation.
-- Diagnostics, completions, and formatting from the Scarlet language server (`scarlet lsp`).
+- Registers the Scarlet language for `.sca` files, with comments, brackets and tab indentation.
+- Syntax highlighting, brackets, indentation and the outline from the tree-sitter grammar in `editors/tree-sitter-scarlet`.
+- Diagnostics, completions and formatting from the Scarlet language server (`scarlet lsp`).
 
-Zed syntax highlighting requires a tree-sitter grammar. Scarlet has none. Language server features do not require one.
+Zed fetches the grammar from the repository at the `rev` pinned in `extension.toml`, so a grammar change reaches Zed only once that `rev` moves.
 
 ## Requirements
 
-The extension runs the `scarlet` binary from `PATH`. Set the path in Zed settings when the binary is elsewhere:
+The extension runs the `scarlet` binary from `PATH`. If the binary is somewhere else, set its path in Zed's settings:
 
 ```json
 {
@@ -27,4 +28,4 @@ The extension runs the `scarlet` binary from `PATH`. Set the path in Zed setting
 
 ## Development
 
-Run `zed: install dev extension` and select `editors/zed`. Zed compiles the extension to WebAssembly. The build requires a Rust toolchain with the `wasm32-wasip2` target.
+Run `zed: install dev extension` and pick `editors/zed`. Zed compiles the extension to WebAssembly, so you need a Rust toolchain with the `wasm32-wasip2` target.

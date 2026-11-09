@@ -94,7 +94,7 @@ pub fn main() {
 
 	// A Decimal carries (units, scale), so 1.10 and 1.1 are structurally distinct
 	// even though they are numerically equal. `decimal::eq` is the numeric answer;
-	// `==` is the structural one. Both are correct — for different questions.
+	// `==` is the structural one. Both are correct, but they answer different questions.
 	d_scaled = decimal::parse('1.10') or decimal::from_int(0)
 	d_plain = decimal::parse('1.1') or decimal::from_int(0)
 	check('Decimal == is structural', False, d_scaled == d_plain)

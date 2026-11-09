@@ -1,24 +1,27 @@
 //! The VM's instructions, and the loader that makes them from Core IR.
 //!
-//! A function's Core IR becomes a flat list of register instructions, once,
-//! when the program loads. A register is a Core IR local: `let %2 = IntAdd(%0,
-//! %1)` becomes `IntAdd { dst: 2, a: 0, b: 1 }`. Each construct maps to one
-//! instruction or a few, so the listing reads like the Core IR it came from.
+//! When the program loads, each function's Core IR becomes a flat list of
+//! register instructions, once. A register is a Core IR local, so
+//! `let %2 = IntAdd(%0, %1)` becomes `Int { dst: 2, op: Add, a: 0, b: 1 }`.
+//! Each construct maps to one instruction or a few, so the listing reads like
+//! the Core IR it came from.
 //!
 //! The VM is being built one feature at a time. A function that uses
 //! something not built yet still loads, marked with what it needs, and only a
 //! call to it stops the run. So a program runs as far as the VM has come.
 //!
-//! A `match` becomes one test per arm, in order: each jumps to the next arm's
-//! test when its value does not fit the arm's pattern, and otherwise falls
-//! into the arm, which reads out the fields the pattern binds. A `LetCont`'s
-//! continuation is placed after its body, and a `Goto` is a jump to it.
+//! A `match` becomes one test per arm, in order. Each test jumps to the next
+//! arm's test when the value does not fit the arm's pattern. Otherwise it
+//! falls into the arm, which reads out the fields the pattern binds. A
+//! `LetCont`'s continuation is placed after its body, and a `Goto` is a jump
+//! to it.
 //!
-//! A call names its callee one of three ways, and each has its own
-//! instruction: a function known when the program loads (`Call`), the
-//! function running now (`CallSelf`, which keeps the closure it runs as, so
-//! a lambda calling itself still sees its captures), and a function value in
-//! a register (`CallValue`). Each has a tail form that replaces the frame.
+//! A call names its callee in one of three ways, and each has its own
+//! instruction. `Call` is for a function known when the program loads.
+//! `CallSelf` is for the function running now, and keeps the closure it runs
+//! as, so a lambda calling itself still sees its captures. `CallValue` is for
+//! a function value in a register. Each has a tail form that replaces the
+//! frame.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -33,7 +36,7 @@ use crate::float::NumOp;
 use crate::show::Types;
 use crate::value::Value;
 
-/// A register: an index into the running function's frame.
+/// A register, which is an index into the running function's frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Reg(pub(crate) u32);
 
@@ -47,8 +50,9 @@ impl Reg {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Arg {
     pub(crate) reg: Reg,
-    /// The call takes the reference the register holds, rather than adding
-    /// one: this is the last the frame does with it ([`moves_on_last_use`]).
+    /// Whether the call takes the reference the register holds instead of
+    /// adding one. It does when this is the last thing the frame does with
+    /// the register ([`moves_on_last_use`]).
     pub(crate) moved: bool,
 }
 
@@ -65,14 +69,14 @@ pub(crate) enum Instr {
         dst: Reg,
         value: Value,
     },
-    /// A new string holding `text`. Made each time the instruction runs,
-    /// until constants get a shared area of their own.
+    /// A new string holding `text`. It is made each time the instruction
+    /// runs, until constants get a shared area of their own.
     Str {
         dst: Reg,
         text: Box<[u8]>,
     },
-    /// A new binary holding the first `len` bits of `bytes`. Made each time
-    /// it runs, like [`Instr::Str`].
+    /// A new binary holding the first `len` bits of `bytes`. It is made each
+    /// time it runs, like [`Instr::Str`].
     BinaryConst {
         dst: Reg,
         bytes: Box<[u8]>,
@@ -85,7 +89,7 @@ pub(crate) enum Instr {
         args: Box<[Reg]>,
     },
     /// A new big int holding `n`, for a constant past a small Int's range.
-    /// Made each time it runs, like [`Instr::Str`].
+    /// It is made each time it runs, like [`Instr::Str`].
     BigInt {
         dst: Reg,
         n: i64,
@@ -122,9 +126,9 @@ pub(crate) enum Instr {
         dst: Reg,
         a: Reg,
     },
-    /// An operator whose operands' type was only known as "a number" when
-    /// the program compiled: Int or Float arithmetic, picked when it runs,
-    /// and `+` of two strings.
+    /// An operator whose operands were only known to be "a number" when the
+    /// program compiled. It does Int or Float arithmetic, picked when it
+    /// runs, and `+` of two strings.
     Num {
         dst: Reg,
         op: NumOp,
@@ -150,24 +154,25 @@ pub(crate) enum Instr {
         parts: Box<[Reg]>,
     },
     /// A new cell for constructor `variant`, holding `fields`. A constructor
-    /// with no fields is a [`Instr::Const`] instead: it needs no cell.
+    /// with no fields needs no cell, so it is an [`Instr::Const`] instead.
     Ctor {
         dst: Reg,
         variant: VariantRef,
         fields: Box<[Reg]>,
-        /// Perceus reuse: a register a [`Instr::DropReuse`] above left a
-        /// hollowed cell in, which this constructor overwrites rather than
-        /// allocating. Anything else there allocates.
+        /// Perceus reuse. This is a register where an [`Instr::DropReuse`]
+        /// above left a hollowed cell, which this constructor overwrites
+        /// instead of allocating. If the register holds anything else, the
+        /// constructor allocates.
         reuse: Option<Reg>,
     },
-    /// Perceus's last use of `reg`: give up its reference now rather than at
-    /// the frame's end.
+    /// Perceus's last use of `reg`. It gives up the reference now instead of
+    /// at the frame's end.
     Drop {
         reg: Reg,
     },
-    /// [`Instr::Drop`] of a cell a constructor below is paired with: when this
-    /// is the last reference, the allocation stays in `reg` to be overwritten
-    /// instead of freed.
+    /// An [`Instr::Drop`] of a cell that a constructor below is paired with.
+    /// When this is the last reference, the allocation stays in `reg` to be
+    /// overwritten instead of freed.
     DropReuse {
         reg: Reg,
     },
@@ -199,7 +204,7 @@ pub(crate) enum Instr {
         args: Box<[Arg]>,
     },
     /// A new closure cell running `func` over `captures`. A function with no
-    /// captures is a [`Instr::Const`] instead: it needs no cell.
+    /// captures needs no cell, so it is an [`Instr::Const`] instead.
     Closure {
         dst: Reg,
         func: FuncIdx,
@@ -240,8 +245,8 @@ pub(crate) enum Instr {
         n: i64,
         to: u32,
     },
-    /// Continue at `to` unless `src` is the Float `x`, as `==` has it: the
-    /// two zeros match each other.
+    /// Continue at `to` unless `src` is the Float `x`, compared as `==` does,
+    /// so the two zeros match each other.
     JumpUnlessFloat {
         src: Reg,
         x: f64,
@@ -295,7 +300,7 @@ pub(crate) enum Instr {
         dst: Reg,
         a: Reg,
     },
-    /// `start..end`: a range of Ints, which stores only its two ends.
+    /// `start..end`, a range of Ints that stores only its two ends.
     Range {
         dst: Reg,
         start: Reg,
@@ -324,13 +329,13 @@ pub(crate) enum Instr {
         src: Reg,
         n: Reg,
     },
-    /// `[x, y, ..xs]`: the array in `rest` with `front` before it, in order.
+    /// `[x, y, ..xs]`, which is the array in `rest` with `front` before it.
     ArrayPrepend {
         dst: Reg,
         front: Box<[Reg]>,
         rest: Reg,
     },
-    /// `[..xs, x, y]`: the array in `rest` with `back` after it, in order.
+    /// `[..xs, x, y]`, which is the array in `rest` with `back` after it.
     ArrayAppend {
         dst: Reg,
         rest: Reg,
@@ -342,23 +347,23 @@ pub(crate) enum Instr {
         a: Reg,
         b: Reg,
     },
-    /// `xs[a..b]`: `Ok` of the elements of the array in `src` from `start` up
-    /// to `end`, or `Err(Nil)` when that range is not inside it.
+    /// `xs[a..b]`. It gives `Ok` of the elements of the array in `src` from
+    /// `start` up to `end`, or `Err(Nil)` when that range is not inside it.
     ArraySlice {
         dst: Reg,
         src: Reg,
         start: Reg,
         end: Reg,
     },
-    /// `xs[i]`: `Some` of element `index` of the array in `src`, or `None`
-    /// when it has none.
+    /// `xs[i]`. It gives `Some` of element `index` of the array in `src`, or
+    /// `None` when it has no such element.
     ArrayIndex {
         dst: Reg,
         src: Reg,
         index: Reg,
     },
-    /// `xs[i] or d`: element `index` of the array in `src`, or `default`
-    /// when it has none.
+    /// `xs[i] or d`. It gives element `index` of the array in `src`, or
+    /// `default` when it has no such element.
     ArrayIndexOr {
         dst: Reg,
         src: Reg,
@@ -371,9 +376,9 @@ pub(crate) enum Instr {
         src: Reg,
         index: u16,
     },
-    /// Stop the run: the program broke a promise the compiler makes, and this
-    /// says which. Placed where only such a program can reach, like after a
-    /// `match`'s last arm.
+    /// Stop the run, because the program broke a promise the compiler makes.
+    /// `why` says which. The loader puts this where only such a program can
+    /// reach, like after a `match`'s last arm.
     Bad {
         why: &'static str,
     },
@@ -446,10 +451,10 @@ impl Instr {
 /// Where a Core IR expression's value goes.
 #[derive(Clone, Copy)]
 enum Dest {
-    /// Returned from the function: a `Tail` is a return or a tail call.
+    /// Returned from the function, so a `Tail` is a return or a tail call.
     Return,
-    /// Written to `reg`, then on to the code after a `LetJoin`: a `Tail` is
-    /// a value, and a call in it is an ordinary call.
+    /// Written to `reg`, then on to the code after a `LetJoin`. A `Tail` here
+    /// is a value, and a call in it is an ordinary call.
     Join { reg: Reg, after: Label },
 }
 
@@ -461,11 +466,11 @@ struct Label(usize);
 /// in the `PrimOp`'s order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BitsOp {
-    /// `<<v:size(b)>>` of an Int: its low `b` bits.
+    /// `<<v:size(b)>>` of an Int, which is its low `b` bits.
     FromInt,
-    /// `<<v:size(b)>>` of a binary: its first `b` bits.
+    /// `<<v:size(b)>>` of a binary, which is its first `b` bits.
     Take,
-    /// `<<s:utf8>>`: a string's bytes.
+    /// `<<s:utf8>>`, which is a string's bytes.
     FromString,
     /// A literal's segments, joined.
     Concat,
@@ -500,7 +505,8 @@ pub(crate) enum IntOp {
 #[derive(Debug)]
 pub(crate) enum Func {
     Ready(Body),
-    /// Uses something the VM does not run yet; this says what.
+    /// The function uses something the VM does not run yet, and this says
+    /// what.
     NotBuiltYet(String),
 }
 
@@ -513,7 +519,7 @@ pub(crate) struct Body {
     pub(crate) params: Box<[Reg]>,
     pub(crate) instrs: Box<[Instr]>,
     /// Registers a constructor reuses. A call to self in tail position keeps
-    /// these, so a loop can overwrite the cell its last turn gave up; every
+    /// these, so a loop can overwrite the cell its last turn gave up. Every
     /// other register is released.
     pub(crate) carried: Box<[Reg]>,
 }
@@ -521,7 +527,8 @@ pub(crate) struct Body {
 /// A whole loaded program.
 pub(crate) struct Code {
     pub(crate) fns: TiVec<FuncIdx, Func>,
-    /// Each module's toplevel, in the order they run, the entry file's last.
+    /// Each module's toplevel in the order they run, with the entry file's
+    /// last.
     pub(crate) toplevels: Vec<Func>,
     pub(crate) main: Option<FuncIdx>,
     pub(crate) globals: u32,
@@ -588,7 +595,7 @@ struct Loader<'c> {
     /// One past the highest register the function names. A value that no
     /// local holds, like a tail expression's, gets a register from here.
     next: u32,
-    /// Locals a constructor reuses, so their `Drop` hollows rather than frees.
+    /// Locals a constructor reuses, so their `Drop` hollows instead of frees.
     reused: BTreeSet<LocalId>,
 }
 
@@ -1257,14 +1264,13 @@ fn built(i: Intrinsic, argc: usize) -> bool {
     argc == arity
 }
 
-/// One past the highest local `e` binds or reads.
 /// A call followed by the `Drop` of one of its own arguments hands the callee
-/// the reference the register holds, rather than adding one and giving it up
+/// the reference the register holds, instead of adding one and giving it up
 /// after the call returns. The callee then sees a value nothing else holds,
-/// which is what lets it overwrite the cell rather than allocate.
+/// which is what lets it overwrite the cell instead of allocating.
 ///
-/// The `Drop` stays where it is: the register it names is empty by the time it
-/// runs, so it does nothing, and a jump that lands on it without the call
+/// The `Drop` stays where it is. The register it names is empty by the time
+/// it runs, so it does nothing, and a jump that lands on it without the call
 /// having run still finds the value and releases it. A `DropReuse` is left
 /// alone, so a cell this frame has already paired with a constructor of its
 /// own stays here.
@@ -1300,8 +1306,8 @@ fn moves_on_last_use(instrs: &mut [Instr]) {
             if dst == reg {
                 continue;
             }
-            // The last position holding it: an earlier one still reads the
-            // register, so only one of them may take what it holds.
+            // Only the last position holding it may take what it holds,
+            // because an earlier one still reads the register.
             if let Some(last) = (0..argc)
                 .rev()
                 .find(|&k| args.get(k).is_some_and(|a| a.reg == reg))
@@ -1314,8 +1320,8 @@ fn moves_on_last_use(instrs: &mut [Instr]) {
 }
 
 /// Every local a constructor in `e` overwrites in place. `Atom`'s operand walk
-/// leaves `reuse` out on purpose — it names a cell to write over, not a value
-/// read — so this reads the atoms itself.
+/// leaves `reuse` out on purpose, because it names a cell to write over, not
+/// a value read. So this reads the atoms itself.
 fn reused_locals(e: &CoreExpr) -> BTreeSet<LocalId> {
     let mut out = BTreeSet::new();
     let mut note = |a: &Atom| {
@@ -1354,6 +1360,7 @@ fn reused_locals(e: &CoreExpr) -> BTreeSet<LocalId> {
     out
 }
 
+/// One past the highest local `e` binds or reads.
 fn highest_local(e: &CoreExpr) -> u32 {
     let mut top = 0;
     let mut note = |l: LocalId| top = top.max(l.0 + 1);

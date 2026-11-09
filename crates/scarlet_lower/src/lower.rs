@@ -1,35 +1,37 @@
-//! Typed IR → Core IR.
+//! Lowering turns typed IR into Core IR.
 //!
-//! [`lower`] turns a [`TypedProgram`] into a [`CoreProgram`]: every
-//! subexpression becomes a `Let{bind,rhs,body}`, so evaluation order is an
-//! explicit right-nested spine and every operand is a [`LocalId`].
+//! [`lower`] turns a [`TypedProgram`] into a [`CoreProgram`]. Every
+//! subexpression becomes a `Let{bind,rhs,body}`, so evaluation order is spelled
+//! out as a right-nested spine of `Let`s and every operand is a [`LocalId`].
 //!
-//! Lowering is total. It takes `&TypedProgram` and returns `CoreProgram` with
-//! no `&mut` and no `Result`, because everything it would have to ask for is
-//! already a field: a type is an [`RTy`], a name is a [`ValueRef`], a callee is
-//! a [`TypedCallee`]. Upstream is not total, though: a broken invariant reaches
-//! the elaborator's `elaborator_bug`, which aborts rather than diagnosing.
+//! Lowering never fails. It takes `&TypedProgram` and returns `CoreProgram`
+//! with no `&mut` and no `Result`, because everything it would have to ask for
+//! is already a field: a type is an [`RTy`], a name is a [`ValueRef`] and a
+//! callee is a [`TypedCallee`]. The earlier stages can fail, though. A broken
+//! invariant there reaches the elaborator's `elaborator_bug`, which aborts
+//! instead of reporting a diagnostic.
 //!
-//! ## Builder discipline
+//! ## How the builder works
 //!
-//! ANF construction is inside-out: recursing into a subexpression yields the
-//! `LocalId` its value lands in plus a list of `Let`s to prepend. [`Lower`]
-//! accumulates those in `spine` and [`Lower::seal`] folds them around the
-//! eventual tail. Join points (`If`/`Match`) seal each arm on its own so no
-//! `Let` floats across a branch.
+//! ANF is built from the inside out. Recursing into a subexpression gives back
+//! the `LocalId` its value lands in, plus a list of `Let`s to put in front.
+//! [`Lower`] collects those in `spine`, and [`Lower::seal`] folds them around
+//! the tail once it's known. Join points (`If` and `Match`) seal each arm on
+//! its own, so no `Let` moves across a branch.
 //!
 //! ## Joins in operand position
 //!
-//! An `if`/`match`/short-circuit where a value is needed lowers via
-//! [`CoreExpr::LetJoin`]: sealed as its own tree whose `Tail`s produce a value,
-//! then bound like any other operand.
+//! An `if`, `match` or short-circuit where a value is needed lowers through
+//! [`CoreExpr::LetJoin`]. It is sealed as its own tree whose `Tail`s produce a
+//! value, and then bound like any other operand.
 //!
 //! A `Let`/`Seq` spine is not one of those. It is straight-line code, so
 //! [`Lower::atom`] splices its bindings onto the enclosing spine. Sealing it as
-//! a join would bind the value twice and hand `Perceus` the join's type rather
-//! than the value's, turning a shaped `Drop` into a generic one.
+//! a join would bind the value twice and hand Perceus the join's type instead
+//! of the value's, which turns a `Drop` that knows the value's shape into a
+//! generic one.
 //!
-//! ## Whole-program, one pass
+//! ## One pass over the whole program
 //!
 //! `lower` walks `TypedProgram::fns` in order, so `CoreProgram::fns[i]` is the
 //! body of `FuncIdx(i)` and every `TypedCallee::Known(i)` operand is already
@@ -37,10 +39,10 @@
 //!
 //! ## The elaborator owns the constant pool
 //!
-//! Interning is a mutation, so `lower` does none: it copies the pool verbatim
-//! and every `Atom::Const` names a [`ConstId`] read off the node. Even integers
-//! no source literal spells (an array pattern's length, a `<<>>` walk's bit
-//! cursor) are pooled at elaboration time, so the pool is final by construction.
+//! Interning changes the pool, so `lower` never interns. Every `Atom::Const`
+//! names a [`ConstId`] read from the node. Even integers no source literal
+//! writes, like an array pattern's length or a `<<>>` walk's bit cursor, are
+//! pooled during elaboration, so the pool is already final when `lower` runs.
 
 use std::collections::VecDeque;
 
@@ -55,8 +57,9 @@ use scarlet_elaborate::{
 use scarlet_ir::tivec::TiVec;
 use scarlet_types::types::StrId;
 
-/// Checked narrowing for a [`PrimOp`] field or element index. Overflow aborts:
-/// silently truncating would address the wrong field.
+/// Narrow a [`PrimOp`] field or element index to `u16`, checking it fits. An
+/// index that doesn't fit aborts, because silently truncating it would read
+/// the wrong field.
 #[allow(clippy::panic)]
 fn idx16<T: TryInto<u16> + Copy + std::fmt::Debug>(i: T) -> u16 {
     match i.try_into() {
@@ -68,10 +71,10 @@ fn idx16<T: TryInto<u16> + Copy + std::fmt::Debug>(i: T) -> u16 {
     }
 }
 
-/// A `TypedFn` misused a [`BindingId`]: read before bound, or never counted by
-/// `TypedFn::binds`. Papering over it is silent, since any substituted
-/// `LocalId` names a live local and the program returns a wrong answer. Aborts
-/// in release too.
+/// A `TypedFn` misused a [`BindingId`], by reading it before binding it or by
+/// not counting it in `TypedFn::binds`. Carrying on would hide the bug,
+/// because any `LocalId` we put in its place names a live local and the
+/// program returns a wrong answer. So this aborts in release builds too.
 #[allow(clippy::panic)]
 #[cold]
 #[inline(never)]
@@ -81,11 +84,11 @@ fn binding_bug(b: BindingId, why: &str) -> ! {
 
 /// Lower a whole typechecked module.
 ///
-/// Module-scope decls come back pinned: a toplevel `Let` whose
-/// [`TypedBind::global`] named an entry-frame slot carries it on
-/// [`CoreBind::global`], recoverable via [`CoreExpr::toplevel_globals`]. The
-/// pairing comes from the `TypedBind`, so it cannot drift from the
-/// `PushGlobal slot` already-emitted fn bodies use.
+/// Module-scope declarations come back pinned to their slots. A toplevel `Let`
+/// whose [`TypedBind::global`] named an entry-frame slot carries it on
+/// [`CoreBind::global`], and [`CoreExpr::toplevel_globals`] can read it back.
+/// The pairing comes from the `TypedBind`, so it can't drift from the
+/// `Load::Global` slot that fn bodies read it from.
 pub fn lower(p: &TypedProgram) -> CoreProgram {
     let mut fns = Vec::with_capacity(p.fns.len());
     for (i, f) in p.fns.iter().enumerate() {
@@ -104,7 +107,7 @@ pub fn lower(p: &TypedProgram) -> CoreProgram {
     }
 }
 
-/// Lower one function. Each param binds under the [`BindingId`] its
+/// Lower one function. Each param is bound under the [`BindingId`] its
 /// [`TypedBind`] carries.
 fn lower_fn(temps: TempTys, f: &TypedFn) -> CoreFn {
     let mut lo = Lower::new(temps, f.binds);
@@ -125,15 +128,16 @@ fn lower_fn(temps: TempTys, f: &TypedFn) -> CoreFn {
     }
 }
 
-/// One pending binding on the spine, sealed around a tail later. `Join` is a
-/// `LetJoin`'s deferred rhs: a full expression tree in operand position.
+/// One binding waiting on the spine, to be sealed around a tail later. `Join`
+/// holds a `LetJoin`'s right-hand side, which is a full expression tree in
+/// operand position.
 enum Pending {
     Let { bind: CoreBind, rhs: Atom },
     Join { bind: CoreBind, join: CoreExpr },
 }
 
-/// What [`Lower::nested_arm_body`] lowers once every residual sub-pattern has
-/// been bound.
+/// What [`Lower::nested_arm_body`] lowers once every remaining sub-pattern
+/// has been bound.
 #[derive(Clone)]
 enum ArmLeaf<'p> {
     Body(&'p TypedExpr),
@@ -141,36 +145,36 @@ enum ArmLeaf<'p> {
         guard: &'p TypedExpr,
         body: &'p TypedExpr,
     },
-    /// Resume reading a `<<>>` pattern's remaining segments. Reached after the
-    /// current segment's value pattern has bound its names — those bindings are
-    /// in scope for the next segment's `size(...)` expression.
+    /// Carry on reading a `<<>>` pattern's remaining segments. We get here
+    /// after the current segment's value pattern has bound its names, so those
+    /// bindings are in scope for the next segment's `size(...)` expression.
     BinCont(Box<BinCont<'p>>),
-    /// An alternative of a binding or-pattern matched, whose commit path
-    /// cannot be shared. Resume with the sub-patterns queued after the
-    /// or-pattern, then `leaf`, falling to `outer` rather than to the next
-    /// alternative: the first match commits, and a later failure goes to the
-    /// next arm.
+    /// An alternative of an or-pattern that binds names has matched, so its
+    /// commit path can't be shared. Carry on with the sub-patterns queued
+    /// after the or-pattern, then `leaf`. A failure falls to `outer` and not to
+    /// the next alternative, because the first match commits and a later
+    /// failure goes to the next arm.
     OrBody {
         rest_nested: Vec<(LocalId, &'p TypedPat)>,
         leaf: Box<ArmLeaf<'p>>,
         outer: ArmFall,
     },
-    /// A bind-free or-pattern alternative matched: jump to the commit
-    /// continuation, lowered once for all alternatives.
+    /// An alternative of an or-pattern that binds nothing has matched. Jump to
+    /// the commit continuation, which is lowered once for all alternatives.
     OrCommit(JoinId),
 }
 
-/// Suspended state of a `<<>>` pattern walk: `segs` are the segments still to
-/// read at bit offset `cursor` into `bin` (whose bit length is `total`). When
-/// `segs` is exhausted the trailing `rest`/exact-length check runs, then
-/// `after` (any nested sub-patterns queued after the binary) and finally
-/// `then` (the arm body / guard).
+/// The paused state of a `<<>>` pattern walk. `segs` are the segments still
+/// to read, starting at bit offset `cursor` into `bin`, whose bit length is
+/// `total`. When `segs` runs out, the trailing `rest` or exact-length check
+/// runs, then `after` (any nested sub-patterns queued after the binary), and
+/// finally `then` (the arm body or guard).
 #[derive(Clone)]
 struct BinCont<'p> {
     bin: LocalId,
     total: LocalId,
     cursor: LocalId,
-    /// The pooled `Int` `0` off the enclosing [`TypedPat::Bin`], so a `:utf8`
+    /// The pooled `Int` `0` from the enclosing [`TypedPat::Bin`], so a `:utf8`
     /// segment can test its decoded width without interning one.
     zero: ConstId,
     segs: &'p [TypedBinPatSeg],
@@ -179,8 +183,9 @@ struct BinCont<'p> {
     then: ArmLeaf<'p>,
 }
 
-/// The position of a `<<>>` walk at one segment boundary, bundled so
-/// [`Lower::bin_read`] cannot take its same-typed locals in the wrong order.
+/// The position of a `<<>>` walk at one segment boundary. The locals are
+/// bundled so [`Lower::bin_read`] can't take them, all of one type, in the
+/// wrong order.
 #[derive(Clone, Copy)]
 struct BinWalk {
     bin: LocalId,
@@ -189,32 +194,34 @@ struct BinWalk {
 }
 
 /// How wide a fixed-position `<<>>` segment read is. A `Sized` read gets the
-/// `end <= total` bounds guard; a `Remainder` read is `total - cursor` wide by
-/// construction, so its guard is vacuous and skipped.
+/// `end <= total` bounds check. A `Remainder` read is always `total - cursor`
+/// wide, so its check could never fail and is skipped.
 enum SegWidth<'p> {
     /// The segment's size in bits, with the unit multiplier already folded in.
     Sized(&'p TypedExpr),
-    /// A sizeless trailing `:binary` segment: the rest of the binary.
+    /// A trailing `:binary` segment with no size, which takes the rest of the
+    /// binary.
     Remainder,
 }
 
 /// Where control goes when a guard or nested sub-pattern fails after the arm's
-/// `CorePat` head matched. A [`JoinId`] label, so an arm with many failure
-/// edges lowers its fallthrough once and `Goto`s it from each.
+/// `CorePat` head matched. It is a [`JoinId`] label, so an arm with many
+/// failure edges lowers its fallthrough once and `Goto`s it from each.
 #[derive(Clone, Copy)]
 enum ArmFall {
-    /// Jump to the join that resumes matching: the remaining arms, or the next
-    /// alternative of an enclosing or-pattern.
+    /// Jump to the join that carries on matching, with the remaining arms or
+    /// the next alternative of an enclosing or-pattern.
     Join(JoinId),
-    /// No join was minted because [`arm_fallible`] said the arm cannot fail.
-    /// Consulting it aborts rather than emit a proven-absent failure edge.
+    /// No join was minted, because [`arm_fallible`] said the arm can't fail.
+    /// Using it aborts instead of emitting a failure edge we proved can't
+    /// exist.
     Unreachable,
 }
 
-/// Whether an [`Lower::expr_tail`] walk is on the function's outermost
-/// `Let`/`Seq` spine or a nested one. Only outermost bindings own frame slots
-/// (see [`Lower::let_bind_at`]). [`lower_fn`] passes `Outer`, everyone else
-/// `Nested`.
+/// Whether a [`Lower::expr_tail`] walk is on the function's outermost
+/// `Let`/`Seq` spine or a nested one. Only bindings on the outermost spine own
+/// frame slots (see [`Lower::let_bind_at`]). [`lower_fn`] passes `Outer`, and
+/// every other caller passes `Nested`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SpinePos {
     Outer,
@@ -224,18 +231,18 @@ enum SpinePos {
 struct Lower {
     temps: TempTys,
     next: u32,
-    /// [`RTy`] for every minted [`LocalId`], indexed by `id.0`.
+    /// The [`RTy`] of every minted [`LocalId`], indexed by `id.0`.
     tys: Vec<RTy>,
-    /// `BindingId → LocalId`, dense over `TypedFn::binds`. Distinct source
-    /// bindings have distinct `BindingId`s, so there is nothing to shadow and
-    /// nothing to unwind leaving a scope.
+    /// Maps `BindingId → LocalId`, densely over `TypedFn::binds`. Different
+    /// source bindings have different `BindingId`s, so nothing is shadowed and
+    /// nothing has to be undone when a scope ends.
     binds: Vec<Option<LocalId>>,
-    /// Let-bindings emitted so far in the current linear segment; folded
-    /// around the segment's tail by [`Self::seal`].
+    /// The `Let`s emitted so far in the current straight-line segment.
+    /// [`Self::seal`] folds them around the segment's tail.
     spine: Vec<Pending>,
-    /// `Goto` count per minted [`JoinId`]. A join nothing targets is not
-    /// materialized as a `LetCont`, which keeps an arm that could fail in shape
-    /// but never does on the flat no-continuation path.
+    /// How many `Goto`s target each minted [`JoinId`]. A join nothing targets
+    /// is never turned into a `LetCont`. So an arm whose shape could fail, but
+    /// never actually does, stays on the flat path with no continuation.
     join_uses: TiVec<JoinId, u32>,
 }
 
@@ -259,14 +266,14 @@ impl Lower {
         id
     }
 
-    /// The `RTy` recorded for `id` at mint time.
+    /// The `RTy` recorded for `id` when it was minted.
     fn bind_ty(&self, id: LocalId) -> RTy {
         self.tys[id.0 as usize]
     }
 
-    /// Record the local `b` names. An out-of-range `BindingId` means the
-    /// elaborator miscounted the body's binders, so it aborts rather than let
-    /// [`Self::local`] invent a value later.
+    /// Record the local `b` names. A `BindingId` out of range means the
+    /// elaborator miscounted the body's binders, so this aborts instead of
+    /// letting [`Self::local`] make up a value later.
     fn bind(&mut self, b: BindingId, id: LocalId) {
         match self.binds.get_mut(b.0 as usize) {
             Some(slot) => *slot = Some(id),
@@ -274,9 +281,10 @@ impl Lower {
         }
     }
 
-    /// The local a [`BindingId`] names. A `TypedProgram` binds before it reads,
-    /// so this cannot fail. It must not fail quietly either: any default would
-    /// be a live local, so the program would run and return a wrong answer.
+    /// The local a [`BindingId`] names. A `TypedProgram` always binds before it
+    /// reads, so this can't fail. It must not fail quietly either, because any
+    /// default would be a live local, and the program would run and return a
+    /// wrong answer.
     fn local(&self, b: BindingId) -> LocalId {
         match self.binds.get(b.0 as usize) {
             Some(Some(id)) => *id,
@@ -305,7 +313,7 @@ impl Lower {
         id
     }
 
-    /// Mint a fresh join-point label, initially targeted by no `Goto`.
+    /// Mint a new join-point label, which no `Goto` targets yet.
     fn fresh_join(&mut self) -> JoinId {
         self.join_uses.push(0)
     }
@@ -322,9 +330,9 @@ impl Lower {
         self.join_uses[j] > 0
     }
 
-    /// Retract the `Goto` counts inside a subtree assembly is discarding.
-    /// Without this a join whose every surviving edge was discarded would still
-    /// be materialized as a dead `LetCont`.
+    /// Take back the `Goto` counts inside a subtree that assembly is throwing
+    /// away. Without this, a join whose remaining edges were all thrown away
+    /// would still be turned into a dead `LetCont`.
     fn retract_gotos(&mut self, e: &CoreExpr) {
         match e {
             CoreExpr::Goto(j) => self.join_uses[*j] -= 1,
@@ -351,8 +359,8 @@ impl Lower {
     }
 
     /// Push `let %id = rhs` for a source binding that owns its slot. The
-    /// [`CoreBind`] carries `bind.global` from construction, so the entry-frame
-    /// pin is never patched on afterwards.
+    /// [`CoreBind`] carries `bind.global` from the moment it's built, so the
+    /// entry-frame pin is never patched on afterwards.
     fn let_pinned(&mut self, bind: &TypedBind, rhs: Atom) -> LocalId {
         let id = self.fresh(bind.ty);
         self.spine.push(Pending::Let {
@@ -381,15 +389,15 @@ impl Lower {
         id
     }
 
-    /// Bind an already-pooled `Int` constant to a fresh local. Every integer a
-    /// lowered body pushes was interned by the elaborator.
+    /// Bind an already-pooled `Int` constant to a new local. The elaborator
+    /// interned every integer a lowered body uses.
     fn int_const(&mut self, c: ConstId) -> LocalId {
         let int_t = self.temps.int;
         self.let_(int_t, Atom::Const(c))
     }
 
-    /// Fold every pending let (from `mark` onward) around `tail`, innermost
-    /// first, producing the sealed `CoreExpr` for this segment.
+    /// Fold every waiting `Let` from `mark` onward around `tail`, innermost
+    /// first, and return the sealed `CoreExpr` for this segment.
     fn seal(&mut self, mark: usize, tail: CoreExpr) -> CoreExpr {
         let mut e = tail;
         for p in self.spine.drain(mark..).rev() {
@@ -409,7 +417,7 @@ impl Lower {
         e
     }
 
-    /// Run `f` in a fresh spine segment, then seal every `Let` it pushed around
+    /// Run `f` in a new spine segment, then seal every `Let` it pushed around
     /// the tail it produced.
     fn sealed(&mut self, f: impl FnOnce(&mut Self) -> CoreExpr) -> CoreExpr {
         let mark = self.spine.len();
@@ -417,14 +425,16 @@ impl Lower {
         self.seal(mark, tail)
     }
 
-    /// Lower `e` as a self-contained tree of result type `result_ty`: a join
-    /// arm in operand position, or the function's tail. Opens a fresh spine.
+    /// Lower `e` as a self-contained tree with result type `result_ty`, such as
+    /// a join arm in operand position or the function's tail. It opens a new
+    /// spine.
     fn expr_as(&mut self, e: &TypedExpr, result_ty: RTy) -> CoreExpr {
         self.sealed(|lo| lo.expr_tail(e, result_ty, SpinePos::Nested))
     }
 
-    /// Lower `e` in tail position. The `Let`/`Seq` spine is walked iteratively:
-    /// a module toplevel is one `Let` per declaration and can be thousands deep.
+    /// Lower `e` in tail position. The `Let`/`Seq` spine is walked in a loop,
+    /// because a module toplevel is one `Let` per declaration and can be
+    /// thousands deep.
     fn expr_tail(&mut self, e: &TypedExpr, result_ty: RTy, spine: SpinePos) -> CoreExpr {
         let mut e = e;
         loop {
@@ -475,14 +485,14 @@ impl Lower {
 
     /// `let bind = init` on the spine at `spine` position.
     ///
-    /// Two kinds of binding own their slot rather than aliasing the local the
-    /// initialiser landed in: a module-scope binding, which fn bodies address
-    /// by its own `PushGlobal` slot, and a source-named `let` on the outermost
-    /// spine, which owes the source a `StoreLocal`/`PushLocal` pair.
+    /// Two kinds of binding own their slot instead of reusing the local the
+    /// initialiser landed in. One is a module-scope binding, which fn bodies
+    /// read from its own entry-frame slot. The other is a `let` with a source
+    /// name on the outermost spine, which gets a local of its own, as written.
     ///
-    /// Everything else collapses into its initialiser: an elaborator temp names
-    /// no source slot, and a named `let` on a nested spine is local to that
-    /// segment, where its value already has a home.
+    /// Everything else folds into its initialiser. An elaborator temporary
+    /// names no source slot, and a named `let` on a nested spine is local to
+    /// that segment, where its value already has a home.
     fn let_bind_at(&mut self, bind: &TypedBind, init: &TypedExpr, spine: SpinePos) {
         let owns_slot =
             bind.global.is_some() || (spine == SpinePos::Outer && bind.name != StrId::NONE);
@@ -496,14 +506,14 @@ impl Lower {
 
     /// `let bind = <init>` for a binding that owns its slot. Both branches mint
     /// the `CoreBind` themselves, so a module-scope binding carries its
-    /// entry-frame pin from construction.
+    /// entry-frame pin from the start.
     ///
-    /// Normally its own `Let`, even when `init` already lowered to a local:
-    /// `let y = x` is two frame slots.
+    /// It's normally its own `Let`, even when `init` already lowered to a
+    /// local, so `let y = x` is two frame slots.
     ///
-    /// A short-circuit is the exception: its `LetJoin` is already the binding's
-    /// single store, so copying again would add a store and leave a dead alias
-    /// to drop.
+    /// A short-circuit is the exception. Its `LetJoin` is already the
+    /// binding's one store, so copying again would add a store and leave a
+    /// dead alias to drop.
     fn let_bound(&mut self, bind: &TypedBind, init: &TypedExpr) -> LocalId {
         match init {
             // Like `atom`'s short-circuit arm, except the join is the binding.
@@ -520,7 +530,7 @@ impl Lower {
         }
     }
 
-    /// Lower `e` to a `LocalId` operand, never leaving a bare atom.
+    /// Lower `e` to a `LocalId` operand, so it never leaves a bare atom.
     fn operand(&mut self, e: &TypedExpr) -> LocalId {
         if let TypedExpr::Var {
             place: ValueRef::Local(b),
@@ -530,8 +540,8 @@ impl Lower {
             return self.local(*b);
         }
         let (a, ty) = self.atom(e);
-        // Forwarding by design: any non-Local atom, current or future, gets
-        // let-bound; only an existing local skips the binding.
+        // The wildcard is on purpose. Any atom that isn't a local, now or
+        // later, gets bound with a `Let`, and only an existing local skips it.
         #[allow(unknown_lints, wildcard_over_own_enum)]
         match a {
             Atom::Local(id) => id,
@@ -539,8 +549,8 @@ impl Lower {
         }
     }
 
-    /// Lower a control-flow expression appearing in operand position by
-    /// sealing it as its own tree and binding the result via a `LetJoin`.
+    /// Lower a control-flow expression in operand position by sealing it as
+    /// its own tree and binding the result with a `LetJoin`.
     fn join_operand(&mut self, e: &TypedExpr, ty: RTy) -> LocalId {
         let join = self.expr_as(e, ty);
         self.let_join(ty, join)
@@ -551,7 +561,7 @@ impl Lower {
     /// A `Let`/`Seq` spine here is straight-line code, so its bindings splice
     /// onto the current spine and its tail becomes the atom. Sealing it as a
     /// join would bind the value twice and hide its type behind the join's,
-    /// degrading a shaped `Drop` to a generic one.
+    /// which turns a `Drop` that knows the value's shape into a generic one.
     fn atom(&mut self, e: &TypedExpr) -> (Atom, RTy) {
         let mut e = e;
         loop {
@@ -574,7 +584,7 @@ impl Lower {
             TypedExpr::Const { value, .. } => Atom::Const(*value),
             TypedExpr::Nil { .. } => Atom::Nil,
             TypedExpr::Var { place, .. } => match *place {
-                // A bound local's type was fixed when the bind was minted.
+                // A bound local's type was fixed when its bind was minted.
                 ValueRef::Local(b) => {
                     let id = self.local(b);
                     return (Atom::Local(id), self.bind_ty(id));
@@ -585,15 +595,15 @@ impl Lower {
             },
             // Only `b` is conditional, so `a` lowers onto the enclosing spine
             // and only the `If` is sealed as the join. Sealing `a` inside would
-            // sink its `Let`, and the `Drop` of its last use, into the join.
+            // push its `Let`, and the `Drop` after its last use, into the join.
             TypedExpr::And { lhs, rhs, .. } | TypedExpr::Or { lhs, rhs, .. } => {
                 let and = matches!(e, TypedExpr::And { .. });
                 let join = self.short_circuit(lhs, rhs, and, ty);
                 let id = self.let_join(ty, join);
                 return (Atom::Local(id), self.bind_ty(id));
             }
-            // Control flow in operand position: seal it and bind the join.
-            // `Let`/`Seq` never reach here, but naming them keeps the match
+            // Control flow in operand position is sealed and bound as a join.
+            // `Let` and `Seq` never get here, but naming them keeps the match
             // exhaustive without a wildcard.
             TypedExpr::Let { .. }
             | TypedExpr::Seq { .. }
@@ -602,7 +612,7 @@ impl Lower {
                 let id = self.join_operand(e, ty);
                 return (Atom::Local(id), self.bind_ty(id));
             }
-            // The checker already specialised e.g. `Add` to `AddInt`.
+            // The elaborator has already specialised `Add` to `IntAdd`, say.
             TypedExpr::Binary { op, lhs, rhs, .. } => {
                 let l = self.operand(lhs);
                 let r = self.operand(rhs);
@@ -675,7 +685,7 @@ impl Lower {
         out
     }
 
-    /// A dynamic callee is evaluated before the arguments, left to right.
+    /// A dynamic callee is evaluated first, then the arguments, left to right.
     fn call(&mut self, callee: &TypedCallee, args: &[TypedExpr]) -> Atom {
         match callee {
             TypedCallee::Known(fi) => {
@@ -733,10 +743,10 @@ impl Lower {
         }
     }
 
-    /// `[a, b, ..xs, c]`: contiguous non-spread runs become `MakeArray`,
-    /// `Prepend` or `Append`, and spreads `ArrayConcat`, folded left to right.
-    /// Every intermediate step carries the literal's `ty` too, so Perceus drops
-    /// the discarded halves of a concat chain.
+    /// `[a, b, ..xs, c]`. Each run of plain elements becomes `MakeArray`,
+    /// `ArrayPrepend` or `ArrayAppend`, and each spread becomes `ArrayConcat`,
+    /// folded left to right. Every step in between carries the literal's `ty`
+    /// too, so Perceus drops the halves of a concat chain that get thrown away.
     fn array(&mut self, elems: &[TypedArrayElem], ty: RTy) -> Atom {
         let has_spread = elems.iter().any(|e| matches!(e, TypedArrayElem::Spread(_)));
         if !has_spread {
@@ -771,7 +781,7 @@ impl Lower {
                     run.push(self.operand(ex));
                 }
             }
-            // Head-run before the first spread: prepend directly onto it.
+            // A run before the first spread is prepended straight onto it.
             if acc.is_none()
                 && let Some(TypedArrayElem::Spread(sp)) = elems.get(j)
             {
@@ -801,8 +811,8 @@ impl Lower {
         }
     }
 
-    /// `"a${b}c"`. Literal pieces are already pooled, expression pieces are
-    /// stringified.
+    /// `"a${b}c"`. Literal pieces are already pooled, and expression pieces are
+    /// turned into strings.
     fn interp(&mut self, parts: &[TypedInterpPart]) -> Atom {
         let str_t = self.temps.string;
         let mut args = Vec::with_capacity(parts.len());
@@ -856,13 +866,13 @@ impl Lower {
         }
     }
 
-    /// `arr[i] or <pure atom>` → one [`PrimOp::ArrayIndexOr`], no `Option`
-    /// cell. The ordinary lowering boxes a `Some` that the next step
-    /// destructures and drops, one heap allocation per index.
+    /// Lower `arr[i] or <pure atom>` to one [`PrimOp::ArrayIndexOr`], with no
+    /// `Option` cell. The ordinary lowering boxes a `Some` that the next step
+    /// takes apart and drops, which is one heap allocation per index.
     ///
-    /// Only fuses when the failure arm is a pure atom: the fused op cannot skip
-    /// evaluating it, so anything with an effect or control flow must keep the
-    /// lazy match.
+    /// This only fuses the two when the failure arm is a pure atom. The fused
+    /// op always evaluates the default, so anything with a side effect or
+    /// control flow must keep the lazy match.
     fn index_or(&mut self, scrut: &TypedExpr, arms: &[TypedArm]) -> Option<CoreExpr> {
         let TypedExpr::Index { recv, index, .. } = scrut else {
             return None;
@@ -906,15 +916,16 @@ impl Lower {
 
     /// Lower `arms` against an already-bound `scrut`.
     ///
-    /// Arms lower front-to-back so locals are minted in source order, but the
-    /// tree assembles back-to-front: every failure edge of a fallible arm
-    /// `Goto`s one zero-arity [`CoreExpr::LetCont`] holding the remaining arms,
-    /// so each arm body is lowered once however many edges resume there.
+    /// Arms are lowered front to back so locals are minted in source order, but
+    /// the tree is assembled back to front. Every failure edge of an arm that
+    /// can fail `Goto`s one [`CoreExpr::LetCont`] with no parameters that
+    /// holds the remaining arms. So each arm body is lowered once, however many
+    /// edges carry on there.
     ///
-    /// An arm with no failure edge is prepended onto the entry `Match` instead,
-    /// so a run of infallible arms keeps the flat single-`Match` shape and its
-    /// `SwitchTag` eligibility. The innermost seed is an arm-less `Match`, whose
-    /// empty ladder is the emitter's `Halt`.
+    /// An arm with no failure edge is put at the front of the entry `Match`
+    /// instead, so a run of arms that can't fail keeps the flat shape of a
+    /// single `Match`. The innermost starting point is a `Match` with no arms,
+    /// which the VM loads as a stop for a value no arm matched.
     fn match_arms(&mut self, scrut: LocalId, arms: &[TypedArm], result_ty: RTy) -> CoreExpr {
         let mut lowered = Vec::with_capacity(arms.len());
         for arm in arms {
@@ -936,8 +947,8 @@ impl Lower {
             lowered.push((pat, body, fall));
         }
 
-        // The suffix so far, kept unassembled so an infallible arm can join the
-        // entry match's ladder instead of chaining another jump.
+        // The arms after this one, kept unassembled so an arm that can't fail
+        // can join the entry match's arms instead of adding another jump.
         let assemble = |entry_arms: VecDeque<(CorePat, CoreExpr)>,
                         wrap: Option<(JoinId, CoreExpr)>| {
             let entry = CoreExpr::Match {
@@ -958,9 +969,9 @@ impl Lower {
         let mut wrap: Option<(JoinId, CoreExpr)> = None;
         for (pat, body, fall) in lowered.into_iter().rev() {
             match fall {
-                // Live failure edges: seal everything below as this arm's
-                // continuation. A refutable head also needs a wildcard arm
-                // routing a head miss to the same join.
+                // With live failure edges, seal everything below as this arm's
+                // continuation. A head that can fail to match also needs a
+                // wildcard arm that sends a miss to the same join.
                 ArmFall::Join(j) if self.join_used(j) => {
                     let cont = assemble(entry_arms, wrap.take());
                     let head_refutable = matches!(pat, CorePat::Lit(_) | CorePat::Ctor { .. });
@@ -970,18 +981,18 @@ impl Lower {
                     }
                     wrap = Some((j, cont));
                 }
-                // No failure edge could fire: flat. `Join` lands here too
-                // when nothing consulted its join.
+                // No failure edge could fire, so the arm stays flat. `Join`
+                // lands here too when nothing used its join.
                 ArmFall::Join(_) | ArmFall::Unreachable => entry_arms.push_front((pat, body)),
             }
         }
         assemble(entry_arms, wrap)
     }
 
-    /// Lower `p` to a flat [`CorePat`] head. Structure `CorePat` cannot carry
-    /// (a compound `Ctor` field, a `Tuple`/`Array` pattern) is bound to a fresh
-    /// local and pushed to `nested`, for [`Self::nested_arm_body`] to flatten
-    /// into `Match`/`Let` nodes inside the arm body.
+    /// Lower `p` to a flat [`CorePat`] head. Structure `CorePat` can't carry,
+    /// such as a compound `Ctor` field or a `Tuple` or `Array` pattern, is
+    /// bound to a new local and pushed to `nested`. [`Self::nested_arm_body`]
+    /// then flattens it into `Match` and `Let` nodes inside the arm body.
     fn pattern<'p>(
         &mut self,
         p: &'p TypedPat,
@@ -1004,8 +1015,8 @@ impl Lower {
                 let mut binds = Vec::with_capacity(fields.len());
                 for fp in fields {
                     let id = self.fresh(fp.ty());
-                    // Forwarding by design: every compound pattern kind,
-                    // current or future, goes to the nested queue.
+                    // The wildcard is on purpose. Every compound pattern kind,
+                    // now or later, goes to the nested queue.
                     #[allow(unknown_lints, wildcard_over_own_enum)]
                     match fp {
                         TypedPat::Wild { .. } => {}
@@ -1032,10 +1043,10 @@ impl Lower {
         }
     }
 
-    /// The failure edge: a `Goto` to the arm's fallthrough join.
+    /// The failure edge, which is a `Goto` to the arm's fallthrough join.
     /// [`ArmFall::Unreachable`] means [`arm_fallible`] proved no such edge
-    /// exists, so reaching it here is a lowering bug. Any substitute expression
-    /// would change what a failed match evaluates to, so it aborts.
+    /// exists, so getting here is a lowering bug. Any expression put in its
+    /// place would change what a failed match evaluates to, so this aborts.
     #[allow(clippy::panic)]
     fn arm_fallthrough(&mut self, fall: ArmFall) -> CoreExpr {
         match fall {
@@ -1047,8 +1058,8 @@ impl Lower {
         }
     }
 
-    /// `if cond { then } else { <fallthrough> }`, sealed from `mark`: the shape
-    /// every refutable check in a pattern arm lowers to.
+    /// `if cond { then } else { <fallthrough> }`, sealed from `mark`. Every
+    /// check in a pattern arm that can fail lowers to this shape.
     fn guard_if(
         &mut self,
         mark: usize,
@@ -1069,17 +1080,18 @@ impl Lower {
         )
     }
 
-    /// Lower an or-pattern's alternatives, mirroring [`Self::match_arms`]:
-    /// each refutable alternative's failure edges `Goto` a try-the-next join,
-    /// and the last one falls to `outer`, so none is lowered twice.
+    /// Lower an or-pattern's alternatives the same way [`Self::match_arms`]
+    /// lowers arms. The failure edges of each alternative that can fail `Goto`
+    /// a join that tries the next one, and the last one falls to `outer`, so
+    /// none is lowered twice.
     ///
-    /// The commit path always falls to `outer`, never to a try-next join: the
-    /// first matching alternative commits, and a later miss goes to the next
-    /// arm. With no bindings the commit path is one shared join
-    /// ([`ArmLeaf::OrCommit`]). A binding or-pattern lowers it once per
-    /// alternative ([`ArmLeaf::OrBody`]) because each alternative binds the
-    /// same [`BindingId`]s to its own locals and a zero-arity continuation
-    /// cannot receive them.
+    /// The commit path always falls to `outer`, never to a try-the-next join,
+    /// because the first matching alternative commits and a later miss goes to
+    /// the next arm. With no bindings, the commit path is one shared join
+    /// ([`ArmLeaf::OrCommit`]). An or-pattern that binds names lowers it once
+    /// per alternative ([`ArmLeaf::OrBody`]). Each alternative binds the same
+    /// [`BindingId`]s to its own locals, and a continuation with no parameters
+    /// can't receive them.
     fn or_alternatives<'p>(
         &mut self,
         scrut: LocalId,
@@ -1093,8 +1105,8 @@ impl Lower {
 
         let mut lowered: Vec<(Option<JoinId>, CoreExpr)> = Vec::with_capacity(alts.len());
         for (i, alt) in alts.iter().enumerate() {
-            // An irrefutable alternative terminates the chain; anything
-            // written after it is unreachable and never lowered.
+            // An alternative that can't fail ends the chain. Anything written
+            // after it can never be reached and is never lowered.
             let terminal = i + 1 == alts.len() || !nested_fallible(alt);
             let fall_join = (!terminal).then(|| self.fresh_join());
             let fall = match fall_join {
@@ -1116,10 +1128,10 @@ impl Lower {
             }
         }
 
-        // Assemble back-to-front. An alternative whose join a failure edge
-        // targeted seals the ones after it as that join's continuation; one
-        // whose join went unused supersedes them, retracting the discarded
-        // subtree's `Goto` counts.
+        // Assemble back to front. An alternative whose join some failure edge
+        // targeted seals the ones after it as that join's continuation. One
+        // whose join went unused replaces them, and the thrown-away subtree's
+        // `Goto` counts are taken back.
         let Some((_, mut cur)) = lowered.pop() else {
             return self.arm_fallthrough(outer);
         };
@@ -1149,10 +1161,11 @@ impl Lower {
         }
     }
 
-    /// Flatten `nested` sub-patterns into `Match`/`Let` nodes wrapping the arm
-    /// body. Irrefutable structure becomes `Let` projections on the current
-    /// spine; refutable structure becomes an inner `Match`/`If` whose fail edge
-    /// is `fall`, so a nested miss resumes matching as the source does.
+    /// Flatten `nested` sub-patterns into `Match` and `Let` nodes around the
+    /// arm body. Structure that can't fail becomes `Let` field reads on the
+    /// current spine. Structure that can fail becomes an inner `Match` or `If`
+    /// whose failure edge is `fall`, so a nested miss carries on matching the
+    /// way the source says.
     fn nested_arm_body<'p>(
         &mut self,
         mut nested: VecDeque<(LocalId, &'p TypedPat)>,
@@ -1168,7 +1181,8 @@ impl Lower {
                     ArmLeaf::Guarded { guard, body } => {
                         let cond = self.operand(guard);
                         let then = self.expr_as(body, result_ty);
-                        // Already sealed from `mark`; the seal below is a no-op.
+                        // This is already sealed from `mark`, so the seal below
+                        // does nothing.
                         self.guard_if(mark, cond, then, fall, result_ty)
                     }
                     ArmLeaf::BinCont(bc) => self.bin_segments(*bc, fall, result_ty),
@@ -1295,9 +1309,9 @@ impl Lower {
         }
     }
 
-    /// Lower one step of a `<<>>` pattern: bounds check, read, match the
-    /// segment's value pattern, then recurse via a `BinCont` leaf so those
-    /// bindings are in scope for the next segment's `size(...)`. With `segs`
+    /// Lower one step of a `<<>>` pattern. Check the bounds, read, match the
+    /// segment's value pattern, then recurse through a `BinCont` leaf so those
+    /// bindings are in scope for the next segment's `size(...)`. When `segs` is
     /// empty, emit the trailing `..rest` bind or exact-length check.
     fn bin_segments<'p>(&mut self, bc: BinCont<'p>, fall: ArmFall, result_ty: RTy) -> CoreExpr {
         let mark = self.spine.len();
@@ -1367,8 +1381,8 @@ impl Lower {
                 };
                 self.guard_if(mark, ok, then_e, fall, result_ty)
             }
-            // A variable-width `:utf8` codepoint. `BinReadUtf8` yields
-            // `(codepoint, nbits)`, with `nbits == 0` meaning decode failure.
+            // A `:utf8` codepoint, whose width varies. `BinaryReadUtf8` gives back
+            // `(codepoint, nbits)`, where `nbits == 0` means decoding failed.
             TypedBinPatSeg::Utf8 { value } => {
                 let pair_ty = self.temps.int_pair;
                 let pair = self.let_(
@@ -1389,8 +1403,8 @@ impl Lower {
                 };
                 self.guard_if(mark, ok, then_e, fall, result_ty)
             }
-            // Int / Binary segment, its width the size expression in bits. A
-            // sizeless `:binary` segment consumes the rest.
+            // An Int or Binary segment, whose width is the size expression in
+            // bits. A `:binary` segment with no size takes the rest.
             TypedBinPatSeg::Int { bits, value } => self.bin_read(
                 mark,
                 BinWalk { bin, total, cursor },
@@ -1422,9 +1436,9 @@ impl Lower {
         }
     }
 
-    /// The shared tail of a fixed-position `<<>>` segment: lower the width
-    /// (bounds-checking the read per [`SegWidth`]), read the value, then match
-    /// the segment's value pattern and continue.
+    /// The shared tail of a fixed-position `<<>>` segment. Lower the width,
+    /// checking the read's bounds as [`SegWidth`] says, read the value, then
+    /// match the segment's value pattern and carry on.
     #[allow(clippy::too_many_arguments)]
     fn bin_read<'p>(
         &mut self,
@@ -1466,23 +1480,24 @@ impl Lower {
     }
 }
 
-// Syntactic answers to "does lowering this arm ever consult its `ArmFall`?",
-// read by `match_arms` before lowering so an infallible arm mints no join.
-// Sound one way only: `false` must mean no failure edge is lowered, while
-// `true` may over-approximate and cost an unused `JoinId`.
+// These answer "does lowering this arm ever use its `ArmFall`?" by looking at
+// the syntax. `match_arms` asks before lowering, so an arm that can't fail
+// mints no join. The answer is only safe one way: `false` must mean no failure
+// edge is lowered, but `true` may be wrong and cost an unused `JoinId`.
 
 /// Whether lowering `arm` can produce a failure edge after its `CorePat` head
-/// matched: a guard, or refutable structure the flat head cannot carry.
+/// matched. That happens with a guard, or with structure that can fail and
+/// that the flat head can't carry.
 fn arm_fallible(arm: &TypedArm) -> bool {
     arm.guard.is_some() || head_fallible(&arm.pat)
 }
 
-/// [`arm_fallible`] for the arm's own pattern. A `Lit` head is checked by the
-/// `Match` ladder itself, so its miss touches no failure continuation. Only
-/// compound `Ctor` fields survive into the nested queue.
+/// [`arm_fallible`] for the arm's own pattern. The `Match` itself checks a
+/// `Lit` head, so a miss there never reaches a failure continuation. Only
+/// compound `Ctor` fields make it into the nested queue.
 fn head_fallible(p: &TypedPat) -> bool {
-    // Forwarding by design: anything that is not a bare head defers to the
-    // general nested check, new pattern kinds included.
+    // The wildcard is on purpose. Anything that isn't a bare head, new
+    // pattern kinds included, goes to the general nested check.
     #[allow(unknown_lints, wildcard_over_own_enum)]
     match p {
         TypedPat::Wild { .. } | TypedPat::Bind(_) | TypedPat::Lit { .. } => false,
@@ -1491,9 +1506,10 @@ fn head_fallible(p: &TypedPat) -> bool {
     }
 }
 
-/// Whether a residual sub-pattern can fail once queued. Mirrors
-/// [`Lower::nested_arm_body`]: `Tuple` is pure projection, while a nested
-/// `Ctor`/`Lit` always lowers a fail edge, even a single-variant one.
+/// Whether a remaining sub-pattern can fail once it's queued. This follows
+/// [`Lower::nested_arm_body`]. A `Tuple` only reads fields, but a nested
+/// `Ctor` or `Lit` always lowers a failure edge, even for a type with one
+/// variant.
 fn nested_fallible(p: &TypedPat) -> bool {
     match p {
         TypedPat::Wild { .. } | TypedPat::Bind(_) => false,
@@ -1507,9 +1523,9 @@ fn nested_fallible(p: &TypedPat) -> bool {
     }
 }
 
-/// Whether `p` binds any name. A zero-arity continuation cannot receive the
-/// locals a binding alternative mints, so only a bind-free or-pattern shares
-/// its commit path as a join (see [`Lower::or_alternatives`]).
+/// Whether `p` binds any name. A continuation with no parameters can't receive
+/// the locals a binding alternative mints, so only an or-pattern that binds
+/// nothing shares its commit path as a join (see [`Lower::or_alternatives`]).
 fn pat_binds(p: &TypedPat) -> bool {
     !scarlet_elaborate::elaborate_pat::pat_binds(p).is_empty()
 }

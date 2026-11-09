@@ -1,5 +1,5 @@
-// Pattern matching, on a stream of UI input events. A match must be
-// exhaustive, so describe below has no fallback arm: the compiler checks it.
+// Pattern matching over a stream of UI input events. A match must be
+// exhaustive, and the compiler checks it, so describe below has no fallback arm.
 
 import scarlet/array
 import scarlet/string
@@ -35,8 +35,8 @@ fn describe(e Event) String {
 	}
 }
 
-// Range patterns are end-exclusive: 400..500 matches 400 through 499.
-// else is the wildcard arm.
+// Range patterns exclude the end, so 400..500 matches 400 through 499.
+// `_` is the wildcard arm.
 fn status_class(code Int) String {
 	match code {
 		// An or-pattern lets several literals share one body.
@@ -68,7 +68,7 @@ fn quadrant(p Point) String {
 	}
 }
 
-// Array patterns match by shape; ..rest binds whatever is left over.
+// Array patterns match by shape, and ..rest binds whatever is left over.
 fn batch(codes Array(Int)) String {
 	match codes {
 		[] -> 'empty batch'

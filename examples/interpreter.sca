@@ -186,7 +186,7 @@ fn divide(a Int, b Int) Result(Int, String) {
 	}
 }
 
-// Fully parenthesized, to show the precedence the parser chose.
+// Fully parenthesised, to show the precedence the parser chose.
 fn show(e Expr) String {
 	match e {
 		Lit(n) -> '${n}'

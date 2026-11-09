@@ -1,5 +1,6 @@
-//! Scarlet's type layer: HM inference, type definitions, exhaustiveness checking,
-//! and the labelled-slot matcher shared by the typechecker and elaborator.
+//! Scarlet's type layer. It holds Hindley-Milner (HM) type inference, type
+//! definitions, exhaustiveness checking, and the code that puts labelled
+//! arguments into their slots for the type checker and the elaborator.
 //!
 //! Depends only on `scarlet_syntax` and `scarlet_ir`: never on the compiler
 //! (`scarlet_core`) or the runtime (`scarlet_vm`).

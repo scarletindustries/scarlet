@@ -51,7 +51,7 @@ pub fn main() {
 
 	counts = array::fold(words, map::new(), fn(m, w) map::set(m, w, { map::get(m, w) or 0 } + 1))
 
-	// Map order is unspecified, so print in a fixed key order.
+	// A map's order isn't promised, so print in a fixed key order.
 	vocab = ['cat', 'mat', 'on', 'sat', 'the']
 
 	array::each(vocab, fn(w) println('${w} -> ${map::get(counts, w) or 0}'))

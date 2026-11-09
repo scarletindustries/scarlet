@@ -3,7 +3,7 @@ import scarlet/json/decode
 import scarlet/json/field
 import scarlet/option
 
-// The JSON stack end to end: SIMD parse, on-demand reads off the tape, typed
+// This tests the JSON stack end to end: SIMD parse, on-demand reads off the tape, typed
 // decoding with accumulated paths, and the three presence states — absent,
 // null and present — that a partial update turns on.
 //

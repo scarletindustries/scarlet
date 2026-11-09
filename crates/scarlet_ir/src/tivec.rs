@@ -1,6 +1,6 @@
 //! Typed indices ([`Idx`]) and the vector that only they can subscript
-//! ([`TiVec`]). Keeps the compiler's many `u32` operand spaces (local ids,
-//! constant slots, function indices) from mixing.
+//! ([`TiVec`]). They keep the compiler's many `u32` index spaces, such as local
+//! ids, constant slots and function indices, from mixing.
 
 use std::fmt;
 use std::hash::Hash;
@@ -14,17 +14,18 @@ pub trait Idx: Copy + Eq + Ord + Hash + fmt::Debug {
     fn index(self) -> usize;
 }
 
-/// `Vec<T>` that can only be subscripted by `I`.
+/// A `Vec<T>` that only `I` can subscript.
 ///
-/// The `fn(I) -> I` phantom neither owns nor borrows an `I`, so auto-traits
-/// come from `T` alone.
+/// The `fn(I) -> I` phantom neither owns nor borrows an `I`, so auto traits
+/// like `Send` come from `T` alone.
 pub struct TiVec<I: Idx, T> {
     raw: Vec<T>,
     _idx: PhantomData<fn(I) -> I>,
 }
 
-// No `is_empty`: nothing in the workspace needs it (hawk enforces the closed
-// world), and clippy would otherwise insist it accompany `len`.
+// There's no `is_empty` because nothing in the workspace needs it, and hawk
+// fails on unused public items. Clippy would otherwise insist it comes with
+// `len`.
 #[allow(clippy::len_without_is_empty)]
 impl<I: Idx, T> TiVec<I, T> {
     pub fn new() -> Self {
@@ -38,7 +39,7 @@ impl<I: Idx, T> TiVec<I, T> {
         self.raw.len()
     }
 
-    /// The index [`Self::push`] would return. Mint indices here, not from
+    /// The index [`Self::push`] would return. Make new indices here, not from
     /// `len() as u32` at a call site that may not own the whole table.
     pub fn next_idx(&self) -> I {
         I::from_usize(self.raw.len())
@@ -61,17 +62,18 @@ impl<I: Idx, T> TiVec<I, T> {
         &self.raw
     }
 
-    /// Drop every element at `len` and after. No-op when `len >= self.len()`.
+    /// Drop every element at `len` and after. Does nothing when
+    /// `len >= self.len()`.
     pub fn truncate(&mut self, len: usize) {
         self.raw.truncate(len);
     }
 
-    /// The elements at `start..`, for consumers that walk a suffix.
+    /// The elements from `start` to the end, for callers that walk a suffix.
     pub fn tail_from(&self, start: I) -> &[T] {
         &self.raw[start.index()..]
     }
 
-    /// Drop the typed-index wrapper, for consumers that want a plain `Vec`.
+    /// Drop the typed-index wrapper, for callers that want a plain `Vec`.
     pub fn into_vec(self) -> Vec<T> {
         self.raw
     }
@@ -191,14 +193,15 @@ mod tests {
         assert_eq!(v.next_idx(), A(0));
     }
 
-    /// `B` cannot subscript a `TiVec<A, _>`. The type checker enforces that, so
-    /// this only pins the two spaces as distinct types with one representation.
+    /// `B` can't subscript a `TiVec<A, _>`. Rust's type checker enforces that,
+    /// so this only checks the two spaces are distinct types with one
+    /// representation.
     #[test]
     fn distinct_index_spaces_do_not_unify() {
         let a = A(7);
         let b = B(7);
         assert_eq!(a.index(), b.index());
         assert_eq!(format!("{a} {b}"), "a7 b7");
-        // `let _: A = b;` does not compile — that is the guard.
+        // `let _: A = b;` doesn't compile, and that's the guard.
     }
 }

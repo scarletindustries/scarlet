@@ -5,23 +5,24 @@ use indexmap::IndexMap;
 use super::infer::{InferEngine, Ty};
 use scarlet_syntax::span::Span;
 
-/// Which stage of an or-pattern a frame is in. The canonical set lives inside
-/// `Checking` so it cannot be read before the first alternative established it.
+/// Which stage of an or-pattern a frame is in. The canonical set of names
+/// lives inside `Checking`, so nothing can read it before the first
+/// alternative has settled it.
 enum OrPhase {
-    /// Typing the first alternative; `seen` is what it binds so far. The first
-    /// `enter_alternative` freezes those as canonical.
+    /// Typing the first alternative. `seen` is what it has bound so far, and
+    /// the first `enter_alternative` freezes those names as the canonical set.
     Establishing { seen: HashSet<String> },
-    /// Past the first alternative: every branch must re-bind exactly
-    /// `canonical`.
+    /// Past the first alternative. Every later alternative must bind exactly
+    /// the names in `canonical` again.
     Checking {
         canonical: HashSet<String>,
         seen: HashSet<String>,
     },
 }
 
-/// One level of or-pattern nesting. `boundary` is `initial.len()` at `enter_or`
-/// time; only the bottom frame uses it, to tell names bound before any
-/// or-pattern from names its first alternative introduced.
+/// One level of or-pattern nesting. `boundary` is `initial.len()` as it was at
+/// `enter_or`. Only the bottom frame uses it, to tell names bound before any
+/// or-pattern apart from names its first alternative introduced.
 struct OrFrame {
     boundary: usize,
     phase: OrPhase,
@@ -42,7 +43,7 @@ impl OrFrame {
     }
 }
 
-/// What recording one name a pattern binds came to.
+/// What happened when a pattern's binding of one name was recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bound {
     /// A new binding, the `index`th of the pattern.
@@ -51,14 +52,14 @@ pub enum Bound {
     Again(usize),
     /// A `_`-prefixed name: typed, but never readable.
     WriteOnly,
-    /// A diagnostic has been reported.
+    /// The binding was refused, and a diagnostic has been reported.
     Rejected,
 }
 
-/// Accumulator for the variable bindings a pattern introduces. The compiler
-/// records each name through [`sink`](Self::sink) as `type_pattern` reaches
-/// it, and [`Bound`] tells it whether to make a new local. Nesting is handled
-/// by the [`OrFrame`] stack, not by a save/restore token the caller carries.
+/// Collects the variables a pattern binds. The compiler records each name
+/// through [`sink`](Self::sink) as `type_pattern` reaches it, and [`Bound`]
+/// tells it whether to make a new local. The [`OrFrame`] stack handles
+/// nesting, so the caller doesn't carry a token to save and restore.
 pub struct PatternBindings {
     frames: Vec<OrFrame>,
     /// Each readable name the pattern binds, with its type, in the order the
@@ -74,15 +75,15 @@ impl PatternBindings {
         }
     }
 
-    /// Reset for reuse across match arms, retaining allocated capacity.
+    /// Reset for the next match arm, keeping the memory already allocated.
     pub fn clear(&mut self) {
         self.frames.clear();
         self.initial.clear();
     }
 
     /// Has `name` already been bound on the current path through the pattern?
-    /// Inside an or-pattern that means: bound before the outermost or, or
-    /// earlier in an enclosing alternative being typed now.
+    /// Inside an or-pattern, that means it was bound before the outermost or,
+    /// or earlier in an enclosing alternative that's being typed now.
     fn already_bound(&self, name: &str) -> bool {
         match self.frames.first() {
             None => self.initial.contains_key(name),
@@ -95,15 +96,16 @@ impl PatternBindings {
         }
     }
 
-    /// The write view `type_pattern` records bindings through. `clear` and the
-    /// result iterator stay on the owner, so pattern typing cannot reset the
-    /// accumulator or read half-built results mid-pattern.
+    /// The write-only view `type_pattern` records bindings through. `clear`
+    /// and the results stay on the owner, so pattern typing can't reset the
+    /// bindings or read half-built results partway through a pattern.
     pub fn sink(&mut self) -> PatternSink<'_> {
         PatternSink(self)
     }
 
-    /// Record a binding. Pushes a diagnostic onto `engine` on duplicate-var,
-    /// extra-var-in-alternative, or a type mismatch between alternatives.
+    /// Record a binding. Pushes a diagnostic onto `engine` when a name is
+    /// bound twice, when a later alternative binds a name the first one
+    /// didn't, or when two alternatives give a name different types.
     fn bind(&mut self, name: &str, ty: Ty, span: Span, engine: &mut InferEngine) -> Bound {
         if name.starts_with('_') {
             return Bound::WriteOnly;
@@ -117,8 +119,8 @@ impl PatternBindings {
         }
         // A binding is fresh only while every enclosing or-pattern is on its
         // first alternative. Once one is `Checking`, the name must be in that
-        // frame's canonical set and unify with the type `initial` recorded for
-        // its fresh binding.
+        // frame's canonical set, and its type must unify with the type
+        // `initial` recorded when it was first bound.
         let innermost_checking = self.frames.iter().rev().find_map(|f| match &f.phase {
             OrPhase::Checking { canonical, .. } => Some(canonical),
             OrPhase::Establishing { .. } => None,
@@ -135,7 +137,7 @@ impl PatternBindings {
                 if !canonical.contains(name) {
                     engine.error_at_span(
                         format!(
-                            "Variable '{name}' is not bound in the first alternative of this pattern"
+                            "Variable '{name}' is not bound in the first alternative of this pattern. Every alternative must bind the same names"
                         ),
                         span,
                     );
@@ -156,9 +158,9 @@ impl PatternBindings {
         }
     }
 
-    /// Begin typing an or-pattern. The returned [`OrScope`] owns the rest of
-    /// the protocol and its `Drop` pops the frame, so an unbalanced
-    /// enter/exit — including via `?` — cannot be spelt at the call site.
+    /// Start typing an or-pattern. The returned [`OrScope`] owns the rest of
+    /// the steps, and its `Drop` pops the frame. So a call site can't enter
+    /// without leaving, even by returning early with `?`.
     fn enter_or(&mut self) -> OrScope<'_> {
         self.frames.push(OrFrame {
             boundary: self.initial.len(),
@@ -170,44 +172,45 @@ impl PatternBindings {
     }
 }
 
-/// Write-only view of a [`PatternBindings`]. Pattern typing recurses through
-/// it; it cannot `clear` the accumulator, so emptying frames out from under a
-/// live [`OrScope`] is unrepresentable.
+/// A write-only view of a [`PatternBindings`]. Pattern typing recurses
+/// through it. It can't `clear` the bindings, so nothing can empty the frames
+/// out from under a live [`OrScope`].
 pub struct PatternSink<'a>(&'a mut PatternBindings);
 
 impl PatternSink<'_> {
-    /// Record a binding. Pushes a diagnostic onto `engine` on duplicate-var,
-    /// extra-var-in-alternative, or a type mismatch between alternatives.
+    /// Record a binding. Pushes a diagnostic onto `engine` when a name is
+    /// bound twice, when a later alternative binds a name the first one
+    /// didn't, or when two alternatives give a name different types.
     #[must_use = "a rejected binding means the pattern is ill-typed and must be propagated"]
     pub fn bind(&mut self, name: &str, ty: Ty, span: Span, engine: &mut InferEngine) -> Bound {
         self.0.bind(name, ty, span, engine)
     }
 
-    /// Begin typing an or-pattern — see [`OrScope`] for the protocol.
+    /// Start typing an or-pattern. See [`OrScope`] for the steps.
     pub fn enter_or(&mut self) -> OrScope<'_> {
         self.0.enter_or()
     }
 }
 
-/// Scoped protocol handle for one or-pattern.
+/// A handle that takes one or-pattern through its steps.
 ///
-/// [`enter_alternative`](Self::enter_alternative) consumes the scope and only
+/// [`enter_alternative`](Self::enter_alternative) consumes the scope, and only
 /// [`Alt::finish`] hands it back, so an alternative can never be left
-/// half-open. Dropping the scope pops the frame and folds its bound names into
-/// the enclosing one; [`finish`](Self::finish) just spells that drop out.
+/// half-open. Dropping the scope pops the frame and adds its bound names to the
+/// enclosing frame. [`finish`](Self::finish) just makes that drop explicit.
 pub struct OrScope<'a> {
     b: &'a mut PatternBindings,
 }
 
 impl<'a> OrScope<'a> {
-    /// Write view of the accumulator, for typing a pattern inside this or.
+    /// The write-only view, for typing a pattern inside this or-pattern.
     pub fn sink(&mut self) -> PatternSink<'_> {
         PatternSink(&mut *self.b)
     }
 
-    /// This scope's frame. It is always the stack top when a method here runs:
-    /// nested scopes borrow `self` and must be dropped first, and this scope's
-    /// own drop is the only pop.
+    /// This scope's frame. It's always on top of the stack when a method here
+    /// runs, because nested scopes borrow `self` and must be dropped first, and
+    /// this scope's own drop is the only pop.
     #[allow(clippy::panic)]
     fn frame_mut(&mut self) -> &mut OrFrame {
         match self.b.frames.last_mut() {
@@ -216,10 +219,11 @@ impl<'a> OrScope<'a> {
         }
     }
 
-    /// Switch to the next non-first alternative. The first call freezes the
-    /// first alternative's bindings as the canonical set; later calls just
-    /// reset `seen`. Consuming the scope makes skipping an alternative's
-    /// completeness check a compile error rather than a runtime assert.
+    /// Move on to the next alternative after the first. The first call freezes
+    /// the first alternative's bindings as the canonical set, and later calls
+    /// just reset `seen`. Because this consumes the scope, skipping an
+    /// alternative's completeness check is a compile error, not a run-time
+    /// assert.
     pub fn enter_alternative(mut self) -> Alt<'a> {
         let f = self.frame_mut();
         f.phase = match std::mem::replace(
@@ -243,17 +247,17 @@ impl<'a> OrScope<'a> {
         Alt { scope: self }
     }
 
-    /// Finish typing this or-pattern. Explicit spelling of the scope's drop.
+    /// Finish typing this or-pattern. This is the scope's drop, made explicit.
     pub fn finish(self) {}
 }
 
-/// The names this or-pattern bound fold into the enclosing alternative's
-/// `seen`, so a sibling binding after the or-pattern still sees them for
-/// duplicate detection.
+/// The names this or-pattern bound are added to the enclosing alternative's
+/// `seen`, so a binding after the or-pattern still sees them when it checks
+/// for duplicates.
 impl Drop for OrScope<'_> {
     fn drop(&mut self) {
-        // Never panic: this runs on unwind by design, and a panicking drop
-        // during unwind aborts.
+        // Never panic here. This runs during unwinding by design, and a drop
+        // that panics while unwinding aborts the process.
         let Some(inner) = self.b.frames.pop() else {
             debug_assert!(false, "OrScope outlived its frame — compiler bug");
             return;
@@ -268,28 +272,28 @@ impl Drop for OrScope<'_> {
     }
 }
 
-/// Handle for typing one non-first alternative of an or-pattern. It owns the
-/// scope, so the protocol cannot advance until [`finish`](Self::finish) has
+/// A handle for typing one alternative of an or-pattern after the first. It
+/// owns the scope, so nothing can move on until [`finish`](Self::finish) has
 /// run its completeness check and handed the scope back.
 pub struct Alt<'a> {
     scope: OrScope<'a>,
 }
 
 impl<'a> Alt<'a> {
-    /// Write view of the accumulator, for typing this alternative's pattern.
+    /// The write-only view, for typing this alternative's pattern.
     pub fn sink(&mut self) -> PatternSink<'_> {
         PatternSink(&mut *self.scope.b)
     }
 
-    /// Finish typing this alternative, handing the or-pattern's scope back.
-    /// Reports any name from the or's canonical set that the branch failed to
+    /// Finish typing this alternative and hand the or-pattern's scope back.
+    /// Reports any name from the canonical set that this alternative didn't
     /// bind.
     #[allow(clippy::panic)]
     #[must_use = "a false result means the pattern is ill-typed and must be propagated"]
     pub fn finish(self, alt_span: Span, engine: &mut InferEngine) -> (OrScope<'a>, bool) {
         let scope = self.scope;
         // `enter_alternative` put the frame in `Checking`, and owning the
-        // scope keeps nested scopes balanced above it, so the top frame is
+        // scope keeps any nested scopes above it balanced, so the top frame is
         // ours.
         let Some(OrFrame {
             phase: OrPhase::Checking { canonical, seen },
@@ -299,8 +303,8 @@ impl<'a> Alt<'a> {
             panic!("Alt outlived its frame — compiler bug")
         };
         let mut ok = true;
-        // Every canonical name is in `initial`, so iterating `initial` gives a
-        // stable diagnostic order.
+        // Every canonical name is in `initial`, so walking `initial` reports
+        // them in a stable order.
         for name in scope.b.initial.keys() {
             if canonical.contains(name) && !seen.contains(name) {
                 engine.error_at_span(
@@ -331,8 +335,8 @@ mod tests {
         (e, int_ty, Span::DUMMY, PatternBindings::new())
     }
 
-    // `_`-prefixed names may appear repeatedly: they are typed but write-only,
-    // outside the canonical set.
+    // Names starting with `_` can appear more than once. They're typed but
+    // can't be read, and they stay out of the canonical set.
     #[test]
     fn underscore_names_are_write_only() {
         let (mut e, int_ty, sp, mut b) = setup();

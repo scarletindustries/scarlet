@@ -9,16 +9,16 @@ import scarlet/binary
 import scarlet/int
 import scarlet/result
 
-// Any value as `println` prints it.
+// Formats any value the way `println` prints it.
 @vm(string__inspect)
 pub fn inspect(x a) String
 
-// Adjacent delimiters give empty pieces. An empty `on` splits into single
-// scalar values.
+// Splits `s` at every `on`. Adjacent delimiters give empty pieces, and an
+// empty `on` splits into single scalar values.
 @vm(string__split)
 pub fn split(s String, on String) Array(String)
 
-// Unicode scalar values, not bytes. O(n).
+// Counts Unicode scalar values, not bytes. It takes O(n) time.
 @vm(string__length)
 pub fn length(s String) Int
 
@@ -29,8 +29,8 @@ pub fn contains(s String, needle String) Bool
 @vm(string__trim)
 pub fn trim(s String) String
 
-// Every occurrence of `pattern`, left to right. An empty `pattern` puts
-// `replacement` between every two scalar values.
+// Replaces every occurrence of `pattern`, left to right. An empty `pattern`
+// puts `replacement` between every two scalar values.
 pub fn replace(s String, pattern String, replacement String) String {
 	match split(s, pattern) {
 		[] -> s
@@ -38,13 +38,13 @@ pub fn replace(s String, pattern String, replacement String) String {
 	}
 }
 
-// The extended grapheme clusters of `s` (UAX #29): a base and its combining
-// marks, or a whole ZWJ sequence, stay one piece.
+// Splits `s` into extended grapheme clusters (UAX #29). A base and its
+// combining marks, or a whole ZWJ sequence, stay one piece.
 @vm(string__to_graphemes)
 pub fn to_graphemes(s String) Array(String)
 
-// `Err(Nil)` if `code_point` is not a scalar value: negative, past U+10FFFF,
-// or a surrogate (U+D800..U+DFFF, 55296..57343).
+// Returns `Err(Nil)` if `code_point` isn't a scalar value, meaning it's
+// negative, past U+10FFFF or a surrogate (U+D800..U+DFFF, 55296..57343).
 fn encode_scalar_value(code_point Int) Result(Binary, Nil) {
 	if code_point < 0 || code_point > 1114111 {
 		Err(Nil)
@@ -73,7 +73,8 @@ fn encode_scalar_value(code_point Int) Result(Binary, Nil) {
 	}
 }
 
-// `Err(Nil)` if any of them is not a Unicode scalar value.
+// Builds a string from code points. It returns `Err(Nil)` if any of them isn't
+// a Unicode scalar value.
 pub fn from_code_points(code_points Array(Int)) Result(String, Nil) {
 	result::then(
 		array::fold(

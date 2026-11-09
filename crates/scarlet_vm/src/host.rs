@@ -4,7 +4,7 @@
 
 use std::time::Instant;
 
-/// The world a run sees.
+/// What one run sees of the world.
 pub struct Host {
     /// `os.argv`: the path of the entrypoint that was run, then the arguments
     /// after it.
@@ -25,7 +25,8 @@ impl Host {
         }
     }
 
-    /// This OS process's world: its environment as it is now, and `argv`.
+    /// The world of this OS process, with its environment as it is now and
+    /// the given `argv`.
     pub fn of_this_process(argv: Vec<String>) -> Host {
         let env = std::env::vars_os()
             .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))

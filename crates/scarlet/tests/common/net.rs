@@ -1,4 +1,4 @@
-//! Harness for tests that spawn an `scarlet` subprocess as a TCP server and drive
+//! Harness for tests that spawn a `scarlet` subprocess as a TCP server and drive
 //! it from a Rust client. The server binds `127.0.0.1:0` and prints
 //! `listening <ip>:<port>` first; parsing that announcement means the client
 //! can only ever reach the server's own listener.
@@ -12,7 +12,7 @@ use super::{Project, wait_or_kill};
 
 /// A spawned `scarlet` server subprocess plus the port it announced. `Drop` kills
 /// and reaps the child so a panicking test leaks no server. Consuming methods
-/// `take` the child first, making `Drop` a no-op after them.
+/// `take` the child first, so `Drop` does nothing after them.
 pub struct AlServer {
     child: Option<Child>,
     pub port: u16,
@@ -49,12 +49,12 @@ impl AlServer {
         assert!(!stderr.contains("panicked"), "server panicked: {stderr}");
     }
 
-    /// Bounded wait for a self-terminating server; see [`super::wait_or_kill`].
+    /// Waits a bounded time for a server that exits by itself; see [`super::wait_or_kill`].
     pub fn wait_or_kill(mut self, secs: u64) -> Output {
         wait_or_kill(self.child.take().unwrap(), secs)
     }
 
-    /// Bounded wait asserting a clean exit; returns captured stdout.
+    /// Waits a bounded time, asserts a clean exit, and returns the captured stdout.
     pub fn wait_ok(self, secs: u64) -> String {
         let out = self.wait_or_kill(secs);
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -68,9 +68,9 @@ impl AlServer {
 }
 
 /// Return the kernel-assigned port from the server's `listening <ip>:<port>`
-/// first line. Read byte-at-a-time so nothing past the newline is consumed,
-/// and the pipe is handed back so `wait_with_output` still gets the rest. The
-/// reader thread plus receive timeout turns a wedged server into a failure
+/// first line. It reads one byte at a time so nothing past the newline is
+/// consumed, and hands the pipe back so `wait_with_output` still gets the rest.
+/// The reader thread and the receive timeout turn a wedged server into a failure
 /// instead of a hung suite.
 pub fn read_announced_port(child: &mut Child) -> u16 {
     fn die(child: &mut Child, msg: String) -> ! {
@@ -149,16 +149,16 @@ pub fn spawn_al_server(proj: &Project, src: &str) -> AlServer {
 }
 
 /// How many connections [`full_accept_queue`] will open before concluding this
-/// platform answers whatever the accept queue holds. Darwin stops after one,
-/// measured; the rest is headroom for platforms that admit more.
+/// platform answers whatever the accept queue holds. We measured Darwin stopping
+/// after one. The rest is headroom for platforms that admit more.
 const MAX_FILL_ATTEMPTS: usize = 16;
 
 /// What an overflow connect to a `listen(1)` socket meant.
 #[derive(Debug, PartialEq, Eq)]
 enum Overflow {
-    /// SYN dropped; the accept queue is full and a later connect can hang.
+    /// The kernel dropped the SYN. The accept queue is full and a later connect can hang.
     DroppedSyn,
-    /// Kernel RST'd (ECONNRESET). The connect was answered, so the
+    /// The kernel sent a RST (ECONNRESET). The connect was answered, so the
     /// deadline-vs-kernel-floor tests have nothing to measure.
     Reset,
     Unexpected,
@@ -172,27 +172,27 @@ fn classify_overflow(err: &std::io::Error) -> Overflow {
     }
 }
 
-/// A listener that never accepts, filled until the platform stops answering.
+/// Makes a listener that never accepts, and fills it until the platform stops answering.
 ///
 /// This is the peer an unbounded connect has no answer for: once the accept
 /// queue is full the SYN is dropped rather than refused, so the client waits
 /// with no answer and no error ever coming back. std's `TcpListener` always
 /// listens with a backlog of 128, which is why this goes through `socket2`.
 ///
-/// How many connections a `listen(1)` socket admits before that happens is
-/// platform-specific — one on Darwin, measured; more than one on Linux, where
-/// CI watched the connect complete — so the fill stops on the observation that
-/// a connect no longer completes, never on a count. Assuming a count is what
-/// made this test fail on Linux CI: the queue was still short, the connect
-/// under test completed, and nothing about the deadline was witnessed.
+/// How many connections a `listen(1)` socket admits before that happens depends
+/// on the platform. We measured one on Darwin, and Linux CI saw more than one
+/// connect complete. So the fill stops when a connect no longer completes, never
+/// at a count. Assuming a count is what made this test fail on Linux CI: the
+/// queue was still short, the connect under test completed, and the test saw
+/// nothing about the deadline.
 ///
-/// Returns `None` when overflow is RST rather than a dropped SYN. A RST is
-/// an answer, so the bounded-connect tests cannot witness a deadline.
+/// Returns `None` when the overflow gets a RST rather than a dropped SYN. A RST
+/// is an answer, so the bounded-connect tests can't see a deadline.
 ///
 /// The listener is returned because dropping it closes the port outright. The
-/// fillers come with it because whether a closed-but-still-queued connection
-/// keeps its slot is platform-specific — on Darwin it does, measured — and
-/// holding them for the life of the test removes the question.
+/// fillers come with it because whether a closed but still queued connection
+/// keeps its slot depends on the platform (we measured that it does on Darwin),
+/// and holding them for the life of the test removes the question.
 pub fn full_accept_queue() -> Option<(socket2::Socket, Vec<std::net::TcpStream>, u16)> {
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse().expect("addr");
     let listener = socket2::Socket::new(
@@ -258,14 +258,14 @@ fn classify_overflow_treats_rst_as_unmeasurable() {
     );
 }
 
-// Darwin only: 54 is ECONNRESET there and nowhere else that CI runs — on Linux
-// errno 54 is EXFULL, so this pin went red on every Linux job. The kind-level
-// test above is the cross-platform half; this one freezes the exact number the
-// macOS 27 kernel answered with, so it is scoped to the platform that produced it.
+// This runs on Darwin only. Errno 54 is ECONNRESET there and nowhere else CI
+// runs. On Linux it's EXFULL, so this pin went red on every Linux job. The
+// kind-level test above is the cross-platform half. This one freezes the exact
+// number the macOS 27 kernel answered with, so it only runs on that platform.
 #[cfg(target_os = "macos")]
 #[test]
 fn classify_overflow_maps_econnreset_54() {
-    // The macOS 27 panic spelled `Os { code: 54, kind: ConnectionReset }`.
+    // The macOS 27 panic printed `Os { code: 54, kind: ConnectionReset }`.
     let rst = std::io::Error::from_raw_os_error(54);
     assert_eq!(rst.kind(), ErrorKind::ConnectionReset);
     assert_eq!(classify_overflow(&rst), Overflow::Reset);
@@ -274,13 +274,13 @@ fn classify_overflow_maps_econnreset_54() {
 /// The deadline the bounded connect tests are given, and the floor the kernel
 /// enforces on the same call without one. Measured on aarch64-apple-darwin: a
 /// loopback connect to a full accept queue fails by itself with ETIMEDOUT
-/// after 7.836 s. Linux's floor is its SYN retransmission schedule and is far
-/// longer — not measured here — so this is the tighter of the two and the
-/// bounds that rest on it hold on both.
+/// after 7.836 s. Linux's floor comes from its SYN retransmission schedule and
+/// is far longer (we haven't measured it), so this is the tighter of the two,
+/// and bounds that rest on it hold on both.
 ///
-/// The gap between these two is the whole of what those tests can see. An
-/// earlier version asserted only the `TimedOut` arm and the exit code, and
-/// passed identically with the deadline made inert — both arms end in
-/// `TimedOut`, so neither witnessed which clock produced it.
+/// The gap between these two is all those tests can see. An earlier version
+/// asserted only the `TimedOut` arm and the exit code, and passed just the same
+/// with the deadline switched off. Both arms end in `TimedOut`, so neither showed
+/// which clock produced it.
 pub const CONNECT_DEADLINE_MS: u64 = 200;
 pub const KERNEL_LOOPBACK_FLOOR_MS: u64 = 7_836;

@@ -104,7 +104,7 @@ fn sign(n Int) String {
 	}
 }
 
-// --- constructor patterns: positional, labeled, and rest ----------------------
+// --- constructor patterns: positional, labelled and rest ----------------------
 
 type Shape {
 	Circle(radius Int)

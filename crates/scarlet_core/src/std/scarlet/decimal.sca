@@ -1,6 +1,6 @@
 // Exact decimal arithmetic on a scaled integer, for money-like values.
 //
-// A `Decimal` is `units * 10^(-scale)`: `new(1999, 2)` is 19.99. Addition
+// A `Decimal` is `units * 10^(-scale)`, so `new(1999, 2)` is 19.99. Addition
 // aligns scales and multiplication adds them, so only `div` and `round` drop
 // digits, at a scale and rounding mode you give. `units` is an `Int`, so
 // neither it nor the scale has a limit.
@@ -21,7 +21,7 @@ pub opaque type Decimal {
 
 // How `div_with` and `round_with` drop digits. `div` and `round` use
 // `HalfEven`, which sends ties to the even neighbour so repeated rounding
-// doesn't drift; `HalfUp` sends them away from zero.
+// doesn't drift. `HalfUp` sends them away from zero.
 pub type Rounding {
 	HalfEven
 	HalfUp
@@ -31,8 +31,8 @@ pub type Rounding {
 	Ceiling
 }
 
-// `units * 10^(-scale)`: `new(1999, 2)` is 19.99. A negative scale is
-// multiplied out: `new(5, 0 - 3)` is 5000 at scale 0.
+// Makes `units * 10^(-scale)`, so `new(1999, 2)` is 19.99. A negative scale is
+// multiplied out, so `new(5, 0 - 3)` is 5000 at scale 0.
 pub fn new(units Int, scale Int) Decimal {
 	if scale < 0 {
 		Decimal(units * pow10(0 - scale), 0)
@@ -45,8 +45,8 @@ pub fn from_int(n Int) Decimal {
 	Decimal(n, 0)
 }
 
-// The raw scaled integer: `units(new(1999, 2))` is 1999. Together with
-// `scale` this is the lossless way to serialize a Decimal.
+// The raw scaled integer, so `units(new(1999, 2))` is 1999. Together with
+// `scale`, this is the lossless way to serialise a Decimal.
 pub fn units(d Decimal) Int {
 	match d {
 		Decimal(u, _) -> u
@@ -76,15 +76,15 @@ pub fn abs(d Decimal) Decimal {
 	Decimal(int::abs(units(d)), scale(d))
 }
 
-// Exact product; the result scale is the sum of the operand scales.
-// 19.99 * 3 is 59.97 at scale 2; 1.5 * 0.25 is 0.375 at scale 3.
+// Multiplies exactly. The result's scale is the sum of the operands' scales,
+// so 19.99 * 3 is 59.97 at scale 2 and 1.5 * 0.25 is 0.375 at scale 3.
 pub fn mul(a Decimal, b Decimal) Decimal {
 	Decimal(units(a) * units(b), scale(a) + scale(b))
 }
 
-// `a / b` at `places`, rounding half-to-even, or `Err(Nil)` when `b` is 0.
-// A negative `places` rounds to a multiple of 10^|places| at scale 0:
-// `div(from_int(1234), from_int(1), 0 - 2)` is 1200.
+// Divides `a` by `b` to `places` decimal places, rounding half to even. It
+// returns `Err(Nil)` when `b` is 0. A negative `places` rounds to a multiple of
+// 10^|places| at scale 0, so `div(from_int(1234), from_int(1), 0 - 2)` is 1200.
 pub fn div(a Decimal, b Decimal, places Int) Result(Decimal, Nil) {
 	div_with(a, b, places, HalfEven)
 }
@@ -103,9 +103,9 @@ pub fn div_with(a Decimal, b Decimal, places Int, mode Rounding) Result(Decimal,
 	}
 }
 
-// Change the scale, rounding half-to-even or padding with zeros:
-// `round(new(2345, 3), 2)` is 2.34. A negative `places` rounds to a
-// multiple of 10^|places| at scale 0: `round(new(1250, 0), 0 - 2)` is 1200.
+// Changes the scale to `places`, rounding half to even or padding with zeros,
+// so `round(new(2345, 3), 2)` is 2.34. A negative `places` rounds to a
+// multiple of 10^|places| at scale 0, so `round(new(1250, 0), 0 - 2)` is 1200.
 pub fn round(d Decimal, places Int) Decimal {
 	round_with(d, places, HalfEven)
 }
@@ -119,9 +119,9 @@ pub fn round_with(d Decimal, places Int, mode Rounding) Decimal {
 	}
 }
 
-// Numeric comparison across scales. `compare(new(15, 1), new(1500, 3))` is
-// `Eq` — built-in `==` would say otherwise, because it compares the
-// representation (units and scale), not the number.
+// Compares the numbers, across scales. `compare(new(15, 1), new(1500, 3))` is
+// `Eq`, but the built-in `==` says they differ, because it compares the
+// representation (units and scale) instead of the number.
 pub fn compare(a Decimal, b Decimal) Order {
 	s = int::max(scale(a), scale(b))
 	ua = units(a) * pow10(s - scale(a))
@@ -190,8 +190,8 @@ pub fn is_positive(d Decimal) Bool {
 	units(d) > 0
 }
 
-// Drop trailing zeros: `normalize(new(1500, 3))` is 1.5 at scale 1. Useful
-// before serializing when the stored scale carries no meaning.
+// Drops trailing zeros, so `normalize(new(1500, 3))` is 1.5 at scale 1. It's
+// useful before serialising when the stored scale carries no meaning.
 pub fn normalize(d Decimal) Decimal {
 	if scale(d) > 0 && units(d) % 10 == 0 {
 		normalize(Decimal(units(d) / 10, scale(d) - 1))
@@ -200,9 +200,9 @@ pub fn normalize(d Decimal) Decimal {
 	}
 }
 
-// An optional sign, digits, and an optional fraction: '42', '-19.99',
-// '+0.05'. The scale is the number of fraction digits. Anything else, like
-// '.5' or '1.', is `Err(Nil)`.
+// Parses an optional sign, digits and an optional fraction, like '42',
+// '-19.99' or '+0.05'. The scale is the number of fraction digits. Anything
+// else, like '.5' or '1.', gives `Err(Nil)`.
 pub fn parse(s String) Result(Decimal, Nil) {
 	b = binary::from_string(s)
 	first = binary::byte_at(b, 0)
@@ -230,8 +230,8 @@ pub fn to_string(d Decimal) String {
 	}
 }
 
-// The nearest Float, rounded once. One too large to be a Float is the
-// largest Float, as in Float arithmetic.
+// Returns the nearest Float, rounded once. A value too large to be a Float
+// becomes the largest Float, as in Float arithmetic.
 pub fn to_float(d Decimal) Float {
 	from_decimal(units(d), scale(d))
 }
@@ -239,8 +239,9 @@ pub fn to_float(d Decimal) Float {
 @vm(float__from_decimal)
 fn from_decimal(units Int, scale Int) Float
 
-// The exact value of `f`, rounded at `places` with ties away from zero, as
-// `float::round` does. A Float is never NaN or infinite, so this cannot fail.
+// Takes the exact value of `f` and rounds it to `places`, with ties going away
+// from zero as `float::round` does. A Float is never NaN or infinite, so this
+// can't fail.
 // Floats are approximate, so prefer `parse` or `new` when exactness matters.
 pub fn from_float(f Float, places Int) Decimal {
 	round_with(exact(f, 0), places, HalfUp)
@@ -257,7 +258,7 @@ fn exact(f Float, k Int) Decimal {
 	}
 }
 
-// A rounded coefficient `q` placed at the target `places`: a negative
+// Places a rounded coefficient `q` at the target `places`. A negative
 // `places` multiplies the magnitude back out to scale 0.
 fn at_places(q Int, places Int) Decimal {
 	if places < 0 {
@@ -271,7 +272,7 @@ fn pow10(n Int) Int {
 	pow(10, n)
 }
 
-// `b^n` by squaring; 1 when `n <= 0`.
+// Computes `b^n` by squaring. It's 1 when `n <= 0`.
 fn pow(b Int, n Int) Int {
 	if n <= 0 {
 		1
@@ -319,9 +320,9 @@ fn pad_zeros(s String, width Int) String {
 	}
 }
 
-// `q + r/d` rounded to an integer per `mode`. `d` must be positive; `n` may
-// be negative — truncating division means `r` carries the sign of `n` and
-// "away from zero" is a step of `sign(n)`.
+// Rounds `n / d` to an integer as `mode` says. `d` must be positive, but `n`
+// may be negative. Truncating division gives the remainder the sign of `n`,
+// so "away from zero" is a step of `sign(n)`.
 fn div_round(n Int, d Int, mode Rounding) Int {
 	q = n / d
 	r = int::abs(n % d)

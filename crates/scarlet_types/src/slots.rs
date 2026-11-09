@@ -1,6 +1,7 @@
-//! Slotting positional and labeled constructor arguments into declared-field
-//! order. The typechecker, the elaborator and the exhaustiveness checker all
-//! call this, so all three agree on which argument lands in which field.
+//! Puts positional and labelled constructor arguments into the order their
+//! fields are declared in. The type checker, the elaborator and the
+//! exhaustiveness checker all call this, so all three agree on which argument
+//! lands in which field.
 
 use smallvec::SmallVec;
 
@@ -9,25 +10,27 @@ use smallvec::SmallVec;
 pub type Slots<T> = SmallVec<[Option<T>; 4]>;
 
 /// A malformed argument list. Each variant hands back the offending item, so a
-/// caller needing its span carries the span in `T`. Only the compiler renders
-/// these; elaboration and exhaustiveness discard them as already reported.
+/// caller that needs its span carries the span in `T`. Only the compiler
+/// reports these. Elaboration and exhaustiveness drop them, because the
+/// compiler has already reported them.
 pub enum SlotError<L, T> {
-    /// Positional item past the last declared field.
+    /// A positional item past the last declared field.
     ExtraPositional(T),
-    /// Label naming no declared field, with the label.
+    /// A label that names no declared field, with the label.
     UnknownLabel(L, T),
-    /// Item that landed on an already-filled field, with that field's index.
+    /// An item that landed on a field already filled, with that field's index.
     Duplicate(T, usize),
 }
 
-/// Slot positional and labeled items into declared-field order: positionals
-/// fill slots left-to-right, a labeled item lands on its declared index.
-/// Overflowing positionals and unknown labels fill no slot. Generic over `L`
-/// so callers can pass either interned `StrId`s or `&str`s.
+/// Put positional and labelled items into declared-field order. Positional
+/// items fill slots from left to right, and a labelled item lands on its
+/// field's index. Extra positional items and unknown labels fill no slot.
+/// It's generic over `L` so callers can pass either interned `StrId`s or
+/// `&str`s.
 ///
-/// `fields` is one entry per declared field, `None` for a field with no label.
-/// Both the slot count and the label lookup come from this slice, so there is
-/// no second width for a label table to drift from.
+/// `fields` has one entry per declared field, with `None` for a field that has
+/// no label. The slot count and the label lookup both come from this slice,
+/// so there's no second width for a label table to drift from.
 pub fn slot_labeled<L: PartialEq + Copy, T>(
     fields: &[Option<L>],
     items: impl IntoIterator<Item = (Option<L>, T)>,
@@ -54,7 +57,8 @@ pub fn slot_labeled<L: PartialEq + Copy, T>(
                 }
             },
         };
-        // First item to claim a field keeps it; every later one is reported.
+        // The first item to claim a field keeps it, and every later one is
+        // reported.
         if by_pos[idx].is_some() {
             errors.push(SlotError::Duplicate(val, idx));
         } else {

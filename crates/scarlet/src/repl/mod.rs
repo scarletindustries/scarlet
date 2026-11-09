@@ -1,10 +1,9 @@
 //! The interactive REPL.
 //!
-//! A session is a growing piece of *source text*: every entry that defined
-//! something is replayed verbatim ahead of the current one (see
-//! [`Session::eval`]). The line editor's coloring, completion and
-//! multi-line behaviour all come from the same scanner/parser the evaluator
-//! uses, via [`helper::ScarletHelper`].
+//! A session is a growing piece of *source text*. Every entry that defined something is replayed
+//! word for word ahead of the current one (see [`Session::eval`]). The line editor's colouring,
+//! completion and multi-line behaviour all come from the same scanner and parser the evaluator
+//! uses, through [`helper::ScarletHelper`].
 
 mod command;
 mod entry;
@@ -28,8 +27,8 @@ use command::Flow;
 use entry::Entry;
 use names::Names;
 
-/// Where an entry's diagnostics say they come from. Not a real path: the
-/// session's replayed source has no file.
+/// Where an entry's diagnostics say they come from. It isn't a real path, because the session's
+/// replayed source has no file.
 const ORIGIN: &str = "<repl>";
 
 pub fn run(version: &str) {
@@ -38,7 +37,7 @@ pub fn run(version: &str) {
     let mut editor = match new_editor(palette, Rc::clone(&names)) {
         Ok(editor) => editor,
         Err(e) => {
-            eprintln!("Failed to initialize readline: {e}");
+            eprintln!("Failed to initialise readline: {e}");
             return;
         }
     };
@@ -68,8 +67,8 @@ pub fn run(version: &str) {
         }
         let _ = editor.add_history_entry(line.as_str());
 
-        // `exit` predates the `:` commands and stays: it is what a REPL
-        // reaches for first.
+        // `exit` is older than the `:` commands, and it stays because it's what people try first
+        // in a REPL.
         if matches!(line.trim(), "exit" | "quit") {
             break;
         }
@@ -109,14 +108,12 @@ fn new_editor(
         .build();
     let mut editor = Editor::with_config(config)?;
     editor.set_helper(Some(helper::ScarletHelper::new(palette, names)));
-    // Enter submits when the entry parses and opens a line when it does not
-    // (see the `Validator`). These open one unconditionally, for adding to an
-    // entry that is already complete.
+    // Enter submits when the entry parses and opens a new line when it doesn't (see the
+    // `Validator`). These keys always open one, for adding to an entry that's already complete.
     //
-    // Shift-Enter is deliberately absent: a terminal sends it as a plain
-    // carriage return, indistinguishable from Enter, unless the user maps it.
-    // `:help` says how. Ctrl-J is the spelling that works everywhere, since it
-    // is a control character in its own right.
+    // We leave out Shift-Enter on purpose. A terminal sends it as a plain carriage return, the
+    // same as Enter, unless the user maps it, and `:help` says how. Ctrl-J works everywhere,
+    // because it's a control character in its own right.
     for key in [
         KeyEvent(KeyCode::Enter, Modifiers::ALT),
         KeyEvent(KeyCode::Char('J'), Modifiers::CTRL),
@@ -135,9 +132,8 @@ fn banner(version: &str, p: &Palette) {
     println!();
 }
 
-/// `$SCARLET_HISTORY`, else an XDG-ish state file. `None` when there is no
-/// home directory to put it in, in which case history lives only as long as
-/// the session.
+/// `$SCARLET_HISTORY`, or else an XDG-style state file. It's `None` when there's no home
+/// directory to put it in, and then history lasts only as long as the session.
 fn history_path() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("SCARLET_HISTORY") {
         return Some(PathBuf::from(explicit));
@@ -157,20 +153,18 @@ fn history_path() -> Option<PathBuf> {
 
 /// The live session: the source it replays, and the names that source bound.
 pub(crate) struct Session {
-    /// Every import the session has seen, and every declaration it has
-    /// accepted, replayed verbatim ahead of the current entry — imports
-    /// first, as the language requires.
+    /// Every import the session has seen and every declaration it has accepted. They're replayed
+    /// word for word ahead of the current entry, imports first, as the language requires.
     ///
-    /// Source, not retained AST: each turn is scanned on its own, so retained
-    /// nodes would all restart their spans at line 1 and two same-shaped
-    /// entries would share a `Span` — which the compiler keys expression
-    /// types on. Replaying text keeps every span unique.
+    /// We keep source instead of the AST because each turn is scanned on its own. Kept nodes would
+    /// all restart their spans at line 1, and two entries of the same shape would share a `Span`,
+    /// which the compiler keys expression types on. Replaying text keeps every span unique.
     imports: String,
     definitions: String,
     names: Rc<RefCell<Names>>,
     palette: Palette,
-    /// Relative imports resolve against the directory the REPL was started
-    /// in, which is the only directory a session can be said to be "in".
+    /// Relative imports resolve against the directory the REPL was started in, which is the only
+    /// directory a session can be said to be "in".
     base_dir: Option<PathBuf>,
 }
 
@@ -205,14 +199,13 @@ impl Session {
         format!("{}{}", self.imports, self.definitions)
     }
 
-    /// Compile the session's source plus `input` as one program and run it,
-    /// printing the value unless it is `Nil` (a definition, or a call that ran
-    /// only for its output). An entry joins the session only when it ran: its
-    /// definitions are replayed ahead of every later entry, and one that
-    /// stopped would stop each of them too.
+    /// Compiles the session's source plus `input` as one program and runs it, printing the value
+    /// unless it's `Nil` (a definition, or a call that ran only for its output). An entry joins
+    /// the session only if it ran. Its definitions are replayed ahead of every later entry, so one
+    /// that stopped would stop each of them too.
     fn eval(&mut self, input: &str) {
-        // A module's name alone is not a value, but at a prompt it is a fair
-        // question: what is in it.
+        // A module's name on its own isn't a value, but at a prompt it's a fair way to ask what's
+        // in it.
         let name = input.trim();
         if self.names.borrow().is_module(name) {
             return self.list_module(name);
@@ -224,9 +217,8 @@ impl Session {
                 return;
             }
         };
-        // The entry's own imports join the session's ahead of every
-        // definition, so `import` works at any point in a session and not
-        // only in its first entry.
+        // The entry's own imports join the session's ahead of every definition, so `import` works
+        // at any point in a session and not only in its first entry.
         let parts = entry::split(input, &program);
         let combined_src = format!(
             "{}{}{}{}{}",
@@ -248,9 +240,8 @@ impl Session {
             }
         }
         let Some(runnable) = result.into_runnable() else {
-            // A successful non-check compile always produces a program, so
-            // reaching here means the stdlib seed failed and was already
-            // reported.
+            // A successful compile that isn't a check always produces a program, so getting here
+            // means the stdlib seed failed and was already reported.
             return;
         };
         let host = scarlet_vm::Host::of_this_process(Vec::new());
@@ -261,9 +252,9 @@ impl Session {
             ran
         };
         match ran {
-            // Only an entry that ends in an expression has a value the user
-            // wrote. What a definition leaves is the program's own, and
-            // printing it says nothing about the entry.
+            // Only an entry that ends in an expression has a value the user wrote. What a
+            // definition leaves belongs to the program, and printing it says nothing about the
+            // entry.
             Ok(Some(shown)) if !parts.expressions.trim().is_empty() => println!("{shown}"),
             Ok(_) => {}
             Err(stop) => {
@@ -279,13 +270,13 @@ impl Session {
         self.definitions.push_str(&parts.definitions);
     }
 
-    /// What the imported module `alias` offers: its first few public names,
-    /// and how to see the rest.
+    /// Lists what the imported module `alias` offers: its first few public names, and how to see
+    /// the rest.
     fn list_module(&self, alias: &str) {
         const SHOWN: usize = 15;
         let mut members = self.names.borrow_mut().qualified(alias, "");
-        // Its functions and values first: what a module is for, ahead of the
-        // types and constructors that go with them.
+        // Show functions and values first, because they're what a module is for, then the types
+        // and constructors that go with them.
         members.sort_by_key(|m| m.name.starts_with(|c: char| c.is_ascii_uppercase()));
         let p = &self.palette;
         println!(
@@ -305,9 +296,9 @@ impl Session {
         }
     }
 
-    /// The inferred type of `expr`, from a throwaway checking session. Bound
-    /// to a name because types are recorded at names: `_`-prefixed so the
-    /// binding is not reported as unused.
+    /// Prints the inferred type of `expr`, from a throwaway checking session. We bind it to a name
+    /// because types are recorded at names, and the name starts with `_` so the binding isn't
+    /// reported as unused.
     fn print_type(&mut self, expr: &str) {
         const BINDING: &str = "const _repl_type = ";
 
@@ -330,8 +321,8 @@ impl Session {
             self.report(&result.diagnostics, &probe_src);
             return;
         }
-        // The binding is the last line of the probe source, and its name
-        // starts one column past `const `.
+        // The binding is the last line of the probe source, and its name starts right after
+        // `const `.
         let line = i32::try_from(replay.lines().count()).unwrap_or(0);
         let column = i32::try_from("const ".len()).unwrap_or(0);
         match session.hover(None, line, column) {
@@ -340,8 +331,8 @@ impl Session {
         }
     }
 
-    /// The Core IR of the session's functions whose name contains `needle`.
-    /// Filtered, never whole: the program carries the entire stdlib.
+    /// Prints the Core IR of the session's functions whose name contains `needle`. It's always
+    /// filtered, because the program carries the whole stdlib.
     fn disassemble(&mut self, needle: &str) {
         let replay = self.replay();
         let mut scanner = crate::scanner::new_scanner(replay.clone());
@@ -363,7 +354,7 @@ impl Session {
         }
     }
 
-    /// Evaluate a file as one entry, so its definitions join the session.
+    /// Evaluates a file as one entry, so its definitions join the session.
     fn load(&mut self, path: &Path) {
         match std::fs::read_to_string(path) {
             Ok(source) => self.eval(source.trim_end()),
@@ -371,8 +362,8 @@ impl Session {
         }
     }
 
-    /// Write the session's replayed source — every entry that defined
-    /// something — to a file that `scarlet run` can take.
+    /// Writes the session's replayed source, meaning every entry that defined something, to a file
+    /// that `scarlet run` can take.
     fn save(&self, path: &Path) {
         let replay = self.replay();
         if replay.is_empty() {

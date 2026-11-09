@@ -1,15 +1,16 @@
-//! Pattern elaboration: [`CPat`] → [`TypedPat`], [`CArm`] → [`TypedArm`].
+//! Pattern elaboration turns a [`CPat`] into a [`TypedPat`] and a [`CArm`]
+//! into a [`TypedArm`].
 //!
-//! The check walk resolved every pattern already: constructors to their
-//! variants, with one sub-pattern per declared field, and names to their
-//! binders. What is left is what needs the module's final types, and the
-//! interning `lower` cannot do:
+//! The check walk has already resolved every pattern. Constructors point at
+//! their variants, with one sub-pattern per declared field, and names point at
+//! their binders. What's left is the work that needs the module's final types,
+//! and the interning `lower` can't do:
 //!
 //! * Every node's type is resolved into the pool, so `lower` never sees an
 //!   unsolved type variable.
 //! * Every `ConstId` `lower` emits is minted here, including ones with no
-//!   source literal, like an array pattern's length or a `<<>>` walk's
-//!   initial bit cursor.
+//!   source literal, like an array pattern's length or the starting bit
+//!   cursor of a `<<>>` walk.
 //!
 //! ## Or-patterns bind once
 //!
@@ -29,11 +30,11 @@ use super::{PatRest, TypedArm, TypedBinPatSeg, TypedBind, TypedExpr, TypedPat, e
 
 /// The services pattern elaboration needs from the enclosing elaborator.
 ///
-/// Deliberately not an `InferEngine`: every type crossing this seam is an
-/// [`RTy`], so a `fresh_var()` cannot reach a `TypedPat`.
+/// It is deliberately not an `InferEngine`. Every type that crosses here is an
+/// [`RTy`], so a `fresh_var()` can't reach a `TypedPat`.
 pub trait PatCtx {
-    /// The bind for `binder`: a fresh [`BindingId`] the first time, and the
-    /// same one again for a later or-alternative's occurrence of it.
+    /// The bind for `binder`. It gets a new [`BindingId`] the first time, and
+    /// the same one again when a later or-alternative mentions it.
     fn bind(&mut self, binder: BinderId, name: StrId, ty: RTy) -> TypedBind;
 
     fn number_const(&mut self, lit: &ast::NumberLiteral) -> ConstId;
@@ -43,11 +44,11 @@ pub trait PatCtx {
 
     fn ty_int(&mut self) -> RTy;
 
-    /// A type the check walk inferred, now final, in the pool.
+    /// Put a type the check walk inferred, which is now final, into the pool.
     fn resolve(&mut self, t: Ty) -> RTy;
 
-    /// Elaborate a checked expression: a `<<v:size(n)>>` width, a guard, an
-    /// arm body.
+    /// Elaborate a checked expression, such as a `<<v:size(n)>>` width, a
+    /// guard or an arm body.
     fn expr(&mut self, e: &CExpr) -> TypedExpr;
 }
 
@@ -95,8 +96,8 @@ fn elaborate_pattern<C: PatCtx>(cx: &mut C, p: &CPat) -> TypedPat {
         CPatKind::Array { elem, prefix, rest } => {
             let elem_ty = cx.resolve(*elem);
             let prefix: Vec<TypedPat> = prefix.iter().map(|e| elaborate_pattern(cx, e)).collect();
-            // The `..rest` binding takes the scrutinee's own array type: it is
-            // a suffix of the same array, not an element.
+            // The `..rest` binding takes the scrutinee's own array type,
+            // because it is a suffix of the same array and not an element.
             let rest = rest_of(cx, rest, ty);
             // `lower` compares `ArrayLen(scrut)` against this and has no pool
             // of its own, so the constant is minted here.
@@ -139,8 +140,8 @@ fn rest_of<C: PatCtx>(cx: &mut C, rest: &CRest, ty: RTy) -> PatRest {
 
 fn bin_seg<C: PatCtx>(cx: &mut C, seg: &CBinPatSeg) -> TypedBinPatSeg {
     match seg {
-        // `<<'lit'>>`: match the literal's UTF-8 bytes as a prefix. Its width
-        // is known now.
+        // `<<'lit'>>` matches the literal's UTF-8 bytes as a prefix, and its
+        // width is already known.
         CBinPatSeg::Literal(s) => {
             let width = (s.len() as i64) * 8;
             let bytes = cx.binary_const(s.as_bytes().to_vec(), width as u64);
@@ -219,28 +220,29 @@ fn collect_rest(rest: &PatRest, out: &mut Vec<TypedBind>) {
     }
 }
 
-/// The width a `<<..>>` segment's spec prescribes. Carrying the kind means an
-/// `Int` segment's width cannot be missing, so consumers need no "Int segment
-/// with no width" guard.
+/// The width a `<<..>>` segment's spec sets. Because this carries the kind, an
+/// `Int` segment's width can't be missing, so consumers don't need to guard
+/// against an `Int` segment with no width.
 #[derive(Debug)]
 pub enum SpecWidth {
-    /// `:N` / `:size(..)`, or the default 8 when sizeless.
+    /// `:N` or `:size(..)`, or the default of 8 when no size is given.
     Int(TypedExpr),
-    /// `:bytes(..)` scaled to bits; `None` is a sizeless `:binary`, which
-    /// consumes the remainder.
+    /// `:bytes(..)` scaled to bits. `None` is a `:binary` with no size, which
+    /// takes the remainder.
     Bytes(Option<TypedExpr>),
-    /// `:utf8` — the width is data-dependent, decoded at runtime.
+    /// `:utf8`, whose width depends on the data and is decoded at runtime.
     Utf8,
 }
 
-/// The bits-width rule for `<<..>>` segments, shared by expression and pattern
-/// elaboration so the two cannot drift. `lower` reads each width as a plain
-/// `Int` expression and never re-derives the default or the unit.
+/// The rule for a `<<..>>` segment's width in bits. Expression and pattern
+/// elaboration share it so the two can't drift apart. `lower` reads each width
+/// as a plain `Int` expression and never works out the default or the unit
+/// again.
 ///
-/// The `:bytes` scale multiplies with `Op::MulInt`: both operands are `Int`
-/// by construction (the width expression is checked `Int`, the scale is a
-/// synthesised `Int` constant), so the typed op applies even though the
-/// checker never saw the node.
+/// The `:bytes` scale multiplies with `PrimOp::IntMul`. Both operands are
+/// always `Int`, because the width expression is checked as `Int` and the
+/// scale is a generated `Int` constant. So the typed op is right even though
+/// the checker never saw the node.
 pub(crate) fn seg_bits<C: PatCtx>(cx: &mut C, width: &CWidth) -> SpecWidth {
     match width {
         CWidth::Int(Some(e)) => SpecWidth::Int(cx.expr(e)),
@@ -284,8 +286,9 @@ mod tests {
     const BINARY: TypeId = TypeId(5);
     const USER: TypeId = TypeId(9);
 
-    /// A `PatCtx` over a bare pool. A test's checked types are stand-ins,
-    /// each naming one pool type; expressions elaborate to a marker `Nil`.
+    /// A `PatCtx` over a bare pool. A test's checked types are stand-ins that
+    /// each name one pool type, and every expression elaborates to a marker
+    /// `Nil`.
     struct Ctx {
         pool: ResolvedPool,
         tys: Vec<RTy>,
@@ -584,7 +587,7 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert!(out[0].guard.is_none());
         assert!(out[1].guard.is_some());
-        // Distinct arms, distinct binders, distinct bindings.
+        // Different arms have different binders, so they get different bindings.
         assert_eq!(cx.binds.len(), 2);
         assert_eq!(cx.binds[0].id, BindingId(0));
         assert_eq!(cx.binds[1].id, BindingId(1));
@@ -608,13 +611,13 @@ mod tests {
             bin_t,
             CPatKind::Binary {
                 segs: vec![
-                    // `<<'hi'>>` — literal prefix, width known now.
+                    // `<<'hi'>>` is a literal prefix whose width is already known.
                     CBinPatSeg::Literal("hi".to_string()),
-                    // `n:8` — the Int default.
+                    // `n:8` is the Int default.
                     seg(CWidth::Int(None), n),
-                    // `m:bytes(2)` — the bytes-to-bits multiplier is folded in.
+                    // `m:bytes(2)` has the bytes-to-bits multiplier folded in.
                     seg(CWidth::Bytes(Some(checked_num(2))), m),
-                    // `b:binary` — sizeless, consumes the remainder.
+                    // `b:binary` has no size, so it takes the remainder.
                     seg(CWidth::Bytes(None), b),
                 ],
                 rest: CRest::Bind {

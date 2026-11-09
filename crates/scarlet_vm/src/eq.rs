@@ -1,5 +1,5 @@
-//! `==`: structural equality, as the old VM had it (`values_equal` in
-//! `bytecode/value.rs` on master).
+//! `==`, which is structural equality. It works as the old VM's
+//! `values_equal` did (that lived in `bytecode/value.rs`, which is now gone).
 //!
 //! Two values are equal when they hold the same thing: the same number,
 //! string, Bool or `Nil`; the same constructor with equal fields; tuples or
@@ -7,8 +7,8 @@
 //! captures; maps with the same keys, each bound to equal values. A range is
 //! an array of its Ints, so `0..3 == [0, 1, 2]`.
 //!
-//! The walk is a list of pairs still to compare rather than recursion, so two
-//! lists a million long compare without overflowing the stack. It stops at the
+//! The walk keeps a list of pairs still to compare instead of recursing, so
+//! two very long lists compare without overflowing the stack. It stops at the
 //! first pair that differs.
 
 use crate::array::{self, Seq};
@@ -33,10 +33,10 @@ pub(crate) fn equal(heap: &Heap, a: Value, b: Value) -> bool {
     true
 }
 
-/// Compare one pair: decide it now, or queue what it holds.
+/// Compare one pair. Decide it now, or queue the values it holds.
 fn pair(heap: &Heap, a: Value, b: Value, todo: &mut Vec<(Value, Value)>) -> bool {
-    // Every value but a Float has one form, so the same word is the same
-    // value. A Float compares as a number, so its two zeros are equal.
+    // Every value but a Float has only one form, so the same word means the
+    // same value. A Float compares as a number, so its two zeros are equal.
     if a.bits() == b.bits() {
         return true;
     }
@@ -146,8 +146,8 @@ fn captures(heap: &Heap, closure: Cell) -> Vec<Value> {
     (0..).map_while(|i| heap.capture(closure, i)).collect()
 }
 
-/// Queue `a` and `b` pairwise, first pair on top, or say they differ in
-/// length.
+/// Queue `a` and `b` in pairs with the first pair on top. Returns false if
+/// they differ in length.
 fn queue(todo: &mut Vec<(Value, Value)>, a: Vec<Value>, b: Vec<Value>) -> bool {
     if a.len() != b.len() {
         return false;

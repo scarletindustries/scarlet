@@ -11,18 +11,20 @@ pub enum Severity {
     Hint,
 }
 
-/// Machine-readable discriminator for a diagnostic. Consumers match on this
-/// instead of substring-matching `message`, so rewording a message cannot
-/// change downstream behaviour.
+/// What kind of diagnostic this is, for code to match on. Consumers match on
+/// this instead of searching `message`, so rewording a message can't change
+/// what they do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticCode {
-    /// Parser or scanner hit end-of-input while more tokens were required.
+    /// The parser or scanner reached the end of the input while it still
+    /// needed more.
     UnexpectedEof,
     ParseError,
     TypeError,
     ModuleError,
     UnusedBinding,
-    /// Secondary note pointing at another location (e.g. "first defined here").
+    /// A secondary note pointing at another location, like "first defined
+    /// here".
     RelatedLocation,
 }
 

@@ -1,13 +1,14 @@
-//! Runtime golden tests for the pure-Scarlet stdlib modules under `scarlet/*`: each
-//! drives a module's public functions through `al run` and pins the output.
+//! Runtime golden tests for the stdlib modules under `scarlet/*` that are
+//! written in Scarlet. Each one drives a module's public functions through
+//! `al run` and pins the output.
 
 mod common;
 use common::{check_ok, check_rejects, run_outputs};
 
-/// Every stdlib module compiles. A module is only checked when a program
-/// imports it, so without this, one that no running test imports could hold
-/// a type error nothing sees. Each goes under an alias of its own, so no two
-/// last segments clash.
+/// Checks that every stdlib module compiles. A module is only checked when a
+/// program imports it, so without this, one that no running test imports could
+/// hold a type error nobody sees. Each one gets its own alias, so no two last
+/// segments clash.
 #[test]
 fn every_stdlib_module_compiles() {
     let imports: String = scarlet_core::module::stdlib_modules()
@@ -79,7 +80,7 @@ fn stdlib_result() {
          }\n",
         "Ok(6)\nErr(bad!)\n",
     );
-    // then: Err short-circuits, propagating the original error untouched.
+    // then: Err short-circuits and passes the original error on untouched.
     run_outputs(
         "import scarlet/result\n\
          pub fn main() {\n\
@@ -88,8 +89,8 @@ fn stdlib_result() {
          }\n",
         "Ok(6)\nErr(e)\n",
     );
-    // unwrap: only defined for Result(a, Nil) — the Err carries nothing to
-    // discard, so it collapses to the default.
+    // unwrap: only defined for Result(a, Nil). The Err carries nothing to
+    // throw away, so it becomes the default.
     run_outputs(
         "import scarlet/result\n\
          pub fn main() {\n\
@@ -98,7 +99,7 @@ fn stdlib_result() {
          }\n",
         "5\n99\n",
     );
-    // replace_err: the Nil error is swapped for a meaningful one; Ok passes
+    // replace_err: the Nil error is swapped for a meaningful one, and Ok passes
     // through untouched.
     run_outputs(
         "import scarlet/result\n\
@@ -131,7 +132,8 @@ fn stdlib_result() {
 
 #[test]
 fn stdlib_resource() {
-    // Acquire, use, release — in that order — and the use's value comes back.
+    // Acquire, use and release happen in that order, and the use's value comes
+    // back.
     run_outputs(
         "import scarlet/resource\n\
          pub fn main() {\n\
@@ -140,8 +142,8 @@ fn stdlib_resource() {
          }\n",
         "release 10\n20\n",
     );
-    // try_with: Ok acquires, uses, releases; Err short-circuits, releasing
-    // and using nothing.
+    // try_with: Ok acquires, uses and releases. Err short-circuits, and
+    // releases and uses nothing.
     run_outputs(
         "import scarlet/resource\n\
          pub fn main() {\n\
@@ -150,7 +152,7 @@ fn stdlib_resource() {
          }\n",
         "release 1\nOk(2)\nErr(Nil)\n",
     );
-    // The backpass idiom: the rest of the block is `next`, and a trailing
+    // In the backpass idiom the rest of the block is `next`, and a trailing
     // backpass passes an empty (Nil) continuation.
     run_outputs(
         "import scarlet/resource\n\
@@ -196,7 +198,7 @@ fn stdlib_array() {
          }\n",
         "True\nFalse\nTrue\nFalse\n",
     );
-    // Empty-array base cases.
+    // The base cases on an empty array.
     run_outputs(
         "import scarlet/array\n\
          pub fn main() {\n\
@@ -209,7 +211,8 @@ fn stdlib_array() {
          }\n",
         "[]\n[]\n0\n0\n[]\nFalse\n",
     );
-    // `length` wraps a @vm builtin in a plain pub fn, so it stays first-class.
+    // `length` wraps a @vm builtin in a plain pub fn, so it can still be used as
+    // a value.
     run_outputs(
         "import scarlet/array\n\
          pub fn main() {\n\
@@ -248,7 +251,8 @@ run_case! {
 
 #[test]
 fn stdlib_decimal() {
-    // Scale propagation: add aligns to the wider scale, mul sums scales.
+    // How scale carries through: add aligns to the wider scale, and mul adds
+    // the scales.
     run_outputs(
         "import scarlet/decimal\n\
          pub fn main() {\n\
@@ -263,7 +267,7 @@ fn stdlib_decimal() {
          }\n",
         "20.00\n19.98\n59.97\n0.375\n1999\n2\n5000\n",
     );
-    // HalfEven is the default; a wider target scale zero-pads.
+    // HalfEven is the default, and a wider target scale pads with zeros.
     run_outputs(
         "import scarlet/decimal\n\
          pub fn main() {\n\
@@ -289,8 +293,8 @@ fn stdlib_decimal() {
          }\n",
         "Ok(33.33)\nOk(0.1250)\nErr(Nil)\n",
     );
-    // Half-tie rounding with big divisor units agrees with the same fraction
-    // at a small scale.
+    // Rounding a half tie with a divisor of large units agrees with the same
+    // fraction at a small scale.
     run_outputs(
         "import scarlet/decimal\n\
          import scarlet/result\n\
@@ -309,7 +313,7 @@ fn stdlib_decimal() {
          }\n",
         "Ok(1)\nOk(1)\nOk(1)\nOk(1)\nOk(0)\nOk(-1)\nOk(1)\nOk(1)\nOk(0)\n",
     );
-    // Comparison is scale-blind (1.5 == 1.500); normalize strips the zeros.
+    // Comparison ignores scale, so 1.5 == 1.500, and normalize strips the zeros.
     run_outputs(
         "import scarlet/decimal\n\
          pub fn main() {\n\
@@ -326,7 +330,7 @@ fn stdlib_decimal() {
         "True\nLt\nTrue\n2\n1\nTrue\nTrue\n",
     );
     // parse keeps the written scale, takes any number of digits, and rejects
-    // only malformed text. -0.05 is the sign-on-zero-whole-part case.
+    // only malformed text. -0.05 tests a sign on a whole part of zero.
     run_outputs(
         "import scarlet/decimal\n\
          import scarlet/result\n\
@@ -365,8 +369,8 @@ fn stdlib_decimal() {
          }\n",
         "1200\n1230\n0\nOk(1200)\n",
     );
-    // Any number of places, either way: past 18 digits was once refused,
-    // because 10^19 did not fit in a 64-bit Int.
+    // Any number of places works, in either direction. We once refused more
+    // than 18 digits, because 10^19 didn't fit in a 64-bit Int.
     run_outputs(
         "import scarlet/decimal\n\
          import scarlet/result\n\
@@ -390,10 +394,10 @@ fn stdlib_decimal() {
          0.000000000001000000000\n0.666666666666666666666666666667\n0\n\
          10000000000000000000000000\n",
     );
-    // to_float rounds `units / 10^scale` once. Converting each side on its
-    // own clamped both past the largest Float, so 10^400 at 399 places read
-    // as 1.0. Too large stops at the largest Float, too small is 0.0, and
-    // 0.1 is the same Float the literal is.
+    // to_float rounds `units / 10^scale` once. Converting each side on its own
+    // used to clamp both past the largest Float, so 10^400 at 399 places read
+    // as 1.0. A value too large stops at the largest Float, one too small is
+    // 0.0, and 0.1 is the same Float the literal is.
     run_outputs(
         "import scarlet/decimal\n\
          fn pow10(n Int) Int {\n\
@@ -464,8 +468,8 @@ fn stdlib_binary_runs() {
          }\n",
         "Ok(<<66>>)\nErr(Nil)\nOk(ABC)\n5\n",
     );
-    // Op::BinReadUtf8 decodes one codepoint, not one byte: [195, 169] is 'é',
-    // so a byte-wise read would bind 195 instead of 233.
+    // Op::BinReadUtf8 decodes one codepoint, not one byte. [195, 169] is 'é',
+    // so reading a single byte would bind 195 instead of 233.
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
@@ -477,8 +481,8 @@ fn stdlib_binary_runs() {
          }\n",
         "233\n",
     );
-    // Op::BinTake — `:bytes(n)` splices the first n bytes. 65,66,67
-    // discriminates both the count and prefix-vs-suffix.
+    // Op::BinTake: `:bytes(n)` splices the first n bytes. 65, 66, 67 tells
+    // apart both the count and prefix from suffix.
     run_outputs(
         "import scarlet/binary\n\
          import scarlet/string\n\
@@ -488,7 +492,8 @@ fn stdlib_binary_runs() {
          }\n",
         "<<65, 66, 67>>\n",
     );
-    // to_string Err branches: undecodable UTF-8, and bit-unaligned input.
+    // to_string's Err branches: UTF-8 it can't decode, and input that isn't a
+    // whole number of bytes.
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
@@ -497,7 +502,7 @@ fn stdlib_binary_runs() {
          }\n",
         "Err(Nil)\nErr(Nil)\n",
     );
-    // byte_size rounds up: a 4-bit binary occupies 1 byte, not 0.
+    // byte_size rounds up, so a 4-bit binary takes 1 byte, not 0.
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
@@ -505,7 +510,8 @@ fn stdlib_binary_runs() {
          }\n",
         "1\n",
     );
-    // A negative offset takes the `at < 0` Err branch, not the OOB one.
+    // A negative offset takes the `at < 0` Err branch, not the out-of-bounds
+    // one.
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
@@ -515,30 +521,30 @@ fn stdlib_binary_runs() {
     );
 }
 
-/// The unit a window is measured in lives in the function's name, and the two
-/// names differ by a factor of eight. Before this, `slice` was bit-indexed and
-/// `byte_size` answered in bytes, so a byte-indexed caller of `slice` read an
-/// eighth of the window it asked for and was told nothing: `slice(b, 0, 2)`
+/// The function's name says which unit a window is measured in, and the two
+/// units differ by a factor of eight. `slice` used to count in bits while
+/// `byte_size` answered in bytes, so a caller of `slice` counting in bytes
+/// silently read an eighth of the window it asked for. `slice(b, 0, 2)`
 /// answered `Ok(<<0:size(2)>>)`, a valid binary, rather than the first two
-/// bytes. The old spelling no longer exists, so that call is now a compile
-/// error rather than a wrong answer.
+/// bytes. The old name is gone, so that call is now a compile error rather
+/// than a wrong answer.
 #[test]
 fn stdlib_binary_slice_units() {
-    // The name `slice` is gone. This is the guard on reintroducing it: a
-    // function of that name could only pick one of the two units, and the
-    // callers meaning the other one would keep compiling.
+    // The name `slice` is gone, and this guards against bringing it back. A
+    // function of that name could only pick one of the two units, and callers
+    // meaning the other one would keep compiling.
     check_rejects(
         "import scarlet/binary\n\
          pub fn main() { println(binary::slice(<<1, 2, 3, 4, 5>>, 0, 2)) }\n",
-        // Spelled out: bare `slice` is a substring of `slice_bits`, so the
-        // loose form would pass on a diagnostic about a different name.
+        // Spell it out, because bare `slice` is a substring of `slice_bits`, so
+        // the loose form would pass on a diagnostic about a different name.
         "has no member 'slice'",
     );
 }
 
 #[test]
 fn stdlib_binary_slice_units_runs() {
-    // Both units, over the same measured windows from T-208, side by side.
+    // Both units side by side, over the same windows measured in T-208.
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
@@ -553,10 +559,10 @@ fn stdlib_binary_slice_units_runs() {
         "Ok(<<1, 2>>)\nOk(<<0:size(2)>>)\nOk(<<2, 3>>)\nOk(<<2, 3>>)\n\
          Ok(<<1, 2, 3, 4, 5>>)\nOk(<<1, 2, 3, 4, 5>>)\n",
     );
-    // T-214: every out-of-range case that used to collapse to `<<>>` — one
-    // byte over, wholly past the end, negative offset, negative length. The
-    // last two are why a Gleam `slice(b, byte_size(b), -n)` cannot be
-    // transliterated: it is an error here, not a backwards window.
+    // T-214: every out-of-range case that used to collapse to `<<>>`. They are
+    // one byte over, wholly past the end, a negative offset and a negative
+    // length. The last two are why a Gleam `slice(b, byte_size(b), -n)` can't
+    // be copied over as is, because here it's an error, not a backwards window.
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
@@ -569,9 +575,9 @@ fn stdlib_binary_slice_units_runs() {
          }\n",
         "Ok(<<5>>)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\n",
     );
-    // `byte_size` rounds up, so the last byte of a 12-bit binary is not a
-    // whole byte and is not addressable by slice_bytes. Reaching it is what
-    // slice_bits is for.
+    // `byte_size` rounds up, so the last byte of a 12-bit binary isn't a whole
+    // byte and slice_bytes can't reach it. Reaching it is what slice_bits is
+    // for.
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
@@ -582,10 +588,10 @@ fn stdlib_binary_slice_units_runs() {
          }\n",
         "2\nErr(Nil)\nOk(<<2:size(4)>>)\n",
     );
-    // drop_bytes is total because it is given a position, not a length: there
-    // is no requested size for the answer to fall short of. Past the end the
-    // remainder really is empty, and it reaches the trailing bits that
-    // slice_bytes cannot.
+    // drop_bytes never fails, because it takes a position, not a length, so
+    // there's no requested size for the answer to fall short of. Past the end
+    // the remainder really is empty, and it reaches the trailing bits that
+    // slice_bytes can't.
     run_outputs(
         "import scarlet/binary\n\
          import scarlet/string\n\
@@ -600,10 +606,10 @@ fn stdlib_binary_slice_units_runs() {
          }\n",
         "<<1, 2, 3, 4, 5>>\n<<4, 5>>\n<<>>\n<<>>\n<<1, 2, 3, 4, 5>>\n4\n",
     );
-    // split_at_bytes is total because it is given a position, not a length.
-    // append(prefix, suffix) == b at every at, including the ones slice_bytes
-    // would refuse. The mid-cut is the control: a clamp-only stub would pass
-    // the four edges and fail this one.
+    // split_at_bytes never fails, because it takes a position, not a length.
+    // append(prefix, suffix) == b at every `at`, including ones slice_bytes
+    // would refuse. The cut in the middle is the control, because a stub that
+    // only clamps would pass the four edges and fail this one.
     run_outputs(
         "import scarlet/binary\n\
          import scarlet/string\n\
@@ -631,8 +637,8 @@ fn stdlib_binary_slice_units_runs() {
 
 #[test]
 fn stdlib_binary_concat() {
-    // Empty input is the identity of append; a first-element stub would
-    // pass the singleton and fail the rest.
+    // Empty input gives the identity of append. A stub that returns the first
+    // element would pass the singleton and fail the rest.
     run_outputs(
         "import scarlet/binary\n\
          import scarlet/string\n\
@@ -644,9 +650,10 @@ fn stdlib_binary_concat() {
          }\n",
         "<<>>\n<<1, 2>>\n<<1, 2, 3, 4, 5>>\n<<9>>\n",
     );
-    // concat(split_at_bytes(b, at)) == b. A first-only or reverse-fold stub
-    // fails here; the three-part case above already rules out those, and
-    // this pins the identity against a different binary than the literals.
+    // concat(split_at_bytes(b, at)) == b. A stub that keeps only the first
+    // part, or folds in reverse, fails here. The three-part case above already
+    // rules those out, and this pins the identity on a binary built
+    // differently from the literals.
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
@@ -660,7 +667,7 @@ fn stdlib_binary_concat() {
 
 #[test]
 fn stdlib_binary_byte_at() {
-    // byte_at is -1 out of bounds on both sides; a view reads through its
+    // byte_at is -1 out of bounds on both sides, and a view reads through its
     // offset.
     run_outputs(
         "import scarlet/binary\n\
@@ -682,8 +689,8 @@ fn stdlib_binary_byte_at() {
 
 #[test]
 fn stdlib_http_builtins() {
-    // These pin the call-site types of the native h1 ops; behaviour is golden
-    // tested in tests/programs/http_parse.sca.
+    // These pin the call-site types of the native h1 ops. Their behaviour has a
+    // golden test in tests/programs/http_parse.sca.
     check_ok(
         "import scarlet/binary\n\
          import scarlet/http/h1\n\
@@ -750,19 +757,19 @@ fn stdlib_http_builtins() {
     );
 }
 
-// Token-list matching exists twice with no shared implementation: natively in
-// `vm::http::has_token` and in Scarlet as `headers.contains_token`. This table
+// We match token lists in two places that share no code: natively in
+// `vm::http::has_token`, and in Scarlet as `headers.contains_token`. This table
 // drives one set of cases through both and demands the same answer.
 #[test]
 fn native_and_al_token_matching_agree() {
-    // (Connection value, does it carry the `close` token?)
+    // Each case is a Connection value, and whether it carries the `close` token.
     let cases: &[(&str, bool)] = &[
         ("close", true),
         ("CLOSE", true),
-        // List element, OWS-trimmed.
+        // A list element, with optional whitespace (OWS) trimmed.
         ("keep-alive, close", true),
         ("  close  ", true),
-        // Trailing comma / empty elements are ignored, never a match.
+        // A trailing comma and empty elements are ignored, and never match.
         ("close,", true),
         ("a,,close", true),
         (",,", false),
@@ -802,8 +809,8 @@ fn native_and_al_token_matching_agree() {
     }
 }
 
-// One `check_ok` per ASCII byte builtin, pinning that the call site
-// type-checks against the `@vm`-declared signature.
+// One `check_ok` per ASCII byte builtin, to pin that the call site
+// type-checks against the signature the `@vm` declaration gives.
 #[test]
 fn stdlib_binary_ascii_builtins() {
     // index_of : (Binary, Binary, Int) -> Option(Int)
@@ -845,10 +852,10 @@ fn stdlib_binary_ascii_builtins() {
     );
 }
 
-// Uppercase, zero-padded two-digit hex of the low 8 bits. from_int_ascii
-// is lowercase and drops the leading zero of a value under 16, so %0D%0A
-// is unreachable from it (T-197). The last line is the control: that
-// existing spelling must stay as it is.
+// hex_byte gives two uppercase hex digits, padded with a zero, for the low 8
+// bits. from_int_ascii is lowercase and drops the leading zero of a value
+// under 16, so it can't produce %0D%0A (T-197). The last line is the control,
+// because that existing spelling must stay as it is.
 #[test]
 fn stdlib_binary_hex_byte() {
     run_outputs(
@@ -890,8 +897,9 @@ fn stdlib_float() {
          }\n",
         "2.5\n0.0\n1.5\n3.2\n",
     );
-    // `-z` with z = 0.0 must preserve the IEEE-754 sign of zero. The `<=`/`>=`
-    // pairs pin the equal boundary, which strict `<`/`>` would fail.
+    // `-z` with z = 0.0 must keep the IEEE-754 sign of zero. The `<=` and `>=`
+    // pairs pin the boundary where both sides are equal, which a strict `<` or
+    // `>` would fail.
     run_outputs(
         "pub fn main() {\n\
          \tx = 2.5\n\
@@ -906,8 +914,8 @@ fn stdlib_float() {
          }\n",
         "3.5\n3.0\n-2.5\n-0.0\nTrue\nTrue\nFalse\n",
     );
-    // On negatives floor goes toward -inf while truncate goes toward zero,
-    // round is half-away-from-zero, ceil toward +inf.
+    // On negatives, floor goes towards -inf while truncate goes towards zero.
+    // round sends halves away from zero, and ceil goes towards +inf.
     run_outputs(
         "import scarlet/float\n\
          pub fn main() {\n\
@@ -922,7 +930,7 @@ fn stdlib_float() {
 
 #[test]
 fn stdlib_string() {
-    // length counts codepoints, not bytes: 'héllo' is 5 chars, 6 bytes.
+    // length counts codepoints, not bytes, so 'héllo' is 5 chars and 6 bytes.
     // split with an empty delimiter takes the char-split branch. trim strips
     // tabs and newlines too. inspect passes a String through verbatim.
     run_outputs(
@@ -937,9 +945,9 @@ fn stdlib_string() {
          }\n",
         "5\n[a, b, c]\nFalse\nhi\nhi\n42\n",
     );
-    // replace is a plain scalar-value substring replace: no grapheme barrier
-    // blocks a bare \r inside a CRLF pair, unlike Gleam's grapheme-aware
-    // replace (the hazard T-287 found does not exist in this module's model).
+    // replace is a plain substring replace over scalar values. Unlike Gleam's
+    // replace, which knows about graphemes, nothing stops it at a bare \r inside
+    // a CRLF pair. The hazard T-287 found doesn't exist in this module's model.
     run_outputs(
         "import scarlet/string\n\
          pub fn main() {\n\
@@ -949,10 +957,10 @@ fn stdlib_string() {
          }\n",
         "a_b_c\nabc\na\nb\n",
     );
-    // to_graphemes groups an extended grapheme cluster into one piece where
-    // split('') would cut it at every scalar value: 'e' + combining acute
-    // (U+0301) is 2 scalar values, 1 cluster; the ZWJ family emoji from
-    // T-287 is 7 scalar values, 1 cluster.
+    // to_graphemes keeps an extended grapheme cluster in one piece, where
+    // split('') would cut it at every scalar value. 'e' plus a combining acute
+    // (U+0301) is 2 scalar values and 1 cluster. The ZWJ family emoji from
+    // T-287 is 7 scalar values and 1 cluster.
     run_outputs(
         "import scarlet/array\n\
          import scarlet/string\n\
@@ -964,12 +972,12 @@ fn stdlib_string() {
          }\n",
         "3\n2\n7\n1\n",
     );
-    // \u{...} spells a code point in Scarlet SOURCE, decoded by the
-    // scanner — every \\u{...} below is literal backslash-u-brace text
-    // handed to `al run`, not Rust's own escape (which only fires in the
+    // \u{...} spells a code point in Scarlet *source*, and the scanner decodes
+    // it. Every \\u{...} below is literal backslash-u-brace text handed to
+    // `al run`, not Rust's own escape. Rust's escape only fires in the
     // `expected` argument, to name the same character a second, independent
-    // way). Precomposed 'a\u{0301}' is 2 scalar values, matching
-    // `to_graphemes`'s own count above for the same pair.
+    // way. 'a\u{0301}' is 2 scalar values, matching `to_graphemes`'s own count
+    // above for the same pair.
     run_outputs(
         "import scarlet/string\n\
          pub fn main() {\n\
@@ -982,10 +990,10 @@ fn stdlib_string() {
          }\n",
         "\u{E9}\n1\n\u{1F469}\n1\na\u{0301}\n2\n",
     );
-    // from_code_points is the constructing inverse: an Array(Int) of scalar
-    // values rebuilds the String \u{...} above spells one at a time.
-    // Err(Nil) for a code point past U+10FFFF, a surrogate half, or
-    // negative — none of which UTF-8 can encode alone.
+    // from_code_points goes the other way. An Array(Int) of scalar values
+    // rebuilds the String that \u{...} above spells one at a time. It gives
+    // Err(Nil) for a code point past U+10FFFF, a surrogate half or a negative
+    // number, because UTF-8 can't encode any of those alone.
     run_outputs(
         "import scarlet/string\n\
          pub fn main() {\n\

@@ -1,27 +1,28 @@
-//! HTTP/1.1 heads, body framing and chunked bodies, behind `scarlet/http/h1`.
+//! HTTP/1.1 heads, body framing and chunked bodies, which `scarlet/http/h1`
+//! is built on.
 //!
-//! Reading a head is `httparse`'s, the parser `hyper` is built on: the
-//! request or status line and the header fields, found by SIMD and refused on
-//! a byte it does not allow. What the stdlib promises beyond that parse is
-//! here, around it:
+//! `httparse`, the parser `hyper` is built on, reads a head. It finds the
+//! request or status line and the header fields with SIMD, and refuses a byte
+//! it does not allow. The code here, around that parse, keeps the rest of
+//! what the stdlib promises:
 //!
-//! - lines end in CRLF only. `httparse` also takes a bare LF, which a proxy in
+//! - Lines end in CRLF only. `httparse` also takes a bare LF, which a proxy in
 //!   front may not, and a disagreement about where a line ends is how requests
-//!   are smuggled;
-//! - at most four empty lines before a request (RFC 9112 section 2.2 allows a
-//!   few), and none before a response, where one means the connection has lost
-//!   its place. `httparse` skips any number, of either;
-//! - a head is at most 64 KiB, and which status each refusal is: 414 for a
-//!   request line that never ends, 431 for a head too large, 505 for a version
-//!   other than 1.0 or 1.1, 400 for everything else;
-//! - the `Connection` and `Expect` tokens a head carried;
-//! - a body's framing, from `Content-Length` and `Transfer-Encoding`, with the
-//!   conflicts RFC 9112 section 6.3 says to refuse;
-//! - a chunked body's chunks, each size line read by `httparse`.
+//!   are smuggled.
+//! - At most four empty lines may come before a request (RFC 9112 section 2.2
+//!   allows a few), and none before a response, where one means the
+//!   connection has lost its place. `httparse` skips any number of either.
+//! - A head is at most 64 KiB, and each refusal has its own status. It is 414
+//!   for a request line that never ends, 431 for a head too large, 505 for a
+//!   version other than 1.0 or 1.1, and 400 for everything else.
+//! - We record the `Connection` and `Expect` tokens a head carried.
+//! - We work out a body's framing from `Content-Length` and
+//!   `Transfer-Encoding`, refusing the conflicts RFC 9112 section 6.3 says to.
+//! - We read a chunked body's chunks, with `httparse` reading each size line.
 //!
 //! Everything here works on bytes and answers in byte ranges of them, so the
-//! views the stdlib hands back (`exec.rs`) are slices of the buffer the program
-//! read, never copies.
+//! views the stdlib hands back (`exec.rs`) are slices of the buffer the
+//! program read, never copies.
 
 use std::ops::Range;
 
@@ -46,8 +47,8 @@ pub(crate) enum Reject {
 }
 
 /// Which of `close` and `keep-alive` the `Connection` fields named. A peer can
-/// send both, and that is recorded rather than resolved: which wins is
-/// `h1.should_close`'s decision.
+/// send both, and we record that instead of resolving it, because
+/// `h1.should_close` decides which wins.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConnTokens {
     #[default]
@@ -68,7 +69,7 @@ impl ConnTokens {
     }
 
     /// A repeated `Connection` field is the same list over more lines, so the
-    /// tokens add up: a later `close` does not unsee an earlier `keep-alive`.
+    /// tokens add up. A later `close` does not cancel an earlier `keep-alive`.
     fn and(self, other: ConnTokens) -> ConnTokens {
         let close = |c| matches!(c, ConnTokens::Close | ConnTokens::Both);
         let keep = |c| matches!(c, ConnTokens::KeepAlive | ConnTokens::Both);
@@ -76,23 +77,23 @@ impl ConnTokens {
     }
 }
 
-/// The `Connection` and `Expect` tokens a head carried: what was found, not
-/// what to do about it.
+/// The `Connection` and `Expect` tokens a head carried. This says what was
+/// found, not what to do about it.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct HeadFlags {
     pub(crate) conn: ConnTokens,
     pub(crate) expect_100_continue: bool,
 }
 
-/// One header field: where its name and its value are in the buffer.
+/// Where one header field's name and value are in the buffer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Field {
     pub(crate) name: Range<usize>,
     pub(crate) value: Range<usize>,
 }
 
-/// A header block, read: its fields, the tokens among them, and the byte
-/// just past its blank line.
+/// A header block once read. It holds the fields, the tokens among them, and
+/// the byte just past the blank line.
 #[derive(Debug)]
 pub(crate) struct Block {
     pub(crate) fields: Vec<Field>,
@@ -112,8 +113,8 @@ pub(crate) enum Request {
     Bad(Reject),
 }
 
-/// Why a response head was refused: not a status, since a client has nobody
-/// to answer.
+/// Why a response head was refused. It is not a status, because a client has
+/// nobody to answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BadResponse {
     StatusLine,
@@ -137,8 +138,8 @@ pub(crate) enum Response {
 /// Read a request head from the start of `bytes`. Ranges in the answer are
 /// of `bytes`.
 pub(crate) fn request(bytes: &[u8]) -> Request {
-    // Empty lines before the request line, CRLF only and at most a few, so a
-    // stream of them cannot hold a connection open.
+    // Allow only a few empty lines before the request line, each ending in
+    // CRLF, so a stream of them cannot hold a connection open.
     let mut start = 0;
     let mut empty = 0;
     while bytes.get(start..start + 2) == Some(b"\r\n") {
@@ -172,8 +173,9 @@ pub(crate) fn request(bytes: &[u8]) -> Request {
                 head: block(bytes, req.headers, start + n),
             }
         }
-        // A line that never ends, past the cap, is a target too long; one that
-        // ended followed by fields that never do is a head too large.
+        // A line that runs past the cap without ending means the target is too
+        // long. A line that ended, followed by fields that never do, means the
+        // head is too large.
         Ok(httparse::Status::Partial) if window.len() > MAX_HEAD => {
             let request_line_ended = memchr::memmem::find(window, b"\r\n").is_some();
             Request::Bad(if request_line_ended {
@@ -190,8 +192,8 @@ pub(crate) fn request(bytes: &[u8]) -> Request {
 
 /// Read a response head from the start of `bytes`.
 pub(crate) fn response(bytes: &[u8]) -> Response {
-    // The status line first, by its own rules, so each way it can be wrong has
-    // its own answer, which `httparse`'s errors do not tell apart.
+    // Check the status line first, by its own rules, so each way it can be
+    // wrong gets its own answer. `httparse`'s errors do not tell them apart.
     let Some(line_end) = memchr::memmem::find(bytes, b"\r\n") else {
         return if bytes.len() > MAX_HEAD {
             Response::Bad(BadResponse::TooLarge)
@@ -242,15 +244,15 @@ pub(crate) fn response(bytes: &[u8]) -> Response {
     }
 }
 
-/// Check a status line, its CRLF taken off: `HTTP/1.x`, a space, three
-/// digits, then nothing or a space and a reason with no CR or LF in it. The
-/// space and reason may be left out: RFC 9112 section 4 wants the space, but
-/// enough servers leave it out that refusing a reply over a byte a client must
-/// ignore would be the wrong call.
+/// Check a status line with its CRLF taken off. It must be `HTTP/1.x`, a
+/// space and three digits, then either nothing or a space and a reason with
+/// no CR or LF in it. The space and reason may be left out. RFC 9112 section 4
+/// wants the space, but enough servers leave it out that refusing a reply
+/// over a byte a client must ignore would be the wrong call.
 ///
 /// A line with no room for a code, or that is not `HTTP/` at all (a server
-/// speaking another protocol, or a TLS record answering plain text), is not a
-/// status line; `HTTP/` and a version not spoken is a version.
+/// speaking another protocol, or a TLS record answering plain text), is a bad
+/// status line. `HTTP/` with a version we don't speak is a bad version.
 fn status_line(line: &[u8]) -> Result<(), BadResponse> {
     let (Some(version), Some(b' '), Some(code)) = (line.get(..8), line.get(8), line.get(9..12))
     else {
@@ -271,9 +273,9 @@ fn status_line(line: &[u8]) -> Result<(), BadResponse> {
     }
 }
 
-/// `bytes` from `start`, up to a whole head and its blank line past the cap:
-/// what the parser is shown, so its work is bounded however much is
-/// buffered.
+/// `bytes` from `start`, cut off just past the cap, so a head at the cap
+/// still shows its blank line. This is all the parser is shown, so its work
+/// is bounded however much is buffered.
 fn capped(bytes: &[u8], start: usize) -> &[u8] {
     let end = bytes.len().min(start + MAX_HEAD + 3);
     bytes.get(start..end).unwrap_or(&[])
@@ -319,8 +321,9 @@ fn block(bytes: &[u8], headers: &[httparse::Header<'_>], end: usize) -> Block {
     Block { fields, flags, end }
 }
 
-/// Whether the list `value` holds `token`: its comma-separated elements, OWS
-/// trimmed and compared ignoring ASCII case, as `headers.has_token` has it.
+/// Whether the list `value` holds `token`. Its comma-separated elements are
+/// trimmed of whitespace (OWS) and compared ignoring ASCII case, as
+/// `headers.has_token` does.
 fn has_token(value: &[u8], token: &[u8]) -> bool {
     value.split(|&b| b == b',').any(|el| {
         let el = trim_ows(el);
@@ -348,11 +351,12 @@ pub(crate) enum Framing {
     Invalid(Reject),
 }
 
-/// RFC 9112 section 6.3: a `Transfer-Encoding` beside a `Content-Length` is
-/// refused, as the conflict smuggling is built from. `chunked` alone is
-/// chunked, and any other coding is refused as not built rather than ignored.
-/// One `Content-Length`, a run of digits with no redundant leading zero and
-/// at most 2^63 - 1; two, or anything else, is refused.
+/// This follows RFC 9112 section 6.3. A `Transfer-Encoding` beside a
+/// `Content-Length` is refused, because smuggling is built from that conflict.
+/// `chunked` alone is chunked, and any other coding is refused as not built
+/// instead of ignored. One `Content-Length` must be a run of digits with no
+/// redundant leading zero and at most 2^63 - 1. Two of them, or anything
+/// else, is refused.
 pub(crate) fn framing(transfer_encodings: &[&[u8]], content_lengths: &[&[u8]]) -> Framing {
     if !transfer_encodings.is_empty() {
         return match (transfer_encodings, content_lengths) {
@@ -397,12 +401,12 @@ pub(crate) enum Chunked {
 
 /// Read a chunked body (RFC 9112 section 7.1) from the start of `bytes`,
 /// refusing more than `max` bytes of body (413). Each chunk is its size in
-/// hex, any extensions, CRLF, the data and CRLF; a size of 0 ends it, then a
-/// trailer block of fields and a blank line.
+/// hex, any extensions, CRLF, the data and CRLF. A size of 0 ends the body,
+/// and a trailer block of fields and a blank line follow it.
 ///
-/// The buffer holds all the state, so a call that ends in `NeedMore` is made
-/// again, over more bytes, from the same start. The pieces are only recorded
-/// here, and copied once, by the caller, when the whole body has arrived.
+/// The buffer holds all the state, so after a `NeedMore` the caller calls
+/// again over more bytes from the same start. The pieces are only recorded
+/// here. The caller copies them once, when the whole body has arrived.
 pub(crate) fn chunked(bytes: &[u8], max: u64) -> Chunked {
     let mut pos = 0usize;
     let mut total = 0u64;
@@ -428,8 +432,8 @@ pub(crate) fn chunked(bytes: &[u8], max: u64) -> Chunked {
         if size == 0 {
             return trailers(bytes, data_start, pieces);
         }
-        // Capped before the data is waited for, so a size no body could fill
-        // is refused at once.
+        // Check the cap before waiting for the data, so a size no body could
+        // fill is refused at once.
         let Some(sum) = total.checked_add(size).filter(|&s| s <= max) else {
             return Chunked::Bad(Reject::PayloadTooLarge);
         };
@@ -442,7 +446,7 @@ pub(crate) fn chunked(bytes: &[u8], max: u64) -> Chunked {
         match bytes.get(data_end..data_end + 2) {
             None => return Chunked::NeedMore,
             Some(b"\r\n") => {}
-            // The size lied about where the data ends: never read on.
+            // The size lied about where the data ends, so never read on.
             Some(_) => return Chunked::Bad(Reject::BadRequest),
         }
         pieces.push(data_start..data_end);
@@ -471,8 +475,8 @@ fn trailers(bytes: &[u8], start: usize, pieces: Vec<Range<usize>>) -> Chunked {
     }
 }
 
-/// Whether `name` is an RFC 9110 token (section 5.6.2): what a field name may
-/// be.
+/// Whether `name` is an RFC 9110 token (section 5.6.2), which is what a field
+/// name must be.
 pub(crate) fn is_token(name: &[u8]) -> bool {
     !name.is_empty()
         && name.iter().all(|&b| {
@@ -481,8 +485,8 @@ pub(crate) fn is_token(name: &[u8]) -> bool {
         })
 }
 
-/// Whether a field value is safe to write: no CR, LF or NUL, any of which
-/// could end the line early and split the message.
+/// Whether a field value is safe to write. It must have no CR, LF or NUL,
+/// because any of them could end the line early and split the message.
 pub(crate) fn is_safe_value(value: &[u8]) -> bool {
     !value.iter().any(|&b| matches!(b, b'\r' | b'\n' | 0))
 }

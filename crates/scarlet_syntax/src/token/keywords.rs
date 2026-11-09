@@ -45,8 +45,8 @@ keywords! {
     As => "as",
 }
 
-/// Between an `if`'s condition and its branch. Not a keyword: the parser
-/// reads it as one only there, so `result.then` stays a name.
+/// The word between an `if`'s condition and its branch. It isn't a keyword:
+/// the parser only reads it as one there, so `result.then` stays a name.
 pub const THEN: &str = "then";
 
 #[inline]

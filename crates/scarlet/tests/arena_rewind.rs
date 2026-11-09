@@ -46,7 +46,7 @@ pub fn main() {
 }
 
 /// `reset_to` must leave the compiler exactly as it was at the watermark.
-/// Hover is the sharpest observable: it joins a resolved `Type` onto a span
+/// Hover shows this most sharply. It joins a resolved `Type` onto a span
 /// through the arena the rewind just truncated, so a stale index would resolve
 /// to whatever re-minted at that slot.
 #[test]
@@ -72,8 +72,8 @@ fn hover_is_stable_across_many_rewinds() {
 }
 
 /// A closure site is keyed by the `Span` of the lambda that minted it, and a
-/// `Span` carries no module id. A site outliving a rewind would be not merely
-/// dangling but *aliasable* by an unrelated body landing on the same span. Here
+/// `Span` carries no module id. A site that outlived a rewind wouldn't just
+/// dangle: an unrelated body landing on the same span could *alias* it. Here
 /// the entry's and the module's closures sit at overlapping spans, and the
 /// module is invalidated between checks so the arenas move under them.
 #[test]
@@ -127,8 +127,9 @@ fn edit_and_revert_returns_to_the_same_arena_state() {
 
     let mut s = IncrementalSession::new();
     assert!(s.check(&parse(entry), Some(&p.dir)).success());
-    // Keyed by canonical identity, never the `./lib` spelling: a written-path
-    // lookup would always be `None` and the assertion below vacuous.
+    // Look the module up by its canonical identity, never the `./lib` spelling.
+    // A lookup by written path would always be `None`, so the assertion below
+    // would prove nothing.
     let lib = module_key(&p.dir, "lib.sca");
     let base_before = s.module_id_base(&lib);
     assert!(

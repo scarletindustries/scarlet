@@ -27,11 +27,11 @@ pub type NetError {
 	PermissionDenied
 	// The peer closed before enough bytes arrived.
 	UnexpectedEof
-	// A message was bigger than the reader will buffer, `limit` bytes.
+	// A message was bigger than the `limit` bytes the reader will buffer.
 	MessageTooLarge(limit Int)
 	// A write was given a binary that is not whole bytes.
 	UnalignedBinary
-	// A port outside 0..=65535.
+	// The port was outside 0..=65535.
 	InvalidPort
 	Errno(code Int)
 }

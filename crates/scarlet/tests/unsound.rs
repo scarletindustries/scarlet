@@ -2,7 +2,7 @@ mod common;
 use common::{check_rejects, run_outputs, run_rejects};
 
 reject_case! {
-    /// U1: `x = x` self-reference infers ⊥ and generalizes to ∀A.A. Pre-define
+    /// U1: `x = x` self-reference infers ⊥ and generalises to ∀A.A. Pre-define
     /// is gated to lambda inits, so the init `x` is unbound.
     u1_self_reference_is_rejected: (
         "pub fn main() {\n\
@@ -21,7 +21,7 @@ reject_case! {
          \tn = smuggle() or 0\n\
          \tprintln(n + 1)\n\
          }\n",
-        "'if' requires an 'else' branch",
+        "An `if` needs an `else` branch",
     ),
 
     /// U5: a generic type used without type args fills fresh vars per use,
@@ -37,7 +37,7 @@ reject_case! {
     ),
 
     /// U7: or-pattern alternatives binding disjoint names let the body read an
-    /// uninitialized local when the non-binding alternative matches.
+    /// uninitialised local when the non-binding alternative matches.
     u7_or_pattern_disjoint_bindings_is_rejected: (
         "fn f(x Int) Int {\n\
          \tmatch x {\n\
@@ -61,7 +61,7 @@ reject_case! {
          \t}\n\
          \tprintln(r)\n\
          }\n",
-        "Range pattern bounds must be number literals",
+        "Both ends of a range pattern must be number literals",
     ),
 
     /// U9: a spread that is not the final element of an array pattern corrupts
@@ -75,7 +75,7 @@ reject_case! {
          \t}\n\
          \tprintln(r)\n\
          }\n",
-        "Spread in array pattern must be the last element",
+        "The spread in an array pattern must come last",
     ),
 
     /// U10: dropping every prefix element after the first in `[a, b, ..rest]`
@@ -291,10 +291,10 @@ fn u20_arithmetic_is_total_vm_never_exits() {
 }
 
 run_case! {
-    // U20b: U20 for the generic (unspecialized) opcodes. An unannotated
-    // `fn op(a, b)` generalizes to one body emitting `Op::Add`/`Lt`/... which
-    // tag-dispatches at runtime. Calling each fn at BOTH Int and Float is what
-    // proves the generic op is live; a specialized body could not serve both.
+    // U20b: U20 for the generic (unspecialised) opcodes. An unannotated
+    // `fn op(a, b)` generalises to one body emitting `Op::Add`/`Lt`/... which
+    // dispatches on the tag at runtime. Calling each fn at BOTH Int and Float
+    // proves the generic op is live, because a specialised body couldn't serve both.
     u20b_generic_polymorphic_numeric_ops_are_total: (
         "fn subtract(a, b) { a - b }\n\
          fn multiply(a, b) { a * b }\n\
@@ -399,7 +399,7 @@ fn u22_same_scope_shadow_preserves_closure_capture() {
         "10\n20\n30\n",
     );
 
-    // The fresh slot is allocated only after the initializer is compiled, so
+    // The fresh slot is allocated only after the initialiser is compiled, so
     // `x = x + 1` observes the old `x`, not the new uninitialised slot.
     run_outputs(
         "pub fn main() {\n\
@@ -425,8 +425,8 @@ fn u22_same_scope_shadow_preserves_closure_capture() {
 }
 
 reject_case! {
-    /// U24: a binding holding a live `Subject` must not generalize the
-    /// message type — one mailbox sent an Int and received as a String would
+    /// U24: a binding holding a live `Subject` must not generalise the
+    /// message type. One mailbox sent an Int and received as a String would
     /// smuggle values between types. The relaxed value restriction keeps the
     /// variable weak, so the first send pins it and the second is an
     /// ordinary mismatch. (An empty `Map` stays polymorphic: it is
@@ -442,8 +442,8 @@ reject_case! {
     ),
 }
 
-// U25: receive on another process's subject is a clean runtime error: the
-// handle travels, the right to receive does not.
+// U25: receiving on another process's subject is a clean runtime error. The
+// handle travels, but the right to receive doesn't.
 #[test]
 #[ignore = "needs the VM"]
 fn u25_foreign_receive_is_a_clean_error() {

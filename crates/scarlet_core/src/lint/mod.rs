@@ -1,57 +1,58 @@
-//! `scarlet lint` — the `.sca` half of the illegal-state sweep.
+//! `scarlet lint` is the `.sca` half of the illegal-state sweep.
 //!
 //! Mordant's `bool_cluster` reads Rust and reports a struct whose `n` `bool`
-//! fields admit `2^n` states when fewer are legal. Nothing read the Scarlet
-//! side, so a type declared in `.sca` was invisible to it — the first sweep's
-//! one genuine hit was the then-current `http/h1.sca` `HeadFlags` (three
-//! Bools; T-310 later collapsed it). This reports the same shape: a
-//! constructor carrying several `Bool` fields.
+//! fields allow `2^n` states when fewer are legal. Nothing read the Scarlet
+//! side, so it could not see a type declared in `.sca`. The first sweep's only
+//! real hit was `HeadFlags` in `http/h1.sca` as it was then, with three Bools
+//! (T-310 later collapsed it). This command reports the same shape: a
+//! constructor that carries several `Bool` fields.
 //!
-//! It once reported a second shape, a catch-all arm over a locally declared
-//! sum type. The compiler now refuses that outright (a match that names some
-//! variants of a value names them all), so the census has nothing left to find
-//! there and no longer looks.
+//! It used to report a second shape too, a catch-all arm over a sum type
+//! declared in the same module. The compiler now refuses that outright (once a
+//! match names some variants of a value it must name them all), so the census
+//! no longer looks for it.
 //!
-//! This is a census, not a lint: it prints what the corpus contains and exits 0
-//! either way. Every finding is a candidate for reading, not a defect. It is
-//! deliberately not a CI gate and not a default-on compiler warning: the first
-//! sweep read 3 constructors out of 469 declarations across five repos, and
-//! only one was a genuine illegal state (`HeadFlags`); the other two are
-//! decoder test fixtures whose width is the property under test. Re-measured on
-//! this repo alone, it is 2 findings, both those fixtures in
-//! `tests/programs/decoders.sca`, so a default-on warning's precision here
-//! would be 0/2.
+//! This is a census, not a lint. It prints what the corpus contains and exits 0
+//! either way, and every finding is something to read, not a defect. It is
+//! deliberately not a CI gate and not a default-on compiler warning. The first
+//! sweep found 3 constructors out of 469 declarations across five repos, and
+//! only one of them (`HeadFlags`) was a real illegal state. The other two are
+//! decoder test fixtures whose width is the property under test. Measured again
+//! on this repo alone, it finds 2, both of them those fixtures in
+//! `tests/programs/decoders.sca`, so a default-on warning would be right 0
+//! times out of 2 here.
 //!
-//! It parses with the compiler's own scanner and parser rather than matching
-//! text, because the text-matching version of this question has been wrong here
-//! before: a `type` inside a comment or a string literal is not a declaration,
-//! and a field list spans lines. The scanner resolves both by construction —
-//! comments become trivia and string bodies become one token.
+//! It parses with the compiler's own scanner and parser instead of matching
+//! text, because matching text has given the wrong answer here before. A `type`
+//! inside a comment or a string literal is not a declaration, and a field list
+//! can span lines. The scanner gets both right by construction, because
+//! comments become trivia and a string's body becomes one token.
 //!
-//! A type can be declared inside a function body, so the walk descends every
-//! expression the AST can nest, and every run compares the declarations it
-//! inspected against the `type` keywords the scanner produced. A file where the
-//! two disagree is reported as uninspected, never silently counted as clean.
+//! A type can be declared inside a function body, so the walk goes into every
+//! expression the AST can nest. Every run also checks the declarations it
+//! inspected against the `type` keywords the scanner produced. If the two
+//! disagree, the file is reported as not inspected, never quietly counted as
+//! clean.
 //!
 //! # What it cannot see
 //!
-//! - **`Bool` is matched by name**, so a locally declared `type Bool` would be
-//!   counted as the prelude's and a module-qualified `m::Bool` would not be
+//! - **It matches `Bool` by name.** So a locally declared `type Bool` would be
+//!   counted as the prelude's, and a module-qualified `m::Bool` would not be
 //!   counted at all.
-//! - **Whether the states are actually illegal.** That is the reading step. The
-//!   `opaque` column is reported because it bounds who can build a bad value,
-//!   but it does not exclude the shape: an invariant held by a private
-//!   constructor is still held by a convention.
-//! - **Layout fixed from outside.** `bool_cluster` skips a `repr` struct because
-//!   something outside Rust dictates its states. A Scarlet type crossing the VM
-//!   ABI is in that position and carries no syntactic mark, so it cannot be
-//!   filtered here and must be triaged by reading.
-//! - **Prose-carried invariants.** An invariant stated in a comment and carried
-//!   by no type has no syntactic mark. A word scan of `.sca` comments hits
-//!   module-behaviour prose (`never modified`, `always close`) at the same rate
-//!   as a real invariant, and the measured instances (T-286, T-309) live next to
-//!   expressions, not on type declarations. Not instrumented; re-read by hand
-//!   when the comment is next to a type.
+//! - **It can't tell whether the states are really illegal.** That is what the
+//!   reading step is for. It reports the `opaque` column because that limits
+//!   who can build a bad value, but it doesn't rule the shape out: an invariant
+//!   kept by a private constructor is still only kept by convention.
+//! - **It can't see layout fixed from outside.** `bool_cluster` skips a `repr`
+//!   struct because something outside Rust decides its states. A Scarlet type
+//!   that crosses the VM ABI is in the same position but has no syntactic mark,
+//!   so it can't be filtered out here and has to be triaged by reading.
+//! - **It can't see invariants that only live in prose.** An invariant stated
+//!   in a comment and carried by no type has no syntactic mark. A word scan of
+//!   `.sca` comments matches prose about module behaviour (`never modified`,
+//!   `always close`) as often as a real invariant, and the cases we measured
+//!   (T-286, T-309) sit next to expressions, not type declarations. Nothing
+//!   checks for these, so read the comment by hand when it is next to a type.
 
 use std::path::{Path, PathBuf};
 
@@ -61,29 +62,29 @@ use crate::parser::new_parser;
 use crate::scanner::new_scanner;
 use crate::token::{Keyword, Kind};
 
-/// Mordant's `FlagCluster::FLOOR`. Held equal to it deliberately: `HeadFlags`
+/// This is kept equal to Mordant's `FlagCluster::FLOOR` on purpose. `HeadFlags`
 /// and the `ConnTokens` it faces across the ABI are one boundary in two
-/// languages, and a census that answered at a different threshold could not be
-/// compared with the Rust side's.
+/// languages, and a census with a different threshold could not be compared
+/// with the Rust side's.
 pub const DEFAULT_MIN_BOOLS: usize = 2;
 
-/// The census types are opaque: their fields are private because [`report`] is
-/// the only reader, so a caller outside this module takes the rendered text
-/// rather than picking the census apart.
+/// The census types are opaque. Their fields are private because [`report`] is
+/// the only thing that reads them, so a caller outside this module gets the
+/// rendered text instead of picking the census apart.
 pub struct Finding {
     path: PathBuf,
     line: i32,
     type_name: String,
-    /// The constructor carrying the bools. Equal to `type_name` for the
-    /// single-constructor types that are the Rust `struct` analogue.
+    /// The constructor that carries the bools. It equals `type_name` for a
+    /// single-constructor type, which is what a Rust `struct` would be.
     ctor_name: String,
     opaque: bool,
     bools: Vec<String>,
 }
 
-/// A file the walk could not account for in full, and why. Kept apart from the
-/// findings because "nothing found here" and "not looked at properly here"
-/// print the same empty list otherwise.
+/// A file the walk could not account for in full, and why. We keep these apart
+/// from the findings because otherwise "nothing found here" and "not looked at
+/// properly here" would print the same empty list.
 pub struct Uninspected {
     path: PathBuf,
     reason: String,
@@ -97,11 +98,11 @@ pub struct Census {
     type_decls: usize,
 }
 
-/// Roots are taken as given, so the census can be pointed at the other `.sca`
+/// The roots are used as given, so you can point the census at the other `.sca`
 /// corpora (`madder`, `website`) without the tool knowing they exist. The
-/// driver defaults them to the working directory: as an xtask this defaulted to
-/// `CARGO_MANIFEST_DIR`'s repo root, which in a released binary would name the
-/// build machine's checkout rather than the caller's.
+/// driver defaults them to the working directory. As an xtask it defaulted to
+/// the repo root from `CARGO_MANIFEST_DIR`, which in a released binary would
+/// name the build machine's checkout, not the caller's.
 pub fn run(roots: &[PathBuf], min_bools: usize) -> Census {
     let mut census = Census::default();
     let mut paths = Vec::new();
@@ -389,8 +390,8 @@ fn is_prelude_bool(typ: &ast::TypeIdentifier) -> bool {
     }
 }
 
-/// `2^n`, or the unevaluated power when it does not fit — the same contract as
-/// `bool_cluster`'s message, so the two sides print comparable numbers.
+/// `2^n` as a number, or written as a power when it does not fit. This matches
+/// `bool_cluster`'s message, so the two sides print numbers you can compare.
 pub(crate) fn states(n: usize) -> String {
     match u32::try_from(n).ok().and_then(|n| 2u64.checked_pow(n)) {
         Some(n) => n.to_string(),
@@ -467,9 +468,9 @@ mod tests {
         assert_eq!(states(64), "2^64");
     }
 
-    /// The shape the census exists to find. The fixture keeps three Bools
-    /// even though T-310 collapsed the `h1.sca` type that motivated it —
-    /// this tests the finder, not the current spelling.
+    /// This is the shape the census exists to find. The fixture keeps three
+    /// Bools even though T-310 collapsed the `h1.sca` type that prompted it,
+    /// because this tests the finder, not how `h1.sca` is written today.
     #[test]
     fn finds_a_bool_cluster() {
         let census = census_of(
@@ -491,7 +492,7 @@ mod tests {
     }
 
     /// One `Bool` is under the floor, and a second field of another type does
-    /// not make a cluster — the count is of `Bool` fields, not of fields.
+    /// not make a cluster, because the census counts `Bool` fields, not fields.
     #[test]
     fn one_bool_is_not_a_cluster() {
         let census = census_of("pub type Flags {\n\tclose Bool\n\tcount Int\n}\n");
@@ -499,18 +500,18 @@ mod tests {
         assert_eq!(census.type_decls, 1);
     }
 
-    /// Bools in two different constructors of one sum type are never
-    /// simultaneously inhabited, so they are not a cluster. The Rust analogue
-    /// is that `bool_cluster` reads one struct, not an enum's whole variant set.
+    /// Bools in two different constructors of one sum type never exist at the
+    /// same time, so they are not a cluster. In the same way, `bool_cluster`
+    /// reads one Rust struct, not all the variants of an enum together.
     #[test]
     fn bools_in_separate_constructors_do_not_combine() {
         let census = census_of("pub type Step {\n\tOpen(a Bool)\n\tShut(b Bool)\n}\n");
         assert_eq!(census.findings.len(), 0);
     }
 
-    /// The defect a text search makes here: `type` and `Bool` inside a comment
-    /// or a string are not a declaration. The scanner never emits them as
-    /// tokens, so neither the finding count nor the coverage cross-check moves.
+    /// A text search gets this wrong: `type` and `Bool` inside a comment or a
+    /// string are not a declaration. The scanner never emits them as tokens, so
+    /// neither the finding count nor the coverage check changes.
     #[test]
     fn comments_and_strings_are_not_declarations() {
         let census = census_of(
@@ -525,9 +526,9 @@ mod tests {
         assert_eq!(census.uninspected.len(), 0);
     }
 
-    /// A declaration nested in a block body is inside the walk. The coverage
-    /// cross-check must agree, and a nested bool cluster is a finding — the
-    /// top-level-only walk used to report this file uninspected instead.
+    /// The walk reaches a declaration nested in a block body. The coverage check
+    /// must agree, and a nested bool cluster is a finding. The old walk only
+    /// looked at the top level and reported this file as not inspected.
     #[test]
     fn a_nested_declaration_is_inspected() {
         let census = census_of(

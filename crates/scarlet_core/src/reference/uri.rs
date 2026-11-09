@@ -10,8 +10,8 @@ use crate::module::{ModuleSource, ResolveError, resolve_canonical};
 
 use super::{ModuleId, ReferenceGraph};
 
-/// Must match VS Code's `URI.file(path).toString()` byte for byte, or a
-/// graph-derived URI will not compare equal to the client's key for that file.
+/// This must match VS Code's `URI.file(path).toString()` byte for byte, or a
+/// URI built from the graph will not equal the client's key for that file.
 const URI_PATH: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
     .remove(b'.')
@@ -30,7 +30,7 @@ pub fn path_to_uri(p: &Path) -> String {
 /// Why a [`ModuleId`] has no `file://` URI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModuleUriError {
-    /// The precompiled stdlib — embedded source, no file on disk.
+    /// A stdlib module. Its source is embedded, with no file on disk.
     Embedded,
     /// The id was never interned into this graph (no path to resolve).
     NoPath,
@@ -49,8 +49,8 @@ impl fmt::Display for ModuleUriError {
     }
 }
 
-/// Map a [`ModuleId`] to a file URI. Graph module paths are always canonical,
-/// so no base directory is involved.
+/// Map a [`ModuleId`] to a file URI. Module paths in the graph are always
+/// canonical, so this needs no base directory.
 pub fn module_uri(graph: &ReferenceGraph, module: ModuleId) -> Result<String, ModuleUriError> {
     let path = graph.module_path(module).ok_or(ModuleUriError::NoPath)?;
     match resolve_canonical(path) {

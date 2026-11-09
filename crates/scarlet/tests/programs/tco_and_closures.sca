@@ -1,4 +1,4 @@
-// Tail-call elimination and closure capture, adversarially.
+// This tests tail-call elimination and closure capture adversarially.
 //
 // Three tail ops come out of core_ir::emit — TailCallSelf (a function calling
 // itself), TailCallKnown (a known non-self function: mutual recursion), and

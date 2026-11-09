@@ -1,7 +1,7 @@
-// Multi-scheduler smoke coverage. With several runnable processes and an idle
-// peer, the yield path donates run-queue processes to the other scheduler, so
-// a worker is moved whole (stack, frames, captures, heap) mid-execution.
-// Assertions are on exact output lines, never timing.
+// Smoke tests for running on several schedulers. With several runnable
+// processes and an idle peer, the yield path donates run-queue processes to the
+// other scheduler, so a worker is moved whole (stack, frames, captures, heap)
+// while it runs. The assertions check exact output lines, never timing.
 
 use std::process::{Command, Stdio};
 
@@ -9,7 +9,7 @@ mod common;
 use common::Project;
 use common::wait_or_kill;
 
-/// Run `al run <prog>` with `SCARLET_SCHEDULERS=<schedulers>` and capture output.
+/// Runs `al run <prog>` with `SCARLET_SCHEDULERS=<schedulers>` and captures its output.
 /// The wall-clock cap only turns a scheduler deadlock into a failure instead
 /// of a hung CI job; no assertion depends on how fast the run finishes.
 fn run_al_with_schedulers(proj: &Project, src: &str, schedulers: u32) -> String {
@@ -40,8 +40,8 @@ fn run_al_with_schedulers(proj: &Project, src: &str, schedulers: u32) -> String 
     stdout
 }
 
-/// Assert `stdout` is exactly the lines of `expected` modulo order. Process
-/// completion order across schedulers is nondeterministic.
+/// Asserts `stdout` holds exactly the lines of `expected`, in any order, because
+/// processes finish in a nondeterministic order across schedulers.
 fn assert_lines_unordered(stdout: &str, expected: &[String], context: &str) {
     let mut got: Vec<&str> = stdout.lines().collect();
     got.sort_unstable();
@@ -53,12 +53,12 @@ fn assert_lines_unordered(stdout: &str, expected: &[String], context: &str) {
     );
 }
 
-/// Mirrors the al program's `fib`, so expected outputs are computed.
+/// Mirrors the Scarlet program's `fib`, so the test can compute the expected output.
 fn fib(n: u64) -> u64 {
     if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
 }
 
-/// Shared imports + `fib` source every migration program starts with.
+/// The imports and `fib` source that every migration program starts with.
 const FIB_PREAMBLE: &str = r#"import scarlet/process
 import scarlet/array
 
@@ -72,16 +72,16 @@ fn fib(n) {
 
 "#;
 
-/// Prepend [`FIB_PREAMBLE`] to `decls` (the program's remaining declarations,
-/// `pub fn main()` included) and run it in a fresh project.
+/// Prepends [`FIB_PREAMBLE`] to `decls` (the program's remaining declarations,
+/// `pub fn main()` included) and runs it in a fresh project.
 fn run_fib_program(tag: &str, schedulers: u32, decls: &str) -> String {
     let proj = Project::new(tag);
     run_al_with_schedulers(&proj, &format!("{FIB_PREAMBLE}{decls}"), schedulers)
 }
 
-/// `spawns` workers each compute `fib(base + i % modulo)`. Sized well past
-/// the 4000-reduction budget so every worker is preempted many times and sits
-/// in a run queue while a sibling runs. Printing the result, not just the id,
+/// Spawns `spawns` workers that each compute `fib(base + i % modulo)`. The work
+/// is sized well past the 4000-reduction budget, so every worker is preempted
+/// many times and sits in a run queue while a sibling runs. Printing the result, not just the id,
 /// is what catches a process corrupted in transit.
 fn cpu_bound_smoke(tag: &str, schedulers: u32, spawns: u64, base: u64, modulo: u64) {
     let decls = format!(
@@ -109,23 +109,23 @@ pub fn main() {{
     );
 }
 
-/// Eight CPU-bound workers under two schedulers: the run-queue state the
-/// donation policy migrates.
+/// Runs eight CPU-bound workers under two schedulers, which builds up the
+/// run-queue state the donation policy migrates.
 #[test]
 #[ignore = "needs the VM"]
 fn cpu_bound_spawns_complete_correctly_under_two_schedulers() {
     cpu_bound_smoke("sched2_smoke", 2, 8, 20, 4);
 }
 
-/// Same workload on one scheduler, where there is never an idle peer: the
-/// donation path must stay inert and the output must be identical.
+/// Runs the same kind of workload on one scheduler, where there's never an idle
+/// peer. The donation path must do nothing and the output must be the same.
 #[test]
 #[ignore = "needs the VM"]
 fn cpu_bound_spawns_complete_correctly_under_one_scheduler() {
     cpu_bound_smoke("sched1_smoke", 1, 6, 19, 3);
 }
 
-/// Deep recursion across a migration boundary. The heavy worker outlives
+/// Tests deep recursion across a migration boundary. The heavy worker outlives
 /// every sibling, so it is the likeliest donation victim; any error in the
 /// moved frame metadata (ip/base_slot/captures) derails the recursion and the
 /// final value comes out wrong.
@@ -149,7 +149,7 @@ fn deep_recursive_worker_survives_two_schedulers() {
     assert_lines_unordered(&stdout, &expected, "deep recursion, SCARLET_SCHEDULERS=2");
 }
 
-/// Migration while holding loaded globals. A `Value` copied out of the
+/// Tests migration while a process holds loaded globals. A `Value` copied out of the
 /// globals table must stay valid on whatever scheduler the process lands on,
 /// so nothing it points at may be scheduler-local. Each worker loads the
 /// globals first, burns many reductions, then prints them.

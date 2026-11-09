@@ -1,10 +1,10 @@
 /// <reference types="tree-sitter-cli/dsl" />
 // @ts-check
 
-// Structural rules transcribed from crates/scarlet_syntax/src/parser; the
-// lexical layer (keywords, escapes, literal shapes) is generated into
-// lexical.js by `cargo xtask gen-editor-syntax`. `bun run corpus` checks the
-// grammar against every .sca file in the repo.
+// The structural rules are copied from crates/scarlet_syntax/src/parser. The
+// lexical layer (keywords, escapes and the shapes of literals) is generated
+// into lexical.js by `cargo xtask gen-editor-syntax`. `bun run corpus` checks
+// the grammar against every .sca file in the repo.
 
 'use strict';
 
@@ -12,8 +12,8 @@ const lex = require('./lexical');
 
 const KEYWORDS = new Set(lex.keywords);
 
-// A keyword renamed in the compiler breaks generation here instead of
-// silently drifting.
+// If the compiler renames a keyword, generation breaks here rather than the
+// grammar quietly falling out of step.
 function kw(text) {
   if (!KEYWORDS.has(text)) throw new Error(`not a Scarlet keyword: ${text}`);
   return text;
@@ -27,8 +27,8 @@ function commaSep(rule) {
   return optional(commaSep1(rule));
 }
 
-// parse_field_list separates fields with commas or newlines; whitespace-blind,
-// the comma is simply optional.
+// parse_field_list separates fields with commas or newlines. This grammar
+// ignores whitespace, so here the comma is just optional.
 function fieldSep1(rule) {
   return seq(rule, repeat(seq(optional(','), rule)), optional(','));
 }
@@ -43,13 +43,13 @@ module.exports = grammar({
   externals: ($) => [$._minus_line_start],
 
   conflicts: ($) => [
-    // Statement forms that only the reference parser's same-line rules
-    // separate from expressions: `x Foo = e` vs `x` then `Foo = e`, and
-    // `Foo(x) = e` vs the call `Foo(x)`.
+    // Statements that only the reference parser's same-line rules tell apart
+    // from expressions: `x Foo = e` against `x` then `Foo = e`, and
+    // `Foo(x) = e` against the call `Foo(x)`.
     [$.binding, $._primary_expression],
-    // Pattern/expression twins: a GLR fork inside `(...)`, `[...]`, or
-    // `<<...>>` stays alive until the `=` (or its absence) after the closing
-    // delimiter decides destructuring vs literal.
+    // Patterns and expressions that look the same: a GLR fork inside `(...)`,
+    // `[...]` or `<<...>>` stays alive until the `=` after the closing
+    // delimiter, or the lack of one, picks destructuring or a literal.
     [$._pattern_atom, $._primary_expression],
     [$._primary_expression, $.ctor_pattern],
     [$.module_expression, $.ctor_pattern],
@@ -122,7 +122,7 @@ module.exports = grammar({
         kw('type'),
         field('name', $.type_identifier),
         optional(field('parameters', $.type_parameters)),
-        // Absent entirely on an external/opaque handle type.
+        // Left out entirely on an external or opaque handle type.
         optional(choice(seq('=', field('alias', $._type)), field('body', $.type_body))),
       )),
 
@@ -135,8 +135,8 @@ module.exports = grammar({
       seq(
         '{',
         choice(
-          // `type Point { x Int  y Int }`: single-constructor shorthand,
-          // selected by a lowercase first token.
+          // `type Point { x Int  y Int }` is the shorthand for a type with
+          // one constructor, picked when the first token is lowercase.
           fieldSep1($.constructor_field),
           repeat1($.constructor),
         ),
@@ -230,8 +230,8 @@ module.exports = grammar({
         ),
       ),
 
-    // `left |> right`: sugar for calling `right` with `left` prepended as its
-    // first argument (crate::desugar rewrites it before type checking).
+    // `left |> right` calls `right` with `left` as its first argument
+    // (scarlet_syntax's desugar rewrites it before type checking).
     pipe_expression: ($) =>
       prec.left(
         2,
@@ -261,7 +261,7 @@ module.exports = grammar({
       );
     },
 
-    // Endpoints are additive-precedence (`-5..5` is `(-5)..(5)`); no chaining.
+    // Each end binds like `+` (`-5..5` is `(-5)..(5)`), and ranges don't chain.
     range_expression: ($) =>
       prec.left(
         7,
@@ -307,8 +307,8 @@ module.exports = grammar({
 
     spread_argument: ($) => seq('..', $._expression),
 
-    // A bare `label:` is punning sugar for `label: label` (crate::parser
-    // desugars it before anything downstream sees the argument).
+    // A bare `label:` is short for `label: label` (the parser expands it
+    // before anything downstream sees the argument).
     labeled_argument: ($) =>
       prec(1, seq(field('label', $.identifier), ':', optional(field('value', $._expression)))),
 
@@ -359,7 +359,7 @@ module.exports = grammar({
         $.function_expression,
       ),
 
-    // 2+ elements; `(x)` grouping does not exist (blocks group instead).
+    // Two or more elements. There's no `(x)` grouping, because blocks group.
     tuple_expression: ($) =>
       seq('(', $._expression, ',', commaSep1($._expression), ')'),
 
@@ -376,7 +376,7 @@ module.exports = grammar({
         optional(seq(':', field('spec', $.binary_spec))),
       ),
 
-    // Contextual identifiers, not keywords (parse_bin_spec matches by text).
+    // Contextual identifiers, not keywords (parse_bin_size_spec matches by text).
     binary_spec: ($) =>
       choice(
         $.number,
@@ -390,7 +390,7 @@ module.exports = grammar({
       ),
 
     // `if c then a else b`, or a block after the condition. Either branch
-    // runs on as far as an expression can, as parse_expression does.
+    // reaches as far as an expression can, as in parse_expression.
     if_expression: ($) =>
       prec.right(
         seq(
@@ -417,7 +417,7 @@ module.exports = grammar({
         field('value', $._expression),
       ),
 
-    // A lambda body is a single expression; a block when it needs statements.
+    // A lambda body is one expression, or a block when it needs statements.
     function_expression: ($) =>
       prec.right(
         seq(kw('fn'), field('parameters', $.parameters), field('body', $._expression)),
@@ -429,7 +429,7 @@ module.exports = grammar({
 
     or_pattern: ($) => prec.left(seq($._pattern, '|', $._pattern)),
 
-    // Both bounds must be number literals; end-exclusive like ranges.
+    // Both bounds must be number literals, and the end is excluded, as in ranges.
     range_pattern: ($) => seq($._number_pattern, '..', $._number_pattern),
 
     _number_pattern: ($) => choice($.number, $.negative_number),
@@ -464,7 +464,7 @@ module.exports = grammar({
       // `name:` alone binds the field to `name`.
       prec(1, seq(field('label', $.identifier), ':', optional(field('pattern', $._pattern)))),
 
-    // `..` / `..rest`: remaining fields, elements, or bytes.
+    // `..` or `..rest` takes the remaining fields, elements or bytes.
     rest_pattern: ($) => prec.right(seq('..', optional(field('binder', $.identifier)))),
 
     tuple_pattern: ($) => seq('(', $._pattern, ',', commaSep1($._pattern), ')'),
@@ -481,15 +481,15 @@ module.exports = grammar({
       ),
 
     // Strings ----------------------------------------------------------------
-    // Single-line; both quotes; `${expr}` and `$name` interpolation.
+    // Strings fit on one line, take either quote, and interpolate `${expr}`
+    // and `$name`.
     //
-    // `\u{HEX*}` is hand-written here rather than generated: `lex.escape` is
-    // scanner::ESCAPES, one source byte to one denoted byte, and this one
-    // denotes up to 4. As permissive on digit count as the scanner itself —
-    // `scan_unicode_escape` recovers a bad count or an out-of-range value
-    // with a diagnostic, not a lex error, so the shape still parses. Aliased
-    // to `escape_sequence` inline, the same way `string_content` below is,
-    // so `@string.escape` highlighting covers it with no wrapper node.
+    // `\u{HEX*}` is written by hand rather than generated, because
+    // `lex.escape` is scanner::ESCAPES, where one source byte stands for one
+    // byte, and this escape stands for up to 4. It allows any digit count, as
+    // the scanner does: `scan_unicode_escape` reports a bad count or value as
+    // a diagnostic, not a lex error. It's aliased to `escape_sequence` inline,
+    // like `string_content` below, so `@string.escape` highlighting covers it.
 
     string: ($) =>
       choice(
@@ -530,8 +530,8 @@ module.exports = grammar({
     short_interpolation: ($) => token.immediate(seq('$', lex.identifier)),
 
     // Terminals --------------------------------------------------------------
-    // identifier and type_identifier are disjoint by first-letter case,
-    // modelling token::is_type_name — the language's only case rule.
+    // identifier and type_identifier differ by the case of the first letter,
+    // as in token::is_type_name. That's the only case rule in the language.
 
     identifier: () => /[a-z_][A-Za-z0-9_]*/,
 
@@ -541,7 +541,7 @@ module.exports = grammar({
 
     line_comment: () => token(seq('//', /[^\n\r]*/)),
 
-    // `/**` opens a doc comment, but `/**/` does not. Non-nesting.
+    // `/**` opens a doc comment, but `/**/` does not. Comments don't nest.
     doc_comment: () => token(prec(1, /\/\*\*[^*]([^*]|\*+[^*/])*\*+\//)),
 
     block_comment: () => token(/\/\*([^*]|\*+[^*/])*\*+\//),

@@ -7,9 +7,10 @@ use std::borrow::Cow;
 use std::cell::OnceCell;
 use std::rc::Rc;
 
-/// Per-check constructor-name interner, covering real variants and the
-/// synthetic `lit:`/`#bin:`/`range:`/`#tuple` names. Ids 0 and 1 are reserved
-/// for the array constructors, so `new` must insert `[]` then `::` first.
+/// Interns constructor names for one check. It covers real variants and the
+/// made-up `lit:`, `#bin:`, `range:` and `#tuple` names. Ids 0 and 1 are
+/// reserved for the array constructors, so `new` must insert `[]` and then
+/// `::` first.
 #[derive(Debug)]
 struct Interner(IndexSet<String>);
 
@@ -36,7 +37,7 @@ impl Interner {
     }
 }
 
-/// Bitset over interner ids, built once per recursion level.
+/// A bitset of interner ids, built once at each level of the recursion.
 #[derive(Debug, Default)]
 struct CtorIdSet {
     words: SmallVec<[u64; 1]>,
@@ -58,9 +59,10 @@ impl CtorIdSet {
     }
 }
 
-/// What the checker knows about one checked pattern node, as much as
-/// exhaustiveness needs. The checker has already resolved every constructor,
-/// so a variant comes by its index in its type's declaration order.
+/// What the checker knows about one checked pattern node, as far as
+/// exhaustiveness needs it. The checker has already resolved every
+/// constructor, so a variant is given by its index in its type's declaration
+/// order.
 pub enum PatShape<'p, P> {
     /// Matches anything: a name, `_`, a field the source left out.
     Wild,
@@ -101,7 +103,7 @@ pub enum BinPart<'p> {
     Any,
     Int(&'p ast::NumberLiteral),
     Str(&'p str),
-    /// Anything else. The position keeps it apart from every other one.
+    /// Anything else. Its position keeps it apart from every other one.
     At(Span),
 }
 
@@ -117,7 +119,8 @@ pub trait PatternShape: Sized {
 }
 
 /// How many levels of a recursive type's variant tables exhaustiveness must
-/// see for `p`: the deepest constructor nesting, with names costing nothing.
+/// see for `p`. That's the deepest nesting of constructors in `p`, and names
+/// don't count.
 pub fn unroll_depth<P: PatternShape>(p: &P) -> usize {
     let deepest = |ps: &[P]| ps.iter().map(unroll_depth).max().unwrap_or(0);
     match p.shape() {
@@ -132,9 +135,9 @@ pub fn unroll_depth<P: PatternShape>(p: &P) -> usize {
     }
 }
 
-/// Lowered pattern used by the matrix recursion. Sub-pattern lists are
-/// `Rc`-shared so the row clones in `specialize`/`default_matrix` are refcount
-/// bumps, not deep copies.
+/// The lowered pattern the matrix recursion works on. Lists of sub-patterns
+/// are shared behind `Rc`, so cloning a row in `specialize` or
+/// `default_matrix` bumps a reference count instead of copying deeply.
 #[derive(Debug, Clone)]
 pub enum Pat {
     Wildcard,
@@ -150,10 +153,10 @@ struct CtorInfo {
 }
 
 impl CtorInfo {
-    /// Constructor absent from the subject type's table (literals, binary
-    /// shapes, ranges, type-error fallout). Payload types are unknown, so
-    /// every column is `Infinite`; `types` must stay as long as `arity`, which
-    /// `specialize` asserts.
+    /// A constructor missing from the subject type's table, such as a
+    /// literal, a binary shape, a range, or the leftovers of a type error. Its
+    /// payload types are unknown, so every column is `Infinite`. `types` must
+    /// stay as long as `arity`, which `specialize` asserts.
     fn opaque(id: u32, arity: usize) -> Self {
         CtorInfo {
             id,
@@ -175,43 +178,46 @@ impl TypeCtors {
     }
 }
 
-/// Synthetic constructor name for an n-ary tuple: one ctor per tuple arity.
+/// The made-up constructor name for a tuple of `n` elements. Each tuple size
+/// has one constructor.
 fn tuple_ctor_name(n: usize) -> String {
     format!("#tuple{}", n)
 }
 
-/// Element type plus a lazily-built `[[], ::]` constructor table. The `::`
-/// tail slot holds a fresh `ArrayType` rather than a self-reference, so there
-/// is no `Rc` cycle.
+/// An element type, plus a `[[], ::]` constructor table built on first use.
+/// The `::` tail slot holds a new `ArrayType` instead of pointing back at this
+/// one, so there's no `Rc` cycle.
 #[derive(Debug)]
 struct ArrayType {
     element: RcType,
     ctors: OnceCell<TypeCtors>,
 }
 
-/// Projection of `type_def::Type` carrying only what the usefulness matrix
-/// needs: a type's constructor set, shared behind `Rc` so `get_type_ctors` can
-/// borrow it at every recursion level. Lowered once in `UsefulnessMatrix::new`.
+/// A cut-down `type_def::Type` with only what the usefulness matrix needs: a
+/// type's set of constructors, shared behind `Rc` so `get_type_ctors` can
+/// borrow it at every level of the recursion. `UsefulnessMatrix::new` lowers
+/// to it once.
 ///
-/// `type_def::Type` cannot hold the `Rc` (the inferencer builds it with struct
-/// literals), so this stays local to the module.
+/// `type_def::Type` can't hold the `Rc`, because the inferencer builds it with
+/// struct literals, so this stays private to the module.
 #[derive(Debug, Clone)]
 enum RcType {
-    /// No finite constructor set: primitives, functions, type variables,
-    /// opaque nominal types, and sub-patterns whose type did not resolve. A
-    /// wildcard arm is always required for these.
+    /// A type with no finite set of constructors: primitives, functions,
+    /// type variables, opaque nominal types, and sub-patterns whose type
+    /// didn't resolve. These always need a wildcard arm.
     Infinite,
     Array(Rc<ArrayType>),
-    /// Constructor table in declaration order. Non-empty: an empty variant
-    /// table lowers to `Infinite`.
+    /// The constructor table, in declaration order. It's never empty, because
+    /// an empty variant table lowers to `Infinite`.
     Named(Rc<TypeCtors>),
-    /// Single synthetic `#tupleN` ctor whose `types` are the element types.
+    /// A single made-up `#tupleN` constructor whose `types` are the element
+    /// types.
     Tuple(Rc<TypeCtors>),
 }
 
-/// Lower a `&Type` into the shared `RcType` graph. `Type::Named.variants`
-/// already has field types substituted for the concrete `type_args`, so no
-/// environment lookup is needed.
+/// Lower a `&Type` into the shared `RcType` graph. The field types in
+/// `Type::Named.variants` already have the concrete `type_args` substituted
+/// in, so nothing needs looking up in the environment.
 fn rc_type(t: &Type, interner: &mut Interner) -> RcType {
     match t {
         Type::Primitive { .. } | Type::Function { .. } | Type::Var { .. } => RcType::Infinite,
@@ -283,9 +289,9 @@ fn get_type_ctors(t: &RcType) -> Cow<'_, TypeCtors> {
     }
 }
 
-/// Persistent singly-linked stack: cloning is a refcount bump, so
-/// `specialize`/`default_matrix` prepend O(arity) nodes onto a shared tail
-/// instead of copying an O(width) suffix per recursion step.
+/// A persistent singly linked stack. Cloning it bumps a reference count, so
+/// `specialize` and `default_matrix` prepend O(arity) nodes onto a shared tail
+/// instead of copying an O(width) suffix at every step of the recursion.
 #[derive(Debug)]
 struct Stack<T>(Option<Rc<StackNode<T>>>);
 
@@ -337,8 +343,8 @@ impl<T: Clone> Stack<T> {
 }
 
 /// A matrix row: the pattern for each remaining column. Every row in a matrix
-/// shares the same column types, so those are carried once alongside the query
-/// rather than per row.
+/// has the same column types, so those are carried once next to the query,
+/// not on every row.
 type PatStack = Stack<Pat>;
 type TypeStack = Stack<RcType>;
 
@@ -373,8 +379,8 @@ impl PatternMatrix {
         seen
     }
 
-    /// Visit every row's first column with Or-patterns flattened, so `f` only
-    /// ever sees `Wildcard` or `Ctor` heads.
+    /// Visit every row's first column with or-patterns flattened, so `f` only
+    /// ever sees a `Wildcard` or a `Ctor` at the head.
     fn for_each_head(&self, mut f: impl FnMut(&Pat, &PatStack)) {
         fn go(p: &Pat, rest: &PatStack, f: &mut impl FnMut(&Pat, &PatStack)) {
             match p {
@@ -394,8 +400,9 @@ impl PatternMatrix {
     }
 
     fn specialize(&self, ctor: &CtorInfo) -> PatternMatrix {
-        // Callers prepend `ctor.types` onto the type stack in lockstep with
-        // the columns pushed here; a mismatch misaligns the two stacks.
+        // Callers prepend `ctor.types` onto the type stack in step with the
+        // columns pushed here. If the counts differ, the two stacks fall out
+        // of line.
         debug_assert!(ctor.arity == ctor.types.len());
         let mut result = PatternMatrix::default();
         self.for_each_head(|head, rest| match head {
@@ -425,6 +432,8 @@ fn is_complete(seen_ctors: &CtorIdSet, type_ctors: &TypeCtors) -> bool {
     !type_ctors.infinite && type_ctors.ctors.iter().all(|c| seen_ctors.contains(c.id))
 }
 
+/// Whether the row `pats` is useful against `m`: some value matches `pats` and
+/// no row of `m`. An arm that isn't useful can never run.
 fn is_useful(m: &PatternMatrix, pats: &PatStack, types: &TypeStack) -> bool {
     let Some((first_pat, rest_pats)) = pats.split() else {
         return m.is_empty();
@@ -453,9 +462,9 @@ fn is_useful(m: &PatternMatrix, pats: &PatStack, types: &TypeStack) -> bool {
             }
         }
         Pat::Ctor { id, args } => {
-            // A constructor absent from the type's table gets an opaque
-            // fallback with one `Infinite` type per arg, which keeps the
-            // pattern and type stacks column-aligned.
+            // A constructor missing from the type's table gets an opaque
+            // stand-in with one `Infinite` type per argument, which keeps the
+            // pattern stack and the type stack in line, column for column.
             let fallback;
             let ctor_info = match type_ctors.find(*id) {
                 Some(c) => c,
@@ -475,11 +484,11 @@ fn is_useful(m: &PatternMatrix, pats: &PatStack, types: &TypeStack) -> bool {
     }
 }
 
-/// The variants a wildcard in `pats` stands in for: a `_` (or bare name) in a
-/// column of a type with named variants, where the rows of `m` name some of
-/// them but not all. A wildcard over a whole value nobody split, or over a
-/// type whose values cannot be listed (numbers, strings, array lengths), is
-/// not one.
+/// The variants a wildcard in `pats` stands in for. That's a `_` (or a bare
+/// name) in a column whose type has named variants, where the rows of `m` name
+/// some of them but not all. A wildcard over a whole value that no arm split
+/// doesn't count, and nor does one over a type whose values can't be listed
+/// (numbers, strings, array lengths).
 fn catch_all(m: &PatternMatrix, pats: &PatStack, types: &TypeStack) -> Option<Vec<CtorInfo>> {
     let (first_pat, rest_pats) = pats.split()?;
     let (first_type, rest_types) = types.split()?;
@@ -528,6 +537,8 @@ fn catch_all(m: &PatternMatrix, pats: &PatStack, types: &TypeStack) -> Option<Ve
     }
 }
 
+/// Find a witness: one pattern per column that matches some value no row of
+/// `m` matches. `None` means `m` covers every value.
 fn find_witness_vec(m: &PatternMatrix, types: &TypeStack) -> Option<Vec<Pat>> {
     let Some((first_type, rest_types)) = types.split() else {
         return if m.is_empty() { Some(vec![]) } else { None };
@@ -551,9 +562,10 @@ fn find_witness_vec(m: &PatternMatrix, types: &TypeStack) -> Option<Vec<Pat>> {
         }
         None
     } else {
-        // Maranget: recurse on the default matrix for the remaining columns
-        // FIRST. A wildcard row may still constrain later columns, so padding
-        // them with `_` yields a witness that overlaps an existing arm.
+        // As in Maranget's algorithm, recurse on the default matrix for the
+        // remaining columns FIRST. A wildcard row may still constrain later
+        // columns, so padding them with `_` would give a witness that overlaps
+        // an existing arm.
         let rest = find_witness_vec(&m.default_matrix(), rest_types)?;
         let head = type_ctors
             .ctors
@@ -568,15 +580,6 @@ fn find_witness_vec(m: &PatternMatrix, types: &TypeStack) -> Option<Vec<Pat>> {
     }
 }
 
-/// Canonical key for a `<<>>` pattern's shape. Two binary patterns share a key
-/// only if they match the same set of `Binary` values, which is what lets the
-/// matrix flag exact-shape duplicates as unreachable. Dynamic sizes and
-/// non-literal segment values are keyed by span so they never collide.
-///
-/// The encoding must stay INJECTIVE. String segment values can contain the
-/// delimiters (`,`, the kind chars `i`/`b`/`u`, digits), so they are
-/// length-prefixed; without that, two different patterns share a key and one
-/// is falsely reported unreachable.
 fn push_int_key(key: &mut String, n: &ast::NumberLiteral) {
     match n.as_int() {
         Some(i) => key.push_str(&i.to_string()),
@@ -598,12 +601,23 @@ fn push_bin_part(key: &mut String, part: &BinPart<'_>, at: char) {
     }
 }
 
+/// The canonical key for the shape of a `<<>>` pattern. Two binary patterns
+/// share a key only if they match the same set of `Binary` values, which is
+/// what lets the matrix flag duplicates of exactly the same shape as
+/// unreachable. Sizes and segment values that aren't literals are keyed by
+/// position, so they never collide.
+///
+/// The encoding must stay INJECTIVE, meaning two different patterns never get
+/// the same key. String segment values can contain the delimiters (`,`, the
+/// kind chars `i`, `b` and `u`, and digits), so they're prefixed with their
+/// length. Without that, two different patterns could share a key and one
+/// would be wrongly reported as unreachable.
 fn bin_pattern_key(segments: &[BinSegShape<'_>], open: bool) -> String {
     let mut key = String::from("#bin:");
     for seg in segments {
         push_bin_part(&mut key, &seg.value, '@');
-        // The kind char also fixes the size's unit ('i' bits, 'b' bytes), so
-        // `<<x:16>>` and `<<x:bytes(16)>>` cannot share a key.
+        // The kind char also fixes the size's unit ('i' for bits, 'b' for
+        // bytes), so `<<x:16>>` and `<<x:bytes(16)>>` can't share a key.
         key.push(match seg.unit {
             BinUnit::Bits => 'i',
             BinUnit::Bytes => 'b',
@@ -643,8 +657,9 @@ fn pat_to_string(p: &Pat, t: &RcType, interner: &Interner) -> String {
                         Pat::Ctor { id, .. } if *id == EMPTY_LIST_ID => {
                             return format!("[{}]", heads.join(", "));
                         }
-                        // Guard fall-through: any non-list pattern renders
-                        // as the open tail, whatever kind it is.
+                        // The guards above didn't match, so this isn't a
+                        // list pattern. Whatever it is, it shows as the open
+                        // tail.
                         #[allow(unknown_lints, wildcard_over_own_enum)]
                         _ => {
                             heads.push("..".to_string());
@@ -693,7 +708,7 @@ fn lower_pattern<P: PatternShape>(p: &P, t: &RcType, interner: &mut Interner) ->
     }
     match p.shape() {
         PatShape::Wild => Pat::Wildcard,
-        // Numeric identity, not spelling: `0xFF` and `255` are one arm.
+        // Key by value, not spelling, so `0xFF` and `255` are the same arm.
         PatShape::Number(n) => {
             let key = match n.as_int() {
                 Some(i) => format!("lit:{i}"),
@@ -717,8 +732,8 @@ fn lower_pattern<P: PatternShape>(p: &P, t: &RcType, interner: &mut Interner) ->
                         .map(|(f, ft)| lower_pattern(f, ft, interner))
                         .collect(),
                 },
-                // Past the depth the type was unrolled to, the variant table
-                // is gone; the variant still has an identity of its own.
+                // Past the depth the type was unrolled to, there's no variant
+                // table, but the variant still has an identity of its own.
                 None => Pat::Ctor {
                     id: interner.intern(&format!("#variant{index}")),
                     args: fields
@@ -752,8 +767,8 @@ fn lower_pattern<P: PatternShape>(p: &P, t: &RcType, interner: &mut Interner) ->
             } else {
                 &RcType::Infinite
             };
-            // Cons-list, right to left. A rest ends the chain in a wildcard
-            // tail; otherwise it ends in `[]`.
+            // Build a cons list from right to left. With a rest, the chain
+            // ends in a wildcard tail, and otherwise it ends in `[]`.
             let mut acc = if open {
                 Pat::Wildcard
             } else {
@@ -773,9 +788,9 @@ fn lower_pattern<P: PatternShape>(p: &P, t: &RcType, interner: &mut Interner) ->
     }
 }
 
-/// Incremental usefulness checker for one match expression. The compiler
-/// pushes each unguarded arm once after checking it, so N arms cost O(N) row
-/// constructions rather than rebuilding the matrix per arm.
+/// Checks usefulness for one match expression, one arm at a time. The compiler
+/// pushes each unguarded arm once after checking it, so N arms cost N row
+/// builds instead of a new matrix for every arm.
 #[derive(Debug)]
 pub struct UsefulnessMatrix {
     matrix: PatternMatrix,
@@ -794,8 +809,8 @@ impl UsefulnessMatrix {
         }
     }
 
-    /// Lower a checked pattern against this checker's subject type. Ctor
-    /// names are interned here, once.
+    /// Lower a checked pattern against this checker's subject type.
+    /// Constructor names are interned here, once.
     pub fn lower<P: PatternShape>(&mut self, p: &P) -> Pat {
         lower_pattern(p, &self.subject_type, &mut self.interner)
     }
@@ -810,10 +825,10 @@ impl UsefulnessMatrix {
         self.matrix.rows.push(PatStack::one(pat.clone()));
     }
 
-    /// The variants `pat` covers with a wildcard although `earlier` arms name
-    /// others of the same value, rendered as patterns (`Absent`, `Present(..)`).
-    /// `earlier` is every arm before `pat`, guarded or not: a guarded arm
-    /// still names the variant it is about.
+    /// The variants `pat` covers with a wildcard even though `earlier` arms
+    /// name others of the same value, shown as patterns (`Absent`,
+    /// `Present(..)`). `earlier` is every arm before `pat`, guarded or not,
+    /// because a guarded arm still names the variant it's about.
     pub fn catch_all<'a>(
         &self,
         earlier: impl IntoIterator<Item = &'a Pat>,
@@ -840,9 +855,9 @@ impl UsefulnessMatrix {
         )
     }
 
-    /// A rendered witness pattern the given arms fail to cover, or `None` if
-    /// they are exhaustive. The arms passed here form their own matrix; this
-    /// checker's incremental matrix is not consulted.
+    /// A pattern the given arms don't cover, shown as text, or `None` if they
+    /// cover everything. The arms passed here form their own matrix, and this
+    /// checker's own matrix isn't used.
     pub fn find_missing<'a>(&self, patterns: impl IntoIterator<Item = &'a Pat>) -> Option<String> {
         let mut matrix = PatternMatrix::default();
         for p in patterns {
@@ -864,7 +879,8 @@ mod tests {
     use super::*;
     use crate::type_def::{self, FieldDef, TypeId, t_int, t_named, t_tuple};
 
-    /// Test-only string-keyed pattern, interned into a `Pat` before use.
+    /// A pattern keyed by strings, for tests. It's interned into a `Pat`
+    /// before use.
     #[derive(Debug, Clone)]
     enum SPat {
         Wildcard,
@@ -933,7 +949,8 @@ mod tests {
         t_named(TypeId(id), name, vec![], variants)
     }
 
-    /// `Bool` is not a primitive: the same `Named` shape the prelude produces.
+    /// `Bool` isn't a primitive. It has the same `Named` shape the prelude
+    /// makes.
     fn t_bool() -> Type {
         t_enum(99, "Bool", vec![("True", vec![]), ("False", vec![])])
     }
@@ -999,7 +1016,7 @@ mod tests {
         assert_eq!(catch_all_of(&[ctor("A", vec![]), rest], &enum3()), None);
     }
 
-    /// `Some(_)` ignores the payload; nobody split it, so it is not a catch-all.
+    /// `Some(_)` ignores the payload. No arm split it, so it isn't a catch-all.
     #[test]
     fn a_wildcard_inside_an_unsplit_field_is_fine() {
         let t = t_option(enum3());
@@ -1237,8 +1254,8 @@ mod tests {
         assert_witness(&[ctor("Leaf", vec![])], &t, "Node(_, _)");
     }
 
-    /// Opaque prelude `Binary`: Named with no variants, so `get_type_ctors`
-    /// reports it infinite.
+    /// The prelude's opaque `Binary`. It's `Named` with no variants, so
+    /// `get_type_ctors` reports it as infinite.
     fn t_binary() -> Type {
         t_enum(98, "Binary", vec![])
     }
@@ -1346,8 +1363,8 @@ mod tests {
         assert!(m.is_useful(&p2));
     }
 
-    /// Segment string values can contain the key's delimiter chars, so two
-    /// different patterns must not share a key.
+    /// String segment values can contain the key's delimiter chars, and two
+    /// different patterns still must not share a key.
     #[test]
     fn binary_string_key_is_injective() {
         let mut m = UsefulnessMatrix::new(t_binary());
@@ -1360,8 +1377,8 @@ mod tests {
         assert!(m.is_useful(&p2));
     }
 
-    /// An unknown constructor with args must keep the pattern and type stacks
-    /// column-aligned, or the type stack runs out early and every duplicate
+    /// An unknown constructor with arguments must keep the pattern and type
+    /// stacks in line, or the type stack runs out early and every duplicate
     /// arm looks useful.
     #[test]
     fn unknown_ctor_with_args_duplicate_is_redundant() {

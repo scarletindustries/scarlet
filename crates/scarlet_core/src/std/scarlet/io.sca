@@ -18,7 +18,8 @@ pub type IoError {
 	ReadOnlyFilesystem(path String)
 	// ELOOP: too many symbolic links.
 	FilesystemLoop(path String)
-	// The contents do not suit the call, such as text that is not UTF-8.
+	// The contents don't fit what the call expects, such as text that isn't
+	// UTF-8.
 	InvalidData(path String)
 	// ENOSPC
 	StorageFull

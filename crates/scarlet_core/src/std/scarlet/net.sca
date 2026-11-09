@@ -19,9 +19,9 @@ pub fn listen(host String, port Int) Result(Server, error::NetError) {
 	listen_addr(addr)
 }
 
-// The next connection, parking until one arrives. `Ok(None)` means the
-// `Server` was closed, and an accept loop stops there. `Err` is a failed
-// accept.
+// Accepts the next connection, parking until one arrives. `Ok(None)` means the
+// `Server` was closed, and an accept loop stops there. An `Err` means the
+// accept failed.
 @vm(net__accept)
 pub fn accept(s Server) Result(Option(socket::Socket), error::NetError)
 
@@ -45,7 +45,7 @@ pub fn serve(
 	serve_in(process::supervisor(ACCEPTOR_BUDGET), host, port, handler)
 }
 
-// As `serve`, with the server's subtree inside `sup`.
+// Like `serve`, but puts the server's subtree inside `sup`.
 pub fn serve_in(
 	sup process::Supervisor,
 	host String,
@@ -62,14 +62,14 @@ pub fn serve_on(server Server, handler fn(socket::Socket) Nil) Service {
 	serve_on_in(process::supervisor(ACCEPTOR_BUDGET), server, handler)
 }
 
-// As `serve_on`, inside `sup`. The connection factory is declared before the
-// acceptors, so it is stopped after them: a stopping server stops accepting
-// before it closes what it accepted.
+// Like `serve_on`, but inside `sup`. The connection factory is declared before
+// the acceptors, so it's stopped after them. That way a stopping server stops
+// accepting before it closes what it accepted.
 pub fn serve_on_in(sup process::Supervisor, server Server, handler fn(socket::Socket) Nil) Service {
 	me = process::supervisor_in(sup, ACCEPTOR_BUDGET)
 	connections = process::factory(me, process::Disposable, fn(_inbox, sock) {
-		// The acceptor owns the socket until this, so that it closes when this
-		// process ends, however it ends.
+		// The acceptor owns the socket until now. Giving it to this process
+		// means it closes when this process ends, however it ends.
 		give(sock, process::self())
 		handler(sock)
 	})
@@ -102,10 +102,11 @@ fn accept_loop(server Server, connections process::Factory(Nil, socket::Socket))
 	}
 }
 
-// The network errors are ones accept(2) reports for a connection that died in
-// the queue, not a dead listener, so they retry. An unmapped errno is usually
-// EMFILE, which dequeues nothing, so it waits 100ms rather than spin. The rest
-// mean the listener itself is broken, so the loop stops.
+// The network errors in the first arm are ones accept(2) reports for a
+// connection that died in the queue, not for a dead listener, so the loop
+// retries them. An unmapped errno is usually EMFILE, which dequeues nothing, so
+// the loop waits 100 ms instead of spinning. The rest mean the listener itself
+// is broken, so the loop stops.
 fn accept_failed(
 	e error::NetError,
 	server Server,
@@ -138,20 +139,21 @@ fn accept_failed(
 	}
 }
 
-// An IP literal passes through. A hostname is looked up with getaddrinfo, off
-// the scheduler's threads.
+// Resolves `host` to an IP address. An IP literal passes straight through, and
+// a hostname is looked up with getaddrinfo, off the scheduler's threads.
 @vm(net__resolve)
 pub fn resolve(host String) Result(address::IpAddress, error::NetError)
 
-// As `resolve`, but `Err(TimedOut)` after `timeout_ms`, even if the lookup
-// answers later. An IP literal is `Ok` on any budget. A lookup cannot be
-// cancelled, so a late one still runs to the end and is thrown away.
+// Like `resolve`, but returns `Err(TimedOut)` after `timeout_ms`, even if the
+// lookup answers later. An IP literal is `Ok` on any budget. A lookup can't be
+// cancelled, so a late one still runs to the end and its answer is thrown
+// away.
 pub fn resolve_within(host String, timeout_ms Int) Result(address::IpAddress, error::NetError) {
 	resolve_until(host, time::add_ms(time::monotonic(), timeout_ms))
 }
 
-// As `resolve_within`, with a `deadline` from `time::monotonic()`, for when one
-// deadline covers several steps.
+// Like `resolve_within`, but takes a `deadline` from `time::monotonic()`, for
+// when one deadline covers several steps.
 pub fn resolve_until(
 	host String,
 	deadline time::Instant,
@@ -163,15 +165,15 @@ pub fn resolve_until(
 fn resolve_until_ms(host String, deadline_ms Int) Result(address::IpAddress, error::NetError)
 
 // Connects to `host:port`, resolving `host` first with `resolve`. It has no
-// deadline of its own: see `connect_within`.
+// deadline of its own. To set one, use `connect_within`.
 pub fn connect(host String, port Int) Result(socket::Socket, error::NetError) {
 	ip <- result::then(resolve(host))
 	addr <- result::then(result::replace_err(address::socket_address(ip, port), error::InvalidPort))
 	connect_addr(addr)
 }
 
-// As `connect`, but waits at most `timeout_ms` for the resolve and the connect
-// together.
+// Like `connect`, but waits at most `timeout_ms` for the resolve and the
+// connect together.
 pub fn connect_within(
 	host String,
 	port Int,
@@ -180,8 +182,8 @@ pub fn connect_within(
 	connect_until(host, port, time::add_ms(time::monotonic(), timeout_ms))
 }
 
-// As `connect_within`, with a `deadline` from `time::monotonic()`, for when one
-// deadline covers several steps.
+// Like `connect_within`, but takes a `deadline` from `time::monotonic()`, for
+// when one deadline covers several steps.
 pub fn connect_until(
 	host String,
 	port Int,
@@ -195,8 +197,9 @@ pub fn connect_until(
 @vm(net__connect)
 pub fn connect_addr(addr address::SocketAddress) Result(socket::Socket, error::NetError)
 
-// As `connect_addr`, but `Err(TimedOut)` after `timeout_ms`. The kernel gives
-// up on its own after about 75 s on Darwin, so a longer timeout does nothing.
+// Like `connect_addr`, but returns `Err(TimedOut)` after `timeout_ms`. On
+// Darwin the kernel gives up on its own after about 75 seconds, so a longer
+// timeout does nothing there.
 pub fn connect_addr_within(
 	addr address::SocketAddress,
 	timeout_ms Int,
@@ -204,7 +207,7 @@ pub fn connect_addr_within(
 	connect_addr_until(addr, time::add_ms(time::monotonic(), timeout_ms))
 }
 
-// As `connect_addr_within`, with a `deadline` from `time::monotonic()`.
+// Like `connect_addr_within`, but takes a `deadline` from `time::monotonic()`.
 pub fn connect_addr_until(
 	addr address::SocketAddress,
 	deadline time::Instant,
@@ -223,6 +226,7 @@ fn connect_addr_until_ms(
 @vm(net__local_addr)
 pub fn local_addr(s Server) Result(address::SocketAddress, error::NetError)
 
-// Every `accept` on it, parked or later, returns `Ok(None)`.
+// Closes the listener. Every `accept` on it, parked now or called later,
+// returns `Ok(None)`.
 @vm(net__close)
 pub fn close(s Server) Result(Nil, error::NetError)

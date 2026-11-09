@@ -1,6 +1,6 @@
-//! Maps: a persistent hash array mapped trie in the process's heap, in the
-//! CHAMP form (Steindorfer & Vinju, 2015), which Scala's and Kotlin's
-//! immutable maps use.
+//! A map is a persistent hash array mapped trie in the process's heap. It
+//! takes the CHAMP form (Steindorfer & Vinju, 2015), which Scala's and
+//! Kotlin's immutable maps use.
 //!
 //! ```text
 //!   map [ size | top ]
@@ -14,11 +14,12 @@
 //!   collision [ hash | key value  key value ... ]
 //! ```
 //!
-//! A key's hash (`hash.rs`) picks its slot: its lowest 5 bits at the top
-//! node, the next 5 one level down, and so on. An entry sits in the first
-//! node where no other key shares its slot, so a map of a million entries is
-//! about 4 levels deep. Keys whose whole 64-bit hashes are equal, once the
-//! bits run out, share a collision cell, a plain list.
+//! A key's hash (`hash.rs`) picks its slot. Its lowest 5 bits pick the slot
+//! in the top node, the next 5 pick it one level down, and so on. An entry
+//! sits in the first node where no other key shares its slot, so a map of a
+//! million entries is about 4 levels deep. When the bits run out, keys whose
+//! whole 64-bit hashes are equal share a collision cell, which is a plain
+//! list.
 //!
 //! Nothing is changed in place. `set` and `delete` build new nodes along the
 //! one path to the key and share every other node with the map they came
@@ -26,28 +27,29 @@
 //! reference.
 //!
 //! What CHAMP adds to the older trie is that its shape depends only on what
-//! the map holds, never on the order it was built in: a delete that leaves a
-//! node one entry moves that entry up into the node above, where an insert
-//! would have put it. So two equal maps have the same nodes, and `==`, the
-//! hash and the order entries come out in all follow from that.
+//! the map holds, never on the order it was built in. A delete that leaves a
+//! node with one entry moves that entry up into the node above, where an
+//! insert would have put it. So two equal maps have the same nodes, and
+//! `==`, the hash and the order entries come out in all follow from that.
 //!
-//! Layout, in words after each cell's header:
+//! This is the layout, in words after each cell's header:
 //!
-//! - map: `size`, then the top node, or `Nil` when empty;
-//! - node: the two 32-bit slot masks in one word, the entry mask low, then
-//!   each entry's key and value, then each child, both in slot order;
-//! - collision: the keys' shared hash, then each entry's key and value.
+//! - A map holds `size`, then the top node, or `Nil` when it is empty.
+//! - A node holds the two 32-bit slot masks in one word, with the entry mask
+//!   low. Then come each entry's key and value, then each child, both in
+//!   slot order.
+//! - A collision holds the keys' shared hash, then each entry's key and value.
 
 use crate::eq;
 use crate::hash;
 use crate::heap::{Cell, Full, Heap, Kind};
 use crate::value::Value;
 
-/// What places a key. Always [`hash::hash`], but for tests, which pass a
-/// poor one to reach the paths a good one almost never takes.
+/// What places a key. It is always [`hash::hash`], except in tests, which
+/// pass a poor one to reach the paths a good one almost never takes.
 type Hasher = fn(&Heap, Value) -> u64;
 
-/// Bits of the hash each level takes: `log2` of the 32 slots.
+/// Bits of the hash each level takes, which is `log2` of the 32 slots.
 const BITS: u32 = 5;
 /// The first shift with none of a 64-bit hash left.
 const END: u32 = 64;
@@ -146,7 +148,7 @@ fn make_collision(heap: &mut Heap, hash: u64, entries: &[(Value, Value)]) -> Res
     Ok(Value::cell(heap.make(Kind::MapCollision, &words)?))
 }
 
-/// `v`, with one more reference: for keeping it in a new cell.
+/// `v` with one more reference, for keeping it in a new cell.
 fn own(heap: &mut Heap, v: Value) -> Value {
     if let Some(cell) = v.as_cell() {
         heap.share(cell);
@@ -160,8 +162,8 @@ fn release(heap: &mut Heap, w: u64) {
     }
 }
 
-/// The words of node or collision `at`, for a new cell to start from: each
-/// value in them has one more reference, which the copy holds. An edit that
+/// The words of node or collision `at`, for a new cell to start from. Each
+/// value in them gets one more reference, which the copy holds. An edit that
 /// takes a word out gives its reference back.
 fn copy(heap: &mut Heap, at: Cell) -> Vec<u64> {
     let words = heap.data(at).to_vec();
@@ -200,8 +202,8 @@ fn put(heap: &mut Heap, words: &mut [u64], i: usize, w: u64) {
     }
 }
 
-/// Which of a node's 32 slots hold an entry and which a child, a bit a slot.
-/// A slot holds one, the other or neither.
+/// Which of a node's 32 slots hold an entry and which hold a child, with one
+/// bit per slot. A slot holds one, the other or neither.
 #[derive(Clone, Copy)]
 struct Used {
     entries: u32,
@@ -256,7 +258,7 @@ fn get_by(heap: &Heap, map: Cell, key: Value, hash: Hasher) -> Option<Value> {
     }
 }
 
-/// `map` with `key` bound to `value`. All three are borrowed: the new map
+/// `map` with `key` bound to `value`. All three are borrowed. The new map
 /// holds references of its own, and shares every node off the path to `key`
 /// with `map`.
 pub(crate) fn set(heap: &mut Heap, map: Cell, key: Value, value: Value) -> Result<Cell, Full> {
@@ -287,8 +289,8 @@ fn set_by(
 }
 
 /// The node `at`, at `shift`, with `key` bound to `value`, and whether `key`
-/// is new. `h` is `key`'s hash. Everything passed is borrowed; the node made
-/// is owned.
+/// is new. `h` is `key`'s hash. Everything passed is borrowed, and the node
+/// made is owned.
 fn insert(
     heap: &mut Heap,
     at: Cell,
@@ -320,8 +322,8 @@ fn insert(
             put(heap, &mut words, 2 + 2 * i, v);
             return Ok((Value::cell(heap.make(Kind::MapNode, &words)?), false));
         }
-        // Two keys in one slot: both go one level down, into a node of
-        // their own, and the slot holds that instead.
+        // Two keys want one slot, so both go one level down into a node of
+        // their own, and the slot holds that node instead.
         let theirs = (own(heap, k), own(heap, v), hash(heap, k));
         let ours = (own(heap, key), own(heap, value), h);
         let child = pair(heap, theirs, ours, shift + BITS)?;
@@ -536,9 +538,9 @@ pub(crate) enum Piece {
     Collision(Vec<(Value, Value)>),
 }
 
-/// `map`'s pieces, in its order: each node's entries, then each child's
-/// pieces, in slot order. Two equal maps give the same pieces, but for the
-/// order inside a collision. Reading them adds no reference.
+/// `map`'s pieces in its order, which is each node's entries, then each
+/// child's pieces, in slot order. Two equal maps give the same pieces, apart
+/// from the order inside a collision. Reading them adds no reference.
 pub(crate) fn pieces(heap: &Heap, map: Cell) -> Vec<Piece> {
     let mut out = Vec::new();
     let mut todo: Vec<Cell> = top(heap, map).as_cell().into_iter().collect();
@@ -566,8 +568,9 @@ pub(crate) fn entries(heap: &Heap, map: Cell) -> Vec<(Value, Value)> {
     out
 }
 
-/// What decides whether two map cells of the same kind are `==`: `None` when
-/// they differ in shape, else the pairs of values that have to be equal.
+/// What decides whether two map cells of the same kind are `==`. It is `None`
+/// when they differ in shape, and otherwise the pairs of values that have to
+/// be equal.
 ///
 /// Equal maps have the same nodes, so two nodes compare slot by slot. A
 /// collision's entries can be in either order, so its keys are matched up
@@ -599,7 +602,7 @@ pub(crate) fn equal_parts(heap: &Heap, x: Cell, y: Cell) -> Option<Vec<(Value, V
 mod tests {
     use super::*;
 
-    /// A key: the string `k<n>`, so keys are cells whose references count.
+    /// A key is the string `k<n>`, so keys are cells whose references count.
     fn key(heap: &mut Heap, n: u64) -> Value {
         Value::cell(heap.string(format!("k{n}").as_bytes()).expect("room"))
     }
@@ -613,12 +616,14 @@ mod tests {
         String::from_utf8_lossy(&text[1..]).parse().expect("a key")
     }
 
-    /// Keys that differ only in the top bits: long paths of one-child nodes.
+    /// A hash where keys differ only in the top bits, which makes long paths
+    /// of one-child nodes.
     fn deep(heap: &Heap, v: Value) -> u64 {
         (number(heap, v) % 13) << 60 | 0x0555_5555_5555_5555
     }
 
-    /// Keys whose whole hashes are equal, three ways: collisions.
+    /// A hash that puts every key in one of three groups whose whole hashes
+    /// are equal, which makes collisions.
     fn clashing(heap: &Heap, v: Value) -> u64 {
         number(heap, v) % 3
     }
@@ -642,12 +647,12 @@ mod tests {
         }
     }
 
-    /// `set` and `delete` at random, then deletes until it is empty, checked
-    /// against a plain list after each: every key finds what the list says,
-    /// the size agrees, and the map is `==` to one built fresh from the list
-    /// in another order, which holds only if the shape depends on the
-    /// entries alone. Some versions are kept and checked again at the end,
-    /// then all are freed, leaving nothing.
+    /// Run `set` and `delete` at random, then delete until the map is empty,
+    /// and check it against a plain list after each step. Every key must find
+    /// what the list says, the size must agree, and the map must be `==` to
+    /// one built fresh from the list in another order. That last check holds
+    /// only if the shape depends on the entries alone. Some versions are kept
+    /// and checked again at the end, then all are freed, leaving nothing.
     fn against_a_list(hash: Hasher) {
         const KEYS: u64 = 120;
         let mut heap = Heap::default();

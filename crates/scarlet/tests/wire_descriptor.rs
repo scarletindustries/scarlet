@@ -1,19 +1,19 @@
-//! The wire descriptor at the two seams a unit test cannot stand over: the
+//! These test the wire descriptor at the two seams a unit test can't reach: the
 //! LSP's `IncrementalSession`, and the REPL as a subprocess.
 //!
 //! Both matter because the descriptor is built during *elaboration*. `check`
 //! truncates the pipeline before emission, so a refusal raised at emission
-//! would be invisible here and in an editor while still failing `al run` —
-//! the exact split this ticket exists to prevent. Nothing here runs a wire
-//! op; the round trips are `wire_handles.rs` and `wire_closures.rs`.
+//! would be invisible here and in an editor while still failing `al run`,
+//! which is the exact split this ticket exists to prevent. Nothing here runs a
+//! wire op. The round trips are in `wire_handles.rs` and `wire_closures.rs`.
 
 use scarlet::bytecode::IncrementalSession;
 
 mod common;
 use common::parse;
 
-/// A record with a `fn` field: closures cross, so it checks clean, and it is
-/// the control that says no refusal fires on one.
+/// A record with a `fn` field. Closures can cross the wire, so it checks clean,
+/// and it's the control that shows no refusal fires on one.
 const HANDLER: &str = "import scarlet/wire\n\
                        type Handler {\n\
                        \tHandler(name String, run fn(Int) Int)\n\
@@ -22,10 +22,10 @@ const HANDLER: &str = "import scarlet/wire\n\
                        \tprintln(wire::encode(Handler('h', fn(x) { x + 1 })))\n\
                        }\n";
 
-/// A record over a user-declared bodiless type, which no VM table backs: a
-/// type no value has is a node no value reaches, so it checks clean, and it
-/// is the control that says so. `send` is never called — nothing can
-/// construct a `Native` — which is fine on a path that never runs.
+/// A record over a user-declared bodiless type, which no VM table backs. A type
+/// with no values is a node no value reaches, so it checks clean, and this is
+/// the control that shows it. `send` is never called, because nothing can
+/// construct a `Native`, and that's fine on a path that never runs.
 const NATIVE: &str = "import scarlet/wire\n\
                       pub type Native\n\
                       type Handler {\n\
@@ -38,9 +38,9 @@ const NATIVE: &str = "import scarlet/wire\n\
                       \t_ = send\n\
                       }\n";
 
-/// A generic function encoding its parameter: the one refusal, about
-/// inference rather than a value, and so the fixture every refusal test here
-/// is reached through.
+/// A generic function that encodes its parameter. This is the one refusal, and
+/// it's about inference rather than a value, so every refusal test here goes
+/// through this fixture.
 const GENERIC: &str = "import scarlet/wire\n\
                        fn send(xs Array(a)) Binary {\n\
                        \twire::encode(xs)\n\
@@ -49,8 +49,8 @@ const GENERIC: &str = "import scarlet/wire\n\
                        \t_ = send\n\
                        }\n";
 
-/// A record whose field is a stdlib type this program never names or imports:
-/// `Port`'s stream is a `scarlet/net/socket.Connection`. On this path the
+/// A record whose field is a stdlib type this program never names or imports,
+/// because `Port`'s stream is a `scarlet/net/socket.Connection`. On this path the
 /// stdlib is the precompiled blob, so `Connection`'s declaration is answered
 /// from the by-id registry the session seeds at construction, not from
 /// anything `import scarlet/os/port` brought in.
@@ -104,8 +104,8 @@ fn a_bodiless_field_checks_clean_on_the_session_path() {
     assert!(r.success(), "{:?}", r.diagnostics);
 }
 
-/// The other half, and the one that catches a refusal that fires on
-/// everything: an encodable type must still check clean on the same path.
+/// This is the other half, and it catches a refusal that fires on everything.
+/// An encodable type must still check clean on the same path.
 #[test]
 fn an_encodable_type_still_checks_clean_on_the_session_path() {
     let mut s = IncrementalSession::new();
@@ -113,7 +113,7 @@ fn an_encodable_type_still_checks_clean_on_the_session_path() {
     assert!(r.success(), "{:?}", r.diagnostics);
 }
 
-/// A `fn` field is one of those: the same buffer checks clean on the same
+/// A `fn` field is encodable too, so the same buffer checks clean on the same
 /// path.
 #[test]
 fn a_fn_field_checks_clean_on_the_session_path() {
@@ -133,10 +133,10 @@ fn a_stdlib_type_reached_only_through_a_field_checks_clean_on_the_session_path()
 
 /// A session compiles the same buffer repeatedly, rewinding between edits.
 /// The descriptor is a constant of the program being built, so nothing has to
-/// be carried across a rewind — asserted by running the cycle rather than by
-/// arguing it: the failure this would catch is descriptors accumulating from
-/// a rewound compile and being minted against a program that no longer has
-/// the call site.
+/// be carried across a rewind. We check that by running the cycle rather than
+/// arguing it. The failure this would catch is descriptors piling up from a
+/// rewound compile and being minted against a program that no longer has the
+/// call site.
 #[test]
 #[ignore = "waits for the wire redesign: check stopped refusing wire types in #50"]
 fn a_session_re_checks_a_wire_call_across_an_edit() {
@@ -184,9 +184,9 @@ fn the_repl_reports_an_unconstrained_decode() {
     );
 }
 
-/// A `Subject` three levels down a record: the handle is an identity node
-/// and the whole record checks clean — on the session path, where a
-/// descriptor built during elaboration has to be reachable without emission.
+/// A `Subject` three levels down a record. The handle is an identity node and
+/// the whole record checks clean on the session path, where a descriptor built
+/// during elaboration has to be reachable without emission.
 const SUBJECT_DEEP: &str = "import scarlet/process\n\
                             import scarlet/wire\n\
                             pub type Inner {\n\
@@ -216,7 +216,7 @@ fn a_handle_three_levels_down_checks_clean_on_the_session_path() {
 /// showing "cannot encode" on a nine-position shape, with the chain dropped
 /// somewhere between the builder and the diagnostic, is the failure that
 /// would otherwise show up only when someone tried to use it. The type at
-/// the bottom is the unknown one, the one refusal. The shape is positional
+/// the bottom is the unknown one, which is the one refusal. The shape is positional
 /// because a `Data` node's arguments are walked before its fields, so
 /// `Outer(a)` refuses at the argument with no path.
 #[test]

@@ -1,58 +1,64 @@
 /**
- * Digests, HMAC, signature checks and random bytes, all bound to aws-lc and
- * the OS rather than written here.
+ * Digests, HMAC, signature checks and random bytes. Every function here calls
+ * aws-lc or the OS instead of doing the work itself.
  *
  * SHA-1 is broken for collisions. It is here only for fixed protocol
  * constants like the WebSocket handshake, never for signatures, passwords or
  * untrusted content. Digests are over whole bytes: a binary like `<<1:4>>` is
- * `Err(Nil)`, since padding it would give two binaries one digest.
+ * `Err(Nil)`, because padding it would give two different binaries the same
+ * digest.
  */
 
 import scarlet/base64
 import scarlet/binary
 import scarlet/result
 
-// RFC 6455 §1.3's handshake constant. Not a secret and not a salt.
+// The handshake constant from RFC 6455 §1.3. It isn't a secret or a salt.
 pub const websocket_guid = <<'258EAFA5-E914-47DA-95CA-C5AB0DC85B11'>>
 
-// 20 bytes. Only for protocols that require it: see the module doc.
+// Returns a 20-byte digest. Only use it for protocols that require it, as the
+// module doc explains.
 @vm(crypto__sha1)
 pub fn sha1(m Binary) Result(Binary, Nil)
 
 // The `Sec-WebSocket-Accept` for a `Sec-WebSocket-Key` (RFC 6455 §4.2.2).
-// `key` is the header as sent, still base64: it is not decoded first.
+// Pass `key` as the header was sent, still in base64. Don't decode it first.
 pub fn websocket_accept(key Binary) Result(Binary, Nil) {
 	result::map(sha1(binary::append(key, websocket_guid)), base64::encode)
 }
 
-// `n` bytes from the OS's secure random source. `Err(Nil)` if `n` is negative
-// or the source fails, never zeros.
+// Returns `n` bytes from the OS's secure random source. It returns `Err(Nil)`
+// if `n` is negative or the source fails, and never falls back to zeros.
 @vm(crypto__random_bytes)
 pub fn random_bytes(n Int) Result(Binary, Nil)
 
-// 32 bytes. Not a password hash, and not a MAC: that is `hmac_sha256`.
+// Returns a 32-byte digest. It isn't a password hash or a MAC. For a MAC, use
+// `hmac_sha256`.
 @vm(crypto__sha256)
 pub fn sha256(m Binary) Result(Binary, Nil)
 
-// 64 bytes.
+// Returns a 64-byte digest.
 @vm(crypto__sha512)
 pub fn sha512(m Binary) Result(Binary, Nil)
 
-// A 32-byte tag, for signing tokens and cookies. Compare tags with
+// Returns a 32-byte tag for signing tokens and cookies. Compare tags with
 // `const_eq`, never `==`.
 @vm(crypto__hmac_sha256)
 pub fn hmac_sha256(key Binary, msg Binary) Result(Binary, Nil)
 
-// Equal, in time that depends only on the lengths. `==` stops at the first
-// difference, which leaks how much of a secret matched.
+// Checks whether two binaries are equal, in time that depends only on their
+// lengths. `==` stops at the first difference, which leaks how much of a
+// secret matched.
 @vm(crypto__const_eq)
 pub fn const_eq(a Binary, b Binary) Bool
 
-// ECDSA P-256 with SHA-256, as WebAuthn's ES256 uses. The key is SEC1
-// uncompressed (`0x04`, x, y) and `sig` is DER. Anything malformed is `False`.
+// Checks an ECDSA P-256 signature over SHA-256, as WebAuthn's ES256 uses. The
+// key is SEC1 uncompressed (`0x04`, x, y) and `sig` is DER. It returns `False`
+// for anything malformed.
 @vm(crypto__p256_verify)
 pub fn p256_verify(public_key Binary, message Binary, sig Binary) Bool
 
-// `public_key` is 32 bytes. Anything malformed is `False`.
+// Checks an Ed25519 signature. `public_key` is 32 bytes. It returns `False`
+// for anything malformed.
 @vm(crypto__ed25519_verify)
 pub fn ed25519_verify(public_key Binary, message Binary, sig Binary) Bool

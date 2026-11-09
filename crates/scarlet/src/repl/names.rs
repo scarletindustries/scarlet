@@ -1,9 +1,8 @@
 //! What the REPL knows how to complete: the language's fixed vocabulary plus
 //! whatever the running session has defined or imported.
 //!
-//! Harvested from the AST of each accepted entry rather than from the
-//! reference graph, so a name becomes completable exactly when the entry that
-//! bound it was accepted into the session's replay source.
+//! We collect names from the AST of each accepted entry, not from the reference graph, so a name
+//! becomes completable exactly when the entry that bound it joins the session's replay source.
 
 use std::collections::BTreeMap;
 
@@ -34,8 +33,8 @@ impl Candidate {
         }
     }
 
-    /// What the completion list shows: the name, plus a call shape for a
-    /// function so `map` and `map(seq, f)` are distinguishable at a glance.
+    /// What the completion list shows. It's the name, plus a call shape for a function, so you can
+    /// tell `map` and `map(seq, f)` apart at a glance.
     pub fn display(&self) -> String {
         if self.params.is_empty() {
             self.name.clone()
@@ -45,18 +44,17 @@ impl Candidate {
     }
 }
 
-/// Names the session has introduced. Rebuilt by [`Names::reset`] and extended
-/// per accepted entry, so it tracks the replayed prelude exactly.
+/// Names the session has introduced. [`Names::reset`] clears it and each accepted entry extends
+/// it, so it tracks the session's replayed source exactly.
 #[derive(Default)]
 pub struct Names {
     defined: Vec<String>,
-    /// Import alias to module path, for `alias.` completion. Only stdlib
-    /// modules resolve: a relative import's exports live in a file this index
-    /// never reads.
+    /// Maps an import alias to its module path, for `alias::` completion. Only stdlib modules
+    /// resolve, because a relative import's exports live in a file this index never reads.
     aliases: BTreeMap<String, ModulePath>,
-    /// Where stdlib exports are read from. Built on the first completion that
-    /// needs one, since it compiles the prelude; it caches every module it
-    /// compiles after that, so each module compiles once per REPL.
+    /// Where stdlib exports are read from. We build it on the first completion that needs it,
+    /// because building it compiles the prelude. It caches every module it compiles after that,
+    /// so each module compiles once per REPL.
     stdlib: Option<IncrementalSession>,
 }
 
@@ -66,7 +64,7 @@ impl Names {
         self.aliases.clear();
     }
 
-    /// Record every top-level name an accepted entry bound.
+    /// Records every top-level name an accepted entry bound.
     pub fn observe(&mut self, program: &ast::BlockExpression) {
         for node in &program.body {
             let ast::Node::Statement(stmt) = node else {
@@ -111,8 +109,8 @@ impl Names {
             Some(a) => a.name.clone(),
             None => last.clone(),
         };
-        // Only a canonical (non-relative) path names a stdlib module;
-        // anything else completes to nothing.
+        // Only a canonical (non-relative) path names a stdlib module. Anything else completes to
+        // nothing.
         if import.path.leading.is_empty() {
             self.aliases.insert(alias, import.path.names.clone());
         } else {
@@ -241,8 +239,8 @@ mod tests {
         assert!(names.qualified("nope", "").is_empty(), "unknown qualifier");
     }
 
-    /// `http::Post` is a constructor of an exported type, not a value export:
-    /// the name list has to reach into the type to find it.
+    /// `http::Post` is a constructor of an exported type, not a value export, so the name list has
+    /// to reach into the type to find it.
     #[test]
     fn a_constructor_completes_behind_its_modules_alias() {
         let mut names = observed("import scarlet/http\n");

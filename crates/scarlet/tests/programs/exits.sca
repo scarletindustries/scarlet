@@ -1,4 +1,4 @@
-// Killing and links. Every process here is watched by a monitor, so each
+// This tests killing and links. Every process here is watched by a monitor, so each
 // exit is observed as a message and the output is fixed; the crash cases,
 // which write to stderr, live in tests/vm_exits.rs.
 
@@ -77,7 +77,7 @@ pub fn main() {
 	process::kill(victim)
 	check('a killed process reports Killed', reason(process::receive(downs)) == 'killed')
 
-	// --- killing what has already ended is nothing -----------------------------------------
+	// --- killing what has already ended does nothing ---------------------------------------
 
 	process::kill(victim)
 	_ = process::monitor(victim, downs, fn(d) d)

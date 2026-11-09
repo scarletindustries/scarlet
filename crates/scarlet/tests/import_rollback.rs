@@ -1,7 +1,7 @@
-//! Regression: an `IncrementalSession` must roll back the types the entry
-//! file's imports register (`lib.Color` for `import ./lib`) between checks.
+//! A regression test. Between checks, an `IncrementalSession` must roll back the
+//! types the entry file's imports register (`lib.Color` for `import ./lib`).
 //! `env.type_info` is a flat map, so a binding left above the `last_entry`
-//! watermark keeps resolving after the import is removed or renamed.
+//! watermark would keep resolving after the import is removed or renamed.
 
 mod common;
 use common::{Project, checked_with, recheck};

@@ -6,7 +6,7 @@ name: Release
 # reads (`knope.toml`). A stable release bumps VERSION, writes CHANGELOG.md,
 # deletes the change files, commits `release <version>`, tags `v<version>` and
 # pushes both, then builds from that tag. A canary previews the next version
-# and builds `<version>-canary.<date>` from the commit it ran on, committing
+# and builds `<version>-canary.<date>` from the commit it ran on, and commits
 # nothing.
 on:
   workflow_dispatch:
@@ -103,23 +103,24 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      # Published stamp. `crates/scarlet/build.rs` uses this as-is because it
-      # already contains `-canary.`; a local `cargo build` leaves VERSION as
-      # `0.0.1` and appends `+git.<sha>` so `--version` can name the commit.
+      # Write the published version. A canary's contains `-canary.`, so
+      # `crates/scarlet/build.rs` uses it as-is. A bare version, like a stable
+      # release's or a local build's `0.0.1`, gets `+git.<sha>` appended so
+      # `--version` can name the commit.
       - name: Update VERSION file
         run: echo "${{ needs.version.outputs.version }}" > VERSION
 
-      - name: Build (Release)
+      - name: Build (release)
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Run Tests
+      - name: Run tests
         run: cargo test --release --target ${{ matrix.target }}
 
-      - name: Prepare Release Binary
+      - name: Prepare release binary
         run: |
           cp "target/${{ matrix.target }}/release/scarlet" "./${{ matrix.asset }}"
 
-      - name: Import Code Signing Certificate
+      - name: Import code signing certificate
         if: matrix.platform == 'macos'
         env:
           CERTIFICATE_BASE64: ${{ secrets.CERTIFICATE_BASE64 }}
@@ -139,14 +140,14 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
           security list-keychain -d user -s $KEYCHAIN_PATH
 
-      - name: Sign Binary
+      - name: Sign binary
         if: matrix.platform == 'macos'
         env:
           CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
         run: |
           # --options runtime without entitlements SIGKILLs the JIT the moment it
-          # maps an executable page, so the entitlements file is load-bearing for
-          # every macOS release. Do not add XML comments to it: AMFI's parser
+          # maps an executable page, so every macOS release depends on the
+          # entitlements file. Don't add XML comments to it: AMFI's parser
           # rejects them ("AMFIUnserializeXML: syntax error") even though
           # `plutil -lint` accepts the file.
           codesign --sign "$CODESIGN_IDENTITY" \
@@ -158,9 +159,9 @@ jobs:
 
           codesign -vv -d ./${{ matrix.asset }}
 
-          # A successful `codesign --sign` does not prove the grants reached the
+          # A successful `codesign --sign` doesn't prove the grants reached the
           # signature, and without them the hardened runtime SIGKILLs the JIT.
-          # Assert against the signed binary, not against the flag we passed.
+          # Check the signed binary, not the flag we passed.
           entitlements=$(codesign -d --entitlements - --xml ./${{ matrix.asset }} 2>/dev/null)
           for key in com.apple.security.cs.allow-jit \
                      com.apple.security.cs.allow-unsigned-executable-memory; do
@@ -170,7 +171,7 @@ jobs:
             esac
           done
 
-      - name: Notarize Binary
+      - name: Notarise binary
         if: matrix.platform == 'macos'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -194,7 +195,7 @@ jobs:
           name: ${{ matrix.asset }}
           path: ./${{ matrix.asset }}
 
-      - name: Cleanup Keychain
+      - name: Clean up keychain
         if: always() && matrix.platform == 'macos'
         run: |
           security delete-keychain $RUNNER_TEMP/app-signing.keychain-db 2>/dev/null || true
@@ -220,7 +221,7 @@ jobs:
           chmod +x release/*
           ls -la release/
 
-      - name: Create Release
+      - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -263,8 +264,9 @@ jobs:
               --target ${{ github.sha }} \
               release/*
           else
-            # This version's entry in CHANGELOG.md, which knope wrote from the
-            # change files: from its heading up to the next release's.
+            # Take this version's entry from CHANGELOG.md, which knope wrote
+            # from the change files. It runs from its heading to the next
+            # release's heading.
             CHANGES=$(awk -v v="$VERSION" '$0 ~ "^## " v " " { on = 1; next } /^## / && on { exit } on' CHANGELOG.md)
             gh release create "$TAG" \
               --repo ${{ github.repository }} \

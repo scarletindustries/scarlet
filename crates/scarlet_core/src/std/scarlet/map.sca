@@ -1,7 +1,7 @@
 import scarlet/array
 
 // An immutable map. `set` and `delete` return a new map and leave the old one
-// as it was; the two share structure, so neither is a copy.
+// as it was. The two share structure, so neither is a copy.
 pub type Map(k, v)
 
 @vm(map__new)
@@ -19,11 +19,12 @@ pub fn get(m Map(k, v), key k) Option(v)
 @vm(map__has)
 pub fn has(m Map(k, v), key k) Bool
 
-// In the map's own order: two equal maps list their keys the same way.
+// Lists the keys in the map's own order, so two equal maps list their keys the
+// same way.
 @vm(map__keys)
 pub fn keys(m Map(k, v)) Array(k)
 
-// In the same order as `keys`.
+// Lists the values in the same order as `keys`.
 @vm(map__values)
 pub fn values(m Map(k, v)) Array(v)
 
@@ -34,7 +35,7 @@ pub fn size(m Map(k, v)) Int
 @vm(map__to_list)
 pub fn to_list(m Map(k, v)) Array((k, v))
 
-// On a repeated key, the later entry wins.
+// Builds a map from pairs. On a repeated key, the later entry wins.
 pub fn from_list(entries Array((k, v))) Map(k, v) {
 	array::fold(entries, new(), fn(acc, entry) match entry {
 		(key, value) -> set(acc, key, value)
@@ -49,7 +50,7 @@ pub fn fold(m Map(k, v), init r, f fn(r, k, v) r) r {
 	})
 }
 
-// Every entry of `a` and `b`. On a shared key, `b`'s value wins.
+// Returns every entry of `a` and `b`. On a shared key, `b`'s value wins.
 pub fn merge(a Map(k, v), b Map(k, v)) Map(k, v) {
 	fold(b, a, fn(acc, key, value) set(acc, key, value))
 }

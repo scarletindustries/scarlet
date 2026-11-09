@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Load-drive examples/bench_service.sca and print requests/sec + p99 per endpoint.
+# Puts load on examples/bench_service.sca and prints requests per second and p99
+# latency for each endpoint.
 #
 #   scripts/bench_service.sh ./target/release/scarlet [duration] [connections]
 #
-# The scarlet binary is $1 so two builds can be compared without rebuilding.
-# The server is started here and killed on every exit path; nothing is left
-# behind. Run this OUTSIDE any sandbox — binding a port needs it off.
+# The scarlet binary is $1, so you can compare two builds without rebuilding.
+# This starts the server and kills it on every exit path, so nothing is left
+# behind. Run this OUTSIDE any sandbox, because binding a port needs it off.
 set -euo pipefail
 
 BIN=${1:?usage: bench_service.sh <path-to-scarlet-binary> [duration] [connections]}
@@ -34,7 +35,7 @@ trap cleanup EXIT INT TERM
 pkill -f 'bench_service\.sca' 2>/dev/null || true
 sleep 0.3
 
-# A free port, from the kernel.
+# Ask the kernel for a free port.
 PORT=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
 BASE=http://127.0.0.1:$PORT
 
@@ -48,12 +49,12 @@ for _ in $(seq 1 100); do
 done
 curl -fsS -o /dev/null "$BASE/" || { echo "server never accepted on $PORT" >&2; exit 1; }
 
-# A real, signed cookie — /me must exercise the success path, not the 401 path.
+# Get a real, signed cookie, so /me runs the success path and not the 401 path.
 COOKIE=$(curl -fsS -i -X POST -d 'user=user7&password=pw-7' "$BASE/login" \
   | sed -n 's/^Set-Cookie: \([^;]*\).*/\1/p' | tr -d '\r')
 [[ -n $COOKIE ]] || { echo "no session cookie from /login" >&2; exit 1; }
 
-# Correctness gate: a benchmark of a broken server measures nothing.
+# Check the server works first, because a benchmark of a broken server measures nothing.
 [[ $(curl -fsS -o /dev/null -w '%{http_code}' -H "Cookie: $COOKIE" "$BASE/me") == 200 ]] \
   || { echo "/me rejected a valid cookie" >&2; exit 1; }
 [[ $(curl -sS -o /dev/null -w '%{http_code}' "$BASE/me") == 401 ]] \

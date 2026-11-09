@@ -1,10 +1,12 @@
 # Typed IR: make `lower` total by construction
 
-**Goal**: correctness above all. Slower compile times are an acceptable price; they can be recovered later. The interpreter's speed is *not* negotiable.
+This is the plan the typed IR was built from, and it's done. The checker builds a typed tree, `scarlet_elaborate` turns it into a `TypedProgram`, and `lower(p: &TypedProgram) -> CoreProgram` takes no `&mut` and can't fail. `LowerError` and `DiagnosticCode::InternalError` are gone. The parts about bytecode (`emit`, `link`, jump operands and `peephole.rs`) went with the old VM, because the new VM reads Core IR itself (`docs/vm-design.md`). We've kept the plan as a record of why the design looks the way it does.
+
+**Goal**: correctness above all. Slower compiles are a fair price, and we can win the time back later. The interpreter must not get slower.
 
 ## The thesis
 
-Every compiler bug found on 2026-07-09 has one shape: **`lower` was handed mutable access to things it should only have been allowed to read, and re-derived facts the typechecker had already established.**
+Every compiler bug found on 2026-07-09 had the same shape: **`lower` could change things it should only have read, and it worked out again facts the typechecker had already found.**
 
 | bug | what `lower` re-derived or mutated | symptom |
 |---|---|---|
@@ -13,18 +15,18 @@ Every compiler bug found on 2026-07-09 has one shape: **`lower` was handed mutab
 | `PushGlobal 219` | `operand: i32` means slot *or* addr *or* const-id *or* func-idx | read an unrelated temp |
 | `internal_error` | exists only because the three above can fail | a runtime apology for an unencoded invariant |
 
-The typechecker already knows every one of these facts — it cannot typecheck `u.id` without resolving the field index, nor `Some(x)` without resolving the variant. It computes them, then throws them away, and `lower` guesses again.
+The typechecker already knows every one of these facts. It can't typecheck `u.id` without finding the field's index, or `Some(x)` without finding the variant. It works them out, throws them away, and then `lower` guesses again.
 
-**The interim fix (`8e5d5c7`) proved the point by reintroducing the class.** It threaded types via `HashMap<Span, Ty>`. `Span` is `{start_line, start_column, end_line, end_column}` — no file, no offset, no identity. Two confirmed consequences:
+**The stopgap fix (`8e5d5c7`) proved the point by bringing the same kind of bug back.** It passed types along in a `HashMap<Span, Ty>`. A `Span` is `{start_line, start_column, end_line, end_column}`, with no file, no offset and no identity. That had two confirmed effects:
 
-1. The REPL scanned each entry separately and replayed the parsed nodes, so every retained entry's spans restarted at line 1. `const a = 'x' + 'y'` then `const b = 100 + 200` collide on `(1,11)-(1,20)`; last write wins; `specialize_binop` picks `AddInt`; the VM runs an integer add over two heap strings. Release printed `0`, debug tripped `as_int_typed`'s `debug_assert`. Fixed in `d9a1add` by replaying *source* — which removes the only current producer of duplicate spans, not the possibility.
-2. The justification comment claims "a body's walk writes every span in it immediately before that body is lowered." That is true for `fn` bodies and **false for the module toplevel**: `analyse_module` walks the entire toplevel, then `lower_body("__main__")` reads every span back. All writes precede all reads. Nothing produces duplicate toplevel spans today; an `--eval` prelude, an LSP scratch buffer, or a harness that concatenates programs would, silently.
+1. The REPL scanned each entry separately and replayed the parsed nodes, so every retained entry's spans restarted at line 1. `const a = 'x' + 'y'` then `const b = 100 + 200` collide on `(1,11)-(1,20)`; last write wins; `specialize_binop` picks `AddInt`; the VM runs an integer add over two heap strings. Release printed `0`, debug tripped `as_int_typed`'s `debug_assert`. `d9a1add` fixed it by replaying the *source* instead. That removed the only thing making duplicate spans at the time, but not the chance of them.
+2. The justification comment claims "a body's walk writes every span in it immediately before that body is lowered." That's true for `fn` bodies and **false for the module toplevel**. `analyse_module` walks the whole toplevel, and then `lower_body("__main__")` reads every span back, so all the writes come before all the reads. Nothing made duplicate toplevel spans then, but an `--eval` prelude, an LSP scratch buffer or a harness that joins programs together would have, silently.
 
-A side table keyed on something that is not an identity is the bug. `TypedExpr` carrying `ty` as a **field** deletes the table and the key with it.
+The bug is a side table keyed on something that isn't an identity. If `TypedExpr` carries `ty` as a **field**, the table and its key both go.
 
-**Fix: the typechecker emits a typed IR. `lower` consumes it and cannot fail.**
+**The fix is for the typechecker to emit a typed IR. `lower` reads it and can't fail.**
 
-This is Rust's `HIR → typeck → THIR → MIR`. Our `ast::Expression` is HIR pretending to be THIR.
+This is how Rust does it: `HIR → typeck → THIR → MIR`. Our `ast::Expression` was HIR pretending to be THIR.
 
 ## Target shape
 
@@ -37,26 +39,26 @@ parse → ast::Expression
       → link   (resolves Labels against the real insertion point)
 ```
 
-### `TypedExpr` — every fact resolved, none re-derivable
+### `TypedExpr` resolves every fact, so nothing works one out again
 
-- `ty: Ty` is a **field on every node**, already `find()`-resolved. Not a lookup.
-- `Field { recv, idx: FieldIdx, ty }` — the elaborator computed `idx`; there is no `ctor_field` call in `lower`.
-- `Ctor { variant: VariantIdx, args }` — labels already reordered into declared order.
-- `Call { callee: Callee, args }` where `Callee = Known(FuncIdx) | SelfRec | Local(LocalId) | Builtin(Op)` — name resolution is done.
-- `Match { scrut, arms }` — variant indices resolved, exhaustiveness already proven.
-- Names resolved to a `VarLoad`; no `resolve_name` in `lower`.
+- `ty: Ty` is a **field on every node**, already resolved with `find()`, not something to look up.
+- `Field { recv, idx: FieldIdx, ty }`: the elaborator worked out `idx`, so `lower` has no `ctor_field` call.
+- `Ctor { variant: VariantIdx, args }`: the labelled arguments are already in declared order.
+- `Call { callee: Callee, args }`, where `Callee = Known(FuncIdx) | SelfRec | Local(LocalId) | Builtin(Op)`: names are already resolved.
+- `Match { scrut, arms }`: variant indices are resolved and exhaustiveness is already proven.
+- Each name is resolved to a `VarLoad`, so `lower` has no `resolve_name`.
 
 ### Eta-wrappers stop being a side effect
 
-Today `LowerCtx::eta_wrapper` synthesises a function into `program.code` **during** lowering. That is the miscompile.
+At the time, `LowerCtx::eta_wrapper` wrote a new function into `program.code` **during** lowering. That's what miscompiled.
 
-Instead: **the elaborator emits them as ordinary `TypedFn`s.** A constructor or builtin used as a first-class value elaborates to a reference to a synthesized `TypedFn` that already exists in `TypedProgram.fns`. `lower` sees a plain function reference. Nothing appends to anything mid-pass.
+Instead, **the elaborator emits them as ordinary `TypedFn`s.** A constructor or built-in used as a value elaborates to a reference to a generated `TypedFn` that's already in `TypedProgram.fns`. `lower` sees a plain function reference. Nothing appends to anything mid-pass.
 
-### Resolved types are a different arena, in which `Var` is unrepresentable
+### Resolved types live in a separate arena where `Var` can't exist
 
-This is the load-bearing mechanism; the rest follows from it.
+Everything else follows from this.
 
-Today `pub type Ty = u32` — a bare index into `InferEngine.nodes`, shared by every phase. That is why `fresh_var()`'s output is indistinguishable from a real type: same type, same arena, same `find()`.
+At the time, `pub type Ty = u32` was a bare index into `InferEngine.nodes`, shared by every phase. That's why you couldn't tell `fresh_var()`'s output from a real type: they had the same type, the same arena and the same `find()`.
 
 ```rust
 // inference world: mutable, may hold unsolved variables
@@ -68,17 +70,17 @@ pub struct RTy(u32);               // indexes ResolvedPool
 enum ResolvedNode { Bound(u32), Con{..}, Fun{..}, Tuple{..} }   // no Var arm
 ```
 
-One bridge, and it is the only one:
+There's one bridge between the two, and only one:
 
 ```rust
 fn zonk(eng: &InferEngine, t: Ty) -> Result<RTy, UnsolvedVar>
 ```
 
-The elaborator calls `zonk` while building `TypedExpr`. Everything downstream traffics in `RTy`. `fresh_var()` still exists and still returns a `Ty` — **and nothing downstream will accept one.** It is not discouraged or linted; there is no function with that signature. That is the whole point.
+The elaborator calls `zonk` while it builds `TypedExpr`, and everything after it works in `RTy`. `fresh_var()` still exists and still returns a `Ty`, **but nothing downstream accepts one.** That isn't a lint or a convention. No function there takes a `Ty` at all, and that's the point. (Today the bridge is `zonk_or_opaque` in `crates/scarlet_elaborate/src/zonk.rs`.)
 
-Keep `Bound` (a rigid quantified variable) and drop `Var` (an unsolved inference variable). The distinction is currently invisible and is exactly what let 22 bugs hide: `fn id(x) { x }` is *honestly* polymorphic and must dispatch dynamically, while a surviving `Var` is *always* a compiler bug. Today `lower` cannot tell them apart.
+Keep `Bound` (a rigid quantified variable) and drop `Var` (an unsolved inference variable). Nothing showed the difference between them, and that's what let 22 bugs hide. `fn id(x) { x }` is *genuinely* polymorphic and must dispatch at run time, but a `Var` that survives inference is *always* a compiler bug. The old `lower` couldn't tell them apart.
 
-Consumers then become total, and their answers become decisions rather than accidents:
+Code that reads types then handles every case, and its answers are decisions rather than accidents:
 
 ```rust
 fn is_heap(t: RTy) -> bool {
@@ -90,9 +92,9 @@ fn is_heap(t: RTy) -> bool {
 }
 ```
 
-Precedent in this codebase: `types: phantom-tag ArenaSlice by pool so cross-pool index is a type error` — `ArenaSlice<P>` already carries which pool it indexes. `Ty` is the index that never got the treatment, and it is the one that mattered.
+This codebase has done it before. `types: phantom-tag ArenaSlice by pool so cross-pool index is a type error` made `ArenaSlice<P>` carry which pool it indexes. `Ty` was the index that never got the same treatment, and it was the one that mattered.
 
-### `lower`'s signature is the enforcement
+### `lower`'s signature enforces it
 
 ```rust
 pub fn lower(p: &TypedProgram) -> CoreProgram   // no &mut, no InferEngine, no Program
@@ -102,50 +104,50 @@ pub fn lower(p: &TypedProgram) -> CoreProgram   // no &mut, no InferEngine, no P
 - No `&mut Program` ⇒ appending mid-pass does not compile. The miscompile cannot come back.
 - Input is `TypedProgram` (carrying `RTy`, resolved field/variant indices, resolved callees) ⇒ there is no type to fail to find and no index to fail to resolve. **`LowerError` becomes uninhabited; delete it and `internal_error` and `DiagnosticCode::InternalError` with it.**
 
-If any of these three still needs an escape hatch, that is a finding — report it, do not widen the signature.
+If any of these three still needs a way out, that's a finding. Report it, and don't widen the signature.
 
-### Addresses stop being spellable
+### Addresses can no longer be written
 
-`emit` produces `Target::Label(LabelId)` and resolves every label against the function's own code vector. There is no `base` parameter.
+`emit` produces `Target::Label(LabelId)` and resolves every label against the function's own code vector. It has no `base` parameter.
 
-**And then no absolute address is ever constructed, because jump operands become function-relative.** The VM already round-trips them for nothing:
+**Then no absolute address is ever built, because jump operands become relative to the function.** The VM already converted them back and forth for no reason:
 
 ```rust
 let addr = code_start + ip;          // exec.rs:388, 482 — every fetch
 ip = instr.operand - code_start;     // exec.rs:148, 256, 263, 604 — every jump
 ```
 
-It stores an absolute operand, subtracts `code_start` to recover a function-relative `ip`, then re-adds `code_start` on the next fetch. The absolute form exists only because `emit` was handed a `base` and folded it in — which *is* the miscompile: `base` was captured before `lower` appended an eta-wrapper.
+It stores an absolute operand, subtracts `code_start` to get back an `ip` relative to the function, then adds `code_start` again on the next fetch. The absolute form exists only because `emit` was given a `base` and added it in. That *is* the miscompile, because `base` was read before `lower` appended an eta wrapper.
 
-So: `ip = instr.operand;`. Four subtractions leave the interpreter's hot path (report the bench; do not treat it as the motivation). A function's code becomes position-independent, so appending it anywhere is correct by construction, and `link` reduces to "append `out.code`, record `Function.code_start`" — no patching pass at all. `fn_body_start` is deleted.
+So it becomes `ip = instr.operand;`. Four subtractions leave the interpreter's hot path (report the bench, but don't treat it as the reason). A function's code no longer depends on where it sits, so appending it anywhere is correct by construction. `link` then only has to append `out.code` and record `Function.code_start`, with no patching pass, and `fn_body_start` is deleted.
 
-This is strictly stronger than resolving addresses in one careful place: an absolute address is never *spelled*.
+This is stronger than resolving addresses carefully in one place, because an absolute address is never *written* at all.
 
-Safe because `CoreExpr`'s control flow is structured (`If`/`Match`/`Tail`), so every jump `emit` produces is intra-function by construction. Calls take a `FuncIdx`, not an address.
+It's safe because `CoreExpr`'s control flow is structured (`If`, `Match`, `Tail`), so every jump `emit` produces stays inside its function. Calls take a `FuncIdx`, not an address.
 
 Two things to verify rather than assume:
-1. `Function.code_start` must still be recorded — it is how the VM enters a function. It is written by the appender, which knows the insertion point.
-2. `crates/scarlet_core/src/bytecode/peephole.rs` is the other consumer of jump operands. Its module comment (line 13) documents the round-trip verbatim, and line 28 does `let t = instr.operand as usize;` to index the code slice. It already works within one function's code, so relative targets simplify it. Update that comment.
+1. `Function.code_start` must still be recorded, because it's how the VM enters a function. The appender writes it, since it knows where the code went.
+2. `crates/scarlet_core/src/bytecode/peephole.rs` is the other consumer of jump operands. Its module comment (line 13) documents the round-trip verbatim, and line 28 does `let t = instr.operand as usize;` to index the code slice. It already works inside one function's code, so relative targets make it simpler. Update that comment.
 
-If some jump genuinely crosses a function boundary, that is a real finding: report it and fall back to `link`-resolves-absolute, naming the jump that forced it.
+If some jump really does cross a function boundary, that's a real finding. Report it and fall back to `link` resolving absolute addresses, and name the jump that forced it.
 
-### Operand spaces become distinct types
+### Each kind of operand gets its own type
 
-`Instruction.operand: i32` currently means jump-target OR local-slot OR const-id OR func-idx OR arity, chosen by opcode. Introduce `CodeAddr`, `LocalSlot`, `ConstId`, `FuncIdx`, `Arity`. Consider `typed-index-collections`' `TiVec<CodeAddr, Instruction>` so indexing code with a `LocalSlot` does not compile. Scarlet already did this once, for `TypeId`.
+`Instruction.operand: i32` meant a jump target, a local slot, a constant id, a function index or an arity, depending on the opcode. Introduce `CodeAddr`, `LocalSlot`, `ConstId`, `FuncIdx`, `Arity`. Consider `typed-index-collections`' `TiVec<CodeAddr, Instruction>` so indexing code with a `LocalSlot` does not compile. Scarlet already did this once, for `TypeId`.
 
-The wire format stays a packed `i32`; the newtypes exist above the encoding boundary.
+The wire format stays a packed `i32`. The new types exist only above the encoding.
 
-## Phasing — one destination, a green tree at every step
+## Phases that keep the tree green at every step
 
-Size is not a constraint; **an unreviewable diff is.** The last two times this compiler was rewritten in a single pass it shipped a miscompile (stale `base`) and 22 invented types. Both were found by adversarial review *after* the fact, not by the swarm that wrote them. So the phases below are not a smaller plan — they are the same plan, ordered so the build is green and the suite passes after each one, and so each can be reviewed on its own.
+Size doesn't matter, but **a diff nobody can review does.** The last two times this compiler was rewritten in one go, it shipped a miscompile (the stale `base`) and 22 invented types. Adversarial review found both *afterwards*, and the agents that wrote them didn't. So the phases below aren't a smaller plan. They're the same plan, ordered so the build is green and the tests pass after each one, and so each can be reviewed on its own.
 
-Each phase is a separate commit. Do not begin the next until the previous is green.
+Each phase is its own commit. Don't start the next until the last one is green.
 
-**Every phase must be part of the destination, never a repair of what the destination deletes.** Test each one by asking: *does this code still exist after T5?* If the answer is no, do not write it.
+**Every phase must be part of where we end up, never a repair of something the end state deletes.** Test each one by asking *does this code still exist after T5?* If it doesn't, don't write it.
 
-An earlier draft of this spec failed that test. It proposed, as T1, giving `ast::Expression` a `NodeId` and re-keying the `HashMap<Span, Ty>` side table on it — to fix the span collisions that produced the REPL wrong-answer bug. But `TypedExpr` carries `ty` as a **field**: T5 deletes the table, so there is no key to give an identity to. T1 was work whose only purpose was to make a doomed data structure correct. It has been removed.
+An earlier draft of this spec failed that test. Its T1 gave `ast::Expression` a `NodeId` and keyed the `HashMap<Span, Ty>` side table on that instead, to fix the span collisions behind the REPL's wrong answer. But `TypedExpr` carries `ty` as a **field**, so T5 deletes the table and there's no key left to fix. T1's only purpose was to make a doomed data structure correct, so we removed it.
 
-The surviving phases each *are* part of T5's end state — T2 and T3 are literally pieces of T5's signature, T4 is orthogonal and permanent.
+Each phase that's left *is* part of T5's end state. T2 and T3 are pieces of T5's signature, and T4 stands on its own and stays.
 
 | # | phase | eliminates | proof it worked |
 |---|---|---|---|
@@ -154,23 +156,23 @@ The surviving phases each *are* part of T5's end state — T2 and T3 are literal
 | **T4** | Jump operands become function-relative; `emit` resolves its own labels; `fn_body_start` is deleted. | stale `base`, and absolute addresses entirely | no absolute address is constructed anywhere |
 | **T5** | `RTy` + `ResolvedNode` (no `Var` arm) + `zonk`. `TypedExpr` carries `ty: RTy` and resolved field/variant/callee indices. `lower(p: &TypedProgram) -> CoreProgram`, total. | `LowerError`, `internal_error`, `DiagnosticCode::InternalError`, and the `Span`-keyed type table | those identifiers do not exist |
 
-T2–T4 are each independently valuable and each kill a class outright. T5 is what they converge on: after T4 the only thing it buys is **totality**, and by then the signature changes that make it possible have already landed.
+T2 to T4 are each worth having alone, and each removes a kind of bug for good. T5 is where they meet. After T4, all it adds is that `lower` can't fail, and by then the signature changes that make that possible have already landed.
 
-Ordering is a hedge against an unreviewable diff, nothing more. If a phase can be folded into T5 *without* writing code that T5 would delete, fold it.
+The order is only there to keep each diff reviewable. If a phase can be folded into T5 *without* writing code that T5 would delete, fold it.
 
-If at T5 it turns out `lower` still needs an escape hatch, that is the most interesting finding in the whole exercise — report it rather than widening the signature.
+If at T5 it turns out `lower` still needs a way out, that's the most interesting finding of the whole job. Report it rather than widening the signature.
 
-## Constraints — outcomes, not tokens
+## Constraints on the outcome
 
-- **Correctness over compile speed.** A slower `Scarlet build` is acceptable and expected. Say how much slower.
-- **The interpreter must not regress.** `examples/bench_typed.sca`, `examples/bench_map.sca`, and an amplified `fib(36)`+`count(8e7)` must hold. This work is compile-time only, so a runtime change is a bug — except where recovering lost typed opcodes makes it *faster*, which is a win worth reporting.
-- Recovering the typed opcodes that `fresh_var()` was suppressing may change the emitted instruction mix. That is the point. Report before/after opcode histograms for an inferred-type function.
-- **Every guard must be a type, an exhaustive match, or a behavioural test.** Never a test that greps source text. Never a hardcoded list of symbol names. A previous attempt produced `const COLD_INLINE_NEVER_HANDLERS: &[&str]` plus a `.rs`-file scanner; it was reverted.
-- Do not weaken, skip, or delete a test. Do not add a cargo feature. Do not bypass git hooks.
+- **Correctness over compile speed.** A slower build is fine and expected. Say how much slower.
+- **The interpreter must not regress.** `examples/bench_typed.sca`, `examples/bench_map.sca`, and an amplified `fib(36)`+`count(8e7)` must hold. This work only touches the compiler, so a change at run time is a bug, unless getting back lost typed opcodes makes it *faster*. That's a win worth reporting.
+- Recovering the typed opcodes that `fresh_var()` was suppressing may change the emitted instruction mix. That's the point. Report the opcode counts before and after for a function whose types were inferred.
+- **Every guard must be a type, an exhaustive match or a test of behaviour.** Never a test that greps source text, and never a hardcoded list of symbol names. An earlier attempt added `const COLD_INLINE_NEVER_HANDLERS: &[&str]` and a scanner over `.rs` files, and it was reverted.
+- Don't weaken, skip or delete a test. Don't add a cargo feature. Don't bypass git hooks.
 
 ## Regressions this must keep fixed
 
-Both are live regression tests today; they must still pass, and they must pass *because the shape makes them impossible*, not because a check was added.
+Both are regression tests. They must still pass, and they must pass *because the shape makes the bug impossible*, not because someone added a check.
 
 ```scarlet
 // eta-wrapper jump miscompile — was a VM index-out-of-bounds
@@ -193,20 +195,20 @@ println(f())              // 7
 ## Acceptance
 
 1. `lower`'s signature takes no `&mut` and returns no `Result`. `LowerError` and `DiagnosticCode::InternalError` are deleted.
-2. `grep -c 'fresh_var()' crates/scarlet_lower/src/lower.rs` → 0, because it does not have an engine. (This is an *outcome* of the signature, not a rule to satisfy.)
-3. No `emit` path produces an absolute address; `link` is the only place addresses are written.
-4. All tests green (currently 727+). Both regressions above green.
+2. `grep -c 'fresh_var()' crates/scarlet_lower/src/lower.rs` gives 0, because `lower` has no engine. That follows from the signature. It isn't a rule to satisfy.
+3. No `emit` path produces an absolute address, and `link` is the only place that writes addresses.
+4. Every test passes, including both regressions above.
 5. `cargo clippy --all-targets` → 0 errors, 0 warnings. `cargo fmt --check` clean.
-6. Interpreter benches hold or improve, measured interleaved, min-of-N `user` time, N≥7, both binaries built before benching, never benching while compiling (the box's load swings 3–170; absolute thresholds are meaningless).
+6. The interpreter's benchmarks hold or improve. Measure the two binaries in turn, taking the lowest `user` time of at least 7 runs. Build both before benching, and never bench while something is compiling. The machine's load swings a lot, so a fixed time limit means nothing.
 
 ## Sequencing
 
-The typed IR is a prerequisite for the effects/comptime work in `docs/effects-comptime-spec.md`, whose Phase A0/A1/A2 assume a compiler that does not mutate itself mid-pass. Land this first.
+The typed IR had to come before the planned work on effects and compile-time evaluation, which assumed a compiler that doesn't change its own state halfway through a pass. That spec, `docs/effects-comptime-spec.md`, is no longer in the repo.
 
 ## Risks, ranked
 
-1. **The elaborator is a rewrite of the typecheck walk.** `compile_expr` currently typechecks *and* drives name resolution *and* records `closure_info`. Splitting "check" from "emit TypedExpr" is the bulk of the work.
-2. **`IncrementalSession` caches `ModuleInterface` + `ModuleReferences` keyed on watermarks.** A new IR between typecheck and lower must not break incremental invalidation. Check `bytecode/session.rs`.
-3. **Spans.** `closure_info` is keyed by `Span`. If `TypedExpr` nodes carry their own identity, that table can die; verify no other consumer depends on span-keying.
-4. **Memory.** A second full IR for a large program doubles peak AST memory. Acceptable; measure it.
-5. **The stdlib is precompiled at build time** (`precompile_stdlib()` from `crates/scarlet/build.rs`). The new pipeline must work there too, and `build.rs`'s only dependency is `scarlet_core`.
+1. **The elaborator rewrites the typecheck walk.** `compile_expr` typechecked, drove name resolution and recorded `closure_info`, all at once. Splitting checking from building `TypedExpr` is most of the work.
+2. **`IncrementalSession` caches `ModuleInterface` and `ModuleReferences`, keyed on watermarks.** A new IR between typechecking and `lower` mustn't break how the cache is invalidated. Check `bytecode/session.rs`.
+3. **Spans.** `closure_info` is keyed by `Span`. If `TypedExpr` nodes carry their own identity, that table can go. Check that nothing else depends on keying by span.
+4. **Memory.** A second full IR for a large program doubles the peak memory the AST takes. That's fine, but measure it.
+5. **The stdlib was precompiled at build time** (`precompile_stdlib()` in `crates/scarlet/build.rs`). The new pipeline had to work there too, and `build.rs` depended only on `scarlet_core`.

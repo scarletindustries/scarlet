@@ -2,13 +2,13 @@
 //! `check_as`) must produce the same diagnostics as a batch `check` of the
 //! same file: none, for a clean stdlib module.
 //!
-//! Regression: `truncate_to` clears `vars` and restarts var numbering, but
-//! schemes survive it holding `QuantVar::origin_id` var ids. Without the
-//! epoch guard in `instantiate`, a prelude ctor scheme's origin id aliased
-//! the first post-rewind module's freshly-minted rigid vars, so `Ok`/`Err`
-//! instantiated *rigid* inside any generic fn and every ctor pattern
-//! mis-unified — phantom `Type mismatch` diagnostics at the imported
-//! module's spans, published for the open file.
+//! This is a regression test. `truncate_to` clears `vars` and restarts var
+//! numbering, but schemes survive it holding `QuantVar::origin_id` var ids.
+//! Without the epoch guard in `instantiate`, a prelude constructor scheme's
+//! origin id aliased the freshly minted rigid vars of the first module checked
+//! after the rewind. So `Ok`/`Err` instantiated *rigid* inside any generic fn,
+//! and every constructor pattern unified wrongly. The open file then got
+//! phantom `Type mismatch` diagnostics at the imported module's spans.
 
 use scarlet_core::bytecode::IncrementalSession;
 use scarlet_core::parser;

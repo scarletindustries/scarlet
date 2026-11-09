@@ -33,7 +33,7 @@ const COMMANDS: &[Spec] = &[
         name: "type",
         aliases: &["t"],
         arg: Arg::Text("expr"),
-        help: "the inferred type of an expression",
+        help: "show the inferred type of an expression",
     },
     Spec {
         name: "dis",
@@ -73,9 +73,8 @@ const COMMANDS: &[Spec] = &[
     },
 ];
 
-/// A parsed command line. Unknown names are represented rather than rejected
-/// here, so the REPL reports them itself instead of trying to run `:hlep` as
-/// Scarlet source.
+/// A parsed command line. We keep unknown names here instead of rejecting them, so the REPL
+/// reports them itself instead of trying to run `:hlep` as Scarlet source.
 pub enum Command<'a> {
     Help,
     Quit,
@@ -88,9 +87,9 @@ pub enum Command<'a> {
     Unknown(&'a str),
 }
 
-/// What the caller does next. `Clear` is its own outcome because clearing the
-/// screen belongs to the line editor, which owns the terminal: printing the
-/// escape from here would race the editor's own repaint.
+/// What the caller does next. `Clear` is its own outcome because the line editor owns the
+/// terminal, so it has to clear the screen. Printing the escape from here would race the editor's
+/// own repaint.
 #[derive(PartialEq, Eq)]
 pub enum Flow {
     Continue,
@@ -100,8 +99,8 @@ pub enum Flow {
 
 /// The command `line` names, or `None` if the line is Scarlet source.
 ///
-/// `:` is the spelling, `/` is accepted too: no Scarlet entry can begin with
-/// either, and everyone arrives from some other tool's habit.
+/// `:` is the usual spelling and `/` works too. No Scarlet entry can begin with either, and
+/// people arrive with habits from other tools.
 pub fn parse(line: &str) -> Option<Command<'_>> {
     let rest = body(line.trim())?;
     let (name, arg) = match rest.split_once(char::is_whitespace) {
@@ -126,7 +125,7 @@ pub fn execute(cmd: Command<'_>, session: &mut Session) -> Flow {
         Command::Help => print_help(session.palette()),
         Command::Quit => return Flow::Quit,
         Command::Clear => return Flow::Clear,
-        // Silence would be indistinguishable from the command not running.
+        // Say something, because silence would look the same as the command not running.
         Command::Reset => {
             session.reset();
             println!("session reset");
@@ -158,7 +157,7 @@ pub fn execute(cmd: Command<'_>, session: &mut Session) -> Flow {
     Flow::Continue
 }
 
-/// The argument, or a usage line naming what was missing.
+/// Returns the argument, or prints a usage line naming what's missing.
 fn require_arg<'a>(command: &str, arg: &'a str) -> Option<&'a str> {
     if !arg.is_empty() {
         return Some(arg);
@@ -171,9 +170,8 @@ fn require_arg<'a>(command: &str, arg: &'a str) -> Option<&'a str> {
     None
 }
 
-/// `line` past its command marker, or `None` if it is not a command line.
-/// The one place the markers are spelled, so parsing and completion cannot
-/// disagree about what counts as a command.
+/// `line` after its command marker, or `None` if it isn't a command line. This is the only place
+/// the markers are spelled, so parsing and completion can't disagree about what's a command.
 pub fn body(line: &str) -> Option<&str> {
     line.strip_prefix(':').or_else(|| line.strip_prefix('/'))
 }
@@ -184,14 +182,13 @@ fn spec(name: &str) -> Option<&'static Spec> {
         .find(|c| c.name == name || c.aliases.contains(&name))
 }
 
-/// Every command name, for Tab completion. Aliases are omitted: completing to
-/// the full name teaches the name that `:help` documents.
+/// Every command name, for Tab completion. We leave out aliases, because completing to the full
+/// name teaches the name that `:help` documents.
 pub fn names() -> Vec<&'static str> {
     COMMANDS.iter().map(|c| c.name).collect()
 }
 
-/// Whether `name`'s argument is a path, and so completes against the
-/// filesystem.
+/// Whether `name` takes a path, which completes against the filesystem.
 pub fn takes_path(name: &str) -> bool {
     spec(name).is_some_and(|s| matches!(s.arg, Arg::Path(_)))
 }
@@ -266,8 +263,7 @@ mod tests {
         assert!(matches!(parse(":?"), Some(Command::Help)));
     }
 
-    /// `/` is the habit half the world arrives with, and no Scarlet entry can
-    /// start with one.
+    /// Lots of people arrive with the `/` habit, and no Scarlet entry can start with one.
     #[test]
     fn a_slash_spells_a_command_too() {
         assert!(matches!(parse("/quit"), Some(Command::Quit)));

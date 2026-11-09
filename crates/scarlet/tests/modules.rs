@@ -22,10 +22,11 @@ fn relative_qualified() {
 #[test]
 fn labelled_args_on_a_qualified_call_take_declared_order() {
     // A qualified callee resolves through `resolve_qualified`, so its parameter
-    // labels come off the imported module's scheme rather than the local env —
-    // a separate path from the bare-name one covered in `type_semantics`. Two
-    // same-typed parameters and an order-revealing body, so source order and
-    // declared order give different answers while both type-check.
+    // labels come off the imported module's scheme rather than the local env.
+    // That's a separate path from the bare-name one `type_semantics` covers.
+    // The two parameters have the same type and the body shows their order, so
+    // source order and declared order give different answers while both
+    // type-check.
     let proj = Project::new("qual_labels");
     proj.write("math.sca", "pub fn diff(a Int, b Int) Int { a - b }\n");
     proj.write(
@@ -212,8 +213,8 @@ fn query_api_alias_imports_resolve() {
     );
 }
 
-// An imported module's top level may contain only declarations, and says so
-// in the module's own words rather than the entry file's `pub fn main()` hint.
+// An imported module's top level may contain only declarations, and the error
+// says so in the module's own words rather than the entry file's `pub fn main()` hint.
 // The entry is a well-formed program; only the import is rejected.
 #[test]
 fn module_top_level_executable_code_is_error() {
@@ -231,7 +232,7 @@ fn module_top_level_executable_code_is_error() {
     );
 }
 
-// Rejected by the qualified-lookup path.
+// The qualified-lookup path rejects this.
 #[test]
 fn qualified_import_unknown_member_is_error() {
     let proj = Project::new("mod_qual_unknown");
@@ -266,7 +267,7 @@ fn a_value_named_like_a_module_does_not_hide_it() {
     run_project_outputs(&proj, "run", "main.sca", "7\n9\n7\n");
 }
 
-/// `.` on a module's name is not a member access: say to use `::`.
+/// `.` on a module's name isn't a member access, so the error says to use `::`.
 #[test]
 fn a_dot_on_a_module_points_at_colons() {
     let proj = Project::new("qual_dot");
@@ -283,7 +284,7 @@ fn a_dot_on_a_module_points_at_colons() {
     );
 }
 
-/// `name::member` where nothing imports `name`.
+/// Tests `name::member` where nothing imports `name`.
 #[test]
 fn colons_on_an_unknown_module_name_it() {
     let proj = Project::new("qual_unknown_module");
@@ -293,7 +294,7 @@ fn colons_on_an_unknown_module_name_it() {
 
 // A module is the file it resolved to, never the import as written. Keying the
 // module cache on the spelling made the first `b.sca` loaded win program-wide,
-// and nothing failed loudly — the wrong module was simply used.
+// and nothing failed loudly. The program just used the wrong module.
 
 /// `sub/mid.sca` imports `./b`, which must be `sub/b.sca`, not the root's.
 #[test]
@@ -338,7 +339,7 @@ fn a_module_in_another_directory_does_not_satisfy_a_relative_import() {
     let proj = Project::new("mod_identity_missing");
     std::fs::create_dir_all(proj.dir.join("sub")).unwrap();
     proj.write("sub/b.sca", "pub fn who() String {\n\t'SUB'\n}\n");
-    // `./b` from the root: `sub/b.sca` must NOT satisfy it.
+    // `sub/b.sca` must NOT satisfy `./b` from the root.
     proj.write(
         "main.sca",
         "import ./b\n\npub fn main() {\n\tprintln(b::who())\n}\n",
@@ -372,8 +373,8 @@ fn same_named_modules_do_not_share_types() {
 }
 
 // `match e { io.NotFound(path) -> … }` reaches a constructor through its own
-// module, so a program need not import the name to match on it and two modules
-// exporting a `NotFound` cannot collide.
+// module, so a program doesn't need to import the name to match on it, and two
+// modules exporting a `NotFound` can't collide.
 
 const COLOR_SRC: &str = "pub type Color {\n\tRed\n\tGreen(shade Int)\n}\n";
 
@@ -431,7 +432,7 @@ fn a_qualified_constructor_destructures_irrefutably() {
     run_project_outputs(&proj, "run", "main.sca", "3\n7\n");
 }
 
-/// `Color`, plus a constructor function in the declaring module, so a
+/// `Color`, plus a function in the declaring module that builds one, so a
 /// scrutinee can cross the module boundary.
 const COLOR_MAKE_SRC: &str =
     "pub type Color {\n\tRed\n\tGreen(shade Int)\n}\n\npub fn make(n Int) Color {\n\tGreen(n)\n}\n";
@@ -455,7 +456,7 @@ fn a_qualified_arm_matches_on_the_test_ladder() {
 }
 
 /// A bare name after a qualified head stands for the variants nobody named.
-/// That shape once broke RESP3 pub/sub; now it is refused, naming them.
+/// That shape once broke RESP3 pub/sub. Now the checker refuses it and names them.
 #[test]
 fn a_bare_binding_after_a_qualified_head_is_refused() {
     let proj = Project::new("qual_ctor_binding_catchall");

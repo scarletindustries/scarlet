@@ -1,4 +1,4 @@
-//! The REPL, driven as a subprocess over stdin. The compiler keys expression
+//! These drive the REPL as a subprocess over stdin. The compiler keys expression
 //! types on `Span`, which carries no file identity, so the REPL must replay
 //! source text (spans stay unique) and not parsed entries (spans all restart
 //! at line 1 and collide).
@@ -8,13 +8,13 @@ mod common;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-/// Feed `entries` to `al repl` on stdin, one per line, and return stdout.
-/// Bounded so a wedged REPL fails the test instead of hanging the suite.
+/// Feeds `entries` to `al repl` on stdin, one per line, and returns stdout.
+/// It's bounded so a wedged REPL fails the test instead of hanging the suite.
 fn repl(entries: &str) -> String {
     session(entries).0
 }
 
-/// [`repl`], keeping stderr too: diagnostics and command errors go there.
+/// Works like [`repl`] but keeps stderr too, where diagnostics and command errors go.
 fn session(entries: &str) -> (String, String) {
     let bin = env!("CARGO_BIN_EXE_scarlet");
     let mut child = Command::new(bin)
@@ -24,7 +24,7 @@ fn session(entries: &str) -> (String, String) {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn al repl");
-    // Dropping stdin is the REPL's EOF, and its exit signal.
+    // Dropping stdin sends the REPL EOF, which tells it to exit.
     {
         let mut stdin = child.stdin.take().expect("stdin");
         stdin.write_all(entries.as_bytes()).expect("write stdin");
@@ -41,14 +41,14 @@ fn session(entries: &str) -> (String, String) {
     )
 }
 
-/// Drop the three banner lines the REPL prints before the first entry —
-/// version, help, blank.
+/// Drops the three banner lines the REPL prints before the first entry: the
+/// version, the help line and a blank line.
 ///
 /// The version is a build stamp: a release build carries a canary timestamp
 /// like `0.0.1-canary.20260812.0745`. Its digits are indistinguishable from
-/// program output to the single-character `contains` assertions below, which
-/// made them read the banner instead of the session — `0745` alone is enough
-/// to fail a `!contains('4')`. Every assertion here is about what the session
+/// program output to the single-character `contains` assertions below, so they
+/// were reading the banner instead of the session. `0745` alone is enough to
+/// fail a `!contains('4')`. Every assertion here is about what the session
 /// printed, so the banner never reaches one.
 fn strip_banner(stdout: &str) -> String {
     let mut lines = stdout.lines();
@@ -158,7 +158,7 @@ fn a_session_round_trips_through_save_and_load() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `:dis` filters: the emitted program carries the whole stdlib.
+/// `:dis` filters its listing, because the emitted program carries the whole stdlib.
 #[test]
 fn dis_lists_only_the_matching_function() {
     let (out, err) = session("fn only_mine() Int { 7 }\n:dis only_mine\n:dis nope\n");
@@ -167,8 +167,8 @@ fn dis_lists_only_the_matching_function() {
     assert!(err.contains("no function matching 'nope'"), "{err}");
 }
 
-/// `/` is the marker half the world's tools use; no Scarlet entry starts with
-/// one, so it spells a command too.
+/// Half the world's tools use `/` to mark a command. No Scarlet entry starts
+/// with one, so it marks a command here too.
 #[test]
 fn a_slash_command_runs_rather_than_erroring() {
     let (out, err) = session("1 + 1\n/quit\n2 + 2\n");
@@ -177,8 +177,8 @@ fn a_slash_command_runs_rather_than_erroring() {
     assert!(!err.contains("error"), "ran /quit as source:\n{err}");
 }
 
-/// A command that prints nothing is indistinguishable from one that did not
-/// run — `:reset` says so.
+/// A command that prints nothing looks the same as one that didn't run, so
+/// `:reset` says it ran.
 #[test]
 fn reset_says_it_ran() {
     let (out, _) = session("const x = 1\n:reset\n");
@@ -194,8 +194,8 @@ fn a_binding_used_by_a_later_entry_is_not_called_unused() {
     assert!(out.contains("<fn#serve>"), "{out}{err}");
 }
 
-/// The entry after a binding must still *run*. An unused-binding error does
-/// not merely print: it makes the module dirty, and a dirty module emits no
+/// The entry after a binding must still *run*. An unused-binding error doesn't
+/// just print. It makes the module dirty, and a dirty module emits no
 /// toplevel, so the entry silently evaluates to nothing.
 #[test]
 fn an_entry_after_a_binding_still_evaluates() {
@@ -233,7 +233,7 @@ fn a_module_name_alone_lists_what_is_in_it() {
     assert!(out.contains("and 1 more"), "{out}");
 }
 
-/// `:exit` leaves, as `:quit` does: it is what other REPLs taught.
+/// `:exit` leaves, like `:quit` does, because that's what other REPLs taught people.
 #[test]
 fn exit_leaves_the_repl() {
     let (out, err) = session(":exit\nprintln('after')\n");

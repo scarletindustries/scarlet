@@ -13,9 +13,9 @@ fn parse_ok(src: &str) -> crate::ast::BlockExpression {
     pr.ast
 }
 
-/// Compile a snippet with codegen on, as a script: these tests are about
-/// what the compiler does with the code, and a script is the shortest way
-/// to hand it some (it is also exactly what the REPL submits).
+/// Compile a snippet with codegen on, as a script. These tests are about what
+/// the compiler does with the code, and a script is the shortest way to give it
+/// some (it is also exactly what the REPL sends).
 fn compile_script(src: &str) -> super::CompileResult {
     super::compile_with(
         &crate::ast::Expression::BlockExpression(parse_ok(src)),
@@ -107,14 +107,14 @@ fn drops(e: &crate::core_ir::CoreExpr) -> Vec<crate::core_ir::LocalId> {
 }
 
 /// Compile `src` as the entry module on the LSP path, with
-/// `collect_hover_facts` on so occurrence collection fires. A script, for
-/// the reason `compile_script` is.
+/// `collect_hover_facts` on so occurrences are collected. It is a script, for
+/// the same reason `compile_script` is.
 fn collect(src: &str) -> super::Compiler {
     collect_with(src, |_| ()).0
 }
 
-/// [`collect`], also handing back what `inspect` reads off the entry's
-/// checker before it finishes, while the entry's own names are still in scope.
+/// [`collect`], but also hand back what `inspect` reads off the entry's checker
+/// before it finishes, while the entry's own names are still in scope.
 fn collect_with<R>(
     src: &str,
     inspect: impl FnOnce(&super::ModuleChecker<'_>) -> R,
@@ -151,11 +151,12 @@ fn collect_with<R>(
 }
 
 mod local_binders_as_definitions {
-    //! Local binders (bindings, parameters, pattern binders, `or`-receivers)
-    //! must be registered as graph `Definition`s, not merely typed in the env.
-    //! Without the record `ReferenceGraph::definition(target)` returns `None`
-    //! and goto-def / find-refs / hover are dead on every local. Gated on
-    //! `collect_hover_facts`, so `al run` / `al check` are untouched.
+    //! Local binders (bindings, parameters, pattern binders and `or` receivers)
+    //! must be registered as graph `Definition`s, not just typed in the env.
+    //! Without the record, `ReferenceGraph::definition(target)` returns `None`
+    //! and goto-def, find-references and hover don't work on any local. This
+    //! only happens when `collect_hover_facts` is on, so `scarlet run` and
+    //! `scarlet check` are unaffected.
 
     use super::super::*;
     use super::collect;
@@ -200,7 +201,8 @@ mod local_binders_as_definitions {
             }\n",
         );
 
-        // p: bind_param, v: var binding, inner: pattern binder, e: or-receiver.
+        // `p` is a parameter, `v` a binding, `inner` a pattern binder and `e`
+        // an `or` receiver.
         for name in ["p", "v", "inner", "e"] {
             let d = sole_def(&c, name);
             assert_eq!(d.entity, EntityKind::Value, "`{name}` is not a Value def");
@@ -208,14 +210,16 @@ mod local_binders_as_definitions {
                 c.entry_refs.definition(d).is_some(),
                 "`{name}` binder was not registered as a graph Definition",
             );
-            // Closes the goto-def chain: occurrence -> target -> definition().
+            // This completes the goto-def chain: occurrence -> target ->
+            // definition().
             assert!(has_use(&c, d), "no recorded use targets `{name}`");
         }
     }
 
     #[test]
     fn goto_def_on_a_local_use_resolves_to_a_real_definition() {
-        // Mirrors the handler path: resolve_position(use) -> definition().
+        // This follows the same path as the handler: resolve_position(use) ->
+        // definition().
         let c = collect("fn f(p Int) Int {\n  v = p\n  v\n}\n");
         let v = sole_def(&c, "v");
 
@@ -305,8 +309,9 @@ mod perceus_drop {
 
     #[test]
     fn a_destructured_cell_is_reused_by_a_same_shaped_constructor() {
-        // Canonical Perceus shape: destructure a Cons, construct a same-arity
-        // Cons in the arm body, pairing the dropped cell with the constructor.
+        // The textbook Perceus shape: take a Cons apart and build a Cons of the
+        // same arity in the arm body, which pairs the dropped cell with the
+        // constructor.
         let p = lowered(
             "type List {\n\tLNil\n\tLCons(head Int, tail List)\n}\n\
              fn lmap(xs List, f fn(Int) Int) List {\n\
@@ -328,8 +333,8 @@ mod perceus_drop {
 
     #[test]
     fn a_reuse_candidate_stays_in_its_own_arm() {
-        // Reuse pairing is arm-scoped: arm 1's dropped two-field cell must not
-        // be consumed by arm 2's constructor, which runs when the cell is a B.
+        // Reuse is paired within each arm. Arm 1's dropped two-field cell must
+        // not be used by arm 2's constructor, which runs when the cell is a B.
         let p = lowered(
             "type T {\n\tA(x Int, y Int)\n\tB\n}\n\
              fn f(v T) T {\n\
@@ -350,10 +355,10 @@ mod perceus_drop {
 
 /// A module the typechecker rejected must never reach the elaborator.
 ///
-/// `CleanModule` is why `lower` and `perceus` need no poison arm: they
-/// take a `TypedProgram`, which only `elaborate_body`/`elaborate_toplevel` can
-/// build. `Elab` aborts on a node the check walk rejected, so without the
-/// gate an ordinary type error would abort the compiler.
+/// `CleanModule` is why `lower` and `perceus` need no poison arm. They take a
+/// `TypedProgram`, which only `elaborate_body` and `elaborate_toplevel` can
+/// build. `Elab` aborts on a node the check walk rejected, so without the gate
+/// an ordinary type error would abort the compiler.
 mod clean_module_gate {
     use super::super::*;
     use super::parse_ok;
@@ -371,10 +376,10 @@ mod clean_module_gate {
             .collect()
     }
 
-    /// One ill-typed fn beside a well-typed sibling: the type error is the
-    /// only diagnostic, and neither body is elaborated. Reaching the
-    /// elaborator would abort the process, so this also pins that a type error
-    /// never aborts the compiler.
+    /// One function that doesn't typecheck next to one that does. The type
+    /// error is the only diagnostic, and neither body is elaborated. Reaching
+    /// the elaborator would abort the process, so this also makes sure a type
+    /// error never aborts the compiler.
     #[test]
     fn a_type_error_is_the_only_diagnostic() {
         let ds = diagnose(
@@ -394,8 +399,8 @@ mod clean_module_gate {
         );
     }
 
-    /// The gate is the diagnostics list, not the shape of the offending node:
-    /// an unbound name poisons the module just as a mismatch does, and must be
+    /// The gate is the diagnostics list, not the shape of the node at fault. An
+    /// unbound name poisons the module just as a mismatch does, and must be
     /// reported once.
     #[test]
     fn an_unbound_name_is_reported_once() {
@@ -444,7 +449,8 @@ mod clean_module_gate {
         );
     }
 
-    /// And the clean module still elaborates: the gate is not a mute button.
+    /// And the clean module still elaborates, because the gate doesn't just
+    /// switch everything off.
     #[test]
     fn a_clean_module_reaches_the_core_pipeline() {
         let block = parse_ok("fn f(x Int) Int { x + 1 }\npub fn main() { f(1) }\n");
@@ -460,9 +466,9 @@ mod toplevel_slots {
     use super::parse_ok;
 
     /// Only a module's own statement walk gives a binding a module-scope slot.
-    /// Depth alone does not identify that walk: a bare-expression program runs
-    /// with no module block open, so an arm's pattern binding would sit at
-    /// "module depth" and take a global slot it must not have.
+    /// Depth alone doesn't identify that walk. A program that is a bare
+    /// expression runs with no module block open, so a pattern binding in an
+    /// arm would sit at "module depth" and take a global slot it must not have.
     #[test]
     fn only_the_module_statement_walk_takes_a_slot() {
         let mut c = new_compiler(true);
@@ -481,9 +487,9 @@ mod toplevel_slots {
         assert_eq!(m.binding_globals.pop(), Some((b, GlobalSlot(8))));
     }
 
-    /// The bare-expression entry point. Its outermost block is an arm body,
-    /// which the elaborator treats as a module toplevel, so the arm's pattern
-    /// bindings must not take module-scope slots.
+    /// The entry point for a bare expression. Its outermost block is an arm
+    /// body, which the elaborator treats as a module toplevel, so the arm's
+    /// pattern bindings must not take module-scope slots.
     #[test]
     fn a_bare_match_expression_compiles_without_stealing_a_pattern_slot() {
         let src = "match Some(1) { Some(v) -> { w = v + 1\n v + w }\n None -> 0 }";
@@ -502,10 +508,10 @@ mod toplevel_slots {
 
 mod qualified_ctor_pattern_occurrences {
     //! A qualified constructor pattern (`io.NotFound(p)`) must record the same
-    //! occurrence pair as the expression path: a `Qualified` use of the ctor
-    //! plus a `Qualifier` occurrence on the module alias. Without the pair,
-    //! unused-import liveness and rename are blind to modules referenced only
-    //! from patterns.
+    //! pair of occurrences as the expression path: a `Qualified` use of the
+    //! constructor plus a `Qualifier` occurrence on the module alias. Without
+    //! the pair, the unused-import check and rename can't see modules that are
+    //! only referred to from patterns.
 
     use super::super::*;
     use super::collect;
@@ -521,9 +527,9 @@ mod qualified_ctor_pattern_occurrences {
             println(x)\n";
         let c = collect(src);
 
-        // The qualified pattern head sits on 0-based line 3. `Err` and the
-        // body's `p` on that line are ordinary Unqualified occurrences; the
-        // call's own pair is on line 1, outside the filter.
+        // The qualified pattern head is on line 3, counting from 0. `Err` and
+        // the body's `p` on that line are ordinary `Unqualified` occurrences.
+        // The call's own pair is on line 1, outside the filter.
         let on_pattern: Vec<Reference> = c
             .entry_refs
             .occurrences()
@@ -568,9 +574,9 @@ mod qualified_ctor_pattern_occurrences {
             "the Qualifier occurrence targets the `io` module alias"
         );
 
-        // The correct pair must replace the Unqualified record, not merely
-        // join it. `Err` on the same line legitimately records Unqualified, so
-        // only the qualified ctor's def is checked.
+        // The correct pair must replace the `Unqualified` record, not just sit
+        // next to it. `Err` on the same line rightly records `Unqualified`, so
+        // only the qualified constructor's def is checked.
         assert!(
             !on_pattern
                 .iter()
@@ -581,16 +587,16 @@ mod qualified_ctor_pattern_occurrences {
 }
 
 mod runnable_programs {
-    //! Two facts a `CompileResult` must never confuse: what analysis saw, and
+    //! A `CompileResult` must never mix up two facts: what analysis saw, and
     //! whether there is a program worth running. A rejected module records no
-    //! toplevel, so running what it built would run the stdlib init and stop
-    //! — and the pre-filled globals would make that look like a computed `0`
-    //! rather than a failure.
+    //! toplevel, so running what it built would run the stdlib init and stop,
+    //! and the pre-filled globals would make that look like a computed `0`
+    //! instead of a failure.
     //!
-    //! Also: a REPL entry is a fragment of a session, not a whole program, so
-    //! the line that uses a binding is typed next. That is why the prompt
-    //! turns the unused-binding check off — and why turning it off must mean
-    //! "do not report", never "report and skip the lowering".
+    //! Also, a REPL entry is a piece of a session, not a whole program, so the
+    //! line that uses a binding is typed next. That is why the prompt turns the
+    //! unused-binding check off, and why turning it off must mean "don't
+    //! report", never "report and skip the lowering".
 
     use super::parse_ok;
     use crate::ast;
@@ -612,11 +618,11 @@ mod runnable_programs {
         );
     }
 
-    /// The shape of a real bug: the REPL filtered a diagnostic it did not want
-    /// to show, `success()` then said yes, and the `Program` it ran had no
-    /// toplevel — so the entry "evaluated" to one of the entry frame's
-    /// pre-filled globals. Whether a program is runnable is now the recorded
-    /// toplevel's answer, not the diagnostics'.
+    /// This is the shape of a real bug. The REPL filtered out a diagnostic it
+    /// didn't want to show, `success()` then said yes, and the `Program` it ran
+    /// had no toplevel, so the entry "evaluated" to one of the entry frame's
+    /// pre-filled globals. Whether a program can run is now answered by the
+    /// recorded toplevel, not by the diagnostics.
     #[test]
     fn a_rejected_compile_stays_unrunnable_even_with_its_diagnostics_removed() {
         let mut result = compile(&entry("pub fn main() {\n  x = 5\n  42\n}\n"), None);
@@ -629,8 +635,8 @@ mod runnable_programs {
         );
     }
 
-    /// A check records no toplevel: analysis, never a run. It also does not
-    /// need a `main`: a library file checks.
+    /// A check records no toplevel, because it only analyses and never runs. It
+    /// also doesn't need a `main`, so a library file passes a check.
     #[test]
     fn a_check_has_nothing_to_run() {
         let src = entry("pub const x = 1\n");
@@ -639,7 +645,7 @@ mod runnable_programs {
         assert!(check(&src, None).into_runnable().is_none());
     }
 
-    /// The atom a toplevel ends in, past its `Let`/`Drop` spine.
+    /// The atom a toplevel ends in, after its `Let` and `Drop` spine.
     fn tail(mut e: &CoreExpr) -> &Atom {
         loop {
             match e {
@@ -681,7 +687,7 @@ mod runnable_programs {
         assert!(
             messages(src)
                 .iter()
-                .any(|m| m.starts_with("No `main` function")),
+                .any(|m| m.starts_with("There's no `main` function")),
             "{:?}",
             messages(src)
         );
@@ -700,8 +706,8 @@ mod runnable_programs {
             with_args.iter().any(|m| m.contains("takes no parameters")),
             "{with_args:?}"
         );
-        // Both are reported by `check` too: a malformed entry point is a
-        // fact about the file, not about running it.
+        // `check` reports both too, because a broken entry point is a fact
+        // about the file, not about running it.
         let checked = check(&entry("fn main() {\n  1\n}\n"), None);
         assert!(!checked.success());
     }
@@ -711,14 +717,14 @@ mod runnable_programs {
         let ms = messages("println(1)\n\npub fn main() {\n  2\n}\n");
         assert!(
             ms.iter()
-                .any(|m| m.starts_with("Statements are not allowed at module scope")),
+                .any(|m| m.starts_with("Statements aren't allowed at module scope")),
             "{ms:?}"
         );
     }
 
-    /// The REPL's mode: statements are the input, bindings persist as
-    /// module-scope binds, and the entry's value is its tail expression — no
-    /// `main` involved.
+    /// The REPL's mode. Statements are the input, bindings last as module-scope
+    /// bindings, and the entry's value is its last expression, with no `main`
+    /// involved.
     #[test]
     fn a_script_entry_runs_its_statements_and_leaves_the_tail() {
         let result = compile_with(
@@ -743,16 +749,16 @@ mod runnable_programs {
 }
 
 mod ctor_visibility_survives_on_the_type {
-    //! `analyse_type_decl` computes `is_public && !opaque` to decide what goes
-    //! in the module interface, then dropped it. `wire`'s descriptor builder
-    //! asks the same question of a type it did not declare — `decode` builds
-    //! values by constructor without running any of the declaring module's
-    //! code — so the bit has to survive on the body.
+    //! `analyse_type_decl` works out `is_public && !opaque` to decide what goes
+    //! in the module interface, and used to then drop it. `wire`'s descriptor
+    //! builder asks the same question of a type it didn't declare, because
+    //! `decode` builds values by constructor without running any of the
+    //! declaring module's code. So the bit has to survive on the body.
     //!
-    //! Each case is asserted on its own. The four answers come from three
-    //! independent inputs (`pub`, `opaque`, having a body at all), and one
-    //! aggregate over them would be carried by whichever happened to be
-    //! wrong last.
+    //! Each case is checked on its own. The four answers come from three
+    //! separate inputs (`pub`, `opaque`, and having a body at all), and one
+    //! combined check over them would only catch whichever happened to be wrong
+    //! last.
 
     use super::collect_with;
 
@@ -788,7 +794,7 @@ mod ctor_visibility_survives_on_the_type {
 
     #[test]
     fn an_alias_has_no_constructors_to_report() {
-        // `None`, never `Some(false)`: a caller building values by
+        // This is `None`, never `Some(false)`. A caller building values by
         // constructor must look through an alias, not refuse it. Collapsing
         // this into `false` is how an alias to an encodable type would come
         // back as "opaque".
@@ -796,8 +802,8 @@ mod ctor_visibility_survives_on_the_type {
     }
 }
 
-/// `scarlet/wire`'s declaration surface: the two `@vm` keys reach the core IR
-/// as their intrinsics.
+/// The declarations in `scarlet/wire`. Its two `@vm` keys reach the core IR as
+/// their intrinsics.
 mod wire_surface {
     use crate::core_ir::Atom;
     use scarlet_types::intrinsic::Intrinsic;
@@ -834,8 +840,8 @@ mod wire_surface {
 }
 
 mod typed_prim_ops {
-    //! An operator on a type inference has fixed lowers to its typed
-    //! [`PrimOp`] (`IntAdd`), never the unresolved one (`Add`) a backend
+    //! An operator on a type that inference has fixed lowers to its typed
+    //! [`PrimOp`] (`IntAdd`), never the unresolved one (`Add`) that a backend
     //! would have to dispatch on at run time.
 
     use super::{atoms, body_named, parse_ok};
@@ -879,12 +885,12 @@ mod typed_prim_ops {
     }
 
     /// `v` is `Int` only because inference unified `Some`'s payload with the
-    /// literal `3`, so lowering must read the solved type back rather than
-    /// re-instantiate `Some`'s scheme.
+    /// literal `3`, so lowering must read the solved type back and not
+    /// instantiate `Some`'s scheme again.
     ///
-    /// `fn g(a, b) { a + b }` would not test this: it really is
-    /// `Addable a => (a, a) -> a`, one body for every instantiation, and the
-    /// unresolved `Add` is correct there.
+    /// `fn g(a, b) { a + b }` wouldn't test this. Its type really is
+    /// `Addable a => (a, a) -> a`, with one body for every instantiation, and
+    /// the unresolved `Add` is correct there.
     #[test]
     fn an_operand_typed_only_by_inference_selects_the_int_op() {
         let ops = prim_ops(

@@ -1,28 +1,29 @@
-//! Binaries: strings of bits, as the old VM had them (`vm/binary.rs` on
-//! master before the rewrite).
+//! Binaries, which are strings of bits. They work as the old VM's did (that
+//! was `vm/binary.rs`, before the rewrite).
 //!
 //! Bits are counted from the most significant bit of the first byte, and the
 //! bits past a binary's end in its last byte are zero.
 //!
-//! A binary is one of two cells:
+//! A binary is one of two kinds of cell:
 //!
-//! - an **owner** holds the bits: a word with its length in bits, then its
-//!   bytes, eight to a word, the first byte in the lowest bits of a word;
-//! - a **slice** holds a reference to an owner, a bit offset and a length in
+//! - An **owner** holds the bits. It has a word with its length in bits, then
+//!   its bytes, eight to a word, with the first byte in the lowest bits.
+//! - A **slice** holds a reference to an owner, a bit offset and a length in
 //!   bits. `binary.slice_bits` and a pattern's `rest:binary` make one, so they
 //!   copy nothing, as their docs promise. A slice of a slice points at the
 //!   owner, so there is never a chain of them.
 //!
-//! [`Bits`] is either, as "these bits of this owner". Everything that reads a
-//! binary reads it through [`Bits`], so it does not matter which one it is.
+//! [`Bits`] stands for either, meaning "these bits of this owner". Everything
+//! that reads a binary reads it through [`Bits`], so which kind it is doesn't
+//! matter.
 
 use num_bigint::{BigInt, Sign};
 
 use crate::heap::{Cell, Full, Heap, Kind};
 use crate::value::Value;
 
-/// The most bits one binary can hold: a cell is at most 2^28 words, and a
-/// word holds 64 bits. A longer one is a full heap, not a binary.
+/// The most bits one binary can hold, because a cell is at most 2^28 words
+/// and a word holds 64 bits. A longer one makes the heap full instead.
 pub(crate) const MAX_BITS: u64 = (1 << 28) * 64;
 
 /// `len` bits of `owner`'s bytes, from bit `at`.
@@ -33,8 +34,8 @@ pub(crate) struct Bits {
     pub(crate) len: u64,
 }
 
-/// The most bytes a binary can hold: a cell's worth of words, less its header
-/// and the word holding its length.
+/// The most bytes a binary can hold. That is a cell's worth of words, less
+/// its header and the word holding its length.
 pub(crate) const MAX_BYTES: usize = (crate::heap::MAX_CELL_WORDS - 2) * 8;
 
 /// The bits `cell` holds, or `None` when it is not a binary.
@@ -98,7 +99,7 @@ pub(crate) fn slice(heap: &mut Heap, b: Bits, from: u64, len: u64) -> Result<Cel
     )
 }
 
-/// Byte `i` of `b`'s owner, or 0 past its end.
+/// Byte `i` of `owner`'s bytes, or 0 past its end.
 fn owner_byte(heap: &Heap, owner: Cell, i: u64) -> u8 {
     let d = heap.data(owner);
     match d.get(1 + (i / 8) as usize) {
@@ -107,7 +108,7 @@ fn owner_byte(heap: &Heap, owner: Cell, i: u64) -> u8 {
     }
 }
 
-/// The 8 bits of `b` from bit `i`, the ones past its end read as 0.
+/// The 8 bits of `b` from bit `i`. Bits past its end read as 0.
 fn byte(heap: &Heap, b: Bits, i: u64) -> u8 {
     if i >= b.len {
         return 0;
@@ -129,10 +130,11 @@ fn byte(heap: &Heap, b: Bits, i: u64) -> u8 {
     }
 }
 
-/// Word `k` of `b`'s bytes, little-endian: bytes `8k` to `8k + 7`, the first
-/// in the lowest bits. `None` when it runs past `b`'s end. When `b` starts on
-/// a word of its owner, as a binary made whole does, this is that word as it
-/// is, so a JSON tape (`json.rs`) reads a node without copying the tape.
+/// Word `k` of `b`'s bytes, little-endian. That is bytes `8k` to `8k + 7`,
+/// with the first in the lowest bits. It is `None` when it runs past `b`'s
+/// end. When `b` starts on a word of its owner, as a whole binary does, this
+/// is that word unchanged, so a JSON tape (`json.rs`) reads a node without
+/// copying the tape.
 pub(crate) fn word(heap: &Heap, b: Bits, k: u64) -> Option<u64> {
     let end = k.checked_add(1)?.checked_mul(64)?;
     if end > b.len {
@@ -165,7 +167,8 @@ pub(crate) fn bytes_from(heap: &Heap, b: Bits, from: u64, n: u64) -> Vec<u8> {
     if !b.at.is_multiple_of(8) {
         return (from..end).map(|k| byte(heap, b, k * 8)).collect();
     }
-    // Starting on a byte of the owner, each byte is one of its bytes as it is.
+    // `b` starts on a byte boundary of the owner, so each byte is one of the
+    // owner's bytes unchanged.
     let d = heap.data(b.owner);
     let base = b.at / 8;
     (from..end)
@@ -197,8 +200,8 @@ pub(crate) fn bytes(heap: &Heap, b: Bits) -> Vec<u8> {
         .collect()
 }
 
-/// `b`'s whole bytes: a last byte that is not whole is left out, as the
-/// ASCII built-ins read it.
+/// `b`'s whole bytes. A last byte that is not whole is left out, which is how
+/// the ASCII built-ins read it.
 pub(crate) fn whole_bytes(heap: &Heap, b: Bits) -> Vec<u8> {
     (0..b.len / 8).map(|k| byte(heap, b, k * 8)).collect()
 }
@@ -258,8 +261,8 @@ fn put(out: &mut [u8], at: u64, chunk: u8, n: u64) {
 }
 
 /// The low `width` bits of `n`, most significant first. A negative `n` is
-/// its two's complement, extended as far as `width` asks, so `<<-1:size(12)>>`
-/// is twelve ones.
+/// written as its two's complement, extended as far as `width` asks, so
+/// `<<-1:size(12)>>` is twelve ones.
 pub(crate) fn from_int(n: &BigInt, width: u64) -> Vec<u8> {
     let bytes = width.div_ceil(8) as usize;
     if bytes == 0 {
@@ -288,7 +291,7 @@ pub(crate) fn read_uint(heap: &Heap, b: Bits, at: u64, width: u64) -> BigInt {
         len: b.len.saturating_sub(at).min(width),
     };
     let n = BigInt::from_bytes_be(Sign::Plus, &bytes(heap, window));
-    // `bytes` pads the window to whole bytes; drop the padding, then add the
+    // `bytes` pads the window to whole bytes. Drop the padding, then add the
     // zeros past `b`'s end that `width` still asks for.
     let n = n >> (window.len.div_ceil(8) * 8 - window.len);
     n << (width - window.len)
@@ -320,8 +323,8 @@ pub(crate) fn read_utf8(heap: &Heap, b: Bits, at: u64) -> Option<(u32, u64)> {
     Some((c as u32, n * 8))
 }
 
-/// How a binary shows: `<<1, 2, 3>>`, with a last byte that is not whole as
-/// `5:size(3)`.
+/// How a binary shows, like `<<1, 2, 3>>`. A last byte that is not whole
+/// shows as `5:size(3)`.
 pub(crate) fn text(heap: &Heap, b: Bits) -> String {
     let mut parts: Vec<String> = (0..b.len / 8)
         .map(|k| byte(heap, b, k * 8).to_string())

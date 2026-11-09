@@ -1,8 +1,8 @@
-//! Fault isolation: a crash ends the process that raised it and nothing
-//! else, is reported to stderr, is observable through monitors as a typed
-//! reason, and spreads over links — up to and including main, which is what
-//! turns an uncontained crash into a failing exit status. The crash-free
-//! half of this (kill, links) is `tests/programs/exits.sca`.
+//! These test fault isolation. A crash ends the process that raised it and
+//! nothing else. It's reported to stderr, monitors see it as a typed reason,
+//! and it spreads over links up to and including main, which is what turns an
+//! uncontained crash into a failing exit status. `tests/programs/exits.sca`
+//! covers the half without crashes (kill and links).
 
 mod common;
 
@@ -14,7 +14,7 @@ fn run(tag: &str, src: &str) -> AlOutput {
     Project::new(tag).run(src)
 }
 
-/// The program failed, and said why on stderr.
+/// Asserts the program failed and said why on stderr.
 fn assert_failed_with(out: &AlOutput, needle: &str) {
     assert!(
         !out.success,
@@ -105,7 +105,7 @@ pub fn main() {
     );
 }
 
-/// A crash in a linked child kills main: the program fails, promptly, even
+/// A crash in a linked child kills main. The program fails promptly, even
 /// though main itself was blocked for ever and never misbehaved.
 #[test]
 #[ignore = "needs the VM"]
@@ -161,7 +161,7 @@ pub fn main() {
     );
 }
 
-/// The boundary: a crash below an unlinked process stops there. main
+/// A crash below an unlinked process stops at that process. main
 /// survives a crash two levels down when the middle process was spawned
 /// unlinked, and sees it only through its monitor on the middle process.
 #[test]
@@ -249,8 +249,8 @@ pub fn main() {
 "#;
     let srv = common::net::spawn_al_server(&proj, src);
 
-    // First connection: make its handler crash. The connection must close
-    // (the crashed handler owned it), rather than hang open.
+    // Make the first connection's handler crash. The connection must close
+    // (the crashed handler owned it) rather than hang open.
     let mut crasher = TcpStream::connect(("127.0.0.1", srv.port)).expect("connect");
     crasher.write_all(b"crash").expect("write");
     crasher
@@ -263,7 +263,7 @@ pub fn main() {
         "the crashed handler's connection must be closed by the runtime, got {closed:?} / {buf:?}"
     );
 
-    // Second connection: still served.
+    // The second connection still gets served.
     let mut client = TcpStream::connect(("127.0.0.1", srv.port)).expect("connect 2");
     client.write_all(b"hello").expect("write 2");
     client

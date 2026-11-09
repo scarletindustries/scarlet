@@ -1,13 +1,13 @@
-//! JSON: parsing a document to a tape, reading the tape, and encoding a
-//! `Json` tree. The old VM's design (`vm/json.rs` on master before the
-//! rewrite), on the new heap.
+//! This parses a JSON document to a tape, reads the tape, and encodes a
+//! `Json` tree. It follows the old VM's design (`vm/json.rs`, before the
+//! rewrite) on the new heap.
 //!
 //! The parse is `simd-json`, the Rust port of simdjson, with runtime
-//! CPU-feature detection so one binary serves SSE4.2, AVX2 and NEON. What it
-//! produces is not a tree of Scarlet values: it is a **compact tape**, a flat
-//! run of fixed-width nodes in document order, plus a string arena. Both are
-//! binaries inside an opaque `scarlet/json.Doc`, with the index of the node
-//! the `Doc` points at.
+//! CPU-feature detection so one binary serves SSE4.2, AVX2 and NEON. It
+//! doesn't produce a tree of Scarlet values. It produces a **compact tape**,
+//! which is a flat run of fixed-width nodes in document order, plus a string
+//! arena. Both are binaries inside an opaque `scarlet/json.Doc`, along with
+//! the index of the node the `Doc` points at.
 //!
 //! That indirection is the point. A Scarlet value per JSON node would put an
 //! allocation and a string copy on every node of the document, whether or not
@@ -67,7 +67,7 @@ const KIND_STRING: i64 = 4;
 const KIND_ARRAY: i64 = 5;
 const KIND_OBJECT: i64 = 6;
 
-/// A node, read.
+/// A node, as read from the tape.
 #[derive(Clone, Copy)]
 struct TapeNode {
     kind: u8,
@@ -98,7 +98,7 @@ impl Tape<'_> {
         let w0 = binary::word(self.heap, self.tape, k)?;
         let payload = binary::word(self.heap, self.tape, k + 1)?;
         let skip = usize::try_from(w0 >> 32).ok()?;
-        // A zero skip would let a walk stand still, forever.
+        // A zero skip would let a walk stand still forever.
         if skip == 0 {
             return None;
         }
@@ -178,8 +178,8 @@ impl Tape<'_> {
         Some(at)
     }
 
-    /// Where each element of the array at `idx` is, in order: one walk, so
-    /// a sender's element count costs its length and not its square, as
+    /// Where each element of the array at `idx` is, in order. It takes one
+    /// walk, so the cost grows with the array's length and not its square, as
     /// calling [`Self::element`] once for each would.
     pub(crate) fn elements(&self, idx: usize) -> Option<Vec<usize>> {
         let arr = self.node(idx)?;
@@ -256,9 +256,9 @@ impl Tape<'_> {
         (n.kind == K_BOOL).then_some(n.payload != 0)
     }
 
-    /// How a `Doc` at `idx` shows: what it points at and where, never the
-    /// document. A `Doc` holds every string of a body that may be
-    /// megabytes, and printing one is the first thing reached for while
+    /// How a `Doc` at `idx` shows. It says what the `Doc` points at and
+    /// where, never the document itself. A `Doc` holds every string of a body
+    /// that may be huge, and printing one is the first thing people try while
     /// debugging, so this stays short however large the document is.
     fn image(&self, idx: usize) -> String {
         let kind = match self.kind(idx) {
@@ -275,8 +275,8 @@ impl Tape<'_> {
     }
 }
 
-/// How the `Doc` in `cell` shows: [`Tape::image`], or `<json invalid>` for
-/// one that is not the shape `parse` makes.
+/// How the `Doc` in `cell` shows. That is [`Tape::image`], or `<json invalid>`
+/// for one that is not the shape `parse` makes.
 pub(crate) fn doc_image(heap: &Heap, cell: Cell) -> String {
     let bits = |i| {
         let v: Value = heap.field(cell, i)?;
@@ -329,14 +329,14 @@ pub(crate) fn parse(src: &[u8]) -> Result<(Vec<u8>, Vec<u8>), ParseError> {
 
 /// The compact tape and the string arena, from `simd-json`'s tape.
 ///
-/// One pass: `simd-json` already gives nodes in document order with each
-/// container's count, so a skip is a copy rather than a walk. Strings are
-/// copied into the arena rather than pointed at in the input, which is gone
-/// when this returns.
+/// It takes one pass, because `simd-json` already gives nodes in document
+/// order with each container's count, so a skip is a copy instead of a walk.
+/// Strings are copied into the arena instead of pointing into the input,
+/// which is gone when this returns.
 ///
-/// An `Err` for a document too large for the 32-bit offsets: both bounds are
-/// about 4 billion, and a document that reaches one has used up memory
-/// already, but they must not wrap.
+/// It returns an `Err` for a document too large for the 32-bit offsets. Both
+/// limits are about 4 billion, and a document that reaches one has already
+/// used up memory, but the offsets must not wrap.
 fn build_tape(nodes: &[Node<'_>]) -> Result<(Vec<u8>, Vec<u8>), &'static str> {
     if nodes.len() > u32::MAX as usize {
         return Err("document has too many JSON nodes to index");
@@ -420,8 +420,8 @@ fn first_lone_surrogate(bytes: &[u8]) -> Option<usize> {
             }
             continue;
         }
-        // Any other escape: consuming both bytes is what stops an escaped
-        // backslash from being read as the start of one.
+        // This is any other escape. Consuming both bytes is what stops an
+        // escaped backslash being read as the start of one.
         i += 2;
     }
     None
@@ -468,9 +468,9 @@ pub(crate) fn write_float(out: &mut Vec<u8>, f: f64) {
 /// Whether `s` is a JSON number, by RFC 8259's grammar.
 ///
 /// `Json.Number` carries its text straight into the output, and the text can
-/// come from a caller, with nothing in its type to say it is a number. So it
-/// is checked here, where it becomes output: one hand-built value that is not
-/// a number would otherwise make the whole document fail to parse at the far
+/// come from a caller, with nothing in its type to say it is a number. So we
+/// check it here, where it becomes output. Otherwise one hand-built value that
+/// is not a number would make the whole document fail to parse at the far
 /// end, for a reason the sender cannot see.
 pub(crate) fn is_number(s: &[u8]) -> bool {
     let mut i = 0usize;
@@ -484,8 +484,8 @@ pub(crate) fn is_number(s: &[u8]) -> bool {
     if s.get(i) == Some(&b'-') {
         i += 1;
     }
-    // A lone `0`, or a digit from 1 and the rest: a leading zero is not
-    // JSON, so `01` fails on the end check.
+    // Take a lone `0`, or a digit from 1 to 9 and the digits after it. A
+    // leading zero is not JSON, so `01` fails on the end check.
     if s.get(i) == Some(&b'0') {
         i += 1;
     } else if !digits(&mut i) {

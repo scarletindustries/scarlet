@@ -1,17 +1,17 @@
-//! Workspace tooling. `cargo xtask gen-editor-syntax` generates the lexical
-//! layer of both editor grammars from the compiler's own token tables:
+//! Workspace tooling. `cargo xtask gen-editor-syntax` writes the lexical layer of both editor
+//! grammars from the compiler's own token tables. With `--check` it writes nothing and fails if
+//! either file is stale.
 //!
-//! - `scarlet.tmLanguage.json` (repo root, symlinked into the VSCode
-//!   extension) is fully generated.
-//! - `editors/tree-sitter-scarlet/lexical.js` feeds the tree-sitter grammar,
-//!   whose structural rules are hand-written in `grammar.js`.
+//! - It writes all of `scarlet.tmLanguage.json` at the repo root. The VSCode extension links to
+//!   it with a symlink.
+//! - It writes `editors/tree-sitter-scarlet/lexical.js`, which the tree-sitter grammar reads.
+//!   That grammar's structural rules are hand-written in `grammar.js`.
 //!
-//! Keywords come from `Keyword::ALL`, operator spellings from
-//! `Kind::fixed_spelling_kinds`, and string escapes from `scanner::ESCAPES`,
-//! so the editors cannot drift from the scanner. The exhaustive matches below
-//! force a new keyword or token kind to be classified here before the
-//! workspace compiles again, and `cargo test -p xtask` fails until the
-//! checked-in files are regenerated.
+//! Keywords come from `Keyword::ALL`, operator spellings from `Kind::fixed_spelling_kinds` and
+//! string escapes from `scanner::ESCAPES`, so the editors can't drift from the scanner. Because
+//! the matches below are exhaustive, a new keyword or token kind has to be classified here
+//! before the workspace compiles again. `cargo test -p xtask` fails until the checked-in files
+//! are regenerated.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -20,9 +20,9 @@ use scarlet_syntax::scanner::ESCAPES;
 use scarlet_syntax::token::{Keyword, Kind, THEN};
 use serde_json::{Value, json};
 
-/// The contextual identifiers accepted as `<< expr:spec >>` segment specs.
-/// They are not keywords; the parser matches them by text in
-/// `parse_bin_spec` (`parser/mod.rs`), which its error message enumerates.
+/// The contextual identifiers a `<< expr:spec >>` segment accepts as its spec. They aren't
+/// keywords. `parse_bin_size_spec` in `parser/mod.rs` matches them by text, and its error
+/// message lists them.
 const BIN_SPEC_SIZED: &[&str] = &["size", "bytes"];
 const BIN_SPEC_BARE: &[&str] = &["binary", "utf8"];
 
@@ -60,7 +60,7 @@ impl std::fmt::Display for GenError {
             GenError::Io { path, source } => write!(f, "{}: {source}", path.display()),
             GenError::Stale(paths) => write!(
                 f,
-                "stale generated files (run `cargo xtask gen-editor-syntax`):\n  {}",
+                "these generated files are stale, so run `cargo xtask gen-editor-syntax`:\n  {}",
                 paths.join("\n  ")
             ),
         }
@@ -149,8 +149,8 @@ fn keyword_alternation(group: KeywordGroup) -> String {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OpGroup {
-    /// `++`, `--`, `;`, `?`: scanned, but no parser rule consumes them, so
-    /// they are always a parse error.
+    /// `++`, `--`, `;` and `?`. The scanner makes tokens of them but no parser rule takes
+    /// them, so they're always a parse error.
     Invalid,
     Arrow,
     Backpass,
@@ -167,14 +167,14 @@ enum OpGroup {
 enum TokenClass {
     Keyword,
     Operator(OpGroup),
-    /// `<<` / `>>`, consumed by the `#binary` region rule.
+    /// `<<` and `>>`, which the `#binary` region rule handles.
     BinaryDelimiter,
     Punctuation(&'static str),
 }
 
 fn classify(kind: &Kind) -> TokenClass {
     match kind {
-        // Payload-bearing or positional: not in the fixed-spelling list.
+        // These carry a payload or mark a position, so they aren't in the fixed-spelling list.
         Kind::Eof
         | Kind::Error(_)
         | Kind::Identifier(_)
@@ -226,7 +226,7 @@ fn op_group_scope(group: OpGroup) -> &'static str {
         OpGroup::Invalid => "invalid.illegal.unsupported-operator.sca",
         OpGroup::Arrow => "keyword.operator.arrow.sca",
         OpGroup::Backpass => "keyword.operator.backpass.sca",
-        // Historical scope name; `..` is both range and spread.
+        // The scope name is historical. `..` is both the range and the spread operator.
         OpGroup::Range => "keyword.operator.spread.sca",
         OpGroup::Comparison => "keyword.operator.comparison.sca",
         OpGroup::Logical => "keyword.operator.logical.sca",
@@ -249,12 +249,11 @@ fn regex_escape(s: &str) -> String {
     out
 }
 
-/// One alternation regex per operator group, longest spelling first so `<=`
-/// wins over `<` inside the same rule. Rule order across groups matters the
-/// same way: `Invalid` precedes `Arithmetic` so `++` wins over `+`, `Logical`
-/// precedes `PatternAlternation` so `||` wins over `|`, `Pipe` precedes
-/// `PatternAlternation` so `|>` wins over `|`, and `Comparison` precedes
-/// `Assignment` so `==` wins over `=`.
+/// Builds one alternation regex per operator group, longest spelling first, so `<=` wins over
+/// `<` in the same rule. The order of the groups matters for the same reason. `Invalid` comes
+/// before `Arithmetic` so `++` wins over `+`. `Logical` and `Pipe` come before
+/// `PatternAlternation` so `||` and `|>` win over `|`. `Comparison` comes before `Assignment`
+/// so `==` wins over `=`.
 fn operator_rules() -> Vec<Value> {
     const ORDER: &[OpGroup] = &[
         OpGroup::Invalid,
@@ -300,15 +299,15 @@ fn punctuation_rules() -> Vec<Value> {
                 "name": scope,
                 "match": regex_escape(&kind.to_string()),
             })),
-            // Routed by other sections: keywords by the keyword
-            // alternations, operators by `operator_rules`, `<<`/`>>` by the
-            // `#binary` region rule. A new class must pick its section.
+            // Other sections handle these. The keyword alternations take keywords,
+            // `operator_rules` takes operators and the `#binary` region rule takes `<<` and
+            // `>>`. A new class has to pick its section.
             TokenClass::Keyword | TokenClass::Operator(_) | TokenClass::BinaryDelimiter => None,
         })
         .collect()
 }
 
-/// The regex character class matching every char valid after `\` in a string,
+/// The regex character class of every character allowed after `\` in a string, taken
 /// straight from the scanner's escape table.
 fn escape_char_class() -> String {
     let mut class = String::new();
@@ -429,7 +428,7 @@ fn tm_language() -> String {
                 "patterns": [string_body("'"), string_body("\"")]
             },
             "numbers": {
-                "comment": "Scanner::scan_number. Hex (`0x`) and binary (`0b`) first so they are not split into `0` + identifier. `_` is a digit separator only between two digits of that radix.",
+                "comment": "Mirrors Scanner::scan_number. Hex (`0x`) and binary (`0b`) come first so they aren't split into `0` and an identifier. `_` separates digits only when it sits between two digits of that radix.",
                 "patterns": [
                     {
                         "name": "constant.numeric.hex.sca",
@@ -450,7 +449,7 @@ fn tm_language() -> String {
                 ]
             },
             "binary": {
-                "comment": "Bit-string literal or pattern: <<expr:spec, ..rest>>. The spec names are contextual identifiers, not keywords.",
+                "comment": "A bit-string literal or pattern, like <<expr:spec, ..rest>>. The spec names are contextual identifiers, not keywords.",
                 "begin": "<<",
                 "end": ">>",
                 "beginCaptures": { "0": { "name": "punctuation.definition.binary.begin.sca" } },
@@ -715,7 +714,7 @@ fn tm_language() -> String {
                 ]
             },
             "function-params": {
-                "comment": "The param list opens immediately after the function name (\\G) and closes at the matching paren. Nested type-argument parens are consumed by #type-args so the inner ) of e.g. Option(a) cannot end the list early.",
+                "comment": "The parameter list opens right after the function name (\\G) and closes at the matching paren. #type-args takes nested type-argument parens, so the inner ) of Option(a) can't end the list early.",
                 "begin": "\\G\\s*(\\()",
                 "beginCaptures": {
                     "1": { "name": "punctuation.definition.parameters.begin.sca" }
@@ -759,7 +758,7 @@ fn tm_language() -> String {
                 ]
             },
             "type-args": {
-                "comment": "Balanced ( ... ) for a parametrized/fn type. Recursive so Option(List(a)) and Result(a, e) nest correctly.",
+                "comment": "Balanced ( ... ) for a parameterised type or a fn type. It includes itself, so Option(List(a)) and Result(a, e) nest correctly.",
                 "begin": "\\(",
                 "beginCaptures": {
                     "0": { "name": "punctuation.definition.typeparameters.begin.sca" }
@@ -790,7 +789,7 @@ fn tm_language() -> String {
                 ]
             },
             "const-definition": {
-                "comment": "The declared name is scoped like a fn declaration name so themes colour toplevel value declarations uniformly.",
+                "comment": "The declared name gets the same scope as a fn name, so themes colour every top-level value declaration the same way.",
                 "match": format!(
                     "\\b({pub}\\s+)?({const_})\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*(?:([A-Z][a-zA-Z0-9_]*)\\s*)?(=)",
                     pub = k(Keyword::Pub), const_ = k(Keyword::Const)
@@ -834,7 +833,7 @@ fn tm_language() -> String {
                         "match": format!("\\b({})\\b", keyword_alternation(KeywordGroup::Control))
                     },
                     {
-                        "comment": "Contextual: a keyword after an if condition, a name after a dot.",
+                        "comment": "`then` is contextual. It's a keyword after an if condition and a name after a dot.",
                         "name": "keyword.control.sca",
                         "match": format!("(?<!\\.)\\b{THEN}\\b")
                     },
@@ -853,7 +852,7 @@ fn tm_language() -> String {
                 ]
             },
             "constants": {
-                "comment": "Prelude constructors themes expect as language constants.",
+                "comment": "Prelude constructors that themes expect to see as language constants.",
                 "patterns": [
                     {
                         "name": "constant.language.boolean.sca",
@@ -874,7 +873,7 @@ fn tm_language() -> String {
                 }
             },
             "constructor-call": {
-                "comment": "Constructor invocation / pattern: Uppercase optionally followed by (",
+                "comment": "Constructor call or pattern: an uppercase name followed by (",
                 "match": "\\b([A-Z][a-zA-Z0-9_]*)(?=\\s*\\()",
                 "captures": {
                     "1": { "name": "entity.name.function.constructor.sca" }
@@ -888,7 +887,7 @@ fn tm_language() -> String {
                 }
             },
             "labeled-argument": {
-                "comment": "Labeled call argument: label: value",
+                "comment": "Labelled call argument: label: value",
                 "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s*(:)(?!:)",
                 "captures": {
                     "1": { "name": "variable.parameter.label.sca" },
@@ -913,7 +912,7 @@ fn tm_language() -> String {
         }
     });
 
-    let mut out = serde_json::to_string_pretty(&grammar).expect("grammar serializes");
+    let mut out = serde_json::to_string_pretty(&grammar).expect("grammar serialises");
     out.push('\n');
     out
 }
@@ -941,28 +940,28 @@ fn lexical_js() -> String {
     format!(
         "\
 // GENERATED FILE - do not edit. Regenerate with: cargo xtask gen-editor-syntax
-// Source of truth: crates/scarlet_syntax (token/keywords.rs, token/kind.rs,
-// scanner ESCAPES). grammar.js holds the hand-written structural rules and
-// consumes these tables so the lexical layer cannot drift from the compiler.
+// These tables come from crates/scarlet_syntax (token/keywords.rs, token/kind.rs and the
+// scanner's ESCAPES). grammar.js holds the hand-written structural rules and reads these
+// tables, so the lexical layer can't drift from the compiler.
 'use strict';
 
 module.exports = {{
-  // Keyword::ALL. Every one is reserved: none may parse as an identifier.
+  // Keyword::ALL. Every one is reserved, so none of them can parse as an identifier.
   keywords: [{keywords}],
   // token::is_name_start / is_name_continue.
   identifier: /[A-Za-z_][A-Za-z0-9_]*/,
-  // Scanner::scan_number: hex (`0x`), binary (`0b`), or decimal with an
-  // optional fraction. `_` sits between two digits of that radix. A `_` or
-  // `.` with no digit after it ends the token. Hex/bin are listed first so
-  // `0xFF` is not consumed as decimal `0`.
+  // Scanner::scan_number: hex (`0x`), binary (`0b`), or decimal with an optional
+  // fraction. A `_` only counts between two digits of that radix, and a `_` or `.`
+  // with no digit after it ends the token. Hex and binary come first so `0xFF`
+  // isn't read as decimal `0`.
   number: /(0[xX][0-9A-Fa-f]+(_[0-9A-Fa-f]+)*|0[bB][01]+(_[01]+)*|\\d+(_\\d+)*(\\.\\d+(_\\d+)*)?)/,
-  // scanner::ESCAPES; anything else after a backslash is an error.
+  // scanner::ESCAPES. Anything else after a backslash is an error.
   escape: /\\\\[{escape_class}]/,
-  // Contextual identifiers in << >> segment specs (parse_bin_spec).
+  // The contextual identifiers in << >> segment specs (parse_bin_size_spec).
   binSpecSized: [{sized}],
   binSpecBare: [{bare}],
-  // token::THEN: a keyword only after an `if` condition
-  // (parse_if_expression), so it is not in `keywords`.
+  // token::THEN is a keyword only after an `if` condition (parse_if_expression),
+  // so it isn't in `keywords`.
   then: '{THEN}',
 }};
 ",
@@ -977,19 +976,17 @@ mod tests {
 
     use super::outputs;
 
-    /// Number literals are the one part of the lexical layer written as a
-    /// hand-copied regex rather than derived from a table, so
-    /// `generated_files_are_up_to_date` cannot see it drift: a change to
-    /// `Scanner::scan_number` regenerates byte-identical files. This pins the
-    /// shape the two regexes encode instead. When it fails, the scanner has
-    /// moved and both must move with it — `lexical_js`'s `number` and
-    /// `tm_language`'s `numbers` patterns.
+    /// Number literals are the one part of the lexical layer that's a hand-copied regex
+    /// instead of coming from a table. A change to `Scanner::scan_number` regenerates
+    /// byte-identical files, so `generated_files_are_up_to_date` can't see the regexes drift.
+    /// This test pins the shape they encode instead. When it fails, the scanner has moved, and
+    /// `lexical_js`'s `number` and `tm_language`'s `numbers` patterns must move with it.
     ///
-    /// Its own history: `_` digit separators were added to the scanner without
-    /// either regex, and the tree-sitter corpus job went red on two examples.
+    /// We added it after `_` digit separators reached the scanner but neither regex, and the
+    /// tree-sitter corpus job went red on two examples.
     #[test]
     fn number_regexes_still_describe_the_scanner() {
-        // (source, the LiteralNumber token texts it must yield, in order)
+        // Each case is a source and the LiteralNumber texts it must yield, in order.
         let cases: &[(&str, &[&str])] = &[
             ("1", &["1"]),
             ("1_000_000", &["1_000_000"]),
@@ -999,7 +996,7 @@ mod tests {
             // why neither regex folds `_` into the digit class.
             ("1_", &["1"]),
             ("1.", &["1"]),
-            // Range bounds: the scanner must not fuse `0..10` into one token.
+            // The scanner mustn't fuse a range like `0..10` into one token.
             ("0..10", &["0", "10"]),
             ("0xFF", &["0xFF"]),
             ("0Xff", &["0Xff"]),
@@ -1023,7 +1020,7 @@ mod tests {
                 .collect();
             assert_eq!(
                 got, *want,
-                "Scanner::scan_number changed on {source:?}; update the `number` \
+                "Scanner::scan_number changed on {source:?}. Update the `number` \
                  regex in lexical_js and the `numbers` patterns in tm_language, \
                  then regenerate with `cargo xtask gen-editor-syntax`"
             );
@@ -1039,7 +1036,7 @@ mod tests {
             assert_eq!(
                 on_disk,
                 contents,
-                "{} is stale; run `cargo xtask gen-editor-syntax`",
+                "{} is stale. Run `cargo xtask gen-editor-syntax`",
                 path.display()
             );
         }

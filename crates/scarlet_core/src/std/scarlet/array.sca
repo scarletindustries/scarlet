@@ -15,7 +15,7 @@ pub fn filter(xs Array(a), p fn(a) Bool) Array(a) {
 	})
 }
 
-// From the first element to the last.
+// Folds from the first element to the last.
 pub fn fold(xs Array(a), init b, f fn(b, a) b) b {
 	match xs {
 		[] -> init
@@ -23,7 +23,8 @@ pub fn fold(xs Array(a), init b, f fn(b, a) b) b {
 	}
 }
 
-// For side effects. To get a value out, use `map` or `fold`.
+// Calls `f` on each element for its side effects. To get a value out, use
+// `map` or `fold`.
 pub fn each(xs Array(a), f fn(a) Nil) Nil {
 	match xs {
 		[] -> Nil
@@ -38,7 +39,7 @@ pub fn reverse(xs Array(a)) Array(a) {
 	fold(xs, [], fn(acc, x) [x, ..acc])
 }
 
-// O(1).
+// Takes O(1) time.
 @vm(array__length)
 pub fn length(xs Array(a)) Int
 
@@ -64,7 +65,7 @@ pub fn find(xs Array(a), p fn(a) Bool) Option(a) {
 	}
 }
 
-// False for an empty array.
+// Returns False for an empty array.
 pub fn any(xs Array(a), p fn(a) Bool) Bool {
 	match xs {
 		[] -> False
@@ -76,7 +77,7 @@ pub fn any(xs Array(a), p fn(a) Bool) Bool {
 	}
 }
 
-// True for an empty array.
+// Returns True for an empty array.
 pub fn all(xs Array(a), p fn(a) Bool) Bool {
 	match xs {
 		[] -> True
@@ -88,7 +89,8 @@ pub fn all(xs Array(a), p fn(a) Bool) Bool {
 	}
 }
 
-// Shares structure with both inputs, rather than copying them.
+// Joins two arrays. The result shares structure with both inputs instead of
+// copying them.
 pub fn concat(xs Array(a), ys Array(a)) Array(a) {
 	[..xs, ..ys]
 }

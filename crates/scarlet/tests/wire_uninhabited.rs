@@ -1,20 +1,22 @@
-//! A type no value has, across the wire, end to end through `al run`. A
-//! `pub type Native` with no body that is none of the five handles is an
-//! uninhabited node in a descriptor: never written, never read, and met only
-//! where the walk never goes — the phantom argument of `Tagged(Native)`, the
-//! element of an empty `Array(Native)`, the payload of a `None`.
+//! These send a type that has no values across the wire, end to end through
+//! `al run`. A `pub type Native` with no body that isn't one of the five handles
+//! is an uninhabited node in a descriptor. It's never written or read, and it
+//! only appears where the walk never goes: the phantom argument of
+//! `Tagged(Native)`, the element of an empty `Array(Native)`, or the payload of
+//! a `None`.
 //!
-//! The decoder's half is that bytes steering it into the node are refused as
-//! `Malformed` and never a panic. The only way to reach one is to forge a
-//! count or a tag the encoder never writes, so each test here forges one
-//! from the header of a value the program could encode.
+//! The decoder must refuse bytes that steer it into the node as `Malformed`,
+//! never with a panic. The only way to reach one is to forge a count or a tag
+//! the encoder never writes, so each test here forges one from the header of a
+//! value the program can encode.
 
 mod common;
 
 use common::run_outputs;
 
-/// `Tagged(Native)` over an `Int`. The body is the `Int` alone — one byte,
-/// zigzag 7 — and the value round trips to `==` with its field intact.
+/// Round-trips a `Tagged(Native)` over an `Int`. The body is just the `Int`, one
+/// byte holding 7 in zigzag, and the value round trips to `==` with its field
+/// intact.
 #[test]
 #[ignore = "needs the VM"]
 fn a_record_with_a_phantom_bodiless_argument_round_trips() {
@@ -81,9 +83,9 @@ fn an_empty_array_of_a_bodiless_type_round_trips_and_forged_counts_are_malformed
     );
 }
 
-/// `Option(Native)`: `None` is a value and round trips as its tag; a forged
-/// `Some` tag steers the decoder into the payload's node and is refused
-/// there.
+/// For `Option(Native)`, `None` is a value and round trips as its tag. A forged
+/// `Some` tag steers the decoder into the payload's node, and the decoder
+/// refuses it there.
 #[test]
 #[ignore = "needs the VM"]
 fn none_of_a_bodiless_type_round_trips_and_a_forged_some_is_malformed() {
@@ -113,13 +115,13 @@ fn none_of_a_bodiless_type_round_trips_and_a_forged_some_is_malformed() {
     );
 }
 
-/// `decode` typed at the bodiless type itself. No program can produce its
-/// header, so the test does, from `wire.sca`'s fingerprint specification:
+/// Calls `decode` at the bodiless type itself. No program can produce its
+/// header, so the test builds one from `wire.sca`'s fingerprint specification:
 /// version 3, one node, root 0, tag 14 alone is `0xf5c99787f8ebc4ff`, written
-/// little-endian behind `SW` 3. The same number is pinned in the descriptor
-/// builder's own tests, so a disagreement between the two instruments fails
-/// one of them. The body is empty, and the decoder is refused at byte 11 —
-/// `Malformed`, never a panic, never a value.
+/// little-endian after `SW` 3. The descriptor builder's own tests pin the same
+/// number, so if the two ever disagree, one of them fails. The body is empty,
+/// and the decoder refuses it at byte 11 with `Malformed`, never a panic or a
+/// value.
 #[test]
 #[ignore = "needs the VM"]
 fn decode_at_a_bodiless_type_is_malformed_rather_than_a_value_or_a_panic() {

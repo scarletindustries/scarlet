@@ -1,8 +1,12 @@
-//! Core IR: typed ANF between the typed IR and a backend.
+//! Core IR is the typed ANF that sits between typed IR and a backend. ANF
+//! (A-normal form) gives every intermediate value a name, so each operation
+//! only takes names as operands.
 //!
-//! The IR itself is the compiler/VM contract and lives in `scarlet_ir`; this
-//! module re-exports it and holds the compiler's passes over it: `lower`
-//! (typed IR to Core) and `perceus` (reference counting and reuse).
+//! The IR itself is the contract between the compiler and the VM, so it lives
+//! in `scarlet_ir`. This crate re-exports it and holds the compiler's passes
+//! over it. `lower` turns typed IR into Core IR, `immediates` turns `Bool` and
+//! `Nil` constructors into plain values, and `perceus` adds reference counting
+//! and memory reuse.
 
 pub mod immediates;
 pub mod lower;
@@ -12,8 +16,8 @@ use std::fmt;
 
 pub use scarlet_ir::core_ir::*;
 
-/// Whole-module lowering: every function plus the module toplevel as its own
-/// expression (module init).
+/// A whole lowered module. It holds every function, plus the module toplevel
+/// as its own expression, which is the module's initialiser.
 #[derive(Debug, Clone)]
 pub struct CoreProgram {
     pub fns: Vec<CoreFn>,
@@ -21,7 +25,7 @@ pub struct CoreProgram {
 }
 
 impl Default for CoreProgram {
-    /// No functions, with a toplevel returning nil.
+    /// No functions, and a toplevel that returns nil.
     fn default() -> Self {
         CoreProgram {
             fns: Vec::new(),
@@ -62,7 +66,7 @@ pub(crate) mod testkit {
         }
     }
 
-    /// The single anonymous variant most reuse/drop tests scrutinise.
+    /// The one anonymous variant most reuse and drop tests match on.
     pub(crate) fn variant() -> VariantRef {
         vref(0, 0)
     }
@@ -98,8 +102,8 @@ mod elaborated_program_tests {
     const BOOL_ID: TypeId = TypeId(5);
     const BINARY_ID: TypeId = TypeId(6);
 
-    /// A [`PreludeTys`] over a real [`InferEngine`], seeded the way the prelude
-    /// seeds one.
+    /// A [`PreludeTys`] over a real [`InferEngine`], set up the way the
+    /// prelude sets one up.
     struct PreludeCtx {
         eng: InferEngine,
     }
@@ -138,8 +142,8 @@ mod elaborated_program_tests {
         }
     }
 
-    /// A prelude that gave `Bool` a `PrimIds` id would silently stop `perceus`
-    /// emitting `Drop`s for it. This is the assertion that fails.
+    /// If the prelude gave `Bool` a `PrimIds` id, `perceus` would silently stop
+    /// emitting `Drop`s for it. This test is what would catch that.
     #[test]
     fn interned_temps_are_the_shapes_perceus_expects() {
         let mut ctx = PreludeCtx::new();
@@ -164,7 +168,7 @@ mod elaborated_program_tests {
     }
 
     /// A pool holding the five [`TempTys`] nodes with the shapes
-    /// [`TempTys::intern`] gives them, but reachable without an `ElabCtx`.
+    /// [`TempTys::intern`] gives them, built without an `ElabCtx`.
     fn pool_and_temps() -> (ResolvedPool, TempTys) {
         let mut p = ResolvedPool::new(PrimIds::default());
         let prims = p.prims();
@@ -195,8 +199,7 @@ mod elaborated_program_tests {
         }
     }
 
-    /// `TypedProgram::consts` is not a second pool that emit merges: lowering
-    /// preserves every `ConstId` in it.
+    /// Lowering keeps every `ConstId` the typed program uses exactly as it is.
     #[test]
     fn typed_program_consts_are_stable_ids() {
         let (pool, temps) = pool_and_temps();
@@ -223,8 +226,8 @@ mod elaborated_program_tests {
         };
 
         // Every constant lives in the compiler's one pool, and `lower` has
-        // none of its own: an id the elaborator minted names the same constant
-        // after lowering.
+        // none of its own. So an id the elaborator minted names the same
+        // constant after lowering.
         let out = format!("{}", lower::lower(&p));
         assert!(out.contains("ret c1\n"), "the fn's constant:\n{out}");
         assert!(
@@ -266,9 +269,9 @@ mod elaborated_program_tests {
         );
     }
 
-    /// The constants `lower` needs but no source literal spells (here an array
-    /// pattern's length check) are carried on the node, so the pool cannot grow
-    /// during lowering.
+    /// The constants `lower` needs that no source literal writes, here an
+    /// array pattern's length check, are carried on the node. So the pool
+    /// can't grow during lowering.
     #[test]
     fn lower_cannot_mint_a_constant_the_elaborator_did_not_pool() {
         let (pool, temps) = pool_and_temps();
@@ -326,8 +329,9 @@ mod elaborated_program_tests {
         };
 
         // The array arm's length check compares against `TypedPat::Array`'s
-        // pooled `len`, `c0`: `lower` has no pool to mint a constant into, so
-        // every constant it emits is one the elaborator already pooled.
+        // pooled `len`, which is `c0`. `lower` has no pool to mint a constant
+        // into, so every constant it emits is one the elaborator already
+        // pooled.
         let out = format!("{}", lower::lower(&p));
         assert!(out.contains("c0"), "the length check:\n{out}");
         assert!(!out.contains("c3"), "a constant nobody pooled:\n{out}");

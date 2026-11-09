@@ -26,7 +26,8 @@ pub fn present(value a) Field(a) {
 	Present(value)
 }
 
-// One branch per state, so merging two is something you write on purpose.
+// Takes one branch per state, so merging two states is something you write on
+// purpose.
 pub fn fold(f Field(a), on_absent fn() b, on_null fn() b, on_present fn(a) b) b {
 	match f {
 		Absent -> on_absent()
@@ -35,8 +36,8 @@ pub fn fold(f Field(a), on_absent fn() b, on_null fn() b, on_present fn(a) b) b 
 	}
 }
 
-// A partial update of `current`: absent keeps it, null clears it, present
-// replaces it.
+// Applies the field to `current` as a partial update. Absent keeps it, null
+// clears it and present replaces it.
 pub fn update(f Field(a), current Option(a)) Option(a) {
 	match f {
 		Absent -> current
@@ -45,7 +46,7 @@ pub fn update(f Field(a), current Option(a)) Option(a) {
 	}
 }
 
-// `Err(Nil)` for absent and for null.
+// Returns the value, or `Err(Nil)` for absent and for null.
 pub fn require(f Field(a)) Result(a, Nil) {
 	match f {
 		Absent -> Err(Nil)

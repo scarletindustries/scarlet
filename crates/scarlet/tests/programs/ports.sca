@@ -1,4 +1,4 @@
-// Ports: a child process as a stream. Everything here uses /bin/sh and cat,
+// Ports treat a child process as a stream. Everything here uses /bin/sh and cat,
 // which every supported platform has, and every line is sequenced by a read
 // or a close, so the output is fixed.
 
@@ -19,7 +19,7 @@ fn check(name String, ok Bool) Nil {
 	}
 }
 
-// Read until the child closes its stdout, accumulating.
+// Read and accumulate until the child closes its stdout.
 fn drain(p port::Port, acc Binary) Binary {
 	match port::read(p, 4096) {
 		Ok(socket::Data(b)) -> drain(p, binary::append(acc, b))

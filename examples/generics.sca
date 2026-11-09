@@ -21,7 +21,7 @@ type Stack(a) {
 	Top(head a, rest Stack(a))
 }
 
-// Inferred as fn(a) a.
+// This is inferred as fn(a) a.
 fn identity(x) {
 	x
 }

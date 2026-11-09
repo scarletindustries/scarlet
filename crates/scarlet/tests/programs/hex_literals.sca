@@ -4,9 +4,9 @@
 // `0xFF` is 255, and `0xFFFFFFFFFFFFFFFF` is out of range, not -1. Prefix
 // case and hex-digit case are insignificant. `_` may sit between two digits
 // of that radix, the same rule as decimal. There is no octal prefix: `08`
-// is decimal 8. Hex/bin floats are not a thing: `0xFF.5` is `0xFF` then `.5`.
+// is decimal 8. There are no hex or binary floats: `0xFF.5` is `0xFF` then `.5`.
 //
-// Range is i64, same as decimal:
+// The range is i64, the same as decimal:
 //   0x7FFFFFFFFFFFFFFF == int::max_value            (ok)
 //   0x8000000000000000                             (compile error: out of range)
 //   9223372036854775808                            (same error, decimal)

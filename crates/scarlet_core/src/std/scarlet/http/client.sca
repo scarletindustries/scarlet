@@ -11,16 +11,16 @@ import scarlet/net/tls
 import scarlet/result
 import scarlet/time
 
-// The HTTP/1.1 client: send one request, read one response back.
+// The HTTP/1.1 client. It sends one request and reads one response back.
 //
-// It runs over an `Io`: read, write and close closures over one open
-// connection. `plain` makes one from a `Socket`, `secure` from a `TlsSocket`,
-// so the request and response code is written once for both, and tests can
-// run it over a Binary with no network.
+// It runs over an `Io`, which is a set of read, write and close closures over
+// one open connection. `plain` makes one from a `Socket` and `secure` makes
+// one from a `TlsSocket`, so the request and response code is written once for
+// both, and tests can run it over a Binary with no network.
 //
-// No connection pooling: each request opens a connection and sends
-// `Connection: close`. No redirects, cookies, retries or decompression. One
-// read deadline covers the whole exchange.
+// There's no connection pooling, so each request opens a connection and sends
+// `Connection: close`. It doesn't do redirects, cookies, retries or
+// decompression. One read deadline covers the whole exchange.
 
 pub type Reader = fn(Int, time::Instant) Result(socket::Read, ClientError)
 
@@ -29,7 +29,7 @@ pub type Writer = fn(Binary) Result(Nil, ClientError)
 pub type Closer = fn() Result(Nil, ClientError)
 
 // An open connection. All three closures must address the same one. The type
-// cannot enforce that; `plain` and `secure` always do.
+// can't enforce that, but `plain` and `secure` always do.
 pub type Io {
 	read Reader
 	write Writer
@@ -37,34 +37,35 @@ pub type Io {
 }
 
 // Why a request failed. A cleartext failure is always `Transport` and a TLS
-// one always `Tls`, socket failures under TLS included, so `u.scheme` says
-// which to match.
+// one is always `Tls`, including socket failures under TLS, so `u.scheme`
+// tells you which to match.
 pub type ClientError {
-	// The URL string is not an absolute http(s) URL.
+	// The URL string isn't an absolute http(s) URL.
 	BadUrl(err url::UrlError)
-	// A header has CR, LF or NUL, or a name that is not a token. Refused before
-	// connecting: it could split the request in two at a proxy.
+	// A header has CR, LF or NUL, or a name that isn't a token. It's refused
+	// before connecting, because it could split the request in two at a proxy.
 	BadRequestHeaders
 	// A cleartext (`http`) socket failure.
 	Transport(err error::NetError)
 	// A TLS (`https`) failure, certificate problems included.
 	Tls(err tls::TlsError)
-	// The peer's response head is not HTTP/1.x, or its framing fields
+	// The peer's response head isn't HTTP/1.x, or its framing fields
 	// contradict each other.
 	MalformedResponse(err h1::BadResponse)
-	// The body passed the byte budget. Carries the budget: the read stops
-	// there, so the real size is never known.
+	// The body went over the byte budget. It carries the budget, because the
+	// read stops there and the real size is never known.
 	BodyTooLarge(limit Int)
 }
 
 // A whole response. The body is read in full, so a caller never holds a
-// half-read connection. Not `scarlet/http.Response`, whose body framing is a
-// promise made by a sender.
+// half-read connection. It isn't `scarlet/http.Response`, whose body framing
+// is a promise made by a sender.
 pub type Response {
 	version h1::Version
 	status Int
-	// The reason phrase exactly as it arrived, possibly empty. Present because
-	// a proxy has to forward it; RFC 9112 §4 says nothing may be decided on it.
+	// The reason phrase exactly as it arrived, possibly empty. It's kept
+	// because a proxy has to forward it, but RFC 9112 §4 says nothing may be
+	// decided on it.
 	reason Binary
 	headers headers::Headers
 	// The `Connection` tokens as the head arrived, for `h1::should_close`.
@@ -78,13 +79,15 @@ pub type Request {
 	method Binary
 	url url::Url
 	// Fields to send in addition to `Host`, `Content-Length` and `Connection`.
-	// Any of those three given here is overwritten, not duplicated.
+	// If you give any of those three here, they're overwritten instead of
+	// duplicated.
 	headers headers::Headers
 	body Binary
 }
 
-// The default cap on a buffered response body. A response advertising more is
-// refused before a byte of it is read; an unadvertised one stops at the limit.
+// The default cap on a buffered response body. A response that advertises more
+// is refused before a byte of it is read, and one that doesn't advertise a
+// length stops at the limit.
 pub const MAX_BODY = 8388608
 
 // How long `send` and `fetch` wait, as one deadline for the whole exchange.
@@ -121,18 +124,19 @@ pub fn secure(sock tls::TlsSocket) Io {
 	)
 }
 
-// The one place a scheme picks a transport: `https` opens TLS and checks the
-// certificate against `u.host`, `http` opens a plain socket.
+// This is the one place a scheme picks a transport. `https` opens TLS and
+// checks the certificate against `u.host`, and `http` opens a plain socket.
 pub fn connect(u url::Url) Result(Io, ClientError) {
 	match u.scheme {
 		url::Http -> result::map(result::map_err(net::connect(u.host, u.port), Transport), plain)
-		// Pass the host we dial and nothing else, or HostnameMismatch cannot
+		// Pass the host we dial and nothing else, or HostnameMismatch can't
 		// catch a mix-up.
 		url::Https -> result::map(result::map_err(tls::connect(u.host, u.port), Tls), secure)
 	}
 }
 
-// Open a connection for `req.url`, send it, read the whole response, close.
+// Opens a connection for `req.url`, sends the request, reads the whole response
+// and closes the connection.
 pub fn fetch(req Request) Result(Response, ClientError) {
 	fetch_bounded(req, MAX_BODY)
 }
@@ -148,8 +152,9 @@ pub fn fetch_until(
 ) Result(Response, ClientError) {
 	io <- result::then(connect(req.url))
 	response = send_until(io, req, max_body, deadline)
-	// Close either way: after `Connection: close` it can't be reused. A failed
-	// close is ignored, since the response is already in hand.
+	// Close either way, because after `Connection: close` the connection can't
+	// be reused. A failed close is ignored, since the response is already in
+	// hand.
 	shut = io.close
 	match shut() {
 		Ok(Nil) -> response
@@ -157,14 +162,14 @@ pub fn fetch_until(
 	}
 }
 
-// `GET url`, with no extra fields.
+// Sends `GET url` with no extra fields.
 pub fn get(url_text String) Result(Response, ClientError) {
 	u <- result::then(result::map_err(url::parse(url_text), BadUrl))
 	fetch(Request(method: <<'GET'>>, url: u, headers: [], body: EMPTY))
 }
 
-// Send `req` over an open `io` and read the response back. For a caller with
-// its own connection, like a tunnel or a test double.
+// Sends `req` over an open `io` and reads the response back. It's for a caller
+// with its own connection, like a tunnel or a test double.
 pub fn send(io Io, req Request) Result(Response, ClientError) {
 	send_bounded(io, req, MAX_BODY)
 }
@@ -182,15 +187,16 @@ pub fn send_until(
 	head <- result::then(serialize_request(req))
 	emit = io.write
 	sent <- result::then(emit(binary::append(head, req.body)))
-	// `sent` is Nil: matched, so no Result is dropped.
+	// `sent` is Nil. Matching on it means no Result is dropped.
 	match sent {
 		Nil -> read_response(io, req.method, max_body, deadline)
 	}
 }
 
-// The request head. `headers::set` puts in our own `Host`, `Content-Length`
-// and `Connection`, dropping any the caller gave, since two Content-Lengths
-// allow request smuggling. Invalid caller fields are refused first.
+// Builds the request head. `headers::set` puts in our own `Host`,
+// `Content-Length` and `Connection` and drops any the caller gave, since two
+// Content-Lengths allow request smuggling. Invalid caller fields are refused
+// first.
 fn serialize_request(req Request) Result(Binary, ClientError) {
 	if !headers::valid(req.headers) {
 		Err(BadRequestHeaders)
@@ -212,7 +218,7 @@ fn concat(parts Array(Binary)) Binary {
 	array::fold(parts, EMPTY, fn(acc, p) binary::append(acc, p))
 }
 
-// Read one response: head, then body framed per RFC 9112 §6.3.
+// Reads one response: the head, then the body, framed as RFC 9112 §6.3 says.
 fn read_response(
 	io Io,
 	method Binary,
@@ -221,8 +227,9 @@ fn read_response(
 ) Result(Response, ClientError) {
 	head <- result::then(read_head(io, EMPTY, max_body, deadline))
 	framing = if binary::eq_ignore_ascii_case(method, HEAD) {
-		// §6.3 rule 1, and the one rule h1 cannot apply: a response to HEAD
-		// has no body however its fields frame one. h1 never saw the request.
+		// This is §6.3 rule 1, the one rule h1 can't apply because it never saw
+		// the request. A response to HEAD has no body, however its fields frame
+		// one.
 		h1::BodyNone
 	} else {
 		h1::response_framing(head.headers, head.status)
@@ -240,8 +247,8 @@ fn read_response(
 	)
 }
 
-// A response head, plus the bytes read past it: the read that finished the
-// head often brought body bytes too.
+// A response head, plus the bytes read past it, because the read that finished
+// the head often brought body bytes too.
 type Head {
 	version h1::Version
 	status Int
@@ -256,8 +263,8 @@ fn read_head(io Io, buf Binary, max_body Int, deadline time::Instant) Result(Hea
 		h1::ResponseDone(version, code, reason, hs, flags, consumed) -> {
 			rest = binary::drop_bytes(buf, consumed)
 			if code >= 100 && code < 200 {
-				// A 1xx interim response is not the answer (RFC 9110 §15.2): skip
-				// it and parse the next head.
+				// A 1xx interim response isn't the answer (RFC 9110 §15.2), so
+				// skip it and parse the next head.
 				read_head(io, rest, max_body, deadline)
 			} else {
 				Ok(
@@ -274,16 +281,16 @@ fn read_head(io Io, buf Binary, max_body Int, deadline time::Instant) Result(Hea
 		}
 		h1::ResponseBad(err) -> Err(MalformedResponse(err))
 		h1::ResponseNeedMore -> {
-			// The head shares the body's budget: a peer that never ends the
-			// head must not be able to make this buffer without limit.
+			// The head shares the body's budget, so a peer that never ends the
+			// head can't make this buffer without limit.
 			more <- result::then(read_more(io, buf, max_body, deadline))
 			read_head(io, more, max_body, deadline)
 		}
 	}
 }
 
-// One read appended to `buf`, refusing to grow past `limit`. A clean close
-// here is UnexpectedEof: every caller is mid-message and wanted more bytes.
+// Appends one read to `buf`, refusing to grow past `limit`. A clean close here
+// is UnexpectedEof, because every caller is mid-message and wanted more bytes.
 fn read_more(io Io, buf Binary, limit Int, deadline time::Instant) Result(Binary, ClientError) {
 	if binary::byte_size(buf) >= limit {
 		Err(BodyTooLarge(limit))
@@ -326,7 +333,7 @@ fn read_exactly(
 	deadline time::Instant,
 ) Result(Binary, ClientError) {
 	if binary::byte_size(buf) >= n {
-		// Cannot fail: framing refuses a negative length, so
+		// This can't fail, because framing refuses a negative length, so
 		// `0 <= n <= byte_size(buf)`.
 		match binary::slice_bytes(buf, 0, n) {
 			Ok(v) -> Ok(v)
@@ -351,8 +358,8 @@ fn read_chunked(io Io, buf Binary, limit Int, deadline time::Instant) Result(Bin
 	}
 }
 
-// Close-framed: a clean close ends the body, so a cut-short body looks the
-// same as a whole one.
+// The body is framed by the close. A clean close ends it, so a body that was
+// cut short looks the same as a whole one.
 fn read_to_close(io Io, buf Binary, limit Int, deadline time::Instant) Result(Binary, ClientError) {
 	if binary::byte_size(buf) >= limit {
 		Err(BodyTooLarge(limit))

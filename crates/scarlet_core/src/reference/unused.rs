@@ -1,6 +1,6 @@
-//! Unused-import / dead-code analysis over the [`ReferenceGraph`]: workspace
-//! reachability and the `Hint` diagnostics it produces for the entry module.
-//! Read-only over the graph.
+//! Finds unused imports and dead code in the [`ReferenceGraph`]. It works out
+//! what is reachable across the workspace and produces `Hint` diagnostics for
+//! the entry module. It never changes the graph.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -10,13 +10,14 @@ use crate::module::ModulePath;
 use super::{DefId, Definition, EntityKind, ModuleId, ReferenceGraph, ReferenceKind};
 
 impl ReferenceGraph {
-    /// Reachability roots: every `pub` definition. The non-LSP consumer adds
-    /// the entry module's top-level definitions to this set before walking.
+    /// The roots that reachability starts from, which are every `pub`
+    /// definition. The caller outside the LSP adds the entry module's
+    /// top-level definitions to this set before walking.
     fn roots(&self) -> impl Iterator<Item = DefId> + '_ {
         self.all_defs().filter(|d| d.is_pub).map(|d| d.defid)
     }
 
-    /// Definition→definition edges: an edge `(a, b)` means definition `a`
+    /// The edges between definitions. An edge `(a, b)` means definition `a`
     /// contains an occurrence that resolves to definition `b`.
     fn edges(&self) -> impl Iterator<Item = (DefId, DefId)> + '_ {
         self.modules.values().flat_map(|mr| {
@@ -27,18 +28,19 @@ impl ReferenceGraph {
     }
 
     /// The set of definitions reachable from `roots()` plus `extra_roots`,
-    /// walking [`edges`](Self::edges). A definition only self-referenced
-    /// (recursive but otherwise unused) is *not* made reachable by its own
-    /// edge, so it is correctly reported as dead.
+    /// walking [`edges`](Self::edges). A definition that only refers to itself
+    /// (recursive, but otherwise unused) is *not* made reachable by its own
+    /// edge, so it is rightly reported as dead.
     fn reachable(&self, extra_roots: Vec<DefId>) -> HashSet<DefId> {
         let mut adj: HashMap<DefId, Vec<DefId>> = HashMap::new();
         for (from, to) in self.edges() {
             adj.entry(from).or_default().push(to);
         }
-        // A constructor keeps its type alive: `Config(name: 'x')` mentions the
-        // constructor, never the type. This edge is structural and must not
-        // move into `edges()`, which is built from occurrences — find-references
-        // on the type would then list the constructor's declaration.
+        // A constructor keeps its type alive, because `Config(name: 'x')`
+        // mentions the constructor and never the type. This edge comes from the
+        // declaration, so it must not move into `edges()`, which is built from
+        // occurrences. If it did, find-references on the type would list the
+        // constructor's declaration.
         for mr in self.modules.values() {
             for d in mr.definitions.values() {
                 if let Some(ty) = d.ctor_of() {
@@ -65,15 +67,15 @@ impl ReferenceGraph {
         seen
     }
 
-    /// Targets of the entry module's executed top-level body — *use*
-    /// occurrences with no enclosing definition. That code runs whenever the
+    /// What the entry module's top-level body refers to, meaning the *use*
+    /// occurrences that sit in no definition. That code runs whenever the
     /// program runs, so anything it names is a live root.
     ///
-    /// The kind filter is load-bearing. The populator also records, with
-    /// `owner == None`, a `Definition` self-occurrence for every top-level
-    /// declaration plus import/binding tokens. Rooting on `owner.is_none()`
-    /// alone would make every top-level definition its own root, so no private
-    /// definition could ever be reported dead.
+    /// The filter on kind matters. The code that fills the graph also records,
+    /// with `owner == None`, a `Definition` occurrence of every top-level
+    /// declaration itself, plus import and binding tokens. Rooting on
+    /// `owner.is_none()` alone would make every top-level definition its own
+    /// root, so no private definition could ever be reported dead.
     fn entry_toplevel_roots(&self, entry: ModuleId) -> Vec<DefId> {
         match self.modules.get(&entry) {
             Some(mr) => mr
@@ -88,22 +90,22 @@ impl ReferenceGraph {
         }
     }
 
-    /// The reachable set under the full dead-code root rule: every `pub`
-    /// definition workspace-wide plus everything the entry module's top-level
-    /// body references.
+    /// Everything reachable under the full dead-code rule for roots, which is
+    /// every `pub` definition in the workspace plus everything the entry
+    /// module's top-level body refers to.
     fn reachable_from_entry(&self, entry: ModuleId) -> HashSet<DefId> {
         self.reachable(self.entry_toplevel_roots(entry))
     }
 
-    /// Whether `def` is used as a real (qualified/unqualified) reference
-    /// anywhere. An import declaration's own `Import`/`Alias`/`Definition`
-    /// occurrences never count as a use.
+    /// Whether `def` is used anywhere as a real reference, qualified or not. An
+    /// import declaration's own `Import`, `Alias` and `Definition` occurrences
+    /// never count as a use.
     ///
-    /// A `ModuleAlias` is used through a qualifier: in `import a/b` then
-    /// `b.foo()`, the member targets the *remote* def, but the qualifier `b`
-    /// records a [`ReferenceKind::Qualifier`] occurrence targeting this alias.
-    /// Naming the alias itself is what stops a second alias of the same module
-    /// from being kept alive by its sibling's use.
+    /// A `ModuleAlias` is used through a qualifier. In `import a/b` followed by
+    /// `b.foo()`, the member targets the def in the other module, but the
+    /// qualifier `b` records a [`ReferenceKind::Qualifier`] occurrence that
+    /// targets this alias. Because that occurrence names the alias itself, a
+    /// second alias of the same module isn't kept alive by the first one's use.
     fn has_real_use(&self, def: &Definition) -> bool {
         let refs = self.references_to(def.defid);
         let direct = refs.iter().any(|r| r.kind.is_use_site());
@@ -115,12 +117,12 @@ impl ReferenceGraph {
             .any(|r| r.kind == ReferenceKind::Qualifier && !r.span.within(&decl_span))
     }
 
-    /// `Hint` diagnostics for the entry module: unused private definitions and
-    /// unused imports, decided by workspace reachability.
+    /// The `Hint` diagnostics for the entry module, which are its unused private
+    /// definitions and unused imports, decided by what the workspace reaches.
     ///
-    /// Only definitions owned by `entry` are reported, so prelude / `@vm` /
-    /// stdlib definitions are never flagged. Output is sorted by source
-    /// position so it flows stably through `publishDiagnostics`.
+    /// Only definitions in `entry` are reported, so prelude, `@vm` and stdlib
+    /// definitions are never flagged. The output is sorted by source position
+    /// so `publishDiagnostics` always gets it in the same order.
     fn unused_diagnostics(&self, entry: ModuleId) -> Vec<Diagnostic> {
         let Some(mr) = self.modules.get(&entry) else {
             return Vec::new();
@@ -139,8 +141,8 @@ impl ReferenceGraph {
                 }
                 continue;
             }
-            // `Value` binders are the unused-binding check's job, and
-            // `Constructor`/`Field` are covered via their owning `Type`.
+            // The unused-binding check handles `Value` binders, and a
+            // `Constructor` or `Field` is covered by the `Type` it belongs to.
             if def.is_pub
                 || !matches!(
                     def.entity(),
@@ -161,8 +163,8 @@ impl ReferenceGraph {
         out
     }
 
-    /// [`unused_diagnostics`](Self::unused_diagnostics) keyed by module path;
-    /// empty if `entry` was never interned into this graph.
+    /// [`unused_diagnostics`](Self::unused_diagnostics), keyed by module path.
+    /// It is empty if `entry` was never interned into this graph.
     pub fn unused_diagnostics_for(&self, entry: &ModulePath) -> Vec<Diagnostic> {
         match self.module_id(entry) {
             Some(id) => self.unused_diagnostics(id),
@@ -288,7 +290,7 @@ mod tests {
     fn unused_diag_self_recursive_only_is_flagged() {
         let (mut g, m, mut mr) = main_graph();
         let spin = add_def(&mut mr, m, "spin", 1, EntityKind::Function, false);
-        // `spin` references only itself — a self edge never makes it reachable.
+        // `spin` only refers to itself, and an edge to itself never makes it reachable.
         add_ref(&mut mr, Some(spin), (2, 4, 8), K::Unqualified, spin);
         g.insert_module(mr);
         let g = g.finish();
@@ -402,9 +404,9 @@ mod tests {
         assert!(g.unused_diagnostics(bare).is_empty());
     }
 
-    /// `Compiler::emit_def` records a `K::Definition` self-occurrence with
-    /// `owner == None` for every top-level declaration. Those must not root
-    /// the entry body, or every definition roots itself.
+    /// `Compiler::emit_def` records a `K::Definition` occurrence of every
+    /// top-level declaration itself, with `owner == None`. Those must not count
+    /// as roots from the entry body, or every definition would be its own root.
     #[test]
     fn unused_diag_definition_self_occurrence_does_not_root_dead_code() {
         let (mut g, m, mut mr) = main_graph();
@@ -426,9 +428,9 @@ mod tests {
         assert_eq!(d.span, dead.span);
     }
 
-    /// A plain `import a/b` alias in the production shape: the `Definition`,
-    /// its self-occurrence, and the `Import` occurrence whose target is owned
-    /// by the imported module.
+    /// A plain `import a/b` alias, built the way the compiler builds it: the
+    /// `Definition`, its occurrence of itself, and the `Import` occurrence
+    /// whose target is in the imported module.
     fn add_plain_import(
         mr: &mut ModuleReferences,
         m: ModuleId,
@@ -459,8 +461,8 @@ mod tests {
         alias
     }
 
-    /// `import a/b` + `b.foo()`: the `Qualifier` occurrence on `b` is what
-    /// keeps the import alive. Dropping the use must flag it again.
+    /// With `import a/b` and `b.foo()`, the `Qualifier` occurrence on `b` is
+    /// what keeps the import alive. Dropping the use must flag it again.
     #[test]
     fn unused_diag_plain_qualified_import_recovers_use() {
         let build = |with_use: bool| {
@@ -498,13 +500,14 @@ mod tests {
             "a plain qualified import whose member is used must not be flagged"
         );
 
-        // Drop the use: the check is still live, not just disabled.
+        // Drop the use, to show the check still works and isn't just switched
+        // off.
         let (g, m) = build(false);
         assert_eq!(sole_unused(&g, m).message, "unused import `b`");
     }
 
-    /// Two plain qualified imports, one used: the used one's `Qualifier`
-    /// occurrence names its own alias, so it cannot mask its sibling.
+    /// Two plain qualified imports, with one used. The used one's `Qualifier`
+    /// occurrence names its own alias, so it can't hide the other one.
     #[test]
     fn unused_diag_one_of_two_plain_qualified_imports_still_flagged() {
         let (mut g, m, mut mr) = main_graph();
@@ -553,9 +556,9 @@ mod tests {
         );
     }
 
-    /// Two aliases of the SAME module, only `bb` used: exactly `b` is flagged.
-    /// Attribution by target module cannot tell the two apart, so the liveness
-    /// edge has to name the alias.
+    /// Two aliases of the SAME module, with only `bb` used, so only `b` is
+    /// flagged. Going by the target module can't tell the two apart, so the
+    /// edge that keeps an alias alive has to name the alias.
     #[test]
     fn unused_diag_two_aliases_of_same_module_only_unused_one_flagged() {
         let (mut g, m, mut mr) = main_graph();

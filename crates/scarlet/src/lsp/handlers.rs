@@ -1,6 +1,6 @@
-//! Position-query responders on [`Workspace`]. Each `*_response` computes the
-//! JSON result of one LSP request with no I/O; the transport layer wraps it in
-//! a `jsonrpc` envelope.
+//! The handlers on [`Workspace`] that answer position queries. Each `*_response` computes the
+//! JSON result of one LSP request with no I/O, and the transport layer wraps it in a `jsonrpc`
+//! envelope.
 
 use serde_json::{Value as Json, json};
 
@@ -15,15 +15,14 @@ use super::wire::{
 use super::workspace::Workspace;
 
 impl Workspace {
-    /// `textDocument/hover`: a markdown block for the symbol under the cursor,
-    /// or `Json::Null`.
+    /// Answers `textDocument/hover` with a markdown block for the symbol under the cursor, or
+    /// `Json::Null`.
     pub fn hover_response(&mut self, params: &Json) -> Json {
         let Some(DocPosition { uri, line, col }) = self.resolve_pos(params) else {
             return Json::Null;
         };
-        // The reference graph carries no inference, so the type comes from the
-        // session's hover table. Absent for in-repo stdlib files, which have no
-        // session; hover then shows the graph's identity alone.
+        // The reference graph carries no inference, so the type comes from the session's hover
+        // table. When the table has no type here, hover shows only the graph's identity.
         let typed = query_module(&uri).and_then(|m| {
             let key = if module::is_stdlib(&m) {
                 module::ModuleKey::for_stdlib(&m)
@@ -33,9 +32,8 @@ impl Workspace {
             self.session_for(&uri)
                 .and_then(|s| s.hover(Some(&key), line, col))
         });
-        // Must come before the definition lookup: an import path segment has no
-        // `Definition`, and a qualifier resolves to the alias binding, whose doc
-        // is empty.
+        // This has to come before the definition lookup, because an import path segment has no
+        // `Definition`, and a qualifier resolves to the alias binding, whose doc is empty.
         if let Some((graph, mid)) = self.graph_module(&uri)
             && let Some(target) = graph.module_named_at(mid, line, col)
         {
@@ -70,11 +68,10 @@ impl Workspace {
         Json::Null
     }
 
-    /// `textDocument/completion`: after `alias.`, the imported module's public
-    /// exports; at a bare identifier, the current module's top-level
-    /// declarations. Always an array — an unresolvable position yields an
-    /// empty list, not null, so a client mid-keystroke sees "no items" rather
-    /// than an error.
+    /// Answers `textDocument/completion`. After `alias::` it lists the imported module's public
+    /// exports, and at a bare identifier the current module's top-level declarations. It always
+    /// returns an array: a position it can't resolve gives an empty list, not null, so a client
+    /// mid-keystroke sees "no items" instead of an error.
     pub fn completion_response(&mut self, params: &Json) -> Json {
         let empty = Json::Array(Vec::new());
         let Some(DocPosition { uri, line, col }) = self.resolve_pos(params) else {
@@ -83,9 +80,9 @@ impl Workspace {
         let Some((graph, mid)) = self.graph_module(&uri) else {
             return empty;
         };
-        // The completion prefix comes from the buffer, not the graph: a
-        // trailing `alias::` is a parse error the recovering parser dropped, so
-        // no occurrence exists at the cursor to resolve.
+        // The completion prefix comes from the buffer, not the graph. A trailing `alias::` is a
+        // parse error the recovering parser dropped, so there's no occurrence at the cursor to
+        // resolve.
         let qualifier = self.documents.get(&uri).and_then(|text| {
             let line_text = text.lines().nth(line as usize)?;
             qualifier_before(line_text, col as usize)
@@ -109,10 +106,9 @@ impl Workspace {
                     .defs_in(target)
                     .filter(|d| d.is_pub && d.entity() != reference::EntityKind::Field)
                     .map(|d| {
-                        // The type comes from the session's hover table, keyed
-                        // by the export's own declaring span. Absent for
-                        // modules with no recorded facts; the item then shows
-                        // name and kind alone.
+                        // The type comes from the session's hover table, keyed by the
+                        // export's own declaring span. A module with no recorded facts has
+                        // none, and then the item shows only its name and kind.
                         let detail = session
                             .zip(key.as_ref())
                             .and_then(|(s, k)| {
@@ -123,9 +119,8 @@ impl Workspace {
                     })
                     .collect()
             }
-            // Bare position: the module's own declarations, same surface as
-            // documentSymbol plus module aliases, minus record fields, which
-            // are never bare names.
+            // At a bare position, offer the module's own declarations: what documentSymbol
+            // lists, plus module aliases, minus record fields, which are never bare names.
             None => graph
                 .defs_in(mid)
                 .filter(|d| d.is_symbol_listable() && d.entity() != reference::EntityKind::Field)
@@ -142,8 +137,8 @@ impl Workspace {
         Json::Array(items)
     }
 
-    /// `textDocument/definition`: the `{ uri, range }` of the definition under
-    /// the cursor, or `Json::Null`.
+    /// Answers `textDocument/definition` with the `{ uri, range }` of the definition under the
+    /// cursor, or `Json::Null`.
     pub fn definition_response(&mut self, params: &Json) -> Json {
         let Some(DocPosition { uri, line, col }) = self.resolve_pos(params) else {
             return Json::Null;
@@ -151,11 +146,10 @@ impl Workspace {
         let Some((graph, mid)) = self.graph_module(&uri) else {
             return Json::Null;
         };
-        // A position naming a module jumps to that module's file at 0:0. A
-        // `scarlet/*` module opens its source when the stdlib tree is on disk
-        // next to the open file, and is null when it is only embedded. Without
-        // this the cursor would resolve to the alias binding, which spans the
-        // whole `import` declaration — a no-op self-jump.
+        // A position naming a module jumps to that module's file at 0:0. A `scarlet/*` module
+        // opens its source when the stdlib tree is on disk next to the open file, and gives null
+        // when it's only embedded. Without this, the cursor would resolve to the alias binding,
+        // which spans the whole `import` declaration, so the jump would go nowhere.
         if let Some(import_mod) = graph.module_named_at(mid, line, col) {
             return match uri_for(graph, &uri, import_mod) {
                 Some(u) => json!({
@@ -169,9 +163,8 @@ impl Workspace {
             };
         }
         if let Some(def) = graph.definition_at(mid, line, col) {
-            // Elsewhere in an `import` declaration there is nothing to navigate
-            // to, and `ModuleAlias` spans the whole declaration, so jumping
-            // there would be a no-op self-jump.
+            // Elsewhere in an `import` declaration there's nothing to go to, and `ModuleAlias`
+            // spans the whole declaration, so jumping there would go nowhere.
             if !def.entity().is_navigable() {
                 return Json::Null;
             }
@@ -182,9 +175,9 @@ impl Workspace {
         Json::Null
     }
 
-    /// `textDocument/references`: deduplicated `{ uri, range }` for the
-    /// definition under the cursor, or `Json::Null` when none resolves. A
-    /// resolved definition with no references gives an empty array, not null.
+    /// Answers `textDocument/references` with deduplicated `{ uri, range }`s for the definition
+    /// under the cursor, or `Json::Null` when none resolves. A resolved definition with no
+    /// references gives an empty array, not null.
     pub fn references_response(&mut self, params: &Json) -> Json {
         let include_decl = params
             .get("context")
@@ -195,13 +188,12 @@ impl Workspace {
             return Json::Null;
         };
         if let Some((graph, mid)) = self.graph_module(&uri) {
-            // The module name inside an `import` declaration resolves to a
-            // target that couples the imported module's id with a span in the
-            // *importing* file's coordinates. Looking that up in the imported
-            // module's definitions is a lookup with the wrong key: usually a
-            // miss, and on a span coincidence another module's data. A
-            // qualifier use (`b` of `b.add`) resolves through the importer's
-            // own alias definition and stays supported.
+            // The module name inside an `import` declaration resolves to a target that pairs the
+            // imported module's id with a span in the *importing* file's coordinates. Looking
+            // that up in the imported module's definitions uses the wrong key. It usually misses,
+            // and when the spans happen to line up it returns another module's data. A qualifier
+            // use (`b` of `b::add`) resolves through the importer's own alias definition, so it
+            // still works.
             if graph.import_declaration_at(mid, line, col) {
                 return Json::Null;
             }
@@ -226,8 +218,8 @@ impl Workspace {
                 }
             };
             for rr in graph.references_to(defid) {
-                // The declaration itself is added only by the `include_decl`
-                // branch below, so `includeDeclaration = false` is honored.
+                // Only the `include_decl` branch below adds the declaration itself, so
+                // `includeDeclaration = false` is honoured.
                 if !rr.kind.is_reference_site() {
                     continue;
                 }
@@ -235,8 +227,8 @@ impl Workspace {
                     push(u, &rr.span, &mut out);
                 }
             }
-            // An importer that is also the current entry appears both here and
-            // in the live edges above, hence the dedup.
+            // An importer that is also the current entry appears both here and in the live edges
+            // above, which is why we dedup.
             let stable = crate::lsp::xrefs::StableDefId::of(graph, &uri, def);
             for x in stable.iter().flat_map(|s| self.dependent_callers(&uri, s)) {
                 push(x.uri.clone(), &x.span, &mut out);
@@ -249,9 +241,8 @@ impl Workspace {
         Json::Null
     }
 
-    /// `textDocument/rename`: a `WorkspaceEdit`, `Json::Null` when nothing
-    /// resolves, or `Err` when the rename is refused. The caller turns `Err`
-    /// into a JSON-RPC error.
+    /// Answers `textDocument/rename` with a `WorkspaceEdit`, `Json::Null` when nothing resolves,
+    /// or `Err` when the rename is refused. The caller turns `Err` into a JSON-RPC error.
     pub fn rename_response(
         &mut self,
         params: &Json,
@@ -269,10 +260,9 @@ impl Workspace {
         {
             return match graph.rename(defid, &new_name, Some((mid, uri.as_str()))) {
                 Ok(mut we) => {
-                    // `graph.rename` already validated `new_name` and rejected
-                    // stdlib / module-alias targets, so the cross-file edits
-                    // need no further checks. Appending breaks each file's
-                    // positional edit order, so re-sort.
+                    // `graph.rename` already validated `new_name` and refused stdlib and
+                    // module-alias targets, so the cross-file edits need no more checks.
+                    // Appending breaks each file's positional edit order, so we re-sort.
                     let mut added = false;
                     let stable = graph
                         .definition(defid)
@@ -300,8 +290,8 @@ impl Workspace {
         Ok(Json::Null)
     }
 
-    /// `textDocument/prepareRename`: `{ range, placeholder }`, or `Json::Null`
-    /// when the position cannot be renamed.
+    /// Answers `textDocument/prepareRename` with `{ range, placeholder }`, or `Json::Null` when
+    /// the position can't be renamed.
     pub fn prepare_rename_response(&mut self, params: &Json) -> Json {
         let Some(DocPosition { uri, line, col }) = self.resolve_pos(params) else {
             return Json::Null;
@@ -315,9 +305,9 @@ impl Workspace {
         }
     }
 
-    /// `textDocument/documentSymbol`: the module's top-level declarations, or
-    /// `Json::Null` when the document has no analysed module. The graph also
-    /// holds locals and parameters; `is_symbol_listable` keeps them out.
+    /// Answers `textDocument/documentSymbol` with the module's top-level declarations, or
+    /// `Json::Null` when the document has no analysed module. The graph also holds locals and
+    /// parameters, and `is_symbol_listable` keeps them out.
     pub fn document_symbol_response(&mut self, params: &Json) -> Json {
         let Some(uri) = doc_uri(params) else {
             return Json::Null;
@@ -343,10 +333,9 @@ impl Workspace {
         Json::Array(syms)
     }
 
-    /// `workspace/symbol`: every declaration matching the query, as
-    /// `{ name, kind, location }`. Always an array, empty rather than null when
-    /// nothing has been analysed yet. Lists declarations only, as
-    /// `document_symbol_response` does.
+    /// Answers `workspace/symbol` with every declaration matching the query, as
+    /// `{ name, kind, location }`. It's always an array, and empty instead of null when nothing
+    /// has been analysed yet. Like `document_symbol_response`, it lists only declarations.
     pub fn workspace_symbol_response(&mut self, params: &Json) -> Json {
         let query = params
             .get("query")
@@ -381,8 +370,8 @@ impl Workspace {
 
 /// A function type rendered with its parameter names: `fn(path String) Result(…)`.
 ///
-/// Names live beside the type, not in it — a parameter's name is not part of a
-/// function's identity. Falls back to bare `Display` when the arity disagrees.
+/// Names live beside the type, not in it, because a parameter's name isn't part of a function's
+/// identity. When the arity disagrees, this falls back to plain `Display`.
 fn labelled(ty: &crate::type_def::Type, names: &[String]) -> String {
     let crate::type_def::Type::Function { params, ret } = ty else {
         return ty.to_string();

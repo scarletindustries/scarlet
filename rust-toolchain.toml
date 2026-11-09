@@ -1,6 +1,6 @@
-# The project's single Rust version. rustup reads this for every local cargo
-# invocation, and CI installs from it (`rustup toolchain install`). The hawk
-# dead-code gate links against this exact compiler, so when bumping this,
+# The project's one Rust version. rustup reads this for every local cargo
+# command, and CI installs from it (`rustup toolchain install`). The hawk
+# dead-code gate links against this exact compiler, so when you bump this,
 # bump the pinned hawk release in .github/workflows/ci.yml with it.
 [toolchain]
 channel = "1.97.1"

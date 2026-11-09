@@ -1,17 +1,19 @@
 //! The workspace reference graph.
 //!
-//! Every name occurrence is a [`Reference`] (a [`Span`] plus a
-//! [`ReferenceKind`]) resolved to the [`Definition`] it points at, identified
-//! by a [`DefId`]. Per-module data lives in [`ModuleReferences`]; the
-//! workspace-wide [`ReferenceGraph`] owns the module-path interner and the
-//! forward (position → def) and reverse (def → occurrences) indexes.
+//! Every place a name occurs is a [`Reference`] (a [`Span`] plus a
+//! [`ReferenceKind`]), resolved to the [`Definition`] it points at, which a
+//! [`DefId`] identifies. Each module's data lives in [`ModuleReferences`]. The
+//! [`ReferenceGraph`] covers the whole workspace and owns the module-path
+//! interner and the two indexes: forward (position → def) and reverse (def →
+//! occurrences).
 //!
-//! Data model and queries only. The typecheck pass populates it, and the graph
-//! never alters inference or codegen. Unused-import / dead-code analysis lives
-//! in [`unused`], the rename planner in [`rename`].
+//! This module only holds the data and answers queries. The typecheck pass
+//! fills it in, and the graph never changes inference or codegen. The
+//! unused-import and dead-code analysis lives in [`unused`], and the rename
+//! planner in [`rename`].
 //!
-//! Module identity is interned to a `Copy` [`ModuleId`] so a `DefId` rides on
-//! `Copy` types and survives incremental recompiles.
+//! Module identity is interned to a `Copy` [`ModuleId`], so a `DefId` is made
+//! only of `Copy` types and survives incremental recompiles.
 
 use std::cell::OnceCell;
 use std::collections::HashMap;
@@ -29,19 +31,19 @@ pub mod uri;
 pub use uri::{ModuleUriError, module_uri, path_to_uri};
 
 // `EntityKind` lives in `scarlet_types::types::environment`, which keys
-// constructor/field metadata on it. Re-exported so `DefId`-keyed consumers
-// share one enum.
+// constructor and field metadata on it. We re-export it so everything keyed on
+// `DefId` shares one enum.
 pub use scarlet_types::types::EntityKind;
 
 /// How a name is being used at an occurrence site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReferenceKind {
-    /// `module::member` — qualified through an import alias.
+    /// `module::member`, qualified through an import alias.
     Qualified,
-    /// The `module` half of a `module::member` access, targeting the
-    /// `ModuleAlias` definition. Not a use site, since a qualifier never
-    /// evaluates its target, but the unused-import check treats an alias as
-    /// live when one occurs outside its own declaration.
+    /// The `module` half of a `module::member` access, which targets the
+    /// `ModuleAlias` definition. It is not a use site, since a qualifier never
+    /// evaluates its target. But the unused-import check counts an alias as
+    /// used when one of these occurs outside its own declaration.
     Qualifier,
     /// A bare `name` resolved through the local/value environment.
     Unqualified,
@@ -56,29 +58,32 @@ pub enum ReferenceKind {
 
 impl ReferenceKind {
     /// Whether this occurrence evaluates its target, as opposed to declaring
-    /// it or naming a module. Drives the xref reverse index and the
-    /// unused/dead-code check.
+    /// it or naming a module. The reverse index and the unused and dead-code
+    /// checks depend on this.
     fn is_use_site(self) -> bool {
         matches!(self, ReferenceKind::Qualified | ReferenceKind::Unqualified)
     }
 
-    /// Whether find-references should list this occurrence. Wider than
-    /// [`is_use_site`](Self::is_use_site): the `b` of `b.add(..)` spells a name
-    /// rename must rewrite, though it evaluates nothing. Binding occurrences
-    /// stay out; the declaration is added separately under `includeDeclaration`.
+    /// Whether find-references should list this occurrence. This covers more
+    /// than [`is_use_site`](Self::is_use_site): the `b` of `b.add(..)` is a
+    /// name that rename must rewrite, even though it evaluates nothing. Binding
+    /// occurrences are left out, and the declaration is added separately under
+    /// `includeDeclaration`.
     pub fn is_reference_site(self) -> bool {
         self.is_use_site() || self == ReferenceKind::Qualifier
     }
 }
 
-/// Interned identity of a module path. Stable for the lifetime of the owning
-/// [`ReferenceGraph`] and independent of inference-engine arenas.
+/// The interned identity of a module path. It stays the same for as long as its
+/// [`ReferenceGraph`] lives, and doesn't depend on the inference engine's
+/// arenas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ModuleId(pub u32);
 
-/// Append-only bijection between [`ModulePath`] and [`ModuleId`]. Ids are
-/// assigned in first-seen order and never reused, so a `DefId` from one compile
-/// still resolves after later modules are added or evicted.
+/// A one-to-one map between [`ModulePath`] and [`ModuleId`] that only grows.
+/// Ids are handed out in the order paths are first seen and never reused, so a
+/// `DefId` from one compile still resolves after later modules are added or
+/// evicted.
 #[derive(Debug, Default, Clone)]
 pub struct ModuleInterner {
     paths: Vec<ModulePath>,
@@ -107,7 +112,7 @@ impl ModuleInterner {
         self.by_key.get(&ModuleKey::of(path)).copied()
     }
 
-    /// Look up by canonical key directly (what `ModuleTable` keys on).
+    /// Look up by canonical key directly, which is what `ModuleTable` keys on.
     fn lookup_key(&self, key: &ModuleKey) -> Option<ModuleId> {
         self.by_key.get(key).copied()
     }
@@ -117,8 +122,8 @@ impl ModuleInterner {
         self.paths.get(id.0 as usize)
     }
 
-    /// Every interned module in id order. Infallible, so a caller mirroring
-    /// the id assignment cannot skip an id and renumber every later one.
+    /// Every interned module in id order. It can't fail, so a caller that
+    /// copies the id assignment can't skip an id and renumber every later one.
     fn iter(&self) -> impl Iterator<Item = (ModuleId, &ModulePath)> {
         self.paths
             .iter()
@@ -126,7 +131,8 @@ impl ModuleInterner {
             .map(|(i, p)| (ModuleId(i as u32), p))
     }
 
-    /// Every interned path in id order: the `i`th item is `ModuleId(i)`'s.
+    /// Every interned path in id order, so the `i`th item belongs to
+    /// `ModuleId(i)`.
     pub(crate) fn paths(&self) -> impl Iterator<Item = &ModulePath> {
         self.iter().map(|(_, p)| p)
     }
@@ -137,8 +143,9 @@ impl ModuleInterner {
     }
 }
 
-/// Canonical identity of a definition: owning module, span of its declaring
-/// name, and entity kind. `Copy`, and usable as a map key.
+/// The canonical identity of a definition: the module it is in, the span of
+/// its declaring name, and its entity kind. It is `Copy`, and works as a map
+/// key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DefId {
     pub module: ModuleId,
@@ -156,15 +163,15 @@ impl DefId {
     }
 }
 
-/// Kind-specific payload of a [`Definition`]. One variant per [`EntityKind`],
-/// carrying only the data that kind owns, so a constant can never carry a
-/// `ctor_of` edge.
+/// The data a [`Definition`] holds for its kind. There is one variant per
+/// [`EntityKind`], each carrying only that kind's data, so a constant can
+/// never carry a `ctor_of` edge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DefinitionKind {
-    /// A `let`/parameter/match binder — a local value.
+    /// A local value, bound by a binding, a parameter or a match pattern.
     Value,
     Function {
-        /// Parameter names, for hover. Documentation only.
+        /// The parameter names. Only hover uses these.
         param_names: Vec<String>,
     },
     Constant,
@@ -172,30 +179,30 @@ pub enum DefinitionKind {
         /// The `DefId` of the type that declares this constructor.
         ///
         /// Reachability follows it, so using `Config(..)` keeps `type Config`
-        /// alive. It is not an occurrence: find-references on the type must not
+        /// alive. It is not an occurrence. Find-references on the type must not
         /// list the constructor, and renaming one must not rename the other,
         /// except for a record-shorthand type whose constructor shares the
-        /// declaring span. `None` only for a hydrated stdlib definition.
+        /// declaring span. It is `None` only for a hydrated stdlib definition.
         ctor_of: Option<DefId>,
-        /// Field labels, mirrored for hover from
-        /// `ValueKind::Constructor.field_labels`.
+        /// The field labels, copied from `ValueKind::Constructor.field_labels`
+        /// for hover.
         param_names: Vec<String>,
     },
     Type,
     ModuleAlias {
-        /// Span of the whole `import ...` declaration, the boundary telling an
-        /// item's binding occurrence (inside) from a real use (outside). For
+        /// The span of the whole `import ...` declaration. It tells an item's
+        /// binding occurrence (inside it) from a real use (outside it). For
         /// `import a/b as c.{item}`, `defid.span` covers only the `c`.
         decl_span: Span,
-        /// The module this alias imports, followed by LSP module navigation.
+        /// The module this alias imports, which LSP module navigation follows.
         imports_module: Option<ModuleId>,
     },
     Field,
 }
 
 impl DefinitionKind {
-    /// The [`EntityKind`] this payload belongs to. Must agree with the
-    /// `DefId.entity` of the definition carrying it.
+    /// The [`EntityKind`] this payload belongs to. It must agree with the
+    /// `DefId.entity` of the definition that carries it.
     pub(crate) fn entity(&self) -> EntityKind {
         match self {
             DefinitionKind::Value => EntityKind::Value,
@@ -267,13 +274,13 @@ impl Definition {
         }
     }
 
-    /// The full extent of the declaration: the whole `import ...` statement
-    /// for a module alias, the declaring identifier otherwise.
+    /// The full extent of the declaration. For a module alias that is the whole
+    /// `import ...` statement, and for anything else the declaring identifier.
     fn decl_span(&self) -> Span {
         match self.kind {
             DefinitionKind::ModuleAlias { decl_span, .. } => decl_span,
-            // Named, not wildcarded: a new kind with its own declaration
-            // extent must say so, as ModuleAlias did.
+            // These are named, not wildcarded, so a new kind with its own
+            // declaration extent has to say so, as ModuleAlias did.
             DefinitionKind::Value
             | DefinitionKind::Function { .. }
             | DefinitionKind::Constant
@@ -294,9 +301,10 @@ impl Definition {
     /// Whether this definition belongs on a symbol surface
     /// (`textDocument/documentSymbol`, `workspace/symbol`).
     ///
-    /// `EntityKind::Value` covers local binders, excluded so the outline lists
-    /// structural declarations only. Gates the symbol projection alone;
-    /// resolution and reachability still walk every definition.
+    /// `EntityKind::Value` covers local binders. We leave those out so the
+    /// outline only lists structural declarations. This only affects the
+    /// symbol lists, and resolution and reachability still walk every
+    /// definition.
     pub fn is_symbol_listable(&self) -> bool {
         self.entity() != EntityKind::Value
     }
@@ -316,8 +324,8 @@ impl Reference {
     }
 }
 
-/// An occurrence located at workspace scope: where a reference physically is,
-/// as opposed to the `target` it points at.
+/// Where a reference is in the workspace, as opposed to the `target` it points
+/// at.
 #[derive(Debug, Clone, Copy)]
 pub struct ResolvedRef {
     pub module: ModuleId,
@@ -326,8 +334,8 @@ pub struct ResolvedRef {
 }
 
 /// A [`Reference`] plus the definition it is lexically nested in. `owner` is
-/// the definition-to-definition edge dead-code analysis walks; `None` for a
-/// bare top-level expression.
+/// the edge between definitions that dead-code analysis walks. It is `None`
+/// for a bare top-level expression.
 #[derive(Debug, Clone, Copy)]
 pub struct Occurrence {
     owner: Option<DefId>,
@@ -338,21 +346,23 @@ pub struct Occurrence {
 #[derive(Debug, Clone)]
 pub struct ModuleReferences {
     module: ModuleId,
-    /// The module's own doc comment, the `/** */` at line 0 of its source.
+    /// The module's own doc comment, which is the `/** */` at line 0 of its
+    /// source.
     doc: Option<String>,
     definitions: IndexMap<DefId, Definition>,
     occurrences: Vec<Occurrence>,
     /// Declared name → the defs declared under it in this module.
     name_to_defs: HashMap<String, Vec<DefId>>,
-    /// Source line → every span touching it. Built lazily on the first
-    /// [`cursor_hit`](Self::cursor_hit), invalidated by any mutation. Makes a
-    /// position query cost the spans on one line, not the whole module.
+    /// Source line → every span touching it. It is built on the first
+    /// [`cursor_hit`](Self::cursor_hit) and thrown away by any change. A
+    /// position query then only looks at the spans on one line, not the whole
+    /// module.
     line_index: OnceCell<HashMap<i32, Vec<LineEntry>>>,
 }
 
-/// One candidate in the [`ModuleReferences::line_index`]. `rank` breaks
-/// equal-width ties: occurrences in insertion order, then definitions in
-/// declaration order.
+/// One candidate in the [`ModuleReferences::line_index`]. `rank` breaks ties
+/// between spans of equal width: occurrences come first in insertion order,
+/// then definitions in declaration order.
 #[derive(Debug, Clone, Copy)]
 struct LineEntry {
     span: Span,
@@ -393,8 +403,8 @@ impl ModuleReferences {
         self.doc.as_deref()
     }
 
-    /// Register a declared name. Re-declaring the same `DefId` overwrites the
-    /// previous record, re-keying `name_to_defs` if the name changed.
+    /// Register a declared name. Declaring the same `DefId` again overwrites the
+    /// old record, and moves it in `name_to_defs` if the name changed.
     pub(crate) fn add_definition(&mut self, def: Definition) {
         let defid = def.defid;
         let name = def.name.clone();
@@ -443,10 +453,10 @@ impl ModuleReferences {
         self.cursor_hit(line, col).map(|h| h.target)
     }
 
-    /// The tightest span the cursor is on, occurrences beating definitions on
-    /// a tie. A position on a declaration's own name resolves to itself as
-    /// [`ReferenceKind::Definition`] even with no `Definition` occurrence
-    /// recorded.
+    /// The tightest span the cursor is on. On a tie, occurrences beat
+    /// definitions. A position on a declaration's own name resolves to itself
+    /// as [`ReferenceKind::Definition`], even when no `Definition` occurrence
+    /// was recorded.
     fn cursor_hit(&self, line: i32, col: i32) -> Option<CursorHit> {
         let index = self.line_index.get_or_init(|| self.build_line_index());
         index
@@ -492,10 +502,11 @@ impl ModuleReferences {
     }
 }
 
-/// Accumulates the workspace module set and seals it into an immutable
-/// [`ReferenceGraph`] via [`finish`](Self::finish), which computes the reverse
-/// index once from the final set. Eviction is by omission: each `check` builds
-/// a fresh graph, so an evicted module leaves no dangling reverse edge.
+/// Collects the workspace's modules and seals them into an immutable
+/// [`ReferenceGraph`] with [`finish`](Self::finish), which builds the reverse
+/// index once from the final set. A module is evicted by leaving it out. Each
+/// `check` builds a fresh graph, so an evicted module leaves no dangling
+/// reverse edge.
 #[derive(Debug, Default)]
 pub struct ReferenceGraphBuilder {
     interner: ModuleInterner,
@@ -512,21 +523,21 @@ impl ReferenceGraphBuilder {
         self.interner.intern(path)
     }
 
-    /// Install (or replace) a module's references. Takes an `Rc` because every
-    /// `check` re-inserts every unchanged module's refs.
+    /// Install or replace a module's references. This takes an `Rc` because
+    /// every `check` inserts the refs of every unchanged module again.
     pub(crate) fn insert(&mut self, refs: Rc<ModuleReferences>) {
         self.modules.insert(refs.module(), refs);
     }
 
-    /// Test-only sugar over [`Self::insert`] for freshly built refs.
+    /// A test helper that calls [`Self::insert`] on freshly built refs.
     #[cfg(test)]
     fn insert_module(&mut self, refs: ModuleReferences) {
         self.insert(Rc::new(refs));
     }
 
-    /// Compute the workspace reverse index from the final module set and seal
-    /// the graph. Building it whole, once, guarantees no stale edge survives a
-    /// module eviction.
+    /// Build the workspace's reverse index from the final set of modules and
+    /// seal the graph. Building it all at once means no stale edge can survive
+    /// a module being evicted.
     pub(crate) fn finish(self) -> ReferenceGraph {
         let mut refs_by_def: HashMap<DefId, Vec<ResolvedRef>> = HashMap::new();
         for (&module, mr) in &self.modules {
@@ -549,14 +560,16 @@ impl ReferenceGraphBuilder {
     }
 }
 
-/// The workspace-wide reference graph: the module-path interner, every
-/// module's [`ModuleReferences`], and the reverse index (`DefId` → every
-/// occurrence anywhere) behind find-references, rename, and dead-code
-/// diagnostics. Immutable once built, via [`ReferenceGraphBuilder`].
+/// The reference graph for the whole workspace. It holds the module-path
+/// interner, every module's [`ModuleReferences`], and the reverse index
+/// (`DefId` → every occurrence anywhere) that find-references, rename and the
+/// dead-code diagnostics use. Once [`ReferenceGraphBuilder`] builds it, it
+/// never changes.
 #[derive(Debug, Default)]
 pub struct ReferenceGraph {
     interner: ModuleInterner,
-    /// `Rc` because each `check` re-inserts every unchanged module's refs.
+    /// This is an `Rc` because each `check` inserts every unchanged module's
+    /// refs again.
     modules: IndexMap<ModuleId, Rc<ModuleReferences>>,
     refs_by_def: HashMap<DefId, Vec<ResolvedRef>>,
 }
@@ -593,20 +606,21 @@ impl ReferenceGraph {
         self.modules.get(&id.module)?.definition(id)
     }
 
-    /// goto-definition: the definition a position points at, across modules.
+    /// For goto-definition, the definition a position points at, in any module.
     pub fn definition_at(&self, module: ModuleId, line: i32, col: i32) -> Option<&Definition> {
         let target = self.modules.get(&module)?.resolve_position(line, col)?;
         self.definition(target)
     }
 
-    /// The doc comment of `module`, the `/** */` at line 0 of its source.
+    /// The doc comment of `module`, which is the `/** */` at line 0 of its
+    /// source.
     pub fn module_doc(&self, module: ModuleId) -> Option<&str> {
         self.modules.get(&module)?.doc()
     }
 
-    /// The module a position names: the final segment of an `import a/b`, or
-    /// the `q` of `q.member`. Every other position in an `import` declaration
-    /// yields `None` and stays non-navigable.
+    /// The module a position names, which is the last segment of an
+    /// `import a/b` or the `q` of `q.member`. Every other position in an
+    /// `import` declaration gives `None`, so you can't navigate from it.
     pub fn module_named_at(&self, module: ModuleId, line: i32, col: i32) -> Option<ModuleId> {
         let hit = self.modules.get(&module)?.cursor_hit(line, col)?;
         match hit.kind {
@@ -617,10 +631,10 @@ impl ReferenceGraph {
     }
 
     /// True when the position is the module name of an `import` declaration
-    /// itself, as opposed to a qualifier use like the `q` of `q.member`. The
-    /// import segment's target couples the imported module's id with a span in
-    /// the importing file's coordinates, so it must not be used as a lookup
-    /// key into the imported module's definitions.
+    /// itself, not a qualifier like the `q` of `q.member`. The import
+    /// segment's target pairs the imported module's id with a span in the
+    /// importing file's coordinates, so it must never be used as a key to look
+    /// up the imported module's definitions.
     pub fn import_declaration_at(&self, module: ModuleId, line: i32, col: i32) -> bool {
         self.modules
             .get(&module)
@@ -628,18 +642,18 @@ impl ReferenceGraph {
             .is_some_and(|h| matches!(h.kind, ReferenceKind::Import))
     }
 
-    /// The raw `DefId` a position resolves to, without crossing to the owning
-    /// module's record.
+    /// The raw `DefId` a position resolves to, without looking up the record in
+    /// the module that owns it.
     pub fn def_id_at(&self, module: ModuleId, line: i32, col: i32) -> Option<DefId> {
         self.modules.get(&module)?.resolve_position(line, col)
     }
 
-    /// find-references: every occurrence of `id` across the whole workspace.
+    /// For find-references, every occurrence of `id` in the whole workspace.
     pub fn references_to(&self, id: DefId) -> &[ResolvedRef] {
         self.refs_by_def.get(&id).map_or(&[], Vec::as_slice)
     }
 
-    /// documentSymbol: every definition declared in `module`.
+    /// For documentSymbol, every definition declared in `module`.
     pub fn defs_in(&self, module: ModuleId) -> impl Iterator<Item = &Definition> {
         self.modules
             .get(&module)
@@ -647,7 +661,7 @@ impl ReferenceGraph {
             .flat_map(|m| m.definitions())
     }
 
-    /// workspace/symbol: every definition in the workspace.
+    /// For workspace/symbol, every definition in the workspace.
     pub fn all_defs(&self) -> impl Iterator<Item = &Definition> {
         self.modules.values().flat_map(|m| m.definitions())
     }
@@ -663,7 +677,7 @@ fn def(module: ModuleId, line: i32, c0: i32, c1: i32, kind: EntityKind) -> DefId
     DefId::new(module, crate::span::Span::single_line(line, c0, c1), kind)
 }
 
-/// Test-only default payload for `defid`'s entity.
+/// The default payload for `defid`'s entity, for tests.
 #[cfg(test)]
 pub(crate) fn stub_kind(defid: DefId) -> DefinitionKind {
     match defid.entity {
@@ -931,9 +945,9 @@ mod tests {
 
     #[test]
     fn omitting_a_referencing_module_leaves_no_dangling_reverse_edges() {
-        // Nothing removes a module: a fresh graph is built from the live set,
-        // so eviction is omission. Build from `lib` alone and no reverse edge
-        // into `helper` can survive.
+        // Nothing removes a module. A fresh graph is built from the live set,
+        // so evicting a module means leaving it out. Build from `lib` alone and
+        // no reverse edge into `helper` can survive.
         let mut g = ReferenceGraphBuilder::new();
         let lib = g.intern_module(&mp(&["lib"]));
         let helper = def(lib, 1, 3, 9, EntityKind::Function);
@@ -954,7 +968,7 @@ mod tests {
             0,
             "no reverse edge may dangle when the referencing module is omitted"
         );
-        // `helper`'s own definition still resolvable from lib.
+        // `helper`'s own definition still resolves from lib.
         assert_eq!(
             g.definition(helper).map(|d| d.name.as_str()),
             Some("helper")
@@ -965,7 +979,8 @@ mod tests {
     fn value_binders_are_excluded_from_symbol_surfaces() {
         // Local binders are `EntityKind::Value` definitions so goto-def and
         // rename resolve on them, but they must not reach the documentSymbol
-        // outline. `Definition::is_symbol_listable` is the only chokepoint.
+        // outline. `Definition::is_symbol_listable` is the one place that
+        // decides this.
         let (mut g, m, mut mr) = main_graph();
         let func = add_def(&mut mr, m, "compute", 1, EntityKind::Function, true);
         let local = add_def(&mut mr, m, "tmp", 2, EntityKind::Value, false);

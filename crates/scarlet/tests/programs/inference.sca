@@ -1,4 +1,4 @@
-// Hindley-Milner regression surface: parameter inference, generalization,
+// Hindley-Milner regression tests: parameter inference, generalisation,
 // let-polymorphism, constrained type variables, and fn-type unification.
 // Every binding here is inferred unless the annotation is the point.
 
@@ -28,7 +28,7 @@ fn shout(s String) {
 	s + '!'
 }
 
-// Mutual recursion: both fns are in one SCC and generalize together.
+// Mutual recursion: both fns are in one SCC and generalise together.
 fn is_even(n) {
 	if n == 0 {
 		True
@@ -44,7 +44,7 @@ fn is_odd(n) {
 	}
 }
 
-// ...and it generalizes inside a function body too, not just at module scope.
+// ...and it generalises inside a function body too, not just at module scope.
 fn describe_all() String {
 	show = fn(v) '<${v}>'
 	'${show(1)}${show('x')}${show(2.5)}'
@@ -163,7 +163,7 @@ pub fn main() {
 
 	// --- recursion -------------------------------------------------------------
 
-	// Self-recursive lambda: the binding is in scope inside its own initializer.
+	// Self-recursive lambda: the binding is in scope inside its own initialiser.
 	countdown = fn(n) if n > 0 {
 		println(n)
 		countdown(n - 1)
@@ -177,7 +177,7 @@ pub fn main() {
 
 	// --- let-polymorphism ------------------------------------------------------
 
-	// A let-bound lambda generalizes: three instantiations of one binding.
+	// A let-bound lambda generalises: three instantiations of one binding.
 	id = fn(v) v
 	println(id(1))
 	println(id('one'))

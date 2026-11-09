@@ -38,10 +38,10 @@ pub struct InterpolatedString {
     pub(crate) span: Span,
 }
 
-/// A number as written, `_` separators included: `value` is what the
-/// formatter prints back; [`NumberLiteral::digits`] is what everything that
-/// interprets the number reads. Hex (`0x`/`0X`) and binary (`0b`/`0B`)
-/// prefixes stay in both — [`NumberLiteral::as_int`] is the i64 parse.
+/// A number as written, `_` separators included. The formatter prints `value`
+/// back, and everything that reads the number's value uses
+/// [`NumberLiteral::digits`]. Hex (`0x`/`0X`) and binary (`0b`/`0B`) prefixes
+/// stay in both, and [`NumberLiteral::as_int`] parses them into an i64.
 #[derive(Debug, Clone)]
 pub struct NumberLiteral {
     pub value: String,
@@ -57,13 +57,12 @@ impl NumberLiteral {
         }
     }
 
-    /// Signed i64 value of this literal. Hex and binary are magnitudes in
+    /// The literal's value as a signed i64. Hex and binary are magnitudes in
     /// that radix, not two's-complement bit patterns: `0xFF` is 255, and
-    /// `0x8000000000000000` is out of range (same as decimal
-    /// `9223372036854775808`). A leading `-` is accepted so a negative
-    /// pattern literal parses — including `-9223372036854775808` /
-    /// `-0x8000000000000000`, which are i64::MIN. `None` is overflow or
-    /// a non-integer spelling.
+    /// `0x8000000000000000` is out of range, as decimal `9223372036854775808`
+    /// is. A leading `-` is accepted so a negative pattern literal parses,
+    /// including `-9223372036854775808` and `-0x8000000000000000`, which are
+    /// i64::MIN. `None` means it overflowed or isn't an integer.
     pub fn as_int(&self) -> Option<i64> {
         parse_int_literal(&self.digits())
     }
@@ -238,7 +237,8 @@ pub struct ConstBinding {
 /// `a, b <- call(args)`: backpassing. Sugar for appending the rest of the
 /// enclosing block to the call as a trailing `fn(a, b) { ... }` argument;
 /// rewritten away by [`crate::desugar`] before type checking. `call` is
-/// always a [`FunctionCallExpression`] — the parser rejects anything else.
+/// always a [`FunctionCallExpression`], because the parser rejects anything
+/// else.
 /// A `_` binder is an [`Identifier`] named `_`, matching how a discarded
 /// function parameter is spelled.
 #[derive(Debug, Clone)]
@@ -254,9 +254,9 @@ pub struct FunctionParameter {
     pub typ: Option<TypeIdentifier>,
 }
 
-/// A function declaration's body. Not `Option<Expression>` plus a separate
-/// `@vm` predicate: the two can desync, and this makes a `@vm` fn without its
-/// op, or a body-less normal fn, unrepresentable.
+/// A function declaration's body. It isn't an `Option<Expression>` with a
+/// separate `@vm` check, because the two could disagree. As an enum, a `@vm`
+/// fn without its op, or a normal fn without a body, can't be built.
 #[derive(Debug, Clone)]
 pub enum FnBody {
     Block(Expression),
@@ -303,7 +303,7 @@ pub enum TypeBody {
         opaque: bool,
     },
     Alias(TypeIdentifier),
-    /// `pub type Name` with no body — a host-backed handle.
+    /// `pub type Name` with no body, for a host-backed handle.
     External,
 }
 
@@ -322,13 +322,14 @@ pub struct ConstructorField {
     pub(crate) span: Span,
 }
 
-/// The `.` / `..` in `import ../lib/util`. A distinct type, not a "." string
-/// in the name list, so a marker and a module name can never be confused.
+/// The `.` or `..` in `import ../lib/util`. It's its own type rather than a
+/// "." string in the name list, so a marker and a module name can't be mixed
+/// up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelSeg {
-    /// `.` — the importing file's own directory.
+    /// `.`, the importing file's own directory.
     CurrentDir,
-    /// `..` — one directory up.
+    /// `..`, one directory up.
     ParentDir,
 }
 
@@ -543,11 +544,11 @@ pub enum CallArg {
     Labeled {
         label: Identifier,
         value: Expression,
-        /// True for punning sugar (`label:` with nothing after it), which the
-        /// parser desugars to `value: Identifier(label)` on the spot. Every
-        /// later pass sees an ordinary labeled argument either way; this flag
-        /// exists only so the formatter can render it back the way it was
-        /// written instead of guessing from `value`'s shape.
+        /// True for the punning shorthand (`label:` with nothing after it),
+        /// which the parser expands to `value: Identifier(label)` on the spot.
+        /// Every later pass sees an ordinary labelled argument either way. The
+        /// flag is only there so the formatter can write it back as it was
+        /// written, rather than guess from `value`'s shape.
         punned: bool,
     },
     Spread(Expression),
@@ -719,8 +720,8 @@ pub enum OrAlternatives {
     /// Walk every alternative. Scope analysis needs this: later alternatives
     /// can hold segment size expressions referencing outer names.
     All,
-    /// Walk only the first. Typing enforces that all alternatives bind the
-    /// identical set, so the first is canonical for codegen.
+    /// Walk only the first. Type checking makes every alternative bind the
+    /// same names, so the first one stands for all of them in codegen.
     First,
 }
 
@@ -940,7 +941,7 @@ mod tests {
             span(2, 1, 2, 7)
         );
 
-        // A labeled arg spans from the label's start to the value's end.
+        // A labelled arg spans from the label's start to the value's end.
         let labeled = CallArg::Labeled {
             label: Identifier {
                 name: "k".to_string(),

@@ -11,7 +11,7 @@
 import scarlet/array
 import scarlet/time
 
-// Names one process, and is never reused, so it can be a map key.
+// Names one process. A Pid is never reused, so it can be a map key.
 pub type Pid
 
 // Starts `f` in a new process linked to this one: if either crashes or is
@@ -20,32 +20,34 @@ pub type Pid
 @vm(process__spawn)
 pub fn spawn(f fn() Nil) Pid
 
-// As `spawn`, with no link, for a task whose failure the caller watches with
-// `monitor`.
+// Like `spawn`, but with no link, for a task whose failure the caller watches
+// with `monitor`.
 @vm(process__spawn_unlinked)
 pub fn spawn_unlinked(f fn() Nil) Pid
 
 @vm(process__self)
 pub fn self() Pid
 
-// Ends `pid` soon, not at once: monitor it to know when it has gone. What is
-// linked to it dies too. Killing a process that has ended does nothing.
+// Ends `pid` soon, but not at once, so monitor it to know when it has gone.
+// Anything linked to it dies too. Killing a process that has ended does
+// nothing.
 @vm(process__kill)
 pub fn kill(pid Pid) Nil
 
-// Parks only the calling process. `ms <= 0` returns at once.
+// Parks the calling process, and only that one, for `ms` milliseconds.
+// `ms <= 0` returns at once.
 @vm(process__sleep)
 pub fn sleep(ms Int) Nil
 
-// `NoProcess`: it had already ended when the monitor was placed, so how it
-// ended is not known.
+// Why a process ended. `NoProcess` means it had already ended when the monitor
+// was placed, so how it ended isn't known.
 pub type ExitReason {
 	Normal
 	NoProcess
 	// `kill` was called on it, or on something linked to it.
 	Killed
-	// Its own code hit a runtime error. Also printed to stderr, unless it was
-	// the main process.
+	// Its own code hit a runtime error. The error is also printed to stderr,
+	// unless it was the main process.
 	Crashed(crash Crash)
 }
 
@@ -53,12 +55,12 @@ pub type ExitReason {
 pub type Crash {
 	IndexOutOfBounds(index Int, length Int)
 	SliceOutOfBounds(from Int, to Int, length Int)
-	// A `receive` on a subject another process owns.
+	// The process called `receive` on a subject another process owns.
 	ForeignReceive
-	// A compiler bug: the runtime met a value of the wrong type.
+	// The runtime met a value of the wrong type, which means a compiler bug.
 	TypeMismatch(op String, expected String, got String)
-	// A declaration the tree refused, such as into a supervisor this process
-	// did not create.
+	// The tree refused a declaration, such as one into a supervisor this
+	// process didn't create.
 	Supervision(why String)
 }
 
@@ -74,7 +76,8 @@ pub opaque type Monitor {
 
 // Sends `wrap(down)` to `notify` when `pid` ends, or at once with `NoProcess`
 // if it already has, so the notice arrives among the caller's other messages.
-// Released when it fires, on `demonitor`, or when the caller ends.
+// The monitor is released when it fires, on `demonitor`, or when the caller
+// ends.
 pub fn monitor(pid Pid, notify Subject(msg), wrap fn(Down) msg) Monitor {
 	on_down(pid, fn(down) send(notify, wrap(down)))
 }
@@ -82,41 +85,41 @@ pub fn monitor(pid Pid, notify Subject(msg), wrap fn(Down) msg) Monitor {
 @vm(process__monitor)
 fn on_down(pid Pid, notice fn(Down) Nil) Monitor
 
-// A notice already on its way may still arrive.
+// Removes a monitor. A notice already on its way may still arrive.
 @vm(process__demonitor)
 pub fn demonitor(m Monitor) Nil
 
-// A typed mailbox. Only the process that made it can receive on it; any
+// A typed mailbox. Only the process that made it can receive on it, but any
 // process holding it can send.
 pub type Subject(msg)
 
-// A new subject owned by the calling process. It is freed when the owner
+// Makes a new subject owned by the calling process. It's freed when the owner
 // drops it or ends, and sends after that are dropped.
 @vm(process__subject)
 pub fn subject() Subject(msg)
 
-// Never blocks. The receiver gets a copy, and a message to a finished process
-// is dropped.
+// Sends `m` to `s` without blocking. The receiver gets a copy, and a message to
+// a finished process is dropped.
 @vm(process__send)
 pub fn send(s Subject(msg), m msg) Nil
 
-// `send`, to the front of the queue, so an `Ask` stop request does not wait
-// its turn.
+// Like `send`, but to the front of the queue, so an `Ask` stop request doesn't
+// wait its turn.
 @vm(process__send_urgent)
 fn send_urgent(s Subject(msg), m msg) Nil
 
-// The oldest message on `s`, parking until one arrives. Only the owner may
-// call it.
+// Takes the oldest message on `s`, parking until one arrives. Only the owner
+// may call it.
 @vm(process__receive)
 pub fn receive(s Subject(msg)) msg
 
-// As `receive`, but `Err(Nil)` after `timeout_ms` milliseconds.
+// Like `receive`, but returns `Err(Nil)` after `timeout_ms` milliseconds.
 pub fn receive_within(s Subject(msg), timeout_ms Int) Result(msg, Nil) {
 	receive_until(s, time::add_ms(time::monotonic(), timeout_ms))
 }
 
-// As `receive`, but `Err(Nil)` once `deadline` (from `time::monotonic()`)
-// passes.
+// Like `receive`, but returns `Err(Nil)` once `deadline`, from
+// `time::monotonic()`, passes.
 pub fn receive_until(s Subject(msg), deadline time::Instant) Result(msg, Nil) {
 	receive_until_ms(s, time::to_deadline_ms(deadline))
 }
@@ -128,9 +131,9 @@ pub opaque type Timer {
 	waiting Pid
 }
 
-// Sends `m` to `s` after `delay_ms`, without parking the caller. The wait is
-// an unlinked process, so it keeps the program running until it fires:
-// cancel a timer you no longer need.
+// Sends `m` to `s` after `delay_ms`, without parking the caller. The wait runs
+// in an unlinked process, so it keeps the program running until it fires.
+// Cancel a timer you no longer need.
 pub fn send_after(s Subject(msg), delay_ms Int, m msg) Timer {
 	Timer(waiting: spawn_unlinked(fn() {
 		sleep(delay_ms)
@@ -138,7 +141,7 @@ pub fn send_after(s Subject(msg), delay_ms Int, m msg) Timer {
 	}))
 }
 
-// A message already on its way may still arrive.
+// Cancels a timer. A message already on its way may still arrive.
 pub fn cancel_timer(t Timer) Nil {
 	kill(t.waiting)
 }
@@ -146,13 +149,13 @@ pub fn cancel_timer(t Timer) Nil {
 // Supervision. A worker's address is a Subject that stays valid across its
 // restarts. See examples/supervision.sca.
 
-// How a supervisor restarts its workers. More than `restarts` restarts within
-// `within_ms` and it gives up, stopping all its children.
+// How a supervisor restarts its workers. If there are more than `restarts`
+// restarts within `within_ms`, it gives up and stops all its children.
 pub type Strategy {
 	// Restart only the one that died.
 	OneForOne(restarts Int, within_ms Int)
-	// Stop the others and restart them all: their states only make sense
-	// together.
+	// Stop the others and restart them all, because their states only make
+	// sense together.
 	OneForAll(restarts Int, within_ms Int)
 	// Restart the one that died and every worker declared after it.
 	RestForOne(restarts Int, within_ms Int)
@@ -160,24 +163,25 @@ pub type Strategy {
 
 // When a worker is restarted.
 pub type Policy {
-	// After any exit, even a normal return: a server.
+	// After any exit, even a normal return, as for a server.
 	Permanent
 	// After a crash or a kill, but not a normal return.
 	Transient
-	// Never. It is in the tree only to be stopped with its siblings.
+	// Never. It's in the tree only to be stopped with its siblings.
 	Temporary
 }
 
 // How a supervisor stops a worker it needs gone.
 pub type Shutdown(msg) {
 	Kill
-	// Send it `message`, ahead of its queue, and kill it if it is still
-	// running `grace_ms` later. The worker stops by returning.
+	// Send it `message` ahead of its queue, and kill it if it's still running
+	// `grace_ms` later. The worker stops by returning.
 	Ask(message msg, grace_ms Int)
 }
 
 pub type Members {
-	// A member ends when its process ends: connections, requests, jobs.
+	// A member ends when its process ends. This suits connections, requests
+	// and jobs.
 	Disposable
 	// A member that crashes or is killed restarts at the same address and key,
 	// within the factory's own budget.
@@ -194,29 +198,30 @@ pub opaque type Factory(msg, key) {
 	supervised Supervised
 }
 
-// A place in the tree: a worker, a supervisor, a factory or a plain process.
-// Compares by identity. Every function on it is total: a place that is gone
-// says so.
+// A place in the tree, which is a worker, a supervisor, a factory or a plain
+// process. It compares by identity. Every function on it is total, so a place
+// that is gone says so instead of failing.
 pub opaque type Supervised {
 	id Int
 }
 
-// Declares a top-level supervisor, runs `body` with it (the rest of the block,
-// under backpassing), then parks for good: the tree is now the program.
+// Declares a top-level supervisor and runs `body` with it, which under
+// backpassing is the rest of the block. Then it parks for good, because the
+// tree is now the program.
 pub fn root(strategy Strategy, body fn(Supervisor) a) b {
 	_ = body(supervisor(strategy))
 	receive(subject())
 }
 
-// A top-level supervisor as a value, for a library that sets up a subtree
-// (`net.serve`). It outlives the caller if the caller returns normally.
-// Applications should use `root`.
+// Makes a top-level supervisor as a value, for a library that sets up a
+// subtree, as `net.serve` does. It outlives the caller if the caller returns
+// normally. Applications should use `root`.
 pub fn supervisor(strategy Strategy) Supervisor {
 	Supervisor(supervised: Supervised(id: declare_supervisor(strategy, Nil)))
 }
 
-// A supervisor inside `parent`, with its own strategy and budget, restarted
-// by `parent` if it gives up.
+// Makes a supervisor inside `parent`, with its own strategy and budget.
+// `parent` restarts it if it gives up.
 pub fn supervisor_in(parent Supervisor, strategy Strategy) Supervisor {
 	Supervisor(supervised: Supervised(id: declare_supervisor(strategy, parent.supervised.id)))
 }
@@ -256,17 +261,18 @@ pub fn worker(
 	}
 }
 
-// `worker` with `Permanent` and `Kill`: the common server.
+// Calls `worker` with `Permanent` and `Kill`, which suits the common server.
 pub fn permanent(sup Supervisor, start fn(Subject(msg)) Nil) Subject(msg) {
 	worker(sup, Permanent, Kill, start)
 }
 
-// `worker` with `Transient` and `Kill`: retried if it fails.
+// Calls `worker` with `Transient` and `Kill`, so it's retried if it fails.
 pub fn transient(sup Supervisor, start fn(Subject(msg)) Nil) Subject(msg) {
 	worker(sup, Transient, Kill, start)
 }
 
-// `worker` with `Temporary` and `Kill`: in the tree, never restarted.
+// Calls `worker` with `Temporary` and `Kill`, so it's in the tree but never
+// restarted.
 pub fn temporary(sup Supervisor, start fn(Subject(msg)) Nil) Subject(msg) {
 	worker(sup, Temporary, Kill, start)
 }
@@ -301,8 +307,8 @@ pub fn factory(
 @vm(process__factory)
 fn factory_entry(sup Int, restarts Int, within_ms Int, template fn(Subject(msg), key) Nil) Int
 
-// The member for `k`, started if there is none. There is at most one per
-// key, however many processes ask at once.
+// Returns the member for `k`, starting one if there's none. There's at most
+// one per key, however many processes ask at once.
 pub fn lookup_or_start(f Factory(msg, key), k key) Subject(msg) {
 	lookup_or_start_in(f.supervised.id, k)
 }
@@ -326,8 +332,9 @@ pub fn start_in(f Factory(msg, arg), a arg) Subject(msg) {
 @vm(process__start_in)
 fn start_member(factory Int, a arg) Subject(msg)
 
-// One worker per scheduler thread, restarted on the same thread. Only for
-// `net`: a socket belongs to the thread that accepted it.
+// Starts one worker per scheduler thread, each restarted on the same thread.
+// It's only for `net`, because a socket belongs to the thread that accepted
+// it.
 pub fn worker_per_scheduler(sup Supervisor, policy Policy, start fn(Subject(msg)) Nil) Nil {
 	worker_slots_per_scheduler(sup.supervised.id, policy_code(policy), start)
 }
@@ -352,8 +359,8 @@ pub fn parent(s Supervised) Supervised {
 @vm(process__parent)
 fn parent_id(id Int) Int
 
-// What is declared under `s`, in declaration order (a factory's members in
-// no order). A snapshot.
+// Lists what is declared under `s` in declaration order, though a factory's
+// members come in no order. The list is a snapshot.
 pub fn children(s Supervised) Array(Supervised) {
 	array::map(children_ids(s.id), fn(id) Supervised(id: id))
 }
@@ -361,7 +368,7 @@ pub fn children(s Supervised) Array(Supervised) {
 @vm(process__children)
 fn children_ids(id Int) Array(Int)
 
-// `array::length(children(s))`, without building the array.
+// Counts `children(s)` without building the array.
 pub fn count(s Supervised) Int {
 	count_of(s.id)
 }
@@ -370,7 +377,7 @@ pub fn count(s Supervised) Int {
 fn count_of(id Int) Int
 
 pub type Kind {
-	// Spawned, or the main process.
+	// A spawned process, or the main process.
 	Process
 	Worker(policy Policy)
 	SupervisorOf(strategy Strategy)
@@ -379,7 +386,7 @@ pub type Kind {
 
 pub type Status {
 	Running
-	// Its process has ended and has not been restarted yet.
+	// Its process has ended and hasn't been restarted yet.
 	Restarting
 	Gone
 }
@@ -387,7 +394,7 @@ pub type Status {
 pub type Info {
 	kind Kind
 	status Status
-	// The process there now. None for a supervisor, a factory, or a worker
+	// The process there now. It's None for a supervisor, a factory, or a worker
 	// between runs.
 	pid Option(Pid)
 	restarts Int
@@ -402,7 +409,8 @@ pub type Ended {
 	GaveUp(restarts Int, within_ms Int)
 }
 
-// One watch notice: what happened at `supervised`, and its status after.
+// One watch notice. It says what happened at `supervised`, and its status
+// afterwards.
 pub type Exit {
 	supervised Supervised
 	ended Ended
@@ -414,9 +422,9 @@ pub opaque type Watch {
 	OnProcess(monitor Monitor)
 }
 
-// Sends `wrap(exit)` to `notify` each time something happens at `s`: every
-// exit of its worker, restarts included (unlike `monitor`), a give-up, and
-// its removal.
+// Sends `wrap(exit)` to `notify` each time something happens at `s`. That's
+// every exit of its worker, a give-up, and its removal. Unlike `monitor`, it
+// keeps reporting across restarts.
 pub fn watch(s Supervised, notify Subject(msg), wrap fn(Exit) msg) Watch {
 	match info(s) {
 		Info(kind: Process, pid: Some(pid), ..) ->
@@ -439,7 +447,7 @@ pub fn watch(s Supervised, notify Subject(msg), wrap fn(Exit) msg) Watch {
 	}
 }
 
-// A notice already on its way may still arrive.
+// Stops a watch. A notice already on its way may still arrive.
 pub fn unwatch(w Watch) Nil {
 	match w {
 		OnPlace(s, id) -> unwatch_place(s.id, id)

@@ -1,16 +1,17 @@
-//! Rename projection + prepare-rename safety.
+//! Turns a rename into edits, and checks that prepare-rename is safe.
 //!
-//! `scarlet_core` has no `serde_json`, so this produces a plain [`WorkspaceEdit`]
-//! and the LSP layer in the `scarlet` crate shapes it into wire JSON.
+//! `scarlet_core` has no `serde_json`, so this produces a plain
+//! [`WorkspaceEdit`] and the LSP layer in the `scarlet` crate turns it into
+//! JSON for the wire.
 //!
-//! Invariants the projection relies on:
-//! * Every [`Reference::span`] is exactly the identifier token spelling the
-//!   target's name, so rewriting is a pure span -> new-text substitution.
+//! This relies on three things being true:
+//! * Every [`Reference::span`] covers exactly the identifier token that spells
+//!   the target's name, so a rename only swaps the text in each span.
 //! * [`ReferenceKind::Import`] spans the module path, not a symbol name, so a
 //!   symbol rename never rewrites one.
-//! * The declaration site is always rewritten even without a recorded
-//!   [`ReferenceKind::Definition`] occurrence; identical edits are deduped so
-//!   the two paths cannot double-apply.
+//! * The declaration site is always rewritten, even when no
+//!   [`ReferenceKind::Definition`] occurrence was recorded. Identical edits are
+//!   merged, so the two can't both apply.
 
 use std::collections::BTreeMap;
 
@@ -21,22 +22,22 @@ use crate::token;
 use super::uri::{ModuleUriError, module_uri};
 use super::{DefId, EntityKind, ModuleId, ReferenceGraph, ReferenceKind};
 
-/// A single text replacement within one file. `span` is in the compiler's
-/// 0-based, end-exclusive coordinate space.
+/// One text replacement in one file. `span` uses the compiler's coordinates,
+/// which count from 0 and exclude the end.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextEdit {
     pub span: Span,
     pub new_text: String,
 }
 
-/// A cross-file rename, keyed by file URI. Ordered containers throughout so
-/// the output is deterministic.
+/// A rename across files, keyed by file URI. Every container is ordered, so the
+/// output is always the same.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkspaceEdit {
     pub changes: BTreeMap<String, Vec<TextEdit>>,
 }
 
-/// Result of `textDocument/prepareRename`.
+/// The result of `textDocument/prepareRename`.
 ///
 /// `def` is the hit's target as-is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,43 +50,44 @@ pub struct PreparedRename {
 /// Why a resolved definition is refused for rename.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotRenameableReason {
-    /// Defined in the precompiled standard library / prelude / `@vm`.
+    /// It is defined in the standard library, the prelude or `@vm`.
     Stdlib,
-    /// Cursor sits on an `import a/b` path — a file rename, not a symbol one.
+    /// The cursor is on an `import a/b` path, which would be a file rename,
+    /// not a symbol rename.
     ModulePath,
-    /// Target is a `ModuleAlias`. Renaming it rewrites the import line, but
-    /// every qualified `q.member` use targets the remote member rather than
-    /// the alias, so the callers would be orphaned.
+    /// The target is a `ModuleAlias`. Renaming it would rewrite the import
+    /// line, but every qualified `q.member` use targets the member in the other
+    /// module, not the alias, so those uses would be left pointing at nothing.
     ModuleAlias,
 }
 
 /// Why a rename / prepare-rename was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenameError {
-    /// Nothing renameable under the cursor / no such definition.
+    /// There is nothing to rename under the cursor, or no such definition.
     NotFound,
     /// The symbol exists but must not be rewritten.
     NotRenameable(NotRenameableReason),
-    /// The requested new name is not a legal identifier.
+    /// The new name asked for is not a valid identifier.
     InvalidName(String),
-    /// Some module holding occurrences has no file URI, so the rename would
-    /// only partially apply. Each entry says why.
+    /// A module with occurrences in it has no file URI, so the rename would
+    /// only partly apply. Each entry says why.
     Unresolvable(Vec<(ModulePath, ModuleUriError)>),
 }
 
 impl RenameError {
-    /// Human-readable message for the LSP `ResponseError`.
+    /// The message to show in the LSP `ResponseError`.
     pub fn message(&self) -> String {
         match self {
-            RenameError::NotFound => "no renameable symbol at this position".to_string(),
+            RenameError::NotFound => "there's nothing here that can be renamed".to_string(),
             RenameError::NotRenameable(NotRenameableReason::Stdlib) => {
-                "cannot rename a symbol defined in the standard library".to_string()
+                "you can't rename something defined in the standard library".to_string()
             }
             RenameError::NotRenameable(NotRenameableReason::ModulePath) => {
-                "cannot rename a module path; rename the file instead".to_string()
+                "you can't rename a module path here, so rename the file instead".to_string()
             }
             RenameError::NotRenameable(NotRenameableReason::ModuleAlias) => {
-                "cannot rename an import declaration".to_string()
+                "you can't rename an import".to_string()
             }
             RenameError::InvalidName(n) => format!("`{n}` is not a valid identifier"),
             RenameError::Unresolvable(mods) => {
@@ -94,13 +96,13 @@ impl RenameError {
                     .map(|(m, why)| format!("{} ({why})", m.join("/")))
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("cannot locate the source file for: {list}")
+                format!("can't find the source file for {list}")
             }
         }
     }
 }
 
-/// Validate a proposed new name. Must mirror the scanner's identifier grammar.
+/// Check a proposed new name. This must match the scanner's identifier grammar.
 fn is_valid_identifier(name: &str) -> bool {
     let mut bytes = name.bytes();
     let Some(first) = bytes.next() else {
@@ -128,8 +130,8 @@ impl ReferenceGraph {
         Ok(())
     }
 
-    /// `textDocument/prepareRename`: validate that the position names a
-    /// renameable symbol and return the precise identifier range.
+    /// For `textDocument/prepareRename`, check that the position names a symbol
+    /// that can be renamed, and return the exact range of its identifier.
     pub fn prepare_rename(
         &self,
         module: ModuleId,
@@ -156,8 +158,8 @@ impl ReferenceGraph {
         })
     }
 
-    /// Project `def -> new_name` into a `WorkspaceEdit`, resolving each
-    /// [`ModuleId`] to a URI through `uri_of`.
+    /// Turn renaming `def` to `new_name` into a `WorkspaceEdit`, resolving each
+    /// [`ModuleId`] to a URI with `uri_of`.
     fn rename_with<F>(
         &self,
         def: DefId,
@@ -175,10 +177,10 @@ impl ReferenceGraph {
 
         self.reject_if_not_renameable(def)?;
 
-        // The rename class: every DefId spelt by the same declaring token.
+        // Rename every DefId spelt by the same declaring token together.
         // `type Config { .. }` mints both a Type and its implicit Constructor
-        // at one span, so renaming either must rewrite both. Constructors of a
-        // multi-constructor type have their own spans and stay separate.
+        // at one span, so renaming either must rewrite both. The constructors
+        // of a type with several have their own spans and stay separate.
         let mut class: Vec<DefId> = vec![def];
         match def.entity {
             EntityKind::Type => {
@@ -200,9 +202,9 @@ impl ReferenceGraph {
             _ => {}
         }
 
-        // The declaration's own name span goes in once — every class member
-        // shares that token. `Import` occurrences span the module path, not
-        // the symbol name, so they are skipped.
+        // The declaration's own name span goes in once, because everything
+        // renamed together shares that token. `Import` occurrences span the
+        // module path, not the symbol name, so we skip them.
         let mut sites: Vec<(ModuleId, Span)> = vec![(def.module, def_record.span())];
         for d in &class {
             for r in self.references_to(*d) {
@@ -213,8 +215,8 @@ impl ReferenceGraph {
             }
         }
 
-        // Refuse the whole rename if any module cannot be located: a partial
-        // rewrite is worse than none.
+        // Refuse the whole rename if we can't find any one module, because a
+        // partial rewrite is worse than none.
         let mut uris: BTreeMap<ModuleId, String> = BTreeMap::new();
         let mut unresolved: Vec<(ModuleId, ModuleUriError)> = Vec::new();
         for (m, _) in &sites {
@@ -229,8 +231,8 @@ impl ReferenceGraph {
             }
         }
         if !unresolved.is_empty() {
-            // Name even a module with no interned path; dropping it would hide
-            // the failure being reported.
+            // Name a module even when it has no interned path, because dropping
+            // it would hide the very failure we're reporting.
             let mods = unresolved
                 .into_iter()
                 .map(|(m, e)| {
@@ -259,9 +261,9 @@ impl ReferenceGraph {
         Ok(WorkspaceEdit { changes })
     }
 
-    /// Project `def -> new_name` into a `WorkspaceEdit`. `entry` pins one
-    /// module — the open buffer / bare entry module, which resolution
-    /// deliberately cannot locate — to a known URI.
+    /// Turn renaming `def` to `new_name` into a `WorkspaceEdit`. `entry` gives
+    /// one module a known URI. That is the open buffer or bare entry module,
+    /// which resolution can't find on purpose.
     pub fn rename(
         &self,
         def: DefId,
@@ -288,8 +290,8 @@ mod tests {
     };
     use std::collections::HashMap;
 
-    /// lib defines `helper` (pub); app imports it, uses it twice, and has its
-    /// own private `run`.
+    /// lib defines a `pub` `helper`. app imports it, uses it twice, and has
+    /// its own private `run`.
     fn workspace() -> (ReferenceGraph, ModuleId, ModuleId, DefId) {
         let mut g = ReferenceGraphBuilder::new();
         let lib = g.intern_module(&mp(&["sub", "lib"]));
@@ -353,7 +355,8 @@ mod tests {
 
         assert_eq!(we.changes.len(), 2);
 
-        // Decl span + the Definition occurrence dedupe to one edit.
+        // The declaration span and the Definition occurrence merge into one
+        // edit.
         let lib_edits = &we.changes["file:///proj/sub/lib.sca"];
         assert_eq!(lib_edits.len(), 1);
         assert_eq!(lib_edits[0].span, Span::single_line(0, 3, 9));
@@ -550,8 +553,8 @@ mod tests {
         assert_eq!(edits[0].new_text, "go");
     }
 
-    /// `type Config { .. }`: a Type and an implicit Constructor at the same
-    /// span, plus one use of each.
+    /// `type Config { .. }` makes a Type and an implicit Constructor at the same
+    /// span. This adds one use of each.
     fn record_shorthand() -> (ReferenceGraph, ModuleId, DefId, DefId) {
         let mut g = ReferenceGraphBuilder::new();
         let m = g.intern_module(&mp(&["main"]));
@@ -612,8 +615,8 @@ mod tests {
 
     #[test]
     fn multi_constructor_type_rename_keeps_ctors_separate() {
-        // `type Shape { A B }`: constructors have their own spans, so renaming
-        // the type must not drag them along, and vice versa.
+        // In `type Shape { A B }` the constructors have their own spans, so
+        // renaming the type must not rename them too, and the other way round.
         let mut g = ReferenceGraphBuilder::new();
         let m = g.intern_module(&mp(&["main"]));
         let ty = def(m, 0, 5, 10, EntityKind::Type);

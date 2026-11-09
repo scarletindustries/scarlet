@@ -8,8 +8,9 @@ import scarlet/map
 @vm(os__argv)
 pub fn argv() Array(String)
 
-// Every variable whose name and value are valid UTF-8. A name listed twice has
-// its first value, as `getenv` gives. The map is made once, on the first call.
+// Every environment variable whose name and value are valid UTF-8. If a name
+// is listed twice, the map holds its first value, as `getenv` does. The map is
+// built once, on the first call.
 @vm(os__env)
 pub fn env() map::Map(String, String)
 

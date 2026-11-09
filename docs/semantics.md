@@ -16,16 +16,18 @@ Each rule is marked:
 - `Result` means an operation can fail. The error is `Nil` when it carries no data, and the stdlib never uses `Option` for failure.
 - Supervisors, links and monitors are for deaths that come from outside the code: a killed process, a process hitting a resource limit, a lost machine. They are not for bugs.
 
-Under this rule, every way code can still crash a process is a bug. Today there are two:
+Under this rule, every way code can still crash a process is a bug. The stdlib's `Crash` type in `std/scarlet/process.sca` names two of them:
 
-- a `receive` on a subject that another process created (`scarlet_vm/src/vm/mailbox.rs`)
-- a supervision declaration that the tree refuses (`Crash.Supervision` in `std/scarlet/process.sca`)
+- `ForeignReceive`, a `receive` on a subject that another process created
+- `Supervision`, a supervision declaration that the tree refuses
+
+The new VM doesn't run processes yet, so neither can happen today.
 
 A stdlib function must never make up a value to hide a failure. It returns a `Result` instead.
 
 ## Integers
 
-**Built: Int is arbitrary precision.** `+`, `-` and `*` always give the exact answer, so `int::max_value + 1` is `9223372036854775808`. An Int that fits in 48 bits stays inside the value word, and any other moves to the heap. An Int *literal* past 64 bits is still a compile error, because the compiler keeps Int constants as 64-bit numbers.
+**Built: Int is arbitrary precision.** `+`, `-` and `*` always give the exact answer, so `int::max_value + 1` is `9223372036854775808`. An Int that fits in 48 bits is stored inside the value word, and any larger one goes on the heap. An Int *literal* past 64 bits is still a compile error, because the compiler keeps Int constants as 64-bit numbers.
 
 **Built: bitwise operations are any size.** `int::bitwise_and`, `or`, `xor`, `not` and the shifts treat an Int as an endless row of two's-complement bits, as Erlang does: endless 0s above a non-negative Int, endless 1s above a negative one. No bit falls off an end, so `int::bitwise_shift_left(1, 64)` is `18446744073709551616`, and a right shift divides by a power of 2, rounding down.
 

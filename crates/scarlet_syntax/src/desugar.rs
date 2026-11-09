@@ -1,29 +1,27 @@
-//! Backpass desugaring: `a, b <- call(args)` followed by the rest of its
-//! block becomes `call(args, fn(a, b) { <rest> })`, the call becoming the
-//! block's final node (and so its value). Multiple backpasses in one block
-//! nest: a later one is part of an earlier one's `<rest>`, so it desugars
-//! inside that lambda.
+//! Backpass desugaring. `a, b <- call(args)` and the rest of its block become
+//! `call(args, fn(a, b) { <rest> })`, and that call becomes the block's final
+//! node, and so its value. Several backpasses in one block nest: a later one is
+//! part of an earlier one's `<rest>`, so it desugars inside that lambda.
 //!
-//! Purely AST→AST and run by the compile pipeline just before type checking
-//! — never by the formatter, which renders the statement as written. After
-//! this pass no [`Statement::Backpass`] remains anywhere in the tree, so
-//! inference and lowering never see one.
+//! This pass is purely AST to AST. The compile pipeline runs it just before
+//! type checking, and the formatter never does, because it writes the
+//! statement as written. After this pass no [`Statement::Backpass`] is left
+//! anywhere in the tree, so inference and lowering never see one.
 //!
-//! The lowering is bind-shaped for every backpass, and it must stay that way
-//! here: whether a step's binder is used later is visible from the AST, but
-//! whether running the later step after this one failed is *wanted* is a
-//! property of the callee, and this pass runs before imports resolve. All 19
-//! backpasses in the stdlib are over `result.then`/`result.map`, and 10 bind
-//! `_` — so a syntactic "independent, therefore combine" rule would reorder
-//! exactly the `http.sca` writes whose comments say the ordering is
-//! load-bearing.
-//! `crates/scarlet/tests/backpass_sequencing.rs` fails if that changes; T-211
-//! carries the argument.
+//! Every backpass lowers to the same bind shape, and it must stay that way
+//! here. The AST shows whether a step's binder is used later, but whether
+//! running a later step after this one failed is *wanted* depends on the
+//! callee, and this pass runs before imports resolve. The stdlib's backpasses
+//! are over `result::then`, `result::map` and `option::then`, and many bind
+//! `_`. So a syntactic "independent, therefore combine" rule would reorder
+//! exactly the `http.sca` writes whose comments say their order matters.
+//! `crates/scarlet/tests/backpass_sequencing.rs` fails if that changes, and
+//! T-211 has the full argument.
 //!
-//! Also rewrites [`Expression::PipeExpression`] (`left |> right`) into a
-//! [`FunctionCallExpression`], `left` inserted as `right`'s first argument.
-//! Same reason: the formatter renders `|>` as written, so inference must
-//! never see one either.
+//! It also rewrites [`Expression::PipeExpression`] (`left |> right`) into a
+//! [`FunctionCallExpression`], with `left` as `right`'s first argument. The
+//! reason is the same: the formatter writes `|>` as written, so inference
+//! must never see one either.
 
 use crate::ast::*;
 
@@ -41,11 +39,11 @@ fn is_backpass(node: &Node) -> bool {
     matches!(node, Node::Statement(s) if matches!(s.as_ref(), Statement::Backpass(_)))
 }
 
-// The Statement catch-all below moves the non-backpass node back; a new statement kind belongs there.
+// The Statement catch-all below puts a non-backpass node back, which is right for any new kind.
 #[allow(unknown_lints, wildcard_over_own_enum)]
 fn desugar_body(body: &mut Vec<Node>) {
-    // Rewrite the first backpass; everything after it moves into the lambda,
-    // so the generic walk below reaches any later ones inside that new node.
+    // Rewrite the first backpass. Everything after it moves into the lambda,
+    // so the walk below reaches any later ones inside that new node.
     if let Some(i) = body.iter().position(is_backpass) {
         let rest = body.split_off(i + 1);
         let bp = match body.pop() {
@@ -134,8 +132,8 @@ fn desugar_statement(s: &mut Statement) {
             desugar_pattern(&mut b.pattern);
             desugar_expr(&mut b.init);
         }
-        // `desugar_body` consumed every backpass this walk can reach; one
-        // here survived a parser rejection (top level), so only its call's
+        // `desugar_body` consumed every backpass this walk can reach. One
+        // here survived a parse error (at the top level), so only its call's
         // own subtree is left to clean.
         Statement::Backpass(bp) => desugar_expr(&mut bp.call),
     }
@@ -223,14 +221,13 @@ fn desugar_expr(e: &mut Expression) {
         }
         Expression::UnaryExpression(u) => desugar_expr(&mut u.expression),
     }
-    // Runs after the match above has already desugared `left`/`right` (and
-    // so any pipe nested inside either of them), so a chain rewrites
-    // inside-out and each step only ever sees calls and already-final forms.
-    // Matching here (rather than inside a helper taking `&mut Expression`)
-    // is what lets `rewrite_pipe` take the already-narrowed `&mut
-    // PipeExpression` and build its replacement without a fallback branch
-    // for "not a pipe" — this crate denies `clippy::unreachable` outside
-    // tests, so that branch would need a real recovery, not a panic.
+    // This runs after the match above has desugared `left` and `right`, and
+    // so any pipe inside them. A chain therefore rewrites from the inside out,
+    // and each step only sees calls and finished forms. Matching here, rather
+    // than in a helper taking `&mut Expression`, lets `rewrite_pipe` take the
+    // narrowed `&mut PipeExpression` and build its replacement with no "not a
+    // pipe" branch. This crate denies `clippy::unreachable` outside tests, so
+    // that branch would need real recovery, not a panic.
     if let Expression::PipeExpression(p) = e {
         *e = rewrite_pipe(p);
     }
@@ -241,10 +238,10 @@ fn desugar_expr(e: &mut Expression) {
 /// or `right(left)` otherwise, treating `right` as a one-argument function.
 fn rewrite_pipe(p: &mut PipeExpression) -> Expression {
     let span = p.span;
-    // `left`/`right` are owned `Box<Expression>` fields reached only through
-    // `&mut`; swap in a throwaway placeholder to move them out, then build
-    // the replacement below. Never observed: the caller overwrites the whole
-    // `PipeExpression` node with what this function returns.
+    // `left` and `right` are owned `Box<Expression>` fields, reached only
+    // through `&mut`. Swap in a throwaway placeholder to move them out, then
+    // build the replacement below. Nothing ever sees the placeholder, because
+    // the caller overwrites the whole `PipeExpression` with the result.
     let placeholder = || {
         Box::new(Expression::Identifier(Identifier {
             name: String::new(),

@@ -1,16 +1,18 @@
 /**
- * Base64 (RFC 4648). `encode` is §4: `+`, `/` and `=` padding. `url_encode`
- * is §5: `-`, `_` and no padding, as URLs, JWTs and PKCE carry.
+ * Base64 (RFC 4648). `encode` follows §4, with `+`, `/` and `=` padding.
+ * `url_encode` follows §5, with `-`, `_` and no padding, which is what URLs,
+ * JWTs and PKCE carry.
  *
  * Decoding is strict: it takes exactly what the encoder writes and nothing
- * else, with no whitespace skipping. Bytes that decode two ways are how a
- * signature check gets bypassed. Strip MIME line breaks first.
+ * else, and it doesn't skip whitespace. If bytes could decode two ways, a
+ * signature check could be bypassed. Strip MIME line breaks before decoding.
  */
 
 import scarlet/binary
 import scarlet/int
 
-// Arithmetic rather than a table, so no lookup binary per call.
+// This uses arithmetic instead of a table, so there's no lookup binary per
+// call.
 fn digit(v Int) Int {
 	if v < 26 {
 		// 'A' is 65.
@@ -30,7 +32,7 @@ fn digit(v Int) Int {
 	}
 }
 
-// -1 outside the alphabet, rather than an `Option` boxed per character.
+// Returns -1 outside the alphabet, instead of an `Option` boxed per character.
 fn undigit(c Int) Int {
 	if c >= 65 && c <= 90 {
 		c - 65
@@ -90,7 +92,7 @@ fn encode_from(b Binary, at Int, size Int, acc Binary) Binary {
 	}
 }
 
-// `Err(Nil)` unless `b` is exactly what `encode` writes.
+// Decodes `b`, returning `Err(Nil)` unless it's exactly what `encode` writes.
 pub fn decode(b Binary) Result(Binary, Nil) {
 	size = binary::byte_size(b)
 	if size % 4 != 0 {
@@ -110,8 +112,9 @@ fn decode_from(b Binary, at Int, size Int, acc Binary) Result(Binary, Nil) {
 		c3 = binary::byte_at(b, at + 3)
 		v0 = undigit(c0)
 		v1 = undigit(c1)
-		// Padding only in the last two places of the last group. Without `last`,
-		// an `=` in the middle would silently drop the rest of the input.
+		// Padding is only allowed in the last two places of the last group.
+		// Without `last`, an `=` in the middle would silently drop the rest of
+		// the input.
 		last = at + 4 >= size
 		if v0 < 0 || v1 < 0 {
 			Err(Nil)
@@ -236,7 +239,8 @@ fn url_encode_from(b Binary, at Int, size Int, acc Binary) Binary {
 	}
 }
 
-// `Err(Nil)` unless `b` is exactly what `url_encode` writes.
+// Decodes `b`, returning `Err(Nil)` unless it's exactly what `url_encode`
+// writes.
 pub fn url_decode(b Binary) Result(Binary, Nil) {
 	size = binary::byte_size(b)
 	if size % 4 == 1 {
@@ -252,7 +256,8 @@ fn url_decode_from(b Binary, at Int, size Int, acc Binary) Result(Binary, Nil) {
 	if left <= 0 {
 		Ok(acc)
 	} else if left == 2 {
-		// One byte; the low four bits of the second digit are the fill.
+		// This is one byte, and the low four bits of the second digit are the
+		// fill.
 		v0 = url_undigit(binary::byte_at(b, at))
 		v1 = url_undigit(binary::byte_at(b, at + 1))
 		if v0 < 0 || v1 < 0 || int::bitwise_and(v1, 15) != 0 {
@@ -262,7 +267,8 @@ fn url_decode_from(b Binary, at Int, size Int, acc Binary) Result(Binary, Nil) {
 			Ok(binary::append(acc, <<out:8>>))
 		}
 	} else if left == 3 {
-		// Two bytes; the low two bits of the third digit are the fill.
+		// These are two bytes, and the low two bits of the third digit are the
+		// fill.
 		v0 = url_undigit(binary::byte_at(b, at))
 		v1 = url_undigit(binary::byte_at(b, at + 1))
 		v2 = url_undigit(binary::byte_at(b, at + 2))

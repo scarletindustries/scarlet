@@ -1,5 +1,5 @@
-// Modules. Every file is a module; import pulls another one in. A relative
-// path (./ or ../) resolves against this file's own directory, not the cwd.
+// Every file is a module, and import pulls another one in. A relative path
+// (./ or ../) resolves against this file's own directory, not the working one.
 
 import scarlet/array
 import scarlet/result

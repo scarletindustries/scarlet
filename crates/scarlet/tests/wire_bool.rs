@@ -1,23 +1,23 @@
-//! `Bool` across the typed wire, end to end through `al run`. `True` and
-//! `False` are a two-constructor `Data` type to the descriptor and an
-//! immediate to the runtime, so the typed encoder's `Data` arm must meet an
-//! unboxed constructor and find its tag through the pre-built word; a
-//! cell-only arm panics in debug and writes no body in release, and `decode`
-//! then reports `Truncated`. Inside a closure's captures `Bool` has a tag of
-//! its own (`wire_closures.rs`), so this is the typed path alone.
+//! These test `Bool` across the typed wire, end to end through `al run`. To the
+//! descriptor, `True` and `False` are a two-constructor `Data` type, but to the
+//! runtime they're an immediate. So the typed encoder's `Data` arm has to handle
+//! an unboxed constructor and find its tag through the pre-built word. An arm
+//! that only handles cells panics in debug and writes no body in release, and
+//! `decode` then reports `Truncated`. Inside a closure's captures `Bool` has a
+//! tag of its own (`wire_closures.rs`), so this file covers only the typed path.
 //!
-//! `Nil` is the control: the prelude's `Nil` is a frozen cell at runtime
+//! `Nil` is the control. The prelude's `Nil` is a frozen cell at runtime
 //! (`Op::PushNil` pushes the `Unit` ABI slot's pre-built constructor), so it
-//! takes the ordinary `Data` path, at zero body bytes.
+//! takes the ordinary `Data` path with an empty body.
 
 mod common;
 
 use common::run_outputs;
 
-/// Each polarity, and `Nil`. The tag is pinned as a byte too: `True` is
+/// Round-trips both values and `Nil`, and pins the tag as a byte too. `True` is
 /// variant 0 because `scarlet.sca` declares it first, so the body of
-/// `wire.encode(True)` is the single byte 0 behind the eleven-byte header,
-/// and `Nil` — one constructor — has no body at all.
+/// `wire.encode(True)` is the single byte 0 after the eleven-byte header. `Nil`
+/// has only one constructor, so it has no body at all.
 #[test]
 #[ignore = "needs the VM"]
 fn true_false_and_nil_round_trip_and_the_tag_is_the_declared_index() {
@@ -36,10 +36,10 @@ fn true_false_and_nil_round_trip_and_the_tag_is_the_declared_index() {
     );
 }
 
-/// A record holding a `Bool` beside an `Int`, and an `Array(Bool)`: the
-/// immediate under a `Data` node that is a field and an element rather than
-/// the root. The decoded `Bool` is used as one — branched on, not only
-/// compared — which a cell standing in for it could not be.
+/// Round-trips a record holding a `Bool` beside an `Int`, and an `Array(Bool)`.
+/// This puts the immediate under a `Data` node as a field and as an element
+/// rather than at the root. The test branches on the decoded `Bool` as well as
+/// comparing it, which a cell standing in for it couldn't get through.
 #[test]
 #[ignore = "needs the VM"]
 fn a_record_with_a_bool_field_and_an_array_of_bools_round_trip() {

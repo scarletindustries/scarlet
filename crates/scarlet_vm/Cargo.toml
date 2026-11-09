@@ -5,29 +5,31 @@ edition = "2024"
 
 [dependencies]
 scarlet_ir = { path = "../scarlet_ir" }
-# Big ints' arithmetic, behind `bigint.rs` (docs/vm-design.md, "Values").
+# Does big-int arithmetic behind `bigint.rs` (docs/vm-design.md, "Values").
 num-bigint = "0.5"
 num-traits = "0.2"
-# `string.to_graphemes`: the extended grapheme clusters of UAX #29.
+# Splits text into UAX #29 extended grapheme clusters for `string.to_graphemes`.
 unicode-segmentation = "1"
-# `crypto.random_bytes`: the OS's own random source.
+# Reads the OS's own random source for `crypto.random_bytes`.
 getrandom = "0.4"
-# `scarlet/crypto`'s digests, HMAC and signature checks: aws-lc, the crypto
-# rustls links for TLS. Without the default `ring-io` and `ring-sig-verify`,
-# which only add `ring`-shaped APIs this does not call.
+# Does `scarlet/crypto`'s digests, HMAC and signature checks with aws-lc, the
+# crypto rustls links for TLS. We turn off the default `ring-io` and
+# `ring-sig-verify` features, which only add `ring`-shaped APIs we don't call.
 aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys", "alloc"] }
-# The OS error numbers `scarlet/io.IoError` names.
+# Gives the OS error numbers that `scarlet/io.IoError` names.
 libc = "0.2"
-# `scarlet/json`'s parser: simdjson's Rust port, choosing its SIMD code for
-# the CPU it runs on. Without the default `serde_impl`, which pulls serde in
-# for an API this never calls; `swar-number-parsing` is a default it does use.
+# Parses JSON for `scarlet/json`. It's simdjson's Rust port, and it picks its
+# SIMD code for the CPU it runs on. We turn off the default `serde_impl`, which
+# pulls in serde for an API we never call, but keep the default
+# `swar-number-parsing`, which we do use.
 simd-json = { version = "0.17", default-features = false, features = ["runtime-detection", "swar-number-parsing"] }
-# Finding the next backslash, for the lone-surrogate check in `json.rs`.
+# Finds the next backslash, for the lone-surrogate check in `json.rs`.
 memchr = "2"
-# `scarlet/http/h1`'s head parser: `hyper`'s, SIMD and allocation-free.
+# Parses HTTP heads for `scarlet/http/h1`. It's `hyper`'s parser, uses SIMD and
+# doesn't allocate.
 httparse = "1"
 
 [dev-dependencies]
 # Tests write their programs in Scarlet and compile them. Only the tests see
-# the compiler; the VM itself reads nothing but `scarlet_ir`.
+# the compiler, and the VM itself reads nothing but `scarlet_ir`.
 scarlet_core = { path = "../scarlet_core" }

@@ -1,11 +1,11 @@
 import scarlet/binary
-// Aliased: `int` and `field` are also functions here.
+// These are aliased because `int` and `field` are also functions here.
 import scarlet/int as integer
 import scarlet/json
 import scarlet/json/field as presence
 
-// Turning a parsed document into your own types. A `Decoder(a)` reads a `Doc`
-// and gives an `a`, or every failure with the path it happened at.
+// Turns a parsed document into your own types. A `Decoder(a)` reads a `Doc`
+// and gives an `a`, or every failure with the path where it happened.
 //
 //     fn user() Decoder(User) {
 //         id <- decode.take('id', decode.int_string())
@@ -13,7 +13,7 @@ import scarlet/json/field as presence
 //         decode.succeed(User(id: id, nickname: nick))
 //     }
 //
-// Every member is checked even after one fails. `then` is the exception: what
+// Every member is checked even after one fails. `then` is the exception. What
 // comes next depends on the value, so it stops at the first failure.
 
 pub type Segment {
@@ -25,7 +25,8 @@ pub type Segment {
 pub type Found {
 	FoundKind(kind json::Kind)
 	FoundAbsent
-	// The right kind, the wrong content: a quoted integer that is not one.
+	// The right kind with the wrong content, like a quoted integer that isn't
+	// one.
 	FoundText(text String)
 }
 
@@ -38,8 +39,8 @@ pub type Failure {
 }
 
 // A stand-in value after a failure, so the members after it still get checked.
-// It never reaches the caller: a run that uses one returns `Err`. `fail` has
-// no value to offer, so it answers `Halt`.
+// It never reaches the caller, because a run that uses one returns `Err`.
+// `fail` has no value to offer, so it answers `Halt`.
 type Recovery(a) {
 	Resume(value a)
 	Halt
@@ -74,7 +75,7 @@ fn recovery(dec Decoder(a)) Recovery(a) {
 	resume()
 }
 
-// `.field.list[3].name`, or `<root>` for the top level.
+// Formats a path like `.field.list[3].name`, or `<root>` for the top level.
 pub fn path_to_string(path Array(Segment)) String {
 	match path {
 		[] -> '<root>'
@@ -96,7 +97,8 @@ fn segment_to_string(s Segment) String {
 	}
 }
 
-// One line per failure: where, what was wanted, what was there.
+// Formats a failure as one line saying where it happened, what was wanted and
+// what was there.
 pub fn failure_to_string(f Failure) String {
 	Failure(path, expected, found) = f
 	'${path_to_string(path)}: expected ${expected}, found ${found_to_string(found)}'
@@ -146,7 +148,7 @@ pub fn fail(expected String) Decoder(a) {
 	Decoder(step: fn(doc) Err(one_failure(expected, doc)), resume: fn() Halt)
 }
 
-// The one place a stand-in value is written down rather than derived.
+// This is the one place a stand-in value is written down instead of derived.
 fn scalar(expected String, resume_with a, read fn(json::Doc) Option(a)) Decoder(a) {
 	Decoder(
 		step: fn(doc) match read(doc) {
@@ -174,8 +176,9 @@ pub fn bool() Decoder(Bool) {
 	scalar('a boolean', False, json::bool)
 }
 
-// An integer sent as a JSON string, as protocols do for 64-bit ids (Discord
-// snowflakes) that a double would round. A leading `-` is fine, `+` is not.
+// Decodes an integer sent as a JSON string. Protocols do this for 64-bit ids,
+// like Discord snowflakes, that a double would round. A leading `-` is fine,
+// but `+` isn't.
 pub fn int_string() Decoder(Int) {
 	Decoder(
 		step: fn(doc) match json::string(doc) {
@@ -189,7 +192,8 @@ pub fn int_string() Decoder(Int) {
 	)
 }
 
-// `int.from_string` takes a leading `+`, and JSON has none. 43 is `+`.
+// `int.from_string` takes a leading `+`, but JSON numbers never have one. 43
+// is `+`.
 fn parse_signed(s String) Result(Int, Nil) {
 	if binary::byte_at(binary::from_string(s), 0) == 43 {
 		Err(Nil)
@@ -198,7 +202,7 @@ fn parse_signed(s String) Result(Int, Nil) {
 	}
 }
 
-// `null`, decoded as `value`.
+// Decodes `null` as `value`.
 pub fn null_as(value a) Decoder(a) {
 	Decoder(
 		step: fn(doc) if json::is_null(doc) {
@@ -224,8 +228,9 @@ pub fn map(dec Decoder(a), f fn(a) b) Decoder(b) {
 	)
 }
 
-// Stops at the first failure: the next decoder depends on the value, so past
-// a failure it would be a guess. Use `take` for members that don't.
+// Stops at the first failure, because the next decoder depends on the value
+// and past a failure it would be a guess. Use `take` for members that don't
+// depend on it.
 pub fn then(dec Decoder(a), f fn(a) Decoder(b)) Decoder(b) {
 	Decoder(step, resume) = dec
 	Decoder(
@@ -240,8 +245,9 @@ pub fn then(dec Decoder(a), f fn(a) Decoder(b)) Decoder(b) {
 	)
 }
 
-// Hands `dec`'s value to the rest, and checks the rest even if `dec` failed,
-// using its stand-in value. Always `Err` if `dec` failed. Stops at `fail`.
+// Hands `dec`'s value to the rest, and checks the rest even if `dec` failed by
+// using its stand-in value. The result is always `Err` if `dec` failed. It
+// stops at `fail`.
 pub fn also(dec Decoder(a), k fn(a) Decoder(b)) Decoder(b) {
 	Decoder(step, resume) = dec
 	Decoder(
@@ -262,12 +268,13 @@ pub fn also(dec Decoder(a), k fn(a) Decoder(b)) Decoder(b) {
 	)
 }
 
-// `also` over `field`.
+// Decodes the member `name` with `inner` and hands it to `k`, using `also`
+// over `field`.
 pub fn take(name String, inner Decoder(a), k fn(a) Decoder(b)) Decoder(b) {
 	also(field(name, inner), k)
 }
 
-// `also` over `optional_field`.
+// Like `take`, but uses `optional_field`, so `k` gets a `Field`.
 pub fn take_optional(
 	name String,
 	inner Decoder(a),
@@ -276,7 +283,8 @@ pub fn take_optional(
 	also(optional_field(name, inner), k)
 }
 
-// Keeps both sets of failures, with no stand-in value needed.
+// Combines two decoders with `f`. It keeps both sets of failures, with no
+// stand-in value needed.
 pub fn map2(d1 Decoder(a), d2 Decoder(b), f fn(a, b) c) Decoder(c) {
 	Decoder(s1, r1) = d1
 	Decoder(s2, r2) = d2
@@ -294,8 +302,8 @@ pub fn map2(d1 Decoder(a), d2 Decoder(b), f fn(a, b) c) Decoder(c) {
 	)
 }
 
-// Only values that satisfy `ok`. Better than doing it with `then`, which stops
-// checking the members after it.
+// Accepts only values that satisfy `ok`. This is better than doing it with
+// `then`, which stops checking the members after it.
 pub fn guard(dec Decoder(a), ok fn(a) Bool, expected String) Decoder(a) {
 	Decoder(step, resume) = dec
 	Decoder(
@@ -311,8 +319,8 @@ pub fn guard(dec Decoder(a), ok fn(a) Bool, expected String) Decoder(a) {
 	)
 }
 
-// A required member. A `null` one goes to `inner`, which fails unless it
-// takes null.
+// Decodes a required member. A `null` member goes to `inner`, which fails
+// unless it takes null.
 pub fn field(name String, inner Decoder(a)) Decoder(a) {
 	Decoder(step, resume) = inner
 	Decoder(
@@ -349,8 +357,9 @@ fn member(doc json::Doc, name String) Result(Option(json::Doc), Array(Failure)) 
 	}
 }
 
-// Absent, null or present, as a `Field(a)`: absent means "unchanged" and null
-// means "cleared", which `Option` would lose. A non-object still fails.
+// Decodes a member that may be absent, null or present, as a `Field(a)`.
+// Absent means "unchanged" and null means "cleared", a difference `Option`
+// would lose. A non-object still fails.
 pub fn optional_field(name String, inner Decoder(a)) Decoder(presence::Field(a)) {
 	Decoder(step, _) = inner
 	Decoder(
@@ -405,7 +414,8 @@ fn collect_list(
 	}
 }
 
-// A list, not a `Map`, to keep member order and duplicate keys.
+// Decodes an object's members into a list instead of a `Map`, to keep member
+// order and duplicate keys.
 pub fn dict(inner Decoder(a)) Decoder(Array((String, a))) {
 	Decoder(step, _) = inner
 	Decoder(
@@ -440,8 +450,8 @@ fn collect_dict(
 	}
 }
 
-// The first that succeeds, or every failure. `first` is its own parameter so
-// there is always at least one.
+// Tries each decoder in turn and gives the first success, or every failure.
+// `first` is its own parameter so there's always at least one.
 pub fn one_of(first Decoder(a), rest Array(Decoder(a))) Decoder(a) {
 	Decoder(
 		step: fn(doc) match run_at(first, doc) {
@@ -466,7 +476,8 @@ fn try_each(
 	}
 }
 
-// A union told apart by a string member. `pick` is `Err(Nil)` for an unknown tag.
+// Decodes a union told apart by the string member `tag`. `pick` returns
+// `Err(Nil)` for an unknown tag.
 pub fn tagged(tag String, pick fn(String) Result(Decoder(a), Nil)) Decoder(a) {
 	then(field(tag, string_value()), fn(t) match pick(t) {
 		Ok(dec) -> dec
@@ -488,7 +499,7 @@ fn unknown_tag(tag String, found String) Decoder(a) {
 	)
 }
 
-// Decode at a path of member names.
+// Decodes at a path of member names.
 pub fn at(path_names Array(String), inner Decoder(a)) Decoder(a) {
 	match path_names {
 		[] -> inner
@@ -496,8 +507,9 @@ pub fn at(path_names Array(String), inner Decoder(a)) Decoder(a) {
 	}
 }
 
-// `default` when the member is absent or null. Not for partial updates:
-// `field.update` keeps the current value, where this would overwrite it.
+// Decodes a member, giving `default` when it's absent or null. Don't use it for
+// partial updates, because `field.update` keeps the current value where this
+// would overwrite it.
 pub fn with_default(name String, inner Decoder(a), default a) Decoder(a) {
 	map(optional_field(name, inner), fn(f) presence::fold(f, fn() default, fn() default, fn(x) x))
 }

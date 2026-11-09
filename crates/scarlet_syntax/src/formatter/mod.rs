@@ -154,9 +154,9 @@ pub fn format(input: &str) -> FormatResult {
     FormatResult::Formatted { output }
 }
 
-/// A scanner line/column position, keying trivia by the token it attaches to.
-/// A named type so transposing line and column is a compile error, not a silent
-/// lookup miss.
+/// A scanner line and column, used to key trivia by the token it belongs to.
+/// It's a named type so that swapping line and column is a compile error, not a
+/// silent lookup miss.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct Pos {
     line: i32,
@@ -727,9 +727,9 @@ impl Formatter {
         };
         let arg = match a {
             ast::CallArg::Positional(e) => self.expr(e),
-            // A punned argument keeps its shorthand — the formatter does not
-            // expand `label:` to `label: label`, or the sugar would defeat
-            // its own point the first time a file gets formatted.
+            // A punned argument keeps its shorthand. If the formatter expanded
+            // `label:` to `label: label`, the shorthand would be gone the first
+            // time a file got formatted.
             ast::CallArg::Labeled {
                 punned: true,
                 label,
@@ -743,7 +743,7 @@ impl Formatter {
         d![comments, arg]
     }
 
-    /// The `:spec` suffix of a `<<>>` segment, inverting `parse_bin_size_spec`.
+    /// The `:spec` suffix of a `<<>>` segment, the reverse of `parse_bin_size_spec`.
     /// A string-literal segment's Utf8 kind is the parser default, so its
     /// `:utf8` is omitted.
     fn bin_size_spec(&self, spec: &ast::BinSpec, value_is_string: bool) -> Doc {
@@ -1107,9 +1107,10 @@ impl Formatter {
                 d![text(head), delimited("(", items, ")")]
             }
             P::Or { first, rest, .. } => {
-                // Flat while it fits: `A | B | C`. Too wide: one alternative
-                // per line, each continuation led by its pipe at the arm's
-                // indent — never a break inside an alternative's own parens.
+                // Keep it flat while it fits: `A | B | C`. When it's too wide,
+                // put one alternative per line, each after the first led by
+                // its pipe at the arm's indent. Never break inside an
+                // alternative's own parens.
                 let mut parts = vec![self.pattern(first)];
                 for p in rest {
                     parts.push(d![line(), text("| "), self.pattern(p)]);
@@ -1909,9 +1910,9 @@ mod tests {
         assert_round_trips(&out);
     }
 
-    /// A punned argument keeps its shorthand — the formatter does not expand
-    /// `now:` to `now: now`, or the sugar would defeat its own point the
-    /// first time a file gets formatted.
+    /// A punned argument keeps its shorthand. If the formatter expanded `now:`
+    /// to `now: now`, the shorthand would be gone the first time a file got
+    /// formatted.
     #[test]
     fn punned_call_argument_keeps_its_shorthand() {
         let out = fmt("f(now:, self:)\n");
@@ -1919,7 +1920,7 @@ mod tests {
         assert_round_trips(&out);
     }
 
-    /// The mirror of the test above: a labeled argument spelled out in full
+    /// The mirror of the test above: a labelled argument spelled out in full
     /// is not collapsed into a pun just because its value happens to share
     /// the label's name. `punned` is a fact the parser records at the site
     /// that observed it, not one re-derived later by comparing spellings.
@@ -1934,7 +1935,7 @@ mod tests {
     }
 
     /// Punning composes with the other call-argument shapes: an ordinary
-    /// labeled argument and a record-update spread in the same call.
+    /// labelled argument and a record-update spread in the same call.
     #[test]
     fn punning_mixes_with_labeled_and_spread_arguments() {
         let out = fmt("Segment(..s, from:, label: 'up')\n");

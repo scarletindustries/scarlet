@@ -1,7 +1,7 @@
 use std::io::IsTerminal;
 
-/// Whether to emit ANSI color for `s`. `NO_COLOR` beats `CLICOLOR_FORCE`, which
-/// beats the terminal check.
+/// Whether to write ANSI colour to `s`. `NO_COLOR` wins over `CLICOLOR_FORCE`,
+/// which wins over the terminal check.
 fn color_enabled(s: &impl IsTerminal) -> bool {
     if std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
         return false;
@@ -12,8 +12,8 @@ fn color_enabled(s: &impl IsTerminal) -> bool {
     s.is_terminal()
 }
 
-/// Resolved ANSI palette. Every field is an escape sequence or the empty
-/// string, so call sites interpolate without checking.
+/// The ANSI palette to use. Every field is an escape sequence or an empty
+/// string, so callers can interpolate it without checking.
 #[derive(Clone, Copy)]
 pub struct Palette {
     pub reset: &'static str,
@@ -26,7 +26,8 @@ pub struct Palette {
     pub(crate) cyan: &'static str,
     pub(crate) blue: &'static str,
     pub error: &'static str,
-    /// Brand mark color (Scarlet, #AA091B) — the logo only. Never body text.
+    /// The brand colour (Scarlet, #AA091B), for the logo only and never for
+    /// body text.
     pub scarlet: &'static str,
     link_open: &'static str,
     link_close: &'static str,
@@ -87,8 +88,8 @@ impl Palette {
         self.enabled
     }
 
-    /// The two resolved palettes, for tests that must not depend on whether
-    /// the test binary's stdout happens to be a terminal.
+    /// The two palettes, for tests that must not depend on whether the test
+    /// binary's stdout happens to be a terminal.
     #[cfg(test)]
     pub(crate) const fn ansi_for_test() -> Self {
         ON
@@ -99,8 +100,8 @@ impl Palette {
         OFF
     }
 
-    /// Render `text` as an OSC 8 terminal hyperlink to `url`. Returns `text`
-    /// bare when color is off.
+    /// Renders `text` as an OSC 8 terminal hyperlink to `url`, or returns
+    /// `text` as it is when colour is off.
     pub fn hyperlink(&self, url: &str, text: &str) -> String {
         if self.enabled {
             format!(

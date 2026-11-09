@@ -1,5 +1,5 @@
 // Conway's Game of Life: a glider crossing an 8x8 grid.
-// The grid rebuilds from scratch each generation; `or` reads past an edge as dead.
+// The grid is rebuilt each generation, and `or` reads past an edge as dead.
 
 import scarlet/array
 

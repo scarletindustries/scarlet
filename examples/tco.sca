@@ -13,7 +13,7 @@ fn sum_to(n Int, acc Int) Int {
 	}
 }
 
-// Recurse hops times and report the live frame count at the bottom.
+// Recurse hops times, and report how many frames are live at the bottom.
 fn depth_after(hops Int) Int {
 	if hops == 0 {
 		internal::stack_depth()
@@ -43,7 +43,7 @@ fn is_odd(n Int) Bool {
 pub fn main() {
 	println(sum_to(1000000, 0))
 
-	// Three frames total: entry, main, and depth_after's one live frame.
+	// Three frames in all: the entry, main, and depth_after's one live frame.
 	println('depth after 1 hop: ${depth_after(1)}')
 	println('depth after 1000000 hops: ${depth_after(1000000)}')
 

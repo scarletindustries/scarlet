@@ -6,13 +6,14 @@ use super::*;
 use crate::typed_ir::{FieldAt, PreludeTys, VariantLayout};
 
 impl PreludeTys for ModuleChecker<'_> {
-    /// The one bridge from a live inference `Ty` into the program's `RTy`
-    /// pool. Total: an unsolved variable becomes a fresh `Bound`.
+    /// The only way a live inference `Ty` gets into the program's `RTy` pool.
+    /// It never fails: an unsolved variable becomes a fresh `Bound`.
     ///
-    /// The cache is what makes structurally identical types share one pool
-    /// node, so consumers keyed off an `RTy` can tell they are one type. Only
-    /// fully solved types may be cached: a variable unsolved now can be solved
-    /// by a later body. Keyed by union-find root; cleared with the pool.
+    /// The cache makes structurally identical types share one pool node, so
+    /// code keyed on an `RTy` can tell they are the same type. Only fully
+    /// solved types go in the cache, because a variable that is unsolved now
+    /// can be solved by a later body. The cache is keyed by union-find root
+    /// and cleared along with the pool.
     fn resolve_rty(&mut self, pool: &mut ResolvedPool, t: Ty) -> RTy {
         let root = self.c.engine.find(t);
         if let Some(&r) = self.c.rty_cache.get(&root) {
@@ -42,8 +43,8 @@ impl ElabCtx for ModuleChecker<'_> {
     fn intern(&mut self, s: &str) -> StrId {
         self.c.engine.intern(s)
     }
-    // Safe mid-elaboration: the pool is `ConstId`-addressed, so pooling moves
-    // no address.
+    // This is safe in the middle of elaboration. The pool is addressed by
+    // `ConstId`, so adding a constant never moves one that is already there.
     fn number_const(&mut self, lit: &ast::NumberLiteral) -> crate::core_ir::ConstId {
         let c = self.c.const_number(lit);
         self.c.add_constant(c)
@@ -112,8 +113,8 @@ impl ElabCtx for ModuleChecker<'_> {
         }
         Some(FieldAt::PerVariant(layouts))
     }
-    /// Labels come off the type by `VariantRef`, not off the constructor's
-    /// scheme by name: a `mod.Ctor(..)` bare name is not in `env`.
+    /// Read the labels off the type by `VariantRef`, not off the constructor's
+    /// scheme by name, because the bare name in `mod.Ctor(..)` is not in `env`.
     fn ctor_labels(&mut self, v: crate::core_ir::VariantRef) -> Option<Vec<StrId>> {
         let info = self.c.env.lookup_type_info_by_id(v.type_id)?;
         let variants = info.variants()?;

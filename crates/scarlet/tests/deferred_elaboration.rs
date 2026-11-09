@@ -1,7 +1,7 @@
-//! Behavioural pins for the deferred-elaboration pass order.
+//! These pin down how programs behave under the deferred-elaboration pass order.
 //!
 //! `analyse_module`'s Pass 5 parks every function body and elaborates it only
-//! after the SCC has been generalized, so elaboration must rebuild the codegen
+//! after the SCC has been generalised, so elaboration must rebuild the codegen
 //! frame the walk saw and place the parked bodies in a layout the walk never
 //! saw. Both fail silently: the program still runs, it just computes something
 //! else.
@@ -112,8 +112,8 @@ fn a_bind_shadowing_a_builtin_in_one_body_does_not_repoint_a_sibling_body() {
     );
 }
 
-/// The same leak one step milder: the bind flips the declared `fn` `h` to an
-/// Int local. `k`, walked afterwards, must still call the function.
+/// This is the same leak in a milder form. The bind turns the declared `fn` `h`
+/// into an Int local, and `k`, walked afterwards, must still call the function.
 #[test]
 fn a_bind_shadowing_a_decl_fn_in_one_body_does_not_repoint_a_sibling_body() {
     run_outputs(

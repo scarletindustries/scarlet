@@ -1,8 +1,9 @@
 /**
- * `application/x-www-form-urlencoded`, both ways: what HTML forms POST and
- * query strings carry (WHATWG URL §5). `decode` is forgiving: a bad percent
- * escape is kept as literal bytes, as every form reader does. `pct_encode` is
- * strict: everything outside RFC 3986's unreserved set is escaped.
+ * Encodes and decodes `application/x-www-form-urlencoded`, the format that
+ * HTML forms POST and query strings carry (WHATWG URL §5). `decode` is
+ * forgiving: it keeps a bad percent escape as literal bytes, as every form
+ * reader does. `pct_encode` is strict: it escapes everything outside RFC
+ * 3986's unreserved set.
  */
 
 import scarlet/array
@@ -52,13 +53,14 @@ fn pct_decode_from(b Binary, at Int, acc Binary) Binary {
 	}
 }
 
-/** The bytes `b` percent-encodes, `+` included. */
+/** Decodes the percent escapes in `b` and turns each `+` into a space. */
 pub fn pct_decode(b Binary) Binary {
 	pct_decode_from(b, 0, <<>>)
 }
 
-/** `s` escaped for any URL position: RFC 3986 unreserved bytes pass, the
- * rest become `%XX`. Total; non-UTF-8 input cannot arise from a String. */
+/** Escapes `s` for any position in a URL. RFC 3986 unreserved bytes pass
+ * through and the rest become `%XX`. It never fails, because a String is
+ * always valid UTF-8. */
 pub fn pct_encode(s String) String {
 	binary::to_string(pct_encode_from(binary::from_string(s), 0, <<>>)) or ''
 }
@@ -84,8 +86,8 @@ fn pct_encode_from(b Binary, at Int, acc Binary) Binary {
 	}
 }
 
-/** `a=1&b=2` (query string or form body) as pairs, in order, decoded. A
- * segment with no `=` contributes nothing. */
+/** Decodes `a=1&b=2`, from a query string or a form body, into pairs in
+ * order. A segment with no `=` is skipped. */
 pub fn decode(b Binary) Array((String, String)) {
 	text = binary::to_string(b) or ''
 	array::fold(string_split(text), [], fn(acc, pair) match split_once(pair) {
@@ -101,7 +103,8 @@ pub fn decode(b Binary) Array((String, String)) {
 	})
 }
 
-// Byte splits on '&' and the first '=', so no need for scarlet/string.
+// These split bytes on '&' and the first '=', so this module doesn't need
+// scarlet/string.
 fn string_split(text String) Array(String) {
 	splits(binary::from_string(text), 0, 0, [])
 }
@@ -130,7 +133,7 @@ fn split_once(pair String) Option((String, String)) {
 	Some((segment(b, 0, at), segment(b, at + 1, binary::byte_size(b))))
 }
 
-/** The first value for `key`, in a `decode` result. */
+/** Returns the first value for `key` in a `decode` result. */
 pub fn get(pairs Array((String, String)), key String) Option(String) {
 	option::map(
 		array::find(pairs, fn(p) {

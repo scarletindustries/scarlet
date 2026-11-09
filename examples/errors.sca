@@ -1,6 +1,6 @@
-// Absence versus failure. Option(a) is a value that may not be there but
-// nothing went wrong; Result(a, e) is an operation that could fail, and e
-// says why.
+// Absence and failure are different. An Option(a) is a value that may not be
+// there, though nothing went wrong. A Result(a, e) comes from an operation that
+// could fail, and e says why.
 
 import scarlet/array
 import scarlet/binary
@@ -9,8 +9,8 @@ import scarlet/option
 import scarlet/result
 import scarlet/string
 
-// A domain error type. Give the variants payloads: the caller wants the bad
-// input, not just that "something broke".
+// An error type for this program. Give the variants payloads, because the
+// caller wants the bad input, not just that "something broke".
 type ParseError {
 	Empty
 	NotANumber(text String)
@@ -45,7 +45,7 @@ fn validate(n Int) Result(Int, ParseError) {
 	}
 }
 
-// `<-` hands the rest of the block to result::then: it runs only on Ok.
+// `<-` hands the rest of the block to result::then, so it runs only on Ok.
 fn checked(s String) Result(Int, ParseError) {
 	n <- result::then(parse_score(s))
 	validate(n)
@@ -63,8 +63,8 @@ pub fn main() {
 	println('map       ${option::map(found, string::length)}')
 	println('unwrap    ${option::unwrap(found, 'nobody')} ${option::unwrap(missing, 'nobody')}')
 
-	// then chains a lookup that may itself find nothing; or_else supplies a
-	// lazy alternative.
+	// then chains a lookup that may itself find nothing, and or_else gives an
+	// alternative it only works out when needed.
 	initial = option::then(found, fn(u) string::split(u, '')[0])
 	println('then      ${option::unwrap(initial, '?')}')
 	println('or_else   ${option::unwrap(option::or_else(missing, fn() Some('anonymous')), '?')}')
@@ -98,7 +98,7 @@ pub fn main() {
 	println('score     ${score}')
 	println('')
 
-	// io errors are typed enums: NotFound carries the path it could not read.
+	// io errors are typed enums. NotFound carries the path it couldn't read.
 	match io::read_text('no-such-file.txt') {
 		Ok(contents) -> println('read ${string::length(contents)} chars')
 		Err(e) -> match e {

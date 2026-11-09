@@ -1,27 +1,28 @@
-//! The one bridge from inference types into [`ResolvedPool`]: resolve every
-//! union-find link, decide what each surviving variable means, copy the spine
-//! into the pool. Being the only `Ty → RTy` constructor is what lets every
-//! consumer downstream match [`ResolvedNode`] exhaustively.
+//! Zonking copies inference types into the [`ResolvedPool`], and this is the
+//! only code that does it. It follows every union-find link, decides what each
+//! remaining variable means, and copies the type into the pool. Because
+//! nothing else builds an `RTy` from a `Ty`, every consumer downstream can
+//! match [`ResolvedNode`] exhaustively.
 //!
-//! Two kinds of variable survive to here, both encoded as
-//! [`ResolvedNode::Bound`] numbered by first appearance within one [`Zonker`]:
+//! Two kinds of variable get this far. Both become a [`ResolvedNode::Bound`],
+//! numbered in order of first appearance within one [`Zonker`]:
 //!
-//! * A **rigid** variable, quantified by `generalize`/`generalize_top`. Honest
-//!   polymorphism.
-//! * An **unbound** variable inference never determined. Undetermined and
-//!   rigidly polymorphic are the same operational fact — unknown
-//!   representation, dispatch dynamically — which is what makes the walk
-//!   total.
+//! * A **rigid** variable, quantified by `generalize`/`generalize_top`. This is
+//!   real polymorphism.
+//! * An **unbound** variable that inference never decided. At runtime this is
+//!   the same as a rigid one: we don't know how the value is represented, so
+//!   operations on it dispatch dynamically. That is why zonking never fails.
 //!
 //! An unsolved variable is not a compiler bug. `generalize_top` only rewrites
-//! variables reachable from the *signature*, so one appearing only inside a
-//! body (`array.length([])`'s element type) stays unbound, and nothing ever
-//! observes it.
+//! variables reachable from the *signature*, so one that appears only inside a
+//! body (such as `array.length([])`'s element type) stays unbound, and nothing
+//! ever looks at it.
 //!
-//! [`Zonker::zonk_or_opaque`]'s `invented` bool is for callers memoising
-//! across zonkers: a variable unsolved now may be solved by a later body, so a
-//! node holding an invented `Bound` must not be cached as that type's final
-//! answer. The per-`Zonker` memo carries the bit for the same reason.
+//! [`Zonker::zonk_or_opaque`] returns an `invented` bool for callers that
+//! cache results across zonkers. A variable unsolved now may be solved by a
+//! later body, so a node holding an invented `Bound` must not be cached as
+//! that type's final answer. The per-`Zonker` memo keeps the bit for the same
+//! reason.
 
 use std::collections::HashMap;
 
@@ -31,18 +32,18 @@ use super::rty::{RTy, ResolvedPool};
 use scarlet_types::types::{InferEngine, Ty, TypeNode};
 
 /// Copies inference types into a [`ResolvedPool`], memoising per resolved `Ty`
-/// so a spine shared by many expressions is allocated once. Bound indices are
-/// numbered per `Zonker`, never across.
+/// so a type shared by many expressions is allocated once. Each `Zonker`
+/// numbers its own `Bound` indices, starting from zero.
 pub struct Zonker<'e> {
     eng: &'e InferEngine,
-    /// Keyed by the *representative* `Ty`, so `find_ref`-equal types share a
-    /// node. The bool is the `invented` bit, carried so a memo hit reports
-    /// what the build reported.
+    /// Keyed by the *representative* `Ty`, so types equal under `find_ref`
+    /// share a node. The bool is the `invented` bit, kept so a memo hit
+    /// reports what the build reported.
     memo: HashMap<Ty, (RTy, bool)>,
-    /// Rigid var id (`QuantVar::origin_id`) or unsolved var id → its `Bound`
-    /// index, so one variable is one type however often it appears.
+    /// Maps a rigid variable's id (`QuantVar::origin_id`) or an unsolved
+    /// variable's id to its `Bound` index, so one variable is one type however
+    /// often it appears.
     quants: HashMap<i32, u32>,
-    /// Next `Bound` index to mint.
     next_bound: u32,
 }
 
@@ -67,12 +68,12 @@ impl<'e> Zonker<'e> {
         i
     }
 
-    /// Resolve `t` and copy it into `pool`. Total: each unsolved variable
-    /// becomes its own opaque `Bound`.
+    /// Resolve `t` and copy it into `pool`. This never fails, because each
+    /// unsolved variable becomes its own opaque `Bound`.
     ///
     /// The `bool` is true when an opaque `Bound` was invented anywhere in the
-    /// spine. A caller caching across zonkers must not keep such a node: the
-    /// variable may be solved by a later body.
+    /// type. A caller caching across zonkers must not keep such a node,
+    /// because a later body may solve the variable.
     pub fn zonk_or_opaque(&mut self, pool: &mut ResolvedPool, t: Ty) -> (RTy, bool) {
         self.resolve(pool, t)
     }
@@ -87,7 +88,7 @@ impl<'e> Zonker<'e> {
         built
     }
 
-    /// `root` must already be a representative: no `Link` can be its node.
+    /// `root` must already be a representative, so its node is never a `Link`.
     fn build(&mut self, pool: &mut ResolvedPool, root: Ty) -> (RTy, bool) {
         match self.eng.node(root) {
             TypeNode::Var(var_id) => match self.eng.root_generic_id(root) {
@@ -101,8 +102,8 @@ impl<'e> Zonker<'e> {
                     (pool.mk_bound(i), true)
                 }
             },
-            // A `Scheme.ty`'s `Bound` indices are already closed and this
-            // scheme's, so they pass through unchanged.
+            // A `Scheme.ty`'s `Bound` indices already belong to this scheme
+            // and refer to nothing outside it, so they pass through unchanged.
             TypeNode::Bound(i) => (pool.mk_bound(i), false),
             TypeNode::Con { id, args, .. } => {
                 let (kids, inv) = self.zonk_children(pool, args);
@@ -125,7 +126,8 @@ impl<'e> Zonker<'e> {
         pool: &mut ResolvedPool,
         sl: scarlet_types::types::ArenaSlice<scarlet_types::types::pool::Children>,
     ) -> (SmallVec<[RTy; 4]>, bool) {
-        // Copied out of the engine's arena first: `resolve` reborrows `self`.
+        // Copy these out of the engine's arena first, because `resolve`
+        // borrows `self` again.
         let kids: SmallVec<[Ty; 4]> = self.eng.children_of(sl).into();
         let mut out: SmallVec<[RTy; 4]> = SmallVec::with_capacity(kids.len());
         let mut invented = false;
@@ -138,7 +140,8 @@ impl<'e> Zonker<'e> {
     }
 }
 
-/// A pool sized for the engine that will feed it, so `prim_of` stays honest.
+/// A pool set up with the engine's primitive type ids, so `prim_of` gives the
+/// right answer.
 pub fn pool_for(eng: &InferEngine) -> ResolvedPool {
     ResolvedPool::new(eng.prim_ids())
 }
@@ -207,7 +210,7 @@ mod tests {
         let (r, _) = z.zonk_or_opaque(&mut pool, tup);
         let elems = pool.tuple_elems(r);
         assert_eq!(elems[0], elems[1], "shared spine must be memoised");
-        // Int, Array(Int), (Array,Array) — three nodes, not five.
+        // Int, Array(Int) and (Array, Array) make three nodes, not five.
         assert_eq!(pool.node_count(), 3);
         // Re-zonking the same type is free.
         let (again, _) = z.zonk_or_opaque(&mut pool, tup);
@@ -233,7 +236,7 @@ mod tests {
     #[test]
     fn rigid_vars_are_numbered_in_order_of_first_appearance() {
         let mut e = engine();
-        // fn(a, b) b  —  generalized, so both vars are rigid.
+        // fn(a, b) b is generalised, so both variables are rigid.
         let a = e.fresh_var();
         let b = e.fresh_var();
         let f = e.mk_fun(&[a, b], b);
@@ -245,9 +248,11 @@ mod tests {
         assert!(!inv_a && !inv_b, "a rigid variable is not an invention");
         assert_eq!(pool.node(ra), ResolvedNode::Bound(0));
         assert_eq!(pool.node(rb), ResolvedNode::Bound(1));
-        // Stable on re-zonk: the index is memoised per variable.
+        // Zonking again gives the same node, because the index is memoised
+        // per variable.
         assert_eq!(z.zonk_or_opaque(&mut pool, a).0, ra);
-        // A rigid var is polymorphic, not missing: no heap cell is assumed.
+        // A rigid variable is polymorphic, not missing, so we don't assume a
+        // heap cell.
         assert!(!pool.is_heap(ra));
         assert!(is_bound(pool.node(ra)));
     }
@@ -276,7 +281,7 @@ mod tests {
     }
 
     /// `generalize_top` closes over the signature, so a body-only variable
-    /// stays `Unbound`: a well-typed program can hand the zonker one.
+    /// stays unbound, so a well-typed program can hand the zonker one.
     #[test]
     fn a_well_typed_body_can_leave_an_unbound_var() {
         let mut e = engine();
@@ -284,8 +289,8 @@ mod tests {
         // fn f(n) { array.length([]); n }   with  array.length : fn(Array(a)) Int
         e.enter_level();
         let n = e.fresh_var();
-        // `[]`'s element unifies with the callee's instantiated `a`; both
-        // sides are unbound and nothing ever determines them.
+        // `[]`'s element unifies with the callee's instantiated `a`. Both
+        // sides are unbound and nothing ever decides them.
         let elem = e.fresh_var();
         let empty = e.mk_con(TypeId(4), "Array", &[elem]);
         let callee_a = e.fresh_var();
@@ -297,7 +302,7 @@ mod tests {
 
         let mut pool = pool_for(&e);
         let mut z = Zonker::new(&e);
-        // The parameter generalized; the element type did not.
+        // The parameter was generalised, but the element type was not.
         assert!(!z.zonk_or_opaque(&mut pool, n).1, "rigid, not invented");
         let (opaque, invented) = z.zonk_or_opaque(&mut pool, empty);
         assert!(invented, "body-only var stays unbound after generalize_top");

@@ -21,13 +21,16 @@ pub type DecodeError {
 	Truncated
 	// Not from `wire.encode`, or from a format version this runtime can't read.
 	NotWire
-	// Written from a type of another shape. Both fingerprints.
+	// The bytes were written from a type of a different shape. It carries both
+	// types' fingerprints.
 	SchemaMismatch(expected Int, found Int)
-	// Bytes that don't hold a value of the type. `offset` is where it went wrong.
+	// The bytes don't hold a value of the type. `offset` is where it went
+	// wrong.
 	Malformed(offset Int, what String)
-	// A whole value followed by more bytes: a caller framing messages lost sync.
+	// A whole value was followed by more bytes. This usually means a caller
+	// that frames messages has lost sync.
 	TrailingBytes(count Int)
-	// A handle or closure from another run. `expected` is this run's identity,
-	// `found` the one in the bytes.
+	// The bytes hold a handle or closure from another run. `expected` is this
+	// run's identity and `found` is the one in the bytes.
 	OtherRun(expected Binary, found Binary)
 }

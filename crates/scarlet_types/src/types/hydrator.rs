@@ -8,43 +8,46 @@ use scarlet_syntax::diagnostic::{Diagnostic, DiagnosticCode};
 use scarlet_syntax::span::Span;
 use scarlet_syntax::token::is_type_name;
 
-/// A resolved type-name occurrence: the use-site span plus the canonical
-/// identity of the `TypeInfo` it resolved to. The hydrator has no `Compiler`
-/// handle, so it accumulates these for the `Compiler::hydrate` wrappers to
-/// drain into the reference graph. It never affects the produced `Ty`.
+/// One place a type name was written and resolved: the span where it was used,
+/// plus the canonical identity of the `TypeInfo` it resolved to. The hydrator
+/// has no `Compiler` handle, so it collects these for the `Compiler::hydrate`
+/// wrappers to drain into the reference graph. They never change the `Ty` it
+/// produces.
 #[derive(Debug, Clone, Copy)]
 pub struct TypeRefHit {
-    /// Span of the written type name (the reference occurrence site).
+    /// The span of the written type name, where the reference occurs.
     pub span: Span,
-    /// Canonical type name as declared (not the local import alias).
+    /// The type's canonical name as declared, not its local import alias.
     pub name: StrId,
-    /// Owning module path, interned in `InferEngine.str_slices`.
+    /// The owning module's path, interned in `InferEngine.str_slices`.
     pub module: ArenaSlice<pool::StrSlices>,
-    /// `(name, span)` of the module qualifier when the occurrence was written
-    /// `module::Type`; the drain records a `Qualifier` occurrence from it so
-    /// the import registers as used and the qualifier resolves in the editor.
+    /// The `(name, span)` of the module qualifier, when the type was written
+    /// as `module::Type`. The drain records a `Qualifier` occurrence from it,
+    /// so the import counts as used and the qualifier resolves in the editor.
     pub qualifier: Option<(StrId, Span)>,
 }
 
 /// Where the annotation being hydrated appears. Each position answers two
-/// questions: may an unseen lowercase name mint a fresh type variable, and may
-/// a function type omit its return type?
+/// questions. Can a lowercase name we haven't seen make a new type variable?
+/// And can a function type leave out its return type?
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnnotationContext {
-    /// An annotation that opens its own type-variable scope: fn signatures,
-    /// lambda parameters, toplevel const annotations. New lowercase names mint
-    /// fresh rigid vars, and a bare `fn(..)` return gets a fresh var that
-    /// inference constrains against the body.
+    /// An annotation that opens its own scope for type variables: function
+    /// signatures, lambda parameters and top-level const annotations. A new
+    /// lowercase name makes a fresh rigid variable, which the body can't solve
+    /// to a concrete type. A `fn(..)` with no return type gets a fresh
+    /// variable that inference works out from the body.
     Signature,
-    /// A `let x: T = ...` annotation. An unseen lowercase name is an error. A
-    /// bare `fn(..)` return is still allowed: the fresh var unifies with the
-    /// initializer's type.
+    /// A `let x: T = ...` annotation. A lowercase name we haven't seen is an
+    /// error. A `fn(..)` with no return type is still allowed, because the
+    /// fresh variable unifies with (is solved to match) the initialiser's type.
     Binding,
-    /// A type-definition body: constructor fields or an alias RHS. Type
-    /// parameters are pre-seeded via [`Hydrator::add_type_variable`], so an
-    /// unseen lowercase name is an error. Every function type must declare its
-    /// return type: there is no inference context, so a fresh return var would
-    /// be generalized into the stored scheme and escape unconstrained.
+    /// The body of a type definition: constructor fields, or the right-hand
+    /// side of an alias. The type parameters are added up front with
+    /// [`Hydrator::add_type_variable`], so a lowercase name we haven't seen is
+    /// an error. Every function type must declare its return type. There's no
+    /// inference here, so a fresh return variable would be generalised into
+    /// the stored scheme and escape with nothing constraining it.
     TypeDefinition,
 }
 
@@ -58,14 +61,14 @@ impl AnnotationContext {
     }
 }
 
-/// Converts a syntactic type annotation (`ast::TypeIdentifier`) into a `Ty`.
+/// Turns a written type annotation (`ast::TypeIdentifier`) into a `Ty`.
 ///
-/// It owns the policy for type-variable names in annotations. Lowercase
-/// identifiers are type variables and uppercase ones are nominal types that
-/// must resolve in the environment. The same lowercase name within one
-/// annotation maps to one shared var, so `fn(x a, y a) a` ties all three
-/// positions together. Minted vars are recorded as *rigid* so `instantiate`
-/// will not replace them while checking the annotated body.
+/// It decides what type-variable names in annotations mean. Lowercase names are
+/// type variables, and uppercase ones are nominal types that must resolve in
+/// the environment. The same lowercase name within one annotation is one
+/// shared variable, so `fn(x a, y a) a` ties all three positions together. New
+/// variables are recorded as *rigid*, so `instantiate` won't replace them while
+/// the annotated body is checked.
 #[derive(Debug)]
 pub struct Hydrator {
     created: HashMap<String, (Ty, i32)>,
@@ -74,8 +77,8 @@ pub struct Hydrator {
     type_refs: Vec<TypeRefHit>,
 }
 
-/// Result of [`Hydrator::add_type_variable`]. Returning the id here keeps
-/// callers from re-deriving it by matching on `TypeNode::Var`.
+/// What [`Hydrator::add_type_variable`] returns. Handing back the id here saves
+/// callers from working it out again by matching on `TypeNode::Var`.
 #[derive(Debug, Clone, Copy)]
 pub struct AddedTypeVar {
     pub ty: Ty,
@@ -93,9 +96,9 @@ impl Hydrator {
         }
     }
 
-    /// Drain the type-name occurrences resolved since the last call. A
-    /// `Hydrator` is reused across one signature's params and return, so
-    /// draining per call keeps occurrences from being recorded twice.
+    /// Drain the type names resolved since the last call. One `Hydrator` is
+    /// reused across a signature's parameters and return type, so draining
+    /// after each one stops a name being recorded twice.
     pub fn take_type_refs(&mut self) -> Vec<TypeRefHit> {
         std::mem::take(&mut self.type_refs)
     }
@@ -104,9 +107,10 @@ impl Hydrator {
         &self.rigid_ids
     }
 
-    /// Pre-seed a declared type parameter (the `a` in `type Foo(a, b) { .. }`).
-    /// A repeated name returns the existing var with `duplicate: true`. Unlike
-    /// implicit annotation vars these are *not* added to `rigid_ids`.
+    /// Add a declared type parameter up front, like the `a` in
+    /// `type Foo(a, b) { .. }`. A repeated name returns the existing variable
+    /// with `duplicate: true`. Unlike the variables an annotation makes
+    /// implicitly, these are *not* added to `rigid_ids`.
     pub fn add_type_variable(&mut self, name: &str, engine: &mut InferEngine) -> AddedTypeVar {
         if let Some(&(ty, id)) = self.created.get(name) {
             return AddedTypeVar {
@@ -150,16 +154,16 @@ impl Hydrator {
                 }
                 let ret = match &ft.return_type {
                     Some(r) => self.type_from_ast(r, env, engine)?,
-                    // An omitted return type means "infer it", but a type
-                    // definition has no inference context, so a fresh var
-                    // there would escape unconstrained.
+                    // A missing return type means "infer it". But nothing is
+                    // inferred in a type definition, so a fresh variable there
+                    // would escape with nothing constraining it.
                     None => {
                         if !self.context.requires_fn_return() {
                             engine.fresh_var()
                         } else {
                             return Err(err(
                                 t.span,
-                                "Function type in a type definition must declare a return type"
+                                "A function type in a type definition must declare its return type, like `fn(Int) Int`"
                                     .to_string(),
                             ));
                         }
@@ -180,8 +184,8 @@ impl Hydrator {
         let name = &nt.identifier.name;
         let name_span = nt.identifier.span;
 
-        // A qualified name can only be a nominal type in the named module:
-        // the type-variable paths below are for bare lowercase names.
+        // A qualified name can only be a nominal type in the named module. The
+        // type-variable paths below are for bare lowercase names.
         if nt.qualifier.is_none()
             && let Some(&(v, _)) = self.created.get(name)
         {
@@ -218,10 +222,10 @@ impl Hydrator {
             return Ok(t);
         }
 
-        // Imported modules register their public types under the mangled
-        // `qualifier::Name` key (see `bind_import`), so a qualified
-        // reference resolves through the same table as a bare one. Type names
-        // cannot contain ':', so mangled keys never collide with local types.
+        // Imported modules register their public types under the mangled key
+        // `qualifier::Name` (see `bind_import`), so a qualified reference
+        // resolves through the same table as a bare one. Type names can't
+        // contain ':', so mangled keys never collide with local types.
         let (lookup_key, display) = match &nt.qualifier {
             Some(q) => {
                 let full = format!("{}::{}", q.name, name);
@@ -236,7 +240,8 @@ impl Hydrator {
                 if arg_tys.len() != arity {
                     return Err(arity_error(span, &display, arity, arg_tys.len()));
                 }
-                // Recording-only: the produced `Ty` below is unchanged.
+                // This only records the reference. It doesn't change the `Ty`
+                // below.
                 self.type_refs.push(TypeRefHit {
                     span: name_span,
                     name: ti.name,
@@ -251,8 +256,8 @@ impl Hydrator {
                         Ok(engine.substitute_type_vars(target, ti.type_params, &arg_tys))
                     }
                     // Custom, External and Unresolved heads all hydrate to a
-                    // nominal application carrying the registered id, which is
-                    // the identity unification uses. The display name is the
+                    // nominal type carrying the registered id, which is the
+                    // identity unification compares. The display name is the
                     // canonical `ti.name`, not the local import alias.
                     TypeBody::Unresolved | TypeBody::Custom { .. } | TypeBody::External => {
                         Ok(engine.mk_con_id(ti.id, ti.name, &arg_tys))
@@ -263,7 +268,7 @@ impl Hydrator {
                 name_span,
                 match &nt.qualifier {
                     Some(q) => format!(
-                        "Unknown type '{display}'. Import '{}' and verify it exports a type '{}'.",
+                        "Unknown type '{display}'. Check that '{}' is imported and exports a type called '{}'.",
                         q.name, name
                     ),
                     None => unknown_bare_type(env, name),
@@ -273,9 +278,9 @@ impl Hydrator {
     }
 }
 
-/// "Unknown type" for a bare name, pointing at the qualified spelling when an
-/// import does export a type by that name: `Map` after `import scarlet/map`
-/// is `map::Map`.
+/// The "Unknown type" message for a bare name. When an import does export a
+/// type by that name, it points at the qualified spelling: `Map` after
+/// `import scarlet/map` is `map::Map`.
 fn unknown_bare_type(env: &TypeEnv, name: &str) -> String {
     let quoted: Vec<String> = env
         .qualified_spellings(name)

@@ -1,5 +1,5 @@
-//! Custom command-line UI. clap is only the argument parser and command
-//! model; all user-facing output is rendered here, not by clap.
+//! We draw the command-line UI ourselves. clap only parses the arguments and holds the command
+//! model, and this module renders everything the user sees.
 
 pub mod help;
 pub mod man;

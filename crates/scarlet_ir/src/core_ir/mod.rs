@@ -1,8 +1,8 @@
-//! Core IR: typed A-Normal Form, what the compiler hands a backend. Every
-//! subexpression is a `Let`-bound `LocalId`, so last-use, drop and reuse fall
-//! out of a linear backward scan (Perceus, ICFP'22 frame-limited). The passes
-//! over it live in the compiler; `docs/vm-design.md` says what running it
-//! means.
+//! Core IR is what the compiler hands a backend. It's typed A-normal form
+//! (ANF), which means every subexpression is bound to a `LocalId` by a `Let`.
+//! That way last use, drops and reuse all fall out of one backward scan
+//! (Perceus, ICFP '22, frame-limited). The passes over it live in the
+//! compiler, and `docs/vm-design.md` says what running it means.
 
 mod prim;
 
@@ -19,17 +19,18 @@ use crate::rty::{RTy, ResolvedPool};
 use crate::tivec::TiVec;
 
 // The core IR's index spaces. Each is a `crate::tivec::Idx`, so the `TiVec` it
-// indexes rejects the others at compile time. `GlobalSlot` (entry-frame stack
-// space) is minted in `typed_ir`.
+// indexes rejects the others at compile time. `GlobalSlot`, a slot in the entry
+// frame, isn't one of them: the compiler in `scarlet_core` hands those out.
 
 newtype_index!(
-    /// Dense per-function local index. Minted by `lower` in evaluation order so
-    /// a backward scan over the `Let` spine sees ids decrease monotonically.
+    /// A dense local index, scoped to one function. `lower` hands these out in
+    /// evaluation order, so a backward scan over the `Let` spine sees the ids
+    /// only go down.
     pub struct LocalId("%")
 );
 
 newtype_index!(
-    /// Index into [`Program::consts`].
+    /// An index into [`Program::consts`].
     pub struct ConstId("c")
 );
 
@@ -84,35 +85,36 @@ impl std::hash::Hash for Const {
 }
 
 newtype_index!(
-    /// Labelled-continuation index, scoped to one lowered body. Declared by
-    /// [`CoreExpr::LetCont`], transferred to by [`CoreExpr::Goto`]. Names code,
-    /// never a value.
+    /// A labelled continuation, scoped to one lowered body.
+    /// [`CoreExpr::LetCont`] declares it and [`CoreExpr::Goto`] jumps to it. It
+    /// names code, never a value.
     pub struct JoinId("j")
 );
 
 newtype_index!(
-    /// Index into `CoreProgram.fns`, numbered the same as `TypedProgram::fns`.
+    /// An index into [`Program::fns`], numbered the same as `TypedProgram::fns`.
     pub struct FuncIdx("fn#")
 );
 
 /// A typed local binding. Its [`RTy`] indexes the elaborator's `ResolvedPool`,
-/// where an unsolved inference variable is unrepresentable, so Perceus cannot
-/// be handed a type that answers `is_heap` `false` because inference lost it.
+/// which can't hold an unsolved inference variable. So Perceus can never get a
+/// type that answers `is_heap` with `false` only because inference lost it.
 #[derive(Debug, Clone)]
 pub struct CoreBind {
     pub id: LocalId,
     pub ty: RTy,
-    /// `Some(slot)` when this bind is a module-toplevel decl that must land in
-    /// that global slot: function bodies read it with `Load::Global(slot)`, so
-    /// the toplevel has to write the same slot.
+    /// `Some(slot)` when this bind is a module's top-level declaration that
+    /// must land in that global slot. Function bodies read it with
+    /// `Load::Global(slot)`, so the top level has to write the same slot.
     ///
-    /// On the bind rather than in a `LocalId`-keyed side table, which would
-    /// desync the moment a pass renumbers or drops a bind.
+    /// It lives on the bind, not in a side table keyed by `LocalId`, because
+    /// that table would fall out of step as soon as a pass renumbers or drops
+    /// a bind.
     pub global: Option<GlobalSlot>,
 }
 
 impl CoreBind {
-    /// Fresh bind, pinned to no slot. `lower` pins [`Self::global`] afterwards.
+    /// A fresh bind, pinned to no slot. `lower` sets [`Self::global`] later.
     pub fn new(id: LocalId, ty: RTy) -> Self {
         CoreBind {
             id,
@@ -122,9 +124,9 @@ impl CoreBind {
     }
 }
 
-/// Resolved constructor identity, captured at lowering so a backend need not
-/// consult the type environment for dispatch. Perceus pairs drops on shape
-/// equality: `type_id`, `variant_idx`, arity.
+/// A constructor's resolved identity, captured during lowering so a backend
+/// doesn't need the type environment to dispatch on it. Perceus doesn't pair
+/// drops by this: it pairs them by field count alone (see [`ReuseShape`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VariantRef {
     pub type_id: TypeId,
@@ -349,9 +351,9 @@ pub struct VariantNames {
     pub fields: Vec<String>,
 }
 
-/// Heap-cell shape for Perceus reuse pairing: a constructor cell with this
-/// many fields. A `Drop` may only hand its cell to a `Ctor` of the same shape,
-/// so the overwrite needs no resize.
+/// The shape of a heap cell, for Perceus reuse pairing: a constructor cell with
+/// this many fields. A `Drop` may only hand its cell to a `Ctor` of the same
+/// shape, so overwriting it needs no resize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReuseShape {
     pub fields: u16,
@@ -366,8 +368,8 @@ impl ReuseShape {
     }
 }
 
-/// Call target after resolution: a function known at compile time, the
-/// function itself, or a closure held in a local.
+/// What a call calls, once resolved: a function known at compile time, the
+/// current function itself, or a closure held in a local.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Callee {
     Known(FuncIdx),
@@ -375,9 +377,9 @@ pub enum Callee {
     Local(LocalId),
 }
 
-/// A slot in the entry (module) frame: where a module-scope binding lives. A
-/// module-scope name may be bound more than once (an import shadowed by a later
-/// `let`), so each binding carries the slot its own binding lands in.
+/// A slot in the entry (module) frame, where a module-scope binding lives. A
+/// module-scope name can be bound more than once, such as an import shadowed
+/// by a later `let`, so each binding carries the slot it lands in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct GlobalSlot(pub i32);
 
@@ -396,9 +398,9 @@ pub enum Load {
     SelfClosure,
 }
 
-/// Right-hand side of a `Let`, or the payload of a `Tail`. Every compound
-/// operand is a `LocalId` — nested evaluation has already been linearised into
-/// the enclosing `Let` spine.
+/// The right-hand side of a `Let`, or the payload of a `Tail`. Every compound
+/// operand is a `LocalId`, because nested evaluation has already been
+/// flattened into the enclosing `Let` spine.
 #[derive(Debug, Clone)]
 pub enum Atom {
     Local(LocalId),
@@ -424,8 +426,8 @@ pub enum Atom {
         intrinsic: Intrinsic,
         args: Vec<LocalId>,
     },
-    /// A closure over `captures`, running function `func_idx`. The body is
-    /// its own entry in `Program::fns`, so this only refers to it.
+    /// A closure over `captures` that runs function `func_idx`. The body is
+    /// its own entry in `Program::fns`, so this only points at it.
     Closure {
         func_idx: FuncIdx,
         captures: Vec<LocalId>,
@@ -463,8 +465,8 @@ impl Atom {
     }
 }
 
-/// Lowered match-arm pattern. `lower` flattens nesting into successive `Match`
-/// nodes, so a `Ctor` arm binds its fields as fresh locals.
+/// A lowered match-arm pattern. `lower` flattens nested patterns into a chain
+/// of `Match` nodes, so a `Ctor` arm binds its fields as fresh locals.
 #[derive(Debug, Clone)]
 pub enum CorePat {
     Wild,
@@ -487,8 +489,9 @@ impl CorePat {
     }
 }
 
-/// ANF expression tree. The spine is a right-nested chain of `Let`s
-/// terminating in `Tail`; `Match`/`If` are the only join points.
+/// An ANF expression tree. The spine is a right-nested chain of `Let`s that
+/// ends in a `Tail`. `Match` and `If` are the only places control flow splits
+/// and joins.
 #[derive(Debug, Clone)]
 pub enum CoreExpr {
     Let {
@@ -496,30 +499,31 @@ pub enum CoreExpr {
         rhs: Atom,
         body: Box<CoreExpr>,
     },
-    /// `let bind = <join>; body` where `join` is a control-flow tree in operand
-    /// position. Every `Tail` inside `join` is a value, not a return. Kept
-    /// distinct from `Let` so `rhs: Atom` stays operand-only, which Perceus's
-    /// linear scan depends on.
+    /// `let bind = <join>; body`, where `join` is a control-flow tree in
+    /// operand position. Every `Tail` inside `join` is a value, not a return.
+    /// It's separate from `Let` so `rhs: Atom` only ever holds operands, which
+    /// Perceus's linear scan depends on.
     LetJoin {
         bind: CoreBind,
         join: Box<CoreExpr>,
         body: Box<CoreExpr>,
     },
-    /// Declares the zero-arity continuation `cont`, in scope for every
-    /// `Goto(id)` in `body`. Unlike `LetJoin` it runs only when a failure edge
-    /// fires, may be entered from many edges, and sits in tail position. Zero
-    /// arity works because `cont` reads only locals bound before this node, and
-    /// this node dominates every `Goto` to `id`.
+    /// Declares the continuation `cont`, which takes no arguments and is in
+    /// scope for every `Goto(id)` in `body`. Unlike `LetJoin`, it runs only when
+    /// a failure edge fires, many edges can enter it, and it sits in tail
+    /// position. It needs no arguments because `cont` only reads locals bound
+    /// before this node, and this node dominates every `Goto` to `id`: every
+    /// path to one of them passes through here.
     LetCont {
         id: JoinId,
         cont: Box<CoreExpr>,
         body: Box<CoreExpr>,
     },
-    /// Inserted by `perceus` at the last use of `local`. Releases the frame's
-    /// reference and, when the cell is uniquely owned, parks the hollowed
-    /// allocation for a paired `Ctor{reuse}`. `shape` is `Some` only when the
-    /// allocation size is statically known; `None` drops for RC correctness but
-    /// never pairs.
+    /// `perceus` inserts this at the last use of `local`. It releases the
+    /// frame's reference and, when nothing else owns the cell, keeps the
+    /// emptied allocation for a paired `Ctor{reuse}`. `shape` is `Some` only
+    /// when the allocation's size is known at compile time. With `None` it
+    /// still drops, so reference counts stay right, but it never pairs.
     Drop {
         local: LocalId,
         shape: Option<ReuseShape>,
@@ -536,11 +540,11 @@ pub enum CoreExpr {
         els: Box<CoreExpr>,
         ty: RTy,
     },
-    /// Tail position: return value or tail call.
+    /// Tail position: a return value or a tail call.
     Tail(Atom),
-    /// Transfer to the continuation an enclosing [`CoreExpr::LetCont`] declared
-    /// for this `JoinId`. Legal only in tail position, so it carries no value.
-    /// Many `Goto`s may share one label.
+    /// Jump to the continuation an enclosing [`CoreExpr::LetCont`] declared for
+    /// this `JoinId`. It's only allowed in tail position, so it carries no
+    /// value. Many `Goto`s can share one label.
     Goto(JoinId),
 }
 
@@ -586,10 +590,11 @@ impl CoreExpr {
     /// The `(bind, entry-frame slot)` pairs pinned on this expression's
     /// outermost `Let`/`LetJoin` spine, in binding order.
     ///
-    /// Meaningful on a module toplevel, where module decls are spine bindings
-    /// by construction. The walk steps over the `Drop`s Perceus interleaves and
-    /// stops at the first join point. The pinning lives only on the binds, so
-    /// nothing can disagree with it.
+    /// This only means something on a module's top level, where every module
+    /// declaration is a binding on the spine. The walk steps over the `Drop`s
+    /// Perceus put between them and stops where control flow first splits.
+    /// The slots are stored only on the binds, so nothing can disagree with
+    /// them.
     pub fn toplevel_globals(&self) -> Vec<(LocalId, GlobalSlot)> {
         let mut out = Vec::new();
         let mut cur = self;
@@ -626,12 +631,12 @@ pub struct CoreFn {
 pub struct LoweredFn {
     /// The key of the module whose source this body was lowered from, as
     /// text: `main` for the entry file, `scarlet/array` for a stdlib module,
-    /// a canonical path for any other file. For people to read, and for
-    /// picking out one module's functions.
+    /// and a canonical path for any other file. It's for people to read, and
+    /// for picking out one module's functions.
     pub module: String,
-    /// The source name, for anything a person reads: a crash report, a stack
-    /// trace, a profile. Unique only within `module`: `scarlet/array` and
-    /// `scarlet/option` both have a `map`.
+    /// The source name, for anything a person reads, like a crash report, a
+    /// stack trace or a profile. It's only unique within `module`, because
+    /// `scarlet/array` and `scarlet/option` both have a `map`.
     pub name: String,
     pub core: CoreFn,
     /// What every `RTy` in `core` indexes. Nothing reads a body's types until
@@ -667,7 +672,8 @@ pub struct Program {
     /// eta wrappers elaboration minted.
     pub fns: TiVec<FuncIdx, LoweredFn>,
     pub consts: Vec<Const>,
-    /// Each imported module's top level, a module after everything it imports.
+    /// Each imported module's top level. A module comes after everything it
+    /// imports.
     pub inits: Vec<LoweredFn>,
     /// The entry file's own top level.
     pub toplevel: LoweredFn,
@@ -683,12 +689,12 @@ pub struct Program {
     pub abi: Abi,
 }
 
-// Printer for the golden tests in `crates/scarlet/tests/core_ir.rs`. Ids print as
-// `%n` and constants as `cN` so snapshots survive string-interner churn. An
-// `RTy` prints as `:N`, its raw pool index, which shifts whenever the
-// elaborator allocates a different number of nodes before it — the harness
-// renumbers those per snapshot (`normalize_tys`). The `:` sigil belongs to this
-// printer, not to `Display for RTy`.
+// The printer for the golden tests in `crates/scarlet/tests/core_ir.rs`. Ids
+// print as `%n` and constants as `cN`, so snapshots survive changes to string
+// interning. An `RTy` prints as `:N`, its raw pool index. That index shifts
+// whenever the elaborator makes a different number of nodes before it, so the
+// harness renumbers them in each snapshot (`renumber`). The `:` sigil belongs to
+// this printer, not to `Display for RTy`.
 
 impl fmt::Display for CoreBind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -787,7 +793,7 @@ impl fmt::Display for CorePat {
     }
 }
 
-/// `CoreExpr` printed `depth` levels in.
+/// A `CoreExpr` printed `depth` levels in.
 pub struct Indented<'a>(pub &'a CoreExpr, pub usize);
 
 impl fmt::Display for Indented<'_> {
@@ -799,8 +805,8 @@ impl fmt::Display for Indented<'_> {
             }
             Ok(())
         };
-        // Iterative: a lowered body is one long spine, and recursing it would
-        // blow the Rust stack.
+        // Loop instead of recursing, because a lowered body is one long spine
+        // and recursing down it would overflow the Rust stack.
         let mut cur = e;
         loop {
             pad(f, depth)?;
@@ -883,8 +889,9 @@ impl fmt::Display for CoreFn {
     }
 }
 
-/// Headed with the module and source name rather than the interned id, which
-/// is what a person reading a listing can use: `fn scarlet/array.map(...)`.
+/// The heading uses the module and source name instead of the interned id,
+/// because that's what a person reading a listing can use:
+/// `fn scarlet/array.map(...)`.
 impl fmt::Display for LoweredFn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write_fn(

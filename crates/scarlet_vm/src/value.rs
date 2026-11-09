@@ -35,19 +35,19 @@ const TAG_FUNC: u64 = 0xFFFB_0000_0000_0000;
 const TAG_CELL: u64 = 0xFFFC_0000_0000_0000;
 const TAG_NULLARY: u64 = 0xFFFD_0000_0000_0000;
 
-/// The range a small Int covers. Outside it an Int is a big int, which the VM
-/// does not build yet.
+/// The range a small Int covers. An Int outside it is a big int, kept in a
+/// heap cell (`bigint.rs`).
 const SMALL_INT_MIN: i64 = -(1 << 47);
 const SMALL_INT_MAX: i64 = (1 << 47) - 1;
 
 /// One value.
 ///
-/// `Copy` on purpose: it is a word. A cell's reference count is kept by the
-/// VM explicitly, against the process's own heap, not by Rust's `Clone` and
-/// `Drop`: copying a `Value` does not add a reference.
+/// It is `Copy` on purpose, because it is a word. The VM keeps a cell's
+/// reference count itself, in the process's own heap, rather than through
+/// Rust's `Clone` and `Drop`. So copying a `Value` does not add a reference.
 ///
-/// No `PartialEq`: comparing the bits is not Scarlet's `==` (`0.0 == -0.0`, and
-/// structural equality looks inside values).
+/// It has no `PartialEq`, because comparing the bits is not Scarlet's `==`
+/// (`0.0 == -0.0`, and structural equality looks inside values).
 #[derive(Clone, Copy)]
 pub(crate) struct Value(u64);
 
@@ -96,8 +96,8 @@ impl Value {
         if b { Value::TRUE } else { Value::FALSE }
     }
 
-    /// A function that captures nothing. It needs no heap cell: its index is
-    /// the whole of it.
+    /// A function that captures nothing. It needs no heap cell, because its
+    /// index says everything about it.
     pub(crate) fn func(f: FuncIdx) -> Value {
         Value(TAG_FUNC | u64::from(f.0))
     }
@@ -107,8 +107,8 @@ impl Value {
         Value(TAG_CELL | c.bits())
     }
 
-    /// A constructor with no fields, like `None`. It needs no heap cell: which
-    /// constructor it is, is the whole of it.
+    /// A constructor with no fields, like `None`. It needs no heap cell,
+    /// because which constructor it is says everything about it.
     pub(crate) fn nullary(v: VariantRef) -> Value {
         Value(TAG_NULLARY | u64::from(v.variant_idx) << 32 | u64::from(v.type_id.0 as u32))
     }

@@ -1,5 +1,5 @@
-/// Non-token source between tokens. The scanner drops horizontal whitespace,
-/// so only these four shapes exist.
+/// Source text between tokens that isn't a token itself. The scanner drops
+/// spaces and tabs, so these four kinds are all there is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Trivia {
     Newline,

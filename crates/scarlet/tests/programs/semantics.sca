@@ -58,7 +58,7 @@ type Config {
 const limit Int = 100
 const label String = 'cap'
 
-// An external type has no body: no constructors, no fields. It names a value
+// An external type has no body, so no constructors and no fields. It names a value
 // only the host can make. Declaring one must still typecheck.
 pub type Handle
 

@@ -1,17 +1,18 @@
-// Opaque, so every one is well formed: make one with `parse` or
-// `net.resolve`.
+// An IP address. It's opaque so that every one is well formed. Make one with
+// `parse` or `net.resolve`.
 pub opaque type IpAddress {
 	V4(addr String)
 	V6(addr String)
 }
 
-// Opaque, so its port is always in 0..=65535.
+// An IP address and a port. It's opaque so that its port is always in
+// 0..=65535.
 pub opaque type SocketAddress {
 	ip IpAddress
 	port Int
 }
 
-// `Err(Nil)` for a port outside 0..=65535.
+// Returns `Err(Nil)` if `port` is outside 0..=65535.
 pub fn socket_address(ip IpAddress, port Int) Result(SocketAddress, Nil) {
 	if port < 0 || port > 65535 {
 		Err(Nil)
@@ -31,7 +32,8 @@ pub fn port(a SocketAddress) Int {
 @vm(address__parse)
 fn parse_raw(s String) Option(IpAddress)
 
-// An IPv4 or IPv6 literal. A hostname is `Err(Nil)`: use `net.resolve`.
+// Parses an IPv4 or IPv6 literal. A hostname gives `Err(Nil)`, so use
+// `net.resolve` for those.
 pub fn parse(s String) Result(IpAddress, Nil) {
 	match parse_raw(s) {
 		Some(ip) -> Ok(ip)

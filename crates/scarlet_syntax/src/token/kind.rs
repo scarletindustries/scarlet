@@ -3,9 +3,9 @@ use std::rc::Rc;
 
 use super::keywords::Keyword;
 
-/// Token kind. Text-bearing tokens carry their text as a payload, so an
-/// identifier without a name cannot be constructed. Equality and hashing
-/// compare the text itself.
+/// The kind of a token. A token with text carries it as a payload, so an
+/// identifier without a name can't be built. Equality and hashing compare the
+/// text itself.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Kind {
     Eof,
@@ -107,8 +107,8 @@ impl Kind {
     }
 }
 
-/// For diagnostics, not source reconstruction. Unquoted; error sites that
-/// want quotes add their own.
+/// How a token reads in a diagnostic, not how to rebuild the source. It has no
+/// quotes, so error messages that want them add their own.
 impl fmt::Display for Kind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
@@ -177,7 +177,7 @@ mod tests {
     fn fixed_spelling_list_is_classified() {
         for kind in fixed_spelling_kinds() {
             match kind {
-                // No fixed source spelling: payload-bearing or positional.
+                // These have no fixed spelling: they carry text or mark a position.
                 Kind::Eof
                 | Kind::Error(_)
                 | Kind::Identifier(_)
@@ -188,7 +188,7 @@ mod tests {
                 | Kind::InterpStringEnd => {
                     unreachable!("{kind:?} must not be in the fixed-spelling list")
                 }
-                // Fixed spelling: must appear in `fixed_spelling_kinds`.
+                // These have a fixed spelling, so they must be in `fixed_spelling_kinds`.
                 Kind::LogicalAnd
                 | Kind::LogicalOr
                 | Kind::BitwiseOr

@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Airtight O(n^2) -> O(n) gate for the list/sequence path.
+# Checks that the list and sequence path is O(n) and not O(n^2).
 #
-# bench_list_{1x,2x,4x}.sca are identical programs at sizes N, 2N, 4N.
-# The per-doubling time ratio is scale-invariant and intrinsic to the
+# bench_list_{1x,2x,4x}.sca are the same program at sizes N, 2N and 4N.
+# The time ratio for each doubling doesn't depend on scale, only on the
 # algorithm's complexity class:
 #
 #   quadratic O(n^2)        => each ratio ~4.0
 #   linear / O(n log n)     => each ratio ~2.0
 #
 # A clean ~2.0 across BOTH doublings (1x->2x and 2x->4x), with every
-# point in the multi-second low-noise regime, is the proof.
+# point taking several seconds so noise stays low, is the proof.
 set -euo pipefail
 cargo build --release 2>/dev/null
 

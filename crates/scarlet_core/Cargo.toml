@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 
-# `cargo mordant` sets `--cfg mordant` and plain cargo does not, so
-# the `#[cfg_attr(mordant, ...)]` suppression on `Compiler` is an
-# unexpected cfg to every other build — and `clippy -- -D warnings` fails on it.
+# `cargo mordant` sets `--cfg mordant` and plain cargo doesn't, so every
+# other build sees the `#[cfg_attr(mordant, ...)]` suppression on `Compiler`
+# as an unexpected cfg, and `clippy -- -D warnings` fails on it.
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(mordant)'] }
 

@@ -1,10 +1,9 @@
-//! One REPL entry, parsed on its own.
+//! Parses one REPL entry on its own.
 //!
-//! Parsed alone, before any replay: only the entry's own diagnostics belong to
-//! the user, and only the entry's own end-of-input means "ask for another
-//! line". The line editor and the evaluator classify an entry the same way,
-//! through here, so Enter never submits something the evaluator would then
-//! call unfinished.
+//! We parse an entry alone, before any replay, because only its own diagnostics belong to the
+//! user, and only its own end of input means "ask for another line". The line editor and the
+//! evaluator both classify entries through here, so Enter never submits something the evaluator
+//! would then call unfinished.
 
 use crate::ast;
 use crate::diagnostic::{self, Diagnostic, DiagnosticCode};
@@ -12,11 +11,10 @@ use crate::parser;
 use crate::scanner;
 
 pub enum Entry {
-    /// The parser ran out of input mid-form: the entry wants another line.
-    /// Carries the diagnostics anyway, for the paths that have no more input
-    /// to offer it.
+    /// The parser ran out of input partway through, so the entry wants another line. It carries
+    /// the diagnostics anyway, for the paths that have no more input to give it.
     Incomplete(Vec<Diagnostic>),
-    /// Unparseable, with the diagnostics saying why.
+    /// The entry doesn't parse, and the diagnostics say why.
     Rejected(Vec<Diagnostic>),
     Accepted(ast::BlockExpression),
 }
@@ -41,23 +39,22 @@ pub fn parse(input: &str) -> Entry {
 /// only runs once.
 #[derive(Default)]
 pub struct Parts {
-    /// Import declarations. The language requires every import to precede all
-    /// other declarations, so a session cannot replay entries in the order
-    /// they were typed: the imports have to be lifted out and kept together.
+    /// Import declarations. The language needs every import to come before all other
+    /// declarations, so a session can't replay entries in the order they were typed. It has to
+    /// lift the imports out and keep them together.
     pub imports: String,
     /// Declarations and bindings, replayed ahead of every later entry.
     pub definitions: String,
-    /// Bare expressions, evaluated this turn only. Replaying one would repeat
-    /// its effects on every later entry.
+    /// Bare expressions, which run this turn only. Replaying one would repeat its effects on every
+    /// later entry.
     pub expressions: String,
 }
 
-/// Split `source` — the text `program` was parsed from — by what each
-/// top-level node is.
+/// Splits `source`, the text `program` was parsed from, by what each top-level node is.
 ///
-/// Line-granular, and each line is claimed by the first node that reaches it,
-/// so the text is only ever moved, never duplicated or rewritten. Lines ahead
-/// of a node (its doc comment, blank space) travel with it.
+/// It works in whole lines, and the first node that reaches a line claims it, so text is only
+/// ever moved, never duplicated or rewritten. Lines before a node (its doc comment, blank lines)
+/// go with it.
 pub fn split(source: &str, program: &ast::BlockExpression) -> Parts {
     let lines: Vec<&str> = source.lines().collect();
     let mut parts = Parts::default();
@@ -83,8 +80,8 @@ pub fn split(source: &str, program: &ast::BlockExpression) -> Parts {
         }
         next = end + 1;
     }
-    // A trailing comment belongs to no node; keep it with the definitions so
-    // nothing the user typed is silently dropped from a saved session.
+    // A trailing comment belongs to no node. Keep it with the definitions so nothing the user
+    // typed is silently dropped from a saved session.
     for line in lines.iter().skip(next) {
         parts.definitions.push_str(line);
         parts.definitions.push('\n');

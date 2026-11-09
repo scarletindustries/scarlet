@@ -2,24 +2,25 @@
  * VM introspection, for debugging and tests. Not a stable API.
  */
 
-// Stack frames in the calling process.
+// The number of stack frames in the calling process.
 @vm(internal__stack_depth)
 pub fn stack_depth() Int
 
-// Cells this process has allocated over its whole life, and cells a
-// constructor overwrote in place instead, because nothing else held them.
+// How many cells this process has allocated over its whole life, and how many
+// a constructor overwrote in place instead because nothing else held them.
 @vm(internal__cells_made)
 pub fn cells_made() Int
 
 @vm(internal__cells_reused)
 pub fn cells_reused() Int
 
-// Mailboxes open across the program: every subject still held, plus every
-// supervised worker's address.
+// The number of mailboxes open across the program. That is every subject
+// still held, plus every supervised worker's address.
 @vm(internal__live_subjects)
 pub fn live_subjects() Int
 
-// Threads alive in the pool that runs file, DNS and subprocess calls, busy or
-// idle. It grows on demand up to SCARLET_BLOCKING_THREADS (512).
+// The number of threads, busy or idle, in the pool that runs file, DNS and
+// subprocess calls. The pool grows on demand up to SCARLET_BLOCKING_THREADS
+// (512).
 @vm(internal__blocking_threads)
 pub fn blocking_threads() Int

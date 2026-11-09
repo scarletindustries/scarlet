@@ -1,13 +1,13 @@
-//! Float arithmetic, by `docs/semantics.md`'s rule that no Float is NaN or
-//! infinite: `x / 0.0` is `0.0`, `x % 0.0` is `x` (both as for Int, so
-//! `a == b * (a / b) + a % b` still holds), an answer too large stops at the
-//! largest Float with its sign, and one with no answer is `0.0`. The last two
-//! are [`Value::float`]'s.
+//! Float arithmetic, following `docs/semantics.md`'s rule that no Float is
+//! NaN or infinite. `x / 0.0` is `0.0` and `x % 0.0` is `x`, as for Int, so
+//! `a == b * (a / b) + a % b` still holds. An answer too large stops at the
+//! largest Float with its sign, and one with no answer is `0.0`.
+//! [`Value::float`] does those last two.
 
 use crate::value::Value;
 
-/// A two-operand operation on numbers: of Floats here, or of either kind for
-/// the operators whose operand type is only known when they run.
+/// An operation on two numbers. Here they are Floats. Elsewhere they can be
+/// either kind, for operators whose operand type is only known when they run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NumOp {
     Add,
@@ -68,7 +68,7 @@ mod tests {
         assert_eq!(float(op(NumOp::Mul, f64::MAX, 2.0)), f64::MAX);
         assert_eq!(float(op(NumOp::Mul, f64::MAX, -2.0)), f64::MIN);
         assert_eq!(float(op(NumOp::Sub, f64::MIN, f64::MAX)), f64::MIN);
-        // Order is kept: an overflowed product still beats 1.0.
+        // Order is kept, so an overflowed product is still bigger than 1.0.
         let big = float(op(NumOp::Mul, 1e300, 1e300));
         assert!(big > 1.0);
     }

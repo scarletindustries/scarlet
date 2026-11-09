@@ -4,9 +4,10 @@
  * to store. `verify_authentication` checks a `navigator.credentials.get`
  * response against it.
  *
- * The attestation statement is not verified: the key comes from the
+ * The attestation statement isn't verified. The key comes from the
  * authenticator data, and every later sign-in is checked against it. Only
- * ES256 and EdDSA. `signCount` is returned, not enforced.
+ * ES256 and EdDSA keys are supported. `signCount` is returned to you but not
+ * enforced.
  */
 
 import scarlet/base64
@@ -69,7 +70,8 @@ fn field(doc json::Doc, name String) Result(String, Error) {
 	}
 }
 
-// The challenge is unpadded base64url. Compared decoded, in constant time.
+// The challenge is unpadded base64url. We decode it and compare in constant
+// time.
 fn challenge_ok(client_challenge String, expected Binary) Bool {
 	match base64::url_decode(binary::from_string(client_challenge)) {
 		Ok(got) -> crypto::const_eq(got, expected)
@@ -86,7 +88,8 @@ fn rp_id_matches(rp_id_hash Binary, rp_id String) Bool {
 
 // authenticatorData
 
-/** Its fixed head, plus the attested credential when the AT flag is set. */
+/** The fixed head of authenticatorData, plus the attested credential when
+ * the AT flag is set. */
 type AuthData {
 	rp_id_hash Binary
 	user_present Bool
@@ -146,7 +149,8 @@ fn parse_auth_data(auth Binary) Result(AuthData, Error) {
 	}
 }
 
-// ES256's key becomes SEC1 uncompressed (0x04, x, y). EdDSA's is used as is.
+// An ES256 key is turned into SEC1 uncompressed form (0x04, x, y). An EdDSA
+// key is used as it is.
 fn cose_key(key cbor::Value) Result((Algorithm, Binary), Error) {
 	alg <- result::then(match option::then(cbor::map_get(key, 3), cbor::as_int) {
 		Some(a) -> Ok(a)
@@ -181,8 +185,9 @@ fn cose_bytes(key cbor::Value, label Int) Result(Binary, Error) {
 
 // Registration
 
-/** A `navigator.credentials.create` response, as raw bytes from the browser.
- * `challenge` is what the server issued. Gives the credential to store. */
+/** Checks a `navigator.credentials.create` response, as raw bytes from the
+ * browser, and returns the credential to store. `challenge` is what the
+ * server issued. */
 pub fn verify_registration(
 	attestation_object Binary,
 	client_data_json Binary,
@@ -234,9 +239,10 @@ pub fn verify_registration(
 
 // Authentication
 
-/** A `navigator.credentials.get` response, as raw bytes from the browser,
- * against what `verify_registration` gave. Gives the new `signCount`, to
- * compare with the stored one if the caller checks for cloned keys. */
+/** Checks a `navigator.credentials.get` response, as raw bytes from the
+ * browser, against the credential `verify_registration` gave. It returns the
+ * new `signCount`, which a caller that checks for cloned keys compares with
+ * the stored one. */
 pub fn verify_authentication(
 	authenticator_data Binary,
 	client_data_json Binary,

@@ -1,11 +1,11 @@
-//! Prelude bootstrap: load `src/std/scarlet.sca` through the ordinary module
-//! pipeline so its names are visible in every Scarlet program without an import.
+//! Loads the prelude, `src/std/scarlet.sca`, through the ordinary module
+//! pipeline so every Scarlet program can use its names without an import.
 //! Nothing here redefines a prelude type in Rust.
 //!
-//! Runs once per compiler, before any user code. It ends in
-//! `PreludeBindings::capture`, a strict typed snapshot of every prelude name
-//! the compiler relies on, so a drifted `scarlet.sca` fails here instead of
-//! surfacing as a confused unify error downstream.
+//! This runs once per compiler, before any user code. It ends in
+//! `PreludeBindings::capture`, which takes a strict, typed snapshot of every
+//! prelude name the compiler relies on. So if `scarlet.sca` drifts, it fails
+//! here and not as a confusing unify error later on.
 
 use super::PreludeBindings;
 use super::compiler::Compiler;
@@ -17,13 +17,13 @@ impl Compiler {
     pub(crate) fn register_prelude(&mut self) {
         // `analyse_module` defines the value schemes into a scope it pops, so
         // pull them back out of the recorded interface into the root scope.
-        // Type heads need no such rescue: they land in the flat env.type_info.
+        // Type heads don't need this, because they land in the flat `env.type_info`.
         let at = Span::DUMMY;
         let path = crate::ast::ImportPath::canonical(module::scarlet_prelude());
-        // The prelude's residue IS the ambient namespace ("Type heads need no
-        // rescue" above depends on it), so its compile must not be
-        // frame-scoped like an ordinary module's.
-        // Nothing imports the prelude; it is loaded as though the entry did.
+        // What the prelude leaves behind is the namespace every program sees,
+        // and the note above about type heads depends on that. So unlike an
+        // ordinary module, its compile must not be scoped to a frame.
+        // Nothing imports the prelude, so we load it as though the entry did.
         let entry = module::ModuleKey::main();
         let importer = super::compiler::Importer {
             dir: None,

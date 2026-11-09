@@ -20,7 +20,7 @@ fn check(name String, ok Bool) Nil {
 type Req {
 	// Reply with the pid of the process serving this address right now.
 	Whoami(reply process::Subject(process::Pid))
-	// Ask the worker to return; what an `Ask` shutdown sends.
+	// Ask the worker to return. This is what an `Ask` shutdown sends.
 	Close
 }
 
@@ -268,7 +268,7 @@ fn scenarios() Nil {
 			[True, True, True],
 	)
 
-	// A factory: one member per key, restarted in place, keys freed on exit.
+	// A factory has one member per key, restarts it in place and frees the key on exit.
 	rooms = process::factory(app, process::Restarted(restarts: 10, within_ms: 60000), member)
 	lobby = process::lookup_or_start(rooms, 'lobby')
 	check('a member knows its key', member_key(lobby) == 'lobby')
@@ -293,7 +293,7 @@ fn scenarios() Nil {
 	check('which frees its key', process::lookup(rooms, 'lobby') == None)
 	check('so the next request makes a new one', process::lookup_or_start(rooms, 'lobby') != lobby)
 
-	// Disposable members made without keys: what a server's connections are.
+	// Disposable members made without keys, which is what a server's connections are.
 	jobs = process::factory(app, process::Disposable, member)
 	j1 = process::start_in(jobs, 'one')
 	j2 = process::start_in(jobs, 'two')
@@ -325,7 +325,7 @@ fn scenarios() Nil {
 		take(log, 1, []) == ['close k']
 	})
 
-	// Watches: every exit at a place, across restarts, then its removal.
+	// A watch reports every exit at a place, across restarts, then its removal.
 	events = process::subject()
 	w = process::permanent(app, reporting('w', log))
 	_ = take(log, 1, [])
@@ -348,7 +348,7 @@ fn scenarios() Nil {
 	_ = take(log, 1, [])
 	check('unwatch stops the reports', process::receive_within(events, 30) == Err(Nil))
 
-	// A transient worker returning: one report, and the place is gone.
+	// A transient worker that returns gives one report, and the place is gone.
 	v = process::transient(app, reporting('v', log))
 	_ = take(log, 1, [])
 	_ = process::watch(process::supervised(v), events, fn(e) e)

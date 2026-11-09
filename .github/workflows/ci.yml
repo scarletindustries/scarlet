@@ -42,24 +42,24 @@ jobs:
       - name: Install
         run: bun install
 
-      # src/ is committed because grammar consumers build from it; editing
-      # grammar.js without regenerating must fail here. lexical.js is read by
-      # this step but never written by it, so a stale copy regenerates a
-      # matching src/ and this diff stays clean. It comes from
-      # crates/scarlet_syntax and is gated in the `test` job by xtask's
-      # generated_files_are_up_to_date — `cargo xtask gen-editor-syntax --check`.
+      # src/ is committed because grammar consumers build from it, so editing
+      # grammar.js without regenerating has to fail here. This step reads
+      # lexical.js but never writes it, so a stale copy regenerates a matching
+      # src/ and this diff stays clean. lexical.js comes from
+      # crates/scarlet_syntax, and the `test` job checks it with xtask's
+      # generated_files_are_up_to_date (`cargo xtask gen-editor-syntax --check`).
       - name: Generated parser is current
         run: bun run generate && git diff --exit-code src grammar.js
 
-      # The grammar-vs-parser sync check: every .sca the compiler's own
-      # corpus accepts must parse without an error node.
+      # Check that the grammar agrees with the parser: every .sca in the
+      # compiler's own corpus must parse without an error node.
       - name: Corpus
         run: bun run corpus
 
-  # Dead-code gate: hawk treats the workspace as a closed world and fails on
-  # `pub` items nothing reachable from the `scarlet` binary uses. It links
-  # against rustc internals, so this pinned release must match the Rust
-  # version in rust-toolchain.toml — bump them together.
+  # The dead-code gate. hawk treats the workspace as a closed world and fails
+  # on `pub` items that nothing reachable from the `scarlet` binary uses. It
+  # links against rustc internals, so this pinned release must match the Rust
+  # version in rust-toolchain.toml. Bump them together.
   hawk:
     runs-on: ubuntu-latest
     steps:
@@ -80,12 +80,13 @@ jobs:
       - name: Hawk
         run: cargo hawk check -D warnings
 
-  # Type-hardening gate: mordant's lints fire only on provable claims, and any
-  # finding fails the job; to keep one, `#[expect]` it where it is, with the
-  # reason. Tests are part of the run so that what they use counts for
-  # `unused_pub`; they are not linted. Mordant is pinned to a rev, so the gate
-  # only changes when this line does, and runs on the nightly it was built
-  # with; the workspace toolchain is untouched. Bump the two together.
+  # The type-hardening gate. Mordant's lints fire only on claims they can
+  # prove, and any finding fails the job. To keep a finding, `#[expect]` it
+  # where it is, with the reason. Tests are part of the run so that what they
+  # use counts for `unused_pub`, but they aren't linted. Mordant is pinned to
+  # a rev, so the gate only changes when this line does. It runs on the
+  # nightly it was built with and leaves the workspace toolchain alone. Bump
+  # the two together.
   mordant:
     runs-on: ubuntu-latest
     env:

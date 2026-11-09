@@ -1,8 +1,9 @@
-//! How `println` and `${x}` show a value: the way it would be written.
+//! How `println` and `${x}` show a value, which is the way you would write it.
 //!
-//! A constructor shows as `Some(1)`, and a record, a constructor named after
-//! its own type, as `Point{ x: 1, y: 2 }`. One whose fields are all small
-//! stays on one line; any other is laid out one field per line, indented:
+//! A constructor shows as `Some(1)`. A record, which is a constructor named
+//! after its own type, shows as `Point{ x: 1, y: 2 }`. One whose fields are
+//! all small stays on one line. Any other is laid out one field per line,
+//! indented:
 //!
 //! ```text
 //! Seg {
@@ -12,8 +13,8 @@
 //! ```
 //!
 //! The layout is the old VM's (`inspect.rs`), so a program prints what it
-//! always printed. The walk is a list of pieces still to write rather than
-//! recursion, so a value nested a million deep shows without overflowing the
+//! always printed. The walk keeps a list of pieces still to write instead of
+//! recursing, so a very deeply nested value shows without overflowing the
 //! stack.
 
 use std::collections::BTreeMap;
@@ -27,11 +28,11 @@ use crate::code::Code;
 use crate::heap::{Cell, Heap, Kind};
 use crate::value::{Value, View};
 
-/// Every type's names, by its id: [`scarlet_ir::core_ir::Program::types`].
+/// Every type's names, by its id, from [`scarlet_ir::core_ir::Program::types`].
 pub(crate) type Types = BTreeMap<TypeId, TypeNames>;
 
-/// A string this long or longer is not small: a constructor holding it takes
-/// a line per field.
+/// A string this long or longer is not small, so a constructor holding it
+/// takes a line per field.
 const SMALL_STRING: usize = 20;
 
 /// The widest a tuple of small values may be and still stay on one line.
@@ -138,7 +139,7 @@ fn map(heap: &Heap, cell: Cell, todo: &mut Vec<Piece<'_>>) {
     todo.push(Piece::Text("{"));
 }
 
-/// A function shows as its name, `<fn#serve>`, whatever it captured.
+/// A function shows as its name, like `<fn#serve>`, whatever it captured.
 fn function(code: &Code, f: FuncIdx, out: &mut Vec<u8>) {
     out.extend_from_slice(b"<fn#");
     match code.names.get(f) {
@@ -148,9 +149,9 @@ fn function(code: &Code, f: FuncIdx, out: &mut Vec<u8>) {
     out.push(b'>');
 }
 
-/// Write the constructor's name and opening bracket now, and queue the rest:
-/// each field, the separators between them, and the closing bracket. The
-/// queue is a stack, so it is pushed last piece first.
+/// Write the constructor's name and opening bracket now, and queue the rest,
+/// which is each field, the separators between them and the closing bracket.
+/// The queue is a stack, so we push the last piece first.
 fn ctor<'t>(
     heap: &Heap,
     types: &'t Types,
@@ -204,8 +205,8 @@ fn ctor<'t>(
     }
 }
 
-/// A tuple: `(1, 'a')` on one line when every element is small and the line
-/// fits, and one element per line otherwise.
+/// A tuple shows as `(1, 'a')` on one line when every element is small and
+/// the line fits, and with one element per line otherwise.
 fn tuple<'t>(
     heap: &Heap,
     code: &'t Code,
@@ -263,8 +264,9 @@ fn tuple<'t>(
     Ok(())
 }
 
-/// An array: `[1, 2, 3]` when it fits on a line, six to a line when it holds
-/// only small values and does not fit, and one element per line otherwise.
+/// An array shows as `[1, 2, 3]` when it fits on a line. When it holds only
+/// small values and does not fit, it shows six to a line, and otherwise one
+/// element per line.
 fn array<'t>(
     heap: &Heap,
     code: &'t Code,
@@ -308,8 +310,8 @@ fn array<'t>(
     Ok(())
 }
 
-/// A range, `0..3`, shows as the array of its elements: `[0, 1, 2]`. Each
-/// element is written straight from the range's start, so none is built.
+/// A range like `0..3` shows as the array of its elements, `[0, 1, 2]`. Each
+/// element is worked out from the range's start, so none is built.
 fn range(heap: &Heap, cell: Cell, layout: Layout, out: &mut Vec<u8>) -> Result<(), Stop> {
     let Some(Seq::Range { start, end }) = array::seq(heap, cell) else {
         return Err(Stop::BadProgram("a range cell that is not a range".into()));
@@ -341,10 +343,10 @@ fn range(heap: &Heap, cell: Cell, layout: Layout, out: &mut Vec<u8>) -> Result<(
     }
 }
 
-/// `count` small elements, each written by `item`, on one line when they fit
-/// in `LINE` columns, and six to a line, indented one past `n`, when they do
-/// not. The one-line try stops as soon as it is too wide, so no element is
-/// written more than twice.
+/// Write `count` small elements, each written by `item`. They go on one line
+/// when they fit in `LINE` columns, and otherwise six to a line, indented one
+/// level past `n`. The one-line try stops as soon as it is too wide, so no
+/// element is written more than twice.
 fn six_to_a_line(
     count: usize,
     n: usize,
@@ -433,9 +435,9 @@ fn names(types: &Types, v: VariantRef) -> Option<(&TypeNames, &VariantNames)> {
     Some((ty, ty.variants.get(usize::from(v.variant_idx))?))
 }
 
-/// A constructor the program has no names for, which only a compiler that
-/// broke its promise (`Program::types`) can give. Shown by number, so a
-/// wrong answer is visible rather than a stop.
+/// A constructor the program has no names for. Only a compiler that broke its
+/// promise (`Program::types`) can give one. We show it by number, so the wrong
+/// answer is visible instead of stopping the run.
 fn unnamed(v: VariantRef, out: &mut Vec<u8>) {
     out.extend_from_slice(format!("<ctor {}.{}>", v.type_id.0, v.variant_idx).as_bytes());
 }

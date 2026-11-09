@@ -1,5 +1,5 @@
-//! End-to-end tests for `IncrementalSession`: a 3-module chain A→B→C where
-//! editing one file recompiles only that file and its dependents.
+//! End-to-end tests for `IncrementalSession`. They use a 3-module chain A→B→C,
+//! where editing one file recompiles only that file and its dependents.
 
 use scarlet::bytecode::IncrementalSession;
 use scarlet::module::MODULE_TYPE_ID_RANGE;
@@ -12,8 +12,8 @@ const A_SRC: &str = "import ./b\npub fn main() {\n\tprintln(b::b())\n}\n";
 const B_SRC: &str = "import ./c\npub fn b() Int { c::val() + 1 }\n";
 const C_SRC: &str = "pub fn val() Int { 1 }\n";
 
-/// Write the A→B→C chain to a fresh project and run the initial `check`,
-/// asserting the baseline: exactly b + c compile fresh.
+/// Writes the A→B→C chain to a fresh project and runs the initial `check`,
+/// asserting the baseline that exactly b and c compile fresh.
 fn fresh_three_module_session(tag: &str) -> (Project, IncrementalSession) {
     let p = Project::new(tag);
     p.write("c.sca", C_SRC);
@@ -69,7 +69,7 @@ fn three_module_incremental() {
 fn overlay_preferred_over_disk() {
     let (p, mut s) = fresh_three_module_session("overlay");
 
-    // Unsaved buffer with a type error; disk is unchanged.
+    // Set an unsaved buffer with a type error. The disk is unchanged.
     s.set_overlay(
         p.dir.join("c.sca"),
         "pub fn val() Int { 'oops' }\n".to_string(),
@@ -92,7 +92,7 @@ fn invalidate_path_drops_overlay_and_force_evicts() {
     let (p, mut s) = fresh_three_module_session("invalidate");
     let cpath = p.dir.join("c.sca");
 
-    // Control: with the disk untouched nothing recompiles, so the next bump
+    // This is the control. With the disk untouched nothing recompiles, so the next bump
     // can only come from invalidate_path.
     let r = s.check(&parse(A_SRC), Some(&p.dir));
     assert!(r.success(), "unchanged: {:?}", r.diagnostics);
@@ -122,7 +122,7 @@ fn invalidate_path_drops_overlay_and_force_evicts() {
         "overlay type error must be observed over clean disk"
     );
 
-    // Green here proves the overlay was evicted, not merely that the module
+    // Passing here proves the overlay was evicted, not just that the module
     // recompiled from the same buffer.
     s.invalidate_path(&cpath);
     let r = s.check(&parse(A_SRC), Some(&p.dir));
@@ -237,7 +237,7 @@ fn edit_b_keeps_refs_then_invalidation_drops_reverse_edges() {
         "entry's use of B must survive B's recompile"
     );
 
-    // B no longer declares `b`: the rebuilt graph must retain no stale edge.
+    // B no longer declares `b`, so the rebuilt graph must keep no stale edge.
     let entry2 = "import ./b\npub fn main() {\n\tprintln(b::gone())\n}\n";
     p.write("b.sca", "import ./c\npub fn gone() Int { c::val() }\n");
     p.write("a.sca", entry2);
@@ -250,19 +250,19 @@ fn edit_b_keeps_refs_then_invalidation_drops_reverse_edges() {
     );
 }
 
-/// Type heads `big.sca` declares once grown. One id each, deliberately well
-/// above `MODULE_TYPE_ID_RANGE` so a reused range spills past its reservation
-/// into the sibling module's block.
+/// How many type heads `big.sca` declares once it has grown. Each takes one id,
+/// and the count is well above `MODULE_TYPE_ID_RANGE` on purpose, so a reused
+/// range spills past its reservation into the sibling module's block.
 const BIG_TYPE_COUNT: i32 = MODULE_TYPE_ID_RANGE + 44;
 
-/// Type heads `big.sca` declares initially. Under `MODULE_TYPE_ID_RANGE`, so
-/// the first compile fits and `y` lands in the very next block — which is what
-/// the later spill collides with.
+/// How many type heads `big.sca` declares at first. It's under
+/// `MODULE_TYPE_ID_RANGE`, so the first compile fits and `y` lands in the very
+/// next block, which is what the later spill collides with.
 const SMALL_TYPE_COUNT: i32 = 10;
 
-/// `big.sca`: `type_count` single-constructor types, `f` to keep the entry
-/// referencing it, and `tweak` so the source changes even between two equal
-/// type counts.
+/// Builds `big.sca` from `type_count` single-constructor types, an `f` that
+/// keeps the entry referencing it, and a `tweak` so the source changes even
+/// between two equal type counts.
 fn big_module_src(type_count: i32, tweak: i32) -> String {
     let mut s = String::with_capacity(type_count as usize * 24);
     for i in 0..type_count {
@@ -273,7 +273,7 @@ fn big_module_src(type_count: i32, tweak: i32) -> String {
     s
 }
 
-/// The only exercise of the type-id overflow machinery:
+/// This is the only test of the type-id overflow machinery:
 /// `IdRangeReservation::note_usage`'s `reused && used > 256` branch, the
 /// `id_range_overflow` flag, and the `invalidate_all` + `reset_id_bases`
 /// recovery inside `IncrementalSession::check`.
@@ -292,7 +292,7 @@ fn recompile_id_overflow_recovers_with_stable_ranges() {
 
     let mut s = IncrementalSession::new();
 
-    // big fits its reservation, so y is assigned the very next block — where
+    // big fits its reservation, so y gets the very next block, which is where
     // big's later spill will land.
     let r = s.check(&parse(entry), Some(&p.dir));
     assert!(r.success(), "initial: {:?}", r.diagnostics);
@@ -321,7 +321,7 @@ fn recompile_id_overflow_recovers_with_stable_ranges() {
          big0={big0} y0={y0}"
     );
 
-    // Grow big past 256 heads: the recompile reuses big's id_base, so the
+    // Grow big past 256 heads. The recompile reuses big's id_base, so the
     // spill overlaps y's block and raises `id_range_overflow`. The same
     // `check` then invalidates all, resets the bases and re-runs once.
     p.write("big.sca", &big_module_src(BIG_TYPE_COUNT, 2));
@@ -331,7 +331,8 @@ fn recompile_id_overflow_recovers_with_stable_ranges() {
         "overflow recovery must keep the check green within one pass: {:?}",
         r.diagnostics
     );
-    // 2 initial + 2 normal pass + 2 recovery re-run. Without recovery: 4.
+    // That's 2 initial, 2 in the normal pass and 2 in the recovery re-run.
+    // Without recovery it would be 4.
     assert_eq!(
         s.compile_count(),
         6,
@@ -371,8 +372,8 @@ fn recompile_id_overflow_recovers_with_stable_ranges() {
          span: big1={big1} y1={y1} (false if recovery is unwired)"
     );
 
-    // An unrelated edit after recovery: big is a cache hit, so its usage is
-    // never re-noted and there is no second overflow.
+    // Make an unrelated edit after recovery. big is a cache hit, so its usage
+    // is never noted again and there's no second overflow.
     p.write(
         "y.sca",
         "pub type Y { Y }\npub fn g() Y { Y }\npub fn h() Int { 7 }\n",

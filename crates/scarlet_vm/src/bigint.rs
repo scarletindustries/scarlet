@@ -1,12 +1,12 @@
 //! Int arithmetic, small and big.
 //!
 //! An Int is always exact (`docs/semantics.md`). One that fits in 48 bits
-//! lives in the value word; any other is a heap cell. Every result is put back
-//! in that form: a result that fits is always small. So each number has one
-//! representation, and a small Int never equals a big one.
+//! lives in the value word, and any other is a heap cell. Every result goes
+//! back into that form, so a result that fits is always small. That gives
+//! each number one representation, and a small Int never equals a big one.
 //!
-//! Two small operands take the fast path, a checked operation on `i64`. The
-//! moment an answer needs more room, the arithmetic moves to `num-bigint`.
+//! Two small operands take the fast path, which is a checked operation on
+//! `i64`. As soon as an answer needs more room, `num-bigint` does the work.
 
 use num_bigint::BigInt;
 use num_traits::{ToPrimitive, Zero};
@@ -15,8 +15,8 @@ use crate::code::IntOp;
 use crate::heap::{Full, Heap};
 use crate::value::Value;
 
-/// The most bits one Int can have: a cell is at most 2^28 words of 64 bits.
-/// An Int wider than that is a full heap, not an Int.
+/// The most bits one Int can have, because a cell is at most 2^28 words of
+/// 64 bits. An Int wider than that makes the heap full instead.
 pub(crate) const MAX_BITS: u64 = (1 << 28) * 64;
 
 /// An Int operand, read out of its value.

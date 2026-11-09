@@ -45,15 +45,15 @@ pub use host::Host;
 pub enum Stop {
     /// The program reached something the VM does not run yet.
     NotBuiltYet(String),
-    /// Where the program's output goes was closed, like a pipe into `head`.
-    /// Nothing is wrong with the program, so this stops it quietly.
+    /// The program's output was closed, like a pipe into `head` that has
+    /// read enough. Nothing is wrong with the program, so it stops quietly.
     OutputClosed,
-    /// The program's heap grew past what the VM can address. A limit of the
-    /// machine, like running out of memory, not a bug in the program.
+    /// The program's heap grew past what the VM can address. This is a limit
+    /// of the machine, like running out of memory, not a bug in the program.
     HeapFull,
     /// The program broke a promise the compiler makes about every program,
     /// like a `match` having an arm for every value. Only a compiler bug
-    /// gives one, so this says what, rather than guessing on.
+    /// causes this, so the VM stops and says what broke instead of guessing.
     BadProgram(String),
 }
 
@@ -64,9 +64,9 @@ pub fn run(program: &Program, host: &Host, out: &mut dyn Write) -> Result<(), St
     Ok(())
 }
 
-/// Run `program` as [`run`] does, and give the value it ends with as `println`
+/// Run `program` as [`run`] does, and return its last value as `println`
 /// shows it, or `None` when that value is `Nil`. The REPL runs each entry this
-/// way: the entry's last expression is the program's last value.
+/// way, because an entry's last expression is the program's last value.
 pub fn run_showing(
     program: &Program,
     host: &Host,

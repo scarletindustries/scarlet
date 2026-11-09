@@ -5,14 +5,16 @@ import scarlet/net/error
 import scarlet/http/headers
 import scarlet/time
 
-// Few pulls for a whole body, and a slow reader pins only one chunk.
+// With this size a whole body takes few pulls, and a slow reader pins only one
+// chunk.
 const READ_SIZE = 65536
 const CRLF = <<'\r\n'>>
 const ZERO = <<'0'>>
-// 0-size chunk + empty trailer block: the terminator for a trailer-free body.
+// A zero-size chunk and an empty trailer block, which together end a body with
+// no trailers.
 const LAST_CHUNK = <<'0\r\n\r\n'>>
 
-// A body is a pull thunk: each call gives the next chunk and the rest of the
+// A body is a pull thunk. Each call gives the next chunk and the rest of the
 // body, or Done with any trailers. `Pull` and `Body` refer to each other, so
 // they must share a module.
 pub type Pull {
@@ -26,14 +28,14 @@ pub fn empty() Body {
 	fn() Ok(Done([]))
 }
 
-// `b` as one chunk, even when it is empty.
+// Makes a body that gives `b` as one chunk, even when it's empty.
 pub fn from_binary(b Binary) Body {
 	fn() Ok(Chunk(b, empty()))
 }
 
-// Exactly `n` more bytes from `reader`, then Done; a close before that is
-// UnexpectedEof. `n <= 0` reads nothing. Every read counts against the one
-// `deadline`, so a peer sending a byte at a time runs out of time.
+// Reads exactly `n` more bytes from `reader`, then gives Done. A close before
+// that gives UnexpectedEof. `n <= 0` reads nothing. Every read counts against
+// the one `deadline`, so a peer sending a byte at a time runs out of time.
 pub fn content_length(reader socket::Socket, n Int, deadline time::Instant) Body {
 	fn() if n <= 0 {
 		Ok(Done([]))
@@ -55,14 +57,16 @@ pub fn pull(b Body) Result(Pull, error::NetError) {
 pub type Buffered {
 	// No bytes at all.
 	Empty
-	// The whole body was one in-memory chunk (http.text and friends).
+	// The whole body was one in-memory chunk, as with http.text.
 	Whole(data Binary)
-	// A real stream: the chunks pulled while finding that out, plus the rest.
+	// A real stream. It holds the two chunks pulled while finding that out,
+	// plus the rest.
 	Streaming(first Binary, second Binary, rest Body)
 }
 
-// Find out whether a body is one chunk in memory (to batch with other writes)
-// or a real stream (to drain). It never writes, so an Err is always the body's.
+// Finds out whether a body is one chunk in memory, to batch with other writes,
+// or a real stream, to drain. It never writes, so an Err always comes from the
+// body.
 pub fn take_buffered(b Body) Result(Buffered, error::NetError) {
 	match pull(b) {
 		Err(e) -> Err(e)
@@ -75,8 +79,8 @@ pub fn take_buffered(b Body) Result(Buffered, error::NetError) {
 	}
 }
 
-// Pull the first step early, so a body that fails at once is found before any
-// bytes are written. The returned body replays that step. Never writes.
+// Pulls the first step early, so a body that fails at once is caught before
+// any bytes are written. The returned body replays that step. It never writes.
 pub fn probe(b Body) Result(Body, error::NetError) {
 	match pull(b) {
 		Ok(step) -> Ok(fn() Ok(step))
@@ -85,27 +89,27 @@ pub fn probe(b Body) Result(Body, error::NetError) {
 }
 
 // Which side of a drain failed. After a source failure the socket still
-// works; after a sink failure nothing more can be sent.
+// works, but after a sink failure nothing more can be sent.
 pub type DrainError {
 	// The body failed. Bytes from earlier steps may already be on the wire.
 	SourceFailed(err error::NetError)
-	// A socket write failed; the connection is unusable.
+	// A socket write failed, so the connection is unusable.
 	SinkFailed(err error::NetError)
 }
 
-// Write a whole body to `sock`, a chunk at a time. A slow reader slows the
-// pulls, and memory stays at one chunk. Trailers are dropped: a raw body
-// cannot carry them.
+// Writes a whole body to `sock` a chunk at a time. A slow reader slows the
+// pulls, and memory stays at one chunk. Trailers are dropped, because a raw
+// body can't carry them.
 pub fn drain(body Body, sock socket::Socket) Result(Nil, DrainError) {
 	drain_prefixed([], body, sock)
 }
 
-// Like `drain`, with `head` in the same write as the first chunk.
+// Like `drain`, but sends `head` in the same write as the first chunk.
 pub fn drain_with_head(head Binary, body Body, sock socket::Socket) Result(Nil, DrainError) {
 	drain_prefixed([head], body, sock)
 }
 
-// `prefix` goes in the first write, and is `[]` after.
+// `prefix` goes in the first write and is `[]` after that.
 fn drain_prefixed(prefix Array(Binary), body Body, sock socket::Socket) Result(Nil, DrainError) {
 	match pull(body) {
 		Ok(Chunk(data, next)) -> match socket::write_parts(sock, [..prefix, data]) {
@@ -123,14 +127,14 @@ fn drain_prefixed(prefix Array(Binary), body Body, sock socket::Socket) Result(N
 	}
 }
 
-// How a counted drain ended, against its budget.
+// How a counted drain ended, compared with its budget.
 pub type Drained {
 	// The body ended having written exactly the budget.
 	Complete
-	// The body ended early: only `written` of the budgeted bytes went out.
+	// The body ended early, so only `written` of the budgeted bytes went out.
 	Short(written Int)
-	// A chunk would have crossed the budget. It was NOT written — `written`
-	// (all within budget) is everything that reached the wire.
+	// A chunk would have crossed the budget, so it wasn't written. `written`,
+	// all within budget, is everything that reached the wire.
 	Overran(written Int)
 }
 
@@ -167,14 +171,14 @@ fn drain_counted_from(
 	}
 }
 
-// Write a body with chunked framing, so a body of unknown length can keep an
-// HTTP/1.1 connection open. Empty chunks are skipped: a zero-size chunk would
-// end the body.
+// Writes a body with chunked framing, so a body of unknown length can keep an
+// HTTP/1.1 connection open. Empty chunks are skipped, because a zero-size
+// chunk would end the body.
 pub fn drain_chunked(body Body, sock socket::Socket) Result(Nil, DrainError) {
 	drain_chunked_prefixed([], body, sock)
 }
 
-// Like `drain_chunked`, with `head` in the same write as the first chunk.
+// Like `drain_chunked`, but sends `head` in the same write as the first chunk.
 pub fn drain_chunked_with_head(
 	head Binary,
 	body Body,
@@ -214,8 +218,9 @@ fn drain_chunked_prefixed(
 	}
 }
 
-// Read a whole body into one Binary, at most `max` bytes (MessageTooLarge).
-// The size is checked before each append, so it never grows past `max`.
+// Reads a whole body into one Binary, or gives MessageTooLarge if it's over
+// `max` bytes. The size is checked before each append, so it never grows past
+// `max`.
 pub fn collect(body Body, max Int) Result(Binary, error::NetError) {
 	collect_into(body, max, <<>>)
 }

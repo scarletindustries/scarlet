@@ -8,25 +8,26 @@ reject_case! {
         "not exhaustive",
     ),
     unknown_identifier_is_error: ("pub fn main() {\n\tx = foo\n}\n", "Unknown identifier"),
-    // A stdlib module's name, used with no import, is that module: the error
-    // says which import it needs.
+    // A stdlib module's name used with no import still means that module, and
+    // the error says which import it needs.
     an_unimported_stdlib_module_names_its_import: (
         "pub fn main() {\n\tprintln(int::abs(1))\n}\n",
         "Unknown module 'int': it is the name of a stdlib module that is not imported. Add `import scarlet/int`",
     ),
-    // A module is not a value: the error says so and shows a use of it.
+    // A module isn't a value. The error says so and shows how to use it.
     a_module_is_not_a_value: (
         "import scarlet/int\npub fn main() {\n\tprintln(int)\n}\n",
         "'int' is the module `scarlet/int`, not a value. Use one of its members, like `int::abs`",
     ),
-    // A constructor destructured through its module, of a type with other
-    // constructors, can fail, so it is refused and `match` is named.
+    // Destructuring a constructor through its module can fail when its type has
+    // other constructors, so we refuse it and point at `match`.
     a_qualified_ctor_binding_must_be_irrefutable: (
         "import scarlet/io\npub fn main() {\n\tio::NotFound(p) = io::PermissionDenied('x')\n\tprintln(p)\n}\n",
         "A binding's pattern must match every value, and this one misses",
     ),
-    // A constructor used by its bare name, when an imported module has it,
-    // names the module to reach it through: in a pattern and in an expression.
+    // When a constructor is used by its bare name and an imported module has
+    // it, the error names the module to reach it through. This holds in a
+    // pattern and in an expression.
     a_bare_constructor_in_a_pattern_names_its_module: (
         "import scarlet/io\npub fn main() {\n\tmatch io::read_file('x') {\n\t\tErr(NotFound(p)) -> println(p)\n\t\t_ -> println('other')\n\t}\n}\n",
         "Unknown constructor 'NotFound' in pattern. It is `io::NotFound`",
@@ -38,7 +39,8 @@ reject_case! {
     if_condition_must_be_bool:
         ("pub fn main() {\n\tprintln(if 1 { 2 } else { 3 })\n}\n", "Type mismatch"),
 
-    // All three numeric-literal compile sites: expression, match pattern, range bound.
+    // The three places a numeric literal compiles: an expression, a match
+    // pattern and a range bound.
     integer_literal_overflow_is_error:
         ("pub fn main() {\n\tx = 99999999999999999999999999\n}\n", "out of range for Int"),
     integer_literal_overflow_in_match_pattern_is_error: (
@@ -64,15 +66,15 @@ reject_case! {
 
     unused_let_binding_is_error: (
         "pub fn main() {\n\tx = 1\n\tprintln('done')\n}\n",
-        "'x' is unused; prefix with '_' to ignore",
+        "'x' is never used. Start its name with '_' if that's on purpose",
     ),
     unused_param_is_error: (
         "fn f(a Int, b Int) Int { a }\npub fn main() {\n\tprintln(f(1, 2))\n}\n",
-        "'b' is unused; prefix with '_' to ignore",
+        "'b' is never used. Start its name with '_' if that's on purpose",
     ),
     unused_match_binding_is_error: (
         "pub fn main() {\n\tprintln(match Some(1) {\n\t\tSome(x) -> 0\n\t\tNone -> 0\n\t})\n}\n",
-        "'x' is unused; prefix with '_' to ignore",
+        "'x' is never used. Start its name with '_' if that's on purpose",
     ),
 }
 
@@ -87,31 +89,31 @@ ok_case! {
 }
 
 reject_case! {
-    // A program is declarations plus `pub fn main()`. Each of the entry rule's
-    // diagnostics, as `check` reports them; `check` itself does not need a
-    // `main` (see the library-shaped cases below), `run` does.
+    // A program is declarations plus `pub fn main()`. These are the entry
+    // rule's diagnostics as `check` reports them. `check` itself doesn't need a
+    // `main` (see the library cases below), but `run` does.
     statement_at_module_scope_is_error: (
         "println('early')\n\npub fn main() {\n\tprintln('main')\n}\n",
-        "Statements are not allowed at module scope: a program's code goes inside `pub fn main()`",
+        "Statements aren't allowed at module scope. Put a program's code inside `pub fn main()`",
     ),
     binding_at_module_scope_is_error: (
         "x = 1\n\npub fn main() {\n\tprintln(x)\n}\n",
-        "Statements are not allowed at module scope: a program's code goes inside `pub fn main()`",
+        "Statements aren't allowed at module scope. Put a program's code inside `pub fn main()`",
     ),
     private_main_is_error: (
         "fn main() {\n\tprintln('hi')\n}\n",
-        "`main` must be public: a program starts at `pub fn main()`",
+        "`main` must be public, because a program starts at `pub fn main()`",
     ),
     main_with_parameters_is_error: (
         "pub fn main(args Array(String)) {\n\tprintln(args)\n}\n",
-        "`main` takes no parameters (arguments are read with `os.argv()`)",
+        "`main` takes no parameters. Read the program's arguments with `os.argv()` instead",
     ),
 }
 
 run_reject_case! {
     program_without_main_does_not_run: (
         "fn helper() Int { 1 }\npub fn exported() Int { helper() }\n",
-        "No `main` function: a program starts at `pub fn main()`",
+        "There's no `main` function. A program starts at `pub fn main()`, so add one",
     ),
 }
 
@@ -121,7 +123,7 @@ ok_case! {
 }
 
 reject_case! {
-    // Call-site mistakes, both from `match_fun_type`.
+    // Mistakes at a call site, both reported by `match_fun_type`.
     wrong_argument_count_is_error: (
         "fn f(a Int, b Int) Int { a + b }\npub fn main() {\n\tprintln(f(1))\n}\n",
         "Expected 2 argument(s), got 1",
@@ -131,9 +133,9 @@ reject_case! {
         "This value of type 'Int' is not a function and cannot be called",
     ),
 
-    // Backpassing desugars to an appended trailing lambda before inference,
-    // so a callee whose last param is not a compatible fn is an ordinary
-    // call-site type error.
+    // Backpassing desugars to a trailing lambda added to the call before
+    // inference, so a callee whose last param isn't a matching fn gives an
+    // ordinary type error at the call site.
     backpass_into_non_function_param_is_error: (
         "fn g(a Int, b Int) Int { a + b }\nfn h() Int {\n\tx <- g(1)\n\tx + 0\n}\n\
          pub fn main() {\n\tprintln(h())\n}\n",
@@ -145,7 +147,8 @@ reject_case! {
         "Expected 2 argument(s), got 3",
     ),
 
-    // Construction-site argument diagnostics, all from `slot_ctor_args`.
+    // Diagnostics for the arguments where a value is constructed, all from
+    // `slot_ctor_args`.
     ctor_missing_field_is_error: (
         "type P { P(name String, age Int) }\npub fn main() {\n\tprintln(P(name: 'a'))\n}\n",
         "Constructor 'P' is missing field(s): age",
@@ -168,9 +171,9 @@ reject_case! {
         "Field 'name' is specified more than once",
     ),
 
-    /// `type_ctor_pattern` is a separate path from the construction-site checks
-    /// above. Only reachable with a constructor-cased name: the parser routes a
-    /// lowercase callee to a different pattern form.
+    /// `type_ctor_pattern` is a separate path from the construction checks
+    /// above. Only a name cased like a constructor reaches it, because the
+    /// parser sends a lowercase callee to a different pattern form.
     ctor_unknown_in_pattern_is_error: (
         "pub fn main() {\n\tr = match Some(1) {\n\t\tBogus(x) -> 0\n\t\t_ -> 1\n\t}\n\tprintln(r)\n}\n",
         "Unknown constructor 'Bogus' in pattern",
@@ -184,12 +187,13 @@ reject_case! {
     /// Inside a `{ }` block every non-last statement must be `Nil` or consumed.
     unconsumed_block_expr_statement_is_error: (
         "pub fn main() {\n\tr = {\n\t\t1 + 2\n\t\t9\n\t}\n\tprintln(r)\n}\n",
-        "must be consumed",
+        "isn't used. Assign it to a name",
     ),
 }
 
 ok_case! {
-    // Control for the rule above: pins the `is_nil` guard against over-firing.
+    // The control for the rule above. It checks the `is_nil` guard doesn't fire
+    // too often.
     nil_typed_block_expr_statement_is_ok:
         ("pub fn main() {\n\tr = {\n\t\tprintln(1)\n\t\t9\n\t}\n\tprintln(r)\n}\n"),
 }
@@ -201,41 +205,42 @@ reject_case! {
         "fn f(_x Option(Int, String)) Int { 1 }\n",
         "Type 'Option' expects 1 type argument, got 2",
     ),
-    /// A field RHS hydrates with `permit_new` disabled, so an unseen var is an
-    /// error rather than an implicit fresh one.
+    /// A field's right-hand side hydrates with `permit_new` off, so a var we
+    /// haven't seen is an error rather than an implicit fresh one.
     unknown_type_variable_in_ctor_field_is_error:
         ("type Box { Box(v t) }\n", "Unknown type variable 't'"),
     type_variable_cannot_take_arguments_is_error:
         ("fn f(x a(Int)) a { x }\n", "Type variable 'a' cannot take arguments"),
-    /// Without a return type there is no inference context to solve, so `fn(Int)`
-    /// would mint an unconstrained var that typechecks against anything.
+    /// Without a return type there's no inference context to solve, so `fn(Int)`
+    /// would mint an unconstrained var that type-checks against anything.
     fn_type_without_return_in_ctor_field_is_error: (
         "type F { F(g fn(Int)) }\n",
-        "Function type in a type definition must declare a return type",
+        "A function type in a type definition must declare its return type, like `fn(Int) Int`",
     ),
-    /// Same rule on an alias RHS, which also hydrates with `permit_new` disabled.
+    /// The same rule on an alias's right-hand side, which also hydrates with
+    /// `permit_new` off.
     fn_type_without_return_in_alias_is_error: (
         "type Callback = fn(Int)\n",
-        "Function type in a type definition must declare a return type",
+        "A function type in a type definition must declare its return type, like `fn(Int) Int`",
     ),
 
     duplicate_type_parameter_is_error:
         ("type Box(t, t) { Box(a t) }\n", "Duplicate type parameter 't'"),
     recursive_type_alias_self_is_error: ("type A = A\n", "Recursive type alias 'A'"),
-    /// Which member of the cycle gets named is up to the cycle detector, so this
-    /// pins the diagnostic class only.
+    /// The cycle detector picks which member of the cycle to name, so this only
+    /// pins the kind of diagnostic.
     mutually_recursive_type_alias_is_error: ("type A = B\ntype B = A\n", "Recursive type alias"),
 }
 
 ok_case! {
-    /// The declared-return rule applies only to type definitions. Binding
-    /// annotations also disable `permit_new`, so keying the rule on that flag
-    /// wrongly rejects this.
+    /// The rule that a return type must be declared only applies to type
+    /// definitions. Binding annotations also turn off `permit_new`, so keying
+    /// the rule on that flag would wrongly reject this.
     fn_type_without_return_in_binding_annotation_is_ok:
         ("pub fn main() {\n\tx fn(Int) = fn(a Int) { a }\n\tprintln(x(1))\n}\n"),
 }
 
-/// Runtime counterpart of the case above.
+/// The runtime version of the case above.
 #[test]
 fn fn_type_without_return_in_binding_annotation_runs() {
     common::run_outputs(
@@ -252,12 +257,12 @@ fn recursive_type_alias_cycle_does_not_drop_other_aliases() {
     let out = check_rejects(src, "Recursive type alias");
     assert!(
         !out.combined().contains("Unknown type"),
-        "cycle in A/B must not poison C"
+        "the A/B cycle must not poison `Good`"
     );
 }
 
-// A duplicate-named constructor is reported once and dropped, like a duplicate
-// fn or const: the first registration survives.
+// A constructor with a duplicate name is reported once and dropped, like a
+// duplicate fn or const, and the first one registered survives.
 #[test]
 fn duplicate_constructor_is_dropped_not_double_defined() {
     let src = "type T {\n\tDup(a Int)\n\tDup\n}\npub fn main() {\n\tprintln(Dup(1))\n}\n";
@@ -281,21 +286,23 @@ reject_case! {
     constructor_colliding_with_fn_is_error:
         ("fn Red() {}\ntype A { Red }\n", "'Red' is already defined"),
 
-    /// Occurs-check: `x(x)` is an infinite type. Inference must reject, not loop.
+    /// The occurs check: `x(x)` is an infinite type. Inference must reject it,
+    /// not loop for ever.
     infinite_type_self_application_is_error: ("fn f(x) { x(x) }\n", "Infinite type detected"),
 
-    // Field/tuple access diagnostics from `compile_binary` / `compile_field_access`.
+    // Diagnostics for field and tuple access, from `compile_binary` and
+    // `compile_field_access`.
 
     tuple_index_out_of_bounds_is_error: (
         "pub fn main() {\n\tt = (1, 2)\n\tprintln(t.5)\n}\n",
-        "Tuple index 5 out of bounds (tuple has 2 elements)",
+        "Tuple index 5 is out of range, because the tuple has 2 elements",
     ),
     numeric_index_on_non_tuple_is_error: (
         "pub fn main() {\n\tx = 5\n\tprintln(x.0)\n}\n",
-        "Cannot index .0 on non-tuple type",
+        "Can't use .0 here, because the value isn't a tuple",
     ),
-    /// The runtime variant is not statically known, so a projected label must be
-    /// present on every variant.
+    /// We don't know the runtime variant statically, so a projected label must
+    /// be on every variant.
     field_not_on_every_variant_is_error: (
         "type Shape {\n\tCircle(r Int)\n\tSquare(side Int)\n}\nfn g(s Shape) Int { s.r }\n",
         "Field 'r' is not present on every variant of 'Shape' (missing on 'Square')",
@@ -312,17 +319,18 @@ reject_case! {
     ),
     field_access_on_unknown_type_is_error: (
         "fn g(x) { x.name }\n",
-        "Cannot access field 'name' on a value of unknown type — add a type annotation",
+        "Can't access field 'name' because the value's type isn't known here. Add a type annotation",
     ),
 
     /// The did-you-mean path in `compile_identifier`. The no-suggestion path is
     /// `unknown_identifier_is_error` above.
     unknown_identifier_suggests_close_name: (
         "pub fn main() {\n\tprintln = 1\n\tfoo = prntln\n}\n",
-        "Closest match: 'println'.",
+        "Did you mean 'println'?",
     ),
 
-    /// The tuple path. The constructor path emits a different message.
+    /// This tests the tuple path. The constructor path emits a different
+    /// message.
     refutable_tuple_destructuring_binding_is_error: (
         "pub fn main() {\n\t(x, 1) = (1, 2)\n\tprintln(x)\n}\n",
         "A binding's pattern must match every value, and this one misses",
@@ -330,7 +338,8 @@ reject_case! {
 }
 
 ok_case! {
-    // Control: the check above fires on refutability, not on tuple destructuring.
+    // The control. The check above fires on refutability, not on tuple
+    // destructuring.
     irrefutable_tuple_destructuring_binding_is_ok:
         ("pub fn main() {\n\t(x, y) = (1, 2)\n\tprintln(x + y)\n}\n"),
 
@@ -339,7 +348,7 @@ ok_case! {
 }
 
 reject_case! {
-    /// Declarations are only legal at a module's top level.
+    /// Declarations are only allowed at a module's top level.
     nested_type_declaration_is_error: (
         "fn outer() Int {\n\ttype Inner { A }\n\t1\n}\n",
         "type declarations are only allowed at the top level",
@@ -348,12 +357,13 @@ reject_case! {
     /// one; `Option`'s `None` does not.
     or_with_receiver_on_option_is_error: (
         "pub fn main() {\n\tx = Some(5) or v -> 0\n\tprintln(x)\n}\n",
-        "'or' on an Option does not bind a value",
+        "'or' on an Option can't bind a value",
     ),
 }
 
 ok_case! {
-    // Control: the diagnostic above fires on the receiver, not on `or` over `Option`.
+    // The control. The diagnostic above fires on the receiver, not on `or` over
+    // `Option`.
     or_without_receiver_on_option_is_ok:
         ("pub fn main() {\n\tx = Some(5) or 0\n\tprintln(x)\n}\n"),
 }
@@ -404,9 +414,9 @@ ok_case! {
     ),
 }
 
-/// Constructor arguments are typechecked in declared-field order whatever order
-/// the labels are written in. The elaborator records types in source order, so
-/// it is easy to let that order drag the checking order along.
+/// Constructor arguments are type-checked in declared field order, whatever
+/// order the labels are written in. The elaborator records types in source
+/// order, so it's easy to let that order drag the checking order along.
 #[test]
 fn ctor_arg_diagnostics_come_out_in_declared_field_order() {
     let out = common::run_source(
@@ -426,8 +436,9 @@ fn ctor_arg_diagnostics_come_out_in_declared_field_order() {
     );
 }
 
-/// A `..base` spread must unify the result type before any argument is checked,
-/// so a function-literal argument still gets a concrete parameter type.
+/// A `..base` spread must unify the result type before we check any argument,
+/// so a function literal passed as an argument still gets a concrete
+/// parameter type.
 #[test]
 fn ctor_spread_solves_type_params_before_lambda_args_are_hinted() {
     common::run_outputs(
@@ -441,8 +452,8 @@ fn ctor_spread_solves_type_params_before_lambda_args_are_hinted() {
     );
 }
 
-// A top-level value may share its name with an imported module: `::` reaches
-// the module and a bare name or `.` reaches the value, so neither hides the
+// A top-level value may share its name with an imported module. `::` reaches
+// the module, and a bare name or `.` reaches the value, so neither hides the
 // other.
 ok_case! {
     a_fn_named_like_an_import_does_not_hide_it: (
@@ -453,9 +464,9 @@ ok_case! {
     ),
 }
 
-// Qualified type identifiers: `module::Type` resolves through the mangled
-// `qualifier::Name` keys `process_import` registers for every public type of
-// an imported module.
+// Qualified type names. `module::Type` resolves through the mangled
+// `qualifier::Name` keys that `process_import` registers for every public type
+// of an imported module.
 ok_case! {
     qualified_type_in_alias_position: (
         "import scarlet/http\n\ntype C = http::Method\n\npub fn new() {\n    2\n}\n",
@@ -471,7 +482,7 @@ ok_case! {
 reject_case! {
     unknown_qualified_type_names_module_and_member: (
         "import scarlet/http\n\ntype C = http::Nope\n",
-        "Unknown type 'http::Nope'. Import 'http' and verify it exports a type 'Nope'.",
+        "Unknown type 'http::Nope'. Check that 'http' is imported and exports a type called 'Nope'.",
     ),
     qualified_type_arity_error_uses_qualified_name: (
         "import scarlet/http\n\ntype C = http::Method(Int)\n",
@@ -483,28 +494,28 @@ reject_case! {
     ),
 }
 
-// Two `scarlet/json/decode` shapes the type system holds shut. Both are pinned
+// Two `scarlet/json/decode` mistakes the type system rules out. We pin them
 // here rather than in `tests/programs/json.sca` because neither program gets
-// far enough to print anything — the golden run can only witness decoders that
+// far enough to print anything, and the golden run can only test decoders that
 // compile.
 reject_case! {
-    /// `Failure.found` is a `Found` and not free text, so a decoder cannot put
-    /// a sentence where the document's shape belongs.
+    /// `Failure.found` is a `Found`, not free text, so a decoder can't put a
+    /// sentence where the document's shape belongs.
     decode_failure_found_rejects_free_text: (
         "import scarlet/json/decode\n\ndecode::Failure([], 'a thing', 'a string')\n",
         "expected 'Found', got 'String'",
     ),
-    /// `one_of` takes its first alternative separately, so a union with nothing
-    /// to try is not a decoder that can be built.
+    /// `one_of` takes its first alternative separately, so you can't build a
+    /// union with nothing to try.
     decode_one_of_rejects_no_alternatives: (
         "import scarlet/json/decode\n\ndecode::one_of([])\n",
         "Expected 2 argument(s), got 1",
     ),
 }
 
-// A catch-all may only stand for values that cannot be listed. Once a match
+// A catch-all may only stand for values that can't be listed. Once a match
 // names some variants of a value, it names them all, so a variant added later
-// cannot fall silently into an arm written before it existed.
+// can't fall silently into an arm written before it existed.
 reject_case! {
     a_wildcard_may_not_stand_for_named_variants: (
         "type Color {\n\tRed\n\tGreen\n\tBlue\n}\npub fn main() {\n\tprintln(match Red {\n\t\tRed -> 1\n\t\t_ -> 2\n\t})\n}\n",
@@ -525,12 +536,14 @@ reject_case! {
         "pub fn main() {\n\tprintln(match (True, 1) {\n\t\t(True, n) -> n\n\t\t(_, _) -> 0\n\t})\n}\n",
         "This pattern stands for False",
     ),
-    /// A wildcard that covers nothing left is dead code, reported as that.
+    /// A wildcard that covers nothing left is dead code, and is reported as
+    /// that.
     a_wildcard_covering_nothing_is_unreachable: (
         "type Color {\n\tRed\n\tGreen\n}\npub fn main() {\n\tprintln(match Red {\n\t\tRed -> 0\n\t\tGreen -> 1\n\t\t_ -> 2\n\t})\n}\n",
         "unreachable",
     ),
-    /// `@exhaustive` is gone: the rule it opted into is now every match's.
+    /// `@exhaustive` is gone, because the rule it opted into now applies to
+    /// every match.
     the_exhaustive_attribute_is_unknown: (
         "@exhaustive\ntype Color {\n\tRed\n\tGreen\n\tBlue\n}\n",
         "Unknown attribute '@exhaustive'",
@@ -542,7 +555,7 @@ ok_case! {
     a_wildcard_over_an_unsplit_value_is_fine: (
         "pub fn main() {\n\tprintln(match (Some(1), 2) {\n\t\t(Some(_), n) -> n\n\t\t(None, _) -> 0\n\t})\n}\n",
     ),
-    /// Numbers, strings and binaries cannot be listed, so `_` stays.
+    /// Numbers, strings and binaries can't be listed, so `_` stays.
     a_wildcard_over_values_that_cannot_be_listed_is_fine: (
         "pub fn main() {\n\tprintln(match 3 {\n\t\t1 -> 'one'\n\t\t_ -> 'many'\n\t})\n}\n",
     ),
@@ -553,28 +566,26 @@ ok_case! {
 }
 
 // ===========================================================================
-// scarlet/wire refusals (T-342). The refusals ARE the feature: `wire.encode`
-// is total precisely because a type it could not reconstruct is rejected when
-// the program is compiled, so each of these is a guarantee rather than an
-// edge case.
+// scarlet/wire refusals (T-342). The refusals *are* the feature. `wire.encode`
+// never fails precisely because the compiler rejects a type it couldn't
+// rebuild, so each of these is a guarantee rather than an edge case.
 //
-// Every case here goes through `al check`, which never emits — the refusal is
-// raised in elaboration for exactly that reason, and a refusal raised at
-// emission would leave every one of these green while `al run` rejected the
-// same file.
+// Every case here goes through `al check`, which never emits. That's exactly
+// why elaboration raises the refusal. A refusal raised at emission would leave
+// every one of these green while `al run` rejected the same file.
 // ===========================================================================
 
-/// `al check` rejects `src` with `needle`, and the wire refusal is the ONLY
-/// error. Returns the combined output so a caller can assert more.
+/// Asserts that `al check` rejects `src` with `needle`, and that the wire
+/// refusal is the *only* error. Returns the combined output so a caller can
+/// assert more.
 ///
-/// The single-error assertion is not decoration, and it does not do what it
-/// looks like it does. Elaboration only runs on a module the check walk left
-/// clean, so an unrelated mistake in a fixture does not add a second
-/// diagnostic beside the wire one — it **deletes** the wire one. Measured
-/// while writing these: a fixture calling a `scarlet/process` member that does
-/// not exist reported that twice and the wire refusal not at all. Pinning the
-/// count is what separates "the fixture is wrong" from "the compiler is
-/// wrong" without reading the output by hand.
+/// The single-error assertion matters, and not for the reason it seems to.
+/// Elaboration only runs on a module the check walk left clean, so an
+/// unrelated mistake in a fixture doesn't add a second diagnostic beside the
+/// wire one. It **deletes** the wire one. We saw this while writing these: a
+/// fixture calling a `scarlet/process` member that doesn't exist reported that
+/// twice and the wire refusal not at all. Pinning the count tells "the fixture
+/// is wrong" from "the compiler is wrong" without reading the output by hand.
 fn wire_rejects(src: &str, needle: &str) -> String {
     let out = check_rejects(src, needle);
     let all = out.combined();
@@ -594,25 +605,26 @@ const FN_FIELD: &str = "import scarlet/wire\n\
                         }\n";
 
 ok_case! {
-    /// A record with a `fn` field checks clean: a closure's captures are not
-    /// fixed by its type, and each is described inline at encode time rather
-    /// than refused. This is the control that says no refusal fires on a
-    /// `fn` field; its round trip, called through the decoded copy, is
-    /// `wire_closures.rs`.
+    /// A record with a `fn` field checks clean. A closure's type doesn't fix its
+    /// captures, so each one is described inline at encode time rather than
+    /// refused. This is the control that shows no refusal fires on a `fn`
+    /// field. `wire_closures.rs` tests its round trip, calling through the
+    /// decoded copy.
     a_fn_field_is_admitted_since_closures_cross: (FN_FIELD),
 }
 
-/// An unencodable type three levels down, and the assertion is the PATH.
+/// A type we can't encode sits three levels down, and the assertion is on the
+/// *path*.
 ///
-/// This is the case the path machinery exists for: a refusal that says only
-/// "cannot encode" leaves the reader to find which of nine positions it
-/// meant. The full chain is asserted, not merely that a refusal happened.
+/// This is the case the path code exists for. A refusal that only says
+/// "cannot encode" leaves the reader to find which of nine positions it meant.
+/// We assert the full chain, not just that a refusal happened.
 ///
-/// The unknown type is the one refusal, so the path witness stands on a
-/// generic function encoding its parameter — and on a positional shape,
-/// because a `Data` node's type arguments are walked before its fields:
-/// `Outer(a)` refuses at the argument with no path, and a field can hold
-/// nothing a type was not applied to.
+/// The unknown type is the only refusal left, so this test uses a generic
+/// function encoding its parameter. It also uses a positional shape, because
+/// we walk a `Data` node's type arguments before its fields. `Outer(a)` refuses
+/// at the argument with no path, and a field can only hold what a type was
+/// applied to.
 #[test]
 #[ignore = "waits for the wire redesign: check stopped refusing wire types in #50"]
 fn wire_names_the_whole_path_down_to_the_refusing_type() {
@@ -629,7 +641,7 @@ fn wire_names_the_whole_path_down_to_the_refusing_type() {
     );
     assert!(
         all.contains("cannot encode `a`"),
-        "the refusal names the offending sub-type, not the type the call named:\n{all}"
+        "the refusal must name the sub-type at fault, not the type the call named:\n{all}"
     );
     assert!(
         all.contains("the type is still polymorphic here"),
@@ -654,19 +666,18 @@ const TAGGED_NATIVE: &str = "import scarlet/wire\n\
                              }\n";
 
 ok_case! {
-    /// `Tagged(Native)` over an `Int` field checks clean: the phantom
-    /// argument is a node no value reaches, and the bytes are the `Int`'s.
-    /// Its round trip is `wire_uninhabited.rs`.
+    /// `Tagged(Native)` over an `Int` field checks clean. No value reaches the
+    /// phantom argument, and the bytes are the `Int`'s. `wire_uninhabited.rs`
+    /// tests its round trip.
     a_phantom_of_a_bodiless_type_is_admitted: (TAGGED_NATIVE),
 }
 
 /// `decode` with nothing to fix its payload, and `decode` inside a generic
-/// function, are two different inputs — an unsolved variable and a rigid
-/// quantified one — that the descriptor builder deliberately does not
-/// distinguish. `zonk` says why: undetermined and rigidly polymorphic are the
-/// same operational fact, an unknown representation. So both are pinned to the
-/// same wording rather than to two, and the pair is what says the second case
-/// is not accidentally reaching the first's code path.
+/// function, are two different inputs. One is an unsolved variable and the
+/// other a rigid quantified one, and the descriptor builder deliberately treats
+/// them the same. `zonk` says why: both mean the representation is unknown. So
+/// we pin both to the same wording, and having the pair shows the second case
+/// isn't reaching the first one's code path by accident.
 mod unknown_payload {
     use super::wire_rejects;
 
@@ -693,9 +704,9 @@ mod unknown_payload {
         );
     }
 
-    /// The call site pins `a` to `Int`, and it is still refused: the body is
-    /// elaborated at the generalised signature, where `a` is rigid. That is
-    /// the distinction from the case above, and it is invisible in the text.
+    /// The call site pins `a` to `Int`, and it's still refused, because the body
+    /// is elaborated at the generalised signature, where `a` is rigid. That's
+    /// how it differs from the case above, and you can't see it in the text.
     #[test]
     #[ignore = "waits for the wire redesign: check stopped refusing wire types in #50"]
     fn a_decode_in_a_generic_fn_is_refused() {
@@ -715,23 +726,22 @@ mod unknown_payload {
     }
 }
 
-/// An opaque type from another module crosses the wire in BOTH directions.
+/// An opaque type from another module crosses the wire in *both* directions.
 ///
-/// A decoder rebuilds a value by constructor, and a module's invariants are
-/// that module's to re-check on the values it is handed; visibility is not
-/// consulted. The symmetry is the point: encoding accepts exactly what
-/// decoding accepts, so both halves run rather than one. `Decimal`'s fields
-/// are two `Int`s and `scarlet/decimal` never exports its constructor, so
-/// only a visibility rule could refuse these programs. These go through
-/// `al run`, not `al check`: the descriptor accepting is half of it, and the
-/// decoder finding a template for a constructor this module cannot name is
-/// the other half.
+/// A decoder rebuilds a value by constructor, and it's up to a module to
+/// re-check its invariants on the values it's handed. Visibility isn't
+/// consulted. The symmetry is the point. Encoding accepts exactly what
+/// decoding accepts, so we run both halves rather than one. `Decimal`'s fields
+/// are two `Int`s and `scarlet/decimal` never exports its constructor, so only
+/// a visibility rule could refuse these programs. These go through `al run`,
+/// not `al check`. The descriptor accepting is one half, and the decoder
+/// finding a template for a constructor this module can't name is the other.
 mod opaque_from_another_module {
     use crate::common::run_outputs;
 
-    /// The value that comes back is the one that went in, by structural `==`
-    /// (which compares `units` and `scale`) and by the declaring module's own
-    /// reader.
+    /// The value that comes back is the one that went in. Both structural `==`
+    /// (which compares `units` and `scale`) and the declaring module's own
+    /// reader agree.
     #[test]
     #[ignore = "needs the VM"]
     fn round_trips_with_equality() {
@@ -774,14 +784,15 @@ mod opaque_from_another_module {
 }
 
 ok_case! {
-    /// The inside-the-module half of the opaque pair: a module encodes its
-    /// OWN opaque type the way every type is encoded, by its constructors.
+    /// The other half of the opaque pair, from inside the module. A module
+    /// encodes its *own* opaque type the way every type is encoded, by its
+    /// constructors.
     a_module_may_encode_its_own_opaque_type: (
         "import scarlet/binary\nimport scarlet/wire\npub opaque type Token {\n\tToken(id Int)\n}\npub fn main() {\n\tprintln(binary::byte_size(wire::encode(Token(1))))\n}\n"
     ),
 }
 
-/// `Map` lives in `scarlet/map`, and the import names it `map.Map`: the bare
+/// `Map` lives in `scarlet/map`, and the import names it `map::Map`. The bare
 /// name resolves to nothing, and the error says which spelling does.
 #[test]
 fn a_bare_type_from_an_imported_module_points_at_its_qualified_name() {
@@ -803,7 +814,7 @@ fn a_bare_type_from_an_imported_module_points_at_its_qualified_name() {
     );
 }
 
-/// A stdlib type is not in scope until its module is imported. The old
+/// A stdlib type isn't in scope until you import its module. The old
 /// pre-built stdlib put every stdlib type name in every program.
 #[test]
 fn a_stdlib_type_is_unknown_without_its_import() {

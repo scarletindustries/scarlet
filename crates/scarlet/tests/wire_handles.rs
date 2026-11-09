@@ -1,14 +1,14 @@
-//! Handles across the wire, end to end through `al run`. A `Pid`, a
+//! These send handles across the wire, end to end through `al run`. A `Pid`, a
 //! `Subject`, a `Connection`, a listener and a port's stream encode as an
-//! identity — run, kind, number — and decode, in the run that minted them, to
-//! the same handle.
+//! identity (run, kind and number), and in the run that minted them they
+//! decode to the same handle.
 //!
 //! Every test here does something through the DECODED handle that only the
 //! original could do: a monitor placed through a decoded pid fires when that
 //! process ends, a message sent through a decoded subject arrives in the
 //! original's mailbox, bytes written through a decoded socket reach the peer.
-//! `==` is asserted too, but a decoder that rebuilt a plausible-looking
-//! different handle would pass `==` against nothing and these against less.
+//! The tests assert `==` too, but `==` alone wouldn't catch a decoder that
+//! rebuilt a different handle that only looks right, and these checks would.
 
 mod common;
 
@@ -124,7 +124,7 @@ fn a_subject_three_levels_down_round_trips() {
     );
 }
 
-/// A listener and a `Socket` record, both through the wire: the connection
+/// Sends a listener and a `Socket` record through the wire. The connection
 /// is accepted through the decoded listener, and the bytes the client reads
 /// were written through the decoded socket. `Socket.peer` is an opaque
 /// `SocketAddress` from another module, so this is the identity rule and the
@@ -186,10 +186,10 @@ pub fn main() {
 }
 
 /// `Port` is a record over a `Connection` and an `Int`, and needs no handle
-/// mapping of its own. What it does need is the kind byte to be the value's:
-/// its stream is `SocketKind::Port` at runtime under a field typed
+/// mapping of its own. What it does need is for the kind byte to come from the
+/// value. Its stream is `SocketKind::Port` at runtime under a field typed
 /// `Connection`, and a decoder that rebuilt it as a connection would hand
-/// `port.write` a handle the port table does not hold.
+/// `port.write` a handle the port table doesn't hold.
 #[test]
 #[ignore = "needs the VM"]
 fn a_port_record_round_trips_and_the_copy_is_written_to() {
@@ -214,9 +214,8 @@ fn a_port_record_round_trips_and_the_copy_is_written_to() {
     );
 }
 
-/// The bytes of a pid with its sixteen run-identity bytes zeroed are another
-/// run's, and the refusal is the `OtherRun` constructor a program can match
-/// on, carrying this run's identity first and the forged one second. The
+/// Zeroing a pid's sixteen run-identity bytes makes it another run's. The
+/// refusal is the `OtherRun` constructor a program can match on, carrying this run's identity first and the forged one second. The
 /// header is eleven bytes and the run follows it, so bytes 11..27 are the
 /// run.
 #[test]

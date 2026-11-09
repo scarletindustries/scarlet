@@ -1,4 +1,4 @@
-//! Stamp `SCARLET_VERSION` for `scarlet --version`.
+//! Sets `SCARLET_VERSION`, the version `scarlet --version` prints.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -7,12 +7,10 @@ fn main() {
     emit_version();
 }
 
-/// `SCARLET_VERSION` for `scarlet --version`.
-///
-/// Canary CI rewrites `VERSION` to `0.0.1-canary.YYYYMMDD.HHMM` before
-/// `cargo build`, so a file that already carries `-` or `+` is the published
-/// stamp and is used as-is. A bare `VERSION` is a source tree: append
-/// `+git.<sha>` so a local binary can name the commit it was built from.
+/// A canary build rewrites `VERSION` to `<version>-canary.YYYYMMDD.HHMM` before
+/// `cargo build`, so a `VERSION` that already has a `-` or `+` is the published stamp and we
+/// use it as it is. Any other `VERSION` gets `+git.<sha>` appended, with `.dirty` after the
+/// sha when the tree has uncommitted changes, so the binary can name the commit it came from.
 fn emit_version() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let repo = manifest.join("../..");

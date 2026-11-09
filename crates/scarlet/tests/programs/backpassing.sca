@@ -1,7 +1,7 @@
 // Backpassing: `x <- f(args)` hands the rest of the enclosing block to `f`
-// as a trailing callback argument. Pins the desugaring end to end: binding,
-// multiple binders, `_`, nesting order, block-value propagation, and that
-// code after the callback in the callee still runs.
+// as a trailing callback argument. This checks the whole desugaring: binding,
+// several binders, `_`, nesting order, how a block's value comes back, and
+// that code after the callback in the callee still runs.
 
 fn require_positive(n Int, k fn(Int) String) String {
 	if n > 0 {

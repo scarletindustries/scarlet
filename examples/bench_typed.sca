@@ -1,5 +1,5 @@
-// Exercises Phase 1 type-directed ops: CallKnown (mutual recursion),
-// SwitchTag (exhaustive enum match), GetFieldUnchecked (record projection).
+// Written for the old VM's typed ops: CallKnown (mutual recursion), SwitchTag
+// (an exhaustive enum match) and GetFieldUnchecked (reading a record field).
 
 type Tree {
 	Leaf(value Int)

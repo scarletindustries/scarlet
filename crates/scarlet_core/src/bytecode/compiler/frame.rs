@@ -185,9 +185,9 @@ impl Frame {
         self.blocks.len() - 1
     }
 
-    /// Note that `name` was bound at `span`. Returns where an earlier binding
-    /// of it in the same block was made, if nothing ever read that one: now it
-    /// is shadowed, nothing can.
+    /// Note that `name` was bound at `span`. If an earlier binding of it in the
+    /// same block was never read, this returns where it was made, because now
+    /// that it is shadowed nothing ever can read it.
     pub(in crate::bytecode) fn track(&mut self, name: StrId, span: Span) -> Option<Span> {
         let block = self.blocks.iter_mut().rev().find(|b| b.unused.is_some())?;
         block.unused.as_mut()?.insert(name, span)

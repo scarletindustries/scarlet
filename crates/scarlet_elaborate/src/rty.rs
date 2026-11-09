@@ -1,19 +1,21 @@
-//! Resolved types. The pool itself is part of the compiler/VM contract and
-//! lives in `scarlet_ir`; what is left here is the compiler's own.
+//! Resolved types. The pool itself is part of the contract between the
+//! compiler and the VM, so it lives in `scarlet_ir`. What's left here belongs
+//! to the compiler alone.
 
 pub use scarlet_ir::rty::{RSlice, RTy, ResolvedNode, ResolvedPool};
 
 /// How many arguments a function type, constructor, or eta wrapper takes.
 ///
-/// A newtype because it gets compared against other bare counts, and a payload
-/// of the wrong width corrupts a heap value silently instead of crashing.
+/// It's a newtype because it gets compared against other bare counts, and a
+/// payload of the wrong width silently corrupts a heap value instead of
+/// crashing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Arity(pub u16);
 
 impl Arity {
-    /// The arity of a parameter/field list.
+    /// The arity of a parameter or field list.
     #[inline]
-    #[allow(clippy::expect_used)] // ctor arity is bounded far below u16::MAX upstream
+    #[allow(clippy::expect_used)] // earlier stages keep arities far below u16::MAX
     pub(crate) fn of<T>(items: &[T]) -> Self {
         Arity(u16::try_from(items.len()).expect("constructor arity exceeds u16"))
     }

@@ -1,19 +1,19 @@
-//! Arrays: a persistent RRB (relaxed radix-balanced) tree in the process's
-//! heap, the same shape as the old VM's (`seq.rs` on master).
+//! An array is a persistent RRB (relaxed radix-balanced) tree in the
+//! process's heap, the same shape as the old VM's (its `seq.rs`).
 //!
 //! ```text
-//!   root [ len | shift | head | tree | tail ]
-//!                         |      |      |
-//!     a push to the front |      |      | a push to the back
-//!     lands here (a leaf) |      |      | lands here (a leaf)
-//!                                |
-//!                 branches, 32 children each, with a
-//!                 table of how many elements each holds
-//!                      /         |          \
-//!                   leaf        leaf        leaf    (32 elements each)
+//!   root [ len | shift | offset | head | tree | tail ]
+//!                                  |      |      |
+//!              a push to the front |      |      | a push to the back
+//!              lands here (a leaf) |      |      | lands here (a leaf)
+//!                                         |
+//!                          branches, 32 children each, with a
+//!                          table of how many elements each holds
+//!                               /         |          \
+//!                            leaf        leaf        leaf    (32 elements each)
 //! ```
 //!
-//! The two buffer leaves make a push at either end cheap: only a full buffer
+//! The two buffer leaves make a push at either end cheap. Only a full buffer
 //! spills into the tree, once every 32 pushes. Every branch keeps the running
 //! total of its children's elements, so finding an element, cutting the array
 //! and joining two of them, as in the RRB paper (Bagwell & Rompf, 2011), each
@@ -22,22 +22,23 @@
 //! Nothing is ever changed in place. An operation builds new nodes along the
 //! one path it touches and shares every other node with the array it came
 //! from, which stays as it was. A node shared this way holds one more
-//! reference. (Changing a node in place when nothing else holds it waits for
-//! moves on last use, `docs/vm-design.md`.)
+//! reference. (Changing a node in place when nothing else holds it has to
+//! wait until values move on their last use; see `docs/vm-design.md`.)
 //!
-//! Layout, in words after each cell's header:
+//! This is the layout, in words after each cell's header:
 //!
-//! - root: `len`, `shift` (the tree's height, 0 for a lone leaf), then the
-//!   head, tree and tail, each a node or `Nil`;
-//! - leaf: 1 to 32 elements;
-//! - branch: `shift`, then `n` running totals, then `n` children, `n` from 1
-//!   to 32, all one level down.
+//! - A root holds `len`, `shift` (the tree's height, 0 for a lone leaf) and
+//!   the head's `offset`, then the head, tree and tail, each a node or `Nil`.
+//! - A leaf holds 1 to 32 elements.
+//! - A branch holds `shift`, then `n` running totals, then `n` children, all
+//!   one level down, with `n` from 1 to 32.
 //!
-//! The walks here go one level per call at most, so they are as deep as the
-//! tree is tall: 13 levels at the very most, for 2^64 elements.
+//! The walks here go down at most one level per call, so they are only as
+//! deep as the tree is tall. That is 13 levels at the very most, for 2^64
+//! elements.
 //!
 //! An array can also be a range, `start..end`, which stores only its two
-//! ends, as the old VM's did: its length, its elements, its tail and its
+//! ends, as the old VM's did. Its length, its elements, its tail and its
 //! slices all come from those two numbers. [`Seq`] is either kind. Adding to a
 //! range, or joining one to another array, first builds it as a tree.
 
@@ -46,14 +47,14 @@ use crate::value::Value;
 
 /// Children per branch, and elements per leaf.
 const B: usize = 32;
-/// Bits of an index each level takes: `log2(B)`.
+/// Bits of an index each level takes, which is `log2(B)`.
 const BITS: usize = 5;
 /// How many more nodes than the tightest packing a level may keep after a
 /// join, which bounds the extra steps a lookup takes (the RRB paper's `e`).
 const E_MAX: usize = 2;
 
-/// An array as the VM holds it: a tree of its elements, or a range of Ints
-/// that stores only its two ends.
+/// An array as the VM holds it. It is either a tree of its elements or a
+/// range of Ints that stores only its two ends.
 #[derive(Clone, Copy)]
 pub(crate) enum Seq {
     Tree(Cell),
@@ -69,7 +70,8 @@ impl Seq {
     }
 }
 
-/// How many Ints `start..end` holds: none when `end` is not past `start`.
+/// How many Ints `start..end` holds. It is none when `end` is not past
+/// `start`.
 pub(crate) fn range_len(start: i64, end: i64) -> u64 {
     u64::try_from(i128::from(end) - i128::from(start)).unwrap_or(0)
 }
@@ -118,7 +120,8 @@ struct Root {
     shift: usize,
     /// Items at the front of `head` this array has left behind. Dropping from
     /// the front moves this along and keeps the same leaf, so `[h, ..t]`
-    /// copies nothing; every other operation settles it back to 0.
+    /// copies nothing. A push settles it back to 0, while `take` and `concat`
+    /// keep it along with the head.
     offset: usize,
     head: Value,
     tree: Value,
@@ -147,14 +150,15 @@ fn root(heap: &Heap, cell: Cell) -> Root {
     }
 }
 
-/// The head's live items: what `offset` leaves of its leaf.
+/// The head's live items, which are what `offset` leaves of its leaf.
 fn head_items(heap: &Heap, r: &Root) -> Vec<Value> {
     let items = slots(heap, r.head);
     items.get(r.offset..).unwrap_or(&[]).to_vec()
 }
 
 /// A leaf of exactly the head's live items, owned, or `Nil` when there are
-/// none. Nothing left behind means the head itself, shared rather than copied.
+/// none. When nothing was left behind, this is the head itself, shared
+/// instead of copied.
 fn own_head(heap: &mut Heap, r: &Root) -> Result<Value, Full> {
     if r.offset == 0 {
         return Ok(own(heap, r.head));
@@ -203,7 +207,7 @@ fn node(heap: &Heap, v: Value) -> Option<Node> {
     }
 }
 
-/// `v`, with one more reference: for keeping it in a new node.
+/// `v` with one more reference, for keeping it in a new node.
 fn own(heap: &mut Heap, v: Value) -> Value {
     if let Some(cell) = v.as_cell() {
         heap.share(cell);
@@ -282,7 +286,7 @@ fn node_len(heap: &Heap, v: Value) -> usize {
     }
 }
 
-/// A node's own slots: a leaf's elements, or a branch's children.
+/// A node's own slots, which are a leaf's elements or a branch's children.
 fn slots(heap: &Heap, v: Value) -> Vec<Value> {
     match node(heap, v) {
         None => Vec::new(),
@@ -403,13 +407,13 @@ pub(crate) fn elements(heap: &Heap, array: Cell) -> Vec<Value> {
     out
 }
 
-/// `array` with `x` added at `end`; `x`'s reference passes to the result.
+/// `array` with `x` added at `end`. `x`'s reference passes to the result.
 /// The buffer at that end takes it, and a full buffer first goes into the
 /// tree as a finished leaf.
 pub(crate) fn push(heap: &mut Heap, array: Cell, x: Value, end: End) -> Result<Cell, Full> {
     let r = root(heap, array);
-    // A head with items left behind is settled first: the leaf that goes into
-    // the tree, or that the new item joins, must hold only live items.
+    // Settle a head with items left behind first. The leaf that goes into the
+    // tree, or that the new item joins, must hold only live items.
     let settled = own_head(heap, &r)?;
     let (this, this_items, other) = match end {
         End::Front => (settled, head_items(heap, &r), r.tail),
@@ -440,7 +444,7 @@ pub(crate) fn push(heap: &mut Heap, array: Cell, x: Value, end: End) -> Result<C
 }
 
 /// `tree` with the full leaf `leaf` hung under its edge at `end`, growing a
-/// level when that edge is full. Both are borrowed; the result is owned.
+/// level when that edge is full. Both are borrowed, and the result is owned.
 fn tree_push_leaf(
     heap: &mut Heap,
     tree: Value,
@@ -475,8 +479,8 @@ fn spine(heap: &mut Heap, leaf: Value, shift: usize) -> Result<Value, Full> {
     Ok(n)
 }
 
-/// `node` with `leaf` hung under its edge at `end` without growing taller,
-/// or `None` when every level on that edge is full.
+/// `n` with `leaf` hung under its edge at `end` without growing taller, or
+/// `None` when every level on that edge is full.
 fn try_push(
     heap: &mut Heap,
     n: Value,
@@ -593,19 +597,19 @@ pub(crate) fn skip(heap: &mut Heap, array: Cell, n: usize) -> Result<Cell, Full>
     }
     let front = head_items(heap, &r);
     if n < front.len() {
-        // The cheap `[h, ..t]`: the same head leaf, tree and tail, with `n`
-        // more items left behind. Nothing is copied.
+        // This is the cheap `[h, ..t]`. It keeps the same head leaf, tree and
+        // tail, with `n` more items left behind, so nothing is copied.
         let head = own(heap, r.head);
         let tree = own(heap, r.tree);
         let tail = own(heap, r.tail);
         return root_at(heap, r.len - n, r.shift, r.offset + n, head, tree, tail);
     }
     let m = n - front.len();
-    // The head is spent, so what is left comes out of the tree: move its
+    // The head is spent, so the rest comes out of the tree. Move the tree's
     // leftmost leaf up to be the new head, whole and shared, and leave `m` of
-    // it behind. The tree is cut once for a leaf rather than once an element,
-    // so walking an array cuts it every `B` steps and the steps between are
-    // the offset above.
+    // it behind. The tree is cut once per leaf instead of once per element,
+    // so walking an array cuts it every `B` steps, and the offset above
+    // covers the steps between.
     if let Some(first) = first_leaf(heap, r.tree)
         && m < slots(heap, first).len()
     {
@@ -820,11 +824,11 @@ fn rebalance(
     Ok(out)
 }
 
-/// The slot counts to repack a level to: while it has more than `E_MAX`
+/// The slot counts to repack a level to. While it has more than `E_MAX`
 /// nodes past `optimal`, the first node under `B - E_MAX / 2` slots is
-/// poured into the ones after it, and one node fewer is left. Such a node
-/// always exists while the loop runs: if every node held at least that many,
-/// the level would already be within `E_MAX` of `optimal`.
+/// poured into the ones after it, leaving one node fewer. Such a node always
+/// exists while the loop runs, because if every node held at least that
+/// many, the level would already be within `E_MAX` of `optimal`.
 fn plan(mut counts: Vec<usize>, optimal: usize) -> Vec<usize> {
     while counts.len() > optimal + E_MAX {
         let Some(i) = counts.iter().position(|c| *c < B - E_MAX / 2) else {
@@ -847,8 +851,8 @@ fn plan(mut counts: Vec<usize>, optimal: usize) -> Vec<usize> {
 }
 
 /// The owned nodes `old`, one level below, rebuilt to the slot counts in
-/// `plan`, their slots streamed in order. A node whose count already matches,
-/// and that starts on a node boundary, is kept as it is.
+/// `plan`, with their slots streamed in order. A node whose count already
+/// matches, and that starts on a node boundary, is kept as it is.
 fn repack(
     heap: &mut Heap,
     old: Vec<Value>,
@@ -922,8 +926,9 @@ mod tests {
         from_values(heap, &items).expect("room")
     }
 
-    /// Every invariant of the tree: each node's height, each leaf's and
-    /// branch's slot count, each running total, and the root's length.
+    /// Check every invariant of the tree. That is each node's height, each
+    /// leaf's and branch's slot count, each running total, and the root's
+    /// length.
     fn check(heap: &Heap, array: Cell) {
         let r = root(heap, array);
         for buf in [r.head, r.tail] {
@@ -1095,7 +1100,7 @@ mod tests {
         assert_eq!(heap.live(), 0);
     }
 
-    /// An array partly walked is an ordinary array: what it left behind is
+    /// An array partly walked is an ordinary array. What it left behind is
     /// invisible to reading it, cutting it, joining it and pushing onto it,
     /// and none of those reach past its own front.
     #[test]

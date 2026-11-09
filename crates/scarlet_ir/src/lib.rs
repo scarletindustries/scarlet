@@ -32,8 +32,8 @@ pub mod tivec;
 pub struct TypeId(pub i32);
 
 impl TypeId {
-    /// Sentinel meaning "no nominal type"; real ids start at 1. Deliberately
-    /// not `Default`, so a derived `Default` cannot manufacture it.
+    /// The sentinel for "no nominal type". Real ids start at 1. It's
+    /// deliberately not `Default`, so a derived `Default` can't make one.
     pub const NONE: TypeId = TypeId(0);
 }
 

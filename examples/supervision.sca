@@ -1,4 +1,4 @@
-// A supervised chat service: rooms, a stats worker and HTTP, restarted independently.
+// A supervised chat service. Rooms, a stats worker and HTTP each restart on their own.
 // Run it, then:
 //   curl -d 'hello' 'localhost:8080/say?room=lobby'
 //   curl 'localhost:8080/history?room=lobby'
@@ -33,7 +33,7 @@ fn room_loop(inbox process::Subject(RoomMsg), name String, history Array(String)
 			room_loop(inbox, name, history)
 		}
 		Crash -> {
-			// Killing this process ends it; the factory starts a fresh one at
+			// Killing this process ends it, and the factory starts a fresh one at
 			// the same address.
 			process::kill(process::self())
 		}
@@ -145,5 +145,5 @@ pub fn main() Nil {
 		Ok(_) -> println('chat is up on http://localhost:8080')
 		Err(e) -> println('cannot serve: ${e}')
 	}
-	// `root` now parks this process; the tree above is the program.
+	// `root` now parks this process, and the tree above is the program.
 }

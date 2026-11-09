@@ -1,6 +1,6 @@
 // The scarlet/http sans-IO contract: request-head parsing, body framing, header
 // lookup/mutation/validation, status reason phrases, response-head
-// serialization, and the pull-based body reader — including every smuggling
+// serialisation, and the pull-based body reader — including every smuggling
 // reject. Pure functions over binaries and thunks, no sockets, so the whole
 // protocol surface is golden-testable. The native (VM-builtin) scanners behind
 // h1::parse_request / h1::framing / h1::chunk_decode / h1::serialize_head /
@@ -9,7 +9,7 @@
 //
 // scarlet/http/body's socket-bound half (content_length, drain*, DrainError) is the
 // one part of the module this file cannot reach: it needs a live Socket. That
-// half is covered by examples/http_client.al, whose second server hand-rolls
+// half is covered by examples/http_client.sca, whose second server hand-rolls
 // the connection driver against a loopback listener.
 
 import scarlet/binary
@@ -17,7 +17,7 @@ import scarlet/result
 import scarlet/string
 import scarlet/array
 import scarlet/http/h1
-// Deliberately NOT importing `Done` from scarlet/http/body — it would clash with
+// We deliberately do NOT import `Done` from scarlet/http/body: it would clash with
 // h1's Parsed.Done. Body's terminator is matched qualified, as `body::Done`.
 import scarlet/http/body
 import scarlet/http/headers
@@ -51,12 +51,12 @@ fn vis_from(b Binary, i Int, len Int, acc String) String {
 	}
 }
 
-// Quoted form, so an empty binary is visibly empty rather than nothing at all.
+// Quote it, so an empty binary is visibly empty rather than nothing at all.
 fn q(b Binary) String {
 	'"${vis(b)}"'
 }
 
-// Join for display. `string::inspect` of a long array wraps across lines; a
+// Join the vectors for display. `string::inspect` of a long array wraps across lines; a
 // vector per golden LINE is what makes a diff readable, so join by hand.
 fn list(parts Array(String)) String {
 	match parts {
@@ -65,7 +65,7 @@ fn list(parts Array(String)) String {
 	}
 }
 
-// Doubling grower: there is no binary::repeat, and the head-size caps need a
+// Grow by doubling, because there is no binary::repeat, and the head-size caps need a
 // buffer bigger than the parser's 64 KiB window.
 fn grow(b Binary, n Int) Binary {
 	if binary::byte_size(b) >= n {
@@ -379,7 +379,7 @@ pub fn main() {
 	show_chunked('signed size rejected', <<'+5\r\nhello\r\n0\r\n\r\n'>>, 1048576)
 	show_chunked('size lie rejected', <<'3\r\nhello\r\n0\r\n\r\n'>>, 1048576)
 	// The cap is `total + size > max`, checked from the size line BEFORE any data is
-	// copied: an over-long body never materializes, not even transiently.
+	// copied: an over-long body never materialises, not even transiently.
 	show_chunked('exactly at max', <<'5\r\nhello\r\n0\r\n\r\n'>>, 5)
 	show_chunked('one byte over max', <<'5\r\nhello\r\n0\r\n\r\n'>>, 4)
 	show_chunked('zero max, empty body', <<'0\r\n\r\n'>>, 0)
@@ -494,7 +494,7 @@ pub fn main() {
 	]
 	println('200 + two fields: ${vis(h1::serialize_head(200, resp_headers))}')
 	println('404 + no fields: ${vis(h1::serialize_head(404, []))}')
-	// An unregistered code still serializes: empty reason phrase, trailing SP kept.
+	// An unregistered code still serialises: empty reason phrase, trailing SP kept.
 	println('599 unregistered: ${vis(h1::serialize_head(599, []))}')
 
 	println('')
@@ -507,7 +507,7 @@ pub fn main() {
 	show_collect('from_binary round-trip', body::from_binary(<<'hello'>>), 1024)
 	show_collect('from_binary empty', body::from_binary(<<>>), 1024)
 	// The cap is checked before each append, so an over-long body errs without ever
-	// materializing past the limit.
+	// materialising past the limit.
 	show_collect('collect past max', body::from_binary(<<'hello'>>), 3)
 
 	// A bare closure IS a Body — the alias is transparent, so no wrapper is needed.

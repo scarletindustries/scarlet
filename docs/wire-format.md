@@ -16,7 +16,7 @@ Every value encodes, as on BEAM, so `encode` returns a plain `Binary`. The one r
 Bytes are tied to a type's shape, not its name. Two programs that declare the same shape interoperate. A change to the shape is a `SchemaMismatch`, not a silent misread.
 
 - **Opaque types** from another module cross by their constructors. The owning module re-checks its invariants on what it's handed.
-- **Handles** (`Pid`, `Subject`, `Connection`, `TlsConnection`, `net.Server`) cross as an identity: run, kind, number. In the run that made one, it decodes to that same handle, `==` to the original. From another run it's `OtherRun`.
+- **Handles** (`Pid`, `Subject`, `Connection`, `TlsConnection`, `net::Server`) cross as an identity: run, kind, number. In the run that made one, it decodes to that same handle, `==` to the original. From another run it's `OtherRun`.
   - A decoded `Subject` is a handle to the mailbox, never a second owner of it.
   - A `Port` is a record over a `Connection` and an `Int`, and crosses as one.
 - **Uninhabited types** (a bodiless `pub type` that is none of the handles) are described, not refused. They're a node that is never written or read. It stands only where the walk never goes, like the element of an empty array.
@@ -64,12 +64,12 @@ One byte each. A kind keeps its number forever, and a new one takes the next fre
 
 | Kind | Byte | What |
 |---|---|---|
-| Connection | 0 | a TCP stream (`net/socket.Connection`) |
-| Listener | 1 | a listening socket (`net.Server`) |
-| Port | 2 | a child process's stdio (`os/port.Port`'s stream) |
-| Tls | 3 | an encrypted stream (`net/tls.TlsConnection`) |
-| Pid | 4 | a process (`process.Pid`) |
-| Subject | 5 | a mailbox (`process.Subject`) |
+| Connection | 0 | a TCP stream (`net/socket::Connection`) |
+| Listener | 1 | a listening socket (`net::Server`) |
+| Port | 2 | a child process's stdio (`os/port::Port`'s stream) |
+| Tls | 3 | an encrypted stream (`net/tls::TlsConnection`) |
+| Pid | 4 | a process (`process::Pid`) |
+| Subject | 5 | a mailbox (`process::Subject`) |
 
 The descriptor names the static type's kind. The byte on the wire is the value's kind. So a Port's stream writes 2 where the descriptor says 0, and a decoder accepts that pair. No other pair is accepted: Tls under Connection is `Malformed`.
 

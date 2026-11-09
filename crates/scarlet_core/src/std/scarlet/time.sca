@@ -1,11 +1,12 @@
 /**
- * Two clocks, not to be mixed up.
+ * Scarlet has two clocks, and you shouldn't mix them up.
  *
  * `monotonic()` only moves forward, so it is the one for durations and
  * deadlines. Its `Instant` is opaque, so nothing else can pass for a deadline.
  *
- * `epoch_ms()` is the wall clock: the date, for timestamps that leave the
- * program. It can jump either way, so never measure a duration with it.
+ * `epoch_ms()` is the wall clock. Use it for dates and for timestamps that
+ * leave the program. It can jump either way, so never measure a duration with
+ * it.
  */
 
 pub opaque type Instant {
@@ -37,7 +38,8 @@ pub fn since_ms(later Instant, earlier Instant) Int {
 	}
 }
 
-// Raw monotonic milliseconds, for the VM's built-ins. Prefer `since_ms`.
+// The raw monotonic milliseconds, which the VM's built-ins take. Prefer
+// `since_ms`.
 pub fn to_deadline_ms(t Instant) Int {
 	match t {
 		Instant(n) -> n

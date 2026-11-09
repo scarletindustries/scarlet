@@ -1,16 +1,18 @@
 import scarlet/binary
 import scarlet/option
 
-// JSON, parsed with SIMD and read in place. `parse` gives a `Doc`, a cursor
-// over the parser's tape, so reading six fields of a big payload copies six
-// strings. `to_json` builds the whole tree, for the few cases that need one.
-// For decoding into your own types, use `scarlet/json/decode`.
+// Parses JSON with SIMD and reads it in place. `parse` gives a `Doc`, which is
+// a cursor over the parser's tape, so reading six fields of a big payload
+// copies only six strings. `to_json` builds the whole tree for the few cases
+// that need one. To decode into your own types, use `scarlet/json/decode`.
 //
-// Strict RFC 8259: no comments, trailing commas, `NaN` or trailing bytes.
-// Duplicate keys are kept (`field` finds the first). An integer past 64 bits
+// Parsing follows RFC 8259 strictly, so it refuses comments, trailing commas,
+// `NaN` and trailing bytes. Duplicate keys are kept, and `field` finds the
+// first. An integer past 64 bits
 // doesn't parse, and an unpaired surrogate escape like `\ud800` is an error.
 
-// Opaque: a hand-built one would point at a node that does not exist.
+// A `Doc` is opaque because a hand-built one could point at a node that
+// doesn't exist.
 pub opaque type Doc {
 	arena Binary
 	tape Binary
@@ -34,8 +36,9 @@ pub type Kind {
 	ObjectKind
 }
 
-// A JSON tree, for building documents to send. Reading uses `Doc` instead.
-// `Boolean`, `Integer` and `Real`, since `Bool`, `Int` and `Float` are taken.
+// A JSON tree for building documents to send. Reading uses `Doc` instead. The
+// variants are called `Boolean`, `Integer` and `Real` because `Bool`, `Int`
+// and `Float` are taken.
 pub type Json {
 	Null
 	Boolean(value Bool)
@@ -44,8 +47,9 @@ pub type Json {
 	Str(value String)
 	List(items Array(Json))
 	Object(members Array((String, Json)))
-	// Written as these digits, for a number that must not round through a
-	// `Float`. `encode` writes `null` if `digits` is not a JSON number.
+	// A number written as exactly these digits, for one that must not round
+	// through a `Float`. `encode` writes `null` if `digits` isn't a JSON
+	// number.
 	Number(digits String)
 }
 
@@ -58,23 +62,25 @@ fn kind_raw(d Doc) Int
 @vm(json__len)
 fn len_raw(d Doc) Int
 
-// The first member named `name`. `None` means absent: a member set to `null`
-// is `Some` of a `NullKind` doc. `json/decode`'s `Field` keeps the two apart.
+// Finds the first member named `name`. `None` means it's absent, and a member
+// set to `null` is `Some` of a `NullKind` doc. `json/decode`'s `Field` keeps
+// the two apart.
 @vm(json__field)
 pub fn field(d Doc, name String) Option(Doc)
 
 @vm(json__index)
 pub fn index(d Doc, i Int) Option(Doc)
 
-// In document order, duplicates included. Empty for a non-object.
+// Lists an object's members in document order, duplicates included. It's
+// empty for anything that isn't an object.
 @vm(json__entries)
 pub fn entries(d Doc) Array((String, Doc))
 
-// Already unescaped.
+// Returns the string, already unescaped.
 @vm(json__string)
 pub fn string(d Doc) Option(String)
 
-// `None` for a float.
+// Returns `None` for a float.
 @vm(json__int)
 pub fn int(d Doc) Option(Int)
 
@@ -82,7 +88,7 @@ pub fn int(d Doc) Option(Int)
 @vm(json__int_text)
 pub fn int_text(d Doc) Option(String)
 
-// Integers included.
+// Returns integers as floats too.
 @vm(json__float)
 pub fn float(d Doc) Option(Float)
 
@@ -92,7 +98,7 @@ pub fn bool(d Doc) Option(Bool)
 @vm(json__encode)
 pub fn encode(j Json) String
 
-// Parse UTF-8 bytes, such as what came in over a socket.
+// Parses UTF-8 bytes, such as ones that came in over a socket.
 pub fn parse_binary(src Binary) Result(Doc, ParseError) {
 	parse_binary_raw(src)
 }
@@ -101,9 +107,10 @@ pub fn parse(src String) Result(Doc, ParseError) {
 	parse_binary_raw(binary::from_string(src))
 }
 
-// `kind_raw` is -1 for a tape that does not decode. That must read as the kind
-// that grants least: `ObjectKind` would let `decode.optional_field` treat a
-// corrupt document as an object missing a member.
+// `kind_raw` is -1 for a tape that doesn't decode. That must read as the kind
+// that grants the least, because `ObjectKind` would let
+// `decode.optional_field` treat a corrupt document as an object missing a
+// member.
 pub fn kind(d Doc) Kind {
 	match kind_raw(d) {
 		0 -> NullKind
@@ -122,24 +129,28 @@ pub fn is_null(d Doc) Bool {
 	kind_raw(d) == 0
 }
 
-// Elements of an array or members of an object. Zero for a scalar.
+// Counts the elements of an array or the members of an object. It's zero for
+// a scalar.
 pub fn size(d Doc) Int {
 	n = len_raw(d)
 	if n < 0 { 0 } else { n }
 }
 
-// Empty for a non-array. One walk: calling `index` per element is O(n²) in a
-// count the sender chooses.
+// Lists an array's elements in one walk, and is empty for anything else.
+// Calling `index` per element instead would be O(n²) in a count the sender
+// chooses.
 @vm(json__elements)
 pub fn elements(d Doc) Array(Doc)
 
-// The whole document as a tree: an allocation per node, read or not. For
-// passing a document through. To get your own types, decode off the `Doc`.
+// Builds the whole document as a tree, with an allocation per node whether you
+// read it or not. It's for passing a document through. To get your own types,
+// decode from the `Doc`.
 pub fn to_json(d Doc) Json {
 	match kind(d) {
 		NullKind -> Null
 		BoolKind -> Boolean(option::unwrap(bool(d), False))
-		// Never `0` as a default: a `reencode` would zero every id it touched.
+		// Never default to `0` here, because `reencode` would then zero every
+		// id it touched.
 		IntKind -> match int(d) {
 			Some(i) -> Integer(i)
 			None -> match int_text(d) {
@@ -171,7 +182,8 @@ fn entries_to_json(es Array((String, Doc))) Array((String, Json)) {
 	}
 }
 
-// Keeps key order and duplicate keys, drops whitespace.
+// Writes the document back out. It keeps key order and duplicate keys, and
+// drops whitespace.
 pub fn reencode(d Doc) String {
 	encode(to_json(d))
 }

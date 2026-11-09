@@ -25,7 +25,8 @@ pub const ESCAPES: &[(u8, u8)] = &[
 struct InterpFrame {
     quote: u8,
     brace_depth: u32,
-    // The opening quote, so a string abandoned at EOF is diagnosed there.
+    // Where the opening quote is, so a string left open at EOF is reported
+    // there.
     start_line: i32,
     start_column: i32,
 }
@@ -87,9 +88,9 @@ impl Scanner {
         self.input.len() as i32
     }
 
-    // The only byte accessor, and it is total: a negative `pos` wraps to a huge
-    // usize, so both past-EOF and negative cursors read as the `0` EOF sentinel
-    // every consumer already treats as end of input.
+    // The only way to read a byte, and it never fails. A negative `pos` wraps
+    // to a huge usize, so a cursor past EOF or below zero reads as `0`, which
+    // every caller already treats as the end of input.
     fn byte_at(&self, pos: i32) -> u8 {
         self.input.get(pos as usize).copied().unwrap_or(0)
     }
@@ -171,8 +172,8 @@ impl Scanner {
                     self.incr_pos();
                 }
                 if !closed {
-                    // Swallow the tail byte the loop bound left unconsumed so
-                    // it is not re-lexed as a spurious token after the error.
+                    // Consume the last byte, which the loop bound left behind,
+                    // so it isn't scanned again as a stray token after the error.
                     while self.pos < self.input_len() {
                         self.incr_pos();
                     }
@@ -180,7 +181,7 @@ impl Scanner {
                     self.diagnostics.push(Diagnostic::error(
                         Span::point(start_line, start_column),
                         DiagnosticCode::UnexpectedEof,
-                        "Unterminated block comment".to_string(),
+                        "This block comment is never closed. End it with `*/`".to_string(),
                     ));
                 }
 
@@ -216,13 +217,13 @@ impl Scanner {
         self.token_start_line = self.line;
 
         if self.pos >= self.input_len() {
-            // EOF inside `${ ... }`: every frame still on the stack is an
-            // unterminated string, diagnosed at its own opening quote.
+            // At EOF inside `${ ... }`, every frame still on the stack is an
+            // unclosed string, reported at its own opening quote.
             while let Some(frame) = self.interp_stack.pop() {
                 self.diagnostics.push(Diagnostic::error(
                     Span::point(frame.start_line, frame.start_column),
                     DiagnosticCode::UnexpectedEof,
-                    "Unterminated string literal".to_string(),
+                    "This string is never closed. End it with a matching quote".to_string(),
                 ));
             }
             return self.new_token(Kind::Eof);
@@ -249,8 +250,8 @@ impl Scanner {
         if token::is_name_start(ch) {
             let Range { start, end } = self.scan_name();
 
-            // Keyword lookup on a borrowed slice, so keywords allocate no
-            // String. Names are ASCII, so `from_utf8` cannot fail here.
+            // Look keywords up on a borrowed slice, so they allocate no String.
+            // Names are ASCII, so `from_utf8` can't fail here.
             if let Some(keyword_kind) =
                 std::str::from_utf8(&self.input[start as usize..end as usize])
                     .ok()
@@ -297,7 +298,7 @@ impl Scanner {
                     self.diagnostics.push(Diagnostic::error(
                         Span::point(start_line, start_col - 1),
                         DiagnosticCode::ParseError,
-                        "Unterminated string literal".to_string(),
+                        "This string is never closed. End it with a matching quote".to_string(),
                     ));
                     return self.new_token(Kind::Error(utf8(result).into()));
                 }
@@ -396,8 +397,8 @@ impl Scanner {
             _ => {
                 // `ch` is a raw byte; `as char` would reinterpret it as
                 // Latin-1. A byte >= 0x80 starts a UTF-8 sequence, so consume
-                // the whole sequence and decode it, or every byte of one
-                // character produces its own garbage-glyph error.
+                // the whole sequence and decode it, or each byte of one
+                // character gets its own error with a garbled glyph.
                 if ch >= 0x80 {
                     let start = self.pos - 1;
                     while (0x80..=0xBF).contains(&self.peek_char()) {
@@ -443,7 +444,7 @@ impl Scanner {
         }
     }
 
-    // Advance past the rest of a name and return its `[start, end)` byte range.
+    // Advances past the rest of a name and returns its `[start, end)` byte range.
     // The caller has already consumed the first byte, so the name starts at
     // `pos - 1`. Names are ASCII, so byte offsets are column offsets.
     fn scan_name(&mut self) -> Range<i32> {
@@ -570,10 +571,10 @@ impl Scanner {
         self.pos += 1;
     }
 
-    // Most escapes denote one ASCII byte; `\u{...}` denotes the UTF-8 encoding
-    // of a code point, which can be up to four. Pushes the denoted bytes onto
-    // `out`. An unknown escape reports a diagnostic and yields the escaped
-    // byte itself.
+    // Most escapes stand for one ASCII byte, but `\u{...}` stands for the UTF-8
+    // encoding of a code point, which can be up to four bytes. Pushes those
+    // bytes onto `out`. An unknown escape reports an error and yields the
+    // escaped byte itself.
     //
     // Consumes nothing when the backslash sits at EOF or a line ending, so
     // the caller still sees the terminator.
@@ -603,11 +604,14 @@ impl Scanner {
                         end += 1;
                     }
                     self.add_error(format!(
-                        "Unknown escape sequence '\\{}'",
+                        "Unknown escape sequence '\\{}'. Write '\\\\' for a backslash",
                         self.slice(start, end)
                     ));
                 } else {
-                    self.add_error(format!("Unknown escape sequence '\\{}'", peeked as char));
+                    self.add_error(format!(
+                        "Unknown escape sequence '\\{}'. Write '\\\\' for a backslash",
+                        peeked as char
+                    ));
                 }
                 out.push(peeked);
             }
@@ -615,18 +619,18 @@ impl Scanner {
     }
 
     // `\u{HEX+}`: hex digits naming a Unicode scalar value, encoded as UTF-8.
-    // No digit-count cap: a scalar value never needs more than 6, so 7+ digits
-    // always lands in the same out-of-range diagnostic a too-large 6-digit
-    // value would, without a separate "too many digits" check. `\u` itself is
-    // already consumed by the caller. Every failure recovers by pushing
-    // U+FFFD (the replacement character) so the buffer stays valid UTF-8 and
-    // scanning continues, the same recovery style `scan_radix_number` uses
-    // for a malformed number.
+    // The caller has already consumed the `\u`. There's no cap on the digit
+    // count: a scalar value never needs more than 6, and extra digits are
+    // either leading zeros or push the value out of range, which gets the same
+    // error as any too-large value. Every failure recovers by pushing U+FFFD
+    // (the replacement character), so the buffer stays valid UTF-8 and
+    // scanning goes on, the way `scan_radix_number` recovers from a malformed
+    // number.
     fn scan_unicode_escape(&mut self, out: &mut Vec<u8>) {
         const REPLACEMENT_CHARACTER: char = '\u{FFFD}';
 
         if self.peek_char() != b'{' {
-            self.add_error("Expected '{' after '\\u'".to_string());
+            self.add_error("Expected '{' after '\\u', like '\\u{E9}'".to_string());
             out.push(b'u');
             return;
         }
@@ -640,7 +644,7 @@ impl Scanner {
 
         if self.peek_char() != b'}' {
             self.add_error(format!(
-                "Unterminated '\\u{{{digits}' escape: expected a closing '}}'",
+                "The '\\u{{{digits}' escape is never closed. End it with '}}'",
             ));
             let mut buf = [0u8; 4];
             out.extend_from_slice(REPLACEMENT_CHARACTER.encode_utf8(&mut buf).as_bytes());
@@ -649,7 +653,9 @@ impl Scanner {
         self.incr_pos();
 
         if digits.is_empty() {
-            self.add_error("'\\u{}' names no code point".to_string());
+            self.add_error(
+                "The '\\u{}' escape is empty. Put hex digits inside, like '\\u{E9}'".to_string(),
+            );
             let mut buf = [0u8; 4];
             out.extend_from_slice(REPLACEMENT_CHARACTER.encode_utf8(&mut buf).as_bytes());
             return;
@@ -665,8 +671,8 @@ impl Scanner {
             }
             None => {
                 self.add_error(format!(
-                    "'\\u{{{digits}}}' is not a Unicode scalar value — it is above U+10FFFF or \
-                     in the surrogate range U+D800..=U+DFFF",
+                    "'\\u{{{digits}}}' is not a Unicode scalar value, because it is above \
+                     U+10FFFF or in the surrogate range U+D800 to U+DFFF",
                 ));
                 let mut buf = [0u8; 4];
                 out.extend_from_slice(REPLACEMENT_CHARACTER.encode_utf8(&mut buf).as_bytes());
@@ -694,7 +700,7 @@ impl Scanner {
                 self.diagnostics.push(Diagnostic::error(
                     anchor,
                     DiagnosticCode::ParseError,
-                    "Unterminated string literal".to_string(),
+                    "This string is never closed. End it with a matching quote".to_string(),
                 ));
                 self.exit_interp_string();
                 return self.new_token(Kind::Error(utf8(result).into()));
@@ -1060,7 +1066,7 @@ mod tests {
             kinds_clean("0x10..0x20"),
             vec![num("0x10"), PuncDotdot, num("0x20"), Eof]
         );
-        // `08` is still decimal — there is no octal prefix.
+        // `08` is still decimal, because there's no octal prefix.
         assert_eq!(kinds_clean("08"), vec![num("08"), Eof]);
         // A `.` after hex/bin digits ends the number; hex floats are not a thing.
         assert_eq!(
@@ -1135,7 +1141,10 @@ mod tests {
     fn unterminated_block_comment_reports_at_the_opening_delimiter() {
         let (_, diags) = scan("x = 1\n  /** oops\nmore text\n");
         assert_eq!(diags.len(), 1);
-        assert_eq!(diags[0].message, "Unterminated block comment");
+        assert_eq!(
+            diags[0].message,
+            "This block comment is never closed. End it with `*/`"
+        );
         // Line 1, column 2: the `/` of the `/**`, not EOF on line 3.
         assert_eq!(
             (diags[0].span.start_line, diags[0].span.start_column),
@@ -1197,7 +1206,7 @@ mod tests {
         assert!(
             diags
                 .iter()
-                .any(|d| d.message.contains("Unterminated string literal"))
+                .any(|d| d.message.contains("This string is never closed"))
         );
     }
 
@@ -1248,7 +1257,7 @@ mod tests {
         assert!(
             diags
                 .iter()
-                .any(|d| d.message.contains("Unterminated string literal")),
+                .any(|d| d.message.contains("This string is never closed")),
             "diagnostics: {diags:?}"
         );
         assert!(
@@ -1265,7 +1274,7 @@ mod tests {
         let (toks, diags) = scan("x = '\\");
         assert_eq!(*toks.last().map(|t| t.kind.clone()).as_ref().unwrap(), Eof);
         assert_eq!(diags.len(), 1, "diagnostics: {diags:?}");
-        assert!(diags[0].message.contains("Unterminated string literal"));
+        assert!(diags[0].message.contains("This string is never closed"));
     }
 
     #[test]
@@ -1313,7 +1322,7 @@ mod tests {
         assert!(
             diags
                 .iter()
-                .any(|d| d.message.contains("Unterminated string literal")),
+                .any(|d| d.message.contains("This string is never closed")),
             "diagnostics: {diags:?}"
         );
         let ks: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
@@ -1326,7 +1335,7 @@ mod tests {
         // Anchored at the opening quote (line 0, column 4), not at EOF.
         let (_, diags) = scan("x = 'abc");
         assert_eq!(diags.len(), 1, "diagnostics: {diags:?}");
-        assert!(diags[0].message.contains("Unterminated string literal"));
+        assert!(diags[0].message.contains("This string is never closed"));
         assert_eq!(
             (diags[0].span.start_line, diags[0].span.start_column),
             (0, 4)
@@ -1340,7 +1349,7 @@ mod tests {
         let (_, diags) = scan("x = 'a${b} cd");
         let unterminated: Vec<_> = diags
             .iter()
-            .filter(|d| d.message.contains("Unterminated string literal"))
+            .filter(|d| d.message.contains("This string is never closed"))
             .collect();
         assert_eq!(unterminated.len(), 1, "diagnostics: {diags:?}");
         assert_eq!(
@@ -1360,7 +1369,7 @@ mod tests {
         assert_eq!(*toks.last().map(|t| t.kind.clone()).as_ref().unwrap(), Eof);
         let unterminated: Vec<_> = diags
             .iter()
-            .filter(|d| d.message.contains("Unterminated string literal"))
+            .filter(|d| d.message.contains("This string is never closed"))
             .collect();
         assert_eq!(unterminated.len(), 1, "diagnostics: {diags:?}");
         // Anchored at the opening quote (line 0, column 4), not at EOF.
@@ -1379,7 +1388,7 @@ mod tests {
         let (_, diags) = scan("'${\"${a");
         let cols: Vec<i32> = diags
             .iter()
-            .filter(|d| d.message.contains("Unterminated string literal"))
+            .filter(|d| d.message.contains("This string is never closed"))
             .map(|d| d.span.start_column)
             .collect();
         assert_eq!(cols.len(), 2, "diagnostics: {diags:?}");
@@ -1388,7 +1397,7 @@ mod tests {
 
     #[test]
     fn test_back_arrow_wins_longest_munch() {
-        // `a<-b` is ident, `<-`, ident — not `a < -b`. A documented
+        // `a<-b` is ident, `<-`, ident, not `a < -b`. A documented
         // behaviour change from before backpassing existed.
         assert_eq!(
             kinds_clean("a<-b"),
@@ -1422,8 +1431,8 @@ mod tests {
 
     #[test]
     fn test_unicode_escape_spells_a_code_point() {
-        // A single scalar value, and one past the BMP (4-byte UTF-8) — both
-        // clean, no diagnostics.
+        // A single scalar value, and one past the BMP (4-byte UTF-8). Both
+        // scan cleanly, with no diagnostics.
         assert_eq!(kinds_clean("'\\u{E9}'"), vec![lit("\u{E9}"), Eof]);
         assert_eq!(kinds_clean("'\\u{1F469}'"), vec![lit("\u{1F469}"), Eof]);
 
@@ -1455,7 +1464,7 @@ mod tests {
         // No closing '}'.
         let (_, diags) = scan("'\\u{41'");
         assert!(
-            diags.iter().any(|d| d.message.contains("Unterminated")),
+            diags.iter().any(|d| d.message.contains("is never closed")),
             "diagnostics: {diags:?}"
         );
 
@@ -1466,7 +1475,7 @@ mod tests {
         assert!(
             diags
                 .iter()
-                .any(|d| d.message.contains("names no code point")),
+                .any(|d| d.message.contains("The '\\u{}' escape is empty")),
             "diagnostics: {diags:?}"
         );
 

@@ -1,24 +1,24 @@
-//! TLS, end to end: a Scarlet program against a real TLS server on loopback.
+//! These tests run a Scarlet program against a real TLS server on loopback.
 //!
 //! **The negative tests are the point of this file.** A TLS client that accepts
 //! any certificate is worse than no TLS client, because it still looks like it
 //! works: every test here would pass, the bytes would flow, and the connection
-//! would be readable by anyone on the path. So three separate ways of being the
-//! wrong peer are checked — an issuer we do not trust, a certificate outside
-//! its validity window, and a certificate for a different name — and each must
-//! come back as its own typed `TlsError`, not merely as "an error".
+//! would be readable by anyone on the path. So we check three ways of being the
+//! wrong peer: an issuer we don't trust, a certificate outside its validity
+//! window, and a certificate for a different name. Each must come back as its
+//! own typed `TlsError`, not just as "an error".
 //!
-//! Every certificate is minted here, per test, by `rcgen`. The alternative is
-//! aiming the tests at a public host that is misconfigured on purpose, which
-//! makes a security test depend on a third party's uptime and turns a network
-//! outage into a green run.
+//! `rcgen` mints every certificate here, per test. The alternative is to aim
+//! the tests at a public host that is misconfigured on purpose. That makes a
+//! security test depend on a third party's uptime, and a network outage would
+//! turn into a green run.
 //!
 //! Trust is granted the way the documentation tells a user to grant it: through
 //! the machine's certificate store, via `SSL_CERT_FILE`, which is what
 //! `rustls-native-certs` reads on Unix. There is deliberately no way to ask the
-//! runtime to skip verification, so there is nothing here that switches it off
-//! — the positive test earns its trust by installing a root, exactly as a
-//! program talking to an internal CA would.
+//! runtime to skip verification, so nothing here switches it off. The positive
+//! test earns its trust by installing a root, just as a program talking to an
+//! internal CA would.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -69,8 +69,8 @@ fn make_ca() -> Ca {
     }
 }
 
-/// A leaf for `name`, signed by `ca`. `validity` picks the window, which is how
-/// the expired case is built.
+/// The validity window `make_leaf` gives a leaf. `Expired` is how we build the
+/// expired case.
 enum Validity {
     Current,
     Expired,
@@ -106,13 +106,12 @@ fn make_leaf(ca: &Ca, name: &str, validity: Validity) -> Leaf {
 // A one-shot TLS server on loopback
 // ---------------------------------------------------------------------------
 
-/// Pick the crypto provider for THIS test process.
+/// Pick the crypto provider for this test process.
 ///
-/// Two are linked in — `scarlet_vm` asks for `aws-lc-rs`, and `ureq` brings
-/// `ring` — so rustls refuses to guess and panics on the first `builder()`.
-/// The runtime has the same problem and solves it the same way, in
-/// `vm/tls.rs`; that call is load-bearing rather than defensive, and this is
-/// the evidence.
+/// Two are linked in, because `scarlet_vm` asks for `aws-lc-rs` and `ureq`
+/// brings `ring`. So rustls refuses to guess and panics on the first
+/// `builder()`. The runtime has the same problem and solves it the same way in
+/// `vm/tls.rs`, and this shows that call is needed, not just defensive.
 fn install_provider() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
@@ -124,10 +123,10 @@ fn install_provider() {
 /// Whether the stalled server looks for bytes arriving BEYOND `expect`.
 ///
 /// The read loop below stops at `expect`, so a writer that sent more can never
-/// show up as a larger count on its own — which is what made a duplicated
-/// re-send unobservable from the client side. `Probe` takes the second look.
+/// show up as a larger count on its own. That is why a duplicated re-send was
+/// invisible from the client side. `Probe` takes a second look.
 enum Excess {
-    /// Reply as soon as `expect` bytes are in. For tests whose subject is the
+    /// Reply as soon as `expect` bytes are in. Use this for tests about the
     /// stall, not the byte count.
     Ignore,
     /// Wait [`EXCESS_WINDOW`] for anything after `expect` and fold it into the
@@ -148,8 +147,8 @@ const EXCESS_WINDOW: std::time::Duration = std::time::Duration::from_millis(500)
 ///
 /// The listener carries a small `SO_RCVBUF`, inherited by the accepted socket,
 /// so the writer's window stays small and its socket fills while the peer is
-/// stalled. That is the state the VM's write path is only ever in here — a few
-/// hundred bytes over loopback never fills anything.
+/// stalled. Only this rig puts the VM's write path in that state, because a few
+/// hundred bytes over loopback never fill anything.
 fn spawn_stalled_tls_server(
     leaf: Leaf,
     expect: usize,
@@ -237,8 +236,8 @@ fn spawn_stalled_tls_server(
 const PATTERN: &str = "0123456789abcdef";
 
 /// Accept `n` connections and hang up on each without speaking TLS, so a
-/// client's `tls.handshake` fails the same way `n` times over. Enough
-/// repetitions to warm the Scarlet function around it, which is the point.
+/// client's `tls.handshake` fails the same way `n` times over. The test needs
+/// enough repetitions to warm up the Scarlet function around it.
 fn spawn_hangup_server(n: usize) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().expect("addr").port();
@@ -260,8 +259,8 @@ fn spawn_hangup_server(n: usize) -> u16 {
 /// A line protocol whose parser swallows the ClientHello looks exactly like
 /// this from the client side.
 ///
-/// The accepted stream is parked rather than dropped, and that is the whole rig:
-/// dropping it closes the connection, which fails the handshake promptly and
+/// The rig depends on parking the accepted stream rather than dropping it.
+/// Dropping it closes the connection, which fails the handshake promptly and
 /// tests something else entirely.
 fn spawn_silent_peer() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -333,12 +332,11 @@ fn project_dir(tag: &str) -> PathBuf {
 /// child, or `None` to leave the child with the roots it would ordinarily
 /// have. Returns the exit code and the combined streams.
 ///
-/// Bounded rather than `Command::output()`, which waits forever: one test here
-/// is about a program that used to never end, and a wedge must be one red test
-/// rather than a hung suite. `wait_or_kill` reports a killed child as no exit
-/// code at all, which is the discriminator that test asserts on — a program
-/// that hangs and one that exits having printed nothing are otherwise the same
-/// empty string.
+/// This has a time limit, unlike `Command::output()`, which waits forever. One
+/// test here is about a program that used to never end, and a hang must be one
+/// red test, not a hung suite. `wait_or_kill` reports a killed child as having
+/// no exit code at all, and that test asserts on it. Otherwise a program that
+/// hangs and one that exits without printing give the same empty string.
 fn run_bounded(tag: &str, src: &str, trust: Option<&str>, secs: u64) -> (Option<i32>, String) {
     let dir = project_dir(tag);
     let entry = dir.join("main.sca");
@@ -386,8 +384,8 @@ fn run_program(tag: &str, src: &str, trust: Option<&str>) -> String {
 /// A program that connects and reports the outcome.
 ///
 /// The TCP connect goes to the literal `127.0.0.1` while the certificate is
-/// verified against `localhost`. That split is not a workaround for the test —
-/// it is the reason `handshake` takes the name as its own argument. Connecting
+/// verified against `localhost`. That split isn't a workaround for the test. It
+/// is the reason `handshake` takes the name as its own argument. Connecting
 /// by address and verifying by name is what a connection pool does, and what a
 /// client behind a proxy does. Using `tls.connect('localhost', …)` here would
 /// instead resolve `localhost` to `::1` on this host, where nothing is bound,
@@ -469,9 +467,10 @@ fn an_expired_certificate_is_rejected() {
 #[ignore = "needs the VM"]
 fn a_hostname_mismatch_is_rejected() {
     let ca = make_ca();
-    // Valid, current, and signed by a CA the client trusts — issued for the
-    // wrong name. This is the case a connection pool gets wrong by reusing a
-    // connection under the wrong key, and the only thing that catches it.
+    // The leaf is current and signed by a CA the client trusts, but issued for
+    // the wrong name. A connection pool gets this wrong when it reuses a
+    // connection under the wrong key, and this check is the only thing that
+    // catches it.
     let leaf = make_leaf(&ca, "wrong.example", Validity::Current);
     let port = spawn_tls_server(leaf, "HTTP/1.1 200 OK\r\n\r\n");
 
@@ -499,18 +498,18 @@ fn a_hostname_mismatch_is_rejected() {
 //
 // `ServerName::try_from` parses an IP literal into `ServerName::IpAddress`
 // rather than rejecting it, so rustls checks it against the certificate's IP
-// SANs like any other name. Three comments used to say the opposite — that an
-// address has nothing to verify against and lands on `InvalidServerName` — and
-// nothing in this file could tell the difference, which is why they survived.
-// The pair below is what separates the two stories: same address, same trusted
+// SANs like any other name. Three comments used to say the opposite: that an
+// address has nothing to verify against and lands on `InvalidServerName`.
+// Nothing in this file could tell the difference, so they survived. The pair
+// below tells the two apart. They use the same address and the same trusted
 // issuer, and only the certificate's SAN differs.
 
 #[test]
 #[ignore = "needs the VM"]
 fn an_ip_literal_against_a_certificate_without_it_is_a_hostname_mismatch() {
     let ca = make_ca();
-    // `DNS:localhost` and no IP SAN, so 127.0.0.1 is simply not on this
-    // certificate — the ordinary wrong-name case, reached by an address.
+    // The leaf has `DNS:localhost` and no IP SAN, so 127.0.0.1 isn't on it.
+    // This is the ordinary wrong-name case, reached by an address.
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
     let port = spawn_tls_server(leaf, "HTTP/1.1 200 OK\r\n\r\n");
 
@@ -542,8 +541,8 @@ fn an_ip_literal_against_a_certificate_without_it_is_a_hostname_mismatch() {
 fn an_ip_literal_against_a_matching_ip_san_completes_the_handshake() {
     let ca = make_ca();
     // `CertificateParams::new` sorts a SAN that parses as an address into
-    // `SanType::IpAddress`, so this leaf carries `IP:127.0.0.1` — the class of
-    // certificate a refusal of IP literals would make unusable.
+    // `SanType::IpAddress`, so this leaf carries `IP:127.0.0.1`. Refusing IP
+    // literals would make this kind of certificate unusable.
     let leaf = make_leaf(&ca, "127.0.0.1", Validity::Current);
     let port = spawn_tls_server(leaf, "HTTP/1.1 200 OK\r\n\r\n");
 
@@ -560,8 +559,8 @@ fn an_ip_literal_against_a_matching_ip_san_completes_the_handshake() {
     );
 }
 
-/// The variant keeps a witness: `InvalidServerName` is alive, and this is the
-/// whole of what reaches it — a name that is neither a DNS name nor an address.
+/// This shows `InvalidServerName` is still reachable. The only thing that
+/// reaches it is a name that is neither a DNS name nor an address.
 ///
 /// Only the split `net.connect` + `tls.handshake` form can get here.
 /// `tls.connect` resolves the host first and fails as `Transport(NetError)`
@@ -591,7 +590,7 @@ fn a_name_that_is_neither_dns_nor_address_is_an_invalid_server_name() {
 }
 
 // ---------------------------------------------------------------------------
-// The positive test, so the negatives are not passing by never connecting
+// The positive test, which shows the negatives don't pass by never connecting
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -642,17 +641,17 @@ pub fn main() {{
 /// rather than parking forever. The server stays connected and silent, so
 /// only the deadline timer can wake the parked read.
 ///
-/// The deadline is captured once in Scarlet as an absolute Instant; the VM
-/// re-pushes that same monotonic-ms on every park. A re-run that reset the
-/// clock would still look like a timeout here (one park, then the timer),
-/// so this test witnesses the typed timeout, not the re-run discipline.
+/// Scarlet captures the deadline once as an absolute Instant, and the VM
+/// pushes that same monotonic-ms again on every park. A re-run that reset the
+/// clock would still look like a timeout here (one park, then the timer), so
+/// this test proves the typed timeout, not how re-runs keep the deadline.
 #[test]
 #[ignore = "needs the VM"]
 fn tls_read_within_times_out_as_transport_timed_out() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
-    // Handshake, then sit unread. The client never writes, so the peer never
-    // replies, and the 100 ms deadline is the only wake.
+    // The server handshakes and then never reads. The client never writes, so
+    // the peer never replies, and only the 100 ms deadline can wake the read.
     let port =
         spawn_stalled_tls_server(leaf, 1, std::time::Duration::from_secs(30), Excess::Ignore);
 
@@ -702,20 +701,20 @@ pub fn main() {{
 /// `tls.handshake_within` against a peer that accepts the connection and then
 /// says nothing must hit its deadline as `Transport(TimedOut)`.
 ///
-/// This is the wedge itself, not a proxy for it. `tls.handshake` parks on
-/// readability alone; the peer never becomes readable, so no event and no timer
-/// can wake the process, and the program never ends. The exit code is therefore
-/// asserted as hard as the arm taken — `run_bounded` reports a killed child as
-/// no exit code at all, which is the discriminator between a program that hung
-/// and one that ran and printed nothing.
+/// This is the hang itself, not a stand-in for it. `tls.handshake` parks on
+/// readability alone. The peer never becomes readable, so no event and no timer
+/// can wake the process, and the program never ends. So we assert on the exit
+/// code as firmly as on the arm taken. `run_bounded` reports a killed child as
+/// having no exit code, which tells a program that hung from one that ran and
+/// printed nothing.
 ///
 /// No trust root is installed, and none is needed: the deadline must fire
 /// before a certificate is ever offered. That also keeps the test independent
 /// of the certificate machinery every other test here depends on.
 ///
-/// What it does NOT witness: the deadline surviving a re-run. One park and then
-/// the timer produces this output, and a re-run that reset the clock would look
-/// identical.
+/// It does NOT prove the deadline survives a re-run. One park and then the
+/// timer produces this output, and a re-run that reset the clock would look the
+/// same.
 #[test]
 #[ignore = "needs the VM"]
 fn tls_handshake_within_times_out_against_a_silent_peer() {
@@ -761,11 +760,10 @@ pub fn main() {{
 /// Control for the test above: `tls.handshake_within` against a peer that does
 /// speak TLS completes, and the connection carries bytes afterwards.
 ///
-/// Without this the timeout test is an instrument that cannot fail — a
-/// `handshake_within` hard-wired to return `Transport(TimedOut)` would satisfy
-/// it. The deadline here is 10 s against loopback, generous on purpose: this
-/// arm is about the deadline NOT firing, so it must not become a timing test of
-/// a host that may be busy.
+/// Without this, the timeout test can't fail: a `handshake_within` hard-wired
+/// to return `Transport(TimedOut)` would pass it. The deadline here is 10 s
+/// against loopback, which is generous on purpose. This test is about the
+/// deadline NOT firing, so it mustn't turn into a timing test of a busy host.
 #[test]
 #[ignore = "needs the VM"]
 fn tls_handshake_within_completes_against_a_live_peer() {
@@ -812,25 +810,25 @@ pub fn main() {{
 /// `tls.connect_within` against a listener that never accepts must hit its own
 /// deadline rather than the kernel's.
 ///
-/// This is the witness for the middle of the three steps: a full accept queue
-/// leaves the call inside the TCP connect, so the deadline has to have survived
-/// the resolve and reached `net.connect_addr_until` for this to return early.
+/// This covers the middle of the three steps. A full accept queue leaves the
+/// call inside the TCP connect, so for this to return early the deadline must
+/// have survived the resolve and reached `net.connect_addr_until`.
 ///
-/// The elapsed time is the assertion, not the error variant. Both the bounded
-/// and the unbounded call end in `Transport(TimedOut)` here — the kernel gives
-/// up on its own after `KERNEL_LOOPBACK_FLOOR_MS` — so only *when* it returns
-/// says whose clock produced it. The sibling test in `vm_io.rs` was once
-/// written the other way and passed with its deadline made inert.
+/// We assert on the elapsed time, not the error variant. Both the bounded and
+/// the unbounded call end in `Transport(TimedOut)` here, because the kernel
+/// gives up on its own after `KERNEL_LOOPBACK_FLOOR_MS`. So only *when* it
+/// returns says whose clock produced it. The sibling test in `vm_io.rs` was
+/// once written the other way and passed with its deadline switched off.
 ///
-/// What it does NOT witness: that the three steps share one Instant rather than
-/// a fresh copy each. An IP literal resolves for free and the handshake is
-/// never reached, so only one step spends any of the budget, and any bound
-/// between the two constants produces this output.
+/// It does NOT prove the three steps share one Instant rather than each taking
+/// a fresh copy. An IP literal resolves for free and the handshake is never
+/// reached, so only one step spends any of the budget. Any bound between the
+/// two constants produces this output.
 ///
-/// Portability: this rests on a full accept queue dropping the SYN. A platform
-/// that completes every connect panics inside `full_accept_queue`. A platform
-/// that RSTs instead of dropping returns unmeasurable: the kernel answered,
-/// so the deadline-vs-kernel-floor gap does not exist.
+/// This relies on a full accept queue dropping the SYN. On a platform that
+/// completes every connect, `full_accept_queue` panics. On a platform that
+/// sends RST instead of dropping, we can't measure anything, because the kernel
+/// answered and there is no gap between the deadline and the kernel's floor.
 #[test]
 #[ignore = "needs the VM"]
 fn tls_connect_within_times_out_against_a_peer_that_never_accepts() {
@@ -865,8 +863,8 @@ pub fn main() {{
         Some(0),
         "expected a clean exit; no exit code means it was killed\n--- output ---\n{out}"
     );
-    // Parsed rather than substring-matched, and it panics on a missing line:
-    // an absent number and a slow one must not read the same.
+    // Parse the number rather than match a substring, and panic if the line is
+    // missing, so a missing number and a slow one don't read the same.
     let elapsed_ms: u64 = out
         .lines()
         .find_map(|l| l.trim().strip_prefix("timed-out "))
@@ -885,12 +883,12 @@ pub fn main() {{
 /// `tls.connect_within` against a peer that accepts and then never speaks TLS
 /// must hit its deadline in the handshake.
 ///
-/// This is the witness for the last of the three steps, and its unbounded floor
-/// is not a kernel timer but infinity: `tls.connect` parks on readability alone
-/// against this peer, so a deadline that never reached `handshake_until` leaves
-/// the program to be killed by `run_bounded`. The exit code is therefore
-/// asserted as hard as the elapsed time — a killed child has no exit code at
-/// all, which is what separates a wedge from a program that printed nothing.
+/// This covers the last of the three steps. Without a deadline it waits
+/// forever, not until a kernel timer: `tls.connect` parks on readability alone
+/// against this peer. So a deadline that never reached `handshake_until` leaves
+/// `run_bounded` to kill the program. That's why we assert on the exit code as
+/// firmly as on the elapsed time. A killed child has no exit code at all, which
+/// tells a hang from a program that printed nothing.
 ///
 /// No trust root is installed and none is needed: the deadline must fire before
 /// a certificate is ever offered.
@@ -940,15 +938,15 @@ pub fn main() {{
     );
 }
 
-/// Control for the two tests above, and the only test of `connect_until`'s own
-/// signature: an absolute deadline the connection comfortably beats completes,
-/// and the connection carries bytes afterwards.
+/// This is the control for the two tests above, and the only test of
+/// `connect_until`'s own signature. A connection that easily beats an absolute
+/// deadline completes, and carries bytes afterwards.
 ///
-/// Without this the timeout tests are instruments that cannot fail — a
-/// `connect_within` hard-wired to return `Transport(TimedOut)`, or one whose
-/// resolve step rejected every host, would satisfy both. The deadline is 10 s
-/// against loopback, generous on purpose: this arm is about the deadline NOT
-/// firing, so it must not become a timing test of a host that may be busy.
+/// Without this, the timeout tests can't fail. A `connect_within` hard-wired to
+/// return `Transport(TimedOut)`, or one whose resolve step rejected every host,
+/// would pass both. The deadline is 10 s against loopback, which is generous on
+/// purpose. This test is about the deadline NOT firing, so it mustn't turn into
+/// a timing test of a busy host.
 ///
 /// The certificate carries `IP:127.0.0.1` because `connect_until` verifies
 /// against the same string it connects to. `localhost` cannot be used here: it
@@ -1060,9 +1058,9 @@ pub fn main() {{
     );
 }
 
-/// Control: the same `client.secure` + `send_until` path returns a response
-/// the peer does send. A red hang test next to this is a deadline, not a
-/// broken HTTPS client.
+/// This is the control: the same `client.secure` + `send_until` path returns a
+/// response the peer does send. If the hang test is red and this one passes,
+/// the deadline is broken, not the HTTPS client.
 #[test]
 #[ignore = "needs the VM"]
 fn https_send_until_returns_a_response() {
@@ -1164,10 +1162,10 @@ pub fn main() {{
 
 /// The cleartext handle is stale once the connection has been secured.
 ///
-/// This is the runtime half of the guarantee whose compile-time half is that
-/// `Socket` and `TlsSocket` are different types: `tls.handshake` re-keys the
-/// connection, so a caller holding the `Socket` it passed in cannot go around
-/// the encryption with it.
+/// The type checker keeps `Socket` and `TlsSocket` apart, and this is the
+/// runtime half of that guarantee. `tls.handshake` re-keys the connection, so a
+/// caller holding the `Socket` it passed in can't use it to get round the
+/// encryption.
 #[test]
 #[ignore = "needs the VM"]
 fn the_cleartext_handle_is_dead_after_an_upgrade() {
@@ -1218,30 +1216,30 @@ pub fn main() {{
 ///
 /// `NativeTable::WARM_CALLS` is 8, so the ninth call to a function runs
 /// natively and every opcode in its body goes through `native_shims`'
-/// dispatchers instead of the interpreter's own match. The TLS opcodes
-/// were classified there — `TlsHandshake`, `TlsRead`, `TlsReadUntil` and
-/// `TlsWrite` as `Park`, `TlsClose` as `Bridge` — and given an arm in
-/// NEITHER dispatcher, so the ninth call fell through to `proof_violation`
-/// and killed the program with `internal invariant violated: run_park_op
-/// on an op is_native_park_op excludes (compiler bug)`.
+/// dispatchers instead of the interpreter's own match. The TLS opcodes were
+/// classified there (`TlsHandshake`, `TlsRead`, `TlsReadUntil` and `TlsWrite`
+/// as `Park`, `TlsClose` as `Bridge`) but given an arm in NEITHER dispatcher.
+/// So the ninth call fell through to `proof_violation` and killed the program
+/// with `internal invariant violated: run_park_op on an op is_native_park_op
+/// excludes (compiler bug)`.
 ///
 /// Nothing caught it because every other test in this file calls TLS from the
 /// top level of `main`, which is interpreted and never warms. The standard
-/// library does not have that luxury: `tls.read_exact` recurses through
-/// `read_exact_loop`, and `tls.connect` calls `handshake` from inside a
-/// function body. A program that read a connection in a loop for nine
-/// iterations would have died.
+/// library can't avoid it: `tls.read_exact` recurses through `read_exact_loop`,
+/// and `tls.connect` calls `handshake` from inside a function body. A program
+/// that read a connection in a loop for nine iterations would have died.
 ///
-/// Each of the five is called TWELVE times, which is what makes this a test of
-/// the dispatch rather than of TLS: three past the threshold, and the outcome
-/// asserted is only that the program finished and reported typed results.
+/// We call each of the five TWELVE times, three past the threshold. That makes
+/// this a test of the dispatch rather than of TLS, and we only assert that the
+/// program finished and reported typed results.
 #[test]
 #[ignore = "needs the VM"]
 fn a_tls_op_survives_the_function_around_it_being_compiled() {
     const REPS: usize = 12;
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
-    // Twelve 16-byte writes; the peer drains them all and reports.
+    // The client makes twelve 16-byte writes, and the peer drains them all and
+    // reports.
     let expect = PATTERN.len() * REPS;
     let port = spawn_stalled_tls_server(leaf, expect, std::time::Duration::ZERO, Excess::Ignore);
     let dead = spawn_hangup_server(REPS);
@@ -1359,8 +1357,8 @@ pub fn main() {{
         out.contains(&format!("wrote {REPS}")),
         "all {REPS} writes must complete, got:\n{out}"
     );
-    // The peer's whole reply, a byte per `tls.read`, then end of stream: the
-    // reply is shorter than `REPS`, so the last reads see `Closed`.
+    // The reads get the peer's whole reply, a byte per `tls.read`, then end of
+    // stream. The reply is shorter than `REPS`, so the last reads see `Closed`.
     let reply_len = format!("got:{expect}:ok").len();
     assert!(
         out.contains(&format!("read back {reply_len}")),
@@ -1375,35 +1373,33 @@ pub fn main() {{
 /// `tls.write` against a peer that has stopped reading parks and resumes, and
 /// every byte arrives exactly once and in order.
 ///
-/// This is the VM half of the flush guarantee. The mechanism itself —
-/// `drain_and_flush` answering `Flushing` rather than `Done` while the session
-/// still owes ciphertext — is asserted in `vm::tls::tests`, where the returned
-/// value can be read directly. What this covers is what the VM does with it:
+/// This is the VM half of the flush guarantee. `vm::tls::tests` checks the
+/// mechanism itself, where it can read the returned value directly:
+/// `drain_and_flush` answers `Flushing` rather than `Done` while the session
+/// still owes ciphertext. This test covers what the VM does with that.
 /// `tls_write`'s `Flushing` arm parks at `bytes.len()`, so the re-run carries an
-/// EMPTY tail and only finishes the flush. A wedged re-run shows up here as no
+/// EMPTY tail and only finishes the flush. A stuck re-run shows up here as no
 /// exit code at all.
 ///
-/// The duplication half rests entirely on [`Excess::Probe`]. Every write sends
-/// the same repeating 16-byte [`PATTERN`], so a duplicated re-send is
-/// byte-identical to a correct stream and no content assertion can separate the
-/// two — the only surviving observable is the COUNT, and a server that stops
-/// reading at `expect` cannot report one that is too large. Without the probe
-/// this test passes against a VM that re-sends the whole payload on every
-/// `Flushing` park.
+/// Catching duplication depends entirely on [`Excess::Probe`]. Every write
+/// sends the same repeating 16-byte [`PATTERN`], so a duplicated re-send is
+/// byte-identical to a correct stream and no content check can tell them apart.
+/// Only the COUNT differs, and a server that stops reading at `expect` can't
+/// report one that is too large. Without the probe this test passes against a
+/// VM that re-sends the whole payload on every `Flushing` park.
 ///
-/// The write is a LOOP of chunks rather than one big binary, and that is
-/// load-bearing in two directions at once. Each chunk is under rustls's 64 KiB
-/// send-buffer limit, so the session accepts it whole and `drain_write` reaches
-/// `Done` — the only way out other than `Done` is then the flush. And the loop
-/// is what fills the socket at all: this host's send buffer takes 1.79 MB
-/// before it refuses a byte, which no single write under the 64 KiB limit could
-/// ever reach.
+/// The write is a LOOP of chunks rather than one big binary, for two reasons.
+/// Each chunk is under rustls's 64 KiB send-buffer limit, so the session
+/// accepts it whole and `drain_write` reaches `Done`, which leaves the flush as
+/// the only other way out. And only the loop fills the socket at all: this
+/// host's send buffer takes 1.79 MB before it refuses a byte, which no single
+/// write under the 64 KiB limit could reach.
 #[test]
 #[ignore = "needs the VM"]
 fn a_large_tls_write_parks_and_resumes_without_duplicating_a_byte() {
-    // 16 << 11 = 32 KiB per write, under rustls's 64 KiB limit; 96 of them is
-    // 3 MiB, comfortably past a loopback socket's capacity with the peer's
-    // receive window pinned small.
+    // Each write is 16 << 11 = 32 KiB, under rustls's 64 KiB limit. 96 of them
+    // make 3 MiB, well past a loopback socket's capacity when the peer's
+    // receive window is pinned small.
     const DOUBLINGS: u32 = 11;
     const WRITES: usize = 96;
     let chunk = PATTERN.len() << DOUBLINGS;
@@ -1490,25 +1486,25 @@ pub fn main() {{
 
 /// An upgrade must not orphan a process already parked on the cleartext id.
 ///
-/// `tls.handshake` re-keys the connection under a new id, and it takes the old
+/// `tls.handshake` re-keys the connection under a new id. It takes the old
 /// entry out WITHOUT `evict_connection` on purpose, so the fd survives into the
 /// TLS entry instead of being torn down. But a park names an ID, not an fd, and
 /// `evict_connection` is also what fails the parks on an id that has gone away.
-/// A sibling parked in `socket.read` when the upgrade happens is then waiting on
-/// an id that nothing can ever resolve — no readiness event, because the fd is
-/// registered under the new id; no eviction, because the entry left by another
-/// door; and no owner death, because `release_connections_of` skips an id with
-/// no entry. The program ends only when every process does, so it never ends.
+/// So a sibling parked in `socket.read` during the upgrade waits on an id that
+/// nothing can ever resolve. No readiness event comes, because the fd is
+/// registered under the new id. No eviction comes, because the entry left some
+/// other way. And no owner death comes, because `release_connections_of` skips
+/// an id with no entry. The program ends only when every process does, so it
+/// never ends.
 ///
-/// STARTTLS and a proxied `CONNECT` are the shapes this module advertises, and
-/// they are exactly the ones where a reader is most likely to be parked
-/// already.
+/// This module is meant for STARTTLS and proxied `CONNECT`, and those are
+/// exactly the cases where a reader is most likely to be parked already.
 ///
-/// The assertion is on the program EXITING, and on the sibling reaching the
-/// same gone-socket error `socket.close` gives it. The handshake's own outcome
-/// is deliberately not asserted: it is the hang that is the defect, and it
-/// happens whether the handshake succeeds or fails — the failure path evicts
-/// the NEW id, which is not the one the sibling is on.
+/// We assert that the program EXITS, and that the sibling gets the same
+/// gone-socket error `socket.close` gives it. We deliberately don't assert on
+/// the handshake's own outcome. The bug is the hang, and it happens whether the
+/// handshake succeeds or fails, because the failure path evicts the NEW id, not
+/// the one the sibling is on.
 #[test]
 #[ignore = "needs the VM"]
 fn an_upgrade_wakes_a_sibling_parked_on_the_cleartext_id() {
@@ -1582,7 +1578,7 @@ fn a_plaintext_peer_is_a_protocol_error() {
         if let Ok((mut sock, _)) = listener.accept() {
             let mut buf = [0u8; 1024];
             let _ = sock.read(&mut buf);
-            // An HTTP server's answer to a ClientHello: not TLS at all.
+            // This is how an HTTP server answers a ClientHello, which isn't TLS.
             let _ = sock.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n");
         }
     });

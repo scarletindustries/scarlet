@@ -1,4 +1,4 @@
-// See src/lib.rs: panicking accessors are banned in non-test code.
+// Like src/lib.rs, this bans panicking accessors outside tests.
 #![cfg_attr(
     not(test),
     deny(
@@ -64,8 +64,8 @@ enum Commands {
 #[derive(Args)]
 struct DisArgs {
     entrypoint: String,
-    /// Every function, from any module, whose name contains this. Without it
-    /// only this file's functions and toplevel are printed.
+    /// Print every function from any module whose name contains NAME. Without it, only this
+    /// file's functions and toplevel are printed.
     #[arg(long = "fn", value_name = "NAME")]
     only: Option<String>,
 }
@@ -83,8 +83,8 @@ struct RunArgs {
 
 #[derive(Args)]
 struct LintArgs {
-    /// Paths to survey (default: the working directory). Taken as given, so
-    /// this can be pointed at another `.sca` corpus.
+    /// Paths to survey (default: the working directory). They're used as given, so you can point
+    /// this at another `.sca` corpus.
     paths: Vec<PathBuf>,
     /// Report constructors carrying at least this many `Bool` fields.
     #[arg(
@@ -96,8 +96,8 @@ struct LintArgs {
     min_bools: usize,
 }
 
-/// Below the floor every constructor with a `Bool` qualifies, so the census
-/// would report its own corpus back rather than a shape worth reading.
+/// Below the floor every constructor with a `Bool` would qualify, so the census would print its
+/// corpus back instead of shapes worth reading.
 fn parse_min_bools(text: &str) -> Result<usize, String> {
     match text.parse::<usize>() {
         Ok(n) if n >= lint::DEFAULT_MIN_BOOLS => Ok(n),
@@ -106,7 +106,7 @@ fn parse_min_bools(text: &str) -> Result<usize, String> {
     }
 }
 
-/// What `al fmt` does with each file it formatted.
+/// What `scarlet fmt` does with each file it formats.
 #[derive(Clone, Copy)]
 enum FileAction {
     /// Rewrite the file, when formatting changed it.
@@ -117,13 +117,12 @@ enum FileAction {
     Check,
 }
 
-/// What `al fmt` was pointed at, and what to do with it.
+/// What `scarlet fmt` was pointed at, and what to do with it.
 ///
-/// The three flags that select these are mutually exclusive, so the parse
-/// boundary is the last place a combination of them can be expressed:
-/// [`FmtArgs::target`] is what `cmd_fmt` reads. `--stdin --stdout` used to
-/// parse and then silently ignore `--stdout`, and `path` was only excluded
-/// alongside `--stdin` by a clap attribute; neither has a spelling here.
+/// The three flags that pick these are mutually exclusive, so parsing is the last place a mix of
+/// them can exist, and `cmd_fmt` reads only [`FmtArgs::target`]. `--stdin --stdout` used to
+/// parse and then silently ignore `--stdout`, and only a clap attribute kept `path` away from
+/// `--stdin`. Neither can be written here.
 enum FmtTarget {
     /// `--stdin`: format stdin and print the result. Takes no path.
     Stdin,
@@ -140,10 +139,9 @@ struct FmtArgs {
     debug: bool,
 }
 
-/// Hand-written because `FmtArgs` holds [`FmtTarget`] rather than one bool per
-/// flag, which no `#[derive(Args)]` spelling produces. The `Command` this
-/// builds is what `--help` and `scarlet man` render, so each arg keeps its
-/// help text.
+/// We write this by hand because `FmtArgs` holds a [`FmtTarget`] instead of one bool per flag,
+/// and no `#[derive(Args)]` spelling produces that. `--help` and `scarlet man` render the
+/// `Command` this builds, so each arg keeps its help text.
 impl clap::FromArgMatches for FmtArgs {
     fn from_arg_matches(m: &clap::ArgMatches) -> Result<Self, clap::Error> {
         let target = if m.get_flag("stdin") {
@@ -208,8 +206,8 @@ impl Args for FmtArgs {
     }
 }
 
-/// Resolve a diagnostic's module provenance to (path, text) so it renders
-/// against the file its span actually points into.
+/// Finds the path and text of the module a diagnostic came from, so it renders against the file
+/// its span actually points into.
 fn resolve_diagnostic_source(key: &scarlet::module::ModuleKey) -> Option<(PathBuf, String)> {
     let path: scarlet::module::ModulePath = key.as_str().split('/').map(str::to_string).collect();
     match scarlet::module::resolve_canonical(&path).ok()?.source {
@@ -223,7 +221,7 @@ fn resolve_diagnostic_source(key: &scarlet::module::ModuleKey) -> Option<(PathBu
     }
 }
 
-/// Print diagnostics (if any) and exit when `fail` is set.
+/// Prints any diagnostics, then exits if there were some and `fail` is set.
 fn report(diagnostics: &[diagnostic::Diagnostic], fail: bool, file: &str, entrypoint: &str) {
     if !diagnostics.is_empty() {
         diagnostic::print_diagnostics(diagnostics, file, entrypoint, &resolve_diagnostic_source);
@@ -252,8 +250,8 @@ fn compile_source(
 ) -> bytecode::CompileResult {
     let path = Path::new(entrypoint);
     let base_dir = path.parent();
-    // Editing the Scarlet repo's own stdlib: analyse as that module so `@vm` and
-    // external are permitted and prelude self-redefinition is suppressed.
+    // A file in the Scarlet repo's own stdlib is checked as that module, so `@vm` and external
+    // are allowed and the prelude isn't reported for redefining itself.
     let result = match scarlet::module::detect_stdlib_module(path) {
         Some(m) => bytecode::check_as_module(expr, base_dir, m),
         None => f(expr, base_dir),
@@ -287,7 +285,7 @@ fn find_scarlet_files(path: &str) -> io::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-/// Spans are 0-indexed; `fmt` output is 1-indexed for both files and stdin.
+/// Spans are 0-indexed, but `fmt` prints 1-indexed positions for both files and stdin.
 fn render_fmt_diagnostic(path: impl std::fmt::Display, d: &diagnostic::Diagnostic) -> String {
     let line = d.span.start_line + 1;
     let col = d.span.start_column + 1;
@@ -323,9 +321,9 @@ fn read_file_or_die(path: &str) -> String {
 }
 
 fn main() -> process::ExitCode {
-    // clap is the parser and command model only; `scarlet::cli` renders all
-    // help/version/error/man output. The meta flags are intercepted before clap
-    // so they work without satisfying required args (`scarlet run --help`).
+    // clap only parses and holds the command model, and `scarlet::cli` renders all help, version,
+    // error and man output. We catch the meta flags before clap sees them, so they work without
+    // the required args (`scarlet run --help`).
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let cmd = Cli::command();
 
@@ -400,7 +398,7 @@ fn main() -> process::ExitCode {
             compile_source(&expr, &file, &entrypoint, bytecode::check);
         }
         Some(Commands::Build { entrypoint }) => {
-            eprintln!("warning: `al build` is deprecated; use `al fmt --stdout <file>`");
+            eprintln!("warning: `scarlet build` is deprecated; use `scarlet fmt --stdout <file>`");
             cmd_fmt(FmtArgs {
                 target: FmtTarget::Files {
                     path: Some(entrypoint),
@@ -427,10 +425,9 @@ fn main() -> process::ExitCode {
     process::ExitCode::SUCCESS
 }
 
-/// The `.sca` illegal-state census. It prints what the corpus contains and
-/// exits 0 either way — `scarlet_core::lint`'s module doc carries the
-/// measurement behind this being a command you run rather than a warning the
-/// compiler emits by default.
+/// Runs the `.sca` illegal-state census. It prints what the corpus contains and exits 0 either
+/// way. `scarlet_core::lint`'s module doc has the measurement that explains why this is a command
+/// you run and not a warning the compiler gives by default.
 fn cmd_lint(args: LintArgs) {
     let roots = if args.paths.is_empty() {
         vec![PathBuf::from(".")]
@@ -465,9 +462,8 @@ fn cmd_run(args: RunArgs) {
     let host = scarlet_vm::Host::of_this_process(argv);
     let mut out = io::BufWriter::new(io::stdout().lock());
     let outcome = scarlet_vm::run(&program, &host, &mut out);
-    // Flushed before any message, so the program's own output comes first. A
-    // flush that fails is the reader leaving, like a pipe into `head`, which
-    // is not a failure of the program.
+    // Flush before printing any message, so the program's own output comes first. A failed flush
+    // means the reader has left, like a pipe into `head`, and the program hasn't failed.
     let _ = out.flush();
     if let Err(stop) = outcome
         && let Some(why) = scarlet::stop::message(&stop)
@@ -476,8 +472,8 @@ fn cmd_run(args: RunArgs) {
     }
 }
 
-/// `al fmt --stdin`: format stdin and print the result. Separate from the file
-/// walk because there is no file to write back to, check, or name in an error.
+/// Formats stdin and prints the result, for `scarlet fmt --stdin`. It's separate from the file
+/// walk because there's no file to write back to, check, or name in an error.
 fn fmt_stdin(debug: bool) {
     let mut content = String::new();
     if let Err(e) = io::stdin().read_to_string(&mut content) {
@@ -604,7 +600,7 @@ fn cmd_fmt(args: FmtArgs) {
     }
 }
 
-/// Why `al upgrade` failed. Rendered once, by `die`.
+/// Why `scarlet upgrade` failed. Only `die` prints it.
 enum UpgradeError {
     UnsupportedOs,
     LocateExe(std::io::Error),
@@ -662,8 +658,8 @@ fn cmd_upgrade(version: Option<String>) -> Result<(), UpgradeError> {
     };
 
     let asset_name = format!("scarlet-{os_name}-{arch}");
-    // Download next to the target so the rename is same-device; temp_dir is
-    // often tmpfs on Linux, which fails with EXDEV.
+    // Download next to the target so the rename stays on one device. temp_dir is often tmpfs on
+    // Linux, where the rename would fail with EXDEV.
     let tmp_path = current_exe.with_extension("new");
     let download_url = format!(
         "https://github.com/scarletindustries/language/releases/download/{tag}/{asset_name}"

@@ -1,7 +1,8 @@
-//! End-to-end VM execution coverage: opcodes only reachable through real
-//! `scan -> parse -> typecheck -> compile -> run` programs that the golden
-//! examples don't already exercise. Each test pins a *discriminating* output so
-//! a regression in the targeted opcode (not just "it ran") is caught.
+//! These tests run the VM end to end. They cover opcodes that only real
+//! `scan -> parse -> typecheck -> compile -> run` programs reach, and that the
+//! golden examples don't already exercise. Each test checks an output that only
+//! a working opcode gives, so we catch a regression in that opcode, not just
+//! "it ran".
 
 mod common;
 use common::run_outputs;
@@ -35,10 +36,10 @@ run_case! {
         "negative\nzero\nbig 500\npositive\n1\n42\n9\n",
     ),
 
-    // `_` separators in number literals are spelling only: the same value in
-    // expressions, in patterns (which must also match their plain spelling —
-    // exhaustiveness keys on the digits, so `1_000` and `1000` are one arm),
-    // and in floats.
+    // `_` separators in number literals only change the spelling. They give
+    // the same value in expressions, in floats and in patterns. A pattern must
+    // also match its plain spelling, because exhaustiveness keys on the digits,
+    // so `1_000` and `1000` are one arm.
     digit_separators: (
         "pub fn main() {\n\
          \tprintln(1_000_000 + 1)\n\
@@ -52,9 +53,9 @@ run_case! {
     ),
 
     // `range[i] or default` lowers to `Op::Index` plus an Option match. The golden
-    // examples only index arrays (`numbers[0] or 0`); a lazy Range scrutinee takes
-    // a distinct arm inside `Op::Index` (`range_elem` instead of `Seq::get`).
-    // In-bounds yields the element; out-of-bounds yields the recovery value.
+    // examples only index arrays (`numbers[0] or 0`). A lazy Range scrutinee takes
+    // a different arm inside `Op::Index` (`range_elem` instead of `Seq::get`). An
+    // index in bounds gives the element, and one out of bounds gives the default.
     range_index_or_else: (
         "pub fn main() {\n\
          \tr = 5..10\n\
@@ -77,7 +78,7 @@ run_case! {
     ),
 
     // `range[a..b]` lowers to `ArraySlice`. The Range arm keeps the result lazy
-    // (`rs+start .. rs+end`) rather than materialising, so the slice of `5..10` at
+    // (`rs+start .. rs+end`) rather than building an array, so the slice of `5..10` at
     // `[1..3]` is `Ok([6, 7])`, and one past the end is `Err(Nil)`.
     range_slice: (
         "pub fn main() {\n\
@@ -90,7 +91,7 @@ run_case! {
 
     // Matching a Range value against an array pattern `[h, ..t]` drives `Op::ElemAt`
     // (head) and `Op::SeqDrop` (tail) on a Range, not an Array. `SeqDrop` on a Range stays
-    // O(1) (`s+n .. e`); reconstructing `[h, ..t]` must reproduce the full sequence.
+    // O(1) (`s+n .. e`), and rebuilding `[h, ..t]` must give back the full sequence.
     match_range_with_array_pattern: (
         "pub fn main() {\n\
          \tr = 0..5\n\
@@ -109,7 +110,7 @@ run_case! {
     ),
 
     // A polymorphic unary minus (`fn n(x) { -x }` with `x` left generic, constrained
-    // only `Numeric`) compiles to the *unspecialized* `Op::Neg`, which dispatches on
+    // only `Numeric`) compiles to the *unspecialised* `Op::Neg`, which dispatches on
     // the runtime tag. The same compiled function must negate an Int and a Float,
     // preserving the IEEE sign for the float.
     generic_unary_neg_dispatches_on_runtime_tag: (
@@ -123,8 +124,8 @@ run_case! {
     ),
 
     // A top-level function passed *as a value* to another function (not called
-    // directly) emits `Op::PushSelf` at the self-reference site. `down` hands itself
-    // to `step`, which invokes the callback — exercising the capture-free PushSelf
+    // directly) emits `Op::PushSelf` where it names itself. `down` hands itself to
+    // `step`, which calls the callback. That exercises the capture-free PushSelf
     // fast path (the cached closure clone) plus an indirect `Op::Call`.
     recursive_fn_passed_as_value: (
         "fn step(f fn(Int) Int, n Int) Int {\n\
@@ -151,7 +152,7 @@ run_case! {
         "[a, b, c]\n[a, , b, ]\n[nodelim]\n",
     ),
 
-    // `values_equal`'s Binary arm: compare structurally, byte for byte.
+    // `values_equal`'s Binary arm compares structurally, byte for byte.
     binary_value_equality: (
         "pub fn main() {\n\
          \tprintln(<<1, 2, 3>> == <<1, 2, 3>>)\n\
@@ -172,7 +173,7 @@ run_case! {
         "3.5\n0.0\n-3.0\n",
     ),
 
-    // `Op::Index` yields `Option`: `None` out of bounds, not a wrap or panic.
+    // `Op::Index` returns an `Option`, with `None` out of bounds, not a wrap or panic.
     array_index_yields_option: (
         "pub fn main() {\n\
          \txs = [10, 20, 30]\n\
@@ -182,9 +183,9 @@ run_case! {
         "Some(20)\nNone\n",
     ),
 
-    // A capturing closure naming itself in value position takes `PushSelf`'s
-    // capture-carrying branch: rebuild from the live frame, not from the
-    // cached capture-free closure, so the recursion still sees `base`.
+    // A capturing closure that names itself as a value takes `PushSelf`'s
+    // capture-carrying branch. That branch rebuilds it from the live frame, not
+    // from the cached capture-free closure, so the recursion still sees `base`.
     capturing_self_referential_closure: (
         "fn apply(f fn(Int) Int, n Int) Int { f(n) }\n\
          fn make(base Int) Int {\n\
@@ -212,11 +213,11 @@ run_case! {
         "Seg {\n  a: Point{ x: 1, y: 2 },\n  b: Point{ x: 3, y: 4 }\n}\n[\n  [1, 2],\n  [3, 4]\n]\n",
     ),
 
-    // Or-pattern alternatives are one logical binding: every alternative must
-    // store into the same slot the arm body reads. Pinned on the first,
-    // middle, and last alternative, both as a function's tail expression and
-    // as a binding's initialiser in `main`'s body (the two ways an arm's slot
-    // gets allocated).
+    // Or-pattern alternatives make one logical binding, so every alternative
+    // must store into the same slot the arm body reads. We check the first,
+    // middle and last alternative, both as a function's tail expression and
+    // as a binding's initialiser in `main`'s body. Those are the two ways an
+    // arm's slot gets allocated.
     or_pattern_binds_same_slot_in_every_alternative: (
         "type Shape {\n\
          \tCircle(r Int)\n\
@@ -244,8 +245,8 @@ run_case! {
         "3\n4\n5\n7\n8\n",
     ),
 
-    // Op::BinIndexOf: `from` is clamped into range and an empty needle matches
-    // at the clamped start.
+    // In Op::BinIndexOf, `from` is clamped into range and an empty needle
+    // matches at the clamped start.
     binary_index_of: (
         "import scarlet/binary\n\
          pub fn main() {\n\
@@ -294,7 +295,7 @@ run_case! {
         "Ok(42)\nOk(0)\nOk(-42)\nOk(42)\nOk(7)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nOk(9223372036854775808)\nOk(-9223372036854775808)\nOk(9223372036854775807)\n",
     ),
 
-    // Op::BinEqIgnoreAsciiCase: ASCII-case-insensitive header-name matching.
+    // Op::BinEqIgnoreAsciiCase matches header names, ignoring ASCII case.
     binary_eq_ignore_ascii_case: (
         "import scarlet/binary\n\
          pub fn main() {\n\
@@ -305,7 +306,7 @@ run_case! {
         "True\nFalse\n",
     ),
 
-    // Op::BinToAsciiLower: non-letter bytes pass through.
+    // Op::BinToAsciiLower passes non-letter bytes through.
     binary_to_ascii_lower: (
         "import scarlet/binary\n\
          pub fn main() {\n\
@@ -314,7 +315,7 @@ run_case! {
         "Ok(abc-123)\n",
     ),
 
-    // Op::BinFromIntAscii: radix 10/16, lowercase hex, zero and negatives.
+    // Op::BinFromIntAscii with radix 10 and 16, lowercase hex, zero and negatives.
     binary_from_int_ascii: (
         "import scarlet/binary\n\
          pub fn main() {\n\
@@ -328,16 +329,16 @@ run_case! {
     ),
 }
 
-// Closure capture of an enclosing function's local — the `PushCapture` /
-// `MakeClosure(capture_count > 0)` path. Distinct from capturing a module
-// global (U22 in unsound.rs), which resolves to `PushGlobal`. Here the
-// captured binding lives only in the outer call's frame, so it must be
-// materialized into the closure at `MakeClosure` time.
+// A closure that captures a local of the enclosing function takes the
+// `PushCapture` / `MakeClosure(capture_count > 0)` path. That is different from
+// capturing a module global (U22 in unsound.rs), which resolves to
+// `PushGlobal`. Here the captured binding lives only in the outer call's frame,
+// so `MakeClosure` must copy it into the closure.
 
 #[test]
 fn closure_captures_enclosing_function_local() {
-    // Two closures over distinct captures: a shared or global slot would make
-    // both print the last `x` written.
+    // Two closures capture different values. A shared or global slot would
+    // make both print the last `x` written.
     run_outputs(
         "fn make_adder(x Int) fn(Int) Int {\n\
          \tfn(y Int) x + y\n\
@@ -354,8 +355,8 @@ fn closure_captures_enclosing_function_local() {
 
 #[test]
 fn closure_captures_multiple_enclosing_locals() {
-    // Two captures: `MakeClosure(capture_count = 2)` plus `PushCapture` at
-    // indices 0 and 1, read back in order.
+    // Two captures give `MakeClosure(capture_count = 2)`, plus `PushCapture`
+    // at indices 0 and 1, read back in order.
     run_outputs(
         "fn make_affine(a Int, b Int) fn(Int) Int {\n\
          \tfn(x Int) a * x + b\n\
@@ -372,7 +373,8 @@ fn closure_captures_multiple_enclosing_locals() {
 
 #[test]
 fn closure_captures_non_parameter_local() {
-    // `base` is a let-binding rather than a parameter, still `PushCapture`.
+    // `base` is a let-binding rather than a parameter, but still uses
+    // `PushCapture`.
     run_outputs(
         "fn counter_from(start Int) fn(Int) Int {\n\
          \tbase = start * 100\n\
@@ -407,8 +409,8 @@ fn and_or_short_circuit_skips_rhs() {
 
 #[test]
 fn and_or_evaluate_rhs_when_lhs_undecided() {
-    // Control for `and_or_short_circuit_skips_rhs`: the LHS does not decide
-    // the result, so the RHS must run and `loud` must print.
+    // This is the control for `and_or_short_circuit_skips_rhs`. The LHS doesn't
+    // decide the result, so the RHS must run and `loud` must print.
     run_outputs(
         "fn loud(b Bool) Bool {\n\
          \tprintln('evaluated')\n\
@@ -422,15 +424,15 @@ fn and_or_evaluate_rhs_when_lhs_undecided() {
     );
 }
 
-// `==`/`!=` over Ints lower to `Op::EqInt`/`Op::NeqInt`; over anything else to
-// the generic structural `Op::Eq`/`Op::Neq`. Elsewhere the suite only asserts
-// Int `==` and discards `!=` results, and the generic `Op::Eq` is exercised
-// only inside the match matcher.
+// `==`/`!=` over Ints lower to `Op::EqInt`/`Op::NeqInt`, and over anything else
+// to the generic structural `Op::Eq`/`Op::Neq`. Elsewhere the suite only checks
+// Int `==` and throws away `!=` results, and only the match matcher exercises
+// the generic `Op::Eq`.
 
 #[test]
 fn neq_on_int_and_enum() {
-    // Both directions per opcode, so an always-true, always-false, or
-    // accidental-`==` lowering flips exactly one line.
+    // Test both directions per opcode, so a lowering that is always true,
+    // always false or wrongly `==` flips exactly one line.
     run_outputs(
         "type C {\n\tGood(v String)\n\tBad(v String)\n}\n\
          pub fn main() {\n\
@@ -445,8 +447,8 @@ fn neq_on_int_and_enum() {
 
 #[test]
 fn eq_on_string_array_tuple() {
-    // Generic `Op::Eq` as a value-producing expression over each compound
-    // kind, both directions.
+    // Use the generic `Op::Eq` as an expression over each compound kind, in
+    // both directions.
     run_outputs(
         "pub fn main() {\n\
          \tprintln('ab' == 'ab')\n\
@@ -460,15 +462,15 @@ fn eq_on_string_array_tuple() {
     );
 }
 
-// Type-directed opcodes and their dynamic fallbacks. The compiler picks a
-// specialized opcode when `engine.find(ty)` resolves at emit time and falls
-// back to the tag-dispatching generic op when it stays a `Var`. Each pair
-// below drives one operation through both halves; they must agree, so a bug in
-// either flips exactly one test.
+// These test type-directed opcodes and their dynamic fallbacks. The compiler
+// picks a specialised opcode when `engine.find(ty)` resolves at emit time, and
+// falls back to the generic op that dispatches on the tag when it stays a
+// `Var`. Each pair below drives one operation through both halves. They must
+// agree, so a bug in either flips exactly one test.
 
 run_case! {
-    // Both directions per op, so an always-True, always-False, or
-    // operand-swapped implementation flips exactly one line.
+    // Test both directions per op, so an implementation that is always True,
+    // always False or swaps its operands flips exactly one line.
     typed_int_ordering_compares: (
         "pub fn main() {\n\
          \tprintln(1 < 2)\n\
@@ -483,8 +485,8 @@ run_case! {
         "True\nFalse\nTrue\nFalse\nTrue\nFalse\nTrue\nFalse\n",
     ),
 
-    // As above for Float. The `<=`/`>=` lines use equal operands, so a
-    // strict-compare mislowering fails them.
+    // The same for Float. The `<=`/`>=` lines use equal operands, so lowering
+    // them to a strict compare fails them.
     typed_float_ordering_compares: (
         "pub fn main() {\n\
          \tprintln(1.5 < 2.5)\n\
@@ -500,7 +502,7 @@ run_case! {
     ),
 
     // A `Numeric`-constrained wrapper leaves the operand type unbound at emit
-    // time, so the four bodies compile to the generic ops and must serve both
+    // time. So the four bodies compile to the generic ops and must serve both
     // Int and Float callers, agreeing with the typed cases line for line.
     generic_ordering_compare_dispatches_on_runtime_tag: (
         "fn lt(a, b) { a < b }\n\
@@ -537,8 +539,8 @@ run_case! {
         "7\n-2\n",
     ),
 
-    // `Op::TailCallKnown`. At n = 200_000 a frame-pushing lowering overflows
-    // the stack, so terminating at all is the assertion.
+    // `Op::TailCallKnown`. At n = 200_000 a lowering that pushes frames
+    // overflows the stack, so the test passes just by finishing.
     mutual_tail_recursion_between_known_fns: (
         "fn even(n Int) Bool { if n == 0 { True } else { odd(n - 1) } }\n\
          fn odd(n Int) Bool { if n == 0 { False } else { even(n - 1) } }\n\
@@ -565,7 +567,7 @@ run_case! {
     ),
 
     // `count` alternates `hop` (`TailCallKnown`) with `f` (dynamic
-    // `TailCall`); at n = 200_000 both halves must reuse the frame.
+    // `TailCall`). At n = 200_000 both halves must reuse the frame.
     indirect_tail_call_through_value_reuses_frame: (
         "fn hop(f fn(Int, Int) Int, acc Int, n Int) Int {\n\
          \tif n == 0 { acc } else { f(acc + 1, n - 1) }\n\
@@ -578,8 +580,8 @@ run_case! {
     ),
 
     // Bare constructor arms lower to `Op::SwitchTag`, one indexed jump on
-    // `variant_idx`. Each arm yields a value only it can, so a mis-indexed
-    // jump table fails a line.
+    // `variant_idx`. Each arm gives a value no other arm can, so a jump table
+    // with the wrong index fails a line.
     exhaustive_variant_match_is_jump_table: (
         "type T {\n\
          \tA(x Int)\n\
@@ -601,9 +603,8 @@ run_case! {
         "3\n40\n506\n",
     ),
 
-    // Two arms share a variant tag, which `variant_idx` alone cannot
-    // distinguish, so the compiler must fall back to sequential
-    // `Op::MatchEnum`.
+    // Two arms share a variant tag, which `variant_idx` alone can't tell
+    // apart, so the compiler must fall back to sequential `Op::MatchEnum`.
     variant_match_with_nested_literal_falls_back: (
         "type T {\n\
          \tA(x Int)\n\
@@ -624,8 +625,8 @@ run_case! {
         "999\n3\n40\n",
     ),
 
-    // `.field` on a record lowers to `Field(n)`. Three field indices pin the
-    // operand encoding; the `..p` spread reads the fields it leaves out
+    // `.field` on a record lowers to `Field(n)`. Three field indices check the
+    // operand encoding, and the `..p` spread reads the fields it leaves out
     // through the same op.
     record_field_access: (
         "type P {\n\tx Int\n\ty Int\n\tz Int\n}\n\
@@ -642,8 +643,8 @@ run_case! {
         "10\n20\n30\n10\n99\n30\n",
     ),
 
-    // A field at the same position on every variant is read by index alone;
-    // the runtime tag varies across calls and `Field` does not consult it.
+    // A field at the same position on every variant is read by index alone.
+    // The runtime tag varies across calls and `Field` doesn't look at it.
     field_access_across_variants_ignores_runtime_tag: (
         "type S {\n\
          \tA(v Int, w Int)\n\
@@ -709,9 +710,10 @@ fn index_or_does_not_evaluate_an_impure_default() {
     );
 }
 
-/// Both encodings, plus every boundary: hit, past the end, negative, empty.
-/// `False` is a nullary constructor, not a constant, so it exercises the
-/// pushed-default path a grid walk's `row[x] or False` depends on.
+/// This tests both encodings and every boundary: a hit, past the end,
+/// negative and empty. `False` is a nullary constructor, not a constant, so it
+/// exercises the pushed-default path that a grid walk's `row[x] or False`
+/// depends on.
 #[test]
 fn index_or_covers_both_encodings_and_every_boundary() {
     run_outputs(
@@ -734,12 +736,12 @@ fn index_or_covers_both_encodings_and_every_boundary() {
     );
 }
 
-/// `examples/bench_typed.sca` is the typed-opcode workload. Its output is
-/// pinned here; its speed is not gated anywhere.
+/// `examples/bench_typed.sca` is the typed-opcode workload. We check its output
+/// here, but nothing gates its speed.
 ///
-/// The spec's ≤610ms wall-clock gate was removed deliberately: it timed a debug
-/// build against an absolute bar, never ran, and belongs in an interleaved
-/// min-of-N bench, not here.
+/// We deliberately removed the spec's ≤610ms wall-clock gate. It timed a debug
+/// build against an absolute bar and never ran. A check like that belongs in an
+/// interleaved min-of-N bench, not here.
 #[test]
 fn bench_typed_output_is_pinned() {
     let path =
@@ -751,12 +753,12 @@ fn bench_typed_output_is_pinned() {
 
 run_case! {
     // A closure directly in `main`'s body, inside a nested `if`/`match`
-    // scope, capturing a local of that scope. `main` is an ordinary function
+    // scope, captures a local of that scope. `main` is an ordinary function
     // called from the entry frame, so this is a by-value `PushCapture` of a
-    // frame local like any other. The script (REPL) emit path is the hazard:
-    // there such a local was an entry-frame temp and `PushGlobal <slot>` read
-    // whatever the toplevel emit had parked there. This pins that `main`'s
-    // body never takes that path. Only single-use nested-scope locals hit
+    // frame local like any other. The danger is the script (REPL) emit path.
+    // There such a local was an entry-frame temp, and `PushGlobal <slot>` read
+    // whatever the toplevel emit had left there. This checks that `main`'s
+    // body never takes that path. Only single-use locals in nested scopes hit
     // this, so each captured name is read exactly once.
     main_nested_scope_closure_capture: (
         "pub fn main() {\n\
@@ -779,9 +781,9 @@ run_case! {
 }
 
 run_case! {
-    // A `@vm` builtin named without being called is a first-class value: the
-    // elaborator synthesises an eta wrapper over the opcode, as for a ctor
-    // used as a value. Driven through the VM, not just the typechecker.
+    // A `@vm` builtin named without being called is a first-class value. The
+    // elaborator builds an eta wrapper over the opcode, as it does for a ctor
+    // used as a value. We run it through the VM, not just the typechecker.
     builtin_bound_to_a_local_is_callable: (
         "import scarlet/string\n\
          pub fn main() {\n\
@@ -808,14 +810,14 @@ run_case! {
          }\n",
         "1\n2\n",
     ),
-    // The three above name the value at the *toplevel*; these two name it inside
-    // a function body, where the wrapper is written into the deferral region
-    // instead. That is new coverage of the shape — eta-expanding a builtin and a
-    // constructor reached through a body, and calling the result.
+    // The three above name the value at the *toplevel*. These two name it inside
+    // a function body, where the wrapper goes into the deferral region instead.
+    // So they cover eta-expanding a builtin and a constructor reached through a
+    // body, and calling the result.
     //
-    // It is not a witness for the jump-over mispatch `tests/check_parity.rs`
-    // pins: both cases pass against the unfixed compiler, because the mispatched
-    // jump is never executed. Only the layout assertion catches that.
+    // They don't catch the jump-over mispatch that `tests/check_parity.rs`
+    // checks. Both cases pass against the unfixed compiler, because the
+    // mispatched jump never runs. Only the layout assertion catches that.
     builtin_as_a_value_inside_a_function_body: (
         "import scarlet/array\n\
          import scarlet/string\n\
@@ -847,21 +849,21 @@ run_case! {
 
     // T-767: `array.map(bs, wire.decode)` reaches the VM through an eta wrapper,
     // so its descriptor comes from `eta_wire_imm`'s `Op::WireDecode` arm and not
-    // from the direct-call spine. T-337 landed both arms and exercised only the
-    // encode one, leaving this path written and never run.
+    // from the direct-call spine. T-337 added both arms but only exercised the
+    // encode one, so this path was written and never run.
     //
-    // HOW THE PAYLOAD IS PINNED, and the first attempt was wrong: a downstream
-    // `match` on the fold does NOT reach the wrapper. Measured — `rs =
+    // HOW WE FIX THE PAYLOAD TYPE, since the first attempt was wrong. A later
+    // `match` on the fold does NOT reach the wrapper. We measured it: `rs =
     // array.map(bs, wire.decode)` with an `Ok(S(n))` arm further down is still
-    // refused with "the type `wire::decode` produces here is not known", because
-    // inference does not flow back into the eta wrapper's return type. It is
-    // pinned here by `decode_all`'s monomorphic signature instead, which fixes
-    // `a` to `S` at the point the wrapper is minted.
+    // refused with "the type `wire::decode` produces here is not known",
+    // because inference doesn't flow back into the eta wrapper's return type.
+    // So `decode_all`'s monomorphic signature fixes it instead, setting `a` to
+    // `S` where the wrapper is made.
     //
-    // The output is the SUM of the decoded payloads, not a count: a descriptor
+    // The output is the SUM of the decoded payloads, not a count. A descriptor
     // that decoded to the wrong shape changes 7, where `array.length` would
-    // still read 2. `dis.rs` covers the missing-descriptor half; only running it
-    // can see a wrong one.
+    // still read 2. `dis.rs` covers a missing descriptor, but only running it
+    // can show a wrong one.
     #[ignore = "needs the VM"]
     eta_wrapped_wire_decode_round_trips: (
         "import scarlet/array\n\
@@ -880,14 +882,14 @@ run_case! {
         "7\n",
     ),
 
-    // An opaque type from another module crosses the wire (decided 2026-08-22,
-    // owner). `json.Doc` is `opaque { arena Binary, tape Binary, idx Int }`:
-    // the descriptor walks its three fields and the decoder rebuilds the
-    // cursor by a constructor this module cannot name. The rebuilt cursor is
-    // then READ through the parser's own natives, which is what says the
-    // three fields came back as the parser's encoding and not merely as three
-    // values of the right types — a `Doc` built wrong answers `None` or the
-    // wrong member, never 42.
+    // An opaque type from another module crosses the wire (the owner decided
+    // this on 2026-08-22). `json.Doc` is `opaque { arena Binary, tape Binary,
+    // idx Int }`. The descriptor walks its three fields, and the decoder
+    // rebuilds the cursor with a constructor this module can't name. We then
+    // READ the rebuilt cursor through the parser's own natives. That shows the
+    // three fields came back in the parser's encoding, not just as three values
+    // of the right types. A `Doc` built wrong answers `None` or the wrong
+    // member, never 42.
     #[ignore = "needs the VM"]
     an_opaque_json_doc_round_trips_through_wire: (
         "import scarlet/json\n\

@@ -1,78 +1,80 @@
-# Type-directed memory & codegen for Scarlet
+# Type-directed memory and code generation for Scarlet
 
-**Status**: design spec for `/rdr-impl`. Every tier is grounded in a peer-reviewed primary source; the composition is Cyclone's proven template instantiated on Scarlet's constraints.
+**Status**: this was the design for the old bytecode VM, and the results below were measured on it. The old VM is gone. Perceus (tiers 2 and 4) carries on in `crates/scarlet_lower/src/perceus.rs` and the new VM, but the opcodes, `MiHeap`, `heap/space.rs` and the file and line references here are the old VM's. `docs/vm-design.md` has the plan for memory in the new VM.
+
+Each tier comes from a peer-reviewed primary source. Putting them together follows Cyclone's proven template, fitted to Scarlet's constraints.
 
 ## The one idea
 
-Every heap type carries an inferred **`(region ρ, aliasability α)`** pair — Cyclone's orthogonal factoring [Swamy et al. SCP; Grossman et al. PLDI'02]:
+Every heap type carries an inferred **`(region ρ, aliasability α)`** pair. Cyclone splits memory this way into two independent questions [Swamy et al. SCP; Grossman et al. PLDI'02]:
 
-- `ρ ∈ {frame ⊑ process ⊑ immortal}` — an outlives lattice (LIFO nesting → subtyping; HM-unification-compatible; zero runtime metadata)
-- `α ∈ {unique, shared}` — governs reuse and RC
+- `ρ ∈ {frame ⊑ process ⊑ immortal}` says how long a value lives. Each region outlives the one before it, so LIFO nesting becomes subtyping. It works with HM unification and needs no metadata at run time.
+- `α ∈ {unique, shared}` decides reuse and reference counting (RC).
 
-The five "tiers" are just the cells of that product. One typing discipline, one inference pass, one degradation rule. Nothing bolted on.
+The five tiers below are just the combinations of those two. There's one set of typing rules, one inference pass and one rule for falling back, with nothing bolted on.
 
-## Why this fits Scarlet specifically
+## Why this fits Scarlet
 
-Scarlet's constraints are exactly the ones the literature's best techniques were designed for:
+Scarlet's constraints are the ones the best techniques in the literature were designed for:
 
 | Scarlet property | what it unlocks | source |
 |---|---|---|
 | HM types at compile time | region + multiplicity + mode inference is decidable, no annotations | Tofte'04; Lorenzen'24 |
-| acyclic-by-construction | RC is **complete** — no cycle collector, ever | Ullrich & de Moura IFL'19 |
+| acyclic-by-construction | RC is **complete**, so no cycle collector is ever needed | Ullrich & de Moura IFL'19 |
 | immutable values | Perceus reuse is sound; DAG sharing well-defined | Reinking et al. PLDI'21 |
 | process isolation | non-atomic RC everywhere; process = one region | Johansson et al. ISMM'02 |
-| no JIT | all placement decisions AOT; monomorphize freely | Weeks MLton'06 |
+| no JIT | all placement decisions AOT; monomorphise freely | Weeks MLton'06 |
 
-## The tiers (falls out of `(ρ, α)`)
+## The tiers, from `(ρ, α)`
 
 ### Tier 1 — frame-local (`ρ=frame`)
 **Placement**: activation record / bump slab freed at return.
-**Analysis**: Jane Street's mode inference (locality axis) [Lorenzen et al. ICFP'24] — a two-point `local ⊑ global` lattice on bindings, fully inferred, deliberately simpler than Tofte-Talpin region variables. Avoids the "region-annotated terms become large and fragile" failure Tofte reported.
-**Win**: MLKit found 90%+ of runtime allocations land in finite (bound-1) regions → activation record [Tofte et al. HOSC'04]. Region inference "serves the purpose of generations" [Elsman & Hallenberg PADL'20] — no separate nursery needed.
+**Analysis**: Jane Street's mode inference on the locality axis [Lorenzen et al. ICFP'24]. It's a two-point `local ⊑ global` lattice on bindings, fully inferred, and deliberately simpler than Tofte-Talpin region variables. That avoids the problem Tofte reported, where "region-annotated terms become large and fragile".
+**Win**: MLKit found that over 90% of allocations at run time land in finite (bound-1) regions, which become the activation record [Tofte et al. HOSC'04]. Region inference "serves the purpose of generations" [Elsman & Hallenberg PADL'20], so there's no need for a separate nursery.
 
 ### Tier 2 — reuse-in-place (`α=unique`, same-shape reconstruction)
-**Placement**: mutate the dying cell; zero (de)alloc, constant stack.
-**Analysis**: FIP calculus check + **drop-guided (frame-limited) reuse** [Lorenzen & Leijen ICFP'22; Lorenzen et al. ICFP'23]. The emitted code is `if is_unique(x) { overwrite } else { dec(x); alloc() }` — the else branch IS tier 4.
-**Critical**: use the ICFP'22 frame-limited algorithm, **NOT** Lean 4's unrestricted borrow inference — Leijen's own paper proves the latter is not safe-for-space (peak heap can blow up unboundedly). Per-call constant-factor bound is what makes this compose with tier 3's arena bounds.
+**Placement**: overwrite the dying cell, with no allocation or freeing and constant stack.
+**Analysis**: FIP calculus check + **drop-guided (frame-limited) reuse** [Lorenzen & Leijen ICFP'22; Lorenzen et al. ICFP'23]. The emitted code is `if is_unique(x) { overwrite } else { dec(x); alloc() }`, and the else branch *is* tier 4.
+**Important**: use the ICFP'22 frame-limited algorithm, **not** Lean 4's unrestricted borrow inference. Leijen's own paper proves Lean's isn't safe for space, because the peak heap can grow without bound. Bounding each call by a constant factor is what lets this work with tier 3's arena bounds.
 
 ### Tier 3 — process arena (`ρ=process`)
-**Placement**: per-process bump `Space` (revive/rewrite `heap/space.rs`); freed O(1) at process death.
-**Analysis**: values escaping frame but not process — the actor's receive-loop state.
-**Critical**: **must NOT be the sole reclamation** — three independent sources agree lexical regions blow up 10-100× on non-nested lifetimes / higher-order fns / server loops (barnes-hut: 284MB region-only vs 2.2MB MLton) [Tofte'04; Cyclone SCP; PADL'20]. An actor's receive loop IS the pathological case. Tier 4 is the mandatory backstop.
+**Placement**: a bump `Space` per process (bring back or rewrite `heap/space.rs`), freed in O(1) when the process dies.
+**Analysis**: values that escape the frame but not the process, like the state of an actor's receive loop.
+**Important**: this **must not be the only way memory is freed**. Three independent sources agree that lexical regions blow up 10 to 100 times over on lifetimes that don't nest, on higher-order functions and on server loops (barnes-hut: 284MB with regions alone, against 2.2MB in MLton) [Tofte'04; Cyclone SCP; PADL'20]. An actor's receive loop is exactly that worst case, so tier 4 has to back it up.
 
-### Tier 4 — RC over mimalloc (`α=shared` or `ρ` escapes analysis)
-**Placement**: current `MiHeap` — non-atomic refcount prefix, `mi_free` at zero.
-**Analysis**: Perceus precise ownership insertion [Reinking et al. PLDI'21]. Lean 4's single-threaded tag [Ullrich'19] — Scarlet already does this (non-atomic RC, process is single-threaded between messages).
-**Cross-process boundary**: keep BEAM-style **copy-on-send** (`rc_copy_graph`) — sidesteps Lean's `markMT` promotion (which is O(reachable) anyway) and preserves process isolation as a feature. Large `Binary` bytes stay `Arc<[u8]>`-shared, no copy.
+### Tier 4 — RC over mimalloc (`α=shared`, or `ρ` the analysis can't pin)
+**Placement**: the `MiHeap` of the time, with a non-atomic refcount before each object and `mi_free` when it reaches zero.
+**Analysis**: Perceus inserts precise ownership [Reinking et al. PLDI'21]. Scarlet already did what Lean 4's single-threaded tag does [Ullrich'19]: RC is non-atomic, because a process is single-threaded between messages.
+**Between processes**: keep BEAM-style **copy on send** (`rc_copy_graph`). That avoids Lean's `markMT` promotion, which costs O(reachable) anyway, and keeps processes isolated, which we want. Large `Binary` bytes stay shared as `Arc<[u8]>`, with no copy.
 
 ### Tier 5 — frozen immortal (`ρ=immortal`)
-**Placement**: `FrozenArea` — no refcount prefix, never freed.
-**Already done.** This is Lean's `persistent` tag verbatim.
+**Placement**: `FrozenArea`, with no refcount and never freed.
+**Already done.** This is exactly Lean's `persistent` tag.
 
-## Type-directed codegen (same analysis feeds both)
+## Type-directed code generation
 
-The `(ρ, α)` inference threads type info to the compiler; the codebase research (`wjqk2f2qb`) confirms the wiring is nearly there:
+The same analysis feeds both memory and code generation. The `(ρ, α)` inference passes type information to the compiler, and research on the codebase (`wjqk2f2qb`) confirmed most of the wiring was already there:
 
-- `resolved_prim` (infer.rs:748) already resolves `Ty → {Int,Float,String}` at emit time — typed arith ops (`AddInt`/`AddFloat`) already exist (mod.rs:78-188). **Gap**: no typed compare, no typed collection ops.
-- `ValueKind::Constructor{variant_idx}` is populated but discarded at emit — thread it through for **integer-tag jump-table dispatch** on exhaustive matches (elides per-arm tag checks).
-- `Op::Call` does 5-step dynamic dispatch (tag check, heap read, arity check, …). Known-target-known-arity callees → **direct `CallKnown func_idx`** op.
-- `GetField` is already O(1) offset — remaining fat is a dead-by-typing tag check + bounds check the type system proves.
-- NaN-box means `Array(Int)`/`Array(Float)` leaves are already unboxed 8-byte words — **monomorphic `map`/`fold` need no per-element box check**.
-- Polymorphic fallback: `engine.find(ty)` → `TypeNode::Var` at emit time → emit the current dynamic op. No new mechanism needed.
+- `resolved_prim` (infer.rs:748) already resolves `Ty → {Int,Float,String}` at emit time, and typed arithmetic ops (`AddInt`, `AddFloat`) already exist (mod.rs:78-188). **Gap**: no typed compares and no typed collection ops.
+- `ValueKind::Constructor{variant_idx}` is filled in but thrown away at emit. Pass it through to get **jump-table dispatch on the integer tag** for exhaustive matches, which skips the tag check on every arm.
+- `Op::Call` does 5-step dynamic dispatch (tag check, heap read, arity check, …). A callee whose target and arity are known gets a **direct `CallKnown func_idx`** op.
+- `GetField` is already an O(1) offset. What's left to cut is a tag check and a bounds check that the types already prove.
+- With NaN boxing, the leaves of an `Array(Int)` or `Array(Float)` are already unboxed 8-byte words, so **a monomorphic `map` or `fold` needs no box check per element**.
+- If `engine.find(ty)` gives `TypeNode::Var` at emit time, the type is polymorphic, so emit the existing dynamic op. That needs nothing new.
 
-## New opcodes (from `vm-opcode-design` findings)
+## New opcodes, from the `vm-opcode-design` findings
 
-`Instruction` is 8-byte fixed `{op:u8, a:u8, b:u16, operand:i32}` — plenty of encoding room. Add: `CallKnown`, `SwitchTag`, `GetFieldUnchecked`, `CmpInt/CmpFloat`, `Reuse`/`ReuseDrop` (Perceus), `AllocFrame n` (tier-1 bump).
+`Instruction` is a fixed 8 bytes, `{op:u8, a:u8, b:u16, operand:i32}`, which leaves plenty of room. Add `CallKnown`, `SwitchTag`, `GetFieldUnchecked`, `CmpInt/CmpFloat`, `Reuse`/`ReuseDrop` (Perceus), `AllocFrame n` (tier-1 bump).
 
 ## Open questions (measure, don't guess)
 
-1. **Mode inference vs full region inference** for tier 1 — Jane Street's is simpler; does it capture the same 90% wins? Start with modes; add region polymorphism only if benchmarks show it's leaving allocations on the table.
-2. **markMT vs copy-on-send** — both O(reachable). Keep copy (isolation is a feature); revisit if message-passing throughput is the bottleneck.
-3. **Monomorphization budget** — MLton reports ≤30% code-size growth in practice. Scarlet's `Program.code: Vec<Instruction>` — measure on `bench_heavy.sca` before deciding whole-program vs on-demand.
+1. **Mode inference or full region inference** for tier 1? Jane Street's is simpler, but does it get the same 90% of the wins? Start with modes, and add region polymorphism only if benchmarks show it's missing allocations.
+2. **`markMT` or copy on send?** Both cost O(reachable). Keep copying, because isolation is worth having, and look again if message passing turns out to be the bottleneck.
+3. **How much to monomorphise?** MLton reports at most 30% code growth in practice. Measure Scarlet's `Program.code: Vec<Instruction>` on `bench_heavy.sca` before choosing between whole-program and on-demand.
 
 ## Bench baseline
 
-`scripts/bench.sh` → best-of-5 `bench_heavy.sca`. The `Instruction` fetch layout comment (mod.rs:374) already cites ~30% swings on this bench — same harness for before/after.
+`scripts/bench.sh` runs `bench_heavy.sca` five times and keeps the best. The comment on the `Instruction` fetch layout (mod.rs:374) already noted swings of about 30% on this bench. Use the same harness before and after.
 
 ## Phase 1 result
 
@@ -84,9 +86,9 @@ The `(ρ, α)` inference threads type info to the compiler; the codebase researc
 | Phase 1 (e460235) | 0.33 s | 343.4 ms ± 3.5 |
 | **delta** | **0.00 s** | **−4.6 ms (1.01× ± 0.02)** |
 
-No measurable win — and on inspection that's expected, not a bug in the new ops. `bench_heavy.sca` is `fib(33)` + `count(10⁷,0)`: pure self-recursion and `Int` `<`/`==`. The baseline already emitted `CallSelf`/`TailCallSelf` for self-recursion and `LtInt`/`JumpGeIntLC`/`JumpNeIntLC` for the guards, so the hot loop's opcode stream is byte-identical before and after. None of the Phase 1 ops fire on this workload: `CallKnown` targets *cross-function* known callees (self-calls hit the older `CallSelf` fast path), and `SwitchTag`/`GetFieldUnchecked` need an enum/record scrutinee the bench doesn't have. The spec's "fib is all self-calls → biggest win" premise was wrong — self-calls were already the fast case.
+There's no measurable win, and on a closer look that's expected. It isn't a bug in the new ops. `bench_heavy.sca` is `fib(33)` + `count(10⁷,0)`: pure self-recursion and `Int` `<`/`==`. The baseline already emitted `CallSelf`/`TailCallSelf` for self-recursion and `LtInt`/`JumpGeIntLC`/`JumpNeIntLC` for the guards, so the hot loop's opcode stream is byte-identical before and after. None of the Phase 1 ops fire on this workload: `CallKnown` targets *cross-function* known callees (self-calls hit the older `CallSelf` fast path), and `SwitchTag`/`GetFieldUnchecked` need an enum/record scrutinee the bench doesn't have. The spec assumed fib, being all self-calls, would gain the most. That was wrong, because self-calls were already the fast case.
 
-Action item: `bench_heavy.sca` needs a companion workload that actually exercises Phase 1 — a mutually-recursive pair (forces `CallKnown`), an exhaustive enum match in the hot loop (forces `SwitchTag`), and a record projection (forces `GetFieldUnchecked`) — before Phase 1's real speedup can be quoted. Le/Ge variants (`LeInt`/`GeInt`/`LeFloat`/`GeFloat`) from spec item 3 were not added — baseline already had `LtInt`/`GtInt`/`EqInt`/`LtFloat`/`GtFloat`, so typed compares are unchanged vs baseline.
+Before we can quote Phase 1's real speedup, `bench_heavy.sca` needs a second workload that uses it: a pair of mutually recursive functions (for `CallKnown`), an exhaustive enum match in the hot loop (for `SwitchTag`) and a record field read (for `GetFieldUnchecked`). The `LeInt`, `GeInt`, `LeFloat` and `GeFloat` ops from spec item 3 weren't added. The baseline already had `LtInt`, `GtInt`, `EqInt`, `LtFloat` and `GtFloat`, so typed compares are the same as before.
 
 `examples/bench_typed.sca` (tree sum + is_even/is_odd + record dot-product loop, best-of-5):
 
@@ -96,18 +98,18 @@ Action item: `bench_heavy.sca` needs a companion workload that actually exercise
 | Phase 1 | 0.61 s |
 | **delta** | **−9%** |
 
-The bulk of remaining time is Point allocation in `dot_loop` — Phase 2 (Perceus reuse) eliminates it.
+Most of the remaining time goes on allocating `Point`s in `dot_loop`. Phase 2 (Perceus reuse) was meant to remove it.
 
 ### Phase 2 — dot_loop reuse
 
-`dot_loop(1_000_000, 0)` allocates two `Point(x y z)` per iteration — 2M heap objects that are constructed, read once by `dot`, and immediately dead. hyperfine, 10 runs, 2 warmup, macOS arm64, both rows measured back-to-back on the same machine (Phase-1 binary preserved as `target/release/al_phase1_baseline`):
+`dot_loop(1_000_000, 0)` allocates two `Point(x y z)` per iteration. That's 2M heap objects, each built, read once by `dot`, and dead straight away. hyperfine, 10 runs, 2 warmup, macOS arm64, both rows measured back-to-back on the same machine (Phase-1 binary preserved as `target/release/al_phase1_baseline`):
 
 | build | `bench_typed.sca` mean ± σ | `dot_loop` only mean ± σ |
 |---|---|---|
 | Phase 1 (62c8795) | 660.0 ms ± 12.0 | 208.4 ms ± 2.9 |
 | Phase 2 | 701.5 ms ± 16.4 | 223.9 ms ± 4.5 |
 
-Phase 2 is currently **+7 %** on `dot_loop`, not the drop this section anticipated. Drop-guided reuse as landed pairs a *drop that dominates a later same-shape constructor within one straight-line frame* — today that means the match-scrutinee pattern (`match xs { Cons(h, t) -> Cons(..) }`). `dot_loop`'s body is the inverse order — construct `p`/`q`, then last-use — so no drop dominates a constructor and no `Op::Reuse` is emitted. The cross-iteration pairing originally assumed here (iteration *N*'s dead `p` feeding iteration *N+1*'s `Point(..)`) does not survive `TailCallSelf`: `collapse_tail_frame` drains the local slots, so the held cell is freed before the next body runs. Until reuse tokens are threaded through the tail-call frame collapse (or `dot_loop` is rewritten as a `match` over a boxed accumulator), Phase 2 pays `Op::Drop` and per-read `Nop`-hole dispatch on the heap locals with no compensating reuse; the +7 % is that overhead. `dot_loop` alone is ~31 % of Phase-1 wall time, which remains the ceiling once pairing covers this shape.
+Phase 2 made `dot_loop` **7% slower**, not faster as this section expected. Drop-guided reuse, as it landed, pairs a *drop with a later constructor of the same shape that it dominates, in one straight-line frame*. Then, that meant the match-scrutinee pattern (`match xs { Cons(h, t) -> Cons(..) }`). `dot_loop`'s body runs the other way round: it builds `p` and `q`, and then uses them for the last time. So no drop dominates a constructor, and no `Op::Reuse` is emitted. The cross-iteration pairing originally assumed here (iteration *N*'s dead `p` feeding iteration *N+1*'s `Point(..)`) does not survive `TailCallSelf`: `collapse_tail_frame` drains the local slots, so the held cell is freed before the next body runs. Until reuse tokens survive the tail-call frame collapse, or `dot_loop` is rewritten as a `match` over a boxed accumulator, Phase 2 pays for `Op::Drop` and a `Nop` hole on every read of a heap local, and gets no reuse back. The 7% is that cost. `dot_loop` alone is about 31% of Phase 1's wall time, which is the most this could save once pairing covers this shape.
 
 ## References
 

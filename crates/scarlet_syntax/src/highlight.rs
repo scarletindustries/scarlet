@@ -1,7 +1,7 @@
 //! ANSI syntax highlighting for Scarlet source.
 //!
-//! Colors are assigned from the scanner's own tokens rather than a second
-//! pattern language, so the REPL cannot drift from what the compiler reads.
+//! Colours come from the scanner's own tokens rather than a second pattern
+//! language, so the REPL can't drift from what the compiler reads.
 //! The output is the input with escape sequences inserted: every source byte
 //! survives, in order, so the highlighted text keeps the original display
 //! width (which is what a line editor repainting a line requires).
@@ -11,11 +11,11 @@ use crate::span::Span;
 use crate::term::Palette;
 use crate::token::{Kind, Token, is_type_name};
 
-/// `source` colored for a terminal, or `source` unchanged when the palette is
-/// off. Partial input is fine: the scanner's error recovery is what decides
-/// how a half-typed line is colored. Additionally bolds the bracket pair that
-/// the cursor at byte offset `cursor` sits on (either side of it), the way an
-/// editor shows which `}` closes the `{` under the caret.
+/// `source` coloured for a terminal, or `source` unchanged when the palette is
+/// off. Partial input is fine: the scanner's error recovery decides how a
+/// half-typed line is coloured. It also bolds the bracket pair that the cursor
+/// at byte offset `cursor` sits on (on either side of it), the way an editor
+/// shows which `}` closes the `{` under the caret.
 pub fn highlight_at(source: &str, p: &Palette, cursor: Option<usize>) -> String {
     if !p.enabled() || source.is_empty() {
         return source.to_string();
@@ -57,9 +57,10 @@ pub fn highlight_at(source: &str, p: &Palette, cursor: Option<usize>) -> String 
     out
 }
 
-/// The scanner's interpolation state, mirrored: inside `'a ${b} c'` the string
-/// body and the embedded expression color differently, and only the scanner's
-/// own rule (`${` opens, the matching `}` closes) says which is which.
+/// A copy of the scanner's interpolation state. Inside `'a ${b} c'` the string
+/// body and the embedded expression are coloured differently, and only the
+/// scanner's own rule (`${` opens, the matching `}` closes) says which is
+/// which.
 #[derive(Default)]
 struct InterpState {
     /// One entry per open interpolated string, holding its brace depth: `0`
@@ -104,8 +105,8 @@ fn token_color(
         Kind::Keyword(_) => p.magenta,
         Kind::LiteralNumber(_) => p.yellow,
         Kind::LiteralString(_) | Kind::InterpStringPart(_) => p.green,
-        // A name starting a type is cased, a name before `(` is being called,
-        // and everything else is a plain binding, left uncolored so the eye
+        // A type name is capitalised, a name before `(` is being called, and
+        // everything else is a plain binding. Those stay uncoloured so the eye
         // lands on the structure instead of on every word.
         Kind::Identifier(name) if is_type_name(name) => p.cyan,
         Kind::Identifier(_) if next.is_some_and(|t| t.kind == Kind::PuncOpenParen) => p.blue,
@@ -117,7 +118,7 @@ fn token_color(
 
 /// Source between two tokens: whitespace, comments, or (inside an
 /// interpolated string) the literal text the scanner folded into the token
-/// payload, which stays string-colored.
+/// payload, which keeps the string colour.
 fn paint_gap(out: &mut String, gap: &str, in_string_body: bool, p: &Palette) {
     if gap.is_empty() {
         return;
@@ -262,7 +263,7 @@ mod tests {
 
     const P: Palette = crate::term::Palette::ansi_for_test();
 
-    /// Whatever the coloring, the visible text must survive byte for byte: a
+    /// Whatever the colouring, the visible text must survive byte for byte: a
     /// line editor lays the line out by the width of what it printed.
     fn strip(s: &str) -> String {
         let mut out = String::new();
@@ -329,7 +330,7 @@ mod tests {
         assert!(out.contains("\x1b[36mInt"), "type not cyan: {out:?}");
         assert!(
             !highlight_at("x", &P, None).contains('\x1b'),
-            "plain name colored"
+            "plain name coloured"
         );
     }
 
@@ -352,13 +353,13 @@ mod tests {
     #[test]
     fn an_interpolation_hole_is_not_string_colored() {
         let out = highlight_at("'a ${b} c'", &P, None);
-        // The name inside the hole keeps its own (absent) color, so the green
+        // The name inside the hole keeps its own (absent) colour, so the green
         // run must be broken by the reset that ends the `${`.
         assert!(strip(&out) == "'a ${b} c'");
         assert!(out.contains("\x1b[32m"), "string parts not green: {out:?}");
         assert!(
             !out.contains("\x1b[32mb"),
-            "hole colored as string: {out:?}"
+            "hole coloured as string: {out:?}"
         );
     }
 

@@ -64,9 +64,9 @@ pub enum PrimOp {
 
     // --- Operand type unresolved ---
     //
-    // The operand's type is a constrained type variable elaboration could not
-    // pin to one primitive (`fn add(a, b) { a + b }` is `addable`), so the
-    // backend picks the operation from the values at run time.
+    // The operand's type is a constrained type variable that elaboration
+    // couldn't pin to one primitive (`fn add(a, b) { a + b }` is `addable`), so
+    // the backend picks the operation from the values at run time.
     /// `a + b` on Int, Float or String.
     Add,
     /// `a - b` on Int or Float.
@@ -118,8 +118,8 @@ pub enum PrimOp {
     ArrayConcat,
     /// `xs[i]`, as an `Option`. Args: `xs`, `i`.
     ArrayIndex,
-    /// `xs[i] or d`, with no `Option` built. Args: `xs`, `i`, `d`, where `d` is
-    /// already evaluated, so it must be pure.
+    /// `xs[i] or d`, without building an `Option`. Args: `xs`, `i`, `d`. `d` is
+    /// already evaluated whether it's needed or not, so it must be pure.
     ArrayIndexOr,
     /// `xs[a..b]`, as a `Result`: `Ok` of the elements from `a` up to but not
     /// including `b`, or `Err(Nil)` when `a..b` is not inside the array.

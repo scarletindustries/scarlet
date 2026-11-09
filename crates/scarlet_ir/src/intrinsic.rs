@@ -1,10 +1,10 @@
 //! The built-in functions the language provides. A stdlib declaration marked
 //! `@vm(key)` has no Scarlet body, and its `key` names one of these.
 //!
-//! Analysis turns the key into an [`Intrinsic`] once, at the annotation, so an
-//! unknown key is a compile error there and everything after carries the
-//! variant rather than the string. What an intrinsic does is the runtime's
-//! business; this list only names them.
+//! Analysis turns the key into an [`Intrinsic`] once, at the annotation. So an
+//! unknown key is a compile error there, and everything after it carries the
+//! variant instead of the string. What an intrinsic does is up to the runtime.
+//! This list only names them.
 
 macro_rules! intrinsics {
     ($($variant:ident = $key:literal,)*) => {

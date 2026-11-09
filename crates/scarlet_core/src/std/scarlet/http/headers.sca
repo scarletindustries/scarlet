@@ -1,14 +1,14 @@
 import scarlet/binary
 
-// An HTTP header field. Names compare case-insensitively (RFC 9110 section 5.1)
-// but the original casing is preserved on the wire.
+// An HTTP header field. Names compare case-insensitively (RFC 9110 §5.1), but
+// the original casing is kept on the wire.
 pub type Header {
 	name Binary
 	value Binary
 }
 
-// Order and duplicates matter (several `Set-Cookie` fields), so a list, not a
-// map.
+// Headers are a list instead of a map, because order and duplicates matter, as
+// with several `Set-Cookie` fields.
 pub type Headers = Array(Header)
 
 const colon_space = <<': '>>
@@ -18,7 +18,8 @@ const comma = <<','>>
 const cr = <<'\r'>>
 const lf = <<'\n'>>
 const nul = <<'\0'>>
-// ASCII SP / HTAB — the only OWS bytes RFC 9110 defines.
+// ASCII SP and HTAB are the only OWS (optional whitespace) bytes RFC 9110
+// defines.
 const sp = 32
 const htab = 9
 
@@ -26,13 +27,14 @@ const htab = 9
 @vm(http__header_get)
 pub fn get(h Headers, name Binary) Option(Binary)
 
-// Whether any field matches `name` (case-insensitive).
+// Whether any field matches `name`, ignoring case.
 @vm(http__header_has)
 pub fn has(h Headers, name Binary) Bool
 
-// Set `name` so exactly one field has it: the first match is replaced in
-// place, later ones are removed, or a field is appended. Two Content-Length
-// fields would allow request smuggling.
+// Sets `name` so that exactly one field has it. The first match is replaced in
+// place and later ones are removed, or a new field is appended if none match.
+// This matters because two Content-Length fields would allow request
+// smuggling.
 pub fn set(h Headers, name Binary, value Binary) Headers {
 	match h {
 		[] -> [Header(name: name, value: value)]
@@ -44,8 +46,8 @@ pub fn set(h Headers, name Binary, value Binary) Headers {
 	}
 }
 
-// Remove every field named `name`, ignoring case. With none, `h` comes back
-// as it is, with no copy.
+// Removes every field named `name`, ignoring case. If there are none, `h`
+// comes back as it is, with no copy.
 pub fn delete(h Headers, name Binary) Headers {
 	if has(h, name) {
 		delete_walk(h, name)
@@ -65,7 +67,7 @@ fn delete_walk(h Headers, name Binary) Headers {
 	}
 }
 
-// Add a field at the end, as for a second `Set-Cookie`.
+// Adds a field at the end, as for a second `Set-Cookie`.
 pub fn append(h Headers, name Binary, value Binary) Headers {
 	[..h, Header(name: name, value: value)]
 }
@@ -76,8 +78,9 @@ pub type InvalidHeader {
 	BadValue(value Binary)
 }
 
-// A Header, only if `name` is an RFC 9110 token and `value` has no CR, LF or
-// NUL, so outside input cannot put a line break on the wire.
+// Builds a Header, but only if `name` is an RFC 9110 token and `value` has no
+// CR, LF or NUL. This stops outside input from putting a line break on the
+// wire.
 pub fn field(name Binary, value Binary) Result(Header, InvalidHeader) {
 	if !valid_name(name) {
 		Err(BadName(name))
@@ -88,8 +91,8 @@ pub fn field(name Binary, value Binary) Result(Header, InvalidHeader) {
 	}
 }
 
-// Whether every field is safe to write: a token name, and no CR, LF or NUL in
-// the value. The server checks this before any response goes out.
+// Whether every field is safe to write, meaning it has a token name and no CR,
+// LF or NUL in its value. The server checks this before any response goes out.
 @vm(http__headers_valid)
 pub fn valid(h Headers) Bool
 
@@ -102,8 +105,8 @@ fn token_bytes_from(name Binary, i Int, len Int) Bool {
 	i >= len || is_token_byte(binary::byte_at(name, i)) && token_bytes_from(name, i + 1, len)
 }
 
-// ALPHA, DIGIT, and !#$%&'*+-.^_`|~ (RFC 9110 §5.6.2). One flat test, since
-// `valid` checks every name byte of every response.
+// Token bytes are ALPHA, DIGIT and !#$%&'*+-.^_`|~ (RFC 9110 §5.6.2). This is
+// one flat test because `valid` checks every name byte of every response.
 fn is_token_byte(b Int) Bool {
 	b >= 97 && b <= 122 ||
 		b >= 65 && b <= 90 ||
@@ -119,8 +122,8 @@ fn is_token_byte(b Int) Bool {
 		b == 126
 }
 
-// No CR or LF, which would end the line early and split the response, and no
-// NUL (RFC 9110 §5.5). One native scan for each.
+// A value must have no CR or LF, which would end the line early and split the
+// response, and no NUL (RFC 9110 §5.5). Each check is one native scan.
 fn valid_value(value Binary) Bool {
 	lacks(value, cr) && lacks(value, lf) && lacks(value, nul)
 }
@@ -133,7 +136,7 @@ fn lacks(v Binary, byte Binary) Bool {
 }
 
 // Whether a field named `name` has `token` in its comma-separated list, like
-// `Connection: keep-alive, Upgrade`. Checks every such field, ignoring case
+// `Connection: keep-alive, Upgrade`. It checks every such field, ignoring case
 // and the spaces around elements.
 pub fn contains_token(h Headers, name Binary, token Binary) Bool {
 	has(h, name) && token_walk(h, name, token)
@@ -206,8 +209,9 @@ fn is_ows(b Int) Bool {
 	b == sp || b == htab
 }
 
-// The header block as parts for socket.write_parts: name, ": ", value, CRLF
-// per field. The caller adds the blank line that ends the block.
+// Renders the header block as parts for socket.write_parts, with name, ": ",
+// value and CRLF for each field. The caller adds the blank line that ends the
+// block.
 pub fn render(h Headers) Array(Binary) {
 	match h {
 		[] -> []

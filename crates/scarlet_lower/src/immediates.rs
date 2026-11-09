@@ -9,7 +9,7 @@
 //! the prelude's `Bool`, and a Bool only ever looks one way.
 //!
 //! It runs between `lower` and `perceus`, so Perceus never sees a Bool as a
-//! constructor: it never marks one's drop as a cell to reuse.
+//! constructor and never marks one's drop as a cell to reuse.
 
 use super::{Atom, CoreExpr, CoreFn, CorePat, LocalId, VariantRef};
 use scarlet_elaborate::RTy;
@@ -25,7 +25,8 @@ pub struct Immediates {
 /// What a pattern tests a Bool or Nil for.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Test {
-    /// Matches every value: a wildcard, or `Nil`, which has only one.
+    /// Matches every value. This is a wildcard, or `Nil`, which has only one
+    /// value.
     Any,
     Is(bool),
 }
@@ -43,7 +44,7 @@ impl Immediates {
         }
     }
 
-    /// `None` for any pattern that is not over a Bool or Nil.
+    /// Returns `None` for any pattern that is not over a Bool or Nil.
     fn test(&self, p: &CorePat) -> Option<Test> {
         match p {
             CorePat::Wild | CorePat::Bind(_) => Some(Test::Any),
@@ -54,10 +55,10 @@ impl Immediates {
         }
     }
 
-    /// For a match whose arms all test a Bool or Nil, and at least one names
-    /// `True`, `False` or `Nil`: the arm that runs when the value is `True`,
-    /// and the one that runs when it is `False`. For a match on Nil, both are
-    /// the arm that runs. A match of only wildcards and bindings is left to
+    /// For a match whose arms all test a Bool or Nil, where at least one names
+    /// `True`, `False` or `Nil`, this gives the arm that runs when the value is
+    /// `True` and the one that runs when it is `False`. For a match on Nil,
+    /// both are the arm that runs. A match of only wildcards and bindings is left to
     /// the backend, which does not need to know what type it is over.
     fn arms_taken(&self, arms: &[(CorePat, CoreExpr)]) -> Option<(usize, usize)> {
         if !arms.iter().any(|(p, _)| matches!(p, CorePat::Ctor { .. })) {
@@ -122,10 +123,10 @@ fn immediate(atom: &mut Atom, im: &Immediates) {
     }
 }
 
-/// The match on `scrut` as the arms it can take: one arm when the same one
-/// runs whatever the value, else an `If` from the `True` arm to the `False`
-/// one. Every other arm can never run. An arm that binds the value starts by
-/// binding it.
+/// Rebuild the match on `scrut` from the arms it can take. That is one arm when
+/// the same one runs whatever the value, or else an `If` with the `True` arm
+/// as `then` and the `False` arm as `else`. No other arm can ever run. An arm
+/// that binds the value starts by binding it.
 fn branch(
     scrut: LocalId,
     arms: Vec<(CorePat, CoreExpr)>,

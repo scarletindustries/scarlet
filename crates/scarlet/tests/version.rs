@@ -1,5 +1,6 @@
-//! `scarlet --version` must name the compiler: a canary stamp (CI rewrote
-//! VERSION) or `+git.<sha>` (source build). Bare `0.0.1` is the T-530 hole.
+//! `scarlet --version` must name the compiler build: a canary stamp (when CI
+//! rewrote VERSION) or `+git.<sha>` (for a source build). A bare `0.0.1` is the
+//! T-530 hole.
 
 use std::process::Command;
 

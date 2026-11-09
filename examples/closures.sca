@@ -16,8 +16,8 @@ fn adder(k Int) fn(Int) Int {
 	fn(x) x + k
 }
 
-// floor outlives this call, inside the closure. Annotated because .qty alone
-// can't tell inference the record type.
+// floor outlives this call, inside the closure. It's annotated because .qty
+// alone can't tell inference the record type.
 fn at_least(floor Int) fn(Line) Bool {
 	fn(o Line) o.qty >= floor
 }
@@ -35,7 +35,7 @@ pub fn main() {
 		Line(sku: 'AL-4', qty: 7, cents: 9900),
 	]
 
-	// map / filter / fold read as a chain of small anonymous functions.
+	// map, filter and fold read as a chain of small anonymous functions.
 	bulk = array::filter(orders, at_least(10))
 	lines = array::map(bulk, fn(o) '${o.sku} x${o.qty}')
 	revenue = array::fold(orders, 0, fn(sum, o) sum + o.qty * o.cents)
@@ -54,11 +54,11 @@ pub fn main() {
 	normalise = pipeline([adder(-1), fn(x) x * x, adder(100)])
 	println('normalise ${string::inspect(array::map(1..5, normalise))}')
 
-	// Spread splices one array into another; ranges are arrays, so they splice too.
+	// A spread splices one array into another. Ranges are arrays, so they splice too.
 	qtys = [..array::map(orders, fn(o) o.qty), ..{ 1..3 }]
 	println('quantities ${string::inspect(qtys)}')
 
-	// find returns an Option; option::map works inside it, or supplies the fallback.
+	// find returns an Option. option::map works inside it, and or gives the fallback.
 	biggest = array::find(orders, fn(o) o.qty > 30)
 	println('biggest sku: ${option::map(biggest, fn(o) o.sku) or 'none'}')
 

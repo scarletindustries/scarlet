@@ -1,4 +1,4 @@
-// Monitors: being told when a process ends. Every line here is sequenced by
+// Monitors tell you when a process ends. Every line here is sequenced by
 // a receive, so the output is fixed even though the processes race; the one
 // negative case (a released monitor stays silent) is a generous timeout.
 

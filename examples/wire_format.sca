@@ -121,7 +121,7 @@ fn read_compact(b Binary) Result(Int, Nil) {
 	}
 }
 
-// In a pattern, `:utf8` reads one codepoint.
+// In a pattern, `:utf8` reads one code point.
 fn tag(label String, body Binary) Binary {
 	binary::append(<<label:utf8>>, body)
 }

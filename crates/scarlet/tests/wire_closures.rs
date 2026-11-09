@@ -1,18 +1,18 @@
-//! Closures across the wire, end to end through `al run`. A function value
-//! encodes as the run that made it, its function index and its captures —
-//! each capture self-described — and decodes, in that run, to a closure that
+//! These send closures across the wire, end to end through `al run`. A function
+//! value encodes as the run that made it, its function index and its captures,
+//! each of which describes itself. In that run it decodes to a closure that
 //! runs the same body over the same captures.
 //!
-//! Every test here CALLS the decoded closure and checks what it computes, so
-//! a decoder that rebuilt a plausible-looking different closure would pass
-//! `==` against nothing and these against less. The capture forms are the
-//! runtime's, not the type system's: `Bool` and `Nil` are immediates, a big
-//! integer is boxed, a range stores no elements, a record carries its names —
-//! and each has a row of its own in `wire.sca`'s capture table.
+//! Every test here CALLS the decoded closure and checks what it computes.
+//! `==` alone wouldn't catch a decoder that rebuilt a different closure that
+//! only looks right, and these checks would. The capture forms come from the
+//! runtime, not the type system. `Bool` and `Nil` are immediates, a big integer
+//! is boxed, a range stores no elements, and a record carries its names. Each
+//! has a row of its own in `wire.sca`'s capture table.
 //!
 //! The tampering tests cut the bytes by position. A closure row is the
 //! eleven-byte header, the sixteen-byte run, then the function index as a
-//! varint, then the capture count; with the stdlib ahead of it a user
+//! varint, then the capture count. With the stdlib ahead of it, a user
 //! function's index is two bytes, so the tests slice from the end rather
 //! than assume a width.
 
@@ -20,8 +20,8 @@ mod common;
 
 use common::run_outputs;
 
-/// The ticket's first case: an `Int` and a `String` captured, the decoded
-/// copy called with the right result. `apply` pins the type `decode` is used
+/// This is the ticket's first case. The closure captures an `Int` and a
+/// `String`, and calling the decoded copy gives the right result. `apply` pins the type `decode` is used
 /// at, since `println` alone would leave the return polymorphic.
 #[test]
 #[ignore = "needs the VM"]
@@ -95,8 +95,8 @@ fn a_closure_capturing_every_value_form_round_trips_and_is_called() {
     );
 }
 
-/// A closure capturing a closure: the decoded outer calls the decoded inner,
-/// so both bodies run over their own captures.
+/// A closure that captures a closure. The decoded outer one calls the decoded
+/// inner one, so both bodies run over their own captures.
 #[test]
 #[ignore = "needs the VM"]
 fn a_closure_capturing_a_closure_round_trips_and_is_called_through_both() {
@@ -158,8 +158,8 @@ fn a_closure_capturing_a_subject_and_a_pid_round_trips_and_the_copies_are_used()
     );
 }
 
-/// A named function as a value, and a lambda closing over nothing: the row
-/// is the run, the index and a count of zero.
+/// A named function used as a value, and a lambda closing over nothing. Each
+/// row is the run, the index and a count of zero.
 #[test]
 #[ignore = "needs the VM"]
 fn a_zero_capture_closure_round_trips_and_is_called() {
@@ -216,8 +216,8 @@ fn a_record_with_a_fn_field_round_trips_and_the_field_is_called() {
     );
 }
 
-/// The bytes of a closure with its sixteen run-identity bytes zeroed are
-/// another run's, and the refusal is `OtherRun`, this run's identity first.
+/// Zeroing a closure's sixteen run-identity bytes makes it another run's. The
+/// refusal is `OtherRun`, with this run's identity first.
 /// Bytes 11..27 are the run, as for a handle.
 #[test]
 #[ignore = "needs the VM"]
@@ -250,9 +250,9 @@ fn a_closure_from_another_run_is_refused_with_other_run() {
 
 /// A function index past the program's table is `Malformed` at the index's
 /// offset, never a panic at `program.functions[..]`. The index is replaced
-/// by the three-byte varint for 2^20, which no program has that many
-/// functions for; the zero-capture closure's row ends with its count, so the
-/// index is everything between the run and the last byte.
+/// by the three-byte varint for 2^20, and no program has that many functions.
+/// The zero-capture closure's row ends with its count, so the index is
+/// everything between the run and the last byte.
 #[test]
 #[ignore = "needs the VM"]
 fn a_tampered_function_index_is_malformed_not_a_panic() {
@@ -281,9 +281,9 @@ fn a_tampered_function_index_is_malformed_not_a_panic() {
     );
 }
 
-/// A capture count that is not the function's is `Malformed` at the count's
-/// offset — here a zero-capture lambda's row claiming one `Nil` capture —
-/// rather than a capture-index error when the body runs.
+/// A capture count that doesn't match the function's is `Malformed` at the
+/// count's offset, rather than a capture-index error when the body runs. Here a
+/// zero-capture lambda's row claims one `Nil` capture.
 #[test]
 #[ignore = "needs the VM"]
 fn a_tampered_capture_count_is_malformed() {
@@ -310,10 +310,10 @@ fn a_tampered_capture_count_is_malformed() {
     );
 }
 
-/// The other direction: a one-capture closure's row cut short and its count
-/// rewritten to zero. Without the check the closure would be built over no
-/// captures and the body's `PushCapture` would fail at the call; with it the
-/// bytes are refused at the count's offset. The row ends `count, tag,
+/// This tests the other direction: a one-capture closure's row is cut short and
+/// its count rewritten to zero. Without the check, the closure would be built
+/// over no captures and the body's `PushCapture` would fail at the call. With
+/// it, the bytes are refused at the count's offset. The row ends `count, tag,
 /// zigzag(5)`, so the count is the third-to-last byte.
 #[test]
 #[ignore = "needs the VM"]
@@ -345,7 +345,7 @@ fn a_capture_count_short_of_the_functions_is_malformed() {
 }
 
 /// A tag byte not in the capture table is `Malformed` at the tag's offset.
-/// The closure captures one `Int`, so its row ends `tag, zigzag(5)`; the
+/// The closure captures one `Int`, so its row ends `tag, zigzag(5)` and the
 /// tag is the second-to-last byte.
 #[test]
 #[ignore = "needs the VM"]

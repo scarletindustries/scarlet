@@ -1,5 +1,5 @@
-//! `scarlet dis` end to end: the command's wiring and exit status. What a
-//! listing contains is `scarlet::dis`'s own tests.
+//! These test `scarlet dis` end to end: how the command is wired up and its exit
+//! status. `scarlet::dis` has its own tests for what a listing contains.
 
 use std::process::Command;
 

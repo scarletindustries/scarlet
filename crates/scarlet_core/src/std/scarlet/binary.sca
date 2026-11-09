@@ -13,20 +13,22 @@ pub fn bit_size(b Binary) Int
 @vm(binary__byte_size)
 pub fn byte_size(b Binary) Int
 
-// `take_bits` bits from bit `at_bit`, sharing `b` without copying. A window
-// past either end is `Err(Nil)`, never a short read. Each offset here names its
-// unit, bits or bytes, because a mix-up would still give a valid binary.
+// Takes `take_bits` bits starting at bit `at_bit`, sharing `b` without
+// copying. A window past either end gives `Err(Nil)`, never a short read. Each
+// offset here names its unit, bits or bytes, because mixing them up would
+// still give a valid binary.
 @vm(binary__slice_bits)
 pub fn slice_bits(b Binary, at_bit Int, take_bits Int) Result(Binary, Nil)
 
-// `len` bytes from byte `at`, sharing `b` without copying. A window past
-// either end is `Err(Nil)`. A last partial byte needs `slice_bits`.
+// Takes `len` bytes starting at byte `at`, sharing `b` without copying. A
+// window past either end gives `Err(Nil)`. To take a last partial byte, use
+// `slice_bits`.
 pub fn slice_bytes(b Binary, at Int, len Int) Result(Binary, Nil) {
 	slice_bits(b, at * 8, len * 8)
 }
 
-// Everything from byte `at` on: `<<>>` past the end, and all of `b` for a
-// negative `at`.
+// Returns everything from byte `at` on. Past the end it returns `<<>>`, and a
+// negative `at` returns all of `b`.
 pub fn drop_bytes(b Binary, at Int) Binary {
 	total = bit_size(b)
 	skip = if at <= 0 {
@@ -41,13 +43,13 @@ pub fn drop_bytes(b Binary, at Int) Binary {
 	} else {
 		match slice_bits(b, skip, total - skip) {
 			Ok(v) -> v
-			// Unreachable: the window is exactly the tail.
+			// This can't fail, because the window is exactly the tail.
 			Err(Nil) -> <<>>
 		}
 	}
 }
 
-// `b` cut at byte `at`, clamped to the binary, so
+// Splits `b` at byte `at`, clamped to the binary, so
 // `append(prefix, suffix) == b` for every `at`.
 pub fn split_at_bytes(b Binary, at Int) (Binary, Binary) {
 	total = bit_size(b)
@@ -63,7 +65,7 @@ pub fn split_at_bytes(b Binary, at Int) (Binary, Binary) {
 	} else {
 		match slice_bits(b, 0, cut) {
 			Ok(v) -> v
-			// Unreachable: the window is exactly the head.
+			// This can't fail, because the window is exactly the head.
 			Err(Nil) -> <<>>
 		}
 	}
@@ -80,8 +82,8 @@ pub fn concat(parts Array(Binary)) Binary {
 @vm(binary__index_of)
 pub fn index_of(haystack Binary, needle Binary, from Int) Option(Int)
 
-// The byte at `i`, or -1 out of range. Not an Option, so a scanner allocates
-// nothing per byte.
+// Returns the byte at `i`, or -1 if `i` is out of range. It doesn't return an
+// Option, so a scanner allocates nothing per byte.
 @vm(binary__byte_at)
 pub fn byte_at(b Binary, i Int) Int
 
@@ -93,8 +95,8 @@ pub type Radix {
 @vm(binary__parse_int)
 fn parse_int_raw(b Binary, radix Radix) Option(Int)
 
-// ASCII digits only, with no sign. Any number of digits is fine, so a caller
-// that needs a limit checks the Int it gets.
+// Parses ASCII digits only, with no sign. Any number of digits is fine, so a
+// caller that needs a limit checks the Int it gets.
 pub fn parse_int(b Binary, radix Radix) Result(Int, Nil) {
 	match parse_int_raw(b, radix) {
 		Some(n) -> Ok(n)
@@ -111,8 +113,9 @@ pub fn to_ascii_lower(b Binary) Binary
 @vm(binary__from_int_ascii)
 pub fn from_int_ascii(n Int, radix Radix) Binary
 
-// Two uppercase hex digits of the low 8 bits of `n`: `hex_byte(13)` is
-// `<<'0D'>>`. For `%XX` escapes, which RFC 3986 §2.1 prefers uppercase.
+// Returns two uppercase hex digits for the low 8 bits of `n`, so
+// `hex_byte(13)` is `<<'0D'>>`. It's for `%XX` escapes, which RFC 3986 §2.1
+// prefers in uppercase.
 pub fn hex_byte(n Int) Binary {
 	b = int::bitwise_and(n, 255)
 	<<hex_digit(int::bitwise_shift_right(b, 4)):8, hex_digit(int::bitwise_and(b, 15)):8>>

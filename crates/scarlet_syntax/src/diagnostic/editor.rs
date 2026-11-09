@@ -88,7 +88,7 @@ fn match_process_name(comm: &str) -> Option<Editor> {
     match_basename(comm.trim())
 }
 
-/// Detect the user's editor once per process; `ps` is forked at most once.
+/// Detects the user's editor once per process, so `ps` runs at most once.
 pub fn detect_editor() -> Option<Editor> {
     static DETECTED: OnceLock<Option<Editor>> = OnceLock::new();
     *DETECTED.get_or_init(detect_editor_uncached)

@@ -9,7 +9,7 @@ fn safe_div(a Int, b Int) Bool {
 }
 
 pub fn main() {
-	// Int is signed 64-bit. / truncates toward zero; % takes the dividend's sign.
+	// / truncates toward zero, and % takes the sign of the dividend.
 	println('7 / 2     ${7 / 2}')
 	println('-7 / 2    ${-7 / 2}')
 	println('7 % 3     ${7 % 3}')
@@ -32,7 +32,7 @@ pub fn main() {
 	println('boxed     ${9223372036854775807 - 1}')
 	println('')
 
-	// Float is a 64-bit double. from_int goes in; floor, ceil, round, truncate come out.
+	// Float is a 64-bit double. from_int converts in, and floor, ceil, round and truncate out.
 	println('from_int  ${float::to_string(float::from_int(3))}')
 	println('floor     ${float::floor(2.7)} ${float::floor(-2.7)}')
 	println('ceil      ${float::ceil(2.1)} ${float::ceil(-2.1)}')

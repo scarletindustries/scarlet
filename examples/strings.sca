@@ -4,7 +4,7 @@ import scarlet/array
 import scarlet/binary
 import scarlet/string
 
-// The stdlib has no join, so this is a fold.
+// The stdlib has no join, so this does it with a fold.
 fn join(parts Array(String), sep String) String {
 	match parts {
 		[] -> ''

@@ -1,6 +1,6 @@
 #![allow(dead_code)]
-// Shared helpers for the integration-test binaries. Lives in a `tests/`
-// subdirectory so Cargo treats it as a module, not a test target.
+// Helpers shared by the integration-test binaries. They live in a `tests/`
+// subdirectory so Cargo treats them as a module, not a test target.
 
 pub mod net;
 
@@ -42,19 +42,20 @@ pub struct AlOutput {
 }
 
 impl AlOutput {
-    /// stdout followed by stderr — diagnostics may land on either stream.
+    /// Returns stdout followed by stderr, because diagnostics can land on either stream.
     pub fn combined(&self) -> String {
         format!("{}{}", self.stdout, self.stderr)
     }
 }
 
-/// Ceiling on any `scarlet` subprocess a test spawns. Deliberately generous: under
-/// a parallel `cargo test` a tight bound turns load into a spurious kill. The
-/// point is only that a wedged child fails one test instead of hanging the run.
+/// The longest any `scarlet` subprocess a test spawns may run. It's generous on
+/// purpose, because under a parallel `cargo test` a tight bound turns load into a
+/// spurious kill. It only has to make a wedged child fail one test instead of
+/// hanging the whole run.
 pub const CHILD_TIMEOUT_SECS: u64 = 120;
 
 /// Kills its child on drop, so a panicking or early-returning test still reaps
-/// the `scarlet` it spawned. A SIGKILLed parent runs no `Drop`, so this is not total.
+/// the `scarlet` it spawned. A SIGKILLed parent runs no `Drop`, so this can still miss.
 pub struct ChildGuard(pub Option<Child>);
 
 impl ChildGuard {
@@ -76,9 +77,9 @@ impl Drop for ChildGuard {
     }
 }
 
-/// `al <subcommand> <path>`, bounded by [`CHILD_TIMEOUT_SECS`].
+/// Runs `al <subcommand> <path>` and kills it after [`CHILD_TIMEOUT_SECS`].
 ///
-/// Not `Command::output()`: that waits forever, so a program that blocks (a
+/// It doesn't use `Command::output()`, which waits forever, so a program that blocks (a
 /// server example, a `net.connect` to a listener a miscompile never accepted)
 /// would wedge the whole test binary.
 pub fn run_al(subcommand: &str, path: &Path) -> AlOutput {
@@ -92,8 +93,8 @@ pub fn run_al(subcommand: &str, path: &Path) -> AlOutput {
         .spawn()
         .expect("spawn al");
     let out = wait_or_kill(child, CHILD_TIMEOUT_SECS);
-    // No exit code means the child died by signal — a reaped wedge or a VM
-    // crash. Both would otherwise read as "produced no output".
+    // No exit code means the child died by signal, either a reaped wedge or a
+    // VM crash. Both would otherwise look like "produced no output".
     assert!(
         out.status.code().is_some(),
         "`al {subcommand} {}` died by signal (wedged past {CHILD_TIMEOUT_SECS}s, or crashed)\n\
@@ -113,8 +114,8 @@ pub fn run_al(subcommand: &str, path: &Path) -> AlOutput {
 /// Wait up to `secs` for a self-terminating `child` to exit, then collect its
 /// output.
 ///
-/// The pipes MUST be drained while waiting, not after. A pipe holds ~64 KiB; a
-/// child that writes more blocks in `write` until someone reads, so a parent
+/// The pipes MUST be drained while waiting, not after. A pipe holds about 64 KiB,
+/// and a child that writes more blocks in `write` until someone reads, so a parent
 /// polling `try_wait` without reading deadlocks against its own child. `al
 /// check` on a 60k-term `else if` chain renders a 1.1 MB diagnostic and hits
 /// this instantly.
@@ -149,8 +150,8 @@ pub fn wait_or_kill(mut child: Child, secs: u64) -> Output {
             Err(_) => break,
         }
     }
-    // No-op if it already exited. Killing closes the pipes, so the drain
-    // threads see EOF and join.
+    // This does nothing if the child already exited. Killing it closes the
+    // pipes, so the drain threads see EOF and join.
     child.kill().ok();
     let status = child.wait().expect("wait for child");
     Output {
@@ -172,7 +173,7 @@ pub fn run_source(cmd: &str, source: &str) -> AlOutput {
     out
 }
 
-/// `source` followed by the captured streams, for assertion-failure messages.
+/// Formats `source` and the captured streams for an assertion failure message.
 fn dump(source: &str, out: &AlOutput) -> String {
     format!(
         "{source}\n--- stdout ---\n{}\n--- stderr ---\n{}",
@@ -180,9 +181,9 @@ fn dump(source: &str, out: &AlOutput) -> String {
     )
 }
 
-/// Assert `out` is a *clean* rejection: failure exit, a real exit code (never a
-/// signal), no Rust panic, and a diagnostic matching one of `expected_diags` on
-/// either stream. An empty entry pins only the clean-rejection contract.
+/// Asserts `out` is a *clean* rejection. It must exit with failure and a real exit
+/// code (never a signal), not panic, and print a diagnostic matching one of
+/// `expected_diags` on either stream. An empty entry checks only the clean rejection.
 pub fn assert_rejects(out: &AlOutput, cmd: &str, source: &str, expected_diags: &[&str]) {
     assert!(
         !out.success,
@@ -229,7 +230,7 @@ macro_rules! reject_case {
     };
 }
 
-/// The `reject_case!` sibling for runtime rejections, via [`run_rejects`].
+/// Works like `reject_case!`, but for runtime rejections, via [`run_rejects`].
 #[macro_export]
 macro_rules! run_reject_case {
     ( $( $(#[$m:meta])* $name:ident: ($src:expr, $msg:expr $(,)?) ),* $(,)? ) => {
@@ -249,21 +250,21 @@ pub fn run_rejects(source: &str, expected_diag: &str) -> AlOutput {
     out
 }
 
-/// `al <cmd>` the project file `entry` and assert it fails cleanly with a
-/// diagnostic matching one of `msgs`.
+/// Runs `al <cmd>` on the project file `entry` and asserts it fails cleanly with
+/// a diagnostic matching one of `msgs`.
 pub fn project_rejects(proj: &Project, cmd: &str, entry: &str, msgs: &[&str]) {
     let r = run_al(cmd, &proj.dir.join(entry));
     assert_rejects(&r, cmd, entry, msgs);
 }
 
-/// `al <cmd>` the project file `entry`, asserting exactly `expected` on stdout.
+/// Runs `al <cmd>` on the project file `entry` and asserts stdout is exactly `expected`.
 pub fn run_project_outputs(proj: &Project, cmd: &str, entry: &str, expected: &str) {
     let r = run_al(cmd, &proj.dir.join(entry));
     assert!(r.success, "stdout: {}\nstderr: {}", r.stdout, r.stderr);
     assert_eq!(r.stdout, expected, "stderr: {}", r.stderr);
 }
 
-/// The accepting counterpart of `reject_case!`, via [`check_ok`].
+/// Works like `reject_case!`, but asserts `al check` accepts each source, via [`check_ok`].
 #[macro_export]
 macro_rules! ok_case {
     ( $( $(#[$m:meta])* $name:ident: ($src:expr $(,)?) ),* $(,)? ) => {
@@ -369,7 +370,7 @@ pub fn cursor(src: &str, needle: &str, nth: usize, into: i32) -> (i32, i32) {
 }
 
 /// A throwaway on-disk project directory for `IncrementalSession` tests.
-/// Uniquely named so concurrent tests never collide; `Drop` removes it.
+/// Each one gets a unique name so concurrent tests never collide, and `Drop` removes it.
 pub struct Project {
     pub dir: PathBuf,
 }
@@ -399,9 +400,9 @@ impl Project {
     pub fn write(&self, name: &str, src: &str) {
         let path = self.dir.join(name);
         fs::write(&path, src).unwrap();
-        // Force a strictly-increasing mtime. `source_changed` is stat-gated
-        // on `(mtime, len)`, so a same-length edit is silently dropped on a
-        // coarse-mtime FS when the sequence finishes within one tick.
+        // Give each write a strictly later mtime. `source_changed` only looks at
+        // `(mtime, len)`, so on a filesystem with coarse mtimes it would silently
+        // miss a same-length edit made within the same tick.
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         fs::File::open(&path)
@@ -424,7 +425,7 @@ use scarlet::module::{self, ModulePath};
 use scarlet::reference::{DefId, Definition, EntityKind, ModuleId, ReferenceGraph};
 use scarlet::span::Span;
 
-/// Fresh session checking `entry` against project `p`, asserting success.
+/// Makes a fresh session, checks `entry` against project `p`, and asserts it succeeds.
 pub fn checked_with(p: &Project, entry: &str) -> IncrementalSession {
     let mut s = IncrementalSession::new();
     let r = s.check(&parse(entry), Some(&p.dir));
@@ -447,12 +448,12 @@ pub struct SymbolInfo {
     pub span: Span,
 }
 
-/// (name, kind) pairs — the debug tail for `assert!`s over a symbol list.
+/// Lists the (name, kind) pairs, for the failure message of an `assert!` over symbols.
 pub fn sym_names(syms: &[SymbolInfo]) -> Vec<(&str, EntityKind)> {
     syms.iter().map(|s| (s.name.as_str(), s.kind)).collect()
 }
 
-/// Assert `syms` includes a `name` of `kind`; dumps every (name, kind) on failure.
+/// Asserts `syms` includes a `name` of `kind`, and prints every (name, kind) if not.
 pub fn assert_has_sym(syms: &[SymbolInfo], name: &str, kind: EntityKind) {
     assert!(
         syms.iter().any(|s| s.name == name && s.kind == kind),
@@ -492,20 +493,21 @@ pub fn module_key(dir: &std::path::Path, file: &str) -> module::ModuleKey {
 }
 
 fn module_for(g: &ReferenceGraph, module_or_uri: &str) -> Option<ModuleId> {
-    // 1. The canonical key, exactly (lookup-not-mint, like the LSP boundary).
+    // 1. Try the canonical key exactly. Like the LSP boundary, this looks a key up
+    // and never mints one.
     if let Some(id) = g.module_id_by_key(&module::ModuleKey::from_lookup_str(module_or_uri)) {
         return Some(id);
     }
-    // 2. A path to the source file — what the LSP passes, via a URI.
+    // 2. Try a path to the source file, which is what the LSP passes in a URI.
     let p = std::path::Path::new(module_or_uri);
     if p.is_file()
         && let Some(id) = g.module_id_by_key(&module::ModuleKey::for_file(p))
     {
         return Some(id);
     }
-    // 3. Test ergonomics only: a written name (`./c`, `b`). A module's name is
-    // NOT its identity, so this matches the last path segment and panics on
-    // ambiguity rather than silently picking one.
+    // 3. For test convenience only, try a written name (`./c`, `b`). A module's
+    // name is NOT its identity, so this matches the last path segment and panics
+    // if several modules match rather than silently picking one.
     let want = module_or_uri.rsplit('/').next().unwrap_or(module_or_uri);
     let hits: Vec<ModuleId> = g
         .modules()
@@ -516,7 +518,7 @@ fn module_for(g: &ReferenceGraph, module_or_uri: &str) -> Option<ModuleId> {
         [one] => return Some(*one),
         [] => {}
         many => panic!(
-            "module name {module_or_uri:?} is ambiguous across {} modules;              pass the source path instead",
+            "module name {module_or_uri:?} is ambiguous across {} modules; pass the source path instead",
             many.len()
         ),
     }
@@ -549,7 +551,7 @@ pub trait SessionQueryExt {
 }
 
 impl SessionQueryExt for IncrementalSession {
-    /// goto-definition: the declaration the occurrence under the cursor names.
+    /// Goto-definition: finds the declaration the occurrence under the cursor names.
     fn definition(&self, module_or_uri: &str, line: i32, col: i32) -> Option<(ModulePath, Span)> {
         let g = self.reference_graph();
         let m = module_for(g, module_or_uri)?;
@@ -577,8 +579,8 @@ impl SessionQueryExt for IncrementalSession {
         Some((id, cursor))
     }
 
-    /// find-references: the declaration plus every occurrence workspace-wide,
-    /// with the declaration's self-occurrence de-duplicated.
+    /// Find-references: returns the declaration plus every occurrence in the
+    /// workspace, without listing the declaration's own occurrence twice.
     fn references(&self, def: DefId) -> Vec<(ModulePath, Span)> {
         let g = self.reference_graph();
         let mut out: Vec<(ModulePath, Span)> = Vec::new();
@@ -598,7 +600,7 @@ impl SessionQueryExt for IncrementalSession {
         out
     }
 
-    /// Every span a rename rewrites: identical to find-references.
+    /// Returns every span a rename rewrites, which is the same as find-references.
     fn rename(&self, def: DefId) -> Vec<(ModulePath, Span)> {
         self.references(def)
     }

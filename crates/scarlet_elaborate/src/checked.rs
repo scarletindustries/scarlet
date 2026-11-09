@@ -1,21 +1,22 @@
-//! The checked tree: what the type-checking walk built, one node per
-//! expression it checked.
+//! The checked tree is what the type-checking walk builds. It has one node for
+//! each expression the walk checked.
 //!
 //! Every node carries the type the walk inferred for it, and every name and
 //! lambda carries what the walk resolved it to, in the frame that was live at
 //! the time. The elaborator turns this tree into [`super::TypedExpr`] once the
-//! module's types are final; it reads everything it needs off the node in
-//! hand, so nothing has to line the two walks up.
+//! module's types are final. It reads everything it needs from the node in
+//! hand, so nothing has to keep the two walks in step.
 //!
-//! Types here are live inference [`Ty`]s, not yet resolved: a body's types are
-//! only final once its whole SCC has been generalized, and the decisions that
-//! need them (which binop, which field slot, which `or` shape) wait for that.
+//! Types here are live inference [`Ty`]s that aren't resolved yet. A body's
+//! types are only final once its whole SCC (the group of definitions that call
+//! each other) has been generalised. The decisions that need them, such as
+//! which binop, which field slot and which `or` shape, wait until then.
 //!
 //! Every local binding the walk made has a [`BinderId`], recorded where the
 //! binding is made and on every use the walk resolved to it, so the elaborator
 //! never looks a name up by its spelling.
 //!
-//! Patterns are resolved once, here: a constructor pattern names its variant
+//! Patterns are resolved once, here. A constructor pattern names its variant
 //! and has one sub-pattern per declared field, and every name a pattern binds
 //! has its binder. Exhaustiveness and the elaborator both read this, so
 //! neither looks a constructor up again.
@@ -45,7 +46,8 @@ pub enum CKind {
         name: StrId,
         fact: NameFact,
     },
-    /// `module::member` in value position. Never a local, whatever its name.
+    /// `module::member` in value position. It is never a local, whatever its
+    /// name.
     Member {
         name: StrId,
         fact: NameFact,
@@ -102,8 +104,8 @@ pub enum CKind {
         receiver: Option<(StrId, BinderId)>,
         body: Box<CExpr>,
     },
-    /// The nodes stay at the indices the source gave them: a module toplevel
-    /// schedules its declarations by index.
+    /// The nodes keep the indices the source gave them, because a module
+    /// toplevel schedules its declarations by index.
     Block(Vec<CNode>),
     /// Something the check walk reported an error for. A module holding one
     /// is never elaborated.
@@ -125,11 +127,11 @@ pub struct CBinSeg {
 /// How wide a `<<..>>` segment is, with its size expression checked.
 #[derive(Debug, Clone)]
 pub enum CWidth {
-    /// `:N` / `:size(..)`; `None` is the default 8 bits.
+    /// `:N` or `:size(..)`. `None` means the default of 8 bits.
     Int(Option<CExpr>),
-    /// `:bytes(..)`; `None` is `:binary`, which takes the rest.
+    /// `:bytes(..)`. `None` means `:binary`, which takes the rest.
     Bytes(Option<CExpr>),
-    /// `:utf8`: one codepoint, as wide as its encoding.
+    /// `:utf8`, which is one codepoint, as wide as its encoding.
     Utf8,
 }
 
@@ -139,8 +141,8 @@ pub enum CArrayElem {
     Spread(CExpr),
 }
 
-/// A call's callee. A name is resolved where it stands, never checked as an
-/// expression of its own.
+/// A call's callee. A name is resolved where it stands and is never checked as
+/// an expression of its own.
 #[derive(Debug, Clone)]
 pub enum CCallee {
     Name {
@@ -175,8 +177,8 @@ pub struct CPat {
 
 #[derive(Debug, Clone)]
 pub enum CPatKind {
-    /// Matches anything and binds nothing: `_`, a write-only `_name`, or a
-    /// constructor field the source left out.
+    /// Matches anything and binds nothing. This is `_`, a write-only `_name`,
+    /// or a constructor field the source left out.
     Wild,
     Bind {
         name: StrId,
@@ -213,7 +215,7 @@ pub enum CPatKind {
 /// The `..rest` of an array or binary pattern.
 #[derive(Debug, Clone)]
 pub enum CRest {
-    /// No rest: the pattern matches exactly what it lists.
+    /// With no rest, the pattern matches exactly what it lists.
     None,
     /// `..` or `.._`.
     Discard,
@@ -225,7 +227,7 @@ pub enum CRest {
 
 #[derive(Debug, Clone)]
 pub enum CBinPatSeg {
-    /// `<<'GET ', ..>>`: these bytes, as a prefix.
+    /// `<<'GET ', ..>>`, which matches these bytes as a prefix.
     Literal(String),
     Value {
         width: CWidth,
@@ -265,10 +267,11 @@ pub enum CNode {
         binder: BinderId,
         init: CExpr,
     },
-    /// A statement evaluated only for its effect: a backpass the desugarer
-    /// left behind.
+    /// A statement run only for its side effect, which is a backpass the
+    /// desugarer left behind.
     Effect(CExpr),
-    /// A type declaration, an import, a `@vm` fn: nothing to elaborate.
+    /// A type declaration, an import or a `@vm` fn, none of which has anything
+    /// to elaborate.
     Nothing,
 }
 
@@ -279,14 +282,15 @@ pub struct NameFact {
     pub ty: Ty,
     pub at: NameAt,
     /// The declared parameter labels when the name is a module `fn` called
-    /// here, `None` for every other name. Labels are refused on anything else.
+    /// here, and `None` for every other name. Labels are refused on anything
+    /// else.
     pub param_labels: Option<Vec<StrId>>,
 }
 
 /// One local binding of one body: a parameter, a name a binding statement or
 /// a pattern binds, an `or` receiver, or a module's own top-level declaration.
-/// Each binding gets its own, so a name bound twice has two. Unique within the
-/// body that binds it, and counted from zero there.
+/// Each binding gets its own, so a name bound twice has two. It is unique
+/// within the body that binds it, and counted from zero there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BinderId(pub u32);
 

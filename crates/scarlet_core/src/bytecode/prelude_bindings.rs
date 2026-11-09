@@ -371,7 +371,6 @@ mod tests {
         );
     }
 
-    /// the first time an array literal is typed.
     /// A prelude type at the wrong arity must fail here, not as a unify error
     /// the first time an array literal is typed.
     #[test]

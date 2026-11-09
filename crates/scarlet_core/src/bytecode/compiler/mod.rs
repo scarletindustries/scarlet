@@ -1,44 +1,46 @@
-//! AST → core IR: orchestrates Hindley–Milner type inference, elaboration to
-//! the typed IR, lowering to core IR and Perceus. The output is a
-//! [`Program`]: every function body, every module's top level, and `main`.
+//! Turns the AST into core IR. It drives Hindley–Milner type inference,
+//! elaboration to the typed IR, lowering to core IR and Perceus. The output is
+//! a [`Program`], which holds every function body, every module's top level,
+//! and `main`.
 //!
-//! Function bodies go through the Core IR pipeline: the fused
-//! [`ModuleChecker::compile_expr`] walk runs first for type inference (a type that
-//! unification just resolved is immediately available so elaboration can pick
-//! typed operations — `IntAdd` over `Add` — and pattern lowering can consult
-//! variant layouts), then the typechecked body is elaborated, lowered to
-//! [`crate::core_ir`] ANF and run through Core→Core passes (Perceus reuse,
-//! later mode inference). See [`ModuleChecker::compile_fn_body`] and
+//! Function bodies go through the Core IR pipeline. First the fused
+//! [`ModuleChecker::compile_expr`] walk runs type inference. A type that
+//! unification just solved is available straight away, so elaboration can pick
+//! typed operations (`IntAdd` instead of `Add`) and pattern lowering can look
+//! at variant layouts. Then the checked body is elaborated, lowered to
+//! [`crate::core_ir`] ANF, and run through the Core→Core passes (Perceus reuse,
+//! and later mode inference). See [`ModuleChecker::compile_fn_body`] and
 //! `docs/core-ir-spec.md`.
 //!
-//! Module top level is the exception: declarations are mutually
-//! recursive and order-free, so `analysis.rs` runs its multi-pass declaration
-//! analysis first and hands each body back to this file.
+//! A module's top level is the exception. Its declarations can refer to each
+//! other in any order, so `analysis.rs` runs its declaration analysis in
+//! several passes first and hands each body back to this file.
 //!
 //! # Map of the module
 //!
-//! - **This file** — [`Compiler`] + entry points ([`compile`] / [`check`] /
-//!   [`check_as_module`]): scoping and inference state in one struct,
-//!   documented field by field; the pass itself (`compile_node` /
-//!   `compile_expr` and friends, one method per AST form); and the Core IR
-//!   orchestration ([`ModuleChecker::compile_fn_body`]).
-//! - **`patterns.rs`** — pattern type-checking: [`ModuleChecker::type_pattern`]
-//!   plus constructor lookup and argument slotting.
-//! - **`bridges.rs`** — the [`ElabCtx`] impl through which the elaborator
-//!   speaks to this compilation.
-//! - **`tests.rs`** — the unit-test modules.
+//! - **This file** has the [`Compiler`] and the entry points ([`compile`],
+//!   [`check`] and [`check_as_module`]). It holds the scoping and inference
+//!   state in one struct, documented field by field. It also has the pass
+//!   itself (`compile_node`, `compile_expr` and the rest, one method per AST
+//!   form) and drives the Core IR pipeline
+//!   ([`ModuleChecker::compile_fn_body`]).
+//! - **`patterns.rs`** type-checks patterns: [`ModuleChecker::type_pattern`],
+//!   plus looking up constructors and putting their arguments in slots.
+//! - **`bridges.rs`** has the [`ElabCtx`] impl the elaborator uses to talk to
+//!   this compilation.
+//! - **`tests.rs`** has the unit tests.
 //!
-//! The LSP/workspace layer that owns a `Compiler` across edits —
-//! [`IncrementalSession`], [`Watermark`]/`reset_to`, and the reference-graph
-//! finalization — lives in [`super::session`].
+//! The LSP and workspace layer that keeps a `Compiler` across edits lives in
+//! [`super::session`]. That is [`IncrementalSession`], [`Watermark`] and
+//! `reset_to`, and building the reference graph at the end.
 //!
 //! # Invariants
 //!
-//! - Everything a compile appends to (inference pool, type env, function
-//!   table, constants) stays append-only between module boundaries; that is
-//!   what makes `Watermark` rollback pure truncation.
-//! - Each body being walked has a frame, and each block in it a map of its
-//!   own names (`frame.rs`): closing a block drops its map.
+//! - Everything a compile adds to (the inference pool, the type env, the
+//!   function table and the constants) only grows between module boundaries.
+//!   That is why rolling back to a `Watermark` is just truncation.
+//! - Each body being walked has a frame, and each block in it has a map of its
+//!   own names (`frame.rs`). Closing a block drops its map.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -87,50 +89,50 @@ mod patterns;
 #[cfg(test)]
 mod tests;
 
-/// The proof the elaborator demands before it will run. Its own module so
-/// that the private field is unforgeable from the rest of this module.
+/// The proof the elaborator asks for before it will run. It has its own module
+/// so nothing else in this module can forge the private field.
 mod clean {
     use crate::diagnostic::{Diagnostic, has_errors};
 
-    /// Proof — as of the moment it was minted — that the module being compiled
-    /// has produced no error diagnostic.
+    /// Proof that, at the moment it was minted, the module being compiled had
+    /// produced no error diagnostic.
     ///
-    /// There is no error node anywhere past the typecheck walk:
+    /// After the typecheck walk there is no error node anywhere.
     /// [`TypedExpr`](crate::typed_ir::TypedExpr) has no poison arm, `lower` has
     /// nothing to emit for a subtree the typechecker rejected, and `perceus`
-    /// has no type to compute its shape from. Rather than teach every pass to
-    /// recognise poison, the whole pipeline is made *unreachable* from a
-    /// poisoned module at its **first** gate, which is the elaborator and not
-    /// `lower`: `typed_ir::elaborate_body`/`elaborate_toplevel` are the only
-    /// constructors of a [`TypedFn`](crate::typed_ir::TypedFn), hence of the
-    /// [`TypedProgram`](crate::typed_ir::TypedProgram) that `lower` consumes,
-    /// and [`ModuleChecker::elaborate_then_materialize`](super::ModuleChecker::elaborate_then_materialize)
-    /// is the only place in this compiler that calls them. It consumes a
+    /// has no type to work out its shape from. Instead of teaching every pass
+    /// to recognise poison, we make the whole pipeline *unreachable* from a
+    /// poisoned module at its **first** gate. That gate is the elaborator, not
+    /// `lower`. `typed_ir::elaborate_body` and `elaborate_toplevel` are the
+    /// only things that build a [`TypedFn`](crate::typed_ir::TypedFn), and so
+    /// the [`TypedProgram`](crate::typed_ir::TypedProgram) that `lower` takes.
+    /// [`ModuleChecker::elaborate_then_materialize`](super::ModuleChecker::elaborate_then_materialize)
+    /// is the only place in this compiler that calls them. It takes a
     /// `CleanModule`, and [`CleanModule::mint`] is the only way to make one.
     ///
-    /// (`core_ir::lower::lower` itself takes no proof — it does not need
-    /// one. Its argument *is* the proof: a `TypedProgram` cannot exist for a
-    /// module that failed to typecheck, because the only way to build one runs
+    /// (`core_ir::lower::lower` itself takes no proof, because it doesn't need
+    /// one. Its argument *is* the proof. A `TypedProgram` can't exist for a
+    /// module that failed to typecheck, because the only way to build one goes
     /// through the gate above.)
     ///
-    /// A body the walk rejected is therefore never elaborated; it is closed out
-    /// empty, which is what the fused pipeline always did. In particular the
-    /// elaborator's abort on a `CKind::Error` node — exactly what a rejected
-    /// subtree looks like in the checked tree — cannot be reached from a
-    /// module that already reported a type error, so a plain type error never
-    /// turns into a compiler-bug report.
+    /// So a body the walk rejected is never elaborated. It is closed out empty,
+    /// which is what the fused pipeline always did. In particular, the
+    /// elaborator aborts on a `CKind::Error` node, which is exactly what a
+    /// rejected subtree looks like in the checked tree. That abort can't be
+    /// reached from a module that already reported a type error, so a plain
+    /// type error never turns into a compiler-bug report.
     ///
-    /// Neither `Copy` nor `Clone`, and taken by value: cleanliness established
-    /// before one elaboration says nothing about the state after it, since an
-    /// elaboration can itself append diagnostics. Each one re-proves it.
+    /// It is neither `Copy` nor `Clone`, and is taken by value. Being clean
+    /// before one elaboration says nothing about the state after it, because an
+    /// elaboration can add diagnostics itself. So each one proves it again.
     #[must_use]
     pub(super) struct CleanModule {
         _priv: (),
     }
 
     impl CleanModule {
-        /// `Some` iff `diagnostics` carries no error — exactly the predicate
-        /// `CompileResult::success` reports, so gating on this proof cannot
+        /// `Some` exactly when `diagnostics` has no error. That is the same
+        /// test `CompileResult::success` reports, so gating on this proof can't
         /// change which diagnostics the user sees.
         pub(super) fn mint(diagnostics: &[Diagnostic]) -> Option<Self> {
             (!has_errors(diagnostics)).then_some(Self { _priv: () })
@@ -139,16 +141,16 @@ mod clean {
 }
 use clean::CleanModule;
 
-/// Proof that the entry frame's toplevel was spliced into the code: the
-/// user's program is actually in the `Program`, not just the stdlib init that
-/// precedes it.
+/// Proof that the entry frame's toplevel was spliced into the code, so the
+/// user's program really is in the `Program` and not just the stdlib init that
+/// comes before it.
 ///
-/// Minted only by [`ModuleChecker::record_toplevel`] on its `Entry` path, and the
-/// only way to reach [`CompileResult::into_runnable`]. Without it, a compile
-/// that rejected the module could still hand back a program that runs the
-/// stdlib and nothing else — which does not fail, it silently evaluates to
-/// whatever the globals were pre-filled with. A caller cannot tell that apart
-/// from a real result, and one did not.
+/// Only [`ModuleChecker::record_toplevel`] mints it, on its `Entry` path, and
+/// it is the only way to reach [`CompileResult::into_runnable`]. Without it, a
+/// compile that rejected the module could still hand back a program that runs
+/// the stdlib and nothing else. That program doesn't fail. It quietly evaluates
+/// to whatever the globals were pre-filled with. A caller can't tell that apart
+/// from a real result, and one didn't.
 #[must_use]
 struct EntryToplevel {
     _priv: (),
@@ -159,21 +161,22 @@ enum Place {
     /// Bound in the function being compiled, by this binding. The elaborator
     /// knows it by its own `BindingId`, so it never asks where it is.
     ThisFunction(BinderId),
-    /// Reached from outside the function: a capture, a global, or the
+    /// Reached from outside the function, as a capture, a global, or the
     /// function itself.
     Outside(Denotation),
 }
 
-/// Why a nominal `.field` lookup failed. Carries enough of the offending
-/// variant for the typecheck path to render its diagnostics; lower just
-/// discards it.
+/// Why looking up a `.field` on a nominal type failed. It carries enough of the
+/// variant at fault for the typecheck path to write its diagnostics. Lowering
+/// just throws it away.
 enum FieldMismatch {
-    /// Receiver's type body has no variants at all (alias, opaque, builtin).
+    /// The receiver's type has no variants at all (an alias, an opaque type or
+    /// a builtin).
     NotNominal,
-    /// Variant list is empty, so no field can exist.
+    /// The variant list is empty, so no field can exist.
     NoVariants,
-    /// A variant with no field of that name, so a value of it has nothing to
-    /// read.
+    /// A variant with no field of that name, so a value of that variant has
+    /// nothing to read.
     MissingOn(StrId),
 }
 
@@ -181,8 +184,8 @@ enum FieldMismatch {
 struct SharedField {
     /// Its type, which every variant agrees on.
     ty: Ty,
-    /// Where it sits in each variant, by variant index. Variants may disagree:
-    /// a read looks the field up by name, not by position.
+    /// Where it sits in each variant, by variant index. Variants may disagree,
+    /// because a read looks the field up by name, not by position.
     slots: SmallVec<[u32; 4]>,
 }
 
@@ -194,9 +197,9 @@ struct SharedField {
 /// Whether a compilation unit reports the bindings it never uses.
 ///
 /// A file is a whole program, so a binding nothing reads is a mistake worth
-/// reporting. A REPL entry is a fragment of a session — the line that uses the
-/// name has not been typed yet — so the same check would reject exactly the
-/// entries the user meant.
+/// reporting. A REPL entry is a piece of a session, where the line that uses
+/// the name hasn't been typed yet. There, the same check would reject exactly
+/// the entries the user meant.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum UnusedBindings {
     #[default]
@@ -206,12 +209,12 @@ pub enum UnusedBindings {
 
 /// What a module's top level may contain.
 ///
-/// A program is declarations — `import`, `fn`, `type`, `const` — and starts
-/// at `pub fn main()`; statements at module scope are rejected, in the entry
-/// file exactly as in an imported module. The REPL is the one place code is
-/// entered a statement at a time, and its bindings have to persist from one
-/// entry to the next, which is what module-scope binds are; so it compiles
-/// in [`Script`](ModuleScope::Script) mode, and nothing else does.
+/// A program is made of declarations (`import`, `fn`, `type` and `const`) and
+/// starts at `pub fn main()`. Statements at module scope are rejected, in the
+/// entry file just as in an imported module. The REPL is the one place where
+/// code is entered one statement at a time, and its bindings have to last from
+/// one entry to the next, which is what module-scope bindings are. So the REPL
+/// compiles in [`Script`](ModuleScope::Script) mode, and nothing else does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ModuleScope {
     #[default]
@@ -220,43 +223,44 @@ pub enum ModuleScope {
 }
 
 pub struct CompileResult {
-    /// The program, when the compile built one. `None` for a check, for a
+    /// The program, when the compile built one. It is `None` for a check, for a
     /// module that failed, and for the incremental (LSP) session.
     ///
-    /// Private, and reachable only through [`into_runnable`](Self::into_runnable),
-    /// which also demands the [`EntryToplevel`] witness.
+    /// It is private, and you can only reach it through
+    /// [`into_runnable`](Self::into_runnable), which also asks for the
+    /// [`EntryToplevel`] witness.
     program: Option<Program>,
-    /// Set iff the entry toplevel was spliced. See [`EntryToplevel`].
+    /// Set exactly when the entry toplevel was spliced. See [`EntryToplevel`].
     entry: Option<EntryToplevel>,
     pub diagnostics: Vec<Diagnostic>,
-    /// Workspace reference graph (the single source of truth for goto-def /
-    /// find-refs / rename / symbols / dead-code). An owned `Rc` handle so the
-    /// owning `IncrementalSession` can keep answering queries against the same
-    /// graph after the result is handed back.
+    /// The workspace reference graph, which is the one source of truth for
+    /// goto-def, find-references, rename, symbols and dead code. It is an `Rc`
+    /// handle, so the `IncrementalSession` that owns it can keep answering
+    /// queries on the same graph after handing back the result.
     pub(crate) references: Rc<ReferenceGraph>,
 }
 
 impl CompileResult {
-    /// Whether the compile succeeded — definitionally, whether `diagnostics`
-    /// carries no error. Derived rather than stored so no construction site
-    /// can disagree with the diagnostics it hands back.
+    /// Whether the compile succeeded, which by definition means `diagnostics`
+    /// has no error. It is worked out, not stored, so no place that builds a
+    /// result can disagree with the diagnostics it hands back.
     pub fn success(&self) -> bool {
         !has_errors(&self.diagnostics)
     }
 
     /// The program to run, and the only way to reach one.
     ///
-    /// `None` unless the compiler recorded the user's toplevel — which a
+    /// It is `None` unless the compiler recorded the user's toplevel, which a
     /// check-only compile and a rejected module both skip. The answer comes
-    /// from that recording itself ([`EntryToplevel`]), not from re-reading
-    /// `diagnostics`, so a caller that filters a diagnostic away cannot turn
-    /// a compile that never lowered into a run.
+    /// from that recording itself ([`EntryToplevel`]), not from reading
+    /// `diagnostics` again. So a caller that filters out a diagnostic can't
+    /// turn a compile that never lowered into a run.
     pub fn into_runnable(self) -> Option<Program> {
         let _recorded = self.entry?;
         self.program
     }
 
-    /// A compile that materialised no program: a check-only session, or a
+    /// A compile that built no program. That is a check-only session, or a
     /// stdlib seed that failed before the user's program was touched.
     pub(crate) fn analysis_only(
         diagnostics: Vec<Diagnostic>,
@@ -272,151 +276,155 @@ impl CompileResult {
 }
 
 // ============================================================================
-// Compiler — single-pass: HM type inference + elaboration
+// Compiler: HM type inference and elaboration in a single pass
 // ============================================================================
 
-/// A live local binding: the stack slot it occupies, and what a use of it
+/// A local binding in scope: the stack slot it uses, and what a use of it
 /// means.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct LocalSlot {
     slot: i32,
     /// This name lives in the entry frame, so a nested body loads it with
-    /// `PushGlobal <slot>` instead of capturing it. Decided once at bind time
-    /// by [`ModuleChecker::binds_a_global`]; `resolve_variable` must read this
-    /// rather than re-derive it from where the binding sits.
+    /// `PushGlobal <slot>` instead of capturing it.
+    /// [`ModuleChecker::binds_a_global`] decides this once, when the name is
+    /// bound. `resolve_variable` must read this and not work it out again from
+    /// where the binding sits.
     is_global: bool,
-    /// The binding a use of the name in this frame means. A slot reserved
-    /// before its binding is complete (a `let` whose init is still being
-    /// walked, a pattern name left of a size expression) keeps the binding
-    /// the name meant before; `None` when there was none in this frame.
+    /// The binding that a use of the name in this frame means. A slot reserved
+    /// before its binding is complete (a binding whose initialiser is still
+    /// being walked, or a pattern name left of a size expression) keeps the
+    /// binding the name meant before. It is `None` when there was none in this
+    /// frame.
     binder: Option<BinderId>,
 }
 
-/// One top-level `fn`/`const` declaration of the module currently being
-/// compiled, as the toplevel elaboration needs it.
+/// One top-level `fn` or `const` declaration of the module being compiled, in
+/// the form the toplevel elaboration needs.
 ///
-/// Both facts the elaborator needs about a declaration live on this one record:
-/// where it sits in the module block (so the spine can be scheduled in
-/// dependency order) and which entry-frame slot the check walk already gave it
-/// (so `TypedBind::global` pins the `StoreLocal` that the `PushGlobal`s already
-/// emitted into fn bodies address). Nothing maps the *name* back to a slot.
+/// Both facts the elaborator needs about a declaration live on this one record.
+/// One is where it sits in the module block, so the spine can be scheduled in
+/// dependency order. The other is which entry-frame slot the check walk already
+/// gave it, so `TypedBind::global` pins the `StoreLocal` that the `PushGlobal`s
+/// already emitted into function bodies point at. Nothing maps the *name* back
+/// to a slot.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ToplevelDecl {
-    /// Index of the declaration's node in the module block's `body`.
+    /// The index of the declaration's node in the module block's `body`.
     pub(super) node: usize,
-    /// The declaration's binder in the module toplevel. Read only to resolve
-    /// a forward *reference* to this decl from inside the toplevel spine, and
-    /// the answer is this record's `slot`.
+    /// The declaration's binder in the module toplevel. It is only read to
+    /// resolve a forward *reference* to this declaration from inside the
+    /// toplevel spine, and the answer is this record's `slot`.
     pub(super) binder: BinderId,
-    /// The entry-frame slot Pass 3 allocated for the declaration.
+    /// The entry-frame slot that Pass 3 allocated for the declaration.
     pub(super) slot: GlobalSlot,
 }
 
-// `bool_cluster` fires on the four bool fields below, and the answer is that
-// all 16 states are legal: there is no illegal combination for an enum to
-// name. They are knobs on four unrelated subsystems — pipeline truncation,
-// hover-fact collection, namespace scoping, and a marker for one transient
-// walk — and both corners are reachable. All unset is an ordinary `compile`;
-// all set is `IncrementalSession::new_from_source`, which builds a
-// `check_only` compiler, sets `collect_hover_facts`, then calls
-// `register_prelude`, which runs under `with_retained_namespaces`, inside
-// which `analyse_module` sets `walking_module_statements`. The mode bools in
-// this struct that did carry an invariant are already enums — see
-// [`UnusedBindings`] and [`ModuleScope`]; these four carry none between them.
+// `bool_cluster` fires on the three bool fields below, and the answer is that
+// all 8 states are legal, so there's no illegal combination for an enum to
+// name. They are switches on three unrelated subsystems: cutting the pipeline
+// short, collecting hover facts, and namespace scoping. Both extremes
+// happen. All unset is an ordinary `compile`. All set is an
+// `IncrementalSession`, which builds a `check_only` compiler, sets
+// `collect_hover_facts`, then calls `register_prelude`, which runs under
+// `with_retained_namespaces`. The mode flags in this struct that did carry an
+// invariant are already enums (see [`UnusedBindings`] and [`ModuleScope`]), and
+// these three carry none between them.
 #[cfg_attr(mordant, allow(bool_cluster))]
-/// What lives as long as one compile, or one editor session: the module
-/// table, the type store, and everything compiled so far. A module's own
-/// state lives on its [`ModuleChecker`] instead.
+/// What lives as long as one compile or one editor session. That is the module
+/// table, the type store, and everything compiled so far. A module's own state
+/// lives on its [`ModuleChecker`] instead.
 pub struct Compiler {
-    /// Every function this compile reserved, indexed by [`FuncIdx`], and filled
-    /// once its body is lowered. A slot stays `None` under `check_only` and
-    /// in a module that failed; [`Self::finish_program`] only builds a
-    /// [`Program`] when every one is filled.
+    /// Every function this compile reserved, indexed by [`FuncIdx`] and filled
+    /// in once its body is lowered. A slot stays `None` under `check_only` and
+    /// in a module that failed. [`Self::finish_program`] only builds a
+    /// [`Program`] when every slot is filled.
     pub(super) fns: TiVec<FuncIdx, Option<LoweredFn>>,
     /// Each imported module's lowered top level, in the order they finished
-    /// compiling: a module after everything it imports.
+    /// compiling, so a module comes after everything it imports.
     pub(super) inits: Vec<LoweredFn>,
     /// The entry file's lowered top level, once recorded.
     pub(super) entry_toplevel: Option<LoweredFn>,
     /// `pub fn main`, when the entry file has a usable one.
     pub(super) main: Option<FuncIdx>,
-    /// Every constant this compile pooled, indexed by [`ConstId`]. Handed to
-    /// [`CoreProgram::consts`](crate::core_ir::CoreProgram) wholesale once the
-    /// program is lowered.
+    /// Every constant this compile pooled, indexed by [`ConstId`]. Once the
+    /// program is lowered, the whole list goes to
+    /// [`CoreProgram::consts`](crate::core_ir::CoreProgram).
     pub(super) consts: Vec<Const>,
     /// Each pooled constant → its `ConstId`, so `add_constant` returns the
-    /// existing id for a repeated literal instead of pushing a duplicate.
-    /// Self-validating on lookup (the id is in bounds and still names that
-    /// constant) so `reset_to`'s pool truncate needs no paired invalidation —
-    /// a stale entry just misses.
+    /// existing id for a repeated literal instead of pushing a copy. A lookup
+    /// checks itself (the id is in bounds and still names that constant), so
+    /// truncating the pool in `reset_to` doesn't need to clear this too. A
+    /// stale entry just misses.
     const_dedup: HashMap<Const, ConstId>,
-    /// Set only while the prelude compiles: the by-name env entries it leaves
-    /// *are* the ambient stdlib namespace, so its [`ModuleChecker`] does not
-    /// undo them when it finishes. User modules always compile with it unset.
+    /// Set only while the prelude compiles. The by-name env entries the prelude
+    /// leaves behind *are* the stdlib namespace every program sees, so its
+    /// [`ModuleChecker`] doesn't undo them when it finishes. User modules
+    /// always compile with this unset.
     retain_namespaces: bool,
-    /// Global slot → [`FuncIdx`] for every top-level `fn`
-    /// that has already been compiled. Populated by `compile_declared_function`
-    /// after `finish_fn_frame` assigns the `func_idx`; consulted by
-    /// `resolve_variable` to choose between [`Denotation::known_fn`] and
-    /// [`Denotation::global`], which lets Core call a known top-level fn
-    /// directly (`Callee::Known`) instead of loading it and calling the value.
-    /// A miss (forward ref within an SCC, or a non-fn global) falls back to the
-    /// value call.
+    /// Global slot → [`FuncIdx`] for every top-level `fn` compiled so far.
+    /// `compile_declared_function` fills it in after `finish_fn_frame` assigns
+    /// the `func_idx`. `resolve_variable` reads it to choose between
+    /// [`Denotation::known_fn`] and [`Denotation::global`], which lets Core
+    /// call a known top-level function directly (`Callee::Known`) instead of
+    /// loading it and calling the value. A miss (a forward reference inside an
+    /// SCC, or a global that isn't a function) falls back to calling the value.
     pub(super) global_to_func: HashMap<GlobalSlot, crate::core_ir::FuncIdx>,
-    /// Memo for [`ElabCtx::resolve_rty`], keyed by union-find root: one pool
-    /// node per solved type, for the whole `TypedProgram` the current
-    /// `elaborate` call is building. Cleared there, with the pool.
+    /// The memo for [`ElabCtx::resolve_rty`], keyed by union-find root. It
+    /// keeps one pool node per solved type for the whole `TypedProgram` that
+    /// the current `elaborate` call is building, and is cleared there along
+    /// with the pool.
     rty_cache: HashMap<Ty, RTy>,
     pub(super) engine: InferEngine,
     pub(super) env: TypeEnv,
     pub(super) recorded: Vec<RawRef>,
     check_only: bool,
-    /// Whether to buffer per-occurrence `RawRef`s and resolve them into the
-    /// `HoverFact` table in `finalize_references`. Only `IncrementalSession`
-    /// (the LSP) consumes `HoverFact`s; the free `compile`/`check` entry points
-    /// discard them, so they leave this `false` and the whole O(occurrences)
-    /// resolve pass (a deep `Type`-tree build + `HashSet` alloc per occurrence)
-    /// plus the per-occurrence `name.to_string()` is skipped. The reference
-    /// graph (goto-def/find-refs/dead-code) is built independently via
-    /// `module_refs` and is unaffected.
+    /// Whether to buffer a `RawRef` for each occurrence and resolve them into
+    /// the `HoverFact` table in `finalize_references`. Only
+    /// `IncrementalSession` (the LSP) uses `HoverFact`s. The free `compile` and
+    /// `check` entry points throw them away, so they leave this `false` and
+    /// skip the whole resolve pass, which builds a deep `Type` tree, allocates
+    /// a `HashSet` and calls `name.to_string()` for every occurrence. The
+    /// reference graph (goto-def, find-references and dead code) is built
+    /// separately from `module_refs` and isn't affected.
     pub(super) collect_hover_facts: bool,
     /// Whether closing a block reports the names nothing read. See
     /// [`UnusedBindings`].
     pub(super) unused_bindings: UnusedBindings,
-    /// Whether module-scope statements are accepted in the entry. See
-    /// [`ModuleScope`]; imported modules never accept them.
+    /// Whether the entry accepts statements at module scope. See
+    /// [`ModuleScope`]. Imported modules never accept them.
     pub(super) module_scope: ModuleScope,
-    /// Memo for [`Compiler::restricted_generalization_cons`]: the TypeIds
-    /// whose parameters must not generalize at a value binding. Stdlib type
-    /// ids are stable across `reset_to` (the watermark sits past the static
-    /// stdlib), so the memo survives a session's rewinds.
+    /// The memo for [`Compiler::restricted_generalization_cons`], which holds
+    /// the TypeIds whose parameters must not generalise at a value binding.
+    /// Stdlib type ids don't change across `reset_to` (the watermark sits past
+    /// the static stdlib), so the memo survives a session's rewinds.
     restricted_gen_cons: Option<HashSet<TypeId>>,
     pub(super) module_table: ModuleTable,
-    /// Append-only `ModulePath` ↔ `ModuleId` interner backing every `DefId`.
-    /// Persistent across `reset_to`/incremental recompiles (like
-    /// `module_table`) so a `DefId` minted in one `check` still resolves after
-    /// later modules are added or evicted; ids are reused across recompiles.
+    /// The `ModulePath` ↔ `ModuleId` interner behind every `DefId`, which only
+    /// grows. Like `module_table`, it lasts across `reset_to` and incremental
+    /// recompiles, so a `DefId` minted in one `check` still resolves after
+    /// later modules are added or evicted. Ids are reused across recompiles.
     pub(super) ref_interner: ModuleInterner,
     /// Memo of a module-path `ArenaSlice` → its interned `ModuleId`. The
-    /// `str_slices` pool is append-only within a compile, so a given
-    /// `ArenaSlice` always denotes the same path (hence the same id); cleared
-    /// in `reset_to`, the single point where the pool is rewound. Lets
-    /// `defid_of`/`record` skip the per-occurrence `strs_of` + key-join
-    /// allocations and string-hash probe on the per-keystroke recompile.
+    /// `str_slices` pool only grows during a compile, so an `ArenaSlice` always
+    /// names the same path and so the same id. It is cleared in `reset_to`, the
+    /// one place the pool is rewound. It lets `defid_of` and `record` skip the
+    /// `strs_of` call, the key-join allocations and the string-hash lookup for
+    /// every occurrence on each keystroke's recompile.
     pub(super) defid_module_memo: HashMap<ArenaSlice<pool::StrSlices>, ModuleId>,
-    /// canonical module key -> the import path as the user wrote it. Identity
-    /// is the resolved file; diagnostics must still say `./lib`, not
-    /// `/private/var/.../lib`.
+    /// Canonical module key → the import path as the user wrote it. The
+    /// identity is the resolved file, but diagnostics should still say `./lib`,
+    /// not `/private/var/.../lib`.
     module_display: HashMap<ModuleKey, String>,
-    /// When set, `scarlet/...` imports resolve to `.sca` files under this directory
-    /// (the in-repo `src/std`) instead of the embedded snapshot, so a session
-    /// editing the stdlib compiles it like any other on-disk module tree.
+    /// When this is set, `scarlet/...` imports resolve to `.sca` files under
+    /// this directory (the `src/std` in this repo) instead of the embedded
+    /// copy. So a session that edits the stdlib compiles it like any other
+    /// module tree on disk.
     pub(super) stdlib_source_root: Option<PathBuf>,
     pub(super) prelude: PreludeBindings,
-    /// Names user code may not redefine. Populated from the prelude module's
-    /// interface (every exported type and constructor) so the set is derived
-    /// from `scarlet.sca` rather than mirrored in Rust. `@vm` functions are
-    /// deliberately excluded — `println` is shadowable.
+    /// Names user code may not redefine. It is filled from the prelude module's
+    /// interface (every exported type and constructor), so the set comes from
+    /// `scarlet.sca` and isn't copied into Rust. `@vm` functions are left out
+    /// on purpose, so you can shadow `println`.
     pub(super) reserved: BTreeSet<String>,
     /// The entry-frame slots every module's toplevel has handed out so far.
     /// Each module's toplevel frame starts counting here.
@@ -425,103 +433,107 @@ pub struct Compiler {
     pub(super) entry_refs: ModuleReferences,
 }
 
-/// One module's body, being checked. Made fresh once the modules it imports
-/// are compiled, and gone when the module is done, so nothing about one
-/// module can leak into the next.
+/// One module's body while it is being checked. A fresh one is made once the
+/// modules it imports are compiled, and it goes away when the module is done,
+/// so nothing about one module can leak into the next.
 pub struct ModuleChecker<'c> {
     pub(super) c: &'c mut Compiler,
-    /// Whether this module's by-name env entries are undone when it is done:
-    /// false only while the prelude, whose names every module sees, compiles.
+    /// Whether this module's by-name env entries are undone when it is done. It
+    /// is false only while the prelude compiles, because every module sees its
+    /// names.
     scoped: bool,
     /// The bodies the walk is inside, the current one first.
     pub(super) frames: frame::Frames,
-    /// `_`-prefixed pattern binders whose discarded type must be re-examined
-    /// once inference for the module is final: discarding a value the type
-    /// system knows is `Nil` hides nothing, so the explicit `Nil` pattern is
-    /// required instead. Drained by [`ModuleChecker::check_nil_discards`].
+    /// Pattern binders starting with `_` whose discarded type has to be looked
+    /// at again once the module's inference is final. Discarding a value the
+    /// type system knows is `Nil` hides nothing, so the explicit `Nil` pattern
+    /// is required instead. [`ModuleChecker::check_nil_discards`] drains this.
     nil_discards: Vec<(String, Ty, Span)>,
-    /// This module's own top-level `fn`/`const` declarations, in Pass 5
-    /// SCC-visit order (leaves first). Cleared to entry-file scope once the
-    /// imports are compiled.
+    /// This module's own top-level `fn` and `const` declarations, in the order
+    /// Pass 5 visits SCCs (leaves first). Once the imports are compiled, this
+    /// is cleared down to the entry file's scope.
     ///
     /// One record serves both halves of the toplevel elaboration. The
-    /// [`ToplevelDecl::node`] index *schedules* the spine: the elaborator walks
-    /// the module block's decl nodes in this order, not source order, so a
-    /// forward-referenced `const` is stored before it is read. The
-    /// [`ToplevelDecl::slot`] on that same record is the entry-frame slot the
-    /// decl's `TypedBind::global` is pinned to, and the one an intra-SCC
-    /// forward *reference* loads with `PushGlobal`. Definition and use read the
-    /// same field of the same record, so they cannot disagree.
+    /// [`ToplevelDecl::node`] index *schedules* the spine. The elaborator walks
+    /// the module block's declaration nodes in this order, not source order, so
+    /// a `const` referred to before it is declared is stored before it is read.
+    /// The [`ToplevelDecl::slot`] on that same record is the entry-frame slot
+    /// the declaration's `TypedBind::global` is pinned to. It is also the one a
+    /// forward *reference* inside an SCC loads with `PushGlobal`. The
+    /// definition and its uses read the same field of the same record, so they
+    /// can't disagree.
     pub(super) toplevel_decls: Vec<ToplevelDecl>,
     /// The names the binding being checked has bound at module scope, with
-    /// their entry-frame slots. [`ModuleChecker::compile_statement`] moves them onto
-    /// that binding's [`CNode::Binding`], so a slot travels with the binding
-    /// it belongs to and nothing pairs them up by order later.
+    /// their entry-frame slots. [`ModuleChecker::compile_statement`] moves them
+    /// onto that binding's [`CNode::Binding`], so a slot travels with the
+    /// binding it belongs to and nothing has to pair them up by order later.
     binding_globals: Vec<(StrId, GlobalSlot)>,
     /// True only while `analyse_module` walks a module's own statement list.
-    /// Being a global ([`ModuleChecker::binds_a_global`]) does not say this on its
-    /// own: imports, the prelude's slot seeds and `fn`/`const` declarations
-    /// are all globals bound outside the statement walk, and each reaches the
-    /// elaborator by a route of its own.
+    /// Being a global ([`ModuleChecker::binds_a_global`]) doesn't tell you this
+    /// on its own. Imports, the prelude's slot seeds and `fn` and `const`
+    /// declarations are all globals bound outside the statement walk, and each
+    /// reaches the elaborator by its own route.
     pub(super) walking_module_statements: bool,
-    /// One-shot self-name handed to the next `enter_fn_frame(None)` so a
-    /// `name = fn(...)` binding's lambda can self-recurse, without leaking the
-    /// enclosing fn's binding into unrelated (e.g. HOF-arg) lambdas.
+    /// A name handed to the next `enter_fn_frame(None)` only, so the lambda in
+    /// a `name = fn(...)` binding can call itself, without leaking the
+    /// enclosing function's binding into unrelated lambdas (such as one passed
+    /// as an argument).
     next_fn_self_name: Option<StrId>,
-    /// The definition whose body is currently being compiled, used as the
-    /// `owner` of every reference-graph occurrence emitted while it is set
-    /// (the def→def edge channel for dead-code reachability). `None` at module
-    /// top level so genuine executed code roots its references; set/restored
-    /// around each `fn`/`const`/`type` body in the single-pass traversal and
-    /// spans nested lambdas (a lambda has no `DefId`, so its body's references
-    /// belong to the enclosing definition).
+    /// The definition whose body is being compiled. It is the `owner` of every
+    /// reference-graph occurrence emitted while it is set, which is how
+    /// dead-code reachability gets its edges between definitions. It is `None`
+    /// at module top level, so code that really runs there roots its
+    /// references. It is set and restored around each `fn`, `const` and `type`
+    /// body in the single-pass walk, and it covers nested lambdas, because a
+    /// lambda has no `DefId` and its body's references belong to the definition
+    /// around it.
     pub(super) current_owner: Option<DefId>,
     /// The definitions and references this module records for the reference
-    /// graph. [`Self::finish`] hands them over: onto the module's
-    /// `CachedModule`, or to [`Compiler::entry_refs`] for the entry.
+    /// graph. [`Self::finish`] hands them over, onto the module's
+    /// `CachedModule` or to [`Compiler::entry_refs`] for the entry.
     module_refs: ModuleReferences,
     pub(super) current_module: ModulePath,
-    /// `current_module`'s canonical cache key, so per-module bookkeeping never
-    /// re-derives a key from a possibly-unresolved path.
+    /// The canonical cache key of `current_module`, so the bookkeeping for each
+    /// module never works a key out again from a path that may not be resolved.
     current_module_key: ModuleKey,
-    /// Memo of `current_module` interned into `engine.str_slices`.
+    /// `current_module`, interned into `engine.str_slices` once.
     pub(super) module_path_slice: Option<ArenaSlice<pool::StrSlices>>,
-    /// Qualifier name in this file → the imported module's canonical key.
+    /// A qualifier name in this file → the imported module's canonical key.
     imported_qualifiers: HashMap<String, ModuleKey>,
     /// Function bodies whose typecheck walk has finished but whose Core
-    /// pipeline (`lower`→`perceus`) is deferred until the enclosing
-    /// declaration group has been generalized. See
-    /// [`Self::begin_deferred_elaboration`].
+    /// pipeline (`lower` → `perceus`) waits until the declaration group around
+    /// them has been generalised. See [`Self::begin_deferred_elaboration`].
     deferred_bodies: Vec<DeferredBody>,
-    /// Nesting depth of open deferral regions. `compile_fn_body` runs the Core
-    /// pipeline inline when this is zero (REPL entries, top-level `let`s and
-    /// bare expressions, which are walked outside `analyse_module`'s Pass 5).
+    /// How deep the open deferral regions are nested. `compile_fn_body` runs
+    /// the Core pipeline straight away when this is zero, which is the case for
+    /// REPL entries, top-level bindings and bare expressions, because they are
+    /// walked outside Pass 5 of `analyse_module`.
     defer_depth: u32,
 }
 
 /// One body, elaborated into a whole-module [`TypedProgram`] that the Core
-/// pipeline can consume.
+/// pipeline can take.
 ///
 /// The elaborator mints a `FuncIdx` for every eta wrapper it needs by pushing
 /// onto its `FnTable`, and `FuncIdx` is also this compiler's index into
-/// [`Compiler::fns`] (it is what `Atom::Closure` and `Callee::Known` carry).
-/// So `fns` is padded up to `Compiler::fns.len()` before the walk starts, and
-/// each wrapper the walk appends past that point gets its slot reserved here
-/// in the same order. `eta_base` is the padding length: `fns[eta_base..]` are
+/// [`Compiler::fns`] (it is what `Atom::Closure` and `Callee::Known` carry). So
+/// `fns` is padded up to `Compiler::fns.len()` before the walk starts, and each
+/// wrapper the walk adds past that point gets its slot reserved here, in the
+/// same order. `eta_base` is the padding length, so `fns[eta_base..]` are
 /// exactly the wrappers.
 struct Elaborated {
     program: TypedProgram,
     eta_base: usize,
 }
 
-/// One body, all the way through `lower`: the `CoreFn` itself and the arena
-/// its `RTy`s index.
+/// One body that has gone all the way through `lower`: the `CoreFn` itself and
+/// the arena its `RTy`s index into.
 ///
-/// A module toplevel's global-slot pinnings ride the IR itself: `lower` copied
-/// `TypedBind::global` — stamped by `ElabCtx::global_slot` during elaboration
-/// — onto each module-scope `Let`'s `CoreBind`. So a def/use mismatch against
-/// the `Load::Global` every function body reads is unspellable: there is no
-/// side table to desync from the binds it describes.
+/// A module toplevel's global-slot pinnings travel in the IR itself. `lower`
+/// copied `TypedBind::global`, which `ElabCtx::global_slot` stamps during
+/// elaboration, onto each module-scope `Let`'s `CoreBind`. So the binds can't
+/// disagree with the `Load::Global` every function body reads, because there is
+/// no side table to fall out of step with them.
 struct LoweredBody {
     /// The function's name, from the `TypedFn` it was lowered from.
     name: StrId,
@@ -529,9 +541,10 @@ struct LoweredBody {
     pool: Rc<ResolvedPool>,
 }
 
-/// A module-scope slot was bound outside any binding statement, so no
-/// binding carries it to the elaborator and its global is never stored.
-/// Aborts, in release as well as debug: only a compiler bug binds one there.
+/// A module-scope slot was bound outside any binding statement, so no binding
+/// carries it to the elaborator and its global is never stored. This aborts in
+/// release builds as well as debug, because only a compiler bug binds one
+/// there.
 #[allow(clippy::panic)]
 #[cold]
 #[inline(never)]
@@ -543,8 +556,8 @@ fn unclaimed_toplevel_slots(n: usize) -> ! {
 }
 
 /// A function slot was reserved but no body ever filled it, so the program
-/// would call a function that does not exist. Aborts: only a compiler bug can
-/// leave one behind.
+/// would call a function that doesn't exist. This aborts, because only a
+/// compiler bug can leave one behind.
 #[allow(clippy::panic)]
 #[cold]
 #[inline(never)]
@@ -569,10 +582,10 @@ fn constructor_of_no_type(id: TypeId) -> ! {
     )
 }
 
-/// Something reserved a function while the elaborator walked — the `FuncIdx`
-/// the next `FnTable::push` mints would stop naming it. Aborts, in release as
-/// well as debug: every eta wrapper reserved after the stray push would
-/// silently call the wrong function.
+/// Something reserved a function while the elaborator was walking, so the
+/// `FuncIdx` that the next `FnTable::push` mints would stop naming it. This
+/// aborts in release builds as well as debug, because every eta wrapper
+/// reserved after the stray push would quietly call the wrong function.
 #[allow(clippy::panic)]
 #[cold]
 #[inline(never)]
@@ -583,17 +596,16 @@ fn function_reserved_during_elaboration() -> ! {
     )
 }
 
-/// A function body parked between its typecheck walk and its elaboration.
+/// A function body waiting between its typecheck walk and its elaboration.
 ///
-/// The walk fixes everything about the body except its *types*: which
-/// function slot it owns, and which names it captured and at which indices.
-/// Types keep moving until the whole SCC
-/// has been inferred and generalized, so `lower` — the pass that reads them —
-/// runs last, off this record.
+/// The walk settles everything about the body except its *types*: which
+/// function slot it owns, and which names it captured at which indices. Types
+/// keep changing until the whole SCC has been inferred and generalised, so
+/// `lower`, the pass that reads them, runs last, from this record.
 ///
-/// Built whole in exactly one place, [`ModuleChecker::finish_fn_frame`], from the
-/// walk half ([`ParkedBody`]) plus the frame half that only becomes final
-/// there. No field is ever back-patched.
+/// It is built whole in exactly one place, [`ModuleChecker::finish_fn_frame`],
+/// from the walk half ([`ParkedBody`]) plus the frame half that only becomes
+/// final there. No field is ever patched in later.
 struct DeferredBody {
     name: StrId,
     param_binds: Vec<(StrId, BinderId, Ty)>,
@@ -601,23 +613,24 @@ struct DeferredBody {
     /// inferred, and every name and lambda with what it resolved to.
     body: CExpr,
     body_ty: Ty,
-    /// The function slot this body fills in. Reserved by `finish_fn_frame` in
-    /// *both* modes: a [`ClosureFact`] and `global_to_func` record it, and
-    /// `lower` bakes it into `Atom::Closure`/`Callee::Known`, all of which
-    /// happen under `check_only` too.
+    /// The function slot this body fills in. `finish_fn_frame` reserves it in
+    /// *both* modes, because a [`ClosureFact`] and `global_to_func` record it
+    /// and `lower` bakes it into `Atom::Closure` and `Callee::Known`, and all
+    /// of that happens under `check_only` too.
     func_idx: FuncIdx,
 }
 
-/// The walk half of a [`DeferredBody`]: everything [`ModuleChecker::compile_fn_body`]
-/// knows about the body it just typechecked, carried by value to the matching
-/// [`ModuleChecker::finish_fn_frame`], which adds the frame half (captures,
-/// `func_idx`) and pushes the complete `DeferredBody`.
+/// The walk half of a [`DeferredBody`]. It is everything
+/// [`ModuleChecker::compile_fn_body`] knows about the body it just checked,
+/// carried by value to the matching [`ModuleChecker::finish_fn_frame`], which
+/// adds the frame half (the captures and `func_idx`) and pushes the complete
+/// `DeferredBody`.
 ///
-/// There is exactly one outcome, and that is the point: the typecheck walk
-/// cannot lower a function body, because `compile_fn_body` has nothing to hand
-/// `finish_fn_frame` but this record. The phase boundary is a type, not a
-/// convention. The deferred body is lowered and fills its function slot in
-/// `analyse_module`'s pass 6.
+/// There is only one outcome, and that is the point. The typecheck walk can't
+/// lower a function body, because `compile_fn_body` has nothing to hand
+/// `finish_fn_frame` but this record. The boundary between the phases is a
+/// type, not a convention. The deferred body is lowered and fills its function
+/// slot in pass 6 of `analyse_module`.
 struct ParkedBody {
     name: StrId,
     param_binds: Vec<(StrId, BinderId, Ty)>,
@@ -625,9 +638,9 @@ struct ParkedBody {
     body_ty: Ty,
 }
 
-/// A name resolved to a constructor, as `type_ctor_pattern` needs it: the
-/// facts to slot and type the pattern's arguments against. Produced by
-/// `Compiler::lookup_ctor` / `lookup_ctor_qualified`.
+/// A name resolved to a constructor, in the form `type_ctor_pattern` needs to
+/// put the pattern's arguments in slots and type them. `Compiler::lookup_ctor`
+/// and `lookup_ctor_qualified` produce it.
 struct CtorLookup {
     variant: VariantRef,
     type_name: StrId,
@@ -637,7 +650,7 @@ struct CtorLookup {
 }
 
 impl CtorLookup {
-    /// The lookup for `scheme` when it names a constructor; `None` otherwise.
+    /// The lookup for `scheme` when it names a constructor, or `None` if not.
     fn from_scheme(scheme: Scheme) -> Option<Self> {
         match scheme.kind {
             ValueKind::Constructor {
@@ -662,14 +675,14 @@ impl CtorLookup {
     }
 }
 
-/// Which toplevel [`ModuleChecker::record_toplevel`] is recording: the entry file's
-/// or an imported module's.
+/// Which toplevel [`ModuleChecker::record_toplevel`] is recording, the entry
+/// file's or an imported module's.
 enum TopKind {
-    /// `__main__`: the program's own toplevel, and the `main` it starts at when
-    /// it has one. A script (the REPL) has no `main`, and its toplevel's tail
-    /// value is what it prints.
+    /// `__main__`, which is the program's own toplevel, and the `main` it
+    /// starts at when it has one. A script (the REPL) has no `main`, and it
+    /// prints the value its toplevel ends with.
     Entry { entered: Option<FuncIdx> },
-    /// An imported module: its toplevel runs for effect.
+    /// An imported module, whose toplevel runs for its effects.
     Module,
 }
 
@@ -684,9 +697,9 @@ struct QualifiedMember<'a> {
     at: NameAt,
 }
 
-/// A callee that resolved to a plain name or a qualified `module::member`:
-/// the looked-up scheme plus everything `compile_call` needs to dispatch on
-/// the scheme's `ValueKind` and render diagnostics about the callee.
+/// A callee that resolved to a plain name or a qualified `module::member`. It
+/// holds the scheme that was looked up, plus everything `compile_call` needs to
+/// dispatch on the scheme's `ValueKind` and write diagnostics about the callee.
 struct ResolvedCallee<'a> {
     name: &'a str,
     span: Span,
@@ -694,31 +707,32 @@ struct ResolvedCallee<'a> {
     /// Whether the callee has a runtime binding (see `Compiler::name_at`).
     has_binding: bool,
     at: NameAt,
-    /// The module a qualified callee resolved through. Diagnostics render it
-    /// with `Compiler::module_name` — the user-visible name, never the key.
+    /// The module a qualified callee resolved through. Diagnostics show it with
+    /// `Compiler::module_name`, which is the name the user sees, never the key.
     qualifier: Option<ModuleKey>,
 }
 
 struct CompiledBody {
     iface: ModuleInterface,
     watermark: Watermark,
-    /// Reference-graph data for this module's body, moved into its
-    /// `CachedModule` by `load_module`. The module's type-id range is both
-    /// reserved and recorded inside `compile_module_body`, so its start is
-    /// deliberately not threaded back out here.
+    /// The reference-graph data for this module's body, which `load_module`
+    /// moves into its `CachedModule`. The module's type-id range is both
+    /// reserved and recorded inside `compile_module_body`, so its start isn't
+    /// passed back out here, on purpose.
     refs: ModuleReferences,
 }
 
-/// Everything one compile can be asked to do differently. Combinations are
-/// named by the entry points below rather than spelled at call sites, so a
-/// new knob does not mean a new argument on five functions.
+/// Everything one compile can be asked to do differently. The entry points
+/// below name the combinations, so call sites don't spell them out and a new
+/// option doesn't mean a new argument on five functions.
 #[derive(Default)]
 pub struct CompileOptions<'a> {
-    /// Directory relative imports resolve against. `None` rejects them.
+    /// The directory that relative imports resolve against. `None` rejects
+    /// them.
     pub base_dir: Option<&'a Path>,
     /// Analyse without emitting a program.
     pub check_only: bool,
-    /// Analyse the buffer *as* this module rather than as `main`.
+    /// Analyse the buffer *as* this module instead of as `main`.
     pub as_module: Option<ModulePath>,
     /// Whether bindings nothing reads are reported. See [`UnusedBindings`].
     pub unused_bindings: UnusedBindings,
@@ -728,8 +742,8 @@ pub struct CompileOptions<'a> {
 }
 
 impl<'a> CompileOptions<'a> {
-    /// Emit a program from `base_dir`: what a file compile is. Every other
-    /// entry point below is this with one field changed.
+    /// Emit a program from `base_dir`, which is what compiling a file means.
+    /// Every other entry point below is this with one field changed.
     pub fn new(base_dir: Option<&'a Path>) -> Self {
         CompileOptions {
             base_dir,
@@ -752,9 +766,10 @@ pub fn check(expr: &ast::Expression, base_dir: Option<&Path>) -> CompileResult {
     )
 }
 
-/// Analyse a file *as* a specific stdlib module (used when editing
-/// `src/std/**/*.sca` inside the Scarlet repo so the LSP/CLI doesn't report
-/// `@vm is stdlib-only` / `Result is reserved`). Always check-only.
+/// Analyse a file *as* a specific stdlib module. This is for editing
+/// `src/std/**/*.sca` inside the Scarlet repo, so the LSP and CLI don't report
+/// that `@vm` is only for the stdlib or that `Result` is reserved. It always
+/// only checks.
 pub fn check_as_module(
     expr: &ast::Expression,
     base_dir: Option<&Path>,
@@ -803,8 +818,8 @@ pub(crate) fn new_compiler(check_only: bool) -> Compiler {
     }
 }
 
-/// The module doing an import: where its relative imports resolve from, and
-/// the key the imported module records as a dependent.
+/// The module doing an import. It says where its relative imports resolve from,
+/// and the key the imported module records as a dependent.
 pub(crate) struct Importer<'a> {
     pub(crate) dir: Option<&'a Path>,
     pub(crate) key: &'a ModuleKey,
@@ -815,8 +830,8 @@ impl<'c> ModuleChecker<'c> {
     /// it imports must already be compiled.
     pub(crate) fn new(c: &'c mut Compiler, path: ModulePath, key: ModuleKey) -> ModuleChecker<'c> {
         // A module's by-name env entries are its own, so they are undone when
-        // it is done. The prelude's are kept on purpose: they are the
-        // ambient namespace every module sees.
+        // it is done. The prelude's are kept on purpose, because they are the
+        // namespace every module sees.
         let scoped = !c.retain_namespaces;
         if scoped {
             c.env.push_module_frame();
@@ -855,23 +870,25 @@ impl<'c> ModuleChecker<'c> {
 }
 
 impl ModuleChecker<'_> {
-    /// The `DefId` of the `Type` named `name` declared in module `path`, read
-    /// from the reference graph's own definitions — the single source of truth.
+    /// The `DefId` of the `Type` named `name` declared in module `path`. It is
+    /// read from the reference graph's own definitions, which are the one
+    /// source of truth.
     ///
-    /// It must *not* go through the flat `env.definitions`: every record
-    /// `type Foo {..}` registers a same-named `Constructor` that overwrites the
-    /// earlier `Foo => Type` entry (last-write-wins `IndexMap`), so once the
-    /// defining module is fully analysed that lookup yields the constructor and
-    /// no type occurrence is ever recorded. The graph keeps `Type` and
-    /// `Constructor` as distinct `DefId`s under the same name, so `defs_named`
-    /// resolves the type unambiguously.
+    /// It must *not* go through the flat `env.definitions`. Every record
+    /// `type Foo {..}` registers a `Constructor` with the same name, which
+    /// overwrites the earlier `Foo => Type` entry (the `IndexMap` keeps the
+    /// last write). So once the module that defines it is fully analysed, that
+    /// lookup gives the constructor and no type occurrence is ever recorded.
+    /// The graph keeps `Type` and `Constructor` as separate `DefId`s under the
+    /// same name, so `defs_named` finds the type without any doubt.
     ///
-    /// Same-module lookups read the live collector (the type def is emitted
-    /// when its declaration is visited, before any annotation that names it is
-    /// hydrated); a cross-module type reads the imported module's persisted
-    /// `module_refs`. `None` for static/hydrated stdlib modules, whose type
-    /// declaration spans are not persisted (a pre-existing limitation: stdlib
-    /// type goto-def is out of this path's scope).
+    /// A lookup in the same module reads the live collector, because the type
+    /// def is emitted when its declaration is visited, before any annotation
+    /// that names it is hydrated. A type from another module reads the imported
+    /// module's stored `module_refs`. It is `None` for static or hydrated
+    /// stdlib modules, whose type declaration spans are not stored. That is a
+    /// known limit: goto-def on a stdlib type is outside what this path
+    /// handles.
     fn type_defid_in_module(&self, path: &ModulePath, name: &str) -> Option<DefId> {
         fn pick(mr: &ModuleReferences, name: &str) -> Option<DefId> {
             mr.defs_named(name)
@@ -887,25 +904,26 @@ impl ModuleChecker<'_> {
     }
 }
 
-/// A constructor pattern as written: `NotFound(path)`, or `io::NotFound(..)`
-/// reached through a module qualifier.
+/// A constructor pattern as written, like `NotFound(path)`, or
+/// `io::NotFound(..)` reached through a module qualifier.
 struct CtorPattern<'a> {
     qualifier: Option<&'a ast::Identifier>,
     name: &'a ast::Identifier,
     args: &'a [ast::PatternArg],
-    /// Ends in `..`, so fields it leaves out match anything.
+    /// It ends in `..`, so the fields it leaves out match anything.
     rest: bool,
     span: Span,
 }
 
-/// What the check walk built for an entry: a module block's nodes, or a bare
-/// expression.
+/// What the check walk built for an entry, which is a module block's nodes or a
+/// bare expression.
 pub(crate) enum CheckedEntry {
     Module(Vec<CNode>, Span),
     Expr(CExpr),
 }
 
-/// The one compile. Every entry point above is a named [`CompileOptions`].
+/// Every compile runs through here. Each entry point above is a named
+/// [`CompileOptions`].
 pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> CompileResult {
     let CompileOptions {
         base_dir,
@@ -915,8 +933,8 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
         module_scope,
     } = options;
 
-    // Backpass sugar is rewritten away here, before any typing pass, so
-    // inference and lowering never see a `Statement::Backpass`.
+    // Remove the backpass sugar here, before any typing pass, so inference and
+    // lowering never see a `Statement::Backpass`.
     let mut expr = expr.clone();
     crate::desugar::desugar_expression(&mut expr);
     let expr = &expr;
@@ -926,12 +944,12 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
     c.module_scope = module_scope;
     let (entry_path, entry_key) = match as_module.clone() {
         Some(m) => {
-            // The user is editing stdlib source, so sibling `scarlet/...`
-            // imports must resolve to the on-disk files next to it, not the
-            // stale embedded snapshot.
+            // The user is editing stdlib source, so the `scarlet/...` imports
+            // next to it must resolve to the files on disk, not the stale
+            // embedded copy.
             c.stdlib_source_root = base_dir.and_then(module::find_stdlib_root);
-            // `as_module` is always a stdlib path (see `check_as_module`),
-            // whose written form is its canonical identity.
+            // `as_module` is always a stdlib path (see `check_as_module`), and
+            // its written form is its canonical identity.
             let key = ModuleKey::for_stdlib(&m);
             (m, key)
         }
@@ -939,14 +957,14 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
     };
 
     // When analysing the prelude file itself, don't load the prelude on top of
-    // it (that would make every type a redefinition of itself). Other stdlib
-    // modules still need the prelude for `Result`/`Nil`/etc.
+    // it, because that would make every type a redefinition of itself. Other
+    // stdlib modules still need the prelude for `Result`, `Nil` and the rest.
     let is_prelude_self = as_module.as_deref() == Some(module::scarlet_prelude().as_slice());
     if !is_prelude_self {
         c.register_prelude();
         if has_errors(&c.engine.diagnostics) {
-            // The prelude itself failed: the user's program was never compiled,
-            // so there is nothing to hand back — not even a partial one.
+            // The prelude itself failed. The user's program was never compiled,
+            // so there is nothing to hand back, not even part of one.
             return CompileResult::analysis_only(
                 c.engine.diagnostics,
                 Rc::new(ReferenceGraph::new()),
@@ -960,14 +978,15 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
     };
     let loaded = c.load_entry_imports(expr, &importer);
     let mut m = ModuleChecker::new(&mut c, entry_path, entry_key.clone());
-    // Entry-file env scope: opened here (not inside `analyse_module`) so the
-    // constructor/fn/const schemes it defines stay visible through the
-    // toplevel elaboration below — otherwise a `type` decl followed by a ctor
-    // use bails on `unbound callee` and the module toplevel never gets Core.
+    // Open the entry file's env scope here, not inside `analyse_module`, so the
+    // constructor, function and const schemes it defines stay visible through
+    // the toplevel elaboration below. Otherwise a `type` declaration followed
+    // by a use of its constructor fails with `unbound callee`, and the module
+    // toplevel never gets Core.
     m.c.env.push_scope();
     let (checked, top_ty) = m.check_entry(expr, loaded);
-    // The `main` a program starts at; `None` for a check, a script, a
-    // module, or a program with no usable `main` (which is then not clean).
+    // The `main` a program starts at. It is `None` for a check, a script, a
+    // module, or a program with no usable `main` (which then isn't clean).
     let entered = match (expr, &as_module) {
         (ast::Expression::BlockExpression(block), None)
             if module_scope == ModuleScope::DeclarationsOnly =>
@@ -979,16 +998,21 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
 
     // Elaborate the module toplevel and lower it into Core, like every other
     // function body (docs/core-ir-spec.md §Pipeline step 3). The elaborator
-    // handles top-level `fn`/`const`/`type`/`import` decls, so it covers real
-    // modules. Fn bodies were already lowered during `analyse_module` and read
-    // sibling decls with `Load::Global(slot)`, where `slot` is Pass 3's
-    // decl-first allocation; `ElabCtx::global_slot` stamped the same slot onto
+    // handles top-level `fn`, `const`, `type` and `import` declarations, so it
+    // covers real modules. Function bodies were already lowered during
+    // `analyse_module`, and they read the declarations next to them with
+    // `Load::Global(slot)`, where `slot` is what Pass 3 allocated for
+    // declarations first. `ElabCtx::global_slot` stamped the same slot onto
     // each `TypedBind`, and `lower` copied it onto each toplevel `Let`'s
-    // `CoreBind`, so definition and use agree.
+    // `CoreBind`, so the definition and its uses agree.
     //
-    // Elaboration and lowering run under `check_only` too. A well-typed
-    // program the front half cannot handle has to be reported by
-    // `scarlet check`, not left to blow up at `scarlet run`.
+    // Elaboration and lowering run under `check_only` too. If the front half
+    // can't handle a well-typed program, `scarlet check` has to report it, not
+    // leave it to blow up at `scarlet run`.
+    //
+    // This stays `None` unless the recording below really happens. That is what
+    // stops a rejected or check-only compile from handing back a `Program` that
+    // runs the stdlib init and nothing else.
     // Stays `None` unless the recording below actually happens, which is what
     // keeps a rejected or check-only compile from handing back a `Program`
     // that runs the stdlib init and nothing else.
@@ -1024,8 +1048,8 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
 }
 
 impl Compiler {
-    /// Compile what the entry file imports. A bare-expression entry imports
-    /// nothing.
+    /// Compile what the entry file imports. An entry that is a bare expression
+    /// imports nothing.
     pub(crate) fn load_entry_imports(
         &mut self,
         expr: &ast::Expression,
@@ -1041,8 +1065,9 @@ impl Compiler {
 }
 
 impl ModuleChecker<'_> {
-    /// Check the entry file: a module's statements, or a bare expression.
-    /// `loaded` is what [`Compiler::load_entry_imports`] compiled for it.
+    /// Check the entry file, which is a module's statements or a bare
+    /// expression. `loaded` is what [`Compiler::load_entry_imports`] compiled
+    /// for it.
     pub(crate) fn check_entry(
         &mut self,
         expr: &ast::Expression,
@@ -1053,18 +1078,19 @@ impl ModuleChecker<'_> {
             let nodes = self.analyse_module(block, None);
             return (CheckedEntry::Module(nodes, block.span), self.c.ty_nil());
         }
-        // `analyse_module` opens a local scope around a module's statements,
-        // so its nested blocks bind at depth 2 and are frame temps, not
+        // `analyse_module` opens a local scope around a module's statements, so
+        // its nested blocks bind at depth 2 and are frame temporaries, not
         // globals. A bare expression has no statement walk, so open the same
-        // scope here: without it a `let` in the expression's first nested
-        // block (an `if` arm) would sit at the module's own depth,
+        // scope here. Without it, a binding in the expression's first nested
+        // block (an `if` arm) would sit at the module's own depth. Then
         // `resolve_variable` would call it a global, and a lambda would load a
-        // global slot that `bind_local` never queued and the elaborator
-        // therefore never pins.
+        // global slot that `bind_local` never queued, so the elaborator never
+        // pins it.
         self.push_local_scope();
-        // The same phase boundary `analyse_module` puts around its walk: a bare
-        // expression program can still contain lambdas, and none of them may
-        // lower while the expression is being typechecked.
+        // Put the same phase boundary around this that `analyse_module` puts
+        // around its walk. A program that is a bare expression can still
+        // contain lambdas, and none of them may be lowered while the expression
+        // is being checked.
         self.begin_deferred_elaboration();
         let body = self.compile_expr(expr);
         self.end_deferred_elaboration();
@@ -1081,13 +1107,13 @@ impl Compiler {
     }
 
     /// The type constructors whose parameters must stay monomorphic when a
-    /// binding's type is generalized — the relaxed value restriction. A
-    /// `Subject`'s argument names what a live mailbox carries, so
-    /// quantifying it would let one queue be sent one type and received as
-    /// another. Resolved by module identity, never by name alone, so a user
-    /// type called `Subject` is unaffected. An unresolvable module yields an
-    /// empty set, which is sound: no value of the type can occur in a
-    /// program that never loaded it.
+    /// binding's type is generalised. This is the relaxed value restriction. A
+    /// `Subject`'s argument names what a live mailbox carries, so quantifying
+    /// it would let one queue be sent one type and received as another. We find
+    /// these by module identity, never by name alone, so a user type called
+    /// `Subject` isn't affected. A module that can't be resolved gives an empty
+    /// set, which is sound, because no value of the type can occur in a program
+    /// that never loaded it.
     pub(crate) fn restricted_generalization_cons(&mut self) -> HashSet<TypeId> {
         if let Some(memo) = &self.restricted_gen_cons {
             return memo.clone();
@@ -1103,8 +1129,8 @@ impl Compiler {
         match found {
             Some(id) => {
                 let set = HashSet::from([id]);
-                // Memoize only a hit: a module unresolvable now (one this
-                // compile has not loaded yet) may load later in this session.
+                // Only memoise a hit. A module we can't resolve now (one this
+                // compile hasn't loaded yet) may load later in this session.
                 self.restricted_gen_cons = Some(set.clone());
                 set
             }
@@ -1112,8 +1138,8 @@ impl Compiler {
         }
     }
 
-    /// Assemble the [`Program`] once the entry toplevel is recorded. Every
-    /// reserved function slot is filled by then; an empty one is a function
+    /// Assemble the [`Program`] once the entry toplevel is recorded. By then
+    /// every reserved function slot is filled. An empty one is a function that
     /// nothing lowered, which only a compiler bug leaves behind.
     fn finish_program(&mut self) -> Option<Program> {
         let toplevel = self.entry_toplevel.take()?;
@@ -1154,9 +1180,9 @@ impl Compiler {
         })
     }
 
-    /// `scarlet/binary.Radix`'s constructors, by name, when the program loaded
-    /// that module. A renamed constructor leaves it `None`, and the built-ins
-    /// that read one then stop, rather than read the wrong base.
+    /// The constructors of `scarlet/binary.Radix`, by name, when the program
+    /// loaded that module. If a constructor is renamed this is `None`, and the
+    /// built-ins that read one stop instead of reading the wrong base.
     fn radix(&self) -> Option<Radix> {
         let variant = self.stdlib_variants(&["scarlet", "binary"], "Radix")?;
         Some(Radix {
@@ -1165,7 +1191,7 @@ impl Compiler {
         })
     }
 
-    /// `scarlet/io.IoError`'s constructors, by name, as [`Self::radix`].
+    /// The constructors of `scarlet/io.IoError`, by name, like [`Self::radix`].
     fn io_errors(&self) -> Option<IoErrors> {
         let variant = self.stdlib_variants(&["scarlet", "io"], "IoError")?;
         Some(IoErrors {
@@ -1184,8 +1210,8 @@ impl Compiler {
         })
     }
 
-    /// `scarlet/json`'s `Doc`, `ParseError` and `Json` constructors, by name,
-    /// as [`Self::radix`].
+    /// The constructors of `Doc`, `ParseError` and `Json` in `scarlet/json`, by
+    /// name, like [`Self::radix`].
     fn json_types(&self) -> Option<JsonTypes> {
         let module = ["scarlet", "json"];
         let doc = self.stdlib_variants(&module, "Doc")?;
@@ -1205,8 +1231,8 @@ impl Compiler {
         })
     }
 
-    /// `scarlet/http/h1`'s and `scarlet/http/headers`' constructors, by name,
-    /// as [`Self::radix`].
+    /// The constructors in `scarlet/http/h1` and `scarlet/http/headers`, by
+    /// name, like [`Self::radix`].
     fn http_types(&self) -> Option<HttpTypes> {
         let h1 = ["scarlet", "http", "h1"];
         let header = self.stdlib_variants(&["scarlet", "http", "headers"], "Header")?;
@@ -1273,7 +1299,7 @@ impl Compiler {
         })
     }
 
-    /// The names of every type a constructor in `bodies`, or in `abi`,
+    /// The names of every type that a constructor in `bodies` or in `abi`
     /// belongs to.
     fn type_names<'a>(
         &self,
@@ -1319,12 +1345,13 @@ impl Compiler {
         }
     }
 
-    /// Pool `c`, deduplicating against the existing pool.
+    /// Pool `c`, reusing an existing entry if the same constant is already
+    /// there.
     ///
     /// The `const_dedup` memo survives `IncrementalSession::reset_to`, which
-    /// truncates `consts` without clearing it. Every hit is therefore
-    /// re-validated against the live pool: a stale entry either falls out of
-    /// range or names a different constant, and `c` is re-pooled.
+    /// truncates `consts` without clearing it. So every hit is checked again
+    /// against the live pool. A stale entry either falls out of range or names
+    /// a different constant, and then `c` is pooled again.
     fn add_constant(&mut self, c: Const) -> ConstId {
         if let Some(&id) = self.const_dedup.get(&c)
             && self.consts.get(id.0 as usize) == Some(&c)
@@ -1355,17 +1382,19 @@ impl ModuleChecker<'_> {
     fn get_or_create_local(&mut self, name: &str) -> i32 {
         let id = self.c.engine.intern(name);
         if let Some((entry, inherited)) = self.frames.current.lookup(id) {
-            // Reuse only if this slot was bound in the *current* block. One
-            // inherited from an enclosing block must survive it, so shadowing
+            // Only reuse the slot if it was bound in the *current* block. One
+            // inherited from an enclosing block must outlive it, so shadowing
             // allocates a fresh slot.
-            // At module scope (no enclosing fn frame) a re-binding must also
-            // get a fresh slot. Top-level bindings live in the entry frame, so
-            // a closure that captured one resolves it to `Global(slot)` and
-            // reads that slot at call time; reusing the slot for the shadow
-            // would overwrite the value the closure observes. Scarlet is immutable-
-            // with-shadowing — each binding is distinct — so the earlier
-            // binding must survive. Nested scopes capture by value at
-            // `MakeClosure` time, so same-scope reuse is safe there.
+            //
+            // At module scope (with no enclosing function frame), binding the
+            // name again must also get a fresh slot. Top-level bindings live in
+            // the entry frame, so a closure that captured one resolves it to
+            // `Global(slot)` and reads that slot when it is called. Reusing the
+            // slot for the shadowing binding would overwrite the value the
+            // closure sees. Scarlet is immutable with shadowing, so each
+            // binding is distinct and the earlier one must survive. Nested
+            // scopes capture by value at `MakeClosure` time, so reusing a slot
+            // in the same scope is safe there.
             let module_scope = self.frames.at_toplevel();
             if !inherited && !module_scope {
                 return entry.slot;
@@ -1377,10 +1406,10 @@ impl ModuleChecker<'_> {
     }
 
     /// Bind `name` to `slot` in the current scope without publishing the slot
-    /// to the toplevel elaboration. This is the whole of binding for anything
-    /// the elaborator learns a slot for by another route: a top-level
-    /// declaration (whose slot travels on its [`ToplevelDecl`]) and every
-    /// binding inside a function frame.
+    /// to the toplevel elaboration. This is all the binding needed for anything
+    /// whose slot the elaborator learns another way: a top-level declaration
+    /// (whose slot travels on its [`ToplevelDecl`]) and every binding inside a
+    /// function frame.
     ///
     /// The new entry keeps the binding the name meant until
     /// [`Self::publish_local`] gives it its own.
@@ -1395,36 +1424,36 @@ impl ModuleChecker<'_> {
         frame.insert(name, entry);
     }
 
-    /// Whether a binding made *now* lands in the entry frame — the one
+    /// Whether a binding made *now* lands in the entry frame. This is the only
     /// definition of "global" the compiler has.
     ///
     /// `at_toplevel` says no function frame is open, and a depth of at most 1
-    /// says we are in the module's own statements: `analyse_module` opens
-    /// exactly one block, and every nested block/`if`/`match` at module level
-    /// opens another. Both halves of
-    /// the global question — [`Self::bind_local`]'s queue and
-    /// `resolve_variable`'s `PushGlobal` — are derived from this, recorded once
-    /// on [`LocalSlot::is_global`], so they cannot drift apart.
+    /// says we are in the module's own statements. `analyse_module` opens
+    /// exactly one block, and every nested block, `if` or `match` at module
+    /// level opens another. Both halves of the global question come from this:
+    /// [`Self::bind_local`]'s queue and the `PushGlobal` in `resolve_variable`.
+    /// It is recorded once on [`LocalSlot::is_global`], so they can't drift
+    /// apart.
     ///
-    /// Note the bare-expression entry path (`compile` on a non-`BlockExpression`)
-    /// opens a matching scope of its own, so a `let` inside one of its nested
-    /// blocks is a frame temp there too.
+    /// Note that the entry path for a bare expression (`compile` on something
+    /// that isn't a `BlockExpression`) opens a matching scope of its own, so a
+    /// binding inside one of its nested blocks is a frame temporary there too.
     fn binds_a_global(&self) -> bool {
         self.frames.at_toplevel() && self.frames.current.depth() <= 1
     }
 
-    /// [`Self::bind_local_raw`], plus: if this is a module-scope binding,
+    /// [`Self::bind_local_raw`], and if this is a module-scope binding, also
     /// queue its slot for the toplevel elaboration.
     ///
-    /// The queue outlives `analyse_module`'s `pop_local_scope`, which the
-    /// name's block does not. Only bindings made by the module's own
-    /// statement walk ([`Self::walking_module_statements`]) at the module's own
-    /// local-scope depth qualify. The extra `walking_module_statements` term is
-    /// not a second definition of "global": the queue is *positional*, and the
-    /// other globals — imports, prelude seeds, `fn`/`const` declarations —
-    /// reach the elaborator by another route (already-stored slots, or their
-    /// own [`ToplevelDecl`]) and must not be dequeued as if they were the
-    /// module's `let`s.
+    /// The queue outlives `analyse_module`'s `pop_local_scope`, but the name's
+    /// block doesn't. Only bindings made by the module's own statement walk
+    /// ([`Self::walking_module_statements`]) at the module's own local-scope
+    /// depth count. The extra `walking_module_statements` check isn't a second
+    /// definition of "global". The queue goes by position, and the other
+    /// globals (imports, prelude seeds, and `fn` and `const` declarations)
+    /// reach the elaborator another way, through slots already stored or their
+    /// own [`ToplevelDecl`]. They must not be taken off the queue as if they
+    /// were the module's bindings.
     fn bind_local(&mut self, name: StrId, slot: i32) {
         self.bind_local_raw(name, slot);
         if self.walking_module_statements && self.binds_a_global() {
@@ -1432,13 +1461,14 @@ impl ModuleChecker<'_> {
         }
     }
 
-    /// Allocate the entry-frame slot for a top-level `fn`/`const` declaration.
+    /// Allocate the entry-frame slot for a top-level `fn` or `const`
+    /// declaration.
     ///
-    /// Unlike [`Self::get_or_create_local`] this never reuses an existing
-    /// binding's slot — a module-scope rebind must not alias the slot a
-    /// closure already captured by reference — and it does not queue the slot
-    /// on [`Self::binding_globals`]: a declaration's slot reaches the
-    /// elaborator on its own [`ToplevelDecl`] record instead.
+    /// Unlike [`Self::get_or_create_local`], this never reuses an existing
+    /// binding's slot, because binding a name again at module scope must not
+    /// share the slot a closure already captured by reference. It also doesn't
+    /// queue the slot on [`Self::binding_globals`], because a declaration's
+    /// slot reaches the elaborator on its own [`ToplevelDecl`] record.
     pub(super) fn alloc_decl_slot(&mut self, name: &str) -> (GlobalSlot, BinderId) {
         let id = self.c.engine.intern(name);
         let idx = self.frames.current.alloc_slot();
@@ -1446,9 +1476,10 @@ impl ModuleChecker<'_> {
         (GlobalSlot(idx), self.publish_local(id))
     }
 
-    /// Make `name`'s slot, already reserved, mean a new binding from here on,
-    /// and return that binding's [`BinderId`]. Uses walked before this, and
-    /// the binding's own init, still mean whatever the name meant before.
+    /// Make `name`'s slot, which is already reserved, mean a new binding from
+    /// here on, and return that binding's [`BinderId`]. Uses walked before
+    /// this, and the binding's own initialiser, still mean whatever the name
+    /// meant before.
     fn publish_local(&mut self, name: StrId) -> BinderId {
         let frame = &mut self.frames.current;
         let binder = frame.mint_binder();
@@ -1468,8 +1499,8 @@ impl ModuleChecker<'_> {
         }
     }
 
-    /// Open a lexical block scope: pushes a fresh type-env scope and a local
-    /// undo mark in lockstep. Must be matched by `pop_block_scope`.
+    /// Open a lexical block scope. This pushes a fresh type-env scope and a
+    /// local undo mark together, and must be matched by `pop_block_scope`.
     fn push_block_scope(&mut self) {
         self.c.env.push_scope();
         self.push_local_scope();
@@ -1480,10 +1511,10 @@ impl ModuleChecker<'_> {
         self.c.env.pop_scope();
     }
 
-    /// Record a let/param/match binding for unused-variable checking. Names
-    /// starting with `_` are exempt. If the same name was already tracked in
-    /// this block and never used, that earlier binding is reported now (it's
-    /// been shadowed and can no longer be referenced).
+    /// Record a binding, parameter or match binding for the unused-variable
+    /// check. Names starting with `_` are exempt. If the same name was already
+    /// tracked in this block and never used, report that earlier binding now,
+    /// because it is shadowed and nothing can refer to it any more.
     fn track_binding(&mut self, name: &str, sp: Span) {
         if name.starts_with('_') {
             return;
@@ -1507,11 +1538,12 @@ impl ModuleChecker<'_> {
         }
     }
 
-    /// Where a name in scope lives. `None` when nothing in scope binds it: a
-    /// constructor, a builtin, or a name whose only binding is not made yet.
+    /// Where a name in scope lives. It is `None` when nothing in scope binds
+    /// it, which is the case for a constructor, a builtin, or a name whose only
+    /// binding isn't made yet.
     fn resolve_variable(&mut self, name: StrId) -> Option<Place> {
         self.frames.mark_used(name);
-        // A slot reserved for a binding not yet made is not in scope.
+        // A slot reserved for a binding that isn't made yet is not in scope.
         let frame = &self.frames.current;
         if let Some(binder) = frame.lookup(name).and_then(|(e, _)| e.binder) {
             return Some(Place::ThisFunction(binder));
@@ -1519,32 +1551,33 @@ impl ModuleChecker<'_> {
         if let Some(idx) = frame.captures.get(name) {
             return Some(Place::Outside(Denotation::capture(idx)));
         }
-        // Search enclosing scopes innermost-first so inner bindings shadow
-        // outer ones. The bottom of the stack (index 0) is always the entry
-        // frame, and its *module-scope* locals are the program's globals, so a
-        // nested fn loads them (`Load::Global`) at call time instead of
-        // capturing by value. This is what makes mutually-recursive top-level
-        // fns work — the sibling's slot is read at call time, not when the
-        // closure is made.
+        // Search the enclosing scopes from the innermost out, so inner bindings
+        // shadow outer ones. The bottom of the stack (index 0) is always the
+        // entry frame, and its *module-scope* locals are the program's globals.
+        // So a nested function loads them (`Load::Global`) when it is called,
+        // instead of capturing them by value. This is what makes top-level
+        // functions that call each other work, because the other function's
+        // slot is read when the call happens, not when the closure is made.
         //
-        // A local bound in a nested block/if/match scope at module level is
-        // *not* a global: it is an ordinary toplevel temp (only
-        // module-scope-depth binds land on `binding_globals`, see
-        // `bind_local`), and nothing guarantees it is stored before a global
-        // load of it runs. Such a
-        // name is captured by value like any other enclosing local — exactly
-        // as it would be inside a fn body. Which of the two a name is was
-        // decided once, by [`Self::binds_a_global`], and recorded on the
-        // binding; re-deriving it here from `depth` is how the loader and the
-        // binder came to disagree on the bare-expression entry path.
+        // A local bound in a nested block, `if` or `match` scope at module
+        // level is *not* a global. It is an ordinary toplevel temporary (only
+        // bindings at module-scope depth go on `binding_globals`, see
+        // `bind_local`), and nothing makes sure it is stored before a global
+        // load of it runs. So a name like that is captured by value like any
+        // other enclosing local, just as it would be inside a function body.
+        // [`Self::binds_a_global`] decided once which of the two a name is, and
+        // recorded it on the binding. Working it out again here from `depth` is
+        // how the loader and the binder came to disagree on the entry path for
+        // bare expressions.
         for (i, outer) in self.frames.outer().iter().enumerate().rev() {
             if let Some((entry, _)) = outer.lookup(name) {
                 let is_global = i == 0 && entry.is_global;
                 if frame.self_name == Some(name) {
-                    // A top-level fn's self-name resolves to its entry-frame
-                    // slot so a value load emits `PushGlobal`; `PushSelf` would
-                    // read the sentinel `captures` a `CallKnown` frame carries.
-                    // `Denotation` fixes both halves together.
+                    // A top-level function's own name resolves to its
+                    // entry-frame slot, so loading it as a value emits
+                    // `PushGlobal`. `PushSelf` would read the placeholder
+                    // `captures` that a `CallKnown` frame carries. `Denotation`
+                    // fixes both halves together.
                     return Some(Place::Outside(if is_global {
                         Denotation::self_toplevel_fn(GlobalSlot(entry.slot))
                     } else {
@@ -1563,8 +1596,8 @@ impl ModuleChecker<'_> {
         None
     }
 
-    /// A module-scope value at `slot`: a known top-level `fn` if one has been
-    /// registered for that slot, an opaque global otherwise.
+    /// A module-scope value at `slot`. It is a known top-level `fn` if one has
+    /// been registered for that slot, and an opaque global if not.
     fn global_denotation(&self, slot: GlobalSlot) -> Denotation {
         match self.c.global_to_func.get(&slot) {
             Some(&func_idx) => Denotation::known_fn(slot, func_idx),
@@ -1572,10 +1605,10 @@ impl ModuleChecker<'_> {
         }
     }
 
-    /// The denotation of one of *this module's* top-level declarations, read
-    /// off the same [`ToplevelDecl`] record whose `slot` the elaborated
-    /// definition is pinned to. A linear scan over the module's own decls: a
-    /// handful, walked once per forward reference.
+    /// What one of *this module's* top-level declarations means, read off the
+    /// same [`ToplevelDecl`] record whose `slot` the elaborated definition is
+    /// pinned to. This scans the module's own declarations in a line, but there
+    /// are only a handful and it runs once per forward reference.
     fn decl_denotation(&self, binder: BinderId) -> Option<Denotation> {
         let decl = self.toplevel_decls.iter().find(|d| d.binder == binder)?;
         Some(self.global_denotation(decl.slot))
@@ -1599,10 +1632,10 @@ impl Compiler {
             .push(Diagnostic::error(sp, DiagnosticCode::ModuleError, msg));
     }
 
-    /// Mint the proof the elaborator demands, if the module has earned it.
-    /// `None` means some subtree is poisoned and nothing may be elaborated: the
+    /// Mint the proof the elaborator asks for, if the module has earned it.
+    /// `None` means some subtree is poisoned and nothing may be elaborated. The
     /// user has already been told why, and a body the checker rejected is
-    /// closed out empty rather than handed to `typed_ir::elaborate_body`.
+    /// closed out empty instead of being handed to `typed_ir::elaborate_body`.
     fn clean_module(&self) -> Option<CleanModule> {
         CleanModule::mint(&self.engine.diagnostics)
     }
@@ -1620,14 +1653,14 @@ impl Compiler {
         self.engine.diagnostics.push(Diagnostic::error(
             sp,
             DiagnosticCode::UnusedBinding,
-            format!("'{name}' is unused; prefix with '_' to ignore"),
+            format!("'{name}' is never used. Start its name with '_' if that's on purpose"),
         ));
     }
 }
 
 impl ModuleChecker<'_> {
-    /// Probe the doc map for `name`, but only while collecting hover facts.
-    /// On the non-LSP path `record` discards the doc, so skip the clone.
+    /// Look up `name` in the doc map, but only while collecting hover facts.
+    /// Anywhere else `record` throws the doc away, so skip the clone.
     fn doc_if_collecting(&self, name: &str) -> Option<String> {
         if self.c.collect_hover_facts {
             self.c.env.lookup_doc(name)
@@ -1637,9 +1670,10 @@ impl ModuleChecker<'_> {
     }
 
     pub(super) fn record(&mut self, name: &str, ty: Ty, sp: Span, doc: Option<String>) {
-        // Hover facts are only consumed by `IncrementalSession` (the LSP). On
-        // the free `compile`/`check` path they are resolved then discarded, so
-        // skip the `name.to_string()` + `RawRef` buffering entirely there.
+        // Only `IncrementalSession` (the LSP) uses hover facts. On the free
+        // `compile` and `check` path they would be resolved and then thrown
+        // away, so skip the `name.to_string()` and the `RawRef` buffering
+        // there.
         if !self.c.collect_hover_facts {
             return;
         }
@@ -1656,13 +1690,13 @@ impl ModuleChecker<'_> {
 
 impl Compiler {
     /// Resolve a module-path `ArenaSlice` to its stable `ModuleId`, memoised on
-    /// the `Copy` slice. The `str_slices` pool is append-only within a compile,
-    /// so a given slice always denotes the same path (hence the same id); the
-    /// memo is dropped in `reset_to`, the single point the pool is rewound.
-    /// Replaces a per-occurrence `strs_of` (`Vec<String>` + a `String` per
-    /// segment) plus `ref_interner.intern` (a `ModuleKey::of` joined `String`
-    /// and a string-hash probe) with one `ArenaSlice`-keyed probe on a cache
-    /// hit.
+    /// the `Copy` slice. The `str_slices` pool only grows during a compile, so
+    /// a slice always names the same path and so the same id. The memo is
+    /// dropped in `reset_to`, the one place the pool is rewound. On a cache
+    /// hit, this replaces a `strs_of` call (a `Vec<String>` and a `String` per
+    /// segment) and a `ref_interner.intern` call (a joined `String` from
+    /// `ModuleKey::of` and a string-hash lookup) for every occurrence with one
+    /// lookup keyed on the `ArenaSlice`.
     fn module_id_of_slice(&mut self, sl: ArenaSlice<pool::StrSlices>) -> ModuleId {
         if let Some(&id) = self.defid_module_memo.get(&sl) {
             return id;
@@ -1675,54 +1709,55 @@ impl Compiler {
 }
 
 impl ModuleChecker<'_> {
-    /// The interned `ModuleId` of `current_module`, reusing the memoised
-    /// module-path slice so the hot recording path neither clones the
-    /// `ModulePath` nor re-interns it.
+    /// The interned `ModuleId` of `current_module`. It reuses the memoised
+    /// module-path slice, so the busy recording path neither clones the
+    /// `ModulePath` nor interns it again.
     fn current_module_id(&mut self) -> ModuleId {
         let sl = self.current_module_slice();
         self.c.module_id_of_slice(sl)
     }
 
-    /// Resolve an env-side [`DefinitionLocation`] (declaring span + module
-    /// `ArenaSlice` + [`EntityKind`]) to a stable reference-graph [`DefId`].
-    /// The module slice is re-interned through the persistent `ref_interner`
-    /// so the id survives incremental recompiles, and the declaring span is
-    /// reconstructed single-line so a definition's `DefId` is bit-identical to
-    /// the `DefId` every occurrence of it targets.
+    /// Resolve a [`DefinitionLocation`] from the env (declaring span, module
+    /// `ArenaSlice` and [`EntityKind`]) to a stable reference-graph [`DefId`].
+    /// The module slice is interned again through the long-lived `ref_interner`
+    /// so the id survives incremental recompiles. The declaring span is rebuilt
+    /// as a single line, so a definition's `DefId` is identical, bit for bit,
+    /// to the `DefId` that every occurrence of it targets.
     pub(super) fn defid_of(&mut self, dl: DefinitionLocation) -> DefId {
         let module = self.c.module_id_of_slice(dl.module);
         DefId::new(module, dl.span(), dl.entity)
     }
 
-    /// The [`DefId`] to stash in `current_owner` while a top-level
-    /// `fn`/`const`/`type` body is compiled. Every reference emitted inside
-    /// that body — including inside nested lambdas, which have no `DefId` of
-    /// their own — is attributed to this owner: the def→def edge channel the
+    /// The [`DefId`] to keep in `current_owner` while a top-level `fn`, `const`
+    /// or `type` body is compiled. Every reference emitted inside that body,
+    /// including inside nested lambdas (which have no `DefId` of their own),
+    /// belongs to this owner. These are the edges between definitions that the
     /// dead-code reachability walk follows.
     pub(super) fn owner_defid(&mut self, name_span: Span, entity: EntityKind) -> DefId {
         let module = self.current_module_slice();
         self.defid_of(DefinitionLocation::new(name_span, module, entity))
     }
 
-    /// Record a resolved name occurrence in the current module's collector,
-    /// attributed to the definition whose body is currently being compiled
-    /// (`current_owner`; `None` for genuine top-level executed code). The
-    /// owner is the def→def edge channel the dead-code reachability walk
-    /// follows: without it every reference in a `fn`/`const`/`type` body
-    /// looks like top-level executed code, so anything it names is treated as
-    /// a live root and no transitively-dead private definition is ever
-    /// reported. Recording-only: never touches inference, schemes, slots, or
-    /// diagnostics.
+    /// Record an occurrence of a resolved name in the current module's
+    /// collector. It belongs to the definition whose body is being compiled
+    /// (`current_owner`, which is `None` for top-level code that really runs).
+    /// The owner gives the dead-code reachability walk its edges between
+    /// definitions. Without it, every reference in a `fn`, `const` or `type`
+    /// body would look like top-level code that runs, so anything it names
+    /// would count as a live root and no private definition that is only dead
+    /// through others would ever be reported. This only records. It never
+    /// touches inference, schemes, slots or diagnostics.
     fn record_ref(&mut self, occ: Span, kind: ReferenceKind, target: DefId) {
         self.module_refs
             .add_reference(self.current_owner, Reference::new(occ, kind, target));
     }
 
     /// Resolve a value name's canonical [`DefinitionLocation`] (carried on its
-    /// `Scheme.def`) to a [`DefId`] and record an occurrence of `kind` at
-    /// `occ`. No-op when the name has no recorded definition; builtins behave
-    /// as external targets (harmless — they own no definition in the graph so
-    /// the edge dangles and never affects reachability).
+    /// `Scheme.def`) to a [`DefId`], and record an occurrence of `kind` at
+    /// `occ`. This does nothing when the name has no recorded definition.
+    /// Builtins act as outside targets, which is harmless: they have no
+    /// definition in the graph, so the edge dangles and never affects
+    /// reachability.
     fn record_value_use(
         &mut self,
         def: Option<DefinitionLocation>,
@@ -1735,15 +1770,15 @@ impl ModuleChecker<'_> {
         }
     }
 
-    /// Record a `Qualifier` occurrence for the module alias a qualified member
-    /// use was reached through. The qualifier names the import, not a value:
-    /// the occurrence targets the `ModuleAlias` binding so hover and goto-def
-    /// on the `b` of `b.add(..)` reach module `b`. Non-use-site, so
-    /// find-references / rename / unused-import are unaffected: the alias's
-    /// liveness rides on the member's own `Qualified` occurrence, which the
-    /// caller records. The alias `Definition` was registered under the
-    /// qualifier's name by `bind_import`, so no extra bookkeeping is needed
-    /// to find it; an unknown qualifier records nothing.
+    /// Record a `Qualifier` occurrence for the module alias that a qualified
+    /// member use was reached through. The qualifier names the import, not a
+    /// value, so the occurrence targets the `ModuleAlias` binding, and hover
+    /// and goto-def on the `b` of `b.add(..)` reach module `b`. It isn't a use
+    /// site, so find-references, rename and the unused-import check aren't
+    /// affected. Whether the alias counts as used depends on the member's own
+    /// `Qualified` occurrence, which the caller records. `bind_import`
+    /// registered the alias `Definition` under the qualifier's name, so finding
+    /// it needs no extra bookkeeping. An unknown qualifier records nothing.
     fn record_qualifier_use(&mut self, qualifier: &ast::Identifier) {
         if let Some(alias) = self
             .module_refs
@@ -1757,9 +1792,9 @@ impl ModuleChecker<'_> {
     }
 
     /// Resolve a type name in `path`'s module to its canonical `Type`
-    /// definition and record an occurrence of `kind` at `occ`. No-op when the
-    /// module has no such type (e.g. static/hydrated stdlib modules). Mirror of
-    /// [`Self::record_value_use`] for type references.
+    /// definition, and record an occurrence of `kind` at `occ`. This does
+    /// nothing when the module has no such type (for example static or hydrated
+    /// stdlib modules). It is the type version of [`Self::record_value_use`].
     fn record_type_use(&mut self, path: &ModulePath, name: &str, occ: Span, kind: ReferenceKind) {
         if let Some(target) = self.type_defid_in_module(path, name) {
             self.record_ref(occ, kind, target);
@@ -1767,16 +1802,16 @@ impl ModuleChecker<'_> {
     }
 
     /// Record a declaration in the current module's reference collector, plus
-    /// a single `Definition`-kind self-occurrence at the declaring name so
-    /// find-references includes the declaration site. The `Definition` record
-    /// is last-write-wins on its `DefId` (a definition may be re-emitted as
-    /// more is learned about it — docs/visibility settle on the last write);
-    /// the self-occurrence is emitted only on first sight so the declaration
-    /// is not double-counted. The self-occurrence is owned by the definition
-    /// itself (not `None`) so it is never mistaken for top-level executed code
-    /// — a self-edge can never bootstrap a def's own reachability, so a dead
-    /// definition stays dead. Recording-only: never touches inference,
-    /// schemes, slots, or diagnostics.
+    /// one `Definition` occurrence at the declaring name so find-references
+    /// includes the declaration site. The last write of a `Definition` record
+    /// wins for its `DefId`, because a definition may be emitted again as more
+    /// is learned about it (its doc and visibility settle on the last write).
+    /// The occurrence is only emitted the first time, so the declaration isn't
+    /// counted twice. That occurrence is owned by the definition itself (not
+    /// `None`), so it is never mistaken for top-level code that runs. An edge
+    /// from a definition to itself can never make that definition reachable, so
+    /// a dead definition stays dead. This only records. It never touches
+    /// inference, schemes, slots or diagnostics.
     pub(super) fn emit_def(
         &mut self,
         dl: DefinitionLocation,
@@ -1798,11 +1833,12 @@ impl ModuleChecker<'_> {
         }
     }
 
-    /// Register a local binder as an `EntityKind::Value` graph definition so
-    /// goto-def / find-refs / hover resolve on it and its uses. LSP-only: the
-    /// graph is built on every compile, but `al run`/`al check` never query
-    /// locals, and `EntityKind::Value` defs are ignored by the dead-code pass,
-    /// so the `collect_hover_facts` gate keeps this off the hot path.
+    /// Register a local binder as an `EntityKind::Value` definition in the
+    /// graph, so goto-def, find-references and hover work on it and its uses.
+    /// Only the LSP needs this. The graph is built on every compile, but
+    /// `scarlet run` and `scarlet check` never ask about locals, and the
+    /// dead-code pass ignores `EntityKind::Value` definitions, so the
+    /// `collect_hover_facts` check keeps this off the busy path.
     fn emit_value_def(&mut self, sp: Span, name: &str, doc: Option<String>) {
         if self.c.collect_hover_facts {
             let m = self.current_module_slice();
@@ -1818,11 +1854,11 @@ impl ModuleChecker<'_> {
 }
 
 impl Compiler {
-    /// Thin wrappers over the engine's `mk_con` for prelude types, fed by the
-    /// captured `PreludeBindings` so the type identity (not just the name
-    /// string) is the source of truth where it matters. The nullary ones go
-    /// through the engine's per-primitive cache so a recompile mints one `Int`
-    /// node instead of one per literal.
+    /// Small wrappers over the engine's `mk_con` for prelude types. They use
+    /// the captured `PreludeBindings`, so the type's identity (not just its
+    /// name) is what counts where it matters. The nullary ones go through the
+    /// engine's cache for each primitive, so a recompile mints one `Int` node
+    /// instead of one per literal.
     #[inline]
     fn ty_prelude(&mut self, r: TypeRef, args: &[Ty]) -> Ty {
         self.engine.mk_con(r.id, r.name, args)
@@ -1858,15 +1894,16 @@ impl Compiler {
 }
 
 impl ModuleChecker<'_> {
-    /// Hydrate a type annotation through `h`, recording any error and falling
-    /// back to a fresh tyvar so inference can continue. Every type name the
-    /// hydrator resolved is drained as an `Unqualified` occurrence of that
-    /// type's declaration — whether hydration succeeded or not, since a nested
-    /// name can resolve before a later sibling fails. The target is the owning
-    /// module's canonical `Type` definition (resolved through the reference
-    /// graph, not the constructor-clobbered `env.definitions`), so an
-    /// occurrence and its declaration share one `DefId`. Recording-only: the
-    /// returned `Ty` is byte-for-byte what the old code returned.
+    /// Hydrate a type annotation through `h`. If that fails, record the error
+    /// and fall back to a fresh type variable so inference can carry on. Every
+    /// type name the hydrator resolved is drained as an `Unqualified`
+    /// occurrence of that type's declaration, whether hydration succeeded or
+    /// not, because a nested name can resolve before a later one fails. The
+    /// target is the canonical `Type` definition in the module that owns it,
+    /// resolved through the reference graph and not through `env.definitions`
+    /// (where constructors overwrite types). So an occurrence and its
+    /// declaration share one `DefId`. This only records, and the `Ty` it
+    /// returns is exactly what it would be without the recording.
     pub(super) fn hydrate(&mut self, h: &mut Hydrator, t: &ast::TypeIdentifier) -> Ty {
         let result = h.type_from_ast(t, &self.c.env, &mut self.c.engine);
         for hit in h.take_type_refs() {
@@ -1878,9 +1915,9 @@ impl ModuleChecker<'_> {
             };
             self.record_type_use(&path, &name, hit.span, kind);
             // A `module::Type` occurrence names the import through its
-            // qualifier, exactly like a `module.value` use: record the
-            // `Qualifier` occurrence so the import counts as used and the
-            // qualifier resolves under hover / goto-def.
+            // qualifier, just like a `module.value` use. So record the
+            // `Qualifier` occurrence, which makes the import count as used and
+            // lets hover and goto-def resolve the qualifier.
             if let Some((qid, qspan)) = hit.qualifier {
                 let q = ast::Identifier {
                     name: self.c.engine.str(qid).to_string(),
@@ -1898,7 +1935,8 @@ impl ModuleChecker<'_> {
         }
     }
 
-    /// Like [`Self::hydrate`] for an optional annotation: `None` yields a fresh tyvar.
+    /// Like [`Self::hydrate`], for an optional annotation. `None` gives a fresh
+    /// type variable.
     pub(super) fn hydrate_opt(&mut self, h: &mut Hydrator, t: Option<&ast::TypeIdentifier>) -> Ty {
         match t {
             Some(t) => self.hydrate(h, t),
@@ -1906,8 +1944,9 @@ impl ModuleChecker<'_> {
         }
     }
 
-    /// Hydrate a `let x: T = ...` binding annotation, where any type-variable
-    /// name must already be in scope (i.e. a parameter of the enclosing fn).
+    /// Hydrate the annotation on a binding like `x T = ...`, where any type
+    /// variable it names must already be in scope (that is, be a parameter of
+    /// the enclosing function).
     fn hydrate_annotation(&mut self, t: &ast::TypeIdentifier) -> Ty {
         let mut h = Hydrator::new(AnnotationContext::Binding);
         self.hydrate(&mut h, t)
@@ -1961,8 +2000,8 @@ impl ModuleChecker<'_> {
                 }
             }
             ast::Statement::Declaration { decl, .. } => {
-                // Top-level declarations are handled by `analyse_module`; reaching
-                // one here means it's nested inside an expression block.
+                // `analyse_module` handles top-level declarations, so reaching
+                // one here means it is nested inside an expression block.
                 let (kind, sp) = match decl.as_ref() {
                     ast::Declaration::Function(fd) => ("named function", fd.span),
                     ast::Declaration::Type(td) => ("type", td.span),
@@ -1974,20 +2013,22 @@ impl ModuleChecker<'_> {
                 );
                 CNode::Nothing
             }
-            // Imports are processed at the start of compilation, before
-            // walking the body. By the time we reach one here it's already
-            // been resolved (or rejected) — nothing left to do.
+            // Imports are handled at the start of compilation, before walking
+            // the body. By the time we reach one here it is already resolved
+            // (or rejected), so there's nothing left to do.
             ast::Statement::ImportDeclaration(_) => CNode::Nothing,
             ast::Statement::Backpass(bp) => {
-                // Desugared away before compilation; one can only survive a
-                // parser rejection (e.g. at module top level), which already
-                // errored. Type the call so its own diagnostics still surface.
+                // Backpasses are removed before compilation. One can only
+                // survive if the parser rejected it (at module top level, for
+                // example), which already raised an error. Type the call anyway
+                // so its own diagnostics still show.
                 CNode::Effect(self.compile_expr(&bp.call))
             }
         }
     }
 
-    /// `x = e` or `x Type = e`. Returns the init and the binding's binder.
+    /// `x = e` or `x Type = e`. Returns the initialiser and the binding's
+    /// binder.
     fn compile_name_binding(
         &mut self,
         vb: &ast::Binding,
@@ -1996,16 +2037,16 @@ impl ModuleChecker<'_> {
         let name = ident.name.clone();
         let name_id = self.c.engine.intern(&name);
 
-        // At module scope a re-binding gets a fresh slot (see
-        // `get_or_create_local`), so the slot must be allocated *after*
-        // the initializer compiles — otherwise the name would already
-        // resolve to the new, still-uninitialised slot and an init that
-        // reads the prior binding (e.g. `x = x + 1`) would read garbage.
-        // The prior binding stays in scope across the init, which also
-        // drives `Self_` resolution for a self-recursive lambda. A first
-        // binding still reserves its slot up front so a self-recursive
-        // lambda can resolve its own (not-yet-bound) name through the
-        // entry frame.
+        // At module scope, binding a name again gets a fresh slot (see
+        // `get_or_create_local`). So the slot must be allocated *after* the
+        // initialiser compiles. Otherwise the name would already resolve to the
+        // new slot, which isn't initialised yet, and an initialiser that reads
+        // the earlier binding (like `x = x + 1`) would read garbage. The
+        // earlier binding stays in scope across the initialiser, which also
+        // drives `Self_` resolution for a lambda that calls itself. A first
+        // binding still reserves its slot up front, so a lambda that calls
+        // itself can resolve its own name, not yet bound, through the entry
+        // frame.
         let defer_slot = self.frames.at_toplevel() && self.frames.current.lookup(name_id).is_some();
         if !defer_slot {
             self.get_or_create_local(&name);
@@ -2016,18 +2057,18 @@ impl ModuleChecker<'_> {
         self.c.engine.enter_level();
         let self_ty = self.c.engine.fresh_var();
         let init_is_fn = matches!(vb.init, ast::Expression::FunctionExpression(_));
-        // Only pre-bind for recursive lambdas. For any other init, exposing
-        // the name to its own initializer lets `x = x` infer ⊥ and generalize
-        // to ∀A.A, which is unsound.
+        // Only bind the name early for recursive lambdas. For any other
+        // initialiser, letting it see its own name lets `x = x` infer ⊥ and
+        // generalise to ∀A.A, which is unsound.
         if init_is_fn {
             self.c.env.define(&name, mono(self_ty));
         }
 
-        // Deliver the self-name to the lambda's own frame via a one-shot
-        // consumed by its `enter_fn_frame`. Setting it on the current frame
-        // would leak into nested / HOF-arg lambdas and mis-resolve their
-        // calls to the enclosing fn as Self_ (emitting CallSelf against the
-        // wrong, live frame).
+        // Hand the name to the lambda's own frame through a value that its
+        // `enter_fn_frame` uses up once. Setting it on the current frame would
+        // leak into nested lambdas and lambdas passed as arguments, and resolve
+        // their calls to the enclosing function as `Self_`, which emits
+        // `CallSelf` against the wrong, live frame.
         let saved_self = if init_is_fn {
             self.next_fn_self_name.replace(name_id)
         } else {
@@ -2070,9 +2111,9 @@ impl ModuleChecker<'_> {
         (init, self.publish_local(name_id))
     }
 
-    /// `(a, b) = e`, `Point(x:, ..) = e`: typed like a one-arm `match`, and the
-    /// one arm has to cover every value, so only a pattern that cannot fail
-    /// is a binding.
+    /// `(a, b) = e` or `Point(x:, ..) = e`. This is typed like a `match` with
+    /// one arm, and that arm has to cover every value, so only a pattern that
+    /// can't fail works as a binding.
     fn compile_destructuring(&mut self, b: &ast::Binding) -> (CPat, CExpr) {
         let init = self.compile_expr(&b.init);
         let init_ty = init.ty;
@@ -2105,9 +2146,8 @@ impl ModuleChecker<'_> {
     // Modules
     // ========================================================================
 
-    /// Bind the module's imports, each already compiled by
-    /// [`Compiler::load_imports`], which handed back `loaded` in the same
-    /// order.
+    /// Bind the module's imports. [`Compiler::load_imports`] already compiled
+    /// each one and handed back `loaded` in the same order.
     fn bind_imports(
         &mut self,
         block: &ast::BlockExpression,
@@ -2122,9 +2162,9 @@ impl ModuleChecker<'_> {
 }
 
 impl Compiler {
-    /// A cache-hit dependency reserved its id range but contributed nothing to
-    /// `next_type_id` this pass, so bump the entry file past every reserved
-    /// block before it allocates any of its own type ids.
+    /// A dependency that was a cache hit reserved its id range but added
+    /// nothing to `next_type_id` on this pass. So move the entry file past
+    /// every reserved range before it allocates any type ids of its own.
     fn bump_type_ids_past_reserved(&mut self) {
         let hw = self.module_table.id_high_water();
         let cur = self.env.next_type_id();
@@ -2135,12 +2175,13 @@ impl Compiler {
 }
 
 impl ModuleChecker<'_> {
-    /// `canon` is the module's identity — the file it resolved to. Every
-    /// downstream key (module table, reference interner, qualifier map) must
-    /// use it, never `imp.path`, which is only how *this* file spelled it.
+    /// `canon` is the module's identity, which is the file it resolved to.
+    /// Every key further on (the module table, the reference interner and the
+    /// qualifier map) must use it, never `imp.path`, which is only how *this*
+    /// file spelt it.
     fn bind_import(&mut self, imp: &ast::ImportDeclaration, canon: ModulePath, key: ModuleKey) {
-        // The default qualifier is the last module-name segment; relative
-        // markers live in `path.leading`, so they can't be picked up here.
+        // The default qualifier is the last segment of the module name.
+        // Relative markers live in `path.leading`, so they can't end up here.
         let qualifier = imp
             .alias
             .as_ref()
@@ -2153,18 +2194,18 @@ impl ModuleChecker<'_> {
                     .unwrap_or_else(|| key.as_str().to_string())
             });
 
-        // Reference graph: the qualifier binding is a `ModuleAlias`
-        // definition; the final module-name path segment is an `Import`
-        // occurrence and the `as` alias an `Alias` occurrence, both targeting
-        // it so qualified `q.member` uses, find-references, and rename resolve
-        // back to this import (and the unused-import reachability rule can see
-        // it). The `Import` occ is recorded at `imp.path_span` — the final
-        // segment only — so the `import` keyword and earlier path segments
-        // (`scarlet` / `/` in `import scarlet/string`) are not clickable. The alias
-        // `Definition` also stores the full declaration span (`decl_span`) and
-        // the imported `ModuleId` (`imports_module`) so unused-import detection
-        // reads both directly instead of recovering them from occurrence
-        // geometry.
+        // In the reference graph, the qualifier binding is a `ModuleAlias`
+        // definition. The last segment of the module path is an `Import`
+        // occurrence and the `as` alias is an `Alias` occurrence. Both target
+        // the alias, so qualified `q.member` uses, find-references and rename
+        // resolve back to this import, and the unused-import rule can see it.
+        // The `Import` occurrence is recorded at `imp.path_span`, which is only
+        // the last segment, so the `import` keyword and the earlier path
+        // segments (`scarlet` and `/` in `import scarlet/string`) aren't
+        // clickable. The alias `Definition` also stores the full declaration
+        // span (`decl_span`) and the imported `ModuleId` (`imports_module`), so
+        // unused-import detection reads both directly instead of working them
+        // out from where the occurrences sit.
         let alias_span = imp.alias.as_ref().map_or(imp.span, |a| a.span);
         let cur_path = self.current_module.clone();
         let cur_mid = self.c.ref_interner.intern(&cur_path);
@@ -2182,11 +2223,11 @@ impl ModuleChecker<'_> {
             },
         ));
         // The module-name segment points at the *imported* module, so its
-        // `Import` occurrence targets a `DefId` owned by that module: goto-def
-        // on the `b` in `import a/b` lands on `b`'s file, not the importing
-        // alias's own binding (a no-op self-jump). find-references / rename / the
-        // unused-import rule all key off the alias `Definition` above, so
-        // retargeting only the occurrence changes nothing for them.
+        // `Import` occurrence targets a `DefId` in that module. Goto-def on the
+        // `b` in `import a/b` then lands in `b`'s file, not on the alias's own
+        // binding (which would jump nowhere). Find-references, rename and the
+        // unused-import rule all go by the alias `Definition` above, so
+        // pointing only the occurrence elsewhere changes nothing for them.
         self.module_refs.add_reference(
             None,
             Reference::new(
@@ -2202,10 +2243,11 @@ impl ModuleChecker<'_> {
             );
         }
 
-        // Every public type of the module is reachable as `qualifier::Name` in
-        // type position. Register each under the mangled `qualifier::Name` key
-        // the hydrator probes for a qualified reference; type names cannot
-        // contain ':', so these keys never collide with local declarations.
+        // Every public type of the module can be named as `qualifier::Name`
+        // where a type goes. Register each one under the combined
+        // `qualifier::Name` key that the hydrator looks for on a qualified
+        // reference. Type names can't contain ':', so these keys never clash
+        // with local declarations.
         let qualified_types: Vec<(String, _)> = self
             .c
             .module_table
@@ -2227,17 +2269,9 @@ impl ModuleChecker<'_> {
 }
 
 impl Compiler {
-    /// Load the module `path` names, relative to the *importing* module's
-    /// directory, and return its canonical identity.
-    ///
-    /// Resolution happens **before** the cache is consulted, and the key comes
-    /// from the file we resolved to — never from `path` as written. Keying on
-    /// the written path made `./b` mean one module program-wide: a `sub/mid.sca`
-    /// importing `./b` silently received the root's `b.sca`. See
-    /// `module::file_module_path`.
-    /// How to name a module in a diagnostic: the path the importer wrote
-    /// (`./lib`), falling back to the module's own last segment. Never the
-    /// canonical key — that is an identity, not a name.
+    /// How to name a module in a diagnostic. This is the path the importer
+    /// wrote (`./lib`), or else the module's own last segment. It is never the
+    /// canonical key, because that is an identity, not a name.
     fn module_name(&self, key: &ModuleKey) -> String {
         self.module_display.get(key).cloned().unwrap_or_else(|| {
             let k = key.as_str();
@@ -2245,9 +2279,9 @@ impl Compiler {
         })
     }
 
-    /// Compile every module `block` imports, in order, before the importer's
-    /// own check starts. `None` for an import that failed to load, which has
-    /// already been reported.
+    /// Compile every module that `block` imports, in order, before the
+    /// importer's own check starts. An import that failed to load gives `None`,
+    /// and was already reported.
     fn load_imports(
         &mut self,
         block: &ast::BlockExpression,
@@ -2263,6 +2297,14 @@ impl Compiler {
             .collect()
     }
 
+    /// Load the module that `path` names, relative to the *importing* module's
+    /// directory, and return its canonical identity.
+    ///
+    /// The path is resolved **before** we look in the cache, and the key comes
+    /// from the file it resolved to, never from `path` as written. Keying on
+    /// the written path made `./b` mean one module across the whole program,
+    /// so a `sub/mid.sca` that imported `./b` quietly got the root's `b.sca`.
+    /// See `module::file_module_path`.
     pub(crate) fn load_module(
         &mut self,
         path: &ast::ImportPath,
@@ -2272,13 +2314,13 @@ impl Compiler {
         let resolved =
             match module::resolve_with(path, importer.dir, self.stdlib_source_root.as_deref()) {
                 Ok(r) => r,
-                // These two get richer, import-syntax-aware guidance than
-                // `ResolveError`'s shared Display wording provides.
+                // These two get more specific advice about import syntax than
+                // the shared `Display` text of `ResolveError` gives.
                 Err(ResolveError::BareName(p)) => {
                     self.module_error(
                         format!(
-                            "Unknown module '{p}' — package imports are not yet supported; \
-                         use a relative path like `./{p}`"
+                            "Unknown module '{p}'. Package imports aren't supported yet, \
+                         so use a relative path like `./{p}`"
                         ),
                         at,
                     );
@@ -2286,7 +2328,7 @@ impl Compiler {
                 }
                 Err(ResolveError::NoBaseDir) => {
                     self.module_error(
-                        "Relative imports are not allowed without a file context (e.g. REPL)"
+                        "Relative imports don't work without a file, such as in the REPL"
                             .to_string(),
                         at,
                     );
@@ -2298,8 +2340,8 @@ impl Compiler {
                 }
             };
 
-        // The identity of an on-disk module is the file it resolved to;
-        // `resolve` already minted the canonical path + key from it.
+        // The identity of a module on disk is the file it resolved to, and
+        // `resolve` already minted the canonical path and key from it.
         let module::ResolvedModule { source, canon, key } = resolved;
         let importer = importer.key.clone();
         if self.module_table.get(&key).is_some() {
@@ -2307,7 +2349,12 @@ impl Compiler {
             return Some((canon, key));
         }
         if self.module_table.is_loading(&key) {
-            self.module_error(format!("Import cycle detected at module '{key}'"), at);
+            self.module_error(
+                format!(
+                    "Import cycle at module '{key}'. Modules can't import each other in a loop"
+                ),
+                at,
+            );
             return None;
         }
 
@@ -2317,7 +2364,7 @@ impl Compiler {
                 ModuleSource::File(p) => match self.module_table.read_source(&p) {
                     Ok(t) => (t, p.parent().map(|d| d.to_path_buf()), Some(p)),
                     Err(e) => {
-                        self.module_error(format!("Failed to read module '{key}': {e}"), at);
+                        self.module_error(format!("Couldn't read module '{key}': {e}"), at);
                         return None;
                     }
                 },
@@ -2329,8 +2376,8 @@ impl Compiler {
         let mut parsed = parser.parse_program();
         crate::desugar::desugar_program(&mut parsed.ast);
         for d in parsed.diagnostics {
-            // The span is `at` — the import site in the *importing* module —
-            // so provenance is left for the importer's own stamping pass.
+            // The span is `at`, the import site in the *importing* module, so
+            // provenance is left for the importer's own stamping pass.
             self.engine.diagnostics.push(Diagnostic {
                 span: at,
                 severity: d.severity,
@@ -2359,9 +2406,9 @@ impl Compiler {
             None => ModuleOrigin::Embedded { refs },
         };
         self.module_table.bump_compile_count();
-        // The watermark is captured *after* this module's own dependencies have
-        // loaded (compile_module_body does that first) but reflects the arena
-        // state immediately *before* this module's body added anything.
+        // The watermark is taken *after* this module's own dependencies have
+        // loaded (`compile_module_body` does that first), but it shows the
+        // arena state just *before* this module's body added anything.
         self.module_table.insert_cached(
             key.clone(),
             CachedModule {
@@ -2378,9 +2425,10 @@ impl Compiler {
         Some((canon, key))
     }
 
-    /// Run `f` with [`Self::retain_namespaces`] set: module compiles inside it
-    /// leave their by-name residue at root instead of scoping it to their
-    /// frame. Stdlib bootstrap only — see the field's doc.
+    /// Run `f` with [`Self::retain_namespaces`] set. Modules compiled inside it
+    /// leave their by-name entries at the root instead of scoping them to their
+    /// frame. This is only for loading the stdlib at startup, so see the
+    /// field's doc.
     pub(crate) fn with_retained_namespaces<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
         let prev = self.retain_namespaces;
         self.retain_namespaces = true;
@@ -2414,14 +2462,15 @@ impl Compiler {
             },
         );
         let imports: Vec<ModuleKey> = loaded.iter().flatten().map(|(_, k)| k.clone()).collect();
-        // Reserve (or reuse) this module's stable 256-aligned type-id range
-        // *before* the watermark is captured, so the captured watermark's
-        // `env.next_type_id == base`. On invalidation `reset_to`/`truncate_to`
-        // restores `next_type_id` from that watermark, putting the module back
-        // at its own range start — editing one module never shifts another's
-        // ids. Its imports have already reserved their ranges, so the floor
-        // (current `next_type_id`) already sits past every stdlib + dependency
-        // id. `key` is the same key `load_module` caches this module under.
+        // Reserve (or reuse) this module's stable type-id range, aligned to
+        // 256, *before* the watermark is taken, so the watermark's
+        // `env.next_type_id == base`. On invalidation, `reset_to` and
+        // `truncate_to` restore `next_type_id` from that watermark, which puts
+        // the module back at the start of its own range. So editing one module
+        // never shifts another's ids. Its imports have already reserved their
+        // ranges, so the floor (the current `next_type_id`) is already past
+        // every stdlib and dependency id. `key` is the same key that
+        // `load_module` caches this module under.
         let floor = self.env.next_type_id();
         let reservation = self.module_table.id_base_for(&key, floor);
         let base = reservation.base();
@@ -2437,15 +2486,16 @@ impl Compiler {
         checker.c.env.pop_scope();
         let refs = checker.finish();
 
-        // Record actual type-id consumption so `id_high_water` tracks real
-        // usage and a reused-range spill past `MODULE_TYPE_ID_RANGE` raises
-        // `id_range_overflow` for the invalidate-all/reset recovery path.
+        // Record how many type ids the module really used, so `id_high_water`
+        // follows real usage, and a reused range that spills past
+        // `MODULE_TYPE_ID_RANGE` sets `id_range_overflow` for the recovery path
+        // that invalidates and resets everything.
         let used = self.env.next_type_id().0 - base.0;
         reservation.note_usage(&mut self.module_table, used);
 
         // Stamp provenance on every diagnostic this module's compile produced.
-        // Its imports have already stamped theirs, so only still-unstamped
-        // (entry-relative) ones become ours.
+        // Its imports have already stamped theirs, so only the ones still
+        // unstamped (relative to the entry) become ours.
         for d in &mut self.engine.diagnostics[diag_mark..] {
             if d.source.is_none() {
                 d.source = Some(key.clone());
@@ -2463,11 +2513,11 @@ impl Compiler {
 }
 
 impl ModuleChecker<'_> {
-    /// The function a program starts at. Validates the entry file's `main`
-    /// — `pub`, no parameters — whenever there is one, so `check` reports a
-    /// malformed entry point too, and requires one when the program is going
-    /// to be run. Returns its `FuncIdx` in that case; a program with no
-    /// usable `main` gets a diagnostic, which is what keeps it from running.
+    /// The function a program starts at. This checks the entry file's `main`
+    /// (it must be `pub` and take no parameters) whenever there is one, so
+    /// `check` reports a broken entry point too. It also requires one when the
+    /// program is going to be run, and returns its `FuncIdx` then. A program
+    /// with no usable `main` gets a diagnostic, which is what stops it running.
     fn program_entry(
         &mut self,
         block: &ast::BlockExpression,
@@ -2493,7 +2543,8 @@ impl ModuleChecker<'_> {
         let Some((node, fd, public)) = main else {
             if !check_only {
                 self.c.error(
-                    "No `main` function: a program starts at `pub fn main()`".to_string(),
+                    "There's no `main` function. A program starts at `pub fn main()`, so add one"
+                        .to_string(),
                     Span::point(module_span.start_line, module_span.start_column),
                 );
             }
@@ -2502,14 +2553,15 @@ impl ModuleChecker<'_> {
         let mut usable = true;
         if !public {
             self.c.error(
-                "`main` must be public: a program starts at `pub fn main()`".to_string(),
+                "`main` must be public, because a program starts at `pub fn main()`".to_string(),
                 fd.identifier.span,
             );
             usable = false;
         }
         if !fd.params.is_empty() {
             self.c.error(
-                "`main` takes no parameters (arguments are read with `os.argv()`)".to_string(),
+                "`main` takes no parameters. Read the program's arguments with `os.argv()` instead"
+                    .to_string(),
                 fd.identifier.span,
             );
             usable = false;
@@ -2517,20 +2569,21 @@ impl ModuleChecker<'_> {
         if check_only || !usable {
             return None;
         }
-        // Compiled by `analyse_module` unless its body failed, in which case
-        // the module is not clean and nothing runs anyway.
+        // `analyse_module` compiled this unless its body failed, and in that
+        // case the module isn't clean and nothing runs anyway.
         let slot = self.toplevel_decls.iter().find(|d| d.node == node)?.slot;
         self.c.global_to_func.get(&slot).copied()
     }
 
-    /// Perceus a just-lowered toplevel and record it: an imported module's
-    /// joins [`Self::inits`], and the entry file's becomes the program's own.
-    /// Returns the [`EntryToplevel`] witness for `TopKind::Entry` — the one
-    /// place it is minted, so it cannot outrun the recording it stands for.
+    /// Run Perceus on a toplevel that was just lowered, and record it. An
+    /// imported module's toplevel joins [`Self::inits`], and the entry file's
+    /// becomes the program's own. For `TopKind::Entry` this returns the
+    /// [`EntryToplevel`] witness. This is the only place it is minted, so it
+    /// can't get ahead of the recording it stands for.
     fn record_toplevel(&mut self, lowered: LoweredBody, kind: TopKind) -> Option<EntryToplevel> {
         use crate::core_ir::perceus;
-        // Every module-scope slot left on a binding's node. One still here was
-        // bound by something that is not a binding statement.
+        // Every module-scope slot left on a binding's node. One that is still
+        // here was bound by something that isn't a binding statement.
         if !self.binding_globals.is_empty() {
             unclaimed_toplevel_slots(self.binding_globals.len());
         }
@@ -2539,10 +2592,10 @@ impl ModuleChecker<'_> {
             core: top,
             pool,
         } = lowered;
-        // Perceus runs so *temporaries* passed into calls are moved (rc==1 in
-        // the callee → its own reuse fires). `keep_globals` then takes the
-        // pinned globals back out: their last use in the toplevel is not their
-        // last use in the program.
+        // We run Perceus so that *temporaries* passed into calls are moved
+        // (rc==1 in the callee, so its own reuse fires). `keep_globals` then
+        // takes the pinned globals back out, because their last use in the
+        // toplevel is not their last use in the program.
         let top = perceus::keep_globals(perceus::perceus(&pool, top));
         if std::env::var("CORE_DBG").is_ok() {
             eprintln!("=== {}\n{top}", self.c.engine.str(name));
@@ -2561,16 +2614,16 @@ impl ModuleChecker<'_> {
         }
     }
 
-    /// Elaborate and lower a just-analysed module toplevel to Core and record
-    /// it, exactly as `compile_with` does for `__main__`.
+    /// Elaborate a module toplevel that was just analysed, lower it to Core and
+    /// record it, just as `compile_with` does for `__main__`.
     fn lower_module_init(&mut self, key: &ModuleKey, nodes: &[CNode], span: Span) {
         let Some(clean) = self.c.clean_module() else {
             return;
         };
         let name = self.c.engine.intern(key.as_str());
         let nil = self.c.ty_nil();
-        // Elaborated and lowered even under `check_only` so a module toplevel
-        // the front half cannot handle is a diagnostic rather than a crash at
+        // Elaborate and lower it even under `check_only`, so a module toplevel
+        // the front half can't handle becomes a diagnostic and not a crash at
         // `scarlet run`.
         let lowered = self.elaborate_then_materialize(clean, None, |c, pool, fns| {
             typed_ir::elaborate_toplevel(c, pool, fns, name, nodes, span, nil)
@@ -2580,9 +2633,9 @@ impl ModuleChecker<'_> {
         }
     }
 
-    /// Look up a `qualifier.member` reference where `qualifier` is an imported
-    /// module name. Returns the value's scheme and (if it has a runtime
-    /// binding) its slot in the entry frame.
+    /// Look up a `qualifier.member` reference where `qualifier` is the name of
+    /// an imported module. Returns the value's scheme and, if it has a runtime
+    /// binding, its slot in the entry frame.
     fn lookup_module_member(
         &mut self,
         module_key: &ModuleKey,
@@ -2619,10 +2672,10 @@ impl ModuleChecker<'_> {
 
     /// Typecheck `expr` and build its node in the checked tree.
     ///
-    /// The tree is what lets the elaborator use the typechecker's answers
-    /// rather than re-derive them: re-instantiating a constructor or module
-    /// function scheme would produce unresolved vars where the walk had a
-    /// concrete `Con`.
+    /// The tree lets the elaborator use the typechecker's answers instead of
+    /// working them out again. Instantiating a constructor or module function
+    /// scheme again would give unsolved variables where the walk had a concrete
+    /// `Con`.
     fn compile_expr(&mut self, expr: &ast::Expression) -> CExpr {
         let (ty, kind) = self.compile_expr_inner(expr);
         CExpr {
@@ -2658,7 +2711,7 @@ impl ModuleChecker<'_> {
                             let ty_str = self.c.engine.type_to_str(ty);
                             self.c.error(
                                 format!(
-                                    "Expression of type '{ty_str}' must be consumed. Assign it to a variable or use '_ = ...' to discard"
+                                    "This expression's value of type '{ty_str}' isn't used. Assign it to a name, or write '_ = ...' to throw it away"
                                 ),
                                 node.span(),
                             );
@@ -2670,9 +2723,9 @@ impl ModuleChecker<'_> {
                 (last_ty, CKind::Block(nodes))
             }
             ast::Expression::NumberLiteral(nl) => {
-                // `const_number` is the single source of the int/float split
-                // (and of the overflow diagnostic); the elaborator pools the
-                // constant itself.
+                // `const_number` is the one place that decides between int and
+                // float (and raises the overflow diagnostic). The elaborator
+                // pools the constant itself.
                 let c = self.c.const_number(nl);
                 let ty = if matches!(c, Const::Float(_)) {
                     self.c.engine.icon_float()
@@ -2812,10 +2865,10 @@ impl ModuleChecker<'_> {
             ast::Expression::ModuleAccessExpression(ma) => self.compile_module_access(ma),
             ast::Expression::OrExpression(oe) => self.compile_or(oe),
             ast::Expression::PipeExpression(p) => {
-                // Desugared away before type checking (`compile_with`/
-                // `check_impl` rewrite every pipe first), same guarantee as
-                // `Statement::Backpass`. Type both sides defensively so a
-                // survivor still surfaces its operands' own diagnostics
+                // Pipes are removed before type checking (`compile_with` and
+                // `check_impl` rewrite every pipe first), the same guarantee as
+                // for `Statement::Backpass`. Type both sides anyway, so one
+                // that survives still shows its operands' own diagnostics
                 // instead of panicking.
                 self.compile_expr(&p.left);
                 self.compile_expr(&p.right);
@@ -2825,17 +2878,19 @@ impl ModuleChecker<'_> {
         }
     }
 
-    /// An `ErrorNode` stands in for a region the parser could not read, so it
-    /// has no meaning to check and none to elaborate. Every parser site that
-    /// builds one also records the error, and the entry file's parse
-    /// diagnostics never enter `engine.diagnostics` — so restate it here, but
-    /// only when nothing else has already denied the module its [`CleanModule`]
-    /// proof. That keeps the diagnostic set a user sees identical (the CLI
-    /// stops before checking a file that failed to parse; the LSP publishes
-    /// only the parse errors for such a buffer; an imported module's parse
-    /// errors are folded in before its body is walked) while making the one
-    /// unelaborable form in the language a checked error rather than a bug
-    /// report from a later pass.
+    /// An `ErrorNode` stands in for a part of the source the parser couldn't
+    /// read, so there's nothing in it to check or elaborate. Every place in the
+    /// parser that builds one also records the error, but the entry file's
+    /// parse diagnostics never go into `engine.diagnostics`. So we repeat the
+    /// error here, but only when nothing else has already denied the module its
+    /// [`CleanModule`] proof.
+    ///
+    /// That keeps the diagnostics a user sees exactly the same. The CLI stops
+    /// before checking a file that failed to parse, the LSP only publishes the
+    /// parse errors for such a buffer, and an imported module's parse errors
+    /// are folded in before its body is walked. It also makes the one form in
+    /// the language that can't be elaborated a checked error, not a bug report
+    /// from a later pass.
     fn error_node(&mut self, err: &ast::ErrorNode) -> Ty {
         if self.c.clean_module().is_some() {
             self.c.engine.diagnostics.push(Diagnostic::error(
@@ -2847,11 +2902,11 @@ impl ModuleChecker<'_> {
         self.c.engine.fresh_var()
     }
 
-    /// Compile an expression with an optional expected-type hint. The hint is
-    /// only consulted for fn-literal arguments where the parameter type is
-    /// known and can be pushed down so unannotated lambda params get a
-    /// concrete type immediately (avoiding "cannot access field on unknown
-    /// type" inside the body).
+    /// Compile an expression with an optional hint about the type it should
+    /// have. The hint is only used for function-literal arguments where the
+    /// parameter type is known. It is pushed down so lambda parameters without
+    /// annotations get a concrete type straight away, which avoids "can't
+    /// access field on unknown type" errors inside the body.
     pub(super) fn compile_expr_with_hint(
         &mut self,
         expr: &ast::Expression,
@@ -2887,13 +2942,13 @@ impl ModuleChecker<'_> {
     // Identifier
     // ========================================================================
 
-    /// What a name denotes, decided here, in the frame that binds it, and
-    /// recorded for the elaborator, which never resolves a name itself. Also
+    /// What a name means. It is decided here, in the frame that binds it, and
+    /// recorded for the elaborator, which never resolves a name itself. It also
     /// says whether the name has a runtime binding.
     ///
-    /// A `Local`/`ModuleFn` resolves the variable, with the usual `mark_used`
-    /// and capture side effects. A constructor or builtin is fixed by its kind
-    /// and has no plain runtime binding.
+    /// A `Local` or `ModuleFn` resolves the variable, with the usual
+    /// `mark_used` and capture side effects. A constructor or builtin is fixed
+    /// by its kind and has no plain runtime binding.
     fn name_at(&mut self, id: StrId, kind: ValueKind) -> (NameAt, bool) {
         if let Some(den) = Denotation::from_kind(kind) {
             return (NameAt::Den(den), false);
@@ -2906,8 +2961,8 @@ impl ModuleChecker<'_> {
         }
     }
 
-    /// The declared parameter labels of a module `fn`. An empty slice is "not
-    /// recorded", never "takes no parameters", so it refuses any label.
+    /// The declared parameter labels of a module `fn`. An empty slice means
+    /// "not recorded", never "takes no parameters", so it refuses any label.
     fn param_labels_of(&self, kind: ValueKind) -> Option<Vec<StrId>> {
         match kind {
             ValueKind::ModuleFn { param_labels } if param_labels.len > 0 => {
@@ -2917,8 +2972,8 @@ impl ModuleChecker<'_> {
         }
     }
 
-    /// How to reach a constructor named `name` that is not in scope: through
-    /// each imported module that has one, as `alias::Name`.
+    /// How to reach a constructor called `name` that isn't in scope, which is
+    /// through each imported module that has one, as `alias::Name`.
     fn qualified_spellings(&self, name: &str) -> Vec<String> {
         let mut out: Vec<String> = self
             .imported_qualifiers
@@ -2940,11 +2995,12 @@ impl ModuleChecker<'_> {
         let name = &expr.name;
 
         let Some(scheme) = self.c.env.lookup(name) else {
-            // A module's name is not a value: say what it is and how to reach
-            // what is in it.
+            // A module's name isn't a value, so say what it is and how to reach
+            // what's in it.
             if let Some(key) = self.imported_qualifiers.get(name) {
                 let module = self.c.module_name(key);
-                // A function or value of it, to show the shape of a use.
+                // Pick one of its functions or values, to show what a use looks
+                // like.
                 let example = self.c.module_table.get(key).and_then(|m| {
                     m.values
                         .keys()
@@ -2976,7 +3032,7 @@ impl ModuleChecker<'_> {
             } else if let Some(suggestion) = self.c.env.suggest_name(name) {
                 self.c.error(
                     format!(
-                        "Unknown identifier '{}'. Closest match: '{}'.",
+                        "Unknown identifier '{}'. Did you mean '{}'?",
                         name, suggestion
                     ),
                     expr.span,
@@ -2994,21 +3050,21 @@ impl ModuleChecker<'_> {
             .instantiate(scheme, &self.frames.current.rigid);
         let kind = scheme.kind;
         let def = scheme.def;
-        // `record` discards everything on the non-LSP path (see its early
-        // return); skip the doc map probe + clone entirely there.
+        // Outside the LSP, `record` throws everything away (see its early
+        // return), so skip looking up and cloning the doc there.
         let doc = self.doc_if_collecting(name);
         self.record(name, ty, expr.span, doc);
         self.record_value_use(def, expr.span, ReferenceKind::Unqualified);
 
-        // `_`-prefixed locals are write-only: the prefix declares the value
-        // intentionally unused, so a read contradicts the declaration.
+        // Locals that start with `_` can't be read. The prefix says the value
+        // is unused on purpose, so reading it contradicts that.
         if name.starts_with('_') && matches!(kind, ValueKind::Local) {
             let msg = match name.trim_start_matches('_') {
                 "" => format!(
-                    "'{name}' is a discard binding and cannot be read; give it a name to use its value"
+                    "'{name}' is a discard binding and can't be read. Give it a name to use its value"
                 ),
                 stripped => format!(
-                    "'{name}' is marked unused by its '_' prefix and cannot be read; rename it to '{stripped}'"
+                    "'{name}' starts with '_', which marks it unused, so it can't be read. Rename it to '{stripped}'"
                 ),
             };
             self.c.error(msg, expr.span);
@@ -3026,10 +3082,10 @@ impl ModuleChecker<'_> {
         (ty, CKind::Name { name: id, fact })
     }
 
-    /// Once a module's inference is final, reject any `_`-prefixed binder that
-    /// discarded a value the type system knows is `Nil`: there is nothing to
-    /// discard, and the explicit `Nil` pattern keeps the arm honest — it stops
-    /// compiling the day the type grows real data.
+    /// Once a module's inference is final, reject any binder starting with `_`
+    /// that discarded a value the type system knows is `Nil`. There is nothing
+    /// to discard, and the explicit `Nil` pattern keeps the arm honest, because
+    /// it stops compiling the day the type gains real data.
     pub(super) fn check_nil_discards(&mut self) {
         let checks = std::mem::take(&mut self.nil_discards);
         for (name, ty, sp) in checks {
@@ -3038,7 +3094,7 @@ impl ModuleChecker<'_> {
             {
                 self.c.error(
                     format!(
-                        "'{name}' always matches Nil here; write the explicit 'Nil' pattern instead"
+                        "'{name}' always matches Nil here, so write the explicit 'Nil' pattern instead"
                     ),
                     sp,
                 );
@@ -3054,9 +3110,9 @@ impl ModuleChecker<'_> {
         self.c.error(msg, sp);
     }
 
-    /// Diagnose a named value used in value position. Constructors and
-    /// builtins are legal (the elaborator synthesises a nullary build or an
-    /// eta wrapper — see `typed_ir::eta`); a `Local`/`ModuleFn` with no
+    /// Check a named value used where a value goes. Constructors and builtins
+    /// are fine, because the elaborator builds a nullary value or an eta
+    /// wrapper for them (see `typed_ir::eta`). A `Local` or `ModuleFn` with no
     /// runtime binding is an error.
     fn check_named_value(
         &mut self,
@@ -3124,9 +3180,9 @@ impl ModuleChecker<'_> {
     // Binary literals  ( `<<v:size:kind, ..>>` )
     // ========================================================================
 
-    /// Type-check a `<<v:size:kind, ..>>` literal. Every segment's value (and
-    /// its runtime size expression) is checked against the kind's expected
-    /// type; the encoding itself is Core's job.
+    /// Type-check a `<<v:size:kind, ..>>` literal. Every segment's value, and
+    /// its runtime size expression, is checked against the type its kind
+    /// expects. The encoding itself is Core's job.
     fn compile_binary_literal(&mut self, bl: &ast::BinaryLiteral) -> (Ty, CKind) {
         let mut segs = Vec::with_capacity(bl.segments.len());
         for seg in &bl.segments {
@@ -3160,8 +3216,8 @@ impl ModuleChecker<'_> {
     // Array
     // ========================================================================
 
-    /// Compile a run of non-spread array elements, unifying each with the
-    /// array's element type variable.
+    /// Compile a run of array elements that aren't spreads, unifying each with
+    /// the array's element type variable.
     fn compile_array_run(
         &mut self,
         elems: &[ast::ArrayElement],
@@ -3204,10 +3260,10 @@ impl ModuleChecker<'_> {
     // ========================================================================
 
     fn compile_call(&mut self, expr: &ast::FunctionCallExpression) -> (Ty, CKind) {
-        // Resolve the callee to a name + scheme + load action without emitting
-        // anything yet. This lets us dispatch on `ValueKind` for constructors
-        // and builtins, and use the callee's known type to push hints into
-        // function-literal arguments.
+        // Resolve the callee to a name, a scheme and a load action without
+        // emitting anything yet. That lets us dispatch on `ValueKind` for
+        // constructors and builtins, and use the callee's known type to push
+        // hints into function-literal arguments.
         if let Some(ResolvedCallee {
             name,
             span: name_span,
@@ -3240,10 +3296,10 @@ impl ModuleChecker<'_> {
                     span: name_span,
                 },
             };
-            // Hover-only here; the graph occurrence (with the correct
-            // Unqualified/Qualified kind) is emitted in `resolve_simple_callee`.
-            // Skip the doc map probe + clone on the non-LSP path, where
-            // `record` discards it (see its early return).
+            // This is only for hover. `resolve_simple_callee` emits the graph
+            // occurrence, with the right `Unqualified` or `Qualified` kind.
+            // Outside the LSP, `record` throws the doc away (see its early
+            // return), so skip looking it up and cloning it there.
             let doc = self.doc_if_collecting(name);
             self.record(name, inst_ty, name_span, doc);
 
@@ -3271,10 +3327,10 @@ impl ModuleChecker<'_> {
                 ValueKind::Local | ValueKind::ModuleFn { .. } => {
                     // A module `fn` reached by name is the only callee here
                     // whose parameter names are known, so it is the only one
-                    // that admits labelled arguments. An empty label slice
+                    // that accepts labelled arguments. An empty label slice
                     // means "not recorded", never "takes no parameters" (see
-                    // `ValueKind::ModuleFn`), so it falls back to the
-                    // positional-only refusal rather than to a zero-arity one.
+                    // `ValueKind::ModuleFn`), so it falls back to refusing
+                    // labels, not to treating the function as taking none.
                     let labels = match scheme.kind {
                         ValueKind::ModuleFn { param_labels } if param_labels.len > 0 => {
                             Some(param_labels)
@@ -3295,10 +3351,10 @@ impl ModuleChecker<'_> {
             };
         }
 
-        // Arbitrary callee expression: compile it first so we have its type
-        // for argument hints. A `module::member` callee only gets here when
-        // `resolve_simple_callee` has already reported it, so check just the
-        // arguments rather than report it twice.
+        // The callee is some other expression. Compile it first so we have its
+        // type for argument hints. A `module::member` callee only gets here
+        // when `resolve_simple_callee` has already reported it, so only check
+        // the arguments and don't report it twice.
         let callee = match expr.callee.as_ref() {
             ast::Expression::ModuleAccessExpression(_) => None,
             callee => Some(self.compile_expr(callee)),
@@ -3319,20 +3375,20 @@ impl ModuleChecker<'_> {
 
     /// Type-check and emit an argument list against a callee type using
     /// `match_fun_type`. The arguments come back in source order, or `None`
-    /// when the callee is not a function at all.
+    /// when the callee isn't a function at all.
     ///
     /// `param_labels` is the callee's declared parameter names when it is a
-    /// module `fn` reached by name, and `None` for every other callee — a local
-    /// binding holding a function, a `@vm` builtin, an arbitrary expression —
-    /// none of which has parameter names at the call site. Only the first
-    /// admits labelled arguments; the rest still refuse them. Spread stays
-    /// constructor-only either way.
+    /// module `fn` reached by name. It is `None` for every other callee (a
+    /// local binding holding a function, a `@vm` builtin, or any other
+    /// expression), because none of those has parameter names at the call site.
+    /// Only the first kind accepts labelled arguments, and the rest still
+    /// refuse them. Spread is only for constructors either way.
     ///
-    /// The arguments are checked in *source* order, so the permutation a
-    /// labelled call needs is applied to the parameter *types* here and to the
-    /// emitted argument vector in `Elab::value_call`. Both sides take it from
+    /// The arguments are checked in *source* order, so the reordering a
+    /// labelled call needs is applied here to the parameter *types*, and to the
+    /// emitted arguments in `Elab::value_call`. Both get it from
     /// [`slot_labeled`] over this one slice, so the order the arguments are
-    /// checked in and the order they are passed in cannot disagree.
+    /// checked in and the order they are passed in can't disagree.
     fn compile_call_args(
         &mut self,
         callee_ty: Ty,
@@ -3370,8 +3426,9 @@ impl ModuleChecker<'_> {
             }
         };
 
-        // Which parameter each source argument fills. A call with no label is
-        // the identity, so only a labelled one pays for the slotting.
+        // Which parameter each source argument fills. A call with no labels
+        // keeps the order as it is, so only a labelled one pays for the
+        // slotting.
         let labelled = args
             .iter()
             .any(|a| matches!(a, ast::CallArg::Labeled { .. }));
@@ -3425,18 +3482,18 @@ impl ModuleChecker<'_> {
         (ret, Some(out))
     }
 
-    /// Map each source argument to the parameter it fills, reporting a label
-    /// naming no parameter and a parameter supplied twice. `None` for an
-    /// argument that filled no slot: a positional past the last parameter,
-    /// whose arity `match_fun_type` has already reported, or a bad label
-    /// reported here.
+    /// Map each source argument to the parameter it fills, and report a label
+    /// that names no parameter or a parameter given twice. An argument that
+    /// filled no slot gets `None`. That is a positional argument past the last
+    /// parameter, whose count `match_fun_type` has already reported, or a bad
+    /// label reported here.
     fn slot_call_args(
         &mut self,
         param_labels: ArenaSlice<pool::StrSlices>,
         args: &[ast::CallArg],
     ) -> Vec<Option<usize>> {
-        // Interning up front releases the `&mut engine` borrow before the
-        // `str_ids_of` slice is taken.
+        // Interning first releases the `&mut engine` borrow before we take the
+        // `str_ids_of` slice.
         let items: Vec<(Option<StrId>, (usize, Span))> = args
             .iter()
             .enumerate()
@@ -3445,12 +3502,12 @@ impl ModuleChecker<'_> {
                 ast::CallArg::Labeled { label, .. } => {
                     Some((Some(self.c.engine.intern(&label.name)), (i, label.span)))
                 }
-                // Spread is refused by the caller and fills no parameter.
+                // The caller refuses spreads, so one fills no parameter.
                 ast::CallArg::Spread(_) => None,
             })
             .collect();
-        // One slot per declared parameter, both sized and named from this one
-        // slice, so there is no second width for a label table to drift from.
+        // One slot per declared parameter, sized and named from this one slice,
+        // so there's no second width for a label table to drift from.
         let names: Vec<Option<StrId>> = self
             .c
             .engine
@@ -3461,7 +3518,8 @@ impl ModuleChecker<'_> {
         let (by_pos, errors) = slot_labeled(&names, items);
         for e in errors {
             match e {
-                // An arity error `match_fun_type` has already reported.
+                // A wrong argument count, which `match_fun_type` has already
+                // reported.
                 SlotError::ExtraPositional(_) => {}
                 SlotError::UnknownLabel(label, (_, span)) => {
                     let available = self.c.engine.strs_of(param_labels).join(", ");
@@ -3505,14 +3563,14 @@ impl ModuleChecker<'_> {
         }
     }
 
-    /// Resolve `module::member`: look the member up, note whether it has a
-    /// runtime binding, and record the `Qualified` value-use. Shared by the
+    /// Resolve `module::member`. This looks the member up, notes whether it has
+    /// a runtime binding, and records the `Qualified` value use. Both the
     /// callee position (`resolve_simple_callee`) and the value position
-    /// (`compile_module_access`). `None` means the access has already been
-    /// diagnosed.
+    /// (`compile_module_access`) use it. `None` means the access was already
+    /// reported.
     ///
-    /// The module name is looked up among the imports only. A value binding of
-    /// the same name cannot shadow it, because `.` and `::` never overlap.
+    /// The module name is only looked up among the imports. A value binding
+    /// with the same name can't shadow it, because `.` and `::` never overlap.
     fn resolve_module_access<'a>(
         &mut self,
         ma: &'a ast::ModuleAccessExpression,
@@ -3523,12 +3581,12 @@ impl ModuleChecker<'_> {
         };
         let member = &ma.member;
         let (scheme, slot) = self.lookup_module_member(&module_key, &member.name, member.span)?;
-        // The member is not in unqualified scope, so resolve the occurrence
+        // The member isn't in unqualified scope, so resolve the occurrence
         // through the imported scheme's canonical `def`.
         self.record_value_use(scheme.def, member.span, ReferenceKind::Qualified);
         self.record_qualifier_use(&ma.module);
-        // A member with neither a fixed denotation nor a slot has no runtime
-        // binding, which `check_named_value` reports, so nothing elaborates it.
+        // A member with neither a fixed meaning nor a slot has no runtime
+        // binding. `check_named_value` reports that, so nothing elaborates it.
         let at = match (Denotation::from_kind(scheme.kind), slot) {
             (Some(den), _) => NameAt::Den(den),
             (None, Some(slot)) => NameAt::Den(self.global_denotation(slot)),
@@ -3544,8 +3602,8 @@ impl ModuleChecker<'_> {
         })
     }
 
-    /// `name::member` where `name` is not an imported module. When a stdlib
-    /// module goes by that name, say which import brings it in.
+    /// `name::member` where `name` isn't an imported module. When a stdlib
+    /// module has that name, say which import brings it in.
     fn unknown_module(&mut self, name: &ast::Identifier) {
         let modules: Vec<String> = crate::module::stdlib_modules()
             .into_iter()
@@ -3567,10 +3625,10 @@ impl ModuleChecker<'_> {
         self.c.module_error(msg, name.span);
     }
 
-    /// Best-effort resolution of a callee expression that is a plain name (or
-    /// `module.name`). Returns the looked-up scheme and whether the callee has
-    /// a runtime binding. Anything else falls through to the
-    /// arbitrary-expression path.
+    /// Try to resolve a callee expression that is a plain name (or
+    /// `module.name`). Returns the scheme that was looked up and whether the
+    /// callee has a runtime binding. Anything else falls through to the path
+    /// for other expressions.
     fn resolve_simple_callee<'a>(
         &mut self,
         callee: &'a ast::Expression,
@@ -3580,8 +3638,8 @@ impl ModuleChecker<'_> {
                 let scheme = *self.c.env.lookup(&id.name)?;
                 let sid = self.c.engine.intern(&id.name);
                 let (at, has_binding) = self.name_at(sid, scheme.kind);
-                // This path bypasses `compile_identifier`, so it is the genuine
-                // unqualified-use seam for calls.
+                // This path skips `compile_identifier`, so this is where an
+                // unqualified use in a call really gets recorded.
                 self.record_value_use(scheme.def, id.span, ReferenceKind::Unqualified);
                 Some(ResolvedCallee {
                     name: &id.name,
@@ -3592,8 +3650,8 @@ impl ModuleChecker<'_> {
                     qualifier: None,
                 })
             }
-            // Qualified callee `module::member()`. A failed lookup has already
-            // been diagnosed, so it is "no simple callee" too.
+            // A qualified callee, `module::member()`. A failed lookup was
+            // already reported, so it also counts as "no simple callee".
             ast::Expression::ModuleAccessExpression(ma) => {
                 let m = self.resolve_module_access(ma)?;
                 Some(ResolvedCallee {
@@ -3609,9 +3667,9 @@ impl ModuleChecker<'_> {
         }
     }
 
-    /// Compile a call where the callee is a data constructor. Handles
-    /// positional, labelled, and `..base` (record-update) argument forms,
-    /// reordering into field-declaration order before emission.
+    /// Compile a call where the callee is a data constructor. It handles
+    /// positional, labelled and `..base` (record update) arguments, and puts
+    /// them in the order the fields are declared before emitting.
     #[allow(clippy::too_many_arguments)]
     fn compile_ctor_call(
         &mut self,
@@ -3623,25 +3681,26 @@ impl ModuleChecker<'_> {
         args: &[ast::CallArg],
         call_span: Span,
     ) -> (Ty, Vec<CArg>) {
-        // The instantiated scheme is `IFun{params, ret}` for arity>0 or `ICon`
-        // for arity==0. Extract param/result types.
+        // The instantiated scheme is `IFun{params, ret}` when there are
+        // arguments, or `ICon` when there are none. Pull out the parameter and
+        // result types.
         let r = self.c.engine.find(inst_ty);
         let (param_tys, result_ty) = match self.c.engine.node(r) {
             TypeNode::Fun { params, ret } => (self.c.engine.children_of(params).to_vec(), ret),
             _ => (vec![], r),
         };
 
-        // Partition the arguments into a spread base (at most one) and a map
-        // of explicitly-supplied fields keyed by their declared position. Each
-        // expression is paired with its source-argument index so a slotted
-        // value structurally remembers which `args[i]` it came from, and its
-        // checked node goes back to that argument.
+        // Split the arguments into a spread base (at most one) and a map of the
+        // fields given explicitly, keyed by their declared position. Each
+        // expression is paired with the index of its source argument, so a
+        // slotted value remembers which `args[i]` it came from, and its checked
+        // node goes back to that argument.
         let mut spread: Option<(usize, &ast::Expression)> = None;
         for (i, arg) in args.iter().enumerate() {
             if let ast::CallArg::Spread(e) = arg {
                 if spread.is_some() {
                     self.c.error(
-                        "Constructor call may have at most one spread".to_string(),
+                        "A constructor call can only have one spread".to_string(),
                         e.span(),
                     );
                 }
@@ -3671,21 +3730,21 @@ impl ModuleChecker<'_> {
             },
         );
 
-        // Checking runs spread-first and then in declared-field order: the
+        // Check the spread first and then the fields in declared order. The
         // spread's `unify_at` solves `result_ty` (and with it the constructor's
-        // type params) before any `compile_expr_with_hint` pushes a parameter
-        // type into a function-literal argument, and the diagnostics a
-        // mistyped argument raises come out in field order. The checked nodes
+        // type parameters) before any `compile_expr_with_hint` pushes a
+        // parameter type into a function-literal argument, and the diagnostics
+        // a mistyped argument raises come out in field order. The checked nodes
         // still go back in source order, which is the order the elaborator
         // spills them in.
         //
-        // An argument `slot_ctor_args` did not place is an arity or label error
-        // it has already reported, and is left unchecked.
+        // An argument that `slot_ctor_args` didn't place is an arity or label
+        // error it has already reported, so it is left unchecked.
         let slots = &by_pos[..(field_labels_sl.len as usize).min(by_pos.len())];
         let mut checked: Vec<Option<CExpr>> = (0..args.len()).map(|_| None).collect();
 
-        // Record-update: the base is unified with the constructor's result
-        // type; the per-field projection is Core's job.
+        // For a record update, the base is unified with the constructor's
+        // result type. Projecting each field is Core's job.
         if let Some((ai, e)) = spread {
             let base = self.compile_expr(e);
             self.c.engine.unify_at(result_ty, base.ty, e.span());
@@ -3709,9 +3768,10 @@ impl ModuleChecker<'_> {
         (result_ty, self.ctor_args(args, checked))
     }
 
-    /// A constructor call's arguments in source order, from the values the
-    /// check walk produced for them, `checked[i]` for `args[i]`. An argument
-    /// with no value is one `slot_ctor_args` refused and has reported.
+    /// A constructor call's arguments in source order, built from the values
+    /// the check walk produced for them, with `checked[i]` for `args[i]`. An
+    /// argument with no value is one that `slot_ctor_args` refused and already
+    /// reported.
     fn ctor_args(&mut self, args: &[ast::CallArg], checked: Vec<Option<CExpr>>) -> Vec<CArg> {
         args.iter()
             .zip(checked)
@@ -3738,11 +3798,11 @@ impl ModuleChecker<'_> {
     }
 
     /// `C(..base, ...)` fills each field it leaves out with `base.field`, so
-    /// each of those has to be a field `base.field` could read: present on
-    /// every variant of the type, by name. On a type with one variant that is
-    /// every field. On a type with several it is only the fields they all
-    /// share, and a spread that leaves out any other is refused, since which
-    /// variant `base` is is not known until it runs.
+    /// each of those has to be a field `base.field` could read, meaning one
+    /// that every variant of the type has by name. On a type with one variant
+    /// that is every field. On a type with several it is only the fields they
+    /// all share, and a spread that leaves out any other field is refused,
+    /// because which variant `base` is isn't known until the program runs.
     fn check_spread_fills(
         &mut self,
         type_id: TypeId,
@@ -3787,8 +3847,8 @@ impl ModuleChecker<'_> {
     // Property access
     // ========================================================================
 
-    /// `module::member` in value position. Calls are handled in
-    /// `compile_call`, through `resolve_simple_callee`.
+    /// `module::member` where a value goes. `compile_call` handles calls,
+    /// through `resolve_simple_callee`.
     fn compile_module_access(&mut self, expr: &ast::ModuleAccessExpression) -> (Ty, CKind) {
         let Some(m) = self.resolve_module_access(expr) else {
             return (self.c.engine.fresh_var(), CKind::Error);
@@ -3803,9 +3863,9 @@ impl ModuleChecker<'_> {
             param_labels: None,
         };
         self.record(m.member_name, ty, m.member_span, None);
-        // Rendered lazily: the qualifier only reaches a diagnostic on the
-        // no-runtime-binding path, so the common (bound) case skips the
-        // display-name lookup entirely.
+        // Work this out only when needed. The qualifier only reaches a
+        // diagnostic when there's no runtime binding, so the usual case, where
+        // there is one, skips looking up the display name.
         let module = (!m.has_binding).then(|| self.c.module_name(&m.module_key));
         self.check_named_value(
             m.member_name,
@@ -3819,7 +3879,8 @@ impl ModuleChecker<'_> {
     }
 
     fn compile_property_access(&mut self, expr: &ast::PropertyAccessExpression) -> (Ty, CKind) {
-        // `c.f` where `c` is an imported module and not a value: point at `::`.
+        // In `c.f`, `c` is an imported module and not a value, so point at
+        // `::`.
         if let (ast::Expression::Identifier(id), ast::PropertyKey::Field(field)) =
             (expr.left.as_ref(), &expr.right)
             && self.c.env.lookup(&id.name).is_none()
@@ -3839,7 +3900,7 @@ impl ModuleChecker<'_> {
         let left_ty = recv.ty;
 
         match &expr.right {
-            // `tuple.N` index.
+            // A `tuple.N` index.
             ast::PropertyKey::TupleIndex(num) => {
                 let index = match num.value.parse::<i32>() {
                     Ok(i) => i,
@@ -3866,7 +3927,7 @@ impl ModuleChecker<'_> {
                     }
                     self.c.error(
                         format!(
-                            "Tuple index {} out of bounds (tuple has {} elements)",
+                            "Tuple index {} is out of range, because the tuple has {} elements",
                             index,
                             elements.len()
                         ),
@@ -3875,12 +3936,12 @@ impl ModuleChecker<'_> {
                     return (self.c.engine.fresh_var(), CKind::Error);
                 }
                 self.c.error(
-                    format!("Cannot index .{} on non-tuple type", index),
+                    format!("Can't use .{} here, because the value isn't a tuple", index),
                     num.span,
                 );
                 (self.c.engine.fresh_var(), CKind::Error)
             }
-            // `value.field` — labelled field shared by every variant.
+            // `value.field`, a labelled field that every variant shares.
             ast::PropertyKey::Field(field) => {
                 let ty = self.compile_field_access(left_ty, &field.name, field.span);
                 let kind = CKind::Field {
@@ -3892,20 +3953,21 @@ impl ModuleChecker<'_> {
         }
     }
 
-    /// compile_field_access error path: report and yield a fresh tyvar.
+    /// The error path of `compile_field_access`, which reports the error and
+    /// gives a fresh type variable.
     fn field_access_bail(&mut self, msg: String, span: Span) -> Ty {
         self.c.error(msg, span);
         self.c.engine.fresh_var()
     }
 
-    /// Single source of truth for the nominal `.field` lookup, by name: where
-    /// the field sits in each variant, plus its instantiated type. A field is
-    /// only readable when EVERY variant carries that label at a unifiable
-    /// type. Its position may differ from one variant to the next.
+    /// The one place that looks up a `.field` on a nominal type, by name. It
+    /// returns where the field sits in each variant, plus its instantiated
+    /// type. A field can only be read when EVERY variant has that label at a
+    /// type that unifies. Its position may differ from one variant to the next.
     ///
-    /// `unify_span` is `Some` on the typecheck path, where the per-variant
-    /// field types still have to be unified (and any mismatch reported); the
-    /// lower path passes `None` because typecheck has already run.
+    /// `unify_span` is `Some` on the typecheck path, where the field types of
+    /// each variant still have to be unified (and any mismatch reported). The
+    /// lowering path passes `None`, because the typecheck has already run.
     fn field_in_variants(
         &mut self,
         info: TypeInfo,
@@ -3916,9 +3978,9 @@ impl ModuleChecker<'_> {
         let variants = info.variants().ok_or(FieldMismatch::NotNominal)?;
         let mut ty: Option<Ty> = None;
         let mut slots = SmallVec::new();
-        // Variant/VariantField are Copy and the pools are append-only, so copy
-        // each entry out by index instead of `to_vec()`ing the slices to
-        // survive the `&mut engine` calls in the loop body.
+        // `Variant` and `VariantField` are `Copy` and the pools only grow, so
+        // copy each entry out by index instead of calling `to_vec()` on the
+        // slices to get them past the `&mut engine` calls in the loop.
         for vi in 0..variants.len as usize {
             let v = self.c.engine.variants_of(variants)[vi];
             let hit = self
@@ -3949,7 +4011,8 @@ impl ModuleChecker<'_> {
         Ok(SharedField { ty, slots })
     }
 
-    /// The end of a sentence naming a field some variant of `type_name` lacks.
+    /// The end of a sentence that names a field some variant of `type_name`
+    /// doesn't have.
     fn missing_on(&self, variant: StrId, type_name: &str) -> String {
         format!(
             "is not present on every variant of '{type_name}' (missing on '{}')",
@@ -3957,14 +4020,14 @@ impl ModuleChecker<'_> {
         )
     }
 
-    /// Project `.field` out of a value. Because the runtime value's variant is
-    /// not statically known, the field is only accessible if EVERY variant of
-    /// the receiver type carries a label of that name and at the same type,
-    /// wherever in the variant it sits.
+    /// Read `.field` out of a value. The variant of the value isn't known until
+    /// the program runs, so the field can only be read if EVERY variant of the
+    /// receiver type has a label of that name at the same type, wherever in the
+    /// variant it sits.
     ///
-    /// Delegates the walk to [`ModuleChecker::field_in_variants`], which lower also
-    /// uses, so the typecheck-approved slot index and the emitted `TupleIndex`
-    /// can never disagree.
+    /// It hands the walk to [`ModuleChecker::field_in_variants`], which
+    /// lowering also uses, so the slot index the typecheck approved and the
+    /// `TupleIndex` that is emitted can never disagree.
     fn compile_field_access(&mut self, receiver_ty: Ty, field: &str, field_span: Span) -> Ty {
         let resolved = self.c.engine.find(receiver_ty);
         let (type_id, type_name, type_args) = match self.c.engine.node(resolved) {
@@ -3976,7 +4039,7 @@ impl ModuleChecker<'_> {
             TypeNode::Var(_) => {
                 return self.field_access_bail(
                     format!(
-                        "Cannot access field '{}' on a value of unknown type — add a type annotation",
+                        "Can't access field '{}' because the value's type isn't known here. Add a type annotation",
                         field
                     ),
                     field_span,
@@ -3991,9 +4054,9 @@ impl ModuleChecker<'_> {
             }
         };
 
-        // Nominal lookup: the receiver's variants come from the type the Con
-        // node identifies, never from whatever same-named type a flat name
-        // lookup would find first.
+        // Look up by identity. The receiver's variants come from the type the
+        // `Con` node identifies, never from whatever type with the same name a
+        // flat lookup by name would find first.
         let Some(info) = self.c.env.lookup_type_info_by_id(type_id) else {
             return self.field_access_bail(
                 format!("Type '{}' has no field '{}'", type_name, field),
@@ -4004,8 +4067,8 @@ impl ModuleChecker<'_> {
         let field_id = self.c.engine.intern(field);
         let result_ty = match self.field_in_variants(info, &type_args, field_id, Some(field_span)) {
             Ok(field) => field.ty,
-            // A variant list with no variants at all: nothing to project, and
-            // the empty type was already diagnosed at its declaration.
+            // A variant list with no variants at all. There's nothing to read,
+            // and the empty type was already reported at its declaration.
             Err(FieldMismatch::NoVariants) => self.c.engine.fresh_var(),
             Err(FieldMismatch::NotNominal) => {
                 return self.field_access_bail(
@@ -4021,10 +4084,10 @@ impl ModuleChecker<'_> {
         let qualified = format!("{}.{}", type_name, field);
         let doc = self.doc_if_collecting(&qualified);
         self.record(&qualified, result_ty, field_span, doc);
-        // `Type.field` is a dotted key in `env.definitions` (no local can
-        // shadow it), so resolving it here is safe and keeps goto-def /
-        // find-references / rename working for record fields, and feeds the
-        // field-level dead-code reachability walk.
+        // `Type.field` is a dotted key in `env.definitions` that no local can
+        // shadow, so resolving it here is safe. It keeps goto-def,
+        // find-references and rename working for record fields, and feeds the
+        // dead-code reachability walk for fields.
         let fdef = self.c.env.lookup_definition(&qualified);
         self.record_value_use(fdef, field_span, ReferenceKind::Unqualified);
         result_ty
@@ -4041,20 +4104,20 @@ impl ModuleChecker<'_> {
 
         let success_var = self.c.engine.fresh_var();
 
-        // Determine which prelude type the LHS is. The Con node carries its
-        // nominal id, so user-defined types that happen to be called
-        // "Option"/"Result" can never match.
+        // Work out which prelude type the left side is. The `Con` node carries
+        // its nominal id, so a user type that happens to be called "Option" or
+        // "Result" can never match.
         let lhs_type_id = match self.c.engine.node(resolved) {
             TypeNode::Con { id, .. } => id,
             _ => TypeId::NONE,
         };
 
-        // Option and Result differ only in the expected ICon and whether the
-        // failure case carries a bindable payload (`err_var`).
+        // Option and Result only differ in the `ICon` we expect and in whether
+        // the failure case carries a payload you can bind (`err_var`).
         let err_var = if self.c.prelude.option().is(lhs_type_id) {
             if let Some(recv) = &expr.receiver {
                 self.c.error(
-                    "'or' on an Option does not bind a value (the failure case carries nothing)"
+                    "'or' on an Option can't bind a value, because None carries nothing"
                         .to_string(),
                     recv.span,
                 );
@@ -4071,8 +4134,8 @@ impl ModuleChecker<'_> {
                 ),
                 expr.expression.span(),
             );
-            // Best-effort recovery: still type-check the body so downstream
-            // errors are not cascaded.
+            // Recover as well as we can, by still type-checking the body so
+            // later errors don't pile up.
             self.push_block_scope();
             let _ = self.compile_expr(&expr.body);
             self.pop_block_scope();
@@ -4087,8 +4150,8 @@ impl ModuleChecker<'_> {
             .engine
             .unify_at(expected, left_ty, expr.expression.span());
 
-        // Failure branch: the recovery body, with the `Err` payload bound to
-        // the receiver when there is one.
+        // The failure branch is the recovery body, with the `Err` payload bound
+        // to the receiver when there is one.
         self.push_block_scope();
         let mut receiver = None;
         if let Some(e) = err_var
@@ -4117,30 +4180,32 @@ impl ModuleChecker<'_> {
     // Functions
     // ========================================================================
 
-    /// Typecheck a function body inside a live `enter_fn_frame`/
-    /// `finish_fn_frame` pair with params already bound, and park it. This is
-    /// the single seam between the typecheck [`Self::compile_expr`] walk and
-    /// the Core IR pipeline, and it is a *hand-off*, not a call: the walk is
-    /// where inference, diagnostics, hover facts and reference-graph collection
-    /// happen, and it lowers nothing at all.
+    /// Typecheck a function body inside an open `enter_fn_frame` and
+    /// `finish_fn_frame` pair, with its parameters already bound, and park it.
+    /// This is the one meeting point between the typecheck
+    /// [`Self::compile_expr`] walk and the Core IR pipeline, and it *hands the
+    /// body off* instead of calling the pipeline. The walk is where inference,
+    /// diagnostics, hover facts and reference-graph collection happen, and it
+    /// lowers nothing at all.
     ///
-    /// The parked body is handed to `typed_ir::elaborate_body`→
-    /// [`core_ir::lower`](crate::core_ir::lower)→`perceus` in pass 6,
-    /// once the whole module has been walked. There is no fallback path and no
-    /// error path: the elaborator covers every form a [`CleanModule`] can
-    /// contain, so it returns a [`TypedFn`] rather than a `Result`.
+    /// In pass 6, once the whole module has been walked, the parked body goes
+    /// through `typed_ir::elaborate_body` →
+    /// [`core_ir::lower`](crate::core_ir::lower) → `perceus`. There's no
+    /// fallback path and no error path. The elaborator covers every form a
+    /// [`CleanModule`] can contain, so it returns a [`TypedFn`] and not a
+    /// `Result`.
     ///
-    /// Elaboration and lowering run under `check_only` too: they are the only
-    /// passes that can prove a well-typed program is actually compilable, so
+    /// Elaboration and lowering run under `check_only` too. They are the only
+    /// passes that can prove a well-typed program really compiles, so
     /// `scarlet check` must not skip them.
     ///
-    /// The Core pipeline does not run here at all: the body is parked in
+    /// The Core pipeline doesn't run here at all. The body is parked in
     /// `deferred_bodies` and elaborated once the whole module has been walked
-    /// (`analyse_module`'s pass 6), so `lower` reads solved types rather than
-    /// the vars inference has not yet pinned down, and sees the module as a
-    /// whole rather than one SCC at a time.
+    /// (pass 6 of `analyse_module`). So `lower` reads solved types, not
+    /// variables inference hasn't pinned down yet, and sees the module as a
+    /// whole instead of one SCC at a time.
     ///
-    /// Returns `(body_ty, parked)`; see [`ParkedBody`].
+    /// Returns `(body_ty, parked)`. See [`ParkedBody`].
     fn compile_fn_body(
         &mut self,
         params: &[ast::FunctionParameter],
@@ -4148,23 +4213,24 @@ impl ModuleChecker<'_> {
         param_binders: &[BinderId],
         body: &ast::Expression,
     ) -> (Ty, ParkedBody) {
-        // Typecheck walk. Nested closures encountered here re-enter this fn
-        // (via `compile_function_common`) and park their own bodies + reserve
-        // their slots before we reserve ours.
+        // The typecheck walk. Nested closures found here come back into this
+        // function (through `compile_function_common`), park their own bodies
+        // and reserve their slots before we reserve ours.
         let params_end = self.frames.current.slots;
         let checked = self.compile_expr(body);
         let body_ty = checked.ty;
-        // The walk still handed out slots for the pattern binds it reserved;
-        // those slots are dead, so rewind to the params.
+        // The walk still handed out slots for the pattern bindings it reserved.
+        // Those slots are dead, so rewind to the parameters.
         self.frames.current.slots = params_end;
         debug_assert!(
             self.defer_depth > 0,
             "every function body must be walked inside a deferral region: \
              the Core pipeline runs after the walk, never during it"
         );
-        // An ill-typed body is parked like any other and closed out empty at
-        // drain time, where `CleanModule` cannot be minted for it: the
-        // elaborator is never shown a subtree the checker rejected.
+        // A body that failed to typecheck is parked like any other and closed
+        // out empty when the bodies are drained, because `CleanModule` can't be
+        // minted for it. The elaborator is never shown a subtree the checker
+        // rejected.
         let name = self
             .frames
             .current
@@ -4185,24 +4251,25 @@ impl ModuleChecker<'_> {
         (body_ty, parked)
     }
 
-    /// Elaborate one already-typechecked body, lower the whole `TypedProgram`
-    /// it produces, and write the bodies of every eta-wrapper the elaborator
-    /// appended to it.
+    /// Elaborate one body that has already been typechecked, lower the whole
+    /// `TypedProgram` it produces, and write the bodies of every eta wrapper
+    /// the elaborator added to it.
     ///
-    /// **The one door into the Core pipeline.** It is the only place in this
-    /// compiler that calls `typed_ir::elaborate_body`/`elaborate_toplevel`, and
-    /// those two are the only constructors of a [`TypedFn`] — so they are the
-    /// only constructors of the [`TypedProgram`] that `lower` and `perceus`
-    /// consume. Consuming a [`CleanModule`] here therefore closes the
-    /// whole pipeline to a module that reported an error: not by convention,
-    /// but because a poisoned module cannot produce the value the passes take.
-    /// (`lower` needs no proof of its own for exactly that reason.)
+    /// **This is the only way into the Core pipeline.** It is the only place in
+    /// this compiler that calls `typed_ir::elaborate_body` or
+    /// `elaborate_toplevel`, and those two are the only things that build a
+    /// [`TypedFn`]. So they are also the only things that build the
+    /// [`TypedProgram`] that `lower` and `perceus` take. Taking a
+    /// [`CleanModule`] here closes the whole pipeline to a module that reported
+    /// an error. That isn't a convention: a poisoned module just can't produce
+    /// the value the passes take. (That is also why `lower` needs no proof of
+    /// its own.)
     ///
     /// `at` says where the elaborated function belongs in the program it is
-    /// lowered as part of: `Some(func_idx)` for a function body, whose reserved
-    /// slot fixes its [`FuncIdx`]; `None` for a module toplevel, which is
-    /// `TypedProgram::toplevel` and has no index. Either way the returned
-    /// [`LoweredBody`] carries its `CoreFn`, and the eta wrappers the
+    /// lowered as part of. It is `Some(func_idx)` for a function body, whose
+    /// reserved slot fixes its [`FuncIdx`], and `None` for a module toplevel,
+    /// which is `TypedProgram::toplevel` and has no index. Either way, the
+    /// returned [`LoweredBody`] carries its `CoreFn`, and the eta wrappers the
     /// elaborator minted are already in their own slots.
     fn elaborate_then_materialize(
         &mut self,
@@ -4218,8 +4285,8 @@ impl ModuleChecker<'_> {
         for f in &mut fns {
             crate::core_ir::immediates::rewrite(f, &im);
         }
-        // Names come from the typed program, index for index: `lower` keeps
-        // `fns` in `TypedProgram::fns` order.
+        // The names come from the typed program, index for index, because
+        // `lower` keeps `fns` in the same order as `TypedProgram::fns`.
         let names: Vec<StrId> = program.fns.iter().map(|f| f.name).collect();
         let pool = Rc::new(program.pool);
         let wrappers = fns.split_off(eta_base);
@@ -4240,14 +4307,14 @@ impl ModuleChecker<'_> {
         LoweredBody { name, core, pool }
     }
 
-    /// Elaborate one body into a whole-module [`TypedProgram`], reserving a
+    /// Elaborate one body into a whole-module [`TypedProgram`], and reserve a
     /// function slot for every eta wrapper the walk minted.
     ///
-    /// `TypedProgram::fns` is `FuncIdx`-indexed and so is [`Self::fns`], so the
-    /// two must agree: `fns` is padded up to `Self::fns.len()` before the walk
-    /// (`FnTable::push` mints each `FuncIdx` in append order), and each wrapper
-    /// appended past that point gets its slot reserved here, in order. Nothing
-    /// else may reserve a slot while the walk runs.
+    /// `TypedProgram::fns` is indexed by `FuncIdx`, and so is [`Self::fns`], so
+    /// the two must agree. `fns` is padded up to `Self::fns.len()` before the
+    /// walk (`FnTable::push` mints each `FuncIdx` in the order it adds them),
+    /// and each wrapper added past that point gets its slot reserved here, in
+    /// order. Nothing else may reserve a slot while the walk runs.
     fn elaborate(
         &mut self,
         at: Option<crate::core_ir::FuncIdx>,
@@ -4255,14 +4322,15 @@ impl ModuleChecker<'_> {
     ) -> Elaborated {
         let eta_base = self.c.fns.len();
         let mut pool = pool_for(&self.c.engine);
-        // `RTy`s name nodes of `pool`, so the memo dies with the previous one.
+        // `RTy`s name nodes in `pool`, so the memo goes when the previous pool
+        // does.
         self.c.rty_cache.clear();
         let temps = TempTys::intern(self, &mut pool);
         let nil_ty = self.c.ty_nil();
         let nil = PreludeTys::resolve_rty(self, &mut pool, nil_ty);
-        // The `fns` entries an earlier body already owns. Never lowered into
-        // anything the caller reads — they exist so the next `FnTable::push`
-        // lands on the slot reserved for it below.
+        // The `fns` entries an earlier body already owns. They are never
+        // lowered into anything the caller reads. They only exist so the next
+        // `FnTable::push` lands on the slot reserved for it below.
         let filler = || TypedFn {
             name: crate::types::StrId::NONE,
             params: Vec::new(),
@@ -4302,7 +4370,7 @@ impl ModuleChecker<'_> {
         }
     }
 
-    /// Perceus the eta wrappers `fns[base..]` and fill the slots
+    /// Run Perceus on the eta wrappers `fns[base..]` and fill the slots that
     /// [`Self::elaborate`] reserved for them. They share the pool of the body
     /// that minted them.
     fn materialize_eta_wrappers(
@@ -4321,7 +4389,7 @@ impl ModuleChecker<'_> {
 }
 
 impl Compiler {
-    /// The prelude constructors Core IR spells as immediates.
+    /// The prelude constructors that Core IR writes as immediates.
     fn immediates(&self) -> crate::core_ir::immediates::Immediates {
         crate::core_ir::immediates::Immediates {
             true_: self.prelude.true_().into(),
@@ -4332,8 +4400,8 @@ impl Compiler {
 }
 
 impl ModuleChecker<'_> {
-    /// Package a finished body for the [`Program`]. Called while the module
-    /// that owns the body is the one being compiled, which is what makes
+    /// Package a finished body for the [`Program`]. This is called while the
+    /// module that owns the body is the one being compiled, which is what makes
     /// `current_module_key` its module.
     fn lowered_fn(&self, name: StrId, core: CoreFn, pool: Rc<ResolvedPool>) -> LoweredFn {
         LoweredFn::new(
@@ -4344,17 +4412,17 @@ impl ModuleChecker<'_> {
         )
     }
 
-    /// Run the Core pipeline (elaborate→`lower`→`perceus`) over one already
-    /// typechecked body and fill its function slot.
+    /// Run the Core pipeline (elaborate → `lower` → `perceus`) over one body
+    /// that has already been typechecked, and fill its function slot.
     ///
-    /// Runs in pass 6, after the whole module has been walked; the only caller
-    /// is [`Self::elaborate_deferred`]. `func_idx` is the slot the walk
+    /// This runs in pass 6, after the whole module has been walked, and only
+    /// [`Self::elaborate_deferred`] calls it. `func_idx` is the slot the walk
     /// reserved. Under `check_only` the pipeline stops after `lower` and the
     /// slot stays empty.
     ///
     /// The `CleanModule` is the caller's proof that this body typechecked (that
-    /// nothing in the module failed to): a poisoned body has no types to
-    /// elaborate.
+    /// nothing in the module failed to), because a poisoned body has no types
+    /// to elaborate.
     #[allow(clippy::too_many_arguments)]
     fn elaborate_body(
         &mut self,
@@ -4380,46 +4448,49 @@ impl ModuleChecker<'_> {
         self.c.fns[func_idx] = Some(self.lowered_fn(name, core, pool));
     }
 
-    /// Open the elaboration phase boundary: every function body walked until
+    /// Open the elaboration phase boundary. Every function body walked until
     /// the matching [`Self::end_deferred_elaboration`] is parked instead of
     /// elaborated, and the Core pipeline runs over all of them at once there.
     ///
     /// Exactly two places open one, and between them they cover every body the
-    /// compiler ever walks: `analyse_module` (around passes 5's whole walk —
-    /// the SCC loop *and* the toplevel lets and bare expressions after it) and
-    /// `compile_impl`'s bare-expression program. `compile_fn_body` asserts it
-    /// is inside one; the assertion is belt-and-braces, since [`ParkedBody`]
-    /// leaves it nothing else to return.
+    /// compiler ever walks. One is `analyse_module`, around the whole walk of
+    /// pass 5 (the SCC loop *and* the toplevel bindings and bare expressions
+    /// after it). The other is `compile_impl`'s program made of a bare
+    /// expression. `compile_fn_body` asserts it is inside one. The assertion is
+    /// only a backstop, because [`ParkedBody`] leaves it nothing else to
+    /// return.
     ///
-    /// It is a whole-module boundary and not a per-SCC one because that is what
-    /// `lower(p: &TypedProgram) -> CoreProgram` needs to exist: lowering cannot
-    /// be a step of the typecheck walk if the walk's product is the module.
+    /// It is a boundary around the whole module and not each SCC, because
+    /// `lower(p: &TypedProgram) -> CoreProgram` needs that to exist. Lowering
+    /// can't be a step of the typecheck walk if what the walk produces is the
+    /// module.
     ///
     /// A body's types are also only final once its SCC has been inferred,
     /// `leave_level` has run and `generalize_top` has quantified what stayed
-    /// free — draining at the end of the module is strictly later than that.
+    /// free. Draining at the end of the module is always later than that.
     ///
-    /// What this buys, precisely: after `generalize_top`, a body var that
-    /// inference never solved has a `Generic` root rather than an `Unbound`
-    /// one, so `lower` can never observe a var that is about to be quantified
-    /// out from under it. That is what keeps zonking honest — a `Generic`
-    /// root maps to a bound index instead of an invented opaque `Bound`.
-    /// It is not, measurably, an opcode win: on the T0 workload set the opcode
-    /// mix is unchanged (0 typed ops recovered), because `compile_binary`
-    /// already unifies both operands during the walk. The cases the reorder
-    /// newly resolves — a var pinned by a later SCC sibling, or by the
-    /// post-body `unify_at(ret_ty, body_ty)` — exist but move no opcodes there.
+    /// Here is exactly what this gets us. After `generalize_top`, a body
+    /// variable that inference never solved has a `Generic` root instead of an
+    /// `Unbound` one, so `lower` can never see a variable that is about to be
+    /// quantified away underneath it. That is what keeps zonking honest,
+    /// because a `Generic` root maps to a bound index instead of an invented
+    /// opaque `Bound`. It doesn't measurably win any opcodes. On the T0
+    /// workload set the mix of opcodes is the same (no typed ops recovered),
+    /// because `compile_binary` already unifies both operands during the walk.
+    /// The cases the reordering newly resolves, a variable pinned by a later
+    /// function in the same SCC or by the `unify_at(ret_ty, body_ty)` after the
+    /// body, do exist, but they don't change any opcodes there.
     ///
-    /// What deferral does *not* move is which slot a declared body owns: those
-    /// are reserved by `finish_fn_frame` during the walk, in walk order, in
-    /// both `check` and `build`.
+    /// What deferral does *not* change is which slot a declared body owns.
+    /// `finish_fn_frame` reserves those during the walk, in walk order, in both
+    /// `check` and `build`.
     pub(super) fn begin_deferred_elaboration(&mut self) {
         self.defer_depth += 1;
     }
 
-    /// Close the region opened by [`Self::begin_deferred_elaboration`] and, at
-    /// depth zero, run the Core pipeline over every parked body in walk order
-    /// — innermost closure first. This is the module's whole `lower`→`perceus`
+    /// Close the region opened by [`Self::begin_deferred_elaboration`]. At
+    /// depth zero, run the Core pipeline over every parked body in walk order,
+    /// innermost closure first. This is the module's whole `lower` → `perceus`
     /// phase: one loop, after the typecheck walk, over every body the walk
     /// produced.
     pub(super) fn end_deferred_elaboration(&mut self) {
@@ -4429,22 +4500,22 @@ impl ModuleChecker<'_> {
         }
         let bodies = std::mem::take(&mut self.deferred_bodies);
         for d in bodies {
-            // Re-proved per body, not once for the run: `elaborate_deferred`
-            // consumes the proof, and an internal error raised while lowering
-            // one body poisons the module for the next.
+            // Prove this again for each body, not once for the whole run.
+            // `elaborate_deferred` uses up the proof, and an internal error
+            // raised while lowering one body poisons the module for the next.
             //
-            // A decl in the module failed to typecheck when there is no proof:
-            // the parked bodies may reference names inference never resolved,
-            // and there is no typed IR to lower. Their slots stay empty, and a
-            // module with an error builds no program.
+            // If there's no proof, a declaration in the module failed to
+            // typecheck. The parked bodies may refer to names inference never
+            // resolved, and there's no typed IR to lower. Their slots stay
+            // empty, and a module with an error builds no program.
             if let Some(clean) = self.c.clean_module() {
                 self.elaborate_deferred(d, clean);
             }
         }
     }
 
-    /// Elaborate a parked body. Everything it needs about names and closures
-    /// is on the checked tree, so no frame state is restored for it.
+    /// Elaborate a parked body. Everything it needs to know about names and
+    /// closures is on the checked tree, so no frame state is restored for it.
     fn elaborate_deferred(&mut self, d: DeferredBody, clean: CleanModule) {
         self.elaborate_body(
             clean,
@@ -4456,11 +4527,10 @@ impl ModuleChecker<'_> {
         );
     }
 
-    /// Compile a `fn(...) { ... }` expression. `param_hints` is `Some` when
-    /// the lambda is being passed directly to a call site whose parameter
-    /// types are known; in that case any unannotated parameter is given the
-    /// hinted type rather than a fresh var so the body can immediately do
-    /// field access etc.
+    /// Compile a `fn(...) { ... }` expression. `param_hints` is `Some` when the
+    /// lambda is passed straight to a call whose parameter types are known.
+    /// Then any parameter without an annotation gets the hinted type instead of
+    /// a fresh variable, so the body can access fields and so on straight away.
     fn compile_function_common(
         &mut self,
         params: &[ast::FunctionParameter],
@@ -4470,8 +4540,8 @@ impl ModuleChecker<'_> {
     ) -> (Ty, ClosureFact) {
         let saved = self.enter_fn_frame(None);
 
-        // A lambda's annotation type-variables share scope with each other but
-        // are local to the lambda; mint them via a fresh hydrator.
+        // The type variables in a lambda's annotations share a scope with each
+        // other but belong to the lambda, so mint them with a fresh hydrator.
         let mut hydrator = Hydrator::new(AnnotationContext::Signature);
         let mut param_tys: Vec<Ty> = Vec::with_capacity(params.len());
         let mut binders: Vec<BinderId> = Vec::with_capacity(params.len());
@@ -4486,7 +4556,7 @@ impl ModuleChecker<'_> {
             param_tys.push(p_ty);
             binders.push(self.bind_param(param, p_ty));
         }
-        // Any tyvars the hydrator minted are rigid for the body.
+        // Any type variables the hydrator minted are rigid in the body.
         self.frames
             .current
             .rigid
@@ -4504,22 +4574,22 @@ impl ModuleChecker<'_> {
             None => body_ty,
         };
 
-        // `finish_fn_frame` restored the enclosing frame, so the closure is as
-        // that frame sees it, and it is that frame's elaboration that builds it.
+        // `finish_fn_frame` restored the enclosing frame, so the closure is
+        // what that frame sees, and that frame's elaboration builds it.
         let closure = self.finish_fn_frame(saved, body_emit);
         (self.c.engine.mk_fun(&param_tys, ret_ty), closure)
     }
 
     /// Compile a top-level `fn` whose parameter and return types were already
-    /// hydrated in Pass 3. The supplied `hydrator` carries the rigid generic
-    /// ids for any annotated type variables so that `instantiate` inside the
-    /// body leaves them intact, and we unify the body's inferred type against
-    /// the preregistered shape rather than re-reading the annotations.
+    /// hydrated in Pass 3. The `hydrator` passed in carries the rigid generic
+    /// ids for any annotated type variables, so `instantiate` inside the body
+    /// leaves them alone, and we unify the body's inferred type against the
+    /// shape registered earlier instead of reading the annotations again.
     ///
-    /// `global_slot` is this fn's entry-frame slot from `Prepared::Fn`,
-    /// threaded from Pass 3 so `global_to_func` is keyed by the same slot the
-    /// caller emits `StoreLocal` for — no reliance on the name's local entry
-    /// still holding that slot by the time this runs.
+    /// `global_slot` is this function's entry-frame slot from `Prepared::Fn`,
+    /// passed down from Pass 3. So `global_to_func` is keyed by the same slot
+    /// the caller emits `StoreLocal` for, without relying on the name's local
+    /// entry still holding that slot when this runs.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn compile_declared_function(
         &mut self,
@@ -4545,12 +4615,12 @@ impl ModuleChecker<'_> {
             .unify_at(ret_ty, body_ty, type_defining_span(body));
 
         // `global_to_func` is how the module toplevel's elaboration finds this
-        // fn's body (`ElabCtx::fn_of_global`, off the same slot it stores into),
-        // in every mode — so the index has to be a real one under `check_only`
-        // too.
-        // `finish_fn_frame` reserved it; take it from there rather than
-        // re-deriving it from `fns.len()`, which is only the same number by
-        // accident of nothing else having reserved since.
+        // function's body (`ElabCtx::fn_of_global`, from the same slot it
+        // stores into), in every mode. So the index has to be a real one under
+        // `check_only` too. `finish_fn_frame` reserved it, so take it from
+        // there instead of working it out from `fns.len()`, which is only the
+        // same number because nothing else happened to reserve a slot in
+        // between.
         let func_idx = self.finish_fn_frame(saved, body_emit).func_idx;
         self.c.global_to_func.insert(global_slot, func_idx);
         self.c.engine.mk_fun(&param_tys, ret_ty)
@@ -4558,10 +4628,10 @@ impl ModuleChecker<'_> {
 
     /// Start walking a nested body, and open a new type-env scope for it.
     ///
-    /// A lambda has no name to call itself by unless it is the init of a
+    /// A lambda has no name to call itself by unless it is the initialiser of a
     /// `name = fn(..)` binding, which leaves that name in `next_fn_self_name`.
-    /// It must not inherit the enclosing body's: a lambda passed to a
-    /// higher-order function and calling the enclosing `fn` would call itself.
+    /// It must not inherit the enclosing body's name, or a lambda passed to a
+    /// higher-order function that calls the enclosing `fn` would call itself.
     fn enter_fn_frame(&mut self, binding: Option<&str>) -> frame::Entered {
         let self_name = match binding {
             Some(n) => Some(self.c.engine.intern(n)),
@@ -4571,11 +4641,11 @@ impl ModuleChecker<'_> {
         self.frames.enter(self_name)
     }
 
-    /// Register a freshly-typed local binding into the type environment, the
-    /// dead-code/reference graph, and the hover record, then emit its
-    /// value-def. These steps must stay in lockstep, so every local-binder
-    /// site (params, pattern names, the `or`-receiver) funnels through here
-    /// after reserving its slot with `get_or_create_local`.
+    /// Register a local binding that was just typed in the type environment,
+    /// the dead-code and reference graph, and the hover record, then emit its
+    /// value definition. These steps must stay together, so every place that
+    /// binds a local (parameters, pattern names, the `or` receiver) goes
+    /// through here after reserving its slot with `get_or_create_local`.
     fn register_local_binding(&mut self, name: &str, ty: Ty, sp: Span) {
         let m = self.current_module_slice();
         self.c.env.define_at(
@@ -4595,21 +4665,22 @@ impl ModuleChecker<'_> {
         self.publish_local(sid)
     }
 
-    /// Close out a function body: reserve its function slot, park it as a
-    /// [`DeferredBody`], and restore the enclosing frame and type-env. Returns
-    /// the closure as the enclosing frame sees it: the slot, and how each
-    /// capture loads there, which goes on the enclosing frame's checked tree.
+    /// Close out a function body. This reserves its function slot, parks it as
+    /// a [`DeferredBody`], and restores the enclosing frame and type env. It
+    /// returns the closure as the enclosing frame sees it: the slot, and how
+    /// each capture loads there, which goes on the enclosing frame's checked
+    /// tree.
     ///
-    /// Nothing is lowered here: the body is lowered in pass 6, after the walk.
+    /// Nothing is lowered here. The body is lowered in pass 6, after the walk.
     fn finish_fn_frame(&mut self, entered: frame::Entered, parked: ParkedBody) -> ClosureFact {
         let mut finished = self.frames.leave(entered);
         let captured = std::mem::take(&mut finished.captures).into_names();
         self.c.env.pop_scope();
         self.report_unused(finished.into_root());
 
-        // Reserve the body's slot now, so the `func_idx` that the
-        // `ClosureFact` and `global_to_func` are about to record is the one the
-        // elaborated body fills in.
+        // Reserve the body's slot now, so the `func_idx` that the `ClosureFact`
+        // and `global_to_func` are about to record is the one the elaborated
+        // body fills in.
         let func_idx = self.c.fns.push(None);
         let ParkedBody {
             name: body_name,
@@ -4625,11 +4696,11 @@ impl ModuleChecker<'_> {
             func_idx,
         });
 
-        // Re-resolving each capture in the *enclosing* frame is load-bearing:
-        // `resolve_variable` promotes a name this body captured from further
-        // out into the enclosing frame's own capture set, so transitive
-        // captures chain outwards. It is also how each capture loads where the
-        // closure is built, so the result is what the elaborator reads.
+        // Resolving each capture again in the *enclosing* frame matters.
+        // `resolve_variable` moves a name this body captured from further out
+        // into the enclosing frame's own capture set, so captures chain
+        // outwards through every level. It is also how each capture loads where
+        // the closure is built, so the result is what the elaborator reads.
         let captures = captured
             .iter()
             .map(|&cap_name| {
@@ -4709,8 +4780,8 @@ impl ModuleChecker<'_> {
                     .resolve_for_patterns(subject_ty, Some(&self.c.env), depth);
             let mut um = UsefulnessMatrix::new(resolved_subj);
             let all_pats: Vec<Pat> = arms.iter().map(|arm| um.lower(&arm.pattern)).collect();
-            // Guarded arms don't contribute to exhaustiveness (the guard may be
-            // false) and don't make later arms unreachable.
+            // Guarded arms don't count towards exhaustiveness (the guard may be
+            // false), and don't make later arms unreachable.
             let unguarded = m
                 .arms
                 .iter()
@@ -4719,20 +4790,20 @@ impl ModuleChecker<'_> {
                 .map(|(_, p)| p);
             if let Some(missing) = um.find_missing(unguarded) {
                 self.c.error(
-                    format!("Match is not exhaustive, missing: {}", missing),
+                    format!("Match is not exhaustive. Add arms for: {}", missing),
                     m.subject.span(),
                 );
             }
             for (i, arm) in m.arms.iter().enumerate() {
                 if !um.is_useful(&all_pats[i]) {
                     self.c.error(
-                        "This pattern is unreachable; a previous pattern matches the same values"
+                        "This pattern is unreachable, because an earlier pattern matches the same values"
                             .to_string(),
                         arm.pattern.span(),
                     );
                 } else if let Some(missing) = um.catch_all(&all_pats[..i], &all_pats[i]) {
-                    // A catch-all may only stand for values that cannot be
-                    // listed. Over named variants it would silently take any
+                    // A catch-all may only stand for values that can't be
+                    // listed. Over named variants it would quietly take any
                     // variant added later, so the arms have to name them.
                     self.c.error(
                         format!(
@@ -4759,12 +4830,12 @@ impl ModuleChecker<'_> {
 }
 
 impl Compiler {
-    /// Single source of truth turning a numeric literal's source text into a
-    /// [`Const`]. On i64 overflow / malformed input it emits a real diagnostic
-    /// via [`Compiler::error`] and then returns a kind-preserving recovery
-    /// zero. The recovery value is reachable ONLY on the post-diagnostic error
-    /// branch, so it can never masquerade as a valid literal `0`: the compile
-    /// has already failed.
+    /// The one place that turns a number literal's source text into a
+    /// [`Const`]. On i64 overflow or bad input, it emits a real diagnostic with
+    /// [`Compiler::error`] and then returns a zero of the same kind so
+    /// compiling can carry on. That zero can ONLY be reached after the
+    /// diagnostic, so it can never pass for a valid literal `0`, because the
+    /// compile has already failed.
     fn const_number(&mut self, n: &ast::NumberLiteral) -> Const {
         match number_literal_value(n) {
             Ok(c) => c,
@@ -4780,7 +4851,7 @@ impl Compiler {
 // Free helpers
 // ============================================================================
 
-/// A module's imports: the `import` statements it starts with.
+/// A module's imports, which are the `import` statements it starts with.
 fn import_decls(block: &ast::BlockExpression) -> impl Iterator<Item = &ast::ImportDeclaration> {
     block.body.iter().map_while(|node| match node {
         ast::Node::Statement(stmt) => match stmt.as_ref() {
@@ -4791,10 +4862,10 @@ fn import_decls(block: &ast::BlockExpression) -> impl Iterator<Item = &ast::Impo
     })
 }
 
-/// The span that "defines" the type of an expression for error reporting:
-/// for a block, the last node (recursively); otherwise the expression's own
-/// span. This focuses a return-type or branch-type mismatch on the actual
-/// value-producing sub-expression rather than the whole `{ ... }`.
+/// The span that "defines" the type of an expression, for error reporting. For
+/// a block it is the last node (recursively), and otherwise the expression's
+/// own span. This points a return-type or branch-type mismatch at the part that
+/// actually produces the value, not the whole `{ ... }`.
 fn type_defining_span(expr: &ast::Expression) -> Span {
     match expr {
         ast::Expression::BlockExpression(b) => match b.body.last() {
@@ -4806,15 +4877,15 @@ fn type_defining_span(expr: &ast::Expression) -> Span {
     }
 }
 
-/// Why a numeric literal's source text could not be turned into a [`Const`].
+/// Why a number literal's source text couldn't be turned into a [`Const`].
 ///
-/// The scanner produces decimal (`[0-9]+(\.[0-9]+)?`), hex (`0[xX][0-9A-Fa-f]+`),
-/// or binary (`0[bB][01]+`), and the parser only prepends a leading `-` for
-/// negative pattern literals. The integer branch fails on i64 overflow (hex
-/// and binary are magnitudes, so `0x8000000000000000` is out of range, not
-/// i64::MIN); the float branch effectively never fails for scanner output,
-/// but `InvalidFloat` is kept so the function is total over every `&str`
-/// rather than silently depending on that lexical invariant.
+/// The scanner produces decimal (`[0-9]+(\.[0-9]+)?`), hex
+/// (`0[xX][0-9A-Fa-f]+`) or binary (`0[bB][01]+`), and the parser only adds a
+/// leading `-` for negative literals in patterns. The integer branch fails on
+/// i64 overflow. Hex and binary are magnitudes, so `0x8000000000000000` is out
+/// of range and isn't i64::MIN. The float branch in practice never fails for
+/// scanner output, but we keep `InvalidFloat` so the function handles every
+/// `&str` instead of quietly depending on what the scanner produces.
 enum NumLitError {
     IntOutOfRange,
     InvalidFloat,
@@ -4832,10 +4903,10 @@ impl NumLitError {
         }
     }
 
-    /// Constant to substitute so compilation can continue after the
-    /// diagnostic has been emitted. Kind-preserving so the inferred type still
-    /// matches user intent and the compile doesn't cascade into spurious type
-    /// errors.
+    /// The constant to use instead, so compiling can carry on after the
+    /// diagnostic has been emitted. It keeps the kind, so the inferred type
+    /// still matches what the user meant and the compile doesn't go on to raise
+    /// bogus type errors.
     fn recovery(&self) -> Const {
         match self {
             NumLitError::IntOutOfRange => Const::Int(0),
@@ -4844,10 +4915,10 @@ impl NumLitError {
     }
 }
 
-/// Parse a numeric literal's source text into a [`Const`].
+/// Parse a number literal's source text into a [`Const`].
 ///
-/// Total: the partiality is lifted into the return type so no caller can
-/// obtain a fabricated constant for out-of-domain input. The only caller is
+/// It handles every input, because failure is part of the return type, so no
+/// caller can get a made-up constant for input out of range. The only caller is
 /// [`Compiler::const_number`], which emits a diagnostic before recovering.
 fn number_literal_value(n: &ast::NumberLiteral) -> Result<Const, NumLitError> {
     let s = n.digits();

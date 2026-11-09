@@ -1,7 +1,7 @@
 /**
  * Small arithmetic helpers.
  *
- * A doc block on line 0 documents the module: hover `b` in a.sca to read it.
+ * A doc block at the top of a file documents the module. Hover `b` in a.sca to see it.
  */
 
 /**

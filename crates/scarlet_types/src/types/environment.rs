@@ -4,14 +4,15 @@ use super::infer::{ArenaSlice, Scheme, StrId, Ty, pool};
 use crate::type_def::TypeId;
 use scarlet_syntax::span::Span;
 
-/// What a definition *is*, stamped on every [`DefinitionLocation`]. Drives LSP
-/// symbol kinds and the unused/dead-code rules. Lives here and is re-exported
-/// by `scarlet_core::reference` so the inference env and the reference graph share
-/// one kind vocabulary with no conversion seam. Must stay `Copy` so `Scheme`
-/// stays `Copy` and the precompiled stdlib can emit `&'static [Scheme]`.
+/// What kind of thing a definition *is*, stored on every
+/// [`DefinitionLocation`]. LSP symbol kinds and the unused-code and dead-code
+/// rules read it. It lives here and `scarlet_core::reference` re-exports it, so
+/// the inference environment and the reference graph share one set of kinds
+/// with nothing to convert. It must stay `Copy` so `Scheme` stays `Copy` and
+/// the precompiled stdlib can emit `&'static [Scheme]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EntityKind {
-    /// A `let`/parameter/match binder — a local value.
+    /// A local value, bound by `let`, a parameter or a match pattern.
     Value,
     /// A top-level `fn` (module function or `@vm` intrinsic).
     Function,
@@ -29,7 +30,7 @@ pub enum EntityKind {
 }
 
 impl EntityKind {
-    /// Human-readable noun, for the hover panel and the unused-code hint.
+    /// The noun for this kind, for the hover panel and the unused-code hint.
     pub fn noun(self) -> &'static str {
         match self {
             EntityKind::Value => "value",
@@ -42,22 +43,23 @@ impl EntityKind {
         }
     }
 
-    /// Whether goto-definition on a target of this kind should navigate. A
-    /// `ModuleAlias` spans the whole `import`, so jumping to it is a no-op;
-    /// the final path segment is handled as an `Import` occurrence instead.
+    /// Whether go-to-definition on a target of this kind should jump. A
+    /// `ModuleAlias` spans the whole `import`, so jumping to it would go
+    /// nowhere. The last path segment is handled as an `Import` occurrence
+    /// instead.
     pub fn is_navigable(self) -> bool {
         !matches!(self, EntityKind::ModuleAlias)
     }
 }
 
-/// The canonical definition site of a name. `module` is an `ArenaSlice`, never
-/// a `Vec<String>`, so this struct and the `Scheme` embedding it stay `Copy`.
+/// Where a name is canonically defined. `module` is an `ArenaSlice`, never a
+/// `Vec<String>`, so this struct and the `Scheme` that holds it stay `Copy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DefinitionLocation {
     line: i32,
     column: i32,
     end_col: i32,
-    /// → `InferEngine.str_slices`: the owning module's path segments.
+    /// The owning module's path segments, stored in `InferEngine.str_slices`.
     pub module: ArenaSlice<pool::StrSlices>,
     pub entity: EntityKind,
 }
@@ -73,10 +75,10 @@ impl DefinitionLocation {
         }
     }
 
-    /// The declaring-name span this location was built from. A declaring
-    /// identifier is always single-line, so this reconstructs exactly what
-    /// [`Self::new`] was handed, keeping a definition's `DefId` equal to the
-    /// one every occurrence targets.
+    /// The span of the declaring name this location was built from. A
+    /// declaring name always sits on one line, so this rebuilds exactly what
+    /// [`Self::new`] was given. That keeps a definition's `DefId` equal to the
+    /// one every use of it points at.
     pub fn span(&self) -> Span {
         Span {
             start_line: self.line,
@@ -91,71 +93,75 @@ impl DefinitionLocation {
 #[derive(Debug, Clone, Copy)]
 pub struct TypeParam {
     pub name: StrId,
-    /// Engine-local var id, minted by the hydrator at Pass 1. For types loaded
-    /// from a `StaticStdlib` this is the build-time engine's id: dangling in
-    /// the live engine, but never matched, since `close_body` rewrote every
-    /// body ref to `Bound(idx)` before flattening.
+    /// The engine's id for this variable, which the hydrator hands out in
+    /// pass 1. For types loaded from a `StaticStdlib`, it's the id from the
+    /// engine that built the stdlib. That id points at nothing in the live
+    /// engine, but nothing matches on it, because `close_body` rewrote every
+    /// reference in the body to `Bound(idx)` before flattening.
     pub id: i32,
 }
 
-/// A field of a constructor variant in template form. `ty` holds `Var(id)`
-/// refs to the owning type's `TypeParam` ids, or `Bound(idx)` after
-/// `close_body`, so callers substitute arguments through the inference engine
-/// without round-tripping through `type_def::Type`.
+/// A field of a constructor variant, in template form. `ty` refers to the
+/// owning type's parameters as `Var(id)` with their `TypeParam` ids, or as
+/// `Bound(idx)` after `close_body`. So callers can substitute arguments through
+/// the inference engine without converting to `type_def::Type` and back.
 #[derive(Debug, Clone, Copy)]
 pub struct VariantField {
     pub label: StrId,
     pub ty: Ty,
 }
 
-/// One constructor of a custom type. `fields` → `InferEngine.variant_fields`.
+/// One constructor of a custom type. `fields` indexes
+/// `InferEngine.variant_fields`.
 #[derive(Debug, Clone, Copy)]
 pub struct Variant {
     pub name: StrId,
     pub fields: ArenaSlice<pool::VariantFields>,
 }
 
-/// The body of a registered type. Separate from the head so Pass 1 can register
-/// every head before Pass 4 hydrates any body, which is what makes
-/// mutually-recursive type declarations work.
+/// The body of a registered type. It's separate from the head so pass 1 can
+/// register every head before pass 4 hydrates any body, which is what lets
+/// type declarations refer to each other.
 #[derive(Debug, Clone, Copy)]
 pub enum TypeBody {
-    /// Head registered, body not yet hydrated. Reading variants/target in this
-    /// state is a compiler bug.
+    /// The head is registered but the body isn't hydrated yet. Reading the
+    /// variants or the target in this state is a compiler bug.
     Unresolved,
     /// `type Name(params) { Ctor(label Type, ...) ... }`
     Custom {
         variants: ArenaSlice<pool::Variants>,
         /// Whether a module other than the declaring one may name these
-        /// constructors: `pub` and not `opaque`. Lives on the body rather
-        /// than the head because only a body with constructors can answer
-        /// it, and travels with `TypeInfo` into module interfaces and the
-        /// precompiled stdlib blob so an importer reads the same answer the
-        /// declaring module computed.
+        /// constructors, meaning the type is `pub` and not `opaque`. It lives
+        /// on the body, not the head, because only a body with constructors
+        /// can answer it. It travels with `TypeInfo` into module interfaces
+        /// and the precompiled stdlib blob, so an importer reads the same
+        /// answer the declaring module worked out.
         ctors_public: bool,
     },
     /// `type Name(params) = Target`
     Alias { target: Ty },
-    /// `pub type Name` with no body — host-backed.
+    /// `pub type Name` with no body. The host provides its values.
     External,
 }
 
-/// Canonical record for a user-defined nominal type. `name` is the name as
-/// declared, which may differ from the local binding under `import {X as Y}`.
-/// `Copy` so the precompiled stdlib emits `&'static [TypeInfo]` directly.
+/// The canonical record of a user-defined nominal type. `name` is the name as
+/// declared, which can differ from the local binding under `import {X as Y}`.
+/// It's `Copy` so the precompiled stdlib can emit `&'static [TypeInfo]`
+/// directly.
 #[derive(Debug, Clone, Copy)]
 pub struct TypeInfo {
     pub id: TypeId,
     pub name: StrId,
-    /// → `InferEngine.str_slices`
+    /// Indexes `InferEngine.str_slices`.
     pub(crate) module: ArenaSlice<pool::StrSlices>,
-    /// → `InferEngine.type_params`
+    /// Indexes `InferEngine.type_params`.
     pub type_params: ArenaSlice<pool::TypeParams>,
     pub(crate) body: TypeBody,
 }
 
 impl TypeInfo {
-    /// Number of type parameters, for the hydrator's arity check.
+    /// How many type parameters the type takes, for the hydrator's arity
+    /// check.
     pub fn arity(&self) -> usize {
         self.type_params.len as usize
     }
@@ -171,11 +177,11 @@ impl TypeInfo {
     /// Whether importers may name this type's constructors, or `None` when
     /// the type has none to name (alias, external, or not yet hydrated).
     ///
-    /// The three states are all distinct to a caller that builds values by
-    /// constructor: an alias must be looked through, an external type has no
-    /// representation at all, and a hydrated-but-private body must be
-    /// refused. Collapsing "no constructors" into `false` would let the
-    /// first two be reported as the third.
+    /// A caller that builds values by constructor treats all three states
+    /// differently. It must look through an alias, an external type has no
+    /// representation at all, and a hydrated but private body must be refused.
+    /// Folding "no constructors" into `false` would let the first two be
+    /// reported as the third.
     pub fn ctors_public(&self) -> Option<bool> {
         match self.body {
             TypeBody::Custom { ctors_public, .. } => Some(ctors_public),
@@ -185,15 +191,15 @@ impl TypeInfo {
 }
 
 /// One in-place replacement of an entry that already existed. The flat maps
-/// roll back by truncating to a length, which cannot undo a replace:
-/// `IndexMap::insert` keeps the entry at its original, possibly pre-watermark,
-/// index. Without this journal an entry file declaring `type Parsed` would
-/// clobber the seeded stdlib `Parsed` for the rest of an LSP session.
-/// `truncate_to` replays these newest-first before truncating.
+/// roll back by truncating to a length, which can't undo a replacement,
+/// because `IndexMap::insert` keeps the entry at its original index, which may
+/// be below the watermark. Without this journal, an entry file that declares
+/// `type Parsed` would overwrite the stdlib's `Parsed` for the rest of an LSP
+/// session. `truncate_to` replays these newest first before it truncates.
 #[derive(Debug, Clone)]
 enum Overwrite {
-    /// A root-scope `define` that replaced an existing entry. Defines inside an
-    /// open scope roll back through `scope_undo` instead.
+    /// A root-scope `define` that replaced an existing entry. A define inside
+    /// an open scope rolls back through `scope_undo` instead.
     Binding(String, Scheme),
     TypeInfo(String, TypeInfo),
     TypeInfoById(TypeId, TypeInfo),
@@ -201,17 +207,18 @@ enum Overwrite {
     Doc(String, String),
 }
 
-/// One by-name mutation made while a module frame was open, replayed
-/// newest-first by [`TypeEnv::pop_module_frame`]. `None` records an insertion
-/// of a new key (removed on pop — the entry is always the map's last, so
-/// index order is never perturbed); `Some` an in-place overwrite (restored).
+/// One change by name made while a module frame was open.
+/// [`TypeEnv::pop_module_frame`] replays these newest first. `None` records a
+/// new key, which the pop removes. By then it's always the map's last entry, so
+/// index order never changes. `Some` records an overwrite, which the pop
+/// restores.
 ///
-/// A module's names — its imports, its own type heads, the mangled
-/// `qualifier::Name` keys — are visible only while that module compiles.
-/// Without this log they would stay in the flat maps for the rest of the
-/// compile, letting a later module resolve a name it never imported (which
-/// `scarlet check` then accepts where a single-file LSP check errors). The
-/// by-id type registry is deliberately NOT covered: ids are the global
+/// A module's names (its imports, its own type heads and the mangled
+/// `qualifier::Name` keys) are visible only while that module compiles.
+/// Without this log they'd stay in the flat maps for the rest of the compile.
+/// A later module could then resolve a name it never imported, and
+/// `scarlet check` would accept code that a single-file LSP check rejects. The
+/// by-id type registry is deliberately NOT covered, because ids are the global
 /// identity that already-hydrated annotations carry across modules.
 #[derive(Debug, Clone)]
 enum FrameUndo {
@@ -223,41 +230,44 @@ enum FrameUndo {
 
 #[derive(Debug, Clone)]
 pub struct TypeEnv {
-    /// Flat name → scheme map. Nested scopes live in the `scope_undo` log below
-    /// rather than a stack of per-scope maps, so an empty scope allocates
-    /// nothing and `lookup` is one hash probe. Same pattern as
-    /// `Compiler::locals`.
+    /// A flat map from name to scheme. Nested scopes live in the `scope_undo`
+    /// log below instead of a stack of maps, one per scope, so an empty scope
+    /// allocates nothing and `lookup` is one hash probe. `Compiler::locals`
+    /// works the same way.
     ///
-    /// Every map here is private: an overwrite MUST go through the journaling
-    /// mutators (`define`, `store_type_info`, `store_definition`, `store_doc`)
-    /// or `truncate_to` cannot restore the clobbered entry.
+    /// Every map here is private. An overwrite MUST go through the methods
+    /// that journal it (`define`, `store_type_info`, `store_definition`,
+    /// `store_doc`), or `truncate_to` can't restore the entry it replaced.
     bindings: IndexMap<String, Scheme>,
-    /// For every `define` with a scope open, `(entry index, prior value)`.
-    /// `pop_scope` replays newest-first: `Some` restores in place, `None` pops
-    /// the entry, which is always the last one, so index order is never
-    /// perturbed.
+    /// For every `define` made while a scope is open, the entry's index and
+    /// its previous value. `pop_scope` replays these newest first. `Some`
+    /// restores the value in place, and `None` pops the entry, which is always
+    /// the last one, so index order never changes.
     scope_undo: Vec<(usize, Option<Scheme>)>,
-    /// `scope_undo.len()` captured at each `push_scope`.
+    /// `scope_undo.len()` as it was at each `push_scope`.
     scope_marks: Vec<usize>,
-    /// Type lookup by SOURCE name. Annotation resolution only, where lexical
-    /// shadowing is the correct semantics. Exhaustiveness, field access and
-    /// hover must go through `type_info_by_id` instead.
+    /// Looks types up by SOURCE name. Only annotation resolution uses it,
+    /// because lexical shadowing is the right behaviour there.
+    /// Exhaustiveness, field access and hover must use `type_info_by_id`
+    /// instead.
     type_info: IndexMap<String, TypeInfo>,
-    /// Type lookup by NOMINAL id, the identity carried in `TypeNode::Con`. Ids
-    /// are allocator-unique, so no name collision can overwrite an entry here.
+    /// Looks types up by NOMINAL id, the identity `TypeNode::Con` carries.
+    /// Each id is handed out once, so no clash of names can overwrite an entry
+    /// here.
     type_info_by_id: IndexMap<TypeId, TypeInfo>,
     definitions: IndexMap<String, DefinitionLocation>,
     docs: IndexMap<String, String>,
-    /// Replay log of in-place overwrites; see [`Overwrite`].
+    /// The log of in-place overwrites to replay. See [`Overwrite`].
     journal: Vec<Overwrite>,
-    /// Replay log of by-name mutations made inside module frames; see
+    /// The log of changes by name made inside module frames, to replay. See
     /// [`FrameUndo`].
     frame_undo: Vec<FrameUndo>,
-    /// `(frame_undo.len(), scope_undo.len())` captured at each
-    /// `push_module_frame`. The `scope_undo` mark exists for the session's
-    /// throwaway import scope: a define made *during* the frame but attributed
-    /// to a scope that was already open at frame entry still belongs to the
-    /// frame, so `pop_module_frame` drains `scope_undo` down to it.
+    /// `(frame_undo.len(), scope_undo.len())` as they were at each
+    /// `push_module_frame`. The `scope_undo` mark is there for the session's
+    /// throwaway import scope. A define made *during* the frame, but recorded
+    /// against a scope that was already open when the frame began, still
+    /// belongs to the frame, so `pop_module_frame` drains `scope_undo` down to
+    /// the mark.
     frame_marks: Vec<(usize, usize)>,
     next_type_id: TypeId,
 }
@@ -271,9 +281,9 @@ impl TypeEnv {
     }
 
     pub fn watermark(&self) -> EnvWatermark {
-        // A `None` frame-undo entry is a key that will be removed when its
-        // module frame pops, so it is transient exactly like a `None`
-        // scope-undo entry: subtract both to get each map's persistent size.
+        // A `None` frame-undo entry is a key that's removed when its module
+        // frame pops, so it's temporary in the same way as a `None` scope-undo
+        // entry. Subtract both to get the size each map keeps.
         let frame_inserts = |f: fn(&FrameUndo) -> bool| {
             self.frame_undo
                 .iter()
@@ -289,9 +299,9 @@ impl TypeEnv {
                 .count()
         };
         EnvWatermark {
-            // Every `None` undo entry is a key appended while a nested scope
-            // was open, so subtracting them gives `bindings.len()` as it would
-            // be after popping all scopes: the persistent root layer.
+            // Every `None` undo entry is a key added while a nested scope was
+            // open. Subtracting them gives `bindings.len()` as it would be
+            // after popping every scope, which is the root layer that stays.
             root_scope: self.bindings.len()
                 - self.scope_undo.iter().filter(|(_, p)| p.is_none()).count()
                 - frame_inserts(|u| matches!(u, FrameUndo::Binding(..))),
@@ -307,15 +317,15 @@ impl TypeEnv {
     }
 
     pub fn truncate_to(&mut self, w: &EnvWatermark) {
-        // Invalidation runs between compiles, when every module frame has
-        // been left; unwind defensively so the by-length truncations below
-        // never see a transient frame entry. Scopes first: they nest inside
-        // frames, so their entries are the newer ones.
+        // Invalidation runs between compiles, after every module frame has
+        // closed. We unwind anyway, so the truncations by length below never
+        // see a leftover frame entry. Scopes go first, because they nest
+        // inside frames, so their entries are the newer ones.
         debug_assert!(
             self.frame_marks.is_empty(),
             "truncate_to inside a module frame"
         );
-        // Unwind the undo log fully so `bindings` holds only root-scope state.
+        // Unwind the whole undo log, so `bindings` holds only the root scope.
         self.scope_marks.clear();
         for (idx, prev) in self.scope_undo.drain(..).rev() {
             match prev {
@@ -328,8 +338,9 @@ impl TypeEnv {
         }
         self.frame_marks.clear();
         self.unwind_frame_undo(0);
-        // Newest-first, so the oldest value of a multiply-overwritten key wins.
-        // A restored entry above the truncation point is removed again below.
+        // Replay newest first, so when a key was overwritten several times its
+        // oldest value wins. A restored entry above the truncation point is
+        // removed again below.
         while self.journal.len() > w.journal {
             match self.journal.pop() {
                 Some(Overwrite::Binding(name, s)) => {
@@ -359,9 +370,9 @@ impl TypeEnv {
     }
 }
 
-/// Rollback payload for [`TypeEnv::truncate_to`]. Deliberately not `Ord`:
-/// `Watermark`'s ordering key excludes it, so this field set can change without
-/// perturbing which module `Watermark::earlier` picks on invalidation.
+/// The point [`TypeEnv::truncate_to`] rolls back to. It's deliberately not
+/// `Ord`. `Watermark`'s ordering key leaves it out, so these fields can change
+/// without changing which module `Watermark::earlier` picks on invalidation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnvWatermark {
     pub root_scope: usize,
@@ -373,8 +384,8 @@ pub struct EnvWatermark {
     pub next_type_id: TypeId,
 }
 
-/// Hand-written, not derived, so `next_type_id` matches [`new_env`]'s starting
-/// id of 1: a derive would manufacture the `TypeId::NONE` sentinel here.
+/// Written by hand, not derived, so `next_type_id` matches [`new_env`]'s first
+/// id of 1. A derive would put the `TypeId::NONE` sentinel here.
 impl Default for EnvWatermark {
     fn default() -> Self {
         EnvWatermark {
@@ -425,20 +436,21 @@ impl TypeEnv {
         }
     }
 
-    /// Open a module frame: until the matching [`Self::pop_module_frame`],
-    /// every by-name mutation made outside an open scope is recorded on
-    /// [`FrameUndo`] and unwound at the pop. See `FrameUndo` for why.
+    /// Open a module frame. Until the matching [`Self::pop_module_frame`],
+    /// every change by name made outside an open scope is recorded as a
+    /// [`FrameUndo`] and undone at the pop. See `FrameUndo` for why.
     pub fn push_module_frame(&mut self) {
         self.frame_marks
             .push((self.frame_undo.len(), self.scope_undo.len()));
     }
 
-    /// Close the innermost module frame, removing every by-name entry the
-    /// module registered — its imports, its own type heads and toplevel
-    /// values, the mangled `qualifier::Name` keys — and restoring what they
-    /// overwrote. Scopes opened inside the frame are balanced by now; entries
-    /// above the recorded `scope_undo` mark were attributed to a scope that
-    /// was already open at frame entry, so they unwind with the frame.
+    /// Close the innermost module frame. This removes every by-name entry the
+    /// module registered (its imports, its own type heads and top-level
+    /// values, and the mangled `qualifier::Name` keys) and restores whatever
+    /// they overwrote. Scopes opened inside the frame are balanced by now.
+    /// Entries above the recorded `scope_undo` mark were recorded against a
+    /// scope that was already open when the frame began, so they unwind with
+    /// the frame.
     pub fn pop_module_frame(&mut self) {
         debug_assert!(!self.frame_marks.is_empty(), "unbalanced pop_module_frame");
         let Some((fmark, smark)) = self.frame_marks.pop() else {
@@ -460,9 +472,9 @@ impl TypeEnv {
         !self.frame_marks.is_empty()
     }
 
-    /// Replay `frame_undo` down to `mark`, newest-first. An inserted key is
-    /// always the map's last entry by the time its record is replayed, so
-    /// removal is a tail pop and index order is never perturbed.
+    /// Replay `frame_undo` down to `mark`, newest first. By the time an
+    /// inserted key's record is replayed, it's always the map's last entry, so
+    /// removing it is a pop from the end and index order never changes.
     fn unwind_frame_undo(&mut self, mark: usize) {
         for u in self.frame_undo.drain(mark..).rev() {
             match u {
@@ -499,8 +511,8 @@ impl TypeEnv {
     }
 
     pub fn define(&mut self, name: &str, scheme: Scheme) {
-        // Probe by borrow first so shadowing an existing name never allocates
-        // a fresh key `String`.
+        // Look the name up by reference first, so shadowing an existing name
+        // never allocates a new key `String`.
         let (idx, prev) = if let Some((idx, _, slot)) = self.bindings.get_full_mut(name) {
             (idx, Some(std::mem::replace(slot, scheme)))
         } else {
@@ -513,8 +525,9 @@ impl TypeEnv {
             self.frame_undo
                 .push(FrameUndo::Binding(name.to_string(), prev));
         } else if let Some(prev) = prev {
-            // By-length truncation cannot undo an in-place replace, so journal
-            // it. Cold: every define inside a function body has a scope open.
+            // Truncating by length can't undo an in-place replacement, so
+            // journal it. This path is rare, because every define inside a
+            // function body has a scope open.
             self.journal
                 .push(Overwrite::Binding(name.to_string(), prev));
         }
@@ -568,11 +581,11 @@ impl TypeEnv {
         self.definitions.insert(name.to_string(), loc);
     }
 
-    /// Insert or rebind a type's info under `name`, journaling any overwrite so
-    /// `truncate_to` can restore it. Keeps the by-id registry in lockstep.
-    /// Inside a module frame the by-name entry is frame-scoped instead — a
-    /// module's type names must not outlive its compile — while the by-id
-    /// entry stays global either way.
+    /// Insert or replace a type's info under `name`, and keep the by-id
+    /// registry in step. Outside a module frame, an overwrite is journaled so
+    /// `truncate_to` can restore it. Inside one, the by-name entry belongs to
+    /// the frame instead, because a module's type names must not outlive its
+    /// compile. The by-id entry is global either way.
     pub fn store_type_info(&mut self, name: &str, ti: TypeInfo) {
         if self.in_module_frame() {
             self.frame_undo.push(FrameUndo::TypeInfo(
@@ -603,13 +616,13 @@ impl TypeEnv {
         self.definitions.get(name).copied()
     }
 
-    /// Pass 1: register a type's head with an `Unresolved` body and allocate
-    /// its id. `set_type_body` fills the body once every head in the module is
-    /// visible, which is what permits mutually-recursive type bodies.
+    /// Pass 1: register a type's head with an `Unresolved` body and give it an
+    /// id. `set_type_body` fills in the body once every head in the module is
+    /// visible, which is what lets type bodies refer to each other.
     ///
     /// `name` MUST be the string `name_id` was interned from. The by-name and
-    /// by-id registries are kept in lockstep, so a mismatch would let the two
-    /// lookups resolve to different `TypeInfo`.
+    /// by-id registries are kept in step, so a mismatch would let the two
+    /// lookups find different `TypeInfo`s.
     pub fn register_type_head(
         &mut self,
         name: &str,
@@ -632,20 +645,22 @@ impl TypeEnv {
         id
     }
 
-    /// Pass 2/4: attach a hydrated body to a head registered by
-    /// [`register_type_head`](Self::register_type_head), addressed by nominal
-    /// id. Goes through the by-id registry because the by-name map is
-    /// shadowable, so mutating through it could attach the body to whatever
-    /// same-named type was analysed most recently. Panics if the head was never
-    /// registered: that is a pass-ordering bug, not a user error.
+    /// Passes 2 and 4: attach a hydrated body to a head that
+    /// [`register_type_head`](Self::register_type_head) registered, found by
+    /// nominal id. It goes through the by-id registry because names in the
+    /// by-name map can be shadowed, so changing an entry through it could
+    /// attach the body to whichever type of that name was analysed last.
+    /// Panics if the head was never registered, because that's a bug in the
+    /// order of passes, not a user error.
     #[allow(clippy::panic)]
     pub fn set_type_body(&mut self, id: TypeId, body: TypeBody) {
         let entry = self
             .type_info_by_id
             .get_mut(&id)
             .unwrap_or_else(|| panic!("set_type_body: type id {id} head not registered"));
-        // The head may itself be a journaled pre-watermark entry; journaling
-        // the pre-body value preserves the head→body→restore ordering.
+        // The head may itself be a journaled entry from before the watermark.
+        // Journaling its value from before the body keeps the order right:
+        // head, then body, then restore.
         let old = *entry;
         entry.body = body;
         self.journal.push(Overwrite::TypeInfoById(id, old));
@@ -653,9 +668,9 @@ impl TypeEnv {
         for (name, by_name) in self.type_info.iter_mut().filter(|(_, ti)| ti.id == id) {
             let old_by_name = *by_name;
             by_name.body = body;
-            // Same routing as `store_type_info`: a by-name entry touched
-            // inside a module frame is restored at frame pop, so journaling it
-            // too would resurrect the name on a later `truncate_to`.
+            // This follows `store_type_info`. A by-name entry changed inside a
+            // module frame is restored when the frame pops, so journaling it
+            // too would bring the name back on a later `truncate_to`.
             if in_frame {
                 self.frame_undo
                     .push(FrameUndo::TypeInfo(name.clone(), Some(old_by_name)));
@@ -670,10 +685,10 @@ impl TypeEnv {
         self.type_info.get(name).copied()
     }
 
-    /// Every qualified spelling (`map::Map`) under which a type named `name`
+    /// Every qualified spelling (`map::Map`) under which a type called `name`
     /// is in scope, sorted. An import registers each of its module's types
     /// under `qualifier::Name`, so these are exactly the spellings that would
-    /// resolve where the bare `name` did not.
+    /// resolve where the bare `name` didn't.
     pub(crate) fn qualified_spellings(&self, name: &str) -> Vec<String> {
         let suffix = format!("::{name}");
         let mut out: Vec<String> = self
@@ -686,17 +701,17 @@ impl TypeEnv {
         out
     }
 
-    /// Nominal lookup by the id carried in `TypeNode::Con`. The only correct
-    /// way to ask for a type's variants or fields: the by-name map can be
-    /// shadowed by whatever same-named type was analysed most recently.
+    /// Look a type up by the nominal id `TypeNode::Con` carries. This is the
+    /// only correct way to ask for a type's variants or fields, because in the
+    /// by-name map, whichever type of that name was analysed last can shadow it.
     pub fn lookup_type_info_by_id(&self, id: TypeId) -> Option<TypeInfo> {
         self.type_info_by_id.get(&id).copied()
     }
 
     pub fn suggest_name(&self, name: &str) -> Option<String> {
         let mut best: Option<&String> = None;
-        // rustc's heuristic: accept distance <= max(len, 3) / 3. `best_dist` is
-        // an exclusive bound, hence the `+ 1`.
+        // This is rustc's rule: accept an edit distance up to max(len, 3) / 3.
+        // `best_dist` is an exclusive bound, hence the `+ 1`.
         let mut best_dist = std::cmp::max(name.chars().count(), 3) / 3 + 1;
 
         for candidate in self.bindings.keys() {
@@ -712,8 +727,8 @@ impl TypeEnv {
 }
 
 fn levenshtein(a: &str, b: &str) -> usize {
-    // Char-based, matching `suggest_name`'s threshold unit. A byte-wise DP
-    // would count one multi-byte substitution as several edits.
+    // Count chars, the same unit as `suggest_name`'s threshold. Counting bytes
+    // would turn one substituted multi-byte char into several edits.
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
     if a.is_empty() {
@@ -757,7 +772,7 @@ mod tests {
     use super::super::infer::mono;
     use super::*;
 
-    // By-length truncation alone cannot reach an in-place replace.
+    // Truncating by length alone can't undo an in-place replacement.
     #[test]
     fn truncate_to_restores_overwritten_root_binding() {
         let mut env = new_env();

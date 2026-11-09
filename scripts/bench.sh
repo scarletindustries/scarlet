@@ -1,21 +1,19 @@
 #!/usr/bin/env bash
-# Interpreter-speed acceptance evidence for the `core_ir` totality work.
+# Measures interpreter speed, as acceptance evidence for the `core_ir` totality work.
 #
-# The refactor is NOT compile-time-only, and assuming it was is why nobody
-# measured it: jump operands became function-relative, `Op::IndexOr` replaced a
-# deleted fused path, and `lower` stops inventing types, so `compile_binary`
-# recovers typed opcodes (`AddInt` over `Add`) and `perceus`
-# recovers `Drop`/`Reuse`. Any slowdown here needs explaining before the commit
-# lands.
+# The refactor changes more than compile time, and assuming it didn't is why nobody
+# measured it. Jump operands became function-relative, `Op::IndexOr` replaced a
+# deleted fused path, and `lower` stopped inventing types, so `compile_binary`
+# recovers typed opcodes (`AddInt` over `Add`) and `perceus` recovers `Drop`/`Reuse`.
+# Any slowdown here needs explaining before the commit lands.
 #
-#   scripts/bench.sh                      # measure, print one line per program
-#   scripts/bench.sh --save before.txt    # record a baseline
+#   scripts/bench.sh                        # measure, print one line per program
+#   scripts/bench.sh --save before.txt      # record a baseline
 #   scripts/bench.sh --baseline before.txt  # measure and diff against it
 #   scripts/bench.sh --reps 9 examples/bench_map.sca   # override
 #
-# Reports the *best* of N wall-clock runs: the minimum is the least
-# noise-contaminated estimate of the work actually done, and the thing that
-# regresses when the VM gets slower.
+# It reports the *best* of N wall-clock runs. The minimum is the estimate noise
+# affects least, and it's what goes up when the VM gets slower.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -78,8 +76,8 @@ if [[ -n "$SAVE" ]]; then
   echo "wrote $SAVE" >&2
 fi
 
-# A regression is a bug; a speedup is the intended win. Fail on >3% slower,
-# which is comfortably outside best-of-5 noise on an idle machine.
+# A regression is a bug, and a speedup is the win we want. Fail when a program is more
+# than 3% slower, which is well outside best-of-5 noise on an idle machine.
 if [[ -n "$BASELINE" ]]; then
   [[ -f "$BASELINE" ]] || { echo "bench: no such baseline $BASELINE" >&2; exit 2; }
   echo
@@ -98,7 +96,7 @@ if [[ -n "$BASELINE" ]]; then
   done
   if [[ $regressed -eq 1 ]]; then
     echo
-    echo "bench: runtime regression >3% — this refactor is compile-time-only, so that is a bug" >&2
+    echo "bench: runtime regression >3%, which is a bug until someone explains it" >&2
     exit 1
   fi
 fi

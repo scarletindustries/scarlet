@@ -1,19 +1,20 @@
 [mordant]
-# Spelled for the mordant rev pinned in `.github/workflows/ci.yml`. Mordant rejects a key it
-# does not know, so a rename upstream fails the gate instead of silently emptying a lint.
+# These keys are spelled for the mordant rev pinned in `.github/workflows/ci.yml`. Mordant
+# rejects a key it doesn't know, so a rename upstream fails the gate instead of silently
+# emptying a lint.
 key-not-identity-types = ["scarlet_syntax::span::Span"]
 key-not-identity-forms = ["ptr-cast"]
 key-not-identity-methods = ["scarlet_vm::bytecode::value::Value::to_bits"]
 
-# The language server must never kill its own process from a handler: a
-# malformed request or bad file state answers with an error response, not an
-# exit. Holds today; a violation prints the chain that reaches exit.
+# The language server must never kill its own process from a handler. A
+# malformed request or bad file state gets an error response, not an exit.
+# This holds today, and a violation prints the call chain that reaches exit.
 [[mordant.forbidden-reach]]
 from = "LspServer::handle_message"
 never = ["std::process::exit", "std::process::abort"]
 
 # The scanner recovers from every malformed input with an Error token and a
-# diagnostic; no byte sequence may reach an explicit panic.
+# diagnostic, so no byte sequence may reach an explicit panic.
 [[mordant.forbidden-reach]]
 from = "Scanner::scan_all"
 never = ["core::panicking::panic_fmt", "core::panicking::panic", "core::panicking::panic_explicit", "Option::unwrap", "Option::expect", "Result::unwrap", "Result::expect"]

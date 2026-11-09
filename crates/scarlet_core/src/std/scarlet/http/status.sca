@@ -1,4 +1,4 @@
-// Reason phrases for HTTP status codes, per the IANA registry / RFC 9110.
+// Reason phrases for HTTP status codes, from the IANA registry and RFC 9110.
 
 // 1xx informational
 const rp_continue = <<'Continue'>>
@@ -74,8 +74,9 @@ const rp_network_auth_required = <<'Network Authentication Required'>>
 // Unknown codes get an empty reason phrase, which RFC 9110 §15 allows.
 const rp_unknown = <<>>
 
-// The reason phrase for a code, like 404 -> "Not Found", or empty if unknown.
-// Common codes come first: the match tests in order, on every response.
+// Returns the reason phrase for a code, like "Not Found" for 404, or an empty
+// one if the code is unknown. Common codes come first because the match tests
+// them in order on every response.
 pub fn reason_phrase(code Int) Binary {
 	match code {
 		200 -> rp_ok

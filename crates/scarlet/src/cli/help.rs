@@ -5,12 +5,12 @@ use clap::{Arg, ArgAction, Command};
 
 use scarlet_core::term::Palette;
 
-/// The brand mark: three horizontal bars, constructed, no curves. See
+/// The brand mark is three straight horizontal bars with no curves. See
 /// scarletindustries/brand.
 const MARK: &str = "≡";
 const DOCS: &str = "https://scarlet.industries";
 
-/// Hand-maintained: clap can describe flags but not show idiomatic usage.
+/// We keep these by hand, because clap can describe flags but can't show idiomatic usage.
 fn examples_for(sub: &str) -> &'static [&'static str] {
     match sub {
         "run" => &["scarlet run hello.sca", "scarlet run server.sca"],
@@ -99,7 +99,7 @@ fn display_width(s: &str) -> usize {
     s.chars().count()
 }
 
-/// One `label  description` row. `width` is measured on the uncolored label so
+/// One `label  description` row. `width` is measured on the uncoloured label so
 /// ANSI codes do not skew alignment.
 fn row(out: &mut String, p: &Palette, label: &str, desc: &str, width: usize) {
     let pad = " ".repeat(width.saturating_sub(display_width(label)) + 2);
@@ -154,7 +154,7 @@ fn global_options() -> [(String, &'static str); 2] {
     ]
 }
 
-/// `scarlet` with no args — compact landing screen.
+/// Prints the short landing screen for `scarlet` with no arguments.
 pub fn home(cmd: &Command) {
     let p = Palette::for_stdout();
     let mut o = String::new();
@@ -176,7 +176,7 @@ pub fn home(cmd: &Command) {
     print!("{o}");
 }
 
-/// `scarlet --help` / `scarlet help` — the full reference.
+/// The full reference, for `scarlet --help` and `scarlet help`.
 fn full_help(cmd: &Command) -> String {
     let p = Palette::for_stdout();
     let mut o = String::new();
@@ -211,7 +211,7 @@ fn full_help(cmd: &Command) -> String {
     o
 }
 
-/// `scarlet <cmd> --help` / `scarlet help <cmd>` — one command in detail.
+/// One command in detail, for `scarlet <cmd> --help` and `scarlet help <cmd>`.
 fn command_help(sub: &Command) -> String {
     let p = Palette::for_stdout();
     let name = sub.get_name();
@@ -288,8 +288,8 @@ fn command_help(sub: &Command) -> String {
     o
 }
 
-/// Dispatch help: `None` prints the full reference, `Some(name)` one command.
-/// An unknown name prints the full reference and exits 2.
+/// Prints help. `None` prints the full reference and `Some(name)` prints one command. An
+/// unknown name prints the full reference and exits 2.
 pub fn help(cmd: &Command, sub: Option<&str>) -> ExitCode {
     match sub {
         None => {
@@ -326,9 +326,9 @@ pub fn version(cmd: &Command) {
     );
 }
 
-/// Render a clap parse failure in our own voice, never clap's formatter.
-/// clap's `Display` puts its own `Usage:`/`For more information` footer after
-/// a blank line, so only the message block above that blank line is kept.
+/// Prints a clap parse failure in our own voice instead of through clap's formatter. clap's
+/// `Display` puts its own `Usage:`/`For more information` footer after a blank line, so we keep
+/// only the message above that blank line.
 pub fn error(err: &clap::Error) {
     let p = Palette::for_stderr();
     let raw = err.to_string();

@@ -19,7 +19,7 @@ type User {
 const USER_COUNT = 384
 const DEFAULT_PORT = 8080
 
-// Not a real MAC: FNV-style mixing with `%`, `*` and `/`.
+// This isn't a real MAC. It mixes in the FNV style with `%`, `*` and `/`.
 
 const M32 = 4294967296
 const FNV_PRIME = 16777619

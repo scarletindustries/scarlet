@@ -28,7 +28,7 @@ pub fn main() {
 	check('punned fields build the constructor', True, p.x == 3 && p.y == 4)
 	check('punned form equals the spelled-out form', True, p == Point(x: 3, y: 4))
 
-	// Punning and an ordinary labeled argument mix freely in one call.
+	// Punning and an ordinary labelled argument mix freely in one call.
 	from = Point(x: 0, y: 0)
 	to = p
 	s = Segment(from:, to:, label: 'diag')

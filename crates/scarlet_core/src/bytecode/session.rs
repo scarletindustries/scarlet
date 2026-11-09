@@ -1,10 +1,10 @@
-//! The LSP/workspace layer over [`Compiler`]: incremental recompilation and
-//! the reference-graph queries answered from it.
+//! The LSP and workspace layer over [`Compiler`]. It handles incremental
+//! recompilation and answers reference-graph queries from it.
 //!
-//! The rule the whole file exists to keep: an index must never outlive the
-//! arena that minted it. [`Compiler::reset_to`] destructures [`Watermark`]
-//! exhaustively so a new arena cannot join the snapshot without its rewind
-//! being written.
+//! This whole file exists to keep one rule: an index must never outlive the
+//! arena that minted it. [`Compiler::reset_to`] destructures [`Watermark`] in
+//! full, so a new arena can't join the snapshot until someone writes its
+//! rewind.
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -18,21 +18,21 @@ use crate::tivec::Idx;
 use crate::type_def::{Type, TypeId};
 use crate::types::{EnginePoolWatermark, EnvWatermark, Ty, ValueKind};
 
-/// One buffered name occurrence, holding the *live* `Ty`: resolution is
-/// deferred until all unifications have settled.
+/// One buffered name occurrence. It holds the *live* `Ty`, because we only
+/// resolve it once every unification has settled.
 #[derive(Debug, Clone)]
 pub(super) struct RawRef {
     pub(super) span: Span,
     pub(super) name: String,
     pub(super) ty: Ty,
     pub(super) doc: Option<String>,
-    /// Interned at `record` time so `finalize_references` need not re-intern
-    /// the path per occurrence.
+    /// Interned when `record` runs, so `finalize_references` doesn't have to
+    /// intern the path again for each occurrence.
     pub(super) module: ModuleId,
 }
 
-/// One name a module offers its importers, as a name list (REPL completion)
-/// wants it.
+/// One name a module offers its importers, in the form a name list such as REPL
+/// completion wants it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Export {
     pub name: String,
@@ -41,8 +41,8 @@ pub struct Export {
     pub params: Vec<String>,
 }
 
-/// Resolved type at one occurrence span. The reference graph is identity-only,
-/// so `IncrementalSession::hover` joins the inferred type from here.
+/// The resolved type at one occurrence's span. The reference graph only holds
+/// identities, so `IncrementalSession::hover` gets the inferred type from here.
 #[derive(Debug, Clone)]
 pub struct HoverFact {
     module: ModuleId,
@@ -52,12 +52,12 @@ pub struct HoverFact {
     doc: Option<String>,
 }
 
-/// Snapshot of every append-only compiler structure, captured at module
+/// A snapshot of every compiler structure that only grows, taken at module
 /// boundaries so an `IncrementalSession` can roll back to that point.
 ///
-/// Pick between two watermarks with [`earlier`](Self::earlier) /
-/// [`later`](Self::later), never `Ord::min`/`max` — those drop an `env`
-/// payload on a tie. Adding a field obliges you to rewind it in
+/// Pick between two watermarks with [`earlier`](Self::earlier) or
+/// [`later`](Self::later), never `Ord::min` or `max`, because those drop an
+/// `env` payload on a tie. If you add a field, you have to rewind it in
 /// [`Compiler::reset_to`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Watermark {
@@ -78,14 +78,15 @@ impl Watermark {
         }
     }
 
-    /// Comparison key. Every field is an append-only pool length or a monotone
-    /// counter, so an earlier watermark compares `<=` a later one. `env` is
-    /// excluded: it is a rollback payload, not a position, so its field set can
-    /// change without perturbing this ordering. Equal keys can therefore hide
-    /// different env payloads, which is why `earlier`/`later` merge on ties.
+    /// The key watermarks compare by. Every field is the length of a pool that
+    /// only grows or a counter that only goes up, so an earlier watermark
+    /// compares `<=` a later one. `env` is left out because it is data for the
+    /// rollback, not a position, so its fields can change without changing this
+    /// order. That means equal keys can hide different env payloads, which is
+    /// why `earlier` and `later` merge them on a tie.
     fn ord_key(&self) -> (EnginePoolWatermark, usize, usize, i32) {
-        // Exhaustive destructure: a new field must be consciously placed in or
-        // out of the ordering.
+        // Destructure every field, so a new one has to be put in or left out of
+        // the order on purpose.
         let Watermark {
             engine,
             env: _,
@@ -96,10 +97,11 @@ impl Watermark {
         (engine, functions, constants, local_count)
     }
 
-    /// The earlier-compiled of two watermarks, order-independently. Use this,
-    /// not `Ord::min`: on an `ord_key` tie `min` picks by argument order and
-    /// silently discards one env payload, which can under-truncate the env and
-    /// leave stale entries. This keeps the field-wise deeper rollback instead.
+    /// Whichever of two watermarks was compiled first, whatever order you pass
+    /// them in. Use this, not `Ord::min`. On an `ord_key` tie, `min` picks by
+    /// argument order and quietly throws away one env payload, which can leave
+    /// the env not truncated far enough with stale entries in it. This keeps
+    /// the deeper rollback of each field instead.
     pub(crate) fn earlier(self, other: Self) -> Self {
         match self.ord_key().cmp(&other.ord_key()) {
             std::cmp::Ordering::Less => self,
@@ -111,9 +113,10 @@ impl Watermark {
         }
     }
 
-    /// `earlier`'s mirror, keeping the field-wise shallower env on a tie. Used
-    /// to clamp a rewind to the seed floor: truncating the env past the seed's
-    /// payload would dangle stdlib bindings whose pools survived.
+    /// The mirror of `earlier`, which keeps the shallower env of each field on
+    /// a tie. We use it to stop a rewind at the seed. Truncating the env below
+    /// the seed's payload would leave dangling stdlib bindings whose pools
+    /// survived.
     fn later(self, other: Self) -> Self {
         match self.ord_key().cmp(&other.ord_key()) {
             std::cmp::Ordering::Less => other,
@@ -126,10 +129,10 @@ impl Watermark {
     }
 }
 
-/// Field-wise `min` of two env rollback payloads: the deeper rollback in
-/// every dimension, which is the conservative direction for
-/// `TypeEnv::truncate_to`. Written out field by field so a new `EnvWatermark`
-/// field fails to compile until its merge direction is chosen.
+/// The `min` of two env rollback payloads, field by field. That is the deeper
+/// rollback in every field, which is the safe direction for
+/// `TypeEnv::truncate_to`. It is written out one field at a time so a new
+/// `EnvWatermark` field won't compile until someone picks which way it merges.
 fn env_field_min(a: EnvWatermark, b: EnvWatermark) -> EnvWatermark {
     EnvWatermark {
         root_scope: a.root_scope.min(b.root_scope),
@@ -142,7 +145,8 @@ fn env_field_min(a: EnvWatermark, b: EnvWatermark) -> EnvWatermark {
     }
 }
 
-/// [`env_field_min`]'s mirror: the shallower rollback in every dimension.
+/// The mirror of [`env_field_min`], which is the shallower rollback in every
+/// field.
 fn env_field_max(a: EnvWatermark, b: EnvWatermark) -> EnvWatermark {
     EnvWatermark {
         root_scope: a.root_scope.max(b.root_scope),
@@ -183,19 +187,19 @@ impl Compiler {
         }
     }
 
-    /// Roll every pool/map back to `w` and clear per-compile transient state.
-    /// `module_table` is left untouched: the caller decides which cached
-    /// modules survive via `ModuleTable::invalidate`.
+    /// Roll every pool and map back to `w`, and clear the state that only lasts
+    /// for one compile. This leaves `module_table` alone, because the caller
+    /// decides which cached modules survive with `ModuleTable::invalidate`.
     ///
-    /// Every structure surviving the rewind must be truncated to `w`, filtered
-    /// to in-bounds indices, or cleared, so no index outlives its arena. The
-    /// exhaustive destructure below makes a new snapshot field fail to compile
-    /// until its rewind is written.
+    /// Every structure that survives the rewind must be truncated to `w`,
+    /// filtered to indices that are still in bounds, or cleared, so no index
+    /// outlives its arena. The full destructure below means a new snapshot
+    /// field won't compile until someone writes its rewind.
     ///
     /// `w` must not be below the session's `seed`, because everything below it
-    /// is the stdlib itself. The prelude-as-entry teardown to `bare` is the one
-    /// deliberate exception, and it rebuilds the session afterwards.
-    /// `IncrementalSession::rewind_to` is the clamp.
+    /// is the stdlib itself. Tearing down to `bare` when the prelude is the
+    /// entry is the one deliberate exception, and it rebuilds the session
+    /// afterwards. `IncrementalSession::rewind_to` enforces the floor.
     fn reset_to(&mut self, w: &Watermark) {
         let Watermark {
             engine,
@@ -207,48 +211,52 @@ impl Compiler {
 
         self.engine.truncate_to(&engine);
         self.env.truncate_to(&env);
-        // A throwaway scope for this compile's imports. The root scope rewinds
-        // by length, which cannot undo an in-place `define` overwrite, so an
-        // import that shadows a prelude name must never touch the root scope.
+        // Push a throwaway scope for this compile's imports. The root scope
+        // rewinds by length, which can't undo a `define` that overwrote a name
+        // in place, so an import that shadows a prelude name must never touch
+        // the root scope.
         self.env.push_scope();
         self.fns.truncate(functions);
         self.consts.truncate(constants);
         self.global_to_func.retain(|_, fi| fi.index() < functions);
         self.slots = local_count;
 
-        // Lowered toplevels are dropped, never truncated: they are recorded
-        // at the end of a module's compile, and a rewound compile's init code
-        // must not run as part of the next one.
+        // Drop the lowered toplevels, never truncate them. They are recorded
+        // at the end of a module's compile, and the init code of a compile we
+        // rewound must not run as part of the next one.
         self.inits.clear();
         self.entry_toplevel = None;
         self.main = None;
 
         self.recorded.clear();
-        // `ref_interner` is deliberately not cleared, so `DefId`s in surviving
-        // `CachedModule.module_refs` keep resolving to stable `ModuleId`s.
+        // We don't clear `ref_interner`, on purpose, so the `DefId`s in the
+        // `CachedModule.module_refs` that survive keep resolving to the same
+        // `ModuleId`s.
         let main_id = self.ref_interner.intern(&module::main_module());
         self.entry_refs = ModuleReferences::new(main_id);
-        // `str_slices` was just rewound, so an `ArenaSlice` may now denote a
-        // different path than it did last compile.
+        // `str_slices` was just rewound, so an `ArenaSlice` may now name a
+        // different path than it did in the last compile.
         self.defid_module_memo.clear();
         self.module_table.unmark_all_loading();
     }
 
-    /// Materialise a `CompileResult` by cloning, not taking, so the session can
-    /// be reused. Rebuilds the workspace reference graph and the hover table.
+    /// Build a `CompileResult` by cloning, not taking, so the session can be
+    /// used again. This rebuilds the workspace reference graph and the hover
+    /// table.
     fn snapshot_result(&mut self) -> (CompileResult, Vec<HoverFact>) {
         let (references, facts) = self.finalize_references();
         (
-            // A check-only session emits no program: the LSP reads only
-            // diagnostics and the graph.
+            // A session that only checks emits no program, because the LSP only
+            // reads the diagnostics and the graph.
             CompileResult::analysis_only(self.engine.diagnostics.clone(), references),
             facts,
         )
     }
 
     /// Build the workspace [`ReferenceGraph`] from the entry file's collector
-    /// and every `CachedModule`'s persisted `module_refs`. Built wholesale each
-    /// `check` so an evicted module's reverse edges vanish coherently.
+    /// and the stored `module_refs` of every `CachedModule`. We rebuild it from
+    /// scratch on each `check`, so an evicted module's reverse edges all go at
+    /// once.
     fn build_reference_graph(&mut self) -> ReferenceGraph {
         // Intern every loaded module path plus main, so every module gets a
         // stable `ModuleId`.
@@ -262,23 +270,23 @@ impl Compiler {
         }
         self.ref_interner.intern(&module::main_module());
 
-        // Mirror the persistent interner's id assignment: interning in id order
-        // reproduces identical ids, so the graph's `ModuleId`s match the ones
-        // already baked into every `DefId`. Skipping one would renumber every
-        // later module.
+        // Copy the long-lived interner's id assignment. Interning in id order
+        // gives the same ids, so the graph's `ModuleId`s match the ones already
+        // baked into every `DefId`. Skipping one would renumber every later
+        // module.
         let mut graph = ReferenceGraphBuilder::new();
         for p in self.ref_interner.paths() {
             graph.intern_module(p);
         }
 
-        // Every cached module's references. The reverse index is built once by
-        // `finish()`, not per insert.
+        // Add every cached module's references. `finish()` builds the reverse
+        // index once, not on each insert.
         for (_key, cm) in self.module_table.loaded_modules() {
             graph.insert(Rc::clone(cm.module_refs()));
         }
 
-        // The entry file's own refs must be copied: the collector is reused for
-        // the next check.
+        // The entry file's own refs must be copied, because the collector is
+        // used again for the next check.
         graph.insert(Rc::new(self.entry_refs.clone()));
 
         graph.finish()
@@ -288,16 +296,16 @@ impl Compiler {
     /// occurrences into the [`HoverFact`] table.
     pub(super) fn finalize_references(&mut self) -> (Rc<ReferenceGraph>, Vec<HoverFact>) {
         let graph = self.build_reference_graph();
-        // Only the LSP consumes hover facts; off that path `record` buffered
-        // nothing, so skip the O(occurrences) resolve pass.
+        // Only the LSP uses hover facts. Anywhere else `record` buffered
+        // nothing, so skip the resolve pass over every occurrence.
         if !self.collect_hover_facts {
             return (Rc::new(graph), Vec::new());
         }
         let raw = std::mem::take(&mut self.recorded);
         let mut facts: Vec<HoverFact> = Vec::with_capacity(raw.len());
-        // Finalization never unifies, so `resolve` is a pure function of the
-        // union-find representative and can be memoised on it. Many occurrences
-        // share a canonical `Ty`, and each raw resolve appends arena nodes.
+        // Nothing here unifies, so `resolve` depends only on the union-find
+        // representative and we can memoise on it. Many occurrences share a
+        // canonical `Ty`, and each resolve on its own adds arena nodes.
         let mut memo: HashMap<Ty, Type> = HashMap::new();
         for r in raw {
             let rep = self.engine.find(r.ty);
@@ -321,31 +329,33 @@ impl Compiler {
     }
 }
 
-/// A reusable, check-only compiler for the LSP. Holds the seeded stdlib and a
-/// cache of compiled user modules; each `check()` re-hashes cached module
-/// sources, invalidates the changed ones and everything compiled after them,
-/// truncates the arena to the surviving boundary, and recompiles the rest.
+/// A reusable compiler for the LSP that only checks. It holds the seeded stdlib
+/// and a cache of compiled user modules. Each `check()` hashes the cached
+/// modules' sources again, invalidates the changed ones and everything compiled
+/// after them, truncates the arena to where the survivors end, and recompiles
+/// the rest.
 pub struct IncrementalSession {
     c: Compiler,
     seed: Watermark,
-    /// Watermark before anything at all was seeded — the floor a
-    /// prelude-as-entry check rewinds to, since the prelude cannot be checked
-    /// on top of itself.
+    /// The watermark before anything was seeded at all. A check with the
+    /// prelude as its entry rewinds to this, because the prelude can't be
+    /// checked on top of itself.
     bare: Watermark,
-    /// Whether the prelude seed is currently in place. A prelude-as-entry
-    /// check tears it down (`bare` rewind); the next ordinary check re-seeds.
+    /// Whether the prelude seed is in place right now. A check with the prelude
+    /// as its entry tears it down (by rewinding to `bare`), and the next
+    /// ordinary check seeds it again.
     seeded: bool,
     /// Module bodies compiled while seeding, which [`Self::compile_count`]
     /// leaves out.
     seed_compiles: u32,
-    /// Watermark immediately before the previous entry-body analysis, i.e.
-    /// after every imported module had been compiled.
+    /// The watermark just before the previous entry body was analysed, which is
+    /// after every imported module was compiled.
     last_entry: Option<Watermark>,
-    /// Workspace reference graph, rebuilt wholesale at the end of every `check`
-    /// so an invalidated module's reverse edges disappear coherently. Shared
-    /// with the `CompileResult` handed back from `check`.
+    /// The workspace reference graph. It is rebuilt from scratch at the end of
+    /// every `check`, so an invalidated module's reverse edges all go at once.
+    /// The `CompileResult` that `check` returns shares it.
     graph: Rc<ReferenceGraph>,
-    /// Resolved type per recorded occurrence, from the last `check`.
+    /// The resolved type of each recorded occurrence, from the last `check`.
     type_facts: Vec<HoverFact>,
 }
 
@@ -362,11 +372,11 @@ impl IncrementalSession {
     }
 
     /// A session that compiles the stdlib from the `.sca` sources under
-    /// `stdlib_root` (the in-repo `src/std`) instead of the embedded copy.
-    /// Used when editing the stdlib itself: every `scarlet/...` module is then
-    /// an ordinary on-disk `File` module — compiled, cached, hashed and
-    /// invalidated exactly like user code — so the reference graph and hover
-    /// facts carry full fidelity for stdlib sources.
+    /// `stdlib_root` (the `src/std` in this repo) instead of the embedded copy.
+    /// Use it when editing the stdlib itself. Every `scarlet/...` module is
+    /// then an ordinary `File` module on disk, compiled, cached, hashed and
+    /// invalidated just like user code, so the reference graph and hover facts
+    /// are complete for stdlib sources.
     pub fn new_from_source(stdlib_root: std::path::PathBuf) -> Self {
         Self::with_stdlib_root(Some(stdlib_root))
     }
@@ -391,9 +401,9 @@ impl IncrementalSession {
         }
     }
 
-    /// Check entries the way a REPL submits them: a script of statements,
-    /// one fragment at a time, so module-scope statements are the point and
-    /// a binding whose use has not been typed yet is not an error. See
+    /// Check entries the way a REPL sends them, as a script of statements one
+    /// piece at a time. Statements at module scope are the whole point there,
+    /// and a binding whose use hasn't been typed yet is not an error. See
     /// [`ModuleScope`](crate::bytecode::ModuleScope) and
     /// [`UnusedBindings`](crate::bytecode::UnusedBindings).
     pub fn as_repl(&mut self) {
@@ -401,16 +411,17 @@ impl IncrementalSession {
         self.c.module_scope = crate::bytecode::ModuleScope::Script;
     }
 
-    /// Module bodies the session's checks have compiled, not counting cache
-    /// hits or the prelude it compiled when it started. Telemetry only.
+    /// How many module bodies the session's checks have compiled, not counting
+    /// cache hits or the prelude it compiled when it started. Only used for
+    /// telemetry.
     pub fn compile_count(&self) -> u32 {
         self.c.module_table.compile_count() - self.seed_compiles
     }
 
-    /// The one rewind path. `seed` is a hard floor: everything below it is the
-    /// stdlib, compiled when the session started, and rewinding past it would
-    /// drop the stdlib too. Clamping here rather than at each caller means a
-    /// new rewind site cannot forget.
+    /// Every rewind goes through here. `seed` is a hard floor, because
+    /// everything below it is the stdlib compiled when the session started, and
+    /// rewinding past it would drop the stdlib too. Enforcing that here instead
+    /// of at each caller means a new caller can't forget.
     fn rewind_to(&mut self, w: Watermark) {
         self.c.reset_to(&w.later(self.seed));
     }
@@ -420,8 +431,8 @@ impl IncrementalSession {
     }
 
     /// The canonical module path a cached user module was loaded under, found
-    /// by its on-disk source path. Analysing the same file as the open entry
-    /// would key it under `main` instead, so the LSP needs this to make a query
+    /// by its source path on disk. Analysing the same file as the open entry
+    /// would key it under `main` instead. So the LSP needs this to make a query
     /// inside an imported file resolve to the `DefId` its callers point at.
     pub fn module_path_for_source(&self, path: &Path) -> Option<&ModulePath> {
         self.c
@@ -431,9 +442,10 @@ impl IncrementalSession {
             .map(|(_, cm)| &cm.iface.path)
     }
 
-    /// Evict the cached module compiled from `path` and its dependents so the
-    /// next `check()` recompiles them. Called from LSP `didChangeWatchedFiles`
-    /// when a file changes on disk outside the editor.
+    /// Evict the cached module compiled from `path`, and everything that
+    /// depends on it, so the next `check()` recompiles them. The LSP calls this
+    /// from `didChangeWatchedFiles` when a file changes on disk outside the
+    /// editor.
     pub fn invalidate_path(&mut self, path: &Path) {
         self.c.module_table.clear_overlay(path);
         let key = self
@@ -461,11 +473,12 @@ impl IncrementalSession {
         self.check_impl(expr, base_dir, module::main_module())
     }
 
-    /// [`check`](Self::check), analysing the buffer *as* the given module
-    /// rather than as `main`. Used by a from-source stdlib session so an open
-    /// `src/std/**/*.sca` file keeps its canonical `scarlet/...` identity: `@vm` is
-    /// legal, prelude-redefinition rules apply, and every def/occurrence/hover
-    /// fact is keyed under the module its importers reference.
+    /// [`check`](Self::check), but analysing the buffer *as* the given module
+    /// instead of as `main`. A session that compiles the stdlib from source
+    /// uses this, so an open `src/std/**/*.sca` file keeps its canonical
+    /// `scarlet/...` identity. Then `@vm` is allowed, the prelude-redefinition
+    /// rules apply, and every def, occurrence and hover fact is keyed under the
+    /// module its importers refer to.
     pub fn check_as(
         &mut self,
         expr: &ast::Expression,
@@ -481,15 +494,15 @@ impl IncrementalSession {
         base_dir: Option<&Path>,
         entry_module: ModulePath,
     ) -> CompileResult {
-        // Rewrite backpass sugar away before any typing pass, mirroring
-        // `compile_impl`.
+        // Remove the backpass sugar before any typing pass, as `compile_impl`
+        // does.
         let mut expr = expr.clone();
         crate::desugar::desugar_expression(&mut expr);
         let expr = &expr;
 
-        // The prelude cannot be analysed on top of itself: tear the seed down
+        // The prelude can't be analysed on top of itself. So tear the seed down
         // to `bare` and compile the buffer as the whole world. The next
-        // ordinary check re-seeds below.
+        // ordinary check seeds it again below.
         let prelude_self = entry_module == module::scarlet_prelude();
         if prelude_self {
             self.c.module_table.invalidate_all();
@@ -497,23 +510,24 @@ impl IncrementalSession {
             self.seeded = false;
             self.last_entry = None;
         } else if !self.seeded {
-            // A previous prelude-as-entry check tore the seed down. Rebuild
-            // the session outright — byte-for-byte the fresh-session state,
-            // with none of the partially-rewound world to reason about. Rare
-            // (only after editing `scarlet.sca` and switching file), so the full
-            // stdlib recompile it implies is acceptable.
+            // An earlier check with the prelude as its entry tore the seed
+            // down. Rebuild the session from scratch, so its state is exactly a
+            // fresh session's and we don't have to reason about a half-rewound
+            // world. This only happens after you edit `scarlet.sca` and switch
+            // file, so the full stdlib recompile it costs is fine.
             *self = Self::with_stdlib_root(self.c.stdlib_source_root.clone());
         }
 
-        // The previous entry's contributions are dropped; cached modules' arena
-        // state sits below this line and survives.
+        // Drop what the previous entry added. The cached modules' arena state
+        // sits below this line and survives.
         let mut floor = self.last_entry.unwrap_or(self.seed);
 
-        // Keys are collected first so the staleness scan can take
+        // Collect the keys first, so the scan for stale files can take
         // `&mut module_table` for its stat cache without overlapping the
-        // `user_modules()` borrow. Modules baked at or below the seed (the
-        // from-source prelude) are excluded: they cannot be rewound past, so a
-        // change there is handled by the owner dropping the session instead.
+        // `user_modules()` borrow. Modules baked in at or below the seed (the
+        // prelude, when compiled from source) are left out. They can't be
+        // rewound past, so the owner handles a change there by dropping the
+        // session.
         let seed = self.seed;
         let candidates: Vec<module::ModuleKey> = self
             .c
@@ -535,8 +549,8 @@ impl IncrementalSession {
             self.rewind_to(floor);
         }
 
-        // Entry identity, from this check alone: its defs land under the
-        // module id importers target.
+        // Work out the entry's identity from this check alone, so its defs land
+        // under the module id its importers target.
         let entry_key = if prelude_self || module::is_stdlib(&entry_module) {
             module::ModuleKey::for_stdlib(&entry_module)
         } else {
@@ -545,11 +559,12 @@ impl IncrementalSession {
 
         self.compile_entry(expr, &entry_module, &entry_key, base_dir);
 
-        // Overflow fallback: a recompiled module spilled past its reused id
-        // range and may have collided with a sibling's block. Evict everything,
-        // drop the id bases, and recompile once. Every module is now a fresh
-        // allocation sized to current usage, so the flag cannot be re-raised
-        // this pass — hence one pass, not a loop.
+        // This is the fallback for overflow. A recompiled module spilled past
+        // its reused id range and may have collided with another module's
+        // range. So evict everything, drop the id bases and recompile once.
+        // Every module now gets a fresh range that fits its current usage, so
+        // the flag can't be set again on this pass. That's why this runs once
+        // and isn't a loop.
         if self.c.module_table.id_range_overflow()
             && let Some(w) = self.c.module_table.invalidate_all()
         {
@@ -575,7 +590,7 @@ impl IncrementalSession {
         let importer = Importer { dir: base_dir, key };
         let loaded = self.c.load_entry_imports(expr, &importer);
         // What the entry imports sits below this line and survives the next
-        // check; the entry's own contributions sit above it.
+        // check. What the entry adds itself sits above it.
         self.last_entry = Some(self.c.watermark());
         let mut checker = ModuleChecker::new(&mut self.c, path.clone(), key.clone());
         checker.c.env.push_scope();
@@ -584,10 +599,10 @@ impl IncrementalSession {
         self.c.entry_refs = checker.finish();
     }
 
-    /// Resolve a module key to its interned `ModuleId`; `None` means the entry
-    /// (`main`) module. A key naming no interned module must resolve to `None`,
-    /// never fall back to the entry, or a stale URI would answer queries with
-    /// another file's facts.
+    /// Resolve a module key to its interned `ModuleId`, where `None` means the
+    /// entry (`main`) module. A key that names no interned module must resolve
+    /// to `None` and never fall back to the entry, or a stale URI would answer
+    /// queries with another file's facts.
     fn module_for(&self, module_key: Option<&module::ModuleKey>) -> Option<ModuleId> {
         match module_key {
             Some(key) => self.graph.module_id_by_key(key),
@@ -595,15 +610,16 @@ impl IncrementalSession {
         }
     }
 
-    /// The base of the type-id range reserved for module `key`, if one was
-    /// allocated. Used by the incremental test harness to assert range reuse.
+    /// The start of the type-id range reserved for module `key`, if one was
+    /// allocated. The incremental test harness uses this to check that ranges
+    /// are reused.
     pub fn module_id_base(&self, key: &module::ModuleKey) -> Option<TypeId> {
         self.c.module_table.id_base_of(key)
     }
 
-    /// Name, inferred type and doc at a position. The tightest fact containing
-    /// the cursor wins, mirroring `resolve_position`, so a nested sub-expr's
-    /// type beats an enclosing one rather than whichever was recorded first.
+    /// The name, inferred type and doc at a position. The tightest fact that
+    /// contains the cursor wins, as in `resolve_position`, so the type of a
+    /// nested expression beats the one around it, whichever was recorded first.
     pub fn hover(
         &self,
         module_key: Option<&module::ModuleKey>,
@@ -619,10 +635,10 @@ impl IncrementalSession {
         Some((f.name.clone(), f.ty.clone(), f.doc.clone()))
     }
 
-    /// What the module at `path` exports, types first. A module no check has
-    /// imported yet is compiled first, by checking an entry that imports it,
-    /// so it lands in the cache through the same door as any other import.
-    /// One that does not resolve or does not compile exports nothing.
+    /// What the module at `path` exports, types first. If no check has imported
+    /// the module yet, we compile it first by checking an entry that imports
+    /// it, so it reaches the cache the same way as any other import. A module
+    /// that doesn't resolve or doesn't compile exports nothing.
     pub fn exports(&mut self, path: &ModulePath) -> Vec<Export> {
         let key = module::ModuleKey::of(path);
         if self.c.module_table.get(&key).is_none() {
@@ -654,7 +670,7 @@ impl IncrementalSession {
                 params,
             }
         });
-        // One name, one entry: a record type names its single constructor
+        // Give each name one entry. A record type names its only constructor
         // after itself.
         let mut seen = HashSet::new();
         types
@@ -732,7 +748,8 @@ mod tests {
         assert_eq!(b.later(a).env, want_max);
     }
 
-    /// Off a tie, `earlier`/`later` follow `Ord` and keep the winner's env.
+    /// When there's no tie, `earlier` and `later` follow `Ord` and keep the
+    /// winner's env.
     #[test]
     fn earlier_and_later_follow_ord_when_keys_differ() {
         let older = Watermark::default();
@@ -751,8 +768,8 @@ mod tests {
     }
 
     /// `reset_to` rewinds the function table and the constant pool to the
-    /// watermark, and drops every lowered toplevel: a rewound compile's init
-    /// code must not run as part of the next one.
+    /// watermark, and drops every lowered toplevel, because the init code of a
+    /// compile we rewound must not run as part of the next one.
     #[test]
     fn reset_to_rewinds_functions_and_consts_and_drops_toplevels() {
         let mut c = new_compiler(false);
@@ -768,8 +785,8 @@ mod tests {
             pool,
         );
 
-        // Anchored to whatever `new_compiler` seeded, not a literal, so the
-        // test survives that seed growing.
+        // Measure from whatever `new_compiler` seeded, not a fixed number, so
+        // the test still works when the seed grows.
         let (fns, consts) = (c.fns.len(), c.consts.len());
         c.fns.push(None);
         c.consts.push(Const::Int(1));

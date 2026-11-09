@@ -1,8 +1,8 @@
-//! Type-system and language-semantics coverage: `type` declarations,
-//! constructors as values, exhaustiveness, refutability, `or`/field/`if`
-//! typing, rigid type variables, record update, match guards, or-patterns,
-//! binary patterns, bindings. Stdlib runtime goldens live in
-//! `tests/stdlib.rs`; opcode-level VM execution lives in `tests/vm_exec.rs`.
+//! Tests for the type system and language semantics: `type` declarations,
+//! constructors as values, exhaustiveness, refutability, typing `or`, fields
+//! and `if`, rigid type variables, record update, match guards, or-patterns,
+//! binary patterns and bindings. Stdlib runtime goldens live in
+//! `tests/stdlib.rs`, and opcode-level VM tests live in `tests/vm_exec.rs`.
 
 mod common;
 use common::{check_ok, check_rejects, run_outputs};
@@ -50,7 +50,7 @@ reject_case! {
          pub fn main() {\n\
          \t_ = Wrap(1)\n\
          }\n",
-        "constructor fields must be labeled",
+        "Each constructor field needs a label",
     ),
 }
 
@@ -88,7 +88,7 @@ run_case! {
 }
 
 reject_case! {
-    // `if` requires `else`
+    // An `if` needs an `else`.
     if_without_else_is_error: (
         "pub fn main() {\n\
          \tx = if True { 1 }\n\
@@ -96,20 +96,20 @@ reject_case! {
          }\n",
         "else",
     ),
-    // Parentheses are tuples-only
+    // Parentheses only make tuples.
     empty_parens_is_parse_error: (
         "pub fn main() {\n\
          \tx = ()\n\
          \tprintln(x)\n\
          }\n",
-        "tuples need 2+ elements",
+        "A tuple needs at least two elements",
     ),
     single_parens_is_parse_error: (
         "pub fn main() {\n\
          \tx = (5)\n\
          \tprintln(x)\n\
          }\n",
-        "single-element parens not allowed",
+        "Parentheses can't hold just one expression",
     ),
 }
 
@@ -134,7 +134,7 @@ run_case! {
 }
 
 reject_case! {
-    /// `xs[0] + 1` should be rejected because `xs[0]` is `Option(Int)`, not `Int`.
+    /// `xs[0] + 1` is rejected because `xs[0]` is `Option(Int)`, not `Int`.
     index_without_unwrap_is_option_typed: (
         "pub fn main() {\n\
          \txs = [10, 20, 30]\n\
@@ -147,8 +147,8 @@ reject_case! {
 
 #[test]
 fn index_negative_returns_none() {
-    // A negative index is rejected by `Op::Index`'s own `idx >= 0` guard, a
-    // different path from the out-of-bounds `arr.get` returning `None`.
+    // `Op::Index`'s own `idx >= 0` guard rejects a negative index. That's a
+    // different path from an out-of-bounds `arr.get` returning `None`.
     run_outputs(
         "pub fn main() {\n\
          \txs = [10, 20, 30]\n\
@@ -162,7 +162,8 @@ fn index_negative_returns_none() {
 
 #[test]
 fn slice_in_bounds_returns_subarray() {
-    // A slice is a `Result(Array(Int), Nil)`: `Ok` of the elements in range.
+    // A slice is a `Result(Array(Int), Nil)`, holding `Ok` of the elements in
+    // range.
     run_outputs(
         "pub fn main() {\n\
          \txs = [10, 20, 30, 40, 50]\n\
@@ -306,8 +307,8 @@ reject_case! {
 #[test]
 fn non_uniform_recursive_type_resolution_terminates() {
     // `Nest`'s argument grows at every level, so the instance key never
-    // repeats and only the recurrence bound stops resolution looping. The
-    // recursive position is cut off, so the wildcard arm is required.
+    // repeats and only the recurrence bound stops resolution looping for ever.
+    // The recursive position is cut off, so its arm has to use a wildcard.
     check_ok(
         "type Nest(t) {\n\tMore(inner Nest((t, t)))\n\tDone\n}\n\
          fn f(n Nest(Int)) Int {\n\
@@ -405,7 +406,7 @@ run_case! {
 }
 
 reject_case! {
-    /// Body returns concrete `Int` where signature promised `a`.
+    /// The body returns a concrete `Int` where the signature promised `a`.
     rigid_tyvar_body_mismatch_is_rejected: (
         "fn bad(x a) a { 1 }\n\
          pub fn main() {\n\
@@ -456,7 +457,7 @@ run_case! {
 
 #[test]
 fn ctor_record_update_overrides_and_projects() {
-    // Record-update builds a fresh value: `base` is left untouched.
+    // A record update builds a fresh value and leaves `base` untouched.
     run_outputs(
         "type P { P(name String, age Int) }\n\
          pub fn main() {\n\
@@ -500,8 +501,8 @@ run_case! {
 }
 
 reject_case! {
-    /// By name, but still of one type: a `.x` that is an `Int` on one variant
-    /// and a `String` on another has no type to be.
+    /// Fields are found by name but still have one type. A `.x` that is an
+    /// `Int` on one variant and a `String` on another has no type it can be.
     field_access_refuses_a_field_whose_type_differs_by_variant: (
         "type S {\n\tA(x Int)\n\tB(x String)\n}\n\
          fn get(s S) Int { s.x }\n\
@@ -521,9 +522,9 @@ reject_case! {
          \tolder = P(..base, ..base)\n\
          \tprintln(older.age)\n\
          }\n",
-        "Constructor call may have at most one spread",
+        "A constructor call can only have one spread",
     ),
-    /// A spread in an ordinary call is a placement error.
+    /// A spread in an ordinary call is in the wrong place.
     spread_arg_in_plain_call_rejected: (
         "fn f(a Int) Int { a }\n\
          pub fn main() {\n\
@@ -532,9 +533,9 @@ reject_case! {
         "Spread arguments are only allowed in constructor record-update calls",
     ),
     /// A callee that is only a value has no parameter names to label, however
-    /// it was bound: `g` is a local binding, so the declaration `f`'s names are
-    /// not in reach at this call site. The refusal is the feature here, not a
-    /// gap — see T-126.
+    /// it was bound. `g` is a local binding, so the names of the declaration
+    /// `f` are out of reach at this call site. Refusing it is deliberate, not a
+    /// gap. See T-126.
     labelled_arg_on_value_callee_rejected: (
         "fn f(a Int) Int { a }\n\
          pub fn main() {\n\
@@ -551,7 +552,7 @@ reject_case! {
          }\n",
         "This function has no parameter 'c'. Available: a, b",
     ),
-    /// Two arguments claiming one parameter is reported, not silently dropped.
+    /// Two arguments claiming one parameter get reported, not silently dropped.
     duplicate_label_on_fn_call_rejected: (
         "fn diff(a Int, b Int) Int { a - b }\n\
          pub fn main() {\n\
@@ -562,15 +563,14 @@ reject_case! {
 }
 
 run_case! {
-    /// Labels reversed against the declaration, on two parameters of the SAME
-    /// type and returning an order-revealing result. Both orders type-check —
-    /// which is exactly why the type checker cannot witness this — so `-1` vs
-    /// `1` is the only thing that distinguishes arguments passed in declared
-    /// order from arguments passed in source order.
+    /// The labels are in reverse order on two parameters of the *same* type, and
+    /// the result shows the order. Both orders type-check, which is exactly why
+    /// the type checker can't catch this. So `-1` vs `1` is the only thing that
+    /// tells arguments passed in declared order from ones passed in source
+    /// order.
     ///
-    /// This does not witness the *checking* order, only the order the call is
-    /// emitted in; `labelled_args_evaluate_in_source_order` covers the other
-    /// half.
+    /// This shows the order the call is emitted in, not the *checking* order.
+    /// `labelled_args_evaluate_in_source_order` covers the other half.
     labelled_args_reversed_on_same_typed_params: (
         "fn diff(a Int, b Int) Int { a - b }\n\
          pub fn main() {\n\
@@ -579,8 +579,8 @@ run_case! {
         "-1\n",
     ),
 
-    /// A full permutation of three same-typed parameters: `123` holds only if
-    /// each label reached its declared position.
+    /// A full permutation of three parameters of the same type. The result is
+    /// `123` only if each label reached its declared position.
     labelled_args_full_permutation: (
         "fn pick(a Int, b Int, c Int) Int { a * 100 + b * 10 + c }\n\
          pub fn main() {\n\
@@ -589,7 +589,7 @@ run_case! {
         "123\n",
     ),
 
-    /// Arguments are evaluated in SOURCE order and passed in DECLARED order:
+    /// Arguments are evaluated in *source* order and passed in *declared* order.
     /// `2` prints before `1`, and the call still computes `1 - 2`.
     labelled_args_evaluate_in_source_order: (
         "fn note(n Int) Int {\n\
@@ -603,7 +603,8 @@ run_case! {
         "2\n1\n-1\n",
     ),
 
-    /// Leading positionals still fill left-to-right with a label after them.
+    /// Leading positional arguments still fill left to right when a label
+    /// follows them.
     labelled_args_mixed_with_positional: (
         "fn diff(a Int, b Int) Int { a - b }\n\
          pub fn main() {\n\
@@ -723,8 +724,8 @@ reject_case! {
 
 #[test]
 fn or_pattern_nested_in_non_first_alternative() {
-    // A nested or-pattern is checked against the outer or's canonical set,
-    // not treated as a fresh scope.
+    // A nested or-pattern is checked against the outer or's canonical set of
+    // names, not treated as a fresh scope.
     run_outputs(
         "fn f(t (Int, (Int, Int))) Int {\n\
          \tmatch t {\n\
@@ -760,13 +761,13 @@ reject_case! {
          \txs = [1] ++ [2]\n\
          \tprintln(xs)\n\
          }\n",
-        "Unexpected '++'",
+        "Expected an expression, but found '++'",
     ),
 }
 
 #[test]
 fn nested_ctor_pattern_exhaustive() {
-    // `resolve_icon`'s cycle guard must not leak across sibling type-args.
+    // `resolve_icon`'s cycle guard must not leak across sibling type arguments.
     check_ok(
         "pub fn main() {\n\
          \tmatch Ok(Nil) { Ok(Nil) -> println('y') Err(e) -> println(e) }\n\
@@ -813,11 +814,11 @@ fn vm_attribute_stdlib_only() {
     check_rejects("@nope\nfn f() Nil { Nil }\n", "Unknown attribute '@nope'");
 }
 
-/// Rejected deliberately, not just incidentally as one more unknown name:
-/// Scarlet has no package boundary to give `@internal` a meaning and no docs
-/// generator to withhold a name from, so accepting it would leave the function
-/// exactly as `pub` as it was (`docs/visibility.md`). Witnesses the rejection
-/// only; it says nothing about `pub`, which this decision leaves unchanged.
+/// We reject `@internal` on purpose, not just as one more unknown name.
+/// Scarlet has no package boundary to give it a meaning and no docs generator
+/// to hide a name from, so accepting it would leave the function exactly as
+/// `pub` as it was (`docs/visibility.md`). This only checks the rejection. It
+/// says nothing about `pub`, which this decision leaves unchanged.
 #[test]
 fn internal_attribute_is_not_a_scarlet_attribute() {
     check_rejects(
@@ -826,16 +827,16 @@ fn internal_attribute_is_not_a_scarlet_attribute() {
     );
 }
 
-/// The `AttrTarget::Type` arm, which is named rather than negated so a new
+/// Tests the `AttrTarget::Type` arm. It's named rather than negated, so a new
 /// attribute target has to decide whether `@vm` is legal on it.
 ///
 /// A test source is never in the stdlib, so `'@vm' is only allowed in the
-/// standard library` fires on this same attribute — the two checks are
-/// sequential, not exclusive, and `al check` prints both. That is why the
-/// expected diagnostic is spelled out in full and passed alone: `check_rejects`
-/// matches one of the strings it is given, so naming both would let the
-/// stdlib-only error satisfy it. The bare rejection is likewise not the
-/// witness, since the stdlib-only error already produces one on its own.
+/// standard library` also fires on this attribute. The two checks run one
+/// after the other, and `al check` prints both. That's why we spell out the
+/// expected diagnostic in full and pass it alone. `check_rejects` matches any
+/// one of the strings it gets, so naming both would let the stdlib-only error
+/// satisfy it. For the same reason, a bare rejection proves nothing, because
+/// the stdlib-only error already causes one.
 #[test]
 fn vm_attribute_may_not_be_used_on_a_type() {
     check_rejects(
@@ -891,7 +892,7 @@ reject_case! {
 
 #[test]
 fn reserved_set_derived_from_prelude_iface() {
-    // Prelude types/ctors are reserved...
+    // Prelude types and constructors are reserved...
     check_rejects(
         "type Option(a) {\n\tJust(value a)\n\tNothing\n}\n",
         "is defined in the prelude and cannot be redefined",
@@ -929,7 +930,7 @@ fn binary_string_literal_patterns() {
 #[test]
 fn binary_string_literal_patterns_runs() {
     // A bare string-literal segment matches its UTF-8 bytes as a prefix
-    // (Op::BinMatchPrefix); the rest binding is a zero-copy view.
+    // (Op::BinMatchPrefix), and the rest binding is a view that copies nothing.
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
@@ -995,7 +996,7 @@ fn binary_string_literal_patterns_runs() {
          }\n",
         "1\n",
     );
-    // Multi-byte UTF-8 literals keep byte-accurate offsets for the rest.
+    // Multi-byte UTF-8 literals keep the rest's offset exact to the byte.
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
@@ -1019,8 +1020,8 @@ fn binary_string_literal_patterns_runs() {
          }\n",
         "4\n",
     );
-    // Mixed and sub-byte literal runs coalesce too; the compile-time
-    // encoding must match Op::BinFromInt's MSB-first layout.
+    // Mixed and sub-byte literal runs coalesce too. The compile-time encoding
+    // must match Op::BinFromInt's MSB-first layout.
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
@@ -1047,7 +1048,8 @@ fn binary_string_literal_patterns_runs() {
 
 #[test]
 fn binary_literal_and_pattern_e2e() {
-    // <<a, b>> pattern: scan→parse→compile→VM. 'A'=65, 'B'=66, sum=131.
+    // A <<a, b>> pattern, taken through scan, parse, compile and the VM.
+    // 'A' is 65 and 'B' is 66, so the sum is 131.
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
@@ -1059,7 +1061,8 @@ fn binary_literal_and_pattern_e2e() {
          }\n",
         "131\n",
     );
-    // <<1:4, 2:4>> literal: 0001_0010 = 18, inspect emits whole-byte form.
+    // The literal <<1:4, 2:4>> is 0001_0010, which is 18, and inspect prints
+    // it as whole bytes.
     run_outputs(
         "import scarlet/string\n\
          pub fn main() {\n\
@@ -1175,9 +1178,9 @@ reject_case! {
     ),
 }
 
-// A constructor used as a value makes `lower` synthesise an eta-wrapper into
-// `program.code` ahead of the body, so `emit` must bake absolute jump targets
-// against the post-lowering address. Only the `else` arm jumps.
+// A constructor used as a value makes `lower` add an eta wrapper to
+// `program.code` ahead of the body, so `emit` must compute absolute jump
+// targets from the address after lowering. Only the `else` arm jumps.
 #[test]
 fn a_branch_after_an_eta_wrapper_jumps_to_the_right_place() {
     let src = "import scarlet/array\n\
@@ -1244,8 +1247,8 @@ fn field_access_through_a_module_fn_inferred_scrutinee_runs() {
 
 /// Binding an inferred scrutinee's heap payload makes the arm responsible for
 /// releasing it, so Perceus needs the payload's real type to emit the `Drop`.
-/// The `drop` itself is pinned by the `inferred_scrutinee_drops_heap_payload`
-/// Core IR golden; this pins the answer.
+/// The `inferred_scrutinee_drops_heap_payload` Core IR golden pins the `drop`
+/// itself, and this pins the answer.
 #[test]
 fn inferred_scrutinee_with_a_heap_payload_runs() {
     let src = "type Boxed { Boxed(n Int) }\n\

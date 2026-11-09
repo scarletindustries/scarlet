@@ -1,5 +1,5 @@
-//! The line editor's view of Scarlet: what to color, what completes, and when
-//! an entry is finished.
+//! The line editor's view of Scarlet: what to colour, what completes, and when an entry is
+//! finished.
 //!
 //! Completion and validation both read the language through the real scanner
 //! and parser, so "is this entry finished" is the parser's answer rather than
@@ -66,9 +66,9 @@ impl Highlighter for ScarletHelper {
         Cow::Owned(format!("{}{hint}{}", self.palette.dim, self.palette.reset))
     }
 
-    /// Repaint on every keystroke and cursor move: the colors depend on the
-    /// whole line (a `(` becomes a call when a name precedes it) and on where
-    /// the cursor is (the bracket it rests on).
+    /// Repaint on every keystroke and cursor move, because the colours depend on the whole line (a
+    /// `(` becomes a call when a name comes before it) and on where the cursor is (the bracket it
+    /// rests on).
     fn highlight_char(&self, _line: &str, _pos: usize, _forced: bool) -> bool {
         self.palette.enabled()
     }
@@ -77,11 +77,11 @@ impl Highlighter for ScarletHelper {
 impl Hinter for ScarletHelper {
     type Hint = String;
 
-    /// The greyed-out text past the cursor: what Tab would insert, falling
-    /// back to the rest of the last matching entry. Right accepts it.
+    /// The greyed-out text after the cursor. It's what Tab would insert, or else the rest of the
+    /// last matching entry, and Right accepts it.
     ///
-    /// Only at the end of the line — a hint drawn mid-line would sit between
-    /// the cursor and text the user can see is already there.
+    /// We only show it at the end of the line, because a hint drawn mid-line would sit between
+    /// the cursor and text the user can already see.
     fn hint(&self, line: &str, pos: usize, ctx: &Context<'_>) -> Option<String> {
         if pos < line.len() {
             return None;
@@ -92,13 +92,13 @@ impl Hinter for ScarletHelper {
 }
 
 impl ScarletHelper {
-    /// The completion every candidate agrees on, minus what is already typed.
-    /// Nothing is suggested for an empty word: every name in scope shares no
-    /// prefix, and a hint that appears out of nowhere is noise.
+    /// The completion every candidate agrees on, minus what's already typed. We suggest nothing
+    /// for an empty word, because the names in scope share no prefix and a hint that appears out
+    /// of nowhere is noise.
     fn completion_hint(&self, line: &str, pos: usize) -> Option<String> {
         let (start, candidates) = match command::body(line) {
-            // A path argument is left to Tab: hinting it would stat the
-            // filesystem on every keystroke.
+            // Leave path arguments to Tab, because hinting one would stat the filesystem on
+            // every keystroke.
             Some(after_marker) if after_marker.contains(char::is_whitespace) => return None,
             Some(_) => complete_command(typed_command(line, pos)),
             None => complete_source(line, pos, &mut self.names.borrow_mut()),
@@ -109,8 +109,8 @@ impl ScarletHelper {
     }
 }
 
-/// The longest prefix shared by every candidate — what Tab would insert, so
-/// the ghost text and the Tab key never disagree.
+/// The longest prefix every candidate shares. It's what Tab would insert, so the ghost text and
+/// the Tab key never disagree.
 fn common_prefix<'a>(mut candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
     let first = candidates.next()?;
     let end = candidates.fold(first.len(), |end, c| {
@@ -120,7 +120,7 @@ fn common_prefix<'a>(mut candidates: impl Iterator<Item = &'a str>) -> Option<&'
             .take(end)
             .take_while(|(a, b)| a == b)
             .count();
-        // Never split a character: the prefix is shown to the user.
+        // Never split a character, because the user sees the prefix.
         (0..=shared)
             .rev()
             .find(|&n| first.is_char_boundary(n))
@@ -130,10 +130,9 @@ fn common_prefix<'a>(mut candidates: impl Iterator<Item = &'a str>) -> Option<&'
 }
 
 impl Validator for ScarletHelper {
-    /// Enter submits a finished entry and opens a new line on an unfinished
-    /// one. Never `Invalid`: a genuine syntax error is the evaluator's to
-    /// report, and refusing to submit would trap the user in a line they
-    /// cannot get out of.
+    /// Enter submits a finished entry and opens a new line on an unfinished one. This never
+    /// returns `Invalid`. The evaluator reports real syntax errors, and refusing to submit would
+    /// trap the user in a line they can't get out of.
     fn validate(&self, ctx: &mut ValidationContext) -> rustyline::Result<ValidationResult> {
         let input = ctx.input();
         if input.trim().is_empty() || command::parse(input).is_some() {
@@ -168,9 +167,9 @@ impl Completer for ScarletHelper {
     }
 }
 
-/// The marker the line opens with and the command name typed so far. The
-/// marker is carried through so a candidate extends the line the user is
-/// actually looking at, rather than rewriting `/he` as `:help`.
+/// The marker the line starts with and the command name typed so far. We keep the marker so a
+/// candidate extends the line the user is actually looking at, instead of rewriting `/he` as
+/// `:help`.
 fn typed_command(line: &str, pos: usize) -> (&str, &str) {
     (
         line.get(..1).unwrap_or(":"),
@@ -219,10 +218,9 @@ fn pairs(candidates: Vec<Candidate>) -> Vec<Pair> {
         .collect()
 }
 
-/// The identifier ending at `pos`, with any `qualifier::` prefix, and where it
-/// starts. `None` where no name can begin — inside a number literal — as
-/// against an empty word at a boundary, which completes to everything in
-/// scope.
+/// The identifier ending at `pos`, with any `qualifier::` prefix, and where it starts. It's
+/// `None` where no name can begin, such as inside a number literal. That's different from an
+/// empty word at a boundary, which completes to everything in scope.
 fn word_before(line: &str, pos: usize) -> Option<(usize, &str)> {
     let pos = pos.min(line.len());
     let bytes = line.as_bytes();
@@ -246,8 +244,7 @@ fn word_before(line: &str, pos: usize) -> Option<(usize, &str)> {
     Some((start, &line[start..pos]))
 }
 
-/// The partially written module path on an `import` line, if the cursor is in
-/// one.
+/// The half-written module path on an `import` line, if the cursor is in one.
 fn import_path_before(line: &str, pos: usize) -> Option<&str> {
     let head = line.get(..pos)?;
     let (before, path) = head.rsplit_once(char::is_whitespace)?;
@@ -315,8 +312,8 @@ mod tests {
         assert_eq!(hint("/he", Names::default()).as_deref(), Some("lp "));
     }
 
-    /// The whole editor path, not just the helper's inner function: a
-    /// candidate that never reaches `Completer::complete` never reaches Tab.
+    /// This tests the whole editor path, not just the helper's inner function, because a candidate
+    /// that never reaches `Completer::complete` never reaches Tab.
     #[test]
     fn the_editor_completes_a_constructor_behind_its_alias() {
         let names = Rc::new(RefCell::new(observed("import scarlet/http")));

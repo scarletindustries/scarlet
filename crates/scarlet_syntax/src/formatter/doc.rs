@@ -6,8 +6,8 @@ use unicode_width::UnicodeWidthChar;
 const TAB_WIDTH: isize = 4;
 
 /// A layout document. The representation is private because the engine relies
-/// on an invariant only these constructors keep: a `Group`'s subtree contains a
-/// hard newline iff its `Breaks` is `Always` or `Hugging`.
+/// on a rule only these constructors keep: a `Group`'s subtree contains a hard
+/// newline exactly when its `Breaks` is `Always` or `Hugging`.
 #[derive(Debug, Clone)]
 pub struct Doc(DocInner);
 
@@ -419,8 +419,9 @@ pub(crate) fn block(body: Doc) -> Doc {
     )
 }
 
-/// Always broken one-per-line, with **no** separators — the newline is the
-/// separator. Used for a constructor field list that is too long to read flat.
+/// Always broken one per line, with **no** separators, because the newline is
+/// the separator. Used for a constructor field list that is too long to read
+/// flat.
 pub(crate) fn hard_list_bare(open: &'static str, items: Vec<Doc>, close: &'static str) -> Doc {
     if items.is_empty() {
         return d![text(open), text(close)];
@@ -459,8 +460,8 @@ pub(crate) fn delimited_commas_when_flat(
 /// )
 /// ```
 ///
-/// Used when the author already broke the list — width is not the only reason
-/// to keep it broken.
+/// Used when the author already broke the list, because width isn't the only
+/// reason to keep it broken.
 pub(crate) fn hard_list(open: &'static str, items: Vec<Doc>, close: &'static str) -> Doc {
     if items.is_empty() {
         return d![text(open), text(close)];

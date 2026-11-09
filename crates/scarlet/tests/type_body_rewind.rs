@@ -1,6 +1,7 @@
-//! Regression: cached `TypeInfo` bodies outlive an incremental rewind but the
-//! engine's `vars` table does not, so bodies must be closed to `Bound(idx)` at
-//! registration (`close_body` in `bytecode/analysis.rs`), not left as `Var`.
+//! A regression test. Cached `TypeInfo` bodies outlive an incremental rewind but
+//! the engine's `vars` table doesn't, so bodies must be closed to `Bound(idx)`
+//! when they're registered (`close_body` in `bytecode/analysis.rs`), not left as
+//! `Var`.
 
 use scarlet::bytecode::IncrementalSession;
 
@@ -15,8 +16,8 @@ fn cached_module_type_bodies_survive_rewinds() {
         "pub type Box(a) {\n\tMk(v a)\n}\npub type Pair(a) = (a, a)\npub fn wrap(x Int) Box(Int) { Mk(x) }\n",
     );
 
-    // Exercises every consumer of the cached bodies: alias target, variant
-    // field template, and pattern elaboration.
+    // This uses the cached bodies in every way the checker does: as an alias
+    // target, as a variant field template, and in pattern elaboration.
     let entry = |k: i64| {
         format!(
             "import ./lib\n\n\

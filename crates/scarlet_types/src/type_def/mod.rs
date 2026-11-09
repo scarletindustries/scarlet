@@ -3,8 +3,8 @@ use std::fmt;
 
 pub use scarlet_ir::TypeId;
 
-/// Names of the prelude types that are not `Type::Named`. The only prelude
-/// name strings outside `bytecode::prelude_bindings`.
+/// The names of the prelude types that aren't `Type::Named`. These are the only
+/// prelude name strings outside `bytecode::prelude_bindings`.
 pub mod prim_names {
     pub const INT: &str = "Int";
     pub const FLOAT: &str = "Float";
@@ -42,9 +42,10 @@ pub enum Type {
         params: Vec<Type>,
         ret: Box<Type>,
     },
-    /// A user-defined nominal type. `variants` has field types already
-    /// substituted for `type_args`, so consumers need no environment lookup.
-    /// A struct is the single-variant case whose ctor name is the type name.
+    /// A user-defined nominal type. The field types in `variants` already have
+    /// `type_args` substituted in, so readers don't need to look anything up in
+    /// the environment. A struct is the one-variant case whose constructor has
+    /// the type's name.
     Named {
         id: TypeId,
         name: String,

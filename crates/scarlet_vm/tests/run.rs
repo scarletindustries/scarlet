@@ -1,5 +1,5 @@
-//! Programs run end to end: compiled from Scarlet source, then run by the VM,
-//! checking exactly what they print.
+//! These tests run programs end to end. Each is compiled from Scarlet source
+//! and run by the VM, and the test checks exactly what it prints.
 
 use scarlet_vm::{Host, Stop};
 
@@ -102,8 +102,8 @@ fn if_picks_a_branch_in_both_positions() {
     );
 }
 
-/// A loop written as tail recursion: each step's call is a tail call, which
-/// reuses the frame, so a million steps finish in the room of one.
+/// A loop written as tail recursion. Each step's call is a tail call, which
+/// reuses the frame, so a million steps fit in the room of one.
 #[test]
 fn a_tail_recursive_loop_of_a_million_steps_finishes() {
     prints(
@@ -117,11 +117,11 @@ fn a_tail_recursive_loop_of_a_million_steps_finishes() {
     );
 }
 
-/// Perceus reuse: a constructor whose cell nothing else holds any more is
-/// overwritten in place rather than allocated. Here the loop gives its pair up
+/// Perceus reuse. A constructor whose cell nothing else holds any more is
+/// overwritten in place instead of allocated. Here the loop gives its pair up
 /// at the `match` and builds another on the way round, so one cell serves
 /// every turn. `scarlet/internal` counts both, so the test pins the saving
-/// rather than just the answer.
+/// and not just the answer.
 #[test]
 fn a_loop_overwrites_the_cell_it_just_gave_up() {
     prints(
@@ -145,7 +145,7 @@ fn a_loop_overwrites_the_cell_it_just_gave_up() {
     );
 }
 
-/// Reuse across a call, which needs the call to be a move: the caller hands
+/// Reuse across a call, which needs the call to be a move. The caller hands
 /// over its own reference, so the callee is the only holder and may overwrite
 /// the cell. Every `Cons` of the new list is the matching one of the old,
 /// written over, so the walk allocates nothing at all.
@@ -214,7 +214,7 @@ fn a_loop_carries_its_cell_across_the_call_that_ends_it() {
 
 /// Reuse waits on the last reference. The same loop with the pair kept in a
 /// list allocates every turn, and every pair still reads back as it was
-/// written: overwriting a cell something else holds would show up here.
+/// written. Overwriting a cell something else holds would show up here.
 #[test]
 fn a_cell_something_else_holds_is_not_overwritten() {
     prints(
@@ -241,7 +241,7 @@ fn a_cell_something_else_holds_is_not_overwritten() {
 }
 
 /// Frames live on the VM's own stack, not Rust's, so a deep recursion that is
-/// not a tail call just uses memory: nothing overflows.
+/// not a tail call just uses memory, and nothing overflows.
 #[test]
 fn a_deep_recursion_uses_memory_not_the_rust_stack() {
     prints(
@@ -255,7 +255,7 @@ fn a_deep_recursion_uses_memory_not_the_rust_stack() {
     );
 }
 
-/// A function that uses something not built yet still loads; only calling
+/// A function that uses something not built yet still loads. Only calling
 /// it stops the run, and the stop says what it needs.
 #[test]
 fn only_calling_an_unbuilt_function_stops_the_run() {
@@ -289,7 +289,7 @@ fn strings_print_join_and_interpolate() {
     );
 }
 
-/// An Int is exact however big it gets: past 48 bits it moves to the heap,
+/// An Int is exact however big it gets. Past 48 bits it moves to the heap,
 /// and past 64 it keeps going.
 #[test]
 fn ints_are_exact_past_48_and_64_bits() {
@@ -324,7 +324,7 @@ fn a_big_result_that_fits_is_small_again() {
 
 /// `docs/semantics.md`'s rules hold for big ints too, including the zero
 /// cases the library would otherwise panic on. The number is built by
-/// multiplying: a literal past 64 bits is still a compile error, because the
+/// multiplying. A literal past 64 bits is still a compile error, because the
 /// compiler keeps Int constants as `i64`.
 #[test]
 fn big_division_follows_the_rules() {
@@ -745,7 +745,8 @@ fn an_array_is_walked_built_and_joined() {
     );
 }
 
-/// `xs[i]` is an `Option`: `Some` of the element, or `None` past either end.
+/// `xs[i]` is an `Option`. It is `Some` of the element, or `None` past either
+/// end.
 #[test]
 fn indexing_an_array_gives_an_option() {
     prints(
@@ -767,8 +768,8 @@ fn indexing_an_array_gives_an_option() {
     );
 }
 
-/// `xs[a..b]` is a `Result`: `Ok` of the elements when the range is inside
-/// the array, and `Err(Nil)` when it is not, never a crash.
+/// `xs[a..b]` is a `Result`. It is `Ok` of the elements when the range is
+/// inside the array, and `Err(Nil)` when it is not, never a crash.
 #[test]
 fn a_slice_is_a_result() {
     prints(
@@ -798,7 +799,8 @@ fn a_slice_is_a_result() {
 }
 
 /// A range stores only its two ends, and is an array of Ints in every way a
-/// program can see: shown, indexed, walked, sliced, spread and joined.
+/// program can see. It can be shown, indexed, walked, sliced, spread and
+/// joined.
 #[test]
 fn a_range_is_an_array_of_its_ints() {
     prints(
@@ -912,7 +914,7 @@ fn the_first_built_ins_run() {
     );
 }
 
-/// Floats follow `docs/semantics.md`: no NaN and no infinity, ever.
+/// Floats follow `docs/semantics.md`, so there is never a NaN or an infinity.
 #[test]
 fn floats_are_never_nan_or_infinite() {
     prints(
@@ -954,8 +956,8 @@ fn floats_are_never_nan_or_infinite() {
     );
 }
 
-/// Binaries: literals of every segment kind, shown as the old VM showed
-/// them, taken apart by patterns, and the core of `scarlet/binary`.
+/// Binary literals of every segment kind, shown as the old VM showed them
+/// and taken apart by patterns, and the core of `scarlet/binary`.
 #[test]
 fn binaries_are_built_shown_and_matched() {
     prints(
@@ -1069,7 +1071,7 @@ fn the_string_built_ins_run() {
 }
 
 /// Bitwise operations treat an Int as an endless row of two's-complement
-/// bits, as `int.sca` says: no bit ever falls off an end.
+/// bits, as `int.sca` says. No bit ever falls off an end.
 #[test]
 fn bitwise_operations_are_any_size() {
     prints(
@@ -1183,8 +1185,8 @@ fn a_key_is_found_by_any_equal_value() {
     );
 }
 
-/// `os.argv` and `os.env` are what the host says. A name the OS lists twice
-/// is the first one's, as `getenv` has it.
+/// `os.argv` and `os.env` are what the host says. When the OS lists a name
+/// twice, the first value wins, as it does for `getenv`.
 #[test]
 fn argv_and_env_come_from_the_host() {
     let env = [("HOME", "/home/al"), ("LANG", "C"), ("HOME", "/elsewhere")];
@@ -1258,7 +1260,7 @@ fn files_read_and_write_and_fail_with_their_error() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The monotonic clock never goes back; the wall clock says it is after
+/// The monotonic clock never goes back, and the wall clock says it is after
 /// 2023. Random bytes come in the number asked for, and a negative number
 /// is an error.
 #[test]
@@ -1283,7 +1285,8 @@ fn the_clocks_and_random_bytes_run() {
     );
 }
 
-/// `<<1, 2, 3>>`, to put bytes into a program's source.
+/// `bytes` written as a literal like `<<1, 2, 3>>`, to put them into a
+/// program's source.
 fn bytes_literal(bytes: &[u8]) -> String {
     let parts: Vec<String> = bytes.iter().map(u8::to_string).collect();
     format!("<<{}>>", parts.join(", "))
@@ -1298,7 +1301,7 @@ fn unhex(s: &str) -> Vec<u8> {
 
 /// The digests and the HMAC tag give the published answers (FIPS 180-2's
 /// `abc`, RFC 4231's second case), and a binary that is not whole bytes has
-/// none. `const_eq` compares bits: the old VM dropped a last partial byte, so
+/// none. `const_eq` compares bits. The old VM dropped a last partial byte, so
 /// `<<1, 2:4>>` and `<<1, 3:4>>` were equal. Signatures made here by aws-lc
 /// check out, and anything of the wrong shape does not.
 #[test]
@@ -1375,10 +1378,10 @@ fn the_crypto_built_ins_run() {
     );
 }
 
-/// A parsed document is read in place: fields, elements, each kind of
-/// scalar, and an integer past `i64::MAX`, which an `Int` holds exactly. A
+/// A parsed document is read in place, including fields, elements, each kind
+/// of scalar, and an integer past `i64::MAX`, which an `Int` holds exactly. A
 /// `Doc` shows as what it points at, never the document. A `Json` tree
-/// encodes, a `Number` that is not one becoming `null`.
+/// encodes, and a `Number` that is not a number becomes `null`.
 #[test]
 fn the_json_built_ins_run() {
     prints(

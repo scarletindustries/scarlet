@@ -1,4 +1,4 @@
-// A live chatroom. One supervised room process, pushed to every tab over SSE.
+// A live chatroom. One supervised room process pushes to every tab over SSE.
 // Run it and open http://localhost:8080 in a few tabs. PORT sets the port.
 
 import scarlet/array
@@ -109,7 +109,7 @@ fn remember(history Array(Binary), frame Binary) Array(Binary) {
 
 // Frames
 
-// An SSE event: one `data:` line each, then a blank line.
+// An SSE event has an `event:` line, a `data:` line per line, then a blank line.
 fn sse(event String, lines Array(String)) Binary {
 	framed = array::fold(lines, 'event: ${event}\n', fn(acc, line) acc + 'data: ${line}\n')
 	binary::from_string(framed + '\n')

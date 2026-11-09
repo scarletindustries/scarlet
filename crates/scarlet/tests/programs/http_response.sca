@@ -30,7 +30,7 @@ fn str(b Binary) String {
 	binary::to_string(b) or '<not utf8>'
 }
 
-// Control bytes escaped so a CRLF-bearing blob stays on ONE golden line.
+// Escape control bytes so a CRLF-bearing blob stays on ONE golden line.
 fn vis(b Binary) String {
 	vis_from(b, 0, binary::byte_size(b), '')
 }
@@ -306,12 +306,12 @@ pub fn main() {
 	show_response('http/2', <<'HTTP/2.0 200 OK\r\n\r\n'>>)
 	show_response('http/0.9', <<'HTTP/0.9 200 OK\r\n\r\n'>>)
 	// A bare LF inside the reason phrase would split the status line for anything
-	// that re-serialized it.
+	// that re-serialised it.
 	show_response('bare LF in reason', <<'HTTP/1.1 200 O\nK\r\n\r\n'>>)
 	show_response('bare CR in reason', <<'HTTP/1.1 200 O\rK\r\n\r\n'>>)
 	// The request parser tolerates leading CRLFs (RFC 7230 §3.5). The response
 	// parser must not: a stray CRLF before a status line means the connection has
-	// desynchronized.
+	// desynchronised.
 	show_response('leading CRLF is NOT skipped', <<'\r\nHTTP/1.1 200 OK\r\n\r\n'>>)
 
 	println('')
@@ -334,7 +334,7 @@ pub fn main() {
 	parsed = h1::parse_response(framed, 0)
 	match parsed {
 		h1::ResponseDone(_, _, _, _, _, consumed) -> {
-			// NOT an argued-unreachable arm. `5` is this case's advertised
+			// This is NOT an arm argued to be unreachable. `5` is this case's advertised
 			// Content-Length, so a `consumed` that does not thread to the body
 			// is the exact failure this line exists to catch — it has to print
 			// as an error rather than as an empty window.

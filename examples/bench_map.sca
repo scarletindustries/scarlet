@@ -1,5 +1,5 @@
-// Map-heavy workload. The rest of the bench suite touches no maps at all, so
-// nothing else in it would notice a regression in the HAMT builtins.
+// A workload that leans on maps. No other bench touches a map, so nothing else
+// would notice if the map built-ins got slower.
 
 import scarlet/map
 
@@ -31,7 +31,7 @@ fn churn(m map::Map(Int, Int), i Int) Int {
 	}
 }
 
-// Sized to run ~1s: below that the 10ms timer can't resolve a regression.
+// It's sized to run for about a second, so the 10ms timer can see a slowdown.
 fn repeat_lookups(m map::Map(Int, Int), rounds Int, acc Int) Int {
 	if rounds == 0 {
 		acc

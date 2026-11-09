@@ -1,7 +1,7 @@
-//! Supervision cases that write to stderr or decide the exit status: crash
-//! restarts, budgets giving up, what that does to the process that declared
-//! the tree, and the creator rule. The stderr-quiet behaviour is
-//! `tests/programs/supervisors.sca`.
+//! These are the supervision cases that write to stderr or decide the exit
+//! status: crash restarts, budgets that give up, what that does to the process
+//! that declared the tree, and the creator rule. `tests/programs/supervisors.sca`
+//! covers the behaviour that keeps stderr quiet.
 
 mod common;
 
@@ -110,8 +110,8 @@ pub fn main() {{
     );
 }
 
-/// `process.supervisor` (the value form) outlives a main that returns; if it
-/// then gives up, nothing can be killed, so the failure becomes the exit
+/// `process.supervisor` (the value form) outlives a main that returns. If it
+/// then gives up there's nothing to kill, so the failure becomes the exit
 /// status once the program winds down.
 #[test]
 #[ignore = "needs the VM"]
@@ -144,8 +144,8 @@ pub fn main() {{
     );
 }
 
-/// A main that returns leaves its tree running: the worker is still
-/// restarted afterwards, and the program keeps going on the tree's account.
+/// A main that returns leaves its tree running. The worker still gets
+/// restarted afterwards, and the program keeps going for the tree's sake.
 #[test]
 #[ignore = "needs the VM"]
 fn a_returned_main_leaves_its_tree_supervised() {
@@ -195,8 +195,8 @@ pub fn main() {{
         out.stdout,
         "served again by the restarted subtree: 0\ninner restarts charged to app: 1\n"
     );
-    // inner gives up on every crash (budget 0); app absorbs two of those,
-    // the third exhausts it too.
+    // inner gives up on every crash (its budget is 0). app absorbs two of
+    // those, and the third exhausts app too.
     assert!(
         out.stderr
             .matches("supervisor gave up: more than 0 restarts")
@@ -320,7 +320,7 @@ pub fn main() {
     assert!(out.stderr.contains("supervision:"), "{}", out.stderr);
 }
 
-/// `http.serve` is a subtree: a handler crash closes one connection, the
+/// `http.serve` is a subtree. A handler crash closes one connection, the
 /// service reports its open connections, and the acceptors are supervised
 /// children of the service.
 #[test]

@@ -1,4 +1,4 @@
-// scarlet/base64 and scarlet/crypto: the encoding and the one hash.
+// This tests scarlet/base64 and scarlet/crypto: the encoding and the one hash.
 //
 // Both are pure Scarlet over `scarlet/int`'s bitwise ops and `<<>>` segments,
 // so this program is also the widest exercise of 32-bit arithmetic emulated on
@@ -220,8 +220,8 @@ pub fn main() {
 	println('sha1 119a: ${digest(crypto::sha1(a_times(119)))}')
 	println('sha1 120a: ${digest(crypto::sha1(a_times(120)))}')
 
-	// A non-ASCII input, so the digest is over bytes and not over anything
-	// text-shaped.
+	// A non-ASCII input checks that the digest is over bytes and not over
+	// anything text-shaped.
 	println('sha1 all256: ${digest(crypto::sha1(every))}')
 
 	// Digest length is fixed at 20 bytes regardless of input size.
@@ -266,10 +266,10 @@ pub fn main() {
 
 	// --- CSPRNG: what a single run can honestly assert -----------------------
 	//
-	// Length, a negative request is Err, two 16-byte draws differ, and a
-	// 16-byte draw is not all one byte (the stand-in a broken fill would
-	// return). A fixed-seed userspace PRNG would still pass every line
-	// here; the two-process check in native_backend is what refuses that.
+	// We check the length, that a negative request is Err, that two 16-byte
+	// draws differ, and that a 16-byte draw is not all one byte (what a broken
+	// fill would return). A fixed-seed userspace PRNG would still pass every
+	// line here; the two-process check in native_backend is what refuses that.
 
 	println('csprng empty: ${ok(random_len(0))}')
 	println('csprng 16: ${ok(random_len(16))}')

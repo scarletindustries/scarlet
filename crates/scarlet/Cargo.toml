@@ -19,16 +19,16 @@ ureq = "2"
 [dev-dependencies]
 scarlet_core = { path = "../scarlet_core" }
 serde_json = "1"
-# A certificate authority and leaf certificates minted per test, so the
-# negative TLS tests — untrusted issuer, expired, wrong hostname — are hermetic.
+# Mints a certificate authority and leaf certificates for each test, so the
+# negative TLS tests (untrusted issuer, expired, wrong hostname) are hermetic.
 # The alternative is pointing them at a public host that stays misconfigured on
 # purpose, which makes a security test depend on someone else's uptime.
 rcgen = "0.13"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 rustls-pki-types = "1"
-# `SO_RCVBUF` on the listener behind the large-write test. The writer's socket
-# has to actually fill for its park-and-resume path to run at all, and loopback
-# autotuning will not oblige.
+# Sets `SO_RCVBUF` on the listener behind the large-write test. The writer's
+# socket has to actually fill for its park-and-resume path to run at all, and
+# loopback autotuning won't make that happen.
 socket2 = { version = "0.5", features = ["all"] }
 
 [[bin]]

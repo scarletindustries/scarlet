@@ -7,9 +7,9 @@ pub struct Span {
 }
 
 impl Span {
-    /// Placeholder span for generated / prelude / test AST with no source
-    /// location. Empty (`start == end`) so it contains no point and cannot win
-    /// a hover/goto/references query at the start of a file.
+    /// A placeholder span for generated, prelude or test AST that has no
+    /// source location. It's empty (`start == end`), so it contains no point
+    /// and can't win a hover, goto or references query at the start of a file.
     pub const DUMMY: Span = Span {
         start_line: 0,
         start_column: 0,
@@ -17,7 +17,7 @@ impl Span {
         end_column: 0,
     };
 
-    /// A single-column span at `(line, col)` — end column is `col + 1`.
+    /// A span one column wide at `(line, column)`, ending at `column + 1`.
     pub fn point(line: i32, column: i32) -> Span {
         Span {
             start_line: line,
@@ -45,15 +45,16 @@ impl Span {
         )
     }
 
-    /// Half-open containment: `[start, end)` in (line, column) order.
+    /// Whether the point is in the half-open range `[start, end)`, in
+    /// (line, column) order.
     pub fn contains(&self, line: i32, col: i32) -> bool {
         let (start, end) = self.endpoints();
         let p = (line, col);
         start <= p && p < end
     }
 
-    /// Ordering key for picking the tightest of several spans containing a
-    /// point. Only the ordering matters, not the numbers.
+    /// A key for picking the tightest of several spans that contain a point.
+    /// Only the ordering matters, not the numbers.
     pub fn width(&self) -> (i32, i32) {
         (
             self.end_line - self.start_line,
@@ -61,9 +62,9 @@ impl Span {
         )
     }
 
-    /// Whether `self` lies fully inside `outer`. Tells an imported item's
-    /// binding occurrence (recorded inside the `import` declaration's span)
-    /// apart from a real use of that name elsewhere.
+    /// Whether `self` lies fully inside `outer`. This tells where an import
+    /// binds a name (inside the `import` declaration's span) apart from a real
+    /// use of that name elsewhere.
     pub fn within(&self, outer: &Span) -> bool {
         let (i_start, i_end) = self.endpoints();
         let (o_start, o_end) = outer.endpoints();

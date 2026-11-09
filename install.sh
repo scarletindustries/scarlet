@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# Scarlet installer script
+# Installs Scarlet.
 # Usage: curl -fsSL scarlet.industries/install.sh | bash
 
 INSTALL_DIR="$HOME/.scarlet/bin"
@@ -29,7 +29,6 @@ esac
 ASSET_NAME="scarlet-$OS-$ARCH"
 DOWNLOAD_URL="https://github.com/$REPO/releases/download/canary/$ASSET_NAME"
 
-# Create install directory
 mkdir -p "$INSTALL_DIR"
 
 curl -fsSL "$DOWNLOAD_URL" -o "$INSTALL_DIR/$BINARY_NAME"

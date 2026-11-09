@@ -1,6 +1,6 @@
-// Timing bench, size 4x of the bench_list_{1x,2x,4x} triple: identical bodies
-// at N / 2N / 4N. A ~2x runtime ratio per doubling proves the list path is
-// linear, not quadratic. Strictly tail-recursive so it survives huge N.
+// A timing bench at size 4x. bench_list_{1x,2x,4x} run the same body at N, 2N
+// and 4N. If each doubling about doubles the time, the list path is linear,
+// not quadratic. It's fully tail-recursive, so it survives a huge N.
 
 import scarlet/array
 

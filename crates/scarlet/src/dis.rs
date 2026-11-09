@@ -1,8 +1,8 @@
-//! `scarlet dis` and the REPL's `:dis`: a compiled program's Core IR as text.
+//! `scarlet dis` and the REPL's `:dis` print a compiled program's Core IR as text.
 //!
-//! The stdlib compiles into the same [`Program`] as the user's code, so a
-//! listing always picks: the entry file's own functions, or every function
-//! whose name matches, from any module.
+//! The stdlib compiles into the same [`Program`] as the user's code, so a listing always picks
+//! one of two sets: the entry file's own functions, or every function from any module whose name
+//! matches.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -15,7 +15,7 @@ use crate::module::ModuleKey;
 pub enum Filter<'a> {
     /// The entry file's functions, then its toplevel.
     Entry,
-    /// Every function, from any module, whose name contains this.
+    /// Every function from any module whose name contains this.
     Named(&'a str),
 }
 
@@ -79,8 +79,8 @@ fn types(program: &Program, bodies: &[&CoreExpr], out: &mut String) {
     }
 }
 
-/// One comment line on the program's shape, so a filtered listing still says
-/// what it was taken from.
+/// Writes one comment line about the program's shape, so a filtered listing still says what it
+/// was taken from.
 fn summary(program: &Program, entry: &ModuleKey) -> String {
     let total = (&program.fns).into_iter().count();
     let own = (&program.fns)

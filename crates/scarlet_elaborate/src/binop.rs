@@ -1,5 +1,5 @@
-//! Source binary operator → [`PrimOp`] selection, specialised against the operand
-//! type elaboration resolved.
+//! Picks the [`PrimOp`] for a source binary operator, specialised to the
+//! operand type the elaborator resolved.
 
 use scarlet_ir::core_ir::PrimOp;
 use scarlet_syntax::ast::BinaryOp;
@@ -7,10 +7,10 @@ use scarlet_types::types::Prim;
 
 /// A binary operator that denotes a [`PrimOp`].
 ///
-/// `&&`/`||` are absent: they branch, so the right operand may never be
-/// evaluated. That is why [`specialize_binop`] returns a `PrimOp`, not an
-/// `Option`. The only constructor is [`BinopKind::of`], which routes the two
-/// short-circuiting forms to [`ShortCircuitOp`] instead.
+/// `&&` and `||` are left out because they branch, so their right operand may
+/// never be evaluated. That is why [`specialize_binop`] can return a `PrimOp`
+/// and not an `Option`. The only constructor is [`BinopKind::of`], which sends
+/// the two short-circuiting forms to [`ShortCircuitOp`] instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueBinop {
     Add,
@@ -26,16 +26,18 @@ pub enum ValueBinop {
     Ge,
 }
 
-/// The two branching binary forms. Their operands are a condition and a branch
-/// arm, so the elaborator builds `TypedExpr::And`/`Or`, not `TypedExpr::Binary`.
+/// The two binary forms that branch. Their operands are a condition and a
+/// branch arm, so the elaborator builds `TypedExpr::And`/`Or` for them and not
+/// `TypedExpr::Binary`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShortCircuitOp {
     And,
     Or,
 }
 
-/// Which of the two a source [`BinaryOp`] is. Total, and the sole constructor
-/// of [`ValueBinop`], so holding one proves the operator is not `&&`/`||`.
+/// Which of the two a source [`BinaryOp`] is. Every operator maps to one, and
+/// this is the only way to build a [`ValueBinop`], so holding one proves the
+/// operator is not `&&` or `||`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinopKind {
     Value(ValueBinop),
@@ -64,9 +66,9 @@ impl BinopKind {
 }
 
 /// The [`PrimOp`] for an operator, specialised to the operand's primitive type
-/// when elaboration resolved one. A still-unresolved operand keeps the generic
-/// form, which the backend dispatches on the values. Total: every
-/// `(ValueBinop, Option<Prim>)` names a `PrimOp`.
+/// when the elaborator resolved one. An operand still unresolved keeps the
+/// generic form, and the backend chooses what to do from the values at runtime.
+/// Every `(ValueBinop, Option<Prim>)` pair names a `PrimOp`.
 pub(crate) fn specialize_binop(op: ValueBinop, ty: Option<Prim>) -> PrimOp {
     use ValueBinop as V;
     match (op, ty) {
@@ -133,7 +135,7 @@ mod tests {
                 BinopKind::ShortCircuit(_) => assert!(matches!(op, B::And | B::Or)),
                 BinopKind::Value(a) => {
                     assert!(!matches!(op, B::And | B::Or));
-                    // Total over every primitive type, including "unresolved".
+                    // It must answer for every primitive type, and for "unresolved".
                     for ty in [None, Some(Prim::Int), Some(Prim::Float), Some(Prim::String)] {
                         let _: PrimOp = specialize_binop(a, ty);
                     }

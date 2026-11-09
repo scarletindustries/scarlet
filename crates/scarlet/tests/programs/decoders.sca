@@ -4,7 +4,7 @@ import scarlet/json
 import scarlet/json/decode
 import scarlet/json/field
 
-// The decoder API at the scale it exists for.
+// This tests the decoder API at the scale it was built for.
 //
 // `json.sca` covers the parser and the presence states. This file covers the
 // shape of `scarlet/json/decode` itself: that a record decoder is one flat
@@ -275,7 +275,7 @@ fn refuse_message() decode::Decoder(Message) {
 	decode::fail('a message this program approves of')
 }
 
-// The price, stated: a decoder with no recovery stops accumulation there.
+// Here is the cost: a decoder with no recovery stops accumulating there.
 // `b` and `c` below are also wrong and are not reported.
 type Three {
 	a String
@@ -366,8 +366,8 @@ pub fn main() {
 
 	// An optional member never invents a failure, and never stops accumulation:
 	// `Field(a)` is inhabited without an `a`, so its recovery is `absent` whatever
-	// the decoder inside it is. Here `id` is wrong and `nick` is null — exactly
-	// one failure, and it is `id`'s.
+	// the decoder inside it is. Here `id` is wrong and `nick` is null, so there is
+	// exactly one failure, and it is `id`'s.
 	line('bad id + null ', applied('{"id":"1","nick":null}'))
 
 	// A present member of the wrong type is a failure, which is what keeps

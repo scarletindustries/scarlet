@@ -1,4 +1,4 @@
-// A worker pool built on subjects, stopped and restarted. Regression for a
+// This stops and restarts a worker pool built on subjects. It guards against a
 // native-backend miscompile: branch arms used to share frame slots, and the
 // compiled park/resume machinery addresses slots by local identity, so one
 // arm's dead temp could zero another arm's live value — this program

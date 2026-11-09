@@ -1,9 +1,9 @@
-//! Module top level: the multi-pass declaration analysis that fronts the
-//! compiler's fused infer+emit pass.
+//! A module's top level. This is the declaration analysis, in several passes,
+//! that runs before the compiler's fused infer-and-emit pass.
 //!
-//! Top-level declarations are mutually recursive and order-free, so bodies
-//! cannot be compiled in source order. `analyse_module` makes the order
-//! explicit in passes, each establishing one fact before the next needs it:
+//! Top-level declarations can refer to each other in any order, so their
+//! bodies can't be compiled in source order. `analyse_module` sets the order
+//! out in passes, and each one settles one fact before the next needs it:
 //!
 //! | pass | does                                                          |
 //! |------|---------------------------------------------------------------|
@@ -14,26 +14,27 @@
 //! |      | signatures                                                    |
 //! | 3.5  | hydrate constructor bodies; define ctor values                |
 //! | 4    | build the fn/const call graph; Tarjan SCC                     |
-//! | 5    | infer each SCC, callees first; generalize per SCC; then walk  |
+//! | 5    | infer each SCC, callees first; generalise per SCC; then walk  |
 //! |      | the non-declaration nodes                                     |
-//! | 6    | elaborate every parked body to Core IR and bytecode           |
+//! | 6    | elaborate every parked body and lower it to Core IR           |
 //!
-//! One SCC's members are inferred at a single engine level against their
-//! pre-registered signatures and generalized together, so mutual recursion
-//! typechecks monomorphically inside the group and polymorphically outside.
+//! The members of one SCC are inferred at a single engine level against the
+//! signatures registered for them earlier, and generalised together. So mutual
+//! recursion typechecks monomorphically inside the group and polymorphically
+//! outside it.
 //!
-//! Pass 6 is a phase boundary, not a step of pass 5: all of pass 5 sits inside
-//! one `begin_deferred_elaboration`/`end_deferred_elaboration` pair, so no
+//! Pass 6 is a phase boundary, not a step of pass 5. All of pass 5 sits inside
+//! one `begin_deferred_elaboration` and `end_deferred_elaboration` pair, so no
 //! body is lowered while the module is still being typechecked. That is what
-//! `lower(p: &TypedProgram) -> CoreProgram` needs — the whole module at once,
-//! with every var already resolved.
+//! `lower(p: &TypedProgram) -> CoreProgram` needs: the whole module at once,
+//! with every variable already resolved.
 //!
-//! # Invariant: per-decl data is positional, never name-keyed
+//! # Invariant: data for each declaration goes by position, never by name
 //!
-//! Data computed in an early pass and read in a later one (`Prepared`,
-//! `PreparedType`) rides in `Vec`s built one-to-one with the decl lists.
-//! Keying by name desyncs the moment two decls share a name: the decl list
-//! keeps both, a map keeps one.
+//! Data worked out in an early pass and read in a later one (`Prepared` and
+//! `PreparedType`) is kept in `Vec`s built one-to-one with the declaration
+//! lists. Keying by name breaks as soon as two declarations share a name,
+//! because the declaration list keeps both and a map keeps one.
 
 use std::collections::{HashMap, HashSet};
 
@@ -80,8 +81,8 @@ impl<'a> Decl<'a> {
         }
     }
 
-    /// The declaration's position in the module block's `body`. This, not the
-    /// name, is what the toplevel elaboration schedules on.
+    /// The declaration's position in the module block's `body`. The toplevel
+    /// elaboration schedules on this, not on the name.
     fn node(&self) -> usize {
         match *self {
             Decl::Fn { node, .. } | Decl::Const { node, .. } => node,
@@ -89,17 +90,18 @@ impl<'a> Decl<'a> {
     }
 }
 
-/// Per-declaration data computed in Pass 3 and read in Pass 5, positionally
-/// (see the module invariant).
+/// Data for each declaration, worked out in Pass 3 and read in Pass 5 by
+/// position (see the module invariant).
 enum Prepared<'a> {
     Fn {
         fd: &'a ast::FunctionDeclaration,
         is_pub: bool,
         slot: GlobalSlot,
         binder: BinderId,
-        /// The declaration's identity, built once and reused by Pass 5's
-        /// `emit_def`/`defid_of` and by the post-generalisation `scheme.def`,
-        /// so definition and scheme cannot land on different locations.
+        /// The declaration's identity. It is built once and reused by
+        /// `emit_def` and `defid_of` in Pass 5 and by `scheme.def` after
+        /// generalisation, so the definition and the scheme can't end up at
+        /// different locations.
         dl: DefinitionLocation,
         body: &'a ast::Expression,
         param_tys: Vec<Ty>,
@@ -117,8 +119,10 @@ enum Prepared<'a> {
 }
 
 impl<'a> Prepared<'a> {
-    /// A function's parameter names in declaration order; empty otherwise.
-    /// Documentation only — see `ExportedValue::param_names`.
+    /// A function's parameter names in declaration order, or empty for anything
+    /// else. They become the `param_labels` of the function's final `ModuleFn`
+    /// scheme, which labelled calls are checked against, and the names hover
+    /// shows.
     fn param_names(&self) -> Vec<String> {
         match self {
             Prepared::Fn { fd, .. } => fd
@@ -161,28 +165,28 @@ impl<'a> Prepared<'a> {
     }
 }
 
-/// Per-type data computed in Pass 1 and read in Pass 3.5, positionally (see
-/// the module invariant).
+/// Data for each type, worked out in Pass 1 and read in Pass 3.5 by position
+/// (see the module invariant).
 ///
-/// Aliases have no head registered in Pass 1 (Pass 2 owns them), so they get
-/// the `Alias` variant rather than a sentinel-filled `Head` a consumer could
-/// mistake for real data.
+/// Aliases have no head registered in Pass 1 (Pass 2 handles them), so they get
+/// the `Alias` variant instead of a `Head` filled with placeholders that
+/// something could mistake for real data.
 enum PreparedType {
     Head {
         type_id: TypeId,
         name_id: StrId,
         hydrator: Hydrator,
         param_tys: Vec<Ty>,
-        /// The type head's `TypeParam` slice; Pass 3.5 needs it to
+        /// The type head's `TypeParam` slice, which Pass 3.5 needs to
         /// `close_body` each stored field template.
         type_params: ArenaSlice<pool::TypeParams>,
     },
-    /// `type X = ...`, registered in Pass 2. `None` means registration was
-    /// skipped (the alias is in a cycle) and there is nothing to export.
+    /// `type X = ...`, registered in Pass 2. `None` means it wasn't registered
+    /// (the alias is in a cycle) and there's nothing to export.
     Alias { type_id: Option<TypeId> },
 }
 
-/// Hydrated shape of one `fn` declaration's signature.
+/// The hydrated shape of one `fn` declaration's signature.
 struct FnSig {
     hydrator: Hydrator,
     param_tys: Vec<Ty>,
@@ -191,9 +195,10 @@ struct FnSig {
 }
 
 impl ModuleChecker<'_> {
-    /// Keep a non-declaration node, erroring first unless this is a script
-    /// (the REPL's entry; see [`super::ModuleScope`]). The node is kept even
-    /// when rejected so the rest of the file is still analysed and reported.
+    /// Keep a node that isn't a declaration, reporting an error first unless
+    /// this is a script (the REPL's entry, see [`super::ModuleScope`]). The
+    /// node is kept even when rejected, so the rest of the file is still
+    /// analysed and reported.
     fn push_non_decl<'a>(
         &mut self,
         idx: usize,
@@ -208,7 +213,7 @@ impl ModuleChecker<'_> {
             );
         } else if self.c.module_scope == super::ModuleScope::DeclarationsOnly {
             self.c.error(
-                "Statements are not allowed at module scope: a program's code goes inside `pub fn main()`"
+                "Statements aren't allowed at module scope. Put a program's code inside `pub fn main()`"
                     .to_string(),
                 node.span(),
             );
@@ -216,17 +221,17 @@ impl ModuleChecker<'_> {
         others.push((idx, node));
     }
 
-    /// Analyse a module body. When `iface` is `Some` the module is being
-    /// compiled as an import and its `pub` items are recorded into the
-    /// interface; when `None` it is the entry module.
+    /// Analyse a module body. When `iface` is `Some`, the module is being
+    /// compiled as an import and its `pub` items are recorded in the interface.
+    /// When it is `None`, this is the entry module.
     ///
-    /// The caller owns the enclosing `env` scope: this walk defines value
-    /// schemes into whatever scope is current on entry and does not pop it, so
-    /// the entry-file caller keeps them visible across the later `lower_body`
-    /// on `__main__`. Import callers bracket the call with their own
-    /// `push_scope`/`pop_scope`.
+    /// The caller owns the enclosing `env` scope. This walk defines value
+    /// schemes into whatever scope is current when it starts and doesn't pop
+    /// it, so the entry file's caller keeps them visible through the toplevel
+    /// elaboration of `__main__` afterwards. Callers for imports wrap the call
+    /// in their own `push_scope` and `pop_scope`.
     ///
-    /// Returns what the walk built for each of the block's nodes, at the
+    /// Returns what the walk built for each of the block's nodes, at that
     /// node's index in the block.
     pub(super) fn analyse_module(
         &mut self,
@@ -238,10 +243,11 @@ impl ModuleChecker<'_> {
         let outer_binder = std::mem::replace(&mut self.frames.current.next_binder, 0);
         self.push_local_scope();
 
-        // Pass 0 — partition + reserved/duplicate name checks.
+        // Pass 0 sorts the nodes and checks for reserved and duplicate names.
         let mut type_decls: Vec<(&ast::TypeDeclaration, bool)> = Vec::new();
-        // Positional with `type_decls`: `true` marks a duplicate-named ctor,
-        // which Pass 3.5 drops as duplicate fns/consts are dropped here.
+        // This lines up with `type_decls` by position. `true` marks a
+        // constructor with a duplicate name, which Pass 3.5 drops, just as
+        // duplicate functions and constants are dropped here.
         let mut dup_ctors: Vec<Vec<bool>> = Vec::new();
         let mut decls: Vec<Decl<'_>> = Vec::new();
         let mut vm_fns: Vec<(&ast::FunctionDeclaration, bool, Intrinsic)> = Vec::new();
@@ -287,9 +293,9 @@ impl ModuleChecker<'_> {
                             ast::Declaration::Function(fd) => {
                                 self.validate_attributes(&fd.attributes, in_stdlib, AttrTarget::Fn);
                                 if !check_duplicate(self.c, &mut seen_values, &fd.identifier) {
-                                    // `@vm` fns carry no Scarlet body: siphon them
-                                    // off so every surviving `Decl::Fn` holds
-                                    // a real expression body.
+                                    // `@vm` functions have no Scarlet body, so
+                                    // take them out here and every `Decl::Fn`
+                                    // left has a real expression body.
                                     match &fd.body {
                                         ast::FnBody::Vm(key) => {
                                             match Intrinsic::from_key(&key.name) {
@@ -323,7 +329,8 @@ impl ModuleChecker<'_> {
                         }
                     }
                     ast::Statement::ImportDeclaration(_) => {
-                        // Already compiled by `load_imports` and bound by `bind_imports`.
+                        // `load_imports` already compiled this and
+                        // `bind_imports` bound it.
                     }
                     _ => self.push_non_decl(node_idx, node, iface.is_some(), &mut other_nodes),
                 },
@@ -333,8 +340,9 @@ impl ModuleChecker<'_> {
             }
         }
 
-        // Pass 1 — register custom-type heads and opaque types. Aliases wait
-        // for Pass 2 because their RHS can reference these heads.
+        // Pass 1 registers the heads of custom types and opaque types. Aliases
+        // wait for Pass 2, because their right-hand side can refer to these
+        // heads.
         let mut prepared_types: Vec<PreparedType> = Vec::with_capacity(type_decls.len());
         for (td, is_public) in &type_decls {
             if matches!(td.body, ast::TypeBody::Alias(_)) {
@@ -361,15 +369,16 @@ impl ModuleChecker<'_> {
             });
         }
 
-        // Pass 2 — toposort + register aliases.
+        // Pass 2 sorts the aliases by dependency and registers them.
         self.register_aliases(&type_decls, &mut prepared_types);
 
-        // Pass 3 — pre-allocate one slot per decl, then register fn
-        // signatures, positionally in `prepared`.
+        // Pass 3 allocates one slot per declaration up front, then registers
+        // function signatures, by position in `prepared`.
         //
-        // `@vm` fns get a `Builtin` scheme, no slot, no body codegen, and
-        // export here rather than after generalisation: their type is the
-        // annotated signature verbatim, there is no body to infer from.
+        // `@vm` functions get a `Builtin` scheme, no slot and no body codegen,
+        // and are exported here instead of after generalisation. Their type is
+        // exactly the annotated signature, because there's no body to infer it
+        // from.
         for &(fd, is_pub, intrinsic) in &vm_fns {
             let name = &fd.identifier.name;
             let fn_ty = self.hydrate_fn_signature(fd).fn_ty;
@@ -401,10 +410,10 @@ impl ModuleChecker<'_> {
             export_value(iface.as_deref_mut(), name, is_pub, scheme, None);
         }
 
-        // Not `get_or_create_local`: a decl's slot reaches the toplevel
-        // elaboration through `toplevel_decls`, not through the module-scope
-        // bind queue. Only `let`/destructuring binds, which have no `Decl` to
-        // hang a slot on, go through that queue.
+        // Don't use `get_or_create_local` here. A declaration's slot reaches
+        // the toplevel elaboration through `toplevel_decls`, not through the
+        // module-scope binding queue. Only plain and destructuring bindings,
+        // which have no `Decl` to hang a slot on, go through that queue.
         let mut prepared: Vec<Prepared> = Vec::with_capacity(decls.len());
         for d in &decls {
             let (slot, binder) = self.alloc_decl_slot(d.name());
@@ -420,9 +429,9 @@ impl ModuleChecker<'_> {
                     } = self.hydrate_fn_signature(fd);
                     let m = self.current_module_slice();
                     let dl = DefinitionLocation::new(fd.identifier.span, m, EntityKind::Function);
-                    // Labelled on the preliminary scheme too, not just the
-                    // final one below: this is the scheme a recursive call
-                    // inside the body resolves against.
+                    // Put the labels on the early scheme too, not just the
+                    // final one below, because a recursive call inside the body
+                    // resolves against this scheme.
                     let names: Vec<String> = fd
                         .params
                         .iter()
@@ -466,39 +475,44 @@ impl ModuleChecker<'_> {
             prepared.push(p);
         }
 
-        // Pass 3.5 — hydrate constructor bodies; define ctor values.
+        // Pass 3.5 hydrates constructor bodies and defines the constructor
+        // values.
         for (((td, is_public), pt), dups) in type_decls.iter().zip(prepared_types).zip(&dup_ctors) {
             self.register_constructors(td, *is_public, pt, dups, &mut iface);
         }
 
-        // Pass 4 — build call graph over fns+consts, Tarjan SCC.
+        // Pass 4 builds the call graph over functions and constants, and finds
+        // its SCCs with Tarjan's algorithm.
         let sccs = build_call_graph_sccs(&decls);
 
-        // Pass 5 — infer each SCC, then generalize. SCC members index into
-        // `prepared`, so per-decl data is reached positionally.
+        // Pass 5 infers each SCC, then generalises it. SCC members are indexes
+        // into `prepared`, so the data for each declaration is reached by
+        // position.
         //
         // THE PHASE BOUNDARY. Everything up to `end_deferred_elaboration` is
-        // the typecheck walk: it infers types, reserves `Function` slots and
-        // records capture shapes, and emits no body bytecode. Every body it
-        // walks is parked in `deferred_bodies`; the Core pipeline drains them
-        // in one loop afterwards, when every var any SCC would solve is solved.
+        // the typecheck walk. It infers types, reserves `Function` slots and
+        // records the shape of captures, and lowers no body. Every body it
+        // walks is parked in `deferred_bodies`, and the Core pipeline drains
+        // them in one loop afterwards, when every variable that any SCC would
+        // solve is solved.
         //
-        // A parked body reads nothing back from the env at drain time: the
-        // walk recorded what each name it met resolved to, so a toplevel `let`
-        // that rebinds a name later cannot change a body walked earlier.
+        // A parked body reads nothing back from the env when it is drained. The
+        // walk recorded what each name it met resolved to, so a toplevel
+        // binding that binds a name again later can't change a body walked
+        // earlier.
         self.begin_deferred_elaboration();
-        // Filled positionally as each SCC generalizes. Tarjan covers every
-        // node, so every entry is `Some` by the export loop below.
+        // Filled in by position as each SCC is generalised. Tarjan covers every
+        // node, so every entry is `Some` by the time of the export loop below.
         let mut final_schemes: Vec<Option<Scheme>> = vec![None; prepared.len()];
         for scc in &sccs {
             self.c.engine.enter_level();
             let mut inferred: Vec<(usize, Ty)> = Vec::with_capacity(scc.len());
 
             for &idx in scc {
-                // Publish this decl to the toplevel elaboration. Pushed in
-                // SCC-visit order, so the elaborated spine initialises
-                // dependencies first and a forward-referenced `const` is
-                // stored before it is read.
+                // Publish this declaration to the toplevel elaboration. These
+                // are pushed in the order SCCs are visited, so the elaborated
+                // spine initialises dependencies first, and a `const` referred
+                // to before its declaration is stored before it is read.
                 let name_id = self.c.engine.intern(prepared[idx].name());
                 let binder = prepared[idx].binder();
                 self.toplevel_decls.push(ToplevelDecl {
@@ -532,10 +546,10 @@ impl ModuleChecker<'_> {
                             *is_pub,
                             DefinitionKind::Function { param_names: names },
                         );
-                        // Attribute references emitted inside this body to the
-                        // fn's own `DefId` so the dead-code walk follows
-                        // def→def edges. Spans nested lambdas too: a lambda has
-                        // no `DefId` of its own.
+                        // Give the references emitted inside this body to the
+                        // function's own `DefId`, so the dead-code walk follows
+                        // edges between definitions. This covers nested lambdas
+                        // too, because a lambda has no `DefId` of its own.
                         let owner = self.owner_defid(fd.identifier.span, EntityKind::Function);
                         let fn_ty = self.with_owner(owner, |checker| {
                             checker.compile_declared_function(
@@ -556,10 +570,11 @@ impl ModuleChecker<'_> {
                             binder,
                             span: fd.span,
                         };
-                        // Nothing to record for the toplevel spine:
+                        // There's nothing to record for the toplevel spine.
                         // `compile_declared_function` keyed this body under the
-                        // slot the spine stores it into, and a top-level fn
-                        // captures nothing (sibling refs are `PushGlobal`).
+                        // slot the spine stores it into, and a top-level
+                        // function captures nothing (references to other
+                        // top-level functions are `PushGlobal`).
                         inferred.push((idx, fn_ty));
                     }
                     Prepared::Const { cb, is_pub, dl, .. } => {
@@ -594,10 +609,10 @@ impl ModuleChecker<'_> {
 
             for (idx, ty) in inferred {
                 let p = &prepared[idx];
-                // A const's initializer already ran, so its type falls under
-                // the relaxed value restriction like any value binding.
-                // Function declarations are values; their vars all sit under
-                // the arrow, where the guard quantifies as before.
+                // A const's initialiser has already run, so its type falls
+                // under the relaxed value restriction like any value binding.
+                // Function declarations are values too, and their variables all
+                // sit under the arrow, where the guard quantifies as before.
                 let mut scheme = if p.is_const() {
                     let restricted = self.c.restricted_generalization_cons();
                     self.c.engine.generalize_top_restricted(ty, &restricted)
@@ -608,11 +623,12 @@ impl ModuleChecker<'_> {
                 if p.is_const() {
                     scheme.kind = ValueKind::Local;
                 } else {
-                    // `generalize_top` mints `ModuleFn` from a type alone and
-                    // so leaves the labels empty; this is the first point the
-                    // declaration is back in reach. Without this the final
-                    // scheme — the one exported and the one every call site
-                    // outside the body resolves against — carries none.
+                    // `generalize_top` mints `ModuleFn` from a type alone, so
+                    // it leaves the labels empty, and this is the first point
+                    // where the declaration is in reach again. Without this,
+                    // the final scheme (the one exported, and the one every
+                    // call outside the body resolves against) would have no
+                    // labels.
                     let names = p.param_names();
                     scheme.kind = ValueKind::ModuleFn {
                         param_labels: self.c.engine.intern_slice(&names),
@@ -623,14 +639,14 @@ impl ModuleChecker<'_> {
             }
         }
 
-        // Export now that schemes are final. Schemes come from
-        // `final_schemes`, never back out of the env by name (which desyncs
-        // under shadowing). Iterated in source order, not SCC order:
-        // `ModuleInterface.values` is an `IndexMap`, and its insertion order
-        // is what importers observe.
+        // Export now that the schemes are final. They come from
+        // `final_schemes`, never back out of the env by name, which goes wrong
+        // under shadowing. Go in source order, not SCC order, because
+        // `ModuleInterface.values` is an `IndexMap` and importers see its
+        // insertion order.
         for (p, s) in prepared.iter().zip(final_schemes) {
             #[allow(clippy::panic)] // the loop above generalizes every prepared decl
-            let s = s.unwrap_or_else(|| panic!("decl '{}' was never generalized", p.name()));
+            let s = s.unwrap_or_else(|| panic!("decl '{}' was never generalised", p.name()));
             export_value(
                 iface.as_deref_mut(),
                 p.name(),
@@ -640,19 +656,21 @@ impl ModuleChecker<'_> {
             );
         }
 
-        // Other nodes (let bindings, bare expressions) — linear walk.
-        // The only walk whose bindings take module-scope slots, each carried on
-        // its own `CNode::Binding`. Nested walks re-enter `compile_node` from
-        // here but open frames or blocks, which `bind_local` also checks.
+        // Walk the other nodes (bindings and bare expressions) in order. This
+        // is the only walk whose bindings take module-scope slots, each carried
+        // on its own `CNode::Binding`. Nested walks come back into
+        // `compile_node` from here, but they open frames or blocks, which
+        // `bind_local` also checks.
         let outer_walk = std::mem::replace(&mut self.walking_module_statements, true);
         for &(idx, node) in &other_nodes {
             nodes[idx] = self.compile_node(node).1;
         }
         self.walking_module_statements = outer_walk;
 
-        // End of the walk; start of the Core pipeline. Types are final: what
-        // no SCC solved is now `Generic`, which only `zonk` cares about
-        // (`Generic` is quantifiable, `Unbound` is an error).
+        // This is the end of the walk and the start of the Core pipeline. The
+        // types are final. Whatever no SCC solved is now `Generic`, which only
+        // `zonk` cares about (`Generic` can be quantified, and `Unbound` is an
+        // error).
         self.end_deferred_elaboration();
         self.check_nil_discards();
 
@@ -684,8 +702,8 @@ impl ModuleChecker<'_> {
         (h, self.c.engine.push_type_params(&type_params), param_tys)
     }
 
-    /// Intern the current module path as a `str_slices` slice. Memoised so a
-    /// module's path occupies one pool entry however many types it declares.
+    /// Intern the current module path as a `str_slices` slice. It is memoised,
+    /// so a module's path takes one pool entry however many types it declares.
     pub(super) fn current_module_slice(&mut self) -> ArenaSlice<pool::StrSlices> {
         if let Some(sl) = self.module_path_slice {
             return sl;
@@ -696,9 +714,9 @@ impl ModuleChecker<'_> {
         sl
     }
 
-    /// Record a named declaration: definition location and doc into the env,
-    /// plus the matching graph definition. The entity comes from `kind`, so
-    /// record and payload cannot disagree.
+    /// Record a named declaration. Its definition location and doc go into the
+    /// env, along with the matching graph definition. The entity comes from
+    /// `kind`, so the record and its payload can't disagree.
     fn store_and_emit_def(
         &mut self,
         id: &ast::Identifier,
@@ -712,8 +730,8 @@ impl ModuleChecker<'_> {
         self.emit_def(dl, &id.name, doc.clone(), is_pub, kind);
     }
 
-    /// Run `f` with `current_owner` set to `owner` so references emitted
-    /// inside `f` are attributed to it.
+    /// Run `f` with `current_owner` set to `owner`, so references emitted
+    /// inside `f` belong to it.
     fn with_owner<R>(&mut self, owner: DefId, f: impl FnOnce(&mut Self) -> R) -> R {
         let prev = self.current_owner;
         self.current_owner = Some(owner);
@@ -738,9 +756,9 @@ impl ModuleChecker<'_> {
         }
     }
 
-    /// Registers each acyclic alias and records its `TypeId` back into the
-    /// matching `prepared_types` slot, so Pass 3.5's export reads the registry
-    /// by id instead of by name.
+    /// Registers each alias that isn't part of a cycle, and records its
+    /// `TypeId` back in the matching `prepared_types` slot, so the export in
+    /// Pass 3.5 reads the registry by id and not by name.
     fn register_aliases(
         &mut self,
         type_decls: &[(&ast::TypeDeclaration, bool)],
@@ -786,9 +804,10 @@ impl ModuleChecker<'_> {
             .map(|a| (idx_of[a.1.identifier.name.as_str()], *a))
             .collect();
 
-        // tarjan_scc yields dependees before dependers. A component with more
-        // than one node, or one node with a self-edge, is a cycle: report each
-        // member and skip it so one bad alias does not block the rest.
+        // `tarjan_scc` gives what is depended on before what depends on it. A
+        // component with more than one node, or one node with an edge to
+        // itself, is a cycle. Report each member and skip it, so one bad alias
+        // doesn't block the rest.
         for component in tarjan_scc(&graph) {
             let cyclic =
                 component.len() > 1 || graph.find_edge(component[0], component[0]).is_some();
@@ -796,7 +815,10 @@ impl ModuleChecker<'_> {
                 for node in &component {
                     if let Some(&(_, td, _, _)) = by_idx.get(node) {
                         self.c.error(
-                            format!("Recursive type alias '{}'", td.identifier.name),
+                            format!(
+                                "Recursive type alias '{}'. An alias can't refer back to itself",
+                                td.identifier.name
+                            ),
                             td.identifier.span,
                         );
                     }
@@ -815,10 +837,10 @@ impl ModuleChecker<'_> {
                     .register_type_head(&td.identifier.name, name_id, module, type_params);
             let owner = self.owner_defid(td.identifier.span, EntityKind::Type);
             let target = self.with_owner(owner, |checker| checker.hydrate(&mut h, rhs));
-            // Store the target CLOSED (`Var(param_id)` → `Bound(idx)`): the
+            // Store the target CLOSED (`Var(param_id)` → `Bound(idx)`). The
             // body outlives incremental rewinds, which clear the engine's
             // `vars` table, and the exported interface copies this `TypeInfo`
-            // by value before Pass 3.5's `export_type`.
+            // by value before `export_type` in Pass 3.5.
             let target = self.c.engine.close_body(target, type_params);
             self.c
                 .env
@@ -830,9 +852,9 @@ impl ModuleChecker<'_> {
         }
     }
 
-    /// `dup_ctors` is positional with `ctors`: a `true` entry marks a
-    /// duplicate-named constructor, dropped here rather than added to
-    /// `variants` or defined as a value.
+    /// `dup_ctors` lines up with `ctors` by position. A `true` entry marks a
+    /// constructor with a duplicate name, which is dropped here instead of
+    /// being added to `variants` or defined as a value.
     fn register_constructors(
         &mut self,
         td: &ast::TypeDeclaration,
@@ -841,9 +863,9 @@ impl ModuleChecker<'_> {
         dup_ctors: &[bool],
         iface: &mut Option<&mut ModuleInterface>,
     ) {
-        // The id the export below reads the registry with. Positional, never
-        // the name: a same-named registration analysed later shadows the
-        // by-name map but cannot hijack the by-id entry.
+        // The id the export below reads the registry with. It goes by position,
+        // never by name, because a registration with the same name analysed
+        // later shadows the by-name map but can't take over the by-id entry.
         let export_id = match &pt {
             PreparedType::Head { type_id, .. } => Some(*type_id),
             PreparedType::Alias { type_id } => *type_id,
@@ -859,7 +881,8 @@ impl ModuleChecker<'_> {
             },
         ) = (&td.body, pt)
         else {
-            // Aliases and externals have no constructors; just export the type info.
+            // Aliases and external types have no constructors, so just export
+            // the type info.
             let ti = export_id.and_then(|id| self.c.env.lookup_type_info_by_id(id));
             export_type(iface.as_deref_mut(), &td.identifier.name, is_public, ti);
             return;
@@ -870,15 +893,16 @@ impl ModuleChecker<'_> {
         let m = self.current_module_slice();
         let mut variants: Vec<Variant> = Vec::with_capacity(ctors.len());
 
-        // Constructor/field hydration is the type's body: types it names are
-        // references owned by this type, giving the dead-code walk type→type
-        // edges.
+        // Hydrating constructors and fields is the type's body. The types it
+        // names are references owned by this type, which gives the dead-code
+        // walk its edges between types.
         let owner = self.owner_defid(td.identifier.span, EntityKind::Type);
         self.with_owner(owner, |checker| {
             for (ctor, _) in ctors.iter().zip(dup_ctors).filter(|&(_, dup)| !dup) {
-                // Index into the surviving variants, not the source ctor list:
-                // dropped duplicates must not leave holes in the
-                // `variant_idx` ↔ `variants` correspondence the VM tags by.
+                // Index into the variants that survived, not the constructor
+                // list in the source, because dropped duplicates must not leave
+                // gaps in the `variant_idx` ↔ `variants` match that the VM tags
+                // by.
                 let variant_idx = variants.len() as u16;
                 let mut field_itys: Vec<Ty> = Vec::with_capacity(ctor.fields.len());
                 let mut field_defs: Vec<VariantField> = Vec::with_capacity(ctor.fields.len());
@@ -888,10 +912,10 @@ impl ModuleChecker<'_> {
                     let ity = checker.hydrate(&mut h, &f.typ);
                     let label = checker.c.engine.intern(&f.label.name);
                     field_itys.push(ity);
-                    // Stored CLOSED (`Var(param_id)` → `Bound(idx)`) so it
-                    // never references the engine's transient `vars` table,
-                    // which incremental rewinds clear. The ctor scheme below
-                    // still generalizes over the open `ity`.
+                    // Store it CLOSED (`Var(param_id)` → `Bound(idx)`) so it
+                    // never refers to the engine's short-lived `vars` table,
+                    // which incremental rewinds clear. The constructor scheme
+                    // below still generalises over the open `ity`.
                     field_defs.push(VariantField {
                         label,
                         ty: checker.c.engine.close_body(ity, type_params),
@@ -913,8 +937,8 @@ impl ModuleChecker<'_> {
                 let fields = checker.c.engine.push_variant_fields(&field_defs);
                 // One interned name for the variant, shared by the type's
                 // variant table and the constructor's own scheme, so a use
-                // site never has to re-derive it from the name it was bound
-                // under — which an alias changes.
+                // never has to work it out again from the name it was bound
+                // under, which an alias changes.
                 let variant_name = checker.c.engine.intern(&ctor.identifier.name);
                 variants.push(Variant {
                     name: variant_name,
@@ -940,22 +964,22 @@ impl ModuleChecker<'_> {
                     arity: ctor.fields.len() as u16,
                     field_labels,
                 };
-                // One identity for the ctor: `scheme.def` and the graph
+                // One identity for the constructor. `scheme.def` and the graph
                 // `DefId` below both read it, so goto-def and find-references
-                // cannot disagree on where it lives.
+                // can't disagree about where it lives.
                 let ctor_dl =
                     DefinitionLocation::new(ctor.identifier.span, m, EntityKind::Constructor);
                 scheme.def = Some(ctor_dl);
 
                 let name = &ctor.identifier.name;
                 checker.c.env.define(name, scheme);
-                // Mirror the field labels into the graph and the export so
-                // hover can render `NotFound fn(path String) IoError` without
-                // reaching back into the engine's string pool.
+                // Copy the field labels into the graph and the export, so hover
+                // can show `NotFound fn(path String) IoError` without going
+                // back to the engine's string pool.
                 let labels = checker.c.engine.strs_of(field_labels);
-                // `Config(name: 'x')` names the constructor, never the type,
-                // so without the `ctor_of` edge every single-constructor type
-                // reads as unused.
+                // `Config(name: 'x')` names the constructor, never the type, so
+                // without the `ctor_of` edge every type with one constructor
+                // would look unused.
                 let type_dl = DefinitionLocation::new(td.identifier.span, m, EntityKind::Type);
                 let type_defid = checker.defid_of(type_dl);
                 checker.store_and_emit_def(
@@ -967,9 +991,9 @@ impl ModuleChecker<'_> {
                     },
                     ctors_public,
                 );
-                // Unconditional: `export_value` routes a non-`pub` name into
-                // `iface.private_names`, so a private ctor gives importers
-                // "'X' is private" rather than "no member 'X'".
+                // Always do this. `export_value` sends a name that isn't `pub`
+                // to `iface.private_names`, so a private constructor gives
+                // importers "'X' is private" and not "no member 'X'".
                 export_value(iface.as_deref_mut(), name, ctors_public, scheme, None);
             }
         });
@@ -995,9 +1019,10 @@ enum AttrTarget {
 }
 
 impl ModuleChecker<'_> {
-    /// Reject unknown attributes, attributes on the wrong target, and any
-    /// attribute outside the embedded stdlib. Arity is not checked here: the
-    /// parser already rejects a `@vm` fn with anything but one arg.
+    /// Reject unknown attributes, attributes on the wrong kind of item, and any
+    /// attribute outside the embedded stdlib. The number of arguments isn't
+    /// checked here, because the parser already rejects a `@vm` function with
+    /// anything but one.
     fn validate_attributes(&mut self, attrs: &[ast::Attribute], in_stdlib: bool, on: AttrTarget) {
         for a in attrs {
             match a.name.name.as_str() {
@@ -1010,8 +1035,8 @@ impl ModuleChecker<'_> {
                     }
                     match on {
                         AttrTarget::Fn => {}
-                        // Named, not negated: a new attribute target must
-                        // decide whether '@vm' is legal on it.
+                        // These are named, not negated, so a new kind of item
+                        // has to decide whether '@vm' is allowed on it.
                         AttrTarget::Type => {
                             self.c
                                 .error("'@vm' may only be used on functions".to_string(), a.span);
@@ -1027,8 +1052,9 @@ impl ModuleChecker<'_> {
     }
 }
 
-/// Record a name in the module interface: into `values`/`types` when public,
-/// into `private_names` otherwise so importers get a "this is private" error.
+/// Record a name in the module interface. It goes in `values` or `types` when
+/// it is public, and in `private_names` if not, so importers get a "this is
+/// private" error.
 fn export_value(
     iface: Option<&mut ModuleInterface>,
     name: &str,
@@ -1066,11 +1092,11 @@ fn export_type(
     }
 }
 
-/// Records a top-level name, erroring if it was already defined. Returns
-/// `true` for a duplicate so the caller drops the redundant declaration.
-/// Dropping is load-bearing: the call graph and the alias toposort key their
-/// nodes by name, so a second decl would alias the first's node and desync
-/// SCC scheduling.
+/// Records a top-level name, with an error if it was already defined. Returns
+/// `true` for a duplicate so the caller drops the extra declaration. Dropping
+/// it matters, because the call graph and the alias sort key their nodes by
+/// name, so a second declaration would share the first one's node and throw SCC
+/// scheduling out.
 fn check_duplicate<'a>(
     c: &mut Compiler,
     seen: &mut HashMap<&'a str, Span>,
@@ -1085,7 +1111,7 @@ fn check_duplicate<'a>(
     }
 }
 
-/// Emits a diagnostic if `id` collides with a prelude-reserved name.
+/// Emits a diagnostic if `id` clashes with a name the prelude reserves.
 fn check_reserved(c: &mut Compiler, id: &ast::Identifier, in_prelude: bool) {
     if !in_prelude && c.is_reserved(&id.name) {
         c.error(
@@ -1098,13 +1124,14 @@ fn check_reserved(c: &mut Compiler, id: &ast::Identifier, in_prelude: bool) {
     }
 }
 
-/// Walk a type-annotation AST collecting every named-type reference.
+/// Walk a type annotation's AST and collect every reference to a named type.
 fn collect_type_ast_deps<'a>(t: &'a ast::TypeIdentifier, out: &mut Vec<&'a str>) {
     match &t.kind {
         ast::TypeKind::NamedType(nt) => {
             // A qualified `module::Type` lives in another module, so it can
-            // never be a dependency edge onto a local declaration; pushing
-            // the bare member name would alias any same-named local type.
+            // never be a dependency edge onto a local declaration. Pushing the
+            // bare member name would mix it up with any local type of the same
+            // name.
             if nt.qualifier.is_none() {
                 out.push(nt.identifier.name.as_str());
             }
@@ -1128,16 +1155,16 @@ fn collect_type_ast_deps<'a>(t: &'a ast::TypeIdentifier, out: &mut Vec<&'a str>)
     }
 }
 
-/// Returns SCCs in dependency order (leaves first). Each inner Vec holds
-/// indices into `decls`.
+/// Returns SCCs in dependency order, leaves first. Each inner `Vec` holds
+/// indexes into `decls`.
 fn build_call_graph_sccs(decls: &[Decl<'_>]) -> Vec<Vec<usize>> {
     let mut graph: StableGraph<(), (), Directed> = StableGraph::new();
     let mut node_of: HashMap<&str, NodeIndex> = HashMap::new();
 
     for d in decls {
         let n = graph.add_node(());
-        // Pass 0 dropped same-named decls, so names are unique here; a
-        // collision would alias two decls onto one node.
+        // Pass 0 dropped declarations with the same name, so names are unique
+        // here. A clash would put two declarations on one node.
         let prev = node_of.insert(d.name(), n);
         debug_assert!(
             prev.is_none(),
@@ -1168,7 +1195,7 @@ fn build_call_graph_sccs(decls: &[Decl<'_>]) -> Vec<Vec<usize>> {
         }
     }
 
-    // Reverse topological order: callees come first, which is the order
+    // Reverse topological order puts callees first, which is the order
     // inference needs.
     tarjan_scc(&graph)
         .into_iter()
@@ -1176,15 +1203,17 @@ fn build_call_graph_sccs(decls: &[Decl<'_>]) -> Vec<Vec<usize>> {
         .collect()
 }
 
-/// Walks an expression body collecting edges to other top-level declarations,
-/// tracking a shadow set so locally-bound names don't count as references.
+/// Walks an expression body and collects edges to other top-level declarations.
+/// It keeps a set of shadowed names, so names bound locally don't count as
+/// references.
 struct RefWalker<'a, 'g> {
     targets: &'a HashMap<&'a str, NodeIndex>,
     graph: &'g mut StableGraph<(), (), Directed>,
     from: NodeIndex,
     shadowed: HashSet<&'a str>,
-    /// Undo log of names newly inserted into `shadowed`. `scoped` truncates it
-    /// on exit instead of deep-cloning the whole set per block/arm/lambda.
+    /// A log of names just added to `shadowed`, for undoing. `scoped` truncates
+    /// it on the way out instead of deep-cloning the whole set for each block,
+    /// arm or lambda.
     undo: Vec<&'a str>,
 }
 
@@ -1208,8 +1237,8 @@ impl<'a, 'g> RefWalker<'a, 'g> {
         let mark = self.undo.len();
         f(self);
         // Nested `scoped` calls already drained their own names, so this holds
-        // exactly what was shadowed at this level. Nothing else takes names
-        // out of the log, so it is at least as long as it was.
+        // exactly what was shadowed at this level. Nothing else takes names out
+        // of the log, so it is at least as long as it was.
         let len = self.undo.len();
         debug_assert!(len >= mark, "the undo log shrank past this scope's mark");
         for name in self.undo.drain(mark.min(len)..) {
@@ -1222,7 +1251,7 @@ impl<'a, 'g> RefWalker<'a, 'g> {
         match e {
             E::Identifier(id) => self.referenced(&id.name),
 
-            // A module member is not a local name.
+            // A module member isn't a local name.
             E::NumberLiteral(_)
             | E::StringLiteral(_)
             | E::ErrorNode(_)
@@ -1278,7 +1307,7 @@ impl<'a, 'g> RefWalker<'a, 'g> {
             E::UnaryExpression(u) => self.expr(&u.expression),
 
             E::PropertyAccessExpression(p) => {
-                // The RHS of `.` is a member, not a free identifier.
+                // The right side of `.` is a member, not a free identifier.
                 self.expr(&p.left);
             }
 
@@ -1309,8 +1338,8 @@ impl<'a, 'g> RefWalker<'a, 'g> {
                 });
             }
 
-            // Desugared away before this walk, same guarantee as
-            // `Statement::Backpass` below; a survivor is walked like the
+            // Pipes are removed before this walk, the same guarantee as for
+            // `Statement::Backpass` below. One that survives is walked like the
             // call it stands for.
             E::PipeExpression(p) => {
                 self.expr(&p.left);
@@ -1376,9 +1405,9 @@ impl<'a, 'g> RefWalker<'a, 'g> {
                     ast::Declaration::Type(_) => {}
                 },
                 ast::Statement::ImportDeclaration(_) => {}
-                // Desugared away before this walk; a survivor was already
-                // rejected by the parser. Walk the call, then the binders,
-                // mirroring the lambda the sugar stands for.
+                // Backpasses are removed before this walk, and one that
+                // survives was already rejected by the parser. Walk the call,
+                // then the binders, like the lambda the sugar stands for.
                 ast::Statement::Backpass(bp) => {
                     self.expr(&bp.call);
                     for b in &bp.binders {

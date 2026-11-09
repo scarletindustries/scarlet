@@ -26,7 +26,7 @@ fn discount_percent(units Int) Int {
 // Returns the amount payable and the amount saved.
 fn price_line(unit_cents Int, units Int) (Int, Int) {
 	subtotal = unit_cents * units
-	// {} groups; parens build tuples, so this would not group the multiply.
+	// {} groups. Parens build tuples, so they wouldn't group the multiply here.
 	discount = { subtotal * discount_percent(units) } / 100
 	payable = subtotal - discount
 	shipping = if payable >= FREE_SHIPPING_CENTS { 0 } else { FLAT_SHIPPING_CENTS }

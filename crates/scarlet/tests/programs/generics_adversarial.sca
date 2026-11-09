@@ -19,7 +19,7 @@ type Either(l, r) {
 	Right(value r)
 }
 
-// A parameter that appears in no field: purely a compile-time tag.
+// A parameter that appears in no field is purely a compile-time tag.
 type Tagged(unit) {
 	amount Int
 }

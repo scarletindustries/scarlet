@@ -1,5 +1,5 @@
-//! Resolved types: the arena every type in a compiled program indexes, in
-//! which an unsolved variable is unrepresentable.
+//! Resolved types. Every type in a compiled program is an index into this
+//! arena, and the arena has no way to hold an unsolved type variable.
 //!
 //! [`ResolvedNode`] has no `Var` arm, unlike inference's `TypeNode`, so a
 //! consumer can never mistake a fresh variable for a solved type.
@@ -17,8 +17,9 @@ pub enum Prim {
     String,
 }
 
-/// Nominal ids for the primitives the inference engine recognises directly:
-/// int/float/string literals, plus `Array` for structural resolution.
+/// The nominal ids of the primitives the inference engine knows directly. Int,
+/// float and string literals get these types, and `Array` is here so arrays
+/// can resolve structurally.
 #[derive(Debug, Clone, Copy)]
 pub struct PrimIds {
     pub int: TypeId,
@@ -28,10 +29,10 @@ pub struct PrimIds {
 }
 
 impl PrimIds {
-    /// Map a nominal type id to the corresponding primitive, if it is one.
-    /// Identity is by id, never name: a user's `type Int { }` is not `Int`.
-    /// `InferEngine::as_prim` and `ResolvedPool::as_prim` both delegate here so
-    /// the two sides of the `Ty`/`RTy` divide cannot disagree.
+    /// The primitive a nominal type id stands for, if it is one. This goes by
+    /// id, never by name, so a user's `type Int { }` is not `Int`.
+    /// `InferEngine::as_prim` and `ResolvedPool::as_prim` both call this, so
+    /// the `Ty` side and the `RTy` side can't disagree.
     pub fn prim_of(self, id: TypeId) -> Option<Prim> {
         if id == self.int {
             Some(Prim::Int)
@@ -47,9 +48,10 @@ impl PrimIds {
 
 impl Default for PrimIds {
     fn default() -> Self {
-        // Placeholders for engine-only tests, distinct from each other and from
-        // the 1-based ids `register_type_head` allocates. `set_prim_ids`
-        // overwrites them as soon as a compiler owns the engine.
+        // Placeholders for tests that use the engine alone. They differ from
+        // each other and from the ids `register_type_head` hands out, which
+        // start at 1. `set_prim_ids` replaces them as soon as a compiler owns
+        // the engine.
         PrimIds {
             int: TypeId(-1),
             float: TypeId(-2),
@@ -59,15 +61,15 @@ impl Default for PrimIds {
     }
 }
 
-/// Index into [`ResolvedPool::nodes`]. Only meaningful for the pool that
-/// minted it.
+/// An index into [`ResolvedPool::nodes`]. It only means something to the pool
+/// that made it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RTy(pub u32);
 
 impl std::fmt::Display for RTy {
-    /// Bare index, no prefix: the golden harness in
-    /// `crates/scarlet/tests/core_ir.rs` renumbers core IR's `:N` sigils by scanning
-    /// for digits after the colon.
+    /// Prints the bare index with no prefix, because the golden harness in
+    /// `crates/scarlet/tests/core_ir.rs` renumbers core IR's `:N` sigils by
+    /// scanning for digits after the colon.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
@@ -84,11 +86,12 @@ impl RSlice {
     const EMPTY: RSlice = RSlice { start: 0, len: 0 };
 }
 
-/// A fully-resolved type node. `types::TypeNode` minus its `Var` arm.
+/// A fully resolved type node. It's `types::TypeNode` without the `Var` arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResolvedNode {
-    /// A rigid quantified variable, indexing the enclosing scheme's quantifier
-    /// list. Its representation is not statically known.
+    /// A quantified variable, as an index into the enclosing scheme's list of
+    /// quantified variables. It's rigid, so nothing can solve it to a type, and
+    /// its representation isn't known at compile time.
     Bound(u32),
     /// `Name(args...)`, identified by `id` alone: a user's `type Parsed` is
     /// not `scarlet/http/h1.Parsed`.
@@ -99,9 +102,9 @@ pub enum ResolvedNode {
     Tuple { elems: RSlice },
 }
 
-/// Append-only arena of resolved types. No
-/// union-find and no mutation after the elaborator builds it, so an `RTy`
-/// always reads back the same node.
+/// An append-only arena of resolved types. It has no union-find, and nothing
+/// changes it after the elaborator builds it, so an `RTy` always reads back the
+/// same node.
 #[derive(Debug, Clone)]
 pub struct ResolvedPool {
     nodes: Vec<ResolvedNode>,
@@ -177,7 +180,7 @@ impl ResolvedPool {
         &self.children[lo..lo + s.len as usize]
     }
 
-    /// Type arguments of a nominal type; empty for every other node.
+    /// The type arguments of a nominal type, or nothing for any other node.
     pub fn con_args(&self, t: RTy) -> &[RTy] {
         match self.node(t) {
             ResolvedNode::Con { args, .. } => self.children(args),
@@ -185,8 +188,8 @@ impl ResolvedPool {
         }
     }
 
-    /// `i`th type argument of a nominal type — `Result(_, E)`'s `E` is
-    /// `con_arg(t, 1)`.
+    /// The `i`th type argument of a nominal type. For example, `Result(_, E)`'s
+    /// `E` is `con_arg(t, 1)`.
     pub fn con_arg(&self, t: RTy, i: usize) -> Option<RTy> {
         self.con_args(t).get(i).copied()
     }
@@ -231,8 +234,8 @@ impl ResolvedPool {
 
     /// Whether a value of type `t` occupies a Perceus-managed heap cell.
     ///
-    /// `Bound` answers `false`: its representation is unknown here, so the
-    /// value is handled dynamically.
+    /// `Bound` answers `false`, because its representation isn't known here,
+    /// so the value is handled at run time.
     pub fn is_heap(&self, t: RTy) -> bool {
         match self.node(t) {
             ResolvedNode::Con { id, .. } => self.as_prim(id).is_none(),
@@ -274,7 +277,7 @@ mod tests {
         assert_eq!(p.prim_of(string), Some(Prim::String));
         assert!(!p.is_heap(int));
         assert!(!p.is_heap(float));
-        // Strings are heap-allocated at runtime but are not Perceus cells.
+        // Strings live on the heap at run time, but they aren't Perceus cells.
         assert!(!p.is_heap(string));
     }
 

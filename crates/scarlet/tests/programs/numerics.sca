@@ -1,4 +1,4 @@
-// Numeric edges: Int, Float, Decimal, and the string boundaries between them.
+// This tests the numeric edges of Int, Float, Decimal and the strings between them.
 //
 // The three number types are deliberately *total* — no arithmetic operation
 // traps, so every edge has a defined answer that this program pins:

@@ -14,7 +14,7 @@ pub type Fahrenheit {
 }
 
 /**
- * opaque exports the type but not its constructor; outside this file, only
+ * opaque exports the type but not its constructor. Outside this file only
  * to_kelvin can build one, and it refuses to go below absolute zero.
  */
 pub opaque type Kelvin {

@@ -1,5 +1,5 @@
-// Rounds of spawned callers asking a worker pool to run closures that
-// capture freshly allocated strings. Regression for a native-backend
+// Rounds of spawned callers ask a worker pool to run closures that
+// capture freshly allocated strings. This guards against a native-backend
 // use-after-free: the generic bridge shim pushes its operands onto the
 // value stack, a push can grow (move) the stack Vec, and compiled code
 // cached the frame-base pointer across the call — so the first natively

@@ -1,19 +1,20 @@
-//! A process's heap: where values too big for one word live.
+//! A process's heap, which is where values too big for one word live.
 //!
 //! The heap is a list of chunks, and a chunk is one block of memory carved
 //! into cells, one value per cell. `docs/vm-design.md` ("how a heap grows")
 //! has the rules and where they come from:
 //!
-//! - no chunk until the first cell is needed;
-//! - small cells fill chunks that start at 2 KB and grow about 1.6 times;
-//! - a cell bigger than the current chunk size gets a chunk of exactly its
+//! - There is no chunk until the first cell is needed.
+//! - Small cells fill chunks that start at 2 KB, and each new chunk is about
+//!   1.6 times the one before.
+//! - A cell bigger than the current chunk size gets a chunk of exactly its
 //!   size, which goes back to the system when the cell is freed.
 //!
-//! Every cell starts with one header word: its reference count, its kind, and
-//! its size in words. A cell is freed when its count reaches zero, and its
-//! space is kept on a free list for the next cell of the same size. Freeing a
-//! constructor, tuple, closure or array node gives up the references it holds
-//! too, and so on down.
+//! Every cell starts with one header word holding its reference count, its
+//! kind and its size in words. A cell is freed when its count reaches zero,
+//! and its space is kept on a free list for the next cell of the same size.
+//! Freeing a cell also gives up the references it holds, like a constructor's
+//! fields or an array node's children, and so on down.
 //!
 //! Chunks are words, not bytes, and cells are named by chunk and word rather
 //! than by address, so the heap needs no `unsafe` and moves with its process
@@ -27,18 +28,18 @@ use scarlet_ir::core_ir::{FuncIdx, VariantRef};
 
 use crate::value::Value;
 
-/// Words in the first chunk: 2 KB.
+/// Words in the first chunk, which makes it 2 KB.
 const FIRST_CHUNK_WORDS: usize = 256;
 
-/// How many chunks and words a [`Cell`] can name: 20 bits of chunk and 28 of
-/// word, so it fits the 48 bits a value word has for it.
+/// How many chunks and words a [`Cell`] can name. It has 20 bits of chunk and
+/// 28 of word, so it fits in the 48 bits a value word has for it.
 const CHUNK_BITS: u32 = 20;
 const WORD_BITS: u32 = 28;
 
 /// The most words one cell can take, its header's among them.
 pub(crate) const MAX_CELL_WORDS: usize = 1 << WORD_BITS;
 
-/// A cell: which chunk, and which word the cell's header is at.
+/// A cell, named by its chunk and the word its header is at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Cell {
     chunk: u32,
@@ -110,7 +111,8 @@ struct Chunk {
     words: Box<[u64]>,
     /// Words handed out so far, from the front.
     used: usize,
-    /// Made for one big cell. It goes back to the system when that cell does.
+    /// Whether this chunk was made for one big cell. If so, it goes back to
+    /// the system when that cell is freed.
     own: bool,
 }
 
@@ -137,8 +139,8 @@ pub(crate) struct Heap {
 }
 
 impl Heap {
-    /// A new cell of `kind` with `data` words after its header, and a count
-    /// of 1: the caller holds the one reference.
+    /// A new cell of `kind` with `data` words after its header. Its count is
+    /// 1, and the caller holds that one reference.
     fn alloc(&mut self, kind: Kind, data: usize) -> Result<Cell, Full> {
         let size = data + 1;
         let cell = if let Some(cell) = self.free.get_mut(&size).and_then(Vec::pop) {
@@ -211,9 +213,9 @@ impl Heap {
 
     /// Drop one reference to `cell`, freeing it when that was the last.
     ///
-    /// A freed constructor's fields each lose a reference in turn. They are
-    /// kept on a list rather than released by recursion, so freeing a list a
-    /// million cells long takes no more stack than freeing one cell.
+    /// A freed cell's fields each lose a reference in turn. We keep them on a
+    /// list instead of releasing them by recursion, so freeing a very long
+    /// list takes no more stack than freeing one cell.
     pub(crate) fn release(&mut self, cell: Cell) {
         let mut dying = std::mem::take(&mut self.dying);
         dying.push(cell);
@@ -233,14 +235,15 @@ impl Heap {
         self.dying = dying;
     }
 
-    /// Perceus's drop of a last reference: when nothing else holds `cell`,
-    /// give up everything it holds and keep the allocation, header and all,
-    /// for a constructor of the same size to overwrite. `false` when
-    /// something else holds it, which leaves it to an ordinary `release`.
+    /// Perceus's drop of a last reference. When nothing else holds `cell`,
+    /// this gives up everything it holds and keeps the allocation, header and
+    /// all, for a constructor of the same size to overwrite. It returns
+    /// `false` when something else holds `cell`, which leaves it to an
+    /// ordinary `release`.
     ///
-    /// A field is emptied before it is released, so a hollowed cell is safe to
-    /// release again: it holds nothing. Emptying here rather than at the
-    /// constructor is what carries reuse down a chain — a callee sees its
+    /// Each field is emptied before it is released, so a hollowed cell holds
+    /// nothing and is safe to release again. Emptying here instead of at the
+    /// constructor is what carries reuse down a chain. A callee sees its
     /// argument as the last reference only because its caller gave up its own
     /// first.
     pub(crate) fn hollow(&mut self, cell: Cell) -> bool {
@@ -258,12 +261,12 @@ impl Heap {
         true
     }
 
-    /// Whether a constructor of `fields` fields may be written over `cell`:
-    /// it must be a constructor cell of exactly that size, and nothing else
-    /// may hold it. Both are true of every cell [`Self::hollow`] kept, and the
-    /// count is read again here because a register holds its cell until
-    /// something overwrites it, so what a constructor finds there need not be
-    /// the one parked for it.
+    /// Whether a constructor with `fields` fields may be written over `cell`.
+    /// It must be a constructor cell of exactly that size, and nothing else
+    /// may hold it. Both are true of every cell [`Self::hollow`] kept. We read
+    /// the count again here anyway, because a register holds its cell until
+    /// something overwrites it. So the cell a constructor finds there might
+    /// not be the one that was kept for it.
     pub(crate) fn fits_ctor(&self, cell: Cell, fields: usize) -> bool {
         let h = self.word(cell, 0);
         count(h) == 1 && kind_bits(h) == Kind::Ctor as u64 && size(h) == fields + 2
@@ -374,9 +377,10 @@ impl Heap {
         Ok(cell)
     }
 
-    /// Perceus reuse: the constructor `ctor` would build, written over a cell
-    /// [`Self::hollow`] emptied, which [`Self::fits_ctor`] says is the right
-    /// size. Its one reference stays, so it is the new constructor's.
+    /// Perceus reuse. This writes the constructor `ctor` would build over a
+    /// cell that [`Self::hollow`] emptied and [`Self::fits_ctor`] says is the
+    /// right size. The cell's one reference stays and becomes the new
+    /// constructor's.
     pub(crate) fn ctor_in(&mut self, cell: Cell, v: VariantRef, fields: &[Value]) {
         self.reused += 1;
         self.write_ctor(cell, v, fields);
@@ -428,8 +432,9 @@ impl Heap {
     }
 
     /// A new cell of `kind` holding `data` after its header, with one
-    /// reference, the caller's. Any reference in `data` passes to the cell.
-    /// For a kind whose layout lives outside the heap, like an array's nodes.
+    /// reference, which is the caller's. Any reference in `data` passes to the
+    /// cell. This is for kinds whose layout lives outside the heap, like an
+    /// array's nodes.
     pub(crate) fn make(&mut self, kind: Kind, data: &[u64]) -> Result<Cell, Full> {
         let cell = self.alloc(kind, data.len())?;
         for (i, w) in data.iter().enumerate() {
@@ -438,8 +443,8 @@ impl Heap {
         Ok(cell)
     }
 
-    /// The words of `cell` after its header. Empty for a cell the heap does
-    /// not have.
+    /// The words of `cell` after its header. They are empty for a cell the
+    /// heap does not have.
     pub(crate) fn data(&self, cell: Cell) -> &[u64] {
         let n = size(self.word(cell, 0)).saturating_sub(1);
         let start = cell.word as usize + 1;
@@ -517,8 +522,8 @@ impl Heap {
     }
 }
 
-/// A header word: the count in the low 32 bits, then the kind, then the
-/// cell's size in words.
+/// A header word. It holds the count in the low 32 bits, then the kind, then
+/// the cell's size in words.
 fn header(count: u32, kind: Kind, size: usize) -> u64 {
     u64::from(count) | (kind as u64) << 32 | (size as u64) << 40
 }
@@ -532,10 +537,11 @@ fn kind_bits(h: u64) -> u64 {
 }
 
 /// The words of a cell of this kind and size that hold a value, and so a
-/// reference: after a constructor's or closure's tag word, all of a tuple or
-/// an array leaf, an array root's three parts (after its length and height),
-/// an array branch's children (after its height and size table), and a map
-/// cell's every word after its first.
+/// reference. They are the words after a constructor's or closure's tag word,
+/// all of a tuple or an array leaf, an array root's three parts (after its
+/// length and height), an array branch's children (after its height and size
+/// table), every word of a map cell after its first, and a binary slice's
+/// first word.
 fn held(kind: u64, size: usize) -> std::ops::Range<usize> {
     let k = |want: Kind| kind == want as u64;
     if k(Kind::Ctor)

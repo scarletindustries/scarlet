@@ -1,6 +1,6 @@
-//! LSP stdio transport: decode JSON-RPC frames, dispatch to [`Workspace`],
-//! write responses back. All server state lives on `Workspace`, so tests build
-//! one directly and never touch stdin/stdout.
+//! The LSP stdio transport. It decodes JSON-RPC frames, hands them to [`Workspace`] and writes
+//! the responses back. All server state lives on `Workspace`, so tests build one directly and
+//! never touch stdin or stdout.
 
 use std::io::{self, BufRead, BufReader, Read as _, Write};
 
@@ -15,8 +15,8 @@ pub use workspace::Workspace;
 
 use wire::{WatchedChange, doc_uri, folder_paths, rename_error_code, uri_to_path};
 
-/// Outcome of one framed stdin read: a message body, or the client closed the
-/// pipe.
+/// What one framed stdin read gives: a message body, or the end of input when the client closes
+/// the pipe.
 enum Incoming {
     Message(String),
     Eof,
@@ -110,7 +110,7 @@ impl LspServer {
             "initialize" => self.handle_initialize(&id, &params),
             "initialized" => self.handle_initialized(),
             "$/setTrace" | "$/cancelRequest" => {
-                // Notifications, no response needed
+                // These are notifications, so they need no response.
             }
             "shutdown" => self.send_response(&id, Json::Null),
             "exit" => return ControlFlow::Break(()),
@@ -134,8 +134,8 @@ impl LspServer {
             }
             "workspace/didChangeWatchedFiles" => self.handle_did_change_watched_files(&params),
             _ => {
-                // An unknown request must be answered or the client waits
-                // forever; JSON-RPC forbids replying to a notification.
+                // We have to answer an unknown request or the client waits forever. JSON-RPC
+                // forbids replying to a notification, though.
                 if !matches!(id, Json::Null) {
                     self.send_error(&id, -32601, &format!("method not found: {method}"));
                 } else {
@@ -155,9 +155,9 @@ impl LspServer {
         self.send_message(&response.to_string());
     }
 
-    /// Run `f` on the workspace and send its result. Diagnostics the query's
-    /// re-root staged (see [`Workspace::ensure_entry`]) go out first, so an
-    /// open importer's problem list refreshes on an edited dependency.
+    /// Runs `f` on the workspace and sends its result. Any diagnostics the query's re-root staged
+    /// (see [`Workspace::ensure_entry`]) go out first, so an open importer's problem list
+    /// refreshes when one of its dependencies is edited.
     fn respond(&mut self, id: &Json, params: &Json, f: fn(&mut Workspace, &Json) -> Json) {
         let result = f(&mut self.ws, params);
         for (uri, diags) in self.ws.take_pending_diagnostics() {
@@ -201,7 +201,9 @@ impl LspServer {
             .and_then(|()| out.write_all(content.as_bytes()))
             .and_then(|()| out.flush())
         {
-            self.log(&format!("stdout write failed: {e} — client likely gone"));
+            self.log(&format!(
+                "stdout write failed: {e}. The client has probably gone"
+            ));
         }
     }
 
@@ -217,8 +219,8 @@ impl LspServer {
     }
 
     fn handle_initialize(&mut self, id: &Json, params: &Json) {
-        // Prefer `workspaceFolders`, fall back to legacy `rootUri`. A client
-        // opening a loose file sends neither; that file gets the empty root.
+        // Prefer `workspaceFolders`, and fall back to the older `rootUri`. A client opening a
+        // loose file sends neither, and that file gets the empty root.
         let folders = params.get("workspaceFolders");
         if folders.is_some_and(Json::is_array) {
             self.ws.workspace_roots.extend(folder_paths(folders));
@@ -251,9 +253,9 @@ impl LspServer {
     }
 
     fn handle_initialized(&self) {
-        // didChangeWatchedFiles has no static registration in the LSP spec, so
-        // ask for the .sca watch dynamically. External edits (git checkout,
-        // formatter) must invalidate the incremental session.
+        // didChangeWatchedFiles has no static registration in the LSP spec, so ask for the .sca
+        // watch dynamically. Edits from outside the editor (a git checkout, a formatter) have to
+        // invalidate the incremental session.
         self.send_request(
             json!("scarlet/watchers"),
             "client/registerCapability",
@@ -277,9 +279,8 @@ impl LspServer {
         }
         let added = folder_paths(event.and_then(|e| e.get("added")));
         self.ws.workspace_roots.extend(added.iter().cloned());
-        // The `scanned` latch makes `ensure_workspace_scanned` early-return, so
-        // a folder added after the first scan must be indexed here or its
-        // modules stay invisible to cross-module queries.
+        // Once `scanned` is set, `ensure_workspace_scanned` returns early, so we have to index a
+        // folder added after the first scan here, or cross-module queries never see its modules.
         if self.ws.scanned {
             for r in &added {
                 self.ws.index_root(r);
@@ -302,8 +303,8 @@ impl LspServer {
                 WatchedChange::from_wire(change.get("type").and_then(|v| v.as_i64()).unwrap_or(2));
             self.ws.invalidate_watched(uri, ty);
         }
-        // Only the client-open documents. Driving this off the full `documents`
-        // map would re-typecheck the whole workspace on every external edit.
+        // Re-analyse only the documents the client has open. Driving this off the full
+        // `documents` map would re-typecheck the whole workspace on every external edit.
         for (uri, diags) in self.ws.reanalyze_open() {
             self.publish_diagnostics(&uri, diags);
         }

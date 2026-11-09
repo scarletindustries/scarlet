@@ -112,7 +112,7 @@
           "name": "punctuation.definition.binary.begin.sca"
         }
       },
-      "comment": "Bit-string literal or pattern: <<expr:spec, ..rest>>. The spec names are contextual identifiers, not keywords.",
+      "comment": "A bit-string literal or pattern, like <<expr:spec, ..rest>>. The spec names are contextual identifiers, not keywords.",
       "end": ">>",
       "endCaptures": {
         "0": {
@@ -219,11 +219,11 @@
           "name": "keyword.operator.assignment.sca"
         }
       },
-      "comment": "The declared name is scoped like a fn declaration name so themes colour toplevel value declarations uniformly.",
+      "comment": "The declared name gets the same scope as a fn name, so themes colour every top-level value declaration the same way.",
       "match": "\\b(pub\\s+)?(const)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*(?:([A-Z][a-zA-Z0-9_]*)\\s*)?(=)"
     },
     "constants": {
-      "comment": "Prelude constructors themes expect as language constants.",
+      "comment": "Prelude constructors that themes expect to see as language constants.",
       "patterns": [
         {
           "match": "\\b(True|False)\\b",
@@ -241,7 +241,7 @@
           "name": "entity.name.function.constructor.sca"
         }
       },
-      "comment": "Constructor invocation / pattern: Uppercase optionally followed by (",
+      "comment": "Constructor call or pattern: an uppercase name followed by (",
       "match": "\\b([A-Z][a-zA-Z0-9_]*)(?=\\s*\\()"
     },
     "field-decl": {
@@ -337,7 +337,7 @@
           "name": "punctuation.definition.parameters.begin.sca"
         }
       },
-      "comment": "The param list opens immediately after the function name (\\G) and closes at the matching paren. Nested type-argument parens are consumed by #type-args so the inner ) of e.g. Option(a) cannot end the list early.",
+      "comment": "The parameter list opens right after the function name (\\G) and closes at the matching paren. #type-args takes nested type-argument parens, so the inner ) of Option(a) can't end the list early.",
       "end": "\\)",
       "endCaptures": {
         "0": {
@@ -498,7 +498,7 @@
           "name": "keyword.control.sca"
         },
         {
-          "comment": "Contextual: a keyword after an if condition, a name after a dot.",
+          "comment": "`then` is contextual. It's a keyword after an if condition and a name after a dot.",
           "match": "(?<!\\.)\\bthen\\b",
           "name": "keyword.control.sca"
         },
@@ -525,7 +525,7 @@
           "name": "punctuation.separator.colon.sca"
         }
       },
-      "comment": "Labeled call argument: label: value",
+      "comment": "Labelled call argument: label: value",
       "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s*(:)(?!:)"
     },
     "module-qualified-access": {
@@ -541,7 +541,7 @@
       "match": "\\b([a-z_][a-zA-Z0-9_]*)(::)(?=[A-Za-z_])"
     },
     "numbers": {
-      "comment": "Scanner::scan_number. Hex (`0x`) and binary (`0b`) first so they are not split into `0` + identifier. `_` is a digit separator only between two digits of that radix.",
+      "comment": "Mirrors Scanner::scan_number. Hex (`0x`) and binary (`0b`) come first so they aren't split into `0` and an identifier. `_` separates digits only when it sits between two digits of that radix.",
       "patterns": [
         {
           "match": "\\b0[xX][0-9A-Fa-f]+(?:_[0-9A-Fa-f]+)*\\b",
@@ -742,7 +742,7 @@
           "name": "punctuation.definition.typeparameters.begin.sca"
         }
       },
-      "comment": "Balanced ( ... ) for a parametrized/fn type. Recursive so Option(List(a)) and Result(a, e) nest correctly.",
+      "comment": "Balanced ( ... ) for a parameterised type or a fn type. It includes itself, so Option(List(a)) and Result(a, e) nest correctly.",
       "end": "\\)",
       "endCaptures": {
         "0": {

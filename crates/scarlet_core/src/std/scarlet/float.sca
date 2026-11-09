@@ -1,12 +1,12 @@
-// Exact for every Float: an Int has no bounds, and a Float is never NaN or
-// infinite.
+// This and the other conversions to Int are exact for every Float, because an
+// Int has no bounds and a Float is never NaN or infinite.
 @vm(float__floor)
 pub fn floor(f Float) Int
 
 @vm(float__ceil)
 pub fn ceil(f Float) Int
 
-// Ties round away from zero.
+// Rounds to the nearest Int. Ties round away from zero.
 @vm(float__round)
 pub fn round(f Float) Int
 
@@ -28,7 +28,8 @@ pub fn min(a Float, b Float) Float {
 	if a < b { a } else { b }
 }
 
-// `<=` so abs(-0.0) is 0.0, matching IEEE abs for both zeros.
+// This uses `<=` so that abs(-0.0) is 0.0, which matches IEEE abs for both
+// zeros.
 pub fn abs(f Float) Float {
 	if f <= 0.0 {
 		0.0 - f

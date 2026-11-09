@@ -1,9 +1,9 @@
-//! Scarlet's syntax layer: source text in, AST out, plus everything needed to talk
-//! about source — spans, tokens, scanner, parser, formatter, diagnostics, and
-//! module *identity* ([`module_path`]).
+//! Scarlet's syntax layer. It turns source text into an AST, and holds what the
+//! rest of the compiler needs to talk about source: spans, tokens, the scanner,
+//! parser and formatter, diagnostics, and module *identity* ([`module_path`]).
 //!
-//! It depends on no other workspace crate, so it stays usable by tooling that
-//! never compiles a program. Module *resolution* lives in `scarlet_core::module`,
+//! It depends on no other workspace crate, so tooling that never compiles a
+//! program can still use it. Module *resolution* lives in `scarlet_core::module`,
 //! built on the identity types here.
 
 #![cfg_attr(

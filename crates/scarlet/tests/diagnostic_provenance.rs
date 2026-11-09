@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use scarlet::{ast, bytecode, diagnostic, module, parser, scanner};
 
-/// The resolver the CLI uses: a `ModuleKey` names an on-disk module (its
-/// canonical path with `.sca` stripped) or an embedded stdlib module.
+/// Resolves modules the way the CLI does. A `ModuleKey` names an on-disk module
+/// (its canonical path with `.sca` stripped) or an embedded stdlib module.
 fn resolve(key: &module::ModuleKey) -> Option<(PathBuf, String)> {
     let path: module::ModulePath = key.as_str().split('/').map(str::to_string).collect();
     match module::resolve_canonical(&path).ok()?.source {

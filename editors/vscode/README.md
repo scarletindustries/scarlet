@@ -10,7 +10,7 @@
 
 ## Requirements
 
-The extension runs the `scarlet` binary from `PATH`. Set `scarlet.binaryPath` when the binary is elsewhere:
+The extension runs the `scarlet` binary from `PATH`. If the binary is somewhere else, set `scarlet.binaryPath`:
 
 ```json
 {
@@ -20,7 +20,7 @@ The extension runs the `scarlet` binary from `PATH`. Set `scarlet.binaryPath` wh
 
 ## Development
 
-Bun manages packages and scripts.
+We use Bun for packages and scripts.
 
 ```sh
 bun install

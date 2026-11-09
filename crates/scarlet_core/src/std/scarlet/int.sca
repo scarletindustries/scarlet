@@ -1,12 +1,13 @@
 @vm(int__to_string)
 pub fn to_string(n Int) String
 
-// The VM answers with an Option; `from_string` makes it a Result.
+// The VM returns an Option, and `from_string` turns it into a Result.
 @vm(int__from_string)
 fn from_string_raw(s String) Option(Int)
 
-// An optional `+` or `-`, then ASCII digits, and nothing else, not even
-// spaces. Leading zeros are fine, and no number of digits is too many.
+// Parses an optional `+` or `-` followed by ASCII digits. Nothing else is
+// allowed, not even spaces. Leading zeros are fine, and no number of digits is
+// too many.
 pub fn from_string(s String) Result(Int, Nil) {
 	match from_string_raw(s) {
 		Some(n) -> Ok(n)
@@ -22,7 +23,7 @@ pub fn min(a Int, b Int) Int {
 	if a < b { a } else { b }
 }
 
-// The smallest and largest 64-bit Ints. An Int has no bounds; these are for
+// The smallest and largest 64-bit Ints. An Int has no bounds, so these are for
 // talking to things that do, like a 64-bit field in a file format.
 pub const min_value = 0 - 9223372036854775807 - 1
 
@@ -36,13 +37,13 @@ pub fn abs(n Int) Int {
 	}
 }
 
-// When `lo > hi`, `hi` wins.
+// Keeps `n` between `lo` and `hi`. When `lo > hi`, `hi` wins.
 pub fn clamp(n Int, lo Int, hi Int) Int {
 	min(max(n, lo), hi)
 }
 
-// `a / b`, but dividing by zero is `Err(Nil)` instead of 0. Truncates toward
-// zero, like `/`.
+// Works like `a / b`, but dividing by zero gives `Err(Nil)` instead of 0. It
+// truncates toward zero, like `/`.
 pub fn divide(a Int, b Int) Result(Int, Nil) {
 	if b == 0 {
 		Err(Nil)
@@ -51,8 +52,8 @@ pub fn divide(a Int, b Int) Result(Int, Nil) {
 	}
 }
 
-// `a % b`, but dividing by zero is `Err(Nil)` instead of `a`. Takes the sign
-// of `a`, like `%`.
+// Works like `a % b`, but dividing by zero gives `Err(Nil)` instead of `a`. The
+// result takes the sign of `a`, like `%`.
 pub fn remainder(a Int, b Int) Result(Int, Nil) {
 	if b == 0 {
 		Err(Nil)
@@ -61,9 +62,10 @@ pub fn remainder(a Int, b Int) Result(Int, Nil) {
 	}
 }
 
-// Bitwise. An Int is an endless row of two's-complement bits, as in Erlang:
-// endless 0s above a non-negative one, endless 1s above a negative one. No bit
-// falls off, so `bitwise_shift_left(1, 64)` is 2^64, not 0.
+// Bitwise operations treat an Int as an endless row of two's-complement bits,
+// as Erlang does. A non-negative Int has endless 0s above it, and a negative
+// one has endless 1s. No bit falls off, so `bitwise_shift_left(1, 64)` is 2^64,
+// not 0.
 
 @vm(int__bitwise_and)
 pub fn bitwise_and(a Int, b Int) Int
@@ -79,12 +81,13 @@ pub fn bitwise_xor(a Int, b Int) Int
 @vm(int__bitwise_not)
 pub fn bitwise_not(n Int) Int
 
-// `x` times 2^n, exactly. A negative `n` shifts right.
+// Multiplies `x` by 2^n exactly. A negative `n` shifts right.
 @vm(int__bitwise_shift_left)
 pub fn bitwise_shift_left(x Int, n Int) Int
 
-// `x` divided by 2^n, rounded down, so the sign stays: -7 shifted by 1 is -4.
-// A negative `n` shifts left. For a logical shift over a `w`-bit field, mask:
+// Divides `x` by 2^n and rounds down, so the sign stays: -7 shifted by 1 is
+// -4. A negative `n` shifts left. For a logical shift over a `w`-bit field,
+// mask the result:
 // `bitwise_and(bitwise_shift_right(x, n), bitwise_shift_left(1, w - n) - 1)`.
 @vm(int__bitwise_shift_right)
 pub fn bitwise_shift_right(x Int, n Int) Int

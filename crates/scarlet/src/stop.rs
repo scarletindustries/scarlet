@@ -1,10 +1,10 @@
-//! What to tell a person when a run stops before its program does: one
-//! wording for `scarlet run` and the REPL.
+//! What we tell someone when a run stops before its program finishes. `scarlet run` and the
+//! REPL share this wording.
 
 use scarlet_vm::Stop;
 
-/// Why `stop` ended the run, or `None` when there is nothing to say: output
-/// closed, like a pipe into `head`, is the reader leaving and not a failure.
+/// Says why `stop` ended the run, or `None` when there is nothing to say. Closed output, like a
+/// pipe into `head`, means the reader has left, and that isn't a failure.
 pub fn message(stop: &Stop) -> Option<String> {
     match stop {
         Stop::OutputClosed => None,

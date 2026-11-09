@@ -1,5 +1,6 @@
-// Exercises the VM's I/O opcodes. Server tests spawn the `scarlet` binary directly
-// because the server must run concurrently with the Rust client driving it.
+// These tests exercise the VM's I/O opcodes. Server tests spawn the `scarlet`
+// binary directly, because the server must run alongside the Rust client that
+// drives it.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -66,7 +67,7 @@ pub fn main() {
         "wrong roundtrip stdout (stderr: {})",
         out.stderr
     );
-    // Persisted, not just echoed in memory.
+    // Check the bytes reached the disk, not just memory.
     assert_eq!(
         std::fs::read_to_string(&data).unwrap(),
         "hello-io",
@@ -76,7 +77,7 @@ pub fn main() {
 
 /// Full TCP lifecycle through the VM: `net.listen` -> `net.local_addr` ->
 /// `net.accept` -> `sock.peer` -> `net.read` -> `net.write` -> `net.close`.
-/// The only test covering the socket opcodes' success paths.
+/// This is the only test that covers the socket opcodes' success paths.
 #[test]
 #[ignore = "needs the VM"]
 fn tcp_echo_server_roundtrip() {
@@ -117,7 +118,7 @@ fn tcp_echo_server_roundtrip() {
         "echoed bytes must match what was sent"
     );
 
-    // The harness consumed the announcement line; the rest starts at `peer`.
+    // The harness consumed the announcement line, so the rest starts at `peer`.
     let stdout = srv.wait_ok(30);
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 2, "expected peer/served, got: {stdout:?}");
@@ -132,8 +133,9 @@ fn tcp_echo_server_roundtrip() {
     );
 }
 
-/// The client side of the API, entirely from Scarlet. Covers connect (non-blocking
-/// completion), read_exact (cross-read accumulation), and write_parts.
+/// This tests the client side of the API, entirely from Scarlet. It covers
+/// connect (non-blocking completion), read_exact (gathering bytes across
+/// reads), and write_parts.
 #[test]
 #[ignore = "needs the VM"]
 fn tcp_connect_and_vectored_echo() {
@@ -366,8 +368,8 @@ pub fn main() {
 }
 
 /// `io.read_file` offloads to the blocking thread pool rather than stalling a
-/// scheduler thread for the syscall: several processes read the same file
-/// concurrently, exercising offload → worker → completion → resume.
+/// scheduler thread for the syscall. Several processes read the same file at
+/// once, which exercises offload → worker → completion → resume.
 #[test]
 #[ignore = "needs the VM"]
 fn file_read_offloads_to_blocking_pool() {
@@ -513,9 +515,10 @@ fn assert_200(stream: &mut TcpStream, buf: &mut Vec<u8>, expected: &[u8], ctx: &
     );
 }
 
-/// End-to-end HTTP/1.1 through the pure-Scarlet `scarlet/http` server core. A second
-/// request is pipelined into the same write, so the connection driver must
-/// answer it from carried leftover bytes with no intervening read.
+/// This runs HTTP/1.1 end to end through the pure-Scarlet `scarlet/http` server
+/// core. We pipeline a second request into the same write, so the connection
+/// driver must answer it from the leftover bytes it carried, with no read in
+/// between.
 #[test]
 #[ignore = "needs the VM"]
 fn http_server_get_and_keepalive() {
@@ -528,7 +531,7 @@ fn http_server_get_and_keepalive() {
     let srv = spawn_al_server(&proj, &src);
     let mut stream = srv.connect();
 
-    // Two GETs in one write land in one server-side read.
+    // Two GETs in one write arrive in one server-side read.
     let request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
     let mut pipelined = Vec::new();
     pipelined.extend_from_slice(request);
@@ -543,9 +546,9 @@ fn http_server_get_and_keepalive() {
     srv.shutdown_clean(stream);
 }
 
-/// Chunked transfer-encoding decode through the `scarlet/http` server. A second
-/// request on the same connection must also succeed, proving the chunked
-/// framing consumed exactly the body plus terminator and did not desync.
+/// The `scarlet/http` server decodes chunked transfer-encoding. A second
+/// request on the same connection must also succeed, which shows the chunked
+/// framing consumed exactly the body plus terminator and stayed in sync.
 #[test]
 #[ignore = "needs the VM"]
 fn http_server_chunked_post_roundtrip() {
@@ -566,7 +569,7 @@ fn http_server_chunked_post_roundtrip() {
     let srv = spawn_al_server(&proj, &src);
     let mut stream = srv.connect();
 
-    // Kept on one line: Rust's `\` continuation strips leading whitespace,
+    // Keep this on one line. Rust's `\` continuation strips leading whitespace,
     // which would eat the " world" chunk's leading space.
     let chunked_post: &[u8] = b"POST /upload HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\nX-Checksum: abc123\r\n\r\n";
     stream.write_all(chunked_post).expect("write chunked POST");
@@ -579,7 +582,7 @@ fn http_server_chunked_post_roundtrip() {
         "chunked POST",
     );
 
-    // The same connection must still be in frame.
+    // The same connection must still be in sync.
     let get = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
     stream.write_all(get).expect("write follow-up GET");
     assert_200(
@@ -589,7 +592,7 @@ fn http_server_chunked_post_roundtrip() {
         "follow-up GET (desync check)",
     );
 
-    // Chunked POST + GET pipelined in one write.
+    // Pipeline a chunked POST and a GET in one write.
     let mut pipelined = Vec::new();
     pipelined.extend_from_slice(
         b"POST /pipelined HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n",
@@ -610,7 +613,7 @@ fn http_server_chunked_post_roundtrip() {
         "pipelined GET",
     );
 
-    // Fresh connection: the 400 below closes the current one.
+    // Use a fresh connection, because the 400 below closes the current one.
     let mut bad_stream = srv.connect();
     bad_stream
         .write_all(
@@ -688,9 +691,9 @@ fn http_server_connection_close_semantics() {
 }
 
 /// `body.content_length` is a pub entry point, so a caller may hand it a raw
-/// parsed header value: 0 and negative counts must terminate immediately with
-/// an empty body instead of reading the socket. Nothing is ever sent on the
-/// pair here, so a regression shows up as a read error or a hang.
+/// parsed header value. A count of 0 or less must end at once with an empty
+/// body instead of reading the socket. Nothing is ever sent on the pair here,
+/// so a regression shows up as a read error or a hang.
 #[test]
 #[ignore = "needs the VM"]
 fn http_body_content_length_non_positive_terminates() {
@@ -732,11 +735,11 @@ pub fn main() {
     run_outputs(src, "empty empty\n");
 }
 
-/// A response body source that fails before anything was written must yield a
-/// framed 500 (the head never went out, so it is still deliverable), not a
-/// dropped connection. Covers both framing paths, Fixed and Unsized. The Fixed
-/// case is pipelined behind a healthy request to prove the batched response
-/// ahead of the 500 still goes out.
+/// A response body source that fails before anything was written must give a
+/// framed 500, not a dropped connection. The head never went out, so we can
+/// still deliver one. This covers both framing paths, Fixed and Unsized. We
+/// pipeline the Fixed case behind a healthy request to show the batched
+/// response ahead of the 500 still goes out.
 #[test]
 #[ignore = "needs the VM"]
 fn http_server_body_source_failure_yields_framed_500() {
@@ -754,7 +757,7 @@ fn http_server_body_source_failure_yields_framed_500() {
     let srv = spawn_al_server(&proj, &src);
     let mut tmp = [0u8; 64];
 
-    // Fixed body source failure, pipelined behind a healthy request.
+    // A Fixed body source fails, pipelined behind a healthy request.
     let mut stream = srv.connect();
     stream
         .write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\nGET /fixed HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -780,7 +783,7 @@ fn http_server_body_source_failure_yields_framed_500() {
     let n = stream.read(&mut tmp).expect("read after fixed-body 500");
     assert_eq!(n, 0, "server must close after the framed 500");
 
-    // Unsized body source failure.
+    // An Unsized body source fails.
     let mut stream2 = srv.connect();
     stream2
         .write_all(b"GET /unsized HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -800,7 +803,7 @@ fn http_server_body_source_failure_yields_framed_500() {
 
     drop(stream);
     drop(stream2);
-    // The failed bodies poisoned nothing beyond their own connections.
+    // The failed bodies broke nothing beyond their own connections.
     let mut stream3 = srv.connect();
     stream3
         .write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -815,8 +818,8 @@ fn http_server_body_source_failure_yields_framed_500() {
     srv.shutdown_clean(stream3);
 }
 
-/// Run `src` under a forced scheduler count, bounded: a wedge is a red test,
-/// never a hung suite.
+/// Run `src` under a forced scheduler count, with a time limit so a hang is a
+/// red test, never a hung suite.
 fn run_with_schedulers(tag: &str, src: &str, schedulers: u32, secs: u64) -> (Option<i32>, String) {
     let proj = Project::new(tag);
     let prog = proj.dir.join("prog.sca");
@@ -845,8 +848,8 @@ fn run_with_schedulers(tag: &str, src: &str, schedulers: u32, secs: u64) -> (Opt
 /// The listener is one shared kernel socket, so a connection can never be
 /// queued where nobody accepts.
 ///
-/// This test is probabilistic — scheduler placement can rescue a broken run.
-/// The deterministic discriminator is the unit test
+/// This test is probabilistic, because scheduler placement can rescue a broken
+/// run. The unit test that catches it every time is
 /// `vm::io::tests::a_foreign_scheduler_registers_the_same_kernel_socket`.
 #[test]
 #[ignore = "needs the VM"]
@@ -1049,9 +1052,9 @@ pub fn main() {
     );
 }
 
-/// A sibling's exit must not close a socket it did not create. Ownership never
-/// moves implicitly: transfer-on-capture would make this split reader/writer
-/// program's fate depend on spawn order.
+/// A sibling's exit must not close a socket it didn't create. Ownership never
+/// moves implicitly. If capturing a socket transferred it, this split
+/// reader/writer program's fate would depend on spawn order.
 #[test]
 #[ignore = "needs the VM"]
 fn a_siblings_exit_does_not_close_a_foreign_socket() {
@@ -1103,10 +1106,10 @@ pub fn main() {
     );
 }
 
-/// `net.serve_on` closes a connection when the handler returns, explicitly —
-/// a handler that forgets `socket.close` must not leak the socket for the
-/// server's whole life (its owner, the acceptor, loops forever). The client
-/// sees the handler's data, then EOF.
+/// `net.serve_on` closes a connection itself when the handler returns. A
+/// handler that forgets `socket.close` mustn't leak the socket for the server's
+/// whole life, because its owner, the acceptor, loops forever. The client sees
+/// the handler's data, then EOF.
 #[test]
 #[ignore = "needs the VM"]
 fn the_accept_loop_closes_a_forgetful_handlers_socket() {
@@ -1140,7 +1143,8 @@ pub fn main() {
     let mut buf = [0u8; 2];
     conn.read_exact(&mut buf).expect("handler's bytes");
     assert_eq!(&buf, b"hi");
-    // EOF, not a hang: the accept loop closed the socket after the handler.
+    // Expect EOF, not a hang, because the accept loop closed the socket after
+    // the handler.
     let mut rest = Vec::new();
     let n = conn.read_to_end(&mut rest).expect("clean EOF");
     assert_eq!(n, 0, "expected EOF after the handler returned");
@@ -1149,23 +1153,23 @@ pub fn main() {
 /// `net.connect_addr_within` against a listener that never accepts must hit its
 /// own deadline rather than the kernel's.
 ///
-/// The elapsed time is the assertion, not the error variant. Both the bounded
-/// and the unbounded call end in `Err(TimedOut)` here — the kernel gives up on
-/// its own — so only *when* it returns says whose deadline fired. The bound is
-/// set an order of magnitude above the deadline and well under the kernel
-/// floor, which is wide enough to survive a loaded host: this was measured with
+/// We assert on the elapsed time, not the error variant. Both the bounded and
+/// the unbounded call end in `Err(TimedOut)` here, because the kernel gives up
+/// on its own. So only *when* it returns says whose deadline fired. The bound
+/// sits an order of magnitude above the deadline and well under the kernel's
+/// floor. That gap is wide enough for a loaded host, and we measured it with
 /// the build fleet running.
 ///
-/// What it does NOT witness: that the deadline is the one Scarlet captured
-/// once. Any bound between the two constants produces this output, so a re-run
-/// that reset the clock would still pass.
+/// It does NOT prove the deadline is the one Scarlet captured once. Any bound
+/// between the two constants produces this output, so a re-run that reset the
+/// clock would still pass.
 ///
-/// Portability: this rests on a full accept queue dropping the SYN, which
-/// Linux and Darwin both do at queue depths they do not agree on — hence the
-/// observed fill in `full_accept_queue`. A platform that completes every
-/// connect panics there. A platform that RSTs instead of dropping returns
-/// unmeasurable: the kernel answered, so the deadline-vs-kernel-floor gap
-/// does not exist.
+/// This relies on a full accept queue dropping the SYN. Linux and Darwin both
+/// do that, but at queue depths they don't agree on, which is why
+/// `full_accept_queue` fills the queue until it sees it drop. On a platform
+/// that completes every connect, it panics there. On a platform that sends RST
+/// instead of dropping, we can't measure anything, because the kernel answered
+/// and there is no gap between the deadline and the kernel's floor.
 #[test]
 #[ignore = "needs the VM"]
 fn connect_addr_within_times_out_against_a_full_accept_queue() {
@@ -1209,8 +1213,8 @@ pub fn main() {{
         Some(0),
         "expected a clean exit; no exit code means it was killed\n--- output ---\n{out}"
     );
-    // Parsed rather than substring-matched, and it panics on a missing line:
-    // an absent number and a slow one must not read the same.
+    // Parse the number rather than match a substring, and panic if the line is
+    // missing, so a missing number and a slow one don't read the same.
     let elapsed_ms: u64 = out
         .lines()
         .find_map(|l| l.trim().strip_prefix("timed-out "))
@@ -1227,17 +1231,17 @@ pub fn main() {{
 }
 
 /// `net.connect_within` against a listener that never accepts must hit its own
-/// deadline rather than the kernel's — the host-resolving twin of
+/// deadline rather than the kernel's. It's the host-resolving twin of
 /// `connect_addr_within_times_out_against_a_full_accept_queue` above.
 ///
-/// The elapsed time is the assertion, not the error variant, for the same
-/// reason as that test: both the bounded and the unbounded call end in
-/// `Err(TimedOut)` here, so only *when* it returns says whose deadline fired.
+/// We assert on the elapsed time, not the error variant, for the same reason
+/// as that test. Both the bounded and the unbounded call end in `Err(TimedOut)`
+/// here, so only *when* it returns says whose deadline fired.
 ///
 /// The address is an IP literal, so `resolve_until` inside `connect_until`
-/// answers for free and every millisecond measured here is spent in the
-/// connect step — this does not witness the deadline surviving a real
-/// hostname resolve, which is `resolve_within`'s own coverage above.
+/// answers for free and every millisecond measured here goes on the connect
+/// step. So this doesn't prove the deadline survives a real hostname resolve.
+/// `resolve_within`'s own tests cover that.
 #[test]
 #[ignore = "needs the VM"]
 fn connect_within_times_out_against_a_full_accept_queue() {
@@ -1272,8 +1276,8 @@ pub fn main() {{
         Some(0),
         "expected a clean exit; no exit code means it was killed\n--- output ---\n{out}"
     );
-    // Parsed rather than substring-matched, and it panics on a missing line:
-    // an absent number and a slow one must not read the same.
+    // Parse the number rather than match a substring, and panic if the line is
+    // missing, so a missing number and a slow one don't read the same.
     let elapsed_ms: u64 = out
         .lines()
         .find_map(|l| l.trim().strip_prefix("timed-out "))
@@ -1291,25 +1295,25 @@ pub fn main() {{
 
 /// `net.resolve_within` gives up on a lookup its deadline outlives.
 ///
-/// The two calls differ in *outcome*, not merely in timing, which is what lets
-/// this assert without a stopwatch: a deadline made inert leaves `localhost` to
-/// resolve and the first match prints `resolved` instead. The second call is
-/// the honest control — the same host on a budget it cannot miss — so a change
-/// that broke resolution outright could not pass by timing everything out.
+/// The two calls differ in *outcome*, not just in timing, so this can assert
+/// without a stopwatch. If the deadline did nothing, `localhost` would resolve
+/// and the first match would print `resolved` instead. The second call is the
+/// honest control, with the same host on a budget it can't miss. So a change
+/// that broke resolution outright couldn't pass by timing everything out.
 ///
 /// `localhost` comes from the hosts file, so no nameserver and no network are
-/// involved. No race decides this: a budget already spent is refused before the
-/// lookup is dispatched, so there is no completion for the timer to beat. That
-/// refusal is what this rests on — while the lookup was dispatched first the
-/// assertion was a genuine race, and it lost whenever the scheduler had other
-/// work to run, which is what
-/// `resolve_within_refuses_a_spent_budget_before_dispatching` pins down.
+/// involved. No race decides this. A budget already spent is refused before
+/// the lookup is dispatched, so there is no completion for the timer to beat.
+/// The test depends on that refusal. While the lookup was dispatched first, the
+/// assertion was a real race, and it lost whenever the scheduler had other work
+/// to run. `resolve_within_refuses_a_spent_budget_before_dispatching` checks
+/// that case.
 ///
-/// What this does not witness: that the bound helps against a resolver that is
-/// genuinely slow — only that a spent budget refuses without starting one. No
-/// fixture for the former is portable — a nameserver that answers nothing needs
-/// root to configure, and the one path that stalls without it (mDNS, measured
-/// at 5.0 s on Darwin) resolves differently on Linux.
+/// This doesn't prove the bound helps against a resolver that is really slow,
+/// only that a spent budget refuses without starting one. We have no portable
+/// fixture for a slow resolver. A nameserver that answers nothing needs root to
+/// set up, and the one path that stalls without it (mDNS, measured at 5.0 s on
+/// Darwin) resolves differently on Linux.
 #[test]
 #[ignore = "needs the VM"]
 fn resolve_within_gives_up_on_a_deadline_that_beats_the_lookup() {
@@ -1341,29 +1345,33 @@ pub fn main() {
     );
 }
 
-/// The end-to-end arm of the spent-budget rule: a `resolve_within(host, 0)`
-/// must time out even when the scheduler has other work to run.
+/// This is the end-to-end test of the spent-budget rule. A
+/// `resolve_within(host, 0)` must time out even when the scheduler has other
+/// work to run.
 ///
 /// The spawned process is the whole fixture. It leaves the scheduler something
-/// runnable, so a lookup handed to the blocking pool has time to finish and be
-/// queued before the parked process is polled again; `poll_parked` drains
+/// to run, so a lookup handed to the blocking pool has time to finish and be
+/// queued before the parked process is polled again. `poll_parked` drains
 /// completions before it wakes due timers, so a dispatched lookup then beats
-/// its own expired deadline and the program prints `resolved`. One scheduler is
-/// pinned because `try_donate` would otherwise hand the spinner to an idle
-/// peer, leaving this scheduler free to poll at once and the fixture inert.
+/// its own expired deadline and the program prints `resolved`. We pin one
+/// scheduler because otherwise `try_donate` would hand the spinner to an idle
+/// peer. This scheduler would then be free to poll at once, and the fixture
+/// would test nothing.
 ///
-/// This test is probabilistic — it rests on the spinner still spinning and on
-/// the pool winning a real race. The deterministic discriminator is the unit
-/// test `vm::io::tests::a_spent_resolve_deadline_is_refused_before_the_lookup_is_dispatched`,
-/// which drives the opcode directly and needs no scheduling at all. Measured
-/// with the refusal removed, aarch64-apple-darwin, debug (`test` profile),
-/// host busy with a live build fleet: 30 of 30 runs printed `resolved`, while
-/// the unspawned form passed 20 of 20 and witnessed nothing. The window is one
-/// reduction slice, so a release build or a quieter host may shrink it.
+/// This test is probabilistic, because it depends on the spinner still
+/// spinning and on the pool winning a real race. The unit test that catches it
+/// every time is
+/// `vm::io::tests::a_spent_resolve_deadline_is_refused_before_the_lookup_is_dispatched`,
+/// which drives the opcode directly and needs no scheduling at all. We measured
+/// it with the refusal removed, on aarch64-apple-darwin, in debug (`test`
+/// profile), with the host busy running a build fleet. 30 of 30 runs printed
+/// `resolved`, while the form without the spawn passed 20 of 20 and caught
+/// nothing. The window is one reduction slice, so a release build or a quieter
+/// host may shrink it.
 ///
-/// The `127.0.0.1` arm pins the other half of the rule: the deadline bounds the
-/// wait, not the work, so an address needing no lookup is still `Ok` on a spent
-/// budget. It is what fails if the refusal is ever hoisted above the
+/// The `127.0.0.1` arm checks the other half of the rule. The deadline bounds
+/// the wait, not the work, so an address that needs no lookup is still `Ok` on
+/// a spent budget. This arm fails if the refusal ever moves above the
 /// IP-literal case.
 #[test]
 #[ignore = "needs the VM"]

@@ -1,21 +1,21 @@
-//! The native (Cranelift) backend's contract, pinned against the language's
-//! intended semantics rather than against a second engine: every test runs a
-//! program once — under the one production configuration, lazy warmup and all —
-//! and asserts the exact bytes it must print. The fuzz test's expected output
-//! is computed in Rust by the generator itself (wrapping i64, `x/0 = 0`,
-//! `x%0 = x`), so a miscompile fails against ground truth even if it is
-//! consistent.
+//! These tests check the native (Cranelift) backend against the language's
+//! intended semantics, not against a second engine. Every test runs a program
+//! once, in the one production configuration with lazy warmup, and asserts the
+//! exact bytes it must print. The generator computes the fuzz test's expected
+//! output in Rust (wrapping i64, `x/0 = 0`, `x%0 = x`), so a miscompile fails
+//! against ground truth even if it is consistent.
 //!
-//! Warmup is part of the contract: a body compiles after
+//! Warmup is part of what we test. A body compiles after
 //! `NativeTable::WARM_CALLS` interpreted calls, so each scenario is built to
-//! cross that threshold mid-run — the interp→native boundary (and the return
-//! path back across it) is exercised by construction, not by a mode switch.
+//! cross that threshold mid-run. That way the program itself crosses from
+//! interpreter to native and back, with no mode switch.
 
 mod common;
 
 use common::{AlOutput, Project, wait_or_kill};
 
-/// `al <args..>` with explicit env overrides, bounded like `common::run_al`.
+/// Run `al <args..>` with explicit env overrides and a time limit, like
+/// `common::run_al`.
 fn run_al_env(args: &[&str], envs: &[(&str, &str)]) -> AlOutput {
     let bin = env!("CARGO_BIN_EXE_scarlet");
     let mut cmd = std::process::Command::new(bin);
@@ -77,10 +77,10 @@ fn assert_prints(tag: &str, src: &str, schedulers: Option<u32>, expected: &str) 
     );
 }
 
-/// (a) interp -> native -> interp sandwich. `leaf`'s recursion crosses the
-/// warmth threshold mid-run (leaf(8) alone is 8 calls), so later `leaf`
-/// frames run native while `middle`/`outer` stay interpreted: the boundary is
-/// crossed in both directions inside one program.
+/// (a) An interp -> native -> interp sandwich. `leaf`'s recursion crosses the
+/// warmth threshold mid-run (leaf(8) alone is 8 calls), so later `leaf` frames
+/// run native while `middle`/`outer` stay interpreted. So one program crosses
+/// the boundary in both directions.
 #[test]
 fn sandwich_crosses_the_warmup_boundary_mid_run() {
     let src = "import scarlet/array
@@ -106,11 +106,11 @@ pub fn main() {
     assert_prints("sandwich", src, None, "403920\n");
 }
 
-/// (b) a native caller whose interpreted callee parks. `caller` warms over
-/// the first 16 iterations; `pause` is reached only on the last 4, so by then
-/// a *native* `caller` frame sits under an interpreted callee that parks on a
-/// timer. The suspension must unwind through the native frame and the resume
-/// must find `x` — bound before the parking call, used after it — intact.
+/// (b) A native caller whose interpreted callee parks. `caller` warms over the
+/// first 16 iterations, and `pause` is reached only on the last 4. So by then a
+/// *native* `caller` frame sits under an interpreted callee that parks on a
+/// timer. The suspension must unwind through the native frame, and the resume
+/// must find `x` intact. `x` is bound before the parking call and used after.
 #[test]
 #[ignore = "needs the JIT and processes"]
 fn native_caller_parks_and_resumes_through_interpreted_callee() {
@@ -140,11 +140,11 @@ pub fn main() {
     assert_prints("native_park", src, Some(1), "600660\n");
 }
 
-/// (c) scheduling fairness. One scheduler; a self-tail spinner and a printer.
-/// `kick` warms `spin` past the threshold with plain calls, so the 20M-step
-/// loop runs native — and its compiled back-edge must checkpoint reductions
-/// like the interpreter's TailCallSelf, or the spinner starves the sibling
-/// and the output order inverts.
+/// (c) Scheduling fairness, with one scheduler running a self-tail spinner and
+/// a printer. `kick` warms `spin` past the threshold with plain calls, so the
+/// 20M-step loop runs native. Its compiled back-edge must checkpoint reductions
+/// like the interpreter's TailCallSelf. Otherwise the spinner starves the
+/// sibling and the output order flips.
 #[test]
 #[ignore = "needs the JIT and processes"]
 fn fairness_native_self_tail_loop_yields_to_sibling() {
@@ -175,10 +175,10 @@ pub fn main() {
     );
 }
 
-/// A body entered exactly once must still warm: the self-tail back-edge
-/// counts toward the threshold, and the crossing edge compiles the body and
-/// flips the running frame onto the fresh entry mid-loop. The debug line is
-/// the witness that the compile fired inside the single call.
+/// A body entered exactly once must still warm. The self-tail back-edge counts
+/// toward the threshold, and the edge that crosses it compiles the body and
+/// moves the running frame onto the fresh entry mid-loop. The debug line shows
+/// the compile fired inside the single call.
 #[test]
 #[ignore = "needs the JIT"]
 fn single_call_loop_warms_and_flips_mid_run() {
@@ -204,23 +204,23 @@ pub fn main() {
     );
 }
 
-/// A qualified constructor's match arm beside a catch-all, run hot. The
-/// ladder tests in `modules.rs` all run cold, and cold is the one
-/// configuration where the two engines cannot be seen to disagree: a ladder
-/// that tested the wrong name sent the interpreted iterations to the
-/// catch-all and not the compiled ones, so one program returned two answers
-/// inside one process, with no error on either stream.
+/// This runs a qualified constructor's match arm beside a catch-all, hot. The
+/// ladder tests in `modules.rs` all run cold, and cold is the one setup where
+/// we can't see the two engines disagree. A ladder that tested the wrong name
+/// sent the interpreted iterations to the catch-all but not the compiled ones.
+/// So one program returned two answers inside one process, with no error on
+/// either stream.
 ///
 /// `hit` is a separate body so it warms on call count, and 20,000 iterations
 /// put both sides of the threshold in the sum.
 ///
-/// `make` alternates the two constructors so the count pins the arm in both
-/// directions: a comparison that is wrongly false loses `Green`s and comes in
-/// under 10,000, and one that is wrongly true picks `Red`s up and comes in
-/// over. A `make` that returned `Green` every time would print 20,000 under a
-/// comparison that always said yes, so only false negatives would be caught.
-/// `assert_warmed` pins the warmth to `hit` by its own fn index — `drive` and
-/// `make` warm here too, so a bare "some body warmed" witness is satisfied
+/// `make` alternates the two constructors so the count catches a wrong arm in
+/// both directions. A comparison that is wrongly false loses `Green`s and comes
+/// in under 10,000, and one that is wrongly true picks up `Red`s and comes in
+/// over. If `make` returned `Green` every time, a comparison that always said
+/// yes would still print the right count, so only false negatives would be
+/// caught. `assert_warmed` checks that `hit` itself warmed, by its fn index.
+/// `drive` and `make` warm here too, so a check that "some body warmed" passes
 /// even when the body holding the match never leaves the interpreter.
 #[test]
 #[ignore = "needs the JIT"]
@@ -261,9 +261,9 @@ pub fn main() {
     assert_warmed(&out.stderr, "hit");
 }
 
-/// (d) Int spill past ±2^47, where Ints leave the NaN-box payload, and past 64
-/// bits, where they stay exact. The recursion warms both functions mid-run, so
-/// the pinned literals hold across the interp→native switch.
+/// (d) Ints spill past ±2^47, where they leave the NaN-box payload, and past
+/// 64 bits, where they stay exact. The recursion warms both functions mid-run,
+/// so the expected values must hold across the switch to native.
 #[test]
 fn int_overflow_spill_prints_pinned_values() {
     let src = "fn fact(n Int, acc Int) Int {
@@ -298,14 +298,14 @@ pub fn main() {
     );
 }
 
-/// Iterations of each bitwise loop in [`bitwise_ops_survive_the_native_bridge`].
-/// Far past `NativeTable::WARM_CALLS`, so all but the first handful of steps
-/// run compiled.
+/// How many times each bitwise loop in [`bitwise_ops_survive_the_native_bridge`]
+/// runs. It's far past `NativeTable::WARM_CALLS`, so all but the first few
+/// steps run compiled.
 const BITWISE_ROUNDS: i64 = 3_000_000;
 
 /// `rotor`'s step: rotate `bitwise_not(acc)` left by 7, then fold in `n`.
-/// Written from the language's stated semantics rather than called out of the
-/// VM, so it is ground truth and not a second opinion from the same code.
+/// We write it from the language's stated semantics rather than call into the
+/// VM, so it's ground truth and not a second opinion from the same code.
 fn rotor_step(acc: i64, n: i64) -> i64 {
     let a = !acc;
     let hi = ((a as u64) << 7) as i64;
@@ -314,7 +314,7 @@ fn rotor_step(acc: i64, n: i64) -> i64 {
 }
 
 /// `mixer`'s step. `0x4444…` is a strict subset of the `0xCCCC…` mask, so the
-/// bits OR contributes survive the AND and reach the printed value.
+/// bits that OR adds survive the AND and reach the printed value.
 fn mixer_step(acc: i64, n: i64) -> i64 {
     ((acc | 0x4444_4444_4444_4444_u64 as i64) & 0xCCCC_CCCC_CCCC_CCCC_u64 as i64) ^ n
 }
@@ -345,10 +345,10 @@ fn selected_index(stderr: &str, name: &str) -> String {
         })
 }
 
-/// Assert `name` actually crossed to native in this run — planned AND warmed.
-/// This is the negative control the bitwise test lacked: raise
-/// `NativeTable::WARM_CALLS` past the loop count and the JIT never runs, which
-/// a test named for the native bridge must notice.
+/// Assert that `name` really crossed to native in this run, meaning it was
+/// planned AND warmed. The bitwise test used to lack this control. If you raise
+/// `NativeTable::WARM_CALLS` past the loop count, the JIT never runs, and a
+/// test named for the native bridge must notice.
 fn assert_warmed(stderr: &str, name: &str) {
     let idx = selected_index(stderr, name);
     let needle = format!("al-native: warmed {idx} in");
@@ -358,33 +358,33 @@ fn assert_warmed(stderr: &str, name: &str) {
     );
 }
 
-/// (e) The integer bitwise ops across the interp→native switch. They lower as
-/// `OpCoverage::Bridge`, so a wrong arm in `run_bridge_op` is invisible to the
-/// interpreter-only golden program (`bitwise.sca` compiles only `ok`), and
-/// this test is the only thing holding the interpreter and the JIT together on
-/// these six ops.
+/// (e) The integer bitwise ops across the switch to native. They lower as
+/// `OpCoverage::Bridge`, so the interpreter-only golden program can't see a
+/// wrong arm in `run_bridge_op` (`bitwise.sca` compiles only `ok`). This test
+/// is the only thing that keeps the interpreter and the JIT in step on these
+/// six ops.
 ///
-/// **No operand here is an identity element, and that is the whole point.**
-/// The first version of this test made every loop an identity — `x ^ k ^ k`,
-/// `x << 1 >> 1`, `(x & -1) | 0` — and stayed green with `BIT_OR` wired to
-/// `bit_xor`, because `0` is the identity of OR *and* of XOR, so no downstream
-/// value can tell those two arms apart. `-1` does the same for AND and XOR;
-/// that plant was caught only because the natively-executed iteration count
-/// happened to be odd, which moving `WARM_CALLS` by one would have undone.
+/// **No operand here is an identity element, and the test depends on that.**
+/// The first version made every loop an identity (`x ^ k ^ k`, `x << 1 >> 1`,
+/// `(x & -1) | 0`). It stayed green with `BIT_OR` wired to `bit_xor`, because
+/// `0` is the identity of OR *and* of XOR, so no later value can tell those two
+/// arms apart. `-1` does the same for AND and XOR. That planted bug was caught
+/// only because the number of natively run iterations happened to be odd, and
+/// moving `WARM_CALLS` by one would have hidden it.
 ///
-/// So both loops evolve state instead, fold `n` in on every step so there is
-/// no fixed point to collapse onto, and pick operands that separate each arm
-/// from its siblings:
+/// So both loops evolve state instead. They fold `n` in on every step so there
+/// is no fixed point to collapse onto, and they pick operands that tell each
+/// arm apart from its siblings:
 ///
-/// - `rotor` rotates `bitwise_not(acc)` left by 7 — `shift_left 7`,
-///   `shift_right 57`, `and 127`. The two shift counts differ, so SHL and SHR
-///   never see the same operand, and neither count is 0.
-/// - `mixer` ORs in `0x4444…`, ANDs with `0xCCCC…`, XORs `n`. The OR bits are
-///   a strict subset of the AND mask, so what OR contributes is not masked
-///   away, and the accumulator carries those bits into the next round's OR —
-///   which is what makes OR and XOR disagree there.
+/// - `rotor` rotates `bitwise_not(acc)` left by 7, using `shift_left 7`,
+///   `shift_right 57` and `and 127`. The two shift counts differ, so SHL and
+///   SHR never see the same operand, and neither count is 0.
+/// - `mixer` ORs in `0x4444…`, ANDs with `0xCCCC…`, and XORs `n`. The OR bits
+///   are a strict subset of the AND mask, so the AND doesn't mask away what OR
+///   adds. The accumulator carries those bits into the next round's OR, and
+///   that's what makes OR and XOR disagree there.
 ///
-/// The expected output is recomputed in Rust from the same recurrence, so a
+/// We recompute the expected output in Rust from the same recurrence, so a
 /// miscompile fails against ground truth rather than against a second run.
 #[test]
 #[ignore = "needs the JIT, and its answers assume 64-bit Ints"]
@@ -411,8 +411,8 @@ pub fn main() {
 \tprintln(mixer(ROUNDS, 0 - 42))
 }
 ";
-    // One source of truth for the count: the Rust fold below must run exactly
-    // as many steps as the program does.
+    // Keep one source of truth for the count, because the Rust fold below must
+    // run exactly as many steps as the program does.
     let src = src.replace("ROUNDS", &BITWISE_ROUNDS.to_string());
     let expected = format!(
         "{}\n{}\n",
@@ -431,15 +431,14 @@ pub fn main() {
     assert_warmed(&out.stderr, "mixer");
 }
 
-/// `crypto.random_bytes` across the interp→native switch. Length is the
-/// observable that separates this arm from a sibling that returns some other
-/// `Result(Binary, Nil)` of a fixed size; two post-warmup draws must differ
-/// so a constant fill is not an identity the way `0` was for OR/XOR in the
-/// bitwise test above.
+/// `crypto.random_bytes` across the switch to native. The length tells this
+/// arm apart from a sibling that returns some other `Result(Binary, Nil)` of a
+/// fixed size. Two draws after warmup must differ, so a constant fill can't
+/// hide a wrong arm the way `0` did for OR/XOR in the bitwise test above.
 ///
-/// What this does NOT witness: cryptographic quality, or that the source is
-/// getrandom rather than another CSPRNG. The two-process test below is what
-/// refuses a fixed-seed userspace generator.
+/// This does NOT prove cryptographic quality, or that the source is getrandom
+/// rather than another CSPRNG. The two-process test below is the one that
+/// rejects a fixed-seed userspace generator.
 #[test]
 #[ignore = "needs the JIT"]
 fn random_bytes_survives_the_native_bridge() {
@@ -505,8 +504,8 @@ pub fn main() {
 }
 
 /// Two process runs must not produce the same 16 bytes. A `StdRng` seeded
-/// once in the source would pass every in-process check and fail here.
-/// Collision of two honest 16-byte CSPRNG draws is 2^-128.
+/// once in the source would pass every in-process check and fail here. The
+/// chance that two honest 16-byte CSPRNG draws collide is 2^-128.
 #[test]
 fn random_bytes_is_not_a_fixed_seed() {
     let src = "import scarlet/binary
@@ -535,7 +534,7 @@ pub fn main() {
     assert!(b.success, "second run failed:\n{}", b.stderr);
     assert_ne!(
         a.stdout, "FAIL\n",
-        "first run's OS CSPRNG failed; this test cannot witness a seed"
+        "first run's OS CSPRNG failed, so this test can't check for a fixed seed"
     );
     assert_ne!(
         a.stdout, b.stdout,
@@ -543,7 +542,8 @@ pub fn main() {
     );
 }
 
-/// xorshift64 — deterministic, seedable, no dependency.
+/// An xorshift64 generator. It's deterministic and seedable, and needs no
+/// dependency.
 struct Rng(u64);
 
 impl Rng {
@@ -576,8 +576,8 @@ const BOUNDARY: [i64; 8] = [
     999999937,
 ];
 
-// The intended Int semantics, in Rust: two's-complement wrap, total div/mod.
-// These are the ground truth the generated programs are checked against.
+// These are the intended Int semantics in Rust, with two's-complement wrap and
+// total div/mod. We check the generated programs against them.
 
 fn wadd(a: i64, b: i64) -> i64 {
     a.wrapping_add(b)
@@ -605,10 +605,10 @@ fn lit(v: i64) -> String {
     }
 }
 
-/// One generated expression: enough of the language to exercise arithmetic
-/// at the boundary constants, control flow, enum construction/dispatch,
-/// closures, reuse loops and cross-function calls — with an [`Expr::eval`]
-/// giving its intended value.
+/// One generated expression. It covers enough of the language to exercise
+/// arithmetic at the boundary constants, control flow, enum construction and
+/// dispatch, closures, reuse loops and cross-function calls. [`Expr::eval`]
+/// gives its intended value.
 enum Expr {
     Lit(i64),
     Temp(usize),
@@ -636,7 +636,7 @@ enum Expr {
         a1: Box<Expr>,
         a2: Box<Expr>,
     },
-    /// `spin_reuse(n, acc, s)` — see the preamble.
+    /// `spin_reuse(n, acc, s)`. See the preamble.
     SpinReuse {
         n: u64,
         acc: Box<Expr>,
@@ -649,14 +649,14 @@ enum Expr {
         m: u64,
         c: Box<Expr>,
     },
-    /// `pick_val(mk_pick(k, x, y), d)` — see the preamble.
+    /// `pick_val(mk_pick(k, x, y), d)`. See the preamble.
     PickVal {
         k: Box<Expr>,
         x: Box<Expr>,
         y: Box<Expr>,
         d: Box<Expr>,
     },
-    /// `spin_step(mk_pick(k, x, y), n, acc)` — see the preamble.
+    /// `spin_step(mk_pick(k, x, y), n, acc)`. See the preamble.
     SpinStep {
         k: Box<Expr>,
         x: Box<Expr>,
@@ -664,7 +664,7 @@ enum Expr {
         n: u64,
         acc: Box<Expr>,
     },
-    /// `f{idx}(a, b)` — a call to an earlier generated function.
+    /// `f{idx}(a, b)`, a call to an earlier generated function.
     Call(usize, Box<Expr>, Box<Expr>),
 }
 
@@ -847,7 +847,7 @@ impl Expr {
     }
 }
 
-/// Evaluate generated `f{idx}(a, b)`: each statement binds the next temp, and
+/// Evaluate generated `f{idx}(a, b)`. Each statement binds the next temp, and
 /// the body returns every temp plus both params, summed left to right.
 fn eval_fn(fns: &[Vec<Expr>], idx: usize, a: i64, b: i64) -> i64 {
     let mut temps: Vec<i64> = Vec::with_capacity(fns[idx].len());
@@ -859,11 +859,11 @@ fn eval_fn(fns: &[Vec<Expr>], idx: usize, a: i64, b: i64) -> i64 {
     wadd(wadd(sum, a), b)
 }
 
-/// Shared preamble for every fuzz program: helpers covering the heap shapes
-/// the generated bodies call into — enum construction and variant dispatch
-/// with payload binds, dynamically called closure parameters, and two reuse
-/// loops (`spin_reuse` carries its reuse slot across a self-tail back-edge;
-/// `spin_step` puts `Reuse` right before `TailCallSelf`).
+/// The preamble every fuzz program shares. Its helpers cover the heap shapes
+/// the generated bodies call into. They are enum construction and variant
+/// dispatch with payload binds, closure parameters called dynamically, and two
+/// reuse loops. `spin_reuse` carries its reuse slot across a self-tail
+/// back-edge, and `spin_step` puts `Reuse` right before `TailCallSelf`.
 const PREAMBLE: &str = "\
 type Pick {\n\
 \tOne(x Int)\n\
@@ -927,8 +927,8 @@ fn spin_step(p Pick, n Int, acc Int) Int {\n\
 \t}\n\
 }\n";
 
-/// A small positive literal for loop/list lengths. Counts never come from
-/// `operand`, which can yield huge boundary constants.
+/// A small positive literal for loop and list lengths. Counts never come from
+/// `operand`, which can return huge boundary constants.
 fn small_count(r: &mut Rng) -> u64 {
     1 + r.below(24)
 }
@@ -948,11 +948,11 @@ fn operand(r: &mut Rng, temps: usize) -> Expr {
     }
 }
 
-/// One generated function: a chain of let-bound statements over Int
-/// operands. Division and modulo need no guard — they are total in Scarlet
+/// One generated function, a chain of let-bound statements over Int operands.
+/// Division and modulo need no guard because they are total in Scarlet
 /// (x/0=0, x%0=x). Every temp and both params fold into the returned sum,
-/// since Scarlet errors on unused bindings, and each function past the first
-/// opens with a call to its predecessor.
+/// because Scarlet errors on unused bindings. Each function after the first
+/// opens with a call to the one before it.
 fn gen_fn(r: &mut Rng, idx: usize) -> Vec<Expr> {
     let stmts = 4 + r.below(7) as usize;
     let mut body = Vec::with_capacity(stmts);
@@ -963,8 +963,8 @@ fn gen_fn(r: &mut Rng, idx: usize) -> Vec<Expr> {
             0..=3 => Expr::Bin(r.below(5) as usize, o(r), o(r)),
             4 => Expr::IfCmp(r.below(6) as usize, o(r), o(r), o(r), o(r)),
             5 => Expr::Mod3(o(r), o(r), o(r), o(r)),
-            // Enum ctor at a runtime-selected variant, consumed by an
-            // exhaustive match with payload binds.
+            // Build an enum at a variant picked at runtime, and consume it with
+            // an exhaustive match with payload binds.
             6 => Expr::PickMatch {
                 k: o(r),
                 x: o(r),
@@ -973,27 +973,28 @@ fn gen_fn(r: &mut Rng, idx: usize) -> Vec<Expr> {
                 q: o(r),
                 z: o(r),
             },
-            // A closure over surrounding locals, called twice dynamically.
+            // A closure over the surrounding locals, called dynamically twice.
             7 => Expr::Closure {
                 m: o(r),
                 c: small_lit(r),
                 a1: o(r),
                 a2: o(r),
             },
-            // Loop-carried reuse across spin_reuse's self-tail back-edge.
+            // Reuse carried across spin_reuse's self-tail back-edge.
             8 => Expr::SpinReuse {
                 n: small_count(r),
                 acc: o(r),
                 s: o(r),
             },
-            // Cons-for-Cons reuse in chain_map, folded back to an Int.
+            // Reuse one Cons for another in chain_map, folded back to an Int.
             9 => Expr::ChainPipe {
                 n: small_count(r),
                 x: o(r),
                 m: 1 + r.below(9),
                 c: o(r),
             },
-            // Match-reconstruct reuse: Reuse right before TailCallSelf.
+            // Reuse a matched value to rebuild it, with Reuse right before
+            // TailCallSelf.
             10 => Expr::SpinStep {
                 k: o(r),
                 x: o(r),
@@ -1023,10 +1024,10 @@ fn render_fn(idx: usize, body: &[Expr]) -> String {
     format!("fn f{idx}(a Int, b Int) Int {{\n{src}}}\n")
 }
 
-/// One whole program plus its expected stdout: the preamble, 2-3 chained
-/// functions, and a `main` printing the last at random arguments plus one
-/// print composing every preamble shape, so no program skips that coverage
-/// when the per-statement dice miss it.
+/// One whole program plus its expected stdout. It has the preamble, 2-3
+/// chained functions, and a `main` that prints the last one at random
+/// arguments. `main` also prints one value that uses every preamble shape, so
+/// no program misses that coverage when the per-statement dice skip it.
 fn gen_program(r: &mut Rng) -> (String, String) {
     let nfns = 2 + r.below(2) as usize;
     let mut fns = Vec::with_capacity(nfns);
@@ -1080,9 +1081,9 @@ fn gen_program(r: &mut Rng) -> (String, String) {
     (src, expected)
 }
 
-/// (e) ~200 seeded random programs; each must print exactly the output the
-/// generator computed from the intended semantics. The seed is fixed, and a
-/// divergence panics with the program index and full source.
+/// (e) About 200 seeded random programs. Each must print exactly the output
+/// the generator computed from the intended semantics. The seed is fixed, and a
+/// mismatch panics with the program index and full source.
 #[test]
 #[ignore = "needs the JIT, and its answers assume 64-bit Ints"]
 fn fuzz_generated_programs_print_their_computed_values() {
@@ -1110,33 +1111,33 @@ fn fuzz_generated_programs_print_their_computed_values() {
 }
 
 /// How many `wire.encode`/`wire.decode` round trips the JIT test below runs.
-/// Only has to clear `NativeTable::WARM_CALLS` (8) by enough that most
-/// iterations execute natively; wire allocates on every round, so this is
+/// It only has to clear `NativeTable::WARM_CALLS` (8) by enough that most
+/// iterations run natively. Wire allocates on every round, so this is
 /// deliberately far smaller than `BITWISE_ROUNDS`.
 const WIRE_ROUNDS: i64 = 2_000;
 
-/// (f) Both wire ops across the interp→native switch. Nothing else holds the
-/// interpreter and the JIT together on them: every other wire test runs the
-/// interpreter only, so a wrong dispatch arm — `WIRE_ENCODE` wired to
-/// `wire_decode`, or an `op_coverage` class that disagrees with the arm the
-/// op is actually dispatched from — is invisible to all of them and shows up
-/// here as a wrong answer or an abort.
+/// (f) Both wire ops across the switch to native. Nothing else keeps the
+/// interpreter and the JIT in step on them, because every other wire test runs
+/// the interpreter only. So none of them can see a wrong dispatch arm, such as
+/// `WIRE_ENCODE` wired to `wire_decode`, or an `op_coverage` class that
+/// disagrees with the arm the op is really dispatched from. Here it shows up as
+/// a wrong answer or an abort.
 ///
-/// It is also the parity check their `OpCoverage` move rests on (T-466,
-/// T-340): they lower as `Bridge`, whose failure arm is a `proof_violation`
-/// abort, so a wrong arm here does not misbehave — it kills the process.
+/// Moving their `OpCoverage` (T-466, T-340) also relies on this parity check.
+/// They lower as `Bridge`, whose failure arm is a `proof_violation` abort, so a
+/// wrong arm here doesn't misbehave. It kills the process.
 ///
 /// The accumulator folds the decoded `n` in on every round, so there is no
-/// fixed point to collapse onto: a decode returning a constant, a stale value,
-/// or the wrong field changes the sum. A decode that fails at all lands on
-/// `0 - 1` and diverges immediately rather than reading as a quiet zero. The
-/// expected total is recomputed in Rust from the same recurrence, so a
+/// fixed point to collapse onto. A decode that returns a constant, a stale
+/// value or the wrong field changes the sum. A decode that fails at all lands
+/// on `0 - 1` and diverges at once, rather than reading as a quiet zero. We
+/// recompute the expected total in Rust from the same recurrence, so a
 /// miscompile fails against ground truth rather than against a second run of
 /// the same code.
 ///
-/// **What this does NOT witness**, deliberately: the byte format (that is
-/// T-341's golden, and a round trip shares its encoder and decoder so it
-/// cannot see a fault symmetric across both), and decode's behaviour on
+/// **This deliberately does NOT check** the byte format. That is T-341's
+/// golden, and a round trip shares its encoder and decoder, so it can't see a
+/// fault that is the same on both sides. Nor does it check how decode handles
 /// hostile bytes (T-343). This test is about the bridge, not the codec.
 #[test]
 #[ignore = "needs the JIT and wire"]
@@ -1162,9 +1163,9 @@ pub fn main() {
 ";
     let src = src.replace("ROUNDS", &WIRE_ROUNDS.to_string());
 
-    // Ground truth from the recurrence, not from the VM: the fold adds every
-    // `n` from WIRE_ROUNDS down to 0, and each `n` only arrives by surviving
-    // a full encode/decode round trip.
+    // Take ground truth from the recurrence, not from the VM. The fold adds
+    // every `n` from WIRE_ROUNDS down to 0, and each `n` only arrives by
+    // surviving a full encode/decode round trip.
     let expected = format!("{}\n", (0..=WIRE_ROUNDS).sum::<i64>());
 
     let proj = Project::new("wire_bridge");
@@ -1177,26 +1178,25 @@ pub fn main() {
     assert_warmed(&out.stderr, "churn");
 }
 
-/// (g) **Bad bytes are a value, not a VM error** — checked rather than argued,
-/// on the native arm.
+/// (g) **Bad bytes are a value, not a VM error.** This checks it on the native
+/// arm rather than arguing it.
 ///
-/// This is the fact that makes `OpCoverage::Try`'s own criterion — "can raise
-/// a runtime error *on user data*" — no longer describe `wire.decode`
-/// (T-466): a refusal is `Err(DecodeError)`, which the program matches on.
-/// It is also the precondition any future move to `Bridge` rests on, since
-/// `al_shim_op` answers a returned `Err` with `proof_violation`, a
-/// `std::process::abort`, so an op that raised on malformed input would abort
-/// the process on the JIT arm and nowhere else. Pinned here so the premise
-/// stays true rather than being re-derived from the code each time.
+/// `OpCoverage::Try` is for ops that "can raise a runtime error *on user
+/// data*", and this is why that no longer describes `wire.decode` (T-466): a
+/// refusal is `Err(DecodeError)`, which the program matches on. Any future move
+/// to `Bridge` also depends on it. `al_shim_op` answers a returned `Err` with
+/// `proof_violation`, a `std::process::abort`, so an op that raised on bad input
+/// would abort the process on the JIT arm and nowhere else. We test it here so
+/// it stays true, rather than working it out from the code each time.
 ///
-/// The bytes are deliberately not wire's at all — a fixed `<<1, 2, 3>>` fails
-/// the magic check. The assertion is on the printed refusal AND on exit
-/// status, because an abort and a clean `Err` differ in the status, not in
-/// stdout, and `out.success` is the only place that shows.
+/// The bytes are deliberately not wire's at all, and a fixed `<<1, 2, 3>>`
+/// fails the magic check. We assert on the printed refusal AND on the exit
+/// status. An abort and a clean `Err` differ in the status, not in stdout, and
+/// `out.success` is the only place that shows.
 ///
-/// **What this does NOT witness**: which `DecodeError` is right for which
-/// corruption, or truncation and single-byte mutation coverage — that is
-/// T-343. Here the only question is abort versus value.
+/// **This does NOT check** which `DecodeError` fits which corruption, or cover
+/// truncation and single-byte mutation. That is T-343. Here the only question
+/// is abort or value.
 #[test]
 #[ignore = "needs the JIT and wire"]
 fn a_wire_decode_refusal_is_a_value_on_the_native_bridge_not_an_abort() {
@@ -1216,8 +1216,8 @@ pub fn main() {
 ";
     let src = src.replace("ROUNDS", &WIRE_ROUNDS.to_string());
     // Every round must take the `Err` arm, so the count is the round count.
-    // `Ok(v) -> acc + v` also pins the payload to `Int`, which is what gives
-    // the call a descriptor to be refused against in the first place.
+    // `Ok(v) -> acc + v` also fixes the payload type to `Int`, which gives the
+    // call a descriptor for decode to refuse against in the first place.
     let expected = format!("{}\n", WIRE_ROUNDS + 1);
 
     let proj = Project::new("wire_bridge_refusal");

@@ -1,19 +1,19 @@
-//! Pattern checking: [`ModuleChecker::type_pattern`] and the constructor lookup
-//! and argument-slotting helpers it leans on.
+//! Checks patterns. This is [`ModuleChecker::type_pattern`], plus the helpers
+//! it uses to look up constructors and put their arguments in slots.
 
 use super::*;
 
 impl ModuleChecker<'_> {
-    /// Type-check a pattern against `expected` and resolve it: constructors to
-    /// their variants, and each name to a new binding, brought into scope as
-    /// the pattern reaches it. A segment's size expression is checked before
-    /// the segment's own value, so it sees the names earlier segments bind and
-    /// nothing later.
+    /// Type-check a pattern against `expected` and resolve it. Constructors
+    /// resolve to their variants, and each name to a new binding, which comes
+    /// into scope as the pattern reaches it. A segment's size expression is
+    /// checked before the segment's own value, so it sees the names that
+    /// earlier segments bind and nothing later.
     ///
     /// `binders` holds the binder of each name `b` has recorded, by its index
-    /// there. The `bool` is false when the pattern is ill-typed: the caller
-    /// must propagate it, so exhaustiveness checks, which assume well-typed
-    /// patterns, are skipped.
+    /// there. The `bool` is false when the pattern doesn't typecheck. The
+    /// caller must pass that on, so the exhaustiveness checks, which assume
+    /// well-typed patterns, are skipped.
     pub(super) fn type_pattern(
         &mut self,
         pat: &ast::Pattern,
@@ -154,13 +154,13 @@ impl ModuleChecker<'_> {
                         ast::ArrayPatternElement::Spread { binding, span: ssp } => {
                             if seen_spread {
                                 self.c.error(
-                                    "Array pattern may contain at most one spread".to_string(),
+                                    "An array pattern can only have one spread".to_string(),
                                     *ssp,
                                 );
                                 ok = false;
                             } else if i != elements.len() - 1 {
                                 self.c.error(
-                                    "Spread in array pattern must be the last element".to_string(),
+                                    "The spread in an array pattern must come last".to_string(),
                                     *ssp,
                                 );
                                 ok = false;
@@ -204,9 +204,10 @@ impl ModuleChecker<'_> {
                 binders,
             ),
             ast::Pattern::Or { first, rest, .. } => {
-                // The first alternative establishes the canonical binding set;
-                // `finish` folds the names into the enclosing frame so a later
-                // sibling binding still sees them for duplicate detection.
+                // The first alternative sets the canonical set of bindings.
+                // `finish` folds the names into the enclosing frame, so a later
+                // binding next to it still sees them when checking for
+                // duplicates.
                 let mut or = b.enter_or();
                 let (head, mut ok) = self.type_pattern(first, expected, &mut or.sink(), binders);
                 let mut alts = Vec::with_capacity(1 + rest.len());
@@ -226,8 +227,9 @@ impl ModuleChecker<'_> {
         }
     }
 
-    /// Bind a name a pattern reaches. `None` when it binds nothing readable:
-    /// a write-only `_name`, or one rejected with a diagnostic (`false`).
+    /// Bind a name a pattern reaches. It is `None` when it binds nothing you
+    /// can read, which is a `_name` or one rejected with a diagnostic
+    /// (`false`).
     fn bind_pattern_name(
         &mut self,
         id: &ast::Identifier,
@@ -249,9 +251,9 @@ impl ModuleChecker<'_> {
                 let sid = self.c.engine.intern(&id.name);
                 (binders.get(index).map(|&binder| (sid, binder)), true)
             }
-            // Registered so hover and go-to-definition see it. Nothing reads
-            // it, so it has no slot, and its discarded type is re-checked once
-            // inference is final.
+            // Register it so hover and go-to-definition see it. Nothing reads
+            // it, so it has no slot, and its discarded type is checked again
+            // once inference is final.
             Bound::WriteOnly => {
                 self.register_local_binding(&id.name, ty, id.span);
                 self.nil_discards.push((id.name.clone(), ty, id.span));
@@ -281,15 +283,16 @@ impl ModuleChecker<'_> {
         CtorLookup::from_scheme(*self.c.env.lookup(name)?)
     }
 
-    /// Resolve `io::NotFound` through the module qualifier. Every `None` path
-    /// has already reported its own diagnostic, so the caller must only
-    /// short-circuit, never report again.
+    /// Resolve `io::NotFound` through the module qualifier. Every path that
+    /// gives `None` has already reported its own diagnostic, so the caller must
+    /// only stop, and never report it again.
     fn lookup_ctor_qualified(&mut self, qual: &str, name: &str, span: Span) -> Option<CtorLookup> {
-        // A silent `None` would leave the module error-free, mint a
-        // `CleanModule`, and abort the elaborator on a program `al check` took.
+        // A silent `None` would leave the module with no errors, mint a
+        // `CleanModule`, and abort the elaborator on a program that
+        // `scarlet check` accepted.
         let Some(key) = self.imported_qualifiers.get(qual).cloned() else {
             self.c.error(
-                format!("Unknown module qualifier '{qual}'. Import the module before use."),
+                format!("Unknown module qualifier '{qual}'. Import the module first"),
                 span,
             );
             return None;
@@ -398,8 +401,8 @@ impl ModuleChecker<'_> {
             self.record(&qualified, inst, name.span, doc);
         }
         // A qualified pattern records the member use AND a use of the module
-        // alias, so unused-import liveness and rename see modules referenced
-        // only from patterns. Must mirror the expression path.
+        // alias, so the unused-import check and rename see modules that are
+        // only referred to from patterns. This must match the expression path.
         match qualifier {
             Some(q) => {
                 self.record_value_use(scheme.def, name.span, ReferenceKind::Qualified);
@@ -412,9 +415,10 @@ impl ModuleChecker<'_> {
         match self.c.engine.node(r) {
             TypeNode::Fun { params, ret } => {
                 let params: Vec<Ty> = self.c.engine.children_of(params).to_vec();
-                // Unify the constructor's return type with the expected subject
-                // type FIRST, so the param types share type-variable cells with
-                // the subject and recursing into args refines it.
+                // Unify the constructor's return type with the subject's
+                // expected type FIRST, so the parameter types share
+                // type-variable cells with the subject and recursing into the
+                // arguments refines it.
                 let mut ok = self.c.engine.unify_at(expected, ret, span);
 
                 let (by_pos, args_ok) = self.slot_ctor_args(
@@ -434,7 +438,7 @@ impl ModuleChecker<'_> {
                     },
                 );
                 ok &= args_ok;
-                // One sub-pattern per declared field; a field the source left
+                // One sub-pattern per declared field. A field the source left
                 // out matches anything.
                 let mut fields = Vec::with_capacity(arity);
                 for (i, sub) in by_pos.iter().enumerate() {
@@ -495,10 +499,10 @@ impl ModuleChecker<'_> {
         }
     }
 
-    /// Slot positional and labelled constructor args into field-declaration
-    /// order with [`slot_labeled`], rendering its errors as diagnostics plus a
-    /// missing-fields one when `missing` is `Some((span, hint))`. Shared by
-    /// ctor calls and patterns.
+    /// Put positional and labelled constructor arguments in the order the
+    /// fields are declared, with [`slot_labeled`]. Its errors become
+    /// diagnostics, plus one for missing fields when `missing` is
+    /// `Some((span, hint))`. Constructor calls and patterns both use this.
     pub(super) fn slot_ctor_args<'a, T>(
         &mut self,
         name: &str,
@@ -507,14 +511,14 @@ impl ModuleChecker<'_> {
         args: impl Iterator<Item = (Option<&'a ast::Identifier>, &'a T, Span)>,
         missing: Option<(Span, &str)>,
     ) -> (SmallVec<[Option<&'a T>; 4]>, bool) {
-        // Interning up front releases the `&mut engine` borrow before the
-        // `str_ids_of` slice is taken.
+        // Interning first releases the `&mut engine` borrow before we take the
+        // `str_ids_of` slice.
         type Item<'a, T> = (Option<StrId>, (&'a T, Span));
         let items: SmallVec<[Item<'a, T>; 4]> = args
             .map(|(l, v, sp)| (l.map(|l| self.c.engine.intern(&l.name)), (v, sp)))
             .collect();
-        // Exactly `arity` long: `slot_labeled` sizes its slots and resolves
-        // labels from this one slice, so the two cannot disagree.
+        // This is exactly `arity` long. `slot_labeled` sizes its slots and
+        // resolves labels from this one slice, so the two can't disagree.
         let field_ids: SmallVec<[StrId; 4]> =
             SmallVec::from_slice(self.c.engine.str_ids_of(field_labels));
         let fields: SmallVec<[Option<StrId>; 4]> =

@@ -1,24 +1,24 @@
-//! `scarlet lint` — the CLI half of the `.sca` illegal-state census.
+//! These test `scarlet lint`, the CLI half of the `.sca` illegal-state census.
 //!
 //! The census used to be `cargo xtask scrl-census` and is now
 //! `scarlet_core::lint`, so every assertion here drives the real binary rather
-//! than calling the library: a census reachable only from `scarlet_core` would
-//! leave the unit tests green while `scarlet lint` did nothing at all, which is
-//! the one failure the move can introduce.
+//! than calling the library. If the census were reachable only from
+//! `scarlet_core`, the unit tests would stay green while `scarlet lint` did
+//! nothing at all, and that's the one failure the move can introduce.
 //!
-//! What these do not witness is the census logic — which shapes it reports and
-//! which it declines to — that is unit-tested beside it in `scarlet_core::lint`.
+//! These don't test the census logic, meaning which shapes it reports and which
+//! it skips. That's unit-tested beside it in `scarlet_core::lint`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Two `Bool` fields in one constructor: the shape the census reports.
+/// Puts two `Bool` fields in one constructor, which is the shape the census reports.
 const CLUSTER: &str = "pub opaque type GateFlags {\n\tarmed Bool\n\tlatched Bool\n}\n";
 
-/// One `Bool` is under the floor, and the `Int` beside it is not a flag. This
-/// is the honest control — it runs in the same suite and stays quiet, so a red
-/// arm above is a red the fixture earned.
+/// One `Bool` is under the floor, and the `Int` beside it isn't a flag. This is
+/// the control. It runs in the same suite and stays quiet, so a failure above
+/// really comes from the fixture.
 const CLEAN: &str = "pub type Counter {\n\tcount Int\n}\n";
 
 fn fixture(name: &str, source: &str) -> PathBuf {
@@ -49,7 +49,7 @@ fn stdout_of(out: &std::process::Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// No path argument, so the root is the working directory. As an xtask this
+/// With no path argument, the root is the working directory. As an xtask this
 /// defaulted to `CARGO_MANIFEST_DIR`, which in a released binary would name the
 /// build machine's checkout instead of the caller's.
 #[test]
@@ -67,7 +67,7 @@ fn lint_surveys_the_working_directory_by_default() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// Run from a directory holding no corpus of its own, so a finding can only
+/// This runs from a directory with no corpus of its own, so a finding can only
 /// have come from the argument.
 #[test]
 fn lint_surveys_an_explicit_root() {
@@ -86,9 +86,9 @@ fn lint_surveys_an_explicit_root() {
 fn a_corpus_without_a_cluster_reports_none() {
     let dir = fixture("clean", CLEAN);
     let text = stdout_of(&lint(&[], &dir));
-    // `in 1 file(s)` and not just `0 finding(s)`: a census that surveyed
-    // nothing at all reports zero findings too, so the count of what was read
-    // is the half that separates quiet from inert.
+    // Check `in 1 file(s)` and not just `0 finding(s)`. A census that read
+    // nothing at all reports zero findings too, so the count of what it read is
+    // what tells a quiet run from one that did nothing.
     assert!(
         text.contains("0 finding(s) over 1 type declaration(s) in 1 file(s)")
             && text.contains("0 file(s) not inspected"),
@@ -115,8 +115,8 @@ fn min_bools_below_the_floor_is_refused() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// Raising the floor past the fixture's width takes the finding away — the
-/// flag reaches `lint::run` rather than being parsed and dropped.
+/// Raising the floor past the fixture's width removes the finding, which shows
+/// the flag reaches `lint::run` rather than being parsed and dropped.
 #[test]
 fn min_bools_above_the_cluster_width_reports_nothing() {
     let dir = fixture("raised_floor", CLUSTER);

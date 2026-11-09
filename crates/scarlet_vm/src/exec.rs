@@ -1,11 +1,11 @@
-//! The interpreter: runs loaded instructions.
+//! The interpreter, which runs loaded instructions.
 //!
 //! Frames live on a stack the VM owns, not on Rust's, so a deep recursion in
 //! a Scarlet program uses memory and never overflows anything. All frames'
-//! registers sit in one vector: a frame is a function, where it is in that
-//! function, and where its registers start.
+//! registers sit in one vector. A frame is a function, where it has got to in
+//! that function, and where its registers start.
 //!
-//! Reference counting follows one rule: every register, global and argument
+//! Reference counting follows one rule. Every register, global and argument
 //! holds one reference to its value. So copying a value into a register adds
 //! a reference, and overwriting a register, or leaving a frame, gives one up.
 //! Perceus's `Drop` gives one up early. This alone keeps every count right,
@@ -42,9 +42,9 @@ struct Frame<'c> {
     /// The caller's register the result goes to. `None` for the frame a run
     /// started with.
     ret_to: Option<Reg>,
-    /// The closure this frame runs as, holding one reference: a closure cell,
-    /// a function value, or `NIL` for a call by name. Its captures are what
-    /// `GetCapture` reads.
+    /// The closure this frame runs as, holding one reference. It is a closure
+    /// cell, a function value, or `NIL` for a call by name. Its captures are
+    /// what `GetCapture` reads.
     env: Value,
 }
 
@@ -75,8 +75,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     }
 
     /// Run every module's toplevel in order, then `main` if the program has
-    /// one. The result is the last thing run's value: `main`'s, or the entry
-    /// toplevel's for a script. The caller holds its reference.
+    /// one. The result is the value of the last thing run, which is `main`'s,
+    /// or the entry toplevel's for a script. The caller holds its reference.
     pub(crate) fn run(&mut self) -> Result<Value, Stop> {
         let mut last = Value::NIL;
         for top in &self.code.toplevels {
@@ -102,7 +102,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     }
 
     /// Call `body` with `args` and run until it returns. The arguments'
-    /// references pass to the callee; the result's passes to the caller.
+    /// references pass to the callee, and the result's passes to the caller.
     fn call(&mut self, body: &'c Body, args: &[Value]) -> Result<Value, Stop> {
         let base = self.regs.len();
         self.enter(body, base, args);
@@ -245,10 +245,10 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                         .iter()
                         .map(|r| self.share(self.get(base, *r)))
                         .collect();
-                    // Perceus reuse: the cell a `DropReuse` above hollowed
-                    // and left in `reuse`, moved out so the register no longer
-                    // holds it. Whatever else may be there is a value this
-                    // frame is done with, released as the register would have.
+                    // Perceus reuse. Move out the cell a `DropReuse` above
+                    // hollowed and left in `reuse`, so the register no longer
+                    // holds it. Anything else there is a value this frame is
+                    // done with, so release it as the register would have.
                     let parked = reuse.map(|r| self.take(base, r));
                     let fits = parked
                         .and_then(|v| v.as_cell())
@@ -269,9 +269,9 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 }
                 Instr::Drop { reg } => self.set(base, *reg, Value::NIL),
                 Instr::DropReuse { reg } => {
-                    // The register keeps a hollowed cell and its one
-                    // reference, so one no constructor takes is freed with the
-                    // frame, like any other register.
+                    // The register keeps the hollowed cell and its one
+                    // reference. If no constructor takes it, it is freed with
+                    // the frame, like any other register.
                     match self.get(base, *reg).as_cell() {
                         Some(cell) if self.heap.hollow(cell) => {}
                         _ => self.set(base, *reg, Value::NIL),
@@ -468,16 +468,16 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     intrinsic,
                     args,
                 } => {
-                    // The one built-in that asks about the run rather than its
-                    // arguments: how many frames are live, which only this
-                    // loop knows. A tail call reuses its frame, so a million
-                    // of them still count one.
+                    // `InternalStackDepth` is the one built-in that asks about
+                    // the run instead of its arguments. It wants how many
+                    // frames are live, which only this loop knows. A tail call
+                    // reuses its frame, so a million of them still count one.
                     let v = match intrinsic {
                         Intrinsic::InternalStackDepth => {
                             bigint::value(&mut self.heap, frames.len().into()).map_err(full)?
                         }
-                        // Read before the count of this call's own answer, so
-                        // asking does not change what it says.
+                        // Read the count before making this call's own answer,
+                        // so asking does not change what it says.
                         Intrinsic::InternalCellsMade => {
                             let n = self.heap.made();
                             bigint::value(&mut self.heap, n.into()).map_err(full)?
@@ -703,8 +703,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 let cell = binary::join(&mut self.heap, &[a, b]).map_err(full)?;
                 Ok(Value::cell(cell))
             }
-            // The ASCII built-ins read whole bytes only, as the old VM's did:
-            // a last byte that is not whole is left out.
+            // The ASCII built-ins read whole bytes only, as the old VM's did.
+            // A last byte that is not whole is left out.
             Intrinsic::BinaryByteAt => {
                 let b = self.binary(v)?;
                 let found = match self.int_of(arg(self, 1))? {
@@ -716,8 +716,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 let n = found.map_or(-1, i64::from);
                 bigint::value(&mut self.heap, n.into()).map_err(full)
             }
-            // From `from`, clamped to the binary; an empty needle is found
-            // where the search starts.
+            // The search starts at `from`, clamped to the binary. An empty
+            // needle is found where the search starts.
             Intrinsic::BinaryIndexOf => {
                 let hay = binary::whole_bytes(&self.heap, self.binary(v)?);
                 let needle = binary::whole_bytes(&self.heap, self.binary(arg(self, 1))?);
@@ -741,8 +741,9 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     None => Ok(Value::nullary(self.code.abi.none)),
                 }
             }
-            // Digits only, no sign: empty input or any other byte is `None`.
-            // An Int has no bounds, so no number is too large.
+            // This takes digits only, with no sign. Empty input or any other
+            // byte gives `None`. An Int has no bounds, so no number is too
+            // large.
             Intrinsic::BinaryParseInt => {
                 let digits = binary::whole_bytes(&self.heap, self.binary(v)?);
                 let base = self.radix(arg(self, 1))?;
@@ -774,7 +775,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     binary::make(&mut self.heap, &bytes, len).map_err(full)?,
                 ))
             }
-            // Lowercase hex, and a `-` before a negative number's digits.
+            // This writes lowercase hex, with a `-` before a negative
+            // number's digits.
             Intrinsic::BinaryFromIntAscii => {
                 let n = match self.int_of(v)? {
                     Int::Small(n) => num_bigint::BigInt::from(n),
@@ -840,8 +842,9 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                         .collect();
                 self.strings(&pieces)
             }
-            // An optional sign, then one or more ASCII digits, and nothing
-            // else. An Int has no bounds, so no number of digits is too many.
+            // This takes an optional sign, then one or more ASCII digits, and
+            // nothing else. An Int has no bounds, so no number of digits is
+            // too many.
             Intrinsic::IntFromString => {
                 let s = self.utf8_of(v)?;
                 let digits = s.strip_prefix(['+', '-']).unwrap_or(&s);
@@ -859,7 +862,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     None => Ok(Value::nullary(self.code.abi.none)),
                 }
             }
-            // An Int as an endless row of two's-complement bits (`int.sca`).
+            // These treat an Int as an endless row of two's-complement bits
+            // (`int.sca`).
             Intrinsic::IntBitwiseAnd | Intrinsic::IntBitwiseOr | Intrinsic::IntBitwiseXor => {
                 let (a, b) = (self.int_of(v)?.big(), self.int_of(arg(self, 1))?.big());
                 let n = match i {
@@ -903,8 +907,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 let ms = self.host.monotonic_ms();
                 bigint::value(&mut self.heap, ms.into()).map_err(full)
             }
-            // Negative before 1970: `duration_since` gives how far before as
-            // an error, and the sign goes back on.
+            // This is negative before 1970. Then `duration_since` gives how
+            // far before as an error, and we put the sign back on.
             Intrinsic::TimeEpochMs => {
                 let ms = match SystemTime::now().duration_since(UNIX_EPOCH) {
                     Ok(after) => num_bigint::BigInt::from(after.as_millis()),
@@ -912,8 +916,9 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 };
                 bigint::value(&mut self.heap, ms).map_err(full)
             }
-            // From the OS's own generator, never one of ours, and never
-            // zeros or anything else in place of bytes it did not give.
+            // The bytes come from the OS's own generator, never one of ours.
+            // We never give zeros or anything else in place of bytes it did
+            // not give.
             Intrinsic::CryptoRandomBytes => {
                 let n = match self.int_of(v)? {
                     Int::Small(n) => usize::try_from(n).ok(),
@@ -932,8 +937,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 let cell = binary::make(&mut self.heap, &bytes, n as u64 * 8).map_err(full)?;
                 self.ok(Value::cell(cell))
             }
-            // The digests and the tag are over bytes: a binary that is not
-            // whole bytes has none, rather than the digest of some bytes near
+            // The digests and the tag are over bytes. A binary that is not
+            // whole bytes has none, instead of the digest of some bytes near
             // it, which another binary would share.
             Intrinsic::CryptoSha1 | Intrinsic::CryptoSha256 | Intrinsic::CryptoSha512 => {
                 let Some(m) = self.whole_bytes(v)? else {
@@ -957,9 +962,9 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 let tag = aws_lc_rs::hmac::sign(&key, &msg);
                 self.ok_bytes(tag.as_ref())
             }
-            // The same bits, compared in time that depends on the lengths
-            // alone. The last byte of each is padded with zeros the same way,
-            // so equal lengths and equal bytes are equal bits.
+            // This checks for the same bits, in time that depends on the
+            // lengths alone. The last byte of each is padded with zeros the
+            // same way, so equal lengths and equal bytes mean equal bits.
             Intrinsic::CryptoConstEq => {
                 let (a, b) = (self.binary(v)?, self.binary(arg(self, 1))?);
                 let same = a.len == b.len
@@ -1028,7 +1033,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     }
                 }
             }
-            // -1 for a node the tape does not have: `scarlet/json` reads it.
+            // This gives -1 for a node the tape does not have, which
+            // `scarlet/json` checks for.
             Intrinsic::JsonKind | Intrinsic::JsonLen => {
                 let d = self.doc(v)?;
                 let t = self.tape(&d)?;
@@ -1132,7 +1138,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             Intrinsic::HttpParseHead | Intrinsic::HttpParseResponseHead => {
                 let buf = self.binary(v)?;
                 let off = self.offset(arg(self, 1), buf)?;
-                // Past the longest head there could be, and its empty lines.
+                // Take enough to reach past the longest head there could be,
+                // and its empty lines.
                 let window =
                     binary::bytes_from(&self.heap, buf, off as u64, http::MAX_HEAD as u64 + 16);
                 match i {
@@ -1466,8 +1473,9 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             .ok_or_else(|| Stop::BadProgram(format!("a binary operation on {v:?}")))
     }
 
-    /// The Int `v` as a width or position in bits: 0 below zero, as in the
-    /// old VM, and past any binary when it does not fit 64 bits.
+    /// The Int `v` as a width or position in bits. It is 0 below zero, as in
+    /// the old VM, and past the end of any binary when it does not fit in 64
+    /// bits.
     fn width(&self, v: Value) -> Result<u64, Stop> {
         Ok(match self.int_of(v)? {
             Int::Small(n) => u64::try_from(n).unwrap_or(0),
@@ -1510,7 +1518,9 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
         match (v.view(), self.code.abi.radix) {
             (View::Nullary(r), Some(radix)) if r == radix.dec => Ok(10),
             (View::Nullary(r), Some(radix)) if r == radix.hex => Ok(16),
-            _ => Err(Stop::BadProgram(format!("{v:?} as a `binary::Radix`"))),
+            _ => Err(Stop::BadProgram(format!(
+                "{v:?} as a `scarlet/binary.Radix`"
+            ))),
         }
     }
 
@@ -1617,8 +1627,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
         }
         let field = |i| self.heap.field(cell, i).ok_or_else(not_a_doc);
         let (arena, tape) = (field(0)?, field(1)?);
-        // A node past any tape, for an index no tape has: every read of it is
-        // `None`.
+        // An index no tape has becomes a node past any tape, so every read of
+        // it is `None`.
         let idx = match self.int_of(field(2)?)? {
             Int::Small(n) => usize::try_from(n).unwrap_or(usize::MAX),
             Int::Big(_) => usize::MAX,
@@ -1646,9 +1656,9 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
         Ok(Value::cell(cell))
     }
 
-    /// The `scarlet/json.Json` tree `root`, as JSON text. The walk is a list
-    /// of what is still to write rather than recursion, so a tree nested a
-    /// million deep encodes without overflowing the stack.
+    /// The `scarlet/json.Json` tree `root`, as JSON text. The walk keeps a
+    /// list of what is still to write instead of recursing, so a very deeply
+    /// nested tree encodes without overflowing the stack.
     fn encode_json(&self, root: Value) -> Result<Vec<u8>, Stop> {
         enum Step {
             Value(Value),
@@ -1698,7 +1708,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             } else if variant == types.str {
                 json::write_string(&mut out, &String::from_utf8_lossy(&self.text_of(inner)?));
             } else if variant == types.number {
-                // Text that is not a JSON number is `null`, rather than
+                // Text that is not a JSON number becomes `null`, instead of
                 // bytes that stop the whole document parsing at the far end.
                 let digits = self.text_of(inner)?;
                 if json::is_number(&digits) {
@@ -1757,8 +1767,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
         Ok(binary::bytes(&self.heap, self.binary(v)?))
     }
 
-    /// The byte offset `v` into `buf`, as `h1`'s offsets are: clamped to the
-    /// buffer.
+    /// The byte offset `v` into `buf`, clamped to the buffer as `h1`'s
+    /// offsets are.
     fn offset(&self, v: Value, buf: Bits) -> Result<usize, Stop> {
         let whole = usize::try_from(buf.len / 8).unwrap_or(usize::MAX);
         Ok(match self.int_of(v)? {
@@ -1836,7 +1846,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
         ))
     }
 
-    /// `variant(status)`: a refusal carrying the HTTP status it answers with.
+    /// `variant(status)`, which is a refusal carrying the HTTP status it
+    /// answers with.
     fn with_status(&mut self, variant: VariantRef, r: http::Reject) -> Result<Value, Stop> {
         let status = Value::int(r as i64).unwrap_or(Value::NIL);
         Ok(Value::cell(
@@ -1959,7 +1970,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             })
     }
 
-    /// The array `v` holds: a tree or a range.
+    /// The array `v` holds, as a tree or a range.
     fn seq(&self, v: Value) -> Result<Seq, Stop> {
         v.as_cell()
             .and_then(|cell| array::seq(&self.heap, cell))
@@ -1983,8 +1994,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
         }
     }
 
-    /// `s` as a tree, holding one reference: the tree itself, or a range's
-    /// elements built into one.
+    /// `s` as a tree, holding one reference. That is the tree itself, or a
+    /// range's elements built into one.
     fn tree(&mut self, s: Seq) -> Result<crate::heap::Cell, Stop> {
         match s {
             Seq::Tree(a) => {
@@ -2031,8 +2042,9 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
         }
     }
 
-    /// The Int `v` as a position in an array, or `None` when it names none:
-    /// negative, or a big int, which is past the end of any array.
+    /// The Int `v` as a position in an array, or `None` when it names none.
+    /// That is when it is negative, or a big int, which is past the end of
+    /// any array.
     fn position(&self, v: Value) -> Result<Option<usize>, Stop> {
         match v.view() {
             View::Int(i) => Ok(usize::try_from(i).ok()),
@@ -2049,7 +2061,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     }
 
     /// `a` with each of `items` pushed at `end`, in turn. Each item's
-    /// reference passes to the result; `a` is borrowed.
+    /// reference passes to the result, and `a` is borrowed.
     fn push_all(
         &mut self,
         a: crate::heap::Cell,
@@ -2066,7 +2078,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
         Ok(cur)
     }
 
-    /// The values in `regs`, each with one more reference: for passing on.
+    /// The values in `regs`, each with one more reference, for passing on.
     fn args(&mut self, base: usize, regs: &[Reg]) -> Vec<Value> {
         regs.iter()
             .map(|r| self.share(self.get(base, *r)))
@@ -2074,9 +2086,9 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     }
 
     /// The values a call passes. A moved argument hands over the reference its
-    /// register holds and leaves it empty, so the callee is the only holder;
-    /// every other one is shared. Read in order, because a register a later
-    /// argument moves may be one an earlier one still reads.
+    /// register holds and leaves it empty, so the callee is the only holder.
+    /// Every other one is shared. They are read in order, because a register
+    /// a later argument moves may be one an earlier one still reads.
     fn call_args(&mut self, base: usize, args: &[Arg]) -> Vec<Value> {
         args.iter()
             .map(|a| {
@@ -2142,8 +2154,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     /// position. Like [`Self::enter`], except that the cells Perceus parked
     /// for a constructor stay, so a loop overwrites the cell its last turn
     /// gave up. Each is the only reference to a cell holding nothing, and the
-    /// register still owns it, so one the loop never takes is freed when the
-    /// frame really ends.
+    /// register still owns it. So a cell the loop never takes is freed when
+    /// the frame really ends.
     fn again(&mut self, body: &Body, base: usize, args: &[Value]) {
         let top = base + body.regs as usize;
         while self.regs.len() > top {
@@ -2179,7 +2191,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
         }
     }
 
-    /// The value in `r`, moved out: the register is emptied and gives up
+    /// The value in `r`, moved out. The register is emptied and gives up
     /// nothing, so its one reference passes to the caller.
     fn take(&mut self, base: usize, r: Reg) -> Value {
         match self.regs.get_mut(base + r.0 as usize) {
@@ -2188,7 +2200,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
         }
     }
 
-    /// `v`, with one more reference: for when it goes somewhere new.
+    /// `v` with one more reference, for when it goes somewhere new.
     fn share(&mut self, v: Value) -> Value {
         if let Some(cell) = v.as_cell() {
             self.heap.share(cell);
@@ -2336,7 +2348,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
 
 /// `x` shifted `count` bits, left (times 2^count, exactly) or right (divided
 /// by 2^count, rounded down). A left shift past what an Int can hold is a
-/// full heap; a right shift past every bit leaves 0 or -1, by `x`'s sign.
+/// full heap. A right shift past every bit leaves 0 or -1, by `x`'s sign.
 fn shift(
     x: num_bigint::BigInt,
     left: bool,
@@ -2379,7 +2391,7 @@ fn ready(f: &Func) -> Result<&Body, Stop> {
     }
 }
 
-/// A `scarlet/json.Doc`, taken apart: the binaries it holds, borrowed, and
+/// A `scarlet/json.Doc` taken apart into the binaries it holds, borrowed, and
 /// the node it points at.
 struct Doc {
     arena: Value,
@@ -2401,8 +2413,9 @@ fn full(_: Full) -> Stop {
 mod tests {
     use super::*;
 
-    /// Run `src`, then release everything a finished run still holds: the
-    /// result and the globals. What is left is what reference counting lost.
+    /// Run `src`, then release everything a finished run still holds, which
+    /// is the result and the globals. What is left is what reference counting
+    /// lost.
     fn cells_left_after(src: &str) -> (String, usize) {
         cells_left_after_in(&Host::new(Vec::new(), Vec::new()), src)
     }
@@ -2473,7 +2486,7 @@ mod tests {
         assert_eq!(left, 0);
     }
 
-    /// Constructors hold references to what is in them: a list's cells, the
+    /// Constructors hold references to what is in them. A list's cells, the
     /// strings in them, and a record kept in a global are all freed.
     #[test]
     fn constructors_and_what_they_hold_are_all_freed() {
@@ -2504,7 +2517,7 @@ mod tests {
     }
 
     /// A match's arms read fields out of the value they match, and each field
-    /// read holds its own reference: walking, rebuilding and dropping lists
+    /// read holds its own reference. Walking, rebuilding and dropping lists
     /// of strings leaves nothing behind.
     #[test]
     fn what_a_match_reads_out_is_all_freed() {
@@ -2539,8 +2552,8 @@ mod tests {
         assert_eq!(left, 0);
     }
 
-    /// A closure holds its captures, and each call to it holds the closure:
-    /// closures made in a loop, returned, called and dropped leave nothing.
+    /// A closure holds its captures, and each call to it holds the closure.
+    /// Closures made in a loop, returned, called and dropped leave nothing.
     #[test]
     fn closures_and_their_captures_are_all_freed() {
         let (out, left) = cells_left_after(
@@ -2648,7 +2661,7 @@ mod tests {
     }
 
     /// A slice of a binary holds its owner, so the owner lives as long as any
-    /// slice of it, and no longer: a binary walked a byte at a time by a
+    /// slice of it, and no longer. A binary walked a byte at a time by a
     /// pattern, slices of slices and all, leaves nothing behind.
     #[test]
     fn binaries_and_their_slices_are_all_freed() {

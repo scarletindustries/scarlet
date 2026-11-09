@@ -1,11 +1,11 @@
-//! HTTP client read deadline: a peer that never sends must time out, and a
-//! peer that does send must still complete.
+//! These test the HTTP client's read deadline. A peer that never sends must
+//! time out, and a peer that does send must still complete.
 //!
 //! The hang case is the point. `client.plain` now closes over `socket.read_until`,
-//! so a silent accepted connection is `Transport(TimedOut)` rather than a park
-//! that outlives the suite. The success case is the control: a red hang test
-//! next to a green exchange means the deadline fired, not that the client
-//! cannot talk at all.
+//! so a connection that is accepted but stays silent ends as `Transport(TimedOut)`
+//! rather than parking past the end of the suite. The success case is the
+//! control: a failing hang test next to a passing exchange means the deadline
+//! fired, not that the client can't talk at all.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -135,8 +135,9 @@ fn http_send_until_times_out_against_a_silent_peer() {
     );
 }
 
-/// Control: the same `send_until` path returns the response a peer that does
-/// send. A red hang test next to this is a deadline, not a broken client.
+/// This is the control. The same `send_until` path returns the response from a
+/// peer that does send. A failing hang test next to this one means the deadline
+/// fired, not that the client is broken.
 #[test]
 #[ignore = "needs the VM"]
 fn http_send_until_returns_a_response() {

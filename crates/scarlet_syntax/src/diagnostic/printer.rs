@@ -6,9 +6,9 @@ use super::{Diagnostic, Severity, count_errors};
 use crate::module_path::ModuleKey;
 use crate::term::Palette;
 
-/// A detected editor plus the canonical path to link to. Only constructed once
-/// color is on, an editor was found and the path canonicalized, so holding one
-/// is proof the link can be emitted.
+/// A detected editor and the canonical path to link to. It's only built once
+/// colour is on, an editor was found and the path canonicalised, so holding one
+/// proves the link can be written.
 struct LinkTarget {
     editor: Editor,
     abs_path: String,
@@ -44,17 +44,18 @@ fn get_source_line<'a>(lines: &'a [&'a str], line_number: i32) -> &'a str {
     lines[(line_number - 1) as usize]
 }
 
-/// The canonicalized absolute path of `file_path`. A `Some` implies the file
-/// exists, which is the proof [`LinkTarget`] requires.
+/// The canonical absolute path of `file_path`. A `Some` means the file exists,
+/// which is the proof [`LinkTarget`] needs.
 fn canonical_path(file_path: &str) -> Option<String> {
     std::fs::canonicalize(file_path)
         .ok()
         .and_then(|p| p.to_str().map(|s| s.to_string()))
 }
 
-/// Lazily-detected editor, shared by every link in one render. Detection forks
-/// `ps`, so it runs at most once and only after a path has canonicalized: the
-/// REPL's `<repl>` never does, so it never pays the fork.
+/// The editor, detected lazily and shared by every link in one render.
+/// Detection forks `ps`, so it runs at most once, and only after a path has
+/// canonicalised. The REPL's `<repl>` never does, so the REPL never pays for
+/// the fork.
 struct EditorProbe {
     enabled: bool,
     detected: Option<Option<Editor>>,
@@ -163,17 +164,18 @@ fn format_diagnostic_header(d: &Diagnostic, file_path: &str, p: &Palette) -> Str
     )
 }
 
-/// A resolved non-entry source: owned text plus the path to display.
+/// A source other than the entry file, with its text and the path to show.
 struct ResolvedSource {
     file_path: String,
     text: String,
     link: Option<LinkTarget>,
 }
 
-/// Print `diagnostics` to stderr. `source`/`file_path` are the ENTRY file, what
-/// diagnostics with `source: None` render against. One stamped with a
-/// `ModuleKey` renders against `resolve(&key)` instead, or header-only when the
-/// resolver has no answer — never a snippet sliced from the wrong file.
+/// Prints `diagnostics` to stderr. `source` and `file_path` are the entry
+/// file, which diagnostics with `source: None` render against. A diagnostic
+/// stamped with a `ModuleKey` renders against `resolve(&key)` instead, or as a
+/// header alone when the resolver has no answer. It never gets a snippet
+/// sliced from the wrong file.
 pub fn print_diagnostics(
     diagnostics: &[Diagnostic],
     source: &str,
@@ -186,8 +188,9 @@ pub fn print_diagnostics(
     }
 }
 
-/// [`print_diagnostics`] as a pure function of its inputs, modulo the palette
-/// and editor detection, which read the environment.
+/// [`print_diagnostics`], returning the text instead. Only the palette and
+/// editor detection read the environment; everything else comes from the
+/// inputs.
 pub fn render_diagnostics(
     diagnostics: &[Diagnostic],
     source: &str,
@@ -202,8 +205,8 @@ pub fn render_diagnostics(
         link: editor.link_target(file_path),
     };
 
-    // `None` is cached too, so an unresolvable module is not re-probed per
-    // diagnostic.
+    // Cache `None` too, so a module that doesn't resolve isn't probed again
+    // for each diagnostic.
     let mut resolved: HashMap<&ModuleKey, Option<ResolvedSource>> = HashMap::new();
     for key in diagnostics.iter().filter_map(|d| d.source.as_ref()) {
         resolved.entry(key).or_insert_with(|| {
@@ -228,7 +231,8 @@ pub fn render_diagnostics(
                     let view = SourceView {
                         file_path: &r.file_path,
                         lines: r.text.lines().collect(),
-                        // Cached, rather than re-canonicalizing per diagnostic.
+                        // Reuse the cached link rather than canonicalising
+                        // again for each diagnostic.
                         link: r.link.as_ref().map(|l| LinkTarget {
                             editor: l.editor,
                             abs_path: l.abs_path.clone(),

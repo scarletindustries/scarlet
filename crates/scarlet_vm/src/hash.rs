@@ -1,20 +1,21 @@
 //! A value's hash, which places it in a map (`map.rs`).
 //!
 //! Two values that are `==` always hash the same, so the hash reads a value
-//! the way `eq.rs` compares one: an Int by its number, a Float with its two
+//! the way `eq.rs` compares one. It reads an Int by its number, both Float
 //! zeros as one, a range as the array of its Ints, a slice as the bits it
-//! shows, a map by its entries. Each value goes in as a tag saying what it is,
-//! then its parts, with a count before any run of them, so two different
-//! values never feed the same words.
+//! shows and a map by its entries. Each value goes in as a tag saying what it
+//! is, then its parts, with a count before any run of them. So two different
+//! values never feed in the same words.
 //!
-//! The hash is SipHash-1-3 (Aumasson & Bernstein, 2012), the one Rust's own
-//! `HashMap` uses, with a fixed key. Fixed, so a map's order is the same on
-//! every run and every machine. SipHash, so that even knowing the key, making
-//! many keys share a whole 64-bit hash is out of reach: a map only slows down
-//! for keys whose whole hashes are equal, and those it keeps in a list.
+//! The hash is SipHash-1-3 (Aumasson & Bernstein, 2012), which Rust's own
+//! `HashMap` uses, with a fixed key. The key is fixed so a map's order is the
+//! same on every run and every machine. We use SipHash because, even if you
+//! know the key, you can't make many keys share a whole 64-bit hash. A map
+//! only slows down for keys whose whole hashes are equal, and it keeps those
+//! in a list.
 //!
-//! Like `==`, the walk is a list of values still to hash rather than
-//! recursion, so a list a million long hashes without overflowing the stack.
+//! Like `==`, the walk keeps a list of values still to hash instead of
+//! recursing, so a very long list hashes without overflowing the stack.
 
 use crate::array::{self, Seq};
 use crate::binary;
@@ -127,9 +128,9 @@ fn cell(heap: &Heap, cell: Cell, s: &mut Sip<1, 3>, todo: &mut Vec<Value>) {
             counted(s, todo, heap.elements(cell).collect());
         }
         // Equal maps have the same shape (`map.rs`), so their entries come
-        // out in the same order. All but the keys a collision holds, which
-        // are in the order they went in: those add up their own hashes,
-        // which comes out the same in any order.
+        // out in the same order. The exception is the keys in a collision,
+        // which keep the order they went in. So we add up their hashes
+        // instead, because a sum is the same in any order.
         Kind::Map => {
             s.tag(Tag::Map);
             s.word(map::size(heap, cell));

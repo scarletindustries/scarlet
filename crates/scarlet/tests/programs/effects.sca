@@ -1,4 +1,4 @@
-// The effectful stdlib, pinned to the parts of it that are deterministic:
+// This tests the effectful stdlib, limited to the parts that are deterministic:
 // scarlet/io (files), scarlet/time (both clocks) and scarlet/process (argv/env).
 //
 // Nothing here may print a value the environment chooses — a raw Instant, an

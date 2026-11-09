@@ -16,7 +16,7 @@ use common::{
 
 const C_SRC: &str = "pub fn shared() Int { 42 }\n";
 const B_SRC: &str = "import ./c\npub fn bridge() Int { c::shared() + 1 }\n";
-// Entry uses a def in B, a def in C (also used by B), and a stdlib def.
+// The entry uses a definition in B, one in C (which B also uses), and one from the stdlib.
 const ENTRY: &str = "import ./b\n\
 import ./c\n\
 import scarlet/array\n\
@@ -39,8 +39,8 @@ fn checked(p: &Project) -> IncrementalSession {
     checked_with(p, ENTRY)
 }
 
-/// Unused-entity diagnostics for the entry module: asserts every one is a
-/// Hint and returns their messages.
+/// Gets the unused-entity diagnostics for the entry module, asserts every one
+/// is a Hint, and returns their messages.
 fn unused_msgs(s: &IncrementalSession) -> Vec<String> {
     let hints = s
         .reference_graph()
@@ -153,7 +153,7 @@ fn document_and_workspace_symbols() {
     let main = s.document_symbols("main");
     assert_has_sym(&main, "array", EntityKind::ModuleAlias);
 
-    // Substring search, case-insensitive.
+    // The search matches substrings and ignores case.
     assert_has_sym(&s.workspace_symbols("SHAR"), "shared", EntityKind::Function);
     assert!(
         s.workspace_symbols("definitely_no_such_symbol").is_empty(),
@@ -302,7 +302,7 @@ fn incremental_edit_b_keeps_refs_then_invalidate_drops_reverse_edges() {
         "entry use lost after B edit: {refs1:?}"
     );
 
-    // B drops `bridge`: the graph rebuild must leave no dangling reverse edge.
+    // B drops `bridge`, so the rebuilt graph must leave no dangling reverse edge.
     p.write("b.sca", "pub fn other() Int { 7 }\n");
     let entry2 = "import ./b\npub fn main() {\n\tprintln(b::other())\n}\n";
     p.write("a.sca", entry2);
@@ -456,7 +456,7 @@ pub fn main() {\n\
 \tprintln(total)\n\
 }\n";
 
-/// Drive goto-def + prepare_rename + find-references + rename for one entity
+/// Drives goto-def, prepare_rename, find-references and rename for one entity
 /// through the session query API. The 1st occurrence of `needle` in `src` is
 /// always the declaration; `use_nth` (1-based) selects the use site to click.
 fn assert_nav(
@@ -586,8 +586,8 @@ fn session_checks_http_h1_program_clean() {
     checked_with(&p, HTTP_ENTRY);
 }
 
-// Two checks in one session: arena truncation between them must not corrupt
-// the stdlib types hydrated for the second.
+// Run two checks in one session. Arena truncation between them must not
+// corrupt the stdlib types hydrated for the second.
 #[test]
 fn session_recheck_keeps_stdlib_types_intact() {
     let p = Project::new("http_session_recheck");
@@ -633,7 +633,7 @@ fn session_hydrates_h1_after_http_in_earlier_check() {
 // An entry type whose name collides with a seeded stdlib type overwrites the
 // `type_info` entry in place (`IndexMap::insert` keeps the pre-watermark
 // index), so truncate-by-length rollback cannot restore it. The env's
-// overwrite journal is what fixes that; this pins it.
+// overwrite journal fixes that, and this test pins it.
 const SHADOWING_ENTRY: &str = "type Parsed = Result(Int, String)\n\
 fn f(x Int) Parsed {\n\
 \tOk(x)\n\
@@ -669,7 +669,7 @@ fn entry_type_shadowing_stdlib_name_is_undone_on_next_check() {
 }
 
 /// The unused-import rule keys off the `Qualified` *member* occurrence, not the
-/// `Qualifier`. Find-all-references does list the qualifier — see
+/// `Qualifier`. Find-all-references does list the qualifier; see
 /// `lsp_handlers::find_refs_on_module_alias_lists_the_qualifier`.
 #[test]
 fn qualified_member_use_keeps_the_import_live_but_a_bare_import_still_warns() {

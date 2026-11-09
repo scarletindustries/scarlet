@@ -36,8 +36,8 @@ enum ArmRecovery {
     Resume,
 }
 
-/// A parsed source file: top-level body, module doc comment, and every
-/// scanner/parser diagnostic.
+/// A parsed source file: its top-level body, its module doc comment, and
+/// every diagnostic from the scanner and the parser.
 pub struct ParseResult {
     pub ast: ast::BlockExpression,
     pub doc: Option<String>,
@@ -76,9 +76,9 @@ pub(crate) fn new_parser_from_tokens(
     mut tokens: Vec<Token>,
     scanner_diagnostics: Vec<Diagnostic>,
 ) -> Parser {
-    // Every loop exits on Eof, so the stream must end with one. The scanner
-    // always appends it; enforce it here so a hand-built stream that forgot
-    // the terminator cannot send the parser out of bounds.
+    // Every loop stops at Eof, so the stream must end with one. The scanner
+    // always adds it, but check here so a hand-built stream that forgot it
+    // can't send the parser out of bounds.
     if tokens.last().map(|t| &t.kind) != Some(&Kind::Eof) {
         let span = tokens.last().map_or(Span::DUMMY, |t| {
             Span::point(t.span.end_line, t.span.end_column)
@@ -101,9 +101,10 @@ pub(crate) fn new_parser_from_tokens(
     }
 }
 
-// Whether a token begins a type annotation in let/const binding position.
-// Lowercase identifiers do not count: free type variables are meaningless
-// there. Param and return positions admit them and use `at_loose_type_start`.
+// Whether a token starts a type annotation on a binding or a `const`. A
+// lowercase name doesn't count, because a free type variable means nothing
+// there. Parameter and return positions allow them and use
+// `at_loose_type_start`.
 fn is_type_start_token(tok: &Token) -> bool {
     match &tok.kind {
         Kind::Keyword(Keyword::Fn) => true,
@@ -113,9 +114,9 @@ fn is_type_start_token(tok: &Token) -> bool {
     }
 }
 
-// Bounds recursive-descent depth so pathologically nested input is a parse
-// error instead of a native stack overflow. The parser is the sole AST
-// producer, so this transitively bounds every downstream AST walker.
+// Limits recursive-descent depth, so deeply nested input is a parse error
+// rather than a native stack overflow. The parser is the only thing that
+// builds an AST, so this also limits every AST walker that runs after it.
 //
 // 128 must stay small enough that the deepest native-frame path (~7 frames per
 // depth unit through the precedence chain) cannot overflow the ~2 MiB libtest
@@ -123,14 +124,18 @@ fn is_type_start_token(tok: &Token) -> bool {
 const MAX_PARSE_DEPTH: u32 = 128;
 
 impl Parser {
-    // Runs `f` one level deeper. No `?` between increment and decrement, so
-    // the counter stays balanced on the Err path and error recovery resumes at
-    // the right depth.
+    // Runs `f` one level deeper. There's no `?` between the increment and the
+    // decrement, so the counter stays balanced on the Err path and error
+    // recovery resumes at the right depth.
     fn with_recursion_guard<T>(&mut self, f: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
         self.depth += 1;
         if self.depth > MAX_PARSE_DEPTH {
             self.depth -= 1;
-            return Err("expression or type nesting too deep".to_string());
+            return Err(
+                "This expression or type is nested too deeply. Pull part of it out into a \
+                 named value or type"
+                    .to_string(),
+            );
         }
         let r = f(self);
         self.depth -= 1;
@@ -148,10 +153,10 @@ impl Parser {
         }
     }
 
-    // Pops on both the Ok and Err paths, so a `?` inside `f` cannot leave a
-    // stale context to misdirect a later `synchronize()`. Constructs that
-    // recover in place (block/array/match) still push/pop directly, because
-    // they must act on their own `SyncOutcome`.
+    // Pops on both the Ok and Err paths, so a `?` inside `f` can't leave a
+    // stale context behind to mislead a later `synchronize()`. Blocks, arrays
+    // and matches recover in place, so they still push and pop directly: they
+    // have to act on their own `SyncOutcome`.
     fn with_context<T>(
         &mut self,
         ctx: ParseContext,
@@ -168,7 +173,8 @@ impl Parser {
         *self.context_stack.last().unwrap_or(&ParseContext::TopLevel)
     }
 
-    /// Single emit path for parser diagnostics at an arbitrary span.
+    /// Reports a parse error at `span`. [`Parser::add_error`] reports one at
+    /// the current token instead.
     fn error_at(&mut self, span: Span, message: impl Into<String>) {
         self.diagnostics.push(Diagnostic::error(
             span,
@@ -178,8 +184,8 @@ impl Parser {
     }
 
     fn add_error(&mut self, message: String) {
-        // Stuck on EOF means the error is an unexpected-EOF by construction,
-        // so tag it structurally rather than by message text.
+        // An error at EOF is an unexpected EOF by construction, so tag it from
+        // the token rather than from the message text.
         let code = if self.kind() == Kind::Eof {
             DiagnosticCode::UnexpectedEof
         } else {
@@ -220,11 +226,11 @@ impl Parser {
         self.prev_token_end_column = sp.end_column;
     }
 
-    // Skips tokens until a plausible resumption point for the current context.
-    // Never touches the context stack: the frame that pushed always pops.
-    // Terminates structurally: every iteration either returns or ends in the
-    // unconditional `advance()` at the bottom, so progress is one token per
-    // pass and Eof is reached in at most token-count iterations.
+    // Skips tokens until a good place to resume in the current context. It
+    // never touches the context stack, because the frame that pushed a context
+    // always pops it. It always ends: each pass either returns or reaches the
+    // `advance()` at the bottom, so it moves one token per pass and reaches Eof
+    // within as many passes as there are tokens.
     fn synchronize(&mut self) -> SyncOutcome {
         let ctx = self.current_context();
 
@@ -288,8 +294,8 @@ impl Parser {
         SyncOutcome::AtItem
     }
 
-    // Error recovery inside a `match` arm: record, synchronize, and classify
-    // where recovery landed.
+    // Recovers from an error inside a `match` arm: reports it, synchronises,
+    // and says where recovery stopped.
     fn recover_in_arm(&mut self, err: String) -> ArmRecovery {
         self.add_error(err);
         if self.synchronize() == SyncOutcome::ConsumedCloser {
@@ -302,8 +308,8 @@ impl Parser {
         }
     }
 
-    // Error recovery for top-level and block node loops: record, synchronize,
-    // and produce an error node for the unparseable region.
+    // Recovers from an error in a top-level or block node loop: reports it,
+    // synchronises, and builds an error node for the region it couldn't parse.
     fn recover_node(&mut self, err: String, span: Span) -> (ast::Node, SyncOutcome) {
         self.add_error(err.clone());
         let outcome = self.synchronize();
@@ -328,7 +334,7 @@ impl Parser {
             return Ok(());
         }
 
-        Err(format!("Expected '{}', got '{}'", kind, self.cur()))
+        Err(format!("Expected '{}', but found '{}'", kind, self.cur()))
     }
 
     // Consumes the current token and returns its text when `extract` matches
@@ -344,7 +350,7 @@ impl Parser {
                 self.index += 1;
                 Ok(text)
             }
-            None => Err(format!("{}, got '{}'", message, self.cur())),
+            None => Err(format!("{}, but found '{}'", message, self.cur())),
         }
     }
 
@@ -422,8 +428,8 @@ impl Parser {
         Some(doc)
     }
 
-    // `open` then zero or more comma-separated items then `close`. Allows a
-    // trailing comma.
+    // Parses `open`, then zero or more items separated by commas, then
+    // `close`. A trailing comma is allowed.
     fn parse_comma_list<T>(
         &mut self,
         open: Kind,
@@ -444,11 +450,12 @@ impl Parser {
         Ok(items)
     }
 
-    /// Items inside a type body: one per line. `noun` names them in the error.
+    /// Parses the items in a type body, one per line. `noun` names them in
+    /// the error.
     ///
-    /// The newline is the separator, not merely permitted whitespace, so
-    /// source cannot drift from what `al fmt` emits. A comma at a separator
-    /// position is a hard error: the items are self-delimiting.
+    /// The newline is the separator, not just allowed whitespace, so source
+    /// can't drift from what `scarlet fmt` writes. A comma between items is an
+    /// error, because each item already shows where it ends.
     fn parse_line_separated_list<T>(
         &mut self,
         close: Kind,
@@ -460,11 +467,11 @@ impl Parser {
         while self.kind() != close && self.kind() != Kind::Eof {
             if self.kind() == Kind::PuncComma {
                 return Err(format!(
-                    "unexpected `,` — each {noun} goes on its own line, not comma-separated"
+                    "Put each {noun} on its own line, without a `,` between them"
                 ));
             }
             if prev_end_line == Some(self.current_span().start_line) {
-                return Err(format!("each {noun} must be on its own line"));
+                return Err(format!("Put each {noun} on its own line"));
             }
             items.push(item(self)?);
             prev_end_line = Some(self.prev_token_end_line);
@@ -504,7 +511,7 @@ impl Parser {
                 continue; // a newline separates
             }
             return Err(
-                "fields on one line are separated by commas: `Name(a Int, b String)`".to_string(),
+                "Separate fields on one line with commas, like `Name(a Int, b String)`".to_string(),
             );
         }
         Ok(items)
@@ -514,9 +521,10 @@ impl Parser {
         is_type_start_token(self.cur())
     }
 
-    // Look ahead for a depth-0 `=` before a depth-0 newline: tells `x Type =`
-    // / `x =` (binding) from `xs[0]` / `Ctor(args)` (expression). A type-start
-    // heuristic instead would misfire on uppercase ctors and `(` tuple types.
+    // Looks ahead for an `=` at depth 0 before a newline at depth 0. That
+    // tells a binding (`x Type =`, `x =`) from an expression (`xs[0]`,
+    // `Ctor(args)`). Guessing from whether a type starts here would misfire on
+    // uppercase constructors and `(` tuple types.
     fn is_binding_ahead(&self) -> bool {
         let mut depth = 0i32;
         let mut i = self.index + 1;
@@ -543,9 +551,9 @@ impl Parser {
         false
     }
 
-    // Look ahead for `ident (, ident)* <-` on one line: a backpass statement.
-    // Anything else (a lone `<` comparison, a binding, a call) falls through
-    // to the other statement/expression paths.
+    // Looks ahead for `ident (, ident)* <-` on one line, which starts a
+    // backpass statement. Anything else (a lone `<` comparison, a binding, a
+    // call) falls through to the other statement and expression paths.
     fn is_backpass_ahead(&self) -> bool {
         let mut i = self.index;
         while matches!(
@@ -579,8 +587,8 @@ impl Parser {
         false
     }
 
-    // By value: parsing moves the diagnostics out, so a parser cannot be run
-    // twice (the second run would report an empty program, silently).
+    // Takes the parser by value. Parsing moves the diagnostics out, so a
+    // second run would silently report an empty program.
     pub fn parse_program(mut self) -> ParseResult {
         let program_span = self.current_span();
         let doc = self.take_module_doc();
@@ -596,7 +604,10 @@ impl Parser {
                         ast::Node::Statement(s) if matches!(**s, ast::Statement::ImportDeclaration(_))
                     );
                     if is_import && seen_non_import {
-                        self.error_at(node.span(), "Imports must precede all other declarations");
+                        self.error_at(
+                            node.span(),
+                            "Put imports at the top of the file, before any other declaration",
+                        );
                     }
                     if !is_import {
                         seen_non_import = true;
@@ -704,7 +715,7 @@ impl Parser {
             if matches!(self.kind(), Kind::Identifier(_))
                 && self.peek_next() == Some(Kind::PuncArrow)
             {
-                receiver = Some(self.eat_identifier("Expected identifier for or receiver")?);
+                receiver = Some(self.eat_identifier("Expected a name for the error after `or`")?);
                 self.eat(Kind::PuncArrow)?;
             }
 
@@ -722,11 +733,11 @@ impl Parser {
         Ok(left)
     }
 
-    // `left |> right`: sugar for `right(left, ...)`, rewritten by
-    // `crate::desugar` before type checking (ast::PipeExpression's doc has
-    // the full story). Left-associative and looser than every binary
-    // operator, so a whole arithmetic/comparison/boolean expression is one
-    // pipeline stage — mirrors Gleam, where `|>` is the loosest operator.
+    // `left |> right` is sugar for `right(left, ...)`, and `crate::desugar`
+    // rewrites it before type checking (`ast::PipeExpression` explains why).
+    // It's left-associative and looser than every binary operator, so a whole
+    // arithmetic, comparison or boolean expression is one pipeline stage. This
+    // matches Gleam, where `|>` is the loosest operator.
     fn parse_pipe_expression(&mut self) -> PResult<ast::Expression> {
         let mut left = self.parse_binary_expression()?;
 
@@ -744,9 +755,9 @@ impl Parser {
         Ok(left)
     }
 
-    // Binary-operator precedence ladder, loosest first; each level is a
-    // left-associative chain over the next. Range splices in at RANGE_LEVEL;
-    // past the table comes unary.
+    // The binary operators by precedence, loosest first. Each level is a
+    // left-associative chain over the next. Ranges sit between RANGE_LEVEL and
+    // the level after it, and unary operators come after the last level.
     const PRECEDENCE: &[&[(Kind, ast::BinaryOp)]] = &[
         &[(Kind::LogicalOr, ast::BinaryOp::Or)],
         &[(Kind::LogicalAnd, ast::BinaryOp::And)],
@@ -899,7 +910,8 @@ impl Parser {
                 }
                 Kind::PuncMinusminus => {
                     return Err(
-                        "Decrement operator (--) is not supported. Values are immutable in Scarlet - use `x = x - 1` with shadowing instead."
+                        "Scarlet has no `--` operator, because values never change. Write \
+                         `x = x - 1` to shadow `x` with a new value instead"
                             .to_string(),
                     );
                 }
@@ -921,13 +933,12 @@ impl Parser {
             } else if matches!(&p.cur().kind, Kind::Identifier(n) if !is_type_name(n))
                 && p.peek_next() == Some(Kind::PuncColon)
             {
-                let label = p.eat_identifier("Expected argument label")?;
+                let label = p.eat_identifier("Expected an argument label")?;
                 p.eat(Kind::PuncColon)?;
                 // `label:` with nothing before the next `,` or `)` is
-                // punning sugar for `label: label` — desugar it here so
-                // every later pass sees an ordinary labeled argument, and
-                // remember that it was punned so the formatter can render
-                // it back the way it was written.
+                // shorthand for `label: label`. Expand it here so every later
+                // pass sees an ordinary labelled argument, and record that it
+                // was punned so the formatter can write it back the same way.
                 if matches!(p.kind(), Kind::PuncComma | Kind::PuncCloseParen) {
                     let value = ast::Expression::Identifier(label.clone());
                     Ok(ast::CallArg::Labeled {
@@ -959,7 +970,7 @@ impl Parser {
             Kind::InterpStringStart => self.parse_interpolated_string()?,
             Kind::LiteralNumber(_) => self.parse_number_expression()?,
             Kind::Identifier(_) => {
-                let id = self.eat_identifier("Expected identifier")?;
+                let id = self.eat_identifier("Expected a name")?;
                 if self.kind() == Kind::PuncColonColon {
                     self.parse_module_access(id)?
                 } else {
@@ -977,12 +988,15 @@ impl Parser {
                 let span = self.current_span();
                 self.advance();
                 ast::Expression::ErrorNode(ast::ErrorNode {
-                    message: "Scanner error".to_string(),
+                    message: "This text could not be read".to_string(),
                     span,
                 })
             }
             _ => {
-                return Err(format!("Unexpected '{}'", self.cur()));
+                return Err(format!(
+                    "Expected an expression, but found '{}'",
+                    self.cur()
+                ));
             }
         };
 
@@ -1047,7 +1061,7 @@ impl Parser {
                     if self.kind() == Kind::Keyword(Keyword::Else) {
                         self.advance();
                     }
-                    let msg = "Expected expression after `..` in array literal".to_string();
+                    let msg = "Expected a value after `..` in an array, like `[..xs]`".to_string();
                     self.error_at(spread_span, msg.clone());
                     Ok(ast::ArrayElement::SpreadElement(ast::SpreadElement {
                         expression: ast::Expression::ErrorNode(ast::ErrorNode {
@@ -1105,8 +1119,8 @@ impl Parser {
         }))
     }
 
-    // `<<seg, seg, ..>>` bit-string literal. A bare segment is an 8-bit Int,
-    // except a bare string, which is its UTF-8 bytes.
+    // Parses a `<<seg, seg, ..>>` bit-string literal. A segment with no size
+    // is an 8-bit Int, except a string, which is its UTF-8 bytes.
     fn parse_binary_literal(&mut self) -> PResult<ast::Expression> {
         let start = self.current_span();
         let segments = self.parse_comma_list(Kind::BinOpen, Kind::BinClose, |p| {
@@ -1134,8 +1148,8 @@ impl Parser {
     //   :bytes(expr)-> expr bytes, Binary slice
     //   :binary     -> remaining bytes, Binary
     //   :utf8       -> UTF-8 bytes
-    // Absent: 8-bit Int with size left None (codegen supplies 8), except when
-    // `value_is_string`, which defaults to Utf8.
+    // With no suffix it's an 8-bit Int with the size left as None (codegen
+    // fills in 8), unless `value_is_string`, which defaults to Utf8.
     fn parse_bin_size_spec(&mut self, value_is_string: bool) -> PResult<ast::BinSpec> {
         if self.kind() != Kind::PuncColon {
             return Ok(if value_is_string {
@@ -1148,7 +1162,7 @@ impl Parser {
 
         if matches!(self.kind(), Kind::LiteralNumber(_)) {
             let span = self.current_span();
-            let value = self.eat_number("Expected bit width")?;
+            let value = self.eat_number("Expected a bit width")?;
             let n = ast::Expression::NumberLiteral(ast::NumberLiteral { value, span });
             return Ok(ast::BinSpec::Int { bits: Some(n) });
         }
@@ -1182,7 +1196,8 @@ impl Parser {
         }
 
         Err(format!(
-            "Expected segment size spec (an integer, `bytes(..)`, `size(..)`, `binary`, or `utf8`), got '{}'",
+            "Expected a segment size after `:`, which is a number, `size(..)`, `bytes(..)`, \
+             `binary` or `utf8`, but found '{}'",
             self.cur()
         ))
     }
@@ -1193,7 +1208,8 @@ impl Parser {
 
         if self.kind() == Kind::PuncCloseParen {
             return Err(
-                "tuples need 2+ elements; for unit use 'Nil', for grouping use '{expr}'"
+                "A tuple needs at least two elements. Write `Nil` for no value, or `{ expr }` \
+                 to group an expression"
                     .to_string(),
             );
         }
@@ -1202,7 +1218,11 @@ impl Parser {
         elements.push(self.parse_expression()?);
 
         if self.kind() == Kind::PuncCloseParen {
-            return Err("single-element parens not allowed; use '{expr}' for grouping".to_string());
+            return Err(
+                "Parentheses can't hold just one expression. Write `{ expr }` to group it, or \
+                 add another element to make a tuple"
+                    .to_string(),
+            );
         }
 
         while self.kind() == Kind::PuncComma {
@@ -1229,9 +1249,9 @@ impl Parser {
         self.eat(Kind::Keyword(Keyword::If))?;
 
         let condition = self.parse_expression()?;
-        // `then` is a keyword only here, right after the condition: an
-        // expression can never go on with a name, so this is the one place
-        // it can mean anything, and `result.then` stays a function.
+        // `then` is a keyword only here, right after the condition. An
+        // expression can never continue with a name, so this is the only
+        // place `then` can mean anything, and `result.then` stays a function.
         let then_keyword =
             matches!(self.kind(), Kind::Identifier(ref name) if &**name == token::THEN);
         let body = if then_keyword {
@@ -1240,17 +1260,20 @@ impl Parser {
         } else if self.kind() == Kind::PuncOpenBrace {
             self.parse_expression()?
         } else {
-            return Err("'if' needs `then` or a block `{ ... }` after its condition".to_string());
+            return Err(
+                "An `if` needs `then` or a block `{ ... }` after its condition".to_string(),
+            );
         };
 
         if self.kind() != Kind::Keyword(Keyword::Else) {
-            return Err("'if' requires an 'else' branch".to_string());
+            return Err("An `if` needs an `else` branch".to_string());
         }
         self.eat(Kind::Keyword(Keyword::Else))?;
-        // Any expression: `else { .. }`, `else if ..`, or `else not_found()`.
-        // An `else if` goes through the guarded wrapper so each rung re-enters
-        // the depth guard; otherwise a long ladder recurses at constant depth
-        // and overflows the native stack.
+        // Any expression can follow: `else { .. }`, `else if ..` or
+        // `else not_found()`. An `else if` goes through the guarded wrapper so
+        // each step counts towards the depth limit. Otherwise a long chain
+        // would recurse without raising the count and overflow the native
+        // stack.
         let else_body = if self.kind() == Kind::Keyword(Keyword::If) {
             self.parse_if_expression()?
         } else {
@@ -1366,7 +1389,7 @@ impl Parser {
 
             if self.kind() == Kind::PuncComma {
                 self.add_error(
-                    "unexpected `,` — match arms are separated by newlines, not commas".to_string(),
+                    "Match arms go on separate lines, without a `,` between them".to_string(),
                 );
                 self.eat(Kind::PuncComma)?;
             }
@@ -1386,8 +1409,8 @@ impl Parser {
 
     fn parse_pattern(&mut self) -> PResult<ast::Pattern> {
         let start = self.current_span();
-        // Optional leading separator, TypeScript-union style: `| A | B` ≡
-        // `A | B`. The formatter never emits it; accepting it lets every
+        // Allow a leading `|`, as TypeScript unions do: `| A | B` means
+        // `A | B`. The formatter never writes it, but accepting it lets every
         // alternative of a hand-wrapped or-pattern start its line with a pipe.
         if self.kind() == Kind::BitwiseOr {
             self.eat(Kind::BitwiseOr)?;
@@ -1437,7 +1460,10 @@ impl Parser {
             ast::Pattern::Literal(ast::PatternLiteral::Number(n)) => n,
             other => {
                 let span = other.span();
-                self.error_at(span, "Range pattern bounds must be number literals");
+                self.error_at(
+                    span,
+                    "Both ends of a range pattern must be number literals, like `1..10`",
+                );
                 ast::NumberLiteral {
                     value: "0".to_string(),
                     span,
@@ -1488,20 +1514,22 @@ impl Parser {
         let start = self.current_span();
         match self.kind() {
             Kind::Keyword(Keyword::Else) => Err(
-                "'else' is not a pattern; bind a name or use '_' as the fallback arm".to_string(),
+                "`else` is not a pattern. Use `_` or a name for the arm that matches everything \
+                 else"
+                    .to_string(),
             ),
             Kind::Identifier(_) => {
                 let id_span = self.current_span();
-                let name = self.eat_name("Expected pattern")?;
-                // `io::NotFound(path)`: a ctor reached through a module
-                // qualifier, so it need not be imported by name.
+                let name = self.eat_name("Expected a pattern")?;
+                // `io::NotFound(path)` reaches a constructor through its
+                // module's name.
                 if self.eat_module_separator(&name)? {
                     let q = ast::Identifier {
                         name,
                         span: id_span,
                     };
                     let member_span = self.current_span();
-                    let member = self.eat_name("Expected constructor name")?;
+                    let member = self.eat_name("Expected a constructor name")?;
                     return self.finish_ctor_pattern(Some(q), member, member_span, start);
                 }
                 if is_type_name(&name) {
@@ -1516,14 +1544,14 @@ impl Parser {
             }
             Kind::LiteralNumber(_) => {
                 let span = self.current_span();
-                let value = self.eat_number("Expected number")?;
+                let value = self.eat_number("Expected a number")?;
                 Ok(ast::Pattern::Literal(ast::PatternLiteral::Number(
                     ast::NumberLiteral { value, span },
                 )))
             }
             Kind::PuncMinus => {
                 self.eat(Kind::PuncMinus)?;
-                let value = self.eat_number("Expected number after `-`")?;
+                let value = self.eat_number("Expected a number after `-`")?;
                 Ok(ast::Pattern::Literal(ast::PatternLiteral::Number(
                     ast::NumberLiteral {
                         value: format!("-{value}"),
@@ -1533,7 +1561,7 @@ impl Parser {
             }
             Kind::LiteralString(_) => {
                 let span = self.current_span();
-                let value = self.eat_string("Expected string")?;
+                let value = self.eat_string("Expected a string")?;
                 Ok(ast::Pattern::Literal(ast::PatternLiteral::String(
                     ast::StringLiteral { value, span },
                 )))
@@ -1544,7 +1572,7 @@ impl Parser {
                         p.parse_pattern()
                     })?;
                 if elements.len() < 2 {
-                    return Err("tuple patterns need 2+ elements".to_string());
+                    return Err("A tuple pattern needs at least two elements".to_string());
                 }
                 Ok(ast::Pattern::Tuple {
                     elements,
@@ -1559,7 +1587,7 @@ impl Parser {
                             p.eat(Kind::PuncDotdot)?;
                             let mut binding: Option<ast::Identifier> = None;
                             if matches!(p.kind(), Kind::Identifier(_)) {
-                                binding = Some(p.eat_identifier("Expected binding after `..`")?);
+                                binding = Some(p.eat_identifier("Expected a name after `..`")?);
                             }
                             Ok(ast::ArrayPatternElement::Spread {
                                 binding,
@@ -1575,13 +1603,14 @@ impl Parser {
                 })
             }
             Kind::BinOpen => self.parse_binary_pattern(),
-            _ => Err(format!("Unexpected '{}' in pattern", self.cur())),
+            _ => Err(format!("Expected a pattern, but found '{}'", self.cur())),
         }
     }
 
-    // `<<seg, seg, .., rest:binary>>` bit-string pattern. Segment values are
-    // atom patterns only; the size spec is shared with the expression form.
-    // A trailing `..ident` / `..` captures the rest and must be last.
+    // Parses a `<<seg, seg, .., rest:binary>>` bit-string pattern. A segment's
+    // value can only be an atom pattern, and its size spec is the same as in
+    // the expression form. A trailing `..ident` or `..` captures the rest and
+    // must come last.
     fn parse_binary_pattern(&mut self) -> PResult<ast::Pattern> {
         let start = self.current_span();
         self.eat(Kind::BinOpen)?;
@@ -1593,15 +1622,13 @@ impl Parser {
             if self.kind() == Kind::PuncDotdot {
                 self.eat(Kind::PuncDotdot)?;
                 let binding = if matches!(self.kind(), Kind::Identifier(_)) {
-                    Some(self.eat_identifier("Expected binding after `..`")?)
+                    Some(self.eat_identifier("Expected a name after `..`")?)
                 } else {
                     None
                 };
                 rest = Some(ast::BinaryPatternRest { binding });
                 if self.kind() == Kind::PuncComma {
-                    return Err(
-                        "`..` rest must be the last segment in a `<<>>` pattern".to_string()
-                    );
+                    return Err("`..` must be the last segment in a `<<>>` pattern".to_string());
                 }
                 break;
             }
@@ -1649,7 +1676,7 @@ impl Parser {
             if matches!(&self.cur().kind, Kind::Identifier(n) if !is_type_name(n))
                 && self.peek_next() == Some(Kind::PuncColon)
             {
-                let label = self.eat_identifier("Expected pattern label")?;
+                let label = self.eat_identifier("Expected a field label")?;
                 self.eat(Kind::PuncColon)?;
                 // `name:` with nothing after it binds the field to `name`.
                 let punned = matches!(self.kind(), Kind::PuncComma | Kind::PuncCloseParen);
@@ -1702,7 +1729,7 @@ impl Parser {
         let fn_span = self.current_span();
         self.eat(Kind::Keyword(Keyword::Fn))?;
 
-        let identifier = self.eat_identifier("Expected function name")?;
+        let identifier = self.eat_identifier("Expected a function name")?;
 
         let params = self.parse_parameters()?;
         let return_type = self.parse_function_return_type()?;
@@ -1715,19 +1742,19 @@ impl Parser {
             if self.kind() == Kind::PuncOpenBrace {
                 return Err("@vm functions cannot have a body".to_string());
             }
-            // Arity is enforced here, once: everything downstream assumes
-            // `FnBody::Vm` carries exactly the op key.
+            // Check the argument count here, once, because everything after
+            // this assumes `FnBody::Vm` carries exactly the op key.
             let op = match vm_attr.args.as_slice() {
                 [op] => op.clone(),
                 _ => {
                     return Err(
-                        "@vm takes exactly one argument: the VM op key, e.g. @vm(add)".to_string(),
+                        "@vm takes exactly one argument, the VM op key, like @vm(add)".to_string(),
                     );
                 }
             };
             ast::FnBody::Vm(op)
         } else {
-            ast::FnBody::Block(self.parse_braced_body("Function body")?)
+            ast::FnBody::Block(self.parse_braced_body("A function body")?)
         };
 
         Ok(ast::Declaration::Function(ast::FunctionDeclaration {
@@ -1760,8 +1787,9 @@ impl Parser {
         ))
     }
 
-    // Whether a token begins a type in param/return position. Any identifier
-    // qualifies: these positions admit lowercase type variables.
+    // Whether the current token starts a type in a parameter or return
+    // position. Any name counts, because these positions allow lowercase type
+    // variables.
     fn at_loose_type_start(&self) -> bool {
         matches!(
             self.kind(),
@@ -1785,7 +1813,7 @@ impl Parser {
     }
 
     fn parse_parameter(&mut self) -> PResult<ast::FunctionParameter> {
-        let identifier = self.eat_identifier("Expected parameter name")?;
+        let identifier = self.eat_identifier("Expected a parameter name")?;
 
         let mut typ: Option<ast::TypeIdentifier> = None;
 
@@ -1808,7 +1836,7 @@ impl Parser {
                     p.parse_type_identifier()
                 })?;
             if elements.len() < 2 {
-                return Err("tuple types need 2+ elements".to_string());
+                return Err("A tuple type needs at least two elements".to_string());
             }
             return Ok(ast::TypeIdentifier {
                 kind: ast::TypeKind::TupleType(ast::TupleType { elements }),
@@ -1821,15 +1849,15 @@ impl Parser {
         }
 
         let span = self.current_span();
-        let name = self.eat_name("Expected type name")?;
+        let name = self.eat_name("Expected a type name")?;
 
-        // `module::Type` — the first name is an import qualifier, the second
-        // names the type inside that module.
+        // In `module::Type`, the first name is the imported module and the
+        // second names the type inside it.
         let mut qualifier: Option<ast::Identifier> = None;
         let mut identifier = ast::Identifier { name, span };
         if self.eat_module_separator(&identifier.name)? {
             let member_span = self.current_span();
-            let member = self.eat_name("Expected type name after `::`")?;
+            let member = self.eat_name("Expected a type name after `::`")?;
             qualifier = Some(identifier);
             identifier = ast::Identifier {
                 name: member,
@@ -1883,7 +1911,7 @@ impl Parser {
             return Ok(Vec::new());
         }
         self.parse_comma_list(Kind::PuncOpenParen, Kind::PuncCloseParen, |p| {
-            p.eat_identifier("Expected type parameter name")
+            p.eat_identifier("Expected a type parameter name")
         })
     }
 
@@ -1896,7 +1924,7 @@ impl Parser {
         let start = self.current_span();
         self.eat(Kind::Keyword(Keyword::Type))?;
 
-        let identifier = self.eat_identifier("Expected type name after `type`")?;
+        let identifier = self.eat_identifier("Expected a type name after `type`")?;
         if !is_type_name(&identifier.name) {
             return Err(format!(
                 "Type name '{}' must start with an uppercase letter",
@@ -1913,7 +1941,7 @@ impl Parser {
             ast::TypeBody::Alias(self.parse_type_identifier()?)
         } else if self.kind() != Kind::PuncOpenBrace {
             if opaque {
-                return Err("`opaque` type must have constructors to hide".to_string());
+                return Err("An `opaque` type must have constructors to hide".to_string());
             }
             ast::TypeBody::External
         } else {
@@ -1940,7 +1968,7 @@ impl Parser {
             })?;
             self.eat(Kind::PuncCloseBrace)?;
             if variants.is_empty() {
-                return Err("Type definition must have at least one constructor".to_string());
+                return Err("A type definition needs at least one constructor".to_string());
             }
             ast::TypeBody::Variants {
                 ctors: variants,
@@ -1961,7 +1989,7 @@ impl Parser {
     fn parse_constructor(&mut self) -> PResult<ast::Constructor> {
         let doc = self.extract_doc_comment();
         let start = self.current_span();
-        let name = self.eat_name("Expected constructor name")?;
+        let name = self.eat_name("Expected a constructor name")?;
         if !is_type_name(&name) {
             return Err(format!(
                 "Constructor name '{name}' must start with an uppercase letter"
@@ -1986,10 +2014,13 @@ impl Parser {
         let start = self.current_span();
 
         if self.is_type_start() {
-            return Err("constructor fields must be labeled: write 'label Type'".to_string());
+            return Err(
+                "Each constructor field needs a label. Write `label Type`, like `name String`"
+                    .to_string(),
+            );
         }
 
-        let label = self.eat_identifier("Expected field label")?;
+        let label = self.eat_identifier("Expected a field label")?;
         let typ = self.parse_type_identifier()?;
 
         Ok(ast::ConstructorField {
@@ -2003,7 +2034,7 @@ impl Parser {
         let span = self.current_span();
         self.eat(Kind::Keyword(Keyword::Const))?;
 
-        let identifier = self.eat_identifier("Expected const name")?;
+        let identifier = self.eat_identifier("Expected a constant name")?;
 
         let mut typ: Option<ast::TypeIdentifier> = None;
         if self.is_type_start() {
@@ -2023,9 +2054,9 @@ impl Parser {
         }))
     }
 
-    // Whether an `=` follows the matching `)` on the same line. Same-line
-    // mirrors `is_binding_ahead`'s newline rule: `(a, b)` then a fresh-line
-    // `=` is a tuple expression plus a separate erroring node.
+    // Whether an `=` follows the matching `)` on the same line. This is the
+    // same newline rule as `is_binding_ahead`: `(a, b)` with `=` on the next
+    // line is a tuple expression, then a separate node that errors.
     fn is_tuple_destructuring(&self) -> bool {
         let mut depth = 0;
         let mut i = self.index;
@@ -2104,11 +2135,13 @@ impl Parser {
         if !matches!(call, ast::Expression::FunctionCallExpression(_)) {
             return Err("backpassing requires a function call on the right of `<-`".to_string());
         }
-        // Checked last so the whole statement is consumed either way — an
-        // early return here would leave recovery stuck on the first binder.
+        // Check this last, so the whole statement is consumed either way.
+        // Returning early would leave recovery stuck on the first binder.
         if self.current_context() != ParseContext::Block {
             return Err(
-                "backpassing is not allowed at the top level of a module — use it inside a function or block".to_string(),
+                "Backpassing is not allowed at the top level of a module. Use it inside a \
+                 function or a block"
+                    .to_string(),
             );
         }
 
@@ -2120,10 +2153,10 @@ impl Parser {
     }
 
     fn parse_backpass_binder(&mut self) -> PResult<ast::Identifier> {
-        let id = self.eat_identifier("Expected binder name")?;
+        let id = self.eat_identifier("Expected a name to bind")?;
         if id.name != "_" && is_type_name(&id.name) {
             return Err(format!(
-                "backpass binders must be plain identifiers or `_`, got '{}'",
+                "A backpass can only bind plain names or `_`, but found '{}'",
                 id.name
             ));
         }
@@ -2168,8 +2201,8 @@ impl Parser {
         if opaque {
             self.eat(Kind::Keyword(Keyword::Opaque))?;
         }
-        // Callers reach here with `pub` and/or at least one attribute, so the
-        // error can always name what preceded the junk.
+        // Callers only get here after `pub` or at least one attribute, so the
+        // error can always name what came before.
         let preceded_by = if is_pub { "`pub`" } else { "attributes" };
         let mut decl = self.parse_declaration_inner(doc, attrs, opaque, preceded_by)?;
         let s = decl.span_mut();
@@ -2201,7 +2234,7 @@ impl Parser {
                 self.parse_const_binding(doc)
             }
             other => Err(format!(
-                "Expected `fn`, `type`, or `const` after {preceded_by}, got '{other}'"
+                "Expected `fn`, `type` or `const` after {preceded_by}, but found '{other}'"
             )),
         }
     }
@@ -2217,11 +2250,11 @@ impl Parser {
     fn parse_attribute(&mut self) -> PResult<ast::Attribute> {
         let start = self.current_span();
         self.eat(Kind::PuncAt)?;
-        let name = self.eat_identifier("Expected attribute name after '@'")?;
+        let name = self.eat_identifier("Expected an attribute name after `@`")?;
         let mut args = Vec::new();
         if self.kind() == Kind::PuncOpenParen {
             args = self.parse_comma_list(Kind::PuncOpenParen, Kind::PuncCloseParen, |p| {
-                p.eat_identifier("Expected attribute argument")
+                p.eat_identifier("Expected an attribute argument")
             })?;
         }
         Ok(ast::Attribute {
@@ -2235,7 +2268,7 @@ impl Parser {
         let import_span = self.current_span();
         self.eat(Kind::Keyword(Keyword::Import))?;
 
-        // Relative-import segments. The grammar admits them only before the
+        // The `.` and `..` of a relative import. They can only come before the
         // first module name, so they never mix into `names`.
         let mut leading: Vec<ast::RelSeg> = Vec::new();
         while matches!(self.kind(), Kind::PuncDot | Kind::PuncDotdot) {
@@ -2246,27 +2279,27 @@ impl Parser {
             });
             self.advance();
             if self.kind() != Kind::PuncDiv {
-                return Err("Expected `/` after relative import segment".to_string());
+                return Err("Expected `/` after `.` or `..` in an import path".to_string());
             }
             self.eat(Kind::PuncDiv)?;
         }
 
         // Span of the final module-name segment; the last write wins.
         let mut path_span = self.current_span();
-        let first = self.eat_name("Expected module name after `import`")?;
+        let first = self.eat_name("Expected a module name after `import`")?;
         let mut names: Vec<String> = vec![first];
 
         while self.kind() == Kind::PuncDiv {
             self.eat(Kind::PuncDiv)?;
             path_span = self.current_span();
-            let seg = self.eat_name("Expected module name after `/`")?;
+            let seg = self.eat_name("Expected a module name after `/`")?;
             names.push(seg);
         }
 
         let mut alias: Option<ast::Identifier> = None;
         if self.kind() == Kind::Keyword(Keyword::As) {
             self.eat(Kind::Keyword(Keyword::As))?;
-            alias = Some(self.eat_identifier("Expected alias after `as`")?);
+            alias = Some(self.eat_identifier("Expected a name after `as`")?);
         }
         let path = ast::ImportPath { leading, names };
 
@@ -2308,10 +2341,10 @@ impl Parser {
         }))
     }
 
-    /// Eat the `::` after a module name in a type or a constructor pattern.
-    /// `http.Method` can only mean `http::Method` there, since neither has a
-    /// value for `.` to read a field of, so it is reported and read as `::`
-    /// rather than left to fail on the next token.
+    /// Eats the `::` after a module name in a type or a constructor pattern.
+    /// There `http.Method` can only mean `http::Method`, because there's no
+    /// value for `.` to read a field of. So we report it and read it as `::`,
+    /// rather than fail on the next token.
     fn eat_module_separator(&mut self, module: &str) -> PResult<bool> {
         match self.kind() {
             Kind::PuncColonColon => {
@@ -2358,7 +2391,7 @@ impl Parser {
         let span = self.current_span();
 
         if matches!(self.kind(), Kind::LiteralNumber(_)) {
-            let num_str = self.eat_number("Expected tuple index")?;
+            let num_str = self.eat_number("Expected a tuple index")?;
             let mut result = left;
             for part in num_str.split('.') {
                 result = ast::Expression::PropertyAccessExpression(ast::PropertyAccessExpression {
@@ -2373,7 +2406,7 @@ impl Parser {
             return Ok(result);
         }
 
-        let property = self.eat_name("Expected property name")?;
+        let property = self.eat_name("Expected a field name after `.`")?;
 
         Ok(ast::Expression::PropertyAccessExpression(
             ast::PropertyAccessExpression {
@@ -2390,7 +2423,7 @@ impl Parser {
     fn parse_string_expression(&mut self) -> PResult<ast::Expression> {
         let span = self.current_span();
         Ok(ast::Expression::StringLiteral(ast::StringLiteral {
-            value: self.eat_string("Expected string")?,
+            value: self.eat_string("Expected a string")?,
             span,
         }))
     }
@@ -2405,7 +2438,7 @@ impl Parser {
             match self.kind() {
                 Kind::InterpStringPart(_) => {
                     let part_span = self.current_span();
-                    let value = self.eat_interp_part("Expected string part")?;
+                    let value = self.eat_interp_part("Expected the text of a string")?;
                     parts.push(ast::InterpPart::Literal(ast::StringLiteral {
                         value,
                         span: part_span,
@@ -2422,14 +2455,14 @@ impl Parser {
                     self.eat(Kind::PuncCloseBrace)?;
                 }
                 Kind::Identifier(_) => {
-                    let ident = self.eat_identifier("Expected identifier")?;
+                    let ident = self.eat_identifier("Expected a name")?;
                     parts.push(ast::InterpPart::Expr(Box::new(
                         ast::Expression::Identifier(ident),
                     )));
                 }
                 _ => {
                     return Err(format!(
-                        "Unexpected token in interpolated string: {}",
+                        "Unexpected '{}' inside an interpolated string",
                         self.kind()
                     ));
                 }
@@ -2447,7 +2480,7 @@ impl Parser {
     fn parse_number_expression(&mut self) -> PResult<ast::Expression> {
         let span = self.current_span();
         Ok(ast::Expression::NumberLiteral(ast::NumberLiteral {
-            value: self.eat_number("Expected number")?,
+            value: self.eat_number("Expected a number")?,
             span,
         }))
     }
@@ -2583,8 +2616,9 @@ mod tests {
         );
     }
 
-    /// Every program in the repo's two .sca corpora must parse cleanly. Globbed
-    /// rather than listed so curating the corpus cannot break the build.
+    /// Every program in the repo's two .sca corpora must parse cleanly. The
+    /// test globs the folders rather than listing files, so curating the corpus
+    /// can't break it.
     #[test]
     fn parses_every_corpus_program() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -2599,7 +2633,7 @@ mod tests {
                     continue;
                 }
                 let name = path.file_name().unwrap().to_string_lossy().into_owned();
-                // a.scarlet/b.sca are the LSP import-demo scratch pair; they may be mid-edit.
+                // a.sca and b.sca are the LSP import demo's scratch pair, and may be mid-edit.
                 if name == "a.sca" || name == "b.sca" {
                     continue;
                 }
@@ -2936,7 +2970,7 @@ mod tests {
     fn test_backpass_rejected_at_module_top_level() {
         assert_has_error(
             "x <- g(1)\nx\n",
-            "backpassing is not allowed at the top level of a module",
+            "Backpassing is not allowed at the top level of a module",
         );
     }
 
@@ -2944,7 +2978,7 @@ mod tests {
     fn test_backpass_binders_must_be_plain() {
         assert_has_error(
             "{\nSome <- g(1)\n0\n}",
-            "backpass binders must be plain identifiers or `_`",
+            "A backpass can only bind plain names or `_`",
         );
     }
 
@@ -2969,7 +3003,7 @@ mod tests {
     fn test_type_decl_errors() {
         assert_has_error("type Foo {}", "at least one constructor");
         assert_has_error("type foo { Foo }", "uppercase");
-        assert_has_error("type Foo { Foo(Int) }", "must be labeled");
+        assert_has_error("type Foo { Foo(Int) }", "needs a label");
     }
 
     #[test]
@@ -2977,13 +3011,13 @@ mod tests {
         assert_no_errors("type User {\n\tname String\n\tage Int\n}");
         assert_no_errors("type Box(A) { value A }");
         assert_no_errors("type User {\n  name String\n  age Int\n}");
-        assert_has_error("type Foo { bar }", "Expected type");
+        assert_has_error("type Foo { bar }", "Expected a type name");
     }
 
     #[test]
     fn test_if_expression() {
         assert_no_errors("if x > 0 { 1 } else { 2 }");
-        assert_has_error("if x > 0 { 1 }", "requires an 'else'");
+        assert_has_error("if x > 0 { 1 }", "needs an `else` branch");
     }
 
     #[test]
@@ -3003,9 +3037,9 @@ mod tests {
         assert_no_errors("[1, 2, 3]");
         assert_no_errors("(1, 2, 3)");
         assert_no_errors("[..xs, 1, ..ys]");
-        assert_has_error("[..xs, 1, ..]", "Expected expression after `..`");
-        assert_has_error("()", "tuples need 2+ elements");
-        assert_has_error("(1)", "single-element parens");
+        assert_has_error("[..xs, 1, ..]", "Expected a value after `..`");
+        assert_has_error("()", "A tuple needs at least two elements");
+        assert_has_error("(1)", "Parentheses can't hold just one expression");
     }
 
     #[test]
@@ -3071,7 +3105,7 @@ mod tests {
             result
                 .diagnostics
                 .iter()
-                .any(|d| d.message.contains("precede"))
+                .any(|d| d.message.contains("at the top of the file"))
         );
     }
 
@@ -3104,7 +3138,7 @@ mod tests {
         // An `if` needs `then` or a block after its condition; a function
         // body must be a block.
         assert_has_error("x = if 1 < 2 5 else 6", "needs `then` or a block");
-        assert_has_error("fn f() Int = 1", "Function body must be a block");
+        assert_has_error("fn f() Int = 1", "A function body must be a block");
         // The well-formed shapes still parse cleanly.
         assert_no_errors("x = if 1 < 2 { 5 } else { 6 }");
         assert_no_errors("x = if 1 < 2 then 5 else 6");
@@ -3118,17 +3152,20 @@ mod tests {
 
     #[test]
     fn test_tuple_arity_and_pattern_diagnostics() {
-        // A parenthesized single type/pattern is not a tuple.
-        assert_has_error("fn f(x (Int)) Int { 1 }", "tuple types need 2+ elements");
+        // A single type or pattern in parentheses is not a tuple.
+        assert_has_error(
+            "fn f(x (Int)) Int { 1 }",
+            "A tuple type needs at least two elements",
+        );
         assert_has_error(
             "match (1, 2) { (x) -> x }",
-            "tuple patterns need 2+ elements",
+            "A tuple pattern needs at least two elements",
         );
         // A binary operator cannot begin a pattern.
-        assert_has_error("match 1 { + -> 0 }", "Unexpected '+' in pattern");
-        // Recovery that synchronizes to the arm's `->` must consume it and
+        assert_has_error("match 1 { + -> 0 }", "Expected a pattern, but found '+'");
+        // Recovery that synchronises to the arm's `->` must consume it and
         // parse the body, not loop re-erroring on the same token. A lowercase
-        // member cannot be a constructor, so that case still needs recovery.
+        // member can't be a constructor, so that case still needs recovery.
         assert_no_errors("match x { net::V6(ip) -> 1 }");
         assert_single_error(
             "match x { net::v6(ip) -> 1 }",
@@ -3138,14 +3175,17 @@ mod tests {
             "match x { net.V6(ip) -> 1 }",
             "Reach a module's type or constructor with `::`, like `net::V6`",
         );
-        assert_single_error("match x { a if + -> 1 }", "Unexpected '+'");
-        assert_single_error("match x { -> 1 }", "Unexpected '->' in pattern");
+        assert_single_error(
+            "match x { a if + -> 1 }",
+            "Expected an expression, but found '+'",
+        );
+        assert_single_error("match x { -> 1 }", "Expected a pattern, but found '->'");
         // Constructor fields on one line need commas; a newline separates too.
         assert_no_errors("type P {\n\tP(a Int, b Int)\n}\n");
         assert_no_errors("type P {\n\tP(\n\t\ta Int\n\t\tb Int\n\t)\n}\n");
         assert_has_error(
             "type P {\n\tP(a Int b Int)\n}\n",
-            "fields on one line are separated by commas",
+            "Separate fields on one line with commas",
         );
         assert_no_errors("fn f(x (Int, Int)) Int { 1 }");
         assert_no_errors("match (1, 2) { (a, b) -> a }");
@@ -3162,11 +3202,11 @@ mod tests {
         // `FnBody::Vm` always holds it.
         assert_has_error(
             "@vm\nfn f(a Int) Int",
-            "@vm takes exactly one argument: the VM op key",
+            "@vm takes exactly one argument, the VM op key",
         );
         assert_has_error(
             "@vm(add, sub)\nfn f(a Int) Int",
-            "@vm takes exactly one argument: the VM op key",
+            "@vm takes exactly one argument, the VM op key",
         );
         // `opaque` requires a body and only modifies `type`.
         assert_has_error(
@@ -3190,14 +3230,17 @@ mod tests {
         // The message must not mention a `pub` the user never wrote.
         assert_has_error(
             "@vm(add)\njunk",
-            "Expected `fn`, `type`, or `const` after attributes",
+            "Expected `fn`, `type` or `const` after attributes",
         );
-        assert_has_error("import .foo", "Expected `/` after relative import segment");
+        assert_has_error(
+            "import .foo",
+            "Expected `/` after `.` or `..` in an import path",
+        );
     }
 
     #[test]
     fn test_decrement_operator_rejected() {
-        assert_has_error("y = 5\nz = y--", "Decrement operator");
+        assert_has_error("y = 5\nz = y--", "Scarlet has no `--` operator");
     }
 
     #[test]
@@ -3296,8 +3339,8 @@ mod tests {
 
     #[test]
     fn test_binary_literal_bad_spec() {
-        assert_has_error("x = <<1:foo>>", "segment size spec");
-        assert_has_error("x = <<1:>>", "segment size spec");
+        assert_has_error("x = <<1:foo>>", "segment size after `:`");
+        assert_has_error("x = <<1:>>", "segment size after `:`");
     }
 
     #[test]
