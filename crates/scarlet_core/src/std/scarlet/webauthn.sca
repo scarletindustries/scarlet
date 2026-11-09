@@ -34,17 +34,66 @@ pub type Algorithm {
 	EdDsa
 }
 
+/** Why a ceremony was refused. */
 pub type Error {
-	BadClientData
+	BadClientData(reason ClientDataError)
+	/** clientDataJSON's `type` is not the ceremony's. */
 	WrongType
 	ChallengeMismatch
 	OriginMismatch
-	UserNotPresent
+	BadAttestation(reason AttestationError)
+	BadAuthData(reason AuthDataError)
 	RpIdMismatch
-	BadAttestation
-	UnsupportedAlgorithm
-	BadCredential
+	UserNotPresent
+	/** The credential public key is not one this checks signatures with. */
+	BadKey(reason KeyError)
 	BadSignature
+}
+
+/** Why clientDataJSON could not be read. */
+pub type ClientDataError {
+	/** It is not a whole number of bytes, so it has no SHA-256. */
+	NotWholeBytes
+	NotJson(error json::ParseError)
+	/** A field the ceremony needs is missing or not a string. */
+	MissingField(name String)
+	/** `challenge` is not base64url. */
+	ChallengeNotBase64url
+}
+
+/** Why the attestation object could not be read. */
+pub type AttestationError {
+	NotCbor(error cbor::Error)
+	/** It has no `authData` byte string. */
+	MissingAuthData
+}
+
+/** Why authenticatorData could not be read. */
+pub type AuthDataError {
+	/** It is shorter than its flags say. */
+	Truncated
+	/** Registration needs the attested credential, and the AT flag is off. */
+	NoCredential
+	/** The credential public key is not CBOR this decodes. */
+	KeyNotCbor(error cbor::Error)
+	/** The extensions (the ED flag) are not CBOR this decodes. */
+	ExtensionsNotCbor(error cbor::Error)
+	/** Bytes follow everything the flags announce. */
+	TrailingData
+}
+
+/** Why a COSE key was refused. */
+pub type KeyError {
+	/** It names no `alg` (label 3). */
+	MissingAlgorithm
+	/** An `alg` other than ES256 (-7) and EdDSA (-8). */
+	UnsupportedAlgorithm(alg Int)
+	/** `kty` (label 1) is missing or wrong for the algorithm. */
+	WrongKeyType
+	/** `crv` (label -1) is missing or not the algorithm's curve. */
+	WrongCurve
+	/** A coordinate (label -2 or -3) is missing, not bytes, or not 32 bytes. */
+	BadCoordinate(label Int)
 }
 
 // clientDataJSON
@@ -53,36 +102,41 @@ type ClientData {
 	kind String
 	challenge String
 	origin String
+	/** SHA-256 of the raw bytes, which an assertion signature covers. */
+	hash Binary
 }
 
-fn parse_client_data(client_data_json Binary) Result(ClientData, Error) {
-	doc <- result::then(result::map_err(json::parse_binary(client_data_json), fn(_) BadClientData))
+fn parse_client_data(bytes Binary) Result(ClientData, ClientDataError) {
+	hash <- result::then(result::replace_err(crypto::sha256(bytes), NotWholeBytes))
+	doc <- result::then(result::map_err(json::parse_binary(bytes), NotJson))
 	kind <- result::then(field(doc, 'type'))
 	challenge <- result::then(field(doc, 'challenge'))
 	origin <- result::then(field(doc, 'origin'))
-	Ok(ClientData(kind: kind, challenge: challenge, origin: origin))
+	Ok(ClientData(kind: kind, challenge: challenge, origin: origin, hash: hash))
 }
 
-fn field(doc json::Doc, name String) Result(String, Error) {
+fn field(doc json::Doc, name String) Result(String, ClientDataError) {
 	match option::then(json::field(doc, name), json::string) {
 		Some(s) -> Ok(s)
-		None -> Err(BadClientData)
+		None -> Err(MissingField(name))
 	}
 }
 
-// The challenge is unpadded base64url. We decode it and compare in constant
-// time.
-fn challenge_ok(client_challenge String, expected Binary) Bool {
-	match base64::url_decode(binary::from_string(client_challenge)) {
-		Ok(got) -> crypto::const_eq(got, expected)
-		Err(Nil) -> False
-	}
-}
-
-fn rp_id_matches(rp_id_hash Binary, rp_id String) Bool {
-	match crypto::sha256(binary::from_string(rp_id)) {
-		Ok(expected) -> crypto::const_eq(rp_id_hash, expected)
-		Err(Nil) -> False
+// The challenge is unpadded base64url. It is compared in constant time.
+fn check_client(cd ClientData, kind String, challenge Binary, origin String) Result(Nil, Error) {
+	if cd.kind != kind {
+		Err(WrongType)
+	} else {
+		match base64::url_decode(binary::from_string(cd.challenge)) {
+			Err(Nil) -> Err(BadClientData(ChallengeNotBase64url))
+			Ok(got) -> if !crypto::const_eq(got, challenge) {
+				Err(ChallengeMismatch)
+			} else if cd.origin != origin {
+				Err(OriginMismatch)
+			} else {
+				Ok(Nil)
+			}
+		}
 	}
 }
 
@@ -97,89 +151,150 @@ type AuthData {
 	attested Option((Binary, cbor::Value))
 }
 
-fn parse_auth_data(auth Binary) Result(AuthData, Error) {
+const FLAG_UP = 1
+const FLAG_AT = 64
+const FLAG_ED = 128
+
+// rpIdHash[32], flags[1], signCount[4], then the attested credential if AT is
+// set, then the extensions map if ED is set, and nothing after.
+fn parse_auth_data(auth Binary) Result(AuthData, AuthDataError) {
 	if binary::byte_size(auth) < 37 {
-		Err(BadCredential)
+		Err(Truncated)
 	} else {
-		rp_id_hash = binary::slice_bytes(auth, 0, 32) or <<>>
+		rp_id_hash <- result::then(take(auth, 0, 32))
 		flags = binary::byte_at(auth, 32)
-		user_present = int::bitwise_and(flags, 1) == 1
-		attested_flag = int::bitwise_and(flags, 64) == 64
 		sign_count = { binary::byte_at(auth, 33) * 16777216 } +
 			{ binary::byte_at(auth, 34) * 65536 } +
 			{ binary::byte_at(auth, 35) * 256 } +
 			binary::byte_at(auth, 36)
-		if !attested_flag {
+
+		cred <- result::then(if has_flag(flags, FLAG_AT) {
+			result::map(attested_credential(auth), Some)
+		} else Ok(None))
+
+		(attested, after_cred) = match cred {
+			Some((c, end)) -> (Some(c), end)
+			None -> (None, 37)
+		}
+
+		end <- result::then(if has_flag(flags, FLAG_ED) {
+			result::map(
+				result::map_err(cbor::decode_prefix(auth, after_cred), ExtensionsNotCbor),
+				fn(ext) {
+					(_, next) = ext
+					next
+				},
+			)
+		} else {
+			Ok(after_cred)
+		})
+
+		if end != binary::byte_size(auth) {
+			Err(TrailingData)
+		} else {
 			Ok(
 				AuthData(
 					rp_id_hash: rp_id_hash,
-					user_present: user_present,
+					user_present: has_flag(flags, FLAG_UP),
 					sign_count: sign_count,
-					attested: None,
+					attested: attested,
 				),
 			)
-		} else if binary::byte_size(auth) < 55 {
-			Err(BadCredential)
-		} else {
-			// aaguid[16] at 37, credentialIdLength[2], the id, then the COSE key.
-			id_len = { binary::byte_at(auth, 53) * 256 } + binary::byte_at(auth, 54)
-			if binary::byte_size(auth) < 55 + id_len {
-				Err(BadCredential)
-			} else {
-				cred_id = binary::slice_bytes(auth, 55, id_len) or <<>>
-				key_bytes = binary::slice_bytes(
-					auth,
-					55 + id_len,
-					binary::byte_size(auth) - { 55 + id_len },
-				) or <<>>
-				match cbor::decode(key_bytes) {
-					Ok(key) ->
-						Ok(
-							AuthData(
-								rp_id_hash: rp_id_hash,
-								user_present: user_present,
-								sign_count: sign_count,
-								attested: Some((cred_id, key)),
-							),
-						)
-					Err(_) -> Err(BadCredential)
-				}
-			}
 		}
 	}
 }
+
+fn has_flag(flags Int, flag Int) Bool {
+	int::bitwise_and(flags, flag) == flag
+}
+
+// aaguid[16] at 37, credentialIdLength[2] at 53, the id at 55, then the COSE
+// key. Returns the id and key with the offset just past the key.
+fn attested_credential(auth Binary) Result(((Binary, cbor::Value), Int), AuthDataError) {
+	if binary::byte_size(auth) < 55 {
+		Err(Truncated)
+	} else {
+		id_len = { binary::byte_at(auth, 53) * 256 } + binary::byte_at(auth, 54)
+		id <- result::then(take(auth, 55, id_len))
+		decoded = cbor::decode_prefix(auth, 55 + id_len)
+		(key, end) <- result::then(result::map_err(decoded, KeyNotCbor))
+		Ok(((id, key), end))
+	}
+}
+
+fn take(b Binary, at Int, n Int) Result(Binary, AuthDataError) {
+	match binary::slice_bytes(b, at, n) {
+		Ok(s) -> Ok(s)
+		Err(Nil) -> Err(Truncated)
+	}
+}
+
+fn check_auth_data(ad AuthData, rp_id String) Result(Nil, Error) {
+	if !rp_id_matches(ad.rp_id_hash, rp_id) {
+		Err(RpIdMismatch)
+	} else if !ad.user_present {
+		Err(UserNotPresent)
+	} else {
+		Ok(Nil)
+	}
+}
+
+fn rp_id_matches(rp_id_hash Binary, rp_id String) Bool {
+	match crypto::sha256(binary::from_string(rp_id)) {
+		Ok(expected) -> crypto::const_eq(rp_id_hash, expected)
+		// A String is always whole bytes, so this can't happen. It refuses.
+		Err(Nil) -> False
+	}
+}
+
+// COSE keys
 
 // An ES256 key is turned into SEC1 uncompressed form (0x04, x, y). An EdDSA
 // key is used as it is.
-fn cose_key(key cbor::Value) Result((Algorithm, Binary), Error) {
-	alg <- result::then(match option::then(cbor::map_get(key, 3), cbor::as_int) {
+fn cose_key(key cbor::Value) Result((Algorithm, Binary), KeyError) {
+	alg <- result::then(match cose_int(key, 3) {
 		Some(a) -> Ok(a)
-		None -> Err(UnsupportedAlgorithm)
+		None -> Err(MissingAlgorithm)
 	})
 	if alg == 0 - 7 {
-		x <- result::then(cose_bytes(key, 0 - 2))
-		y <- result::then(cose_bytes(key, 0 - 3))
-		if binary::byte_size(x) == 32 && binary::byte_size(y) == 32 {
-			Ok((Es256, binary::append(binary::append(<<4:8>>, x), y)))
+		// kty EC2 (2), crv P-256 (1).
+		if cose_int(key, 1) != Some(2) {
+			Err(WrongKeyType)
+		} else if cose_int(key, 0 - 1) != Some(1) {
+			Err(WrongCurve)
 		} else {
-			Err(BadCredential)
+			x <- result::then(coordinate(key, 0 - 2))
+			y <- result::then(coordinate(key, 0 - 3))
+			Ok((Es256, binary::concat([<<4:8>>, x, y])))
 		}
 	} else if alg == 0 - 8 {
-		x <- result::then(cose_bytes(key, 0 - 2))
-		if binary::byte_size(x) == 32 {
-			Ok((EdDsa, x))
+		// kty OKP (1), crv Ed25519 (6).
+		if cose_int(key, 1) != Some(1) {
+			Err(WrongKeyType)
+		} else if cose_int(key, 0 - 1) != Some(6) {
+			Err(WrongCurve)
 		} else {
-			Err(BadCredential)
+			x <- result::then(coordinate(key, 0 - 2))
+			Ok((EdDsa, x))
 		}
 	} else {
-		Err(UnsupportedAlgorithm)
+		Err(UnsupportedAlgorithm(alg))
 	}
 }
 
-fn cose_bytes(key cbor::Value, label Int) Result(Binary, Error) {
+fn cose_int(key cbor::Value, label Int) Option(Int) {
+	option::then(cbor::map_get(key, label), cbor::as_int)
+}
+
+// Both curves here have 32-byte coordinates.
+fn coordinate(key cbor::Value, label Int) Result(Binary, KeyError) {
 	match option::then(cbor::map_get(key, label), cbor::as_bytes) {
-		Some(b) -> Ok(b)
-		None -> Err(BadCredential)
+		Some(b) -> if binary::byte_size(b) == 32 {
+			Ok(b)
+		} else {
+			Err(BadCoordinate(label))
+		}
+		None -> Err(BadCoordinate(label))
 	}
 }
 
@@ -195,44 +310,24 @@ pub fn verify_registration(
 	rp_id String,
 	origin String,
 ) Result(Credential, Error) {
-	cd <- result::then(parse_client_data(client_data_json))
-	ClientData(kind, chal, org) = cd
-	if kind != 'webauthn.create' {
-		Err(WrongType)
-	} else if !challenge_ok(chal, challenge) {
-		Err(ChallengeMismatch)
-	} else if org != origin {
-		Err(OriginMismatch)
-	} else {
-		att <- result::then(result::map_err(cbor::decode(attestation_object), fn(_) BadAttestation))
-		auth_bytes <- result::then(
-			match option::then(cbor::text_map_get(att, 'authData'), cbor::as_bytes) {
-				Some(b) -> Ok(b)
-				None -> Err(BadAttestation)
-			},
-		)
-		ad <- result::then(parse_auth_data(auth_bytes))
-		AuthData(rp_id_hash, user_present, sign_count, attested) = ad
-		if !rp_id_matches(rp_id_hash, rp_id) {
-			Err(RpIdMismatch)
-		} else if !user_present {
-			Err(UserNotPresent)
-		} else {
-			match attested {
-				None -> Err(BadCredential)
-				Some((cred_id, key)) -> {
-					parsed <- result::then(cose_key(key))
-					(alg, pk) = parsed
-					Ok(
-						Credential(
-							id: cred_id,
-							public_key: pk,
-							algorithm: alg,
-							sign_count: sign_count,
-						),
-					)
-				}
-			}
+	cd <- result::then(result::map_err(parse_client_data(client_data_json), BadClientData))
+	Nil <- result::then(check_client(cd, 'webauthn.create', challenge, origin))
+	att <- result::then(
+		result::map_err(cbor::decode(attestation_object), fn(e) BadAttestation(NotCbor(e))),
+	)
+	auth_bytes <- result::then(
+		match option::then(cbor::text_map_get(att, 'authData'), cbor::as_bytes) {
+			Some(b) -> Ok(b)
+			None -> Err(BadAttestation(MissingAuthData))
+		},
+	)
+	ad <- result::then(result::map_err(parse_auth_data(auth_bytes), BadAuthData))
+	Nil <- result::then(check_auth_data(ad, rp_id))
+	match ad.attested {
+		None -> Err(BadAuthData(NoCredential))
+		Some((cred_id, key)) -> {
+			(alg, pk) <- result::then(result::map_err(cose_key(key), BadKey))
+			Ok(Credential(id: cred_id, public_key: pk, algorithm: alg, sign_count: ad.sign_count))
 		}
 	}
 }
@@ -252,38 +347,19 @@ pub fn verify_authentication(
 	origin String,
 	cred Credential,
 ) Result(Int, Error) {
-	cd <- result::then(parse_client_data(client_data_json))
-	ClientData(kind, chal, org) = cd
-	Credential(_, public_key, algorithm, _) = cred
-	if kind != 'webauthn.get' {
-		Err(WrongType)
-	} else if !challenge_ok(chal, challenge) {
-		Err(ChallengeMismatch)
-	} else if org != origin {
-		Err(OriginMismatch)
+	cd <- result::then(result::map_err(parse_client_data(client_data_json), BadClientData))
+	Nil <- result::then(check_client(cd, 'webauthn.get', challenge, origin))
+	ad <- result::then(result::map_err(parse_auth_data(authenticator_data), BadAuthData))
+	Nil <- result::then(check_auth_data(ad, rp_id))
+	// The signature is over authenticatorData || sha256(clientDataJSON).
+	message = binary::append(authenticator_data, cd.hash)
+	verified = match cred.algorithm {
+		Es256 -> crypto::p256_verify(cred.public_key, message, signature)
+		EdDsa -> crypto::ed25519_verify(cred.public_key, message, signature)
+	}
+	if verified {
+		Ok(ad.sign_count)
 	} else {
-		ad <- result::then(parse_auth_data(authenticator_data))
-		AuthData(rp_id_hash, user_present, sign_count, _) = ad
-		if !rp_id_matches(rp_id_hash, rp_id) {
-			Err(RpIdMismatch)
-		} else if !user_present {
-			Err(UserNotPresent)
-		} else {
-			// The signature is over authenticatorData || sha256(clientDataJSON).
-			ok = match crypto::sha256(client_data_json) {
-				Ok(client_hash) -> {
-					message = binary::append(authenticator_data, client_hash)
-					match algorithm {
-						Es256 -> crypto::p256_verify(public_key, message, signature)
-						EdDsa -> crypto::ed25519_verify(public_key, message, signature)
-					}
-				}
-				Err(Nil) -> False
-			}
-			match ok {
-				True -> Ok(sign_count)
-				False -> Err(BadSignature)
-			}
-		}
+		Err(BadSignature)
 	}
 }

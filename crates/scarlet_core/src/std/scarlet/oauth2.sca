@@ -1,12 +1,13 @@
 /**
- * OAuth 2.1 as the MCP authorization spec (rev 2026-07-28) profiles it: a
- * resource server with RFC 9728 metadata, and an authorization server with
- * the code flow, PKCE S256 only, public clients and dynamic registration
- * (RFC 7591).
+ * OAuth 2.1, set up the way the MCP authorization spec (rev 2026-07-28) asks.
+ * It gives you a resource server with RFC 9728 metadata, and an authorization
+ * server with the code flow, public clients and dynamic client registration
+ * (RFC 7591). PKCE (proof key for code exchange) is how a client proves it's
+ * the one that asked for a code, and only its S256 method is supported.
  *
- * The caller owns storage (a `Store` of closures) and the consent page.
- * There is no `plain` PKCE and no client secret. Codes are one-shot, which
- * is what makes a replayed code fail.
+ * You own the storage (a `Store` of closures) and the consent page. There's
+ * no `plain` PKCE and no client secret. Each code works only once, which is
+ * what makes a replayed code fail.
  */
 
 import scarlet/array
@@ -18,7 +19,8 @@ import scarlet/json
 import scarlet/result
 import scarlet/string
 
-/** What a grant carries from consent to token to bearer check. */
+/** What a user agreed to. It goes from the consent page into the token, and
+ * each bearer check gets it back. */
 pub type Grant {
 	user String
 	scope String
@@ -28,7 +30,8 @@ pub type Grant {
 	resource String
 }
 
-/** The caller's storage. `take_code` must remove the code it returns. */
+/** Your storage. `take_code` must remove the code it returns, so that each
+ * code works only once. */
 pub type Store {
 	put_client fn(String, String) Nil
 	get_client fn(String) Option(String)
@@ -44,7 +47,8 @@ fn texts(values Array(String)) json::Json {
 
 // Discovery
 
-/** RFC 9728 metadata. Serve it at /.well-known/oauth-protected-resource. */
+/** Builds the RFC 9728 metadata. Serve it at
+ * /.well-known/oauth-protected-resource. */
 pub fn resource_metadata(resource_uri String, auth_server String, scopes Array(String)) json::Json {
 	json::Object([
 		('resource', json::Str(resource_uri)),
@@ -54,8 +58,8 @@ pub fn resource_metadata(resource_uri String, auth_server String, scopes Array(S
 	])
 }
 
-/** The WWW-Authenticate value for a 401 (RFC 6750 §3). `scope` is left out
- * when empty. */
+/** Builds the `WWW-Authenticate` value for a 401 (RFC 6750 §3). It leaves
+ * `scope` out when it's empty. */
 pub fn challenge(metadata_url String, scope String) String {
 	base = 'Bearer resource_metadata="${metadata_url}"'
 	match scope {
@@ -64,8 +68,8 @@ pub fn challenge(metadata_url String, scope String) String {
 	}
 }
 
-/** RFC 8414 metadata, with endpoints at `issuer`/oauth/authorize, /token and
- * /register. `issuer` has no trailing slash. Serve it at
+/** Builds the RFC 8414 metadata, with endpoints at `issuer`/oauth/authorize,
+ * /token and /register. `issuer` must not end in a slash. Serve it at
  * /.well-known/oauth-authorization-server. */
 pub fn metadata(issuer String, scopes Array(String)) json::Json {
 	json::Object([
@@ -85,23 +89,24 @@ pub fn metadata(issuer String, scopes Array(String)) json::Json {
 
 /** Why `register` refused a client. */
 pub type RegisterError {
-	/** The body is not JSON. */
-	BodyNotJson
-	/** The body names no `redirect_uris`. */
+	/** The body isn't JSON. */
+	BodyInvalidJson(error json::ParseError)
+	/** The body has no `redirect_uris`, or none of them is a string. */
 	MissingRedirectUris
 }
 
-/** The RFC 7591 §3.2.2 `error` value for a refused registration. */
+/** Returns the RFC 7591 §3.2.2 `error` value for a refused registration. */
 pub fn register_error_code(e RegisterError) String {
 	match e {
-		BodyNotJson -> 'invalid_client_metadata'
+		BodyInvalidJson(_) -> 'invalid_client_metadata'
 		MissingRedirectUris -> 'invalid_redirect_uri'
 	}
 }
 
-/** Registers a public client and gives back its metadata. No secret. */
+/** Registers a public client and returns its metadata. A public client has
+ * no secret. */
 pub fn register(store Store, req_body Binary) Result(json::Json, RegisterError) {
-	doc <- result::then(result::map_err(json::parse_binary(req_body), fn(_) BodyNotJson))
+	doc <- result::then(result::map_err(json::parse_binary(req_body), BodyInvalidJson))
 
 	uris = match json::field(doc, 'redirect_uris') {
 		Some(list) -> array::fold(json::elements(list), [], fn(acc, u) match json::string(u) {
@@ -113,7 +118,7 @@ pub fn register(store Store, req_body Binary) Result(json::Json, RegisterError) 
 
 	match uris {
 		[] -> Err(MissingRedirectUris)
-		_ -> {
+		uris -> {
 			id = new_token()
 			Store(put_client, _, _, _, _, _) = store
 			put_client(id, join_spaced(uris))
@@ -133,13 +138,14 @@ pub fn register(store Store, req_body Binary) Result(json::Json, RegisterError) 
 fn join_spaced(xs Array(String)) String {
 	array::fold(xs, '', fn(acc, x) match acc {
 		'' -> x
-		_ -> '${acc} ${x}'
+		acc -> '${acc} ${x}'
 	})
 }
 
 // Authorize
 
-/** A checked /authorize request, for the caller's consent page. */
+/** An /authorize request that passed every check. Show it on your consent
+ * page. */
 pub type AuthorizeReq {
 	client_id String
 	redirect_uri String
@@ -153,17 +159,17 @@ pub type AuthorizeReq {
 pub type AuthorizeError {
 	/** `client_id` or `redirect_uri` is missing. */
 	MissingClient
-	/** The redirect uri is not one this client registered. */
+	/** The redirect URI isn't one this client registered. */
 	UnregisteredRedirectUri
-	/** `response_type` is not `code`. */
+	/** `response_type` isn't `code`. */
 	UnsupportedResponseType
-	/** There is no `code_challenge`, or its method is not `S256`. */
+	/** There's no `code_challenge`, or its method isn't `S256`. */
 	PkceRequired
 }
 
-/** The RFC 6749 §4.1.2.1 `error` value for a refused request. Do not send
- * `MissingClient` or `UnregisteredRedirectUri` to the redirect uri: it is not
- * trusted. Show the error to the user instead. */
+/** Returns the RFC 6749 §4.1.2.1 `error` value for a refused request. Don't
+ * send `MissingClient` or `UnregisteredRedirectUri` to the redirect URI,
+ * because it isn't trusted. Show the error to the user instead. */
 pub fn authorize_error_code(e AuthorizeError) String {
 	match e {
 		MissingClient -> 'invalid_request'
@@ -173,16 +179,15 @@ pub fn authorize_error_code(e AuthorizeError) String {
 	}
 }
 
-/** The query of a `GET /authorize`. The redirect uri must be one the client
- * registered: a code sent anywhere else is a stolen code. */
+/** Checks the query of a `GET /authorize`. The redirect URI must be one the
+ * client registered, because a code sent anywhere else can be stolen. */
 pub fn parse_authorize(store Store, query_bytes Binary) Result(AuthorizeReq, AuthorizeError) {
 	q = form::decode(query_bytes)
 	client_id = form::get(q, 'client_id') or ''
 	redirect_uri = form::get(q, 'redirect_uri') or ''
 	pkce_challenge = form::get(q, 'code_challenge') or ''
 	method = form::get(q, 'code_challenge_method') or ''
-	Store(_, get_client, _, _, _, _) = store
-	registered = get_client(client_id) or ''
+	registered = store.get_client(client_id) or ''
 	if client_id == '' || redirect_uri == '' {
 		Err(MissingClient)
 	} else if !array::contains(string::split(registered, ' '), redirect_uri) {
@@ -205,7 +210,8 @@ pub fn parse_authorize(store Store, query_bytes Binary) Result(AuthorizeReq, Aut
 	}
 }
 
-/** After consent: a one-shot code for `user`, and the redirect to send. */
+/** Call this once the user agrees. It makes a one-time code for `user` and
+ * returns the URL to redirect them to. */
 pub fn approve(store Store, areq AuthorizeReq, user String) String {
 	AuthorizeReq(client_id, redirect_uri, state, pkce_challenge, scope, resource) = areq
 	code = new_token()
@@ -236,15 +242,15 @@ pub type TokenError {
 	UnsupportedGrantType
 	/** `code` or `code_verifier` is missing. */
 	MissingCode
-	/** The code is unknown, already used, or expired. */
+	/** The code isn't known, was already used, or has expired. */
 	UnknownCode
-	/** The verifier does not hash to the code's challenge. */
+	/** The verifier doesn't hash to the code's challenge. */
 	PkceFailed
-	/** `client_id` or `redirect_uri` is not the one the code was issued to. */
+	/** `client_id` or `redirect_uri` isn't the one the code was issued to. */
 	GrantMismatch
 }
 
-/** The RFC 6749 §5.2 `error` value for a refused code. */
+/** Returns the RFC 6749 §5.2 `error` value for a refused code. */
 pub fn token_error_code(e TokenError) String {
 	match e {
 		UnsupportedGrantType -> 'unsupported_grant_type'
@@ -255,8 +261,8 @@ pub fn token_error_code(e TokenError) String {
 	}
 }
 
-/** `POST /token`: a code for a bearer token. PKCE is the client's proof: the
- * verifier must hash to the code's challenge. */
+/** Handles `POST /token` by swapping a code for a bearer token. The client's
+ * PKCE verifier must hash to the code's challenge. */
 pub fn token(store Store, req_body Binary) Result(json::Json, TokenError) {
 	f = form::decode(req_body)
 	code = form::get(f, 'code') or ''
@@ -271,7 +277,7 @@ pub fn token(store Store, req_body Binary) Result(json::Json, TokenError) {
 			None -> Err(UnknownCode)
 			Some(g) -> {
 				Grant(_, scope, client_id, redirect_uri, pkce_challenge, _) = g
-				// No empty stand-in on `Err`: it would match an empty challenge.
+				// Don't fall back to an empty digest on `Err`, because it would match an empty challenge.
 				pkce_ok = match crypto::sha256(binary::from_string(verifier)) {
 					Ok(digest) ->
 						crypto::const_eq(
@@ -302,13 +308,14 @@ pub fn token(store Store, req_body Binary) Result(json::Json, TokenError) {
 	}
 }
 
-/** The resource side's bearer check: a token's grant. */
+/** Checks a bearer token for the resource server. Returns the token's grant,
+ * or `None` if the token isn't known. */
 pub fn bearer(store Store, token_text String) Option(Grant) {
 	Store(_, _, _, _, _, get_token) = store
 	get_token(token_text)
 }
 
-// 32 random bytes, url-safe, for tokens, codes and client ids.
+// Makes 32 random bytes as URL-safe base64, for tokens, codes and client IDs.
 fn new_token() String {
 	binary::to_string(base64::url_encode(crypto::random_bytes(32) or <<>>)) or ''
 }

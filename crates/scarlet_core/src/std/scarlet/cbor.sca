@@ -2,9 +2,9 @@
  * Decodes CBOR (RFC 8949), but only the subset that COSE keys and WebAuthn
  * carry: integers, byte and text strings, arrays and maps.
  *
- * Floats, tags and indefinite lengths give `Unsupported` instead of a guess.
- * Map keys stay `Value`s, because COSE labels are integers (`alg` is 3, the EC
- * coordinates are -2 and -3).
+ * Floats, tags and indefinite lengths give `Unsupported` instead of a guess,
+ * and a map that repeats a key is refused. Map keys stay `Value`s, because
+ * COSE labels are integers (`alg` is 3, the EC coordinates are -2 and -3).
  */
 
 import scarlet/array
@@ -23,65 +23,76 @@ pub type Value {
 	Map(entries Array((Value, Value)))
 }
 
+/** Why `decode` stopped. `at` is the byte offset of the item at fault. */
 pub type Error {
-	Truncated
-	/** A major type or additional-info value this subset doesn't decode.
-	 * `decode` also gives it for bytes left over after the item. */
+	/** The input ends inside the item. */
+	Truncated(at Int)
+	/** Not well-formed CBOR (RFC 8949 §3): a reserved additional-info value,
+	 * or an indefinite length or break where none can be. */
+	Malformed(at Int)
+	/** Well-formed, but outside this subset: a tag, a float or simple value,
+	 * or an indefinite-length string, array or map. */
 	Unsupported(at Int)
+	/** A text string that is not UTF-8. */
 	NotUtf8(at Int)
+	/** A map key equal to an earlier key of the same map. */
+	DuplicateKey(at Int)
+	/** `decode` read one whole item, and more bytes follow it. */
+	TrailingData(at Int)
 }
 
 /** Decodes exactly one item, with nothing after it. Use `decode_prefix` when
  * more may follow. */
 pub fn decode(b Binary) Result(Value, Error) {
-	v <- result::then(decode_prefix(b, 0))
-	(value, at) = v
-	if at == binary::byte_size(b) {
+	(value, end) <- result::then(decode_prefix(b, 0))
+	if end == binary::byte_size(b) {
 		Ok(value)
 	} else {
-		Err(Unsupported(at))
+		Err(TrailingData(end))
 	}
 }
 
 /** Decodes the item at `at` and returns it with the offset just past it. */
 pub fn decode_prefix(b Binary, at Int) Result((Value, Int), Error) {
 	if at >= binary::byte_size(b) {
-		Err(Truncated)
+		Err(Truncated(at))
 	} else {
 		ib = binary::byte_at(b, at)
 		major = int::bitwise_shift_right(ib, 5)
 		info = int::bitwise_and(ib, 31)
-		head <- result::then(argument(b, at + 1, info))
-		(arg, body) = head
+		(arg, body) <- result::then(argument(b, at, major, info))
 		read_item(b, major, arg, body, at)
 	}
 }
 
 // The argument is `info` itself for 0-23, or the next 1, 2, 4 or 8 bytes for
-// 24-27.
-fn argument(b Binary, at Int, info Int) Result((Int, Int), Error) {
+// 24-27. `start` is the item's first byte.
+fn argument(b Binary, start Int, major Int, info Int) Result((Int, Int), Error) {
 	if info < 24 {
-		Ok((info, at))
+		Ok((info, start + 1))
 	} else if info == 24 {
-		be(b, at, 1)
+		be(b, start, 1)
 	} else if info == 25 {
-		be(b, at, 2)
+		be(b, start, 2)
 	} else if info == 26 {
-		be(b, at, 4)
+		be(b, start, 4)
 	} else if info == 27 {
-		be(b, at, 8)
+		be(b, start, 8)
+	} else if info == 31 && major >= 2 && major <= 5 {
+		Err(Unsupported(start))
 	} else {
-		// 28-30 are reserved, and 31 is an indefinite length, which this subset
-		// doesn't support.
-		Err(Unsupported(at))
+		// 28-30 are reserved. 31 means nothing on an integer or a tag, and as a
+		// break (major 7) it can only end an indefinite-length item, which this
+		// never opens.
+		Err(Malformed(start))
 	}
 }
 
-fn be(b Binary, at Int, n Int) Result((Int, Int), Error) {
-	if at + n > binary::byte_size(b) {
-		Err(Truncated)
+fn be(b Binary, start Int, n Int) Result((Int, Int), Error) {
+	if start + 1 + n > binary::byte_size(b) {
+		Err(Truncated(start))
 	} else {
-		Ok((be_from(b, at, n, 0), at + n))
+		Ok((be_from(b, start + 1, n, 0), start + 1 + n))
 	}
 }
 
@@ -99,16 +110,12 @@ fn read_item(b Binary, major Int, arg Int, body Int, start Int) Result((Value, I
 	} else if major == 1 {
 		Ok((Nint(0 - 1 - arg), body))
 	} else if major == 2 {
-		bytes(b, body, arg, fn(slice) Bytes(slice))
+		result::map(content(b, body, arg, start), fn(s) (Bytes(s), body + arg))
 	} else if major == 3 {
-		if body + arg > binary::byte_size(b) {
-			Err(Truncated)
-		} else {
-			slice = binary::slice_bytes(b, body, arg) or <<>>
-			match binary::to_string(slice) {
-				Ok(s) -> Ok((Text(s), body + arg))
-				Err(Nil) -> Err(NotUtf8(start))
-			}
+		slice <- result::then(content(b, body, arg, start))
+		match binary::to_string(slice) {
+			Ok(s) -> Ok((Text(s), body + arg))
+			Err(Nil) -> Err(NotUtf8(start))
 		}
 	} else if major == 4 {
 		read_list(b, body, arg, [])
@@ -121,11 +128,11 @@ fn read_item(b Binary, major Int, arg Int, body Int, start Int) Result((Value, I
 	}
 }
 
-fn bytes(b Binary, at Int, n Int, wrap fn(Binary) Value) Result((Value, Int), Error) {
-	if at + n > binary::byte_size(b) {
-		Err(Truncated)
-	} else {
-		Ok((wrap(binary::slice_bytes(b, at, n) or <<>>), at + n))
+// The `n` content bytes at `at` of the string that starts at `start`.
+fn content(b Binary, at Int, n Int, start Int) Result(Binary, Error) {
+	match binary::slice_bytes(b, at, n) {
+		Ok(s) -> Ok(s)
+		Err(Nil) -> Err(Truncated(start))
 	}
 }
 
@@ -133,21 +140,27 @@ fn read_list(b Binary, at Int, left Int, acc Array(Value)) Result((Value, Int), 
 	if left <= 0 {
 		Ok((List(acc), at))
 	} else {
-		item <- result::then(decode_prefix(b, at))
-		(value, next) = item
+		(value, next) <- result::then(decode_prefix(b, at))
 		read_list(b, next, left - 1, [..acc, value])
 	}
 }
 
+// A repeated key is refused, not resolved: two readers that keep different
+// copies would disagree about what the map says.
 fn read_map(b Binary, at Int, left Int, acc Array((Value, Value))) Result((Value, Int), Error) {
 	if left <= 0 {
 		Ok((Map(acc), at))
 	} else {
-		key <- result::then(decode_prefix(b, at))
-		(k, after_key) = key
-		val <- result::then(decode_prefix(b, after_key))
-		(v, after_val) = val
-		read_map(b, after_val, left - 1, [..acc, (k, v)])
+		(k, after_key) <- result::then(decode_prefix(b, at))
+		if array::any(acc, fn(e) {
+			(seen, _) = e
+			seen == k
+		}) {
+			Err(DuplicateKey(at))
+		} else {
+			(v, after_val) <- result::then(decode_prefix(b, after_key))
+			read_map(b, after_val, left - 1, [..acc, (k, v)])
+		}
 	}
 }
 
