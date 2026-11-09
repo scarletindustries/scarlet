@@ -102,6 +102,7 @@ pub fn register_error_code(e RegisterError) String {
 /** Registers a public client and gives back its metadata. No secret. */
 pub fn register(store Store, req_body Binary) Result(json::Json, RegisterError) {
 	doc <- result::then(result::map_err(json::parse_binary(req_body), fn(_) BodyNotJson))
+
 	uris = match json::field(doc, 'redirect_uris') {
 		Some(list) -> array::fold(json::elements(list), [], fn(acc, u) match json::string(u) {
 			Some(t) -> [..acc, t]
@@ -109,6 +110,7 @@ pub fn register(store Store, req_body Binary) Result(json::Json, RegisterError) 
 		})
 		None -> []
 	}
+
 	match uris {
 		[] -> Err(MissingRedirectUris)
 		_ -> {
