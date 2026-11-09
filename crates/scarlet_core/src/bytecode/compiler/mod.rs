@@ -50,8 +50,8 @@ use super::session::{RawRef, Watermark};
 use super::{PreludeBindings, TypeRef};
 use crate::ast;
 use crate::core_ir::{
-    Abi, Const, ConstId, CoreFn, FuncIdx, HttpTypes, IoErrors, JsonTypes, LoweredFn, Program,
-    Radix, TypeNames, VariantNames, VariantRef,
+    Abi, Const, ConstId, CoreFn, FuncIdx, HttpTypes, IoErrors, JsonTypes, LoweredFn, ParseReasons,
+    Program, Radix, TypeNames, VariantNames, VariantRef,
 };
 use crate::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
 use crate::tivec::{Idx, TiVec};
@@ -1216,10 +1216,23 @@ impl Compiler {
         let module = ["scarlet", "json"];
         let doc = self.stdlib_variants(&module, "Doc")?;
         let parse_error = self.stdlib_variants(&module, "ParseError")?;
+        let reason = self.stdlib_variants(&module, "ParseReason")?;
         let json = self.stdlib_variants(&module, "Json")?;
         Some(JsonTypes {
             doc: doc("Doc")?,
             parse_error: parse_error("ParseError")?,
+            reasons: ParseReasons {
+                unexpected_end: reason("UnexpectedEnd")?,
+                unexpected_byte: reason("UnexpectedByte")?,
+                trailing_data: reason("TrailingData")?,
+                unterminated_string: reason("UnterminatedString")?,
+                bad_escape: reason("BadEscape")?,
+                bad_unicode: reason("BadUnicode")?,
+                bad_number: reason("BadNumber")?,
+                not_utf8: reason("NotUtf8")?,
+                not_whole_bytes: reason("NotWholeBytes")?,
+                too_large: reason("TooLarge")?,
+            },
             null: json("Null")?,
             boolean: json("Boolean")?,
             integer: json("Integer")?,
@@ -2896,7 +2909,7 @@ impl ModuleChecker<'_> {
             self.c.engine.diagnostics.push(Diagnostic::error(
                 err.span,
                 DiagnosticCode::ParseError,
-                err.message.clone(),
+                err.error.to_string(),
             ));
         }
         self.c.engine.fresh_var()

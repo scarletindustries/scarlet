@@ -14,6 +14,7 @@ import scarlet/string
 type ParseError {
 	Empty
 	NotANumber(text String)
+	OutOfRange(score Int)
 }
 
 // map_err lifts binary::parse_int's bare Result(Int, Nil) into our own error type.
@@ -34,6 +35,7 @@ fn show(r Result(Int, ParseError)) String {
 		Ok(n) -> 'Ok(${n})'
 		Err(Empty) -> 'Err(Empty)'
 		Err(NotANumber(t)) -> 'Err(NotANumber(${t}))'
+		Err(OutOfRange(n)) -> 'Err(OutOfRange(${n}))'
 	}
 }
 
@@ -41,7 +43,7 @@ fn validate(n Int) Result(Int, ParseError) {
 	if n >= 0 && n <= 100 {
 		Ok(n)
 	} else {
-		Err(NotANumber('${n} out of range'))
+		Err(OutOfRange(n))
 	}
 }
 
@@ -91,6 +93,7 @@ pub fn main() {
 		match e {
 			Empty -> println('recover   nothing to parse')
 			NotANumber(t) -> println('recover   ${t} is not a number, using 0')
+			OutOfRange(n) -> println('recover   ${n} is out of range, using 0')
 		}
 		0
 	}

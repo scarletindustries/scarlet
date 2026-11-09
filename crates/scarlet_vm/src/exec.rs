@@ -33,6 +33,7 @@ use crate::http;
 use crate::json;
 use crate::map;
 use crate::show;
+use crate::stop::{Broken, Missing};
 use crate::value::{Value, View};
 
 struct Frame<'c> {
@@ -95,9 +96,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     fn body(&self, f: FuncIdx) -> Result<&'c Body, Stop> {
         match self.code.fns.get(f) {
             Some(func) => ready(func),
-            None => Err(Stop::NotBuiltYet(format!(
-                "a call to {f}, which the program does not have"
-            ))),
+            None => Err(Stop::missing(Missing::NoFunc(f))),
         }
     }
 
@@ -118,10 +117,9 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 return Ok(Value::NIL);
             };
             let Some(instr) = frame.body.instrs.get(frame.pc) else {
-                return Err(Stop::BadProgram(format!(
-                    "{} ran past its last instruction",
-                    frame.body.name
-                )));
+                return Err(Stop::broken(Broken::RanPastEnd {
+                    func: frame.body.name.clone(),
+                }));
             };
             frame.pc += 1;
             let base = frame.base;
@@ -229,7 +227,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                             Some(cell) if self.is_string(v) => {
                                 self.heap.read_string(cell, &mut text);
                             }
-                            _ => return Err(Stop::NotBuiltYet(format!("joining {v:?}"))),
+                            _ => return Err(Stop::missing(Missing::Join(v.view()))),
                         }
                     }
                     let s = Value::cell(self.heap.string(&text).map_err(full)?);
@@ -362,10 +360,10 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                         _ => None,
                     };
                     let Some(v) = capture else {
-                        return Err(Stop::BadProgram(format!(
-                            "{} read capture {index}, which the closure it runs as does not have",
-                            frame.body.name
-                        )));
+                        return Err(Stop::broken(Broken::NoCapture {
+                            func: frame.body.name.clone(),
+                            index: *index,
+                        }));
                     };
                     let v = self.share(v);
                     self.set(base, *dst, v);
@@ -431,9 +429,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                         _ => None,
                     };
                     let Some(field) = field else {
-                        return Err(Stop::BadProgram(format!(
-                            "field {index} read from a value with no such field"
-                        )));
+                        return Err(Stop::broken(Broken::NoField { index: *index }));
                     };
                     let field = self.share(field);
                     self.set(base, *dst, field);
@@ -451,9 +447,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                         _ => None,
                     };
                     let Some(element) = element else {
-                        return Err(Stop::BadProgram(format!(
-                            "element {index} read from a value with no such element"
-                        )));
+                        return Err(Stop::broken(Broken::NoElement { index: *index }));
                     };
                     let element = self.share(element);
                     self.set(base, *dst, element);
@@ -507,7 +501,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                         | View::Func(_)
                         | View::Cell(_)
                         | View::Nullary(_)) => {
-                            return Err(Stop::BadProgram(format!("`!` on {v:?}, not a Bool")));
+                            return Err(Stop::broken(Broken::NotOnNonBool(v)));
                         }
                     };
                     self.set(base, *dst, Value::bool(!b));
@@ -526,9 +520,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 Instr::ArrayElem { dst, src, index } => {
                     let s = self.seq(self.get(base, *src))?;
                     let Some(v) = self.element(s, usize::from(*index))? else {
-                        return Err(Stop::BadProgram(format!(
-                            "element {index} read from an array with no such element"
-                        )));
+                        return Err(Stop::broken(Broken::NoArrayElement { index: *index }));
                     };
                     self.set(base, *dst, v);
                 }
@@ -543,9 +535,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                         | View::Func(_)
                         | View::Cell(_)
                         | View::Nullary(_)) => {
-                            return Err(Stop::BadProgram(format!(
-                                "an array's first {v:?} elements dropped"
-                            )));
+                            return Err(Stop::broken(Broken::DropCount(v)));
                         }
                     };
                     let cell = match s {
@@ -635,7 +625,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     };
                     self.set(base, *dst, v);
                 }
-                Instr::Bad { why } => return Err(Stop::BadProgram((*why).into())),
+                Instr::Bad { why } => return Err(Stop::broken(why.clone())),
                 Instr::JumpIfFalse { cond, to } => match self.get(base, *cond).view() {
                     View::Bool(true) => {}
                     View::Bool(false) => frame.pc = *to as usize,
@@ -645,7 +635,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     | View::Func(_)
                     | View::Cell(_)
                     | View::Nullary(_)) => {
-                        return Err(Stop::NotBuiltYet(format!("a branch on {v:?}")));
+                        return Err(Stop::missing(Missing::Branch(v)));
                     }
                 },
                 Instr::Ret { src } => {
@@ -887,14 +877,14 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             }
             Intrinsic::StringLength => {
                 let Some(cell) = v.as_cell().filter(|_| self.is_string(v)) else {
-                    return Err(Stop::BadProgram(format!("`string.length` of {v:?}")));
+                    return Err(Stop::broken(Broken::StringLength(v.view())));
                 };
                 let mut bytes = Vec::with_capacity(self.heap.string_len(cell));
                 self.heap.read_string(cell, &mut bytes);
                 let n = match std::str::from_utf8(&bytes) {
                     Ok(s) => s.chars().count(),
                     Err(_) => {
-                        return Err(Stop::BadProgram("a string that is not UTF-8".into()));
+                        return Err(Stop::broken(Broken::NotUtf8));
                     }
                 };
                 bigint::value(&mut self.heap, n.into()).map_err(full)
@@ -1004,7 +994,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 } else {
                     Err(json::ParseError {
                         offset: (src.len / 8) as usize,
-                        message: "input is not a whole number of bytes".into(),
+                        reason: json::Reason::NotWholeBytes,
                     })
                 };
                 let types = self.json_types()?;
@@ -1024,10 +1014,10 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     Err(e) => {
                         let offset =
                             bigint::value(&mut self.heap, e.offset.into()).map_err(full)?;
-                        let text = self.heap.string(e.message.as_bytes()).map_err(full)?;
+                        let reason = Value::nullary(e.reason.variant(&types.reasons));
                         let error = self
                             .heap
-                            .ctor(types.parse_error, &[offset, Value::cell(text)])
+                            .ctor(types.parse_error, &[offset, reason])
                             .map_err(full)?;
                         self.err(Value::cell(error))
                     }
@@ -1358,7 +1348,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 let text = format!("{units}e{}", -scale);
                 let f = text
                     .parse::<f64>()
-                    .map_err(|_| Stop::BadProgram(format!("`{text}` is not a float")))?;
+                    .map_err(|_| Stop::broken(Broken::NotAFloat { text }))?;
                 Ok(Value::float(f))
             }
             Intrinsic::FloatToString => {
@@ -1373,7 +1363,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     self.heap.string(text.as_bytes()).map_err(full)?,
                 ))
             }
-            other => Err(Stop::NotBuiltYet(format!("the built-in {other:?}"))),
+            other => Err(Stop::missing(Missing::Intrinsic(other))),
         }
     }
 
@@ -1425,10 +1415,11 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 let b = self.binary(arg(self, 0))?;
                 let (at, len) = (self.width(arg(self, 1))?, self.width(arg(self, 2))?);
                 if at.checked_add(len).is_none_or(|end| end > b.len) {
-                    return Err(Stop::BadProgram(format!(
-                        "a pattern read bits {at}..{at}+{len} of a binary {} long",
-                        b.len
-                    )));
+                    return Err(Stop::broken(Broken::ReadPastEnd {
+                        at,
+                        len,
+                        bits: b.len,
+                    }));
                 }
                 Ok(Value::cell(
                     binary::slice(&mut self.heap, b, at, len).map_err(full)?,
@@ -1447,7 +1438,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 let (cp, took) = (i64::from(cp), took as i64);
                 let pair = [Value::int(cp), Value::int(took)];
                 let [Some(cp), Some(took)] = pair else {
-                    return Err(Stop::BadProgram("a code point past a small Int".into()));
+                    return Err(Stop::broken(Broken::CodePointTooBig));
                 };
                 Ok(Value::cell(self.heap.tuple(&[cp, took]).map_err(full)?))
             }
@@ -1455,10 +1446,11 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 let b = self.binary(arg(self, 0))?;
                 let (at, width) = (self.width(arg(self, 1))?, self.width(arg(self, 2))?);
                 if at.checked_add(width).is_none_or(|end| end > b.len) {
-                    return Err(Stop::BadProgram(format!(
-                        "a pattern read bits {at}..{at}+{width} of a binary {} long",
-                        b.len
-                    )));
+                    return Err(Stop::broken(Broken::ReadPastEnd {
+                        at,
+                        len: width,
+                        bits: b.len,
+                    }));
                 }
                 let n = binary::read_uint(&self.heap, b, at, width);
                 bigint::value(&mut self.heap, n).map_err(full)
@@ -1470,7 +1462,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     fn binary(&self, v: Value) -> Result<Bits, Stop> {
         v.as_cell()
             .and_then(|cell| binary::bits(&self.heap, cell))
-            .ok_or_else(|| Stop::BadProgram(format!("a binary operation on {v:?}")))
+            .ok_or_else(|| Stop::broken(Broken::NotBinary(v.view())))
     }
 
     /// The Int `v` as a width or position in bits. It is 0 below zero, as in
@@ -1486,8 +1478,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
 
     /// The string `v`, as text. Every string the VM makes is UTF-8.
     fn utf8_of(&self, v: Value) -> Result<String, Stop> {
-        String::from_utf8(self.text_of(v)?)
-            .map_err(|_| Stop::BadProgram("a string that is not UTF-8".into()))
+        String::from_utf8(self.text_of(v)?).map_err(|_| Stop::broken(Broken::NotUtf8))
     }
 
     /// A new array of new strings holding `pieces`.
@@ -1509,7 +1500,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 self.heap.read_string(cell, &mut text);
                 Ok(text)
             }
-            _ => Err(Stop::BadProgram(format!("a string operation on {v:?}"))),
+            _ => Err(Stop::broken(Broken::NotString(v.view()))),
         }
     }
 
@@ -1518,9 +1509,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
         match (v.view(), self.code.abi.radix) {
             (View::Nullary(r), Some(radix)) if r == radix.dec => Ok(10),
             (View::Nullary(r), Some(radix)) if r == radix.hex => Ok(16),
-            _ => Err(Stop::BadProgram(format!(
-                "{v:?} as a `scarlet/binary.Radix`"
-            ))),
+            _ => Err(Stop::broken(Broken::NotRadix(v.view()))),
         }
     }
 
@@ -1574,9 +1563,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     }
 
     fn io_errors(&self) -> Result<IoErrors, Stop> {
-        self.code.abi.io.ok_or_else(|| {
-            Stop::BadProgram("a file built-in, in a program with no `scarlet/io.IoError`".into())
-        })
+        self.code.abi.io.ok_or(Stop::broken(Broken::NoIoTypes))
     }
 
     /// `Err` of the `IoError` `e` stands for, about `path`.
@@ -1611,16 +1598,14 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     }
 
     fn json_types(&self) -> Result<JsonTypes, Stop> {
-        self.code.abi.json.ok_or_else(|| {
-            Stop::BadProgram("a JSON built-in, in a program with no `scarlet/json` types".into())
-        })
+        self.code.abi.json.ok_or(Stop::broken(Broken::NoJsonTypes))
     }
 
     /// The parts of the `Doc` `v`. Only `json.parse` makes one, so anything
     /// else is a program the compiler should not have let through.
     fn doc(&self, v: Value) -> Result<Doc, Stop> {
         let types = self.json_types()?;
-        let not_a_doc = || Stop::BadProgram(format!("a JSON read of {v:?}, which is not a `Doc`"));
+        let not_a_doc = || Stop::broken(Broken::NotADoc(v.view()));
         let cell = v.as_cell().ok_or_else(not_a_doc)?;
         if self.heap.kind(cell) != Some(Kind::Ctor) || self.heap.variant(cell) != types.doc {
             return Err(not_a_doc());
@@ -1680,7 +1665,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 }
                 Step::Value(v) => v,
             };
-            let not_json = || Stop::BadProgram(format!("{v:?} as a `Json` to encode"));
+            let not_json = || Stop::broken(Broken::NotJson(v.view()));
             let cell = match v.view() {
                 View::Nullary(n) if n == types.null => {
                     out.extend_from_slice(b"null");
@@ -1755,11 +1740,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     }
 
     fn http_types(&self) -> Result<HttpTypes, Stop> {
-        self.code.abi.http.ok_or_else(|| {
-            Stop::BadProgram(
-                "an HTTP built-in, in a program with no `scarlet/http/h1` types".into(),
-            )
-        })
+        self.code.abi.http.ok_or(Stop::broken(Broken::NoHttpTypes))
     }
 
     /// The bytes of the binary `v`, the last one padded with zero bits.
@@ -1781,7 +1762,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     /// The name and value of each `Header` in the `Headers` array `v`.
     fn headers(&self, v: Value) -> Result<Vec<(Value, Value)>, Stop> {
         let types = self.http_types()?;
-        let not_headers = || Stop::BadProgram(format!("{v:?} as `Headers`"));
+        let not_headers = || Stop::broken(Broken::NotHeaders(v.view()));
         let items = match self.seq(v)? {
             Seq::Tree(t) => array::elements(&self.heap, t),
             Seq::Range { start, end } if start >= end => Vec::new(),
@@ -1965,20 +1946,14 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     fn map(&self, v: Value) -> Result<Cell, Stop> {
         v.as_cell()
             .filter(|&cell| self.heap.kind(cell) == Some(Kind::Map))
-            .ok_or_else(|| {
-                Stop::BadProgram(format!("a map operation on {v:?}, which is not a map"))
-            })
+            .ok_or_else(|| Stop::broken(Broken::NotAMap(v.view())))
     }
 
     /// The array `v` holds, as a tree or a range.
     fn seq(&self, v: Value) -> Result<Seq, Stop> {
         v.as_cell()
             .and_then(|cell| array::seq(&self.heap, cell))
-            .ok_or_else(|| {
-                Stop::BadProgram(format!(
-                    "an array operation on {v:?}, which is not an array"
-                ))
-            })
+            .ok_or_else(|| Stop::broken(Broken::NotAnArray(v.view())))
     }
 
     /// Element `i` of `s`, holding its own reference, or `None` past the end.
@@ -2029,16 +2004,14 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             View::Int(n) => Ok(n),
             View::Cell(cell) if self.heap.kind(cell) == Some(Kind::BigInt) => {
                 num_traits::ToPrimitive::to_i64(&self.heap.read_big_int(cell))
-                    .ok_or_else(|| Stop::NotBuiltYet("a range with an end past 64 bits".into()))
+                    .ok_or(Stop::missing(Missing::BigRangeEnd))
             }
             v @ (View::Float(_)
             | View::Nil
             | View::Bool(_)
             | View::Func(_)
             | View::Cell(_)
-            | View::Nullary(_)) => Err(Stop::BadProgram(format!(
-                "a range whose end is {v:?}, not an Int"
-            ))),
+            | View::Nullary(_)) => Err(Stop::broken(Broken::RangeEnd(v))),
         }
     }
 
@@ -2054,9 +2027,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             | View::Bool(_)
             | View::Func(_)
             | View::Cell(_)
-            | View::Nullary(_)) => Err(Stop::BadProgram(format!(
-                "an array position that is {v:?}, not an Int"
-            ))),
+            | View::Nullary(_)) => Err(Stop::broken(Broken::Position(v))),
         }
     }
 
@@ -2115,18 +2086,16 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             | View::Bool(_)
             | View::Cell(_)
             | View::Nullary(_)) => {
-                return Err(Stop::BadProgram(format!(
-                    "a call to {v:?}, which is not a function"
-                )));
+                return Err(Stop::broken(Broken::NotAFunction(v)));
             }
         };
         let body = self.body(func)?;
         if body.params.len() != argc {
-            return Err(Stop::BadProgram(format!(
-                "{} called with {argc} arguments, not {}",
-                body.name,
-                body.params.len()
-            )));
+            return Err(Stop::broken(Broken::CallArity {
+                func: body.name.clone(),
+                got: argc,
+                want: body.params.len(),
+            }));
         }
         Ok((body, self.share(f)))
     }
@@ -2256,7 +2225,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             | View::Bool(_)
             | View::Func(_)
             | View::Cell(_)
-            | View::Nullary(_)) => Err(Stop::BadProgram(format!("a Float operation on {v:?}"))),
+            | View::Nullary(_)) => Err(Stop::broken(Broken::FloatOperation(v))),
         }
     }
 
@@ -2305,7 +2274,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             | View::Bool(_)
             | View::Func(_)
             | View::Cell(_)
-            | View::Nullary(_)) => Err(Stop::NotBuiltYet(format!("an Int operation on {v:?}"))),
+            | View::Nullary(_)) => Err(Stop::missing(Missing::IntOperation(v))),
         }
     }
 
@@ -2387,7 +2356,7 @@ fn shift(
 fn ready(f: &Func) -> Result<&Body, Stop> {
     match f {
         Func::Ready(body) => Ok(body),
-        Func::NotBuiltYet(what) => Err(Stop::NotBuiltYet(what.clone())),
+        Func::NotBuiltYet(what) => Err(Stop::missing(what.clone())),
     }
 }
 

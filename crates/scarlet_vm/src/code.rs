@@ -34,6 +34,7 @@ use scarlet_ir::tivec::{Idx, TiVec};
 
 use crate::float::NumOp;
 use crate::show::Types;
+use crate::stop::{Arity, Broken, Missing};
 use crate::value::Value;
 
 /// A register, which is an index into the running function's frame.
@@ -380,7 +381,7 @@ pub(crate) enum Instr {
     /// `why` says which. The loader puts this where only such a program can
     /// reach, like after a `match`'s last arm.
     Bad {
-        why: &'static str,
+        why: Broken,
     },
 }
 
@@ -507,7 +508,7 @@ pub(crate) enum Func {
     Ready(Body),
     /// The function uses something the VM does not run yet, and this says
     /// what.
-    NotBuiltYet(String),
+    NotBuiltYet(Missing),
 }
 
 #[derive(Debug)]
@@ -617,7 +618,7 @@ impl<'c> Loader<'c> {
         }
     }
 
-    fn body(mut self, f: &CoreFn) -> Result<(u32, Vec<Instr>), String> {
+    fn body(mut self, f: &CoreFn) -> Result<(u32, Vec<Instr>), Missing> {
         self.expr(&f.body, Dest::Return)?;
         moves_on_last_use(&mut self.instrs);
         Ok((self.next, self.instrs))
@@ -672,7 +673,7 @@ impl<'c> Loader<'c> {
             },
             (Callee::Known(func), None) => Instr::TailCall { func: *func, args },
             (Callee::Self_, _) if self.this.is_none() => Instr::Bad {
-                why: "a toplevel calls itself",
+                why: Broken::ToplevelCallsSelf,
             },
             (Callee::Self_, Some(dst)) => Instr::CallSelf { dst, args },
             (Callee::Self_, None) => Instr::TailCallSelf { args },
@@ -694,7 +695,7 @@ impl<'c> Loader<'c> {
         r
     }
 
-    fn expr(&mut self, e: &CoreExpr, dest: Dest) -> Result<(), String> {
+    fn expr(&mut self, e: &CoreExpr, dest: Dest) -> Result<(), Missing> {
         let mut e = e;
         loop {
             match e {
@@ -763,9 +764,7 @@ impl<'c> Loader<'c> {
                         self.expr(arm, dest)?;
                         self.place(next);
                     }
-                    self.instrs.push(Instr::Bad {
-                        why: "a match found no arm for its value",
-                    });
+                    self.instrs.push(Instr::Bad { why: Broken::NoArm });
                     return Ok(());
                 }
                 // Every path through `body` ends in a return or a jump, so
@@ -781,7 +780,7 @@ impl<'c> Loader<'c> {
                     match self.conts.get(id) {
                         Some(&l) => self.jump(l, |to| Instr::Jump { to }),
                         None => self.instrs.push(Instr::Bad {
-                            why: "a jump to a case that no match declares",
+                            why: Broken::UndeclaredCase,
                         }),
                     }
                     return Ok(());
@@ -792,7 +791,7 @@ impl<'c> Loader<'c> {
 
     /// Test `src` against `pat`, jumping to `next` when it does not fit, and
     /// read out what the pattern binds when it does.
-    fn pattern(&mut self, src: Reg, pat: &CorePat, next: Label) -> Result<(), String> {
+    fn pattern(&mut self, src: Reg, pat: &CorePat, next: Label) -> Result<(), Missing> {
         match pat {
             CorePat::Wild => {}
             CorePat::Bind(b) => self.instrs.push(Instr::Move {
@@ -803,8 +802,7 @@ impl<'c> Loader<'c> {
                 let variant = *variant;
                 self.jump(next, |to| Instr::JumpUnlessVariant { src, variant, to });
                 for (i, f) in fields.iter().enumerate() {
-                    let index = u16::try_from(i)
-                        .map_err(|_| "a constructor with more than 65535 fields".to_string())?;
+                    let index = u16::try_from(i).map_err(|_| Missing::TooManyFields)?;
                     self.instrs.push(Instr::Field {
                         dst: Reg::of(f.id),
                         src,
@@ -835,17 +833,14 @@ impl<'c> Loader<'c> {
                     });
                 }
                 None => {
-                    return Err(format!(
-                        "constant c{}, which the program does not have",
-                        c.index()
-                    ));
+                    return Err(Missing::NoConst(c.index()));
                 }
             },
         }
         Ok(())
     }
 
-    fn atom(&mut self, dst: Reg, atom: &Atom) -> Result<(), String> {
+    fn atom(&mut self, dst: Reg, atom: &Atom) -> Result<(), Missing> {
         let instr = match atom {
             Atom::Local(src) => Instr::Move {
                 dst,
@@ -879,13 +874,13 @@ impl<'c> Loader<'c> {
             Atom::Load(Load::Capture(i)) => match u32::try_from(i.0) {
                 Ok(index) => Instr::GetCapture { dst, index },
                 Err(_) => Instr::Bad {
-                    why: "a capture with a negative index",
+                    why: Broken::NegativeCapture,
                 },
             },
             Atom::Load(Load::SelfClosure) => match self.this {
                 Some(this) => Instr::GetSelf { dst, this },
                 None => Instr::Bad {
-                    why: "a toplevel reads itself as a closure",
+                    why: Broken::ToplevelSelf,
                 },
             },
             Atom::Closure { func_idx, captures } if captures.is_empty() => Instr::Const {
@@ -907,7 +902,7 @@ impl<'c> Loader<'c> {
                     dst,
                     arg: Reg::of(*arg),
                 },
-                _ => return Err("println with other than one argument".into()),
+                _ => return Err(Missing::PrintlnArity),
             },
             Atom::Intrinsic { intrinsic, args } if built(*intrinsic, args.len()) => {
                 Instr::Builtin {
@@ -916,7 +911,7 @@ impl<'c> Loader<'c> {
                     args: args.iter().copied().map(Reg::of).collect(),
                 }
             }
-            Atom::Intrinsic { intrinsic, .. } => return Err(format!("the built-in {intrinsic:?}")),
+            Atom::Intrinsic { intrinsic, .. } => return Err(Missing::Intrinsic(*intrinsic)),
             // A constructor with no fields is a value word, so there is no
             // allocation for Perceus to reuse.
             Atom::Ctor {
@@ -940,8 +935,10 @@ impl<'c> Loader<'c> {
         Ok(())
     }
 
-    fn prim(&mut self, dst: Reg, op: PrimOp, args: &[LocalId]) -> Result<Instr, String> {
-        let int = |op| -> Result<Instr, String> {
+    fn prim(&mut self, dst: Reg, op: PrimOp, args: &[LocalId]) -> Result<Instr, Missing> {
+        let prim = op;
+        let arity = |want| Missing::Arity { op: prim, want };
+        let int = |op| -> Result<Instr, Missing> {
             match args {
                 [a, b] => Ok(Instr::Int {
                     dst,
@@ -949,12 +946,12 @@ impl<'c> Loader<'c> {
                     a: Reg::of(*a),
                     b: Reg::of(*b),
                 }),
-                _ => Err(format!("{op:?} with other than two arguments")),
+                _ => Err(arity(Arity::Two)),
             }
         };
-        let bits = |op, argc| -> Result<Instr, String> {
-            if args.len() != argc {
-                return Err(format!("{op:?} with other than {argc} arguments"));
+        let bits = |op, want: Arity| -> Result<Instr, Missing> {
+            if !want.fits(args.len()) {
+                return Err(arity(want));
             }
             Ok(Instr::Bits {
                 dst,
@@ -963,7 +960,7 @@ impl<'c> Loader<'c> {
             })
         };
         // A Float operation (`float`), or one on either kind of number.
-        let two = |op, float| -> Result<Instr, String> {
+        let two = |op, float| -> Result<Instr, Missing> {
             match args {
                 [a, b] => {
                     let (a, b) = (Reg::of(*a), Reg::of(*b));
@@ -973,7 +970,7 @@ impl<'c> Loader<'c> {
                         Instr::Num { dst, op, a, b }
                     })
                 }
-                _ => Err(format!("{op:?} with other than two arguments")),
+                _ => Err(arity(Arity::Two)),
             }
         };
         match op {
@@ -1014,14 +1011,14 @@ impl<'c> Loader<'c> {
                         Instr::Neg { dst, a }
                     })
                 }
-                _ => Err(format!("{op:?} with other than one argument")),
+                _ => Err(arity(Arity::One)),
             },
             PrimOp::ToString => match args {
                 [a] => Ok(Instr::ToString {
                     dst,
                     a: Reg::of(*a),
                 }),
-                _ => Err("ToString with other than one argument".into()),
+                _ => Err(arity(Arity::One)),
             },
             PrimOp::StringConcat | PrimOp::StringConcatMany => Ok(Instr::Concat {
                 dst,
@@ -1032,7 +1029,7 @@ impl<'c> Loader<'c> {
                     dst,
                     a: Reg::of(*a),
                 }),
-                _ => Err("IntNeg with other than one argument".into()),
+                _ => Err(arity(Arity::One)),
             },
             PrimOp::Eq | PrimOp::Ne => match args {
                 [a, b] => {
@@ -1043,35 +1040,35 @@ impl<'c> Loader<'c> {
                         Instr::NotEqual { dst, a, b }
                     })
                 }
-                _ => Err(format!("{op:?} with other than two arguments")),
+                _ => Err(arity(Arity::Two)),
             },
             PrimOp::Not => match args {
                 [a] => Ok(Instr::Not {
                     dst,
                     a: Reg::of(*a),
                 }),
-                _ => Err("Not with other than one argument".into()),
+                _ => Err(arity(Arity::One)),
             },
-            PrimOp::BinaryFromInt => bits(BitsOp::FromInt, 2),
-            PrimOp::BinaryTake => bits(BitsOp::Take, 2),
-            PrimOp::BinaryFromString => bits(BitsOp::FromString, 1),
+            PrimOp::BinaryFromInt => bits(BitsOp::FromInt, Arity::Two),
+            PrimOp::BinaryTake => bits(BitsOp::Take, Arity::Two),
+            PrimOp::BinaryFromString => bits(BitsOp::FromString, Arity::One),
             PrimOp::BinaryConcatMany => Ok(Instr::Bits {
                 dst,
                 op: BitsOp::Concat,
                 args: args.iter().copied().map(Reg::of).collect(),
             }),
-            PrimOp::BinaryBitSize => bits(BitsOp::BitSize, 1),
-            PrimOp::BinaryView => bits(BitsOp::View, 3),
-            PrimOp::BinaryMatchPrefix => bits(BitsOp::MatchPrefix, 3),
-            PrimOp::BinaryReadUtf8 => bits(BitsOp::ReadUtf8, 2),
-            PrimOp::BinaryReadInt => bits(BitsOp::ReadInt, 3),
+            PrimOp::BinaryBitSize => bits(BitsOp::BitSize, Arity::One),
+            PrimOp::BinaryView => bits(BitsOp::View, Arity::Three),
+            PrimOp::BinaryMatchPrefix => bits(BitsOp::MatchPrefix, Arity::Three),
+            PrimOp::BinaryReadUtf8 => bits(BitsOp::ReadUtf8, Arity::Two),
+            PrimOp::BinaryReadInt => bits(BitsOp::ReadInt, Arity::Three),
             PrimOp::MakeRange => match args {
                 [start, end] => Ok(Instr::Range {
                     dst,
                     start: Reg::of(*start),
                     end: Reg::of(*end),
                 }),
-                _ => Err("MakeRange with other than two arguments".into()),
+                _ => Err(arity(Arity::Two)),
             },
             PrimOp::MakeArray => Ok(Instr::Array {
                 dst,
@@ -1082,7 +1079,7 @@ impl<'c> Loader<'c> {
                     dst,
                     src: Reg::of(*src),
                 }),
-                _ => Err("ArrayLen with other than one argument".into()),
+                _ => Err(arity(Arity::One)),
             },
             PrimOp::ArrayElem(index) => match args {
                 [src] => Ok(Instr::ArrayElem {
@@ -1090,7 +1087,7 @@ impl<'c> Loader<'c> {
                     src: Reg::of(*src),
                     index,
                 }),
-                _ => Err("ArrayElem with other than one argument".into()),
+                _ => Err(arity(Arity::One)),
             },
             PrimOp::ArrayDrop => match args {
                 [src, n] => Ok(Instr::ArrayDrop {
@@ -1098,7 +1095,7 @@ impl<'c> Loader<'c> {
                     src: Reg::of(*src),
                     n: Reg::of(*n),
                 }),
-                _ => Err("ArrayDrop with other than two arguments".into()),
+                _ => Err(arity(Arity::Two)),
             },
             PrimOp::ArrayPrepend => match args.split_last() {
                 Some((rest, front)) => Ok(Instr::ArrayPrepend {
@@ -1106,7 +1103,7 @@ impl<'c> Loader<'c> {
                     front: front.iter().copied().map(Reg::of).collect(),
                     rest: Reg::of(*rest),
                 }),
-                None => Err("ArrayPrepend with no arguments".into()),
+                None => Err(arity(Arity::AtLeastOne)),
             },
             PrimOp::ArrayAppend => match args.split_first() {
                 Some((rest, back)) => Ok(Instr::ArrayAppend {
@@ -1114,7 +1111,7 @@ impl<'c> Loader<'c> {
                     rest: Reg::of(*rest),
                     back: back.iter().copied().map(Reg::of).collect(),
                 }),
-                None => Err("ArrayAppend with no arguments".into()),
+                None => Err(arity(Arity::AtLeastOne)),
             },
             PrimOp::ArrayConcat => match args {
                 [a, b] => Ok(Instr::ArrayConcat {
@@ -1122,7 +1119,7 @@ impl<'c> Loader<'c> {
                     a: Reg::of(*a),
                     b: Reg::of(*b),
                 }),
-                _ => Err("ArrayConcat with other than two arguments".into()),
+                _ => Err(arity(Arity::Two)),
             },
             PrimOp::ArraySlice => match args {
                 [src, start, end] => Ok(Instr::ArraySlice {
@@ -1131,7 +1128,7 @@ impl<'c> Loader<'c> {
                     start: Reg::of(*start),
                     end: Reg::of(*end),
                 }),
-                _ => Err("ArraySlice with other than three arguments".into()),
+                _ => Err(arity(Arity::Three)),
             },
             PrimOp::ArrayIndex => match args {
                 [src, index] => Ok(Instr::ArrayIndex {
@@ -1139,7 +1136,7 @@ impl<'c> Loader<'c> {
                     src: Reg::of(*src),
                     index: Reg::of(*index),
                 }),
-                _ => Err("ArrayIndex with other than two arguments".into()),
+                _ => Err(arity(Arity::Two)),
             },
             PrimOp::ArrayIndexOr => match args {
                 [src, index, default] => Ok(Instr::ArrayIndexOr {
@@ -1148,7 +1145,7 @@ impl<'c> Loader<'c> {
                     index: Reg::of(*index),
                     default: Reg::of(*default),
                 }),
-                _ => Err("ArrayIndexOr with other than three arguments".into()),
+                _ => Err(arity(Arity::Three)),
             },
             PrimOp::MakeTuple => Ok(Instr::Tuple {
                 dst,
@@ -1160,7 +1157,7 @@ impl<'c> Loader<'c> {
                     src: Reg::of(*src),
                     index,
                 }),
-                _ => Err("TupleField with other than one argument".into()),
+                _ => Err(arity(Arity::One)),
             },
             PrimOp::Field(index) => match args {
                 [src] => Ok(Instr::Field {
@@ -1168,20 +1165,18 @@ impl<'c> Loader<'c> {
                     src: Reg::of(*src),
                     index,
                 }),
-                _ => Err("Field with other than one argument".into()),
+                _ => Err(arity(Arity::One)),
             },
         }
     }
 
-    fn constant(&self, i: usize) -> Result<Value, String> {
+    fn constant(&self, i: usize) -> Result<Value, Missing> {
         match self.consts.get(i) {
-            Some(Const::Int(n)) => {
-                Value::int(*n).ok_or_else(|| format!("the constant {n} as a small Int"))
-            }
+            Some(Const::Int(n)) => Value::int(*n).ok_or(Missing::BigConst(*n)),
             Some(Const::Float(f)) => Ok(Value::float(*f)),
-            Some(Const::String(_)) => Err("String".into()),
-            Some(Const::Binary { .. }) => Err("a Binary as a plain value".into()),
-            None => Err(format!("constant c{i}, which the program does not have")),
+            Some(Const::String(_)) => Err(Missing::StringConst),
+            Some(Const::Binary { .. }) => Err(Missing::BinaryConst),
+            None => Err(Missing::NoConst(i)),
         }
     }
 }

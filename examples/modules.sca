@@ -10,7 +10,10 @@ fn conversions(t units::Celsius) Array(String) {
 	fahrenheit = units::show_fahrenheit(units::to_fahrenheit(t))
 	// Kelvin is opaque: its constructor stays inside units, so to_kelvin is
 	// the only way in, and it can fail.
-	kelvin = result::map(units::to_kelvin(t), units::show_kelvin) or why -> 'no Kelvin (${why})'
+	kelvin = result::map(
+		units::to_kelvin(t),
+		units::show_kelvin,
+	) or why -> 'no Kelvin (${units::show_error(why)})'
 	[fahrenheit, kelvin]
 }
 

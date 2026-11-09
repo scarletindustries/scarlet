@@ -170,18 +170,49 @@ fn render(ip address::IpAddress, port Int) String {
 	}
 }
 
+/** Why the demo stopped early. */
+type SetupError {
+	NotAnIpLiteral
+	PortOutOfRange
+	StepFailed(step Step, error error::NetError)
+}
+
+type Step {
+	Listen
+	LocalAddr
+	SecondListen
+	SecondLocalAddr
+}
+
+fn step_name(s Step) String {
+	match s {
+		Listen -> 'listen'
+		LocalAddr -> 'local_addr'
+		SecondListen -> 'second listen'
+		SecondLocalAddr -> 'second local_addr'
+	}
+}
+
+fn describe(e SetupError) String {
+	match e {
+		NotAnIpLiteral -> 'not an ip literal'
+		PortOutOfRange -> 'port out of range'
+		StepFailed(s, err) -> '${step_name(s)} failed: ${string::inspect(err)}'
+	}
+}
+
 // A second listener, served by net::serve_on.
-fn served(bind_addr address::SocketAddress) Result(Nil, String) {
-	server <- result::then(step(net::listen_addr(bind_addr), 'second listen'))
-	local <- result::then(step(net::local_addr(server), 'second local_addr'))
+fn served(bind_addr address::SocketAddress) Result(Nil, SetupError) {
+	server <- result::then(step(net::listen_addr(bind_addr), SecondListen))
+	local <- result::then(step(net::local_addr(server), SecondLocalAddr))
 	_ = net::serve_on(server, serve_one)
 	println(echo_once(local, 'served'))
 	net::close(server) or Nil
 	Ok(Nil)
 }
 
-fn run() Result(Nil, String) {
-	ip <- result::then(result::replace_err(address::parse('127.0.0.1'), 'not an ip literal'))
+fn run() Result(Nil, SetupError) {
+	ip <- result::then(result::replace_err(address::parse('127.0.0.1'), NotAnIpLiteral))
 	resolved = net::resolve('127.0.0.1') or ip
 	agrees = address::ip_to_string(resolved) == address::ip_to_string(ip)
 	println('loopback is v6: ${address::is_v6(ip)}, resolve agrees: ${agrees}')
@@ -212,11 +243,9 @@ fn run() Result(Nil, String) {
 	}
 
 	// Port 0 lets the kernel pick a free port.
-	bind_addr <- result::then(
-		result::replace_err(address::socket_address(ip, 0), 'port out of range'),
-	)
-	server <- result::then(step(net::listen_addr(bind_addr), 'listen'))
-	local <- result::then(step(net::local_addr(server), 'local_addr'))
+	bind_addr <- result::then(result::replace_err(address::socket_address(ip, 0), PortOutOfRange))
+	server <- result::then(step(net::listen_addr(bind_addr), Listen))
+	local <- result::then(step(net::local_addr(server), LocalAddr))
 
 	host = address::ip_to_string(address::ip(local))
 	assigned = address::port(local) > 0
@@ -229,16 +258,16 @@ fn run() Result(Nil, String) {
 	past_close(local)
 	timeouts(local)
 
-	served(bind_addr) or why -> println(why)
+	served(bind_addr) or why -> println(describe(why))
 
 	net::close(server) or Nil
 	Ok(Nil)
 }
 
-fn step(r Result(a, error::NetError), what String) Result(a, String) {
-	result::map_err(r, fn(e) '${what} failed: ${string::inspect(e)}')
+fn step(r Result(a, error::NetError), s Step) Result(a, SetupError) {
+	result::map_err(r, fn(e) StepFailed(step: s, error: e))
 }
 
 pub fn main() {
-	run() or why -> println(why)
+	run() or why -> println(describe(why))
 }

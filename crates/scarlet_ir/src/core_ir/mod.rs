@@ -265,8 +265,10 @@ impl HttpTypes {
 pub struct JsonTypes {
     /// `Doc(arena, tape, idx)`: a parsed document, and every cursor into it.
     pub doc: VariantRef,
-    /// `ParseError(offset, message)`.
+    /// `ParseError(offset, reason)`.
     pub parse_error: VariantRef,
+    /// `ParseReason`'s, the `reason` a `ParseError` carries.
+    pub reasons: ParseReasons,
     /// `Json`'s, which `json.encode` writes out.
     pub null: VariantRef,
     pub boolean: VariantRef,
@@ -278,11 +280,37 @@ pub struct JsonTypes {
     pub number: VariantRef,
 }
 
+/// `scarlet/json.ParseReason`'s constructors: why a document did not parse.
+#[derive(Debug, Clone, Copy)]
+pub struct ParseReasons {
+    pub unexpected_end: VariantRef,
+    pub unexpected_byte: VariantRef,
+    pub trailing_data: VariantRef,
+    pub unterminated_string: VariantRef,
+    pub bad_escape: VariantRef,
+    pub bad_unicode: VariantRef,
+    pub bad_number: VariantRef,
+    pub not_utf8: VariantRef,
+    pub not_whole_bytes: VariantRef,
+    pub too_large: VariantRef,
+}
+
 impl JsonTypes {
-    fn variants(&self) -> [VariantRef; 10] {
+    fn variants(&self) -> [VariantRef; 20] {
+        let r = self.reasons;
         [
             self.doc,
             self.parse_error,
+            r.unexpected_end,
+            r.unexpected_byte,
+            r.trailing_data,
+            r.unterminated_string,
+            r.bad_escape,
+            r.bad_unicode,
+            r.bad_number,
+            r.not_utf8,
+            r.not_whole_bytes,
+            r.too_large,
             self.null,
             self.boolean,
             self.integer,

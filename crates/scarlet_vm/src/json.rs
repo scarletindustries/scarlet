@@ -39,6 +39,7 @@
 //! is not there `None` rather than a wrong read.
 
 use num_bigint::BigInt;
+use scarlet_ir::core_ir::{ParseReasons, VariantRef};
 use simd_json::StaticNode;
 use simd_json::value::tape::Node;
 
@@ -301,7 +302,60 @@ pub(crate) fn doc_image(heap: &Heap, cell: Cell) -> String {
 /// what it found.
 pub(crate) struct ParseError {
     pub(crate) offset: usize,
-    pub(crate) message: String,
+    pub(crate) reason: Reason,
+}
+
+pub(crate) enum Reason {
+    Syntax(simd_json::Error),
+    LoneSurrogate,
+    NotWholeBytes,
+    TooLarge(TooLarge),
+}
+
+/// Which 32-bit bound a document is past.
+#[derive(Debug)]
+pub(crate) enum TooLarge {
+    Nodes,
+    Strings,
+}
+
+impl Reason {
+    /// The `scarlet/json.ParseReason` this is.
+    pub(crate) fn variant(&self, r: &ParseReasons) -> VariantRef {
+        use simd_json::ErrorType as E;
+        match self {
+            Reason::Syntax(e) => match e.error() {
+                E::Eof => r.unexpected_end,
+                E::TrailingData => r.trailing_data,
+                E::UnterminatedString => r.unterminated_string,
+                E::InvalidEscape => r.bad_escape,
+                E::InvalidUnicodeEscape | E::InvalidUnicodeCodepoint => r.bad_unicode,
+                E::InvalidNumber | E::InvalidExponent | E::Overflow => r.bad_number,
+                E::InvalidUtf8 => r.not_utf8,
+                E::InputTooLarge => r.too_large,
+                _ => r.unexpected_byte,
+            },
+            Reason::LoneSurrogate => r.bad_unicode,
+            Reason::NotWholeBytes => r.not_whole_bytes,
+            Reason::TooLarge(_) => r.too_large,
+        }
+    }
+}
+
+impl std::fmt::Display for Reason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Reason::Syntax(e) => e.fmt(f),
+            Reason::LoneSurrogate => f.write_str("unpaired UTF-16 surrogate escape"),
+            Reason::NotWholeBytes => f.write_str("input is not a whole number of bytes"),
+            Reason::TooLarge(TooLarge::Nodes) => {
+                f.write_str("document has too many JSON nodes to index")
+            }
+            Reason::TooLarge(TooLarge::Strings) => {
+                f.write_str("document has too much string data to index")
+            }
+        }
+    }
 }
 
 /// Parse `src` into a tape and a string arena, as bytes.
@@ -313,17 +367,17 @@ pub(crate) fn parse(src: &[u8]) -> Result<(Vec<u8>, Vec<u8>), ParseError> {
     let lone = first_lone_surrogate(&buf);
     let tape = simd_json::to_tape(&mut buf).map_err(|e| ParseError {
         offset: e.index(),
-        message: e.to_string(),
+        reason: Reason::Syntax(e),
     })?;
     if let Some(offset) = lone {
         return Err(ParseError {
             offset,
-            message: "unpaired UTF-16 surrogate escape".into(),
+            reason: Reason::LoneSurrogate,
         });
     }
-    build_tape(&tape.0).map_err(|message| ParseError {
+    build_tape(&tape.0).map_err(|bound| ParseError {
         offset: 0,
-        message: message.into(),
+        reason: Reason::TooLarge(bound),
     })
 }
 
@@ -337,9 +391,9 @@ pub(crate) fn parse(src: &[u8]) -> Result<(Vec<u8>, Vec<u8>), ParseError> {
 /// It returns an `Err` for a document too large for the 32-bit offsets. Both
 /// limits are about 4 billion, and a document that reaches one has already
 /// used up memory, but the offsets must not wrap.
-fn build_tape(nodes: &[Node<'_>]) -> Result<(Vec<u8>, Vec<u8>), &'static str> {
+fn build_tape(nodes: &[Node<'_>]) -> Result<(Vec<u8>, Vec<u8>), TooLarge> {
     if nodes.len() > u32::MAX as usize {
-        return Err("document has too many JSON nodes to index");
+        return Err(TooLarge::Nodes);
     }
     let mut tape = Vec::with_capacity(nodes.len() * 16);
     let mut arena: Vec<u8> = Vec::new();
@@ -348,7 +402,7 @@ fn build_tape(nodes: &[Node<'_>]) -> Result<(Vec<u8>, Vec<u8>), &'static str> {
             Node::String(s) => {
                 let at = arena.len();
                 if at > u32::MAX as usize || s.len() > u32::MAX as usize {
-                    return Err("document has too much string data to index");
+                    return Err(TooLarge::Strings);
                 }
                 arena.extend_from_slice(s.as_bytes());
                 (K_STR, 1, (at as u64) << 32 | s.len() as u64)
@@ -515,7 +569,7 @@ mod tests {
 
     /// A parsed document on a heap of its own.
     fn doc(src: &str) -> (Heap, Bits, Bits) {
-        let (tape, arena) = parse(src.as_bytes()).unwrap_or_else(|e| panic!("{}", e.message));
+        let (tape, arena) = parse(src.as_bytes()).unwrap_or_else(|e| panic!("{}", e.reason));
         let mut heap = Heap::default();
         let t = binary::make(&mut heap, &tape, tape.len() as u64 * 8).expect("room");
         let a = binary::make(&mut heap, &arena, arena.len() as u64 * 8).expect("room");

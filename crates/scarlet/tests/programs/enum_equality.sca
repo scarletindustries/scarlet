@@ -29,6 +29,10 @@ type Wrapper {
 	inner Outcome
 }
 
+type Failure {
+	Failed(code Int)
+}
+
 pub fn main() {
 	// --- primitives ---------------------------------------------------------------
 
@@ -83,9 +87,9 @@ pub fn main() {
 	check('Option eq', True, Some([1, 2]) == Some([1, 2]))
 	none_int Option(Int) = None
 	check('Option None eq', True, none_int == None)
-	ok1 Result(Int, String) = Ok(1)
-	ok2 Result(Int, String) = Ok(1)
-	er1 Result(Int, String) = Err('x')
+	ok1 Result(Int, Failure) = Ok(1)
+	ok2 Result(Int, Failure) = Ok(1)
+	er1 Result(Int, Failure) = Err(Failed(code: 1))
 	check('Result eq', True, ok1 == ok2)
 	check('Result ne across variants', True, ok1 != er1)
 	check('Order eq', True, decimal::compare(decimal::from_int(1), decimal::from_int(2)) == Lt)

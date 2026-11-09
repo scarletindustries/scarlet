@@ -26,6 +26,7 @@ use crate::Stop;
 use crate::array::{self, Seq};
 use crate::code::Code;
 use crate::heap::{Cell, Heap, Kind};
+use crate::stop::{Broken, Missing};
 use crate::value::{Value, View};
 
 /// Every type's names, by its id, from [`scarlet_ir::core_ir::Program::types`].
@@ -101,18 +102,14 @@ fn value<'t>(
             Some(Kind::Binary | Kind::BinarySlice) => match crate::binary::bits(heap, cell) {
                 Some(b) => out.extend_from_slice(crate::binary::text(heap, b).as_bytes()),
                 None => {
-                    return Err(Stop::BadProgram(
-                        "a binary cell that is not a binary".into(),
-                    ));
+                    return Err(Stop::broken(Broken::BinaryCell));
                 }
             },
             Some(Kind::Map) => map(heap, cell, todo),
             Some(Kind::ArrayLeaf | Kind::ArrayBranch | Kind::MapNode | Kind::MapCollision) => {
-                return Err(Stop::BadProgram(
-                    "a piece of an array's or a map's tree held as a value".into(),
-                ));
+                return Err(Stop::broken(Broken::TreePiece));
             }
-            None => return Err(Stop::NotBuiltYet("printing this value".into())),
+            None => return Err(Stop::missing(Missing::Printing)),
         },
         View::Func(f) => function(code, f, out),
         View::Float(f) => out.extend_from_slice(crate::float::text(f).as_bytes()),
@@ -314,7 +311,7 @@ fn array<'t>(
 /// element is worked out from the range's start, so none is built.
 fn range(heap: &Heap, cell: Cell, layout: Layout, out: &mut Vec<u8>) -> Result<(), Stop> {
     let Some(Seq::Range { start, end }) = array::seq(heap, cell) else {
-        return Err(Stop::BadProgram("a range cell that is not a range".into()));
+        return Err(Stop::broken(Broken::RangeCell));
     };
     let count = array::range_len(start, end);
     let item = |i: usize, out: &mut Vec<u8>| {

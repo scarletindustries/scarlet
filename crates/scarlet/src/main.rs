@@ -98,13 +98,30 @@ struct LintArgs {
 
 /// Below the floor every constructor with a `Bool` would qualify, so the census would print its
 /// corpus back instead of shapes worth reading.
-fn parse_min_bools(text: &str) -> Result<usize, String> {
+fn parse_min_bools(text: &str) -> Result<usize, MinBoolsError> {
     match text.parse::<usize>() {
         Ok(n) if n >= lint::DEFAULT_MIN_BOOLS => Ok(n),
-        Ok(n) => Err(format!("{n} is below {}", lint::DEFAULT_MIN_BOOLS)),
-        Err(e) => Err(e.to_string()),
+        Ok(n) => Err(MinBoolsError::BelowFloor(n)),
+        Err(e) => Err(MinBoolsError::NotANumber(e)),
     }
 }
+
+#[derive(Debug)]
+enum MinBoolsError {
+    BelowFloor(usize),
+    NotANumber(std::num::ParseIntError),
+}
+
+impl std::fmt::Display for MinBoolsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MinBoolsError::BelowFloor(n) => write!(f, "{n} is below {}", lint::DEFAULT_MIN_BOOLS),
+            MinBoolsError::NotANumber(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for MinBoolsError {}
 
 /// What `scarlet fmt` does with each file it formats.
 #[derive(Clone, Copy)]

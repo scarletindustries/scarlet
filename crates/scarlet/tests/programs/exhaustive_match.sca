@@ -153,11 +153,15 @@ fn triage(r Reply) String {
 
 // --- nested constructors --------------------------------------------------------
 
-fn describe(o Option(Result(Shape, String))) String {
+type ShapeError {
+	TooFewSides(sides Int)
+}
+
+fn describe(o Option(Result(Shape, ShapeError))) String {
 	match o {
 		Some(Ok(Circle(r))) -> 'circle ${r}'
 		Some(Ok(Rect(..))) -> 'rect'
-		Some(Err(e)) -> 'err ${e}'
+		Some(Err(TooFewSides(n))) -> 'err ${n} sides'
 		None -> 'none'
 	}
 }
@@ -291,7 +295,7 @@ pub fn main() {
 	check('binding after int literal arm', 'code 500', triage(Code(n: 500)))
 
 	check('nested ctor 3 deep', 'circle 9', describe(Some(Ok(Circle(radius: 9)))))
-	check('nested ctor err', 'err bad', describe(Some(Err('bad'))))
+	check('nested ctor err', 'err 2 sides', describe(Some(Err(TooFewSides(sides: 2)))))
 	check('nested ctor none', 'none', describe(None))
 
 	check('tuple literal pair', 'origin', quadrant((0, 0)))

@@ -8,6 +8,7 @@ import scarlet/binary
 import scarlet/http
 import scarlet/http/body
 import scarlet/http/headers
+import scarlet/net/error
 import scarlet/result
 
 const MAX_BODY = 8192
@@ -35,18 +36,23 @@ fn hello(req http::Request) http::Response {
 	}
 }
 
+/** Why a body could not be echoed. */
+type EchoError {
+	ReadFailed(error error::NetError)
+	NotUtf8
+}
+
 fn echo(req http::Request) http::Response {
 	match echo_text(req) {
 		Ok(text) -> respond(200, 'echo: ${text}\n')
-		Err(msg) -> respond(400, msg)
+		Err(ReadFailed(e)) -> respond(400, 'read failed: ${e}\n')
+		Err(NotUtf8) -> respond(400, 'body is not utf-8\n')
 	}
 }
 
-fn echo_text(req http::Request) Result(String, String) {
-	bytes <- result::then(
-		result::map_err(body::collect(req.body, MAX_BODY), fn(e) 'read failed: ${e}\n'),
-	)
-	result::replace_err(binary::to_string(bytes), 'body is not utf-8\n')
+fn echo_text(req http::Request) Result(String, EchoError) {
+	bytes <- result::then(result::map_err(body::collect(req.body, MAX_BODY), ReadFailed))
+	result::replace_err(binary::to_string(bytes), NotUtf8)
 }
 
 fn route(req http::Request) http::Response {

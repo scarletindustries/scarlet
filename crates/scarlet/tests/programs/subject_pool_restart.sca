@@ -12,8 +12,12 @@ type Health {
 	Broken
 }
 
+type JobError {
+	JobFailed
+}
+
 type Job {
-	run fn(Result(Int, String)) Health
+	run fn(Result(Int, JobError)) Health
 }
 
 type Task {
@@ -27,7 +31,7 @@ type Request {
 	Stop(done process::Subject(Nil))
 }
 
-fn ask(gateway process::Subject(Request), next fn(Int) Result(a, String)) Result(a, String) {
+fn ask(gateway process::Subject(Request), next fn(Int) Result(a, JobError)) Result(a, JobError) {
 	reply = process::subject()
 	process::send(gateway, Run(job: Job(run: fn(lease) {
 		outcome = bind(lease, next)
@@ -37,14 +41,14 @@ fn ask(gateway process::Subject(Request), next fn(Int) Result(a, String)) Result
 	process::receive(reply)
 }
 
-fn bind(r Result(Int, String), f fn(Int) Result(a, String)) Result(a, String) {
+fn bind(r Result(Int, JobError), f fn(Int) Result(a, JobError)) Result(a, JobError) {
 	match r {
 		Ok(v) -> f(v)
 		Err(e) -> Err(e)
 	}
 }
 
-fn health(outcome Result(a, String)) Health {
+fn health(outcome Result(a, JobError)) Health {
 	match outcome {
 		Ok(_) -> Healthy
 		Err(_) -> Broken
@@ -71,13 +75,13 @@ fn labour(
 	}
 }
 
-fn run(job Job, lease Result(Int, String)) Health {
+fn run(job Job, lease Result(Int, JobError)) Health {
 	match job {
 		Job(f) -> f(lease)
 	}
 }
 
-fn retain(lease Result(Int, String), verdict Health) Option(Int) {
+fn retain(lease Result(Int, JobError), verdict Health) Option(Int) {
 	match (lease, verdict) {
 		(Ok(v), Healthy) -> Some(v)
 		(Ok(_), Broken) -> None
@@ -177,7 +181,7 @@ fn beat(gateway process::Subject(Request), left Int, ok Int) Int {
 		ok
 	} else {
 		outcome = if left == 7 {
-			ask(gateway, fn(_) Err('broken'))
+			ask(gateway, fn(_) Err(JobFailed))
 		} else {
 			ask(gateway, fn(v) Ok(v))
 		}

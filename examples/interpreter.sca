@@ -18,6 +18,31 @@ type Token {
 	Assign
 }
 
+/** Everything that can go wrong with a line, from lexing to evaluating. */
+type Error {
+	UnexpectedCharacter(c String)
+	BadNumber(word String)
+	UnexpectedEnd
+	MissingClose
+	UnexpectedToken(token Token)
+	TrailingToken(token Token)
+	UndefinedVariable(name String)
+	DivisionByZero
+}
+
+fn message(e Error) String {
+	match e {
+		UnexpectedCharacter(c) -> 'unexpected character: ${c}'
+		BadNumber(word) -> 'bad number: ${word}'
+		UnexpectedEnd -> 'unexpected end of input'
+		MissingClose -> 'missing closing )'
+		UnexpectedToken(t) -> 'unexpected ${string::inspect(t)}'
+		TrailingToken(t) -> 'unexpected ${string::inspect(t)} after the expression'
+		UndefinedVariable(name) -> 'undefined variable: ${name}'
+		DivisionByZero -> 'division by zero'
+	}
+}
+
 // Single-character tokens. Numbers and names are runs of word_chars.
 const punctuation = ['+', '-', '*', '/', '(', ')', '=']
 
@@ -35,11 +60,11 @@ fn symbol(c String) Token {
 	}
 }
 
-fn lex(source String) Result(Array(Token), String) {
+fn lex(source String) Result(Array(Token), Error) {
 	scan(string::split(source, ''))
 }
 
-fn scan(chars Array(String)) Result(Array(Token), String) {
+fn scan(chars Array(String)) Result(Array(Token), Error) {
 	match chars {
 		[] -> Ok([])
 		[' ', ..rest] -> scan(rest)
@@ -49,11 +74,11 @@ fn scan(chars Array(String)) Result(Array(Token), String) {
 			t <- result::then(word_token(word))
 			prepend(t, scan(rest))
 		}
-		[c, ..] -> Err('unexpected character: ${c}')
+		[c, ..] -> Err(UnexpectedCharacter(c))
 	}
 }
 
-fn prepend(t Token, rest Result(Array(Token), String)) Result(Array(Token), String) {
+fn prepend(t Token, rest Result(Array(Token), Error)) Result(Array(Token), Error) {
 	result::map(rest, fn(ts) [t, ..ts])
 }
 
@@ -68,11 +93,11 @@ fn take_word(chars Array(String)) (String, Array(String)) {
 }
 
 // `12abc` is an error, not a variable.
-fn word_token(word String) Result(Token, String) {
+fn word_token(word String) Result(Token, Error) {
 	match binary::parse_int(binary::from_string(word), binary::Dec) {
 		Ok(n) -> Ok(Number(n))
 		Err(Nil) -> if starts_with_digit(word) {
-			Err('bad number: ${word}')
+			Err(BadNumber(word))
 		} else {
 			Ok(Name(word))
 		}
@@ -99,7 +124,7 @@ type Expr {
 //   expression = term (('+' | '-') term)*
 //   term       = factor (('*' | '/') factor)*
 //   factor     = number | name | '(' expression ')'
-type Parsed = Result((Expr, Array(Token)), String)
+type Parsed = Result((Expr, Array(Token)), Error)
 
 fn expression(tokens Array(Token)) Parsed {
 	result::then(term(tokens), fn(s) more_terms(s.0, s.1))
@@ -127,7 +152,7 @@ fn more_factors(left Expr, tokens Array(Token)) Parsed {
 
 fn factor(tokens Array(Token)) Parsed {
 	match tokens {
-		[] -> Err('unexpected end of input')
+		[] -> Err(UnexpectedEnd)
 		[t, ..rest] -> match t {
 			Number(n) -> Ok((Lit(n), rest))
 			Name(x) -> Ok((Var(x), rest))
@@ -135,30 +160,30 @@ fn factor(tokens Array(Token)) Parsed {
 				pair <- result::then(expression(rest))
 				match pair {
 					(inner, [Close, ..after]) -> Ok((inner, after))
-					(_, []) -> Err('missing closing )')
+					(_, []) -> Err(MissingClose)
 					(_, [Number(_) | Name(_) | Plus | Minus | Star | Slash | Open | Assign, ..]) ->
-						Err('missing closing )')
+						Err(MissingClose)
 				}
 			}
-			Plus | Minus | Star | Slash | Close | Assign -> Err('unexpected ${string::inspect(t)}')
+			Plus | Minus | Star | Slash | Close | Assign -> Err(UnexpectedToken(t))
 		}
 	}
 }
 
-fn parse(tokens Array(Token)) Result(Expr, String) {
+fn parse(tokens Array(Token)) Result(Expr, Error) {
 	pair <- result::then(expression(tokens))
 	match pair {
 		(e, []) -> Ok(e)
-		(_, [t, ..]) -> Err('unexpected ${string::inspect(t)} after the expression')
+		(_, [t, ..]) -> Err(TrailingToken(t))
 	}
 }
 
-fn evaluate(e Expr, env map::Map(String, Int)) Result(Int, String) {
+fn evaluate(e Expr, env map::Map(String, Int)) Result(Int, Error) {
 	match e {
 		Lit(n) -> Ok(n)
 		Var(name) -> match map::get(env, name) {
 			Some(v) -> Ok(v)
-			None -> Err('undefined variable: ${name}')
+			None -> Err(UndefinedVariable(name))
 		}
 		Add(l, r) -> combine(l, r, env, fn(a, b) Ok(a + b))
 		Sub(l, r) -> combine(l, r, env, fn(a, b) Ok(a - b))
@@ -171,16 +196,16 @@ fn combine(
 	l Expr,
 	r Expr,
 	env map::Map(String, Int),
-	op fn(Int, Int) Result(Int, String),
-) Result(Int, String) {
+	op fn(Int, Int) Result(Int, Error),
+) Result(Int, Error) {
 	a <- result::then(evaluate(l, env))
 	b <- result::then(evaluate(r, env))
 	op(a, b)
 }
 
-fn divide(a Int, b Int) Result(Int, String) {
+fn divide(a Int, b Int) Result(Int, Error) {
 	if b == 0 {
-		Err('division by zero')
+		Err(DivisionByZero)
 	} else {
 		Ok(a / b)
 	}
@@ -213,7 +238,7 @@ fn run_line(env map::Map(String, Int), line String) map::Map(String, Int) {
 	}
 }
 
-fn describe(tokens Array(Token), env map::Map(String, Int)) Result(String, String) {
+fn describe(tokens Array(Token), env map::Map(String, Int)) Result(String, Error) {
 	e <- result::then(parse(tokens))
 	v <- result::map(evaluate(e, env))
 	'${show(e)} = ${v}'
@@ -237,10 +262,10 @@ fn bind(
 	}
 }
 
-fn report(line String, outcome Result(String, String)) Nil {
+fn report(line String, outcome Result(String, Error)) Nil {
 	match outcome {
 		Ok(text) -> println('${line}  ->  ${text}')
-		Err(m) -> println('${line}  !  ${m}')
+		Err(e) -> println('${line}  !  ${message(e)}')
 	}
 }
 

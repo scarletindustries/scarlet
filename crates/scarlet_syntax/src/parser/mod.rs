@@ -4,7 +4,13 @@ use crate::scanner::Scanner;
 use crate::span::Span;
 use crate::token::{self, Keyword, Kind, Token, Trivia, is_type_name};
 
-type PResult<T> = Result<T, String>;
+mod error;
+
+pub use error::{DeclarationLead, Expected, LineItem, ParseError};
+
+// Boxed so every frame on the recursive descent carries a pointer, not the
+// whole error: unboxed, `test_deep_nesting_does_not_overflow` overflows.
+type PResult<T> = Result<T, Box<ParseError>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ParseContext {
@@ -131,11 +137,7 @@ impl Parser {
         self.depth += 1;
         if self.depth > MAX_PARSE_DEPTH {
             self.depth -= 1;
-            return Err(
-                "This expression or type is nested too deeply. Pull part of it out into a \
-                 named value or type"
-                    .to_string(),
-            );
+            return Err(Box::new(ParseError::NestingTooDeep));
         }
         let r = f(self);
         self.depth -= 1;
@@ -175,15 +177,15 @@ impl Parser {
 
     /// Reports a parse error at `span`. [`Parser::add_error`] reports one at
     /// the current token instead.
-    fn error_at(&mut self, span: Span, message: impl Into<String>) {
+    fn error_at(&mut self, span: Span, error: ParseError) {
         self.diagnostics.push(Diagnostic::error(
             span,
             DiagnosticCode::ParseError,
-            message.into(),
+            error.to_string(),
         ));
     }
 
-    fn add_error(&mut self, message: String) {
+    fn add_error(&mut self, error: &ParseError) {
         // An error at EOF is an unexpected EOF by construction, so tag it from
         // the token rather than from the message text.
         let code = if self.kind() == Kind::Eof {
@@ -195,7 +197,7 @@ impl Parser {
         self.diagnostics.push(Diagnostic::error(
             Span::point(sp.start_line, sp.start_column),
             code,
-            message,
+            error.to_string(),
         ));
     }
 
@@ -296,7 +298,7 @@ impl Parser {
 
     // Recovers from an error inside a `match` arm: reports it, synchronises,
     // and says where recovery stopped.
-    fn recover_in_arm(&mut self, err: String) -> ArmRecovery {
+    fn recover_in_arm(&mut self, err: &ParseError) -> ArmRecovery {
         self.add_error(err);
         if self.synchronize() == SyncOutcome::ConsumedCloser {
             return ArmRecovery::ConsumedCloser;
@@ -310,11 +312,11 @@ impl Parser {
 
     // Recovers from an error in a top-level or block node loop: reports it,
     // synchronises, and builds an error node for the region it couldn't parse.
-    fn recover_node(&mut self, err: String, span: Span) -> (ast::Node, SyncOutcome) {
-        self.add_error(err.clone());
+    fn recover_node(&mut self, err: Box<ParseError>, span: Span) -> (ast::Node, SyncOutcome) {
+        self.add_error(&err);
         let outcome = self.synchronize();
         let node = ast::Node::Expression(ast::Expression::ErrorNode(ast::ErrorNode {
-            message: err,
+            error: *err,
             span,
         }));
         (node, outcome)
@@ -334,14 +336,17 @@ impl Parser {
             return Ok(());
         }
 
-        Err(format!("Expected '{}', but found '{}'", kind, self.cur()))
+        Err(Box::new(ParseError::ExpectedToken {
+            expected: kind,
+            got: self.kind(),
+        }))
     }
 
     // Consumes the current token and returns its text when `extract` matches
     // its kind.
     fn eat_payload(
         &mut self,
-        message: &str,
+        what: Expected,
         extract: impl FnOnce(&Kind) -> Option<String>,
     ) -> PResult<String> {
         match extract(&self.tokens[self.index].kind) {
@@ -350,41 +355,44 @@ impl Parser {
                 self.index += 1;
                 Ok(text)
             }
-            None => Err(format!("{}, but found '{}'", message, self.cur())),
+            None => Err(Box::new(ParseError::Expected {
+                what,
+                got: self.kind(),
+            })),
         }
     }
 
-    fn eat_name(&mut self, message: &str) -> PResult<String> {
-        self.eat_payload(message, |k| match k {
+    fn eat_name(&mut self, what: Expected) -> PResult<String> {
+        self.eat_payload(what, |k| match k {
             Kind::Identifier(name) => Some(name.to_string()),
             _ => None,
         })
     }
 
-    fn eat_number(&mut self, message: &str) -> PResult<String> {
-        self.eat_payload(message, |k| match k {
+    fn eat_number(&mut self, what: Expected) -> PResult<String> {
+        self.eat_payload(what, |k| match k {
             Kind::LiteralNumber(text) => Some(text.to_string()),
             _ => None,
         })
     }
 
-    fn eat_string(&mut self, message: &str) -> PResult<String> {
-        self.eat_payload(message, |k| match k {
+    fn eat_string(&mut self, what: Expected) -> PResult<String> {
+        self.eat_payload(what, |k| match k {
             Kind::LiteralString(text) => Some(text.to_string()),
             _ => None,
         })
     }
 
-    fn eat_interp_part(&mut self, message: &str) -> PResult<String> {
-        self.eat_payload(message, |k| match k {
+    fn eat_interp_part(&mut self, what: Expected) -> PResult<String> {
+        self.eat_payload(what, |k| match k {
             Kind::InterpStringPart(text) => Some(text.to_string()),
             _ => None,
         })
     }
 
-    fn eat_identifier(&mut self, message: &str) -> PResult<ast::Identifier> {
+    fn eat_identifier(&mut self, what: Expected) -> PResult<ast::Identifier> {
         let span = self.current_span();
-        let name = self.eat_name(message)?;
+        let name = self.eat_name(what)?;
         Ok(ast::Identifier { name, span })
     }
 
@@ -459,19 +467,17 @@ impl Parser {
     fn parse_line_separated_list<T>(
         &mut self,
         close: Kind,
-        noun: &str,
+        noun: LineItem,
         mut item: impl FnMut(&mut Self) -> PResult<T>,
     ) -> PResult<Vec<T>> {
         let mut items = Vec::new();
         let mut prev_end_line: Option<i32> = None;
         while self.kind() != close && self.kind() != Kind::Eof {
             if self.kind() == Kind::PuncComma {
-                return Err(format!(
-                    "Put each {noun} on its own line, without a `,` between them"
-                ));
+                return Err(Box::new(ParseError::CommaBetweenLines(noun)));
             }
             if prev_end_line == Some(self.current_span().start_line) {
-                return Err(format!("Put each {noun} on its own line"));
+                return Err(Box::new(ParseError::SameLine(noun)));
             }
             items.push(item(self)?);
             prev_end_line = Some(self.prev_token_end_line);
@@ -510,9 +516,7 @@ impl Parser {
             if self.current_span().start_line > self.prev_token_end_line {
                 continue; // a newline separates
             }
-            return Err(
-                "Separate fields on one line with commas, like `Name(a Int, b String)`".to_string(),
-            );
+            return Err(Box::new(ParseError::FieldsWithoutCommas));
         }
         Ok(items)
     }
@@ -604,10 +608,7 @@ impl Parser {
                         ast::Node::Statement(s) if matches!(**s, ast::Statement::ImportDeclaration(_))
                     );
                     if is_import && seen_non_import {
-                        self.error_at(
-                            node.span(),
-                            "Put imports at the top of the file, before any other declaration",
-                        );
+                        self.error_at(node.span(), ParseError::ImportAfterDeclaration);
                     }
                     if !is_import {
                         seen_non_import = true;
@@ -715,7 +716,7 @@ impl Parser {
             if matches!(self.kind(), Kind::Identifier(_))
                 && self.peek_next() == Some(Kind::PuncArrow)
             {
-                receiver = Some(self.eat_identifier("Expected a name for the error after `or`")?);
+                receiver = Some(self.eat_identifier(Expected::OrReceiver)?);
                 self.eat(Kind::PuncArrow)?;
             }
 
@@ -876,7 +877,7 @@ impl Parser {
                 // A bare module name before `::` was taken by the primary
                 // expression, so anything reaching here is not one.
                 Kind::PuncColonColon => {
-                    return Err("Only an imported module's name can come before `::`".to_string());
+                    return Err(Box::new(ParseError::QualifierNotModule));
                 }
                 Kind::PuncOpenParen => {
                     // A newline before `(` ends the postfix chain, so `f`
@@ -909,11 +910,7 @@ impl Parser {
                     });
                 }
                 Kind::PuncMinusminus => {
-                    return Err(
-                        "Scarlet has no `--` operator, because values never change. Write \
-                         `x = x - 1` to shadow `x` with a new value instead"
-                            .to_string(),
-                    );
+                    return Err(Box::new(ParseError::Decrement));
                 }
                 _ => {
                     break;
@@ -933,7 +930,7 @@ impl Parser {
             } else if matches!(&p.cur().kind, Kind::Identifier(n) if !is_type_name(n))
                 && p.peek_next() == Some(Kind::PuncColon)
             {
-                let label = p.eat_identifier("Expected an argument label")?;
+                let label = p.eat_identifier(Expected::ArgumentLabel)?;
                 p.eat(Kind::PuncColon)?;
                 // `label:` with nothing before the next `,` or `)` is
                 // shorthand for `label: label`. Expand it here so every later
@@ -970,7 +967,7 @@ impl Parser {
             Kind::InterpStringStart => self.parse_interpolated_string()?,
             Kind::LiteralNumber(_) => self.parse_number_expression()?,
             Kind::Identifier(_) => {
-                let id = self.eat_identifier("Expected a name")?;
+                let id = self.eat_identifier(Expected::Identifier)?;
                 if self.kind() == Kind::PuncColonColon {
                     self.parse_module_access(id)?
                 } else {
@@ -988,15 +985,12 @@ impl Parser {
                 let span = self.current_span();
                 self.advance();
                 ast::Expression::ErrorNode(ast::ErrorNode {
-                    message: "This text could not be read".to_string(),
+                    error: ParseError::ScannerError,
                     span,
                 })
             }
             _ => {
-                return Err(format!(
-                    "Expected an expression, but found '{}'",
-                    self.cur()
-                ));
+                return Err(Box::new(ParseError::Unexpected(self.kind())));
             }
         };
 
@@ -1061,11 +1055,10 @@ impl Parser {
                     if self.kind() == Kind::Keyword(Keyword::Else) {
                         self.advance();
                     }
-                    let msg = "Expected a value after `..` in an array, like `[..xs]`".to_string();
-                    self.error_at(spread_span, msg.clone());
+                    self.error_at(spread_span, ParseError::SpreadWithoutValue);
                     Ok(ast::ArrayElement::SpreadElement(ast::SpreadElement {
                         expression: ast::Expression::ErrorNode(ast::ErrorNode {
-                            message: msg,
+                            error: ParseError::SpreadWithoutValue,
                             span: spread_span,
                         }),
                         span: spread_span,
@@ -1085,7 +1078,7 @@ impl Parser {
             match elem_result {
                 Ok(elem) => elements.push(elem),
                 Err(err) => {
-                    self.add_error(err.clone());
+                    self.add_error(&err);
                     if self.synchronize() == SyncOutcome::ConsumedCloser {
                         self.pop_context();
                         return Ok(ast::Expression::ArrayExpression(ast::ArrayExpression {
@@ -1095,7 +1088,7 @@ impl Parser {
                     }
                     elements.push(ast::ArrayElement::Expression(ast::Expression::ErrorNode(
                         ast::ErrorNode {
-                            message: err,
+                            error: *err,
                             span: elem_span,
                         },
                     )));
@@ -1162,7 +1155,7 @@ impl Parser {
 
         if matches!(self.kind(), Kind::LiteralNumber(_)) {
             let span = self.current_span();
-            let value = self.eat_number("Expected a bit width")?;
+            let value = self.eat_number(Expected::BitWidth)?;
             let n = ast::Expression::NumberLiteral(ast::NumberLiteral { value, span });
             return Ok(ast::BinSpec::Int { bits: Some(n) });
         }
@@ -1195,11 +1188,7 @@ impl Parser {
             }
         }
 
-        Err(format!(
-            "Expected a segment size after `:`, which is a number, `size(..)`, `bytes(..)`, \
-             `binary` or `utf8`, but found '{}'",
-            self.cur()
-        ))
+        Err(Box::new(ParseError::SegmentSpec { got: self.kind() }))
     }
 
     fn parse_tuple(&mut self) -> PResult<ast::Expression> {
@@ -1207,22 +1196,14 @@ impl Parser {
         self.eat(Kind::PuncOpenParen)?;
 
         if self.kind() == Kind::PuncCloseParen {
-            return Err(
-                "A tuple needs at least two elements. Write `Nil` for no value, or `{ expr }` \
-                 to group an expression"
-                    .to_string(),
-            );
+            return Err(Box::new(ParseError::EmptyTuple));
         }
 
         let mut elements: Vec<ast::Expression> = Vec::new();
         elements.push(self.parse_expression()?);
 
         if self.kind() == Kind::PuncCloseParen {
-            return Err(
-                "Parentheses can't hold just one expression. Write `{ expr }` to group it, or \
-                 add another element to make a tuple"
-                    .to_string(),
-            );
+            return Err(Box::new(ParseError::SingleElementParens));
         }
 
         while self.kind() == Kind::PuncComma {
@@ -1260,13 +1241,11 @@ impl Parser {
         } else if self.kind() == Kind::PuncOpenBrace {
             self.parse_expression()?
         } else {
-            return Err(
-                "An `if` needs `then` or a block `{ ... }` after its condition".to_string(),
-            );
+            return Err(Box::new(ParseError::IfWithoutBody));
         };
 
         if self.kind() != Kind::Keyword(Keyword::Else) {
-            return Err("An `if` needs an `else` branch".to_string());
+            return Err(Box::new(ParseError::IfWithoutElse));
         }
         self.eat(Kind::Keyword(Keyword::Else))?;
         // Any expression can follow: `else { .. }`, `else if ..` or
@@ -1289,9 +1268,9 @@ impl Parser {
         }))
     }
 
-    fn parse_braced_body(&mut self, what: &str) -> PResult<ast::Expression> {
+    fn parse_function_body(&mut self) -> PResult<ast::Expression> {
         if self.kind() != Kind::PuncOpenBrace {
-            return Err(format!("{what} must be a block `{{ ... }}`"));
+            return Err(Box::new(ParseError::FunctionBodyNotBlock));
         }
         self.parse_expression()
     }
@@ -1313,7 +1292,7 @@ impl Parser {
                 Ok(p) => p,
                 Err(err) => {
                     let err_span = self.current_span();
-                    match self.recover_in_arm(err) {
+                    match self.recover_in_arm(&err) {
                         ArmRecovery::ConsumedCloser => {
                             closed = true;
                             break 'arms;
@@ -1337,7 +1316,7 @@ impl Parser {
                 self.eat(Kind::Keyword(Keyword::If))?;
                 match self.parse_expression() {
                     Ok(e) => Some(e),
-                    Err(err) => match self.recover_in_arm(err) {
+                    Err(err) => match self.recover_in_arm(&err) {
                         ArmRecovery::ConsumedCloser => {
                             closed = true;
                             break 'arms;
@@ -1352,7 +1331,7 @@ impl Parser {
             };
 
             if let Err(err) = self.eat(Kind::PuncArrow) {
-                match self.recover_in_arm(err) {
+                match self.recover_in_arm(&err) {
                     ArmRecovery::ConsumedCloser => {
                         closed = true;
                         break 'arms;
@@ -1366,7 +1345,7 @@ impl Parser {
             let body_span = self.current_span();
             let body = match self.parse_expression() {
                 Ok(e) => e,
-                Err(err) => match self.recover_in_arm(err.clone()) {
+                Err(err) => match self.recover_in_arm(&err) {
                     ArmRecovery::ConsumedCloser => {
                         closed = true;
                         break 'arms;
@@ -1374,7 +1353,7 @@ impl Parser {
                     ArmRecovery::AtCloseBrace => break 'arms,
                     ArmRecovery::AtArrow | ArmRecovery::Resume => {
                         ast::Expression::ErrorNode(ast::ErrorNode {
-                            message: err,
+                            error: *err,
                             span: body_span,
                         })
                     }
@@ -1388,9 +1367,7 @@ impl Parser {
             });
 
             if self.kind() == Kind::PuncComma {
-                self.add_error(
-                    "Match arms go on separate lines, without a `,` between them".to_string(),
-                );
+                self.add_error(&ParseError::CommaBetweenArms);
                 self.eat(Kind::PuncComma)?;
             }
         }
@@ -1460,10 +1437,7 @@ impl Parser {
             ast::Pattern::Literal(ast::PatternLiteral::Number(n)) => n,
             other => {
                 let span = other.span();
-                self.error_at(
-                    span,
-                    "Both ends of a range pattern must be number literals, like `1..10`",
-                );
+                self.error_at(span, ParseError::RangeBoundNotNumber);
                 ast::NumberLiteral {
                     value: "0".to_string(),
                     span,
@@ -1485,9 +1459,7 @@ impl Parser {
         start: Span,
     ) -> PResult<ast::Pattern> {
         if !is_type_name(&name) {
-            return Err(format!(
-                "Constructor name '{name}' must start with an uppercase letter"
-            ));
+            return Err(Box::new(ParseError::LowercaseConstructor { name }));
         }
         let mut args: Vec<ast::PatternArg> = Vec::new();
         let mut rest = false;
@@ -1513,14 +1485,10 @@ impl Parser {
     fn parse_pattern_atom_inner(&mut self) -> PResult<ast::Pattern> {
         let start = self.current_span();
         match self.kind() {
-            Kind::Keyword(Keyword::Else) => Err(
-                "`else` is not a pattern. Use `_` or a name for the arm that matches everything \
-                 else"
-                    .to_string(),
-            ),
+            Kind::Keyword(Keyword::Else) => Err(Box::new(ParseError::ElsePattern)),
             Kind::Identifier(_) => {
                 let id_span = self.current_span();
-                let name = self.eat_name("Expected a pattern")?;
+                let name = self.eat_name(Expected::Pattern)?;
                 // `io::NotFound(path)` reaches a constructor through its
                 // module's name.
                 if self.eat_module_separator(&name)? {
@@ -1529,7 +1497,7 @@ impl Parser {
                         span: id_span,
                     };
                     let member_span = self.current_span();
-                    let member = self.eat_name("Expected a constructor name")?;
+                    let member = self.eat_name(Expected::ConstructorName)?;
                     return self.finish_ctor_pattern(Some(q), member, member_span, start);
                 }
                 if is_type_name(&name) {
@@ -1544,14 +1512,14 @@ impl Parser {
             }
             Kind::LiteralNumber(_) => {
                 let span = self.current_span();
-                let value = self.eat_number("Expected a number")?;
+                let value = self.eat_number(Expected::Number)?;
                 Ok(ast::Pattern::Literal(ast::PatternLiteral::Number(
                     ast::NumberLiteral { value, span },
                 )))
             }
             Kind::PuncMinus => {
                 self.eat(Kind::PuncMinus)?;
-                let value = self.eat_number("Expected a number after `-`")?;
+                let value = self.eat_number(Expected::NumberAfterMinus)?;
                 Ok(ast::Pattern::Literal(ast::PatternLiteral::Number(
                     ast::NumberLiteral {
                         value: format!("-{value}"),
@@ -1561,7 +1529,7 @@ impl Parser {
             }
             Kind::LiteralString(_) => {
                 let span = self.current_span();
-                let value = self.eat_string("Expected a string")?;
+                let value = self.eat_string(Expected::String)?;
                 Ok(ast::Pattern::Literal(ast::PatternLiteral::String(
                     ast::StringLiteral { value, span },
                 )))
@@ -1572,7 +1540,7 @@ impl Parser {
                         p.parse_pattern()
                     })?;
                 if elements.len() < 2 {
-                    return Err("A tuple pattern needs at least two elements".to_string());
+                    return Err(Box::new(ParseError::TuplePatternTooShort));
                 }
                 Ok(ast::Pattern::Tuple {
                     elements,
@@ -1587,7 +1555,7 @@ impl Parser {
                             p.eat(Kind::PuncDotdot)?;
                             let mut binding: Option<ast::Identifier> = None;
                             if matches!(p.kind(), Kind::Identifier(_)) {
-                                binding = Some(p.eat_identifier("Expected a name after `..`")?);
+                                binding = Some(p.eat_identifier(Expected::SpreadBinding)?);
                             }
                             Ok(ast::ArrayPatternElement::Spread {
                                 binding,
@@ -1603,7 +1571,7 @@ impl Parser {
                 })
             }
             Kind::BinOpen => self.parse_binary_pattern(),
-            _ => Err(format!("Expected a pattern, but found '{}'", self.cur())),
+            _ => Err(Box::new(ParseError::UnexpectedInPattern(self.kind()))),
         }
     }
 
@@ -1622,13 +1590,13 @@ impl Parser {
             if self.kind() == Kind::PuncDotdot {
                 self.eat(Kind::PuncDotdot)?;
                 let binding = if matches!(self.kind(), Kind::Identifier(_)) {
-                    Some(self.eat_identifier("Expected a name after `..`")?)
+                    Some(self.eat_identifier(Expected::SpreadBinding)?)
                 } else {
                     None
                 };
                 rest = Some(ast::BinaryPatternRest { binding });
                 if self.kind() == Kind::PuncComma {
-                    return Err("`..` must be the last segment in a `<<>>` pattern".to_string());
+                    return Err(Box::new(ParseError::RestNotLast));
                 }
                 break;
             }
@@ -1676,7 +1644,7 @@ impl Parser {
             if matches!(&self.cur().kind, Kind::Identifier(n) if !is_type_name(n))
                 && self.peek_next() == Some(Kind::PuncColon)
             {
-                let label = self.eat_identifier("Expected a field label")?;
+                let label = self.eat_identifier(Expected::PatternLabel)?;
                 self.eat(Kind::PuncColon)?;
                 // `name:` with nothing after it binds the field to `name`.
                 let punned = matches!(self.kind(), Kind::PuncComma | Kind::PuncCloseParen);
@@ -1729,7 +1697,7 @@ impl Parser {
         let fn_span = self.current_span();
         self.eat(Kind::Keyword(Keyword::Fn))?;
 
-        let identifier = self.eat_identifier("Expected a function name")?;
+        let identifier = self.eat_identifier(Expected::FunctionName)?;
 
         let params = self.parse_parameters()?;
         let return_type = self.parse_function_return_type()?;
@@ -1737,24 +1705,22 @@ impl Parser {
         let vm_attr = attributes.iter().find(|a| a.name.name == "vm");
         let body = if let Some(vm_attr) = vm_attr {
             if return_type.is_none() {
-                return Err("@vm functions must declare a return type".to_string());
+                return Err(Box::new(ParseError::VmWithoutReturnType));
             }
             if self.kind() == Kind::PuncOpenBrace {
-                return Err("@vm functions cannot have a body".to_string());
+                return Err(Box::new(ParseError::VmWithBody));
             }
             // Check the argument count here, once, because everything after
             // this assumes `FnBody::Vm` carries exactly the op key.
             let op = match vm_attr.args.as_slice() {
                 [op] => op.clone(),
                 _ => {
-                    return Err(
-                        "@vm takes exactly one argument, the VM op key, like @vm(add)".to_string(),
-                    );
+                    return Err(Box::new(ParseError::VmArity));
                 }
             };
             ast::FnBody::Vm(op)
         } else {
-            ast::FnBody::Block(self.parse_braced_body("A function body")?)
+            ast::FnBody::Block(self.parse_function_body()?)
         };
 
         Ok(ast::Declaration::Function(ast::FunctionDeclaration {
@@ -1813,7 +1779,7 @@ impl Parser {
     }
 
     fn parse_parameter(&mut self) -> PResult<ast::FunctionParameter> {
-        let identifier = self.eat_identifier("Expected a parameter name")?;
+        let identifier = self.eat_identifier(Expected::ParameterName)?;
 
         let mut typ: Option<ast::TypeIdentifier> = None;
 
@@ -1836,7 +1802,7 @@ impl Parser {
                     p.parse_type_identifier()
                 })?;
             if elements.len() < 2 {
-                return Err("A tuple type needs at least two elements".to_string());
+                return Err(Box::new(ParseError::TupleTypeTooShort));
             }
             return Ok(ast::TypeIdentifier {
                 kind: ast::TypeKind::TupleType(ast::TupleType { elements }),
@@ -1849,7 +1815,7 @@ impl Parser {
         }
 
         let span = self.current_span();
-        let name = self.eat_name("Expected a type name")?;
+        let name = self.eat_name(Expected::TypeName)?;
 
         // In `module::Type`, the first name is the imported module and the
         // second names the type inside it.
@@ -1857,7 +1823,7 @@ impl Parser {
         let mut identifier = ast::Identifier { name, span };
         if self.eat_module_separator(&identifier.name)? {
             let member_span = self.current_span();
-            let member = self.eat_name("Expected a type name after `::`")?;
+            let member = self.eat_name(Expected::MemberTypeName)?;
             qualifier = Some(identifier);
             identifier = ast::Identifier {
                 name: member,
@@ -1911,7 +1877,7 @@ impl Parser {
             return Ok(Vec::new());
         }
         self.parse_comma_list(Kind::PuncOpenParen, Kind::PuncCloseParen, |p| {
-            p.eat_identifier("Expected a type parameter name")
+            p.eat_identifier(Expected::TypeParameterName)
         })
     }
 
@@ -1924,24 +1890,23 @@ impl Parser {
         let start = self.current_span();
         self.eat(Kind::Keyword(Keyword::Type))?;
 
-        let identifier = self.eat_identifier("Expected a type name after `type`")?;
+        let identifier = self.eat_identifier(Expected::DeclaredTypeName)?;
         if !is_type_name(&identifier.name) {
-            return Err(format!(
-                "Type name '{}' must start with an uppercase letter",
-                identifier.name
-            ));
+            return Err(Box::new(ParseError::LowercaseTypeName {
+                name: identifier.name,
+            }));
         }
         let type_params = self.parse_type_params()?;
 
         let body = if self.kind() == Kind::PuncEquals {
             if opaque {
-                return Err("`opaque` cannot be applied to a type alias".to_string());
+                return Err(Box::new(ParseError::OpaqueAlias));
             }
             self.eat(Kind::PuncEquals)?;
             ast::TypeBody::Alias(self.parse_type_identifier()?)
         } else if self.kind() != Kind::PuncOpenBrace {
             if opaque {
-                return Err("An `opaque` type must have constructors to hide".to_string());
+                return Err(Box::new(ParseError::OpaqueWithoutConstructors));
             }
             ast::TypeBody::External
         } else {
@@ -1951,7 +1916,7 @@ impl Parser {
                     // Single-constructor shorthand: `type T { field Type ... }`
                     // desugars to `type T { T(field Type ...) }`.
                     let fields =
-                        p.parse_line_separated_list(Kind::PuncCloseBrace, "field", |q| {
+                        p.parse_line_separated_list(Kind::PuncCloseBrace, LineItem::Field, |q| {
                             q.parse_constructor_field()
                         })?;
                     Ok(vec![ast::Constructor {
@@ -1961,14 +1926,14 @@ impl Parser {
                         span: identifier.span,
                     }])
                 } else {
-                    p.parse_line_separated_list(Kind::PuncCloseBrace, "constructor", |q| {
+                    p.parse_line_separated_list(Kind::PuncCloseBrace, LineItem::Constructor, |q| {
                         q.parse_constructor()
                     })
                 }
             })?;
             self.eat(Kind::PuncCloseBrace)?;
             if variants.is_empty() {
-                return Err("A type definition needs at least one constructor".to_string());
+                return Err(Box::new(ParseError::EmptyTypeDefinition));
             }
             ast::TypeBody::Variants {
                 ctors: variants,
@@ -1989,11 +1954,9 @@ impl Parser {
     fn parse_constructor(&mut self) -> PResult<ast::Constructor> {
         let doc = self.extract_doc_comment();
         let start = self.current_span();
-        let name = self.eat_name("Expected a constructor name")?;
+        let name = self.eat_name(Expected::ConstructorName)?;
         if !is_type_name(&name) {
-            return Err(format!(
-                "Constructor name '{name}' must start with an uppercase letter"
-            ));
+            return Err(Box::new(ParseError::LowercaseConstructor { name }));
         }
         let mut fields = Vec::new();
         if self.kind() == Kind::PuncOpenParen {
@@ -2014,13 +1977,10 @@ impl Parser {
         let start = self.current_span();
 
         if self.is_type_start() {
-            return Err(
-                "Each constructor field needs a label. Write `label Type`, like `name String`"
-                    .to_string(),
-            );
+            return Err(Box::new(ParseError::UnlabeledField));
         }
 
-        let label = self.eat_identifier("Expected a field label")?;
+        let label = self.eat_identifier(Expected::FieldLabel)?;
         let typ = self.parse_type_identifier()?;
 
         Ok(ast::ConstructorField {
@@ -2034,7 +1994,7 @@ impl Parser {
         let span = self.current_span();
         self.eat(Kind::Keyword(Keyword::Const))?;
 
-        let identifier = self.eat_identifier("Expected a constant name")?;
+        let identifier = self.eat_identifier(Expected::ConstName)?;
 
         let mut typ: Option<ast::TypeIdentifier> = None;
         if self.is_type_start() {
@@ -2130,19 +2090,15 @@ impl Parser {
 
         let call = self.parse_expression()?;
         if matches!(call, ast::Expression::OrExpression(_)) {
-            return Err("`or` is not allowed on a backpass statement".to_string());
+            return Err(Box::new(ParseError::BackpassOr));
         }
         if !matches!(call, ast::Expression::FunctionCallExpression(_)) {
-            return Err("backpassing requires a function call on the right of `<-`".to_string());
+            return Err(Box::new(ParseError::BackpassNotCall));
         }
         // Check this last, so the whole statement is consumed either way.
         // Returning early would leave recovery stuck on the first binder.
         if self.current_context() != ParseContext::Block {
-            return Err(
-                "Backpassing is not allowed at the top level of a module. Use it inside a \
-                 function or a block"
-                    .to_string(),
-            );
+            return Err(Box::new(ParseError::BackpassAtTopLevel));
         }
 
         Ok(ast::Statement::Backpass(ast::BackpassBinding {
@@ -2153,12 +2109,11 @@ impl Parser {
     }
 
     fn parse_backpass_binder(&mut self) -> PResult<ast::Identifier> {
-        let id = self.eat_identifier("Expected a name to bind")?;
+        let id = self.eat_identifier(Expected::BinderName)?;
         if id.name != "_" && is_type_name(&id.name) {
-            return Err(format!(
-                "A backpass can only bind plain names or `_`, but found '{}'",
-                id.name
-            ));
+            return Err(Box::new(ParseError::BackpassBinderUppercase {
+                name: id.name,
+            }));
         }
         Ok(id)
     }
@@ -2203,7 +2158,11 @@ impl Parser {
         }
         // Callers only get here after `pub` or at least one attribute, so the
         // error can always name what came before.
-        let preceded_by = if is_pub { "`pub`" } else { "attributes" };
+        let preceded_by = if is_pub {
+            DeclarationLead::Pub
+        } else {
+            DeclarationLead::Attributes
+        };
         let mut decl = self.parse_declaration_inner(doc, attrs, opaque, preceded_by)?;
         let s = decl.span_mut();
         s.start_line = start.start_line;
@@ -2219,23 +2178,24 @@ impl Parser {
         doc: Option<String>,
         attrs: Vec<ast::Attribute>,
         opaque: bool,
-        preceded_by: &str,
+        preceded_by: DeclarationLead,
     ) -> PResult<ast::Declaration> {
         if opaque && self.kind() != Kind::Keyword(Keyword::Type) {
-            return Err("`opaque` may only be applied to `type` declarations".to_string());
+            return Err(Box::new(ParseError::OpaqueNotType));
         }
         match self.kind() {
             Kind::Keyword(Keyword::Fn) => self.parse_function_declaration(doc, attrs),
             Kind::Keyword(Keyword::Type) => self.parse_type_declaration(doc, attrs, opaque),
             Kind::Keyword(Keyword::Const) => {
                 if !attrs.is_empty() {
-                    return Err("Attributes are not allowed on `const` declarations".to_string());
+                    return Err(Box::new(ParseError::AttributesOnConst));
                 }
                 self.parse_const_binding(doc)
             }
-            other => Err(format!(
-                "Expected `fn`, `type` or `const` after {preceded_by}, but found '{other}'"
-            )),
+            other => Err(Box::new(ParseError::ExpectedDeclaration {
+                after: preceded_by,
+                got: other,
+            })),
         }
     }
 
@@ -2250,11 +2210,11 @@ impl Parser {
     fn parse_attribute(&mut self) -> PResult<ast::Attribute> {
         let start = self.current_span();
         self.eat(Kind::PuncAt)?;
-        let name = self.eat_identifier("Expected an attribute name after `@`")?;
+        let name = self.eat_identifier(Expected::AttributeName)?;
         let mut args = Vec::new();
         if self.kind() == Kind::PuncOpenParen {
             args = self.parse_comma_list(Kind::PuncOpenParen, Kind::PuncCloseParen, |p| {
-                p.eat_identifier("Expected an attribute argument")
+                p.eat_identifier(Expected::AttributeArgument)
             })?;
         }
         Ok(ast::Attribute {
@@ -2279,27 +2239,27 @@ impl Parser {
             });
             self.advance();
             if self.kind() != Kind::PuncDiv {
-                return Err("Expected `/` after `.` or `..` in an import path".to_string());
+                return Err(Box::new(ParseError::RelativeImportWithoutSlash));
             }
             self.eat(Kind::PuncDiv)?;
         }
 
         // Span of the final module-name segment; the last write wins.
         let mut path_span = self.current_span();
-        let first = self.eat_name("Expected a module name after `import`")?;
+        let first = self.eat_name(Expected::ImportedModule)?;
         let mut names: Vec<String> = vec![first];
 
         while self.kind() == Kind::PuncDiv {
             self.eat(Kind::PuncDiv)?;
             path_span = self.current_span();
-            let seg = self.eat_name("Expected a module name after `/`")?;
+            let seg = self.eat_name(Expected::ModuleSegment)?;
             names.push(seg);
         }
 
         let mut alias: Option<ast::Identifier> = None;
         if self.kind() == Kind::Keyword(Keyword::As) {
             self.eat(Kind::Keyword(Keyword::As))?;
-            alias = Some(self.eat_identifier("Expected a name after `as`")?);
+            alias = Some(self.eat_identifier(Expected::Alias)?);
         }
         let path = ast::ImportPath { leading, names };
 
@@ -2327,9 +2287,11 @@ impl Parser {
             let list = self.span_from(list_start);
             self.error_at(
                 list,
-                format!(
-                    "Import the module and name it at the use: `import {path}`, then `{qualifier}::{item}`"
-                ),
+                ParseError::ImportList {
+                    path: path.clone(),
+                    qualifier,
+                    item,
+                },
             );
         }
 
@@ -2359,11 +2321,12 @@ impl Parser {
                 if !is_type_name(member) {
                     return Ok(false);
                 }
-                let msg = format!(
-                    "Reach a module's type or constructor with `::`, like `{module}::{member}`"
-                );
+                let error = ParseError::DotBeforeModuleMember {
+                    module: module.to_string(),
+                    member: member.to_string(),
+                };
                 let span = self.current_span();
-                self.error_at(span, msg);
+                self.error_at(span, error);
                 self.eat(Kind::PuncDot)?;
                 Ok(true)
             }
@@ -2374,7 +2337,7 @@ impl Parser {
     fn parse_module_access(&mut self, module: ast::Identifier) -> PResult<ast::Expression> {
         self.eat(Kind::PuncColonColon)?;
         let span = self.current_span();
-        let name = self.eat_name("Expected a module member after `::`")?;
+        let name = self.eat_name(Expected::ModuleMember)?;
         Ok(ast::Expression::ModuleAccessExpression(
             ast::ModuleAccessExpression {
                 span: module.span.union(&span),
@@ -2391,7 +2354,7 @@ impl Parser {
         let span = self.current_span();
 
         if matches!(self.kind(), Kind::LiteralNumber(_)) {
-            let num_str = self.eat_number("Expected a tuple index")?;
+            let num_str = self.eat_number(Expected::TupleIndex)?;
             let mut result = left;
             for part in num_str.split('.') {
                 result = ast::Expression::PropertyAccessExpression(ast::PropertyAccessExpression {
@@ -2406,7 +2369,7 @@ impl Parser {
             return Ok(result);
         }
 
-        let property = self.eat_name("Expected a field name after `.`")?;
+        let property = self.eat_name(Expected::PropertyName)?;
 
         Ok(ast::Expression::PropertyAccessExpression(
             ast::PropertyAccessExpression {
@@ -2423,7 +2386,7 @@ impl Parser {
     fn parse_string_expression(&mut self) -> PResult<ast::Expression> {
         let span = self.current_span();
         Ok(ast::Expression::StringLiteral(ast::StringLiteral {
-            value: self.eat_string("Expected a string")?,
+            value: self.eat_string(Expected::String)?,
             span,
         }))
     }
@@ -2438,7 +2401,7 @@ impl Parser {
             match self.kind() {
                 Kind::InterpStringPart(_) => {
                     let part_span = self.current_span();
-                    let value = self.eat_interp_part("Expected the text of a string")?;
+                    let value = self.eat_interp_part(Expected::StringPart)?;
                     parts.push(ast::InterpPart::Literal(ast::StringLiteral {
                         value,
                         span: part_span,
@@ -2455,16 +2418,13 @@ impl Parser {
                     self.eat(Kind::PuncCloseBrace)?;
                 }
                 Kind::Identifier(_) => {
-                    let ident = self.eat_identifier("Expected a name")?;
+                    let ident = self.eat_identifier(Expected::Identifier)?;
                     parts.push(ast::InterpPart::Expr(Box::new(
                         ast::Expression::Identifier(ident),
                     )));
                 }
                 _ => {
-                    return Err(format!(
-                        "Unexpected '{}' inside an interpolated string",
-                        self.kind()
-                    ));
+                    return Err(Box::new(ParseError::UnexpectedInInterpolation(self.kind())));
                 }
             }
         }
@@ -2480,7 +2440,7 @@ impl Parser {
     fn parse_number_expression(&mut self) -> PResult<ast::Expression> {
         let span = self.current_span();
         Ok(ast::Expression::NumberLiteral(ast::NumberLiteral {
-            value: self.eat_number("Expected a number")?,
+            value: self.eat_number(Expected::Number)?,
             span,
         }))
     }

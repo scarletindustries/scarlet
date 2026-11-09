@@ -13,7 +13,12 @@ type Pair(a, b) {
 type Bag(a) = Array(a)
 
 /** An alias for a function type, so signatures can say what they mean. */
-type Validate = fn(Int) Result(Int, String)
+type Validate = fn(Int) Result(Int, NotPositive)
+
+/** Why a number failed validation. */
+type NotPositive {
+	n Int
+}
 
 /** A generic enum: a persistent stack, recursive in its own type parameter. */
 type Stack(a) {
@@ -53,11 +58,18 @@ fn first_of(xs Bag(a)) Option(a) {
 	xs[0]
 }
 
-fn positive(n Int) Result(Int, String) {
+fn positive(n Int) Result(Int, NotPositive) {
 	if n > 0 {
 		Ok(n)
 	} else {
-		Err('${n} is not positive')
+		Err(NotPositive(n))
+	}
+}
+
+fn show_checked(r Result(Int, NotPositive)) String {
+	match r {
+		Ok(n) -> 'Ok(${n})'
+		Err(NotPositive(n)) -> 'Err(${n} is not positive)'
 	}
 }
 
@@ -80,7 +92,7 @@ pub fn main() {
 	println('first of nothing ${string::inspect(first_of(to_array(Empty)))}')
 
 	check Validate = positive
-	println('${string::inspect(check(7))} / ${string::inspect(check(-1))}')
+	println('${show_checked(check(7))} / ${show_checked(check(-1))}')
 
 	sizes Bag(Int) = array::map(['al', 'claude', 'inference'], fn(s) string::length(s))
 	println('sizes ${string::inspect(sizes)}')

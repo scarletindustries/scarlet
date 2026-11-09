@@ -270,10 +270,10 @@ fn only_calling_an_unbuilt_function_stops_the_run() {
                  pub fn main() {\n\
                  \t_ = me()\n\
                  }\n";
-    assert_eq!(
-        run(calls),
-        Err(Stop::NotBuiltYet("the built-in ProcessSelf".into()))
-    );
+    match run(calls) {
+        Err(Stop::NotBuiltYet(what)) => assert_eq!(what.to_string(), "the built-in ProcessSelf"),
+        other => panic!("expected NotBuiltYet, got {other:?}"),
+    }
 }
 
 #[test]

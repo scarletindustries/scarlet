@@ -169,6 +169,6 @@ pub fn main() {
 
 	// Prelude generics compose with user generics.
 	boxes Array(Box(Int)) = [Box(value: 1), Box(value: 2)]
-	ok Result(Int, String) = Ok(3)
+	ok Result(Int, Nil) = Ok(3)
 	println(make_pair(boxes, ok))
 }

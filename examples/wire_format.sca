@@ -15,6 +15,23 @@ type Sample {
 	gauge Bool
 }
 
+/** Why a frame was dropped. */
+type DecodeError {
+	UnsupportedVersion(version Int)
+	ForeignFrame
+	NotNameValueUnit
+	MalformedPayload
+}
+
+fn reason(e DecodeError) String {
+	match e {
+		UnsupportedVersion(v) -> 'unsupported version ${v}'
+		ForeignFrame -> 'truncated or foreign frame'
+		NotNameValueUnit -> 'payload is not name=value unit'
+		MalformedPayload -> 'malformed payload'
+	}
+}
+
 fn encode(s Sample) Binary {
 	payload = binary::from_string('${s.name}=${s.value} ${s.unit}')
 	flags = match s.gauge {
@@ -34,19 +51,19 @@ fn header(frame Binary) String {
 }
 
 // bytes(len) takes exactly the length the header announced.
-fn decode(frame Binary) Result(Sample, String) {
+fn decode(frame Binary) Result(Sample, DecodeError) {
 	match frame {
-		<<'ALM', v:4, _:4, _:16, _:binary>> if v != VERSION -> { Err('unsupported version ${v}') }
+		<<'ALM', v:4, _:4, _:16, _:binary>> if v != VERSION -> { Err(UnsupportedVersion(v)) }
 		<<'ALM', _:4, flags:4, len:16, payload:bytes(len)>> -> { parse_payload(payload, flags) }
-		_ -> Err('truncated or foreign frame')
+		_ -> Err(ForeignFrame)
 	}
 }
 
-fn parse_payload(payload Binary, flags Int) Result(Sample, String) {
+fn parse_payload(payload Binary, flags Int) Result(Sample, DecodeError) {
 	match (binary::index_of(payload, <<'='>>, 0), binary::index_of(payload, <<' '>>, 0)) {
 		(Some(eq), Some(sp)) ->
-			result::replace_err(sample(payload, eq, sp, flags == GAUGE), 'malformed payload')
-		(None, _) | (Some(_), None) -> Err('payload is not name=value unit')
+			result::replace_err(sample(payload, eq, sp, flags == GAUGE), MalformedPayload)
+		(None, _) | (Some(_), None) -> Err(NotNameValueUnit)
 	}
 }
 
@@ -74,14 +91,14 @@ fn round_trip(s Sample) Nil {
 	println('  head  ${header(frame)}')
 	match decode(frame) {
 		Ok(got) -> println('  recv  ${show(got)}')
-		Err(reason) -> println('  drop  ${reason}')
+		Err(e) -> println('  drop  ${reason(e)}')
 	}
 }
 
 fn reject(what String, frame Binary) Nil {
 	match decode(frame) {
 		Ok(s) -> println('${what}: accepted ${show(s)}')
-		Err(reason) -> println('${what}: ${reason}')
+		Err(e) -> println('${what}: ${reason(e)}')
 	}
 }
 

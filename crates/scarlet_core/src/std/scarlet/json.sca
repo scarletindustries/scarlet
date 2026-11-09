@@ -22,7 +22,31 @@ pub opaque type Doc {
 // `offset` is the byte the parser stopped at.
 pub type ParseError {
 	offset Int
-	message String
+	reason ParseReason
+}
+
+/** Why a document did not parse. */
+pub type ParseReason {
+	/** The input ended inside a value. */
+	UnexpectedEnd
+	/** A byte that cannot start or continue a value where it is. */
+	UnexpectedByte
+	/** Something follows the one top-level value. */
+	TrailingData
+	/** A string that never closes. */
+	UnterminatedString
+	/** A `\` escape JSON does not have. */
+	BadEscape
+	/** A `\u` escape that is not a code point, or half a surrogate pair. */
+	BadUnicode
+	/** A number JSON does not allow. */
+	BadNumber
+	/** The input is not UTF-8. */
+	NotUtf8
+	/** The input is not a whole number of bytes. */
+	NotWholeBytes
+	/** The document has too many values or too much text to index. */
+	TooLarge
 }
 
 // A number with no fraction or exponent is an `IntKind`, so big ids survive.
@@ -189,6 +213,18 @@ pub fn reencode(d Doc) String {
 }
 
 pub fn parse_error_message(e ParseError) String {
-	ParseError(offset, message) = e
-	'${message} (at byte ${offset})'
+	ParseError(offset, reason) = e
+	text = match reason {
+		UnexpectedEnd -> 'unexpected end of input'
+		UnexpectedByte -> 'unexpected character'
+		TrailingData -> 'trailing data after the value'
+		UnterminatedString -> 'unterminated string'
+		BadEscape -> 'invalid escape'
+		BadUnicode -> 'invalid unicode escape'
+		BadNumber -> 'invalid number'
+		NotUtf8 -> 'input is not utf-8'
+		NotWholeBytes -> 'input is not a whole number of bytes'
+		TooLarge -> 'document is too large to index'
+	}
+	'${text} (at byte ${offset})'
 }

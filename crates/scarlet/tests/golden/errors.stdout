@@ -14,7 +14,7 @@ is_err    False True
 map       Ok(84)
 or        42 0
 then      Ok(42)
-then      Err(NotANumber(900 out of range))
+then      Err(OutOfRange(900))
 then      Err(NotANumber(abc))
 recover   oops is not a number, using 0
 score     0

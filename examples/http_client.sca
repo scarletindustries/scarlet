@@ -226,19 +226,30 @@ fn pump_payload() String {
 	array::fold(1..129, '', fn(acc, _i) '${acc}0123456789abcdef')
 }
 
+/** Why no loopback port could be had. */
+type LoopbackError {
+	ListenFailed(error error::NetError)
+	LocalAddrFailed(error error::NetError)
+}
+
+fn describe_loopback(e LoopbackError) String {
+	match e {
+		ListenFailed(err) -> 'listen failed: ${err}'
+		LocalAddrFailed(err) -> 'local_addr failed: ${err}'
+	}
+}
+
 // Listens on a spare loopback port, then runs the rest of the caller's block.
 fn bind_loopback(next fn(Int, net::Server) Nil) Nil {
 	match loopback() {
 		Ok((port, server)) -> next(port, server)
-		Err(why) -> println(why)
+		Err(why) -> println(describe_loopback(why))
 	}
 }
 
-fn loopback() Result((Int, net::Server), String) {
-	server <- result::then(
-		result::map_err(net::listen('127.0.0.1', 0), fn(e) 'listen failed: ${e}'),
-	)
-	addr <- result::then(result::map_err(net::local_addr(server), fn(e) 'local_addr failed: ${e}'))
+fn loopback() Result((Int, net::Server), LoopbackError) {
+	server <- result::then(result::map_err(net::listen('127.0.0.1', 0), ListenFailed))
+	addr <- result::then(result::map_err(net::local_addr(server), LocalAddrFailed))
 	Ok((address::port(addr), server))
 }
 

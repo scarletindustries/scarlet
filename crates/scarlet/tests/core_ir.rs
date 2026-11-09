@@ -858,7 +858,7 @@ mod unlowerable {
         *body = ast::Expression::BlockExpression(ast::BlockExpression {
             body: vec![ast::Node::Expression(ast::Expression::ErrorNode(
                 ast::ErrorNode {
-                    message: "spliced".into(),
+                    error: scarlet::parser::ParseError::ScannerError,
                     span: at,
                 },
             ))],

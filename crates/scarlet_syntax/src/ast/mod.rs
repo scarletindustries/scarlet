@@ -1,3 +1,4 @@
+use crate::parser::ParseError;
 use crate::span::Span;
 
 /// Delegating `span()` / `span_mut()` for an enum whose variants each wrap a
@@ -98,7 +99,7 @@ fn int_from_radix(sign: &str, digits: &str, radix: u32) -> Option<i64> {
 
 #[derive(Debug, Clone)]
 pub struct ErrorNode {
-    pub message: String,
+    pub error: ParseError,
     pub span: Span,
 }
 
@@ -924,7 +925,7 @@ mod tests {
     fn call_arg_and_error_node_spans() {
         let err = |s| {
             Expression::ErrorNode(ErrorNode {
-                message: "e".to_string(),
+                error: ParseError::ScannerError,
                 span: s,
             })
         };
