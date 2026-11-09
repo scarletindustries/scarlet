@@ -1,52 +1,85 @@
-//! Pattern type-checking (no codegen): [`Compiler::type_pattern`] and the
-//! constructor lookup and argument-slotting helpers it leans on.
+//! Pattern checking: [`Compiler::type_pattern`] and the constructor lookup
+//! and argument-slotting helpers it leans on.
 
 use super::*;
 
 impl Compiler {
-    /// Type-check a pattern against `expected`, recording bound names in `b`.
-    /// Emits no bytecode. `false` means ill-typed: the caller must propagate it
-    /// so exhaustiveness checks, which assume well-typed patterns, are skipped.
-    #[must_use = "a false result means the pattern is ill-typed and must be propagated"]
+    /// Type-check a pattern against `expected` and resolve it: constructors to
+    /// their variants, and each name to a new binding, brought into scope as
+    /// the pattern reaches it. A segment's size expression is checked before
+    /// the segment's own value, so it sees the names earlier segments bind and
+    /// nothing later.
+    ///
+    /// `binders` holds the binder of each name `b` has recorded, by its index
+    /// there. The `bool` is false when the pattern is ill-typed: the caller
+    /// must propagate it, so exhaustiveness checks, which assume well-typed
+    /// patterns, are skipped.
     pub(super) fn type_pattern(
         &mut self,
         pat: &ast::Pattern,
         expected: Ty,
         b: &mut PatternSink<'_>,
-    ) -> bool {
+        binders: &mut Vec<BinderId>,
+    ) -> (CPat, bool) {
+        let span = pat.span();
+        let at = |kind| CPat {
+            ty: expected,
+            span,
+            kind,
+        };
         match pat {
-            ast::Pattern::Binary {
-                segments,
-                rest,
-                span,
-            } => {
+            ast::Pattern::Binary { segments, rest, .. } => {
                 let bin_ty = self.ty_binary();
-                let mut ok = self.engine.unify_at(expected, bin_ty, *span);
+                let mut ok = self.engine.unify_at(expected, bin_ty, span);
+                let mut segs = Vec::with_capacity(segments.len());
                 for seg in segments {
-                    // A string-literal Utf8 segment (`<<'GET ', ..>>`) binds
-                    // nothing. Size expressions are operands, not bindings, and
-                    // `type_pattern_sizes` checks them later, once every name
-                    // this pattern binds is in scope.
-                    if seg.utf8_literal().is_some() {
+                    if let Some(s) = seg.utf8_literal() {
+                        segs.push(CBinPatSeg::Literal(s.to_string()));
                         continue;
                     }
-                    let seg_val_ty = match seg.spec {
-                        ast::BinSpec::Int { .. } | ast::BinSpec::Utf8 => self.ty_int(),
-                        ast::BinSpec::Binary { .. } => self.ty_binary(),
+                    let (width, val_ty) = match &seg.spec {
+                        ast::BinSpec::Int { bits } => (
+                            CWidth::Int(self.type_seg_size(bits.as_ref())),
+                            self.ty_int(),
+                        ),
+                        ast::BinSpec::Binary { bytes } => (
+                            CWidth::Bytes(self.type_seg_size(bytes.as_ref())),
+                            self.ty_binary(),
+                        ),
+                        ast::BinSpec::Utf8 => (CWidth::Utf8, self.ty_int()),
                     };
-                    ok &= self.type_pattern(&seg.value, seg_val_ty, b);
+                    let (value, v_ok) = self.type_pattern(&seg.value, val_ty, b, binders);
+                    ok &= v_ok;
+                    segs.push(CBinPatSeg::Value {
+                        width,
+                        value: Box::new(value),
+                    });
                 }
-                if let Some(r) = rest
-                    && let Some(id) = &r.binding
-                {
-                    let rest_ty = self.ty_binary();
-                    ok &= b.bind(&id.name, rest_ty, id.span, &mut self.engine);
-                }
-                ok
+                let rest = match rest {
+                    None => CRest::None,
+                    Some(r) => match &r.binding {
+                        None => CRest::Discard,
+                        Some(id) => {
+                            let rest_ty = self.ty_binary();
+                            let (rest, r_ok) = self.bind_rest(id, rest_ty, b, binders);
+                            ok &= r_ok;
+                            rest
+                        }
+                    },
+                };
+                (at(CPatKind::Binary { segs, rest }), ok)
             }
-            ast::Pattern::Var { name } => b.bind(&name.name, expected, name.span, &mut self.engine),
+            ast::Pattern::Var { name } => {
+                let (bound, ok) = self.bind_pattern_name(name, expected, b, binders);
+                let kind = match bound {
+                    Some((name, binder)) => CPatKind::Bind { name, binder },
+                    None if ok => CPatKind::Wild,
+                    None => CPatKind::Error,
+                };
+                (at(kind), ok)
+            }
             ast::Pattern::Literal(lit) => {
-                let (lit_ty, sp) = match lit {
+                let (lit_ty, sp, kind) = match lit {
                     // `const_number` raises the out-of-range/malformed error.
                     ast::PatternLiteral::Number(n) => {
                         let v = self.const_number(n);
@@ -55,15 +88,18 @@ impl Compiler {
                         } else {
                             self.ty_int()
                         };
-                        (ty, n.span)
+                        (ty, n.span, CPatKind::Number(n.clone()))
                     }
-                    ast::PatternLiteral::String(s) => (self.ty_string(), s.span),
+                    ast::PatternLiteral::String(s) => {
+                        (self.ty_string(), s.span, CPatKind::String(s.value.clone()))
+                    }
                 };
-                self.engine.unify_at(expected, lit_ty, sp)
+                let ok = self.engine.unify_at(expected, lit_ty, sp);
+                (at(kind), ok)
             }
-            ast::Pattern::Range { start, end, span } => {
+            ast::Pattern::Range { start, end, .. } => {
                 let int_t = self.ty_int();
-                let mut ok = self.engine.unify_at(expected, int_t, *span);
+                let mut ok = self.engine.unify_at(expected, int_t, span);
                 for bound in [start, end] {
                     // `const_number` raises the out-of-range/malformed error.
                     let v = self.const_number(bound);
@@ -78,29 +114,40 @@ impl Compiler {
                         ok = false;
                     }
                 }
-                ok
+                let kind = CPatKind::Range {
+                    start: start.clone(),
+                    end: end.clone(),
+                };
+                (at(kind), ok)
             }
-            ast::Pattern::Tuple { elements, span } => {
+            ast::Pattern::Tuple { elements, .. } => {
                 let fresh: Vec<Ty> = (0..elements.len())
                     .map(|_| self.engine.fresh_var())
                     .collect();
                 let tup = self.engine.mk_tuple(&fresh);
-                let mut ok = self.engine.unify_at(expected, tup, *span);
+                let mut ok = self.engine.unify_at(expected, tup, span);
+                let mut elems = Vec::with_capacity(elements.len());
                 for (elem, &ety) in elements.iter().zip(fresh.iter()) {
-                    ok &= self.type_pattern(elem, ety, b);
+                    let (e, e_ok) = self.type_pattern(elem, ety, b, binders);
+                    ok &= e_ok;
+                    elems.push(e);
                 }
-                ok
+                (at(CPatKind::Tuple(elems)), ok)
             }
-            ast::Pattern::Array { elements, span } => {
+            ast::Pattern::Array { elements, .. } => {
                 let elem_var = self.engine.fresh_var();
                 let arr_ty = self.ty_array(elem_var);
-                let mut ok = self.engine.unify_at(expected, arr_ty, *span);
+                let mut ok = self.engine.unify_at(expected, arr_ty, span);
 
+                let mut prefix = Vec::with_capacity(elements.len());
+                let mut rest = CRest::None;
                 let mut seen_spread = false;
                 for (i, e) in elements.iter().enumerate() {
                     match e {
                         ast::ArrayPatternElement::Pattern(p) => {
-                            ok &= self.type_pattern(p, elem_var, b);
+                            let (el, e_ok) = self.type_pattern(p, elem_var, b, binders);
+                            ok &= e_ok;
+                            prefix.push(el);
                         }
                         ast::ArrayPatternElement::Spread { binding, span: ssp } => {
                             if seen_spread {
@@ -117,49 +164,114 @@ impl Compiler {
                                 ok = false;
                             }
                             seen_spread = true;
-                            if let Some(id) = binding {
-                                let rest_ty = self.ty_array(elem_var);
-                                ok &= b.bind(&id.name, rest_ty, id.span, &mut self.engine);
-                            }
+                            rest = match binding {
+                                None => CRest::Discard,
+                                Some(id) => {
+                                    let rest_ty = self.ty_array(elem_var);
+                                    let (r, r_ok) = self.bind_rest(id, rest_ty, b, binders);
+                                    ok &= r_ok;
+                                    r
+                                }
+                            };
                         }
                     }
                 }
-                ok
+                let kind = CPatKind::Array {
+                    elem: elem_var,
+                    prefix,
+                    rest,
+                };
+                (at(kind), ok)
             }
             ast::Pattern::Constructor {
                 qualifier,
                 name,
                 args,
                 rest,
-                span,
+                ..
             } => self.type_ctor_pattern(
-                CtorHead {
+                CtorPattern {
                     qualifier: qualifier.as_ref(),
                     name,
+                    args,
+                    rest: *rest,
+                    span,
                 },
-                args,
-                *rest,
-                *span,
                 expected,
                 b,
+                binders,
             ),
             ast::Pattern::Or { first, rest, .. } => {
                 // The first alternative establishes the canonical binding set;
                 // `finish` folds the names into the enclosing frame so a later
                 // sibling binding still sees them for duplicate detection.
                 let mut or = b.enter_or();
-                let mut ok = self.type_pattern(first, expected, &mut or.sink());
+                let (head, mut ok) = self.type_pattern(first, expected, &mut or.sink(), binders);
+                let mut alts = Vec::with_capacity(1 + rest.len());
+                alts.push(head);
                 for alt in rest {
                     let mut a = or.enter_alternative();
-                    ok &= self.type_pattern(alt, expected, &mut a.sink());
+                    let (p, a_ok) = self.type_pattern(alt, expected, &mut a.sink(), binders);
+                    ok &= a_ok;
+                    alts.push(p);
                     let (scope, complete) = a.finish(alt.span(), &mut self.engine);
                     ok &= complete;
                     or = scope;
                 }
                 or.finish();
-                ok
+                (at(CPatKind::Or(alts)), ok)
             }
         }
+    }
+
+    /// Bind a name a pattern reaches. `None` when it binds nothing readable:
+    /// a write-only `_name`, or one rejected with a diagnostic (`false`).
+    fn bind_pattern_name(
+        &mut self,
+        id: &ast::Identifier,
+        ty: Ty,
+        b: &mut PatternSink<'_>,
+        binders: &mut Vec<BinderId>,
+    ) -> (Option<(StrId, BinderId)>, bool) {
+        match b.bind(&id.name, ty, id.span, &mut self.engine) {
+            Bound::Fresh(index) => {
+                self.get_or_create_local(&id.name);
+                self.register_local_binding(&id.name, ty, id.span);
+                let sid = self.engine.intern(&id.name);
+                let binder = self.publish_local(sid);
+                debug_assert_eq!(index, binders.len(), "pattern binders out of step");
+                binders.push(binder);
+                (Some((sid, binder)), true)
+            }
+            Bound::Again(index) => {
+                let sid = self.engine.intern(&id.name);
+                (binders.get(index).map(|&binder| (sid, binder)), true)
+            }
+            // Registered so hover and go-to-definition see it. Nothing reads
+            // it, so it has no slot, and its discarded type is re-checked once
+            // inference is final.
+            Bound::WriteOnly => {
+                self.register_local_binding(&id.name, ty, id.span);
+                self.nil_discards.push((id.name.clone(), ty, id.span));
+                (None, true)
+            }
+            Bound::Rejected => (None, false),
+        }
+    }
+
+    fn bind_rest(
+        &mut self,
+        id: &ast::Identifier,
+        ty: Ty,
+        b: &mut PatternSink<'_>,
+        binders: &mut Vec<BinderId>,
+    ) -> (CRest, bool) {
+        let (bound, ok) = self.bind_pattern_name(id, ty, b, binders);
+        let rest = match bound {
+            Some((name, binder)) => CRest::Bind { name, binder },
+            None => CRest::Discard,
+        };
+        (rest, ok)
     }
 
     /// Resolve a constructor name in scope to a [`CtorLookup`].
@@ -213,19 +325,28 @@ impl Compiler {
 
     fn type_ctor_pattern(
         &mut self,
-        head: CtorHead<'_>,
-        args: &[ast::PatternArg],
-        rest: bool,
-        span: Span,
+        pat: CtorPattern<'_>,
         expected: Ty,
         b: &mut PatternSink<'_>,
-    ) -> bool {
-        let CtorHead { qualifier, name } = head;
+        binders: &mut Vec<BinderId>,
+    ) -> (CPat, bool) {
+        let CtorPattern {
+            qualifier,
+            name,
+            args,
+            rest,
+            span,
+        } = pat;
+        let error = || CPat {
+            ty: expected,
+            span,
+            kind: CPatKind::Error,
+        };
         let ctor = match qualifier {
             // `lookup_ctor_qualified` reports its own diagnostic.
             Some(q) => match self.lookup_ctor_qualified(&q.name, &name.name, name.span) {
                 Some(f) => f,
-                None => return false,
+                None => return (error(), false),
             },
             None => match self.lookup_ctor(&name.name) {
                 Some(f) => f,
@@ -252,11 +373,12 @@ impl Compiler {
                         format!("Unknown constructor '{}' in pattern", name.name)
                     };
                     self.error(msg, name.span);
-                    return false;
+                    return (error(), false);
                 }
             },
         };
         let CtorLookup {
+            variant,
             type_name,
             arity,
             field_labels,
@@ -306,16 +428,37 @@ impl Compiler {
                     },
                 );
                 ok &= args_ok;
+                // One sub-pattern per declared field; a field the source left
+                // out matches anything.
+                let mut fields = Vec::with_capacity(arity);
                 for (i, sub) in by_pos.iter().enumerate() {
-                    if let Some(p) = sub {
-                        let field_ty = params
-                            .get(i)
-                            .cloned()
-                            .unwrap_or_else(|| self.engine.fresh_var());
-                        ok &= self.type_pattern(p, field_ty, b);
-                    }
+                    let field_ty = params
+                        .get(i)
+                        .cloned()
+                        .unwrap_or_else(|| self.engine.fresh_var());
+                    let field = match sub {
+                        Some(p) => {
+                            let (f, f_ok) = self.type_pattern(p, field_ty, b, binders);
+                            ok &= f_ok;
+                            f
+                        }
+                        None => CPat {
+                            ty: field_ty,
+                            span,
+                            kind: CPatKind::Wild,
+                        },
+                    };
+                    fields.push(field);
                 }
-                ok
+                let kind = CPatKind::Ctor { variant, fields };
+                (
+                    CPat {
+                        ty: expected,
+                        span,
+                        kind,
+                    },
+                    ok,
+                )
             }
             _ => {
                 let mut ok = self.engine.unify_at(expected, r, span);
@@ -330,7 +473,18 @@ impl Compiler {
                     );
                     ok = false;
                 }
-                ok
+                let kind = CPatKind::Ctor {
+                    variant,
+                    fields: Vec::new(),
+                };
+                (
+                    CPat {
+                        ty: expected,
+                        span,
+                        kind,
+                    },
+                    ok,
+                )
             }
         }
     }
@@ -408,27 +562,5 @@ impl Compiler {
             ok = false;
         }
         (by_pos.into_iter().map(|s| s.map(|(v, _)| v)).collect(), ok)
-    }
-}
-
-/// The exhaustiveness checker resolves pattern heads through the same scope
-/// `type_pattern` did, so an aliased constructor import (`{Circle as Round}`)
-/// names the variant it was imported from rather than a variant the subject
-/// type has no name for. Silent on failure by contract: it runs only on
-/// patterns `type_pattern` accepted, so a `None` here is a head that already
-/// has a diagnostic.
-impl CtorResolver for Compiler {
-    fn variant_index(&self, qualifier: Option<&str>, name: &str) -> Option<usize> {
-        let scheme = match qualifier {
-            Some(q) => {
-                let key = self.imported_qualifiers.get(q)?;
-                self.module_table.get(key)?.values.get(name)?.scheme
-            }
-            None => *self.env.lookup(name)?,
-        };
-        match scheme.kind {
-            ValueKind::Constructor { variant_idx, .. } => Some(variant_idx as usize),
-            _ => None,
-        }
     }
 }

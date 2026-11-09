@@ -691,7 +691,7 @@ pub enum ArrayPatternElement {
 pub struct BinSegmentPat {
     pub value: Pattern,
     pub spec: BinSpec,
-    pub span: Span,
+    pub(crate) span: Span,
 }
 
 impl BinSegmentPat {
@@ -711,7 +711,6 @@ impl BinSegmentPat {
 #[derive(Debug, Clone)]
 pub struct BinaryPatternRest {
     pub binding: Option<Identifier>,
-    pub span: Span,
 }
 
 /// How [`Pattern::for_each_binder`] treats the alternatives of an or-pattern.
@@ -786,11 +785,13 @@ impl Pattern {
                 }
             }
             Pattern::Binary { segments, rest, .. } => {
+                // A size is read before the segment's own value, so it sees
+                // only the names earlier segments bind.
                 for seg in segments {
-                    seg.value.for_each_binder(or_mode, f);
                     if let Some(sz) = seg.spec.size_expr() {
                         f(PatternBinder::SizeExpr(sz));
                     }
+                    seg.value.for_each_binder(or_mode, f);
                 }
                 if let Some(r) = rest
                     && let Some(id) = &r.binding

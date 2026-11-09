@@ -307,8 +307,8 @@ core_golden!(
      }\n"
 );
 
-// Same for tuple destructuring: element types come from the scrutinee's Tuple
-// node.
+// Same for tuple destructuring: each element is typed with what the checker
+// inferred for it.
 core_golden!(
     tuple_destructure_binding,
     "type L {\n\tCons(h Int, t L)\n\tLNil\n}\n\

@@ -15,17 +15,17 @@
 //! binding is made and on every use the walk resolved to it, so the elaborator
 //! never looks a name up by its spelling.
 //!
-//! Patterns stay as the source wrote them, because the elaborator reads only
-//! the pattern and its scrutinee's type. The expressions inside one (a binary
-//! segment's size) are checked like any other and kept beside it, in the order
-//! the pattern visits them.
+//! Patterns are resolved once, here: a constructor pattern names its variant
+//! and has one sub-pattern per declared field, and every name a pattern binds
+//! has its binder. Exhaustiveness and the elaborator both read this, so
+//! neither looks a constructor up again.
 
 use scarlet_syntax::ast;
 use scarlet_syntax::span::Span;
 
 use super::{Denotation, GlobalSlot};
-use scarlet_ir::core_ir::FuncIdx;
-use scarlet_types::types::{StrId, Ty};
+use scarlet_ir::core_ir::{FuncIdx, VariantRef};
+use scarlet_types::types::{BinPart, BinSegShape, BinUnit, PatShape, PatternShape, StrId, Ty};
 
 #[derive(Debug, Clone)]
 pub struct CExpr {
@@ -119,9 +119,18 @@ pub enum CInterpPart {
 #[derive(Debug, Clone)]
 pub struct CBinSeg {
     pub value: CExpr,
-    pub spec: ast::BinSpec,
-    /// The checked size expression, when the spec has one.
-    pub size: Option<CExpr>,
+    pub width: CWidth,
+}
+
+/// How wide a `<<..>>` segment is, with its size expression checked.
+#[derive(Debug, Clone)]
+pub enum CWidth {
+    /// `:N` / `:size(..)`; `None` is the default 8 bits.
+    Int(Option<CExpr>),
+    /// `:bytes(..)`; `None` is `:binary`, which takes the rest.
+    Bytes(Option<CExpr>),
+    /// `:utf8`: one codepoint, as wide as its encoding.
+    Utf8,
 }
 
 #[derive(Debug, Clone)]
@@ -155,20 +164,78 @@ pub enum CArg {
     Spread(CExpr),
 }
 
+/// A pattern as the walk checked it. Every node carries the type the walk
+/// checked it against.
 #[derive(Debug, Clone)]
-pub struct CPattern {
-    pub pattern: ast::Pattern,
-    /// The pattern's size expressions, in the order the pattern visits them.
-    pub sizes: Vec<CExpr>,
-    /// The binder of each name the pattern binds. A pattern binds a name once,
-    /// across all the alternatives of an or-pattern too, so the name is the
-    /// key. `_`-prefixed names are never read and have none.
-    pub binders: Vec<(StrId, BinderId)>,
+pub struct CPat {
+    pub ty: Ty,
+    pub span: Span,
+    pub kind: CPatKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum CPatKind {
+    /// Matches anything and binds nothing: `_`, a write-only `_name`, or a
+    /// constructor field the source left out.
+    Wild,
+    Bind {
+        name: StrId,
+        binder: BinderId,
+    },
+    Number(ast::NumberLiteral),
+    String(String),
+    Range {
+        start: ast::NumberLiteral,
+        end: ast::NumberLiteral,
+    },
+    /// One sub-pattern per declared field, in declared order.
+    Ctor {
+        variant: VariantRef,
+        fields: Vec<CPat>,
+    },
+    Tuple(Vec<CPat>),
+    Array {
+        elem: Ty,
+        prefix: Vec<CPat>,
+        rest: CRest,
+    },
+    Binary {
+        segs: Vec<CBinPatSeg>,
+        rest: CRest,
+    },
+    /// The alternatives bind the same names, to the same binders.
+    Or(Vec<CPat>),
+    /// Something the walk reported an error for. A module holding one is
+    /// never elaborated, and its matches are not checked for exhaustiveness.
+    Error,
+}
+
+/// The `..rest` of an array or binary pattern.
+#[derive(Debug, Clone)]
+pub enum CRest {
+    /// No rest: the pattern matches exactly what it lists.
+    None,
+    /// `..` or `.._`.
+    Discard,
+    Bind {
+        name: StrId,
+        binder: BinderId,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum CBinPatSeg {
+    /// `<<'GET ', ..>>`: these bytes, as a prefix.
+    Literal(String),
+    Value {
+        width: CWidth,
+        value: Box<CPat>,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub struct CArm {
-    pub pattern: CPattern,
+    pub pattern: CPat,
     pub guard: Option<CExpr>,
     pub body: CExpr,
 }
@@ -178,7 +245,7 @@ pub enum CNode {
     Expr(CExpr),
     /// `pattern = init`. A plain name is a pattern too.
     Binding {
-        pattern: CPattern,
+        pattern: CPat,
         init: CExpr,
         /// The entry-frame slot of each name this binding binds at module
         /// scope, which lambdas already checked read it from. Empty for a
@@ -243,4 +310,70 @@ pub struct ClosureFact {
     /// Every captured name, in capture-index order, with how it loads in the
     /// enclosing body.
     pub captures: Vec<(StrId, NameFact)>,
+}
+
+impl PatternShape for CPat {
+    fn shape(&self) -> PatShape<'_, Self> {
+        match &self.kind {
+            CPatKind::Wild | CPatKind::Bind { .. } | CPatKind::Error => PatShape::Wild,
+            CPatKind::Number(n) => PatShape::Number(n),
+            CPatKind::String(s) => PatShape::String(s),
+            CPatKind::Range { start, end } => PatShape::Range(start, end),
+            CPatKind::Ctor { variant, fields } => PatShape::Variant {
+                index: variant.variant_idx as usize,
+                fields,
+            },
+            CPatKind::Tuple(elems) => PatShape::Tuple(elems),
+            CPatKind::Array { prefix, rest, .. } => PatShape::Array {
+                prefix,
+                open: !matches!(rest, CRest::None),
+            },
+            // `<<..rest>>` matches every binary.
+            CPatKind::Binary { segs, rest } if segs.is_empty() && !matches!(rest, CRest::None) => {
+                PatShape::Wild
+            }
+            CPatKind::Binary { segs, rest } => PatShape::Binary {
+                segs: segs.iter().map(bin_seg_shape).collect(),
+                open: !matches!(rest, CRest::None),
+            },
+            CPatKind::Or(alts) => PatShape::Or(alts),
+        }
+    }
+}
+
+fn bin_seg_shape(seg: &CBinPatSeg) -> BinSegShape<'_> {
+    match seg {
+        CBinPatSeg::Literal(s) => BinSegShape {
+            value: BinPart::Str(s),
+            unit: BinUnit::Utf8,
+            size: None,
+        },
+        CBinPatSeg::Value { width, value } => {
+            let value = match &value.kind {
+                CPatKind::Wild | CPatKind::Bind { .. } => BinPart::Any,
+                CPatKind::Number(n) => BinPart::Int(n),
+                CPatKind::String(s) => BinPart::Str(s),
+                CPatKind::Range { .. }
+                | CPatKind::Ctor { .. }
+                | CPatKind::Tuple(_)
+                | CPatKind::Array { .. }
+                | CPatKind::Binary { .. }
+                | CPatKind::Or(_)
+                | CPatKind::Error => BinPart::At(value.span),
+            };
+            let (unit, size) = match width {
+                CWidth::Int(e) => (BinUnit::Bits, size_part(e)),
+                CWidth::Bytes(e) => (BinUnit::Bytes, size_part(e)),
+                CWidth::Utf8 => (BinUnit::Utf8, None),
+            };
+            BinSegShape { value, unit, size }
+        }
+    }
+}
+
+fn size_part(e: &Option<CExpr>) -> Option<BinPart<'_>> {
+    e.as_ref().map(|e| match &e.kind {
+        CKind::Number(n) => BinPart::Int(n),
+        _ => BinPart::At(e.span),
+    })
 }

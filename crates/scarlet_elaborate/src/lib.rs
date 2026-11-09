@@ -23,9 +23,9 @@ pub use scarlet_types::slots;
 pub mod zonk;
 
 pub use checked::{BinderId, ClosureFact, NameAt, NameFact};
+pub(crate) use elaborate::elaborator_bug;
 pub use elaborate::{
     ElabCtx, FieldAt, OrShape, PreludeTys, VariantLayout, elaborate_body, elaborate_toplevel,
-    elaborator_bug,
 };
 pub use eta::FnTable;
 pub use resolve::Denotation;

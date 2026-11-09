@@ -8,7 +8,7 @@
 //! no `&mut` and no `Result`, because everything it would have to ask for is
 //! already a field: a type is an [`RTy`], a name is a [`ValueRef`], a callee is
 //! a [`TypedCallee`]. Upstream is not total, though: a broken invariant reaches
-//! [`scarlet_elaborate::elaborator_bug`], which aborts rather than diagnosing.
+//! the elaborator's `elaborator_bug`, which aborts rather than diagnosing.
 //!
 //! ## Builder discipline
 //!

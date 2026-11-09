@@ -57,12 +57,6 @@ impl ElabCtx for Compiler {
     fn binary_const(&mut self, bytes: Vec<u8>, bit_len: u64) -> crate::core_ir::ConstId {
         self.const_binary(bytes, bit_len)
     }
-    fn resolve_ctor(&mut self, name: &str) -> Option<(Ty, Denotation)> {
-        let scheme = self.env.lookup(name)?;
-        let den = Denotation::from_kind(scheme.kind)?;
-        let ty = self.engine.instantiate(scheme, &self.rigid_ids);
-        Some((ty, den))
-    }
     fn toplevel_fn_ty(&mut self, name: StrId) -> Option<Ty> {
         let name = self.engine.str(name).to_string();
         let scheme = self.env.lookup(&name)?;
@@ -70,31 +64,6 @@ impl ElabCtx for Compiler {
     }
     fn decl_denotation(&self, binder: BinderId) -> Option<Denotation> {
         Compiler::decl_denotation(self, binder)
-    }
-    fn resolve_qualified(
-        &mut self,
-        qual: &str,
-        member: &str,
-        span: Span,
-    ) -> Option<(Ty, Denotation)> {
-        let key = self.imported_qualifiers.get(qual)?.clone();
-        let iface = self.module_table.get(&key)?;
-        let ev = iface.values.get(member)?;
-        let scheme = ev.scheme;
-        let ty = self.engine.instantiate(&scheme, &self.rigid_ids);
-        let local_slot = ev.local_slot;
-        // `@vm` builtins and re-exported constructors carry no `local_slot`;
-        // their `ValueKind` alone denotes them. Everything else must have one.
-        let den = match Denotation::from_kind(scheme.kind) {
-            Some(fixed) => fixed,
-            None => match local_slot {
-                Some(slot) => self.global_denotation(slot),
-                None => {
-                    typed_ir::elaborator_bug("qualified module member has no runtime binding", span)
-                }
-            },
-        };
-        Some((ty, den))
     }
     fn ctor_field(&mut self, receiver: Ty, field: StrId) -> Option<FieldAt> {
         let resolved = self.engine.find(receiver);

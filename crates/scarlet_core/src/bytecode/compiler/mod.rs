@@ -55,7 +55,8 @@ use crate::core_ir::{
 use crate::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
 use crate::tivec::{Idx, TiVec};
 use crate::typed_ir::checked::{
-    BinderId, CArg, CArm, CArrayElem, CBinSeg, CCallee, CExpr, CInterpPart, CKind, CNode, CPattern,
+    BinderId, CArg, CArm, CArrayElem, CBinPatSeg, CBinSeg, CCallee, CExpr, CInterpPart, CKind,
+    CNode, CPat, CPatKind, CRest, CWidth,
 };
 use crate::typed_ir::slots::{SlotError, slot_labeled};
 use crate::typed_ir::{
@@ -76,10 +77,10 @@ use crate::reference::{
 use crate::span::Span;
 use crate::type_def::TypeId;
 use crate::types::{
-    AnnotationContext, ArenaSlice, Constraint, CtorResolver, DefinitionLocation, EntityKind,
-    Hydrator, InferEngine, MatchFunTypeError, NullaryPrim, Pat, PatternBindings, PatternSink,
-    Scheme, StrId, Ty, TypeEnv, TypeInfo, TypeNode, UsefulnessMatrix, ValueKind, mono, new_engine,
-    new_env, pool,
+    AnnotationContext, ArenaSlice, Bound, Constraint, DefinitionLocation, EntityKind, Hydrator,
+    InferEngine, MatchFunTypeError, NullaryPrim, Pat, PatternBindings, PatternSink, Scheme, StrId,
+    Ty, TypeEnv, TypeInfo, TypeNode, UsefulnessMatrix, ValueKind, mono, new_engine, new_env, pool,
+    unroll_depth,
 };
 
 mod bridges;
@@ -607,42 +608,6 @@ struct LoweredBody {
     pool: Rc<ResolvedPool>,
 }
 
-/// How many levels of a recursive type's variant tables exhaustiveness must
-/// see for these patterns: the deepest constructor nesting, with wildcards and
-/// bindings costing nothing. One extra level is added at the call sites so
-/// witness rendering at the boundary still has variants to name.
-fn pattern_unroll_depth(p: &ast::Pattern) -> usize {
-    fn arg_depth(a: &ast::PatternArg) -> usize {
-        match a {
-            ast::PatternArg::Positional(p) | ast::PatternArg::Labeled { pattern: p, .. } => {
-                pattern_unroll_depth(p)
-            }
-        }
-    }
-    match p {
-        ast::Pattern::Constructor { args, .. } => 1 + args.iter().map(arg_depth).max().unwrap_or(0),
-        ast::Pattern::Tuple { elements, .. } => {
-            1 + elements.iter().map(pattern_unroll_depth).max().unwrap_or(0)
-        }
-        ast::Pattern::Array { elements, .. } => {
-            1 + elements
-                .iter()
-                .map(|e| match e {
-                    ast::ArrayPatternElement::Pattern(p) => pattern_unroll_depth(p),
-                    ast::ArrayPatternElement::Spread { .. } => 0,
-                })
-                .max()
-                .unwrap_or(0)
-        }
-        ast::Pattern::Or { first, rest, .. } => rest
-            .iter()
-            .map(pattern_unroll_depth)
-            .fold(pattern_unroll_depth(first), usize::max),
-        ast::Pattern::Literal(_) | ast::Pattern::Range { .. } | ast::Pattern::Binary { .. } => 1,
-        ast::Pattern::Var { .. } => 0,
-    }
-}
-
 /// A module-scope slot was bound outside any binding statement, so no
 /// binding carries it to the elaborator and its global is never stored.
 /// Aborts, in release as well as debug: only a compiler bug binds one there.
@@ -743,6 +708,7 @@ struct ParkedBody {
 /// facts to slot and type the pattern's arguments against. Produced by
 /// `Compiler::lookup_ctor` / `lookup_ctor_qualified`.
 struct CtorLookup {
+    variant: VariantRef,
     type_name: StrId,
     arity: usize,
     field_labels: ArenaSlice<pool::StrSlices>,
@@ -755,10 +721,16 @@ impl CtorLookup {
         match scheme.kind {
             ValueKind::Constructor {
                 type_name,
+                type_id,
+                variant_idx,
                 arity,
                 field_labels,
                 ..
             } => Some(CtorLookup {
+                variant: VariantRef {
+                    type_id,
+                    variant_idx,
+                },
                 type_name,
                 arity: arity as usize,
                 field_labels,
@@ -968,11 +940,15 @@ impl Compiler {
     }
 }
 
-/// The head of a constructor pattern: `NotFound`, or `io::NotFound` reached
-/// through a module qualifier. One thing, so it travels as one argument.
-struct CtorHead<'a> {
+/// A constructor pattern as written: `NotFound(path)`, or `io::NotFound(..)`
+/// reached through a module qualifier.
+struct CtorPattern<'a> {
     qualifier: Option<&'a ast::Identifier>,
     name: &'a ast::Identifier,
+    args: &'a [ast::PatternArg],
+    /// Ends in `..`, so fields it leaves out match anything.
+    rest: bool,
+    span: Span,
 }
 
 /// What the check walk built for an entry: a module block's nodes, or a bare
@@ -2024,10 +2000,13 @@ impl Compiler {
                 let (pattern, init) = match b.name() {
                     Some(ident) => {
                         let (init, binder) = self.compile_name_binding(b, ident);
-                        let pattern = CPattern {
-                            pattern: b.pattern.clone(),
-                            sizes: Vec::new(),
-                            binders: vec![(self.engine.intern(&ident.name), binder)],
+                        let pattern = CPat {
+                            ty: init.ty,
+                            span: ident.span,
+                            kind: CPatKind::Bind {
+                                name: self.engine.intern(&ident.name),
+                                binder,
+                            },
                         };
                         (pattern, init)
                     }
@@ -2152,21 +2131,21 @@ impl Compiler {
     /// `(a, b) = e`, `Point(x:, ..) = e`: typed like a one-arm `match`, and the
     /// one arm has to cover every value, so only a pattern that cannot fail
     /// is a binding.
-    fn compile_destructuring(&mut self, b: &ast::Binding) -> (CPattern, CExpr) {
+    fn compile_destructuring(&mut self, b: &ast::Binding) -> (CPat, CExpr) {
         let init = self.compile_expr(&b.init);
         let init_ty = init.ty;
         let mut pb = PatternBindings::new();
-        let typed_ok = self.type_pattern(&b.pattern, init_ty, &mut pb.sink());
-        let pattern = self.bind_pattern(&b.pattern, &pb);
+        let (pattern, typed_ok) =
+            self.type_pattern(&b.pattern, init_ty, &mut pb.sink(), &mut Vec::new());
         if !typed_ok {
             return (pattern, init);
         }
-        let depth = pattern_unroll_depth(&b.pattern) + 1;
+        let depth = unroll_depth(&pattern) + 1;
         let resolved = self
             .engine
             .resolve_for_patterns(init_ty, Some(&self.env), depth);
         let mut um = UsefulnessMatrix::new(resolved);
-        let pat = um.lower(&b.pattern, self);
+        let pat = um.lower(&pattern);
         if let Some(missing) = um.find_missing(&[pat]) {
             self.error(
                 format!(
@@ -3281,12 +3260,12 @@ impl Compiler {
                 ast::BinSpec::Utf8 => self.ty_string(),
             };
             self.engine.unify_at(expected, value.ty, seg.value.span());
-            let size = self.type_seg_size(seg.spec.size_expr());
-            segs.push(CBinSeg {
-                value,
-                spec: seg.spec.clone(),
-                size,
-            });
+            let width = match &seg.spec {
+                ast::BinSpec::Int { bits } => CWidth::Int(self.type_seg_size(bits.as_ref())),
+                ast::BinSpec::Binary { bytes } => CWidth::Bytes(self.type_seg_size(bytes.as_ref())),
+                ast::BinSpec::Utf8 => CWidth::Utf8,
+            };
+            segs.push(CBinSeg { value, width });
         }
         (self.ty_binary(), CKind::BinaryLiteral(segs))
     }
@@ -4824,10 +4803,9 @@ impl Compiler {
             self.push_block_scope();
 
             b.clear();
-            if !self.type_pattern(&arm.pattern, subject_ty, &mut b.sink()) {
-                any_pattern_err = true;
-            }
-            let pattern = self.bind_pattern(&arm.pattern, &b);
+            let (pattern, ok) =
+                self.type_pattern(&arm.pattern, subject_ty, &mut b.sink(), &mut Vec::new());
+            any_pattern_err |= !ok;
 
             let guard = arm.guard.as_ref().map(|guard| {
                 let g = self.compile_expr(guard);
@@ -4848,16 +4826,10 @@ impl Compiler {
                 body,
             });
         }
-        let kind = CKind::Match {
-            subject: Box::new(subject),
-            arms,
-        };
-
         if !any_pattern_err {
-            let depth = m
-                .arms
+            let depth = arms
                 .iter()
-                .map(|arm| pattern_unroll_depth(&arm.pattern))
+                .map(|arm| unroll_depth(&arm.pattern))
                 .max()
                 .unwrap_or(0)
                 + 1;
@@ -4865,11 +4837,7 @@ impl Compiler {
                 self.engine
                     .resolve_for_patterns(subject_ty, Some(&self.env), depth);
             let mut um = UsefulnessMatrix::new(resolved_subj);
-            let all_pats: Vec<Pat> = m
-                .arms
-                .iter()
-                .map(|arm| um.lower(&arm.pattern, self))
-                .collect();
+            let all_pats: Vec<Pat> = arms.iter().map(|arm| um.lower(&arm.pattern)).collect();
             // Guarded arms don't contribute to exhaustiveness (the guard may be
             // false) and don't make later arms unreachable.
             let unguarded = m
@@ -4911,80 +4879,11 @@ impl Compiler {
             }
         }
 
+        let kind = CKind::Match {
+            subject: Box::new(subject),
+            arms,
+        };
         (result_ty, kind)
-    }
-
-    /// Bind the names of pattern `p`, typed by `type_pattern` into `b`, and
-    /// check its size expressions: the pattern as the elaborator needs it.
-    fn bind_pattern(&mut self, p: &ast::Pattern, b: &PatternBindings) -> CPattern {
-        let names = self.bind_pattern_initials(b);
-        let (sizes, binders) = self.type_pattern_sizes(p, names);
-        CPattern {
-            pattern: p.clone(),
-            sizes,
-            binders,
-        }
-    }
-
-    /// Bind a pattern's freshly-typed names (populated by `type_pattern`):
-    /// reserve a local slot for each and funnel it through
-    /// [`Self::register_local_binding`]. Returns the names, which
-    /// [`Self::type_pattern_sizes`] then brings into scope.
-    fn bind_pattern_initials(&mut self, b: &PatternBindings) -> Vec<StrId> {
-        let mut names = Vec::new();
-        for (name, (ty, sp)) in b.bindings() {
-            self.get_or_create_local(name);
-            self.register_local_binding(name, *ty, *sp);
-            names.push(self.engine.intern(name));
-        }
-        // Write-only (`_`-prefixed) binders go through the same registration
-        // so hover and go-to-definition see them; `compile_identifier` rejects
-        // reads, so no local slot is reserved and the elaborator (which lowers
-        // them to `Wild`) has no slot to claim. Their discarded types are
-        // re-checked once inference is final.
-        for (name, ty, sp) in b.write_only_bindings() {
-            self.register_local_binding(name, *ty, *sp);
-            self.nil_discards.push((name.to_string(), *ty, *sp));
-        }
-        names
-    }
-
-    /// Type-check the runtime size expressions of every `<<..>>` segment in
-    /// `p`, and bring the pattern's `names` into scope as the pattern reaches
-    /// them. A size expression is an operand, not a binder, and may name an
-    /// earlier segment's binding (`<<n:8, body:bytes(n)>>`), but not a later
-    /// one's: that name still means what it meant outside the pattern.
-    ///
-    /// Returns the checked sizes, in the order the pattern visits them, and
-    /// each name's binder.
-    fn type_pattern_sizes(
-        &mut self,
-        p: &ast::Pattern,
-        names: Vec<StrId>,
-    ) -> (Vec<CExpr>, Vec<(StrId, BinderId)>) {
-        let mut order: Vec<ast::PatternBinder<'_>> = Vec::new();
-        p.for_each_binder(ast::OrAlternatives::All, &mut |b| order.push(b));
-        let mut binders: Vec<(StrId, BinderId)> = Vec::with_capacity(names.len());
-        let mut sizes = Vec::new();
-        for b in order {
-            match b {
-                ast::PatternBinder::Name(id) => {
-                    let sid = self.engine.intern(&id.name);
-                    if names.contains(&sid) && binders.iter().all(|(n, _)| *n != sid) {
-                        binders.push((sid, self.publish_local(sid)));
-                    }
-                }
-                ast::PatternBinder::SizeExpr(e) => sizes.extend(self.type_seg_size(Some(e))),
-            }
-        }
-        // `type_pattern` reaches every name the walk above does, so this is
-        // only a guard against the two disagreeing.
-        for sid in names {
-            if binders.iter().all(|(n, _)| *n != sid) {
-                binders.push((sid, self.publish_local(sid)));
-            }
-        }
-        (sizes, binders)
     }
 
     /// Single source of truth turning a numeric literal's source text into a

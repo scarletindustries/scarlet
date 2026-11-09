@@ -1591,17 +1591,13 @@ impl Parser {
 
         while self.kind() != Kind::BinClose && self.kind() != Kind::Eof {
             if self.kind() == Kind::PuncDotdot {
-                let rest_span = self.current_span();
                 self.eat(Kind::PuncDotdot)?;
                 let binding = if matches!(self.kind(), Kind::Identifier(_)) {
                     Some(self.eat_identifier("Expected binding after `..`")?)
                 } else {
                     None
                 };
-                rest = Some(ast::BinaryPatternRest {
-                    binding,
-                    span: self.span_from(rest_span),
-                });
+                rest = Some(ast::BinaryPatternRest { binding });
                 if self.kind() == Kind::PuncComma {
                     return Err(
                         "`..` rest must be the last segment in a `<<>>` pattern".to_string()

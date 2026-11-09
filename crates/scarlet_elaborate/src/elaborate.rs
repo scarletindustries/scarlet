@@ -18,15 +18,13 @@ use smallvec::SmallVec;
 
 use super::binop::{BinopKind, ShortCircuitOp, ValueBinop, specialize_binop};
 use super::checked::{
-    BinderId, CArg, CArm, CArrayElem, CBinSeg, CCallee, CExpr, CInterpPart, CKind, CNode,
-    ClosureFact, NameAt, NameFact,
+    BinderId, CArg, CArm, CArrayElem, CBinSeg, CCallee, CExpr, CInterpPart, CKind, CNode, CPat,
+    CPatKind, ClosureFact, NameAt, NameFact,
 };
-use super::elaborate_pat::{
-    CtorPat, PatCtx, SpecWidth, elaborate_arms, seg_bits, slot_pattern_args,
-};
+use super::elaborate_pat::{PatCtx, SpecWidth, elaborate_arms, seg_bits};
 use super::eta::{FnRTy, FnTable, eta_wrapper};
 use super::resolve::{CallForm, Denotation, EtaTarget, ValueForm};
-use super::rty::{RTy, ResolvedNode, ResolvedPool};
+use super::rty::{Arity, RTy, ResolvedNode, ResolvedPool};
 use super::slots::slot_labeled;
 use super::{
     BindingId, GlobalSlot, TypedArm, TypedArrayElem, TypedBinSeg, TypedBind, TypedCallee,
@@ -81,7 +79,7 @@ pub struct VariantLayout {
 #[allow(clippy::panic)]
 #[cold]
 #[inline(never)]
-pub fn elaborator_bug(why: &'static str, span: Span) -> ! {
+pub(crate) fn elaborator_bug(why: &'static str, span: Span) -> ! {
     panic!(
         "internal compiler error: {why} at {span:?} is well-typed but was not elaborated. \
          Report this as a compiler bug."
@@ -120,22 +118,11 @@ pub trait ElabCtx: PreludeTys {
     /// Pool a `Binary` constant with the given raw bytes and bit length.
     fn binary_const(&mut self, bytes: Vec<u8>, bit_len: u64) -> ConstId;
 
-    /// A constructor named by its bare name in a pattern, as
-    /// `(instantiated scheme, denotation)`.
-    fn resolve_ctor(&mut self, name: &str) -> Option<(Ty, Denotation)>;
     /// The type of the module's own top-level `fn` declaration `name`.
     fn toplevel_fn_ty(&mut self, name: StrId) -> Option<Ty>;
     /// One of this module's own top-level declarations, by its binder, for a
     /// use the module toplevel reaches before the declaration's statement.
     fn decl_denotation(&self, binder: BinderId) -> Option<Denotation>;
-    /// Resolve a `qualifier.member` name. `span` is the member's, for the
-    /// internal-error report.
-    fn resolve_qualified(
-        &mut self,
-        qual: &str,
-        member: &str,
-        span: Span,
-    ) -> Option<(Ty, Denotation)>;
     /// Where `.field` sits in a receiver of `receiver` type.
     fn ctor_field(&mut self, receiver: Ty, field: StrId) -> Option<FieldAt>;
     /// Declared field-label order of the variant `v` constructs.
@@ -259,10 +246,6 @@ pub struct Elab<'a, C: ElabCtx> {
     /// True, in a toplevel, until the first [`Self::block`] call. Gates decl
     /// scheduling.
     at_toplevel: bool,
-    /// Span of the `match` whose arms are being elaborated. The [`PatCtx`] seam
-    /// carries no spans, so this is the only location an internal error raised
-    /// from a pattern query can be attributed to.
-    pat_span: Span,
 }
 
 impl<'a, C: ElabCtx> Elab<'a, C> {
@@ -288,7 +271,6 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             nil,
             toplevel,
             at_toplevel: toplevel,
-            pat_span: Span::DUMMY,
         }
     }
 
@@ -335,24 +317,13 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         self.resolve(t)
     }
 
-    /// Everything a constructor's use site needs, with its field types
-    /// specialised to `at`'s type arguments. When `at` is opaque (an
-    /// undetermined scrutinee) a field type stays `Bound` and is handled
-    /// dynamically.
-    ///
-    /// The bare-name path. Qualified constructors go through [`Self::ctor_of`];
-    /// `mod.C(x)` is not a pattern the parser accepts.
-    fn ctor_at(&mut self, name: &str, at: RTy, span: Span) -> Option<CtorPat> {
-        let (scheme, den) = self.ctx.resolve_ctor(name)?;
-        self.ctor_of(scheme, den, at, span)
-    }
-
-    /// As [`Self::ctor_at`], but from the denotation the callee walk already
+    /// Everything a constructor call needs, with its field types specialised
+    /// to `at`'s type arguments, from the denotation the callee walk
     /// resolved. A qualified constructor has no bare name to re-resolve, and
     /// re-resolving one that does would instantiate its scheme twice.
     ///
     /// `None` means exactly one thing: `den` does not denote a constructor.
-    fn ctor_of(&mut self, scheme: Ty, den: Denotation, at: RTy, span: Span) -> Option<CtorPat> {
+    fn ctor_of(&mut self, scheme: Ty, den: Denotation, at: RTy, span: Span) -> Option<CtorSig> {
         let (variant, arity) = den.as_ctor()?;
         let Some(labels) = self.ctx.ctor_labels(variant) else {
             elaborator_bug("constructor with no declared labels", span)
@@ -373,7 +344,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         // `from_parts` checks the three independently-derived widths against
         // each other and aborts on a disagreement, so callers can zip the slots
         // against `field_tys()` without indexing.
-        Some(CtorPat::from_parts(variant, arity, labels, field_tys, span))
+        Some(CtorSig::from_parts(variant, arity, labels, field_tys, span))
     }
 
     fn new_bind(&mut self, name: StrId, ty: RTy) -> TypedBind {
@@ -446,7 +417,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         match &e.kind {
             CKind::Block(nodes) => self.block(nodes, result, span),
             CKind::If { cond, then, els } => self.if_expr(cond, then, els, result),
-            CKind::Match { subject, arms } => self.match_expr(subject, arms, result, span),
+            CKind::Match { subject, arms } => self.match_expr(subject, arms, result),
             CKind::Or {
                 lhs,
                 receiver,
@@ -710,7 +681,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             .iter()
             .map(|seg| {
                 let value = self.expr(&seg.value);
-                match seg_bits(self, &seg.spec, seg.size.as_ref(), seg.value.span) {
+                match seg_bits(self, &seg.width) {
                     SpecWidth::Int(bits) => TypedBinSeg::Int { value, bits },
                     SpecWidth::Bytes(bits) => TypedBinSeg::Binary { value, bits },
                     SpecWidth::Utf8 => TypedBinSeg::Utf8 { value },
@@ -976,7 +947,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         if !errors.is_empty() {
             elaborator_bug("constructor arguments the check walk mis-slotted", at)
         }
-        let field_tys: SmallVec<[RTy; 4]> = cp.field_tys().into();
+        let field_tys: SmallVec<[RTy; 4]> = SmallVec::from_slice(&cp.field_tys);
         let mut fields: Vec<TypedExpr> = Vec::with_capacity(arity);
         for (i, (slot, fty)) in by_pos.into_iter().zip(field_tys).enumerate() {
             match slot {
@@ -1074,21 +1045,10 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         }
     }
 
-    fn match_expr(
-        &mut self,
-        subject: &CExpr,
-        arms: &[CArm],
-        result_ty: Ty,
-        span: Span,
-    ) -> TypedExpr {
+    fn match_expr(&mut self, subject: &CExpr, arms: &[CArm], result_ty: Ty) -> TypedExpr {
         let ty = self.resolve(result_ty);
-        let scrut_rty = self.resolve(subject.ty);
         let scrut = Box::new(self.expr(subject));
-        // Save and restore rather than assign: an arm body may hold a nested
-        // `match`, and an error raised after it still names this one.
-        let outer = std::mem::replace(&mut self.pat_span, span);
-        let arms = elaborate_arms(self, scrut_rty, arms);
-        self.pat_span = outer;
+        let arms = elaborate_arms(self, arms);
         TypedExpr::Match { ty, scrut, arms }
     }
 
@@ -1199,17 +1159,24 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 pattern,
                 init,
                 globals,
-            } => match &pattern.pattern {
-                ast::Pattern::Var { name } => {
-                    let sid = self.ctx.intern(&name.name);
-                    let binder = binder_of(&pattern.binders, sid, name.span);
+            } => match pattern.kind {
+                CPatKind::Bind { name, binder } => {
                     let init = self.expr(init);
-                    let mut bind = self.new_bind(sid, init.ty());
-                    bind.global = global_of(globals, sid);
+                    let mut bind = self.new_bind(name, init.ty());
+                    bind.global = global_of(globals, name);
                     self.bind_local(binder, bind.id);
                     out.push(Frame::Let(bind, init));
                 }
-                pat => self.destructure(pat, &pattern.binders, init, globals, out),
+                CPatKind::Wild
+                | CPatKind::Number(_)
+                | CPatKind::String(_)
+                | CPatKind::Range { .. }
+                | CPatKind::Ctor { .. }
+                | CPatKind::Tuple(_)
+                | CPatKind::Array { .. }
+                | CPatKind::Binary { .. }
+                | CPatKind::Or(_)
+                | CPatKind::Error => self.destructure(pattern, init, globals, out),
             },
             CNode::Fn { name, binder, span } => {
                 // A `fn` declaration is not an expression, so the walk built no
@@ -1253,8 +1220,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// reads need no check.
     fn destructure(
         &mut self,
-        pat: &ast::Pattern,
-        binders: &[(StrId, BinderId)],
+        pat: &CPat,
         init: &CExpr,
         globals: &[(StrId, GlobalSlot)],
         out: &mut Vec<Frame>,
@@ -1262,7 +1228,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         let value = self.expr(init);
         let scrut = self.new_bind(self.anon, value.ty());
         let mut lets = vec![(scrut, value)];
-        self.irrefutable(pat, scrut.id, binders, globals, &mut lets);
+        self.irrefutable(pat, scrut.id, globals, &mut lets);
         out.extend(lets.into_iter().map(|(b, e)| Frame::Let(b, e)));
     }
 
@@ -1270,20 +1236,15 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// projection. A `Var` sub-pattern is an alias, not a copy.
     fn irrefutable(
         &mut self,
-        pat: &ast::Pattern,
+        pat: &CPat,
         src: BindingId,
-        binders: &[(StrId, BinderId)],
         globals: &[(StrId, GlobalSlot)],
         lets: &mut Vec<(TypedBind, TypedExpr)>,
     ) {
-        let src_ty = self.bind_ty(src);
-        match pat {
-            // Write-only `_`-prefixed names: nothing may read them, so the
-            // projection bind stays anonymous.
-            ast::Pattern::Var { name } if name.name.starts_with('_') => {}
-            ast::Pattern::Var { name } => {
-                let sid = self.ctx.intern(&name.name);
-                self.bind_local(binder_of(binders, sid, name.span), src);
+        let fields = match &pat.kind {
+            CPatKind::Wild => return,
+            CPatKind::Bind { name, binder } => {
+                self.bind_local(*binder, src);
                 // A local needs nothing more: names resolve by `BindingId`, so
                 // the projection bind can stay anonymous and collapsible.
                 //
@@ -1292,61 +1253,42 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 // projection's own bind, one per field, so exactly one bind is
                 // pinned per source name.
                 let Some((b, _)) = lets.iter_mut().find(|(b, _)| b.id == src) else {
-                    elaborator_bug("destructured name with no projection bind", name.span)
+                    elaborator_bug("destructured name with no projection bind", pat.span)
                 };
-                if let Some(slot) = global_of(globals, sid) {
-                    b.name = sid;
+                if let Some(slot) = global_of(globals, *name) {
+                    b.name = *name;
                     b.global = Some(slot);
                 }
+                return;
             }
-            ast::Pattern::Tuple { elements, span } => {
-                for (i, sub) in elements.iter().enumerate() {
-                    let Some(ety) = self.pool.tuple_elem(src_ty, i) else {
-                        elaborator_bug("tuple element of a non-tuple type", *span)
-                    };
-                    let b = self.new_bind(self.anon, ety);
-                    let proj = TypedExpr::TupleIndex {
-                        ty: ety,
-                        recv: Box::new(self.var(src)),
-                        idx: i as u32,
-                    };
-                    lets.push((b, proj));
-                    self.irrefutable(sub, b.id, binders, globals, lets);
-                }
+            CPatKind::Tuple(elems) => elems,
+            CPatKind::Ctor { fields, .. } => fields,
+            // A binding binds irrefutably: the check walk rejects a literal,
+            // range, array, binary or or-pattern in binding position.
+            CPatKind::Number(_)
+            | CPatKind::String(_)
+            | CPatKind::Range { .. }
+            | CPatKind::Array { .. }
+            | CPatKind::Binary { .. }
+            | CPatKind::Or(_)
+            | CPatKind::Error => elaborator_bug("irrefutable pattern", pat.span),
+        };
+        let tuple = matches!(pat.kind, CPatKind::Tuple(_));
+        for (i, sub) in fields.iter().enumerate() {
+            if matches!(sub.kind, CPatKind::Wild) {
+                continue;
             }
-            ast::Pattern::Constructor {
-                qualifier,
-                name,
-                args,
-                ..
-            } => {
-                let resolved = match qualifier {
-                    Some(q) => self
-                        .ctx
-                        .resolve_qualified(&q.name, &name.name, name.span)
-                        .and_then(|(ty, den)| self.ctor_of(ty, den, src_ty, name.span)),
-                    None => self.ctor_at(&name.name, src_ty, name.span),
-                };
-                let Some(cp) = resolved else {
-                    elaborator_bug("unresolved constructor pattern", name.span)
-                };
-                let by_pos = slot_pattern_args(self, &cp.slot_fields(), args, name.span);
-                let field_tys: SmallVec<[RTy; 4]> = cp.field_tys().into();
-                for (i, (sub, fty)) in by_pos.into_iter().zip(field_tys).enumerate() {
-                    let Some(sub) = sub else { continue };
-                    let b = self.new_bind(self.anon, fty);
-                    let proj = TypedExpr::Field {
-                        ty: fty,
-                        recv: Box::new(self.var(src)),
-                        idx: i as u32,
-                    };
-                    lets.push((b, proj));
-                    self.irrefutable(sub, b.id, binders, globals, lets);
-                }
-            }
-            // `let`/`(a, b) =` bind irrefutably: the check walk rejects a
-            // literal, range, binary or or-pattern in binding position.
-            other => elaborator_bug("irrefutable pattern", other.span()),
+            let ty = self.resolve(sub.ty);
+            let b = self.new_bind(self.anon, ty);
+            let recv = Box::new(self.var(src));
+            let idx = i as u32;
+            let proj = if tuple {
+                TypedExpr::TupleIndex { ty, recv, idx }
+            } else {
+                TypedExpr::Field { ty, recv, idx }
+            };
+            lets.push((b, proj));
+            self.irrefutable(sub, b.id, globals, lets);
         }
     }
 }
@@ -1354,10 +1296,6 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
 /// Pattern elaboration's view of the walk. Every type crossing this seam is an
 /// [`RTy`], so a `fresh_var()` cannot reach a `TypedPat`.
 impl<C: ElabCtx> PatCtx for Elab<'_, C> {
-    fn intern(&mut self, name: &str) -> StrId {
-        self.ctx.intern(name)
-    }
-
     fn bind(&mut self, binder: BinderId, name: StrId, ty: RTy) -> TypedBind {
         if let Some(id) = self.local(binder) {
             return TypedBind {
@@ -1392,47 +1330,56 @@ impl<C: ElabCtx> PatCtx for Elab<'_, C> {
         self.int_rty()
     }
 
-    /// Aborts on `None`: wildcarding an unresolved constructor pattern would
-    /// make the arm match everything and drop its bindings.
-    fn resolve_ctor_pat(&mut self, name: &str, scrut: RTy) -> CtorPat {
-        let span = self.pat_span;
-        match self.ctor_at(name, scrut, span) {
-            Some(cp) => cp,
-            None => elaborator_bug("unresolved constructor pattern", span),
-        }
-    }
-
-    fn resolve_ctor_pat_qualified(&mut self, qual: &str, name: &str, scrut: RTy) -> CtorPat {
-        let span = self.pat_span;
-        let resolved = self
-            .ctx
-            .resolve_qualified(qual, name, span)
-            .and_then(|(ty, den)| self.ctor_of(ty, den, scrut, span));
-        match resolved {
-            Some(cp) => cp,
-            None => elaborator_bug("unresolved qualified constructor pattern", span),
-        }
-    }
-
-    /// Aborts on `None`: defaulting to `Nil` would hand Perceus a non-heap type
-    /// for a possibly-heap element and silently lose its `Drop`.
-    fn tuple_elem_ty(&mut self, t: RTy, i: usize) -> RTy {
-        match self.pool.tuple_elem(t, i) {
-            Some(t) => t,
-            None => elaborator_bug("tuple element of a non-tuple type", self.pat_span),
-        }
-    }
-
-    /// As [`Self::tuple_elem_ty`], for an array's element type.
-    fn array_elem_ty(&mut self, t: RTy) -> RTy {
-        match self.pool.con_arg(t, 0) {
-            Some(t) => t,
-            None => elaborator_bug("type argument of a non-generic type", self.pat_span),
-        }
+    fn resolve(&mut self, t: Ty) -> RTy {
+        Elab::resolve(self, t)
     }
 
     fn expr(&mut self, e: &CExpr) -> TypedExpr {
         Elab::expr(self, e)
+    }
+}
+
+/// A constructor's declared fields at one use: the labels in declared order,
+/// and each field's type, instantiated against the use's type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CtorSig {
+    variant: VariantRef,
+    /// The same length as `field_tys`: [`CtorSig::from_parts`] checks it.
+    labels: Vec<StrId>,
+    field_tys: Vec<RTy>,
+}
+
+impl CtorSig {
+    /// A disagreement between the widths the independent sources report is a
+    /// compiler bug and aborts. Guessing a field type would be unsound: `Nil`
+    /// is a prim `Con`, `is_heap` answers false for it, and Perceus then emits
+    /// neither `Dup` nor `Drop` for what may be a heap field.
+    fn from_parts(
+        variant: VariantRef,
+        declared_arity: Arity,
+        labels: Vec<StrId>,
+        field_tys: Vec<RTy>,
+        span: Span,
+    ) -> CtorSig {
+        let arity = declared_arity.0 as usize;
+        if labels.len() != arity || field_tys.len() != arity {
+            elaborator_bug("constructor field-type desync", span)
+        }
+        CtorSig {
+            variant,
+            labels,
+            field_tys,
+        }
+    }
+
+    fn arity(&self) -> usize {
+        self.field_tys.len()
+    }
+
+    /// The declared-fields description [`slot_labeled`] consumes: one labeled
+    /// entry per field.
+    fn slot_fields(&self) -> SmallVec<[Option<StrId>; 4]> {
+        self.labels.iter().map(|&l| Some(l)).collect()
     }
 }
 
@@ -1476,14 +1423,6 @@ enum Frame {
 /// The module-scope slot the check walk gave `name` in this binding.
 fn global_of(globals: &[(StrId, GlobalSlot)], name: StrId) -> Option<GlobalSlot> {
     globals.iter().find(|(n, _)| *n == name).map(|&(_, g)| g)
-}
-
-/// The binder the check walk gave `name` in this pattern.
-pub(crate) fn binder_of(binders: &[(StrId, BinderId)], name: StrId, span: Span) -> BinderId {
-    match binders.iter().find(|(n, _)| *n == name) {
-        Some(&(_, b)) => b,
-        None => elaborator_bug("a pattern name with no binder", span),
-    }
 }
 
 /// Fold `lets` around `tail`: the first pushed `Let` is the outermost, so the

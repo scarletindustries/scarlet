@@ -9,8 +9,8 @@ fn main.g(%0:t0) -> :t1
       ret c0
 
 fn main.f(%0:t2) -> :t1
-  let %1:t0 = TupleField(0)(%0)
-  let %2:t3 = TupleField(1)(%0)
+  let %1:t3 = TupleField(0)(%0)
+  let %2:t4 = TupleField(1)(%0)
   drop %0
   let %3:t1 = call fn#0(%1)
   drop %1
@@ -19,18 +19,18 @@ fn main.f(%0:t2) -> :t1
   ret IntAdd(%3, %4)
 
 fn main.main() -> :t1
-  let %0:t4 = ctor 512.1()
-  let %1:t4 = ctor 512.1()
-  let %2:t5 = MakeTuple(%0, %1)
+  let %0:t5 = ctor 512.1()
+  let %1:t5 = ctor 512.1()
+  let %2:t6 = MakeTuple(%0, %1)
   drop %0 [ctor:0]
   drop %1 [ctor:0]
   ret call fn#1(%2)
 
 toplevel:
-fn main.__main__() -> :t6
-  let %0:t3@g0 = closure fn#0()
-  let %1:t5@g1 = closure fn#1()
-  let %2:t7@g2 = closure fn#2()
+fn main.__main__() -> :t7
+  let %0:t8@g0 = closure fn#0()
+  let %1:t6@g1 = closure fn#1()
+  let %2:t9@g2 = closure fn#2()
   ret nil
 where
   c0 = Int(0)

@@ -1480,3 +1480,20 @@ fn a_segment_size_sees_only_the_names_bound_before_it() {
         "<<2>>\n<<1, 9>>\n2\n",
     );
 }
+
+/// A segment's size is read before the segment's own value, so a size naming
+/// the segment's own name reads the binding that name had outside.
+#[test]
+fn a_segment_size_naming_its_own_value_reads_the_outer_binding() {
+    prints(
+        "pub fn main() {\n\
+         \tx = 8\n\
+         \tr = match <<1, 2>> {\n\
+         \t\t<<x:size(x), ..>> -> x\n\
+         \t\t_ -> 0\n\
+         \t}\n\
+         \tprintln(r)\n\
+         }\n",
+        "1\n",
+    );
+}

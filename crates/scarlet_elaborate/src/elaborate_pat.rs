@@ -1,122 +1,37 @@
-//! Pattern elaboration: `ast::Pattern` → [`TypedPat`], [`CArm`] →
-//! [`TypedArm`].
+//! Pattern elaboration: [`CPat`] → [`TypedPat`], [`CArm`] → [`TypedArm`].
 //!
-//! The resolution half of `core_ir::lower`'s pattern machinery; `lower` keeps
-//! the ANF half. Everything `lower` would otherwise ask the inference engine
-//! is decided here, so it never sees an unsolved type variable:
+//! The check walk resolved every pattern already: constructors to their
+//! variants, with one sub-pattern per declared field, and names to their
+//! binders. What is left is what needs the module's final types, and the
+//! interning `lower` cannot do:
 //!
-//! * A [`TypedPat::Ctor`]'s `fields` is exactly the variant's arity, in
-//!   declared-field order. A slot no source argument filled is a
-//!   [`TypedPat::Wild`] carrying that field's resolved type.
-//! * A [`TypedPat::Array`] carries `elem_ty` projected out of its scrutinee.
-//! * Interning is a mutation, so `lower` cannot do it: every `ConstId` it
-//!   emits — including ones with no source literal, like an array pattern's
-//!   length or a `<<>>` walk's initial bit cursor — is minted here.
+//! * Every node's type is resolved into the pool, so `lower` never sees an
+//!   unsolved type variable.
+//! * Every `ConstId` `lower` emits is minted here, including ones with no
+//!   source literal, like an array pattern's length or a `<<>>` walk's
+//!   initial bit cursor.
 //!
 //! ## Or-patterns bind once
 //!
 //! `Cons(x, _) | Wrap(x)` binds one `x`. The arm's guard and body are one
 //! tree, so which [`BindingId`] a name means must not depend on which
 //! alternative matched. The check walk gave the name one binder across the
-//! alternatives: the first occurrence mints its [`BindingId`] and every
-//! occurrence in a later alternative reuses it. A repeat *within* one
-//! alternative (`Pair(x, x)`) is what that reuse must never absorb; the check
-//! walk rejects it, so elaboration aborts on one.
-
-use std::collections::HashSet;
-
-use smallvec::SmallVec;
+//! alternatives, and [`PatCtx::bind`] gives a binder one binding.
 
 use scarlet_ir::core_ir::ConstId;
 use scarlet_ir::core_ir::PrimOp;
-use scarlet_ir::core_ir::VariantRef;
 use scarlet_syntax::ast;
-use scarlet_syntax::span::Span;
-use scarlet_types::types::StrId;
+use scarlet_types::types::{StrId, Ty};
 
-use super::checked::{BinderId, CArm, CExpr, CPattern};
-use super::elaborate::binder_of;
-use super::rty::{Arity, RTy};
-use super::slots::{Slots, slot_labeled};
+use super::checked::{BinderId, CArm, CBinPatSeg, CExpr, CPat, CPatKind, CRest, CWidth};
+use super::rty::RTy;
 use super::{PatRest, TypedArm, TypedBinPatSeg, TypedBind, TypedExpr, TypedPat, elaborator_bug};
-
-/// Everything a constructor pattern head needs, resolved against the
-/// scrutinee's type.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CtorPat {
-    pub(crate) variant: VariantRef,
-    /// Declared field labels, in declared order. Private, and the same length
-    /// as `field_tys` — see [`CtorPat::new`].
-    labels: Vec<StrId>,
-    /// Field types, instantiated against the scrutinee, index-aligned with
-    /// `labels`.
-    field_tys: Vec<RTy>,
-}
-
-impl CtorPat {
-    /// One `(label, type)` pair per declared field, in declared order.
-    ///
-    /// The only constructor, so a `labels`/`field_tys` desync is unspellable
-    /// rather than merely rejected. Guessing a field type would be unsound:
-    /// `Nil` is a prim `Con`, `is_heap` answers false for it, and Perceus then
-    /// emits neither `Dup` nor `Drop` for what may be a heap field.
-    /// [`Self::from_parts`] checks the widths the independent sources report.
-    fn new(variant: VariantRef, fields: Vec<(StrId, RTy)>) -> CtorPat {
-        let (labels, field_tys) = fields.into_iter().unzip();
-        CtorPat {
-            variant,
-            labels,
-            field_tys,
-        }
-    }
-
-    /// [`Self::new`] from three widths the walk derived independently. A
-    /// disagreement is a compiler bug and aborts — never a wildcard, which
-    /// would silently match everything.
-    pub(crate) fn from_parts(
-        variant: VariantRef,
-        declared_arity: Arity,
-        labels: Vec<StrId>,
-        field_tys: Vec<RTy>,
-        span: Span,
-    ) -> CtorPat {
-        let arity = declared_arity.0 as usize;
-        if labels.len() != arity || field_tys.len() != arity {
-            elaborator_bug("constructor field-type desync", span)
-        }
-        CtorPat::new(variant, labels.into_iter().zip(field_tys).collect())
-    }
-
-    pub(crate) fn arity(&self) -> usize {
-        self.field_tys.len()
-    }
-
-    /// Declared field labels, for hover and diagnostics.
-    #[cfg(test)]
-    fn labels(&self) -> &[StrId] {
-        &self.labels
-    }
-
-    /// The declared-fields description [`slot_labeled`] consumes: one labeled
-    /// entry per field.
-    pub(crate) fn slot_fields(&self) -> SmallVec<[Option<StrId>; 4]> {
-        self.labels.iter().map(|&l| Some(l)).collect()
-    }
-
-    /// Field types in declared order. Exactly [`Self::arity`] long, so it zips
-    /// against `slot_labeled`'s slots.
-    pub(crate) fn field_tys(&self) -> &[RTy] {
-        &self.field_tys
-    }
-}
 
 /// The services pattern elaboration needs from the enclosing elaborator.
 ///
 /// Deliberately not an `InferEngine`: every type crossing this seam is an
 /// [`RTy`], so a `fresh_var()` cannot reach a `TypedPat`.
 pub trait PatCtx {
-    fn intern(&mut self, name: &str) -> StrId;
-
     /// The bind for `binder`: a fresh [`BindingId`] the first time, and the
     /// same one again for a later or-alternative's occurrence of it.
     fn bind(&mut self, binder: BinderId, name: StrId, ty: RTy) -> TypedBind;
@@ -128,30 +43,19 @@ pub trait PatCtx {
 
     fn ty_int(&mut self) -> RTy;
 
-    /// Resolve a constructor pattern head. Total: a diagnostics-clean module
-    /// cannot name a constructor that does not resolve, so an implementation
-    /// aborts rather than answering with a wildcard — that would match
-    /// unconditionally and leave the body's names bound to nothing.
-    fn resolve_ctor_pat(&mut self, name: &str, scrut: RTy) -> CtorPat;
-    /// `io.NotFound(path)`, resolved through the module qualifier. Total for
-    /// the same reason as the bare form.
-    fn resolve_ctor_pat_qualified(&mut self, qual: &str, name: &str, scrut: RTy) -> CtorPat;
-
-    /// `i`th element type of the tuple type `t`.
-    fn tuple_elem_ty(&mut self, t: RTy, i: usize) -> RTy;
-    /// Element type of the array type `t`.
-    fn array_elem_ty(&mut self, t: RTy) -> RTy;
+    /// A type the check walk inferred, now final, in the pool.
+    fn resolve(&mut self, t: Ty) -> RTy;
 
     /// Elaborate a checked expression: a `<<v:size(n)>>` width, a guard, an
     /// arm body.
     fn expr(&mut self, e: &CExpr) -> TypedExpr;
 }
 
-/// Elaborate the arms of a `match` whose scrutinee has type `scrut`.
-pub(crate) fn elaborate_arms<C: PatCtx>(cx: &mut C, scrut: RTy, arms: &[CArm]) -> Vec<TypedArm> {
+/// Elaborate the arms of a `match`.
+pub(crate) fn elaborate_arms<C: PatCtx>(cx: &mut C, arms: &[CArm]) -> Vec<TypedArm> {
     arms.iter()
         .map(|arm| {
-            let pat = elaborate_pattern(cx, &arm.pattern, scrut);
+            let pat = elaborate_pattern(cx, &arm.pattern);
             let guard = arm.guard.as_ref().map(|g| cx.expr(g));
             let body = cx.expr(&arm.body);
             TypedArm { pat, guard, body }
@@ -159,49 +63,101 @@ pub(crate) fn elaborate_arms<C: PatCtx>(cx: &mut C, scrut: RTy, arms: &[CArm]) -
         .collect()
 }
 
-/// Elaborate one pattern against a scrutinee of type `scrut`.
-///
-/// The pattern's size expressions are elaborated in the order the pattern
-/// visits them, which is the order the check walk kept them in.
-fn elaborate_pattern<C: PatCtx>(cx: &mut C, p: &CPattern, scrut: RTy) -> TypedPat {
-    let mut el = PatElab {
-        cx,
-        sizes: p.sizes.iter(),
-        binders: &p.binders,
-        seen: HashSet::new(),
-    };
-    let pat = el.pat(&p.pattern, scrut);
-    if el.sizes.next().is_some() {
-        elaborator_bug(
-            "pattern size the pattern has no segment for",
-            p.pattern.span(),
-        )
+/// Elaborate one pattern. A segment's size is elaborated where the segment
+/// is, which is where the check walk checked it.
+fn elaborate_pattern<C: PatCtx>(cx: &mut C, p: &CPat) -> TypedPat {
+    let ty = cx.resolve(p.ty);
+    match &p.kind {
+        CPatKind::Wild => TypedPat::Wild { ty },
+        CPatKind::Bind { name, binder } => TypedPat::Bind(cx.bind(*binder, *name, ty)),
+        CPatKind::Number(n) => TypedPat::Lit {
+            ty,
+            value: cx.number_const(n),
+        },
+        CPatKind::String(s) => TypedPat::Lit {
+            ty,
+            value: cx.string_const(s),
+        },
+        CPatKind::Range { start, end } => {
+            let lo = cx.number_const(start);
+            let hi = cx.number_const(end);
+            TypedPat::Range { ty, lo, hi }
+        }
+        CPatKind::Ctor { variant, fields } => TypedPat::Ctor {
+            ty,
+            variant: *variant,
+            fields: fields.iter().map(|f| elaborate_pattern(cx, f)).collect(),
+        },
+        CPatKind::Tuple(elems) => TypedPat::Tuple {
+            ty,
+            elems: elems.iter().map(|e| elaborate_pattern(cx, e)).collect(),
+        },
+        CPatKind::Array { elem, prefix, rest } => {
+            let elem_ty = cx.resolve(*elem);
+            let prefix: Vec<TypedPat> = prefix.iter().map(|e| elaborate_pattern(cx, e)).collect();
+            // The `..rest` binding takes the scrutinee's own array type: it is
+            // a suffix of the same array, not an element.
+            let rest = rest_of(cx, rest, ty);
+            // `lower` compares `ArrayLen(scrut)` against this and has no pool
+            // of its own, so the constant is minted here.
+            let len = cx.int_const(prefix.len() as i64);
+            TypedPat::Array {
+                ty,
+                elem_ty,
+                len,
+                prefix,
+                rest,
+            }
+        }
+        CPatKind::Binary { segs, rest } => {
+            let segs = segs.iter().map(|s| bin_seg(cx, s)).collect();
+            let rest = rest_of(cx, rest, ty);
+            // The bit cursor `lower` walks the segments with starts here.
+            let zero = cx.int_const(0);
+            TypedPat::Bin {
+                ty,
+                zero,
+                segs,
+                rest,
+            }
+        }
+        CPatKind::Or(alts) => TypedPat::Or {
+            ty,
+            alts: alts.iter().map(|a| elaborate_pattern(cx, a)).collect(),
+        },
+        CPatKind::Error => elaborator_bug("a pattern the check walk rejected", p.span),
     }
-    pat
 }
 
-/// Slot a constructor's pattern args into declared-field order, so a slot
-/// index is a field index rather than a source-arg index.
-///
-/// The check walk already slotted these args the same way and reported any
-/// error, so an error here means the two walks disagree. It aborts: dropping
-/// the mis-slotted sub-pattern would leave its binds unminted and the arm
-/// matching too much.
-pub(crate) fn slot_pattern_args<'p, C: PatCtx>(
-    cx: &mut C,
-    fields: &[Option<StrId>],
-    args: &'p [ast::PatternArg],
-    span: Span,
-) -> Slots<&'p ast::Pattern> {
-    let supplied = args.iter().map(|a| match a {
-        ast::PatternArg::Positional(p) => (None, p),
-        ast::PatternArg::Labeled { label, pattern, .. } => (Some(cx.intern(&label.name)), pattern),
-    });
-    let (by_pos, errors) = slot_labeled(fields, supplied);
-    if !errors.is_empty() {
-        elaborator_bug("constructor pattern arg desync", span)
+fn rest_of<C: PatCtx>(cx: &mut C, rest: &CRest, ty: RTy) -> PatRest {
+    match rest {
+        CRest::None => PatRest::None,
+        CRest::Discard => PatRest::Discard,
+        CRest::Bind { name, binder } => PatRest::Bind(cx.bind(*binder, *name, ty)),
     }
-    by_pos
+}
+
+fn bin_seg<C: PatCtx>(cx: &mut C, seg: &CBinPatSeg) -> TypedBinPatSeg {
+    match seg {
+        // `<<'lit'>>`: match the literal's UTF-8 bytes as a prefix. Its width
+        // is known now.
+        CBinPatSeg::Literal(s) => {
+            let width = (s.len() as i64) * 8;
+            let bytes = cx.binary_const(s.as_bytes().to_vec(), width as u64);
+            let bits = cx.int_const(width);
+            TypedBinPatSeg::Utf8Literal { bytes, bits }
+        }
+        CBinPatSeg::Value { width, value } => {
+            let width = seg_bits(cx, width);
+            let value = elaborate_pattern(cx, value);
+            match width {
+                // `BinReadUtf8` yields the codepoint as an `Int`.
+                SpecWidth::Utf8 => TypedBinPatSeg::Utf8 { value },
+                SpecWidth::Bytes(bits) => TypedBinPatSeg::Binary { bits, value },
+                SpecWidth::Int(bits) => TypedBinPatSeg::Int { bits, value },
+            }
+        }
+    }
 }
 
 /// Every [`TypedBind`] `p` introduces, in left-to-right order, each listed
@@ -263,242 +219,6 @@ fn collect_rest(rest: &PatRest, out: &mut Vec<TypedBind>) {
     }
 }
 
-struct PatElab<'c, C: PatCtx> {
-    cx: &'c mut C,
-    /// The pattern's checked size expressions not yet claimed by a segment.
-    sizes: std::slice::Iter<'c, CExpr>,
-    /// The binder of each name the pattern binds.
-    binders: &'c [(StrId, BinderId)],
-    /// Names bound in the *current* or-alternative. A binder alone cannot tell
-    /// a legitimate cross-alternative re-bind from `Pair(x, x)`.
-    seen: HashSet<StrId>,
-}
-
-impl<C: PatCtx> PatElab<'_, C> {
-    /// Bind `name`, or return the [`TypedBind`] an earlier or-alternative
-    /// minted for it. A repeat within the current alternative is a compiler
-    /// bug (the check walk rejects it) and aborts rather than aliasing two
-    /// positions to one binder.
-    fn bind(&mut self, name: &str, ty: RTy, span: Span) -> TypedBind {
-        let sid = self.cx.intern(name);
-        if !self.seen.insert(sid) {
-            elaborator_bug("duplicate binding in pattern alternative", span)
-        }
-        let binder = binder_of(self.binders, sid, span);
-        self.cx.bind(binder, sid, ty)
-    }
-
-    /// A `..name` rest binder. The parser leaves a `.._` rest as a binding
-    /// named `_`; `_`-prefixed names are write-only and may repeat, so they
-    /// must not reach [`Self::bind`]'s duplicate abort.
-    fn rest_bind(&mut self, id: &ast::Identifier, ty: RTy) -> PatRest {
-        if id.name.starts_with('_') {
-            PatRest::Discard
-        } else {
-            PatRest::Bind(self.bind(&id.name, ty, id.span))
-        }
-    }
-
-    fn pat(&mut self, p: &ast::Pattern, scrut: RTy) -> TypedPat {
-        match p {
-            // `_`-prefixed binders are write-only (the checker rejects reads)
-            // and may repeat, so they lower to `Wild` rather than sharing the
-            // one-bind-per-name map.
-            ast::Pattern::Var { name } if name.name.starts_with('_') => {
-                TypedPat::Wild { ty: scrut }
-            }
-            ast::Pattern::Var { name } => TypedPat::Bind(self.bind(&name.name, scrut, name.span)),
-            ast::Pattern::Literal(ast::PatternLiteral::Number(n)) => {
-                let value = self.cx.number_const(n);
-                TypedPat::Lit { ty: scrut, value }
-            }
-            ast::Pattern::Literal(ast::PatternLiteral::String(s)) => TypedPat::Lit {
-                ty: scrut,
-                value: self.cx.string_const(&s.value),
-            },
-            ast::Pattern::Constructor {
-                qualifier,
-                name,
-                args,
-                span,
-                ..
-            } => self.ctor(qualifier.as_ref(), &name.name, args, scrut, *span),
-            ast::Pattern::Tuple { elements, .. } => {
-                let elems = elements
-                    .iter()
-                    .enumerate()
-                    .map(|(i, e)| {
-                        let ty = self.cx.tuple_elem_ty(scrut, i);
-                        self.pat(e, ty)
-                    })
-                    .collect();
-                TypedPat::Tuple { ty: scrut, elems }
-            }
-            ast::Pattern::Array { elements, span } => self.array(elements, scrut, *span),
-            ast::Pattern::Binary { segments, rest, .. } => self.bin(segments, rest.as_ref(), scrut),
-            ast::Pattern::Or { first, rest, .. } => {
-                // A binder is shared across alternatives (the bind-once rule),
-                // but `seen` restarts from the enclosing names per
-                // alternative, so only a repeat within one alternative trips
-                // `bind`. What the alternatives bound folds back in after:
-                // `(A(x) | B(x), x)` repeats `x` in its one alternative.
-                let outer = std::mem::take(&mut self.seen);
-                let mut after = outer.clone();
-                let alts = std::iter::once(&**first)
-                    .chain(rest.iter())
-                    .map(|a| {
-                        self.seen = outer.clone();
-                        let alt = self.pat(a, scrut);
-                        after.extend(self.seen.iter().copied());
-                        alt
-                    })
-                    .collect();
-                self.seen = after;
-                TypedPat::Or { ty: scrut, alts }
-            }
-            ast::Pattern::Range { start, end, .. } => {
-                let lo = self.cx.number_const(start);
-                let hi = self.cx.number_const(end);
-                TypedPat::Range { ty: scrut, lo, hi }
-            }
-        }
-    }
-
-    /// Args are slotted into declared-field order by the same `slot_labeled`
-    /// the typechecker and exhaustiveness checker use. Every slot is filled —
-    /// an unreached one becomes a `Wild` carrying that field's type — which is
-    /// what gives `fields.len() == arity`.
-    fn ctor(
-        &mut self,
-        qualifier: Option<&ast::Identifier>,
-        name: &str,
-        args: &[ast::PatternArg],
-        scrut: RTy,
-        span: Span,
-    ) -> TypedPat {
-        let info = match qualifier {
-            Some(q) => self.cx.resolve_ctor_pat_qualified(&q.name, name, scrut),
-            None => self.cx.resolve_ctor_pat(name, scrut),
-        };
-        let by_pos = slot_pattern_args(&mut *self.cx, &info.slot_fields(), args, span);
-
-        let field_tys: SmallVec<[RTy; 4]> = info.field_tys().into();
-        let mut fields = Vec::with_capacity(info.arity());
-        for (slot, fty) in by_pos.into_iter().zip(field_tys) {
-            fields.push(match slot {
-                Some(sub) => self.pat(sub, fty),
-                None => TypedPat::Wild { ty: fty },
-            });
-        }
-        TypedPat::Ctor {
-            ty: scrut,
-            variant: info.variant,
-            fields,
-        }
-    }
-
-    /// The parser only accepts `..rest` as the final element. Anything after
-    /// one is a desync and aborts: dropping it would match a shorter prefix
-    /// than the source wrote.
-    fn array(&mut self, elements: &[ast::ArrayPatternElement], scrut: RTy, span: Span) -> TypedPat {
-        let elem_ty = self.cx.array_elem_ty(scrut);
-        let pre = elements
-            .iter()
-            .position(|e| matches!(e, ast::ArrayPatternElement::Spread { .. }))
-            .unwrap_or(elements.len());
-        let (prefix_elems, rest_elems) = elements.split_at(pre);
-        let mut prefix = Vec::with_capacity(prefix_elems.len());
-        for e in prefix_elems {
-            let ast::ArrayPatternElement::Pattern(ep) = e else {
-                elaborator_bug("array spread not last", span)
-            };
-            prefix.push(self.pat(ep, elem_ty));
-        }
-        // The `..rest` binding takes the scrutinee's own array type: it is a
-        // suffix of the same array, not an element.
-        let rest = match rest_elems {
-            [] => PatRest::None,
-            [ast::ArrayPatternElement::Spread { binding: None, .. }] => PatRest::Discard,
-            [
-                ast::ArrayPatternElement::Spread {
-                    binding: Some(id), ..
-                },
-            ] => self.rest_bind(id, scrut),
-            _ => elaborator_bug("array spread not last", span),
-        };
-        // `lower` compares `ArrayLen(scrut)` against this and has no pool of
-        // its own, so the constant is minted here.
-        let len = self.cx.int_const(prefix.len() as i64);
-        TypedPat::Array {
-            ty: scrut,
-            elem_ty,
-            len,
-            prefix,
-            rest,
-        }
-    }
-
-    fn bin(
-        &mut self,
-        segments: &[ast::BinSegmentPat],
-        rest: Option<&ast::BinaryPatternRest>,
-        scrut: RTy,
-    ) -> TypedPat {
-        let segs = segments.iter().map(|s| self.bin_seg(s, scrut)).collect();
-        let rest = match rest {
-            None => PatRest::None,
-            Some(r) => match &r.binding {
-                None => PatRest::Discard,
-                Some(id) => self.rest_bind(id, scrut),
-            },
-        };
-        // The bit cursor `lower` walks the segments with starts here.
-        let zero = self.cx.int_const(0);
-        TypedPat::Bin {
-            ty: scrut,
-            zero,
-            segs,
-            rest,
-        }
-    }
-
-    fn bin_seg(&mut self, seg: &ast::BinSegmentPat, scrut: RTy) -> TypedBinPatSeg {
-        // `<<'lit'>>`: match the literal's UTF-8 bytes as a prefix. Its width
-        // is known now.
-        if let Some(s) = seg.utf8_literal() {
-            let width = (s.len() as i64) * 8;
-            let bytes = self.cx.binary_const(s.as_bytes().to_vec(), width as u64);
-            let bits = self.cx.int_const(width);
-            return TypedBinPatSeg::Utf8Literal { bytes, bits };
-        }
-        let size = match seg.spec.size_expr() {
-            Some(_) => match self.sizes.next() {
-                Some(e) => Some(e),
-                None => elaborator_bug("pattern size the check walk did not type", seg.span),
-            },
-            None => None,
-        };
-        match seg_bits(&mut *self.cx, &seg.spec, size, seg.span) {
-            SpecWidth::Utf8 => {
-                // `BinReadUtf8` yields the codepoint as an `Int`.
-                let int_t = self.cx.ty_int();
-                TypedBinPatSeg::Utf8 {
-                    value: self.pat(&seg.value, int_t),
-                }
-            }
-            SpecWidth::Bytes(bits) => {
-                let value = self.pat(&seg.value, scrut);
-                TypedBinPatSeg::Binary { bits, value }
-            }
-            SpecWidth::Int(bits) => {
-                let int_t = self.cx.ty_int();
-                let value = self.pat(&seg.value, int_t);
-                TypedBinPatSeg::Int { bits, value }
-            }
-        }
-    }
-}
-
 /// The width a `<<..>>` segment's spec prescribes. Carrying the kind means an
 /// `Int` segment's width cannot be missing, so consumers need no "Int segment
 /// with no width" guard.
@@ -517,27 +237,19 @@ pub enum SpecWidth {
 /// elaboration so the two cannot drift. `lower` reads each width as a plain
 /// `Int` expression and never re-derives the default or the unit.
 ///
-/// `size` is the checked form of `spec`'s size expression, and is present
-/// exactly when `spec` has one.
-///
 /// The `:bytes` scale multiplies with `Op::MulInt`: both operands are `Int`
 /// by construction (the width expression is checked `Int`, the scale is a
 /// synthesised `Int` constant), so the typed op applies even though the
 /// checker never saw the node.
-pub(crate) fn seg_bits<C: PatCtx>(
-    cx: &mut C,
-    spec: &ast::BinSpec,
-    size: Option<&CExpr>,
-    at: Span,
-) -> SpecWidth {
-    match (spec, size) {
-        (ast::BinSpec::Int { bits: Some(_) }, Some(e)) => SpecWidth::Int(cx.expr(e)),
-        (ast::BinSpec::Int { bits: None }, None) => {
+pub(crate) fn seg_bits<C: PatCtx>(cx: &mut C, width: &CWidth) -> SpecWidth {
+    match width {
+        CWidth::Int(Some(e)) => SpecWidth::Int(cx.expr(e)),
+        CWidth::Int(None) => {
             let ty = cx.ty_int();
             let value = cx.int_const(8);
             SpecWidth::Int(TypedExpr::Const { ty, value })
         }
-        (ast::BinSpec::Binary { bytes: Some(_) }, Some(e)) => {
+        CWidth::Bytes(Some(e)) => {
             let ty = cx.ty_int();
             let v = cx.expr(e);
             let eight = cx.int_const(8);
@@ -548,9 +260,8 @@ pub(crate) fn seg_bits<C: PatCtx>(
                 rhs: Box::new(TypedExpr::Const { ty, value: eight }),
             }))
         }
-        (ast::BinSpec::Binary { bytes: None }, None) => SpecWidth::Bytes(None),
-        (ast::BinSpec::Utf8, None) => SpecWidth::Utf8,
-        _ => elaborator_bug("segment size and its checked expression disagree", at),
+        CWidth::Bytes(None) => SpecWidth::Bytes(None),
+        CWidth::Utf8 => SpecWidth::Utf8,
     }
 }
 
@@ -560,7 +271,7 @@ mod tests {
     use crate::BindingId;
     use crate::checked::CKind;
     use crate::rty::ResolvedPool;
-    use scarlet_ir::core_ir::Const;
+    use scarlet_ir::core_ir::{Const, VariantRef};
     use scarlet_syntax::span::Span;
     use scarlet_types::type_def::TypeId;
     use scarlet_types::types::PrimIds;
@@ -573,16 +284,15 @@ mod tests {
     const BINARY: TypeId = TypeId(5);
     const USER: TypeId = TypeId(9);
 
-    /// A `PatCtx` over a bare pool: constructors come from a table and
-    /// expressions elaborate to a marker `Nil`.
+    /// A `PatCtx` over a bare pool. A test's checked types are stand-ins,
+    /// each naming one pool type; expressions elaborate to a marker `Nil`.
     struct Ctx {
         pool: ResolvedPool,
-        names: Vec<String>,
+        tys: Vec<RTy>,
         consts: Vec<Const>,
         binds: Vec<TypedBind>,
         bound: HashMap<BinderId, TypedBind>,
         next_binder: u32,
-        ctors: HashMap<String, (u16, Vec<&'static str>, Vec<RTy>)>,
         int: RTy,
         binary: RTy,
     }
@@ -599,15 +309,20 @@ mod tests {
             let binary = pool.mk_con(BINARY, &[]);
             Ctx {
                 pool,
-                names: Vec::new(),
+                tys: Vec::new(),
                 consts: Vec::new(),
                 binds: Vec::new(),
                 bound: HashMap::new(),
                 next_binder: 0,
-                ctors: HashMap::new(),
                 int,
                 binary,
             }
+        }
+
+        /// The checked type that resolves to `r`.
+        fn ty(&mut self, r: RTy) -> Ty {
+            self.tys.push(r);
+            Ty((self.tys.len() - 1) as u32)
         }
 
         fn arr(&mut self, elem: RTy) -> RTy {
@@ -618,50 +333,32 @@ mod tests {
             self.pool.mk_con(USER, &[])
         }
 
-        /// `p` as the check walk would hand it over: one fresh binder per name
-        /// it binds, or-alternatives sharing one.
-        fn checked(&mut self, p: &ast::Pattern, sizes: Vec<CExpr>) -> CPattern {
-            let mut names = Vec::new();
-            p.for_each_binder(ast::OrAlternatives::All, &mut |b| {
-                if let ast::PatternBinder::Name(id) = b
-                    && !id.name.starts_with('_')
-                {
-                    names.push(id.name.clone());
-                }
-            });
-            let mut binders: Vec<(StrId, BinderId)> = Vec::new();
-            for n in names {
-                let sid = self.intern(&n);
-                if binders.iter().all(|(s, _)| *s != sid) {
-                    binders.push((sid, BinderId(self.next_binder)));
-                    self.next_binder += 1;
-                }
-            }
-            CPattern {
-                pattern: p.clone(),
-                sizes,
-                binders,
+        fn pat(&mut self, ty: RTy, kind: CPatKind) -> CPat {
+            CPat {
+                ty: self.ty(ty),
+                span: Span::DUMMY,
+                kind,
             }
         }
 
-        /// Declare `name` as variant `idx`.
-        fn ctor(&mut self, name: &str, idx: u16, labels: &[&'static str], tys: &[RTy]) {
-            self.ctors
-                .insert(name.to_string(), (idx, labels.to_vec(), tys.to_vec()));
+        fn binder(&mut self) -> BinderId {
+            self.next_binder += 1;
+            BinderId(self.next_binder - 1)
+        }
+
+        fn var(&mut self, name: u32, ty: RTy) -> CPat {
+            let binder = self.binder();
+            self.pat(
+                ty,
+                CPatKind::Bind {
+                    name: StrId(name),
+                    binder,
+                },
+            )
         }
     }
 
     impl PatCtx for Ctx {
-        fn intern(&mut self, name: &str) -> StrId {
-            match self.names.iter().position(|n| n == name) {
-                Some(i) => StrId(i as u32),
-                None => {
-                    self.names.push(name.to_string());
-                    StrId((self.names.len() - 1) as u32)
-                }
-            }
-        }
-
         fn bind(&mut self, binder: BinderId, name: StrId, ty: RTy) -> TypedBind {
             if let Some(b) = self.bound.get(&binder) {
                 return *b;
@@ -701,36 +398,8 @@ mod tests {
             self.int
         }
 
-        /// The stub has no module table, so a qualifier resolves like a bare
-        /// name.
-        fn resolve_ctor_pat_qualified(&mut self, _q: &str, name: &str, scrut: RTy) -> CtorPat {
-            self.resolve_ctor_pat(name, scrut)
-        }
-
-        fn resolve_ctor_pat(&mut self, name: &str, _scrut: RTy) -> CtorPat {
-            let Some((idx, labels, tys)) = self.ctors.get(name).cloned() else {
-                elaborator_bug("unresolved constructor pattern", Span::DUMMY)
-            };
-            let arity = Arity::of(&labels);
-            let labels = labels.iter().map(|l| self.intern(l)).collect();
-            CtorPat::from_parts(
-                VariantRef {
-                    type_id: USER,
-                    variant_idx: idx,
-                },
-                arity,
-                labels,
-                tys,
-                Span::DUMMY,
-            )
-        }
-
-        fn tuple_elem_ty(&mut self, t: RTy, i: usize) -> RTy {
-            self.pool.tuple_elem(t, i).unwrap_or(self.int)
-        }
-
-        fn array_elem_ty(&mut self, t: RTy) -> RTy {
-            self.pool.con_arg(t, 0).unwrap_or(self.int)
+        fn resolve(&mut self, t: Ty) -> RTy {
+            self.tys[t.0 as usize]
         }
 
         fn expr(&mut self, _e: &CExpr) -> TypedExpr {
@@ -738,34 +407,14 @@ mod tests {
         }
     }
 
-    fn pat_of(cx: &mut Ctx, p: &ast::Pattern, scrut: RTy) -> TypedPat {
-        let p = cx.checked(p, Vec::new());
-        elaborate_pattern(cx, &p, scrut)
-    }
-
     /// A checked number literal. The test context elaborates every expression
     /// to `Nil`, so its type is never read.
     fn checked_num(v: i64) -> CExpr {
         CExpr {
-            ty: scarlet_types::types::Ty(0),
+            ty: Ty(0),
             span: Span::DUMMY,
             kind: CKind::Number(num(v)),
         }
-    }
-
-    fn ident(name: &str) -> ast::Identifier {
-        ast::Identifier {
-            name: name.to_string(),
-            span: Span::DUMMY,
-        }
-    }
-
-    fn var(name: &str) -> ast::Pattern {
-        ast::Pattern::Var { name: ident(name) }
-    }
-
-    fn wild() -> ast::Pattern {
-        ast::Pattern::Var { name: ident("_") }
     }
 
     fn num(v: i64) -> ast::NumberLiteral {
@@ -775,223 +424,11 @@ mod tests {
         }
     }
 
-    fn ctor_pat(name: &str, args: Vec<ast::PatternArg>, rest: bool) -> ast::Pattern {
-        ast::Pattern::Constructor {
-            qualifier: None,
-            name: ident(name),
-            args,
-            rest,
-            span: Span::DUMMY,
-        }
-    }
-
-    fn pos(p: ast::Pattern) -> ast::PatternArg {
-        ast::PatternArg::Positional(p)
-    }
-
-    fn lab(l: &str, p: ast::Pattern) -> ast::PatternArg {
-        ast::PatternArg::Labeled {
-            label: ident(l),
-            pattern: p,
-            punned: false,
-        }
-    }
-
-    #[test]
-    fn a_labelled_subset_fills_every_slot_in_declared_order() {
-        let mut cx = Ctx::new();
-        let int = cx.int;
-        let user = cx.user();
-        let arr = cx.arr(int);
-        cx.ctor("W", 3, &["a", "b", "c"], &[int, user, arr]);
-
-        let p = pat_of(
-            &mut cx,
-            &ctor_pat("W", vec![lab("c", var("z"))], false),
-            user,
-        );
-        let TypedPat::Ctor {
-            variant, fields, ..
-        } = p
-        else {
-            panic!("expected Ctor")
-        };
-        assert_eq!(variant.variant_idx, 3);
-        assert_eq!(fields.len(), 3);
-        assert_eq!(fields[0], TypedPat::Wild { ty: int });
-        assert_eq!(fields[1], TypedPat::Wild { ty: user });
-        match &fields[2] {
-            TypedPat::Bind(b) => assert_eq!(b.ty, arr),
-            other => panic!("expected Bind, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_rest_pattern_wilds_the_unfilled_slots_with_their_field_types() {
-        let mut cx = Ctx::new();
-        let int = cx.int;
-        let user = cx.user();
-        cx.ctor("Cons", 0, &["head", "tail"], &[int, user]);
-
-        let p = pat_of(&mut cx, &ctor_pat("Cons", vec![pos(var("h"))], true), user);
-        let TypedPat::Ctor { fields, .. } = p else {
-            panic!("expected Ctor")
-        };
-        assert_eq!(fields.len(), 2);
-        // The unfilled `tail` slot still carries the heap type Perceus needs.
-        assert_eq!(fields[1], TypedPat::Wild { ty: user });
-        assert!(cx.pool.is_heap(fields[1].ty()));
-    }
-
-    #[test]
-    fn positional_args_of_arity_zero_ctors_produce_no_fields() {
-        let mut cx = Ctx::new();
-        let user = cx.user();
-        cx.ctor("Nil", 1, &[], &[]);
-        let p = pat_of(&mut cx, &ctor_pat("Nil", vec![], false), user);
-        assert_eq!(
-            p,
-            TypedPat::Ctor {
-                ty: user,
-                variant: VariantRef {
-                    type_id: USER,
-                    variant_idx: 1,
-                },
-                fields: vec![],
-            }
-        );
-    }
-
-    /// A pattern naming no constructor is a compiler bug, not a catch-all arm:
-    /// wildcarding it would match everything and leave the arm body's names
-    /// bound to nothing.
-    #[test]
-    #[should_panic(expected = "unresolved constructor pattern")]
-    fn an_unresolved_constructor_aborts_rather_than_wildcarding() {
-        let mut cx = Ctx::new();
-        let user = cx.user();
-        let _ = pat_of(&mut cx, &ctor_pat("Nope", vec![], false), user);
-    }
-
-    /// A `field_tys`/`labels` desync must abort. Guessing `Nil` loses
-    /// Perceus's `Drop` for a heap field; guessing the scrutinee's type
-    /// invents a `Dup`/`Drop` against an immediate.
-    #[test]
-    #[should_panic(expected = "constructor field-type desync")]
-    fn a_field_type_desync_is_reported_not_guessed() {
-        let mut cx = Ctx::new();
-        let int = cx.int;
-        let user = cx.user();
-        // Two labels, one field type: the desync `CtorPat::from_parts` catches.
-        cx.ctor("Bad", 0, &["a", "b"], &[int]);
-
-        let _ = pat_of(
-            &mut cx,
-            &ctor_pat("Bad", vec![pos(var("x")), pos(var("y"))], false),
-            user,
-        );
-    }
-
-    /// An arg `slot_labeled` cannot place must abort, not be dropped:
-    /// dropping it leaves its binds unminted and the arm matching more than
-    /// the source wrote.
-    #[test]
-    #[should_panic(expected = "constructor pattern arg desync")]
-    fn a_mis_slotted_pattern_arg_aborts_rather_than_dropping_it() {
-        let mut cx = Ctx::new();
-        let int = cx.int;
-        let user = cx.user();
-        cx.ctor("W", 0, &["a"], &[int]);
-        let _ = pat_of(
-            &mut cx,
-            &ctor_pat("W", vec![lab("nope", var("x"))], false),
-            user,
-        );
-    }
-
-    /// So is an arg past the declared arity.
-    #[test]
-    #[should_panic(expected = "constructor pattern arg desync")]
-    fn an_extra_positional_pattern_arg_aborts() {
-        let mut cx = Ctx::new();
-        let int = cx.int;
-        let user = cx.user();
-        cx.ctor("W", 0, &["a"], &[int]);
-        let _ = pat_of(
-            &mut cx,
-            &ctor_pat("W", vec![pos(var("x")), pos(var("y"))], false),
-            user,
-        );
-    }
-
-    /// An element after `..rest` must abort, not be dropped: dropping it
-    /// matches a shorter prefix than the source wrote.
-    #[test]
-    #[should_panic(expected = "array spread not last")]
-    fn an_element_after_the_spread_aborts_rather_than_vanishing() {
-        let mut cx = Ctx::new();
-        let int = cx.int;
-        let arr = cx.arr(int);
-        let p = ast::Pattern::Array {
-            elements: vec![
-                ast::ArrayPatternElement::Pattern(var("x")),
-                ast::ArrayPatternElement::Spread {
-                    binding: Some(ident("rest")),
-                    span: Span::DUMMY,
-                },
-                ast::ArrayPatternElement::Pattern(var("y")),
-            ],
-            span: Span::DUMMY,
-        };
-        let _ = pat_of(&mut cx, &p, arr);
-    }
-
-    /// `arity`, `labels` and `field_tys` all agree, or `from_parts` aborts.
-    #[test]
-    fn ctor_pat_pairs_one_field_type_with_each_label() {
-        let mut cx = Ctx::new();
-        let int = cx.int;
-        let v = VariantRef {
+    fn variant(idx: u16) -> VariantRef {
+        VariantRef {
             type_id: USER,
-            variant_idx: 0,
-        };
-        let a = cx.intern("a");
-        let b = cx.intern("b");
-        let ok = CtorPat::from_parts(v, Arity(2), vec![a, b], vec![int, int], Span::DUMMY);
-        assert_eq!(ok.arity(), 2);
-        assert_eq!(ok.field_tys().len(), ok.labels().len());
-        assert_eq!(ok.labels(), [a, b]);
-
-        let direct = CtorPat::new(v, vec![(a, int), (b, int)]);
-        assert_eq!(direct, ok);
-    }
-
-    #[test]
-    #[should_panic(expected = "constructor field-type desync")]
-    fn ctor_pat_from_parts_aborts_on_a_short_field_type_list() {
-        let mut cx = Ctx::new();
-        let int = cx.int;
-        let v = VariantRef {
-            type_id: USER,
-            variant_idx: 0,
-        };
-        let a = cx.intern("a");
-        let b = cx.intern("b");
-        let _ = CtorPat::from_parts(v, Arity(2), vec![a, b], vec![int], Span::DUMMY);
-    }
-
-    #[test]
-    #[should_panic(expected = "constructor field-type desync")]
-    fn ctor_pat_from_parts_aborts_when_arity_disagrees() {
-        let mut cx = Ctx::new();
-        let int = cx.int;
-        let v = VariantRef {
-            type_id: USER,
-            variant_idx: 0,
-        };
-        let a = cx.intern("a");
-        let b = cx.intern("b");
-        let _ = CtorPat::from_parts(v, Arity(1), vec![a, b], vec![int, int], Span::DUMMY);
+            variant_idx: idx,
+        }
     }
 
     #[test]
@@ -1001,24 +438,27 @@ mod tests {
         let user = cx.user();
         let arr = cx.arr(user);
 
-        let ap = ast::Pattern::Array {
-            elements: vec![
-                ast::ArrayPatternElement::Pattern(var("x")),
-                ast::ArrayPatternElement::Spread {
-                    binding: Some(ident("rest")),
-                    span: Span::DUMMY,
+        let x = cx.var(0, user);
+        let binder = cx.binder();
+        let elem = cx.ty(user);
+        let ap = cx.pat(
+            arr,
+            CPatKind::Array {
+                elem,
+                prefix: vec![x],
+                rest: CRest::Bind {
+                    name: StrId(1),
+                    binder,
                 },
-            ],
-            span: Span::DUMMY,
-        };
-        let p = pat_of(&mut cx, &ap, arr);
+            },
+        );
         let TypedPat::Array {
             ty,
             elem_ty,
             len,
             prefix,
             rest,
-        } = p
+        } = elaborate_pattern(&mut cx, &ap)
         else {
             panic!("expected Array")
         };
@@ -1036,64 +476,26 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_spread_discards_and_no_spread_is_exact() {
-        let mut cx = Ctx::new();
-        let int = cx.int;
-        let arr = cx.arr(int);
-        let discard = ast::Pattern::Array {
-            elements: vec![ast::ArrayPatternElement::Spread {
-                binding: None,
-                span: Span::DUMMY,
-            }],
-            span: Span::DUMMY,
-        };
-        let exact = ast::Pattern::Array {
-            elements: vec![ast::ArrayPatternElement::Pattern(wild())],
-            span: Span::DUMMY,
-        };
-        match pat_of(&mut cx, &discard, arr) {
-            TypedPat::Array { rest, prefix, .. } => {
-                assert_eq!(rest, PatRest::Discard);
-                assert!(prefix.is_empty());
-            }
-            other => panic!("{other:?}"),
-        }
-        match pat_of(&mut cx, &exact, arr) {
-            TypedPat::Array { rest, prefix, .. } => {
-                assert_eq!(rest, PatRest::None);
-                assert_eq!(prefix.len(), 1);
-            }
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
     fn literals_and_ranges_pool_const_ids() {
         let mut cx = Ctx::new();
         let int = cx.int;
-        let lit = pat_of(
-            &mut cx,
-            &ast::Pattern::Literal(ast::PatternLiteral::Number(num(7))),
-            int,
-        );
+        let lit = cx.pat(int, CPatKind::Number(num(7)));
         assert_eq!(
-            lit,
+            elaborate_pattern(&mut cx, &lit),
             TypedPat::Lit {
                 ty: int,
                 value: ConstId(0)
             }
         );
-        let rng = pat_of(
-            &mut cx,
-            &ast::Pattern::Range {
+        let rng = cx.pat(
+            int,
+            CPatKind::Range {
                 start: num(1),
                 end: num(9),
-                span: Span::DUMMY,
             },
-            int,
         );
         assert_eq!(
-            rng,
+            elaborate_pattern(&mut cx, &rng),
             TypedPat::Range {
                 ty: int,
                 lo: ConstId(1),
@@ -1108,17 +510,38 @@ mod tests {
         let mut cx = Ctx::new();
         let int = cx.int;
         let user = cx.user();
-        cx.ctor("Cons", 0, &["head", "tail"], &[int, user]);
-        cx.ctor("Wrap", 1, &["v"], &[int]);
 
-        let or = ast::Pattern::Or {
-            first: Box::new(ctor_pat("Cons", vec![pos(var("x")), pos(wild())], false)),
-            rest: vec![ctor_pat("Wrap", vec![pos(var("x"))], false)],
-            span: Span::DUMMY,
+        // `Cons(x, _) | Wrap(x)`: one binder for both `x`s.
+        let x1 = cx.var(0, int);
+        let shared = match x1.kind {
+            CPatKind::Bind { binder, .. } => binder,
+            _ => unreachable!(),
         };
-        let p = pat_of(&mut cx, &or, user);
+        let x2 = cx.pat(
+            int,
+            CPatKind::Bind {
+                name: StrId(0),
+                binder: shared,
+            },
+        );
+        let tail = cx.pat(user, CPatKind::Wild);
+        let cons = cx.pat(
+            user,
+            CPatKind::Ctor {
+                variant: variant(0),
+                fields: vec![x1, tail],
+            },
+        );
+        let wrap = cx.pat(
+            user,
+            CPatKind::Ctor {
+                variant: variant(1),
+                fields: vec![x2],
+            },
+        );
+        let or = cx.pat(user, CPatKind::Or(vec![cons, wrap]));
+        let p = elaborate_pattern(&mut cx, &or);
         let binds = pat_binds(&p);
-        // One `x`, however many alternatives mention it.
         assert_eq!(binds.len(), 1);
         assert_eq!(binds[0].id, BindingId(0));
         assert_eq!(cx.binds.len(), 1);
@@ -1139,127 +562,25 @@ mod tests {
         assert_eq!(ids, vec![BindingId(0), BindingId(0)]);
     }
 
-    /// The check walk rejects `(x, x)`, so seeing one here is a compiler bug.
-    /// Aliasing both positions to one binder would make `(x, x)` match any
-    /// pair and bind `x` to an arbitrary side.
-    #[test]
-    #[should_panic(expected = "duplicate binding in pattern alternative")]
-    fn a_repeated_name_within_one_alternative_aborts() {
-        let mut cx = Ctx::new();
-        let int = cx.int;
-        let tup = cx.pool.mk_tuple(&[int, int]);
-        let p = ast::Pattern::Tuple {
-            elements: vec![var("x"), var("x")],
-            span: Span::DUMMY,
-        };
-        let _ = pat_of(&mut cx, &p, tup);
-    }
-
-    /// Only the cross-alternative re-bind is sanctioned reuse; binding a name
-    /// twice inside one alternative is still a repeat.
-    #[test]
-    #[should_panic(expected = "duplicate binding in pattern alternative")]
-    fn a_repeat_inside_a_later_alternative_aborts() {
-        let mut cx = Ctx::new();
-        let int = cx.int;
-        let user = cx.user();
-        cx.ctor("Wrap", 0, &["v"], &[int]);
-        cx.ctor("Pair", 1, &["a", "b"], &[int, int]);
-        let or = ast::Pattern::Or {
-            first: Box::new(ctor_pat("Wrap", vec![pos(var("x"))], false)),
-            rest: vec![ctor_pat("Pair", vec![pos(var("x")), pos(var("x"))], false)],
-            span: Span::DUMMY,
-        };
-        let _ = pat_of(&mut cx, &or, user);
-    }
-
-    /// `(A(x) | B(x), x)` repeats `x` within the one alternative the whole
-    /// tuple is.
-    #[test]
-    #[should_panic(expected = "duplicate binding in pattern alternative")]
-    fn a_name_bound_in_an_or_is_a_repeat_after_it() {
-        let mut cx = Ctx::new();
-        let int = cx.int;
-        let user = cx.user();
-        cx.ctor("A", 0, &["v"], &[int]);
-        cx.ctor("B", 1, &["v"], &[int]);
-        let tup_ty = cx.pool.mk_tuple(&[user, int]);
-        let or = ast::Pattern::Or {
-            first: Box::new(ctor_pat("A", vec![pos(var("x"))], false)),
-            rest: vec![ctor_pat("B", vec![pos(var("x"))], false)],
-            span: Span::DUMMY,
-        };
-        let p = ast::Pattern::Tuple {
-            elements: vec![or, var("x")],
-            span: Span::DUMMY,
-        };
-        let _ = pat_of(&mut cx, &p, tup_ty);
-    }
-
-    /// The check walk exempts `_` from the once-per-alternative rule, and the
-    /// parser leaves a `.._` rest as a binding named `_`. Two of them in one
-    /// alternative must elaborate as discards, not trip the duplicate abort.
-    #[test]
-    fn underscore_rests_are_discards_and_never_duplicates() {
-        let mut cx = Ctx::new();
-        let int = cx.int;
-        let arr = cx.arr(int);
-        let binary = cx.binary;
-        let tup_ty = cx.pool.mk_tuple(&[arr, arr, binary]);
-        let arr_rest = |bind: &str| ast::Pattern::Array {
-            elements: vec![ast::ArrayPatternElement::Spread {
-                binding: Some(ident(bind)),
-                span: Span::DUMMY,
-            }],
-            span: Span::DUMMY,
-        };
-        let bin_rest = ast::Pattern::Binary {
-            segments: vec![],
-            rest: Some(ast::BinaryPatternRest {
-                binding: Some(ident("_")),
-                span: Span::DUMMY,
-            }),
-            span: Span::DUMMY,
-        };
-        let p = ast::Pattern::Tuple {
-            elements: vec![arr_rest("_"), arr_rest("_"), bin_rest],
-            span: Span::DUMMY,
-        };
-        let p = pat_of(&mut cx, &p, tup_ty);
-        assert_eq!(cx.binds.len(), 0);
-        let TypedPat::Tuple { elems, .. } = &p else {
-            panic!("expected Tuple")
-        };
-        assert!(matches!(
-            &elems[0],
-            TypedPat::Array {
-                rest: PatRest::Discard,
-                ..
-            }
-        ));
-        assert!(matches!(
-            &elems[2],
-            TypedPat::Bin {
-                rest: PatRest::Discard,
-                ..
-            }
-        ));
-    }
-
     #[test]
     fn each_arm_binds_its_own_names() {
         let mut cx = Ctx::new();
         let int = cx.int;
-        let mut arm = |guard: Option<CExpr>, body: CExpr| CArm {
-            pattern: cx.checked(&var("a"), Vec::new()),
-            guard,
-            body,
-        };
+        let a1 = cx.var(0, int);
+        let a2 = cx.var(0, int);
         let arms = vec![
-            arm(None, checked_num(1)),
-            arm(Some(checked_num(2)), checked_num(3)),
+            CArm {
+                pattern: a1,
+                guard: None,
+                body: checked_num(1),
+            },
+            CArm {
+                pattern: a2,
+                guard: Some(checked_num(2)),
+                body: checked_num(3),
+            },
         ];
-        let out = elaborate_arms(&mut cx, int, &arms);
+        let out = elaborate_arms(&mut cx, &arms);
         assert_eq!(out.len(), 2);
         assert!(out[0].guard.is_none());
         assert!(out[1].guard.is_some());
@@ -1269,56 +590,46 @@ mod tests {
         assert_eq!(cx.binds[1].id, BindingId(1));
     }
 
-    fn seg(value: ast::Pattern, spec: ast::BinSpec) -> ast::BinSegmentPat {
-        ast::BinSegmentPat {
-            value,
-            spec,
-            span: Span::DUMMY,
-        }
-    }
-
     #[test]
     fn binary_segments_fold_width_and_unit_at_elaboration_time() {
         let mut cx = Ctx::new();
         let int = cx.int;
         let bin_t = cx.binary;
 
-        let p = ast::Pattern::Binary {
-            segments: vec![
-                // `<<'hi'>>` — literal prefix, width known now.
-                seg(
-                    ast::Pattern::Literal(ast::PatternLiteral::String(ast::StringLiteral {
-                        value: "hi".to_string(),
-                        span: Span::DUMMY,
-                    })),
-                    ast::BinSpec::Utf8,
-                ),
-                // `n:8` — the Int default.
-                seg(var("n"), ast::BinSpec::Int { bits: None }),
-                // `m:bytes(2)` — the bytes-to-bits multiplier is folded in.
-                seg(
-                    var("m"),
-                    ast::BinSpec::Binary {
-                        bytes: Some(ast::Expression::NumberLiteral(num(2))),
-                    },
-                ),
-                // `b:binary` — sizeless, consumes the remainder.
-                seg(var("b"), ast::BinSpec::Binary { bytes: None }),
-            ],
-            rest: Some(ast::BinaryPatternRest {
-                binding: Some(ident("tail")),
-                span: Span::DUMMY,
-            }),
-            span: Span::DUMMY,
+        let n = cx.var(0, int);
+        let m = cx.var(1, bin_t);
+        let b = cx.var(2, bin_t);
+        let tail = cx.binder();
+        let seg = |width, value| CBinPatSeg::Value {
+            width,
+            value: Box::new(value),
         };
-        let p = cx.checked(&p, vec![checked_num(2)]);
+        let p = cx.pat(
+            bin_t,
+            CPatKind::Binary {
+                segs: vec![
+                    // `<<'hi'>>` — literal prefix, width known now.
+                    CBinPatSeg::Literal("hi".to_string()),
+                    // `n:8` — the Int default.
+                    seg(CWidth::Int(None), n),
+                    // `m:bytes(2)` — the bytes-to-bits multiplier is folded in.
+                    seg(CWidth::Bytes(Some(checked_num(2))), m),
+                    // `b:binary` — sizeless, consumes the remainder.
+                    seg(CWidth::Bytes(None), b),
+                ],
+                rest: CRest::Bind {
+                    name: StrId(3),
+                    binder: tail,
+                },
+            },
+        );
 
         let TypedPat::Bin {
             ty,
             zero,
             segs,
             rest,
-        } = elaborate_pattern(&mut cx, &p, bin_t)
+        } = elaborate_pattern(&mut cx, &p)
         else {
             panic!("expected Bin")
         };
@@ -1376,36 +687,15 @@ mod tests {
     }
 
     #[test]
-    fn a_utf8_codepoint_segment_matches_an_int() {
-        let mut cx = Ctx::new();
-        let int = cx.int;
-        let bin_t = cx.binary;
-        let p = ast::Pattern::Binary {
-            segments: vec![seg(var("c"), ast::BinSpec::Utf8)],
-            rest: None,
-            span: Span::DUMMY,
-        };
-        let TypedPat::Bin { segs, rest, .. } = pat_of(&mut cx, &p, bin_t) else {
-            panic!("expected Bin")
-        };
-        assert_eq!(rest, PatRest::None);
-        match &segs[0] {
-            TypedBinPatSeg::Utf8 { value } => assert_eq!(value.ty(), int),
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
     fn nested_tuple_fields_take_their_element_types() {
         let mut cx = Ctx::new();
         let int = cx.int;
         let user = cx.user();
         let tup = cx.pool.mk_tuple(&[int, user]);
-        let p = ast::Pattern::Tuple {
-            elements: vec![var("a"), var("b")],
-            span: Span::DUMMY,
-        };
-        let TypedPat::Tuple { elems, .. } = pat_of(&mut cx, &p, tup) else {
+        let a = cx.var(0, int);
+        let b = cx.var(1, user);
+        let p = cx.pat(tup, CPatKind::Tuple(vec![a, b]));
+        let TypedPat::Tuple { elems, .. } = elaborate_pattern(&mut cx, &p) else {
             panic!("expected Tuple")
         };
         assert_eq!(elems[0].ty(), int);

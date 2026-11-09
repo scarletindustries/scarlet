@@ -42,15 +42,28 @@ impl OrFrame {
     }
 }
 
+/// What recording one name a pattern binds came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bound {
+    /// A new binding, the `index`th of the pattern.
+    Fresh(usize),
+    /// A later or-alternative binding the `index`th name again.
+    Again(usize),
+    /// A `_`-prefixed name: typed, but never readable.
+    WriteOnly,
+    /// A diagnostic has been reported.
+    Rejected,
+}
+
 /// Accumulator for the variable bindings a pattern introduces. The compiler
-/// runs `type_pattern` against [`sink`](Self::sink), then reads
-/// [`bindings`](Self::bindings) to allocate locals before compiling the arm
-/// body. Nesting is handled by the [`OrFrame`] stack, not by a save/restore
-/// token the caller carries.
+/// records each name through [`sink`](Self::sink) as `type_pattern` reaches
+/// it, and [`Bound`] tells it whether to make a new local. Nesting is handled
+/// by the [`OrFrame`] stack, not by a save/restore token the caller carries.
 pub struct PatternBindings {
     frames: Vec<OrFrame>,
-    initial: IndexMap<String, (Ty, Span)>,
-    write_only: Vec<(String, Ty, Span)>,
+    /// Each readable name the pattern binds, with its type, in the order the
+    /// pattern binds them. A name's index here is what [`Bound`] reports.
+    initial: IndexMap<String, Ty>,
 }
 
 impl PatternBindings {
@@ -58,7 +71,6 @@ impl PatternBindings {
         Self {
             frames: Vec::new(),
             initial: IndexMap::new(),
-            write_only: Vec::new(),
         }
     }
 
@@ -66,20 +78,6 @@ impl PatternBindings {
     pub fn clear(&mut self) {
         self.frames.clear();
         self.initial.clear();
-        self.write_only.clear();
-    }
-
-    /// The canonical bindings this pattern introduces, in insertion order.
-    pub fn bindings(&self) -> impl Iterator<Item = (&str, &(Ty, Span))> {
-        self.initial.iter().map(|(k, v)| (k.as_str(), v))
-    }
-
-    /// `_`-prefixed bindings, in source order. They are typed like any other
-    /// binding (so hover works) but are never readable, so they sit outside
-    /// the canonical set: duplicates are legal and or-pattern alternatives
-    /// need not agree on them.
-    pub fn write_only_bindings(&self) -> impl Iterator<Item = (&str, &Ty, &Span)> {
-        self.write_only.iter().map(|(k, t, s)| (k.as_str(), t, s))
     }
 
     /// Has `name` already been bound on the current path through the pattern?
@@ -104,20 +102,18 @@ impl PatternBindings {
         PatternSink(self)
     }
 
-    /// Record a binding. Returns `false` (and pushes a diagnostic onto
-    /// `engine`) on duplicate-var, extra-var-in-alternative, or a type
-    /// mismatch between alternatives.
-    fn bind(&mut self, name: &str, ty: Ty, span: Span, engine: &mut InferEngine) -> bool {
+    /// Record a binding. Pushes a diagnostic onto `engine` on duplicate-var,
+    /// extra-var-in-alternative, or a type mismatch between alternatives.
+    fn bind(&mut self, name: &str, ty: Ty, span: Span, engine: &mut InferEngine) -> Bound {
         if name.starts_with('_') {
-            self.write_only.push((name.to_string(), ty, span));
-            return true;
+            return Bound::WriteOnly;
         }
         if self.already_bound(name) {
             engine.error_at_span(
                 format!("Variable '{name}' is bound more than once in this pattern"),
                 span,
             );
-            return false;
+            return Bound::Rejected;
         }
         // A binding is fresh only while every enclosing or-pattern is on its
         // first alternative. Once one is `Checking`, the name must be in that
@@ -129,11 +125,11 @@ impl PatternBindings {
         });
         match innermost_checking {
             None => {
-                self.initial.insert(name.to_string(), (ty, span));
+                let (index, _) = self.initial.insert_full(name.to_string(), ty);
                 if let Some(top) = self.frames.last_mut() {
                     top.seen_mut().insert(name.to_string());
                 }
-                true
+                Bound::Fresh(index)
             }
             Some(canonical) => {
                 if !canonical.contains(name) {
@@ -143,12 +139,19 @@ impl PatternBindings {
                         ),
                         span,
                     );
-                    return false;
+                    return Bound::Rejected;
                 }
-                let init_ty = self.initial[name].0;
+                let Some(index) = self.initial.get_index_of(name) else {
+                    return Bound::Rejected;
+                };
+                let init_ty = self.initial[index];
                 let last = self.frames.len() - 1;
                 self.frames[last].seen_mut().insert(name.to_string());
-                engine.unify_at(init_ty, ty, span)
+                if engine.unify_at(init_ty, ty, span) {
+                    Bound::Again(index)
+                } else {
+                    Bound::Rejected
+                }
             }
         }
     }
@@ -173,11 +176,10 @@ impl PatternBindings {
 pub struct PatternSink<'a>(&'a mut PatternBindings);
 
 impl PatternSink<'_> {
-    /// Record a binding. Returns `false` (and pushes a diagnostic onto
-    /// `engine`) on duplicate-var, extra-var-in-alternative, or a type
-    /// mismatch between alternatives.
-    #[must_use = "a false result means the pattern is ill-typed and must be propagated"]
-    pub fn bind(&mut self, name: &str, ty: Ty, span: Span, engine: &mut InferEngine) -> bool {
+    /// Record a binding. Pushes a diagnostic onto `engine` on duplicate-var,
+    /// extra-var-in-alternative, or a type mismatch between alternatives.
+    #[must_use = "a rejected binding means the pattern is ill-typed and must be propagated"]
+    pub fn bind(&mut self, name: &str, ty: Ty, span: Span, engine: &mut InferEngine) -> Bound {
         self.0.bind(name, ty, span, engine)
     }
 
@@ -336,16 +338,15 @@ mod tests {
         let (mut e, int_ty, sp, mut b) = setup();
         assert!(b.initial.is_empty());
 
-        assert!(b.sink().bind("_", int_ty, sp, &mut e));
-        assert!(b.sink().bind("_", int_ty, sp, &mut e));
-        assert!(b.sink().bind("_x", int_ty, sp, &mut e));
+        assert_ne!(b.sink().bind("_", int_ty, sp, &mut e), Bound::Rejected);
+        assert_ne!(b.sink().bind("_", int_ty, sp, &mut e), Bound::Rejected);
+        assert_ne!(b.sink().bind("_x", int_ty, sp, &mut e), Bound::Rejected);
         assert!(
             b.initial.is_empty(),
             "'_'-prefixed names must not join the canonical set"
         );
-        assert_eq!(b.write_only.len(), 3);
 
-        assert!(b.sink().bind("x", int_ty, sp, &mut e));
+        assert_ne!(b.sink().bind("x", int_ty, sp, &mut e), Bound::Rejected);
         assert_eq!(b.initial.len(), 1);
         assert!(e.diagnostics.is_empty(), "no diagnostics expected");
     }
@@ -357,12 +358,12 @@ mod tests {
         {
             let mut s = b.sink();
             let mut or = s.enter_or();
-            assert!(or.sink().bind("x", int_ty, sp, &mut e));
+            assert_ne!(or.sink().bind("x", int_ty, sp, &mut e), Bound::Rejected);
         }
         assert!(b.frames.is_empty(), "drop must pop the or frame");
         // `x` is still visible for duplicate detection.
-        assert!(!b.sink().bind("x", int_ty, sp, &mut e));
-        assert!(b.sink().bind("y", int_ty, sp, &mut e));
+        assert_eq!(b.sink().bind("x", int_ty, sp, &mut e), Bound::Rejected);
+        assert_ne!(b.sink().bind("y", int_ty, sp, &mut e), Bound::Rejected);
     }
 
     // An alternative may re-bind the canonical name at a unifiable type, but
@@ -372,12 +373,12 @@ mod tests {
         let (mut e, int_ty, sp, mut b) = setup();
         let mut s = b.sink();
         let mut or = s.enter_or();
-        assert!(or.sink().bind("x", int_ty, sp, &mut e));
+        assert_ne!(or.sink().bind("x", int_ty, sp, &mut e), Bound::Rejected);
 
         let mut alt = or.enter_alternative();
-        assert!(alt.sink().bind("x", int_ty, sp, &mut e));
+        assert_ne!(alt.sink().bind("x", int_ty, sp, &mut e), Bound::Rejected);
         // Re-binding `x` in the *same* alternative is a duplicate.
-        assert!(!alt.sink().bind("x", int_ty, sp, &mut e));
+        assert_eq!(alt.sink().bind("x", int_ty, sp, &mut e), Bound::Rejected);
         let (or, complete) = alt.finish(sp, &mut e);
         assert!(complete);
         or.finish();
@@ -397,10 +398,10 @@ mod tests {
         let str_ty = e.icon_string();
         let mut s = b.sink();
         let mut or = s.enter_or();
-        assert!(or.sink().bind("x", int_ty, sp, &mut e)); // canonical x : Int
+        assert_ne!(or.sink().bind("x", int_ty, sp, &mut e), Bound::Rejected); // canonical x : Int
 
         let mut alt = or.enter_alternative();
-        assert!(!alt.sink().bind("x", str_ty, sp, &mut e));
+        assert_eq!(alt.sink().bind("x", str_ty, sp, &mut e), Bound::Rejected);
         let (or, complete) = alt.finish(sp, &mut e);
         assert!(complete, "`x` was bound (at the wrong type), so complete");
         or.finish();
@@ -419,13 +420,13 @@ mod tests {
         // Outer: A(a) | B( C(a) | D(a) )
         let mut s = b.sink();
         let mut outer = s.enter_or();
-        assert!(outer.sink().bind("a", int_ty, sp, &mut e)); // A(a)
+        assert_ne!(outer.sink().bind("a", int_ty, sp, &mut e), Bound::Rejected); // A(a)
         let mut oalt = outer.enter_alternative();
         let mut osink = oalt.sink();
         let mut inner = osink.enter_or();
-        assert!(inner.sink().bind("a", int_ty, sp, &mut e)); // C(a) — must NOT be a duplicate
+        assert_ne!(inner.sink().bind("a", int_ty, sp, &mut e), Bound::Rejected); // C(a) — must NOT be a duplicate
         let mut ialt = inner.enter_alternative();
-        assert!(ialt.sink().bind("a", int_ty, sp, &mut e)); // D(a)
+        assert_ne!(ialt.sink().bind("a", int_ty, sp, &mut e), Bound::Rejected); // D(a)
         let (inner, i_complete) = ialt.finish(sp, &mut e);
         assert!(i_complete);
         inner.finish();
@@ -449,12 +450,12 @@ mod tests {
         // Outer: A(a) | B(a, C(a) | D(a)) — B's first arg and the inner or both bind `a`.
         let mut s = b.sink();
         let mut outer = s.enter_or();
-        assert!(outer.sink().bind("a", int_ty, sp, &mut e));
+        assert_ne!(outer.sink().bind("a", int_ty, sp, &mut e), Bound::Rejected);
         let mut oalt = outer.enter_alternative();
-        assert!(oalt.sink().bind("a", int_ty, sp, &mut e)); // B's first arg
+        assert_ne!(oalt.sink().bind("a", int_ty, sp, &mut e), Bound::Rejected); // B's first arg
         let mut osink = oalt.sink();
         let mut inner = osink.enter_or();
-        assert!(!inner.sink().bind("a", int_ty, sp, &mut e)); // C(a) — dup of B's first arg
+        assert_eq!(inner.sink().bind("a", int_ty, sp, &mut e), Bound::Rejected); // C(a) — dup of B's first arg
         inner.finish();
         let (outer, o_complete) = oalt.finish(sp, &mut e);
         assert!(o_complete);

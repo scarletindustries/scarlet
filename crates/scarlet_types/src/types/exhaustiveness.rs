@@ -1,7 +1,7 @@
-use crate::slots::slot_labeled;
 use crate::type_def::Type;
 use indexmap::IndexSet;
 use scarlet_syntax::ast;
+use scarlet_syntax::span::Span;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::cell::OnceCell;
@@ -58,30 +58,77 @@ impl CtorIdSet {
     }
 }
 
-/// Resolves a constructor pattern's head to the variant it names.
-///
-/// The exhaustiveness checker sees only the source pattern, whose head is
-/// whatever name is in scope at the use site; an aliased import (`{Circle as
-/// Round}`) makes that differ from the variant's declared name. Only the
-/// compiler's scope knows the two are the same constructor, so it answers
-/// here, in the one currency both layers agree on: the variant's index in its
-/// type's declaration order.
-pub trait CtorResolver {
-    /// Index of the variant `qualifier`-qualified `name` denotes, in the
-    /// declaration order of the type that owns it. `None` when the head does
-    /// not resolve to a constructor, which only happens for patterns the
-    /// typechecker has already rejected.
-    fn variant_index(&self, qualifier: Option<&str>, name: &str) -> Option<usize>;
+/// What the checker knows about one checked pattern node, as much as
+/// exhaustiveness needs. The checker has already resolved every constructor,
+/// so a variant comes by its index in its type's declaration order.
+pub enum PatShape<'p, P> {
+    /// Matches anything: a name, `_`, a field the source left out.
+    Wild,
+    /// A variant of the type at this position. `fields` has one pattern per
+    /// declared field, in declared order.
+    Variant {
+        index: usize,
+        fields: &'p [P],
+    },
+    Tuple(&'p [P]),
+    /// `[a, b]`, or `[a, b, ..rest]` when `open`.
+    Array {
+        prefix: &'p [P],
+        open: bool,
+    },
+    Number(&'p ast::NumberLiteral),
+    String(&'p str),
+    Range(&'p ast::NumberLiteral, &'p ast::NumberLiteral),
+    /// `<<..>>` with at least one segment. A bare `<<..rest>>` is `Wild`.
+    Binary {
+        segs: Vec<BinSegShape<'p>>,
+        open: bool,
+    },
+    Or(&'p [P]),
 }
 
-/// Resolves nothing: every head falls back to matching on its written name.
-/// For callers with no scope to consult, which therefore cannot see through an
-/// alias.
-pub struct NoCtorResolver;
+/// One `<<..>>` segment: what it matches, and how wide it is.
+pub struct BinSegShape<'p> {
+    pub value: BinPart<'p>,
+    pub unit: BinUnit,
+    /// The size, when the segment names one.
+    pub size: Option<BinPart<'p>>,
+}
 
-impl CtorResolver for NoCtorResolver {
-    fn variant_index(&self, _qualifier: Option<&str>, _name: &str) -> Option<usize> {
-        None
+/// A segment's value or size, as far as telling two segments apart goes.
+pub enum BinPart<'p> {
+    /// A name or `_`: any value.
+    Any,
+    Int(&'p ast::NumberLiteral),
+    Str(&'p str),
+    /// Anything else. The position keeps it apart from every other one.
+    At(Span),
+}
+
+pub enum BinUnit {
+    Bits,
+    Bytes,
+    Utf8,
+}
+
+/// A checked pattern exhaustiveness can read.
+pub trait PatternShape: Sized {
+    fn shape(&self) -> PatShape<'_, Self>;
+}
+
+/// How many levels of a recursive type's variant tables exhaustiveness must
+/// see for `p`: the deepest constructor nesting, with names costing nothing.
+pub fn unroll_depth<P: PatternShape>(p: &P) -> usize {
+    let deepest = |ps: &[P]| ps.iter().map(unroll_depth).max().unwrap_or(0);
+    match p.shape() {
+        PatShape::Wild => 0,
+        PatShape::Variant { fields, .. } => 1 + deepest(fields),
+        PatShape::Tuple(ps) | PatShape::Array { prefix: ps, .. } => 1 + deepest(ps),
+        PatShape::Or(ps) => deepest(ps),
+        PatShape::Number(_)
+        | PatShape::String(_)
+        | PatShape::Range(..)
+        | PatShape::Binary { .. } => 1,
     }
 }
 
@@ -99,9 +146,6 @@ pub enum Pat {
 struct CtorInfo {
     id: u32,
     arity: usize,
-    /// Field labels in declaration order, parallel to `types`. Empty for
-    /// constructors without named fields (array `::`/`[]`, tuples).
-    labels: Vec<String>,
     types: Vec<RcType>,
 }
 
@@ -114,7 +158,6 @@ impl CtorInfo {
         CtorInfo {
             id,
             arity,
-            labels: vec![],
             types: vec![RcType::Infinite; arity],
         }
     }
@@ -181,7 +224,6 @@ fn rc_type(t: &Type, interner: &mut Interner) -> RcType {
             let ctor = CtorInfo {
                 id: interner.intern(&tuple_ctor_name(types.len())),
                 arity: types.len(),
-                labels: vec![],
                 types,
             };
             RcType::Tuple(Rc::new(TypeCtors {
@@ -198,7 +240,6 @@ fn rc_type(t: &Type, interner: &mut Interner) -> RcType {
                     .map(|(name, fields)| CtorInfo {
                         id: interner.intern(name),
                         arity: fields.len(),
-                        labels: fields.iter().map(|f| f.label.clone()).collect(),
                         types: fields.iter().map(|f| rc_type(&f.ty, interner)).collect(),
                     })
                     .collect();
@@ -223,13 +264,11 @@ fn get_type_ctors(t: &RcType) -> Cow<'_, TypeCtors> {
                 CtorInfo {
                     id: EMPTY_LIST_ID,
                     arity: 0,
-                    labels: vec![],
                     types: vec![],
                 },
                 CtorInfo {
                     id: CONS_ID,
                     arity: 2,
-                    labels: vec![],
                     types: vec![
                         arr.element.clone(),
                         RcType::Array(Rc::new(ArrayType {
@@ -545,41 +584,37 @@ fn push_int_key(key: &mut String, n: &ast::NumberLiteral) {
     }
 }
 
-fn bin_pattern_key(segments: &[ast::BinSegmentPat], has_rest: bool) -> String {
+fn push_bin_part(key: &mut String, part: &BinPart<'_>, at: char) {
     use std::fmt::Write;
+    match part {
+        BinPart::Any => key.push('_'),
+        BinPart::Int(n) => push_int_key(key, n),
+        BinPart::Str(s) => {
+            let _ = write!(key, "s{}:{}", s.len(), s);
+        }
+        BinPart::At(sp) => {
+            let _ = write!(key, "{at}{}:{}", sp.start_line, sp.start_column);
+        }
+    }
+}
+
+fn bin_pattern_key(segments: &[BinSegShape<'_>], open: bool) -> String {
     let mut key = String::from("#bin:");
     for seg in segments {
-        match &seg.value {
-            ast::Pattern::Var { .. } => key.push('_'),
-            ast::Pattern::Literal(ast::PatternLiteral::Number(n)) => {
-                push_int_key(&mut key, n);
-            }
-            ast::Pattern::Literal(ast::PatternLiteral::String(s)) => {
-                let _ = write!(key, "s{}:{}", s.value.len(), s.value);
-            }
-            other => {
-                let sp = other.span();
-                let _ = write!(key, "@{}:{}", sp.start_line, sp.start_column);
-            }
-        }
+        push_bin_part(&mut key, &seg.value, '@');
         // The kind char also fixes the size's unit ('i' bits, 'b' bytes), so
         // `<<x:16>>` and `<<x:bytes(16)>>` cannot share a key.
-        match &seg.spec {
-            ast::BinSpec::Int { .. } => key.push('i'),
-            ast::BinSpec::Binary { .. } => key.push('b'),
-            ast::BinSpec::Utf8 => key.push('u'),
-        }
-        match seg.spec.size_expr() {
-            None => {}
-            Some(ast::Expression::NumberLiteral(n)) => push_int_key(&mut key, n),
-            Some(e) => {
-                let sp = e.span();
-                let _ = write!(key, "?{}:{}", sp.start_line, sp.start_column);
-            }
+        key.push(match seg.unit {
+            BinUnit::Bits => 'i',
+            BinUnit::Bytes => 'b',
+            BinUnit::Utf8 => 'u',
+        });
+        if let Some(size) = &seg.size {
+            push_bin_part(&mut key, size, '?');
         }
         key.push(',');
     }
-    if has_rest {
+    if open {
         key.push_str("..");
     }
     key
@@ -649,109 +684,51 @@ fn pat_to_string(p: &Pat, t: &RcType, interner: &Interner) -> String {
     }
 }
 
-fn lower_pattern(
-    p: &ast::Pattern,
-    t: &RcType,
-    interner: &mut Interner,
-    ctors: &dyn CtorResolver,
-) -> Pat {
+fn lower_pattern<P: PatternShape>(p: &P, t: &RcType, interner: &mut Interner) -> Pat {
     fn nullary(id: u32) -> Pat {
         Pat::Ctor {
             id,
             args: Rc::from([]),
         }
     }
-    match p {
-        ast::Pattern::Var { .. } => Pat::Wildcard,
-        ast::Pattern::Literal(lit) => match lit {
-            ast::PatternLiteral::Number(n) => {
-                // Numeric identity, not spelling: `0xFF` and `255` are one arm.
-                let key = match n.as_int() {
-                    Some(i) => format!("lit:{i}"),
-                    None => format!("lit:{}", n.digits()),
-                };
-                nullary(interner.intern(&key))
-            }
-            ast::PatternLiteral::String(s) => {
-                nullary(interner.intern(&format!("lit:'{}'", s.value)))
-            }
-        },
-        ast::Pattern::Constructor {
-            qualifier,
-            name,
-            args,
-            ..
-        } => {
-            let type_ctors = get_type_ctors(t);
-            // The head names a variant of `t`, and the name it is *written*
-            // with need not be that variant's declared name: an aliased import
-            // (`{Circle as Round}`) puts a local name in scope that the type's
-            // variant table has never heard of. Resolve through the scope to
-            // the variant index — the constructor's canonical identity — and
-            // only fall back to matching on the written name for heads the
-            // resolver cannot see (ill-typed patterns), which stay opaque
-            // exactly as before.
-            let by_index = ctors
-                .variant_index(qualifier.as_ref().map(|q| q.name.as_str()), &name.name)
-                .and_then(|i| type_ctors.ctors.get(i));
-            let (id, resolved) = match by_index {
-                Some(c) => (c.id, Some(c)),
-                None => {
-                    let id = interner.intern(&name.name);
-                    (id, type_ctors.find(id))
-                }
+    match p.shape() {
+        PatShape::Wild => Pat::Wildcard,
+        // Numeric identity, not spelling: `0xFF` and `255` are one arm.
+        PatShape::Number(n) => {
+            let key = match n.as_int() {
+                Some(i) => format!("lit:{i}"),
+                None => format!("lit:{}", n.digits()),
             };
-            let pat_args: Rc<[Pat]> = match resolved {
-                Some(ctor) => {
-                    // Slot args into field-DECLARATION order with the same
-                    // `slot_labeled` the typechecker and elaborator use; empty
-                    // slots become wildcards. Source order would permute the
-                    // matrix against real match semantics and report a
-                    // non-exhaustive match as exhaustive. Slotting errors are
-                    // dropped — the typechecker already reported them.
-                    let fields: Vec<Option<&str>> = (0..ctor.types.len())
-                        .map(|i| ctor.labels.get(i).map(String::as_str))
-                        .collect();
-                    let supplied = args.iter().map(|a| match a {
-                        ast::PatternArg::Positional(p) => (None, p),
-                        ast::PatternArg::Labeled { label, pattern, .. } => {
-                            (Some(label.name.as_str()), pattern)
-                        }
-                    });
-                    let (by_pos, errors) = slot_labeled(&fields, supplied);
-                    // Reachable only on ill-typed patterns, which the compiler
-                    // gates out of exhaustiveness (`type_pattern`'s must-use
-                    // contract). A wildcard for a mis-slotted arg could make a
-                    // non-exhaustive match look exhaustive, so hold the gate.
-                    debug_assert!(
-                        errors.is_empty(),
-                        "exhaustiveness ran on an ill-typed pattern"
-                    );
-                    by_pos
-                        .into_iter()
-                        .zip(&ctor.types)
-                        .map(|(slot, field_t)| match slot {
-                            Some(p) => lower_pattern(p, field_t, interner, ctors),
-                            None => Pat::Wildcard,
-                        })
-                        .collect()
-                }
-                // Unknown constructor: typing already reported the error, so
-                // lower args in source order as a best effort.
-                None => args
-                    .iter()
-                    .map(|a| {
-                        let inner = match a {
-                            ast::PatternArg::Positional(p) => p,
-                            ast::PatternArg::Labeled { pattern, .. } => pattern,
-                        };
-                        lower_pattern(inner, &RcType::Infinite, interner, ctors)
-                    })
-                    .collect(),
-            };
-            Pat::Ctor { id, args: pat_args }
+            nullary(interner.intern(&key))
         }
-        ast::Pattern::Tuple { elements, .. } => {
+        PatShape::String(s) => nullary(interner.intern(&format!("lit:'{s}'"))),
+        PatShape::Range(start, end) => {
+            nullary(interner.intern(&format!("range:{}..{}", start.value, end.value)))
+        }
+        PatShape::Binary { segs, open } => nullary(interner.intern(&bin_pattern_key(&segs, open))),
+        PatShape::Variant { index, fields } => {
+            let type_ctors = get_type_ctors(t);
+            match type_ctors.ctors.get(index) {
+                Some(ctor) => Pat::Ctor {
+                    id: ctor.id,
+                    args: fields
+                        .iter()
+                        .zip(&ctor.types)
+                        .map(|(f, ft)| lower_pattern(f, ft, interner))
+                        .collect(),
+                },
+                // Past the depth the type was unrolled to, the variant table
+                // is gone; the variant still has an identity of its own.
+                None => Pat::Ctor {
+                    id: interner.intern(&format!("#variant{index}")),
+                    args: fields
+                        .iter()
+                        .map(|f| lower_pattern(f, &RcType::Infinite, interner))
+                        .collect(),
+                },
+            }
+        }
+        PatShape::Tuple(elements) => {
             let elem_types: &[RcType] = if let RcType::Tuple(ctors) = t {
                 &ctors.ctors[0].types
             } else {
@@ -761,12 +738,7 @@ fn lower_pattern(
                 .iter()
                 .enumerate()
                 .map(|(i, e)| {
-                    lower_pattern(
-                        e,
-                        elem_types.get(i).unwrap_or(&RcType::Infinite),
-                        interner,
-                        ctors,
-                    )
+                    lower_pattern(e, elem_types.get(i).unwrap_or(&RcType::Infinite), interner)
                 })
                 .collect();
             Pat::Ctor {
@@ -774,49 +746,30 @@ fn lower_pattern(
                 args,
             }
         }
-        ast::Pattern::Array { elements, .. } => {
+        PatShape::Array { prefix, open } => {
             let elem_type: &RcType = if let RcType::Array(arr) = t {
                 &arr.element
             } else {
                 &RcType::Infinite
             };
-            // Cons-list, right to left. A spread ends the chain in a wildcard
+            // Cons-list, right to left. A rest ends the chain in a wildcard
             // tail; otherwise it ends in `[]`.
-            let mut acc = nullary(EMPTY_LIST_ID);
-            for el in elements.iter().rev() {
-                match el {
-                    ast::ArrayPatternElement::Spread { .. } => {
-                        acc = Pat::Wildcard;
-                    }
-                    ast::ArrayPatternElement::Pattern(p) => {
-                        acc = Pat::Ctor {
-                            id: CONS_ID,
-                            args: Rc::from([lower_pattern(p, elem_type, interner, ctors), acc]),
-                        };
-                    }
-                }
+            let mut acc = if open {
+                Pat::Wildcard
+            } else {
+                nullary(EMPTY_LIST_ID)
+            };
+            for el in prefix.iter().rev() {
+                acc = Pat::Ctor {
+                    id: CONS_ID,
+                    args: Rc::from([lower_pattern(el, elem_type, interner), acc]),
+                };
             }
             acc
         }
-        ast::Pattern::Binary { segments, rest, .. } => {
-            // `<<..rest>>` with no leading segments matches every Binary. Any
-            // other shape constrains length or content, so it lowers to an
-            // opaque ctor and a wildcard arm is still required.
-            if segments.is_empty() && rest.is_some() {
-                Pat::Wildcard
-            } else {
-                nullary(interner.intern(&bin_pattern_key(segments, rest.is_some())))
-            }
-        }
-        ast::Pattern::Or { first, rest, .. } => Pat::Or {
-            patterns: std::iter::once(&**first)
-                .chain(rest.iter())
-                .map(|p| lower_pattern(p, t, interner, ctors))
-                .collect(),
+        PatShape::Or(alts) => Pat::Or {
+            patterns: alts.iter().map(|a| lower_pattern(a, t, interner)).collect(),
         },
-        ast::Pattern::Range { start, end, .. } => {
-            nullary(interner.intern(&format!("range:{}..{}", start.value, end.value)))
-        }
     }
 }
 
@@ -841,10 +794,10 @@ impl UsefulnessMatrix {
         }
     }
 
-    /// Lower an `ast::Pattern` against this checker's subject type, resolving
-    /// constructor heads through `ctors`. Ctor names are interned here, once.
-    pub fn lower(&mut self, p: &ast::Pattern, ctors: &dyn CtorResolver) -> Pat {
-        lower_pattern(p, &self.subject_type, &mut self.interner, ctors)
+    /// Lower a checked pattern against this checker's subject type. Ctor
+    /// names are interned here, once.
+    pub fn lower<P: PatternShape>(&mut self, p: &P) -> Pat {
+        lower_pattern(p, &self.subject_type, &mut self.interner)
     }
 
     pub fn is_useful(&self, pat: &Pat) -> bool {
@@ -1290,65 +1243,73 @@ mod tests {
         t_enum(98, "Binary", vec![])
     }
 
-    fn bin_seg(value: ast::Pattern, size: Option<&str>) -> ast::BinSegmentPat {
-        ast::BinSegmentPat {
-            value,
-            spec: ast::BinSpec::Int {
-                bits: size.map(|n| {
-                    ast::Expression::NumberLiteral(ast::NumberLiteral {
-                        value: n.to_string(),
-                        span: scarlet_syntax::span::Span::DUMMY,
-                    })
-                }),
-            },
-            span: scarlet_syntax::span::Span::DUMMY,
+    /// A checked binary pattern, as the tests write one.
+    struct TBin {
+        segs: Vec<(TPart, Option<ast::NumberLiteral>)>,
+        open: bool,
+    }
+
+    enum TPart {
+        Any,
+        Int(ast::NumberLiteral),
+        Str(&'static str),
+    }
+
+    fn num(v: &str) -> ast::NumberLiteral {
+        ast::NumberLiteral {
+            value: v.to_string(),
+            span: Span::DUMMY,
         }
     }
 
-    fn bin_pat(segments: Vec<ast::BinSegmentPat>, rest: bool) -> ast::Pattern {
-        ast::Pattern::Binary {
-            segments,
-            rest: rest.then_some(ast::BinaryPatternRest {
-                binding: None,
-                span: scarlet_syntax::span::Span::DUMMY,
-            }),
-            span: scarlet_syntax::span::Span::DUMMY,
+    impl PatternShape for TBin {
+        fn shape(&self) -> PatShape<'_, Self> {
+            if self.segs.is_empty() && self.open {
+                return PatShape::Wild;
+            }
+            let segs = self
+                .segs
+                .iter()
+                .map(|(v, size)| BinSegShape {
+                    value: match v {
+                        TPart::Any => BinPart::Any,
+                        TPart::Int(n) => BinPart::Int(n),
+                        TPart::Str(s) => BinPart::Str(s),
+                    },
+                    unit: BinUnit::Bits,
+                    size: size.as_ref().map(BinPart::Int),
+                })
+                .collect();
+            PatShape::Binary {
+                segs,
+                open: self.open,
+            }
         }
     }
 
-    fn p_var(name: &str) -> ast::Pattern {
-        ast::Pattern::Var {
-            name: ast::Identifier {
-                name: name.to_string(),
-                span: scarlet_syntax::span::Span::DUMMY,
-            },
-        }
+    fn bin(segs: Vec<(TPart, Option<&str>)>, open: bool) -> TBin {
+        let segs = segs.into_iter().map(|(v, sz)| (v, sz.map(num))).collect();
+        TBin { segs, open }
     }
 
     #[test]
     fn binary_fixed_segments_not_exhaustive() {
         let mut um = UsefulnessMatrix::new(t_binary());
-        let p = um.lower(
-            &bin_pat(
-                vec![bin_seg(p_var("a"), None), bin_seg(p_var("b"), None)],
-                false,
-            ),
-            &NoCtorResolver,
-        );
+        let p = um.lower(&bin(vec![(TPart::Any, None), (TPart::Any, None)], false));
         assert_eq!(um.find_missing(&[p]).as_deref(), Some("_"));
     }
 
     #[test]
     fn binary_empty_literal_not_exhaustive() {
         let mut um = UsefulnessMatrix::new(t_binary());
-        let p = um.lower(&bin_pat(vec![], false), &NoCtorResolver);
+        let p = um.lower(&bin(vec![], false));
         assert_eq!(um.find_missing(&[p]).as_deref(), Some("_"));
     }
 
     #[test]
     fn binary_rest_only_is_exhaustive() {
         let mut um = UsefulnessMatrix::new(t_binary());
-        let p = um.lower(&bin_pat(vec![], true), &NoCtorResolver);
+        let p = um.lower(&bin(vec![], true));
         assert!(matches!(p, Pat::Wildcard));
         assert_eq!(um.find_missing(&[p]), None);
     }
@@ -1356,37 +1317,22 @@ mod tests {
     #[test]
     fn binary_segments_with_rest_not_exhaustive() {
         let mut um = UsefulnessMatrix::new(t_binary());
-        let p = um.lower(
-            &bin_pat(vec![bin_seg(p_var("a"), None)], true),
-            &NoCtorResolver,
-        );
+        let p = um.lower(&bin(vec![(TPart::Any, None)], true));
         assert_eq!(um.find_missing(&[p]).as_deref(), Some("_"));
     }
 
     #[test]
     fn binary_fixed_then_else_exhaustive() {
         let mut um = UsefulnessMatrix::new(t_binary());
-        let p1 = um.lower(
-            &bin_pat(
-                vec![bin_seg(p_var("a"), None), bin_seg(p_var("b"), None)],
-                false,
-            ),
-            &NoCtorResolver,
-        );
+        let p1 = um.lower(&bin(vec![(TPart::Any, None), (TPart::Any, None)], false));
         assert_eq!(um.find_missing(&[p1, Pat::Wildcard]), None);
     }
 
     #[test]
     fn binary_same_shape_redundant() {
         let mut m = UsefulnessMatrix::new(t_binary());
-        let p1 = m.lower(
-            &bin_pat(vec![bin_seg(p_var("a"), Some("8"))], false),
-            &NoCtorResolver,
-        );
-        let p2 = m.lower(
-            &bin_pat(vec![bin_seg(p_var("b"), Some("8"))], false),
-            &NoCtorResolver,
-        );
+        let p1 = m.lower(&bin(vec![(TPart::Any, Some("8"))], false));
+        let p2 = m.lower(&bin(vec![(TPart::Any, Some("8"))], false));
         m.push(&p1);
         assert!(!m.is_useful(&p2));
     }
@@ -1394,20 +1340,8 @@ mod tests {
     #[test]
     fn binary_different_literal_useful() {
         let mut m = UsefulnessMatrix::new(t_binary());
-        let lit = |v: &str| {
-            ast::Pattern::Literal(ast::PatternLiteral::Number(ast::NumberLiteral {
-                value: v.to_string(),
-                span: scarlet_syntax::span::Span::DUMMY,
-            }))
-        };
-        let p1 = m.lower(
-            &bin_pat(vec![bin_seg(lit("1"), None)], false),
-            &NoCtorResolver,
-        );
-        let p2 = m.lower(
-            &bin_pat(vec![bin_seg(lit("2"), None)], false),
-            &NoCtorResolver,
-        );
+        let p1 = m.lower(&bin(vec![(TPart::Int(num("1")), None)], false));
+        let p2 = m.lower(&bin(vec![(TPart::Int(num("2")), None)], false));
         m.push(&p1);
         assert!(m.is_useful(&p2));
     }
@@ -1416,27 +1350,12 @@ mod tests {
     /// different patterns must not share a key.
     #[test]
     fn binary_string_key_is_injective() {
-        let str_lit = |v: &str| {
-            ast::Pattern::Literal(ast::PatternLiteral::String(ast::StringLiteral {
-                value: v.to_string(),
-                span: scarlet_syntax::span::Span::DUMMY,
-            }))
-        };
         let mut m = UsefulnessMatrix::new(t_binary());
-        let p1 = m.lower(
-            &bin_pat(vec![bin_seg(str_lit("a'i8,'b"), None)], false),
-            &NoCtorResolver,
-        );
-        let p2 = m.lower(
-            &bin_pat(
-                vec![
-                    bin_seg(str_lit("a"), Some("8")),
-                    bin_seg(str_lit("b"), None),
-                ],
-                false,
-            ),
-            &NoCtorResolver,
-        );
+        let p1 = m.lower(&bin(vec![(TPart::Str("a'i8,'b"), None)], false));
+        let p2 = m.lower(&bin(
+            vec![(TPart::Str("a"), Some("8")), (TPart::Str("b"), None)],
+            false,
+        ));
         m.push(&p1);
         assert!(m.is_useful(&p2));
     }
@@ -1450,85 +1369,5 @@ mod tests {
         m.push_s(&ctor("Foo", vec![SPat::Wildcard]));
         assert!(!m.is_useful_s(&ctor("Foo", vec![SPat::Wildcard])));
         assert!(m.is_useful_s(&ctor("Bar", vec![SPat::Wildcard])));
-    }
-
-    /// A nullary constructor pattern such as `True`.
-    fn p_ctor0(name: &str) -> ast::Pattern {
-        ast::Pattern::Constructor {
-            qualifier: None,
-            name: ast::Identifier {
-                name: name.to_string(),
-                span: scarlet_syntax::span::Span::DUMMY,
-            },
-            args: vec![],
-            rest: false,
-            span: scarlet_syntax::span::Span::DUMMY,
-        }
-    }
-
-    /// `Name(label: pat, ...)` with all-labeled args and an optional `..` rest.
-    fn p_ctor_labeled(name: &str, fields: Vec<(&str, ast::Pattern)>, rest: bool) -> ast::Pattern {
-        ast::Pattern::Constructor {
-            qualifier: None,
-            name: ast::Identifier {
-                name: name.to_string(),
-                span: scarlet_syntax::span::Span::DUMMY,
-            },
-            args: fields
-                .into_iter()
-                .map(|(label, pattern)| ast::PatternArg::Labeled {
-                    label: ast::Identifier {
-                        name: label.to_string(),
-                        span: scarlet_syntax::span::Span::DUMMY,
-                    },
-                    pattern,
-                    punned: false,
-                })
-                .collect(),
-            rest,
-            span: scarlet_syntax::span::Span::DUMMY,
-        }
-    }
-
-    /// `type Pair { a Bool b Bool }` — `a` is declaration index 0, `b` is 1.
-    fn pair_bool_bool() -> Type {
-        t_enum(
-            50,
-            "Pair",
-            vec![("Pair", vec![("a", t_bool()), ("b", t_bool())])],
-        )
-    }
-
-    /// `lower` must slot labeled args into field-DECLARATION order, matching
-    /// the compiler's `slot_ctor_args` and the runtime matcher. Source order
-    /// makes a non-exhaustive match look exhaustive.
-    #[test]
-    fn lower_slots_labeled_args_in_declaration_order() {
-        let pair = pair_bool_bool();
-        let pair_pat = |fields: &[(&str, &str)], rest| {
-            let args = fields.iter().map(|&(l, v)| (l, p_ctor0(v))).collect();
-            p_ctor_labeled("Pair", args, rest)
-        };
-        let missing = |arms: &[ast::Pattern]| {
-            let mut um = UsefulnessMatrix::new(pair.clone());
-            let ipats: Vec<Pat> = arms.iter().map(|p| um.lower(p, &NoCtorResolver)).collect();
-            um.find_missing(&ipats)
-        };
-
-        // `Pair(b: True, ..)` ∪ `Pair(a: False, ..)` MISS (a: True, b: False).
-        let unsound = [
-            pair_pat(&[("b", "True")], true),
-            pair_pat(&[("a", "False")], true),
-        ];
-        assert_eq!(missing(&unsound).as_deref(), Some("Pair(True, False)"));
-
-        // Exhaustive; the third arm names its fields in reverse order.
-        let exhaustive = [
-            pair_pat(&[("a", "True"), ("b", "True")], false),
-            pair_pat(&[("a", "True"), ("b", "False")], false),
-            pair_pat(&[("b", "True"), ("a", "False")], false),
-            pair_pat(&[("a", "False"), ("b", "False")], false),
-        ];
-        assert_eq!(missing(&exhaustive), None);
     }
 }
