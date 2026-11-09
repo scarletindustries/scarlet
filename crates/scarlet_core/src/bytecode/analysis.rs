@@ -642,8 +642,7 @@ impl Compiler {
         // Other nodes (let bindings, bare expressions) — linear walk.
         // The only walk whose bindings take module-scope slots, each carried on
         // its own `CNode::Binding`. Nested walks re-enter `compile_node` from
-        // here but push `outer_scopes`/`scope_marks`, which `bind_local` also
-        // checks.
+        // here but open frames or blocks, which `bind_local` also checks.
         let outer_walk = std::mem::replace(&mut self.walking_module_statements, true);
         for &(idx, node) in &other_nodes {
             nodes[idx] = self.compile_node(node).1;

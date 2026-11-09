@@ -443,7 +443,7 @@ mod toplevel_slots {
 
     /// Only a module's own statement walk gives a binding a module-scope slot.
     /// Depth alone does not identify that walk: a bare-expression program runs
-    /// with `scope_marks` empty, so an arm's pattern binding would sit at
+    /// with no module block open, so an arm's pattern binding would sit at
     /// "module depth" and take a global slot it must not have.
     #[test]
     fn only_the_module_statement_walk_takes_a_slot() {

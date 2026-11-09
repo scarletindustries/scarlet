@@ -1,13 +1,17 @@
-//! The function bodies the check walk is inside.
+//! The function bodies the check walk is inside, and the blocks inside them.
 //!
 //! Each body being checked has a [`Frame`]: the module toplevel at the
 //! bottom, then each `fn` and lambda the walk is nested in. Everything that
 //! belongs to one body lives on its frame, so entering a body is pushing a
 //! fresh frame and leaving it is popping the finished one off.
+//!
+//! A frame's names live in [`Block`]s, innermost last. Opening a block pushes
+//! an empty one and closing it drops it, which is all shadowing needs: a name
+//! means its entry in the innermost block that has one.
 
 use std::collections::{HashMap, HashSet};
 
-use super::{LocalSlot, StrId};
+use super::{LocalSlot, Span, StrId};
 use crate::typed_ir::{BinderId, CaptureIdx};
 
 /// The bodies the walk is inside, innermost first. Never empty: the module
@@ -26,15 +30,15 @@ pub(in crate::bytecode) struct Frames {
 pub(in crate::bytecode) struct Entered(());
 
 impl Frames {
-    /// The module toplevel, with entry-frame `locals` already holding `slots`
-    /// slots.
-    pub(in crate::bytecode) fn toplevel(locals: HashMap<StrId, LocalSlot>, slots: i32) -> Frames {
+    /// The module toplevel, whose root block already holds `names`, in
+    /// `slots` slots.
+    pub(in crate::bytecode) fn toplevel(names: HashMap<StrId, LocalSlot>, slots: i32) -> Frames {
+        let root = Block {
+            names,
+            unused: None,
+        };
         Frames {
-            current: Frame {
-                locals,
-                slots,
-                ..Frame::default()
-            },
+            current: Frame::with_root(root, slots),
             outer: Vec::new(),
         }
     }
@@ -43,11 +47,9 @@ impl Frames {
     /// itself by, if it has one. Type variables rigid around it stay rigid in
     /// it.
     pub(in crate::bytecode) fn enter(&mut self, self_name: Option<StrId>) -> Entered {
-        let inner = Frame {
-            self_name,
-            rigid: self.current.rigid.clone(),
-            ..Frame::default()
-        };
+        let mut inner = Frame::with_root(Block::reporting(), 0);
+        inner.self_name = self_name;
+        inner.rigid = self.current.rigid.clone();
         self.outer.push(std::mem::replace(&mut self.current, inner));
         Entered(())
     }
@@ -70,6 +72,21 @@ impl Frames {
     pub(in crate::bytecode) fn outer(&self) -> &[Frame] {
         &self.outer
     }
+
+    /// Note a read of `name`, so it is not reported unused. A body may read a
+    /// name from the bodies around it, so they are searched too.
+    pub(in crate::bytecode) fn mark_used(&mut self, name: StrId) {
+        let frames = std::iter::once(&mut self.current).chain(self.outer.iter_mut().rev());
+        for frame in frames {
+            for block in frame.blocks.iter_mut().rev() {
+                if let Some(unused) = &mut block.unused
+                    && unused.remove(&name).is_some()
+                {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 /// [`Frames::leave`] with nothing to return to. An [`Entered`] is only minted
@@ -82,15 +99,13 @@ fn left_the_toplevel() -> ! {
 }
 
 /// One body being checked.
-#[derive(Default)]
 pub(in crate::bytecode) struct Frame {
-    /// Each name in scope in this body, to its binding.
-    pub(in crate::bytecode) locals: HashMap<StrId, LocalSlot>,
-    /// Every change to `locals` made inside an open block, as `(name, entry it
-    /// replaced)`, so closing the block can put them back.
-    pub(in crate::bytecode) undo_log: Vec<(StrId, Option<LocalSlot>)>,
-    /// `undo_log`'s length when each open block began, innermost last.
-    pub(in crate::bytecode) scope_marks: Vec<usize>,
+    /// Never empty. `blocks[0]` is the body's own level: its parameters, or
+    /// for the module toplevel, the root every module sees.
+    blocks: Vec<Block>,
+    /// In the module toplevel, the index of the block holding the current
+    /// module's imports. The module's own statements are the block after it.
+    module_base: usize,
     /// Slots handed out so far.
     pub(in crate::bytecode) slots: i32,
     /// The next [`BinderId`]. Binders count from zero in every body.
@@ -105,7 +120,37 @@ pub(in crate::bytecode) struct Frame {
     pub(in crate::bytecode) rigid: HashSet<i32>,
 }
 
+/// One block's names.
+pub(in crate::bytecode) struct Block {
+    names: HashMap<StrId, LocalSlot>,
+    /// The names bound here and not read yet, with where they were bound.
+    /// `None` for a block whose names are never reported unused: the module
+    /// root, and a module's imports.
+    pub(in crate::bytecode) unused: Option<HashMap<StrId, Span>>,
+}
+
+impl Block {
+    fn reporting() -> Block {
+        Block {
+            names: HashMap::new(),
+            unused: Some(HashMap::new()),
+        }
+    }
+}
+
 impl Frame {
+    fn with_root(root: Block, slots: i32) -> Frame {
+        Frame {
+            blocks: vec![root],
+            module_base: 0,
+            slots,
+            next_binder: 0,
+            captures: Captures::default(),
+            self_name: None,
+            rigid: HashSet::new(),
+        }
+    }
+
     pub(in crate::bytecode) fn alloc_slot(&mut self) -> i32 {
         self.slots += 1;
         self.slots - 1
@@ -114,6 +159,93 @@ impl Frame {
     pub(in crate::bytecode) fn mint_binder(&mut self) -> BinderId {
         self.next_binder += 1;
         BinderId(self.next_binder - 1)
+    }
+
+    /// What `name` means in this body, and whether that binding was made in
+    /// an enclosing block rather than the innermost one.
+    pub(in crate::bytecode) fn lookup(&self, name: StrId) -> Option<(LocalSlot, bool)> {
+        let innermost = self.blocks.len() - 1;
+        self.blocks
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(i, b)| b.names.get(&name).map(|&e| (e, i < innermost)))
+    }
+
+    pub(in crate::bytecode) fn lookup_mut(&mut self, name: StrId) -> Option<&mut LocalSlot> {
+        self.blocks
+            .iter_mut()
+            .rev()
+            .find_map(|b| b.names.get_mut(&name))
+    }
+
+    /// Bind `name` in the innermost block.
+    pub(in crate::bytecode) fn insert(&mut self, name: StrId, entry: LocalSlot) {
+        self.innermost().names.insert(name, entry);
+    }
+
+    /// The blocks open inside the current module's own statements, counting
+    /// the statements' block itself.
+    pub(in crate::bytecode) fn module_depth(&self) -> usize {
+        self.blocks.len() - 1 - self.module_base
+    }
+
+    /// Note that `name` was bound at `span`. Returns where an earlier binding
+    /// of it in the same block was made, if nothing ever read that one: now it
+    /// is shadowed, nothing can.
+    pub(in crate::bytecode) fn track(&mut self, name: StrId, span: Span) -> Option<Span> {
+        let block = self.blocks.iter_mut().rev().find(|b| b.unused.is_some())?;
+        block.unused.as_mut()?.insert(name, span)
+    }
+
+    pub(in crate::bytecode) fn open_block(&mut self) {
+        self.blocks.push(Block::reporting());
+    }
+
+    /// Close the innermost block. `None` when only the body's own level is
+    /// left, which only a body's end closes.
+    pub(in crate::bytecode) fn close_block(&mut self) -> Option<Block> {
+        if self.blocks.len() > 1 {
+            self.blocks.pop()
+        } else {
+            None
+        }
+    }
+
+    /// The body's own level, for a body that is finished.
+    pub(in crate::bytecode) fn into_root(mut self) -> Block {
+        self.blocks.swap_remove(0)
+    }
+
+    /// Open a block for a module's imports. Returns what to hand
+    /// [`Self::close_module`] when the module is done.
+    pub(in crate::bytecode) fn open_module(&mut self) -> usize {
+        self.blocks.push(Block {
+            names: HashMap::new(),
+            unused: None,
+        });
+        std::mem::replace(&mut self.module_base, self.blocks.len() - 1)
+    }
+
+    /// Drop the module's imports, and everything bound since it opened.
+    pub(in crate::bytecode) fn close_module(&mut self, outer_base: usize) {
+        self.blocks.truncate(self.module_base);
+        self.module_base = outer_base;
+    }
+
+    /// Every name in scope, for a session keeping the toplevel across
+    /// compiles. Innermost bindings win.
+    pub(in crate::bytecode) fn take_names(&mut self) -> HashMap<StrId, LocalSlot> {
+        let mut names = HashMap::new();
+        for block in self.blocks.drain(..) {
+            names.extend(block.names);
+        }
+        names
+    }
+
+    fn innermost(&mut self) -> &mut Block {
+        let last = self.blocks.len() - 1;
+        &mut self.blocks[last]
     }
 }
 

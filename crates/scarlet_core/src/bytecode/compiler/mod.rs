@@ -37,9 +37,8 @@
 //! - Everything a compile appends to (inference pool, type env, function
 //!   table, constants) stays append-only between module boundaries; that is
 //!   what makes `Watermark` rollback pure truncation.
-//! - Local scoping is undo-log based (`undo_log` / `scope_marks`): popping
-//!   a scope replays only the bindings it actually shadowed, never a map
-//!   snapshot.
+//! - Each body being walked has a frame, and each block in it a map of its
+//!   own names (`frame.rs`): closing a block drops its map.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -276,20 +275,15 @@ impl CompileResult {
 // Compiler — single-pass: HM type inference + elaboration
 // ============================================================================
 
-/// A live local binding: the stack slot it occupies plus the block-scope
-/// nesting depth (its frame's `scope_marks.len()`) at which it was bound. The depth lets
-/// `get_or_create_local` decide in O(1) whether a re-binding shadows an
-/// enclosing scope (depth strictly shallower than the current scope ⇒ a fresh
-/// slot must be allocated so the outer value survives the block) or simply
-/// rebinds within the current scope (reuse the slot).
+/// A live local binding: the stack slot it occupies, and what a use of it
+/// means.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct LocalSlot {
     pub(super) slot: i32,
-    pub(super) depth: u32,
     /// This name lives in the entry frame, so a nested body loads it with
     /// `PushGlobal <slot>` instead of capturing it. Decided once at bind time
     /// by [`Compiler::binds_a_global`]; `resolve_variable` must read this
-    /// rather than re-derive it from `depth`.
+    /// rather than re-derive it from where the binding sits.
     is_global: bool,
     /// The binding a use of the name in this frame means. A slot reserved
     /// before its binding is complete (a `let` whose init is still being
@@ -330,10 +324,11 @@ struct ModuleFrame {
     imported_qualifiers: HashMap<String, ModuleKey>,
     base_dir: Option<PathBuf>,
     module_refs: ModuleReferences,
-    /// Whether this frame scoped the module's namespace (env module frame +
-    /// `locals_frame_marks`). Recorded at enter so a `retain_namespaces`
-    /// toggle can never unbalance the pop.
-    scoped: bool,
+    /// What to close the module's imports with: the module base it replaced
+    /// in the toplevel frame. `None` when the module's namespace was not
+    /// scoped (prelude registration). Recorded at enter so a
+    /// `retain_namespaces` toggle can never unbalance the pop.
+    scoped: Option<usize>,
 }
 
 // `bool_cluster` fires on the four bool fields below, and the answer is that
@@ -374,26 +369,10 @@ pub struct Compiler {
     const_dedup: HashMap<Const, ConstId>,
     /// The bodies the walk is inside, the current one first.
     pub(super) frames: frame::Frames,
-    /// Depth-0 `locals` binds made while a module frame is open — a module's
-    /// import items bind below its local scope, so `undo_log` never sees them.
-    /// `leave_module_frame` replays this so an import's binding is scoped to
-    /// the module that wrote it instead of leaking into every later module.
-    locals_frame_undo: Vec<(StrId, Option<LocalSlot>)>,
-    /// `(locals_frame_undo.len(), undo_log.len())` captured by each *scoped*
-    /// `enter_module_frame` (see [`ModuleFrame::scoped`]).
-    locals_frame_marks: Vec<(usize, usize)>,
     /// Stdlib bootstrap (prelude registration) compiles at root on purpose: the flat by-name residue it leaves *is*
     /// the ambient stdlib namespace. While set, `enter_module_frame` skips
     /// namespace scoping. User modules always compile with it unset.
     retain_namespaces: bool,
-    /// Per-scope unused-binding tracking. Each frame maps a let/param/match
-    /// name (that doesn't start with `_`) to its definition span; `mark_used`
-    /// removes the entry on first reference. Anything left when the frame is
-    /// popped is reported as an error. Frames are pushed/popped in lockstep
-    /// with `scope_marks` (blocks) and `enter_fn_frame`/`finish_fn_frame`
-    /// (params), so a use inside a nested closure marks the outer binding by
-    /// walking the whole stack.
-    pub(super) unused: Vec<HashMap<StrId, Span>>,
     /// `_`-prefixed pattern binders whose discarded type must be re-examined
     /// once inference for the module is final: discarding a value the type
     /// system knows is `Nil` hides nothing, so the explicit `Nil` pattern is
@@ -468,7 +447,7 @@ pub struct Compiler {
     /// graph (goto-def/find-refs/dead-code) is built independently via
     /// `module_refs` and is unaffected.
     pub(super) collect_hover_facts: bool,
-    /// Whether `pop_unused_scope` reports what it finds. See
+    /// Whether closing a block reports the names nothing read. See
     /// [`UnusedBindings`].
     pub(super) unused_bindings: UnusedBindings,
     /// Whether module-scope statements are accepted in the entry. See
@@ -812,10 +791,7 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         consts: Vec::new(),
         const_dedup: HashMap::new(),
         frames: frame::Frames::toplevel(HashMap::new(), 0),
-        locals_frame_undo: vec![],
-        locals_frame_marks: vec![],
         retain_namespaces: false,
-        unused: vec![],
         nil_discards: vec![],
         global_to_func: HashMap::new(),
         toplevel_decls: Vec::new(),
@@ -1316,14 +1292,10 @@ impl Compiler {
 
     fn get_or_create_local(&mut self, name: &str) -> i32 {
         let id = self.engine.intern(name);
-        let frame = &self.frames.current;
-        if let Some(entry) = frame.locals.get(&id).copied() {
-            // Reuse only if this slot was bound in the *current* block scope.
-            // If it was bound at a strictly shallower depth it is inherited
-            // from an enclosing scope, and shadowing must allocate a fresh
-            // slot so the outer value survives the block.
-            let inherited =
-                !frame.scope_marks.is_empty() && entry.depth < frame.scope_marks.len() as u32;
+        if let Some((entry, inherited)) = self.frames.current.lookup(id) {
+            // Reuse only if this slot was bound in the *current* block. One
+            // inherited from an enclosing block must survive it, so shadowing
+            // allocates a fresh slot.
             // At module scope (no enclosing fn frame) a re-binding must also
             // get a fresh slot. Top-level bindings live in the entry frame, so
             // a closure that captured one resolves it to `Global(slot)` and
@@ -1348,39 +1320,27 @@ impl Compiler {
     /// declaration (whose slot travels on its [`ToplevelDecl`]) and every
     /// binding inside a function frame.
     ///
-    /// The displaced entry goes on the undo log so `pop_local_scope` can
-    /// restore it. Outside any open block scope there is nothing to unwind, so
-    /// the log entry is skipped (the binding is captured by the next scope's
-    /// mark instead).
-    ///
     /// The new entry keeps the binding the name meant until
     /// [`Self::publish_local`] gives it its own.
     fn bind_local_raw(&mut self, name: StrId, slot: i32) {
         let is_global = self.binds_a_global();
-        let at_toplevel = self.frames.at_toplevel();
         let frame = &mut self.frames.current;
         let entry = LocalSlot {
             slot,
-            depth: frame.scope_marks.len() as u32,
             is_global,
-            binder: frame.locals.get(&name).and_then(|e| e.binder),
+            binder: frame.lookup(name).and_then(|(e, _)| e.binder),
         };
-        let prev = frame.locals.insert(name, entry);
-        if !frame.scope_marks.is_empty() {
-            frame.undo_log.push((name, prev));
-        } else if at_toplevel && !self.locals_frame_marks.is_empty() {
-            self.locals_frame_undo.push((name, prev));
-        }
+        frame.insert(name, entry);
     }
 
     /// Whether a binding made *now* lands in the entry frame — the one
     /// definition of "global" the compiler has.
     ///
-    /// `outer_scopes.is_empty()` says no function frame is open, and
-    /// `scope_marks.len() <= 1` says we are at the module's own local-scope
-    /// depth: `analyse_module` opens exactly one scope, imports and the
-    /// prelude's slot seeds bind below it at depth 0, and every nested
-    /// block/`if`/`match` at module level pushes another mark. Both halves of
+    /// `at_toplevel` says no function frame is open, and a module depth of at
+    /// most 1 says we are in the module's own statements: `analyse_module`
+    /// opens exactly one block, imports and the prelude's slot seeds bind
+    /// below it, and every nested block/`if`/`match` at module level opens
+    /// another. Both halves of
     /// the global question — [`Self::bind_local`]'s queue and
     /// `resolve_variable`'s `PushGlobal` — are derived from this, recorded once
     /// on [`LocalSlot::is_global`], so they cannot drift apart.
@@ -1389,14 +1349,14 @@ impl Compiler {
     /// opens a matching scope of its own, so a `let` inside one of its nested
     /// blocks is a frame temp there too.
     fn binds_a_global(&self) -> bool {
-        self.frames.at_toplevel() && self.frames.current.scope_marks.len() <= 1
+        self.frames.at_toplevel() && self.frames.current.module_depth() <= 1
     }
 
     /// [`Self::bind_local_raw`], plus: if this is a module-scope binding,
     /// queue its slot for the toplevel elaboration.
     ///
     /// The queue outlives `analyse_module`'s `pop_local_scope`, which the
-    /// `locals` entry does not. Only bindings made by the module's own
+    /// name's block does not. Only bindings made by the module's own
     /// statement walk ([`Self::walking_module_statements`]) at the module's own
     /// local-scope depth qualify. The extra `walking_module_statements` term is
     /// not a second definition of "global": the queue is *positional*, and the
@@ -1431,42 +1391,20 @@ impl Compiler {
     fn publish_local(&mut self, name: StrId) -> BinderId {
         let frame = &mut self.frames.current;
         let binder = frame.mint_binder();
-        // The entry was made in the current scope, so the undo log already
-        // restores what it displaced.
-        if let Some(entry) = frame.locals.get_mut(&name) {
+        if let Some(entry) = frame.lookup_mut(name) {
             entry.binder = Some(binder);
         }
         binder
     }
 
     pub(super) fn push_local_scope(&mut self) {
-        let frame = &mut self.frames.current;
-        frame.scope_marks.push(frame.undo_log.len());
-        self.unused.push(HashMap::new());
+        self.frames.current.open_block();
     }
 
     pub(super) fn pop_local_scope(&mut self) {
-        let frame = &mut self.frames.current;
-        if let Some(mark) = frame.scope_marks.pop() {
-            // Unwind in reverse bind order so a name shadowed twice in the
-            // same scope lands back on its pre-scope entry. `mark` is a length
-            // captured at the matching push, so it never exceeds the log.
-            debug_assert!(
-                mark <= frame.undo_log.len(),
-                "unbalanced push/pop_local_scope"
-            );
-            for (name, prev) in frame.undo_log.drain(mark..).rev() {
-                match prev {
-                    Some(entry) => {
-                        frame.locals.insert(name, entry);
-                    }
-                    None => {
-                        frame.locals.remove(&name);
-                    }
-                }
-            }
+        if let Some(block) = self.frames.current.close_block() {
+            self.report_unused(block);
         }
-        self.pop_unused_scope();
     }
 
     /// Open a lexical block scope: pushes a fresh type-env scope and a local
@@ -1483,34 +1421,24 @@ impl Compiler {
 
     /// Record a let/param/match binding for unused-variable checking. Names
     /// starting with `_` are exempt. If the same name was already tracked in
-    /// this scope and never used, that earlier binding is reported now (it's
+    /// this block and never used, that earlier binding is reported now (it's
     /// been shadowed and can no longer be referenced).
     fn track_binding(&mut self, name: &str, sp: Span) {
         if name.starts_with('_') {
             return;
         }
         let id = self.engine.intern(name);
-        let prev = self.unused.last_mut().and_then(|s| s.insert(id, sp));
-        if let Some(prev_sp) = prev {
+        if let Some(prev_sp) = self.frames.current.track(id, sp) {
             self.unused_binding(name, prev_sp);
         }
     }
 
-    /// Mark a name as used, searching innermost scope outward so a closure
-    /// referencing an enclosing binding clears it there.
-    fn mark_used(&mut self, name: StrId) {
-        for scope in self.unused.iter_mut().rev() {
-            if scope.remove(&name).is_some() {
-                return;
-            }
-        }
-    }
-
-    fn pop_unused_scope(&mut self) {
-        let Some(scope) = self.unused.pop() else {
+    /// Report each name `block` bound that nothing read, in source order.
+    fn report_unused(&mut self, block: frame::Block) {
+        let Some(unused) = block.unused else {
             return;
         };
-        let mut leftover: Vec<(StrId, Span)> = scope.into_iter().collect();
+        let mut leftover: Vec<(StrId, Span)> = unused.into_iter().collect();
         leftover.sort_by_key(|(_, sp)| (sp.start_line, sp.start_column));
         for (id, sp) in leftover {
             let name = self.engine.str(id).to_string();
@@ -1521,10 +1449,10 @@ impl Compiler {
     /// Where a name in scope lives. `None` when nothing in scope binds it: a
     /// constructor, a builtin, or a name whose only binding is not made yet.
     fn resolve_variable(&mut self, name: StrId) -> Option<Place> {
-        self.mark_used(name);
+        self.frames.mark_used(name);
         // A slot reserved for a binding not yet made is not in scope.
         let frame = &self.frames.current;
-        if let Some(binder) = frame.locals.get(&name).and_then(|e| e.binder) {
+        if let Some(binder) = frame.lookup(name).and_then(|(e, _)| e.binder) {
             return Some(Place::ThisFunction(binder));
         }
         if let Some(idx) = frame.captures.get(name) {
@@ -1549,7 +1477,7 @@ impl Compiler {
         // binding; re-deriving it here from `depth` is how the loader and the
         // binder came to disagree on the bare-expression entry path.
         for (i, outer) in self.frames.outer().iter().enumerate().rev() {
-            if let Some(entry) = outer.locals.get(&name) {
+            if let Some((entry, _)) = outer.lookup(name) {
                 let is_global = i == 0 && entry.is_global;
                 if frame.self_name == Some(name) {
                     // A top-level fn's self-name resolves to its entry-frame
@@ -2005,8 +1933,7 @@ impl Compiler {
         // binding still reserves its slot up front so a self-recursive
         // lambda can resolve its own (not-yet-bound) name through the
         // entry frame.
-        let defer_slot =
-            self.frames.at_toplevel() && self.frames.current.locals.contains_key(&name_id);
+        let defer_slot = self.frames.at_toplevel() && self.frames.current.lookup(name_id).is_some();
         if !defer_slot {
             self.get_or_create_local(&name);
         }
@@ -2024,10 +1951,10 @@ impl Compiler {
         }
 
         // Deliver the self-name to the lambda's own frame via a one-shot
-        // consumed by its `enter_fn_frame` — NOT by mutating
-        // `current_binding` here, which leaks into nested / HOF-arg
-        // lambdas and mis-resolves their calls to the enclosing fn as
-        // Self_ (emitting CallSelf against the wrong, live frame).
+        // consumed by its `enter_fn_frame`. Setting it on the current frame
+        // would leak into nested / HOF-arg lambdas and mis-resolve their
+        // calls to the enclosing fn as Self_ (emitting CallSelf against the
+        // wrong, live frame).
         let saved_self = if init_is_fn {
             self.next_fn_self_name.replace(name_id)
         } else {
@@ -2367,24 +2294,6 @@ impl Compiler {
         out
     }
 
-    /// Session rewind support: a balanced enter/leave pair leaves both module-
-    /// frame vectors empty, so anything found here means a frame was carried
-    /// across compiles, where its undo entries would evict an unrelated
-    /// compile's locals. Cleared in release so a survivor cannot do damage,
-    /// asserted in debug so the unbalanced path gets found.
-    pub(crate) fn reset_module_frames(&mut self) {
-        debug_assert!(
-            self.locals_frame_marks.is_empty(),
-            "module frame survived across reset_to"
-        );
-        debug_assert!(
-            self.locals_frame_undo.is_empty(),
-            "module-frame undo entries survived across reset_to"
-        );
-        self.locals_frame_marks.clear();
-        self.locals_frame_undo.clear();
-    }
-
     /// Snapshot the enclosing module's per-module state into a `ModuleFrame`
     /// and swap in fresh state for compiling `path`'s body. A fresh
     /// `ModuleReferences` collector is installed (the typecheck pass populates
@@ -2398,18 +2307,10 @@ impl Compiler {
         base_dir: Option<PathBuf>,
     ) -> ModuleFrame {
         let mid = self.ref_interner.intern(&path);
-        let scoped = !self.retain_namespaces;
-        if scoped {
-            // No compiler scope may span a module frame: imports (the only
-            // depth-0 binds inside a frame) are processed before the module's
-            // own local scope opens.
-            debug_assert!(self.frames.current.scope_marks.is_empty());
+        let scoped = (!self.retain_namespaces).then(|| {
             self.env.push_module_frame();
-            self.locals_frame_marks.push((
-                self.locals_frame_undo.len(),
-                self.frames.current.undo_log.len(),
-            ));
-        }
+            self.frames.current.open_module()
+        });
         ModuleFrame {
             module: std::mem::replace(&mut self.current_module, path),
             module_key: std::mem::replace(&mut self.current_module_key, key),
@@ -2434,26 +2335,10 @@ impl Compiler {
             module_refs,
             scoped,
         } = old;
-        if scoped {
+        if let Some(outer_base) = scoped {
             // Unwind the module's namespace: its env by-name entries and its
-            // depth-0 `locals` binds (import items). Entries above the
-            // `undo_log` mark were attributed to a scope already open at
-            // frame entry, so they unwind here too.
-            if let Some((fmark, umark)) = self.locals_frame_marks.pop() {
-                let frame = &mut self.frames.current;
-                let undone = frame.undo_log.drain(umark..).rev();
-                let undone = undone.chain(self.locals_frame_undo.drain(fmark..).rev());
-                for (name, prev) in undone {
-                    match prev {
-                        Some(p) => {
-                            frame.locals.insert(name, p);
-                        }
-                        None => {
-                            frame.locals.remove(&name);
-                        }
-                    }
-                }
-            }
+            // import items.
+            self.frames.current.close_module(outer_base);
             self.env.pop_module_frame();
         }
         self.current_module = module;
@@ -4560,7 +4445,7 @@ impl Compiler {
     ///
     /// `global_slot` is this fn's entry-frame slot from `Prepared::Fn`,
     /// threaded from Pass 3 so `global_to_func` is keyed by the same slot the
-    /// caller emits `StoreLocal` for — no reliance on `self.locals[name]`
+    /// caller emits `StoreLocal` for — no reliance on the name's local entry
     /// still holding that slot by the time this runs.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn compile_declared_function(
@@ -4609,7 +4494,6 @@ impl Compiler {
             None => self.next_fn_self_name.take(),
         };
         self.env.push_scope();
-        self.unused.push(HashMap::new());
         self.frames.enter(self_name)
     }
 
@@ -4644,9 +4528,10 @@ impl Compiler {
     ///
     /// Nothing is lowered here: the body is lowered in pass 6, after the walk.
     fn finish_fn_frame(&mut self, entered: frame::Entered, parked: ParkedBody) -> ClosureFact {
-        let captured = self.frames.leave(entered).captures.into_names();
+        let mut finished = self.frames.leave(entered);
+        let captured = std::mem::take(&mut finished.captures).into_names();
         self.env.pop_scope();
-        self.pop_unused_scope();
+        self.report_unused(finished.into_root());
 
         // Reserve the body's slot now, so the `func_idx` that the
         // `ClosureFact` and `global_to_func` are about to record is the one the

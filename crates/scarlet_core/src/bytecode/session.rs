@@ -214,23 +214,16 @@ impl Compiler {
         self.fns.truncate(functions);
         self.consts.truncate(constants);
         self.global_to_func.retain(|_, fi| fi.index() < functions);
-        // Survivors are watermark-preserved entry-frame slots. Depth normalises
-        // to 0 so the next opened scope treats them as inherited. The `StrId`
+        // Survivors are watermark-preserved entry-frame slots, and they all
+        // land in the fresh frame's root block. The `StrId`
         // key must also survive the strings truncation: an aliased selective
         // import can bind a post-watermark key to a pre-watermark slot, and a
         // dangling key would collide with whatever re-interns at that index.
         //
         // Everything else a body keeps (captures, binders, open blocks,
         // rigid type variables) starts over with a fresh toplevel frame.
-        let mut locals = std::mem::take(&mut self.frames.current.locals);
-        locals.retain(|&k, v| {
-            if v.slot < local_count && k.idx() < engine.strings {
-                v.depth = 0;
-                true
-            } else {
-                false
-            }
-        });
+        let mut locals = self.frames.current.take_names();
+        locals.retain(|&k, v| v.slot < local_count && k.idx() < engine.strings);
         self.frames = super::compiler::frame::Frames::toplevel(locals, local_count);
 
         // Lowered toplevels are dropped, never truncated: they are recorded
@@ -244,7 +237,6 @@ impl Compiler {
         self.binding_globals.clear();
         self.walking_module_statements = false;
 
-        self.unused.clear();
         // Queued entries hold `Ty` indices into the arena just rewound.
         self.nil_discards.clear();
         self.next_fn_self_name = None;
@@ -262,7 +254,6 @@ impl Compiler {
         // different path than it did last compile.
         self.defid_module_memo.clear();
         self.module_table.unmark_all_loading();
-        self.reset_module_frames();
     }
 
     /// Materialise a `CompileResult` by cloning, not taking, so the session can
