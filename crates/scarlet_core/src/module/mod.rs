@@ -115,7 +115,7 @@ pub enum ModuleSource {
 /// never on the path as written.
 #[derive(Debug, Clone)]
 pub struct ResolvedModule {
-    pub source: ModuleSource,
+    pub(crate) source: ModuleSource,
     pub(crate) key: ModuleKey,
 }
 
@@ -175,7 +175,7 @@ pub(crate) fn resolve_with(
 /// Resolve a canonical, non-relative module path: a [`file_module_path`]
 /// identity, a stdlib path, or a bare name. This is the form paths take in the
 /// reference graph, so the LSP's module-to-URI translation enters here.
-pub fn resolve_canonical(path: &ModulePath) -> Result<ResolvedModule, ResolveError> {
+pub(crate) fn resolve_canonical(path: &ModulePath) -> Result<ResolvedModule, ResolveError> {
     resolve_canonical_with(path, None)
 }
 

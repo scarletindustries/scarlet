@@ -11,7 +11,7 @@ use crate::module_path::ModuleKey;
 pub struct SourceFile {
     pub key: ModuleKey,
     /// The file it was read from, when it came from one.
-    pub path: Option<PathBuf>,
+    path: Option<PathBuf>,
     pub text: Rc<str>,
 }
 
@@ -25,7 +25,7 @@ impl SourceFile {
     }
 
     /// How to name it to a person: its path, or else its key.
-    pub fn display_name(&self) -> String {
+    pub(crate) fn display_name(&self) -> String {
         match &self.path {
             Some(p) => p.display().to_string(),
             None => self.key.to_string(),

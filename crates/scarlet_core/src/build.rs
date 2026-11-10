@@ -476,10 +476,6 @@ pub fn parse(text: &str) -> Parsed {
     }
 }
 
-pub fn source_hash(text: &str) -> u64 {
-    module::source_hash(text)
-}
-
 /// A file's modification time, length and inode. An editor that saves by
 /// replacing the file changes the inode even within the same second.
 type FileStat = (std::time::SystemTime, u64, u64);
