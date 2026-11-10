@@ -1,4 +1,6 @@
 // A TCP echo server and client in one program, over a length-prefixed protocol.
+// Every step returns a Result, and `main` is the one place that reports a
+// failure.
 
 import scarlet/binary
 import scarlet/net
@@ -13,10 +15,18 @@ import scarlet/time
 // A frame is four ASCII digits of length, then the payload.
 const HEADER_BYTES = 4
 
+// The server half.
+
+// Each connection runs in its own process, and a process's result goes
+// nowhere, so this is where a failed connection is reported.
 fn accept_loop(server net::Server) Nil {
 	match net::accept(server) {
 		Ok(Some(sock)) -> {
-			_ = process::spawn(fn() serve_one(sock) |> warn('server: connection'))
+			_ = process::spawn(
+				fn() serve_one(
+					sock,
+				) or e -> println('server: connection failed: ${string::inspect(e)}'),
+			)
 			accept_loop(server)
 		}
 		// net::close wakes this. An unclosed listener keeps the program alive.
@@ -39,11 +49,6 @@ fn serve_one(sock socket::Socket) Result(Nil, error::NetError) {
 	served |> result::then(fn(_) closed)
 }
 
-// Prints a failed step. The demo carries on, because each step stands alone.
-fn warn(r Result(Nil, error::NetError), what String) Nil {
-	r or e -> println('${what} failed: ${string::inspect(e)}')
-}
-
 fn read_frame(sock socket::Socket) Result(Binary, error::NetError) {
 	head <- result::then(socket::read_exact(sock, HEADER_BYTES))
 	length <- result::then(
@@ -51,6 +56,8 @@ fn read_frame(sock socket::Socket) Result(Binary, error::NetError) {
 	)
 	socket::read_exact(sock, length)
 }
+
+// The client half.
 
 fn pad(b Binary) Binary {
 	if binary::byte_size(b) >= HEADER_BYTES {
@@ -60,117 +67,83 @@ fn pad(b Binary) Binary {
 	}
 }
 
-fn read_all(sock socket::Socket, acc Binary) Binary {
+// Reads until the server closes.
+fn read_all(sock socket::Socket, acc Binary) Result(Binary, error::NetError) {
 	match socket::read(sock, 4096) {
 		Ok(socket::Data(chunk)) -> read_all(sock, binary::append(acc, chunk))
-		Ok(socket::Closed) -> acc
-		Err(_) -> acc
+		Ok(socket::Closed) -> Ok(acc)
+		Err(e) -> Err(e)
 	}
 }
 
-fn echo_once(server_addr address::SocketAddress, payload String) String {
-	exchange(server_addr, payload) or e -> 'echo failed: ${string::inspect(e)}'
-}
-
-fn exchange(server_addr address::SocketAddress, payload String) Result(String, error::NetError) {
+fn echo(server_addr address::SocketAddress, payload String) Result(String, error::NetError) {
 	sock <- result::then(net::connect_addr(server_addr))
 	bytes = binary::from_string(payload)
 	header = bytes |> binary::byte_size |> binary::from_int_ascii(binary::Dec) |> pad
 	Nil <- result::then(socket::write(sock, binary::append(header, bytes)))
-	reply = read_all(sock, <<>>)
+	reply <- result::then(read_all(sock, <<>>))
 	Nil <- result::then(socket::close(sock))
 	Ok(binary::to_string(reply) or '<not utf-8>')
 }
 
 // Asks for more than the server sends, so the close arrives as UnexpectedEof.
-fn past_close(server_addr address::SocketAddress) Nil {
-	match net::connect_addr(server_addr) {
-		Ok(sock) -> {
-			socket::write(sock, <<'0002ab'>>) |> warn('write')
-			match socket::read_exact(sock, 1024) {
-				Ok(_) -> println('read_exact: unexpectedly satisfied')
-				Err(e) -> match e {
-					error::UnexpectedEof -> println('read_exact past close: UnexpectedEof')
-					error::TimedOut
-					| error::ConnectionRefused
-					| error::ConnectionReset
-					| error::ConnectionAborted
-					| error::NotConnected
-					| error::BrokenPipe
-					| error::AddrInUse
-					| error::AddrNotAvailable
-					| error::NetworkDown
-					| error::NetworkUnreachable
-					| error::HostUnreachable
-					| error::PermissionDenied
-					| error::MessageTooLarge(_)
-					| error::UnalignedBinary
-					| error::InvalidPort
-					| error::Errno(_) -> println('read_exact: ${string::inspect(e)}')
-				}
-			}
-			socket::close(sock) |> warn('close')
+fn past_close(server_addr address::SocketAddress) Result(Nil, error::NetError) {
+	sock <- result::then(net::connect_addr(server_addr))
+	Nil <- result::then(socket::write(sock, <<'0002ab'>>))
+	Nil <- result::then(match socket::read_exact(sock, 1024) {
+		Ok(_) -> Ok(println('read_exact: unexpectedly satisfied'))
+		Err(e) -> if e == error::UnexpectedEof {
+			Ok(println('read_exact past close: UnexpectedEof'))
+		} else {
+			Err(e)
 		}
-		Err(e) -> println('connect failed: ${string::inspect(e)}')
+	})
+	socket::close(sock)
+}
+
+// read_within takes a timeout. read_until takes an absolute deadline. The
+// server never answers, so both should time out.
+fn timeouts(server_addr address::SocketAddress) Result(Nil, error::NetError) {
+	sock <- result::then(net::connect_addr(server_addr))
+	deadline = time::add_ms(time::monotonic(), 50)
+	Nil <- result::then(
+		socket::read_until(sock, 16, deadline)
+		|> timed_out(fn() println('read_until: deadline passed')),
+	)
+	start = time::monotonic()
+	Nil <- result::then(
+		socket::read_within(sock, 16, 50)
+		|> timed_out(fn() {
+			elapsed = time::since_ms(time::monotonic(), start)
+			println('read_within: waited out the 50ms: ${elapsed >= 50}')
+		}),
+	)
+	socket::close(sock)
+}
+
+// Runs `then` when a read timed out, as expected. Data is a surprise, and any
+// other error is passed on.
+fn timed_out(r Result(socket::Read, error::NetError), then fn() Nil) Result(Nil, error::NetError) {
+	match r {
+		Ok(_) -> Ok(println('read: unexpected data'))
+		Err(e) -> if e == error::TimedOut {
+			Ok(then())
+		} else {
+			Err(e)
+		}
 	}
 }
 
-// read_within takes a timeout. read_until takes an absolute deadline.
-fn timeouts(server_addr address::SocketAddress) Nil {
-	match net::connect_addr(server_addr) {
-		Ok(sock) -> {
-			deadline = time::add_ms(time::monotonic(), 50)
-			match socket::read_until(sock, 16, deadline) {
-				Ok(_) -> println('read_until: unexpected data')
-				Err(e) -> match e {
-					error::TimedOut -> println('read_until: deadline passed')
-					error::ConnectionRefused
-					| error::ConnectionReset
-					| error::ConnectionAborted
-					| error::NotConnected
-					| error::BrokenPipe
-					| error::AddrInUse
-					| error::AddrNotAvailable
-					| error::NetworkDown
-					| error::NetworkUnreachable
-					| error::HostUnreachable
-					| error::PermissionDenied
-					| error::UnexpectedEof
-					| error::MessageTooLarge(_)
-					| error::UnalignedBinary
-					| error::InvalidPort
-					| error::Errno(_) -> println('read_until: ${string::inspect(e)}')
-				}
-			}
-			start = time::monotonic()
-			match socket::read_within(sock, 16, 50) {
-				Ok(_) -> println('read_within: unexpected data')
-				Err(e) -> match e {
-					error::TimedOut -> {
-						elapsed = time::since_ms(time::monotonic(), start)
-						println('read_within: waited out the 50ms: ${elapsed >= 50}')
-					}
-					error::ConnectionRefused
-					| error::ConnectionReset
-					| error::ConnectionAborted
-					| error::NotConnected
-					| error::BrokenPipe
-					| error::AddrInUse
-					| error::AddrNotAvailable
-					| error::NetworkDown
-					| error::NetworkUnreachable
-					| error::HostUnreachable
-					| error::PermissionDenied
-					| error::UnexpectedEof
-					| error::MessageTooLarge(_)
-					| error::UnalignedBinary
-					| error::InvalidPort
-					| error::Errno(_) -> println('read_within: ${string::inspect(e)}')
-				}
-			}
-			socket::close(sock) |> warn('close')
+// Connecting to a port that can't exist fails before anything goes on the
+// wire.
+fn bad_port() Result(Nil, error::NetError) {
+	match net::connect('127.0.0.1', 70000) {
+		Ok(_) -> Ok(println('connected on a port that cannot exist'))
+		Err(e) -> if e == error::InvalidPort {
+			Ok(println('connect to port 70000: InvalidPort'))
+		} else {
+			Err(e)
 		}
-		Err(e) -> println('connect failed: ${string::inspect(e)}')
 	}
 }
 
@@ -181,8 +154,10 @@ fn render(ip address::IpAddress, port Int) String {
 	}
 }
 
+// Running the demo.
+
 /** Why the demo stopped early. */
-type SetupError {
+type DemoError {
 	NotAnIpLiteral
 	PortOutOfRange
 	StepFailed(step Step, error error::NetError)
@@ -190,23 +165,37 @@ type SetupError {
 
 type Step {
 	Resolve
+	BadPort
 	Listen
 	LocalAddr
+	Echo
+	PastClose
+	Timeouts
+	Close
 	SecondListen
 	SecondLocalAddr
+	SecondEcho
+	SecondClose
 }
 
 fn step_name(s Step) String {
 	match s {
 		Resolve -> 'resolve'
+		BadPort -> 'connect to a bad port'
 		Listen -> 'listen'
 		LocalAddr -> 'local_addr'
+		Echo -> 'echo'
+		PastClose -> 'read past close'
+		Timeouts -> 'timeouts'
+		Close -> 'close'
 		SecondListen -> 'second listen'
 		SecondLocalAddr -> 'second local_addr'
+		SecondEcho -> 'second echo'
+		SecondClose -> 'second close'
 	}
 }
 
-fn describe(e SetupError) String {
+fn describe(e DemoError) String {
 	match e {
 		NotAnIpLiteral -> 'not an ip literal'
 		PortOutOfRange -> 'port out of range'
@@ -214,77 +203,52 @@ fn describe(e SetupError) String {
 	}
 }
 
+fn step(r Result(a, error::NetError), s Step) Result(a, DemoError) {
+	r |> result::map_err(fn(e) StepFailed(step: s, error: e))
+}
+
 // A second listener, served by net::serve_on.
-fn served(bind_addr address::SocketAddress) Result(Nil, SetupError) {
-	server <- result::then(step(net::listen_addr(bind_addr), SecondListen))
-	local <- result::then(step(net::local_addr(server), SecondLocalAddr))
+fn served(bind_addr address::SocketAddress) Result(Nil, DemoError) {
+	server <- result::then(net::listen_addr(bind_addr) |> step(SecondListen))
+	local <- result::then(net::local_addr(server) |> step(SecondLocalAddr))
 	_ = net::serve_on(
 		server,
 		serve_one,
 		fn(e) println('served: ${address::to_string(e.peer)} failed: ${string::inspect(e.error)}'),
 	)
-	println(echo_once(local, 'served'))
-	net::close(server) |> warn('close')
-	Ok(Nil)
+	reply <- result::then(echo(local, 'served') |> step(SecondEcho))
+	println(reply)
+	net::close(server) |> step(SecondClose)
 }
 
-fn run() Result(Nil, SetupError) {
+fn run() Result(Nil, DemoError) {
 	ip <- result::then(address::parse('127.0.0.1') |> result::replace_err(NotAnIpLiteral))
-	resolved <- result::then(step(net::resolve('127.0.0.1'), Resolve))
+	resolved <- result::then(net::resolve('127.0.0.1') |> step(Resolve))
 	agrees = address::ip_to_string(resolved) == address::ip_to_string(ip)
 	println('loopback is v6: ${address::is_v6(ip)}, resolve agrees: ${agrees}')
 	println('a constructed address: ${render(ip, 8080)}')
 	println('an impossible one: ${render(ip, 70000)}')
-
-	match net::connect('127.0.0.1', 70000) {
-		Ok(_) -> println('connected on a port that cannot exist')
-		Err(e) -> match e {
-			error::InvalidPort -> println('connect to port 70000: InvalidPort')
-			error::TimedOut
-			| error::ConnectionRefused
-			| error::ConnectionReset
-			| error::ConnectionAborted
-			| error::NotConnected
-			| error::BrokenPipe
-			| error::AddrInUse
-			| error::AddrNotAvailable
-			| error::NetworkDown
-			| error::NetworkUnreachable
-			| error::HostUnreachable
-			| error::PermissionDenied
-			| error::UnexpectedEof
-			| error::MessageTooLarge(_)
-			| error::UnalignedBinary
-			| error::Errno(_) -> println('connect failed: ${string::inspect(e)}')
-		}
-	}
+	Nil <- result::then(bad_port() |> step(BadPort))
 
 	// Port 0 lets the kernel pick a free port.
 	bind_addr <- result::then(address::socket_address(ip, 0) |> result::replace_err(PortOutOfRange))
-	server <- result::then(step(net::listen_addr(bind_addr), Listen))
-	local <- result::then(step(net::local_addr(server), LocalAddr))
-
+	server <- result::then(net::listen_addr(bind_addr) |> step(Listen))
+	local <- result::then(net::local_addr(server) |> step(LocalAddr))
 	host = local |> address::ip |> address::ip_to_string
-	assigned = address::port(local) > 0
-	println('bound ${host}, kernel picked a port: ${assigned}')
+	println('bound ${host}, kernel picked a port: ${address::port(local) > 0}')
 
 	_ = process::spawn(fn() accept_loop(server))
 
-	println(echo_once(local, 'hello'))
-	println(echo_once(local, 'sockets'))
-	past_close(local)
-	timeouts(local)
-
-	served(bind_addr) or why -> println(describe(why))
-
-	net::close(server) |> warn('close')
-	Ok(Nil)
-}
-
-fn step(r Result(a, error::NetError), s Step) Result(a, SetupError) {
-	result::map_err(r, fn(e) StepFailed(step: s, error: e))
+	hello <- result::then(echo(local, 'hello') |> step(Echo))
+	println(hello)
+	sockets <- result::then(echo(local, 'sockets') |> step(Echo))
+	println(sockets)
+	Nil <- result::then(past_close(local) |> step(PastClose))
+	Nil <- result::then(timeouts(local) |> step(Timeouts))
+	Nil <- result::then(served(bind_addr))
+	net::close(server) |> step(Close)
 }
 
 pub fn main() {
-	run() or why -> println(describe(why))
+	run() or why -> println('demo stopped: ${describe(why)}')
 }

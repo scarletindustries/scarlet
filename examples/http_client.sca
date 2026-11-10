@@ -27,10 +27,8 @@ fn route(req http::Request) http::Response {
 		(_, <<'/stream'>>) -> http::ok(body::from_binary(<<'streamed'>>))
 		(http::Post, <<'/echo'>>) -> match body::collect(req.body, MAX_BODY) {
 			Ok(bytes) -> echo_reply(bytes)
-			Err(e) -> {
-				println('echo: body failed: ${string::inspect(e)}')
-				http::Response(..http::text('could not read the body'), status: 400)
-			}
+			// The client sent a body the server couldn't read, so it gets a 400.
+			Err(_) -> http::Response(..http::text('could not read the body'), status: 400)
 		}
 		(
 			http::Get
@@ -56,19 +54,15 @@ fn echo_reply(bytes Binary) http::Response {
 // The client half.
 
 // Connection: close makes the end of the stream the end of the response.
-fn read_to_close(conn socket::Socket, acc Binary) Binary {
+fn read_to_close(conn socket::Socket, acc Binary) Result(Binary, error::NetError) {
 	match socket::read(conn, 65536) {
 		Ok(socket::Data(bytes)) -> read_to_close(conn, binary::append(acc, bytes))
-		Ok(socket::Closed) -> acc
-		Err(_) -> acc
+		Ok(socket::Closed) -> Ok(acc)
+		Err(e) -> Err(e)
 	}
 }
 
-fn request(port Int, method String, target String, payload String) String {
-	exchange(port, method, target, payload) or e -> 'request failed: ${string::inspect(e)}'
-}
-
-fn exchange(
+fn request(
 	port Int,
 	method String,
 	target String,
@@ -79,7 +73,7 @@ fn exchange(
 	head = '${method} ${target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: ${length}\r\n\r\n'
 	conn <- result::then(net::connect('127.0.0.1', port))
 	Nil <- result::then(socket::write(conn, head |> binary::from_string |> binary::append(bytes)))
-	response = read_to_close(conn, <<>>)
+	response <- result::then(read_to_close(conn, <<>>))
 	Nil <- result::then(socket::close(conn))
 	Ok(binary::to_string(response) or '<not utf-8>')
 }
@@ -117,35 +111,35 @@ fn budget_body() body::Body {
 	fn() Ok(body::Chunk(<<'five!'>>, body::from_binary(<<'more'>>)))
 }
 
-// Prints a failed step. Each request stands alone, so the demo carries on.
-fn warn(r Result(Nil, error::NetError), what String) Nil {
-	r or e -> println('${what} failed: ${string::inspect(e)}')
+/** Why the hand-written server gave up on a connection. */
+type ServeError {
+	NetFailed(error error::NetError)
+	DrainFailed(error body::DrainError)
 }
 
-// Runs the rest of the block once the head is written. If the write fails,
-// there's no point sending a body.
-fn head_sent(r Result(Nil, error::NetError), what String, next fn(Nil) Nil) Nil {
-	match r {
-		Ok(Nil) -> next(Nil)
-		Err(e) -> println('${what}: head failed: ${string::inspect(e)}')
+fn describe_serve(e ServeError) String {
+	match e {
+		NetFailed(err) -> string::inspect(err)
+		DrainFailed(body::SourceFailed(err)) -> 'source failed: ${string::inspect(err)}'
+		DrainFailed(body::SinkFailed(err)) -> 'sink failed: ${string::inspect(err)}'
 	}
 }
 
-fn sent(what String, r Result(Nil, body::DrainError)) Nil {
-	match r {
-		Ok(Nil) -> Nil
-		Err(body::SourceFailed(e)) -> println('${what}: source failed: ${string::inspect(e)}')
-		Err(body::SinkFailed(e)) -> println('${what}: sink failed: ${string::inspect(e)}')
-	}
+fn net_failed(r Result(a, error::NetError)) Result(a, ServeError) {
+	r |> result::map_err(NetFailed)
 }
 
-fn counted(what String, r Result(body::Drained, body::DrainError)) Nil {
-	match r {
-		Ok(body::Complete) -> println('${what}: Complete')
-		Ok(body::Short(written)) -> println('${what}: Short(${written})')
-		Ok(body::Overran(written)) -> println('${what}: Overran(${written})')
-		Err(body::SourceFailed(e)) -> println('${what}: source failed: ${string::inspect(e)}')
-		Err(body::SinkFailed(e)) -> println('${what}: sink failed: ${string::inspect(e)}')
+fn drain_failed(r Result(a, body::DrainError)) Result(a, ServeError) {
+	r |> result::map_err(DrainFailed)
+}
+
+// Prints how a counted drain ended. Each outcome is a success, but they look
+// different on the wire.
+fn counted(what String, d body::Drained) Nil {
+	match d {
+		body::Complete -> println('${what}: Complete')
+		body::Short(written) -> println('${what}: Short(${written})')
+		body::Overran(written) -> println('${what}: Overran(${written})')
 	}
 }
 
@@ -180,47 +174,55 @@ fn read_length(
 	body::collect(rest, MAX_BODY) |> result::map(fn(tail) binary::append(head_bytes, tail))
 }
 
-fn respond(sock socket::Socket, target Binary, payload Binary) Nil {
+fn respond(sock socket::Socket, target Binary, payload Binary) Result(Nil, ServeError) {
 	match target {
 		<<'/pump'>> -> {
 			bin = binary::from_string('pumped ${binary::byte_size(payload)} bytes')
 			head = fixed_head(binary::byte_size(bin))
-			sent('pump', body::drain_with_head(head, body::from_binary(bin), sock))
+			body::drain_with_head(head, body::from_binary(bin), sock) |> drain_failed
 		}
 		<<'/bare'>> -> {
 			bin = <<'drained bare'>>
-			Nil <- head_sent(socket::write(sock, fixed_head(binary::byte_size(bin))), 'bare')
-			sent('bare', body::drain(body::from_binary(bin), sock))
+			Nil <- result::then(
+				socket::write(sock, fixed_head(binary::byte_size(bin))) |> net_failed,
+			)
+			body::drain(body::from_binary(bin), sock) |> drain_failed
 		}
 		<<'/chunked'>> -> {
-			Nil <- head_sent(socket::write(sock, chunked_head()), 'chunked')
-			sent('chunked', body::drain_chunked(two_chunks(), sock))
+			Nil <- result::then(socket::write(sock, chunked_head()) |> net_failed)
+			body::drain_chunked(two_chunks(), sock) |> drain_failed
 		}
 		<<'/streamed'>> ->
-			sent('streamed', body::drain_chunked_with_head(chunked_head(), two_chunks(), sock))
+			body::drain_chunked_with_head(chunked_head(), two_chunks(), sock) |> drain_failed
 		<<'/counted'>> -> {
 			bin = <<'counted body'>>
 			n = binary::byte_size(bin)
-			Nil <- head_sent(socket::write(sock, fixed_head(n)), 'counted')
-			counted('counted', body::drain_counted(body::from_binary(bin), sock, n))
+			Nil <- result::then(socket::write(sock, fixed_head(n)) |> net_failed)
+			body::drain_counted(body::from_binary(bin), sock, n)
+			|> drain_failed
+			|> result::map(fn(d) counted('counted', d))
 		}
 		// The head promises 5 bytes, so the second chunk is dropped.
 		<<'/overrun'>> -> {
-			Nil <- head_sent(socket::write(sock, fixed_head(5)), 'overrun')
-			counted('overrun', body::drain_counted(budget_body(), sock, 5))
+			Nil <- result::then(socket::write(sock, fixed_head(5)) |> net_failed)
+			body::drain_counted(budget_body(), sock, 5)
+			|> drain_failed
+			|> result::map(fn(d) counted('overrun', d))
 		}
-		_ -> socket::write(sock, h1::serialize_head(404, [])) |> warn('404')
+		_ -> socket::write(sock, h1::serialize_head(404, [])) |> net_failed
 	}
 }
 
-fn serve_raw(sock socket::Socket) Nil {
+// Serves one connection and closes it, even after a failure. The first error
+// is the one returned.
+fn serve_raw(sock socket::Socket) Result(Nil, ServeError) {
 	deadline = time::add_ms(time::monotonic(), DEADLINE_MS)
-	match read_head(sock, <<>>, deadline) {
+	served = match read_head(sock, <<>>, deadline) {
 		Ok((buf, h1::Done(target: t, headers: hs, consumed: c, ..))) -> match h1::framing(hs) {
 			h1::NoBody -> respond(sock, t, <<>>)
-			h1::Length(n) -> match read_length(sock, buf, c, n, deadline) {
-				Ok(payload) -> respond(sock, t, payload)
-				Err(e) -> println('body read failed: ${string::inspect(e)}')
+			h1::Length(n) -> {
+				payload <- result::then(read_length(sock, buf, c, n, deadline) |> net_failed)
+				respond(sock, t, payload)
 			}
 			// This server reads no chunked request bodies.
 			h1::Chunked -> reject(sock, 501)
@@ -228,88 +230,113 @@ fn serve_raw(sock socket::Socket) Nil {
 		}
 		Ok((_, h1::Bad(status))) -> reject(sock, status)
 		// `read_head` reads until the head is whole, so it never returns this.
-		Ok((_, h1::NeedMore)) -> Nil
-		// The peer closed, or the deadline passed: there is no one to answer.
-		Err(_) -> Nil
+		Ok((_, h1::NeedMore)) -> Ok(Nil)
+		// A peer that closes before sending a request has nothing to answer.
+		Err(e) -> if e == error::UnexpectedEof {
+			Ok(Nil)
+		} else {
+			Err(NetFailed(e))
+		}
 	}
-	socket::close(sock) |> warn('close')
+	closed = socket::close(sock) |> net_failed
+	served |> result::then(fn(_) closed)
 }
 
-fn reject(sock socket::Socket, status Int) Nil {
-	socket::write(sock, h1::serialize_head(status, [])) |> warn('reject')
+fn reject(sock socket::Socket, status Int) Result(Nil, ServeError) {
+	socket::write(sock, h1::serialize_head(status, [])) |> net_failed
 }
 
+// Each connection runs in its own process, and a process's result goes
+// nowhere, so this is where a failed connection is reported.
 fn accept_loop(server net::Server) Nil {
 	match net::accept(server) {
 		Ok(Some(sock)) -> {
-			_ = process::spawn(fn() serve_raw(sock))
+			_ = process::spawn(
+				fn() serve_raw(sock) or e -> println('raw server: ${describe_serve(e)}'),
+			)
 			accept_loop(server)
 		}
 		Ok(None) -> Nil
-		Err(_) -> Nil
+		Err(e) -> println('raw server: accept failed: ${string::inspect(e)}')
 	}
+}
+
+// Running the demo.
+
+/** Why the demo stopped early. */
+type DemoError {
+	StepFailed(step Step, error error::NetError)
+}
+
+type Step {
+	Listen
+	LocalAddr
+	Request(label String)
+	Close
+}
+
+fn describe(e DemoError) String {
+	match e {
+		StepFailed(Listen, err) -> 'listen failed: ${string::inspect(err)}'
+		StepFailed(LocalAddr, err) -> 'local_addr failed: ${string::inspect(err)}'
+		StepFailed(Request(label), err) -> '${label} failed: ${string::inspect(err)}'
+		StepFailed(Close, err) -> 'close failed: ${string::inspect(err)}'
+	}
+}
+
+fn step(r Result(a, error::NetError), s Step) Result(a, DemoError) {
+	r |> result::map_err(fn(e) StepFailed(step: s, error: e))
+}
+
+// Listens on a spare loopback port.
+fn loopback() Result((Int, net::Server), DemoError) {
+	server <- result::then(net::listen('127.0.0.1', 0) |> step(Listen))
+	addr <- result::then(net::local_addr(server) |> step(LocalAddr))
+	Ok((address::port(addr), server))
+}
+
+// Sends one request and prints the response.
+fn fetch(port Int, method String, target String, payload String) Result(Nil, DemoError) {
+	label = '${method} ${target}'
+	response <- result::then(request(port, method, target, payload) |> step(Request(label)))
+	Ok(show(label, response))
 }
 
 fn pump_payload() String {
 	array::fold(1..129, '', fn(acc, _i) '${acc}0123456789abcdef')
 }
 
-/** Why no loopback port could be had. */
-type LoopbackError {
-	ListenFailed(error error::NetError)
-	LocalAddrFailed(error error::NetError)
-}
-
-fn describe_loopback(e LoopbackError) String {
-	match e {
-		ListenFailed(err) -> 'listen failed: ${err}'
-		LocalAddrFailed(err) -> 'local_addr failed: ${err}'
-	}
-}
-
-// Listens on a spare loopback port, then runs the rest of the caller's block.
-fn bind_loopback(next fn(Int, net::Server) Nil) Nil {
-	match loopback() {
-		Ok((port, server)) -> next(port, server)
-		Err(why) -> println(describe_loopback(why))
-	}
-}
-
-fn loopback() Result((Int, net::Server), LoopbackError) {
-	server <- result::then(net::listen('127.0.0.1', 0) |> result::map_err(ListenFailed))
-	addr <- result::then(net::local_addr(server) |> result::map_err(LocalAddrFailed))
-	Ok((address::port(addr), server))
-}
-
-fn by_hand() Nil {
-	port, server <- bind_loopback()
+fn by_hand() Result(Nil, DemoError) {
+	(port, server) <- result::then(loopback())
 	_ = process::spawn(fn() accept_loop(server))
 
-	show('POST /pump', request(port, 'POST', '/pump', pump_payload()))
-	show('GET /bare', request(port, 'GET', '/bare', ''))
-	show('GET /chunked', request(port, 'GET', '/chunked', ''))
-	show('GET /streamed', request(port, 'GET', '/streamed', ''))
-	show('GET /counted', request(port, 'GET', '/counted', ''))
-	show('GET /overrun', request(port, 'GET', '/overrun', ''))
-
-	net::close(server) |> warn('close')
+	Nil <- result::then(fetch(port, 'POST', '/pump', pump_payload()))
+	Nil <- result::then(fetch(port, 'GET', '/bare', ''))
+	Nil <- result::then(fetch(port, 'GET', '/chunked', ''))
+	Nil <- result::then(fetch(port, 'GET', '/streamed', ''))
+	Nil <- result::then(fetch(port, 'GET', '/counted', ''))
+	Nil <- result::then(fetch(port, 'GET', '/overrun', ''))
+	net::close(server) |> step(Close)
 }
 
-pub fn main() {
-	port, server <- bind_loopback()
+fn run() Result(Nil, DemoError) {
+	(port, server) <- result::then(loopback())
 	_ = http::serve_on(
 		server,
 		route,
 		fn(e) println('client ${address::to_string(e.peer)} failed: ${string::inspect(e.error)}'),
 	)
 
-	show('GET /', request(port, 'GET', '/', ''))
-	show('POST /echo', request(port, 'POST', '/echo', 'hello'))
-	show('GET /stream', request(port, 'GET', '/stream', ''))
-	show('GET /nope', request(port, 'GET', '/nope', ''))
+	Nil <- result::then(fetch(port, 'GET', '/', ''))
+	Nil <- result::then(fetch(port, 'POST', '/echo', 'hello'))
+	Nil <- result::then(fetch(port, 'GET', '/stream', ''))
+	Nil <- result::then(fetch(port, 'GET', '/nope', ''))
 
 	// Wakes the acceptors with Ok(None), so the program can end.
-	net::close(server) |> warn('close')
-
+	Nil <- result::then(net::close(server) |> step(Close))
 	by_hand()
+}
+
+pub fn main() {
+	run() or e -> println('demo stopped: ${describe(e)}')
 }
