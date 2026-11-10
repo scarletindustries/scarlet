@@ -11,7 +11,7 @@ use crate::typed::{BinSegPat, Block, Const, Expr, ExprKind, FnBody, Function, Or
 
 impl Checker<'_> {
     pub fn finalise(&mut self, functions: &[Function], consts: &[Const], statements: &[Stmt]) {
-        let mut visit = |c: &mut Self, e: &Expr| c.visit(e);
+        let visit = |c: &mut Self, e: &Expr| c.visit(e);
         for f in functions {
             if let FnBody::Expr(body) = &f.body {
                 body.walk(&mut |e| visit(self, e));

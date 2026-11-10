@@ -22,8 +22,7 @@ fn golden_dir() -> PathBuf {
 /// appearance, and print each referenced constant's value in a `where` block
 /// so the snapshot still shows what the program computes.
 fn lower(source: &str) -> String {
-    let ast = parse(source);
-    let r = scarlet::bytecode::compile(&ast, None);
+    let r = scarlet::compile::compile_text(source, None);
     assert!(
         r.success(),
         "compile failed:\n{source}\n--- diagnostics ---\n{:#?}",

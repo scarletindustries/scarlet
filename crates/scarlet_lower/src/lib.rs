@@ -1,12 +1,14 @@
-//! Core IR is the typed ANF that sits between typed IR and a backend. ANF
-//! (A-normal form) gives every intermediate value a name, so each operation
-//! only takes names as operands.
+//! Lowering: checked modules in, one [`Program`] out.
 //!
-//! The IR itself is the contract between the compiler and the VM, so it lives
-//! in `scarlet_ir`. This crate re-exports it and holds the compiler's passes
-//! over it. `lower` turns typed IR into Core IR, `immediates` turns `Bool` and
-//! `Nil` constructors into plain values, and `perceus` adds reference counting
-//! and memory reuse.
+//! `program` hands out the ids the VM uses and drives the rest. `translate`
+//! turns each module's typed tree into typed IR, `lower` turns typed IR into
+//! Core IR, `immediates` turns `Bool` and `Nil` constructors into plain
+//! values, and `perceus` adds reference counting and memory reuse.
+//!
+//! Core IR is the typed ANF between typed IR and a backend. ANF (A-normal
+//! form) gives every intermediate value a name, so each operation only takes
+//! names as operands. It is the contract between the compiler and the VM, so
+//! it lives in `scarlet_ir`, and this crate re-exports it.
 
 pub mod immediates;
 pub mod lower;
@@ -15,37 +17,7 @@ pub mod program;
 mod translate;
 pub mod typed_ir;
 
-use std::fmt;
-
 pub use scarlet_ir::core_ir::*;
-
-/// A whole lowered module. It holds every function, plus the module toplevel
-/// as its own expression, which is the module's initialiser.
-#[derive(Debug, Clone)]
-pub struct CoreProgram {
-    pub fns: Vec<CoreFn>,
-    pub toplevel: CoreExpr,
-}
-
-impl Default for CoreProgram {
-    /// No functions, and a toplevel that returns nil.
-    fn default() -> Self {
-        CoreProgram {
-            fns: Vec::new(),
-            toplevel: CoreExpr::Tail(Atom::Nil),
-        }
-    }
-}
-
-impl fmt::Display for CoreProgram {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for func in &self.fns {
-            writeln!(f, "{func}")?;
-        }
-        writeln!(f, "toplevel:")?;
-        write!(f, "{}", Indented(&self.toplevel, 1))
-    }
-}
 
 /// Fixture builders shared by the `core_ir` test modules.
 #[cfg(test)]

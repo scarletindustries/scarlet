@@ -11,7 +11,7 @@
 //! later has to work one out again.
 
 use scarlet_ir::intrinsic::Intrinsic;
-use scarlet_syntax::ast::{BinaryOp, UnaryOp};
+use scarlet_syntax::ast::UnaryOp;
 use scarlet_syntax::span::Span;
 use scarlet_types::name::{CtorName, ModuleKey, Name, ValueName};
 
@@ -85,6 +85,23 @@ pub struct Expr {
     pub kind: ExprKind,
 }
 
+/// A binary operator that takes two values. `&&` and `||` are control flow,
+/// so they are their own nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
 /// What a name in value position refers to.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Var {
@@ -146,9 +163,8 @@ pub enum ExprKind {
         start: Box<Expr>,
         end: Box<Expr>,
     },
-    /// Any operator but `&&` and `||`.
     BinOp {
-        op: BinaryOp,
+        op: BinOp,
         left: Box<Expr>,
         right: Box<Expr>,
     },
@@ -202,6 +218,9 @@ pub struct Arg {
 #[derive(Debug, Clone)]
 pub struct Spread {
     pub base: Expr,
+    /// How many of the call's arguments were written before it, so it runs
+    /// in its place among them.
+    pub at: u32,
     /// For each field no argument gives: its slot in the new value, and where
     /// to read it from `base`.
     pub fills: Vec<(u32, FieldAt)>,

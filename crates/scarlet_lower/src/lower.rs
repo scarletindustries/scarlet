@@ -1,15 +1,13 @@
 //! Lowering turns typed IR into Core IR.
 //!
-//! [`lower`] turns a [`TypedProgram`] into a [`CoreProgram`]. Every
-//! subexpression becomes a `Let{bind,rhs,body}`, so evaluation order is spelled
-//! out as a right-nested spine of `Let`s and every operand is a [`LocalId`].
+//! [`lower_fn`] turns one [`TypedFn`] into a [`CoreFn`]. Every subexpression
+//! becomes a `Let{bind,rhs,body}`, so evaluation order is spelled out as a
+//! right-nested spine of `Let`s and every operand is a [`LocalId`].
 //!
-//! Lowering never fails. It takes `&TypedProgram` and returns `CoreProgram`
-//! with no `&mut` and no `Result`, because everything it would have to ask for
-//! is already a field: a type is an [`RTy`], a name is a [`ValueRef`] and a
-//! callee is a [`TypedCallee`]. The earlier stages can fail, though. A broken
-//! invariant there reaches the elaborator's `elaborator_bug`, which aborts
-//! instead of reporting a diagnostic.
+//! Lowering never fails. It takes `&TypedFn` and returns `CoreFn` with no
+//! `Result`, because everything it would have to ask for is already a field: a
+//! type is an [`RTy`], a name is a [`ValueRef`] and a callee is a
+//! [`TypedCallee`].
 //!
 //! ## How the builder works
 //!
@@ -31,18 +29,12 @@
 //! of the value's, which turns a `Drop` that knows the value's shape into a
 //! generic one.
 //!
-//! ## One pass over the whole program
+//! ## The constant pool is already final
 //!
-//! `lower` walks `TypedProgram::fns` in order, so `CoreProgram::fns[i]` is the
-//! body of `FuncIdx(i)` and every `TypedCallee::Known(i)` operand is already
-//! correct.
-//!
-//! ## The elaborator owns the constant pool
-//!
-//! Interning changes the pool, so `lower` never interns. Every `Atom::Const`
-//! names a [`ConstId`] read from the node. Even integers no source literal
-//! writes, like an array pattern's length or a `<<>>` walk's bit cursor, are
-//! pooled during elaboration, so the pool is already final when `lower` runs.
+//! `lower` never interns. Every `Atom::Const` names a [`ConstId`] read from
+//! the node. Even integers no source literal writes, like an array pattern's
+//! length or a `<<>>` walk's bit cursor, are pooled when the typed IR is made,
+//! so the pool is already final when `lower` runs.
 
 use std::collections::VecDeque;
 
@@ -255,7 +247,7 @@ impl Lower {
         }
     }
 
-    /// The local a [`BindingId`] names. A `TypedProgram` always binds before it
+    /// The local a [`BindingId`] names. A `TypedFn` always binds before it
     /// reads, so this can't fail. It must not fail quietly either, because any
     /// default would be a live local, and the program would run and return a
     /// wrong answer.

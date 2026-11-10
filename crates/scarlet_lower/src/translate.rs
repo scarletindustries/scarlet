@@ -6,12 +6,12 @@
 use std::collections::HashMap;
 
 use scarlet_check::typed::{
-    self as t, Arg, ArrayElem, BinSeg, BinSegPat, BinUnit, BinderId, Block, Expr, ExprKind, FieldAt, FnBody,
+    self as t, Arg, ArrayElem, BinOp, BinSeg, BinSegPat, BinUnit, BinderId, Block, Expr, ExprKind, FieldAt, FnBody,
     InterpPart, OrShape, Pattern, PatternKind, Rest, Stmt, TypedModule, Var,
 };
 use scarlet_ir::core_ir::{Const, FuncIdx, PrimOp};
 use scarlet_ir::rty::{Prim, RTy};
-use scarlet_syntax::ast::{BinaryOp, UnaryOp};
+use scarlet_syntax::ast::UnaryOp;
 use scarlet_types::name::{CtorName, ValueName};
 use scarlet_types::ty::Type;
 
@@ -553,17 +553,23 @@ impl Mx<'_, '_, '_> {
             let (lets, fields) = self.args_in_slot_order(cx, args);
             return wrap(lets, TypedExpr::Ctor { ty, variant, args: fields });
         };
+        // Everything runs in the order it was written, the spread among the
+        // arguments.
         let result = self.final_ty(e.ty);
-        let base = self.expr(cx, &spread.base);
-        let base_bind = self.temp(cx, base.ty());
-        let mut lets = vec![(base_bind, base)];
+        let mut lets = Vec::with_capacity(args.len() + 1);
         let mut fields: Vec<(u32, TypedExpr)> = Vec::new();
-        for a in args {
-            let v = self.expr(cx, &a.value);
-            let b = self.temp(cx, v.ty());
+        let mut base_bind = None;
+        for (i, a) in args.iter().enumerate() {
+            if i as u32 == spread.at {
+                base_bind = Some(self.spill(cx, &spread.base, &mut lets));
+            }
+            let b = self.spill(cx, &a.value, &mut lets);
             fields.push((a.slot, self.var(&b)));
-            lets.push((b, v));
         }
+        let base_bind = match base_bind {
+            Some(b) => b,
+            None => self.spill(cx, &spread.base, &mut lets),
+        };
         let field_tys = self.field_tys(&result, ctor.variant);
         for (slot, at) in &spread.fills {
             let fty = field_tys.get(*slot as usize).copied().unwrap_or(self.b.temps.int);
@@ -578,6 +584,14 @@ impl Mx<'_, '_, '_> {
             args: fields.into_iter().map(|(_, v)| v).collect(),
         };
         wrap(lets, ctor)
+    }
+
+    /// Run `e` into a new `let`, returning its binding.
+    fn spill(&mut self, cx: &mut Fx, e: &Expr, lets: &mut Vec<(TypedBind, TypedExpr)>) -> TypedBind {
+        let v = self.expr(cx, e);
+        let b = self.temp(cx, v.ty());
+        lets.push((b, v));
+        b
     }
 
     /// The field types of variant `v` of the named type `t`.
@@ -960,8 +974,8 @@ fn wrap(lets: Vec<(TypedBind, TypedExpr)>, tail: TypedExpr) -> TypedExpr {
 
 /// The operator `op` is on operands of primitive `prim`. With no primitive,
 /// as in `fn add(a, b) { a + b }`, the VM picks it from the values.
-fn specialize(op: BinaryOp, prim: Option<Prim>) -> PrimOp {
-    use BinaryOp as B;
+fn specialize(op: BinOp, prim: Option<Prim>) -> PrimOp {
+    use BinOp as B;
     match (op, prim) {
         (B::Add, Some(Prim::Int)) => PrimOp::IntAdd,
         (B::Add, Some(Prim::Float)) => PrimOp::FloatAdd,
@@ -994,7 +1008,5 @@ fn specialize(op: BinaryOp, prim: Option<Prim>) -> PrimOp {
         (B::Ge, Some(Prim::Int)) => PrimOp::IntGe,
         (B::Ge, Some(Prim::Float)) => PrimOp::FloatGe,
         (B::Ge, _) => PrimOp::Ge,
-        // The checker makes `&&` and `||` their own nodes.
-        (B::And | B::Or, _) => PrimOp::Eq,
     }
 }

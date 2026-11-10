@@ -14,7 +14,7 @@ use crate::check::{Checker, entity_of};
 use crate::index::{EntityKind, Site, UseKind};
 use crate::pattern::{CtorRef, Number, PatBinds};
 use crate::typed::{
-    Arg, ArrayElem, Arm, BinSeg, BinUnit, BinderId, Block, Expr, ExprKind, FieldAt, InterpPart,
+    Arg, ArrayElem, Arm, BinOp, BinSeg, BinUnit, BinderId, Block, Expr, ExprKind, FieldAt, InterpPart,
     Lambda, OrShape, Pattern, PatternKind, Spread, Stmt, Var,
 };
 
@@ -29,6 +29,10 @@ pub(crate) fn type_defining_span(expr: &ast::Expression) -> Span {
         _ => expr.span(),
     }
 }
+
+/// One written constructor argument, for slotting: its label, and its index
+/// among the arguments with its value.
+type SlotItem<'a> = (Option<&'a str>, ((usize, &'a ast::Expression), Span));
 
 /// A name in value position, resolved.
 struct Resolved {
@@ -565,7 +569,7 @@ impl Checker<'_> {
 
     fn check_binary(&mut self, b: &ast::BinaryExpression) -> (Ty, ExprKind) {
         use ast::BinaryOp as Op;
-        let (constraint, compares) = match b.op {
+        let (constraint, compares, op) = match b.op {
             Op::And | Op::Or => {
                 let left = self.check_expr(&b.left);
                 let t = self.e.bool();
@@ -584,11 +588,18 @@ impl Checker<'_> {
                 let left = self.check_expr(&b.left);
                 let right = self.check_expr(&b.right);
                 self.unify(left.ty, right.ty, b.span);
-                return (self.e.bool(), binop(b.op, left, right));
+                let op = if b.op == Op::Eq { BinOp::Eq } else { BinOp::Ne };
+                return (self.e.bool(), binop(op, left, right));
             }
-            Op::Add => (Constraint::Addable, false),
-            Op::Sub | Op::Mul | Op::Div | Op::Mod => (Constraint::Numeric, false),
-            Op::Lt | Op::Gt | Op::Le | Op::Ge => (Constraint::Numeric, true),
+            Op::Add => (Constraint::Addable, false, BinOp::Add),
+            Op::Sub => (Constraint::Numeric, false, BinOp::Sub),
+            Op::Mul => (Constraint::Numeric, false, BinOp::Mul),
+            Op::Div => (Constraint::Numeric, false, BinOp::Div),
+            Op::Mod => (Constraint::Numeric, false, BinOp::Mod),
+            Op::Lt => (Constraint::Numeric, true, BinOp::Lt),
+            Op::Gt => (Constraint::Numeric, true, BinOp::Gt),
+            Op::Le => (Constraint::Numeric, true, BinOp::Le),
+            Op::Ge => (Constraint::Numeric, true, BinOp::Ge),
         };
         let left = self.check_expr(&b.left);
         let right = self.check_expr(&b.right);
@@ -596,7 +607,7 @@ impl Checker<'_> {
         self.unify(operand, left.ty, b.left.span());
         self.unify(operand, right.ty, b.right.span());
         let ty = if compares { self.e.bool() } else { operand };
-        (ty, binop(b.op, left, right))
+        (ty, binop(op, left, right))
     }
 
     fn check_binary_literal(&mut self, bl: &ast::BinaryLiteral) -> (Ty, ExprKind) {
@@ -889,16 +900,20 @@ impl Checker<'_> {
             Shape::Fn(params, ret) => (params, ret),
             Shape::Var(_) | Shape::Con(..) | Shape::Tuple(_) => (Vec::new(), c.ty),
         };
-        let mut spread: Option<&ast::Expression> = None;
+        let mut spread: Option<(u32, &ast::Expression)> = None;
+        let mut written = 0u32;
         for a in args {
-            if let ast::CallArg::Spread(e) = a {
-                if spread.is_some() {
-                    self.error(e.span(), "A constructor call can only have one spread");
+            match a {
+                ast::CallArg::Spread(e) => {
+                    if spread.is_some() {
+                        self.error(e.span(), "A constructor call can only have one spread");
+                    }
+                    spread = Some((written, e));
                 }
-                spread = Some(e);
+                ast::CallArg::Positional(_) | ast::CallArg::Labeled { .. } => written += 1,
             }
         }
-        let items: Vec<(Option<&str>, ((usize, &ast::Expression), Span))> = args
+        let items: Vec<SlotItem<'_>> = args
             .iter()
             .enumerate()
             .filter_map(|(i, a)| match a {
@@ -913,14 +928,14 @@ impl Checker<'_> {
 
         // The spread first, so its type settles the constructor's parameters
         // before a function literal argument takes a hint from them.
-        let spread = spread.map(|e| {
+        let spread = spread.map(|(at, e)| {
             let base = self.check_expr(e);
             self.unify(result, base.ty, e.span());
             let unfilled: Vec<usize> = (0..c.labels.len())
                 .filter(|&i| by_pos.get(i).is_none_or(Option::is_none))
                 .collect();
             let fills = self.spread_fills(&c, result, &unfilled, e.span());
-            Box::new(Spread { base, fills })
+            Box::new(Spread { base, at, fills })
         });
         let mut checked: Vec<(usize, Arg)> = Vec::with_capacity(args.len());
         for (slot, sub) in by_pos.into_iter().enumerate() {
@@ -1208,7 +1223,7 @@ impl Checker<'_> {
     }
 }
 
-fn binop(op: ast::BinaryOp, left: Expr, right: Expr) -> ExprKind {
+fn binop(op: BinOp, left: Expr, right: Expr) -> ExprKind {
     ExprKind::BinOp {
         op,
         left: Box::new(left),
