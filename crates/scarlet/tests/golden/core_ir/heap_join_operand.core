@@ -1,33 +1,30 @@
 fn main.g(%0:t0) -> :t1
   match %0 :t1
-    | 512.0(%1, %2) ->
+    | 10.0(%1, %2) ->
       drop %0 [ctor:2]
       drop %2
       ret %1
-    | 512.1() ->
+    | 10.1() ->
       drop %0 [ctor:0]
       ret c0
 
-fn main.f(%0:t0) -> :t1
-  letj %3:t2 =
-    if %0 :t2
-      let %1:t3 = c1
-      let %2:t4 = ctor 512.1()
-      ret ctor 512.0(%1, %2)
+fn main.f(%0:t2) -> :t1
+  letj %3:t0 =
+    if %0 :t0
+      let %1:t1 = c1
+      let %2:t0 = ctor 10.1()
+      ret ctor 10.0(%1, %2)
     else
-      ret ctor 512.1()
+      ret ctor 10.1()
   drop %0
   ret call fn#0(%3)
 
 fn main.main() -> :t1
-  let %0:t5 = true
+  let %0:t2 = true
   ret call fn#1(%0)
 
 toplevel:
-fn main.__main__() -> :t6
-  let %0:t7@g0 = closure fn#0()
-  let %1:t2@g1 = closure fn#1()
-  let %2:t8@g2 = closure fn#2()
+fn main.__main__() -> :t3
   ret nil
 where
   c0 = Int(0)

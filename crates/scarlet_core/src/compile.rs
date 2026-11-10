@@ -57,7 +57,8 @@ impl Compiled {
 
 /// Compile `block`, whose text hashes to `hash`, with `build` holding the
 /// modules it imports.
-pub fn compile(build: &mut Build, block: &ast::BlockExpression, doc: Option<String>, hash: u64, opts: &Options<'_>) -> Compiled {
+pub fn compile(build: &mut Build, parsed: crate::build::Parsed, hash: u64, opts: &Options<'_>) -> Compiled {
+    let block = &parsed.ast;
     let (key, role) = match &opts.as_module {
         Some(path) => (ModuleKey::for_stdlib(path), Role::Library),
         None => (ModuleKey::main(), opts.role),
@@ -65,7 +66,8 @@ pub fn compile(build: &mut Build, block: &ast::BlockExpression, doc: Option<Stri
     let reach = build.check_entry(Entry {
         key: key.clone(),
         ast: block,
-        doc,
+        doc: parsed.doc.clone(),
+        parse: parsed.diagnostics.clone(),
         hash,
         base_dir: opts.base_dir,
         role,
@@ -109,8 +111,9 @@ pub fn compile(build: &mut Build, block: &ast::BlockExpression, doc: Option<Stri
     }
 }
 
-/// The entry's `main`: it must be public and take no parameters, and a
-/// program about to run must have one. Returns its name when it is usable.
+/// The entry's `main`, when it has a usable one. A program about to run must
+/// have one. The checker reports a `main` that isn't public or takes
+/// parameters.
 fn entry_rules(block: &ast::BlockExpression, run: bool, out: &mut Vec<Diagnostic>) -> Option<&'static str> {
     let main = block.body.iter().find_map(|n| match n {
         ast::Node::Statement(s) => match s.as_ref() {
@@ -122,32 +125,17 @@ fn entry_rules(block: &ast::BlockExpression, run: bool, out: &mut Vec<Diagnostic
         },
         ast::Node::Expression(_) => None,
     });
-    let error = |span, msg: &str| Diagnostic::error(span, DiagnosticCode::TypeError, msg.to_string());
     let Some((fd, public)) = main else {
         if run {
-            out.push(error(
+            out.push(Diagnostic::error(
                 Span::point(block.span.start_line, block.span.start_column),
-                "There's no `main` function. A program starts at `pub fn main()`, so add one",
+                DiagnosticCode::TypeError,
+                "There's no `main` function. A program starts at `pub fn main()`, so add one".to_string(),
             ));
         }
         return None;
     };
-    let mut usable = true;
-    if !public {
-        out.push(error(
-            fd.identifier.span,
-            "`main` must be public, because a program starts at `pub fn main()`",
-        ));
-        usable = false;
-    }
-    if !fd.params.is_empty() {
-        out.push(error(
-            fd.identifier.span,
-            "`main` takes no parameters. Read the program's arguments with `os.argv()` instead",
-        ));
-        usable = false;
-    }
-    usable.then_some("main")
+    (public && fd.params.is_empty()).then_some("main")
 }
 
 /// Type definitions, read from the interfaces the build holds.
@@ -164,20 +152,7 @@ impl TypeDefs for Defs<'_> {
 pub fn compile_text(text: &str, base_dir: Option<&Path>) -> Compiled {
     let parsed = crate::build::parse(text);
     let mut build = Build::new(None);
-    let mut compiled = compile(
-        &mut build,
-        &parsed.ast,
-        parsed.doc,
-        crate::build::source_hash(text),
-        &Options::program(base_dir),
-    );
-    if has_errors(&parsed.diagnostics) {
-        let mut all = parsed.diagnostics;
-        all.append(&mut compiled.diagnostics);
-        compiled.diagnostics = all;
-        compiled.program = None;
-    }
-    compiled
+    compile(&mut build, parsed, crate::build::source_hash(text), &Options::program(base_dir))
 }
 
 /// One public name of a module, for completion.
@@ -202,6 +177,7 @@ pub fn exports(build: &mut Build, path: &ModulePath) -> Vec<Export> {
             key: ModuleKey::main(),
             ast: &parsed.ast,
             doc: None,
+            parse: Vec::new(),
             hash: crate::build::source_hash(&source),
             base_dir: None,
             role: Role::Script,

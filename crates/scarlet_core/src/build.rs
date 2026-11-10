@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use scarlet_check::{CheckInput, CheckedModule, Interfaces, Role, UnusedBindings};
 use scarlet_syntax::ast;
-use scarlet_syntax::diagnostic::{Diagnostic, DiagnosticCode};
+use scarlet_syntax::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
 use scarlet_syntax::module_path::{ModuleKey, ModulePath, ResolveError};
 use scarlet_syntax::span::Span;
 use scarlet_types::interface::Interface;
@@ -56,6 +56,8 @@ pub struct Entry<'a> {
     pub key: ModuleKey,
     pub ast: &'a ast::BlockExpression,
     pub doc: Option<String>,
+    /// What the parser reported about the text.
+    pub parse: Vec<Diagnostic>,
     pub hash: u64,
     /// The directory `./` imports are relative to.
     pub base_dir: Option<&'a Path>,
@@ -125,7 +127,12 @@ impl Build {
         self.loading.insert(entry.key.clone());
         let imports = self.load_imports(entry.ast, entry.base_dir);
         self.loading.remove(&entry.key);
-        let (imports, load_diagnostics) = imports;
+        let (imports, import_errors) = imports;
+        let mut load_diagnostics = entry.parse;
+        load_diagnostics.extend(import_errors);
+        for d in &mut load_diagnostics {
+            d.source = Some(entry.key.clone());
+        }
         let fresh = self.modules.get(&entry.key).is_some_and(|m| {
             m.source_hash == entry.hash
                 && m.imports == imports
@@ -134,6 +141,7 @@ impl Build {
                 && self.interfaces_unchanged(m)
         });
         if !fresh {
+            let parsed_cleanly = !has_errors(&load_diagnostics);
             let checked = self.run_check(
                 &entry.key,
                 entry.ast,
@@ -141,6 +149,7 @@ impl Build {
                 &imports,
                 entry.role,
                 entry.unused,
+                parsed_cleanly,
             );
             let seen = self.seen(&imports);
             self.modules.insert(
@@ -217,6 +226,7 @@ impl Build {
         imports: &[Option<ModuleKey>],
         role: Role,
         unused: UnusedBindings,
+        parsed_cleanly: bool,
     ) -> CheckedModule {
         self.checks += 1;
         let input = CheckInput {
@@ -227,6 +237,7 @@ impl Build {
             role,
             unused,
             doc,
+            parsed_cleanly,
             stdlib_modules: &self.stdlib_modules,
         };
         scarlet_check::check_module(&input)
@@ -295,6 +306,8 @@ impl Build {
         if let Some(m) = self.modules.get(&key)
             && m.source_hash == hash
             && m.imports == imports
+            && m.role == Role::Library
+            && m.unused == UnusedBindings::Report
             && self.interfaces_unchanged(m)
         {
             self.verified.insert(key.clone());
@@ -308,7 +321,8 @@ impl Build {
         }
         let mut diagnostics = std::mem::take(&mut parsed.diagnostics);
         diagnostics.extend(load_diagnostics);
-        let checked = self.run_check(&key, &parsed.ast, parsed.doc, &imports, Role::Library, UnusedBindings::Report);
+        let parsed_cleanly = !has_errors(&diagnostics);
+        let checked = self.run_check(&key, &parsed.ast, parsed.doc, &imports, Role::Library, UnusedBindings::Report, parsed_cleanly);
         let seen = self.seen(&imports);
         self.modules.insert(
             key.clone(),

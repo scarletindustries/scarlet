@@ -1,16 +1,24 @@
-//! These test the wire descriptor at the two seams a unit test can't reach: the
-//! LSP's `IncrementalSession`, and the REPL as a subprocess.
-//!
-//! Both matter because the descriptor is built during *elaboration*. `check`
-//! truncates the pipeline before emission, so a refusal raised at emission
-//! would be invisible here and in an editor while still failing `al run`,
-//! which is the exact split this ticket exists to prevent. Nothing here runs a
-//! wire op. The round trips are in `wire_handles.rs` and `wire_closures.rs`.
+//! These test the wire descriptor at the two seams a unit test can't reach:
+//! a long-lived `Build`, which is what the editor checks with, and the REPL
+//! as a subprocess. A refusal raised only when a program is emitted would be
+//! invisible to an editor while still failing `scarlet run`, which is the
+//! split these exist to prevent. Nothing here runs a wire op. The round trips
+//! are in `wire_handles.rs` and `wire_closures.rs`.
 
-use scarlet::bytecode::IncrementalSession;
+use scarlet::build::{self, Build};
+use scarlet::compile::{self, Compiled};
 
 mod common;
-use common::parse;
+
+/// Check `src` the way an editor does: in a build that outlives one check,
+/// without running it.
+fn check(b: &mut Build, src: &str) -> Compiled {
+    let parsed = build::parse(src);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut opts = compile::Options::program(None);
+    opts.run = false;
+    compile::compile(b, parsed, build::source_hash(src), &opts)
+}
 
 /// A record with a `fn` field. Closures can cross the wire, so it checks clean,
 /// and it's the control that shows no refusal fires on one.
@@ -72,7 +80,7 @@ const EVENT: &str = "import scarlet/wire\n\
                      \tprintln(wire::encode(Left('a')))\n\
                      }\n";
 
-fn messages(r: &scarlet::bytecode::CompileResult) -> String {
+fn messages(r: &Compiled) -> String {
     r.diagnostics
         .iter()
         .map(|d| d.message.clone())
@@ -80,13 +88,13 @@ fn messages(r: &scarlet::bytecode::CompileResult) -> String {
         .join("\n")
 }
 
-/// The LSP path is `IncrementalSession::check`, which never emits. A refusal
+/// The editor path checks without running. A refusal
 /// has to arrive here or an editor shows a clean file that `al run` rejects.
 #[test]
 #[ignore = "waits for the wire redesign: check stopped refusing wire types in #50"]
 fn a_refusal_is_reported_on_the_session_check_path() {
-    let mut s = IncrementalSession::new();
-    let r = s.check(&parse(GENERIC), None);
+    let mut s = Build::default();
+    let r = check(&mut s, GENERIC);
     assert!(!r.success(), "an unknown element type must be refused");
     assert!(
         messages(&r).contains("the type is still polymorphic here"),
@@ -99,8 +107,8 @@ fn a_refusal_is_reported_on_the_session_check_path() {
 /// around it checks clean.
 #[test]
 fn a_bodiless_field_checks_clean_on_the_session_path() {
-    let mut s = IncrementalSession::new();
-    let r = s.check(&parse(NATIVE), None);
+    let mut s = Build::default();
+    let r = check(&mut s, NATIVE);
     assert!(r.success(), "{:?}", r.diagnostics);
 }
 
@@ -108,8 +116,8 @@ fn a_bodiless_field_checks_clean_on_the_session_path() {
 /// An encodable type must still check clean on the same path.
 #[test]
 fn an_encodable_type_still_checks_clean_on_the_session_path() {
-    let mut s = IncrementalSession::new();
-    let r = s.check(&parse(EVENT), None);
+    let mut s = Build::default();
+    let r = check(&mut s, EVENT);
     assert!(r.success(), "{:?}", r.diagnostics);
 }
 
@@ -117,8 +125,8 @@ fn an_encodable_type_still_checks_clean_on_the_session_path() {
 /// path.
 #[test]
 fn a_fn_field_checks_clean_on_the_session_path() {
-    let mut s = IncrementalSession::new();
-    let r = s.check(&parse(HANDLER), None);
+    let mut s = Build::default();
+    let r = check(&mut s, HANDLER);
     assert!(r.success(), "{:?}", r.diagnostics);
 }
 
@@ -126,25 +134,23 @@ fn a_fn_field_checks_clean_on_the_session_path() {
 /// described from the seeded registry, and the record checks clean.
 #[test]
 fn a_stdlib_type_reached_only_through_a_field_checks_clean_on_the_session_path() {
-    let mut s = IncrementalSession::new();
-    let r = s.check(&parse(PORT), None);
+    let mut s = Build::default();
+    let r = check(&mut s, PORT);
     assert!(r.success(), "{:?}", r.diagnostics);
 }
 
-/// A session compiles the same buffer repeatedly, rewinding between edits.
-/// The descriptor is a constant of the program being built, so nothing has to
-/// be carried across a rewind. We check that by running the cycle rather than
-/// arguing it. The failure this would catch is descriptors piling up from a
-/// rewound compile and being minted against a program that no longer has the
-/// call site.
+/// An editor checks the same buffer again and again in one build. The
+/// descriptor is a constant of the program being built, so nothing carries
+/// from one check to the next. We check that by running the cycle rather than
+/// arguing it.
 #[test]
 #[ignore = "waits for the wire redesign: check stopped refusing wire types in #50"]
 fn a_session_re_checks_a_wire_call_across_an_edit() {
-    let mut s = IncrementalSession::new();
+    let mut s = Build::default();
     for _ in 0..2 {
-        let bad = s.check(&parse(GENERIC), None);
+        let bad = check(&mut s, GENERIC);
         assert!(!bad.success());
-        let good = s.check(&parse(HANDLER), None);
+        let good = check(&mut s, HANDLER);
         assert!(good.success(), "{:?}", good.diagnostics);
     }
 }
@@ -204,8 +210,8 @@ const SUBJECT_DEEP: &str = "import scarlet/process\n\
 
 #[test]
 fn a_handle_three_levels_down_checks_clean_on_the_session_path() {
-    let mut s = IncrementalSession::new();
-    let r = s.check(&parse(SUBJECT_DEEP), None);
+    let mut s = Build::default();
+    let r = check(&mut s, SUBJECT_DEEP);
     assert!(r.success(), "{:?}", r.diagnostics);
 }
 
@@ -222,19 +228,17 @@ fn a_handle_three_levels_down_checks_clean_on_the_session_path() {
 #[test]
 #[ignore = "waits for the wire redesign: check stopped refusing wire types in #50"]
 fn the_refusal_path_survives_to_the_session_check_path() {
-    let mut s = IncrementalSession::new();
-    let r = s.check(
-        &parse(
-            "import scarlet/map\n\
-             import scarlet/wire\n\
-             fn send(o (Int, map::Map(String, Array(a)))) Binary {\n\
-             \twire::encode(o)\n\
-             }\n\
-             pub fn main() {\n\
-             \t_ = send\n\
-             }\n",
-        ),
-        None,
+    let mut s = Build::default();
+    let r = check(
+        &mut s,
+        "import scarlet/map\n\
+         import scarlet/wire\n\
+         fn send(o (Int, map::Map(String, Array(a)))) Binary {\n\
+         \twire::encode(o)\n\
+         }\n\
+         pub fn main() {\n\
+         \t_ = send\n\
+         }\n",
     );
     assert!(
         !r.success(),

@@ -9,11 +9,11 @@ use serde_json::{Value as Json, json};
 mod handlers;
 mod wire;
 mod workspace;
-mod xrefs;
 
-pub use workspace::Workspace;
+pub use wire::WatchedChange;
+pub use workspace::{Publications, Workspace};
 
-use wire::{WatchedChange, doc_uri, folder_paths, rename_error_code, uri_to_path};
+use wire::{doc_uri, folder_paths, rename_error_code, uri_to_path};
 
 /// What one framed stdin read gives: a message body, or the end of input when the client closes
 /// the pipe.
@@ -155,14 +155,9 @@ impl LspServer {
         self.send_message(&response.to_string());
     }
 
-    /// Runs `f` on the workspace and sends its result. Any diagnostics the query's re-root staged
-    /// (see [`Workspace::ensure_entry`]) go out first, so an open importer's problem list
-    /// refreshes when one of its dependencies is edited.
+    /// Runs `f` on the workspace and sends its result.
     fn respond(&mut self, id: &Json, params: &Json, f: fn(&mut Workspace, &Json) -> Json) {
         let result = f(&mut self.ws, params);
-        for (uri, diags) in self.ws.take_pending_diagnostics() {
-            self.publish_diagnostics(&uri, diags);
-        }
         self.send_response(id, result);
     }
 
@@ -207,11 +202,13 @@ impl LspServer {
         }
     }
 
-    fn publish_diagnostics(&self, uri: &str, diagnostics: Vec<Json>) {
-        self.send_notification(
-            "textDocument/publishDiagnostics",
-            json!({ "uri": uri, "diagnostics": diagnostics }),
-        );
+    fn publish_diagnostics(&self, publications: Publications) {
+        for (uri, diagnostics) in publications {
+            self.send_notification(
+                "textDocument/publishDiagnostics",
+                json!({ "uri": uri, "diagnostics": diagnostics }),
+            );
+        }
     }
 
     fn log(&self, msg: &str) {
@@ -255,7 +252,7 @@ impl LspServer {
     fn handle_initialized(&self) {
         // didChangeWatchedFiles has no static registration in the LSP spec, so ask for the .sca
         // watch dynamically. Edits from outside the editor (a git checkout, a formatter) have to
-        // invalidate the incremental session.
+        // reach the build.
         self.send_request(
             json!("scarlet/watchers"),
             "client/registerCapability",
@@ -295,19 +292,18 @@ impl LspServer {
         if self.ws.roots.is_empty() {
             return;
         }
-        for change in changes {
-            let Some(uri) = change.get("uri").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            let ty =
-                WatchedChange::from_wire(change.get("type").and_then(|v| v.as_i64()).unwrap_or(2));
-            self.ws.invalidate_watched(uri, ty);
-        }
-        // Re-analyse only the documents the client has open. Driving this off the full
-        // `documents` map would re-typecheck the whole workspace on every external edit.
-        for (uri, diags) in self.ws.reanalyze_open() {
-            self.publish_diagnostics(&uri, diags);
-        }
+        let changes: Vec<(String, WatchedChange)> = changes
+            .iter()
+            .filter_map(|change| {
+                let uri = change.get("uri")?.as_str()?.to_string();
+                let ty = WatchedChange::from_wire(
+                    change.get("type").and_then(|v| v.as_i64()).unwrap_or(2),
+                );
+                Some((uri, ty))
+            })
+            .collect();
+        let publications = self.ws.files_changed(&changes);
+        self.publish_diagnostics(publications);
     }
 
     fn handle_did_open(&mut self, params: &Json) {
@@ -319,8 +315,8 @@ impl LspServer {
         else {
             return;
         };
-        let diags = self.ws.open_document(&uri, text);
-        self.publish_diagnostics(&uri, diags);
+        let publications = self.ws.open_document(&uri, text);
+        self.publish_diagnostics(publications);
     }
 
     fn handle_did_change(&mut self, params: &Json) {
@@ -332,22 +328,19 @@ impl LspServer {
         if let Some(last_change) = changes.last()
             && let Some(text) = last_change.get("text").and_then(|v| v.as_str())
         {
-            let diags = self.ws.open_document(&uri, text);
-            self.publish_diagnostics(&uri, diags);
+            let publications = self.ws.open_document(&uri, text);
+            self.publish_diagnostics(publications);
         }
     }
 
     fn handle_did_close(&mut self, params: &Json) {
         let Some(uri) = doc_uri(params) else { return };
-        self.ws.close_document(&uri);
+        let publications = self.ws.close_document(&uri);
+        self.publish_diagnostics(publications);
     }
 
     fn handle_rename(&mut self, id: &Json, params: &Json) {
-        let result = self.ws.rename_response(params);
-        for (uri, diags) in self.ws.take_pending_diagnostics() {
-            self.publish_diagnostics(&uri, diags);
-        }
-        match result {
+        match self.ws.rename_response(params) {
             Ok(r) => self.send_response(id, r),
             Err(e) => self.send_error(id, rename_error_code(&e), &e.message()),
         }

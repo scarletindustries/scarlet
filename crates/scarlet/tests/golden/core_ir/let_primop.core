@@ -8,7 +8,6 @@ fn main.main() -> :t0
 
 toplevel:
 fn main.__main__() -> :t1
-  let %0:t2@g0 = closure fn#0()
   ret nil
 where
   c0 = Int(1)

@@ -6,7 +6,9 @@ use common::{Project, module_key};
 
 use std::path::PathBuf;
 
-use scarlet::{ast, bytecode, diagnostic, module, parser, scanner};
+use scarlet::build::{self, Build, Entry};
+use scarlet::check::{Role, UnusedBindings};
+use scarlet::{diagnostic, module};
 
 /// Resolves modules the way the CLI does. A `ModuleKey` names an on-disk module
 /// (its canonical path with `.sca` stripped) or an embedded stdlib module.
@@ -27,17 +29,38 @@ const LIB_SRC: &str = "pub fn broken() Int {\n  \"not an int\"\n}\n";
 /// sliced from the wrong file still looks plausible.
 const ENTRY_SRC: &str = "import ./lib\npub fn probe() Int { lib::broken() }\n";
 
-fn check_project(p: &Project, entry_src: &str) -> bytecode::CompileResult {
-    let mut sc = scanner::new_scanner(entry_src.to_string());
-    let ps = parser::new_parser(&mut sc);
-    let parsed = ps.parse_program();
+/// What checking a project's entry reported.
+struct Checked {
+    diagnostics: Vec<diagnostic::Diagnostic>,
+}
+
+impl Checked {
+    fn success(&self) -> bool {
+        !diagnostic::has_errors(&self.diagnostics)
+    }
+}
+
+fn check_project(p: &Project, entry_src: &str) -> Checked {
+    let parsed = build::parse(entry_src);
     assert!(
         parsed.diagnostics.is_empty(),
         "entry failed to parse: {:?}",
         parsed.diagnostics
     );
-    let expr = ast::Expression::BlockExpression(parsed.ast);
-    bytecode::check(&expr, Some(&p.dir))
+    let mut b = Build::default();
+    let reach = b.check_entry(Entry {
+        key: module::ModuleKey::main(),
+        ast: &parsed.ast,
+        doc: parsed.doc,
+        parse: parsed.diagnostics,
+        hash: build::source_hash(entry_src),
+        base_dir: Some(&p.dir),
+        role: Role::Entry,
+        unused: UnusedBindings::Report,
+    });
+    Checked {
+        diagnostics: b.diagnostics(&reach),
+    }
 }
 
 #[test]

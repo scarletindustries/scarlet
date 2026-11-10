@@ -1,54 +1,52 @@
-fn main.small(%0:t0) -> :t1
+fn main.small(%0:t0) -> :t0
   letc j0 =
     letc j3 =
-      match %0 :t1
+      match %0 :t0
         | _ ->
           ret c0
-    match %0 :t1
+    match %0 :t0
       | _ ->
         letc j4 =
           ret c1
         letc j5 =
           letc j6 =
-            match %0 :t1
+            match %0 :t0
               | c2 ->
                 goto j4
               | _ ->
                 goto j3
-          match %0 :t1
+          match %0 :t0
             | c3 ->
               goto j4
             | _ ->
               goto j6
-        match %0 :t1
+        match %0 :t0
           | c1 ->
             goto j4
           | _ ->
             goto j5
-  match %0 :t1
+  match %0 :t0
     | _ ->
       letc j1 =
         ret c4
       letc j2 =
-        match %0 :t1
+        match %0 :t0
           | c4 ->
             goto j1
           | _ ->
             goto j0
-      match %0 :t1
+      match %0 :t0
         | c0 ->
           goto j1
         | _ ->
           goto j2
 
 fn main.main() -> :t0
-  let %0:t1 = c3
+  let %0:t0 = c3
   ret call fn#0(%0)
 
 toplevel:
-fn main.__main__() -> :t2
-  let %0:t3@g0 = closure fn#0()
-  let %1:t4@g1 = closure fn#1()
+fn main.__main__() -> :t1
   ret nil
 where
   c0 = Int(0)

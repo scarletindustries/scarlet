@@ -5,7 +5,7 @@ fn main.to_method(%0:t0) -> :t1
         letc j3 =
           match %0 :t1
             | _ ->
-              ret ctor 512.4(%0)
+              ret ctor 10.4(%0)
         match %0 :t1
           | _ ->
             let %22:t2 = BinaryBitSize(%0)
@@ -19,7 +19,7 @@ fn main.to_method(%0:t0) -> :t1
               let %28:t3 = IntEq(%27, %22)
               if %28 :t1
                 drop %0
-                ret ctor 512.3()
+                ret ctor 10.3()
               else
                 goto j3
             else
@@ -37,7 +37,7 @@ fn main.to_method(%0:t0) -> :t1
             let %21:t3 = IntEq(%20, %15)
             if %21 :t1
               drop %0
-              ret ctor 512.2()
+              ret ctor 10.2()
             else
               goto j2
           else
@@ -55,7 +55,7 @@ fn main.to_method(%0:t0) -> :t1
           let %14:t3 = IntEq(%13, %8)
           if %14 :t1
             drop %0
-            ret ctor 512.1()
+            ret ctor 10.1()
           else
             goto j1
         else
@@ -73,7 +73,7 @@ fn main.to_method(%0:t0) -> :t1
         let %7:t3 = IntEq(%6, %1)
         if %7 :t1
           drop %0
-          ret ctor 512.0()
+          ret ctor 10.0()
         else
           goto j0
       else
@@ -81,13 +81,11 @@ fn main.to_method(%0:t0) -> :t1
 
 fn main.main() -> :t1
   let %0:t4 = c8
-  let %1:t5 = BinaryFromString(%0)
+  let %1:t0 = BinaryFromString(%0)
   ret call fn#0(%1)
 
 toplevel:
-fn main.__main__() -> :t6
-  let %0:t7@g0 = closure fn#0()
-  let %1:t8@g1 = closure fn#1()
+fn main.__main__() -> :t5
   ret nil
 where
   c0 = Int(0)

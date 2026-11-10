@@ -1,23 +1,21 @@
-fn main.count(%0:t0, %1:t1) -> :t1
-  match %0 :t1
+fn main.count(%0:t0, %1:t0) -> :t0
+  match %0 :t0
     | c0 ->
       ret %1
     | _ ->
-      let %2:t2 = c1
+      let %2:t0 = c1
       let %3:t0 = IntSub(%0, %2)
-      let %4:t2 = c1
-      let %5:t1 = IntAdd(%1, %4)
+      let %4:t0 = c1
+      let %5:t0 = IntAdd(%1, %4)
       ret call self(%3, %5)
 
-fn main.main() -> :t1
-  let %0:t2 = c2
-  let %1:t2 = c0
+fn main.main() -> :t0
+  let %0:t0 = c2
+  let %1:t0 = c0
   ret call fn#0(%0, %1)
 
 toplevel:
-fn main.__main__() -> :t3
-  let %0:t4@g0 = closure fn#0()
-  let %1:t5@g1 = closure fn#1()
+fn main.__main__() -> :t1
   ret nil
 where
   c0 = Int(0)

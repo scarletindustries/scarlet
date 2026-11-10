@@ -1,9 +1,8 @@
 use scarlet::reference::EntityKind;
 
 mod common;
-use common::{
-    Project, SessionQueryExt, checked_with, cursor, project_rejects, run_al, run_project_outputs,
-};
+use common::graph::{GraphQueryExt, checked_with};
+use common::{Project, cursor, project_rejects, run_al, run_project_outputs};
 
 const UTIL_SRC: &str =
     "pub fn quote(s String) String { '\"' + s + '\"' }\npub fn empty() String { '' }\n";

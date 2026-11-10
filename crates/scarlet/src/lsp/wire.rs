@@ -14,14 +14,14 @@ use crate::span::Span;
 /// 3 = Deleted), cut down to the one distinction the server acts on. Clients don't agree on
 /// Created and Changed (renames arrive as Delete then Create, and some editors report creates as
 /// changes), so both mean "drop the cached state and re-read from disk".
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum WatchedChange {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchedChange {
     Touched,
     Deleted,
 }
 
 impl WatchedChange {
-    pub(super) fn from_wire(n: i64) -> Self {
+    pub fn from_wire(n: i64) -> Self {
         if n == 3 { Self::Deleted } else { Self::Touched }
     }
 }
@@ -45,7 +45,7 @@ pub(super) fn folder_paths(v: Option<&Json>) -> Vec<PathBuf> {
 }
 
 /// Picks the workspace root that owns `path`. LSP allows nested roots, and the deepest one wins.
-/// Files outside every root share the empty-path session.
+/// Files outside every root share the empty-path build.
 pub(super) fn root_for(roots: &[PathBuf], path: &Path) -> PathBuf {
     roots
         .iter()
@@ -111,18 +111,22 @@ fn completion_kind(e: reference::EntityKind) -> i32 {
     }
 }
 
-/// One LSP `CompletionItem` for a definition. `detail` carries the rendered type when the
-/// session has one. The doc comment becomes markdown documentation, cleaned the same way hover
-/// cleans it.
-pub(super) fn completion_item(d: &reference::Definition, detail: Option<String>) -> Json {
+/// One LSP `CompletionItem`. `detail` carries the rendered type when the check has one. The doc
+/// comment becomes markdown documentation, cleaned the same way hover cleans it.
+pub(super) fn completion_item(
+    label: &str,
+    entity: reference::EntityKind,
+    detail: Option<String>,
+    doc: Option<&str>,
+) -> Json {
     let mut item = json!({
-        "label": d.name,
-        "kind": completion_kind(d.entity()),
+        "label": label,
+        "kind": completion_kind(entity),
     });
     if let Some(det) = detail {
         item["detail"] = json!(det);
     }
-    if let Some(doc) = &d.doc {
+    if let Some(doc) = doc {
         item["documentation"] = json!({
             "kind": "markdown",
             "value": clean_doc_comment(doc),
@@ -183,36 +187,6 @@ pub(super) fn diagnostic_to_json(diag: &diagnostic::Diagnostic) -> Json {
     })
 }
 
-/// The module a queried file's definitions and occurrences are keyed under in the graph. That's
-/// its stdlib path for an in-repo stdlib file, or else the entry module `main`.
-pub(super) fn query_module(uri: &str) -> Option<ModulePath> {
-    let p = uri_to_path(uri)?;
-    Some(module::detect_stdlib_module(&p).unwrap_or_else(module::main_module))
-}
-
-/// Translates a graph `ModuleId` back to a file URI, relative to the requesting file. The
-/// requesting file's own module has to short-circuit to the request URI, because the entry
-/// module is bare and `resolve` can't find it.
-pub(super) fn uri_for(
-    graph: &reference::ReferenceGraph,
-    request_uri: &str,
-    module: reference::ModuleId,
-) -> Option<String> {
-    let path = graph.module_path(module)?;
-    let req_path = uri_to_path(request_uri)?;
-    let req_mod = module::detect_stdlib_module(&req_path).unwrap_or_else(module::main_module);
-    if *path == req_mod {
-        return Some(request_uri.to_string());
-    }
-    if module::is_stdlib(path) {
-        if let Some(p) = stdlib_file(path, &req_path) {
-            return Some(reference::path_to_uri(&p));
-        }
-        return None;
-    }
-    reference::module_uri(graph, module).ok()
-}
-
 /// Shapes a `WorkspaceEdit` into the LSP wire JSON.
 pub(super) fn workspace_edit_json(we: &reference::rename::WorkspaceEdit) -> Json {
     let mut changes = serde_json::Map::new();
@@ -228,7 +202,7 @@ pub(super) fn workspace_edit_json(we: &reference::rename::WorkspaceEdit) -> Json
 
 /// The on-disk path of stdlib module `m`, found by walking up from `near` to the stdlib-root
 /// marker (the inverse of `module::detect_stdlib_module`).
-fn stdlib_file(m: &ModulePath, near: &Path) -> Option<PathBuf> {
+pub(super) fn stdlib_file(m: &ModulePath, near: &Path) -> Option<PathBuf> {
     let mut p = module::find_stdlib_root(near)?;
     for seg in m {
         p.push(seg);

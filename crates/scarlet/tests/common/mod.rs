@@ -2,6 +2,7 @@
 // Helpers shared by the integration-test binaries. They live in a `tests/`
 // subdirectory so Cargo treats them as a module, not a test target.
 
+pub mod graph;
 pub mod net;
 
 use std::fs;
@@ -316,7 +317,7 @@ macro_rules! run_case {
 }
 
 /// Parse `src` as a whole program, asserting it is diagnostic-free, and wrap
-/// the block as the `Expression` `IncrementalSession` consumes.
+/// the block as an `Expression`.
 pub fn parse(src: &str) -> ast::Expression {
     let mut sc = scanner::new_scanner(src.to_string());
     let p = parser::new_parser(&mut sc);
@@ -353,6 +354,12 @@ pub fn diff_lines(want: &str, got: &str) -> String {
     out
 }
 
+/// The canonical key of an on-disk module. A module is the file it resolved
+/// to, so tests that address one by name must go through here.
+pub fn module_key(dir: &Path, file: &str) -> scarlet::module::ModuleKey {
+    scarlet::module::ModuleKey::for_file(&dir.join(file))
+}
+
 /// 0-based `(line, col)` of the `nth` (1-based) occurrence of `needle`, nudged
 /// `into` columns right so the cursor lands *inside* the identifier's span.
 pub fn cursor(src: &str, needle: &str, nth: usize, into: i32) -> (i32, i32) {
@@ -369,7 +376,7 @@ pub fn cursor(src: &str, needle: &str, nth: usize, into: i32) -> (i32, i32) {
     (line, (b - line_start) as i32 + into)
 }
 
-/// A throwaway on-disk project directory for `IncrementalSession` tests.
+/// A throwaway on-disk project directory for tests that check several files.
 /// Each one gets a unique name so concurrent tests never collide, and `Drop` removes it.
 pub struct Project {
     pub dir: PathBuf,

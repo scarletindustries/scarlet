@@ -73,6 +73,10 @@ pub struct CheckInput<'a> {
     pub unused: UnusedBindings,
     /// The module's leading `/** */` comment, as the parser found it.
     pub doc: Option<String>,
+    /// Whether the parser read the module with no errors. A module that holds
+    /// something the parser couldn't read then has nothing reporting it, so
+    /// the checker does.
+    pub parsed_cleanly: bool,
     /// Every stdlib module's path, so `int::abs` with no import can say which
     /// import it needs.
     pub stdlib_modules: &'a [scarlet_syntax::module_path::ModulePath],

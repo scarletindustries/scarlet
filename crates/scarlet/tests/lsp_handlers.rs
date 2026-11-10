@@ -1,5 +1,5 @@
-//! Tests for the LSP server's handlers. `references.rs` drives the
-//! `IncrementalSession` query API. These start a real `Workspace`, open a
+//! Tests for the LSP server's handlers. `references.rs` drives the reference
+//! graph of a `Build` directly. These start a real `Workspace`, open a
 //! document the way `textDocument/didOpen` does, and assert on the JSON each
 //! `*_response` returns.
 
@@ -99,8 +99,8 @@ fn seam_round_trips_position_queries() {
     assert!(s.definition_response(&json!({})).is_null());
     assert!(s.hover_response(&pos(&uri, 99, 99)).is_null());
 
-    // Hover joins its type through the session accessor.
-    assert!(s.session_for(&uri).is_some());
+    // Hover joins its type through the build that owns the file.
+    assert!(s.build_for(&uri).is_some());
 
     // These are reachable through the seam. Tests further down pin how they
     // behave.
@@ -797,9 +797,9 @@ fn cross_module_find_references_spans_decl_and_use_across_files() {
 }
 
 // These mirror the tests above, with the query starting at the declaration in
-// the imported file. That re-roots compilation to lib.sca. main.sca imports
-// lib.sca rather than the reverse, so main.sca falls outside lib.sca's import
-// closure, and its reverse edge must come from saved xrefs.
+// the imported file. main.sca imports lib.sca rather than the reverse, so
+// main.sca is outside lib.sca's import closure, and its reverse edge has to come
+// from main.sca's own check.
 
 #[test]
 fn find_references_from_library_declaration_includes_dependent_callers() {
@@ -821,17 +821,16 @@ fn rename_from_library_declaration_rewrites_dependent_callers() {
 }
 
 /// A regression test for stale data. Edit lib.sca so every span in it shifts,
-/// *then* rename from the moved declaration. The saved reverse edge for
-/// main.sca was recorded before the edit. A key holding a span would miss it,
-/// and the rename would silently drop main.sca's call site, breaking the
-/// workspace with no diagnostic. The xref key must survive the edit.
+/// *then* rename from the moved declaration. main.sca's reverse edge was
+/// recorded before the edit. If main.sca weren't checked again, its edge would
+/// still point at the old span, and the rename would silently drop main.sca's
+/// call site, breaking the workspace with no diagnostic.
 #[test]
 fn rename_after_library_edit_still_rewrites_dependent_callers() {
     let (_p, mut s, main_uri, lib_uri) = xmod_project();
 
     // Simulate didChange. A blank line added to the top of lib.sca moves
-    // greet's declaration down one line. main.sca stays open but isn't
-    // analysed again.
+    // greet's declaration down one line. Only lib.sca changes.
     let edited = "\npub fn greet() Int { 7 }\n";
     s.open_document(&lib_uri, edited);
 
@@ -858,8 +857,7 @@ fn rename_after_library_edit_still_rewrites_dependent_callers() {
 #[test]
 fn find_references_from_library_declaration_when_only_library_is_open() {
     // main.sca is never opened as a tab, so only the one-off workspace scan
-    // analyses it. The reverse edge must be recorded then, not only when an
-    // importer happens to be the entry at query time.
+    // checks it. The reverse edge must be recorded then.
     let p = Project::new("xmod_lib_only");
     p.write("lib.sca", XMOD_LIB);
     p.write("main.sca", XMOD_MAIN);
@@ -874,37 +872,74 @@ fn find_references_from_library_declaration_when_only_library_is_open() {
     assert_refs_uris_span_lib_and_main(&mut s, &lib_uri, &main_uri, &lib_uri);
 }
 
-// A position query that re-roots the entry to another open file must stage
-// that file's diagnostics for the transport layer, or its Problems panel goes
-// stale after an in-memory edit to a dependency.
+// An in-memory edit to a dependency must refresh the diagnostics of an open
+// file that imports it, or its Problems panel goes stale.
 #[test]
-fn position_query_reroot_stages_diagnostics_for_open_file() {
+fn editing_a_dependency_republishes_its_open_importers() {
     let (_p, mut s, main_uri, lib_uri) = xmod_project();
-    // Both are open, and the entry is main because it was opened last. Nothing
-    // is staged yet.
-    assert!(s.take_pending_diagnostics().is_empty());
 
-    // Hover in lib.sca re-roots the entry to lib, so lib's diagnostics stage.
-    let (l, c) = cursor(XMOD_LIB, "greet", 1, 1);
-    s.hover_response(&pos(&lib_uri, l, c));
-    let staged = s.take_pending_diagnostics();
-    assert_eq!(
-        staged.iter().map(|(u, _)| u.as_str()).collect::<Vec<_>>(),
-        [lib_uri.as_str()],
-        "re-rooting an open file stages its diagnostics"
+    // lib.sca stops exporting `greet`, so main.sca's `lib::greet()` breaks.
+    let published = s.open_document(&lib_uri, "pub fn salute() Int { 7 }\n");
+    let uris: Vec<&str> = published.iter().map(|(u, _)| u.as_str()).collect();
+    assert!(
+        uris.contains(&lib_uri.as_str()) && uris.contains(&main_uri.as_str()),
+        "the edited file and its open importer are both published, got {uris:?}"
+    );
+    let main_diags = &published
+        .iter()
+        .find(|(u, _)| *u == main_uri)
+        .expect("main.sca is published")
+        .1;
+    assert!(
+        main_diags
+            .iter()
+            .any(|d| d["message"].as_str().is_some_and(|m| m.contains("greet"))),
+        "main.sca must now report the missing `greet`: {main_diags:?}"
     );
 
-    // A second query on the file that's now the entry re-roots nothing.
-    s.hover_response(&pos(&lib_uri, l, c));
-    assert!(s.take_pending_diagnostics().is_empty());
-
-    // Switching the entry back to the other open file stages that one in turn.
+    // A position query changes nothing, so it has nothing to publish.
     let (l, c) = cursor(XMOD_MAIN, "greet", 1, 1);
     s.hover_response(&pos(&main_uri, l, c));
-    let staged = s.take_pending_diagnostics();
+}
+
+/// An error inside an imported module is shown on that module's file, never on
+/// the file that imports it.
+#[test]
+fn an_imported_modules_error_is_published_on_its_own_file() {
+    let p = Project::new("diag_owner");
+    let lib = "pub fn broken() Int {\n  'not an int'\n}\n";
+    let main = "import ./lib\npub fn main() {\n  println(lib::broken())\n}\n";
+    p.write("lib.sca", lib);
+    p.write("main.sca", main);
+    let mut s = Workspace::new();
+    s.add_workspace_root(p.dir.clone());
+    let main_uri = uri_of(&p, "main.sca");
+    let lib_uri = uri_of(&p, "lib.sca");
+    let published = s.open_document(&main_uri, main);
+
+    let diags_of = |uri: &str| -> Vec<Json> {
+        published
+            .iter()
+            .find(|(u, _)| u == uri)
+            .map(|(_, d)| d.clone())
+            .unwrap_or_else(|| panic!("{uri} is published: {published:?}"))
+    };
+    let errors = |d: &[Json]| d.iter().filter(|d| d["severity"] == json!(1)).count();
     assert_eq!(
-        staged.iter().map(|(u, _)| u.as_str()).collect::<Vec<_>>(),
-        [main_uri.as_str()]
+        errors(&diags_of(&main_uri)),
+        0,
+        "main.sca has no errors of its own: {:?}",
+        diags_of(&main_uri)
+    );
+    let lib_diags = diags_of(&lib_uri);
+    assert!(
+        errors(&lib_diags) >= 1,
+        "lib.sca's type error is published on lib.sca: {lib_diags:?}"
+    );
+    assert_eq!(
+        lib_diags[0]["range"]["start"]["line"].as_i64(),
+        Some(1),
+        "the error points into lib.sca's text: {lib_diags:?}"
     );
 }
 
@@ -1079,8 +1114,8 @@ fn find_refs_on_module_alias_lists_the_qualifier() {
     assert_eq!(with_decl.as_array().map(Vec::len), Some(2));
 }
 
-/// `scarlet/process` is loaded from the static blob and never compiled again,
-/// so its module doc only reaches hover through `synth_refs_from_interface`.
+/// `scarlet/process` is the embedded stdlib, so its module doc reaches hover
+/// through that module's own check.
 #[test]
 fn hover_on_a_stdlib_module_alias_shows_its_module_doc() {
     let src = "import scarlet/process as s\n\ns::spawn(fn() { Nil })\n";
@@ -1115,8 +1150,7 @@ fn hover_shows_a_functions_parameter_names() {
     );
 }
 
-/// The stdlib is loaded from the precompiled blob, never compiled from source,
-/// so this only passes if `SExport` carries the names.
+/// The parameter names of an embedded stdlib function reach hover too.
 #[test]
 fn hover_shows_parameter_names_across_the_stdlib_blob() {
     let src = "import scarlet/io\n\nprintln(io::read_text('x') or e -> '')\n";
@@ -1124,11 +1158,11 @@ fn hover_shows_parameter_names_across_the_stdlib_blob() {
     let md = hover_md(&mut s, &uri, 2, 12); // inside `read_text`
     assert!(
         md.contains("fn(path String)"),
-        "stdlib fn must carry its parameter name through the blob, got:\n{md}"
+        "stdlib fn must carry its parameter name, got:\n{md}"
     );
 }
 
-/// A constructor's labels come from `ValueKind::Constructor.field_labels`.
+/// A constructor's labels are its field labels.
 #[test]
 fn hover_shows_a_constructors_field_labels() {
     let src = "import scarlet/io\n\nfn f(e io::IoError) String {\n\tmatch e {\n\t\tio::NotFound(p) -> p\n\t\t_ -> ''\n\t}\n}\nprintln(1)\n";
@@ -1140,8 +1174,7 @@ fn hover_shows_a_constructors_field_labels() {
     );
 }
 
-/// A declaration's doc comment must cross a module boundary, carried by
-/// `ExportedValue::doc`.
+/// A declaration's doc comment must cross a module boundary.
 #[test]
 fn hover_shows_a_declaration_doc_from_another_module() {
     let p = Project::new("hover_xmod_doc");
@@ -1266,4 +1299,71 @@ fn goto_def_on_stdlib_module_qualifier_opens_its_file() {
     );
     assert_eq!(def["range"]["start"]["line"].as_i64(), Some(0));
     assert_eq!(def["range"]["start"]["character"].as_i64(), Some(0));
+}
+
+// Edits from outside the editor reach the build through didClose and
+// didChangeWatchedFiles. Nothing is rewound: the build reads the file again and
+// checks what changed.
+
+/// The diagnostics published for `uri`, or a panic naming what was published.
+fn published_for<'a>(published: &'a [(String, Vec<Json>)], uri: &str) -> &'a [Json] {
+    published
+        .iter()
+        .find(|(u, _)| u == uri)
+        .map(|(_, d)| d.as_slice())
+        .unwrap_or_else(|| panic!("{uri} is published: {published:?}"))
+}
+
+fn mentions(diags: &[Json], needle: &str) -> bool {
+    diags
+        .iter()
+        .any(|d| d["message"].as_str().is_some_and(|m| m.contains(needle)))
+}
+
+#[test]
+fn closing_an_edited_buffer_puts_the_file_on_disk_back() {
+    let (_p, mut s, main_uri, lib_uri) = xmod_project();
+
+    // An unsaved edit to lib.sca breaks main.sca's `lib::greet()`.
+    let published = s.open_document(&lib_uri, "pub fn salute() Int { 7 }\n");
+    assert!(mentions(published_for(&published, &main_uri), "greet"));
+
+    // Closing lib.sca without saving brings back the file on disk, which still
+    // exports `greet`.
+    let published = s.close_document(&lib_uri);
+    assert!(
+        !mentions(published_for(&published, &main_uri), "greet"),
+        "main.sca is checked against lib.sca's file again: {published:?}"
+    );
+}
+
+#[test]
+fn a_watched_change_to_a_closed_file_rechecks_its_importers() {
+    let p = Project::new("watched");
+    p.write("lib.sca", XMOD_LIB);
+    p.write("main.sca", XMOD_MAIN);
+    let (mut s, main_uri) = open(&p, "main.sca", XMOD_MAIN);
+    let lib_uri = uri_of(&p, "lib.sca");
+
+    // lib.sca changes on disk, say from a git checkout.
+    p.write("lib.sca", "pub fn salute() Int { 7 }\n");
+    let published = s.files_changed(&[(lib_uri.clone(), scarlet::lsp::WatchedChange::Touched)]);
+    assert!(
+        mentions(published_for(&published, &main_uri), "greet"),
+        "main.sca must see that lib.sca no longer exports `greet`: {published:?}"
+    );
+
+    // Once lib.sca is deleted, its definitions leave the graph.
+    std::fs::remove_file(p.dir.join("lib.sca")).unwrap();
+    let published = s.files_changed(&[(lib_uri.clone(), scarlet::lsp::WatchedChange::Deleted)]);
+    assert!(
+        !published_for(&published, &main_uri).is_empty(),
+        "main.sca's import of the deleted lib.sca is an error: {published:?}"
+    );
+    let found = s.workspace_symbol_response(&json!({ "query": "salute" }));
+    assert_eq!(
+        found,
+        json!([]),
+        "a deleted file's definitions must leave the graph"
+    );
 }

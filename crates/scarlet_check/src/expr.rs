@@ -213,10 +213,19 @@ impl Checker<'_> {
                 self.has_error_nodes = true;
                 self.error_expr()
             }
-            // The parser reported this. Nothing in it can be checked, and the
-            // module can't be clean.
-            E::ErrorNode(_) => {
+            // Nothing in it can be checked, and the module can't be clean. The
+            // parser reported it, unless the tree was made some other way.
+            E::ErrorNode(err) => {
                 self.has_error_nodes = true;
+                if self.input.parsed_cleanly {
+                    let mut d = scarlet_syntax::diagnostic::Diagnostic::error(
+                        err.span,
+                        scarlet_syntax::diagnostic::DiagnosticCode::ParseError,
+                        err.error.to_string(),
+                    );
+                    d.source = Some(self.key.clone());
+                    self.diags.push(d);
+                }
                 self.error_expr()
             }
         }

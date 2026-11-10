@@ -264,7 +264,7 @@ fn compile_source(parsed: build::Parsed, file: &str, entrypoint: &str, run: bool
     opts.run = run;
     opts.as_module = scarlet::module::detect_stdlib_module(path);
     let mut b = build::Build::new(None);
-    let result = compile::compile(&mut b, &parsed.ast, parsed.doc, build::source_hash(file), &opts);
+    let result = compile::compile(&mut b, parsed, build::source_hash(file), &opts);
     report(&result.diagnostics, !result.success(), file, entrypoint);
     result
 }

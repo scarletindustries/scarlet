@@ -98,6 +98,9 @@ impl<'a> Checker<'a> {
                     }
                     ast::Declaration::Function(fd) => {
                         self.validate_attributes(&fd.attributes, in_stdlib, true);
+                        if fd.identifier.name == "main" && self.input.role == Role::Entry {
+                            self.main_rules(fd, *public);
+                        }
                         if self.check_duplicate(&mut seen_values, &fd.identifier) {
                             continue;
                         }
@@ -233,6 +236,22 @@ impl<'a> Checker<'a> {
             self.infer_group(&decls, &mut sigs, &group, first_fn);
         }
         ModuleParts { statements }
+    }
+
+    /// A program starts at `main`, so it must be public and take nothing.
+    fn main_rules(&mut self, fd: &ast::FunctionDeclaration, public: bool) {
+        if !public {
+            self.error(
+                fd.identifier.span,
+                "`main` must be public, because a program starts at `pub fn main()`",
+            );
+        }
+        if !fd.params.is_empty() {
+            self.error(
+                fd.identifier.span,
+                "`main` takes no parameters. Read the program's arguments with `os.argv()` instead",
+            );
+        }
     }
 
     /// Report a statement at module scope where the role doesn't allow one.

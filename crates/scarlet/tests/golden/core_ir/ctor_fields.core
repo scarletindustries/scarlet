@@ -1,15 +1,14 @@
 fn main.main() -> :t0
-  let %0:t1 = c0
-  let %1:t1 = c1
-  let %2:t2 = ctor 512.0(%0, %1)
+  let %0:t0 = c0
+  let %1:t0 = c1
+  let %2:t1 = ctor 10.0(%0, %1)
   let %3:t0 = Field(0)(%2)
-  let %4:t3 = Field(1)(%2)
+  let %4:t0 = Field(1)(%2)
   drop %2 [ctor:2]
   ret IntAdd(%3, %4)
 
 toplevel:
-fn main.__main__() -> :t4
-  let %0:t2@g0 = closure fn#0()
+fn main.__main__() -> :t2
   ret nil
 where
   c0 = Int(1)

@@ -1,20 +1,81 @@
-use scarlet::bytecode::{CompileResult, IncrementalSession};
+//! Reference-graph queries over a [`Build`], for tests that check a program
+//! and then ask what its names resolve to. The entry is checked as `main`, the
+//! way `scarlet check` checks a file, and its imports under their real keys.
+
+use scarlet::build::{self, Build, Entry};
+use scarlet::check::{Role, UnusedBindings};
+use scarlet::diagnostic::{self, Diagnostic};
 use scarlet::module::{self, ModulePath};
 use scarlet::reference::{DefId, Definition, EntityKind, ModuleId, ReferenceGraph};
 use scarlet::span::Span;
 
-/// Makes a fresh session, checks `entry` against project `p`, and asserts it succeeds.
-pub fn checked_with(p: &Project, entry: &str) -> IncrementalSession {
-    let mut s = IncrementalSession::new();
-    let r = s.check(&parse(entry), Some(&p.dir));
-    assert!(r.success(), "compile failed: {:?}", r.diagnostics);
-    s
+use super::Project;
+
+/// A build that has checked an entry, and the reference graph of everything it
+/// holds.
+pub struct Checked {
+    pub build: Build,
+    graph: ReferenceGraph,
+    dir: std::path::PathBuf,
 }
 
-/// Re-check `entry` against project `p` in the existing session, returning the
-/// full result so callers can assert success or failure.
-pub fn recheck(s: &mut IncrementalSession, p: &Project, entry: &str) -> CompileResult {
-    s.check(&parse(entry), Some(&p.dir))
+/// What one check of the entry reported, its imports included.
+pub struct CheckResult {
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl CheckResult {
+    pub fn success(&self) -> bool {
+        !diagnostic::has_errors(&self.diagnostics)
+    }
+}
+
+impl Checked {
+    pub fn new(p: &Project) -> Self {
+        Checked {
+            build: Build::default(),
+            graph: ReferenceGraph::of_build(&Build::default()),
+            dir: p.dir.clone(),
+        }
+    }
+
+    /// Checks `entry` as the program `main` in this build, then rebuilds the
+    /// graph.
+    pub fn check(&mut self, entry: &str) -> CheckResult {
+        let parsed = build::parse(entry);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "parse errors: {:?}\n---\n{entry}",
+            parsed.diagnostics
+        );
+        let reach = self.build.check_entry(Entry {
+            key: module::ModuleKey::main(),
+            ast: &parsed.ast,
+            doc: parsed.doc,
+            parse: parsed.diagnostics,
+            hash: build::source_hash(entry),
+            base_dir: Some(&self.dir),
+            role: Role::Entry,
+            unused: UnusedBindings::Report,
+        });
+        self.graph = ReferenceGraph::of_build(&self.build);
+        CheckResult {
+            diagnostics: self.build.diagnostics(&reach),
+        }
+    }
+
+    pub fn reference_graph(&self) -> &ReferenceGraph {
+        &self.graph
+    }
+}
+
+/// Makes a fresh build, checks `entry` against project `p`, and asserts it
+/// succeeds.
+pub fn checked_with(p: &Project, entry: &str) -> Checked {
+    let mut s = Checked::new(p);
+    let r = s.check(entry);
+    assert!(r.success(), "check failed: {:?}", r.diagnostics);
+    s
 }
 
 /// A document/workspace symbol projected from a graph `Definition`.
@@ -64,29 +125,24 @@ pub fn assert_no_msg(msgs: &[String], needle: &str) {
     );
 }
 
-/// The canonical key of an on-disk module. A module is the file it resolved
-/// to, so tests that address one by name must go through here.
-pub fn module_key(dir: &std::path::Path, file: &str) -> module::ModuleKey {
-    module::ModuleKey::for_file(&dir.join(file))
-}
-
-fn module_for(g: &ReferenceGraph, module_or_uri: &str) -> Option<ModuleId> {
+fn module_for(g: &ReferenceGraph, module_or_path: &str) -> Option<ModuleId> {
     // 1. Try the canonical key exactly. Like the LSP boundary, this looks a key up
     // and never mints one.
-    if let Some(id) = g.module_id_by_key(&module::ModuleKey::from_lookup_str(module_or_uri)) {
+    if let Some(id) = g.module_id_by_key(&module::ModuleKey::from_lookup_str(module_or_path)) {
         return Some(id);
     }
-    // 2. Try a path to the source file, which is what the LSP passes in a URI.
-    let p = std::path::Path::new(module_or_uri);
+    // 2. Try a path to the source file.
+    let p = std::path::Path::new(module_or_path);
     if p.is_file()
-        && let Some(id) = g.module_id_by_key(&module::ModuleKey::for_file(p))
+        && let Ok(mp) = module::file_module_path(p)
+        && let Some(id) = g.module_id_by_key(&module::ModuleKey::of(&mp))
     {
         return Some(id);
     }
     // 3. For test convenience only, try a written name (`./c`, `b`). A module's
     // name is NOT its identity, so this matches the last path segment and panics
     // if several modules match rather than silently picking one.
-    let want = module_or_uri.rsplit('/').next().unwrap_or(module_or_uri);
+    let want = module_or_path.rsplit('/').next().unwrap_or(module_or_path);
     let hits: Vec<ModuleId> = g
         .modules()
         .filter(|(_, path)| path.last().map(String::as_str) == Some(want))
@@ -96,7 +152,7 @@ fn module_for(g: &ReferenceGraph, module_or_uri: &str) -> Option<ModuleId> {
         [one] => return Some(*one),
         [] => {}
         many => panic!(
-            "module name {module_or_uri:?} is ambiguous across {} modules; pass the source path instead",
+            "module name {module_or_path:?} is ambiguous across {} modules; pass the source path instead",
             many.len()
         ),
     }
@@ -115,33 +171,32 @@ fn symbol_of(g: &ReferenceGraph, d: &Definition) -> Option<SymbolInfo> {
     })
 }
 
-/// String-keyed LSP-style queries answered from
-/// [`IncrementalSession::reference_graph`]. The production server queries the
-/// graph directly with resolved `ModuleId`s; these key by module path and fall
-/// back to the entry `main` module for the single-open-file case.
-pub trait SessionQueryExt {
-    fn definition(&self, module_or_uri: &str, line: i32, col: i32) -> Option<(ModulePath, Span)>;
-    fn prepare_rename(&self, module_or_uri: &str, line: i32, col: i32) -> Option<(DefId, Span)>;
+/// String-keyed LSP-style queries answered from the reference graph. The
+/// language server queries the graph directly with resolved `ModuleId`s. These
+/// key by module path and fall back to the entry `main`.
+pub trait GraphQueryExt {
+    fn definition(&self, module_or_path: &str, line: i32, col: i32) -> Option<(ModulePath, Span)>;
+    fn prepare_rename(&self, module_or_path: &str, line: i32, col: i32) -> Option<(DefId, Span)>;
     fn references(&self, def: DefId) -> Vec<(ModulePath, Span)>;
     fn rename(&self, def: DefId) -> Vec<(ModulePath, Span)>;
-    fn document_symbols(&self, module_or_uri: &str) -> Vec<SymbolInfo>;
+    fn document_symbols(&self, module_or_path: &str) -> Vec<SymbolInfo>;
     fn workspace_symbols(&self, query: &str) -> Vec<SymbolInfo>;
 }
 
-impl SessionQueryExt for IncrementalSession {
+impl GraphQueryExt for Checked {
     /// Goto-definition: finds the declaration the occurrence under the cursor names.
-    fn definition(&self, module_or_uri: &str, line: i32, col: i32) -> Option<(ModulePath, Span)> {
+    fn definition(&self, module_or_path: &str, line: i32, col: i32) -> Option<(ModulePath, Span)> {
         let g = self.reference_graph();
-        let m = module_for(g, module_or_uri)?;
+        let m = module_for(g, module_or_path)?;
         let id = g.def_id_at(m, line, col)?;
         Some((g.module_path(id.module)?.clone(), id.span))
     }
 
     /// The alias-preserving `DefId` under the cursor plus the span of the
     /// smallest enclosing occurrence.
-    fn prepare_rename(&self, module_or_uri: &str, line: i32, col: i32) -> Option<(DefId, Span)> {
+    fn prepare_rename(&self, module_or_path: &str, line: i32, col: i32) -> Option<(DefId, Span)> {
         let g = self.reference_graph();
-        let m = module_for(g, module_or_uri)?;
+        let m = module_for(g, module_or_path)?;
         let id = g.def_id_at(m, line, col)?;
         let cursor = g
             .module_refs(m)
@@ -184,9 +239,9 @@ impl SessionQueryExt for IncrementalSession {
     }
 
     /// Every symbol-listable definition declared in the module.
-    fn document_symbols(&self, module_or_uri: &str) -> Vec<SymbolInfo> {
+    fn document_symbols(&self, module_or_path: &str) -> Vec<SymbolInfo> {
         let g = self.reference_graph();
-        match module_for(g, module_or_uri) {
+        match module_for(g, module_or_path) {
             Some(m) => g.defs_in(m).filter_map(|d| symbol_of(g, d)).collect(),
             None => Vec::new(),
         }

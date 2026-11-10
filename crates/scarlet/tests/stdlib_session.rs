@@ -1,44 +1,63 @@
-//! From-source stdlib sessions (`IncrementalSession::new_from_source` +
-//! `check_as`) must produce the same diagnostics as a batch `check` of the
-//! same file: none, for a clean stdlib module.
+//! A build that reads the stdlib from source must check a stdlib file, as its
+//! own `scarlet/...` module, with the same diagnostics as a batch check: none,
+//! for a clean stdlib module. Every module the check reaches must be clean too.
 //!
-//! This is a regression test. `truncate_to` clears `vars` and restarts var
-//! numbering, but schemes survive it holding `QuantVar::origin_id` var ids.
-//! Without the epoch guard in `instantiate`, a prelude constructor scheme's
-//! origin id aliased the freshly minted rigid vars of the first module checked
-//! after the rewind. So `Ok`/`Err` instantiated *rigid* inside any generic fn,
-//! and every constructor pattern unified wrongly. The open file then got
-//! phantom `Type mismatch` diagnostics at the imported module's spans.
+//! This is a regression test. The old incremental session rewound one shared
+//! inference engine between checks, and a prelude constructor's scheme once
+//! aliased the fresh rigid variables of the first module checked after a
+//! rewind. The open file then got phantom `Type mismatch` diagnostics at the
+//! imported module's spans.
 
-use scarlet_core::bytecode::IncrementalSession;
-use scarlet_core::parser;
-use scarlet_core::scanner;
-use std::path::PathBuf;
+use scarlet_core::build::{self, Build, Entry};
+use scarlet_core::check::{Role, UnusedBindings};
+use scarlet_core::module::ModuleKey;
+use std::path::{Path, PathBuf};
 
-fn check_stdlib_file(rel: &str, module: Vec<String>) -> Vec<String> {
+fn stdlib_root() -> PathBuf {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../scarlet_core/src/std");
-    let root = root.canonicalize().unwrap();
-    let path = root.join(rel);
-    let text = std::fs::read_to_string(&path).unwrap();
+    root.canonicalize().unwrap()
+}
 
-    let mut sc = scanner::new_scanner(text);
-    let p = parser::new_parser(&mut sc);
-    let r = p.parse_program();
-    assert!(r.diagnostics.is_empty(), "parse: {:#?}", r.diagnostics);
+/// Checks `text` as stdlib module `module` in a build reading the stdlib from
+/// `root`, and renders every diagnostic the check reaches.
+fn check_as(root: &Path, text: &str, base_dir: &Path, module: Vec<String>) -> Vec<String> {
+    let parsed = build::parse(text);
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "parse: {:#?}",
+        parsed.diagnostics
+    );
 
-    let mut s = IncrementalSession::new_from_source(root);
-    let expr = scarlet_core::ast::Expression::BlockExpression(r.ast);
-    let result = s.check_as(&expr, path.parent(), module);
-    result
-        .diagnostics
+    let mut b = Build::new(Some(root.to_path_buf()));
+    let reach = b.check_entry(Entry {
+        key: ModuleKey::for_stdlib(&module),
+        ast: &parsed.ast,
+        doc: parsed.doc,
+        parse: parsed.diagnostics,
+        hash: build::source_hash(text),
+        base_dir: Some(base_dir),
+        role: Role::Library,
+        unused: UnusedBindings::Report,
+    });
+    b.diagnostics(&reach)
         .iter()
         .map(|d| {
             format!(
-                "{}:{}: {}",
-                d.span.start_line, d.span.start_column, d.message
+                "{}:{}:{}: {}",
+                d.source.as_ref().map_or("?", |k| k.as_str()),
+                d.span.start_line,
+                d.span.start_column,
+                d.message
             )
         })
         .collect()
+}
+
+fn check_stdlib_file(rel: &str, module: Vec<String>) -> Vec<String> {
+    let root = stdlib_root();
+    let path = root.join(rel);
+    let text = std::fs::read_to_string(&path).unwrap();
+    check_as(&root, &text, path.parent().unwrap(), module)
 }
 
 #[test]
@@ -69,27 +88,8 @@ fn http_body_as_module_is_clean() {
 }
 
 fn check_buffer_as(text: &str, module: Vec<String>) -> Vec<String> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../scarlet_core/src/std");
-    let root = root.canonicalize().unwrap();
-
-    let mut sc = scanner::new_scanner(text.to_string());
-    let p = parser::new_parser(&mut sc);
-    let r = p.parse_program();
-    assert!(r.diagnostics.is_empty(), "parse: {:#?}", r.diagnostics);
-
-    let mut s = IncrementalSession::new_from_source(root.clone());
-    let expr = scarlet_core::ast::Expression::BlockExpression(r.ast);
-    let result = s.check_as(&expr, Some(&root.join("scarlet")), module);
-    result
-        .diagnostics
-        .iter()
-        .map(|d| {
-            format!(
-                "{}:{}: {}",
-                d.span.start_line, d.span.start_column, d.message
-            )
-        })
-        .collect()
+    let root = stdlib_root();
+    check_as(&root, text, &root.join("scarlet"), module)
 }
 
 #[test]

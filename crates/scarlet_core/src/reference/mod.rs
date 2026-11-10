@@ -89,10 +89,6 @@ pub struct ModuleInterner {
 }
 
 impl ModuleInterner {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
     /// Intern `path`, returning its stable id (creating one on first sight).
     pub(crate) fn intern(&mut self, path: &ModulePath) -> ModuleId {
         let key = ModuleKey::of(path);
@@ -127,12 +123,6 @@ impl ModuleInterner {
             .iter()
             .enumerate()
             .map(|(i, p)| (ModuleId(i as u32), p))
-    }
-
-    /// Every interned path in id order, so the `i`th item belongs to
-    /// `ModuleId(i)`.
-    pub(crate) fn paths(&self) -> impl Iterator<Item = &ModulePath> {
-        self.iter().map(|(_, p)| p)
     }
 
     #[cfg(test)]
@@ -573,11 +563,6 @@ pub struct ReferenceGraph {
 }
 
 impl ReferenceGraph {
-    /// The empty graph, a placeholder until a real one is built.
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
     pub fn module_id(&self, path: &ModulePath) -> Option<ModuleId> {
         self.interner.lookup(path)
     }
@@ -747,7 +732,7 @@ mod tests {
 
     #[test]
     fn interner_is_stable_and_bijective() {
-        let mut it = ModuleInterner::new();
+        let mut it = ModuleInterner::default();
         let a = it.intern(&mp(&["main"]));
         let b = it.intern(&mp(&["scarlet", "array"]));
         let a2 = it.intern(&mp(&["main"]));
@@ -1037,7 +1022,7 @@ fn module_references(
     index: &scarlet_check::SourceIndex,
 ) -> ModuleReferences {
     use scarlet_check::index::{DefKind, Site, UseKind};
-    let mut defid = |g: &mut ReferenceGraphBuilder, s: &Site| DefId::new(g.intern_module(&path_of(&s.module)), s.span, s.entity);
+    let defid = |g: &mut ReferenceGraphBuilder, s: &Site| DefId::new(g.intern_module(&path_of(&s.module)), s.span, s.entity);
     let module = g.intern_module(&path_of(key));
     let mut refs = ModuleReferences::new(module);
     refs.set_doc(index.doc.clone());

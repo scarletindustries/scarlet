@@ -246,6 +246,7 @@ fn resolve_canonical_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     fn unique_dir(tag: &str) -> PathBuf {

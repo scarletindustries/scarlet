@@ -1,17 +1,18 @@
-//! End-to-end coverage for the workspace reference graph exposed through
-//! `IncrementalSession`: goto-definition, find-references, rename, symbols,
-//! the `scarlet/*` stdlib import path, unused-import / dead-code hints, and
-//! incremental stability of the reverse-edge index.
+//! End-to-end coverage for the workspace reference graph a `Build` gives:
+//! goto-definition, find-references, rename, symbols, the `scarlet/*` stdlib
+//! import path, unused-import / dead-code hints, and how the reverse-edge index
+//! holds up when a module is checked again.
 
-use scarlet::bytecode::IncrementalSession;
 use scarlet::module;
 use scarlet::reference::EntityKind;
 use scarlet::span::Span;
 
 mod common;
-use common::{
-    Project, SessionQueryExt, assert_has_msg, assert_has_sym, assert_msg_eq, assert_no_msg,
-    checked_with, cursor, parse, sym_names,
+use common::Project;
+use common::cursor;
+use common::graph::{
+    Checked, GraphQueryExt, assert_has_msg, assert_has_sym, assert_msg_eq, assert_no_msg,
+    checked_with, sym_names,
 };
 
 const C_SRC: &str = "pub fn shared() Int { 42 }\n";
@@ -35,13 +36,13 @@ fn project() -> Project {
     p
 }
 
-fn checked(p: &Project) -> IncrementalSession {
+fn checked(p: &Project) -> Checked {
     checked_with(p, ENTRY)
 }
 
 /// Gets the unused-entity diagnostics for the entry module, asserts every one
 /// is a Hint, and returns their messages.
-fn unused_msgs(s: &IncrementalSession) -> Vec<String> {
+fn unused_msgs(s: &Checked) -> Vec<String> {
     let hints = s
         .reference_graph()
         .unused_diagnostics_for(&module::main_module());
@@ -271,16 +272,16 @@ fn incremental_edit_b_keeps_refs_then_invalidate_drops_reverse_edges() {
         !s.reference_graph().references_to(defid0).is_empty(),
         "entry use should create a reverse edge into B"
     );
-    let n0 = s.compile_count();
+    let n0 = s.build.checks();
 
     // Edit B's body only, keeping `bridge`.
     p.write(
         "b.sca",
         "import ./c\npub fn bridge() Int { c::shared() + 100 }\n",
     );
-    let r = s.check(&parse(ENTRY), Some(&p.dir));
+    let r = s.check(ENTRY);
     assert!(r.success(), "after B edit: {:?}", r.diagnostics);
-    assert!(s.compile_count() > n0, "B must have recompiled");
+    assert!(s.build.checks() > n0, "B must have been checked again");
     let (m1, _) = s
         .definition("main", bl, bc)
         .expect("bridge still resolves after B edit");
@@ -306,7 +307,7 @@ fn incremental_edit_b_keeps_refs_then_invalidate_drops_reverse_edges() {
     p.write("b.sca", "pub fn other() Int { 7 }\n");
     let entry2 = "import ./b\npub fn main() {\n\tprintln(b::other())\n}\n";
     p.write("a.sca", entry2);
-    let r = s.check(&parse(entry2), Some(&p.dir));
+    let r = s.check(entry2);
     assert!(r.success(), "after B invalidation: {:?}", r.diagnostics);
     assert!(
         s.reference_graph().references_to(defid0).is_empty(),
@@ -439,7 +440,7 @@ fn unused_one_of_two_plain_qualified_imports_is_flagged() {
     assert_no_msg(&msgs, "unused import `d`");
 }
 
-// Session navigation over the Constructor / Type / Constant / Field entity
+// Navigation over the Constructor / Type / Constant / Field entity
 // kinds, each driven from a real use site.
 
 const NAV_SRC: &str = "type Color {\n\tRed\n\tGreen\n\tBlue\n}\n\
@@ -457,15 +458,9 @@ pub fn main() {\n\
 }\n";
 
 /// Drives goto-def, prepare_rename, find-references and rename for one entity
-/// through the session query API. The 1st occurrence of `needle` in `src` is
+/// through the graph query API. The 1st occurrence of `needle` in `src` is
 /// always the declaration; `use_nth` (1-based) selects the use site to click.
-fn assert_nav(
-    s: &IncrementalSession,
-    src: &str,
-    needle: &str,
-    use_nth: usize,
-    expected: EntityKind,
-) {
+fn assert_nav(s: &Checked, src: &str, needle: &str, use_nth: usize, expected: EntityKind) {
     let (decl_l, decl_c) = cursor(src, needle, 1, 0);
     let (ul, uc) = cursor(src, needle, use_nth, 1);
 
@@ -566,8 +561,7 @@ fn constructor_in_match_pattern_is_a_graph_reference() {
 }
 
 // A program matching scarlet/http/h1's `Parsed` enum exhaustively must check clean
-// through `IncrementalSession` exactly as through `al check`. A failure means
-// session hydration of the embedded stdlib blob mangled a declaration.
+// through a `Build` exactly as through `scarlet check`.
 const HTTP_ENTRY: &str = "import scarlet/binary\n\
 import scarlet/http/h1\n\
 pub fn main() {\n\
@@ -580,30 +574,30 @@ pub fn main() {\n\
 }\n";
 
 #[test]
-fn session_checks_http_h1_program_clean() {
+fn build_checks_http_h1_program_clean() {
     let p = Project::new("http_session");
     p.write("a.sca", HTTP_ENTRY);
     checked_with(&p, HTTP_ENTRY);
 }
 
-// Run two checks in one session. Arena truncation between them must not
-// corrupt the stdlib types hydrated for the second.
+// Run two checks in one build. The second must see the stdlib types exactly as
+// a fresh build would.
 #[test]
-fn session_recheck_keeps_stdlib_types_intact() {
+fn build_recheck_keeps_stdlib_types_intact() {
     let p = Project::new("http_session_recheck");
     p.write("a.sca", HTTP_ENTRY);
 
     let mut s = checked_with(&p, "pub fn main() {\n\tprintln(1)\n}\n");
-    let r2 = s.check(&parse(HTTP_ENTRY), Some(&p.dir));
+    let r2 = s.check(HTTP_ENTRY);
     assert!(
         r2.success(),
-        "re-check of an scarlet/http/h1 program in a reused session failed: {:?}",
+        "re-check of an scarlet/http/h1 program in a reused build failed: {:?}",
         r2.diagnostics
     );
 }
 
-// One entry hydrates scarlet/http, a later entry in the same session imports
-// scarlet/http/h1 directly. h1's hydration must still resolve `Parsed` / `Framing` /
+// One entry loads scarlet/http, a later entry in the same build imports
+// scarlet/http/h1 directly. h1 must still resolve `Parsed` / `Framing` /
 // `Header` to real enum types rather than collapsing them to a builtin.
 const HTTP_HELLO_ENTRY: &str = "import scarlet/http\n\
 pub fn main() {\n\
@@ -614,26 +608,24 @@ pub fn main() {\n\
 }\n";
 
 #[test]
-fn session_hydrates_h1_after_http_in_earlier_check() {
+fn build_loads_h1_after_http_in_earlier_check() {
     let p = Project::new("http_session_order");
     p.write("a.sca", HTTP_HELLO_ENTRY);
     p.write("b.sca", HTTP_ENTRY);
 
-    // Hydrates http + headers, then h1 directly.
+    // Loads http + headers, then h1 directly.
     let mut s = checked_with(&p, HTTP_HELLO_ENTRY);
-    let r2 = s.check(&parse(HTTP_ENTRY), Some(&p.dir));
+    let r2 = s.check(HTTP_ENTRY);
     assert!(
         r2.success(),
         "scarlet/http/h1 program checked after an scarlet/http program in the same \
-         session must still see Parsed as an enum: {:?}",
+         build must still see Parsed as an enum: {:?}",
         r2.diagnostics
     );
 }
 
-// An entry type whose name collides with a seeded stdlib type overwrites the
-// `type_info` entry in place (`IndexMap::insert` keeps the pre-watermark
-// index), so truncate-by-length rollback cannot restore it. The env's
-// overwrite journal fixes that, and this test pins it.
+// An entry type whose name collides with a stdlib type must not leak into a
+// later check of another entry that uses the stdlib type.
 const SHADOWING_ENTRY: &str = "import scarlet/string\n\
 type Parsed = Result(Int, String)\n\
 fn f(x Int) Parsed {\n\
@@ -653,15 +645,15 @@ fn entry_type_shadowing_stdlib_name_is_undone_on_next_check() {
 
     // An entry using the real scarlet/http/h1.Parsed must see the enum, not the
     // dead alias.
-    let r2 = s.check(&parse(HTTP_ENTRY), Some(&p.dir));
+    let r2 = s.check(HTTP_ENTRY);
     assert!(
         r2.success(),
         "h1::Parsed corrupted by an earlier entry's shadowing type alias: {:?}",
         r2.diagnostics
     );
 
-    // And back: the journal restore is itself rolled back cleanly.
-    let r3 = s.check(&parse(SHADOWING_ENTRY), Some(&p.dir));
+    // And back again.
+    let r3 = s.check(SHADOWING_ENTRY);
     assert!(
         r3.success(),
         "re-check of shadowing entry failed: {:?}",

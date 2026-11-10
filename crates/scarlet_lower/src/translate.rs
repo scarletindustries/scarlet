@@ -767,38 +767,8 @@ impl Mx<'_, '_, '_> {
                 cx.binds.insert(*b, (bind.id, bind.ty));
                 frames.push(Frame::Let(bind, self.var(src)));
             }
-            PatternKind::Tuple(elems) => {
-                for (i, sub) in elems.iter().enumerate() {
-                    if matches!(sub.kind, PatternKind::Wild) {
-                        continue;
-                    }
-                    let ty = self.ty(sub.ty);
-                    let b = self.temp(cx, ty);
-                    let read = TypedExpr::TupleIndex {
-                        ty,
-                        recv: Box::new(self.var(src)),
-                        idx: i as u32,
-                    };
-                    frames.push(Frame::Let(b, read));
-                    self.project(cx, sub, &b, frames);
-                }
-            }
-            PatternKind::Ctor { fields, .. } => {
-                for (i, sub) in fields.iter().enumerate() {
-                    if matches!(sub.kind, PatternKind::Wild) {
-                        continue;
-                    }
-                    let ty = self.ty(sub.ty);
-                    let b = self.temp(cx, ty);
-                    let read = TypedExpr::Field {
-                        ty,
-                        recv: Box::new(self.var(src)),
-                        idx: i as u32,
-                    };
-                    frames.push(Frame::Let(b, read));
-                    self.project(cx, sub, &b, frames);
-                }
-            }
+            PatternKind::Tuple(elems) => self.project_fields(cx, elems, src, true, frames),
+            PatternKind::Ctor { fields, .. } => self.project_fields(cx, fields, src, false, frames),
             // Only `[..rest]` and `<<..rest>>` match every value, and the rest
             // is the whole value.
             PatternKind::Array { rest, .. } | PatternKind::Binary { rest, .. } => {
@@ -814,6 +784,34 @@ impl Mx<'_, '_, '_> {
                     self.project(cx, first, src, frames);
                 }
             }
+        }
+    }
+
+    /// Read each field `subs` names out of `src`. A name binds the read
+    /// itself, so it is an alias of the field, not a copy of it.
+    fn project_fields(&mut self, cx: &mut Fx, subs: &[Pattern], src: &TypedBind, tuple: bool, frames: &mut Vec<Frame>) {
+        for (i, sub) in subs.iter().enumerate() {
+            if matches!(sub.kind, PatternKind::Wild) {
+                continue;
+            }
+            let ty = self.ty(sub.ty);
+            let recv = Box::new(self.var(src));
+            let idx = i as u32;
+            let read = if tuple {
+                TypedExpr::TupleIndex { ty, recv, idx }
+            } else {
+                TypedExpr::Field { ty, recv, idx }
+            };
+            if let PatternKind::Bind(b) = sub.kind {
+                let mut bind = self.bind(cx, b);
+                bind.ty = ty;
+                cx.binds.insert(b, (bind.id, bind.ty));
+                frames.push(Frame::Let(bind, read));
+                continue;
+            }
+            let b = self.temp(cx, ty);
+            frames.push(Frame::Let(b, read));
+            self.project(cx, sub, &b, frames);
         }
     }
 

@@ -188,7 +188,7 @@ impl Session {
 
     /// Compile `source` as the session's script: against the directory the REPL was started in,
     /// and without the unused-binding check, which no fragment of a session can pass.
-    fn compile(&mut self, source: &str, ast: &crate::ast::BlockExpression) -> Compiled {
+    fn compile(&mut self, source: &str, parsed: build::Parsed) -> Compiled {
         let opts = compile::Options {
             base_dir: self.base_dir.as_deref(),
             role: Role::Script,
@@ -196,7 +196,7 @@ impl Session {
             as_module: None,
             run: false,
         };
-        compile::compile(&mut self.build, ast, None, build::source_hash(source), &opts)
+        compile::compile(&mut self.build, parsed, build::source_hash(source), &opts)
     }
 
     /// The session's own source: everything it replays ahead of an entry.
@@ -234,7 +234,7 @@ impl Session {
             self.report(&combined.diagnostics, &combined_src);
             return;
         }
-        let result = self.compile(&combined_src, &combined.ast);
+        let result = self.compile(&combined_src, combined);
         if !result.diagnostics.is_empty() {
             self.report(&result.diagnostics, &combined_src);
             if !result.success() {
@@ -311,7 +311,7 @@ impl Session {
             self.report(&probe.diagnostics, &probe_src);
             return;
         }
-        let result = self.compile(&probe_src, &probe.ast);
+        let result = self.compile(&probe_src, probe);
         if !result.success() {
             self.report(&result.diagnostics, &probe_src);
             return;
@@ -340,7 +340,7 @@ impl Session {
     fn disassemble(&mut self, needle: &str) {
         let replay = self.replay();
         let parsed = build::parse(&replay);
-        let result = self.compile(&replay, &parsed.ast);
+        let result = self.compile(&replay, parsed);
         if !result.success() {
             self.report(&result.diagnostics, &replay);
             return;

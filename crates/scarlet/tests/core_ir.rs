@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 mod common;
-use common::{diff_lines, parse};
+use common::diff_lines;
 
 fn golden_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/core_ir")
@@ -866,7 +866,22 @@ mod unlowerable {
         (program, at)
     }
 
-    fn assert_rejected(r: &scarlet::bytecode::CompileResult, at: Span, what: &str) {
+    fn compile(expr: ast::Expression, run: bool) -> scarlet::compile::Compiled {
+        let ast::Expression::BlockExpression(ast) = expr else {
+            unreachable!("parse wraps the module in a block")
+        };
+        let parsed = scarlet::build::Parsed {
+            ast,
+            doc: None,
+            diagnostics: Vec::new(),
+        };
+        let mut opts = scarlet::compile::Options::program(None);
+        opts.run = run;
+        let mut b = scarlet::build::Build::default();
+        scarlet::compile::compile(&mut b, parsed, 0, &opts)
+    }
+
+    fn assert_rejected(r: &scarlet::compile::Compiled, at: Span, what: &str) {
         assert!(!r.success(), "{what} accepted an unlowerable program");
         let d = r
             .diagnostics
@@ -884,14 +899,14 @@ mod unlowerable {
     #[test]
     fn al_check_reports_it_rather_than_passing() {
         let (expr, at) = program_with_an_error_node();
-        let r = scarlet::bytecode::check(&expr, None);
+        let r = compile(expr, false);
         assert_rejected(&r, at, "check");
     }
 
     #[test]
     fn al_run_reports_it_rather_than_panicking() {
         let (expr, at) = program_with_an_error_node();
-        let r = scarlet::bytecode::compile(&expr, None);
+        let r = compile(expr, true);
         assert_rejected(&r, at, "compile");
     }
 
@@ -901,7 +916,7 @@ mod unlowerable {
     #[test]
     fn the_same_program_without_the_error_node_compiles() {
         let expr = crate::common::parse("pub fn main() {\n\t1 + 1\n}\n");
-        let r = scarlet::bytecode::compile(&expr, None);
+        let r = compile(expr, true);
         assert!(r.success(), "{:?}", r.diagnostics);
         let program = r.into_runnable().expect("a successful compile is runnable");
         assert!(program.main.is_some(), "a program with `main` starts there");
@@ -924,7 +939,7 @@ fn every_constructor_has_names() {
                pub fn main() {\n\
                \tprintln(string::inspect(Circle(radius: 1)))\n\
                }\n";
-    let r = scarlet::bytecode::compile(&parse(src), None);
+    let r = scarlet::compile::compile_text(src, None);
     assert!(r.success(), "{:?}", r.diagnostics);
     let program = r.into_runnable().expect("a successful compile is runnable");
     let bodies = (&program.fns)
