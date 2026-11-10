@@ -20,7 +20,9 @@ fn cell_at(grid Array(Array(Bool)), x Int, y Int) Bool {
 const neighborhood = [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)]
 
 fn live_neighbors(grid Array(Array(Bool)), x Int, y Int) Int {
-	array::length(array::filter(neighborhood, fn(offset) cell_at(grid, x + offset.0, y + offset.1)))
+	neighborhood
+	|> array::filter(fn(offset) cell_at(grid, x + offset.0, y + offset.1))
+	|> array::length
 }
 
 fn next_cell(alive Bool, neighbors Int) Bool {

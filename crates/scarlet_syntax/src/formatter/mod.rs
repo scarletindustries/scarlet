@@ -333,7 +333,7 @@ impl Formatter {
     fn node(&self, n: &ast::Node) -> Doc {
         match n {
             ast::Node::Statement(s) => self.statement(s),
-            ast::Node::Expression(e) => self.expr(e),
+            ast::Node::Expression(e) => self.expr_at_line_start(e),
         }
     }
 
@@ -354,12 +354,7 @@ impl Formatter {
                     Some(t) => d![text(" "), self.type_(t)],
                     None => nil(),
                 };
-                d![
-                    self.pattern(&s.pattern),
-                    ty,
-                    text(" = "),
-                    self.expr(&s.init)
-                ]
+                d![self.pattern(&s.pattern), ty, self.bound(" =", &s.init)]
             }
             ast::Statement::Backpass(s) => {
                 let mut parts = Vec::new();
@@ -419,8 +414,7 @@ impl Formatter {
                     text("const "),
                     text(s.identifier.name.clone()),
                     ty,
-                    text(" = "),
-                    self.expr(&s.init)
+                    self.bound(" =", &s.init)
                 ]
             }
             ast::Declaration::Function(func) => self.fn_decl(func),
@@ -662,12 +656,7 @@ impl Formatter {
                     self.expr(&o.body)
                 ]
             }
-            E::PipeExpression(p) => group(d![
-                self.expr(&p.left),
-                line(),
-                text("|> "),
-                self.expr(&p.right),
-            ]),
+            E::PipeExpression(p) => self.pipeline(p, HeadAt::MidLine),
             E::FunctionExpression(f) => self.fn_expr(f),
             E::FunctionCallExpression(c) => {
                 let args: Vec<Doc> = c.arguments.iter().map(|a| self.call_arg(a)).collect();
@@ -740,6 +729,61 @@ impl Formatter {
         }
     }
 
+    /// `a |> b |> c` parses as `(a |> b) |> c`. The chain is laid out as one
+    /// group, so it either fits on one line or puts every `|>` on its own
+    /// line. A line that starts with `|>` continues the one before, so
+    /// breaking there never ends a statement.
+    ///
+    /// When `a` starts its own line, the `|>` lines line up under it, as in
+    /// Gleam. When something comes before `a` on its line, like `fn(x)` or a
+    /// binding that `bound` didn't move down, they go one level in instead,
+    /// so they don't sit under whatever that was.
+    fn pipeline(&self, p: &ast::PipeExpression, head_at: HeadAt) -> Doc {
+        let mut stages = vec![&*p.right];
+        let mut head = &*p.left;
+        while let ast::Expression::PipeExpression(inner) = head {
+            stages.push(&inner.right);
+            head = &inner.left;
+        }
+        let mut rest = Vec::new();
+        for stage in stages.into_iter().rev() {
+            rest.push(line());
+            rest.push(text("|> "));
+            rest.push(self.expr(stage));
+        }
+        let indent = match head_at {
+            HeadAt::LineStart => 0,
+            HeadAt::MidLine => 1,
+        };
+        group(d![self.expr(head), nest(indent, doc::concat(rest))])
+    }
+
+    /// `expr` for an expression that starts its own line: a statement, an
+    /// arm body after a broken `->`, a call argument, or a pipeline `bound`
+    /// moved down.
+    fn expr_at_line_start(&self, e: &ast::Expression) -> Doc {
+        match e {
+            ast::Expression::PipeExpression(p) => self.pipeline(p, HeadAt::LineStart),
+            _ => self.expr(e),
+        }
+    }
+
+    /// What follows `=` or a label's `:`. A pipeline that doesn't fit
+    /// there moves to the next line, one level in, so its `|>` lines sit under
+    /// its first value and not under the name being bound. Anything else
+    /// stays on the binder's line.
+    fn bound(&self, binder: &'static str, e: &ast::Expression) -> Doc {
+        match e {
+            ast::Expression::PipeExpression(_) => {
+                d![
+                    text(binder),
+                    group(nest(1, d![line(), self.expr_at_line_start(e)]))
+                ]
+            }
+            _ => d![text(binder), text(" "), self.expr(e)],
+        }
+    }
+
     fn call_arg(&self, a: &ast::CallArg) -> Doc {
         // A spread's span starts after the `..`, but a comment above the
         // argument attaches to the `..` token. Query both positions.
@@ -757,7 +801,7 @@ impl Formatter {
             }
         };
         let arg = match a {
-            ast::CallArg::Positional(e) => self.expr(e),
+            ast::CallArg::Positional(e) => self.expr_at_line_start(e),
             // A punned argument keeps its shorthand. If the formatter expanded
             // `label:` to `label: label`, the shorthand would be gone the first
             // time a file got formatted.
@@ -767,7 +811,7 @@ impl Formatter {
                 ..
             } => d![text(label.name.clone()), text(":")],
             ast::CallArg::Labeled { label, value, .. } => {
-                d![text(label.name.clone()), text(": "), self.expr(value)]
+                d![text(label.name.clone()), self.bound(":", value)]
             }
             ast::CallArg::Spread(e) => d![text(".."), self.expr(e)],
         };
@@ -1037,6 +1081,7 @@ impl Formatter {
             let tail = if doc::ends_line(&body) {
                 d![text(" -> "), body]
             } else {
+                let body = self.expr_at_line_start(&arm.body);
                 group_willing(nest(1, d![text(" ->"), line(), body]))
             };
             arms.push(d![head, guard, tail]);
@@ -1280,6 +1325,13 @@ fn starts_with_minus(e: &ast::Expression) -> bool {
     }
 }
 
+/// Where a pipeline's first value sits on its line. See `Formatter::pipeline`.
+#[derive(Clone, Copy)]
+enum HeadAt {
+    LineStart,
+    MidLine,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1320,6 +1372,60 @@ mod tests {
     fn a_long_backpass_pattern_wraps_and_re_parses() {
         let src = "fn f(r Result((Int, Int), Nil)) Result(Int, Nil) {\n\t(aaaaaaaaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb) <- result::then(result::map_err(r, fn(e) e))\n\tOk(aaaaaaaaaaaaaaaaaaaaaa + bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)\n}\n";
         assert_round_trips(&fmt(src));
+    }
+
+    #[test]
+    fn a_short_pipeline_stays_on_one_line() {
+        let src =
+            "fn f(xs Array(Int)) Int {\n\tn = xs |> array::map(inc) |> array::length\n\tn\n}\n";
+        assert_eq!(fmt(src), src);
+    }
+
+    /// A pipeline breaks at every `|>` or at none, and its stages line up
+    /// under its first value. After `=`, the whole chain moves down a level.
+    #[test]
+    fn a_long_pipeline_breaks_at_every_stage() {
+        let stage = "array::filter(fn(word) string::length(word) > 0)";
+        let src = format!(
+            "fn f(line String) Array(String) {{\n\twords = line |> string::trim |> string::split(' ') |> {stage}\n\tline |> string::trim |> string::split(' ') |> {stage} |> array::reverse\n}}\n"
+        );
+        let out = fmt(&src);
+        assert_eq!(
+            out,
+            format!(
+                "fn f(line String) Array(String) {{\n\twords =\n\t\tline\n\t\t|> string::trim\n\t\t|> string::split(' ')\n\t\t|> {stage}\n\tline\n\t|> string::trim\n\t|> string::split(' ')\n\t|> {stage}\n\t|> array::reverse\n}}\n"
+            )
+        );
+        assert_round_trips(&out);
+    }
+
+    #[test]
+    fn a_long_pipeline_after_a_label_moves_down_a_level() {
+        let head = "socket::read_until(sock, buffer_size, deadline_in_milliseconds)";
+        let src = format!(
+            "fn f(sock Int) Reader {{\n\tr = Reader(read: {head} |> result::map_err(Transport), write: w)\n\tr\n}}\n"
+        );
+        let out = fmt(&src);
+        assert_eq!(
+            out,
+            format!(
+                "fn f(sock Int) Reader {{\n\tr = Reader(\n\t\tread:\n\t\t\t{head}\n\t\t\t|> result::map_err(Transport),\n\t\twrite: w,\n\t)\n\tr\n}}\n"
+            )
+        );
+        assert_round_trips(&out);
+    }
+
+    /// A pipeline that doesn't start its line, like one before `or` or in a
+    /// lambda body, indents its `|>` lines so they don't sit under the binding.
+    #[test]
+    fn a_pipeline_mid_line_indents_its_stages() {
+        let src = "fn f() Int {\n\tport = { os::get_env('PORT_NUMBER_FOR_THIS_SERVER') or '8080' } |> binary::from_string |> binary::parse_int(binary::Dec) or 8080\n\tport\n}\n";
+        let out = fmt(src);
+        assert_eq!(
+            out,
+            "fn f() Int {\n\tport = { os::get_env('PORT_NUMBER_FOR_THIS_SERVER') or '8080' }\n\t\t|> binary::from_string\n\t\t|> binary::parse_int(binary::Dec) or 8080\n\tport\n}\n"
+        );
+        assert_round_trips(&out);
     }
 
     #[track_caller]

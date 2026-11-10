@@ -196,7 +196,9 @@ fn collapse(blocks Array(Array(String))) Array(Array(String)) {
 		[(prev, n), ..rest] if prev == block -> [(prev, n + 1), ..rest]
 		_ -> [(block, 1), ..acc]
 	})
-	array::map(array::reverse(runs), fn(run) match run {
+	runs
+	|> array::reverse
+	|> array::map(fn(run) match run {
 		([first, ..rest], n) if n > 1 -> ['${first} ×${n}', ..rest]
 		(block, _) -> block
 	})
@@ -333,10 +335,9 @@ pub fn main() Nil {
 	// Past 10 crashes a minute the supervisor gives up and the program exits.
 	app <- process::root(process::OneForOne(restarts: 10, within_ms: 60_000))
 	chat = process::permanent(app, room)
-	port = binary::parse_int(
-		binary::from_string(os::get_env('PORT') or '8080'),
-		binary::Dec,
-	) or 8080
+	port = { os::get_env('PORT') or '8080' }
+		|> binary::from_string
+		|> binary::parse_int(binary::Dec) or 8080
 	match http::serve_in(app, '0.0.0.0', port, fn(req) route(req, chat)) {
 		Ok(_) -> println('chat is up on http://localhost:${port}')
 		Err(e) -> {

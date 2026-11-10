@@ -23,10 +23,10 @@ fn parse_score(s String) Result(Int, ParseError) {
 	if string::length(trimmed) == 0 {
 		Err(Empty)
 	} else {
-		result::map_err(
-			binary::parse_int(binary::from_string(trimmed), binary::Dec),
-			fn(_) NotANumber(trimmed),
-		)
+		trimmed
+		|> binary::from_string
+		|> binary::parse_int(binary::Dec)
+		|> result::replace_err(NotANumber(trimmed))
 	}
 }
 
@@ -69,7 +69,9 @@ pub fn main() {
 	// alternative it only works out when needed.
 	initial = option::then(found, fn(u) string::split(u, '')[0])
 	println('then      ${option::unwrap(initial, '?')}')
-	println('or_else   ${option::unwrap(option::or_else(missing, fn() Some('anonymous')), '?')}')
+	println(
+		'or_else   ${missing |> option::or_else(fn() Some('anonymous')) |> option::unwrap('?')}',
+	)
 
 	// or unwraps an Option, or falls back to a value, in one expression.
 	println('or        ${users[9] or 'out of range'}')

@@ -109,18 +109,19 @@ const HEAD = <<'HEAD'>>
 // An `Io` over a cleartext socket.
 pub fn plain(sock socket::Socket) Io {
 	Io(
-		read: fn(max, deadline) result::map_err(socket::read_until(sock, max, deadline), Transport),
-		write: fn(bytes) result::map_err(socket::write(sock, bytes), Transport),
-		close: fn() result::map_err(socket::close(sock), Transport),
+		read: fn(max, deadline) socket::read_until(sock, max, deadline)
+			|> result::map_err(Transport),
+		write: fn(bytes) socket::write(sock, bytes) |> result::map_err(Transport),
+		close: fn() socket::close(sock) |> result::map_err(Transport),
 	)
 }
 
 // An `Io` over an authenticated, encrypted connection.
 pub fn secure(sock tls::TlsSocket) Io {
 	Io(
-		read: fn(max, deadline) result::map_err(tls::read_until(sock, max, deadline), Tls),
-		write: fn(bytes) result::map_err(tls::write(sock, bytes), Tls),
-		close: fn() result::map_err(tls::close(sock), Tls),
+		read: fn(max, deadline) tls::read_until(sock, max, deadline) |> result::map_err(Tls),
+		write: fn(bytes) tls::write(sock, bytes) |> result::map_err(Tls),
+		close: fn() tls::close(sock) |> result::map_err(Tls),
 	)
 }
 
@@ -202,15 +203,12 @@ fn serialize_request(req Request) Result(Binary, ClientError) {
 	if !headers::valid(req.headers) {
 		Err(BadRequestHeaders)
 	} else {
-		hs = headers::set(
-			headers::set(
-				headers::set(req.headers, NAME_HOST, url::authority(req.url)),
-				NAME_CONTENT_LENGTH,
-				binary::from_int_ascii(binary::byte_size(req.body), binary::Dec),
-			),
-			NAME_CONNECTION,
-			VAL_CLOSE,
-		)
+		length = binary::from_int_ascii(binary::byte_size(req.body), binary::Dec)
+		hs =
+			req.headers
+			|> headers::set(NAME_HOST, url::authority(req.url))
+			|> headers::set(NAME_CONTENT_LENGTH, length)
+			|> headers::set(NAME_CONNECTION, VAL_CLOSE)
 		Ok(concat([req.method, SP, req.url.target, SP, HTTP11, CRLF, ..headers::render(hs), CRLF]))
 	}
 }
