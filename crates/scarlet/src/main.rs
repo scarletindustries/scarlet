@@ -255,8 +255,14 @@ fn compile_source(
     opts.as_module = scarlet::module::detect_stdlib_module(path);
     let mut b = build::Build::new(None);
     opts.file = Some(path);
-    let result = compile::compile(&mut b, file, parsed, &opts);
-    report(&result.diagnostics, !result.success(), file, entrypoint);
+    let result = compile::compile(
+        &mut b,
+        &mut scarlet::sources::DiskSources::new(),
+        file,
+        parsed,
+        &opts,
+    );
+    report(result.diagnostics(), !result.success(), file, entrypoint);
     result
 }
 

@@ -10,6 +10,7 @@ use crate::ast;
 use crate::build::Build;
 use crate::compile::{Export, exports};
 use crate::module::{self, ModuleKey, ModulePath};
+use crate::sources::DiskSources;
 use crate::token::Keyword;
 
 /// A completion candidate and how to describe it in the completion list.
@@ -56,7 +57,7 @@ pub struct Names {
     /// Where stdlib exports are read from. We make it on the first completion that needs it,
     /// because that checks the prelude. It keeps every module it checks after that, so each
     /// module is checked once per REPL.
-    stdlib: Option<Build>,
+    stdlib: Option<(Build, DiskSources)>,
 }
 
 impl Names {
@@ -185,7 +186,10 @@ impl Names {
     }
 
     fn exports(&mut self, path: &ModulePath) -> Vec<Export> {
-        exports(self.stdlib.get_or_insert_with(Build::default), path)
+        let (build, sources) = self
+            .stdlib
+            .get_or_insert_with(|| (Build::default(), DiskSources::new()));
+        exports(build, sources, path)
     }
 }
 

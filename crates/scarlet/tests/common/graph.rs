@@ -1,12 +1,13 @@
-//! Reference-graph queries over a [`Build`], for tests that check a program
+//! Reference-graph queries over a [`Build`]'s analysis, for tests that check a program
 //! and then ask what its names resolve to. The entry is checked as `main`, the
 //! way `scarlet check` checks a file, and its imports under their real keys.
 
-use scarlet::build::{self, Build, Entry};
+use scarlet::build::{self, Build, Counts, Entry};
 use scarlet::check::{Role, UnusedBindings};
 use scarlet::diagnostic::{self, Diagnostic};
 use scarlet::module::{self, ModulePath};
 use scarlet::reference::{DefId, Definition, EntityKind, ModuleId, ReferenceGraph};
+use scarlet::sources::DiskSources;
 use scarlet::span::Span;
 
 use super::Project;
@@ -14,7 +15,8 @@ use super::Project;
 /// A build that has checked an entry, and the reference graph of everything it
 /// holds.
 pub struct Checked {
-    pub build: Build,
+    build: Build,
+    sources: DiskSources,
     graph: ReferenceGraph,
     dir: std::path::PathBuf,
 }
@@ -22,6 +24,7 @@ pub struct Checked {
 /// What one check of the entry reported, its imports included.
 pub struct CheckResult {
     pub diagnostics: Vec<Diagnostic>,
+    pub counts: Counts,
 }
 
 impl CheckResult {
@@ -34,7 +37,8 @@ impl Checked {
     pub fn new(p: &Project) -> Self {
         Checked {
             build: Build::default(),
-            graph: ReferenceGraph::of_build(&Build::default()),
+            sources: DiskSources::new(),
+            graph: ReferenceGraph::of_modules([]),
             dir: p.dir.clone(),
         }
     }
@@ -48,18 +52,22 @@ impl Checked {
             "parse errors: {:?}\n---\n{entry}",
             parsed.diagnostics
         );
-        let reach = self.build.check_entry(Entry {
-            source: scarlet::source::SourceFile::new(module::ModuleKey::main(), None, entry),
-            ast: &parsed.ast,
-            doc: parsed.doc,
-            parse: parsed.diagnostics,
-            base_dir: Some(&self.dir),
-            role: Role::Entry,
-            unused: UnusedBindings::Report,
-        });
-        self.graph = ReferenceGraph::of_build(&self.build);
+        let analysis = self.build.check(
+            &mut self.sources,
+            Entry {
+                source: scarlet::source::SourceFile::new(module::ModuleKey::main(), None, entry),
+                ast: &parsed.ast,
+                doc: parsed.doc,
+                parse: parsed.diagnostics,
+                base_dir: Some(&self.dir),
+                role: Role::Entry,
+                unused: UnusedBindings::Report,
+            },
+        );
+        self.graph = ReferenceGraph::of_modules(analysis.modules());
         CheckResult {
-            diagnostics: self.build.diagnostics(&reach),
+            diagnostics: analysis.diagnostics(),
+            counts: analysis.counts(),
         }
     }
 

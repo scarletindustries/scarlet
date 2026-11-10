@@ -99,8 +99,8 @@ fn seam_round_trips_position_queries() {
     assert!(s.definition_response(&json!({})).is_null());
     assert!(s.hover_response(&pos(&uri, 99, 99)).is_null());
 
-    // Hover joins its type through the build that owns the file.
-    assert!(s.build_for(&uri).is_some());
+    // Hover reads its type from the document's analysis.
+    assert!(s.analysis_of(&uri).is_some());
 
     // These are reachable through the seam. Tests further down pin how they
     // behave.

@@ -33,17 +33,20 @@ fn check_project(p: &Project, entry_src: &str) -> Checked {
         parsed.diagnostics
     );
     let mut b = Build::default();
-    let reach = b.check_entry(Entry {
-        source: scarlet::source::SourceFile::new(module::ModuleKey::main(), None, entry_src),
-        ast: &parsed.ast,
-        doc: parsed.doc,
-        parse: parsed.diagnostics,
-        base_dir: Some(&p.dir),
-        role: Role::Entry,
-        unused: UnusedBindings::Report,
-    });
+    let analysis = b.check(
+        &mut scarlet::sources::DiskSources::new(),
+        Entry {
+            source: scarlet::source::SourceFile::new(module::ModuleKey::main(), None, entry_src),
+            ast: &parsed.ast,
+            doc: parsed.doc,
+            parse: parsed.diagnostics,
+            base_dir: Some(&p.dir),
+            role: Role::Entry,
+            unused: UnusedBindings::Report,
+        },
+    );
     Checked {
-        diagnostics: b.diagnostics(&reach),
+        diagnostics: analysis.diagnostics(),
     }
 }
 

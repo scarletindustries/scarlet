@@ -726,13 +726,20 @@ fn add_def(
 }
 
 impl ReferenceGraph {
-    /// The graph of every module `build` holds.
-    pub fn of_build(build: &crate::build::Build) -> ReferenceGraph {
-        let mut g = ReferenceGraphBuilder::new();
-        let mut modules: Vec<&crate::build::Module> = build.modules().collect();
-        modules.sort_by(|a, b| a.key.as_str().cmp(b.key.as_str()));
+    /// The graph of `modules`. A key may come more than once, from several
+    /// analyses: the first module with that key is the one the graph shows.
+    pub fn of_modules<'m>(
+        modules: impl IntoIterator<Item = &'m crate::build::Module>,
+    ) -> ReferenceGraph {
+        let mut by_key: HashMap<&ModuleKey, &crate::build::Module> = HashMap::new();
         for m in modules {
-            let refs = module_references(&mut g, &m.key, &m.checked.index);
+            by_key.entry(m.key()).or_insert(m);
+        }
+        let mut modules: Vec<&crate::build::Module> = by_key.into_values().collect();
+        modules.sort_by(|a, b| a.key().as_str().cmp(b.key().as_str()));
+        let mut g = ReferenceGraphBuilder::new();
+        for m in modules {
+            let refs = module_references(&mut g, m.key(), &m.checked.index);
             g.insert(Rc::new(refs));
         }
         g.finish()

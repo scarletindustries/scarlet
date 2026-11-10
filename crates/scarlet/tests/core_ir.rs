@@ -26,7 +26,7 @@ fn lower(source: &str) -> String {
     assert!(
         r.success(),
         "compile failed:\n{source}\n--- diagnostics ---\n{:#?}",
-        r.diagnostics
+        r.diagnostics()
     );
     let program = r.into_runnable().expect("a successful compile is runnable");
     let entry = scarlet::module::ModuleKey::main();
@@ -878,16 +878,22 @@ mod unlowerable {
         let mut opts = scarlet::compile::Options::program(None);
         opts.run = run;
         let mut b = scarlet::build::Build::default();
-        scarlet::compile::compile(&mut b, "", parsed, &opts)
+        scarlet::compile::compile(
+            &mut b,
+            &mut scarlet::sources::DiskSources::new(),
+            "",
+            parsed,
+            &opts,
+        )
     }
 
     fn assert_rejected(r: &scarlet::compile::Compiled, at: Span, what: &str) {
         assert!(!r.success(), "{what} accepted an unlowerable program");
         let d = r
-            .diagnostics
+            .diagnostics()
             .iter()
             .find(|d| d.severity == Severity::Error)
-            .unwrap_or_else(|| panic!("{what}: no error diagnostic: {:?}", r.diagnostics));
+            .unwrap_or_else(|| panic!("{what}: no error diagnostic: {:?}", r.diagnostics()));
         assert_eq!(
             d.code,
             DiagnosticCode::ParseError,
@@ -917,7 +923,7 @@ mod unlowerable {
     fn the_same_program_without_the_error_node_compiles() {
         let expr = crate::common::parse("pub fn main() {\n\t1 + 1\n}\n");
         let r = compile(expr, true);
-        assert!(r.success(), "{:?}", r.diagnostics);
+        assert!(r.success(), "{:?}", r.diagnostics());
         let program = r.into_runnable().expect("a successful compile is runnable");
         assert!(program.main.is_some(), "a program with `main` starts there");
     }
@@ -940,7 +946,7 @@ fn every_constructor_has_names() {
                \tprintln(string::inspect(Circle(radius: 1)))\n\
                }\n";
     let r = scarlet::compile::compile_text(src, None);
-    assert!(r.success(), "{:?}", r.diagnostics);
+    assert!(r.success(), "{:?}", r.diagnostics());
     let program = r.into_runnable().expect("a successful compile is runnable");
     let bodies = (&program.fns)
         .into_iter()

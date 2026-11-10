@@ -5,7 +5,7 @@ use scarlet_vm::{Host, Stop};
 
 fn compile(src: &str) -> scarlet_core::core_ir::Program {
     let result = scarlet_core::compile::compile_text(src, None);
-    assert!(result.success(), "{:?}", result.diagnostics);
+    assert!(result.success(), "{:?}", result.diagnostics());
     result.into_runnable().expect("a clean compile is runnable")
 }
 

@@ -22,6 +22,7 @@ use crate::build::{self, Build};
 use crate::check::{Role, UnusedBindings};
 use crate::compile::{self, Compiled};
 use crate::diagnostic;
+use crate::sources::DiskSources;
 use crate::term::Palette;
 use command::Flow;
 use entry::Entry;
@@ -163,6 +164,7 @@ pub(crate) struct Session {
     imports: String,
     definitions: String,
     build: Build,
+    sources: DiskSources,
     names: Rc<RefCell<Names>>,
     palette: Palette,
     /// Relative imports resolve against the directory the REPL was started in, which is the only
@@ -176,6 +178,7 @@ impl Session {
             imports: String::new(),
             definitions: String::new(),
             build: Build::default(),
+            sources: DiskSources::new(),
             names,
             palette,
             base_dir: std::env::current_dir().ok(),
@@ -197,7 +200,7 @@ impl Session {
             as_module: None,
             run: false,
         };
-        compile::compile(&mut self.build, source, parsed, &opts)
+        compile::compile(&mut self.build, &mut self.sources, source, parsed, &opts)
     }
 
     /// The session's own source: everything it replays ahead of an entry.
@@ -236,8 +239,8 @@ impl Session {
             return;
         }
         let result = self.compile(&combined_src, combined);
-        if !result.diagnostics.is_empty() {
-            self.report(&result.diagnostics, &combined_src);
+        if !result.diagnostics().is_empty() {
+            self.report(result.diagnostics(), &combined_src);
             if !result.success() {
                 return;
             }
@@ -314,15 +317,16 @@ impl Session {
         }
         let result = self.compile(&probe_src, probe);
         if !result.success() {
-            self.report(&result.diagnostics, &probe_src);
+            self.report(result.diagnostics(), &probe_src);
             return;
         }
         // The binding is the last line of the probe source, and its name starts right after
         // `const `.
         let line = i32::try_from(replay.lines().count()).unwrap_or(0);
         let column = i32::try_from("const ".len()).unwrap_or(0);
-        let ty = self.build.module(&result.key).and_then(|m| {
-            m.checked
+        let ty = result.analysis().and_then(|a| {
+            a.entry()
+                .checked
                 .index
                 .hovers
                 .iter()
@@ -343,7 +347,7 @@ impl Session {
         let parsed = build::parse(&replay);
         let result = self.compile(&replay, parsed);
         if !result.success() {
-            self.report(&result.diagnostics, &replay);
+            self.report(result.diagnostics(), &replay);
             return;
         }
         let Some(program) = result.into_runnable() else {

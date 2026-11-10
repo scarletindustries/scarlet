@@ -14,7 +14,8 @@ use scarlet_syntax::span::Span;
 use scarlet_types::def::TypeDef;
 use scarlet_types::name::{TypeName, ValueName};
 
-use crate::build::{Build, Entry};
+use crate::build::{Analysis, Build, Entry};
+use crate::sources::{DiskSources, Sources};
 
 pub struct Options<'a> {
     /// The file the text came from, when it came from one.
@@ -42,27 +43,64 @@ impl<'a> Options<'a> {
     }
 }
 
-pub struct Compiled {
-    pub key: ModuleKey,
-    pub diagnostics: Vec<Diagnostic>,
-    program: Option<Program>,
+/// What compiling a program came to. Each kind carries what it has, so
+/// "it checked" and "there is a program" can't disagree.
+pub enum Compiled {
+    /// Something is wrong, so there is nothing to run.
+    Rejected { diagnostics: Vec<Diagnostic> },
+    /// Every module checked, and the entry is a library, so there is nothing
+    /// to run.
+    Checked {
+        diagnostics: Vec<Diagnostic>,
+        analysis: Analysis,
+    },
+    Runnable {
+        diagnostics: Vec<Diagnostic>,
+        analysis: Analysis,
+        program: Box<Program>,
+    },
 }
 
 impl Compiled {
-    pub fn success(&self) -> bool {
-        !has_errors(&self.diagnostics)
+    /// Everything reported, warnings included.
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        match self {
+            Compiled::Rejected { diagnostics }
+            | Compiled::Checked { diagnostics, .. }
+            | Compiled::Runnable { diagnostics, .. } => diagnostics,
+        }
     }
 
-    /// The program, when everything checked and the entry is one that runs.
+    pub fn success(&self) -> bool {
+        match self {
+            Compiled::Rejected { .. } => false,
+            Compiled::Checked { .. } | Compiled::Runnable { .. } => true,
+        }
+    }
+
+    /// The modules the check reached, when everything checked.
+    pub fn analysis(&self) -> Option<&Analysis> {
+        match self {
+            Compiled::Rejected { .. } => None,
+            Compiled::Checked { analysis, .. } | Compiled::Runnable { analysis, .. } => {
+                Some(analysis)
+            }
+        }
+    }
+
     pub fn into_runnable(self) -> Option<Program> {
-        self.program
+        match self {
+            Compiled::Runnable { program, .. } => Some(*program),
+            Compiled::Rejected { .. } | Compiled::Checked { .. } => None,
+        }
     }
 }
 
-/// Compile `text`, which parsed to `parsed`, with `build` holding the
-/// modules it imports.
+/// Compile `text`, which parsed to `parsed`, reading the modules it imports
+/// from `sources` and keeping their checks in `build`.
 pub fn compile(
     build: &mut Build,
+    sources: &mut dyn Sources,
     text: &str,
     parsed: crate::build::Parsed,
     opts: &Options<'_>,
@@ -73,56 +111,56 @@ pub fn compile(
         None => (ModuleKey::main(), opts.role),
     };
     let source = SourceFile::new(key.clone(), opts.file.map(Path::to_path_buf), text);
-    let reach = build.check_entry(Entry {
-        source,
-        ast: block,
-        doc: parsed.doc.clone(),
-        parse: parsed.diagnostics.clone(),
-        base_dir: opts.base_dir,
-        role,
-        unused: opts.unused,
-    });
-    let mut diagnostics = build.diagnostics(&reach);
+    let analysis = build.check(
+        sources,
+        Entry {
+            source: source.clone(),
+            ast: block,
+            doc: parsed.doc.clone(),
+            parse: parsed.diagnostics.clone(),
+            base_dir: opts.base_dir,
+            role,
+            unused: opts.unused,
+        },
+    );
+    let mut diagnostics = analysis.diagnostics();
     let main = (role == Role::Entry)
-        .then(|| entry_rules(block, opts.run, &mut diagnostics))
+        .then(|| entry_rules(block, opts.run, &source, &mut diagnostics))
         .flatten();
-    if has_errors(&diagnostics) || role == Role::Library {
-        return Compiled {
-            key,
+    if has_errors(&diagnostics) {
+        return Compiled::Rejected { diagnostics };
+    }
+    if role == Role::Library {
+        return Compiled::Checked {
             diagnostics,
-            program: None,
+            analysis,
         };
     }
-    let clean: Option<Vec<_>> = reach
-        .iter()
-        .map(|k| build.module(k).and_then(|m| m.checked.clean.as_ref()))
+    let clean: Option<Vec<_>> = analysis
+        .modules()
+        .map(|m| m.checked.clean.as_ref())
         .collect();
     let Some(clean) = clean else {
-        return Compiled {
-            key,
-            diagnostics,
-            program: None,
-        };
+        return Compiled::Rejected { diagnostics };
     };
     let main = main.map(|name| ValueName {
         module: key.clone(),
         name: name.into(),
     });
-    let program = match build_program(&clean, &Defs(build), main.as_ref()) {
-        Ok(p) => Some(p),
+    match build_program(&clean, &Defs(&analysis), main.as_ref()) {
+        Ok(program) => Compiled::Runnable {
+            diagnostics,
+            analysis,
+            program: Box::new(program),
+        },
         Err(LinkError::Prelude(msg)) => {
             diagnostics.push(Diagnostic::error(
                 Span::DUMMY,
                 DiagnosticCode::TypeError,
                 msg,
             ));
-            None
+            Compiled::Rejected { diagnostics }
         }
-    };
-    Compiled {
-        key,
-        diagnostics,
-        program,
     }
 }
 
@@ -132,6 +170,7 @@ pub fn compile(
 fn entry_rules(
     block: &ast::BlockExpression,
     run: bool,
+    source: &std::rc::Rc<SourceFile>,
     out: &mut Vec<Diagnostic>,
 ) -> Option<&'static str> {
     let main = block.body.iter().find_map(|n| match n {
@@ -152,20 +191,22 @@ fn entry_rules(
     });
     let Some((fd, public)) = main else {
         if run {
-            out.push(Diagnostic::error(
+            let mut d = Diagnostic::error(
                 Span::point(block.span.start_line, block.span.start_column),
                 DiagnosticCode::TypeError,
                 "There's no `main` function. A program starts at `pub fn main()`, so add one"
                     .to_string(),
-            ));
+            );
+            d.source = Some(source.clone());
+            out.push(d);
         }
         return None;
     };
     (public && fd.params.is_empty()).then_some("main")
 }
 
-/// Type definitions, read from the interfaces the build holds.
-pub struct Defs<'b>(&'b Build);
+/// Type definitions, read from the interfaces of the modules a check reached.
+pub struct Defs<'a>(&'a Analysis);
 
 impl TypeDefs for Defs<'_> {
     fn type_def(&self, name: &TypeName) -> Option<&TypeDef> {
@@ -183,7 +224,13 @@ impl TypeDefs for Defs<'_> {
 pub fn compile_text(text: &str, base_dir: Option<&Path>) -> Compiled {
     let parsed = crate::build::parse(text);
     let mut build = Build::new(None);
-    compile(&mut build, text, parsed, &Options::program(base_dir))
+    compile(
+        &mut build,
+        &mut DiskSources::new(),
+        text,
+        parsed,
+        &Options::program(base_dir),
+    )
 }
 
 /// One public name of a module, for completion.
@@ -193,18 +240,18 @@ pub struct Export {
     pub params: Vec<String>,
 }
 
-/// The public names of the module `path`, checking it first if `build`
-/// hasn't. Types come first, and each name is listed once: a record type
-/// names its only constructor after itself.
-pub fn exports(build: &mut Build, path: &ModulePath) -> Vec<Export> {
+/// The public names of the module `path`. Types come first, and each name is
+/// listed once: a record type names its only constructor after itself.
+pub fn exports(build: &mut Build, sources: &mut dyn Sources, path: &ModulePath) -> Vec<Export> {
     let key = ModuleKey::of(path);
-    if build.module(&key).is_none() {
-        let source = format!("import {key}\n");
-        let parsed = crate::build::parse(&source);
-        if has_errors(&parsed.diagnostics) {
-            return Vec::new();
-        }
-        build.check_entry(Entry {
+    let source = format!("import {key}\n");
+    let parsed = crate::build::parse(&source);
+    if has_errors(&parsed.diagnostics) {
+        return Vec::new();
+    }
+    let analysis = build.check(
+        sources,
+        Entry {
             source: SourceFile::new(ModuleKey::main(), None, source.as_str()),
             ast: &parsed.ast,
             doc: None,
@@ -212,9 +259,9 @@ pub fn exports(build: &mut Build, path: &ModulePath) -> Vec<Export> {
             base_dir: None,
             role: Role::Script,
             unused: UnusedBindings::Ignore,
-        });
-    }
-    let Some(m) = build.module(&key) else {
+        },
+    );
+    let Some(m) = analysis.module(&key) else {
         return Vec::new();
     };
     let iface = &m.checked.interface;

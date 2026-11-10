@@ -16,6 +16,7 @@ pub mod compile;
 pub mod lint;
 pub mod module;
 pub mod reference;
+pub mod sources;
 pub use scarlet_check as check;
 pub use scarlet_ir::tivec;
 pub use scarlet_lower as core_ir;

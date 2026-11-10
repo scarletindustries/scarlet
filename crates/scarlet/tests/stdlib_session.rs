@@ -29,16 +29,20 @@ fn check_as(root: &Path, text: &str, base_dir: &Path, module: Vec<String>) -> Ve
     );
 
     let mut b = Build::new(Some(root.to_path_buf()));
-    let reach = b.check_entry(Entry {
-        source: scarlet::source::SourceFile::new(ModuleKey::for_stdlib(&module), None, text),
-        ast: &parsed.ast,
-        doc: parsed.doc,
-        parse: parsed.diagnostics,
-        base_dir: Some(base_dir),
-        role: Role::Library,
-        unused: UnusedBindings::Report,
-    });
-    b.diagnostics(&reach)
+    let analysis = b.check(
+        &mut scarlet_core::sources::DiskSources::new(),
+        Entry {
+            source: scarlet::source::SourceFile::new(ModuleKey::for_stdlib(&module), None, text),
+            ast: &parsed.ast,
+            doc: parsed.doc,
+            parse: parsed.diagnostics,
+            base_dir: Some(base_dir),
+            role: Role::Library,
+            unused: UnusedBindings::Report,
+        },
+    );
+    analysis
+        .diagnostics()
         .iter()
         .map(|d| {
             format!(

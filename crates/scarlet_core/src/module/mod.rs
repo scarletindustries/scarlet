@@ -95,15 +95,6 @@ pub fn collect_source_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// A 64-bit FNV-1a hash of the source bytes, for cheap change detection.
-pub(crate) fn source_hash(s: &str) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in s.bytes() {
-        h = (h ^ b as u64).wrapping_mul(0x100000001b3);
-    }
-    h
-}
-
 #[derive(Debug, Clone)]
 pub enum ModuleSource {
     Embedded(&'static str),

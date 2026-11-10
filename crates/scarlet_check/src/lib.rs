@@ -48,7 +48,7 @@ pub trait Interfaces {
 }
 
 /// What a module is being checked as.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Role {
     /// Imported by another module: it may only hold declarations.
     Library,
@@ -59,7 +59,7 @@ pub enum Role {
 }
 
 /// Whether a binding nothing reads is an error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnusedBindings {
     Report,
     Ignore,

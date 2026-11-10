@@ -104,7 +104,7 @@ mod tests {
 
     fn program(src: &str) -> Program {
         let result = crate::compile::compile_text(src, None);
-        assert!(result.success(), "{:?}", result.diagnostics);
+        assert!(result.success(), "{:?}", result.diagnostics());
         result.into_runnable().expect("a clean compile is runnable")
     }
 

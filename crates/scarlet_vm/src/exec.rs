@@ -2428,7 +2428,7 @@ mod tests {
 
     fn cells_left_after_in(host: &Host, src: &str) -> (String, usize) {
         let result = scarlet_core::compile::compile_text(src, None);
-        assert!(result.success(), "{:?}", result.diagnostics);
+        assert!(result.success(), "{:?}", result.diagnostics());
         let program = result.into_runnable().expect("a clean compile is runnable");
         let code = crate::code::load(&program);
         let mut out = Vec::new();

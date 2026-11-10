@@ -17,7 +17,13 @@ fn check(b: &mut Build, src: &str) -> Compiled {
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let mut opts = compile::Options::program(None);
     opts.run = false;
-    compile::compile(b, src, parsed, &opts)
+    compile::compile(
+        b,
+        &mut scarlet::sources::DiskSources::new(),
+        src,
+        parsed,
+        &opts,
+    )
 }
 
 /// A record with a `fn` field. Closures can cross the wire, so it checks clean,
@@ -81,7 +87,7 @@ const EVENT: &str = "import scarlet/wire\n\
                      }\n";
 
 fn messages(r: &Compiled) -> String {
-    r.diagnostics
+    r.diagnostics()
         .iter()
         .map(|d| d.message.clone())
         .collect::<Vec<_>>()
@@ -109,7 +115,7 @@ fn a_refusal_is_reported_on_the_session_check_path() {
 fn a_bodiless_field_checks_clean_on_the_session_path() {
     let mut s = Build::default();
     let r = check(&mut s, NATIVE);
-    assert!(r.success(), "{:?}", r.diagnostics);
+    assert!(r.success(), "{:?}", r.diagnostics());
 }
 
 /// This is the other half, and it catches a refusal that fires on everything.
@@ -118,7 +124,7 @@ fn a_bodiless_field_checks_clean_on_the_session_path() {
 fn an_encodable_type_still_checks_clean_on_the_session_path() {
     let mut s = Build::default();
     let r = check(&mut s, EVENT);
-    assert!(r.success(), "{:?}", r.diagnostics);
+    assert!(r.success(), "{:?}", r.diagnostics());
 }
 
 /// A `fn` field is encodable too, so the same buffer checks clean on the same
@@ -127,7 +133,7 @@ fn an_encodable_type_still_checks_clean_on_the_session_path() {
 fn a_fn_field_checks_clean_on_the_session_path() {
     let mut s = Build::default();
     let r = check(&mut s, HANDLER);
-    assert!(r.success(), "{:?}", r.diagnostics);
+    assert!(r.success(), "{:?}", r.diagnostics());
 }
 
 /// A stdlib type reached only through a field of an imported type is
@@ -136,7 +142,7 @@ fn a_fn_field_checks_clean_on_the_session_path() {
 fn a_stdlib_type_reached_only_through_a_field_checks_clean_on_the_session_path() {
     let mut s = Build::default();
     let r = check(&mut s, PORT);
-    assert!(r.success(), "{:?}", r.diagnostics);
+    assert!(r.success(), "{:?}", r.diagnostics());
 }
 
 /// An editor checks the same buffer again and again in one build. The
@@ -151,7 +157,7 @@ fn a_session_re_checks_a_wire_call_across_an_edit() {
         let bad = check(&mut s, GENERIC);
         assert!(!bad.success());
         let good = check(&mut s, HANDLER);
-        assert!(good.success(), "{:?}", good.diagnostics);
+        assert!(good.success(), "{:?}", good.diagnostics());
     }
 }
 
@@ -212,7 +218,7 @@ const SUBJECT_DEEP: &str = "import scarlet/process\n\
 fn a_handle_three_levels_down_checks_clean_on_the_session_path() {
     let mut s = Build::default();
     let r = check(&mut s, SUBJECT_DEEP);
-    assert!(r.success(), "{:?}", r.diagnostics);
+    assert!(r.success(), "{:?}", r.diagnostics());
 }
 
 /// The refusal's PATH has to survive to the LSP too.

@@ -58,11 +58,7 @@ impl Workspace {
         };
         // The graph carries no types, so the type comes from the check's hover table. When the
         // table has no type here, hover shows only the graph's identity.
-        let ty = q
-            .root
-            .build
-            .module(q.key)
-            .and_then(|m| type_at(m, line, col));
+        let ty = type_at(q.analysis.entry(), line, col);
         let signature = match ty {
             Some(ty) => format!("{} {}", def.name, labelled(ty, def.param_names())),
             None => def.name.clone(),
@@ -115,7 +111,7 @@ impl Workspace {
                 let Some(iface) = q
                     .graph
                     .module_path(target)
-                    .and_then(|p| q.root.build.module(&ModuleKey::of(p)))
+                    .and_then(|p| q.analysis.module(&ModuleKey::of(p)))
                     .map(|m| &m.checked.interface)
                 else {
                     return empty;
@@ -142,14 +138,13 @@ impl Workspace {
             // At a bare position, offer the module's own declarations: what documentSymbol
             // lists, plus module aliases, minus record fields, which are never bare names.
             None => {
-                let module = q.root.build.module(q.key);
+                let module = q.analysis.entry();
                 q.graph
                     .defs_in(q.module)
                     .filter(|d| d.is_symbol_listable() && d.entity() != EntityKind::Field)
                     .map(|d| {
                         let s = d.span();
-                        let detail = module
-                            .and_then(|m| type_at(m, s.start_line, s.start_column))
+                        let detail = type_at(module, s.start_line, s.start_column)
                             .map(|ty| labelled(ty, d.param_names()));
                         completion_item(&d.name, d.entity(), detail, d.doc.as_deref())
                     })

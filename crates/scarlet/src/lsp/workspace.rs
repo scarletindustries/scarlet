@@ -11,12 +11,13 @@ use std::path::{Path, PathBuf};
 use serde_json::Value as Json;
 
 use crate::ast;
-use crate::build::{self, Build, Entry, Origin};
+use crate::build::{self, Analysis, Build, Entry, Origin};
 use crate::check::{Role, UnusedBindings};
 use crate::diagnostic::{self, Diagnostic};
 use crate::module::{self, ModuleKey, ModulePath};
 use crate::reference::{self, ModuleId, ReferenceGraph};
 use crate::source::SourceFile;
+use crate::sources::{DiskSources, Sources, Text};
 
 use super::wire::{
     DocPosition, WatchedChange, diagnostic_to_json, extract_position_params, root_for, stdlib_file,
@@ -38,23 +39,43 @@ fn owning_root(workspace_roots: &[PathBuf], path: &Path) -> (PathBuf, Option<Pat
 
 /// A buffer's text and what the parser said about it.
 struct Document {
-    text: String,
+    text: Text,
     syntax: Vec<Diagnostic>,
 }
 
 impl Document {
     fn new(text: String) -> Self {
         let syntax = build::parse(&text).diagnostics;
-        Document { text, syntax }
+        Document {
+            text: Text::new(text),
+            syntax,
+        }
+    }
+}
+
+/// Where a check reads module text: an open tab's buffer, then the disk.
+struct Editor<'w> {
+    documents: &'w HashMap<String, Document>,
+    open: &'w HashSet<String>,
+    disk: &'w mut DiskSources,
+}
+
+impl Sources for Editor<'_> {
+    fn read(&mut self, path: &Path) -> std::io::Result<Text> {
+        let uri = reference::path_to_uri(path);
+        match self.documents.get(&uri) {
+            Some(d) if self.open.contains(&uri) => Ok(d.text.clone()),
+            _ => self.disk.read(path),
+        }
     }
 }
 
 /// One workspace root: a build that lives as long as the session, and the reference graph of
 /// everything in it, made again only after a check.
 pub(super) struct Root {
-    pub(super) build: Build,
-    /// The module each document was checked as.
-    keys: HashMap<String, ModuleKey>,
+    build: Build,
+    /// Each document's latest analysis. Its entry is the document's module.
+    analyses: HashMap<String, Analysis>,
     /// The client's URI for each module checked from a document.
     uris: HashMap<ModuleKey, String>,
     graph: OnceCell<ReferenceGraph>,
@@ -64,19 +85,33 @@ impl Root {
     fn new(stdlib_root: Option<PathBuf>) -> Self {
         Root {
             build: Build::new(stdlib_root),
-            keys: HashMap::new(),
+            analyses: HashMap::new(),
             uris: HashMap::new(),
             graph: OnceCell::new(),
         }
     }
 
-    pub(super) fn graph(&self) -> &ReferenceGraph {
-        self.graph
-            .get_or_init(|| ReferenceGraph::of_build(&self.build))
+    /// The analyses in URI order, so what is made from them doesn't depend
+    /// on a map's order.
+    fn analyses(&self) -> Vec<&Analysis> {
+        let mut uris: Vec<&String> = self.analyses.keys().collect();
+        uris.sort();
+        uris.into_iter().map(|u| &self.analyses[u]).collect()
     }
 
-    fn key_of(&self, uri: &str) -> Option<&ModuleKey> {
-        self.keys.get(uri)
+    /// The graph of every document's module, and of what they import. A
+    /// document's own module wins over its copy checked as another's import.
+    pub(super) fn graph(&self) -> &ReferenceGraph {
+        self.graph.get_or_init(|| {
+            let analyses = self.analyses();
+            let entries = analyses.iter().map(|a| a.entry());
+            let imports = analyses.iter().flat_map(|a| a.modules());
+            ReferenceGraph::of_modules(entries.chain(imports))
+        })
+    }
+
+    fn analysis(&self, uri: &str) -> Option<&Analysis> {
+        self.analyses.get(uri)
     }
 
     /// The file URI of module `key`, when it has a file.
@@ -84,10 +119,12 @@ impl Root {
         if let Some(u) = self.uris.get(key) {
             return Some(u.clone());
         }
-        match &self.build.module(key)?.origin {
-            Origin::File(p) => Some(reference::path_to_uri(p)),
-            Origin::Embedded | Origin::Given => None,
-        }
+        self.analyses()
+            .into_iter()
+            .find_map(|a| match &a.module(key)?.origin {
+                Origin::File(p) => Some(reference::path_to_uri(p)),
+                Origin::Embedded | Origin::Given => None,
+            })
     }
 
     /// The file URI of graph module `id`. An embedded stdlib module opens its source when the
@@ -108,9 +145,10 @@ impl Root {
 /// What a position query works on: the document's root and its module in the root's graph.
 pub(super) struct Query<'a> {
     pub(super) root: &'a Root,
+    /// The document's latest analysis.
+    pub(super) analysis: &'a Analysis,
     pub(super) graph: &'a ReferenceGraph,
     pub(super) module: ModuleId,
-    pub(super) key: &'a ModuleKey,
 }
 
 pub struct Workspace {
@@ -126,6 +164,7 @@ pub struct Workspace {
     /// URIs the client has open in a tab, a subset of `documents`. Their text wins over the file
     /// on disk.
     open: HashSet<String>,
+    disk: DiskSources,
 }
 
 /// Diagnostics to publish, as `(uri, diagnostics)` pairs.
@@ -139,6 +178,7 @@ impl Workspace {
             roots: HashMap::new(),
             scanned: false,
             open: HashSet::new(),
+            disk: DiskSources::new(),
         }
     }
 
@@ -147,9 +187,9 @@ impl Workspace {
         self.workspace_roots.push(root);
     }
 
-    /// The build that owns `uri`.
-    pub fn build_for(&self, uri: &str) -> Option<&Build> {
-        Some(&self.roots.get(&self.root_dir_of(uri))?.build)
+    /// The latest analysis of `uri`.
+    pub fn analysis_of(&self, uri: &str) -> Option<&Analysis> {
+        self.roots.get(&self.root_dir_of(uri))?.analysis(uri)
     }
 
     /// Handles `textDocument/didOpen` and `didChange`. It opens `uri` as a client tab, checks it
@@ -158,13 +198,6 @@ impl Workspace {
         self.documents
             .insert(uri.to_string(), Document::new(text.to_string()));
         self.open.insert(uri.to_string());
-        self.root_mut(uri);
-        // Every root gets the buffer, because a file in one root can import a file in another.
-        if let Some(p) = uri_to_path(uri) {
-            for root in self.roots.values_mut() {
-                root.build.set_overlay(p.clone(), text.to_string());
-            }
-        }
         self.ensure_workspace_scanned();
         self.check_with_dependents(uri)
     }
@@ -173,13 +206,7 @@ impl Workspace {
     /// file is gone, the document is forgotten and its root is built again without it.
     pub fn close_document(&mut self, uri: &str) -> Publications {
         self.open.remove(uri);
-        let path = uri_to_path(uri);
-        if let Some(p) = &path {
-            for root in self.roots.values_mut() {
-                root.build.clear_overlay(p);
-            }
-        }
-        match path.as_deref().map(std::fs::read_to_string) {
+        match uri_to_path(uri).as_deref().map(std::fs::read_to_string) {
             Some(Ok(text)) => {
                 self.documents.insert(uri.to_string(), Document::new(text));
                 self.check_with_dependents(uri)
@@ -211,9 +238,7 @@ impl Workspace {
                 continue;
             }
             any = true;
-            for root in self.roots.values_mut() {
-                root.build.file_changed(&path);
-            }
+            self.disk.changed(&path);
             match ty {
                 WatchedChange::Deleted => {
                     self.documents.remove(uri);
@@ -243,8 +268,8 @@ impl Workspace {
             && module::detect_stdlib_module(path).is_none()
     }
 
-    /// Throws away the build of root `dir` and checks every document in it again. A build never
-    /// forgets a module, so this is how a deleted file leaves the graph.
+    /// Throws away the build of root `dir` and checks every document in it again, so a deleted
+    /// file leaves the graph.
     fn rebuild_root(&mut self, dir: &Path) -> Publications {
         self.roots.remove(dir);
         let uris = self.documents_in(dir);
@@ -291,37 +316,30 @@ impl Workspace {
             .unwrap_or_default()
     }
 
-    /// The root that owns `uri`. A new root starts with every open buffer as an overlay.
-    fn root_mut(&mut self, uri: &str) -> &mut Root {
+    /// The directory of the root that owns `uri`, and that root, made if it isn't yet.
+    fn root_entry(&mut self, uri: &str) -> PathBuf {
         let (dir, stdlib_root) = uri_to_path(uri)
             .map(|p| owning_root(&self.workspace_roots, &p))
             .unwrap_or_default();
-        match self.roots.entry(dir) {
-            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-            std::collections::hash_map::Entry::Vacant(e) => {
-                let mut root = Root::new(stdlib_root);
-                for u in &self.open {
-                    if let (Some(p), Some(d)) = (uri_to_path(u), self.documents.get(u)) {
-                        root.build.set_overlay(p, d.text.clone());
-                    }
-                }
-                e.insert(root)
-            }
-        }
+        self.roots
+            .entry(dir.clone())
+            .or_insert_with(|| Root::new(stdlib_root));
+        dir
     }
 
     /// The root and module a position query on `uri` works on, or `None` when the document
     /// hasn't been checked.
     pub(super) fn query(&self, uri: &str) -> Option<Query<'_>> {
         let root = self.roots.get(&self.root_dir_of(uri))?;
-        let key = root.key_of(uri)?;
+        let analysis = root.analysis(uri)?;
+        let key = analysis.entry().key();
         let graph = root.graph();
         let module = graph.module_id_by_key(key)?;
         Some(Query {
             root,
+            analysis,
             graph,
             module,
-            key,
         })
     }
 
@@ -331,7 +349,7 @@ impl Workspace {
     }
 
     pub(super) fn document_text(&self, uri: &str) -> Option<&str> {
-        self.documents.get(uri).map(|d| d.text.as_str())
+        self.documents.get(uri).map(|d| &*d.text.text)
     }
 
     /// The first step every position query handler shares.
@@ -390,9 +408,9 @@ impl Workspace {
         for dir in dirs {
             let mut checked: Vec<String> = match self.roots.get(&dir) {
                 Some(root) => root
-                    .keys
+                    .analyses
                     .iter()
-                    .filter(|(u, k)| u.as_str() != uri && root.build.reach(k).contains(&key))
+                    .filter(|(u, a)| u.as_str() != uri && a.module(&key).is_some())
                     .map(|(u, _)| u.clone())
                     .collect(),
                 None => Vec::new(),
@@ -412,7 +430,7 @@ impl Workspace {
     /// Checks the document `uri` as its own module and returns that module's key.
     fn check_document(&mut self, uri: &str) -> Option<ModuleKey> {
         eprintln!("[Scarlet LSP] Checking: {uri}");
-        let text = self.documents.get(uri)?.text.clone();
+        let text = self.documents.get(uri)?.text.text.clone();
         let path = uri_to_path(uri);
         let stdlib_module = path.as_deref().and_then(module::detect_stdlib_module);
         let key = match (&stdlib_module, &path) {
@@ -429,17 +447,31 @@ impl Workspace {
             Some(_) => Role::Library,
             None => role_of(&parsed.ast),
         };
-        let root = self.root_mut(uri);
-        root.build.check_entry(Entry {
-            source: SourceFile::new(key.clone(), path.clone(), text.as_str()),
+        let entry = Entry {
+            source: SourceFile::new(key.clone(), path.clone(), text),
             ast: &parsed.ast,
             doc: parsed.doc,
             parse: parsed.diagnostics,
             base_dir: path.as_deref().and_then(Path::parent),
             role,
             unused: UnusedBindings::Report,
-        });
-        root.keys.insert(uri.to_string(), key.clone());
+        };
+        let spec = entry.spec();
+        let dir = self.root_entry(uri);
+        let mut sources = Editor {
+            documents: &self.documents,
+            open: &self.open,
+            disk: &mut self.disk,
+        };
+        let root = self.roots.get_mut(&dir)?;
+        // A document checked as something else before leaves that check behind.
+        if let Some(old) = root.analyses.get(uri).map(|a| a.entry().spec.clone())
+            && old != spec
+        {
+            root.build.forget(&old);
+        }
+        let analysis = root.build.check(&mut sources, entry);
+        root.analyses.insert(uri.to_string(), analysis);
         root.uris.insert(key.clone(), uri.to_string());
         root.graph = OnceCell::new();
         Some(key)
@@ -452,29 +484,27 @@ impl Workspace {
         let Some(root) = self.roots.get(dir) else {
             return Vec::new();
         };
-        let mut reach: Vec<ModuleKey> = Vec::new();
-        let mut seen: HashSet<ModuleKey> = HashSet::new();
-        for k in checked.iter().filter_map(|u| root.key_of(u)) {
-            for r in root.build.reach(k).into_iter().rev() {
-                if seen.insert(r.clone()) {
-                    reach.push(r);
+        let mut reach: Vec<&build::Module> = Vec::new();
+        let mut seen: HashSet<&ModuleKey> = HashSet::new();
+        for a in checked.iter().filter_map(|u| root.analysis(u)) {
+            for m in a.modules().rev() {
+                if seen.insert(m.key()) {
+                    reach.push(m);
                 }
             }
         }
         let mut by_module: HashMap<&ModuleKey, Vec<&Diagnostic>> = HashMap::new();
-        for k in &reach {
-            let Some(m) = root.build.module(k) else {
-                continue;
-            };
+        for m in &reach {
             for d in m.diagnostics() {
                 by_module
-                    .entry(d.source.as_ref().map_or(k, |s| &s.key))
+                    .entry(d.source.as_ref().map_or(m.key(), |s| &s.key))
                     .or_default()
                     .push(d);
             }
         }
         let mut out = Vec::new();
-        for k in &reach {
+        for m in &reach {
+            let k = m.key();
             let Some(uri) = root.uri_of(k) else {
                 continue;
             };

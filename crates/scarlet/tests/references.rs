@@ -272,7 +272,6 @@ fn incremental_edit_b_keeps_refs_then_invalidate_drops_reverse_edges() {
         !s.reference_graph().references_to(defid0).is_empty(),
         "entry use should create a reverse edge into B"
     );
-    let n0 = s.build.checks();
 
     // Edit B's body only, keeping `bridge`.
     p.write(
@@ -281,7 +280,7 @@ fn incremental_edit_b_keeps_refs_then_invalidate_drops_reverse_edges() {
     );
     let r = s.check(ENTRY);
     assert!(r.success(), "after B edit: {:?}", r.diagnostics);
-    assert!(s.build.checks() > n0, "B must have been checked again");
+    assert!(r.counts.checks > 0, "B must have been checked again");
     let (m1, _) = s
         .definition("main", bl, bc)
         .expect("bridge still resolves after B edit");

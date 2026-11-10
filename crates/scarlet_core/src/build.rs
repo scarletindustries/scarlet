@@ -1,8 +1,12 @@
-//! A build: every module a program or an editor session reaches, each checked
-//! once. A module is checked again only when its source changes or one of its
-//! imports' interfaces does. Nothing is rewound: re-checking a module just
-//! replaces its result.
+//! A build: the modules a program or an editor session reaches, each checked
+//! once and kept while some entry still reaches it.
+//!
+//! Each [`Build::check`] is one [`CheckRun`]. The run loads the entry's
+//! imports depth first, reuses every cached check that is still fresh, and
+//! checks the rest. It gives back an [`Analysis`]: the modules that one check
+//! reached, which is what every consumer reads.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -14,8 +18,10 @@ use scarlet_syntax::module_path::{ModuleKey, ModulePath, ResolveError};
 use scarlet_syntax::source::SourceFile;
 use scarlet_syntax::span::Span;
 use scarlet_types::interface::Interface;
+use scarlet_types::known::prelude_key;
 
 use crate::module::{self, ModuleSource};
+use crate::sources::{Revision, Sources, Text};
 
 /// Where a module's text came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,38 +34,88 @@ pub enum Origin {
     Given,
 }
 
+/// Everything besides its text and imports that decides a module's check:
+/// which module it is and what it is checked as. A file open as a program and
+/// imported as a library is checked once as each.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CheckSpec {
+    key: ModuleKey,
+    role: Role,
+    unused: UnusedBindings,
+}
+
+impl CheckSpec {
+    /// How every import is checked.
+    fn library(key: ModuleKey) -> Self {
+        CheckSpec {
+            key,
+            role: Role::Library,
+            unused: UnusedBindings::Report,
+        }
+    }
+}
+
 /// One checked module.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Module {
-    pub(crate) key: ModuleKey,
+    pub spec: CheckSpec,
     pub origin: Origin,
-    source_hash: u64,
+    revision: Revision,
     /// Each import's module, in source order, or `None` when it didn't
     /// resolve.
     imports: Vec<Option<ModuleKey>>,
-    /// The interfaces of the imports as this check saw them.
-    seen: Vec<(ModuleKey, Interface)>,
-    /// The imports as written, and the directory `./` ones are relative to,
-    /// so a module whose text hasn't changed can have its imports looked at
-    /// again without parsing it.
+    /// The imports as written, so a module whose text hasn't changed can have
+    /// its imports looked at again without parsing it.
     written: Vec<(ast::ImportPath, Span)>,
-    dir: Option<PathBuf>,
-    /// The file's stat when it was read, so an unchanged file needn't be
-    /// read again. `None` for text that didn't come from the file.
-    stat: Option<FileStat>,
+    /// Every interface the check read, as it read it.
+    read: Vec<(ModuleKey, Interface)>,
     /// What the parser and the import resolution reported.
     load_diagnostics: Vec<Diagnostic>,
-    role: Role,
-    unused: UnusedBindings,
     pub checked: CheckedModule,
 }
 
 impl Module {
+    pub fn key(&self) -> &ModuleKey {
+        &self.spec.key
+    }
+
     /// Everything reported about this module.
     pub fn diagnostics(&self) -> impl Iterator<Item = &Diagnostic> {
         self.load_diagnostics
             .iter()
             .chain(&self.checked.diagnostics)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Freshness {
+    Fresh,
+    Stale,
+}
+
+/// Whether a cached check still holds for a module now. It does when the
+/// module has the same text from the same place, its imports resolve to the
+/// same modules, and every interface the check read is the one loaded now.
+fn freshness(
+    cached: &Module,
+    origin: &Origin,
+    revision: Revision,
+    imports: &[Option<ModuleKey>],
+    loaded: &Loaded,
+) -> Freshness {
+    let same = cached.origin == *origin
+        && cached.revision == revision
+        && cached.imports == imports
+        && cached.read.iter().all(|(k, iface)| {
+            loaded
+                .by_key
+                .get(k)
+                .is_some_and(|m| m.checked.interface == *iface)
+        });
+    if same {
+        Freshness::Fresh
+    } else {
+        Freshness::Stale
     }
 }
 
@@ -77,22 +133,78 @@ pub struct Entry<'a> {
     pub unused: UnusedBindings,
 }
 
+impl Entry<'_> {
+    pub fn spec(&self) -> CheckSpec {
+        CheckSpec {
+            key: self.source.key.clone(),
+            role: self.role,
+            unused: self.unused,
+        }
+    }
+}
+
+/// How much work one check did, for tests of what gets done again.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Counts {
+    /// Modules checked.
+    pub checks: usize,
+    /// Imported modules parsed.
+    pub parses: usize,
+}
+
+/// What one check reached: the entry, and every module it imports, directly
+/// or not. Within one analysis a key names one module.
+#[derive(Debug, Clone)]
+pub struct Analysis {
+    /// Each before every module that imports it, the prelude first.
+    imports: Vec<Rc<Module>>,
+    entry: Rc<Module>,
+    counts: Counts,
+}
+
+impl Analysis {
+    pub fn entry(&self) -> &Module {
+        &self.entry
+    }
+
+    /// Every module, each before the modules that import it, and the entry
+    /// last.
+    pub fn modules(&self) -> impl DoubleEndedIterator<Item = &Module> {
+        self.imports
+            .iter()
+            .chain(std::iter::once(&self.entry))
+            .map(|m| &**m)
+    }
+
+    pub fn module(&self, key: &ModuleKey) -> Option<&Module> {
+        self.modules().find(|m| m.key() == key)
+    }
+
+    /// Everything reported about every module.
+    pub fn diagnostics(&self) -> Vec<Diagnostic> {
+        self.modules()
+            .flat_map(|m| m.diagnostics().cloned())
+            .collect()
+    }
+
+    pub fn counts(&self) -> Counts {
+        self.counts
+    }
+
+    fn specs(&self) -> Vec<CheckSpec> {
+        self.modules().map(|m| m.spec.clone()).collect()
+    }
+}
+
 pub struct Build {
     /// The stdlib's source directory, when the stdlib itself is being edited:
     /// its files on disk win over the copy built in.
     stdlib_root: Option<PathBuf>,
-    /// Editor buffers, which win over the file on disk.
-    overlays: HashMap<PathBuf, String>,
-    modules: HashMap<ModuleKey, Module>,
-    loading: HashSet<ModuleKey>,
-    /// The modules this check has already found up to date, so a module
-    /// many others import is read once per check.
-    verified: HashSet<ModuleKey>,
     stdlib_modules: Vec<ModulePath>,
-    /// How many module checks ran, for tests of what gets checked again.
-    checks: usize,
-    /// How many imported modules were parsed, for the same.
-    parses: usize,
+    modules: HashMap<CheckSpec, Rc<Module>>,
+    /// Each entry checked, and what its latest analysis reached. A module no
+    /// entry reaches is dropped.
+    entries: HashMap<CheckSpec, Vec<CheckSpec>>,
 }
 
 impl Default for Build {
@@ -105,180 +217,235 @@ impl Build {
     pub fn new(stdlib_root: Option<PathBuf>) -> Self {
         Build {
             stdlib_root,
-            overlays: HashMap::new(),
-            modules: HashMap::new(),
-            loading: HashSet::new(),
-            verified: HashSet::new(),
             stdlib_modules: module::stdlib_modules(),
-            checks: 0,
-            parses: 0,
+            modules: HashMap::new(),
+            entries: HashMap::new(),
         }
     }
 
-    pub fn checks(&self) -> usize {
-        self.checks
+    /// Check `entry`, and every module it imports that needs it, reading
+    /// module text from `sources`.
+    pub fn check(&mut self, sources: &mut dyn Sources, entry: Entry<'_>) -> Analysis {
+        let spec = entry.spec();
+        let mut run = CheckRun {
+            cache: &self.modules,
+            stdlib_root: self.stdlib_root.as_deref(),
+            stdlib_modules: &self.stdlib_modules,
+            sources,
+            loading: Vec::new(),
+            loaded: Loaded::default(),
+            counts: Counts::default(),
+        };
+        let given = Given {
+            ast: entry.ast,
+            doc: entry.doc,
+            parse: entry.parse,
+        };
+        let dir = entry.base_dir.map(Path::to_path_buf);
+        let revision = Revision::of(&entry.source.text);
+        let checked = run.settle(
+            spec.clone(),
+            Origin::Given,
+            entry.source,
+            revision,
+            dir,
+            Some(given),
+        );
+        let analysis = Analysis {
+            imports: run.loaded.order,
+            entry: checked,
+            counts: run.counts,
+        };
+        for m in analysis.imports.iter().chain([&analysis.entry]) {
+            self.modules.insert(m.spec.clone(), m.clone());
+        }
+        self.entries.insert(spec, analysis.specs());
+        self.drop_unreached();
+        analysis
     }
 
-    pub fn parses(&self) -> usize {
-        self.parses
+    /// Forget the entry `spec`, and every module only it reached.
+    pub fn forget(&mut self, spec: &CheckSpec) {
+        self.entries.remove(spec);
+        self.drop_unreached();
     }
 
-    pub fn module(&self, key: &ModuleKey) -> Option<&Module> {
-        self.modules.get(key)
+    fn drop_unreached(&mut self) {
+        let live: HashSet<&CheckSpec> = self.entries.values().flatten().collect();
+        self.modules.retain(|spec, _| live.contains(spec));
     }
+}
 
-    pub(crate) fn modules(&self) -> impl Iterator<Item = &Module> {
-        self.modules.values()
+/// The modules one run has loaded, by key and in the order they finished.
+#[derive(Default)]
+struct Loaded {
+    by_key: HashMap<ModuleKey, Rc<Module>>,
+    order: Vec<Rc<Module>>,
+}
+
+impl Loaded {
+    fn add(&mut self, m: Rc<Module>) {
+        self.by_key.insert(m.key().clone(), m.clone());
+        self.order.push(m);
     }
+}
 
-    pub fn set_overlay(&mut self, path: PathBuf, text: String) {
-        self.overlays.insert(path, text);
+/// The interfaces a check may read, which notes each one it does read: a
+/// cached check holds only while those are unchanged.
+struct Reading<'l> {
+    loaded: &'l Loaded,
+    read: RefCell<Vec<ModuleKey>>,
+}
+
+impl Interfaces for Reading<'_> {
+    fn interface(&self, key: &ModuleKey) -> Option<&Interface> {
+        let m = self.loaded.by_key.get(key)?;
+        self.read.borrow_mut().push(key.clone());
+        Some(&m.checked.interface)
     }
+}
 
-    pub fn clear_overlay(&mut self, path: &Path) {
-        self.overlays.remove(path);
-    }
+/// The parse an entry arrives with.
+struct Given<'a> {
+    ast: &'a ast::BlockExpression,
+    doc: Option<String>,
+    parse: Vec<Diagnostic>,
+}
 
-    /// Say that the file at `path` changed, so the next check reads it even
-    /// if its stat looks the same. An edit within one clock tick that keeps
-    /// the length and inode would otherwise go unseen.
-    pub fn file_changed(&mut self, path: &Path) {
-        for m in self.modules.values_mut() {
-            if m.origin == Origin::File(path.to_path_buf()) {
-                m.stat = None;
+/// The tree a module is checked from: the one its entry arrived with, or
+/// one parsed here.
+enum Tree<'a> {
+    Given(Given<'a>),
+    Parsed(Parsed),
+}
+
+/// One check of an entry. It lives for that check only.
+struct CheckRun<'r> {
+    /// What earlier checks made, to reuse what is still fresh.
+    cache: &'r HashMap<CheckSpec, Rc<Module>>,
+    stdlib_root: Option<&'r Path>,
+    stdlib_modules: &'r [ModulePath],
+    sources: &'r mut dyn Sources,
+    /// The modules being loaded, innermost last, for finding import cycles.
+    loading: Vec<ModuleKey>,
+    loaded: Loaded,
+    counts: Counts,
+}
+
+impl CheckRun<'_> {
+    /// The checked module for `source`: the cached check when it is still
+    /// fresh, or a new one. Its imports are loaded first.
+    fn settle(
+        &mut self,
+        spec: CheckSpec,
+        origin: Origin,
+        source: Rc<SourceFile>,
+        revision: Revision,
+        dir: Option<PathBuf>,
+        given: Option<Given<'_>>,
+    ) -> Rc<Module> {
+        let cached = self.cache.get(&spec).cloned();
+        // The imports come from the parse, or from a cached check of the
+        // same text, which saves parsing it.
+        let mut parsed = None;
+        let written = match (&given, &cached) {
+            (Some(g), _) => written_imports(g.ast),
+            (None, Some(c)) if c.revision == revision => c.written.clone(),
+            (None, _) => {
+                let p = self.parse(&source.text);
+                let w = written_imports(&p.ast);
+                parsed = Some(p);
+                w
             }
+        };
+        self.loading.push(spec.key.clone());
+        let (imports, import_errors) = self.load_imports(&written, dir.as_deref());
+        self.loading.pop();
+        if let Some(c) = cached
+            && freshness(&c, &origin, revision, &imports, &self.loaded) == Freshness::Fresh
+        {
+            return c;
         }
-    }
-
-    /// Check `entry`, and every module it imports that needs it. Returns the
-    /// keys of the modules it reaches, imports first and `entry` last.
-    pub fn check_entry(&mut self, entry: Entry<'_>) -> Vec<ModuleKey> {
-        let key = entry.source.key.clone();
-        let hash = module::source_hash(&entry.source.text);
-        self.verified.clear();
-        self.loading.insert(key.clone());
-        let written = written_imports(entry.ast);
-        let imports = self.load_imports(&written, entry.base_dir);
-        self.loading.remove(&key);
-        let (imports, import_errors) = imports;
-        let mut load_diagnostics = entry.parse;
+        let parsed = match (given, parsed) {
+            (Some(g), _) => Tree::Given(g),
+            (None, Some(p)) => Tree::Parsed(p),
+            (None, None) => Tree::Parsed(self.parse(&source.text)),
+        };
+        let owned;
+        let (ast, doc, mut load_diagnostics) = match parsed {
+            Tree::Given(g) => (g.ast, g.doc, g.parse),
+            Tree::Parsed(Parsed {
+                ast,
+                doc,
+                diagnostics,
+            }) => {
+                owned = ast;
+                (&owned, doc, diagnostics)
+            }
+        };
         load_diagnostics.extend(import_errors);
         for d in &mut load_diagnostics {
-            d.source = Some(entry.source.clone());
+            d.source = Some(source.clone());
         }
-        let fresh = self.modules.get(&key).is_some_and(|m| {
-            m.source_hash == hash
-                && m.imports == imports
-                && m.role == entry.role
-                && m.unused == entry.unused
-                && self.interfaces_unchanged(m)
-        });
-        if !fresh {
-            let parsed_cleanly = !has_errors(&load_diagnostics);
-            let checked = self.run_check(
-                &entry.source,
-                entry.ast,
-                entry.doc,
-                &imports,
-                (entry.role, entry.unused),
-                parsed_cleanly,
-            );
-            let seen = self.seen(&imports);
-            self.modules.insert(
-                key.clone(),
-                Module {
-                    key: key.clone(),
-                    origin: Origin::Given,
-                    source_hash: hash,
-                    imports,
-                    seen,
-                    written,
-                    dir: entry.base_dir.map(Path::to_path_buf),
-                    stat: None,
-                    load_diagnostics,
-                    role: entry.role,
-                    unused: entry.unused,
-                    checked,
-                },
-            );
-        }
-        self.reach(&key)
-    }
-
-    /// The modules `key` reaches, imports first and `key` last.
-    pub fn reach(&self, key: &ModuleKey) -> Vec<ModuleKey> {
-        let mut out = Vec::new();
-        let mut seen = HashSet::new();
-        self.visit(key, &mut seen, &mut out);
-        out
-    }
-
-    fn visit(&self, key: &ModuleKey, seen: &mut HashSet<ModuleKey>, out: &mut Vec<ModuleKey>) {
-        if !seen.insert(key.clone()) {
-            return;
-        }
-        let Some(m) = self.modules.get(key) else {
-            return;
-        };
-        for k in m.imports.iter().flatten() {
-            self.visit(k, seen, out);
-        }
-        // The prelude comes before everything, though nothing imports it.
-        if *key != scarlet_types::known::prelude_key() {
-            self.visit(&scarlet_types::known::prelude_key(), seen, out);
-        }
-        out.push(key.clone());
-    }
-
-    /// Every diagnostic of the modules `keys` names.
-    pub fn diagnostics(&self, keys: &[ModuleKey]) -> Vec<Diagnostic> {
-        keys.iter()
-            .filter_map(|k| self.modules.get(k))
-            .flat_map(|m| m.diagnostics().cloned())
-            .collect()
-    }
-
-    fn interfaces_unchanged(&self, m: &Module) -> bool {
-        m.seen.iter().all(|(k, iface)| {
-            self.modules
-                .get(k)
-                .is_some_and(|d| d.checked.interface == *iface)
+        let parsed_cleanly = !has_errors(&load_diagnostics);
+        let (checked, read) = self.check(&source, ast, doc, &imports, &spec, parsed_cleanly);
+        Rc::new(Module {
+            spec,
+            origin,
+            revision,
+            imports,
+            written,
+            read,
+            load_diagnostics,
+            checked,
         })
     }
 
-    fn seen(&self, imports: &[Option<ModuleKey>]) -> Vec<(ModuleKey, Interface)> {
-        let mut keys: Vec<ModuleKey> = imports.iter().flatten().cloned().collect();
-        keys.push(scarlet_types::known::prelude_key());
-        keys.into_iter()
-            .filter_map(|k| {
-                let iface = self.modules.get(&k)?.checked.interface.clone();
-                Some((k, iface))
-            })
-            .collect()
+    fn parse(&mut self, text: &str) -> Parsed {
+        self.counts.parses += 1;
+        parse(text)
     }
 
-    fn run_check(
+    /// Check one module, against the interfaces loaded so far. Returns the
+    /// result, and each interface it read.
+    fn check(
         &mut self,
         source: &Rc<SourceFile>,
         ast: &ast::BlockExpression,
         doc: Option<String>,
         imports: &[Option<ModuleKey>],
-        (role, unused): (Role, UnusedBindings),
+        spec: &CheckSpec,
         parsed_cleanly: bool,
-    ) -> CheckedModule {
-        self.checks += 1;
+    ) -> (CheckedModule, Vec<(ModuleKey, Interface)>) {
+        self.counts.checks += 1;
+        let reading = Reading {
+            loaded: &self.loaded,
+            read: RefCell::new(Vec::new()),
+        };
         let input = CheckInput {
             source,
             module: ast,
             imports,
-            interfaces: &*self,
-            role,
-            unused,
+            interfaces: &reading,
+            role: spec.role,
+            unused: spec.unused,
             doc,
             parsed_cleanly,
-            stdlib_modules: &self.stdlib_modules,
+            stdlib_modules: self.stdlib_modules,
         };
-        scarlet_check::check_module(&input)
+        let checked = scarlet_check::check_module(&input);
+        let mut seen = HashSet::new();
+        let read = reading
+            .read
+            .into_inner()
+            .into_iter()
+            .filter(|k| seen.insert(k.clone()))
+            .filter_map(|k| {
+                let iface = self.loaded.by_key.get(&k)?.checked.interface.clone();
+                Some((k, iface))
+            })
+            .collect();
+        (checked, read)
     }
 
     /// Load the prelude and every module `written` names. Returns each
@@ -288,9 +455,9 @@ impl Build {
         written: &[(ast::ImportPath, Span)],
         base_dir: Option<&Path>,
     ) -> (Vec<Option<ModuleKey>>, Vec<Diagnostic>) {
-        let prelude = scarlet_types::known::prelude_key();
-        if !self.loading.contains(&prelude) {
+        if !self.loading.contains(&prelude_key()) {
             let path = ast::ImportPath::canonical(module::scarlet_prelude());
+            // The prelude is part of the compiler, so it always loads.
             let _ = self.load(&path, Span::DUMMY, None);
         }
         let mut keys = Vec::new();
@@ -307,8 +474,7 @@ impl Build {
         (keys, errors)
     }
 
-    /// Load the module `path` names, checking it if it hasn't been or needs
-    /// to be again.
+    /// Load the module `path` names, as a library.
     fn load(
         &mut self,
         path: &ast::ImportPath,
@@ -316,7 +482,7 @@ impl Build {
         base_dir: Option<&Path>,
     ) -> Result<ModuleKey, Diagnostic> {
         let error = |msg: String| Diagnostic::error(at, DiagnosticCode::ModuleError, msg);
-        let resolved = module::resolve_with(path, base_dir, self.stdlib_root.as_deref()).map_err(|e| match e {
+        let resolved = module::resolve_with(path, base_dir, self.stdlib_root).map_err(|e| match e {
             ResolveError::BareName(p) => error(format!(
                 "Unknown module '{p}'. Package imports aren't supported yet, so use a relative path like `./{p}`"
             )),
@@ -326,7 +492,7 @@ impl Build {
             e => error(e.to_string()),
         })?;
         let key = resolved.key.clone();
-        if self.verified.contains(&key) {
+        if self.loaded.by_key.contains_key(&key) {
             return Ok(key);
         }
         if self.loading.contains(&key) {
@@ -334,126 +500,32 @@ impl Build {
                 "Import cycle at module '{key}'. Modules can't import each other in a loop"
             )));
         }
-        let (origin, dir) = match &resolved.source {
-            ModuleSource::Embedded(_) => (Origin::Embedded, None),
-            ModuleSource::File(p) => (Origin::File(p.clone()), p.parent().map(Path::to_path_buf)),
-        };
-        let read = |p: &Path| {
-            std::fs::read_to_string(p)
-                .map_err(|e| error(format!("Couldn't read module '{key}': {e}")))
-        };
-
-        // Find out whether the text is what the cached check saw, reading the
-        // file only when its stat can't say.
-        let cached = self.modules.get(&key);
-        let mut text: Option<String> = None;
-        let mut stat = None;
-        let unchanged = match &resolved.source {
-            ModuleSource::Embedded(_) => cached.is_some_and(|m| m.origin == Origin::Embedded),
-            ModuleSource::File(p) => match self.overlays.get(p) {
-                Some(t) => cached.is_some_and(|m| m.source_hash == module::source_hash(t)),
-                None => {
-                    stat = file_stat(p);
-                    if stat.is_some() && cached.is_some_and(|m| m.stat == stat) {
-                        true
-                    } else {
-                        let t = read(p)?;
-                        let same = cached.is_some_and(|m| m.source_hash == module::source_hash(&t));
-                        text = Some(t);
-                        same
-                    }
-                }
-            },
-        };
-        if unchanged && let Some(m) = cached {
-            let (written, mdir) = (m.written.clone(), m.dir.clone());
-            self.loading.insert(key.clone());
-            let (imports, _) = self.load_imports(&written, mdir.as_deref());
-            self.loading.remove(&key);
-            if let Some(m) = self.modules.get(&key)
-                && m.imports == imports
-                && m.role == Role::Library
-                && m.unused == UnusedBindings::Report
-                && self.interfaces_unchanged(m)
-            {
-                if let Some(m) = self.modules.get_mut(&key)
-                    && stat.is_some()
-                {
-                    m.stat = stat;
-                }
-                self.verified.insert(key.clone());
-                return Ok(key);
+        let (origin, dir, file, text) = match &resolved.source {
+            ModuleSource::Embedded(s) => (Origin::Embedded, None, None, Text::new(*s)),
+            ModuleSource::File(p) => {
+                let text = self
+                    .sources
+                    .read(p)
+                    .map_err(|e| error(format!("Couldn't read module '{key}': {e}")))?;
+                (
+                    Origin::File(p.clone()),
+                    p.parent().map(Path::to_path_buf),
+                    Some(p.clone()),
+                    text,
+                )
             }
-        }
-
-        let text = match (text, &resolved.source) {
-            (Some(t), _) => t,
-            (None, ModuleSource::Embedded(s)) => s.to_string(),
-            (None, ModuleSource::File(p)) => match self.overlays.get(p) {
-                Some(t) => t.clone(),
-                None => read(p)?,
-            },
         };
-        if let ModuleSource::File(p) = &resolved.source
-            && self.overlays.contains_key(p)
-        {
-            stat = None;
-        }
-        let hash = module::source_hash(&text);
-        let source = SourceFile::new(
-            key.clone(),
-            match &resolved.source {
-                ModuleSource::File(p) => Some(p.clone()),
-                ModuleSource::Embedded(_) => None,
-            },
-            text.as_str(),
+        let source = SourceFile::new(key.clone(), file, text.text);
+        let m = self.settle(
+            CheckSpec::library(key.clone()),
+            origin,
+            source,
+            text.revision,
+            dir,
+            None,
         );
-        self.parses += 1;
-        let mut parsed = parse(&text);
-        let written = written_imports(&parsed.ast);
-        self.loading.insert(key.clone());
-        let (imports, mut load_diagnostics) = self.load_imports(&written, dir.as_deref());
-        self.loading.remove(&key);
-        for d in parsed.diagnostics.iter_mut().chain(&mut load_diagnostics) {
-            d.source = Some(source.clone());
-        }
-        let mut diagnostics = std::mem::take(&mut parsed.diagnostics);
-        diagnostics.extend(load_diagnostics);
-        let parsed_cleanly = !has_errors(&diagnostics);
-        let checked = self.run_check(
-            &source,
-            &parsed.ast,
-            parsed.doc,
-            &imports,
-            (Role::Library, UnusedBindings::Report),
-            parsed_cleanly,
-        );
-        let seen = self.seen(&imports);
-        self.modules.insert(
-            key.clone(),
-            Module {
-                key: key.clone(),
-                origin,
-                source_hash: hash,
-                imports,
-                seen,
-                written,
-                dir,
-                stat,
-                load_diagnostics: diagnostics,
-                role: Role::Library,
-                unused: UnusedBindings::Report,
-                checked,
-            },
-        );
-        self.verified.insert(key.clone());
+        self.loaded.add(m);
         Ok(key)
-    }
-}
-
-impl Interfaces for Build {
-    fn interface(&self, key: &ModuleKey) -> Option<&Interface> {
-        self.modules.get(key).map(|m| &m.checked.interface)
     }
 }
 
@@ -476,34 +548,19 @@ pub fn parse(text: &str) -> Parsed {
     }
 }
 
-/// A file's modification time, length and inode. An editor that saves by
-/// replacing the file changes the inode even within the same second.
-type FileStat = (std::time::SystemTime, u64, u64);
-
-fn file_stat(path: &Path) -> Option<FileStat> {
-    let meta = std::fs::metadata(path).ok()?;
-    #[cfg(unix)]
-    let ino = std::os::unix::fs::MetadataExt::ino(&meta);
-    #[cfg(not(unix))]
-    let ino = 0;
-    Some((meta.modified().ok()?, meta.len(), ino))
-}
-
 /// Each `import` in `block`, as written, with its span.
 fn written_imports(block: &ast::BlockExpression) -> Vec<(ast::ImportPath, Span)> {
-    import_decls(block)
-        .map(|d| (d.path.clone(), d.span))
+    block
+        .body
+        .iter()
+        .filter_map(|n| match n {
+            ast::Node::Statement(s) => match s.as_ref() {
+                ast::Statement::ImportDeclaration(d) => Some((d.path.clone(), d.span)),
+                ast::Statement::Declaration { .. }
+                | ast::Statement::Binding(_)
+                | ast::Statement::Backpass(_) => None,
+            },
+            ast::Node::Expression(_) => None,
+        })
         .collect()
-}
-
-fn import_decls(block: &ast::BlockExpression) -> impl Iterator<Item = &ast::ImportDeclaration> {
-    block.body.iter().filter_map(|n| match n {
-        ast::Node::Statement(s) => match s.as_ref() {
-            ast::Statement::ImportDeclaration(d) => Some(d),
-            ast::Statement::Declaration { .. }
-            | ast::Statement::Binding(_)
-            | ast::Statement::Backpass(_) => None,
-        },
-        ast::Node::Expression(_) => None,
-    })
 }
