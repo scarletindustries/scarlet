@@ -10,10 +10,12 @@ use crate::token::{Kind, Token, Trivia};
 
 pub mod doc;
 mod verify;
+
 use doc::{
     Doc, block, delimited, delimited_hug, delimited_hug_list, delimited_no_trailing, group,
     group_willing, hard_braces, hard_list, hardline, hardlines, join, line, nest, nil, text,
 };
+pub use verify::Mismatch;
 
 const MAX_WIDTH: isize = 100;
 
@@ -34,9 +36,40 @@ pub enum FormatResult {
     },
     /// A formatter bug: the output is not the same program as the input. No
     /// output; callers must leave the source untouched.
-    OutputInvalid {
-        detail: String,
+    OutputInvalid(FormatBug),
+}
+
+/// How the formatter's output fails to be the input's program. Each is a
+/// formatter bug.
+#[derive(Debug)]
+pub enum FormatBug {
+    /// Keeping breaks flat never stopped layout adding the same line end.
+    LineEndLoop,
+    Layout(verify::Mismatch),
+    /// The output has an error the input didn't.
+    DoesNotReparse(Diagnostic),
+    TopLevelCount {
+        output: usize,
+        input: usize,
     },
+}
+
+impl std::fmt::Display for FormatBug {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FormatBug::LineEndLoop => write!(f, "layout keeps adding the same line end"),
+            FormatBug::Layout(m) => write!(f, "{m}"),
+            FormatBug::DoesNotReparse(d) => write!(
+                f,
+                "output does not re-parse: {} at {}:{}",
+                d.message, d.span.start_line, d.span.start_column
+            ),
+            FormatBug::TopLevelCount { output, input } => write!(
+                f,
+                "output re-parses to {output} top-level nodes, input had {input}"
+            ),
+        }
+    }
 }
 
 /// Every comment in the tokens' leading trivia, keyed by trimmed text with its
@@ -130,13 +163,11 @@ fn format_at(input: &str, width: isize) -> FormatResult {
                 let before = keep_flat.len();
                 keep_flat.extend(ids);
                 if keep_flat.len() == before {
-                    return FormatResult::OutputInvalid {
-                        detail: "layout keeps adding the same line end".to_string(),
-                    };
+                    return FormatResult::OutputInvalid(FormatBug::LineEndLoop);
                 }
             }
-            verify::Verdict::Different(detail) => {
-                return FormatResult::OutputInvalid { detail };
+            verify::Verdict::Different(m) => {
+                return FormatResult::OutputInvalid(FormatBug::Layout(m));
             }
         }
     };
@@ -166,21 +197,13 @@ fn format_at(input: &str, width: isize) -> FormatResult {
         .iter()
         .find(|d| d.severity == Severity::Error)
     {
-        return FormatResult::OutputInvalid {
-            detail: format!(
-                "output does not re-parse: {} at {}:{}",
-                d.message, d.span.start_line, d.span.start_column
-            ),
-        };
+        return FormatResult::OutputInvalid(FormatBug::DoesNotReparse(d.clone()));
     }
     if reparsed.ast.body.len() != result.ast.body.len() {
-        return FormatResult::OutputInvalid {
-            detail: format!(
-                "output re-parses to {} top-level nodes, input had {}",
-                reparsed.ast.body.len(),
-                result.ast.body.len()
-            ),
-        };
+        return FormatResult::OutputInvalid(FormatBug::TopLevelCount {
+            output: reparsed.ast.body.len(),
+            input: result.ast.body.len(),
+        });
     }
 
     FormatResult::Formatted { output }
@@ -1344,7 +1367,7 @@ mod tests {
             FormatResult::CommentsLost { comment } => {
                 panic!("formatter lost the comment `{comment}` in:\n{src}")
             }
-            FormatResult::OutputInvalid { detail } => {
+            FormatResult::OutputInvalid(detail) => {
                 panic!("formatter produced invalid output ({detail}) for:\n{src}")
             }
         }
@@ -1440,7 +1463,7 @@ mod tests {
             FormatResult::CommentsLost { comment } => {
                 panic!("re-format lost the comment `{comment}`:\n{out}")
             }
-            FormatResult::OutputInvalid { detail } => {
+            FormatResult::OutputInvalid(detail) => {
                 panic!("re-format produced invalid output ({detail}):\n{out}")
             }
         }
@@ -1480,7 +1503,7 @@ mod tests {
                     FormatResult::CommentsLost { comment } => {
                         panic!("{name} at width {width} lost the comment `{comment}`")
                     }
-                    FormatResult::OutputInvalid { detail } => {
+                    FormatResult::OutputInvalid(detail) => {
                         panic!("{name} at width {width}: {detail}")
                     }
                 };
@@ -1492,7 +1515,7 @@ mod tests {
                     FormatResult::CommentsLost { comment } => {
                         panic!("{name} at width {width} then lost the comment `{comment}`")
                     }
-                    FormatResult::OutputInvalid { detail } => {
+                    FormatResult::OutputInvalid(detail) => {
                         panic!("{name} at width {width} then: {detail}")
                     }
                 }
@@ -1521,7 +1544,7 @@ mod tests {
                     FormatResult::CommentsLost { comment } => {
                         panic!("formatting {name} lost the comment `{comment}`")
                     }
-                    FormatResult::OutputInvalid { detail } => {
+                    FormatResult::OutputInvalid(detail) => {
                         panic!("formatting {name} produced invalid output: {detail}")
                     }
                 };
@@ -1535,7 +1558,7 @@ mod tests {
                     FormatResult::CommentsLost { comment } => {
                         panic!("re-formatting {name} lost the comment `{comment}`")
                     }
-                    FormatResult::OutputInvalid { detail } => {
+                    FormatResult::OutputInvalid(detail) => {
                         panic!("re-formatting {name} produced invalid output: {detail}")
                     }
                 }
@@ -2219,7 +2242,7 @@ mod tests {
                 assert!(output.contains("// stranded before else"), "{output}")
             }
             FormatResult::ParseFailed { errors } => panic!("parse failed: {errors:?}"),
-            FormatResult::OutputInvalid { detail } => {
+            FormatResult::OutputInvalid(detail) => {
                 panic!("formatter produced invalid output: {detail}")
             }
         }
@@ -2243,7 +2266,7 @@ mod tests {
                 )
             }
             FormatResult::ParseFailed { errors } => panic!("parse failed: {errors:?}"),
-            FormatResult::OutputInvalid { detail } => {
+            FormatResult::OutputInvalid(detail) => {
                 panic!("formatter produced invalid output: {detail}")
             }
         }
@@ -2262,7 +2285,7 @@ mod tests {
                 assert!(output.contains("// stranded before else\n"), "{output}")
             }
             FormatResult::ParseFailed { errors } => panic!("parse failed: {errors:?}"),
-            FormatResult::OutputInvalid { detail } => {
+            FormatResult::OutputInvalid(detail) => {
                 panic!("formatter produced invalid output: {detail}")
             }
         }

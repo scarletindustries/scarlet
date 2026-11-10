@@ -14,6 +14,7 @@
 //!   merged, so the two can't both apply.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use crate::module::ModulePath;
 use crate::span::Span;
@@ -75,28 +76,36 @@ pub enum RenameError {
     Unresolvable(Vec<(ModulePath, ModuleUriError)>),
 }
 
-impl RenameError {
-    /// The message to show in the LSP `ResponseError`.
-    pub fn message(&self) -> String {
+/// The message the LSP shows in its `ResponseError`.
+impl fmt::Display for RenameError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RenameError::NotFound => "there's nothing here that can be renamed".to_string(),
+            RenameError::NotFound => write!(f, "there's nothing here that can be renamed"),
             RenameError::NotRenameable(NotRenameableReason::Stdlib) => {
-                "you can't rename something defined in the standard library".to_string()
+                write!(
+                    f,
+                    "you can't rename something defined in the standard library"
+                )
             }
             RenameError::NotRenameable(NotRenameableReason::ModulePath) => {
-                "you can't rename a module path here, so rename the file instead".to_string()
+                write!(
+                    f,
+                    "you can't rename a module path here, so rename the file instead"
+                )
             }
             RenameError::NotRenameable(NotRenameableReason::ModuleAlias) => {
-                "you can't rename an import".to_string()
+                write!(f, "you can't rename an import")
             }
-            RenameError::InvalidName(n) => format!("`{n}` is not a valid identifier"),
+            RenameError::InvalidName(n) => write!(f, "`{n}` is not a valid identifier"),
             RenameError::Unresolvable(mods) => {
-                let list = mods
-                    .iter()
-                    .map(|(m, why)| format!("{} ({why})", m.join("/")))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("can't find the source file for {list}")
+                write!(f, "can't find the source file for ")?;
+                for (i, (m, why)) in mods.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{} ({why})", m.join("/"))?;
+                }
+                Ok(())
             }
         }
     }

@@ -335,7 +335,7 @@ impl LspServer {
     fn handle_rename(&mut self, id: &Json, params: &Json) {
         match self.ws.rename_response(params) {
             Ok(r) => self.send_response(id, r),
-            Err(e) => self.send_error(id, rename_error_code(&e), &e.message()),
+            Err(e) => self.send_error(id, rename_error_code(&e), &e.to_string()),
         }
     }
 }

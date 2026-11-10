@@ -10,6 +10,7 @@
 //! flat and layout runs again.
 
 use std::collections::BTreeSet;
+use std::fmt;
 
 use super::doc::{BreakId, Layout};
 use crate::token::{Kind, Token, Trivia, line_ends};
@@ -20,7 +21,57 @@ pub(super) enum Verdict {
     /// flat removes it.
     KeepFlat(BTreeSet<BreakId>),
     /// The output is a different program, and layout can't fix it.
-    Different(String),
+    Different(Mismatch),
+}
+
+/// How the laid-out tokens differ from the doc's. Positions are the output's,
+/// counted from 1.
+#[derive(Debug)]
+pub enum Mismatch {
+    TokenKind {
+        made: Kind,
+        doc: Kind,
+        at: (i32, i32),
+    },
+    TokenCount {
+        made: usize,
+        doc: usize,
+    },
+    JoinedLines {
+        at: (i32, i32),
+    },
+    LineCommentEndsLine {
+        at: (i32, i32),
+    },
+}
+
+impl fmt::Display for Mismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Mismatch::TokenKind {
+                made,
+                doc,
+                at: (line, col),
+            } => write!(
+                f,
+                "layout made '{made}' where the doc has '{doc}', at {line}:{col}"
+            ),
+            Mismatch::TokenCount { made, doc } => {
+                write!(f, "layout made {made} tokens, the doc has {doc}")
+            }
+            Mismatch::JoinedLines { at: (line, col) } => {
+                write!(f, "layout joined two lines at {line}:{col}")
+            }
+            Mismatch::LineCommentEndsLine { at: (line, col) } => {
+                write!(f, "a line comment ends a line at {line}:{col}")
+            }
+        }
+    }
+}
+
+/// Where a token starts, counted from 1.
+fn position(tok: &Token) -> (i32, i32) {
+    (tok.span.start_line + 1, tok.span.start_column + 1)
 }
 
 pub(super) fn compare(reference: &[Token], output: &[Token], layout: &Layout) -> Verdict {
@@ -28,21 +79,18 @@ pub(super) fn compare(reference: &[Token], output: &[Token], layout: &Layout) ->
     let b = comparable(output);
     for (&i, &o) in a.iter().zip(&b) {
         if reference[i].kind != output[o].kind {
-            return Verdict::Different(format!(
-                "layout made '{}' where the doc has '{}', at {}:{}",
-                output[o].kind,
-                reference[i].kind,
-                output[o].span.start_line + 1,
-                output[o].span.start_column + 1,
-            ));
+            return Verdict::Different(Mismatch::TokenKind {
+                made: output[o].kind.clone(),
+                doc: reference[i].kind.clone(),
+                at: position(&output[o]),
+            });
         }
     }
     if a.len() != b.len() {
-        return Verdict::Different(format!(
-            "layout made {} tokens, the doc has {}",
-            b.len(),
-            a.len()
-        ));
+        return Verdict::Different(Mismatch::TokenCount {
+            made: b.len(),
+            doc: a.len(),
+        });
     }
 
     let reference_ends = line_ends(reference);
@@ -51,11 +99,9 @@ pub(super) fn compare(reference: &[Token], output: &[Token], layout: &Layout) ->
     for (&i, &o) in a.iter().zip(&b) {
         match (reference_ends[i], output_ends[o]) {
             (true, false) => {
-                return Verdict::Different(format!(
-                    "layout joined two lines at {}:{}",
-                    output[o].span.start_line + 1,
-                    output[o].span.start_column + 1,
-                ));
+                return Verdict::Different(Mismatch::JoinedLines {
+                    at: position(&output[o]),
+                });
             }
             (false, true) => {
                 let tok = &output[o];
@@ -64,11 +110,7 @@ pub(super) fn compare(reference: &[Token], output: &[Token], layout: &Layout) ->
                     .iter()
                     .any(|t| matches!(t, Trivia::LineComment(_)))
                 {
-                    return Verdict::Different(format!(
-                        "a line comment ends a line at {}:{}",
-                        tok.span.start_line + 1,
-                        tok.span.start_column + 1,
-                    ));
+                    return Verdict::Different(Mismatch::LineCommentEndsLine { at: position(tok) });
                 }
                 // Newline `k` ends line `k`, so the ones between the two
                 // tokens are those from the previous token's line up to this

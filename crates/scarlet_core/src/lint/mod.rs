@@ -87,7 +87,33 @@ pub struct Finding {
 /// properly here" would print the same empty list.
 pub struct Uninspected {
     path: PathBuf,
-    reason: String,
+    reason: Skipped,
+}
+
+/// Why the walk could not account for a file.
+enum Skipped {
+    Unreadable(std::io::Error),
+    /// The parser reported this many diagnostics, so the tree is partial.
+    ParseDiagnostics(usize),
+    /// The walk reached a different number of type declarations than the
+    /// scanner found `type` keywords.
+    WalkMismatch {
+        walked: usize,
+        keywords: usize,
+    },
+}
+
+impl std::fmt::Display for Skipped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Skipped::Unreadable(e) => write!(f, "unreadable: {e}"),
+            Skipped::ParseDiagnostics(n) => write!(f, "{n} parse diagnostic(s)"),
+            Skipped::WalkMismatch { walked, keywords } => write!(
+                f,
+                "walk reached {walked} type declaration(s), scanner found {keywords} `type` keyword(s)"
+            ),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -116,7 +142,7 @@ pub fn run(roots: &[PathBuf], min_bools: usize) -> Census {
             Ok(source) => inspect(&path, &source, min_bools, &mut census),
             Err(e) => census.uninspected.push(Uninspected {
                 path,
-                reason: format!("unreadable: {e}"),
+                reason: Skipped::Unreadable(e),
             }),
         }
     }
@@ -164,7 +190,7 @@ fn inspect(path: &Path, source: &str, min_bools: usize, census: &mut Census) {
     if !parsed.diagnostics.is_empty() {
         census.uninspected.push(Uninspected {
             path: path.to_path_buf(),
-            reason: format!("{} parse diagnostic(s)", parsed.diagnostics.len()),
+            reason: Skipped::ParseDiagnostics(parsed.diagnostics.len()),
         });
         return;
     }
@@ -175,10 +201,10 @@ fn inspect(path: &Path, source: &str, min_bools: usize, census: &mut Census) {
     if types.len() != type_keywords {
         census.uninspected.push(Uninspected {
             path: path.to_path_buf(),
-            reason: format!(
-                "walk reached {} type declaration(s), scanner found {type_keywords} `type` keyword(s)",
-                types.len(),
-            ),
+            reason: Skipped::WalkMismatch {
+                walked: types.len(),
+                keywords: type_keywords,
+            },
         });
         return;
     }

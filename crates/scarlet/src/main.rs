@@ -506,7 +506,7 @@ fn fmt_stdin(debug: bool) {
             let _ = io::stdout().flush();
             process::exit(1);
         }
-        formatter::FormatResult::OutputInvalid { detail } => {
+        formatter::FormatResult::OutputInvalid(detail) => {
             // Pass the input through so valid source is never replaced.
             eprintln!("formatter bug: {detail}; input left unchanged");
             print!("{content}");
@@ -563,7 +563,7 @@ fn cmd_fmt(args: FmtArgs) {
                 );
                 has_errors = true;
             }
-            formatter::FormatResult::OutputInvalid { detail } => {
+            formatter::FormatResult::OutputInvalid(detail) => {
                 eprintln!(
                     "Error formatting {}: formatter bug: {detail}; file left unchanged",
                     file.display()
