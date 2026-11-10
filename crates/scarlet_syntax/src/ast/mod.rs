@@ -24,7 +24,7 @@ macro_rules! impl_span {
 #[derive(Debug, Clone)]
 pub struct StringLiteral {
     pub value: String,
-    pub span: Span,
+    pub(crate) span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -245,7 +245,7 @@ pub struct ConstBinding {
 /// `(a, b) <- g()`. It has to match every value, as a binding's does.
 #[derive(Debug, Clone)]
 pub struct BackpassBinding {
-    pub binders: Vec<Pattern>,
+    pub(crate) binders: Vec<Pattern>,
     pub call: Expression,
     pub(crate) span: Span,
 }
@@ -461,7 +461,7 @@ pub struct BinaryExpression {
     pub left: Box<Expression>,
     pub right: Box<Expression>,
     pub op: BinaryOp,
-    pub span: Span,
+    pub(crate) span: Span,
 }
 
 /// `left |> right`: sugar for calling `right` with `left` as its first
