@@ -179,3 +179,47 @@ pub fn compile_text(text: &str, base_dir: Option<&Path>) -> Compiled {
     }
     compiled
 }
+
+/// One public name of a module, for completion.
+pub struct Export {
+    pub name: String,
+    /// A function's parameter names, or a constructor's field labels.
+    pub params: Vec<String>,
+}
+
+/// The public names of the module `path`, checking it first if `build`
+/// hasn't. Types come first, and each name is listed once: a record type
+/// names its only constructor after itself.
+pub fn exports(build: &mut Build, path: &ModulePath) -> Vec<Export> {
+    let key = ModuleKey::of(path);
+    if build.module(&key).is_none() {
+        let source = format!("import {key}\n");
+        let parsed = crate::build::parse(&source);
+        if has_errors(&parsed.diagnostics) {
+            return Vec::new();
+        }
+        build.check_entry(Entry {
+            key: ModuleKey::main(),
+            ast: &parsed.ast,
+            doc: None,
+            hash: crate::build::source_hash(&source),
+            base_dir: None,
+            role: Role::Script,
+            unused: UnusedBindings::Ignore,
+        });
+    }
+    let Some(m) = build.module(&key) else {
+        return Vec::new();
+    };
+    let iface = &m.checked.interface;
+    let types = iface.types.values().filter(|t| t.public).map(|t| Export {
+        name: t.name.name().to_string(),
+        params: Vec::new(),
+    });
+    let values = iface.values.iter().map(|(name, v)| Export {
+        name: name.to_string(),
+        params: v.kind.labels().unwrap_or_default().iter().map(|l| l.to_string()).collect(),
+    });
+    let mut seen = std::collections::HashSet::new();
+    types.chain(values).filter(|e| seen.insert(e.name.clone())).collect()
+}

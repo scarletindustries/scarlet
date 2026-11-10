@@ -20,7 +20,7 @@ use std::process;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
 use scarlet::cli::{help, man};
-use scarlet::{build, compile, diagnostic, dis, formatter, lint, scanner};
+use scarlet::{build, compile, diagnostic, dis, formatter, lint, lsp, scanner};
 
 const VERSION: &str = env!("SCARLET_VERSION");
 
@@ -374,10 +374,11 @@ fn main() -> process::ExitCode {
             help::home(&cmd);
         }
         Some(Commands::Repl) => {
-            die("the REPL is being rebuilt");
+            scarlet::repl::run(VERSION.trim());
         }
         Some(Commands::Lsp) => {
-            die("the language server is being rebuilt");
+            let mut server = lsp::new_server();
+            server.run();
         }
         Some(Commands::Dis(args)) => {
             let file = read_file_or_die(&args.entrypoint);

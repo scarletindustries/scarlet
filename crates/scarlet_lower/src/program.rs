@@ -298,9 +298,16 @@ pub fn build_program(modules: &[&CleanModule], defs: &dyn TypeDefs, main: Option
         };
         fns.push(LoweredFn::new(module.clone(), name.clone(), finish(f, false), Rc::clone(&pool)));
     }
+    // The entry's top level is named for what it is; each import's, for its
+    // module.
+    let last = tops.len().saturating_sub(1);
     let mut inits: Vec<LoweredFn> = tops
         .iter()
-        .map(|(module, f)| LoweredFn::new(module.clone(), module.clone(), finish(f, true), Rc::clone(&pool)))
+        .enumerate()
+        .map(|(i, (module, f))| {
+            let name = if i == last { "__main__".to_string() } else { module.clone() };
+            LoweredFn::new(module.clone(), name, finish(f, true), Rc::clone(&pool))
+        })
         .collect();
     let toplevel = match inits.pop() {
         Some(t) => t,

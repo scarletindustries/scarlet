@@ -7,7 +7,8 @@
 use std::collections::BTreeMap;
 
 use crate::ast;
-use crate::bytecode::{Export, IncrementalSession};
+use crate::build::Build;
+use crate::compile::{Export, exports};
 use crate::module::{self, ModuleKey, ModulePath};
 use crate::token::Keyword;
 
@@ -52,10 +53,10 @@ pub struct Names {
     /// Maps an import alias to its module path, for `alias::` completion. Only stdlib modules
     /// resolve, because a relative import's exports live in a file this index never reads.
     aliases: BTreeMap<String, ModulePath>,
-    /// Where stdlib exports are read from. We build it on the first completion that needs it,
-    /// because building it compiles the prelude. It caches every module it compiles after that,
-    /// so each module compiles once per REPL.
-    stdlib: Option<IncrementalSession>,
+    /// Where stdlib exports are read from. We make it on the first completion that needs it,
+    /// because that checks the prelude. It keeps every module it checks after that, so each
+    /// module is checked once per REPL.
+    stdlib: Option<Build>,
 }
 
 impl Names {
@@ -184,9 +185,7 @@ impl Names {
     }
 
     fn exports(&mut self, path: &ModulePath) -> Vec<Export> {
-        self.stdlib
-            .get_or_insert_with(IncrementalSession::new)
-            .exports(path)
+        exports(self.stdlib.get_or_insert_with(Build::default), path)
     }
 }
 

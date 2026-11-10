@@ -18,9 +18,9 @@ use rustyline::error::ReadlineError;
 use rustyline::history::FileHistory;
 use rustyline::{Cmd, Config, Editor, EventHandler, KeyCode, KeyEvent, Modifiers};
 
-use crate::ast;
-use crate::bytecode;
-use crate::bytecode::{CompileOptions, IncrementalSession, ModuleScope, UnusedBindings};
+use crate::build::{self, Build};
+use crate::check::{Role, UnusedBindings};
+use crate::compile::{self, Compiled};
 use crate::diagnostic;
 use crate::term::Palette;
 use command::Flow;
@@ -151,7 +151,8 @@ fn history_path() -> Option<PathBuf> {
     )
 }
 
-/// The live session: the source it replays, and the names that source bound.
+/// The live session: the source it replays, the names that source bound, and the build that keeps
+/// every module it imports checked, so the stdlib is checked once per session.
 pub(crate) struct Session {
     /// Every import the session has seen and every declaration it has accepted. They're replayed
     /// word for word ahead of the current entry, imports first, as the language requires.
@@ -161,6 +162,7 @@ pub(crate) struct Session {
     /// which the compiler keys expression types on. Replaying text keeps every span unique.
     imports: String,
     definitions: String,
+    build: Build,
     names: Rc<RefCell<Names>>,
     palette: Palette,
     /// Relative imports resolve against the directory the REPL was started in, which is the only
@@ -173,6 +175,7 @@ impl Session {
         Session {
             imports: String::new(),
             definitions: String::new(),
+            build: Build::default(),
             names,
             palette,
             base_dir: std::env::current_dir().ok(),
@@ -183,15 +186,17 @@ impl Session {
         &self.palette
     }
 
-    /// How a session compiles an entry: against the directory the REPL was
-    /// started in, and without the unused-binding check, which no fragment of
-    /// a session can pass (see [`UnusedBindings`]).
-    fn compile_options(&self) -> CompileOptions<'_> {
-        CompileOptions {
-            unused_bindings: UnusedBindings::Ignore,
-            module_scope: ModuleScope::Script,
-            ..CompileOptions::new(self.base_dir.as_deref())
-        }
+    /// Compile `source` as the session's script: against the directory the REPL was started in,
+    /// and without the unused-binding check, which no fragment of a session can pass.
+    fn compile(&mut self, source: &str, ast: &crate::ast::BlockExpression) -> Compiled {
+        let opts = compile::Options {
+            base_dir: self.base_dir.as_deref(),
+            role: Role::Script,
+            unused: UnusedBindings::Ignore,
+            as_module: None,
+            run: false,
+        };
+        compile::compile(&mut self.build, ast, None, build::source_hash(source), &opts)
     }
 
     /// The session's own source: everything it replays ahead of an entry.
@@ -224,15 +229,12 @@ impl Session {
             "{}{}{}{}{}",
             self.imports, parts.imports, self.definitions, parts.definitions, parts.expressions
         );
-        let mut scanner = crate::scanner::new_scanner(combined_src.clone());
-        let combined = crate::parser::new_parser(&mut scanner).parse_program();
+        let combined = build::parse(&combined_src);
         if diagnostic::has_errors(&combined.diagnostics) {
             self.report(&combined.diagnostics, &combined_src);
             return;
         }
-        let combined_ast = ast::Expression::BlockExpression(combined.ast);
-
-        let result = bytecode::compile_with(&combined_ast, self.compile_options());
+        let result = self.compile(&combined_src, &combined.ast);
         if !result.diagnostics.is_empty() {
             self.report(&result.diagnostics, &combined_src);
             if !result.success() {
@@ -304,19 +306,12 @@ impl Session {
 
         let replay = self.replay();
         let probe_src = format!("{replay}{BINDING}{expr}\n");
-        let mut scanner = crate::scanner::new_scanner(probe_src.clone());
-        let probe = crate::parser::new_parser(&mut scanner).parse_program();
+        let probe = build::parse(&probe_src);
         if diagnostic::has_errors(&probe.diagnostics) {
             self.report(&probe.diagnostics, &probe_src);
             return;
         }
-
-        let mut session = IncrementalSession::new();
-        session.as_repl();
-        let result = session.check(
-            &ast::Expression::BlockExpression(probe.ast),
-            self.base_dir.as_deref(),
-        );
+        let result = self.compile(&probe_src, &probe.ast);
         if !result.success() {
             self.report(&result.diagnostics, &probe_src);
             return;
@@ -325,8 +320,17 @@ impl Session {
         // `const `.
         let line = i32::try_from(replay.lines().count()).unwrap_or(0);
         let column = i32::try_from("const ".len()).unwrap_or(0);
-        match session.hover(None, line, column) {
-            Some((_, ty)) => println!("{expr}  {}{ty}{}", self.palette.bold, self.palette.reset),
+        let ty = self.build.module(&result.key).and_then(|m| {
+            m.checked
+                .index
+                .hovers
+                .iter()
+                .filter(|h| h.span.contains(line, column))
+                .min_by_key(|h| h.span.width())
+                .map(|h| h.ty.clone())
+        });
+        match ty {
+            Some(ty) => println!("{expr}  {}{ty}{}", self.palette.bold, self.palette.reset),
             None => eprintln!("no type was inferred for that expression"),
         }
     }
@@ -335,12 +339,8 @@ impl Session {
     /// filtered, because the program carries the whole stdlib.
     fn disassemble(&mut self, needle: &str) {
         let replay = self.replay();
-        let mut scanner = crate::scanner::new_scanner(replay.clone());
-        let parsed = crate::parser::new_parser(&mut scanner).parse_program();
-        let result = bytecode::compile_with(
-            &ast::Expression::BlockExpression(parsed.ast),
-            self.compile_options(),
-        );
+        let parsed = build::parse(&replay);
+        let result = self.compile(&replay, &parsed.ast);
         if !result.success() {
             self.report(&result.diagnostics, &replay);
             return;

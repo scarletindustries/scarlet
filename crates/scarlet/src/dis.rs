@@ -103,10 +103,7 @@ mod tests {
     use super::*;
 
     fn program(src: &str) -> Program {
-        let mut scanner = crate::scanner::new_scanner(src.to_string());
-        let parsed = crate::parser::new_parser(&mut scanner).parse_program();
-        let result =
-            crate::bytecode::compile(&crate::ast::Expression::BlockExpression(parsed.ast), None);
+        let result = crate::compile::compile_text(src, None);
         assert!(result.success(), "{:?}", result.diagnostics);
         result.into_runnable().expect("a clean compile is runnable")
     }

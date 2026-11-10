@@ -96,14 +96,26 @@ pub(crate) fn module(b: &mut Builder<'_>, m: &TypedModule) -> TypedFn {
         };
         frames.push(Frame::Let(bind, init));
     }
-    for s in &m.statements {
+    // A script's last expression is its value, which a REPL shows.
+    let (last, init) = match m.statements.split_last() {
+        Some((Stmt::Expr(e), init)) => (Some(e), init),
+        Some(_) | None => (None, &m.statements[..]),
+    };
+    for s in init {
         mx.stmt(&mut cx, s, &mut frames);
     }
-    let nil = mx.nil_ty();
-    let body = fold(frames, TypedExpr::Nil { ty: nil });
+    let tail = match last {
+        Some(e) => mx.expr(&mut cx, e),
+        None => {
+            let nil = mx.nil_ty();
+            TypedExpr::Nil { ty: nil }
+        }
+    };
+    let ret = tail.ty();
+    let body = fold(frames, tail);
     TypedFn {
         params: Vec::new(),
-        ret: nil,
+        ret,
         body,
         binds: cx.next,
     }

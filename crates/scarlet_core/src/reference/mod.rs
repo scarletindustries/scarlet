@@ -7,13 +7,14 @@
 //! interner and the two indexes: forward (position → def) and reverse (def →
 //! occurrences).
 //!
-//! This module only holds the data and answers queries. The typecheck pass
-//! fills it in, and the graph never changes inference or codegen. The
+//! This module only holds the data and answers queries. It is built from each
+//! checked module's [`SourceIndex`](scarlet_check::SourceIndex), so the graph
+//! never changes inference or codegen. The
 //! unused-import and dead-code analysis lives in [`unused`], and the rename
 //! planner in [`rename`].
 //!
 //! Module identity is interned to a `Copy` [`ModuleId`], so a `DefId` is made
-//! only of `Copy` types and survives incremental recompiles.
+//! only of `Copy` types.
 
 use std::cell::OnceCell;
 use std::collections::HashMap;
@@ -30,10 +31,7 @@ pub mod uri;
 
 pub use uri::{ModuleUriError, module_uri, path_to_uri};
 
-// `EntityKind` lives in `scarlet_types::types::environment`, which keys
-// constructor and field metadata on it. We re-export it so everything keyed on
-// `DefId` shares one enum.
-pub use scarlet_types::types::EntityKind;
+pub use scarlet_check::index::EntityKind;
 
 /// How a name is being used at an occurrence site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1012,4 +1010,69 @@ mod tests {
             .collect();
         assert_eq!(surfaced, vec!["compute"]);
     }
+}
+
+impl ReferenceGraph {
+    /// The graph of every module `build` holds.
+    pub fn of_build(build: &crate::build::Build) -> ReferenceGraph {
+        let mut g = ReferenceGraphBuilder::new();
+        let mut modules: Vec<&crate::build::Module> = build.modules().collect();
+        modules.sort_by(|a, b| a.key.as_str().cmp(b.key.as_str()));
+        for m in modules {
+            let refs = module_references(&mut g, &m.key, &m.checked.index);
+            g.insert(Rc::new(refs));
+        }
+        g.finish()
+    }
+}
+
+fn path_of(key: &ModuleKey) -> ModulePath {
+    key.as_str().split('/').map(str::to_string).collect()
+}
+
+/// One module's definitions and uses, from what its check recorded.
+fn module_references(
+    g: &mut ReferenceGraphBuilder,
+    key: &ModuleKey,
+    index: &scarlet_check::SourceIndex,
+) -> ModuleReferences {
+    use scarlet_check::index::{DefKind, Site, UseKind};
+    let mut defid = |g: &mut ReferenceGraphBuilder, s: &Site| DefId::new(g.intern_module(&path_of(&s.module)), s.span, s.entity);
+    let module = g.intern_module(&path_of(key));
+    let mut refs = ModuleReferences::new(module);
+    refs.set_doc(index.doc.clone());
+    for d in &index.defs {
+        let kind = match &d.kind {
+            DefKind::Value => DefinitionKind::Value,
+            DefKind::Function { params } => DefinitionKind::Function {
+                param_names: params.clone(),
+            },
+            DefKind::Constant => DefinitionKind::Constant,
+            DefKind::Constructor { of, fields } => DefinitionKind::Constructor {
+                ctor_of: Some(defid(g, of)),
+                param_names: fields.clone(),
+            },
+            DefKind::Type => DefinitionKind::Type,
+            DefKind::ModuleAlias { decl, imports } => DefinitionKind::ModuleAlias {
+                decl_span: *decl,
+                imports_module: Some(g.intern_module(&path_of(imports))),
+            },
+            DefKind::Field => DefinitionKind::Field,
+        };
+        refs.add_definition(Definition::new(module, d.site.span, d.name.clone(), d.doc.clone(), d.public, kind));
+    }
+    for u in &index.uses {
+        let kind = match u.kind {
+            UseKind::Qualified => ReferenceKind::Qualified,
+            UseKind::Qualifier => ReferenceKind::Qualifier,
+            UseKind::Unqualified => ReferenceKind::Unqualified,
+            UseKind::Import => ReferenceKind::Import,
+            UseKind::Alias => ReferenceKind::Alias,
+            UseKind::Definition => ReferenceKind::Definition,
+        };
+        let owner = u.owner.as_ref().map(|o| defid(g, o));
+        let target = defid(g, &u.target);
+        refs.add_reference(owner, Reference::new(u.span, kind, target));
+    }
+    refs
 }
