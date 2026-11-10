@@ -18,15 +18,19 @@
 #![forbid(unsafe_code)]
 
 mod annot;
-mod callgraph;
-mod check;
-mod decls;
-mod expr;
+mod declare;
+mod env;
 mod finalise;
 pub mod index;
-mod pattern;
+mod infer;
+mod interface;
+mod report;
+mod resolve;
+mod resolve_pat;
+mod resolved;
 mod scope;
 pub mod typed;
+mod types;
 
 use scarlet_syntax::ast;
 use scarlet_syntax::diagnostic::Diagnostic;
@@ -104,6 +108,99 @@ pub struct CheckedModule {
     pub index: SourceIndex,
 }
 
-pub fn check_module(input: &CheckInput<'_>) -> CheckedModule {
-    check::Checker::new(input).run()
+/// Check one module. Each pass takes what the ones before it made and gives
+/// back what it makes, with what it found to report:
+///
+/// 1. the environment: the imports and the prelude;
+/// 2. the module's declarations, and then its types;
+/// 3. resolution, which settles every name and orders the declarations into
+///    groups that use each other;
+/// 4. inference, a group at a time, after which the types are frozen;
+/// 5. the checks that need final types, and the interface.
+pub fn check_module<'a>(input: &'a CheckInput<'a>) -> CheckedModule {
+    let mut report = report::Report::new(input.source);
+    let env = env::Env::new(input, &mut report);
+    let declared = declare::declare(&env, input.module, &mut report);
+    let defs = types::define_types(&env, &declared, &mut report);
+    let (resolved, found) = resolve::resolve(&env, &declared, &defs);
+    report.absorb(found);
+    let (inferred, found) = infer::infer(&env, &declared, &defs, &resolved);
+    report.absorb(found);
+    let infer::Inferred {
+        engine,
+        functions,
+        consts,
+        statements,
+        binder_types,
+        schemes,
+        hovers,
+        refused,
+    } = inferred;
+    let types = engine.freeze();
+    let finished = finalise::Finished {
+        env: &env,
+        defs: &defs,
+        types: &types,
+        binders: &resolved.binders,
+        binder_types: &binder_types,
+        unused: &resolved.unused,
+        refused: &refused,
+    };
+    report.absorb(finalise::finalise(
+        &finished,
+        &functions,
+        &consts,
+        &statements,
+    ));
+    let (interface, found) = interface::interface(&env, &declared, &defs, &schemes, &types);
+    report.absorb(found);
+
+    let report::Report {
+        diags, defs, uses, ..
+    } = report;
+    let binders: Vec<typed::Binder> = resolved
+        .binders
+        .iter()
+        .zip(&binder_types)
+        .map(|(b, &ty)| typed::Binder {
+            name: b.name.clone(),
+            ty,
+            module_scope: b.module_scope,
+        })
+        .collect();
+    let mut spots: Vec<(scarlet_syntax::span::Span, scarlet_types::engine::Ty)> = binders
+        .iter()
+        .zip(&resolved.binders)
+        .map(|(b, info)| (info.span, b.ty))
+        .collect();
+    spots.extend(hovers);
+    let index = SourceIndex {
+        defs,
+        uses,
+        hovers: spots
+            .into_iter()
+            .map(|(span, ty)| index::Hover {
+                span,
+                ty: types.get(ty),
+            })
+            .collect(),
+        doc: input.doc.clone(),
+    };
+    let clean =
+        (input.parsed_cleanly && !scarlet_syntax::diagnostic::has_errors(&diags)).then(|| {
+            CleanModule(TypedModule {
+                key: interface.key.clone(),
+                types,
+                binders,
+                functions,
+                consts,
+                statements,
+            })
+        });
+    CheckedModule {
+        interface,
+        clean,
+        diagnostics: diags,
+        index,
+    }
 }

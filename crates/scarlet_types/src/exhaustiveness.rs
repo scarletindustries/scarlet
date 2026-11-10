@@ -146,7 +146,7 @@ pub fn unroll_depth<P: PatternShape>(p: &P) -> usize {
 /// are shared behind `Rc`, so cloning a row in `specialize` or
 /// `default_matrix` bumps a reference count instead of copying deeply.
 #[derive(Debug, Clone)]
-pub enum Pat {
+enum Pat {
     Wildcard,
     Ctor { id: u32, args: Rc<[Pat]> },
     Or { patterns: Rc<[Pat]> },
@@ -790,18 +790,64 @@ fn lower_pattern<P: PatternShape>(p: &P, t: &RcType, interner: &mut Interner) ->
     }
 }
 
-/// Checks usefulness for one match expression, one arm at a time. The compiler
-/// pushes each unguarded arm once after checking it, so N arms cost N row
-/// builds instead of a new matrix for every arm.
+/// What a `match` covers, arm by arm.
+#[derive(Debug, Default)]
+pub struct MatchReport {
+    /// A value no unguarded arm matches, shown as a pattern.
+    pub missing: Option<String>,
+    /// Arms an earlier unguarded arm already covers.
+    pub unreachable: Vec<usize>,
+    /// Arms that use a catch-all for variants an earlier arm names others
+    /// of, with those variants shown as patterns.
+    pub catch_alls: Vec<(usize, Vec<String>)>,
+}
+
+/// Check `arms` against `space`. A guarded arm may not match, so it neither
+/// covers anything nor makes a later arm unreachable.
+pub fn analyse<P: PatternShape>(space: &Space, arms: &[(&P, bool)]) -> MatchReport {
+    let mut um = UsefulnessMatrix::new(space);
+    let pats: Vec<Pat> = arms.iter().map(|(p, _)| um.lower(*p)).collect();
+    let mut report = MatchReport {
+        missing: um.find_missing(
+            arms.iter()
+                .zip(&pats)
+                .filter(|((_, guarded), _)| !guarded)
+                .map(|(_, p)| p),
+        ),
+        ..MatchReport::default()
+    };
+    for (i, ((_, guarded), pat)) in arms.iter().zip(&pats).enumerate() {
+        if !um.is_useful(pat) {
+            report.unreachable.push(i);
+        } else if let Some(missing) = um.catch_all(&pats[..i], pat) {
+            report.catch_alls.push((i, missing));
+        }
+        if !guarded {
+            um.push(pat);
+        }
+    }
+    report
+}
+
+/// A value `pattern` doesn't match, shown as a pattern, or `None` when it
+/// matches every value in `space`.
+pub fn missed_by<P: PatternShape>(space: &Space, pattern: &P) -> Option<String> {
+    let mut um = UsefulnessMatrix::new(space);
+    let p = um.lower(pattern);
+    um.find_missing(&[p])
+}
+
+/// Checks usefulness for one match expression, one arm at a time, so N arms
+/// cost N row builds instead of a new matrix for every arm.
 #[derive(Debug)]
-pub struct UsefulnessMatrix {
+struct UsefulnessMatrix {
     matrix: PatternMatrix,
     subject_type: RcType,
     interner: Interner,
 }
 
 impl UsefulnessMatrix {
-    pub fn new(subject: &Space) -> Self {
+    fn new(subject: &Space) -> Self {
         let mut interner = Interner::new();
         let subject_type = rc_type(subject, &mut interner);
         Self {
@@ -813,17 +859,17 @@ impl UsefulnessMatrix {
 
     /// Lower a checked pattern against this checker's subject type.
     /// Constructor names are interned here, once.
-    pub fn lower<P: PatternShape>(&mut self, p: &P) -> Pat {
+    fn lower<P: PatternShape>(&mut self, p: &P) -> Pat {
         lower_pattern(p, &self.subject_type, &mut self.interner)
     }
 
-    pub fn is_useful(&self, pat: &Pat) -> bool {
+    fn is_useful(&self, pat: &Pat) -> bool {
         let pats = PatStack::one(pat.clone());
         let types = TypeStack::one(self.subject_type.clone());
         is_useful(&self.matrix, &pats, &types)
     }
 
-    pub fn push(&mut self, pat: &Pat) {
+    fn push(&mut self, pat: &Pat) {
         self.matrix.rows.push(PatStack::one(pat.clone()));
     }
 
@@ -831,7 +877,7 @@ impl UsefulnessMatrix {
     /// name others of the same value, shown as patterns (`Absent`,
     /// `Present(..)`). `earlier` is every arm before `pat`, guarded or not,
     /// because a guarded arm still names the variant it's about.
-    pub fn catch_all<'a>(
+    fn catch_all<'a>(
         &self,
         earlier: impl IntoIterator<Item = &'a Pat>,
         pat: &Pat,
@@ -860,7 +906,7 @@ impl UsefulnessMatrix {
     /// A pattern the given arms don't cover, shown as text, or `None` if they
     /// cover everything. The arms passed here form their own matrix, and this
     /// checker's own matrix isn't used.
-    pub fn find_missing<'a>(&self, patterns: impl IntoIterator<Item = &'a Pat>) -> Option<String> {
+    fn find_missing<'a>(&self, patterns: impl IntoIterator<Item = &'a Pat>) -> Option<String> {
         let mut matrix = PatternMatrix::default();
         for p in patterns {
             matrix.rows.push(PatStack::one(p.clone()));

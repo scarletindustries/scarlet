@@ -1,67 +1,115 @@
 //! The checks that need the module's types to be final: whether matches and
 //! bindings cover every value, `_` over a `Nil`, an `or` that drops an error,
-//! a statement whose value nothing uses, and bindings nothing reads. Each one
-//! is a walk over the finished tree.
+//! and a statement whose value nothing uses. Each reads the frozen types and
+//! the finished tree, and reports what it finds.
 
+use scarlet_types::def::TypeDef;
+use scarlet_types::engine::Types;
 use scarlet_types::exhaustiveness::{
-    BinPart, BinSegShape, BinUnit, PatShape, PatternShape, Space, UsefulnessMatrix, unroll_depth,
+    BinPart, BinSegShape, BinUnit, PatShape, PatternShape, Space, analyse, missed_by, unroll_depth,
 };
+use scarlet_types::name::TypeName;
 use scarlet_types::ty::Type;
 
-use crate::check::Checker;
+use crate::UnusedBindings;
+use crate::env::Env;
+use crate::report::Report;
+use crate::resolved::BinderInfo;
 use crate::typed::{
-    BinSegPat, Block, Const, Expr, ExprKind, FnBody, Function, OrShape, Pattern, PatternKind, Rest,
-    Stmt,
+    Arm, BinSegPat, BinderId, Block, Expr, ExprKind, FnBody, Function, OrShape, Pattern,
+    PatternKind, Rest, Stmt,
 };
+use crate::types::TypeDefs;
 
-impl Checker<'_> {
-    pub fn finalise(&mut self, functions: &[Function], consts: &[Const], statements: &[Stmt]) {
-        let visit = |c: &mut Self, e: &Expr| c.visit(e);
-        for f in functions {
-            if let FnBody::Expr(body) = &f.body {
-                body.walk(&mut |e| visit(self, e));
-            }
+/// What the checks read.
+pub(crate) struct Finished<'f, 'a> {
+    pub env: &'f Env<'a>,
+    pub defs: &'f TypeDefs,
+    pub types: &'f Types,
+    pub binders: &'f [BinderInfo],
+    pub binder_types: &'f [scarlet_types::engine::Ty],
+    pub unused: &'f [BinderId],
+    pub refused: &'f [BinderId],
+}
+
+pub(crate) fn finalise(
+    f: &Finished<'_, '_>,
+    functions: &[Function],
+    consts: &[crate::typed::Const],
+    statements: &[Stmt],
+) -> Report {
+    let mut report = Report::new(f.env.input.source);
+    let mut visit = |e: &Expr| f.visit(e, &mut report);
+    for func in functions {
+        if let FnBody::Expr(body) = &func.body {
+            body.walk(&mut visit);
         }
-        for c in consts {
-            c.value.walk(&mut |e| visit(self, e));
-        }
-        for s in statements {
-            s.for_each_expr(&mut |e| e.walk(&mut |e| visit(self, e)));
-            if let Stmt::Let { pattern, value } = s {
-                self.check_irrefutable(pattern, value);
-            }
-        }
-        self.check_discards();
-        self.report_unused();
     }
+    for c in consts {
+        c.value.walk(&mut visit);
+    }
+    for s in statements {
+        s.for_each_expr(&mut |e| e.walk(&mut visit));
+    }
+    for s in statements {
+        if let Stmt::Let { pattern, value } = s {
+            f.irrefutable(pattern, value, &mut report);
+        }
+    }
+    f.discards(&mut report);
+    f.unused(&mut report);
+    report
+}
 
-    fn visit(&mut self, e: &Expr) {
+impl Finished<'_, '_> {
+    fn visit(&self, e: &Expr, report: &mut Report) {
         match &e.kind {
-            ExprKind::Match { subject, arms } => self.check_match_arms(subject, arms, e),
-            ExprKind::Block(b) => self.check_block_stmts(b),
+            ExprKind::Match { subject, arms } => self.match_arms(subject, arms, report),
+            ExprKind::Block(b) => self.block(b, report),
             ExprKind::OrElse {
                 shape: OrShape::Result,
                 value,
                 error,
                 ..
-            } => self.check_or_receiver(value, *error),
-            _ => {}
+            } => self.or_receiver(value, *error, report),
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::String(_)
+            | ExprKind::Interp(_)
+            | ExprKind::Binary(_)
+            | ExprKind::Var(_)
+            | ExprKind::Lambda(_)
+            | ExprKind::Call { .. }
+            | ExprKind::Construct { .. }
+            | ExprKind::Tuple(_)
+            | ExprKind::TupleIndex { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Array(_)
+            | ExprKind::Index { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::BinOp { .. }
+            | ExprKind::And(..)
+            | ExprKind::Or(..)
+            | ExprKind::Unary { .. }
+            | ExprKind::If { .. }
+            | ExprKind::OrElse { .. }
+            | ExprKind::Error => {}
         }
     }
 
-    fn check_block_stmts(&mut self, b: &Block) {
+    fn is_nil(&self, t: &Type) -> bool {
+        matches!(t, Type::Named { name, .. } if *name == self.types.known().nil)
+    }
+
+    fn block(&self, b: &Block, report: &mut Report) {
         for s in &b.stmts {
             match s {
-                Stmt::Let { pattern, value } => self.check_irrefutable(pattern, value),
+                Stmt::Let { pattern, value } => self.irrefutable(pattern, value, report),
                 Stmt::Expr(x) => {
-                    let ty = self.e.zonk(x.ty);
-                    let ignorable = match &ty {
-                        Type::Var(_) => true,
-                        Type::Named { name, .. } => *name == self.e.known().nil,
-                        Type::Fn { .. } | Type::Tuple(_) => false,
-                    };
-                    if !ignorable {
-                        self.error(
+                    let ty = self.types.get(x.ty);
+                    if !matches!(ty, Type::Var(_)) && !self.is_nil(&ty) {
+                        report.error(
                             x.span,
                             format!(
                                 "This expression's value of type '{ty}' isn't used. Assign it to a name, or write '_ = ...' to throw it away"
@@ -71,6 +119,13 @@ impl Checker<'_> {
                 }
             }
         }
+    }
+
+    fn type_def(&self, name: &TypeName) -> Option<&TypeDef> {
+        if *name.module() == self.env.key {
+            return self.defs.types.get(name.name());
+        }
+        self.env.interface_of(name.module())?.types.get(name.name())
     }
 
     /// The space of values of `ty`, unrolled `depth` levels deep.
@@ -84,7 +139,7 @@ impl Checker<'_> {
                     .collect(),
             ),
             Type::Named { name, args } => {
-                if *name == self.e.known().array {
+                if *name == self.types.known().array {
                     let elem = args
                         .first()
                         .map_or(Space::Infinite, |a| self.space(a, depth.saturating_sub(1)));
@@ -118,7 +173,7 @@ impl Checker<'_> {
         }
     }
 
-    fn check_match_arms(&mut self, subject: &Expr, arms: &[crate::typed::Arm], m: &Expr) {
+    fn match_arms(&self, subject: &Expr, arms: &[Arm], report: &mut Report) {
         if arms.iter().any(|a| has_error(&a.pattern)) {
             return;
         }
@@ -128,61 +183,48 @@ impl Checker<'_> {
             .max()
             .unwrap_or(0)
             + 1;
-        let ty = self.e.zonk(subject.ty);
-        let space = self.space(&ty, depth);
-        let mut um = UsefulnessMatrix::new(&space);
-        let pats: Vec<_> = arms.iter().map(|a| um.lower(&a.pattern)).collect();
-        // A guarded arm may not match, so it neither covers anything nor makes
-        // a later arm unreachable.
-        let unguarded = arms
+        let space = self.space(&self.types.get(subject.ty), depth);
+        let checked: Vec<(&Pattern, bool)> = arms
             .iter()
-            .zip(&pats)
-            .filter(|(a, _)| a.guard.is_none())
-            .map(|(_, p)| p);
-        if let Some(missing) = um.find_missing(unguarded) {
-            self.error(
+            .map(|a| (&a.pattern, a.guard.is_some()))
+            .collect();
+        let found = analyse(&space, &checked);
+        if let Some(missing) = found.missing {
+            report.error(
                 subject.span,
                 format!("Match is not exhaustive. Add arms for: {missing}"),
             );
         }
-        let _ = m;
-        for (i, arm) in arms.iter().enumerate() {
-            if !um.is_useful(&pats[i]) {
-                self.error(
-                    arm.pattern.span,
-                    "This pattern is unreachable, because an earlier pattern matches the same values",
-                );
-            } else if let Some(missing) = um.catch_all(&pats[..i], &pats[i]) {
-                // A catch-all over named variants would quietly take any
-                // variant added later, so the arms have to name them.
-                self.error(
-                    arm.pattern.span,
-                    format!(
-                        "This pattern stands for {}. Name {} instead, like `{} ->`",
-                        missing.join(", "),
-                        if missing.len() == 1 { "it" } else { "them" },
-                        missing.join(" | ")
-                    ),
-                );
-            }
-            if arm.guard.is_none() {
-                um.push(&pats[i]);
-            }
+        for i in found.unreachable {
+            report.error(
+                arms[i].pattern.span,
+                "This pattern is unreachable, because an earlier pattern matches the same values",
+            );
+        }
+        // A catch-all over named variants would quietly take any variant
+        // added later, so the arms have to name them.
+        for (i, missing) in found.catch_alls {
+            report.error(
+                arms[i].pattern.span,
+                format!(
+                    "This pattern stands for {}. Name {} instead, like `{} ->`",
+                    missing.join(", "),
+                    if missing.len() == 1 { "it" } else { "them" },
+                    missing.join(" | ")
+                ),
+            );
         }
     }
 
     /// A binding's pattern has to match every value.
-    fn check_irrefutable(&mut self, pattern: &Pattern, value: &Expr) {
+    fn irrefutable(&self, pattern: &Pattern, value: &Expr, report: &mut Report) {
         if matches!(pattern.kind, PatternKind::Bind(_) | PatternKind::Wild) || has_error(pattern) {
             return;
         }
         let depth = unroll_depth(pattern) + 1;
-        let ty = self.e.zonk(value.ty);
-        let space = self.space(&ty, depth);
-        let mut um = UsefulnessMatrix::new(&space);
-        let p = um.lower(pattern);
-        if let Some(missing) = um.find_missing(&[p]) {
-            self.error(
+        let space = self.space(&self.types.get(value.ty), depth);
+        if let Some(missing) = missed_by(&space, pattern) {
+            report.error(
                 pattern.span,
                 format!(
                     "A binding's pattern must match every value, and this one misses {missing}. Use `match` to handle it"
@@ -194,30 +236,33 @@ impl Checker<'_> {
     /// An `or` on a `Result` must handle the error. A `Nil` error carries
     /// nothing, so like `Option` it takes no receiver. Any other error must be
     /// bound to a name, and one starting with `_` drops it just as quietly.
-    fn check_or_receiver(&mut self, value: &Expr, error: Option<crate::typed::BinderId>) {
-        let err = match self.e.zonk(value.ty) {
+    fn or_receiver(
+        &self,
+        value: &Expr,
+        error: Option<crate::typed::BinderId>,
+        report: &mut Report,
+    ) {
+        let err = match self.types.get(value.ty) {
             Type::Named { args, .. } => args.get(1).cloned(),
             Type::Var(_) | Type::Fn { .. } | Type::Tuple(_) => None,
         };
         let Some(err) = err else { return };
-        let is_nil = matches!(&err, Type::Named { name, .. } if *name == self.e.known().nil);
+        let is_nil = self.is_nil(&err);
         let receiver = error.map(|b| {
             let s = &self.binders[b.0 as usize];
             (s.name.clone(), s.span)
         });
         match (is_nil, receiver) {
             (true, None) => {}
-            (true, Some((_, sp))) => self.error(
+            (true, Some((_, sp))) => report.error(
                 sp,
                 "'or' on a Result(_, Nil) can't bind a value, because the error carries nothing",
             ),
-            (false, None) => self.error(
+            (false, None) => report.error(
                 value.span,
-                format!(
-                    "This 'or' throws away the Result's error, of type '{err}'. Bind it with 'e -> ...' and handle it"
-                ),
+                format!("This 'or' throws away the Result's error, of type '{err}'. Bind it with 'e -> ...' and handle it"),
             ),
-            (false, Some((name, sp))) if name.starts_with('_') => self.error(
+            (false, Some((name, sp))) if name.starts_with('_') => report.error(
                 sp,
                 format!("'{name}' throws away the error. Give the 'or' receiver a name and use it"),
             ),
@@ -226,36 +271,31 @@ impl Checker<'_> {
     }
 
     /// A `_` that throws away a value the types know is `Nil`. There is
-    /// nothing to throw away, and the explicit `Nil` pattern stops compiling
-    /// the day the type gains data.
-    fn check_discards(&mut self) {
-        let nil = self.e.known().nil.clone();
-        let mut found = Vec::new();
-        for b in &self.binders {
-            if b.discards {
-                found.push((b.name.clone(), b.scheme.ty, b.span));
-            }
-        }
-        for (name, ty, span) in found {
-            if matches!(self.e.zonk(ty), Type::Named { name: n, .. } if n == nil) {
-                self.error(
-                    span,
-                    format!("'{name}' always matches Nil here, so write the explicit 'Nil' pattern instead"),
+    /// nothing to throw away, and the `Nil` pattern stops compiling the day
+    /// the type gains data.
+    fn discards(&self, report: &mut Report) {
+        for (b, &ty) in self.binders.iter().zip(self.binder_types) {
+            if b.discards && self.is_nil(&self.types.get(ty)) {
+                report.error(
+                    b.span,
+                    format!(
+                        "'{}' always matches Nil here, so write the explicit 'Nil' pattern instead",
+                        b.name
+                    ),
                 );
             }
         }
     }
+}
 
-    fn report_unused(&mut self) {
-        let mut unused: Vec<(String, scarlet_syntax::span::Span)> = self
-            .binders
-            .iter()
-            .filter(|b| !b.used && !b.name.starts_with('_'))
-            .map(|b| (b.name.to_string(), b.span))
-            .collect();
-        unused.sort_by_key(|(_, sp)| (sp.start_line, sp.start_column));
-        for (name, span) in unused {
-            self.unused_binding(&name, span);
+impl Finished<'_, '_> {
+    fn unused(&self, report: &mut Report) {
+        if self.env.input.unused == UnusedBindings::Ignore {
+            return;
+        }
+        for b in self.unused.iter().filter(|b| !self.refused.contains(b)) {
+            let info = &self.binders[b.0 as usize];
+            report.unused(info.span, &info.name);
         }
     }
 }
@@ -349,7 +389,6 @@ fn size_part(e: &Option<Expr>) -> Option<BinPart<'_>> {
 }
 
 fn bin_seg_shape(seg: &BinSegPat) -> BinSegShape<'_> {
-    let (part, size) = (bin_part, size_part);
     match seg {
         BinSegPat::Text(s) => BinSegShape {
             value: BinPart::Str(s),
@@ -357,19 +396,19 @@ fn bin_seg_shape(seg: &BinSegPat) -> BinSegShape<'_> {
             size: None,
         },
         BinSegPat::Utf8(p) => BinSegShape {
-            value: part(p),
+            value: bin_part(p),
             unit: BinUnit::Utf8,
             size: None,
         },
         BinSegPat::Bits { bits, value } => BinSegShape {
-            value: part(value),
+            value: bin_part(value),
             unit: BinUnit::Bits,
-            size: size(bits),
+            size: size_part(bits),
         },
         BinSegPat::Bytes { bytes, value } => BinSegShape {
-            value: part(value),
+            value: bin_part(value),
             unit: BinUnit::Bytes,
-            size: size(bytes),
+            size: size_part(bytes),
         },
     }
 }

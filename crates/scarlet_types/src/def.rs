@@ -70,7 +70,7 @@ impl TypeDef {
 
     /// `ty`, written in terms of this type's parameters, with `args` put in
     /// for them.
-    fn instantiate(&self, ty: &Type, args: &[Type]) -> Type {
+    pub fn instantiate(&self, ty: &Type, args: &[Type]) -> Type {
         ty.substitute(&|v| {
             self.params
                 .iter()

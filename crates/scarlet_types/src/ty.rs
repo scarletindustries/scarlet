@@ -58,11 +58,13 @@ pub use scarlet_ir::rty::Prim;
 /// is unique. In an interface, a scheme's variables are numbered from 0.
 ///
 /// Two variables are the same variable when their ids are equal. The name and
-/// constraint go along for display and instantiation.
+/// constraint go along for display and instantiation. A variable has a name
+/// only when the source gave it one, like `a` in `fn id(x a) a`; any other
+/// is lettered when a type holding it is shown.
 #[derive(Debug, Clone)]
 pub struct TypeVar {
     pub id: u32,
-    pub name: Name,
+    pub name: Option<Name>,
     pub constraint: Option<Constraint>,
 }
 
@@ -114,7 +116,7 @@ impl Type {
         }
     }
 
-    pub(crate) fn tuple(elems: Vec<Type>) -> Type {
+    pub fn tuple(elems: Vec<Type>) -> Type {
         Type::Tuple(elems.into())
     }
 
@@ -128,7 +130,7 @@ impl Type {
 
     /// Replace each variable `f` gives a type for. Shared subtrees that hold
     /// no such variable are kept as they are.
-    pub fn substitute(&self, f: &impl Fn(&TypeVar) -> Option<Type>) -> Type {
+    pub(crate) fn substitute(&self, f: &impl Fn(&TypeVar) -> Option<Type>) -> Type {
         match self {
             Type::Var(v) => f(v).unwrap_or_else(|| self.clone()),
             Type::Named { name, args } => Type::Named {
@@ -169,42 +171,125 @@ impl Type {
 
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
+        let names = VarNames::of(&[self]);
+        names.write(self, f)
+    }
+}
+
+/// Show `types` side by side, as in "expected 'a', got 'fn(a) b'": a variable
+/// that appears in more than one of them gets the same letter in each.
+pub(crate) fn show_together(types: &[&Type]) -> Vec<String> {
+    let names = VarNames::of(types);
+    types
+        .iter()
+        .map(|t| {
+            let mut out = String::new();
+            let _ = fmt::write(&mut out, format_args!("{}", Shown(t, &names)));
+            out
+        })
+        .collect()
+}
+
+/// What each variable in some types is called when they are shown: its own
+/// name when it has one, otherwise the next letter no named variable uses,
+/// in the order the variables first appear.
+struct VarNames(Vec<(u32, Name)>);
+
+impl VarNames {
+    fn of(types: &[&Type]) -> Self {
+        let mut vars: Vec<TypeVar> = Vec::new();
+        for t in types {
+            for v in t.vars() {
+                if !vars.contains(&v) {
+                    vars.push(v);
+                }
+            }
+        }
+        let taken: Vec<&Name> = vars.iter().filter_map(|v| v.name.as_ref()).collect();
+        let mut next = 0u32;
+        let mut out = Vec::with_capacity(vars.len());
+        for v in &vars {
+            let name = match &v.name {
+                Some(n) => n.clone(),
+                None => loop {
+                    let candidate: Name = letters(next).into();
+                    next += 1;
+                    if !taken.contains(&&candidate) {
+                        break candidate;
+                    }
+                },
+            };
+            out.push((v.id, name));
+        }
+        VarNames(out)
+    }
+
+    fn get(&self, v: &TypeVar) -> &str {
+        self.0
+            .iter()
+            .find(|(id, _)| *id == v.id)
+            .map_or("_", |(_, n)| n)
+    }
+
+    fn write(&self, t: &Type, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let list = |f: &mut fmt::Formatter<'_>, items: &[Type]| -> fmt::Result {
+            for (i, x) in items.iter().enumerate() {
+                if i > 0 {
+                    f.write_str(", ")?;
+                }
+                self.write(x, f)?;
+            }
+            Ok(())
+        };
+        match t {
             Type::Named { name, args } => {
                 f.write_str(name.name())?;
                 if !args.is_empty() {
                     f.write_str("(")?;
-                    write_list(f, args)?;
+                    list(f, args)?;
                     f.write_str(")")?;
                 }
                 Ok(())
             }
             Type::Fn { params, ret } => {
                 f.write_str("fn(")?;
-                write_list(f, params)?;
-                write!(f, ") {ret}")
+                list(f, params)?;
+                f.write_str(") ")?;
+                self.write(ret, f)
             }
             Type::Tuple(elems) => {
                 f.write_str("(")?;
-                write_list(f, elems)?;
+                list(f, elems)?;
                 f.write_str(")")
             }
             Type::Var(v) => match v.constraint {
                 Some(c) => f.write_str(c.name()),
-                None => f.write_str(&v.name),
+                None => f.write_str(self.get(v)),
             },
         }
     }
 }
 
-fn write_list(f: &mut fmt::Formatter<'_>, items: &[Type]) -> fmt::Result {
-    for (i, t) in items.iter().enumerate() {
-        if i > 0 {
-            f.write_str(", ")?;
-        }
-        write!(f, "{t}")?;
+struct Shown<'a>(&'a Type, &'a VarNames);
+
+impl fmt::Display for Shown<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.1.write(self.0, f)
     }
-    Ok(())
+}
+
+/// The base-26 letters for the `n`th variable: `a` to `z`, then `aa`.
+fn letters(mut n: u32) -> String {
+    let mut out = Vec::new();
+    loop {
+        out.push(b'a' + (n % 26) as u8);
+        if n < 26 {
+            break;
+        }
+        n = n / 26 - 1;
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap_or_default()
 }
 
 /// A possibly generic type: each use of a value with this scheme may pick
@@ -216,14 +301,6 @@ pub struct Scheme {
 }
 
 impl Scheme {
-    /// A scheme with no generic variables.
-    pub fn mono(ty: Type) -> Scheme {
-        Scheme {
-            vars: Vec::new(),
-            ty,
-        }
-    }
-
     /// The same scheme with its variables numbered from 0 in the order they
     /// are listed, so two equal schemes from different checks compare equal.
     pub fn canonical(&self) -> Scheme {

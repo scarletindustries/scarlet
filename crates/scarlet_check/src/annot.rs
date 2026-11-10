@@ -1,119 +1,191 @@
-//! Type annotations, turned into inference types.
-
-use std::collections::HashMap;
+//! Type annotations, read into finished types. Nothing here needs inference:
+//! an annotation names types, and a lowercase name in it is a variable.
 
 use scarlet_syntax::ast;
 use scarlet_syntax::span::Span;
 use scarlet_syntax::token::is_type_name;
 use scarlet_types::def::{TypeBody, TypeDef};
-use scarlet_types::engine::Ty;
 use scarlet_types::name::{Name, TypeName};
+use scarlet_types::ty::{Type, TypeVar};
 
-use crate::check::Checker;
-use crate::index::{EntityKind, Site, UseKind};
+use crate::env::Env;
+use crate::index::{EntityKind, Site, Use, UseKind};
+use crate::report::Report;
 
-/// Where an annotation is written, which decides what a new lowercase name
-/// in it means.
+/// Where an annotation is written, which decides what a new lowercase name in
+/// it means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AnnotContext {
     /// A function's signature: a new lowercase name is a generic the caller
     /// picks.
     Signature,
-    /// A binding's type: every type variable must already be in scope.
+    /// A binding's type: no type variable is in scope.
     Binding,
-    /// A type's body: the parameters are in scope, nothing else is, and every
+    /// A type's body: its parameters are in scope, nothing else is, and every
     /// function type states its return type.
     TypeDefinition,
 }
 
-/// The type variables one annotation, or one signature, has named so far.
-pub(crate) struct Annot {
-    pub ctx: AnnotContext,
-    pub vars: HashMap<Name, Ty>,
+/// The variables one signature or one type's body names, in the order it
+/// names them, numbered from 0.
+pub(crate) struct AnnotVars {
+    ctx: AnnotContext,
+    named: Vec<TypeVar>,
+    next: u32,
 }
 
-impl Annot {
+impl AnnotVars {
     pub fn new(ctx: AnnotContext) -> Self {
-        Annot {
+        AnnotVars {
             ctx,
-            vars: HashMap::new(),
+            named: Vec::new(),
+            next: 0,
         }
+    }
+
+    /// A type's parameters, in scope for its body.
+    pub fn params(params: &[ast::Identifier], report: &mut Report) -> Self {
+        let mut vars = AnnotVars::new(AnnotContext::TypeDefinition);
+        for p in params {
+            if vars
+                .named
+                .iter()
+                .any(|v| v.name.as_deref() == Some(p.name.as_str()))
+            {
+                report.error(p.span, format!("Duplicate type parameter '{}'", p.name));
+                continue;
+            }
+            vars.add(p.name.as_str().into());
+        }
+        vars
+    }
+
+    /// An annotation scope with `params` already in it.
+    pub fn with_params(ctx: AnnotContext, params: &[TypeVar]) -> Self {
+        AnnotVars {
+            ctx,
+            named: params.to_vec(),
+            next: params.iter().map(|p| p.id + 1).max().unwrap_or(0),
+        }
+    }
+
+    fn add(&mut self, name: Name) -> Type {
+        let v = TypeVar {
+            id: self.next,
+            name: Some(name),
+            constraint: None,
+        };
+        self.next += 1;
+        self.named.push(v.clone());
+        Type::Var(v)
+    }
+
+    /// A stand-in for an annotation that names nothing. Inference gives it a
+    /// fresh variable, so checking carries on.
+    fn placeholder(&mut self) -> Type {
+        let v = TypeVar {
+            id: self.next,
+            name: None,
+            constraint: None,
+        };
+        self.next += 1;
+        Type::Var(v)
+    }
+
+    /// The variables the annotations named, which stand for whatever the
+    /// caller picks.
+    pub fn named(&self) -> &[TypeVar] {
+        &self.named
     }
 }
 
-/// A named type as an annotation sees it.
-struct NamedRef {
-    name: TypeName,
-    arity: usize,
-    /// The alias's definition, when it is one.
-    alias: Option<TypeDef>,
-    span: Span,
+/// A type name an annotation can mean.
+pub(crate) struct NamedType<'d> {
+    pub name: TypeName,
+    pub arity: usize,
+    pub span: Span,
+    /// Its definition, when it is an alias.
+    pub alias: Option<&'d TypeDef>,
 }
 
-impl Checker<'_> {
-    /// The type `t` names, or a fresh variable after reporting why it names
-    /// none, so checking carries on.
-    pub fn hydrate(&mut self, a: &mut Annot, t: &ast::TypeIdentifier) -> Ty {
-        match self.type_from_ast(a, t) {
+/// What the module's own type names mean, as far as they are known.
+pub(crate) trait OwnTypes {
+    fn own_type(&self, name: &str) -> Option<NamedType<'_>>;
+}
+
+/// What a written type means.
+pub(crate) struct Annotations<'e, 'a, O: OwnTypes> {
+    pub env: &'e Env<'a>,
+    pub own: &'e O,
+    /// The module-level definition the annotation is part of.
+    pub owner: Option<Site>,
+}
+
+impl<O: OwnTypes> Annotations<'_, '_, O> {
+    pub fn read(&self, vars: &mut AnnotVars, t: &ast::TypeIdentifier, report: &mut Report) -> Type {
+        match self.type_of(vars, t, report) {
             Ok(ty) => ty,
             Err((span, msg)) => {
-                self.error(span, msg);
-                self.e.fresh()
+                report.error(span, msg);
+                vars.placeholder()
             }
         }
     }
 
-    pub fn hydrate_opt(&mut self, a: &mut Annot, t: Option<&ast::TypeIdentifier>) -> Ty {
-        match t {
-            Some(t) => self.hydrate(a, t),
-            None => self.e.fresh(),
-        }
+    pub fn read_opt(
+        &self,
+        vars: &mut AnnotVars,
+        t: Option<&ast::TypeIdentifier>,
+        report: &mut Report,
+    ) -> Option<Type> {
+        t.map(|t| self.read(vars, t, report))
     }
 
-    fn type_from_ast(
-        &mut self,
-        a: &mut Annot,
+    fn type_of(
+        &self,
+        vars: &mut AnnotVars,
         t: &ast::TypeIdentifier,
-    ) -> Result<Ty, (Span, String)> {
+        report: &mut Report,
+    ) -> Result<Type, (Span, String)> {
         match &t.kind {
-            ast::TypeKind::NamedType(nt) => self.named_type(a, nt, t.span),
+            ast::TypeKind::NamedType(nt) => self.named(vars, nt, t.span, report),
             ast::TypeKind::TupleType(tt) => {
                 let mut elems = Vec::with_capacity(tt.elements.len());
                 for el in &tt.elements {
-                    elems.push(self.type_from_ast(a, el)?);
+                    elems.push(self.type_of(vars, el, report)?);
                 }
-                Ok(self.e.tuple(elems))
+                Ok(Type::tuple(elems))
             }
             ast::TypeKind::FunctionType(ft) => {
                 let mut params = Vec::with_capacity(ft.params.len());
                 for p in &ft.params {
-                    params.push(self.type_from_ast(a, p)?);
+                    params.push(self.type_of(vars, p, report)?);
                 }
                 let ret = match &ft.return_type {
-                    Some(r) => self.type_from_ast(a, r)?,
-                    // A missing return type means "infer it", but nothing in a
-                    // type's body is inferred, so a fresh variable there would
-                    // escape with nothing to solve it.
-                    None if a.ctx == AnnotContext::TypeDefinition => {
+                    Some(r) => self.type_of(vars, r, report)?,
+                    // A missing return type means "infer it", but nothing in
+                    // a type's body is inferred.
+                    None if vars.ctx == AnnotContext::TypeDefinition => {
                         return Err((
                             t.span,
                             "A function type in a type definition must declare its return type, like `fn(Int) Int`"
                                 .to_string(),
                         ));
                     }
-                    None => self.e.fresh(),
+                    None => vars.placeholder(),
                 };
-                Ok(self.e.fun(params, ret))
+                Ok(Type::function(params, ret))
             }
         }
     }
 
-    fn named_type(
-        &mut self,
-        a: &mut Annot,
+    fn named(
+        &self,
+        vars: &mut AnnotVars,
         nt: &ast::NamedType,
         span: Span,
-    ) -> Result<Ty, (Span, String)> {
+        report: &mut Report,
+    ) -> Result<Type, (Span, String)> {
         let name = nt.identifier.name.as_str();
         let name_span = nt.identifier.span;
 
@@ -124,34 +196,34 @@ impl Checker<'_> {
                     format!("Type variable '{name}' cannot take arguments"),
                 ));
             }
-            if let Some(&v) = a.vars.get(name) {
-                return Ok(v);
+            if let Some(v) = vars.named.iter().find(|v| v.name.as_deref() == Some(name)) {
+                return Ok(Type::Var(v.clone()));
             }
-            if a.ctx != AnnotContext::Signature {
+            if vars.ctx != AnnotContext::Signature {
                 return Err((name_span, format!("Unknown type variable '{name}'")));
             }
-            let v = self.e.rigid(name.into());
-            a.vars.insert(name.into(), v);
-            return Ok(v);
+            return Ok(vars.add(name.into()));
         }
 
         let mut args = Vec::with_capacity(nt.type_args.len());
         for ta in &nt.type_args {
-            args.push(self.type_from_ast(a, ta)?);
+            args.push(self.type_of(vars, ta, report)?);
         }
-
         let display = match &nt.qualifier {
             Some(q) => format!("{}::{name}", q.name),
             None => name.to_string(),
         };
-        let Some(found) = self.lookup_type(nt.qualifier.as_ref().map(|q| q.name.as_str()), name)
-        else {
+        let found = match &nt.qualifier {
+            Some(q) => self.qualified(q, name),
+            None => self.bare(name),
+        };
+        let Some(found) = found else {
             let msg = match &nt.qualifier {
                 Some(q) => format!(
                     "Unknown type '{display}'. Check that '{}' is imported and exports a type called '{name}'.",
                     q.name
                 ),
-                None => self.unknown_bare_type(name),
+                None => self.unknown_bare(name),
             };
             return Err((name_span, msg));
         };
@@ -166,66 +238,57 @@ impl Checker<'_> {
                 ),
             ));
         }
-        let kind = if nt.qualifier.is_some() {
-            UseKind::Qualified
-        } else {
-            UseKind::Unqualified
-        };
-        let target = Site {
-            module: found.name.module().clone(),
-            span: found.span,
-            entity: EntityKind::Type,
-        };
-        self.use_site(name_span, kind, target);
-        if let Some(q) = &nt.qualifier {
-            self.qualifier_use(q);
+        report.uses.push(Use {
+            span: name_span,
+            kind: if nt.qualifier.is_some() {
+                UseKind::Qualified
+            } else {
+                UseKind::Unqualified
+            },
+            target: Site {
+                module: found.name.module().clone(),
+                span: found.span,
+                entity: EntityKind::Type,
+            },
+            owner: self.owner.clone(),
+        });
+        if let Some(q) = &nt.qualifier
+            && let Some(imp) = self.env.imports.get(&q.name)
+        {
+            report.uses.push(Use {
+                span: q.span,
+                kind: UseKind::Qualifier,
+                target: imp.alias.clone(),
+                owner: self.owner.clone(),
+            });
         }
-        match found.alias {
-            Some(def) => {
-                let TypeBody::Alias(target) = &def.body else {
-                    return Ok(self.e.con(found.name, args));
-                };
-                let mut subst: Vec<_> = def.params.iter().cloned().zip(args).collect();
-                Ok(self.e.import(target, &mut subst))
-            }
-            None => Ok(self.e.con(found.name, args)),
-        }
+        Ok(match found.alias.map(|d| (d, &d.body)) {
+            Some((def, TypeBody::Alias(target))) => def.instantiate(target, &args),
+            Some(_) | None => Type::named(found.name, args),
+        })
     }
 
-    /// The type `name` means here: one of the module's own, then the
-    /// prelude's. With a qualifier, the imported module's public one.
-    fn lookup_type(&self, qualifier: Option<&str>, name: &str) -> Option<NamedRef> {
-        match qualifier {
-            Some(q) => {
-                let key = self.qualifiers.get(q)?;
-                let def = self.interface_of(key)?.public_type(name)?;
-                Some(named_ref(def))
-            }
-            None => {
-                if let Some(own) = self.types.get(name) {
-                    return Some(NamedRef {
-                        name: own.name.clone(),
-                        arity: own.arity,
-                        alias: own
-                            .def
-                            .as_ref()
-                            .filter(|d| matches!(d.body, TypeBody::Alias(_)))
-                            .cloned(),
-                        span: own.span,
-                    });
-                }
-                let def = self.prelude?.public_type(name)?;
-                Some(named_ref(def))
-            }
+    /// A bare type name: one of the module's own, then the prelude's.
+    fn bare(&self, name: &str) -> Option<NamedType<'_>> {
+        if let Some(t) = self.own.own_type(name) {
+            return Some(t);
         }
+        Some(foreign(self.env.prelude?.public_type(name)?))
     }
 
-    fn unknown_bare_type(&self, name: &str) -> String {
+    fn qualified(&self, q: &ast::Identifier, name: &str) -> Option<NamedType<'_>> {
+        let imp = self.env.imports.get(&q.name)?;
+        Some(foreign(self.env.interface_of(&imp.key)?.public_type(name)?))
+    }
+
+    fn unknown_bare(&self, name: &str) -> String {
         let mut quoted: Vec<String> = self
-            .qualifiers
+            .env
+            .imports
             .iter()
-            .filter(|(_, key)| {
-                self.interface_of(key)
+            .filter(|(_, imp)| {
+                self.env
+                    .interface_of(&imp.key)
                     .is_some_and(|i| i.public_type(name).is_some())
             })
             .map(|(q, _)| format!("'{q}::{name}'"))
@@ -240,26 +303,13 @@ impl Checker<'_> {
             ),
         }
     }
-
-    /// The `module` in `module::member`: a use of the import.
-    pub fn qualifier_use(&mut self, q: &ast::Identifier) {
-        let Some(alias) = self
-            .defs
-            .iter()
-            .find(|d| d.site.entity == EntityKind::ModuleAlias && d.name == q.name)
-            .map(|d| d.site.clone())
-        else {
-            return;
-        };
-        self.use_site(q.span, UseKind::Qualifier, alias);
-    }
 }
 
-fn named_ref(def: &TypeDef) -> NamedRef {
-    NamedRef {
+fn foreign(def: &TypeDef) -> NamedType<'_> {
+    NamedType {
         name: def.name.clone(),
         arity: def.params.len(),
-        alias: matches!(def.body, TypeBody::Alias(_)).then(|| def.clone()),
         span: def.span,
+        alias: matches!(def.body, TypeBody::Alias(_)).then_some(def),
     }
 }
