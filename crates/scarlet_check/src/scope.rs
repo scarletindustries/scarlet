@@ -18,10 +18,12 @@ struct Frame {
 
 impl Frame {
     fn lookup(&self, name: &str) -> Option<BinderId> {
-        self.blocks
-            .iter()
-            .rev()
-            .find_map(|b| b.iter().rev().find(|(n, _)| &**n == name).map(|&(_, id)| id))
+        self.blocks.iter().rev().find_map(|b| {
+            b.iter()
+                .rev()
+                .find(|(n, _)| &**n == name)
+                .map(|&(_, id)| id)
+        })
     }
 }
 

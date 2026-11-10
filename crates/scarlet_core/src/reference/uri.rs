@@ -51,7 +51,10 @@ impl fmt::Display for ModuleUriError {
 
 /// Map a [`ModuleId`] to a file URI. Module paths in the graph are always
 /// canonical, so this needs no base directory.
-pub fn module_uri(graph: &ReferenceGraph, module: ModuleId) -> Result<String, ModuleUriError> {
+pub(crate) fn module_uri(
+    graph: &ReferenceGraph,
+    module: ModuleId,
+) -> Result<String, ModuleUriError> {
     let path = graph.module_path(module).ok_or(ModuleUriError::NoPath)?;
     match resolve_canonical(path) {
         Ok(r) => match r.source {

@@ -25,7 +25,7 @@ use scarlet_ir::intrinsic::Intrinsic;
 /// `i < TypedFn::binds`. It is not a `core_ir::LocalId`: `lower` mints those in
 /// ANF evaluation order and maps each `BindingId` onto one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct BindingId(pub u32);
+pub struct BindingId(pub(crate) u32);
 
 impl std::fmt::Display for BindingId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -38,14 +38,14 @@ pub use scarlet_ir::core_ir::{CaptureIdx, GlobalSlot};
 /// A name bound to a value, with the type the checker gave it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypedBind {
-    pub id: BindingId,
+    pub(crate) id: BindingId,
     /// Whether the source names it, as opposed to a temporary lowering made.
     /// A named `let` on a function's outermost spine keeps a local of its own.
-    pub named: bool,
-    pub ty: RTy,
+    pub(crate) named: bool,
+    pub(crate) ty: RTy,
     /// `Some(slot)` when this binding is module-level and must land in that
     /// entry-frame slot, because fn bodies read it from there.
-    pub global: Option<GlobalSlot>,
+    pub(crate) global: Option<GlobalSlot>,
 }
 
 /// Where a value reference reads from at runtime. Names are already resolved,
@@ -189,7 +189,7 @@ pub enum TypedPat {
 }
 
 impl TypedPat {
-    pub fn ty(&self) -> RTy {
+    pub(crate) fn ty(&self) -> RTy {
         match self {
             TypedPat::Wild { ty }
             | TypedPat::Lit { ty, .. }
@@ -207,9 +207,9 @@ impl TypedPat {
 /// One arm of a `match`. The checker has already proven the match exhaustive.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedArm {
-    pub pat: TypedPat,
-    pub guard: Option<TypedExpr>,
-    pub body: TypedExpr,
+    pub(crate) pat: TypedPat,
+    pub(crate) guard: Option<TypedExpr>,
+    pub(crate) body: TypedExpr,
 }
 
 /// A typechecked expression. Every node carries its resolved type.
@@ -363,7 +363,7 @@ pub enum TypedExpr {
 impl TypedExpr {
     /// The resolved type of this expression. Every arm is a field read, so this
     /// never recurses and never walks a `Let` spine.
-    pub fn ty(&self) -> RTy {
+    pub(crate) fn ty(&self) -> RTy {
         match self {
             TypedExpr::Const { ty, .. }
             | TypedExpr::Nil { ty }
@@ -398,16 +398,16 @@ impl TypedExpr {
 /// [`TypedProgram::fns`], so a `TypedFn` never contains another.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedFn {
-    pub params: Vec<TypedBind>,
-    pub ret: RTy,
-    pub body: TypedExpr,
+    pub(crate) params: Vec<TypedBind>,
+    pub(crate) ret: RTy,
+    pub(crate) body: TypedExpr,
     /// How many [`BindingId`]s this function minted, params included, so a
     /// consumer can hold a dense `BindingId → LocalId` map in a `Vec`.
     ///
     /// Each function has its own counter. A nested closure is a separate
     /// [`TypedFn`] whose ids start again at zero, and it reaches an enclosing
     /// binding through [`ValueRef::Capture`].
-    pub binds: u32,
+    pub(crate) binds: u32,
 }
 
 /// The few [`RTy`]s `lower` needs for the temporaries it introduces, such as an
@@ -421,17 +421,17 @@ pub struct TypedFn {
 /// counts as a heap type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TempTys {
-    pub int: RTy,
-    pub bool: RTy,
-    pub string: RTy,
-    pub binary: RTy,
+    pub(crate) int: RTy,
+    pub(crate) bool: RTy,
+    pub(crate) string: RTy,
+    pub(crate) binary: RTy,
     /// `(Int, Int)`, the `(codepoint, bits)` result of `PrimOp::BinaryReadUtf8`.
-    pub int_pair: RTy,
+    pub(crate) int_pair: RTy,
 }
 
 /// Every [`TypedBind`] `p` introduces, in left-to-right order, each listed
 /// once however many or-alternatives mention it.
-pub fn pat_binds(p: &TypedPat) -> Vec<TypedBind> {
+pub(crate) fn pat_binds(p: &TypedPat) -> Vec<TypedBind> {
     let mut out = Vec::new();
     collect_binds(p, &mut out);
     out

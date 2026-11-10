@@ -64,7 +64,10 @@ fn only_what_changed_is_checked_again() {
     assert_eq!(check(&mut b, &p, A_SRC), (1, true), "b's body changed");
 
     // A type error in c is reported, though nothing else needs checking.
-    p.write("c.sca", "pub fn val() Int { 'nope' }\npub fn more() Int { 3 }\n");
+    p.write(
+        "c.sca",
+        "pub fn val() Int { 'nope' }\npub fn more() Int { 3 }\n",
+    );
     assert_eq!(check(&mut b, &p, A_SRC), (1, false), "c broke");
 
     p.write("c.sca", "pub fn val() Int { 3 }\npub fn more() Int { 3 }\n");
@@ -113,5 +116,8 @@ fn the_graph_follows_the_chain_across_an_edit() {
     p.write("a.sca", entry);
     check(&mut b, &p, entry);
     let g = ReferenceGraph::of_build(&b);
-    assert!(g.references_to(def).is_empty(), "the old b has no uses left");
+    assert!(
+        g.references_to(def).is_empty(),
+        "the old b has no uses left"
+    );
 }

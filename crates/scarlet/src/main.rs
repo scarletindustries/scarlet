@@ -258,7 +258,12 @@ fn parse_source(file: &str, entrypoint: &str) -> build::Parsed {
 /// Check the program at `entrypoint`, and lower it when it checks. A file in
 /// the Scarlet repo's own stdlib is checked as that module, so `@vm` is
 /// allowed and the prelude isn't reported for redefining itself.
-fn compile_source(parsed: build::Parsed, file: &str, entrypoint: &str, run: bool) -> compile::Compiled {
+fn compile_source(
+    parsed: build::Parsed,
+    file: &str,
+    entrypoint: &str,
+    run: bool,
+) -> compile::Compiled {
     let path = Path::new(entrypoint);
     let mut opts = compile::Options::program(path.parent());
     opts.run = run;

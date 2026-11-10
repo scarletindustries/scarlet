@@ -70,7 +70,11 @@ impl Checker<'_> {
         }
     }
 
-    fn type_from_ast(&mut self, a: &mut Annot, t: &ast::TypeIdentifier) -> Result<Ty, (Span, String)> {
+    fn type_from_ast(
+        &mut self,
+        a: &mut Annot,
+        t: &ast::TypeIdentifier,
+    ) -> Result<Ty, (Span, String)> {
         match &t.kind {
             ast::TypeKind::NamedType(nt) => self.named_type(a, nt, t.span),
             ast::TypeKind::TupleType(tt) => {
@@ -104,13 +108,21 @@ impl Checker<'_> {
         }
     }
 
-    fn named_type(&mut self, a: &mut Annot, nt: &ast::NamedType, span: Span) -> Result<Ty, (Span, String)> {
+    fn named_type(
+        &mut self,
+        a: &mut Annot,
+        nt: &ast::NamedType,
+        span: Span,
+    ) -> Result<Ty, (Span, String)> {
         let name = nt.identifier.name.as_str();
         let name_span = nt.identifier.span;
 
         if nt.qualifier.is_none() && !is_type_name(name) {
             if !nt.type_args.is_empty() {
-                return Err((span, format!("Type variable '{name}' cannot take arguments")));
+                return Err((
+                    span,
+                    format!("Type variable '{name}' cannot take arguments"),
+                ));
             }
             if let Some(&v) = a.vars.get(name) {
                 return Ok(v);
@@ -132,7 +144,8 @@ impl Checker<'_> {
             Some(q) => format!("{}::{name}", q.name),
             None => name.to_string(),
         };
-        let Some(found) = self.lookup_type(nt.qualifier.as_ref().map(|q| q.name.as_str()), name) else {
+        let Some(found) = self.lookup_type(nt.qualifier.as_ref().map(|q| q.name.as_str()), name)
+        else {
             let msg = match &nt.qualifier {
                 Some(q) => format!(
                     "Unknown type '{display}'. Check that '{}' is imported and exports a type called '{name}'.",
@@ -221,7 +234,10 @@ impl Checker<'_> {
         match quoted.as_slice() {
             [] => format!("Unknown type '{name}'"),
             [one] => format!("Unknown type '{name}'. Did you mean {one}?"),
-            many => format!("Unknown type '{name}'. Did you mean one of {}?", many.join(", ")),
+            many => format!(
+                "Unknown type '{name}'. Did you mean one of {}?",
+                many.join(", ")
+            ),
         }
     }
 

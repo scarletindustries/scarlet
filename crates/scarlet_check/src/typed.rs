@@ -26,8 +26,6 @@ pub struct BinderId(pub u32);
 pub struct Binder {
     pub name: Name,
     pub ty: Ty,
-    /// The binding name's span.
-    pub span: Span,
     /// Whether the binder lives at module scope, where functions read it as a
     /// global. Everything else lives in the frame of the function that binds it.
     pub module_scope: bool,
@@ -37,7 +35,6 @@ pub struct Binder {
 #[derive(Debug, Clone)]
 pub struct Function {
     pub name: Name,
-    pub span: Span,
     pub params: Vec<BinderId>,
     /// The function's own type, generic variables and all.
     pub ty: Ty,
@@ -55,7 +52,6 @@ pub enum FnBody {
 #[derive(Debug, Clone)]
 pub struct Const {
     pub name: Name,
-    pub span: Span,
     pub value: Expr,
 }
 
@@ -81,7 +77,7 @@ impl TypedModule {
 #[derive(Debug, Clone)]
 pub struct Expr {
     pub ty: Ty,
-    pub span: Span,
+    pub(crate) span: Span,
     pub kind: ExprKind,
 }
 
@@ -298,7 +294,7 @@ pub struct Arm {
 #[derive(Debug, Clone)]
 pub struct Pattern {
     pub ty: Ty,
-    pub span: Span,
+    pub(crate) span: Span,
     pub kind: PatternKind,
 }
 
@@ -347,21 +343,27 @@ pub enum BinSegPat {
     Text(String),
     Utf8(Pattern),
     /// An integer in `bits` bits (8 when unwritten).
-    Bits { bits: Option<Expr>, value: Pattern },
+    Bits {
+        bits: Option<Expr>,
+        value: Pattern,
+    },
     /// A binary of `bytes` bytes, or the rest when unwritten.
-    Bytes { bytes: Option<Expr>, value: Pattern },
+    Bytes {
+        bytes: Option<Expr>,
+        value: Pattern,
+    },
 }
 
 impl Expr {
     /// Visit every expression in the tree below and including this one, outer
     /// first.
-    pub fn walk<'a>(&'a self, f: &mut impl FnMut(&'a Expr)) {
+    pub(crate) fn walk<'a>(&'a self, f: &mut impl FnMut(&'a Expr)) {
         f(self);
         self.for_each_child(&mut |e| e.walk(f));
     }
 
     /// The expressions directly below this one, in source order.
-    pub fn for_each_child<'a>(&'a self, f: &mut impl FnMut(&'a Expr)) {
+    fn for_each_child<'a>(&'a self, f: &mut impl FnMut(&'a Expr)) {
         match &self.kind {
             ExprKind::Int(_)
             | ExprKind::Float(_)
@@ -459,7 +461,7 @@ impl Expr {
 }
 
 impl Stmt {
-    pub fn for_each_expr<'a>(&'a self, f: &mut impl FnMut(&'a Expr)) {
+    pub(crate) fn for_each_expr<'a>(&'a self, f: &mut impl FnMut(&'a Expr)) {
         match self {
             Stmt::Let { pattern, value } => {
                 pattern.for_each_expr(f);
@@ -472,7 +474,7 @@ impl Stmt {
 
 impl Pattern {
     /// The expressions inside the pattern: binary segment sizes.
-    pub fn for_each_expr<'a>(&'a self, f: &mut impl FnMut(&'a Expr)) {
+    fn for_each_expr<'a>(&'a self, f: &mut impl FnMut(&'a Expr)) {
         match &self.kind {
             PatternKind::Wild
             | PatternKind::Bind(_)
@@ -503,47 +505,6 @@ impl Pattern {
                             value.for_each_expr(f);
                         }
                     }
-                }
-            }
-        }
-    }
-
-    /// Every binder the pattern binds, alternatives of an `or` counted once.
-    pub fn binders(&self, out: &mut Vec<BinderId>) {
-        match &self.kind {
-            PatternKind::Bind(b) => out.push(*b),
-            PatternKind::Wild
-            | PatternKind::Int(_)
-            | PatternKind::Float(_)
-            | PatternKind::String(_)
-            | PatternKind::Range(..)
-            | PatternKind::Error => {}
-            PatternKind::Ctor { fields: ps, .. } | PatternKind::Tuple(ps) => {
-                ps.iter().for_each(|p| p.binders(out))
-            }
-            PatternKind::Array { prefix, rest } => {
-                prefix.iter().for_each(|p| p.binders(out));
-                if let Rest::Bind(b) = rest {
-                    out.push(*b);
-                }
-            }
-            PatternKind::Binary { segs, rest } => {
-                for s in segs {
-                    match s {
-                        BinSegPat::Text(_) => {}
-                        BinSegPat::Utf8(p)
-                        | BinSegPat::Bits { value: p, .. }
-                        | BinSegPat::Bytes { value: p, .. } => p.binders(out),
-                    }
-                }
-                if let Rest::Bind(b) = rest {
-                    out.push(*b);
-                }
-            }
-            // Every alternative binds the same binders.
-            PatternKind::Or(alts) => {
-                if let Some(first) = alts.first() {
-                    first.binders(out);
                 }
             }
         }

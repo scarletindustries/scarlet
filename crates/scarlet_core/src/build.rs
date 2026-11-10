@@ -29,16 +29,16 @@ pub enum Origin {
 /// One checked module.
 #[derive(Debug, Clone)]
 pub struct Module {
-    pub key: ModuleKey,
+    pub(crate) key: ModuleKey,
     pub origin: Origin,
     source_hash: u64,
     /// Each import's module, in source order, or `None` when it didn't
     /// resolve.
-    pub imports: Vec<Option<ModuleKey>>,
+    imports: Vec<Option<ModuleKey>>,
     /// The interfaces of the imports as this check saw them.
     seen: Vec<(ModuleKey, Interface)>,
     /// What the parser and the import resolution reported.
-    pub load_diagnostics: Vec<Diagnostic>,
+    load_diagnostics: Vec<Diagnostic>,
     role: Role,
     unused: UnusedBindings,
     pub checked: CheckedModule,
@@ -47,7 +47,9 @@ pub struct Module {
 impl Module {
     /// Everything reported about this module.
     pub fn diagnostics(&self) -> impl Iterator<Item = &Diagnostic> {
-        self.load_diagnostics.iter().chain(&self.checked.diagnostics)
+        self.load_diagnostics
+            .iter()
+            .chain(&self.checked.diagnostics)
     }
 }
 
@@ -108,7 +110,7 @@ impl Build {
         self.modules.get(key)
     }
 
-    pub fn modules(&self) -> impl Iterator<Item = &Module> {
+    pub(crate) fn modules(&self) -> impl Iterator<Item = &Module> {
         self.modules.values()
     }
 
@@ -147,8 +149,7 @@ impl Build {
                 entry.ast,
                 entry.doc,
                 &imports,
-                entry.role,
-                entry.unused,
+                (entry.role, entry.unused),
                 parsed_cleanly,
             );
             let seen = self.seen(&imports);
@@ -182,7 +183,9 @@ impl Build {
         if !seen.insert(key.clone()) {
             return;
         }
-        let Some(m) = self.modules.get(key) else { return };
+        let Some(m) = self.modules.get(key) else {
+            return;
+        };
         for k in m.imports.iter().flatten() {
             self.visit(k, seen, out);
         }
@@ -202,9 +205,11 @@ impl Build {
     }
 
     fn interfaces_unchanged(&self, m: &Module) -> bool {
-        m.seen
-            .iter()
-            .all(|(k, iface)| self.modules.get(k).is_some_and(|d| d.checked.interface == *iface))
+        m.seen.iter().all(|(k, iface)| {
+            self.modules
+                .get(k)
+                .is_some_and(|d| d.checked.interface == *iface)
+        })
     }
 
     fn seen(&self, imports: &[Option<ModuleKey>]) -> Vec<(ModuleKey, Interface)> {
@@ -224,8 +229,7 @@ impl Build {
         ast: &ast::BlockExpression,
         doc: Option<String>,
         imports: &[Option<ModuleKey>],
-        role: Role,
-        unused: UnusedBindings,
+        (role, unused): (Role, UnusedBindings),
         parsed_cleanly: bool,
     ) -> CheckedModule {
         self.checks += 1;
@@ -245,7 +249,11 @@ impl Build {
 
     /// Load the prelude and every module `block` imports. Returns each
     /// import's key, in source order, and the errors the imports raised.
-    fn load_imports(&mut self, block: &ast::BlockExpression, base_dir: Option<&Path>) -> (Vec<Option<ModuleKey>>, Vec<Diagnostic>) {
+    fn load_imports(
+        &mut self,
+        block: &ast::BlockExpression,
+        base_dir: Option<&Path>,
+    ) -> (Vec<Option<ModuleKey>>, Vec<Diagnostic>) {
         let prelude = scarlet_types::known::prelude_key();
         if !self.loading.contains(&prelude) {
             let path = ast::ImportPath::canonical(module::scarlet_prelude());
@@ -267,7 +275,12 @@ impl Build {
 
     /// Load the module `path` names, checking it if it hasn't been or needs
     /// to be again.
-    fn load(&mut self, path: &ast::ImportPath, at: Span, base_dir: Option<&Path>) -> Result<ModuleKey, Diagnostic> {
+    fn load(
+        &mut self,
+        path: &ast::ImportPath,
+        at: Span,
+        base_dir: Option<&Path>,
+    ) -> Result<ModuleKey, Diagnostic> {
         let error = |msg: String| Diagnostic::error(at, DiagnosticCode::ModuleError, msg);
         let resolved = module::resolve_with(path, base_dir, self.stdlib_root.as_deref()).map_err(|e| match e {
             ResolveError::BareName(p) => error(format!(
@@ -295,7 +308,11 @@ impl Build {
                     None => std::fs::read_to_string(p)
                         .map_err(|e| error(format!("Couldn't read module '{key}': {e}")))?,
                 };
-                (text, Origin::File(p.clone()), p.parent().map(Path::to_path_buf))
+                (
+                    text,
+                    Origin::File(p.clone()),
+                    p.parent().map(Path::to_path_buf),
+                )
             }
         };
         let hash = module::source_hash(&text);
@@ -322,7 +339,14 @@ impl Build {
         let mut diagnostics = std::mem::take(&mut parsed.diagnostics);
         diagnostics.extend(load_diagnostics);
         let parsed_cleanly = !has_errors(&diagnostics);
-        let checked = self.run_check(&key, &parsed.ast, parsed.doc, &imports, Role::Library, UnusedBindings::Report, parsed_cleanly);
+        let checked = self.run_check(
+            &key,
+            &parsed.ast,
+            parsed.doc,
+            &imports,
+            (Role::Library, UnusedBindings::Report),
+            parsed_cleanly,
+        );
         let seen = self.seen(&imports);
         self.modules.insert(
             key.clone(),
@@ -376,7 +400,9 @@ fn import_decls(block: &ast::BlockExpression) -> impl Iterator<Item = &ast::Impo
     block.body.iter().filter_map(|n| match n {
         ast::Node::Statement(s) => match s.as_ref() {
             ast::Statement::ImportDeclaration(d) => Some(d),
-            ast::Statement::Declaration { .. } | ast::Statement::Binding(_) | ast::Statement::Backpass(_) => None,
+            ast::Statement::Declaration { .. }
+            | ast::Statement::Binding(_)
+            | ast::Statement::Backpass(_) => None,
         },
         ast::Node::Expression(_) => None,
     })

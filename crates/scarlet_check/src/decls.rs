@@ -107,7 +107,8 @@ impl<'a> Checker<'a> {
                         match &fd.body {
                             ast::FnBody::Vm(key) => match Intrinsic::from_key(&key.name) {
                                 Some(i) => vm_fns.push((fd, *public, i)),
-                                None => self.error(key.span, format!("unknown @vm builtin '{}'", key.name)),
+                                None => self
+                                    .error(key.span, format!("unknown @vm builtin '{}'", key.name)),
                             },
                             ast::FnBody::Block(body) => decls.push(Decl::Fn {
                                 fd,
@@ -118,7 +119,10 @@ impl<'a> Checker<'a> {
                     }
                     ast::Declaration::Const(cb) => {
                         if !self.check_duplicate(&mut seen_values, &cb.identifier) {
-                            decls.push(Decl::Const { cb, public: *public });
+                            decls.push(Decl::Const {
+                                cb,
+                                public: *public,
+                            });
                         }
                     }
                 },
@@ -160,7 +164,11 @@ impl<'a> Checker<'a> {
                     params: params.iter().map(|p| p.to_string()).collect(),
                 },
             );
-            self.hovers.push((fd.identifier.span, fd.identifier.name.as_str().into(), sig.ty));
+            self.hovers.push((
+                fd.identifier.span,
+                fd.identifier.name.as_str().into(),
+                sig.ty,
+            ));
             self.values.insert(
                 fd.identifier.name.as_str().into(),
                 OwnValue {
@@ -173,7 +181,6 @@ impl<'a> Checker<'a> {
             );
             self.functions.push(Some(typed::Function {
                 name: fd.identifier.name.as_str().into(),
-                span: fd.identifier.span,
                 params: Vec::new(),
                 ty: sig.ty,
                 body: typed::FnBody::Builtin(intrinsic),
@@ -288,7 +295,11 @@ impl<'a> Checker<'a> {
 
     /// Report a name declared twice. The second declaration is dropped, so
     /// returns whether it was a duplicate.
-    fn check_duplicate<'n>(&mut self, seen: &mut HashMap<&'n str, Span>, id: &'n ast::Identifier) -> bool {
+    fn check_duplicate<'n>(
+        &mut self,
+        seen: &mut HashMap<&'n str, Span>,
+        id: &'n ast::Identifier,
+    ) -> bool {
         match seen.insert(id.name.as_str(), id.span) {
             Some(prev) => {
                 self.error(id.span, format!("'{}' is already defined", id.name));
@@ -303,7 +314,10 @@ impl<'a> Checker<'a> {
         if !in_prelude && self.reserved.contains(id.name.as_str()) {
             self.error(
                 id.span,
-                format!("'{}' is defined in the prelude and cannot be redefined", id.name),
+                format!(
+                    "'{}' is defined in the prelude and cannot be redefined",
+                    id.name
+                ),
             );
         }
     }
@@ -384,7 +398,13 @@ impl<'a> Checker<'a> {
                 span: td.identifier.span,
             },
         );
-        self.define(td.identifier.span, &td.identifier.name, td.doc.clone(), public, DefKind::Type);
+        self.define(
+            td.identifier.span,
+            &td.identifier.name,
+            td.doc.clone(),
+            public,
+            DefKind::Type,
+        );
     }
 
     fn register_aliases(&mut self, type_decls: &[(&ast::TypeDeclaration, bool, Vec<bool>)]) {
@@ -414,7 +434,8 @@ impl<'a> Checker<'a> {
             }
         }
         for component in tarjan_scc(&graph) {
-            let cyclic = component.len() > 1 || graph.find_edge(component[0], component[0]).is_some();
+            let cyclic =
+                component.len() > 1 || graph.find_edge(component[0], component[0]).is_some();
             if cyclic {
                 for n in &component {
                     let (td, _, _) = aliases[n.index()];
@@ -452,7 +473,13 @@ impl<'a> Checker<'a> {
                     span: td.identifier.span,
                 },
             );
-            self.define(td.identifier.span, &td.identifier.name, td.doc.clone(), public, DefKind::Type);
+            self.define(
+                td.identifier.span,
+                &td.identifier.name,
+                td.doc.clone(),
+                public,
+                DefKind::Type,
+            );
         }
     }
 
@@ -481,7 +508,13 @@ impl<'a> Checker<'a> {
                 let ty = self.hydrate(&mut annot, &f.typ);
                 tys.push(ty);
                 fields.push((f, ty));
-                self.define(f.label.span, &f.label.name, None, ctors_public, DefKind::Field);
+                self.define(
+                    f.label.span,
+                    &f.label.name,
+                    None,
+                    ctors_public,
+                    DefKind::Field,
+                );
             }
             variants.push((ctor, fields));
             field_tys.push(tys);
@@ -525,12 +558,18 @@ impl<'a> Checker<'a> {
             own.def = Some(def);
         }
 
-        let result = Type::named(name.clone(), type_params.iter().cloned().map(Type::Var).collect());
+        let result = Type::named(
+            name.clone(),
+            type_params.iter().cloned().map(Type::Var).collect(),
+        );
         for (i, v) in defs.iter().enumerate() {
             let ty = if v.fields.is_empty() {
                 result.clone()
             } else {
-                Type::function(v.fields.iter().map(|f| f.ty.clone()).collect(), result.clone())
+                Type::function(
+                    v.fields.iter().map(|f| f.ty.clone()).collect(),
+                    result.clone(),
+                )
             };
             let labels: Vec<Name> = v.fields.iter().map(|f| f.label.clone()).collect();
             self.values.insert(
@@ -575,14 +614,16 @@ impl<'a> Checker<'a> {
             .collect();
         let ret = self.hydrate_opt(&mut annot, fd.return_type.as_ref());
         let ty = self.e.fun(params.clone(), ret);
-        Signature {
-            params,
-            ret,
-            ty,
-        }
+        Signature { params, ret, ty }
     }
 
-    fn infer_group(&mut self, decls: &[Decl<'a>], sigs: &mut [Option<Signature>], group: &[usize], first_fn: usize) {
+    fn infer_group(
+        &mut self,
+        decls: &[Decl<'a>],
+        sigs: &mut [Option<Signature>],
+        group: &[usize],
+        first_fn: usize,
+    ) {
         self.e.enter_level();
         let mut inferred: Vec<(usize, Ty)> = Vec::with_capacity(group.len());
         for &i in group {
@@ -596,14 +637,21 @@ impl<'a> Checker<'a> {
                         fd.doc.clone(),
                         *public,
                         DefKind::Function {
-                            params: fd.params.iter().map(|p| p.identifier.name.clone()).collect(),
+                            params: fd
+                                .params
+                                .iter()
+                                .map(|p| p.identifier.name.clone())
+                                .collect(),
                         },
                     );
                     let prev = self.owner.replace(site);
                     let function = self.check_function(fd, body, sig);
                     self.owner = prev;
-                    self.hovers
-                        .push((fd.identifier.span, fd.identifier.name.as_str().into(), function.ty));
+                    self.hovers.push((
+                        fd.identifier.span,
+                        fd.identifier.name.as_str().into(),
+                        function.ty,
+                    ));
                     inferred.push((i, function.ty));
                     self.functions[first_fn + i] = Some(function);
                 }
@@ -640,7 +688,6 @@ impl<'a> Checker<'a> {
                     inferred.push((i, ty));
                     self.consts.push(typed::Const {
                         name: cb.identifier.name.as_str().into(),
-                        span: cb.identifier.span,
                         value,
                     });
                 }
@@ -666,7 +713,12 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_function(&mut self, fd: &ast::FunctionDeclaration, body: &ast::Expression, sig: Signature) -> typed::Function {
+    fn check_function(
+        &mut self,
+        fd: &ast::FunctionDeclaration,
+        body: &ast::Expression,
+        sig: Signature,
+    ) -> typed::Function {
         self.scope.open_frame(None);
         let params: Vec<_> = fd
             .params
@@ -679,7 +731,6 @@ impl<'a> Checker<'a> {
         self.scope.close_frame();
         typed::Function {
             name: fd.identifier.name.as_str().into(),
-            span: fd.identifier.span,
             params,
             ty: sig.ty,
             body: typed::FnBody::Expr(body),

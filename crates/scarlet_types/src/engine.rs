@@ -14,7 +14,7 @@ use std::collections::HashSet;
 
 use crate::known::Known;
 use crate::name::{Name, TypeName};
-use crate::ty::{Constraint, Prim, Scheme, Type, TypeVar};
+use crate::ty::{Constraint, Scheme, Type, TypeVar};
 
 /// An inference type: an index into the engine's arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -55,7 +55,7 @@ enum VarState {
 /// because the uses need it as one.
 #[derive(Debug, Clone)]
 pub struct LocalScheme {
-    pub vars: Vec<VarId>,
+    vars: Vec<VarId>,
     pub ty: Ty,
 }
 
@@ -127,7 +127,10 @@ fn mismatch(expected: Ty, given: Ty) -> UnifyError {
 #[derive(Debug, Clone)]
 pub enum NotCallable {
     /// It is a function, but it takes `params.len()` arguments.
-    Arity { params: Vec<Ty>, ret: Ty },
+    Arity {
+        params: Vec<Ty>,
+        ret: Ty,
+    },
     NotFn,
 }
 
@@ -222,7 +225,7 @@ impl Engine {
     }
 
     /// A prelude type with no arguments, like `Int`.
-    pub fn prelude(&mut self, name: &TypeName) -> Ty {
+    fn prelude(&mut self, name: &TypeName) -> Ty {
         self.con(name.clone(), Vec::new())
     }
 
@@ -263,7 +266,7 @@ impl Engine {
 
     /// Follow links to the type `t` stands for, shortening the chain on the
     /// way.
-    pub fn find(&mut self, t: Ty) -> Ty {
+    fn find(&mut self, t: Ty) -> Ty {
         let mut root = t;
         while let Node::Var(v) = self.node(root)
             && let VarState::Link(next) = self.vars[v.0 as usize]
@@ -291,13 +294,6 @@ impl Engine {
         }
     }
 
-    pub fn prim_of(&mut self, t: Ty) -> Option<Prim> {
-        match self.shape(t) {
-            Shape::Con(name, args) if args.is_empty() => self.known.prim_of(&name),
-            Shape::Con(..) | Shape::Var(_) | Shape::Fn(..) | Shape::Tuple(_) => None,
-        }
-    }
-
     pub fn enter_level(&mut self) {
         self.level += 1;
     }
@@ -322,7 +318,16 @@ impl Engine {
                 }
                 self.unify_all(&aa, &ab, a, b)
             }
-            (Node::Fn { params: pa, ret: ra }, Node::Fn { params: pb, ret: rb }) => {
+            (
+                Node::Fn {
+                    params: pa,
+                    ret: ra,
+                },
+                Node::Fn {
+                    params: pb,
+                    ret: rb,
+                },
+            ) => {
                 if pa.len() != pb.len() {
                     return Err(UnifyError::Mismatch {
                         expected: a,
@@ -346,7 +351,13 @@ impl Engine {
         }
     }
 
-    fn unify_all(&mut self, xs: &[Ty], ys: &[Ty], outer_a: Ty, outer_b: Ty) -> Result<(), UnifyError> {
+    fn unify_all(
+        &mut self,
+        xs: &[Ty],
+        ys: &[Ty],
+        outer_a: Ty,
+        outer_b: Ty,
+    ) -> Result<(), UnifyError> {
         for (&x, &y) in xs.iter().zip(ys) {
             self.unify(x, y).map_err(|e| e.enclosed(outer_a, outer_b))?;
         }
@@ -401,7 +412,13 @@ impl Engine {
 
     /// Check that `ty` can meet constraint `c`, moving the constraint onto
     /// `ty` when it is a variable itself.
-    fn meet_constraint(&mut self, c: Constraint, level: u32, var_ty: Ty, ty: Ty) -> Result<(), UnifyError> {
+    fn meet_constraint(
+        &mut self,
+        c: Constraint,
+        level: u32,
+        var_ty: Ty,
+        ty: Ty,
+    ) -> Result<(), UnifyError> {
         match self.node(ty).clone() {
             Node::Var(other) => match self.vars[other.0 as usize] {
                 VarState::Unbound {
@@ -434,7 +451,13 @@ impl Engine {
         }
     }
 
-    fn occurs_and_lower(&mut self, var: VarId, level: u32, t: Ty, lowered: &mut Vec<(VarId, u32)>) -> bool {
+    fn occurs_and_lower(
+        &mut self,
+        var: VarId,
+        level: u32,
+        t: Ty,
+        lowered: &mut Vec<(VarId, u32)>,
+    ) -> bool {
         let r = self.find(t);
         match self.node(r).clone() {
             Node::Var(v) => {
@@ -452,11 +475,13 @@ impl Engine {
                 }
                 false
             }
-            Node::Con { args, .. } | Node::Tuple(args) => {
-                args.iter().any(|&a| self.occurs_and_lower(var, level, a, lowered))
-            }
+            Node::Con { args, .. } | Node::Tuple(args) => args
+                .iter()
+                .any(|&a| self.occurs_and_lower(var, level, a, lowered)),
             Node::Fn { params, ret } => {
-                params.iter().any(|&p| self.occurs_and_lower(var, level, p, lowered))
+                params
+                    .iter()
+                    .any(|&p| self.occurs_and_lower(var, level, p, lowered))
                     || self.occurs_and_lower(var, level, ret, lowered)
             }
         }
@@ -533,17 +558,25 @@ impl Engine {
                     VarState::Unbound { .. } | VarState::Rigid { .. } | VarState::Link(_) => {}
                 }
             }
-            Node::Con { args, .. } | Node::Tuple(args) => {
-                args.iter().for_each(|&a| self.collect_generalizable(a, weak, out))
-            }
+            Node::Con { args, .. } | Node::Tuple(args) => args
+                .iter()
+                .for_each(|&a| self.collect_generalizable(a, weak, out)),
             Node::Fn { params, ret } => {
-                params.iter().for_each(|&p| self.collect_generalizable(p, weak, out));
+                params
+                    .iter()
+                    .for_each(|&p| self.collect_generalizable(p, weak, out));
                 self.collect_generalizable(ret, weak, out);
             }
         }
     }
 
-    fn collect_weak(&mut self, t: Ty, restricted: &[TypeName], inside: bool, weak: &mut HashSet<VarId>) {
+    fn collect_weak(
+        &mut self,
+        t: Ty,
+        restricted: &[TypeName],
+        inside: bool,
+        weak: &mut HashSet<VarId>,
+    ) {
         let r = self.find(t);
         match self.node(r).clone() {
             Node::Var(v) => {
@@ -553,16 +586,21 @@ impl Engine {
             }
             Node::Con { name, args } => {
                 let inside = inside || restricted.contains(&name);
-                args.iter().for_each(|&a| self.collect_weak(a, restricted, inside, weak));
+                args.iter()
+                    .for_each(|&a| self.collect_weak(a, restricted, inside, weak));
             }
             Node::Fn { params, ret } => {
                 if inside {
-                    params.iter().for_each(|&p| self.collect_weak(p, restricted, true, weak));
+                    params
+                        .iter()
+                        .for_each(|&p| self.collect_weak(p, restricted, true, weak));
                     self.collect_weak(ret, restricted, true, weak);
                 }
             }
             Node::Tuple(elems) => {
-                elems.iter().for_each(|&e| self.collect_weak(e, restricted, inside, weak));
+                elems
+                    .iter()
+                    .for_each(|&e| self.collect_weak(e, restricted, inside, weak));
             }
         }
     }
@@ -578,7 +616,9 @@ impl Engine {
             .iter()
             .map(|&v| {
                 let constraint = match self.vars[v.0 as usize] {
-                    VarState::Unbound { constraint, .. } | VarState::Rigid { constraint, .. } => constraint,
+                    VarState::Unbound { constraint, .. } | VarState::Rigid { constraint, .. } => {
+                        constraint
+                    }
                     VarState::Link(_) => None,
                 };
                 let name = self.names[v.0 as usize].clone();
@@ -732,7 +772,10 @@ impl Engine {
     /// the frozen types read back the same every time.
     pub fn freeze(mut self) -> Types {
         for v in 0..self.vars.len() {
-            if matches!(self.vars[v], VarState::Unbound { .. } | VarState::Rigid { .. }) {
+            if matches!(
+                self.vars[v],
+                VarState::Unbound { .. } | VarState::Rigid { .. }
+            ) {
                 self.var_name(VarId(v as u32));
             }
         }
@@ -782,10 +825,6 @@ impl Types {
             ),
             Node::Tuple(elems) => Type::tuple(elems.iter().map(|&e| self.get(e)).collect()),
         }
-    }
-
-    pub fn known(&self) -> &Known {
-        &self.engine.known
     }
 }
 

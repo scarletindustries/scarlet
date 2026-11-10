@@ -822,7 +822,7 @@ impl fmt::Display for CorePat {
 }
 
 /// A `CoreExpr` printed `depth` levels in.
-pub struct Indented<'a>(pub &'a CoreExpr, pub usize);
+pub struct Indented<'a>(&'a CoreExpr, usize);
 
 impl fmt::Display for Indented<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

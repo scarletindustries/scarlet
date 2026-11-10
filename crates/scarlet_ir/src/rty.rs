@@ -33,7 +33,7 @@ impl PrimIds {
     /// id, never by name, so a user's `type Int { }` is not `Int`.
     /// `InferEngine::as_prim` and `ResolvedPool::as_prim` both call this, so
     /// the `Ty` side and the `RTy` side can't disagree.
-    pub fn prim_of(self, id: TypeId) -> Option<Prim> {
+    fn prim_of(self, id: TypeId) -> Option<Prim> {
         if id == self.int {
             Some(Prim::Int)
         } else if id == self.float {
@@ -79,7 +79,7 @@ impl std::fmt::Display for RTy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RSlice {
     start: u32,
-    pub len: u32,
+    len: u32,
 }
 
 impl RSlice {
@@ -119,11 +119,6 @@ impl ResolvedPool {
             children: Vec::new(),
             prims,
         }
-    }
-
-    /// How many nodes the pool holds.
-    pub fn node_count(&self) -> usize {
-        self.nodes.len()
     }
 
     /// The primitive ids this pool classifies types against.
@@ -170,18 +165,18 @@ impl ResolvedPool {
 
     /// The node `t` names. Panics on an `RTy` from a different pool.
     #[allow(clippy::indexing_slicing)]
-    pub fn node(&self, t: RTy) -> ResolvedNode {
+    fn node(&self, t: RTy) -> ResolvedNode {
         self.nodes[t.0 as usize]
     }
 
     #[allow(clippy::indexing_slicing)]
-    pub fn children(&self, s: RSlice) -> &[RTy] {
+    fn children(&self, s: RSlice) -> &[RTy] {
         let lo = s.start as usize;
         &self.children[lo..lo + s.len as usize]
     }
 
     /// The type arguments of a nominal type, or nothing for any other node.
-    pub fn con_args(&self, t: RTy) -> &[RTy] {
+    fn con_args(&self, t: RTy) -> &[RTy] {
         match self.node(t) {
             ResolvedNode::Con { args, .. } => self.children(args),
             _ => &[],
@@ -194,14 +189,16 @@ impl ResolvedPool {
         self.con_args(t).get(i).copied()
     }
 
-    pub fn tuple_elems(&self, t: RTy) -> &[RTy] {
+    #[cfg(test)]
+    fn tuple_elems(&self, t: RTy) -> &[RTy] {
         match self.node(t) {
             ResolvedNode::Tuple { elems } => self.children(elems),
             _ => &[],
         }
     }
 
-    pub fn tuple_elem(&self, t: RTy, i: usize) -> Option<RTy> {
+    #[cfg(test)]
+    fn tuple_elem(&self, t: RTy, i: usize) -> Option<RTy> {
         self.tuple_elems(t).get(i).copied()
     }
 

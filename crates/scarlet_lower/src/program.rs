@@ -11,8 +11,8 @@ use scarlet_check::CleanModule;
 use scarlet_check::typed::BinderId;
 use scarlet_ir::TypeId;
 use scarlet_ir::core_ir::{
-    Abi, Const, ConstId, FuncIdx, GlobalSlot, HttpTypes, IoErrors, JsonTypes, LoweredFn, ParseReasons, Program,
-    Radix, TypeNames, VariantNames, VariantRef,
+    Abi, Const, ConstId, FuncIdx, GlobalSlot, HttpTypes, IoErrors, JsonTypes, LoweredFn,
+    ParseReasons, Program, Radix, TypeNames, VariantNames, VariantRef,
 };
 use scarlet_ir::rty::{PrimIds, RTy, ResolvedPool};
 use scarlet_ir::tivec::TiVec;
@@ -153,8 +153,9 @@ impl<'a> Builder<'a> {
             int_pair,
         };
         let variant = |b: &mut Builder<'_>, t: &TypeName, v: &str| {
-            b.variant(t, v)
-                .ok_or_else(|| LinkError::Prelude(format!("prelude: constructor '{v}' is required")))
+            b.variant(t, v).ok_or_else(|| {
+                LinkError::Prelude(format!("prelude: constructor '{v}' is required"))
+            })
         };
         b.ctors = PreludeCtors {
             some: variant(&mut b, &known.option, "Some")?,
@@ -180,7 +181,12 @@ impl<'a> Builder<'a> {
 
     /// The constructor of `t` named `variant`.
     pub fn variant(&mut self, t: &TypeName, variant: &str) -> Option<VariantRef> {
-        let idx = self.defs.type_def(t)?.variants()?.iter().position(|v| &*v.name == variant)?;
+        let idx = self
+            .defs
+            .type_def(t)?
+            .variants()?
+            .iter()
+            .position(|v| &*v.name == variant)?;
         Some(VariantRef {
             type_id: self.type_id(t),
             variant_idx: u16::try_from(idx).ok()?,
@@ -268,7 +274,11 @@ impl<'a> Builder<'a> {
 
 /// Build the program whose modules are `modules`, imports first and the
 /// entry last. `main` is the entry's function to start at, when it runs one.
-pub fn build_program(modules: &[&CleanModule], defs: &dyn TypeDefs, main: Option<&ValueName>) -> Result<Program, LinkError> {
+pub fn build_program(
+    modules: &[&CleanModule],
+    defs: &dyn TypeDefs,
+    main: Option<&ValueName>,
+) -> Result<Program, LinkError> {
     let mut b = Builder::new(defs)?;
     let mut tops: Vec<(String, TypedFn)> = Vec::with_capacity(modules.len());
     for m in modules {
@@ -289,14 +299,23 @@ pub fn build_program(modules: &[&CleanModule], defs: &dyn TypeDefs, main: Option
         let mut core = lower::lower_fn(b.temps, f);
         immediates::rewrite(&mut core, &im);
         let core = perceus::perceus(&pool, core);
-        if toplevel { perceus::keep_globals(core) } else { core }
+        if toplevel {
+            perceus::keep_globals(core)
+        } else {
+            core
+        }
     };
     let mut fns = TiVec::new();
     for slot in &b.fns {
         let Some((module, name, f)) = slot else {
             continue;
         };
-        fns.push(LoweredFn::new(module.clone(), name.clone(), finish(f, false), Rc::clone(&pool)));
+        fns.push(LoweredFn::new(
+            module.clone(),
+            name.clone(),
+            finish(f, false),
+            Rc::clone(&pool),
+        ));
     }
     // The entry's top level is named for what it is; each import's, for its
     // module.
@@ -305,7 +324,11 @@ pub fn build_program(modules: &[&CleanModule], defs: &dyn TypeDefs, main: Option
         .iter()
         .enumerate()
         .map(|(i, (module, f))| {
-            let name = if i == last { "__main__".to_string() } else { module.clone() };
+            let name = if i == last {
+                "__main__".to_string()
+            } else {
+                module.clone()
+            };
             LoweredFn::new(module.clone(), name, finish(f, true), Rc::clone(&pool))
         })
         .collect();
@@ -318,7 +341,12 @@ pub fn build_program(modules: &[&CleanModule], defs: &dyn TypeDefs, main: Option
                 body: crate::typed_ir::TypedExpr::Nil { ty: b.temps.int },
                 binds: 0,
             };
-            LoweredFn::new("main".into(), "main".into(), finish(&empty, true), Rc::clone(&pool))
+            LoweredFn::new(
+                "main".into(),
+                "main".into(),
+                finish(&empty, true),
+                Rc::clone(&pool),
+            )
         }
     };
     let main = main.and_then(|m| b.fn_of.get(m).copied());
@@ -338,7 +366,8 @@ pub fn build_program(modules: &[&CleanModule], defs: &dyn TypeDefs, main: Option
             ids.insert(v.type_id);
         });
     }
-    let types: BTreeMap<TypeId, TypeNames> = ids.into_iter().map(|id| (id, b.names_of(id))).collect();
+    let types: BTreeMap<TypeId, TypeNames> =
+        ids.into_iter().map(|id| (id, b.names_of(id))).collect();
     Ok(Program {
         fns,
         consts: b.consts.clone(),
@@ -353,7 +382,11 @@ pub fn build_program(modules: &[&CleanModule], defs: &dyn TypeDefs, main: Option
 
 /// The constructors of the stdlib type `module.name`, by name, when the
 /// program reaches that module.
-fn stdlib_variants<'b, 'd>(b: &'b mut Builder<'d>, module: &[&str], name: &str) -> Option<impl FnMut(&str) -> Option<VariantRef> + use<'b, 'd>> {
+fn stdlib_variants<'b, 'd>(
+    b: &'b mut Builder<'d>,
+    module: &[&str],
+    name: &str,
+) -> Option<impl FnMut(&str) -> Option<VariantRef> + use<'b, 'd>> {
     let path: Vec<String> = module.iter().map(|s| s.to_string()).collect();
     let t = TypeName::new(ModuleKey::for_stdlib(&path), name.into());
     b.defs.type_def(&t)?;
@@ -431,7 +464,12 @@ fn http_types(b: &mut Builder<'_>) -> Option<HttpTypes> {
     let head_flags = stdlib_variants(b, &h1, "HeadFlags")?("HeadFlags")?;
     let (conn_neither, conn_close, conn_keep_alive, conn_both) = {
         let mut c = stdlib_variants(b, &h1, "ConnTokens")?;
-        (c("ConnNeither")?, c("ConnClose")?, c("ConnKeepAlive")?, c("ConnBoth")?)
+        (
+            c("ConnNeither")?,
+            c("ConnClose")?,
+            c("ConnKeepAlive")?,
+            c("ConnBoth")?,
+        )
     };
     let (parsed_done, parsed_need_more, parsed_bad) = {
         let mut p = stdlib_variants(b, &h1, "Parsed")?;
@@ -439,7 +477,11 @@ fn http_types(b: &mut Builder<'_>) -> Option<HttpTypes> {
     };
     let (response_done, response_need_more, response_bad) = {
         let mut r = stdlib_variants(b, &h1, "ParsedResponse")?;
-        (r("ResponseDone")?, r("ResponseNeedMore")?, r("ResponseBad")?)
+        (
+            r("ResponseDone")?,
+            r("ResponseNeedMore")?,
+            r("ResponseBad")?,
+        )
     };
     let (bad_status_line, bad_version, bad_field, head_too_large, bad_framing) = {
         let mut x = stdlib_variants(b, &h1, "BadResponse")?;

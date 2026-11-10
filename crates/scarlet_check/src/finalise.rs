@@ -3,11 +3,16 @@
 //! a statement whose value nothing uses, and bindings nothing reads. Each one
 //! is a walk over the finished tree.
 
-use scarlet_types::exhaustiveness::{BinPart, BinSegShape, BinUnit, PatShape, PatternShape, Space, UsefulnessMatrix, unroll_depth};
+use scarlet_types::exhaustiveness::{
+    BinPart, BinSegShape, BinUnit, PatShape, PatternShape, Space, UsefulnessMatrix, unroll_depth,
+};
 use scarlet_types::ty::Type;
 
 use crate::check::Checker;
-use crate::typed::{BinSegPat, Block, Const, Expr, ExprKind, FnBody, Function, OrShape, Pattern, PatternKind, Rest, Stmt};
+use crate::typed::{
+    BinSegPat, Block, Const, Expr, ExprKind, FnBody, Function, OrShape, Pattern, PatternKind, Rest,
+    Stmt,
+};
 
 impl Checker<'_> {
     pub fn finalise(&mut self, functions: &[Function], consts: &[Const], statements: &[Stmt]) {
@@ -72,10 +77,17 @@ impl Checker<'_> {
     fn space(&self, ty: &Type, depth: usize) -> Space {
         match ty {
             Type::Var(_) | Type::Fn { .. } => Space::Infinite,
-            Type::Tuple(elems) => Space::Tuple(elems.iter().map(|e| self.space(e, depth.saturating_sub(1))).collect()),
+            Type::Tuple(elems) => Space::Tuple(
+                elems
+                    .iter()
+                    .map(|e| self.space(e, depth.saturating_sub(1)))
+                    .collect(),
+            ),
             Type::Named { name, args } => {
                 if *name == self.e.known().array {
-                    let elem = args.first().map_or(Space::Infinite, |a| self.space(a, depth.saturating_sub(1)));
+                    let elem = args
+                        .first()
+                        .map_or(Space::Infinite, |a| self.space(a, depth.saturating_sub(1)));
                     return Space::Array(std::rc::Rc::new(elem));
                 }
                 if depth == 0 {
@@ -110,16 +122,28 @@ impl Checker<'_> {
         if arms.iter().any(|a| has_error(&a.pattern)) {
             return;
         }
-        let depth = arms.iter().map(|a| unroll_depth(&a.pattern)).max().unwrap_or(0) + 1;
+        let depth = arms
+            .iter()
+            .map(|a| unroll_depth(&a.pattern))
+            .max()
+            .unwrap_or(0)
+            + 1;
         let ty = self.e.zonk(subject.ty);
         let space = self.space(&ty, depth);
         let mut um = UsefulnessMatrix::new(&space);
         let pats: Vec<_> = arms.iter().map(|a| um.lower(&a.pattern)).collect();
         // A guarded arm may not match, so it neither covers anything nor makes
         // a later arm unreachable.
-        let unguarded = arms.iter().zip(&pats).filter(|(a, _)| a.guard.is_none()).map(|(_, p)| p);
+        let unguarded = arms
+            .iter()
+            .zip(&pats)
+            .filter(|(a, _)| a.guard.is_none())
+            .map(|(_, p)| p);
         if let Some(missing) = um.find_missing(unguarded) {
-            self.error(subject.span, format!("Match is not exhaustive. Add arms for: {missing}"));
+            self.error(
+                subject.span,
+                format!("Match is not exhaustive. Add arms for: {missing}"),
+            );
         }
         let _ = m;
         for (i, arm) in arms.iter().enumerate() {
@@ -245,16 +269,17 @@ fn has_error(p: &Pattern) -> bool {
 fn walk_patterns(p: &Pattern, f: &mut impl FnMut(&Pattern)) {
     f(p);
     match &p.kind {
-        PatternKind::Ctor { fields: ps, .. } | PatternKind::Tuple(ps) | PatternKind::Array { prefix: ps, .. } | PatternKind::Or(ps) => {
-            ps.iter().for_each(|q| walk_patterns(q, f))
-        }
+        PatternKind::Ctor { fields: ps, .. }
+        | PatternKind::Tuple(ps)
+        | PatternKind::Array { prefix: ps, .. }
+        | PatternKind::Or(ps) => ps.iter().for_each(|q| walk_patterns(q, f)),
         PatternKind::Binary { segs, .. } => {
             for s in segs {
                 match s {
                     BinSegPat::Text(_) => {}
-                    BinSegPat::Utf8(q) | BinSegPat::Bits { value: q, .. } | BinSegPat::Bytes { value: q, .. } => {
-                        walk_patterns(q, f)
-                    }
+                    BinSegPat::Utf8(q)
+                    | BinSegPat::Bits { value: q, .. }
+                    | BinSegPat::Bytes { value: q, .. } => walk_patterns(q, f),
                 }
             }
         }
@@ -286,7 +311,11 @@ impl PatternShape for Pattern {
                 open: !matches!(rest, Rest::None),
             },
             // `<<..rest>>` matches every binary.
-            PatternKind::Binary { segs, rest } if segs.is_empty() && !matches!(rest, Rest::None) => PatShape::Wild,
+            PatternKind::Binary { segs, rest }
+                if segs.is_empty() && !matches!(rest, Rest::None) =>
+            {
+                PatShape::Wild
+            }
             PatternKind::Binary { segs, rest } => PatShape::Binary {
                 segs: segs.iter().map(bin_seg_shape).collect(),
                 open: !matches!(rest, Rest::None),

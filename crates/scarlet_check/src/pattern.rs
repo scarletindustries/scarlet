@@ -50,7 +50,12 @@ impl Checker<'_> {
     /// Check `pat` against `expected`. The `bool` is false when the pattern
     /// doesn't typecheck, in which case nothing may check it for
     /// exhaustiveness.
-    pub fn check_pattern(&mut self, pat: &ast::Pattern, expected: Ty, pb: &mut PatBinds) -> (Pattern, bool) {
+    pub fn check_pattern(
+        &mut self,
+        pat: &ast::Pattern,
+        expected: Ty,
+        pb: &mut PatBinds,
+    ) -> (Pattern, bool) {
         let span = pat.span();
         let at = |kind| Pattern {
             ty: expected,
@@ -133,14 +138,7 @@ impl Checker<'_> {
                                 None => Rest::Discard,
                                 Some(id) => {
                                     let ty = self.e.array(elem);
-                                    match self.bind_pattern_name(id, ty, pb) {
-                                        Bound::Binder(b) => Rest::Bind(b),
-                                        Bound::WriteOnly => Rest::Discard,
-                                        Bound::Rejected => {
-                                            ok = false;
-                                            Rest::Discard
-                                        }
-                                    }
+                                    self.bind_rest(id, ty, pb, &mut ok)
                                 }
                             };
                         }
@@ -159,14 +157,14 @@ impl Checker<'_> {
                     }
                     let s = match &seg.spec {
                         ast::BinSpec::Int { bits } => {
-                            let bits = bits.as_ref().map(|b| self.check_size(b));
+                            let bits = bits.as_ref().map(|b| self.check_int(b));
                             let int = self.e.int();
                             let (value, v_ok) = self.check_pattern(&seg.value, int, pb);
                             ok &= v_ok;
                             BinSegPat::Bits { bits, value }
                         }
                         ast::BinSpec::Binary { bytes } => {
-                            let bytes = bytes.as_ref().map(|b| self.check_size(b));
+                            let bytes = bytes.as_ref().map(|b| self.check_int(b));
                             let bin = self.e.binary();
                             let (value, v_ok) = self.check_pattern(&seg.value, bin, pb);
                             ok &= v_ok;
@@ -187,14 +185,7 @@ impl Checker<'_> {
                         None => Rest::Discard,
                         Some(id) => {
                             let bin = self.e.binary();
-                            match self.bind_pattern_name(id, bin, pb) {
-                                Bound::Binder(b) => Rest::Bind(b),
-                                Bound::WriteOnly => Rest::Discard,
-                                Bound::Rejected => {
-                                    ok = false;
-                                    Rest::Discard
-                                }
-                            }
+                            self.bind_rest(id, bin, pb, &mut ok)
                         }
                     },
                 };
@@ -214,7 +205,9 @@ impl Checker<'_> {
                     let (p, p_ok) = self.check_pattern(alt, expected, pb);
                     ok &= p_ok;
                     alts.push(p);
-                    let Some(frame) = pb.ors.last_mut() else { break };
+                    let Some(frame) = pb.ors.last_mut() else {
+                        break;
+                    };
                     let seen = std::mem::take(&mut frame.seen);
                     let canonical = frame.canonical.clone().unwrap_or_default();
                     for name in pb.bound.keys() {
@@ -244,11 +237,23 @@ impl Checker<'_> {
         }
     }
 
-    fn check_size(&mut self, e: &ast::Expression) -> crate::typed::Expr {
-        let size = self.check_expr(e);
-        let int = self.e.int();
-        self.unify(int, size.ty, e.span());
-        size
+    /// The `..rest` of an array or binary pattern, which binds the part
+    /// after the prefix.
+    fn bind_rest(
+        &mut self,
+        id: &ast::Identifier,
+        ty: Ty,
+        pb: &mut PatBinds,
+        ok: &mut bool,
+    ) -> Rest {
+        match self.bind_pattern_name(id, ty, pb) {
+            Bound::Binder(b) => Rest::Bind(b),
+            Bound::WriteOnly => Rest::Discard,
+            Bound::Rejected => {
+                *ok = false;
+                Rest::Discard
+            }
+        }
     }
 
     fn bind_pattern_name(&mut self, id: &ast::Identifier, ty: Ty, pb: &mut PatBinds) -> Bound {
@@ -264,7 +269,10 @@ impl Checker<'_> {
                 let in_alt = pb.ors.last().is_some_and(|f| f.seen.contains(&name));
                 if in_alt || !canonical.contains(&name) {
                     if in_alt {
-                        self.error(id.span, format!("Variable '{name}' is bound more than once in this pattern"));
+                        self.error(
+                            id.span,
+                            format!("Variable '{name}' is bound more than once in this pattern"),
+                        );
                     } else {
                         self.error(
                             id.span,
@@ -289,7 +297,10 @@ impl Checker<'_> {
             }
             None => {
                 if pb.bound.contains_key(&name) {
-                    self.error(id.span, format!("Variable '{name}' is bound more than once in this pattern"));
+                    self.error(
+                        id.span,
+                        format!("Variable '{name}' is bound more than once in this pattern"),
+                    );
                     return Bound::Rejected;
                 }
                 let b = self.bind_mono(&id.name, ty, id.span);
@@ -334,7 +345,11 @@ impl Checker<'_> {
                         (Some(label.name.as_str()), (pattern, label.span))
                     }
                 });
-                let (by_pos, args_ok) = self.slot_ctor(&c, items, (!rest).then_some((span, ". Use '..' to ignore them")));
+                let (by_pos, args_ok) = self.slot_ctor(
+                    &c,
+                    items,
+                    (!rest).then_some((span, ". Use '..' to ignore them")),
+                );
                 ok &= args_ok;
                 let mut fields = Vec::with_capacity(params.len());
                 for (i, sub) in by_pos.into_iter().enumerate() {
@@ -376,7 +391,10 @@ impl Checker<'_> {
             Pattern {
                 ty: expected,
                 span,
-                kind: PatternKind::Ctor { ctor: c.ctor, fields },
+                kind: PatternKind::Ctor {
+                    ctor: c.ctor,
+                    fields,
+                },
             },
             ok,
         )
@@ -389,9 +407,14 @@ impl Checker<'_> {
         }
         let qualified = self.qualified_spellings(&name.name);
         let msg = if self.is_value_name(&name.name) {
-            format!("'{}' is not a constructor and cannot be used in a pattern", name.name)
+            format!(
+                "'{}' is not a constructor and cannot be used in a pattern",
+                name.name
+            )
         } else if self.types.contains_key(name.name.as_str())
-            || self.prelude.is_some_and(|p| p.public_type(&name.name).is_some())
+            || self
+                .prelude
+                .is_some_and(|p| p.public_type(&name.name).is_some())
         {
             format!(
                 "'{0}' is a type, not a constructor. To check a value's type and drop it, write `_ {0} = value`",
@@ -415,18 +438,33 @@ impl Checker<'_> {
     /// caller.
     pub fn bare_ctor(&mut self, name: &ast::Identifier) -> Option<CtorRef> {
         if let Some(v) = self.values.get(name.name.as_str()).cloned() {
-            let ValueKind::Constructor { ctor, name: n, labels } = v.kind else {
+            let ValueKind::Constructor {
+                ctor,
+                name: n,
+                labels,
+            } = v.kind
+            else {
                 return None;
             };
             let ty = self.instantiate_value(&v.scheme);
             let target = self.site(v.span, crate::index::EntityKind::Constructor);
             self.use_site(name.span, UseKind::Unqualified, target);
             self.hovers.push((name.span, name.name.as_str().into(), ty));
-            return Some(CtorRef { ctor, name: n, labels, ty });
+            return Some(CtorRef {
+                ctor,
+                name: n,
+                labels,
+                ty,
+            });
         }
         let p = self.prelude?;
         let v = p.values.get(name.name.as_str())?;
-        let ValueKind::Constructor { ctor, name: n, labels } = &v.kind else {
+        let ValueKind::Constructor {
+            ctor,
+            name: n,
+            labels,
+        } = &v.kind
+        else {
             return None;
         };
         let ty = self.e.instantiate_scheme(&v.scheme);
@@ -446,7 +484,10 @@ impl Checker<'_> {
         let Some(key) = self.qualifiers.get(q.name.as_str()).cloned() else {
             self.error(
                 name.span,
-                format!("Unknown module qualifier '{}'. Import the module first", q.name),
+                format!(
+                    "Unknown module qualifier '{}'. Import the module first",
+                    q.name
+                ),
             );
             return None;
         };
@@ -454,14 +495,22 @@ impl Checker<'_> {
         let iface = self.interface_of(&key)?;
         let Some(v) = iface.values.get(name.name.as_str()) else {
             let msg = if iface.private_names.contains(name.name.as_str()) {
-                format!("Constructor '{}' is private in module '{module}'", name.name)
+                format!(
+                    "Constructor '{}' is private in module '{module}'",
+                    name.name
+                )
             } else {
                 format!("Module '{module}' has no constructor '{}'", name.name)
             };
             self.error(name.span, msg);
             return None;
         };
-        let ValueKind::Constructor { ctor, name: n, labels } = &v.kind else {
+        let ValueKind::Constructor {
+            ctor,
+            name: n,
+            labels,
+        } = &v.kind
+        else {
             self.error(
                 name.span,
                 format!(
@@ -519,7 +568,10 @@ impl Checker<'_> {
             match e {
                 SlotError::ExtraPositional((_, span)) => self.error(
                     span,
-                    format!("Constructor '{}' has {arity} field(s) but more were supplied", c.name),
+                    format!(
+                        "Constructor '{}' has {arity} field(s) but more were supplied",
+                        c.name
+                    ),
                 ),
                 SlotError::UnknownLabel(label, (_, span)) => self.error(
                     span,

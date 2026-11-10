@@ -21,7 +21,7 @@ pub enum WatchedChange {
 }
 
 impl WatchedChange {
-    pub fn from_wire(n: i64) -> Self {
+    pub(crate) fn from_wire(n: i64) -> Self {
         if n == 3 { Self::Deleted } else { Self::Touched }
     }
 }

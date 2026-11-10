@@ -19,7 +19,7 @@ pub enum Constraint {
 }
 
 impl Constraint {
-    pub fn name(self) -> &'static str {
+    fn name(self) -> &'static str {
         match self {
             Constraint::Addable => "addable",
             Constraint::Numeric => "numeric",
@@ -27,7 +27,7 @@ impl Constraint {
     }
 
     /// Whether a primitive meets this constraint.
-    pub fn allows(self, prim: Prim) -> bool {
+    pub(crate) fn allows(self, prim: Prim) -> bool {
         match (self, prim) {
             (Constraint::Addable, Prim::Int | Prim::Float | Prim::String) => true,
             (Constraint::Numeric, Prim::Int | Prim::Float) => true,
@@ -37,7 +37,7 @@ impl Constraint {
 
     /// The constraint that allows exactly the types both allow. Every pair
     /// shares at least `Int`, so this never fails.
-    pub fn intersect(self, other: Constraint) -> Constraint {
+    pub(crate) fn intersect(self, other: Constraint) -> Constraint {
         match (self, other) {
             (Constraint::Addable, Constraint::Addable) => Constraint::Addable,
             (Constraint::Numeric, _) | (_, Constraint::Numeric) => Constraint::Numeric,
@@ -45,7 +45,7 @@ impl Constraint {
     }
 
     /// Whether every type `self` allows is one `required` allows too.
-    pub fn implies(self, required: Constraint) -> bool {
+    pub(crate) fn implies(self, required: Constraint) -> bool {
         [Prim::Int, Prim::Float, Prim::String]
             .into_iter()
             .all(|p| !self.allows(p) || required.allows(p))
@@ -85,9 +85,15 @@ pub enum Type {
     /// `Name(args...)`. Primitives are named types too: `Int` is
     /// `scarlet.Int`. An alias never appears here, because annotations expand
     /// it.
-    Named { name: TypeName, args: Rc<[Type]> },
+    Named {
+        name: TypeName,
+        args: Rc<[Type]>,
+    },
     /// `fn(params...) ret`.
-    Fn { params: Rc<[Type]>, ret: Rc<Type> },
+    Fn {
+        params: Rc<[Type]>,
+        ret: Rc<Type>,
+    },
     /// `(elems...)`.
     Tuple(Rc<[Type]>),
     Var(TypeVar),
@@ -108,7 +114,7 @@ impl Type {
         }
     }
 
-    pub fn tuple(elems: Vec<Type>) -> Type {
+    pub(crate) fn tuple(elems: Vec<Type>) -> Type {
         Type::Tuple(elems.into())
     }
 

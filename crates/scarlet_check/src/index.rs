@@ -55,7 +55,9 @@ pub struct Site {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DefKind {
     Value,
-    Function { params: Vec<String> },
+    Function {
+        params: Vec<String>,
+    },
     Constant,
     Constructor {
         /// The type that declares it. Using the constructor keeps the type
@@ -74,7 +76,7 @@ pub enum DefKind {
 }
 
 impl DefKind {
-    pub fn entity(&self) -> EntityKind {
+    pub(crate) fn entity(&self) -> EntityKind {
         match self {
             DefKind::Value => EntityKind::Value,
             DefKind::Function { .. } => EntityKind::Function,
@@ -114,13 +116,7 @@ pub enum UseKind {
     Definition,
 }
 
-impl UseKind {
-    /// Whether this occurrence reads its target, as opposed to declaring it
-    /// or naming a module.
-    pub fn is_reference_site(self) -> bool {
-        matches!(self, UseKind::Qualified | UseKind::Unqualified)
-    }
-}
+impl UseKind {}
 
 #[derive(Debug, Clone)]
 pub struct Use {
@@ -136,7 +132,6 @@ pub struct Use {
 #[derive(Debug, Clone)]
 pub struct Hover {
     pub span: Span,
-    pub name: String,
     pub ty: Type,
 }
 

@@ -95,7 +95,10 @@ impl<'a> Walker<'a, '_> {
         use ast::Expression as E;
         match e {
             E::Identifier(id) => self.referenced(&id.name),
-            E::NumberLiteral(_) | E::StringLiteral(_) | E::ErrorNode(_) | E::ModuleAccessExpression(_) => {}
+            E::NumberLiteral(_)
+            | E::StringLiteral(_)
+            | E::ErrorNode(_)
+            | E::ModuleAccessExpression(_) => {}
             E::BinaryLiteral(bl) => {
                 for seg in &bl.segments {
                     self.expr(&seg.value);

@@ -178,7 +178,6 @@ impl<'a> Checker<'a> {
             .map(|b| typed::Binder {
                 name: b.name,
                 ty: b.scheme.ty,
-                span: b.span,
                 module_scope: b.module_scope,
             })
             .collect();
@@ -203,7 +202,8 @@ impl<'a> Checker<'a> {
     // --- Diagnostics ---
 
     pub fn error(&mut self, span: Span, message: impl Into<String>) {
-        self.diags.push(self.diag(span, DiagnosticCode::TypeError, message.into()));
+        self.diags
+            .push(self.diag(span, DiagnosticCode::TypeError, message.into()));
     }
 
     pub fn module_error(&mut self, span: Span, message: impl Into<String>) {
@@ -278,7 +278,8 @@ impl<'a> Checker<'a> {
     /// whatever the name meant before.
     pub fn bind(&mut self, name: &str, scheme: LocalScheme, span: Span) -> BinderId {
         let id = self.new_binder(name, scheme, span);
-        self.scope.insert(self.binders[id.0 as usize].name.clone(), id);
+        self.scope
+            .insert(self.binders[id.0 as usize].name.clone(), id);
         id
     }
 
@@ -314,7 +315,14 @@ impl<'a> Checker<'a> {
         }
     }
 
-    pub fn define(&mut self, span: Span, name: &str, doc: Option<String>, public: bool, kind: DefKind) {
+    pub fn define(
+        &mut self,
+        span: Span,
+        name: &str,
+        doc: Option<String>,
+        public: bool,
+        kind: DefKind,
+    ) {
         let site = self.site(span, kind.entity());
         self.defs.push(Def {
             site,
@@ -337,9 +345,8 @@ impl<'a> Checker<'a> {
     fn source_index(&mut self) -> SourceIndex {
         let hovers = std::mem::take(&mut self.hovers)
             .into_iter()
-            .map(|(span, name, ty)| Hover {
+            .map(|(span, _, ty)| Hover {
                 span,
-                name: name.to_string(),
                 ty: self.e.zonk(ty),
             })
             .collect();

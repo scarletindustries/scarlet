@@ -14,8 +14,8 @@ use crate::check::{Checker, entity_of};
 use crate::index::{EntityKind, Site, UseKind};
 use crate::pattern::{CtorRef, Number, PatBinds};
 use crate::typed::{
-    Arg, ArrayElem, Arm, BinOp, BinSeg, BinUnit, BinderId, Block, Expr, ExprKind, FieldAt, InterpPart,
-    Lambda, OrShape, Pattern, PatternKind, Spread, Stmt, Var,
+    Arg, Arm, ArrayElem, BinOp, BinSeg, BinUnit, BinderId, Block, Expr, ExprKind, FieldAt,
+    InterpPart, Lambda, OrShape, Pattern, PatternKind, Spread, Stmt, Var,
 };
 
 /// The span whose type decides a body's type: its last expression.
@@ -231,7 +231,7 @@ impl Checker<'_> {
         }
     }
 
-    fn check_int(&mut self, e: &ast::Expression) -> Expr {
+    pub(crate) fn check_int(&mut self, e: &ast::Expression) -> Expr {
         let x = self.check_expr(e);
         let int = self.e.int();
         self.unify(int, x.ty, e.span());
@@ -309,7 +309,10 @@ impl Checker<'_> {
                     ast::Declaration::Type(td) => ("type", td.span),
                     ast::Declaration::Const(cb) => ("const", cb.span),
                 };
-                self.error(sp, format!("{kind} declarations are only allowed at the top level"));
+                self.error(
+                    sp,
+                    format!("{kind} declarations are only allowed at the top level"),
+                );
                 None
             }
             ast::Statement::ImportDeclaration(_) => None,
@@ -333,6 +336,9 @@ impl Checker<'_> {
         self.e.enter_level();
         let self_ty = self.e.fresh();
         let binder = self.new_binder(&id.name, LocalScheme::mono(self_ty), id.span);
+        if let Some(def) = self.defs.last_mut() {
+            def.doc = b.doc.clone();
+        }
         let is_fn = matches!(b.init, ast::Expression::FunctionExpression(_));
         let saved = std::mem::replace(
             &mut self.pending_self,
@@ -472,7 +478,8 @@ impl Checker<'_> {
             let b = found.binder;
             self.binders[b.0 as usize].used = true;
             let state = &self.binders[b.0 as usize];
-            let (module_scope, scheme, span) = (state.module_scope, state.scheme.clone(), state.span);
+            let (module_scope, scheme, span) =
+                (state.module_scope, state.scheme.clone(), state.span);
             if found.frame < self.scope.depth() && !module_scope {
                 self.scope.capture(b, found.frame);
             }
@@ -529,9 +536,15 @@ impl Checker<'_> {
         let member = ma.member.name.as_str();
         let Some(v) = iface.values.get(member) else {
             if iface.private_names.contains(member) {
-                self.error(ma.member.span, format!("'{member}' is private in module '{module}'"));
+                self.error(
+                    ma.member.span,
+                    format!("'{member}' is private in module '{module}'"),
+                );
             } else {
-                self.error(ma.member.span, format!("Module '{module}' has no member '{member}'"));
+                self.error(
+                    ma.member.span,
+                    format!("Module '{module}' has no member '{member}'"),
+                );
             }
             return None;
         };
@@ -630,7 +643,9 @@ impl Checker<'_> {
             };
             self.unify(expected, value.ty, seg.value.span());
             let unit = match &seg.spec {
-                ast::BinSpec::Int { bits } => BinUnit::Bits(bits.as_ref().map(|b| Box::new(self.check_int(b)))),
+                ast::BinSpec::Int { bits } => {
+                    BinUnit::Bits(bits.as_ref().map(|b| Box::new(self.check_int(b))))
+                }
                 ast::BinSpec::Binary { bytes } => {
                     BinUnit::Bytes(bytes.as_ref().map(|b| Box::new(self.check_int(b))))
                 }
@@ -684,7 +699,11 @@ impl Checker<'_> {
             let body = self.check_expr(&arm.body);
             self.unify(result, body.ty, type_defining_span(&arm.body));
             self.scope.close_block();
-            arms.push(Arm { pattern, guard, body });
+            arms.push(Arm {
+                pattern,
+                guard,
+                body,
+            });
         }
         (
             result,
@@ -697,7 +716,11 @@ impl Checker<'_> {
 
     // --- Functions ---
 
-    fn check_lambda(&mut self, fe: &ast::FunctionExpression, hints: Option<Vec<Ty>>) -> (Ty, Lambda) {
+    fn check_lambda(
+        &mut self,
+        fe: &ast::FunctionExpression,
+        hints: Option<Vec<Ty>>,
+    ) -> (Ty, Lambda) {
         self.e.enter_level();
         let self_name = self.pending_self.take();
         self.scope.open_frame(self_name.clone());
@@ -798,11 +821,20 @@ impl Checker<'_> {
     /// A call's arguments, checked in source order against the callee's
     /// parameters. `labels` is the callee's parameter names when a call may
     /// label its arguments, which is only a module function named directly.
-    fn check_args(&mut self, callee: Expr, labels: Option<&[Name]>, args: &[ast::CallArg], span: Span) -> (Ty, ExprKind) {
+    fn check_args(
+        &mut self,
+        callee: Expr,
+        labels: Option<&[Name]>,
+        args: &[ast::CallArg],
+        span: Span,
+    ) -> (Ty, ExprKind) {
         let (params, ret) = match self.e.callable(callee.ty, args.len()) {
             Ok(pr) => pr,
             Err(NotCallable::Arity { params, ret }) => {
-                self.error(span, format!("Expected {} argument(s), got {}", params.len(), args.len()));
+                self.error(
+                    span,
+                    format!("Expected {} argument(s), got {}", params.len(), args.len()),
+                );
                 (params, ret)
             }
             Err(NotCallable::NotFn) => {
@@ -817,7 +849,9 @@ impl Checker<'_> {
                 return self.error_expr();
             }
         };
-        let labelled = args.iter().any(|a| matches!(a, ast::CallArg::Labeled { .. }));
+        let labelled = args
+            .iter()
+            .any(|a| matches!(a, ast::CallArg::Labeled { .. }));
         let slot_of: Vec<Option<usize>> = match labels {
             Some(names) if labelled => self.slot_call_args(names, args),
             _ => (0..args.len()).map(Some).collect(),
@@ -870,7 +904,9 @@ impl Checker<'_> {
             .enumerate()
             .filter_map(|(i, a)| match a {
                 ast::CallArg::Positional(e) => Some((None, (i, e.span()))),
-                ast::CallArg::Labeled { label, .. } => Some((Some(label.name.as_str()), (i, label.span))),
+                ast::CallArg::Labeled { label, .. } => {
+                    Some((Some(label.name.as_str()), (i, label.span)))
+                }
                 ast::CallArg::Spread(_) => None,
             })
             .collect();
@@ -889,7 +925,10 @@ impl Checker<'_> {
                 ),
                 SlotError::Duplicate((_, span), p) => {
                     let dup = names.get(p).map_or("_", |n| &**n);
-                    self.error(span, format!("Parameter '{dup}' is specified more than once"));
+                    self.error(
+                        span,
+                        format!("Parameter '{dup}' is specified more than once"),
+                    );
                 }
             }
         }
@@ -978,7 +1017,13 @@ impl Checker<'_> {
     /// Where `base.field` reads each field a spread fills. A field the type's
     /// variants don't all have can't be filled, because which variant `base`
     /// is isn't known until the program runs.
-    fn spread_fills(&mut self, c: &CtorRef, result: Ty, unfilled: &[usize], span: Span) -> Vec<(u32, FieldAt)> {
+    fn spread_fills(
+        &mut self,
+        c: &CtorRef,
+        result: Ty,
+        unfilled: &[usize],
+        span: Span,
+    ) -> Vec<(u32, FieldAt)> {
         let Shape::Con(type_name, type_args) = self.e.shape(result) else {
             return Vec::new();
         };
@@ -987,7 +1032,9 @@ impl Checker<'_> {
         };
         let mut fills = Vec::new();
         for &i in unfilled {
-            let Some(label) = c.labels.get(i) else { continue };
+            let Some(label) = c.labels.get(i) else {
+                continue;
+            };
             match self.field_in_variants(&def, &type_args, label, span) {
                 Ok((_, at)) => fills.push((i as u32, at)),
                 Err(FieldMissing::On(variant)) => {
@@ -1006,7 +1053,8 @@ impl Checker<'_> {
     // --- Fields ---
 
     fn check_property(&mut self, pa: &ast::PropertyAccessExpression) -> (Ty, ExprKind) {
-        if let (ast::Expression::Identifier(id), ast::PropertyKey::Field(field)) = (pa.left.as_ref(), &pa.right)
+        if let (ast::Expression::Identifier(id), ast::PropertyKey::Field(field)) =
+            (pa.left.as_ref(), &pa.right)
             && !self.is_value_name(&id.name)
             && self.qualifiers.contains_key(id.name.as_str())
         {
@@ -1023,7 +1071,10 @@ impl Checker<'_> {
         match &pa.right {
             ast::PropertyKey::TupleIndex(num) => {
                 let Ok(index) = num.value.parse::<u32>() else {
-                    self.error(num.span, format!("Tuple index must be an integer, got '{}'", num.value));
+                    self.error(
+                        num.span,
+                        format!("Tuple index must be an integer, got '{}'", num.value),
+                    );
                     return self.error_expr();
                 };
                 match self.e.shape(record.ty) {
@@ -1047,7 +1098,10 @@ impl Checker<'_> {
                         }
                     },
                     Shape::Var(_) | Shape::Con(..) | Shape::Fn(..) => {
-                        self.error(num.span, format!("Can't use .{index} here, because the value isn't a tuple"));
+                        self.error(
+                            num.span,
+                            format!("Can't use .{index} here, because the value isn't a tuple"),
+                        );
                         self.error_expr()
                     }
                 }
@@ -1084,12 +1138,18 @@ impl Checker<'_> {
             }
             Shape::Fn(..) | Shape::Tuple(_) => {
                 let s = self.e.display(receiver);
-                self.error(field.span, format!("Type '{s}' has no field '{}'", field.name));
+                self.error(
+                    field.span,
+                    format!("Type '{s}' has no field '{}'", field.name),
+                );
                 return None;
             }
         };
         let Some(def) = self.type_def(&type_name).cloned() else {
-            self.error(field.span, format!("Type '{}' has no field '{}'", type_name.name(), field.name));
+            self.error(
+                field.span,
+                format!("Type '{}' has no field '{}'", type_name.name(), field.name),
+            );
             return None;
         };
         match self.field_in_variants(&def, &type_args, &field.name, field.span) {
@@ -1102,7 +1162,10 @@ impl Checker<'_> {
                 Some((ty, at))
             }
             Err(FieldMissing::NotCustom) => {
-                self.error(field.span, format!("Type '{}' has no accessible fields", type_name.name()));
+                self.error(
+                    field.span,
+                    format!("Type '{}' has no accessible fields", type_name.name()),
+                );
                 None
             }
             Err(FieldMissing::On(variant)) => {
@@ -1142,11 +1205,21 @@ impl Checker<'_> {
         if variants.is_empty() {
             return Err(FieldMissing::NotCustom);
         }
-        let mut subst: Vec<_> = def.params.iter().cloned().zip(args.iter().copied()).collect();
+        let mut subst: Vec<_> = def
+            .params
+            .iter()
+            .cloned()
+            .zip(args.iter().copied())
+            .collect();
         let mut ty: Option<Ty> = None;
         let mut slots = Vec::with_capacity(variants.len());
         for v in variants {
-            let Some((i, f)) = v.fields.iter().enumerate().find(|(_, f)| &*f.label == label) else {
+            let Some((i, f)) = v
+                .fields
+                .iter()
+                .enumerate()
+                .find(|(_, f)| &*f.label == label)
+            else {
                 return Err(FieldMissing::On(v.name.clone()));
             };
             slots.push(i as u32);

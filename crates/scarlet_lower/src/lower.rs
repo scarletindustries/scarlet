@@ -39,8 +39,7 @@
 use std::collections::VecDeque;
 
 use super::{
-    Atom, Callee, ConstId, CoreBind, CoreExpr, CoreFn, CorePat, JoinId, Load, LocalId,
-    PrimOp,
+    Atom, Callee, ConstId, CoreBind, CoreExpr, CoreFn, CorePat, JoinId, Load, LocalId, PrimOp,
 };
 use crate::typed_ir::{
     BindingId, PatRest, RTy, TempTys, TypedArm, TypedArrayElem, TypedBinPatSeg, TypedBinSeg,
@@ -75,7 +74,7 @@ fn binding_bug(b: BindingId, why: &str) -> ! {
 
 /// Lower one function. Each param is bound under the [`BindingId`] its
 /// [`TypedBind`] carries.
-pub fn lower_fn(temps: TempTys, f: &TypedFn) -> CoreFn {
+pub(crate) fn lower_fn(temps: TempTys, f: &TypedFn) -> CoreFn {
     let mut lo = Lower::new(temps, f.binds);
     let params: Vec<CoreBind> = f
         .params
@@ -460,8 +459,7 @@ impl Lower {
     /// names no source slot, and a named `let` on a nested spine is local to
     /// that segment, where its value already has a home.
     fn let_bind_at(&mut self, bind: &TypedBind, init: &TypedExpr, spine: SpinePos) {
-        let owns_slot =
-            bind.global.is_some() || (spine == SpinePos::Outer && bind.named);
+        let owns_slot = bind.global.is_some() || (spine == SpinePos::Outer && bind.named);
         let v = if owns_slot {
             self.let_bound(bind, init)
         } else {
@@ -1488,4 +1486,3 @@ fn nested_fallible(p: &TypedPat) -> bool {
         | TypedPat::Range { .. } => true,
     }
 }
-

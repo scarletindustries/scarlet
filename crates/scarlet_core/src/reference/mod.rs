@@ -29,7 +29,7 @@ pub mod rename;
 pub mod unused;
 pub mod uri;
 
-pub use uri::{ModuleUriError, module_uri, path_to_uri};
+pub use uri::path_to_uri;
 
 pub use scarlet_check::index::EntityKind;
 
@@ -90,7 +90,7 @@ pub struct ModuleInterner {
 
 impl ModuleInterner {
     /// Intern `path`, returning its stable id (creating one on first sight).
-    pub(crate) fn intern(&mut self, path: &ModulePath) -> ModuleId {
+    fn intern(&mut self, path: &ModulePath) -> ModuleId {
         let key = ModuleKey::of(path);
         if let Some(&id) = self.by_key.get(&key) {
             return id;
@@ -142,7 +142,7 @@ pub struct DefId {
 }
 
 impl DefId {
-    pub(crate) fn new(module: ModuleId, span: Span, entity: EntityKind) -> Self {
+    fn new(module: ModuleId, span: Span, entity: EntityKind) -> Self {
         DefId {
             module,
             span,
@@ -191,7 +191,7 @@ pub enum DefinitionKind {
 impl DefinitionKind {
     /// The [`EntityKind`] this payload belongs to. It must agree with the
     /// `DefId.entity` of the definition that carries it.
-    pub(crate) fn entity(&self) -> EntityKind {
+    fn entity(&self) -> EntityKind {
         match self {
             DefinitionKind::Value => EntityKind::Value,
             DefinitionKind::Function { .. } => EntityKind::Function,
@@ -211,13 +211,13 @@ pub struct Definition {
     pub name: String,
     pub doc: Option<String>,
     kind: DefinitionKind,
-    pub is_pub: bool,
+    is_pub: bool,
 }
 
 impl Definition {
     /// Build a definition from its location and payload. The `DefId` is
     /// derived here, so its entity always agrees with the payload.
-    pub(crate) fn new(
+    fn new(
         module: ModuleId,
         span: Span,
         name: impl Into<String>,
@@ -302,12 +302,12 @@ impl Definition {
 #[derive(Debug, Clone, Copy)]
 pub struct Reference {
     pub span: Span,
-    pub kind: ReferenceKind,
-    pub target: DefId,
+    kind: ReferenceKind,
+    target: DefId,
 }
 
 impl Reference {
-    pub(crate) fn new(span: Span, kind: ReferenceKind, target: DefId) -> Self {
+    fn new(span: Span, kind: ReferenceKind, target: DefId) -> Self {
         Reference { span, kind, target }
     }
 }
@@ -368,7 +368,7 @@ struct CursorHit {
 }
 
 impl ModuleReferences {
-    pub(crate) fn new(module: ModuleId) -> Self {
+    fn new(module: ModuleId) -> Self {
         ModuleReferences {
             module,
             doc: None,
@@ -383,7 +383,7 @@ impl ModuleReferences {
         self.module
     }
 
-    pub(crate) fn set_doc(&mut self, doc: Option<String>) {
+    fn set_doc(&mut self, doc: Option<String>) {
         self.doc = doc;
     }
 
@@ -393,7 +393,7 @@ impl ModuleReferences {
 
     /// Register a declared name. Declaring the same `DefId` again overwrites the
     /// old record, and moves it in `name_to_defs` if the name changed.
-    pub(crate) fn add_definition(&mut self, def: Definition) {
+    fn add_definition(&mut self, def: Definition) {
         let defid = def.defid;
         let name = def.name.clone();
         if let Some(old) = self.definitions.insert(defid, def) {
@@ -414,7 +414,7 @@ impl ModuleReferences {
 
     /// Record an occurrence. `owner` is the definition this occurrence is
     /// nested within, used for dead-code reachability.
-    pub(crate) fn add_reference(&mut self, owner: Option<DefId>, reference: Reference) {
+    fn add_reference(&mut self, owner: Option<DefId>, reference: Reference) {
         self.occurrences.push(Occurrence { owner, reference });
         self.line_index.take();
     }
@@ -423,7 +423,7 @@ impl ModuleReferences {
         self.definitions.values()
     }
 
-    pub(crate) fn definition(&self, id: DefId) -> Option<&Definition> {
+    fn definition(&self, id: DefId) -> Option<&Definition> {
         self.definitions.get(&id)
     }
 
@@ -437,7 +437,7 @@ impl ModuleReferences {
     }
 
     /// The definition a position resolves to. `None` if nothing covers it.
-    pub(crate) fn resolve_position(&self, line: i32, col: i32) -> Option<DefId> {
+    fn resolve_position(&self, line: i32, col: i32) -> Option<DefId> {
         self.cursor_hit(line, col).map(|h| h.target)
     }
 
@@ -502,18 +502,18 @@ pub struct ReferenceGraphBuilder {
 }
 
 impl ReferenceGraphBuilder {
-    pub(crate) fn new() -> Self {
+    fn new() -> Self {
         Self::default()
     }
 
     /// Intern `path`, returning its stable id (creating one on first sight).
-    pub(crate) fn intern_module(&mut self, path: &ModulePath) -> ModuleId {
+    fn intern_module(&mut self, path: &ModulePath) -> ModuleId {
         self.interner.intern(path)
     }
 
     /// Install or replace a module's references. This takes an `Rc` because
     /// every `check` inserts the refs of every unchanged module again.
-    pub(crate) fn insert(&mut self, refs: Rc<ModuleReferences>) {
+    fn insert(&mut self, refs: Rc<ModuleReferences>) {
         self.modules.insert(refs.module(), refs);
     }
 
@@ -526,7 +526,7 @@ impl ReferenceGraphBuilder {
     /// Build the workspace's reverse index from the final set of modules and
     /// seal the graph. Building it all at once means no stale edge can survive
     /// a module being evicted.
-    pub(crate) fn finish(self) -> ReferenceGraph {
+    fn finish(self) -> ReferenceGraph {
         let mut refs_by_def: HashMap<DefId, Vec<ResolvedRef>> = HashMap::new();
         for (&module, mr) in &self.modules {
             for occ in mr.occurrences() {
@@ -563,7 +563,7 @@ pub struct ReferenceGraph {
 }
 
 impl ReferenceGraph {
-    pub fn module_id(&self, path: &ModulePath) -> Option<ModuleId> {
+    fn module_id(&self, path: &ModulePath) -> Option<ModuleId> {
         self.interner.lookup(path)
     }
 
@@ -723,6 +723,80 @@ fn add_def(
         stub_kind(d),
     ));
     d
+}
+
+impl ReferenceGraph {
+    /// The graph of every module `build` holds.
+    pub fn of_build(build: &crate::build::Build) -> ReferenceGraph {
+        let mut g = ReferenceGraphBuilder::new();
+        let mut modules: Vec<&crate::build::Module> = build.modules().collect();
+        modules.sort_by(|a, b| a.key.as_str().cmp(b.key.as_str()));
+        for m in modules {
+            let refs = module_references(&mut g, &m.key, &m.checked.index);
+            g.insert(Rc::new(refs));
+        }
+        g.finish()
+    }
+}
+
+fn path_of(key: &ModuleKey) -> ModulePath {
+    key.as_str().split('/').map(str::to_string).collect()
+}
+
+/// One module's definitions and uses, from what its check recorded.
+fn module_references(
+    g: &mut ReferenceGraphBuilder,
+    key: &ModuleKey,
+    index: &scarlet_check::SourceIndex,
+) -> ModuleReferences {
+    use scarlet_check::index::{DefKind, Site, UseKind};
+    let defid = |g: &mut ReferenceGraphBuilder, s: &Site| {
+        DefId::new(g.intern_module(&path_of(&s.module)), s.span, s.entity)
+    };
+    let module = g.intern_module(&path_of(key));
+    let mut refs = ModuleReferences::new(module);
+    refs.set_doc(index.doc.clone());
+    for d in &index.defs {
+        let kind = match &d.kind {
+            DefKind::Value => DefinitionKind::Value,
+            DefKind::Function { params } => DefinitionKind::Function {
+                param_names: params.clone(),
+            },
+            DefKind::Constant => DefinitionKind::Constant,
+            DefKind::Constructor { of, fields } => DefinitionKind::Constructor {
+                ctor_of: Some(defid(g, of)),
+                param_names: fields.clone(),
+            },
+            DefKind::Type => DefinitionKind::Type,
+            DefKind::ModuleAlias { decl, imports } => DefinitionKind::ModuleAlias {
+                decl_span: *decl,
+                imports_module: Some(g.intern_module(&path_of(imports))),
+            },
+            DefKind::Field => DefinitionKind::Field,
+        };
+        refs.add_definition(Definition::new(
+            module,
+            d.site.span,
+            d.name.clone(),
+            d.doc.clone(),
+            d.public,
+            kind,
+        ));
+    }
+    for u in &index.uses {
+        let kind = match u.kind {
+            UseKind::Qualified => ReferenceKind::Qualified,
+            UseKind::Qualifier => ReferenceKind::Qualifier,
+            UseKind::Unqualified => ReferenceKind::Unqualified,
+            UseKind::Import => ReferenceKind::Import,
+            UseKind::Alias => ReferenceKind::Alias,
+            UseKind::Definition => ReferenceKind::Definition,
+        };
+        let owner = u.owner.as_ref().map(|o| defid(g, o));
+        let target = defid(g, &u.target);
+        refs.add_reference(owner, Reference::new(u.span, kind, target));
+    }
+    refs
 }
 
 #[cfg(test)]
@@ -995,69 +1069,4 @@ mod tests {
             .collect();
         assert_eq!(surfaced, vec!["compute"]);
     }
-}
-
-impl ReferenceGraph {
-    /// The graph of every module `build` holds.
-    pub fn of_build(build: &crate::build::Build) -> ReferenceGraph {
-        let mut g = ReferenceGraphBuilder::new();
-        let mut modules: Vec<&crate::build::Module> = build.modules().collect();
-        modules.sort_by(|a, b| a.key.as_str().cmp(b.key.as_str()));
-        for m in modules {
-            let refs = module_references(&mut g, &m.key, &m.checked.index);
-            g.insert(Rc::new(refs));
-        }
-        g.finish()
-    }
-}
-
-fn path_of(key: &ModuleKey) -> ModulePath {
-    key.as_str().split('/').map(str::to_string).collect()
-}
-
-/// One module's definitions and uses, from what its check recorded.
-fn module_references(
-    g: &mut ReferenceGraphBuilder,
-    key: &ModuleKey,
-    index: &scarlet_check::SourceIndex,
-) -> ModuleReferences {
-    use scarlet_check::index::{DefKind, Site, UseKind};
-    let defid = |g: &mut ReferenceGraphBuilder, s: &Site| DefId::new(g.intern_module(&path_of(&s.module)), s.span, s.entity);
-    let module = g.intern_module(&path_of(key));
-    let mut refs = ModuleReferences::new(module);
-    refs.set_doc(index.doc.clone());
-    for d in &index.defs {
-        let kind = match &d.kind {
-            DefKind::Value => DefinitionKind::Value,
-            DefKind::Function { params } => DefinitionKind::Function {
-                param_names: params.clone(),
-            },
-            DefKind::Constant => DefinitionKind::Constant,
-            DefKind::Constructor { of, fields } => DefinitionKind::Constructor {
-                ctor_of: Some(defid(g, of)),
-                param_names: fields.clone(),
-            },
-            DefKind::Type => DefinitionKind::Type,
-            DefKind::ModuleAlias { decl, imports } => DefinitionKind::ModuleAlias {
-                decl_span: *decl,
-                imports_module: Some(g.intern_module(&path_of(imports))),
-            },
-            DefKind::Field => DefinitionKind::Field,
-        };
-        refs.add_definition(Definition::new(module, d.site.span, d.name.clone(), d.doc.clone(), d.public, kind));
-    }
-    for u in &index.uses {
-        let kind = match u.kind {
-            UseKind::Qualified => ReferenceKind::Qualified,
-            UseKind::Qualifier => ReferenceKind::Qualifier,
-            UseKind::Unqualified => ReferenceKind::Unqualified,
-            UseKind::Import => ReferenceKind::Import,
-            UseKind::Alias => ReferenceKind::Alias,
-            UseKind::Definition => ReferenceKind::Definition,
-        };
-        let owner = u.owner.as_ref().map(|o| defid(g, o));
-        let target = defid(g, &u.target);
-        refs.add_reference(owner, Reference::new(u.span, kind, target));
-    }
-    refs
 }

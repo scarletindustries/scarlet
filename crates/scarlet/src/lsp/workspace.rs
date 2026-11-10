@@ -74,7 +74,7 @@ impl Root {
             .get_or_init(|| ReferenceGraph::of_build(&self.build))
     }
 
-    pub(super) fn key_of(&self, uri: &str) -> Option<&ModuleKey> {
+    fn key_of(&self, uri: &str) -> Option<&ModuleKey> {
         self.keys.get(uri)
     }
 

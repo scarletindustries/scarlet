@@ -17,9 +17,9 @@ use crate::typed_ir::RTy;
 /// The prelude's constructors that are immediates.
 #[derive(Clone, Copy)]
 pub struct Immediates {
-    pub true_: VariantRef,
-    pub false_: VariantRef,
-    pub nil: VariantRef,
+    pub(crate) true_: VariantRef,
+    pub(crate) false_: VariantRef,
+    pub(crate) nil: VariantRef,
 }
 
 /// What a pattern tests a Bool or Nil for.
@@ -78,7 +78,7 @@ impl Immediates {
 }
 
 /// Rewrite `f` in place.
-pub fn rewrite(f: &mut CoreFn, im: &Immediates) {
+pub(crate) fn rewrite(f: &mut CoreFn, im: &Immediates) {
     let mut work = vec![&mut f.body];
     while let Some(e) = work.pop() {
         if let CoreExpr::Match { arms, .. } = e

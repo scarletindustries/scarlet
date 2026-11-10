@@ -30,11 +30,6 @@ pub fn desugar_program(block: &mut BlockExpression) {
     desugar_body(&mut block.body);
 }
 
-/// Desugar every backpass and pipe in `expr`, in place.
-pub fn desugar_expression(expr: &mut Expression) {
-    desugar_expr(expr);
-}
-
 fn is_backpass(node: &Node) -> bool {
     matches!(node, Node::Statement(s) if matches!(s.as_ref(), Statement::Backpass(_)))
 }

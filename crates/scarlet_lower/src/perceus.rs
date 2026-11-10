@@ -22,7 +22,7 @@ use crate::typed_ir::{RTy, ResolvedPool};
 /// bind's `ty` is a heap type and to read a tuple's width. Its types are always
 /// resolved, so no unsolved variable can get here and make `is_heap` answer
 /// `false` by accident.
-pub fn perceus(pool: &ResolvedPool, f: CoreFn) -> CoreFn {
+pub(crate) fn perceus(pool: &ResolvedPool, f: CoreFn) -> CoreFn {
     let CoreFn {
         params,
         body,
@@ -643,7 +643,7 @@ fn unscoped_goto(id: JoinId) -> ! {
 /// use, because function bodies read it through `Load::Global` for as long as
 /// the program runs. Releasing or overwriting it at the toplevel's last read would
 /// free a value the program still holds.
-pub fn keep_globals(mut f: CoreFn) -> CoreFn {
+pub(crate) fn keep_globals(mut f: CoreFn) -> CoreFn {
     let pinned: BTreeSet<LocalId> = f
         .body
         .toplevel_globals()

@@ -35,10 +35,6 @@ impl<I: Idx, T> TiVec<I, T> {
         }
     }
 
-    pub fn len(&self) -> usize {
-        self.raw.len()
-    }
-
     /// The index [`Self::push`] would return. Make new indices here, not from
     /// `len() as u32` at a call site that may not own the whole table.
     pub fn next_idx(&self) -> I {
@@ -64,18 +60,9 @@ impl<I: Idx, T> TiVec<I, T> {
 
     /// Drop every element at `len` and after. Does nothing when
     /// `len >= self.len()`.
-    pub fn truncate(&mut self, len: usize) {
+    #[cfg(test)]
+    fn truncate(&mut self, len: usize) {
         self.raw.truncate(len);
-    }
-
-    /// The elements from `start` to the end, for callers that walk a suffix.
-    pub fn tail_from(&self, start: I) -> &[T] {
-        &self.raw[start.index()..]
-    }
-
-    /// Drop the typed-index wrapper, for callers that want a plain `Vec`.
-    pub fn into_vec(self) -> Vec<T> {
-        self.raw
     }
 }
 

@@ -57,7 +57,12 @@ impl Compiled {
 
 /// Compile `block`, whose text hashes to `hash`, with `build` holding the
 /// modules it imports.
-pub fn compile(build: &mut Build, parsed: crate::build::Parsed, hash: u64, opts: &Options<'_>) -> Compiled {
+pub fn compile(
+    build: &mut Build,
+    parsed: crate::build::Parsed,
+    hash: u64,
+    opts: &Options<'_>,
+) -> Compiled {
     let block = &parsed.ast;
     let (key, role) = match &opts.as_module {
         Some(path) => (ModuleKey::for_stdlib(path), Role::Library),
@@ -74,7 +79,9 @@ pub fn compile(build: &mut Build, parsed: crate::build::Parsed, hash: u64, opts:
         unused: opts.unused,
     });
     let mut diagnostics = build.diagnostics(&reach);
-    let main = (role == Role::Entry).then(|| entry_rules(block, opts.run, &mut diagnostics)).flatten();
+    let main = (role == Role::Entry)
+        .then(|| entry_rules(block, opts.run, &mut diagnostics))
+        .flatten();
     if has_errors(&diagnostics) || role == Role::Library {
         return Compiled {
             key,
@@ -100,7 +107,11 @@ pub fn compile(build: &mut Build, parsed: crate::build::Parsed, hash: u64, opts:
     let program = match build_program(&clean, &Defs(build), main.as_ref()) {
         Ok(p) => Some(p),
         Err(LinkError::Prelude(msg)) => {
-            diagnostics.push(Diagnostic::error(Span::DUMMY, DiagnosticCode::TypeError, msg));
+            diagnostics.push(Diagnostic::error(
+                Span::DUMMY,
+                DiagnosticCode::TypeError,
+                msg,
+            ));
             None
         }
     };
@@ -114,14 +125,24 @@ pub fn compile(build: &mut Build, parsed: crate::build::Parsed, hash: u64, opts:
 /// The entry's `main`, when it has a usable one. A program about to run must
 /// have one. The checker reports a `main` that isn't public or takes
 /// parameters.
-fn entry_rules(block: &ast::BlockExpression, run: bool, out: &mut Vec<Diagnostic>) -> Option<&'static str> {
+fn entry_rules(
+    block: &ast::BlockExpression,
+    run: bool,
+    out: &mut Vec<Diagnostic>,
+) -> Option<&'static str> {
     let main = block.body.iter().find_map(|n| match n {
         ast::Node::Statement(s) => match s.as_ref() {
             ast::Statement::Declaration { decl, public } => match decl.as_ref() {
-                ast::Declaration::Function(fd) if fd.identifier.name == "main" => Some((fd, *public)),
-                ast::Declaration::Function(_) | ast::Declaration::Type(_) | ast::Declaration::Const(_) => None,
+                ast::Declaration::Function(fd) if fd.identifier.name == "main" => {
+                    Some((fd, *public))
+                }
+                ast::Declaration::Function(_)
+                | ast::Declaration::Type(_)
+                | ast::Declaration::Const(_) => None,
             },
-            ast::Statement::ImportDeclaration(_) | ast::Statement::Binding(_) | ast::Statement::Backpass(_) => None,
+            ast::Statement::ImportDeclaration(_)
+            | ast::Statement::Binding(_)
+            | ast::Statement::Backpass(_) => None,
         },
         ast::Node::Expression(_) => None,
     });
@@ -130,7 +151,8 @@ fn entry_rules(block: &ast::BlockExpression, run: bool, out: &mut Vec<Diagnostic
             out.push(Diagnostic::error(
                 Span::point(block.span.start_line, block.span.start_column),
                 DiagnosticCode::TypeError,
-                "There's no `main` function. A program starts at `pub fn main()`, so add one".to_string(),
+                "There's no `main` function. A program starts at `pub fn main()`, so add one"
+                    .to_string(),
             ));
         }
         return None;
@@ -139,11 +161,16 @@ fn entry_rules(block: &ast::BlockExpression, run: bool, out: &mut Vec<Diagnostic
 }
 
 /// Type definitions, read from the interfaces the build holds.
-pub struct Defs<'b>(pub &'b Build);
+pub struct Defs<'b>(&'b Build);
 
 impl TypeDefs for Defs<'_> {
     fn type_def(&self, name: &TypeName) -> Option<&TypeDef> {
-        self.0.module(name.module())?.checked.interface.types.get(name.name())
+        self.0
+            .module(name.module())?
+            .checked
+            .interface
+            .types
+            .get(name.name())
     }
 }
 
@@ -152,7 +179,12 @@ impl TypeDefs for Defs<'_> {
 pub fn compile_text(text: &str, base_dir: Option<&Path>) -> Compiled {
     let parsed = crate::build::parse(text);
     let mut build = Build::new(None);
-    compile(&mut build, parsed, crate::build::source_hash(text), &Options::program(base_dir))
+    compile(
+        &mut build,
+        parsed,
+        crate::build::source_hash(text),
+        &Options::program(base_dir),
+    )
 }
 
 /// One public name of a module, for completion.
@@ -194,8 +226,17 @@ pub fn exports(build: &mut Build, path: &ModulePath) -> Vec<Export> {
     });
     let values = iface.values.iter().map(|(name, v)| Export {
         name: name.to_string(),
-        params: v.kind.labels().unwrap_or_default().iter().map(|l| l.to_string()).collect(),
+        params: v
+            .kind
+            .labels()
+            .unwrap_or_default()
+            .iter()
+            .map(|l| l.to_string())
+            .collect(),
     });
     let mut seen = std::collections::HashSet::new();
-    types.chain(values).filter(|e| seen.insert(e.name.clone())).collect()
+    types
+        .chain(values)
+        .filter(|e| seen.insert(e.name.clone()))
+        .collect()
 }

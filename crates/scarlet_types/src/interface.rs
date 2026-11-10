@@ -58,7 +58,9 @@ pub struct ValueDef {
 pub enum ValueKind {
     /// A `fn` declaration, with its parameter names in order. A call may use
     /// them as labels.
-    Fn { params: Vec<Name> },
+    Fn {
+        params: Vec<Name>,
+    },
     /// A `@vm` function: the VM runs it directly.
     Builtin {
         intrinsic: Intrinsic,

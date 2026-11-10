@@ -11,8 +11,8 @@
 //! it lives in `scarlet_ir`, and this crate re-exports it.
 
 pub mod immediates;
-pub mod lower;
-pub mod perceus;
+pub(crate) mod lower;
+pub(crate) mod perceus;
 pub mod program;
 mod translate;
 pub mod typed_ir;

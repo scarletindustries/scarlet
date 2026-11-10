@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 
 use scarlet_check::typed::{
-    self as t, Arg, ArrayElem, BinOp, BinSeg, BinSegPat, BinUnit, BinderId, Block, Expr, ExprKind, FieldAt, FnBody,
-    InterpPart, OrShape, Pattern, PatternKind, Rest, Stmt, TypedModule, Var,
+    self as t, Arg, ArrayElem, BinOp, BinSeg, BinSegPat, BinUnit, BinderId, Block, Expr, ExprKind,
+    FieldAt, FnBody, InterpPart, OrShape, Pattern, PatternKind, Rest, Stmt, TypedModule, Var,
 };
 use scarlet_ir::core_ir::{Const, FuncIdx, PrimOp};
 use scarlet_ir::rty::{Prim, RTy};
@@ -17,8 +17,8 @@ use scarlet_types::ty::Type;
 
 use crate::program::Builder;
 use crate::typed_ir::{
-    BindingId, PatRest, TypedArm, TypedArrayElem, TypedBinPatSeg, TypedBinSeg, TypedBind, TypedCallee, TypedExpr,
-    TypedFn, TypedInterpPart, TypedPat, ValueRef,
+    BindingId, PatRest, TypedArm, TypedArrayElem, TypedBinPatSeg, TypedBinSeg, TypedBind,
+    TypedCallee, TypedExpr, TypedFn, TypedInterpPart, TypedPat, ValueRef,
 };
 
 /// Give each of the module's functions its `FuncIdx`, and each module-level
@@ -50,7 +50,8 @@ pub(crate) fn register(b: &mut Builder<'_>, m: &TypedModule) {
     for (i, binder) in m.binders.iter().enumerate() {
         if binder.module_scope {
             let slot = b.global();
-            b.binder_slot.insert((m.key.clone(), BinderId(i as u32)), slot);
+            b.binder_slot
+                .insert((m.key.clone(), BinderId(i as u32)), slot);
         }
     }
 }
@@ -60,12 +61,16 @@ pub(crate) fn register(b: &mut Builder<'_>, m: &TypedModule) {
 pub(crate) fn module(b: &mut Builder<'_>, m: &TypedModule) -> TypedFn {
     let mut mx = Mx { b, m };
     for f in &m.functions {
-        let FnBody::Expr(body) = &f.body else { continue };
+        let FnBody::Expr(body) = &f.body else {
+            continue;
+        };
         let name = ValueName {
             module: m.key.clone(),
             name: f.name.clone(),
         };
-        let Some(&idx) = mx.b.fn_of.get(&name) else { continue };
+        let Some(&idx) = mx.b.fn_of.get(&name) else {
+            continue;
+        };
         let ty = mx.ty(f.ty);
         let ret = mx.b.pool.fun_ret(ty).unwrap_or(mx.b.temps.int);
         let mut cx = Fx::new(Some(name));
@@ -226,7 +231,10 @@ impl Mx<'_, '_, '_> {
     }
 
     fn global_of(&self, binder: BinderId) -> Option<scarlet_ir::core_ir::GlobalSlot> {
-        self.b.binder_slot.get(&(self.m.key.clone(), binder)).copied()
+        self.b
+            .binder_slot
+            .get(&(self.m.key.clone(), binder))
+            .copied()
     }
 
     fn temp(&mut self, cx: &mut Fx, ty: RTy) -> TypedBind {
@@ -282,7 +290,9 @@ impl Mx<'_, '_, '_> {
                 let parts = parts
                     .iter()
                     .map(|p| match p {
-                        InterpPart::Text(s) => TypedInterpPart::Str(self.b.constant(Const::String(s.clone()))),
+                        InterpPart::Text(s) => {
+                            TypedInterpPart::Str(self.b.constant(Const::String(s.clone())))
+                        }
                         InterpPart::Expr(x) => TypedInterpPart::Expr(self.expr(cx, x)),
                     })
                     .collect();
@@ -292,7 +302,9 @@ impl Mx<'_, '_, '_> {
             ExprKind::Var(v) => self.var_value(cx, v, e, ty),
             ExprKind::Lambda(l) => self.lambda(cx, l, ty),
             ExprKind::Call { callee, args } => self.call(cx, callee, args, ty),
-            ExprKind::Construct { ctor, args, spread } => self.construct(cx, ctor, args, spread.as_deref(), e, ty),
+            ExprKind::Construct { ctor, args, spread } => {
+                self.construct(cx, ctor, args, spread.as_deref(), e, ty)
+            }
             ExprKind::Tuple(xs) => TypedExpr::Tuple {
                 ty,
                 elems: xs.iter().map(|x| self.expr(cx, x)).collect(),
@@ -420,20 +432,24 @@ impl Mx<'_, '_, '_> {
             },
             Var::Builtin(intrinsic) => {
                 let intrinsic = *intrinsic;
-                self.eta(ty, &format!("{intrinsic:?}"), |_, params, ret| TypedExpr::Call {
-                    ty: ret,
-                    callee: TypedCallee::Builtin { intrinsic },
-                    args: params,
+                self.eta(ty, &format!("{intrinsic:?}"), |_, params, ret| {
+                    TypedExpr::Call {
+                        ty: ret,
+                        callee: TypedCallee::Builtin { intrinsic },
+                        args: params,
+                    }
                 })
             }
             Var::Ctor(ctor) => {
                 let variant = self.b.ctor_ref(&ctor.type_name, ctor.variant);
                 match self.final_ty(e.ty) {
-                    Type::Fn { .. } => self.eta(ty, "ctor", move |_, params, ret| TypedExpr::Ctor {
-                        ty: ret,
-                        variant,
-                        args: params,
-                    }),
+                    Type::Fn { .. } => {
+                        self.eta(ty, "ctor", move |_, params, ret| TypedExpr::Ctor {
+                            ty: ret,
+                            variant,
+                            args: params,
+                        })
+                    }
                     Type::Named { .. } | Type::Tuple(_) | Type::Var(_) => TypedExpr::Ctor {
                         ty,
                         variant,
@@ -446,7 +462,12 @@ impl Mx<'_, '_, '_> {
 
     /// A function that takes `ty`'s parameters and gives `body` of them: a
     /// constructor or builtin used as a value.
-    fn eta(&mut self, ty: RTy, name: &str, body: impl FnOnce(&mut Self, Vec<TypedExpr>, RTy) -> TypedExpr) -> TypedExpr {
+    fn eta(
+        &mut self,
+        ty: RTy,
+        name: &str,
+        body: impl FnOnce(&mut Self, Vec<TypedExpr>, RTy) -> TypedExpr,
+    ) -> TypedExpr {
         let params: Vec<RTy> = self.b.pool.fun_params(ty).to_vec();
         let ret = self.b.pool.fun_ret(ty).unwrap_or(self.b.temps.int);
         let mut fx = Fx::new(None);
@@ -511,10 +532,16 @@ impl Mx<'_, '_, '_> {
 
     fn call(&mut self, cx: &mut Fx, callee: &Expr, args: &[Arg], ty: RTy) -> TypedExpr {
         let target = match &callee.kind {
-            ExprKind::Var(Var::Fn(name)) if cx.self_fn.as_ref() == Some(name) => Some(TypedCallee::SelfRec),
+            ExprKind::Var(Var::Fn(name)) if cx.self_fn.as_ref() == Some(name) => {
+                Some(TypedCallee::SelfRec)
+            }
             ExprKind::Var(Var::Fn(name)) => self.b.fn_of.get(name).map(|&i| TypedCallee::Known(i)),
-            ExprKind::Var(Var::Builtin(intrinsic)) => Some(TypedCallee::Builtin { intrinsic: *intrinsic }),
-            ExprKind::Var(Var::Local(b)) if cx.self_name == Some(*b) && !cx.binds.contains_key(b) => {
+            ExprKind::Var(Var::Builtin(intrinsic)) => Some(TypedCallee::Builtin {
+                intrinsic: *intrinsic,
+            }),
+            ExprKind::Var(Var::Local(b))
+                if cx.self_name == Some(*b) && !cx.binds.contains_key(b) =>
+            {
                 Some(TypedCallee::SelfRec)
             }
             _ => None,
@@ -530,10 +557,17 @@ impl Mx<'_, '_, '_> {
     /// The arguments in the order their parameters are declared. When that
     /// isn't the order they were written in, each runs first into a `let`,
     /// in the order written, so reordering them can't reorder what they do.
-    fn args_in_slot_order(&mut self, cx: &mut Fx, args: &[Arg]) -> (Vec<(TypedBind, TypedExpr)>, Vec<TypedExpr>) {
+    fn args_in_slot_order(
+        &mut self,
+        cx: &mut Fx,
+        args: &[Arg],
+    ) -> (Vec<(TypedBind, TypedExpr)>, Vec<TypedExpr>) {
         let in_order = args.iter().enumerate().all(|(i, a)| a.slot as usize == i);
         if in_order {
-            return (Vec::new(), args.iter().map(|a| self.expr(cx, &a.value)).collect());
+            return (
+                Vec::new(),
+                args.iter().map(|a| self.expr(cx, &a.value)).collect(),
+            );
         }
         let mut lets = Vec::with_capacity(args.len());
         let mut slotted: Vec<(u32, TypedExpr)> = Vec::with_capacity(args.len());
@@ -547,11 +581,26 @@ impl Mx<'_, '_, '_> {
         (lets, slotted.into_iter().map(|(_, v)| v).collect())
     }
 
-    fn construct(&mut self, cx: &mut Fx, ctor: &CtorName, args: &[Arg], spread: Option<&t::Spread>, e: &Expr, ty: RTy) -> TypedExpr {
+    fn construct(
+        &mut self,
+        cx: &mut Fx,
+        ctor: &CtorName,
+        args: &[Arg],
+        spread: Option<&t::Spread>,
+        e: &Expr,
+        ty: RTy,
+    ) -> TypedExpr {
         let variant = self.b.ctor_ref(&ctor.type_name, ctor.variant);
         let Some(spread) = spread else {
             let (lets, fields) = self.args_in_slot_order(cx, args);
-            return wrap(lets, TypedExpr::Ctor { ty, variant, args: fields });
+            return wrap(
+                lets,
+                TypedExpr::Ctor {
+                    ty,
+                    variant,
+                    args: fields,
+                },
+            );
         };
         // Everything runs in the order it was written, the spread among the
         // arguments.
@@ -572,7 +621,10 @@ impl Mx<'_, '_, '_> {
         };
         let field_tys = self.field_tys(&result, ctor.variant);
         for (slot, at) in &spread.fills {
-            let fty = field_tys.get(*slot as usize).copied().unwrap_or(self.b.temps.int);
+            let fty = field_tys
+                .get(*slot as usize)
+                .copied()
+                .unwrap_or(self.b.temps.int);
             let recv = self.var(&base_bind);
             let read = self.field(cx, recv, &result, at, fty);
             fields.push((*slot, read));
@@ -587,7 +639,12 @@ impl Mx<'_, '_, '_> {
     }
 
     /// Run `e` into a new `let`, returning its binding.
-    fn spill(&mut self, cx: &mut Fx, e: &Expr, lets: &mut Vec<(TypedBind, TypedExpr)>) -> TypedBind {
+    fn spill(
+        &mut self,
+        cx: &mut Fx,
+        e: &Expr,
+        lets: &mut Vec<(TypedBind, TypedExpr)>,
+    ) -> TypedBind {
         let v = self.expr(cx, e);
         let b = self.temp(cx, v.ty());
         lets.push((b, v));
@@ -610,7 +667,14 @@ impl Mx<'_, '_, '_> {
 
     /// A field read. Where every variant holds it in the same slot it is one
     /// read; otherwise it is a `match` that reads each variant's own.
-    fn field(&mut self, cx: &mut Fx, recv: TypedExpr, rec_ty: &Type, at: &FieldAt, ty: RTy) -> TypedExpr {
+    fn field(
+        &mut self,
+        cx: &mut Fx,
+        recv: TypedExpr,
+        rec_ty: &Type,
+        at: &FieldAt,
+        ty: RTy,
+    ) -> TypedExpr {
         let layouts = match at {
             FieldAt::Same(idx) => {
                 return TypedExpr::Field {
@@ -789,7 +853,14 @@ impl Mx<'_, '_, '_> {
 
     /// Read each field `subs` names out of `src`. A name binds the read
     /// itself, so it is an alias of the field, not a copy of it.
-    fn project_fields(&mut self, cx: &mut Fx, subs: &[Pattern], src: &TypedBind, tuple: bool, frames: &mut Vec<Frame>) {
+    fn project_fields(
+        &mut self,
+        cx: &mut Fx,
+        subs: &[Pattern],
+        src: &TypedBind,
+        tuple: bool,
+        frames: &mut Vec<Frame>,
+    ) {
         for (i, sub) in subs.iter().enumerate() {
             if matches!(sub.kind, PatternKind::Wild) {
                 continue;
@@ -867,7 +938,12 @@ impl Mx<'_, '_, '_> {
                 let segs = segs.iter().map(|s| self.bin_seg_pat(cx, s)).collect();
                 let rest = self.rest(cx, rest, ty);
                 let zero = self.b.constant(Const::Int(0));
-                TypedPat::Bin { ty, zero, segs, rest }
+                TypedPat::Bin {
+                    ty,
+                    zero,
+                    segs,
+                    rest,
+                }
             }
             PatternKind::Or(alts) => TypedPat::Or {
                 ty,
@@ -967,7 +1043,10 @@ impl Mx<'_, '_, '_> {
 }
 
 fn wrap(lets: Vec<(TypedBind, TypedExpr)>, tail: TypedExpr) -> TypedExpr {
-    fold(lets.into_iter().map(|(b, e)| Frame::Let(b, e)).collect(), tail)
+    fold(
+        lets.into_iter().map(|(b, e)| Frame::Let(b, e)).collect(),
+        tail,
+    )
 }
 
 /// The operator `op` is on operands of primitive `prim`. With no primitive,

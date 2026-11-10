@@ -40,7 +40,7 @@ impl Known {
         }
     }
 
-    pub fn prim_of(&self, name: &TypeName) -> Option<Prim> {
+    pub(crate) fn prim_of(&self, name: &TypeName) -> Option<Prim> {
         if *name == self.int {
             Some(Prim::Int)
         } else if *name == self.float {

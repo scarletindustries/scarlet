@@ -116,11 +116,7 @@ pub enum ModuleSource {
 #[derive(Debug, Clone)]
 pub struct ResolvedModule {
     pub source: ModuleSource,
-    /// For a module on disk, the [`file_module_path`] of the file it resolved
-    /// to. For the embedded stdlib, the written `scarlet/...` path, which *is*
-    /// its identity.
-    pub canon: ModulePath,
-    pub key: ModuleKey,
+    pub(crate) key: ModuleKey,
 }
 
 /// Resolve an import path as written to its source and canonical identity.
@@ -137,7 +133,7 @@ fn resolve(path: &ImportPath, base_dir: Option<&Path>) -> Result<ResolvedModule,
 /// a session that edits the stdlib itself compiles, caches and invalidates
 /// stdlib modules just like any other module on disk, instead of reading the
 /// copy embedded at build time.
-pub fn resolve_with(
+pub(crate) fn resolve_with(
     path: &ImportPath,
     base_dir: Option<&Path>,
     stdlib_root: Option<&Path>,
@@ -164,11 +160,9 @@ pub fn resolve_with(
             p.set_file_name(format!("{name}.{SOURCE_EXTENSION}"));
         }
         if p.is_file() {
-            let canon = file_module_path(&p)?;
-            let key = ModuleKey::of(&canon);
+            let key = ModuleKey::of(&file_module_path(&p)?);
             return Ok(ResolvedModule {
                 source: ModuleSource::File(p),
-                canon,
                 key,
             });
         }
@@ -202,7 +196,6 @@ fn resolve_canonical_with(
         return if p.is_file() {
             Ok(ResolvedModule {
                 source: ModuleSource::File(p),
-                canon: path.clone(),
                 key,
             })
         } else {
@@ -224,7 +217,6 @@ fn resolve_canonical_with(
             if p.is_file() {
                 return Ok(ResolvedModule {
                     source: ModuleSource::File(p),
-                    canon: path.clone(),
                     key,
                 });
             }
@@ -232,7 +224,6 @@ fn resolve_canonical_with(
         return match stdlib::lookup(key.as_str()) {
             Some(src) => Ok(ResolvedModule {
                 source: ModuleSource::Embedded(src),
-                canon: path.clone(),
                 key,
             }),
             None => Err(ResolveError::NoSuchStdlibModule(path.clone())),
@@ -340,7 +331,6 @@ mod tests {
         match resolve(&rel(&[], &["scarlet", "array"]), None) {
             Ok(r) => {
                 assert!(matches!(r.source, ModuleSource::Embedded(_)));
-                assert_eq!(r.canon, vec!["scarlet".to_string(), "array".to_string()]);
                 assert_eq!(r.key.as_str(), "scarlet/array");
             }
             other => panic!("expected scarlet/array to resolve embedded, got {other:?}"),
@@ -364,11 +354,9 @@ mod tests {
         match resolve(&rel(&[RelSeg::CurrentDir], &["foo"]), Some(&base)) {
             Ok(ResolvedModule {
                 source: ModuleSource::File(p),
-                canon,
                 key,
             }) => {
                 assert_eq!(p, base.join("foo.sca"));
-                assert_eq!(canon, file_module_path(&base.join("foo.sca")).unwrap());
                 assert_eq!(key, ModuleKey::for_file(&base.join("foo.sca")));
             }
             other => panic!("expected ./foo to resolve to a file, got {other:?}"),
