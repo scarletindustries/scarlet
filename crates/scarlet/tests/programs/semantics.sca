@@ -48,6 +48,13 @@ fn check_message(e CheckError) String {
 	}
 }
 
+// A negative input counts as 0.
+fn zero(e CheckError) Int {
+	match e {
+		Negative(_) -> 0
+	}
+}
+
 fn checked(n Int) Result(Int, CheckError) {
 	if n >= 0 {
 		Ok(n)
@@ -143,7 +150,7 @@ pub fn main() {
 
 	println('param shadows const: ${shadow_param(10)} const is still ${scale}')
 
-	println('or default: ${checked(4) or 0} ${checked(-4) or 0}')
+	println('or default: ${checked(4) or e -> zero(e)} ${checked(-4) or e -> zero(e)}')
 	println('or binding: ${checked(-4) or e -> string::length(check_message(e))}')
 	found = array::find([1, 2, 3], fn(x) x > 2)
 	missing = array::find([1, 2, 3], fn(x) x > 9)

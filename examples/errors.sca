@@ -47,6 +47,16 @@ fn validate(n Int) Result(Int, ParseError) {
 	}
 }
 
+// An error that carries data can't be thrown away, so `or` names it and the
+// fallback can depend on what went wrong. A score above 100 becomes 100, and
+// anything else becomes 0.
+fn fallback(e ParseError) Int {
+	match e {
+		OutOfRange(n) -> if n > 100 { 100 } else { 0 }
+		Empty | NotANumber(_) -> 0
+	}
+}
+
 // `<-` hands the rest of the block to result::then, so it runs only on Ok.
 fn checked(s String) Result(Int, ParseError) {
 	n <- result::then(parse_score(s))
@@ -85,7 +95,7 @@ pub fn main() {
 	println('is_ok     ${result::is_ok(good)} ${result::is_ok(bad)}')
 	println('is_err    ${result::is_err(good)} ${result::is_err(bad)}')
 	println('map       ${show(result::map(good, fn(n) n * 2))}')
-	println('or        ${good or 0} ${bad or 0}')
+	println('or        ${good or e -> fallback(e)} ${bad or e -> fallback(e)}')
 
 	println('then      ${show(result::then(good, validate))}')
 	array::each(['900', 'abc'], fn(s) println('then      ${show(checked(s))}'))

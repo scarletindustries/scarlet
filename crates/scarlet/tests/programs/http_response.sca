@@ -222,9 +222,10 @@ fn show_exchange(label String, req_url String, method Binary, script Binary, chu
 fn show_bounded(label String, script Binary, max_body Int) Nil {
 	inbox = scripted(script)
 	io = wire_io(inbox, 65536)
-	u = url::parse(
-		'http://example.com/a',
-	) or url::Url(scheme: url::Http, host: 'x', port: 80, target: <<'/'>>)
+	u = url::parse('http://example.com/a') or e -> {
+		println('bad url: ${string::inspect(e)}')
+		url::Url(scheme: url::Http, host: 'x', port: 80, target: <<'/'>>)
+	}
 	req = client::Request(method: <<'GET'>>, url: u, headers: [], body: <<>>)
 	out = match client::send_bounded(io, req, max_body) {
 		Ok(r) -> '${r.status} body=${q(r.body)}'

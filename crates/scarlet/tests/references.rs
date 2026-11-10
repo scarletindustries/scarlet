@@ -607,7 +607,7 @@ fn session_recheck_keeps_stdlib_types_intact() {
 // `Header` to real enum types rather than collapsing them to a builtin.
 const HTTP_HELLO_ENTRY: &str = "import scarlet/http\n\
 pub fn main() {\n\
-\tmatch http::serve('127.0.0.1', 8080, fn(_req) http::text('hi')) {\n\
+\tmatch http::serve('127.0.0.1', 8080, fn(_req) http::text('hi'), fn(_) Nil) {\n\
 \t\tOk(_) -> Nil\n\
 \t\tErr(e) -> println(e)\n\
 \t}\n\
@@ -634,12 +634,13 @@ fn session_hydrates_h1_after_http_in_earlier_check() {
 // `type_info` entry in place (`IndexMap::insert` keeps the pre-watermark
 // index), so truncate-by-length rollback cannot restore it. The env's
 // overwrite journal fixes that, and this test pins it.
-const SHADOWING_ENTRY: &str = "type Parsed = Result(Int, String)\n\
+const SHADOWING_ENTRY: &str = "import scarlet/string\n\
+type Parsed = Result(Int, String)\n\
 fn f(x Int) Parsed {\n\
 \tOk(x)\n\
 }\n\
 pub fn main() {\n\
-\tprintln(f(1) or 0)\n\
+\tprintln(f(1) or e -> string::length(e))\n\
 }\n";
 
 #[test]

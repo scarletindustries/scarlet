@@ -224,7 +224,11 @@ pub fn main() {
 	// `or` unwraps Option and Result; its body must have the payload's type.
 	println(find(0) or origin)
 	println(find(3) or origin)
-	println(risky(4) or -1)
+	println(
+		risky(4) or e -> match e {
+			Boom(_) -> -1
+		},
+	)
 	println(
 		risky(-1) or e -> match e {
 			Boom(_) -> -1

@@ -10,6 +10,8 @@ import scarlet/array
 import scarlet/binary
 import scarlet/http
 import scarlet/http/body
+import scarlet/net
+import scarlet/net/address
 import scarlet/process
 import scarlet/string
 
@@ -132,6 +134,10 @@ fn render(node process::Supervised, indent String) String {
 	process::children(node) |> array::fold(line, fn(out, child) out + render(child, indent + '  '))
 }
 
+fn log_failed(e net::ConnectionError) Nil {
+	println('connection from ${address::to_string(e.peer)} failed: ${e.error}')
+}
+
 pub fn main() Nil {
 	app <- process::root(process::OneForOne(restarts: 5, within_ms: 60_000))
 	counter = process::permanent(app, stats)
@@ -141,6 +147,7 @@ pub fn main() Nil {
 		'0.0.0.0',
 		8080,
 		fn(req) handle(req, rooms, counter, app.supervised),
+		log_failed,
 	) {
 		Ok(_) -> println('chat is up on http://localhost:8080')
 		Err(e) -> println('cannot serve: ${e}')

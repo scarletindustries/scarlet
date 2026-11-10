@@ -319,7 +319,9 @@ pub fn main() {
 
 	println('bench_service listening on http://127.0.0.1:${port} (${USER_COUNT} users)')
 
-	match http::serve('127.0.0.1', port, fn(req) route(req, tables)) {
+	// Load generators hang up all the time, and logging each one would skew the
+	// numbers, so failed connections are ignored on purpose.
+	match http::serve('127.0.0.1', port, fn(req) route(req, tables), fn(_) Nil) {
 		Ok(_) -> Nil
 		Err(e) -> println('serve failed: ${e}')
 	}

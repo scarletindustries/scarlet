@@ -25,7 +25,13 @@ fn route(req http::Request) http::Response {
 		(_, <<'/'>>) -> http::text('root')
 		// http::ok has no known length, so it goes out chunked.
 		(_, <<'/stream'>>) -> http::ok(body::from_binary(<<'streamed'>>))
-		(http::Post, <<'/echo'>>) -> echo_reply(body::collect(req.body, MAX_BODY) or <<>>)
+		(http::Post, <<'/echo'>>) -> match body::collect(req.body, MAX_BODY) {
+			Ok(bytes) -> echo_reply(bytes)
+			Err(e) -> {
+				println('echo: body failed: ${string::inspect(e)}')
+				http::Response(..http::text('could not read the body'), status: 400)
+			}
+		}
 		(
 			http::Get
 			| http::Post
@@ -59,18 +65,23 @@ fn read_to_close(conn socket::Socket, acc Binary) Binary {
 }
 
 fn request(port Int, method String, target String, payload String) String {
+	exchange(port, method, target, payload) or e -> 'request failed: ${string::inspect(e)}'
+}
+
+fn exchange(
+	port Int,
+	method String,
+	target String,
+	payload String,
+) Result(String, error::NetError) {
 	bytes = binary::from_string(payload)
 	length = binary::byte_size(bytes)
 	head = '${method} ${target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: ${length}\r\n\r\n'
-	match net::connect('127.0.0.1', port) {
-		Ok(conn) -> {
-			socket::write(conn, head |> binary::from_string |> binary::append(bytes)) or Nil
-			response = read_to_close(conn, <<>>)
-			socket::close(conn) or Nil
-			binary::to_string(response) or '<not utf-8>'
-		}
-		Err(e) -> 'connect failed: ${e}'
-	}
+	conn <- result::then(net::connect('127.0.0.1', port))
+	Nil <- result::then(socket::write(conn, head |> binary::from_string |> binary::append(bytes)))
+	response = read_to_close(conn, <<>>)
+	Nil <- result::then(socket::close(conn))
+	Ok(binary::to_string(response) or '<not utf-8>')
 }
 
 fn show(label String, response String) Nil {
@@ -104,6 +115,20 @@ fn two_chunks() body::Body {
 
 fn budget_body() body::Body {
 	fn() Ok(body::Chunk(<<'five!'>>, body::from_binary(<<'more'>>)))
+}
+
+// Prints a failed step. Each request stands alone, so the demo carries on.
+fn warn(r Result(Nil, error::NetError), what String) Nil {
+	r or e -> println('${what} failed: ${string::inspect(e)}')
+}
+
+// Runs the rest of the block once the head is written. If the write fails,
+// there's no point sending a body.
+fn head_sent(r Result(Nil, error::NetError), what String, next fn(Nil) Nil) Nil {
+	match r {
+		Ok(Nil) -> next(Nil)
+		Err(e) -> println('${what}: head failed: ${string::inspect(e)}')
+	}
 }
 
 fn sent(what String, r Result(Nil, body::DrainError)) Nil {
@@ -164,11 +189,11 @@ fn respond(sock socket::Socket, target Binary, payload Binary) Nil {
 		}
 		<<'/bare'>> -> {
 			bin = <<'drained bare'>>
-			socket::write(sock, fixed_head(binary::byte_size(bin))) or Nil
+			Nil <- head_sent(socket::write(sock, fixed_head(binary::byte_size(bin))), 'bare')
 			sent('bare', body::drain(body::from_binary(bin), sock))
 		}
 		<<'/chunked'>> -> {
-			socket::write(sock, chunked_head()) or Nil
+			Nil <- head_sent(socket::write(sock, chunked_head()), 'chunked')
 			sent('chunked', body::drain_chunked(two_chunks(), sock))
 		}
 		<<'/streamed'>> ->
@@ -176,15 +201,15 @@ fn respond(sock socket::Socket, target Binary, payload Binary) Nil {
 		<<'/counted'>> -> {
 			bin = <<'counted body'>>
 			n = binary::byte_size(bin)
-			socket::write(sock, fixed_head(n)) or Nil
+			Nil <- head_sent(socket::write(sock, fixed_head(n)), 'counted')
 			counted('counted', body::drain_counted(body::from_binary(bin), sock, n))
 		}
 		// The head promises 5 bytes, so the second chunk is dropped.
 		<<'/overrun'>> -> {
-			socket::write(sock, fixed_head(5)) or Nil
+			Nil <- head_sent(socket::write(sock, fixed_head(5)), 'overrun')
 			counted('overrun', body::drain_counted(budget_body(), sock, 5))
 		}
-		_ -> socket::write(sock, h1::serialize_head(404, [])) or Nil
+		_ -> socket::write(sock, h1::serialize_head(404, [])) |> warn('404')
 	}
 }
 
@@ -193,7 +218,10 @@ fn serve_raw(sock socket::Socket) Nil {
 	match read_head(sock, <<>>, deadline) {
 		Ok((buf, h1::Done(target: t, headers: hs, consumed: c, ..))) -> match h1::framing(hs) {
 			h1::NoBody -> respond(sock, t, <<>>)
-			h1::Length(n) -> respond(sock, t, read_length(sock, buf, c, n, deadline) or <<>>)
+			h1::Length(n) -> match read_length(sock, buf, c, n, deadline) {
+				Ok(payload) -> respond(sock, t, payload)
+				Err(e) -> println('body read failed: ${string::inspect(e)}')
+			}
 			// This server reads no chunked request bodies.
 			h1::Chunked -> reject(sock, 501)
 			h1::Invalid(status) -> reject(sock, status)
@@ -204,11 +232,11 @@ fn serve_raw(sock socket::Socket) Nil {
 		// The peer closed, or the deadline passed: there is no one to answer.
 		Err(_) -> Nil
 	}
-	socket::close(sock) or Nil
+	socket::close(sock) |> warn('close')
 }
 
 fn reject(sock socket::Socket, status Int) Nil {
-	socket::write(sock, h1::serialize_head(status, [])) or Nil
+	socket::write(sock, h1::serialize_head(status, [])) |> warn('reject')
 }
 
 fn accept_loop(server net::Server) Nil {
@@ -264,12 +292,16 @@ fn by_hand() Nil {
 	show('GET /counted', request(port, 'GET', '/counted', ''))
 	show('GET /overrun', request(port, 'GET', '/overrun', ''))
 
-	net::close(server) or Nil
+	net::close(server) |> warn('close')
 }
 
 pub fn main() {
 	port, server <- bind_loopback()
-	_ = http::serve_on(server, route)
+	_ = http::serve_on(
+		server,
+		route,
+		fn(e) println('client ${address::to_string(e.peer)} failed: ${string::inspect(e.error)}'),
+	)
 
 	show('GET /', request(port, 'GET', '/', ''))
 	show('POST /echo', request(port, 'POST', '/echo', 'hello'))
@@ -277,7 +309,7 @@ pub fn main() {
 	show('GET /nope', request(port, 'GET', '/nope', ''))
 
 	// Wakes the acceptors with Ok(None), so the program can end.
-	net::close(server) or Nil
+	net::close(server) |> warn('close')
 
 	by_hand()
 }

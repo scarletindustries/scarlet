@@ -177,14 +177,16 @@ fn build_request(head ReqHead, trailers headers::Headers, b body::Body) Request 
 }
 
 // Listens on host:port and serves each connection in its own process, so a slow
-// or crashing one affects only itself. The `Service` holds the listener and
-// the connections' place in the process tree.
+// or crashing one affects only itself. When a connection fails, for example
+// because the client hung up mid-response, `on_error` gets the error. The
+// `Service` holds the listener and the connections' place in the process tree.
 pub fn serve(
 	host String,
 	port Int,
 	handler fn(Request) Response,
+	on_error fn(net::ConnectionError) Nil,
 ) Result(net::Service, error::NetError) {
-	net::serve(host, port, fn(sock) drive(sock, handler))
+	net::serve(host, port, fn(sock) drive(sock, handler), on_error)
 }
 
 // Like `serve`, but inside your own supervisor, so it stops and restarts with
@@ -194,20 +196,27 @@ pub fn serve_in(
 	host String,
 	port Int,
 	handler fn(Request) Response,
+	on_error fn(net::ConnectionError) Nil,
 ) Result(net::Service, error::NetError) {
-	net::serve_in(sup, host, port, fn(sock) drive(sock, handler))
+	net::serve_in(sup, host, port, fn(sock) drive(sock, handler), on_error)
 }
 
 // Serves on a listener you already bound, for example on port 0 so you can
 // read the port back.
-pub fn serve_on(server net::Server, handler fn(Request) Response) net::Service {
-	net::serve_on(server, fn(sock) drive(sock, handler))
+pub fn serve_on(
+	server net::Server,
+	handler fn(Request) Response,
+	on_error fn(net::ConnectionError) Nil,
+) net::Service {
+	net::serve_on(server, fn(sock) drive(sock, handler), on_error)
 }
 
-// Serves one connection and closes it once on the way out.
-fn drive(sock socket::Socket, handler fn(Request) Response) Nil {
-	serve_conn(sock, EMPTY, 0, head_deadline(), handler, []) or Nil
-	socket::close(sock) or Nil
+// Serves one connection and closes it once on the way out, even after a
+// failure. The first error is the one returned.
+fn drive(sock socket::Socket, handler fn(Request) Response) Result(Nil, error::NetError) {
+	served = serve_conn(sock, EMPTY, 0, head_deadline(), handler, [])
+	closed = socket::close(sock)
+	served |> result::then(fn(_) closed)
 }
 
 fn head_deadline() time::Instant {
@@ -241,10 +250,7 @@ fn serve_conn(
 				Err(e) -> Err(e)
 			}
 		}
-		h1::Bad(status) -> {
-			reject(sock, pending, status)
-			Ok(Nil)
-		}
+		h1::Bad(status) -> reject(sock, pending, status)
 		h1::Done(method, target, version, hdrs, flags, consumed) -> {
 			head = ReqHead(
 				method: method,
@@ -260,8 +266,8 @@ fn serve_conn(
 
 // Flushes earlier pipelined responses, then writes an error. The caller closes
 // the connection.
-fn reject(sock socket::Socket, pending Array(Binary), status Int) Nil {
-	flush(sock, pending) or Nil
+fn reject(sock socket::Socket, pending Array(Binary), status Int) Result(Nil, error::NetError) {
+	Nil <- result::then(flush(sock, pending))
 	write_error(sock, status)
 }
 
@@ -294,10 +300,7 @@ fn handle(
 	pending Array(Binary),
 ) Result(Nil, error::NetError) {
 	match h1::framing(head.headers) {
-		h1::Invalid(status) -> {
-			reject(sock, pending, status)
-			Ok(Nil)
-		}
+		h1::Invalid(status) -> reject(sock, pending, status)
 		h1::NoBody ->
 			respond_and_continue(
 				sock,
@@ -309,7 +312,6 @@ fn handle(
 			)
 		h1::Length(n) -> if n > MAX_BODY {
 			reject(sock, pending, 413)
-			Ok(Nil)
 		} else {
 			deadline = body_deadline()
 			// Flush first, because the client may wait for those responses
@@ -390,10 +392,7 @@ fn chunked_loop(
 			Ok(socket::Closed) -> Ok(Nil)
 			Err(e) -> Err(e)
 		}
-		h1::ChunkedBad(status) -> {
-			write_error(sock, status)
-			Ok(Nil)
-		}
+		h1::ChunkedBad(status) -> write_error(sock, status)
 		// `pending` was flushed before the body was read.
 		h1::ChunkedDone(decoded, trailers, consumed) ->
 			respond_and_continue(
@@ -521,8 +520,7 @@ fn respond(
 }
 
 fn replace_with_500(sock socket::Socket, pending Array(Binary)) Result(Sent, error::NetError) {
-	reject(sock, pending, 500)
-	Ok(Close)
+	reject(sock, pending, 500) |> result::map(fn(_) Close)
 }
 
 // On keep-alive the parts wait for the next write. On close there is no
@@ -670,10 +668,10 @@ fn response_close(resp Response) Bool {
 }
 
 // A minimal error response, so the client sees the status before the close.
-fn write_error(sock socket::Socket, status Int) Nil {
+fn write_error(sock socket::Socket, status Int) Result(Nil, error::NetError) {
 	hdrs = [
 		headers::Header(name: NAME_CONTENT_LENGTH, value: ZERO),
 		headers::Header(name: NAME_CONNECTION, value: VAL_CLOSE),
 	]
-	socket::write(sock, h1::serialize_head(status, hdrs)) or Nil
+	socket::write(sock, h1::serialize_head(status, hdrs))
 }

@@ -474,6 +474,10 @@ pub struct ModuleChecker<'c> {
     /// type system knows is `Nil` hides nothing, so the explicit `Nil` pattern
     /// is required instead. [`ModuleChecker::check_nil_discards`] drains this.
     nil_discards: Vec<(String, Ty, Span)>,
+    /// Every `or` on a `Result`, looked at again once the module's inference
+    /// is final, because only then is it known whether the error type is
+    /// `Nil`. [`ModuleChecker::check_or_receivers`] drains this.
+    or_receivers: Vec<OrReceiverCheck>,
     /// This module's own top-level `fn` and `const` declarations, in the order
     /// Pass 5 visits SCCs (leaves first). Once the imports are compiled, this
     /// is cleared down to the entry file's scope.
@@ -627,6 +631,16 @@ fn function_reserved_during_elaboration() -> ! {
         "internal compiler error: a function was reserved while the elaborator walked. \
          Report this as a compiler bug."
     )
+}
+
+/// One `or` on a `Result`, queued for [`ModuleChecker::check_or_receivers`].
+struct OrReceiverCheck {
+    /// The `Result`'s error type.
+    err: Ty,
+    /// The left side, where a missing receiver is reported.
+    lhs: Span,
+    /// The receiver's name and span, when the `or` has one.
+    receiver: Option<(String, Span)>,
 }
 
 /// A function body waiting between its typecheck walk and its elaboration.
@@ -870,6 +884,7 @@ impl<'c> ModuleChecker<'c> {
             c,
             frames,
             nil_discards: Vec::new(),
+            or_receivers: Vec::new(),
             toplevel_decls: Vec::new(),
             binding_globals: Vec::new(),
             walking_module_statements: false,
@@ -1108,7 +1123,7 @@ impl ModuleChecker<'_> {
         self.begin_deferred_elaboration();
         let body = self.compile_expr(expr);
         self.end_deferred_elaboration();
-        self.check_nil_discards();
+        self.check_after_inference();
         self.close_block();
         let ty = body.ty;
         (CheckedEntry::Expr(body), ty)
@@ -3023,11 +3038,57 @@ impl ModuleChecker<'_> {
         (ty, CKind::Name { name: id, fact })
     }
 
+    /// Runs the checks that need the module's inference to be final.
+    pub(super) fn check_after_inference(&mut self) {
+        self.check_nil_discards();
+        self.check_or_receivers();
+    }
+
+    /// Once a module's inference is final, reject any `or` on a `Result` that
+    /// throws away an error carrying data. A `Nil` error carries nothing, so
+    /// like `Option` it takes no receiver. Any other error must be bound to a
+    /// name and used, because a receiver starting with `_` drops it just as
+    /// quietly.
+    fn check_or_receivers(&mut self) {
+        let checks = std::mem::take(&mut self.or_receivers);
+        for OrReceiverCheck { err, lhs, receiver } in checks {
+            let rep = self.c.engine.find(err);
+            let is_nil = matches!(
+                self.c.engine.node(rep),
+                TypeNode::Con { id, .. } if self.c.prelude.nil().is(id)
+            );
+            match (is_nil, receiver) {
+                (true, None) => {}
+                (true, Some((_, sp))) => self.c.error(
+                    "'or' on a Result(_, Nil) can't bind a value, because the error carries nothing"
+                        .to_string(),
+                    sp,
+                ),
+                (false, None) => {
+                    let ty = self.c.engine.type_to_str(err);
+                    self.c.error(
+                        format!(
+                            "This 'or' throws away the Result's error, of type '{ty}'. Bind it with 'e -> ...' and handle it"
+                        ),
+                        lhs,
+                    );
+                }
+                (false, Some((name, sp))) if name.starts_with('_') => self.c.error(
+                    format!(
+                        "'{name}' throws away the error. Give the 'or' receiver a name and use it"
+                    ),
+                    sp,
+                ),
+                (false, Some(_)) => {}
+            }
+        }
+    }
+
     /// Once a module's inference is final, reject any binder starting with `_`
     /// that discarded a value the type system knows is `Nil`. There is nothing
     /// to discard, and the explicit `Nil` pattern keeps the arm honest, because
     /// it stops compiling the day the type gains real data.
-    pub(super) fn check_nil_discards(&mut self) {
+    fn check_nil_discards(&mut self) {
         let checks = std::mem::take(&mut self.nil_discards);
         for (name, ty, sp) in checks {
             let rep = self.c.engine.find(ty);
@@ -4061,6 +4122,13 @@ impl ModuleChecker<'_> {
         self.c
             .engine
             .unify_at(expected, left_ty, expr.expression.span());
+        if let Some(err) = err_var {
+            self.or_receivers.push(OrReceiverCheck {
+                err,
+                lhs: expr.expression.span(),
+                receiver: expr.receiver.as_ref().map(|r| (r.name.clone(), r.span)),
+            });
+        }
 
         // The failure branch is the recovery body, with the `Err` payload bound
         // to the receiver when there is one.

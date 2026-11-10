@@ -143,7 +143,7 @@ run_case! {
          \tErr(E(msg: 'boom'))\n\
          }\n\
          pub fn main() {\n\
-         \tr = f() or _e -> 99\n\
+         \tr = f() or e -> match e { E(_) -> 99 }\n\
          \tprintln(r)\n\
          }\n",
         "99\n",

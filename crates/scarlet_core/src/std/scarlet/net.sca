@@ -36,15 +36,25 @@ pub type Service {
 	connections process::Supervised
 }
 
+// Why one connection failed: which client it was, and the network error that
+// ended it.
+pub type ConnectionError {
+	peer address::SocketAddress
+	error error::NetError
+}
+
 // Listens on `host:port` and runs `handler` for each connection in a process
 // of its own, with an acceptor on every core. A handler that crashes ends only
-// its own connection. Use `serve_in` to put the server in your own tree.
+// its own connection. When `handler` returns an `Err`, `on_error` gets it, so
+// you choose what a failed connection means: log it, count it, or ignore it
+// with `fn(_) Nil`. Use `serve_in` to put the server in your own tree.
 pub fn serve(
 	host String,
 	port Int,
-	handler fn(socket::Socket) Nil,
+	handler fn(socket::Socket) Result(Nil, error::NetError),
+	on_error fn(ConnectionError) Nil,
 ) Result(Service, error::NetError) {
-	serve_in(process::supervisor(ACCEPTOR_BUDGET), host, port, handler)
+	serve_in(process::supervisor(ACCEPTOR_BUDGET), host, port, handler, on_error)
 }
 
 // Like `serve`, but puts the server's subtree inside `sup`.
@@ -52,28 +62,38 @@ pub fn serve_in(
 	sup process::Supervisor,
 	host String,
 	port Int,
-	handler fn(socket::Socket) Nil,
+	handler fn(socket::Socket) Result(Nil, error::NetError),
+	on_error fn(ConnectionError) Nil,
 ) Result(Service, error::NetError) {
 	server <- result::then(listen(host, port))
-	Ok(serve_on_in(sup, server, handler))
+	Ok(serve_on_in(sup, server, handler, on_error))
 }
 
 // Serves a listener already bound with `listen`, for example on port 0 with
 // the port read back by `local_addr`.
-pub fn serve_on(server Server, handler fn(socket::Socket) Nil) Service {
-	serve_on_in(process::supervisor(ACCEPTOR_BUDGET), server, handler)
+pub fn serve_on(
+	server Server,
+	handler fn(socket::Socket) Result(Nil, error::NetError),
+	on_error fn(ConnectionError) Nil,
+) Service {
+	serve_on_in(process::supervisor(ACCEPTOR_BUDGET), server, handler, on_error)
 }
 
 // Like `serve_on`, but inside `sup`. The connection factory is declared before
 // the acceptors, so it's stopped after them. That way a stopping server stops
 // accepting before it closes what it accepted.
-pub fn serve_on_in(sup process::Supervisor, server Server, handler fn(socket::Socket) Nil) Service {
+pub fn serve_on_in(
+	sup process::Supervisor,
+	server Server,
+	handler fn(socket::Socket) Result(Nil, error::NetError),
+	on_error fn(ConnectionError) Nil,
+) Service {
 	me = process::supervisor_in(sup, ACCEPTOR_BUDGET)
 	connections = process::factory(me, process::Disposable, fn(_inbox, sock) {
 		// The acceptor owns the socket until now. Giving it to this process
 		// means it closes when this process ends, however it ends.
 		give(sock, process::self())
-		handler(sock)
+		handler(sock) or e -> on_error(ConnectionError(peer: sock.peer, error: e))
 	})
 	process::worker_per_scheduler(
 		me,

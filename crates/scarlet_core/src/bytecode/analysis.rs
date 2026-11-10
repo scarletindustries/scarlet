@@ -667,7 +667,7 @@ impl ModuleChecker<'_> {
         // `zonk` cares about (`Generic` can be quantified, and `Unbound` is an
         // error).
         self.end_deferred_elaboration();
-        self.check_nil_discards();
+        self.check_after_inference();
 
         self.close_block();
         nodes

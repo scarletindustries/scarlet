@@ -382,7 +382,7 @@ fn stdlib_decimal() {
          \tprintln(decimal::to_string(decimal::round_with(decimal::new(1, 18), 0 - 1, decimal::Up)))\n\
          \tprintln(decimal::to_string(decimal::round_with(decimal::new(5000000000000000000, 18), 0 - 1, decimal::HalfUp)))\n\
          \tprintln(decimal::to_string(decimal::round(decimal::new(5000000000000000000, 18), 0 - 1)))\n\
-         \tshow = fn(q) { result::map(q, decimal::to_string) or 'Err' }\n\
+         \tshow = fn(q Result(decimal::Decimal, Nil)) { result::map(q, decimal::to_string) or 'Err' }\n\
          \tprintln(show(decimal::div(decimal::from_int(1), decimal::from_int(1), 0 - 19)))\n\
          \tprintln(show(decimal::div(decimal::from_int(1), decimal::new(1, 18), 21)))\n\
          \tprintln(show(decimal::div(decimal::new(1, 12), decimal::from_int(1), 21)))\n\

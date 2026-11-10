@@ -8,6 +8,8 @@ import scarlet/binary
 import scarlet/http
 import scarlet/http/body
 import scarlet/http/headers
+import scarlet/net
+import scarlet/net/address
 import scarlet/net/error
 import scarlet/result
 
@@ -67,9 +69,13 @@ fn route(req http::Request) http::Response {
 	http::with_header(response, NAME_SERVER, VAL_AL)
 }
 
+fn log_failed(e net::ConnectionError) Nil {
+	println('connection from ${address::to_string(e.peer)} failed: ${e.error}')
+}
+
 pub fn main() {
 	// One acceptor per core. They keep the program alive after main returns.
-	match http::serve('0.0.0.0', 8080, route) {
+	match http::serve('0.0.0.0', 8080, route, log_failed) {
 		Ok(_) -> println('Listening on http://localhost:8080')
 		Err(e) -> println('serve failed: ${e}')
 	}

@@ -394,14 +394,15 @@ reject_case! {
 
 run_case! {
     or_on_result_unwraps_ok: (
-        "fn f(b Bool) Result(Int, String) {\n\
+        "import scarlet/string\n\
+         fn f(b Bool) Result(Int, String) {\n\
          \tif b { Ok(42) } else { Err('nope') }\n\
          }\n\
          pub fn main() {\n\
-         \tprintln(f(True) or -1)\n\
-         \tprintln(f(False) or -1)\n\
+         \tprintln(f(True) or e -> 0 - string::length(e))\n\
+         \tprintln(f(False) or e -> 0 - string::length(e))\n\
          }\n",
-        "42\n-1\n",
+        "42\n-4\n",
     ),
 }
 
@@ -799,7 +800,7 @@ fn module_builtins_qualified_and_destructured() {
     check_ok(
         "import scarlet/io\n\
          pub fn main() {\n\
-         \tx = io::read_text('a') or ''\n\
+         \tx = io::read_text('a') or e -> '${e}'\n\
          \tprintln(x)\n\
          }\n",
     );

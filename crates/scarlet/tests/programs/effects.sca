@@ -32,7 +32,7 @@ pub fn main() {
 	println('pool starts empty: ${internal::blocking_threads() == 0}')
 
 	println('write: ${io::write_text(PATH, 'ledger v1')}')
-	println('read back: ${io::read_text(PATH) or '<failed>'}')
+	println('read back: ${io::read_text(PATH) or e -> '<failed: ${string::inspect(e)}>'}')
 	println('round trip: ${io::read_text(PATH) == Ok('ledger v1')}')
 
 	// Each failure lands on its own variant, carrying the path it concerns.

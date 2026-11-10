@@ -78,6 +78,38 @@ reject_case! {
     ),
 }
 
+reject_case! {
+    // An `or` on a Result whose error carries data must look at the error.
+    an_or_must_bind_an_error_that_carries_data: (
+        "type E {\n\tBad(n Int)\n}\nfn f() Result(Int, E) { Err(Bad(1)) }\npub fn main() {\n\tprintln(f() or 0)\n}\n",
+        "This 'or' throws away the Result's error, of type 'E'",
+    ),
+    // A receiver starting with `_` drops the error just as quietly.
+    an_underscore_receiver_still_drops_the_error: (
+        "type E {\n\tBad(n Int)\n}\nfn f() Result(Int, E) { Err(Bad(1)) }\npub fn main() {\n\tprintln(f() or _e -> 0)\n}\n",
+        "'_e' throws away the error",
+    ),
+    // A Nil error carries nothing, so there is nothing to bind.
+    an_or_on_a_nil_error_takes_no_receiver: (
+        "fn f() Result(Int, Nil) { Err(Nil) }\npub fn main() {\n\tprintln(f() or e -> 0)\n}\n",
+        "can't bind a value, because the error carries nothing",
+    ),
+    // The error type is only known once inference is done, so a Result whose
+    // error is inferred later is still checked.
+    an_inferred_error_type_is_still_checked: (
+        "type E {\n\tBad(n Int)\n}\npub fn main() {\n\tr = if True { Ok(1) } else { Err(Bad(2)) }\n\tprintln(r or 0)\n}\n",
+        "This 'or' throws away the Result's error, of type 'E'",
+    ),
+}
+
+ok_case! {
+    an_or_that_handles_its_error_is_ok: (
+        "type E {\n\tBad(n Int)\n}\nfn f() Result(Int, E) { Err(Bad(1)) }\npub fn main() {\n\tprintln(f() or e -> match e {\n\t\tBad(n) -> n\n\t})\n}\n"
+    ),
+    an_or_on_a_nil_error_needs_no_receiver:
+        ("fn f() Result(Int, Nil) { Err(Nil) }\npub fn main() {\n\tprintln(f() or 0)\n}\n"),
+}
+
 ok_case! {
     underscore_prefix_suppresses_unused_error:
         ("pub fn main() {\n\t_x = 1\n\tprintln('done')\n}\n"),

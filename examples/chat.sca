@@ -7,6 +7,8 @@ import scarlet/http
 import scarlet/http/body
 import scarlet/http/headers
 import scarlet/map
+import scarlet/net
+import scarlet/net/address
 import scarlet/os
 import scarlet/process
 import scarlet/result
@@ -338,13 +340,17 @@ pub fn main() Nil {
 	port = { os::get_env('PORT') or '8080' }
 		|> binary::from_string
 		|> binary::parse_int(binary::Dec) or 8080
-	match http::serve_in(app, '0.0.0.0', port, fn(req) route(req, chat)) {
+	match http::serve_in(app, '0.0.0.0', port, fn(req) route(req, chat), log_failed) {
 		Ok(_) -> println('chat is up on http://localhost:${port}')
 		Err(e) -> {
 			println('cannot listen on port ${port}: ${e}')
 			process::kill(process::self())
 		}
 	}
+}
+
+fn log_failed(e net::ConnectionError) Nil {
+	println('connection from ${address::to_string(e.peer)} failed: ${e.error}')
 }
 
 // The dashboard. Messages render with textContent, never as markup.
