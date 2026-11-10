@@ -460,7 +460,43 @@ impl Expr {
     }
 }
 
+impl Expr {
+    /// Every binder this expression binds in its own frame, in the order they
+    /// are written: `let` and arm patterns, and `or` receivers. A lambda's
+    /// body is a frame of its own, so nothing inside one is listed. An
+    /// or-pattern's binders come once per alternative.
+    pub fn for_each_bound(&self, f: &mut impl FnMut(BinderId)) {
+        match &self.kind {
+            ExprKind::Lambda(_) => return,
+            ExprKind::Match { arms, .. } => {
+                for a in arms {
+                    a.pattern.for_each_bound(f);
+                }
+            }
+            ExprKind::OrElse { error: Some(b), .. } => f(*b),
+            ExprKind::Block(b) => {
+                for s in &b.stmts {
+                    if let Stmt::Let { pattern, .. } = s {
+                        pattern.for_each_bound(f);
+                    }
+                }
+            }
+            _ => {}
+        }
+        self.for_each_child(&mut |c| c.for_each_bound(f));
+    }
+}
+
 impl Stmt {
+    /// Every binder the statement binds in its own frame. See
+    /// [`Expr::for_each_bound`].
+    pub fn for_each_bound(&self, f: &mut impl FnMut(BinderId)) {
+        if let Stmt::Let { pattern, .. } = self {
+            pattern.for_each_bound(f);
+        }
+        self.for_each_expr(&mut |e| e.for_each_bound(f));
+    }
+
     pub(crate) fn for_each_expr<'a>(&'a self, f: &mut impl FnMut(&'a Expr)) {
         match self {
             Stmt::Let { pattern, value } => {
@@ -473,6 +509,42 @@ impl Stmt {
 }
 
 impl Pattern {
+    /// Every binder the pattern binds, in the order they are written.
+    fn for_each_bound(&self, f: &mut impl FnMut(BinderId)) {
+        let rest = |r: &Rest, f: &mut dyn FnMut(BinderId)| {
+            if let Rest::Bind(b) = r {
+                f(*b);
+            }
+        };
+        match &self.kind {
+            PatternKind::Bind(b) => f(*b),
+            PatternKind::Wild
+            | PatternKind::Int(_)
+            | PatternKind::Float(_)
+            | PatternKind::String(_)
+            | PatternKind::Range(..)
+            | PatternKind::Error => {}
+            PatternKind::Ctor { fields: ps, .. } | PatternKind::Tuple(ps) | PatternKind::Or(ps) => {
+                ps.iter().for_each(|p| p.for_each_bound(f))
+            }
+            PatternKind::Array { prefix, rest: r } => {
+                prefix.iter().for_each(|p| p.for_each_bound(f));
+                rest(r, f);
+            }
+            PatternKind::Binary { segs, rest: r } => {
+                for s in segs {
+                    match s {
+                        BinSegPat::Text(_) => {}
+                        BinSegPat::Utf8(p)
+                        | BinSegPat::Bits { value: p, .. }
+                        | BinSegPat::Bytes { value: p, .. } => p.for_each_bound(f),
+                    }
+                }
+                rest(r, f);
+            }
+        }
+    }
+
     /// The expressions inside the pattern: binary segment sizes.
     fn for_each_expr<'a>(&'a self, f: &mut impl FnMut(&'a Expr)) {
         match &self.kind {

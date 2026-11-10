@@ -66,6 +66,16 @@ impl<I: Idx, T> TiVec<I, T> {
     }
 }
 
+/// Collecting gives the `n`th element index `n`.
+impl<I: Idx, T> FromIterator<T> for TiVec<I, T> {
+    fn from_iter<It: IntoIterator<Item = T>>(iter: It) -> Self {
+        TiVec {
+            raw: iter.into_iter().collect(),
+            _idx: PhantomData,
+        }
+    }
+}
+
 impl<I: Idx, T> Default for TiVec<I, T> {
     fn default() -> Self {
         TiVec::new()

@@ -10,7 +10,6 @@ pub use prim::PrimOp;
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::rc::Rc;
 
 use crate::TypeId;
 use crate::intrinsic::Intrinsic;
@@ -667,24 +666,11 @@ pub struct LoweredFn {
     /// `scarlet/array` and `scarlet/option` both have a `map`.
     pub name: String,
     pub core: CoreFn,
-    /// What every `RTy` in `core` indexes. Nothing reads a body's types until
-    /// a backend does, but dropping the pool would leave those indices
-    /// pointing into an arena that no longer exists.
-    #[expect(
-        dead_code,
-        reason = "the RTys in `core` index it; the backend that reads them is not written yet"
-    )]
-    pool: Rc<ResolvedPool>,
 }
 
 impl LoweredFn {
-    pub fn new(module: String, name: String, core: CoreFn, pool: Rc<ResolvedPool>) -> Self {
-        LoweredFn {
-            module,
-            name,
-            core,
-            pool,
-        }
+    pub fn new(module: String, name: String, core: CoreFn) -> Self {
+        LoweredFn { module, name, core }
     }
 }
 
@@ -715,6 +701,8 @@ pub struct Program {
     /// in the program has its type here.
     pub types: BTreeMap<TypeId, TypeNames>,
     pub abi: Abi,
+    /// What every `RTy` in every body indexes.
+    pub pool: ResolvedPool,
 }
 
 // The printer for the golden tests in `crates/scarlet/tests/core_ir.rs`. Ids

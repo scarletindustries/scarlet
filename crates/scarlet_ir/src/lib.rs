@@ -31,12 +31,6 @@ pub mod tivec;
 #[repr(transparent)]
 pub struct TypeId(pub i32);
 
-impl TypeId {
-    /// The sentinel for "no nominal type". Real ids start at 1. It's
-    /// deliberately not `Default`, so a derived `Default` can't make one.
-    pub const NONE: TypeId = TypeId(0);
-}
-
 impl fmt::Display for TypeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)

@@ -5,7 +5,7 @@ use std::path::Path;
 
 use scarlet_check::{Role, UnusedBindings};
 use scarlet_ir::core_ir::Program;
-use scarlet_lower::program::{LinkError, TypeDefs, build_program};
+use scarlet_lower::program::{TypeDefs, build_program};
 use scarlet_syntax::ast;
 use scarlet_syntax::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
 use scarlet_syntax::module_path::{ModuleKey, ModulePath};
@@ -153,11 +153,11 @@ pub fn compile(
             analysis,
             program: Box::new(program),
         },
-        Err(LinkError::Prelude(msg)) => {
+        Err(e) => {
             diagnostics.push(Diagnostic::error(
                 Span::DUMMY,
                 DiagnosticCode::TypeError,
-                msg,
+                e.to_string(),
             ));
             Compiled::Rejected { diagnostics }
         }
