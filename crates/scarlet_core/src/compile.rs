@@ -158,3 +158,24 @@ impl TypeDefs for Defs<'_> {
         self.0.module(name.module())?.checked.interface.types.get(name.name())
     }
 }
+
+/// Parse and compile `text` as a program, in a build of its own. The parse
+/// errors come first.
+pub fn compile_text(text: &str, base_dir: Option<&Path>) -> Compiled {
+    let parsed = crate::build::parse(text);
+    let mut build = Build::new(None);
+    let mut compiled = compile(
+        &mut build,
+        &parsed.ast,
+        parsed.doc,
+        crate::build::source_hash(text),
+        &Options::program(base_dir),
+    );
+    if has_errors(&parsed.diagnostics) {
+        let mut all = parsed.diagnostics;
+        all.append(&mut compiled.diagnostics);
+        compiled.diagnostics = all;
+        compiled.program = None;
+    }
+    compiled
+}

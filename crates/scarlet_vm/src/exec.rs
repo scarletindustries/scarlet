@@ -2427,10 +2427,7 @@ mod tests {
     }
 
     fn cells_left_after_in(host: &Host, src: &str) -> (String, usize) {
-        let mut scanner = scarlet_core::scanner::new_scanner(src.to_string());
-        let parsed = scarlet_core::parser::new_parser(&mut scanner).parse_program();
-        let expr = scarlet_core::ast::Expression::BlockExpression(parsed.ast);
-        let result = scarlet_core::bytecode::compile(&expr, None);
+        let result = scarlet_core::compile::compile_text(src, None);
         assert!(result.success(), "{:?}", result.diagnostics);
         let program = result.into_runnable().expect("a clean compile is runnable");
         let code = crate::code::load(&program);

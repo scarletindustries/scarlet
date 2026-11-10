@@ -4,10 +4,7 @@
 use scarlet_vm::{Host, Stop};
 
 fn compile(src: &str) -> scarlet_core::core_ir::Program {
-    let mut scanner = scarlet_core::scanner::new_scanner(src.to_string());
-    let parsed = scarlet_core::parser::new_parser(&mut scanner).parse_program();
-    let expr = scarlet_core::ast::Expression::BlockExpression(parsed.ast);
-    let result = scarlet_core::bytecode::compile(&expr, None);
+    let result = scarlet_core::compile::compile_text(src, None);
     assert!(result.success(), "{:?}", result.diagnostics);
     result.into_runnable().expect("a clean compile is runnable")
 }
