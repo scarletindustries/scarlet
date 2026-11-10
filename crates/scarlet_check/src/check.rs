@@ -1,6 +1,6 @@
 //! The checker's state for one module, and the order its passes run in.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use indexmap::IndexMap;
 use scarlet_syntax::ast;
@@ -28,6 +28,8 @@ pub(crate) struct BinderState {
     /// A `_name = e` binding with no written type. If `e` turns out to be
     /// `Nil`, it should have been written `Nil = e`.
     pub discards: bool,
+    /// Whether any name resolved to it, in code that checked or not.
+    pub used: bool,
 }
 
 /// The scheme a module-level value has right now.
@@ -75,6 +77,8 @@ pub(crate) struct Checker<'a> {
     pub types: IndexMap<Name, OwnType>,
     /// Import qualifier to the module it names.
     pub qualifiers: IndexMap<Name, ModuleKey>,
+    /// Each imported module's path as the import wrote it, for diagnostics.
+    pub written: HashMap<ModuleKey, String>,
     /// The prelude's interface, unless this is the prelude.
     pub prelude: Option<&'a Interface>,
     /// Names user code can't declare again: the prelude's types and
@@ -125,6 +129,7 @@ impl<'a> Checker<'a> {
             values: IndexMap::new(),
             types: IndexMap::new(),
             qualifiers: IndexMap::new(),
+            written: HashMap::new(),
             prelude,
             reserved,
             restricted: vec![TypeName::new(
@@ -292,6 +297,7 @@ impl<'a> Checker<'a> {
             span,
             module_scope,
             discards: false,
+            used: false,
         });
         self.hovers.push((span, name.into(), ty));
         self.define(span, name, None, false, DefKind::Value);
@@ -394,6 +400,7 @@ impl<'a> Checker<'a> {
                 let target = self.site(alias_span, EntityKind::ModuleAlias);
                 self.use_site(a.span, UseKind::Alias, target);
             }
+            self.written.insert(key.clone(), imp.path.to_string());
             self.qualifiers.insert(qualifier, key.clone());
         }
     }
@@ -403,9 +410,12 @@ impl<'a> Checker<'a> {
         self.input.interfaces.interface(key)
     }
 
-    /// How to name a module in a diagnostic: the qualifier it is imported
-    /// under, or its last segment.
+    /// How to name a module in a diagnostic: the path its import wrote, or
+    /// its last segment. Never the key, which is an identity, not a name.
     pub fn module_name(&self, key: &ModuleKey) -> String {
+        if let Some(w) = self.written.get(key) {
+            return w.clone();
+        }
         let k = key.as_str();
         k.rsplit('/').next().unwrap_or(k).to_string()
     }

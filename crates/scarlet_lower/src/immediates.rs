@@ -12,7 +12,7 @@
 //! constructor and never marks one's drop as a cell to reuse.
 
 use super::{Atom, CoreExpr, CoreFn, CorePat, LocalId, VariantRef};
-use scarlet_elaborate::RTy;
+use crate::typed_ir::RTy;
 
 /// The prelude's constructors that are immediates.
 #[derive(Clone, Copy)]

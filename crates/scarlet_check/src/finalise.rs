@@ -7,12 +7,11 @@ use scarlet_types::exhaustiveness::{BinPart, BinSegShape, BinUnit, PatShape, Pat
 use scarlet_types::ty::Type;
 
 use crate::check::Checker;
-use crate::typed::{BinSegPat, Block, Const, Expr, ExprKind, FnBody, Function, OrShape, Pattern, PatternKind, Rest, Stmt, Var};
+use crate::typed::{BinSegPat, Block, Const, Expr, ExprKind, FnBody, Function, OrShape, Pattern, PatternKind, Rest, Stmt};
 
 impl Checker<'_> {
     pub fn finalise(&mut self, functions: &[Function], consts: &[Const], statements: &[Stmt]) {
-        let mut uses = vec![0u32; self.binders.len()];
-        let mut visit = |c: &mut Self, e: &Expr| c.visit(e, &mut uses);
+        let mut visit = |c: &mut Self, e: &Expr| c.visit(e);
         for f in functions {
             if let FnBody::Expr(body) = &f.body {
                 body.walk(&mut |e| visit(self, e));
@@ -28,12 +27,11 @@ impl Checker<'_> {
             }
         }
         self.check_discards();
-        self.report_unused(&uses);
+        self.report_unused();
     }
 
-    fn visit(&mut self, e: &Expr, uses: &mut [u32]) {
+    fn visit(&mut self, e: &Expr) {
         match &e.kind {
-            ExprKind::Var(Var::Local(b)) => uses[b.0 as usize] += 1,
             ExprKind::Match { subject, arms } => self.check_match_arms(subject, arms, e),
             ExprKind::Block(b) => self.check_block_stmts(b),
             ExprKind::OrElse {
@@ -224,13 +222,12 @@ impl Checker<'_> {
         }
     }
 
-    fn report_unused(&mut self, uses: &[u32]) {
+    fn report_unused(&mut self) {
         let mut unused: Vec<(String, scarlet_syntax::span::Span)> = self
             .binders
             .iter()
-            .zip(uses)
-            .filter(|(b, n)| **n == 0 && !b.name.starts_with('_'))
-            .map(|(b, _)| (b.name.to_string(), b.span))
+            .filter(|b| !b.used && !b.name.starts_with('_'))
+            .map(|b| (b.name.to_string(), b.span))
             .collect();
         unused.sort_by_key(|(_, sp)| (sp.start_line, sp.start_column));
         for (name, span) in unused {

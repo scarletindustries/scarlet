@@ -1,5 +1,5 @@
-//! Typed IR is what the elaborator builds from the checker's typed tree, and
-//! it is the only thing `lower` reads.
+//! Typed IR is what lowering builds from the checker's typed tree, and what
+//! `lower` turns into Core IR.
 //!
 //! Every decision the checker made is stored as a field on the node: the type,
 //! the resolved field index, the resolved variant and the resolved call target.
@@ -15,29 +15,10 @@
 //! `Match` patterns keep their nesting for `lower` to flatten into `CorePat`
 //! heads (docs/core-ir-spec.md §IR).
 
-pub mod binop;
-pub mod checked;
-pub mod elaborate;
-pub mod elaborate_pat;
-pub mod eta;
-pub mod resolve;
-pub mod rty;
-pub use scarlet_types::slots;
-pub mod zonk;
-
-pub use checked::{BinderId, ClosureFact, NameAt, NameFact};
-pub(crate) use elaborate::elaborator_bug;
-pub use elaborate::{
-    ElabCtx, FieldAt, OrShape, PreludeTys, VariantLayout, elaborate_body, elaborate_toplevel,
-};
-pub use eta::FnTable;
-pub use resolve::Denotation;
-pub use rty::{Arity, RSlice, RTy, ResolvedNode, ResolvedPool};
-pub use zonk::{Zonker, pool_for};
+pub use scarlet_ir::rty::{RSlice, RTy, ResolvedNode, ResolvedPool};
 
 use scarlet_ir::core_ir::{ConstId, FuncIdx, PrimOp, VariantRef};
-use scarlet_types::intrinsic::Intrinsic;
-use scarlet_types::types::StrId;
+use scarlet_ir::intrinsic::Intrinsic;
 
 /// A binding introduced by a `TypedFn`'s parameter list, a `let`, or a
 /// pattern. The ids in a function are dense: `BindingId(i)` exists for every
@@ -58,7 +39,9 @@ pub use scarlet_ir::core_ir::{CaptureIdx, GlobalSlot};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypedBind {
     pub id: BindingId,
-    pub name: StrId,
+    /// Whether the source names it, as opposed to a temporary lowering made.
+    /// A named `let` on a function's outermost spine keeps a local of its own.
+    pub named: bool,
     pub ty: RTy,
     /// `Some(slot)` when this binding is module-level and must land in that
     /// entry-frame slot, because fn bodies read it from there.
@@ -415,7 +398,6 @@ impl TypedExpr {
 /// [`TypedProgram::fns`], so a `TypedFn` never contains another.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedFn {
-    pub name: StrId,
     pub params: Vec<TypedBind>,
     pub ret: RTy,
     pub body: TypedExpr,
@@ -426,34 +408,6 @@ pub struct TypedFn {
     /// [`TypedFn`] whose ids start again at zero, and it reaches an enclosing
     /// binding through [`ValueRef::Capture`].
     pub binds: u32,
-}
-
-/// A whole typechecked module, and the only input `lower` takes.
-///
-/// It **owns** its type pool instead of borrowing the compiler's, so the
-/// elaborator can hand the finished program over by value and `lower` can take
-/// `&self`.
-///
-/// [`Self::pool`] is dropped at the end of the compile but the `CoreProgram` it
-/// typed is not, so an `RTy` on a surviving `CoreFn::ret_ty` names a pool that
-/// no longer exists. Nothing may read a lowered function's types once the
-/// compile ends. That is why `Compiler::reset_to` rewinds functions by count,
-/// never by looking at their types.
-#[derive(Debug, Clone)]
-pub struct TypedProgram {
-    /// Top-level functions, nested closures and eta wrappers, indexed by the
-    /// [`FuncIdx`] every [`TypedCallee::Known`] and [`TypedExpr::Closure`]
-    /// carries.
-    pub fns: Vec<TypedFn>,
-    /// The module's initialiser. It runs the top-level declarations in
-    /// dependency order and then the module's statements. `params` is empty.
-    pub toplevel: TypedFn,
-    /// The arena every [`RTy`] in the program indexes. Elaboration only appends
-    /// to it, and nothing changes it afterwards. `lower` never reads it,
-    /// `perceus` reads it for `is_heap`, and the VM never sees types at all.
-    pub pool: ResolvedPool,
-    /// Types for the locals `lower` mints that no source expression names.
-    pub temps: TempTys,
 }
 
 /// The few [`RTy`]s `lower` needs for the temporaries it introduces, such as an
@@ -475,30 +429,47 @@ pub struct TempTys {
     pub int_pair: RTy,
 }
 
-impl TempTys {
-    /// Intern the five nodes into `pool`, once per compile, before any body is
-    /// elaborated. Each comes from the real prelude type through
-    /// [`PreludeTys::resolve_rty`], never a made-up stand-in, so `Bool` and
-    /// `Binary` stay outside `PrimIds` and [`ResolvedPool::is_heap`] answers
-    /// `true` for them. `int_pair` has no prelude `Ty`, because source code
-    /// never names the result of `PrimOp::BinaryReadUtf8`, so it is built from
-    /// its parts.
-    pub fn intern<C: PreludeTys>(ctx: &mut C, pool: &mut ResolvedPool) -> TempTys {
-        let t = ctx.ty_int();
-        let int = ctx.resolve_rty(pool, t);
-        let t = ctx.ty_bool();
-        let boolean = ctx.resolve_rty(pool, t);
-        let t = ctx.ty_string();
-        let string = ctx.resolve_rty(pool, t);
-        let t = ctx.ty_binary();
-        let binary = ctx.resolve_rty(pool, t);
-        let int_pair = pool.mk_tuple(&[int, int]);
-        TempTys {
-            int,
-            bool: boolean,
-            string,
-            binary,
-            int_pair,
+/// Every [`TypedBind`] `p` introduces, in left-to-right order, each listed
+/// once however many or-alternatives mention it.
+pub fn pat_binds(p: &TypedPat) -> Vec<TypedBind> {
+    let mut out = Vec::new();
+    collect_binds(p, &mut out);
+    out
+}
+
+fn push_bind(out: &mut Vec<TypedBind>, b: TypedBind) {
+    if !out.iter().any(|x| x.id == b.id) {
+        out.push(b);
+    }
+}
+
+fn collect_binds(p: &TypedPat, out: &mut Vec<TypedBind>) {
+    match p {
+        TypedPat::Wild { .. } | TypedPat::Lit { .. } | TypedPat::Range { .. } => {}
+        TypedPat::Bind(b) => push_bind(out, *b),
+        TypedPat::Ctor { fields: ps, .. }
+        | TypedPat::Tuple { elems: ps, .. }
+        | TypedPat::Or { alts: ps, .. } => ps.iter().for_each(|q| collect_binds(q, out)),
+        TypedPat::Array { prefix, rest, .. } => {
+            prefix.iter().for_each(|q| collect_binds(q, out));
+            collect_rest(rest, out);
         }
+        TypedPat::Bin { segs, rest, .. } => {
+            for s in segs {
+                match s {
+                    TypedBinPatSeg::Utf8Literal { .. } => {}
+                    TypedBinPatSeg::Utf8 { value }
+                    | TypedBinPatSeg::Int { value, .. }
+                    | TypedBinPatSeg::Binary { value, .. } => collect_binds(value, out),
+                }
+            }
+            collect_rest(rest, out);
+        }
+    }
+}
+
+fn collect_rest(rest: &PatRest, out: &mut Vec<TypedBind>) {
+    if let PatRest::Bind(b) = rest {
+        push_bind(out, *b);
     }
 }

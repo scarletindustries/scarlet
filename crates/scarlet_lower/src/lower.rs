@@ -47,15 +47,14 @@
 use std::collections::VecDeque;
 
 use super::{
-    Atom, Callee, ConstId, CoreBind, CoreExpr, CoreFn, CorePat, CoreProgram, JoinId, Load, LocalId,
+    Atom, Callee, ConstId, CoreBind, CoreExpr, CoreFn, CorePat, JoinId, Load, LocalId,
     PrimOp,
 };
-use scarlet_elaborate::{
+use crate::typed_ir::{
     BindingId, PatRest, RTy, TempTys, TypedArm, TypedArrayElem, TypedBinPatSeg, TypedBinSeg,
-    TypedBind, TypedCallee, TypedExpr, TypedFn, TypedInterpPart, TypedPat, TypedProgram, ValueRef,
+    TypedBind, TypedCallee, TypedExpr, TypedFn, TypedInterpPart, TypedPat, ValueRef, pat_binds,
 };
 use scarlet_ir::tivec::TiVec;
-use scarlet_types::types::StrId;
 
 /// Narrow a [`PrimOp`] field or element index to `u16`, checking it fits. An
 /// index that doesn't fit aborts, because silently truncating it would read
@@ -82,34 +81,9 @@ fn binding_bug(b: BindingId, why: &str) -> ! {
     panic!("internal compiler error: {b} {why}. Report this as a compiler bug.")
 }
 
-/// Lower a whole typechecked module.
-///
-/// Module-scope declarations come back pinned to their slots. A toplevel `Let`
-/// whose [`TypedBind::global`] named an entry-frame slot carries it on
-/// [`CoreBind::global`], and [`CoreExpr::toplevel_globals`] can read it back.
-/// The pairing comes from the `TypedBind`, so it can't drift from the
-/// `Load::Global` slot that fn bodies read it from.
-pub fn lower(p: &TypedProgram) -> CoreProgram {
-    let mut fns = Vec::with_capacity(p.fns.len());
-    for (i, f) in p.fns.iter().enumerate() {
-        let f = lower_fn(p.temps, f);
-        // Only a toplevel's lowering reads the pinning, so a pinned bind inside
-        // an ordinary fn would be silently ignored.
-        debug_assert!(
-            f.body.toplevel_globals().is_empty(),
-            "ordinary fn#{i} carries slot-pinned binds"
-        );
-        fns.push(f);
-    }
-    CoreProgram {
-        toplevel: lower_fn(p.temps, &p.toplevel).body,
-        fns,
-    }
-}
-
 /// Lower one function. Each param is bound under the [`BindingId`] its
 /// [`TypedBind`] carries.
-fn lower_fn(temps: TempTys, f: &TypedFn) -> CoreFn {
+pub fn lower_fn(temps: TempTys, f: &TypedFn) -> CoreFn {
     let mut lo = Lower::new(temps, f.binds);
     let params: Vec<CoreBind> = f
         .params
@@ -495,7 +469,7 @@ impl Lower {
     /// that segment, where its value already has a home.
     fn let_bind_at(&mut self, bind: &TypedBind, init: &TypedExpr, spine: SpinePos) {
         let owns_slot =
-            bind.global.is_some() || (spine == SpinePos::Outer && bind.name != StrId::NONE);
+            bind.global.is_some() || (spine == SpinePos::Outer && bind.named);
         let v = if owns_slot {
             self.let_bound(bind, init)
         } else {
@@ -1101,7 +1075,7 @@ impl Lower {
         outer: ArmFall,
         result_ty: RTy,
     ) -> CoreExpr {
-        let commit = (!alts.iter().any(pat_binds)).then(|| self.fresh_join());
+        let commit = (!alts.iter().any(|a| !pat_binds(a).is_empty())).then(|| self.fresh_join());
 
         let mut lowered: Vec<(Option<JoinId>, CoreExpr)> = Vec::with_capacity(alts.len());
         for (i, alt) in alts.iter().enumerate() {
@@ -1523,9 +1497,3 @@ fn nested_fallible(p: &TypedPat) -> bool {
     }
 }
 
-/// Whether `p` binds any name. A continuation with no parameters can't receive
-/// the locals a binding alternative mints, so only an or-pattern that binds
-/// nothing shares its commit path as a join (see [`Lower::or_alternatives`]).
-fn pat_binds(p: &TypedPat) -> bool {
-    !scarlet_elaborate::elaborate_pat::pat_binds(p).is_empty()
-}

@@ -457,6 +457,7 @@ impl Checker<'_> {
         let name = id.name.as_str();
         if let Some(found) = self.scope.lookup(name) {
             let b = found.binder;
+            self.binders[b.0 as usize].used = true;
             let state = &self.binders[b.0 as usize];
             let (module_scope, scheme, span) = (state.module_scope, state.scheme.clone(), state.span);
             if found.frame < self.scope.depth() && !module_scope {

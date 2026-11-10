@@ -11,20 +11,15 @@
 )]
 #![forbid(unsafe_code)]
 
-pub mod bytecode;
-pub use scarlet_lower as core_ir;
+pub mod build;
+pub mod compile;
 pub mod lint;
 pub mod module;
-pub mod reference;
-pub use scarlet_elaborate as typed_ir;
 pub use scarlet_ir::tivec;
+pub use scarlet_check as check;
+pub use scarlet_lower as core_ir;
+pub use scarlet_types as types;
 
-// Re-exported at their historical paths so `scarlet_core::parser`,
-// `scarlet_core::types` etc. keep naming one definition.
 pub use scarlet_syntax::{
     ast, desugar, diagnostic, formatter, highlight, parser, scanner, span, term, token,
 };
-pub use scarlet_types::{type_def, types};
-
-pub use bytecode::{CtorRef, PreludeBindings, TypeRef};
-pub use type_def::TypeId;

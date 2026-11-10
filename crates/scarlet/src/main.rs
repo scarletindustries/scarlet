@@ -20,7 +20,7 @@ use std::process;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
 use scarlet::cli::{help, man};
-use scarlet::{ast, bytecode, diagnostic, dis, formatter, lint, lsp, parser, repl, scanner};
+use scarlet::{build, compile, diagnostic, dis, formatter, lint, scanner};
 
 const VERSION: &str = env!("SCARLET_VERSION");
 
@@ -248,34 +248,24 @@ fn report(diagnostics: &[diagnostic::Diagnostic], fail: bool, file: &str, entryp
     }
 }
 
-fn parse_source(file: &str, entrypoint: &str) -> ast::Expression {
-    let mut s = scanner::new_scanner(file.to_string());
-    let p = parser::new_parser(&mut s);
-    let result = p.parse_program();
-
-    let fail = diagnostic::has_errors(&result.diagnostics);
-    report(&result.diagnostics, fail, file, entrypoint);
-
-    ast::Expression::BlockExpression(result.ast)
+fn parse_source(file: &str, entrypoint: &str) -> build::Parsed {
+    let parsed = build::parse(file);
+    let fail = diagnostic::has_errors(&parsed.diagnostics);
+    report(&parsed.diagnostics, fail, file, entrypoint);
+    parsed
 }
 
-fn compile_source(
-    expr: &ast::Expression,
-    file: &str,
-    entrypoint: &str,
-    f: impl FnOnce(&ast::Expression, Option<&Path>) -> bytecode::CompileResult,
-) -> bytecode::CompileResult {
+/// Check the program at `entrypoint`, and lower it when it checks. A file in
+/// the Scarlet repo's own stdlib is checked as that module, so `@vm` is
+/// allowed and the prelude isn't reported for redefining itself.
+fn compile_source(parsed: build::Parsed, file: &str, entrypoint: &str, run: bool) -> compile::Compiled {
     let path = Path::new(entrypoint);
-    let base_dir = path.parent();
-    // A file in the Scarlet repo's own stdlib is checked as that module, so `@vm` and external
-    // are allowed and the prelude isn't reported for redefining itself.
-    let result = match scarlet::module::detect_stdlib_module(path) {
-        Some(m) => bytecode::check_as_module(expr, base_dir, m),
-        None => f(expr, base_dir),
-    };
-
+    let mut opts = compile::Options::program(path.parent());
+    opts.run = run;
+    opts.as_module = scarlet::module::detect_stdlib_module(path);
+    let mut b = build::Build::new(None);
+    let result = compile::compile(&mut b, &parsed.ast, parsed.doc, build::source_hash(file), &opts);
     report(&result.diagnostics, !result.success(), file, entrypoint);
-
     result
 }
 
@@ -384,16 +374,15 @@ fn main() -> process::ExitCode {
             help::home(&cmd);
         }
         Some(Commands::Repl) => {
-            repl::run(VERSION.trim());
+            die("the REPL is being rebuilt");
         }
         Some(Commands::Lsp) => {
-            let mut server = lsp::new_server();
-            server.run();
+            die("the language server is being rebuilt");
         }
         Some(Commands::Dis(args)) => {
             let file = read_file_or_die(&args.entrypoint);
-            let expr = parse_source(&file, &args.entrypoint);
-            let result = compile_source(&expr, &file, &args.entrypoint, bytecode::compile);
+            let parsed = parse_source(&file, &args.entrypoint);
+            let result = compile_source(parsed, &file, &args.entrypoint, true);
             let Some(program) = result.into_runnable() else {
                 die("nothing to list: the compile produced no program");
             };
@@ -411,8 +400,8 @@ fn main() -> process::ExitCode {
         }
         Some(Commands::Check { entrypoint }) => {
             let file = read_file_or_die(&entrypoint);
-            let expr = parse_source(&file, &entrypoint);
-            compile_source(&expr, &file, &entrypoint, bytecode::check);
+            let parsed = parse_source(&file, &entrypoint);
+            compile_source(parsed, &file, &entrypoint, false);
         }
         Some(Commands::Build { entrypoint }) => {
             eprintln!("warning: `scarlet build` is deprecated; use `scarlet fmt --stdout <file>`");
@@ -457,7 +446,7 @@ fn cmd_lint(args: LintArgs) {
 
 fn cmd_run(args: RunArgs) {
     let file = read_file_or_die(&args.entrypoint);
-    let expr = parse_source(&file, &args.entrypoint);
+    let parsed = parse_source(&file, &args.entrypoint);
 
     if args.debug_printer {
         println!();
@@ -469,7 +458,7 @@ fn cmd_run(args: RunArgs) {
         println!();
     }
 
-    let result = compile_source(&expr, &file, &args.entrypoint, bytecode::compile);
+    let result = compile_source(parsed, &file, &args.entrypoint, true);
     let Some(program) = result.into_runnable() else {
         die("nothing to run: the compile produced no program");
     };

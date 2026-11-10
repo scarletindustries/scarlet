@@ -16,7 +16,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{Atom, Callee, CoreBind, CoreExpr, CoreFn, CorePat, JoinId, LocalId, ReuseShape};
-use scarlet_elaborate::{RTy, ResolvedPool};
+use crate::typed_ir::{RTy, ResolvedPool};
 
 /// Run Perceus on one lowered function. `pool` is only used to check whether a
 /// bind's `ty` is a heap type and to read a tuple's width. Its types are always
@@ -724,8 +724,8 @@ mod tests {
     use crate::PrimOp;
     use crate::testkit::{bind, ctor, func, local, variant};
     use crate::{ConstId, FuncIdx};
-    use scarlet_types::type_def::TypeId;
-    use scarlet_types::types::PrimIds;
+    use scarlet_ir::TypeId;
+    use scarlet_ir::rty::PrimIds;
 
     /// The same kind of arena the elaborator hands `perceus` in the real
     /// pipeline.
@@ -822,7 +822,7 @@ mod tests {
         let mut pool = pool();
         let obj = con(&mut pool, 7);
         let mut global = bind(0, obj);
-        global.global = Some(scarlet_elaborate::GlobalSlot(0));
+        global.global = Some(crate::typed_ir::GlobalSlot(0));
         let reuse_global = Atom::Ctor {
             variant: variant(),
             fields: Vec::new(),

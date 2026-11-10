@@ -7,4 +7,5 @@ edition = "2024"
 scarlet_syntax = { path = "../scarlet_syntax" }
 scarlet_ir = { path = "../scarlet_ir" }
 scarlet_types = { path = "../scarlet_types" }
+scarlet_check = { path = "../scarlet_check" }
 smallvec = "1.15"
