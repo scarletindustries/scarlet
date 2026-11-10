@@ -666,7 +666,7 @@ fn cmd_upgrade(version: Option<String>) -> Result<(), UpgradeError> {
     // Linux, where the rename would fail with EXDEV.
     let tmp_path = current_exe.with_extension("new");
     let download_url = format!(
-        "https://github.com/scarletindustries/language/releases/download/{tag}/{asset_name}"
+        "https://github.com/scarletindustries/scarlet/releases/download/{tag}/{asset_name}"
     );
 
     println!("Downloading {tag}...");

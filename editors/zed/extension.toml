@@ -4,11 +4,11 @@ description = "Scarlet language support for Zed, with syntax highlighting from t
 version = "0.0.1"
 schema_version = 1
 authors = ["Alistair Smith <hi@alistair.sh>"]
-repository = "https://github.com/scarletindustries/language"
+repository = "https://github.com/scarletindustries/scarlet"
 
 [grammars.scarlet]
-repository = "https://github.com/scarletindustries/language"
-rev = "cc9080c474d5b5932de2a7c2778299eca7028414"
+repository = "https://github.com/scarletindustries/scarlet"
+rev = "85461e2daad154b14e137ae0363e59c55905044e"
 path = "editors/tree-sitter-scarlet"
 
 [language_servers.scarlet]

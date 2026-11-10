@@ -220,11 +220,13 @@ impl LspServer {
         // loose file sends neither, and that file gets the empty root.
         let folders = params.get("workspaceFolders");
         if folders.is_some_and(Json::is_array) {
-            self.ws.workspace_roots.extend(folder_paths(folders));
+            for p in folder_paths(folders) {
+                self.ws.add_workspace_root(p);
+            }
         } else if let Some(uri) = params.get("rootUri").and_then(|v| v.as_str())
             && let Some(p) = uri_to_path(uri)
         {
-            self.ws.workspace_roots.push(p);
+            self.ws.add_workspace_root(p);
         }
         self.send_response(
             id,
@@ -270,26 +272,17 @@ impl LspServer {
 
     fn handle_did_change_workspace_folders(&mut self, params: &Json) {
         let event = params.get("event");
-        for p in folder_paths(event.and_then(|e| e.get("removed"))) {
-            self.ws.workspace_roots.retain(|r| r != &p);
-            self.ws.roots.remove(&p);
-        }
+        let removed = folder_paths(event.and_then(|e| e.get("removed")));
         let added = folder_paths(event.and_then(|e| e.get("added")));
-        self.ws.workspace_roots.extend(added.iter().cloned());
-        // Once `scanned` is set, `ensure_workspace_scanned` returns early, so we have to index a
-        // folder added after the first scan here, or cross-module queries never see its modules.
-        if self.ws.scanned {
-            for r in &added {
-                self.ws.index_root(r);
-            }
-        }
+        let publications = self.ws.change_folders(&added, &removed);
+        self.publish_diagnostics(publications);
     }
 
     fn handle_did_change_watched_files(&mut self, params: &Json) {
         let Some(changes) = params.get("changes").and_then(|v| v.as_array()) else {
             return;
         };
-        if self.ws.roots.is_empty() {
+        if self.ws.is_empty() {
             return;
         }
         let changes: Vec<(String, WatchedChange)> = changes

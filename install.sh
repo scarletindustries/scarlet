@@ -6,7 +6,7 @@ set -e
 
 INSTALL_DIR="$HOME/.scarlet/bin"
 BINARY_NAME="scarlet"
-REPO="scarletindustries/language"
+REPO="scarletindustries/scarlet"
 
 echo "Installing Scarlet..."
 

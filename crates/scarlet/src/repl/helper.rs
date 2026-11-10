@@ -18,20 +18,20 @@ use rustyline::{Context, Helper};
 use crate::highlight::highlight_at;
 use crate::repl::command;
 use crate::repl::entry::{self, Entry};
-use crate::repl::names::{Candidate, Names};
+use crate::repl::names::{Accepted, Candidate};
 use crate::term::Palette;
 use crate::token::{is_name_continue, is_name_start};
 
 pub struct ScarletHelper {
     palette: Palette,
     /// Shared with the session, which extends it as entries are accepted.
-    names: Rc<RefCell<Names>>,
+    names: Rc<RefCell<Accepted>>,
     hinter: HistoryHinter,
     filenames: FilenameCompleter,
 }
 
 impl ScarletHelper {
-    pub fn new(palette: Palette, names: Rc<RefCell<Names>>) -> Self {
+    pub fn new(palette: Palette, names: Rc<RefCell<Accepted>>) -> Self {
         ScarletHelper {
             palette,
             names,
@@ -190,11 +190,11 @@ fn complete_command((marker, typed): (&str, &str)) -> (usize, Vec<Pair>) {
 }
 
 /// Candidates for source text, and the byte offset they replace from.
-fn complete_source(line: &str, pos: usize, names: &mut Names) -> (usize, Vec<Pair>) {
+fn complete_source(line: &str, pos: usize, names: &mut Accepted) -> (usize, Vec<Pair>) {
     // `import scarlet/…` completes module paths, which are not identifiers:
     // their `/` separators fall outside the word grammar.
     if let Some(path) = import_path_before(line, pos) {
-        return (pos - path.len(), pairs(Names::module_paths(path)));
+        return (pos - path.len(), pairs(Accepted::module_paths(path)));
     }
     let Some((start, word)) = word_before(line, pos) else {
         return (pos, Vec::new());
@@ -259,34 +259,35 @@ fn import_path_before(line: &str, pos: usize) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repl::names::AcceptedEntry;
 
-    fn observed(src: &str) -> Names {
+    fn observed(src: &str) -> Accepted {
         let mut scanner = crate::scanner::new_scanner(src.to_string());
         let program = crate::parser::new_parser(&mut scanner).parse_program();
-        let mut names = Names::default();
-        names.observe(&program.ast);
+        let mut names = Accepted::default();
+        names.accept(AcceptedEntry::new(src, &program.ast));
         names
     }
 
-    fn candidates(line: &str, names: &mut Names) -> (usize, Vec<String>) {
+    fn candidates(line: &str, names: &mut Accepted) -> (usize, Vec<String>) {
         let (start, pairs) = complete_source(line, line.len(), names);
         (start, pairs.into_iter().map(|p| p.replacement).collect())
     }
 
-    fn helper(names: Names) -> ScarletHelper {
+    fn helper(names: Accepted) -> ScarletHelper {
         ScarletHelper::new(
             crate::term::Palette::for_stdout(),
             Rc::new(RefCell::new(names)),
         )
     }
 
-    fn hint(line: &str, names: Names) -> Option<String> {
+    fn hint(line: &str, names: Accepted) -> Option<String> {
         helper(names).completion_hint(line, line.len())
     }
 
     #[test]
     fn the_ghost_text_is_what_tab_would_insert() {
-        assert_eq!(hint("printl", Names::default()).as_deref(), Some("n"));
+        assert_eq!(hint("printl", Accepted::default()).as_deref(), Some("n"));
         assert_eq!(
             hint("http::Del", observed("import scarlet/http")).as_deref(),
             Some("ete")
@@ -302,14 +303,14 @@ mod tests {
 
     #[test]
     fn nothing_is_suggested_for_an_empty_word() {
-        assert_eq!(hint("", Names::default()), None);
-        assert_eq!(hint("1 + ", Names::default()), None);
+        assert_eq!(hint("", Accepted::default()), None);
+        assert_eq!(hint("1 + ", Accepted::default()), None);
     }
 
     #[test]
     fn a_command_suggests_the_rest_of_its_name() {
-        assert_eq!(hint(":he", Names::default()).as_deref(), Some("lp "));
-        assert_eq!(hint("/he", Names::default()).as_deref(), Some("lp "));
+        assert_eq!(hint(":he", Accepted::default()).as_deref(), Some("lp "));
+        assert_eq!(hint("/he", Accepted::default()).as_deref(), Some("lp "));
     }
 
     /// This tests the whole editor path, not just the helper's inner function, because a candidate
@@ -331,7 +332,7 @@ mod tests {
 
     #[test]
     fn a_bare_prefix_completes_prelude_names() {
-        let (start, items) = candidates("printl", &mut Names::default());
+        let (start, items) = candidates("printl", &mut Accepted::default());
         assert_eq!(start, 0);
         assert!(items.contains(&"println".to_string()), "{items:?}");
     }
@@ -357,14 +358,14 @@ mod tests {
 
     #[test]
     fn an_import_line_completes_module_paths() {
-        let (start, items) = candidates("import scarlet/str", &mut Names::default());
+        let (start, items) = candidates("import scarlet/str", &mut Accepted::default());
         assert_eq!(start, "import ".len());
         assert!(items.iter().any(|i| i == "scarlet/string"), "{items:?}");
     }
 
     #[test]
     fn a_number_is_not_a_name_to_complete() {
-        let (start, items) = candidates("1 + 2", &mut Names::default());
+        let (start, items) = candidates("1 + 2", &mut Accepted::default());
         assert_eq!(start, "1 + 2".len());
         assert!(items.is_empty(), "{items:?}");
     }

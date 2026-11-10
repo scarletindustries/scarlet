@@ -18,15 +18,16 @@ use rustyline::error::ReadlineError;
 use rustyline::history::FileHistory;
 use rustyline::{Cmd, Config, Editor, EventHandler, KeyCode, KeyEvent, Modifiers};
 
+use crate::ast;
 use crate::build::{self, Build};
-use crate::check::{Role, UnusedBindings};
+use crate::check::{Role, UnusedBindings, typed};
 use crate::compile::{self, Compiled};
 use crate::diagnostic;
 use crate::sources::DiskSources;
 use crate::term::Palette;
 use command::Flow;
 use entry::Entry;
-use names::Names;
+use names::{Accepted, AcceptedEntry};
 
 /// Where an entry's diagnostics say they come from. It isn't a real path, because the session's
 /// replayed source has no file.
@@ -34,8 +35,8 @@ const ORIGIN: &str = "<repl>";
 
 pub fn run(version: &str) {
     let palette = Palette::for_stdout();
-    let names = Rc::new(RefCell::new(Names::default()));
-    let mut editor = match new_editor(palette, Rc::clone(&names)) {
+    let accepted = Rc::new(RefCell::new(Accepted::default()));
+    let mut editor = match new_editor(palette, Rc::clone(&accepted)) {
         Ok(editor) => editor,
         Err(e) => {
             eprintln!("Failed to initialise readline: {e}");
@@ -48,7 +49,7 @@ pub fn run(version: &str) {
     }
     banner(version, &palette);
 
-    let mut session = Session::new(palette, names);
+    let mut session = Session::new(palette, accepted);
     loop {
         let line = match editor.readline(">>> ") {
             Ok(line) => line,
@@ -97,7 +98,7 @@ pub fn run(version: &str) {
 
 fn new_editor(
     palette: Palette,
-    names: Rc<RefCell<Names>>,
+    accepted: Rc<RefCell<Accepted>>,
 ) -> rustyline::Result<Editor<helper::ScarletHelper, FileHistory>> {
     let config = Config::builder()
         .max_history_size(10_000)?
@@ -108,7 +109,7 @@ fn new_editor(
         .indent_size(4)
         .build();
     let mut editor = Editor::with_config(config)?;
-    editor.set_helper(Some(helper::ScarletHelper::new(palette, names)));
+    editor.set_helper(Some(helper::ScarletHelper::new(palette, accepted)));
     // Enter submits when the entry parses and opens a new line when it doesn't (see the
     // `Validator`). These keys always open one, for adding to an entry that's already complete.
     //
@@ -152,20 +153,19 @@ fn history_path() -> Option<PathBuf> {
     )
 }
 
-/// The live session: the source it replays, the names that source bound, and the build that keeps
-/// every module it imports checked, so the stdlib is checked once per session.
+/// The live session: the entries it accepted, and the build that keeps every module it imports
+/// checked, so the stdlib is checked once per session.
 pub(crate) struct Session {
-    /// Every import the session has seen and every declaration it has accepted. They're replayed
-    /// word for word ahead of the current entry, imports first, as the language requires.
+    /// The entries the session accepted. Each one's imports and definitions are replayed word
+    /// for word ahead of the current entry, imports first, as the language requires.
     ///
     /// We keep source instead of the AST because each turn is scanned on its own. Kept nodes would
-    /// all restart their spans at line 1, and two entries of the same shape would share a `Span`,
-    /// which the compiler keys expression types on. Replaying text keeps every span unique.
-    imports: String,
-    definitions: String,
+    /// all restart their spans at line 1, and two entries of the same shape would share a `Span`.
+    /// Replaying text keeps every span unique. The line editor reads the same list to complete
+    /// names, so it is shared.
+    accepted: Rc<RefCell<Accepted>>,
     build: Build,
     sources: DiskSources,
-    names: Rc<RefCell<Names>>,
     palette: Palette,
     /// Relative imports resolve against the directory the REPL was started in, which is the only
     /// directory a session can be said to be "in".
@@ -173,13 +173,11 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    fn new(palette: Palette, names: Rc<RefCell<Names>>) -> Self {
+    fn new(palette: Palette, accepted: Rc<RefCell<Accepted>>) -> Self {
         Session {
-            imports: String::new(),
-            definitions: String::new(),
+            accepted,
             build: Build::default(),
             sources: DiskSources::new(),
-            names,
             palette,
             base_dir: std::env::current_dir().ok(),
         }
@@ -205,7 +203,7 @@ impl Session {
 
     /// The session's own source: everything it replays ahead of an entry.
     fn replay(&self) -> String {
-        format!("{}{}", self.imports, self.definitions)
+        self.accepted.borrow().replay()
     }
 
     /// Compiles the session's source plus `input` as one program and runs it, printing the value
@@ -216,7 +214,7 @@ impl Session {
         // A module's name on its own isn't a value, but at a prompt it's a fair way to ask what's
         // in it.
         let name = input.trim();
-        if self.names.borrow().is_module(name) {
+        if self.accepted.borrow().is_module(name) {
             return self.list_module(name);
         }
         let program = match entry::parse(input) {
@@ -229,10 +227,7 @@ impl Session {
         // The entry's own imports join the session's ahead of every definition, so `import` works
         // at any point in a session and not only in its first entry.
         let parts = entry::split(input, &program);
-        let combined_src = format!(
-            "{}{}{}{}{}",
-            self.imports, parts.imports, self.definitions, parts.definitions, parts.expressions
-        );
+        let combined_src = self.accepted.borrow().replay_with(&parts);
         let combined = build::parse(&combined_src);
         if diagnostic::has_errors(&combined.diagnostics) {
             self.report(&combined.diagnostics, &combined_src);
@@ -271,16 +266,16 @@ impl Session {
             }
         }
 
-        self.names.borrow_mut().observe(&program);
-        self.imports.push_str(&parts.imports);
-        self.definitions.push_str(&parts.definitions);
+        self.accepted
+            .borrow_mut()
+            .accept(AcceptedEntry::new(input, &program));
     }
 
     /// Lists what the imported module `alias` offers: its first few public names, and how to see
     /// the rest.
     fn list_module(&self, alias: &str) {
         const SHOWN: usize = 15;
-        let mut members = self.names.borrow_mut().qualified(alias, "");
+        let mut members = self.accepted.borrow_mut().qualified(alias, "");
         // Show functions and values first, because they're what a module is for, then the types
         // and constructors that go with them.
         members.sort_by_key(|m| m.name.starts_with(|c: char| c.is_ascii_uppercase()));
@@ -302,14 +297,24 @@ impl Session {
         }
     }
 
-    /// Prints the inferred type of `expr`, from a throwaway checking session. We bind it to a name
-    /// because types are recorded at names, and the name starts with `_` so the binding isn't
-    /// reported as unused.
+    /// Prints the inferred type of `expr`. It is checked as the session's last statement, so it
+    /// sees every name the session bound, and nothing runs. The type is the one the checker gave
+    /// that statement.
     fn print_type(&mut self, expr: &str) {
-        const BINDING: &str = "const _repl_type = ";
-
-        let replay = self.replay();
-        let probe_src = format!("{replay}{BINDING}{expr}\n");
+        let is_one_expression = match entry::parse(expr) {
+            Entry::Accepted(program) => {
+                matches!(program.body.as_slice(), [ast::Node::Expression(_)])
+            }
+            Entry::Incomplete(diagnostics) | Entry::Rejected(diagnostics) => {
+                diagnostic::print_diagnostics(&diagnostics, expr, ORIGIN);
+                return;
+            }
+        };
+        if !is_one_expression {
+            eprintln!(":type takes one expression");
+            return;
+        }
+        let probe_src = format!("{}{expr}\n", self.replay());
         let probe = build::parse(&probe_src);
         if diagnostic::has_errors(&probe.diagnostics) {
             self.report(&probe.diagnostics, &probe_src);
@@ -320,20 +325,16 @@ impl Session {
             self.report(result.diagnostics(), &probe_src);
             return;
         }
-        // The binding is the last line of the probe source, and its name starts right after
-        // `const `.
-        let line = i32::try_from(replay.lines().count()).unwrap_or(0);
-        let column = i32::try_from("const ".len()).unwrap_or(0);
-        let ty = result.analysis().and_then(|a| {
-            a.entry()
-                .checked
-                .index
-                .hovers
-                .iter()
-                .filter(|h| h.span.contains(line, column))
-                .min_by_key(|h| h.span.width())
-                .map(|h| h.ty.clone())
-        });
+        let ty = result
+            .analysis()
+            .and_then(|a| a.entry().checked.clean.as_ref())
+            .and_then(|clean| {
+                let module = clean.module();
+                match module.statements.last()? {
+                    typed::Stmt::Expr(e) => Some(module.types.get(e.ty)),
+                    typed::Stmt::Let { .. } => None,
+                }
+            });
         match ty {
             Some(ty) => println!("{expr}  {}{ty}{}", self.palette.bold, self.palette.reset),
             None => eprintln!("no type was inferred for that expression"),
@@ -382,9 +383,7 @@ impl Session {
     }
 
     fn reset(&mut self) {
-        self.imports.clear();
-        self.definitions.clear();
-        self.names.borrow_mut().reset();
+        self.accepted.borrow_mut().reset();
     }
 
     fn report(&self, diagnostics: &[diagnostic::Diagnostic], source: &str) {

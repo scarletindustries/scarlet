@@ -1367,3 +1367,32 @@ fn a_watched_change_to_a_closed_file_rechecks_its_importers() {
         "a deleted file's definitions must leave the graph"
     );
 }
+
+/// A folder added inside a root takes over the files under it: the new root checks them and
+/// publishes their diagnostics, and when the folder goes, they move back.
+#[test]
+fn a_file_moves_to_the_folder_that_now_owns_it() {
+    let p = Project::new("folders");
+    let a = "pub fn main() {\n\tprintln(1)\n}\n";
+    p.write("a.sca", a);
+    std::fs::create_dir_all(p.dir.join("sub")).unwrap();
+    p.write("sub/lib.sca", "pub fn broken() Int { 'no' }\n");
+    let (mut s, _) = open(&p, "a.sca", a);
+    let lib = uri_of(&p, "sub/lib.sca");
+    assert!(s.analysis_of(&lib).is_some(), "the scan checked lib");
+
+    let sub = p.dir.join("sub");
+    let published = s.change_folders(std::slice::from_ref(&sub), &[]);
+    assert!(
+        s.analysis_of(&lib).is_some(),
+        "the new folder's root checked lib"
+    );
+    let lib_diags = published.iter().find(|(u, _)| *u == lib);
+    assert!(
+        lib_diags.is_some_and(|(_, d)| !d.is_empty()),
+        "lib's error is published from its new root: {published:?}"
+    );
+
+    s.change_folders(&[], std::slice::from_ref(&sub));
+    assert!(s.analysis_of(&lib).is_some(), "lib moved back");
+}

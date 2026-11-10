@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 
+use super::entry::{Parts, split};
 use crate::ast;
 use crate::build::Build;
 use crate::compile::{Export, exports};
@@ -46,64 +47,67 @@ impl Candidate {
     }
 }
 
-/// Names the session has introduced. [`Names::reset`] clears it and each accepted entry extends
-/// it, so it tracks the session's replayed source exactly.
-#[derive(Default)]
-pub struct Names {
+/// One entry the session accepted: what it adds to the replayed source, and the names it binds.
+pub struct AcceptedEntry {
+    /// Its imports. The language needs every import before all other declarations, so a session
+    /// replays every entry's imports first.
+    imports: String,
+    /// Its declarations and bindings, replayed ahead of every later entry.
+    definitions: String,
+    /// The names it binds at the top level.
     defined: Vec<String>,
-    /// Maps an import alias to its module path, for `alias::` completion. Only stdlib modules
-    /// resolve, because a relative import's exports live in a file this index never reads.
-    aliases: BTreeMap<String, ModulePath>,
-    /// Where stdlib exports are read from. We make it on the first completion that needs it,
-    /// because that checks the prelude. It keeps every module it checks after that, so each
-    /// module is checked once per REPL.
-    stdlib: Option<(Build, DiskSources)>,
+    /// The aliases its imports bind, in order: the stdlib module each names, or `None` for a
+    /// relative import, whose exports live in a file completion never reads.
+    aliases: Vec<(String, Option<ModulePath>)>,
 }
 
-impl Names {
-    pub fn reset(&mut self) {
-        self.defined.clear();
-        self.aliases.clear();
-    }
-
-    /// Records every top-level name an accepted entry bound.
-    pub fn observe(&mut self, program: &ast::BlockExpression) {
+impl AcceptedEntry {
+    /// The entry `source`, which parsed to `program`.
+    pub fn new(source: &str, program: &ast::BlockExpression) -> Self {
+        let parts = split(source, program);
+        let mut entry = AcceptedEntry {
+            imports: parts.imports,
+            definitions: parts.definitions,
+            defined: Vec::new(),
+            aliases: Vec::new(),
+        };
         for node in &program.body {
             let ast::Node::Statement(stmt) = node else {
                 continue;
             };
             match stmt.as_ref() {
-                ast::Statement::Declaration { decl, .. } => self.observe_declaration(decl),
+                ast::Statement::Declaration { decl, .. } => entry.declaration(decl),
                 ast::Statement::Binding(b) => {
                     b.pattern
                         .for_each_binder(ast::OrAlternatives::All, &mut |binder| {
                             if let ast::PatternBinder::Name(id) = binder {
-                                self.define(&id.name);
+                                entry.defined.push(id.name.clone());
                             }
                         })
                 }
-                ast::Statement::ImportDeclaration(i) => self.observe_import(i),
-                _ => {}
+                ast::Statement::ImportDeclaration(i) => entry.import(i),
+                ast::Statement::Backpass(_) => {}
             }
         }
+        entry
     }
 
-    fn observe_declaration(&mut self, decl: &ast::Declaration) {
+    fn declaration(&mut self, decl: &ast::Declaration) {
         match decl {
-            ast::Declaration::Const(c) => self.define(&c.identifier.name),
-            ast::Declaration::Function(f) => self.define(&f.identifier.name),
+            ast::Declaration::Const(c) => self.defined.push(c.identifier.name.clone()),
+            ast::Declaration::Function(f) => self.defined.push(f.identifier.name.clone()),
             ast::Declaration::Type(t) => {
-                self.define(&t.identifier.name);
+                self.defined.push(t.identifier.name.clone());
                 if let ast::TypeBody::Variants { ctors, .. } = &t.body {
                     for ctor in ctors {
-                        self.define(&ctor.identifier.name);
+                        self.defined.push(ctor.identifier.name.clone());
                     }
                 }
             }
         }
     }
 
-    fn observe_import(&mut self, import: &ast::ImportDeclaration) {
+    fn import(&mut self, import: &ast::ImportDeclaration) {
         let Some(last) = import.path.names.last() else {
             return;
         };
@@ -111,19 +115,79 @@ impl Names {
             Some(a) => a.name.clone(),
             None => last.clone(),
         };
-        // Only a canonical (non-relative) path names a stdlib module. Anything else completes to
-        // nothing.
-        if import.path.leading.is_empty() {
-            self.aliases.insert(alias, import.path.names.clone());
-        } else {
-            self.aliases.remove(&alias);
-        }
+        // Only a canonical (non-relative) path names a stdlib module.
+        let module = import
+            .path
+            .leading
+            .is_empty()
+            .then(|| import.path.names.clone());
+        self.aliases.push((alias, module));
+    }
+}
+
+/// The entries the session has accepted. The source the session replays and the names it
+/// completes both come from this one list, so a reset clears one thing.
+#[derive(Default)]
+pub struct Accepted {
+    entries: Vec<AcceptedEntry>,
+    /// Where stdlib exports are read from. We make it on the first completion that needs it,
+    /// because that checks the prelude. It keeps every module it checks after that, so each
+    /// module is checked once per REPL.
+    stdlib: Option<(Build, DiskSources)>,
+}
+
+impl Accepted {
+    pub fn reset(&mut self) {
+        self.entries.clear();
     }
 
-    fn define(&mut self, name: &str) {
-        if !self.defined.iter().any(|n| n == name) {
-            self.defined.push(name.to_string());
+    pub fn accept(&mut self, entry: AcceptedEntry) {
+        self.entries.push(entry);
+    }
+
+    /// The session's own source: every import, then every definition.
+    pub fn replay(&self) -> String {
+        self.replay_with(&Parts::default())
+    }
+
+    /// The session's source with `next` joined to it: its imports after the session's, its
+    /// definitions after the session's, and its expressions last.
+    pub fn replay_with(&self, next: &Parts) -> String {
+        let mut out = String::new();
+        for e in &self.entries {
+            out.push_str(&e.imports);
         }
+        out.push_str(&next.imports);
+        for e in &self.entries {
+            out.push_str(&e.definitions);
+        }
+        out.push_str(&next.definitions);
+        out.push_str(&next.expressions);
+        out
+    }
+
+    /// Every name the session's entries bound, each once.
+    fn defined(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for n in self.entries.iter().flat_map(|e| &e.defined) {
+            if !out.contains(&n.as_str()) {
+                out.push(n);
+            }
+        }
+        out
+    }
+
+    /// Each import alias in scope, and the stdlib module it names, for `alias::` completion. A
+    /// later import of the same alias wins.
+    fn aliases(&self) -> BTreeMap<&str, &ModulePath> {
+        let mut out = BTreeMap::new();
+        for (alias, module) in self.entries.iter().flat_map(|e| &e.aliases) {
+            match module {
+                Some(m) => out.insert(alias.as_str(), m),
+                None => out.remove(alias.as_str()),
+            };
+        }
+        out
     }
 
     /// Candidates for a bare word: keywords, the implicitly imported prelude,
@@ -142,13 +206,15 @@ impl Names {
                 .filter(|e| e.name.starts_with(prefix))
                 .map(Candidate::from_export),
         );
-        out.extend(
-            self.aliases
-                .keys()
-                .chain(self.defined.iter())
-                .filter(|n| n.starts_with(prefix))
-                .map(Candidate::plain),
-        );
+        let aliases = self.aliases();
+        let local: Vec<String> = aliases
+            .keys()
+            .copied()
+            .chain(self.defined())
+            .filter(|n| n.starts_with(prefix))
+            .map(str::to_string)
+            .collect();
+        out.extend(local.into_iter().map(Candidate::plain));
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out.dedup_by(|a, b| a.name == b.name);
         out
@@ -157,12 +223,12 @@ impl Names {
     /// Whether `name`, typed alone, is an imported module rather than a value
     /// the session defined.
     pub fn is_module(&self, name: &str) -> bool {
-        self.aliases.contains_key(name) && !self.defined.iter().any(|d| d == name)
+        self.aliases().contains_key(name) && !self.defined().contains(&name)
     }
 
     /// Candidates after `qualifier::`: that module's public exports.
     pub fn qualified(&mut self, qualifier: &str, prefix: &str) -> Vec<Candidate> {
-        let Some(path) = self.aliases.get(qualifier).cloned() else {
+        let Some(path) = self.aliases().get(qualifier).map(|p| (*p).clone()) else {
             return Vec::new();
         };
         let mut out: Vec<Candidate> = self
@@ -198,11 +264,11 @@ mod tests {
     use super::*;
     use crate::{parser, scanner};
 
-    fn observed(src: &str) -> Names {
+    fn observed(src: &str) -> Accepted {
         let mut scanner = scanner::new_scanner(src.to_string());
         let program = parser::new_parser(&mut scanner).parse_program();
-        let mut names = Names::default();
-        names.observe(&program.ast);
+        let mut names = Accepted::default();
+        names.accept(AcceptedEntry::new(src, &program.ast));
         names
     }
 
@@ -212,7 +278,7 @@ mod tests {
 
     #[test]
     fn the_prelude_is_completable_with_no_session_at_all() {
-        let mut names = Names::default();
+        let mut names = Accepted::default();
         assert!(labels(&names.bare("printl")).contains(&"println".to_string()));
         assert!(
             labels(&names.bare("f")).contains(&"fn".to_string()),
@@ -267,7 +333,7 @@ mod tests {
     }
 
     fn names_candidate(name: &str) -> Candidate {
-        let mut names = Names::default();
+        let mut names = Accepted::default();
         names
             .bare(name)
             .into_iter()

@@ -2,7 +2,7 @@
   "name": "tree-sitter-scarlet",
   "version": "0.1.0",
   "description": "Scarlet grammar for tree-sitter",
-  "repository": "https://github.com/scarletindustries/language",
+  "repository": "https://github.com/scarletindustries/scarlet",
   "license": "MIT",
   "private": true,
   "scripts": {

@@ -13,7 +13,7 @@
     "license": "MIT",
     "description": "Scarlet grammar for tree-sitter",
     "links": {
-      "repository": "https://github.com/scarletindustries/language"
+      "repository": "https://github.com/scarletindustries/scarlet"
     }
   }
 }

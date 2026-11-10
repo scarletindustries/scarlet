@@ -121,6 +121,15 @@ fn the_type_command_reports_an_inferred_type() {
     assert!(out.contains("fn(a) Nil"), "{out}");
 }
 
+/// `:type` sees what the session bound, not only its constants, and runs nothing.
+#[test]
+fn the_type_command_sees_the_sessions_bindings() {
+    let (out, err) = session("x = 41\n:type x + 1\n:type println('ran')\n");
+    assert!(out.contains("x + 1  Int"), "{out}\n{err}");
+    assert!(out.contains("println('ran')  Nil"), "{out}\n{err}");
+    assert!(!out.lines().any(|l| l == "ran"), "the probe ran:\n{out}");
+}
+
 #[test]
 fn an_unknown_command_is_reported_rather_than_evaluated() {
     let (out, err) = session(":hlep\n");
