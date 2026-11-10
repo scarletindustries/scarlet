@@ -7,7 +7,7 @@ import ./lib/report/table as report
 import ./lib/units
 
 fn conversions(t units::Celsius) Array(String) {
-	fahrenheit = units::show_fahrenheit(units::to_fahrenheit(t))
+	fahrenheit = t |> units::to_fahrenheit |> units::show_fahrenheit
 	// Kelvin is opaque: its constructor stays inside units, so to_kelvin is
 	// the only way in, and it can fail.
 	kelvin = result::map(

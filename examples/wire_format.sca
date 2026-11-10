@@ -62,7 +62,7 @@ fn decode(frame Binary) Result(Sample, DecodeError) {
 fn parse_payload(payload Binary, flags Int) Result(Sample, DecodeError) {
 	match (binary::index_of(payload, <<'='>>, 0), binary::index_of(payload, <<' '>>, 0)) {
 		(Some(eq), Some(sp)) ->
-			result::replace_err(sample(payload, eq, sp, flags == GAUGE), MalformedPayload)
+			sample(payload, eq, sp, flags == GAUGE) |> result::replace_err(MalformedPayload)
 		(None, _) | (Some(_), None) -> Err(NotNameValueUnit)
 	}
 }
@@ -72,7 +72,7 @@ fn sample(payload Binary, eq Int, sp Int, gauge Bool) Result(Sample, Nil) {
 	name <- result::then(binary::to_string(name_bytes))
 	digits <- result::then(binary::slice_bytes(payload, eq + 1, sp - eq - 1))
 	value <- result::then(binary::parse_int(digits, binary::Dec))
-	unit <- result::then(binary::to_string(binary::drop_bytes(payload, sp + 1)))
+	unit <- result::then(payload |> binary::drop_bytes(sp + 1) |> binary::to_string)
 	Ok(Sample(name, value, unit, gauge))
 }
 

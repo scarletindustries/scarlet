@@ -35,7 +35,7 @@ pub fn main() {
 	// length counts scalars, not bytes.
 	text = 'héllo'
 	scalars = string::length(text)
-	bytes = binary::byte_size(binary::from_string(text))
+	bytes = text |> binary::from_string |> binary::byte_size
 	println('${text}: ${scalars} scalars, ${bytes} bytes')
 
 	println('contains  ${string::contains(text, 'llo')} ${string::contains(text, 'z')}')
@@ -44,7 +44,7 @@ pub fn main() {
 	println('inspect   ${string::inspect([1, 2, 3])} ${string::inspect(Some('x'))}')
 
 	line = '  the quick   brown  fox  '
-	words = array::filter(string::split(string::trim(line), ' '), fn(w) string::length(w) > 0)
+	words = line |> string::trim |> string::split(' ') |> array::filter(fn(w) string::length(w) > 0)
 	longest = array::fold(
 		words,
 		'',

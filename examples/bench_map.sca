@@ -27,7 +27,7 @@ fn churn(m map::Map(Int, Int), i Int) Int {
 	if i == 0 {
 		map::size(m)
 	} else {
-		churn(map::delete(map::set(m, i, i), i - 1), i - 1)
+		m |> map::set(i, i) |> map::delete(i - 1) |> churn(i - 1)
 	}
 }
 

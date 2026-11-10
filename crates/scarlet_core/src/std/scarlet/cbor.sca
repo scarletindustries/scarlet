@@ -110,7 +110,7 @@ fn read_item(b Binary, major Int, arg Int, body Int, start Int) Result((Value, I
 	} else if major == 1 {
 		Ok((Nint(0 - 1 - arg), body))
 	} else if major == 2 {
-		result::map(content(b, body, arg, start), fn(s) (Bytes(s), body + arg))
+		content(b, body, arg, start) |> result::map(fn(s) (Bytes(s), body + arg))
 	} else if major == 3 {
 		slice <- result::then(content(b, body, arg, start))
 		match binary::to_string(slice) {

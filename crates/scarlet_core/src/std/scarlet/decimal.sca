@@ -115,7 +115,7 @@ pub fn round_with(d Decimal, places Int, mode Rounding) Decimal {
 	if k <= 0 {
 		Decimal(units(d) * pow10(0 - k), places)
 	} else {
-		at_places(div_round(units(d), pow10(k), mode), places)
+		div_round(units(d), pow10(k), mode) |> at_places(places)
 	}
 }
 
@@ -207,7 +207,7 @@ pub fn parse(s String) Result(Decimal, Nil) {
 	b = binary::from_string(s)
 	first = binary::byte_at(b, 0)
 	parsed = if first == 45 {
-		option::map(parse_unsigned(tail(b)), neg)
+		tail(b) |> parse_unsigned |> option::map(neg)
 	} else if first == 43 {
 		parse_unsigned(tail(b))
 	} else {
@@ -244,7 +244,7 @@ fn from_decimal(units Int, scale Int) Float
 // can't fail.
 // Floats are approximate, so prefer `parse` or `new` when exactness matters.
 pub fn from_float(f Float, places Int) Decimal {
-	round_with(exact(f, 0), places, HalfUp)
+	exact(f, 0) |> round_with(places, HalfUp)
 }
 
 // `f * 2^k` is whole after at most 1074 doublings, each exact. Then `f` is

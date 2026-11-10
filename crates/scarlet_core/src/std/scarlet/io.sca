@@ -40,7 +40,7 @@ pub fn write_file(path String, data Binary) Result(Nil, IoError)
 
 pub fn read_text(path String) Result(String, IoError) {
 	b <- result::then(read_file(path))
-	result::replace_err(binary::to_string(b), InvalidData(path))
+	binary::to_string(b) |> result::replace_err(InvalidData(path))
 }
 
 pub fn write_text(path String, s String) Result(Nil, IoError) {

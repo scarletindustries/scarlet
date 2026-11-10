@@ -128,7 +128,7 @@ pub fn parse_binary(src Binary) Result(Doc, ParseError) {
 }
 
 pub fn parse(src String) Result(Doc, ParseError) {
-	parse_binary_raw(binary::from_string(src))
+	src |> binary::from_string |> parse_binary_raw
 }
 
 // `kind_raw` is -1 for a tape that doesn't decode. That must read as the kind
@@ -172,7 +172,7 @@ pub fn elements(d Doc) Array(Doc)
 pub fn to_json(d Doc) Json {
 	match kind(d) {
 		NullKind -> Null
-		BoolKind -> Boolean(option::unwrap(bool(d), False))
+		BoolKind -> Boolean(bool(d) |> option::unwrap(False))
 		// Never default to `0` here, because `reencode` would then zero every
 		// id it touched.
 		IntKind -> match int(d) {
@@ -182,8 +182,8 @@ pub fn to_json(d Doc) Json {
 				None -> Null
 			}
 		}
-		FloatKind -> Real(option::unwrap(float(d), 0.0))
-		StringKind -> Str(option::unwrap(string(d), ''))
+		FloatKind -> Real(float(d) |> option::unwrap(0.0))
+		StringKind -> Str(string(d) |> option::unwrap(''))
 		ArrayKind -> List(array_map_to_json(elements(d)))
 		ObjectKind -> Object(entries_to_json(entries(d)))
 	}
@@ -209,7 +209,7 @@ fn entries_to_json(es Array((String, Doc))) Array((String, Json)) {
 // Writes the document back out. It keeps key order and duplicate keys, and
 // drops whitespace.
 pub fn reencode(d Doc) String {
-	encode(to_json(d))
+	d |> to_json |> encode
 }
 
 pub fn parse_error_message(e ParseError) String {

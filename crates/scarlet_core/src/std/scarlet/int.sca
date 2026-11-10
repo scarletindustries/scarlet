@@ -39,7 +39,7 @@ pub fn abs(n Int) Int {
 
 // Keeps `n` between `lo` and `hi`. When `lo > hi`, `hi` wins.
 pub fn clamp(n Int, lo Int, hi Int) Int {
-	min(max(n, lo), hi)
+	n |> max(lo) |> min(hi)
 }
 
 // Works like `a / b`, but dividing by zero gives `Err(Nil)` instead of 0. It

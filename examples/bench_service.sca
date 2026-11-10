@@ -308,7 +308,7 @@ fn route(req http::Request, t Tables) http::Response {
 fn port_arg() Int {
 	match os::argv() {
 		[_script, p, .._rest] ->
-			binary::parse_int(binary::from_string(p), binary::Dec) or DEFAULT_PORT
+			p |> binary::from_string |> binary::parse_int(binary::Dec) or DEFAULT_PORT
 		_ -> DEFAULT_PORT
 	}
 }

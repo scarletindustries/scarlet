@@ -36,7 +36,7 @@ fn serve_one(sock socket::Socket) Nil {
 fn read_frame(sock socket::Socket) Result(Binary, error::NetError) {
 	head <- result::then(socket::read_exact(sock, HEADER_BYTES))
 	length <- result::then(
-		result::replace_err(binary::parse_int(head, binary::Dec), error::UnexpectedEof),
+		binary::parse_int(head, binary::Dec) |> result::replace_err(error::UnexpectedEof),
 	)
 	socket::read_exact(sock, length)
 }
@@ -61,7 +61,7 @@ fn echo_once(server_addr address::SocketAddress, payload String) String {
 	match net::connect_addr(server_addr) {
 		Ok(sock) -> {
 			bytes = binary::from_string(payload)
-			header = pad(binary::from_int_ascii(binary::byte_size(bytes), binary::Dec))
+			header = bytes |> binary::byte_size |> binary::from_int_ascii(binary::Dec) |> pad
 			socket::write(sock, binary::append(header, bytes)) or Nil
 			reply = read_all(sock, <<>>)
 			socket::close(sock) or Nil
@@ -212,7 +212,7 @@ fn served(bind_addr address::SocketAddress) Result(Nil, SetupError) {
 }
 
 fn run() Result(Nil, SetupError) {
-	ip <- result::then(result::replace_err(address::parse('127.0.0.1'), NotAnIpLiteral))
+	ip <- result::then(address::parse('127.0.0.1') |> result::replace_err(NotAnIpLiteral))
 	resolved = net::resolve('127.0.0.1') or ip
 	agrees = address::ip_to_string(resolved) == address::ip_to_string(ip)
 	println('loopback is v6: ${address::is_v6(ip)}, resolve agrees: ${agrees}')
@@ -243,11 +243,11 @@ fn run() Result(Nil, SetupError) {
 	}
 
 	// Port 0 lets the kernel pick a free port.
-	bind_addr <- result::then(result::replace_err(address::socket_address(ip, 0), PortOutOfRange))
+	bind_addr <- result::then(address::socket_address(ip, 0) |> result::replace_err(PortOutOfRange))
 	server <- result::then(step(net::listen_addr(bind_addr), Listen))
 	local <- result::then(step(net::local_addr(server), LocalAddr))
 
-	host = address::ip_to_string(address::ip(local))
+	host = local |> address::ip |> address::ip_to_string
 	assigned = address::port(local) > 0
 	println('bound ${host}, kernel picked a port: ${assigned}')
 

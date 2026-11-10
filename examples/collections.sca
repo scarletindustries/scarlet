@@ -36,8 +36,9 @@ pub fn main() {
 	println('xs[2]     ${xs[2] or 0}')
 	println('xs[99]    ${xs[99] or 0}')
 
-	println('find      ${option::unwrap(array::find(xs, fn(x) x > 4), 0)}')
-	println('find none ${option::is_none(array::find(xs, fn(x) x > 100))}')
+	// x |> f(a) is f(x, a): the value on the left goes in as the first argument.
+	println('find      ${xs |> array::find(fn(x) x > 4) |> option::unwrap(0)}')
+	println('find none ${xs |> array::find(fn(x) x > 100) |> option::is_none}')
 
 	// ..a spreads an array into a literal.
 	head = [0]
@@ -59,16 +60,16 @@ pub fn main() {
 	println('size      ${map::size(counts)}')
 	println('total     ${map::fold(counts, 0, fn(acc, _, n) acc + n)}')
 	println('has       ${map::has(counts, 'the')} ${map::has(counts, 'dog')}')
-	println('keys      ${array::length(map::keys(counts))} distinct')
-	println('values    ${array::fold(map::values(counts), 0, fn(a, b) a + b)} words')
-	println('to_list   ${array::length(map::to_list(counts))} pairs')
+	println('keys      ${counts |> map::keys |> array::length} distinct')
+	println('values    ${counts |> map::values |> array::fold(0, fn(a, b) a + b)} words')
+	println('to_list   ${counts |> map::to_list |> array::length} pairs')
 
 	fewer = map::delete(counts, 'the')
 	println('delete    ${map::has(fewer, 'the')}, original ${map::has(counts, 'the')}')
 
 	// filter takes the key and the value.
 	repeats = map::filter(counts, fn(_, n) n > 1)
-	println('filter    ${array::length(map::keys(repeats))} words seen twice or more')
+	println('filter    ${repeats |> map::keys |> array::length} words seen twice or more')
 
 	// merge prefers the right-hand map on a clash.
 	defaults = map::from_list([('mode', 'fast'), ('retries', '3')])

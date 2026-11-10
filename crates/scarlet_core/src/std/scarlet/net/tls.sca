@@ -51,7 +51,7 @@ pub type TlsError {
 // `host`. Sessions are cached in memory, never on disk. It has no deadline, so
 // a peer that never speaks TLS parks it for good. Prefer `connect_within`.
 pub fn connect(host String, port Int) Result(TlsSocket, TlsError) {
-	sock <- result::then(result::map_err(net::connect(host, port), Transport))
+	sock <- result::then(net::connect(host, port) |> result::map_err(Transport))
 	handshake(sock, host)
 }
 
@@ -64,7 +64,7 @@ pub fn connect_within(host String, port Int, timeout_ms Int) Result(TlsSocket, T
 // Like `connect_within`, but takes a `deadline` from `time::monotonic()`,
 // shared by all three steps.
 pub fn connect_until(host String, port Int, deadline time::Instant) Result(TlsSocket, TlsError) {
-	sock <- result::then(result::map_err(net::connect_until(host, port, deadline), Transport))
+	sock <- result::then(net::connect_until(host, port, deadline) |> result::map_err(Transport))
 	handshake_until(sock, host, deadline)
 }
 

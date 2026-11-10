@@ -61,17 +61,17 @@ fn encode_from(b Binary, at Int, size Int, acc Binary) Binary {
 		b0 = binary::byte_at(b, at)
 		// The low 4 bits of the second digit are the zero fill of RFC 4648 §3.5.
 		d0 = int::bitwise_shift_right(b0, 2)
-		d1 = int::bitwise_shift_left(int::bitwise_and(b0, 3), 4)
+		d1 = b0 |> int::bitwise_and(3) |> int::bitwise_shift_left(4)
 		binary::append(acc, <<digit(d0):8, digit(d1):8, 61:8, 61:8>>)
 	} else if left == 2 {
 		b0 = binary::byte_at(b, at)
 		b1 = binary::byte_at(b, at + 1)
 		d0 = int::bitwise_shift_right(b0, 2)
 		d1 = int::bitwise_or(
-			int::bitwise_shift_left(int::bitwise_and(b0, 3), 4),
+			b0 |> int::bitwise_and(3) |> int::bitwise_shift_left(4),
 			int::bitwise_shift_right(b1, 4),
 		)
-		d2 = int::bitwise_shift_left(int::bitwise_and(b1, 15), 2)
+		d2 = b1 |> int::bitwise_and(15) |> int::bitwise_shift_left(2)
 		binary::append(acc, <<digit(d0):8, digit(d1):8, digit(d2):8, 61:8>>)
 	} else {
 		b0 = binary::byte_at(b, at)
@@ -79,11 +79,11 @@ fn encode_from(b Binary, at Int, size Int, acc Binary) Binary {
 		b2 = binary::byte_at(b, at + 2)
 		d0 = int::bitwise_shift_right(b0, 2)
 		d1 = int::bitwise_or(
-			int::bitwise_shift_left(int::bitwise_and(b0, 3), 4),
+			b0 |> int::bitwise_and(3) |> int::bitwise_shift_left(4),
 			int::bitwise_shift_right(b1, 4),
 		)
 		d2 = int::bitwise_or(
-			int::bitwise_shift_left(int::bitwise_and(b1, 15), 2),
+			b1 |> int::bitwise_and(15) |> int::bitwise_shift_left(2),
 			int::bitwise_shift_right(b2, 6),
 		)
 		d3 = int::bitwise_and(b2, 63)
@@ -140,7 +140,7 @@ fn decode_from(b Binary, at Int, size Int, acc Binary) Result(Binary, Nil) {
 					int::bitwise_shift_right(v1, 4),
 				)
 				o1 = int::bitwise_or(
-					int::bitwise_shift_left(int::bitwise_and(v1, 15), 4),
+					v1 |> int::bitwise_and(15) |> int::bitwise_shift_left(4),
 					int::bitwise_shift_right(v2, 2),
 				)
 				Ok(binary::append(acc, <<o0:8, o1:8>>))
@@ -156,10 +156,10 @@ fn decode_from(b Binary, at Int, size Int, acc Binary) Result(Binary, Nil) {
 					int::bitwise_shift_right(v1, 4),
 				)
 				o1 = int::bitwise_or(
-					int::bitwise_shift_left(int::bitwise_and(v1, 15), 4),
+					v1 |> int::bitwise_and(15) |> int::bitwise_shift_left(4),
 					int::bitwise_shift_right(v2, 2),
 				)
-				o2 = int::bitwise_or(int::bitwise_shift_left(int::bitwise_and(v2, 3), 6), v3)
+				o2 = int::bitwise_or(v2 |> int::bitwise_and(3) |> int::bitwise_shift_left(6), v3)
 				decode_from(b, at + 4, size, binary::append(acc, <<o0:8, o1:8, o2:8>>))
 			}
 		}
@@ -203,17 +203,17 @@ fn url_encode_from(b Binary, at Int, size Int, acc Binary) Binary {
 	} else if left == 1 {
 		b0 = binary::byte_at(b, at)
 		d0 = int::bitwise_shift_right(b0, 2)
-		d1 = int::bitwise_shift_left(int::bitwise_and(b0, 3), 4)
+		d1 = b0 |> int::bitwise_and(3) |> int::bitwise_shift_left(4)
 		binary::append(acc, <<url_digit(d0):8, url_digit(d1):8>>)
 	} else if left == 2 {
 		b0 = binary::byte_at(b, at)
 		b1 = binary::byte_at(b, at + 1)
 		d0 = int::bitwise_shift_right(b0, 2)
 		d1 = int::bitwise_or(
-			int::bitwise_shift_left(int::bitwise_and(b0, 3), 4),
+			b0 |> int::bitwise_and(3) |> int::bitwise_shift_left(4),
 			int::bitwise_shift_right(b1, 4),
 		)
-		d2 = int::bitwise_shift_left(int::bitwise_and(b1, 15), 2)
+		d2 = b1 |> int::bitwise_and(15) |> int::bitwise_shift_left(2)
 		binary::append(acc, <<url_digit(d0):8, url_digit(d1):8, url_digit(d2):8>>)
 	} else {
 		b0 = binary::byte_at(b, at)
@@ -221,11 +221,11 @@ fn url_encode_from(b Binary, at Int, size Int, acc Binary) Binary {
 		b2 = binary::byte_at(b, at + 2)
 		d0 = int::bitwise_shift_right(b0, 2)
 		d1 = int::bitwise_or(
-			int::bitwise_shift_left(int::bitwise_and(b0, 3), 4),
+			b0 |> int::bitwise_and(3) |> int::bitwise_shift_left(4),
 			int::bitwise_shift_right(b1, 4),
 		)
 		d2 = int::bitwise_or(
-			int::bitwise_shift_left(int::bitwise_and(b1, 15), 2),
+			b1 |> int::bitwise_and(15) |> int::bitwise_shift_left(2),
 			int::bitwise_shift_right(b2, 6),
 		)
 		d3 = int::bitwise_and(b2, 63)
@@ -277,7 +277,7 @@ fn url_decode_from(b Binary, at Int, size Int, acc Binary) Result(Binary, Nil) {
 		} else {
 			o0 = int::bitwise_or(int::bitwise_shift_left(v0, 2), int::bitwise_shift_right(v1, 4))
 			o1 = int::bitwise_or(
-				int::bitwise_shift_left(int::bitwise_and(v1, 15), 4),
+				v1 |> int::bitwise_and(15) |> int::bitwise_shift_left(4),
 				int::bitwise_shift_right(v2, 2),
 			)
 			Ok(binary::append(acc, <<o0:8, o1:8>>))
@@ -292,10 +292,10 @@ fn url_decode_from(b Binary, at Int, size Int, acc Binary) Result(Binary, Nil) {
 		} else {
 			o0 = int::bitwise_or(int::bitwise_shift_left(v0, 2), int::bitwise_shift_right(v1, 4))
 			o1 = int::bitwise_or(
-				int::bitwise_shift_left(int::bitwise_and(v1, 15), 4),
+				v1 |> int::bitwise_and(15) |> int::bitwise_shift_left(4),
 				int::bitwise_shift_right(v2, 2),
 			)
-			o2 = int::bitwise_or(int::bitwise_shift_left(int::bitwise_and(v2, 3), 6), v3)
+			o2 = int::bitwise_or(v2 |> int::bitwise_and(3) |> int::bitwise_shift_left(6), v3)
 			url_decode_from(b, at + 4, size, binary::append(acc, <<o0:8, o1:8, o2:8>>))
 		}
 	}

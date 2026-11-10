@@ -45,7 +45,8 @@ pub fn from_list(entries Array((k, v))) Map(k, v) {
 // Calls `f` with the accumulator, key and value of each entry, in the same
 // order as `keys`.
 pub fn fold(m Map(k, v), init r, f fn(r, k, v) r) r {
-	array::fold(to_list(m), init, fn(acc, entry) match entry {
+	to_list(m)
+	|> array::fold(init, fn(acc, entry) match entry {
 		(key, value) -> f(acc, key, value)
 	})
 }

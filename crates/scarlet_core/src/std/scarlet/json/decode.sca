@@ -271,7 +271,7 @@ pub fn also(dec Decoder(a), k fn(a) Decoder(b)) Decoder(b) {
 // Decodes the member `name` with `inner` and hands it to `k`, using `also`
 // over `field`.
 pub fn take(name String, inner Decoder(a), k fn(a) Decoder(b)) Decoder(b) {
-	also(field(name, inner), k)
+	field(name, inner) |> also(k)
 }
 
 // Like `take`, but uses `optional_field`, so `k` gets a `Field`.
@@ -280,7 +280,7 @@ pub fn take_optional(
 	inner Decoder(a),
 	k fn(presence::Field(a)) Decoder(b),
 ) Decoder(b) {
-	also(optional_field(name, inner), k)
+	optional_field(name, inner) |> also(k)
 }
 
 // Combines two decoders with `f`. It keeps both sets of failures, with no
@@ -479,14 +479,16 @@ fn try_each(
 // Decodes a union told apart by the string member `tag`. `pick` returns
 // `Err(Nil)` for an unknown tag.
 pub fn tagged(tag String, pick fn(String) Result(Decoder(a), Nil)) Decoder(a) {
-	then(field(tag, string_value()), fn(t) match pick(t) {
+	field(tag, string_value())
+	|> then(fn(t) match pick(t) {
 		Ok(dec) -> dec
 		Err(Nil) -> unknown_tag(tag, 'the tag "${t}"')
 	})
 }
 
 pub fn tagged_int(tag String, pick fn(Int) Result(Decoder(a), Nil)) Decoder(a) {
-	then(field(tag, int()), fn(t) match pick(t) {
+	field(tag, int())
+	|> then(fn(t) match pick(t) {
 		Ok(dec) -> dec
 		Err(Nil) -> unknown_tag(tag, 'the tag ${t}')
 	})
@@ -511,5 +513,5 @@ pub fn at(path_names Array(String), inner Decoder(a)) Decoder(a) {
 // partial updates, because `field.update` keeps the current value where this
 // would overwrite it.
 pub fn with_default(name String, inner Decoder(a), default a) Decoder(a) {
-	map(optional_field(name, inner), fn(f) presence::fold(f, fn() default, fn() default, fn(x) x))
+	optional_field(name, inner) |> map(fn(f) presence::fold(f, fn() default, fn() default, fn(x) x))
 }

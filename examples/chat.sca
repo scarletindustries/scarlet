@@ -138,8 +138,8 @@ const RESTARTED = sse('system', [
 
 // One line per node. Identical siblings collapse into one line with a count.
 fn render(node process::Supervised, indent String, me process::Supervised) Array(String) {
-	blocks = array::map(process::children(node), fn(child) render(child, indent + '  ', me))
-	array::fold(collapse(blocks), [indent + describe(node, me)], array::concat)
+	blocks = node |> process::children |> array::map(fn(child) render(child, indent + '  ', me))
+	blocks |> collapse |> array::fold([indent + describe(node, me)], array::concat)
 }
 
 fn describe(node process::Supervised, me process::Supervised) String {
@@ -263,10 +263,10 @@ fn live(chat process::Subject(RoomMsg), feed process::Subject(Feed)) body::Body 
 
 // The body is a name, a newline, then the message.
 fn parse_say(req http::Request) Result(RoomMsg, http::Response) {
-	bytes <- result::then(or_reply(body::collect(req.body, MAX_SAY), 413, 'too long'))
-	s <- result::then(or_reply(binary::to_string(bytes), 400, 'not utf-8'))
+	bytes <- result::then(body::collect(req.body, MAX_SAY) |> or_reply(413, 'too long'))
+	s <- result::then(binary::to_string(bytes) |> or_reply(400, 'not utf-8'))
 	// A stray \r would end an SSE line early.
-	(first, rest) = match string::split(without(s, '\r'), '\n') {
+	(first, rest) = match s |> without('\r') |> string::split('\n') {
 		[first, ..rest] -> (first, join(rest, '\n'))
 		[] -> ('', '')
 	}
@@ -289,7 +289,7 @@ fn field(s String, max Int, why String) Result(String, http::Response) {
 }
 
 fn without(s String, needle String) String {
-	join(string::split(s, needle), '')
+	s |> string::split(needle) |> join('')
 }
 
 fn join(parts Array(String), sep String) String {
@@ -348,7 +348,7 @@ pub fn main() Nil {
 
 // The dashboard. Messages render with textContent, never as markup.
 
-const PAGE = binary::from_string(join(PAGE_LINES, '\n'))
+const PAGE = PAGE_LINES |> join('\n') |> binary::from_string
 
 const PAGE_LINES = [
 	'<!doctype html>',

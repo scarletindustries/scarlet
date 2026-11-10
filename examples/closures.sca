@@ -36,8 +36,7 @@ pub fn main() {
 	]
 
 	// map, filter and fold read as a chain of small anonymous functions.
-	bulk = array::filter(orders, at_least(10))
-	lines = array::map(bulk, fn(o) '${o.sku} x${o.qty}')
+	lines = orders |> array::filter(at_least(10)) |> array::map(fn(o) '${o.sku} x${o.qty}')
 	revenue = array::fold(orders, 0, fn(sum, o) sum + o.qty * o.cents)
 
 	array::each(lines, fn(line) println('bulk: ${line}'))
@@ -52,7 +51,7 @@ pub fn main() {
 
 	// Steps are ordinary values, so a pipeline can be assembled at run time.
 	normalise = pipeline([adder(-1), fn(x) x * x, adder(100)])
-	println('normalise ${string::inspect(array::map(1..5, normalise))}')
+	println('normalise ${1..5 |> array::map(normalise) |> string::inspect}')
 
 	// A spread splices one array into another. Ranges are arrays, so they splice too.
 	qtys = [..array::map(orders, fn(o) o.qty), ..{ 1..3 }]

@@ -71,7 +71,7 @@ fn room_named(
 	rooms process::Factory(RoomMsg, String),
 	req http::Request,
 ) process::Subject(RoomMsg) {
-	q = binary::to_string(http::query(req)) or ''
+	q = req |> http::query |> binary::to_string or ''
 	name = match string::split(q, '=') {
 		['room', n] -> string::trim(n)
 		_ -> 'lobby'
@@ -129,7 +129,7 @@ fn render(node process::Supervised, indent String) String {
 		process::FactoryOf(members) ->
 			'${indent}factory ${string::inspect(members)}, ${process::count(node)} live\n'
 	}
-	array::fold(process::children(node), line, fn(out, child) out + render(child, indent + '  '))
+	process::children(node) |> array::fold(line, fn(out, child) out + render(child, indent + '  '))
 }
 
 pub fn main() Nil {

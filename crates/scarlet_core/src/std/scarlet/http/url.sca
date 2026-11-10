@@ -71,16 +71,14 @@ pub fn default_port(s Scheme) Int {
 pub fn authority(u Url) Binary {
 	host = binary::from_string(u.host)
 	bracketed = match binary::index_of(host, COLON, 0) {
-		Some(_) -> binary::append(binary::append(LBRACKET, host), RBRACKET)
+		Some(_) -> LBRACKET |> binary::append(host) |> binary::append(RBRACKET)
 		None -> host
 	}
 	if u.port == default_port(u.scheme) {
 		bracketed
 	} else {
-		binary::append(
-			binary::append(bracketed, COLON),
-			binary::from_int_ascii(u.port, binary::Dec),
-		)
+		port = binary::from_int_ascii(u.port, binary::Dec)
+		bracketed |> binary::append(COLON) |> binary::append(port)
 	}
 }
 

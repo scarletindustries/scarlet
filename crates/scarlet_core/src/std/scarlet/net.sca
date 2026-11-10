@@ -15,7 +15,9 @@ pub fn listen_addr(addr address::SocketAddress) Result(Server, error::NetError)
 // Binds a listener to `host:port`, resolving `host` first with `resolve`.
 pub fn listen(host String, port Int) Result(Server, error::NetError) {
 	ip <- result::then(resolve(host))
-	addr <- result::then(result::replace_err(address::socket_address(ip, port), error::InvalidPort))
+	addr <- result::then(
+		address::socket_address(ip, port) |> result::replace_err(error::InvalidPort),
+	)
 	listen_addr(addr)
 }
 
@@ -168,7 +170,9 @@ fn resolve_until_ms(host String, deadline_ms Int) Result(address::IpAddress, err
 // deadline of its own. To set one, use `connect_within`.
 pub fn connect(host String, port Int) Result(socket::Socket, error::NetError) {
 	ip <- result::then(resolve(host))
-	addr <- result::then(result::replace_err(address::socket_address(ip, port), error::InvalidPort))
+	addr <- result::then(
+		address::socket_address(ip, port) |> result::replace_err(error::InvalidPort),
+	)
 	connect_addr(addr)
 }
 
@@ -190,7 +194,9 @@ pub fn connect_until(
 	deadline time::Instant,
 ) Result(socket::Socket, error::NetError) {
 	ip <- result::then(resolve_until(host, deadline))
-	addr <- result::then(result::replace_err(address::socket_address(ip, port), error::InvalidPort))
+	addr <- result::then(
+		address::socket_address(ip, port) |> result::replace_err(error::InvalidPort),
+	)
 	connect_addr_until(addr, deadline)
 }
 

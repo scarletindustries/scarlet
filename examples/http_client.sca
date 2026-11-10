@@ -64,7 +64,7 @@ fn request(port Int, method String, target String, payload String) String {
 	head = '${method} ${target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: ${length}\r\n\r\n'
 	match net::connect('127.0.0.1', port) {
 		Ok(conn) -> {
-			socket::write(conn, binary::append(binary::from_string(head), bytes)) or Nil
+			socket::write(conn, head |> binary::from_string |> binary::append(bytes)) or Nil
 			response = read_to_close(conn, <<>>)
 			socket::close(conn) or Nil
 			binary::to_string(response) or '<not utf-8>'
@@ -75,7 +75,7 @@ fn request(port Int, method String, target String, payload String) String {
 
 fn show(label String, response String) Nil {
 	println(label)
-	array::each(string::split(response, '\r\n'), fn(line) println('  | ${line}'))
+	response |> string::split('\r\n') |> array::each(fn(line) println('  | ${line}'))
 }
 
 // A second server that writes responses by hand, one target per drain style.
@@ -152,7 +152,7 @@ fn read_length(
 	buffered = int::min(avail, n)
 	head_bytes = binary::slice_bytes(buf, consumed, buffered) or <<>>
 	rest = body::content_length(sock, n - buffered, deadline)
-	result::map(body::collect(rest, MAX_BODY), fn(tail) binary::append(head_bytes, tail))
+	body::collect(rest, MAX_BODY) |> result::map(fn(tail) binary::append(head_bytes, tail))
 }
 
 fn respond(sock socket::Socket, target Binary, payload Binary) Nil {
@@ -248,8 +248,8 @@ fn bind_loopback(next fn(Int, net::Server) Nil) Nil {
 }
 
 fn loopback() Result((Int, net::Server), LoopbackError) {
-	server <- result::then(result::map_err(net::listen('127.0.0.1', 0), ListenFailed))
-	addr <- result::then(result::map_err(net::local_addr(server), LocalAddrFailed))
+	server <- result::then(net::listen('127.0.0.1', 0) |> result::map_err(ListenFailed))
+	addr <- result::then(net::local_addr(server) |> result::map_err(LocalAddrFailed))
 	Ok((address::port(addr), server))
 }
 

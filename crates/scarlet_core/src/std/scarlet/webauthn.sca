@@ -107,8 +107,8 @@ type ClientData {
 }
 
 fn parse_client_data(bytes Binary) Result(ClientData, ClientDataError) {
-	hash <- result::then(result::replace_err(crypto::sha256(bytes), NotWholeBytes))
-	doc <- result::then(result::map_err(json::parse_binary(bytes), NotJson))
+	hash <- result::then(crypto::sha256(bytes) |> result::replace_err(NotWholeBytes))
+	doc <- result::then(json::parse_binary(bytes) |> result::map_err(NotJson))
 	kind <- result::then(field(doc, 'type'))
 	challenge <- result::then(field(doc, 'challenge'))
 	origin <- result::then(field(doc, 'origin'))
@@ -116,7 +116,7 @@ fn parse_client_data(bytes Binary) Result(ClientData, ClientDataError) {
 }
 
 fn field(doc json::Doc, name String) Result(String, ClientDataError) {
-	match option::then(json::field(doc, name), json::string) {
+	match json::field(doc, name) |> option::then(json::string) {
 		Some(s) -> Ok(s)
 		None -> Err(MissingField(name))
 	}
@@ -127,7 +127,7 @@ fn check_client(cd ClientData, kind String, challenge Binary, origin String) Res
 	if cd.kind != kind {
 		Err(WrongType)
 	} else {
-		match base64::url_decode(binary::from_string(cd.challenge)) {
+		match cd.challenge |> binary::from_string |> base64::url_decode {
 			Err(Nil) -> Err(BadClientData(ChallengeNotBase64url))
 			Ok(got) -> if !crypto::const_eq(got, challenge) {
 				Err(ChallengeMismatch)
@@ -169,7 +169,7 @@ fn parse_auth_data(auth Binary) Result(AuthData, AuthDataError) {
 			binary::byte_at(auth, 36)
 
 		cred <- result::then(if has_flag(flags, FLAG_AT) {
-			result::map(attested_credential(auth), Some)
+			attested_credential(auth) |> result::map(Some)
 		} else Ok(None))
 
 		(attested, after_cred) = match cred {
@@ -178,13 +178,11 @@ fn parse_auth_data(auth Binary) Result(AuthData, AuthDataError) {
 		}
 
 		end <- result::then(if has_flag(flags, FLAG_ED) {
-			result::map(
-				result::map_err(cbor::decode_prefix(auth, after_cred), ExtensionsNotCbor),
-				fn(ext) {
-					(_, next) = ext
-					next
-				},
+			ext <- result::then(
+				cbor::decode_prefix(auth, after_cred) |> result::map_err(ExtensionsNotCbor),
 			)
+			(_, next) = ext
+			Ok(next)
 		} else {
 			Ok(after_cred)
 		})
@@ -283,12 +281,12 @@ fn cose_key(key cbor::Value) Result((Algorithm, Binary), KeyError) {
 }
 
 fn cose_int(key cbor::Value, label Int) Option(Int) {
-	option::then(cbor::map_get(key, label), cbor::as_int)
+	cbor::map_get(key, label) |> option::then(cbor::as_int)
 }
 
 // Both curves here have 32-byte coordinates.
 fn coordinate(key cbor::Value, label Int) Result(Binary, KeyError) {
-	match option::then(cbor::map_get(key, label), cbor::as_bytes) {
+	match cbor::map_get(key, label) |> option::then(cbor::as_bytes) {
 		Some(b) -> if binary::byte_size(b) == 32 {
 			Ok(b)
 		} else {
@@ -310,23 +308,23 @@ pub fn verify_registration(
 	rp_id String,
 	origin String,
 ) Result(Credential, Error) {
-	cd <- result::then(result::map_err(parse_client_data(client_data_json), BadClientData))
+	cd <- result::then(parse_client_data(client_data_json) |> result::map_err(BadClientData))
 	Nil <- result::then(check_client(cd, 'webauthn.create', challenge, origin))
 	att <- result::then(
-		result::map_err(cbor::decode(attestation_object), fn(e) BadAttestation(NotCbor(e))),
+		cbor::decode(attestation_object) |> result::map_err(fn(e) BadAttestation(NotCbor(e))),
 	)
 	auth_bytes <- result::then(
-		match option::then(cbor::text_map_get(att, 'authData'), cbor::as_bytes) {
+		match cbor::text_map_get(att, 'authData') |> option::then(cbor::as_bytes) {
 			Some(b) -> Ok(b)
 			None -> Err(BadAttestation(MissingAuthData))
 		},
 	)
-	ad <- result::then(result::map_err(parse_auth_data(auth_bytes), BadAuthData))
+	ad <- result::then(parse_auth_data(auth_bytes) |> result::map_err(BadAuthData))
 	Nil <- result::then(check_auth_data(ad, rp_id))
 	match ad.attested {
 		None -> Err(BadAuthData(NoCredential))
 		Some((cred_id, key)) -> {
-			(alg, pk) <- result::then(result::map_err(cose_key(key), BadKey))
+			(alg, pk) <- result::then(cose_key(key) |> result::map_err(BadKey))
 			Ok(Credential(id: cred_id, public_key: pk, algorithm: alg, sign_count: ad.sign_count))
 		}
 	}
@@ -347,9 +345,9 @@ pub fn verify_authentication(
 	origin String,
 	cred Credential,
 ) Result(Int, Error) {
-	cd <- result::then(result::map_err(parse_client_data(client_data_json), BadClientData))
+	cd <- result::then(parse_client_data(client_data_json) |> result::map_err(BadClientData))
 	Nil <- result::then(check_client(cd, 'webauthn.get', challenge, origin))
-	ad <- result::then(result::map_err(parse_auth_data(authenticator_data), BadAuthData))
+	ad <- result::then(parse_auth_data(authenticator_data) |> result::map_err(BadAuthData))
 	Nil <- result::then(check_auth_data(ad, rp_id))
 	// The signature is over authenticatorData || sha256(clientDataJSON).
 	message = binary::append(authenticator_data, cd.hash)

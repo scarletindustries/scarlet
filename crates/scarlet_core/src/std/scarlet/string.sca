@@ -76,15 +76,10 @@ fn encode_scalar_value(code_point Int) Result(Binary, Nil) {
 // Builds a string from code points. It returns `Err(Nil)` if any of them isn't
 // a Unicode scalar value.
 pub fn from_code_points(code_points Array(Int)) Result(String, Nil) {
-	result::then(
-		array::fold(
-			code_points,
-			Ok(<<>>),
-			fn(acc, cp) result::then(
-				acc,
-				fn(bytes) result::map(encode_scalar_value(cp), fn(next) binary::append(bytes, next)),
-			),
-		),
-		fn(bytes) binary::to_string(bytes),
-	)
+	code_points
+	|> array::fold(Ok(<<>>), fn(acc, cp) {
+		bytes <- result::then(acc)
+		encode_scalar_value(cp) |> result::map(fn(next) binary::append(bytes, next))
+	})
+	|> result::then(binary::to_string)
 }

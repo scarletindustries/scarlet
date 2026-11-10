@@ -362,7 +362,7 @@ fn parent_id(id Int) Int
 // Lists what is declared under `s` in declaration order, though a factory's
 // members come in no order. The list is a snapshot.
 pub fn children(s Supervised) Array(Supervised) {
-	array::map(children_ids(s.id), fn(id) Supervised(id: id))
+	children_ids(s.id) |> array::map(fn(id) Supervised(id: id))
 }
 
 @vm(process__children)

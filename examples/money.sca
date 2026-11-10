@@ -34,7 +34,7 @@ fn d(s String) decimal::Decimal {
 
 // Rounds to cents with banker's rounding, the default.
 fn tax(u Usd, rate decimal::Decimal) Usd {
-	Usd(decimal::round(decimal::mul(amount(u), rate), 2))
+	Usd(amount(u) |> decimal::mul(rate) |> decimal::round(2))
 }
 
 // Splits into n shares that sum back to the total. Leftover cents go first.
@@ -45,7 +45,8 @@ fn split(total Usd, n Int) Array(Usd) {
 		2,
 		decimal::Down,
 	) or decimal::from_int(0)
-	leftover = decimal::units(decimal::sub(amount(total), decimal::mul(base, decimal::from_int(n))))
+	shared = decimal::mul(base, decimal::from_int(n))
+	leftover = amount(total) |> decimal::sub(shared) |> decimal::units
 	shares(base, leftover, n)
 }
 
@@ -112,7 +113,7 @@ pub fn main() {
 	println('lt lte           ${decimal::lt(a, b)} ${decimal::lte(a, b)}')
 	println('gt gte           ${decimal::gt(a, b)} ${decimal::gte(a, b)}')
 	println('min max          ${str(decimal::min(a, b))} ${str(decimal::max(a, b))}')
-	println('neg abs          ${str(decimal::neg(a))} ${str(decimal::abs(decimal::neg(a)))}')
+	println('neg abs          ${str(decimal::neg(a))} ${a |> decimal::neg |> decimal::abs |> str}')
 
 	zero = decimal::new(0, 2)
 	println('is_zero          ${decimal::is_zero(zero)} ${decimal::is_zero(a)}')
@@ -160,8 +161,8 @@ pub fn main() {
 
 	array::each(modes, fn(m) match m {
 		(name, mode) -> {
-			up = decimal::to_string(decimal::round_with(tie, 2, mode))
-			down = decimal::to_string(decimal::round_with(decimal::neg(tie), 2, mode))
+			up = tie |> decimal::round_with(2, mode) |> decimal::to_string
+			down = tie |> decimal::neg |> decimal::round_with(2, mode) |> decimal::to_string
 			println('${name}\t 2.345 -> ${up}\t-2.345 -> ${down}')
 		}
 	})

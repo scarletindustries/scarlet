@@ -106,13 +106,16 @@ pub fn register_error_code(e RegisterError) String {
 /** Registers a public client and returns its metadata. A public client has
  * no secret. */
 pub fn register(store Store, req_body Binary) Result(json::Json, RegisterError) {
-	doc <- result::then(result::map_err(json::parse_binary(req_body), BodyInvalidJson))
+	doc <- result::then(json::parse_binary(req_body) |> result::map_err(BodyInvalidJson))
 
 	uris = match json::field(doc, 'redirect_uris') {
-		Some(list) -> array::fold(json::elements(list), [], fn(acc, u) match json::string(u) {
-			Some(t) -> [..acc, t]
-			None -> acc
-		})
+		Some(list) -> {
+			json::elements(list)
+			|> array::fold([], fn(acc, u) match json::string(u) {
+				Some(t) -> [..acc, t]
+				None -> acc
+			})
+		}
 		None -> []
 	}
 
@@ -317,5 +320,5 @@ pub fn bearer(store Store, token_text String) Option(Grant) {
 
 // Makes 32 random bytes as URL-safe base64, for tokens, codes and client IDs.
 fn new_token() String {
-	binary::to_string(base64::url_encode(crypto::random_bytes(32) or <<>>)) or ''
+	{ crypto::random_bytes(32) or <<>> } |> base64::url_encode |> binary::to_string or ''
 }

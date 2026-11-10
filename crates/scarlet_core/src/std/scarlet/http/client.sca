@@ -128,10 +128,11 @@ pub fn secure(sock tls::TlsSocket) Io {
 // checks the certificate against `u.host`, and `http` opens a plain socket.
 pub fn connect(u url::Url) Result(Io, ClientError) {
 	match u.scheme {
-		url::Http -> result::map(result::map_err(net::connect(u.host, u.port), Transport), plain)
+		url::Http ->
+			net::connect(u.host, u.port) |> result::map_err(Transport) |> result::map(plain)
 		// Pass the host we dial and nothing else, or HostnameMismatch can't
 		// catch a mix-up.
-		url::Https -> result::map(result::map_err(tls::connect(u.host, u.port), Tls), secure)
+		url::Https -> tls::connect(u.host, u.port) |> result::map_err(Tls) |> result::map(secure)
 	}
 }
 
@@ -164,7 +165,7 @@ pub fn fetch_until(
 
 // Sends `GET url` with no extra fields.
 pub fn get(url_text String) Result(Response, ClientError) {
-	u <- result::then(result::map_err(url::parse(url_text), BadUrl))
+	u <- result::then(url::parse(url_text) |> result::map_err(BadUrl))
 	fetch(Request(method: <<'GET'>>, url: u, headers: [], body: EMPTY))
 }
 

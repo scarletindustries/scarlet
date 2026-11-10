@@ -86,10 +86,10 @@ pub fn main() {
 	pair = Pair(first: 'one', second: 1)
 	println('${string::inspect(pair)} swapped is ${string::inspect(swap(pair))}')
 
-	stack = push(push(push(Empty, 1), 2), 3)
+	stack = Empty |> push(1) |> push(2) |> push(3)
 	println('stack ${string::inspect(to_array(stack))}')
-	println('first ${string::inspect(first_of(to_array(stack)))}')
-	println('first of nothing ${string::inspect(first_of(to_array(Empty)))}')
+	println('first ${stack |> to_array |> first_of |> string::inspect}')
+	println('first of nothing ${Empty |> to_array |> first_of |> string::inspect}')
 
 	check Validate = positive
 	println('${show_checked(check(7))} / ${show_checked(check(-1))}')

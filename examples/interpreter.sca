@@ -61,7 +61,7 @@ fn symbol(c String) Token {
 }
 
 fn lex(source String) Result(Array(Token), Error) {
-	scan(string::split(source, ''))
+	source |> string::split('') |> scan
 }
 
 fn scan(chars Array(String)) Result(Array(Token), Error) {
@@ -94,7 +94,7 @@ fn take_word(chars Array(String)) (String, Array(String)) {
 
 // `12abc` is an error, not a variable.
 fn word_token(word String) Result(Token, Error) {
-	match binary::parse_int(binary::from_string(word), binary::Dec) {
+	match word |> binary::from_string |> binary::parse_int(binary::Dec) {
 		Ok(n) -> Ok(Number(n))
 		Err(Nil) -> if starts_with_digit(word) {
 			Err(BadNumber(word))
@@ -106,7 +106,8 @@ fn word_token(word String) Result(Token, Error) {
 
 fn starts_with_digit(word String) Bool {
 	match string::split(word, '') {
-		[first, ..] -> result::is_ok(binary::parse_int(binary::from_string(first), binary::Dec))
+		[first, ..] ->
+			first |> binary::from_string |> binary::parse_int(binary::Dec) |> result::is_ok
 		[] -> False
 	}
 }
@@ -127,25 +128,25 @@ type Expr {
 type Parsed = Result((Expr, Array(Token)), Error)
 
 fn expression(tokens Array(Token)) Parsed {
-	result::then(term(tokens), fn(s) more_terms(s.0, s.1))
+	term(tokens) |> result::then(fn(s) more_terms(s.0, s.1))
 }
 
 fn more_terms(left Expr, tokens Array(Token)) Parsed {
 	match tokens {
-		[Plus, ..rest] -> result::then(term(rest), fn(s) more_terms(Add(left, s.0), s.1))
-		[Minus, ..rest] -> result::then(term(rest), fn(s) more_terms(Sub(left, s.0), s.1))
+		[Plus, ..rest] -> term(rest) |> result::then(fn(s) more_terms(Add(left, s.0), s.1))
+		[Minus, ..rest] -> term(rest) |> result::then(fn(s) more_terms(Sub(left, s.0), s.1))
 		_ -> Ok((left, tokens))
 	}
 }
 
 fn term(tokens Array(Token)) Parsed {
-	result::then(factor(tokens), fn(s) more_factors(s.0, s.1))
+	factor(tokens) |> result::then(fn(s) more_factors(s.0, s.1))
 }
 
 fn more_factors(left Expr, tokens Array(Token)) Parsed {
 	match tokens {
-		[Star, ..rest] -> result::then(factor(rest), fn(s) more_factors(Mul(left, s.0), s.1))
-		[Slash, ..rest] -> result::then(factor(rest), fn(s) more_factors(Div(left, s.0), s.1))
+		[Star, ..rest] -> factor(rest) |> result::then(fn(s) more_factors(Mul(left, s.0), s.1))
+		[Slash, ..rest] -> factor(rest) |> result::then(fn(s) more_factors(Div(left, s.0), s.1))
 		_ -> Ok((left, tokens))
 	}
 }
@@ -250,7 +251,7 @@ fn bind(
 	name String,
 	rest Array(Token),
 ) map::Map(String, Int) {
-	match result::then(parse(rest), fn(e) evaluate(e, env)) {
+	match parse(rest) |> result::then(fn(e) evaluate(e, env)) {
 		Ok(v) -> {
 			report(line, Ok('${name} = ${v}'))
 			map::set(env, name, v)

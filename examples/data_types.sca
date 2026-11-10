@@ -68,7 +68,7 @@ fn find(e Entry, want Path) Option(Entry) {
 fn find_first(entries Listing, want Path) Option(Entry) {
 	match entries {
 		[] -> None
-		[head, ..rest] -> option::or_else(find(head, want), fn() find_first(rest, want))
+		[head, ..rest] -> find(head, want) |> option::or_else(fn() find_first(rest, want))
 	}
 }
 

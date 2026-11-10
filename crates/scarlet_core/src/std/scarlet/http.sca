@@ -346,7 +346,7 @@ fn read_body(
 		Err(Nil) -> <<>>
 	}
 	need = n - buffered
-	tail <- result::then(body::collect(body::content_length(sock, need, deadline), MAX_BODY))
+	tail <- result::then(body::content_length(sock, need, deadline) |> body::collect(MAX_BODY))
 	// `pending` was flushed before the body was read.
 	req = build_request(head, [], body::from_binary(binary::append(head_bytes, tail)))
 	if avail > n {
@@ -543,7 +543,7 @@ fn finish_buffered(
 // The driver writes the framing headers itself, from the ResponseBody, so
 // any the handler set are dropped.
 fn strip_framing(hs headers::Headers) headers::Headers {
-	headers::delete(headers::delete(hs, NAME_CONTENT_LENGTH), NAME_TRANSFER_ENCODING)
+	hs |> headers::delete(NAME_CONTENT_LENGTH) |> headers::delete(NAME_TRANSFER_ENCODING)
 }
 
 // HTTP/1.0 closes by default, so keeping one alive must say `keep-alive`.
