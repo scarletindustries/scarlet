@@ -21,10 +21,9 @@ All of these come from one cause. There is no point where a module is finished a
 Each step takes values and gives back values. Nothing reaches into another step's state.
 
 ```
-source ─parse→ ast::Module
-        ─check(ast, imports' interfaces)→ CheckedModule { interface, typed, diagnostics }
-        ─lower(clean typed module)→ ModuleCode (Core IR functions, module-local ids)
-        ─link(all modules' code)→ core_ir::Program
+source ─parse→ ast::BlockExpression
+        ─check(ast, imports' interfaces)→ CheckedModule { interface, clean, diagnostics, index }
+        ─build_program(every clean module)→ core_ir::Program
 ```
 
 ### Identity
@@ -32,7 +31,7 @@ source ─parse→ ast::Module
 Each thing gets one canonical identity, and every map is keyed on it.
 
 - **A module** is its `ModuleKey`, as today.
-- **A nominal type** is `TypeName { module: ModuleKey, name }`. The numeric `TypeId` the VM uses is handed out by the linker, once per program. That removes the 256-id range reservations, `id_bases` and the overflow recovery. It also means editing one module can't shift another module's type ids, because no ids exist before linking.
+- **A nominal type** is `TypeName { module: ModuleKey, name }`. The numeric `TypeId` the VM uses is handed out when a program is built, once per program. That removes the 256-id range reservations, `id_bases` and the overflow recovery. It also means editing one module can't shift another module's type ids, because no ids exist before a program is built.
 - **A module-level value** is `ValueName { module, name }`.
 - **A local binder** is a `BinderId`, numbered within its function.
 - **A constructor** is `(TypeName, variant index)`.
@@ -64,9 +63,9 @@ Inside, it runs these passes over one module:
 
 1. **Declarations.** Collect the type, constructor, function and const names. Report duplicates and the use of reserved names.
 2. **Types.** Resolve type annotations to `Type`, including aliases (in dependency order, with a cycle error), constructors and fields.
-3. **Values in order.** Resolve every name in the module once. That resolution builds the call graph, and the strongly connected parts of that graph come out of it. The separate string-keyed `RefWalker` is removed.
+3. **Order.** Find the order functions and consts are inferred in: each after what it uses, and a group that uses each other together. The edges come from a walk over the source that tracks which names a local hides, as Gleam's call graph does. It only decides order; the checker resolves every name itself.
 4. **Inference.** Infer each group in dependency order, then generalise it. This pass builds the typed tree with live inference types.
-5. **Finalise.** Once the whole module is inferred, replace every inference type with its final `Type`. Then run every check that needs final types, over the finished tree: exhaustiveness, unreachable arms, `_` over `Nil`, unused bindings and unused values. Then make every decision that needs final types, like which `+` to use.
+5. **Finalise.** Once the whole module is inferred, run every check that needs final types, as walks over the finished tree: exhaustiveness, unreachable arms, `_` over `Nil`, an `or` that drops an error, unused values and unused bindings. Then the engine is frozen, so every type in the tree reads back the same finished `Type` from then on.
 
 Diagnostics are made with the module's key already on them. No one adds it afterwards.
 
@@ -74,15 +73,17 @@ Diagnostics are made with the module's key already on them. No one adds it after
 
 `TypedModule` is what the checker hands on. Everything the old elaborator worked out again is now written on the node:
 
-- every expression's final `Type`, and its span
+- every expression's type, a `Ty` into the module's frozen `Types`, and its span
 - every name already resolved: a local `BinderId`, a `ValueName`, a constructor, or a builtin `Intrinsic`
 - call and constructor arguments in parameter order, with their source order kept only where the evaluation order needs it
 - a field access's slot, or its per-variant slots
 - the shape of an `or` (`Option` or `Result`)
 - number literals parsed into their constant value
-- the operator each binary and unary op uses, chosen from the final types
+- a lambda's captures, and the name it calls itself by
 - each function declaration's generalised type
-- the order declarations run in
+- the order consts run in
+
+Which `+` an operator is, `IntAdd` or `FloatAdd`, is read off the final operand type when the tree is lowered. That is the one place it is decided.
 
 The same tree feeds the editor. Hover is the narrowest node under the cursor. The reference graph is a walk over the tree's names and binders. The checker no longer records references or hover facts as a side effect.
 
@@ -98,36 +99,29 @@ struct Interface {
 }
 ```
 
-It is a plain value with no arena indexes. It can be hashed and compared. A module whose interface didn't change doesn't make the modules that import it re-check.
+It is a plain value with no arena indexes, and it can be compared. A module whose interface didn't change doesn't make the modules that import it re-check.
+
+A public value whose type still holds a variable nothing generalised, like a `const` holding a `Subject(a)`, is an error. Its type would mean something different in every module that used it, so it has to be written out.
 
 ### Cleanness is a value
 
-`CheckedModule.typed` is `Option<CleanModule>`, and the checker fills it only when that module has no errors. Lowering only accepts a `CleanModule`. Linking only accepts code from clean modules. `into_runnable` stays the only way to get a `Program`. No step looks at a diagnostics list to decide whether it may go on.
+`CheckedModule.clean` is `Option<CleanModule>`, and the checker fills it only when that module has no errors and holds nothing the parser couldn't read. Lowering only accepts `CleanModule`s. `into_runnable` stays the only way to get a `Program`.
 
 ### Lowering
 
 ```rust
-fn lower_module(module: &CleanModule, abi: &PreludeAbi) -> ModuleCode
+fn build_program(modules: &[&CleanModule], defs: &dyn TypeDefs, main: Option<&ValueName>) -> Result<Program, LinkError>
 ```
 
-This step takes over what is left of `scarlet_elaborate`:
+Lowering runs once per program, over every clean module in dependency order. It hands out the program-wide ids: `FuncIdx`, global slots, `TypeId`s and the constant pool. For each module it:
 
-- spilling arguments so they run in source order
-- the per-variant field reads
-- the two arms an `or` becomes
-- record-update spreads
-- turning patterns into Core IR
-- the eta wrappers for a constructor or builtin used as a value
+- turns each function, lambda and constructor or builtin used as a value into a `TypedFn` of typed IR
+- runs arguments into `let`s in the order they were written, when that isn't their parameters' order
+- reads a field each variant holds in its own place with a `match`
+- turns an `or` into its two-arm `match`, and a record-update spread into field reads
+- makes the module's top level: its consts, then its statements
 
-It runs once per module, over every function in the module, with one type pool. `immediates` and `perceus` then run on its output. Functions, globals and constants use ids that are local to the module.
-
-### Linking
-
-```rust
-fn link(modules: &[ModuleCode], entry: &ModuleKey) -> Result<Program, LinkError>
-```
-
-The linker puts modules in dependency order and gives out the program-wide ids: `FuncIdx`, global slots, `TypeId`s and the constant pool. It builds `Program.types`, `inits` and `main`. It also builds the `Abi`, by finding `TypeName { scarlet/json, ... }` and the like in the interfaces, not by matching strings at runtime. The checks on `main` (it must be `pub` and take no parameters) happen here, for every caller.
+Then every `TypedFn` goes through `lower`, `immediates` and `perceus`, and the `Program` is assembled: `types`, `inits`, `main`, and the `Abi`, found by `TypeName` in the stdlib's interfaces. The checks on `main` (it must be `pub` and take no parameters) happen in the driver, on the entry, for every caller.
 
 ### The prelude
 
@@ -148,7 +142,7 @@ A cached check is reused when its source hash and its imports' interface hashes 
 
 - **`scarlet check`, `run` and `dis`** make a `Build`, check the entry and what it imports, then lower and link if everything is clean.
 - **The LSP** keeps one `Build` for each workspace root. A changed file re-checks itself, and its dependents re-check only if its interface changed. **Each file is checked as its own module, under its real key, not as `main`.** That removes `module_path_for_source`, the `StableDefId` side index and the `uri_for` short-circuit. It also fixes an existing bug where an imported module's errors are shown in the entry file.
-- **The REPL** keeps one `Build` too, so the stdlib is checked once. Each line is checked as a new small module. It implicitly imports everything the earlier lines defined, and later names shadow earlier ones.
+- **The REPL** keeps one `Build` too, so the stdlib is checked once per session. It replays the definitions it has accepted as one script ahead of each new line, which is also what `:save` writes out.
 
 ## Crates
 
@@ -157,10 +151,10 @@ A cached check is reused when its source hash and its imports' interface hashes 
 | `scarlet_syntax` | Unchanged |
 | `scarlet_ir` | Unchanged, apart from what linking needs |
 | `scarlet_types` | `Type`, `Interface`, the inference engine, exhaustiveness |
-| `scarlet_check` (new) | `check_module` → `CheckedModule` and the typed tree |
-| `scarlet_lower` | `lower_module`, plus `perceus` and `immediates` as today |
+| `scarlet_check` (new) | `check_module` → `CheckedModule`, the typed tree and the source index |
+| `scarlet_lower` | `build_program`, plus `lower`, `perceus` and `immediates` as before |
 | `scarlet_elaborate` | Deleted |
-| `scarlet_core` | Module resolution, `Build`, `link`, the reference graph built from typed trees |
+| `scarlet_core` | Module resolution, `Build`, the compile driver, the reference graph built from each module's source index |
 | `scarlet` | CLI, REPL and LSP, on top of `Build` |
 
 ## Tests
