@@ -33,5 +33,11 @@ pub type Order {
 	Gt
 }
 
+// Prints `x` with nothing after it, so the next print carries on the same
+// line.
+@vm(print)
+pub fn print(x a) Nil
+
+// Prints `x` and then a newline.
 @vm(println)
 pub fn println(x a) Nil

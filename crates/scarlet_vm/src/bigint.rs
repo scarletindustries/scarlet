@@ -102,6 +102,18 @@ fn small_op(op: IntOp, a: i64, b: i64) -> Option<Value> {
 }
 
 /// `n` in its one form: small when it fits, a heap cell when it does not.
+/// A machine integer as an Int. One that fits in a small Int never touches
+/// `num-bigint`, so it costs no allocation.
+pub(crate) fn int<N>(heap: &mut Heap, n: N) -> Result<Value, Full>
+where
+    N: TryInto<i64> + Into<BigInt> + Copy,
+{
+    if let Some(v) = n.try_into().ok().and_then(Value::int) {
+        return Ok(v);
+    }
+    Ok(Value::cell(heap.big_int(&n.into())?))
+}
+
 pub(crate) fn value(heap: &mut Heap, n: BigInt) -> Result<Value, Full> {
     if let Some(v) = n.to_i64().and_then(Value::int) {
         return Ok(v);

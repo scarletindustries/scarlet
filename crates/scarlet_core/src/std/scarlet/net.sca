@@ -180,7 +180,7 @@ pub fn resolve_until(
 	host String,
 	deadline time::Instant,
 ) Result(address::IpAddress, error::NetError) {
-	resolve_until_ms(host, time::to_deadline_ms(deadline))
+	resolve_until_ms(host, time::to_monotonic_ms(deadline))
 }
 
 @vm(net__resolve_until)
@@ -238,7 +238,7 @@ pub fn connect_addr_until(
 	addr address::SocketAddress,
 	deadline time::Instant,
 ) Result(socket::Socket, error::NetError) {
-	connect_addr_until_ms(addr, time::to_deadline_ms(deadline))
+	connect_addr_until_ms(addr, time::to_monotonic_ms(deadline))
 }
 
 @vm(net__connect_until)

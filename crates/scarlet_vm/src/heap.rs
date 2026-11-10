@@ -107,6 +107,43 @@ pub(crate) enum Kind {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Full;
 
+/// Sizes below this, in words, have their free list in a plain array. Almost
+/// every cell is one of these: constructors, tuples, closures, array nodes
+/// and short strings.
+const DENSE_SIZES: usize = 64;
+
+/// Freed cells, one list per size in words. The size is the key for both
+/// halves. Small sizes index an array, so the alloc and free on every hot path
+/// do no hashing, and the rare large size goes in a map.
+#[derive(Default)]
+struct FreeLists {
+    dense: Vec<Vec<Cell>>,
+    sparse: HashMap<usize, Vec<Cell>>,
+}
+
+impl FreeLists {
+    fn pop(&mut self, size: usize) -> Option<Cell> {
+        if size < DENSE_SIZES {
+            self.dense.get_mut(size)?.pop()
+        } else {
+            self.sparse.get_mut(&size)?.pop()
+        }
+    }
+
+    fn push(&mut self, size: usize, cell: Cell) {
+        if size < DENSE_SIZES {
+            if self.dense.len() <= size {
+                self.dense.resize_with(size + 1, Vec::new);
+            }
+            if let Some(list) = self.dense.get_mut(size) {
+                list.push(cell);
+            }
+        } else {
+            self.sparse.entry(size).or_default().push(cell);
+        }
+    }
+}
+
 struct Chunk {
     words: Box<[u64]>,
     /// Words handed out so far, from the front.
@@ -127,7 +164,7 @@ pub(crate) struct Heap {
     /// Words in the next small-cell chunk.
     next_chunk: usize,
     /// Freed small cells, by size in words, ready to be reused.
-    free: HashMap<usize, Vec<Cell>>,
+    free: FreeLists,
     live: usize,
     /// Cells taken from a chunk or a free list over this heap's life, and
     /// cells a constructor overwrote in place instead (`internal.sca`).
@@ -143,7 +180,7 @@ impl Heap {
     /// 1, and the caller holds that one reference.
     fn alloc(&mut self, kind: Kind, data: usize) -> Result<Cell, Full> {
         let size = data + 1;
-        let cell = if let Some(cell) = self.free.get_mut(&size).and_then(Vec::pop) {
+        let cell = if let Some(cell) = self.free.pop(size) {
             cell
         } else if size > self.chunk_size() {
             self.own_chunk(size)?
@@ -282,7 +319,7 @@ impl Heap {
             self.spare.push(cell.chunk);
         } else {
             self.set_word(cell, 0, 0);
-            self.free.entry(size(h)).or_default().push(cell);
+            self.free.push(size(h), cell);
         }
     }
 

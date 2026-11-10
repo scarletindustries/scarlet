@@ -246,7 +246,7 @@ impl Session {
         };
         let host = scarlet_vm::Host::of_this_process(Vec::new());
         let ran = {
-            let mut out = std::io::stdout().lock();
+            let mut out = crate::output::ProgramOut::stdout();
             let ran = scarlet_vm::run_showing(&runnable, &host, &mut out);
             let _ = std::io::Write::flush(&mut out);
             ran

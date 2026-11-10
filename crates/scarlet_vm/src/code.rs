@@ -140,9 +140,12 @@ pub(crate) enum Instr {
         dst: Reg,
         a: Reg,
     },
-    Println {
+    /// Write what `arg` shows to the output, and a newline after it if
+    /// `newline`.
+    Print {
         dst: Reg,
         arg: Reg,
+        newline: bool,
     },
     /// The text `${a}` shows.
     ToString {
@@ -410,7 +413,7 @@ impl Instr {
             | Instr::FloatNeg { .. }
             | Instr::Num { .. }
             | Instr::Neg { .. }
-            | Instr::Println { .. }
+            | Instr::Print { .. }
             | Instr::ToString { .. }
             | Instr::Concat { .. }
             | Instr::Ctor { .. }
@@ -895,14 +898,15 @@ impl<'c> Loader<'c> {
             Atom::Call { callee, args } => self.call(Some(dst), callee, args),
             Atom::PrimOp { op, args } => self.prim(dst, *op, args)?,
             Atom::Intrinsic {
-                intrinsic: Intrinsic::Println,
+                intrinsic: intrinsic @ (Intrinsic::Print | Intrinsic::Println),
                 args,
             } => match args.as_slice() {
-                [arg] => Instr::Println {
+                [arg] => Instr::Print {
                     dst,
                     arg: Reg::of(*arg),
+                    newline: *intrinsic == Intrinsic::Println,
                 },
-                _ => return Err(Missing::PrintlnArity),
+                _ => return Err(Missing::PrintArity(*intrinsic)),
             },
             Atom::Intrinsic { intrinsic, args } if built(*intrinsic, args.len()) => {
                 Instr::Builtin {
@@ -1192,8 +1196,10 @@ fn built(i: Intrinsic, argc: usize) -> bool {
         | Intrinsic::TimeMonotonic
         | Intrinsic::TimeEpochMs
         | Intrinsic::OsArgv
-        | Intrinsic::OsEnv => 0,
+        | Intrinsic::OsEnv
+        | Intrinsic::OsTerminalSize => 0,
         Intrinsic::CryptoRandomBytes
+        | Intrinsic::ProcessSleep
         | Intrinsic::IoReadFile
         | Intrinsic::CryptoSha1
         | Intrinsic::CryptoSha256

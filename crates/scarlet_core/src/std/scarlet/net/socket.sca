@@ -52,7 +52,7 @@ pub fn read_within(c Socket, max Int, timeout_ms Int) Result(Read, error::NetErr
 
 // Like `read_within`, but takes a `deadline` from `time::monotonic()`.
 pub fn read_until(c Socket, max Int, deadline time::Instant) Result(Read, error::NetError) {
-	read_until_ms(c, max, time::to_deadline_ms(deadline))
+	read_until_ms(c, max, time::to_monotonic_ms(deadline))
 }
 
 @vm(socket__read_until)

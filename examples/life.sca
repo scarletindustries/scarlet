@@ -1,63 +1,189 @@
-// Conway's Game of Life: a glider crossing an 8x8 grid.
-// The grid is rebuilt each generation, and `or` reads past an edge as dead.
+// Conway's Game of Life, live, filling the whole terminal.
+//
+//     scarlet run examples/life.sca
+//
+// It asks the terminal its size. To pick one yourself, or to run it with no
+// terminal, pass a width and a height:
+//
+//     scarlet run examples/life.sca 80 24
+//
+// The board starts as random noise and wraps at its edges, so a glider that
+// leaves the right side comes back on the left. Each cell remembers how many
+// generations it has been alive, and the colour shows it: new cells are bright
+// and old ones cool down. When the board stops changing, it starts over.
+// Press Ctrl-C to stop.
 
 import scarlet/array
+import scarlet/result
+import scarlet/binary
+import scarlet/crypto
+import scarlet/int
+import scarlet/os
+import scarlet/process
+import scarlet/time
 
-const width = 8
-const height = 8
-const generations = 4
+const frame_ms = 70
 
-// 0..height is an Array(Int), so this is two nested maps.
-fn make_grid(cell fn(Int, Int) Bool) Array(Array(Bool)) {
-	array::map(0..height, fn(y) array::map(0..width, fn(x) cell(x, y)))
+// How many generations the population may stay the same before the board is
+// thought of as settled and seeded again.
+const patience = 40
+
+const escape = '['
+
+// The two ways the program can fail to start, or to start over.
+type LifeError {
+	NoRandomness
+	BadSize(text String)
+	NoTerminal
 }
 
-fn cell_at(grid Array(Array(Bool)), x Int, y Int) Bool {
-	row = grid[y] or []
-	row[x] or False
+type Board {
+	width Int
+	height Int
+	cells Array(Int)
 }
 
-const neighborhood = [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)]
-
-fn live_neighbors(grid Array(Array(Bool)), x Int, y Int) Int {
-	neighborhood
-	|> array::filter(fn(offset) cell_at(grid, x + offset.0, y + offset.1))
-	|> array::length
+// A cell holds 0 when it is dead, and its age in generations when it is alive.
+fn age_at(board Board, x Int, y Int) Int {
+	wx = { x + board.width } % board.width
+	wy = { y + board.height } % board.height
+	board.cells[wy * board.width + wx] or 0
 }
 
-fn next_cell(alive Bool, neighbors Int) Bool {
-	match (alive, neighbors) {
-		(True, 2 | 3) -> True
-		(False, 3) -> True
-		_ -> False
+fn alive_at(board Board, x Int, y Int) Int {
+	if age_at(board, x, y) > 0 { 1 } else { 0 }
+}
+
+fn live_neighbors(board Board, x Int, y Int) Int {
+	alive_at(board, x - 1, y - 1) +
+		alive_at(board, x, y - 1) +
+		alive_at(board, x + 1, y - 1) +
+		alive_at(board, x - 1, y) +
+		alive_at(board, x + 1, y) +
+		alive_at(board, x - 1, y + 1) +
+		alive_at(board, x, y + 1) +
+		alive_at(board, x + 1, y + 1)
+}
+
+fn next_age(age Int, neighbors Int) Int {
+	match (age > 0, neighbors) {
+		(True, 2 | 3) -> age + 1
+		(False, 3) -> 1
+		_ -> 0
 	}
 }
 
-fn step(grid Array(Array(Bool))) Array(Array(Bool)) {
-	make_grid(fn(x, y) next_cell(cell_at(grid, x, y), live_neighbors(grid, x, y)))
+fn step(board Board) Board {
+	cells = array::map(0..{ board.width * board.height }, fn(i) {
+		x = i % board.width
+		y = i / board.width
+		next_age(age_at(board, x, y), live_neighbors(board, x, y))
+	})
+
+	Board(board.width, board.height, cells)
 }
 
-fn render(grid Array(Array(Bool))) String {
-	array::fold(grid, '', fn(text, row) text + render_row(row) + '\n')
+// Roughly one cell in four starts alive.
+fn seed(width Int, height Int) Result(Board, LifeError) {
+	noise <- result::map(crypto::random_bytes(width * height) |> result::replace_err(NoRandomness))
+	cells = array::map(
+		0..{ width * height },
+		fn(i) if binary::byte_at(noise, i) < 64 { 1 } else { 0 },
+	)
+	Board(width, height, cells)
 }
 
-fn render_row(row Array(Bool)) String {
-	array::fold(row, '', fn(line, alive) line + if alive { '#' } else { '.' })
+fn population(board Board) Int {
+	count, age <- array::fold(board.cells, 0)
+	if age > 0 then count + 1 else count
 }
 
-fn run(grid Array(Array(Bool)), gen Int) Nil {
-	println('generation ${gen}:')
-	println(render(grid))
-	if gen < generations {
-		run(step(grid), gen + 1)
+// A 256-colour palette from white-hot through yellow and red to deep purple.
+const palette = [231, 226, 220, 214, 208, 202, 196, 161, 125, 89, 53]
+
+fn colour(age Int) Int {
+	index = int::min(age - 1, array::length(palette) - 1)
+	palette[index] or 53
+}
+
+fn render_row(board Board, y Int) String {
+	array::fold(0..board.width, '', fn(line, x) {
+		age = age_at(board, x, y)
+		if age == 0 {
+			line + ' '
+		} else {
+			line + '${escape}38;5;${colour(age)}m█'
+		}
+	})
+}
+
+fn render(board Board, generation Int, alive Int) String {
+	rows = array::fold(
+		0..board.height,
+		'',
+		fn(text, y) text + render_row(board, y) + '${escape}0m\n',
+	)
+	status = 'generation ${generation}  ·  ${alive} alive  ·  Ctrl-C to stop'
+	'${escape}H' + rows + '${escape}2m' + status + '${escape}0m${escape}K'
+}
+
+fn wait_until(deadline time::Instant) Nil {
+	process::sleep(time::since_ms(deadline, time::monotonic()))
+}
+
+// This only returns if seeding a new board fails.
+fn run(board Board, generation Int, last Int, same_for Int) Result(Nil, LifeError) {
+	deadline = time::deadline_in_ms(frame_ms)
+	alive = population(board)
+	// The status bar is the last line, so there is no newline after it. One
+	// would scroll the whole board up by a line.
+	print(render(board, generation, alive))
+	same = if alive == last then same_for + 1 else 0
+
+	// The next board is worked out before the wait, so the wait covers it.
+	if same > patience || alive == 0 {
+		next <- result::then(seed(board.width, board.height))
+		wait_until(deadline)
+		run(next, 0, -1, 0)
 	} else {
-		Nil
+		next = step(board)
+		wait_until(deadline)
+		run(next, generation + 1, alive, same)
 	}
 }
 
-// A glider: after 4 generations the same shape reappears, shifted by (1, 1).
-const glider = [(1, 0), (2, 1), (0, 2), (1, 2), (2, 2)]
+fn size_arg(text String) Result(Int, LifeError) {
+	n <- result::then(int::from_string(text) |> result::replace_err(BadSize(text)))
+	if n > 0 then Ok(n) else Err(BadSize(text))
+}
+
+// The width and height given on the command line, or else the terminal's.
+fn size() Result((Int, Int), LifeError) {
+	match os::argv() {
+		[_, width, height] -> {
+			w <- result::then(size_arg(width))
+			h <- result::map(size_arg(height))
+			(w, h)
+		}
+		_ -> os::terminal_size() |> result::replace_err(NoTerminal)
+	}
+}
+
+fn start() Result(Nil, LifeError) {
+	(width, lines) <- result::then(size())
+	// One line is kept for the status bar.
+	board <- result::then(seed(width, int::max(lines - 1, 1)))
+	println('${escape}2J')
+	run(board, 0, -1, 0)
+}
 
 pub fn main() {
-	run(make_grid(fn(x, y) array::contains(glider, (x, y))), 0)
+	match start() {
+		Ok(Nil) -> Nil
+		Err(NoRandomness) -> println('life: the OS gave no random bytes to seed the board')
+		Err(BadSize(text)) ->
+			println('life: "${text}" is not a size. Pass a width and a height, like: 80 24')
+		Err(NoTerminal) ->
+			println('life: this is not a terminal, so pass a width and a height, like: 80 24')
+	}
 }

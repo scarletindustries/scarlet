@@ -23,6 +23,8 @@ libc = "0.2"
 # pulls in serde for an API we never call, but keep the default
 # `swar-number-parsing`, which we do use.
 simd-json = { version = "0.17", default-features = false, features = ["runtime-detection", "swar-number-parsing"] }
+# Asks the terminal its size for `os.terminal_size`, without `unsafe`.
+rustix = { version = "1", features = ["termios"] }
 # Finds the next backslash, for the lone-surrogate check in `json.rs`.
 memchr = "2"
 # Parses HTTP heads for `scarlet/http/h1`. It's `hyper`'s parser, uses SIMD and

@@ -123,10 +123,10 @@ pub fn main() {
 	println('since_ms is signed: ${time::since_ms(start, deadline)}')
 	println('monotonic never rewinds: ${time::since_ms(time::monotonic(), start) >= 0}')
 
-	// to_deadline_ms is the escape hatch to raw monotonic ms for a @vm boundary
+	// to_monotonic_ms is the escape hatch to raw monotonic ms for a @vm boundary
 	// that wants a number; the number itself is the machine's, only the difference
 	// between two of them is ours to print.
-	println('deadline in raw ms: ${time::to_deadline_ms(deadline) - time::to_deadline_ms(start)}')
+	println('deadline in raw ms: ${time::to_monotonic_ms(deadline) - time::to_monotonic_ms(start)}')
 
 	// The wall clock is a second clock and not a rebased first one, and these
 	// bounds are what say so. Both are fixed dates, so nothing printed here is a
@@ -138,7 +138,7 @@ pub fn main() {
 	println('epoch is after 2024: ${epoch_start > 1704067200000}')
 	println('epoch is before 2100: ${epoch_start < 4102444800000}')
 	println(
-		'epoch is not the monotonic clock: ${epoch_start - time::to_deadline_ms(start) >
+		'epoch is not the monotonic clock: ${epoch_start - time::to_monotonic_ms(start) >
 			1704067200000}',
 	)
 

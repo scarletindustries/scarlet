@@ -211,9 +211,8 @@ suite! {
         // lib/report/table.sca, which imports `../units` relative to its own
         // directory.
         modules,
-        // Algorithms, then the capstone: a lexer, parser and evaluator built
-        // only from what the examples above teach. Read last.
-        life,
+        // The capstone: a lexer, parser and evaluator built only from what the
+        // examples above teach. Read last.
         interpreter,
         // scripts/bench*.sh also drives these benchmarks. Their output is
         // deterministic, so they have goldens like any other example.
@@ -335,6 +334,9 @@ suite! {
         // A single-room chat. It serves SSE responses out of per-connection
         // mailboxes, and tabs rejoin a restarted worker. It serves for ever.
         chat,
+        // The Game of Life, drawn live over the whole terminal from a random
+        // seed. It runs for ever.
+        life,
     ],
 
     // Perf programs that scripts/bench*.sh and

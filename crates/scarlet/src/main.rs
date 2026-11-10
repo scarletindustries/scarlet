@@ -477,7 +477,7 @@ fn cmd_run(args: RunArgs) {
         .chain(args.args)
         .collect();
     let host = scarlet_vm::Host::of_this_process(argv);
-    let mut out = io::BufWriter::new(io::stdout().lock());
+    let mut out = scarlet::output::ProgramOut::stdout();
     let outcome = scarlet_vm::run(&program, &host, &mut out);
     // Flush before printing any message, so the program's own output comes first. A failed flush
     // means the reader has left, like a pipe into `head`, and the program hasn't failed.

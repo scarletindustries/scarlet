@@ -43,6 +43,40 @@ fn one_plus_two() {
     prints("pub fn main() {\n\tprintln(1 + 2)\n}\n", "3\n");
 }
 
+/// `print` writes what `println` would, without the newline.
+#[test]
+fn print_leaves_the_line_open() {
+    prints(
+        "pub fn main() {\n\
+         \tprint('a')\n\
+         \tprint(1 + 2)\n\
+         \tprintln(' b')\n\
+         \tprint([1, 2])\n\
+         }\n",
+        "a3 b\n[1, 2]",
+    );
+}
+
+/// `process.sleep` waits at least as long as it is asked, and a wait of zero
+/// or less returns at once.
+#[test]
+fn sleep_waits() {
+    prints(
+        "import scarlet/process\n\
+         import scarlet/time\n\
+         pub fn main() {\n\
+         \tstart = time::monotonic()\n\
+         \tprocess::sleep(30)\n\
+         \tprintln(time::since_ms(time::monotonic(), start) >= 30)\n\
+         \tprocess::sleep(0)\n\
+         \tprocess::sleep(-5)\n\
+         \tprocess::sleep(-9223372036854775807 * 1000)\n\
+         \tprintln('done')\n\
+         }\n",
+        "True\ndone\n",
+    );
+}
+
 #[test]
 fn a_call_passes_its_arguments_and_returns_its_result() {
     prints(

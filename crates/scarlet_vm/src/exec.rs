@@ -138,7 +138,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     self.set(base, *dst, v);
                 }
                 Instr::BigInt { dst, n } => {
-                    let v = bigint::value(&mut self.heap, (*n).into()).map_err(full)?;
+                    let v = bigint::int(&mut self.heap, *n).map_err(full)?;
                     self.set(base, *dst, v);
                 }
                 Instr::Move { dst, src } => {
@@ -199,10 +199,12 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     };
                     self.set(base, *dst, v);
                 }
-                Instr::Println { dst, arg } => {
+                Instr::Print { dst, arg, newline } => {
                     let mut text = Vec::new();
                     self.show(self.get(base, *arg), &mut text)?;
-                    text.push(b'\n');
+                    if *newline {
+                        text.push(b'\n');
+                    }
                     if self.out.write_all(&text).is_err() {
                         return Err(Stop::OutputClosed);
                     }
@@ -468,17 +470,17 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     // reuses its frame, so a million of them still count one.
                     let v = match intrinsic {
                         Intrinsic::InternalStackDepth => {
-                            bigint::value(&mut self.heap, frames.len().into()).map_err(full)?
+                            bigint::int(&mut self.heap, frames.len()).map_err(full)?
                         }
                         // Read the count before making this call's own answer,
                         // so asking does not change what it says.
                         Intrinsic::InternalCellsMade => {
                             let n = self.heap.made();
-                            bigint::value(&mut self.heap, n.into()).map_err(full)?
+                            bigint::int(&mut self.heap, n).map_err(full)?
                         }
                         Intrinsic::InternalCellsReused => {
                             let n = self.heap.reused();
-                            bigint::value(&mut self.heap, n.into()).map_err(full)?
+                            bigint::int(&mut self.heap, n).map_err(full)?
                         }
                         _ => self.builtin(*intrinsic, base, args)?,
                     };
@@ -514,7 +516,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 }
                 Instr::ArrayLen { dst, src } => {
                     let n = self.seq(self.get(base, *src))?.len(&self.heap);
-                    let v = bigint::value(&mut self.heap, n.into()).map_err(full)?;
+                    let v = bigint::int(&mut self.heap, n).map_err(full)?;
                     self.set(base, *dst, v);
                 }
                 Instr::ArrayElem { dst, src, index } => {
@@ -682,11 +684,11 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             }
             Intrinsic::BinaryBitSize => {
                 let n = self.binary(v)?.len;
-                bigint::value(&mut self.heap, n.into()).map_err(full)
+                bigint::int(&mut self.heap, n).map_err(full)
             }
             Intrinsic::BinaryByteSize => {
                 let n = self.binary(v)?.len.div_ceil(8);
-                bigint::value(&mut self.heap, n.into()).map_err(full)
+                bigint::int(&mut self.heap, n).map_err(full)
             }
             Intrinsic::BinaryAppend => {
                 let (a, b) = (self.binary(v)?, self.binary(arg(self, 1))?);
@@ -704,7 +706,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     Int::Big(_) => None,
                 };
                 let n = found.map_or(-1, i64::from);
-                bigint::value(&mut self.heap, n.into()).map_err(full)
+                bigint::int(&mut self.heap, n).map_err(full)
             }
             // The search starts at `from`, clamped to the binary. An empty
             // needle is found where the search starts.
@@ -725,7 +727,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 };
                 match found {
                     Some(at) => {
-                        let at = bigint::value(&mut self.heap, at.into()).map_err(full)?;
+                        let at = bigint::int(&mut self.heap, at).map_err(full)?;
                         self.some(at)
                     }
                     None => Ok(Value::nullary(self.code.abi.none)),
@@ -855,7 +857,17 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             // These treat an Int as an endless row of two's-complement bits
             // (`int.sca`).
             Intrinsic::IntBitwiseAnd | Intrinsic::IntBitwiseOr | Intrinsic::IntBitwiseXor => {
-                let (a, b) = (self.int_of(v)?.big(), self.int_of(arg(self, 1))?.big());
+                let (a, b) = (self.int_of(v)?, self.int_of(arg(self, 1))?);
+                // Two small Ints give a small answer, since these never widen.
+                if let (Int::Small(a), Int::Small(b)) = (&a, &b) {
+                    let n = match i {
+                        Intrinsic::IntBitwiseAnd => a & b,
+                        Intrinsic::IntBitwiseOr => a | b,
+                        _ => a ^ b,
+                    };
+                    return bigint::int(&mut self.heap, n).map_err(full);
+                }
+                let (a, b) = (a.big(), b.big());
                 let n = match i {
                     Intrinsic::IntBitwiseAnd => a & b,
                     Intrinsic::IntBitwiseOr => a | b,
@@ -863,10 +875,10 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 };
                 bigint::value(&mut self.heap, n).map_err(full)
             }
-            Intrinsic::IntBitwiseNot => {
-                let n = !self.int_of(v)?.big();
-                bigint::value(&mut self.heap, n).map_err(full)
-            }
+            Intrinsic::IntBitwiseNot => match self.int_of(v)? {
+                Int::Small(n) => bigint::int(&mut self.heap, !n).map_err(full),
+                Int::Big(n) => bigint::value(&mut self.heap, !n).map_err(full),
+            },
             // A negative count shifts the other way.
             Intrinsic::IntBitwiseShiftLeft | Intrinsic::IntBitwiseShiftRight => {
                 let x = self.int_of(v)?.big();
@@ -887,24 +899,39 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                         return Err(Stop::broken(Broken::NotUtf8));
                     }
                 };
-                bigint::value(&mut self.heap, n.into()).map_err(full)
+                bigint::int(&mut self.heap, n).map_err(full)
             }
             Intrinsic::ArrayLength => {
                 let n = self.seq(v)?.len(&self.heap);
-                bigint::value(&mut self.heap, n.into()).map_err(full)
+                bigint::int(&mut self.heap, n).map_err(full)
+            }
+            // A wait too long for a `u64` of milliseconds is still one nobody
+            // outlives, so it waits that long instead.
+            Intrinsic::ProcessSleep => {
+                let ms = match self.int_of(v)? {
+                    Int::Small(n) => u64::try_from(n).unwrap_or(0),
+                    Int::Big(n) if n.sign() == Sign::Minus => 0,
+                    Int::Big(_) => u64::MAX,
+                };
+                if ms > 0 {
+                    self.host.sleep_ms(ms);
+                }
+                Ok(Value::NIL)
             }
             Intrinsic::TimeMonotonic => {
                 let ms = self.host.monotonic_ms();
-                bigint::value(&mut self.heap, ms.into()).map_err(full)
+                bigint::int(&mut self.heap, ms).map_err(full)
             }
             // This is negative before 1970. Then `duration_since` gives how
             // far before as an error, and we put the sign back on.
             Intrinsic::TimeEpochMs => {
+                // A `Duration` is under 2^64 seconds, so its milliseconds fit
+                // an `i128` with room for the sign.
                 let ms = match SystemTime::now().duration_since(UNIX_EPOCH) {
-                    Ok(after) => num_bigint::BigInt::from(after.as_millis()),
-                    Err(before) => -num_bigint::BigInt::from(before.duration().as_millis()),
+                    Ok(after) => after.as_millis() as i128,
+                    Err(before) => -(before.duration().as_millis() as i128),
                 };
-                bigint::value(&mut self.heap, ms).map_err(full)
+                bigint::int(&mut self.heap, ms).map_err(full)
             }
             // The bytes come from the OS's own generator, never one of ours.
             // We never give zeros or anything else in place of bytes it did
@@ -1012,8 +1039,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                         self.ok(Value::cell(doc))
                     }
                     Err(e) => {
-                        let offset =
-                            bigint::value(&mut self.heap, e.offset.into()).map_err(full)?;
+                        let offset = bigint::int(&mut self.heap, e.offset).map_err(full)?;
                         let reason = Value::nullary(e.reason.variant(&types.reasons));
                         let error = self
                             .heap
@@ -1032,7 +1058,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     Intrinsic::JsonKind => t.kind(d.idx),
                     _ => t.len(d.idx).and_then(|n| i64::try_from(n).ok()),
                 };
-                bigint::value(&mut self.heap, n.unwrap_or(-1).into()).map_err(full)
+                bigint::int(&mut self.heap, n.unwrap_or(-1)).map_err(full)
             }
             Intrinsic::JsonField | Intrinsic::JsonIndex => {
                 let d = self.doc(v)?;
@@ -1165,7 +1191,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     http::Framing::NoBody => Ok(Value::nullary(types.no_body)),
                     http::Framing::Chunked => Ok(Value::nullary(types.chunked)),
                     http::Framing::Length(n) => {
-                        let n = bigint::value(&mut self.heap, n.into()).map_err(full)?;
+                        let n = bigint::int(&mut self.heap, n).map_err(full)?;
                         Ok(Value::cell(
                             self.heap.ctor(types.length, &[n]).map_err(full)?,
                         ))
@@ -1269,6 +1295,15 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 self.heap.share(env);
                 Ok(Value::cell(env))
             }
+            Intrinsic::OsTerminalSize => match self.host.terminal_size() {
+                Some((cols, rows)) => {
+                    let cols = bigint::int(&mut self.heap, cols).map_err(full)?;
+                    let rows = bigint::int(&mut self.heap, rows).map_err(full)?;
+                    let size = self.heap.tuple(&[cols, rows]).map_err(full)?;
+                    self.ok(Value::cell(size))
+                }
+                None => self.err_nil(),
+            },
             Intrinsic::MapNew => Ok(Value::cell(map::empty(&mut self.heap).map_err(full)?)),
             Intrinsic::MapSet => {
                 let m = self.map(v)?;
@@ -1297,7 +1332,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             }
             Intrinsic::MapSize => {
                 let n = map::size(&self.heap, self.map(v)?);
-                bigint::value(&mut self.heap, n.into()).map_err(full)
+                bigint::int(&mut self.heap, n).map_err(full)
             }
             Intrinsic::MapKeys | Intrinsic::MapValues | Intrinsic::MapToList => {
                 let entries = map::entries(&self.heap, self.map(v)?);
@@ -1329,6 +1364,9 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     _ => f.trunc(),
                 };
                 // A Float is finite, so every whole one is an exact Int.
+                if (i64::MIN as f64..i64::MAX as f64).contains(&whole) {
+                    return bigint::int(&mut self.heap, whole as i64).map_err(full);
+                }
                 let n = num_bigint::BigInt::from_f64(whole).unwrap_or_default();
                 bigint::value(&mut self.heap, n).map_err(full)
             }
@@ -1409,7 +1447,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             }
             BitsOp::BitSize => {
                 let n = self.binary(arg(self, 0))?.len;
-                bigint::value(&mut self.heap, n.into()).map_err(full)
+                bigint::int(&mut self.heap, n).map_err(full)
             }
             BitsOp::View => {
                 let b = self.binary(arg(self, 0))?;
@@ -1589,8 +1627,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             (None, Some(libc::EDQUOT)) => Value::nullary(io.quota_exceeded),
             // `-1` for an error that did not come from the OS.
             (None, code) => {
-                let code =
-                    bigint::value(&mut self.heap, code.unwrap_or(-1).into()).map_err(full)?;
+                let code = bigint::int(&mut self.heap, code.unwrap_or(-1)).map_err(full)?;
                 Value::cell(self.heap.ctor(io.errno, &[code]).map_err(full)?)
             }
         };
@@ -1632,7 +1669,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     /// A `Doc` over the same document as `d`, at node `idx`.
     fn doc_at(&mut self, d: &Doc, idx: usize) -> Result<Value, Stop> {
         let types = self.json_types()?;
-        let idx = bigint::value(&mut self.heap, idx.into()).map_err(full)?;
+        let idx = bigint::int(&mut self.heap, idx).map_err(full)?;
         let (arena, tape) = (self.share(d.arena), self.share(d.tape));
         let cell = self
             .heap
@@ -1838,7 +1875,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
 
     /// The offset `off + n` into `buf`, as an Int.
     fn consumed(&mut self, off: usize, n: usize) -> Result<Value, Stop> {
-        bigint::value(&mut self.heap, (off + n).into()).map_err(full)
+        bigint::int(&mut self.heap, off + n).map_err(full)
     }
 
     /// `h1.Parsed`, for the request head at byte `off` of `buf`, whose bytes
@@ -1963,7 +2000,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             Seq::Tree(a) => Ok(array::get(&self.heap, a, i).map(|v| self.share(v))),
             Seq::Range { start, end } if (i as u64) < array::range_len(start, end) => {
                 let n = i128::from(start) + i as i128;
-                Ok(Some(bigint::value(&mut self.heap, n.into()).map_err(full)?))
+                Ok(Some(bigint::int(&mut self.heap, n).map_err(full)?))
             }
             Seq::Range { .. } => Ok(None),
         }
@@ -1980,7 +2017,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             Seq::Range { start, end } => {
                 let mut items = Vec::new();
                 for n in start..end.max(start) {
-                    items.push(bigint::value(&mut self.heap, n.into()).map_err(full)?);
+                    items.push(bigint::int(&mut self.heap, n).map_err(full)?);
                 }
                 array::from_values(&mut self.heap, &items).map_err(full)
             }

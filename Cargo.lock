@@ -980,6 +980,7 @@ dependencies = [
  "memchr",
  "num-bigint",
  "num-traits",
+ "rustix",
  "scarlet_core",
  "scarlet_ir",
  "simd-json",

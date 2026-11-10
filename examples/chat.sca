@@ -46,15 +46,8 @@ type Room {
 }
 
 fn room(inbox process::Subject(RoomMsg)) Nil {
-	room_loop(
-		Room(
-			inbox: inbox,
-			place: process::supervised(inbox),
-			members: map::new(),
-			history: [],
-			said: 0,
-		),
-	)
+	Room(inbox: inbox, place: process::supervised(inbox), members: map::new(), history: [], said: 0)
+	|> room_loop
 }
 
 fn room_loop(r Room) Nil {

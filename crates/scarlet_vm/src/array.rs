@@ -128,13 +128,45 @@ struct Root {
     tail: Value,
 }
 
+/// A node copied out of the heap, for the paths that build new nodes and so
+/// need the heap mutably while they hold it.
 enum Node {
     Leaf(Vec<Value>),
     Branch {
         shift: usize,
-        sizes: Vec<usize>,
+        sizes: Vec<u64>,
         children: Vec<Value>,
     },
+}
+
+/// A node read in place. A lookup goes through this, so it copies nothing and
+/// allocates nothing.
+enum View<'h> {
+    Leaf(&'h [u64]),
+    Branch {
+        shift: usize,
+        sizes: &'h [u64],
+        children: &'h [u64],
+    },
+}
+
+impl View<'_> {
+    /// Elements under this node.
+    fn len(&self) -> usize {
+        match self {
+            View::Leaf(items) => items.len(),
+            View::Branch { sizes, .. } => sizes.last().copied().unwrap_or(0) as usize,
+        }
+    }
+
+    /// Slot `i`, which is an element of a leaf or a child of a branch.
+    fn slot(&self, i: usize) -> Option<Value> {
+        let words = match self {
+            View::Leaf(items) => items,
+            View::Branch { children, .. } => children,
+        };
+        words.get(i).copied().map(Value::from_bits)
+    }
 }
 
 fn root(heap: &Heap, cell: Cell) -> Root {
@@ -171,25 +203,20 @@ fn own_head(heap: &mut Heap, r: &Root) -> Result<Value, Full> {
     leaf(heap, &kept)
 }
 
-/// `v` as a node, or `None` for `Nil`.
-fn node(heap: &Heap, v: Value) -> Option<Node> {
+/// `v` as a node read in place, or `None` for `Nil`.
+fn view(heap: &Heap, v: Value) -> Option<View<'_>> {
     let cell = v.as_cell()?;
     let d = heap.data(cell);
     match heap.kind(cell)? {
-        Kind::ArrayLeaf => Some(Node::Leaf(
-            d.iter().copied().map(Value::from_bits).collect(),
-        )),
+        Kind::ArrayLeaf => Some(View::Leaf(d)),
         Kind::ArrayBranch => {
             let n = d.len().saturating_sub(1) / 2;
-            Some(Node::Branch {
+            let rest = d.get(1..).unwrap_or(&[]);
+            let (sizes, children) = rest.split_at(n.min(rest.len()));
+            Some(View::Branch {
                 shift: d.first().copied().unwrap_or(0) as usize,
-                sizes: d.iter().skip(1).take(n).map(|s| *s as usize).collect(),
-                children: d
-                    .iter()
-                    .skip(1 + n)
-                    .copied()
-                    .map(Value::from_bits)
-                    .collect(),
+                sizes,
+                children,
             })
         }
         Kind::String
@@ -205,6 +232,22 @@ fn node(heap: &Heap, v: Value) -> Option<Node> {
         | Kind::MapNode
         | Kind::MapCollision => None,
     }
+}
+
+/// `v` as a node copied out of the heap, or `None` for `Nil`.
+fn node(heap: &Heap, v: Value) -> Option<Node> {
+    Some(match view(heap, v)? {
+        View::Leaf(items) => Node::Leaf(items.iter().copied().map(Value::from_bits).collect()),
+        View::Branch {
+            shift,
+            sizes,
+            children,
+        } => Node::Branch {
+            shift,
+            sizes: sizes.to_vec(),
+            children: children.iter().copied().map(Value::from_bits).collect(),
+        },
+    })
 }
 
 /// `v` with one more reference, for keeping it in a new node.
@@ -279,11 +322,7 @@ fn branch(heap: &mut Heap, shift: usize, children: &[Value]) -> Result<Value, Fu
 
 /// Elements under a node.
 fn node_len(heap: &Heap, v: Value) -> usize {
-    match node(heap, v) {
-        None => 0,
-        Some(Node::Leaf(items)) => items.len(),
-        Some(Node::Branch { sizes, .. }) => sizes.last().copied().unwrap_or(0),
-    }
+    view(heap, v).map_or(0, |n| n.len())
 }
 
 /// A node's own slots, which are a leaf's elements or a branch's children.
@@ -305,14 +344,14 @@ struct Slot {
 /// The slot of element `idx` in a branch at `shift`. The scan starts at the
 /// radix guess `idx >> shift`, which never overshoots, since a child holds at
 /// most `1 << shift` elements.
-fn size_slot(sizes: &[usize], idx: usize, shift: usize) -> Slot {
+fn size_slot(sizes: &[u64], idx: usize, shift: usize) -> Slot {
     let last = sizes.len().saturating_sub(1);
     let mut child = (idx >> shift).min(last);
-    while child < last && sizes.get(child).is_some_and(|s| *s <= idx) {
+    while child < last && sizes.get(child).is_some_and(|s| *s as usize <= idx) {
         child += 1;
     }
     let before = match child.checked_sub(1) {
-        Some(p) => sizes.get(p).copied().unwrap_or(0),
+        Some(p) => sizes.get(p).copied().unwrap_or(0) as usize,
         None => 0,
     };
     Slot { child, before }
@@ -365,25 +404,22 @@ pub(crate) fn get(heap: &Heap, array: Cell, i: usize) -> Option<Value> {
     }
     let head_len = node_len(heap, r.head) - r.offset;
     if i < head_len {
-        return slots(heap, r.head).get(i + r.offset).copied();
+        return view(heap, r.head)?.slot(i + r.offset);
     }
     let mut idx = i - head_len;
     let tree_len = node_len(heap, r.tree);
     if idx >= tree_len {
-        return slots(heap, r.tail).get(idx - tree_len).copied();
+        return view(heap, r.tail)?.slot(idx - tree_len);
     }
     let mut n = r.tree;
     loop {
-        match node(heap, n)? {
-            Node::Leaf(items) => return items.get(idx).copied(),
-            Node::Branch {
-                shift,
-                sizes,
-                children,
-            } => {
-                let slot = size_slot(&sizes, idx, shift);
+        let v = view(heap, n)?;
+        match v {
+            View::Leaf(_) => return v.slot(idx),
+            View::Branch { shift, sizes, .. } => {
+                let slot = size_slot(sizes, idx, shift);
                 idx -= slot.before;
-                n = *children.get(slot.child)?;
+                n = v.slot(slot.child)?;
             }
         }
     }
@@ -397,13 +433,17 @@ pub(crate) fn elements(heap: &Heap, array: Cell) -> Vec<Value> {
     // A stack of nodes still to visit, last child first, so they pop in order.
     let mut todo = vec![r.tree];
     while let Some(n) = todo.pop() {
-        match node(heap, n) {
+        match view(heap, n) {
             None => {}
-            Some(Node::Leaf(items)) => out.extend(items),
-            Some(Node::Branch { children, .. }) => todo.extend(children.into_iter().rev()),
+            Some(View::Leaf(items)) => out.extend(items.iter().copied().map(Value::from_bits)),
+            Some(View::Branch { children, .. }) => {
+                todo.extend(children.iter().rev().copied().map(Value::from_bits));
+            }
         }
     }
-    out.extend(slots(heap, r.tail));
+    if let Some(View::Leaf(items)) = view(heap, r.tail) {
+        out.extend(items.iter().copied().map(Value::from_bits));
+    }
     out
 }
 
@@ -669,7 +709,7 @@ fn tree_take(heap: &mut Heap, n: Value, m: usize) -> Result<Value, Full> {
             sizes,
             children,
         }) => {
-            if m >= sizes.last().copied().unwrap_or(0) {
+            if m >= sizes.last().copied().unwrap_or(0) as usize {
                 return Ok(own(heap, n));
             }
             let slot = size_slot(&sizes, m - 1, shift);
@@ -971,7 +1011,7 @@ mod tests {
                 let mut total = 0;
                 for (i, c) in children.iter().enumerate() {
                     total += check_node(heap, *c, shift - BITS);
-                    assert_eq!(sizes[i], total);
+                    assert_eq!(sizes[i] as usize, total);
                 }
                 total
             }

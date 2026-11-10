@@ -35,7 +35,8 @@ pub fn self() Pid
 pub fn kill(pid Pid) Nil
 
 // Parks the calling process, and only that one, for `ms` milliseconds.
-// `ms <= 0` returns at once.
+// `ms <= 0` returns at once. Until there is a scheduler, this blocks the
+// whole program while it waits.
 @vm(process__sleep)
 pub fn sleep(ms Int) Nil
 
@@ -121,7 +122,7 @@ pub fn receive_within(s Subject(msg), timeout_ms Int) Result(msg, Nil) {
 // Like `receive`, but returns `Err(Nil)` once `deadline`, from
 // `time::monotonic()`, passes.
 pub fn receive_until(s Subject(msg), deadline time::Instant) Result(msg, Nil) {
-	receive_until_ms(s, time::to_deadline_ms(deadline))
+	receive_until_ms(s, time::to_monotonic_ms(deadline))
 }
 
 @vm(process__receive_until)

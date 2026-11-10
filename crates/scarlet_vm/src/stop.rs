@@ -47,7 +47,7 @@ pub struct BadProgram(Broken);
 pub(crate) enum Missing {
     Intrinsic(Intrinsic),
     Arity { op: PrimOp, want: Arity },
-    PrintlnArity,
+    PrintArity(Intrinsic),
     TooManyFields,
     NoConst(usize),
     BigConst(i64),
@@ -147,7 +147,7 @@ impl fmt::Display for NotBuilt {
         match &self.0 {
             Missing::Intrinsic(i) => write!(f, "the built-in {i:?}"),
             Missing::Arity { op, want } => write!(f, "{op:?} with {want}"),
-            Missing::PrintlnArity => write!(f, "println with {}", Arity::One),
+            Missing::PrintArity(i) => write!(f, "{i:?} with {}", Arity::One),
             Missing::TooManyFields => f.write_str("a constructor with more than 65535 fields"),
             Missing::NoConst(i) => write!(f, "constant c{i}, which the program does not have"),
             Missing::BigConst(n) => write!(f, "the constant {n} as a small Int"),

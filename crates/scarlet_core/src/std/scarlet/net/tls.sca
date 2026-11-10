@@ -90,7 +90,7 @@ pub fn handshake_until(
 	server_name String,
 	deadline time::Instant,
 ) Result(TlsSocket, TlsError) {
-	handshake_until_ms(sock, server_name, time::to_deadline_ms(deadline))
+	handshake_until_ms(sock, server_name, time::to_monotonic_ms(deadline))
 }
 
 @vm(tls__handshake_until)
@@ -135,7 +135,7 @@ pub fn read_within(c TlsSocket, max Int, timeout_ms Int) Result(socket::Read, Tl
 
 // Like `read_within`, but takes a `deadline` from `time::monotonic()`.
 pub fn read_until(c TlsSocket, max Int, deadline time::Instant) Result(socket::Read, TlsError) {
-	read_until_ms(c, max, time::to_deadline_ms(deadline))
+	read_until_ms(c, max, time::to_monotonic_ms(deadline))
 }
 
 @vm(tls__read_until)

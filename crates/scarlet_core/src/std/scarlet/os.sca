@@ -14,6 +14,12 @@ pub fn argv() Array(String)
 @vm(os__env)
 pub fn env() map::Map(String, String)
 
+// The terminal's size as (columns, rows), asked of it each time, so it follows
+// a resize. It fails when standard output is not a terminal, such as a pipe
+// or a file.
+@vm(os__terminal_size)
+pub fn terminal_size() Result((Int, Int), Nil)
+
 pub fn get_env(key String) Option(String) {
 	map::get(env(), key)
 }

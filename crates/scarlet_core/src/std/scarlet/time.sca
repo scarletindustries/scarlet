@@ -38,9 +38,10 @@ pub fn since_ms(later Instant, earlier Instant) Int {
 	}
 }
 
-// The raw monotonic milliseconds, which the VM's built-ins take. Prefer
-// `since_ms`.
-pub fn to_deadline_ms(t Instant) Int {
+// The instant as a raw reading of the monotonic clock, in milliseconds. It
+// is not a duration and not the time left until anything. The VM's built-ins
+// take deadlines in this form. Prefer `since_ms`.
+pub fn to_monotonic_ms(t Instant) Int {
 	match t {
 		Instant(n) -> n
 	}

@@ -42,6 +42,19 @@ impl Host {
         &self.env
     }
 
+    /// Standard output's terminal size as (columns, rows), or `None` when it
+    /// is not a terminal or reports no size.
+    pub(crate) fn terminal_size(&self) -> Option<(u16, u16)> {
+        let size = rustix::termios::tcgetwinsize(std::io::stdout()).ok()?;
+        (size.ws_col > 0 && size.ws_row > 0).then_some((size.ws_col, size.ws_row))
+    }
+
+    /// Wait `ms` milliseconds. There is no scheduler yet, so this blocks the
+    /// thread, and with it the one process there is.
+    pub(crate) fn sleep_ms(&self, ms: u64) {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+
     /// Milliseconds since the run began, on a clock that only goes forward.
     pub(crate) fn monotonic_ms(&self) -> u128 {
         self.started.elapsed().as_millis()

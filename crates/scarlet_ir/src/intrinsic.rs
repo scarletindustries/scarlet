@@ -30,6 +30,7 @@ macro_rules! intrinsics {
 }
 
 intrinsics! {
+    Print = "print",
     Println = "println",
     StringInspect = "string__inspect",
     InternalStackDepth = "internal__stack_depth",
@@ -145,6 +146,7 @@ intrinsics! {
     CryptoEd25519Verify = "crypto__ed25519_verify",
     OsArgv = "os__argv",
     OsEnv = "os__env",
+    OsTerminalSize = "os__terminal_size",
     MapGet = "map__get",
     MapHas = "map__has",
     MapKeys = "map__keys",

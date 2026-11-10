@@ -83,7 +83,7 @@ pub fn read_within(p Port, max Int, timeout_ms Int) Result(socket::Read, error::
 
 // Like `read_within`, but takes a `deadline` from `time::monotonic()`.
 pub fn read_until(p Port, max Int, deadline time::Instant) Result(socket::Read, error::NetError) {
-	read_until_ms(p, max, time::to_deadline_ms(deadline))
+	read_until_ms(p, max, time::to_monotonic_ms(deadline))
 }
 
 @vm(port__read_until)
