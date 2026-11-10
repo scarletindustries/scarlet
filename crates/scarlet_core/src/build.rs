@@ -37,6 +37,14 @@ pub struct Module {
     imports: Vec<Option<ModuleKey>>,
     /// The interfaces of the imports as this check saw them.
     seen: Vec<(ModuleKey, Interface)>,
+    /// The imports as written, and the directory `./` ones are relative to,
+    /// so a module whose text hasn't changed can have its imports looked at
+    /// again without parsing it.
+    written: Vec<(ast::ImportPath, Span)>,
+    dir: Option<PathBuf>,
+    /// The file's stat when it was read, so an unchanged file needn't be
+    /// read again. `None` for text that didn't come from the file.
+    stat: Option<FileStat>,
     /// What the parser and the import resolution reported.
     load_diagnostics: Vec<Diagnostic>,
     role: Role,
@@ -81,6 +89,8 @@ pub struct Build {
     stdlib_modules: Vec<ModulePath>,
     /// How many module checks ran, for tests of what gets checked again.
     checks: usize,
+    /// How many imported modules were parsed, for the same.
+    parses: usize,
 }
 
 impl Default for Build {
@@ -99,11 +109,16 @@ impl Build {
             verified: HashSet::new(),
             stdlib_modules: module::stdlib_modules(),
             checks: 0,
+            parses: 0,
         }
     }
 
     pub fn checks(&self) -> usize {
         self.checks
+    }
+
+    pub fn parses(&self) -> usize {
+        self.parses
     }
 
     pub fn module(&self, key: &ModuleKey) -> Option<&Module> {
@@ -122,12 +137,24 @@ impl Build {
         self.overlays.remove(path);
     }
 
+    /// Say that the file at `path` changed, so the next check reads it even
+    /// if its stat looks the same. An edit within one clock tick that keeps
+    /// the length and inode would otherwise go unseen.
+    pub fn file_changed(&mut self, path: &Path) {
+        for m in self.modules.values_mut() {
+            if m.origin == Origin::File(path.to_path_buf()) {
+                m.stat = None;
+            }
+        }
+    }
+
     /// Check `entry`, and every module it imports that needs it. Returns the
     /// keys of the modules it reaches, imports first and `entry` last.
     pub fn check_entry(&mut self, entry: Entry<'_>) -> Vec<ModuleKey> {
         self.verified.clear();
         self.loading.insert(entry.key.clone());
-        let imports = self.load_imports(entry.ast, entry.base_dir);
+        let written = written_imports(entry.ast);
+        let imports = self.load_imports(&written, entry.base_dir);
         self.loading.remove(&entry.key);
         let (imports, import_errors) = imports;
         let mut load_diagnostics = entry.parse;
@@ -161,6 +188,9 @@ impl Build {
                     source_hash: entry.hash,
                     imports,
                     seen,
+                    written,
+                    dir: entry.base_dir.map(Path::to_path_buf),
+                    stat: None,
                     load_diagnostics,
                     role: entry.role,
                     unused: entry.unused,
@@ -247,11 +277,11 @@ impl Build {
         scarlet_check::check_module(&input)
     }
 
-    /// Load the prelude and every module `block` imports. Returns each
+    /// Load the prelude and every module `written` names. Returns each
     /// import's key, in source order, and the errors the imports raised.
     fn load_imports(
         &mut self,
-        block: &ast::BlockExpression,
+        written: &[(ast::ImportPath, Span)],
         base_dir: Option<&Path>,
     ) -> (Vec<Option<ModuleKey>>, Vec<Diagnostic>) {
         let prelude = scarlet_types::known::prelude_key();
@@ -261,8 +291,8 @@ impl Build {
         }
         let mut keys = Vec::new();
         let mut errors = Vec::new();
-        for imp in import_decls(block) {
-            match self.load(&imp.path, imp.span, base_dir) {
+        for (path, span) in written {
+            match self.load(path, *span, base_dir) {
                 Ok(k) => keys.push(Some(k)),
                 Err(d) => {
                     errors.push(d);
@@ -300,36 +330,78 @@ impl Build {
                 "Import cycle at module '{key}'. Modules can't import each other in a loop"
             )));
         }
-        let (text, origin, dir) = match &resolved.source {
-            ModuleSource::Embedded(s) => (s.to_string(), Origin::Embedded, None),
-            ModuleSource::File(p) => {
-                let text = match self.overlays.get(p) {
-                    Some(t) => t.clone(),
-                    None => std::fs::read_to_string(p)
-                        .map_err(|e| error(format!("Couldn't read module '{key}': {e}")))?,
-                };
-                (
-                    text,
-                    Origin::File(p.clone()),
-                    p.parent().map(Path::to_path_buf),
-                )
-            }
+        let (origin, dir) = match &resolved.source {
+            ModuleSource::Embedded(_) => (Origin::Embedded, None),
+            ModuleSource::File(p) => (Origin::File(p.clone()), p.parent().map(Path::to_path_buf)),
         };
-        let hash = module::source_hash(&text);
-        let mut parsed = parse(&text);
-        self.loading.insert(key.clone());
-        let (imports, mut load_diagnostics) = self.load_imports(&parsed.ast, dir.as_deref());
-        self.loading.remove(&key);
-        if let Some(m) = self.modules.get(&key)
-            && m.source_hash == hash
-            && m.imports == imports
-            && m.role == Role::Library
-            && m.unused == UnusedBindings::Report
-            && self.interfaces_unchanged(m)
-        {
-            self.verified.insert(key.clone());
-            return Ok(key);
+        let read = |p: &Path| {
+            std::fs::read_to_string(p)
+                .map_err(|e| error(format!("Couldn't read module '{key}': {e}")))
+        };
+
+        // Find out whether the text is what the cached check saw, reading the
+        // file only when its stat can't say.
+        let cached = self.modules.get(&key);
+        let mut text: Option<String> = None;
+        let mut stat = None;
+        let unchanged = match &resolved.source {
+            ModuleSource::Embedded(_) => cached.is_some_and(|m| m.origin == Origin::Embedded),
+            ModuleSource::File(p) => match self.overlays.get(p) {
+                Some(t) => cached.is_some_and(|m| m.source_hash == module::source_hash(t)),
+                None => {
+                    stat = file_stat(p);
+                    if stat.is_some() && cached.is_some_and(|m| m.stat == stat) {
+                        true
+                    } else {
+                        let t = read(p)?;
+                        let same = cached.is_some_and(|m| m.source_hash == module::source_hash(&t));
+                        text = Some(t);
+                        same
+                    }
+                }
+            },
+        };
+        if unchanged && let Some(m) = cached {
+            let (written, mdir) = (m.written.clone(), m.dir.clone());
+            self.loading.insert(key.clone());
+            let (imports, _) = self.load_imports(&written, mdir.as_deref());
+            self.loading.remove(&key);
+            if let Some(m) = self.modules.get(&key)
+                && m.imports == imports
+                && m.role == Role::Library
+                && m.unused == UnusedBindings::Report
+                && self.interfaces_unchanged(m)
+            {
+                if let Some(m) = self.modules.get_mut(&key)
+                    && stat.is_some()
+                {
+                    m.stat = stat;
+                }
+                self.verified.insert(key.clone());
+                return Ok(key);
+            }
         }
+
+        let text = match (text, &resolved.source) {
+            (Some(t), _) => t,
+            (None, ModuleSource::Embedded(s)) => s.to_string(),
+            (None, ModuleSource::File(p)) => match self.overlays.get(p) {
+                Some(t) => t.clone(),
+                None => read(p)?,
+            },
+        };
+        if let ModuleSource::File(p) = &resolved.source
+            && self.overlays.contains_key(p)
+        {
+            stat = None;
+        }
+        let hash = module::source_hash(&text);
+        self.parses += 1;
+        let mut parsed = parse(&text);
+        let written = written_imports(&parsed.ast);
+        self.loading.insert(key.clone());
+        let (imports, mut load_diagnostics) = self.load_imports(&written, dir.as_deref());
+        self.loading.remove(&key);
         for d in &mut parsed.diagnostics {
             d.source = Some(key.clone());
         }
@@ -356,6 +428,9 @@ impl Build {
                 source_hash: hash,
                 imports,
                 seen,
+                written,
+                dir,
+                stat,
                 load_diagnostics: diagnostics,
                 role: Role::Library,
                 unused: UnusedBindings::Report,
@@ -394,6 +469,26 @@ pub fn parse(text: &str) -> Parsed {
 
 pub fn source_hash(text: &str) -> u64 {
     module::source_hash(text)
+}
+
+/// A file's modification time, length and inode. An editor that saves by
+/// replacing the file changes the inode even within the same second.
+type FileStat = (std::time::SystemTime, u64, u64);
+
+fn file_stat(path: &Path) -> Option<FileStat> {
+    let meta = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    let ino = std::os::unix::fs::MetadataExt::ino(&meta);
+    #[cfg(not(unix))]
+    let ino = 0;
+    Some((meta.modified().ok()?, meta.len(), ino))
+}
+
+/// Each `import` in `block`, as written, with its span.
+fn written_imports(block: &ast::BlockExpression) -> Vec<(ast::ImportPath, Span)> {
+    import_decls(block)
+        .map(|d| (d.path.clone(), d.span))
+        .collect()
 }
 
 fn import_decls(block: &ast::BlockExpression) -> impl Iterator<Item = &ast::ImportDeclaration> {

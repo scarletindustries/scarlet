@@ -74,6 +74,20 @@ fn only_what_changed_is_checked_again() {
     assert_eq!(check(&mut b, &p, A_SRC), (1, true), "c is fixed");
 }
 
+/// A module whose text hasn't changed is neither parsed nor checked again,
+/// the stdlib included: only what changed is read.
+#[test]
+fn an_unchanged_module_is_not_parsed_again() {
+    let (p, mut b) = fresh("noparse");
+    let parses = b.parses();
+    assert_eq!(check(&mut b, &p, A_SRC), (0, true));
+    assert_eq!(b.parses(), parses, "nothing changed, so nothing was parsed");
+
+    p.write("c.sca", "pub fn val() Int { 9 }\n");
+    check(&mut b, &p, A_SRC);
+    assert_eq!(b.parses(), parses + 1, "only c was parsed");
+}
+
 #[test]
 fn an_editor_buffer_wins_over_the_file() {
     let (p, mut b) = fresh("overlay");

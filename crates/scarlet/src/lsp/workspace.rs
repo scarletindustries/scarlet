@@ -210,6 +210,9 @@ impl Workspace {
                 continue;
             }
             any = true;
+            for root in self.roots.values_mut() {
+                root.build.file_changed(&path);
+            }
             match ty {
                 WatchedChange::Deleted => {
                     self.documents.remove(uri);
