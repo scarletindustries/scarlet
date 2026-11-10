@@ -1,14 +1,16 @@
 /**
  * Encodes and decodes `application/x-www-form-urlencoded`, the format that
- * HTML forms POST and query strings carry (WHATWG URL §5). `decode` is
- * forgiving: it keeps a bad percent escape as literal bytes, as every form
- * reader does. `pct_encode` is strict: it escapes everything outside RFC
- * 3986's unreserved set.
+ * HTML forms POST and query strings carry (WHATWG URL §5). `decode` keeps a
+ * bad percent escape as literal bytes, as every form reader does. But it
+ * refuses a name or value that isn't UTF-8, instead of replacing or dropping
+ * it. `pct_encode` is strict: it escapes everything outside RFC 3986's
+ * unreserved set.
  */
 
 import scarlet/array
 import scarlet/binary
 import scarlet/option
+import scarlet/result
 
 fn hex_val(c Int) Int {
 	if c >= 48 && c <= 57 {
@@ -87,51 +89,49 @@ fn pct_encode_from(b Binary, at Int, acc Binary) Binary {
 }
 
 /** Decodes `a=1&b=2`, from a query string or a form body, into pairs in
- * order. A segment with no `=` is skipped. */
-pub fn decode(b Binary) Array((String, String)) {
-	text = binary::to_string(b) or ''
-	string_split(text)
-	|> array::fold([], fn(acc, pair) match split_once(pair) {
-		Some((k, v)) ->
-			[
-				..acc,
-				(
-					binary::from_string(k) |> pct_decode |> binary::to_string or '',
-					binary::from_string(v) |> pct_decode |> binary::to_string or '',
-				),
-			]
-		None -> acc
-	})
+ * order. A segment with no `=` is a name with an empty value, and an empty
+ * segment is skipped, as WHATWG URL §5.1 says. It returns `Err(Nil)` when a
+ * decoded name or value isn't UTF-8, so nothing is replaced or dropped. */
+pub fn decode(b Binary) Result(Array((String, String)), Nil) {
+	decode_from(b, 0, 0, [])
 }
 
-// These split bytes on '&' and the first '=', so this module doesn't need
-// scarlet/string.
-fn string_split(text String) Array(String) {
-	splits(binary::from_string(text), 0, 0, [])
-}
-
-fn splits(b Binary, from Int, at Int, acc Array(String)) Array(String) {
+// `from` is where the current segment starts, and `at` is the byte being read.
+fn decode_from(
+	b Binary,
+	from Int,
+	at Int,
+	acc Array((String, String)),
+) Result(Array((String, String)), Nil) {
 	size = binary::byte_size(b)
-	if at >= size {
-		[..acc, segment(b, from, at)]
-	} else if binary::byte_at(b, at) == 38 {
-		splits(b, at + 1, at + 1, [..acc, segment(b, from, at)])
+	if at < size && binary::byte_at(b, at) != 38 {
+		decode_from(b, from, at + 1, acc)
 	} else {
-		splits(b, from, at + 1, acc)
+		pairs <- result::then(if at == from {
+			Ok(acc)
+		} else {
+			decode_pair(b, from, at) |> result::map(fn(p) [..acc, p])
+		})
+		if at >= size {
+			Ok(pairs)
+		} else {
+			decode_from(b, at + 1, at + 1, pairs)
+		}
 	}
 }
 
-fn segment(b Binary, from Int, to Int) String {
-	match binary::slice_bytes(b, from, to - from) {
-		Ok(s) -> binary::to_string(s) or ''
-		Err(Nil) -> ''
+fn decode_pair(b Binary, from Int, to Int) Result((String, String), Nil) {
+	seg <- result::then(binary::slice_bytes(b, from, to - from))
+	(raw_name, raw_value) = match binary::index_of(seg, <<'='>>, 0) {
+		Some(eq) -> {
+			(name, rest) = binary::split_at_bytes(seg, eq)
+			(name, binary::drop_bytes(rest, 1))
+		}
+		None -> (seg, <<>>)
 	}
-}
-
-fn split_once(pair String) Option((String, String)) {
-	b = binary::from_string(pair)
-	at <- option::then(binary::index_of(b, <<'='>>, 0))
-	Some((segment(b, 0, at), segment(b, at + 1, binary::byte_size(b))))
+	name <- result::then(raw_name |> pct_decode |> binary::to_string)
+	value <- result::then(raw_value |> pct_decode |> binary::to_string)
+	Ok((name, value))
 }
 
 /** Returns the first value for `key` in a `decode` result. */

@@ -23,18 +23,19 @@ import scarlet/string
  * each bearer check gets it back. */
 pub type Grant {
 	user String
-	scope String
+	scope Option(String)
 	client_id String
 	redirect_uri String
 	challenge String
-	resource String
+	resource Option(String)
 }
 
-/** Your storage. `take_code` must remove the code it returns, so that each
- * code works only once. */
+/** Your storage. `get_client` returns the redirect URIs a client registered.
+ * `take_code` must remove the code it returns, so that each code works only
+ * once. */
 pub type Store {
-	put_client fn(String, String) Nil
-	get_client fn(String) Option(String)
+	put_client fn(String, Array(String)) Nil
+	get_client fn(String) Option(Array(String))
 	put_code fn(String, Grant) Nil
 	take_code fn(String) Option(Grant)
 	put_token fn(String, Grant) Nil
@@ -91,15 +92,25 @@ pub fn metadata(issuer String, scopes Array(String)) json::Json {
 pub type RegisterError {
 	/** The body isn't JSON. */
 	BodyInvalidJson(error json::ParseError)
-	/** The body has no `redirect_uris`, or none of them is a string. */
+	/** The body has no `redirect_uris`, or the list is empty. */
 	MissingRedirectUris
+	/** `redirect_uris` isn't a list. */
+	RedirectUrisNotList
+	/** The entry at `index` of `redirect_uris` isn't a string. */
+	RedirectUriNotString(index Int)
+	/** The OS random source failed, so no client ID could be made. */
+	NoClientId
 }
 
-/** Returns the RFC 7591 §3.2.2 `error` value for a refused registration. */
-pub fn register_error_code(e RegisterError) String {
+/** Returns the RFC 7591 §3.2.2 `error` value for a refused registration.
+ * `None` means the server itself failed: answer 500, with no OAuth error
+ * body. */
+pub fn register_error_code(e RegisterError) Option(String) {
 	match e {
-		BodyInvalidJson(_) -> 'invalid_client_metadata'
-		MissingRedirectUris -> 'invalid_redirect_uri'
+		BodyInvalidJson(_) -> Some('invalid_client_metadata')
+		MissingRedirectUris | RedirectUrisNotList | RedirectUriNotString(_) ->
+			Some('invalid_redirect_uri')
+		NoClientId -> None
 	}
 }
 
@@ -107,42 +118,44 @@ pub fn register_error_code(e RegisterError) String {
  * no secret. */
 pub fn register(store Store, req_body Binary) Result(json::Json, RegisterError) {
 	doc <- result::then(json::parse_binary(req_body) |> result::map_err(BodyInvalidJson))
+	uris <- result::then(redirect_uris(doc))
+	id <- result::then(new_token() |> result::replace_err(NoClientId))
+	Store(put_client, _, _, _, _, _) = store
+	put_client(id, uris)
+	Ok(
+		json::Object([
+			('client_id', json::Str(id)),
+			('redirect_uris', texts(uris)),
+			('token_endpoint_auth_method', json::Str('none')),
+			('grant_types', json::List([json::Str('authorization_code')])),
+			('response_types', json::List([json::Str('code')])),
+		]),
+	)
+}
 
-	uris = match json::field(doc, 'redirect_uris') {
-		Some(list) -> {
-			json::elements(list)
-			|> array::fold([], fn(acc, u) match json::string(u) {
-				Some(t) -> [..acc, t]
-				None -> acc
-			})
-		}
-		None -> []
-	}
-
-	match uris {
-		[] -> Err(MissingRedirectUris)
-		uris -> {
-			id = new_token()
-			Store(put_client, _, _, _, _, _) = store
-			put_client(id, join_spaced(uris))
-			Ok(
-				json::Object([
-					('client_id', json::Str(id)),
-					('redirect_uris', texts(uris)),
-					('token_endpoint_auth_method', json::Str('none')),
-					('grant_types', json::List([json::Str('authorization_code')])),
-					('response_types', json::List([json::Str('code')])),
-				]),
-			)
+fn redirect_uris(doc json::Doc) Result(Array(String), RegisterError) {
+	match json::field(doc, 'redirect_uris') {
+		None -> Err(MissingRedirectUris)
+		Some(list) -> if json::kind(list) != json::ArrayKind {
+			Err(RedirectUrisNotList)
+		} else {
+			uris <- result::then(uri_strings(list, 0, []))
+			match uris {
+				[] -> Err(MissingRedirectUris)
+				_ -> Ok(uris)
+			}
 		}
 	}
 }
 
-fn join_spaced(xs Array(String)) String {
-	array::fold(xs, '', fn(acc, x) match acc {
-		'' -> x
-		acc -> '${acc} ${x}'
-	})
+fn uri_strings(list json::Doc, i Int, acc Array(String)) Result(Array(String), RegisterError) {
+	match json::index(list, i) {
+		None -> Ok(acc)
+		Some(u) -> match json::string(u) {
+			Some(t) -> uri_strings(list, i + 1, [..acc, t])
+			None -> Err(RedirectUriNotString(i))
+		}
+	}
 }
 
 // Authorize
@@ -152,162 +165,293 @@ fn join_spaced(xs Array(String)) String {
 pub type AuthorizeReq {
 	client_id String
 	redirect_uri String
-	state String
+	state Option(String)
 	challenge String
-	scope String
-	resource String
+	scope Option(String)
+	resource Option(String)
 }
 
-/** Why `parse_authorize` refused a request. */
+/** Why `parse_authorize` refused a request. The two kinds say where the error
+ * may go. */
 pub type AuthorizeError {
+	/** The redirect URI isn't trusted, so don't send the error to it. Show it
+	 * to the user instead. */
+	Untrusted(reason UntrustedReason)
+	/** The client and its redirect URI check out, so the error goes back to
+	 * the client. Redirect to `refusal_redirect(redirect_uri, state, reason)`. */
+	Refused(redirect_uri String, state Option(String), reason RefusedReason)
+}
+
+pub type UntrustedReason {
+	/** The query isn't form-encoded UTF-8. */
+	MalformedQuery
+	/** `client_id` or `redirect_uri` appears more than once. */
+	RepeatedClient(name String)
 	/** `client_id` or `redirect_uri` is missing. */
-	MissingClient
+	MissingClient(name String)
+	/** No client is registered under `client_id`. */
+	UnknownClient
 	/** The redirect URI isn't one this client registered. */
 	UnregisteredRedirectUri
-	/** `response_type` isn't `code`. */
-	UnsupportedResponseType
-	/** There's no `code_challenge`, or its method isn't `S256`. */
-	PkceRequired
 }
 
-/** Returns the RFC 6749 §4.1.2.1 `error` value for a refused request. Don't
- * send `MissingClient` or `UnregisteredRedirectUri` to the redirect URI,
- * because it isn't trusted. Show the error to the user instead. */
-pub fn authorize_error_code(e AuthorizeError) String {
-	match e {
-		MissingClient -> 'invalid_request'
-		UnregisteredRedirectUri -> 'invalid_request'
+pub type RefusedReason {
+	/** A parameter appears more than once (RFC 6749 §3.1). */
+	RepeatedParameter(name String)
+	/** `response_type` is missing or isn't `code`. */
+	UnsupportedResponseType
+	/** There's no `code_challenge`. */
+	MissingChallenge
+	/** `code_challenge` isn't 43 base64url characters, which every S256
+	 * challenge is (RFC 7636 §4.2). */
+	MalformedChallenge
+	/** `code_challenge_method` is missing or isn't `S256`. */
+	UnsupportedChallengeMethod
+}
+
+/** Returns the RFC 6749 §4.1.2.1 `error` value for a refused request. */
+pub fn authorize_error_code(reason RefusedReason) String {
+	match reason {
 		UnsupportedResponseType -> 'unsupported_response_type'
-		PkceRequired -> 'invalid_request'
+		RepeatedParameter(_) | MissingChallenge | MalformedChallenge | UnsupportedChallengeMethod ->
+			'invalid_request'
 	}
+}
+
+/** Where to send the client for a `Refused` request. */
+pub fn refusal_redirect(redirect_uri String, state Option(String), reason RefusedReason) String {
+	redirect_with(redirect_uri, [('error', authorize_error_code(reason)), ..state_param(state)])
+}
+
+/** Where to send the client when `approve` fails. */
+pub fn server_error_redirect(areq AuthorizeReq) String {
+	redirect_with(areq.redirect_uri, [('error', 'server_error'), ..state_param(areq.state)])
 }
 
 /** Checks the query of a `GET /authorize`. The redirect URI must be one the
  * client registered, because a code sent anywhere else can be stolen. */
 pub fn parse_authorize(store Store, query_bytes Binary) Result(AuthorizeReq, AuthorizeError) {
-	q = form::decode(query_bytes)
-	client_id = form::get(q, 'client_id') or ''
-	redirect_uri = form::get(q, 'redirect_uri') or ''
-	pkce_challenge = form::get(q, 'code_challenge') or ''
-	method = form::get(q, 'code_challenge_method') or ''
-	registered = store.get_client(client_id) or ''
-	if client_id == '' || redirect_uri == '' {
-		Err(MissingClient)
-	} else if !array::contains(string::split(registered, ' '), redirect_uri) {
-		Err(UnregisteredRedirectUri)
-	} else if { form::get(q, 'response_type') or '' } != 'code' {
-		Err(UnsupportedResponseType)
-	} else if method != 'S256' || pkce_challenge == '' {
-		Err(PkceRequired)
-	} else {
-		Ok(
-			AuthorizeReq(
-				client_id: client_id,
-				redirect_uri: redirect_uri,
-				state: form::get(q, 'state') or '',
-				challenge: pkce_challenge,
-				scope: form::get(q, 'scope') or '',
-				resource: form::get(q, 'resource') or '',
-			),
-		)
+	q <- result::then(form::decode(query_bytes) |> result::replace_err(Untrusted(MalformedQuery)))
+	client_id <- result::then(client_param(q, 'client_id'))
+	redirect_uri <- result::then(client_param(q, 'redirect_uri'))
+	Store(_, get_client, _, _, _, _) = store
+	match get_client(client_id) {
+		None -> Err(Untrusted(UnknownClient))
+		Some(registered) -> if !array::contains(registered, redirect_uri) {
+			Err(Untrusted(UnregisteredRedirectUri))
+		} else {
+			parse_trusted(q, client_id, redirect_uri)
+		}
 	}
 }
 
+fn client_param(q Array((String, String)), name String) Result(String, AuthorizeError) {
+	match param(q, name) {
+		Err(n) -> Err(Untrusted(RepeatedClient(n)))
+		Ok(None) -> Err(Untrusted(MissingClient(name)))
+		Ok(Some(v)) -> Ok(v)
+	}
+}
+
+// Checks the rest of the request, once errors may go to `redirect_uri`.
+fn parse_trusted(
+	q Array((String, String)),
+	client_id String,
+	redirect_uri String,
+) Result(AuthorizeReq, AuthorizeError) {
+	match param(q, 'state') {
+		Err(n) ->
+			Err(Refused(redirect_uri: redirect_uri, state: None, reason: RepeatedParameter(n)))
+		Ok(state) -> {
+			refuse = fn(reason) Refused(redirect_uri: redirect_uri, state: state, reason: reason)
+			repeated = fn(n) refuse(RepeatedParameter(n))
+			response_type <- result::then(param(q, 'response_type') |> result::map_err(repeated))
+			challenge <- result::then(param(q, 'code_challenge') |> result::map_err(repeated))
+			method <- result::then(param(q, 'code_challenge_method') |> result::map_err(repeated))
+			scope <- result::then(param(q, 'scope') |> result::map_err(repeated))
+			resource <- result::then(param(q, 'resource') |> result::map_err(repeated))
+			if response_type != Some('code') {
+				Err(refuse(UnsupportedResponseType))
+			} else if method != Some('S256') {
+				Err(refuse(UnsupportedChallengeMethod))
+			} else {
+				match challenge {
+					None -> Err(refuse(MissingChallenge))
+					Some(c) -> if !is_s256_challenge(c) {
+						Err(refuse(MalformedChallenge))
+					} else {
+						Ok(
+							AuthorizeReq(
+								client_id: client_id,
+								redirect_uri: redirect_uri,
+								state: state,
+								challenge: c,
+								scope: scope,
+								resource: resource,
+							),
+						)
+					}
+				}
+			}
+		}
+	}
+}
+
+// BASE64URL(SHA256(verifier)) with no padding is always 43 characters.
+fn is_s256_challenge(c String) Bool {
+	b = binary::from_string(c)
+	binary::byte_size(b) == 43 &&
+		match base64::url_decode(b) {
+			Ok(digest) -> binary::byte_size(digest) == 32
+			Err(Nil) -> False
+		}
+}
+
 /** Call this once the user agrees. It makes a one-time code for `user` and
- * returns the URL to redirect them to. */
-pub fn approve(store Store, areq AuthorizeReq, user String) String {
-	AuthorizeReq(client_id, redirect_uri, state, pkce_challenge, scope, resource) = areq
-	code = new_token()
+ * returns the URL to redirect them to. It returns `Err(Nil)` when the OS
+ * random source fails and no code could be made. Redirect to
+ * `server_error_redirect(areq)` then. */
+pub fn approve(store Store, areq AuthorizeReq, user String) Result(String, Nil) {
+	code <- result::then(new_token())
 	Store(_, _, put_code, _, _, _) = store
 	put_code(
 		code,
 		Grant(
 			user: user,
-			scope: scope,
-			client_id: client_id,
-			redirect_uri: redirect_uri,
-			challenge: pkce_challenge,
-			resource: resource,
+			scope: areq.scope,
+			client_id: areq.client_id,
+			redirect_uri: areq.redirect_uri,
+			challenge: areq.challenge,
+			resource: areq.resource,
 		),
 	)
+	Ok(redirect_with(areq.redirect_uri, [('code', code), ..state_param(areq.state)]))
+}
+
+fn state_param(state Option(String)) Array((String, String)) {
+	match state {
+		Some(s) -> [('state', s)]
+		None -> []
+	}
+}
+
+fn redirect_with(redirect_uri String, params Array((String, String))) String {
 	sep = match string::contains(redirect_uri, '?') {
 		True -> '&'
 		False -> '?'
 	}
-	'${redirect_uri}${sep}code=${form::pct_encode(code)}&state=${form::pct_encode(state)}'
+	query =
+		params
+		|> array::map(fn(p) {
+			(k, v) = p
+			'${form::pct_encode(k)}=${form::pct_encode(v)}'
+		})
+		|> join('&')
+	'${redirect_uri}${sep}${query}'
 }
 
 // Token
 
 /** Why `token` refused a code. */
 pub type TokenError {
-	/** `grant_type` is not `authorization_code`. */
+	/** The body isn't form-encoded UTF-8. */
+	MalformedBody
+	/** A parameter appears more than once (RFC 6749 §3.1). */
+	RepeatedBodyParameter(name String)
+	/** `grant_type`, `code`, `code_verifier` or `client_id` is missing. */
+	MissingBodyParameter(name String)
+	/** `grant_type` isn't `authorization_code`. */
 	UnsupportedGrantType
-	/** `code` or `code_verifier` is missing. */
-	MissingCode
 	/** The code isn't known, was already used, or has expired. */
 	UnknownCode
 	/** The verifier doesn't hash to the code's challenge. */
 	PkceFailed
 	/** `client_id` or `redirect_uri` isn't the one the code was issued to. */
 	GrantMismatch
+	/** The OS random source failed, so no access token could be made. The code
+	 * can still be used. */
+	NoAccessToken
 }
 
-/** Returns the RFC 6749 §5.2 `error` value for a refused code. */
-pub fn token_error_code(e TokenError) String {
+/** Returns the RFC 6749 §5.2 `error` value for a refused code. `None` means
+ * the server itself failed: answer 500, with no OAuth error body. */
+pub fn token_error_code(e TokenError) Option(String) {
 	match e {
-		UnsupportedGrantType -> 'unsupported_grant_type'
-		MissingCode -> 'invalid_request'
-		UnknownCode -> 'invalid_grant'
-		PkceFailed -> 'invalid_grant'
-		GrantMismatch -> 'invalid_grant'
+		MalformedBody | RepeatedBodyParameter(_) | MissingBodyParameter(_) ->
+			Some('invalid_request')
+		UnsupportedGrantType -> Some('unsupported_grant_type')
+		UnknownCode | PkceFailed | GrantMismatch -> Some('invalid_grant')
+		NoAccessToken -> None
 	}
 }
 
 /** Handles `POST /token` by swapping a code for a bearer token. The client's
- * PKCE verifier must hash to the code's challenge. */
+ * PKCE verifier must hash to the code's challenge. A public client must name
+ * itself with `client_id`. It can leave out `redirect_uri`, as OAuth 2.1
+ * allows, but if it sends one, it must match. */
 pub fn token(store Store, req_body Binary) Result(json::Json, TokenError) {
-	f = form::decode(req_body)
-	code = form::get(f, 'code') or ''
-	verifier = form::get(f, 'code_verifier') or ''
-	if { form::get(f, 'grant_type') or '' } != 'authorization_code' {
+	f <- result::then(form::decode(req_body) |> result::replace_err(MalformedBody))
+	grant_type <- result::then(required(f, 'grant_type'))
+	code <- result::then(required(f, 'code'))
+	verifier <- result::then(required(f, 'code_verifier'))
+	client_id <- result::then(required(f, 'client_id'))
+	redirect_uri <- result::then(param(f, 'redirect_uri') |> result::map_err(RepeatedBodyParameter))
+	if grant_type != 'authorization_code' {
 		Err(UnsupportedGrantType)
-	} else if code == '' || verifier == '' {
-		Err(MissingCode)
 	} else {
+		// The token is made before the code is taken, so if this fails the
+		// code still works.
+		tok <- result::then(new_token() |> result::replace_err(NoAccessToken))
 		Store(_, _, _, take_code, put_token, _) = store
 		match take_code(code) {
 			None -> Err(UnknownCode)
-			Some(g) -> {
-				Grant(_, scope, client_id, redirect_uri, pkce_challenge, _) = g
-				// Don't fall back to an empty digest on `Err`, because it would match an empty challenge.
-				pkce_ok = match crypto::sha256(binary::from_string(verifier)) {
-					Ok(digest) ->
-						crypto::const_eq(
-							base64::url_encode(digest),
-							binary::from_string(pkce_challenge),
-						)
-					Err(Nil) -> False
-				}
-				ok_client = { form::get(f, 'client_id') or client_id } == client_id
-				ok_redirect = { form::get(f, 'redirect_uri') or redirect_uri } == redirect_uri
-				if !pkce_ok {
-					Err(PkceFailed)
-				} else if !ok_client || !ok_redirect {
-					Err(GrantMismatch)
-				} else {
-					tok = new_token()
-					put_token(tok, g)
-					Ok(
-						json::Object([
-							('access_token', json::Str(tok)),
-							('token_type', json::Str('Bearer')),
-							('scope', json::Str(scope)),
-						]),
-					)
-				}
+			Some(g) -> if !pkce_ok(verifier, g.challenge) {
+				Err(PkceFailed)
+			} else if client_id != g.client_id || !matches_if_sent(redirect_uri, g.redirect_uri) {
+				Err(GrantMismatch)
+			} else {
+				put_token(tok, g)
+				Ok(
+					json::Object([
+						('access_token', json::Str(tok)),
+						('token_type', json::Str('Bearer')),
+						..scope_field(g.scope),
+					]),
+				)
 			}
 		}
+	}
+}
+
+fn required(f Array((String, String)), name String) Result(String, TokenError) {
+	match param(f, name) {
+		Err(n) -> Err(RepeatedBodyParameter(n))
+		Ok(None) -> Err(MissingBodyParameter(name))
+		Ok(Some(v)) -> Ok(v)
+	}
+}
+
+fn matches_if_sent(sent Option(String), issued String) Bool {
+	match sent {
+		Some(s) -> s == issued
+		None -> True
+	}
+}
+
+fn scope_field(scope Option(String)) Array((String, json::Json)) {
+	match scope {
+		Some(s) -> [('scope', json::Str(s))]
+		None -> []
+	}
+}
+
+fn pkce_ok(verifier String, challenge String) Bool {
+	match verifier |> binary::from_string |> crypto::sha256 {
+		Ok(digest) ->
+			digest |> base64::url_encode |> crypto::const_eq(binary::from_string(challenge))
+		// Don't fall back to an empty digest, because it would match an empty
+		// challenge.
+		Err(Nil) -> False
 	}
 }
 
@@ -318,7 +462,37 @@ pub fn bearer(store Store, token_text String) Option(Grant) {
 	get_token(token_text)
 }
 
+// Parameters
+
+// Returns the value of `name`, if it's there. It returns `Err(name)` when the
+// name appears more than once, which RFC 6749 §3.1 forbids.
+fn param(pairs Array((String, String)), name String) Result(Option(String), String) {
+	count =
+		pairs
+		|> array::filter(fn(p) {
+			(k, _) = p
+			k == name
+		})
+		|> array::length
+	if count > 1 {
+		Err(name)
+	} else {
+		Ok(form::get(pairs, name))
+	}
+}
+
+fn join(xs Array(String), sep String) String {
+	joined = array::fold(xs, None, fn(acc, x) match acc {
+		None -> Some(x)
+		Some(a) -> Some('${a}${sep}${x}')
+	})
+	joined or ''
+}
+
 // Makes 32 random bytes as URL-safe base64, for tokens, codes and client IDs.
-fn new_token() String {
-	{ crypto::random_bytes(32) or <<>> } |> base64::url_encode |> binary::to_string or ''
+// It returns `Err(Nil)` when the OS random source fails, because there's no
+// safe stand-in.
+fn new_token() Result(String, Nil) {
+	bytes <- result::then(crypto::random_bytes(32))
+	bytes |> base64::url_encode |> binary::to_string
 }
