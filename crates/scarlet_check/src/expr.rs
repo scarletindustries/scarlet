@@ -223,7 +223,7 @@ impl Checker<'_> {
                         scarlet_syntax::diagnostic::DiagnosticCode::ParseError,
                         err.error.to_string(),
                     );
-                    d.source = Some(self.key.clone());
+                    d.source = Some(self.input.source.clone());
                     self.diags.push(d);
                 }
                 self.error_expr()

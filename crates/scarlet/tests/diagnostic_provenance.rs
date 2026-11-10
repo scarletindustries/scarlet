@@ -4,24 +4,9 @@
 mod common;
 use common::{Project, module_key};
 
-use std::path::PathBuf;
-
 use scarlet::build::{self, Build, Entry};
 use scarlet::check::{Role, UnusedBindings};
 use scarlet::{diagnostic, module};
-
-/// Resolves modules the way the CLI does. A `ModuleKey` names an on-disk module
-/// (its canonical path with `.sca` stripped) or an embedded stdlib module.
-fn resolve(key: &module::ModuleKey) -> Option<(PathBuf, String)> {
-    let path: module::ModulePath = key.as_str().split('/').map(str::to_string).collect();
-    match module::resolve_canonical(&path).ok()?.source {
-        module::ModuleSource::File(p) => {
-            let text = std::fs::read_to_string(&p).ok()?;
-            Some((p, text))
-        }
-        module::ModuleSource::Embedded(s) => Some((PathBuf::from(key.as_str()), s.to_string())),
-    }
-}
 
 const LIB_SRC: &str = "pub fn broken() Int {\n  \"not an int\"\n}\n";
 
@@ -49,11 +34,10 @@ fn check_project(p: &Project, entry_src: &str) -> Checked {
     );
     let mut b = Build::default();
     let reach = b.check_entry(Entry {
-        key: module::ModuleKey::main(),
+        source: scarlet::source::SourceFile::new(module::ModuleKey::main(), None, entry_src),
         ast: &parsed.ast,
         doc: parsed.doc,
         parse: parsed.diagnostics,
-        hash: build::source_hash(entry_src),
         base_dir: Some(&p.dir),
         role: Role::Entry,
         unused: UnusedBindings::Report,
@@ -78,7 +62,7 @@ fn imported_module_type_error_is_stamped_with_that_module() {
         .find(|d| d.severity == diagnostic::Severity::Error)
         .expect("no error diagnostic");
     assert_eq!(
-        stamped.source.as_ref(),
+        stamped.source.as_ref().map(|s| &s.key),
         Some(&lib_key),
         "type error in lib.sca not stamped with lib's key: {:?}",
         result.diagnostics
@@ -93,7 +77,7 @@ fn imported_module_type_error_renders_against_that_modules_text() {
     let result = check_project(&p, ENTRY_SRC);
     assert!(!result.success(), "expected the lib type error to surface");
 
-    let out = diagnostic::render_diagnostics(&result.diagnostics, ENTRY_SRC, "main.sca", &resolve);
+    let out = diagnostic::render_diagnostics(&result.diagnostics, ENTRY_SRC, "main.sca");
 
     assert!(
         out.contains("lib.sca:"),
@@ -109,22 +93,31 @@ fn imported_module_type_error_renders_against_that_modules_text() {
     );
 }
 
+/// A diagnostic shows the text the check saw, even when the file changes on
+/// disk afterwards. Nothing reads it again to print it.
 #[test]
-fn unresolvable_source_prints_location_but_never_a_snippet() {
+fn a_diagnostic_renders_the_text_its_check_read() {
     let p = Project::new("diagprovgone");
     p.write("lib.sca", LIB_SRC);
 
     let result = check_project(&p, ENTRY_SRC);
     assert!(!result.success(), "expected the lib type error to surface");
+    p.write("lib.sca", "pub fn broken() Int { 1 }\n");
 
-    let out = diagnostic::render_diagnostics(&result.diagnostics, ENTRY_SRC, "main.sca", &|_| None);
+    let out = diagnostic::render_diagnostics(&result.diagnostics, ENTRY_SRC, "main.sca");
     assert!(
-        !out.contains("pub fn probe") && !out.contains("import ./lib"),
-        "snippet sliced from the entry file for a foreign diagnostic:\n{out}"
+        out.contains("\"not an int\""),
+        "snippet not taken from the text the check read:\n{out}"
     );
-    let lib_key = module_key(&p.dir, "lib.sca");
+}
+
+/// The entry's own errors show its code, like every other module's.
+#[test]
+fn the_entrys_errors_show_its_code() {
+    let src = "pub fn main() {\n\tx Int = 'not an int'\n\tprintln(x)\n}\n";
+    let out = common::run_source("check", src).combined();
     assert!(
-        out.contains(lib_key.as_str()),
-        "location line does not name the foreign module:\n{out}"
+        out.contains("x Int = 'not an int'"),
+        "no snippet under the entry's error:\n{out}"
     );
 }

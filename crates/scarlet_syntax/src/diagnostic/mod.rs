@@ -34,10 +34,10 @@ pub struct Diagnostic {
     pub severity: Severity,
     pub code: DiagnosticCode,
     pub message: String,
-    /// Which module's text `span` points into; `None` means the entry file.
-    /// `compile_module_body` stamps this on every diagnostic it raises, so the
-    /// printer never renders module A's span against file B's text.
-    pub source: Option<crate::module_path::ModuleKey>,
+    /// The text `span` points into. `None` only for a diagnostic made before
+    /// there was a module to belong to, like the parser's, which its caller
+    /// shows against the text it parsed.
+    pub source: Option<std::rc::Rc<crate::source::SourceFile>>,
 }
 
 impl Diagnostic {

@@ -2,6 +2,32 @@ mod common;
 use common::{check_rejects, run_outputs, run_rejects};
 
 reject_case! {
+    /// A subject's message type is fixed once it exists. A function that sends
+    /// to it can't make it generic again, or one subject would carry an `Int`
+    /// and a `String`.
+    a_function_over_a_local_subject_keeps_its_type: (
+        "import scarlet/process\n\
+         pub fn main() {\n\
+         \ts = process::subject()\n\
+         \tput = fn(v) { process::send(s, v) }\n\
+         \tput(1)\n\
+         \tput('x')\n\
+         }\n",
+        "Type mismatch",
+    ),
+    a_function_over_a_module_subject_keeps_its_type: (
+        "import scarlet/process\n\
+         const s = process::subject()\n\
+         fn put(v) {\n\
+         \tprocess::send(s, v)\n\
+         }\n\
+         pub fn main() {\n\
+         \tput(1)\n\
+         \tput('x')\n\
+         }\n",
+        "Type mismatch",
+    ),
+
     /// U1: `x = x` self-reference infers ⊥ and generalises to ∀A.A. Pre-define
     /// is gated to lambda inits, so the init `x` is unbound.
     u1_self_reference_is_rejected: (

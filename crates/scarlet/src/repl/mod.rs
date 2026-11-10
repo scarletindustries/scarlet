@@ -190,13 +190,14 @@ impl Session {
     /// and without the unused-binding check, which no fragment of a session can pass.
     fn compile(&mut self, source: &str, parsed: build::Parsed) -> Compiled {
         let opts = compile::Options {
+            file: Some(Path::new(ORIGIN)),
             base_dir: self.base_dir.as_deref(),
             role: Role::Script,
             unused: UnusedBindings::Ignore,
             as_module: None,
             run: false,
         };
-        compile::compile(&mut self.build, parsed, build::source_hash(source), &opts)
+        compile::compile(&mut self.build, source, parsed, &opts)
     }
 
     /// The session's own source: everything it replays ahead of an entry.
@@ -218,7 +219,7 @@ impl Session {
         let program = match entry::parse(input) {
             Entry::Accepted(program) => program,
             Entry::Incomplete(diagnostics) | Entry::Rejected(diagnostics) => {
-                diagnostic::print_diagnostics(&diagnostics, input, ORIGIN, &|_| None);
+                diagnostic::print_diagnostics(&diagnostics, input, ORIGIN);
                 return;
             }
         };
@@ -383,6 +384,6 @@ impl Session {
     }
 
     fn report(&self, diagnostics: &[diagnostic::Diagnostic], source: &str) {
-        diagnostic::print_diagnostics(diagnostics, source, ORIGIN, &|_| None);
+        diagnostic::print_diagnostics(diagnostics, source, ORIGIN);
     }
 }

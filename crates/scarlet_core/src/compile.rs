@@ -9,6 +9,7 @@ use scarlet_lower::program::{LinkError, TypeDefs, build_program};
 use scarlet_syntax::ast;
 use scarlet_syntax::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
 use scarlet_syntax::module_path::{ModuleKey, ModulePath};
+use scarlet_syntax::source::SourceFile;
 use scarlet_syntax::span::Span;
 use scarlet_types::def::TypeDef;
 use scarlet_types::name::{TypeName, ValueName};
@@ -16,6 +17,8 @@ use scarlet_types::name::{TypeName, ValueName};
 use crate::build::{Build, Entry};
 
 pub struct Options<'a> {
+    /// The file the text came from, when it came from one.
+    pub file: Option<&'a Path>,
     /// The directory `./` imports are relative to.
     pub base_dir: Option<&'a Path>,
     pub role: Role,
@@ -29,6 +32,7 @@ pub struct Options<'a> {
 impl<'a> Options<'a> {
     pub fn program(base_dir: Option<&'a Path>) -> Self {
         Options {
+            file: None,
             base_dir,
             role: Role::Entry,
             unused: UnusedBindings::Report,
@@ -55,12 +59,12 @@ impl Compiled {
     }
 }
 
-/// Compile `block`, whose text hashes to `hash`, with `build` holding the
+/// Compile `text`, which parsed to `parsed`, with `build` holding the
 /// modules it imports.
 pub fn compile(
     build: &mut Build,
+    text: &str,
     parsed: crate::build::Parsed,
-    hash: u64,
     opts: &Options<'_>,
 ) -> Compiled {
     let block = &parsed.ast;
@@ -68,12 +72,12 @@ pub fn compile(
         Some(path) => (ModuleKey::for_stdlib(path), Role::Library),
         None => (ModuleKey::main(), opts.role),
     };
+    let source = SourceFile::new(key.clone(), opts.file.map(Path::to_path_buf), text);
     let reach = build.check_entry(Entry {
-        key: key.clone(),
+        source,
         ast: block,
         doc: parsed.doc.clone(),
         parse: parsed.diagnostics.clone(),
-        hash,
         base_dir: opts.base_dir,
         role,
         unused: opts.unused,
@@ -179,12 +183,7 @@ impl TypeDefs for Defs<'_> {
 pub fn compile_text(text: &str, base_dir: Option<&Path>) -> Compiled {
     let parsed = crate::build::parse(text);
     let mut build = Build::new(None);
-    compile(
-        &mut build,
-        parsed,
-        crate::build::source_hash(text),
-        &Options::program(base_dir),
-    )
+    compile(&mut build, text, parsed, &Options::program(base_dir))
 }
 
 /// One public name of a module, for completion.
@@ -206,11 +205,10 @@ pub fn exports(build: &mut Build, path: &ModulePath) -> Vec<Export> {
             return Vec::new();
         }
         build.check_entry(Entry {
-            key: ModuleKey::main(),
+            source: SourceFile::new(ModuleKey::main(), None, source.as_str()),
             ast: &parsed.ast,
             doc: None,
             parse: Vec::new(),
-            hash: crate::build::source_hash(&source),
             base_dir: None,
             role: Role::Script,
             unused: UnusedBindings::Ignore,

@@ -223,25 +223,10 @@ impl Args for FmtArgs {
     }
 }
 
-/// Finds the path and text of the module a diagnostic came from, so it renders against the file
-/// its span actually points into.
-fn resolve_diagnostic_source(key: &scarlet::module::ModuleKey) -> Option<(PathBuf, String)> {
-    let path: scarlet::module::ModulePath = key.as_str().split('/').map(str::to_string).collect();
-    match scarlet::module::resolve_canonical(&path).ok()?.source {
-        scarlet::module::ModuleSource::File(p) => {
-            let text = fs::read_to_string(&p).ok()?;
-            Some((p, text))
-        }
-        scarlet::module::ModuleSource::Embedded(s) => {
-            Some((PathBuf::from(key.as_str()), s.to_string()))
-        }
-    }
-}
-
 /// Prints any diagnostics, then exits if there were some and `fail` is set.
 fn report(diagnostics: &[diagnostic::Diagnostic], fail: bool, file: &str, entrypoint: &str) {
     if !diagnostics.is_empty() {
-        diagnostic::print_diagnostics(diagnostics, file, entrypoint, &resolve_diagnostic_source);
+        diagnostic::print_diagnostics(diagnostics, file, entrypoint);
         if fail {
             process::exit(1);
         }
@@ -269,7 +254,8 @@ fn compile_source(
     opts.run = run;
     opts.as_module = scarlet::module::detect_stdlib_module(path);
     let mut b = build::Build::new(None);
-    let result = compile::compile(&mut b, parsed, build::source_hash(file), &opts);
+    opts.file = Some(path);
+    let result = compile::compile(&mut b, file, parsed, &opts);
     report(&result.diagnostics, !result.success(), file, entrypoint);
     result
 }

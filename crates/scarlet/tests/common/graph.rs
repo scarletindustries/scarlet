@@ -49,11 +49,10 @@ impl Checked {
             parsed.diagnostics
         );
         let reach = self.build.check_entry(Entry {
-            key: module::ModuleKey::main(),
+            source: scarlet::source::SourceFile::new(module::ModuleKey::main(), None, entry),
             ast: &parsed.ast,
             doc: parsed.doc,
             parse: parsed.diagnostics,
-            hash: build::source_hash(entry),
             base_dir: Some(&self.dir),
             role: Role::Entry,
             unused: UnusedBindings::Report,

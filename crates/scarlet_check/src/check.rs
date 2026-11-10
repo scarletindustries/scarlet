@@ -104,8 +104,14 @@ pub(crate) struct Checker<'a> {
 
 impl<'a> Checker<'a> {
     pub fn new(input: &'a CheckInput<'a>) -> Self {
-        let path: ModulePath = input.key.as_str().split('/').map(str::to_string).collect();
-        let prelude = (*input.key != prelude_key())
+        let path: ModulePath = input
+            .source
+            .key
+            .as_str()
+            .split('/')
+            .map(str::to_string)
+            .collect();
+        let prelude = (input.source.key != prelude_key())
             .then(|| input.interfaces.interface(&prelude_key()))
             .flatten();
         let mut reserved = HashSet::new();
@@ -120,7 +126,7 @@ impl<'a> Checker<'a> {
         let process: ModulePath = vec!["scarlet".into(), "process".into()];
         Checker {
             input,
-            key: input.key.clone(),
+            key: input.source.key.clone(),
             path,
             e: Engine::new(Known::new()),
             diags: Vec::new(),
@@ -213,13 +219,13 @@ impl<'a> Checker<'a> {
 
     pub fn note(&mut self, span: Span, message: impl Into<String>) {
         let mut d = Diagnostic::hint(span, DiagnosticCode::RelatedLocation, message.into());
-        d.source = Some(self.key.clone());
+        d.source = Some(self.input.source.clone());
         self.diags.push(d);
     }
 
     fn diag(&self, span: Span, code: DiagnosticCode, message: String) -> Diagnostic {
         let mut d = Diagnostic::error(span, code, message);
-        d.source = Some(self.key.clone());
+        d.source = Some(self.input.source.clone());
         d
     }
 

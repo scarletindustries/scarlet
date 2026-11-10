@@ -16,6 +16,7 @@ use crate::check::{Role, UnusedBindings};
 use crate::diagnostic::{self, Diagnostic};
 use crate::module::{self, ModuleKey, ModulePath};
 use crate::reference::{self, ModuleId, ReferenceGraph};
+use crate::source::SourceFile;
 
 use super::wire::{
     DocPosition, WatchedChange, diagnostic_to_json, extract_position_params, root_for, stdlib_file,
@@ -430,11 +431,10 @@ impl Workspace {
         };
         let root = self.root_mut(uri);
         root.build.check_entry(Entry {
-            key: key.clone(),
+            source: SourceFile::new(key.clone(), path.clone(), text.as_str()),
             ast: &parsed.ast,
             doc: parsed.doc,
             parse: parsed.diagnostics,
-            hash: build::source_hash(&text),
             base_dir: path.as_deref().and_then(Path::parent),
             role,
             unused: UnusedBindings::Report,
@@ -468,7 +468,7 @@ impl Workspace {
             };
             for d in m.diagnostics() {
                 by_module
-                    .entry(d.source.as_ref().unwrap_or(k))
+                    .entry(d.source.as_ref().map_or(k, |s| &s.key))
                     .or_default()
                     .push(d);
             }

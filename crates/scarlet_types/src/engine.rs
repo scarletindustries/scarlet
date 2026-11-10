@@ -537,6 +537,19 @@ impl Engine {
     pub fn generalize(&mut self, ty: Ty, restricted: &[TypeName]) -> LocalScheme {
         let mut weak = HashSet::new();
         self.collect_weak(ty, restricted, false, &mut weak);
+        // A weak variable stays one type for every use, so it now belongs to
+        // the scope around this binding. Left at its deeper level, a later
+        // generalisation there would quantify it after all.
+        for &v in &weak {
+            if let VarState::Unbound { level, constraint } = self.vars[v.0 as usize]
+                && level > self.level
+            {
+                self.vars[v.0 as usize] = VarState::Unbound {
+                    level: self.level,
+                    constraint,
+                };
+            }
+        }
         let mut vars = Vec::new();
         self.collect_generalizable(ty, &weak, &mut vars);
         LocalScheme { vars, ty }

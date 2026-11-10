@@ -21,11 +21,10 @@ fn check(b: &mut Build, p: &Project, src: &str) -> (usize, bool) {
     let before = b.checks();
     let parsed = build::parse(src);
     let reach = b.check_entry(Entry {
-        key: ModuleKey::main(),
+        source: scarlet::source::SourceFile::new(ModuleKey::main(), None, src),
         ast: &parsed.ast,
         doc: parsed.doc,
         parse: parsed.diagnostics,
-        hash: build::source_hash(src),
         base_dir: Some(&p.dir),
         role: Role::Entry,
         unused: UnusedBindings::Report,

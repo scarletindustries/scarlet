@@ -17,7 +17,7 @@ fn check(b: &mut Build, src: &str) -> Compiled {
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let mut opts = compile::Options::program(None);
     opts.run = false;
-    compile::compile(b, parsed, build::source_hash(src), &opts)
+    compile::compile(b, src, parsed, &opts)
 }
 
 /// A record with a `fn` field. Closures can cross the wire, so it checks clean,

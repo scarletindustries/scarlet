@@ -62,7 +62,9 @@ pub enum UnusedBindings {
 }
 
 pub struct CheckInput<'a> {
-    pub key: &'a ModuleKey,
+    /// The module's text, which every diagnostic points into. Its key is
+    /// the module's identity.
+    pub source: &'a std::rc::Rc<scarlet_syntax::source::SourceFile>,
     pub module: &'a ast::BlockExpression,
     /// One entry per `import` in the module, in source order: the module it
     /// resolved to, or `None` when it didn't resolve. The build has already

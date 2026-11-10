@@ -5,11 +5,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use scarlet_check::{CheckInput, CheckedModule, Interfaces, Role, UnusedBindings};
 use scarlet_syntax::ast;
 use scarlet_syntax::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
 use scarlet_syntax::module_path::{ModuleKey, ModulePath, ResolveError};
+use scarlet_syntax::source::SourceFile;
 use scarlet_syntax::span::Span;
 use scarlet_types::interface::Interface;
 
@@ -63,12 +65,12 @@ impl Module {
 
 /// A module to check whose text the caller has.
 pub struct Entry<'a> {
-    pub key: ModuleKey,
+    /// The module's text. Its key is the module's identity.
+    pub source: Rc<SourceFile>,
     pub ast: &'a ast::BlockExpression,
     pub doc: Option<String>,
     /// What the parser reported about the text.
     pub parse: Vec<Diagnostic>,
-    pub hash: u64,
     /// The directory `./` imports are relative to.
     pub base_dir: Option<&'a Path>,
     pub role: Role,
@@ -151,19 +153,21 @@ impl Build {
     /// Check `entry`, and every module it imports that needs it. Returns the
     /// keys of the modules it reaches, imports first and `entry` last.
     pub fn check_entry(&mut self, entry: Entry<'_>) -> Vec<ModuleKey> {
+        let key = entry.source.key.clone();
+        let hash = module::source_hash(&entry.source.text);
         self.verified.clear();
-        self.loading.insert(entry.key.clone());
+        self.loading.insert(key.clone());
         let written = written_imports(entry.ast);
         let imports = self.load_imports(&written, entry.base_dir);
-        self.loading.remove(&entry.key);
+        self.loading.remove(&key);
         let (imports, import_errors) = imports;
         let mut load_diagnostics = entry.parse;
         load_diagnostics.extend(import_errors);
         for d in &mut load_diagnostics {
-            d.source = Some(entry.key.clone());
+            d.source = Some(entry.source.clone());
         }
-        let fresh = self.modules.get(&entry.key).is_some_and(|m| {
-            m.source_hash == entry.hash
+        let fresh = self.modules.get(&key).is_some_and(|m| {
+            m.source_hash == hash
                 && m.imports == imports
                 && m.role == entry.role
                 && m.unused == entry.unused
@@ -172,7 +176,7 @@ impl Build {
         if !fresh {
             let parsed_cleanly = !has_errors(&load_diagnostics);
             let checked = self.run_check(
-                &entry.key,
+                &entry.source,
                 entry.ast,
                 entry.doc,
                 &imports,
@@ -181,11 +185,11 @@ impl Build {
             );
             let seen = self.seen(&imports);
             self.modules.insert(
-                entry.key.clone(),
+                key.clone(),
                 Module {
-                    key: entry.key.clone(),
+                    key: key.clone(),
                     origin: Origin::Given,
-                    source_hash: entry.hash,
+                    source_hash: hash,
                     imports,
                     seen,
                     written,
@@ -198,7 +202,7 @@ impl Build {
                 },
             );
         }
-        self.reach(&entry.key)
+        self.reach(&key)
     }
 
     /// The modules `key` reaches, imports first and `key` last.
@@ -255,7 +259,7 @@ impl Build {
 
     fn run_check(
         &mut self,
-        key: &ModuleKey,
+        source: &Rc<SourceFile>,
         ast: &ast::BlockExpression,
         doc: Option<String>,
         imports: &[Option<ModuleKey>],
@@ -264,7 +268,7 @@ impl Build {
     ) -> CheckedModule {
         self.checks += 1;
         let input = CheckInput {
-            key,
+            source,
             module: ast,
             imports,
             interfaces: &*self,
@@ -396,23 +400,28 @@ impl Build {
             stat = None;
         }
         let hash = module::source_hash(&text);
+        let source = SourceFile::new(
+            key.clone(),
+            match &resolved.source {
+                ModuleSource::File(p) => Some(p.clone()),
+                ModuleSource::Embedded(_) => None,
+            },
+            text.as_str(),
+        );
         self.parses += 1;
         let mut parsed = parse(&text);
         let written = written_imports(&parsed.ast);
         self.loading.insert(key.clone());
         let (imports, mut load_diagnostics) = self.load_imports(&written, dir.as_deref());
         self.loading.remove(&key);
-        for d in &mut parsed.diagnostics {
-            d.source = Some(key.clone());
-        }
-        for d in &mut load_diagnostics {
-            d.source = Some(key.clone());
+        for d in parsed.diagnostics.iter_mut().chain(&mut load_diagnostics) {
+            d.source = Some(source.clone());
         }
         let mut diagnostics = std::mem::take(&mut parsed.diagnostics);
         diagnostics.extend(load_diagnostics);
         let parsed_cleanly = !has_errors(&diagnostics);
         let checked = self.run_check(
-            &key,
+            &source,
             &parsed.ast,
             parsed.doc,
             &imports,

@@ -878,7 +878,7 @@ mod unlowerable {
         let mut opts = scarlet::compile::Options::program(None);
         opts.run = run;
         let mut b = scarlet::build::Build::default();
-        scarlet::compile::compile(&mut b, parsed, 0, &opts)
+        scarlet::compile::compile(&mut b, "", parsed, &opts)
     }
 
     fn assert_rejected(r: &scarlet::compile::Compiled, at: Span, what: &str) {

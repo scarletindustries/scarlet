@@ -22,5 +22,5 @@ pub use scarlet_lower as core_ir;
 pub use scarlet_types as types;
 
 pub use scarlet_syntax::{
-    ast, desugar, diagnostic, formatter, highlight, parser, scanner, span, term, token,
+    ast, desugar, diagnostic, formatter, highlight, parser, scanner, source, span, term, token,
 };

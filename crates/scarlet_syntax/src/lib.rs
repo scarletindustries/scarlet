@@ -27,6 +27,7 @@ pub mod highlight;
 pub mod module_path;
 pub mod parser;
 pub mod scanner;
+pub mod source;
 pub mod span;
 pub mod term;
 pub mod token;
