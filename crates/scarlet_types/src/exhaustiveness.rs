@@ -1,6 +1,10 @@
-use crate::type_def::Type;
+//! Exhaustiveness and usefulness for patterns, as a matrix of rows, after
+//! Maranget's "Warnings for pattern matching".
+//!
+//! The caller describes the subject's type as a [`Space`], unrolled as deep as
+//! the patterns look, so this module needs nothing from the type checker.
+
 use indexmap::IndexSet;
-use scarlet_syntax::ast;
 use scarlet_syntax::span::Span;
 use smallvec::SmallVec;
 use std::borrow::Cow;
@@ -78,9 +82,11 @@ pub enum PatShape<'p, P> {
         prefix: &'p [P],
         open: bool,
     },
-    Number(&'p ast::NumberLiteral),
+    Int(i64),
+    /// A float literal, by its bits.
+    Float(u64),
     String(&'p str),
-    Range(&'p ast::NumberLiteral, &'p ast::NumberLiteral),
+    Range(i64, i64),
     /// `<<..>>` with at least one segment. A bare `<<..rest>>` is `Wild`.
     Binary {
         segs: Vec<BinSegShape<'p>>,
@@ -101,7 +107,7 @@ pub struct BinSegShape<'p> {
 pub enum BinPart<'p> {
     /// A name or `_`: any value.
     Any,
-    Int(&'p ast::NumberLiteral),
+    Int(i64),
     Str(&'p str),
     /// Anything else. Its position keeps it apart from every other one.
     At(Span),
@@ -128,7 +134,8 @@ pub fn unroll_depth<P: PatternShape>(p: &P) -> usize {
         PatShape::Variant { fields, .. } => 1 + deepest(fields),
         PatShape::Tuple(ps) | PatShape::Array { prefix: ps, .. } => 1 + deepest(ps),
         PatShape::Or(ps) => deepest(ps),
-        PatShape::Number(_)
+        PatShape::Int(_)
+        | PatShape::Float(_)
         | PatShape::String(_)
         | PatShape::Range(..)
         | PatShape::Binary { .. } => 1,
@@ -193,13 +200,9 @@ struct ArrayType {
     ctors: OnceCell<TypeCtors>,
 }
 
-/// A cut-down `type_def::Type` with only what the usefulness matrix needs: a
-/// type's set of constructors, shared behind `Rc` so `get_type_ctors` can
-/// borrow it at every level of the recursion. `UsefulnessMatrix::new` lowers
-/// to it once.
-///
-/// `type_def::Type` can't hold the `Rc`, because the inferencer builds it with
-/// struct literals, so this stays private to the module.
+/// A [`Space`] with each type's constructors interned and shared behind `Rc`,
+/// so `get_type_ctors` can borrow it at every level of the recursion.
+/// `UsefulnessMatrix::new` lowers to it once.
 #[derive(Debug, Clone)]
 enum RcType {
     /// A type with no finite set of constructors: primitives, functions,
@@ -215,17 +218,30 @@ enum RcType {
     Tuple(Rc<TypeCtors>),
 }
 
-/// Lower a `&Type` into the shared `RcType` graph. The field types in
-/// `Type::Named.variants` already have the concrete `type_args` substituted
-/// in, so nothing needs looking up in the environment.
-fn rc_type(t: &Type, interner: &mut Interner) -> RcType {
+/// The values a pattern can be matched against, as far as telling them apart
+/// goes. A recursive type is unrolled only as deep as the patterns look,
+/// because anything deeper is only ever matched by a wildcard.
+#[derive(Debug, Clone)]
+pub enum Space {
+    /// No finite set of constructors: a primitive, a function, a type
+    /// variable, an external type, or a type unrolled past the patterns'
+    /// depth. Covering it always takes a wildcard.
+    Infinite,
+    Array(Rc<Space>),
+    Tuple(Vec<Space>),
+    /// A type's variants in declaration order, each with its fields' spaces.
+    /// An empty list is a type with no constructors, which is `Infinite`.
+    Variants(Vec<(String, Vec<Space>)>),
+}
+
+fn rc_type(t: &Space, interner: &mut Interner) -> RcType {
     match t {
-        Type::Primitive { .. } | Type::Function { .. } | Type::Var { .. } => RcType::Infinite,
-        Type::Array { element } => RcType::Array(Rc::new(ArrayType {
+        Space::Infinite => RcType::Infinite,
+        Space::Array(element) => RcType::Array(Rc::new(ArrayType {
             element: rc_type(element, interner),
             ctors: OnceCell::new(),
         })),
-        Type::Tuple { elements } => {
+        Space::Tuple(elements) => {
             let types: Vec<RcType> = elements.iter().map(|e| rc_type(e, interner)).collect();
             let ctor = CtorInfo {
                 id: interner.intern(&tuple_ctor_name(types.len())),
@@ -237,7 +253,7 @@ fn rc_type(t: &Type, interner: &mut Interner) -> RcType {
                 infinite: false,
             }))
         }
-        Type::Named { variants, .. } => {
+        Space::Variants(variants) => {
             if variants.is_empty() {
                 RcType::Infinite
             } else {
@@ -246,7 +262,7 @@ fn rc_type(t: &Type, interner: &mut Interner) -> RcType {
                     .map(|(name, fields)| CtorInfo {
                         id: interner.intern(name),
                         arity: fields.len(),
-                        types: fields.iter().map(|f| rc_type(&f.ty, interner)).collect(),
+                        types: fields.iter().map(|f| rc_type(f, interner)).collect(),
                     })
                     .collect();
                 RcType::Named(Rc::new(TypeCtors {
@@ -580,18 +596,11 @@ fn find_witness_vec(m: &PatternMatrix, types: &TypeStack) -> Option<Vec<Pat>> {
     }
 }
 
-fn push_int_key(key: &mut String, n: &ast::NumberLiteral) {
-    match n.as_int() {
-        Some(i) => key.push_str(&i.to_string()),
-        None => key.push_str(&n.digits()),
-    }
-}
-
 fn push_bin_part(key: &mut String, part: &BinPart<'_>, at: char) {
     use std::fmt::Write;
     match part {
         BinPart::Any => key.push('_'),
-        BinPart::Int(n) => push_int_key(key, n),
+        BinPart::Int(n) => key.push_str(&n.to_string()),
         BinPart::Str(s) => {
             let _ = write!(key, "s{}:{}", s.len(), s);
         }
@@ -709,17 +718,10 @@ fn lower_pattern<P: PatternShape>(p: &P, t: &RcType, interner: &mut Interner) ->
     match p.shape() {
         PatShape::Wild => Pat::Wildcard,
         // Key by value, not spelling, so `0xFF` and `255` are the same arm.
-        PatShape::Number(n) => {
-            let key = match n.as_int() {
-                Some(i) => format!("lit:{i}"),
-                None => format!("lit:{}", n.digits()),
-            };
-            nullary(interner.intern(&key))
-        }
+        PatShape::Int(i) => nullary(interner.intern(&format!("lit:{i}"))),
+        PatShape::Float(bits) => nullary(interner.intern(&format!("lit:f{bits}"))),
         PatShape::String(s) => nullary(interner.intern(&format!("lit:'{s}'"))),
-        PatShape::Range(start, end) => {
-            nullary(interner.intern(&format!("range:{}..{}", start.value, end.value)))
-        }
+        PatShape::Range(start, end) => nullary(interner.intern(&format!("range:{start}..{end}"))),
         PatShape::Binary { segs, open } => nullary(interner.intern(&bin_pattern_key(&segs, open))),
         PatShape::Variant { index, fields } => {
             let type_ctors = get_type_ctors(t);
@@ -799,9 +801,9 @@ pub struct UsefulnessMatrix {
 }
 
 impl UsefulnessMatrix {
-    pub fn new(subject_type: Type) -> Self {
+    pub fn new(subject: &Space) -> Self {
         let mut interner = Interner::new();
-        let subject_type = rc_type(&subject_type, &mut interner);
+        let subject_type = rc_type(subject, &mut interner);
         Self {
             matrix: PatternMatrix::default(),
             subject_type,
@@ -877,7 +879,6 @@ impl UsefulnessMatrix {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::type_def::{self, FieldDef, TypeId, t_int, t_named, t_tuple};
 
     /// A pattern keyed by strings, for tests. It's interned into a `Pat`
     /// before use.
@@ -915,43 +916,51 @@ mod tests {
         }
     }
 
-    fn check_exhaustiveness(pats: &[SPat], t: &Type) -> Option<String> {
-        let mut um = UsefulnessMatrix::new(t.clone());
+    fn check_exhaustiveness(pats: &[SPat], t: &Space) -> Option<String> {
+        let mut um = UsefulnessMatrix::new(t);
         let ipats: Vec<Pat> = pats.iter().map(|p| um.intern(p)).collect();
         um.find_missing(&ipats)
     }
 
     #[track_caller]
-    fn assert_witness(pats: &[SPat], t: &Type, w: &str) {
+    fn assert_witness(pats: &[SPat], t: &Space, w: &str) {
         assert_eq!(check_exhaustiveness(pats, t).as_deref(), Some(w));
     }
 
     #[track_caller]
-    fn assert_exhaustive(pats: &[SPat], t: &Type) {
+    fn assert_exhaustive(pats: &[SPat], t: &Space) {
         assert_eq!(check_exhaustiveness(pats, t), None);
     }
 
     /// Build a `Named` enum type from a `(variant, [(field, ty)])` table.
-    fn t_enum(id: i32, name: &str, variants: Vec<(&str, Vec<(&str, Type)>)>) -> Type {
-        let variants = variants
-            .into_iter()
-            .map(|(v, fs)| {
-                let fs = fs
-                    .into_iter()
-                    .map(|(label, ty)| FieldDef {
-                        label: label.into(),
-                        ty,
-                    })
-                    .collect();
-                (v.to_string(), fs)
-            })
-            .collect();
-        t_named(TypeId(id), name, vec![], variants)
+    fn t_enum(_id: i32, _name: &str, variants: Vec<(&str, Vec<(&str, Space)>)>) -> Space {
+        Space::Variants(
+            variants
+                .into_iter()
+                .map(|(v, fs)| (v.to_string(), fs.into_iter().map(|(_, ty)| ty).collect()))
+                .collect(),
+        )
+    }
+
+    fn t_int() -> Space {
+        Space::Infinite
+    }
+
+    fn t_string() -> Space {
+        Space::Infinite
+    }
+
+    fn t_array(element: Space) -> Space {
+        Space::Array(Rc::new(element))
+    }
+
+    fn t_tuple(elements: Vec<Space>) -> Space {
+        Space::Tuple(elements)
     }
 
     /// `Bool` isn't a primitive. It has the same `Named` shape the prelude
     /// makes.
-    fn t_bool() -> Type {
+    fn t_bool() -> Space {
         t_enum(99, "Bool", vec![("True", vec![]), ("False", vec![])])
     }
 
@@ -962,7 +971,7 @@ mod tests {
         }
     }
 
-    fn t_option(inner: Type) -> Type {
+    fn t_option(inner: Space) -> Space {
         t_enum(
             1,
             "Option",
@@ -970,7 +979,7 @@ mod tests {
         )
     }
 
-    fn t_result(ok: Type, err: Type) -> Type {
+    fn t_result(ok: Space, err: Space) -> Space {
         t_enum(
             2,
             "Result",
@@ -978,7 +987,7 @@ mod tests {
         )
     }
 
-    fn enum3() -> Type {
+    fn enum3() -> Space {
         t_enum(
             10,
             "Letter",
@@ -987,8 +996,8 @@ mod tests {
     }
 
     /// What the last of `pats` stands for, given the arms before it.
-    fn catch_all_of(pats: &[SPat], t: &Type) -> Option<Vec<String>> {
-        let mut um = UsefulnessMatrix::new(t.clone());
+    fn catch_all_of(pats: &[SPat], t: &Space) -> Option<Vec<String>> {
+        let mut um = UsefulnessMatrix::new(t);
         let ipats: Vec<Pat> = pats.iter().map(|p| um.intern(p)).collect();
         let (last, earlier) = ipats.split_last()?;
         um.catch_all(earlier, last)
@@ -1056,7 +1065,7 @@ mod tests {
     /// An array's `[]` and `[_, ..]` are lengths, which cannot be listed.
     #[test]
     fn an_array_wildcard_after_the_empty_array_is_fine() {
-        let t = type_def::t_array(t_bool());
+        let t = t_array(t_bool());
         let pats = [ctor("[]", vec![]), SPat::Wildcard];
         assert_eq!(catch_all_of(&pats, &t), None);
     }
@@ -1134,7 +1143,7 @@ mod tests {
     /// The witness's cons chain is walked so the head renders, not `[_, ..]`.
     #[test]
     fn array_witness_renders_cons_head() {
-        let t = type_def::t_array(t_bool());
+        let t = t_array(t_bool());
         let pats = vec![
             ctor("[]", vec![]),
             ctor("::", vec![ctor("True", vec![]), SPat::Wildcard]),
@@ -1174,13 +1183,13 @@ mod tests {
 
     #[test]
     fn result_missing_err() {
-        let t = t_result(t_int(), type_def::t_string());
+        let t = t_result(t_int(), t_string());
         assert_witness(&[ctor("Ok", vec![SPat::Wildcard])], &t, "Err(_)");
     }
 
     #[test]
     fn array_missing_empty() {
-        let t = type_def::t_array(t_int());
+        let t = t_array(t_int());
         assert_witness(
             &[ctor("::", vec![SPat::Wildcard, SPat::Wildcard])],
             &t,
@@ -1190,11 +1199,7 @@ mod tests {
 
     #[test]
     fn array_missing_nonempty() {
-        assert_witness(
-            &[ctor("[]", vec![])],
-            &type_def::t_array(t_int()),
-            "[_, ..]",
-        );
+        assert_witness(&[ctor("[]", vec![])], &t_array(t_int()), "[_, ..]");
     }
 
     #[test]
@@ -1208,7 +1213,7 @@ mod tests {
 
     #[test]
     fn or_pattern_useful_if_any_alt_useful() {
-        let mut m = UsefulnessMatrix::new(t_bool());
+        let mut m = UsefulnessMatrix::new(&t_bool());
         m.push_s(&ctor("True", vec![]));
         let new = SPat::Or {
             patterns: vec![ctor("True", vec![]), ctor("False", vec![])],
@@ -1218,7 +1223,7 @@ mod tests {
 
     #[test]
     fn or_pattern_not_useful_if_all_covered() {
-        let mut m = UsefulnessMatrix::new(t_bool());
+        let mut m = UsefulnessMatrix::new(&t_bool());
         m.push_s(&ctor("True", vec![]));
         m.push_s(&ctor("False", vec![]));
         let new = SPat::Or {
@@ -1229,14 +1234,14 @@ mod tests {
 
     #[test]
     fn usefulness_redundant_after_wildcard() {
-        let mut m = UsefulnessMatrix::new(t_bool());
+        let mut m = UsefulnessMatrix::new(&t_bool());
         m.push_s(&SPat::Wildcard);
         assert!(!m.is_useful_s(&ctor("True", vec![])));
     }
 
     #[test]
     fn usefulness_distinct_ctor() {
-        let mut m = UsefulnessMatrix::new(t_bool());
+        let mut m = UsefulnessMatrix::new(&t_bool());
         m.push_s(&ctor("True", vec![]));
         assert!(m.is_useful_s(&ctor("False", vec![])));
     }
@@ -1256,27 +1261,28 @@ mod tests {
 
     /// The prelude's opaque `Binary`. It's `Named` with no variants, so
     /// `get_type_ctors` reports it as infinite.
-    fn t_binary() -> Type {
+    fn t_binary() -> Space {
         t_enum(98, "Binary", vec![])
     }
 
     /// A checked binary pattern, as the tests write one.
     struct TBin {
-        segs: Vec<(TPart, Option<ast::NumberLiteral>)>,
+        segs: Vec<(TPart, Option<i64>)>,
         open: bool,
     }
 
     enum TPart {
         Any,
-        Int(ast::NumberLiteral),
+        Int(i64),
         Str(&'static str),
     }
 
-    fn num(v: &str) -> ast::NumberLiteral {
-        ast::NumberLiteral {
-            value: v.to_string(),
-            span: Span::DUMMY,
+    fn num(v: &str) -> i64 {
+        let v = v.replace('_', "");
+        if let Some(h) = v.strip_prefix("0x") {
+            return i64::from_str_radix(h, 16).unwrap_or_default();
         }
+        v.parse().unwrap_or_default()
     }
 
     impl PatternShape for TBin {
@@ -1290,11 +1296,11 @@ mod tests {
                 .map(|(v, size)| BinSegShape {
                     value: match v {
                         TPart::Any => BinPart::Any,
-                        TPart::Int(n) => BinPart::Int(n),
+                        TPart::Int(n) => BinPart::Int(*n),
                         TPart::Str(s) => BinPart::Str(s),
                     },
                     unit: BinUnit::Bits,
-                    size: size.as_ref().map(BinPart::Int),
+                    size: size.map(BinPart::Int),
                 })
                 .collect();
             PatShape::Binary {
@@ -1311,21 +1317,21 @@ mod tests {
 
     #[test]
     fn binary_fixed_segments_not_exhaustive() {
-        let mut um = UsefulnessMatrix::new(t_binary());
+        let mut um = UsefulnessMatrix::new(&t_binary());
         let p = um.lower(&bin(vec![(TPart::Any, None), (TPart::Any, None)], false));
         assert_eq!(um.find_missing(&[p]).as_deref(), Some("_"));
     }
 
     #[test]
     fn binary_empty_literal_not_exhaustive() {
-        let mut um = UsefulnessMatrix::new(t_binary());
+        let mut um = UsefulnessMatrix::new(&t_binary());
         let p = um.lower(&bin(vec![], false));
         assert_eq!(um.find_missing(&[p]).as_deref(), Some("_"));
     }
 
     #[test]
     fn binary_rest_only_is_exhaustive() {
-        let mut um = UsefulnessMatrix::new(t_binary());
+        let mut um = UsefulnessMatrix::new(&t_binary());
         let p = um.lower(&bin(vec![], true));
         assert!(matches!(p, Pat::Wildcard));
         assert_eq!(um.find_missing(&[p]), None);
@@ -1333,21 +1339,21 @@ mod tests {
 
     #[test]
     fn binary_segments_with_rest_not_exhaustive() {
-        let mut um = UsefulnessMatrix::new(t_binary());
+        let mut um = UsefulnessMatrix::new(&t_binary());
         let p = um.lower(&bin(vec![(TPart::Any, None)], true));
         assert_eq!(um.find_missing(&[p]).as_deref(), Some("_"));
     }
 
     #[test]
     fn binary_fixed_then_else_exhaustive() {
-        let mut um = UsefulnessMatrix::new(t_binary());
+        let mut um = UsefulnessMatrix::new(&t_binary());
         let p1 = um.lower(&bin(vec![(TPart::Any, None), (TPart::Any, None)], false));
         assert_eq!(um.find_missing(&[p1, Pat::Wildcard]), None);
     }
 
     #[test]
     fn binary_same_shape_redundant() {
-        let mut m = UsefulnessMatrix::new(t_binary());
+        let mut m = UsefulnessMatrix::new(&t_binary());
         let p1 = m.lower(&bin(vec![(TPart::Any, Some("8"))], false));
         let p2 = m.lower(&bin(vec![(TPart::Any, Some("8"))], false));
         m.push(&p1);
@@ -1356,7 +1362,7 @@ mod tests {
 
     #[test]
     fn binary_different_literal_useful() {
-        let mut m = UsefulnessMatrix::new(t_binary());
+        let mut m = UsefulnessMatrix::new(&t_binary());
         let p1 = m.lower(&bin(vec![(TPart::Int(num("1")), None)], false));
         let p2 = m.lower(&bin(vec![(TPart::Int(num("2")), None)], false));
         m.push(&p1);
@@ -1367,7 +1373,7 @@ mod tests {
     /// different patterns still must not share a key.
     #[test]
     fn binary_string_key_is_injective() {
-        let mut m = UsefulnessMatrix::new(t_binary());
+        let mut m = UsefulnessMatrix::new(&t_binary());
         let p1 = m.lower(&bin(vec![(TPart::Str("a'i8,'b"), None)], false));
         let p2 = m.lower(&bin(
             vec![(TPart::Str("a"), Some("8")), (TPart::Str("b"), None)],
@@ -1382,7 +1388,7 @@ mod tests {
     /// arm looks useful.
     #[test]
     fn unknown_ctor_with_args_duplicate_is_redundant() {
-        let mut m = UsefulnessMatrix::new(t_int());
+        let mut m = UsefulnessMatrix::new(&t_int());
         m.push_s(&ctor("Foo", vec![SPat::Wildcard]));
         assert!(!m.is_useful_s(&ctor("Foo", vec![SPat::Wildcard])));
         assert!(m.is_useful_s(&ctor("Bar", vec![SPat::Wildcard])));

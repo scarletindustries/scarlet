@@ -1,0 +1,11 @@
+[package]
+name = "scarlet_check"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+scarlet_syntax = { path = "../scarlet_syntax" }
+scarlet_ir = { path = "../scarlet_ir" }
+scarlet_types = { path = "../scarlet_types" }
+indexmap = { workspace = true }
+petgraph = "0.8"

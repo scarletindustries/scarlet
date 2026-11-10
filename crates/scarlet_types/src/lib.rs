@@ -1,9 +1,7 @@
-//! Scarlet's type layer. It holds Hindley-Milner (HM) type inference, type
-//! definitions, exhaustiveness checking, and the code that puts labelled
-//! arguments into their slots for the type checker and the elaborator.
+//! Scarlet's type layer: finished types, module interfaces, the inference
+//! engine one module check uses, and exhaustiveness checking.
 //!
-//! Depends only on `scarlet_syntax` and `scarlet_ir`: never on the compiler
-//! (`scarlet_core`) or the runtime (`scarlet_vm`).
+//! Depends only on `scarlet_syntax` and `scarlet_ir`.
 
 #![cfg_attr(
     not(test),
@@ -18,7 +16,13 @@
 )]
 #![forbid(unsafe_code)]
 
-pub use scarlet_ir::intrinsic;
+pub mod def;
+pub mod engine;
+pub mod exhaustiveness;
+pub mod interface;
+pub mod known;
+pub mod name;
 pub mod slots;
-pub mod type_def;
-pub mod types;
+pub mod ty;
+
+pub use scarlet_ir::intrinsic;
