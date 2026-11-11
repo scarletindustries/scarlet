@@ -15,7 +15,7 @@ use std::collections::HashSet;
 
 use crate::known::Known;
 use crate::name::{Name, TypeName};
-use crate::ty::{Constraint, Scheme, Type, TypeVar, show_together};
+use crate::ty::{Constraint, Scheme, Type, TypeVar};
 
 /// An inference type: an index into the engine's arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -723,7 +723,7 @@ impl Engine {
     }
 
     /// The finished type `t` stands for now.
-    fn zonk(&self, t: Ty) -> Type {
+    pub fn zonk(&self, t: Ty) -> Type {
         match self.node(self.find(t)) {
             Node::Var(v) => Type::Var(self.type_var(*v)),
             Node::Con { name, args } => {
@@ -747,12 +747,6 @@ impl Engine {
             name: self.vars[v.0 as usize].name.clone(),
             constraint,
         }
-    }
-
-    /// Show `types` together, so a variable they share gets one letter.
-    pub fn show(&self, types: &[Ty]) -> Vec<String> {
-        let zonked: Vec<Type> = types.iter().map(|&t| self.zonk(t)).collect();
-        show_together(&zonked.iter().collect::<Vec<_>>())
     }
 
     /// End inference. What is left can only be read.

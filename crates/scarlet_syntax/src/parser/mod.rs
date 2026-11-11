@@ -1,12 +1,13 @@
 use crate::ast;
-use crate::diagnostic::{Diagnostic, DiagnosticCode};
+use crate::diagnostic::Diagnostic;
+use crate::scanner::ScanError;
 use crate::scanner::Scanner;
 use crate::span::Span;
 use crate::token::{self, Keyword, Kind, Token, Trivia, is_type_name};
 
 mod error;
 
-pub use error::{DeclarationLead, Expected, LineItem, ParseError};
+pub use error::{DeclarationLead, Expected, LineItem, ParseError, SyntaxError};
 
 // The error is boxed so each frame of the recursive descent only carries a
 // pointer. Without the box, `test_deep_nesting_does_not_overflow` overflows.
@@ -47,13 +48,13 @@ enum ArmRecovery {
 pub struct ParseResult {
     pub ast: ast::BlockExpression,
     pub doc: Option<String>,
-    pub diagnostics: Vec<Diagnostic>,
+    pub diagnostics: Vec<Diagnostic<SyntaxError>>,
 }
 
 pub struct Parser {
     tokens: Vec<Token>,
     index: usize,
-    diagnostics: Vec<Diagnostic>,
+    diagnostics: Vec<Diagnostic<SyntaxError>>,
     context_stack: Vec<ParseContext>,
     prev_token_end_line: i32,
     prev_token_end_column: i32,
@@ -80,7 +81,7 @@ pub(crate) fn precedence_level(op: ast::BinaryOp) -> usize {
 
 pub(crate) fn new_parser_from_tokens(
     mut tokens: Vec<Token>,
-    scanner_diagnostics: Vec<Diagnostic>,
+    scanner_diagnostics: Vec<Diagnostic<ScanError>>,
 ) -> Parser {
     // Every loop stops at Eof, so the stream must end with one. The scanner
     // always adds it, but check here so a hand-built stream that forgot it
@@ -98,7 +99,10 @@ pub(crate) fn new_parser_from_tokens(
     Parser {
         tokens: token::insert_line_ends(tokens),
         index: 0,
-        diagnostics: scanner_diagnostics,
+        diagnostics: scanner_diagnostics
+            .into_iter()
+            .map(|d| d.map(SyntaxError::Scan))
+            .collect(),
         context_stack: vec![ParseContext::TopLevel],
         prev_token_end_line: 0,
         prev_token_end_column: 0,
@@ -178,26 +182,26 @@ impl Parser {
     /// Reports a parse error at `span`. [`Parser::add_error`] reports one at
     /// the current token instead.
     fn error_at(&mut self, span: Span, error: ParseError) {
-        self.diagnostics.push(Diagnostic::error(
+        self.diagnostics.push(Diagnostic::new(
             span,
-            DiagnosticCode::ParseError,
-            error.to_string(),
+            SyntaxError::Parse {
+                error,
+                at_end: false,
+            },
         ));
     }
 
     fn add_error(&mut self, error: &ParseError) {
-        // An error at EOF is an unexpected EOF by construction, so tag it from
-        // the token rather than from the message text.
-        let code = if self.kind() == Kind::Eof {
-            DiagnosticCode::UnexpectedEof
-        } else {
-            DiagnosticCode::ParseError
-        };
+        // An error at EOF is an unexpected EOF by construction, so it says so
+        // from the token rather than from the message text.
+        let at_end = self.kind() == Kind::Eof;
         let sp = self.cur().span;
-        self.diagnostics.push(Diagnostic::error(
+        self.diagnostics.push(Diagnostic::new(
             Span::point(sp.start_line, sp.start_column),
-            code,
-            error.to_string(),
+            SyntaxError::Parse {
+                error: error.clone(),
+                at_end,
+            },
         ));
     }
 
@@ -2456,7 +2460,7 @@ mod tests {
         let errors: Vec<_> = result
             .diagnostics
             .iter()
-            .filter(|d| d.severity == diagnostic::Severity::Error)
+            .filter(|d| d.severity() == diagnostic::Severity::Error)
             .collect();
         assert!(
             errors.is_empty(),
@@ -2543,7 +2547,8 @@ mod tests {
             result
                 .diagnostics
                 .iter()
-                .any(|d| d.severity == diagnostic::Severity::Error && d.message.contains(snippet)),
+                .any(|d| d.severity() == diagnostic::Severity::Error
+                    && d.message().contains(snippet)),
             "expected error containing '{}' for:\n{}\ngot: {:#?}",
             snippet,
             src,
@@ -2556,7 +2561,7 @@ mod tests {
         let errors: Vec<_> = result
             .diagnostics
             .iter()
-            .filter(|d| d.severity == diagnostic::Severity::Error)
+            .filter(|d| d.severity() == diagnostic::Severity::Error)
             .collect();
         assert_eq!(
             errors.len(),
@@ -2564,9 +2569,9 @@ mod tests {
             "expected exactly one error for:\n{src}\ngot: {errors:#?}"
         );
         assert!(
-            errors[0].message.contains(snippet),
+            errors[0].message().contains(snippet),
             "expected sole error to contain '{snippet}', got: {:?}",
-            errors[0].message
+            errors[0].message()
         );
     }
 
@@ -2596,7 +2601,7 @@ mod tests {
                 let errors: Vec<_> = r
                     .diagnostics
                     .iter()
-                    .filter(|d| d.severity == diagnostic::Severity::Error)
+                    .filter(|d| d.severity() == diagnostic::Severity::Error)
                     .collect();
                 assert!(errors.is_empty(), "{name} failed to parse: {errors:#?}");
                 assert!(!r.ast.body.is_empty(), "{name} parsed to an empty program");
@@ -3109,7 +3114,7 @@ mod tests {
             result
                 .diagnostics
                 .iter()
-                .any(|d| d.message.contains("at the top of the file"))
+                .any(|d| d.message().contains("at the top of the file"))
         );
     }
 
@@ -3121,7 +3126,7 @@ mod tests {
         let error = |src: &str| {
             let result = parse(src);
             assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
-            result.diagnostics[0].message.clone()
+            result.diagnostics[0].message().clone()
         };
         let message = error("import scarlet/list.{fold, map as m}\nx = 1");
         assert!(message.contains("`import scarlet/list`"), "{message}");

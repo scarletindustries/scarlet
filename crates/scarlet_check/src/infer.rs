@@ -14,6 +14,7 @@ use scarlet_types::ty::{Constraint, Type, TypeVar};
 
 use crate::declare::{DeclBody, DeclId, Declared};
 use crate::env::Env;
+use crate::error::CheckError;
 use crate::index::{EntityKind, Site, Use, UseKind};
 use crate::report::Report;
 use crate::resolved::*;
@@ -330,38 +331,26 @@ impl Infer<'_, '_> {
         match self.e.unify(expected, given) {
             Ok(()) => true,
             Err(err) => {
-                let msg = self.unify_message(err);
-                self.report.error(span, msg);
+                let e = self.unify_error(err);
+                self.report.add(span, e);
                 false
             }
         }
     }
 
-    fn unify_message(&self, err: UnifyError) -> String {
+    fn unify_error(&self, err: UnifyError) -> CheckError {
         match err {
             UnifyError::Mismatch {
                 expected,
                 given,
                 arity,
-            } => {
-                let shown = self.e.show(&[expected, given]);
-                let mut msg = format!("Type mismatch: expected '{}', got '{}'", shown[0], shown[1]);
-                if let Some(a) = arity {
-                    msg.push_str(&format!(
-                        "\nExpected a function that takes {} argument(s), but got one that takes {}.",
-                        a.expected, a.given
-                    ));
-                }
-                msg
-            }
-            UnifyError::Recursive => {
-                "Infinite type detected: this would need a type that contains itself, as `x(x)` does".to_string()
-            }
+            } => CheckError::Mismatch {
+                expected: self.e.zonk(expected),
+                given: self.e.zonk(given),
+                arity: arity.map(|a| (a.expected, a.given)),
+            },
+            UnifyError::Recursive => CheckError::InfiniteType,
         }
-    }
-
-    fn show(&self, t: Ty) -> String {
-        self.e.show(&[t]).pop().unwrap_or_default()
     }
 
     fn error(&mut self) -> (Ty, ExprKind) {
@@ -577,21 +566,19 @@ impl Infer<'_, '_> {
                             },
                         ),
                         None => {
-                            self.report.error(
+                            self.report.add(
                                 *index_span,
-                                format!(
-                                    "Tuple index {index} is out of range, because the tuple has {} elements",
-                                    elems.len()
-                                ),
+                                CheckError::TupleIndexOutOfRange {
+                                    index: *index,
+                                    len: elems.len(),
+                                },
                             );
                             self.error()
                         }
                     },
                     Shape::Var(_) | Shape::Con(..) | Shape::Fn(..) => {
-                        self.report.error(
-                            *index_span,
-                            format!("Can't use .{index} here, because the value isn't a tuple"),
-                        );
+                        self.report
+                            .add(*index_span, CheckError::NotATuple { index: *index });
                         self.error()
                     }
                 }
@@ -777,10 +764,7 @@ impl Infer<'_, '_> {
     /// module so this can't happen; if it ever does, it is an error, never a
     /// guess.
     fn unbound(&mut self, span: Span) -> (Ty, ExprKind) {
-        self.report.error(
-            span,
-            "internal compiler error: this name was read before it had a type",
-        );
+        self.report.add(span, CheckError::ReadBeforeTyped);
         self.error()
     }
 
@@ -889,18 +873,18 @@ impl Infer<'_, '_> {
         let (params, ret) = match self.e.callable(callee.ty, args.len()) {
             Ok(pr) => pr,
             Err(NotCallable::Arity { params, ret }) => {
-                self.report.error(
+                self.report.add(
                     span,
-                    format!("Expected {} argument(s), got {}", params.len(), args.len()),
+                    CheckError::WrongArgumentCount {
+                        expected: params.len(),
+                        given: args.len(),
+                    },
                 );
                 (params, ret)
             }
             Err(NotCallable::NotFn) => {
-                let s = self.show(callee.ty);
-                self.report.error(
-                    span,
-                    format!("This value of type '{s}' is not a function and cannot be called"),
-                );
+                self.report
+                    .add(span, CheckError::NotCallable(self.e.zonk(callee.ty)));
                 for a in args {
                     self.expr(&a.value, ctx);
                 }
@@ -1018,10 +1002,13 @@ impl Infer<'_, '_> {
             match self.field_in_variants(&def, &type_args, label, span) {
                 Ok((_, at)) => fills.push((i as u32, at)),
                 Err(FieldMissing::On(variant)) => {
-                    let why = missing_on(&variant, type_name.name());
-                    self.report.error(
+                    self.report.add(
                         span,
-                        format!("The spread cannot fill field '{label}', which {why}; write '{label}:' in the call"),
+                        CheckError::SpreadCannotFill {
+                            label: label.clone(),
+                            variant,
+                            ty: type_name.name().clone(),
+                        },
                     );
                 }
                 Err(FieldMissing::NotCustom) => {}
@@ -1043,25 +1030,28 @@ impl Infer<'_, '_> {
         let (type_name, type_args) = match self.e.shape(receiver) {
             Shape::Con(n, a) => (n, a),
             Shape::Var(_) => {
-                self.report.error(
-                    span,
-                    format!(
-                        "Can't access field '{label}' because the value's type isn't known here. Add a type annotation"
-                    ),
-                );
+                self.report
+                    .add(span, CheckError::FieldOfUnknownType(label.clone()));
                 return None;
             }
             Shape::Fn(..) | Shape::Tuple(_) => {
-                let s = self.show(receiver);
-                self.report
-                    .error(span, format!("Type '{s}' has no field '{label}'"));
+                self.report.add(
+                    span,
+                    CheckError::NoFieldOnType {
+                        ty: self.e.zonk(receiver),
+                        label: label.clone(),
+                    },
+                );
                 return None;
             }
         };
         let Some(def) = self.type_def(&type_name).cloned() else {
-            self.report.error(
+            self.report.add(
                 span,
-                format!("Type '{}' has no field '{label}'", type_name.name()),
+                CheckError::NoFieldOnNamed {
+                    ty: type_name.name().clone(),
+                    label: label.clone(),
+                },
             );
             return None;
         };
@@ -1079,15 +1069,21 @@ impl Infer<'_, '_> {
                 Some(found)
             }
             Err(FieldMissing::NotCustom) => {
-                self.report.error(
+                self.report.add(
                     span,
-                    format!("Type '{}' has no accessible fields", type_name.name()),
+                    CheckError::NoAccessibleFields(type_name.name().clone()),
                 );
                 None
             }
             Err(FieldMissing::On(variant)) => {
-                let why = missing_on(&variant, type_name.name());
-                self.report.error(span, format!("Field '{label}' {why}"));
+                self.report.add(
+                    span,
+                    CheckError::FieldNotOnEveryVariant {
+                        label: label.clone(),
+                        variant,
+                        ty: type_name.name().clone(),
+                    },
+                );
                 None
             }
         }
@@ -1164,10 +1160,9 @@ impl Infer<'_, '_> {
             Shape::Con(..) | Shape::Var(_) | Shape::Fn(..) | Shape::Tuple(_) => None,
         };
         let Some(shape) = shape else {
-            let s = self.show(value.ty);
-            self.report.error(
+            self.report.add(
                 value.span,
-                format!("'or' requires the left side to be Option(_) or Result(_, _), got '{s}'"),
+                CheckError::OrNeedsOptionOrResult(self.e.zonk(value.ty)),
             );
             if let Some((b, _)) = receiver {
                 let t = self.e.fresh();
@@ -1180,10 +1175,7 @@ impl Infer<'_, '_> {
         let error = match shape {
             OrShape::Option => {
                 if let Some((b, span)) = receiver {
-                    self.report.error(
-                        span,
-                        "'or' on an Option can't bind a value, because None carries nothing",
-                    );
+                    self.report.add(span, CheckError::OrOptionReceiver);
                     let t = self.e.fresh();
                     self.define(b, LocalScheme::mono(t));
                     self.refused.push(b);
@@ -1387,11 +1379,6 @@ impl Infer<'_, '_> {
 enum FieldMissing {
     NotCustom,
     On(Name),
-}
-
-/// The end of a sentence that names a field some variant lacks.
-fn missing_on(variant: &str, type_name: &str) -> String {
-    format!("is not present on every variant of '{type_name}' (missing on '{variant}')")
 }
 
 /// The field's definition: where it first appears among the type's variants.

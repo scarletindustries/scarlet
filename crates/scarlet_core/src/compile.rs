@@ -7,7 +7,7 @@ use scarlet_check::{Role, UnusedBindings};
 use scarlet_ir::core_ir::Program;
 use scarlet_lower::program::{TypeDefs, build_program};
 use scarlet_syntax::ast;
-use scarlet_syntax::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
+use scarlet_syntax::diagnostic::{Diagnostic, has_errors};
 use scarlet_syntax::module_path::{ModuleKey, ModulePath};
 use scarlet_syntax::source::SourceFile;
 use scarlet_syntax::span::Span;
@@ -15,6 +15,7 @@ use scarlet_types::def::TypeDef;
 use scarlet_types::name::{TypeName, ValueName};
 
 use crate::build::{Analysis, Build, Entry};
+use crate::issue::Issue;
 use crate::sources::{DiskSources, Sources};
 
 pub struct Options<'a> {
@@ -47,15 +48,15 @@ impl<'a> Options<'a> {
 /// "it checked" and "there is a program" can't disagree.
 pub enum Compiled {
     /// Something is wrong, so there is nothing to run.
-    Rejected { diagnostics: Vec<Diagnostic> },
+    Rejected { diagnostics: Vec<Diagnostic<Issue>> },
     /// Every module checked, and the entry is a library, so there is nothing
     /// to run.
     Checked {
-        diagnostics: Vec<Diagnostic>,
+        diagnostics: Vec<Diagnostic<Issue>>,
         analysis: Analysis,
     },
     Runnable {
-        diagnostics: Vec<Diagnostic>,
+        diagnostics: Vec<Diagnostic<Issue>>,
         analysis: Analysis,
         program: Box<Program>,
     },
@@ -63,7 +64,7 @@ pub enum Compiled {
 
 impl Compiled {
     /// Everything reported, warnings included.
-    pub fn diagnostics(&self) -> &[Diagnostic] {
+    pub fn diagnostics(&self) -> &[Diagnostic<Issue>] {
         match self {
             Compiled::Rejected { diagnostics }
             | Compiled::Checked { diagnostics, .. }
@@ -154,11 +155,7 @@ pub fn compile(
             program: Box::new(program),
         },
         Err(e) => {
-            diagnostics.push(Diagnostic::error(
-                Span::DUMMY,
-                DiagnosticCode::TypeError,
-                e.to_string(),
-            ));
+            diagnostics.push(Diagnostic::new(Span::DUMMY, Issue::Link(e)));
             Compiled::Rejected { diagnostics }
         }
     }
@@ -171,7 +168,7 @@ fn entry_rules(
     block: &ast::BlockExpression,
     run: bool,
     source: &std::rc::Rc<SourceFile>,
-    out: &mut Vec<Diagnostic>,
+    out: &mut Vec<Diagnostic<Issue>>,
 ) -> Option<&'static str> {
     let main = block.body.iter().find_map(|n| match n {
         ast::Node::Statement(s) => match s.as_ref() {
@@ -191,11 +188,9 @@ fn entry_rules(
     });
     let Some((fd, public)) = main else {
         if run {
-            let mut d = Diagnostic::error(
+            let mut d = Diagnostic::new(
                 Span::point(block.span.start_line, block.span.start_column),
-                DiagnosticCode::TypeError,
-                "There's no `main` function. A program starts at `pub fn main()`, so add one"
-                    .to_string(),
+                Issue::NoMain,
             );
             d.source = Some(source.clone());
             out.push(d);

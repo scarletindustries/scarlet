@@ -5,6 +5,7 @@
 use scarlet::build::{self, Build, Counts, Entry};
 use scarlet::check::{Role, UnusedBindings};
 use scarlet::diagnostic::{self, Diagnostic};
+use scarlet::issue::Issue;
 use scarlet::module::{self, ModulePath};
 use scarlet::reference::{DefId, Definition, EntityKind, ModuleId, ReferenceGraph};
 use scarlet::sources::DiskSources;
@@ -23,7 +24,7 @@ pub struct Checked {
 
 /// What one check of the entry reported, its imports included.
 pub struct CheckResult {
-    pub diagnostics: Vec<Diagnostic>,
+    pub diagnostics: Vec<Diagnostic<Issue>>,
     pub counts: Counts,
 }
 

@@ -12,6 +12,7 @@ use scarlet_types::known::prelude_key;
 use scarlet_types::name::{ModuleKey, Name, TypeName};
 
 use crate::CheckInput;
+use crate::error::CheckError;
 use crate::index::{DefKind, EntityKind, Site, UseKind};
 use crate::report::Report;
 
@@ -96,10 +97,10 @@ impl<'a> Env<'a> {
         Some((&p.key, p.values.get(name)?))
     }
 
-    /// How to reach a constructor `name` that isn't in scope: through each
-    /// imported module that has one.
-    pub fn qualified_spellings(&self, name: &str) -> Vec<String> {
-        let mut out: Vec<String> = self
+    /// The imports that have a constructor `name`, by qualifier, in the
+    /// order a suggestion lists them: how to reach one that isn't in scope.
+    pub fn qualifiers_with_ctor(&self, name: &str) -> Vec<Name> {
+        let mut out: Vec<Name> = self
             .imports
             .iter()
             .filter(|(_, imp)| {
@@ -107,9 +108,9 @@ impl<'a> Env<'a> {
                     .and_then(|i| i.values.get(name))
                     .is_some_and(|v| matches!(v.kind, ValueKind::Constructor { .. }))
             })
-            .map(|(q, _)| format!("`{q}::{name}`"))
+            .map(|(q, _)| q.clone())
             .collect();
-        out.sort();
+        out.sort_by_key(|q| format!("`{q}::{name}`"));
         out
     }
 }
@@ -195,12 +196,12 @@ impl Imports {
                 });
             }
             if let Some(prev) = by_qualifier.get(&qualifier) {
-                report.module_error(
+                report.add(
                     alias_span,
-                    format!(
-                        "'{qualifier}' already names the import of `{}`. Give this one another name with `as`",
-                        prev.written
-                    ),
+                    CheckError::DuplicateQualifier {
+                        qualifier: qualifier.clone(),
+                        written: prev.written.clone(),
+                    },
                 );
                 continue;
             }

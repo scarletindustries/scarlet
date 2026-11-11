@@ -892,10 +892,10 @@ mod unlowerable {
         let d = r
             .diagnostics()
             .iter()
-            .find(|d| d.severity == Severity::Error)
+            .find(|d| d.severity() == Severity::Error)
             .unwrap_or_else(|| panic!("{what}: no error diagnostic: {:?}", r.diagnostics()));
         assert_eq!(
-            d.code,
+            d.code(),
             DiagnosticCode::ParseError,
             "{what}: an unreadable region is a parse error, not a compiler bug"
         );

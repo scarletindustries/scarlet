@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 
 use super::editor::{Editor, build_editor_url, detect_editor};
-use super::{Diagnostic, Severity, count_errors};
+use super::{Diagnostic, Problem, Severity, count_errors};
 use crate::term::Palette;
 
 /// A detected editor and the canonical path to link to. It's only built once
@@ -77,11 +77,15 @@ impl EditorProbe {
     }
 }
 
-fn format_diagnostic_with_lines(d: &Diagnostic, view: &SourceView<'_>, p: &Palette) -> String {
+fn format_diagnostic_with_lines<P: Problem>(
+    d: &Diagnostic<P>,
+    view: &SourceView<'_>,
+    p: &Palette,
+) -> String {
     let mut result = String::new();
 
-    let color = severity_color(d.severity, p);
-    let label = severity_label(d.severity);
+    let color = severity_color(d.severity(), p);
+    let label = severity_label(d.severity());
 
     let file_path = view.file_path;
     let lines = &view.lines;
@@ -106,7 +110,7 @@ fn format_diagnostic_with_lines(d: &Diagnostic, view: &SourceView<'_>, p: &Palet
     let _ = writeln!(
         result,
         "{}{color}{label}{}: {} {}at {loc}{}",
-        p.bold, p.reset, d.message, p.dim, p.reset
+        p.bold, p.reset, d.problem, p.dim, p.reset
     );
 
     let line_num_width = display_line.to_string().len();
@@ -152,7 +156,7 @@ fn format_diagnostic_with_lines(d: &Diagnostic, view: &SourceView<'_>, p: &Palet
 /// Prints `diagnostics` to stderr, each against the text it points into.
 /// `source` and `file_path` are the text a diagnostic with no source of its
 /// own was made from.
-pub fn print_diagnostics(diagnostics: &[Diagnostic], source: &str, file_path: &str) {
+pub fn print_diagnostics<P: Problem>(diagnostics: &[Diagnostic<P>], source: &str, file_path: &str) {
     let output = render_diagnostics(diagnostics, source, file_path);
     if !output.is_empty() {
         eprintln!("{output}");
@@ -162,7 +166,11 @@ pub fn print_diagnostics(diagnostics: &[Diagnostic], source: &str, file_path: &s
 /// [`print_diagnostics`], returning the text instead. Only the palette and
 /// editor detection read the environment; everything else comes from the
 /// inputs.
-pub fn render_diagnostics(diagnostics: &[Diagnostic], source: &str, file_path: &str) -> String {
+pub fn render_diagnostics<P: Problem>(
+    diagnostics: &[Diagnostic<P>],
+    source: &str,
+    file_path: &str,
+) -> String {
     let palette = Palette::for_stderr();
     let mut editor = EditorProbe::new(palette.enabled());
     let mut output: Vec<String> = Vec::new();

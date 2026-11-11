@@ -12,6 +12,7 @@ use scarlet_types::name::Name;
 
 use crate::Role;
 use crate::env::Env;
+use crate::error::CheckError;
 use crate::index::{Def, DefKind, EntityKind};
 use crate::report::Report;
 
@@ -146,8 +147,10 @@ pub(crate) fn declare<'a>(
                         ast::FnBody::Vm(key) => match Intrinsic::from_key(&key.name) {
                             Some(i) => DeclBody::Builtin(fd, i),
                             None => {
-                                report
-                                    .error(key.span, format!("unknown @vm builtin '{}'", key.name));
+                                report.add(
+                                    key.span,
+                                    CheckError::UnknownBuiltin(key.name.as_str().into()),
+                                );
                                 continue;
                             }
                         },
@@ -214,11 +217,8 @@ impl<'a> Declared<'a> {
 /// checked, so the rest of the file is reported too.
 fn non_declaration(env: &Env<'_>, node: &ast::Node, report: &mut Report) {
     match env.input.role {
-        Role::Library => report.error(node.span(), "Modules may only contain declarations at the top level"),
-        Role::Entry => report.error(
-            node.span(),
-            "Statements aren't allowed at module scope. Put a program's code inside `pub fn main()`",
-        ),
+        Role::Library => report.add(node.span(), CheckError::StatementInLibrary),
+        Role::Entry => report.add(node.span(), CheckError::StatementInEntry),
         Role::Script => {}
     }
 }
@@ -226,16 +226,10 @@ fn non_declaration(env: &Env<'_>, node: &ast::Node, report: &mut Report) {
 /// A program starts at `main`, so it must be public and take nothing.
 fn main_rules(fd: &ast::FunctionDeclaration, public: bool, report: &mut Report) {
     if !public {
-        report.error(
-            fd.identifier.span,
-            "`main` must be public, because a program starts at `pub fn main()`",
-        );
+        report.add(fd.identifier.span, CheckError::MainNotPublic);
     }
     if !fd.params.is_empty() {
-        report.error(
-            fd.identifier.span,
-            "`main` takes no parameters. Read the program's arguments with `os.argv()` instead",
-        );
+        report.add(fd.identifier.span, CheckError::MainTakesParameters);
     }
 }
 
@@ -249,13 +243,13 @@ fn validate_attributes(
         match a.name.name.as_str() {
             "vm" => {
                 if !in_stdlib {
-                    report.error(a.span, "'@vm' is only allowed in the standard library");
+                    report.add(a.span, CheckError::VmOutsideStdlib);
                 }
                 if !on_fn {
-                    report.error(a.span, "'@vm' may only be used on functions");
+                    report.add(a.span, CheckError::VmOnNonFunction);
                 }
             }
-            other => report.error(a.span, format!("Unknown attribute '@{other}'")),
+            other => report.add(a.span, CheckError::UnknownAttribute(other.into())),
         }
     }
 }
@@ -269,8 +263,8 @@ fn duplicate<'n>(
 ) -> bool {
     match seen.insert(id.name.as_str(), id.span) {
         Some(prev) => {
-            report.error(id.span, format!("'{}' is already defined", id.name));
-            report.note(prev, "first definition was here");
+            report.add(id.span, CheckError::AlreadyDefined(id.name.as_str().into()));
+            report.add(prev, CheckError::FirstDefinition);
             true
         }
         None => false,
@@ -279,12 +273,9 @@ fn duplicate<'n>(
 
 fn reserved(env: &Env<'_>, id: &ast::Identifier, in_prelude: bool, report: &mut Report) {
     if !in_prelude && env.reserved.contains(id.name.as_str()) {
-        report.error(
+        report.add(
             id.span,
-            format!(
-                "'{}' is defined in the prelude and cannot be redefined",
-                id.name
-            ),
+            CheckError::RedefinesPrelude(id.name.as_str().into()),
         );
     }
 }

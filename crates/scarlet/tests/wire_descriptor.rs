@@ -89,7 +89,7 @@ const EVENT: &str = "import scarlet/wire\n\
 fn messages(r: &Compiled) -> String {
     r.diagnostics()
         .iter()
-        .map(|d| d.message.clone())
+        .map(|d| d.message().clone())
         .collect::<Vec<_>>()
         .join("\n")
 }

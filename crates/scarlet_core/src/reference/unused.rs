@@ -4,10 +4,38 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::diagnostic::{Diagnostic, DiagnosticCode};
+use std::fmt;
+
+use crate::diagnostic::{Diagnostic, DiagnosticCode, Problem, Severity};
 use crate::module::ModulePath;
 
 use super::{DefId, Definition, EntityKind, ModuleId, ReferenceGraph, ReferenceKind};
+
+/// A definition nothing reachable uses: its kind and name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnusedDef {
+    entity: EntityKind,
+    name: String,
+}
+
+impl Problem for UnusedDef {
+    fn code(&self) -> DiagnosticCode {
+        DiagnosticCode::UnusedBinding
+    }
+
+    fn severity(&self) -> Severity {
+        Severity::Hint
+    }
+}
+
+impl fmt::Display for UnusedDef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.entity {
+            EntityKind::ModuleAlias => write!(f, "unused import `{}`", self.name),
+            other => write!(f, "unused {} `{}`", other.noun(), self.name),
+        }
+    }
+}
 
 impl ReferenceGraph {
     /// The roots that reachability starts from, which are every `pub`
@@ -123,20 +151,22 @@ impl ReferenceGraph {
     /// Only definitions in `entry` are reported, so prelude, `@vm` and stdlib
     /// definitions are never flagged. The output is sorted by source position
     /// so `publishDiagnostics` always gets it in the same order.
-    fn unused_diagnostics(&self, entry: ModuleId) -> Vec<Diagnostic> {
+    fn unused_diagnostics(&self, entry: ModuleId) -> Vec<Diagnostic<UnusedDef>> {
         let Some(mr) = self.modules.get(&entry) else {
             return Vec::new();
         };
         let reachable = self.reachable_from_entry(entry);
-        let mut out: Vec<Diagnostic> = Vec::new();
+        let mut out: Vec<Diagnostic<UnusedDef>> = Vec::new();
 
         for def in mr.definitions.values() {
             if def.entity() == EntityKind::ModuleAlias {
                 if !self.has_real_use(def) {
-                    out.push(Diagnostic::hint(
+                    out.push(Diagnostic::new(
                         def.span(),
-                        DiagnosticCode::UnusedBinding,
-                        format!("unused import `{}`", def.name),
+                        UnusedDef {
+                            entity: EntityKind::ModuleAlias,
+                            name: def.name.clone(),
+                        },
                     ));
                 }
                 continue;
@@ -152,10 +182,12 @@ impl ReferenceGraph {
             {
                 continue;
             }
-            out.push(Diagnostic::hint(
+            out.push(Diagnostic::new(
                 def.span(),
-                DiagnosticCode::UnusedBinding,
-                format!("unused {} `{}`", def.entity().noun(), def.name),
+                UnusedDef {
+                    entity: def.entity(),
+                    name: def.name.clone(),
+                },
             ));
         }
 
@@ -165,7 +197,7 @@ impl ReferenceGraph {
 
     /// [`unused_diagnostics`](Self::unused_diagnostics), keyed by module path.
     /// It is empty if `entry` was never interned into this graph.
-    pub fn unused_diagnostics_for(&self, entry: &ModulePath) -> Vec<Diagnostic> {
+    pub fn unused_diagnostics_for(&self, entry: &ModulePath) -> Vec<Diagnostic<UnusedDef>> {
         match self.module_id(entry) {
             Some(id) => self.unused_diagnostics(id),
             None => Vec::new(),
@@ -183,7 +215,7 @@ mod tests {
     use crate::diagnostic::Severity;
 
     #[track_caller]
-    fn sole_unused(g: &ReferenceGraph, m: ModuleId) -> Diagnostic {
+    fn sole_unused(g: &ReferenceGraph, m: ModuleId) -> Diagnostic<UnusedDef> {
         let mut d = g.unused_diagnostics(m);
         assert_eq!(d.len(), 1, "expected exactly one unused diagnostic: {d:?}");
         d.pop().unwrap()
@@ -266,8 +298,8 @@ mod tests {
         let g = g.finish();
 
         let d = sole_unused(&g, m);
-        assert_eq!(d.severity, Severity::Hint);
-        assert_eq!(d.message, "unused function `dead`");
+        assert_eq!(d.severity(), Severity::Hint);
+        assert_eq!(d.message(), "unused function `dead`");
         assert_eq!(d.span, dead.span);
     }
 
@@ -282,7 +314,7 @@ mod tests {
         let g = g.finish();
 
         let d = sole_unused(&g, m);
-        assert_eq!(d.message, "unused function `dead`");
+        assert_eq!(d.message(), "unused function `dead`");
         assert_eq!(d.span, dead.span);
     }
 
@@ -295,7 +327,7 @@ mod tests {
         g.insert_module(mr);
         let g = g.finish();
 
-        assert_eq!(sole_unused(&g, m).message, "unused function `spin`");
+        assert_eq!(sole_unused(&g, m).message(), "unused function `spin`");
     }
 
     #[test]
@@ -326,7 +358,7 @@ mod tests {
         let g = g.finish();
 
         let d = sole_unused(&g, m);
-        assert_eq!(d.message, "unused import `io`");
+        assert_eq!(d.message(), "unused import `io`");
         assert_eq!(d.span, unused_imp.span);
     }
 
@@ -340,7 +372,7 @@ mod tests {
         g.insert_module(mr);
         let g = g.finish();
 
-        assert_eq!(sole_unused(&g, m).message, "unused import `util`");
+        assert_eq!(sole_unused(&g, m).message(), "unused import `util`");
     }
 
     #[test]
@@ -353,7 +385,7 @@ mod tests {
         let g = g.finish();
 
         let d = g.unused_diagnostics(m);
-        let msgs: Vec<&str> = d.iter().map(|x| x.message.as_str()).collect();
+        let msgs: Vec<String> = d.iter().map(|x| x.message()).collect();
         assert_eq!(msgs, vec!["unused constant `MAX`", "unused type `Color`"]);
     }
 
@@ -424,7 +456,7 @@ mod tests {
         let g = g.finish();
 
         let d = sole_unused(&g, m);
-        assert_eq!(d.message, "unused function `dead`");
+        assert_eq!(d.message(), "unused function `dead`");
         assert_eq!(d.span, dead.span);
     }
 
@@ -503,7 +535,7 @@ mod tests {
         // Drop the use, to show the check still works and isn't just switched
         // off.
         let (g, m) = build(false);
-        assert_eq!(sole_unused(&g, m).message, "unused import `b`");
+        assert_eq!(sole_unused(&g, m).message(), "unused import `b`");
     }
 
     /// Two plain qualified imports, with one used. The used one's `Qualifier`
@@ -550,7 +582,7 @@ mod tests {
         let g = g.finish();
 
         assert_eq!(
-            sole_unused(&g, m).message,
+            sole_unused(&g, m).message(),
             "unused import `b`",
             "the unused `a/b` import must be flagged while the used `a/c` is not"
         );
@@ -590,7 +622,8 @@ mod tests {
 
         let d = sole_unused(&g, m);
         assert_eq!(
-            d.message, "unused import `b`",
+            d.message(),
+            "unused import `b`",
             "only the alias the use actually went through stays alive"
         );
         assert_eq!(d.span, alias_b.span);

@@ -19,6 +19,7 @@ use scarlet_types::ty::Scheme;
 use crate::annot::{AnnotContext, AnnotVars, Annotations};
 use crate::declare::{DeclBody, DeclId, Declared};
 use crate::env::Env;
+use crate::error::{CheckError, FieldSite, NestedDecl, Unreadable};
 use crate::index::{Def, DefKind, EntityKind, Site, Use, UseKind};
 use crate::report::Report;
 use crate::resolved::*;
@@ -311,21 +312,18 @@ impl<'r, 'a> Resolver<'r, 'a> {
             }),
             ast::Statement::Declaration { decl, .. } => {
                 let (kind, sp) = match decl.as_ref() {
-                    ast::Declaration::Function(fd) => ("named function", fd.span),
-                    ast::Declaration::Type(td) => ("type", td.span),
-                    ast::Declaration::Const(cb) => ("const", cb.span),
+                    ast::Declaration::Function(fd) => (NestedDecl::Function, fd.span),
+                    ast::Declaration::Type(td) => (NestedDecl::Type, td.span),
+                    ast::Declaration::Const(cb) => (NestedDecl::Const, cb.span),
                 };
-                self.report.error(
-                    sp,
-                    format!("{kind} declarations are only allowed at the top level"),
-                );
+                self.report.add(sp, CheckError::NestedDeclaration(kind));
                 None
             }
             ast::Statement::ImportDeclaration(_) => None,
             // The parser removes backpasses, so one that survives is one it
             // refused.
             ast::Statement::Backpass(bp) => {
-                self.unreadable(bp.call.span(), "This backpass can't be read here");
+                self.unreadable(bp.call.span(), Unreadable::Backpass);
                 Some(RStmt::Expr(self.expr(&bp.call, w)))
             }
         }
@@ -333,9 +331,9 @@ impl<'r, 'a> Resolver<'r, 'a> {
 
     /// Something the parser should have refused. It did, unless the tree was
     /// made some other way, and then this says so.
-    fn unreadable(&mut self, span: Span, message: &str) {
+    fn unreadable(&mut self, span: Span, what: Unreadable) {
         if self.env.input.parsed_cleanly {
-            self.report.parse_error(span, message);
+            self.report.add(span, CheckError::Unreadable(what));
         }
     }
 
@@ -526,11 +524,11 @@ impl<'r, 'a> Resolver<'r, 'a> {
             E::PipeExpression(p) => {
                 self.expr(&p.left, w);
                 self.expr(&p.right, w);
-                self.unreadable(e.span(), "This pipe can't be read here");
+                self.unreadable(e.span(), Unreadable::Pipe);
                 RKind::Error
             }
             E::ErrorNode(err) => {
-                self.unreadable(err.span, &err.error.to_string());
+                self.unreadable(err.span, Unreadable::Node(err.error.clone()));
                 RKind::Error
             }
         }
@@ -601,15 +599,8 @@ impl<'r, 'a> Resolver<'r, 'a> {
             let target = self.env.site(span, EntityKind::Value);
             self.use_of(id.span, UseKind::Unqualified, target, w);
             if name.starts_with('_') {
-                let msg = match name.trim_start_matches('_') {
-                    "" => format!(
-                        "'{name}' is a discard binding and can't be read. Give it a name to use its value"
-                    ),
-                    stripped => format!(
-                        "'{name}' starts with '_', which marks it unused, so it can't be read. Rename it to '{stripped}'"
-                    ),
-                };
-                self.report.error(id.span, msg);
+                self.report
+                    .add(id.span, CheckError::ReadsDiscarded(name.into()));
             }
             return Some(Found {
                 r: Ref::Local(b),
@@ -668,14 +659,20 @@ impl<'r, 'a> Resolver<'r, 'a> {
         let member = ma.member.name.as_str();
         let Some(v) = iface.values.get(member) else {
             if iface.private_names.contains(member) {
-                self.report.error(
+                self.report.add(
                     ma.member.span,
-                    format!("'{member}' is private in module '{module}'"),
+                    CheckError::PrivateMember {
+                        module,
+                        member: member.into(),
+                    },
                 );
             } else {
-                self.report.error(
+                self.report.add(
                     ma.member.span,
-                    format!("Module '{module}' has no member '{member}'"),
+                    CheckError::NoMember {
+                        module,
+                        member: member.into(),
+                    },
                 );
             }
             return None;
@@ -687,27 +684,21 @@ impl<'r, 'a> Resolver<'r, 'a> {
     }
 
     fn unknown_module(&mut self, name: &ast::Identifier) {
-        let modules: Vec<String> = self
+        let stdlib = self
             .env
             .input
             .stdlib_modules
             .iter()
             .filter(|path| path.len() > 1 && path.last() == Some(&name.name))
-            .map(|path| format!("`import {}`", path.join("/")))
+            .cloned()
             .collect();
-        let msg = if modules.is_empty() {
-            format!(
-                "Unknown module '{}'. Import it before reaching into it with `::`",
-                name.name
-            )
-        } else {
-            format!(
-                "Unknown module '{}': it is the name of a stdlib module that is not imported. Add {}",
-                name.name,
-                modules.join(" or ")
-            )
-        };
-        self.report.module_error(name.span, msg);
+        self.report.add(
+            name.span,
+            CheckError::UnknownModule {
+                name: name.name.as_str().into(),
+                stdlib,
+            },
+        );
     }
 
     fn unknown_identifier(&mut self, id: &ast::Identifier) {
@@ -721,28 +712,30 @@ impl<'r, 'a> Resolver<'r, 'a> {
                     .min()
                     .cloned()
             });
-            let example = match example {
-                Some(member) => format!(", like `{name}::{member}`"),
-                None => String::new(),
-            };
-            self.report.error(
+            self.report.add(
                 id.span,
-                format!("'{name}' is the module `{module}`, not a value. Use one of its members{example}"),
+                CheckError::ModuleNotValue {
+                    name: name.as_str().into(),
+                    module,
+                    example,
+                },
             );
             return;
         }
-        let qualified = self.env.qualified_spellings(name);
-        let msg = if !qualified.is_empty() {
-            format!(
-                "Unknown identifier '{name}'. A constructor of that name is {}",
-                qualified.join(" or ")
-            )
-        } else if let Some(s) = self.suggest(name) {
-            format!("Unknown identifier '{name}'. Did you mean '{s}'?")
+        let ctor_in = self.env.qualifiers_with_ctor(name);
+        let suggestion = if ctor_in.is_empty() {
+            self.suggest(name).map(|s| s.as_str().into())
         } else {
-            format!("Unknown identifier '{name}'")
+            None
         };
-        self.report.error(id.span, msg);
+        self.report.add(
+            id.span,
+            CheckError::UnknownIdentifier {
+                name: name.as_str().into(),
+                ctor_in,
+                suggestion,
+            },
+        );
     }
 
     fn suggest(&self, name: &str) -> Option<String> {
@@ -834,18 +827,14 @@ impl<'r, 'a> Resolver<'r, 'a> {
                     ast::CallArg::Positional(e) => self.expr(e, w),
                     ast::CallArg::Labeled { label, value, .. } => {
                         if labels.is_none() {
-                            self.report.error(
-                                label.span,
-                                "Labelled arguments need a callee whose parameter names are known: a constructor, or a function named directly",
-                            );
+                            self.report
+                                .add(label.span, CheckError::LabelNeedsKnownCallee);
                         }
                         self.expr(value, w)
                     }
                     ast::CallArg::Spread(e) => {
-                        self.report.error(
-                            e.span(),
-                            "Spread arguments are only allowed in constructor record-update calls",
-                        );
+                        self.report
+                            .add(e.span(), CheckError::SpreadOutsideConstructor);
                         self.expr(e, w)
                     }
                 };
@@ -878,19 +867,17 @@ impl<'r, 'a> Resolver<'r, 'a> {
             match e {
                 // A wrong count, which inference reports.
                 SlotError::ExtraPositional(_) => {}
-                SlotError::UnknownLabel(label, (_, span)) => self.report.error(
+                SlotError::UnknownLabel(label, (_, span)) => self.report.add(
                     span,
-                    format!(
-                        "This function has no parameter '{label}'. Available: {}",
-                        names.join(", ")
-                    ),
+                    CheckError::NoSuchParameter {
+                        label: label.into(),
+                        available: names.to_vec(),
+                    },
                 ),
                 SlotError::Duplicate((_, span), p) => {
                     let dup = names.get(p).map_or("_", |n| &**n);
-                    self.report.error(
-                        span,
-                        format!("Parameter '{dup}' is specified more than once"),
-                    );
+                    self.report
+                        .add(span, CheckError::ParameterTwice(dup.into()));
                 }
             }
         }
@@ -919,8 +906,7 @@ impl<'r, 'a> Resolver<'r, 'a> {
             match a {
                 ast::CallArg::Spread(e) => {
                     if spread.is_some() {
-                        self.report
-                            .error(e.span(), "A constructor call can only have one spread");
+                        self.report.add(e.span(), CheckError::TwoSpreadsInCall);
                     }
                     spread = Some((written, e));
                 }
@@ -938,7 +924,11 @@ impl<'r, 'a> Resolver<'r, 'a> {
                 ast::CallArg::Spread(_) => None,
             })
             .collect();
-        let by_pos = self.slot_ctor(&c, items, spread.is_none().then_some((span, "")));
+        let by_pos = self.slot_ctor(
+            &c,
+            items,
+            spread.is_none().then_some((span, FieldSite::Call)),
+        );
         let mut slot_of = vec![None; args.len()];
         for (slot, i) in by_pos.into_iter().enumerate() {
             if let Some(i) = i {
@@ -980,49 +970,48 @@ impl<'r, 'a> Resolver<'r, 'a> {
         &mut self,
         c: &CtorInfo,
         items: Vec<(Option<&str>, (T, Span))>,
-        missing: Option<(Span, &str)>,
+        missing: Option<(Span, FieldSite)>,
     ) -> Vec<Option<T>> {
         let fields: Vec<Option<&str>> = c.labels.iter().map(|l| Some(&**l)).collect();
         let arity = fields.len();
         let (by_pos, errors) = slot_labeled(&fields, items);
         for e in errors {
             match e {
-                SlotError::ExtraPositional((_, span)) => self.report.error(
+                SlotError::ExtraPositional((_, span)) => self.report.add(
                     span,
-                    format!(
-                        "Constructor '{}' has {arity} field(s) but more were supplied",
-                        c.name
-                    ),
+                    CheckError::TooManyFields {
+                        ctor: c.name.clone(),
+                        arity,
+                    },
                 ),
-                SlotError::UnknownLabel(label, (_, span)) => self.report.error(
+                SlotError::UnknownLabel(label, (_, span)) => self.report.add(
                     span,
-                    format!(
-                        "Constructor '{}' has no field '{label}'. Available: {}",
-                        c.name,
-                        c.labels.join(", ")
-                    ),
+                    CheckError::NoSuchField {
+                        ctor: c.name.clone(),
+                        label: label.into(),
+                        available: c.labels.clone(),
+                    },
                 ),
                 SlotError::Duplicate((_, span), field) => {
                     let dup = c.labels.get(field).map_or("_", |l| &**l);
-                    self.report
-                        .error(span, format!("Field '{dup}' is specified more than once"));
+                    self.report.add(span, CheckError::FieldTwice(dup.into()));
                 }
             }
         }
-        if let Some((span, hint)) = missing
+        if let Some((span, site)) = missing
             && by_pos.iter().any(Option::is_none)
         {
-            let absent: Vec<&str> = (0..arity)
+            let absent: Vec<Name> = (0..arity)
                 .filter(|&i| by_pos[i].is_none())
-                .map(|i| c.labels.get(i).map_or("_", |l| &**l))
+                .map(|i| c.labels.get(i).cloned().unwrap_or_else(|| "_".into()))
                 .collect();
-            self.report.error(
+            self.report.add(
                 span,
-                format!(
-                    "Constructor '{}' is missing field(s): {}{hint}",
-                    c.name,
-                    absent.join(", ")
-                ),
+                CheckError::MissingFields {
+                    ctor: c.name.clone(),
+                    fields: absent,
+                    site,
+                },
             );
         }
         by_pos.into_iter().map(|s| s.map(|(v, _)| v)).collect()
@@ -1036,12 +1025,12 @@ impl<'r, 'a> Resolver<'r, 'a> {
             && !self.is_value_name(&id.name)
             && self.env.imports.get(&id.name).is_some()
         {
-            self.report.error(
+            self.report.add(
                 id.span,
-                format!(
-                    "'{0}' is a module, not a value. Reach its members with `::`, like `{0}::{1}`",
-                    id.name, field.name
-                ),
+                CheckError::ModuleField {
+                    module: id.name.as_str().into(),
+                    field: field.name.as_str().into(),
+                },
             );
             return RKind::Error;
         }
@@ -1054,10 +1043,8 @@ impl<'r, 'a> Resolver<'r, 'a> {
                     index_span: num.span,
                 },
                 Err(_) => {
-                    self.report.error(
-                        num.span,
-                        format!("Tuple index must be an integer, got '{}'", num.value),
-                    );
+                    self.report
+                        .add(num.span, CheckError::TupleIndexNotInt(num.value.clone()));
                     RKind::Error
                 }
             },
@@ -1154,7 +1141,7 @@ pub(crate) fn number(n: &ast::NumberLiteral, report: &mut Report) -> Number {
         match digits.parse() {
             Ok(f) => Number::Float(f),
             Err(_) => {
-                report.error(n.span, format!("invalid number literal '{}'", n.value));
+                report.add(n.span, CheckError::InvalidNumber(n.value.clone()));
                 Number::Float(0.0)
             }
         }
@@ -1162,15 +1149,7 @@ pub(crate) fn number(n: &ast::NumberLiteral, report: &mut Report) -> Number {
         match n.as_int() {
             Some(i) => Number::Int(i),
             None => {
-                report.error(
-                    n.span,
-                    format!(
-                        "integer literal '{}' out of range for Int (must be between {} and {})",
-                        n.value,
-                        i64::MIN,
-                        i64::MAX
-                    ),
-                );
+                report.add(n.span, CheckError::IntOutOfRange(n.value.clone()));
                 Number::Int(0)
             }
         }

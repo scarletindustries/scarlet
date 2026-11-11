@@ -178,7 +178,7 @@ impl fmt::Display for Type {
 
 /// Show `types` side by side, as in "expected 'a', got 'fn(a) b'": a variable
 /// that appears in more than one of them gets the same letter in each.
-pub(crate) fn show_together(types: &[&Type]) -> Vec<String> {
+pub fn show_together(types: &[&Type]) -> Vec<String> {
     let names = VarNames::of(types);
     types
         .iter()

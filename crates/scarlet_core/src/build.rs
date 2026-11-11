@@ -13,13 +13,15 @@ use std::rc::Rc;
 
 use scarlet_check::{CheckInput, CheckedModule, Interfaces, Role, UnusedBindings};
 use scarlet_syntax::ast;
-use scarlet_syntax::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
-use scarlet_syntax::module_path::{ModuleKey, ModulePath, ResolveError};
+use scarlet_syntax::diagnostic::{Diagnostic, has_errors};
+use scarlet_syntax::module_path::{ModuleKey, ModulePath};
+use scarlet_syntax::parser::SyntaxError;
 use scarlet_syntax::source::SourceFile;
 use scarlet_syntax::span::Span;
 use scarlet_types::interface::Interface;
 use scarlet_types::known::prelude_key;
 
+use crate::issue::{Issue, ModuleError};
 use crate::module::{self, ModuleSource};
 use crate::sources::{Revision, Sources, Text};
 
@@ -70,7 +72,7 @@ pub struct Module {
     /// Every interface the check read, as it read it.
     read: Vec<(ModuleKey, Interface)>,
     /// What the parser and the import resolution reported.
-    load_diagnostics: Vec<Diagnostic>,
+    load_diagnostics: Vec<Diagnostic<Issue>>,
     pub checked: CheckedModule,
 }
 
@@ -80,10 +82,13 @@ impl Module {
     }
 
     /// Everything reported about this module.
-    pub fn diagnostics(&self) -> impl Iterator<Item = &Diagnostic> {
-        self.load_diagnostics
+    pub fn diagnostics(&self) -> impl Iterator<Item = Diagnostic<Issue>> + '_ {
+        let checked = self
+            .checked
+            .diagnostics
             .iter()
-            .chain(&self.checked.diagnostics)
+            .map(|d| d.clone().map(Issue::Check));
+        self.load_diagnostics.iter().cloned().chain(checked)
     }
 }
 
@@ -126,7 +131,7 @@ pub struct Entry<'a> {
     pub ast: &'a ast::BlockExpression,
     pub doc: Option<String>,
     /// What the parser reported about the text.
-    pub parse: Vec<Diagnostic>,
+    pub parse: Vec<Diagnostic<SyntaxError>>,
     /// The directory `./` imports are relative to.
     pub base_dir: Option<&'a Path>,
     pub role: Role,
@@ -181,10 +186,8 @@ impl Analysis {
     }
 
     /// Everything reported about every module.
-    pub fn diagnostics(&self) -> Vec<Diagnostic> {
-        self.modules()
-            .flat_map(|m| m.diagnostics().cloned())
-            .collect()
+    pub fn diagnostics(&self) -> Vec<Diagnostic<Issue>> {
+        self.modules().flat_map(|m| m.diagnostics()).collect()
     }
 
     pub fn counts(&self) -> Counts {
@@ -309,7 +312,7 @@ impl Interfaces for Reading<'_> {
 struct Given<'a> {
     ast: &'a ast::BlockExpression,
     doc: Option<String>,
-    parse: Vec<Diagnostic>,
+    parse: Vec<Diagnostic<SyntaxError>>,
 }
 
 /// The tree a module is checked from: the one its entry arrived with, or
@@ -372,7 +375,7 @@ impl CheckRun<'_> {
             (None, None) => Tree::Parsed(self.parse(&source.text)),
         };
         let owned;
-        let (ast, doc, mut load_diagnostics) = match parsed {
+        let (ast, doc, parse) = match parsed {
             Tree::Given(g) => (g.ast, g.doc, g.parse),
             Tree::Parsed(Parsed {
                 ast,
@@ -383,6 +386,8 @@ impl CheckRun<'_> {
                 (&owned, doc, diagnostics)
             }
         };
+        let mut load_diagnostics: Vec<Diagnostic<Issue>> =
+            parse.into_iter().map(|d| d.map(Issue::Syntax)).collect();
         load_diagnostics.extend(import_errors);
         for d in &mut load_diagnostics {
             d.source = Some(source.clone());
@@ -454,19 +459,19 @@ impl CheckRun<'_> {
         &mut self,
         written: &[(ast::ImportPath, Span)],
         base_dir: Option<&Path>,
-    ) -> (Vec<Option<ModuleKey>>, Vec<Diagnostic>) {
+    ) -> (Vec<Option<ModuleKey>>, Vec<Diagnostic<Issue>>) {
         if !self.loading.contains(&prelude_key()) {
             let path = ast::ImportPath::canonical(module::scarlet_prelude());
             // The prelude is part of the compiler, so it always loads.
-            let _ = self.load(&path, Span::DUMMY, None);
+            let _ = self.load(&path, None);
         }
         let mut keys = Vec::new();
         let mut errors = Vec::new();
         for (path, span) in written {
-            match self.load(path, *span, base_dir) {
+            match self.load(path, base_dir) {
                 Ok(k) => keys.push(Some(k)),
-                Err(d) => {
-                    errors.push(d);
+                Err(e) => {
+                    errors.push(Diagnostic::new(*span, Issue::Module(e)));
                     keys.push(None);
                 }
             }
@@ -478,35 +483,24 @@ impl CheckRun<'_> {
     fn load(
         &mut self,
         path: &ast::ImportPath,
-        at: Span,
         base_dir: Option<&Path>,
-    ) -> Result<ModuleKey, Diagnostic> {
-        let error = |msg: String| Diagnostic::error(at, DiagnosticCode::ModuleError, msg);
-        let resolved = module::resolve_with(path, base_dir, self.stdlib_root).map_err(|e| match e {
-            ResolveError::BareName(p) => error(format!(
-                "Unknown module '{p}'. Package imports aren't supported yet, so use a relative path like `./{p}`"
-            )),
-            ResolveError::NoBaseDir => {
-                error("Relative imports don't work without a file, such as in the REPL".to_string())
-            }
-            e => error(e.to_string()),
-        })?;
+    ) -> Result<ModuleKey, ModuleError> {
+        let resolved =
+            module::resolve_with(path, base_dir, self.stdlib_root).map_err(ModuleError::Resolve)?;
         let key = resolved.key.clone();
         if self.loaded.by_key.contains_key(&key) {
             return Ok(key);
         }
         if self.loading.contains(&key) {
-            return Err(error(format!(
-                "Import cycle at module '{key}'. Modules can't import each other in a loop"
-            )));
+            return Err(ModuleError::Cycle(key));
         }
         let (origin, dir, file, text) = match &resolved.source {
             ModuleSource::Embedded(s) => (Origin::Embedded, None, None, Text::new(*s)),
             ModuleSource::File(p) => {
-                let text = self
-                    .sources
-                    .read(p)
-                    .map_err(|e| error(format!("Couldn't read module '{key}': {e}")))?;
+                let text = self.sources.read(p).map_err(|e| ModuleError::Unreadable {
+                    key: key.clone(),
+                    error: Rc::new(e),
+                })?;
                 (
                     Origin::File(p.clone()),
                     p.parent().map(Path::to_path_buf),
@@ -533,7 +527,7 @@ impl CheckRun<'_> {
 pub struct Parsed {
     pub ast: ast::BlockExpression,
     pub doc: Option<String>,
-    pub diagnostics: Vec<Diagnostic>,
+    pub diagnostics: Vec<Diagnostic<SyntaxError>>,
 }
 
 pub fn parse(text: &str) -> Parsed {

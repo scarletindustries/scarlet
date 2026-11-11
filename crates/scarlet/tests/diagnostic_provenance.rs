@@ -16,7 +16,7 @@ const ENTRY_SRC: &str = "import ./lib\npub fn probe() Int { lib::broken() }\n";
 
 /// What checking a project's entry reported.
 struct Checked {
-    diagnostics: Vec<diagnostic::Diagnostic>,
+    diagnostics: Vec<diagnostic::Diagnostic<scarlet::issue::Issue>>,
 }
 
 impl Checked {
@@ -62,7 +62,7 @@ fn imported_module_type_error_is_stamped_with_that_module() {
     let stamped = result
         .diagnostics
         .iter()
-        .find(|d| d.severity == diagnostic::Severity::Error)
+        .find(|d| d.severity() == diagnostic::Severity::Error)
         .expect("no error diagnostic");
     assert_eq!(
         stamped.source.as_ref().map(|s| &s.key),

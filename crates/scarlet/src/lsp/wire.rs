@@ -175,15 +175,15 @@ pub(super) fn rename_error_code(e: &reference::rename::RenameError) -> i32 {
     }
 }
 
-pub(super) fn diagnostic_to_json(diag: &diagnostic::Diagnostic) -> Json {
-    let severity = match diag.severity {
+pub(super) fn diagnostic_to_json<P: diagnostic::Problem>(diag: &diagnostic::Diagnostic<P>) -> Json {
+    let severity = match diag.severity() {
         diagnostic::Severity::Error => 1,
         diagnostic::Severity::Hint => 4,
     };
     json!({
         "range": range_json(&diag.span),
         "severity": severity,
-        "message": diag.message,
+        "message": diag.message(),
     })
 }
 

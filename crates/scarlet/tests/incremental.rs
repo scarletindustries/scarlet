@@ -200,7 +200,7 @@ fn a_change_two_imports_away_reaches_the_entry() {
     );
     let a = s.analyse(&p, entry);
     assert!(
-        a.diagnostics().iter().any(|d| d.message.contains("'n'")),
+        a.diagnostics().iter().any(|d| d.message().contains("'n'")),
         "the entry reads a field that is gone: {:?}",
         a.diagnostics()
     );

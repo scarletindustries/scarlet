@@ -7,15 +7,15 @@
 
 use crate::ast;
 use crate::diagnostic::{self, Diagnostic, DiagnosticCode};
-use crate::parser;
+use crate::parser::{self, SyntaxError};
 use crate::scanner;
 
 pub enum Entry {
     /// The parser ran out of input partway through, so the entry wants another line. It carries
     /// the diagnostics anyway, for the paths that have no more input to give it.
-    Incomplete(Vec<Diagnostic>),
+    Incomplete(Vec<Diagnostic<SyntaxError>>),
     /// The entry doesn't parse, and the diagnostics say why.
-    Rejected(Vec<Diagnostic>),
+    Rejected(Vec<Diagnostic<SyntaxError>>),
     Accepted(ast::BlockExpression),
 }
 
@@ -28,7 +28,7 @@ pub fn parse(input: &str) -> Entry {
     if parsed
         .diagnostics
         .iter()
-        .any(|d| d.code == DiagnosticCode::UnexpectedEof)
+        .any(|d| d.code() == DiagnosticCode::UnexpectedEof)
     {
         return Entry::Incomplete(parsed.diagnostics);
     }

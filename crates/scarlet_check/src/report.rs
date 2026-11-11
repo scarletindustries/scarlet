@@ -3,15 +3,16 @@
 
 use std::rc::Rc;
 
-use scarlet_syntax::diagnostic::{Diagnostic, DiagnosticCode};
+use scarlet_syntax::diagnostic::Diagnostic;
 use scarlet_syntax::source::SourceFile;
 use scarlet_syntax::span::Span;
 
+use crate::error::CheckError;
 use crate::index::{Def, Use};
 
 pub(crate) struct Report {
     source: Rc<SourceFile>,
-    pub diags: Vec<Diagnostic>,
+    pub diags: Vec<Diagnostic<CheckError>>,
     pub defs: Vec<Def>,
     pub uses: Vec<Use>,
 }
@@ -26,34 +27,9 @@ impl Report {
         }
     }
 
-    fn push(&mut self, span: Span, code: DiagnosticCode, message: String) {
-        let mut d = Diagnostic::error(span, code, message);
-        d.source = Some(self.source.clone());
-        self.diags.push(d);
-    }
-
-    pub fn error(&mut self, span: Span, message: impl Into<String>) {
-        self.push(span, DiagnosticCode::TypeError, message.into());
-    }
-
-    pub fn module_error(&mut self, span: Span, message: impl Into<String>) {
-        self.push(span, DiagnosticCode::ModuleError, message.into());
-    }
-
-    pub fn parse_error(&mut self, span: Span, message: impl Into<String>) {
-        self.push(span, DiagnosticCode::ParseError, message.into());
-    }
-
-    pub fn unused(&mut self, span: Span, name: &str) {
-        self.push(
-            span,
-            DiagnosticCode::UnusedBinding,
-            format!("'{name}' is never used. Start its name with '_' if that's on purpose"),
-        );
-    }
-
-    pub fn note(&mut self, span: Span, message: impl Into<String>) {
-        let mut d = Diagnostic::hint(span, DiagnosticCode::RelatedLocation, message.into());
+    /// Report `problem` at `span`.
+    pub fn add(&mut self, span: Span, problem: CheckError) {
+        let mut d = Diagnostic::new(span, problem);
         d.source = Some(self.source.clone());
         self.diags.push(d);
     }

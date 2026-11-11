@@ -386,7 +386,11 @@ impl Session {
         self.accepted.borrow_mut().reset();
     }
 
-    fn report(&self, diagnostics: &[diagnostic::Diagnostic], source: &str) {
+    fn report<P: diagnostic::Problem>(
+        &self,
+        diagnostics: &[diagnostic::Diagnostic<P>],
+        source: &str,
+    ) {
         diagnostic::print_diagnostics(diagnostics, source, ORIGIN);
     }
 }

@@ -13,6 +13,7 @@ use scarlet_types::ty::Type;
 
 use crate::UnusedBindings;
 use crate::env::Env;
+use crate::error::CheckError;
 use crate::report::Report;
 use crate::resolved::BinderInfo;
 use crate::typed::{
@@ -109,12 +110,7 @@ impl Finished<'_, '_> {
                 Stmt::Expr(x) => {
                     let ty = self.types.get(x.ty);
                     if !matches!(ty, Type::Var(_)) && !self.is_nil(&ty) {
-                        report.error(
-                            x.span,
-                            format!(
-                                "This expression's value of type '{ty}' isn't used. Assign it to a name, or write '_ = ...' to throw it away"
-                            ),
-                        );
+                        report.add(x.span, CheckError::UnusedValue(ty));
                     }
                 }
             }
@@ -190,29 +186,15 @@ impl Finished<'_, '_> {
             .collect();
         let found = analyse(&space, &checked);
         if let Some(missing) = found.missing {
-            report.error(
-                subject.span,
-                format!("Match is not exhaustive. Add arms for: {missing}"),
-            );
+            report.add(subject.span, CheckError::NotExhaustive { missing });
         }
         for i in found.unreachable {
-            report.error(
-                arms[i].pattern.span,
-                "This pattern is unreachable, because an earlier pattern matches the same values",
-            );
+            report.add(arms[i].pattern.span, CheckError::Unreachable);
         }
         // A catch-all over named variants would quietly take any variant
         // added later, so the arms have to name them.
         for (i, missing) in found.catch_alls {
-            report.error(
-                arms[i].pattern.span,
-                format!(
-                    "This pattern stands for {}. Name {} instead, like `{} ->`",
-                    missing.join(", "),
-                    if missing.len() == 1 { "it" } else { "them" },
-                    missing.join(" | ")
-                ),
-            );
+            report.add(arms[i].pattern.span, CheckError::CatchAll(missing));
         }
     }
 
@@ -224,12 +206,7 @@ impl Finished<'_, '_> {
         let depth = unroll_depth(pattern) + 1;
         let space = self.space(&self.types.get(value.ty), depth);
         if let Some(missing) = missed_by(&space, pattern) {
-            report.error(
-                pattern.span,
-                format!(
-                    "A binding's pattern must match every value, and this one misses {missing}. Use `match` to handle it"
-                ),
-            );
+            report.add(pattern.span, CheckError::BindingMisses { missing });
         }
     }
 
@@ -254,18 +231,11 @@ impl Finished<'_, '_> {
         });
         match (is_nil, receiver) {
             (true, None) => {}
-            (true, Some((_, sp))) => report.error(
-                sp,
-                "'or' on a Result(_, Nil) can't bind a value, because the error carries nothing",
-            ),
-            (false, None) => report.error(
-                value.span,
-                format!("This 'or' throws away the Result's error, of type '{err}'. Bind it with 'e -> ...' and handle it"),
-            ),
-            (false, Some((name, sp))) if name.starts_with('_') => report.error(
-                sp,
-                format!("'{name}' throws away the error. Give the 'or' receiver a name and use it"),
-            ),
+            (true, Some((_, sp))) => report.add(sp, CheckError::OrNilReceiver),
+            (false, None) => report.add(value.span, CheckError::OrDropsError(err)),
+            (false, Some((name, sp))) if name.starts_with('_') => {
+                report.add(sp, CheckError::OrDiscardsReceiver(name))
+            }
             (false, Some(_)) => {}
         }
     }
@@ -276,13 +246,7 @@ impl Finished<'_, '_> {
     fn discards(&self, report: &mut Report) {
         for (b, &ty) in self.binders.iter().zip(self.binder_types) {
             if b.discards && self.is_nil(&self.types.get(ty)) {
-                report.error(
-                    b.span,
-                    format!(
-                        "'{}' always matches Nil here, so write the explicit 'Nil' pattern instead",
-                        b.name
-                    ),
-                );
+                report.add(b.span, CheckError::NilDiscard(b.name.clone()));
             }
         }
     }
@@ -295,7 +259,7 @@ impl Finished<'_, '_> {
         }
         for b in self.unused.iter().filter(|b| !self.refused.contains(b)) {
             let info = &self.binders[b.0 as usize];
-            report.unused(info.span, &info.name);
+            report.add(info.span, CheckError::Unused(info.name.clone()));
         }
     }
 }

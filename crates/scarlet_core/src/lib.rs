@@ -13,6 +13,7 @@
 
 pub mod build;
 pub mod compile;
+pub mod issue;
 pub mod lint;
 pub mod module;
 pub mod reference;

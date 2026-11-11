@@ -9,6 +9,7 @@ use scarlet_types::ty::Scheme;
 
 use crate::declare::Declared;
 use crate::env::Env;
+use crate::error::CheckError;
 use crate::report::Report;
 use crate::types::TypeDefs;
 
@@ -42,12 +43,12 @@ pub(crate) fn interface(
             return;
         }
         if scheme.ty.vars().iter().any(|v| !scheme.vars.contains(v)) {
-            report.error(
+            report.add(
                 span,
-                format!(
-                    "The type of '{name}' isn't fully known: '{}'. Write its type out, so every module that uses it agrees on it",
-                    scheme.ty
-                ),
+                CheckError::NotFullyKnown {
+                    name: name.clone(),
+                    ty: scheme.ty.clone(),
+                },
             );
         }
         iface.values.insert(

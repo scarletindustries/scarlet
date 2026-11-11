@@ -1,6 +1,8 @@
 use std::fmt;
 
 use crate::ast::ImportPath;
+use crate::diagnostic::{DiagnosticCode, Problem};
+use crate::scanner::ScanError;
 use crate::token::Kind;
 
 /// Why the parser could not read a stretch of source. The text a user reads
@@ -318,5 +320,37 @@ impl fmt::Display for DeclarationLead {
             DeclarationLead::Pub => "`pub`",
             DeclarationLead::Attributes => "attributes",
         })
+    }
+}
+
+/// What reading a source file can find wrong with it: the scanner's errors
+/// and the parser's.
+#[derive(Debug, Clone)]
+pub enum SyntaxError {
+    Scan(ScanError),
+    /// `at_end` says the parser ran out of input partway through, so a reader
+    /// that can ask for more input should.
+    Parse {
+        error: ParseError,
+        at_end: bool,
+    },
+}
+
+impl Problem for SyntaxError {
+    fn code(&self) -> DiagnosticCode {
+        match self {
+            SyntaxError::Scan(e) => e.code(),
+            SyntaxError::Parse { at_end: true, .. } => DiagnosticCode::UnexpectedEof,
+            SyntaxError::Parse { at_end: false, .. } => DiagnosticCode::ParseError,
+        }
+    }
+}
+
+impl fmt::Display for SyntaxError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SyntaxError::Scan(e) => e.fmt(f),
+            SyntaxError::Parse { error, .. } => error.fmt(f),
+        }
     }
 }

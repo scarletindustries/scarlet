@@ -28,47 +28,70 @@ pub enum DiagnosticCode {
     RelatedLocation,
 }
 
+/// A problem a diagnostic reports: a typed value, one variant per kind of
+/// failure, carrying what it is about. Its text is its `Display`, made only
+/// when someone reads it.
+pub trait Problem: std::fmt::Display {
+    fn code(&self) -> DiagnosticCode;
+
+    /// Whether the problem stops a build, or only points something out.
+    fn severity(&self) -> Severity {
+        Severity::Error
+    }
+}
+
+/// A problem at a place in the source.
 #[derive(Debug, Clone)]
-pub struct Diagnostic {
+pub struct Diagnostic<P> {
     pub span: Span,
-    pub severity: Severity,
-    pub code: DiagnosticCode,
-    pub message: String,
+    pub problem: P,
     /// The text `span` points into. `None` only for a diagnostic made before
     /// there was a module to belong to, like the parser's, which its caller
     /// shows against the text it parsed.
     pub source: Option<std::rc::Rc<crate::source::SourceFile>>,
 }
 
-impl Diagnostic {
-    pub fn error(span: Span, code: DiagnosticCode, message: String) -> Diagnostic {
+impl<P> Diagnostic<P> {
+    pub fn new(span: Span, problem: P) -> Self {
         Diagnostic {
             span,
-            severity: Severity::Error,
-            code,
-            message,
+            problem,
             source: None,
         }
     }
 
-    pub fn hint(span: Span, code: DiagnosticCode, message: String) -> Diagnostic {
+    /// The same diagnostic, its problem wrapped in a wider kind.
+    pub fn map<Q>(self, f: impl FnOnce(P) -> Q) -> Diagnostic<Q> {
         Diagnostic {
-            span,
-            severity: Severity::Hint,
-            code,
-            message,
-            source: None,
+            span: self.span,
+            problem: f(self.problem),
+            source: self.source,
         }
     }
 }
 
-pub fn has_errors(diagnostics: &[Diagnostic]) -> bool {
-    diagnostics.iter().any(|d| d.severity == Severity::Error)
+impl<P: Problem> Diagnostic<P> {
+    pub fn code(&self) -> DiagnosticCode {
+        self.problem.code()
+    }
+
+    pub fn severity(&self) -> Severity {
+        self.problem.severity()
+    }
+
+    /// The problem as a person reads it.
+    pub fn message(&self) -> String {
+        self.problem.to_string()
+    }
 }
 
-fn count_errors(diagnostics: &[Diagnostic]) -> usize {
+pub fn has_errors<P: Problem>(diagnostics: &[Diagnostic<P>]) -> bool {
+    diagnostics.iter().any(|d| d.severity() == Severity::Error)
+}
+
+fn count_errors<P: Problem>(diagnostics: &[Diagnostic<P>]) -> usize {
     diagnostics
         .iter()
-        .filter(|d| d.severity == Severity::Error)
+        .filter(|d| d.severity() == Severity::Error)
         .count()
 }

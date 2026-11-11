@@ -3,7 +3,7 @@ use std::collections::{BTreeSet, HashMap};
 use crate::ast;
 use crate::d;
 use crate::diagnostic::{Diagnostic, Severity};
-use crate::parser;
+use crate::parser::{self, SyntaxError};
 use crate::scanner;
 use crate::span::Span;
 use crate::token::{Kind, Token, Trivia};
@@ -27,7 +27,7 @@ pub enum FormatResult {
         output: String,
     },
     ParseFailed {
-        errors: Vec<Diagnostic>,
+        errors: Vec<Diagnostic<SyntaxError>>,
     },
     /// A formatter bug: layout dropped an input comment. No output; callers
     /// must leave the source untouched. `comment` is one of the lost ones.
@@ -47,7 +47,7 @@ pub enum FormatBug {
     LineEndLoop,
     Layout(verify::Mismatch),
     /// The output has an error the input didn't.
-    DoesNotReparse(Diagnostic),
+    DoesNotReparse(Diagnostic<SyntaxError>),
     TopLevelCount {
         output: usize,
         input: usize,
@@ -62,7 +62,7 @@ impl std::fmt::Display for FormatBug {
             FormatBug::DoesNotReparse(d) => write!(
                 f,
                 "output does not re-parse: {} at {}:{}",
-                d.message, d.span.start_line, d.span.start_column
+                d.problem, d.span.start_line, d.span.start_column
             ),
             FormatBug::TopLevelCount { output, input } => write!(
                 f,
@@ -124,10 +124,10 @@ fn format_at(input: &str, width: isize) -> FormatResult {
     let p = parser::new_parser_from_tokens(scanned_tokens, scanner_diagnostics);
     let result = p.parse_program();
 
-    let errors: Vec<Diagnostic> = result
+    let errors: Vec<Diagnostic<SyntaxError>> = result
         .diagnostics
         .into_iter()
-        .filter(|d| d.severity == Severity::Error)
+        .filter(|d| d.severity() == Severity::Error)
         .collect();
 
     if !errors.is_empty() {
@@ -195,7 +195,7 @@ fn format_at(input: &str, width: isize) -> FormatResult {
     if let Some(d) = reparsed
         .diagnostics
         .iter()
-        .find(|d| d.severity == Severity::Error)
+        .find(|d| d.severity() == Severity::Error)
     {
         return FormatResult::OutputInvalid(FormatBug::DoesNotReparse(d.clone()));
     }

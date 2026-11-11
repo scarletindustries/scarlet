@@ -9,6 +9,7 @@ use scarlet_types::name::{Name, TypeName};
 use scarlet_types::ty::{Type, TypeVar};
 
 use crate::env::Env;
+use crate::error::CheckError;
 use crate::index::{EntityKind, Site, Use, UseKind};
 use crate::report::Report;
 
@@ -52,7 +53,10 @@ impl AnnotVars {
                 .iter()
                 .any(|v| v.name.as_deref() == Some(p.name.as_str()))
             {
-                report.error(p.span, format!("Duplicate type parameter '{}'", p.name));
+                report.add(
+                    p.span,
+                    CheckError::DuplicateTypeParameter(p.name.as_str().into()),
+                );
                 continue;
             }
             vars.add(p.name.as_str().into());
@@ -125,8 +129,8 @@ impl<O: OwnTypes> Annotations<'_, '_, O> {
     pub fn read(&self, vars: &mut AnnotVars, t: &ast::TypeIdentifier, report: &mut Report) -> Type {
         match self.type_of(vars, t, report) {
             Ok(ty) => ty,
-            Err((span, msg)) => {
-                report.error(span, msg);
+            Err((span, e)) => {
+                report.add(span, e);
                 vars.placeholder()
             }
         }
@@ -146,7 +150,7 @@ impl<O: OwnTypes> Annotations<'_, '_, O> {
         vars: &mut AnnotVars,
         t: &ast::TypeIdentifier,
         report: &mut Report,
-    ) -> Result<Type, (Span, String)> {
+    ) -> Result<Type, (Span, CheckError)> {
         match &t.kind {
             ast::TypeKind::NamedType(nt) => self.named(vars, nt, t.span, report),
             ast::TypeKind::TupleType(tt) => {
@@ -166,11 +170,7 @@ impl<O: OwnTypes> Annotations<'_, '_, O> {
                     // A missing return type means "infer it", but nothing in
                     // a type's body is inferred.
                     None if vars.ctx == AnnotContext::TypeDefinition => {
-                        return Err((
-                            t.span,
-                            "A function type in a type definition must declare its return type, like `fn(Int) Int`"
-                                .to_string(),
-                        ));
+                        return Err((t.span, CheckError::FunctionTypeNeedsReturn));
                     }
                     None => vars.placeholder(),
                 };
@@ -185,22 +185,19 @@ impl<O: OwnTypes> Annotations<'_, '_, O> {
         nt: &ast::NamedType,
         span: Span,
         report: &mut Report,
-    ) -> Result<Type, (Span, String)> {
+    ) -> Result<Type, (Span, CheckError)> {
         let name = nt.identifier.name.as_str();
         let name_span = nt.identifier.span;
 
         if nt.qualifier.is_none() && !is_type_name(name) {
             if !nt.type_args.is_empty() {
-                return Err((
-                    span,
-                    format!("Type variable '{name}' cannot take arguments"),
-                ));
+                return Err((span, CheckError::TypeVariableWithArguments(name.into())));
             }
             if let Some(v) = vars.named.iter().find(|v| v.name.as_deref() == Some(name)) {
                 return Ok(Type::Var(v.clone()));
             }
             if vars.ctx != AnnotContext::Signature {
-                return Err((name_span, format!("Unknown type variable '{name}'")));
+                return Err((name_span, CheckError::UnknownTypeVariable(name.into())));
             }
             return Ok(vars.add(name.into()));
         }
@@ -209,33 +206,32 @@ impl<O: OwnTypes> Annotations<'_, '_, O> {
         for ta in &nt.type_args {
             args.push(self.type_of(vars, ta, report)?);
         }
-        let display = match &nt.qualifier {
-            Some(q) => format!("{}::{name}", q.name),
-            None => name.to_string(),
-        };
         let found = match &nt.qualifier {
             Some(q) => self.qualified(q, name),
             None => self.bare(name),
         };
         let Some(found) = found else {
-            let msg = match &nt.qualifier {
-                Some(q) => format!(
-                    "Unknown type '{display}'. Check that '{}' is imported and exports a type called '{name}'.",
-                    q.name
-                ),
-                None => self.unknown_bare(name),
+            let e = match &nt.qualifier {
+                Some(q) => CheckError::UnknownQualifiedType {
+                    qualifier: q.name.as_str().into(),
+                    name: name.into(),
+                },
+                None => CheckError::UnknownType {
+                    name: name.into(),
+                    exported_by: self.exporters(name),
+                },
             };
-            return Err((name_span, msg));
+            return Err((name_span, e));
         };
         if args.len() != found.arity {
-            let expected = found.arity;
             return Err((
                 span,
-                format!(
-                    "Type '{display}' expects {expected} type argument{}, got {}",
-                    if expected == 1 { "" } else { "s" },
-                    args.len()
-                ),
+                CheckError::TypeArity {
+                    qualifier: nt.qualifier.as_ref().map(|q| q.name.as_str().into()),
+                    name: name.into(),
+                    expected: found.arity,
+                    given: args.len(),
+                },
             ));
         }
         report.uses.push(Use {
@@ -281,8 +277,10 @@ impl<O: OwnTypes> Annotations<'_, '_, O> {
         Some(foreign(self.env.interface_of(&imp.key)?.public_type(name)?))
     }
 
-    fn unknown_bare(&self, name: &str) -> String {
-        let mut quoted: Vec<String> = self
+    /// The imports that export a public type `name`, by qualifier, in the
+    /// order a suggestion lists them.
+    fn exporters(&self, name: &str) -> Vec<Name> {
+        let mut out: Vec<Name> = self
             .env
             .imports
             .iter()
@@ -291,17 +289,10 @@ impl<O: OwnTypes> Annotations<'_, '_, O> {
                     .interface_of(&imp.key)
                     .is_some_and(|i| i.public_type(name).is_some())
             })
-            .map(|(q, _)| format!("'{q}::{name}'"))
+            .map(|(q, _)| q.clone())
             .collect();
-        quoted.sort();
-        match quoted.as_slice() {
-            [] => format!("Unknown type '{name}'"),
-            [one] => format!("Unknown type '{name}'. Did you mean {one}?"),
-            many => format!(
-                "Unknown type '{name}'. Did you mean one of {}?",
-                many.join(", ")
-            ),
-        }
+        out.sort_by_key(|q| format!("{q}::{name}"));
+        out
     }
 }
 

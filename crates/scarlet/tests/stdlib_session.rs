@@ -50,7 +50,7 @@ fn check_as(root: &Path, text: &str, base_dir: &Path, module: Vec<String>) -> Ve
                 d.source.as_ref().map_or("?", |s| s.key.as_str()),
                 d.span.start_line,
                 d.span.start_column,
-                d.message
+                d.message()
             )
         })
         .collect()

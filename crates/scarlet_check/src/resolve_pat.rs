@@ -11,6 +11,7 @@ use scarlet_types::interface::ValueKind;
 use scarlet_types::name::Name;
 
 use crate::env::Env;
+use crate::error::{CheckError, FieldSite};
 use crate::index::{EntityKind, UseKind};
 use crate::resolve::{CtorInfo, Number, Resolver, Walk, number};
 use crate::resolved::{RBinSegPat, RPatKind, RPattern};
@@ -69,10 +70,8 @@ impl Resolver<'_, '_> {
                 let bound = |r: &mut Self, n: &ast::NumberLiteral| match number(n, &mut r.report) {
                     Number::Int(i) => Some(i),
                     Number::Float(_) => {
-                        r.report.error(
-                            n.span,
-                            format!("Range pattern bound must be an integer, got '{}'", n.value),
-                        );
+                        r.report
+                            .add(n.span, CheckError::RangeBoundNotInt(n.value.clone()));
                         None
                     }
                 };
@@ -94,12 +93,10 @@ impl Resolver<'_, '_> {
                         ast::ArrayPatternElement::Pattern(p) => prefix.push(self.pat(p, pb, w)),
                         ast::ArrayPatternElement::Spread { binding, span: ssp } => {
                             if seen_spread {
-                                self.report
-                                    .error(*ssp, "An array pattern can only have one spread");
+                                self.report.add(*ssp, CheckError::TwoSpreads);
                                 ok = false;
                             } else if i != elements.len() - 1 {
-                                self.report
-                                    .error(*ssp, "The spread in an array pattern must come last");
+                                self.report.add(*ssp, CheckError::SpreadNotLast);
                                 ok = false;
                             }
                             seen_spread = true;
@@ -184,9 +181,9 @@ impl Resolver<'_, '_> {
             if let Some(OrFrame::Later { seen, .. }) = pb.ors.last() {
                 for name in pb.bound.keys() {
                     if canonical.contains(name) && !seen.contains(name) {
-                        self.report.error(
+                        self.report.add(
                             alt.span(),
-                            format!("Variable '{name}' must be bound in every alternative of this pattern"),
+                            CheckError::UnboundInSomeAlternative(name.clone()),
                         );
                     }
                 }
@@ -222,19 +219,13 @@ impl Resolver<'_, '_> {
                     .last()
                     .is_some_and(|f| matches!(f, OrFrame::First { seen } | OrFrame::Later { seen, .. } if seen.contains(&name)));
                 if in_alt {
-                    self.report.error(
-                        id.span,
-                        format!("Variable '{name}' is bound more than once in this pattern"),
-                    );
+                    self.report
+                        .add(id.span, CheckError::BoundTwice(name.clone()));
                     return None;
                 }
                 if !canonical.contains(&name) {
-                    self.report.error(
-                        id.span,
-                        format!(
-                            "Variable '{name}' is not bound in the first alternative of this pattern. Every alternative must bind the same names"
-                        ),
-                    );
+                    self.report
+                        .add(id.span, CheckError::NotInFirstAlternative(name.clone()));
                     return None;
                 }
                 let b = pb.bound.get(&name).copied()?;
@@ -245,10 +236,8 @@ impl Resolver<'_, '_> {
             }
             None => {
                 if pb.bound.contains_key(&name) {
-                    self.report.error(
-                        id.span,
-                        format!("Variable '{name}' is bound more than once in this pattern"),
-                    );
+                    self.report
+                        .add(id.span, CheckError::BoundTwice(name.clone()));
                     return None;
                 }
                 let b = self.bind(id, false);
@@ -281,13 +270,12 @@ impl Resolver<'_, '_> {
         };
         if c.labels.is_empty() {
             if !args.is_empty() {
-                self.report.error(
+                self.report.add(
                     span,
-                    format!(
-                        "Constructor '{}' takes no arguments but {} were given",
-                        name.name,
-                        args.len()
-                    ),
+                    CheckError::ConstructorTakesNoArguments {
+                        ctor: name.name.as_str().into(),
+                        given: args.len(),
+                    },
                 );
                 return RPatKind::Error;
             }
@@ -307,11 +295,7 @@ impl Resolver<'_, '_> {
                 }
             })
             .collect();
-        let by_pos = self.slot_ctor(
-            &c,
-            items,
-            (!rest).then_some((span, ". Use '..' to ignore them")),
-        );
+        let by_pos = self.slot_ctor(&c, items, (!rest).then_some((span, FieldSite::Pattern)));
         let fields = by_pos
             .into_iter()
             .map(|sub| match sub {
@@ -358,32 +342,28 @@ impl Resolver<'_, '_> {
                 scheme: v.scheme.clone(),
             });
         }
-        let qualified = self.env.qualified_spellings(&name.name);
-        let msg = if self.is_value_name(&name.name) {
-            format!(
-                "'{}' is not a constructor and cannot be used in a pattern",
-                name.name
-            )
+        let n: Name = name.name.as_str().into();
+        let e = if self.is_value_name(&name.name) {
+            CheckError::PatternNotConstructor(n)
         } else if self.defs.types.contains_key(name.name.as_str())
             || self
                 .env
                 .prelude
                 .is_some_and(|p| p.public_type(&name.name).is_some())
         {
-            format!(
-                "'{0}' is a type, not a constructor. To check a value's type and drop it, write `_ {0} = value`",
-                name.name
-            )
-        } else if !qualified.is_empty() {
-            format!(
-                "Unknown constructor '{}' in pattern. It is {}",
-                name.name,
-                qualified.join(" or ")
-            )
+            CheckError::PatternIsType(n)
         } else {
-            format!("Unknown constructor '{}' in pattern", name.name)
+            let qualifiers = self.env.qualifiers_with_ctor(&name.name);
+            if qualifiers.is_empty() {
+                CheckError::UnknownConstructor(n)
+            } else {
+                CheckError::UnknownConstructorElsewhere {
+                    name: n,
+                    qualifiers,
+                }
+            }
         };
-        self.report.error(name.span, msg);
+        self.report.add(name.span, e);
         None
     }
 
@@ -395,34 +375,32 @@ impl Resolver<'_, '_> {
         w: &Walk,
     ) -> Option<CtorInfo> {
         let Some(imp) = self.env.imports.get(&q.name) else {
-            self.report.error(
+            self.report.add(
                 name.span,
-                format!(
-                    "Unknown module qualifier '{}'. Import the module first",
-                    q.name
-                ),
+                CheckError::UnknownQualifier(q.name.as_str().into()),
             );
             return None;
         };
         let key = imp.key.clone();
         let module = self.env.imports.module_name(&key);
         let Some(iface) = self.env.interface_of(&key) else {
-            self.report.error(
+            self.report.add(
                 name.span,
-                format!("Module '{module}' has no constructor '{}'", name.name),
+                CheckError::NoConstructorInModule {
+                    module,
+                    name: name.name.as_str().into(),
+                },
             );
             return None;
         };
         let Some(v) = iface.values.get(name.name.as_str()) else {
-            let msg = if iface.private_names.contains(name.name.as_str()) {
-                format!(
-                    "Constructor '{}' is private in module '{module}'",
-                    name.name
-                )
+            let n: Name = name.name.as_str().into();
+            let e = if iface.private_names.contains(name.name.as_str()) {
+                CheckError::PrivateConstructor { module, name: n }
             } else {
-                format!("Module '{module}' has no constructor '{}'", name.name)
+                CheckError::NoConstructorInModule { module, name: n }
             };
-            self.report.error(name.span, msg);
+            self.report.add(name.span, e);
             return None;
         };
         let ValueKind::Constructor {
@@ -431,12 +409,12 @@ impl Resolver<'_, '_> {
             labels,
         } = &v.kind
         else {
-            self.report.error(
+            self.report.add(
                 name.span,
-                format!(
-                    "'{module}::{}' is not a constructor and cannot be used in a pattern",
-                    name.name
-                ),
+                CheckError::QualifiedNotConstructor {
+                    module,
+                    name: name.name.as_str().into(),
+                },
             );
             return None;
         };

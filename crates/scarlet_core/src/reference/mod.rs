@@ -29,6 +29,7 @@ pub mod rename;
 pub mod unused;
 pub mod uri;
 
+pub use unused::UnusedDef;
 pub use uri::path_to_uri;
 
 pub use scarlet_check::index::EntityKind;

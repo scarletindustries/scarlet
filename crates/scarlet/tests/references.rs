@@ -49,10 +49,10 @@ fn unused_msgs(s: &Checked) -> Vec<String> {
     assert!(
         hints
             .iter()
-            .all(|d| d.severity == scarlet::diagnostic::Severity::Hint),
+            .all(|d| d.severity() == scarlet::diagnostic::Severity::Hint),
         "unused diagnostics must be Hints: {hints:?}"
     );
-    hints.into_iter().map(|d| d.message).collect()
+    hints.into_iter().map(|d| d.message()).collect()
 }
 
 #[test]

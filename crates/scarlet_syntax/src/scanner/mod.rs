@@ -1,6 +1,10 @@
 use std::ops::Range;
 
-use crate::diagnostic::{Diagnostic, DiagnosticCode};
+mod error;
+
+pub use error::{Radix, ScanError};
+
+use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 use crate::token::{self, Kind, Token, Trivia};
 
@@ -36,7 +40,7 @@ pub struct Scanner {
     pos: i32,
     column: i32,
     line: i32,
-    diagnostics: Vec<Diagnostic>,
+    diagnostics: Vec<Diagnostic<ScanError>>,
     pending_trivia: Vec<Trivia>,
     token_start_column: i32,
     token_start_line: i32,
@@ -59,12 +63,12 @@ pub fn new_scanner(input: impl Into<String>) -> Scanner {
 }
 
 impl Scanner {
-    fn add_error(&mut self, message: String) {
-        self.diagnostics.push(Diagnostic::error(
-            Span::point(self.line, self.column),
-            DiagnosticCode::ParseError,
-            message,
-        ));
+    fn add_error(&mut self, error: ScanError) {
+        self.error_at(Span::point(self.line, self.column), error);
+    }
+
+    fn error_at(&mut self, at: Span, error: ScanError) {
+        self.diagnostics.push(Diagnostic::new(at, error));
     }
 
     fn in_interp_string(&self) -> bool {
@@ -178,11 +182,10 @@ impl Scanner {
                         self.incr_pos();
                     }
                     // Anchor at the opening `/*`; the cursor is at EOF.
-                    self.diagnostics.push(Diagnostic::error(
+                    self.error_at(
                         Span::point(start_line, start_column),
-                        DiagnosticCode::UnexpectedEof,
-                        "This block comment is never closed. End it with `*/`".to_string(),
-                    ));
+                        ScanError::UnclosedBlockComment,
+                    );
                 }
 
                 let text = self.slice(start, self.pos);
@@ -220,11 +223,10 @@ impl Scanner {
             // At EOF inside `${ ... }`, every frame still on the stack is an
             // unclosed string, reported at its own opening quote.
             while let Some(frame) = self.interp_stack.pop() {
-                self.diagnostics.push(Diagnostic::error(
+                self.error_at(
                     Span::point(frame.start_line, frame.start_column),
-                    DiagnosticCode::UnexpectedEof,
-                    "This string is never closed. End it with a matching quote".to_string(),
-                ));
+                    ScanError::UnclosedInterpolation,
+                );
             }
             return self.new_token(Kind::Eof);
         }
@@ -295,11 +297,10 @@ impl Scanner {
                 if next == 0 || next == b'\n' || next == b'\r' {
                     // Anchor at the opening quote, one byte before the body:
                     // the cursor sits at the line end or EOF.
-                    self.diagnostics.push(Diagnostic::error(
+                    self.error_at(
                         Span::point(start_line, start_col - 1),
-                        DiagnosticCode::ParseError,
-                        "This string is never closed. End it with a matching quote".to_string(),
-                    ));
+                        ScanError::UnclosedString,
+                    );
                     return self.new_token(Kind::Error(utf8(result).into()));
                 }
 
@@ -405,17 +406,17 @@ impl Scanner {
                         self.incr_pos();
                     }
                     let text = self.slice(start, self.pos);
-                    self.add_error(format!("Unexpected character '{text}'"));
+                    self.add_error(ScanError::UnexpectedChar(text.to_string()));
                     self.new_token(Kind::Error(text.into()))
                 } else {
-                    self.add_error(format!("Unexpected character '{}'", ch as char));
+                    self.add_error(ScanError::UnexpectedChar((ch as char).to_string()));
                     self.new_token(Kind::Error((ch as char).to_string().into()))
                 }
             }
         }
     }
 
-    pub fn scan_all(&mut self) -> (Vec<Token>, Vec<Diagnostic>) {
+    pub fn scan_all(&mut self) -> (Vec<Token>, Vec<Diagnostic<ScanError>>) {
         let mut tokens = Vec::new();
 
         loop {
@@ -518,7 +519,11 @@ impl Scanner {
             }
         }
 
-        let name = if radix == 16 { "hex" } else { "binary" };
+        let name = if radix == 16 {
+            Radix::Hex
+        } else {
+            Radix::Binary
+        };
         if digits == 0 {
             // Swallow a following name or digit run so `0xZ` / `0b2` is one
             // error, not `0x` plus a stray identifier.
@@ -527,7 +532,7 @@ impl Scanner {
                     self.incr_pos();
                 }
             }
-            self.add_error(format!("{name} literal has no digits"));
+            self.add_error(ScanError::NoDigits(name));
             let text = self.slice(start, self.pos);
             return self.new_token(Kind::Error(text.into()));
         }
@@ -538,7 +543,7 @@ impl Scanner {
             while self.peek_char().is_ascii_alphanumeric() || self.peek_char() == b'_' {
                 self.incr_pos();
             }
-            self.add_error(format!("invalid digit in {name} literal"));
+            self.add_error(ScanError::BadDigit(name));
             let text = self.slice(start, self.pos);
             return self.new_token(Kind::Error(text.into()));
         }
@@ -603,15 +608,10 @@ impl Scanner {
                     while (0x80..=0xBF).contains(&self.byte_at(end)) {
                         end += 1;
                     }
-                    self.add_error(format!(
-                        "Unknown escape sequence '\\{}'. Write '\\\\' for a backslash",
-                        self.slice(start, end)
-                    ));
+                    let escape = self.slice(start, end).to_string();
+                    self.add_error(ScanError::UnknownEscape(escape));
                 } else {
-                    self.add_error(format!(
-                        "Unknown escape sequence '\\{}'. Write '\\\\' for a backslash",
-                        peeked as char
-                    ));
+                    self.add_error(ScanError::UnknownEscape((peeked as char).to_string()));
                 }
                 out.push(peeked);
             }
@@ -630,7 +630,7 @@ impl Scanner {
         const REPLACEMENT_CHARACTER: char = '\u{FFFD}';
 
         if self.peek_char() != b'{' {
-            self.add_error("Expected '{' after '\\u', like '\\u{E9}'".to_string());
+            self.add_error(ScanError::UnicodeEscapeWithoutBrace);
             out.push(b'u');
             return;
         }
@@ -643,9 +643,9 @@ impl Scanner {
         let digits = self.slice(digits_start, self.pos);
 
         if self.peek_char() != b'}' {
-            self.add_error(format!(
-                "The '\\u{{{digits}' escape is never closed. End it with '}}'",
-            ));
+            self.add_error(ScanError::UnclosedUnicodeEscape {
+                digits: digits.to_string(),
+            });
             let mut buf = [0u8; 4];
             out.extend_from_slice(REPLACEMENT_CHARACTER.encode_utf8(&mut buf).as_bytes());
             return;
@@ -653,9 +653,7 @@ impl Scanner {
         self.incr_pos();
 
         if digits.is_empty() {
-            self.add_error(
-                "The '\\u{}' escape is empty. Put hex digits inside, like '\\u{E9}'".to_string(),
-            );
+            self.add_error(ScanError::EmptyUnicodeEscape);
             let mut buf = [0u8; 4];
             out.extend_from_slice(REPLACEMENT_CHARACTER.encode_utf8(&mut buf).as_bytes());
             return;
@@ -670,10 +668,9 @@ impl Scanner {
                 out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
             }
             None => {
-                self.add_error(format!(
-                    "'\\u{{{digits}}}' is not a Unicode scalar value, because it is above \
-                     U+10FFFF or in the surrogate range U+D800 to U+DFFF",
-                ));
+                self.add_error(ScanError::NotAScalarValue {
+                    digits: digits.to_string(),
+                });
                 let mut buf = [0u8; 4];
                 out.extend_from_slice(REPLACEMENT_CHARACTER.encode_utf8(&mut buf).as_bytes());
             }
@@ -697,11 +694,7 @@ impl Scanner {
                     .last()
                     .map(|f| Span::point(f.start_line, f.start_column))
                     .unwrap_or_else(|| Span::point(self.line, self.column));
-                self.diagnostics.push(Diagnostic::error(
-                    anchor,
-                    DiagnosticCode::ParseError,
-                    "This string is never closed. End it with a matching quote".to_string(),
-                ));
+                self.error_at(anchor, ScanError::UnclosedString);
                 self.exit_interp_string();
                 return self.new_token(Kind::Error(utf8(result).into()));
             }
@@ -776,7 +769,7 @@ mod tests {
     use crate::token::Keyword as Kw;
     use Kind::*;
 
-    fn scan(src: &str) -> (Vec<Token>, Vec<Diagnostic>) {
+    fn scan(src: &str) -> (Vec<Token>, Vec<Diagnostic<ScanError>>) {
         new_scanner(src).scan_all()
     }
 
@@ -1077,17 +1070,17 @@ mod tests {
         let (toks, diags) = scan("0x");
         assert!(matches!(toks[0].kind, Error(_)));
         assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("hex literal has no digits"));
+        assert!(diags[0].message().contains("hex literal has no digits"));
 
         let (toks, diags) = scan("0b2");
         assert!(matches!(toks[0].kind, Error(_)));
         assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("binary literal has no digits"));
+        assert!(diags[0].message().contains("binary literal has no digits"));
 
         let (toks, diags) = scan("0xFFG");
         assert!(matches!(toks[0].kind, Error(_)));
         assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("invalid digit in hex literal"));
+        assert!(diags[0].message().contains("invalid digit in hex literal"));
     }
 
     #[test]
@@ -1142,7 +1135,7 @@ mod tests {
         let (_, diags) = scan("x = 1\n  /** oops\nmore text\n");
         assert_eq!(diags.len(), 1);
         assert_eq!(
-            diags[0].message,
+            diags[0].message(),
             "This block comment is never closed. End it with `*/`"
         );
         // Line 1, column 2: the `/` of the `/**`, not EOF on line 3.
@@ -1206,7 +1199,7 @@ mod tests {
         assert!(
             diags
                 .iter()
-                .any(|d| d.message.contains("This string is never closed"))
+                .any(|d| d.message().contains("This string is never closed"))
         );
     }
 
@@ -1257,11 +1250,11 @@ mod tests {
         assert!(
             diags
                 .iter()
-                .any(|d| d.message.contains("This string is never closed")),
+                .any(|d| d.message().contains("This string is never closed")),
             "diagnostics: {diags:?}"
         );
         assert!(
-            !diags.iter().any(|d| d.message.contains("Unknown escape")),
+            !diags.iter().any(|d| d.message().contains("Unknown escape")),
             "the newline must not be treated as an escape body: {diags:?}"
         );
         let ks: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
@@ -1274,7 +1267,7 @@ mod tests {
         let (toks, diags) = scan("x = '\\");
         assert_eq!(*toks.last().map(|t| t.kind.clone()).as_ref().unwrap(), Eof);
         assert_eq!(diags.len(), 1, "diagnostics: {diags:?}");
-        assert!(diags[0].message.contains("This string is never closed"));
+        assert!(diags[0].message().contains("This string is never closed"));
     }
 
     #[test]
@@ -1322,7 +1315,7 @@ mod tests {
         assert!(
             diags
                 .iter()
-                .any(|d| d.message.contains("This string is never closed")),
+                .any(|d| d.message().contains("This string is never closed")),
             "diagnostics: {diags:?}"
         );
         let ks: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
@@ -1335,7 +1328,7 @@ mod tests {
         // Anchored at the opening quote (line 0, column 4), not at EOF.
         let (_, diags) = scan("x = 'abc");
         assert_eq!(diags.len(), 1, "diagnostics: {diags:?}");
-        assert!(diags[0].message.contains("This string is never closed"));
+        assert!(diags[0].message().contains("This string is never closed"));
         assert_eq!(
             (diags[0].span.start_line, diags[0].span.start_column),
             (0, 4)
@@ -1349,7 +1342,7 @@ mod tests {
         let (_, diags) = scan("x = 'a${b} cd");
         let unterminated: Vec<_> = diags
             .iter()
-            .filter(|d| d.message.contains("This string is never closed"))
+            .filter(|d| d.message().contains("This string is never closed"))
             .collect();
         assert_eq!(unterminated.len(), 1, "diagnostics: {diags:?}");
         assert_eq!(
@@ -1369,7 +1362,7 @@ mod tests {
         assert_eq!(*toks.last().map(|t| t.kind.clone()).as_ref().unwrap(), Eof);
         let unterminated: Vec<_> = diags
             .iter()
-            .filter(|d| d.message.contains("This string is never closed"))
+            .filter(|d| d.message().contains("This string is never closed"))
             .collect();
         assert_eq!(unterminated.len(), 1, "diagnostics: {diags:?}");
         // Anchored at the opening quote (line 0, column 4), not at EOF.
@@ -1388,7 +1381,7 @@ mod tests {
         let (_, diags) = scan("'${\"${a");
         let cols: Vec<i32> = diags
             .iter()
-            .filter(|d| d.message.contains("This string is never closed"))
+            .filter(|d| d.message().contains("This string is never closed"))
             .map(|d| d.span.start_column)
             .collect();
         assert_eq!(cols.len(), 2, "diagnostics: {diags:?}");
@@ -1424,7 +1417,7 @@ mod tests {
         assert!(
             diags
                 .iter()
-                .any(|d| d.message.contains("Unknown escape sequence '\\q'")),
+                .any(|d| d.message().contains("Unknown escape sequence '\\q'")),
             "diagnostics: {diags:?}"
         );
     }
@@ -1457,14 +1450,16 @@ mod tests {
         let ks: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
         assert!(ks.contains(&lit("u41}")), "tokens: {ks:?}");
         assert!(
-            diags.iter().any(|d| d.message.contains("Expected '{'")),
+            diags.iter().any(|d| d.message().contains("Expected '{'")),
             "diagnostics: {diags:?}"
         );
 
         // No closing '}'.
         let (_, diags) = scan("'\\u{41'");
         assert!(
-            diags.iter().any(|d| d.message.contains("is never closed")),
+            diags
+                .iter()
+                .any(|d| d.message().contains("is never closed")),
             "diagnostics: {diags:?}"
         );
 
@@ -1475,7 +1470,7 @@ mod tests {
         assert!(
             diags
                 .iter()
-                .any(|d| d.message.contains("The '\\u{}' escape is empty")),
+                .any(|d| d.message().contains("The '\\u{}' escape is empty")),
             "diagnostics: {diags:?}"
         );
 
@@ -1484,7 +1479,9 @@ mod tests {
         let ks: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
         assert!(ks.contains(&lit("\u{FFFD}")), "tokens: {ks:?}");
         assert!(
-            diags.iter().any(|d| d.message.contains("surrogate range")),
+            diags
+                .iter()
+                .any(|d| d.message().contains("surrogate range")),
             "diagnostics: {diags:?}"
         );
 
@@ -1493,7 +1490,7 @@ mod tests {
         let ks: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
         assert!(ks.contains(&lit("\u{FFFD}")), "tokens: {ks:?}");
         assert!(
-            diags.iter().any(|d| d.message.contains("U+10FFFF")),
+            diags.iter().any(|d| d.message().contains("U+10FFFF")),
             "diagnostics: {diags:?}"
         );
     }

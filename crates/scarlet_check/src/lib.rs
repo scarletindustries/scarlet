@@ -20,6 +20,7 @@
 mod annot;
 mod declare;
 mod env;
+pub mod error;
 mod finalise;
 pub mod index;
 mod infer;
@@ -37,6 +38,7 @@ use scarlet_syntax::diagnostic::Diagnostic;
 use scarlet_types::interface::Interface;
 use scarlet_types::name::ModuleKey;
 
+pub use error::CheckError;
 pub use index::SourceIndex;
 pub use typed::TypedModule;
 
@@ -104,7 +106,7 @@ pub struct CheckedModule {
     pub interface: Interface,
     /// `Some` only when the module has no errors.
     pub clean: Option<CleanModule>,
-    pub diagnostics: Vec<Diagnostic>,
+    pub diagnostics: Vec<Diagnostic<CheckError>>,
     pub index: SourceIndex,
 }
 

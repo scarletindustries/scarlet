@@ -17,7 +17,9 @@ use crate::ast;
 use crate::build::{self, Analysis, Build, Entry, Origin};
 use crate::check::{Role, UnusedBindings};
 use crate::diagnostic::{self, Diagnostic};
+use crate::issue::Issue;
 use crate::module::{self, ModuleKey, ModulePath};
+use crate::parser::SyntaxError;
 use crate::reference::{self, ModuleId, ReferenceGraph};
 use crate::source::SourceFile;
 use crate::sources::{DiskSources, Sources, Text};
@@ -43,7 +45,7 @@ fn owning_root(workspace_roots: &[PathBuf], path: &Path) -> (PathBuf, Option<Pat
 /// A buffer's text and what the parser said about it.
 struct Document {
     text: Text,
-    syntax: Vec<Diagnostic>,
+    syntax: Vec<Diagnostic<SyntaxError>>,
 }
 
 impl Document {
@@ -594,13 +596,11 @@ impl Workspace {
                 }
             }
         }
-        let mut by_module: HashMap<&ModuleKey, Vec<&Diagnostic>> = HashMap::new();
+        let mut by_module: HashMap<ModuleKey, Vec<Diagnostic<Issue>>> = HashMap::new();
         for m in &reach {
             for d in m.diagnostics() {
-                by_module
-                    .entry(d.source.as_ref().map_or(m.key(), |s| &s.key))
-                    .or_default()
-                    .push(d);
+                let key = d.source.as_ref().map_or(m.key(), |s| &s.key).clone();
+                by_module.entry(key).or_default().push(d);
             }
         }
         let mut out = Vec::new();
@@ -618,15 +618,13 @@ impl Workspace {
             let diags: Vec<Json> = if diagnostic::has_errors(&doc.syntax) {
                 doc.syntax.iter().map(diagnostic_to_json).collect()
             } else {
-                let unused = root.graph().unused_diagnostics_for(&path_of(k));
-                by_module
-                    .get(k)
+                let unused = root
+                    .graph()
+                    .unused_diagnostics_for(&path_of(k))
                     .into_iter()
-                    .flatten()
-                    .copied()
-                    .chain(&unused)
-                    .map(diagnostic_to_json)
-                    .collect()
+                    .map(|d| d.map(Issue::Unused));
+                let own = by_module.get(k).into_iter().flatten().cloned();
+                own.chain(unused).map(|d| diagnostic_to_json(&d)).collect()
             };
             out.push((uri, diags));
         }

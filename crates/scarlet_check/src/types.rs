@@ -18,6 +18,7 @@ use scarlet_types::ty::{Scheme, Type, TypeVar};
 use crate::annot::{AnnotContext, AnnotVars, Annotations, NamedType, OwnTypes};
 use crate::declare::{Declared, TypeDecl};
 use crate::env::Env;
+use crate::error::CheckError;
 use crate::index::{Def, DefKind, EntityKind};
 use crate::report::Report;
 
@@ -230,12 +231,9 @@ fn alias_order<'a>(
         if cyclic {
             for n in &component {
                 let (td, _, _) = aliases[n.index()];
-                report.error(
+                report.add(
                     td.identifier.span,
-                    format!(
-                        "Recursive type alias '{}'. An alias can't refer back to itself",
-                        td.identifier.name
-                    ),
+                    CheckError::RecursiveAlias(td.identifier.name.as_str().into()),
                 );
             }
             continue;

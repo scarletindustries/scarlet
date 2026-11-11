@@ -224,7 +224,12 @@ impl Args for FmtArgs {
 }
 
 /// Prints any diagnostics, then exits if there were some and `fail` is set.
-fn report(diagnostics: &[diagnostic::Diagnostic], fail: bool, file: &str, entrypoint: &str) {
+fn report<P: diagnostic::Problem>(
+    diagnostics: &[diagnostic::Diagnostic<P>],
+    fail: bool,
+    file: &str,
+    entrypoint: &str,
+) {
     if !diagnostics.is_empty() {
         diagnostic::print_diagnostics(diagnostics, file, entrypoint);
         if fail {
@@ -290,10 +295,13 @@ fn find_scarlet_files(path: &str) -> io::Result<Vec<PathBuf>> {
 }
 
 /// Spans are 0-indexed, but `fmt` prints 1-indexed positions for both files and stdin.
-fn render_fmt_diagnostic(path: impl std::fmt::Display, d: &diagnostic::Diagnostic) -> String {
+fn render_fmt_diagnostic<P: diagnostic::Problem>(
+    path: impl std::fmt::Display,
+    d: &diagnostic::Diagnostic<P>,
+) -> String {
     let line = d.span.start_line + 1;
     let col = d.span.start_column + 1;
-    format!("{path}:{line}:{col}: {}", d.message)
+    format!("{path}:{line}:{col}: {}", d.problem)
 }
 
 fn dump_tokens(src: &str) {
@@ -310,7 +318,7 @@ fn dump_tokens(src: &str) {
             "Scan error: {}:{}: {}",
             d.span.start_line + 1,
             d.span.start_column + 1,
-            d.message
+            d.problem
         );
     }
 }
