@@ -112,7 +112,7 @@ The body follows the root node's kind:
 
 ### Refusals
 
-- A count is checked against the bytes left before anything is allocated. A huge count on short input is `Malformed(offset, what)`, never an allocation. An uninhabited element counts as one byte here.
+- A count is checked against the bytes left before anything is allocated. A huge count on short input is `Malformed(offset, why)`, never an allocation. An uninhabited element counts as one byte here.
 - Input too short for the value is `Truncated`.
 - A whole value followed by more bytes is `TrailingBytes(count)`. A caller that frames its own messages has lost sync.
 - **An identity** is checked in this order:

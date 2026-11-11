@@ -60,9 +60,15 @@ pub type Crash {
 	ForeignReceive
 	// The runtime met a value of the wrong type, which means a compiler bug.
 	TypeMismatch(op String, expected String, got String)
-	// The tree refused a declaration, such as one into a supervisor this
-	// process didn't create.
-	Supervision(why String)
+	// The tree refused a declaration.
+	Supervision(refusal SupervisionRefusal)
+}
+
+// Why the supervision tree refused a declaration.
+pub type SupervisionRefusal {
+	// Only the process that created a supervisor or factory may declare into
+	// it.
+	NotCreator
 }
 
 pub type Down {

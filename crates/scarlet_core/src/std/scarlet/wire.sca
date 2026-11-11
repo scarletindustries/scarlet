@@ -25,12 +25,37 @@ pub type DecodeError {
 	// types' fingerprints.
 	SchemaMismatch(expected Int, found Int)
 	// The bytes don't hold a value of the type. `offset` is where it went
-	// wrong.
-	Malformed(offset Int, what String)
+	// wrong, and `why` says what was wrong there.
+	Malformed(offset Int, why Malformation)
 	// A whole value was followed by more bytes. This usually means a caller
 	// that frames messages has lost sync.
 	TrailingBytes(count Int)
 	// The bytes hold a handle or closure from another run. `expected` is this
 	// run's identity and `found` is the one in the bytes.
 	OtherRun(expected Binary, found Binary)
+}
+
+// What was wrong at the offset of a `Malformed`.
+pub type Malformation {
+	// A count is larger than the bytes left could hold.
+	CountTooLarge
+	// A handle's kind is one the type doesn't allow.
+	WrongHandleKind
+	// A handle's id is too big for its kind.
+	IdTooLarge
+	// A closure's function index names no function.
+	NoSuchFunction
+	// A closure's function takes a different number of arguments than its
+	// type says.
+	ArityMismatch
+	// A closure's capture count isn't its function's.
+	CaptureCountMismatch
+	// A capture's tag isn't in the capture table.
+	UnknownCaptureTag
+	// A variant tag names no variant of the type.
+	UnknownVariant
+	// A `Bool` byte is neither 0 nor 1.
+	NotABool
+	// The type has no values, so no bytes can hold one.
+	Uninhabited
 }

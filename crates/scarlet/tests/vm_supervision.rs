@@ -270,6 +270,7 @@ fn only_the_creator_may_declare_into_a_supervisor() {
     let out = run(
         "creator_rule",
         r#"import scarlet/process
+import scarlet/string
 
 fn kill_repeatedly(sup process::Supervised, n Int) Nil {
 	if n > 0 {
@@ -296,7 +297,7 @@ pub fn main() {
 	})
 	_ = process::monitor(intruder, downs, fn(d) d)
 	match process::receive(downs).reason {
-		process::Crashed(process::Supervision(why)) -> println('refused: ${why}')
+		process::Crashed(process::Supervision(why)) -> println('refused: ${string::inspect(why)}')
 		process::Crashed(process::IndexOutOfBounds(..) | process::SliceOutOfBounds(..) | process::ForeignReceive | process::TypeMismatch(..))
 		| process::Normal
 		| process::NoProcess
@@ -312,8 +313,7 @@ pub fn main() {
 "#,
     );
     assert_eq!(
-        out.stdout,
-        "refused: only the process that created a supervisor or factory may declare into it\ndeclared: 1\n",
+        out.stdout, "refused: NotCreator\ndeclared: 1\n",
         "--- stderr ---\n{}",
         out.stderr
     );

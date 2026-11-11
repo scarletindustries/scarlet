@@ -241,7 +241,7 @@ fn a_closure_from_another_run_is_refused_with_other_run() {
          \t\t\tprintln(theirs == zeros)\n\
          \t\t\tprintln(mine == theirs)\n\
          \t\t}\n\
-         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(_) | wire::Malformed(_) | wire::TrailingBytes(_)) -> println('some other refusal')\n\
+         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(..) | wire::Malformed(..) | wire::TrailingBytes(_)) -> println('some other refusal')\n\
          \t}\n\
          }\n",
         "True\nTrue\nFalse\n",
@@ -258,6 +258,7 @@ fn a_closure_from_another_run_is_refused_with_other_run() {
 fn a_tampered_function_index_is_malformed_not_a_panic() {
     run_outputs(
         "import scarlet/binary\n\
+         import scarlet/string\n\
          import scarlet/wire\n\
          fn apply(f fn(Int) Int, x Int) Int {\n\
          \tf(x)\n\
@@ -272,12 +273,12 @@ fn a_tampered_function_index_is_malformed_not_a_panic() {
          \t\tOk(g) -> println(apply(g, 1))\n\
          \t\tErr(wire::Malformed(offset, what)) -> {\n\
          \t\t\tprintln(offset)\n\
-         \t\t\tprintln(what)\n\
+         \t\t\tprintln(string::inspect(what))\n\
          \t\t}\n\
-         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(_) | wire::TrailingBytes(_) | wire::OtherRun(_)) -> println('some other refusal')\n\
+         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(..) | wire::TrailingBytes(_) | wire::OtherRun(..)) -> println('some other refusal')\n\
          \t}\n\
          }\n",
-        "True\n27\nclosure function index out of range\n",
+        "True\n27\nNoSuchFunction\n",
     );
 }
 
@@ -289,6 +290,7 @@ fn a_tampered_function_index_is_malformed_not_a_panic() {
 fn a_tampered_capture_count_is_malformed() {
     run_outputs(
         "import scarlet/binary\n\
+         import scarlet/string\n\
          import scarlet/wire\n\
          fn apply(f fn(Int) Int, x Int) Int {\n\
          \tf(x)\n\
@@ -301,12 +303,12 @@ fn a_tampered_capture_count_is_malformed() {
          \t\tOk(g) -> println(apply(g, 1))\n\
          \t\tErr(wire::Malformed(offset, what)) -> {\n\
          \t\t\tprintln(offset == size - 1)\n\
-         \t\t\tprintln(what)\n\
+         \t\t\tprintln(string::inspect(what))\n\
          \t\t}\n\
-         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(_) | wire::TrailingBytes(_) | wire::OtherRun(_)) -> println('some other refusal')\n\
+         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(..) | wire::TrailingBytes(_) | wire::OtherRun(..)) -> println('some other refusal')\n\
          \t}\n\
          }\n",
-        "True\nclosure capture count does not match its function\n",
+        "True\nCaptureCountMismatch\n",
     );
 }
 
@@ -320,6 +322,7 @@ fn a_tampered_capture_count_is_malformed() {
 fn a_capture_count_short_of_the_functions_is_malformed() {
     run_outputs(
         "import scarlet/binary\n\
+         import scarlet/string\n\
          import scarlet/wire\n\
          fn apply(f fn(Int) Int, x Int) Int {\n\
          \tf(x)\n\
@@ -335,12 +338,12 @@ fn a_capture_count_short_of_the_functions_is_malformed() {
          \t\tOk(g) -> println(apply(g, 1))\n\
          \t\tErr(wire::Malformed(offset, what)) -> {\n\
          \t\t\tprintln(offset == size - 3)\n\
-         \t\t\tprintln(what)\n\
+         \t\t\tprintln(string::inspect(what))\n\
          \t\t}\n\
-         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(_) | wire::TrailingBytes(_) | wire::OtherRun(_)) -> println('some other refusal')\n\
+         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(..) | wire::TrailingBytes(_) | wire::OtherRun(..)) -> println('some other refusal')\n\
          \t}\n\
          }\n",
-        "True\nTrue\nclosure capture count does not match its function\n",
+        "True\nTrue\nCaptureCountMismatch\n",
     );
 }
 
@@ -352,6 +355,7 @@ fn a_capture_count_short_of_the_functions_is_malformed() {
 fn a_tampered_capture_tag_is_malformed() {
     run_outputs(
         "import scarlet/binary\n\
+         import scarlet/string\n\
          import scarlet/wire\n\
          fn apply(f fn(Int) Int, x Int) Int {\n\
          \tf(x)\n\
@@ -367,11 +371,11 @@ fn a_tampered_capture_tag_is_malformed() {
          \t\tOk(g) -> println(apply(g, 1))\n\
          \t\tErr(wire::Malformed(offset, what)) -> {\n\
          \t\t\tprintln(offset == size - 2)\n\
-         \t\t\tprintln(what)\n\
+         \t\t\tprintln(string::inspect(what))\n\
          \t\t}\n\
-         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(_) | wire::TrailingBytes(_) | wire::OtherRun(_)) -> println('some other refusal')\n\
+         \t\tErr(wire::Truncated | wire::NotWire | wire::SchemaMismatch(..) | wire::TrailingBytes(_) | wire::OtherRun(..)) -> println('some other refusal')\n\
          \t}\n\
          }\n",
-        "True\nTrue\ncapture tag is not in the table\n",
+        "True\nTrue\nUnknownCaptureTag\n",
     );
 }
