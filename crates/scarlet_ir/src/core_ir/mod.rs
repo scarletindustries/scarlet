@@ -613,34 +613,6 @@ impl CoreExpr {
             }
         }
     }
-
-    /// The `(bind, entry-frame slot)` pairs pinned on this expression's
-    /// outermost `Let`/`LetJoin` spine, in binding order.
-    ///
-    /// This only means something on a module's top level, where every module
-    /// declaration is a binding on the spine. The walk steps over the `Drop`s
-    /// Perceus put between them and stops where control flow first splits.
-    /// The slots are stored only on the binds, so nothing can disagree with
-    /// them.
-    pub fn toplevel_globals(&self) -> Vec<(LocalId, GlobalSlot)> {
-        let mut out = Vec::new();
-        let mut cur = self;
-        loop {
-            match cur {
-                CoreExpr::Let { bind, body, .. } | CoreExpr::LetJoin { bind, body, .. } => {
-                    if let Some(slot) = bind.global {
-                        out.push((bind.id, slot));
-                    }
-                    cur = body;
-                }
-                CoreExpr::Drop { body, .. } | CoreExpr::LetCont { body, .. } => cur = body,
-                CoreExpr::Match { .. }
-                | CoreExpr::If { .. }
-                | CoreExpr::Tail(_)
-                | CoreExpr::Goto(_) => return out,
-            }
-        }
-    }
 }
 
 /// One lowered function. Its name travels beside it, on [`LoweredFn`].

@@ -11,7 +11,7 @@
 //! It runs between `lower` and `perceus`, so Perceus never sees a Bool as a
 //! constructor and never marks one's drop as a cell to reuse.
 
-use super::{Atom, CoreExpr, CoreFn, CorePat, LocalId, VariantRef};
+use super::{Atom, CoreBind, CoreExpr, CoreFn, CorePat, JoinId, LocalId, ReuseShape, VariantRef};
 use crate::typed_ir::RTy;
 
 /// The prelude's constructors that are immediates.
@@ -32,7 +32,7 @@ enum Test {
 }
 
 impl Immediates {
-    fn atom(&self, v: VariantRef) -> Option<Atom> {
+    fn immediate(&self, v: VariantRef) -> Option<Atom> {
         if v == self.true_ {
             Some(Atom::Bool(true))
         } else if v == self.false_ {
@@ -77,101 +77,172 @@ impl Immediates {
     }
 }
 
-/// Rewrite `f` in place.
-pub(crate) fn rewrite(f: &mut CoreFn, im: &Immediates) {
-    let mut work = vec![&mut f.body];
-    while let Some(e) = work.pop() {
-        if let CoreExpr::Match { arms, .. } = e
-            && let Some(taken) = im.arms_taken(arms)
-        {
-            let old = std::mem::replace(e, CoreExpr::Tail(Atom::Nil));
-            if let CoreExpr::Match { scrut, arms, ty } = old {
-                *e = branch(scrut, arms, ty, taken);
-            }
-            work.push(e);
-            continue;
-        }
-        match e {
-            CoreExpr::Let { rhs, body, .. } => {
-                immediate(rhs, im);
-                work.push(body);
-            }
-            CoreExpr::Tail(atom) => immediate(atom, im),
-            CoreExpr::LetJoin { join, body, .. }
-            | CoreExpr::LetCont {
-                cont: join, body, ..
-            } => {
-                work.push(join);
-                work.push(body);
-            }
-            CoreExpr::Drop { body, .. } => work.push(body),
-            CoreExpr::Match { arms, .. } => work.extend(arms.iter_mut().map(|(_, arm)| arm)),
-            CoreExpr::If { then, els, .. } => {
-                work.push(then);
-                work.push(els);
-            }
-            CoreExpr::Goto(_) => {}
-        }
+/// Rewrite `f`'s body.
+pub(crate) fn rewrite(f: CoreFn, im: &Immediates) -> CoreFn {
+    CoreFn {
+        body: im.expr(f.body),
+        ..f
     }
 }
 
-fn immediate(atom: &mut Atom, im: &Immediates) {
-    if let Atom::Ctor { variant, .. } = atom
-        && let Some(a) = im.atom(*variant)
-    {
-        *atom = a;
-    }
+/// One node peeled off a spine, waiting for its rewritten body.
+enum Frame {
+    Let {
+        bind: CoreBind,
+        rhs: Atom,
+    },
+    Join {
+        bind: CoreBind,
+        join: CoreExpr,
+    },
+    Cont {
+        id: JoinId,
+        cont: CoreExpr,
+    },
+    Drop {
+        local: LocalId,
+        shape: Option<ReuseShape>,
+    },
 }
 
-/// Rebuild the match on `scrut` from the arms it can take. That is one arm when
-/// the same one runs whatever the value, or else an `If` with the `True` arm
-/// as `then` and the `False` arm as `else`. No other arm can ever run. An arm
-/// that binds the value starts by binding it.
-fn branch(
-    scrut: LocalId,
-    arms: Vec<(CorePat, CoreExpr)>,
-    ty: RTy,
-    (on_true, on_false): (usize, usize),
-) -> CoreExpr {
-    let mut then = None;
-    let mut els = None;
-    for (i, (pat, body)) in arms.into_iter().enumerate() {
-        let body = match pat {
-            CorePat::Bind(bind) => CoreExpr::Let {
+impl Frame {
+    fn wrap(self, body: CoreExpr) -> CoreExpr {
+        let body = Box::new(body);
+        match self {
+            Frame::Let { bind, rhs } => CoreExpr::Let { bind, rhs, body },
+            Frame::Join { bind, join } => CoreExpr::LetJoin {
                 bind,
-                rhs: Atom::Local(scrut),
-                body: Box::new(body),
+                join: Box::new(join),
+                body,
             },
-            CorePat::Wild | CorePat::Lit(_) | CorePat::Ctor { .. } => body,
-        };
-        if i == on_true {
-            then = Some(body);
-        } else if i == on_false {
-            els = Some(body);
+            Frame::Cont { id, cont } => CoreExpr::LetCont {
+                id,
+                cont: Box::new(cont),
+                body,
+            },
+            Frame::Drop { local, shape } => CoreExpr::Drop { local, shape, body },
         }
     }
-    match (then, els) {
-        (Some(body), None) if on_true == on_false => body,
-        (Some(then), Some(els)) => CoreExpr::If {
+}
+
+impl Immediates {
+    /// The spine is walked in a loop, so a long toplevel costs no stack depth.
+    fn expr(&self, mut e: CoreExpr) -> CoreExpr {
+        let mut spine: Vec<Frame> = Vec::new();
+        let tail = loop {
+            e = match e {
+                CoreExpr::Let { bind, rhs, body } => {
+                    spine.push(Frame::Let {
+                        bind,
+                        rhs: self.atom(rhs),
+                    });
+                    *body
+                }
+                CoreExpr::LetJoin { bind, join, body } => {
+                    spine.push(Frame::Join {
+                        bind,
+                        join: self.expr(*join),
+                    });
+                    *body
+                }
+                CoreExpr::LetCont { id, cont, body } => {
+                    spine.push(Frame::Cont {
+                        id,
+                        cont: self.expr(*cont),
+                    });
+                    *body
+                }
+                CoreExpr::Drop { local, shape, body } => {
+                    spine.push(Frame::Drop { local, shape });
+                    *body
+                }
+                // A match on a Bool or Nil becomes the expression that
+                // replaces it, which the loop then carries on into.
+                CoreExpr::Match { scrut, arms, ty } => match self.branch(scrut, arms, ty) {
+                    Ok(e) => e,
+                    Err(arms) => {
+                        break CoreExpr::Match {
+                            scrut,
+                            arms: arms
+                                .into_iter()
+                                .map(|(pat, body)| (pat, self.expr(body)))
+                                .collect(),
+                            ty,
+                        };
+                    }
+                },
+                CoreExpr::If {
+                    cond,
+                    then,
+                    els,
+                    ty,
+                } => {
+                    break CoreExpr::If {
+                        cond,
+                        then: Box::new(self.expr(*then)),
+                        els: Box::new(self.expr(*els)),
+                        ty,
+                    };
+                }
+                CoreExpr::Tail(atom) => break CoreExpr::Tail(self.atom(atom)),
+                CoreExpr::Goto(j) => break CoreExpr::Goto(j),
+            };
+        };
+        spine.into_iter().rev().fold(tail, |body, f| f.wrap(body))
+    }
+
+    fn atom(&self, atom: Atom) -> Atom {
+        match atom {
+            Atom::Ctor { variant, .. } if let Some(a) = self.immediate(variant) => a,
+            other => other,
+        }
+    }
+
+    /// Rebuild a match on `scrut` from the arms it can take. That is one arm
+    /// when the same one runs whatever the value, or else an `If` with the
+    /// `True` arm as `then` and the `False` arm as `else`. No other arm can
+    /// ever run. An arm that binds the value starts by binding it. A match
+    /// that isn't over a Bool or Nil comes back as its arms.
+    fn branch(
+        &self,
+        scrut: LocalId,
+        mut arms: Vec<(CorePat, CoreExpr)>,
+        ty: RTy,
+    ) -> Result<CoreExpr, Vec<(CorePat, CoreExpr)>> {
+        let Some((on_true, on_false)) = self.arms_taken(&arms) else {
+            return Err(arms);
+        };
+        // Both indices came from `arms`, so they are in range. Taking the
+        // later one first leaves the earlier one where it was.
+        arms.truncate(on_true.max(on_false) + 1);
+        let mut take = |i: usize| {
+            let (pat, body) = arms.swap_remove(i);
+            match pat {
+                CorePat::Bind(bind) => CoreExpr::Let {
+                    bind,
+                    rhs: Atom::Local(scrut),
+                    body: Box::new(body),
+                },
+                CorePat::Wild | CorePat::Lit(_) | CorePat::Ctor { .. } => body,
+            }
+        };
+        if on_true == on_false {
+            return Ok(take(on_true));
+        }
+        let later = take(on_true.max(on_false));
+        let earlier = take(on_true.min(on_false));
+        let (then, els) = if on_true > on_false {
+            (later, earlier)
+        } else {
+            (earlier, later)
+        };
+        Ok(CoreExpr::If {
             cond: scrut,
             then: Box::new(then),
             els: Box::new(els),
             ty,
-        },
-        _ => arm_went_missing(on_true, on_false),
+        })
     }
-}
-
-/// `arms_taken` picked an arm the match does not have. Only a compiler bug can
-/// get here.
-#[allow(clippy::panic)]
-#[cold]
-#[inline(never)]
-fn arm_went_missing(on_true: usize, on_false: usize) -> ! {
-    panic!(
-        "internal compiler error: a Bool match lost arm {on_true} or {on_false}. \
-         Report this as a compiler bug."
-    )
 }
 
 #[cfg(test)]
@@ -199,9 +270,8 @@ mod tests {
     }
 
     fn rewritten(body: CoreExpr) -> String {
-        let mut f = func(vec![bind(0, RTy(0))], body, RTy(0));
-        rewrite(&mut f, &im());
-        f.to_string()
+        let f = func(vec![bind(0, RTy(0))], body, RTy(0));
+        rewrite(f, &im()).to_string()
     }
 
     #[test]

@@ -20,8 +20,8 @@ use scarlet_check::CleanModule;
 use scarlet_check::typed::{BinderId, FnBody, TypedModule};
 use scarlet_ir::TypeId;
 use scarlet_ir::core_ir::{
-    Abi, Const, ConstId, FuncIdx, GlobalSlot, HttpTypes, IoErrors, JsonTypes, LoweredFn,
-    ParseReasons, Program, Radix, TypeNames, VariantNames, VariantRef,
+    Abi, Const, ConstId, CoreFn, FuncIdx, GlobalSlot, HttpTypes, IoErrors, JoinId, JsonTypes,
+    LocalId, LoweredFn, ParseReasons, Program, Radix, TypeNames, VariantNames, VariantRef,
 };
 use scarlet_ir::rty::{PrimIds, RTy, ResolvedPool};
 use scarlet_ir::tivec::TiVec;
@@ -80,6 +80,10 @@ pub enum InternalLinkError {
     ResultWithoutError(RTy),
     /// An array pattern on a value whose type isn't an array.
     NotAnArray(RTy),
+    /// Core IR reads a local `lower` never gave a type.
+    UntypedLocal(LocalId),
+    /// A `Goto` jumps to a join no enclosing `LetCont` declares.
+    UnboundJoin(JoinId),
 }
 
 impl From<InternalLinkError> for LinkError {
@@ -129,6 +133,8 @@ impl fmt::Display for InternalLinkError {
             E::NotAnArray(t) => {
                 write!(f, "an array pattern on type :{}, which isn't an array", t.0)
             }
+            E::UntypedLocal(l) => write!(f, "local {l} has no type"),
+            E::UnboundJoin(j) => write!(f, "a goto to join {j}, which nothing declares"),
         }
     }
 }
@@ -505,27 +511,25 @@ pub fn build_program(
         false_: prelude.ctors.false_,
         nil: prelude.ctors.nil,
     };
-    let finish = |f: &TypedFn| {
-        let mut core = lower::lower_fn(prelude.temps, f);
-        immediates::rewrite(&mut core, &im);
-        perceus::perceus(&frozen.pool, core)
-    };
+    let finish = |f: &TypedFn| core_fn(prelude.temps, &im, &frozen.pool, f);
     let fns: TiVec<FuncIdx, LoweredFn> = declared
         .iter()
         .chain(&minted.fns)
-        .map(|n| LoweredFn::new(n.module.clone(), n.name.clone(), finish(&n.body)))
-        .collect();
+        .map(|n| {
+            let core = finish(&n.body)?;
+            Ok(LoweredFn::new(n.module.clone(), n.name.clone(), core))
+        })
+        .collect::<Result<_, InternalLinkError>>()?;
     // The entry's top level is named for what it is; each import's, for its
     // module.
     let mut inits: Vec<LoweredFn> = modules
         .iter()
         .zip(&tops)
         .map(|(m, f)| {
-            let core = perceus::keep_globals(finish(f));
             let key = m.key.as_str();
-            LoweredFn::new(key.to_string(), key.to_string(), core)
+            Ok(LoweredFn::new(key.to_string(), key.to_string(), finish(f)?))
         })
-        .collect();
+        .collect::<Result<_, InternalLinkError>>()?;
     let mut toplevel = inits.pop().ok_or(InternalLinkError::NoEntryModule)?;
     toplevel.name = "__main__".to_string();
 
@@ -551,6 +555,19 @@ pub fn build_program(
         abi,
         pool,
     })
+}
+
+/// Typed IR to the Core IR a backend runs: `lower`, then `immediates`, then
+/// `perceus`. This is the only place they run, so they can't run out of order.
+fn core_fn(
+    temps: TempTys,
+    im: &Immediates,
+    pool: &ResolvedPool,
+    f: &TypedFn,
+) -> Result<CoreFn, InternalLinkError> {
+    let lower::Lowered { core, locals } = lower::lower_fn(temps, f);
+    let core = immediates::rewrite(core, im);
+    perceus::perceus(pool, &locals, core)
 }
 
 /// The constructors of the stdlib type `module.name`, by name, when the

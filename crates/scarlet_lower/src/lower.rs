@@ -72,9 +72,15 @@ fn binding_bug(b: BindingId, why: &str) -> ! {
     panic!("internal compiler error: {b} {why}. Report this as a compiler bug.")
 }
 
+/// A lowered function, with the type of every local in it.
+pub(crate) struct Lowered {
+    pub core: CoreFn,
+    pub locals: TiVec<LocalId, RTy>,
+}
+
 /// Lower one function. Each param is bound under the [`BindingId`] its
 /// [`TypedBind`] carries.
-pub(crate) fn lower_fn(temps: TempTys, f: &TypedFn) -> CoreFn {
+pub(crate) fn lower_fn(temps: TempTys, f: &TypedFn) -> Lowered {
     let mut lo = Lower::new(temps, f.binds);
     let params: Vec<CoreBind> = f
         .params
@@ -86,10 +92,13 @@ pub(crate) fn lower_fn(temps: TempTys, f: &TypedFn) -> CoreFn {
         })
         .collect();
     let body = lo.sealed(|lo| lo.expr_tail(&f.body, f.ret, SpinePos::Outer));
-    CoreFn {
-        params,
-        body,
-        ret_ty: f.ret,
+    Lowered {
+        core: CoreFn {
+            params,
+            body,
+            ret_ty: f.ret,
+        },
+        locals: lo.tys,
     }
 }
 
@@ -195,9 +204,8 @@ enum SpinePos {
 
 struct Lower {
     temps: TempTys,
-    next: u32,
-    /// The [`RTy`] of every minted [`LocalId`], indexed by `id.0`.
-    tys: Vec<RTy>,
+    /// The [`RTy`] of every minted [`LocalId`].
+    tys: TiVec<LocalId, RTy>,
     /// Maps `BindingId → LocalId`, densely over `TypedFn::binds`. Different
     /// source bindings have different `BindingId`s, so nothing is shadowed and
     /// nothing has to be undone when a scope ends.
@@ -215,8 +223,7 @@ impl Lower {
     fn new(temps: TempTys, binds: u32) -> Self {
         Lower {
             temps,
-            next: 0,
-            tys: Vec::new(),
+            tys: TiVec::new(),
             binds: vec![None; binds as usize],
             spine: Vec::new(),
             join_uses: TiVec::new(),
@@ -224,16 +231,12 @@ impl Lower {
     }
 
     fn fresh(&mut self, ty: RTy) -> LocalId {
-        let id = LocalId(self.next);
-        self.next += 1;
-        self.tys.push(ty);
-        debug_assert_eq!(self.tys.len(), self.next as usize);
-        id
+        self.tys.push(ty)
     }
 
     /// The `RTy` recorded for `id` when it was minted.
     fn bind_ty(&self, id: LocalId) -> RTy {
-        self.tys[id.0 as usize]
+        self.tys[id]
     }
 
     /// Record the local `b` names. A `BindingId` out of range means the

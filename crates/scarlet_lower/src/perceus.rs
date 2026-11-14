@@ -16,23 +16,33 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{Atom, Callee, CoreBind, CoreExpr, CoreFn, CorePat, JoinId, LocalId, ReuseShape};
+use crate::program::InternalLinkError;
 use crate::typed_ir::{RTy, ResolvedPool};
+use scarlet_ir::tivec::TiVec;
 
-/// Run Perceus on one lowered function. `pool` is only used to check whether a
-/// bind's `ty` is a heap type and to read a tuple's width. Its types are always
-/// resolved, so no unsolved variable can get here and make `is_heap` answer
-/// `false` by accident.
-pub(crate) fn perceus(pool: &ResolvedPool, f: CoreFn) -> CoreFn {
+/// Run Perceus on one lowered function. `locals` is the type of every local
+/// `lower` made for it, and `pool` says which of those types live on the heap.
+/// Its types are always resolved, so no unsolved variable can get here and
+/// make `is_heap` answer `false` by accident.
+///
+/// A bind pinned to a global slot is never released or reused here, because
+/// function bodies read the global for as long as the program runs, long after
+/// the toplevel's last read of it.
+pub(crate) fn perceus(
+    pool: &ResolvedPool,
+    locals: &TiVec<LocalId, RTy>,
+    f: CoreFn,
+) -> Result<CoreFn, InternalLinkError> {
     let CoreFn {
         params,
         body,
         ret_ty,
     } = f;
-    let mut cx = Perceus::new(pool);
+    let mut cx = Perceus::new(pool, locals);
     for p in &params {
         cx.record_bind(p, None);
     }
-    let (body, live) = cx.drop_pass(body);
+    let (body, live) = cx.drop_pass(body)?;
     // Params are owned on entry. Any the body doesn't read drop at its head,
     // so the frame still releases everything it owns.
     let dead_params: Vec<LocalId> = params
@@ -40,12 +50,12 @@ pub(crate) fn perceus(pool: &ResolvedPool, f: CoreFn) -> CoreFn {
         .map(|p| p.id)
         .filter(|id| !live.contains(id))
         .collect();
-    let body = cx.wrap_drops(&dead_params, None, body);
-    CoreFn {
+    let body = cx.wrap_drops(&dead_params, None, body)?;
+    Ok(CoreFn {
         params,
         body: reuse_pass(body),
         ret_ty,
-    }
+    })
 }
 
 /// The locals live at a program point. It's a `BTreeSet` so the order drops
@@ -67,8 +77,9 @@ struct Token {
 
 struct Perceus<'p> {
     pool: &'p ResolvedPool,
-    /// Every bind's resolved type, used to decide whether it needs a `Drop`.
-    ty: BTreeMap<LocalId, RTy>,
+    locals: &'p TiVec<LocalId, RTy>,
+    /// The binds pinned to a global slot, which this function never owns.
+    pinned: BTreeSet<LocalId>,
     /// A bind's allocation shape, when its right-hand side proves one. Locals
     /// with no entry drop with `shape: None` and are never offered for reuse.
     shape: BTreeMap<LocalId, ReuseShape>,
@@ -112,27 +123,33 @@ enum SpineRhs {
 }
 
 impl<'p> Perceus<'p> {
-    fn new(pool: &'p ResolvedPool) -> Self {
+    fn new(pool: &'p ResolvedPool, locals: &'p TiVec<LocalId, RTy>) -> Self {
         Perceus {
             pool,
-            ty: BTreeMap::new(),
+            locals,
+            pinned: BTreeSet::new(),
             shape: BTreeMap::new(),
             cont_live: BTreeMap::new(),
         }
     }
 
     fn record_bind(&mut self, b: &CoreBind, rhs_shape: Option<ReuseShape>) {
-        self.ty.insert(b.id, b.ty);
+        if b.global.is_some() {
+            self.pinned.insert(b.id);
+        }
         if let Some(s) = rhs_shape {
             self.shape.insert(b.id, s);
         }
     }
 
-    /// Whether the local's type allocates a heap cell that Perceus manages. A
-    /// local with no recorded type was never bound by this pass, so it owns
-    /// nothing.
-    fn is_heap_local(&self, id: LocalId) -> bool {
-        self.ty.get(&id).is_some_and(|&t| self.pool.is_heap(t))
+    /// Whether this function owns a heap cell through the local, so must
+    /// release it. A pinned global is owned by the program instead.
+    fn owns_cell(&self, id: LocalId) -> Result<bool, InternalLinkError> {
+        let ty = self
+            .locals
+            .get(id)
+            .ok_or(InternalLinkError::UntypedLocal(id))?;
+        Ok(self.pool.is_heap(*ty) && !self.pinned.contains(&id))
     }
 
     /// Transform `e` and return `(e', live)`, where `live` is the locals from
@@ -140,7 +157,7 @@ impl<'p> Perceus<'p> {
     /// Drops are inserted for locals that die inside `e`. The spine is walked
     /// in a loop, so a long straight-line body doesn't recurse on the Rust
     /// stack.
-    fn drop_pass(&mut self, mut e: CoreExpr) -> (CoreExpr, Live) {
+    fn drop_pass(&mut self, mut e: CoreExpr) -> Result<(CoreExpr, Live), InternalLinkError> {
         let mut spine: Vec<SpineFrame> = Vec::new();
         let (mut body, mut live) = loop {
             match e {
@@ -167,7 +184,7 @@ impl<'p> Perceus<'p> {
                 CoreExpr::LetCont { id, cont, body } => {
                     // Transform this before the body, so its live set is known at
                     // every `Goto(id)` the body contains.
-                    let (cont, cont_live) = self.drop_pass(*cont);
+                    let (cont, cont_live) = self.drop_pass(*cont)?;
                     self.cont_live.insert(id, cont_live);
                     spine.push(SpineFrame::Cont { id, cont });
                     e = *body;
@@ -195,7 +212,7 @@ impl<'p> Perceus<'p> {
                         .cont_live
                         .get(&id)
                         .cloned()
-                        .unwrap_or_else(|| unscoped_goto(id));
+                        .ok_or(InternalLinkError::UnboundJoin(id))?;
                     break (CoreExpr::Goto(id), live);
                 }
                 CoreExpr::If {
@@ -204,12 +221,12 @@ impl<'p> Perceus<'p> {
                     els,
                     ty,
                 } => {
-                    let (then, live_t) = self.drop_pass(*then);
-                    let (els, live_e) = self.drop_pass(*els);
+                    let (then, live_t) = self.drop_pass(*then)?;
+                    let (els, live_e) = self.drop_pass(*els)?;
                     // Both branches must release the same set, so the branch
                     // that does not need a local drops it at entry.
-                    let then = self.wrap_drops(&set_diff(&live_e, &live_t), None, then);
-                    let els = self.wrap_drops(&set_diff(&live_t, &live_e), None, els);
+                    let then = self.wrap_drops(&set_diff(&live_e, &live_t), None, then)?;
+                    let els = self.wrap_drops(&set_diff(&live_t, &live_e), None, els)?;
                     let mut live: Live = &live_t | &live_e;
                     live.insert(cond);
                     break (
@@ -223,7 +240,7 @@ impl<'p> Perceus<'p> {
                     );
                 }
                 CoreExpr::Match { scrut, arms, ty } => {
-                    break self.drop_match(scrut, arms, ty);
+                    break self.drop_match(scrut, arms, ty)?;
                 }
             }
         };
@@ -252,7 +269,7 @@ impl<'p> Perceus<'p> {
             if !live.contains(&frame.bind.id) {
                 dead.push(frame.bind.id);
             }
-            body = self.wrap_drops(&dead, None, body);
+            body = self.wrap_drops(&dead, None, body)?;
             live.remove(&frame.bind.id);
             live.extend(frame.rhs_live);
             body = match frame.rhs {
@@ -268,7 +285,7 @@ impl<'p> Perceus<'p> {
                 },
             };
         }
-        (body, live)
+        Ok((body, live))
     }
 
     fn drop_match(
@@ -276,7 +293,7 @@ impl<'p> Perceus<'p> {
         scrut: LocalId,
         arms: Vec<(CorePat, CoreExpr)>,
         ty: RTy,
-    ) -> (CoreExpr, Live) {
+    ) -> Result<(CoreExpr, Live), InternalLinkError> {
         struct Arm {
             pat: CorePat,
             body: CoreExpr,
@@ -291,7 +308,7 @@ impl<'p> Perceus<'p> {
         let mut lowered: Vec<Arm> = Vec::with_capacity(arms.len());
         for (pat, body) in arms {
             let (bound, scrut_shape) = self.record_pat(&pat, scrut);
-            let (body, mut live) = self.drop_pass(body);
+            let (body, mut live) = self.drop_pass(body)?;
             let dead_binders: Vec<LocalId> = bound
                 .iter()
                 .copied()
@@ -321,13 +338,13 @@ impl<'p> Perceus<'p> {
                     drops.push(scrut);
                 }
                 drops.extend(a.dead_binders);
-                let body = self.wrap_drops(&drops, a.scrut_shape.map(|s| (scrut, s)), a.body);
-                (a.pat, body)
+                let body = self.wrap_drops(&drops, a.scrut_shape.map(|s| (scrut, s)), a.body)?;
+                Ok((a.pat, body))
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
         let mut live = live_union;
         live.insert(scrut);
-        (CoreExpr::Match { scrut, arms, ty }, live)
+        Ok((CoreExpr::Match { scrut, arms, ty }, live))
     }
 
     /// Record the locals a pattern binds, and return the scrutinee's shape. A
@@ -352,8 +369,8 @@ impl<'p> Perceus<'p> {
         }
     }
 
-    /// Put `Drop{x}` in front of `body` for each heap-typed `x` in `dead`,
-    /// going in reverse so the printed order matches `dead`. Locals that
+    /// Put `Drop{x}` in front of `body` for each `x` in `dead` that owns a
+    /// cell, going in reverse so the printed order matches `dead`. Locals that
     /// aren't on the heap are skipped, because dropping an unboxed primitive
     /// does nothing but still costs an instruction. `arm_scrut` overrides the
     /// recorded shape for one id.
@@ -362,9 +379,9 @@ impl<'p> Perceus<'p> {
         dead: &[LocalId],
         arm_scrut: Option<(LocalId, ReuseShape)>,
         mut body: CoreExpr,
-    ) -> CoreExpr {
+    ) -> Result<CoreExpr, InternalLinkError> {
         for &x in dead.iter().rev() {
-            if !self.is_heap_local(x) {
+            if !self.owns_cell(x)? {
                 continue;
             }
             let shape = match arm_scrut {
@@ -377,7 +394,7 @@ impl<'p> Perceus<'p> {
                 body: Box::new(body),
             };
         }
-        body
+        Ok(body)
     }
 }
 
@@ -390,6 +407,8 @@ struct ReuseWalk {
 
 /// Frame-limited reuse over the body once it has its drops. A second walk
 /// handles tokens carried round a loop, for a body that tail-calls itself.
+/// Each walk decides every constructor's `reuse`, so the body holds the last
+/// walk's plan whole, never a mix of the two.
 fn reuse_pass(mut body: CoreExpr) -> CoreExpr {
     let mut walk = ReuseWalk {
         self_tails: Vec::new(),
@@ -455,9 +474,7 @@ impl ReuseWalk {
                             .iter()
                             .rposition(|t| t.slot == bind.id && t.shape == want)
                             .or_else(|| avail.iter().rposition(|t| !t.carried && t.shape == want));
-                        if let Some(i) = i {
-                            *reuse = Some(avail.remove(i).slot);
-                        }
+                        *reuse = i.map(|i| avail.remove(i).slot);
                     }
                     // The slot now holds a live value, and a token for it
                     // would read that instead of a released cell.
@@ -495,11 +512,8 @@ impl ReuseWalk {
                     match a {
                         Atom::Ctor { fields, reuse, .. } => {
                             let want = ReuseShape::ctor(fields.len());
-                            if let Some(i) =
-                                avail.iter().rposition(|t| !t.carried && t.shape == want)
-                            {
-                                *reuse = Some(avail.remove(i).slot);
-                            }
+                            let i = avail.iter().rposition(|t| !t.carried && t.shape == want);
+                            *reuse = i.map(|i| avail.remove(i).slot);
                         }
                         Atom::Call {
                             callee: Callee::Self_,
@@ -623,91 +637,6 @@ fn set_diff(a: &Live, b: &Live) -> Vec<LocalId> {
     a.difference(b).copied().collect()
 }
 
-/// A `Goto` whose join was never peeled is a lowering bug. Carrying on with an
-/// empty live set would drop locals the continuation still reads, so this
-/// aborts in release builds too.
-#[allow(clippy::panic)]
-#[cold]
-#[inline(never)]
-fn unscoped_goto(id: JoinId) -> ! {
-    panic!(
-        "internal compiler error: perceus reached goto to join {id} with no \
-         enclosing LetCont. Report this as a compiler bug."
-    )
-}
-
-/// Take a module toplevel's pinned globals back out of Perceus's hands, so no
-/// `Drop` releases one and no `Ctor` reuses one's cell.
-///
-/// Perceus only sees the toplevel, where a global's last read is not its last
-/// use, because function bodies read it through `Load::Global` for as long as
-/// the program runs. Releasing or overwriting it at the toplevel's last read would
-/// free a value the program still holds.
-pub(crate) fn keep_globals(mut f: CoreFn) -> CoreFn {
-    let pinned: BTreeSet<LocalId> = f
-        .body
-        .toplevel_globals()
-        .into_iter()
-        .map(|(id, _)| id)
-        .collect();
-    if !pinned.is_empty() {
-        spare(&mut f.body, &pinned);
-    }
-    f
-}
-
-/// The walk for [`keep_globals`]. It loops along each spine and only recurses
-/// into branches, so a long toplevel costs no stack depth.
-fn spare(mut e: &mut CoreExpr, pinned: &BTreeSet<LocalId>) {
-    loop {
-        if let CoreExpr::Drop { local, body, .. } = &mut *e
-            && pinned.contains(local)
-        {
-            let rest = std::mem::replace(&mut **body, CoreExpr::Tail(Atom::Nil));
-            *e = rest;
-            continue;
-        }
-        match e {
-            CoreExpr::Let { rhs, body, .. } => {
-                spare_atom(rhs, pinned);
-                e = body;
-            }
-            CoreExpr::LetJoin { join, body, .. } => {
-                spare(join, pinned);
-                e = body;
-            }
-            CoreExpr::LetCont { cont, body, .. } => {
-                spare(cont, pinned);
-                e = body;
-            }
-            CoreExpr::Drop { body, .. } => e = body,
-            CoreExpr::If { then, els, .. } => {
-                spare(then, pinned);
-                e = els;
-            }
-            CoreExpr::Match { arms, .. } => {
-                for (_, body) in arms {
-                    spare(body, pinned);
-                }
-                return;
-            }
-            CoreExpr::Tail(a) => {
-                spare_atom(a, pinned);
-                return;
-            }
-            CoreExpr::Goto(_) => return,
-        }
-    }
-}
-
-fn spare_atom(a: &mut Atom, pinned: &BTreeSet<LocalId>) {
-    if let Atom::Ctor { reuse, .. } = a
-        && reuse.is_some_and(|r| pinned.contains(&r))
-    {
-        *reuse = None;
-    }
-}
-
 /// The known allocation shape of a `Let`'s right-hand side. Only a `Ctor`
 /// proves a shape, because the arity of a `Call` or `PrimOp` result isn't
 /// known at compile time.
@@ -814,56 +743,83 @@ mod tests {
         }
     }
 
-    /// A toplevel keeps every value it pins to a global. Perceus's drop of one
-    /// and a constructor's reuse of its cell both go, but a plain temporary's
-    /// drop stays.
+    /// Run the pass with every bind's type in the table, the way `lower`
+    /// hands it over. An id no bind uses gets the return type, which nothing
+    /// reads.
+    fn perceus(pool: &ResolvedPool, f: CoreFn) -> CoreFn {
+        fn binds(e: &CoreExpr, out: &mut Vec<CoreBind>) {
+            match e {
+                CoreExpr::Let { bind, body, .. } => {
+                    out.push(bind.clone());
+                    binds(body, out);
+                }
+                CoreExpr::LetJoin { bind, join, body } => {
+                    out.push(bind.clone());
+                    binds(join, out);
+                    binds(body, out);
+                }
+                CoreExpr::LetCont { cont, body, .. } => {
+                    binds(cont, out);
+                    binds(body, out);
+                }
+                CoreExpr::Drop { body, .. } => binds(body, out),
+                CoreExpr::If { then, els, .. } => {
+                    binds(then, out);
+                    binds(els, out);
+                }
+                CoreExpr::Match { arms, .. } => {
+                    for (pat, body) in arms {
+                        out.extend(pat.binds().cloned());
+                        binds(body, out);
+                    }
+                }
+                CoreExpr::Tail(_) | CoreExpr::Goto(_) => {}
+            }
+        }
+        let mut all = f.params.clone();
+        binds(&f.body, &mut all);
+        let len = all.iter().map(|b| b.id.0 + 1).max().unwrap_or(0);
+        let mut locals: TiVec<LocalId, RTy> = (0..len).map(|_| f.ret_ty).collect();
+        for b in all {
+            locals[b.id] = b.ty;
+        }
+        super::perceus(pool, &locals, f).expect("every local is typed")
+    }
+
+    /// A toplevel keeps every value it pins to a global. Perceus never drops
+    /// one, so no constructor reuses its cell, but a plain temporary still
+    /// drops and is reused.
     #[test]
-    fn keep_globals_spares_pinned_globals_only() {
+    fn pinned_globals_are_never_dropped_or_reused() {
         let mut pool = pool();
         let obj = con(&mut pool, 7);
+        let int = int_ty(&mut pool);
         let mut global = bind(0, obj);
         global.global = Some(crate::typed_ir::GlobalSlot(0));
-        let reuse_global = Atom::Ctor {
-            variant: variant(),
-            fields: Vec::new(),
-            reuse: Some(local(0)),
-        };
         let top = func(
             Vec::new(),
             CoreExpr::Let {
-                bind: global,
-                rhs: ctor(&[]),
+                bind: bind(5, int),
+                rhs: Atom::Const(ConstId(0)),
                 body: Box::new(CoreExpr::Let {
-                    bind: bind(1, obj),
-                    rhs: ctor(&[]),
-                    body: Box::new(CoreExpr::Drop {
-                        local: local(0),
-                        shape: Some(ReuseShape::ctor(0)),
-                        body: Box::new(CoreExpr::Drop {
-                            local: local(1),
-                            shape: Some(ReuseShape::ctor(0)),
-                            body: Box::new(CoreExpr::Tail(reuse_global)),
-                        }),
+                    bind: global,
+                    rhs: ctor(&[5]),
+                    body: Box::new(CoreExpr::Let {
+                        bind: bind(1, obj),
+                        rhs: ctor(&[5]),
+                        body: Box::new(CoreExpr::Tail(ctor(&[5]))),
                     }),
                 }),
             },
             obj,
         );
-        let kept = keep_globals(top);
-        assert_eq!(count_drops(&kept.body), 1, "only the temporary is dropped");
-        assert!(
-            matches!(
-                kept.body,
-                CoreExpr::Let { ref body, .. }
-                    if matches!(**body, CoreExpr::Let { ref body, .. }
-                        if matches!(**body, CoreExpr::Drop { local, .. } if local == LocalId(1)))
-            ),
-            "the global's drop is the one removed"
-        );
+        let kept = perceus(&pool, top);
+        assert!(!find_drop(&kept.body, local(0)), "{}", kept);
+        assert!(find_drop(&kept.body, local(1)), "{}", kept);
         assert_eq!(
             ctor_reuses(&kept.body),
-            vec![None, None, None],
-            "no constructor reuses the global's cell"
+            vec![None, None, Some(local(1))],
+            "only the temporary's cell is reused:\n{kept}"
         );
     }
 
