@@ -10,6 +10,18 @@
 //! names as operands. It is the contract between the compiler and the VM, so
 //! it lives in `scarlet_ir`, and this crate re-exports it.
 
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+    )
+)]
+
 pub mod immediates;
 pub(crate) mod lower;
 pub(crate) mod perceus;

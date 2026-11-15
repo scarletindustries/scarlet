@@ -357,7 +357,7 @@ pub fn diff_lines(want: &str, got: &str) -> String {
 /// The canonical key of an on-disk module. A module is the file it resolved
 /// to, so tests that address one by name must go through here.
 pub fn module_key(dir: &Path, file: &str) -> scarlet::module::ModuleKey {
-    scarlet::module::ModuleKey::for_file(&dir.join(file))
+    scarlet::module::ModuleKey::for_file(&dir.join(file)).expect("a test module has a key")
 }
 
 /// 0-based `(line, col)` of the `nth` (1-based) occurrence of `needle`, nudged

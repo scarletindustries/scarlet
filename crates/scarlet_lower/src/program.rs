@@ -31,7 +31,7 @@ use scarlet_types::name::{CtorName, ModuleKey, Name, TypeName, ValueName};
 use scarlet_types::ty::Type;
 
 use crate::immediates::Immediates;
-use crate::typed_ir::{TempTys, TypedFn};
+use crate::typed_ir::{BindingId, TempTys, TypedFn};
 use crate::{immediates, lower, perceus};
 
 /// Where lowering reads a type's definition.
@@ -84,6 +84,12 @@ pub enum InternalLinkError {
     UntypedLocal(LocalId),
     /// A `Goto` jumps to a join no enclosing `LetCont` declares.
     UnboundJoin(JoinId),
+    /// A body reads a binding where no binding of it is in scope.
+    UnboundBinding(BindingId),
+    /// A body names a binding past the end of its function's binder table.
+    BindingOutOfRange(BindingId),
+    /// A field or element index too wide for an instruction to carry.
+    IndexTooWide(usize),
 }
 
 impl From<InternalLinkError> for LinkError {
@@ -135,6 +141,11 @@ impl fmt::Display for InternalLinkError {
             }
             E::UntypedLocal(l) => write!(f, "local {l} has no type"),
             E::UnboundJoin(j) => write!(f, "a goto to join {j}, which nothing declares"),
+            E::UnboundBinding(b) => write!(f, "{b} is read where it isn't bound"),
+            E::BindingOutOfRange(b) => {
+                write!(f, "{b} is past the end of its function's binder table")
+            }
+            E::IndexTooWide(i) => write!(f, "index {i} is too wide for an instruction"),
         }
     }
 }
@@ -565,7 +576,7 @@ fn core_fn(
     pool: &ResolvedPool,
     f: &TypedFn,
 ) -> Result<CoreFn, InternalLinkError> {
-    let lower::Lowered { core, locals } = lower::lower_fn(temps, f);
+    let lower::Lowered { core, locals } = lower::lower_fn(temps, f)?;
     let core = immediates::rewrite(core, im);
     perceus::perceus(pool, &locals, core)
 }

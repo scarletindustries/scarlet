@@ -37,13 +37,10 @@ impl ModuleKey {
         ModuleKey(path.join("/"))
     }
 
-    /// Key of the on-disk module at `p` (see [`file_module_path`]).
-    ///
-    /// Panics if `p` has no absolute form. Where that can happen, use
-    /// [`file_module_path`], which returns the error instead.
-    #[allow(clippy::expect_used)]
-    pub fn for_file(p: &Path) -> Self {
-        Self::of(&file_module_path(p).expect("on-disk module path has an absolute form"))
+    /// Key of the on-disk module at `p` (see [`file_module_path`]), or why
+    /// `p` has none.
+    pub fn for_file(p: &Path) -> Result<Self, ResolveError> {
+        Ok(Self::of(&file_module_path(p)?))
     }
 
     /// Key of a stdlib module, from its `scarlet/...` path as written. That's

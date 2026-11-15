@@ -43,6 +43,9 @@ pub enum FormatResult {
 /// formatter bug.
 #[derive(Debug)]
 pub enum FormatBug {
+    /// The input parsed with no error, yet holds a node the parser made for
+    /// one. That is a parser bug, and there is nothing to lay out there.
+    ErrorNode(Span),
     /// Keeping breaks flat never stopped layout adding the same line end.
     LineEndLoop,
     Layout(verify::Mismatch),
@@ -57,6 +60,11 @@ pub enum FormatBug {
 impl std::fmt::Display for FormatBug {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            FormatBug::ErrorNode(s) => write!(
+                f,
+                "the parser left an error node at {}:{} without reporting an error",
+                s.start_line, s.start_column
+            ),
             FormatBug::LineEndLoop => write!(f, "layout keeps adding the same line end"),
             FormatBug::Layout(m) => write!(f, "{m}"),
             FormatBug::DoesNotReparse(d) => write!(
@@ -138,7 +146,10 @@ fn format_at(input: &str, width: isize) -> FormatResult {
         trivia_map,
         dotdot_before,
     };
-    let body = f.program(&result.ast, &eof_trivia);
+    let body = match f.program(&result.ast, &eof_trivia) {
+        Ok(body) => body,
+        Err(ErrorNodeLeft(span)) => return FormatResult::OutputInvalid(FormatBug::ErrorNode(span)),
+    };
 
     // Lay out, then read the output back with the real scanner and compare
     // it to the doc's meaning (see `verify`). A line end that layout added is
@@ -235,6 +246,12 @@ impl Pos {
         }
     }
 }
+
+/// Building the doc met an error node, at this span, in input that parsed
+/// with no error.
+struct ErrorNodeLeft(Span);
+
+type Fmt<T> = Result<T, ErrorNodeLeft>;
 
 struct Formatter {
     trivia_map: HashMap<Pos, Vec<Trivia>>,
@@ -346,14 +363,14 @@ impl Formatter {
             .is_some_and(|tr| tr.iter().any(|t| t.comment_text().is_some()))
     }
 
-    fn program(&self, block: &ast::BlockExpression, eof_trivia: &[Trivia]) -> Doc {
-        d![
-            self.nodes_with_trivia(&block.body, 1),
+    fn program(&self, block: &ast::BlockExpression, eof_trivia: &[Trivia]) -> Fmt<Doc> {
+        Ok(d![
+            self.nodes_with_trivia(&block.body, 1)?,
             self.trivia_doc(eof_trivia, block.body.is_empty(), 1),
-        ]
+        ])
     }
 
-    fn node(&self, n: &ast::Node) -> Doc {
+    fn node(&self, n: &ast::Node) -> Fmt<Doc> {
         match n {
             ast::Node::Statement(s) => self.statement(s),
             ast::Node::Expression(e) => self.expr_at_line_start(e),
@@ -361,23 +378,23 @@ impl Formatter {
     }
 
     /// Emit each node preceded by its leading trivia.
-    fn nodes_with_trivia(&self, nodes: &[ast::Node], max_blanks: usize) -> Doc {
+    fn nodes_with_trivia(&self, nodes: &[ast::Node], max_blanks: usize) -> Fmt<Doc> {
         let mut parts = Vec::new();
         for (i, n) in nodes.iter().enumerate() {
             parts.push(self.leading_trivia(n.span(), i == 0, max_blanks));
-            parts.push(self.node(n));
+            parts.push(self.node(n)?);
         }
-        doc::concat(parts)
+        Ok(doc::concat(parts))
     }
 
-    fn statement(&self, stmt: &ast::Statement) -> Doc {
-        match stmt {
+    fn statement(&self, stmt: &ast::Statement) -> Fmt<Doc> {
+        Ok(match stmt {
             ast::Statement::Binding(s) => {
                 let ty = match &s.typ {
                     Some(t) => d![text(" "), self.type_(t)],
                     None => nil(),
                 };
-                d![self.pattern(&s.pattern), ty, self.bound(" =", &s.init)]
+                d![self.pattern(&s.pattern)?, ty, self.bound(" =", &s.init)?]
             }
             ast::Statement::Backpass(s) => {
                 let mut parts = Vec::new();
@@ -385,13 +402,13 @@ impl Formatter {
                     if i > 0 {
                         parts.push(text(", "));
                     }
-                    parts.push(self.pattern(b));
+                    parts.push(self.pattern(b)?);
                 }
                 parts.push(text(" <- "));
-                parts.push(self.expr(&s.call));
+                parts.push(self.expr(&s.call)?);
                 doc::concat(parts)
             }
-            ast::Statement::Declaration { decl, public } => self.declaration(decl, *public),
+            ast::Statement::Declaration { decl, public } => self.declaration(decl, *public)?,
             ast::Statement::ImportDeclaration(s) => {
                 let mut out = vec![text("import "), text(s.path.to_string())];
                 if let Some(a) = &s.alias {
@@ -400,7 +417,7 @@ impl Formatter {
                 }
                 doc::concat(out)
             }
-        }
+        })
     }
 
     fn attributes(&self, attrs: &[ast::Attribute]) -> Doc {
@@ -420,7 +437,7 @@ impl Formatter {
         doc::concat(parts)
     }
 
-    fn declaration(&self, dcl: &ast::Declaration, is_public: bool) -> Doc {
+    fn declaration(&self, dcl: &ast::Declaration, is_public: bool) -> Fmt<Doc> {
         let attrs = match dcl {
             ast::Declaration::Function(f) => self.attributes(&f.attributes),
             ast::Declaration::Type(t) => self.attributes(&t.attributes),
@@ -437,13 +454,13 @@ impl Formatter {
                     text("const "),
                     text(s.identifier.name.clone()),
                     ty,
-                    self.bound(" =", &s.init)
+                    self.bound(" =", &s.init)?
                 ]
             }
-            ast::Declaration::Function(func) => self.fn_decl(func),
+            ast::Declaration::Function(func) => self.fn_decl(func)?,
             ast::Declaration::Type(s) => self.type_decl(s),
         };
-        d![attrs, prefix, body]
+        Ok(d![attrs, prefix, body])
     }
 
     /// A named-function parameter list the author broke after `(` stays broken.
@@ -495,51 +512,51 @@ impl Formatter {
         d![head, list, r]
     }
 
-    fn fn_decl(&self, f: &ast::FunctionDeclaration) -> Doc {
+    fn fn_decl(&self, f: &ast::FunctionDeclaration) -> Fmt<Doc> {
         let header = self.fn_header(
             Some(&f.identifier.name),
             &f.params,
             &f.return_type,
             Some(f.identifier.span.start_line),
         );
-        match &f.body {
-            ast::FnBody::Block(b) => d![header, text(" "), self.fn_body(b)],
+        Ok(match &f.body {
+            ast::FnBody::Block(b) => d![header, text(" "), self.fn_body(b)?],
             ast::FnBody::Vm(_) => header,
-        }
+        })
     }
 
-    fn fn_expr(&self, f: &ast::FunctionExpression) -> Doc {
-        d![
+    fn fn_expr(&self, f: &ast::FunctionExpression) -> Fmt<Doc> {
+        Ok(d![
             self.fn_header(None, &f.params, &None, None),
             text(" "),
-            self.lambda_body(&f.body),
-        ]
+            self.lambda_body(&f.body)?,
+        ])
     }
 
     /// A named `fn` body is always a hard multi-line block, never collapsed
     /// onto the signature line. Lambdas go through `lambda_body` instead.
-    fn fn_body(&self, body: &ast::Expression) -> Doc {
+    fn fn_body(&self, body: &ast::Expression) -> Fmt<Doc> {
         if let ast::Expression::BlockExpression(b) = body {
             let trail = self.trailing_comments(b.span, true);
             if b.body.is_empty() && trail.is_nil() {
-                return text("{}");
+                return Ok(text("{}"));
             }
         }
         self.body_as_hard_block(body)
     }
 
-    fn lambda_body(&self, body: &ast::Expression) -> Doc {
+    fn lambda_body(&self, body: &ast::Expression) -> Fmt<Doc> {
         if let ast::Expression::BlockExpression(b) = body
             && b.body.len() == 1
             && let ast::Node::Expression(inner) = &b.body[0]
             && !self.has_comment_at(inner.span())
             && self.trailing_comments(b.span, true).is_nil()
         {
-            return group(self.expr(inner));
+            return Ok(group(self.expr(inner)?));
         }
         if !matches!(body, ast::Expression::BlockExpression(_)) && !self.has_comment_at(body.span())
         {
-            return group(self.expr(body));
+            return Ok(group(self.expr(body)?));
         }
         self.body_as_block(body)
     }
@@ -617,9 +634,9 @@ impl Formatter {
         d![text(c.identifier.name.clone()), list]
     }
 
-    fn expr(&self, e: &ast::Expression) -> Doc {
+    fn expr(&self, e: &ast::Expression) -> Fmt<Doc> {
         use ast::Expression as E;
-        match e {
+        Ok(match e {
             E::StringLiteral(s) => text(quoted(&s.value)),
             E::InterpolatedString(s) => {
                 let literal: String = s
@@ -642,7 +659,7 @@ impl Formatter {
                         // ordinary tokens and never change the string's value.
                         ast::InterpPart::Expr(e) => {
                             parts.push(text("${"));
-                            parts.push(group(self.expr(e)));
+                            parts.push(group(self.expr(e)?));
                             parts.push(text("}"));
                         }
                     }
@@ -652,7 +669,7 @@ impl Formatter {
             }
             E::NumberLiteral(n) => text(n.value.clone()),
             E::Identifier(id) => text(id.name.clone()),
-            E::BinaryExpression(b) => self.binary_chain(b),
+            E::BinaryExpression(b) => self.binary_chain(b)?,
             E::UnaryExpression(u) => {
                 // `- -x` must not collapse into `--x`: the scanner relexes
                 // `--` as the rejected decrement token, so the formatted
@@ -662,27 +679,31 @@ impl Formatter {
                 } else {
                     nil()
                 };
-                d![text(u.op.symbol()), gap, self.expr(&u.expression)]
+                d![text(u.op.symbol()), gap, self.expr(&u.expression)?]
             }
-            E::BlockExpression(b) => self.block_expr(b),
-            E::IfExpression(_) => self.if_chain(e),
-            E::MatchExpression(m) => self.match_expr(m),
+            E::BlockExpression(b) => self.block_expr(b)?,
+            E::IfExpression(_) => self.if_chain(e)?,
+            E::MatchExpression(m) => self.match_expr(m)?,
             E::OrExpression(o) => {
                 let recv = match &o.receiver {
                     Some(r) => d![text(r.name.clone()), text(" -> ")],
                     None => nil(),
                 };
                 d![
-                    self.expr(&o.expression),
+                    self.expr(&o.expression)?,
                     text(" or "),
                     recv,
-                    self.expr(&o.body)
+                    self.expr(&o.body)?
                 ]
             }
-            E::PipeExpression(p) => self.pipeline(p, HeadAt::MidLine),
-            E::FunctionExpression(f) => self.fn_expr(f),
+            E::PipeExpression(p) => self.pipeline(p, HeadAt::MidLine)?,
+            E::FunctionExpression(f) => self.fn_expr(f)?,
             E::FunctionCallExpression(c) => {
-                let args: Vec<Doc> = c.arguments.iter().map(|a| self.call_arg(a)).collect();
+                let args: Vec<Doc> = c
+                    .arguments
+                    .iter()
+                    .map(|a| self.call_arg(a))
+                    .collect::<Fmt<_>>()?;
                 // A block-shaped final argument hugs the parentheses,
                 // `f(a, fn() { … })`, instead of one argument per line, and so
                 // does a final list, `Object([ … ])`, unless an earlier
@@ -694,7 +715,7 @@ impl Formatter {
                     }
                     _ => delimited("(", args, ")"),
                 };
-                d![self.expr(&c.callee), parens]
+                d![self.expr(&c.callee)?, parens]
             }
             E::ModuleAccessExpression(m) => text(format!("{}::{}", m.module.name, m.member.name)),
             E::PropertyAccessExpression(p) => {
@@ -702,10 +723,14 @@ impl Formatter {
                     ast::PropertyKey::Field(id) => text(id.name.clone()),
                     ast::PropertyKey::TupleIndex(n) => text(n.value.clone()),
                 };
-                d![self.expr(&p.left), text("."), key]
+                d![self.expr(&p.left)?, text("."), key]
             }
             E::ArrayExpression(a) => {
-                let items: Vec<Doc> = a.elements.iter().map(|e| self.array_elem(e)).collect();
+                let items: Vec<Doc> = a
+                    .elements
+                    .iter()
+                    .map(|e| self.array_elem(e))
+                    .collect::<Fmt<_>>()?;
                 delimited("[", items, "]")
             }
             E::BinaryLiteral(b) => {
@@ -718,38 +743,37 @@ impl Formatter {
                             ast::Expression::StringLiteral(_)
                                 | ast::Expression::InterpolatedString(_)
                         );
-                        d![
+                        Ok(d![
                             self.comments_before(s.span),
-                            self.expr(&s.value),
-                            self.bin_size_spec(&s.spec, is_string)
-                        ]
+                            self.expr(&s.value)?,
+                            self.bin_size_spec(&s.spec, is_string)?
+                        ])
                     })
-                    .collect();
+                    .collect::<Fmt<_>>()?;
                 delimited("<<", segs, ">>")
             }
             E::TupleExpression(t) => {
                 let items: Vec<Doc> = t
                     .elements
                     .iter()
-                    .map(|e| d![self.comments_before(e.span()), self.expr(e)])
-                    .collect();
+                    .map(|e| Ok(d![self.comments_before(e.span()), self.expr(e)?]))
+                    .collect::<Fmt<_>>()?;
                 delimited("(", items, ")")
             }
             E::ArrayIndexExpression(a) => {
                 d![
-                    self.expr(&a.expression),
+                    self.expr(&a.expression)?,
                     text("["),
-                    self.expr(&a.index),
+                    self.expr(&a.index)?,
                     text("]")
                 ]
             }
-            E::RangeExpression(r) => d![self.expr(&r.start), text(".."), self.expr(&r.end)],
+            E::RangeExpression(r) => d![self.expr(&r.start)?, text(".."), self.expr(&r.end)?],
             // `format()` returns `ParseFailed` before building any Doc when
             // there are errors, so reaching here means a parser path built an
             // ErrorNode without recording one.
-            #[allow(clippy::unreachable)]
-            E::ErrorNode(_) => unreachable!("ErrorNode reached formatter; parser emitted no Error"),
-        }
+            E::ErrorNode(n) => return Err(ErrorNodeLeft(n.span)),
+        })
     }
 
     /// `a |> b |> c` parses as `(a |> b) |> c`. The chain is laid out as one
@@ -761,7 +785,7 @@ impl Formatter {
     /// Gleam. When something comes before `a` on its line, like `fn(x)` or a
     /// binding that `bound` didn't move down, they go one level in instead,
     /// so they don't sit under whatever that was.
-    fn pipeline(&self, p: &ast::PipeExpression, head_at: HeadAt) -> Doc {
+    fn pipeline(&self, p: &ast::PipeExpression, head_at: HeadAt) -> Fmt<Doc> {
         let mut stages = vec![&*p.right];
         let mut head = &*p.left;
         while let ast::Expression::PipeExpression(inner) = head {
@@ -772,19 +796,19 @@ impl Formatter {
         for stage in stages.into_iter().rev() {
             rest.push(line());
             rest.push(text("|> "));
-            rest.push(self.expr(stage));
+            rest.push(self.expr(stage)?);
         }
         let indent = match head_at {
             HeadAt::LineStart => 0,
             HeadAt::MidLine => 1,
         };
-        group(d![self.expr(head), nest(indent, doc::concat(rest))])
+        Ok(group(d![self.expr(head)?, nest(indent, doc::concat(rest))]))
     }
 
     /// `expr` for an expression that starts its own line: a statement, an
     /// arm body after a broken `->`, a call argument, or a pipeline `bound`
     /// moved down.
-    fn expr_at_line_start(&self, e: &ast::Expression) -> Doc {
+    fn expr_at_line_start(&self, e: &ast::Expression) -> Fmt<Doc> {
         match e {
             ast::Expression::PipeExpression(p) => self.pipeline(p, HeadAt::LineStart),
             _ => self.expr(e),
@@ -795,19 +819,19 @@ impl Formatter {
     /// there moves to the next line, one level in, so its `|>` lines sit under
     /// its first value and not under the name being bound. Anything else
     /// stays on the binder's line.
-    fn bound(&self, binder: &'static str, e: &ast::Expression) -> Doc {
-        match e {
+    fn bound(&self, binder: &'static str, e: &ast::Expression) -> Fmt<Doc> {
+        Ok(match e {
             ast::Expression::PipeExpression(_) => {
                 d![
                     text(binder),
-                    group(nest(1, d![line(), self.expr_at_line_start(e)]))
+                    group(nest(1, d![line(), self.expr_at_line_start(e)?]))
                 ]
             }
-            _ => d![text(binder), text(" "), self.expr(e)],
-        }
+            _ => d![text(binder), text(" "), self.expr(e)?],
+        })
     }
 
-    fn call_arg(&self, a: &ast::CallArg) -> Doc {
+    fn call_arg(&self, a: &ast::CallArg) -> Fmt<Doc> {
         // A spread's span starts after the `..`, but a comment above the
         // argument attaches to the `..` token. Query both positions.
         let comments = match a {
@@ -824,7 +848,7 @@ impl Formatter {
             }
         };
         let arg = match a {
-            ast::CallArg::Positional(e) => self.expr_at_line_start(e),
+            ast::CallArg::Positional(e) => self.expr_at_line_start(e)?,
             // A punned argument keeps its shorthand. If the formatter expanded
             // `label:` to `label: label`, the shorthand would be gone the first
             // time a file got formatted.
@@ -834,71 +858,71 @@ impl Formatter {
                 ..
             } => d![text(label.name.clone()), text(":")],
             ast::CallArg::Labeled { label, value, .. } => {
-                d![text(label.name.clone()), self.bound(":", value)]
+                d![text(label.name.clone()), self.bound(":", value)?]
             }
-            ast::CallArg::Spread(e) => d![text(".."), self.expr(e)],
+            ast::CallArg::Spread(e) => d![text(".."), self.expr(e)?],
         };
-        d![comments, arg]
+        Ok(d![comments, arg])
     }
 
     /// The `:spec` suffix of a `<<>>` segment, the reverse of `parse_bin_size_spec`.
     /// A string-literal segment's Utf8 kind is the parser default, so its
     /// `:utf8` is omitted.
-    fn bin_size_spec(&self, spec: &ast::BinSpec, value_is_string: bool) -> Doc {
-        match spec {
+    fn bin_size_spec(&self, spec: &ast::BinSpec, value_is_string: bool) -> Fmt<Doc> {
+        Ok(match spec {
             ast::BinSpec::Int { bits: None } => nil(),
             ast::BinSpec::Int {
                 bits: Some(ast::Expression::NumberLiteral(n)),
             } => d![text(":"), text(n.value.clone())],
-            ast::BinSpec::Int { bits: Some(e) } => d![text(":size("), self.expr(e), text(")")],
+            ast::BinSpec::Int { bits: Some(e) } => d![text(":size("), self.expr(e)?, text(")")],
             ast::BinSpec::Binary { bytes: None } => text(":binary"),
             ast::BinSpec::Binary { bytes: Some(e) } => {
-                d![text(":bytes("), self.expr(e), text(")")]
+                d![text(":bytes("), self.expr(e)?, text(")")]
             }
             ast::BinSpec::Utf8 if value_is_string => nil(),
             ast::BinSpec::Utf8 => text(":utf8"),
-        }
+        })
     }
 
-    fn array_elem(&self, e: &ast::ArrayElement) -> Doc {
-        match e {
+    fn array_elem(&self, e: &ast::ArrayElement) -> Fmt<Doc> {
+        Ok(match e {
             ast::ArrayElement::Expression(e) => {
-                d![self.comments_before(e.span()), self.expr(e)]
+                d![self.comments_before(e.span()), self.expr(e)?]
             }
             ast::ArrayElement::SpreadElement(se) => d![
                 self.comments_before(se.span),
                 text(".."),
-                self.expr(&se.expression)
+                self.expr(&se.expression)?
             ],
-        }
+        })
     }
 
-    fn body_as_block(&self, body: &ast::Expression) -> Doc {
+    fn body_as_block(&self, body: &ast::Expression) -> Fmt<Doc> {
         match body {
             ast::Expression::BlockExpression(b) => self.block_expr(b),
-            other => block(self.expr(other)),
+            other => Ok(block(self.expr(other)?)),
         }
     }
 
-    fn block_expr(&self, b: &ast::BlockExpression) -> Doc {
+    fn block_expr(&self, b: &ast::BlockExpression) -> Fmt<Doc> {
         let trail = self.trailing_comments(b.span, !b.body.is_empty());
         if b.body.is_empty() && trail.is_nil() {
-            return text("{}");
+            return Ok(text("{}"));
         }
         let hard = !trail.is_nil() || b.body.iter().any(|n| self.has_comment_at(n.span()));
-        let body = d![self.nodes_with_trivia(&b.body, 1), trail];
-        if b.body.len() <= 1 && !hard {
+        let body = d![self.nodes_with_trivia(&b.body, 1)?, trail];
+        Ok(if b.body.len() <= 1 && !hard {
             block(body)
         } else {
             hard_braces(body)
-        }
+        })
     }
 
     /// A chain of operators on one precedence level, `a || b || c`, is one
     /// group: on one line, or every operand on its own line indented under
     /// the first. The operator ends its line, since a line that starts with
     /// `-` would parse as a new statement.
-    fn binary_chain(&self, b: &ast::BinaryExpression) -> Doc {
+    fn binary_chain(&self, b: &ast::BinaryExpression) -> Fmt<Doc> {
         let level = parser::precedence_level(b.op);
         let mut rest = Vec::new();
         let mut cur = b;
@@ -914,12 +938,18 @@ impl Formatter {
         let rest: Vec<Doc> = rest
             .into_iter()
             .rev()
-            .map(|(op, right)| d![text(format!(" {}", op.symbol())), line(), self.expr(right)])
-            .collect();
-        group(d![self.expr(first), nest(1, doc::concat(rest))])
+            .map(|(op, right)| {
+                Ok(d![
+                    text(format!(" {}", op.symbol())),
+                    line(),
+                    self.expr(right)?
+                ])
+            })
+            .collect::<Fmt<_>>()?;
+        Ok(group(d![self.expr(first)?, nest(1, doc::concat(rest))]))
     }
 
-    fn if_chain(&self, e: &ast::Expression) -> Doc {
+    fn if_chain(&self, e: &ast::Expression) -> Fmt<Doc> {
         // Unroll an if/else-if/else chain into a flat clause list so they share
         // one group and break together.
         struct Clause<'a> {
@@ -965,18 +995,18 @@ impl Formatter {
         };
         // A bare branch after `then` or `else`. A comment above it puts it on
         // a line of its own, indented under the keyword.
-        let bare = |word: &'static str, b: &ast::Expression| {
-            if self.has_comment_at(b.span()) {
+        let bare = |word: &'static str, b: &ast::Expression| -> Fmt<Doc> {
+            Ok(if self.has_comment_at(b.span()) {
                 d![
                     text(word),
                     nest(
                         1,
-                        d![hardline(), self.comments_before(b.span()), self.expr(b)]
+                        d![hardline(), self.comments_before(b.span()), self.expr(b)?]
                     )
                 ]
             } else {
-                d![text(word), text(" "), self.expr(b)]
-            }
+                d![text(word), text(" "), self.expr(b)?]
+            })
         };
         // `if a then x else if b then y else z`: on one line when it fits,
         // else a clause a line, each after the first indented under it.
@@ -985,19 +1015,19 @@ impl Formatter {
             for (i, clause) in clauses.iter().enumerate() {
                 docs.push(d![
                     kw(i, clause),
-                    self.expr(clause.cond),
+                    self.expr(clause.cond)?,
                     text(" "),
-                    bare("then", clause.body),
+                    bare("then", clause.body)?,
                 ]);
             }
-            let last = bare("else", else_body);
+            let last = bare("else", else_body)?;
             let rest: Vec<Doc> = docs
                 .drain(1..)
                 .chain([last])
                 .map(|d| d![line(), d])
                 .collect();
             let first = docs.pop().unwrap_or_else(nil);
-            return group(d![first, nest(1, doc::concat(rest))]);
+            return Ok(group(d![first, nest(1, doc::concat(rest))]));
         }
         // Only a ternary-shaped if/else stays on one line: no chain, no
         // comments, every branch a bare atom. Anything heavier breaks every
@@ -1024,14 +1054,14 @@ impl Formatter {
         let mut docs: Vec<Doc> = Vec::new();
         for (i, clause) in clauses.iter().enumerate() {
             let branch = if clause.then_keyword {
-                bare("then", clause.body)
+                bare("then", clause.body)?
             } else {
-                d![self.comments_before(clause.body.span()), body(clause.body)]
+                d![self.comments_before(clause.body.span()), body(clause.body)?]
             };
             docs.push(d![
                 kw(i, clause),
                 self.comments_before(clause.cond.span()),
-                self.expr(clause.cond),
+                self.expr(clause.cond)?,
                 text(" "),
                 branch,
             ]);
@@ -1040,16 +1070,16 @@ impl Formatter {
             d![
                 text("else "),
                 self.comments_before(else_body.span()),
-                body(else_body)
+                body(else_body)?
             ]
         } else {
-            bare("else", else_body)
+            bare("else", else_body)?
         });
-        if trivial {
+        Ok(if trivial {
             group(join(docs, line()))
         } else {
             join(docs, text(" "))
-        }
+        })
     }
 
     /// A branch is trivial when it is one comment-free bare atom. Only these
@@ -1075,57 +1105,60 @@ impl Formatter {
         )
     }
 
-    fn body_as_hard_block(&self, body: &ast::Expression) -> Doc {
+    fn body_as_hard_block(&self, body: &ast::Expression) -> Fmt<Doc> {
         let inner = match body {
             ast::Expression::BlockExpression(b) => {
                 d![
-                    self.nodes_with_trivia(&b.body, 1),
+                    self.nodes_with_trivia(&b.body, 1)?,
                     self.trailing_comments(b.span, !b.body.is_empty())
                 ]
             }
-            other => self.expr(other),
+            other => self.expr(other)?,
         };
-        hard_braces(inner)
+        Ok(hard_braces(inner))
     }
 
-    fn match_expr(&self, m: &ast::MatchExpression) -> Doc {
+    fn match_expr(&self, m: &ast::MatchExpression) -> Fmt<Doc> {
         let mut arms: Vec<Doc> = Vec::new();
         for (i, arm) in m.arms.iter().enumerate() {
             arms.push(self.leading_trivia(arm.pattern.span(), i == 0, 1));
             let guard = match &arm.guard {
-                Some(g) => d![text(" if "), self.expr(g)],
+                Some(g) => d![text(" if "), self.expr(g)?],
                 None => nil(),
             };
-            let head = self.pattern(&arm.pattern);
-            let body = self.expr(&arm.body);
+            let head = self.pattern(&arm.pattern)?;
+            let body = self.expr(&arm.body)?;
             // A body that ends the line itself hugs the arrow. Anything else
             // gets a break point after the arrow, so an overflowing arm wraps
             // there rather than inside the pattern.
             let tail = if doc::ends_line(&body) {
                 d![text(" -> "), body]
             } else {
-                let body = self.expr_at_line_start(&arm.body);
+                let body = self.expr_at_line_start(&arm.body)?;
                 group_willing(nest(1, d![text(" ->"), line(), body]))
             };
             arms.push(d![head, guard, tail]);
         }
         let trail = self.trailing_comments(m.span, true);
-        d![
+        Ok(d![
             text("match "),
-            self.expr(&m.subject),
+            self.expr(&m.subject)?,
             text(" "),
             hard_braces(d![doc::concat(arms), trail]),
-        ]
+        ])
     }
 
-    fn pattern(&self, p: &ast::Pattern) -> Doc {
+    fn pattern(&self, p: &ast::Pattern) -> Fmt<Doc> {
         use ast::Pattern as P;
-        match p {
+        Ok(match p {
             P::Var { name } => text(name.name.clone()),
             P::Literal(ast::PatternLiteral::Number(n)) => text(n.value.clone()),
             P::Literal(ast::PatternLiteral::String(s)) => text(quoted(&s.value)),
             P::Tuple { elements, .. } => {
-                let es: Vec<Doc> = elements.iter().map(|e| self.pattern(e)).collect();
+                let es: Vec<Doc> = elements
+                    .iter()
+                    .map(|e| self.pattern(e))
+                    .collect::<Fmt<_>>()?;
                 delimited("(", es, ")")
             }
             P::Array { elements, .. } => {
@@ -1133,12 +1166,12 @@ impl Formatter {
                     .iter()
                     .map(|e| match e {
                         ast::ArrayPatternElement::Pattern(p) => self.pattern(p),
-                        ast::ArrayPatternElement::Spread { binding, .. } => match binding {
+                        ast::ArrayPatternElement::Spread { binding, .. } => Ok(match binding {
                             Some(b) => d![text(".."), text(b.name.clone())],
                             None => text(".."),
-                        },
+                        }),
                     })
-                    .collect();
+                    .collect::<Fmt<_>>()?;
                 delimited("[", es, "]")
             }
             P::Binary { segments, rest, .. } => {
@@ -1149,13 +1182,13 @@ impl Formatter {
                             s.value,
                             ast::Pattern::Literal(ast::PatternLiteral::String(_))
                         );
-                        d![
+                        Ok(d![
                             self.comments_before(s.span),
-                            self.pattern(&s.value),
-                            self.bin_size_spec(&s.spec, is_string)
-                        ]
+                            self.pattern(&s.value)?,
+                            self.bin_size_spec(&s.spec, is_string)?
+                        ])
                     })
-                    .collect();
+                    .collect::<Fmt<_>>()?;
                 match rest {
                     None => delimited("<<", segs, ">>"),
                     Some(r) => {
@@ -1181,27 +1214,29 @@ impl Formatter {
                     None => name.name.clone(),
                 };
                 if args.is_empty() && !*rest {
-                    return text(head);
+                    return Ok(text(head));
                 }
                 let mut items: Vec<Doc> = args
                     .iter()
-                    .map(|a| match a {
-                        ast::PatternArg::Positional(p) => self.pattern(p),
-                        ast::PatternArg::Labeled {
-                            label,
-                            punned: true,
-                            ..
-                        } => text(format!("{}:", label.name)),
-                        ast::PatternArg::Labeled { label, pattern, .. } => {
-                            d![text(label.name.clone()), text(": "), self.pattern(pattern)]
-                        }
+                    .map(|a| {
+                        Ok(match a {
+                            ast::PatternArg::Positional(p) => self.pattern(p)?,
+                            ast::PatternArg::Labeled {
+                                label,
+                                punned: true,
+                                ..
+                            } => text(format!("{}:", label.name)),
+                            ast::PatternArg::Labeled { label, pattern, .. } => {
+                                d![text(label.name.clone()), text(": "), self.pattern(pattern)?]
+                            }
+                        })
                     })
-                    .collect();
+                    .collect::<Fmt<_>>()?;
                 if *rest {
                     items.push(text(".."));
                     // No trailing comma: the parser rejects `..,`, so a wrapped
                     // pattern must end `..\n)`.
-                    return d![text(head), delimited_no_trailing("(", items, ")")];
+                    return Ok(d![text(head), delimited_no_trailing("(", items, ")")]);
                 }
                 d![text(head), delimited("(", items, ")")]
             }
@@ -1210,9 +1245,9 @@ impl Formatter {
                 // put one alternative per line, each after the first led by
                 // its pipe at the arm's indent. Never break inside an
                 // alternative's own parens.
-                let mut parts = vec![self.pattern(first)];
+                let mut parts = vec![self.pattern(first)?];
                 for p in rest {
-                    parts.push(d![line(), text("| "), self.pattern(p)]);
+                    parts.push(d![line(), text("| "), self.pattern(p)?]);
                 }
                 group(doc::concat(parts))
             }
@@ -1223,7 +1258,7 @@ impl Formatter {
                     text(end.value.clone())
                 ]
             }
-        }
+        })
     }
 
     fn type_(&self, t: &ast::TypeIdentifier) -> Doc {

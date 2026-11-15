@@ -363,7 +363,7 @@ impl<'p> Perceus<'p> {
                 }
                 (
                     fields.iter().map(|b| b.id).collect(),
-                    Some(ReuseShape::ctor(fields.len())),
+                    ReuseShape::ctor(fields.len()),
                 )
             }
         }
@@ -472,8 +472,12 @@ impl ReuseWalk {
                         // here or be thrown away by the retain below.
                         let i = avail
                             .iter()
-                            .rposition(|t| t.slot == bind.id && t.shape == want)
-                            .or_else(|| avail.iter().rposition(|t| !t.carried && t.shape == want));
+                            .rposition(|t| t.slot == bind.id && Some(t.shape) == want)
+                            .or_else(|| {
+                                avail
+                                    .iter()
+                                    .rposition(|t| !t.carried && Some(t.shape) == want)
+                            });
                         *reuse = i.map(|i| avail.remove(i).slot);
                     }
                     // The slot now holds a live value, and a token for it
@@ -512,7 +516,9 @@ impl ReuseWalk {
                     match a {
                         Atom::Ctor { fields, reuse, .. } => {
                             let want = ReuseShape::ctor(fields.len());
-                            let i = avail.iter().rposition(|t| !t.carried && t.shape == want);
+                            let i = avail
+                                .iter()
+                                .rposition(|t| !t.carried && Some(t.shape) == want);
                             *reuse = i.map(|i| avail.remove(i).slot);
                         }
                         Atom::Call {
@@ -642,7 +648,7 @@ fn set_diff(a: &Live, b: &Live) -> Vec<LocalId> {
 /// known at compile time.
 fn ctor_shape(a: &Atom) -> Option<ReuseShape> {
     match a {
-        Atom::Ctor { fields, .. } => Some(ReuseShape::ctor(fields.len())),
+        Atom::Ctor { fields, .. } => ReuseShape::ctor(fields.len()),
         _ => None,
     }
 }

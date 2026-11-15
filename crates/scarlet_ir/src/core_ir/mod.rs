@@ -387,11 +387,11 @@ pub struct ReuseShape {
 }
 
 impl ReuseShape {
-    #[allow(clippy::expect_used)] // ctor arity is bounded far below u16::MAX upstream
-    pub fn ctor(arity: usize) -> Self {
-        ReuseShape {
-            fields: u16::try_from(arity).expect("constructor arity exceeds u16"),
-        }
+    /// The shape of a constructor cell with `arity` fields, when a shape can
+    /// say that many.
+    pub fn ctor(arity: usize) -> Option<Self> {
+        let fields = u16::try_from(arity).ok()?;
+        Some(ReuseShape { fields })
     }
 }
 
@@ -1013,7 +1013,7 @@ mod tests {
             rhs: Atom::prim(PrimOp::IntAdd, vec![LocalId(0), LocalId(1)]),
             body: Box::new(CoreExpr::Drop {
                 local: LocalId(0),
-                shape: Some(ReuseShape::ctor(3)),
+                shape: ReuseShape::ctor(3),
                 body: Box::new(CoreExpr::Let {
                     bind: bind(3, RTy(11)),
                     rhs: Atom::Ctor {

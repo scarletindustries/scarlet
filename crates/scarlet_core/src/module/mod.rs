@@ -348,7 +348,7 @@ mod tests {
                 key,
             }) => {
                 assert_eq!(p, base.join("foo.sca"));
-                assert_eq!(key, ModuleKey::for_file(&base.join("foo.sca")));
+                assert_eq!(key, ModuleKey::for_file(&base.join("foo.sca")).unwrap());
             }
             other => panic!("expected ./foo to resolve to a file, got {other:?}"),
         }
