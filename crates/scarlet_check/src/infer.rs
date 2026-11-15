@@ -4,6 +4,8 @@
 //! whose own initialiser is being checked. Every binder's type is written
 //! once, where it is bound.
 
+use std::collections::HashMap;
+
 use scarlet_syntax::ast::{BinaryOp, UnaryOp};
 use scarlet_syntax::span::Span;
 use scarlet_types::def::TypeDef;
@@ -87,9 +89,9 @@ struct Infer<'r, 'a> {
     defs: &'r TypeDefs,
     e: Engine,
     /// Written once each, where the binder is bound.
-    binders: Vec<Option<LocalScheme>>,
+    binders: HashMap<BinderId, LocalScheme>,
     /// Written once each, when the declaration's group is generalised.
-    decls: Vec<Option<LocalScheme>>,
+    decls: HashMap<DeclId, LocalScheme>,
     hovers: Vec<(Span, Ty)>,
     refused: Vec<BinderId>,
     report: Report,
@@ -106,8 +108,8 @@ pub(crate) fn infer(
         declared,
         defs,
         e: Engine::new(Known::new()),
-        binders: vec![None; resolved.binders.len()],
-        decls: vec![None; resolved.decls.len()],
+        binders: HashMap::new(),
+        decls: HashMap::new(),
         hovers: Vec::new(),
         refused: Vec::new(),
         report: Report::new(env.input.source),
@@ -129,16 +131,16 @@ pub(crate) fn infer(
     let statements = resolved.statements.iter().map(|s| i.stmt(s, top)).collect();
     // A binder with no type was bound in code that didn't check, which has
     // been reported; it keeps a variable nothing solves.
-    let mut binder_types = Vec::with_capacity(i.binders.len());
-    for s in std::mem::take(&mut i.binders) {
-        binder_types.push(match s {
+    let mut binder_types = Vec::with_capacity(resolved.binders.len());
+    for b in (0..resolved.binders.len() as u32).map(BinderId) {
+        binder_types.push(match i.binders.remove(&b) {
             Some(s) => s.ty,
             None => i.e.fresh(),
         });
     }
-    let mut schemes = Vec::with_capacity(i.decls.len());
-    for s in std::mem::take(&mut i.decls) {
-        schemes.push(match s {
+    let mut schemes = Vec::with_capacity(resolved.decls.len());
+    for d in (0..resolved.decls.len() as u32).map(DeclId) {
+        schemes.push(match i.decls.remove(&d) {
             Some(s) => s,
             None => LocalScheme::mono(i.e.fresh()),
         });
@@ -170,7 +172,7 @@ impl Infer<'_, '_> {
         let sigs: Vec<(DeclId, Ty, Vec<Ty>, Ty)> = group
             .iter()
             .map(|&d| {
-                let (ty, params, ret) = self.signature(&resolved.decls[d.0 as usize]);
+                let (ty, params, ret) = self.signature(resolved.decl(d));
                 (d, ty, params, ret)
             })
             .collect();
@@ -186,7 +188,7 @@ impl Infer<'_, '_> {
                 pending: None,
                 owner: &owner,
             };
-            match (&resolved.decls[d.0 as usize], &decl.body) {
+            match (resolved.decl(*d), &decl.body) {
                 (
                     RDecl::Fn {
                         params: ps,
@@ -244,14 +246,14 @@ impl Infer<'_, '_> {
         let restricted = self.env.restricted.clone();
         let items: Vec<(Ty, &[TypeName])> = sigs
             .iter()
-            .map(|&(d, ty, _, _)| match resolved.decls[d.0 as usize] {
+            .map(|&(d, ty, _, _)| match resolved.decl(d) {
                 RDecl::Const { .. } => (ty, &restricted[..]),
                 RDecl::Fn { .. } | RDecl::Builtin { .. } => (ty, &[][..]),
             })
             .collect();
         let schemes = self.e.generalize_all(level, &items);
         for ((d, ..), scheme) in sigs.iter().zip(schemes) {
-            self.decls[d.0 as usize] = Some(scheme);
+            self.decls.insert(*d, scheme);
         }
         (functions, consts)
     }
@@ -310,13 +312,13 @@ impl Infer<'_, '_> {
     // --- Binders ---
 
     fn define(&mut self, b: BinderId, scheme: LocalScheme) {
-        self.binders[b.0 as usize] = Some(scheme);
+        self.binders.insert(b, scheme);
     }
 
     /// Bind a pattern's binder to `ty`. The alternatives of an `|` share
     /// their binders, so a binder already bound must have the same type.
     fn bind_pattern(&mut self, b: BinderId, ty: Ty, span: Span) -> bool {
-        match self.binders[b.0 as usize].as_ref().map(|s| s.ty) {
+        match self.binders.get(&b).map(|s| s.ty) {
             Some(existing) => self.unify(existing, ty, span),
             None => {
                 self.define(b, LocalScheme::mono(ty));
@@ -732,7 +734,7 @@ impl Infer<'_, '_> {
             Ref::Local(b) => {
                 let ty = match ctx.pending(*b) {
                     Some(t) => t,
-                    None => match self.binders[b.0 as usize].clone() {
+                    None => match self.binders.get(b).cloned() {
                         Some(s) => self.e.instantiate(&s),
                         None => return self.unbound(span),
                     },
@@ -742,7 +744,7 @@ impl Infer<'_, '_> {
             Ref::Own(d, var) => {
                 let ty = match ctx.group(*d) {
                     Some(t) => t,
-                    None => match self.decls[d.0 as usize].clone() {
+                    None => match self.decls.get(d).cloned() {
                         Some(s) => self.e.instantiate(&s),
                         None => return self.unbound(span),
                     },
@@ -838,9 +840,9 @@ impl Infer<'_, '_> {
         for (i, (b, annot)) in l.params.iter().enumerate() {
             let ty = match annot {
                 Some(t) => self.e.import(t, &mut subst),
-                None => match &hints {
-                    Some(h) if i < h.len() => h[i],
-                    _ => self.e.fresh(),
+                None => match hints.as_ref().and_then(|h| h.get(i)) {
+                    Some(&t) => t,
+                    None => self.e.fresh(),
                 },
             };
             self.define(*b, LocalScheme::mono(ty));
@@ -950,12 +952,12 @@ impl Infer<'_, '_> {
                 fills,
             })
         });
-        let mut checked: Vec<Arg> = Vec::with_capacity(args.len());
-        let mut order: Vec<usize> = (0..args.len()).collect();
-        order.sort_by_key(|&i| args[i].slot);
-        let mut by_index: Vec<Option<Arg>> = (0..args.len()).map(|_| None).collect();
-        for i in order {
-            let a = &args[i];
+        // Arguments are checked in parameter order, so each one's hint is
+        // known, and kept in the order they were written.
+        let mut order: Vec<(usize, &RArg)> = args.iter().enumerate().collect();
+        order.sort_by_key(|(_, a)| a.slot);
+        let mut by_index: Vec<(usize, Arg)> = Vec::with_capacity(args.len());
+        for (i, a) in order {
             let param = a
                 .fills
                 .then(|| params.get(a.slot as usize).copied())
@@ -964,12 +966,16 @@ impl Infer<'_, '_> {
             if let Some(p) = param {
                 self.unify(p, value.ty, value.span);
             }
-            by_index[i] = Some(Arg {
-                slot: a.slot,
-                value,
-            });
+            by_index.push((
+                i,
+                Arg {
+                    slot: a.slot,
+                    value,
+                },
+            ));
         }
-        checked.extend(by_index.into_iter().flatten());
+        by_index.sort_by_key(|(i, _)| *i);
+        let checked: Vec<Arg> = by_index.into_iter().map(|(_, a)| a).collect();
         (
             result,
             ExprKind::Construct {

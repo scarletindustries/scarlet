@@ -52,7 +52,12 @@ pub struct ParseResult {
 }
 
 pub struct Parser {
+    /// Every token before the end of input. The Eof token lives apart in
+    /// `eof`, so the stream can never run out: any position at or past
+    /// `tokens.len()` is the end of input.
     tokens: Vec<Token>,
+    eof: Token,
+    /// At most `tokens.len()`, which is the Eof token.
     index: usize,
     diagnostics: Vec<Diagnostic<SyntaxError>>,
     context_stack: Vec<ParseContext>,
@@ -80,24 +85,29 @@ pub(crate) fn precedence_level(op: ast::BinaryOp) -> usize {
 }
 
 pub(crate) fn new_parser_from_tokens(
-    mut tokens: Vec<Token>,
+    tokens: Vec<Token>,
     scanner_diagnostics: Vec<Diagnostic<ScanError>>,
 ) -> Parser {
-    // Every loop stops at Eof, so the stream must end with one. The scanner
-    // always adds it, but check here so a hand-built stream that forgot it
-    // can't send the parser out of bounds.
-    if tokens.last().map(|t| &t.kind) != Some(&Kind::Eof) {
-        let span = tokens.last().map_or(Span::DUMMY, |t| {
-            Span::point(t.span.end_line, t.span.end_column)
-        });
-        tokens.push(Token {
-            kind: Kind::Eof,
-            span,
-            leading_trivia: Vec::new(),
-        });
-    }
+    // The scanner always ends the stream with Eof. A hand-built stream that
+    // forgot it gets one at the end of its last token.
+    let mut tokens = token::insert_line_ends(tokens);
+    let eof = match tokens.pop() {
+        Some(last) if last.kind == Kind::Eof => last,
+        last => {
+            let span = last.as_ref().map_or(Span::DUMMY, |t| {
+                Span::point(t.span.end_line, t.span.end_column)
+            });
+            tokens.extend(last);
+            Token {
+                kind: Kind::Eof,
+                span,
+                leading_trivia: Vec::new(),
+            }
+        }
+    };
     Parser {
-        tokens: token::insert_line_ends(tokens),
+        tokens,
+        eof,
         index: 0,
         diagnostics: scanner_diagnostics
             .into_iter()
@@ -218,18 +228,49 @@ impl Parser {
         }
     }
 
+    /// The token at `i`. Every position at or past the end is the Eof token.
+    fn token_at(&self, i: usize) -> &Token {
+        self.tokens.get(i).unwrap_or(&self.eof)
+    }
+
+    /// The token at `i`, or `None` past the Eof token.
+    fn token_get(&self, i: usize) -> Option<&Token> {
+        match self.tokens.get(i) {
+            Some(tok) => Some(tok),
+            None if i == self.tokens.len() => Some(&self.eof),
+            None => None,
+        }
+    }
+
+    /// The tokens from `i` on, through the Eof token.
+    fn tokens_from(&self, i: usize) -> impl Iterator<Item = &Token> {
+        self.tokens
+            .get(i..)
+            .unwrap_or_default()
+            .iter()
+            .chain(std::iter::once(&self.eof))
+    }
+
     fn cur(&self) -> &Token {
-        &self.tokens[self.index]
+        self.token_at(self.index)
     }
 
     fn kind(&self) -> Kind {
-        self.tokens[self.index].kind.clone()
+        self.cur().kind.clone()
     }
 
     fn save_token_end(&mut self) {
-        let sp = self.tokens[self.index].span;
+        let sp = self.cur().span;
         self.prev_token_end_line = sp.end_line;
         self.prev_token_end_column = sp.end_column;
+    }
+
+    /// Moves past the current token. The Eof token is never moved past.
+    fn bump(&mut self) {
+        if self.index < self.tokens.len() {
+            self.save_token_end();
+            self.index += 1;
+        }
     }
 
     // Skips tokens until a good place to resume in the current context. It
@@ -341,16 +382,12 @@ impl Parser {
     }
 
     fn advance(&mut self) {
-        if self.index + 1 < self.tokens.len() {
-            self.save_token_end();
-            self.index += 1;
-        }
+        self.bump();
     }
 
     fn eat(&mut self, kind: Kind) -> PResult<()> {
-        if self.tokens[self.index].kind == kind {
-            self.save_token_end();
-            self.index += 1;
+        if self.cur().kind == kind {
+            self.bump();
             return Ok(());
         }
 
@@ -367,10 +404,9 @@ impl Parser {
         what: Expected,
         extract: impl FnOnce(&Kind) -> Option<String>,
     ) -> PResult<String> {
-        match extract(&self.tokens[self.index].kind) {
+        match extract(&self.cur().kind) {
             Some(text) => {
-                self.save_token_end();
-                self.index += 1;
+                self.bump();
                 Ok(text)
             }
             None => Err(Box::new(ParseError::Expected {
@@ -415,7 +451,7 @@ impl Parser {
     }
 
     fn peek_next(&self) -> Option<Kind> {
-        self.tokens.get(self.index + 1).map(|t| t.kind.clone())
+        self.token_get(self.index + 1).map(|t| t.kind.clone())
     }
 
     /// The first `/** */` in the current token's leading trivia. If that token
@@ -546,9 +582,7 @@ impl Parser {
     // uppercase constructors and `(` tuple types.
     fn is_binding_ahead(&self) -> bool {
         let mut depth = 0i32;
-        let mut i = self.index + 1;
-        while i < self.tokens.len() {
-            let tok = &self.tokens[i];
+        for tok in self.tokens_from(self.index + 1) {
             if depth == 0 && tok.kind == Kind::LineEnd {
                 return false;
             }
@@ -567,7 +601,6 @@ impl Parser {
                 Kind::Eof => return false,
                 _ => {}
             }
-            i += 1;
         }
         false
     }
@@ -578,7 +611,7 @@ impl Parser {
     // something else: a binding, a call, a comparison.
     fn is_backpass_ahead(&self) -> bool {
         let mut depth = 0usize;
-        for tok in self.tokens.iter().skip(self.index) {
+        for tok in self.tokens_from(self.index) {
             match tok.kind {
                 Kind::PuncOpenParen | Kind::PuncOpenBracket | Kind::BinOpen => depth += 1,
                 Kind::PuncCloseParen | Kind::PuncCloseBracket | Kind::BinClose => {
@@ -797,9 +830,9 @@ impl Parser {
     }
 
     fn parse_level(&mut self, lvl: usize) -> PResult<ast::Expression> {
-        if lvl == Self::PRECEDENCE.len() {
+        let Some(ops) = Self::PRECEDENCE.get(lvl) else {
             return self.parse_unary_expression();
-        }
+        };
         let next = |p: &mut Self| {
             if lvl == Self::RANGE_LEVEL {
                 p.parse_range()
@@ -808,7 +841,7 @@ impl Parser {
             }
         };
         let mut left = next(self)?;
-        while let Some((tok, op)) = Self::PRECEDENCE[lvl]
+        while let Some((tok, op)) = ops
             .iter()
             .find(|(k, _)| *k == self.kind())
             .map(|(k, op)| (k.clone(), *op))
@@ -2025,24 +2058,20 @@ impl Parser {
     // Whether an `=` follows the matching `)`.
     fn is_tuple_destructuring(&self) -> bool {
         let mut depth = 0;
-        let mut i = self.index;
-
-        while i < self.tokens.len() {
-            let tok = &self.tokens[i];
+        let mut rest = self.tokens_from(self.index);
+        while let Some(tok) = rest.next() {
             if tok.kind == Kind::PuncOpenParen {
                 depth += 1;
             } else if tok.kind == Kind::PuncCloseParen {
                 depth -= 1;
                 if depth == 0 {
-                    return self
-                        .tokens
-                        .get(i + 1)
+                    return rest
+                        .next()
                         .is_some_and(|next| next.kind == Kind::PuncEquals);
                 }
             } else if tok.kind == Kind::Eof {
                 return false;
             }
-            i += 1;
         }
         false
     }
@@ -2051,7 +2080,7 @@ impl Parser {
     /// `::`, a constructor name and its `(`, then an `=` after the matching `)`.
     /// Without the `=` it is a call, `http::Fixed(1, b)`.
     fn is_qualified_ctor_destructuring(&self) -> bool {
-        let kind = |i: usize| self.tokens.get(self.index + i).map(|t| &t.kind);
+        let kind = |i: usize| self.token_get(self.index + i).map(|t| &t.kind);
         let (Some(Kind::Identifier(_)), Some(Kind::PuncColonColon), Some(Kind::Identifier(ctor))) =
             (kind(0), kind(1), kind(2))
         else {
@@ -2061,15 +2090,15 @@ impl Parser {
             return false;
         }
         let mut depth = 0usize;
-        for (i, tok) in self.tokens.iter().enumerate().skip(self.index + 3) {
+        let mut rest = self.tokens_from(self.index + 3);
+        while let Some(tok) = rest.next() {
             match tok.kind {
                 Kind::PuncOpenParen => depth += 1,
                 Kind::PuncCloseParen => {
                     depth -= 1;
                     if depth == 0 {
-                        return self
-                            .tokens
-                            .get(i + 1)
+                        return rest
+                            .next()
                             .is_some_and(|next| next.kind == Kind::PuncEquals);
                     }
                 }
@@ -2312,7 +2341,7 @@ impl Parser {
                 Ok(true)
             }
             Kind::PuncDot => {
-                let next = self.tokens.get(self.index + 1).map(|t| &t.kind);
+                let next = self.token_get(self.index + 1).map(|t| &t.kind);
                 let Some(Kind::Identifier(member)) = next else {
                     return Ok(false);
                 };

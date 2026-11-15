@@ -28,7 +28,10 @@ impl Frame {
 }
 
 pub(crate) struct Scope {
-    frames: Vec<Frame>,
+    /// Frame 0, which is always there.
+    module: Frame,
+    /// The function bodies open inside it, innermost last.
+    inner: Vec<Frame>,
 }
 
 /// Where a local was found.
@@ -41,27 +44,34 @@ pub(crate) struct Found {
 impl Scope {
     pub fn new() -> Self {
         Scope {
-            frames: vec![Frame {
+            module: Frame {
                 blocks: vec![Vec::new()],
                 ..Frame::default()
-            }],
+            },
+            inner: Vec::new(),
         }
     }
 
     /// The innermost frame's index.
     pub fn depth(&self) -> usize {
-        self.frames.len() - 1
+        self.inner.len()
     }
 
     /// Whether a binding made now is one of the module's own statements: no
     /// function is open, and no block inside a statement either.
     pub fn at_module_scope(&self) -> bool {
-        self.frames.len() == 1 && self.frames[0].blocks.len() == 1
+        self.inner.is_empty() && self.module.blocks.len() == 1
+    }
+
+    fn frames(&self) -> impl Iterator<Item = &Frame> {
+        std::iter::once(&self.module).chain(&self.inner)
     }
 
     fn current(&mut self) -> &mut Frame {
-        let i = self.frames.len() - 1;
-        &mut self.frames[i]
+        match self.inner.last_mut() {
+            Some(f) => f,
+            None => &mut self.module,
+        }
     }
 
     pub fn open_block(&mut self) {
@@ -79,7 +89,7 @@ impl Scope {
     }
 
     pub fn open_frame(&mut self, self_name: Option<(Name, BinderId)>) {
-        self.frames.push(Frame {
+        self.inner.push(Frame {
             blocks: vec![Vec::new()],
             captures: Vec::new(),
             self_name,
@@ -88,14 +98,21 @@ impl Scope {
 
     /// Close the innermost frame, giving back what it captured.
     pub fn close_frame(&mut self) -> Vec<BinderId> {
-        self.frames.pop().map(|f| f.captures).unwrap_or_default()
+        self.inner.pop().map(|f| f.captures).unwrap_or_default()
     }
 
     /// The local `name` means here, innermost first: a frame's own blocks,
     /// then the name the frame's lambda calls itself by, then the frames
     /// around it.
     pub fn lookup(&self, name: &str) -> Option<Found> {
-        for (i, f) in self.frames.iter().enumerate().rev() {
+        let innermost_first = self
+            .inner
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(i, f)| (i + 1, f))
+            .chain(std::iter::once((0, &self.module)));
+        for (i, f) in innermost_first {
             if let Some(binder) = f.lookup(name) {
                 return Some(Found { binder, frame: i });
             }
@@ -114,7 +131,7 @@ impl Scope {
     /// Record that the frames inside `bound_in` read `binder`, so each lambda
     /// on the way captures it.
     pub fn capture(&mut self, binder: BinderId, bound_in: usize) {
-        for f in self.frames.iter_mut().skip(bound_in + 1) {
+        for f in self.inner.iter_mut().skip(bound_in) {
             if !f.captures.contains(&binder) {
                 f.captures.push(binder);
             }
@@ -123,8 +140,7 @@ impl Scope {
 
     /// Every local name in scope, for "did you mean".
     pub fn names(&self) -> impl Iterator<Item = &Name> {
-        self.frames
-            .iter()
+        self.frames()
             .flat_map(|f| f.blocks.iter().flatten().map(|(n, _)| n))
     }
 }

@@ -253,8 +253,11 @@ impl Lower {
     }
 
     /// The `RTy` recorded for `id` when it was minted.
-    fn bind_ty(&self, id: LocalId) -> RTy {
-        self.tys[id]
+    fn bind_ty(&self, id: LocalId) -> R<RTy> {
+        self.tys
+            .get(id)
+            .copied()
+            .ok_or(InternalLinkError::UntypedLocal(id))
     }
 
     /// Record the local `b` names. A `BindingId` out of range means the
@@ -351,8 +354,12 @@ impl Lower {
         let outer = std::mem::take(&mut self.undo);
         let r = f(self);
         let inner = std::mem::replace(&mut self.undo, outer);
+        // Each entry's slot was in range when it was bound, and the table
+        // never shrinks.
         for (b, old) in inner.into_iter().rev() {
-            self.binds[b.0 as usize] = old;
+            if let Some(slot) = self.binds.get_mut(b.0 as usize) {
+                *slot = old;
+            }
         }
         r
     }
@@ -547,7 +554,7 @@ impl Lower {
                 // A bound local's type was fixed when its bind was minted.
                 ValueRef::Local(b) => {
                     let id = self.local(b)?;
-                    return Ok((Atom::Local(id), self.bind_ty(id)));
+                    return Ok((Atom::Local(id), self.bind_ty(id)?));
                 }
                 ValueRef::Global(slot) => Atom::Load(Load::Global(slot)),
                 ValueRef::Capture(idx) => Atom::Load(Load::Capture(idx)),
@@ -560,7 +567,7 @@ impl Lower {
                 let and = matches!(e, TypedExpr::And { .. });
                 let join = self.short_circuit(lhs, rhs, and, ty)?;
                 let id = self.let_join(ty, join);
-                return Ok((Atom::Local(id), self.bind_ty(id)));
+                return Ok((Atom::Local(id), self.bind_ty(id)?));
             }
             // Control flow in operand position is sealed and bound as a join.
             // `Let` and `Seq` never get here, but naming them keeps the match
@@ -570,7 +577,7 @@ impl Lower {
             | TypedExpr::If { .. }
             | TypedExpr::Match { .. } => {
                 let id = self.join_operand(e, ty)?;
-                return Ok((Atom::Local(id), self.bind_ty(id)));
+                return Ok((Atom::Local(id), self.bind_ty(id)?));
             }
             // The elaborator has already specialised `Add` to `IntAdd`, say.
             TypedExpr::Binary { op, lhs, rhs, .. } => {
@@ -720,35 +727,30 @@ impl Lower {
         }
 
         let mut acc: Option<LocalId> = None;
-        let mut i = 0usize;
-        while i < elems.len() {
-            if let Some(TypedArrayElem::Spread(sp)) = elems.get(i) {
+        let mut rest = elems;
+        while let Some((first, tail)) = rest.split_first() {
+            if let TypedArrayElem::Spread(sp) = first {
                 let s = self.operand(sp)?;
                 acc = Some(match acc {
                     Some(a) => self.let_(ty, Atom::prim(PrimOp::ArrayConcat, vec![a, s])),
                     None => s,
                 });
-                i += 1;
+                rest = tail;
                 continue;
             }
-            let mut j = i;
-            while j < elems.len() && !matches!(elems.get(j), Some(TypedArrayElem::Spread(_))) {
-                j += 1;
-            }
-            let mut run: Vec<LocalId> = Vec::with_capacity(j - i);
-            for el in &elems[i..j] {
-                if let TypedArrayElem::Elem(ex) = el {
-                    run.push(self.operand(ex)?);
-                }
+            let mut run: Vec<LocalId> = Vec::new();
+            while let Some((TypedArrayElem::Elem(ex), tail)) = rest.split_first() {
+                run.push(self.operand(ex)?);
+                rest = tail;
             }
             // A run before the first spread is prepended straight onto it.
             if acc.is_none()
-                && let Some(TypedArrayElem::Spread(sp)) = elems.get(j)
+                && let Some((TypedArrayElem::Spread(sp), tail)) = rest.split_first()
             {
                 let s = self.operand(sp)?;
                 run.push(s);
                 acc = Some(self.let_(ty, Atom::prim(PrimOp::ArrayPrepend, run)));
-                i = j + 1;
+                rest = tail;
                 continue;
             }
             let a = match acc {
@@ -763,7 +765,6 @@ impl Lower {
                 }
             };
             acc = Some(a);
-            i = j;
         }
         Ok(match acc {
             Some(id) => Atom::Local(id),
@@ -1167,7 +1168,7 @@ impl Lower {
                     rest,
                     ..
                 } => {
-                    let vty = self.bind_ty(v);
+                    let vty = self.bind_ty(v)?;
                     let int_t = self.temps.int;
                     let bool_t = self.temps.bool;
                     let len = self.let_(int_t, Atom::prim(PrimOp::ArrayLen, vec![v]));
@@ -1251,7 +1252,7 @@ impl Lower {
     fn bin_step<'p>(&mut self, bc: BinCont<'p>, fall: JoinId, result_ty: RTy) -> R<Tree> {
         let int_t = self.temps.int;
         let bool_t = self.temps.bool;
-        let bin_ty = self.bind_ty(bc.bin);
+        let bin_ty = self.bind_ty(bc.bin)?;
         let BinCont {
             bin,
             total,

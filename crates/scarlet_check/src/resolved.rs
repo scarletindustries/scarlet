@@ -289,3 +289,20 @@ pub(crate) struct Resolved {
     /// The binders nothing reads, in source order.
     pub unused: Vec<BinderId>,
 }
+
+impl Resolved {
+    // Resolution makes one entry per declaration, in `DeclId` order, so a
+    // lookup misses only for an id from another module.
+    #[allow(clippy::indexing_slicing)]
+    pub fn decl(&self, d: DeclId) -> &RDecl {
+        &self.decls[d.0 as usize]
+    }
+}
+
+/// What the resolver recorded of binder `b`. A `BinderId` is the place its
+/// binder was pushed to in the module's binders, which never shrink, so a
+/// lookup misses only for an id from another module.
+#[allow(clippy::indexing_slicing)]
+pub(crate) fn binder_info(binders: &[BinderInfo], b: BinderId) -> &BinderInfo {
+    &binders[b.0 as usize]
+}

@@ -8,6 +8,8 @@
         clippy::unreachable,
         clippy::todo,
         clippy::unimplemented,
+        clippy::indexing_slicing,
+        clippy::string_slice,
     )
 )]
 #![deny(unsafe_code)]
@@ -621,6 +623,11 @@ enum UpgradeError {
         source: Box<ureq::Error>,
     },
     Read(std::io::Error),
+    /// The download stream said it read more bytes than the buffer it was given holds.
+    ReadOverrun {
+        read: usize,
+        buffer: usize,
+    },
     Io {
         action: &'static str,
         path: std::path::PathBuf,
@@ -637,6 +644,10 @@ impl std::fmt::Display for UpgradeError {
                 write!(f, "download of {url} failed: {source}")
             }
             UpgradeError::Read(e) => write!(f, "read error: {e}"),
+            UpgradeError::ReadOverrun { read, buffer } => write!(
+                f,
+                "read error: the download stream reported {read} bytes read into a {buffer}-byte buffer"
+            ),
             UpgradeError::Io {
                 action,
                 path,
@@ -703,7 +714,11 @@ fn cmd_upgrade(version: Option<String>) -> Result<(), UpgradeError> {
         if n == 0 {
             break;
         }
-        out.write_all(&buf[..n]).map_err(|e| UpgradeError::Io {
+        let chunk = buf.get(..n).ok_or(UpgradeError::ReadOverrun {
+            read: n,
+            buffer: buf.len(),
+        })?;
+        out.write_all(chunk).map_err(|e| UpgradeError::Io {
             action: "cannot write",
             path: tmp_path.clone(),
             source: e,

@@ -36,10 +36,12 @@ fn severity_color(severity: Severity, p: &Palette) -> &'static str {
 }
 
 fn get_source_line<'a>(lines: &'a [&'a str], line_number: i32) -> &'a str {
-    if line_number < 1 || line_number as usize > lines.len() {
-        return "";
-    }
-    lines[(line_number - 1) as usize]
+    usize::try_from(line_number)
+        .ok()
+        .and_then(|n| n.checked_sub(1))
+        .and_then(|i| lines.get(i))
+        .copied()
+        .unwrap_or("")
 }
 
 /// The canonical absolute path of `file_path`. A `Some` means the file exists,

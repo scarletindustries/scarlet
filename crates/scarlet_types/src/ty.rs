@@ -178,16 +178,13 @@ impl fmt::Display for Type {
 
 /// Show `types` side by side, as in "expected 'a', got 'fn(a) b'": a variable
 /// that appears in more than one of them gets the same letter in each.
-pub fn show_together(types: &[&Type]) -> Vec<String> {
-    let names = VarNames::of(types);
-    types
-        .iter()
-        .map(|t| {
-            let mut out = String::new();
-            let _ = fmt::write(&mut out, format_args!("{}", Shown(t, &names)));
-            out
-        })
-        .collect()
+pub fn show_together<const N: usize>(types: [&Type; N]) -> [String; N] {
+    let names = VarNames::of(&types);
+    types.map(|t| {
+        let mut out = String::new();
+        let _ = fmt::write(&mut out, format_args!("{}", Shown(t, &names)));
+        out
+    })
 }
 
 /// What each variable in some types is called when they are shown: its own
@@ -317,8 +314,9 @@ impl Scheme {
         let ty = self.ty.substitute(&|v| {
             self.vars
                 .iter()
-                .position(|q| q == v)
-                .map(|i| Type::Var(renumbered[i].clone()))
+                .zip(&renumbered)
+                .find(|(q, _)| *q == v)
+                .map(|(_, r)| Type::Var(r.clone()))
         });
         Scheme {
             vars: renumbered,

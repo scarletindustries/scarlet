@@ -88,7 +88,10 @@ fn summary(program: &Program, entry: &ModuleKey) -> String {
         .filter(|f| f.module == entry.as_str())
         .count();
     let start = match program.main {
-        Some(main) => format!("starts at {main} ({})", program.fns[main].name),
+        Some(main) => match program.fns.get(main) {
+            Some(f) => format!("starts at {main} ({})", f.name),
+            None => format!("starts at {main}, which is not a function in this program"),
+        },
         None => "runs its toplevel".to_string(),
     };
     format!(

@@ -124,8 +124,10 @@ fn format_at(input: &str, width: isize) -> FormatResult {
     // each token back to a preceding `..` so `call_arg` can find that trivia.
     let mut dotdot_before: HashMap<Pos, Pos> = HashMap::new();
     for pair in scanned_tokens.windows(2) {
-        if pair[0].kind == Kind::PuncDotdot {
-            dotdot_before.insert(Pos::start_of(&pair[1].span), Pos::start_of(&pair[0].span));
+        if let [dotdot, next] = pair
+            && dotdot.kind == Kind::PuncDotdot
+        {
+            dotdot_before.insert(Pos::start_of(&next.span), Pos::start_of(&dotdot.span));
         }
     }
 
@@ -547,8 +549,7 @@ impl Formatter {
 
     fn lambda_body(&self, body: &ast::Expression) -> Fmt<Doc> {
         if let ast::Expression::BlockExpression(b) = body
-            && b.body.len() == 1
-            && let ast::Node::Expression(inner) = &b.body[0]
+            && let [ast::Node::Expression(inner)] = b.body.as_slice()
             && !self.has_comment_at(inner.span())
             && self.trailing_comments(b.span, true).is_nil()
         {
@@ -586,11 +587,10 @@ impl Formatter {
             ast::TypeBody::Variants { ctors, .. } => {
                 // Shorthand: one constructor named after the type, with at
                 // least one field, emits the fields directly inside `{}`.
-                if ctors.len() == 1
-                    && ctors[0].identifier.name == s.identifier.name
-                    && !ctors[0].fields.is_empty()
+                if let [c] = ctors.as_slice()
+                    && c.identifier.name == s.identifier.name
+                    && !c.fields.is_empty()
                 {
-                    let c = &ctors[0];
                     let mut parts = Vec::new();
                     for (i, f) in c.fields.iter().enumerate() {
                         // `leading_trivia` emits the separating hardline and
@@ -1088,13 +1088,10 @@ impl Formatter {
         let ast::Expression::BlockExpression(blk) = b else {
             return false;
         };
-        if blk.body.len() != 1 || !self.trailing_comments(blk.span, true).is_nil() {
-            return false;
-        }
-        let ast::Node::Expression(inner) = &blk.body[0] else {
+        let [ast::Node::Expression(inner)] = blk.body.as_slice() else {
             return false;
         };
-        if self.has_comment_at(inner.span()) {
+        if !self.trailing_comments(blk.span, true).is_nil() || self.has_comment_at(inner.span()) {
             return false;
         }
         matches!(

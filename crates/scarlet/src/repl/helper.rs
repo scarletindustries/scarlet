@@ -48,7 +48,12 @@ impl Highlighter for ScarletHelper {
         if line.starts_with(':') {
             return Cow::Owned(format!("{}{line}{}", self.palette.dim, self.palette.reset));
         }
-        Cow::Owned(highlight_at(line, &self.palette, Some(pos)))
+        // Colour is display only, so a line the highlighter can't lay its
+        // tokens over is shown as typed.
+        match highlight_at(line, &self.palette, Some(pos)) {
+            Ok(coloured) => Cow::Owned(coloured),
+            Err(_) => Cow::Borrowed(line),
+        }
     }
 
     fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
@@ -224,24 +229,21 @@ fn pairs(candidates: Vec<Candidate>) -> Vec<Pair> {
 fn word_before(line: &str, pos: usize) -> Option<(usize, &str)> {
     let pos = pos.min(line.len());
     let bytes = line.as_bytes();
-    let name_start = |mut i: usize| {
-        while i > 0 && is_name_continue(bytes[i - 1]) {
-            i -= 1;
-        }
-        i
-    };
-    let mut start = name_start(pos);
+    let before = bytes.get(..pos)?;
+    let name_start =
+        |s: &[u8]| s.len() - s.iter().rev().take_while(|&&b| is_name_continue(b)).count();
+    let mut start = name_start(before);
     // One `qualifier::` in front of the member being typed.
-    if start >= 2 && &bytes[start - 2..start] == b"::" {
-        let q = name_start(start - 2);
-        if q < start - 2 {
+    if let Some(head) = before.get(..start).and_then(|h| h.strip_suffix(b"::")) {
+        let q = name_start(head);
+        if q < head.len() {
             start = q;
         }
     }
     if start < pos && !bytes.get(start).copied().is_some_and(is_name_start) {
         return None;
     }
-    Some((start, &line[start..pos]))
+    Some((start, line.get(start..pos)?))
 }
 
 /// The half-written module path on an `import` line, if the cursor is in one.

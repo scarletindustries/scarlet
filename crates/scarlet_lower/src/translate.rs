@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use scarlet_check::typed::{
     self as t, Arg, ArrayElem, BinOp, BinSeg, BinSegPat, BinUnit, BinderId, Block, Expr, ExprKind,
-    FieldAt, FnBody, InterpPart, OrShape, Pattern, PatternKind, Rest, Stmt, TypedModule, Var,
+    FieldAt, InterpPart, OrShape, Pattern, PatternKind, Rest, Stmt, TypedModule, Var,
 };
 use scarlet_ir::core_ir::{CaptureIdx, Const, ConstId, PrimOp};
 use scarlet_ir::rty::{Prim, RTy};
@@ -19,7 +19,7 @@ use scarlet_syntax::ast::UnaryOp;
 use scarlet_types::name::{CtorName, ValueName};
 use scarlet_types::ty::Type;
 
-use crate::program::{Ids, InternalLinkError, LinkError, Minted, Named, Prelude, Symbols};
+use crate::program::{Ids, InternalLinkError, LinkError, Minted, Named, Prelude, Site, Symbols};
 use crate::typed_ir::{
     BindingId, PatRest, TypedArm, TypedArrayElem, TypedBinPatSeg, TypedBinSeg, TypedBind,
     TypedCallee, TypedExpr, TypedFn, TypedInterpPart, TypedPat, ValueRef,
@@ -31,26 +31,17 @@ type R<T> = Result<T, LinkError>;
 pub(crate) struct Cx<'x, 'd> {
     pub ids: &'x mut Ids<'d>,
     pub prelude: &'x Prelude,
-    pub symbols: &'x Symbols,
+    pub symbols: &'x Symbols<'x>,
     pub minted: &'x mut Minted,
 }
 
-/// The `index`th function of `m`, which has a body.
-pub(crate) fn function(cx: &mut Cx<'_, '_>, m: &TypedModule, index: usize) -> R<Named> {
-    let f = m
-        .functions
-        .get(index)
-        .ok_or_else(|| InternalLinkError::NoSuchFunction {
-            module: m.key.clone(),
-            index,
-        })?;
-    let FnBody::Expr(body) = &f.body else {
-        return Err(InternalLinkError::NoBody(ValueName {
-            module: m.key.clone(),
-            name: f.name.clone(),
-        })
-        .into());
-    };
+/// The function at `site`.
+pub(crate) fn function(cx: &mut Cx<'_, '_>, site: &Site<'_>) -> R<Named> {
+    let Site {
+        module: m,
+        function: f,
+        body,
+    } = *site;
     let mut tx = Tx { cx, m };
     let ty = tx.ty(f.ty);
     let ret = tx.ret_of(ty)?;

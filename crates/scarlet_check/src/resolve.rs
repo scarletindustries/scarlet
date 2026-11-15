@@ -4,11 +4,11 @@
 //! unknown and private names, labels, a constructor's fields, a pattern's
 //! names, and bindings nothing reads.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use petgraph::Directed;
 use petgraph::algo::tarjan_scc;
-use petgraph::stable_graph::StableGraph;
+use petgraph::stable_graph::{NodeIndex, StableGraph};
 use scarlet_syntax::ast;
 use scarlet_syntax::span::Span;
 use scarlet_types::interface::ValueKind;
@@ -60,7 +60,7 @@ pub(crate) struct Resolver<'r, 'a> {
     pub used: HashSet<BinderId>,
     pub report: Report,
     /// For each declaration, the declarations its body names.
-    edges: Vec<BTreeSet<DeclId>>,
+    edges: BTreeMap<DeclId, BTreeSet<DeclId>>,
 }
 
 pub(crate) fn resolve(
@@ -76,7 +76,7 @@ pub(crate) fn resolve(
         binders: Vec::new(),
         used: HashSet::new(),
         report: Report::new(env.input.source),
-        edges: vec![BTreeSet::new(); declared.values.len()],
+        edges: BTreeMap::new(),
     };
     let decls: Vec<RDecl> = declared.ids().map(|id| r.decl(id)).collect();
     let top = Walk {
@@ -89,7 +89,7 @@ pub(crate) fn resolve(
         .filter_map(|n| r.node(n, &top))
         .collect();
     let unused = r.unused();
-    let groups = groups(&r.edges);
+    let groups = groups(declared.values.len(), &r.edges);
     let resolved = Resolved {
         decls,
         statements,
@@ -102,12 +102,16 @@ pub(crate) fn resolve(
 
 /// The declarations in groups that use each other, each after the groups it
 /// uses.
-fn groups(edges: &[BTreeSet<DeclId>]) -> Vec<Vec<DeclId>> {
+fn groups(decls: usize, edges: &BTreeMap<DeclId, BTreeSet<DeclId>>) -> Vec<Vec<DeclId>> {
+    // Node `n` is declaration `n`: they are added in `DeclId` order.
+    let node = |d: DeclId| NodeIndex::new(d.0 as usize);
     let mut graph: StableGraph<(), (), Directed> = StableGraph::new();
-    let nodes: Vec<_> = edges.iter().map(|_| graph.add_node(())).collect();
-    for (from, tos) in edges.iter().enumerate() {
-        for to in tos {
-            graph.add_edge(nodes[from], nodes[to.0 as usize], ());
+    for _ in 0..decls {
+        graph.add_node(());
+    }
+    for (&from, tos) in edges {
+        for &to in tos {
+            graph.add_edge(node(from), node(to), ());
         }
     }
     tarjan_scc(&graph)
@@ -254,15 +258,14 @@ impl<'r, 'a> Resolver<'r, 'a> {
     /// The binders nothing reads, in source order. A `_` name says that
     /// is on purpose.
     fn unused(&self) -> Vec<BinderId> {
-        let mut unused: Vec<BinderId> = (0..self.binders.len() as u32)
+        let mut unused: Vec<(BinderId, Span)> = (0..)
             .map(BinderId)
-            .filter(|b| !self.binders[b.0 as usize].name.starts_with('_') && !self.used.contains(b))
+            .zip(&self.binders)
+            .filter(|(b, info)| !info.name.starts_with('_') && !self.used.contains(b))
+            .map(|(b, info)| (b, info.span))
             .collect();
-        unused.sort_by_key(|b| {
-            let sp = self.binders[b.0 as usize].span;
-            (sp.start_line, sp.start_column)
-        });
-        unused
+        unused.sort_by_key(|(_, sp)| (sp.start_line, sp.start_column));
+        unused.into_iter().map(|(b, _)| b).collect()
     }
 
     pub fn use_of(&mut self, span: Span, kind: UseKind, target: Site, w: &Walk) {
@@ -590,7 +593,7 @@ impl<'r, 'a> Resolver<'r, 'a> {
         let name = id.name.as_str();
         if let Some(found) = self.scope.lookup(name) {
             let b = found.binder;
-            let info = &self.binders[b.0 as usize];
+            let info = binder_info(&self.binders, b);
             let (module_scope, span) = (info.module_scope, info.span);
             if found.frame < self.scope.depth() && !module_scope {
                 self.scope.capture(b, found.frame);
@@ -613,7 +616,7 @@ impl<'r, 'a> Resolver<'r, 'a> {
             let target = self.env.site(decl.span, decl.entity());
             self.use_of(id.span, UseKind::Unqualified, target, w);
             if let Some(from) = w.decl {
-                self.edges[from.0 as usize].insert(d);
+                self.edges.entry(from).or_default().insert(d);
             }
             let value = ValueName {
                 module: self.env.key.clone(),
@@ -881,13 +884,13 @@ impl<'r, 'a> Resolver<'r, 'a> {
                 }
             }
         }
-        let mut out = vec![None; args.len()];
-        for (p, slot) in by_pos.into_iter().enumerate() {
-            if let Some((i, _)) = slot {
-                out[i] = Some(p);
-            }
-        }
-        out
+        (0..args.len())
+            .map(|i| {
+                by_pos
+                    .iter()
+                    .position(|slot| matches!(slot, Some((a, _)) if *a == i))
+            })
+            .collect()
     }
 
     /// A constructor applied to arguments: positional, labelled, and at most
@@ -929,12 +932,14 @@ impl<'r, 'a> Resolver<'r, 'a> {
             items,
             spread.is_none().then_some((span, FieldSite::Call)),
         );
-        let mut slot_of = vec![None; args.len()];
-        for (slot, i) in by_pos.into_iter().enumerate() {
-            if let Some(i) = i {
-                slot_of[i] = Some(slot as u32);
-            }
-        }
+        let slot_of: Vec<Option<u32>> = (0..args.len())
+            .map(|i| {
+                by_pos
+                    .iter()
+                    .position(|slot| *slot == Some(i))
+                    .map(|slot| slot as u32)
+            })
+            .collect();
         let spread = spread.map(|(at, e)| (at, self.boxed(e, w)));
         let args = args
             .iter()
@@ -1001,9 +1006,12 @@ impl<'r, 'a> Resolver<'r, 'a> {
         if let Some((span, site)) = missing
             && by_pos.iter().any(Option::is_none)
         {
-            let absent: Vec<Name> = (0..arity)
-                .filter(|&i| by_pos[i].is_none())
-                .map(|i| c.labels.get(i).cloned().unwrap_or_else(|| "_".into()))
+            let absent: Vec<Name> = c
+                .labels
+                .iter()
+                .zip(&by_pos)
+                .filter(|(_, slot)| slot.is_none())
+                .map(|(label, _)| label.clone())
                 .collect();
             self.report.add(
                 span,
@@ -1173,17 +1181,22 @@ fn closest_name<'n>(name: &str, candidates: impl Iterator<Item = &'n str>) -> Op
 }
 
 fn levenshtein(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
+    // `prev` is the distances from the part of `a` seen so far to each prefix
+    // of `b`, and `dist` the last of them.
     let mut prev: Vec<usize> = (0..=b.len()).collect();
-    let mut curr = vec![0; b.len() + 1];
-    for i in 1..=a.len() {
-        curr[0] = i;
-        for j in 1..=b.len() {
-            let cost = usize::from(a[i - 1] != b[j - 1]);
-            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+    let mut dist = b.len();
+    for (i, ca) in a.chars().enumerate() {
+        let mut left = i + 1;
+        let mut curr = Vec::with_capacity(b.len() + 1);
+        curr.push(left);
+        for ((&cb, &diag), &up) in b.iter().zip(&prev).zip(prev.iter().skip(1)) {
+            let cost = usize::from(ca != cb);
+            left = (up + 1).min(left + 1).min(diag + cost);
+            curr.push(left);
         }
-        std::mem::swap(&mut prev, &mut curr);
+        dist = left;
+        prev = curr;
     }
-    prev[b.len()]
+    dist
 }

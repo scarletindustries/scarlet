@@ -563,12 +563,8 @@ impl fmt::Display for CheckError {
                 given,
                 arity,
             } => {
-                let shown = show_together(&[expected, given]);
-                write!(
-                    f,
-                    "Type mismatch: expected '{}', got '{}'",
-                    shown[0], shown[1]
-                )?;
+                let [expected, given] = show_together([expected, given]);
+                write!(f, "Type mismatch: expected '{expected}', got '{given}'")?;
                 match arity {
                     Some((e, g)) => write!(
                         f,

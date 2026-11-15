@@ -12,6 +12,8 @@
         clippy::unreachable,
         clippy::todo,
         clippy::unimplemented,
+        clippy::indexing_slicing,
+        clippy::string_slice,
     )
 )]
 #![forbid(unsafe_code)]

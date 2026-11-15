@@ -99,12 +99,14 @@ impl<I: Idx, T: fmt::Debug> fmt::Debug for TiVec<I, T> {
 
 impl<I: Idx, T> Index<I> for TiVec<I, T> {
     type Output = T;
+    #[allow(clippy::indexing_slicing)]
     fn index(&self, i: I) -> &T {
         &self.raw[i.index()]
     }
 }
 
 impl<I: Idx, T> IndexMut<I> for TiVec<I, T> {
+    #[allow(clippy::indexing_slicing)]
     fn index_mut(&mut self, i: I) -> &mut T {
         &mut self.raw[i.index()]
     }

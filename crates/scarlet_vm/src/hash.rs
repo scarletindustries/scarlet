@@ -173,7 +173,7 @@ fn int(s: &mut Sip<1, 3>, n: i128) {
     let digits: &[u64] = &[m as u64, (m >> 64) as u64];
     let len = digits.iter().rposition(|&d| d != 0).map_or(0, |i| i + 1);
     s.word(len as u64);
-    for &d in &digits[..len] {
+    for &d in digits.iter().take(len) {
         s.word(d);
     }
 }

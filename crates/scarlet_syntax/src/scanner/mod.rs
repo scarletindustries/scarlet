@@ -99,11 +99,17 @@ impl Scanner {
         self.input.get(pos as usize).copied().unwrap_or(0)
     }
 
-    fn slice(&self, start: i32, end: i32) -> String {
+    // The input from `start` to `end`, clamped to the input the way
+    // `byte_at` is, so the part of the range outside it reads as nothing.
+    fn bytes(&self, start: i32, end: i32) -> &[u8] {
         let len = self.input.len();
         let s = (start.max(0) as usize).min(len);
         let e = (end.max(0) as usize).min(len).max(s);
-        String::from_utf8_lossy(&self.input[s..e]).into_owned()
+        self.input.get(s..e).unwrap_or_default()
+    }
+
+    fn slice(&self, start: i32, end: i32) -> String {
+        String::from_utf8_lossy(self.bytes(start, end)).into_owned()
     }
 
     fn collect_trivia(&mut self) {
@@ -254,10 +260,9 @@ impl Scanner {
 
             // Look keywords up on a borrowed slice, so they allocate no String.
             // Names are ASCII, so `from_utf8` can't fail here.
-            if let Some(keyword_kind) =
-                std::str::from_utf8(&self.input[start as usize..end as usize])
-                    .ok()
-                    .and_then(token::match_keyword)
+            if let Some(keyword_kind) = std::str::from_utf8(self.bytes(start, end))
+                .ok()
+                .and_then(token::match_keyword)
             {
                 return self.new_token(keyword_kind);
             }

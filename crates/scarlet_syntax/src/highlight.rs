@@ -6,6 +6,8 @@
 //! survives, in order, so the highlighted text keeps the original display
 //! width (which is what a line editor repainting a line requires).
 
+use std::fmt;
+
 use crate::scanner::new_scanner;
 use crate::span::Span;
 use crate::term::Palette;
@@ -16,45 +18,105 @@ use crate::token::{Kind, Token, is_type_name};
 /// half-typed line is coloured. It also bolds the bracket pair that the cursor
 /// at byte offset `cursor` sits on (on either side of it), the way an editor
 /// shows which `}` closes the `{` under the caret.
-pub fn highlight_at(source: &str, p: &Palette, cursor: Option<usize>) -> String {
+///
+/// It fails when the scanner's tokens don't map onto `source` in order, and
+/// then there is no faithful colouring to give.
+pub fn highlight_at(
+    source: &str,
+    p: &Palette,
+    cursor: Option<usize>,
+) -> Result<String, HighlightError> {
     if !p.enabled() || source.is_empty() {
-        return source.to_string();
+        return Ok(source.to_string());
     }
-
     let (tokens, _) = new_scanner(source).scan_all();
+    paint(source, &tokens, p, cursor)
+}
+
+/// Why the tokens of a source could not be laid back over it. Offsets are
+/// bytes into the source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HighlightError {
+    /// A token starts at `start`, before the token ahead of it ends at
+    /// `previous_end`.
+    TokenOverlap { previous_end: usize, start: usize },
+    /// `start..end` does not cut the source on character boundaries.
+    NotCharRange { start: usize, end: usize },
+}
+
+impl fmt::Display for HighlightError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HighlightError::TokenOverlap {
+                previous_end,
+                start,
+            } => write!(
+                f,
+                "a token starts at byte {start}, before the previous one ends at byte {previous_end}"
+            ),
+            HighlightError::NotCharRange { start, end } => {
+                write!(
+                    f,
+                    "bytes {start}..{end} do not fall on character boundaries"
+                )
+            }
+        }
+    }
+}
+
+fn source_range(source: &str, range: std::ops::Range<usize>) -> Result<&str, HighlightError> {
+    let (start, end) = (range.start, range.end);
+    source
+        .get(range)
+        .ok_or(HighlightError::NotCharRange { start, end })
+}
+
+fn paint(
+    source: &str,
+    tokens: &[Token],
+    p: &Palette,
+    cursor: Option<usize>,
+) -> Result<String, HighlightError> {
     let offsets = Offsets::new(source);
     let ranges: Vec<(usize, usize)> = tokens
         .iter()
         .map(|t| offsets.range(source, t.span))
         .collect();
-    let pair = cursor.and_then(|c| matching_pair(&tokens, &ranges, c));
+    let pair = cursor.and_then(|c| matching_pair(tokens, &ranges, c));
 
     let mut out = String::with_capacity(source.len() * 2);
     let mut cursor_byte = 0usize;
     let mut interp = InterpState::default();
 
-    for (i, token) in tokens.iter().enumerate() {
+    for (i, (token, &(start, end))) in tokens.iter().zip(&ranges).enumerate() {
         if token.kind == Kind::Eof {
             break;
         }
-        let (start, end) = ranges[i];
         // Whatever the scanner skipped between tokens: horizontal whitespace,
         // newlines, comments, and the quote characters of an interpolated
         // string, which are consumed without becoming tokens of their own.
-        paint_gap(&mut out, &source[cursor_byte..start], interp.in_body(), p);
+        if start < cursor_byte {
+            return Err(HighlightError::TokenOverlap {
+                previous_end: cursor_byte,
+                start,
+            });
+        }
+        let gap = source_range(source, cursor_byte..start)?;
+        paint_gap(&mut out, gap, cursor_byte, interp.in_body(), p)?;
 
         let color = if pair.is_some_and(|(a, b)| a == i || b == i) {
             p.bold
         } else {
             token_color(token, tokens.get(i + 1), interp.in_body(), p)
         };
-        push_colored(&mut out, &source[start..end], color, p);
+        push_colored(&mut out, source_range(source, start..end)?, color, p);
 
         interp.advance(&token.kind);
         cursor_byte = end;
     }
-    paint_gap(&mut out, &source[cursor_byte..], interp.in_body(), p);
-    out
+    let tail = source_range(source, cursor_byte..source.len())?;
+    paint_gap(&mut out, tail, cursor_byte, interp.in_body(), p)?;
+    Ok(out)
 }
 
 /// A copy of the scanner's interpolation state. Inside `'a ${b} c'` the string
@@ -119,43 +181,48 @@ fn token_color(
 /// Source between two tokens: whitespace, comments, or (inside an
 /// interpolated string) the literal text the scanner folded into the token
 /// payload, which keeps the string colour.
-fn paint_gap(out: &mut String, gap: &str, in_string_body: bool, p: &Palette) {
+fn paint_gap(
+    out: &mut String,
+    gap: &str,
+    gap_start: usize,
+    in_string_body: bool,
+    p: &Palette,
+) -> Result<(), HighlightError> {
     if gap.is_empty() {
-        return;
+        return Ok(());
     }
     if in_string_body {
         push_colored(out, gap, p.green, p);
-        return;
+        return Ok(());
     }
-    let bytes = gap.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let rest = &gap[i..];
-        let comment_len = if rest.starts_with("//") {
-            Some(rest.find('\n').unwrap_or(rest.len()))
+    let mut rest = gap;
+    let mut at = gap_start;
+    while !rest.is_empty() {
+        let (len, color) = if rest.starts_with("//") {
+            (rest.find('\n').unwrap_or(rest.len()), p.dim)
         } else if rest.starts_with("/*") {
-            Some(rest.find("*/").map_or(rest.len(), |e| e + 2))
+            (rest.find("*/").map_or(rest.len(), |e| e + 2), p.dim)
         } else {
-            None
+            // Up to the next `/`, which is the only byte that can open a
+            // comment.
+            let next = rest
+                .bytes()
+                .skip(1)
+                .position(|b| b == b'/')
+                .map_or(rest.len(), |n| n + 1);
+            (next, "")
         };
-        match comment_len {
-            Some(len) => {
-                push_colored(out, &rest[..len], p.dim, p);
-                i += len;
-            }
-            None => {
-                // Up to the next `/`, which is the only byte that can open a
-                // comment. `/` is ASCII, so the split is on a char boundary.
-                let next = rest
-                    .bytes()
-                    .skip(1)
-                    .position(|b| b == b'/')
-                    .map_or(rest.len(), |n| n + 1);
-                out.push_str(&rest[..next]);
-                i += next;
-            }
-        }
+        let (piece, tail) = rest
+            .split_at_checked(len)
+            .ok_or(HighlightError::NotCharRange {
+                start: at,
+                end: at + len,
+            })?;
+        push_colored(out, piece, color, p);
+        rest = tail;
+        at += len;
     }
+    Ok(())
 }
 
 fn push_colored(out: &mut String, text: &str, color: &str, p: &Palette) {
@@ -175,24 +242,28 @@ fn matching_pair(
     ranges: &[(usize, usize)],
     cursor: usize,
 ) -> Option<(usize, usize)> {
-    let mut stack: Vec<usize> = Vec::new();
-    let mut pairs: Vec<(usize, usize)> = Vec::new();
-    for (i, t) in tokens.iter().enumerate() {
+    // Each bracket is its token index and its byte range.
+    let mut stack: Vec<(usize, (usize, usize))> = Vec::new();
+    let mut pairs = Vec::new();
+    for (i, (t, &range)) in tokens.iter().zip(ranges).enumerate() {
         match bracket(&t.kind) {
-            Some(Bracket::Open) => stack.push(i),
+            Some(Bracket::Open) => stack.push((i, range)),
             Some(Bracket::Close) => {
                 if let Some(open) = stack.pop() {
-                    pairs.push((open, i));
+                    pairs.push((open, (i, range)));
                 }
             }
             None => {}
         }
     }
-    pairs.into_iter().find(|&(open, close)| {
-        [open, close]
-            .iter()
-            .any(|&i| ranges[i].0 == cursor || ranges[i].1 == cursor)
-    })
+    pairs
+        .into_iter()
+        .find(|(open, close)| {
+            [open, close]
+                .iter()
+                .any(|(_, (start, end))| *start == cursor || *end == cursor)
+        })
+        .map(|((open, _), (close, _))| (open, close))
 }
 
 enum Bracket {
@@ -263,6 +334,32 @@ mod tests {
 
     const P: Palette = crate::term::Palette::ansi_for_test();
 
+    #[track_caller]
+    fn hl(src: &str, p: &Palette, cursor: Option<usize>) -> String {
+        highlight_at(src, p, cursor).expect("the scanner's tokens map onto the source")
+    }
+
+    #[test]
+    fn overlapping_tokens_are_an_error() {
+        let token = |column| Token {
+            kind: Kind::Identifier("ab".into()),
+            span: Span {
+                start_line: 0,
+                start_column: column,
+                end_line: 0,
+                end_column: column + 2,
+            },
+            leading_trivia: Vec::new(),
+        };
+        assert_eq!(
+            paint("abc", &[token(0), token(1)], &P, None),
+            Err(HighlightError::TokenOverlap {
+                previous_end: 2,
+                start: 1
+            })
+        );
+    }
+
     /// Whatever the colouring, the visible text must survive byte for byte: a
     /// line editor lays the line out by the width of what it printed.
     fn strip(s: &str) -> String {
@@ -279,11 +376,7 @@ mod tests {
 
     #[track_caller]
     fn assert_transparent(src: &str) {
-        assert_eq!(
-            strip(&highlight_at(src, &P, None)),
-            src,
-            "source text changed"
-        );
+        assert_eq!(strip(&hl(src, &P, None)), src, "source text changed");
     }
 
     #[test]
@@ -307,52 +400,49 @@ mod tests {
 
     #[test]
     fn keywords_strings_and_numbers_get_distinct_colors() {
-        let out = highlight_at("const x = 'hi'", &P, None);
+        let out = hl("const x = 'hi'", &P, None);
         assert!(
             out.contains("\x1b[35mconst"),
             "keyword not magenta: {out:?}"
         );
         assert!(out.contains("\x1b[32m'hi'"), "string not green: {out:?}");
-        let out = highlight_at("const x = 42", &P, None);
+        let out = hl("const x = 42", &P, None);
         assert!(out.contains("\x1b[33m42"), "number not yellow: {out:?}");
     }
 
     #[test]
     fn a_comment_between_tokens_is_dimmed() {
-        let out = highlight_at("const x = 1 // note\n", &P, None);
+        let out = hl("const x = 1 // note\n", &P, None);
         assert!(out.contains("\x1b[2m// note"), "comment not dim: {out:?}");
     }
 
     #[test]
     fn a_type_name_and_a_callee_differ_from_a_binding() {
-        let out = highlight_at("println(Int)", &P, None);
+        let out = hl("println(Int)", &P, None);
         assert!(out.contains("\x1b[34mprintln"), "callee not blue: {out:?}");
         assert!(out.contains("\x1b[36mInt"), "type not cyan: {out:?}");
-        assert!(
-            !highlight_at("x", &P, None).contains('\x1b'),
-            "plain name coloured"
-        );
+        assert!(!hl("x", &P, None).contains('\x1b'), "plain name coloured");
     }
 
     #[test]
     fn the_bracket_pair_under_the_cursor_is_bolded() {
         let src = "f(a, b)";
-        let out = highlight_at(src, &P, Some(1));
+        let out = hl(src, &P, Some(1));
         assert_eq!(out.matches("\x1b[1m").count(), 2, "want both ends: {out:?}");
         // Away from any bracket, nothing is bolded.
-        let out = highlight_at(src, &P, Some(4));
+        let out = hl(src, &P, Some(4));
         assert_eq!(out.matches("\x1b[1m").count(), 0, "{out:?}");
     }
 
     #[test]
     fn an_unmatched_bracket_has_no_partner_to_bold() {
-        let out = highlight_at("f(a", &P, Some(1));
+        let out = hl("f(a", &P, Some(1));
         assert!(!out.contains("\x1b[1m"), "{out:?}");
     }
 
     #[test]
     fn an_interpolation_hole_is_not_string_colored() {
-        let out = highlight_at("'a ${b} c'", &P, None);
+        let out = hl("'a ${b} c'", &P, None);
         // The name inside the hole keeps its own (absent) colour, so the green
         // run must be broken by the reset that ends the `${`.
         assert!(strip(&out) == "'a ${b} c'");
@@ -365,7 +455,7 @@ mod tests {
 
     #[test]
     fn a_qualified_member_being_typed_is_colored() {
-        let out = highlight_at("http.Del", &P, None);
+        let out = hl("http.Del", &P, None);
         assert!(
             out.contains("\x1b[36mDel"),
             "type-cased member not cyan: {out:?}"
@@ -375,9 +465,6 @@ mod tests {
     #[test]
     fn a_disabled_palette_adds_nothing() {
         let plain = crate::term::Palette::plain_for_test();
-        assert_eq!(
-            highlight_at("const x = 'hi'", &plain, None),
-            "const x = 'hi'"
-        );
+        assert_eq!(hl("const x = 'hi'", &plain, None), "const x = 'hi'");
     }
 }

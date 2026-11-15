@@ -348,9 +348,7 @@ impl Heap {
         let cell = self.alloc(Kind::String, 1 + text.len().div_ceil(8))?;
         self.set_word(cell, 1, text.len() as u64);
         for (i, bytes) in text.chunks(8).enumerate() {
-            let mut word = [0u8; 8];
-            word[..bytes.len()].copy_from_slice(bytes);
-            self.set_word(cell, 2 + i, u64::from_le_bytes(word));
+            self.set_word(cell, 2 + i, padded_word(bytes));
         }
         Ok(cell)
     }
@@ -363,11 +361,10 @@ impl Heap {
     /// Whether a string cell holds exactly `text`.
     pub(crate) fn string_is(&self, cell: Cell, text: &[u8]) -> bool {
         self.string_len(cell) == text.len()
-            && text.chunks(8).enumerate().all(|(i, bytes)| {
-                let mut word = [0u8; 8];
-                word[..bytes.len()].copy_from_slice(bytes);
-                self.word(cell, 2 + i) == u64::from_le_bytes(word)
-            })
+            && text
+                .chunks(8)
+                .enumerate()
+                .all(|(i, bytes)| self.word(cell, 2 + i) == padded_word(bytes))
     }
 
     /// A string cell's bytes, appended to `out`.
@@ -376,7 +373,7 @@ impl Heap {
         for i in 0..len.div_ceil(8) {
             let bytes = self.word(cell, 2 + i).to_le_bytes();
             let n = (len - i * 8).min(8);
-            out.extend_from_slice(&bytes[..n]);
+            out.extend(bytes.into_iter().take(n));
         }
     }
 
@@ -603,6 +600,15 @@ fn held(kind: u64, size: usize) -> std::ops::Range<usize> {
 
 fn size(h: u64) -> usize {
     (h >> 40) as usize
+}
+
+/// Up to eight bytes of a string, little-endian, zero-padded to a whole word.
+fn padded_word(bytes: &[u8]) -> u64 {
+    let mut word = [0u8; 8];
+    for (w, b) in word.iter_mut().zip(bytes) {
+        *w = *b;
+    }
+    u64::from_le_bytes(word)
 }
 
 #[cfg(test)]

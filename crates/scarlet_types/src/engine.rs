@@ -13,17 +13,39 @@
 
 use std::collections::HashSet;
 
+use scarlet_ir::tivec::{Idx, TiVec};
+
 use crate::known::Known;
 use crate::name::{Name, TypeName};
 use crate::ty::{Constraint, Scheme, Type, TypeVar};
 
-/// An inference type: an index into the engine's arena.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// An inference type: an index into the engine's arena. Only
+/// [`Engine::push`] makes one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Ty(u32);
 
-/// A type variable's id, unique within one engine.
+impl Idx for Ty {
+    fn from_usize(i: usize) -> Self {
+        Ty(i as u32)
+    }
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// A type variable's id, unique within one engine. Only
+/// [`Engine::new_var`] makes one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct VarId(u32);
+
+impl Idx for VarId {
+    fn from_usize(i: usize) -> Self {
+        VarId(i as u32)
+    }
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
 
 #[derive(Debug, Clone)]
 enum Node {
@@ -161,8 +183,8 @@ struct Var {
 
 #[derive(Clone)]
 pub struct Engine {
-    nodes: Vec<Node>,
-    vars: Vec<Var>,
+    nodes: TiVec<Ty, Node>,
+    vars: TiVec<VarId, Var>,
     level: u32,
     known: Known,
 }
@@ -170,8 +192,8 @@ pub struct Engine {
 impl Engine {
     pub fn new(known: Known) -> Self {
         Engine {
-            nodes: Vec::new(),
-            vars: Vec::new(),
+            nodes: TiVec::new(),
+            vars: TiVec::new(),
             level: 0,
             known,
         }
@@ -182,18 +204,29 @@ impl Engine {
     }
 
     fn push(&mut self, node: Node) -> Ty {
-        let t = Ty(self.nodes.len() as u32);
-        self.nodes.push(node);
-        t
+        self.nodes.push(node)
     }
 
+    // A `Ty` or `VarId` is only made by pushing into this engine's arenas,
+    // which never shrink, so a lookup misses only for one from another
+    // engine.
+    #[allow(clippy::indexing_slicing)]
     fn node(&self, t: Ty) -> &Node {
-        &self.nodes[t.0 as usize]
+        &self.nodes[t]
+    }
+
+    #[allow(clippy::indexing_slicing)]
+    fn var(&self, v: VarId) -> &Var {
+        &self.vars[v]
+    }
+
+    #[allow(clippy::indexing_slicing)]
+    fn var_mut(&mut self, v: VarId) -> &mut Var {
+        &mut self.vars[v]
     }
 
     fn new_var(&mut self, state: VarState, name: Option<Name>) -> Ty {
-        let id = VarId(self.vars.len() as u32);
-        self.vars.push(Var { state, name });
+        let id = self.vars.push(Var { state, name });
         self.push(Node::Var(id))
     }
 
@@ -278,7 +311,7 @@ impl Engine {
     fn find(&self, t: Ty) -> Ty {
         let mut r = t;
         while let Node::Var(v) = *self.node(r)
-            && let VarState::Link(next) = self.vars[v.0 as usize].state
+            && let VarState::Link(next) = self.var(v).state
         {
             r = next;
         }
@@ -316,15 +349,15 @@ impl Engine {
         let r = self.unify_in(expected, given, &mut trail);
         if r.is_err() {
             for (v, old) in trail.into_iter().rev() {
-                self.vars[v.0 as usize].state = old;
+                self.var_mut(v).state = old;
             }
         }
         r
     }
 
     fn set(&mut self, v: VarId, state: VarState, trail: &mut Trail) {
-        trail.push((v, self.vars[v.0 as usize].state));
-        self.vars[v.0 as usize].state = state;
+        trail.push((v, self.var(v).state));
+        self.var_mut(v).state = state;
     }
 
     fn unify_in(&mut self, expected: Ty, given: Ty, trail: &mut Trail) -> Result<(), UnifyError> {
@@ -399,7 +432,7 @@ impl Engine {
         ty: Ty,
         trail: &mut Trail,
     ) -> Result<(), UnifyError> {
-        match self.vars[var.0 as usize].state {
+        match self.var(var).state {
             VarState::Link(_) => Err(mismatch(var_ty, ty)),
             VarState::Rigid { constraint, .. } => {
                 // A rigid variable only absorbs an unbound one, which then
@@ -409,7 +442,7 @@ impl Engine {
                     && let VarState::Unbound {
                         constraint: required,
                         ..
-                    } = self.vars[other.0 as usize].state
+                    } = self.var(other).state
                 {
                     if let Some(req) = required
                         && !constraint.is_some_and(|c| c.implies(req))
@@ -445,7 +478,7 @@ impl Engine {
         trail: &mut Trail,
     ) -> Result<(), UnifyError> {
         match self.node(ty).clone() {
-            Node::Var(other) => match self.vars[other.0 as usize].state {
+            Node::Var(other) => match self.var(other).state {
                 VarState::Unbound {
                     level: other_level,
                     constraint: other_c,
@@ -490,7 +523,7 @@ impl Engine {
                 if let VarState::Unbound {
                     level: l,
                     constraint,
-                } = self.vars[v.0 as usize].state
+                } = self.var(v).state
                     && l > level
                 {
                     self.set(v, VarState::Unbound { level, constraint }, trail);
@@ -521,7 +554,7 @@ impl Engine {
                     Err(NotCallable::Arity { params, ret })
                 }
             }
-            Node::Var(v) => match self.vars[v.0 as usize].state {
+            Node::Var(v) => match self.var(v).state {
                 VarState::Unbound { .. } => {
                     let params: Vec<Ty> = (0..arity).map(|_| self.fresh()).collect();
                     let ret = self.fresh();
@@ -571,10 +604,10 @@ impl Engine {
         let mut weak = HashSet::new();
         self.collect_weak(ty, restricted, false, &mut weak);
         for &v in &weak {
-            if let VarState::Unbound { level, constraint } = self.vars[v.0 as usize].state
+            if let VarState::Unbound { level, constraint } = self.var(v).state
                 && level > self.level
             {
-                self.vars[v.0 as usize].state = VarState::Unbound {
+                self.var_mut(v).state = VarState::Unbound {
                     level: self.level,
                     constraint,
                 };
@@ -592,9 +625,9 @@ impl Engine {
                 if out.contains(&v) || weak.contains(&v) {
                     return;
                 }
-                match self.vars[v.0 as usize].state {
+                match self.var(v).state {
                     VarState::Unbound { level, constraint } if level > self.level => {
-                        self.vars[v.0 as usize].state = VarState::Rigid { level, constraint };
+                        self.var_mut(v).state = VarState::Rigid { level, constraint };
                         out.push(v);
                     }
                     VarState::Rigid { level, .. } if level > self.level => out.push(v),
@@ -655,13 +688,13 @@ impl Engine {
             .vars
             .iter()
             .map(|&v| {
-                let constraint = match self.vars[v.0 as usize].state {
+                let constraint = match self.var(v).state {
                     VarState::Unbound { constraint, .. } | VarState::Rigid { constraint, .. } => {
                         constraint
                     }
                     VarState::Link(_) => None,
                 };
-                let name = self.vars[v.0 as usize].name.clone();
+                let name = self.var(v).name.clone();
                 (v, self.fresh_named(constraint, name))
             })
             .collect();
@@ -738,13 +771,13 @@ impl Engine {
     }
 
     fn type_var(&self, v: VarId) -> TypeVar {
-        let constraint = match self.vars[v.0 as usize].state {
+        let constraint = match self.var(v).state {
             VarState::Unbound { constraint, .. } | VarState::Rigid { constraint, .. } => constraint,
             VarState::Link(_) => None,
         };
         TypeVar {
             id: v.0,
-            name: self.vars[v.0 as usize].name.clone(),
+            name: self.var(v).name.clone(),
             constraint,
         }
     }

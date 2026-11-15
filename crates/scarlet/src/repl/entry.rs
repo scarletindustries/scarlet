@@ -74,7 +74,7 @@ pub fn split(source: &str, program: &ast::BlockExpression) -> Parts {
             ast::Node::Statement(_) => &mut parts.definitions,
             ast::Node::Expression(_) => &mut parts.expressions,
         };
-        for line in &lines[next..=end] {
+        for line in lines.iter().take(end + 1).skip(next) {
             bucket.push_str(line);
             bucket.push('\n');
         }

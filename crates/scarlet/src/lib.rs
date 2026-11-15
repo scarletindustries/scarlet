@@ -7,6 +7,8 @@
         clippy::unreachable,
         clippy::todo,
         clippy::unimplemented,
+        clippy::indexing_slicing,
+        clippy::string_slice,
     )
 )]
 // The CLI/REPL/LSP driver has no use for unsafe code.

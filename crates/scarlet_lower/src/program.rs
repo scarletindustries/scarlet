@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 
 use scarlet_check::CleanModule;
-use scarlet_check::typed::{BinderId, FnBody, TypedModule};
+use scarlet_check::typed::{BinderId, Expr, FnBody, Function, TypedModule};
 use scarlet_ir::TypeId;
 use scarlet_ir::core_ir::{
     Abi, Const, ConstId, CoreFn, FuncIdx, GlobalSlot, HttpTypes, IoErrors, JoinId, JsonTypes,
@@ -59,10 +59,6 @@ pub enum InternalLinkError {
     NoConst(ValueName),
     /// The program has no modules, so no entry.
     NoEntryModule,
-    /// A function's place is past the end of its module's functions.
-    NoSuchFunction { module: ModuleKey, index: usize },
-    /// A function to translate has no Scarlet body.
-    NoBody(ValueName),
     /// Something called or made as a function has a type that isn't a
     /// function's.
     NotAFunction(RTy),
@@ -116,10 +112,6 @@ impl fmt::Display for InternalLinkError {
             E::NoFunction(v) => write!(f, "no function `{}::{}`", v.module, v.name),
             E::NoConst(v) => write!(f, "no const `{}::{}`", v.module, v.name),
             E::NoEntryModule => write!(f, "a program with no entry module"),
-            E::NoSuchFunction { module, index } => {
-                write!(f, "module `{module}` has no function {index}")
-            }
-            E::NoBody(v) => write!(f, "`{}::{}` has no body to translate", v.module, v.name),
             E::NotAFunction(t) => write!(f, "type :{} isn't a function's", t.0),
             E::UnownedBinder(n) => write!(f, "`{n}` is bound in a function that doesn't own it"),
             E::ErrorNode => write!(f, "a clean module holds an error node"),
@@ -361,24 +353,26 @@ impl Prelude {
 
 /// Where one module function's body is: its module, and its place in the
 /// module's functions.
-struct Site {
-    module: usize,
-    function: usize,
+pub(crate) struct Site<'m> {
+    pub module: &'m TypedModule,
+    pub function: &'m Function,
+    /// The function's Scarlet body. Only a function with one gets a site.
+    pub body: &'m Expr,
 }
 
 /// Every module function's index and every module-level value's slot, all
 /// known before any body is translated.
-pub(crate) struct Symbols {
+pub(crate) struct Symbols<'m> {
     fns: HashMap<ValueName, FuncIdx>,
     consts: HashMap<ValueName, GlobalSlot>,
     binders: HashMap<(ModuleKey, BinderId), GlobalSlot>,
     /// Each module function, in `FuncIdx` order.
-    sites: Vec<Site>,
+    sites: Vec<Site<'m>>,
     globals: u32,
 }
 
-impl Symbols {
-    fn of(modules: &[&TypedModule]) -> Self {
+impl<'m> Symbols<'m> {
+    fn of(modules: &[&'m TypedModule]) -> Self {
         let mut s = Symbols {
             fns: HashMap::new(),
             consts: HashMap::new(),
@@ -391,14 +385,15 @@ impl Symbols {
             *n += 1;
             g
         };
-        for (mi, m) in modules.iter().enumerate() {
-            for (fi, f) in m.functions.iter().enumerate() {
-                if let FnBody::Expr(_) = f.body {
+        for &m in modules {
+            for f in &m.functions {
+                if let FnBody::Expr(body) = &f.body {
                     let idx = FuncIdx(s.sites.len() as u32);
                     s.fns.insert(value_name(&m.key, &f.name), idx);
                     s.sites.push(Site {
-                        module: mi,
-                        function: fi,
+                        module: m,
+                        function: f,
+                        body,
                     });
                 }
             }
@@ -498,7 +493,7 @@ pub fn build_program(
     let declared: Vec<Named> = symbols
         .sites
         .iter()
-        .map(|site| crate::translate::function(&mut cx, modules[site.module], site.function))
+        .map(|site| crate::translate::function(&mut cx, site))
         .collect::<Result<_, _>>()?;
     let tops: Vec<TypedFn> = modules
         .iter()

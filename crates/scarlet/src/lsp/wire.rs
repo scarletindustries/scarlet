@@ -119,20 +119,22 @@ pub(super) fn completion_item(
     detail: Option<String>,
     doc: Option<&str>,
 ) -> Json {
-    let mut item = json!({
-        "label": label,
-        "kind": completion_kind(entity),
-    });
+    let mut item = serde_json::Map::new();
+    item.insert("label".to_string(), json!(label));
+    item.insert("kind".to_string(), json!(completion_kind(entity)));
     if let Some(det) = detail {
-        item["detail"] = json!(det);
+        item.insert("detail".to_string(), json!(det));
     }
     if let Some(doc) = doc {
-        item["documentation"] = json!({
-            "kind": "markdown",
-            "value": clean_doc_comment(doc),
-        });
+        item.insert(
+            "documentation".to_string(),
+            json!({
+                "kind": "markdown",
+                "value": clean_doc_comment(doc),
+            }),
+        );
     }
-    item
+    Json::Object(item)
 }
 
 fn is_ident_char(c: char) -> bool {
@@ -144,23 +146,13 @@ fn is_ident_char(c: char) -> bool {
 /// the cursor isn't in a qualified access. `col` counts characters, as the rest of the server
 /// does for LSP columns.
 pub(super) fn qualifier_before(line: &str, col: usize) -> Option<String> {
-    let chars: Vec<char> = line.chars().collect();
-    let mut i = col.min(chars.len());
-    while i > 0 && is_ident_char(chars[i - 1]) {
-        i -= 1;
+    let before: String = line.chars().take(col).collect();
+    let access = before.trim_end_matches(is_ident_char).strip_suffix("::")?;
+    let qualifier = access.strip_prefix(access.trim_end_matches(is_ident_char))?;
+    match qualifier.chars().next() {
+        Some(first) if !first.is_ascii_digit() => Some(qualifier.to_string()),
+        _ => None,
     }
-    if i < 2 || chars[i - 1] != ':' || chars[i - 2] != ':' {
-        return None;
-    }
-    let end = i - 2;
-    let mut start = end;
-    while start > 0 && is_ident_char(chars[start - 1]) {
-        start -= 1;
-    }
-    if start == end || chars[start].is_ascii_digit() {
-        return None;
-    }
-    Some(chars[start..end].iter().collect())
 }
 
 /// The JSON-RPC error code for a refused rename. It lives here and not on `RenameError` because
@@ -239,13 +231,17 @@ pub(super) fn clean_doc_comment(doc: &str) -> String {
             Some(r) => r.strip_prefix(' ').unwrap_or(r),
             None => gutter,
         };
-        cleaned.push(rest.trim_end().to_string());
+        let rest = rest.trim_end();
+        // Leading blank lines are dropped.
+        if cleaned.is_empty() && rest.is_empty() {
+            continue;
+        }
+        cleaned.push(rest.to_string());
     }
     while cleaned.last().is_some_and(String::is_empty) {
         cleaned.pop();
     }
-    let start = cleaned.iter().position(|l| !l.is_empty()).unwrap_or(0);
-    cleaned[start..].join("\n")
+    cleaned.join("\n")
 }
 
 #[cfg(test)]

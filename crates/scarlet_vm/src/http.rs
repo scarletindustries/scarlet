@@ -159,7 +159,7 @@ pub(crate) fn request(bytes: &[u8]) -> Request {
     let mut req = httparse::Request::new(&mut slots);
     match req.parse(window) {
         Ok(httparse::Status::Complete(n)) => {
-            if has_bare_lf(&window[..n]) {
+            if window.get(..n).is_none_or(has_bare_lf) {
                 return Request::Bad(Reject::BadRequest);
             }
             let (Some(method), Some(target), Some(version)) = (req.method, req.path, req.version)
@@ -194,14 +194,14 @@ pub(crate) fn request(bytes: &[u8]) -> Request {
 pub(crate) fn response(bytes: &[u8]) -> Response {
     // Check the status line first, by its own rules, so each way it can be
     // wrong gets its own answer. `httparse`'s errors do not tell them apart.
-    let Some(line_end) = memchr::memmem::find(bytes, b"\r\n") else {
+    let Some(line) = memchr::memmem::find(bytes, b"\r\n").and_then(|end| bytes.get(..end)) else {
         return if bytes.len() > MAX_HEAD {
             Response::Bad(BadResponse::TooLarge)
         } else {
             Response::NeedMore
         };
     };
-    if let Err(why) = status_line(&bytes[..line_end]) {
+    if let Err(why) = status_line(line) {
         return Response::Bad(why);
     }
     let window = capped(bytes, 0);
@@ -209,7 +209,7 @@ pub(crate) fn response(bytes: &[u8]) -> Response {
     let mut resp = httparse::Response::new(&mut slots);
     match resp.parse(window) {
         Ok(httparse::Status::Complete(n)) => {
-            if has_bare_lf(&window[..n]) {
+            if window.get(..n).is_none_or(has_bare_lf) {
                 return Response::Bad(BadResponse::Field);
             }
             let (Some(version), Some(code)) = (resp.version, resp.code) else {
@@ -423,7 +423,9 @@ pub(crate) fn chunked(bytes: &[u8], max: u64) -> Chunked {
             };
         }
         let (data_start, size) = match httparse::parse_chunk_size(rest) {
-            Ok(httparse::Status::Complete((n, size))) if !has_bare_lf(&rest[..n]) => {
+            Ok(httparse::Status::Complete((n, size)))
+                if rest.get(..n).is_some_and(|line| !has_bare_lf(line)) =>
+            {
                 (pos + n, size)
             }
             Ok(httparse::Status::Partial) => return Chunked::NeedMore,
@@ -460,7 +462,9 @@ fn trailers(bytes: &[u8], start: usize, pieces: Vec<Range<usize>>) -> Chunked {
     let window = capped(bytes, start);
     let mut slots = header_slots(window);
     match httparse::parse_headers(window, &mut slots) {
-        Ok(httparse::Status::Complete((n, headers))) if !has_bare_lf(&window[..n]) => {
+        Ok(httparse::Status::Complete((n, headers)))
+            if window.get(..n).is_some_and(|head| !has_bare_lf(head)) =>
+        {
             let mut trailers = block(bytes, headers, start + n);
             // A trailer carries no connection or expectation meaning
             // (RFC 9110 section 6.5.1).

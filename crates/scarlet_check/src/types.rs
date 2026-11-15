@@ -210,13 +210,17 @@ fn alias_order<'a>(
             ast::TypeBody::Variants { .. } | ast::TypeBody::External => None,
         })
         .collect();
-    let mut graph: StableGraph<(), (), Directed> = StableGraph::new();
+    let mut graph: StableGraph<(&ast::TypeDeclaration, bool), (), Directed> = StableGraph::new();
     let mut idx_of: HashMap<&str, NodeIndex> = HashMap::new();
-    for (td, _, _) in &aliases {
-        idx_of.insert(td.identifier.name.as_str(), graph.add_node(()));
-    }
-    for (td, rhs, _) in &aliases {
-        let from = idx_of[td.identifier.name.as_str()];
+    let nodes: Vec<(NodeIndex, &ast::TypeIdentifier)> = aliases
+        .iter()
+        .map(|&(td, rhs, public)| {
+            let n = graph.add_node((td, public));
+            idx_of.insert(td.identifier.name.as_str(), n);
+            (n, rhs)
+        })
+        .collect();
+    for (from, rhs) in nodes {
         let mut deps = Vec::new();
         type_deps(rhs, &mut deps);
         for dep in deps {
@@ -227,10 +231,13 @@ fn alias_order<'a>(
     }
     let mut out = Vec::new();
     for component in tarjan_scc(&graph) {
-        let cyclic = component.len() > 1 || graph.find_edge(component[0], component[0]).is_some();
+        let cyclic = match component.as_slice() {
+            [only] => graph.find_edge(*only, *only).is_some(),
+            _ => true,
+        };
+        let members = component.iter().filter_map(|&n| graph.node_weight(n));
         if cyclic {
-            for n in &component {
-                let (td, _, _) = aliases[n.index()];
+            for (td, _) in members {
                 report.add(
                     td.identifier.span,
                     CheckError::RecursiveAlias(td.identifier.name.as_str().into()),
@@ -238,8 +245,7 @@ fn alias_order<'a>(
             }
             continue;
         }
-        let (td, _, public) = aliases[component[0].index()];
-        out.push((td, public));
+        out.extend(members.copied());
     }
     out
 }

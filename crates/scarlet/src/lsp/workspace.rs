@@ -343,10 +343,9 @@ impl Workspace {
         }
         let mut out = Merged::default();
         let mut moved = Vec::new();
-        let mut uris: Vec<&String> = before.keys().collect();
-        uris.sort();
-        for uri in uris {
-            let old = &before[uri];
+        let mut docs: Vec<(&String, &PathBuf)> = before.iter().collect();
+        docs.sort();
+        for (uri, old) in docs {
             if self.root_dir_of(uri) == *old && self.roots.contains_key(old) {
                 continue;
             }

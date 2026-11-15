@@ -80,6 +80,9 @@ pub(crate) struct Declared<'a> {
 }
 
 impl<'a> Declared<'a> {
+    // A `DeclId` is the place its declaration was pushed to, and `values`
+    // never shrinks, so a lookup misses only for an id from another module.
+    #[allow(clippy::indexing_slicing)]
     pub fn get(&self, id: DeclId) -> &Decl<'a> {
         &self.values[id.0 as usize]
     }

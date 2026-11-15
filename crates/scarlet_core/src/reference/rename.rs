@@ -226,17 +226,22 @@ impl ReferenceGraph {
 
         // Refuse the whole rename if we can't find any one module, because a
         // partial rewrite is worse than none.
-        let mut uris: BTreeMap<ModuleId, String> = BTreeMap::new();
+        let mut uris: BTreeMap<ModuleId, Option<String>> = BTreeMap::new();
         let mut unresolved: Vec<(ModuleId, ModuleUriError)> = Vec::new();
-        for (m, _) in &sites {
-            if uris.contains_key(m) || unresolved.iter().any(|(u, _)| u == m) {
-                continue;
-            }
-            match uri_of(*m) {
-                Ok(u) => {
-                    uris.insert(*m, u);
+        let mut changes: BTreeMap<String, Vec<TextEdit>> = BTreeMap::new();
+        for (m, span) in sites {
+            let uri = uris.entry(m).or_insert_with(|| match uri_of(m) {
+                Ok(u) => Some(u),
+                Err(e) => {
+                    unresolved.push((m, e));
+                    None
                 }
-                Err(e) => unresolved.push((*m, e)),
+            });
+            if let Some(uri) = uri {
+                changes.entry(uri.clone()).or_default().push(TextEdit {
+                    span,
+                    new_text: new_name.to_string(),
+                });
             }
         }
         if !unresolved.is_empty() {
@@ -255,13 +260,6 @@ impl ReferenceGraph {
             return Err(RenameError::Unresolvable(mods));
         }
 
-        let mut changes: BTreeMap<String, Vec<TextEdit>> = BTreeMap::new();
-        for (m, span) in sites {
-            changes.entry(uris[&m].clone()).or_default().push(TextEdit {
-                span,
-                new_text: new_name.to_string(),
-            });
-        }
         for edits in changes.values_mut() {
             edits.sort_by_key(|e| (e.span.start_line, e.span.start_column));
             edits.dedup();

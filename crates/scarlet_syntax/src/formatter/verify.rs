@@ -77,12 +77,12 @@ fn position(tok: &Token) -> (i32, i32) {
 pub(super) fn compare(reference: &[Token], output: &[Token], layout: &Layout) -> Verdict {
     let a = comparable(reference);
     let b = comparable(output);
-    for (&i, &o) in a.iter().zip(&b) {
-        if reference[i].kind != output[o].kind {
+    for (r, o) in a.iter().zip(&b) {
+        if r.tok.kind != o.tok.kind {
             return Verdict::Different(Mismatch::TokenKind {
-                made: output[o].kind.clone(),
-                doc: reference[i].kind.clone(),
-                at: position(&output[o]),
+                made: o.tok.kind.clone(),
+                doc: r.tok.kind.clone(),
+                at: position(o.tok),
             });
         }
     }
@@ -93,18 +93,16 @@ pub(super) fn compare(reference: &[Token], output: &[Token], layout: &Layout) ->
         });
     }
 
-    let reference_ends = line_ends(reference);
-    let output_ends = line_ends(output);
     let mut keep_flat = BTreeSet::new();
-    for (&i, &o) in a.iter().zip(&b) {
-        match (reference_ends[i], output_ends[o]) {
+    for (r, o) in a.iter().zip(&b) {
+        match (r.ends_line, o.ends_line) {
             (true, false) => {
                 return Verdict::Different(Mismatch::JoinedLines {
-                    at: position(&output[o]),
+                    at: position(o.tok),
                 });
             }
             (false, true) => {
-                let tok = &output[o];
+                let tok = o.tok;
                 if tok
                     .leading_trivia
                     .iter()
@@ -115,8 +113,7 @@ pub(super) fn compare(reference: &[Token], output: &[Token], layout: &Layout) ->
                 // Newline `k` ends line `k`, so the ones between the two
                 // tokens are those from the previous token's line up to this
                 // one's.
-                let prev = o.checked_sub(1).map_or(0, |p| output[p].span.end_line);
-                let from = usize::try_from(prev).unwrap_or(0);
+                let from = usize::try_from(o.prev_end_line).unwrap_or(0);
                 let to = usize::try_from(tok.span.start_line).unwrap_or(0);
                 keep_flat.extend(
                     layout
@@ -137,24 +134,41 @@ pub(super) fn compare(reference: &[Token], output: &[Token], layout: &Layout) ->
     }
 }
 
-/// The indices of the tokens that must match. A trailing comma, right before
-/// a closer, is left out: the formatter writes one exactly when the list
-/// breaks, and the parser reads the list the same either way.
-fn comparable(tokens: &[Token]) -> Vec<usize> {
-    (0..tokens.len())
-        .filter(|&i| {
-            let kind = &tokens[i].kind;
-            let trailing_comma = *kind == Kind::PuncComma
-                && tokens.get(i + 1).is_some_and(|next| {
-                    matches!(
-                        next.kind,
-                        Kind::PuncCloseParen
-                            | Kind::PuncCloseBracket
-                            | Kind::PuncCloseBrace
-                            | Kind::BinClose
-                    )
-                });
-            *kind != Kind::Eof && !trailing_comma
-        })
-        .collect()
+/// A token that must match, with what the comparison needs from its
+/// neighbours in the full stream.
+struct Comparable<'a> {
+    tok: &'a Token,
+    ends_line: bool,
+    /// The line the token right before this one ends on, or 0 for the first.
+    prev_end_line: i32,
+}
+
+/// The tokens that must match. A trailing comma, right before a closer, is
+/// left out: the formatter writes one exactly when the list breaks, and the
+/// parser reads the list the same either way.
+fn comparable(tokens: &[Token]) -> Vec<Comparable<'_>> {
+    let mut out = Vec::new();
+    let mut prev_end_line = 0;
+    let mut rest = tokens.iter().zip(line_ends(tokens)).peekable();
+    while let Some((tok, ends_line)) = rest.next() {
+        let trailing_comma = tok.kind == Kind::PuncComma
+            && rest.peek().is_some_and(|(next, _)| {
+                matches!(
+                    next.kind,
+                    Kind::PuncCloseParen
+                        | Kind::PuncCloseBracket
+                        | Kind::PuncCloseBrace
+                        | Kind::BinClose
+                )
+            });
+        if tok.kind != Kind::Eof && !trailing_comma {
+            out.push(Comparable {
+                tok,
+                ends_line,
+                prev_end_line,
+            });
+        }
+        prev_end_line = tok.span.end_line;
+    }
+    out
 }

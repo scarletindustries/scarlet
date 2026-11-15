@@ -39,30 +39,32 @@ pub fn slot_labeled<L: PartialEq + Copy, T>(
     let mut errors = Vec::new();
     let mut next_pos = 0usize;
     for (label, val) in items {
-        let idx = match label {
+        let found = match label {
             None => {
                 let i = next_pos;
                 next_pos += 1;
-                if i >= fields.len() {
-                    errors.push(SlotError::ExtraPositional(val));
-                    continue;
-                }
-                i
+                by_pos.get_mut(i).map(|slot| (i, slot))
             }
-            Some(label) => match fields.iter().position(|&f| f == Some(label)) {
-                Some(i) => i,
-                None => {
-                    errors.push(SlotError::UnknownLabel(label, val));
-                    continue;
-                }
-            },
+            Some(label) => fields
+                .iter()
+                .zip(by_pos.iter_mut())
+                .enumerate()
+                .find(|(_, (f, _))| **f == Some(label))
+                .map(|(i, (_, slot))| (i, slot)),
+        };
+        let Some((idx, slot)) = found else {
+            errors.push(match label {
+                None => SlotError::ExtraPositional(val),
+                Some(label) => SlotError::UnknownLabel(label, val),
+            });
+            continue;
         };
         // The first item to claim a field keeps it, and every later one is
         // reported.
-        if by_pos[idx].is_some() {
+        if slot.is_some() {
             errors.push(SlotError::Duplicate(val, idx));
         } else {
-            by_pos[idx] = Some(val);
+            *slot = Some(val);
         }
     }
     (by_pos, errors)

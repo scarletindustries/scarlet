@@ -15,7 +15,7 @@ use crate::UnusedBindings;
 use crate::env::Env;
 use crate::error::CheckError;
 use crate::report::Report;
-use crate::resolved::BinderInfo;
+use crate::resolved::{BinderInfo, binder_info};
 use crate::typed::{
     Arm, BinSegPat, BinderId, Block, Expr, ExprKind, FnBody, Function, OrShape, Pattern,
     PatternKind, Rest, Stmt,
@@ -188,13 +188,13 @@ impl Finished<'_, '_> {
         if let Some(missing) = found.missing {
             report.add(subject.span, CheckError::NotExhaustive { missing });
         }
-        for i in found.unreachable {
-            report.add(arms[i].pattern.span, CheckError::Unreachable);
+        for pattern in found.unreachable {
+            report.add(pattern.span, CheckError::Unreachable);
         }
         // A catch-all over named variants would quietly take any variant
         // added later, so the arms have to name them.
-        for (i, missing) in found.catch_alls {
-            report.add(arms[i].pattern.span, CheckError::CatchAll(missing));
+        for (pattern, missing) in found.catch_alls {
+            report.add(pattern.span, CheckError::CatchAll(missing));
         }
     }
 
@@ -226,7 +226,7 @@ impl Finished<'_, '_> {
         let Some(err) = err else { return };
         let is_nil = self.is_nil(&err);
         let receiver = error.map(|b| {
-            let s = &self.binders[b.0 as usize];
+            let s = binder_info(self.binders, b);
             (s.name.clone(), s.span)
         });
         match (is_nil, receiver) {
@@ -258,7 +258,7 @@ impl Finished<'_, '_> {
             return;
         }
         for b in self.unused.iter().filter(|b| !self.refused.contains(b)) {
-            let info = &self.binders[b.0 as usize];
+            let info = binder_info(self.binders, *b);
             report.add(info.span, CheckError::Unused(info.name.clone()));
         }
     }

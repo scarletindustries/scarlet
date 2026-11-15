@@ -4,11 +4,12 @@
 //! The caller describes the subject's type as a [`Space`], unrolled as deep as
 //! the patterns look, so this module needs nothing from the type checker.
 
-use indexmap::IndexSet;
+use scarlet_ir::tivec::{Idx, TiVec};
 use scarlet_syntax::span::Span;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::cell::OnceCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 /// Interns constructor names for one check. It covers real variants and the
@@ -16,28 +17,53 @@ use std::rc::Rc;
 /// reserved for the array constructors, so `new` must insert `[]` and then
 /// `::` first.
 #[derive(Debug)]
-struct Interner(IndexSet<String>);
+struct Interner {
+    names: TiVec<CtorId, String>,
+    ids: HashMap<String, CtorId>,
+}
 
-const EMPTY_LIST_ID: u32 = 0;
-const CONS_ID: u32 = 1;
+/// A constructor name's id within one check. Only [`Interner::intern`] makes
+/// one, apart from the two array constructors `Interner::new` reserves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct CtorId(u32);
+
+impl Idx for CtorId {
+    fn from_usize(i: usize) -> Self {
+        CtorId(i as u32)
+    }
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+const EMPTY_LIST_ID: CtorId = CtorId(0);
+const CONS_ID: CtorId = CtorId(1);
 
 impl Interner {
     fn new() -> Self {
-        let mut set = IndexSet::new();
-        set.insert("[]".to_string());
-        set.insert("::".to_string());
-        Interner(set)
+        let mut interner = Interner {
+            names: TiVec::new(),
+            ids: HashMap::new(),
+        };
+        interner.intern("[]");
+        interner.intern("::");
+        interner
     }
 
-    fn intern(&mut self, name: &str) -> u32 {
-        match self.0.get_index_of(name) {
-            Some(i) => i as u32,
-            None => self.0.insert_full(name.to_string()).0 as u32,
+    fn intern(&mut self, name: &str) -> CtorId {
+        if let Some(&id) = self.ids.get(name) {
+            return id;
         }
+        let id = self.names.push(name.to_string());
+        self.ids.insert(name.to_string(), id);
+        id
     }
 
-    fn name(&self, id: u32) -> &str {
-        &self.0[id as usize]
+    // The interner never shrinks, so a lookup misses only for an id from
+    // another check's interner.
+    #[allow(clippy::indexing_slicing)]
+    fn name(&self, id: CtorId) -> &str {
+        &self.names[id]
     }
 }
 
@@ -48,18 +74,22 @@ struct CtorIdSet {
 }
 
 impl CtorIdSet {
-    fn insert(&mut self, id: u32) {
-        let w = (id / 64) as usize;
-        if w >= self.words.len() {
-            self.words.resize(w + 1, 0);
+    fn insert(&mut self, id: CtorId) {
+        let w = (id.0 / 64) as usize;
+        let bit = 1u64 << (id.0 % 64);
+        match self.words.get_mut(w) {
+            Some(word) => *word |= bit,
+            None => {
+                self.words.resize(w, 0);
+                self.words.push(bit);
+            }
         }
-        self.words[w] |= 1u64 << (id % 64);
     }
 
-    fn contains(&self, id: u32) -> bool {
+    fn contains(&self, id: CtorId) -> bool {
         self.words
-            .get((id / 64) as usize)
-            .is_some_and(|w| w & (1u64 << (id % 64)) != 0)
+            .get((id.0 / 64) as usize)
+            .is_some_and(|w| w & (1u64 << (id.0 % 64)) != 0)
     }
 }
 
@@ -148,13 +178,13 @@ pub fn unroll_depth<P: PatternShape>(p: &P) -> usize {
 #[derive(Debug, Clone)]
 enum Pat {
     Wildcard,
-    Ctor { id: u32, args: Rc<[Pat]> },
+    Ctor { id: CtorId, args: Rc<[Pat]> },
     Or { patterns: Rc<[Pat]> },
 }
 
 #[derive(Debug, Clone)]
 struct CtorInfo {
-    id: u32,
+    id: CtorId,
     arity: usize,
     types: Vec<RcType>,
 }
@@ -164,7 +194,7 @@ impl CtorInfo {
     /// literal, a binary shape, a range, or the leftovers of a type error. Its
     /// payload types are unknown, so every column is `Infinite`. `types` must
     /// stay as long as `arity`, which `specialize` asserts.
-    fn opaque(id: u32, arity: usize) -> Self {
+    fn opaque(id: CtorId, arity: usize) -> Self {
         CtorInfo {
             id,
             arity,
@@ -180,7 +210,7 @@ struct TypeCtors {
 }
 
 impl TypeCtors {
-    fn find(&self, id: u32) -> Option<&CtorInfo> {
+    fn find(&self, id: CtorId) -> Option<&CtorInfo> {
         self.ctors.iter().find(|c| c.id == id)
     }
 }
@@ -213,9 +243,16 @@ enum RcType {
     /// The constructor table, in declaration order. It's never empty, because
     /// an empty variant table lowers to `Infinite`.
     Named(Rc<TypeCtors>),
-    /// A single made-up `#tupleN` constructor whose `types` are the element
-    /// types.
-    Tuple(Rc<TypeCtors>),
+    Tuple(Rc<TupleType>),
+}
+
+/// A tuple's single made-up `#tupleN` constructor, whose `types` are the
+/// element types, and the one-row constructor table built from it on first
+/// use.
+#[derive(Debug)]
+struct TupleType {
+    ctor: CtorInfo,
+    table: OnceCell<TypeCtors>,
 }
 
 /// The values a pattern can be matched against, as far as telling them apart
@@ -248,9 +285,9 @@ fn rc_type(t: &Space, interner: &mut Interner) -> RcType {
                 arity: types.len(),
                 types,
             };
-            RcType::Tuple(Rc::new(TypeCtors {
-                ctors: vec![ctor],
-                infinite: false,
+            RcType::Tuple(Rc::new(TupleType {
+                ctor,
+                table: OnceCell::new(),
             }))
         }
         Space::Variants(variants) => {
@@ -280,7 +317,11 @@ fn get_type_ctors(t: &RcType) -> Cow<'_, TypeCtors> {
             ctors: vec![],
             infinite: true,
         }),
-        RcType::Named(ctors) | RcType::Tuple(ctors) => Cow::Borrowed(ctors.as_ref()),
+        RcType::Named(ctors) => Cow::Borrowed(ctors.as_ref()),
+        RcType::Tuple(tuple) => Cow::Borrowed(tuple.table.get_or_init(|| TypeCtors {
+            ctors: vec![tuple.ctor.clone()],
+            infinite: false,
+        })),
         RcType::Array(arr) => Cow::Borrowed(arr.ctors.get_or_init(|| TypeCtors {
             ctors: vec![
                 CtorInfo {
@@ -659,9 +700,12 @@ fn pat_to_string(p: &Pat, t: &RcType, interner: &Interner) -> String {
                 let mut tail = p;
                 loop {
                     match tail {
-                        Pat::Ctor { id, args } if *id == CONS_ID && args.len() == 2 => {
-                            heads.push(pat_to_string(&args[0], elem_t, interner));
-                            tail = &args[1];
+                        Pat::Ctor { id, args }
+                            if *id == CONS_ID
+                                && let [head, rest] = &**args =>
+                        {
+                            heads.push(pat_to_string(head, elem_t, interner));
+                            tail = rest;
                         }
                         Pat::Ctor { id, .. } if *id == EMPTY_LIST_ID => {
                             return format!("[{}]", heads.join(", "));
@@ -709,7 +753,7 @@ fn pat_to_string(p: &Pat, t: &RcType, interner: &Interner) -> String {
 }
 
 fn lower_pattern<P: PatternShape>(p: &P, t: &RcType, interner: &mut Interner) -> Pat {
-    fn nullary(id: u32) -> Pat {
+    fn nullary(id: CtorId) -> Pat {
         Pat::Ctor {
             id,
             args: Rc::from([]),
@@ -746,8 +790,8 @@ fn lower_pattern<P: PatternShape>(p: &P, t: &RcType, interner: &mut Interner) ->
             }
         }
         PatShape::Tuple(elements) => {
-            let elem_types: &[RcType] = if let RcType::Tuple(ctors) = t {
-                &ctors.ctors[0].types
+            let elem_types: &[RcType] = if let RcType::Tuple(tuple) = t {
+                &tuple.ctor.types
             } else {
                 &[]
             };
@@ -790,21 +834,21 @@ fn lower_pattern<P: PatternShape>(p: &P, t: &RcType, interner: &mut Interner) ->
     }
 }
 
-/// What a `match` covers, arm by arm.
-#[derive(Debug, Default)]
-pub struct MatchReport {
+/// What a `match` covers, arm by arm. Each arm is given by its pattern.
+#[derive(Debug)]
+pub struct MatchReport<'p, P> {
     /// A value no unguarded arm matches, shown as a pattern.
     pub missing: Option<String>,
     /// Arms an earlier unguarded arm already covers.
-    pub unreachable: Vec<usize>,
+    pub unreachable: Vec<&'p P>,
     /// Arms that use a catch-all for variants an earlier arm names others
     /// of, with those variants shown as patterns.
-    pub catch_alls: Vec<(usize, Vec<String>)>,
+    pub catch_alls: Vec<(&'p P, Vec<String>)>,
 }
 
 /// Check `arms` against `space`. A guarded arm may not match, so it neither
 /// covers anything nor makes a later arm unreachable.
-pub fn analyse<P: PatternShape>(space: &Space, arms: &[(&P, bool)]) -> MatchReport {
+pub fn analyse<'p, P: PatternShape>(space: &Space, arms: &[(&'p P, bool)]) -> MatchReport<'p, P> {
     let mut um = UsefulnessMatrix::new(space);
     let pats: Vec<Pat> = arms.iter().map(|(p, _)| um.lower(*p)).collect();
     let mut report = MatchReport {
@@ -814,13 +858,14 @@ pub fn analyse<P: PatternShape>(space: &Space, arms: &[(&P, bool)]) -> MatchRepo
                 .filter(|((_, guarded), _)| !guarded)
                 .map(|(_, p)| p),
         ),
-        ..MatchReport::default()
+        unreachable: Vec::new(),
+        catch_alls: Vec::new(),
     };
-    for (i, ((_, guarded), pat)) in arms.iter().zip(&pats).enumerate() {
+    for (i, (&(arm, guarded), pat)) in arms.iter().zip(&pats).enumerate() {
         if !um.is_useful(pat) {
-            report.unreachable.push(i);
-        } else if let Some(missing) = um.catch_all(&pats[..i], pat) {
-            report.catch_alls.push((i, missing));
+            report.unreachable.push(arm);
+        } else if let Some(missing) = um.catch_all(pats.iter().take(i), pat) {
+            report.catch_alls.push((arm, missing));
         }
         if !guarded {
             um.push(pat);
