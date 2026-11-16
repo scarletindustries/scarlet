@@ -579,6 +579,8 @@ enum Unloadable {
     Missing(Missing),
     /// It has more instructions than a jump target can name.
     TooLong,
+    /// It needs more registers than a register number can name.
+    TooManyRegisters,
 }
 
 impl From<Missing> for Unloadable {
@@ -590,9 +592,11 @@ impl From<Missing> for Unloadable {
 /// A function that's too long for the VM's jumps stops the whole load, as a
 /// heap too big for its addresses stops a run: it's a limit of the machine.
 fn load_fn(f: &LoweredFn, consts: &[Const], this: Option<FuncIdx>) -> Result<Func, Stop> {
-    Ok(match Loader::new(consts, &f.core, this).body(&f.core) {
+    let name = || format!("{}.{}", f.module, f.name);
+    let loaded = Loader::new(consts, &f.core, this).and_then(|l| l.body(&f.core));
+    Ok(match loaded {
         Ok((regs, instrs)) => Func::Ready(Body {
-            name: format!("{}.{}", f.module, f.name),
+            name: name(),
             regs,
             params: f.core.params.iter().map(|p| Reg::of(p.id)).collect(),
             carried: reused_locals(&f.core.body)
@@ -602,10 +606,9 @@ fn load_fn(f: &LoweredFn, consts: &[Const], this: Option<FuncIdx>) -> Result<Fun
             instrs: instrs.into_boxed_slice(),
         }),
         Err(Unloadable::Missing(what)) => Func::NotBuiltYet(what),
-        Err(Unloadable::TooLong) => {
-            return Err(Stop::FunctionTooLong {
-                name: format!("{}.{}", f.module, f.name),
-            });
+        Err(Unloadable::TooLong) => return Err(Stop::FunctionTooLong { name: name() }),
+        Err(Unloadable::TooManyRegisters) => {
+            return Err(Stop::TooManyRegisters { name: name() });
         }
     })
 }
@@ -627,21 +630,26 @@ struct Loader<'c> {
 }
 
 impl<'c> Loader<'c> {
-    fn new(consts: &'c [Const], f: &CoreFn, this: Option<FuncIdx>) -> Self {
-        let mut top = 0;
-        for p in &f.params {
-            top = top.max(p.id.0 + 1);
-        }
-        top = top.max(highest_local(&f.body));
-        Loader {
+    fn new(consts: &'c [Const], f: &CoreFn, this: Option<FuncIdx>) -> Result<Self, Unloadable> {
+        let highest = f
+            .params
+            .iter()
+            .map(|p| p.id.0)
+            .chain(highest_local(&f.body))
+            .max();
+        let next = match highest {
+            None => 0,
+            Some(h) => h.checked_add(1).ok_or(Unloadable::TooManyRegisters)?,
+        };
+        Ok(Loader {
             consts,
             this,
             reused: reused_locals(&f.body),
             instrs: Vec::new(),
             labels: Vec::new(),
             conts: HashMap::new(),
-            next: top,
-        }
+            next,
+        })
     }
 
     fn body(mut self, f: &CoreFn) -> Result<(u32, Vec<Instr>), Unloadable> {
@@ -651,8 +659,9 @@ impl<'c> Loader<'c> {
     }
 
     fn label(&mut self) -> Label {
+        let l = Label(self.labels.len());
         self.labels.push((None, Vec::new()));
-        Label(self.labels.len() - 1)
+        l
     }
 
     /// Put `l` at the next instruction, and point every jump to it there.
@@ -716,10 +725,13 @@ impl<'c> Loader<'c> {
         }
     }
 
-    fn scratch(&mut self) -> Reg {
+    fn scratch(&mut self) -> Result<Reg, Unloadable> {
         let r = Reg(self.next);
-        self.next += 1;
-        r
+        self.next = self
+            .next
+            .checked_add(1)
+            .ok_or(Unloadable::TooManyRegisters)?;
+        Ok(r)
     }
 
     fn expr(&mut self, e: &CoreExpr, dest: Dest) -> Result<(), Unloadable> {
@@ -750,7 +762,7 @@ impl<'c> Loader<'c> {
                             self.instrs.push(call);
                         }
                         (Dest::Return, atom) => {
-                            let src = self.scratch();
+                            let src = self.scratch()?;
                             self.atom(src, atom)?;
                             self.instrs.push(Instr::Ret { src });
                         }
@@ -1312,7 +1324,7 @@ fn moves_on_last_use(instrs: &mut [Instr]) {
         // The run of drops that follows, which is where this call's own
         // arguments die.
         let mut dying: Vec<Reg> = Vec::new();
-        for next in instrs.get(i + 1..).into_iter().flatten() {
+        for next in instrs.get(i..).into_iter().flatten().skip(1) {
             match next {
                 Instr::Drop { reg } => dying.push(*reg),
                 _ => break,
@@ -1385,10 +1397,10 @@ fn reused_locals(e: &CoreExpr) -> BTreeSet<LocalId> {
     out
 }
 
-/// One past the highest local `e` binds or reads.
-fn highest_local(e: &CoreExpr) -> u32 {
-    let mut top = 0;
-    let mut note = |l: LocalId| top = top.max(l.0 + 1);
+/// The highest local `e` binds or reads, or `None` when it names none.
+fn highest_local(e: &CoreExpr) -> Option<u32> {
+    let mut top = None;
+    let mut note = |l: LocalId| top = top.max(Some(l.0));
     let mut stack = vec![e];
     while let Some(e) = stack.pop() {
         match e {

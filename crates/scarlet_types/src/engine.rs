@@ -370,7 +370,7 @@ impl Engine {
     }
 
     pub fn enter(&mut self) -> Level {
-        self.level += 1;
+        self.level = self.level.saturating_add(1);
         Level(self.level)
     }
 

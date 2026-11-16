@@ -175,7 +175,10 @@ fn int(s: &mut Sip<1, 3>, n: i128) {
         reason = "the low and the high 64 bits of a u128, on purpose"
     )]
     let digits: &[u64] = &[m as u64, (m >> 64) as u64];
-    let len = digits.iter().rposition(|&d| d != 0).map_or(0, |i| i + 1);
+    let len = digits
+        .iter()
+        .rposition(|&d| d != 0)
+        .map_or(0, |i| i.saturating_add(1));
     s.word(len as u64);
     for &d in digits.iter().take(len) {
         s.word(d);
@@ -235,7 +238,7 @@ impl<const C: usize, const D: usize> Sip<C, D> {
 
     fn word(&mut self, w: u64) {
         if self.tail_len == 0 {
-            self.len += 8;
+            self.len = self.len.wrapping_add(8);
             self.compress(w);
         } else {
             self.bytes(&w.to_le_bytes());
@@ -244,9 +247,9 @@ impl<const C: usize, const D: usize> Sip<C, D> {
 
     fn bytes(&mut self, bytes: &[u8]) {
         for &b in bytes {
-            self.tail |= u64::from(b) << (8 * self.tail_len);
-            self.tail_len += 1;
-            self.len += 1;
+            self.tail |= u64::from(b) << (self.tail_len << 3);
+            self.tail_len = self.tail_len.saturating_add(1);
+            self.len = self.len.wrapping_add(1);
             if self.tail_len == 8 {
                 let m = self.tail;
                 self.tail = 0;

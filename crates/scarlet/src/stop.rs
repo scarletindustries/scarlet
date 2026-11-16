@@ -13,6 +13,9 @@ pub fn message(stop: &Stop) -> Option<String> {
         Stop::FunctionTooLong { name } => Some(format!(
             "the function {name} is longer than the VM's jumps can reach"
         )),
+        Stop::TooManyRegisters { name } => Some(format!(
+            "the function {name} needs more registers than the VM can name"
+        )),
         Stop::BadProgram(what) => Some(format!(
             "internal error: {what}. This is a bug in the compiler, not in the program"
         )),

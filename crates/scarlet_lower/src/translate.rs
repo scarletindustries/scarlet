@@ -188,7 +188,7 @@ impl Fx {
 
     fn fresh(&mut self) -> BindingId {
         let id = BindingId(self.next);
-        self.next += 1;
+        self.next = self.next.saturating_add(1);
         id
     }
 }
@@ -667,7 +667,7 @@ impl Tx<'_, '_, '_, '_> {
         // Everything runs in the order it was written, the spread among the
         // arguments.
         let result = self.final_ty(e.ty)?;
-        let mut lets = Vec::with_capacity(args.len() + 1);
+        let mut lets = Vec::with_capacity(args.len().saturating_add(1));
         let mut fields: Vec<(usize, TypedExpr)> = Vec::new();
         let mut base_bind = None;
         for (i, a) in args.iter().enumerate() {

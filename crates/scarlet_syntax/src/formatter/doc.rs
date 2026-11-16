@@ -321,7 +321,11 @@ pub(crate) fn join(items: Vec<Doc>, sep: Doc) -> Doc {
         DocInner::Nil => &[],
         _ => std::slice::from_ref(&sep),
     };
-    let mut out = Vec::with_capacity(items.len() + (items.len() - 1) * sep_parts.len());
+    let mut out = Vec::with_capacity(
+        items
+            .len()
+            .saturating_mul(sep_parts.len().saturating_add(1)),
+    );
     for (i, it) in items.into_iter().enumerate() {
         if i > 0 {
             out.extend_from_slice(sep_parts);
@@ -541,24 +545,24 @@ pub(crate) fn layout_keeping_flat(doc: &Doc, max_width: isize, flat: &KeepFlat) 
             DocInner::Nil => {}
             DocInner::Text { s, width } => {
                 out.push_str(s);
-                col += width;
+                col = col.saturating_add(*width);
             }
             DocInner::Break {
                 flat: flat_text,
                 trailing_comma,
             } => {
                 let id = BreakId(next_break);
-                next_break += 1;
+                next_break = next_break.saturating_add(1);
                 if mode == Mode::Flat || flat.contains(id) {
                     out.push_str(flat_text.text());
-                    col += flat_text.width();
+                    col = col.saturating_add(flat_text.width());
                 } else {
                     if *trailing_comma {
                         out.push(',');
                     }
                     emit_newline(&mut out, indent);
                     newlines.push(Some(id));
-                    col = indent * TAB_WIDTH;
+                    col = indent.saturating_mul(TAB_WIDTH);
                 }
             }
             DocInner::HardLine(n) => {
@@ -569,7 +573,7 @@ pub(crate) fn layout_keeping_flat(doc: &Doc, max_width: isize, flat: &KeepFlat) 
                     out.push('\n');
                 }
                 emit_newline(&mut out, indent);
-                col = indent * TAB_WIDTH;
+                col = indent.saturating_mul(TAB_WIDTH);
             }
             DocInner::RawNewline => {
                 // No indent: the continuation line renders verbatim.
@@ -578,11 +582,11 @@ pub(crate) fn layout_keeping_flat(doc: &Doc, max_width: isize, flat: &KeepFlat) 
                 col = 0;
             }
             DocInner::Nest(i, inner) => {
-                work.push_front((indent + i, mode, inner));
+                work.push_front((indent.saturating_add(*i), mode, inner));
             }
             DocInner::NestIfBroken(i, inner) => {
                 let indent = if mode == Mode::Broken {
-                    indent + i
+                    indent.saturating_add(*i)
                 } else {
                     indent
                 };
@@ -605,7 +609,7 @@ pub(crate) fn layout_keeping_flat(doc: &Doc, max_width: isize, flat: &KeepFlat) 
                     // takes the all-fits case from O(D^2) to O(D).
                     Mode::Flat
                 } else if fits(
-                    max_width - col,
+                    max_width.saturating_sub(col),
                     (indent, Mode::Flat, inner),
                     &work,
                     &mut probe,
@@ -689,9 +693,9 @@ fn fits<'d>(
         };
         match &d.0 {
             DocInner::Nil => {}
-            DocInner::Text { width, .. } => remaining -= width,
+            DocInner::Text { width, .. } => remaining = remaining.saturating_sub(*width),
             DocInner::Break { flat, .. } => match mode {
-                Mode::Flat => remaining -= flat.width(),
+                Mode::Flat => remaining = remaining.saturating_sub(flat.width()),
                 Mode::Broken => return true,
             },
             DocInner::HardLine(_) | DocInner::RawNewline => match mode {
@@ -700,7 +704,7 @@ fn fits<'d>(
                 Mode::Flat => return false,
                 Mode::Broken => return true,
             },
-            DocInner::Nest(i, inner) => probe.push((indent + i, mode, inner, own)),
+            DocInner::Nest(i, inner) => probe.push((indent.saturating_add(*i), mode, inner, own)),
             // Nesting never affects a width probe: probes stop at the first
             // newline.
             DocInner::NestIfBroken(_, inner) => probe.push((indent, mode, inner, own)),

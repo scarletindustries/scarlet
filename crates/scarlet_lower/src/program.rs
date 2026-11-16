@@ -480,7 +480,7 @@ impl<'m> Symbols<'m> {
             let g = i32::try_from(*n)
                 .map(GlobalSlot)
                 .map_err(|_| LinkError::TooMany(Table::Globals))?;
-            *n += 1;
+            *n = n.checked_add(1).ok_or(LinkError::TooMany(Table::Globals))?;
             Ok::<_, LinkError>(g)
         };
         for &m in modules {

@@ -114,11 +114,11 @@ fn arrays(heap: &Heap, a: Seq, b: Seq, todo: &mut Vec<(Value, Value)>) -> bool {
     }
     match (a, b) {
         (Seq::Range { start: x, .. }, Seq::Range { start: y, .. }) => x == y || a.len(heap) == 0,
-        (Seq::Tree(t), Seq::Range { start, .. }) | (Seq::Range { start, .. }, Seq::Tree(t)) => {
+        (Seq::Tree(t), Seq::Range { start, end }) | (Seq::Range { start, end }, Seq::Tree(t)) => {
             array::elements(heap, t)
                 .into_iter()
-                .zip(0i128..)
-                .all(|(v, i)| is_int(heap, v, i128::from(start) + i))
+                .zip(start..end)
+                .all(|(v, n)| is_int(heap, v, i128::from(n)))
         }
         (Seq::Tree(x), Seq::Tree(y)) => {
             queue(todo, array::elements(heap, x), array::elements(heap, y))

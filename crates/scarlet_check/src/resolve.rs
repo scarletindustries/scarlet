@@ -552,7 +552,9 @@ impl<'r, 'a> Resolver<'r, 'a> {
             let mut tail = None;
             for (i, node) in b.body.iter().enumerate() {
                 match node {
-                    ast::Node::Expression(e) if i + 1 == b.body.len() => tail = Some(r.boxed(e, w)),
+                    ast::Node::Expression(e) if i.saturating_add(1) == b.body.len() => {
+                        tail = Some(r.boxed(e, w))
+                    }
                     node => stmts.extend(r.node(node, w)),
                 }
             }
@@ -931,7 +933,9 @@ impl<'r, 'a> Resolver<'r, 'a> {
                     }
                     spread = Some((written, e));
                 }
-                ast::CallArg::Positional(_) | ast::CallArg::Labeled { .. } => written += 1,
+                ast::CallArg::Positional(_) | ast::CallArg::Labeled { .. } => {
+                    written = written.saturating_add(1);
+                }
             }
         }
         let items: Vec<(Option<&str>, (usize, Span))> = args
@@ -1182,7 +1186,7 @@ pub(crate) fn number(n: &ast::NumberLiteral, report: &mut Report) -> Number {
 /// edit distance up to `max(len, 3) / 3`.
 fn closest_name<'n>(name: &str, candidates: impl Iterator<Item = &'n str>) -> Option<&'n str> {
     let mut best = None;
-    let mut best_dist = std::cmp::max(name.chars().count(), 3) / 3 + 1;
+    let mut best_dist = (std::cmp::max(name.chars().count(), 3) / 3).saturating_add(1);
     for c in candidates {
         let d = levenshtein(name, c);
         if d < best_dist {
@@ -1200,12 +1204,17 @@ fn levenshtein(a: &str, b: &str) -> usize {
     let mut prev: Vec<usize> = (0..=b.len()).collect();
     let mut dist = b.len();
     for (i, ca) in a.chars().enumerate() {
-        let mut left = i + 1;
-        let mut curr = Vec::with_capacity(b.len() + 1);
+        // Distances never exceed the longer string's length, so they never
+        // saturate.
+        let mut left = i.saturating_add(1);
+        let mut curr = Vec::with_capacity(b.len().saturating_add(1));
         curr.push(left);
         for ((&cb, &diag), &up) in b.iter().zip(&prev).zip(prev.iter().skip(1)) {
             let cost = usize::from(ca != cb);
-            left = (up + 1).min(left + 1).min(diag + cost);
+            left = up
+                .saturating_add(1)
+                .min(left.saturating_add(1))
+                .min(diag.saturating_add(cost));
             curr.push(left);
         }
         dist = left;

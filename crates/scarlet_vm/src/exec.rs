@@ -122,7 +122,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     func: frame.body.name.clone(),
                 }));
             };
-            frame.pc += 1;
+            // `pc` names an instruction, so one past it is exact.
+            frame.pc = frame.pc.saturating_add(1);
             let base = frame.base;
             match instr {
                 Instr::Const { dst, value } => self.set(base, *dst, *value),
@@ -284,7 +285,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 Instr::Call { dst, func, args } => {
                     let callee = self.body(*func)?;
                     let values = self.call_args(base, args);
-                    let new_base = base + frame.body.regs as usize;
+                    let new_base = frame_end(base, frame.body);
                     self.enter(callee, new_base, &values);
                     frames.push(Frame {
                         body: callee,
@@ -298,7 +299,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     let values = self.call_args(base, args);
                     let body = frame.body;
                     let env = self.share(frame.env);
-                    let new_base = base + body.regs as usize;
+                    let new_base = frame_end(base, body);
                     self.enter(body, new_base, &values);
                     frames.push(Frame {
                         body,
@@ -311,7 +312,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 Instr::CallValue { dst, callee, args } => {
                     let (body, env) = self.callee(self.get(base, *callee), args.len())?;
                     let values = self.call_args(base, args);
-                    let new_base = base + frame.body.regs as usize;
+                    let new_base = frame_end(base, frame.body);
                     self.enter(body, new_base, &values);
                     frames.push(Frame {
                         body,
@@ -679,7 +680,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
         match i {
             Intrinsic::BinaryFromString => {
                 let text = self.text_of(v)?;
-                let cell = binary::make(&mut self.heap, &text, text.len() as u64 * 8);
+                let cell = binary::from_bytes(&mut self.heap, &text);
                 Ok(Value::cell(cell.map_err(full)?))
             }
             Intrinsic::BinaryToString => {
@@ -734,7 +735,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 } else {
                     hay.get(from..)
                         .and_then(|rest| rest.windows(needle.len()).position(|w| w == needle))
-                        .map(|at| from + at)
+                        .map(|at| from.saturating_add(at))
                 };
                 match found {
                     Some(at) => {
@@ -773,9 +774,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             Intrinsic::BinaryToAsciiLower => {
                 let mut bytes = binary::whole_bytes(&self.heap, self.binary(v)?);
                 bytes.make_ascii_lowercase();
-                let len = bytes.len() as u64 * 8;
                 Ok(Value::cell(
-                    binary::make(&mut self.heap, &bytes, len).map_err(full)?,
+                    binary::from_bytes(&mut self.heap, &bytes).map_err(full)?,
                 ))
             }
             // This writes lowercase hex, with a `-` before a negative
@@ -786,8 +786,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     Int::Big(n) => n,
                 };
                 let text = n.to_str_radix(self.radix(arg(self, 1))?);
-                let len = text.len() as u64 * 8;
-                let cell = binary::make(&mut self.heap, text.as_bytes(), len);
+                let cell = binary::from_bytes(&mut self.heap, text.as_bytes());
                 Ok(Value::cell(cell.map_err(full)?))
             }
             // A negative bound, or one past the end, is `Err(Nil)`, never a
@@ -798,7 +797,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 let window = match (at, take) {
                     (Int::Small(at), Int::Small(take)) if at >= 0 && take >= 0 => {
                         let (at, take) = (at.unsigned_abs(), take.unsigned_abs());
-                        (at + take <= b.len).then_some((at, take))
+                        let fits = at.checked_add(take).is_some_and(|end| end <= b.len);
+                        fits.then_some((at, take))
                     }
                     _ => None,
                 };
@@ -940,7 +940,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 // an `i128` with room for the sign.
                 let ms = match SystemTime::now().duration_since(UNIX_EPOCH) {
                     Ok(after) => after.as_millis().cast_signed(),
-                    Err(before) => -before.duration().as_millis().cast_signed(),
+                    Err(before) => before.duration().as_millis().cast_signed().saturating_neg(),
                 };
                 bigint::int(&mut self.heap, ms).map_err(full)
             }
@@ -962,7 +962,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 if getrandom::fill(&mut bytes).is_err() {
                     return self.err_nil();
                 }
-                let cell = binary::make(&mut self.heap, &bytes, n as u64 * 8).map_err(full)?;
+                let cell = binary::from_bytes(&mut self.heap, &bytes).map_err(full)?;
                 self.ok(Value::cell(cell))
             }
             // The digests and the tag are over bytes. A binary that is not
@@ -1038,9 +1038,9 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 let types = self.json_types()?;
                 match parsed {
                     Ok((tape, arena)) => {
-                        let arena = binary::make(&mut self.heap, &arena, arena.len() as u64 * 8);
+                        let arena = binary::from_bytes(&mut self.heap, &arena);
                         let arena = Value::cell(arena.map_err(full)?);
-                        let tape = binary::make(&mut self.heap, &tape, tape.len() as u64 * 8);
+                        let tape = binary::from_bytes(&mut self.heap, &tape);
                         let tape = Value::cell(tape.map_err(full)?);
                         let root = Value::int(0).unwrap_or(Value::NIL);
                         let doc = self
@@ -1167,8 +1167,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 let off = self.offset(arg(self, 1), buf)?;
                 // Take enough to reach past the longest head there could be,
                 // and its empty lines.
-                let window =
-                    binary::bytes_from(&self.heap, buf, off as u64, http::MAX_HEAD as u64 + 16);
+                const WINDOW: u64 = http::MAX_HEAD as u64 + 16;
+                let window = binary::bytes_from(&self.heap, buf, off as u64, WINDOW);
                 match i {
                     Intrinsic::HttpParseHead => self.parsed_request(buf, off, &window),
                     _ => self.parsed_response(buf, off, &window),
@@ -1243,7 +1243,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 let code = self.int_of(v)?.to_string();
                 let reason = self.bytes_of(arg(self, 1))?;
                 let fields = self.headers(arg(self, 2))?;
-                let mut out = Vec::with_capacity(64 + reason.len() + fields.len() * 64);
+                let mut out = Vec::new();
                 out.extend_from_slice(b"HTTP/1.1 ");
                 out.extend_from_slice(code.as_bytes());
                 out.push(b' ');
@@ -1256,8 +1256,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     out.extend_from_slice(b"\r\n");
                 }
                 out.extend_from_slice(b"\r\n");
-                let cell =
-                    binary::make(&mut self.heap, &out, out.len() as u64 * 8).map_err(full)?;
+                let cell = binary::from_bytes(&mut self.heap, &out).map_err(full)?;
                 Ok(Value::cell(cell))
             }
             Intrinsic::IoReadFile => {
@@ -1265,8 +1264,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 match std::fs::read(path_of(&path)) {
                     Ok(bytes) if bytes.len() > binary::MAX_BYTES => Err(Stop::HeapFull),
                     Ok(bytes) => {
-                        let len = bytes.len() as u64 * 8;
-                        let cell = binary::make(&mut self.heap, &bytes, len).map_err(full)?;
+                        let cell = binary::from_bytes(&mut self.heap, &bytes).map_err(full)?;
                         self.ok(Value::cell(cell))
                     }
                     Err(e) => self.io_error(&e, &path),
@@ -1399,7 +1397,12 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             Intrinsic::FloatFromDecimal => {
                 let units = self.int_of(v)?.big();
                 let scale = self.int_of(arg(self, 1))?.big();
-                let text = format!("{units}e{}", -scale);
+                #[expect(
+                    clippy::arithmetic_side_effects,
+                    reason = "an Int grows instead of overflowing"
+                )]
+                let exponent = -scale;
+                let text = format!("{units}e{exponent}");
                 let f = text
                     .parse::<f64>()
                     .map_err(|_| Stop::broken(Broken::NotAFloat { text }))?;
@@ -1450,7 +1453,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             }
             BitsOp::FromString => {
                 let text = self.text_of(arg(self, 0))?;
-                let cell = binary::make(&mut self.heap, &text, text.len() as u64 * 8);
+                let cell = binary::from_bytes(&mut self.heap, &text);
                 Ok(Value::cell(cell.map_err(full)?))
             }
             BitsOp::Concat => {
@@ -1844,9 +1847,11 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
         off: usize,
         range: &std::ops::Range<usize>,
     ) -> Result<Value, Stop> {
-        let from = (off + range.start) as u64 * 8;
-        let cell =
-            binary::slice(&mut self.heap, buf, from, range.len() as u64 * 8).map_err(full)?;
+        // A position past what a word counts in bits is past any binary.
+        let bits = |n: Option<usize>| n.and_then(binary::bit_len).ok_or(Stop::HeapFull);
+        let from = bits(off.checked_add(range.start))?;
+        let len = bits(Some(range.len()))?;
+        let cell = binary::slice(&mut self.heap, buf, from, len).map_err(full)?;
         Ok(Value::cell(cell))
     }
 
@@ -1892,7 +1897,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
 
     /// The offset `off + n` into `buf`, as an Int.
     fn consumed(&mut self, off: usize, n: usize) -> Result<Value, Stop> {
-        bigint::int(&mut self.heap, off + n).map_err(full)
+        // Both are offsets into one buffer, so their sum is exact.
+        bigint::int(&mut self.heap, off.saturating_add(n)).map_err(full)
     }
 
     /// `h1.Parsed`, for the request head at byte `off` of `buf`, whose bytes
@@ -1972,7 +1978,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 for p in &pieces {
                     body.extend_from_slice(bytes.get(p.clone()).unwrap_or(&[]));
                 }
-                let body = binary::make(&mut self.heap, &body, body.len() as u64 * 8);
+                let body = binary::from_bytes(&mut self.heap, &body);
                 let body = Value::cell(body.map_err(full)?);
                 let trailer_fields = self.fields(buf, off, &trailers)?;
                 let consumed = self.consumed(off, trailers.end)?;
@@ -1992,7 +1998,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
 
     /// `Ok` of a new binary holding `bytes`.
     fn ok_bytes(&mut self, bytes: &[u8]) -> Result<Value, Stop> {
-        let cell = binary::make(&mut self.heap, bytes, bytes.len() as u64 * 8).map_err(full)?;
+        let cell = binary::from_bytes(&mut self.heap, bytes).map_err(full)?;
         self.ok(Value::cell(cell))
     }
 
@@ -2016,7 +2022,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
         match s {
             Seq::Tree(a) => Ok(array::get(&self.heap, a, i).map(|v| self.share(v))),
             Seq::Range { start, end } if (i as u64) < array::range_len(start, end) => {
-                let n = i128::from(start) + i as i128;
+                // An i128 holds any i64 plus any index, so this is exact.
+                let n = i128::from(start).saturating_add(i as i128);
                 Ok(Some(bigint::int(&mut self.heap, n).map_err(full)?))
             }
             Seq::Range { .. } => Ok(None),
@@ -2158,7 +2165,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     /// Whatever held registers from `base` on is released first.
     fn enter(&mut self, body: &Body, base: usize, args: &[Value]) {
         self.leave(base);
-        self.regs.resize(base + body.regs as usize, Value::NIL);
+        self.regs.resize(frame_end(base, body), Value::NIL);
         for (param, arg) in body.params.iter().zip(args) {
             self.set(base, *param, *arg);
         }
@@ -2180,7 +2187,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     /// register still owns it. So a cell the loop never takes is freed when
     /// the frame really ends.
     fn again(&mut self, body: &Body, base: usize, args: &[Value]) {
-        let top = base + body.regs as usize;
+        let top = frame_end(base, body);
         while self.regs.len() > top {
             if let Some(v) = self.regs.pop() {
                 self.release(v);
@@ -2200,7 +2207,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
 
     fn get(&self, base: usize, r: Reg) -> Value {
         self.regs
-            .get(base + r.0 as usize)
+            .get(base..)
+            .and_then(|frame| frame.get(r.0 as usize))
             .copied()
             .unwrap_or(Value::NIL)
     }
@@ -2208,7 +2216,11 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     /// Put `v` in register `r`, whose old value is released. `v`'s reference
     /// passes to the register.
     fn set(&mut self, base: usize, r: Reg, v: Value) {
-        if let Some(slot) = self.regs.get_mut(base + r.0 as usize) {
+        if let Some(slot) = self
+            .regs
+            .get_mut(base..)
+            .and_then(|f| f.get_mut(r.0 as usize))
+        {
             let old = std::mem::replace(slot, v);
             self.release(old);
         }
@@ -2217,7 +2229,11 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     /// The value in `r`, moved out. The register is emptied and gives up
     /// nothing, so its one reference passes to the caller.
     fn take(&mut self, base: usize, r: Reg) -> Value {
-        match self.regs.get_mut(base + r.0 as usize) {
+        match self
+            .regs
+            .get_mut(base..)
+            .and_then(|f| f.get_mut(r.0 as usize))
+        {
             Some(slot) => std::mem::replace(slot, Value::NIL),
             None => Value::NIL,
         }
@@ -2372,6 +2388,10 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
 /// `x` shifted `count` bits, left (times 2^count, exactly) or right (divided
 /// by 2^count, rounded down). A left shift past what an Int can hold is a
 /// full heap. A right shift past every bit leaves 0 or -1, by `x`'s sign.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "an Int grows instead of overflowing, and its size is checked first"
+)]
 fn shift(
     x: num_bigint::BigInt,
     left: bool,
@@ -2426,6 +2446,13 @@ struct Doc {
 /// lost on the way.
 fn path_of(text: &[u8]) -> PathBuf {
     PathBuf::from(String::from_utf8_lossy(text).into_owned())
+}
+
+/// Where the registers of a frame of `body` at `base` end. `base` is no more
+/// than the register stack's length, which a `Vec` keeps under `isize::MAX`,
+/// and a frame has at most `u32::MAX` registers, so this is exact.
+fn frame_end(base: usize, body: &Body) -> usize {
+    base.saturating_add(body.regs as usize)
 }
 
 fn full(_: Full) -> Stop {

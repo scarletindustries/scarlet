@@ -13,6 +13,7 @@
         clippy::cast_possible_truncation,
         clippy::cast_possible_wrap,
         clippy::cast_sign_loss,
+        clippy::arithmetic_side_effects,
     )
 )]
 #![deny(unsafe_code)]
@@ -304,8 +305,8 @@ fn render_fmt_diagnostic<P: diagnostic::Problem>(
     path: impl std::fmt::Display,
     d: &diagnostic::Diagnostic<P>,
 ) -> String {
-    let line = d.span.start_line + 1;
-    let col = d.span.start_column + 1;
+    let line = d.span.start_line.saturating_add(1);
+    let col = d.span.start_column.saturating_add(1);
     format!("{path}:{line}:{col}: {}", d.problem)
 }
 
@@ -321,8 +322,8 @@ fn dump_tokens(src: &str) {
     for d in &diagnostics {
         eprintln!(
             "Scan error: {}:{}: {}",
-            d.span.start_line + 1,
-            d.span.start_column + 1,
+            d.span.start_line.saturating_add(1),
+            d.span.start_column.saturating_add(1),
             d.problem
         );
     }
@@ -726,7 +727,7 @@ fn cmd_upgrade(version: Option<String>) -> Result<(), UpgradeError> {
             path: tmp_path.clone(),
             source: e,
         })?;
-        written += n as u64;
+        written = written.saturating_add(n as u64);
         if len > 0 {
             eprint!("\r  {:>6.1} / {:.1} MB", mb(written), mb(len));
         } else {

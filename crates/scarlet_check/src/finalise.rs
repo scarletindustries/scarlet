@@ -173,7 +173,7 @@ impl Finished<'_, '_> {
                                 .field_types(i, args)
                                 .unwrap_or_default()
                                 .iter()
-                                .map(|f| self.space(f, depth - 1))
+                                .map(|f| self.space(f, depth.saturating_sub(1)))
                                 .collect();
                             (v.name.to_string(), fields)
                         })
@@ -192,7 +192,7 @@ impl Finished<'_, '_> {
             .map(|a| unroll_depth(&a.pattern))
             .max()
             .unwrap_or(0)
-            + 1;
+            .saturating_add(1);
         let Some(ty) = self.get(subject.ty, subject.span, report) else {
             return;
         };
@@ -223,7 +223,7 @@ impl Finished<'_, '_> {
         if matches!(pattern.kind, PatternKind::Bind(_) | PatternKind::Wild) || has_error(pattern) {
             return;
         }
-        let depth = unroll_depth(pattern) + 1;
+        let depth = unroll_depth(pattern).saturating_add(1);
         let Some(ty) = self.get(value.ty, value.span, report) else {
             return;
         };

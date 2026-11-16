@@ -183,9 +183,9 @@ impl ResolvedPool {
     /// The children of `t`'s node `s`. Only this pool makes an `RSlice`, so
     /// `s` misses only when `t` came from a different pool.
     fn children(&self, t: RTy, s: RSlice) -> Result<&[RTy], ForeignRTy> {
-        let lo = s.start as usize;
         self.children
-            .get(lo..lo + s.len as usize)
+            .get(s.start as usize..)
+            .and_then(|rest| rest.get(..s.len as usize))
             .ok_or(ForeignRTy(t))
     }
 

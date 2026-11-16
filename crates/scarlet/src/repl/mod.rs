@@ -291,7 +291,7 @@ impl Session {
             println!(
                 "{}  and {} more: type `{alias}::` and press Tab to see them all{}",
                 p.dim,
-                members.len() - SHOWN,
+                members.len().saturating_sub(SHOWN),
                 p.reset
             );
         }

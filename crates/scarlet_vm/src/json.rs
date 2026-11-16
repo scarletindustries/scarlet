@@ -98,7 +98,7 @@ impl Tape<'_> {
     fn node(&self, i: usize) -> Option<TapeNode> {
         let k = u64::try_from(i).ok()?.checked_mul(2)?;
         let w0 = binary::word(self.heap, self.tape, k)?;
-        let payload = binary::word(self.heap, self.tape, k + 1)?;
+        let payload = binary::word(self.heap, self.tape, k.checked_add(1)?)?;
         let skip = usize::try_from(w0 >> 32).ok()?;
         // A zero skip would let a walk stand still forever.
         if skip == 0 {
@@ -426,7 +426,7 @@ fn build_tape(nodes: &[Node<'_>]) -> Result<(Vec<u8>, Vec<u8>), TooLarge> {
     if nodes.len() > u32::MAX as usize {
         return Err(TooLarge::Nodes);
     }
-    let mut tape = Vec::with_capacity(nodes.len() * 16);
+    let mut tape = Vec::with_capacity(nodes.len().saturating_mul(16));
     let mut arena: Vec<u8> = Vec::new();
     for n in nodes {
         let (kind, skip, payload): (u8, u64, u64) = match n {
@@ -439,9 +439,12 @@ fn build_tape(nodes: &[Node<'_>]) -> Result<(Vec<u8>, Vec<u8>), TooLarge> {
                 (K_STR, 1, (at as u64) << 32 | s.len() as u64)
             }
             // `count` is the nodes after this one that belong to it, so the
-            // subtree is one more. An empty container's count is 0.
-            Node::Object { len, count } => (K_OBJECT, *count as u64 + 1, *len as u64),
-            Node::Array { len, count } => (K_ARRAY, *count as u64 + 1, *len as u64),
+            // subtree is one more. An empty container's count is 0. There are
+            // fewer than `u32::MAX` nodes, so one more is exact.
+            Node::Object { len, count } => {
+                (K_OBJECT, (*count as u64).saturating_add(1), *len as u64)
+            }
+            Node::Array { len, count } => (K_ARRAY, (*count as u64).saturating_add(1), *len as u64),
             Node::Static(StaticNode::Null) => (K_NULL, 1, 0),
             Node::Static(StaticNode::Bool(b)) => (K_BOOL, 1, u64::from(*b)),
             Node::Static(StaticNode::I64(i)) => (K_INT, 1, i.cast_unsigned()),
@@ -477,19 +480,21 @@ fn first_lone_surrogate(bytes: &[u8]) -> Option<usize> {
         let s = std::str::from_utf8(b.get(..4)?).ok()?;
         u32::from_str_radix(s, 16).ok()
     }
+    // `i` only moves forward, and a step past the end ends the scan, so a
+    // step that saturates means the same as any other past the end.
     let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes.get(i) != Some(&b'\\') {
-            i += memchr::memchr(b'\\', bytes.get(i..)?)?;
+    while let Some(at) = bytes.get(i..).filter(|at| !at.is_empty()) {
+        if at.first() != Some(&b'\\') {
+            i = i.saturating_add(memchr::memchr(b'\\', at)?);
             continue;
         }
-        if bytes.get(i + 1) == Some(&b'u') {
-            match bytes.get(i + 2..).and_then(hex4) {
+        if at.get(1) == Some(&b'u') {
+            match at.get(2..).and_then(hex4) {
                 // A high surrogate is legal only right before a low one. Both
                 // are consumed, so the low half is never taken for a lone one.
                 Some(hi @ 0xD800..=0xDBFF) => {
                     let _ = hi;
-                    let tail = bytes.get(i + 6..).unwrap_or(&[]);
+                    let tail = at.get(6..).unwrap_or(&[]);
                     let paired = tail.starts_with(b"\\u")
                         && tail
                             .get(2..)
@@ -498,16 +503,16 @@ fn first_lone_surrogate(bytes: &[u8]) -> Option<usize> {
                     if !paired {
                         return Some(i);
                     }
-                    i += 12;
+                    i = i.saturating_add(12);
                 }
                 Some(0xDC00..=0xDFFF) => return Some(i),
-                _ => i += 6,
+                _ => i = i.saturating_add(6),
             }
             continue;
         }
         // This is any other escape. Consuming both bytes is what stops an
         // escaped backslash being read as the start of one.
-        i += 2;
+        i = i.saturating_add(2);
     }
     None
 }
@@ -558,40 +563,40 @@ pub(crate) fn write_float(out: &mut Vec<u8>, f: f64) {
 /// is not a number would make the whole document fail to parse at the far
 /// end, for a reason the sender cannot see.
 pub(crate) fn is_number(s: &[u8]) -> bool {
-    let mut i = 0usize;
-    let digits = |i: &mut usize| {
-        let start = *i;
-        while matches!(s.get(*i), Some(b'0'..=b'9')) {
-            *i += 1;
-        }
-        *i > start
-    };
-    if s.get(i) == Some(&b'-') {
-        i += 1;
+    number_rest(s).is_some_and(<[u8]>::is_empty)
+}
+
+/// What follows the longest JSON number at the start of `s`, or `None` when
+/// `s` does not start with one.
+fn number_rest(s: &[u8]) -> Option<&[u8]> {
+    /// `s` after one or more digits, or `None` when it starts with none.
+    fn digits(s: &[u8]) -> Option<&[u8]> {
+        let n = s.iter().take_while(|b| b.is_ascii_digit()).count();
+        if n == 0 { None } else { s.get(n..) }
     }
+    let s = s.strip_prefix(b"-").unwrap_or(s);
     // Take a lone `0`, or a digit from 1 to 9 and the digits after it. A
     // leading zero is not JSON, so `01` fails on the end check.
-    if s.get(i) == Some(&b'0') {
-        i += 1;
-    } else if !digits(&mut i) {
-        return false;
-    }
-    if s.get(i) == Some(&b'.') {
-        i += 1;
-        if !digits(&mut i) {
-            return false;
-        }
-    }
-    if matches!(s.get(i), Some(b'e' | b'E')) {
-        i += 1;
-        if matches!(s.get(i), Some(b'+' | b'-')) {
-            i += 1;
-        }
-        if !digits(&mut i) {
-            return false;
-        }
-    }
-    i == s.len()
+    let s = match s.strip_prefix(b"0") {
+        Some(rest) => rest,
+        None => digits(s)?,
+    };
+    let s = match s.strip_prefix(b".") {
+        Some(rest) => digits(rest)?,
+        None => s,
+    };
+    Some(
+        match s.strip_prefix(b"e").or_else(|| s.strip_prefix(b"E")) {
+            Some(rest) => {
+                let rest = rest
+                    .strip_prefix(b"+")
+                    .or_else(|| rest.strip_prefix(b"-"))
+                    .unwrap_or(rest);
+                digits(rest)?
+            }
+            None => s,
+        },
+    )
 }
 
 #[cfg(test)]

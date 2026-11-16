@@ -91,7 +91,7 @@ fn format_diagnostic_with_lines<P: Problem>(
 
     let file_path = view.file_path;
     let lines = &view.lines;
-    let display_line = d.span.start_line + 1;
+    let display_line = d.span.start_line.saturating_add(1);
     let source_line = get_source_line(lines, display_line);
     // Columns are never negative. A span that says otherwise is drawn from
     // the start of its line.

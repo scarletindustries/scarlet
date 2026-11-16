@@ -102,7 +102,7 @@ fn display_width(s: &str) -> usize {
 /// One `label  description` row. `width` is measured on the uncoloured label so
 /// ANSI codes do not skew alignment.
 fn row(out: &mut String, p: &Palette, label: &str, desc: &str, width: usize) {
-    let pad = " ".repeat(width.saturating_sub(display_width(label)) + 2);
+    let pad = " ".repeat(width.saturating_sub(display_width(label)).saturating_add(2));
     let _ = write!(out, "  {label}{pad}");
     if desc.is_empty() {
         out.push('\n');

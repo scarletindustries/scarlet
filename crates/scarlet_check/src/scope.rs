@@ -110,7 +110,7 @@ impl Scope {
             .iter()
             .enumerate()
             .rev()
-            .map(|(i, f)| (i + 1, f))
+            .map(|(i, f)| (i.saturating_add(1), f))
             .chain(std::iter::once((0, &self.module)));
         for (i, f) in innermost_first {
             if let Some(binder) = f.lookup(name) {

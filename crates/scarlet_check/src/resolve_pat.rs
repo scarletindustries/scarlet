@@ -95,7 +95,7 @@ impl Resolver<'_, '_> {
                             if seen_spread {
                                 self.report.add(*ssp, CheckError::TwoSpreads);
                                 ok = false;
-                            } else if i != elements.len() - 1 {
+                            } else if i.saturating_add(1) != elements.len() {
                                 self.report.add(*ssp, CheckError::SpreadNotLast);
                                 ok = false;
                             }

@@ -53,13 +53,17 @@ pub(crate) fn op(heap: &mut Heap, op: IntOp, a: Int, b: Int) -> Result<Value, Fu
         return Ok(v);
     }
     let (a, b) = (a.big(), b.big());
+    #[expect(
+        clippy::arithmetic_side_effects,
+        reason = "an Int grows instead of overflowing"
+    )]
     let n = match op {
         IntOp::Add => a + b,
         IntOp::Sub => a - b,
         IntOp::Mul => a * b,
-        // `num-bigint` panics on a zero divisor, so the zero rules come first.
-        IntOp::Div if b.is_zero() => BigInt::zero(),
-        IntOp::Div => a / b,
+        // `num-bigint` panics on a zero divisor, so the zero rules come
+        // first. `checked_div` is `None` only for that divisor.
+        IntOp::Div => a.checked_div(&b).unwrap_or_else(BigInt::zero),
         IntOp::Rem if b.is_zero() => a,
         IntOp::Rem => a % b,
         IntOp::Eq => return Ok(Value::bool(a == b)),
@@ -78,7 +82,12 @@ pub(crate) fn neg(heap: &mut Heap, a: Int) -> Result<Value, Full> {
     {
         return Ok(v);
     }
-    value(heap, -a.big())
+    #[expect(
+        clippy::arithmetic_side_effects,
+        reason = "an Int grows instead of overflowing"
+    )]
+    let n = -a.big();
+    value(heap, n)
 }
 
 /// The fast path, or `None` when the answer does not fit a small Int.

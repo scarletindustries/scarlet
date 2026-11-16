@@ -173,12 +173,12 @@ fn ctor<'t>(
             todo.push(Piece::Text(close));
             todo.push(Piece::Line(n));
             for (i, f) in fields.iter().enumerate().rev() {
-                todo.push(Piece::Value(*f, Layout::Open(n + 1)));
+                todo.push(Piece::Value(*f, Layout::Open(n.saturating_add(1))));
                 if record {
                     todo.push(Piece::Text(": "));
                     todo.push(Piece::Text(label(i)));
                 }
-                todo.push(Piece::Line(n + 1));
+                todo.push(Piece::Line(n.saturating_add(1)));
                 if i > 0 {
                     todo.push(Piece::Text(","));
                 }
@@ -228,7 +228,7 @@ fn tuple<'t>(
                 show(heap, code, *e, out)?;
             }
             out.push(b')');
-            if out.len() - start <= LINE {
+            if out.len().saturating_sub(start) <= LINE {
                 return Ok(());
             }
             out.truncate(start);
@@ -242,8 +242,8 @@ fn tuple<'t>(
         Some(n) => {
             todo.push(Piece::Line(n));
             for (i, e) in elements.iter().enumerate().rev() {
-                todo.push(Piece::Value(*e, Layout::Open(n + 1)));
-                todo.push(Piece::Line(n + 1));
+                todo.push(Piece::Value(*e, Layout::Open(n.saturating_add(1))));
+                todo.push(Piece::Line(n.saturating_add(1)));
                 if i > 0 {
                     todo.push(Piece::Text(","));
                 }
@@ -286,8 +286,8 @@ fn array<'t>(
             todo.push(Piece::Text("]"));
             todo.push(Piece::Line(n));
             for (i, e) in elements.iter().enumerate().rev() {
-                todo.push(Piece::Value(*e, Layout::Open(n + 1)));
-                todo.push(Piece::Line(n + 1));
+                todo.push(Piece::Value(*e, Layout::Open(n.saturating_add(1))));
+                todo.push(Piece::Line(n.saturating_add(1)));
                 if i > 0 {
                     todo.push(Piece::Text(","));
                 }
@@ -315,7 +315,8 @@ fn range(heap: &Heap, cell: Cell, layout: Layout, out: &mut Vec<u8>) -> Result<(
     };
     let count = array::range_len(start, end);
     let item = |i: usize, out: &mut Vec<u8>| {
-        let n = i128::from(start) + i as i128;
+        // An i128 holds any i64 plus any index, so this is exact.
+        let n = i128::from(start).saturating_add(i as i128);
         out.extend_from_slice(n.to_string().as_bytes());
         Ok(())
     };
@@ -358,25 +359,25 @@ fn six_to_a_line(
             out.extend_from_slice(b", ");
         }
         item(i, out)?;
-        if out.len() - start > LINE {
+        if out.len().saturating_sub(start) > LINE {
             fits = false;
             break;
         }
     }
     if fits {
         out.push(b']');
-        if out.len() - start <= LINE {
+        if out.len().saturating_sub(start) <= LINE {
             return Ok(());
         }
     }
     out.truncate(start);
     out.push(b'[');
-    line(out, n + 1);
+    line(out, n.saturating_add(1));
     for i in 0..count {
         if i > 0 {
             out.extend_from_slice(b", ");
             if i % 6 == 0 {
-                line(out, n + 1);
+                line(out, n.saturating_add(1));
             }
         }
         item(i, out)?;

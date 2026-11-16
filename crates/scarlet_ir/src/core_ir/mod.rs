@@ -805,12 +805,12 @@ impl fmt::Display for Indented<'_> {
                 }
                 CoreExpr::LetJoin { bind, join, body } => {
                     writeln!(f, "letj {bind} =")?;
-                    Indented(join, depth + 1).fmt(f)?;
+                    Indented(join, depth.saturating_add(1)).fmt(f)?;
                     cur = body;
                 }
                 CoreExpr::LetCont { id, cont, body } => {
                     writeln!(f, "letc {id} =")?;
-                    Indented(cont, depth + 1).fmt(f)?;
+                    Indented(cont, depth.saturating_add(1)).fmt(f)?;
                     cur = body;
                 }
                 CoreExpr::Drop { local, shape, body } => {
@@ -833,17 +833,17 @@ impl fmt::Display for Indented<'_> {
                     ty,
                 } => {
                     writeln!(f, "if {cond} :{ty}")?;
-                    Indented(then, depth + 1).fmt(f)?;
+                    Indented(then, depth.saturating_add(1)).fmt(f)?;
                     pad(f, depth)?;
                     writeln!(f, "else")?;
-                    return Indented(els, depth + 1).fmt(f);
+                    return Indented(els, depth.saturating_add(1)).fmt(f);
                 }
                 CoreExpr::Match { scrut, arms, ty } => {
                     writeln!(f, "match {scrut} :{ty}")?;
                     for (pat, body) in arms {
-                        pad(f, depth + 1)?;
+                        pad(f, depth.saturating_add(1))?;
                         writeln!(f, "| {pat} ->")?;
-                        Indented(body, depth + 2).fmt(f)?;
+                        Indented(body, depth.saturating_add(2)).fmt(f)?;
                     }
                     return Ok(());
                 }

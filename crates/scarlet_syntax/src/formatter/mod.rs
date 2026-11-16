@@ -88,7 +88,8 @@ fn comment_census(tokens: &[Token]) -> HashMap<String, usize> {
     for tok in tokens {
         for t in &tok.leading_trivia {
             if let Some(c) = t.comment_text() {
-                *census.entry(c.trim_end().to_string()).or_default() += 1;
+                let n = census.entry(c.trim_end().to_string()).or_default();
+                *n = n.saturating_add(1);
             }
         }
     }
@@ -244,7 +245,7 @@ impl Pos {
     fn closing_brace_of(span: &Span) -> Pos {
         Pos {
             line: span.end_line,
-            column: span.end_column - 1,
+            column: span.end_column.saturating_sub(1),
         }
     }
 }
@@ -297,13 +298,13 @@ impl Formatter {
                     0
                 };
                 if emitted_any {
-                    parts.push(hardlines(1 + blanks));
+                    parts.push(hardlines(blanks.saturating_add(1)));
                 }
                 parts.push(text(c.trim_end().to_string()));
                 emitted_any = true;
                 newlines = 0;
             } else {
-                newlines += 1;
+                newlines = newlines.saturating_add(1);
             }
         }
         let blanks = if emitted_any {
@@ -312,7 +313,7 @@ impl Formatter {
             0
         };
         if emitted_any || !first {
-            parts.push(hardlines(1 + blanks));
+            parts.push(hardlines(blanks.saturating_add(1)));
         }
         doc::concat(parts)
     }

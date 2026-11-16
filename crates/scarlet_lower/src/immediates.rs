@@ -214,7 +214,7 @@ impl Immediates {
         };
         // Both indices came from `arms`, so they are in range. Taking the
         // later one first leaves the earlier one where it was.
-        arms.truncate(on_true.max(on_false) + 1);
+        arms.truncate(on_true.max(on_false).saturating_add(1));
         let mut take = |i: usize| {
             let (pat, body) = arms.swap_remove(i);
             match pat {

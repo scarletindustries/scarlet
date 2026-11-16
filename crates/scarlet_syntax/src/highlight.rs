@@ -84,7 +84,7 @@ fn paint(
         .collect();
     let pair = cursor.and_then(|c| matching_pair(tokens, &ranges, c));
 
-    let mut out = String::with_capacity(source.len() * 2);
+    let mut out = String::with_capacity(source.len().saturating_mul(2));
     let mut cursor_byte = 0usize;
     let mut interp = InterpState::default();
 
@@ -107,7 +107,7 @@ fn paint(
         let color = if pair.is_some_and(|(a, b)| a == i || b == i) {
             p.bold
         } else {
-            token_color(token, tokens.get(i + 1), interp.in_body(), p)
+            token_color(token, tokens.get(i.saturating_add(1)), interp.in_body(), p)
         };
         push_colored(&mut out, source_range(source, start..end)?, color, p);
 
@@ -143,7 +143,7 @@ impl InterpState {
             }
             Kind::PuncOpenBrace => {
                 if let Some(d) = self.depths.last_mut() {
-                    *d += 1;
+                    *d = d.saturating_add(1);
                 }
             }
             Kind::PuncCloseBrace => {
@@ -201,7 +201,10 @@ fn paint_gap(
         let (len, color) = if rest.starts_with("//") {
             (rest.find('\n').unwrap_or(rest.len()), p.dim)
         } else if rest.starts_with("/*") {
-            (rest.find("*/").map_or(rest.len(), |e| e + 2), p.dim)
+            (
+                rest.find("*/").map_or(rest.len(), |e| e.saturating_add(2)),
+                p.dim,
+            )
         } else {
             // Up to the next `/`, which is the only byte that can open a
             // comment.
@@ -209,18 +212,18 @@ fn paint_gap(
                 .bytes()
                 .skip(1)
                 .position(|b| b == b'/')
-                .map_or(rest.len(), |n| n + 1);
+                .map_or(rest.len(), |n| n.saturating_add(1));
             (next, "")
         };
         let (piece, tail) = rest
             .split_at_checked(len)
             .ok_or(HighlightError::NotCharRange {
                 start: at,
-                end: at + len,
+                end: at.saturating_add(len),
             })?;
         push_colored(out, piece, color, p);
         rest = tail;
-        at += len;
+        at = at.saturating_add(len);
     }
     Ok(())
 }
@@ -293,12 +296,12 @@ struct Offsets {
 impl Offsets {
     fn new(source: &str) -> Self {
         let mut line_starts = vec![0];
+        // Pair each byte with the offset just after it.
         line_starts.extend(
-            source
-                .bytes()
-                .enumerate()
+            (1..=source.len())
+                .zip(source.bytes())
                 .filter(|&(_, b)| b == b'\n')
-                .map(|(i, _)| i + 1),
+                .map(|(after, _)| after),
         );
         Offsets { line_starts }
     }
@@ -320,11 +323,7 @@ impl Offsets {
             .and_then(|l| self.line_starts.get(l).copied())
             .unwrap_or(source.len());
         let col = usize::try_from(column).unwrap_or(0);
-        let mut at = base.saturating_add(col).min(source.len());
-        while at > 0 && !source.is_char_boundary(at) {
-            at -= 1;
-        }
-        at
+        source.floor_char_boundary(base.saturating_add(col))
     }
 }
 

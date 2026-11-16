@@ -91,9 +91,7 @@ fn int_from_radix(sign: &str, digits: &str, radix: u32) -> Option<i64> {
     }
     // `from_str_radix` accepts a leading sign, so the i64::MIN hex/bin
     // spellings parse the same way decimal `-9223372036854775808` does.
-    let mut signed = String::with_capacity(sign.len() + digits.len());
-    signed.push_str(sign);
-    signed.push_str(digits);
+    let signed = format!("{sign}{digits}");
     i64::from_str_radix(&signed, radix).ok()
 }
 

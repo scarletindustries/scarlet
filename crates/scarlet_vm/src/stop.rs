@@ -22,6 +22,9 @@ pub enum Stop {
     /// The function `name` has more instructions than the VM's jumps can
     /// reach. Like `HeapFull`, this is a limit of the machine.
     FunctionTooLong { name: String },
+    /// The function `name` needs more registers than a register number can
+    /// name. This is a limit of the machine too.
+    TooManyRegisters { name: String },
     /// The program broke a promise the compiler makes about every program,
     /// like a `match` having an arm for every value. Only a compiler bug
     /// causes this, so the VM stops and says what broke instead of guessing.

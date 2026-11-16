@@ -72,7 +72,7 @@ pub(crate) fn line_ends(tokens: &[Token]) -> Vec<bool> {
 /// the end of that line.
 pub(crate) fn insert_line_ends(tokens: Vec<Token>) -> Vec<Token> {
     let ends = line_ends(&tokens);
-    let mut out = Vec::with_capacity(tokens.len() + tokens.len() / 4);
+    let mut out = Vec::with_capacity(tokens.len().saturating_add(tokens.len() / 4));
     for (tok, ends) in tokens.into_iter().zip(ends) {
         if ends && let Some(prev) = out.last() {
             let prev: &Token = prev;

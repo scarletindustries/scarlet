@@ -40,7 +40,7 @@ fn desugar_body(body: &mut Vec<Node>) {
     // Rewrite the first backpass. Everything after it moves into the lambda,
     // so the walk below reaches any later ones inside that new node.
     if let Some(i) = body.iter().position(is_backpass) {
-        let rest = body.split_off(i + 1);
+        let rest = body.split_off(i.saturating_add(1));
         let bp = match body.pop() {
             Some(Node::Statement(s)) => match *s {
                 Statement::Backpass(bp) => Some(bp),

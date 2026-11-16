@@ -37,8 +37,15 @@ const FIRST_CHUNK_WORDS: usize = 256;
 const CHUNK_BITS: u32 = 20;
 const WORD_BITS: u32 = 28;
 
-/// The most words one cell can take, its header's among them.
-pub(crate) const MAX_CELL_WORDS: usize = 1 << WORD_BITS;
+/// The most words one cell can take, its header's among them. A header holds
+/// the size in [`WORD_BITS`] bits, so this is the largest size they can hold.
+pub(crate) const MAX_CELL_WORDS: usize = (1 << WORD_BITS) - 1;
+
+/// A reference count that has reached this stays there, and its cell is never
+/// freed. A count cannot grow past the 32 bits its header has for it, and a
+/// count that wrapped would free a cell still in use. This is what Koka and
+/// Lean do with a count that overflows.
+const STICKY: u64 = 0xFFFF_FFFF;
 
 /// A cell, named by its chunk and the word its header is at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,7 +141,7 @@ impl FreeLists {
     fn push(&mut self, size: usize, cell: Cell) {
         if size < DENSE_SIZES {
             if self.dense.len() <= size {
-                self.dense.resize_with(size + 1, Vec::new);
+                self.dense.resize_with(DENSE_SIZES, Vec::new);
             }
             if let Some(list) = self.dense.get_mut(size) {
                 list.push(cell);
@@ -177,10 +184,14 @@ pub(crate) struct Heap {
 }
 
 impl Heap {
-    /// A new cell of `kind` with `data` words after its header. Its count is
-    /// 1, and the caller holds that one reference.
-    fn alloc(&mut self, kind: Kind, data: usize) -> Result<Cell, Full> {
-        let size = data + 1;
+    /// A new cell of `kind` with `fixed` and then `n` words after its header.
+    /// Its count is 1, and the caller holds that one reference.
+    fn alloc(&mut self, kind: Kind, fixed: usize, n: usize) -> Result<Cell, Full> {
+        let size = n
+            .checked_add(fixed)
+            .and_then(|data| data.checked_add(1))
+            .filter(|size| *size <= MAX_CELL_WORDS)
+            .ok_or(Full)?;
         let cell = if let Some(cell) = self.free.pop(size) {
             cell
         } else if size > self.chunk_size() {
@@ -189,8 +200,8 @@ impl Heap {
             self.carve(size)?
         };
         self.set_word(cell, 0, header(1, kind, size));
-        self.live += 1;
-        self.made += 1;
+        self.live = self.live.saturating_add(1);
+        self.made = self.made.saturating_add(1);
         Ok(cell)
     }
 
@@ -208,14 +219,16 @@ impl Heap {
     fn carve(&mut self, size: usize) -> Result<Cell, Full> {
         if let Some(i) = self.current
             && let Some(Some(c)) = self.chunks.get_mut(i as usize)
-            && c.words.len() - c.used >= size
+            && let Some(end) = c.used.checked_add(size).filter(|end| *end <= c.words.len())
         {
             let word = u32::try_from(c.used).map_err(|_| Full)?;
-            c.used += size;
+            c.used = end;
             return Ok(Cell { chunk: i, word });
         }
         let words = self.chunk_size();
-        self.next_chunk = words * 8 / 5;
+        // A chunk too big for a cell to name is refused by `new_chunk`, so
+        // the size can stop growing at the most a `usize` holds.
+        self.next_chunk = words.saturating_mul(8) / 5;
         let i = self.new_chunk(words, false)?;
         self.current = Some(i);
         self.carve(size)
@@ -239,14 +252,18 @@ impl Heap {
         if self.chunks.len() >= 1 << CHUNK_BITS {
             return Err(Full);
         }
+        let i = u32::try_from(self.chunks.len()).map_err(|_| Full)?;
         self.chunks.push(Some(chunk));
-        u32::try_from(self.chunks.len() - 1).map_err(|_| Full)
+        Ok(i)
     }
 
     /// Add one reference to `cell`.
     pub(crate) fn share(&mut self, cell: Cell) {
         let h = self.word(cell, 0);
-        self.set_word(cell, 0, h + 1);
+        let c = count(h);
+        if c < STICKY {
+            self.set_word(cell, 0, with_count(h, c.saturating_add(1)));
+        }
     }
 
     /// Drop one reference to `cell`, freeing it when that was the last.
@@ -259,8 +276,11 @@ impl Heap {
         dying.push(cell);
         while let Some(cell) = dying.pop() {
             let h = self.word(cell, 0);
-            if count(h) > 1 {
-                self.set_word(cell, 0, h - 1);
+            let c = count(h);
+            if c > 1 {
+                if c < STICKY {
+                    self.set_word(cell, 0, with_count(h, c.saturating_sub(1)));
+                }
                 continue;
             }
             for i in held(kind_bits(h), size(h)) {
@@ -307,11 +327,11 @@ impl Heap {
     /// not be the one that was kept for it.
     pub(crate) fn fits_ctor(&self, cell: Cell, fields: usize) -> bool {
         let h = self.word(cell, 0);
-        count(h) == 1 && kind_bits(h) == Kind::Ctor as u64 && size(h) == fields + 2
+        count(h) == 1 && kind_bits(h) == Kind::Ctor as u64 && size(h).checked_sub(2) == Some(fields)
     }
 
     fn free_cell(&mut self, cell: Cell, h: u64) {
-        self.live -= 1;
+        self.live = self.live.saturating_sub(1);
         let own = matches!(self.chunks.get(cell.chunk as usize), Some(Some(c)) if c.own);
         if own {
             if let Some(slot) = self.chunks.get_mut(cell.chunk as usize) {
@@ -346,10 +366,10 @@ impl Heap {
 
     /// A new string cell holding `text`.
     pub(crate) fn string(&mut self, text: &[u8]) -> Result<Cell, Full> {
-        let cell = self.alloc(Kind::String, 1 + text.len().div_ceil(8))?;
+        let cell = self.alloc(Kind::String, 1, text.len().div_ceil(8))?;
         self.set_word(cell, 1, text.len() as u64);
-        for (i, bytes) in text.chunks(8).enumerate() {
-            self.set_word(cell, 2 + i, padded_word(bytes));
+        for (slot, bytes) in self.words_mut(cell, 2).iter_mut().zip(text.chunks(8)) {
+            *slot = padded_word(bytes);
         }
         Ok(cell)
     }
@@ -361,31 +381,34 @@ impl Heap {
 
     /// Whether a string cell holds exactly `text`.
     pub(crate) fn string_is(&self, cell: Cell, text: &[u8]) -> bool {
+        let words = self.words(cell, 2);
         self.string_len(cell) == text.len()
-            && text
-                .chunks(8)
-                .enumerate()
-                .all(|(i, bytes)| self.word(cell, 2 + i) == padded_word(bytes))
+            && words.len() == text.len().div_ceil(8)
+            && words
+                .iter()
+                .zip(text.chunks(8))
+                .all(|(w, bytes)| *w == padded_word(bytes))
     }
 
     /// A string cell's bytes, appended to `out`.
     pub(crate) fn read_string(&self, cell: Cell, out: &mut Vec<u8>) {
         let len = to_usize(self.word(cell, 1));
-        for i in 0..len.div_ceil(8) {
-            let bytes = self.word(cell, 2 + i).to_le_bytes();
-            let n = (len - i * 8).min(8);
-            out.extend(bytes.into_iter().take(n));
-        }
+        out.extend(
+            self.words(cell, 2)
+                .iter()
+                .flat_map(|w| w.to_le_bytes())
+                .take(len),
+        );
     }
 
     /// A new big-int cell holding `n`.
     pub(crate) fn big_int(&mut self, n: &BigInt) -> Result<Cell, Full> {
         let (sign, digits) = n.to_u64_digits();
-        let cell = self.alloc(Kind::BigInt, 1 + digits.len())?;
+        let cell = self.alloc(Kind::BigInt, 1, digits.len())?;
         let negative = u64::from(sign == Sign::Minus) << 63;
         self.set_word(cell, 1, negative | digits.len() as u64);
-        for (i, d) in digits.iter().enumerate() {
-            self.set_word(cell, 2 + i, *d);
+        for (slot, d) in self.words_mut(cell, 2).iter_mut().zip(&digits) {
+            *slot = *d;
         }
         Ok(cell)
     }
@@ -398,8 +421,11 @@ impl Heap {
             Sign::Plus
         };
         let len = (w & 0xFFFF_FFFF) as usize;
-        let bytes: Vec<u8> = (0..len)
-            .flat_map(|i| self.word(cell, 2 + i).to_le_bytes())
+        let bytes: Vec<u8> = self
+            .words(cell, 2)
+            .iter()
+            .take(len)
+            .flat_map(|d| d.to_le_bytes())
             .collect();
         BigInt::from_bytes_le(sign, &bytes)
     }
@@ -407,7 +433,7 @@ impl Heap {
     /// A new cell for constructor `v`, holding `fields`. Each field's
     /// reference passes to the cell.
     pub(crate) fn ctor(&mut self, v: VariantRef, fields: &[Value]) -> Result<Cell, Full> {
-        let cell = self.alloc(Kind::Ctor, 1 + fields.len())?;
+        let cell = self.alloc(Kind::Ctor, 1, fields.len())?;
         self.write_ctor(cell, v, fields);
         Ok(cell)
     }
@@ -417,15 +443,15 @@ impl Heap {
     /// right size. The cell's one reference stays and becomes the new
     /// constructor's.
     pub(crate) fn ctor_in(&mut self, cell: Cell, v: VariantRef, fields: &[Value]) {
-        self.reused += 1;
+        self.reused = self.reused.saturating_add(1);
         self.write_ctor(cell, v, fields);
     }
 
     fn write_ctor(&mut self, cell: Cell, v: VariantRef, fields: &[Value]) {
         let tag = u64::from(v.variant_idx) << 32 | u64::from(v.type_id.0.cast_unsigned());
         self.set_word(cell, 1, tag);
-        for (i, f) in fields.iter().enumerate() {
-            self.set_word(cell, 2 + i, f.bits());
+        for (slot, f) in self.words_mut(cell, 2).iter_mut().zip(fields) {
+            *slot = f.bits();
         }
     }
 
@@ -447,10 +473,10 @@ impl Heap {
     /// A new cell for function `func` over `captures`. Each capture's
     /// reference passes to the cell.
     pub(crate) fn closure(&mut self, func: FuncIdx, captures: &[Value]) -> Result<Cell, Full> {
-        let cell = self.alloc(Kind::Closure, 1 + captures.len())?;
+        let cell = self.alloc(Kind::Closure, 1, captures.len())?;
         self.set_word(cell, 1, u64::from(func.0));
-        for (i, c) in captures.iter().enumerate() {
-            self.set_word(cell, 2 + i, c.bits());
+        for (slot, c) in self.words_mut(cell, 2).iter_mut().zip(captures) {
+            *slot = c.bits();
         }
         Ok(cell)
     }
@@ -471,9 +497,9 @@ impl Heap {
     /// cell. This is for kinds whose layout lives outside the heap, like an
     /// array's nodes.
     pub(crate) fn make(&mut self, kind: Kind, data: &[u64]) -> Result<Cell, Full> {
-        let cell = self.alloc(kind, data.len())?;
-        for (i, w) in data.iter().enumerate() {
-            self.set_word(cell, 1 + i, *w);
+        let cell = self.alloc(kind, 0, data.len())?;
+        for (slot, w) in self.words_mut(cell, 1).iter_mut().zip(data) {
+            *slot = *w;
         }
         Ok(cell)
     }
@@ -481,20 +507,15 @@ impl Heap {
     /// The words of `cell` after its header. They are empty for a cell the
     /// heap does not have.
     pub(crate) fn data(&self, cell: Cell) -> &[u64] {
-        let n = size(self.word(cell, 0)).saturating_sub(1);
-        let start = cell.word as usize + 1;
-        match self.chunks.get(cell.chunk as usize) {
-            Some(Some(c)) => c.words.get(start..start + n).unwrap_or(&[]),
-            _ => &[],
-        }
+        self.words(cell, 1)
     }
 
     /// A new tuple cell holding `elements`. Each element's reference passes
     /// to the cell.
     pub(crate) fn tuple(&mut self, elements: &[Value]) -> Result<Cell, Full> {
-        let cell = self.alloc(Kind::Tuple, elements.len())?;
-        for (i, e) in elements.iter().enumerate() {
-            self.set_word(cell, 1 + i, e.bits());
+        let cell = self.alloc(Kind::Tuple, 0, elements.len())?;
+        for (slot, e) in self.words_mut(cell, 1).iter_mut().zip(elements) {
+            *slot = e.bits();
         }
         Ok(cell)
     }
@@ -502,27 +523,23 @@ impl Heap {
     /// Element `i` of a tuple cell, or `None` past its last. Reading it adds
     /// no reference.
     pub(crate) fn element(&self, cell: Cell, i: usize) -> Option<Value> {
-        let n = size(self.word(cell, 0)).saturating_sub(1);
-        (i < n).then(|| Value::from_bits(self.word(cell, 1 + i)))
+        self.words(cell, 1).get(i).map(|w| Value::from_bits(*w))
     }
 
     /// A tuple cell's elements, in order. Reading one adds no reference.
     pub(crate) fn elements(&self, cell: Cell) -> impl Iterator<Item = Value> + '_ {
-        let n = size(self.word(cell, 0)).saturating_sub(1);
-        (0..n).map(move |i| Value::from_bits(self.word(cell, 1 + i)))
+        self.words(cell, 1).iter().map(|w| Value::from_bits(*w))
     }
 
     /// Value `i` of the ones a constructor or closure cell holds after its
     /// tag word.
     fn held(&self, cell: Cell, i: usize) -> Option<Value> {
-        let n = size(self.word(cell, 0)).saturating_sub(2);
-        (i < n).then(|| Value::from_bits(self.word(cell, 2 + i)))
+        self.words(cell, 2).get(i).map(|w| Value::from_bits(*w))
     }
 
     /// A constructor cell's fields, in order. Reading one adds no reference.
     pub(crate) fn fields(&self, cell: Cell) -> impl Iterator<Item = Value> + '_ {
-        let n = size(self.word(cell, 0)).saturating_sub(2);
-        (0..n).map(move |i| Value::from_bits(self.word(cell, 2 + i)))
+        self.words(cell, 2).iter().map(|w| Value::from_bits(*w))
     }
 
     /// Cells not yet freed.
@@ -541,34 +558,63 @@ impl Heap {
         self.reused
     }
 
-    fn word(&self, cell: Cell, i: usize) -> u64 {
+    /// The chunk's words from `cell`'s header to the chunk's end, or none
+    /// for a cell the heap does not have.
+    fn onward(&self, cell: Cell) -> &[u64] {
         match self.chunks.get(cell.chunk as usize) {
-            Some(Some(c)) => c.words.get(cell.word as usize + i).copied().unwrap_or(0),
-            _ => 0,
+            Some(Some(c)) => c.words.get(cell.word as usize..).unwrap_or(&[]),
+            _ => &[],
         }
     }
 
+    fn onward_mut(&mut self, cell: Cell) -> &mut [u64] {
+        match self.chunks.get_mut(cell.chunk as usize) {
+            Some(Some(c)) => c.words.get_mut(cell.word as usize..).unwrap_or(&mut []),
+            _ => &mut [],
+        }
+    }
+
+    /// Words `from` to the end of `cell`, counting its header as word 0.
+    fn words(&self, cell: Cell, from: usize) -> &[u64] {
+        let words = self.onward(cell);
+        let size = words.first().map_or(0, |h| size(*h));
+        words.get(from..size).unwrap_or(&[])
+    }
+
+    fn words_mut(&mut self, cell: Cell, from: usize) -> &mut [u64] {
+        let words = self.onward_mut(cell);
+        let size = words.first().map_or(0, |h| size(*h));
+        words.get_mut(from..size).unwrap_or(&mut [])
+    }
+
+    fn word(&self, cell: Cell, i: usize) -> u64 {
+        self.onward(cell).get(i).copied().unwrap_or(0)
+    }
+
     fn set_word(&mut self, cell: Cell, i: usize, w: u64) {
-        if let Some(Some(c)) = self.chunks.get_mut(cell.chunk as usize)
-            && let Some(slot) = c.words.get_mut(cell.word as usize + i)
-        {
+        if let Some(slot) = self.onward_mut(cell).get_mut(i) {
             *slot = w;
         }
     }
 }
 
-/// A header word. It holds the count in the low 32 bits, then the kind, then
-/// the cell's size in words.
+/// A header word. It holds the count in the low 32 bits, then the kind in 4
+/// bits, then the cell's size in words in the top [`WORD_BITS`].
 fn header(count: u32, kind: Kind, size: usize) -> u64 {
-    u64::from(count) | (kind as u64) << 32 | (size as u64) << 40
+    u64::from(count) | (kind as u64) << 32 | (size as u64) << 36
 }
 
 fn count(h: u64) -> u64 {
-    h & 0xFFFF_FFFF
+    h & STICKY
+}
+
+/// `h` with its count replaced by `c`, which is at most [`STICKY`].
+fn with_count(h: u64, c: u64) -> u64 {
+    h & !STICKY | c & STICKY
 }
 
 fn kind_bits(h: u64) -> u64 {
-    h >> 32 & 0xFF
+    h >> 32 & 0xF
 }
 
 /// The words of a cell of this kind and size that hold a value, and so a
@@ -591,7 +637,10 @@ fn held(kind: u64, size: usize) -> std::ops::Range<usize> {
     } else if k(Kind::ArrayRoot) {
         4..size
     } else if k(Kind::ArrayBranch) {
-        2 + size.saturating_sub(2) / 2..size
+        // A branch is its height, then a size table and the children, the
+        // same number of each. A size is at most `MAX_CELL_WORDS`, so neither
+        // step can saturate.
+        size.saturating_sub(size.saturating_sub(2) / 2)..size
     } else if k(Kind::BinarySlice) {
         1..2
     } else {
@@ -600,7 +649,7 @@ fn held(kind: u64, size: usize) -> std::ops::Range<usize> {
 }
 
 fn size(h: u64) -> usize {
-    (h >> 40) as usize
+    (h >> 36) as usize
 }
 
 /// Up to eight bytes of a string, little-endian, zero-padded to a whole word.

@@ -140,14 +140,19 @@ pub(crate) enum Response {
 pub(crate) fn request(bytes: &[u8]) -> Request {
     // Allow only a few empty lines before the request line, each ending in
     // CRLF, so a stream of them cannot hold a connection open.
-    let mut start = 0;
-    let mut empty = 0;
-    while bytes.get(start..start + 2) == Some(b"\r\n") {
-        empty += 1;
+    // Offsets here are inside `bytes`, which is no longer than `isize::MAX`,
+    // so the sum of two of them is exact.
+    let mut start = 0usize;
+    let mut empty = 0usize;
+    while bytes
+        .get(start..)
+        .is_some_and(|rest| rest.starts_with(b"\r\n"))
+    {
+        empty = empty.saturating_add(1);
         if empty > MAX_LEADING_EMPTY {
             return Request::Bad(Reject::BadRequest);
         }
-        start += 2;
+        start = start.saturating_add(2);
     }
     match bytes.get(start..) {
         None | Some([] | [b'\r']) => return Request::NeedMore,
@@ -170,7 +175,7 @@ pub(crate) fn request(bytes: &[u8]) -> Request {
                 method: range_in(bytes, method.as_bytes()),
                 target: range_in(bytes, target.as_bytes()),
                 http11: version == 1,
-                head: block(bytes, req.headers, start + n),
+                head: block(bytes, req.headers, start.saturating_add(n)),
             }
         }
         // A line that runs past the cap without ending means the target is too
@@ -277,7 +282,7 @@ fn status_line(line: &[u8]) -> Result<(), BadResponse> {
 /// still shows its blank line. This is all the parser is shown, so its work
 /// is bounded however much is buffered.
 fn capped(bytes: &[u8], start: usize) -> &[u8] {
-    let end = bytes.len().min(start + MAX_HEAD + 3);
+    let end = bytes.len().min(start.saturating_add(MAX_HEAD + 3));
     bytes.get(start..end).unwrap_or(&[])
 }
 
@@ -285,18 +290,21 @@ fn capped(bytes: &[u8], start: usize) -> &[u8] {
 /// never refused for having many fields.
 fn header_slots(window: &[u8]) -> Vec<httparse::Header<'_>> {
     let lines = memchr::memchr_iter(b'\n', window).count();
-    vec![httparse::EMPTY_HEADER; lines + 1]
+    vec![httparse::EMPTY_HEADER; lines.saturating_add(1)]
 }
 
 /// Whether a line in `bytes` ends in a bare LF rather than CRLF.
 fn has_bare_lf(bytes: &[u8]) -> bool {
-    memchr::memchr_iter(b'\n', bytes).any(|i| i == 0 || bytes.get(i - 1) != Some(&b'\r'))
+    memchr::memchr_iter(b'\n', bytes).any(|i| {
+        i.checked_sub(1)
+            .is_none_or(|p| bytes.get(p) != Some(&b'\r'))
+    })
 }
 
 /// Where the slice `part` of `whole` is in it.
 fn range_in(whole: &[u8], part: &[u8]) -> Range<usize> {
     let start = (part.as_ptr() as usize).saturating_sub(whole.as_ptr() as usize);
-    start..start + part.len()
+    start..start.saturating_add(part.len())
 }
 
 /// The fields `httparse` read, as ranges of `bytes`, and their tokens.
@@ -426,7 +434,7 @@ pub(crate) fn chunked(bytes: &[u8], max: u64) -> Chunked {
             Ok(httparse::Status::Complete((n, size)))
                 if rest.get(..n).is_some_and(|line| !has_bare_lf(line)) =>
             {
-                (pos + n, size)
+                (pos.saturating_add(n), size)
             }
             Ok(httparse::Status::Partial) => return Chunked::NeedMore,
             Ok(httparse::Status::Complete(_)) | Err(_) => return Chunked::Bad(Reject::BadRequest),
@@ -445,7 +453,7 @@ pub(crate) fn chunked(bytes: &[u8], max: u64) -> Chunked {
         else {
             return Chunked::Bad(Reject::PayloadTooLarge);
         };
-        match bytes.get(data_end..data_end + 2) {
+        match bytes.get(data_end..).and_then(|rest| rest.get(..2)) {
             None => return Chunked::NeedMore,
             Some(b"\r\n") => {}
             // The size lied about where the data ends, so never read on.
@@ -453,7 +461,7 @@ pub(crate) fn chunked(bytes: &[u8], max: u64) -> Chunked {
         }
         pieces.push(data_start..data_end);
         total = sum;
-        pos = data_end + 2;
+        pos = data_end.saturating_add(2);
     }
 }
 
@@ -465,7 +473,7 @@ fn trailers(bytes: &[u8], start: usize, pieces: Vec<Range<usize>>) -> Chunked {
         Ok(httparse::Status::Complete((n, headers)))
             if window.get(..n).is_some_and(|head| !has_bare_lf(head)) =>
         {
-            let mut trailers = block(bytes, headers, start + n);
+            let mut trailers = block(bytes, headers, start.saturating_add(n));
             // A trailer carries no connection or expectation meaning
             // (RFC 9110 section 6.5.1).
             trailers.flags = HeadFlags::default();

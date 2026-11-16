@@ -42,7 +42,7 @@ pub fn slot_labeled<L: PartialEq + Copy, T>(
         let found = match label {
             None => {
                 let i = next_pos;
-                next_pos += 1;
+                next_pos = next_pos.saturating_add(1);
                 by_pos.get_mut(i).map(|slot| (i, slot))
             }
             Some(label) => fields

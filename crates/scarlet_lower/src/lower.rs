@@ -1056,7 +1056,7 @@ impl Lower {
         // matches.
         let mut last = Tree::goto(outer);
         for (i, alt) in alts.iter().enumerate() {
-            let is_last = i + 1 == alts.len();
+            let is_last = i.saturating_add(1) == alts.len();
             let fall = if is_last { outer } else { self.fresh_join()? };
             let alt_leaf = match commit {
                 Some(cj) => ArmLeaf::OrCommit(cj),

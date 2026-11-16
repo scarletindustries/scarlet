@@ -84,8 +84,37 @@ fn bit(hash: u64, shift: u32) -> u32 {
 }
 
 /// Where the one set bit `bit` of `mask` goes among the ones `mask` sets.
+/// `bit` is never 0, so the bits below it are exact.
 fn index(mask: u32, bit: u32) -> usize {
-    (mask & (bit - 1)).count_ones() as usize
+    (mask & bit.saturating_sub(1)).count_ones() as usize
+}
+
+/// The shift one level down. A shift past [`END`] has no hash left to read,
+/// which [`slot`] reads as slot 0 and [`pair`] turns into a collision first.
+fn deeper(shift: u32) -> u32 {
+    shift.saturating_add(BITS)
+}
+
+// Where things are in a node's or a collision's words: entry `i`'s key and
+// value, the words of the whole entry, and child `i` after `entries` entries.
+// A cell has at most `MAX_CELL_WORDS` words, so for anything it holds these
+// are exact. One that saturates is past every cell's end, and reads as not
+// there.
+
+fn key_at(i: usize) -> usize {
+    i.saturating_mul(2).saturating_add(1)
+}
+
+fn value_at(i: usize) -> usize {
+    key_at(i).saturating_add(1)
+}
+
+fn entry_words(i: usize) -> std::ops::Range<usize> {
+    key_at(i)..key_at(i).saturating_add(2)
+}
+
+fn child_at(entries: usize, i: usize) -> usize {
+    key_at(entries).saturating_add(i)
 }
 
 /// A node's entries and children, read out, each in slot order. Reading them
@@ -101,10 +130,10 @@ fn node(heap: &Heap, cell: Cell) -> Node {
     let n = used.entries.count_ones() as usize;
     Node {
         entries: (0..n)
-            .map(|i| (word(d, 1 + 2 * i), word(d, 2 + 2 * i)))
+            .map(|i| (word(d, key_at(i)), word(d, value_at(i))))
             .collect(),
         children: (0..used.children.count_ones() as usize)
-            .map(|i| word(d, 1 + 2 * n + i))
+            .map(|i| word(d, child_at(n, i)))
             .collect(),
     }
 }
@@ -114,7 +143,7 @@ fn collision(heap: &Heap, cell: Cell) -> (u64, Vec<(Value, Value)>) {
     let d = heap.data(cell);
     let n = d.len().saturating_sub(1) / 2;
     let entries = (0..n)
-        .map(|i| (word(d, 1 + 2 * i), word(d, 2 + 2 * i)))
+        .map(|i| (word(d, key_at(i)), word(d, value_at(i))))
         .collect();
     (d.first().copied().unwrap_or(0), entries)
 }
@@ -130,22 +159,18 @@ fn make_node(
     entries: &[(Value, Value)],
     children: &[Value],
 ) -> Result<Value, Full> {
-    let mut words = Vec::with_capacity(1 + 2 * entries.len() + children.len());
-    words.push(used.word());
-    for (k, v) in entries {
-        words.extend([k.bits(), v.bits()]);
-    }
-    words.extend(children.iter().map(|c| c.bits()));
+    let words: Vec<u64> = std::iter::once(used.word())
+        .chain(entries.iter().flat_map(|(k, v)| [k.bits(), v.bits()]))
+        .chain(children.iter().map(|c| c.bits()))
+        .collect();
     Ok(Value::cell(heap.make(Kind::MapNode, &words)?))
 }
 
 /// A new collision cell. The references in `entries` pass to it.
 fn make_collision(heap: &mut Heap, hash: u64, entries: &[(Value, Value)]) -> Result<Value, Full> {
-    let mut words = Vec::with_capacity(1 + 2 * entries.len());
-    words.push(hash);
-    for (k, v) in entries {
-        words.extend([k.bits(), v.bits()]);
-    }
+    let words: Vec<u64> = std::iter::once(hash)
+        .chain(entries.iter().flat_map(|(k, v)| [k.bits(), v.bits()]))
+        .collect();
     Ok(Value::cell(heap.make(Kind::MapCollision, &words)?))
 }
 
@@ -241,21 +266,21 @@ fn get_by(heap: &Heap, map: Cell, key: Value, hash: Hasher) -> Option<Value> {
         let d = heap.data(at);
         if is_collision(heap, at) {
             return (0..d.len() / 2)
-                .find(|&i| eq::equal(heap, word(d, 1 + 2 * i), key))
-                .map(|i| word(d, 2 + 2 * i));
+                .find(|&i| eq::equal(heap, word(d, key_at(i)), key))
+                .map(|i| word(d, value_at(i)));
         }
         let used = Used::of(d);
         let b = bit(h, shift);
         if used.entries & b != 0 {
             let i = index(used.entries, b);
-            return eq::equal(heap, word(d, 1 + 2 * i), key).then(|| word(d, 2 + 2 * i));
+            return eq::equal(heap, word(d, key_at(i)), key).then(|| word(d, value_at(i)));
         }
         if used.children & b == 0 {
             return None;
         }
         let n = used.entries.count_ones() as usize;
-        at = word(d, 1 + 2 * n + index(used.children, b)).as_cell()?;
-        shift += BITS;
+        at = word(d, child_at(n, index(used.children, b))).as_cell()?;
+        shift = deeper(shift);
     }
 }
 
@@ -285,7 +310,7 @@ fn set_by(
             (make_node(heap, used, &[entry], &[])?, true)
         }
     };
-    let size = size(heap, map) + u64::from(added);
+    let size = size(heap, map).checked_add(u64::from(added)).ok_or(Full)?;
     heap.make(Kind::Map, &[size, top.bits()])
 }
 
@@ -301,11 +326,11 @@ fn insert(
 ) -> Result<(Value, bool), Full> {
     let d = heap.data(at);
     if is_collision(heap, at) {
-        let found = (0..d.len() / 2).find(|&i| eq::equal(heap, word(d, 1 + 2 * i), key));
+        let found = (0..d.len() / 2).find(|&i| eq::equal(heap, word(d, key_at(i)), key));
         let mut words = copy(heap, at);
         let v = own(heap, value).bits();
         match found {
-            Some(i) => put(heap, &mut words, 2 + 2 * i, v),
+            Some(i) => put(heap, &mut words, value_at(i), v),
             None => words.extend([own(heap, key).bits(), v]),
         }
         let made = heap.make(Kind::MapCollision, &words)?;
@@ -316,23 +341,23 @@ fn insert(
     let b = bit(h, shift);
     if used.entries & b != 0 {
         let i = index(used.entries, b);
-        let (k, v) = (word(d, 1 + 2 * i), word(d, 2 + 2 * i));
+        let (k, v) = (word(d, key_at(i)), word(d, value_at(i)));
         if eq::equal(heap, k, key) {
             let mut words = copy(heap, at);
             let v = own(heap, value).bits();
-            put(heap, &mut words, 2 + 2 * i, v);
+            put(heap, &mut words, value_at(i), v);
             return Ok((Value::cell(heap.make(Kind::MapNode, &words)?), false));
         }
         // Two keys want one slot, so both go one level down into a node of
         // their own, and the slot holds that node instead.
         let theirs = (own(heap, k), own(heap, v), hash(heap, k));
         let ours = (own(heap, key), own(heap, value), h);
-        let child = pair(heap, theirs, ours, shift + BITS)?;
+        let child = pair(heap, theirs, ours, deeper(shift))?;
         let mut words = copy(heap, at);
-        cut(heap, &mut words, 1 + 2 * i..3 + 2 * i);
+        cut(heap, &mut words, entry_words(i));
         place(
             &mut words,
-            1 + 2 * (n - 1) + index(used.children, b),
+            child_at(n.saturating_sub(1), index(used.children, b)),
             &[child.bits()],
         );
         set_used(
@@ -345,16 +370,16 @@ fn insert(
         return Ok((Value::cell(heap.make(Kind::MapNode, &words)?), true));
     }
     if used.children & b != 0 {
-        let j = 1 + 2 * n + index(used.children, b);
+        let j = child_at(n, index(used.children, b));
         let Some(child) = word(d, j).as_cell() else {
             return Ok((Value::NIL, false));
         };
-        let (child, added) = insert(heap, child, (key, value, h), shift + BITS, hash)?;
+        let (child, added) = insert(heap, child, (key, value, h), deeper(shift), hash)?;
         let mut words = copy(heap, at);
         put(heap, &mut words, j, child.bits());
         return Ok((Value::cell(heap.make(Kind::MapNode, &words)?), added));
     }
-    let i = 1 + 2 * index(used.entries, b);
+    let i = key_at(index(used.entries, b));
     let mut words = copy(heap, at);
     let entry = [own(heap, key).bits(), own(heap, value).bits()];
     place(&mut words, i, &entry);
@@ -381,7 +406,7 @@ fn pair(
     }
     let (sa, sb) = (slot(a.2, shift), slot(b.2, shift));
     if sa == sb {
-        let child = pair(heap, a, b, shift + BITS)?;
+        let child = pair(heap, a, b, deeper(shift))?;
         let used = Used {
             entries: 0,
             children: 1 << sa,
@@ -446,11 +471,11 @@ fn delete_by(heap: &mut Heap, map: Cell, key: Value, hash: Hasher) -> Result<Cel
 fn remove(heap: &mut Heap, at: Cell, key: Value, h: u64, shift: u32) -> Result<Gone, Full> {
     let d = heap.data(at);
     if is_collision(heap, at) {
-        let Some(i) = (0..d.len() / 2).find(|&i| eq::equal(heap, word(d, 1 + 2 * i), key)) else {
+        let Some(i) = (0..d.len() / 2).find(|&i| eq::equal(heap, word(d, key_at(i)), key)) else {
             return Ok(Gone::Missing);
         };
         let mut words = copy(heap, at);
-        cut(heap, &mut words, 1 + 2 * i..3 + 2 * i);
+        cut(heap, &mut words, entry_words(i));
         return Ok(match words.len() {
             0 | 1 => Gone::Empty,
             3 => Gone::Lone(word(&words, 1), word(&words, 2)),
@@ -462,11 +487,11 @@ fn remove(heap: &mut Heap, at: Cell, key: Value, h: u64, shift: u32) -> Result<G
     let b = bit(h, shift);
     if used.entries & b != 0 {
         let i = index(used.entries, b);
-        if !eq::equal(heap, word(d, 1 + 2 * i), key) {
+        if !eq::equal(heap, word(d, key_at(i)), key) {
             return Ok(Gone::Missing);
         }
         let mut words = copy(heap, at);
-        cut(heap, &mut words, 1 + 2 * i..3 + 2 * i);
+        cut(heap, &mut words, entry_words(i));
         set_used(
             &mut words,
             Used {
@@ -479,11 +504,11 @@ fn remove(heap: &mut Heap, at: Cell, key: Value, h: u64, shift: u32) -> Result<G
     if used.children & b == 0 {
         return Ok(Gone::Missing);
     }
-    let j = 1 + 2 * n + index(used.children, b);
+    let j = child_at(n, index(used.children, b));
     let Some(child) = word(d, j).as_cell() else {
         return Ok(Gone::Missing);
     };
-    let gone = remove(heap, child, key, h, shift + BITS)?;
+    let gone = remove(heap, child, key, h, deeper(shift))?;
     let mut words = match gone {
         Gone::Missing => return Ok(Gone::Missing),
         Gone::Node(_) | Gone::Lone(..) | Gone::Empty => copy(heap, at),
@@ -493,8 +518,8 @@ fn remove(heap: &mut Heap, at: Cell, key: Value, h: u64, shift: u32) -> Result<G
         Gone::Node(c) => put(heap, &mut words, j, c.bits()),
         // The child is down to one entry, which moves up into its slot here.
         Gone::Lone(k, v) => {
-            cut(heap, &mut words, j..j + 1);
-            let i = 1 + 2 * index(used.entries, b);
+            cut(heap, &mut words, j..j.saturating_add(1));
+            let i = key_at(index(used.entries, b));
             place(&mut words, i, &[k.bits(), v.bits()]);
             set_used(
                 &mut words,
@@ -505,7 +530,7 @@ fn remove(heap: &mut Heap, at: Cell, key: Value, h: u64, shift: u32) -> Result<G
             );
         }
         Gone::Empty => {
-            cut(heap, &mut words, j..j + 1);
+            cut(heap, &mut words, j..j.saturating_add(1));
             set_used(
                 &mut words,
                 Used {

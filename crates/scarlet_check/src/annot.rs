@@ -69,7 +69,11 @@ impl AnnotVars {
         AnnotVars {
             ctx,
             named: params.to_vec(),
-            next: params.iter().map(|p| p.id + 1).max().unwrap_or(0),
+            next: params
+                .iter()
+                .map(|p| p.id.saturating_add(1))
+                .max()
+                .unwrap_or(0),
         }
     }
 
@@ -79,7 +83,7 @@ impl AnnotVars {
             name: Some(name),
             constraint: None,
         };
-        self.next += 1;
+        self.next = self.next.saturating_add(1);
         self.named.push(v.clone());
         Type::Var(v)
     }
@@ -92,7 +96,7 @@ impl AnnotVars {
             name: None,
             constraint: None,
         };
-        self.next += 1;
+        self.next = self.next.saturating_add(1);
         Type::Var(v)
     }
 

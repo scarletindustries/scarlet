@@ -181,8 +181,8 @@ pub fn unroll_depth<P: PatternShape>(p: &P) -> usize {
     let deepest = |ps: &[P]| ps.iter().map(unroll_depth).max().unwrap_or(0);
     match p.shape() {
         PatShape::Wild => 0,
-        PatShape::Variant { fields, .. } => 1 + deepest(fields),
-        PatShape::Tuple(ps) | PatShape::Array { prefix: ps, .. } => 1 + deepest(ps),
+        PatShape::Variant { fields, .. } => deepest(fields).saturating_add(1),
+        PatShape::Tuple(ps) | PatShape::Array { prefix: ps, .. } => deepest(ps).saturating_add(1),
         PatShape::Or(ps) => deepest(ps),
         PatShape::Int(_)
         | PatShape::Float(_)

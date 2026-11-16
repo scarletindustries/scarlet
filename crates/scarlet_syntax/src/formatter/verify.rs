@@ -71,7 +71,10 @@ impl fmt::Display for Mismatch {
 
 /// Where a token starts, counted from 1.
 fn position(tok: &Token) -> (i32, i32) {
-    (tok.span.start_line + 1, tok.span.start_column + 1)
+    (
+        tok.span.start_line.saturating_add(1),
+        tok.span.start_column.saturating_add(1),
+    )
 }
 
 pub(super) fn compare(reference: &[Token], output: &[Token], layout: &Layout) -> Verdict {

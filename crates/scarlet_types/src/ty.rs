@@ -210,7 +210,7 @@ impl VarNames {
                 Some(n) => n.clone(),
                 None => loop {
                     let candidate: Name = letters(next).into();
-                    next += 1;
+                    next = next.saturating_add(1);
                     if !taken.contains(&&candidate) {
                         break candidate;
                     }
@@ -276,18 +276,15 @@ impl fmt::Display for Shown<'_> {
 }
 
 /// The base-26 letters for the `n`th variable: `a` to `z`, then `aa`.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "n % 26 is below 26, so it fits in a byte"
-)]
 fn letters(mut n: usize) -> String {
+    const ALPHABET: &[u8; 26] = b"abcdefghijklmnopqrstuvwxyz";
     let mut out = Vec::new();
     loop {
-        out.push(b'a' + (n % 26) as u8);
+        out.extend(ALPHABET.get(n % 26));
         if n < 26 {
             break;
         }
-        n = n / 26 - 1;
+        n = (n / 26).saturating_sub(1);
     }
     out.reverse();
     String::from_utf8(out).unwrap_or_default()

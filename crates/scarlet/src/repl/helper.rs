@@ -199,14 +199,17 @@ fn complete_source(line: &str, pos: usize, names: &mut Accepted) -> (usize, Vec<
     // `import scarlet/…` completes module paths, which are not identifiers:
     // their `/` separators fall outside the word grammar.
     if let Some(path) = import_path_before(line, pos) {
-        return (pos - path.len(), pairs(Accepted::module_paths(path)));
+        return (
+            pos.saturating_sub(path.len()),
+            pairs(Accepted::module_paths(path)),
+        );
     }
     let Some((start, word)) = word_before(line, pos) else {
         return (pos, Vec::new());
     };
     match word.rsplit_once("::") {
         Some((qualifier, member)) => (
-            start + qualifier.len() + 2,
+            start.saturating_add(qualifier.len()).saturating_add(2),
             pairs(names.qualified(qualifier, member)),
         ),
         None => (start, pairs(names.bare(word))),
@@ -230,8 +233,10 @@ fn word_before(line: &str, pos: usize) -> Option<(usize, &str)> {
     let pos = pos.min(line.len());
     let bytes = line.as_bytes();
     let before = bytes.get(..pos)?;
-    let name_start =
-        |s: &[u8]| s.len() - s.iter().rev().take_while(|&&b| is_name_continue(b)).count();
+    let name_start = |s: &[u8]| {
+        s.len()
+            .saturating_sub(s.iter().rev().take_while(|&&b| is_name_continue(b)).count())
+    };
     let mut start = name_start(before);
     // One `qualifier::` in front of the member being typed.
     if let Some(head) = before.get(..start).and_then(|h| h.strip_suffix(b"::")) {

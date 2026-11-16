@@ -144,17 +144,17 @@ fn is_type_start_token(tok: &Token) -> bool {
 const MAX_PARSE_DEPTH: u32 = 128;
 
 impl Parser {
-    // Runs `f` one level deeper. There's no `?` between the increment and the
-    // decrement, so the counter stays balanced on the Err path and error
-    // recovery resumes at the right depth.
+    // Runs `f` one level deeper. There's no `?` between setting the depth and
+    // restoring it, so it stays balanced on the Err path and error recovery
+    // resumes at the right depth.
     fn with_recursion_guard<T>(&mut self, f: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
-        self.depth += 1;
-        if self.depth > MAX_PARSE_DEPTH {
-            self.depth -= 1;
+        let outer = self.depth;
+        let Some(depth) = outer.checked_add(1).filter(|d| *d <= MAX_PARSE_DEPTH) else {
             return Err(Box::new(ParseError::NestingTooDeep));
-        }
+        };
+        self.depth = depth;
         let r = f(self);
-        self.depth -= 1;
+        self.depth = outer;
         r
     }
 
@@ -233,13 +233,9 @@ impl Parser {
         self.tokens.get(i).unwrap_or(&self.eof)
     }
 
-    /// The token at `i`, or `None` past the Eof token.
-    fn token_get(&self, i: usize) -> Option<&Token> {
-        match self.tokens.get(i) {
-            Some(tok) => Some(tok),
-            None if i == self.tokens.len() => Some(&self.eof),
-            None => None,
-        }
+    /// The token `k` places after the current one, or `None` past the Eof token.
+    fn token_ahead(&self, k: usize) -> Option<&Token> {
+        self.tokens_from(self.index).nth(k)
     }
 
     /// The tokens from `i` on, through the Eof token.
@@ -269,7 +265,7 @@ impl Parser {
     fn bump(&mut self) {
         if self.index < self.tokens.len() {
             self.save_token_end();
-            self.index += 1;
+            self.index = self.index.saturating_add(1);
         }
     }
 
@@ -451,7 +447,7 @@ impl Parser {
     }
 
     fn peek_next(&self) -> Option<Kind> {
-        self.token_get(self.index + 1).map(|t| t.kind.clone())
+        self.token_ahead(1).map(|t| t.kind.clone())
     }
 
     /// The first `/** */` in the current token's leading trivia. If that token
@@ -581,21 +577,23 @@ impl Parser {
     // `Ctor(args)`). Guessing from whether a type starts here would misfire on
     // uppercase constructors and `(` tuple types.
     fn is_binding_ahead(&self) -> bool {
-        let mut depth = 0i32;
-        for tok in self.tokens_from(self.index + 1) {
+        let mut depth = 0usize;
+        for tok in self.tokens_from(self.index).skip(1) {
             if depth == 0 && tok.kind == Kind::LineEnd {
                 return false;
             }
             match tok.kind {
-                Kind::PuncOpenParen | Kind::PuncOpenBracket | Kind::PuncOpenBrace => depth += 1,
+                Kind::PuncOpenParen | Kind::PuncOpenBracket | Kind::PuncOpenBrace => {
+                    depth = depth.saturating_add(1);
+                }
                 // A closer with nothing open ends the enclosing block, and the
                 // statement with it.
-                Kind::PuncCloseParen | Kind::PuncCloseBracket | Kind::PuncCloseBrace
-                    if depth == 0 =>
-                {
-                    return false;
+                Kind::PuncCloseParen | Kind::PuncCloseBracket | Kind::PuncCloseBrace => {
+                    let Some(d) = depth.checked_sub(1) else {
+                        return false;
+                    };
+                    depth = d;
                 }
-                Kind::PuncCloseParen | Kind::PuncCloseBracket | Kind::PuncCloseBrace => depth -= 1,
                 Kind::PuncEquals if depth == 0 => return true,
                 Kind::PuncEqualsComparator if depth == 0 => return false,
                 Kind::Eof => return false,
@@ -613,7 +611,9 @@ impl Parser {
         let mut depth = 0usize;
         for tok in self.tokens_from(self.index) {
             match tok.kind {
-                Kind::PuncOpenParen | Kind::PuncOpenBracket | Kind::BinOpen => depth += 1,
+                Kind::PuncOpenParen | Kind::PuncOpenBracket | Kind::BinOpen => {
+                    depth = depth.saturating_add(1);
+                }
                 Kind::PuncCloseParen | Kind::PuncCloseBracket | Kind::BinClose => {
                     let Some(d) = depth.checked_sub(1) else {
                         return false;
@@ -837,7 +837,7 @@ impl Parser {
             if lvl == Self::RANGE_LEVEL {
                 p.parse_range()
             } else {
-                p.parse_level(lvl + 1)
+                p.parse_level(lvl.saturating_add(1))
             }
         };
         let mut left = next(self)?;
@@ -2057,13 +2057,16 @@ impl Parser {
 
     // Whether an `=` follows the matching `)`.
     fn is_tuple_destructuring(&self) -> bool {
-        let mut depth = 0;
+        let mut depth = 0usize;
         let mut rest = self.tokens_from(self.index);
         while let Some(tok) = rest.next() {
             if tok.kind == Kind::PuncOpenParen {
-                depth += 1;
+                depth = depth.saturating_add(1);
             } else if tok.kind == Kind::PuncCloseParen {
-                depth -= 1;
+                let Some(d) = depth.checked_sub(1) else {
+                    return false;
+                };
+                depth = d;
                 if depth == 0 {
                     return rest
                         .next()
@@ -2080,7 +2083,7 @@ impl Parser {
     /// `::`, a constructor name and its `(`, then an `=` after the matching `)`.
     /// Without the `=` it is a call, `http::Fixed(1, b)`.
     fn is_qualified_ctor_destructuring(&self) -> bool {
-        let kind = |i: usize| self.token_get(self.index + i).map(|t| &t.kind);
+        let kind = |i: usize| self.token_ahead(i).map(|t| &t.kind);
         let (Some(Kind::Identifier(_)), Some(Kind::PuncColonColon), Some(Kind::Identifier(ctor))) =
             (kind(0), kind(1), kind(2))
         else {
@@ -2090,12 +2093,15 @@ impl Parser {
             return false;
         }
         let mut depth = 0usize;
-        let mut rest = self.tokens_from(self.index + 3);
+        let mut rest = self.tokens_from(self.index).skip(3);
         while let Some(tok) = rest.next() {
             match tok.kind {
-                Kind::PuncOpenParen => depth += 1,
+                Kind::PuncOpenParen => depth = depth.saturating_add(1),
                 Kind::PuncCloseParen => {
-                    depth -= 1;
+                    let Some(d) = depth.checked_sub(1) else {
+                        return false;
+                    };
+                    depth = d;
                     if depth == 0 {
                         return rest
                             .next()
@@ -2341,7 +2347,7 @@ impl Parser {
                 Ok(true)
             }
             Kind::PuncDot => {
-                let next = self.token_get(self.index + 1).map(|t| &t.kind);
+                let next = self.token_ahead(1).map(|t| &t.kind);
                 let Some(Kind::Identifier(member)) = next else {
                     return Ok(false);
                 };

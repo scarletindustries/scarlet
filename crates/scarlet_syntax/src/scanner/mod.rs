@@ -170,7 +170,7 @@ impl Scanner {
                 continue;
             }
 
-            if ch == b'/' && self.byte_at(self.pos + 1) == b'/' {
+            if ch == b'/' && self.peek_next() == b'/' {
                 let start = self.pos;
                 while self.pos < self.input_len() {
                     let c = self.peek_char();
@@ -184,7 +184,7 @@ impl Scanner {
                 continue;
             }
 
-            if ch == b'/' && self.byte_at(self.pos + 1) == b'*' {
+            if ch == b'/' && self.peek_next() == b'*' {
                 let start = self.pos;
                 let start_line = self.line;
                 let start_column = self.column;
@@ -194,11 +194,11 @@ impl Scanner {
                 // `/**` opens a doc comment, but `/**/` does not.
                 let opens_doc = self.pos < self.input_len()
                     && self.peek_char() == b'*'
-                    && self.byte_at(self.pos + 1) != b'/';
+                    && self.peek_next() != b'/';
 
                 let mut closed = false;
-                while self.pos + 1 < self.input_len() {
-                    if self.peek_char() == b'*' && self.byte_at(self.pos + 1) == b'/' {
+                while self.pos.saturating_add(1) < self.input_len() {
+                    if self.peek_char() == b'*' && self.peek_next() == b'/' {
                         self.incr_pos(); // skip *
                         self.incr_pos(); // skip /
                         closed = true;
@@ -268,13 +268,13 @@ impl Scanner {
         if self.in_interp_string() {
             if ch == b'{' {
                 if let Some(f) = self.interp_stack.last_mut() {
-                    f.brace_depth += 1;
+                    f.brace_depth = f.brace_depth.saturating_add(1);
                 }
                 return self.new_token(Kind::PuncOpenBrace);
             }
             if ch == b'}' {
                 if let Some(f) = self.interp_stack.last_mut() {
-                    f.brace_depth -= 1;
+                    f.brace_depth = f.brace_depth.saturating_sub(1);
                 }
                 return self.new_token(Kind::PuncCloseBrace);
             }
@@ -328,20 +328,20 @@ impl Scanner {
                     // Anchor at the opening quote, one byte before the body:
                     // the cursor sits at the line end or EOF.
                     self.error_at(
-                        Span::point(start_line, start_col - 1),
+                        Span::point(start_line, start_col.saturating_sub(1)),
                         ScanError::UnclosedString,
                     );
                     return self.new_token(Kind::Error(utf8(result).into()));
                 }
 
                 if next == b'$' {
-                    let follow = self.byte_at(self.pos + 1);
+                    let follow = self.peek_next();
                     if follow == b'{' || token::is_name_start(follow) {
                         self.pos = start_pos;
                         self.column = start_col;
                         self.line = start_line;
                         self.diagnostics.truncate(diag_len);
-                        self.enter_interp_string(ch, start_line, start_col - 1);
+                        self.enter_interp_string(ch, start_line, start_col.saturating_sub(1));
                         return self.new_token(Kind::InterpStringStart);
                     }
                 }
@@ -431,7 +431,7 @@ impl Scanner {
                 // the whole sequence and decode it, or each byte of one
                 // character gets its own error with a garbled glyph.
                 if ch >= 0x80 {
-                    let start = self.pos - 1;
+                    let start = self.pos.saturating_sub(1);
                     while (0x80..=0xBF).contains(&self.peek_char()) {
                         self.incr_pos();
                     }
@@ -479,7 +479,7 @@ impl Scanner {
     // The caller has already consumed the first byte, so the name starts at
     // `pos - 1`. Names are ASCII, so byte offsets are column offsets.
     fn scan_name(&mut self) -> Range<i32> {
-        let start = self.pos - 1;
+        let start = self.pos.saturating_sub(1);
         while token::is_name_continue(self.peek_char()) {
             self.incr_pos();
         }
@@ -493,7 +493,7 @@ impl Scanner {
     }
 
     fn scan_number(&mut self) -> Token {
-        let start = self.pos - 1;
+        let start = self.pos.saturating_sub(1);
 
         // `0x` / `0b` (either case) starts a radix literal. Commit on the
         // prefix: a following non-digit is a lexical error, not `0` plus an
@@ -513,13 +513,13 @@ impl Scanner {
 
             if next.is_ascii_digit() {
                 self.incr_pos();
-            } else if next == b'_' && self.byte_at(self.pos + 1).is_ascii_digit() {
+            } else if next == b'_' && self.peek_next().is_ascii_digit() {
                 // `1_000_000`: a separator between digits, kept in the token
                 // text so the formatter preserves it; `NumberLiteral::digits`
                 // drops it for everything that reads the number.
                 self.incr_pos();
             } else if next == b'.' && !has_dot {
-                if !self.byte_at(self.pos + 1).is_ascii_digit() {
+                if !self.peek_next().is_ascii_digit() {
                     break;
                 }
                 has_dot = true;
@@ -535,14 +535,14 @@ impl Scanner {
 
     fn scan_radix_number(&mut self, start: i32, radix: u32) -> Token {
         self.incr_pos(); // consume x/X or b/B
-        let mut digits = 0u32;
+        let mut any_digits = false;
 
         loop {
             let next = self.peek_char();
             if is_radix_digit(next, radix) {
-                digits += 1;
+                any_digits = true;
                 self.incr_pos();
-            } else if next == b'_' && is_radix_digit(self.byte_at(self.pos + 1), radix) {
+            } else if next == b'_' && is_radix_digit(self.peek_next(), radix) {
                 self.incr_pos();
             } else {
                 break;
@@ -554,7 +554,7 @@ impl Scanner {
         } else {
             Radix::Binary
         };
-        if digits == 0 {
+        if !any_digits {
             // Swallow a following name or digit run so `0xZ` / `0b2` is one
             // error, not `0x` plus a stray identifier.
             if token::is_name_start(self.peek_char()) || self.peek_char().is_ascii_digit() {
@@ -595,15 +595,20 @@ impl Scanner {
         self.byte_at(self.pos)
     }
 
+    // Positions stay below `MAX_INPUT`, so adding one never saturates.
+    fn peek_next(&self) -> u8 {
+        self.byte_at(self.pos.saturating_add(1))
+    }
+
     fn incr_pos(&mut self) {
         if self.byte_at(self.pos) == b'\n' {
-            self.line += 1;
+            self.line = self.line.saturating_add(1);
             self.column = 0;
         } else {
-            self.column += 1;
+            self.column = self.column.saturating_add(1);
         }
 
-        self.pos += 1;
+        self.pos = self.pos.saturating_add(1);
     }
 
     // Most escapes stand for one ASCII byte, but `\u{...}` stands for the UTF-8
@@ -633,10 +638,10 @@ impl Scanner {
                     // lead byte is consumed here; the continuation bytes flow
                     // into the string as ordinary content behind it, so the
                     // buffer stays valid UTF-8.
-                    let start = self.pos - 1;
+                    let start = self.pos.saturating_sub(1);
                     let mut end = self.pos;
                     while (0x80..=0xBF).contains(&self.byte_at(end)) {
-                        end += 1;
+                        end = end.saturating_add(1);
                     }
                     let escape = self.slice(start, end).to_string();
                     self.add_error(ScanError::UnknownEscape(escape));

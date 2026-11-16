@@ -23,9 +23,10 @@ use crate::heap::{Cell, Full, Heap, Kind};
 use crate::value::Value;
 use crate::word::{low_byte, to_usize};
 
-/// The most bits one binary can hold, because a cell is at most 2^28 words
-/// and a word holds 64 bits. A longer one makes the heap full instead.
-pub(crate) const MAX_BITS: u64 = (1 << 28) * 64;
+/// The most bits one binary can hold, because a cell is at most
+/// [`crate::heap::MAX_CELL_WORDS`] words and a word holds 64 bits. A longer
+/// one makes the heap full instead.
+pub(crate) const MAX_BITS: u64 = crate::heap::MAX_CELL_WORDS as u64 * 64;
 
 /// `len` bits of `owner`'s bytes, from bit `at`.
 #[derive(Clone, Copy)]
@@ -71,63 +72,87 @@ pub(crate) fn bits(heap: &Heap, cell: Cell) -> Option<Bits> {
 /// A new owner holding the first `len` bits of `bytes`. The bits past `len`
 /// in the last byte are cleared.
 pub(crate) fn make(heap: &mut Heap, bytes: &[u8], len: u64) -> Result<Cell, Full> {
+    if len > MAX_BITS {
+        return Err(Full);
+    }
     let n = to_usize(len.div_ceil(8));
     let mut buf: Vec<u8> = bytes.iter().copied().take(n).collect();
     buf.resize(n, 0);
-    let pad = n as u64 * 8 - len;
-    if let Some(last) = buf.last_mut() {
-        *last &= 0xFFu8 << pad;
+    // Keep the top `len % 8` bits of a last byte that is not whole.
+    let rem = len % 8;
+    if rem != 0
+        && let Some(last) = buf.last_mut()
+    {
+        *last &= !(0xFFu8 >> rem);
     }
-    let mut data = Vec::with_capacity(1 + n.div_ceil(8));
-    data.push(len);
-    for chunk in buf.chunks(8) {
+    let words = buf.chunks(8).map(|chunk| {
         let mut word = [0u8; 8];
         for (w, b) in word.iter_mut().zip(chunk) {
             *w = *b;
         }
-        data.push(u64::from_le_bytes(word));
-    }
+        u64::from_le_bytes(word)
+    });
+    let data: Vec<u64> = std::iter::once(len).chain(words).collect();
     heap.make(Kind::Binary, &data)
+}
+
+/// How many bits `n` whole bytes are, or `None` past what a word counts.
+pub(crate) fn bit_len(n: usize) -> Option<u64> {
+    u64::try_from(n).ok()?.checked_mul(8)
+}
+
+/// A new owner holding all of `bytes`.
+pub(crate) fn from_bytes(heap: &mut Heap, bytes: &[u8]) -> Result<Cell, Full> {
+    make(heap, bytes, bit_len(bytes.len()).ok_or(Full)?)
 }
 
 /// Bits `from .. from + len` of `b`, sharing its owner. The caller has
 /// checked that they are inside it.
 pub(crate) fn slice(heap: &mut Heap, b: Bits, from: u64, len: u64) -> Result<Cell, Full> {
+    let at = b.at.checked_add(from).ok_or(Full)?;
     heap.share(b.owner);
-    heap.make(
-        Kind::BinarySlice,
-        &[Value::cell(b.owner).bits(), b.at + from, len],
-    )
+    heap.make(Kind::BinarySlice, &[Value::cell(b.owner).bits(), at, len])
 }
 
-/// Byte `i` of `owner`'s bytes, or 0 past its end.
-fn owner_byte(heap: &Heap, owner: Cell, i: u64) -> u8 {
-    let d = heap.data(owner);
-    match d.get(1 + to_usize(i / 8)) {
-        Some(w) => low_byte(w >> ((i % 8) * 8)),
+/// Byte `i` of an owner's data words, or 0 past its end. The data's first
+/// word is the owner's length, and its bytes start after it.
+fn data_byte(data: &[u64], i: u64) -> u8 {
+    match data.get(1..).and_then(|words| words.get(to_usize(i / 8))) {
+        Some(w) => low_byte(w >> ((i % 8) << 3)),
         None => 0,
     }
 }
 
+/// Byte `i` of `owner`'s bytes, or 0 past its end.
+fn owner_byte(heap: &Heap, owner: Cell, i: u64) -> u8 {
+    data_byte(heap.data(owner), i)
+}
+
 /// The 8 bits of `b` from bit `i`. Bits past its end read as 0.
 fn byte(heap: &Heap, b: Bits, i: u64) -> u8 {
-    if i >= b.len {
+    let Some(left) = b.len.checked_sub(i).filter(|left| *left > 0) else {
         return 0;
-    }
-    let p = b.at + i;
-    let s = (p % 8) as u32;
+    };
+    let Some(p) = b.at.checked_add(i) else {
+        return 0;
+    };
+    let s = p % 8;
     let hi = owner_byte(heap, b.owner, p / 8);
     let raw = if s == 0 {
         hi
     } else {
-        let lo = owner_byte(heap, b.owner, p / 8 + 1);
-        (hi << s) | (lo >> (8 - s))
+        // The byte straddles two of the owner's, so it is the middle 8 bits
+        // of the pair.
+        let lo = (p / 8)
+            .checked_add(1)
+            .map_or(0, |i| owner_byte(heap, b.owner, i));
+        let [top, _] = (u16::from_be_bytes([hi, lo]) << s).to_be_bytes();
+        top
     };
-    let left = b.len - i;
     if left >= 8 {
         raw
     } else {
-        raw & (0xFFu8 << (8 - left))
+        raw & !(0xFFu8 >> left)
     }
 }
 
@@ -142,79 +167,93 @@ pub(crate) fn word(heap: &Heap, b: Bits, k: u64) -> Option<u64> {
         return None;
     }
     if b.at.is_multiple_of(64) {
-        let at = usize::try_from(b.at / 64 + k).ok()?;
-        return heap.data(b.owner).get(1 + at).copied();
+        let at = usize::try_from((b.at / 64).checked_add(k)?).ok()?;
+        return heap.data(b.owner).get(1..)?.get(at).copied();
     }
+    let start = k.checked_mul(64)?;
     let mut bytes = [0u8; 8];
-    for (j, out) in bytes.iter_mut().enumerate() {
-        *out = byte(heap, b, k * 64 + j as u64 * 8);
+    for (out, i) in bytes.iter_mut().zip((start..end).step_by(8)) {
+        *out = byte(heap, b, i);
     }
     Some(u64::from_le_bytes(bytes))
 }
 
 /// Bytes `from` to `from + n` of `b`, or `None` when they run past its end.
 pub(crate) fn byte_range(heap: &Heap, b: Bits, from: u64, n: u64) -> Option<Vec<u8>> {
-    if from.checked_add(n)?.checked_mul(8)? > b.len {
+    let end = from.checked_add(n)?.checked_mul(8)?;
+    if end > b.len {
         return None;
     }
-    Some((from..from + n).map(|k| byte(heap, b, k * 8)).collect())
+    let start = from.checked_mul(8)?;
+    Some((start..end).step_by(8).map(|i| byte(heap, b, i)).collect())
 }
 
 /// Up to `n` whole bytes of `b` from byte `from`, fewer where it ends first.
 pub(crate) fn bytes_from(heap: &Heap, b: Bits, from: u64, n: u64) -> Vec<u8> {
-    let whole = b.len / 8;
-    let from = from.min(whole);
-    let end = from.saturating_add(n).min(whole);
+    // Bit positions, clamped to the last whole byte's end.
+    let whole = whole_bits(b);
+    let start = from.saturating_mul(8).min(whole);
+    let end = from.saturating_add(n).saturating_mul(8).min(whole);
     if !b.at.is_multiple_of(8) {
-        return (from..end).map(|k| byte(heap, b, k * 8)).collect();
+        return (start..end).step_by(8).map(|i| byte(heap, b, i)).collect();
     }
     // `b` starts on a byte boundary of the owner, so each byte is one of the
     // owner's bytes unchanged.
     let d = heap.data(b.owner);
     let base = b.at / 8;
-    (from..end)
-        .map(|k| {
-            let i = base + k;
-            d.get(1 + to_usize(i / 8))
-                .map_or(0, |w| low_byte(w >> (i % 8 * 8)))
-        })
+    (start / 8..end / 8)
+        .map(|k| base.checked_add(k).map_or(0, |i| data_byte(d, i)))
         .collect()
 }
 
 /// Whether bytes `from` to `from + text.len()` of `b` are `text`, read in
 /// place.
 pub(crate) fn bytes_are(heap: &Heap, b: Bits, from: u64, text: &[u8]) -> bool {
-    let fits = (text.len() as u64)
+    let Some(end) = (text.len() as u64)
         .checked_add(from)
         .and_then(|end| end.checked_mul(8))
-        .is_some_and(|end| end <= b.len);
-    fits && text
-        .iter()
-        .zip(from..)
-        .all(|(&t, k)| byte(heap, b, k * 8) == t)
+        .filter(|end| *end <= b.len)
+    else {
+        return false;
+    };
+    let Some(start) = from.checked_mul(8) else {
+        return false;
+    };
+    text.iter()
+        .zip((start..end).step_by(8))
+        .all(|(&t, i)| byte(heap, b, i) == t)
 }
 
 /// `b` as whole bytes, the last one padded with zero bits.
 pub(crate) fn bytes(heap: &Heap, b: Bits) -> Vec<u8> {
-    (0..b.len.div_ceil(8))
-        .map(|k| byte(heap, b, k * 8))
-        .collect()
+    (0..b.len).step_by(8).map(|i| byte(heap, b, i)).collect()
+}
+
+/// Where `b`'s last whole byte ends, in bits.
+fn whole_bits(b: Bits) -> u64 {
+    b.len & !7
 }
 
 /// `b`'s whole bytes. A last byte that is not whole is left out, which is how
 /// the ASCII built-ins read it.
 pub(crate) fn whole_bytes(heap: &Heap, b: Bits) -> Vec<u8> {
-    (0..b.len / 8).map(|k| byte(heap, b, k * 8)).collect()
+    (0..whole_bits(b))
+        .step_by(8)
+        .map(|i| byte(heap, b, i))
+        .collect()
 }
 
 /// Whole byte `i` of `b`, or `None` past the last whole one.
 pub(crate) fn whole_byte(heap: &Heap, b: Bits, i: u64) -> Option<u8> {
-    (i < b.len / 8).then(|| byte(heap, b, i * 8))
+    (i < b.len / 8).then(|| i.checked_mul(8).map(|bit| byte(heap, b, bit)))?
 }
 
 /// Whether `a` and `b` hold the same bits.
 pub(crate) fn equal(heap: &Heap, a: Bits, b: Bits) -> bool {
-    a.len == b.len && (0..a.len.div_ceil(8)).all(|k| byte(heap, a, k * 8) == byte(heap, b, k * 8))
+    a.len == b.len
+        && (0..a.len)
+            .step_by(8)
+            .all(|i| byte(heap, a, i) == byte(heap, b, i))
 }
 
 /// Whether `b` holds `prefix` from bit `at`.
@@ -225,9 +264,12 @@ pub(crate) fn has_at(heap: &Heap, b: Bits, at: u64, prefix: Bits) -> bool {
     if end > b.len {
         return false;
     }
+    let Some(at) = b.at.checked_add(at) else {
+        return false;
+    };
     let window = Bits {
         owner: b.owner,
-        at: b.at + at,
+        at,
         len: prefix.len,
     };
     equal(heap, window, prefix)
@@ -235,16 +277,22 @@ pub(crate) fn has_at(heap: &Heap, b: Bits, at: u64, prefix: Bits) -> bool {
 
 /// All of `parts`, one after another, as a new owner.
 pub(crate) fn join(heap: &mut Heap, parts: &[Bits]) -> Result<Cell, Full> {
-    let len: u64 = parts.iter().map(|p| p.len).sum();
+    let len = parts
+        .iter()
+        .try_fold(0u64, |len, p| len.checked_add(p.len))
+        .filter(|len| *len <= MAX_BITS)
+        .ok_or(Full)?;
     let mut out = vec![0u8; to_usize(len.div_ceil(8))];
+    // Every position below is inside `len`, which fits, so the sums are
+    // exact.
     let mut at = 0u64;
     for p in parts {
-        for k in 0..p.len.div_ceil(8) {
-            let chunk = byte(heap, *p, k * 8);
-            let n = (p.len - k * 8).min(8);
-            put(&mut out, at + k * 8, chunk, n);
+        for i in (0..p.len).step_by(8) {
+            let chunk = byte(heap, *p, i);
+            let n = p.len.saturating_sub(i).min(8);
+            put(&mut out, at.saturating_add(i), chunk, n);
         }
-        at += p.len;
+        at = at.saturating_add(p.len);
     }
     make(heap, &out, len)
 }
@@ -253,8 +301,10 @@ pub(crate) fn join(heap: &mut Heap, parts: &[Bits]) -> Result<Cell, Full> {
 fn put(out: &mut [u8], at: u64, chunk: u8, n: u64) {
     for j in 0..n {
         if chunk & (0x80 >> j) != 0 {
-            let p = at + j;
-            if let Some(b) = out.get_mut((p / 8) as usize) {
+            let Some(p) = at.checked_add(j) else {
+                return;
+            };
+            if let Some(b) = out.get_mut(to_usize(p / 8)) {
                 *b |= 0x80 >> (p % 8);
             }
         }
@@ -264,6 +314,10 @@ fn put(out: &mut [u8], at: u64, chunk: u8, n: u64) {
 /// The low `width` bits of `n`, most significant first. A negative `n` is
 /// written as its two's complement, extended as far as `width` asks, so
 /// `<<-1:size(12)>>` is twelve ones.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "Int arithmetic grows instead of overflowing, and the modulus is at least 1"
+)]
 pub(crate) fn from_int(n: &BigInt, width: u64) -> Vec<u8> {
     let bytes = to_usize(width.div_ceil(8));
     if bytes == 0 {
@@ -273,7 +327,8 @@ pub(crate) fn from_int(n: &BigInt, width: u64) -> Vec<u8> {
     // `%` keeps the dividend's sign, so add the modulus back to land in
     // `0 .. 2^width`.
     let low = ((n % &modulus) + &modulus) % &modulus;
-    let pad = bytes as u64 * 8 - width;
+    // The zero bits after the value that fill its last byte.
+    let pad = 8u64.abs_diff(width % 8) % 8;
     let (_, be) = (low << pad).to_bytes_be();
     let mut out = vec![0u8; bytes];
     let start = bytes.saturating_sub(be.len());
@@ -288,14 +343,24 @@ pub(crate) fn from_int(n: &BigInt, width: u64) -> Vec<u8> {
 pub(crate) fn read_uint(heap: &Heap, b: Bits, at: u64, width: u64) -> BigInt {
     let window = Bits {
         owner: b.owner,
-        at: b.at + at.min(b.len),
+        at: b.at.saturating_add(at.min(b.len)),
         len: b.len.saturating_sub(at).min(width),
     };
     let n = BigInt::from_bytes_be(Sign::Plus, &bytes(heap, window));
     // `bytes` pads the window to whole bytes. Drop the padding, then add the
-    // zeros past `b`'s end that `width` still asks for.
-    let n = n >> (window.len.div_ceil(8) * 8 - window.len);
-    n << (width - window.len)
+    // zeros past `b`'s end that `width` still asks for. The window is no
+    // wider than `width`.
+    let pad = 8u64.abs_diff(window.len % 8) % 8;
+    shift(n, pad, width.abs_diff(window.len))
+}
+
+/// `n` shifted down by `down` bits and then up by `up`.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "an Int grows instead of overflowing when shifted"
+)]
+fn shift(n: BigInt, down: u64, up: u64) -> BigInt {
+    (n >> down) << up
 }
 
 /// The UTF-8 code point at bit `at` of `b`, and how many bits it took, or
@@ -316,23 +381,27 @@ pub(crate) fn read_utf8(heap: &Heap, b: Bits, at: u64) -> Option<(u32, u64)> {
     } else {
         return None;
     };
-    if at + n * 8 > b.len {
+    let bits = n.checked_mul(8)?;
+    let end = at.checked_add(bits)?;
+    if end > b.len {
         return None;
     }
-    let buf: Vec<u8> = (0..n).map(|k| byte(heap, b, at + k * 8)).collect();
+    let buf: Vec<u8> = (at..end).step_by(8).map(|i| byte(heap, b, i)).collect();
     let c = std::str::from_utf8(&buf).ok()?.chars().next()?;
-    Some((c as u32, n * 8))
+    Some((c as u32, bits))
 }
 
 /// How a binary shows, like `<<1, 2, 3>>`. A last byte that is not whole
 /// shows as `5:size(3)`.
 pub(crate) fn text(heap: &Heap, b: Bits) -> String {
-    let mut parts: Vec<String> = (0..b.len / 8)
-        .map(|k| byte(heap, b, k * 8).to_string())
+    let whole = whole_bits(b);
+    let mut parts: Vec<String> = (0..whole)
+        .step_by(8)
+        .map(|i| byte(heap, b, i).to_string())
         .collect();
     let rem = b.len % 8;
     if rem != 0 {
-        let last = byte(heap, b, b.len - rem) >> (8 - rem);
+        let last = byte(heap, b, whole) >> 8u64.abs_diff(rem);
         parts.push(format!("{last}:size({rem})"));
     }
     format!("<<{}>>", parts.join(", "))

@@ -17,6 +17,7 @@
         clippy::cast_possible_truncation,
         clippy::cast_possible_wrap,
         clippy::cast_sign_loss,
+        clippy::arithmetic_side_effects,
     )
 )]
 #![forbid(unsafe_code)]

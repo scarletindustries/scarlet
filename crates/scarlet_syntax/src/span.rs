@@ -23,7 +23,7 @@ impl Span {
             start_line: line,
             start_column: column,
             end_line: line,
-            end_column: column + 1,
+            end_column: column.saturating_add(1),
         }
     }
 
@@ -57,8 +57,8 @@ impl Span {
     /// Only the ordering matters, not the numbers.
     pub fn width(&self) -> (i32, i32) {
         (
-            self.end_line - self.start_line,
-            self.end_column - self.start_column,
+            self.end_line.saturating_sub(self.start_line),
+            self.end_column.saturating_sub(self.start_column),
         )
     }
 

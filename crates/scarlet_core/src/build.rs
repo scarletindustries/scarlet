@@ -407,7 +407,7 @@ impl CheckRun<'_> {
     }
 
     fn parse(&mut self, text: &str) -> Parsed {
-        self.counts.parses += 1;
+        self.counts.parses = self.counts.parses.saturating_add(1);
         parse(text)
     }
 
@@ -422,7 +422,7 @@ impl CheckRun<'_> {
         spec: &CheckSpec,
         parsed_cleanly: bool,
     ) -> (CheckedModule, Vec<(ModuleKey, Interface)>) {
-        self.counts.checks += 1;
+        self.counts.checks = self.counts.checks.saturating_add(1);
         let reading = Reading {
             loaded: &self.loaded,
             read: RefCell::new(Vec::new()),

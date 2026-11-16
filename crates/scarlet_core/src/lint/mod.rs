@@ -137,7 +137,7 @@ pub fn run(roots: &[PathBuf], min_bools: usize) -> Census {
     }
     paths.sort();
     for path in paths {
-        census.files += 1;
+        census.files = census.files.saturating_add(1);
         match std::fs::read_to_string(&path) {
             Ok(source) => inspect(&path, &source, min_bools, &mut census),
             Err(e) => census.uninspected.push(Uninspected {
@@ -209,7 +209,7 @@ fn inspect(path: &Path, source: &str, min_bools: usize, census: &mut Census) {
         return;
     }
 
-    census.type_decls += types.len();
+    census.type_decls = census.type_decls.saturating_add(types.len());
 
     for type_decl in &types {
         let ast::TypeBody::Variants { ctors, opaque } = &type_decl.body else {
@@ -227,7 +227,7 @@ fn inspect(path: &Path, source: &str, min_bools: usize, census: &mut Census) {
             }
             census.findings.push(Finding {
                 path: path.to_path_buf(),
-                line: ctor.identifier.span.start_line + 1,
+                line: ctor.identifier.span.start_line.saturating_add(1),
                 type_name: type_decl.identifier.name.clone(),
                 ctor_name: ctor.identifier.name.clone(),
                 opaque: *opaque,
