@@ -9,14 +9,14 @@ use std::collections::HashMap;
 use scarlet_syntax::ast::{BinaryOp, UnaryOp};
 use scarlet_syntax::span::Span;
 use scarlet_types::def::TypeDef;
-use scarlet_types::engine::{Engine, LocalScheme, NotCallable, Shape, Ty, UnifyError};
+use scarlet_types::engine::{Engine, LocalScheme, NotCallable, NotInEngine, Shape, Ty, UnifyError};
 use scarlet_types::known::Known;
 use scarlet_types::name::{Name, TypeName};
 use scarlet_types::ty::{Constraint, Type, TypeVar};
 
 use crate::declare::{DeclBody, DeclId, Declared};
 use crate::env::Env;
-use crate::error::CheckError;
+use crate::error::{CheckError, Internal};
 use crate::index::{EntityKind, Site, Use, UseKind};
 use crate::report::Report;
 use crate::resolved::*;
@@ -168,19 +168,28 @@ impl Infer<'_, '_> {
         group: &[DeclId],
         resolved: &Resolved,
     ) -> (Vec<(DeclId, typed::Function)>, Vec<typed::Const>) {
+        let mut members = Vec::with_capacity(group.len());
+        for &d in group {
+            match (self.declared.get(d), resolved.decl(d)) {
+                (Some(decl), Some(rdecl)) => members.push((d, decl, rdecl)),
+                _ => self.report.add(
+                    self.env.input.module.span,
+                    CheckError::Internal(Internal::UnknownDecl(d.0)),
+                ),
+            }
+        }
         let level = self.e.enter();
-        let sigs: Vec<(DeclId, Ty, Vec<Ty>, Ty)> = group
+        let sigs: Vec<(DeclId, Ty, Vec<Ty>, Ty)> = members
             .iter()
-            .map(|&d| {
-                let (ty, params, ret) = self.signature(resolved.decl(d));
+            .map(|&(d, _, rdecl)| {
+                let (ty, params, ret) = self.signature(rdecl);
                 (d, ty, params, ret)
             })
             .collect();
         let tys: Vec<(DeclId, Ty)> = sigs.iter().map(|&(d, ty, _, _)| (d, ty)).collect();
         let mut functions = Vec::new();
         let mut consts = Vec::new();
-        for (d, ty, params, ret) in &sigs {
-            let decl = self.declared.get(*d);
+        for ((d, ty, params, ret), &(_, decl, rdecl)) in sigs.iter().zip(&members) {
             self.hovers.push((decl.span, *ty));
             let owner = Some(self.env.site(decl.span, decl.entity()));
             let ctx = Ctx {
@@ -188,7 +197,7 @@ impl Infer<'_, '_> {
                 pending: None,
                 owner: &owner,
             };
-            match (resolved.decl(*d), &decl.body) {
+            match (rdecl, &decl.body) {
                 (
                     RDecl::Fn {
                         params: ps,
@@ -246,12 +255,22 @@ impl Infer<'_, '_> {
         let restricted = self.env.restricted.clone();
         let items: Vec<(Ty, &[TypeName])> = sigs
             .iter()
-            .map(|&(d, ty, _, _)| match resolved.decl(d) {
+            .zip(&members)
+            .map(|(&(_, ty, _, _), &(_, _, rdecl))| match rdecl {
                 RDecl::Const { .. } => (ty, &restricted[..]),
                 RDecl::Fn { .. } | RDecl::Builtin { .. } => (ty, &[][..]),
             })
             .collect();
-        let schemes = self.e.generalize_all(level, &items);
+        let schemes = match self.e.generalize_all(level, &items) {
+            Ok(schemes) => schemes,
+            Err(e) => {
+                let span = members
+                    .first()
+                    .map_or(self.env.input.module.span, |&(_, decl, _)| decl.span);
+                self.report.add(span, e.into());
+                items.iter().map(|&(ty, _)| LocalScheme::mono(ty)).collect()
+            }
+        };
         for ((d, ..), scheme) in sigs.iter().zip(schemes) {
             self.decls.insert(*d, scheme);
         }
@@ -333,25 +352,60 @@ impl Infer<'_, '_> {
         match self.e.unify(expected, given) {
             Ok(()) => true,
             Err(err) => {
-                let e = self.unify_error(err);
+                let e = self.unify_error(err).unwrap_or_else(CheckError::from);
                 self.report.add(span, e);
                 false
             }
         }
     }
 
-    fn unify_error(&self, err: UnifyError) -> CheckError {
-        match err {
+    fn unify_error(&self, err: UnifyError) -> Result<CheckError, NotInEngine> {
+        Ok(match err {
             UnifyError::Mismatch {
                 expected,
                 given,
                 arity,
             } => CheckError::Mismatch {
-                expected: self.e.zonk(expected),
-                given: self.e.zonk(given),
+                expected: self.e.zonk(expected)?,
+                given: self.e.zonk(given)?,
                 arity: arity.map(|a| (a.expected, a.given)),
             },
             UnifyError::Recursive => CheckError::InfiniteType,
+            UnifyError::NotInEngine(e) => e.into(),
+        })
+    }
+
+    /// What `t` is now. `None` means a checker bug, already reported at
+    /// `span`.
+    fn shape(&mut self, t: Ty, span: Span) -> Option<Shape> {
+        match self.e.shape(t) {
+            Ok(shape) => Some(shape),
+            Err(e) => {
+                self.report.add(span, e.into());
+                None
+            }
+        }
+    }
+
+    /// Report the error `make` builds from `t`'s finished type. If `t` can't
+    /// be read, the checker bug is reported in its place.
+    fn report_ty(&mut self, span: Span, t: Ty, make: impl FnOnce(Type) -> CheckError) {
+        let e = match self.e.zonk(t) {
+            Ok(ty) => make(ty),
+            Err(e) => e.into(),
+        };
+        self.report.add(span, e);
+    }
+
+    /// A fresh use of `scheme`. On a checker bug, reported at `span`, the use
+    /// gets a variable nothing solves.
+    fn instantiate(&mut self, scheme: &LocalScheme, span: Span) -> Ty {
+        match self.e.instantiate(scheme) {
+            Ok(t) => t,
+            Err(e) => {
+                self.report.add(span, e.into());
+                self.e.fresh()
+            }
         }
     }
 
@@ -430,7 +484,13 @@ impl Infer<'_, '_> {
             None => value.ty,
         };
         let restricted = self.env.restricted.clone();
-        let scheme = self.e.generalize(level, ty, &restricted);
+        let scheme = match self.e.generalize(level, ty, &restricted) {
+            Ok(scheme) => scheme,
+            Err(e) => {
+                self.report.add(value_span, e.into());
+                LocalScheme::mono(ty)
+            }
+        };
         self.define(binder, scheme);
         let kind = match pattern.kind {
             RPatKind::Bind(b) => PatternKind::Bind(b),
@@ -476,7 +536,7 @@ impl Infer<'_, '_> {
     /// can read their fields.
     fn expr_hinted(&mut self, x: &RExpr, hint: Option<Ty>, ctx: Ctx<'_>) -> Expr {
         if let (Some(h), RKind::Lambda(l)) = (hint, &x.kind)
-            && let Shape::Fn(params, _) = self.e.shape(h)
+            && let Some(Shape::Fn(params, _)) = self.shape(h, x.span)
             && params.len() == l.params.len()
         {
             let (ty, lambda) = self.lambda(l, Some(params), ctx);
@@ -558,8 +618,9 @@ impl Infer<'_, '_> {
                 index_span,
             } => {
                 let tuple = self.boxed(tuple, ctx);
-                match self.e.shape(tuple.ty) {
-                    Shape::Tuple(elems) => match elems.get(*index as usize) {
+                match self.shape(tuple.ty, *index_span) {
+                    None => self.error(),
+                    Some(Shape::Tuple(elems)) => match elems.get(*index as usize) {
                         Some(&ty) => (
                             ty,
                             ExprKind::TupleIndex {
@@ -578,7 +639,7 @@ impl Infer<'_, '_> {
                             self.error()
                         }
                     },
-                    Shape::Var(_) | Shape::Con(..) | Shape::Fn(..) => {
+                    Some(Shape::Var(_) | Shape::Con(..) | Shape::Fn(..)) => {
                         self.report
                             .add(*index_span, CheckError::NotATuple { index: *index });
                         self.error()
@@ -735,7 +796,7 @@ impl Infer<'_, '_> {
                 let ty = match ctx.pending(*b) {
                     Some(t) => t,
                     None => match self.binders.get(b).cloned() {
-                        Some(s) => self.e.instantiate(&s),
+                        Some(s) => self.instantiate(&s, span),
                         None => return self.unbound(span),
                     },
                 };
@@ -745,7 +806,7 @@ impl Infer<'_, '_> {
                 let ty = match ctx.group(*d) {
                     Some(t) => t,
                     None => match self.decls.get(d).cloned() {
-                        Some(s) => self.e.instantiate(&s),
+                        Some(s) => self.instantiate(&s, span),
                         None => return self.unbound(span),
                     },
                 };
@@ -766,7 +827,8 @@ impl Infer<'_, '_> {
     /// module so this can't happen; if it ever does, it is an error, never a
     /// guess.
     fn unbound(&mut self, span: Span) -> (Ty, ExprKind) {
-        self.report.add(span, CheckError::ReadBeforeTyped);
+        self.report
+            .add(span, CheckError::Internal(Internal::ReadBeforeTyped));
         self.error()
     }
 
@@ -885,8 +947,14 @@ impl Infer<'_, '_> {
                 (params, ret)
             }
             Err(NotCallable::NotFn) => {
-                self.report
-                    .add(span, CheckError::NotCallable(self.e.zonk(callee.ty)));
+                self.report_ty(span, callee.ty, CheckError::NotCallable);
+                for a in args {
+                    self.expr(&a.value, ctx);
+                }
+                return self.error();
+            }
+            Err(NotCallable::NotInEngine(e)) => {
+                self.report.add(span, e.into());
                 for a in args {
                     self.expr(&a.value, ctx);
                 }
@@ -934,9 +1002,9 @@ impl Infer<'_, '_> {
         let spread = spread.as_ref();
         let ty = self.e.instantiate_scheme(scheme);
         self.hovers.push((*at, ty));
-        let (params, result) = match self.e.shape(ty) {
-            Shape::Fn(params, ret) => (params, ret),
-            Shape::Var(_) | Shape::Con(..) | Shape::Tuple(_) => (Vec::new(), ty),
+        let (params, result) = match self.shape(ty, *at) {
+            Some(Shape::Fn(params, ret)) => (params, ret),
+            Some(Shape::Var(_) | Shape::Con(..) | Shape::Tuple(_)) | None => (Vec::new(), ty),
         };
         let spread = spread.map(|(at, base)| {
             let base = self.expr(base, ctx);
@@ -996,7 +1064,7 @@ impl Infer<'_, '_> {
         unfilled: &[usize],
         span: Span,
     ) -> Vec<(u32, FieldAt)> {
-        let Shape::Con(type_name, type_args) = self.e.shape(result) else {
+        let Some(Shape::Con(type_name, type_args)) = self.shape(result, span) else {
             return Vec::new();
         };
         let Some(def) = self.type_def(&type_name).cloned() else {
@@ -1033,7 +1101,7 @@ impl Infer<'_, '_> {
         span: Span,
         ctx: Ctx<'_>,
     ) -> Option<(Ty, FieldAt)> {
-        let (type_name, type_args) = match self.e.shape(receiver) {
+        let (type_name, type_args) = match self.shape(receiver, span)? {
             Shape::Con(n, a) => (n, a),
             Shape::Var(_) => {
                 self.report
@@ -1041,13 +1109,10 @@ impl Infer<'_, '_> {
                 return None;
             }
             Shape::Fn(..) | Shape::Tuple(_) => {
-                self.report.add(
-                    span,
-                    CheckError::NoFieldOnType {
-                        ty: self.e.zonk(receiver),
-                        label: label.clone(),
-                    },
-                );
+                self.report_ty(span, receiver, |ty| CheckError::NoFieldOnType {
+                    ty,
+                    label: label.clone(),
+                });
                 return None;
             }
         };
@@ -1160,16 +1225,16 @@ impl Infer<'_, '_> {
         let value = self.boxed(value, ctx);
         let success = self.e.fresh();
         let known = self.e.known().clone();
-        let shape = match self.e.shape(value.ty) {
-            Shape::Con(n, _) if n == known.option => Some(OrShape::Option),
-            Shape::Con(n, _) if n == known.result => Some(OrShape::Result),
-            Shape::Con(..) | Shape::Var(_) | Shape::Fn(..) | Shape::Tuple(_) => None,
+        let shape = match self.shape(value.ty, value.span) {
+            Some(Shape::Con(n, _)) if n == known.option => Some(OrShape::Option),
+            Some(Shape::Con(n, _)) if n == known.result => Some(OrShape::Result),
+            Some(Shape::Con(..) | Shape::Var(_) | Shape::Fn(..) | Shape::Tuple(_)) => {
+                self.report_ty(value.span, value.ty, CheckError::OrNeedsOptionOrResult);
+                None
+            }
+            None => None,
         };
         let Some(shape) = shape else {
-            self.report.add(
-                value.span,
-                CheckError::OrNeedsOptionOrResult(self.e.zonk(value.ty)),
-            );
             if let Some((b, _)) = receiver {
                 let t = self.e.fresh();
                 self.define(b, LocalScheme::mono(t));
@@ -1347,8 +1412,9 @@ impl Infer<'_, '_> {
             } => {
                 let ty = self.e.instantiate_scheme(scheme);
                 self.hovers.push((*name_at, ty));
-                match self.e.shape(ty) {
-                    Shape::Fn(params, ret) => {
+                match self.shape(ty, *name_at) {
+                    None => at(PatternKind::Error),
+                    Some(Shape::Fn(params, ret)) => {
                         let ok = self.unify(expected, ret, p.span);
                         let fields = fields
                             .iter()
@@ -1367,7 +1433,7 @@ impl Infer<'_, '_> {
                             PatternKind::Error
                         })
                     }
-                    Shape::Var(_) | Shape::Con(..) | Shape::Tuple(_) => at(fits(
+                    Some(Shape::Var(_) | Shape::Con(..) | Shape::Tuple(_)) => at(fits(
                         self,
                         ty,
                         PatternKind::Ctor {

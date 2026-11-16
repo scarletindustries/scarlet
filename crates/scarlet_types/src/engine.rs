@@ -96,6 +96,26 @@ impl LocalScheme {
     }
 }
 
+/// An id that isn't in the engine it was handed to. Only an engine makes its
+/// ids, and its arenas never shrink, so this means the id came from another
+/// module's engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotInEngine {
+    Ty(Ty),
+    Var(VarId),
+}
+
+impl std::fmt::Display for NotInEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NotInEngine::Ty(t) => write!(f, "type {} isn't in this module's engine", t.0),
+            NotInEngine::Var(v) => {
+                write!(f, "type variable {} isn't in this module's engine", v.0)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum UnifyError {
     Mismatch {
@@ -105,6 +125,13 @@ pub enum UnifyError {
     },
     /// A variable would have to contain itself, as `x(x)` asks for.
     Recursive,
+    NotInEngine(NotInEngine),
+}
+
+impl From<NotInEngine> for UnifyError {
+    fn from(e: NotInEngine) -> Self {
+        UnifyError::NotInEngine(e)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -125,7 +152,7 @@ impl UnifyError {
                 given: expected,
                 arity,
             },
-            UnifyError::Recursive => UnifyError::Recursive,
+            e @ (UnifyError::Recursive | UnifyError::NotInEngine(_)) => e,
         }
     }
 
@@ -138,7 +165,7 @@ impl UnifyError {
                 given,
                 arity,
             },
-            UnifyError::Recursive => UnifyError::Recursive,
+            e @ (UnifyError::Recursive | UnifyError::NotInEngine(_)) => e,
         }
     }
 }
@@ -160,6 +187,13 @@ pub enum NotCallable {
         ret: Ty,
     },
     NotFn,
+    NotInEngine(NotInEngine),
+}
+
+impl From<NotInEngine> for NotCallable {
+    fn from(e: NotInEngine) -> Self {
+        NotCallable::NotInEngine(e)
+    }
 }
 
 /// What a type is, as far as inference knows right now.
@@ -207,22 +241,16 @@ impl Engine {
         self.nodes.push(node)
     }
 
-    // A `Ty` or `VarId` is only made by pushing into this engine's arenas,
-    // which never shrink, so a lookup misses only for one from another
-    // engine.
-    #[allow(clippy::indexing_slicing)]
-    fn node(&self, t: Ty) -> &Node {
-        &self.nodes[t]
+    fn node(&self, t: Ty) -> Result<&Node, NotInEngine> {
+        self.nodes.get(t).ok_or(NotInEngine::Ty(t))
     }
 
-    #[allow(clippy::indexing_slicing)]
-    fn var(&self, v: VarId) -> &Var {
-        &self.vars[v]
+    fn var(&self, v: VarId) -> Result<&Var, NotInEngine> {
+        self.vars.get(v).ok_or(NotInEngine::Var(v))
     }
 
-    #[allow(clippy::indexing_slicing)]
-    fn var_mut(&mut self, v: VarId) -> &mut Var {
-        &mut self.vars[v]
+    fn var_mut(&mut self, v: VarId) -> Result<&mut Var, NotInEngine> {
+        self.vars.get_mut(v).ok_or(NotInEngine::Var(v))
     }
 
     fn new_var(&mut self, state: VarState, name: Option<Name>) -> Ty {
@@ -308,24 +336,30 @@ impl Engine {
     }
 
     /// The type `t` stands for, following links.
-    fn find(&self, t: Ty) -> Ty {
+    fn find(&self, t: Ty) -> Result<Ty, NotInEngine> {
         let mut r = t;
-        while let Node::Var(v) = *self.node(r)
-            && let VarState::Link(next) = self.var(v).state
+        while let Node::Var(v) = *self.node(r)?
+            && let VarState::Link(next) = self.var(v)?.state
         {
             r = next;
         }
-        r
+        Ok(r)
+    }
+
+    /// The node `t` stands for, following links.
+    fn root(&self, t: Ty) -> Result<(Ty, &Node), NotInEngine> {
+        let r = self.find(t)?;
+        Ok((r, self.node(r)?))
     }
 
     /// What a type is, as far as inference knows right now.
-    pub fn shape(&self, t: Ty) -> Shape {
-        match self.node(self.find(t)).clone() {
+    pub fn shape(&self, t: Ty) -> Result<Shape, NotInEngine> {
+        Ok(match self.root(t)?.1.clone() {
             Node::Var(v) => Shape::Var(v),
             Node::Con { name, args } => Shape::Con(name, args),
             Node::Fn { params, ret } => Shape::Fn(params, ret),
             Node::Tuple(elems) => Shape::Tuple(elems),
-        }
+        })
     }
 
     pub fn enter(&mut self) -> Level {
@@ -349,24 +383,29 @@ impl Engine {
         let r = self.unify_in(expected, given, &mut trail);
         if r.is_err() {
             for (v, old) in trail.into_iter().rev() {
-                self.var_mut(v).state = old;
+                // `set` read `v` before it trailed it, so it's here.
+                if let Some(var) = self.vars.get_mut(v) {
+                    var.state = old;
+                }
             }
         }
         r
     }
 
-    fn set(&mut self, v: VarId, state: VarState, trail: &mut Trail) {
-        trail.push((v, self.var(v).state));
-        self.var_mut(v).state = state;
+    fn set(&mut self, v: VarId, state: VarState, trail: &mut Trail) -> Result<(), NotInEngine> {
+        let var = self.var_mut(v)?;
+        trail.push((v, var.state));
+        var.state = state;
+        Ok(())
     }
 
     fn unify_in(&mut self, expected: Ty, given: Ty, trail: &mut Trail) -> Result<(), UnifyError> {
-        let a = self.find(expected);
-        let b = self.find(given);
+        let a = self.find(expected)?;
+        let b = self.find(given)?;
         if a == b {
             return Ok(());
         }
-        match (self.node(a).clone(), self.node(b).clone()) {
+        match (self.node(a)?.clone(), self.node(b)?.clone()) {
             (Node::Var(x), Node::Var(y)) if x == y => Ok(()),
             (Node::Var(x), _) => self.unify_var(x, a, b, trail),
             (_, Node::Var(_)) => self.unify_in(b, a, trail).map_err(UnifyError::flip),
@@ -432,36 +471,36 @@ impl Engine {
         ty: Ty,
         trail: &mut Trail,
     ) -> Result<(), UnifyError> {
-        match self.var(var).state {
+        match self.var(var)?.state {
             VarState::Link(_) => Err(mismatch(var_ty, ty)),
             VarState::Rigid { constraint, .. } => {
                 // A rigid variable only absorbs an unbound one, which then
                 // links to it. It must already guarantee that one's
                 // constraint, because linking drops it.
-                if let Node::Var(other) = *self.node(ty)
+                if let Node::Var(other) = *self.node(ty)?
                     && let VarState::Unbound {
                         constraint: required,
                         ..
-                    } = self.var(other).state
+                    } = self.var(other)?.state
                 {
                     if let Some(req) = required
                         && !constraint.is_some_and(|c| c.implies(req))
                     {
                         return Err(mismatch(var_ty, ty));
                     }
-                    self.set(other, VarState::Link(var_ty), trail);
+                    self.set(other, VarState::Link(var_ty), trail)?;
                     return Ok(());
                 }
                 Err(mismatch(var_ty, ty))
             }
             VarState::Unbound { level, constraint } => {
-                if self.occurs_and_lower(var, level, ty, trail) {
+                if self.occurs_and_lower(var, level, ty, trail)? {
                     return Err(UnifyError::Recursive);
                 }
                 if let Some(c) = constraint {
                     self.meet_constraint(c, level, var_ty, ty, trail)?;
                 }
-                self.set(var, VarState::Link(ty), trail);
+                self.set(var, VarState::Link(ty), trail)?;
                 Ok(())
             }
         }
@@ -477,8 +516,8 @@ impl Engine {
         ty: Ty,
         trail: &mut Trail,
     ) -> Result<(), UnifyError> {
-        match self.node(ty).clone() {
-            Node::Var(other) => match self.var(other).state {
+        match self.node(ty)?.clone() {
+            Node::Var(other) => match self.var(other)?.state {
                 VarState::Unbound {
                     level: other_level,
                     constraint: other_c,
@@ -490,7 +529,7 @@ impl Engine {
                             None => c,
                         }),
                     };
-                    self.set(other, state, trail);
+                    self.set(other, state, trail)?;
                     Ok(())
                 }
                 VarState::Rigid { constraint: rc, .. } => {
@@ -513,40 +552,48 @@ impl Engine {
     /// Whether `var` occurs in `t`. On the way, every unbound variable in `t`
     /// deeper than `level` comes up to it, because `t` is about to be visible
     /// wherever `var` is.
-    fn occurs_and_lower(&mut self, var: VarId, level: u32, t: Ty, trail: &mut Trail) -> bool {
-        let r = self.find(t);
-        match self.node(r).clone() {
+    fn occurs_and_lower(
+        &mut self,
+        var: VarId,
+        level: u32,
+        t: Ty,
+        trail: &mut Trail,
+    ) -> Result<bool, NotInEngine> {
+        let (_, node) = self.root(t)?;
+        let children = match node.clone() {
             Node::Var(v) => {
                 if v == var {
-                    return true;
+                    return Ok(true);
                 }
                 if let VarState::Unbound {
                     level: l,
                     constraint,
-                } = self.var(v).state
+                } = self.var(v)?.state
                     && l > level
                 {
-                    self.set(v, VarState::Unbound { level, constraint }, trail);
+                    self.set(v, VarState::Unbound { level, constraint }, trail)?;
                 }
-                false
+                return Ok(false);
             }
-            Node::Con { args, .. } | Node::Tuple(args) => args
-                .iter()
-                .any(|&a| self.occurs_and_lower(var, level, a, trail)),
-            Node::Fn { params, ret } => {
+            Node::Con { args, .. } | Node::Tuple(args) => args,
+            Node::Fn { mut params, ret } => {
+                params.push(ret);
                 params
-                    .iter()
-                    .any(|&p| self.occurs_and_lower(var, level, p, trail))
-                    || self.occurs_and_lower(var, level, ret, trail)
+            }
+        };
+        for c in children {
+            if self.occurs_and_lower(var, level, c, trail)? {
+                return Ok(true);
             }
         }
+        Ok(false)
     }
 
     /// The parameters and return type of `t` called with `arity` arguments.
     /// An unbound variable becomes a function of that arity.
     pub fn callable(&mut self, t: Ty, arity: usize) -> Result<(Vec<Ty>, Ty), NotCallable> {
-        let r = self.find(t);
-        match self.node(r).clone() {
+        let (r, node) = self.root(t)?;
+        match node.clone() {
             Node::Fn { params, ret } => {
                 if params.len() == arity {
                     Ok((params, ret))
@@ -554,14 +601,17 @@ impl Engine {
                     Err(NotCallable::Arity { params, ret })
                 }
             }
-            Node::Var(v) => match self.var(v).state {
+            Node::Var(v) => match self.var(v)?.state {
                 VarState::Unbound { .. } => {
                     let params: Vec<Ty> = (0..arity).map(|_| self.fresh()).collect();
                     let ret = self.fresh();
                     let f = self.fun(params.clone(), ret);
                     match self.unify(r, f) {
                         Ok(()) => Ok((params, ret)),
-                        Err(_) => Err(NotCallable::NotFn),
+                        Err(UnifyError::NotInEngine(e)) => Err(e.into()),
+                        Err(UnifyError::Mismatch { .. } | UnifyError::Recursive) => {
+                            Err(NotCallable::NotFn)
+                        }
                     }
                 }
                 VarState::Rigid { .. } | VarState::Link(_) => Err(NotCallable::NotFn),
@@ -580,10 +630,16 @@ impl Engine {
     /// one live value be written at one type and read at another. A weak
     /// variable comes up to the outer level, so no generalisation out there
     /// can quantify it either.
-    pub fn generalize(&mut self, level: Level, ty: Ty, restricted: &[TypeName]) -> LocalScheme {
-        self.generalize_all(level, &[(ty, restricted)])
+    pub fn generalize(
+        &mut self,
+        level: Level,
+        ty: Ty,
+        restricted: &[TypeName],
+    ) -> Result<LocalScheme, NotInEngine> {
+        Ok(self
+            .generalize_all(level, &[(ty, restricted)])?
             .pop()
-            .unwrap_or(LocalScheme::mono(ty))
+            .unwrap_or(LocalScheme::mono(ty)))
     }
 
     /// [`Engine::generalize`] for several types made at one level, like the
@@ -592,7 +648,7 @@ impl Engine {
         &mut self,
         level: Level,
         items: &[(Ty, &[TypeName])],
-    ) -> Vec<LocalScheme> {
+    ) -> Result<Vec<LocalScheme>, NotInEngine> {
         self.leave(level);
         items
             .iter()
@@ -600,50 +656,58 @@ impl Engine {
             .collect()
     }
 
-    fn quantify(&mut self, ty: Ty, restricted: &[TypeName]) -> LocalScheme {
+    fn quantify(&mut self, ty: Ty, restricted: &[TypeName]) -> Result<LocalScheme, NotInEngine> {
         let mut weak = HashSet::new();
-        self.collect_weak(ty, restricted, false, &mut weak);
+        self.collect_weak(ty, restricted, false, &mut weak)?;
+        let outer = self.level;
         for &v in &weak {
-            if let VarState::Unbound { level, constraint } = self.var(v).state
-                && level > self.level
+            let var = self.var_mut(v)?;
+            if let VarState::Unbound { level, constraint } = var.state
+                && level > outer
             {
-                self.var_mut(v).state = VarState::Unbound {
-                    level: self.level,
+                var.state = VarState::Unbound {
+                    level: outer,
                     constraint,
                 };
             }
         }
         let mut vars = Vec::new();
-        self.collect_generalizable(ty, &weak, &mut vars);
-        LocalScheme { vars, ty }
+        self.collect_generalizable(ty, &weak, &mut vars)?;
+        Ok(LocalScheme { vars, ty })
     }
 
-    fn collect_generalizable(&mut self, t: Ty, weak: &HashSet<VarId>, out: &mut Vec<VarId>) {
-        let r = self.find(t);
-        match self.node(r).clone() {
+    fn collect_generalizable(
+        &mut self,
+        t: Ty,
+        weak: &HashSet<VarId>,
+        out: &mut Vec<VarId>,
+    ) -> Result<(), NotInEngine> {
+        let children = match self.root(t)?.1.clone() {
             Node::Var(v) => {
                 if out.contains(&v) || weak.contains(&v) {
-                    return;
+                    return Ok(());
                 }
-                match self.var(v).state {
-                    VarState::Unbound { level, constraint } if level > self.level => {
-                        self.var_mut(v).state = VarState::Rigid { level, constraint };
+                let outer = self.level;
+                let var = self.var_mut(v)?;
+                match var.state {
+                    VarState::Unbound { level, constraint } if level > outer => {
+                        var.state = VarState::Rigid { level, constraint };
                         out.push(v);
                     }
-                    VarState::Rigid { level, .. } if level > self.level => out.push(v),
+                    VarState::Rigid { level, .. } if level > outer => out.push(v),
                     VarState::Unbound { .. } | VarState::Rigid { .. } | VarState::Link(_) => {}
                 }
+                return Ok(());
             }
-            Node::Con { args, .. } | Node::Tuple(args) => args
-                .iter()
-                .for_each(|&a| self.collect_generalizable(a, weak, out)),
-            Node::Fn { params, ret } => {
+            Node::Con { args, .. } | Node::Tuple(args) => args,
+            Node::Fn { mut params, ret } => {
+                params.push(ret);
                 params
-                    .iter()
-                    .for_each(|&p| self.collect_generalizable(p, weak, out));
-                self.collect_generalizable(ret, weak, out);
             }
-        }
+        };
+        children
+            .into_iter()
+            .try_for_each(|c| self.collect_generalizable(c, weak, out))
     }
 
     fn collect_weak(
@@ -652,73 +716,80 @@ impl Engine {
         restricted: &[TypeName],
         inside: bool,
         weak: &mut HashSet<VarId>,
-    ) {
-        match self.node(self.find(t)) {
+    ) -> Result<(), NotInEngine> {
+        match self.root(t)?.1 {
             Node::Var(v) => {
                 if inside {
                     weak.insert(*v);
                 }
+                Ok(())
             }
             Node::Con { name, args } => {
                 let inside = inside || restricted.contains(name);
                 args.iter()
-                    .for_each(|&a| self.collect_weak(a, restricted, inside, weak));
+                    .try_for_each(|&a| self.collect_weak(a, restricted, inside, weak))
             }
             Node::Fn { params, ret } => {
-                if inside {
-                    params
-                        .iter()
-                        .for_each(|&p| self.collect_weak(p, restricted, true, weak));
-                    self.collect_weak(*ret, restricted, true, weak);
+                if !inside {
+                    return Ok(());
                 }
+                params
+                    .iter()
+                    .chain([ret])
+                    .try_for_each(|&p| self.collect_weak(p, restricted, true, weak))
             }
             Node::Tuple(elems) => elems
                 .iter()
-                .for_each(|&e| self.collect_weak(e, restricted, inside, weak)),
+                .try_for_each(|&e| self.collect_weak(e, restricted, inside, weak)),
         }
     }
 
     /// A fresh copy of `scheme.ty`, with a new variable for each of its
     /// generic ones.
-    pub fn instantiate(&mut self, scheme: &LocalScheme) -> Ty {
+    pub fn instantiate(&mut self, scheme: &LocalScheme) -> Result<Ty, NotInEngine> {
         if scheme.vars.is_empty() {
-            return scheme.ty;
+            return Ok(scheme.ty);
         }
-        let fresh: Vec<(VarId, Ty)> = scheme
+        let fresh = scheme
             .vars
             .iter()
             .map(|&v| {
-                let constraint = match self.var(v).state {
+                let var = self.var(v)?;
+                let constraint = match var.state {
                     VarState::Unbound { constraint, .. } | VarState::Rigid { constraint, .. } => {
                         constraint
                     }
                     VarState::Link(_) => None,
                 };
-                let name = self.var(v).name.clone();
-                (v, self.fresh_named(constraint, name))
+                let name = var.name.clone();
+                Ok((v, self.fresh_named(constraint, name)))
             })
-            .collect();
+            .collect::<Result<Vec<(VarId, Ty)>, NotInEngine>>()?;
         self.copy_with(scheme.ty, &fresh)
     }
 
-    fn copy_with(&mut self, t: Ty, subst: &[(VarId, Ty)]) -> Ty {
-        let r = self.find(t);
-        match self.node(r).clone() {
+    fn copy_with(&mut self, t: Ty, subst: &[(VarId, Ty)]) -> Result<Ty, NotInEngine> {
+        let (r, node) = self.root(t)?;
+        Ok(match node.clone() {
             Node::Var(v) => subst.iter().find(|(q, _)| *q == v).map_or(r, |&(_, t)| t),
             Node::Con { name, args } => {
-                let args = args.iter().map(|&a| self.copy_with(a, subst)).collect();
+                let args = self.copy_all(&args, subst)?;
                 self.con(name, args)
             }
             Node::Fn { params, ret } => {
-                let params = params.iter().map(|&p| self.copy_with(p, subst)).collect();
-                let ret = self.copy_with(ret, subst);
+                let params = self.copy_all(&params, subst)?;
+                let ret = self.copy_with(ret, subst)?;
                 self.fun(params, ret)
             }
             Node::Tuple(elems) => {
-                let elems = elems.iter().map(|&e| self.copy_with(e, subst)).collect();
+                let elems = self.copy_all(&elems, subst)?;
                 self.tuple(elems)
             }
-        }
+        })
+    }
+
+    fn copy_all(&mut self, ts: &[Ty], subst: &[(VarId, Ty)]) -> Result<Vec<Ty>, NotInEngine> {
+        ts.iter().map(|&t| self.copy_with(t, subst)).collect()
     }
 
     /// Bring a finished type into this engine. `subst` gives the engine type
@@ -756,30 +827,30 @@ impl Engine {
     }
 
     /// The finished type `t` stands for now.
-    pub fn zonk(&self, t: Ty) -> Type {
-        match self.node(self.find(t)) {
-            Node::Var(v) => Type::Var(self.type_var(*v)),
-            Node::Con { name, args } => {
-                Type::named(name.clone(), args.iter().map(|&a| self.zonk(a)).collect())
-            }
-            Node::Fn { params, ret } => Type::function(
-                params.iter().map(|&p| self.zonk(p)).collect(),
-                self.zonk(*ret),
-            ),
-            Node::Tuple(elems) => Type::tuple(elems.iter().map(|&e| self.zonk(e)).collect()),
-        }
+    pub fn zonk(&self, t: Ty) -> Result<Type, NotInEngine> {
+        Ok(match self.root(t)?.1 {
+            Node::Var(v) => Type::Var(self.type_var(*v)?),
+            Node::Con { name, args } => Type::named(name.clone(), self.zonk_all(args)?),
+            Node::Fn { params, ret } => Type::function(self.zonk_all(params)?, self.zonk(*ret)?),
+            Node::Tuple(elems) => Type::tuple(self.zonk_all(elems)?),
+        })
     }
 
-    fn type_var(&self, v: VarId) -> TypeVar {
-        let constraint = match self.var(v).state {
+    fn zonk_all(&self, ts: &[Ty]) -> Result<Vec<Type>, NotInEngine> {
+        ts.iter().map(|&t| self.zonk(t)).collect()
+    }
+
+    fn type_var(&self, v: VarId) -> Result<TypeVar, NotInEngine> {
+        let var = self.var(v)?;
+        let constraint = match var.state {
             VarState::Unbound { constraint, .. } | VarState::Rigid { constraint, .. } => constraint,
             VarState::Link(_) => None,
         };
-        TypeVar {
+        Ok(TypeVar {
             id: v.0,
-            name: self.var(v).name.clone(),
+            name: var.name.clone(),
             constraint,
-        }
+        })
     }
 
     /// End inference. What is left can only be read.
@@ -797,17 +868,21 @@ pub struct Types {
 }
 
 impl Types {
-    pub fn get(&self, t: Ty) -> Type {
+    pub fn get(&self, t: Ty) -> Result<Type, NotInEngine> {
         self.engine.zonk(t)
     }
 
     /// A scheme, finished. Quantified variables are rigid, so each is still a
     /// root.
-    pub fn scheme(&self, s: &LocalScheme) -> Scheme {
-        Scheme {
-            vars: s.vars.iter().map(|&v| self.engine.type_var(v)).collect(),
-            ty: self.get(s.ty),
-        }
+    pub fn scheme(&self, s: &LocalScheme) -> Result<Scheme, NotInEngine> {
+        Ok(Scheme {
+            vars: s
+                .vars
+                .iter()
+                .map(|&v| self.engine.type_var(v))
+                .collect::<Result<_, _>>()?,
+            ty: self.get(s.ty)?,
+        })
     }
 
     pub fn known(&self) -> &Known {
@@ -835,7 +910,7 @@ mod tests {
         let v = e.fresh();
         let i = e.int();
         assert!(e.unify(v, i).is_ok());
-        assert_eq!(e.zonk(v).to_string(), "Int");
+        assert_eq!(e.zonk(v).unwrap().to_string(), "Int");
     }
 
     #[test]
@@ -864,7 +939,7 @@ mod tests {
         let right = e.fun(vec![s, s], i);
         assert!(e.unify(left, right).is_err());
         assert!(
-            matches!(e.shape(a), Shape::Var(_)),
+            matches!(e.shape(a), Ok(Shape::Var(_))),
             "`a` stayed joined to String"
         );
     }
@@ -876,10 +951,10 @@ mod tests {
         let level = e.enter();
         let inner = e.fresh();
         let f = e.fun(vec![inner], outer);
-        let s = e.generalize(level, f, &[]);
+        let s = e.generalize(level, f, &[]).unwrap();
         assert_eq!(s.vars.len(), 1);
-        let a = e.instantiate(&s);
-        let b = e.instantiate(&s);
+        let a = e.instantiate(&s).unwrap();
+        let b = e.instantiate(&s).unwrap();
         let i = e.int();
         let st = e.string();
         let Ok((pa, _)) = e.callable(a, 1) else {

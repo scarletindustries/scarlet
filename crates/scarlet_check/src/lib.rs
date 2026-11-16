@@ -159,9 +159,6 @@ pub fn check_module<'a>(input: &'a CheckInput<'a>) -> CheckedModule {
     let (interface, found) = interface::interface(&env, &declared, &defs, &schemes, &types);
     report.absorb(found);
 
-    let report::Report {
-        diags, defs, uses, ..
-    } = report;
     let binders: Vec<typed::Binder> = resolved
         .binders
         .iter()
@@ -178,16 +175,20 @@ pub fn check_module<'a>(input: &'a CheckInput<'a>) -> CheckedModule {
         .map(|(b, info)| (info.span, b.ty))
         .collect();
     spots.extend(hovers);
+    let mut hovers = Vec::with_capacity(spots.len());
+    for (span, ty) in spots {
+        match types.get(ty) {
+            Ok(ty) => hovers.push(index::Hover { span, ty }),
+            Err(e) => report.add(span, e.into()),
+        }
+    }
+    let report::Report {
+        diags, defs, uses, ..
+    } = report;
     let index = SourceIndex {
         defs,
         uses,
-        hovers: spots
-            .into_iter()
-            .map(|(span, ty)| index::Hover {
-                span,
-                ty: types.get(ty),
-            })
-            .collect(),
+        hovers,
         doc: input.doc.clone(),
     };
     let clean =

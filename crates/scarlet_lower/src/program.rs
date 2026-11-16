@@ -23,9 +23,10 @@ use scarlet_ir::core_ir::{
     Abi, Const, ConstId, CoreFn, FuncIdx, GlobalSlot, HttpTypes, IoErrors, JoinId, JsonTypes,
     LocalId, LoweredFn, ParseReasons, Program, Radix, TypeNames, VariantNames, VariantRef,
 };
-use scarlet_ir::rty::{PrimIds, RTy, ResolvedPool};
+use scarlet_ir::rty::{ForeignRTy, PrimIds, RTy, ResolvedPool};
 use scarlet_ir::tivec::TiVec;
 use scarlet_types::def::TypeDef;
+use scarlet_types::engine::NotInEngine;
 use scarlet_types::known::Known;
 use scarlet_types::name::{CtorName, ModuleKey, Name, TypeName, ValueName};
 use scarlet_types::ty::Type;
@@ -86,6 +87,24 @@ pub enum InternalLinkError {
     BindingOutOfRange(BindingId),
     /// A field or element index too wide for an instruction to carry.
     IndexTooWide(usize),
+    /// A body names a binder its module never made.
+    UnknownBinder(BinderId),
+    /// A type that isn't in the pool lowering builds.
+    ForeignRTy(ForeignRTy),
+    /// A type that isn't in its module's frozen types.
+    NotInEngine(NotInEngine),
+}
+
+impl From<ForeignRTy> for InternalLinkError {
+    fn from(e: ForeignRTy) -> Self {
+        InternalLinkError::ForeignRTy(e)
+    }
+}
+
+impl From<NotInEngine> for InternalLinkError {
+    fn from(e: NotInEngine) -> Self {
+        InternalLinkError::NotInEngine(e)
+    }
 }
 
 impl From<InternalLinkError> for LinkError {
@@ -138,6 +157,9 @@ impl fmt::Display for InternalLinkError {
                 write!(f, "{b} is past the end of its function's binder table")
             }
             E::IndexTooWide(i) => write!(f, "index {i} is too wide for an instruction"),
+            E::UnknownBinder(b) => write!(f, "binder {} isn't in its module", b.0),
+            E::ForeignRTy(e) => write!(f, "{e}"),
+            E::NotInEngine(e) => write!(f, "{e}"),
         }
     }
 }

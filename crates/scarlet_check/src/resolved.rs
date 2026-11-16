@@ -9,6 +9,7 @@ use scarlet_types::name::{CtorName, Name};
 use scarlet_types::ty::{Scheme, Type, TypeVar};
 
 use crate::declare::DeclId;
+use crate::error::{CheckError, Internal};
 use crate::typed::{BinderId, Rest, Var};
 
 /// A local binder: a parameter, a `let`, a pattern name, an `or` receiver.
@@ -291,18 +292,18 @@ pub(crate) struct Resolved {
 }
 
 impl Resolved {
-    // Resolution makes one entry per declaration, in `DeclId` order, so a
-    // lookup misses only for an id from another module.
-    #[allow(clippy::indexing_slicing)]
-    pub fn decl(&self, d: DeclId) -> &RDecl {
-        &self.decls[d.0 as usize]
+    /// Resolution makes one entry per declaration, in `DeclId` order, so this
+    /// misses only for an id from another module.
+    pub fn decl(&self, d: DeclId) -> Option<&RDecl> {
+        self.decls.get(d.0 as usize)
     }
 }
 
 /// What the resolver recorded of binder `b`. A `BinderId` is the place its
-/// binder was pushed to in the module's binders, which never shrink, so a
-/// lookup misses only for an id from another module.
-#[allow(clippy::indexing_slicing)]
-pub(crate) fn binder_info(binders: &[BinderInfo], b: BinderId) -> &BinderInfo {
-    &binders[b.0 as usize]
+/// binder was pushed to in the module's binders, which never shrink, so this
+/// misses only for an id from another module.
+pub(crate) fn binder_info(binders: &[BinderInfo], b: BinderId) -> Result<&BinderInfo, CheckError> {
+    binders
+        .get(b.0 as usize)
+        .ok_or(CheckError::Internal(Internal::UnknownBinder(b.0)))
 }

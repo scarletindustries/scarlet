@@ -336,7 +336,8 @@ impl Session {
                 }
             });
         match ty {
-            Some(ty) => println!("{expr}  {}{ty}{}", self.palette.bold, self.palette.reset),
+            Some(Ok(ty)) => println!("{expr}  {}{ty}{}", self.palette.bold, self.palette.reset),
+            Some(Err(e)) => eprintln!("internal compiler error: {e}"),
             None => eprintln!("no type was inferred for that expression"),
         }
     }

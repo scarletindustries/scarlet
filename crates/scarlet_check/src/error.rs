@@ -4,9 +4,13 @@
 
 use std::fmt;
 
+use petgraph::graph::GraphError;
+
 use scarlet_syntax::diagnostic::{DiagnosticCode, Problem, Severity};
 use scarlet_syntax::module_path::ModulePath;
 use scarlet_syntax::parser::ParseError;
+use scarlet_types::engine::NotInEngine;
+use scarlet_types::exhaustiveness::UnknownCtor;
 use scarlet_types::name::Name;
 use scarlet_types::ty::{Type, show_together};
 
@@ -34,8 +38,58 @@ pub enum Unreadable {
     Node(ParseError),
 }
 
+/// A bug in the checker, not in the program being checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Internal {
+    /// Resolution orders the module so this can't happen.
+    ReadBeforeTyped,
+    NotInEngine(NotInEngine),
+    UnknownCtor(UnknownCtor),
+    /// A declaration id this module never made.
+    UnknownDecl(u32),
+    /// A binder id this module never made.
+    UnknownBinder(u32),
+    /// The graph that orders declarations or aliases refused a node or an
+    /// edge.
+    Graph(GraphError),
+}
+
+impl fmt::Display for Internal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Internal::ReadBeforeTyped => write!(f, "this name was read before it had a type"),
+            Internal::NotInEngine(e) => write!(f, "{e}"),
+            Internal::UnknownCtor(e) => write!(f, "{e}"),
+            Internal::UnknownDecl(d) => write!(f, "declaration {d} isn't in this module"),
+            Internal::UnknownBinder(b) => write!(f, "binder {b} isn't in this module"),
+            Internal::Graph(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl From<GraphError> for CheckError {
+    fn from(e: GraphError) -> Self {
+        CheckError::Internal(Internal::Graph(e))
+    }
+}
+
+impl From<NotInEngine> for CheckError {
+    fn from(e: NotInEngine) -> Self {
+        CheckError::Internal(Internal::NotInEngine(e))
+    }
+}
+
+impl From<UnknownCtor> for CheckError {
+    fn from(e: UnknownCtor) -> Self {
+        CheckError::Internal(Internal::UnknownCtor(e))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum CheckError {
+    /// A bug in the checker. It still stops the build, at the place it was
+    /// found.
+    Internal(Internal),
     // --- Imports and modules ---
     /// An import's qualifier already names another import, written as
     /// `written`.
@@ -223,9 +277,6 @@ pub enum CheckError {
     NotATuple {
         index: u32,
     },
-    /// Resolution orders the module so this can't happen. If it does, it is
-    /// a bug in the checker.
-    ReadBeforeTyped,
     FieldOfUnknownType(Name),
     NoFieldOnType {
         ty: Type,
@@ -587,10 +638,7 @@ impl fmt::Display for CheckError {
                     "Can't use .{index} here, because the value isn't a tuple"
                 )
             }
-            E::ReadBeforeTyped => write!(
-                f,
-                "internal compiler error: this name was read before it had a type"
-            ),
+            E::Internal(i) => write!(f, "internal compiler error: {i}"),
             E::FieldOfUnknownType(label) => write!(
                 f,
                 "Can't access field '{label}' because the value's type isn't known here. Add a type annotation"

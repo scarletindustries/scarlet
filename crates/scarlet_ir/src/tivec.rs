@@ -5,7 +5,6 @@
 use std::fmt;
 use std::hash::Hash;
 use std::marker::PhantomData;
-use std::ops::{Index, IndexMut};
 
 /// A dense index into a [`TiVec`]. `Idx::from_usize(i).index() == i` must hold
 /// for every `i` a program can allocate.
@@ -53,6 +52,11 @@ impl<I: Idx, T> TiVec<I, T> {
         self.raw.get(i.index())
     }
 
+    /// The element at `i` for writing, or `None` past the end.
+    pub fn get_mut(&mut self, i: I) -> Option<&mut T> {
+        self.raw.get_mut(i.index())
+    }
+
     #[cfg(test)]
     fn as_slice(&self) -> &[T] {
         &self.raw
@@ -94,21 +98,6 @@ impl<I: Idx, T: Clone> Clone for TiVec<I, T> {
 impl<I: Idx, T: fmt::Debug> fmt::Debug for TiVec<I, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(&self.raw, f)
-    }
-}
-
-impl<I: Idx, T> Index<I> for TiVec<I, T> {
-    type Output = T;
-    #[allow(clippy::indexing_slicing)]
-    fn index(&self, i: I) -> &T {
-        &self.raw[i.index()]
-    }
-}
-
-impl<I: Idx, T> IndexMut<I> for TiVec<I, T> {
-    #[allow(clippy::indexing_slicing)]
-    fn index_mut(&mut self, i: I) -> &mut T {
-        &mut self.raw[i.index()]
     }
 }
 
@@ -171,8 +160,8 @@ mod tests {
         let a = v.push("zero");
         let b = v.push("one");
         assert_eq!((a, b), (A(0), A(1)));
-        assert_eq!(v[a], "zero");
-        assert_eq!(v[b], "one");
+        assert_eq!(v.get(a), Some(&"zero"));
+        assert_eq!(v.get(b), Some(&"one"));
         assert_eq!(v.next_idx(), A(2));
     }
 

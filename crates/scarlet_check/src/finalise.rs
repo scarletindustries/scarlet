@@ -3,6 +3,7 @@
 //! and a statement whose value nothing uses. Each reads the frozen types and
 //! the finished tree, and reports what it finds.
 
+use scarlet_syntax::span::Span;
 use scarlet_types::def::TypeDef;
 use scarlet_types::engine::Types;
 use scarlet_types::exhaustiveness::{
@@ -99,6 +100,17 @@ impl Finished<'_, '_> {
         }
     }
 
+    /// The finished type `t`. `None` means a checker bug, reported at `span`.
+    fn get(&self, t: scarlet_types::engine::Ty, span: Span, report: &mut Report) -> Option<Type> {
+        match self.types.get(t) {
+            Ok(ty) => Some(ty),
+            Err(e) => {
+                report.add(span, e.into());
+                None
+            }
+        }
+    }
+
     fn is_nil(&self, t: &Type) -> bool {
         matches!(t, Type::Named { name, .. } if *name == self.types.known().nil)
     }
@@ -108,7 +120,9 @@ impl Finished<'_, '_> {
             match s {
                 Stmt::Let { pattern, value } => self.irrefutable(pattern, value, report),
                 Stmt::Expr(x) => {
-                    let ty = self.types.get(x.ty);
+                    let Some(ty) = self.get(x.ty, x.span, report) else {
+                        continue;
+                    };
                     if !matches!(ty, Type::Var(_)) && !self.is_nil(&ty) {
                         report.add(x.span, CheckError::UnusedValue(ty));
                     }
@@ -179,12 +193,18 @@ impl Finished<'_, '_> {
             .max()
             .unwrap_or(0)
             + 1;
-        let space = self.space(&self.types.get(subject.ty), depth);
+        let Some(ty) = self.get(subject.ty, subject.span, report) else {
+            return;
+        };
+        let space = self.space(&ty, depth);
         let checked: Vec<(&Pattern, bool)> = arms
             .iter()
             .map(|a| (&a.pattern, a.guard.is_some()))
             .collect();
-        let found = analyse(&space, &checked);
+        let found = match analyse(&space, &checked) {
+            Ok(found) => found,
+            Err(e) => return report.add(subject.span, e.into()),
+        };
         if let Some(missing) = found.missing {
             report.add(subject.span, CheckError::NotExhaustive { missing });
         }
@@ -204,9 +224,14 @@ impl Finished<'_, '_> {
             return;
         }
         let depth = unroll_depth(pattern) + 1;
-        let space = self.space(&self.types.get(value.ty), depth);
-        if let Some(missing) = missed_by(&space, pattern) {
-            report.add(pattern.span, CheckError::BindingMisses { missing });
+        let Some(ty) = self.get(value.ty, value.span, report) else {
+            return;
+        };
+        let space = self.space(&ty, depth);
+        match missed_by(&space, pattern) {
+            Ok(Some(missing)) => report.add(pattern.span, CheckError::BindingMisses { missing }),
+            Ok(None) => {}
+            Err(e) => report.add(pattern.span, e.into()),
         }
     }
 
@@ -219,16 +244,16 @@ impl Finished<'_, '_> {
         error: Option<crate::typed::BinderId>,
         report: &mut Report,
     ) {
-        let err = match self.types.get(value.ty) {
-            Type::Named { args, .. } => args.get(1).cloned(),
-            Type::Var(_) | Type::Fn { .. } | Type::Tuple(_) => None,
+        let err = match self.get(value.ty, value.span, report) {
+            Some(Type::Named { args, .. }) => args.get(1).cloned(),
+            Some(Type::Var(_) | Type::Fn { .. } | Type::Tuple(_)) | None => None,
         };
         let Some(err) = err else { return };
         let is_nil = self.is_nil(&err);
-        let receiver = error.map(|b| {
-            let s = binder_info(self.binders, b);
-            (s.name.clone(), s.span)
-        });
+        let receiver = match error.map(|b| binder_info(self.binders, b)).transpose() {
+            Ok(info) => info.map(|s| (s.name.clone(), s.span)),
+            Err(e) => return report.add(value.span, e),
+        };
         match (is_nil, receiver) {
             (true, None) => {}
             (true, Some((_, sp))) => report.add(sp, CheckError::OrNilReceiver),
@@ -245,7 +270,11 @@ impl Finished<'_, '_> {
     /// the type gains data.
     fn discards(&self, report: &mut Report) {
         for (b, &ty) in self.binders.iter().zip(self.binder_types) {
-            if b.discards && self.is_nil(&self.types.get(ty)) {
+            if b.discards
+                && self
+                    .get(ty, b.span, report)
+                    .is_some_and(|t| self.is_nil(&t))
+            {
                 report.add(b.span, CheckError::NilDiscard(b.name.clone()));
             }
         }
@@ -258,8 +287,10 @@ impl Finished<'_, '_> {
             return;
         }
         for b in self.unused.iter().filter(|b| !self.refused.contains(b)) {
-            let info = binder_info(self.binders, *b);
-            report.add(info.span, CheckError::Unused(info.name.clone()));
+            match binder_info(self.binders, *b) {
+                Ok(info) => report.add(info.span, CheckError::Unused(info.name.clone())),
+                Err(e) => report.add(self.env.input.module.span, e),
+            }
         }
     }
 }

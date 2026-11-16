@@ -901,7 +901,7 @@ impl Lower {
                         body: &arm.body,
                     },
                 };
-                Ok((
+                Ok::<_, InternalLinkError>((
                     pat,
                     lo.nested_arm_body(nested.into(), leaf, fall, result_ty)?,
                 ))

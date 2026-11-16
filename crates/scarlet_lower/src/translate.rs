@@ -10,11 +10,11 @@
 use std::collections::HashMap;
 
 use scarlet_check::typed::{
-    self as t, Arg, ArrayElem, BinOp, BinSeg, BinSegPat, BinUnit, BinderId, Block, Expr, ExprKind,
-    FieldAt, InterpPart, OrShape, Pattern, PatternKind, Rest, Stmt, TypedModule, Var,
+    self as t, Arg, ArrayElem, BinOp, BinSeg, BinSegPat, BinUnit, Binder, BinderId, Block, Expr,
+    ExprKind, FieldAt, InterpPart, OrShape, Pattern, PatternKind, Rest, Stmt, TypedModule, Var,
 };
 use scarlet_ir::core_ir::{CaptureIdx, Const, ConstId, PrimOp};
-use scarlet_ir::rty::{Prim, RTy};
+use scarlet_ir::rty::{Prim, RTy, ResolvedPool};
 use scarlet_syntax::ast::UnaryOp;
 use scarlet_types::name::{CtorName, ValueName};
 use scarlet_types::ty::Type;
@@ -43,7 +43,7 @@ pub(crate) fn function(cx: &mut Cx<'_, '_>, site: &Site<'_>) -> R<Named> {
         body,
     } = *site;
     let mut tx = Tx { cx, m };
-    let ty = tx.ty(f.ty);
+    let ty = tx.ty(f.ty)?;
     let ret = tx.ret_of(ty)?;
     let mut fx = Fx::new(&f.params, |out| body.for_each_bound(&mut |b| out(b)));
     fx.self_fn = Some(ValueName {
@@ -197,22 +197,33 @@ struct Tx<'t, 'x, 'd, 'm> {
 }
 
 impl Tx<'_, '_, '_, '_> {
-    fn ty(&mut self, t: scarlet_types::engine::Ty) -> RTy {
-        let ty = self.m.types.get(t);
-        self.cx.ids.rty(&ty)
+    fn ty(&mut self, t: scarlet_types::engine::Ty) -> R<RTy> {
+        let ty = self.final_ty(t)?;
+        Ok(self.cx.ids.rty(&ty))
     }
 
-    fn final_ty(&self, t: scarlet_types::engine::Ty) -> Type {
-        self.m.types.get(t)
+    fn final_ty(&self, t: scarlet_types::engine::Ty) -> R<Type> {
+        Ok(self.m.types.get(t).map_err(InternalLinkError::from)?)
+    }
+
+    fn binder(&self, b: BinderId) -> R<&Binder> {
+        Ok(self
+            .m
+            .binder(b)
+            .ok_or(InternalLinkError::UnknownBinder(b))?)
+    }
+
+    fn pool(&self) -> &ResolvedPool {
+        self.cx.ids.pool()
     }
 
     /// What a function of type `ty` returns.
     fn ret_of(&self, ty: RTy) -> R<RTy> {
-        self.cx
-            .ids
+        Ok(self
             .pool()
             .fun_ret(ty)
-            .ok_or(InternalLinkError::NotAFunction(ty).into())
+            .map_err(InternalLinkError::from)?
+            .ok_or(InternalLinkError::NotAFunction(ty))?)
     }
 
     fn int(&self) -> RTy {
@@ -237,7 +248,10 @@ impl Tx<'_, '_, '_, '_> {
         let id = *fx
             .own
             .get(&binder)
-            .ok_or_else(|| InternalLinkError::UnownedBinder(self.m.binder(binder).name.clone()))?;
+            .ok_or_else(|| match self.binder(binder) {
+                Ok(b) => InternalLinkError::UnownedBinder(b.name.clone()).into(),
+                Err(e) => e,
+            })?;
         Ok(TypedBind {
             id,
             named: true,
@@ -248,7 +262,8 @@ impl Tx<'_, '_, '_, '_> {
 
     /// The binding for `binder`, at the type the checker gave it.
     fn bind_own(&mut self, fx: &Fx, binder: BinderId) -> R<TypedBind> {
-        let ty = self.ty(self.m.binder(binder).ty);
+        let ty = self.binder(binder)?.ty;
+        let ty = self.ty(ty)?;
         self.bind(fx, binder, ty)
     }
 
@@ -291,7 +306,7 @@ impl Tx<'_, '_, '_, '_> {
     }
 
     fn expr(&mut self, fx: &mut Fx, e: &Expr) -> R<TypedExpr> {
-        let ty = self.ty(e.ty);
+        let ty = self.ty(e.ty)?;
         Ok(match &e.kind {
             ExprKind::Int(i) => TypedExpr::Const {
                 ty,
@@ -340,7 +355,7 @@ impl Tx<'_, '_, '_, '_> {
                 idx: *index,
             },
             ExprKind::Field { record, at, .. } => {
-                let rec_ty = self.final_ty(record.ty);
+                let rec_ty = self.final_ty(record.ty)?;
                 let recv = self.expr(fx, record)?;
                 self.field(fx, recv, &rec_ty, at, ty)?
             }
@@ -375,7 +390,10 @@ impl Tx<'_, '_, '_, '_> {
             ExprKind::BinOp { op, left, right } => {
                 let lhs = self.expr(fx, left)?;
                 let rhs = self.expr(fx, right)?;
-                let prim = self.cx.ids.pool().prim_of(lhs.ty());
+                let prim = self
+                    .pool()
+                    .prim_of(lhs.ty())
+                    .map_err(InternalLinkError::from)?;
                 TypedExpr::Binary {
                     ty,
                     op: specialize(*op, prim),
@@ -397,7 +415,11 @@ impl Tx<'_, '_, '_, '_> {
                 let operand = self.expr(fx, operand)?;
                 let op = match op {
                     UnaryOp::Not => PrimOp::Not,
-                    UnaryOp::Neg => match self.cx.ids.pool().prim_of(operand.ty()) {
+                    UnaryOp::Neg => match self
+                        .pool()
+                        .prim_of(operand.ty())
+                        .map_err(InternalLinkError::from)?
+                    {
                         Some(Prim::Int) => PrimOp::IntNeg,
                         Some(Prim::Float) => PrimOp::FloatNeg,
                         Some(Prim::String) | None => PrimOp::Neg,
@@ -464,7 +486,7 @@ impl Tx<'_, '_, '_, '_> {
             }
             Var::Ctor(ctor) => {
                 let variant = self.cx.ids.ctor_ref(&ctor.type_name, ctor.variant);
-                match self.final_ty(e.ty) {
+                match self.final_ty(e.ty)? {
                     Type::Fn { .. } => {
                         self.eta(ty, "ctor", move |params, ret| TypedExpr::Ctor {
                             ty: ret,
@@ -490,7 +512,11 @@ impl Tx<'_, '_, '_, '_> {
         name: &str,
         body: impl FnOnce(Vec<TypedExpr>, RTy) -> TypedExpr,
     ) -> R<TypedExpr> {
-        let params: Vec<RTy> = self.cx.ids.pool().fun_params(ty).to_vec();
+        let params: Vec<RTy> = self
+            .pool()
+            .fun_params(ty)
+            .map_err(InternalLinkError::from)?
+            .to_vec();
         let ret = self.ret_of(ty)?;
         let mut fx = Fx::new(&[], |_| {});
         let binds: Vec<TypedBind> = params
@@ -532,9 +558,10 @@ impl Tx<'_, '_, '_, '_> {
             .collect::<R<_>>()?;
         let body = self.expr(&mut inner, &l.body)?;
         let ret = self.ret_of(ty)?;
-        let name = l
-            .self_name
-            .map_or_else(|| "fn".to_string(), |b| self.m.binder(b).name.to_string());
+        let name = match l.self_name {
+            Some(b) => self.binder(b)?.name.to_string(),
+            None => "fn".to_string(),
+        };
         let func_idx = self.cx.minted.push(Named {
             module: self.m.key.as_str().to_string(),
             name,
@@ -549,10 +576,11 @@ impl Tx<'_, '_, '_, '_> {
             .captures
             .iter()
             .map(|&c| {
-                let cty = self.ty(self.m.binder(c).ty);
-                self.load(fx, c, cty)
+                let cty = self.binder(c)?.ty;
+                let cty = self.ty(cty)?;
+                Ok(self.load(fx, c, cty))
             })
-            .collect();
+            .collect::<R<_>>()?;
         Ok(TypedExpr::Closure {
             ty,
             func_idx,
@@ -632,7 +660,7 @@ impl Tx<'_, '_, '_, '_> {
         };
         // Everything runs in the order it was written, the spread among the
         // arguments.
-        let result = self.final_ty(e.ty);
+        let result = self.final_ty(e.ty)?;
         let mut lets = Vec::with_capacity(args.len() + 1);
         let mut fields: Vec<(u32, TypedExpr)> = Vec::new();
         let mut base_bind = None;
@@ -774,10 +802,9 @@ impl Tx<'_, '_, '_, '_> {
             OrShape::Option => (ctors.some, ctors.none, Vec::new()),
             OrShape::Result => {
                 let ety = self
-                    .cx
-                    .ids
                     .pool()
                     .con_arg(lhs_ty, 1)
+                    .map_err(InternalLinkError::from)?
                     .ok_or(InternalLinkError::ResultWithoutError(lhs_ty))?;
                 let err = match error {
                     Some(b) => self.bind(fx, b, ety)?,
@@ -906,7 +933,7 @@ impl Tx<'_, '_, '_, '_> {
             if matches!(sub.kind, PatternKind::Wild) {
                 continue;
             }
-            let ty = self.ty(sub.ty);
+            let ty = self.ty(sub.ty)?;
             let recv = Box::new(self.var(src));
             let idx = i as u32;
             let read = if tuple {
@@ -931,7 +958,7 @@ impl Tx<'_, '_, '_, '_> {
     }
 
     fn pattern(&mut self, fx: &mut Fx, p: &Pattern) -> R<TypedPat> {
-        let ty = self.ty(p.ty);
+        let ty = self.ty(p.ty)?;
         Ok(match &p.kind {
             PatternKind::Wild | PatternKind::Error => TypedPat::Wild { ty },
             PatternKind::Bind(b) => {
@@ -967,10 +994,9 @@ impl Tx<'_, '_, '_, '_> {
             },
             PatternKind::Array { prefix, rest } => {
                 let elem_ty = self
-                    .cx
-                    .ids
                     .pool()
                     .con_arg(ty, 0)
+                    .map_err(InternalLinkError::from)?
                     .ok_or(InternalLinkError::NotAnArray(ty))?;
                 let prefix = self.patterns(fx, prefix)?;
                 let rest = self.rest(fx, rest, ty)?;

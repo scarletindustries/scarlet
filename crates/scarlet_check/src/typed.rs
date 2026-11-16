@@ -69,11 +69,10 @@ pub struct TypedModule {
 }
 
 impl TypedModule {
-    // The checker makes one binder per `BinderId` it hands out, in order, so
-    // a lookup misses only for an id from another module.
-    #[allow(clippy::indexing_slicing)]
-    pub fn binder(&self, b: BinderId) -> &Binder {
-        &self.binders[b.0 as usize]
+    /// The checker makes one binder per `BinderId` it hands out, in order,
+    /// so this misses only for an id from another module.
+    pub fn binder(&self, b: BinderId) -> Option<&Binder> {
+        self.binders.get(b.0 as usize)
     }
 }
 

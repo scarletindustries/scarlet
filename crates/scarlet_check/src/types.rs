@@ -212,20 +212,24 @@ fn alias_order<'a>(
         .collect();
     let mut graph: StableGraph<(&ast::TypeDeclaration, bool), (), Directed> = StableGraph::new();
     let mut idx_of: HashMap<&str, NodeIndex> = HashMap::new();
-    let nodes: Vec<(NodeIndex, &ast::TypeIdentifier)> = aliases
-        .iter()
-        .map(|&(td, rhs, public)| {
-            let n = graph.add_node((td, public));
-            idx_of.insert(td.identifier.name.as_str(), n);
-            (n, rhs)
-        })
-        .collect();
-    for (from, rhs) in nodes {
+    let mut nodes: Vec<(NodeIndex, &ast::TypeDeclaration, &ast::TypeIdentifier)> = Vec::new();
+    for &(td, rhs, public) in &aliases {
+        match graph.try_add_node((td, public)) {
+            Ok(n) => {
+                idx_of.insert(td.identifier.name.as_str(), n);
+                nodes.push((n, td, rhs));
+            }
+            Err(e) => report.add(td.identifier.span, e.into()),
+        }
+    }
+    for (from, td, rhs) in nodes {
         let mut deps = Vec::new();
         type_deps(rhs, &mut deps);
         for dep in deps {
-            if let Some(&to) = idx_of.get(dep) {
-                graph.add_edge(from, to, ());
+            if let Some(&to) = idx_of.get(dep)
+                && let Err(e) = graph.try_add_edge(from, to, ())
+            {
+                report.add(td.identifier.span, e.into());
             }
         }
     }

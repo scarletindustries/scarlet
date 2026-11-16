@@ -80,19 +80,20 @@ pub(crate) struct Declared<'a> {
 }
 
 impl<'a> Declared<'a> {
-    // A `DeclId` is the place its declaration was pushed to, and `values`
-    // never shrinks, so a lookup misses only for an id from another module.
-    #[allow(clippy::indexing_slicing)]
-    pub fn get(&self, id: DeclId) -> &Decl<'a> {
-        &self.values[id.0 as usize]
+    /// The declaration `id` names. A `DeclId` is the place its declaration
+    /// was pushed to, and `values` never shrinks, so this misses only for an
+    /// id from another module.
+    pub fn get(&self, id: DeclId) -> Option<&Decl<'a>> {
+        self.values.get(id.0 as usize)
+    }
+
+    /// Every declaration, with its id.
+    pub fn iter(&self) -> impl Iterator<Item = (DeclId, &Decl<'a>)> {
+        (0..).map(DeclId).zip(&self.values)
     }
 
     pub fn find(&self, name: &str) -> Option<DeclId> {
         self.by_name.get(name).copied()
-    }
-
-    pub fn ids(&self) -> impl Iterator<Item = DeclId> + use<'_, 'a> {
-        (0..self.values.len() as u32).map(DeclId)
     }
 }
 

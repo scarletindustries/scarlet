@@ -149,7 +149,7 @@ impl<'p> Perceus<'p> {
             .locals
             .get(id)
             .ok_or(InternalLinkError::UntypedLocal(id))?;
-        Ok(self.pool.is_heap(*ty) && !self.pinned.contains(&id))
+        Ok(self.pool.is_heap(*ty)? && !self.pinned.contains(&id))
     }
 
     /// Transform `e` and return `(e', live)`, where `live` is the locals from
@@ -339,7 +339,7 @@ impl<'p> Perceus<'p> {
                 }
                 drops.extend(a.dead_binders);
                 let body = self.wrap_drops(&drops, a.scrut_shape.map(|s| (scrut, s)), a.body)?;
-                Ok((a.pat, body))
+                Ok::<_, InternalLinkError>((a.pat, body))
             })
             .collect::<Result<_, _>>()?;
         let mut live = live_union;
@@ -787,7 +787,9 @@ mod tests {
         let len = all.iter().map(|b| b.id.0 + 1).max().unwrap_or(0);
         let mut locals: TiVec<LocalId, RTy> = (0..len).map(|_| f.ret_ty).collect();
         for b in all {
-            locals[b.id] = b.ty;
+            if let Some(slot) = locals.get_mut(b.id) {
+                *slot = b.ty;
+            }
         }
         super::perceus(pool, &locals, f).expect("every local is typed")
     }

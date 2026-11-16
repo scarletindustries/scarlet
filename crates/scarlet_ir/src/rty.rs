@@ -75,6 +75,17 @@ impl std::fmt::Display for RTy {
     }
 }
 
+/// An [`RTy`] that isn't in the pool it was looked up in. The pool never
+/// shrinks, so this means the `RTy` came from a different pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForeignRTy(pub RTy);
+
+impl std::fmt::Display for ForeignRTy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "type {} isn't in this type pool", self.0)
+    }
+}
+
 /// A contiguous run of child [`RTy`]s in [`ResolvedPool::children`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RSlice {
@@ -163,57 +174,63 @@ impl ResolvedPool {
         self.alloc(ResolvedNode::Tuple { elems })
     }
 
-    /// The node `t` names. Panics on an `RTy` from a different pool.
-    #[allow(clippy::indexing_slicing)]
-    fn node(&self, t: RTy) -> ResolvedNode {
-        self.nodes[t.0 as usize]
+    /// The node `t` names.
+    fn node(&self, t: RTy) -> Result<ResolvedNode, ForeignRTy> {
+        self.nodes.get(t.0 as usize).copied().ok_or(ForeignRTy(t))
     }
 
-    #[allow(clippy::indexing_slicing)]
-    fn children(&self, s: RSlice) -> &[RTy] {
+    /// The children of `t`'s node `s`. Only this pool makes an `RSlice`, so
+    /// `s` misses only when `t` came from a different pool.
+    fn children(&self, t: RTy, s: RSlice) -> Result<&[RTy], ForeignRTy> {
         let lo = s.start as usize;
-        &self.children[lo..lo + s.len as usize]
+        self.children
+            .get(lo..lo + s.len as usize)
+            .ok_or(ForeignRTy(t))
     }
 
     /// The type arguments of a nominal type, or nothing for any other node.
-    fn con_args(&self, t: RTy) -> &[RTy] {
-        match self.node(t) {
-            ResolvedNode::Con { args, .. } => self.children(args),
-            _ => &[],
+    fn con_args(&self, t: RTy) -> Result<&[RTy], ForeignRTy> {
+        match self.node(t)? {
+            ResolvedNode::Con { args, .. } => self.children(t, args),
+            ResolvedNode::Bound(_) | ResolvedNode::Fun { .. } | ResolvedNode::Tuple { .. } => {
+                Ok(&[])
+            }
         }
     }
 
     /// The `i`th type argument of a nominal type. For example, `Result(_, E)`'s
     /// `E` is `con_arg(t, 1)`.
-    pub fn con_arg(&self, t: RTy, i: usize) -> Option<RTy> {
-        self.con_args(t).get(i).copied()
+    pub fn con_arg(&self, t: RTy, i: usize) -> Result<Option<RTy>, ForeignRTy> {
+        Ok(self.con_args(t)?.get(i).copied())
     }
 
     #[cfg(test)]
-    fn tuple_elems(&self, t: RTy) -> &[RTy] {
-        match self.node(t) {
-            ResolvedNode::Tuple { elems } => self.children(elems),
-            _ => &[],
+    fn tuple_elems(&self, t: RTy) -> Result<&[RTy], ForeignRTy> {
+        match self.node(t)? {
+            ResolvedNode::Tuple { elems } => self.children(t, elems),
+            ResolvedNode::Bound(_) | ResolvedNode::Con { .. } | ResolvedNode::Fun { .. } => Ok(&[]),
         }
     }
 
     #[cfg(test)]
-    fn tuple_elem(&self, t: RTy, i: usize) -> Option<RTy> {
-        self.tuple_elems(t).get(i).copied()
+    fn tuple_elem(&self, t: RTy, i: usize) -> Result<Option<RTy>, ForeignRTy> {
+        Ok(self.tuple_elems(t)?.get(i).copied())
     }
 
-    pub fn fun_params(&self, t: RTy) -> &[RTy] {
-        match self.node(t) {
-            ResolvedNode::Fun { params, .. } => self.children(params),
-            _ => &[],
+    pub fn fun_params(&self, t: RTy) -> Result<&[RTy], ForeignRTy> {
+        match self.node(t)? {
+            ResolvedNode::Fun { params, .. } => self.children(t, params),
+            ResolvedNode::Bound(_) | ResolvedNode::Con { .. } | ResolvedNode::Tuple { .. } => {
+                Ok(&[])
+            }
         }
     }
 
-    pub fn fun_ret(&self, t: RTy) -> Option<RTy> {
-        match self.node(t) {
+    pub fn fun_ret(&self, t: RTy) -> Result<Option<RTy>, ForeignRTy> {
+        Ok(match self.node(t)? {
             ResolvedNode::Fun { ret, .. } => Some(ret),
-            _ => None,
-        }
+            ResolvedNode::Bound(_) | ResolvedNode::Con { .. } | ResolvedNode::Tuple { .. } => None,
+        })
     }
 
     /// [`PrimIds::prim_of`] against this pool's ids.
@@ -222,23 +239,23 @@ impl ResolvedPool {
     }
 
     /// The primitive `t` denotes, if any.
-    pub fn prim_of(&self, t: RTy) -> Option<Prim> {
-        match self.node(t) {
+    pub fn prim_of(&self, t: RTy) -> Result<Option<Prim>, ForeignRTy> {
+        Ok(match self.node(t)? {
             ResolvedNode::Con { id, .. } => self.as_prim(id),
             ResolvedNode::Bound(_) | ResolvedNode::Fun { .. } | ResolvedNode::Tuple { .. } => None,
-        }
+        })
     }
 
     /// Whether a value of type `t` occupies a Perceus-managed heap cell.
     ///
     /// `Bound` answers `false`, because its representation isn't known here,
     /// so the value is handled at run time.
-    pub fn is_heap(&self, t: RTy) -> bool {
-        match self.node(t) {
+    pub fn is_heap(&self, t: RTy) -> Result<bool, ForeignRTy> {
+        Ok(match self.node(t)? {
             ResolvedNode::Con { id, .. } => self.as_prim(id).is_none(),
             ResolvedNode::Tuple { .. } | ResolvedNode::Fun { .. } => true,
             ResolvedNode::Bound(_) => false,
-        }
+        })
     }
 }
 
@@ -269,13 +286,13 @@ mod tests {
         let int = p.mk_con(TypeId(1), &[]);
         let float = p.mk_con(TypeId(2), &[]);
         let string = p.mk_con(TypeId(3), &[]);
-        assert_eq!(p.prim_of(int), Some(Prim::Int));
-        assert_eq!(p.prim_of(float), Some(Prim::Float));
-        assert_eq!(p.prim_of(string), Some(Prim::String));
-        assert!(!p.is_heap(int));
-        assert!(!p.is_heap(float));
+        assert_eq!(p.prim_of(int).unwrap(), Some(Prim::Int));
+        assert_eq!(p.prim_of(float).unwrap(), Some(Prim::Float));
+        assert_eq!(p.prim_of(string).unwrap(), Some(Prim::String));
+        assert!(!p.is_heap(int).unwrap());
+        assert!(!p.is_heap(float).unwrap());
         // Strings live on the heap at run time, but they aren't Perceus cells.
-        assert!(!p.is_heap(string));
+        assert!(!p.is_heap(string).unwrap());
     }
 
     #[test]
@@ -285,19 +302,19 @@ mod tests {
         let user = p.mk_con(TypeId(9), &[]);
         let tup = p.mk_tuple(&[int, int]);
         let fun = p.mk_fun(&[int], int);
-        assert!(p.is_heap(user));
-        assert!(p.is_heap(tup));
-        assert!(p.is_heap(fun));
-        assert_eq!(p.prim_of(user), None);
+        assert!(p.is_heap(user).unwrap());
+        assert!(p.is_heap(tup).unwrap());
+        assert!(p.is_heap(fun).unwrap());
+        assert_eq!(p.prim_of(user).unwrap(), None);
     }
 
     #[test]
     fn a_bound_variable_is_polymorphic_not_missing() {
         let mut p = pool();
         let b = p.mk_bound(0);
-        assert!(!p.is_heap(b));
-        assert_eq!(p.prim_of(b), None);
-        assert_eq!(p.node(b), ResolvedNode::Bound(0));
+        assert!(!p.is_heap(b).unwrap());
+        assert_eq!(p.prim_of(b).unwrap(), None);
+        assert_eq!(p.node(b).unwrap(), ResolvedNode::Bound(0));
     }
 
     #[test]
@@ -307,12 +324,12 @@ mod tests {
         let str_ = p.mk_con(TypeId(3), &[]);
         let a = p.mk_tuple(&[int, str_]);
         let b = p.mk_tuple(&[str_, int]);
-        assert_eq!(p.tuple_elems(a), &[int, str_]);
-        assert_eq!(p.tuple_elems(b), &[str_, int]);
-        assert_eq!(p.tuple_elem(a, 1), Some(str_));
-        assert_eq!(p.tuple_elem(a, 2), None);
-        assert!(matches!(p.node(a), ResolvedNode::Tuple { elems } if elems.len == 2));
-        assert!(!matches!(p.node(int), ResolvedNode::Tuple { .. }));
+        assert_eq!(p.tuple_elems(a).unwrap(), &[int, str_]);
+        assert_eq!(p.tuple_elems(b).unwrap(), &[str_, int]);
+        assert_eq!(p.tuple_elem(a, 1).unwrap(), Some(str_));
+        assert_eq!(p.tuple_elem(a, 2).unwrap(), None);
+        assert!(matches!(p.node(a).unwrap(), ResolvedNode::Tuple { elems } if elems.len == 2));
+        assert!(!matches!(p.node(int).unwrap(), ResolvedNode::Tuple { .. }));
     }
 
     #[test]
@@ -321,12 +338,12 @@ mod tests {
         let int = p.mk_con(TypeId(1), &[]);
         let nil = p.mk_con(TypeId(7), &[]);
         let res = p.mk_con(TypeId(8), &[int, nil]);
-        assert_eq!(p.con_arg(res, 0), Some(int));
-        assert_eq!(p.con_arg(res, 1), Some(nil));
-        assert_eq!(p.con_arg(res, 2), None);
+        assert_eq!(p.con_arg(res, 0).unwrap(), Some(int));
+        assert_eq!(p.con_arg(res, 1).unwrap(), Some(nil));
+        assert_eq!(p.con_arg(res, 2).unwrap(), None);
         let f = p.mk_fun(&[int, res], nil);
-        assert_eq!(p.fun_params(f), &[int, res]);
-        assert_eq!(p.fun_ret(f), Some(nil));
-        assert_eq!(p.fun_ret(int), None);
+        assert_eq!(p.fun_params(f).unwrap(), &[int, res]);
+        assert_eq!(p.fun_ret(f).unwrap(), Some(nil));
+        assert_eq!(p.fun_ret(int).unwrap(), None);
     }
 }

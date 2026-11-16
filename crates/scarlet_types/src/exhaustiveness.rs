@@ -36,6 +36,21 @@ impl Idx for CtorId {
     }
 }
 
+/// A constructor id that isn't in the interner it was looked up in. The
+/// interner never shrinks, so the id came from another check's interner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnknownCtor(u32);
+
+impl std::fmt::Display for UnknownCtor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "constructor id {} isn't in this match's interner",
+            self.0
+        )
+    }
+}
+
 const EMPTY_LIST_ID: CtorId = CtorId(0);
 const CONS_ID: CtorId = CtorId(1);
 
@@ -59,11 +74,11 @@ impl Interner {
         id
     }
 
-    // The interner never shrinks, so a lookup misses only for an id from
-    // another check's interner.
-    #[allow(clippy::indexing_slicing)]
-    fn name(&self, id: CtorId) -> &str {
-        &self.names[id]
+    fn name(&self, id: CtorId) -> Result<&str, UnknownCtor> {
+        self.names
+            .get(id)
+            .map(String::as_str)
+            .ok_or(UnknownCtor(id.0))
     }
 }
 
@@ -684,12 +699,12 @@ fn bin_pattern_key(segments: &[BinSegShape<'_>], open: bool) -> String {
     key
 }
 
-fn pat_to_string(p: &Pat, t: &RcType, interner: &Interner) -> String {
+fn pat_to_string(p: &Pat, t: &RcType, interner: &Interner) -> Result<String, UnknownCtor> {
     match p {
-        Pat::Wildcard => "_".to_string(),
+        Pat::Wildcard => Ok("_".to_string()),
         Pat::Ctor { id, args } => {
             if *id == EMPTY_LIST_ID {
-                return "[]".to_string();
+                return Ok("[]".to_string());
             }
             if *id == CONS_ID {
                 let elem_t: &RcType = match t {
@@ -704,11 +719,11 @@ fn pat_to_string(p: &Pat, t: &RcType, interner: &Interner) -> String {
                             if *id == CONS_ID
                                 && let [head, rest] = &**args =>
                         {
-                            heads.push(pat_to_string(head, elem_t, interner));
+                            heads.push(pat_to_string(head, elem_t, interner)?);
                             tail = rest;
                         }
                         Pat::Ctor { id, .. } if *id == EMPTY_LIST_ID => {
-                            return format!("[{}]", heads.join(", "));
+                            return Ok(format!("[{}]", heads.join(", ")));
                         }
                         // The guards above didn't match, so this isn't a
                         // list pattern. Whatever it is, it shows as the open
@@ -716,38 +731,38 @@ fn pat_to_string(p: &Pat, t: &RcType, interner: &Interner) -> String {
                         #[allow(unknown_lints, wildcard_over_own_enum)]
                         _ => {
                             heads.push("..".to_string());
-                            return format!("[{}]", heads.join(", "));
+                            return Ok(format!("[{}]", heads.join(", ")));
                         }
                     }
                 }
             }
-            let name = interner.name(*id);
+            let name = interner.name(*id)?;
             let type_ctors = get_type_ctors(t);
             let ctor_types = type_ctors
                 .find(*id)
                 .map(|c| c.types.as_slice())
                 .unwrap_or(&[]);
-            let parts: Vec<String> = args
+            let parts = args
                 .iter()
                 .enumerate()
                 .map(|(i, a)| {
                     pat_to_string(a, ctor_types.get(i).unwrap_or(&RcType::Infinite), interner)
                 })
-                .collect();
+                .collect::<Result<Vec<String>, UnknownCtor>>()?;
             if name.starts_with("#tuple") {
-                return format!("({})", parts.join(", "));
+                return Ok(format!("({})", parts.join(", ")));
             }
             if parts.is_empty() {
-                return name.to_string();
+                return Ok(name.to_string());
             }
-            format!("{}({})", name, parts.join(", "))
+            Ok(format!("{}({})", name, parts.join(", ")))
         }
         Pat::Or { patterns } => {
-            let parts: Vec<String> = patterns
+            let parts = patterns
                 .iter()
                 .map(|pp| pat_to_string(pp, t, interner))
-                .collect();
-            parts.join(" | ")
+                .collect::<Result<Vec<String>, UnknownCtor>>()?;
+            Ok(parts.join(" | "))
         }
     }
 }
@@ -848,7 +863,10 @@ pub struct MatchReport<'p, P> {
 
 /// Check `arms` against `space`. A guarded arm may not match, so it neither
 /// covers anything nor makes a later arm unreachable.
-pub fn analyse<'p, P: PatternShape>(space: &Space, arms: &[(&'p P, bool)]) -> MatchReport<'p, P> {
+pub fn analyse<'p, P: PatternShape>(
+    space: &Space,
+    arms: &[(&'p P, bool)],
+) -> Result<MatchReport<'p, P>, UnknownCtor> {
     let mut um = UsefulnessMatrix::new(space);
     let pats: Vec<Pat> = arms.iter().map(|(p, _)| um.lower(*p)).collect();
     let mut report = MatchReport {
@@ -857,26 +875,29 @@ pub fn analyse<'p, P: PatternShape>(space: &Space, arms: &[(&'p P, bool)]) -> Ma
                 .zip(&pats)
                 .filter(|((_, guarded), _)| !guarded)
                 .map(|(_, p)| p),
-        ),
+        )?,
         unreachable: Vec::new(),
         catch_alls: Vec::new(),
     };
     for (i, (&(arm, guarded), pat)) in arms.iter().zip(&pats).enumerate() {
         if !um.is_useful(pat) {
             report.unreachable.push(arm);
-        } else if let Some(missing) = um.catch_all(pats.iter().take(i), pat) {
+        } else if let Some(missing) = um.catch_all(pats.iter().take(i), pat)? {
             report.catch_alls.push((arm, missing));
         }
         if !guarded {
             um.push(pat);
         }
     }
-    report
+    Ok(report)
 }
 
 /// A value `pattern` doesn't match, shown as a pattern, or `None` when it
 /// matches every value in `space`.
-pub fn missed_by<P: PatternShape>(space: &Space, pattern: &P) -> Option<String> {
+pub fn missed_by<P: PatternShape>(
+    space: &Space,
+    pattern: &P,
+) -> Result<Option<String>, UnknownCtor> {
     let mut um = UsefulnessMatrix::new(space);
     let p = um.lower(pattern);
     um.find_missing(&[p])
@@ -926,44 +947,48 @@ impl UsefulnessMatrix {
         &self,
         earlier: impl IntoIterator<Item = &'a Pat>,
         pat: &Pat,
-    ) -> Option<Vec<String>> {
+    ) -> Result<Option<Vec<String>>, UnknownCtor> {
         let mut matrix = PatternMatrix::default();
         for p in earlier {
             matrix.rows.push(PatStack::one(p.clone()));
         }
         let types = TypeStack::one(self.subject_type.clone());
-        let missing = catch_all(&matrix, &PatStack::one(pat.clone()), &types)?;
-        Some(
-            missing
-                .iter()
-                .map(|c| {
-                    let name = self.interner.name(c.id);
-                    if c.arity == 0 {
-                        name.to_string()
-                    } else {
-                        format!("{name}(..)")
-                    }
+        let Some(missing) = catch_all(&matrix, &PatStack::one(pat.clone()), &types) else {
+            return Ok(None);
+        };
+        missing
+            .iter()
+            .map(|c| {
+                let name = self.interner.name(c.id)?;
+                Ok(if c.arity == 0 {
+                    name.to_string()
+                } else {
+                    format!("{name}(..)")
                 })
-                .collect(),
-        )
+            })
+            .collect::<Result<Vec<String>, UnknownCtor>>()
+            .map(Some)
     }
 
     /// A pattern the given arms don't cover, shown as text, or `None` if they
     /// cover everything. The arms passed here form their own matrix, and this
     /// checker's own matrix isn't used.
-    fn find_missing<'a>(&self, patterns: impl IntoIterator<Item = &'a Pat>) -> Option<String> {
+    fn find_missing<'a>(
+        &self,
+        patterns: impl IntoIterator<Item = &'a Pat>,
+    ) -> Result<Option<String>, UnknownCtor> {
         let mut matrix = PatternMatrix::default();
         for p in patterns {
             matrix.rows.push(PatStack::one(p.clone()));
         }
         let types = TypeStack::one(self.subject_type.clone());
         if !is_useful(&matrix, &PatStack::one(Pat::Wildcard), &types) {
-            return None;
+            return Ok(None);
         }
         let witness = find_witness_vec(&matrix, &types)
             .and_then(|v| v.into_iter().next())
             .unwrap_or(Pat::Wildcard);
-        Some(pat_to_string(&witness, &self.subject_type, &self.interner))
+        pat_to_string(&witness, &self.subject_type, &self.interner).map(Some)
     }
 }
 
@@ -1010,7 +1035,7 @@ mod tests {
     fn check_exhaustiveness(pats: &[SPat], t: &Space) -> Option<String> {
         let mut um = UsefulnessMatrix::new(t);
         let ipats: Vec<Pat> = pats.iter().map(|p| um.intern(p)).collect();
-        um.find_missing(&ipats)
+        um.find_missing(&ipats).unwrap()
     }
 
     #[track_caller]
@@ -1091,7 +1116,7 @@ mod tests {
         let mut um = UsefulnessMatrix::new(t);
         let ipats: Vec<Pat> = pats.iter().map(|p| um.intern(p)).collect();
         let (last, earlier) = ipats.split_last()?;
-        um.catch_all(earlier, last)
+        um.catch_all(earlier, last).unwrap()
     }
 
     #[test]
@@ -1410,14 +1435,14 @@ mod tests {
     fn binary_fixed_segments_not_exhaustive() {
         let mut um = UsefulnessMatrix::new(&t_binary());
         let p = um.lower(&bin(vec![(TPart::Any, None), (TPart::Any, None)], false));
-        assert_eq!(um.find_missing(&[p]).as_deref(), Some("_"));
+        assert_eq!(um.find_missing(&[p]).unwrap().as_deref(), Some("_"));
     }
 
     #[test]
     fn binary_empty_literal_not_exhaustive() {
         let mut um = UsefulnessMatrix::new(&t_binary());
         let p = um.lower(&bin(vec![], false));
-        assert_eq!(um.find_missing(&[p]).as_deref(), Some("_"));
+        assert_eq!(um.find_missing(&[p]).unwrap().as_deref(), Some("_"));
     }
 
     #[test]
@@ -1425,21 +1450,21 @@ mod tests {
         let mut um = UsefulnessMatrix::new(&t_binary());
         let p = um.lower(&bin(vec![], true));
         assert!(matches!(p, Pat::Wildcard));
-        assert_eq!(um.find_missing(&[p]), None);
+        assert_eq!(um.find_missing(&[p]), Ok(None));
     }
 
     #[test]
     fn binary_segments_with_rest_not_exhaustive() {
         let mut um = UsefulnessMatrix::new(&t_binary());
         let p = um.lower(&bin(vec![(TPart::Any, None)], true));
-        assert_eq!(um.find_missing(&[p]).as_deref(), Some("_"));
+        assert_eq!(um.find_missing(&[p]).unwrap().as_deref(), Some("_"));
     }
 
     #[test]
     fn binary_fixed_then_else_exhaustive() {
         let mut um = UsefulnessMatrix::new(&t_binary());
         let p1 = um.lower(&bin(vec![(TPart::Any, None), (TPart::Any, None)], false));
-        assert_eq!(um.find_missing(&[p1, Pat::Wildcard]), None);
+        assert_eq!(um.find_missing(&[p1, Pat::Wildcard]), Ok(None));
     }
 
     #[test]

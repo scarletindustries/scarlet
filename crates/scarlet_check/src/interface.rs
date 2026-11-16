@@ -32,6 +32,9 @@ pub(crate) fn interface(
         }
         iface.types.insert(name.clone(), def.clone());
     }
+    // `export` holds `report` until the loop is over, so checker bugs wait
+    // here.
+    let mut bugs = Vec::new();
     let mut export = |name: &Name,
                       public: bool,
                       scheme: Scheme,
@@ -62,14 +65,17 @@ pub(crate) fn interface(
         );
     };
     for (decl, scheme) in declared.values.iter().zip(schemes) {
-        export(
-            &decl.name,
-            decl.public,
-            types.scheme(scheme),
-            decl.kind(),
-            &decl.doc,
-            decl.span,
-        );
+        match types.scheme(scheme) {
+            Ok(scheme) => export(
+                &decl.name,
+                decl.public,
+                scheme,
+                decl.kind(),
+                &decl.doc,
+                decl.span,
+            ),
+            Err(e) => bugs.push((decl.span, e)),
+        }
     }
     for (name, c) in &defs.ctors {
         let kind = ValueKind::Constructor {
@@ -78,6 +84,9 @@ pub(crate) fn interface(
             labels: c.labels.clone(),
         };
         export(name, c.public, c.scheme.clone(), kind, &c.doc, c.span);
+    }
+    for (span, e) in bugs {
+        report.add(span, e.into());
     }
     (iface, report)
 }

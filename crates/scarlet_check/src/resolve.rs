@@ -17,9 +17,9 @@ use scarlet_types::slots::{SlotError, slot_labeled};
 use scarlet_types::ty::Scheme;
 
 use crate::annot::{AnnotContext, AnnotVars, Annotations};
-use crate::declare::{DeclBody, DeclId, Declared};
+use crate::declare::{Decl, DeclBody, DeclId, Declared};
 use crate::env::Env;
-use crate::error::{CheckError, FieldSite, NestedDecl, Unreadable};
+use crate::error::{CheckError, FieldSite, Internal, NestedDecl, Unreadable};
 use crate::index::{Def, DefKind, EntityKind, Site, Use, UseKind};
 use crate::report::Report;
 use crate::resolved::*;
@@ -78,7 +78,7 @@ pub(crate) fn resolve(
         report: Report::new(env.input.source),
         edges: BTreeMap::new(),
     };
-    let decls: Vec<RDecl> = declared.ids().map(|id| r.decl(id)).collect();
+    let decls: Vec<RDecl> = declared.iter().map(|(id, d)| r.decl(id, d)).collect();
     let top = Walk {
         owner: None,
         decl: None,
@@ -89,7 +89,7 @@ pub(crate) fn resolve(
         .filter_map(|n| r.node(n, &top))
         .collect();
     let unused = r.unused();
-    let groups = groups(declared.values.len(), &r.edges);
+    let groups = groups(declared, &r.edges, env.input.module.span, &mut r.report);
     let resolved = Resolved {
         decls,
         statements,
@@ -102,16 +102,26 @@ pub(crate) fn resolve(
 
 /// The declarations in groups that use each other, each after the groups it
 /// uses.
-fn groups(decls: usize, edges: &BTreeMap<DeclId, BTreeSet<DeclId>>) -> Vec<Vec<DeclId>> {
+fn groups(
+    declared: &Declared<'_>,
+    edges: &BTreeMap<DeclId, BTreeSet<DeclId>>,
+    module: Span,
+    report: &mut Report,
+) -> Vec<Vec<DeclId>> {
     // Node `n` is declaration `n`: they are added in `DeclId` order.
     let node = |d: DeclId| NodeIndex::new(d.0 as usize);
     let mut graph: StableGraph<(), (), Directed> = StableGraph::new();
-    for _ in 0..decls {
-        graph.add_node(());
+    for (_, d) in declared.iter() {
+        if let Err(e) = graph.try_add_node(()) {
+            report.add(d.span, e.into());
+        }
     }
     for (&from, tos) in edges {
         for &to in tos {
-            graph.add_edge(node(from), node(to), ());
+            if let Err(e) = graph.try_add_edge(node(from), node(to), ()) {
+                let span = declared.get(from).map_or(module, |d| d.span);
+                report.add(span, e.into());
+            }
         }
     }
     tarjan_scc(&graph)
@@ -129,8 +139,7 @@ impl<'r, 'a> Resolver<'r, 'a> {
         }
     }
 
-    fn decl(&mut self, id: DeclId) -> RDecl {
-        let d = self.declared.get(id);
+    fn decl(&mut self, id: DeclId, d: &Decl<'a>) -> RDecl {
         let w = Walk {
             owner: Some(self.env.site(d.span, d.entity())),
             decl: Some(id),
@@ -593,8 +602,13 @@ impl<'r, 'a> Resolver<'r, 'a> {
         let name = id.name.as_str();
         if let Some(found) = self.scope.lookup(name) {
             let b = found.binder;
-            let info = binder_info(&self.binders, b);
-            let (module_scope, span) = (info.module_scope, info.span);
+            let (module_scope, span) = match binder_info(&self.binders, b) {
+                Ok(info) => (info.module_scope, info.span),
+                Err(e) => {
+                    self.report.add(id.span, e);
+                    return None;
+                }
+            };
             if found.frame < self.scope.depth() && !module_scope {
                 self.scope.capture(b, found.frame);
             }
@@ -612,7 +626,11 @@ impl<'r, 'a> Resolver<'r, 'a> {
             });
         }
         if let Some(d) = self.declared.find(name) {
-            let decl = self.declared.get(d);
+            let Some(decl) = self.declared.get(d) else {
+                self.report
+                    .add(id.span, CheckError::Internal(Internal::UnknownDecl(d.0)));
+                return None;
+            };
             let target = self.env.site(decl.span, decl.entity());
             self.use_of(id.span, UseKind::Unqualified, target, w);
             if let Some(from) = w.decl {
