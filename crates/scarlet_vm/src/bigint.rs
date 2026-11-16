@@ -91,7 +91,8 @@ pub(crate) fn neg(heap: &mut Heap, a: Int) -> Result<Value, Full> {
 }
 
 /// The fast path, or `None` when the answer does not fit a small Int.
-fn small_op(op: IntOp, a: i64, b: i64) -> Option<Value> {
+#[inline]
+pub(crate) fn small_op(op: IntOp, a: i64, b: i64) -> Option<Value> {
     let n = match op {
         IntOp::Add => a.checked_add(b)?,
         IntOp::Sub => a.checked_sub(b)?,

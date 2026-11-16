@@ -314,6 +314,170 @@ fn set_by(
     heap.make(Kind::Map, &[size, top.bits()])
 }
 
+/// [`set`] for a caller that gives up its reference to `map`. When nothing
+/// else holds the map, it changes in place, and so does each node on the path
+/// to `key` that nothing else holds either. `key` and `value` are borrowed.
+pub(crate) fn set_owned(
+    heap: &mut Heap,
+    map: Cell,
+    key: Value,
+    value: Value,
+) -> Result<Cell, Full> {
+    set_owned_by(heap, map, key, value, hash::hash)
+}
+
+fn set_owned_by(
+    heap: &mut Heap,
+    map: Cell,
+    key: Value,
+    value: Value,
+    hash: Hasher,
+) -> Result<Cell, Full> {
+    if !heap.unique(map) {
+        let made = set_by(heap, map, key, value, hash);
+        heap.release(map);
+        return made;
+    }
+    let h = hash(heap, key);
+    // The map's reference to its top node passes to `insert_owned`, and the
+    // node that comes back takes its place.
+    let (top, added) = match top(heap, map).as_cell() {
+        Some(t) => insert_owned(heap, t, (key, value, h), 0, hash)?,
+        None => {
+            let entry = (own(heap, key), own(heap, value));
+            let used = Used {
+                entries: bit(h, 0),
+                children: 0,
+            };
+            (make_node(heap, used, &[entry], &[])?, true)
+        }
+    };
+    let size = size(heap, map).checked_add(u64::from(added)).ok_or(Full)?;
+    if let [s, t, ..] = heap.data_mut(map) {
+        *s = size;
+        *t = top.bits();
+    }
+    Ok(map)
+}
+
+/// [`insert`] for a caller that gives up its reference to `at`. A node
+/// nothing else holds is changed where it is, or, when it has to grow, its
+/// words move to a bigger cell without the references in them changing.
+fn insert_owned(
+    heap: &mut Heap,
+    at: Cell,
+    (key, value, h): (Value, Value, u64),
+    shift: u32,
+    hash: Hasher,
+) -> Result<(Value, bool), Full> {
+    if !heap.unique(at) {
+        let made = insert(heap, at, (key, value, h), shift, hash);
+        heap.release(at);
+        return made;
+    }
+    let d = heap.data(at);
+    if is_collision(heap, at) {
+        let found = (0..d.len() / 2).find(|&i| eq::equal(heap, word(d, key_at(i)), key));
+        return match found {
+            Some(i) => {
+                let v = own(heap, value).bits();
+                put_in(heap, at, value_at(i), v);
+                Ok((Value::cell(at), false))
+            }
+            None => {
+                let mut words = heap.data(at).to_vec();
+                words.extend([own(heap, key).bits(), own(heap, value).bits()]);
+                grown(heap, at, Kind::MapCollision, &words, true)
+            }
+        };
+    }
+    let used = Used::of(d);
+    let n = used.entries.count_ones() as usize;
+    let b = bit(h, shift);
+    if used.entries & b != 0 {
+        let i = index(used.entries, b);
+        let (k, v) = (word(d, key_at(i)), word(d, value_at(i)));
+        if eq::equal(heap, k, key) {
+            let v = own(heap, value).bits();
+            put_in(heap, at, value_at(i), v);
+            return Ok((Value::cell(at), false));
+        }
+        // The entry already here moves down into the new child with ours,
+        // taking its references with it.
+        let theirs = (k, v, hash(heap, k));
+        let ours = (own(heap, key), own(heap, value), h);
+        let child = pair(heap, theirs, ours, deeper(shift))?;
+        let mut words = heap.data(at).to_vec();
+        let gone = entry_words(i);
+        let end = gone.end.min(words.len());
+        words.drain(gone.start.min(end)..end);
+        place(
+            &mut words,
+            child_at(n.saturating_sub(1), index(used.children, b)),
+            &[child.bits()],
+        );
+        set_used(
+            &mut words,
+            Used {
+                entries: used.entries & !b,
+                children: used.children | b,
+            },
+        );
+        return grown(heap, at, Kind::MapNode, &words, true);
+    }
+    if used.children & b != 0 {
+        let j = child_at(n, index(used.children, b));
+        let Some(child) = word(d, j).as_cell() else {
+            return Ok((Value::cell(at), false));
+        };
+        // The node's reference to the child passes down, and what comes back
+        // takes its place, so nothing is released here.
+        let (child, added) = insert_owned(heap, child, (key, value, h), deeper(shift), hash)?;
+        if let Some(slot) = heap.data_mut(at).get_mut(j) {
+            *slot = child.bits();
+        }
+        return Ok((Value::cell(at), added));
+    }
+    let i = key_at(index(used.entries, b));
+    let mut words = heap.data(at).to_vec();
+    let entry = [own(heap, key).bits(), own(heap, value).bits()];
+    place(&mut words, i, &entry);
+    set_used(
+        &mut words,
+        Used {
+            entries: used.entries | b,
+            ..used
+        },
+    );
+    grown(heap, at, Kind::MapNode, &words, true)
+}
+
+/// `words`, moved out of `old`, in a new cell of `kind`. `old` is freed
+/// without giving anything up, since the new cell holds it all now.
+fn grown(
+    heap: &mut Heap,
+    old: Cell,
+    kind: Kind,
+    words: &[u64],
+    added: bool,
+) -> Result<(Value, bool), Full> {
+    let made = heap.make(kind, words)?;
+    heap.discard(old);
+    Ok((Value::cell(made), added))
+}
+
+/// Put `w` at word `i` of `cell`, which the caller alone holds, giving back
+/// the reference the word there held.
+fn put_in(heap: &mut Heap, cell: Cell, i: usize, w: u64) {
+    let old = heap
+        .data_mut(cell)
+        .get_mut(i)
+        .map(|slot| std::mem::replace(slot, w));
+    if let Some(old) = old {
+        release(heap, old);
+    }
+}
+
 /// The node `at`, at `shift`, with `key` bound to `value`, and whether `key`
 /// is new. `h` is `key`'s hash. Everything passed is borrowed, and the node
 /// made is owned.
@@ -690,22 +854,31 @@ mod tests {
             let k = rng.below(KEYS);
             let kv = key(&mut heap, k);
             let before = model.clone();
+            // A version kept for later shares its nodes with every map made
+            // from it, so a set that gives its map up must not change them.
+            let keep = step % 50 == 0;
             let next = if rng.below(3) == 0 {
                 model[k as usize] = None;
-                delete_by(&mut heap, map, kv, hash).expect("room")
+                let next = delete_by(&mut heap, map, kv, hash).expect("room");
+                if !keep {
+                    heap.release(map);
+                }
+                next
             } else {
                 let v = rng.below(1000);
                 model[k as usize] = Some(v);
                 let vv = Value::cell(heap.string(format!("v{v}").as_bytes()).expect("room"));
-                let next = set_by(&mut heap, map, kv, vv, hash).expect("room");
+                let next = if keep {
+                    set_by(&mut heap, map, kv, vv, hash)
+                } else {
+                    set_owned_by(&mut heap, map, kv, vv, hash)
+                };
                 release(&mut heap, vv);
-                next
+                next.expect("room")
             };
             release(&mut heap, kv);
-            if step % 50 == 0 {
+            if keep {
                 versions.push((map, before));
-            } else {
-                heap.release(map);
             }
             map = next;
             check(&mut heap, map, &model, hash);

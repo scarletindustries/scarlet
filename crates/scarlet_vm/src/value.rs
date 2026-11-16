@@ -125,6 +125,13 @@ impl Value {
     }
 
     /// The cell this value points at, if it is one.
+    /// The small Int this word holds, if it holds one.
+    #[inline]
+    pub(crate) fn small_int(self) -> Option<i64> {
+        // The same shift as `view`'s, which copies the payload's sign up.
+        (self.0 & TAG == TAG_INT).then(|| ((self.0 & PAYLOAD) << 16).cast_signed() >> 16)
+    }
+
     pub(crate) fn as_cell(self) -> Option<Cell> {
         (self.0 & TAG == TAG_CELL).then(|| Cell::from_bits(self.0 & PAYLOAD))
     }

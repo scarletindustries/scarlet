@@ -510,6 +510,23 @@ impl Heap {
         self.words(cell, 1)
     }
 
+    /// Whether `cell` has one holder, who may then change it in place.
+    pub(crate) fn unique(&self, cell: Cell) -> bool {
+        count(self.word(cell, 0)) == 1
+    }
+
+    /// The words of `cell` after its header, for its one holder to change.
+    pub(crate) fn data_mut(&mut self, cell: Cell) -> &mut [u64] {
+        self.words_mut(cell, 1)
+    }
+
+    /// Free `cell`, whose one holder has moved what it held somewhere else,
+    /// so nothing it holds is released.
+    pub(crate) fn discard(&mut self, cell: Cell) {
+        let h = self.word(cell, 0);
+        self.free_cell(cell, h);
+    }
+
     /// A new tuple cell holding `elements`. Each element's reference passes
     /// to the cell.
     pub(crate) fn tuple(&mut self, elements: &[Value]) -> Result<Cell, Full> {

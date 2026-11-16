@@ -57,6 +57,11 @@ pub(crate) struct Machine<'c, 'h, 'o> {
     heap: Heap,
     globals: Vec<Value>,
     regs: Vec<Value>,
+    /// Where the live registers end. Every register from here on is `Nil`.
+    top: usize,
+    /// The arguments of the call being made, kept between calls so that
+    /// making one allocates nothing.
+    passing: Vec<Value>,
     /// `os.env` as a map, made the first time it is asked for. The
     /// environment cannot change while the program runs, so every call after
     /// shares this one.
@@ -72,6 +77,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             heap: Heap::default(),
             globals: vec![Value::NIL; code.globals as usize],
             regs: Vec::new(),
+            top: 0,
+            passing: Vec::new(),
             env: None,
         }
     }
@@ -104,20 +111,21 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     /// Call `body` with `args` and run until it returns. The arguments'
     /// references pass to the callee, and the result's passes to the caller.
     fn call(&mut self, body: &'c Body, args: &[Value]) -> Result<Value, Stop> {
-        let base = self.regs.len();
+        let base = self.top;
         self.enter(body, base, args);
-        let mut frames = vec![Frame {
+        // The frame running is kept apart from the ones waiting on it, so an
+        // instruction reaches it without going through the stack.
+        let mut frame = Frame {
             body,
             pc: 0,
             base,
             ret_to: None,
             env: Value::NIL,
-        }];
+        };
+        let mut callers: Vec<Frame<'c>> = Vec::new();
         loop {
-            let Some(frame) = frames.last_mut() else {
-                return Ok(Value::NIL);
-            };
-            let Some(instr) = frame.body.instrs.get(frame.pc) else {
+            let body = frame.body;
+            let Some(instr) = body.instrs.get(frame.pc) else {
                 return Err(Stop::broken(Broken::RanPastEnd {
                     func: frame.body.name.clone(),
                 }));
@@ -167,8 +175,31 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     }
                 }
                 Instr::Int { dst, op, a, b } => {
-                    let (a, b) = (self.int(base, *a)?, self.int(base, *b)?);
-                    let v = bigint::op(&mut self.heap, *op, a, b).map_err(full)?;
+                    let (x, y) = (self.get(base, *a), self.get(base, *b));
+                    // Nearly every Int is small, and so is nearly every
+                    // answer, so that case skips building an `Int`.
+                    let v = match (x.small_int(), y.small_int()) {
+                        (Some(x), Some(y)) => bigint::small_op(*op, x, y),
+                        _ => None,
+                    };
+                    let v = match v {
+                        Some(v) => v,
+                        None => {
+                            let (x, y) = (self.int_of(x)?, self.int_of(y)?);
+                            bigint::op(&mut self.heap, *op, x, y).map_err(full)?
+                        }
+                    };
+                    self.set(base, *dst, v);
+                }
+                Instr::IntImm { dst, op, a, b } => {
+                    let x = self.get(base, *a);
+                    let v = match x.small_int().and_then(|x| bigint::small_op(*op, x, *b)) {
+                        Some(v) => v,
+                        None => {
+                            let x = self.int_of(x)?;
+                            bigint::op(&mut self.heap, *op, x, Int::Small(*b)).map_err(full)?
+                        }
+                    };
                     self.set(base, *dst, v);
                 }
                 Instr::IntNeg { dst, a } => {
@@ -287,13 +318,17 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     let values = self.call_args(base, args);
                     let new_base = frame_end(base, frame.body);
                     self.enter(callee, new_base, &values);
-                    frames.push(Frame {
-                        body: callee,
-                        pc: 0,
-                        base: new_base,
-                        ret_to: Some(*dst),
-                        env: Value::NIL,
-                    });
+                    self.passed(values);
+                    callers.push(std::mem::replace(
+                        &mut frame,
+                        Frame {
+                            body: callee,
+                            pc: 0,
+                            base: new_base,
+                            ret_to: Some(*dst),
+                            env: Value::NIL,
+                        },
+                    ));
                 }
                 Instr::CallSelf { dst, args } => {
                     let values = self.call_args(base, args);
@@ -301,26 +336,34 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     let env = self.share(frame.env);
                     let new_base = frame_end(base, body);
                     self.enter(body, new_base, &values);
-                    frames.push(Frame {
-                        body,
-                        pc: 0,
-                        base: new_base,
-                        ret_to: Some(*dst),
-                        env,
-                    });
+                    self.passed(values);
+                    callers.push(std::mem::replace(
+                        &mut frame,
+                        Frame {
+                            body,
+                            pc: 0,
+                            base: new_base,
+                            ret_to: Some(*dst),
+                            env,
+                        },
+                    ));
                 }
                 Instr::CallValue { dst, callee, args } => {
                     let (body, env) = self.callee(self.get(base, *callee), args.len())?;
                     let values = self.call_args(base, args);
                     let new_base = frame_end(base, frame.body);
                     self.enter(body, new_base, &values);
-                    frames.push(Frame {
-                        body,
-                        pc: 0,
-                        base: new_base,
-                        ret_to: Some(*dst),
-                        env,
-                    });
+                    self.passed(values);
+                    callers.push(std::mem::replace(
+                        &mut frame,
+                        Frame {
+                            body,
+                            pc: 0,
+                            base: new_base,
+                            ret_to: Some(*dst),
+                            env,
+                        },
+                    ));
                 }
                 // A tail call's callee takes over this frame, so a loop
                 // written as tail recursion runs in constant space.
@@ -328,6 +371,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     let callee = self.body(*func)?;
                     let values = self.call_args(base, args);
                     self.enter(callee, base, &values);
+                    self.passed(values);
                     let old = std::mem::replace(&mut frame.env, Value::NIL);
                     self.release(old);
                     frame.body = callee;
@@ -336,6 +380,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 Instr::TailCallSelf { args } => {
                     let values = self.call_args(base, args);
                     self.again(frame.body, base, &values);
+                    self.passed(values);
                     frame.pc = 0;
                 }
                 // The callee's closure gets its own reference before `enter`
@@ -345,6 +390,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     let (body, env) = self.callee(self.get(base, *callee), args.len())?;
                     let values = self.call_args(base, args);
                     self.enter(body, base, &values);
+                    self.passed(values);
                     let old = std::mem::replace(&mut frame.env, env);
                     self.release(old);
                     frame.body = body;
@@ -475,7 +521,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     // reuses its frame, so a million of them still count one.
                     let v = match intrinsic {
                         Intrinsic::InternalStackDepth => {
-                            bigint::int(&mut self.heap, frames.len()).map_err(full)?
+                            bigint::int(&mut self.heap, callers.len().saturating_add(1))
+                                .map_err(full)?
                         }
                         // Read the count before making this call's own answer,
                         // so asking does not change what it says.
@@ -652,17 +699,59 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                         return Err(Stop::missing(Missing::Branch(v)));
                     }
                 },
+                Instr::MapSetOwned {
+                    dst,
+                    map,
+                    key,
+                    value,
+                } => {
+                    let m = self.map(self.get(base, *map))?;
+                    let (k, v) = (self.get(base, *key), self.get(base, *value));
+                    // The register's reference passes to the set.
+                    self.take(base, *map);
+                    let cell = map::set_owned(&mut self.heap, m, k, v).map_err(full)?;
+                    self.set(base, *dst, Value::cell(cell));
+                }
+                Instr::JumpUnlessCmp { op, a, b, to } => {
+                    let (x, y) = (self.get(base, *a), self.get(base, *b));
+                    let holds = match (x.small_int(), y.small_int()) {
+                        (Some(x), Some(y)) => bigint::small_op(*op, x, y),
+                        _ => None,
+                    };
+                    let holds = match holds {
+                        Some(v) => v,
+                        None => {
+                            let (x, y) = (self.int_of(x)?, self.int_of(y)?);
+                            bigint::op(&mut self.heap, *op, x, y).map_err(full)?
+                        }
+                    };
+                    if holds.bits() != Value::bool(true).bits() {
+                        frame.pc = *to as usize;
+                    }
+                }
+                Instr::JumpUnlessCmpImm { op, a, b, to } => {
+                    let x = self.get(base, *a);
+                    let holds = match x.small_int().and_then(|x| bigint::small_op(*op, x, *b)) {
+                        Some(v) => v,
+                        None => {
+                            let x = self.int_of(x)?;
+                            bigint::op(&mut self.heap, *op, x, Int::Small(*b)).map_err(full)?
+                        }
+                    };
+                    if holds.bits() != Value::bool(true).bits() {
+                        frame.pc = *to as usize;
+                    }
+                }
                 Instr::Ret { src } => {
                     let v = self.share(self.get(base, *src));
                     let ret_to = frame.ret_to;
                     let env = frame.env;
-                    frames.pop();
                     self.leave(base);
                     self.release(env);
-                    match (ret_to, frames.last()) {
+                    match (ret_to, callers.pop()) {
                         (Some(dst), Some(caller)) => {
-                            let caller_base = caller.base;
-                            self.set(caller_base, dst, v);
+                            self.set(caller.base, dst, v);
+                            frame = caller;
                         }
                         _ => return Ok(v),
                     }
@@ -2121,16 +2210,28 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     /// register holds and leaves it empty, so the callee is the only holder.
     /// Every other one is shared. They are read in order, because a register
     /// a later argument moves may be one an earlier one still reads.
+    ///
+    /// They go in the buffer [`Self::passed`] gives back, so a call allocates
+    /// nothing for them.
     fn call_args(&mut self, base: usize, args: &[Arg]) -> Vec<Value> {
-        args.iter()
-            .map(|a| {
-                if a.moved {
-                    self.take(base, a.reg)
-                } else {
-                    self.share(self.get(base, a.reg))
-                }
-            })
-            .collect()
+        let mut values = std::mem::take(&mut self.passing);
+        values.clear();
+        for a in args {
+            let v = if a.moved {
+                self.take(base, a.reg)
+            } else {
+                self.share(self.get(base, a.reg))
+            };
+            values.push(v);
+        }
+        values
+    }
+
+    /// Keep the buffer [`Self::call_args`] filled for the next call. Its
+    /// values' references have passed to the callee's registers.
+    fn passed(&mut self, mut values: Vec<Value>) {
+        values.clear();
+        self.passing = values;
     }
 
     /// The body function value `f` runs, and `f` with one more reference, for
@@ -2165,19 +2266,34 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     /// Whatever held registers from `base` on is released first.
     fn enter(&mut self, body: &Body, base: usize, args: &[Value]) {
         self.leave(base);
-        self.regs.resize(frame_end(base, body), Value::NIL);
+        self.open(frame_end(base, body));
         for (param, arg) in body.params.iter().zip(args) {
             self.set(base, *param, *arg);
         }
     }
 
-    /// Release every register from `base` on, and drop them.
+    /// Release every live register from `base` on, leaving each `Nil`.
+    /// They are released from the top down, the order frames end in.
     fn leave(&mut self, base: usize) {
-        while self.regs.len() > base {
-            if let Some(v) = self.regs.pop() {
-                self.release(v);
+        if let Some(live) = self.regs.get_mut(base..self.top) {
+            for slot in live.iter_mut().rev() {
+                let old = std::mem::replace(slot, Value::NIL);
+                if let Some(cell) = old.as_cell() {
+                    self.heap.release(cell);
+                }
             }
         }
+        self.top = self.top.min(base);
+    }
+
+    /// Make the registers up to `end` live. Every register past `top` is
+    /// already `Nil`, so the stack only grows the first time a frame
+    /// reaches this far, and never shrinks.
+    fn open(&mut self, end: usize) {
+        if self.regs.len() < end {
+            self.regs.resize(end, Value::NIL);
+        }
+        self.top = end;
     }
 
     /// Run `body` again in the same frame, for a call to self in tail
@@ -2187,17 +2303,16 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     /// register still owns it. So a cell the loop never takes is freed when
     /// the frame really ends.
     fn again(&mut self, body: &Body, base: usize, args: &[Value]) {
-        let top = frame_end(base, body);
-        while self.regs.len() > top {
-            if let Some(v) = self.regs.pop() {
-                self.release(v);
-            }
-        }
-        self.regs.resize(top, Value::NIL);
-        for i in 0..body.regs {
-            let r = Reg(i);
+        let end = frame_end(base, body);
+        self.leave(end);
+        self.open(end);
+        let frame = self.regs.get_mut(base..end).unwrap_or_default();
+        for (r, slot) in (0..).map(Reg).zip(frame.iter_mut()) {
             if !body.carried.contains(&r) {
-                self.set(base, r, Value::NIL);
+                let old = std::mem::replace(slot, Value::NIL);
+                if let Some(cell) = old.as_cell() {
+                    self.heap.release(cell);
+                }
             }
         }
         for (param, arg) in body.params.iter().zip(args) {
@@ -2480,7 +2595,10 @@ mod tests {
         let last = m.run().expect("the program runs");
         m.release(last);
         m.release_globals();
-        assert!(m.regs.is_empty(), "a frame's registers outlived it");
+        assert!(
+            m.top == 0 && m.regs.iter().all(|v| v.bits() == Value::NIL.bits()),
+            "a frame's registers outlived it"
+        );
         let left = m.live();
         drop(m);
         (String::from_utf8(out).expect("UTF-8"), left)

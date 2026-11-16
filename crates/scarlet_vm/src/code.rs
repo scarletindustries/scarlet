@@ -26,8 +26,8 @@
 use std::collections::{BTreeSet, HashMap};
 
 use scarlet_ir::core_ir::{
-    Abi, Atom, Callee, Const, CoreExpr, CoreFn, CorePat, FuncIdx, GlobalSlot, JoinId, Load,
-    LocalId, LoweredFn, PrimOp, Program, VariantRef,
+    Abi, Atom, Callee, Const, CoreBind, CoreExpr, CoreFn, CorePat, FuncIdx, GlobalSlot, JoinId,
+    Load, LocalId, LoweredFn, PrimOp, Program, VariantRef,
 };
 use scarlet_ir::intrinsic::Intrinsic;
 use scarlet_ir::tivec::{Idx, TiVec};
@@ -112,6 +112,14 @@ pub(crate) enum Instr {
         op: IntOp,
         a: Reg,
         b: Reg,
+    },
+    /// `a op b` for a `b` the program spells as a small Int constant, which
+    /// saves the instruction that would put it in a register.
+    IntImm {
+        dst: Reg,
+        op: IntOp,
+        a: Reg,
+        b: i64,
     },
     IntNeg {
         dst: Reg,
@@ -235,6 +243,29 @@ pub(crate) enum Instr {
     /// Continue at `to` when `cond` is `False`, else at the next instruction.
     JumpIfFalse {
         cond: Reg,
+        to: u32,
+    },
+    /// Continue at `to` unless `a op b` holds, for an `if` on a comparison
+    /// nothing else reads.
+    JumpUnlessCmp {
+        op: IntOp,
+        a: Reg,
+        b: Reg,
+        to: u32,
+    },
+    /// `map::set` for a map whose register gives up its reference, so the map
+    /// can change in place when nothing else holds it.
+    MapSetOwned {
+        dst: Reg,
+        map: Reg,
+        key: Reg,
+        value: Reg,
+    },
+    /// [`Instr::JumpUnlessCmp`] against a small Int constant.
+    JumpUnlessCmpImm {
+        op: IntOp,
+        a: Reg,
+        b: i64,
         to: u32,
     },
     /// Continue at `to` unless `src` is constructor `variant`.
@@ -394,6 +425,8 @@ impl Instr {
         match self {
             Instr::Jump { to }
             | Instr::JumpIfFalse { to, .. }
+            | Instr::JumpUnlessCmp { to, .. }
+            | Instr::JumpUnlessCmpImm { to, .. }
             | Instr::JumpUnlessVariant { to, .. }
             | Instr::JumpUnlessInt { to, .. }
             | Instr::JumpUnlessFloat { to, .. }
@@ -408,6 +441,8 @@ impl Instr {
             | Instr::GetGlobal { .. }
             | Instr::SetGlobal { .. }
             | Instr::Int { .. }
+            | Instr::IntImm { .. }
+            | Instr::MapSetOwned { .. }
             | Instr::IntNeg { .. }
             | Instr::Float { .. }
             | Instr::FloatNeg { .. }
@@ -503,6 +538,32 @@ pub(crate) enum IntOp {
     Le,
     Gt,
     Ge,
+}
+
+impl IntOp {
+    /// Whether the op gives a Bool.
+    fn compares(self) -> bool {
+        match self {
+            IntOp::Eq | IntOp::Ne | IntOp::Lt | IntOp::Le | IntOp::Gt | IntOp::Ge => true,
+            IntOp::Add | IntOp::Sub | IntOp::Mul | IntOp::Div | IntOp::Rem => false,
+        }
+    }
+
+    /// The op that gives the same answer with its operands swapped, or `None`
+    /// when there is none.
+    fn swapped(self) -> Option<IntOp> {
+        Some(match self {
+            IntOp::Add => IntOp::Add,
+            IntOp::Mul => IntOp::Mul,
+            IntOp::Eq => IntOp::Eq,
+            IntOp::Ne => IntOp::Ne,
+            IntOp::Lt => IntOp::Gt,
+            IntOp::Le => IntOp::Ge,
+            IntOp::Gt => IntOp::Lt,
+            IntOp::Ge => IntOp::Le,
+            IntOp::Sub | IntOp::Div | IntOp::Rem => return None,
+        })
+    }
 }
 
 /// One loaded function.
@@ -627,6 +688,8 @@ struct Loader<'c> {
     next: u32,
     /// Locals a constructor reuses, so their `Drop` hollows instead of frees.
     reused: BTreeSet<LocalId>,
+    /// How many times each local is read.
+    reads: HashMap<LocalId, u32>,
 }
 
 impl<'c> Loader<'c> {
@@ -645,6 +708,7 @@ impl<'c> Loader<'c> {
             consts,
             this,
             reused: reused_locals(&f.body),
+            reads: reads(&f.body),
             instrs: Vec::new(),
             labels: Vec::new(),
             conts: HashMap::new(),
@@ -725,6 +789,75 @@ impl<'c> Loader<'c> {
         }
     }
 
+    /// `let k = <small Int>` read only by the `let` right after it, which does
+    /// Int arithmetic or a comparison on it. The two load as one
+    /// [`Instr::IntImm`], and what comes after them is returned too.
+    fn immediate<'e>(
+        &self,
+        bind: &CoreBind,
+        rhs: &Atom,
+        body: &'e CoreExpr,
+    ) -> Option<(Imm, &'e CoreExpr)> {
+        let Atom::Const(c) = rhs else { return None };
+        let Some(&Const::Int(n)) = self.consts.get(c.index()) else {
+            return None;
+        };
+        let CoreExpr::Let {
+            bind: next,
+            rhs: Atom::PrimOp { op, args },
+            body: rest,
+        } = body
+        else {
+            return None;
+        };
+        if bind.global.is_some() || Value::int(n).is_none() || self.reads.get(&bind.id) != Some(&1)
+        {
+            return None;
+        }
+        let op = int_op(*op)?;
+        let (a, op) = match args.as_slice() {
+            [a, k] if *k == bind.id && *a != bind.id => (*a, op),
+            [k, a] if *k == bind.id && *a != bind.id => (*a, op.swapped()?),
+            _ => return None,
+        };
+        let instr = Instr::IntImm {
+            dst: Reg::of(next.id),
+            op,
+            a: Reg::of(a),
+            b: n,
+        };
+        Some((
+            Imm {
+                instr,
+                global: next.global,
+            },
+            rest,
+        ))
+    }
+
+    /// When the last instruction compares two Ints into `cond`, and the `if`
+    /// on `cond` is all that reads it, take that instruction back, so the
+    /// `if` can compare and jump in one. Nothing may jump to the `if` itself,
+    /// or that jump would skip the comparison.
+    fn take_comparison(&mut self, cond: LocalId) -> Option<Test> {
+        let here = u32::try_from(self.instrs.len()).ok()?;
+        if self.reads.get(&cond) != Some(&1) || self.labels.iter().any(|(at, _)| *at == Some(here))
+        {
+            return None;
+        }
+        let test = match self.instrs.last()? {
+            Instr::Int { dst, op, a, b } if *dst == Reg::of(cond) && op.compares() => {
+                Test::Regs(*op, *a, *b)
+            }
+            Instr::IntImm { dst, op, a, b } if *dst == Reg::of(cond) && op.compares() => {
+                Test::Imm(*op, *a, *b)
+            }
+            _ => return None,
+        };
+        self.instrs.pop();
+        Some(test)
+    }
+
     fn scratch(&mut self) -> Result<Reg, Unloadable> {
         let r = Reg(self.next);
         self.next = self
@@ -738,6 +871,47 @@ impl<'c> Loader<'c> {
         let mut e = e;
         loop {
             match e {
+                CoreExpr::Let { bind, rhs, body }
+                    if let Some((imm, rest)) = self.immediate(bind, rhs, body) =>
+                {
+                    let dst = imm.dst();
+                    self.instrs.push(imm.instr);
+                    if let Some(slot) = imm.global {
+                        self.instrs.push(Instr::SetGlobal { slot, src: dst });
+                    }
+                    e = rest;
+                }
+                // A map dropped right after it is set gives its reference to
+                // the set.
+                CoreExpr::Let {
+                    bind,
+                    rhs:
+                        Atom::Intrinsic {
+                            intrinsic: Intrinsic::MapSet,
+                            args,
+                        },
+                    body,
+                } if let [m, k, v] = args.as_slice()
+                    && k != m
+                    && v != m
+                    && let CoreExpr::Drop {
+                        local, body: rest, ..
+                    } = &**body
+                    && local == m
+                    && !self.reused.contains(m) =>
+                {
+                    let dst = Reg::of(bind.id);
+                    self.instrs.push(Instr::MapSetOwned {
+                        dst,
+                        map: Reg::of(*m),
+                        key: Reg::of(*k),
+                        value: Reg::of(*v),
+                    });
+                    if let Some(slot) = bind.global {
+                        self.instrs.push(Instr::SetGlobal { slot, src: dst });
+                    }
+                    e = rest;
+                }
                 CoreExpr::Let { bind, rhs, body } => {
                     let dst = Reg::of(bind.id);
                     self.atom(dst, rhs)?;
@@ -760,6 +934,11 @@ impl<'c> Loader<'c> {
                         (Dest::Return, Atom::Call { callee, args }) => {
                             let call = self.call(None, callee, args);
                             self.instrs.push(call);
+                        }
+                        (Dest::Return, Atom::Local(local)) => {
+                            self.instrs.push(Instr::Ret {
+                                src: Reg::of(*local),
+                            });
                         }
                         (Dest::Return, atom) => {
                             let src = self.scratch()?;
@@ -789,8 +968,18 @@ impl<'c> Loader<'c> {
                     cond, then, els, ..
                 } => {
                     let otherwise = self.label();
-                    let cond = Reg::of(*cond);
-                    self.jump(otherwise, |to| Instr::JumpIfFalse { cond, to });
+                    match self.take_comparison(*cond) {
+                        Some(Test::Regs(op, a, b)) => {
+                            self.jump(otherwise, |to| Instr::JumpUnlessCmp { op, a, b, to });
+                        }
+                        Some(Test::Imm(op, a, b)) => {
+                            self.jump(otherwise, |to| Instr::JumpUnlessCmpImm { op, a, b, to });
+                        }
+                        None => {
+                            let cond = Reg::of(*cond);
+                            self.jump(otherwise, |to| Instr::JumpIfFalse { cond, to });
+                        }
+                    }
                     self.expr(then, dest)?;
                     self.place(otherwise)?;
                     e = els;
@@ -1391,6 +1580,89 @@ fn reused_locals(e: &CoreExpr) -> BTreeSet<LocalId> {
                 stack.push(els);
             }
             CoreExpr::Tail(atom) => note(atom),
+            CoreExpr::Goto(_) => {}
+        }
+    }
+    out
+}
+
+/// A comparison an `if` jumps on: two registers, or one and a constant.
+enum Test {
+    Regs(IntOp, Reg, Reg),
+    Imm(IntOp, Reg, i64),
+}
+
+/// An [`Instr::IntImm`], and the global its result is stored in, if any.
+struct Imm {
+    instr: Instr,
+    global: Option<GlobalSlot>,
+}
+
+impl Imm {
+    fn dst(&self) -> Reg {
+        match self.instr {
+            Instr::IntImm { dst, .. } => dst,
+            _ => Reg(0),
+        }
+    }
+}
+
+/// The [`IntOp`] an Int primitive is, or `None` for any other primitive.
+fn int_op(op: PrimOp) -> Option<IntOp> {
+    Some(match op {
+        PrimOp::IntAdd => IntOp::Add,
+        PrimOp::IntSub => IntOp::Sub,
+        PrimOp::IntMul => IntOp::Mul,
+        PrimOp::IntDiv => IntOp::Div,
+        PrimOp::IntRem => IntOp::Rem,
+        PrimOp::IntEq => IntOp::Eq,
+        PrimOp::IntNe => IntOp::Ne,
+        PrimOp::IntLt => IntOp::Lt,
+        PrimOp::IntLe => IntOp::Le,
+        PrimOp::IntGt => IntOp::Gt,
+        PrimOp::IntGe => IntOp::Ge,
+        _ => return None,
+    })
+}
+
+/// How many times `e` reads each local.
+fn reads(e: &CoreExpr) -> HashMap<LocalId, u32> {
+    let mut out: HashMap<LocalId, u32> = HashMap::new();
+    let mut note = |l: LocalId| {
+        let n = out.entry(l).or_default();
+        *n = n.saturating_add(1);
+    };
+    let mut stack = vec![e];
+    while let Some(e) = stack.pop() {
+        match e {
+            CoreExpr::Let { rhs, body, .. } => {
+                rhs.for_each_operand(&mut note);
+                stack.push(body);
+            }
+            CoreExpr::LetJoin { join, body, .. } => {
+                stack.push(join);
+                stack.push(body);
+            }
+            CoreExpr::LetCont { cont, body, .. } => {
+                stack.push(cont);
+                stack.push(body);
+            }
+            CoreExpr::Drop { local, body, .. } => {
+                note(*local);
+                stack.push(body);
+            }
+            CoreExpr::Match { scrut, arms, .. } => {
+                note(*scrut);
+                stack.extend(arms.iter().map(|(_, arm)| arm));
+            }
+            CoreExpr::If {
+                cond, then, els, ..
+            } => {
+                note(*cond);
+                stack.push(then);
+                stack.push(els);
+            }
+            CoreExpr::Tail(atom) => atom.for_each_operand(&mut note),
             CoreExpr::Goto(_) => {}
         }
     }
