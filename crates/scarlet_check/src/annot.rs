@@ -32,7 +32,7 @@ pub(crate) enum AnnotContext {
 pub(crate) struct AnnotVars {
     ctx: AnnotContext,
     named: Vec<TypeVar>,
-    next: u32,
+    next: usize,
 }
 
 impl AnnotVars {

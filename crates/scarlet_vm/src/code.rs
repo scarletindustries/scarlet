@@ -34,7 +34,7 @@ use scarlet_ir::tivec::{Idx, TiVec};
 
 use crate::float::NumOp;
 use crate::show::Types;
-use crate::stop::{Arity, Broken, Missing};
+use crate::stop::{Arity, Broken, Missing, Stop};
 use crate::value::Value;
 
 /// A register, which is an index into the running function's frame.
@@ -543,22 +543,23 @@ pub(crate) struct Code {
     pub(crate) abi: Abi,
 }
 
-pub(crate) fn load(program: &Program) -> Code {
+pub(crate) fn load(program: &Program) -> Result<Code, Stop> {
+    let full = |_| Stop::broken(Broken::TooManyFunctions);
     let consts = &program.consts;
     let mut fns = TiVec::new();
     let mut names = TiVec::new();
     for f in &program.fns {
-        let this = fns.next_idx();
-        fns.push(load_fn(f, consts, Some(this)));
-        names.push(f.name.clone());
+        let this = fns.next_idx().map_err(full)?;
+        fns.push(load_fn(f, consts, Some(this))?).map_err(full)?;
+        names.push(f.name.clone()).map_err(full)?;
     }
     let toplevels = program
         .inits
         .iter()
         .chain([&program.toplevel])
         .map(|f| load_fn(f, consts, None))
-        .collect();
-    Code {
+        .collect::<Result<_, _>>()?;
+    Ok(Code {
         fns,
         toplevels,
         main: program.main,
@@ -566,13 +567,30 @@ pub(crate) fn load(program: &Program) -> Code {
         types: program.types.clone(),
         names,
         abi: program.abi,
-    }
+    })
 }
 
 /// `this` is the function's own index, which a call to `self` means. A
 /// toplevel has none, and cannot call itself.
-fn load_fn(f: &LoweredFn, consts: &[Const], this: Option<FuncIdx>) -> Func {
-    match Loader::new(consts, &f.core, this).body(&f.core) {
+/// Why a function didn't load.
+enum Unloadable {
+    /// It needs something the VM doesn't run yet. The function still loads,
+    /// and stops with this if it's ever called.
+    Missing(Missing),
+    /// It has more instructions than a jump target can name.
+    TooLong,
+}
+
+impl From<Missing> for Unloadable {
+    fn from(m: Missing) -> Self {
+        Unloadable::Missing(m)
+    }
+}
+
+/// A function that's too long for the VM's jumps stops the whole load, as a
+/// heap too big for its addresses stops a run: it's a limit of the machine.
+fn load_fn(f: &LoweredFn, consts: &[Const], this: Option<FuncIdx>) -> Result<Func, Stop> {
+    Ok(match Loader::new(consts, &f.core, this).body(&f.core) {
         Ok((regs, instrs)) => Func::Ready(Body {
             name: format!("{}.{}", f.module, f.name),
             regs,
@@ -583,8 +601,13 @@ fn load_fn(f: &LoweredFn, consts: &[Const], this: Option<FuncIdx>) -> Func {
                 .collect(),
             instrs: instrs.into_boxed_slice(),
         }),
-        Err(what) => Func::NotBuiltYet(what),
-    }
+        Err(Unloadable::Missing(what)) => Func::NotBuiltYet(what),
+        Err(Unloadable::TooLong) => {
+            return Err(Stop::FunctionTooLong {
+                name: format!("{}.{}", f.module, f.name),
+            });
+        }
+    })
 }
 
 struct Loader<'c> {
@@ -621,7 +644,7 @@ impl<'c> Loader<'c> {
         }
     }
 
-    fn body(mut self, f: &CoreFn) -> Result<(u32, Vec<Instr>), Missing> {
+    fn body(mut self, f: &CoreFn) -> Result<(u32, Vec<Instr>), Unloadable> {
         self.expr(&f.body, Dest::Return)?;
         moves_on_last_use(&mut self.instrs);
         Ok((self.next, self.instrs))
@@ -633,8 +656,8 @@ impl<'c> Loader<'c> {
     }
 
     /// Put `l` at the next instruction, and point every jump to it there.
-    fn place(&mut self, l: Label) {
-        let here = self.instrs.len() as u32;
+    fn place(&mut self, l: Label) -> Result<(), Unloadable> {
+        let here = u32::try_from(self.instrs.len()).map_err(|_| Unloadable::TooLong)?;
         let waiting = match self.labels.get_mut(l.0) {
             Some((at, waiting)) => {
                 *at = Some(here);
@@ -647,6 +670,7 @@ impl<'c> Loader<'c> {
                 *to = here;
             }
         }
+        Ok(())
     }
 
     /// Push a jump to `l`, patched when `l` is placed if it is not yet.
@@ -698,7 +722,7 @@ impl<'c> Loader<'c> {
         r
     }
 
-    fn expr(&mut self, e: &CoreExpr, dest: Dest) -> Result<(), Missing> {
+    fn expr(&mut self, e: &CoreExpr, dest: Dest) -> Result<(), Unloadable> {
         let mut e = e;
         loop {
             match e {
@@ -743,7 +767,7 @@ impl<'c> Loader<'c> {
                     let after = self.label();
                     let reg = Reg::of(bind.id);
                     self.expr(join, Dest::Join { reg, after })?;
-                    self.place(after);
+                    self.place(after)?;
                     if let Some(slot) = bind.global {
                         self.instrs.push(Instr::SetGlobal { slot, src: reg });
                     }
@@ -756,7 +780,7 @@ impl<'c> Loader<'c> {
                     let cond = Reg::of(*cond);
                     self.jump(otherwise, |to| Instr::JumpIfFalse { cond, to });
                     self.expr(then, dest)?;
-                    self.place(otherwise);
+                    self.place(otherwise)?;
                     e = els;
                 }
                 CoreExpr::Match { scrut, arms, .. } => {
@@ -765,7 +789,7 @@ impl<'c> Loader<'c> {
                         let next = self.label();
                         self.pattern(src, pat, next)?;
                         self.expr(arm, dest)?;
-                        self.place(next);
+                        self.place(next)?;
                     }
                     self.instrs.push(Instr::Bad { why: Broken::NoArm });
                     return Ok(());
@@ -776,7 +800,7 @@ impl<'c> Loader<'c> {
                     let l = self.label();
                     self.conts.insert(*id, l);
                     self.expr(body, dest)?;
-                    self.place(l);
+                    self.place(l)?;
                     e = cont;
                 }
                 CoreExpr::Goto(id) => {
@@ -794,7 +818,7 @@ impl<'c> Loader<'c> {
 
     /// Test `src` against `pat`, jumping to `next` when it does not fit, and
     /// read out what the pattern binds when it does.
-    fn pattern(&mut self, src: Reg, pat: &CorePat, next: Label) -> Result<(), Missing> {
+    fn pattern(&mut self, src: Reg, pat: &CorePat, next: Label) -> Result<(), Unloadable> {
         match pat {
             CorePat::Wild => {}
             CorePat::Bind(b) => self.instrs.push(Instr::Move {
@@ -836,14 +860,14 @@ impl<'c> Loader<'c> {
                     });
                 }
                 None => {
-                    return Err(Missing::NoConst(c.index()));
+                    return Err(Missing::NoConst(c.index()).into());
                 }
             },
         }
         Ok(())
     }
 
-    fn atom(&mut self, dst: Reg, atom: &Atom) -> Result<(), Missing> {
+    fn atom(&mut self, dst: Reg, atom: &Atom) -> Result<(), Unloadable> {
         let instr = match atom {
             Atom::Local(src) => Instr::Move {
                 dst,
@@ -906,7 +930,7 @@ impl<'c> Loader<'c> {
                     arg: Reg::of(*arg),
                     newline: *intrinsic == Intrinsic::Println,
                 },
-                _ => return Err(Missing::PrintArity(*intrinsic)),
+                _ => return Err(Missing::PrintArity(*intrinsic).into()),
             },
             Atom::Intrinsic { intrinsic, args } if built(*intrinsic, args.len()) => {
                 Instr::Builtin {
@@ -915,7 +939,7 @@ impl<'c> Loader<'c> {
                     args: args.iter().copied().map(Reg::of).collect(),
                 }
             }
-            Atom::Intrinsic { intrinsic, .. } => return Err(Missing::Intrinsic(*intrinsic)),
+            Atom::Intrinsic { intrinsic, .. } => return Err(Missing::Intrinsic(*intrinsic).into()),
             // A constructor with no fields is a value word, so there is no
             // allocation for Perceus to reuse.
             Atom::Ctor {

@@ -18,7 +18,7 @@ use crate::report::Report;
 
 /// A module-level value's position in [`Declared::values`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct DeclId(pub u32);
+pub(crate) struct DeclId(pub usize);
 
 pub(crate) enum DeclBody<'a> {
     Fn(&'a ast::FunctionDeclaration, &'a ast::Expression),
@@ -84,7 +84,7 @@ impl<'a> Declared<'a> {
     /// was pushed to, and `values` never shrinks, so this misses only for an
     /// id from another module.
     pub fn get(&self, id: DeclId) -> Option<&Decl<'a>> {
-        self.values.get(id.0 as usize)
+        self.values.get(id.0)
     }
 
     /// Every declaration, with its id.
@@ -212,7 +212,7 @@ pub(crate) fn declare<'a>(
 impl<'a> Declared<'a> {
     fn push(&mut self, d: Decl<'a>) {
         self.by_name
-            .insert(d.name.clone(), DeclId(self.values.len() as u32));
+            .insert(d.name.clone(), DeclId(self.values.len()));
         self.values.push(d);
     }
 }

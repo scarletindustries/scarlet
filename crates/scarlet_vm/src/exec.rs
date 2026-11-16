@@ -35,6 +35,7 @@ use crate::map;
 use crate::show;
 use crate::stop::{Broken, Missing};
 use crate::value::{Value, View};
+use crate::word::to_usize;
 
 struct Frame<'c> {
     body: &'c Body,
@@ -146,9 +147,9 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     self.set(base, *dst, v);
                 }
                 Instr::GetGlobal { dst, slot } => {
-                    let v = self
-                        .globals
-                        .get(slot.0 as usize)
+                    let v = usize::try_from(slot.0)
+                        .ok()
+                        .and_then(|i| self.globals.get(i))
                         .copied()
                         .unwrap_or(Value::NIL);
                     let v = self.share(v);
@@ -156,7 +157,10 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 }
                 Instr::SetGlobal { slot, src } => {
                     let v = self.share(self.get(base, *src));
-                    if let Some(g) = self.globals.get_mut(slot.0 as usize) {
+                    if let Some(g) = usize::try_from(slot.0)
+                        .ok()
+                        .and_then(|i| self.globals.get_mut(i))
+                    {
                         let old = std::mem::replace(g, v);
                         self.release(old);
                     }
@@ -529,7 +533,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 Instr::ArrayDrop { dst, src, n } => {
                     let s = self.seq(self.get(base, *src))?;
                     let n = match self.get(base, *n).view() {
-                        View::Int(n) if n >= 0 => n as usize,
+                        View::Int(n) if n >= 0 => to_usize(n.unsigned_abs()),
                         v @ (View::Int(_)
                         | View::Float(_)
                         | View::Nil
@@ -544,7 +548,9 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                         Seq::Tree(a) => array::skip(&mut self.heap, a, n),
                         Seq::Range { start, end } => {
                             let n = (n as u64).min(array::range_len(start, end));
-                            array::range(&mut self.heap, start + n as i64, end)
+                            // `n` is at most `end - start`, so `start + n` is
+                            // within `start..=end` and the add is exact.
+                            array::range(&mut self.heap, start.wrapping_add_unsigned(n), end)
                         }
                     };
                     self.set(base, *dst, Value::cell(cell.map_err(full)?));
@@ -591,7 +597,12 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                         (Seq::Range { start, end }, (Some(from), Some(to)))
                             if from <= to && to as u64 <= array::range_len(start, end) =>
                         {
-                            let (from, to) = (start + from as i64, start + to as i64);
+                            // Both are at most the range's length, so each sum
+                            // lands within `start..=end` and the add is exact.
+                            let (from, to) = (
+                                start.wrapping_add_unsigned(from as u64),
+                                start.wrapping_add_unsigned(to as u64),
+                            );
                             Some(array::range(&mut self.heap, from, to).map_err(full)?)
                         }
                         (Seq::Tree(_) | Seq::Range { .. }, _) => None,
@@ -786,7 +797,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 let (at, take) = (self.int_of(arg(self, 1))?, self.int_of(arg(self, 2))?);
                 let window = match (at, take) {
                     (Int::Small(at), Int::Small(take)) if at >= 0 && take >= 0 => {
-                        let (at, take) = (at as u64, take as u64);
+                        let (at, take) = (at.unsigned_abs(), take.unsigned_abs());
                         (at + take <= b.len).then_some((at, take))
                     }
                     _ => None,
@@ -928,8 +939,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 // A `Duration` is under 2^64 seconds, so its milliseconds fit
                 // an `i128` with room for the sign.
                 let ms = match SystemTime::now().duration_since(UNIX_EPOCH) {
-                    Ok(after) => after.as_millis() as i128,
-                    Err(before) => -(before.duration().as_millis() as i128),
+                    Ok(after) => after.as_millis().cast_signed(),
+                    Err(before) => -before.duration().as_millis().cast_signed(),
                 };
                 bigint::int(&mut self.heap, ms).map_err(full)
             }
@@ -1365,7 +1376,12 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 };
                 // A Float is finite, so every whole one is an exact Int.
                 if (i64::MIN as f64..i64::MAX as f64).contains(&whole) {
-                    return bigint::int(&mut self.heap, whole as i64).map_err(full);
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        reason = "`whole` is a whole number inside i64's range, so it converts exactly"
+                    )]
+                    let exact = whole as i64;
+                    return bigint::int(&mut self.heap, exact).map_err(full);
                 }
                 let n = num_bigint::BigInt::from_f64(whole).unwrap_or_default();
                 bigint::value(&mut self.heap, n).map_err(full)
@@ -1473,8 +1489,9 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 let b = self.binary(arg(self, 0))?;
                 let at = self.width(arg(self, 1))?;
                 let (cp, took) = binary::read_utf8(&self.heap, b, at).unwrap_or((0, 0));
-                let (cp, took) = (i64::from(cp), took as i64);
-                let pair = [Value::int(cp), Value::int(took)];
+                let cp = Value::int(i64::from(cp));
+                let took = i64::try_from(took).ok().and_then(Value::int);
+                let pair = [cp, took];
                 let [Some(cp), Some(took)] = pair else {
                     return Err(Stop::broken(Broken::CodePointTooBig));
                 };
@@ -2430,7 +2447,7 @@ mod tests {
         let result = scarlet_core::compile::compile_text(src, None);
         assert!(result.success(), "{:?}", result.diagnostics());
         let program = result.into_runnable().expect("a clean compile is runnable");
-        let code = crate::code::load(&program);
+        let code = crate::code::load(&program).expect("the program loads");
         let mut out = Vec::new();
         let mut m = Machine::new(&code, host, &mut out);
         let last = m.run().expect("the program runs");

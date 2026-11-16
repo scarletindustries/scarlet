@@ -46,9 +46,9 @@ pub enum Internal {
     NotInEngine(NotInEngine),
     UnknownCtor(UnknownCtor),
     /// A declaration id this module never made.
-    UnknownDecl(u32),
+    UnknownDecl(usize),
     /// A binder id this module never made.
-    UnknownBinder(u32),
+    UnknownBinder(usize),
     /// The graph that orders declarations or aliases refused a node or an
     /// edge.
     Graph(GraphError),
@@ -169,6 +169,8 @@ pub enum CheckError {
         given: usize,
     },
     RecursiveAlias(Name),
+    /// A type with more variants than a 16-bit index can name.
+    TooManyVariants(Name),
     /// A public value whose type still holds a variable nothing generalised.
     NotFullyKnown {
         name: Name,
@@ -454,6 +456,10 @@ impl fmt::Display for CheckError {
                         .join(", ")
                 ),
             },
+            E::TooManyVariants(ty) => write!(
+                f,
+                "Type '{ty}' has more than 65536 variants, which is more than a program can tell apart"
+            ),
             E::TypeArity {
                 qualifier,
                 name,

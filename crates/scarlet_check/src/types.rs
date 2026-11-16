@@ -310,6 +310,11 @@ fn constructors(
     );
     let type_site = env.site(def.span, EntityKind::Type);
     for (i, v) in variants.iter().enumerate() {
+        // A program names a variant by a 16-bit index.
+        let Ok(variant) = u16::try_from(i) else {
+            report.add(v.span, CheckError::TooManyVariants(def.name.name().clone()));
+            break;
+        };
         let ty = if v.fields.is_empty() {
             result.clone()
         } else {
@@ -334,7 +339,7 @@ fn constructors(
             Ctor {
                 ctor: CtorName {
                     type_name: def.name.clone(),
-                    variant: i as u16,
+                    variant,
                 },
                 labels,
                 scheme: Scheme {

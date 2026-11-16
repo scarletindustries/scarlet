@@ -19,7 +19,9 @@ use scarlet_syntax::ast::UnaryOp;
 use scarlet_types::name::{CtorName, ValueName};
 use scarlet_types::ty::Type;
 
-use crate::program::{Ids, InternalLinkError, LinkError, Minted, Named, Prelude, Site, Symbols};
+use crate::program::{
+    Ids, InternalLinkError, LinkError, Minted, Named, Prelude, Site, Symbols, Table,
+};
 use crate::typed_ir::{
     BindingId, PatRest, TypedArm, TypedArrayElem, TypedBinPatSeg, TypedBinSeg, TypedBind,
     TypedCallee, TypedExpr, TypedFn, TypedInterpPart, TypedPat, ValueRef,
@@ -155,7 +157,7 @@ struct Fx {
     /// parameters, then the rest in the order they are written.
     own: HashMap<BinderId, BindingId>,
     /// The next id for a temporary. Temporaries come after every binder.
-    next: u32,
+    next: usize,
     /// The enclosing function's locals this one reads, by capture index.
     captures: Vec<BinderId>,
     /// The binder that means this closure itself.
@@ -170,13 +172,13 @@ impl Fx {
     fn new(params: &[BinderId], body: impl FnOnce(&mut dyn FnMut(BinderId))) -> Self {
         let mut own: HashMap<BinderId, BindingId> = HashMap::new();
         let mut number = |b: BinderId| {
-            let next = BindingId(own.len() as u32);
+            let next = BindingId(own.len());
             own.entry(b).or_insert(next);
         };
         params.iter().for_each(|&p| number(p));
         body(&mut number);
         Fx {
-            next: own.len() as u32,
+            next: own.len(),
             own,
             captures: Vec::new(),
             self_name: None,
@@ -199,7 +201,7 @@ struct Tx<'t, 'x, 'd, 'm> {
 impl Tx<'_, '_, '_, '_> {
     fn ty(&mut self, t: scarlet_types::engine::Ty) -> R<RTy> {
         let ty = self.final_ty(t)?;
-        Ok(self.cx.ids.rty(&ty))
+        self.cx.ids.rty(&ty)
     }
 
     fn final_ty(&self, t: scarlet_types::engine::Ty) -> R<Type> {
@@ -230,16 +232,16 @@ impl Tx<'_, '_, '_, '_> {
         self.cx.prelude.temps.int
     }
 
-    fn constant(&mut self, c: Const) -> ConstId {
+    fn constant(&mut self, c: Const) -> R<ConstId> {
         self.cx.ids.constant(c)
     }
 
-    fn int_const(&mut self, i: i64) -> TypedExpr {
-        let value = self.constant(Const::Int(i));
-        TypedExpr::Const {
+    fn int_const(&mut self, i: i64) -> R<TypedExpr> {
+        let value = self.constant(Const::Int(i))?;
+        Ok(TypedExpr::Const {
             ty: self.int(),
             value,
-        }
+        })
     }
 
     /// The binding for `binder`, a binder of the function being made, at
@@ -284,17 +286,21 @@ impl Tx<'_, '_, '_, '_> {
     }
 
     /// Where a local reads from in the function being made.
-    fn load(&self, fx: &Fx, binder: BinderId, ty: RTy) -> TypedExpr {
+    fn load(&self, fx: &Fx, binder: BinderId, ty: RTy) -> R<TypedExpr> {
         let place = if let Some(&id) = fx.own.get(&binder) {
             ValueRef::Local(id)
         } else if let Some(slot) = self.cx.symbols.binder_slot(&self.m.key, binder) {
             ValueRef::Global(slot)
         } else if let Some(i) = fx.captures.iter().position(|&c| c == binder) {
-            ValueRef::Capture(CaptureIdx(i as i32))
+            ValueRef::Capture(
+                i32::try_from(i)
+                    .map(CaptureIdx)
+                    .map_err(|_| LinkError::TooMany(Table::Captures))?,
+            )
         } else {
             ValueRef::SelfClosure
         };
-        TypedExpr::Var { ty, place }
+        Ok(TypedExpr::Var { ty, place })
     }
 
     fn exprs(&mut self, fx: &mut Fx, xs: &[Expr]) -> R<Vec<TypedExpr>> {
@@ -310,19 +316,19 @@ impl Tx<'_, '_, '_, '_> {
         Ok(match &e.kind {
             ExprKind::Int(i) => TypedExpr::Const {
                 ty,
-                value: self.constant(Const::Int(*i)),
+                value: self.constant(Const::Int(*i))?,
             },
             ExprKind::Float(f) => TypedExpr::Const {
                 ty,
-                value: self.constant(Const::Float(*f)),
+                value: self.constant(Const::Float(*f))?,
             },
             ExprKind::String(s) => TypedExpr::Const {
                 ty,
-                value: self.constant(Const::String(s.clone())),
+                value: self.constant(Const::String(s.clone()))?,
             },
             ExprKind::Interp(parts) => {
                 if parts.is_empty() {
-                    let value = self.constant(Const::String(String::new()));
+                    let value = self.constant(Const::String(String::new()))?;
                     return Ok(TypedExpr::Const { ty, value });
                 }
                 let parts = parts
@@ -330,7 +336,7 @@ impl Tx<'_, '_, '_, '_> {
                     .map(|p| {
                         Ok(match p {
                             InterpPart::Text(s) => {
-                                TypedInterpPart::Str(self.constant(Const::String(s.clone())))
+                                TypedInterpPart::Str(self.constant(Const::String(s.clone()))?)
                             }
                             InterpPart::Expr(x) => TypedInterpPart::Expr(self.expr(fx, x)?),
                         })
@@ -352,7 +358,7 @@ impl Tx<'_, '_, '_, '_> {
             ExprKind::TupleIndex { tuple, index } => TypedExpr::TupleIndex {
                 ty,
                 recv: self.boxed(fx, tuple)?,
-                idx: *index,
+                idx: *index as usize,
             },
             ExprKind::Field { record, at, .. } => {
                 let rec_ty = self.final_ty(record.ty)?;
@@ -464,7 +470,7 @@ impl Tx<'_, '_, '_, '_> {
 
     fn var_value(&mut self, fx: &mut Fx, v: &Var, e: &Expr, ty: RTy) -> R<TypedExpr> {
         Ok(match v {
-            Var::Local(b) => self.load(fx, *b, ty),
+            Var::Local(b) => self.load(fx, *b, ty)?,
             Var::Fn(name) => TypedExpr::Closure {
                 ty,
                 func_idx: self.cx.symbols.func(name)?,
@@ -485,7 +491,7 @@ impl Tx<'_, '_, '_, '_> {
                 })?
             }
             Var::Ctor(ctor) => {
-                let variant = self.cx.ids.ctor_ref(&ctor.type_name, ctor.variant);
+                let variant = self.cx.ids.ctor_ref(&ctor.type_name, ctor.variant)?;
                 match self.final_ty(e.ty)? {
                     Type::Fn { .. } => {
                         self.eta(ty, "ctor", move |params, ret| TypedExpr::Ctor {
@@ -539,7 +545,7 @@ impl Tx<'_, '_, '_, '_> {
             module: self.m.key.as_str().to_string(),
             name: name.to_string(),
             body: f,
-        });
+        })?;
         Ok(TypedExpr::Closure {
             ty,
             func_idx,
@@ -571,14 +577,14 @@ impl Tx<'_, '_, '_, '_> {
                 body,
                 binds: inner.next,
             },
-        });
+        })?;
         let captures = l
             .captures
             .iter()
             .map(|&c| {
                 let cty = self.binder(c)?.ty;
                 let cty = self.ty(cty)?;
-                Ok(self.load(fx, c, cty))
+                self.load(fx, c, cty)
             })
             .collect::<R<_>>()?;
         Ok(TypedExpr::Closure {
@@ -619,7 +625,7 @@ impl Tx<'_, '_, '_, '_> {
         fx: &mut Fx,
         args: &[Arg],
     ) -> R<(Vec<(TypedBind, TypedExpr)>, Vec<TypedExpr>)> {
-        let in_order = args.iter().enumerate().all(|(i, a)| a.slot as usize == i);
+        let in_order = args.iter().enumerate().all(|(i, a)| a.slot == i);
         if in_order {
             let values = args
                 .iter()
@@ -628,7 +634,7 @@ impl Tx<'_, '_, '_, '_> {
             return Ok((Vec::new(), values));
         }
         let mut lets = Vec::with_capacity(args.len());
-        let mut slotted: Vec<(u32, TypedExpr)> = Vec::with_capacity(args.len());
+        let mut slotted: Vec<(usize, TypedExpr)> = Vec::with_capacity(args.len());
         for a in args {
             let b = self.spill(fx, &a.value, &mut lets)?;
             slotted.push((a.slot, self.var(&b)));
@@ -646,7 +652,7 @@ impl Tx<'_, '_, '_, '_> {
         e: &Expr,
         ty: RTy,
     ) -> R<TypedExpr> {
-        let variant = self.cx.ids.ctor_ref(&ctor.type_name, ctor.variant);
+        let variant = self.cx.ids.ctor_ref(&ctor.type_name, ctor.variant)?;
         let Some(spread) = spread else {
             let (lets, fields) = self.args_in_slot_order(fx, args)?;
             return Ok(wrap(
@@ -662,10 +668,10 @@ impl Tx<'_, '_, '_, '_> {
         // arguments.
         let result = self.final_ty(e.ty)?;
         let mut lets = Vec::with_capacity(args.len() + 1);
-        let mut fields: Vec<(u32, TypedExpr)> = Vec::new();
+        let mut fields: Vec<(usize, TypedExpr)> = Vec::new();
         let mut base_bind = None;
         for (i, a) in args.iter().enumerate() {
-            if i as u32 == spread.at {
+            if i == spread.at {
                 base_bind = Some(self.spill(fx, &spread.base, &mut lets)?);
             }
             let b = self.spill(fx, &a.value, &mut lets)?;
@@ -675,15 +681,14 @@ impl Tx<'_, '_, '_, '_> {
             Some(b) => b,
             None => self.spill(fx, &spread.base, &mut lets)?,
         };
-        let field_tys = self.field_tys(&result, ctor.variant)?;
+        let field_tys = self.field_tys(&result, usize::from(ctor.variant))?;
         for (slot, at) in &spread.fills {
-            let fty =
-                *field_tys
-                    .get(*slot as usize)
-                    .ok_or_else(|| InternalLinkError::NoFieldSlot {
-                        ctor: ctor.clone(),
-                        slot: *slot,
-                    })?;
+            let fty = *field_tys
+                .get(*slot)
+                .ok_or_else(|| InternalLinkError::NoFieldSlot {
+                    ctor: ctor.clone(),
+                    slot: *slot,
+                })?;
             let recv = self.var(&base_bind);
             let read = self.field(fx, recv, &result, at, fty)?;
             fields.push((*slot, read));
@@ -711,7 +716,7 @@ impl Tx<'_, '_, '_, '_> {
     }
 
     /// The field types of variant `v` of the named type `t`.
-    fn field_tys(&mut self, t: &Type, v: u16) -> R<Vec<RTy>> {
+    fn field_tys(&mut self, t: &Type, v: usize) -> R<Vec<RTy>> {
         let (name, args) = t
             .as_named()
             .ok_or_else(|| InternalLinkError::FieldOfUnnamed(t.clone()))?;
@@ -720,12 +725,12 @@ impl Tx<'_, '_, '_, '_> {
             .ids
             .defs
             .type_def(name)
-            .and_then(|d| d.field_types(v as usize, args))
+            .and_then(|d| d.field_types(v, args))
             .ok_or_else(|| InternalLinkError::NoVariant {
                 ty: name.clone(),
                 variant: v,
             })?;
-        Ok(tys.iter().map(|f| self.cx.ids.rty(f)).collect())
+        tys.iter().map(|f| self.cx.ids.rty(f)).collect()
     }
 
     /// A field read. Where every variant holds it in the same slot it is one
@@ -761,7 +766,7 @@ impl Tx<'_, '_, '_, '_> {
                 .into_iter()
                 .enumerate()
                 .map(|(j, fty)| {
-                    if j == slot as usize {
+                    if j == slot {
                         TypedPat::Bind(b)
                     } else {
                         TypedPat::Wild { ty: fty }
@@ -771,7 +776,10 @@ impl Tx<'_, '_, '_, '_> {
             arms.push(TypedArm {
                 pat: TypedPat::Ctor {
                     ty: scrut_ty,
-                    variant: self.cx.ids.ctor_ref(&name, v),
+                    variant: self.cx.ids.ctor_ref(
+                        &name,
+                        u16::try_from(v).map_err(|_| InternalLinkError::IndexTooWide(v))?,
+                    )?,
                     fields,
                 },
                 guard: None,
@@ -935,7 +943,7 @@ impl Tx<'_, '_, '_, '_> {
             }
             let ty = self.ty(sub.ty)?;
             let recv = Box::new(self.var(src));
-            let idx = i as u32;
+            let idx = i;
             let read = if tuple {
                 TypedExpr::TupleIndex { ty, recv, idx }
             } else {
@@ -968,24 +976,24 @@ impl Tx<'_, '_, '_, '_> {
             }
             PatternKind::Int(i) => TypedPat::Lit {
                 ty,
-                value: self.constant(Const::Int(*i)),
+                value: self.constant(Const::Int(*i))?,
             },
             PatternKind::Float(f) => TypedPat::Lit {
                 ty,
-                value: self.constant(Const::Float(*f)),
+                value: self.constant(Const::Float(*f))?,
             },
             PatternKind::String(s) => TypedPat::Lit {
                 ty,
-                value: self.constant(Const::String(s.clone())),
+                value: self.constant(Const::String(s.clone()))?,
             },
             PatternKind::Range(lo, hi) => TypedPat::Range {
                 ty,
-                lo: self.constant(Const::Int(*lo)),
-                hi: self.constant(Const::Int(*hi)),
+                lo: self.constant(Const::Int(*lo))?,
+                hi: self.constant(Const::Int(*hi))?,
             },
             PatternKind::Ctor { ctor, fields } => TypedPat::Ctor {
                 ty,
-                variant: self.cx.ids.ctor_ref(&ctor.type_name, ctor.variant),
+                variant: self.cx.ids.ctor_ref(&ctor.type_name, ctor.variant)?,
                 fields: self.patterns(fx, fields)?,
             },
             PatternKind::Tuple(elems) => TypedPat::Tuple {
@@ -1000,7 +1008,9 @@ impl Tx<'_, '_, '_, '_> {
                     .ok_or(InternalLinkError::NotAnArray(ty))?;
                 let prefix = self.patterns(fx, prefix)?;
                 let rest = self.rest(fx, rest, ty)?;
-                let len = self.constant(Const::Int(prefix.len() as i64));
+                let len = i64::try_from(prefix.len())
+                    .map_err(|_| InternalLinkError::IndexTooWide(prefix.len()))?;
+                let len = self.constant(Const::Int(len))?;
                 TypedPat::Array {
                     ty,
                     elem_ty,
@@ -1015,7 +1025,7 @@ impl Tx<'_, '_, '_, '_> {
                     .map(|s| self.bin_seg_pat(fx, s))
                     .collect::<R<_>>()?;
                 let rest = self.rest(fx, rest, ty)?;
-                let zero = self.constant(Const::Int(0));
+                let zero = self.constant(Const::Int(0))?;
                 TypedPat::Bin {
                     ty,
                     zero,
@@ -1045,12 +1055,16 @@ impl Tx<'_, '_, '_, '_> {
     fn bin_seg_pat(&mut self, fx: &mut Fx, s: &BinSegPat) -> R<TypedBinPatSeg> {
         Ok(match s {
             BinSegPat::Text(text) => {
-                let width = (text.len() as i64) * 8;
+                let too_wide = || InternalLinkError::IndexTooWide(text.len());
+                let width = i64::try_from(text.len())
+                    .ok()
+                    .and_then(|n| n.checked_mul(8))
+                    .ok_or_else(too_wide)?;
                 let bytes = self.constant(Const::Binary {
                     bytes: text.as_bytes().to_vec(),
-                    bit_len: width as u64,
-                });
-                let bits = self.constant(Const::Int(width));
+                    bit_len: width.unsigned_abs(),
+                })?;
+                let bits = self.constant(Const::Int(width))?;
                 TypedBinPatSeg::Utf8Literal { bytes, bits }
             }
             BinSegPat::Utf8(p) => TypedBinPatSeg::Utf8 {
@@ -1059,7 +1073,7 @@ impl Tx<'_, '_, '_, '_> {
             BinSegPat::Bits { bits, value } => {
                 let bits = match bits {
                     Some(e) => self.expr(fx, e)?,
-                    None => self.int_const(8),
+                    None => self.int_const(8)?,
                 };
                 TypedBinPatSeg::Int {
                     bits,
@@ -1081,7 +1095,7 @@ impl Tx<'_, '_, '_, '_> {
 
     fn bytes_to_bits(&mut self, fx: &mut Fx, e: &Expr) -> R<TypedExpr> {
         let v = self.expr(fx, e)?;
-        let eight = self.int_const(8);
+        let eight = self.int_const(8)?;
         Ok(TypedExpr::Binary {
             ty: self.int(),
             op: PrimOp::IntMul,
@@ -1095,7 +1109,7 @@ impl Tx<'_, '_, '_, '_> {
             let value = self.constant(Const::Binary {
                 bytes: Vec::new(),
                 bit_len: 0,
-            });
+            })?;
             return Ok(TypedExpr::Const { ty, value });
         }
         let segs = segs
@@ -1106,7 +1120,7 @@ impl Tx<'_, '_, '_, '_> {
                     BinUnit::Bits(bits) => {
                         let bits = match bits {
                             Some(e) => self.expr(fx, e)?,
-                            None => self.int_const(8),
+                            None => self.int_const(8)?,
                         };
                         TypedBinSeg::Int { value, bits }
                     }

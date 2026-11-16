@@ -44,6 +44,7 @@
 
 use crate::heap::{Cell, Full, Heap, Kind};
 use crate::value::Value;
+use crate::word::to_usize;
 
 /// Children per branch, and elements per leaf.
 const B: usize = 32;
@@ -78,7 +79,7 @@ pub(crate) fn range_len(start: i64, end: i64) -> u64 {
 
 /// A new range cell, `start..end`.
 pub(crate) fn range(heap: &mut Heap, start: i64, end: i64) -> Result<Cell, Full> {
-    heap.make(Kind::Range, &[start as u64, end as u64])
+    heap.make(Kind::Range, &[start.cast_unsigned(), end.cast_unsigned()])
 }
 
 /// The array `cell` holds, or `None` when it holds something else.
@@ -87,7 +88,7 @@ pub(crate) fn seq(heap: &Heap, cell: Cell) -> Option<Seq> {
         Kind::ArrayRoot => Some(Seq::Tree(cell)),
         Kind::Range => {
             let d = heap.data(cell);
-            let w = |i: usize| d.get(i).copied().unwrap_or(0) as i64;
+            let w = |i: usize| d.get(i).copied().unwrap_or(0).cast_signed();
             Some(Seq::Range {
                 start: w(0),
                 end: w(1),
@@ -155,7 +156,7 @@ impl View<'_> {
     fn len(&self) -> usize {
         match self {
             View::Leaf(items) => items.len(),
-            View::Branch { sizes, .. } => sizes.last().copied().unwrap_or(0) as usize,
+            View::Branch { sizes, .. } => to_usize(sizes.last().copied().unwrap_or(0)),
         }
     }
 
@@ -173,9 +174,9 @@ fn root(heap: &Heap, cell: Cell) -> Root {
     let d = heap.data(cell);
     let w = |i: usize| d.get(i).copied().unwrap_or(Value::NIL.bits());
     Root {
-        len: w(0) as usize,
-        shift: w(1) as usize,
-        offset: w(2) as usize,
+        len: to_usize(w(0)),
+        shift: to_usize(w(1)),
+        offset: to_usize(w(2)),
         head: Value::from_bits(w(3)),
         tree: Value::from_bits(w(4)),
         tail: Value::from_bits(w(5)),
@@ -214,7 +215,7 @@ fn view(heap: &Heap, v: Value) -> Option<View<'_>> {
             let rest = d.get(1..).unwrap_or(&[]);
             let (sizes, children) = rest.split_at(n.min(rest.len()));
             Some(View::Branch {
-                shift: d.first().copied().unwrap_or(0) as usize,
+                shift: to_usize(d.first().copied().unwrap_or(0)),
                 sizes,
                 children,
             })
@@ -347,11 +348,11 @@ struct Slot {
 fn size_slot(sizes: &[u64], idx: usize, shift: usize) -> Slot {
     let last = sizes.len().saturating_sub(1);
     let mut child = (idx >> shift).min(last);
-    while child < last && sizes.get(child).is_some_and(|s| *s as usize <= idx) {
+    while child < last && sizes.get(child).is_some_and(|s| to_usize(*s) <= idx) {
         child += 1;
     }
     let before = match child.checked_sub(1) {
-        Some(p) => sizes.get(p).copied().unwrap_or(0) as usize,
+        Some(p) => to_usize(sizes.get(p).copied().unwrap_or(0)),
         None => 0,
     };
     Slot { child, before }
@@ -709,7 +710,7 @@ fn tree_take(heap: &mut Heap, n: Value, m: usize) -> Result<Value, Full> {
             sizes,
             children,
         }) => {
-            if m >= sizes.last().copied().unwrap_or(0) as usize {
+            if m >= to_usize(sizes.last().copied().unwrap_or(0)) {
                 return Ok(own(heap, n));
             }
             let slot = size_slot(&sizes, m - 1, shift);

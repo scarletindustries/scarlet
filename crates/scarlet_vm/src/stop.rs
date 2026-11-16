@@ -19,6 +19,9 @@ pub enum Stop {
     /// The program's heap grew past what the VM can address. This is a limit
     /// of the machine, like running out of memory, not a bug in the program.
     HeapFull,
+    /// The function `name` has more instructions than the VM's jumps can
+    /// reach. Like `HeapFull`, this is a limit of the machine.
+    FunctionTooLong { name: String },
     /// The program broke a promise the compiler makes about every program,
     /// like a `match` having an arm for every value. Only a compiler bug
     /// causes this, so the VM stops and says what broke instead of guessing.
@@ -83,6 +86,8 @@ impl Arity {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Broken {
+    /// The program has more functions than a 32-bit index can name.
+    TooManyFunctions,
     NoArm,
     UndeclaredCase,
     NegativeCapture,
@@ -177,6 +182,9 @@ impl fmt::Display for Arity {
 impl fmt::Display for BadProgram {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.0 {
+            Broken::TooManyFunctions => {
+                f.write_str("the program has more functions than an index can name")
+            }
             Broken::NoArm => f.write_str("a match found no arm for its value"),
             Broken::UndeclaredCase => f.write_str("a jump to a case that no match declares"),
             Broken::NegativeCapture => f.write_str("a capture with a negative index"),

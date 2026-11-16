@@ -8,6 +8,7 @@
 //! nothing without that pool.
 
 use crate::TypeId;
+use crate::tivec::TableFull;
 
 /// The primitive types an operator can be specialised to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,40 +138,40 @@ impl ResolvedPool {
         self.prims
     }
 
-    fn push_children(&mut self, xs: &[RTy]) -> RSlice {
+    fn push_children(&mut self, xs: &[RTy]) -> Result<RSlice, TableFull> {
         if xs.is_empty() {
-            return RSlice::EMPTY;
+            return Ok(RSlice::EMPTY);
         }
-        let start = self.children.len() as u32;
+        let start = u32::try_from(self.children.len()).map_err(|_| TableFull)?;
+        let len = u32::try_from(xs.len()).map_err(|_| TableFull)?;
+        // `children` reads back `start..start + len`, so that end must fit too.
+        start.checked_add(len).ok_or(TableFull)?;
         self.children.extend_from_slice(xs);
-        RSlice {
-            start,
-            len: xs.len() as u32,
-        }
+        Ok(RSlice { start, len })
     }
 
-    fn alloc(&mut self, n: ResolvedNode) -> RTy {
-        let t = RTy(self.nodes.len() as u32);
+    fn alloc(&mut self, n: ResolvedNode) -> Result<RTy, TableFull> {
+        let t = RTy(u32::try_from(self.nodes.len()).map_err(|_| TableFull)?);
         self.nodes.push(n);
-        t
+        Ok(t)
     }
 
-    pub fn mk_bound(&mut self, idx: u32) -> RTy {
+    pub fn mk_bound(&mut self, idx: u32) -> Result<RTy, TableFull> {
         self.alloc(ResolvedNode::Bound(idx))
     }
 
-    pub fn mk_con(&mut self, id: TypeId, args: &[RTy]) -> RTy {
-        let args = self.push_children(args);
+    pub fn mk_con(&mut self, id: TypeId, args: &[RTy]) -> Result<RTy, TableFull> {
+        let args = self.push_children(args)?;
         self.alloc(ResolvedNode::Con { id, args })
     }
 
-    pub fn mk_fun(&mut self, params: &[RTy], ret: RTy) -> RTy {
-        let params = self.push_children(params);
+    pub fn mk_fun(&mut self, params: &[RTy], ret: RTy) -> Result<RTy, TableFull> {
+        let params = self.push_children(params)?;
         self.alloc(ResolvedNode::Fun { params, ret })
     }
 
-    pub fn mk_tuple(&mut self, elems: &[RTy]) -> RTy {
-        let elems = self.push_children(elems);
+    pub fn mk_tuple(&mut self, elems: &[RTy]) -> Result<RTy, TableFull> {
+        let elems = self.push_children(elems)?;
         self.alloc(ResolvedNode::Tuple { elems })
     }
 
@@ -283,9 +284,9 @@ mod tests {
     #[test]
     fn primitives_are_not_heap() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), &[]);
-        let float = p.mk_con(TypeId(2), &[]);
-        let string = p.mk_con(TypeId(3), &[]);
+        let int = p.mk_con(TypeId(1), &[]).unwrap();
+        let float = p.mk_con(TypeId(2), &[]).unwrap();
+        let string = p.mk_con(TypeId(3), &[]).unwrap();
         assert_eq!(p.prim_of(int).unwrap(), Some(Prim::Int));
         assert_eq!(p.prim_of(float).unwrap(), Some(Prim::Float));
         assert_eq!(p.prim_of(string).unwrap(), Some(Prim::String));
@@ -298,10 +299,10 @@ mod tests {
     #[test]
     fn user_types_tuples_and_functions_are_heap() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), &[]);
-        let user = p.mk_con(TypeId(9), &[]);
-        let tup = p.mk_tuple(&[int, int]);
-        let fun = p.mk_fun(&[int], int);
+        let int = p.mk_con(TypeId(1), &[]).unwrap();
+        let user = p.mk_con(TypeId(9), &[]).unwrap();
+        let tup = p.mk_tuple(&[int, int]).unwrap();
+        let fun = p.mk_fun(&[int], int).unwrap();
         assert!(p.is_heap(user).unwrap());
         assert!(p.is_heap(tup).unwrap());
         assert!(p.is_heap(fun).unwrap());
@@ -311,7 +312,7 @@ mod tests {
     #[test]
     fn a_bound_variable_is_polymorphic_not_missing() {
         let mut p = pool();
-        let b = p.mk_bound(0);
+        let b = p.mk_bound(0).unwrap();
         assert!(!p.is_heap(b).unwrap());
         assert_eq!(p.prim_of(b).unwrap(), None);
         assert_eq!(p.node(b).unwrap(), ResolvedNode::Bound(0));
@@ -320,10 +321,10 @@ mod tests {
     #[test]
     fn children_slices_do_not_alias() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), &[]);
-        let str_ = p.mk_con(TypeId(3), &[]);
-        let a = p.mk_tuple(&[int, str_]);
-        let b = p.mk_tuple(&[str_, int]);
+        let int = p.mk_con(TypeId(1), &[]).unwrap();
+        let str_ = p.mk_con(TypeId(3), &[]).unwrap();
+        let a = p.mk_tuple(&[int, str_]).unwrap();
+        let b = p.mk_tuple(&[str_, int]).unwrap();
         assert_eq!(p.tuple_elems(a).unwrap(), &[int, str_]);
         assert_eq!(p.tuple_elems(b).unwrap(), &[str_, int]);
         assert_eq!(p.tuple_elem(a, 1).unwrap(), Some(str_));
@@ -335,13 +336,13 @@ mod tests {
     #[test]
     fn con_args_and_fun_shape() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), &[]);
-        let nil = p.mk_con(TypeId(7), &[]);
-        let res = p.mk_con(TypeId(8), &[int, nil]);
+        let int = p.mk_con(TypeId(1), &[]).unwrap();
+        let nil = p.mk_con(TypeId(7), &[]).unwrap();
+        let res = p.mk_con(TypeId(8), &[int, nil]).unwrap();
         assert_eq!(p.con_arg(res, 0).unwrap(), Some(int));
         assert_eq!(p.con_arg(res, 1).unwrap(), Some(nil));
         assert_eq!(p.con_arg(res, 2).unwrap(), None);
-        let f = p.mk_fun(&[int, res], nil);
+        let f = p.mk_fun(&[int, res], nil).unwrap();
         assert_eq!(p.fun_params(f).unwrap(), &[int, res]);
         assert_eq!(p.fun_ret(f).unwrap(), Some(nil));
         assert_eq!(p.fun_ret(int).unwrap(), None);

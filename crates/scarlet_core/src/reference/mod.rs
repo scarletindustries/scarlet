@@ -77,7 +77,7 @@ impl ReferenceKind {
 /// [`ReferenceGraph`] lives, and doesn't depend on the inference engine's
 /// arenas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ModuleId(pub u32);
+pub struct ModuleId(pub usize);
 
 /// A one-to-one map between [`ModulePath`] and [`ModuleId`] that only grows.
 /// Ids are handed out in the order paths are first seen and never reused, so a
@@ -96,7 +96,7 @@ impl ModuleInterner {
         if let Some(&id) = self.by_key.get(&key) {
             return id;
         }
-        let id = ModuleId(self.paths.len() as u32);
+        let id = ModuleId(self.paths.len());
         self.paths.push(path.clone());
         self.by_key.insert(key, id);
         id
@@ -114,16 +114,13 @@ impl ModuleInterner {
 
     /// Resolve an id back to its path.
     fn path(&self, id: ModuleId) -> Option<&ModulePath> {
-        self.paths.get(id.0 as usize)
+        self.paths.get(id.0)
     }
 
     /// Every interned module in id order. It can't fail, so a caller that
     /// copies the id assignment can't skip an id and renumber every later one.
     fn iter(&self) -> impl Iterator<Item = (ModuleId, &ModulePath)> {
-        self.paths
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (ModuleId(i as u32), p))
+        self.paths.iter().enumerate().map(|(i, p)| (ModuleId(i), p))
     }
 
     #[cfg(test)]
@@ -357,7 +354,7 @@ struct LineEntry {
     span: Span,
     target: DefId,
     kind: ReferenceKind,
-    rank: (u8, u32),
+    rank: (u8, usize),
 }
 
 /// What the cursor is sitting on, as resolved by
@@ -470,13 +467,13 @@ impl ModuleReferences {
             .iter()
             .map(|o| (o.reference.span, o.reference.target, o.reference.kind))
             .enumerate()
-            .map(|(i, (span, target, kind))| (span, target, kind, (0u8, i as u32)));
+            .map(|(i, (span, target, kind))| (span, target, kind, (0u8, i)));
         let definitions = self
             .definitions
             .values()
             .map(|d| (d.span(), d.defid, ReferenceKind::Definition))
             .enumerate()
-            .map(|(i, (span, target, kind))| (span, target, kind, (1u8, i as u32)));
+            .map(|(i, (span, target, kind))| (span, target, kind, (1u8, i)));
         for (span, target, kind, rank) in occurrences.chain(definitions) {
             for line in span.start_line..=span.end_line {
                 index.entry(line).or_default().push(LineEntry {

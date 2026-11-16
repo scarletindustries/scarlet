@@ -76,8 +76,8 @@ pub(super) struct DocPosition {
 pub(super) fn extract_position_params(params: &Json) -> Option<DocPosition> {
     let uri = doc_uri(params)?;
     let pos = params.get("position")?;
-    let line = pos.get("line")?.as_i64()? as i32;
-    let col = pos.get("character")?.as_i64()? as i32;
+    let line = i32::try_from(pos.get("line")?.as_i64()?).ok()?;
+    let col = i32::try_from(pos.get("character")?.as_i64()?).ok()?;
     Some(DocPosition { uri, line, col })
 }
 

@@ -25,21 +25,23 @@ struct Interner {
 /// A constructor name's id within one check. Only [`Interner::intern`] makes
 /// one, apart from the two array constructors `Interner::new` reserves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct CtorId(u32);
+struct CtorId(usize);
 
+/// As wide as a `Vec` index, so the interner can't outgrow it.
 impl Idx for CtorId {
-    fn from_usize(i: usize) -> Self {
-        CtorId(i as u32)
+    type Full = std::convert::Infallible;
+    fn from_usize(i: usize) -> Result<Self, std::convert::Infallible> {
+        Ok(CtorId(i))
     }
     fn index(self) -> usize {
-        self.0 as usize
+        self.0
     }
 }
 
 /// A constructor id that isn't in the interner it was looked up in. The
 /// interner never shrinks, so the id came from another check's interner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UnknownCtor(u32);
+pub struct UnknownCtor(usize);
 
 impl std::fmt::Display for UnknownCtor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -69,7 +71,10 @@ impl Interner {
         if let Some(&id) = self.ids.get(name) {
             return id;
         }
-        let id = self.names.push(name.to_string());
+        let id = self
+            .names
+            .push(name.to_string())
+            .unwrap_or_else(|never| match never {});
         self.ids.insert(name.to_string(), id);
         id
     }
@@ -90,7 +95,7 @@ struct CtorIdSet {
 
 impl CtorIdSet {
     fn insert(&mut self, id: CtorId) {
-        let w = (id.0 / 64) as usize;
+        let w = id.0 / 64;
         let bit = 1u64 << (id.0 % 64);
         match self.words.get_mut(w) {
             Some(word) => *word |= bit,
@@ -103,7 +108,7 @@ impl CtorIdSet {
 
     fn contains(&self, id: CtorId) -> bool {
         self.words
-            .get((id.0 / 64) as usize)
+            .get(id.0 / 64)
             .is_some_and(|w| w & (1u64 << (id.0 % 64)) != 0)
     }
 }

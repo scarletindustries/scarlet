@@ -20,7 +20,7 @@ use scarlet_types::engine::{Ty, Types};
 /// A local name's identity within one module: a parameter, a `let`, a
 /// pattern binding, or a module-scope statement's binding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct BinderId(pub u32);
+pub struct BinderId(pub usize);
 
 #[derive(Debug, Clone)]
 pub struct Binder {
@@ -72,7 +72,7 @@ impl TypedModule {
     /// The checker makes one binder per `BinderId` it hands out, in order,
     /// so this misses only for an id from another module.
     pub fn binder(&self, b: BinderId) -> Option<&Binder> {
-        self.binders.get(b.0 as usize)
+        self.binders.get(b.0)
     }
 }
 
@@ -209,7 +209,7 @@ pub struct Lambda {
 #[derive(Debug, Clone)]
 pub struct Arg {
     /// The parameter or field it fills.
-    pub slot: u32,
+    pub slot: usize,
     pub value: Expr,
 }
 
@@ -218,19 +218,19 @@ pub struct Spread {
     pub base: Expr,
     /// How many of the call's arguments were written before it, so it runs
     /// in its place among them.
-    pub at: u32,
+    pub at: usize,
     /// For each field no argument gives: its slot in the new value, and where
     /// to read it from `base`.
-    pub fills: Vec<(u32, FieldAt)>,
+    pub fills: Vec<(usize, FieldAt)>,
 }
 
 /// Where a field sits in the values a record can be.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldAt {
     /// Every variant holds it in the same slot.
-    Same(u32),
+    Same(usize),
     /// Each variant holds it somewhere else: `(variant, slot)` for each.
-    PerVariant(Vec<(u16, u32)>),
+    PerVariant(Vec<(usize, usize)>),
 }
 
 /// Which type `or` unwraps.

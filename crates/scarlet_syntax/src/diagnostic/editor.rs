@@ -127,7 +127,7 @@ fn detect_editor_uncached() -> Option<Editor> {
 /// still sees the path segments.
 const PATH_ENCODE: &AsciiSet = &NON_ALPHANUMERIC.remove(b'/');
 
-pub fn build_editor_url(editor: Editor, abs_path: &str, line: i32, col: i32) -> String {
+pub fn build_editor_url(editor: Editor, abs_path: &str, line: i32, col: usize) -> String {
     let path = utf8_percent_encode(abs_path, PATH_ENCODE);
     match editor {
         Editor::Vscode => format!("vscode://file{path}:{line}:{col}"),

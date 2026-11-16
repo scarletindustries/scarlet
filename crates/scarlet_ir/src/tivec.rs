@@ -6,11 +6,25 @@ use std::fmt;
 use std::hash::Hash;
 use std::marker::PhantomData;
 
-/// A dense index into a [`TiVec`]. `Idx::from_usize(i).index() == i` must hold
-/// for every `i` a program can allocate.
+/// A dense index into a [`TiVec`]. `Idx::from_usize(i)?.index() == i` must
+/// hold whenever `from_usize` succeeds.
 pub trait Idx: Copy + Eq + Ord + Hash + fmt::Debug {
-    fn from_usize(i: usize) -> Self;
+    /// Why an index can't be made: [`TableFull`] for one narrower than
+    /// `usize`, and [`std::convert::Infallible`] for one as wide, since no
+    /// `Vec` is longer than `usize::MAX`.
+    type Full: fmt::Debug;
+    fn from_usize(i: usize) -> Result<Self, Self::Full>;
     fn index(self) -> usize;
+}
+
+/// A table already holds as many entries as its index type can name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TableFull;
+
+impl fmt::Display for TableFull {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a table holds as many entries as its 32-bit ids can name")
+    }
 }
 
 /// A `Vec<T>` that only `I` can subscript.
@@ -36,15 +50,16 @@ impl<I: Idx, T> TiVec<I, T> {
 
     /// The index [`Self::push`] would return. Make new indices here, not from
     /// `len() as u32` at a call site that may not own the whole table.
-    pub fn next_idx(&self) -> I {
+    pub fn next_idx(&self) -> Result<I, I::Full> {
         I::from_usize(self.raw.len())
     }
 
-    /// Append `v` and return the index it landed at.
-    pub fn push(&mut self, v: T) -> I {
-        let i = self.next_idx();
+    /// Append `v` and return the index it landed at. When the index type
+    /// can't name another entry, `v` isn't added.
+    pub fn push(&mut self, v: T) -> Result<I, I::Full> {
+        let i = self.next_idx()?;
         self.raw.push(v);
-        i
+        Ok(i)
     }
 
     /// The element at `i`, or `None` past the end.
@@ -127,10 +142,10 @@ macro_rules! newtype_index {
         $vis struct $name(pub u32);
 
         impl $crate::tivec::Idx for $name {
+            type Full = $crate::tivec::TableFull;
             #[inline]
-            fn from_usize(i: usize) -> Self {
-                assert!(i <= u32::MAX as usize, concat!(stringify!($name), " overflow"));
-                $name(i as u32)
+            fn from_usize(i: usize) -> Result<Self, $crate::tivec::TableFull> {
+                u32::try_from(i).map($name).map_err(|_| $crate::tivec::TableFull)
             }
             #[inline]
             fn index(self) -> usize {
@@ -156,29 +171,35 @@ mod tests {
     #[test]
     fn push_returns_the_index_it_filled() {
         let mut v: TiVec<A, &str> = TiVec::new();
-        assert_eq!(v.next_idx(), A(0));
-        let a = v.push("zero");
-        let b = v.push("one");
+        assert_eq!(v.next_idx(), Ok(A(0)));
+        let a = v.push("zero").unwrap();
+        let b = v.push("one").unwrap();
         assert_eq!((a, b), (A(0), A(1)));
         assert_eq!(v.get(a), Some(&"zero"));
         assert_eq!(v.get(b), Some(&"one"));
-        assert_eq!(v.next_idx(), A(2));
+        assert_eq!(v.next_idx(), Ok(A(2)));
     }
 
     #[test]
     fn truncate_drops_the_suffix() {
         let mut v: TiVec<A, &str> = TiVec::new();
-        v.push("a");
-        v.push("b");
-        v.push("c");
+        v.push("a").unwrap();
+        v.push("b").unwrap();
+        v.push("c").unwrap();
         v.truncate(1);
         assert_eq!(v.as_slice(), &["a"]);
-        assert_eq!(v.next_idx(), A(1));
+        assert_eq!(v.next_idx(), Ok(A(1)));
         v.truncate(1);
         assert_eq!(v.as_slice(), &["a"]);
         v.truncate(0);
         assert_eq!(v.as_slice(), &[] as &[&str]);
-        assert_eq!(v.next_idx(), A(0));
+        assert_eq!(v.next_idx(), Ok(A(0)));
+    }
+
+    #[test]
+    fn an_index_past_u32_is_a_full_table() {
+        assert_eq!(A::from_usize(u32::MAX as usize), Ok(A(u32::MAX)));
+        assert_eq!(A::from_usize(u32::MAX as usize + 1), Err(TableFull));
     }
 
     /// `B` can't subscript a `TiVec<A, _>`. Rust's type checker enforces that,

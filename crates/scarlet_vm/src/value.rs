@@ -23,6 +23,7 @@ use scarlet_ir::TypeId;
 use scarlet_ir::core_ir::{FuncIdx, VariantRef};
 
 use crate::heap::Cell;
+use crate::word::{low_u16, low_u32};
 
 /// Set in every word that is not a float.
 const TAGGED: u64 = 0xFFF8_0000_0000_0000;
@@ -73,7 +74,7 @@ impl Value {
     pub(crate) fn int(n: i64) -> Option<Value> {
         (SMALL_INT_MIN..=SMALL_INT_MAX)
             .contains(&n)
-            .then_some(Value(TAG_INT | (n as u64 & PAYLOAD)))
+            .then_some(Value(TAG_INT | (n.cast_unsigned() & PAYLOAD)))
     }
 
     /// `x` as a Float. No Float is NaN or infinite (`docs/semantics.md`): an
@@ -110,7 +111,7 @@ impl Value {
     /// A constructor with no fields, like `None`. It needs no heap cell,
     /// because which constructor it is says everything about it.
     pub(crate) fn nullary(v: VariantRef) -> Value {
-        Value(TAG_NULLARY | u64::from(v.variant_idx) << 32 | u64::from(v.type_id.0 as u32))
+        Value(TAG_NULLARY | u64::from(v.variant_idx) << 32 | u64::from(v.type_id.0.cast_unsigned()))
     }
 
     /// The word itself, for storing in a heap cell.
@@ -137,12 +138,12 @@ impl Value {
         match bits & TAG {
             // Shift the payload's sign bit up to bit 63 and back, so the
             // arithmetic shift copies it into the top 16 bits.
-            TAG_INT => View::Int(((payload << 16) as i64) >> 16),
-            TAG_FUNC => View::Func(FuncIdx(payload as u32)),
+            TAG_INT => View::Int((payload << 16).cast_signed() >> 16),
+            TAG_FUNC => View::Func(FuncIdx(low_u32(payload))),
             TAG_CELL => View::Cell(Cell::from_bits(payload)),
             TAG_NULLARY => View::Nullary(VariantRef {
-                type_id: TypeId(payload as u32 as i32),
-                variant_idx: (payload >> 32) as u16,
+                type_id: TypeId(low_u32(payload).cast_signed()),
+                variant_idx: low_u16(payload >> 32),
             }),
             // Only the constructors above make a tagged word, so what is
             // left is an immediate.

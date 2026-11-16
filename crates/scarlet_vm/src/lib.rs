@@ -16,9 +16,17 @@
         clippy::unimplemented,
         clippy::indexing_slicing,
         clippy::string_slice,
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
     )
 )]
 #![forbid(unsafe_code)]
+
+// Heap words are 64 bits, and lengths and indices read from them are used as
+// `usize` (see `word::to_usize`).
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("the Scarlet VM needs a 64-bit target");
 
 mod array;
 mod bigint;
@@ -36,6 +44,7 @@ mod map;
 mod show;
 mod stop;
 mod value;
+mod word;
 
 use std::io::Write;
 
@@ -46,7 +55,7 @@ pub use stop::Stop;
 
 /// Run `program` in `host`'s world, writing what it prints to `out`.
 pub fn run(program: &Program, host: &Host, out: &mut dyn Write) -> Result<(), Stop> {
-    let code = code::load(program);
+    let code = code::load(program)?;
     exec::Machine::new(&code, host, out).run()?;
     Ok(())
 }
@@ -59,7 +68,7 @@ pub fn run_showing(
     host: &Host,
     out: &mut dyn Write,
 ) -> Result<Option<String>, Stop> {
-    let code = code::load(program);
+    let code = code::load(program)?;
     let mut machine = exec::Machine::new(&code, host, out);
     let last = machine.run()?;
     machine.shown(last)

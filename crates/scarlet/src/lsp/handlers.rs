@@ -88,8 +88,8 @@ impl Workspace {
         // parse error the recovering parser dropped, so there's no occurrence at the cursor to
         // resolve.
         let qualifier = self.document_text(&uri).and_then(|text| {
-            let line_text = text.lines().nth(line as usize)?;
-            qualifier_before(line_text, col as usize)
+            let line_text = text.lines().nth(usize::try_from(line).ok()?)?;
+            qualifier_before(line_text, usize::try_from(col).ok()?)
         });
         let Some(q) = self.query(&uri) else {
             return empty;

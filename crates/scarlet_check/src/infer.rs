@@ -132,14 +132,14 @@ pub(crate) fn infer(
     // A binder with no type was bound in code that didn't check, which has
     // been reported; it keeps a variable nothing solves.
     let mut binder_types = Vec::with_capacity(resolved.binders.len());
-    for b in (0..resolved.binders.len() as u32).map(BinderId) {
+    for b in (0..resolved.binders.len()).map(BinderId) {
         binder_types.push(match i.binders.remove(&b) {
             Some(s) => s.ty,
             None => i.e.fresh(),
         });
     }
     let mut schemes = Vec::with_capacity(resolved.decls.len());
-    for d in (0..resolved.decls.len() as u32).map(DeclId) {
+    for d in (0..resolved.decls.len()).map(DeclId) {
         schemes.push(match i.decls.remove(&d) {
             Some(s) => s,
             None => LocalScheme::mono(i.e.fresh()),
@@ -964,10 +964,7 @@ impl Infer<'_, '_> {
         let args = args
             .iter()
             .map(|a| {
-                let param = a
-                    .fills
-                    .then(|| params.get(a.slot as usize).copied())
-                    .flatten();
+                let param = a.fills.then(|| params.get(a.slot).copied()).flatten();
                 let value = self.expr_hinted(&a.value, param, ctx);
                 if let Some(p) = param {
                     self.unify(p, value.ty, value.span);
@@ -1009,10 +1006,8 @@ impl Infer<'_, '_> {
         let spread = spread.map(|(at, base)| {
             let base = self.expr(base, ctx);
             self.unify(result, base.ty, base.span);
-            let given: Vec<u32> = args.iter().filter(|a| a.fills).map(|a| a.slot).collect();
-            let unfilled: Vec<usize> = (0..labels.len())
-                .filter(|i| !given.contains(&(*i as u32)))
-                .collect();
+            let given: Vec<usize> = args.iter().filter(|a| a.fills).map(|a| a.slot).collect();
+            let unfilled: Vec<usize> = (0..labels.len()).filter(|i| !given.contains(i)).collect();
             let fills = self.spread_fills(labels, result, &unfilled, base.span);
             Box::new(Spread {
                 base,
@@ -1026,10 +1021,7 @@ impl Infer<'_, '_> {
         order.sort_by_key(|(_, a)| a.slot);
         let mut by_index: Vec<(usize, Arg)> = Vec::with_capacity(args.len());
         for (i, a) in order {
-            let param = a
-                .fills
-                .then(|| params.get(a.slot as usize).copied())
-                .flatten();
+            let param = a.fills.then(|| params.get(a.slot).copied()).flatten();
             let value = self.expr_hinted(&a.value, param, ctx);
             if let Some(p) = param {
                 self.unify(p, value.ty, value.span);
@@ -1063,7 +1055,7 @@ impl Infer<'_, '_> {
         result: Ty,
         unfilled: &[usize],
         span: Span,
-    ) -> Vec<(u32, FieldAt)> {
+    ) -> Vec<(usize, FieldAt)> {
         let Some(Shape::Con(type_name, type_args)) = self.shape(result, span) else {
             return Vec::new();
         };
@@ -1074,7 +1066,7 @@ impl Infer<'_, '_> {
         for &i in unfilled {
             let Some(label) = labels.get(i) else { continue };
             match self.field_in_variants(&def, &type_args, label, span) {
-                Ok((_, at)) => fills.push((i as u32, at)),
+                Ok((_, at)) => fills.push((i, at)),
                 Err(FieldMissing::On(variant)) => {
                     self.report.add(
                         span,
@@ -1191,7 +1183,7 @@ impl Infer<'_, '_> {
             else {
                 return Err(FieldMissing::On(v.name.clone()));
             };
-            slots.push(i as u32);
+            slots.push(i);
             let fty = self.e.import(&f.ty, &mut subst);
             match ty {
                 Some(t) => {
@@ -1203,13 +1195,9 @@ impl Infer<'_, '_> {
         let ty = ty.ok_or(FieldMissing::NotCustom)?;
         let at = match slots.first() {
             Some(&first) if slots.iter().all(|&s| s == first) => FieldAt::Same(first),
-            Some(_) | None => FieldAt::PerVariant(
-                slots
-                    .iter()
-                    .enumerate()
-                    .map(|(v, &s)| (v as u16, s))
-                    .collect(),
-            ),
+            Some(_) | None => {
+                FieldAt::PerVariant(slots.iter().enumerate().map(|(v, &s)| (v, s)).collect())
+            }
         };
         Ok((ty, at))
     }

@@ -46,6 +46,7 @@ use simd_json::value::tape::Node;
 use crate::binary::{self, Bits};
 use crate::heap::{Cell, Heap};
 use crate::value::{Value, View};
+use crate::word::low_byte;
 
 // Node kinds. `K_UINT_BIG` is an integer above `i64::MAX` that fits a `u64`:
 // its payload is the `u64`, where a `K_INT`'s is an `i64`'s bits.
@@ -104,7 +105,7 @@ impl Tape<'_> {
             return None;
         }
         Some(TapeNode {
-            kind: w0 as u8,
+            kind: low_byte(w0),
             skip,
             payload,
         })
@@ -235,7 +236,7 @@ impl Tape<'_> {
     pub(crate) fn int(&self, idx: usize) -> Option<BigInt> {
         let n = self.node(idx)?;
         match n.kind {
-            K_INT => Some(BigInt::from(n.payload as i64)),
+            K_INT => Some(BigInt::from(n.payload.cast_signed())),
             K_UINT_BIG => Some(BigInt::from(n.payload)),
             _ => None,
         }
@@ -246,7 +247,7 @@ impl Tape<'_> {
         let n = self.node(idx)?;
         match n.kind {
             K_FLOAT => Some(f64::from_bits(n.payload)),
-            K_INT => Some(n.payload as i64 as f64),
+            K_INT => Some(n.payload.cast_signed() as f64),
             K_UINT_BIG => Some(n.payload as f64),
             _ => None,
         }
@@ -443,9 +444,9 @@ fn build_tape(nodes: &[Node<'_>]) -> Result<(Vec<u8>, Vec<u8>), TooLarge> {
             Node::Array { len, count } => (K_ARRAY, *count as u64 + 1, *len as u64),
             Node::Static(StaticNode::Null) => (K_NULL, 1, 0),
             Node::Static(StaticNode::Bool(b)) => (K_BOOL, 1, u64::from(*b)),
-            Node::Static(StaticNode::I64(i)) => (K_INT, 1, *i as u64),
+            Node::Static(StaticNode::I64(i)) => (K_INT, 1, i.cast_unsigned()),
             Node::Static(StaticNode::U64(u)) => match i64::try_from(*u) {
-                Ok(i) => (K_INT, 1, i as u64),
+                Ok(i) => (K_INT, 1, i.cast_unsigned()),
                 Err(_) => (K_UINT_BIG, 1, *u),
             },
             Node::Static(StaticNode::F64(f)) => (K_FLOAT, 1, f.to_bits()),

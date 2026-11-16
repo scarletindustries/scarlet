@@ -63,7 +63,7 @@ pub use scarlet_ir::rty::Prim;
 /// is lettered when a type holding it is shown.
 #[derive(Debug, Clone)]
 pub struct TypeVar {
-    pub id: u32,
+    pub id: usize,
     pub name: Option<Name>,
     pub constraint: Option<Constraint>,
 }
@@ -190,7 +190,7 @@ pub fn show_together<const N: usize>(types: [&Type; N]) -> [String; N] {
 /// What each variable in some types is called when they are shown: its own
 /// name when it has one, otherwise the next letter no named variable uses,
 /// in the order the variables first appear.
-struct VarNames(Vec<(u32, Name)>);
+struct VarNames(Vec<(usize, Name)>);
 
 impl VarNames {
     fn of(types: &[&Type]) -> Self {
@@ -203,7 +203,7 @@ impl VarNames {
             }
         }
         let taken: Vec<&Name> = vars.iter().filter_map(|v| v.name.as_ref()).collect();
-        let mut next = 0u32;
+        let mut next = 0usize;
         let mut out = Vec::with_capacity(vars.len());
         for v in &vars {
             let name = match &v.name {
@@ -276,7 +276,11 @@ impl fmt::Display for Shown<'_> {
 }
 
 /// The base-26 letters for the `n`th variable: `a` to `z`, then `aa`.
-fn letters(mut n: u32) -> String {
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "n % 26 is below 26, so it fits in a byte"
+)]
+fn letters(mut n: usize) -> String {
     let mut out = Vec::new();
     loop {
         out.push(b'a' + (n % 26) as u8);
@@ -306,7 +310,7 @@ impl Scheme {
             .iter()
             .enumerate()
             .map(|(i, v)| TypeVar {
-                id: i as u32,
+                id: i,
                 name: v.name.clone(),
                 constraint: v.constraint,
             })

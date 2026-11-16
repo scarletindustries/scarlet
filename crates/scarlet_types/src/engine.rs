@@ -12,6 +12,7 @@
 //! back, so going deeper and coming back out are one value's two ends.
 
 use std::collections::HashSet;
+use std::convert::Infallible;
 
 use scarlet_ir::tivec::{Idx, TiVec};
 
@@ -22,28 +23,31 @@ use crate::ty::{Constraint, Scheme, Type, TypeVar};
 /// An inference type: an index into the engine's arena. Only
 /// [`Engine::push`] makes one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Ty(u32);
+pub struct Ty(usize);
 
+/// As wide as a `Vec` index, so the arena can't outgrow it.
 impl Idx for Ty {
-    fn from_usize(i: usize) -> Self {
-        Ty(i as u32)
+    type Full = Infallible;
+    fn from_usize(i: usize) -> Result<Self, Infallible> {
+        Ok(Ty(i))
     }
     fn index(self) -> usize {
-        self.0 as usize
+        self.0
     }
 }
 
 /// A type variable's id, unique within one engine. Only
 /// [`Engine::new_var`] makes one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct VarId(u32);
+pub struct VarId(usize);
 
 impl Idx for VarId {
-    fn from_usize(i: usize) -> Self {
-        VarId(i as u32)
+    type Full = Infallible;
+    fn from_usize(i: usize) -> Result<Self, Infallible> {
+        Ok(VarId(i))
     }
     fn index(self) -> usize {
-        self.0 as usize
+        self.0
     }
 }
 
@@ -238,7 +242,7 @@ impl Engine {
     }
 
     fn push(&mut self, node: Node) -> Ty {
-        self.nodes.push(node)
+        self.nodes.push(node).unwrap_or_else(|never| match never {})
     }
 
     fn node(&self, t: Ty) -> Result<&Node, NotInEngine> {
@@ -254,7 +258,10 @@ impl Engine {
     }
 
     fn new_var(&mut self, state: VarState, name: Option<Name>) -> Ty {
-        let id = self.vars.push(Var { state, name });
+        let id = self
+            .vars
+            .push(Var { state, name })
+            .unwrap_or_else(|never| match never {});
         self.push(Node::Var(id))
     }
 

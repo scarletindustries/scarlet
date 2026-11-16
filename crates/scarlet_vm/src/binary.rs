@@ -21,6 +21,7 @@ use num_bigint::{BigInt, Sign};
 
 use crate::heap::{Cell, Full, Heap, Kind};
 use crate::value::Value;
+use crate::word::{low_byte, to_usize};
 
 /// The most bits one binary can hold, because a cell is at most 2^28 words
 /// and a word holds 64 bits. A longer one makes the heap full instead.
@@ -70,7 +71,7 @@ pub(crate) fn bits(heap: &Heap, cell: Cell) -> Option<Bits> {
 /// A new owner holding the first `len` bits of `bytes`. The bits past `len`
 /// in the last byte are cleared.
 pub(crate) fn make(heap: &mut Heap, bytes: &[u8], len: u64) -> Result<Cell, Full> {
-    let n = len.div_ceil(8) as usize;
+    let n = to_usize(len.div_ceil(8));
     let mut buf: Vec<u8> = bytes.iter().copied().take(n).collect();
     buf.resize(n, 0);
     let pad = n as u64 * 8 - len;
@@ -102,8 +103,8 @@ pub(crate) fn slice(heap: &mut Heap, b: Bits, from: u64, len: u64) -> Result<Cel
 /// Byte `i` of `owner`'s bytes, or 0 past its end.
 fn owner_byte(heap: &Heap, owner: Cell, i: u64) -> u8 {
     let d = heap.data(owner);
-    match d.get(1 + (i / 8) as usize) {
-        Some(w) => (w >> ((i % 8) * 8)) as u8,
+    match d.get(1 + to_usize(i / 8)) {
+        Some(w) => low_byte(w >> ((i % 8) * 8)),
         None => 0,
     }
 }
@@ -174,8 +175,8 @@ pub(crate) fn bytes_from(heap: &Heap, b: Bits, from: u64, n: u64) -> Vec<u8> {
     (from..end)
         .map(|k| {
             let i = base + k;
-            d.get(1 + (i / 8) as usize)
-                .map_or(0, |w| (w >> (i % 8 * 8)) as u8)
+            d.get(1 + to_usize(i / 8))
+                .map_or(0, |w| low_byte(w >> (i % 8 * 8)))
         })
         .collect()
 }
@@ -235,7 +236,7 @@ pub(crate) fn has_at(heap: &Heap, b: Bits, at: u64, prefix: Bits) -> bool {
 /// All of `parts`, one after another, as a new owner.
 pub(crate) fn join(heap: &mut Heap, parts: &[Bits]) -> Result<Cell, Full> {
     let len: u64 = parts.iter().map(|p| p.len).sum();
-    let mut out = vec![0u8; len.div_ceil(8) as usize];
+    let mut out = vec![0u8; to_usize(len.div_ceil(8))];
     let mut at = 0u64;
     for p in parts {
         for k in 0..p.len.div_ceil(8) {
@@ -264,7 +265,7 @@ fn put(out: &mut [u8], at: u64, chunk: u8, n: u64) {
 /// written as its two's complement, extended as far as `width` asks, so
 /// `<<-1:size(12)>>` is twelve ones.
 pub(crate) fn from_int(n: &BigInt, width: u64) -> Vec<u8> {
-    let bytes = width.div_ceil(8) as usize;
+    let bytes = to_usize(width.div_ceil(8));
     if bytes == 0 {
         return Vec::new();
     }

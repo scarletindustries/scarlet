@@ -46,9 +46,47 @@ pub enum LinkError {
     /// The prelude has no constructor `ctor` of `ty`, which lowering builds
     /// values of itself.
     MissingPreludeCtor { ty: TypeName, ctor: &'static str },
+    /// The program has more of something than a Core IR id can name.
+    TooMany(Table),
     /// Lowering met something a checked program can't hold. It is a bug in
     /// the compiler, never in the program.
     Internal(InternalLinkError),
+}
+
+/// A table whose ids are 32 bits wide in Core IR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Table {
+    /// Named types, by `TypeId`.
+    TypeNames,
+    /// Type nodes in the program's pool, by `RTy`.
+    Types,
+    /// Constants, by `ConstId`.
+    Constants,
+    /// One function's locals, by `LocalId`.
+    Locals,
+    /// Functions, by `FuncIdx`.
+    Functions,
+    /// One function's join points, by `JoinId`.
+    Joins,
+    /// Global slots, by `GlobalSlot`.
+    Globals,
+    /// One closure's captures, by `CaptureIdx`.
+    Captures,
+}
+
+impl fmt::Display for Table {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Table::TypeNames => "named types",
+            Table::Types => "types",
+            Table::Constants => "constants",
+            Table::Locals => "locals in one function",
+            Table::Functions => "functions",
+            Table::Joins => "join points in one function",
+            Table::Globals => "globals",
+            Table::Captures => "captures in one closure",
+        })
+    }
 }
 
 /// What lowering found that a checked program can't hold.
@@ -68,11 +106,11 @@ pub enum InternalLinkError {
     /// A clean module holds a node the checker marked as an error.
     ErrorNode,
     /// A spread fills a field slot its constructor doesn't have.
-    NoFieldSlot { ctor: CtorName, slot: u32 },
+    NoFieldSlot { ctor: CtorName, slot: usize },
     /// A field is read from a value whose type isn't a named type.
     FieldOfUnnamed(Type),
     /// A named type has no variant at this index.
-    NoVariant { ty: TypeName, variant: u16 },
+    NoVariant { ty: TypeName, variant: usize },
     /// An `or` on a `Result` whose type has no error argument.
     ResultWithoutError(RTy),
     /// An array pattern on a value whose type isn't an array.
@@ -118,6 +156,9 @@ impl fmt::Display for LinkError {
         match self {
             LinkError::MissingPreludeCtor { ctor, .. } => {
                 write!(f, "prelude: constructor '{ctor}' is required")
+            }
+            LinkError::TooMany(t) => {
+                write!(f, "the program has more {t} than a 32-bit id can name")
             }
             LinkError::Internal(e) => write!(f, "internal compiler error: {e}"),
         }
@@ -181,18 +222,22 @@ impl<'a> Ids<'a> {
         let known = Known::new();
         let mut type_ids = HashMap::new();
         let mut type_names = Vec::new();
-        let mut intern = |n: &TypeName| -> TypeId {
-            *type_ids.entry(n.clone()).or_insert_with(|| {
-                type_names.push(n.clone());
-                TypeId(type_names.len() as i32)
-            })
-        };
+        // The four primitives get ids 1 to 4.
         let prims = PrimIds {
-            int: intern(&known.int),
-            float: intern(&known.float),
-            string: intern(&known.string),
-            array: intern(&known.array),
+            int: TypeId(1),
+            float: TypeId(2),
+            string: TypeId(3),
+            array: TypeId(4),
         };
+        for (n, id) in [
+            (&known.int, prims.int),
+            (&known.float, prims.float),
+            (&known.string, prims.string),
+            (&known.array, prims.array),
+        ] {
+            type_names.push(n.clone());
+            type_ids.insert(n.clone(), id);
+        }
         Ids {
             defs,
             pool: ResolvedPool::new(prims),
@@ -209,76 +254,100 @@ impl<'a> Ids<'a> {
         &self.pool
     }
 
-    pub fn type_id(&mut self, n: &TypeName) -> TypeId {
+    /// Ids count from 1, so the next one is the table's length plus one.
+    pub fn type_id(&mut self, n: &TypeName) -> Result<TypeId, LinkError> {
         if let Some(&id) = self.type_ids.get(n) {
-            return id;
+            return Ok(id);
         }
+        let id = i32::try_from(self.type_names.len())
+            .ok()
+            .and_then(|len| len.checked_add(1))
+            .map(TypeId)
+            .ok_or(LinkError::TooMany(Table::TypeNames))?;
         self.type_names.push(n.clone());
-        let id = TypeId(self.type_names.len() as i32);
         self.type_ids.insert(n.clone(), id);
-        id
+        Ok(id)
     }
 
-    /// The constructor of `t` named `variant`.
-    pub fn variant(&mut self, t: &TypeName, variant: &str) -> Option<VariantRef> {
-        let idx = self
+    /// The constructor of `t` named `variant`, or `None` when `t` has none.
+    pub fn variant(
+        &mut self,
+        t: &TypeName,
+        variant: &str,
+    ) -> Result<Option<VariantRef>, LinkError> {
+        let Some(idx) = self
             .defs
-            .type_def(t)?
-            .variants()?
-            .iter()
-            .position(|v| &*v.name == variant)?;
-        Some(VariantRef {
-            type_id: self.type_id(t),
-            variant_idx: u16::try_from(idx).ok()?,
-        })
+            .type_def(t)
+            .and_then(TypeDef::variants)
+            .and_then(|vs| vs.iter().position(|v| &*v.name == variant))
+        else {
+            return Ok(None);
+        };
+        let variant_idx = u16::try_from(idx).map_err(|_| InternalLinkError::IndexTooWide(idx))?;
+        Ok(Some(VariantRef {
+            type_id: self.type_id(t)?,
+            variant_idx,
+        }))
     }
 
-    pub fn ctor_ref(&mut self, t: &TypeName, variant: u16) -> VariantRef {
-        VariantRef {
-            type_id: self.type_id(t),
+    pub fn ctor_ref(&mut self, t: &TypeName, variant: u16) -> Result<VariantRef, LinkError> {
+        Ok(VariantRef {
+            type_id: self.type_id(t)?,
             variant_idx: variant,
-        }
+        })
     }
 
     /// A finished type in the program's pool. An open variable is a `Bound`:
     /// a type nothing knows the representation of.
-    pub fn rty(&mut self, t: &Type) -> RTy {
+    pub fn rty(&mut self, t: &Type) -> Result<RTy, LinkError> {
         if let Some(&r) = self.rtys.get(t) {
-            return r;
+            return Ok(r);
         }
         let r = match t {
-            Type::Var(v) => self.pool.mk_bound(v.id),
+            Type::Var(v) => {
+                let idx = u32::try_from(v.id).map_err(|_| LinkError::TooMany(Table::Types))?;
+                self.pool.mk_bound(idx)
+            }
             Type::Named { name, args } => {
-                let args: Vec<RTy> = args.iter().map(|a| self.rty(a)).collect();
-                let id = self.type_id(name);
+                let args = self.rtys_of(args)?;
+                let id = self.type_id(name)?;
                 self.pool.mk_con(id, &args)
             }
             Type::Fn { params, ret } => {
-                let params: Vec<RTy> = params.iter().map(|p| self.rty(p)).collect();
-                let ret = self.rty(ret);
+                let params = self.rtys_of(params)?;
+                let ret = self.rty(ret)?;
                 self.pool.mk_fun(&params, ret)
             }
             Type::Tuple(elems) => {
-                let elems: Vec<RTy> = elems.iter().map(|e| self.rty(e)).collect();
+                let elems = self.rtys_of(elems)?;
                 self.pool.mk_tuple(&elems)
             }
-        };
-        self.rtys.insert(t.clone(), r);
-        r
-    }
-
-    pub fn tuple(&mut self, elems: &[RTy]) -> RTy {
-        self.pool.mk_tuple(elems)
-    }
-
-    pub fn constant(&mut self, c: Const) -> ConstId {
-        if let Some(&id) = self.const_ids.get(&c) {
-            return id;
         }
-        let id = ConstId(self.consts.len() as u32);
+        .map_err(|_| LinkError::TooMany(Table::Types))?;
+        self.rtys.insert(t.clone(), r);
+        Ok(r)
+    }
+
+    fn rtys_of(&mut self, ts: &[Type]) -> Result<Vec<RTy>, LinkError> {
+        ts.iter().map(|t| self.rty(t)).collect()
+    }
+
+    pub fn tuple(&mut self, elems: &[RTy]) -> Result<RTy, LinkError> {
+        self.pool
+            .mk_tuple(elems)
+            .map_err(|_| LinkError::TooMany(Table::Types))
+    }
+
+    pub fn constant(&mut self, c: Const) -> Result<ConstId, LinkError> {
+        if let Some(&id) = self.const_ids.get(&c) {
+            return Ok(id);
+        }
+        let id = u32::try_from(self.consts.len())
+            .map(ConstId)
+            .map_err(|_| LinkError::TooMany(Table::Constants))?;
         self.consts.push(c.clone());
         self.const_ids.insert(c, id);
-        id
+        Ok(id)
     }
 
     /// Everything handed out, once nothing more will be.
@@ -302,7 +371,11 @@ struct Frozen<'a> {
 
 impl Frozen<'_> {
     fn names_of(&self, id: TypeId) -> TypeNames {
-        let name = self.type_names.get((id.0 - 1) as usize);
+        // Ids count from 1.
+        let name =
+            id.0.checked_sub(1)
+                .and_then(|i| usize::try_from(i).ok())
+                .and_then(|i| self.type_names.get(i));
         let def = name.and_then(|n| self.defs.type_def(n));
         TypeNames {
             name: name.map_or_else(String::new, |n| n.name().to_string()),
@@ -344,16 +417,16 @@ impl Prelude {
     fn resolve(ids: &mut Ids<'_>) -> Result<Self, LinkError> {
         let known = Known::new();
         let named = |ids: &mut Ids<'_>, n: &TypeName| ids.rty(&Type::named(n.clone(), vec![]));
-        let int = named(ids, &known.int);
+        let int = named(ids, &known.int)?;
         let temps = TempTys {
             int,
-            bool: named(ids, &known.bool),
-            string: named(ids, &known.string),
-            binary: named(ids, &known.binary),
-            int_pair: ids.tuple(&[int, int]),
+            bool: named(ids, &known.bool)?,
+            string: named(ids, &known.string)?,
+            binary: named(ids, &known.binary)?,
+            int_pair: ids.tuple(&[int, int])?,
         };
         let mut variant = |t: &TypeName, v: &'static str| {
-            ids.variant(t, v)
+            ids.variant(t, v)?
                 .ok_or_else(|| LinkError::MissingPreludeCtor {
                     ty: t.clone(),
                     ctor: v,
@@ -368,7 +441,7 @@ impl Prelude {
             false_: variant(&known.bool, "False")?,
             nil: variant(&known.nil, "Nil")?,
         };
-        let nil = named(ids, &known.nil);
+        let nil = named(ids, &known.nil)?;
         Ok(Prelude { temps, ctors, nil })
     }
 }
@@ -394,7 +467,7 @@ pub(crate) struct Symbols<'m> {
 }
 
 impl<'m> Symbols<'m> {
-    fn of(modules: &[&'m TypedModule]) -> Self {
+    fn of(modules: &[&'m TypedModule]) -> Result<Self, LinkError> {
         let mut s = Symbols {
             fns: HashMap::new(),
             consts: HashMap::new(),
@@ -402,15 +475,20 @@ impl<'m> Symbols<'m> {
             sites: Vec::new(),
             globals: 0,
         };
+        // A slot is an `i32`, and the count of them a `u32`, so both must fit.
         let global = |n: &mut u32| {
-            let g = GlobalSlot(*n as i32);
+            let g = i32::try_from(*n)
+                .map(GlobalSlot)
+                .map_err(|_| LinkError::TooMany(Table::Globals))?;
             *n += 1;
-            g
+            Ok::<_, LinkError>(g)
         };
         for &m in modules {
             for f in &m.functions {
                 if let FnBody::Expr(body) = &f.body {
-                    let idx = FuncIdx(s.sites.len() as u32);
+                    let idx = u32::try_from(s.sites.len())
+                        .map(FuncIdx)
+                        .map_err(|_| LinkError::TooMany(Table::Functions))?;
                     s.fns.insert(value_name(&m.key, &f.name), idx);
                     s.sites.push(Site {
                         module: m,
@@ -421,16 +499,16 @@ impl<'m> Symbols<'m> {
             }
             for c in &m.consts {
                 s.consts
-                    .insert(value_name(&m.key, &c.name), global(&mut s.globals));
+                    .insert(value_name(&m.key, &c.name), global(&mut s.globals)?);
             }
             for (i, b) in m.binders.iter().enumerate() {
                 if b.module_scope {
                     s.binders
-                        .insert((m.key.clone(), BinderId(i as u32)), global(&mut s.globals));
+                        .insert((m.key.clone(), BinderId(i)), global(&mut s.globals)?);
                 }
             }
         }
-        s
+        Ok(s)
     }
 
     pub fn func(&self, name: &ValueName) -> Result<FuncIdx, LinkError> {
@@ -455,8 +533,8 @@ impl<'m> Symbols<'m> {
 
     /// How many module functions there are. Every minted function comes
     /// after them.
-    fn fn_count(&self) -> u32 {
-        self.sites.len() as u32
+    fn fn_count(&self) -> Result<u32, LinkError> {
+        u32::try_from(self.sites.len()).map_err(|_| LinkError::TooMany(Table::Functions))
     }
 }
 
@@ -485,9 +563,15 @@ pub(crate) struct Minted {
 }
 
 impl Minted {
-    pub fn push(&mut self, f: Named) -> FuncIdx {
+    /// Every function index, minted or declared, fits in a `FuncIdx`, so the
+    /// program's function table can name all of them.
+    pub fn push(&mut self, f: Named) -> Result<FuncIdx, LinkError> {
+        let idx = u32::try_from(self.fns.len())
+            .ok()
+            .and_then(|n| self.base.checked_add(n))
+            .ok_or(LinkError::TooMany(Table::Functions))?;
         self.fns.push(f);
-        FuncIdx(self.base + self.fns.len() as u32 - 1)
+        Ok(FuncIdx(idx))
     }
 }
 
@@ -501,9 +585,9 @@ pub fn build_program(
     let modules: Vec<&TypedModule> = modules.iter().map(|m| m.module()).collect();
     let mut ids = Ids::new(defs);
     let prelude = Prelude::resolve(&mut ids)?;
-    let symbols = Symbols::of(&modules);
+    let symbols = Symbols::of(&modules)?;
     let mut minted = Minted {
-        base: symbols.fn_count(),
+        base: symbols.fn_count()?,
         fns: Vec::new(),
     };
     let mut cx = crate::translate::Cx {
@@ -527,10 +611,10 @@ pub fn build_program(
         none: prelude.ctors.none,
         ok: prelude.ctors.ok,
         err: prelude.ctors.err,
-        radix: radix(&mut ids),
-        io: io_errors(&mut ids),
-        json: json_types(&mut ids),
-        http: http_types(&mut ids),
+        radix: present(radix(&mut ids))?,
+        io: present(io_errors(&mut ids))?,
+        json: present(json_types(&mut ids))?,
+        http: present(http_types(&mut ids))?,
     };
 
     let frozen = ids.freeze();
@@ -547,7 +631,7 @@ pub fn build_program(
             let core = finish(&n.body)?;
             Ok(LoweredFn::new(n.module.clone(), n.name.clone(), core))
         })
-        .collect::<Result<_, InternalLinkError>>()?;
+        .collect::<Result<_, LinkError>>()?;
     // The entry's top level is named for what it is; each import's, for its
     // module.
     let mut inits: Vec<LoweredFn> = modules
@@ -557,7 +641,7 @@ pub fn build_program(
             let key = m.key.as_str();
             Ok(LoweredFn::new(key.to_string(), key.to_string(), finish(f)?))
         })
-        .collect::<Result<_, InternalLinkError>>()?;
+        .collect::<Result<_, LinkError>>()?;
     let mut toplevel = inits.pop().ok_or(InternalLinkError::NoEntryModule)?;
     toplevel.name = "__main__".to_string();
 
@@ -592,10 +676,32 @@ fn core_fn(
     im: &Immediates,
     pool: &ResolvedPool,
     f: &TypedFn,
-) -> Result<CoreFn, InternalLinkError> {
+) -> Result<CoreFn, LinkError> {
     let lower::Lowered { core, locals } = lower::lower_fn(temps, f)?;
     let core = immediates::rewrite(core, im);
-    perceus::perceus(pool, &locals, core)
+    Ok(perceus::perceus(pool, &locals, core)?)
+}
+
+/// Why a stdlib type's constructors can't be listed.
+enum Absent {
+    /// The program doesn't reach the type, or the type lacks a constructor.
+    No,
+    Link(LinkError),
+}
+
+impl From<LinkError> for Absent {
+    fn from(e: LinkError) -> Self {
+        Absent::Link(e)
+    }
+}
+
+/// `r`, with a type the program doesn't reach as `None`.
+fn present<T>(r: Result<T, Absent>) -> Result<Option<T>, LinkError> {
+    match r {
+        Ok(t) => Ok(Some(t)),
+        Err(Absent::No) => Ok(None),
+        Err(Absent::Link(e)) => Err(e),
+    }
 }
 
 /// The constructors of the stdlib type `module.name`, by name, when the
@@ -604,24 +710,24 @@ fn stdlib_variants<'b, 'd>(
     b: &'b mut Ids<'d>,
     module: &[&str],
     name: &str,
-) -> Option<impl FnMut(&str) -> Option<VariantRef> + use<'b, 'd>> {
+) -> Result<impl FnMut(&str) -> Result<VariantRef, Absent> + use<'b, 'd>, Absent> {
     let path: Vec<String> = module.iter().map(|s| s.to_string()).collect();
     let t = TypeName::new(ModuleKey::for_stdlib(&path), name.into());
-    b.defs.type_def(&t)?;
-    Some(move |v: &str| b.variant(&t, v))
+    b.defs.type_def(&t).ok_or(Absent::No)?;
+    Ok(move |v: &str| b.variant(&t, v)?.ok_or(Absent::No))
 }
 
-fn radix(b: &mut Ids<'_>) -> Option<Radix> {
+fn radix(b: &mut Ids<'_>) -> Result<Radix, Absent> {
     let mut v = stdlib_variants(b, &["scarlet", "binary"], "Radix")?;
-    Some(Radix {
+    Ok(Radix {
         dec: v("Dec")?,
         hex: v("Hex")?,
     })
 }
 
-fn io_errors(b: &mut Ids<'_>) -> Option<IoErrors> {
+fn io_errors(b: &mut Ids<'_>) -> Result<IoErrors, Absent> {
     let mut v = stdlib_variants(b, &["scarlet", "io"], "IoError")?;
-    Some(IoErrors {
+    Ok(IoErrors {
         not_found: v("NotFound")?,
         permission_denied: v("PermissionDenied")?,
         already_exists: v("AlreadyExists")?,
@@ -637,7 +743,7 @@ fn io_errors(b: &mut Ids<'_>) -> Option<IoErrors> {
     })
 }
 
-fn json_types(b: &mut Ids<'_>) -> Option<JsonTypes> {
+fn json_types(b: &mut Ids<'_>) -> Result<JsonTypes, Absent> {
     let module = ["scarlet", "json"];
     let doc = stdlib_variants(b, &module, "Doc")?("Doc")?;
     let parse_error = stdlib_variants(b, &module, "ParseError")?("ParseError")?;
@@ -657,7 +763,7 @@ fn json_types(b: &mut Ids<'_>) -> Option<JsonTypes> {
         }
     };
     let mut j = stdlib_variants(b, &module, "Json")?;
-    Some(JsonTypes {
+    Ok(JsonTypes {
         doc,
         parse_error,
         reasons,
@@ -672,7 +778,7 @@ fn json_types(b: &mut Ids<'_>) -> Option<JsonTypes> {
     })
 }
 
-fn http_types(b: &mut Ids<'_>) -> Option<HttpTypes> {
+fn http_types(b: &mut Ids<'_>) -> Result<HttpTypes, Absent> {
     let h1 = ["scarlet", "http", "h1"];
     let header = stdlib_variants(b, &["scarlet", "http", "headers"], "Header")?("Header")?;
     let (http10, http11) = {
@@ -719,7 +825,7 @@ fn http_types(b: &mut Ids<'_>) -> Option<HttpTypes> {
         let mut c = stdlib_variants(b, &h1, "ChunkBody")?;
         (c("ChunkedDone")?, c("ChunkedNeedMore")?, c("ChunkedBad")?)
     };
-    Some(HttpTypes {
+    Ok(HttpTypes {
         header,
         http10,
         http11,

@@ -129,7 +129,7 @@ pub(crate) struct RConstruct {
     pub labels: Vec<Name>,
     pub args: Vec<RArg>,
     /// `..base`, and how many arguments were written before it.
-    pub spread: Option<(u32, Box<RExpr>)>,
+    pub spread: Option<(usize, Box<RExpr>)>,
     /// Where the constructor's name is written.
     pub at: Span,
 }
@@ -151,7 +151,7 @@ pub(crate) struct RLambda {
 #[derive(Debug, Clone)]
 pub(crate) struct RArg {
     /// The parameter it fills, or its position when it fills none.
-    pub slot: u32,
+    pub slot: usize,
     pub value: RExpr,
     /// Whether the slot really is a parameter. An argument that names no
     /// parameter has been reported already, and its value is only checked.
@@ -295,7 +295,7 @@ impl Resolved {
     /// Resolution makes one entry per declaration, in `DeclId` order, so this
     /// misses only for an id from another module.
     pub fn decl(&self, d: DeclId) -> Option<&RDecl> {
-        self.decls.get(d.0 as usize)
+        self.decls.get(d.0)
     }
 }
 
@@ -304,6 +304,6 @@ impl Resolved {
 /// misses only for an id from another module.
 pub(crate) fn binder_info(binders: &[BinderInfo], b: BinderId) -> Result<&BinderInfo, CheckError> {
     binders
-        .get(b.0 as usize)
+        .get(b.0)
         .ok_or(CheckError::Internal(Internal::UnknownBinder(b.0)))
 }

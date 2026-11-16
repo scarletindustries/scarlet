@@ -93,13 +93,16 @@ fn format_diagnostic_with_lines<P: Problem>(
     let lines = &view.lines;
     let display_line = d.span.start_line + 1;
     let source_line = get_source_line(lines, display_line);
+    // Columns are never negative. A span that says otherwise is drawn from
+    // the start of its line.
+    let col = usize::try_from(d.span.start_column).unwrap_or(0);
+    let end_col = usize::try_from(d.span.end_column).unwrap_or(0);
     // Span columns count bytes, but printed locations and editor line:col URLs
     // are read as characters, so re-measure the prefix in chars.
     let display_col = source_line
-        .get(..d.span.start_column as usize)
-        .map(|s| s.chars().count())
-        .unwrap_or(d.span.start_column as usize) as i32
-        + 1;
+        .get(..col)
+        .map_or(col, |s| s.chars().count())
+        .saturating_add(1);
     let location = format!("{file_path}:{display_line}:{display_col}");
     let loc = match &view.link {
         Some(link) => {
@@ -124,7 +127,6 @@ fn format_diagnostic_with_lines<P: Problem>(
         p.blue, p.reset
     );
 
-    let col = d.span.start_column as usize;
     let mut caret_padding = String::new();
     for ch in source_line.get(..col).unwrap_or(source_line).chars() {
         caret_padding.push(if ch == '\t' { '\t' } else { ' ' });
@@ -135,7 +137,7 @@ fn format_diagnostic_with_lines<P: Problem>(
     let caret_len =
         if d.span.end_line == d.span.start_line && d.span.end_column > d.span.start_column {
             source_line
-                .get(col..d.span.end_column as usize)
+                .get(col..end_col)
                 .map(|s| s.chars().count())
                 .unwrap_or(1)
         } else {

@@ -111,7 +111,7 @@ fn cell(heap: &Heap, cell: Cell, s: &mut Sip<1, 3>, todo: &mut Vec<Value>) {
         Kind::Ctor => {
             s.tag(Tag::Ctor);
             let v = heap.variant(cell);
-            s.word(u64::from(v.variant_idx) << 32 | u64::from(v.type_id.0 as u32));
+            s.word(u64::from(v.variant_idx) << 32 | u64::from(v.type_id.0.cast_unsigned()));
             counted(s, todo, heap.fields(cell).collect());
         }
         Kind::Closure => {
@@ -170,6 +170,10 @@ fn int(s: &mut Sip<1, 3>, n: i128) {
     s.tag(Tag::Int);
     s.word(u64::from(n < 0));
     let m = n.unsigned_abs();
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the low and the high 64 bits of a u128, on purpose"
+    )]
     let digits: &[u64] = &[m as u64, (m >> 64) as u64];
     let len = digits.iter().rposition(|&d| d != 0).map_or(0, |i| i + 1);
     s.word(len as u64);

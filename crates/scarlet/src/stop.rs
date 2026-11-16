@@ -10,6 +10,9 @@ pub fn message(stop: &Stop) -> Option<String> {
         Stop::OutputClosed => None,
         Stop::NotBuiltYet(what) => Some(format!("cannot run: the new VM does not run {what} yet")),
         Stop::HeapFull => Some("the program ran out of heap".into()),
+        Stop::FunctionTooLong { name } => Some(format!(
+            "the function {name} is longer than the VM's jumps can reach"
+        )),
         Stop::BadProgram(what) => Some(format!(
             "internal error: {what}. This is a bug in the compiler, not in the program"
         )),

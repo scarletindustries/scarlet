@@ -27,6 +27,7 @@ use scarlet_ir::TypeId;
 use scarlet_ir::core_ir::{FuncIdx, VariantRef};
 
 use crate::value::Value;
+use crate::word::{low_u16, low_u32, to_usize};
 
 /// Words in the first chunk, which makes it 2 KB.
 const FIRST_CHUNK_WORDS: usize = 256;
@@ -54,8 +55,8 @@ impl Cell {
 
     pub(crate) fn from_bits(bits: u64) -> Cell {
         Cell {
-            chunk: (bits >> WORD_BITS) as u32 & ((1 << CHUNK_BITS) - 1),
-            word: bits as u32 & ((1 << WORD_BITS) - 1),
+            chunk: low_u32(bits >> WORD_BITS) & ((1 << CHUNK_BITS) - 1),
+            word: low_u32(bits) & ((1 << WORD_BITS) - 1),
         }
     }
 }
@@ -209,7 +210,7 @@ impl Heap {
             && let Some(Some(c)) = self.chunks.get_mut(i as usize)
             && c.words.len() - c.used >= size
         {
-            let word = c.used as u32;
+            let word = u32::try_from(c.used).map_err(|_| Full)?;
             c.used += size;
             return Ok(Cell { chunk: i, word });
         }
@@ -239,7 +240,7 @@ impl Heap {
             return Err(Full);
         }
         self.chunks.push(Some(chunk));
-        Ok((self.chunks.len() - 1) as u32)
+        u32::try_from(self.chunks.len() - 1).map_err(|_| Full)
     }
 
     /// Add one reference to `cell`.
@@ -355,7 +356,7 @@ impl Heap {
 
     /// A string cell's length in bytes.
     pub(crate) fn string_len(&self, cell: Cell) -> usize {
-        self.word(cell, 1) as usize
+        to_usize(self.word(cell, 1))
     }
 
     /// Whether a string cell holds exactly `text`.
@@ -369,7 +370,7 @@ impl Heap {
 
     /// A string cell's bytes, appended to `out`.
     pub(crate) fn read_string(&self, cell: Cell, out: &mut Vec<u8>) {
-        let len = self.word(cell, 1) as usize;
+        let len = to_usize(self.word(cell, 1));
         for i in 0..len.div_ceil(8) {
             let bytes = self.word(cell, 2 + i).to_le_bytes();
             let n = (len - i * 8).min(8);
@@ -421,7 +422,7 @@ impl Heap {
     }
 
     fn write_ctor(&mut self, cell: Cell, v: VariantRef, fields: &[Value]) {
-        let tag = u64::from(v.variant_idx) << 32 | u64::from(v.type_id.0 as u32);
+        let tag = u64::from(v.variant_idx) << 32 | u64::from(v.type_id.0.cast_unsigned());
         self.set_word(cell, 1, tag);
         for (i, f) in fields.iter().enumerate() {
             self.set_word(cell, 2 + i, f.bits());
@@ -432,8 +433,8 @@ impl Heap {
     pub(crate) fn variant(&self, cell: Cell) -> VariantRef {
         let tag = self.word(cell, 1);
         VariantRef {
-            type_id: TypeId(tag as u32 as i32),
-            variant_idx: (tag >> 32) as u16,
+            type_id: TypeId(low_u32(tag).cast_signed()),
+            variant_idx: low_u16(tag >> 32),
         }
     }
 
@@ -456,7 +457,7 @@ impl Heap {
 
     /// The function a closure cell runs.
     pub(crate) fn closure_func(&self, cell: Cell) -> FuncIdx {
-        FuncIdx(self.word(cell, 1) as u32)
+        FuncIdx(low_u32(self.word(cell, 1)))
     }
 
     /// Capture `i` of a closure cell, or `None` past its last. Reading it adds

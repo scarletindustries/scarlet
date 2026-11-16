@@ -671,13 +671,13 @@ mod tests {
     /// A nominal type that isn't a primitive, so it lives on the heap and its
     /// allocation width is unknown.
     fn con(p: &mut ResolvedPool, id: i32) -> RTy {
-        p.mk_con(TypeId(id), &[])
+        p.mk_con(TypeId(id), &[]).unwrap()
     }
 
     /// The unboxed `Int`. It isn't on the heap, so it gets no `Drop`.
     fn int_ty(p: &mut ResolvedPool) -> RTy {
         let int = p.prims().int;
-        p.mk_con(int, &[])
+        p.mk_con(int, &[]).unwrap()
     }
 
     fn count_drops(e: &CoreExpr) -> usize {
@@ -1097,7 +1097,7 @@ mod tests {
     #[test]
     fn bound_is_not_heap_but_a_nominal_is() {
         let mut pool = pool();
-        let generic = pool.mk_bound(0);
+        let generic = pool.mk_bound(0).unwrap();
         let int = int_ty(&mut pool);
         let t = con(&mut pool, 99);
         let f = perceus(

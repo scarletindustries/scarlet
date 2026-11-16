@@ -25,7 +25,7 @@ use scarlet_ir::intrinsic::Intrinsic;
 /// `i < TypedFn::binds`. It is not a `core_ir::LocalId`: `lower` mints those in
 /// ANF evaluation order and maps each `BindingId` onto one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct BindingId(pub(crate) u32);
+pub struct BindingId(pub(crate) usize);
 
 impl std::fmt::Display for BindingId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -282,7 +282,7 @@ pub enum TypedExpr {
     TupleIndex {
         ty: RTy,
         recv: Box<TypedExpr>,
-        idx: u32,
+        idx: usize,
     },
     /// Field `idx` of `recv`, where every variant `recv` could be holds it.
     /// A `.field` whose variants hold it in different slots is a
@@ -290,7 +290,7 @@ pub enum TypedExpr {
     Field {
         ty: RTy,
         recv: Box<TypedExpr>,
-        idx: u32,
+        idx: usize,
     },
     /// `args` is exactly the variant's arity, in declared-field order. The
     /// elaborator has reordered labels and expanded `..base` spreads into
@@ -407,7 +407,7 @@ pub struct TypedFn {
     /// Each function has its own counter. A nested closure is a separate
     /// [`TypedFn`] whose ids start again at zero, and it reaches an enclosing
     /// binding through [`ValueRef::Capture`].
-    pub(crate) binds: u32,
+    pub(crate) binds: usize,
 }
 
 /// The few [`RTy`]s `lower` needs for the temporaries it introduces, such as an

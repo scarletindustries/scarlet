@@ -636,19 +636,25 @@ fn emit_newline(out: &mut String, indent: isize) {
     }
 }
 
+/// `n` as a width. A width past `isize::MAX` can't fit on any line, so it
+/// stays at the most.
+fn width(n: usize) -> isize {
+    isize::try_from(n).unwrap_or(isize::MAX)
+}
+
 fn str_width(s: &str) -> isize {
     if s.is_ascii() {
-        let tabs = s.bytes().filter(|&b| b == b'\t').count() as isize;
-        return s.len() as isize + tabs * (TAB_WIDTH - 1);
+        let tabs = width(s.bytes().filter(|&b| b == b'\t').count());
+        return width(s.len()).saturating_add(tabs.saturating_mul(TAB_WIDTH - 1));
     }
     let mut w = 0isize;
     for c in s.chars() {
-        w += if c == '\t' {
+        w = w.saturating_add(if c == '\t' {
             TAB_WIDTH
         } else {
             // Terminal columns: CJK/emoji count 2, combining marks 0.
-            c.width().unwrap_or(0) as isize
-        };
+            width(c.width().unwrap_or(0))
+        });
     }
     w
 }

@@ -44,6 +44,7 @@ use crate::eq;
 use crate::hash;
 use crate::heap::{Cell, Full, Heap, Kind};
 use crate::value::Value;
+use crate::word::{high_u32, low_u32};
 
 /// What places a key. It is always [`hash::hash`], except in tests, which
 /// pass a poor one to reach the paths a good one almost never takes.
@@ -215,8 +216,8 @@ impl Used {
     fn of(d: &[u64]) -> Used {
         let m = d.first().copied().unwrap_or(0);
         Used {
-            entries: m as u32,
-            children: (m >> 32) as u32,
+            entries: low_u32(m),
+            children: high_u32(m),
         }
     }
 

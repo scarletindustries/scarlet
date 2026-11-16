@@ -109,7 +109,7 @@ fn groups(
     report: &mut Report,
 ) -> Vec<Vec<DeclId>> {
     // Node `n` is declaration `n`: they are added in `DeclId` order.
-    let node = |d: DeclId| NodeIndex::new(d.0 as usize);
+    let node = |d: DeclId| NodeIndex::new(d.0);
     let mut graph: StableGraph<(), (), Directed> = StableGraph::new();
     for (_, d) in declared.iter() {
         if let Err(e) = graph.try_add_node(()) {
@@ -126,7 +126,7 @@ fn groups(
     }
     tarjan_scc(&graph)
         .into_iter()
-        .map(|c| c.into_iter().map(|n| DeclId(n.index() as u32)).collect())
+        .map(|c| c.into_iter().map(|n| DeclId(n.index())).collect())
         .collect()
 }
 
@@ -234,7 +234,7 @@ impl<'r, 'a> Resolver<'r, 'a> {
         discards: bool,
         doc: Option<String>,
     ) -> BinderId {
-        let b = BinderId(self.binders.len() as u32);
+        let b = BinderId(self.binders.len());
         self.binders.push(BinderInfo {
             name: id.name.as_str().into(),
             span: id.span,
@@ -860,7 +860,7 @@ impl<'r, 'a> Resolver<'r, 'a> {
                     }
                 };
                 RArg {
-                    slot: slot.unwrap_or(i) as u32,
+                    slot: slot.unwrap_or(i),
                     value,
                     fills: slot.is_some(),
                 }
@@ -921,8 +921,8 @@ impl<'r, 'a> Resolver<'r, 'a> {
         at: Span,
         w: &Walk,
     ) -> RKind {
-        let mut spread: Option<(u32, &ast::Expression)> = None;
-        let mut written = 0u32;
+        let mut spread: Option<(usize, &ast::Expression)> = None;
+        let mut written = 0usize;
         for a in args {
             match a {
                 ast::CallArg::Spread(e) => {
@@ -950,13 +950,8 @@ impl<'r, 'a> Resolver<'r, 'a> {
             items,
             spread.is_none().then_some((span, FieldSite::Call)),
         );
-        let slot_of: Vec<Option<u32>> = (0..args.len())
-            .map(|i| {
-                by_pos
-                    .iter()
-                    .position(|slot| *slot == Some(i))
-                    .map(|slot| slot as u32)
-            })
+        let slot_of: Vec<Option<usize>> = (0..args.len())
+            .map(|i| by_pos.iter().position(|slot| *slot == Some(i)))
             .collect();
         let spread = spread.map(|(at, e)| (at, self.boxed(e, w)));
         let args = args
@@ -970,7 +965,7 @@ impl<'r, 'a> Resolver<'r, 'a> {
                     ast::CallArg::Spread(_) => return None,
                 };
                 Some(RArg {
-                    slot: slot.unwrap_or(i as u32),
+                    slot: slot.unwrap_or(i),
                     value,
                     fills: slot.is_some(),
                 })

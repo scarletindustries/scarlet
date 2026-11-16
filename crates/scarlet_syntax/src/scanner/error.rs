@@ -44,6 +44,8 @@ pub enum ScanError {
     EmptyUnicodeEscape,
     /// `\u{..}` whose digits name no Unicode scalar value.
     NotAScalarValue { digits: String },
+    /// The source is too long to scan.
+    TooLarge { bytes: usize },
 }
 
 impl Problem for ScanError {
@@ -62,7 +64,8 @@ impl Problem for ScanError {
             | ScanError::UnicodeEscapeWithoutBrace
             | ScanError::UnclosedUnicodeEscape { .. }
             | ScanError::EmptyUnicodeEscape
-            | ScanError::NotAScalarValue { .. } => DiagnosticCode::ParseError,
+            | ScanError::NotAScalarValue { .. }
+            | ScanError::TooLarge { .. } => DiagnosticCode::ParseError,
         }
     }
 }
@@ -101,6 +104,10 @@ impl fmt::Display for ScanError {
                 f,
                 "'\\u{{{digits}}}' is not a Unicode scalar value, because it is above \
                  U+10FFFF or in the surrogate range U+D800 to U+DFFF"
+            ),
+            ScanError::TooLarge { bytes } => write!(
+                f,
+                "This file is {bytes} bytes, which is more than the 1 GiB a source file can be"
             ),
         }
     }

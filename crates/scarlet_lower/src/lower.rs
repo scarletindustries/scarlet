@@ -41,19 +41,19 @@ use std::collections::{BTreeSet, VecDeque};
 use super::{
     Atom, Callee, ConstId, CoreBind, CoreExpr, CoreFn, CorePat, JoinId, Load, LocalId, PrimOp,
 };
-use crate::program::InternalLinkError;
+use crate::program::{InternalLinkError, LinkError, Table};
 use crate::typed_ir::{
     BindingId, PatRest, RTy, TempTys, TypedArm, TypedArrayElem, TypedBinPatSeg, TypedBinSeg,
     TypedBind, TypedCallee, TypedExpr, TypedFn, TypedInterpPart, TypedPat, ValueRef, pat_binds,
 };
 use scarlet_ir::tivec::TiVec;
 
-type R<T> = Result<T, InternalLinkError>;
+type R<T> = Result<T, LinkError>;
 
 /// Narrow a [`PrimOp`] field or element index to `u16`, checking it fits.
 /// Truncating it instead would read the wrong field.
 fn idx16(i: usize) -> R<u16> {
-    u16::try_from(i).map_err(|_| InternalLinkError::IndexTooWide(i))
+    Ok(u16::try_from(i).map_err(|_| InternalLinkError::IndexTooWide(i))?)
 }
 
 /// A lowered function, with the type of every local in it.
@@ -70,7 +70,7 @@ pub(crate) fn lower_fn(temps: TempTys, f: &TypedFn) -> R<Lowered> {
         .params
         .iter()
         .map(|p| {
-            let id = lo.fresh(p.ty);
+            let id = lo.fresh(p.ty)?;
             lo.bind(p.id, id)?;
             Ok(CoreBind::new(id, p.ty))
         })
@@ -237,19 +237,21 @@ struct Lower {
 }
 
 impl Lower {
-    fn new(temps: TempTys, binds: u32) -> Self {
+    fn new(temps: TempTys, binds: usize) -> Self {
         Lower {
             temps,
             tys: TiVec::new(),
-            binds: vec![None; binds as usize],
+            binds: vec![None; binds],
             undo: Vec::new(),
             spine: Vec::new(),
             joins: 0,
         }
     }
 
-    fn fresh(&mut self, ty: RTy) -> LocalId {
-        self.tys.push(ty)
+    fn fresh(&mut self, ty: RTy) -> R<LocalId> {
+        self.tys
+            .push(ty)
+            .map_err(|_| LinkError::TooMany(Table::Locals))
     }
 
     /// The `RTy` recorded for `id` when it was minted.
@@ -257,7 +259,7 @@ impl Lower {
         self.tys
             .get(id)
             .copied()
-            .ok_or(InternalLinkError::UntypedLocal(id))
+            .ok_or(InternalLinkError::UntypedLocal(id).into())
     }
 
     /// Record the local `b` names. A `BindingId` out of range means the
@@ -265,7 +267,7 @@ impl Lower {
     fn bind(&mut self, b: BindingId, id: LocalId) -> R<()> {
         let slot = self
             .binds
-            .get_mut(b.0 as usize)
+            .get_mut(b.0)
             .ok_or(InternalLinkError::BindingOutOfRange(b))?;
         self.undo.push((b, slot.replace(id)));
         Ok(())
@@ -276,45 +278,48 @@ impl Lower {
     /// never be a default, because any default would be a live local, and
     /// the program would run and return a wrong answer.
     fn local(&self, b: BindingId) -> R<LocalId> {
-        match self.binds.get(b.0 as usize) {
+        match self.binds.get(b.0) {
             Some(Some(id)) => Ok(*id),
-            Some(None) => Err(InternalLinkError::UnboundBinding(b)),
-            None => Err(InternalLinkError::BindingOutOfRange(b)),
+            Some(None) => Err(InternalLinkError::UnboundBinding(b).into()),
+            None => Err(InternalLinkError::BindingOutOfRange(b).into()),
         }
     }
 
     /// Push `let %id = rhs` onto the current spine and return `%id`.
-    fn let_(&mut self, ty: RTy, rhs: Atom) -> LocalId {
-        let id = self.fresh(ty);
+    fn let_(&mut self, ty: RTy, rhs: Atom) -> R<LocalId> {
+        let id = self.fresh(ty)?;
         self.spine.push(Pending::Let {
             bind: CoreBind::new(id, ty),
             rhs,
         });
-        id
+        Ok(id)
     }
 
     /// Push `letj %id = <join>` onto the current spine and return `%id`.
-    fn let_join(&mut self, ty: RTy, join: CoreExpr) -> LocalId {
-        let id = self.fresh(ty);
+    fn let_join(&mut self, ty: RTy, join: CoreExpr) -> R<LocalId> {
+        let id = self.fresh(ty)?;
         self.spine.push(Pending::Join {
             bind: CoreBind::new(id, ty),
             join,
         });
-        id
+        Ok(id)
     }
 
     /// Mint a new join-point label, which no `Goto` targets yet.
-    fn fresh_join(&mut self) -> JoinId {
+    fn fresh_join(&mut self) -> R<JoinId> {
         let j = JoinId(self.joins);
-        self.joins += 1;
-        j
+        self.joins = self
+            .joins
+            .checked_add(1)
+            .ok_or(LinkError::TooMany(Table::Joins))?;
+        Ok(j)
     }
 
     /// Push `let %id = rhs` for a source binding that owns its slot. The
     /// [`CoreBind`] carries `bind.global` from the moment it's built, so the
     /// entry-frame pin is never patched on afterwards.
-    fn let_pinned(&mut self, bind: &TypedBind, rhs: Atom) -> LocalId {
-        let id = self.fresh(bind.ty);
+    fn let_pinned(&mut self, bind: &TypedBind, rhs: Atom) -> R<LocalId> {
+        let id = self.fresh(bind.ty)?;
         self.spine.push(Pending::Let {
             bind: CoreBind {
                 id,
@@ -323,13 +328,13 @@ impl Lower {
             },
             rhs,
         });
-        id
+        Ok(id)
     }
 
     /// Push `letj %id = <join>` carrying `bind.global`, as [`Self::let_pinned`]
     /// does for a plain `Let`. `ty` is the join's own result type.
-    fn let_join_pinned(&mut self, bind: &TypedBind, ty: RTy, join: CoreExpr) -> LocalId {
-        let id = self.fresh(ty);
+    fn let_join_pinned(&mut self, bind: &TypedBind, ty: RTy, join: CoreExpr) -> R<LocalId> {
+        let id = self.fresh(ty)?;
         self.spine.push(Pending::Join {
             bind: CoreBind {
                 id,
@@ -338,12 +343,12 @@ impl Lower {
             },
             join,
         });
-        id
+        Ok(id)
     }
 
     /// Bind an already-pooled `Int` constant to a new local. The elaborator
     /// interned every integer a lowered body uses.
-    fn int_const(&mut self, c: ConstId) -> LocalId {
+    fn int_const(&mut self, c: ConstId) -> R<LocalId> {
         let int_t = self.temps.int;
         self.let_(int_t, Atom::Const(c))
     }
@@ -357,7 +362,7 @@ impl Lower {
         // Each entry's slot was in range when it was bound, and the table
         // never shrinks.
         for (b, old) in inner.into_iter().rev() {
-            if let Some(slot) = self.binds.get_mut(b.0 as usize) {
+            if let Some(slot) = self.binds.get_mut(b.0) {
                 *slot = old;
             }
         }
@@ -488,11 +493,11 @@ impl Lower {
                 let and = matches!(init, TypedExpr::And { .. });
                 let ty = init.ty();
                 let join = self.short_circuit(lhs, rhs, and, ty)?;
-                Ok(self.let_join_pinned(bind, ty, join))
+                Ok(self.let_join_pinned(bind, ty, join)?)
             }
             _ => {
                 let (a, _ty) = self.atom(init)?;
-                Ok(self.let_pinned(bind, a))
+                Ok(self.let_pinned(bind, a)?)
             }
         }
     }
@@ -512,7 +517,7 @@ impl Lower {
         #[allow(unknown_lints, wildcard_over_own_enum)]
         Ok(match a {
             Atom::Local(id) => id,
-            other => self.let_(ty, other),
+            other => self.let_(ty, other)?,
         })
     }
 
@@ -520,7 +525,7 @@ impl Lower {
     /// its own tree and binding the result with a `LetJoin`.
     fn join_operand(&mut self, e: &TypedExpr, ty: RTy) -> R<LocalId> {
         let join = self.expr_as(e, ty)?;
-        Ok(self.let_join(ty, join))
+        self.let_join(ty, join)
     }
 
     /// Lower `e` to an `(Atom, RTy)` whose operands are all `LocalId`s.
@@ -566,7 +571,7 @@ impl Lower {
             TypedExpr::And { lhs, rhs, .. } | TypedExpr::Or { lhs, rhs, .. } => {
                 let and = matches!(e, TypedExpr::And { .. });
                 let join = self.short_circuit(lhs, rhs, and, ty)?;
-                let id = self.let_join(ty, join);
+                let id = self.let_join(ty, join)?;
                 return Ok((Atom::Local(id), self.bind_ty(id)?));
             }
             // Control flow in operand position is sealed and bound as a join.
@@ -595,11 +600,11 @@ impl Lower {
             }
             TypedExpr::TupleIndex { recv, idx, .. } => {
                 let r = self.operand(recv)?;
-                Atom::prim(PrimOp::TupleField(idx16(*idx as usize)?), vec![r])
+                Atom::prim(PrimOp::TupleField(idx16(*idx)?), vec![r])
             }
             TypedExpr::Field { recv, idx, .. } => {
                 let r = self.operand(recv)?;
-                Atom::prim(PrimOp::Field(idx16(*idx as usize)?), vec![r])
+                Atom::prim(PrimOp::Field(idx16(*idx)?), vec![r])
             }
             TypedExpr::Ctor { variant, args, .. } => {
                 let fields = self.operands(args)?;
@@ -732,7 +737,7 @@ impl Lower {
             if let TypedArrayElem::Spread(sp) = first {
                 let s = self.operand(sp)?;
                 acc = Some(match acc {
-                    Some(a) => self.let_(ty, Atom::prim(PrimOp::ArrayConcat, vec![a, s])),
+                    Some(a) => self.let_(ty, Atom::prim(PrimOp::ArrayConcat, vec![a, s]))?,
                     None => s,
                 });
                 rest = tail;
@@ -749,7 +754,7 @@ impl Lower {
             {
                 let s = self.operand(sp)?;
                 run.push(s);
-                acc = Some(self.let_(ty, Atom::prim(PrimOp::ArrayPrepend, run)));
+                acc = Some(self.let_(ty, Atom::prim(PrimOp::ArrayPrepend, run))?);
                 rest = tail;
                 continue;
             }
@@ -757,11 +762,11 @@ impl Lower {
                 Some(a) => {
                     let mut args = vec![a];
                     args.extend(run);
-                    self.let_(ty, Atom::prim(PrimOp::ArrayAppend, args))
+                    self.let_(ty, Atom::prim(PrimOp::ArrayAppend, args))?
                 }
                 None => {
                     let a = Atom::prim(PrimOp::MakeArray, run);
-                    self.let_(ty, a)
+                    self.let_(ty, a)?
                 }
             };
             acc = Some(a);
@@ -779,10 +784,10 @@ impl Lower {
         let mut args = Vec::with_capacity(parts.len());
         for part in parts {
             let a = match part {
-                TypedInterpPart::Str(c) => self.let_(str_t, Atom::Const(*c)),
+                TypedInterpPart::Str(c) => self.let_(str_t, Atom::Const(*c))?,
                 TypedInterpPart::Expr(ex) => {
                     let v = self.operand(ex)?;
-                    self.let_(str_t, Atom::prim(PrimOp::ToString, vec![v]))
+                    self.let_(str_t, Atom::prim(PrimOp::ToString, vec![v]))?
                 }
             };
             args.push(a);
@@ -802,21 +807,21 @@ impl Lower {
                 TypedBinSeg::Int { value, bits } => {
                     let v = self.operand(value)?;
                     let b = self.operand(bits)?;
-                    self.let_(bin_t, Atom::prim(PrimOp::BinaryFromInt, vec![v, b]))
+                    self.let_(bin_t, Atom::prim(PrimOp::BinaryFromInt, vec![v, b]))?
                 }
                 TypedBinSeg::Binary { value, bits } => {
                     let v = self.operand(value)?;
                     match bits {
                         Some(b) => {
                             let b = self.operand(b)?;
-                            self.let_(bin_t, Atom::prim(PrimOp::BinaryTake, vec![v, b]))
+                            self.let_(bin_t, Atom::prim(PrimOp::BinaryTake, vec![v, b]))?
                         }
                         None => v,
                     }
                 }
                 TypedBinSeg::Utf8 { value } => {
                     let v = self.operand(value)?;
-                    self.let_(bin_t, Atom::prim(PrimOp::BinaryFromString, vec![v]))
+                    self.let_(bin_t, Atom::prim(PrimOp::BinaryFromString, vec![v]))?
                 }
             };
             out.push(id);
@@ -890,7 +895,7 @@ impl Lower {
     fn match_arms(&mut self, scrut: LocalId, arms: &[TypedArm], result_ty: RTy) -> R<CoreExpr> {
         let mut lowered = Vec::with_capacity(arms.len());
         for arm in arms {
-            let fall = self.fresh_join();
+            let fall = self.fresh_join()?;
             let (pat, body) = self.scoped(|lo| {
                 let mut nested = Vec::new();
                 let pat = lo.pattern(&arm.pat, scrut, &mut nested)?;
@@ -901,7 +906,7 @@ impl Lower {
                         body: &arm.body,
                     },
                 };
-                Ok::<_, InternalLinkError>((
+                Ok::<_, LinkError>((
                     pat,
                     lo.nested_arm_body(nested.into(), leaf, fall, result_ty)?,
                 ))
@@ -961,7 +966,7 @@ impl Lower {
         Ok(match p {
             TypedPat::Wild { .. } => CorePat::Wild,
             TypedPat::Bind(b) => {
-                let id = self.fresh(b.ty);
+                let id = self.fresh(b.ty)?;
                 self.bind(b.id, id)?;
                 CorePat::Bind(CoreBind::new(id, b.ty))
             }
@@ -973,7 +978,7 @@ impl Lower {
                 // line up with the declared fields.
                 let mut binds = Vec::with_capacity(fields.len());
                 for fp in fields {
-                    let id = self.fresh(fp.ty());
+                    let id = self.fresh(fp.ty())?;
                     // The wildcard is on purpose. Every compound pattern kind,
                     // now or later, goes to the nested queue.
                     #[allow(unknown_lints, wildcard_over_own_enum)]
@@ -1039,7 +1044,11 @@ impl Lower {
         outer: JoinId,
         result_ty: RTy,
     ) -> R<Tree> {
-        let commit = (!alts.iter().any(|a| !pat_binds(a).is_empty())).then(|| self.fresh_join());
+        let commit = if alts.iter().any(|a| !pat_binds(a).is_empty()) {
+            None
+        } else {
+            Some(self.fresh_join()?)
+        };
 
         // Each alternative that can fail, with the join its failures go to.
         let mut chain: Vec<(JoinId, Tree)> = Vec::with_capacity(alts.len());
@@ -1048,7 +1057,7 @@ impl Lower {
         let mut last = Tree::goto(outer);
         for (i, alt) in alts.iter().enumerate() {
             let is_last = i + 1 == alts.len();
-            let fall = if is_last { outer } else { self.fresh_join() };
+            let fall = if is_last { outer } else { self.fresh_join()? };
             let alt_leaf = match commit {
                 Some(cj) => ArmLeaf::OrCommit(cj),
                 None => ArmLeaf::OrBody {
@@ -1136,7 +1145,7 @@ impl Lower {
                         let ej = self.let_(
                             elem.ty(),
                             Atom::prim(PrimOp::TupleField(idx16(j)?), vec![v]),
-                        );
+                        )?;
                         tmp.push((ej, elem));
                     }
                     for r in tmp.into_iter().rev() {
@@ -1171,23 +1180,25 @@ impl Lower {
                     let vty = self.bind_ty(v)?;
                     let int_t = self.temps.int;
                     let bool_t = self.temps.bool;
-                    let len = self.let_(int_t, Atom::prim(PrimOp::ArrayLen, vec![v]));
-                    let n = self.int_const(*len_c);
+                    let len = self.let_(int_t, Atom::prim(PrimOp::ArrayLen, vec![v]))?;
+                    let n = self.int_const(*len_c)?;
                     let cmp = match rest {
                         PatRest::None => PrimOp::IntEq,
                         PatRest::Discard | PatRest::Bind(_) => PrimOp::IntGe,
                     };
-                    let ok = self.let_(bool_t, Atom::prim(cmp, vec![len, n]));
+                    let ok = self.let_(bool_t, Atom::prim(cmp, vec![len, n]))?;
                     let then = self.sealed_tree(|lo| {
                         let mut tmp = Vec::with_capacity(prefix.len());
                         for (j, ep) in prefix.iter().enumerate() {
-                            let ej = lo
-                                .let_(*elem_ty, Atom::prim(PrimOp::ArrayElem(idx16(j)?), vec![v]));
+                            let ej = lo.let_(
+                                *elem_ty,
+                                Atom::prim(PrimOp::ArrayElem(idx16(j)?), vec![v]),
+                            )?;
                             tmp.push((ej, ep));
                         }
                         if let PatRest::Bind(b) = rest {
-                            let n2 = lo.int_const(*len_c);
-                            let tail = lo.let_(vty, Atom::prim(PrimOp::ArrayDrop, vec![v, n2]));
+                            let n2 = lo.int_const(*len_c)?;
+                            let tail = lo.let_(vty, Atom::prim(PrimOp::ArrayDrop, vec![v, n2]))?;
                             lo.bind(b.id, tail)?;
                         }
                         for r in tmp.into_iter().rev() {
@@ -1200,11 +1211,11 @@ impl Lower {
                 TypedPat::Range { lo, hi, .. } => {
                     let int_t = self.temps.int;
                     let bool_t = self.temps.bool;
-                    let lo_c = self.let_(int_t, Atom::Const(*lo));
-                    let ge = self.let_(bool_t, Atom::prim(PrimOp::IntGe, vec![v, lo_c]));
+                    let lo_c = self.let_(int_t, Atom::Const(*lo))?;
+                    let ge = self.let_(bool_t, Atom::prim(PrimOp::IntGe, vec![v, lo_c]))?;
                     let then = self.sealed_tree(|lo| {
-                        let hi = lo.let_(int_t, Atom::Const(*hi));
-                        let lt = lo.let_(bool_t, Atom::prim(PrimOp::IntLt, vec![v, hi]));
+                        let hi = lo.let_(int_t, Atom::Const(*hi))?;
+                        let lt = lo.let_(bool_t, Atom::prim(PrimOp::IntLt, vec![v, hi]))?;
                         let inner = lo.nested_arm_body(nested, leaf, fall, result_ty)?;
                         Ok(lo.guard_if(lt, inner, fall, result_ty))
                     })?;
@@ -1218,8 +1229,8 @@ impl Lower {
                     zero, segs, rest, ..
                 } => {
                     let int_t = self.temps.int;
-                    let total = self.let_(int_t, Atom::prim(PrimOp::BinaryBitSize, vec![v]));
-                    let cursor = self.int_const(*zero);
+                    let total = self.let_(int_t, Atom::prim(PrimOp::BinaryBitSize, vec![v]))?;
+                    let cursor = self.int_const(*zero)?;
                     let after: Vec<_> = nested.into_iter().collect();
                     return self.bin_segments(
                         BinCont {
@@ -1267,17 +1278,17 @@ impl Lower {
         let Some((seg, tail_segs)) = segs.split_first() else {
             return Ok(match rest {
                 PatRest::Bind(b) => {
-                    let rem = self.let_(int_t, Atom::prim(PrimOp::IntSub, vec![total, cursor]));
+                    let rem = self.let_(int_t, Atom::prim(PrimOp::IntSub, vec![total, cursor]))?;
                     let rv = self.let_(
                         bin_ty,
                         Atom::prim(PrimOp::BinaryView, vec![bin, cursor, rem]),
-                    );
+                    )?;
                     self.bind(b.id, rv)?;
                     self.nested_arm_body(after.into(), then, fall, result_ty)?
                 }
                 PatRest::Discard => self.nested_arm_body(after.into(), then, fall, result_ty)?,
                 PatRest::None => {
-                    let ok = self.let_(bool_t, Atom::prim(PrimOp::IntEq, vec![cursor, total]));
+                    let ok = self.let_(bool_t, Atom::prim(PrimOp::IntEq, vec![cursor, total]))?;
                     let body = self.nested_arm_body(after.into(), then, fall, result_ty)?;
                     self.guard_if(ok, body, fall, result_ty)
                 }
@@ -1298,14 +1309,14 @@ impl Lower {
         Ok(match seg {
             // A `<<'literal'>>` segment matches its UTF-8 bytes as a prefix.
             TypedBinPatSeg::Utf8Literal { bytes, bits } => {
-                let pfx = self.let_(bin_ty, Atom::Const(*bytes));
+                let pfx = self.let_(bin_ty, Atom::Const(*bytes))?;
                 let ok = self.let_(
                     bool_t,
                     Atom::prim(PrimOp::BinaryMatchPrefix, vec![bin, cursor, pfx]),
-                );
+                )?;
                 let then_e = self.sealed_tree(|lo| {
-                    let w = lo.int_const(*bits);
-                    let cur2 = lo.let_(int_t, Atom::prim(PrimOp::IntAdd, vec![cursor, w]));
+                    let w = lo.int_const(*bits)?;
+                    let cur2 = lo.let_(int_t, Atom::prim(PrimOp::IntAdd, vec![cursor, w]))?;
                     lo.bin_segments(cont(cur2), fall, result_ty)
                 })?;
                 self.guard_if(ok, then_e, fall, result_ty)
@@ -1317,13 +1328,13 @@ impl Lower {
                 let pair = self.let_(
                     pair_ty,
                     Atom::prim(PrimOp::BinaryReadUtf8, vec![bin, cursor]),
-                );
-                let cp = self.let_(int_t, Atom::prim(PrimOp::TupleField(0), vec![pair]));
-                let nbits = self.let_(int_t, Atom::prim(PrimOp::TupleField(1), vec![pair]));
-                let z = self.int_const(zero);
-                let ok = self.let_(bool_t, Atom::prim(PrimOp::IntGt, vec![nbits, z]));
+                )?;
+                let cp = self.let_(int_t, Atom::prim(PrimOp::TupleField(0), vec![pair]))?;
+                let nbits = self.let_(int_t, Atom::prim(PrimOp::TupleField(1), vec![pair]))?;
+                let z = self.int_const(zero)?;
+                let ok = self.let_(bool_t, Atom::prim(PrimOp::IntGt, vec![nbits, z]))?;
                 let then_e = self.sealed_tree(|lo| {
-                    let cur2 = lo.let_(int_t, Atom::prim(PrimOp::IntAdd, vec![cursor, nbits]));
+                    let cur2 = lo.let_(int_t, Atom::prim(PrimOp::IntAdd, vec![cursor, nbits]))?;
                     let leaf2 = ArmLeaf::BinCont(Box::new(cont(cur2)));
                     lo.nested_arm_body(VecDeque::from([(cp, value)]), leaf2, fall, result_ty)
                 })?;
@@ -1380,7 +1391,7 @@ impl Lower {
         let BinWalk { bin, total, cursor } = walk;
         let read = |lo: &mut Self, width: LocalId, end: LocalId| -> R<Tree> {
             lo.sealed_tree(|lo| {
-                let sv = lo.let_(val_ty, Atom::prim(read_op, vec![bin, cursor, width]));
+                let sv = lo.let_(val_ty, Atom::prim(read_op, vec![bin, cursor, width]))?;
                 let leaf2 = ArmLeaf::BinCont(Box::new(cont(end)));
                 lo.nested_arm_body(VecDeque::from([(sv, value)]), leaf2, fall, result_ty)
             })
@@ -1388,14 +1399,14 @@ impl Lower {
         match width {
             SegWidth::Sized(bits) => {
                 let width = self.operand(bits)?;
-                let end = self.let_(int_t, Atom::prim(PrimOp::IntAdd, vec![cursor, width]));
-                let ok = self.let_(bool_t, Atom::prim(PrimOp::IntLe, vec![end, total]));
+                let end = self.let_(int_t, Atom::prim(PrimOp::IntAdd, vec![cursor, width]))?;
+                let ok = self.let_(bool_t, Atom::prim(PrimOp::IntLe, vec![end, total]))?;
                 let then_e = read(self, width, end)?;
                 Ok(self.guard_if(ok, then_e, fall, result_ty))
             }
             SegWidth::Remainder => {
-                let width = self.let_(int_t, Atom::prim(PrimOp::IntSub, vec![total, cursor]));
-                let end = self.let_(int_t, Atom::prim(PrimOp::IntAdd, vec![cursor, width]));
+                let width = self.let_(int_t, Atom::prim(PrimOp::IntSub, vec![total, cursor]))?;
+                let end = self.let_(int_t, Atom::prim(PrimOp::IntAdd, vec![cursor, width]))?;
                 read(self, width, end)
             }
         }

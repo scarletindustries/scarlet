@@ -35,8 +35,14 @@ struct InterpFrame {
     start_column: i32,
 }
 
+/// The largest input the scanner reads. Positions are `i32`, and the scanner
+/// looks a few bytes past `pos`, so the input stays far below `i32::MAX`.
+const MAX_INPUT: i32 = 1 << 30;
+
 pub struct Scanner {
     input: Vec<u8>,
+    /// `input.len()`, which `new_scanner` checked is at most [`MAX_INPUT`].
+    len: i32,
     pos: i32,
     column: i32,
     line: i32,
@@ -49,12 +55,26 @@ pub struct Scanner {
 
 #[inline]
 pub fn new_scanner(input: impl Into<String>) -> Scanner {
+    let input = input.into().into_bytes();
+    let (input, len, diagnostics) = match i32::try_from(input.len()) {
+        Ok(len) if len <= MAX_INPUT => (input, len, Vec::new()),
+        // Too long to scan, so the scanner sees an empty input and says why.
+        Ok(_) | Err(_) => (
+            Vec::new(),
+            0,
+            vec![Diagnostic::new(
+                Span::point(0, 0),
+                ScanError::TooLarge { bytes: input.len() },
+            )],
+        ),
+    };
     Scanner {
-        input: input.into().into_bytes(),
+        input,
+        len,
         pos: 0,
         column: 0,
         line: 0,
-        diagnostics: Vec::new(),
+        diagnostics,
         pending_trivia: Vec::new(),
         token_start_column: 0,
         token_start_line: 0,
@@ -89,22 +109,27 @@ impl Scanner {
     }
 
     fn input_len(&self) -> i32 {
-        self.input.len() as i32
+        self.len
     }
 
-    // The only way to read a byte, and it never fails. A negative `pos` wraps
-    // to a huge usize, so a cursor past EOF or below zero reads as `0`, which
-    // every caller already treats as the end of input.
+    // The only way to read a byte, and it never fails. A cursor past EOF or
+    // below zero reads as `0`, which every caller already treats as the end
+    // of input.
     fn byte_at(&self, pos: i32) -> u8 {
-        self.input.get(pos as usize).copied().unwrap_or(0)
+        usize::try_from(pos)
+            .ok()
+            .and_then(|p| self.input.get(p))
+            .copied()
+            .unwrap_or(0)
     }
 
     // The input from `start` to `end`, clamped to the input the way
     // `byte_at` is, so the part of the range outside it reads as nothing.
     fn bytes(&self, start: i32, end: i32) -> &[u8] {
         let len = self.input.len();
-        let s = (start.max(0) as usize).min(len);
-        let e = (end.max(0) as usize).min(len).max(s);
+        let clamp = |i: i32| usize::try_from(i).map_or(0, |i| i.min(len));
+        let s = clamp(start);
+        let e = clamp(end).max(s);
         self.input.get(s..e).unwrap_or_default()
     }
 
