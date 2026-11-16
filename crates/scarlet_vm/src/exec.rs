@@ -603,21 +603,37 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     };
                     self.set(base, *dst, Value::cell(cell.map_err(full)?));
                 }
-                Instr::ArrayPrepend { dst, front, rest } => {
+                Instr::ArrayPrepend {
+                    dst,
+                    front,
+                    rest,
+                    moved,
+                } => {
                     let s = self.seq(self.get(base, *rest))?;
                     let a = self.tree(s)?;
                     let items = self.args(base, front);
-                    let cell = self.push_all(a, items.into_iter().rev(), End::Front);
-                    self.heap.release(a);
-                    self.set(base, *dst, Value::cell(cell?));
+                    if *moved {
+                        let held = self.take(base, *rest);
+                        self.release(held);
+                    }
+                    let cell = self.push_all(a, items.into_iter().rev(), End::Front)?;
+                    self.set(base, *dst, Value::cell(cell));
                 }
-                Instr::ArrayAppend { dst, rest, back } => {
+                Instr::ArrayAppend {
+                    dst,
+                    rest,
+                    back,
+                    moved,
+                } => {
                     let s = self.seq(self.get(base, *rest))?;
                     let a = self.tree(s)?;
                     let items = self.args(base, back);
-                    let cell = self.push_all(a, items.into_iter(), End::Back);
-                    self.heap.release(a);
-                    self.set(base, *dst, Value::cell(cell?));
+                    if *moved {
+                        let held = self.take(base, *rest);
+                        self.release(held);
+                    }
+                    let cell = self.push_all(a, items.into_iter(), End::Back)?;
+                    self.set(base, *dst, Value::cell(cell));
                 }
                 Instr::ArrayConcat { dst, a, b } => {
                     let (a, b) = (self.seq(self.get(base, *a))?, self.seq(self.get(base, *b))?);
@@ -2181,8 +2197,9 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
         }
     }
 
-    /// `a` with each of `items` pushed at `end`, in turn. Each item's
-    /// reference passes to the result, and `a` is borrowed.
+    /// `a` with each of `items` pushed at `end`, in turn. The references of
+    /// `a` and of each item pass to the result, so a push can change an
+    /// array nothing else holds in place.
     fn push_all(
         &mut self,
         a: crate::heap::Cell,
@@ -2190,11 +2207,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
         end: End,
     ) -> Result<crate::heap::Cell, Stop> {
         let mut cur = a;
-        self.heap.share(cur);
         for x in items {
-            let next = array::push(&mut self.heap, cur, x, end).map_err(full)?;
-            self.heap.release(cur);
-            cur = next;
+            cur = array::push_owned(&mut self.heap, cur, x, end).map_err(full)?;
         }
         Ok(cur)
     }

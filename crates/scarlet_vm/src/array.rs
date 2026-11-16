@@ -193,6 +193,12 @@ fn root(heap: &Heap, cell: Cell) -> Root {
     }
 }
 
+/// How many live items the head has, which is what `offset` leaves of its
+/// leaf.
+fn head_len(heap: &Heap, r: &Root) -> usize {
+    slot_count(heap, r.head).saturating_sub(r.offset)
+}
+
 /// The head's live items, which are what `offset` leaves of its leaf.
 fn head_items(heap: &Heap, r: &Root) -> Vec<Value> {
     let items = slots(heap, r.head);
@@ -356,6 +362,15 @@ fn node_len(heap: &Heap, v: Value) -> usize {
     view(heap, v).map_or(0, |n| n.len())
 }
 
+/// How many items a leaf holds, or children a branch does, read in place.
+fn slot_count(heap: &Heap, v: Value) -> usize {
+    match view(heap, v) {
+        None => 0,
+        Some(View::Leaf(items)) => items.len(),
+        Some(View::Branch { children, .. }) => children.len(),
+    }
+}
+
 /// A node's own slots, which are a leaf's elements or a branch's children.
 fn slots(heap: &Heap, v: Value) -> Vec<Value> {
     match node(heap, v) {
@@ -487,7 +502,7 @@ pub(crate) fn elements(heap: &Heap, array: Cell) -> Vec<Value> {
 /// `array` with `x` added at `end`. `x`'s reference passes to the result.
 /// The buffer at that end takes it, and a full buffer first goes into the
 /// tree as a finished leaf.
-pub(crate) fn push(heap: &mut Heap, array: Cell, x: Value, end: End) -> Result<Cell, Full> {
+fn push(heap: &mut Heap, array: Cell, x: Value, end: End) -> Result<Cell, Full> {
     let r = root(heap, array);
     let len = r.len.checked_add(1).ok_or(Full)?;
     // Settle a head with items left behind first. The leaf that goes into the
@@ -519,6 +534,58 @@ pub(crate) fn push(heap: &mut Heap, array: Cell, x: Value, end: End) -> Result<C
         End::Back => (other, new),
     };
     new_root(heap, len, shift, head, tree, tail)
+}
+
+/// [`push`] for a caller that gives up its reference to `array`. When
+/// nothing else holds the array or the leaf at `end`, and that leaf has room,
+/// the leaf's items move to a leaf one longer and the root changes in place,
+/// so nothing is shared or released. `x`'s reference passes in, as for
+/// [`push`].
+pub(crate) fn push_owned(heap: &mut Heap, array: Cell, x: Value, end: End) -> Result<Cell, Full> {
+    let r = root(heap, array);
+    let (edge, slot) = match end {
+        End::Front => (r.head, 3),
+        End::Back => (r.tail, 5),
+    };
+    let fits = heap.unique(array)
+        && (end == End::Back || r.offset == 0)
+        && edge
+            .as_cell()
+            .is_some_and(|leaf| heap.unique(leaf) && heap.kind(leaf) == Some(Kind::ArrayLeaf))
+        && (1..B).contains(&slot_count(heap, edge));
+    let (Some(leaf), true) = (edge.as_cell(), fits) else {
+        let made = push(heap, array, x, end);
+        heap.release(array);
+        return made;
+    };
+    let len = r.len.checked_add(1).ok_or(Full)?;
+    let old = heap.data(leaf);
+    let mut words = [0u64; B];
+    let n = old.len();
+    let (at, rest) = match end {
+        End::Front => (0, 1..n.saturating_add(1)),
+        End::Back => (n, 0..n),
+    };
+    if let Some(dst) = words.get_mut(rest) {
+        dst.copy_from_slice(old);
+    }
+    if let Some(w) = words.get_mut(at) {
+        *w = x.bits();
+    }
+    let made = heap.make(
+        Kind::ArrayLeaf,
+        words.get(..n.saturating_add(1)).unwrap_or(&[]),
+    )?;
+    heap.discard(leaf);
+    if let Some(d) = heap.data_mut(array).get_mut(..6) {
+        if let Some(w) = d.get_mut(0) {
+            *w = len as u64;
+        }
+        if let Some(w) = d.get_mut(slot) {
+            *w = Value::cell(made).bits();
+        }
+    }
+    Ok(array)
 }
 
 /// `tree` with the full leaf `leaf` hung under its edge at `end`, growing a
@@ -670,8 +737,7 @@ pub(crate) fn skip(heap: &mut Heap, array: Cell, n: usize) -> Result<Cell, Full>
     let Some(left) = r.len.checked_sub(n).filter(|left| *left > 0) else {
         return empty(heap);
     };
-    let front = head_items(heap, &r);
-    let Some(m) = n.checked_sub(front.len()) else {
+    let Some(m) = n.checked_sub(head_len(heap, &r)) else {
         // This is the cheap `[h, ..t]`. It keeps the same head leaf, tree and
         // tail, with `n` more items left behind, so nothing is copied. The
         // head is one leaf, so the offset stays below `B`.
@@ -687,9 +753,9 @@ pub(crate) fn skip(heap: &mut Heap, array: Cell, n: usize) -> Result<Cell, Full>
     // so walking an array cuts it every `B` steps, and the offset above
     // covers the steps between.
     if let Some(first) = first_leaf(heap, r.tree)
-        && m < slots(heap, first).len()
+        && m < slot_count(heap, first)
     {
-        let taken = slots(heap, first).len();
+        let taken = slot_count(heap, first);
         // `tree_drop` of a whole leaf that is the whole tree would leave an
         // empty leaf behind, so a tree of one leaf becomes no tree at all.
         let (tree, shift) = if taken == node_len(heap, r.tree) {
@@ -722,9 +788,9 @@ pub(crate) fn skip(heap: &mut Heap, array: Cell, n: usize) -> Result<Cell, Full>
 fn first_leaf(heap: &Heap, n: Value) -> Option<Value> {
     let mut n = n;
     loop {
-        match node(heap, n)? {
-            Node::Leaf(_) => return Some(n),
-            Node::Branch { children, .. } => n = *children.first()?,
+        match view(heap, n)? {
+            View::Leaf(_) => return Some(n),
+            View::Branch { children, .. } => n = Value::from_bits(*children.first()?),
         }
     }
 }
@@ -897,7 +963,7 @@ fn rebalance(
     let mut all = own_all(heap, left);
     all.extend(mid);
     all.extend(own_all(heap, right));
-    let counts: Vec<usize> = all.iter().map(|n| slots(heap, *n).len()).collect();
+    let counts: Vec<usize> = all.iter().map(|n| slot_count(heap, *n)).collect();
     let total: usize = counts.iter().sum();
     let optimal = total.div_ceil(B);
     if all.len().saturating_sub(optimal) > E_MAX {
@@ -959,7 +1025,7 @@ fn repack(
     for &want in plan {
         if off == 0
             && let Some(Some(n)) = old.get(src)
-            && slots(heap, *n).len() == want
+            && slot_count(heap, *n) == want
         {
             out.extend(old.get_mut(src).and_then(Option::take));
             src = src.saturating_add(1);
@@ -1128,6 +1194,63 @@ mod tests {
         heap.release(a);
         heap.release(first);
         assert_eq!(heap.live(), 0);
+    }
+
+    /// Pushes that give their array up change it in place when nothing else
+    /// holds it, so they must leave alone every version something else does
+    /// hold, and keep every reference counted. The items are strings, which
+    /// are cells, so a lost or extra reference shows in the live count.
+    #[test]
+    fn an_owned_push_leaves_every_kept_version_alone() {
+        let mut heap = Heap::default();
+        let text = |heap: &Heap, v: Value| {
+            let mut out = Vec::new();
+            if let Some(c) = v.as_cell() {
+                heap.read_string(c, &mut out);
+            }
+            String::from_utf8(out).expect("UTF-8")
+        };
+        let texts = |heap: &Heap, a: Cell| -> Vec<String> {
+            elements(heap, a)
+                .into_iter()
+                .map(|v| text(heap, v))
+                .collect()
+        };
+        let mut a = from_values(&mut heap, &[]).expect("room");
+        let mut want: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+        let mut kept: Vec<(Cell, Vec<String>)> = Vec::new();
+        for i in 0..2500 {
+            if i % 41 == 0 {
+                heap.share(a);
+                kept.push((a, want.iter().cloned().collect()));
+            }
+            if i % 17 == 0 && !want.is_empty() {
+                let next = skip(&mut heap, a, 1).expect("room");
+                heap.release(a);
+                a = next;
+                want.pop_front();
+                continue;
+            }
+            let end = if i % 3 == 0 { End::Front } else { End::Back };
+            let name = format!("s{i}");
+            let x = Value::cell(heap.string(name.as_bytes()).expect("room"));
+            a = push_owned(&mut heap, a, x, end).expect("room");
+            match end {
+                End::Front => want.push_front(name),
+                End::Back => want.push_back(name),
+            }
+        }
+        check(&heap, a);
+        assert_eq!(texts(&heap, a), want.iter().cloned().collect::<Vec<_>>());
+        for (k, items) in &kept {
+            check(&heap, *k);
+            assert_eq!(&texts(&heap, *k), items);
+        }
+        heap.release(a);
+        for (k, _) in kept {
+            heap.release(k);
+        }
+        assert_eq!(heap.live(), 0, "an owned push lost track of a reference");
     }
 
     #[test]

@@ -365,16 +365,20 @@ pub(crate) enum Instr {
         n: Reg,
     },
     /// `[x, y, ..xs]`, which is the array in `rest` with `front` before it.
+    /// `moved` says nothing reads `rest` after this, so the push takes its
+    /// reference and may change the array in place.
     ArrayPrepend {
         dst: Reg,
         front: Box<[Reg]>,
         rest: Reg,
+        moved: bool,
     },
     /// `[..xs, x, y]`, which is the array in `rest` with `back` after it.
     ArrayAppend {
         dst: Reg,
         rest: Reg,
         back: Box<[Reg]>,
+        moved: bool,
     },
     /// `[..a, ..b]`.
     ArrayConcat {
@@ -420,6 +424,252 @@ pub(crate) enum Instr {
 }
 
 impl Instr {
+    /// Each register this instruction reads, for liveness. A plain `Drop`
+    /// reads nothing, because dropping an emptied register does nothing.
+    fn reads(&self, mut f: impl FnMut(Reg)) {
+        let args = |args: &[Arg], f: &mut dyn FnMut(Reg)| args.iter().for_each(|a| f(a.reg));
+        match self {
+            Instr::Const { .. }
+            | Instr::Str { .. }
+            | Instr::BinaryConst { .. }
+            | Instr::BigInt { .. }
+            | Instr::GetGlobal { .. }
+            | Instr::GetCapture { .. }
+            | Instr::GetSelf { .. }
+            | Instr::Drop { .. }
+            | Instr::Jump { .. }
+            | Instr::Bad { .. } => {}
+            Instr::Bits { args, .. }
+            | Instr::Concat { parts: args, .. }
+            | Instr::Closure { captures: args, .. }
+            | Instr::Tuple { elements: args, .. }
+            | Instr::Builtin { args, .. }
+            | Instr::Array { elements: args, .. } => args.iter().copied().for_each(f),
+            Instr::Move { src: a, .. }
+            | Instr::SetGlobal { src: a, .. }
+            | Instr::IntImm { a, .. }
+            | Instr::IntNeg { a, .. }
+            | Instr::FloatNeg { a, .. }
+            | Instr::Neg { a, .. }
+            | Instr::Print { arg: a, .. }
+            | Instr::ToString { a, .. }
+            | Instr::DropReuse { reg: a }
+            | Instr::Ret { src: a }
+            | Instr::JumpIfFalse { cond: a, .. }
+            | Instr::JumpUnlessCmpImm { a, .. }
+            | Instr::JumpUnlessVariant { src: a, .. }
+            | Instr::JumpUnlessInt { src: a, .. }
+            | Instr::JumpUnlessFloat { src: a, .. }
+            | Instr::JumpUnlessStr { src: a, .. }
+            | Instr::JumpUnlessBinary { src: a, .. }
+            | Instr::Element { src: a, .. }
+            | Instr::Not { a, .. }
+            | Instr::ArrayLen { src: a, .. }
+            | Instr::ArrayElem { src: a, .. }
+            | Instr::Field { src: a, .. } => f(*a),
+            Instr::Int { a, b, .. }
+            | Instr::Float { a, b, .. }
+            | Instr::Num { a, b, .. }
+            | Instr::JumpUnlessCmp { a, b, .. }
+            | Instr::Equal { a, b, .. }
+            | Instr::NotEqual { a, b, .. }
+            | Instr::Range {
+                start: a, end: b, ..
+            }
+            | Instr::ArrayDrop { src: a, n: b, .. }
+            | Instr::ArrayConcat { a, b, .. }
+            | Instr::ArrayIndex {
+                src: a, index: b, ..
+            } => {
+                f(*a);
+                f(*b);
+            }
+            Instr::ArraySlice {
+                src, start, end, ..
+            } => {
+                f(*src);
+                f(*start);
+                f(*end);
+            }
+            Instr::ArrayIndexOr {
+                src,
+                index,
+                default,
+                ..
+            } => {
+                f(*src);
+                f(*index);
+                f(*default);
+            }
+            Instr::MapSetOwned {
+                map, key, value, ..
+            } => {
+                f(*map);
+                f(*key);
+                f(*value);
+            }
+            Instr::Ctor { fields, reuse, .. } => {
+                fields.iter().copied().for_each(&mut f);
+                reuse.iter().copied().for_each(f);
+            }
+            Instr::ArrayPrepend {
+                front: more, rest, ..
+            }
+            | Instr::ArrayAppend {
+                back: more, rest, ..
+            } => {
+                more.iter().copied().for_each(&mut f);
+                f(*rest);
+            }
+            Instr::Call { args: a, .. }
+            | Instr::CallSelf { args: a, .. }
+            | Instr::TailCall { args: a, .. }
+            | Instr::TailCallSelf { args: a } => args(a, &mut f),
+            Instr::CallValue {
+                callee, args: a, ..
+            }
+            | Instr::TailCallValue { callee, args: a } => {
+                f(*callee);
+                args(a, &mut f);
+            }
+        }
+    }
+
+    /// The register this instruction writes, if any. A `Drop` empties its
+    /// register, which ends what it held as surely as a write.
+    fn writes(&self) -> Option<Reg> {
+        match self {
+            Instr::Const { dst, .. }
+            | Instr::Str { dst, .. }
+            | Instr::BinaryConst { dst, .. }
+            | Instr::Bits { dst, .. }
+            | Instr::BigInt { dst, .. }
+            | Instr::Move { dst, .. }
+            | Instr::GetGlobal { dst, .. }
+            | Instr::Int { dst, .. }
+            | Instr::IntImm { dst, .. }
+            | Instr::IntNeg { dst, .. }
+            | Instr::Float { dst, .. }
+            | Instr::FloatNeg { dst, .. }
+            | Instr::Num { dst, .. }
+            | Instr::Neg { dst, .. }
+            | Instr::Print { dst, .. }
+            | Instr::ToString { dst, .. }
+            | Instr::Concat { dst, .. }
+            | Instr::Ctor { dst, .. }
+            | Instr::Call { dst, .. }
+            | Instr::CallSelf { dst, .. }
+            | Instr::CallValue { dst, .. }
+            | Instr::Closure { dst, .. }
+            | Instr::GetCapture { dst, .. }
+            | Instr::GetSelf { dst, .. }
+            | Instr::MapSetOwned { dst, .. }
+            | Instr::Tuple { dst, .. }
+            | Instr::Element { dst, .. }
+            | Instr::Builtin { dst, .. }
+            | Instr::Equal { dst, .. }
+            | Instr::NotEqual { dst, .. }
+            | Instr::Not { dst, .. }
+            | Instr::Range { dst, .. }
+            | Instr::Array { dst, .. }
+            | Instr::ArrayLen { dst, .. }
+            | Instr::ArrayElem { dst, .. }
+            | Instr::ArrayDrop { dst, .. }
+            | Instr::ArrayPrepend { dst, .. }
+            | Instr::ArrayAppend { dst, .. }
+            | Instr::ArrayConcat { dst, .. }
+            | Instr::ArraySlice { dst, .. }
+            | Instr::ArrayIndex { dst, .. }
+            | Instr::ArrayIndexOr { dst, .. }
+            | Instr::Field { dst, .. }
+            | Instr::Drop { reg: dst } => Some(*dst),
+            Instr::SetGlobal { .. }
+            | Instr::DropReuse { .. }
+            | Instr::TailCall { .. }
+            | Instr::TailCallSelf { .. }
+            | Instr::TailCallValue { .. }
+            | Instr::Ret { .. }
+            | Instr::Jump { .. }
+            | Instr::JumpIfFalse { .. }
+            | Instr::JumpUnlessCmp { .. }
+            | Instr::JumpUnlessCmpImm { .. }
+            | Instr::JumpUnlessVariant { .. }
+            | Instr::JumpUnlessInt { .. }
+            | Instr::JumpUnlessFloat { .. }
+            | Instr::JumpUnlessStr { .. }
+            | Instr::JumpUnlessBinary { .. }
+            | Instr::Bad { .. } => None,
+        }
+    }
+
+    /// The instructions that may run after this one, which is at `i`.
+    fn successors(&self, i: usize) -> impl Iterator<Item = usize> {
+        let next = i.checked_add(1);
+        let (fall, jump) = match self {
+            Instr::Jump { to } => (None, Some(*to)),
+            Instr::JumpIfFalse { to, .. }
+            | Instr::JumpUnlessCmp { to, .. }
+            | Instr::JumpUnlessCmpImm { to, .. }
+            | Instr::JumpUnlessVariant { to, .. }
+            | Instr::JumpUnlessInt { to, .. }
+            | Instr::JumpUnlessFloat { to, .. }
+            | Instr::JumpUnlessStr { to, .. }
+            | Instr::JumpUnlessBinary { to, .. } => (next, Some(*to)),
+            Instr::TailCall { .. }
+            | Instr::TailCallSelf { .. }
+            | Instr::TailCallValue { .. }
+            | Instr::Ret { .. }
+            | Instr::Bad { .. } => (None, None),
+            Instr::Const { .. }
+            | Instr::Str { .. }
+            | Instr::BinaryConst { .. }
+            | Instr::Bits { .. }
+            | Instr::BigInt { .. }
+            | Instr::Move { .. }
+            | Instr::GetGlobal { .. }
+            | Instr::SetGlobal { .. }
+            | Instr::Int { .. }
+            | Instr::IntImm { .. }
+            | Instr::IntNeg { .. }
+            | Instr::Float { .. }
+            | Instr::FloatNeg { .. }
+            | Instr::Num { .. }
+            | Instr::Neg { .. }
+            | Instr::Print { .. }
+            | Instr::ToString { .. }
+            | Instr::Concat { .. }
+            | Instr::Ctor { .. }
+            | Instr::Drop { .. }
+            | Instr::DropReuse { .. }
+            | Instr::Call { .. }
+            | Instr::CallSelf { .. }
+            | Instr::CallValue { .. }
+            | Instr::Closure { .. }
+            | Instr::GetCapture { .. }
+            | Instr::GetSelf { .. }
+            | Instr::MapSetOwned { .. }
+            | Instr::Tuple { .. }
+            | Instr::Element { .. }
+            | Instr::Builtin { .. }
+            | Instr::Equal { .. }
+            | Instr::NotEqual { .. }
+            | Instr::Not { .. }
+            | Instr::Range { .. }
+            | Instr::Array { .. }
+            | Instr::ArrayLen { .. }
+            | Instr::ArrayElem { .. }
+            | Instr::ArrayDrop { .. }
+            | Instr::ArrayPrepend { .. }
+            | Instr::ArrayAppend { .. }
+            | Instr::ArrayConcat { .. }
+            | Instr::ArraySlice { .. }
+            | Instr::ArrayIndex { .. }
+            | Instr::ArrayIndexOr { .. }
+            | Instr::Field { .. } => (next, None),
+        };
+        fall.into_iter().chain(jump.map(|to| to as usize))
+    }
+
     /// Where this instruction may jump, for a jump still waiting on its label.
     fn target(&mut self) -> Option<&mut u32> {
         match self {
@@ -718,7 +968,7 @@ impl<'c> Loader<'c> {
 
     fn body(mut self, f: &CoreFn) -> Result<(u32, Vec<Instr>), Unloadable> {
         self.expr(&f.body, Dest::Return)?;
-        moves_on_last_use(&mut self.instrs);
+        moves_on_last_use(&mut self.instrs, self.next);
         Ok((self.next, self.instrs))
     }
 
@@ -1331,6 +1581,7 @@ impl<'c> Loader<'c> {
                     dst,
                     front: front.iter().copied().map(Reg::of).collect(),
                     rest: Reg::of(*rest),
+                    moved: false,
                 }),
                 None => Err(arity(Arity::AtLeastOne)),
             },
@@ -1339,6 +1590,7 @@ impl<'c> Loader<'c> {
                     dst,
                     rest: Reg::of(*rest),
                     back: back.iter().copied().map(Reg::of).collect(),
+                    moved: false,
                 }),
                 None => Err(arity(Arity::AtLeastOne)),
             },
@@ -1490,57 +1742,134 @@ fn built(i: Intrinsic, argc: usize) -> bool {
     argc == arity
 }
 
-/// A call followed by the `Drop` of one of its own arguments hands the callee
-/// the reference the register holds, instead of adding one and giving it up
-/// after the call returns. The callee then sees a value nothing else holds,
-/// which is what lets it overwrite the cell instead of allocating.
+/// A call hands the callee the reference an argument's register holds,
+/// instead of adding one, when nothing the frame runs later reads that
+/// register. The callee then sees a value nothing else holds, which is what
+/// lets it change the value in place or overwrite its cell.
 ///
-/// The `Drop` stays where it is. The register it names is empty by the time
-/// it runs, so it does nothing, and a jump that lands on it without the call
-/// having run still finds the value and releases it. A `DropReuse` is left
-/// alone, so a cell this frame has already paired with a constructor of its
-/// own stays here.
-fn moves_on_last_use(instrs: &mut [Instr]) {
-    for i in 0..instrs.len() {
-        let (dst, argc) = match instrs.get(i) {
-            Some(
-                Instr::Call { dst, args, .. }
-                | Instr::CallSelf { dst, args }
-                | Instr::CallValue { dst, args, .. },
-            ) => (*dst, args.len()),
+/// Which registers are read later comes from liveness over the function's
+/// instructions, jumps and all. A plain `Drop` does not count as a read: by
+/// the time it runs on a register a call emptied, it does nothing, and on a
+/// path where the call never ran it still finds the value and releases it.
+/// A `DropReuse` does count, so a cell this frame has already paired with a
+/// constructor of its own stays here.
+fn moves_on_last_use(instrs: &mut [Instr], regs: u32) {
+    let live = live_after(instrs, regs);
+    for (instr, after) in instrs.iter_mut().zip(&live) {
+        // A push whose array is read by nothing later takes it over. Its own
+        // items are read before the array is, so they may name it too.
+        if let Instr::ArrayPrepend {
+            front: items,
+            rest,
+            moved,
+            ..
+        }
+        | Instr::ArrayAppend {
+            back: items,
+            rest,
+            moved,
+            ..
+        } = instr
+        {
+            *moved = !after.has(*rest) && !items.contains(rest);
+            continue;
+        }
+        let args = match instr {
+            Instr::Call { args, .. }
+            | Instr::CallSelf { args, .. }
+            | Instr::CallValue { args, .. }
+            | Instr::TailCall { args, .. }
+            | Instr::TailCallSelf { args }
+            | Instr::TailCallValue { args, .. } => args,
             _ => continue,
         };
-        // The run of drops that follows, which is where this call's own
-        // arguments die.
-        let mut dying: Vec<Reg> = Vec::new();
-        for next in instrs.get(i..).into_iter().flatten().skip(1) {
-            match next {
-                Instr::Drop { reg } => dying.push(*reg),
-                _ => break,
-            }
-        }
-        if dying.is_empty() {
-            continue;
-        }
-        let Some(
-            Instr::Call { args, .. } | Instr::CallSelf { args, .. } | Instr::CallValue { args, .. },
-        ) = instrs.get_mut(i)
-        else {
-            continue;
-        };
-        for reg in dying {
-            if dst == reg {
+        // Only the last position holding a register may take what it holds,
+        // because an earlier one still reads it.
+        for k in (0..args.len()).rev() {
+            let Some(reg) = args.get(k).map(|a| a.reg) else {
+                continue;
+            };
+            let later = args.get(k.saturating_add(1)..).unwrap_or_default();
+            if after.has(reg) || later.iter().any(|a| a.reg == reg) {
                 continue;
             }
-            // Only the last position holding it may take what it holds,
-            // because an earlier one still reads the register.
-            if let Some(last) = (0..argc)
-                .rev()
-                .find(|&k| args.get(k).is_some_and(|a| a.reg == reg))
-                && let Some(a) = args.get_mut(last)
-            {
+            if let Some(a) = args.get_mut(k) {
                 a.moved = true;
             }
+        }
+    }
+}
+
+/// A set of registers, one bit each.
+#[derive(Clone, PartialEq, Eq)]
+struct Regs(Vec<u64>);
+
+impl Regs {
+    fn new(regs: u32) -> Regs {
+        Regs(vec![0; (regs as usize).div_ceil(64)])
+    }
+
+    fn has(&self, r: Reg) -> bool {
+        let r = r.0 as usize;
+        self.0.get(r / 64).is_some_and(|w| w >> (r % 64) & 1 == 1)
+    }
+
+    fn add(&mut self, r: Reg) {
+        let r = r.0 as usize;
+        if let Some(w) = self.0.get_mut(r / 64) {
+            *w |= 1 << (r % 64);
+        }
+    }
+
+    fn remove(&mut self, r: Reg) {
+        let r = r.0 as usize;
+        if let Some(w) = self.0.get_mut(r / 64) {
+            *w &= !(1 << (r % 64));
+        }
+    }
+
+    fn union(&mut self, other: &Regs) {
+        for (w, o) in self.0.iter_mut().zip(&other.0) {
+            *w |= o;
+        }
+    }
+}
+
+/// For each instruction, the registers some later instruction may read
+/// before anything writes them again.
+fn live_after(instrs: &[Instr], regs: u32) -> Vec<Regs> {
+    let empty = Regs::new(regs);
+    let mut before = vec![empty.clone(); instrs.len()];
+    let mut after = vec![empty.clone(); instrs.len()];
+    // Backward liveness, run to a fixed point. Loops only come from jumps
+    // back, which are rare, so this settles in a pass or two.
+    loop {
+        let mut changed = false;
+        for i in (0..instrs.len()).rev() {
+            let Some(instr) = instrs.get(i) else { continue };
+            let mut out = empty.clone();
+            for next in instr.successors(i) {
+                if let Some(b) = before.get(next) {
+                    out.union(b);
+                }
+            }
+            let mut live = out.clone();
+            if let Some(w) = instr.writes() {
+                live.remove(w);
+            }
+            instr.reads(|r| live.add(r));
+            if let Some(slot) = after.get_mut(i) {
+                *slot = out;
+            }
+            if let Some(slot) = before.get_mut(i)
+                && *slot != live
+            {
+                *slot = live;
+                changed = true;
+            }
+        }
+        if !changed {
+            return after;
         }
     }
 }

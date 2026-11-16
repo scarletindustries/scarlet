@@ -87,6 +87,40 @@ fn a_call_passes_its_arguments_and_returns_its_result() {
     );
 }
 
+/// A call takes over an argument only when nothing reads it later. Here
+/// `xs` and `m` go to calls and pushes and are read again afterwards, on
+/// both arms of an `if`, so each must still hold what it held, unchanged by
+/// what the calls built from it.
+#[test]
+fn a_value_passed_on_is_still_there_for_what_reads_it_later() {
+    prints(
+        "import scarlet/array\n\
+         import scarlet/map\n\
+         fn keep(xs Array(Int)) Array(Int) { xs }\n\
+         fn grow(xs Array(Int)) Array(Int) { [..xs, 9] }\n\
+         fn both(xs Array(Int), flag Bool) Int {\n\
+         \tys = grow(xs)\n\
+         \tif flag { array::length(xs) + array::length(ys) } else { array::length(keep(xs)) }\n\
+         }\n\
+         pub fn main() {\n\
+         \txs = [1, 2, 3]\n\
+         \tys = [0, ..xs]\n\
+         \tzs = [..xs, 4]\n\
+         \tm = map::set(map::new(), 1, 10)\n\
+         \tn = map::set(m, 2, 20)\n\
+         \tprintln(xs)\n\
+         \tprintln(ys)\n\
+         \tprintln(zs)\n\
+         \tprintln(map::size(m))\n\
+         \tprintln(map::size(n))\n\
+         \tprintln(both(xs, True))\n\
+         \tprintln(both(xs, False))\n\
+         \tprintln(xs)\n\
+         }\n",
+        "[1, 2, 3]\n[0, 1, 2, 3]\n[1, 2, 3, 4]\n1\n2\n7\n3\n[1, 2, 3]\n",
+    );
+}
+
 /// `docs/semantics.md`'s rules for `/` and `%`.
 #[test]
 fn division_follows_the_rules() {
