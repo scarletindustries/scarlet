@@ -313,10 +313,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 }
                 Instr::Call { dst, func, args } => {
                     let callee = self.body(*func)?;
-                    let values = self.call_args(base, args);
                     let new_base = frame_end(base, frame.body);
-                    self.enter(callee, new_base, &values);
-                    self.passed(values);
+                    self.enter_above(base, args, callee, new_base);
                     callers.push(std::mem::replace(
                         &mut frame,
                         Frame {
@@ -329,12 +327,10 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     ));
                 }
                 Instr::CallSelf { dst, args } => {
-                    let values = self.call_args(base, args);
                     let body = frame.body;
                     let env = self.share(frame.env);
                     let new_base = frame_end(base, body);
-                    self.enter(body, new_base, &values);
-                    self.passed(values);
+                    self.enter_above(base, args, body, new_base);
                     callers.push(std::mem::replace(
                         &mut frame,
                         Frame {
@@ -348,10 +344,8 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 }
                 Instr::CallValue { dst, callee, args } => {
                     let (body, env) = self.callee(self.get(base, *callee), args.len())?;
-                    let values = self.call_args(base, args);
                     let new_base = frame_end(base, frame.body);
-                    self.enter(body, new_base, &values);
-                    self.passed(values);
+                    self.enter_above(base, args, body, new_base);
                     callers.push(std::mem::replace(
                         &mut frame,
                         Frame {
@@ -2286,6 +2280,23 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
         Ok((body, self.share(f)))
     }
 
+    /// Give `body` a fresh frame at `new_base`, above the caller's frame at
+    /// `base`, and pass it `args` from the caller's registers. The frames do
+    /// not overlap, so each argument goes straight into its parameter, read
+    /// in order as [`Self::call_args`] reads them.
+    fn enter_above(&mut self, base: usize, args: &[Arg], body: &Body, new_base: usize) {
+        self.leave(new_base);
+        self.open(frame_end(new_base, body));
+        for (param, a) in body.params.iter().zip(args) {
+            let v = if a.moved {
+                self.take(base, a.reg)
+            } else {
+                self.share(self.get(base, a.reg))
+            };
+            self.set(new_base, *param, v);
+        }
+    }
+
     /// Give `body` a fresh frame at `base`, with `args` in its parameters.
     /// Whatever held registers from `base` on is released first.
     fn enter(&mut self, body: &Body, base: usize, args: &[Value]) {
@@ -2328,9 +2339,27 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     /// the frame really ends.
     fn again(&mut self, body: &Body, base: usize, args: &[Value]) {
         let end = frame_end(base, body);
-        self.leave(end);
-        self.open(end);
+        if self.top != end {
+            self.leave(end);
+            self.open(end);
+        }
         let frame = self.regs.get_mut(base..end).unwrap_or_default();
+        // Most loops park no cell for reuse, and then every register goes,
+        // and each parameter lands in a register just emptied.
+        if body.carried.is_empty() {
+            for slot in frame.iter_mut() {
+                let old = std::mem::replace(slot, Value::NIL);
+                if let Some(cell) = old.as_cell() {
+                    self.heap.release(cell);
+                }
+            }
+            for (param, arg) in body.params.iter().zip(args) {
+                if let Some(slot) = frame.get_mut(param.0 as usize) {
+                    *slot = *arg;
+                }
+            }
+            return;
+        }
         for (r, slot) in (0..).map(Reg).zip(frame.iter_mut()) {
             if !body.carried.contains(&r) {
                 let old = std::mem::replace(slot, Value::NIL);
@@ -2345,21 +2374,13 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     }
 
     fn get(&self, base: usize, r: Reg) -> Value {
-        self.regs
-            .get(base..)
-            .and_then(|frame| frame.get(r.0 as usize))
-            .copied()
-            .unwrap_or(Value::NIL)
+        self.regs.get(at(base, r)).copied().unwrap_or(Value::NIL)
     }
 
     /// Put `v` in register `r`, whose old value is released. `v`'s reference
     /// passes to the register.
     fn set(&mut self, base: usize, r: Reg, v: Value) {
-        if let Some(slot) = self
-            .regs
-            .get_mut(base..)
-            .and_then(|f| f.get_mut(r.0 as usize))
-        {
+        if let Some(slot) = self.regs.get_mut(at(base, r)) {
             let old = std::mem::replace(slot, v);
             self.release(old);
         }
@@ -2368,11 +2389,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     /// The value in `r`, moved out. The register is emptied and gives up
     /// nothing, so its one reference passes to the caller.
     fn take(&mut self, base: usize, r: Reg) -> Value {
-        match self
-            .regs
-            .get_mut(base..)
-            .and_then(|f| f.get_mut(r.0 as usize))
-        {
+        match self.regs.get_mut(at(base, r)) {
             Some(slot) => std::mem::replace(slot, Value::NIL),
             None => Value::NIL,
         }
@@ -2601,6 +2618,13 @@ fn path_of(text: &[u8]) -> PathBuf {
 /// Where the registers of a frame of `body` at `base` end. `base` is no more
 /// than the register stack's length, which a `Vec` keeps under `isize::MAX`,
 /// and a frame has at most `u32::MAX` registers, so this is exact.
+/// Where register `r` of the frame at `base` sits on the stack. A sum past
+/// what a `usize` holds is past the stack too, so it reads as nothing.
+#[inline]
+fn at(base: usize, r: Reg) -> usize {
+    base.saturating_add(r.0 as usize)
+}
+
 fn frame_end(base: usize, body: &Body) -> usize {
     base.saturating_add(body.regs as usize)
 }

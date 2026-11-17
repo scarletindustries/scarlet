@@ -439,6 +439,176 @@ pub(crate) enum Instr {
 }
 
 impl Instr {
+    /// Each register this instruction names, read or written, to renumber.
+    fn regs_mut(&mut self, f: &mut impl FnMut(&mut Reg)) {
+        let args = |args: &mut [Arg], f: &mut dyn FnMut(&mut Reg)| {
+            args.iter_mut().for_each(|a| f(&mut a.reg));
+        };
+        match self {
+            Instr::Bad { .. } | Instr::Jump { .. } => {}
+            Instr::Const { dst, .. }
+            | Instr::Str { dst, .. }
+            | Instr::BinaryConst { dst, .. }
+            | Instr::BigInt { dst, .. }
+            | Instr::GetGlobal { dst, .. }
+            | Instr::GetCapture { dst, .. }
+            | Instr::GetSelf { dst, .. }
+            | Instr::SetGlobal { src: dst, .. }
+            | Instr::Drop { reg: dst }
+            | Instr::DropReuse { reg: dst }
+            | Instr::Ret { src: dst }
+            | Instr::JumpIfFalse { cond: dst, .. }
+            | Instr::JumpUnlessCmpImm { a: dst, .. }
+            | Instr::JumpUnlessVariant { src: dst, .. }
+            | Instr::JumpUnlessInt { src: dst, .. }
+            | Instr::JumpUnlessFloat { src: dst, .. }
+            | Instr::JumpUnlessStr { src: dst, .. }
+            | Instr::JumpUnlessBinary { src: dst, .. } => f(dst),
+            Instr::Move { dst, src: a }
+            | Instr::IntImm { dst, a, .. }
+            | Instr::IntNeg { dst, a }
+            | Instr::FloatNeg { dst, a }
+            | Instr::Neg { dst, a }
+            | Instr::Print { dst, arg: a, .. }
+            | Instr::ToString { dst, a }
+            | Instr::Element { dst, src: a, .. }
+            | Instr::Not { dst, a }
+            | Instr::ArrayLen { dst, src: a }
+            | Instr::ArrayElem { dst, src: a, .. }
+            | Instr::Field { dst, src: a, .. }
+            | Instr::JumpUnlessCmp { a: dst, b: a, .. } => {
+                f(dst);
+                f(a);
+            }
+            Instr::Int { dst, a, b, .. }
+            | Instr::Float { dst, a, b, .. }
+            | Instr::Num { dst, a, b, .. }
+            | Instr::Equal { dst, a, b }
+            | Instr::NotEqual { dst, a, b }
+            | Instr::Range {
+                dst,
+                start: a,
+                end: b,
+            }
+            | Instr::ArrayDrop { dst, src: a, n: b }
+            | Instr::ArrayConcat { dst, a, b }
+            | Instr::ArrayIndex {
+                dst,
+                src: a,
+                index: b,
+            }
+            | Instr::MapFind {
+                dst,
+                map: a,
+                key: b,
+                ..
+            }
+            | Instr::MapDeleteOwned {
+                dst,
+                map: a,
+                key: b,
+            } => {
+                f(dst);
+                f(a);
+                f(b);
+            }
+            Instr::ArraySlice {
+                dst,
+                src,
+                start,
+                end,
+            } => {
+                for r in [dst, src, start, end] {
+                    f(r);
+                }
+            }
+            Instr::ArrayIndexOr {
+                dst,
+                src,
+                index,
+                default,
+            } => {
+                for r in [dst, src, index, default] {
+                    f(r);
+                }
+            }
+            Instr::MapSetOwned {
+                dst,
+                map,
+                key,
+                value,
+            } => {
+                for r in [dst, map, key, value] {
+                    f(r);
+                }
+            }
+            Instr::Bits {
+                dst, args: more, ..
+            }
+            | Instr::Concat { dst, parts: more }
+            | Instr::Closure {
+                dst,
+                captures: more,
+                ..
+            }
+            | Instr::Tuple {
+                dst,
+                elements: more,
+            }
+            | Instr::Builtin {
+                dst, args: more, ..
+            }
+            | Instr::Array {
+                dst,
+                elements: more,
+            } => {
+                f(dst);
+                more.iter_mut().for_each(f);
+            }
+            Instr::Ctor {
+                dst, fields, reuse, ..
+            } => {
+                f(dst);
+                fields.iter_mut().for_each(&mut *f);
+                reuse.iter_mut().for_each(f);
+            }
+            Instr::ArrayPrepend {
+                dst,
+                front: more,
+                rest,
+                ..
+            }
+            | Instr::ArrayAppend {
+                dst,
+                back: more,
+                rest,
+                ..
+            } => {
+                f(dst);
+                more.iter_mut().for_each(&mut *f);
+                f(rest);
+            }
+            Instr::Call { dst, args: a, .. } | Instr::CallSelf { dst, args: a } => {
+                f(dst);
+                args(a, f);
+            }
+            Instr::CallValue {
+                dst,
+                callee,
+                args: a,
+            } => {
+                f(dst);
+                f(callee);
+                args(a, f);
+            }
+            Instr::TailCall { args: a, .. } | Instr::TailCallSelf { args: a } => args(a, f),
+            Instr::TailCallValue { callee, args: a } => {
+                f(callee);
+                args(a, f);
+            }
+        }
+    }
+
     /// Each register this instruction reads, for liveness. A plain `Drop`
     /// reads nothing, because dropping an emptied register does nothing.
     fn reads(&self, mut f: impl FnMut(Reg)) {
@@ -937,16 +1107,21 @@ fn load_fn(
     let name = || format!("{}.{}", f.module, f.name);
     let loaded = Loader::new(consts, abi, &f.core, this).and_then(|l| l.body(&f.core));
     Ok(match loaded {
-        Ok((regs, instrs)) => Func::Ready(Body {
-            name: name(),
-            regs,
-            params: f.core.params.iter().map(|p| Reg::of(p.id)).collect(),
-            carried: reused_locals(&f.core.body)
+        Ok((_, mut instrs)) => {
+            let mut params: Box<[Reg]> = f.core.params.iter().map(|p| Reg::of(p.id)).collect();
+            let mut carried: Box<[Reg]> = reused_locals(&f.core.body)
                 .into_iter()
                 .map(Reg::of)
-                .collect(),
-            instrs: instrs.into_boxed_slice(),
-        }),
+                .collect();
+            let regs = renumber(&mut instrs, &mut params, &mut carried);
+            Func::Ready(Body {
+                name: name(),
+                regs,
+                params,
+                carried,
+                instrs: instrs.into_boxed_slice(),
+            })
+        }
         Err(Unloadable::Missing(what)) => Func::NotBuiltYet(what),
         Err(Unloadable::TooLong) => return Err(Stop::FunctionTooLong { name: name() }),
         Err(Unloadable::TooManyRegisters) => {
@@ -1891,6 +2066,30 @@ fn moves_on_last_use(instrs: &mut [Instr], regs: u32) {
             }
         }
     }
+}
+
+/// Number the registers a function names densely from 0, in the order of
+/// their old numbers, and give how many there are. Core IR numbers a local
+/// once in the whole program's function, and loading leaves some unused, but
+/// a frame costs a word per register at every call, return and loop.
+fn renumber(instrs: &mut [Instr], params: &mut [Reg], carried: &mut [Reg]) -> u32 {
+    let mut used = BTreeSet::new();
+    let mut note = |r: &mut Reg| {
+        used.insert(r.0);
+    };
+    params.iter_mut().for_each(&mut note);
+    carried.iter_mut().for_each(&mut note);
+    instrs.iter_mut().for_each(|i| i.regs_mut(&mut note));
+    let new: HashMap<u32, u32> = used.iter().copied().zip(0..).collect();
+    let mut map = |r: &mut Reg| {
+        if let Some(&n) = new.get(&r.0) {
+            r.0 = n;
+        }
+    };
+    params.iter_mut().for_each(&mut map);
+    carried.iter_mut().for_each(&mut map);
+    instrs.iter_mut().for_each(|i| i.regs_mut(&mut map));
+    u32::try_from(used.len()).unwrap_or(u32::MAX)
 }
 
 /// A set of registers, one bit each.
