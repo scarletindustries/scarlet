@@ -14,6 +14,12 @@
 //! only slows down for keys whose whole hashes are equal, and it keeps those
 //! in a list.
 //!
+//! An Int that fits 64 bits is the exception. It hashes through a fixed
+//! permutation of the 64-bit words instead (the splitmix64 finalizer), which
+//! is a few multiplies. A permutation gives no two such Ints the same hash at
+//! all, which is more than SipHash promises. The keys of one map all have one
+//! type, so these hashes only ever meet each other.
+//!
 //! Like `==`, the walk keeps a list of values still to hash instead of
 //! recursing, so a very long list hashes without overflowing the stack.
 
@@ -48,6 +54,9 @@ enum Tag {
 
 /// `v`'s hash.
 pub(crate) fn hash(heap: &Heap, v: Value) -> u64 {
+    if let Some(n) = crate::bigint::wide(heap, v).and_then(|n| i64::try_from(n).ok()) {
+        return permute(n.cast_unsigned() ^ K0);
+    }
     let mut s = Sip::<1, 3>::new(K0, K1);
     // Empty until `v` holds other values, so a key that holds none, like an
     // Int or a string, hashes without allocating.
@@ -59,7 +68,16 @@ pub(crate) fn hash(heap: &Heap, v: Value) -> u64 {
     s.finish()
 }
 
+/// The splitmix64 finalizer, a bijection on 64-bit words: each step is a
+/// shift-xor or a multiply by an odd number, and each of those can be undone.
+fn permute(x: u64) -> u64 {
+    let x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    let x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^ (x >> 31)
+}
+
 /// Hash `v` itself, and queue what it holds, first part on top.
+#[inline]
 fn one(heap: &Heap, v: Value, s: &mut Sip<1, 3>, todo: &mut Vec<Value>) {
     match v.view() {
         View::Int(n) => int(s, i128::from(n)),
@@ -166,6 +184,7 @@ fn cell(heap: &Heap, cell: Cell, s: &mut Sip<1, 3>, todo: &mut Vec<Value>) {
 
 /// An Int, small or big, by its number: its sign, then its magnitude as
 /// 64-bit digits, least significant first.
+#[inline]
 fn int(s: &mut Sip<1, 3>, n: i128) {
     s.tag(Tag::Int);
     s.word(u64::from(n < 0));
@@ -218,6 +237,7 @@ struct Sip<const C: usize, const D: usize> {
 }
 
 impl<const C: usize, const D: usize> Sip<C, D> {
+    #[inline]
     fn new(k0: u64, k1: u64) -> Self {
         Sip {
             v: [
@@ -232,10 +252,12 @@ impl<const C: usize, const D: usize> Sip<C, D> {
         }
     }
 
+    #[inline]
     fn tag(&mut self, t: Tag) {
         self.word(t as u64);
     }
 
+    #[inline]
     fn word(&mut self, w: u64) {
         if self.tail_len == 0 {
             self.len = self.len.wrapping_add(8);
@@ -259,6 +281,7 @@ impl<const C: usize, const D: usize> Sip<C, D> {
         }
     }
 
+    #[inline]
     fn compress(&mut self, m: u64) {
         self.v[3] ^= m;
         for _ in 0..C {
@@ -267,6 +290,7 @@ impl<const C: usize, const D: usize> Sip<C, D> {
         self.v[0] ^= m;
     }
 
+    #[inline]
     fn finish(mut self) -> u64 {
         let m = (self.len & 0xFF) << 56 | self.tail;
         self.compress(m);
@@ -277,6 +301,7 @@ impl<const C: usize, const D: usize> Sip<C, D> {
         self.v[0] ^ self.v[1] ^ self.v[2] ^ self.v[3]
     }
 
+    #[inline]
     fn round(&mut self) {
         let [v0, v1, v2, v3] = &mut self.v;
         *v0 = v0.wrapping_add(*v1);

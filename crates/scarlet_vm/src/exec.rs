@@ -726,6 +726,16 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     let cell = map::set_owned(&mut self.heap, m, k, v).map_err(full)?;
                     self.set(base, *dst, Value::cell(cell));
                 }
+                Instr::MapFind { dst, map, key, to } => {
+                    let m = self.map(self.get(base, *map))?;
+                    match map::get(&self.heap, m, self.get(base, *key)) {
+                        Some(v) => {
+                            let v = self.share(v);
+                            self.set(base, *dst, v);
+                        }
+                        None => frame.pc = *to as usize,
+                    }
+                }
                 Instr::MapDeleteOwned { dst, map, key } => {
                     let m = self.map(self.get(base, *map))?;
                     let k = self.get(base, *key);

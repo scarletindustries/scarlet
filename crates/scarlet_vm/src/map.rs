@@ -42,7 +42,7 @@
 
 use crate::eq;
 use crate::hash;
-use crate::heap::{Cell, Full, Heap, Kind};
+use crate::heap::{Cell, Edit, Full, Heap, Kind};
 use crate::value::Value;
 use crate::word::{high_u32, low_u32};
 
@@ -179,6 +179,13 @@ fn make_collision(heap: &mut Heap, hash: u64, entries: &[(Value, Value)]) -> Res
     Ok(Value::cell(heap.make(Kind::MapCollision, &words)?))
 }
 
+/// Whether two keys are `==`. A word that is neither a cell nor a Float has
+/// one form, so for two of those the words alone decide, without a walk.
+fn same_key(heap: &Heap, a: Value, b: Value) -> bool {
+    let deep = |v: Value| v.as_cell().is_some() || matches!(v.view(), crate::value::View::Float(_));
+    a.bits() == b.bits() || ((deep(a) || deep(b)) && eq::equal(heap, a, b))
+}
+
 /// `v` with one more reference, for keeping it in a new cell.
 fn own(heap: &mut Heap, v: Value) -> Value {
     if let Some(cell) = v.as_cell() {
@@ -251,6 +258,14 @@ impl Used {
         }
     }
 
+    /// How many words a node using these slots holds, its mask among them.
+    /// A node's cell may have room past that, holding `Nil`.
+    fn len(self) -> usize {
+        let e = self.entries.count_ones() as usize;
+        let c = self.children.count_ones() as usize;
+        e.saturating_mul(2).saturating_add(c).saturating_add(1)
+    }
+
     /// As a node's first word.
     fn word(self) -> u64 {
         u64::from(self.entries) | u64::from(self.children) << 32
@@ -268,17 +283,17 @@ fn get_by(heap: &Heap, map: Cell, key: Value, hash: Hasher) -> Option<Value> {
     let h = hash(heap, key);
     let mut shift = 0;
     loop {
-        let d = heap.data(at);
-        if is_collision(heap, at) {
+        let (kind, d) = heap.kind_and_data(at);
+        if kind == Some(Kind::MapCollision) {
             return (0..d.len() / 2)
-                .find(|&i| eq::equal(heap, word(d, key_at(i)), key))
+                .find(|&i| same_key(heap, word(d, key_at(i)), key))
                 .map(|i| word(d, value_at(i)));
         }
         let used = Used::of(d);
         let b = bit(h, shift);
         if used.entries & b != 0 {
             let i = index(used.entries, b);
-            return eq::equal(heap, word(d, key_at(i)), key).then(|| word(d, value_at(i)));
+            return same_key(heap, word(d, key_at(i)), key).then(|| word(d, value_at(i)));
         }
         if used.children & b == 0 {
             return None;
@@ -382,7 +397,7 @@ fn insert_owned(
     }
     let d = heap.data(at);
     if is_collision(heap, at) {
-        let found = (0..d.len() / 2).find(|&i| eq::equal(heap, word(d, key_at(i)), key));
+        let found = (0..d.len() / 2).find(|&i| same_key(heap, word(d, key_at(i)), key));
         return match found {
             Some(i) => {
                 let v = own(heap, value).bits();
@@ -390,9 +405,20 @@ fn insert_owned(
                 Ok((Value::cell(at), false))
             }
             None => {
-                let mut words = Words::from_slice(heap.data(at));
-                words.extend([own(heap, key).bits(), own(heap, value).bits()]);
-                grown(heap, at, Kind::MapCollision, &words, true)
+                let n = d.len();
+                let entry = [own(heap, key).bits(), own(heap, value).bits()];
+                let made = heap.splice(
+                    Kind::MapCollision,
+                    at,
+                    n,
+                    Edit {
+                        cut: n..n,
+                        at: n,
+                        put: &entry,
+                    },
+                    0,
+                )?;
+                Ok((Value::cell(made), true))
             }
         };
     }
@@ -402,7 +428,7 @@ fn insert_owned(
     if used.entries & b != 0 {
         let i = index(used.entries, b);
         let (k, v) = (word(d, key_at(i)), word(d, value_at(i)));
-        if eq::equal(heap, k, key) {
+        if same_key(heap, k, key) {
             let v = own(heap, value).bits();
             put_in(heap, at, value_at(i), v);
             return Ok((Value::cell(at), false));
@@ -412,23 +438,23 @@ fn insert_owned(
         let theirs = (k, v, hash(heap, k));
         let ours = (own(heap, key), own(heap, value), h);
         let child = pair(heap, theirs, ours, deeper(shift))?;
-        let mut words = Words::from_slice(heap.data(at));
-        let gone = entry_words(i);
-        let end = gone.end.min(words.len());
-        words.drain(gone.start.min(end)..end);
-        place(
-            &mut words,
-            child_at(n.saturating_sub(1), index(used.children, b)),
-            &[child.bits()],
-        );
-        set_used(
-            &mut words,
-            Used {
-                entries: used.entries & !b,
-                children: used.children | b,
+        let to = child_at(n.saturating_sub(1), index(used.children, b));
+        let after = Used {
+            entries: used.entries & !b,
+            children: used.children | b,
+        };
+        let made = reshape(
+            heap,
+            at,
+            used,
+            after,
+            Edit {
+                cut: entry_words(i),
+                at: to,
+                put: &[child.bits()],
             },
-        );
-        return grown(heap, at, Kind::MapNode, &words, true);
+        )?;
+        return Ok((Value::cell(made), true));
     }
     if used.children & b != 0 {
         let j = child_at(n, index(used.children, b));
@@ -444,31 +470,23 @@ fn insert_owned(
         return Ok((Value::cell(at), added));
     }
     let i = key_at(index(used.entries, b));
-    let mut words = Words::from_slice(heap.data(at));
     let entry = [own(heap, key).bits(), own(heap, value).bits()];
-    place(&mut words, i, &entry);
-    set_used(
-        &mut words,
-        Used {
-            entries: used.entries | b,
-            ..used
+    let after = Used {
+        entries: used.entries | b,
+        ..used
+    };
+    let made = reshape(
+        heap,
+        at,
+        used,
+        after,
+        Edit {
+            cut: i..i,
+            at: i,
+            put: &entry,
         },
-    );
-    grown(heap, at, Kind::MapNode, &words, true)
-}
-
-/// `words`, moved out of `old`, in a new cell of `kind`. `old` is freed
-/// without giving anything up, since the new cell holds it all now.
-fn grown(
-    heap: &mut Heap,
-    old: Cell,
-    kind: Kind,
-    words: &[u64],
-    added: bool,
-) -> Result<(Value, bool), Full> {
-    let made = heap.make(kind, words)?;
-    heap.discard(old);
-    Ok((Value::cell(made), added))
+    )?;
+    Ok((Value::cell(made), true))
 }
 
 /// Put `w` at word `i` of `cell`, which the caller alone holds, giving back
@@ -495,7 +513,7 @@ fn insert(
 ) -> Result<(Value, bool), Full> {
     let d = heap.data(at);
     if is_collision(heap, at) {
-        let found = (0..d.len() / 2).find(|&i| eq::equal(heap, word(d, key_at(i)), key));
+        let found = (0..d.len() / 2).find(|&i| same_key(heap, word(d, key_at(i)), key));
         let mut words = copy(heap, at);
         let v = own(heap, value).bits();
         match found {
@@ -511,7 +529,7 @@ fn insert(
     if used.entries & b != 0 {
         let i = index(used.entries, b);
         let (k, v) = (word(d, key_at(i)), word(d, value_at(i)));
-        if eq::equal(heap, k, key) {
+        if same_key(heap, k, key) {
             let mut words = copy(heap, at);
             let v = own(heap, value).bits();
             put(heap, &mut words, value_at(i), v);
@@ -686,7 +704,7 @@ fn remove_owned(heap: &mut Heap, at: Cell, key: Value, h: u64, shift: u32) -> Re
     }
     let d = heap.data(at);
     if is_collision(heap, at) {
-        let Some(i) = (0..d.len() / 2).find(|&i| eq::equal(heap, word(d, key_at(i)), key)) else {
+        let Some(i) = (0..d.len() / 2).find(|&i| same_key(heap, word(d, key_at(i)), key)) else {
             return Ok(Gone::Missing);
         };
         let mut words = Words::from_slice(d);
@@ -704,19 +722,28 @@ fn remove_owned(heap: &mut Heap, at: Cell, key: Value, h: u64, shift: u32) -> Re
     let b = bit(h, shift);
     if used.entries & b != 0 {
         let i = index(used.entries, b);
-        if !eq::equal(heap, word(d, key_at(i)), key) {
+        if !same_key(heap, word(d, key_at(i)), key) {
             return Ok(Gone::Missing);
         }
-        let mut words = Words::from_slice(d);
-        cut(heap, &mut words, entry_words(i));
-        set_used(
-            &mut words,
-            Used {
-                entries: used.entries & !b,
-                ..used
+        let (k, v) = (word(d, key_at(i)), word(d, value_at(i)));
+        let after = Used {
+            entries: used.entries & !b,
+            ..used
+        };
+        let gone = settle_cut(
+            heap,
+            at,
+            shift,
+            after,
+            Edit {
+                cut: entry_words(i),
+                at: 0,
+                put: &[],
             },
-        );
-        return settle_owned(heap, at, shift, &words);
+        )?;
+        release(heap, k.bits());
+        release(heap, v.bits());
+        return Ok(gone);
     }
     if used.children & b == 0 {
         return Ok(Gone::Missing);
@@ -737,55 +764,144 @@ fn remove_owned(heap: &mut Heap, at: Cell, key: Value, h: u64, shift: u32) -> Re
         }
         // The child is down to one entry, which moves up into its slot here.
         Gone::Lone(k, v) => {
-            let mut words = Words::from_slice(heap.data(at));
-            let end = j.saturating_add(1).min(words.len());
-            words.drain(j.min(end)..end);
+            let after = Used {
+                entries: used.entries | b,
+                children: used.children & !b,
+            };
             let i = key_at(index(used.entries, b));
-            place(&mut words, i, &[k.bits(), v.bits()]);
-            set_used(
-                &mut words,
-                Used {
-                    entries: used.entries | b,
-                    children: used.children & !b,
+            let put = [k.bits(), v.bits()];
+            let cut = j..j.saturating_add(1);
+            settle_cut(
+                heap,
+                at,
+                shift,
+                after,
+                Edit {
+                    cut,
+                    at: i,
+                    put: &put,
                 },
-            );
-            settle_owned(heap, at, shift, &words)
+            )
         }
         Gone::Empty => {
-            let mut words = Words::from_slice(heap.data(at));
-            let end = j.saturating_add(1).min(words.len());
-            words.drain(j.min(end)..end);
-            set_used(
-                &mut words,
-                Used {
-                    children: used.children & !b,
-                    ..used
+            let after = Used {
+                children: used.children & !b,
+                ..used
+            };
+            settle_cut(
+                heap,
+                at,
+                shift,
+                after,
+                Edit {
+                    cut: j..j.saturating_add(1),
+                    at: 0,
+                    put: &[],
                 },
-            );
-            settle_owned(heap, at, shift, &words)
+            )
         }
     }
 }
 
-/// [`settle`] for `words` moved out of `at`, which is freed without giving
-/// anything up, since what it held is in `words` now.
-fn settle_owned(heap: &mut Heap, at: Cell, shift: u32, words: &[u64]) -> Result<Gone, Full> {
-    let used = Used::of(words);
-    let gone = match (used.entries.count_ones(), used.children.count_ones()) {
-        (0, 0) => Gone::Empty,
-        (1, 0) if shift > 0 => Gone::Lone(word(words, 1), word(words, 2)),
-        _ => Gone::Node(Value::cell(heap.make(Kind::MapNode, words)?)),
+/// Spare words a node is given when it has to move to a bigger cell, so the
+/// next few entries fit where it is. Two entries' worth.
+const ROOM: usize = 4;
+
+/// The most words a node can hold: its mask and 32 slots of two words.
+const NODE_MAX: usize = 65;
+
+/// Node `at`, which its one holder gives up, now using slots `after` instead
+/// of `before`, with `edit` made to its words. When that fits the cell, it changes in place, and any words
+/// it no longer needs go back to `Nil`. Otherwise its words move to a cell
+/// with some room. Either way the references move without changing.
+fn reshape(
+    heap: &mut Heap,
+    at: Cell,
+    before: Used,
+    after: Used,
+    edit: Edit<'_>,
+) -> Result<Cell, Full> {
+    let (old, new) = (before.len(), after.len());
+    let Edit {
+        cut,
+        at: put_at,
+        put,
+    } = edit;
+    let d = heap.data_mut(at);
+    // Both bounds hold for any node this module made, and they keep every
+    // shift below inside the cell.
+    if new <= d.len() && old <= d.len() {
+        // Close the gap `cut` leaves, then open one for `put`. Both are
+        // shifts inside the cell, of the words after the change.
+        let end = cut.end.min(old);
+        let start = cut.start.min(end);
+        d.copy_within(end..old, start);
+        let left = old.saturating_sub(end.saturating_sub(start));
+        let put_at = put_at.min(left);
+        let to = put_at.saturating_add(put.len());
+        if to <= d.len() && left <= d.len() && new <= d.len() {
+            d.copy_within(put_at..left, to);
+        }
+        if let Some(slot) = d.get_mut(put_at..to) {
+            slot.copy_from_slice(put);
+        }
+        if let Some(spare) = d.get_mut(new..old) {
+            spare.fill(Value::NIL.bits());
+        }
+        set_used(d, after);
+        return Ok(at);
+    }
+    let room = ROOM.min(NODE_MAX.saturating_sub(new));
+    let edit = Edit {
+        cut,
+        at: put_at,
+        put,
     };
-    heap.discard(at);
-    Ok(gone)
+    let made = heap.splice(Kind::MapNode, at, old, edit, room)?;
+    set_used(heap.data_mut(made), after);
+    Ok(made)
 }
 
+/// [`settle`] for node `at`, which its one holder gives up, once `edit` is
+/// made to its words, so that it uses the slots `after` says. The words move on without
+/// their references changing, and `at` is freed. Whatever `cut` takes, the
+/// caller sees to.
+fn settle_cut(
+    heap: &mut Heap,
+    at: Cell,
+    shift: u32,
+    after: Used,
+    edit: Edit<'_>,
+) -> Result<Gone, Full> {
+    match (after.entries.count_ones(), after.children.count_ones()) {
+        (0, 0) => {
+            heap.discard(at);
+            Ok(Gone::Empty)
+        }
+        // One entry is left, which moves up into the node above. The node is
+        // three words then, so building them here costs next to nothing.
+        (1, 0) if shift > 0 => {
+            let mut words = Words::from_slice(heap.data(at));
+            let end = edit.cut.end.min(words.len());
+            words.drain(edit.cut.start.min(end)..end);
+            place(&mut words, edit.at, edit.put);
+            let gone = Gone::Lone(word(&words, 1), word(&words, 2));
+            heap.discard(at);
+            Ok(gone)
+        }
+        _ => {
+            let before = Used::of(heap.data(at));
+            let made = reshape(heap, at, before, after, edit)?;
+            Ok(Gone::Node(Value::cell(made)))
+        }
+    }
+}
 /// The node `at`, at `shift`, without `key`, whose hash is `h`. Everything
 /// passed is borrowed.
 fn remove(heap: &mut Heap, at: Cell, key: Value, h: u64, shift: u32) -> Result<Gone, Full> {
     let d = heap.data(at);
     if is_collision(heap, at) {
-        let Some(i) = (0..d.len() / 2).find(|&i| eq::equal(heap, word(d, key_at(i)), key)) else {
+        let Some(i) = (0..d.len() / 2).find(|&i| same_key(heap, word(d, key_at(i)), key)) else {
             return Ok(Gone::Missing);
         };
         let mut words = copy(heap, at);
@@ -801,7 +917,7 @@ fn remove(heap: &mut Heap, at: Cell, key: Value, h: u64, shift: u32) -> Result<G
     let b = bit(h, shift);
     if used.entries & b != 0 {
         let i = index(used.entries, b);
-        if !eq::equal(heap, word(d, key_at(i)), key) {
+        if !same_key(heap, word(d, key_at(i)), key) {
             return Ok(Gone::Missing);
         }
         let mut words = copy(heap, at);
@@ -919,8 +1035,12 @@ pub(crate) fn equal_parts(heap: &Heap, x: Cell, y: Cell) -> Option<Vec<(Value, V
     let (dx, dy) = (heap.data(x), heap.data(y));
     match heap.kind(x)? {
         Kind::Map => (size(heap, x) == size(heap, y)).then(|| vec![(top(heap, x), top(heap, y))]),
-        Kind::MapNode => (dx.first() == dy.first() && dx.len() == dy.len())
-            .then(|| (1..dx.len()).map(|i| (word(dx, i), word(dy, i))).collect()),
+        // Equal masks mean equal lengths, whatever room either cell has.
+        Kind::MapNode => (dx.first() == dy.first()).then(|| {
+            (1..Used::of(dx).len())
+                .map(|i| (word(dx, i), word(dy, i)))
+                .collect()
+        }),
         Kind::MapCollision => {
             let ((hx, ex), (hy, mut ey)) = (collision(heap, x), collision(heap, y));
             if hx != hy || ex.len() != ey.len() {

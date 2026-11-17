@@ -272,6 +272,15 @@ impl Heap {
     /// list instead of releasing them by recursion, so freeing a very long
     /// list takes no more stack than freeing one cell.
     pub(crate) fn release(&mut self, cell: Cell) {
+        // Most releases leave the cell alive, and need no list of the dying.
+        let h = self.word(cell, 0);
+        let c = count(h);
+        if c > 1 {
+            if c < STICKY {
+                self.set_word(cell, 0, with_count(h, c.saturating_sub(1)));
+            }
+            return;
+        }
         let mut dying = std::mem::take(&mut self.dying);
         dying.push(cell);
         while let Some(cell) = dying.pop() {
@@ -345,23 +354,15 @@ impl Heap {
     }
 
     pub(crate) fn kind(&self, cell: Cell) -> Option<Kind> {
-        match kind_bits(self.word(cell, 0)) {
-            1 => Some(Kind::String),
-            2 => Some(Kind::BigInt),
-            3 => Some(Kind::Ctor),
-            4 => Some(Kind::Closure),
-            5 => Some(Kind::Tuple),
-            6 => Some(Kind::ArrayRoot),
-            7 => Some(Kind::ArrayLeaf),
-            8 => Some(Kind::ArrayBranch),
-            9 => Some(Kind::Range),
-            10 => Some(Kind::Binary),
-            11 => Some(Kind::BinarySlice),
-            12 => Some(Kind::Map),
-            13 => Some(Kind::MapNode),
-            14 => Some(Kind::MapCollision),
-            _ => None,
-        }
+        kind_of(self.word(cell, 0))
+    }
+
+    /// `cell`'s kind and the words after its header, read with one look up
+    /// of the cell, for a walk that wants both at every step.
+    pub(crate) fn kind_and_data(&self, cell: Cell) -> (Option<Kind>, &[u64]) {
+        let words = self.onward(cell);
+        let h = words.first().copied().unwrap_or(0);
+        (kind_of(h), words.get(1..size(h)).unwrap_or(&[]))
     }
 
     /// A new string cell holding `text`.
@@ -551,6 +552,91 @@ impl Heap {
         self.words_mut(cell, 1)
     }
 
+    /// A new cell of `kind` made from the first `n` words after `old`'s
+    /// header with `edit` made to them, and `room` spare words after, holding
+    /// `Nil`. The words move straight from one cell to the other. `old`'s
+    /// one holder gives it up, and it is freed without anything it held
+    /// being released: that is in the new cell now, apart from what the edit
+    /// cut, which the caller has seen to.
+    pub(crate) fn splice(
+        &mut self,
+        kind: Kind,
+        old: Cell,
+        n: usize,
+        edit: Edit<'_>,
+        room: usize,
+    ) -> Result<Cell, Full> {
+        let Edit { cut, at, put } = edit;
+        let n = n.min(self.data(old).len());
+        let cut = cut.start.min(n)..cut.end.min(n).max(cut.start.min(n));
+        let kept = n.saturating_sub(cut.len());
+        let at = at.min(kept);
+        let len = kept.saturating_add(put.len());
+        let new = self.alloc(kind, 0, len.saturating_add(room))?;
+        if let Some(spare) = self.data_mut(new).get_mut(len..) {
+            spare.fill(Value::NIL.bits());
+        }
+        // What is kept is `old[..cut.start]` then `old[cut.end..]`. Copy it
+        // in runs, leaving a gap for `put` at `at`.
+        let mut done = 0;
+        for run in [0..cut.start, cut.end..n] {
+            let mut run = run;
+            while !run.is_empty() {
+                let gap = if done < at { at } else { usize::MAX };
+                let take = run.len().min(gap.saturating_sub(done));
+                let dst = if done < at {
+                    done
+                } else {
+                    done.saturating_add(put.len())
+                };
+                let piece = run.start..run.start.saturating_add(take);
+                self.copy_words(old, piece, new, dst);
+                done = done.saturating_add(take);
+                run = run.start.saturating_add(take)..run.end;
+                if take == 0 {
+                    break;
+                }
+            }
+        }
+        if let Some(slot) = self.data_mut(new).get_mut(at..at.saturating_add(put.len())) {
+            slot.copy_from_slice(put);
+        }
+        self.discard(old);
+        Ok(new)
+    }
+
+    /// Copy words `src` after `from`'s header to the words from `dst` after
+    /// `to`'s, two different cells.
+    fn copy_words(&mut self, from: Cell, src: std::ops::Range<usize>, to: Cell, dst: usize) {
+        let len = src.len();
+        let s = (from.word as usize)
+            .saturating_add(1)
+            .saturating_add(src.start);
+        let d = (to.word as usize).saturating_add(1).saturating_add(dst);
+        let (a, b) = (from.chunk as usize, to.chunk as usize);
+        if a == b {
+            if let Some(Some(c)) = self.chunks.get_mut(a)
+                && s.saturating_add(len) <= c.words.len()
+                && d.saturating_add(len) <= c.words.len()
+            {
+                c.words.copy_within(s..s.saturating_add(len), d);
+            }
+            return;
+        }
+        let (lo, hi) = self.chunks.split_at_mut(a.max(b));
+        let (source, target) = if a < b {
+            (lo.get(a), hi.first_mut())
+        } else {
+            (hi.first(), lo.get_mut(b))
+        };
+        if let (Some(Some(source)), Some(Some(target))) = (source, target)
+            && let Some(from) = source.words.get(s..s.saturating_add(len))
+            && let Some(to) = target.words.get_mut(d..d.saturating_add(len))
+        {
+            to.copy_from_slice(from);
+        }
+    }
+
     /// Free `cell`, whose one holder has moved what it held somewhere else,
     /// so nothing it holds is released.
     pub(crate) fn discard(&mut self, cell: Cell) {
@@ -707,6 +793,35 @@ fn padded_word(bytes: &[u8]) -> u64 {
         *w = *b;
     }
     u64::from_le_bytes(word)
+}
+
+/// A change to a run of words: `cut` taken out, then `put` placed before
+/// word `at` of what is left.
+pub(crate) struct Edit<'a> {
+    pub(crate) cut: std::ops::Range<usize>,
+    pub(crate) at: usize,
+    pub(crate) put: &'a [u64],
+}
+
+/// The kind header `h` names, or `None` for a header no cell has.
+fn kind_of(h: u64) -> Option<Kind> {
+    match kind_bits(h) {
+        1 => Some(Kind::String),
+        2 => Some(Kind::BigInt),
+        3 => Some(Kind::Ctor),
+        4 => Some(Kind::Closure),
+        5 => Some(Kind::Tuple),
+        6 => Some(Kind::ArrayRoot),
+        7 => Some(Kind::ArrayLeaf),
+        8 => Some(Kind::ArrayBranch),
+        9 => Some(Kind::Range),
+        10 => Some(Kind::Binary),
+        11 => Some(Kind::BinarySlice),
+        12 => Some(Kind::Map),
+        13 => Some(Kind::MapNode),
+        14 => Some(Kind::MapCollision),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

@@ -261,6 +261,15 @@ pub(crate) enum Instr {
         key: Reg,
         value: Reg,
     },
+    /// `map::get` whose `Option` is only matched on: the value goes straight
+    /// to `dst`, the `Some` arm's binder, and a missing key continues at `to`,
+    /// the `None` arm. No `Some` cell is made.
+    MapFind {
+        dst: Reg,
+        map: Reg,
+        key: Reg,
+        to: u32,
+    },
     /// `map::delete`, as [`Instr::MapSetOwned`] is `map::set`.
     MapDeleteOwned {
         dst: Reg,
@@ -514,7 +523,7 @@ impl Instr {
                 f(*key);
                 f(*value);
             }
-            Instr::MapDeleteOwned { map, key, .. } => {
+            Instr::MapFind { map, key, .. } | Instr::MapDeleteOwned { map, key, .. } => {
                 f(*map);
                 f(*key);
             }
@@ -575,6 +584,7 @@ impl Instr {
             | Instr::GetSelf { dst, .. }
             | Instr::MapSetOwned { dst, .. }
             | Instr::MapDeleteOwned { dst, .. }
+            | Instr::MapFind { dst, .. }
             | Instr::Tuple { dst, .. }
             | Instr::Element { dst, .. }
             | Instr::Builtin { dst, .. }
@@ -621,6 +631,7 @@ impl Instr {
             Instr::JumpIfFalse { to, .. }
             | Instr::JumpUnlessCmp { to, .. }
             | Instr::JumpUnlessCmpImm { to, .. }
+            | Instr::MapFind { to, .. }
             | Instr::JumpUnlessVariant { to, .. }
             | Instr::JumpUnlessInt { to, .. }
             | Instr::JumpUnlessFloat { to, .. }
@@ -689,6 +700,7 @@ impl Instr {
             | Instr::JumpIfFalse { to, .. }
             | Instr::JumpUnlessCmp { to, .. }
             | Instr::JumpUnlessCmpImm { to, .. }
+            | Instr::MapFind { to, .. }
             | Instr::JumpUnlessVariant { to, .. }
             | Instr::JumpUnlessInt { to, .. }
             | Instr::JumpUnlessFloat { to, .. }
@@ -874,14 +886,15 @@ pub(crate) fn load(program: &Program) -> Result<Code, Stop> {
     let mut names = TiVec::new();
     for f in &program.fns {
         let this = fns.next_idx().map_err(full)?;
-        fns.push(load_fn(f, consts, Some(this))?).map_err(full)?;
+        fns.push(load_fn(f, consts, &program.abi, Some(this))?)
+            .map_err(full)?;
         names.push(f.name.clone()).map_err(full)?;
     }
     let toplevels = program
         .inits
         .iter()
         .chain([&program.toplevel])
-        .map(|f| load_fn(f, consts, None))
+        .map(|f| load_fn(f, consts, &program.abi, None))
         .collect::<Result<_, _>>()?;
     Ok(Code {
         fns,
@@ -915,9 +928,14 @@ impl From<Missing> for Unloadable {
 
 /// A function that's too long for the VM's jumps stops the whole load, as a
 /// heap too big for its addresses stops a run: it's a limit of the machine.
-fn load_fn(f: &LoweredFn, consts: &[Const], this: Option<FuncIdx>) -> Result<Func, Stop> {
+fn load_fn(
+    f: &LoweredFn,
+    consts: &[Const],
+    abi: &Abi,
+    this: Option<FuncIdx>,
+) -> Result<Func, Stop> {
     let name = || format!("{}.{}", f.module, f.name);
-    let loaded = Loader::new(consts, &f.core, this).and_then(|l| l.body(&f.core));
+    let loaded = Loader::new(consts, abi, &f.core, this).and_then(|l| l.body(&f.core));
     Ok(match loaded {
         Ok((regs, instrs)) => Func::Ready(Body {
             name: name(),
@@ -953,10 +971,17 @@ struct Loader<'c> {
     reused: BTreeSet<LocalId>,
     /// How many times each local is read.
     reads: HashMap<LocalId, u32>,
+    /// The stdlib's own constructors, such as `Some` and `None`.
+    abi: &'c Abi,
 }
 
 impl<'c> Loader<'c> {
-    fn new(consts: &'c [Const], f: &CoreFn, this: Option<FuncIdx>) -> Result<Self, Unloadable> {
+    fn new(
+        consts: &'c [Const],
+        abi: &'c Abi,
+        f: &CoreFn,
+        this: Option<FuncIdx>,
+    ) -> Result<Self, Unloadable> {
         let highest = f
             .params
             .iter()
@@ -969,6 +994,7 @@ impl<'c> Loader<'c> {
         };
         Ok(Loader {
             consts,
+            abi,
             this,
             reused: reused_locals(&f.body),
             reads: reads(&f.body),
@@ -1174,6 +1200,33 @@ impl<'c> Loader<'c> {
                         self.instrs.push(Instr::SetGlobal { slot, src: dst });
                     }
                     e = rest;
+                }
+                CoreExpr::Let {
+                    bind,
+                    rhs:
+                        Atom::Intrinsic {
+                            intrinsic: Intrinsic::MapGet,
+                            args,
+                        },
+                    body,
+                } if let [m, k] = args.as_slice()
+                    && bind.global.is_none()
+                    && self.reads.get(&bind.id) == Some(&1)
+                    && let CoreExpr::Match { scrut, arms, .. } = &**body
+                    && *scrut == bind.id
+                    && let Some((value, found, missing)) = option_arms(self.abi, arms) =>
+                {
+                    let none = self.label();
+                    let (map, key) = (Reg::of(*m), Reg::of(*k));
+                    self.jump(none, |to| Instr::MapFind {
+                        dst: Reg::of(value),
+                        map,
+                        key,
+                        to,
+                    });
+                    self.expr(found, dest)?;
+                    self.place(none)?;
+                    e = missing;
                 }
                 CoreExpr::Let {
                     bind,
@@ -1953,6 +2006,31 @@ fn reused_locals(e: &CoreExpr) -> BTreeSet<LocalId> {
         }
     }
     out
+}
+
+/// The arms of a `match` on an `Option` that names both variants and binds
+/// `Some`'s value to a plain name: that name, the `Some` arm and the `None`
+/// arm.
+fn option_arms<'e>(
+    abi: &Abi,
+    arms: &'e [(CorePat, CoreExpr)],
+) -> Option<(LocalId, &'e CoreExpr, &'e CoreExpr)> {
+    let [(a, x), (b, y)] = arms else {
+        return None;
+    };
+    let some = |p: &CorePat| match p {
+        CorePat::Ctor { variant, fields } if *variant == abi.some => match fields.as_slice() {
+            [v] if v.global.is_none() => Some(v.id),
+            _ => None,
+        },
+        CorePat::Wild | CorePat::Bind(_) | CorePat::Lit(_) | CorePat::Ctor { .. } => None,
+    };
+    let none = |p: &CorePat| matches!(p, CorePat::Ctor { variant, fields } if *variant == abi.none && fields.is_empty());
+    match (some(a), some(b)) {
+        (Some(v), _) if none(b) => Some((v, x, y)),
+        (_, Some(v)) if none(a) => Some((v, y, x)),
+        _ => None,
+    }
 }
 
 /// A comparison an `if` jumps on: two registers, or one and a constant.
