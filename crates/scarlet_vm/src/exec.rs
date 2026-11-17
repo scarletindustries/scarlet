@@ -59,8 +59,9 @@ pub(crate) struct Machine<'c, 'h, 'o> {
     regs: Vec<Value>,
     /// Where the live registers end. Every register from here on is `Nil`.
     top: usize,
-    /// The arguments of the call being made, kept between calls so that
-    /// making one allocates nothing.
+    /// The values on their way into a frame or a cell, which are a call's
+    /// arguments or a constructor's fields. It is kept between uses so that
+    /// neither allocates.
     passing: Vec<Value>,
     /// `os.env` as a map, made the first time it is asked for. The
     /// environment cannot change while the program runs, so every call after
@@ -184,10 +185,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     };
                     let v = match v {
                         Some(v) => v,
-                        None => {
-                            let (x, y) = (self.int_of(x)?, self.int_of(y)?);
-                            bigint::op(&mut self.heap, *op, x, y).map_err(full)?
-                        }
+                        None => self.int_op(*op, x, y)?,
                     };
                     self.set(base, *dst, v);
                 }
@@ -195,10 +193,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     let x = self.get(base, *a);
                     let v = match x.small_int().and_then(|x| bigint::small_op(*op, x, *b)) {
                         Some(v) => v,
-                        None => {
-                            let x = self.int_of(x)?;
-                            bigint::op(&mut self.heap, *op, x, Int::Small(*b)).map_err(full)?
-                        }
+                        None => self.int_op(*op, x, Value::int(*b).unwrap_or(Value::NIL))?,
                     };
                     self.set(base, *dst, v);
                 }
@@ -277,10 +272,12 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     fields,
                     reuse,
                 } => {
-                    let values: Vec<Value> = fields
-                        .iter()
-                        .map(|r| self.share(self.get(base, *r)))
-                        .collect();
+                    let mut values = std::mem::take(&mut self.passing);
+                    values.clear();
+                    for r in fields {
+                        let v = self.share(self.get(base, *r));
+                        values.push(v);
+                    }
                     // Perceus reuse. Move out the cell a `DropReuse` above
                     // hollowed and left in `reuse`, so the register no longer
                     // holds it. Anything else there is a value this frame is
@@ -301,6 +298,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                             self.heap.ctor(*variant, &values).map_err(full)?
                         }
                     };
+                    self.passed(values);
                     self.set(base, *dst, Value::cell(cell));
                 }
                 Instr::Drop { reg } => self.set(base, *reg, Value::NIL),
@@ -728,6 +726,14 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     let cell = map::set_owned(&mut self.heap, m, k, v).map_err(full)?;
                     self.set(base, *dst, Value::cell(cell));
                 }
+                Instr::MapDeleteOwned { dst, map, key } => {
+                    let m = self.map(self.get(base, *map))?;
+                    let k = self.get(base, *key);
+                    // The register's reference passes to the delete.
+                    self.take(base, *map);
+                    let cell = map::delete_owned(&mut self.heap, m, k).map_err(full)?;
+                    self.set(base, *dst, Value::cell(cell));
+                }
                 Instr::JumpUnlessCmp { op, a, b, to } => {
                     let (x, y) = (self.get(base, *a), self.get(base, *b));
                     let holds = match (x.small_int(), y.small_int()) {
@@ -736,10 +742,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     };
                     let holds = match holds {
                         Some(v) => v,
-                        None => {
-                            let (x, y) = (self.int_of(x)?, self.int_of(y)?);
-                            bigint::op(&mut self.heap, *op, x, y).map_err(full)?
-                        }
+                        None => self.int_op(*op, x, y)?,
                     };
                     if holds.bits() != Value::bool(true).bits() {
                         frame.pc = *to as usize;
@@ -749,10 +752,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     let x = self.get(base, *a);
                     let holds = match x.small_int().and_then(|x| bigint::small_op(*op, x, *b)) {
                         Some(v) => v,
-                        None => {
-                            let x = self.int_of(x)?;
-                            bigint::op(&mut self.heap, *op, x, Int::Small(*b)).map_err(full)?
-                        }
+                        None => self.int_op(*op, x, Value::int(*b).unwrap_or(Value::NIL))?,
                     };
                     if holds.bits() != Value::bool(true).bits() {
                         frame.pc = *to as usize;
@@ -2454,12 +2454,23 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             NumOp::Gt => IntOp::Gt,
             NumOp::Ge => IntOp::Ge,
         };
-        let (a, b) = (self.int_of(a)?, self.int_of(b)?);
-        bigint::op(&mut self.heap, int, a, b).map_err(full)
+        self.int_op(int, a, b)
     }
 
     fn int(&self, base: usize, r: Reg) -> Result<Int, Stop> {
         self.int_of(self.get(base, r))
+    }
+
+    /// `x op y` off the small-Int fast path: in `i128` when both fit one
+    /// word, and through `num-bigint` when not.
+    fn int_op(&mut self, op: IntOp, x: Value, y: Value) -> Result<Value, Stop> {
+        if let (Some(a), Some(b)) = (bigint::wide(&self.heap, x), bigint::wide(&self.heap, y))
+            && let Some(v) = bigint::wide_op(&mut self.heap, op, a, b)
+        {
+            return v.map_err(full);
+        }
+        let (a, b) = (self.int_of(x)?, self.int_of(y)?);
+        bigint::op(&mut self.heap, op, a, b).map_err(full)
     }
 
     fn int_of(&self, v: Value) -> Result<Int, Stop> {

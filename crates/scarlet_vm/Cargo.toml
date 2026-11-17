@@ -30,6 +30,9 @@ memchr = "2"
 # Parses HTTP heads for `scarlet/http/h1`. It's `hyper`'s parser, uses SIMD and
 # doesn't allocate.
 httparse = "1"
+# Holds a map node's words while a set or delete rebuilds it. A node is at most
+# 65 words, so the copy stays on the stack.
+smallvec = { version = "1", features = ["const_generics"] }
 
 [dev-dependencies]
 # Tests write their programs in Scarlet and compile them. Only the tests see

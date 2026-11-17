@@ -90,6 +90,43 @@ pub(crate) fn neg(heap: &mut Heap, a: Int) -> Result<Value, Full> {
     value(heap, n)
 }
 
+/// `v` as an `i128`, when it is a small Int or a big one of one word. Those
+/// are most of the big Ints a program makes, such as a sum just past 48
+/// bits, and `i128` arithmetic on them needs no `num-bigint`.
+pub(crate) fn wide(heap: &Heap, v: Value) -> Option<i128> {
+    match v.small_int() {
+        Some(n) => Some(i128::from(n)),
+        None => v
+            .as_cell()
+            .filter(|c| heap.kind(*c) == Some(crate::heap::Kind::BigInt))
+            .and_then(|c| heap.big_int_word(c)),
+    }
+}
+
+/// `a op b` on two operands [`wide`] read, or `None` when the answer does
+/// not fit an `i128`. The rules are [`op`]'s.
+pub(crate) fn wide_op(heap: &mut Heap, op: IntOp, a: i128, b: i128) -> Option<Result<Value, Full>> {
+    let n = match op {
+        IntOp::Add => a.checked_add(b)?,
+        IntOp::Sub => a.checked_sub(b)?,
+        IntOp::Mul => a.checked_mul(b)?,
+        IntOp::Div if b == 0 => 0,
+        IntOp::Div => a.checked_div(b)?,
+        IntOp::Rem if b == 0 => a,
+        IntOp::Rem => a.checked_rem(b)?,
+        IntOp::Eq => return Some(Ok(Value::bool(a == b))),
+        IntOp::Ne => return Some(Ok(Value::bool(a != b))),
+        IntOp::Lt => return Some(Ok(Value::bool(a < b))),
+        IntOp::Le => return Some(Ok(Value::bool(a <= b))),
+        IntOp::Gt => return Some(Ok(Value::bool(a > b))),
+        IntOp::Ge => return Some(Ok(Value::bool(a >= b))),
+    };
+    if let Some(v) = i64::try_from(n).ok().and_then(Value::int) {
+        return Some(Ok(v));
+    }
+    Some(heap.big_int_i128(n).map(Value::cell))
+}
+
 /// The fast path, or `None` when the answer does not fit a small Int.
 #[inline]
 pub(crate) fn small_op(op: IntOp, a: i64, b: i64) -> Option<Value> {
@@ -129,4 +166,86 @@ pub(crate) fn value(heap: &mut Heap, n: BigInt) -> Result<Value, Full> {
         return Ok(v);
     }
     Ok(Value::cell(heap.big_int(&n)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `i128` path gives what `num-bigint` gives, for operands around
+    /// every edge: 0, the small-Int bounds, one word, and past it.
+    #[test]
+    fn the_wide_path_agrees_with_num_bigint() {
+        let mut heap = Heap::default();
+        let edges: Vec<i128> = [
+            0,
+            1,
+            2,
+            7,
+            1 << 47,
+            (1 << 47) - 1,
+            1 << 48,
+            i128::from(i64::MAX),
+            i128::from(u64::MAX),
+            i128::from(u64::MAX) - 1,
+            3_000_000_000_000_000_000,
+        ]
+        .into_iter()
+        .flat_map(|n| [n, -n])
+        .collect();
+        let ops = [
+            IntOp::Add,
+            IntOp::Sub,
+            IntOp::Mul,
+            IntOp::Div,
+            IntOp::Rem,
+            IntOp::Eq,
+            IntOp::Ne,
+            IntOp::Lt,
+            IntOp::Le,
+            IntOp::Gt,
+            IntOp::Ge,
+        ];
+        let show = |heap: &Heap, v: Value| match v.small_int() {
+            Some(n) => n.to_string(),
+            None => match v.as_cell() {
+                Some(c) => heap.read_big_int(c).to_string(),
+                None => format!("{:?}", v.view()),
+            },
+        };
+        for &a in &edges {
+            for &b in &edges {
+                let (x, y) = (
+                    value(&mut heap, BigInt::from(a)).expect("room"),
+                    value(&mut heap, BigInt::from(b)).expect("room"),
+                );
+                let (wa, wb) = (wide(&heap, x), wide(&heap, y));
+                for op in ops {
+                    let want = op_values(&mut heap, op, x, y);
+                    let got = match (wa, wb) {
+                        (Some(wa), Some(wb)) => match wide_op(&mut heap, op, wa, wb) {
+                            Some(v) => v.expect("room"),
+                            None => continue,
+                        },
+                        _ => continue,
+                    };
+                    assert_eq!(show(&heap, got), show(&heap, want), "{a} {op:?} {b}");
+                    // One number has one form, so the cell is the one
+                    // `num-bigint`'s result would make, hash and all.
+                    if let (Some(g), Some(w)) = (got.as_cell(), want.as_cell()) {
+                        assert_eq!(heap.data(g), heap.data(w), "{a} {op:?} {b}");
+                    }
+                }
+            }
+        }
+    }
+
+    fn op_values(heap: &mut Heap, op: IntOp, x: Value, y: Value) -> Value {
+        let read = |heap: &Heap, v: Value| match v.small_int() {
+            Some(n) => Int::Small(n),
+            None => Int::Big(heap.read_big_int(v.as_cell().expect("a cell"))),
+        };
+        let (a, b) = (read(heap, x), read(heap, y));
+        super::op(heap, op, a, b).expect("room")
+    }
 }

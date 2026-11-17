@@ -46,6 +46,11 @@ use crate::heap::{Cell, Full, Heap, Kind};
 use crate::value::Value;
 use crate::word::{high_u32, low_u32};
 
+/// A node's or collision's words, for building a new cell from. A node has
+/// at most 32 slots of up to two words each, after its mask, so it never
+/// spills to the heap. A long collision can.
+type Words = smallvec::SmallVec<[u64; 65]>;
+
 /// What places a key. It is always [`hash::hash`], except in tests, which
 /// pass a poor one to reach the paths a good one almost never takes.
 type Hasher = fn(&Heap, Value) -> u64;
@@ -159,7 +164,7 @@ fn make_node(
     entries: &[(Value, Value)],
     children: &[Value],
 ) -> Result<Value, Full> {
-    let words: Vec<u64> = std::iter::once(used.word())
+    let words: Words = std::iter::once(used.word())
         .chain(entries.iter().flat_map(|(k, v)| [k.bits(), v.bits()]))
         .chain(children.iter().map(|c| c.bits()))
         .collect();
@@ -168,7 +173,7 @@ fn make_node(
 
 /// A new collision cell. The references in `entries` pass to it.
 fn make_collision(heap: &mut Heap, hash: u64, entries: &[(Value, Value)]) -> Result<Value, Full> {
-    let words: Vec<u64> = std::iter::once(hash)
+    let words: Words = std::iter::once(hash)
         .chain(entries.iter().flat_map(|(k, v)| [k.bits(), v.bits()]))
         .collect();
     Ok(Value::cell(heap.make(Kind::MapCollision, &words)?))
@@ -191,8 +196,8 @@ fn release(heap: &mut Heap, w: u64) {
 /// The words of node or collision `at`, for a new cell to start from. Each
 /// value in them gets one more reference, which the copy holds. An edit that
 /// takes a word out gives its reference back.
-fn copy(heap: &mut Heap, at: Cell) -> Vec<u64> {
-    let words = heap.data(at).to_vec();
+fn copy(heap: &mut Heap, at: Cell) -> Words {
+    let words = Words::from_slice(heap.data(at));
     for &w in words.iter().skip(1) {
         own(heap, Value::from_bits(w));
     }
@@ -200,7 +205,7 @@ fn copy(heap: &mut Heap, at: Cell) -> Vec<u64> {
 }
 
 /// Take words `range` out of `words`, giving back their references.
-fn cut(heap: &mut Heap, words: &mut Vec<u64>, range: std::ops::Range<usize>) {
+fn cut(heap: &mut Heap, words: &mut Words, range: std::ops::Range<usize>) {
     let end = range.end.min(words.len());
     for w in words.drain(range.start.min(end)..end) {
         release(heap, w);
@@ -208,9 +213,9 @@ fn cut(heap: &mut Heap, words: &mut Vec<u64>, range: std::ops::Range<usize>) {
 }
 
 /// Put `new` into `words` before word `at`, whose references pass in.
-fn place(words: &mut Vec<u64>, at: usize, new: &[u64]) {
+fn place(words: &mut Words, at: usize, new: &[u64]) {
     let at = at.min(words.len());
-    words.splice(at..at, new.iter().copied());
+    words.insert_from_slice(at, new);
 }
 
 /// Say which slots `words` now uses.
@@ -385,7 +390,7 @@ fn insert_owned(
                 Ok((Value::cell(at), false))
             }
             None => {
-                let mut words = heap.data(at).to_vec();
+                let mut words = Words::from_slice(heap.data(at));
                 words.extend([own(heap, key).bits(), own(heap, value).bits()]);
                 grown(heap, at, Kind::MapCollision, &words, true)
             }
@@ -407,7 +412,7 @@ fn insert_owned(
         let theirs = (k, v, hash(heap, k));
         let ours = (own(heap, key), own(heap, value), h);
         let child = pair(heap, theirs, ours, deeper(shift))?;
-        let mut words = heap.data(at).to_vec();
+        let mut words = Words::from_slice(heap.data(at));
         let gone = entry_words(i);
         let end = gone.end.min(words.len());
         words.drain(gone.start.min(end)..end);
@@ -439,7 +444,7 @@ fn insert_owned(
         return Ok((Value::cell(at), added));
     }
     let i = key_at(index(used.entries, b));
-    let mut words = heap.data(at).to_vec();
+    let mut words = Words::from_slice(heap.data(at));
     let entry = [own(heap, key).bits(), own(heap, value).bits()];
     place(&mut words, i, &entry);
     set_used(
@@ -630,6 +635,151 @@ fn delete_by(heap: &mut Heap, map: Cell, key: Value, hash: Hasher) -> Result<Cel
     heap.make(Kind::Map, &[size, top.bits()])
 }
 
+/// [`delete`] for a caller that gives up its reference to `map`. Like
+/// [`set_owned`], it changes the map and each node on the path that nothing
+/// else holds in place. `key` is borrowed.
+pub(crate) fn delete_owned(heap: &mut Heap, map: Cell, key: Value) -> Result<Cell, Full> {
+    delete_owned_by(heap, map, key, hash::hash)
+}
+
+fn delete_owned_by(heap: &mut Heap, map: Cell, key: Value, hash: Hasher) -> Result<Cell, Full> {
+    if !heap.unique(map) {
+        let made = delete_by(heap, map, key, hash);
+        heap.release(map);
+        return made;
+    }
+    let Some(t) = top(heap, map).as_cell() else {
+        return Ok(map);
+    };
+    let h = hash(heap, key);
+    let top = match remove_owned(heap, t, key, h, 0)? {
+        Gone::Missing => return Ok(map),
+        Gone::Node(n) => n,
+        Gone::Lone(k, v) => {
+            let used = Used {
+                entries: bit(h, 0),
+                children: 0,
+            };
+            make_node(heap, used, &[(k, v)], &[])?
+        }
+        Gone::Empty => Value::NIL,
+    };
+    let size = size(heap, map).saturating_sub(1);
+    if let [s, t, ..] = heap.data_mut(map) {
+        *s = size;
+        *t = top.bits();
+    }
+    Ok(map)
+}
+
+/// [`remove`] on a node whose holder's slot will take what comes back. When
+/// that is [`Gone::Missing`], nothing changed and the slot keeps `at`.
+/// Otherwise the slot's reference to `at` has been given up, and a node that
+/// nothing else held was changed in place or had its words moved on.
+fn remove_owned(heap: &mut Heap, at: Cell, key: Value, h: u64, shift: u32) -> Result<Gone, Full> {
+    if !heap.unique(at) {
+        let gone = remove(heap, at, key, h, shift)?;
+        if !matches!(gone, Gone::Missing) {
+            heap.release(at);
+        }
+        return Ok(gone);
+    }
+    let d = heap.data(at);
+    if is_collision(heap, at) {
+        let Some(i) = (0..d.len() / 2).find(|&i| eq::equal(heap, word(d, key_at(i)), key)) else {
+            return Ok(Gone::Missing);
+        };
+        let mut words = Words::from_slice(d);
+        cut(heap, &mut words, entry_words(i));
+        let gone = match words.len() {
+            0 | 1 => Gone::Empty,
+            3 => Gone::Lone(word(&words, 1), word(&words, 2)),
+            _ => Gone::Node(Value::cell(heap.make(Kind::MapCollision, &words)?)),
+        };
+        heap.discard(at);
+        return Ok(gone);
+    }
+    let used = Used::of(d);
+    let n = used.entries.count_ones() as usize;
+    let b = bit(h, shift);
+    if used.entries & b != 0 {
+        let i = index(used.entries, b);
+        if !eq::equal(heap, word(d, key_at(i)), key) {
+            return Ok(Gone::Missing);
+        }
+        let mut words = Words::from_slice(d);
+        cut(heap, &mut words, entry_words(i));
+        set_used(
+            &mut words,
+            Used {
+                entries: used.entries & !b,
+                ..used
+            },
+        );
+        return settle_owned(heap, at, shift, &words);
+    }
+    if used.children & b == 0 {
+        return Ok(Gone::Missing);
+    }
+    let j = child_at(n, index(used.children, b));
+    let Some(child) = word(d, j).as_cell() else {
+        return Ok(Gone::Missing);
+    };
+    // The child's slot is the holder `remove_owned` speaks of, so what comes
+    // back goes there, and the child's own reference was given up already.
+    match remove_owned(heap, child, key, h, deeper(shift))? {
+        Gone::Missing => Ok(Gone::Missing),
+        Gone::Node(c) => {
+            if let Some(slot) = heap.data_mut(at).get_mut(j) {
+                *slot = c.bits();
+            }
+            Ok(Gone::Node(Value::cell(at)))
+        }
+        // The child is down to one entry, which moves up into its slot here.
+        Gone::Lone(k, v) => {
+            let mut words = Words::from_slice(heap.data(at));
+            let end = j.saturating_add(1).min(words.len());
+            words.drain(j.min(end)..end);
+            let i = key_at(index(used.entries, b));
+            place(&mut words, i, &[k.bits(), v.bits()]);
+            set_used(
+                &mut words,
+                Used {
+                    entries: used.entries | b,
+                    children: used.children & !b,
+                },
+            );
+            settle_owned(heap, at, shift, &words)
+        }
+        Gone::Empty => {
+            let mut words = Words::from_slice(heap.data(at));
+            let end = j.saturating_add(1).min(words.len());
+            words.drain(j.min(end)..end);
+            set_used(
+                &mut words,
+                Used {
+                    children: used.children & !b,
+                    ..used
+                },
+            );
+            settle_owned(heap, at, shift, &words)
+        }
+    }
+}
+
+/// [`settle`] for `words` moved out of `at`, which is freed without giving
+/// anything up, since what it held is in `words` now.
+fn settle_owned(heap: &mut Heap, at: Cell, shift: u32, words: &[u64]) -> Result<Gone, Full> {
+    let used = Used::of(words);
+    let gone = match (used.entries.count_ones(), used.children.count_ones()) {
+        (0, 0) => Gone::Empty,
+        (1, 0) if shift > 0 => Gone::Lone(word(words, 1), word(words, 2)),
+        _ => Gone::Node(Value::cell(heap.make(Kind::MapNode, words)?)),
+    };
+    heap.discard(at);
+    Ok(gone)
+}
+
 /// The node `at`, at `shift`, without `key`, whose hash is `h`. Everything
 /// passed is borrowed.
 fn remove(heap: &mut Heap, at: Cell, key: Value, h: u64, shift: u32) -> Result<Gone, Full> {
@@ -709,7 +859,7 @@ fn remove(heap: &mut Heap, at: Cell, key: Value, h: u64, shift: u32) -> Result<G
 
 /// A node at `shift` holding `words`, whose references pass on, unless that
 /// is too little for a node to hold there.
-fn settle(heap: &mut Heap, shift: u32, words: Vec<u64>) -> Result<Gone, Full> {
+fn settle(heap: &mut Heap, shift: u32, words: Words) -> Result<Gone, Full> {
     let used = Used::of(&words);
     Ok(
         match (used.entries.count_ones(), used.children.count_ones()) {
@@ -859,11 +1009,11 @@ mod tests {
             let keep = step % 50 == 0;
             let next = if rng.below(3) == 0 {
                 model[k as usize] = None;
-                let next = delete_by(&mut heap, map, kv, hash).expect("room");
-                if !keep {
-                    heap.release(map);
+                if keep {
+                    delete_by(&mut heap, map, kv, hash).expect("room")
+                } else {
+                    delete_owned_by(&mut heap, map, kv, hash).expect("room")
                 }
-                next
             } else {
                 let v = rng.below(1000);
                 model[k as usize] = Some(v);
@@ -888,9 +1038,8 @@ mod tests {
         while !left.is_empty() {
             let k = left.swap_remove(rng.below(left.len() as u64) as usize);
             let kv = key(&mut heap, k);
-            let next = delete_by(&mut heap, map, kv, hash).expect("room");
+            let next = delete_owned_by(&mut heap, map, kv, hash).expect("room");
             release(&mut heap, kv);
-            heap.release(map);
             map = next;
             model[k as usize] = None;
             check(&mut heap, map, &model, hash);

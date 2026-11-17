@@ -413,6 +413,37 @@ impl Heap {
         Ok(cell)
     }
 
+    /// The Int in big Int cell `cell`, when it is one word long, as an
+    /// `i128`. A wider one is `None`.
+    pub(crate) fn big_int_word(&self, cell: Cell) -> Option<i128> {
+        let w = self.word(cell, 1);
+        if w & 0xFFFF_FFFF != 1 {
+            return None;
+        }
+        let d = i128::from(self.word(cell, 2));
+        if w >> 63 == 1 {
+            d.checked_neg()
+        } else {
+            Some(d)
+        }
+    }
+
+    /// A big Int cell for `n`, laid out as [`Self::big_int`] lays it out.
+    /// `n` is past what a small Int holds, so it is never 0.
+    pub(crate) fn big_int_i128(&mut self, n: i128) -> Result<Cell, Full> {
+        let m = n.unsigned_abs();
+        let lo = u64::try_from(m & u128::from(u64::MAX)).unwrap_or(0);
+        let hi = u64::try_from(m >> 64).unwrap_or(0);
+        let digits: &[u64] = if hi == 0 { &[lo] } else { &[lo, hi] };
+        let cell = self.alloc(Kind::BigInt, 1, digits.len())?;
+        let negative = u64::from(n < 0) << 63;
+        self.set_word(cell, 1, negative | digits.len() as u64);
+        for (slot, d) in self.words_mut(cell, 2).iter_mut().zip(digits) {
+            *slot = *d;
+        }
+        Ok(cell)
+    }
+
     pub(crate) fn read_big_int(&self, cell: Cell) -> BigInt {
         let w = self.word(cell, 1);
         let sign = if w >> 63 == 1 {

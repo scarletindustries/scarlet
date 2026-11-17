@@ -261,6 +261,12 @@ pub(crate) enum Instr {
         key: Reg,
         value: Reg,
     },
+    /// `map::delete`, as [`Instr::MapSetOwned`] is `map::set`.
+    MapDeleteOwned {
+        dst: Reg,
+        map: Reg,
+        key: Reg,
+    },
     /// [`Instr::JumpUnlessCmp`] against a small Int constant.
     JumpUnlessCmpImm {
         op: IntOp,
@@ -508,6 +514,10 @@ impl Instr {
                 f(*key);
                 f(*value);
             }
+            Instr::MapDeleteOwned { map, key, .. } => {
+                f(*map);
+                f(*key);
+            }
             Instr::Ctor { fields, reuse, .. } => {
                 fields.iter().copied().for_each(&mut f);
                 reuse.iter().copied().for_each(f);
@@ -564,6 +574,7 @@ impl Instr {
             | Instr::GetCapture { dst, .. }
             | Instr::GetSelf { dst, .. }
             | Instr::MapSetOwned { dst, .. }
+            | Instr::MapDeleteOwned { dst, .. }
             | Instr::Tuple { dst, .. }
             | Instr::Element { dst, .. }
             | Instr::Builtin { dst, .. }
@@ -648,6 +659,7 @@ impl Instr {
             | Instr::GetCapture { .. }
             | Instr::GetSelf { .. }
             | Instr::MapSetOwned { .. }
+            | Instr::MapDeleteOwned { .. }
             | Instr::Tuple { .. }
             | Instr::Element { .. }
             | Instr::Builtin { .. }
@@ -693,6 +705,7 @@ impl Instr {
             | Instr::Int { .. }
             | Instr::IntImm { .. }
             | Instr::MapSetOwned { .. }
+            | Instr::MapDeleteOwned { .. }
             | Instr::IntNeg { .. }
             | Instr::Float { .. }
             | Instr::FloatNeg { .. }
@@ -1156,6 +1169,33 @@ impl<'c> Loader<'c> {
                         map: Reg::of(*m),
                         key: Reg::of(*k),
                         value: Reg::of(*v),
+                    });
+                    if let Some(slot) = bind.global {
+                        self.instrs.push(Instr::SetGlobal { slot, src: dst });
+                    }
+                    e = rest;
+                }
+                CoreExpr::Let {
+                    bind,
+                    rhs:
+                        Atom::Intrinsic {
+                            intrinsic: Intrinsic::MapDelete,
+                            args,
+                        },
+                    body,
+                } if let [m, k] = args.as_slice()
+                    && k != m
+                    && let CoreExpr::Drop {
+                        local, body: rest, ..
+                    } = &**body
+                    && local == m
+                    && !self.reused.contains(m) =>
+                {
+                    let dst = Reg::of(bind.id);
+                    self.instrs.push(Instr::MapDeleteOwned {
+                        dst,
+                        map: Reg::of(*m),
+                        key: Reg::of(*k),
                     });
                     if let Some(slot) = bind.global {
                         self.instrs.push(Instr::SetGlobal { slot, src: dst });
