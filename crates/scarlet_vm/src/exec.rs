@@ -274,8 +274,12 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 } => {
                     let mut values = std::mem::take(&mut self.passing);
                     values.clear();
-                    for r in fields {
-                        let v = self.share(self.get(base, *r));
+                    for a in fields {
+                        let v = if a.moved {
+                            self.take(base, a.reg)
+                        } else {
+                            self.share(self.get(base, a.reg))
+                        };
                         values.push(v);
                     }
                     // Perceus reuse. Move out the cell a `DropReuse` above
@@ -767,8 +771,10 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                         frame.pc = *to as usize;
                     }
                 }
+                // The frame is ending, so the result's register gives its
+                // reference up instead of sharing it.
                 Instr::Ret { src } => {
-                    let v = self.share(self.get(base, *src));
+                    let v = self.take(base, *src);
                     let ret_to = frame.ret_to;
                     let env = frame.env;
                     self.leave(base);

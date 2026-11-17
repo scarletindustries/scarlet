@@ -170,7 +170,7 @@ pub(crate) enum Instr {
     Ctor {
         dst: Reg,
         variant: VariantRef,
-        fields: Box<[Reg]>,
+        fields: Box<[Arg]>,
         /// Perceus reuse. This is a register where an [`Instr::DropReuse`]
         /// above left a hollowed cell, which this constructor overwrites
         /// instead of allocating. If the register holds anything else, the
@@ -574,7 +574,7 @@ impl Instr {
                 dst, fields, reuse, ..
             } => {
                 f(dst);
-                fields.iter_mut().for_each(&mut *f);
+                fields.iter_mut().for_each(|a| f(&mut a.reg));
                 reuse.iter_mut().for_each(f);
             }
             Instr::ArrayPrepend {
@@ -703,7 +703,7 @@ impl Instr {
                 f(*key);
             }
             Instr::Ctor { fields, reuse, .. } => {
-                fields.iter().copied().for_each(&mut f);
+                fields.iter().for_each(|a| f(a.reg));
                 reuse.iter().copied().for_each(f);
             }
             Instr::ArrayPrepend {
@@ -1679,7 +1679,11 @@ impl<'c> Loader<'c> {
             } => Instr::Ctor {
                 dst,
                 variant: *variant,
-                fields: fields.iter().copied().map(Reg::of).collect(),
+                fields: fields
+                    .iter()
+                    .copied()
+                    .map(|l| Arg::shared(Reg::of(l)))
+                    .collect(),
                 reuse: reuse.map(Reg::of),
             },
         };
@@ -2018,7 +2022,7 @@ fn built(i: Intrinsic, argc: usize) -> bool {
 
 /// A call hands the callee the reference an argument's register holds,
 /// instead of adding one, when nothing the frame runs later reads that
-/// register. The callee then sees a value nothing else holds, which is what
+/// register. A constructor takes its fields' references the same way. The callee then sees a value nothing else holds, which is what
 /// lets it change the value in place or overwrite its cell.
 ///
 /// Which registers are read later comes from liveness over the function's
@@ -2053,7 +2057,8 @@ fn moves_on_last_use(instrs: &mut [Instr], regs: u32) {
             continue;
         }
         let args = match instr {
-            Instr::Call { args, .. }
+            Instr::Ctor { fields: args, .. }
+            | Instr::Call { args, .. }
             | Instr::CallSelf { args, .. }
             | Instr::CallValue { args, .. }
             | Instr::TailCall { args, .. }
