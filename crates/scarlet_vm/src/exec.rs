@@ -1541,6 +1541,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     /// A binary operation, with its arguments in the `PrimOp`'s order. A width
     /// or position below zero counts as 0, and a segment wider than the binary
     /// it takes from takes all of it, as in the old VM.
+    #[inline(never)]
     fn bits_op(&mut self, op: BitsOp, base: usize, args: &[Reg]) -> Result<Value, Stop> {
         let arg = |m: &Self, k: usize| args.get(k).map_or(Value::NIL, |r| m.get(base, *r));
         match op {
@@ -1665,6 +1666,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     }
 
     /// The bytes of the string `v`.
+    #[inline(never)]
     fn text_of(&self, v: Value) -> Result<Vec<u8>, Stop> {
         match v.as_cell() {
             Some(cell) if self.is_string(v) => {
@@ -2124,6 +2126,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     }
 
     /// The array `v` holds, as a tree or a range.
+    #[inline(never)]
     fn seq(&self, v: Value) -> Result<Seq, Stop> {
         v.as_cell()
             .and_then(|cell| array::seq(&self.heap, cell))
@@ -2132,6 +2135,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
 
     /// Element `i` of `s`, holding its own reference, or `None` past the end.
     /// A range's element is made from its start.
+    #[inline(never)]
     fn element(&mut self, s: Seq, i: usize) -> Result<Option<Value>, Stop> {
         match s {
             Seq::Tree(a) => Ok(array::get(&self.heap, a, i).map(|v| self.share(v))),
@@ -2146,6 +2150,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
 
     /// `s` as a tree, holding one reference. That is the tree itself, or a
     /// range's elements built into one.
+    #[inline(never)]
     fn tree(&mut self, s: Seq) -> Result<crate::heap::Cell, Stop> {
         match s {
             Seq::Tree(a) => {
@@ -2164,6 +2169,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
 
     /// Element `index` of the array `a`, holding its own reference, or `None`
     /// when it has none.
+    #[inline(never)]
     fn index(&mut self, a: Value, index: Value) -> Result<Option<Value>, Stop> {
         let s = self.seq(a)?;
         match self.position(index)? {
@@ -2174,6 +2180,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
 
     /// A range's end as an `i64`. A range past 64 bits could not be walked in
     /// any time a program has.
+    #[inline(never)]
     fn range_end(&self, v: Value) -> Result<i64, Stop> {
         match v.view() {
             View::Int(n) => Ok(n),
@@ -2193,6 +2200,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     /// The Int `v` as a position in an array, or `None` when it names none.
     /// That is when it is negative, or a big int, which is past the end of
     /// any array.
+    #[inline(never)]
     fn position(&self, v: Value) -> Result<Option<usize>, Stop> {
         match v.view() {
             View::Int(i) => Ok(usize::try_from(i).ok()),
@@ -2209,6 +2217,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     /// `a` with each of `items` pushed at `end`, in turn. The references of
     /// `a` and of each item pass to the result, so a push can change an
     /// array nothing else holds in place.
+    #[inline(never)]
     fn push_all(
         &mut self,
         a: crate::heap::Cell,
@@ -2223,6 +2232,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     }
 
     /// [`Self::args`] for the few items a push adds, kept off the heap.
+    #[inline(never)]
     fn items(&mut self, base: usize, regs: &[Reg]) -> smallvec::SmallVec<[Value; 4]> {
         regs.iter()
             .map(|r| self.share(self.get(base, *r)))
@@ -2230,6 +2240,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     }
 
     /// The values in `regs`, each with one more reference, for passing on.
+    #[inline(never)]
     fn args(&mut self, base: usize, regs: &[Reg]) -> Vec<Value> {
         regs.iter()
             .map(|r| self.share(self.get(base, *r)))
@@ -2266,6 +2277,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
 
     /// The body function value `f` runs, and `f` with one more reference, for
     /// the frame that runs it as its closure.
+    #[inline(never)]
     fn callee(&mut self, f: Value, argc: usize) -> Result<(&'c Body, Value), Stop> {
         let func = match f.view() {
             View::Func(func) => func,
@@ -2421,6 +2433,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
         }
     }
 
+    #[inline(never)]
     fn is_string(&self, v: Value) -> bool {
         v.as_cell()
             .is_some_and(|c| self.heap.kind(c) == Some(Kind::String))
@@ -2451,6 +2464,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
         }
     }
 
+    #[inline(never)]
     fn float(&self, base: usize, r: Reg) -> Result<f64, Stop> {
         self.float_of(self.get(base, r))
     }
@@ -2469,6 +2483,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
 
     /// `a op b` for an operator whose operands are both Ints, both Floats, or,
     /// for `+`, both strings.
+    #[inline(never)]
     fn num(&mut self, op: NumOp, a: Value, b: Value) -> Result<Value, Stop> {
         if let (View::Float(x), View::Float(y)) = (a.view(), b.view()) {
             return Ok(float::op(op, x, y));
@@ -2502,6 +2517,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
 
     /// `x op y` off the small-Int fast path: in `i128` when both fit one
     /// word, and through `num-bigint` when not.
+    #[inline(never)]
     fn int_op(&mut self, op: IntOp, x: Value, y: Value) -> Result<Value, Stop> {
         if let (Some(a), Some(b)) = (bigint::wide(&self.heap, x), bigint::wide(&self.heap, y))
             && let Some(v) = bigint::wide_op(&mut self.heap, op, a, b)
@@ -2528,6 +2544,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
     }
 
     /// How `println` and `${x}` show a value.
+    #[inline(never)]
     fn show(&self, v: Value, out: &mut Vec<u8>) -> Result<(), Stop> {
         show::show(&self.heap, self.code, v, out)
     }

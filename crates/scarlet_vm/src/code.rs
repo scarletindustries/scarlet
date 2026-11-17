@@ -1112,13 +1112,13 @@ fn load_fn(
     let name = || format!("{}.{}", f.module, f.name);
     let loaded = Loader::new(consts, abi, &f.core, this).and_then(|l| l.body(&f.core));
     Ok(match loaded {
-        Ok((_, mut instrs)) => {
+        Ok((regs, mut instrs)) => {
             let mut params: Box<[Reg]> = f.core.params.iter().map(|p| Reg::of(p.id)).collect();
             let mut carried: Box<[Reg]> = reused_locals(&f.core.body)
                 .into_iter()
                 .map(Reg::of)
                 .collect();
-            let regs = renumber(&mut instrs, &mut params, &mut carried);
+            let regs = allocate(&mut instrs, &mut params, &mut carried, regs);
             Func::Ready(Body {
                 name: name(),
                 regs,
@@ -2078,11 +2078,48 @@ fn moves_on_last_use(instrs: &mut [Instr], regs: u32) {
     }
 }
 
-/// Number the registers a function names densely from 0, in the order of
-/// their old numbers, and give how many there are. Core IR numbers a local
-/// once in the whole program's function, and loading leaves some unused, but
-/// a frame costs a word per register at every call, return and loop.
-fn renumber(instrs: &mut [Instr], params: &mut [Reg], carried: &mut [Reg]) -> u32 {
+/// Give the function's values registers, two values sharing one whenever
+/// they are never live at once, and say how many registers that takes.
+/// Every frame clears its registers when it returns and every loop when it
+/// goes round, so fewer of them is less work at each.
+///
+/// Sharing a register changes when a value is released, never whether: the
+/// value a register held is released when the next one is written over it,
+/// instead of when the frame ends, and by then nothing reads it. A `Drop`
+/// names its register, so a value keeps it until its `Drop`. The registers
+/// Perceus parks a cell in for a constructor to reuse survive a loop going
+/// round, so none of them is shared.
+fn allocate(instrs: &mut [Instr], params: &mut [Reg], carried: &mut [Reg], regs: u32) -> u32 {
+    let (before, after) = liveness(instrs, regs, true);
+    let n = regs as usize;
+    let mut clash = vec![Regs::new(regs); n];
+    let edge = |clash: &mut Vec<Regs>, a: Reg, b: Reg| {
+        if a != b {
+            if let Some(x) = clash.get_mut(a.0 as usize) {
+                x.add(b);
+            }
+            if let Some(y) = clash.get_mut(b.0 as usize) {
+                y.add(a);
+            }
+        }
+    };
+    for (instr, out) in instrs.iter().zip(&after) {
+        if let Some(w) = instr.writes() {
+            for r in out.iter() {
+                edge(&mut clash, w, r);
+            }
+        }
+    }
+    // The parameters are all written on entry, with whatever is live there.
+    let entry = before.first().cloned().unwrap_or_else(|| Regs::new(regs));
+    for &p in params.iter() {
+        for &q in params.iter() {
+            edge(&mut clash, p, q);
+        }
+        for r in entry.iter() {
+            edge(&mut clash, p, r);
+        }
+    }
     let mut used = BTreeSet::new();
     let mut note = |r: &mut Reg| {
         used.insert(r.0);
@@ -2090,16 +2127,40 @@ fn renumber(instrs: &mut [Instr], params: &mut [Reg], carried: &mut [Reg]) -> u3
     params.iter_mut().for_each(&mut note);
     carried.iter_mut().for_each(&mut note);
     instrs.iter_mut().for_each(|i| i.regs_mut(&mut note));
-    let new: HashMap<u32, u32> = used.iter().copied().zip(0..).collect();
+    let mut color: HashMap<u32, u32> = HashMap::new();
+    let mut count = 0u32;
+    // A parked cell's register is its own, and no other value takes it.
+    for r in carried.iter() {
+        if let std::collections::hash_map::Entry::Vacant(e) = color.entry(r.0) {
+            e.insert(count);
+            count = count.saturating_add(1);
+        }
+    }
+    let reserved = count;
+    let order = params.iter().map(|p| p.0).chain(used.iter().copied());
+    for r in order.collect::<Vec<_>>() {
+        if color.contains_key(&r) {
+            continue;
+        }
+        let taken: BTreeSet<u32> = clash
+            .get(r as usize)
+            .into_iter()
+            .flat_map(Regs::iter)
+            .filter_map(|q| color.get(&q.0).copied())
+            .collect();
+        let c = (reserved..).find(|c| !taken.contains(c)).unwrap_or(count);
+        color.insert(r, c);
+        count = count.max(c.saturating_add(1));
+    }
     let mut map = |r: &mut Reg| {
-        if let Some(&n) = new.get(&r.0) {
-            r.0 = n;
+        if let Some(&c) = color.get(&r.0) {
+            r.0 = c;
         }
     };
     params.iter_mut().for_each(&mut map);
     carried.iter_mut().for_each(&mut map);
     instrs.iter_mut().for_each(|i| i.regs_mut(&mut map));
-    u32::try_from(used.len()).unwrap_or(u32::MAX)
+    count
 }
 
 /// A set of registers, one bit each.
@@ -2130,6 +2191,14 @@ impl Regs {
         }
     }
 
+    fn iter(&self) -> impl Iterator<Item = Reg> + '_ {
+        self.0.iter().zip(0u32..).flat_map(|(&w, i)| {
+            (0..64u32)
+                .filter(move |b| w >> b & 1 == 1)
+                .map(move |b| Reg(i.saturating_mul(64).saturating_add(b)))
+        })
+    }
+
     fn union(&mut self, other: &Regs) {
         for (w, o) in self.0.iter_mut().zip(&other.0) {
             *w |= o;
@@ -2140,6 +2209,13 @@ impl Regs {
 /// For each instruction, the registers some later instruction may read
 /// before anything writes them again.
 fn live_after(instrs: &[Instr], regs: u32) -> Vec<Regs> {
+    liveness(instrs, regs, false).1
+}
+
+/// The registers live before and after each instruction. With
+/// `drops_read`, a plain `Drop` counts as a read, so a register stays its
+/// value's until the `Drop` that names it.
+fn liveness(instrs: &[Instr], regs: u32, drops_read: bool) -> (Vec<Regs>, Vec<Regs>) {
     let empty = Regs::new(regs);
     let mut before = vec![empty.clone(); instrs.len()];
     let mut after = vec![empty.clone(); instrs.len()];
@@ -2160,6 +2236,9 @@ fn live_after(instrs: &[Instr], regs: u32) -> Vec<Regs> {
                 live.remove(w);
             }
             instr.reads(|r| live.add(r));
+            if drops_read && let Instr::Drop { reg } = instr {
+                live.add(*reg);
+            }
             if let Some(slot) = after.get_mut(i) {
                 *slot = out;
             }
@@ -2171,7 +2250,7 @@ fn live_after(instrs: &[Instr], regs: u32) -> Vec<Regs> {
             }
         }
         if !changed {
-            return after;
+            return (before, after);
         }
     }
 }
