@@ -131,14 +131,23 @@ struct Root {
 
 /// A node copied out of the heap, for the paths that build new nodes and so
 /// need the heap mutably while they hold it.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a Node lives on the stack for one step of building a node; boxing the \
+              bigger variant would bring back the allocation these buffers avoid"
+)]
 enum Node {
-    Leaf(Vec<Value>),
+    Leaf(Slots),
     Branch {
         shift: usize,
-        sizes: Vec<u64>,
-        children: Vec<Value>,
+        sizes: smallvec::SmallVec<[u64; B]>,
+        children: Slots,
     },
 }
+
+/// A node's slots, taken out to build a new node from. A node has at most
+/// `B`, so they stay on the stack.
+type Slots = smallvec::SmallVec<[Value; B]>;
 
 /// A node read in place. A lookup goes through this, so it copies nothing and
 /// allocates nothing.
@@ -200,9 +209,17 @@ fn head_len(heap: &Heap, r: &Root) -> usize {
 }
 
 /// The head's live items, which are what `offset` leaves of its leaf.
-fn head_items(heap: &Heap, r: &Root) -> Vec<Value> {
-    let items = slots(heap, r.head);
-    items.get(r.offset..).unwrap_or(&[]).to_vec()
+fn head_items(heap: &Heap, r: &Root) -> Slots {
+    match view(heap, r.head) {
+        Some(View::Leaf(items)) => items
+            .get(r.offset..)
+            .unwrap_or_default()
+            .iter()
+            .copied()
+            .map(Value::from_bits)
+            .collect(),
+        Some(View::Branch { .. }) | None => Slots::new(),
+    }
 }
 
 /// A leaf of exactly the head's live items, owned, or `Nil` when there are
@@ -261,7 +278,7 @@ fn node(heap: &Heap, v: Value) -> Option<Node> {
             children,
         } => Node::Branch {
             shift,
-            sizes: sizes.to_vec(),
+            sizes: sizes.iter().copied().collect(),
             children: children.iter().copied().map(Value::from_bits).collect(),
         },
     })
@@ -275,7 +292,15 @@ fn own(heap: &mut Heap, v: Value) -> Value {
     v
 }
 
-fn own_all(heap: &mut Heap, vs: &[Value]) -> Vec<Value> {
+/// `slots` with `x` added at `end`.
+fn at_end(slots: Slots, x: Value, end: End) -> Slots {
+    match end {
+        End::Front => std::iter::once(x).chain(slots).collect(),
+        End::Back => slots.into_iter().chain(std::iter::once(x)).collect(),
+    }
+}
+
+fn own_all(heap: &mut Heap, vs: &[Value]) -> Slots {
     vs.iter().map(|v| own(heap, *v)).collect()
 }
 
@@ -320,7 +345,7 @@ fn root_at(
 
 /// A leaf of `items`, whose references pass to it.
 fn leaf(heap: &mut Heap, items: &[Value]) -> Result<Value, Full> {
-    let data: Vec<u64> = items.iter().map(|v| v.bits()).collect();
+    let data: smallvec::SmallVec<[u64; B]> = items.iter().map(|v| v.bits()).collect();
     Ok(Value::cell(heap.make(Kind::ArrayLeaf, &data)?))
 }
 
@@ -328,13 +353,13 @@ fn leaf(heap: &mut Heap, items: &[Value]) -> Result<Value, Full> {
 /// Children shared between arrays can hold more elements together than a
 /// word can count, and that is a branch too big to make.
 fn branch(heap: &mut Heap, shift: usize, children: &[Value]) -> Result<Value, Full> {
-    let mut totals = Vec::with_capacity(children.len());
+    let mut totals: smallvec::SmallVec<[u64; B]> = smallvec::SmallVec::new();
     let mut total: u64 = 0;
     for c in children {
         total = total.checked_add(node_len(heap, *c) as u64).ok_or(Full)?;
         totals.push(total);
     }
-    let data: Vec<u64> = std::iter::once(shift as u64)
+    let data: smallvec::SmallVec<[u64; 65]> = std::iter::once(shift as u64)
         .chain(totals)
         .chain(children.iter().map(|c| c.bits()))
         .collect();
@@ -372,9 +397,9 @@ fn slot_count(heap: &Heap, v: Value) -> usize {
 }
 
 /// A node's own slots, which are a leaf's elements or a branch's children.
-fn slots(heap: &Heap, v: Value) -> Vec<Value> {
+fn slots(heap: &Heap, v: Value) -> Slots {
     match node(heap, v) {
-        None => Vec::new(),
+        None => Slots::new(),
         Some(Node::Leaf(items)) => items,
         Some(Node::Branch { children, .. }) => children,
     }
@@ -516,10 +541,7 @@ fn push(heap: &mut Heap, array: Cell, x: Value, end: End) -> Result<Cell, Full> 
         (own(heap, r.tree), r.shift, leaf(heap, &[x])?)
     } else if this_items.len() < B {
         let kept = own_all(heap, &this_items);
-        let items = match end {
-            End::Front => [vec![x], kept].concat(),
-            End::Back => [kept, vec![x]].concat(),
-        };
+        let items = at_end(kept, x, end);
         (own(heap, r.tree), r.shift, leaf(heap, &items)?)
     } else {
         let (tree, shift) = tree_push_leaf(heap, r.tree, r.shift, this, end)?;
@@ -646,7 +668,7 @@ fn try_push(
         return Ok(None);
     };
     if let Some(sub) = try_push(heap, edge_child, down(shift), leaf, end)? {
-        let mut kept = Vec::with_capacity(children.len());
+        let mut kept = Slots::new();
         for (i, c) in children.iter().enumerate() {
             kept.push(if i == edge { sub } else { own(heap, *c) });
         }
@@ -656,10 +678,7 @@ fn try_push(
         let leaf = own(heap, leaf);
         let s = spine(heap, leaf, down(shift))?;
         let kept = own_all(heap, &children);
-        let all = match end {
-            End::Front => [vec![s], kept].concat(),
-            End::Back => [kept, vec![s]].concat(),
-        };
+        let all = at_end(kept, s, end);
         return Ok(Some(branch(heap, shift, &all)?));
     }
     Ok(None)
@@ -784,6 +803,26 @@ pub(crate) fn skip(heap: &mut Heap, array: Cell, n: usize) -> Result<Cell, Full>
     new_root(heap, left, 0, Value::NIL, Value::NIL, tail)
 }
 
+/// [`skip`] for a caller that gives up its reference to `array`. When
+/// nothing else holds it and the head still has more than `n` items, which
+/// is every step of a walk but one in `B`, the root just leaves `n` more of
+/// them behind, in place.
+pub(crate) fn skip_owned(heap: &mut Heap, array: Cell, n: usize) -> Result<Cell, Full> {
+    let r = root(heap, array);
+    if heap.unique(array) && n > 0 && n < head_len(heap, &r) {
+        let len = r.len.saturating_sub(n);
+        let offset = r.offset.saturating_add(n);
+        if let [l, _, o, ..] = heap.data_mut(array) {
+            *l = len as u64;
+            *o = offset as u64;
+        }
+        return Ok(array);
+    }
+    let made = skip(heap, array, n);
+    heap.release(array);
+    made
+}
+
 /// The tree's leftmost leaf, borrowed, or `None` when there is no tree.
 fn first_leaf(heap: &Heap, n: Value) -> Option<Value> {
     let mut n = n;
@@ -854,7 +893,7 @@ fn tree_drop(heap: &mut Heap, n: Value, m: usize) -> Result<Value, Full> {
                 return Ok(Value::NIL);
             };
             let cut = tree_drop(heap, child, slot.within)?;
-            let mut kept = vec![cut];
+            let mut kept: Slots = smallvec::smallvec![cut];
             kept.extend(own_all(heap, after(&children, slot.child)));
             branch(heap, shift, &kept)
         }
@@ -928,7 +967,7 @@ fn merge(
     let rc = slots(heap, r);
     let (left, right) = match (lc.split_last(), rc.split_first()) {
         (Some((last, left)), Some((first, right))) => ((left, *last), (*first, right)),
-        _ => return Ok(own_all(heap, &[l, r])),
+        _ => return Ok(own_all(heap, &[l, r]).into_vec()),
     };
     if lshift > rshift {
         let mid = merge(heap, left.1, down(lshift), r, rshift)?;
@@ -941,7 +980,7 @@ fn merge(
             let items = own_all(heap, &[lc, rc].concat());
             Ok(vec![leaf(heap, &items)?])
         } else {
-            Ok(own_all(heap, &[l, r]))
+            Ok(own_all(heap, &[l, r]).into_vec())
         }
     } else {
         let mid = merge(heap, left.1, down(lshift), right.0, down(rshift))?;
@@ -960,7 +999,7 @@ fn rebalance(
     right: &[Value],
     shift: usize,
 ) -> Result<Vec<Value>, Full> {
-    let mut all = own_all(heap, left);
+    let mut all = own_all(heap, left).into_vec();
     all.extend(mid);
     all.extend(own_all(heap, right));
     let counts: Vec<usize> = all.iter().map(|n| slot_count(heap, *n)).collect();
@@ -1225,9 +1264,7 @@ mod tests {
                 kept.push((a, want.iter().cloned().collect()));
             }
             if i % 17 == 0 && !want.is_empty() {
-                let next = skip(&mut heap, a, 1).expect("room");
-                heap.release(a);
-                a = next;
+                a = skip_owned(&mut heap, a, 1).expect("room");
                 want.pop_front();
                 continue;
             }

@@ -570,7 +570,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                     };
                     self.set(base, *dst, v);
                 }
-                Instr::ArrayDrop { dst, src, n } => {
+                Instr::ArrayDrop { dst, src, n, moved } => {
                     let s = self.seq(self.get(base, *src))?;
                     let n = match self.get(base, *n).view() {
                         View::Int(n) if n >= 0 => to_usize(n.unsigned_abs()),
@@ -585,6 +585,11 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                         }
                     };
                     let cell = match s {
+                        // The register's reference passes to the skip.
+                        Seq::Tree(a) if *moved => {
+                            self.take(base, *src);
+                            array::skip_owned(&mut self.heap, a, n)
+                        }
                         Seq::Tree(a) => array::skip(&mut self.heap, a, n),
                         Seq::Range { start, end } => {
                             let n = (n as u64).min(array::range_len(start, end));
@@ -603,7 +608,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 } => {
                     let s = self.seq(self.get(base, *rest))?;
                     let a = self.tree(s)?;
-                    let items = self.args(base, front);
+                    let items = self.items(base, front);
                     if *moved {
                         let held = self.take(base, *rest);
                         self.release(held);
@@ -619,7 +624,7 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
                 } => {
                     let s = self.seq(self.get(base, *rest))?;
                     let a = self.tree(s)?;
-                    let items = self.args(base, back);
+                    let items = self.items(base, back);
                     if *moved {
                         let held = self.take(base, *rest);
                         self.release(held);
@@ -2215,6 +2220,13 @@ impl<'c, 'h, 'o> Machine<'c, 'h, 'o> {
             cur = array::push_owned(&mut self.heap, cur, x, end).map_err(full)?;
         }
         Ok(cur)
+    }
+
+    /// [`Self::args`] for the few items a push adds, kept off the heap.
+    fn items(&mut self, base: usize, regs: &[Reg]) -> smallvec::SmallVec<[Value; 4]> {
+        regs.iter()
+            .map(|r| self.share(self.get(base, *r)))
+            .collect()
     }
 
     /// The values in `regs`, each with one more reference, for passing on.

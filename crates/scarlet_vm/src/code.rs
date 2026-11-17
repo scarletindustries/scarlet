@@ -374,10 +374,13 @@ pub(crate) enum Instr {
         index: u16,
     },
     /// The array in `src` without its first `n` elements.
+    /// `moved` says nothing reads `src` after this, so the drop takes its
+    /// reference and may change the array in place.
     ArrayDrop {
         dst: Reg,
         src: Reg,
         n: Reg,
+        moved: bool,
     },
     /// `[x, y, ..xs]`, which is the array in `rest` with `front` before it.
     /// `moved` says nothing reads `rest` after this, so the push takes its
@@ -490,7 +493,9 @@ impl Instr {
                 start: a,
                 end: b,
             }
-            | Instr::ArrayDrop { dst, src: a, n: b }
+            | Instr::ArrayDrop {
+                dst, src: a, n: b, ..
+            }
             | Instr::ArrayConcat { dst, a, b }
             | Instr::ArrayIndex {
                 dst,
@@ -1841,6 +1846,7 @@ impl<'c> Loader<'c> {
                     dst,
                     src: Reg::of(*src),
                     n: Reg::of(*n),
+                    moved: false,
                 }),
                 _ => Err(arity(Arity::Two)),
             },
@@ -2040,6 +2046,10 @@ fn moves_on_last_use(instrs: &mut [Instr], regs: u32) {
         } = instr
         {
             *moved = !after.has(*rest) && !items.contains(rest);
+            continue;
+        }
+        if let Instr::ArrayDrop { src, n, moved, .. } = instr {
+            *moved = !after.has(*src) && n != src;
             continue;
         }
         let args = match instr {
