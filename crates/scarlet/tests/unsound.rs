@@ -453,10 +453,9 @@ fn u22_same_scope_shadow_preserves_closure_capture() {
 reject_case! {
     /// U24: a binding holding a live `Subject` must not generalise the
     /// message type. One mailbox sent an Int and received as a String would
-    /// smuggle values between types. The relaxed value restriction keeps the
-    /// variable weak, so the first send pins it and the second is an
-    /// ordinary mismatch. (An empty `Map` stays polymorphic: it is
-    /// immutable, so reuse at two types is sound.)
+    /// smuggle values between types. Under the value restriction a call's
+    /// result keeps one type, so the first send pins it and the second is an
+    /// ordinary mismatch.
     u24_subject_binding_does_not_generalize: (
         "import scarlet/process\n\
          pub fn main() {\n\
@@ -465,6 +464,44 @@ reject_case! {
          \tprocess::send(s, 'text')\n\
          }\n",
         "Type mismatch: expected 'Int', got 'String'",
+    ),
+    /// U24b: the same mailbox hidden inside closures. The binding's type
+    /// names no `Subject`, so only the value restriction catches it: `pair()`
+    /// is a call, so `p` keeps one type and `recv` gives back what `send` put
+    /// in.
+    u24_subject_hidden_in_closures_does_not_generalize: (
+        "import scarlet/process\n\
+         import scarlet/string\n\
+         fn pair() (fn(a) Nil, fn() a) {\n\
+         \ts = process::subject()\n\
+         \t(fn(x) process::send(s, x), fn() process::receive(s))\n\
+         }\n\
+         pub fn main() {\n\
+         \tp = pair()\n\
+         \t(send, _) = p\n\
+         \t(_, recv) = p\n\
+         \tsend(1)\n\
+         \tprintln(string::length(recv()))\n\
+         }\n",
+        "Type mismatch: expected 'String', got 'Int'",
+    ),
+}
+
+ok_case! {
+    /// A function literal is a value, so a binding of one stays generic.
+    a_bound_function_literal_stays_generic: (
+        "pub fn main() {\n\
+         \tid = fn(x) x\n\
+         \tprintln('${id(1)} ${id('one')}')\n\
+         }\n",
+    ),
+    /// So is a constructor of values, like an empty array.
+    a_bound_empty_array_stays_generic: (
+        "import scarlet/array\n\
+         pub fn main() {\n\
+         \tnone = []\n\
+         \tprintln('${array::length([1, ..none])} ${array::length(['a', ..none])}')\n\
+         }\n",
     ),
 }
 

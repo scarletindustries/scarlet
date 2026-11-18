@@ -15,7 +15,7 @@ use scarlet_syntax::ast::UnaryOp;
 use scarlet_syntax::span::Span;
 use scarlet_types::name::{CtorName, ModuleKey, Name, ValueName};
 
-use scarlet_types::engine::{Ty, Types};
+use scarlet_types::engine::{Binding, Ty, Types};
 
 /// A local name's identity within one module: a parameter, a `let`, a
 /// pattern binding, or a module-scope statement's binding.
@@ -81,6 +81,55 @@ pub struct Expr {
     pub ty: Ty,
     pub(crate) span: Span,
     pub kind: ExprKind,
+}
+
+impl Expr {
+    /// Whether nothing has to run to make this value, so its type may be
+    /// generalised. A call, or anything that branches or computes, may build
+    /// something live, so it isn't. This is Standard ML's value restriction.
+    fn is_value(&self) -> bool {
+        match &self.kind {
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::String(_)
+            | ExprKind::Var(_)
+            | ExprKind::Lambda(_)
+            | ExprKind::Error => true,
+            ExprKind::Construct { args, spread, .. } => {
+                args.iter().all(|a| a.value.is_value())
+                    && spread.as_ref().is_none_or(|s| s.base.is_value())
+            }
+            ExprKind::Tuple(elems) => elems.iter().all(Expr::is_value),
+            ExprKind::Array(elems) => elems.iter().all(|e| match e {
+                ArrayElem::Elem(e) | ArrayElem::Spread(e) => e.is_value(),
+            }),
+            ExprKind::Interp(_)
+            | ExprKind::Binary(_)
+            | ExprKind::Call { .. }
+            | ExprKind::TupleIndex { .. }
+            | ExprKind::Field { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Slice { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::BinOp { .. }
+            | ExprKind::And(..)
+            | ExprKind::Or(..)
+            | ExprKind::Unary { .. }
+            | ExprKind::If { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::OrElse { .. }
+            | ExprKind::Block(_) => false,
+        }
+    }
+
+    /// [`Self::is_value`], as the engine's word for it.
+    pub(crate) fn binding(&self) -> Binding {
+        if self.is_value() {
+            Binding::Value
+        } else {
+            Binding::Computed
+        }
+    }
 }
 
 /// A binary operator that takes two values. `&&` and `||` are control flow,

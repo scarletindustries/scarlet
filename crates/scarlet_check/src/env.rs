@@ -9,7 +9,7 @@ use scarlet_syntax::module_path::{self, ModulePath};
 use scarlet_syntax::span::Span;
 use scarlet_types::interface::{Interface, ValueDef, ValueKind};
 use scarlet_types::known::prelude_key;
-use scarlet_types::name::{ModuleKey, Name, TypeName};
+use scarlet_types::name::{ModuleKey, Name};
 
 use crate::CheckInput;
 use crate::error::CheckError;
@@ -25,8 +25,6 @@ pub(crate) struct Env<'a> {
     /// Names user code can't declare again: the prelude's types and
     /// constructors.
     pub reserved: HashSet<Name>,
-    /// Types whose parameters a binding never generalises over.
-    pub restricted: Vec<TypeName>,
     pub imports: Imports,
 }
 
@@ -46,7 +44,6 @@ impl<'a> Env<'a> {
                 }
             }
         }
-        let process: ModulePath = vec!["scarlet".into(), "process".into()];
         let imports = Imports::bind(input, &key, report);
         Env {
             input,
@@ -54,10 +51,6 @@ impl<'a> Env<'a> {
             path,
             prelude,
             reserved,
-            restricted: vec![TypeName::new(
-                ModuleKey::for_stdlib(&process),
-                "Subject".into(),
-            )],
             imports,
         }
     }

@@ -83,6 +83,19 @@ enum VarState {
 #[derive(Debug)]
 pub struct Level(u32);
 
+/// What a binding's value is, which decides whether its type may be
+/// generalised. This is the value restriction from Standard ML.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Binding {
+    /// A value nothing had to run to make: a function, a literal, a
+    /// constructor or tuple of values. Every use may pick its own types.
+    Value,
+    /// A value some code ran to make, like a call's result. It may hold
+    /// something live, like a `Subject` captured in a closure, so every use
+    /// shares one type.
+    Computed,
+}
+
 /// A scheme inside one check: `ty`, generic over `vars`. Each use instantiates
 /// it with fresh variables.
 #[derive(Debug, Clone)]
@@ -628,23 +641,15 @@ impl Engine {
     }
 
     /// Leave `level`, and quantify every variable in `ty` made at it or
-    /// deeper, except those `restricted` keeps weak.
-    ///
-    /// Under the relaxed value restriction, a variable reachable through one
-    /// of the `restricted` types stays one type for every use, unless the
-    /// type sits under a function, which hasn't built the value yet. For a
-    /// mutable reference like `Subject`, quantifying its parameter would let
-    /// one live value be written at one type and read at another. A weak
-    /// variable comes up to the outer level, so no generalisation out there
-    /// can quantify it either.
+    /// deeper, if `binding` says that's safe.
     pub fn generalize(
         &mut self,
         level: Level,
         ty: Ty,
-        restricted: &[TypeName],
+        binding: Binding,
     ) -> Result<LocalScheme, NotInEngine> {
         Ok(self
-            .generalize_all(level, &[(ty, restricted)])?
+            .generalize_all(level, &[(ty, binding)])?
             .pop()
             .unwrap_or(LocalScheme::mono(ty)))
     }
@@ -654,44 +659,48 @@ impl Engine {
     pub fn generalize_all(
         &mut self,
         level: Level,
-        items: &[(Ty, &[TypeName])],
+        items: &[(Ty, Binding)],
     ) -> Result<Vec<LocalScheme>, NotInEngine> {
         self.leave(level);
         items
             .iter()
-            .map(|&(ty, restricted)| self.quantify(ty, restricted))
+            .map(|&(ty, binding)| self.quantify(ty, binding))
             .collect()
     }
 
-    fn quantify(&mut self, ty: Ty, restricted: &[TypeName]) -> Result<LocalScheme, NotInEngine> {
-        let mut weak = HashSet::new();
-        self.collect_weak(ty, restricted, false, &mut weak)?;
-        let outer = self.level;
-        for &v in &weak {
-            let var = self.var_mut(v)?;
-            if let VarState::Unbound { level, constraint } = var.state
-                && level > outer
-            {
-                var.state = VarState::Unbound {
-                    level: outer,
-                    constraint,
-                };
+    fn quantify(&mut self, ty: Ty, binding: Binding) -> Result<LocalScheme, NotInEngine> {
+        match binding {
+            Binding::Value => {
+                let mut vars = Vec::new();
+                self.collect_generalizable(ty, &mut vars)?;
+                Ok(LocalScheme { vars, ty })
+            }
+            Binding::Computed => {
+                // Each variable comes up to the outer level, so no
+                // generalisation out there can quantify it either.
+                let mut free = HashSet::new();
+                self.collect_vars(ty, &mut free)?;
+                let outer = self.level;
+                for v in free {
+                    let var = self.var_mut(v)?;
+                    if let VarState::Unbound { level, constraint } = var.state
+                        && level > outer
+                    {
+                        var.state = VarState::Unbound {
+                            level: outer,
+                            constraint,
+                        };
+                    }
+                }
+                Ok(LocalScheme::mono(ty))
             }
         }
-        let mut vars = Vec::new();
-        self.collect_generalizable(ty, &weak, &mut vars)?;
-        Ok(LocalScheme { vars, ty })
     }
 
-    fn collect_generalizable(
-        &mut self,
-        t: Ty,
-        weak: &HashSet<VarId>,
-        out: &mut Vec<VarId>,
-    ) -> Result<(), NotInEngine> {
+    fn collect_generalizable(&mut self, t: Ty, out: &mut Vec<VarId>) -> Result<(), NotInEngine> {
         let children = match self.root(t)?.1.clone() {
             Node::Var(v) => {
-                if out.contains(&v) || weak.contains(&v) {
+                if out.contains(&v) {
                     return Ok(());
                 }
                 let outer = self.level;
@@ -714,40 +723,23 @@ impl Engine {
         };
         children
             .into_iter()
-            .try_for_each(|c| self.collect_generalizable(c, weak, out))
+            .try_for_each(|c| self.collect_generalizable(c, out))
     }
 
-    fn collect_weak(
-        &self,
-        t: Ty,
-        restricted: &[TypeName],
-        inside: bool,
-        weak: &mut HashSet<VarId>,
-    ) -> Result<(), NotInEngine> {
+    /// Every variable `t` mentions.
+    fn collect_vars(&self, t: Ty, out: &mut HashSet<VarId>) -> Result<(), NotInEngine> {
         match self.root(t)?.1 {
             Node::Var(v) => {
-                if inside {
-                    weak.insert(*v);
-                }
+                out.insert(*v);
                 Ok(())
             }
-            Node::Con { name, args } => {
-                let inside = inside || restricted.contains(name);
-                args.iter()
-                    .try_for_each(|&a| self.collect_weak(a, restricted, inside, weak))
+            Node::Con { args, .. } | Node::Tuple(args) => {
+                args.iter().try_for_each(|&a| self.collect_vars(a, out))
             }
-            Node::Fn { params, ret } => {
-                if !inside {
-                    return Ok(());
-                }
-                params
-                    .iter()
-                    .chain([ret])
-                    .try_for_each(|&p| self.collect_weak(p, restricted, true, weak))
-            }
-            Node::Tuple(elems) => elems
+            Node::Fn { params, ret } => params
                 .iter()
-                .try_for_each(|&e| self.collect_weak(e, restricted, inside, weak)),
+                .chain([ret])
+                .try_for_each(|&p| self.collect_vars(p, out)),
         }
     }
 
@@ -952,13 +944,28 @@ mod tests {
     }
 
     #[test]
+    fn a_computed_binding_quantifies_nothing_and_pins_its_variables() {
+        let mut e = engine();
+        let level = e.enter();
+        let inner = e.fresh();
+        let f = e.fun(vec![inner], inner);
+        let s = e.generalize(level, f, Binding::Computed).unwrap();
+        assert!(s.vars.is_empty());
+        // The variable came up to the outer level, so generalising there
+        // can't quantify it either.
+        let outer_level = e.enter();
+        let s2 = e.generalize(outer_level, f, Binding::Value).unwrap();
+        assert!(s2.vars.is_empty());
+    }
+
+    #[test]
     fn generalising_quantifies_only_deeper_variables() {
         let mut e = engine();
         let outer = e.fresh();
         let level = e.enter();
         let inner = e.fresh();
         let f = e.fun(vec![inner], outer);
-        let s = e.generalize(level, f, &[]).unwrap();
+        let s = e.generalize(level, f, Binding::Value).unwrap();
         assert_eq!(s.vars.len(), 1);
         let a = e.instantiate(&s).unwrap();
         let b = e.instantiate(&s).unwrap();

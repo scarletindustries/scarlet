@@ -9,7 +9,9 @@ use std::collections::HashMap;
 use scarlet_syntax::ast::{BinaryOp, UnaryOp};
 use scarlet_syntax::span::Span;
 use scarlet_types::def::TypeDef;
-use scarlet_types::engine::{Engine, LocalScheme, NotCallable, NotInEngine, Shape, Ty, UnifyError};
+use scarlet_types::engine::{
+    Binding, Engine, LocalScheme, NotCallable, NotInEngine, Shape, Ty, UnifyError,
+};
 use scarlet_types::known::Known;
 use scarlet_types::name::{Name, TypeName};
 use scarlet_types::ty::{Constraint, Type, TypeVar};
@@ -189,6 +191,10 @@ impl Infer<'_, '_> {
         let tys: Vec<(DeclId, Ty)> = sigs.iter().map(|&(d, ty, _, _)| (d, ty)).collect();
         let mut functions = Vec::new();
         let mut consts = Vec::new();
+        // Whether each member may be generalised, in `sigs` order. A
+        // function's variables all sit under its arrow. A const falls under
+        // the value restriction like any binding.
+        let mut bindings = Vec::with_capacity(sigs.len());
         for ((d, ty, params, ret), &(_, decl, rdecl)) in sigs.iter().zip(&members) {
             self.hovers.push((decl.span, *ty));
             let owner = Some(self.env.site(decl.span, decl.entity()));
@@ -212,6 +218,7 @@ impl Infer<'_, '_> {
                     }
                     let body = self.expr(body, ctx);
                     self.unify(*ret, body.ty, *body_span);
+                    bindings.push(Binding::Value);
                     functions.push((
                         *d,
                         typed::Function {
@@ -222,15 +229,18 @@ impl Infer<'_, '_> {
                         },
                     ));
                 }
-                (RDecl::Builtin { .. }, DeclBody::Builtin(_, intrinsic)) => functions.push((
-                    *d,
-                    typed::Function {
-                        name: decl.name.clone(),
-                        params: Vec::new(),
-                        ty: *ty,
-                        body: typed::FnBody::Builtin(*intrinsic),
-                    },
-                )),
+                (RDecl::Builtin { .. }, DeclBody::Builtin(_, intrinsic)) => {
+                    bindings.push(Binding::Value);
+                    functions.push((
+                        *d,
+                        typed::Function {
+                            name: decl.name.clone(),
+                            params: Vec::new(),
+                            ty: *ty,
+                            body: typed::FnBody::Builtin(*intrinsic),
+                        },
+                    ));
+                }
                 (
                     RDecl::Const {
                         annot,
@@ -242,24 +252,21 @@ impl Infer<'_, '_> {
                     let hint = annot.as_ref().map(|_| *ty);
                     let value = self.expr_hinted(value, hint, ctx);
                     self.unify(*ty, value.ty, *value_span);
+                    bindings.push(value.binding());
                     consts.push(typed::Const {
                         name: decl.name.clone(),
                         value,
                     });
                 }
-                (RDecl::Builtin { .. }, DeclBody::Fn(..) | DeclBody::Const(_)) => {}
+                (RDecl::Builtin { .. }, DeclBody::Fn(..) | DeclBody::Const(_)) => {
+                    bindings.push(Binding::Value);
+                }
             }
         }
-        // A const has already been evaluated, so it falls under the value
-        // restriction. A function's variables all sit under its arrow.
-        let restricted = self.env.restricted.clone();
-        let items: Vec<(Ty, &[TypeName])> = sigs
+        let items: Vec<(Ty, Binding)> = sigs
             .iter()
-            .zip(&members)
-            .map(|(&(_, ty, _, _), &(_, _, rdecl))| match rdecl {
-                RDecl::Const { .. } => (ty, &restricted[..]),
-                RDecl::Fn { .. } | RDecl::Builtin { .. } => (ty, &[][..]),
-            })
+            .zip(bindings)
+            .map(|(&(_, ty, _, _), binding)| (ty, binding))
             .collect();
         let schemes = match self.e.generalize_all(level, &items) {
             Ok(schemes) => schemes,
@@ -483,8 +490,7 @@ impl Infer<'_, '_> {
             }
             None => value.ty,
         };
-        let restricted = self.env.restricted.clone();
-        let scheme = match self.e.generalize(level, ty, &restricted) {
+        let scheme = match self.e.generalize(level, ty, value.binding()) {
             Ok(scheme) => scheme,
             Err(e) => {
                 self.report.add(value_span, e.into());
