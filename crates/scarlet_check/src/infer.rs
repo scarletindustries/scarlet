@@ -26,7 +26,7 @@ use crate::typed::{
     self, Arg, Arm, ArrayElem, BinOp, BinSeg, BinSegPat, BinUnit, BinderId, Block, Expr, ExprKind,
     FieldAt, InterpPart, Lambda, OrShape, Pattern, PatternKind, Spread, Stmt, Var,
 };
-use crate::types::TypeDefs;
+use crate::types::{TypeDefs, TypeLookup};
 
 /// What inference carries down the tree.
 #[derive(Clone, Copy)]
@@ -268,7 +268,11 @@ impl Infer<'_, '_> {
             .zip(bindings)
             .map(|(&(_, ty, _, _), binding)| (ty, binding))
             .collect();
-        let schemes = match self.e.generalize_all(level, &items) {
+        let types = TypeLookup {
+            env: self.env,
+            own: &self.defs.types,
+        };
+        let schemes = match self.e.generalize_all(level, &items, &types) {
             Ok(schemes) => schemes,
             Err(e) => {
                 let span = members
@@ -490,7 +494,11 @@ impl Infer<'_, '_> {
             }
             None => value.ty,
         };
-        let scheme = match self.e.generalize(level, ty, value.binding()) {
+        let types = TypeLookup {
+            env: self.env,
+            own: &self.defs.types,
+        };
+        let scheme = match self.e.generalize(level, ty, value.binding(), &types) {
             Ok(scheme) => scheme,
             Err(e) => {
                 self.report.add(value_span, e.into());

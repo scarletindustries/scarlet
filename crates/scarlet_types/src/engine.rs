@@ -11,7 +11,7 @@
 //! [`Level`], which only [`Engine::leave`] or [`Engine::generalize`] take
 //! back, so going deeper and coming back out are one value's two ends.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::convert::Infallible;
 
 use scarlet_ir::tivec::{Idx, TiVec};
@@ -19,6 +19,7 @@ use scarlet_ir::tivec::{Idx, TiVec};
 use crate::known::Known;
 use crate::name::{Name, TypeName};
 use crate::ty::{Constraint, Scheme, Type, TypeVar};
+use crate::variance::{Variance, Variances};
 
 /// An inference type: an index into the engine's arena. Only
 /// [`Engine::push`] makes one.
@@ -640,16 +641,18 @@ impl Engine {
         }
     }
 
-    /// Leave `level`, and quantify every variable in `ty` made at it or
-    /// deeper, if `binding` says that's safe.
+    /// Leave `level`, and quantify the variables in `ty` made at it or
+    /// deeper that `binding` lets generalise. `types` says which way each
+    /// named type's parameters go.
     pub fn generalize(
         &mut self,
         level: Level,
         ty: Ty,
         binding: Binding,
+        types: &impl Variances,
     ) -> Result<LocalScheme, NotInEngine> {
         Ok(self
-            .generalize_all(level, &[(ty, binding)])?
+            .generalize_all(level, &[(ty, binding)], types)?
             .pop()
             .unwrap_or(LocalScheme::mono(ty)))
     }
@@ -660,41 +663,47 @@ impl Engine {
         &mut self,
         level: Level,
         items: &[(Ty, Binding)],
+        types: &impl Variances,
     ) -> Result<Vec<LocalScheme>, NotInEngine> {
         self.leave(level);
         items
             .iter()
-            .map(|&(ty, binding)| self.quantify(ty, binding))
+            .map(|&(ty, binding)| self.quantify(ty, binding, types))
             .collect()
     }
 
-    fn quantify(&mut self, ty: Ty, binding: Binding) -> Result<LocalScheme, NotInEngine> {
-        match binding {
-            Binding::Value => {
-                let mut vars = Vec::new();
-                self.collect_generalizable(ty, &mut vars)?;
-                Ok(LocalScheme { vars, ty })
-            }
-            Binding::Computed => {
-                // Each variable comes up to the outer level, so no
-                // generalisation out there can quantify it either.
-                let mut free = HashSet::new();
-                self.collect_vars(ty, &mut free)?;
-                let outer = self.level;
-                for v in free {
-                    let var = self.var_mut(v)?;
-                    if let VarState::Unbound { level, constraint } = var.state
-                        && level > outer
-                    {
-                        var.state = VarState::Unbound {
-                            level: outer,
-                            constraint,
-                        };
-                    }
+    fn quantify(
+        &mut self,
+        ty: Ty,
+        binding: Binding,
+        types: &impl Variances,
+    ) -> Result<LocalScheme, NotInEngine> {
+        if binding == Binding::Computed {
+            // Only a variable whose values come out of the binding, and never
+            // go in, may still be generic. Every other one comes up to the
+            // outer level, so no generalisation out there can quantify it
+            // either.
+            let mut uses = HashMap::new();
+            self.collect_uses(ty, Variance::Covariant, types, &mut uses)?;
+            let outer = self.level;
+            for (v, variance) in uses {
+                if variance == Variance::Covariant {
+                    continue;
                 }
-                Ok(LocalScheme::mono(ty))
+                let var = self.var_mut(v)?;
+                if let VarState::Unbound { level, constraint } = var.state
+                    && level > outer
+                {
+                    var.state = VarState::Unbound {
+                        level: outer,
+                        constraint,
+                    };
+                }
             }
         }
+        let mut vars = Vec::new();
+        self.collect_generalizable(ty, &mut vars)?;
+        Ok(LocalScheme { vars, ty })
     }
 
     fn collect_generalizable(&mut self, t: Ty, out: &mut Vec<VarId>) -> Result<(), NotInEngine> {
@@ -726,20 +735,33 @@ impl Engine {
             .try_for_each(|c| self.collect_generalizable(c, out))
     }
 
-    /// Every variable `t` mentions.
-    fn collect_vars(&self, t: Ty, out: &mut HashSet<VarId>) -> Result<(), NotInEngine> {
+    /// How each variable in `t` is used, with `t` itself at `here`.
+    fn collect_uses(
+        &self,
+        t: Ty,
+        here: Variance,
+        types: &impl Variances,
+        uses: &mut HashMap<VarId, Variance>,
+    ) -> Result<(), NotInEngine> {
         match self.root(t)?.1 {
             Node::Var(v) => {
-                out.insert(*v);
+                let seen = uses.entry(*v).or_insert(Variance::Unused);
+                *seen = seen.join(here);
                 Ok(())
             }
-            Node::Con { args, .. } | Node::Tuple(args) => {
-                args.iter().try_for_each(|&a| self.collect_vars(a, out))
+            Node::Con { name, args } => args.iter().enumerate().try_for_each(|(i, &a)| {
+                self.collect_uses(a, here.then(types.variance(name, i)), types, uses)
+            }),
+            Node::Fn { params, ret } => {
+                let inward = here.then(Variance::Contravariant);
+                params
+                    .iter()
+                    .try_for_each(|&p| self.collect_uses(p, inward, types, uses))?;
+                self.collect_uses(*ret, here, types, uses)
             }
-            Node::Fn { params, ret } => params
+            Node::Tuple(elems) => elems
                 .iter()
-                .chain([ret])
-                .try_for_each(|&p| self.collect_vars(p, out)),
+                .try_for_each(|&e| self.collect_uses(e, here, types, uses)),
         }
     }
 
@@ -943,18 +965,39 @@ mod tests {
         );
     }
 
+    /// No named types, so the tests only meet functions and tuples.
+    struct NoTypes;
+
+    impl Variances for NoTypes {
+        fn variance(&self, _: &TypeName, _: usize) -> Variance {
+            Variance::Invariant
+        }
+    }
+
     #[test]
-    fn a_computed_binding_quantifies_nothing_and_pins_its_variables() {
+    fn a_computed_binding_still_generalises_what_only_comes_out() {
+        let mut e = engine();
+        let level = e.enter();
+        let a = e.fresh();
+        let f = e.fun(vec![], a);
+        let s = e.generalize(level, f, Binding::Computed, &NoTypes).unwrap();
+        assert_eq!(s.vars.len(), 1);
+    }
+
+    #[test]
+    fn a_computed_binding_pins_what_goes_in() {
         let mut e = engine();
         let level = e.enter();
         let inner = e.fresh();
         let f = e.fun(vec![inner], inner);
-        let s = e.generalize(level, f, Binding::Computed).unwrap();
+        let s = e.generalize(level, f, Binding::Computed, &NoTypes).unwrap();
         assert!(s.vars.is_empty());
         // The variable came up to the outer level, so generalising there
         // can't quantify it either.
         let outer_level = e.enter();
-        let s2 = e.generalize(outer_level, f, Binding::Value).unwrap();
+        let s2 = e
+            .generalize(outer_level, f, Binding::Value, &NoTypes)
+            .unwrap();
         assert!(s2.vars.is_empty());
     }
 
@@ -965,7 +1008,7 @@ mod tests {
         let level = e.enter();
         let inner = e.fresh();
         let f = e.fun(vec![inner], outer);
-        let s = e.generalize(level, f, Binding::Value).unwrap();
+        let s = e.generalize(level, f, Binding::Value, &NoTypes).unwrap();
         assert_eq!(s.vars.len(), 1);
         let a = e.instantiate(&s).unwrap();
         let b = e.instantiate(&s).unwrap();

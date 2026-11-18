@@ -575,6 +575,12 @@ reject_case! {
         "type Color {\n\tRed\n\tGreen\n}\npub fn main() {\n\tprintln(match Red {\n\t\tRed -> 0\n\t\tGreen -> 1\n\t\t_ -> 2\n\t})\n}\n",
         "unreachable",
     ),
+    /// `@covariant` is a promise about how the host moves a type's values,
+    /// so user code can't make it.
+    covariant_is_only_for_the_standard_library: (
+        "@covariant\npub type Cell(a)\n",
+        "'@covariant' is only allowed in the standard library",
+    ),
     /// `@exhaustive` is gone, because the rule it opted into now applies to
     /// every match.
     the_exhaustive_attribute_is_unknown: (

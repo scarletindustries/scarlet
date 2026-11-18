@@ -4,6 +4,8 @@ pub type Float
 
 pub type String
 
+// Arrays never change, so an element only ever comes out of one.
+@covariant
 pub type Array(a)
 
 pub type Binary

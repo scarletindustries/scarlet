@@ -136,6 +136,8 @@ pub enum CheckError {
     MainTakesParameters,
     VmOutsideStdlib,
     VmOnNonFunction,
+    CovariantOutsideStdlib,
+    CovariantOnNonHostType,
     UnknownAttribute(Name),
     AlreadyDefined(Name),
     /// Where the name the error before this one says is defined twice was
@@ -413,6 +415,13 @@ impl fmt::Display for CheckError {
             ),
             E::VmOutsideStdlib => write!(f, "'@vm' is only allowed in the standard library"),
             E::VmOnNonFunction => write!(f, "'@vm' may only be used on functions"),
+            E::CovariantOutsideStdlib => {
+                write!(f, "'@covariant' is only allowed in the standard library")
+            }
+            E::CovariantOnNonHostType => write!(
+                f,
+                "'@covariant' may only be used on a type with no body. A custom type's variance comes from its fields"
+            ),
             E::UnknownAttribute(a) => write!(f, "Unknown attribute '@{a}'"),
             E::AlreadyDefined(n) => write!(f, "'{n}' is already defined"),
             E::FirstDefinition => write!(f, "first definition was here"),

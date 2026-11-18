@@ -15,6 +15,7 @@ use crate::env::Env;
 use crate::error::CheckError;
 use crate::index::{Def, DefKind, EntityKind};
 use crate::report::Report;
+use crate::types::COVARIANT;
 
 /// A module-level value's position in [`Declared::values`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -121,7 +122,13 @@ pub(crate) fn declare<'a>(
         match stmt.as_ref() {
             ast::Statement::Declaration { decl, public } => match decl.as_ref() {
                 ast::Declaration::Type(td) => {
-                    validate_attributes(&td.attributes, in_stdlib, false, report);
+                    let target = match td.body {
+                        ast::TypeBody::External => AttrTarget::HostType,
+                        ast::TypeBody::Variants { .. } | ast::TypeBody::Alias(_) => {
+                            AttrTarget::Type
+                        }
+                    };
+                    validate_attributes(&td.attributes, in_stdlib, target, report);
                     let dup = duplicate(&mut seen_types, &td.identifier, report);
                     reserved(env, &td.identifier, in_prelude, report);
                     let mut dup_ctors = Vec::new();
@@ -140,7 +147,7 @@ pub(crate) fn declare<'a>(
                     }
                 }
                 ast::Declaration::Function(fd) => {
-                    validate_attributes(&fd.attributes, in_stdlib, true, report);
+                    validate_attributes(&fd.attributes, in_stdlib, AttrTarget::Function, report);
                     if fd.identifier.name == "main" && env.input.role == Role::Entry {
                         main_rules(fd, *public, report);
                     }
@@ -237,10 +244,20 @@ fn main_rules(fd: &ast::FunctionDeclaration, public: bool, report: &mut Report) 
     }
 }
 
+/// What an attribute is written on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AttrTarget {
+    Function,
+    /// A type with no body, which the host backs.
+    HostType,
+    /// A custom type or an alias.
+    Type,
+}
+
 fn validate_attributes(
     attrs: &[ast::Attribute],
     in_stdlib: bool,
-    on_fn: bool,
+    target: AttrTarget,
     report: &mut Report,
 ) {
     for a in attrs {
@@ -249,8 +266,18 @@ fn validate_attributes(
                 if !in_stdlib {
                     report.add(a.span, CheckError::VmOutsideStdlib);
                 }
-                if !on_fn {
+                if target != AttrTarget::Function {
                     report.add(a.span, CheckError::VmOnNonFunction);
+                }
+            }
+            // A promise about how the host moves a type's values, so only the
+            // standard library, which the host implements, can make it.
+            COVARIANT => {
+                if !in_stdlib {
+                    report.add(a.span, CheckError::CovariantOutsideStdlib);
+                }
+                if target != AttrTarget::HostType {
+                    report.add(a.span, CheckError::CovariantOnNonHostType);
                 }
             }
             other => report.add(a.span, CheckError::UnknownAttribute(other.into())),

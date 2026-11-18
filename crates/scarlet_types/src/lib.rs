@@ -30,5 +30,6 @@ pub mod known;
 pub mod name;
 pub mod slots;
 pub mod ty;
+pub mod variance;
 
 pub use scarlet_ir::intrinsic;

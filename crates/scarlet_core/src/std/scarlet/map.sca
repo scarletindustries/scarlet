@@ -2,6 +2,7 @@ import scarlet/array
 
 // An immutable map. `set` and `delete` return a new map and leave the old one
 // as it was. The two share structure, so neither is a copy.
+@covariant
 pub type Map(k, v)
 
 @vm(map__new)

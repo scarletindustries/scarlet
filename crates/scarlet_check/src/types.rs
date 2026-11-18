@@ -14,6 +14,7 @@ use scarlet_syntax::span::Span;
 use scarlet_types::def::{FieldDef, TypeBody, TypeDef, VariantDef};
 use scarlet_types::name::{CtorName, Name, TypeName};
 use scarlet_types::ty::{Scheme, Type, TypeVar};
+use scarlet_types::variance::{self, Variance, Variances};
 
 use crate::annot::{AnnotContext, AnnotVars, Annotations, NamedType, OwnTypes};
 use crate::declare::{Declared, TypeDecl};
@@ -141,7 +142,9 @@ pub(crate) fn define_types(
             ast::TypeBody::External => TypeDef {
                 name: head.name.clone(),
                 params: head.params.clone(),
-                body: TypeBody::External,
+                body: TypeBody::External {
+                    variance: host_variance(td, head.params.len()),
+                },
                 public: t.public,
                 doc: td.doc.clone(),
                 span: td.identifier.span,
@@ -155,6 +158,8 @@ pub(crate) fn define_types(
                     body: TypeBody::Variants {
                         variants,
                         constructors_public,
+                        // Raised to what the fields say by `settle_variance`.
+                        variance: vec![Variance::Unused; head.params.len()],
                     },
                     public: t.public,
                     doc: td.doc.clone(),
@@ -166,7 +171,93 @@ pub(crate) fn define_types(
         };
         types.insert(td.identifier.name.as_str().into(), def);
     }
+    settle_variance(env, &mut types);
     TypeDefs { types, ctors }
+}
+
+/// A host type's variance: covariant throughout when its declaration says
+/// `@covariant`, and otherwise invariant.
+fn host_variance(td: &ast::TypeDeclaration, params: usize) -> Vec<Variance> {
+    let covariant = td.attributes.iter().any(|a| a.name.name == COVARIANT);
+    let each = if covariant {
+        Variance::Covariant
+    } else {
+        Variance::Invariant
+    };
+    vec![each; params]
+}
+
+/// The attribute that marks a host type's parameters covariant.
+pub(crate) const COVARIANT: &str = "covariant";
+
+/// Work out each custom type's variance from its fields. Types can name each
+/// other, so every parameter starts at `Unused` and takes in what the fields
+/// say until nothing changes. A pass can only raise a variance, and there are
+/// four levels, so this ends.
+fn settle_variance(env: &Env<'_>, types: &mut IndexMap<Name, TypeDef>) {
+    loop {
+        let mut changed = false;
+        for i in 0..types.len() {
+            let Some(next) = field_variance(env, types, i) else {
+                continue;
+            };
+            if let Some((_, def)) = types.get_index_mut(i)
+                && let TypeBody::Variants { variance, .. } = &mut def.body
+                && *variance != next
+            {
+                *variance = next;
+                changed = true;
+            }
+        }
+        if !changed {
+            return;
+        }
+    }
+}
+
+/// What the fields of type `i` say about each of its parameters, given the
+/// variances known so far. `None` for a type with no fields to read.
+fn field_variance(
+    env: &Env<'_>,
+    types: &IndexMap<Name, TypeDef>,
+    i: usize,
+) -> Option<Vec<Variance>> {
+    let (_, def) = types.get_index(i)?;
+    let variants = def.variants()?;
+    let lookup = TypeLookup { env, own: types };
+    Some(
+        def.params
+            .iter()
+            .map(|p| {
+                variants
+                    .iter()
+                    .flat_map(|v| &v.fields)
+                    .fold(Variance::Unused, |acc, f| {
+                        acc.join(variance::of_var(&f.ty, p, &lookup))
+                    })
+            })
+            .collect(),
+    )
+}
+
+/// Every type a module check can reach, for reading variances.
+#[derive(Clone, Copy)]
+pub(crate) struct TypeLookup<'e, 'a> {
+    pub env: &'e Env<'a>,
+    pub own: &'e IndexMap<Name, TypeDef>,
+}
+
+impl Variances for TypeLookup<'_, '_> {
+    fn variance(&self, ty: &TypeName, param: usize) -> Variance {
+        let def = if *ty.module() == self.env.key {
+            self.own.get(ty.name())
+        } else {
+            self.env
+                .interface_of(ty.module())
+                .and_then(|i| i.types.get(ty.name()))
+        };
+        def.map_or(Variance::Invariant, |d| d.variance(param))
+    }
 }
 
 fn annotations<'e, 'a>(

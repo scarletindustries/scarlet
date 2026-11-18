@@ -2,6 +2,7 @@
 
 use crate::name::{Name, TypeName};
 use crate::ty::{Type, TypeVar};
+use crate::variance::Variance;
 use scarlet_syntax::span::Span;
 
 /// A `type` declaration, as an importer sees it. Field and alias types refer
@@ -25,11 +26,17 @@ pub enum TypeBody {
         /// Whether importers can see the constructors. An opaque type's
         /// constructors exist, but only its own module can name them.
         constructors_public: bool,
+        /// How each parameter is used, in `params` order, worked out from
+        /// the fields.
+        variance: Vec<Variance>,
     },
-    /// The target, with the alias's parameters as variables.
+    /// The target, with the alias's parameters as variables. An alias never
+    /// appears in a checked type, so it has no variance of its own.
     Alias(Type),
     /// A type the host backs, with no constructors at all: `Int`, a socket.
-    External,
+    /// Its parameters are invariant unless the declaration says `@covariant`,
+    /// since nothing in Scarlet shows which way the host moves its values.
+    External { variance: Vec<Variance> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,7 +58,18 @@ impl TypeDef {
     pub fn variants(&self) -> Option<&[VariantDef]> {
         match &self.body {
             TypeBody::Variants { variants, .. } => Some(variants),
-            TypeBody::Alias(_) | TypeBody::External => None,
+            TypeBody::Alias(_) | TypeBody::External { .. } => None,
+        }
+    }
+
+    /// How parameter `param` is used. An alias, or a parameter the type
+    /// doesn't have, is taken as invariant, which never generalises wrongly.
+    pub fn variance(&self, param: usize) -> Variance {
+        match &self.body {
+            TypeBody::Variants { variance, .. } | TypeBody::External { variance } => {
+                variance.get(param).copied().unwrap_or(Variance::Invariant)
+            }
+            TypeBody::Alias(_) => Variance::Invariant,
         }
     }
 

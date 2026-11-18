@@ -465,6 +465,28 @@ reject_case! {
          }\n",
         "Type mismatch: expected 'Int', got 'String'",
     ),
+    /// U24c: the same mailbox, behind a custom type whose field takes the
+    /// message in. That makes the type's parameter contravariant, so the
+    /// binding is pinned like the bare closure would be.
+    u24_subject_behind_a_custom_type_does_not_generalize: (
+        "import scarlet/process\n\
+         import scarlet/string\n\
+         type Pair(a) {\n\
+         \tPair(send fn(a) Nil, recv fn() a)\n\
+         }\n\
+         fn pair() Pair(a) {\n\
+         \ts = process::subject()\n\
+         \tPair(send: fn(x) process::send(s, x), recv: fn() process::receive(s))\n\
+         }\n\
+         pub fn main() {\n\
+         \tp = pair()\n\
+         \tPair(send:, ..) = p\n\
+         \tPair(recv:, ..) = p\n\
+         \tsend(1)\n\
+         \tprintln(string::length(recv()))\n\
+         }\n",
+        "Type mismatch: expected 'String', got 'Int'",
+    ),
     /// U24b: the same mailbox hidden inside closures. The binding's type
     /// names no `Subject`, so only the value restriction catches it: `pair()`
     /// is a call, so `p` keeps one type and `recv` gives back what `send` put
@@ -493,6 +515,38 @@ ok_case! {
         "pub fn main() {\n\
          \tid = fn(x) x\n\
          \tprintln('${id(1)} ${id('one')}')\n\
+         }\n",
+    ),
+    /// A call's result stays generic over what only comes out of it: an
+    /// empty map never changes, so each use may pick its own types.
+    an_empty_map_from_a_call_stays_generic: (
+        "import scarlet/map\n\
+         pub fn main() {\n\
+         \tm = map::new()\n\
+         \ta = map::set(m, 'age', 30)\n\
+         \tb = map::set(m, 'name', 'Ann')\n\
+         \tprintln('${map::size(a)} ${map::size(b)}')\n\
+         }\n",
+    ),
+    /// A custom type's parameter is covariant when its fields only hand it
+    /// out, recursion included.
+    a_covariant_custom_type_from_a_call_stays_generic: (
+        "type Stack(a) {\n\
+         \tEmpty\n\
+         \tTop(item a, rest Stack(a))\n\
+         }\n\
+         fn empty() Stack(a) {\n\
+         \tEmpty\n\
+         }\n\
+         fn depth(s Stack(a)) Int {\n\
+         \tmatch s {\n\
+         \t\tEmpty -> 0\n\
+         \t\tTop(rest:, ..) -> 1 + depth(rest)\n\
+         \t}\n\
+         }\n\
+         pub fn main() {\n\
+         \ts = empty()\n\
+         \tprintln('${depth(Top(item: 1, rest: s))} ${depth(Top(item: 'a', rest: s))}')\n\
          }\n",
     ),
     /// So is a constructor of values, like an empty array.
