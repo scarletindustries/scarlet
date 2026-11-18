@@ -558,10 +558,11 @@ reject_case! {
         "type Color {\n\tRed\n\tGreen\n\tBlue\n}\npub fn main() {\n\tprintln(match Red {\n\t\tRed -> 1\n\t\tc -> show(c)\n\t})\n}\nfn show(c Color) Int { 2 }\n",
         "This pattern stands for Green, Blue",
     ),
-    /// A guarded arm still names its variant.
+    /// A guarded arm still names its variant. The catch-all also stands for
+    /// the values of that variant the guard turns away, so it lists both.
     a_guarded_arm_still_names_its_variant: (
         "pub fn main() {\n\tprintln(match Some(1) {\n\t\tSome(n) if n > 0 -> n\n\t\t_ -> 0\n\t})\n}\n",
-        "This pattern stands for None",
+        "This pattern stands for Some(..), None. Name them instead, like `Some(..) | None ->`",
     ),
     /// Inside a tuple, the rule applies to each column the arms split.
     a_wildcard_in_a_tuple_column_is_held_to_it_too: (
@@ -590,6 +591,10 @@ ok_case! {
     /// Numbers, strings and binaries can't be listed, so `_` stays.
     a_wildcard_over_values_that_cannot_be_listed_is_fine: (
         "pub fn main() {\n\tprintln(match 3 {\n\t\t1 -> 'one'\n\t\t_ -> 'many'\n\t})\n}\n",
+    ),
+    /// The arms a guarded arm's catch-all asks for are enough.
+    naming_what_a_guarded_catch_all_stood_for_is_enough: (
+        "pub fn main() {\n\tprintln(match Some(1) {\n\t\tSome(n) if n > 0 -> n\n\t\tSome(..) | None -> 0\n\t})\n}\n",
     ),
     /// An or-pattern inside a constructor names its variants in place.
     an_or_pattern_inside_a_constructor_names_them: (

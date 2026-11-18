@@ -94,6 +94,15 @@ fn parity(n Int) String {
 
 // --- guards -------------------------------------------------------------------
 
+// When a guard turns down one alternative of an or-pattern, the next
+// alternative gets its turn, with its own bindings.
+fn either_big(p (Int, Int)) String {
+	match p {
+		(x, _) | (_, x) if x > 5 -> 'big ${x}'
+		_ -> 'small'
+	}
+}
+
 // A guarded arm never counts toward exhaustiveness: the unguarded `n` arm is
 // required even though the two guards look total.
 fn sign(n Int) String {
@@ -243,6 +252,14 @@ fn frame(b Binary) String {
 	}
 }
 
+// A negative `size(...)` matches nothing, so the next arm runs.
+fn first_bits(b Binary, n Int) Int {
+	match b {
+		<<v:size(n), .._rest>> -> v
+		_ -> -1
+	}
+}
+
 // --- irrefutable destructuring statements -------------------------------------
 
 type Point {
@@ -275,6 +292,9 @@ pub fn main() {
 	check('or-pattern in array slot misses', 'other', header([8, 9]))
 
 	check('wildcard arm matches', 'even digit', parity(4))
+	check('guard passes first alternative', 'big 7', either_big((7, 9)))
+	check('guard tries next alternative', 'big 9', either_big((1, 9)))
+	check('guard fails every alternative', 'small', either_big((1, 2)))
 	check('wildcard arm catches the rest', 'anything else', parity(5))
 
 	check('guard true branch', 'positive', sign(4))
@@ -333,6 +353,8 @@ pub fn main() {
 	// A segment width can be a runtime expression.
 	width = 3
 	check('binary size(expr)', '<<0, 0, 5>>', '${<<5:size(width * 8)>>}')
+	check('binary negative size', '-1', '${first_bits(<<1, 2>>, -8)}')
+	check('binary zero size', '0', '${first_bits(<<1, 2>>, 0)}')
 
 	// Single-constructor types destructure without a match.
 	Point(px, py) = Point(x: 3, y: 4)

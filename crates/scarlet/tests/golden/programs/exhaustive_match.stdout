@@ -15,6 +15,9 @@ PASS or-pattern in tuple slot misses
 PASS or-pattern in array slot
 PASS or-pattern in array slot misses
 PASS wildcard arm matches
+PASS guard passes first alternative
+PASS guard tries next alternative
+PASS guard fails every alternative
 PASS wildcard arm catches the rest
 PASS guard true branch
 PASS guard second branch
@@ -51,6 +54,8 @@ PASS binary utf8 + widths + bytes(n) + rest
 PASS binary empty
 PASS binary wildcard
 PASS binary size(expr)
+PASS binary negative size
+PASS binary zero size
 PASS ctor destructuring binding
 PASS tuple destructuring binding
 typed discard runs for its effect

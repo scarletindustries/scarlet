@@ -561,18 +561,44 @@ fn is_useful(m: &PatternMatrix, pats: &PatStack, types: &TypeStack) -> bool {
     }
 }
 
+/// The arms before a possible catch-all, seen two ways. `named` is every
+/// earlier arm, guarded or not, since a guarded arm still names its variant.
+/// `covered` is only the unguarded ones, since only those surely match.
+struct Earlier {
+    named: PatternMatrix,
+    covered: PatternMatrix,
+}
+
+impl Earlier {
+    fn specialize(&self, ctor: &CtorInfo) -> Earlier {
+        Earlier {
+            named: self.named.specialize(ctor),
+            covered: self.covered.specialize(ctor),
+        }
+    }
+
+    fn default_matrix(&self) -> Earlier {
+        Earlier {
+            named: self.named.default_matrix(),
+            covered: self.covered.default_matrix(),
+        }
+    }
+}
+
 /// The variants a wildcard in `pats` stands in for. That's a `_` (or a bare
-/// name) in a column whose type has named variants, where the rows of `m` name
-/// some of them but not all. A wildcard over a whole value that no arm split
-/// doesn't count, and nor does one over a type whose values can't be listed
-/// (numbers, strings, array lengths).
-fn catch_all(m: &PatternMatrix, pats: &PatStack, types: &TypeStack) -> Option<Vec<CtorInfo>> {
+/// name) in a column whose type has named variants, where the earlier arms
+/// name some of them but not all. The variants listed are the ones the
+/// wildcard can still match: those no unguarded arm covers, so a variant only
+/// a guarded arm names is listed too. A wildcard over a whole value that no
+/// arm split doesn't count, and nor does one over a type whose values can't be
+/// listed (numbers, strings, array lengths).
+fn catch_all(m: &Earlier, pats: &PatStack, types: &TypeStack) -> Option<Vec<CtorInfo>> {
     let (first_pat, rest_pats) = pats.split()?;
     let (first_type, rest_types) = types.split()?;
     let type_ctors = get_type_ctors(first_type);
     match first_pat {
         Pat::Wildcard => {
-            let seen = m.first_col_ctors();
+            let seen = m.named.first_col_ctors();
             let complete = is_complete(&seen, &type_ctors);
             if complete {
                 // Every variant is named somewhere, so look inside each.
@@ -582,13 +608,18 @@ fn catch_all(m: &PatternMatrix, pats: &PatStack, types: &TypeStack) -> Option<Ve
                     catch_all(&m.specialize(ctor), &new_pats, &new_types)
                 });
             }
-            let named = !m.rows.is_empty() && type_ctors.ctors.iter().any(|c| seen.contains(c.id));
+            let named =
+                !m.named.rows.is_empty() && type_ctors.ctors.iter().any(|c| seen.contains(c.id));
             if named && matches!(first_type, RcType::Named(_)) {
                 return Some(
                     type_ctors
                         .ctors
                         .iter()
-                        .filter(|c| !seen.contains(c.id))
+                        .filter(|c| {
+                            let pats = PatStack::prepend_n(Pat::Wildcard, c.arity, rest_pats);
+                            let types = TypeStack::prepend(&c.types, rest_types);
+                            is_useful(&m.covered.specialize(c), &pats, &types)
+                        })
                         .cloned()
                         .collect(),
                 );
@@ -887,7 +918,9 @@ pub fn analyse<'p, P: PatternShape>(
     for (i, (&(arm, guarded), pat)) in arms.iter().zip(&pats).enumerate() {
         if !um.is_useful(pat) {
             report.unreachable.push(arm);
-        } else if let Some(missing) = um.catch_all(pats.iter().take(i), pat)? {
+        } else if let Some(missing) =
+            um.catch_all(pats.iter().zip(arms.iter().map(|&(_, g)| g)).take(i), pat)?
+        {
             report.catch_alls.push((arm, missing));
         }
         if !guarded {
@@ -946,16 +979,22 @@ impl UsefulnessMatrix {
 
     /// The variants `pat` covers with a wildcard even though `earlier` arms
     /// name others of the same value, shown as patterns (`Absent`,
-    /// `Present(..)`). `earlier` is every arm before `pat`, guarded or not,
-    /// because a guarded arm still names the variant it's about.
+    /// `Present(..)`). `earlier` is every arm before `pat`, each with whether
+    /// it's guarded.
     fn catch_all<'a>(
         &self,
-        earlier: impl IntoIterator<Item = &'a Pat>,
+        earlier: impl IntoIterator<Item = (&'a Pat, bool)>,
         pat: &Pat,
     ) -> Result<Option<Vec<String>>, UnknownCtor> {
-        let mut matrix = PatternMatrix::default();
-        for p in earlier {
-            matrix.rows.push(PatStack::one(p.clone()));
+        let mut matrix = Earlier {
+            named: PatternMatrix::default(),
+            covered: PatternMatrix::default(),
+        };
+        for (p, guarded) in earlier {
+            matrix.named.rows.push(PatStack::one(p.clone()));
+            if !guarded {
+                matrix.covered.rows.push(PatStack::one(p.clone()));
+            }
         }
         let types = TypeStack::one(self.subject_type.clone());
         let Some(missing) = catch_all(&matrix, &PatStack::one(pat.clone()), &types) else {
@@ -1121,7 +1160,8 @@ mod tests {
         let mut um = UsefulnessMatrix::new(t);
         let ipats: Vec<Pat> = pats.iter().map(|p| um.intern(p)).collect();
         let (last, earlier) = ipats.split_last()?;
-        um.catch_all(earlier, last).unwrap()
+        um.catch_all(earlier.iter().map(|p| (p, false)), last)
+            .unwrap()
     }
 
     #[test]

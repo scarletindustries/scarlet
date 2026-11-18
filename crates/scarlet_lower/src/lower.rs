@@ -109,13 +109,11 @@ enum ArmLeaf<'p> {
     BinCont(Box<BinCont<'p>>),
     /// An alternative of an or-pattern that binds names has matched, so its
     /// commit path can't be shared. Carry on with the sub-patterns queued
-    /// after the or-pattern, then `leaf`. A failure falls to `outer` and not to
-    /// the next alternative, because the first match commits and a later
-    /// failure goes to the next arm.
+    /// after the or-pattern, then `leaf`. A failure tries the next
+    /// alternative, because its bindings may pass a guard this one's failed.
     OrBody {
         rest_nested: Vec<(LocalId, &'p TypedPat)>,
         leaf: Box<ArmLeaf<'p>>,
-        outer: JoinId,
     },
     /// An alternative of an or-pattern that binds nothing has matched. Jump to
     /// the commit continuation, which is lowered once for all alternatives.
@@ -149,6 +147,8 @@ struct BinWalk {
     bin: LocalId,
     total: LocalId,
     cursor: LocalId,
+    /// The Int constant 0.
+    zero: ConstId,
 }
 
 /// How wide a fixed-position `<<>>` segment read is. A `Sized` read gets the
@@ -1028,13 +1028,13 @@ impl Lower {
     /// tries the next one, and the last one falls to `outer`, so none is
     /// lowered twice.
     ///
-    /// The commit path always falls to `outer`, never to a try-the-next join,
-    /// because the first matching alternative commits and a later miss goes to
-    /// the next arm. With no bindings, the commit path is one shared join
-    /// ([`ArmLeaf::OrCommit`]). An or-pattern that binds names lowers it once
-    /// per alternative ([`ArmLeaf::OrBody`]). Each alternative binds the same
-    /// [`BindingId`]s to its own locals, and a continuation with no parameters
-    /// can't receive them.
+    /// With no bindings, the commit path is one shared join
+    /// ([`ArmLeaf::OrCommit`]), and a miss after it falls to `outer`: every
+    /// alternative would lead to the same miss. An or-pattern that binds names
+    /// lowers it once per alternative ([`ArmLeaf::OrBody`]), and a miss there
+    /// (a failed guard, say) tries the next alternative, as in Gleam and Rust.
+    /// Each alternative binds the same [`BindingId`]s to its own locals, and a
+    /// continuation with no parameters can't receive them.
     fn or_alternatives<'p>(
         &mut self,
         scrut: LocalId,
@@ -1063,7 +1063,6 @@ impl Lower {
                 None => ArmLeaf::OrBody {
                     rest_nested: rest_nested.clone(),
                     leaf: Box::new(leaf.clone()),
-                    outer,
                 },
             };
             let t =
@@ -1128,11 +1127,9 @@ impl Lower {
                         self.guard_if(cond, then, fall, result_ty)
                     }
                     ArmLeaf::BinCont(bc) => self.bin_segments(*bc, fall, result_ty)?,
-                    ArmLeaf::OrBody {
-                        rest_nested,
-                        leaf,
-                        outer,
-                    } => self.nested_arm_body(rest_nested.into(), *leaf, outer, result_ty)?,
+                    ArmLeaf::OrBody { rest_nested, leaf } => {
+                        self.nested_arm_body(rest_nested.into(), *leaf, fall, result_ty)?
+                    }
                     ArmLeaf::OrCommit(j) => Tree::goto(j),
                 });
             };
@@ -1343,7 +1340,12 @@ impl Lower {
             // An Int or Binary segment, whose width is the size expression in
             // bits. A `:binary` segment with no size takes the rest.
             TypedBinPatSeg::Int { bits, value } => self.bin_read(
-                BinWalk { bin, total, cursor },
+                BinWalk {
+                    bin,
+                    total,
+                    cursor,
+                    zero,
+                },
                 SegWidth::Sized(bits),
                 PrimOp::BinaryReadInt,
                 int_t,
@@ -1358,7 +1360,12 @@ impl Lower {
                     None => SegWidth::Remainder,
                 };
                 self.bin_read(
-                    BinWalk { bin, total, cursor },
+                    BinWalk {
+                        bin,
+                        total,
+                        cursor,
+                        zero,
+                    },
                     width,
                     PrimOp::BinaryView,
                     bin_ty,
@@ -1388,7 +1395,12 @@ impl Lower {
     ) -> R<Tree> {
         let int_t = self.temps.int;
         let bool_t = self.temps.bool;
-        let BinWalk { bin, total, cursor } = walk;
+        let BinWalk {
+            bin,
+            total,
+            cursor,
+            zero,
+        } = walk;
         let read = |lo: &mut Self, width: LocalId, end: LocalId| -> R<Tree> {
             lo.sealed_tree(|lo| {
                 let sv = lo.let_(val_ty, Atom::prim(read_op, vec![bin, cursor, width]))?;
@@ -1397,12 +1409,18 @@ impl Lower {
             })
         };
         match width {
+            // A negative width matches nothing, like a read past the end.
             SegWidth::Sized(bits) => {
                 let width = self.operand(bits)?;
-                let end = self.let_(int_t, Atom::prim(PrimOp::IntAdd, vec![cursor, width]))?;
-                let ok = self.let_(bool_t, Atom::prim(PrimOp::IntLe, vec![end, total]))?;
-                let then_e = read(self, width, end)?;
-                Ok(self.guard_if(ok, then_e, fall, result_ty))
+                let none = self.int_const(zero)?;
+                let sized = self.let_(bool_t, Atom::prim(PrimOp::IntGe, vec![width, none]))?;
+                let fits = self.sealed_tree(|lo| {
+                    let end = lo.let_(int_t, Atom::prim(PrimOp::IntAdd, vec![cursor, width]))?;
+                    let ok = lo.let_(bool_t, Atom::prim(PrimOp::IntLe, vec![end, total]))?;
+                    let then_e = read(lo, width, end)?;
+                    Ok(lo.guard_if(ok, then_e, fall, result_ty))
+                })?;
+                Ok(self.guard_if(sized, fits, fall, result_ty))
             }
             SegWidth::Remainder => {
                 let width = self.let_(int_t, Atom::prim(PrimOp::IntSub, vec![total, cursor]))?;
