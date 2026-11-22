@@ -33,6 +33,8 @@ use crate::stop::{Broken, Missing};
 use crate::value::{Value, View};
 use crate::word::to_usize;
 
+mod net;
+
 struct Frame<'c> {
     body: &'c Body,
     pc: usize,
@@ -93,6 +95,7 @@ impl<'c, 'h> Machine<'c, 'h> {
             self.release(last);
             last = v;
         }
+        self.let_go_of_handles();
         Ok(last)
     }
 
@@ -1526,6 +1529,26 @@ impl<'c, 'h> Machine<'c, 'h> {
                     self.heap.string(text.as_bytes()).map_err(full)?,
                 ))
             }
+            Intrinsic::AddressParse
+            | Intrinsic::NetResolve
+            | Intrinsic::NetResolveUntil
+            | Intrinsic::NetListen
+            | Intrinsic::NetAccept
+            | Intrinsic::NetConnect
+            | Intrinsic::NetConnectUntil
+            | Intrinsic::NetLocalAddr
+            | Intrinsic::NetClose
+            | Intrinsic::SocketRead
+            | Intrinsic::SocketReadUntil
+            | Intrinsic::SocketWrite
+            | Intrinsic::SocketWriteParts
+            | Intrinsic::SocketClose
+            | Intrinsic::TlsHandshake
+            | Intrinsic::TlsHandshakeUntil
+            | Intrinsic::TlsRead
+            | Intrinsic::TlsReadUntil
+            | Intrinsic::TlsWrite
+            | Intrinsic::TlsClose => self.net_builtin(i, base, args),
             other => Err(Stop::missing(Missing::Intrinsic(other))),
         }
     }

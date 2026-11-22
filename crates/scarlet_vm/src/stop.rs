@@ -134,6 +134,11 @@ pub(crate) enum Broken {
     NotJson(View),
     NoHttpTypes,
     NotHeaders(View),
+    NoAddressTypes,
+    NoNetTypes,
+    NoTlsTypes,
+    NotAHandle(View),
+    NotASocketAddress(View),
     NotAMap(View),
     NotAnArray(View),
     RangeEnd(View),
@@ -234,6 +239,17 @@ impl fmt::Display for BadProgram {
                 f.write_str("an HTTP built-in, in a program with no `scarlet/http/h1` types")
             }
             Broken::NotHeaders(v) => write!(f, "{v:?} as `Headers`"),
+            Broken::NoAddressTypes => {
+                f.write_str("a network built-in, in a program with no `scarlet/net/address` types")
+            }
+            Broken::NoNetTypes => {
+                f.write_str("a network built-in, in a program with no `scarlet/net/socket` types")
+            }
+            Broken::NoTlsTypes => {
+                f.write_str("a TLS built-in, in a program with no `scarlet/net/tls` types")
+            }
+            Broken::NotAHandle(v) => write!(f, "{v:?} as a socket or a listener"),
+            Broken::NotASocketAddress(v) => write!(f, "{v:?} as a `SocketAddress`"),
             Broken::NotAMap(v) => write!(f, "a map operation on {v:?}, which is not a map"),
             Broken::NotAnArray(v) => {
                 write!(f, "an array operation on {v:?}, which is not an array")

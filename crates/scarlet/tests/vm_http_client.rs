@@ -69,7 +69,7 @@ pub fn main() {{
 					}}
 				}}
 				shut = io.close
-				shut() or Nil
+				_ = shut()
 			}}
 		}}
 		Err(e) -> println('connect failed: ${{e}}')
@@ -116,7 +116,6 @@ fn run_bounded(tag: &str, src: &str, secs: u64) -> (Option<i32>, String) {
 /// A peer that accepts and never sends must hit the client's read deadline as
 /// `Transport(TimedOut)` rather than parking forever.
 #[test]
-#[ignore = "needs the VM"]
 fn http_send_until_times_out_against_a_silent_peer() {
     let port = spawn_silent_peer(Duration::from_secs(30));
     let (code, out) = run_bounded("http_hang", &client_src(port, 200), 10);
@@ -139,7 +138,6 @@ fn http_send_until_times_out_against_a_silent_peer() {
 /// peer that does send. A failing hang test next to this one means the deadline
 /// fired, not that the client is broken.
 #[test]
-#[ignore = "needs the VM"]
 fn http_send_until_returns_a_response() {
     let port = spawn_http_peer(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
     let (code, out) = run_bounded("http_ok", &client_src(port, 5000), 10);

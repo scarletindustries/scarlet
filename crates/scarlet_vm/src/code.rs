@@ -2015,6 +2015,24 @@ fn built(i: Intrinsic, argc: usize) -> bool {
         | Intrinsic::BinaryEqIgnoreAsciiCase
         | Intrinsic::BinaryFromIntAscii => 2,
         Intrinsic::BinarySliceBits | Intrinsic::BinaryIndexOf => 3,
+        Intrinsic::AddressParse
+        | Intrinsic::NetResolve
+        | Intrinsic::NetListen
+        | Intrinsic::NetAccept
+        | Intrinsic::NetConnect
+        | Intrinsic::NetLocalAddr
+        | Intrinsic::NetClose
+        | Intrinsic::SocketClose
+        | Intrinsic::TlsClose => 1,
+        Intrinsic::NetResolveUntil
+        | Intrinsic::NetConnectUntil
+        | Intrinsic::SocketRead
+        | Intrinsic::SocketWrite
+        | Intrinsic::SocketWriteParts
+        | Intrinsic::TlsHandshake
+        | Intrinsic::TlsRead
+        | Intrinsic::TlsWrite => 2,
+        Intrinsic::SocketReadUntil | Intrinsic::TlsHandshakeUntil | Intrinsic::TlsReadUntil => 3,
         _ => return false,
     };
     argc == arity

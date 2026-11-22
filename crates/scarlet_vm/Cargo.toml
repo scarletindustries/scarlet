@@ -16,6 +16,11 @@ getrandom = "0.4"
 # crypto rustls links for TLS. We turn off the default `ring-io` and
 # `ring-sig-verify` features, which only add `ring`-shaped APIs we don't call.
 aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys", "alloc"] }
+# TLS for `scarlet/net/tls`, with aws-lc's crypto. Trust roots come from the
+# machine's own store, with webpki-roots' bundle when it has none.
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12", "logging"] }
+rustls-native-certs = "0.8"
+webpki-roots = "1"
 # Gives the OS error numbers that `scarlet/io.IoError` names.
 libc = "0.2"
 # Parses JSON for `scarlet/json`. It's simdjson's Rust port, and it picks its

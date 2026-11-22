@@ -106,6 +106,13 @@ fn value<'t>(
                 }
             },
             Some(Kind::Map) => map(heap, cell, todo),
+            // A socket or a listener shows as the host's number for it.
+            Some(Kind::Handle) => {
+                out.extend_from_slice(b"<handle#");
+                let n = heap.data(cell).first().copied().unwrap_or(0);
+                out.extend_from_slice(n.to_string().as_bytes());
+                out.push(b'>');
+            }
             Some(Kind::ArrayLeaf | Kind::ArrayBranch | Kind::MapNode | Kind::MapCollision) => {
                 return Err(Stop::broken(Broken::TreePiece));
             }
@@ -407,7 +414,7 @@ fn small(heap: &Heap, v: Value) -> bool {
         | View::Nullary(_) => true,
         View::Cell(cell) => match heap.kind(cell) {
             Some(Kind::String) => heap.string_len(cell) < SMALL_STRING,
-            Some(Kind::BigInt | Kind::Closure) => true,
+            Some(Kind::BigInt | Kind::Closure | Kind::Handle) => true,
             // Up to 8 bytes, as the old VM had it.
             Some(Kind::Binary | Kind::BinarySlice) => {
                 crate::binary::bits(heap, cell).is_some_and(|b| b.len.div_ceil(8) <= 8)

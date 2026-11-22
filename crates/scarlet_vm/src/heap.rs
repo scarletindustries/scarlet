@@ -108,6 +108,10 @@ pub(crate) enum Kind {
     Map = 12,
     MapNode = 13,
     MapCollision = 14,
+    /// Something the host holds for the program, like a socket: one word,
+    /// the host's number for it. When the cell is freed, the number goes on
+    /// [`Heap::take_released`]'s list, for the host to let go of.
+    Handle = 15,
 }
 
 /// A heap that has run out of the cells a [`Cell`] can name. It is a limit of
@@ -181,6 +185,9 @@ pub(crate) struct Heap {
     /// The cells a [`Heap::release`] still has to give a reference up for.
     /// Kept between calls so a release does not allocate.
     dying: Vec<Cell>,
+    /// The numbers of handle cells freed since the last
+    /// [`Heap::take_released`].
+    released: Vec<u64>,
 }
 
 impl Heap {
@@ -339,7 +346,15 @@ impl Heap {
         count(h) == 1 && kind_bits(h) == Kind::Ctor as u64 && size(h).checked_sub(2) == Some(fields)
     }
 
+    /// The handle numbers freed since this was last asked.
+    pub(crate) fn take_released(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.released)
+    }
+
     fn free_cell(&mut self, cell: Cell, h: u64) {
+        if kind_bits(h) == Kind::Handle as u64 {
+            self.released.push(self.word(cell, 1));
+        }
         self.live = self.live.saturating_sub(1);
         let own = matches!(self.chunks.get(cell.chunk as usize), Some(Some(c)) if c.own);
         if own {
@@ -820,6 +835,7 @@ fn kind_of(h: u64) -> Option<Kind> {
         12 => Some(Kind::Map),
         13 => Some(Kind::MapNode),
         14 => Some(Kind::MapCollision),
+        15 => Some(Kind::Handle),
         _ => None,
     }
 }

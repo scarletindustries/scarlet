@@ -20,8 +20,9 @@ use scarlet_check::CleanModule;
 use scarlet_check::typed::{BinderId, Expr, FnBody, Function, TypedModule};
 use scarlet_ir::TypeId;
 use scarlet_ir::core_ir::{
-    Abi, Const, ConstId, CoreFn, FuncIdx, GlobalSlot, HttpTypes, IoErrors, JoinId, JsonTypes,
-    LocalId, LoweredFn, ParseReasons, Program, Radix, TypeNames, VariantNames, VariantRef,
+    Abi, AddressTypes, Const, ConstId, CoreFn, FuncIdx, GlobalSlot, HttpTypes, IoErrors, JoinId,
+    JsonTypes, LocalId, LoweredFn, NetTypes, ParseReasons, Program, Radix, TlsTypes, TypeNames,
+    VariantNames, VariantRef,
 };
 use scarlet_ir::rty::{ForeignRTy, PrimIds, RTy, ResolvedPool};
 use scarlet_ir::tivec::TiVec;
@@ -615,6 +616,9 @@ pub fn build_program(
         io: present(io_errors(&mut ids))?,
         json: present(json_types(&mut ids))?,
         http: present(http_types(&mut ids))?,
+        address: present(address_types(&mut ids))?,
+        net: present(net_types(&mut ids))?,
+        tls: present(tls_types(&mut ids))?,
     };
 
     let frozen = ids.freeze();
@@ -740,6 +744,70 @@ fn io_errors(b: &mut Ids<'_>) -> Result<IoErrors, Absent> {
         quota_exceeded: v("QuotaExceeded")?,
         unaligned_binary: v("UnalignedBinary")?,
         errno: v("Errno")?,
+    })
+}
+
+fn address_types(b: &mut Ids<'_>) -> Result<AddressTypes, Absent> {
+    let module = ["scarlet", "net", "address"];
+    let (v4, v6) = {
+        let mut ip = stdlib_variants(b, &module, "IpAddress")?;
+        (ip("V4")?, ip("V6")?)
+    };
+    let socket_address = stdlib_variants(b, &module, "SocketAddress")?("SocketAddress")?;
+    Ok(AddressTypes {
+        v4,
+        v6,
+        socket_address,
+    })
+}
+
+fn net_types(b: &mut Ids<'_>) -> Result<NetTypes, Absent> {
+    let socket_module = ["scarlet", "net", "socket"];
+    let socket = stdlib_variants(b, &socket_module, "Socket")?("Socket")?;
+    let (data, closed) = {
+        let mut r = stdlib_variants(b, &socket_module, "Read")?;
+        (r("Data")?, r("Closed")?)
+    };
+    let mut e = stdlib_variants(b, &["scarlet", "net", "error"], "NetError")?;
+    Ok(NetTypes {
+        timed_out: e("TimedOut")?,
+        connection_refused: e("ConnectionRefused")?,
+        connection_reset: e("ConnectionReset")?,
+        connection_aborted: e("ConnectionAborted")?,
+        not_connected: e("NotConnected")?,
+        broken_pipe: e("BrokenPipe")?,
+        addr_in_use: e("AddrInUse")?,
+        addr_not_available: e("AddrNotAvailable")?,
+        network_down: e("NetworkDown")?,
+        network_unreachable: e("NetworkUnreachable")?,
+        host_unreachable: e("HostUnreachable")?,
+        permission_denied: e("PermissionDenied")?,
+        unexpected_eof: e("UnexpectedEof")?,
+        unaligned_binary: e("UnalignedBinary")?,
+        invalid_port: e("InvalidPort")?,
+        errno: e("Errno")?,
+        socket,
+        data,
+        closed,
+    })
+}
+
+fn tls_types(b: &mut Ids<'_>) -> Result<TlsTypes, Absent> {
+    let module = ["scarlet", "net", "tls"];
+    let tls_socket = stdlib_variants(b, &module, "TlsSocket")?("TlsSocket")?;
+    let mut e = stdlib_variants(b, &module, "TlsError")?;
+    Ok(TlsTypes {
+        tls_socket,
+        certificate_unknown_issuer: e("CertificateUnknownIssuer")?,
+        certificate_expired: e("CertificateExpired")?,
+        certificate_not_yet_valid: e("CertificateNotYetValid")?,
+        certificate_revoked: e("CertificateRevoked")?,
+        hostname_mismatch: e("HostnameMismatch")?,
+        bad_certificate: e("BadCertificate")?,
+        protocol_error: e("ProtocolError")?,
+        handshake_failed: e("HandshakeFailed")?,
+        invalid_server_name: e("InvalidServerName")?,
+        transport: e("Transport")?,
     })
 }
 

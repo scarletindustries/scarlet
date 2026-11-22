@@ -94,7 +94,8 @@ pub(crate) fn seq(heap: &Heap, cell: Cell) -> Option<Seq> {
                 end: w(1),
             })
         }
-        Kind::String
+        Kind::Handle
+        | Kind::String
         | Kind::BigInt
         | Kind::Ctor
         | Kind::Closure
@@ -253,7 +254,8 @@ fn view(heap: &Heap, v: Value) -> Option<View<'_>> {
                 children,
             })
         }
-        Kind::String
+        Kind::Handle
+        | Kind::String
         | Kind::BigInt
         | Kind::Ctor
         | Kind::Closure

@@ -156,6 +156,69 @@ pub struct Abi {
     pub json: Option<JsonTypes>,
     /// `scarlet/http/h1`'s types, when the program loads that module.
     pub http: Option<HttpTypes>,
+    /// `scarlet/net/address`'s types, when the program loads that module.
+    pub address: Option<AddressTypes>,
+    /// `scarlet/net/error` and `scarlet/net/socket`'s types, when the program
+    /// loads both.
+    pub net: Option<NetTypes>,
+    /// `scarlet/net/tls`'s types, when the program loads that module.
+    pub tls: Option<TlsTypes>,
+}
+
+/// The constructors of `scarlet/net/address`.
+#[derive(Debug, Clone, Copy)]
+pub struct AddressTypes {
+    /// `IpAddress`'s two forms, each holding the address as text.
+    pub v4: VariantRef,
+    pub v6: VariantRef,
+    /// `SocketAddress(ip, port)`.
+    pub socket_address: VariantRef,
+}
+
+/// The constructors of `scarlet/net/error.NetError` and
+/// `scarlet/net/socket` that the VM builds.
+#[derive(Debug, Clone, Copy)]
+pub struct NetTypes {
+    pub timed_out: VariantRef,
+    pub connection_refused: VariantRef,
+    pub connection_reset: VariantRef,
+    pub connection_aborted: VariantRef,
+    pub not_connected: VariantRef,
+    pub broken_pipe: VariantRef,
+    pub addr_in_use: VariantRef,
+    pub addr_not_available: VariantRef,
+    pub network_down: VariantRef,
+    pub network_unreachable: VariantRef,
+    pub host_unreachable: VariantRef,
+    pub permission_denied: VariantRef,
+    pub unexpected_eof: VariantRef,
+    pub unaligned_binary: VariantRef,
+    pub invalid_port: VariantRef,
+    /// Any other OS error: this holds its number.
+    pub errno: VariantRef,
+    /// `socket.Socket(conn, peer)`.
+    pub socket: VariantRef,
+    /// `socket.Read`: `Data(bytes)` and `Closed`.
+    pub data: VariantRef,
+    pub closed: VariantRef,
+}
+
+/// The constructors of `scarlet/net/tls` that the VM builds.
+#[derive(Debug, Clone, Copy)]
+pub struct TlsTypes {
+    /// `TlsSocket(conn, peer, server_name)`.
+    pub tls_socket: VariantRef,
+    pub certificate_unknown_issuer: VariantRef,
+    pub certificate_expired: VariantRef,
+    pub certificate_not_yet_valid: VariantRef,
+    pub certificate_revoked: VariantRef,
+    pub hostname_mismatch: VariantRef,
+    pub bad_certificate: VariantRef,
+    pub protocol_error: VariantRef,
+    pub handshake_failed: VariantRef,
+    pub invalid_server_name: VariantRef,
+    /// `Transport(cause)`, holding a `NetError`.
+    pub transport: VariantRef,
 }
 
 /// The constructors of `scarlet/binary.Radix`.
@@ -341,6 +404,56 @@ impl IoErrors {
     }
 }
 
+impl AddressTypes {
+    fn variants(&self) -> [VariantRef; 3] {
+        [self.v4, self.v6, self.socket_address]
+    }
+}
+
+impl NetTypes {
+    fn variants(&self) -> [VariantRef; 19] {
+        [
+            self.timed_out,
+            self.connection_refused,
+            self.connection_reset,
+            self.connection_aborted,
+            self.not_connected,
+            self.broken_pipe,
+            self.addr_in_use,
+            self.addr_not_available,
+            self.network_down,
+            self.network_unreachable,
+            self.host_unreachable,
+            self.permission_denied,
+            self.unexpected_eof,
+            self.unaligned_binary,
+            self.invalid_port,
+            self.errno,
+            self.socket,
+            self.data,
+            self.closed,
+        ]
+    }
+}
+
+impl TlsTypes {
+    fn variants(&self) -> [VariantRef; 11] {
+        [
+            self.tls_socket,
+            self.certificate_unknown_issuer,
+            self.certificate_expired,
+            self.certificate_not_yet_valid,
+            self.certificate_revoked,
+            self.hostname_mismatch,
+            self.bad_certificate,
+            self.protocol_error,
+            self.handshake_failed,
+            self.invalid_server_name,
+            self.transport,
+        ]
+    }
+}
+
 impl Abi {
     /// Every constructor here, so their types' names can travel with them.
     pub fn variants(&self) -> Vec<VariantRef> {
@@ -356,6 +469,15 @@ impl Abi {
         }
         if let Some(http) = self.http {
             all.extend(http.variants());
+        }
+        if let Some(address) = self.address {
+            all.extend(address.variants());
+        }
+        if let Some(net) = self.net {
+            all.extend(net.variants());
+        }
+        if let Some(tls) = self.tls {
+            all.extend(tls.variants());
         }
         all
     }

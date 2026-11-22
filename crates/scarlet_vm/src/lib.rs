@@ -50,7 +50,10 @@ mod word;
 
 use scarlet_ir::core_ir::Program;
 
-pub use host::{Host, IoError, NoRandomness, OutputClosed};
+pub use host::{
+    Deadline, Handle, Host, IoError, IpAddr, NetError, NoRandomness, OutputClosed, Received,
+    SocketAddr, TlsError,
+};
 pub use os_host::OsHost;
 pub use stop::Stop;
 

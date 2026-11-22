@@ -50,6 +50,8 @@ enum Tag {
     Map,
     /// Keys whose whole hashes are equal, in a map.
     Collision,
+    /// A socket or a listener, by the host's number for it.
+    Handle,
 }
 
 /// `v`'s hash.
@@ -144,6 +146,10 @@ fn cell(heap: &Heap, cell: Cell, s: &mut Sip<1, 3>, todo: &mut Vec<Value>) {
         Kind::Tuple => {
             s.tag(Tag::Tuple);
             counted(s, todo, heap.elements(cell).collect());
+        }
+        Kind::Handle => {
+            s.tag(Tag::Handle);
+            s.word(heap.data(cell).first().copied().unwrap_or(0));
         }
         // Equal maps have the same shape (`map.rs`), so their entries come
         // out in the same order. The exception is the keys in a collision,

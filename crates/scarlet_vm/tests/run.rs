@@ -1588,3 +1588,40 @@ fn a_backpass_binds_a_pattern() {
         "Ok(7)\nErr(bad)\n",
     );
 }
+
+/// A connection nothing holds any more is closed, even though the program
+/// never called `socket.close`: the peer reads the end of the stream.
+#[test]
+fn a_dropped_connection_is_closed() {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let peer = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().expect("accept");
+        conn.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .expect("timeout");
+        let mut buf = [0u8; 8];
+        conn.read(&mut buf).expect("the stream ends, not times out")
+    });
+    let src = format!(
+        "import scarlet/net\n\
+         import scarlet/net/address\n\
+         import scarlet/result\n\
+         fn open() Nil {{\n\
+         \tmatch net::connect('127.0.0.1', {port}) {{\n\
+         \t\tOk(sock) -> println('connected to ${{address::to_string(sock.peer)}}')\n\
+         \t\tErr(e) -> println('failed: ${{e}}')\n\
+         \t}}\n\
+         }}\n\
+         pub fn main() {{\n\
+         \topen()\n\
+         \tprintln(result::map(net::resolve('::1'), address::ip_to_string))\n\
+         \tprintln(address::parse('nope'))\n\
+         }}\n"
+    );
+    prints(
+        &src,
+        &format!("connected to 127.0.0.1:{port}\nOk(::1)\nErr(Nil)\n"),
+    );
+    assert_eq!(peer.join().expect("peer"), 0);
+}

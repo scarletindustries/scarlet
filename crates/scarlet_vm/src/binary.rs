@@ -54,7 +54,8 @@ pub(crate) fn bits(heap: &Heap, cell: Cell) -> Option<Bits> {
             at: d.get(1).copied()?,
             len: d.get(2).copied()?,
         }),
-        Kind::String
+        Kind::Handle
+        | Kind::String
         | Kind::BigInt
         | Kind::Ctor
         | Kind::Closure

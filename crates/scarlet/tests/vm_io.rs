@@ -24,7 +24,7 @@ import scarlet/result
 pub fn main() {{
 	match net::listen('127.0.0.1', 0) {{
 		Ok(server) -> {{
-			println('listening ${{result::map(net::local_addr(server), address::to_string) or '?'}}')
+			println('listening ${{result::map(net::local_addr(server), address::to_string) or e -> '? ${{e}}'}}')
 {body}
 		}}
 		Err(e) -> println('listen-failed: ${{e}}')
@@ -79,7 +79,6 @@ pub fn main() {
 /// `net.accept` -> `sock.peer` -> `net.read` -> `net.write` -> `net.close`.
 /// This is the only test that covers the socket opcodes' success paths.
 #[test]
-#[ignore = "needs the VM"]
 fn tcp_echo_server_roundtrip() {
     let proj = Project::new("io_tcp");
     let src = listening_src(
@@ -137,7 +136,7 @@ fn tcp_echo_server_roundtrip() {
 /// connect (non-blocking completion), read_exact (gathering bytes across
 /// reads), and write_parts.
 #[test]
-#[ignore = "needs the VM"]
+#[ignore = "needs processes"]
 fn tcp_connect_and_vectored_echo() {
     let proj = Project::new("io_connect");
     let src = r#"import scarlet/process
@@ -154,8 +153,8 @@ pub fn main() {
 						Ok(Some(sock)) -> match socket::read_exact(sock, 5) {
 							Ok(first) -> match socket::read_exact(sock, 6) {
 								Ok(second) -> {
-									socket::write_parts(sock, [first, second]) or Nil
-									socket::close(sock) or Nil
+									_ = socket::write_parts(sock, [first, second])
+									_ = socket::close(sock)
 								}
 								Err(e) -> println('server read2 failed: ${e}')
 							}
@@ -168,8 +167,8 @@ pub fn main() {
 
 				match net::connect('127.0.0.1', addr.port) {
 					Ok(conn) -> {
-						socket::write(conn, binary::from_string('hello')) or Nil
-						socket::write(conn, binary::from_string(' world')) or Nil
+						_ = socket::write(conn, binary::from_string('hello'))
+						_ = socket::write(conn, binary::from_string(' world'))
 						match socket::read_exact(conn, 11) {
 							Ok(data) -> match binary::to_string(data) {
 								Ok(text) -> println('echoed: ${text}')
@@ -177,7 +176,7 @@ pub fn main() {
 							}
 							Err(e) -> println('client read failed: ${e}')
 						}
-						socket::close(conn) or Nil
+						_ = socket::close(conn)
 					}
 					Err(e) -> println('connect failed: ${e}')
 				}
@@ -205,7 +204,6 @@ pub fn main() {
 /// its deadline instead of blocking forever. The client stays connected and
 /// silent, so only the deadline timer can wake the parked read.
 #[test]
-#[ignore = "needs the VM"]
 fn tcp_read_within_times_out() {
     let proj = Project::new("io_read_within_timeout");
     let src = listening_src(
@@ -238,7 +236,6 @@ fn tcp_read_within_times_out() {
 /// `socket.read_within` returns `Ok` when data arrives before the deadline.
 /// The generous timeout keeps this independent of scheduler timing.
 #[test]
-#[ignore = "needs the VM"]
 fn tcp_read_within_returns_data() {
     let proj = Project::new("io_read_within_data");
     let src = listening_src(
@@ -332,7 +329,6 @@ pub fn main() {
 /// Connecting to a port with no listener surfaces `ConnectionRefused` as a
 /// typed variant, and exercises the non-blocking-connect completion path.
 #[test]
-#[ignore = "needs the VM"]
 fn connect_refused_is_typed() {
     // Reserve an ephemeral port and release it. Tests that spawn a server must
     // never do this: between release and re-bind the kernel can hand the port
@@ -371,7 +367,7 @@ pub fn main() {
 /// scheduler thread for the syscall. Several processes read the same file at
 /// once, which exercises offload → worker → completion → resume.
 #[test]
-#[ignore = "needs the VM"]
+#[ignore = "needs processes"]
 fn file_read_offloads_to_blocking_pool() {
     let proj = Project::new("io_pool");
     let data = proj.dir.join("data.txt");
@@ -412,7 +408,7 @@ pub fn main() {
 /// `net.resolve` runs `getaddrinfo` on the blocking pool and returns a typed
 /// `IpAddress`. `localhost` always resolves on a loopback-capable host.
 #[test]
-#[ignore = "needs the VM"]
+#[ignore = "needs processes"]
 fn dns_resolve_runs_on_pool() {
     let proj = Project::new("dns_resolve");
     let src = r#"import scarlet/net
@@ -520,12 +516,12 @@ fn assert_200(stream: &mut TcpStream, buf: &mut Vec<u8>, expected: &[u8], ctx: &
 /// driver must answer it from the leftover bytes it carried, with no read in
 /// between.
 #[test]
-#[ignore = "needs the VM"]
+#[ignore = "needs processes"]
 fn http_server_get_and_keepalive() {
     let proj = Project::new("io_http");
     let src = listening_src(
         "import scarlet/http",
-        "_ = http::serve_on(server, fn(_req) http::text('Hello from scarlet/http!'))",
+        "_ = http::serve_on(server, fn(_req) http::text('Hello from scarlet/http!'), fn(_) Nil)",
     );
 
     let srv = spawn_al_server(&proj, &src);
@@ -550,20 +546,23 @@ fn http_server_get_and_keepalive() {
 /// request on the same connection must also succeed, which shows the chunked
 /// framing consumed exactly the body plus terminator and stayed in sync.
 #[test]
-#[ignore = "needs the VM"]
+#[ignore = "needs processes"]
 fn http_server_chunked_post_roundtrip() {
     let proj = Project::new("io_http_chunked");
     let src = listening_src(
         "import scarlet/http\nimport scarlet/http/body\nimport scarlet/http/headers\nimport scarlet/binary",
         r#"_ = http::serve_on(server, fn(req) {
-	collected = body::collect(req.body, 1048576) or <<>>
+	collected = match body::collect(req.body, 1048576) {
+		Ok(b) -> b
+		Err(e) -> binary::from_string('<collect failed: ${e}>')
+	}
 	echoed = binary::to_string(collected) or '<not-utf8>'
 	trailer = match headers::get(req.trailers, <<'x-checksum'>>) {
 		Some(v) -> binary::to_string(v) or '?'
 		None -> 'none'
 	}
 	http::text('body=[${echoed}] trailer=[${trailer}]')
-})"#,
+}, fn(_) Nil)"#,
     );
 
     let srv = spawn_al_server(&proj, &src);
@@ -635,12 +634,12 @@ fn http_server_chunked_post_roundtrip() {
 /// close` request gets `Connection: close` back and then a closed socket (RFC
 /// 9112 §9.6), and `close` wins over a `keep-alive` token (§9.3).
 #[test]
-#[ignore = "needs the VM"]
+#[ignore = "needs processes"]
 fn http_server_connection_close_semantics() {
     let proj = Project::new("io_http_close");
     let src = listening_src(
         "import scarlet/http",
-        "_ = http::serve_on(server, fn(_req) http::text('bye'))",
+        "_ = http::serve_on(server, fn(_req) http::text('bye'), fn(_) Nil)",
     );
     let srv = spawn_al_server(&proj, &src);
     let mut tmp = [0u8; 64];
@@ -695,7 +694,6 @@ fn http_server_connection_close_semantics() {
 /// body instead of reading the socket. Nothing is ever sent on the pair here,
 /// so a regression shows up as a read error or a hang.
 #[test]
-#[ignore = "needs the VM"]
 fn http_body_content_length_non_positive_terminates() {
     let src = r#"import scarlet/net
 import scarlet/net/socket
@@ -741,7 +739,7 @@ pub fn main() {
 /// pipeline the Fixed case behind a healthy request to show the batched
 /// response ahead of the 500 still goes out.
 #[test]
-#[ignore = "needs the VM"]
+#[ignore = "needs processes"]
 fn http_server_body_source_failure_yields_framed_500() {
     let proj = Project::new("io_http_source_500");
     let src = listening_src(
@@ -752,7 +750,7 @@ fn http_server_body_source_failure_yields_framed_500() {
 		<<'/unsized'>> -> http::Response(status: 200, headers: [], body: http::Unsized(fn() Err(error::UnexpectedEof)))
 		_ -> http::text('ok')
 	}
-})"#,
+}, fn(_) Nil)"#,
     );
     let srv = spawn_al_server(&proj, &src);
     let mut tmp = [0u8; 64];
@@ -852,7 +850,7 @@ fn run_with_schedulers(tag: &str, src: &str, schedulers: u32, secs: u64) -> (Opt
 /// run. The unit test that catches it every time is
 /// `vm::io::tests::a_foreign_scheduler_registers_the_same_kernel_socket`.
 #[test]
-#[ignore = "needs the VM"]
+#[ignore = "needs processes"]
 fn accept_on_a_scheduler_that_did_not_listen() {
     let src = r#"import scarlet/process
 import scarlet/net
@@ -874,8 +872,8 @@ pub fn main() {
 				_ = process::spawn(fn() {
 					match net::accept(server) {
 						Ok(Some(c)) -> {
-							socket::write(c, binary::from_string('pong')) or Nil
-							socket::close(c) or Nil
+							_ = socket::write(c, binary::from_string('pong'))
+							_ = socket::close(c)
 						}
 						Ok(None) -> println('accept closed')
 						Err(e) -> println('accept failed: ${e}')
@@ -912,7 +910,7 @@ pub fn main() {
 /// `net.close` on a listener must end accepts parked on other schedulers
 /// with `Ok(None)`, not leave them parked forever.
 #[test]
-#[ignore = "needs the VM"]
+#[ignore = "needs processes"]
 fn closing_a_listener_wakes_a_foreign_parked_acceptor() {
     let src = r#"import scarlet/process
 import scarlet/net
@@ -937,7 +935,7 @@ pub fn main() {
 				}
 			})
 			println('warm ${burn(25)}')
-			net::close(server) or Nil
+			_ = net::close(server)
 			println('closed')
 		}
 		Err(e) -> println('listen failed: ${e}')
@@ -960,7 +958,7 @@ pub fn main() {
 /// rule). The child returns without `socket.close`, so the parent's read on
 /// the peer side must see EOF rather than park on a leaked fd.
 #[test]
-#[ignore = "needs the VM"]
+#[ignore = "needs processes"]
 fn a_connection_closes_when_its_owner_ends() {
     let src = r#"import scarlet/process
 import scarlet/net
@@ -1003,7 +1001,7 @@ pub fn main() {
 /// reader wakes, re-runs, misses the table, and gets a stale-socket
 /// `NetError`.
 #[test]
-#[ignore = "needs the VM"]
+#[ignore = "needs processes"]
 fn closing_a_connection_wakes_a_parked_reader() {
     let src = r#"import scarlet/process
 import scarlet/net
@@ -1028,7 +1026,7 @@ pub fn main() {
 							}
 						})
 						process::sleep(50)
-						socket::close(conn) or Nil
+						_ = socket::close(conn)
 						println('closed')
 					}
 					Err(e) -> println('connect failed: ${e}')
@@ -1056,7 +1054,7 @@ pub fn main() {
 /// moves implicitly. If capturing a socket transferred it, this split
 /// reader/writer program's fate would depend on spawn order.
 #[test]
-#[ignore = "needs the VM"]
+#[ignore = "needs processes"]
 fn a_siblings_exit_does_not_close_a_foreign_socket() {
     let src = r#"import scarlet/process
 import scarlet/net
@@ -1071,7 +1069,7 @@ pub fn main() {
 					match net::accept(server) {
 						Ok(Some(peer)) -> {
 							process::sleep(150)
-							socket::write(peer, binary::from_string('x')) or Nil
+							_ = socket::write(peer, binary::from_string('x'))
 						}
 						Ok(None) -> Nil
 						Err(_) -> Nil
@@ -1080,7 +1078,7 @@ pub fn main() {
 				match net::connect('127.0.0.1', addr.port) {
 					Ok(conn) -> {
 						_ = process::spawn(fn() {
-							socket::write(conn, binary::from_string('w')) or Nil
+							_ = socket::write(conn, binary::from_string('w'))
 							println('writer done')
 						})
 						match socket::read_exact(conn, 1) {
@@ -1111,7 +1109,7 @@ pub fn main() {
 /// whole life, because its owner, the acceptor, loops forever. The client sees
 /// the handler's data, then EOF.
 #[test]
-#[ignore = "needs the VM"]
+#[ignore = "needs processes"]
 fn the_accept_loop_closes_a_forgetful_handlers_socket() {
     use std::io::Read;
     let proj = Project::new("serve_forgetful");
@@ -1127,8 +1125,8 @@ pub fn main() {
 			Ok(addr) -> {
 				println('listening ${addr.port}')
 				_ = net::serve_on(server, fn(sock) {
-					socket::write(sock, binary::from_string('hi')) or Nil
-				})
+					socket::write(sock, binary::from_string('hi'))
+				}, fn(_) Nil)
 			}
 			Err(e) -> println('addr failed: ${e}')
 		}
@@ -1171,7 +1169,6 @@ pub fn main() {
 /// instead of dropping, we can't measure anything, because the kernel answered
 /// and there is no gap between the deadline and the kernel's floor.
 #[test]
-#[ignore = "needs the VM"]
 fn connect_addr_within_times_out_against_a_full_accept_queue() {
     let Some((_listener, _fillers, port)) = full_accept_queue() else {
         return;
@@ -1243,7 +1240,6 @@ pub fn main() {{
 /// step. So this doesn't prove the deadline survives a real hostname resolve.
 /// `resolve_within`'s own tests cover that.
 #[test]
-#[ignore = "needs the VM"]
 fn connect_within_times_out_against_a_full_accept_queue() {
     let Some((_listener, _fillers, port)) = full_accept_queue() else {
         return;
@@ -1315,7 +1311,6 @@ pub fn main() {{
 /// set up, and the one path that stalls without it (mDNS, measured at 5.0 s on
 /// Darwin) resolves differently on Linux.
 #[test]
-#[ignore = "needs the VM"]
 fn resolve_within_gives_up_on_a_deadline_that_beats_the_lookup() {
     let proj = Project::new("resolve_within");
     let src = r#"import scarlet/net
@@ -1374,7 +1369,7 @@ pub fn main() {
 /// a spent budget. This arm fails if the refusal ever moves above the
 /// IP-literal case.
 #[test]
-#[ignore = "needs the VM"]
+#[ignore = "needs processes"]
 fn resolve_within_refuses_a_spent_budget_before_dispatching() {
     let src = r#"import scarlet/net
 import scarlet/net/error

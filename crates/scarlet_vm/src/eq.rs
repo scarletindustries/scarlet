@@ -89,6 +89,8 @@ fn cells(heap: &Heap, x: Cell, y: Cell, todo: &mut Vec<(Value, Value)>) -> bool 
                 && queue(todo, captures(heap, x), captures(heap, y))
         }
         Kind::Tuple => queue(todo, heap.elements(x).collect(), heap.elements(y).collect()),
+        // A handle is the same one only when the host's number is.
+        Kind::Handle => heap.data(x) == heap.data(y),
         Kind::Map | Kind::MapNode | Kind::MapCollision => match map::equal_parts(heap, x, y) {
             Some(pairs) => {
                 todo.extend(pairs.into_iter().rev());

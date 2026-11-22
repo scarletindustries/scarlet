@@ -402,7 +402,7 @@ pub fn main() {{
         Ok(sock) -> match tls::handshake(sock, '{name}') {{
             Ok(conn) -> {{
                 println('connected')
-                tls::close(conn) or Nil
+                _ = tls::close(conn)
             }}
             Err(e) -> println('failed: ${{string::inspect(e)}}')
         }}
@@ -418,7 +418,6 @@ pub fn main() {{
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "needs the VM"]
 fn an_untrusted_issuer_is_rejected() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
@@ -439,7 +438,6 @@ fn an_untrusted_issuer_is_rejected() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn an_expired_certificate_is_rejected() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Expired);
@@ -464,7 +462,6 @@ fn an_expired_certificate_is_rejected() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn a_hostname_mismatch_is_rejected() {
     let ca = make_ca();
     // The leaf is current and signed by a CA the client trusts, but issued for
@@ -505,7 +502,6 @@ fn a_hostname_mismatch_is_rejected() {
 // issuer, and only the certificate's SAN differs.
 
 #[test]
-#[ignore = "needs the VM"]
 fn an_ip_literal_against_a_certificate_without_it_is_a_hostname_mismatch() {
     let ca = make_ca();
     // The leaf has `DNS:localhost` and no IP SAN, so 127.0.0.1 isn't on it.
@@ -537,7 +533,6 @@ fn an_ip_literal_against_a_certificate_without_it_is_a_hostname_mismatch() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn an_ip_literal_against_a_matching_ip_san_completes_the_handshake() {
     let ca = make_ca();
     // `CertificateParams::new` sorts a SAN that parses as an address into
@@ -566,7 +561,6 @@ fn an_ip_literal_against_a_matching_ip_san_completes_the_handshake() {
 /// `tls.connect` resolves the host first and fails as `Transport(NetError)`
 /// before the name is ever handed to rustls.
 #[test]
-#[ignore = "needs the VM"]
 fn a_name_that_is_neither_dns_nor_address_is_an_invalid_server_name() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
@@ -594,7 +588,6 @@ fn a_name_that_is_neither_dns_nor_address_is_an_invalid_server_name() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "needs the VM"]
 fn a_trusted_certificate_completes_the_handshake_and_moves_bytes() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
@@ -611,13 +604,13 @@ pub fn main() {{
     match net::connect('127.0.0.1', {port}) {{
         Ok(sock) -> match tls::handshake(sock, 'localhost') {{
             Ok(conn) -> {{
-                tls::write(conn, <<'ping'>>) or Nil
+                _ = tls::write(conn, <<'ping'>>)
                 match tls::read(conn, 1024) {{
                     Ok(socket::Data(b)) -> println('read: ${{binary::to_string(b) or "<not utf-8>"}}')
                     Ok(socket::Closed) -> println('closed')
                     Err(e) -> println('read failed: ${{string::inspect(e)}}')
                 }}
-                tls::close(conn) or Nil
+                _ = tls::close(conn)
             }}
             Err(e) -> println('failed: ${{string::inspect(e)}}')
         }}
@@ -646,7 +639,6 @@ pub fn main() {{
 /// clock would still look like a timeout here (one park, then the timer), so
 /// this test proves the typed timeout, not how re-runs keep the deadline.
 #[test]
-#[ignore = "needs the VM"]
 fn tls_read_within_times_out_as_transport_timed_out() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
@@ -672,7 +664,7 @@ pub fn main() {{
                         tls::Transport(error::ConnectionRefused | error::ConnectionReset | error::ConnectionAborted | error::NotConnected | error::BrokenPipe | error::AddrInUse | error::AddrNotAvailable | error::NetworkDown | error::NetworkUnreachable | error::HostUnreachable | error::PermissionDenied | error::UnexpectedEof | error::MessageTooLarge(_) | error::UnalignedBinary | error::InvalidPort | error::Errno(_)) | tls::CertificateUnknownIssuer | tls::CertificateExpired | tls::CertificateNotYetValid | tls::CertificateRevoked | tls::HostnameMismatch | tls::BadCertificate | tls::ProtocolError | tls::HandshakeFailed | tls::InvalidServerName -> println('other-error: ${{string::inspect(e)}}')
                     }}
                 }}
-                tls::close(conn) or Nil
+                _ = tls::close(conn)
             }}
             Err(e) -> println('handshake failed: ${{string::inspect(e)}}')
         }}
@@ -716,7 +708,6 @@ pub fn main() {{
 /// timer produces this output, and a re-run that reset the clock would look the
 /// same.
 #[test]
-#[ignore = "needs the VM"]
 fn tls_handshake_within_times_out_against_a_silent_peer() {
     let port = spawn_silent_peer();
 
@@ -765,7 +756,6 @@ pub fn main() {{
 /// against loopback, which is generous on purpose. This test is about the
 /// deadline NOT firing, so it mustn't turn into a timing test of a busy host.
 #[test]
-#[ignore = "needs the VM"]
 fn tls_handshake_within_completes_against_a_live_peer() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
@@ -782,13 +772,13 @@ pub fn main() {{
     match net::connect('127.0.0.1', {port}) {{
         Ok(sock) -> match tls::handshake_within(sock, 'localhost', 10000) {{
             Ok(conn) -> {{
-                tls::write(conn, <<'ping'>>) or Nil
+                _ = tls::write(conn, <<'ping'>>)
                 match tls::read(conn, 1024) {{
                     Ok(socket::Data(b)) -> println('read: ${{binary::to_string(b) or "<not utf-8>"}}')
                     Ok(socket::Closed) -> println('closed')
                     Err(e) -> println('read failed: ${{string::inspect(e)}}')
                 }}
-                tls::close(conn) or Nil
+                _ = tls::close(conn)
             }}
             Err(e) -> println('failed: ${{string::inspect(e)}}')
         }}
@@ -830,7 +820,6 @@ pub fn main() {{
 /// sends RST instead of dropping, we can't measure anything, because the kernel
 /// answered and there is no gap between the deadline and the kernel's floor.
 #[test]
-#[ignore = "needs the VM"]
 fn tls_connect_within_times_out_against_a_peer_that_never_accepts() {
     let Some((_listener, _fillers, port)) = full_accept_queue() else {
         return;
@@ -893,7 +882,6 @@ pub fn main() {{
 /// No trust root is installed and none is needed: the deadline must fire before
 /// a certificate is ever offered.
 #[test]
-#[ignore = "needs the VM"]
 fn tls_connect_within_times_out_against_a_peer_that_never_speaks_tls() {
     let port = spawn_silent_peer();
 
@@ -952,7 +940,6 @@ pub fn main() {{
 /// against the same string it connects to. `localhost` cannot be used here: it
 /// resolves to `::1` on this host, where nothing is bound.
 #[test]
-#[ignore = "needs the VM"]
 fn tls_connect_until_completes_against_a_live_peer() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "127.0.0.1", Validity::Current);
@@ -969,13 +956,13 @@ pub fn main() {{
     deadline = time::add_ms(time::monotonic(), 10000)
     match tls::connect_until('127.0.0.1', {port}, deadline) {{
         Ok(conn) -> {{
-            tls::write(conn, <<'ping'>>) or Nil
+            _ = tls::write(conn, <<'ping'>>)
             match tls::read(conn, 1024) {{
                 Ok(socket::Data(b)) -> println('read: ${{binary::to_string(b) or "<not utf-8>"}}')
                 Ok(socket::Closed) -> println('closed')
                 Err(e) -> println('read failed: ${{string::inspect(e)}}')
             }}
-            tls::close(conn) or Nil
+            _ = tls::close(conn)
         }}
         Err(e) -> println('failed: ${{string::inspect(e)}}')
     }}
@@ -997,7 +984,6 @@ pub fn main() {{
 /// The hang is after the handshake: `tls.connect`/`handshake` still have no
 /// deadline of their own, so this test speaks TLS first and then waits.
 #[test]
-#[ignore = "needs the VM"]
 fn https_send_until_times_out_against_a_silent_peer() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
@@ -1031,7 +1017,7 @@ pub fn main() {{
                         }}
                     }}
                     shut = io.close
-                    shut() or Nil
+                    _ = shut()
                 }}
             }}
             Err(e) -> println('handshake failed: ${{string::inspect(e)}}')
@@ -1062,7 +1048,6 @@ pub fn main() {{
 /// response the peer does send. If the hang test is red and this one passes,
 /// the deadline is broken, not the HTTPS client.
 #[test]
-#[ignore = "needs the VM"]
 fn https_send_until_returns_a_response() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
@@ -1095,7 +1080,7 @@ pub fn main() {{
                         }}
                     }}
                     shut = io.close
-                    shut() or Nil
+                    _ = shut()
                 }}
             }}
             Err(e) -> println('handshake failed: ${{string::inspect(e)}}')
@@ -1119,7 +1104,6 @@ pub fn main() {{
 
 /// `tls.read_within` returns the plaintext that arrives before the deadline.
 #[test]
-#[ignore = "needs the VM"]
 fn tls_read_within_returns_data() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
@@ -1136,13 +1120,13 @@ pub fn main() {{
     match net::connect('127.0.0.1', {port}) {{
         Ok(sock) -> match tls::handshake(sock, 'localhost') {{
             Ok(conn) -> {{
-                tls::write(conn, <<'ping'>>) or Nil
+                _ = tls::write(conn, <<'ping'>>)
                 match tls::read_within(conn, 1024, 5000) {{
                     Ok(socket::Data(b)) -> println('read: ${{binary::to_string(b) or "<not utf-8>"}}')
                     Ok(socket::Closed) -> println('closed')
                     Err(e) -> println('read failed: ${{string::inspect(e)}}')
                 }}
-                tls::close(conn) or Nil
+                _ = tls::close(conn)
             }}
             Err(e) -> println('failed: ${{string::inspect(e)}}')
         }}
@@ -1167,7 +1151,6 @@ pub fn main() {{
 /// caller holding the `Socket` it passed in can't use it to get round the
 /// encryption.
 #[test]
-#[ignore = "needs the VM"]
 fn the_cleartext_handle_is_dead_after_an_upgrade() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
@@ -1189,7 +1172,7 @@ pub fn main() {{
                     Ok(Nil) -> println('LEAKED: cleartext write succeeded')
                     Err(e) -> println('cleartext refused: ${{string::inspect(e)}}')
                 }}
-                tls::close(secure) or Nil
+                _ = tls::close(secure)
             }}
             Err(e) -> println('handshake failed: ${{string::inspect(e)}}')
         }}
@@ -1233,7 +1216,6 @@ pub fn main() {{
 /// this a test of the dispatch rather than of TLS, and we only assert that the
 /// program finished and reported typed results.
 #[test]
-#[ignore = "needs the VM"]
 fn a_tls_op_survives_the_function_around_it_being_compiled() {
     const REPS: usize = 12;
     let ca = make_ca();
@@ -1292,7 +1274,7 @@ fn close_n(c tls::TlsSocket, n Int) Nil {{
         Nil
     }} else {{
         {{
-            tls::close(c) or Nil
+            _ = tls::close(c)
             close_n(c, n - 1)
         }}
     }}
@@ -1395,7 +1377,6 @@ pub fn main() {{
 /// host's send buffer takes 1.79 MB before it refuses a byte, which no single
 /// write under the 64 KiB limit could reach.
 #[test]
-#[ignore = "needs the VM"]
 fn a_large_tls_write_parks_and_resumes_without_duplicating_a_byte() {
     // Each write is 16 << 11 = 32 KiB, under rustls's 64 KiB limit. 96 of them
     // make 3 MiB, well past a loopback socket's capacity when the peer's
@@ -1455,7 +1436,7 @@ pub fn main() {{
                     }}
                     Err(e) -> println('write failed: ${{string::inspect(e)}}')
                 }}
-                tls::close(conn) or Nil
+                _ = tls::close(conn)
             }}
             Err(e) -> println('handshake failed: ${{string::inspect(e)}}')
         }}
@@ -1506,7 +1487,7 @@ pub fn main() {{
 /// handshake succeeds or fails, because the failure path evicts the NEW id, not
 /// the one the sibling is on.
 #[test]
-#[ignore = "needs the VM"]
+#[ignore = "needs processes"]
 fn an_upgrade_wakes_a_sibling_parked_on_the_cleartext_id() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
@@ -1536,7 +1517,7 @@ pub fn main() {{
             match tls::handshake(sock, 'localhost') {{
                 Ok(conn) -> {{
                     println('parent: handshake ok')
-                    tls::close(conn) or Nil
+                    _ = tls::close(conn)
                 }}
                 Err(e) -> println('parent: handshake err ${{string::inspect(e)}}')
             }}
@@ -1570,7 +1551,6 @@ pub fn main() {{
 /// Connecting with TLS to a plaintext port is a protocol error, not a hang and
 /// not a silent success.
 #[test]
-#[ignore = "needs the VM"]
 fn a_plaintext_peer_is_a_protocol_error() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().expect("addr").port();
