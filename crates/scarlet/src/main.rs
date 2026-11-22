@@ -477,12 +477,11 @@ fn cmd_run(args: RunArgs) {
     let argv = std::iter::once(args.entrypoint.clone())
         .chain(args.args)
         .collect();
-    let host = scarlet_vm::Host::of_this_process(argv);
-    let mut out = scarlet::output::ProgramOut::stdout();
-    let outcome = scarlet_vm::run(&program, &host, &mut out);
+    let mut host = scarlet_vm::OsHost::of_this_process(argv, scarlet::output::ProgramOut::stdout());
+    let outcome = scarlet_vm::run(&program, &mut host);
     // Flush before printing any message, so the program's own output comes first. A failed flush
     // means the reader has left, like a pipe into `head`, and the program hasn't failed.
-    let _ = out.flush();
+    let _ = host.out().flush();
     if let Err(stop) = outcome
         && let Some(why) = scarlet::stop::message(&stop)
     {

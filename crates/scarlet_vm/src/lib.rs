@@ -42,35 +42,31 @@ mod host;
 mod http;
 mod json;
 mod map;
+mod os_host;
 mod show;
 mod stop;
 mod value;
 mod word;
 
-use std::io::Write;
-
 use scarlet_ir::core_ir::Program;
 
-pub use host::Host;
+pub use host::{Host, IoError, NoRandomness, OutputClosed};
+pub use os_host::OsHost;
 pub use stop::Stop;
 
-/// Run `program` in `host`'s world, writing what it prints to `out`.
-pub fn run(program: &Program, host: &Host, out: &mut dyn Write) -> Result<(), Stop> {
+/// Run `program` in `host`'s world.
+pub fn run(program: &Program, host: &mut dyn Host) -> Result<(), Stop> {
     let code = code::load(program)?;
-    exec::Machine::new(&code, host, out).run()?;
+    exec::Machine::new(&code, host).run()?;
     Ok(())
 }
 
 /// Run `program` as [`run`] does, and return its last value as `println`
 /// shows it, or `None` when that value is `Nil`. The REPL runs each entry this
 /// way, because an entry's last expression is the program's last value.
-pub fn run_showing(
-    program: &Program,
-    host: &Host,
-    out: &mut dyn Write,
-) -> Result<Option<String>, Stop> {
+pub fn run_showing(program: &Program, host: &mut dyn Host) -> Result<Option<String>, Stop> {
     let code = code::load(program)?;
-    let mut machine = exec::Machine::new(&code, host, out);
+    let mut machine = exec::Machine::new(&code, host);
     let last = machine.run()?;
     machine.shown(last)
 }

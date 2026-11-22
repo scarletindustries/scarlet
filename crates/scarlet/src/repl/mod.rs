@@ -245,13 +245,10 @@ impl Session {
             // means the stdlib seed failed and was already reported.
             return;
         };
-        let host = scarlet_vm::Host::of_this_process(Vec::new());
-        let ran = {
-            let mut out = crate::output::ProgramOut::stdout();
-            let ran = scarlet_vm::run_showing(&runnable, &host, &mut out);
-            let _ = std::io::Write::flush(&mut out);
-            ran
-        };
+        let mut host =
+            scarlet_vm::OsHost::of_this_process(Vec::new(), crate::output::ProgramOut::stdout());
+        let ran = scarlet_vm::run_showing(&runnable, &mut host);
+        let _ = std::io::Write::flush(host.out());
         match ran {
             // Only an entry that ends in an expression has a value the user wrote. What a
             // definition leaves belongs to the program, and printing it says nothing about the

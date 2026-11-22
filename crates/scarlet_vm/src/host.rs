@@ -1,62 +1,72 @@
 //! What a program sees of the world outside it: its arguments, its
-//! environment and its clock. The driver makes one and hands it to
-//! [`crate::run`], so a test can hand in a world of its own.
+//! environment, its output, the clocks, random bytes and files.
+//!
+//! The VM reaches the world only through [`Host`], so the same interpreter
+//! can run on an operating system ([`crate::OsHost`]), inside a test that
+//! hands in a world of its own, or one day with no operating system under it
+//! at all. Nothing else in the VM calls the OS.
 
-use std::time::Instant;
-
-/// What one run sees of the world.
-pub struct Host {
+/// The world one run sees. The driver makes one and hands it to
+/// [`crate::run`].
+pub trait Host {
     /// `os.argv`: the path of the entrypoint that was run, then the arguments
     /// after it.
-    argv: Vec<String>,
+    fn argv(&self) -> &[String];
+
     /// `os.env`: each variable whose name and value are both UTF-8, in the
-    /// order the OS lists them.
-    env: Vec<(String, String)>,
-    /// What `time.monotonic` counts from.
-    started: Instant,
-}
+    /// order the world lists them. A name may be listed twice.
+    fn env(&self) -> &[(String, String)];
 
-impl Host {
-    pub fn new(argv: Vec<String>, env: Vec<(String, String)>) -> Host {
-        Host {
-            argv,
-            env,
-            started: Instant::now(),
-        }
-    }
-
-    /// The world of this OS process, with its environment as it is now and
-    /// the given `argv`.
-    pub fn of_this_process(argv: Vec<String>) -> Host {
-        let env = std::env::vars_os()
-            .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
-            .collect();
-        Host::new(argv, env)
-    }
-
-    pub(crate) fn argv(&self) -> &[String] {
-        &self.argv
-    }
-
-    pub(crate) fn env(&self) -> &[(String, String)] {
-        &self.env
-    }
-
-    /// Standard output's terminal size as (columns, rows), or `None` when it
-    /// is not a terminal or reports no size.
-    pub(crate) fn terminal_size(&self) -> Option<(u16, u16)> {
-        let size = rustix::termios::tcgetwinsize(std::io::stdout()).ok()?;
-        (size.ws_col > 0 && size.ws_row > 0).then_some((size.ws_col, size.ws_row))
-    }
-
-    /// Wait `ms` milliseconds. There is no scheduler yet, so this blocks the
-    /// thread, and with it the one process there is.
-    pub(crate) fn sleep_ms(&self, ms: u64) {
-        std::thread::sleep(std::time::Duration::from_millis(ms));
-    }
+    /// Write what `print` and `println` show.
+    fn print(&mut self, text: &[u8]) -> Result<(), OutputClosed>;
 
     /// Milliseconds since the run began, on a clock that only goes forward.
-    pub(crate) fn monotonic_ms(&self) -> u128 {
-        self.started.elapsed().as_millis()
-    }
+    fn monotonic_ms(&self) -> u128;
+
+    /// Milliseconds since 1970 began in UTC, negative before it.
+    fn epoch_ms(&self) -> i128;
+
+    /// Wait `ms` milliseconds.
+    fn sleep_ms(&mut self, ms: u64);
+
+    /// Fill `into` from a generator fit for keys. Never fill it any other way.
+    fn random_bytes(&mut self, into: &mut [u8]) -> Result<(), NoRandomness>;
+
+    /// The output's terminal size as (columns, rows), or `None` when it is
+    /// not a terminal or reports no size.
+    fn terminal_size(&self) -> Option<(u16, u16)>;
+
+    /// The whole file at `path`.
+    fn read_file(&mut self, path: &[u8]) -> Result<Vec<u8>, IoError>;
+
+    /// Make the file at `path` hold `bytes` and nothing else.
+    fn write_file(&mut self, path: &[u8], bytes: &[u8]) -> Result<(), IoError>;
+}
+
+/// The output was closed, like a pipe into `head` that has read enough.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputClosed;
+
+/// The world could not give random bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NoRandomness;
+
+/// Why a file could not be read or written. These are `scarlet/io`'s
+/// `IoError`s that the world gives; the VM adds the path, and the ones it
+/// finds itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoError {
+    NotFound,
+    PermissionDenied,
+    AlreadyExists,
+    NotADirectory,
+    IsADirectory,
+    ReadOnlyFilesystem,
+    /// Too many symbolic links.
+    FilesystemLoop,
+    FileTooLarge,
+    StorageFull,
+    QuotaExceeded,
+    /// Any other error, by the world's own number for it.
+    Errno(i32),
 }

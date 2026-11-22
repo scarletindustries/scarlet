@@ -1,7 +1,7 @@
 //! These tests run programs end to end. Each is compiled from Scarlet source
 //! and run by the VM, and the test checks exactly what it prints.
 
-use scarlet_vm::{Host, Stop};
+use scarlet_vm::{OsHost, Stop};
 
 fn compile(src: &str) -> scarlet_core::core_ir::Program {
     let result = scarlet_core::compile::compile_text(src, None);
@@ -10,20 +10,21 @@ fn compile(src: &str) -> scarlet_core::core_ir::Program {
 }
 
 fn run(src: &str) -> Result<String, Stop> {
-    let mut out = Vec::new();
-    scarlet_vm::run(&compile(src), &Host::new(Vec::new(), Vec::new()), &mut out)?;
-    Ok(String::from_utf8(out).expect("println writes UTF-8"))
+    let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+    scarlet_vm::run(&compile(src), &mut host)?;
+    Ok(String::from_utf8(std::mem::take(host.out())).expect("println writes UTF-8"))
 }
 
 fn prints(src: &str, want: &str) {
     assert_eq!(run(src).as_deref(), Ok(want), "{src}");
 }
 
-/// Run `src` in `host`'s world.
-fn prints_in(host: &Host, src: &str, want: &str) {
-    let mut out = Vec::new();
-    let ran = scarlet_vm::run(&compile(src), host, &mut out);
+/// Run `src` in a world with `argv` and `env`.
+fn prints_in(argv: Vec<String>, env: Vec<(String, String)>, src: &str, want: &str) {
+    let mut host = OsHost::new(argv, env, Vec::new());
+    let ran = scarlet_vm::run(&compile(src), &mut host);
     assert_eq!(ran, Ok(()), "{src}");
+    let out = std::mem::take(host.out());
     assert_eq!(String::from_utf8(out).expect("UTF-8"), want, "{src}");
 }
 
@@ -421,7 +422,7 @@ impl std::io::Write for Closed {
 fn a_closed_output_stops_the_run_quietly() {
     let program = compile("pub fn main() {\n\tprintln(1)\n}\n");
     assert_eq!(
-        scarlet_vm::run(&program, &Host::new(Vec::new(), Vec::new()), &mut Closed),
+        scarlet_vm::run(&program, &mut OsHost::new(Vec::new(), Vec::new(), Closed)),
         Err(Stop::OutputClosed)
     );
 }
@@ -1255,14 +1256,11 @@ fn a_key_is_found_by_any_equal_value() {
 #[test]
 fn argv_and_env_come_from_the_host() {
     let env = [("HOME", "/home/al"), ("LANG", "C"), ("HOME", "/elsewhere")];
-    let host = Host::new(
+    prints_in(
         vec!["main.sca".into(), "--fast".into(), "two words".into()],
         env.iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
-    );
-    prints_in(
-        &host,
         "import scarlet/os\n\
          import scarlet/map\n\
          pub fn main() {\n\
@@ -1316,7 +1314,7 @@ fn files_read_and_write_and_fail_with_their_error() {
          not found {d}/missing\na directory {d}\nnot found {d}/no/such/dir\n\
          not a directory {d}/plain/under\nok Nil\nnot text {d}/x.bin\n"
     );
-    prints_in(&Host::new(Vec::new(), Vec::new()), &src, &want);
+    prints_in(Vec::new(), Vec::new(), &src, &want);
     assert_eq!(std::fs::read(&file).expect("written"), b"hi");
     assert!(
         !dir.join("b.txt").exists(),
