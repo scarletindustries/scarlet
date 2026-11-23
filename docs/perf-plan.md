@@ -4,7 +4,7 @@ This is the build order for making the interpreter fast on one core, written on 
 
 How it was made: for each area three designers each wrote a design from a different starting point, a judge merged them, three sceptics attacked the result, and the design was revised to answer them. One more pass put every step into the order below and found where the designs disagree.
 
-Each step is built alone, measured with `benches/run.py`, and reverted if it does not pay. The decisions marked open are the owner's and are not made yet.
+Each step is built alone, measured with `benches/run.py`, and reverted if it does not pay. The owner took the recommended answer to every decision below on 23 November 2026.
 
 ## What to expect
 
@@ -22,7 +22,9 @@ By the clock expect about half of this in logs, because most of what goes is che
 
 Where it will still be bad at the end: sieve (about 4 to 6), permute and queens (about 4 to 5), fannkuch (about 3 with its rewrite, about 9 without), and bounce, closures and richards (about 3 to 4). Rows that read below 1.0 by this arithmetic (json, cfold, mandelbrot) should not be trusted, and the diagnosis notes that LuaJIT's own number is inflated on spectral_norm, map_churn, cfold and closures. The run.py column added in step 1 (claimed so far against measured) is what will show which of these estimates was wrong, one step at a time.
 
-## Open decisions
+## Decisions
+
+Each was settled as its recommended answer.
 
 ### 1. docs/vm-design.md proposes that the VM counts references itself and that this is always right whatever Perceus did. Steps 39 to 41 end that: the compiler states every count, two checkers verify it, and the VM stops sweeping frames and testing registers on write. Do you want that?
 
