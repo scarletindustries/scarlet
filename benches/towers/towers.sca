@@ -1,0 +1,105 @@
+// Towers of Hanoi with explicit disk stacks: 13 disks moved between three piles,
+// many times over. It stresses small record updates and linked-list pushes and pops.
+// Ported from the Are We Fast Yet suite (github.com/smarr/are-we-fast-yet, MIT licence).
+
+type Pile {
+	Empty
+	Disk(size Int, next Pile)
+}
+
+type Towers {
+	a Pile
+	b Pile
+	c Pile
+	moves Int
+	errors Int
+}
+
+fn get_pile(t Towers, pile Int) Pile {
+	match pile {
+		0 -> t.a
+		1 -> t.b
+		_ -> t.c
+	}
+}
+
+fn set_pile(t Towers, pile Int, top Pile) Towers {
+	match pile {
+		0 -> Towers(..t, a: top)
+		1 -> Towers(..t, b: top)
+		_ -> Towers(..t, c: top)
+	}
+}
+
+// Putting a big disk on a smaller one, or popping an empty pile, is counted
+// in `errors` and the move is skipped.
+fn push_disk(t Towers, size Int, pile Int) Towers {
+	top = get_pile(t, pile)
+	match top {
+		Empty -> set_pile(t, pile, Disk(size, Empty))
+		Disk(top_size, _) -> if size >= top_size {
+			Towers(..t, errors: t.errors + 1)
+		} else {
+			set_pile(t, pile, Disk(size, top))
+		}
+	}
+}
+
+fn move_top_disk(t Towers, from Int, to Int) Towers {
+	match get_pile(t, from) {
+		Empty -> Towers(..t, errors: t.errors + 1)
+		Disk(size, next) -> {
+			pushed = push_disk(set_pile(t, from, next), size, to)
+			Towers(..pushed, moves: pushed.moves + 1)
+		}
+	}
+}
+
+fn build_tower_at(t Towers, pile Int, i Int) Towers {
+	if i < 0 {
+		t
+	} else {
+		build_tower_at(push_disk(t, i, pile), pile, i - 1)
+	}
+}
+
+fn move_disks(t Towers, disks Int, from Int, to Int) Towers {
+	if disks == 1 {
+		move_top_disk(t, from, to)
+	} else {
+		other = 3 - from - to
+		t1 = move_disks(t, disks - 1, from, other)
+		t2 = move_top_disk(t1, from, to)
+		move_disks(t2, disks - 1, other, to)
+	}
+}
+
+fn weigh(p Pile, depth Int, acc Int) Int {
+	match p {
+		Empty -> acc
+		Disk(size, next) -> weigh(next, depth + 1, acc + size * depth)
+	}
+}
+
+fn benchmark() Towers {
+	built = build_tower_at(Towers(Empty, Empty, Empty, 0, 0), 0, 13)
+	move_disks(built, 13, 0, 1)
+}
+
+fn run(n Int, moves Int, weight Int, errors Int) Nil {
+	if n == 0 {
+		if errors == 0 {
+			println(moves)
+			println(weight)
+		} else {
+			println('${errors} bad moves')
+		}
+	} else {
+		t = benchmark()
+		run(n - 1, moves + t.moves, weight + weigh(t.b, 1, 0) + weigh(t.a, 1, 0), errors + t.errors)
+	}
+}
+
+pub fn main() {
+	run(600, 0, 0, 0)
+}

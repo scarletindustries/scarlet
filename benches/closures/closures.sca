@@ -1,0 +1,55 @@
+// closures: map, filter and fold over a 1000-element array with closures that
+// capture variables, a composed pipeline of small functions, and a counter
+// whose step function returns the next counter. It stresses making closures
+// and calling them. Written for this suite, not a port.
+
+import scarlet/array
+
+type Counter {
+	value Int
+	next fn(Int) Counter
+}
+
+fn adder(k Int) fn(Int) Int {
+	fn(x) x + k
+}
+
+fn scaler(k Int, m Int) fn(Int) Int {
+	fn(x) x * k % m
+}
+
+fn compose(f fn(Int) Int, g fn(Int) Int) fn(Int) Int {
+	fn(x) g(f(x))
+}
+
+fn counter(value Int, step Int) Counter {
+	Counter(value, fn(d) counter({ value + step * d } % 1000003, step + 1))
+}
+
+fn count(c Counter, n Int) Int {
+	if n == 0 {
+		c.value
+	} else {
+		count(c.next(n % 5 + 1), n - 1)
+	}
+}
+
+fn rounds(xs Array(Int), r Int, acc Int) Int {
+	if r == 0 {
+		acc
+	} else {
+		k = r % 7
+		scaled = array::map(xs, fn(x) { x * r + acc } % 1009)
+		kept = array::filter(scaled, fn(x) x % 7 != k)
+		direct = array::fold(kept, 0, fn(s, x) { s + x * r } % 1000003)
+		steps = [adder(r), scaler(3, 1013), adder(acc % 13), scaler(k + 2, 1019)]
+		pipeline = array::fold(steps, fn(x) x, compose)
+		piped = array::fold(array::map(kept, pipeline), 0, fn(s, x) { s + x } % 1000003)
+		counted = count(counter(acc % 97, r), 200)
+		rounds(xs, r - 1, { acc * 31 + direct + piped + counted } % 1000003)
+	}
+}
+
+pub fn main() {
+	println(rounds(0..1000, 1500, 1))
+}

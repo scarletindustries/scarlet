@@ -1,0 +1,98 @@
+// Bounce: 100 balls bounce around a box for 50 steps. We count the bounces and
+// add up where the balls end.
+// It stresses record allocation, field reads and small-integer arithmetic.
+// Ported from Are We Fast Yet (github.com/smarr/are-we-fast-yet, MIT licence).
+
+import scarlet/array
+import scarlet/int
+
+type Ball {
+	x Int
+	y Int
+	x_vel Int
+	y_vel Int
+}
+
+// The suite's own generator. The seed is threaded through by hand.
+fn next(seed Int) Int {
+	int::bitwise_and(seed * 1309 + 13849, 65535)
+}
+
+fn make_balls(count Int, seed Int, balls Array(Ball)) Array(Ball) {
+	if count == 0 {
+		balls
+	} else {
+		s1 = next(seed)
+		s2 = next(s1)
+		s3 = next(s2)
+		s4 = next(s3)
+		ball = Ball(x: s1 % 500, y: s2 % 500, x_vel: s3 % 300 - 150, y_vel: s4 % 300 - 150)
+		make_balls(count - 1, s4, [..balls, ball])
+	}
+}
+
+// Moves a ball one step. The Bool says whether it hit a wall.
+fn bounce(ball Ball) (Ball, Bool) {
+	x = ball.x + ball.x_vel
+	y = ball.y + ball.y_vel
+	(x, x_vel, hit_x) = if x > 500 {
+		(500, 0 - int::abs(ball.x_vel), True)
+	} else if x < 0 {
+		(0, int::abs(ball.x_vel), True)
+	} else {
+		(x, ball.x_vel, False)
+	}
+	(y, y_vel, hit_y) = if y > 500 {
+		(500, 0 - int::abs(ball.y_vel), True)
+	} else if y < 0 {
+		(0, int::abs(ball.y_vel), True)
+	} else {
+		(y, ball.y_vel, False)
+	}
+	(Ball(x:, y:, x_vel:, y_vel:), hit_x || hit_y)
+}
+
+fn step(balls Array(Ball), moved Array(Ball), bounces Int) (Array(Ball), Int) {
+	match balls {
+		[] -> (moved, bounces)
+		[ball, ..rest] -> {
+			(ball, bounced) = bounce(ball)
+			bounces = if bounced {
+				bounces + 1
+			} else {
+				bounces
+			}
+			step(rest, [..moved, ball], bounces)
+		}
+	}
+}
+
+fn run(steps Int, balls Array(Ball), bounces Int) (Int, Int) {
+	if steps == 0 {
+		(bounces, array::fold(balls, 0, fn(sum, ball) sum + ball.x + ball.y))
+	} else {
+		(balls, bounces) = step(balls, [], bounces)
+		run(steps - 1, balls, bounces)
+	}
+}
+
+// One run gives the bounce count and the sum of every ball's final x and y.
+fn benchmark() (Int, Int) {
+	run(50, make_balls(100, 74755, []), 0)
+}
+
+fn repeat(times Int, bounces Int, positions Int) (Int, Int) {
+	if times == 0 {
+		(bounces, positions)
+	} else {
+		(b, p) = benchmark()
+		repeat(times - 1, bounces + b, positions + p)
+	}
+}
+
+pub fn main() {
+	(bounces, positions) = benchmark()
+	println('${bounces} ${positions}')
+	(bounces, positions) = repeat(1000, 0, 0)
+	println('${bounces} ${positions}')
+}

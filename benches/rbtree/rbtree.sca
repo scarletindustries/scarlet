@@ -1,0 +1,142 @@
+// Stresses pattern matching on nested constructors, allocation, and reuse of
+// nodes in place: insert into a functional red-black tree (Okasaki balance), then fold.
+// Ported from Koka's test/bench/koka/rbtree.kk (https://github.com/koka-lang/koka, Apache-2.0).
+
+type Color {
+	Red
+	Black
+}
+
+type Tree {
+	Leaf
+	Node(
+		color Color,
+		left Tree,
+		key Int,
+		value Bool,
+		right Tree,
+	)
+}
+
+fn is_red(t Tree) Bool {
+	match t {
+		Node(Red, ..) -> True
+		Leaf | Node(Black, ..) -> False
+	}
+}
+
+fn balance_left(l Tree, k Int, v Bool, r Tree) Tree {
+	match l {
+		Node(_, ll, ky, vy, lr) -> match ll {
+			Node(Red, lx, kx, vx, rx) ->
+				Node(Red, Node(Black, lx, kx, vx, rx), ky, vy, Node(Black, lr, k, v, r))
+			Leaf | Node(Black, ..) -> match lr {
+				Node(Red, lx, kx, vx, rx) ->
+					Node(Red, Node(Black, ll, ky, vy, lx), kx, vx, Node(Black, rx, k, v, r))
+				Leaf | Node(Black, ..) -> Node(Black, Node(Red, ll, ky, vy, lr), k, v, r)
+			}
+		}
+		Leaf -> Leaf
+	}
+}
+
+fn balance_right(l Tree, k Int, v Bool, r Tree) Tree {
+	match r {
+		Node(_, rl, ky, vy, rr) -> match rl {
+			Node(Red, lx, kx, vx, rx) ->
+				Node(Red, Node(Black, l, k, v, lx), kx, vx, Node(Black, rx, ky, vy, rr))
+			Leaf | Node(Black, ..) -> match rr {
+				Node(Red, lx, kx, vx, rx) ->
+					Node(Red, Node(Black, l, k, v, rl), ky, vy, Node(Black, lx, kx, vx, rx))
+				Leaf | Node(Black, ..) -> Node(Black, l, k, v, Node(Red, rl, ky, vy, rr))
+			}
+		}
+		Leaf -> Leaf
+	}
+}
+
+fn ins(t Tree, k Int, v Bool) Tree {
+	match t {
+		Node(Red, l, kx, vx, r) -> if k < kx {
+			Node(Red, ins(l, k, v), kx, vx, r)
+		} else if k > kx {
+			Node(Red, l, kx, vx, ins(r, k, v))
+		} else {
+			Node(Red, l, k, v, r)
+		}
+		Node(Black, l, kx, vx, r) -> if k < kx {
+			if is_red(l) {
+				balance_left(ins(l, k, v), kx, vx, r)
+			} else {
+				Node(Black, ins(l, k, v), kx, vx, r)
+			}
+		} else if k > kx {
+			if is_red(r) {
+				balance_right(l, kx, vx, ins(r, k, v))
+			} else {
+				Node(Black, l, kx, vx, ins(r, k, v))
+			}
+		} else {
+			Node(Black, l, k, v, r)
+		}
+		Leaf -> Node(Red, Leaf, k, v, Leaf)
+	}
+}
+
+fn set_black(t Tree) Tree {
+	match t {
+		Node(_, l, k, v, r) -> Node(Black, l, k, v, r)
+		Leaf -> t
+	}
+}
+
+fn insert(t Tree, k Int, v Bool) Tree {
+	set_black(ins(t, k, v))
+}
+
+fn fold(t Tree, b Int, f fn(Int, Bool, Int) Int) Int {
+	match t {
+		Node(_, l, k, v, r) -> fold(r, f(k, v, fold(l, b, f)), f)
+		Leaf -> b
+	}
+}
+
+fn height(t Tree) Int {
+	match t {
+		Node(_, l, _, _, r) -> {
+			hl = height(l)
+			hr = height(r)
+			if hl > hr {
+				hl + 1
+			} else {
+				hr + 1
+			}
+		}
+		Leaf -> 0
+	}
+}
+
+fn make_tree_aux(n Int, t Tree) Tree {
+	if n <= 0 {
+		t
+	} else {
+		n1 = n - 1
+		make_tree_aux(n1, insert(t, n1, n1 % 10 == 0))
+	}
+}
+
+fn make_tree(n Int) Tree {
+	make_tree_aux(n, Leaf)
+}
+
+pub fn main() {
+	t = make_tree(300000)
+	count = fold(t, 0, fn(_k, v, r) if v {
+		r + 1
+	} else {
+		r
+	})
+	println(count)
+	println(fold(t, 0, fn(k, _v, r) { r * 31 + k } % 1000000007))
+	println(height(t))
+}

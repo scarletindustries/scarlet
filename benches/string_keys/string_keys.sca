@@ -1,0 +1,52 @@
+// Counts how often each word turns up in a stream of short words, in a map
+// keyed by string, then looks a second stream up in it. It stresses building
+// short strings, hashing them and maps keyed by strings. Written for this suite.
+
+import scarlet/map
+
+const letters = ['a', 'e', 'i', 'n', 'r', 't']
+
+fn next(seed Int) Int {
+	seed * 16807 % 2147483647
+}
+
+fn spell(r Int, n Int, acc String) String {
+	if n == 0 {
+		acc
+	} else {
+		spell(r / 6, n - 1, acc + { letters[r % 6] or '' })
+	}
+}
+
+// A word of 2 to `lengths + 1` letters, all of it decided by `r`.
+fn word(r Int, lengths Int) String {
+	spell(r / lengths, 2 + r % lengths, '')
+}
+
+fn count(m map::Map(String, Int), seed Int, i Int) map::Map(String, Int) {
+	if i == 0 {
+		m
+	} else {
+		s = next(seed)
+		w = word(s, 5)
+		count(map::set(m, w, { map::get(m, w) or 0 } + 1), s, i - 1)
+	}
+}
+
+// The second stream has longer words in it too, so some lookups miss.
+fn probe(m map::Map(String, Int), seed Int, i Int, check Int) Int {
+	if i == 0 {
+		check
+	} else {
+		s = next(seed)
+		n = map::get(m, word(s, 6)) or 0
+		probe(m, s, i - 1, { check * 31 + n } % 1000000007)
+	}
+}
+
+pub fn main() {
+	m = count(map::new(), 42, 1000000)
+	println(map::size(m))
+	println(map::fold(m, 0, fn(acc, _, n) acc + n * n))
+	println(probe(m, 2024, 1000000, 0))
+}

@@ -1,0 +1,51 @@
+// sieve: the sieve of Eratosthenes over an array of 5000 flags, run many times.
+// It stresses array writes in a tight loop. Ported from the Are We Fast Yet
+// suite (https://github.com/smarr/are-we-fast-yet, MIT licence).
+
+fn make_flags(n Int, flags Array(Bool)) Array(Bool) {
+	if n == 0 {
+		flags
+	} else {
+		make_flags(n - 1, [..flags, True])
+	}
+}
+
+// Arrays have no write at an index, so this cuts the array around the slot
+// and joins the two sides back around the new value.
+fn clear(flags Array(Bool), at Int, size Int) Array(Bool) {
+	before = flags[0..at] or []
+	after = flags[at + 1..size] or []
+	[..before, False, ..after]
+}
+
+fn strike(flags Array(Bool), k Int, step Int, size Int) Array(Bool) {
+	if k <= size {
+		strike(clear(flags, k - 1, size), k + step, step, size)
+	} else {
+		flags
+	}
+}
+
+fn sieve(flags Array(Bool), i Int, size Int, count Int) Int {
+	if i <= size {
+		if flags[i - 1] or False {
+			sieve(strike(flags, i + i, i, size), i + 1, size, count + 1)
+		} else {
+			sieve(flags, i + 1, size, count)
+		}
+	} else {
+		count
+	}
+}
+
+fn repeat(n Int, total Int) Int {
+	if n == 0 {
+		total
+	} else {
+		repeat(n - 1, total + sieve(make_flags(5000, []), 2, 5000, 0))
+	}
+}
+
+pub fn main() {
+	println(repeat(45, 0))
+}

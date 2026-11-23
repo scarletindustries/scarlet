@@ -1,0 +1,60 @@
+// Permute: walks the permutations of a six-element array by swapping.
+// It stresses array reads and writes and deep recursion.
+// Ported from Are We Fast Yet (github.com/smarr/are-we-fast-yet), MIT licence.
+
+type State {
+	v Array(Int)
+	count Int
+	check Int
+}
+
+fn set(xs Array(Int), i Int, x Int) Array(Int) {
+	match xs {
+		[] -> []
+		[h, ..t] -> if i == 0 {
+			[x, ..t]
+		} else {
+			[h, ..set(t, i - 1, x)]
+		}
+	}
+}
+
+fn swap(v Array(Int), i Int, j Int) Array(Int) {
+	a = v[i] or 0
+	b = v[j] or 0
+	v |> set(i, b) |> set(j, a)
+}
+
+fn swaps(s State, n1 Int, i Int) State {
+	if i < 0 {
+		s
+	} else {
+		moved = State(..s, v: swap(s.v, n1, i))
+		done = permute(moved, n1)
+		swaps(State(..done, v: swap(done.v, n1, i)), n1, i - 1)
+	}
+}
+
+fn permute(s State, n Int) State {
+	counted = State(..s, count: s.count + 1)
+	if n == 0 {
+		State(..counted, check: { counted.check * 31 + { counted.v[0] or 0 } } % 1000003)
+	} else {
+		swaps(permute(counted, n - 1), n - 1, n - 1)
+	}
+}
+
+fn run(iterations Int, count Int, check Int) State {
+	done = permute(State([0, 1, 2, 3, 4, 5], 0, check), 6)
+	if iterations == 1 {
+		State(..done, count: count + done.count)
+	} else {
+		run(iterations - 1, count + done.count, done.check)
+	}
+}
+
+pub fn main() {
+	done = run(200, 0, 0)
+	println(done.count)
+	println(done.check)
+}

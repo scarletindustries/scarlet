@@ -1,0 +1,59 @@
+// binary-trees: builds complete binary trees and walks them to count their
+// nodes. It stresses allocating and freeing many small objects.
+// Ported from the Computer Language Benchmarks Game (BSD-3-Clause licence).
+
+import scarlet/int
+
+type Tree {
+	Empty
+	Node(left Tree, right Tree)
+}
+
+fn bottom_up_tree(depth Int) Tree {
+	if depth > 0 {
+		Node(bottom_up_tree(depth - 1), bottom_up_tree(depth - 1))
+	} else {
+		Node(Empty, Empty)
+	}
+}
+
+fn item_check(tree Tree) Int {
+	match tree {
+		Empty -> 0
+		Node(left, right) -> match left {
+			Empty -> 1
+			Node(..) -> 1 + item_check(left) + item_check(right)
+		}
+	}
+}
+
+fn check_trees(i Int, depth Int, check Int) Int {
+	if i == 0 {
+		check
+	} else {
+		check_trees(i - 1, depth, check + item_check(bottom_up_tree(depth)))
+	}
+}
+
+fn run_depths(depth Int, min_depth Int, max_depth Int) Nil {
+	if depth <= max_depth {
+		iterations = int::bitwise_shift_left(1, max_depth - depth + min_depth)
+		check = check_trees(iterations, depth, 0)
+		println('${iterations}\t trees of depth ${depth}\t check: ${check}')
+		run_depths(depth + 2, min_depth, max_depth)
+	} else {
+		Nil
+	}
+}
+
+pub fn main() {
+	n = 16
+	min_depth = 4
+	max_depth = int::max(min_depth + 2, n)
+	stretch_depth = max_depth + 1
+	stretch_check = item_check(bottom_up_tree(stretch_depth))
+	println('stretch tree of depth ${stretch_depth}\t check: ${stretch_check}')
+	long_lived_tree = bottom_up_tree(max_depth)
+	run_depths(min_depth, min_depth, max_depth)
+	println('long lived tree of depth ${max_depth}\t check: ${item_check(long_lived_tree)}')
+}

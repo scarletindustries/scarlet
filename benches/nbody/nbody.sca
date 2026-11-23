@@ -1,0 +1,198 @@
+// NBody: five bodies (the sun and four planets) pull on each other for many
+// small time steps. It stresses float arithmetic and reading and rebuilding
+// records. Ported from the Are We Fast Yet suite (MIT licence), which took it
+// from the Computer Language Benchmarks Game. The square root is Newton's
+// method written out, the same in every language, because Scarlet has none.
+
+import scarlet/array
+import scarlet/float
+
+const PI = 3.141592653589793
+const SOLAR_MASS = 4.0 * PI * PI
+const DAYS_PER_YEAR = 365.24
+const STEPS = 100000
+
+type Body {
+	x Float
+	y Float
+	z Float
+	vx Float
+	vy Float
+	vz Float
+	mass Float
+}
+
+fn body(x Float, y Float, z Float, vx Float, vy Float, vz Float, mass Float) Body {
+	Body(
+		x: x,
+		y: y,
+		z: z,
+		vx: vx * DAYS_PER_YEAR,
+		vy: vy * DAYS_PER_YEAR,
+		vz: vz * DAYS_PER_YEAR,
+		mass: mass * SOLAR_MASS,
+	)
+}
+
+fn sqrt_from(d Float, guess Float) Float {
+	next = 0.5 * { guess + d / guess }
+	if next >= guess {
+		guess
+	} else {
+		sqrt_from(d, next)
+	}
+}
+
+fn sqrt(d Float) Float {
+	if d > 1.0 {
+		sqrt_from(d, d)
+	} else {
+		sqrt_from(d, 1.0)
+	}
+}
+
+fn momentum(bodies Array(Body), px Float, py Float, pz Float) (Float, Float, Float) {
+	match bodies {
+		[] -> (px, py, pz)
+		[b, ..rest] -> momentum(rest, px + b.vx * b.mass, py + b.vy * b.mass, pz + b.vz * b.mass)
+	}
+}
+
+fn create_bodies() Array(Body) {
+	sun = body(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+	planets = [
+		body(
+			4.84143144246472090,
+			-1.16032004402742839,
+			-0.103622044471123109,
+			0.00166007664274403694,
+			0.00769901118419740425,
+			-0.0000690460016972063023,
+			0.000954791938424326609,
+		),
+		body(
+			8.34336671824457987,
+			4.12479856412430479,
+			-0.403523417114321381,
+			-0.00276742510726862411,
+			0.00499852801234917238,
+			0.0000230417297573763929,
+			0.000285885980666130812,
+		),
+		body(
+			12.8943695621391310,
+			-15.1111514016986312,
+			-0.223307578892655734,
+			0.00296460137564761618,
+			0.00237847173959480950,
+			-0.0000296589568540237556,
+			0.0000436624404335156298,
+		),
+		body(
+			15.3796971148509165,
+			-25.9193146099879641,
+			0.179258772950371181,
+			0.00268067772490389322,
+			0.00162824170038242295,
+			-0.0000951592254519715870,
+			0.0000515138902046611451,
+		),
+	]
+	(px, py, pz) = momentum([sun, ..planets], 0.0, 0.0, 0.0)
+	[
+		Body(
+			..sun,
+			vx: 0.0 - px / SOLAR_MASS,
+			vy: 0.0 - py / SOLAR_MASS,
+			vz: 0.0 - pz / SOLAR_MASS,
+		),
+		..planets,
+	]
+}
+
+// Lets `b` and every body after it change each other's velocity.
+fn pull(b Body, others Array(Body), dt Float) (Body, Array(Body)) {
+	match others {
+		[] -> (b, [])
+		[o, ..rest] -> {
+			dx = b.x - o.x
+			dy = b.y - o.y
+			dz = b.z - o.z
+			d_squared = dx * dx + dy * dy + dz * dz
+			distance = sqrt(d_squared)
+			mag = dt / { d_squared * distance }
+			pulled = Body(
+				..b,
+				vx: b.vx - dx * o.mass * mag,
+				vy: b.vy - dy * o.mass * mag,
+				vz: b.vz - dz * o.mass * mag,
+			)
+			other = Body(
+				..o,
+				vx: o.vx + dx * b.mass * mag,
+				vy: o.vy + dy * b.mass * mag,
+				vz: o.vz + dz * b.mass * mag,
+			)
+			(done, others_done) = pull(pulled, rest, dt)
+			(done, [other, ..others_done])
+		}
+	}
+}
+
+fn pull_all(bodies Array(Body), dt Float) Array(Body) {
+	match bodies {
+		[] -> []
+		[b, ..rest] -> {
+			(done, others) = pull(b, rest, dt)
+			[done, ..pull_all(others, dt)]
+		}
+	}
+}
+
+fn advance(bodies Array(Body), dt Float) Array(Body) {
+	bodies
+	|> pull_all(dt)
+	|> array::map(fn(b) Body(..b, x: b.x + dt * b.vx, y: b.y + dt * b.vy, z: b.z + dt * b.vz))
+}
+
+fn potential(b Body, others Array(Body), e Float) Float {
+	match others {
+		[] -> e
+		[o, ..rest] -> {
+			dx = b.x - o.x
+			dy = b.y - o.y
+			dz = b.z - o.z
+			distance = sqrt(dx * dx + dy * dy + dz * dz)
+			potential(b, rest, e - b.mass * o.mass / distance)
+		}
+	}
+}
+
+fn energy(bodies Array(Body), e Float) Float {
+	match bodies {
+		[] -> e
+		[b, ..rest] -> {
+			kinetic = e + 0.5 * b.mass * { b.vx * b.vx + b.vy * b.vy + b.vz * b.vz }
+			energy(rest, potential(b, rest, kinetic))
+		}
+	}
+}
+
+fn run(bodies Array(Body), steps Int) Array(Body) {
+	if steps == 0 {
+		bodies
+	} else {
+		run(advance(bodies, 0.01), steps - 1)
+	}
+}
+
+// The energy as a whole number, so every language prints the same text.
+fn scaled(e Float) Int {
+	float::truncate(e * 1000000000000000.0)
+}
+
+pub fn main() {
+	bodies = create_bodies()
+	println(scaled(energy(bodies, 0.0)))
+	println(scaled(energy(run(bodies, STEPS), 0.0)))
+}

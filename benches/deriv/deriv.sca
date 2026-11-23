@@ -1,0 +1,160 @@
+// deriv: differentiate x^x symbolically nine times over, simplifying as it goes, and do that twice.
+// It stresses allocating small nodes of a sum type and matching on pairs of them.
+// Ported from test/bench/koka/deriv.kk in Koka's benchmarks (Apache-2.0), itself from Lean 4's deriv.ml.
+
+type Expr {
+	Val(value Int)
+	Var(name String)
+	Add(l Expr, r Expr)
+	Mul(l Expr, r Expr)
+	Pow(l Expr, r Expr)
+	Ln(e Expr)
+}
+
+fn pown(a Int, b Int, acc Int) Int {
+	if b <= 0 {
+		acc
+	} else {
+		pown(a, b - 1, acc * a)
+	}
+}
+
+fn add(n0 Expr, m0 Expr) Expr {
+	match m0 {
+		Val(m) -> match n0 {
+			Val(n) -> Val(n + m)
+			Var(..) | Add(..) | Mul(..) | Pow(..) | Ln(..) -> if m == 0 {
+				n0
+			} else {
+				add(Val(m), n0)
+			}
+		}
+		Add(ml, mr) -> match n0 {
+			Val(0) -> m0
+			Val(n) -> match ml {
+				Val(m) -> add(Val(n + m), mr)
+				Var(..) | Add(..) | Mul(..) | Pow(..) | Ln(..) -> Add(n0, m0)
+			}
+			Add(f, g) -> match ml {
+				Val(k) -> add(Val(k), add(n0, mr))
+				Var(..) | Add(..) | Mul(..) | Pow(..) | Ln(..) -> add(f, add(g, m0))
+			}
+			Var(..) | Mul(..) | Pow(..) | Ln(..) -> match ml {
+				Val(k) -> add(Val(k), add(n0, mr))
+				Var(..) | Add(..) | Mul(..) | Pow(..) | Ln(..) -> Add(n0, m0)
+			}
+		}
+		Var(..) | Mul(..) | Pow(..) | Ln(..) -> match n0 {
+			Val(0) -> m0
+			Add(f, g) -> add(f, add(g, m0))
+			Val(_) | Var(..) | Mul(..) | Pow(..) | Ln(..) -> Add(n0, m0)
+		}
+	}
+}
+
+fn mul(n0 Expr, m0 Expr) Expr {
+	match m0 {
+		Val(m) -> match n0 {
+			Val(n) -> Val(n * m)
+			Var(..) | Add(..) | Mul(..) | Pow(..) | Ln(..) -> if m == 0 {
+				Val(0)
+			} else if m == 1 {
+				n0
+			} else {
+				mul(Val(m), n0)
+			}
+		}
+		Mul(ml, mr) -> match n0 {
+			Val(0) -> Val(0)
+			Val(1) -> m0
+			Val(n) -> match ml {
+				Val(m) -> mul(Val(n * m), mr)
+				Var(..) | Add(..) | Mul(..) | Pow(..) | Ln(..) -> Mul(n0, m0)
+			}
+			Mul(f, g) -> match ml {
+				Val(k) -> mul(Val(k), mul(n0, mr))
+				Var(..) | Add(..) | Mul(..) | Pow(..) | Ln(..) -> mul(f, mul(g, m0))
+			}
+			Var(..) | Add(..) | Pow(..) | Ln(..) -> match ml {
+				Val(k) -> mul(Val(k), mul(n0, mr))
+				Var(..) | Add(..) | Mul(..) | Pow(..) | Ln(..) -> Mul(n0, m0)
+			}
+		}
+		Var(..) | Add(..) | Pow(..) | Ln(..) -> match n0 {
+			Val(0) -> Val(0)
+			Val(1) -> m0
+			Mul(f, g) -> mul(f, mul(g, m0))
+			Val(_) | Var(..) | Add(..) | Pow(..) | Ln(..) -> Mul(n0, m0)
+		}
+	}
+}
+
+fn powr(m0 Expr, n0 Expr) Expr {
+	match n0 {
+		Val(n) -> match m0 {
+			Val(m) -> Val(pown(m, n, 1))
+			Var(..) | Add(..) | Mul(..) | Pow(..) | Ln(..) -> if n == 0 {
+				Val(1)
+			} else if n == 1 {
+				m0
+			} else {
+				Pow(m0, n0)
+			}
+		}
+		Var(..) | Add(..) | Mul(..) | Pow(..) | Ln(..) -> match m0 {
+			Val(0) -> Val(0)
+			Val(_) | Var(..) | Add(..) | Mul(..) | Pow(..) | Ln(..) -> Pow(m0, n0)
+		}
+	}
+}
+
+fn ln(n Expr) Expr {
+	match n {
+		Val(1) -> Val(0)
+		Val(_) | Var(..) | Add(..) | Mul(..) | Pow(..) | Ln(..) -> Ln(n)
+	}
+}
+
+fn d(x String, e Expr) Expr {
+	match e {
+		Val(_) -> Val(0)
+		Var(y) -> if x == y {
+			Val(1)
+		} else {
+			Val(0)
+		}
+		Add(f, g) -> add(d(x, f), d(x, g))
+		Mul(f, g) -> add(mul(f, d(x, g)), mul(g, d(x, f)))
+		Pow(f, g) ->
+			mul(powr(f, g), add(mul(mul(g, d(x, f)), powr(f, Val(-1))), mul(ln(f), d(x, g))))
+		Ln(f) -> mul(d(x, f), powr(f, Val(-1)))
+	}
+}
+
+fn count(e Expr) Int {
+	match e {
+		Val(_) -> 1
+		Var(_) -> 1
+		Add(f, g) -> count(f) + count(g)
+		Mul(f, g) -> count(f) + count(g)
+		Pow(f, g) -> count(f) + count(g)
+		Ln(f) -> count(f)
+	}
+}
+
+fn nest(i Int, n Int, f Expr) Expr {
+	if i == n {
+		f
+	} else {
+		df = d('x', f)
+		println('${i + 1} count: ${count(df)}')
+		nest(i + 1, n, df)
+	}
+}
+
+pub fn main() {
+	x = Var('x')
+	_ = nest(0, 9, powr(x, x))
+	_ = nest(0, 9, powr(x, x))
+	println('done')
+}

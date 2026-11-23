@@ -1,0 +1,313 @@
+// Richards: a simulation of an operating system's task scheduler. Stresses
+// dispatch on variants, records rebuilt with one field changed, and state passing.
+// Ported from Are We Fast Yet (https://github.com/smarr/are-we-fast-yet, MIT licence).
+
+import scarlet/int
+import scarlet/map
+
+const IDLER = 1
+const WORKER = 2
+const HANDLER_A = 3
+const HANDLER_B = 4
+const DEVICE_A = 5
+const DEVICE_B = 6
+const NO_TASK = 0
+
+const DATA_SIZE = 4
+
+type Kind {
+	DeviceKind
+	WorkKind
+}
+
+type Packet {
+	identity Int
+	kind Kind
+	datum Int
+	data Array(Int)
+}
+
+type TaskData {
+	Idle(control Int, count Int)
+	Worker(destination Int, count Int)
+	Handler(work_in Array(Packet), device_in Array(Packet))
+	Device(pending Option(Packet))
+}
+
+type Task {
+	link Int
+	identity Int
+	priority Int
+	input Array(Packet)
+	packet_pending Bool
+	task_waiting Bool
+	task_holding Bool
+	data TaskData
+}
+
+// `current` is the identity of the task to run next, or NO_TASK.
+type Scheduler {
+	tasks map::Map(Int, Task)
+	current Int
+	queue_count Int
+	hold_count Int
+}
+
+const NOBODY = Task(
+	link: NO_TASK,
+	identity: NO_TASK,
+	priority: 0,
+	input: [],
+	packet_pending: False,
+	task_waiting: False,
+	task_holding: True,
+	data: Device(None),
+)
+
+fn find_task(s Scheduler, identity Int) Task {
+	map::get(s.tasks, identity) or NOBODY
+}
+
+fn put_task(s Scheduler, t Task) Scheduler {
+	Scheduler(..s, tasks: map::set(s.tasks, t.identity, t))
+}
+
+fn wait(s Scheduler, t Task) Scheduler {
+	put_task(s, Task(..t, task_waiting: True))
+}
+
+fn hold_self(s Scheduler, t Task) Scheduler {
+	Scheduler(
+		..s,
+		tasks: map::set(s.tasks, t.identity, Task(..t, task_holding: True)),
+		current: t.link,
+		hold_count: s.hold_count + 1,
+	)
+}
+
+fn release(s Scheduler, t Task, identity Int) Scheduler {
+	s = put_task(s, t)
+	freed = Task(..find_task(s, identity), task_holding: False)
+	next = if freed.priority > t.priority {
+		freed.identity
+	} else {
+		t.identity
+	}
+	Scheduler(..s, tasks: map::set(s.tasks, identity, freed), current: next)
+}
+
+fn queue_packet(s Scheduler, t Task, packet Packet) Scheduler {
+	s = put_task(s, t)
+	target = find_task(s, packet.identity)
+	sent = Packet(..packet, identity: t.identity)
+	match target.input {
+		[] -> {
+			next = if target.priority > t.priority {
+				target.identity
+			} else {
+				t.identity
+			}
+			woken = Task(..target, input: [sent], packet_pending: True)
+			Scheduler(
+				..s,
+				tasks: map::set(s.tasks, woken.identity, woken),
+				current: next,
+				queue_count: s.queue_count + 1,
+			)
+		}
+		queue -> {
+			busy = Task(..target, input: [..queue, sent])
+			Scheduler(
+				..s,
+				tasks: map::set(s.tasks, busy.identity, busy),
+				queue_count: s.queue_count + 1,
+			)
+		}
+	}
+}
+
+fn idle(s Scheduler, t Task, control Int, count Int) Scheduler {
+	count = count - 1
+	if count == 0 {
+		hold_self(s, Task(..t, data: Idle(control, count)))
+	} else if int::bitwise_and(control, 1) == 0 {
+		release(s, Task(..t, data: Idle(control / 2, count)), DEVICE_A)
+	} else {
+		control = int::bitwise_xor(control / 2, 53256)
+		release(s, Task(..t, data: Idle(control, count)), DEVICE_B)
+	}
+}
+
+// Writes the next DATA_SIZE letters of the alphabet into a packet's data.
+fn fill(data Array(Int), i Int, count Int) (Array(Int), Int) {
+	if i == DATA_SIZE {
+		(data, count)
+	} else {
+		count = if count >= 26 {
+			1
+		} else {
+			count + 1
+		}
+		fill([..data, 65 + count - 1], i + 1, count)
+	}
+}
+
+fn work(s Scheduler, t Task, message Option(Packet), destination Int, count Int) Scheduler {
+	match message {
+		None -> wait(s, t)
+		Some(packet) -> {
+			destination = if destination == HANDLER_A { HANDLER_B } else { HANDLER_A }
+			(data, count) = fill([], 0, count)
+			packet = Packet(..packet, identity: destination, datum: 0, data: data)
+			queue_packet(s, Task(..t, data: Worker(destination, count)), packet)
+		}
+	}
+}
+
+fn handle(
+	s Scheduler,
+	t Task,
+	message Option(Packet),
+	work_in Array(Packet),
+	device_in Array(Packet),
+) Scheduler {
+	(work_in, device_in) = match message {
+		None -> (work_in, device_in)
+		Some(packet) -> match packet.kind {
+			WorkKind -> ([..work_in, packet], device_in)
+			DeviceKind -> (work_in, [..device_in, packet])
+		}
+	}
+	match work_in {
+		[] -> wait(s, Task(..t, data: Handler(work_in, device_in)))
+		[work_packet, ..work_rest] -> {
+			count = work_packet.datum
+			if count >= DATA_SIZE {
+				queue_packet(s, Task(..t, data: Handler(work_rest, device_in)), work_packet)
+			} else {
+				match device_in {
+					[] -> wait(s, Task(..t, data: Handler(work_in, device_in)))
+					[device_packet, ..device_rest] -> {
+						device_packet = Packet(..device_packet, datum: work_packet.data[count] or 0)
+						work_packet = Packet(..work_packet, datum: count + 1)
+						t = Task(..t, data: Handler([work_packet, ..work_rest], device_rest))
+						queue_packet(s, t, device_packet)
+					}
+				}
+			}
+		}
+	}
+}
+
+fn drive(s Scheduler, t Task, message Option(Packet), pending Option(Packet)) Scheduler {
+	match message {
+		None -> match pending {
+			None -> wait(s, t)
+			Some(packet) -> queue_packet(s, Task(..t, data: Device(None)), packet)
+		}
+		Some(_) -> hold_self(s, Task(..t, data: Device(message)))
+	}
+}
+
+fn act(s Scheduler, t Task, message Option(Packet)) Scheduler {
+	match t.data {
+		Idle(control, count) -> idle(s, t, control, count)
+		Worker(destination, count) -> work(s, t, message, destination, count)
+		Handler(work_in, device_in) -> handle(s, t, message, work_in, device_in)
+		Device(pending) -> drive(s, t, message, pending)
+	}
+}
+
+fn run_task(s Scheduler, t Task) Scheduler {
+	if t.packet_pending && t.task_waiting && !t.task_holding {
+		match t.input {
+			[] -> act(s, t, None)
+			[message, ..rest] -> {
+				t = Task(
+					..t,
+					input: rest,
+					packet_pending: rest != [],
+					task_waiting: False,
+					task_holding: False,
+				)
+				act(s, t, Some(message))
+			}
+		}
+	} else {
+		act(s, t, None)
+	}
+}
+
+fn schedule(s Scheduler) Scheduler {
+	if s.current == NO_TASK {
+		s
+	} else {
+		t = find_task(s, s.current)
+		if t.task_holding || { !t.packet_pending && t.task_waiting } {
+			schedule(Scheduler(..s, current: t.link))
+		} else {
+			schedule(run_task(s, t))
+		}
+	}
+}
+
+fn packet(identity Int, kind Kind) Packet {
+	Packet(identity: identity, kind: kind, datum: 0, data: [0, 0, 0, 0])
+}
+
+fn create_task(
+	s Scheduler,
+	identity Int,
+	priority Int,
+	input Array(Packet),
+	data TaskData,
+) Scheduler {
+	t = Task(
+		link: s.current,
+		identity: identity,
+		priority: priority,
+		input: input,
+		packet_pending: input != [],
+		task_waiting: identity != IDLER,
+		task_holding: False,
+		data: data,
+	)
+	Scheduler(..s, tasks: map::set(s.tasks, identity, t), current: identity)
+}
+
+fn start() Scheduler {
+	work_queue = [packet(WORKER, WorkKind), packet(WORKER, WorkKind)]
+	a_queue = [
+		packet(DEVICE_A, DeviceKind),
+		packet(DEVICE_A, DeviceKind),
+		packet(DEVICE_A, DeviceKind),
+	]
+	b_queue = [
+		packet(DEVICE_B, DeviceKind),
+		packet(DEVICE_B, DeviceKind),
+		packet(DEVICE_B, DeviceKind),
+	]
+	Scheduler(tasks: map::new(), current: NO_TASK, queue_count: 0, hold_count: 0)
+	|> create_task(IDLER, 0, [], Idle(control: 1, count: 10000))
+	|> create_task(WORKER, 1000, work_queue, Worker(destination: HANDLER_A, count: 0))
+	|> create_task(HANDLER_A, 2000, a_queue, Handler(work_in: [], device_in: []))
+	|> create_task(HANDLER_B, 3000, b_queue, Handler(work_in: [], device_in: []))
+	|> create_task(DEVICE_A, 4000, [], Device(None))
+	|> create_task(DEVICE_B, 5000, [], Device(None))
+	|> schedule
+}
+
+fn repeat(n Int, queued Int, held Int) (Int, Int) {
+	if n == 0 {
+		(queued, held)
+	} else {
+		s = start()
+		repeat(n - 1, queued + s.queue_count, held + s.hold_count)
+	}
+}
+
+pub fn main() {
+	(queued, held) = repeat(25, 0, 0)
+	println(queued)
+	println(held)
+}

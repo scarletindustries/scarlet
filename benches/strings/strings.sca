@@ -1,0 +1,122 @@
+// Strings: builds records by interpolation and concatenation, trims, splits,
+// joins and replaces them, searches for substrings and turns ints into strings
+// and back. It stresses the string built-ins. Written for this suite.
+
+import scarlet/array
+import scarlet/int
+import scarlet/string
+
+const rows = 120000
+
+const batch_size = 50
+
+const words = [
+	'amber',
+	'birch',
+	'cedar',
+	'delta',
+	'ember',
+	'flint',
+	'grove',
+	'heath',
+	'ivory',
+	'jade',
+	'kelp',
+	'lotus',
+	'maple',
+	'north',
+	'olive',
+	'pearl',
+]
+
+fn next(seed Int) Int {
+	{ seed * 1309 + 13849 } % 65536
+}
+
+fn mix(h Int, v Int) Int {
+	{ h * 31 + v } % 1000000007
+}
+
+fn join(parts Array(String), sep String) String {
+	match parts {
+		[] -> ''
+		[first, ..rest] -> array::fold(rest, first, fn(acc, part) acc + sep + part)
+	}
+}
+
+fn count(flag Bool) Int {
+	if flag { 1 } else { 0 }
+}
+
+// Reads one `key=value` field: the numeric ones are parsed, the others measured.
+fn field_value(field String) Int {
+	match string::split(field, '=') {
+		[key, value] -> match key {
+			'id' | 'score' -> match int::from_string(value) {
+				Ok(n) -> n
+				Err(_) -> 0
+			}
+			_ -> string::length(value)
+		}
+		_ -> 0
+	}
+}
+
+fn field_text(field String) String {
+	match string::split(field, '=') {
+		[_, value] -> value
+		_ -> ''
+	}
+}
+
+fn row_checksum(h Int, i Int, a Int, b Int, c Int, row String) Int {
+	padded = '  ' + row + ' '
+	fields = padded |> string::trim |> string::split(',')
+	h1 = array::fold(fields, h, fn(acc, field) mix(acc, field_value(field)))
+	rebuilt = fields |> array::map(field_text) |> join('|')
+	h2 = mix(h1, string::length(rebuilt))
+	h3 = mix(h2, count(string::contains(row, '7,tag=')) + 2 * count(string::contains(row, 'ar-ma')))
+	h4 = mix(h3, string::length(string::replace(row, '=', ': ')))
+	digits = int::to_string(a * 65536 + b) + int::to_string(c)
+	number = match int::from_string(digits) {
+		Ok(n) -> n
+		Err(_) -> 0
+	}
+	mix(mix(h4, number % 1000003), i)
+}
+
+// Joins a batch of rows into one text and takes it apart again.
+fn batch_checksum(h Int, batch Array(String)) Int {
+	text = join(batch, '\n')
+	lines = string::split(text, '\n')
+	pieces = string::split(text, ',')
+	hits = array::fold(lines, 0, fn(acc, line) acc + count(string::contains(line, 'user=u1')))
+	h1 = mix(h, string::length(text))
+	h2 = mix(h1, array::length(lines) * 1000 + hits)
+	h3 = mix(h2, array::length(pieces))
+	mix(h3, string::length(string::replace(text, 'tag=', '#')))
+}
+
+fn run(i Int, seed Int, h Int, batch Array(String)) Int {
+	if i == rows {
+		h
+	} else {
+		a = next(seed)
+		b = next(a)
+		c = next(b)
+		first = words[c % 16] or ''
+		second = words[a % 16] or ''
+		row = 'id=${i},user=u${a % 997},score=${b},tag=${first}-${second}'
+		h1 = row_checksum(h, i, a, b, c, row)
+		full = [..batch, row]
+		if array::length(full) == batch_size {
+			run(i + 1, c, batch_checksum(h1, full), [])
+		} else {
+			run(i + 1, c, h1, full)
+		}
+	}
+}
+
+pub fn main() {
+	println(run(0, 42, 7, []))
+}

@@ -1,0 +1,91 @@
+// Queens from the Are We Fast Yet suite: place eight queens by backtracking over
+// boolean arrays of free rows and diagonals. Stresses array reads and writes.
+// Ported from https://github.com/smarr/are-we-fast-yet (MIT licence).
+
+type Board {
+	rows Array(Bool)
+	maxs Array(Bool)
+	mins Array(Bool)
+	queens Array(Int)
+}
+
+// The array with `v` at index `i`. An index past the end changes nothing.
+fn set(xs Array(a), i Int, v a) Array(a) {
+	match xs {
+		[] -> []
+		[h, ..t] -> if i == 0 {
+			[v, ..t]
+		} else {
+			[h, ..set(t, i - 1, v)]
+		}
+	}
+}
+
+fn filled(n Int, v a) Array(a) {
+	if n == 0 {
+		[]
+	} else {
+		[v, ..filled(n - 1, v)]
+	}
+}
+
+fn is_free(b Board, r Int, c Int) Bool {
+	{ b.rows[r] or False } && { b.maxs[c + r] or False } && { b.mins[c - r + 7] or False }
+}
+
+fn take(b Board, r Int, c Int) Board {
+	Board(
+		rows: set(b.rows, r, False),
+		maxs: set(b.maxs, c + r, False),
+		mins: set(b.mins, c - r + 7, False),
+		queens: set(b.queens, r, c),
+	)
+}
+
+// Tries rows `r` to 7 for the queen in column `c`. Backtracking is going back
+// to the board from before the queen was placed.
+fn place_queen(b Board, c Int, r Int) Option(Board) {
+	if r == 8 {
+		None
+	} else if is_free(b, r, c) {
+		next = take(b, r, c)
+		if c == 7 {
+			Some(next)
+		} else {
+			match place_queen(next, c + 1, 0) {
+				Some(done) -> Some(done)
+				None -> place_queen(b, c, r + 1)
+			}
+		}
+	} else {
+		place_queen(b, c, r + 1)
+	}
+}
+
+fn queens() Option(Board) {
+	place_queen(Board(filled(8, True), filled(16, True), filled(16, True), filled(8, -1)), 0, 0)
+}
+
+// The column of each row's queen, read as one decimal number.
+fn digits(xs Array(Int), acc Int) Int {
+	match xs {
+		[] -> acc
+		[h, ..t] -> digits(t, acc * 10 + h)
+	}
+}
+
+fn run(n Int, solved Int, sum Int) Nil {
+	if n == 0 {
+		println(solved)
+		println(sum)
+	} else {
+		match queens() {
+			Some(b) -> run(n - 1, solved + 1, sum + digits(b.queens, 0))
+			None -> run(n - 1, solved, sum)
+		}
+	}
+}
+
+pub fn main() {
+	run(3500, 0, 0)
+}

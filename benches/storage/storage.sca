@@ -1,0 +1,66 @@
+// Storage builds a tree of nested arrays, four children to a node and seven
+// levels deep, over and over. It stresses allocation and freeing.
+// Ported from Are We Fast Yet (github.com/smarr/are-we-fast-yet), MIT licence.
+
+type Tree {
+	Empty
+	Node(children Array(Tree))
+}
+
+type Built {
+	tree Tree
+	seed Int
+	count Int
+	slots Int
+}
+
+type Totals {
+	count Int
+	slots Int
+}
+
+fn next(seed Int) Int {
+	{ seed * 1309 + 13849 } % 65536
+}
+
+fn empty_slots(arr Array(Tree), n Int) Array(Tree) {
+	if n == 0 {
+		arr
+	} else {
+		empty_slots([..arr, Empty], n - 1)
+	}
+}
+
+fn children(arr Array(Tree), i Int, depth Int, seed Int, count Int, slots Int) Built {
+	if i == 4 {
+		Built(Node(arr), seed, count, slots)
+	} else {
+		b = build(depth - 1, seed, count, slots)
+		children([..arr, b.tree], i + 1, depth, b.seed, b.count, b.slots)
+	}
+}
+
+fn build(depth Int, seed Int, count Int, slots Int) Built {
+	if depth == 1 {
+		s = next(seed)
+		n = s % 10 + 1
+		Built(Node(empty_slots([], n)), s, count + 1, slots + n)
+	} else {
+		children([], 0, depth, seed, count + 1, slots)
+	}
+}
+
+fn repeat(rounds Int, acc Totals) Totals {
+	if rounds == 0 {
+		acc
+	} else {
+		b = build(7, 74755, 0, 0)
+		repeat(rounds - 1, Totals(acc.count + b.count, acc.slots + b.slots))
+	}
+}
+
+pub fn main() {
+	t = repeat(500, Totals(0, 0))
+	println(t.count)
+	println(t.slots)
+}

@@ -1,0 +1,114 @@
+// fannkuch-redux: flips the front of every permutation of 0..N-1 until 0 leads,
+// and keeps a checksum and the longest run of flips. It stresses small-array
+// reads, writes and reversal. Ported from Mike Pall's Lua program in the Computer
+// Language Benchmarks Game (benchmarksgame-team.pages.debian.net, BSD-3 licence).
+
+type Outcome {
+	sum Int
+	maxflips Int
+}
+
+type Step {
+	Done
+	Next(p Array(Int), s Array(Int))
+}
+
+fn iota(i Int, n Int, acc Array(Int)) Array(Int) {
+	if i == n {
+		acc
+	} else {
+		iota(i + 1, n, [..acc, i])
+	}
+}
+
+// Arrays have no write at an index, so this cuts the array around the slot
+// and joins the two sides back around the new value.
+fn set(xs Array(Int), at Int, x Int, n Int) Array(Int) {
+	before = xs[0..at] or []
+	after = xs[at + 1..n] or []
+	[..before, x, ..after]
+}
+
+// Pushes q[i], q[i + 1], ... q[q1 - 1] onto the front of acc, which leaves
+// them in reverse order.
+fn reversed(q Array(Int), i Int, q1 Int, acc Array(Int)) Array(Int) {
+	if i == q1 {
+		acc
+	} else {
+		reversed(q, i + 1, q1, [q[i] or 0, ..acc])
+	}
+}
+
+// The first element lives in q1, not in q, so slot 0 of q is never read.
+fn flip(q Array(Int), q1 Int, flips Int, n Int) Int {
+	qq = q[q1] or 0
+	if qq == 0 {
+		flips
+	} else {
+		back = q[q1 + 1..n] or []
+		flip([0, ..reversed(q, 1, q1, [q1, ..back])], qq, flips + 1, n)
+	}
+}
+
+// Rotates the first m + 1 elements left by one.
+fn rotate(p Array(Int), m Int, n Int) Array(Int) {
+	match p {
+		[] -> p
+		[h, ..t] -> {
+			moved = t[0..m] or []
+			rest = t[m..n - 1] or []
+			[..moved, h, ..rest]
+		}
+	}
+}
+
+fn swap01(p Array(Int)) Array(Int) {
+	match p {
+		[a, b, ..t] -> [b, a, ..t]
+		_ -> p
+	}
+}
+
+fn swap12(p Array(Int)) Array(Int) {
+	match p {
+		[a, b, c, ..t] -> [a, c, b, ..t]
+		_ -> p
+	}
+}
+
+fn advance(p Array(Int), s Array(Int), i Int, n Int) Step {
+	sx = s[i] or 0
+	if sx != 0 {
+		Next(p, set(s, i, sx - 1, n))
+	} else if i == n - 1 {
+		Done
+	} else {
+		advance(rotate(p, i + 1, n), set(s, i, i, n), i + 1, n)
+	}
+}
+
+fn run(p Array(Int), s Array(Int), sign Int, sum Int, maxflips Int, n Int) Outcome {
+	q1 = p[0] or 0
+	flips = if q1 == 0 {
+		0
+	} else {
+		flip(p, q1, 1, n)
+	}
+	sum2 = sum + sign * flips
+	max2 = if flips > maxflips { flips } else { maxflips }
+	if sign == 1 {
+		run(swap01(p), s, -1, sum2, max2, n)
+	} else {
+		match advance(swap12(p), s, 2, n) {
+			Done -> Outcome(sum2, max2)
+			Next(p2, s2) -> run(p2, s2, 1, sum2, max2, n)
+		}
+	}
+}
+
+pub fn main() {
+	n = 9
+	done = run(iota(0, n, []), iota(0, n, []), 1, 0, 0, n)
+	println(done.sum)
+	println('Pfannkuchen(${n}) = ${done.maxflips}')
+}

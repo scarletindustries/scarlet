@@ -1,0 +1,130 @@
+// cfold: build an expression tree, reassociate it and fold its constants, many times over.
+// It stresses allocating small nodes of a sum type and matching on them, with deep recursion.
+// Ported from test/bench/koka/cfold.kk in Koka's benchmarks (Apache-2.0), itself from Lean 4's const_fold.
+
+type Expr {
+	Var(name Int)
+	Val(value Int)
+	Add(l Expr, r Expr)
+	Mul(l Expr, r Expr)
+}
+
+fn mk_expr(n Int, v Int) Expr {
+	if n == 0 {
+		if v == 0 {
+			Var(1)
+		} else {
+			Val(v)
+		}
+	} else {
+		Add(mk_expr(n - 1, v + 1), mk_expr(n - 1, if v == 0 {
+			0
+		} else {
+			v - 1
+		}))
+	}
+}
+
+fn append_add(e0 Expr, e3 Expr) Expr {
+	match e0 {
+		Add(e1, e2) -> Add(e1, append_add(e2, e3))
+		Var(..) | Val(..) | Mul(..) -> Add(e0, e3)
+	}
+}
+
+fn append_mul(e0 Expr, e3 Expr) Expr {
+	match e0 {
+		Mul(e1, e2) -> Mul(e1, append_mul(e2, e3))
+		Var(..) | Val(..) | Add(..) -> Mul(e0, e3)
+	}
+}
+
+fn reassoc(e Expr) Expr {
+	match e {
+		Add(e1, e2) -> append_add(reassoc(e1), reassoc(e2))
+		Mul(e1, e2) -> append_mul(reassoc(e1), reassoc(e2))
+		Var(..) | Val(..) -> e
+	}
+}
+
+fn cfold(e Expr) Expr {
+	match e {
+		Add(e1, e2) -> {
+			f1 = cfold(e1)
+			f2 = cfold(e2)
+			match f1 {
+				Val(a) -> match f2 {
+					Val(b) -> Val(a + b)
+					Add(l, r) -> match r {
+						Val(b) -> Add(Val(a + b), l)
+						Var(..) | Add(..) | Mul(..) -> match l {
+							Val(b) -> Add(Val(a + b), r)
+							Var(..) | Add(..) | Mul(..) -> Add(f1, f2)
+						}
+					}
+					Var(..) | Mul(..) -> Add(f1, f2)
+				}
+				Var(..) | Add(..) | Mul(..) -> Add(f1, f2)
+			}
+		}
+		Mul(e1, e2) -> {
+			f1 = cfold(e1)
+			f2 = cfold(e2)
+			match f1 {
+				Val(a) -> match f2 {
+					Val(b) -> Val(a * b)
+					Mul(l, r) -> match r {
+						Val(b) -> Mul(Val(a * b), l)
+						Var(..) | Add(..) | Mul(..) -> match l {
+							Val(b) -> Mul(Val(a * b), r)
+							Var(..) | Add(..) | Mul(..) -> Mul(f1, f2)
+						}
+					}
+					Var(..) | Add(..) -> Mul(f1, f2)
+				}
+				Var(..) | Add(..) | Mul(..) -> Mul(f1, f2)
+			}
+		}
+		Var(..) | Val(..) -> e
+	}
+}
+
+fn eval(e Expr) Int {
+	match e {
+		Var(_) -> 0
+		Val(v) -> v
+		Add(l, r) -> eval(l) + eval(r)
+		Mul(l, r) -> eval(l) * eval(r)
+	}
+}
+
+// An order-sensitive hash of the tree, so the output pins down the folded tree's
+// shape and not only its value, which folding leaves unchanged.
+fn shape(e Expr) Int {
+	match e {
+		Var(n) -> 3 * n + 1
+		Val(v) -> 3 * v + 2
+		Add(l, r) -> { 31 * shape(l) + 17 * shape(r) + 3 } % 1000003
+		Mul(l, r) -> { 37 * shape(l) + 19 * shape(r) + 5 } % 1000003
+	}
+}
+
+// The tree is rebuilt every round, from a start value that walks 0 to 7, so some
+// trees are mostly Var leaves and some mostly Val. Depth 12 is as deep as it goes
+// because the reassociated tree is one chain 4096 long, and LuaJIT's stack ends near 10000.
+fn rounds(i Int, n Int, before Int, after Int, shapes Int) (Int, Int, Int) {
+	if i == n {
+		(before, after, shapes)
+	} else {
+		e = mk_expr(12, i % 8)
+		f = cfold(reassoc(e))
+		rounds(i + 1, n, before + eval(e), after + eval(f), shapes + shape(f))
+	}
+}
+
+pub fn main() {
+	(before, after, shapes) = rounds(0, 700, 0, 0, 0)
+	println(before)
+	println(after)
+	println(shapes)
+}

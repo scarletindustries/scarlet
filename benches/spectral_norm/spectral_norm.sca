@@ -1,0 +1,101 @@
+// spectral-norm: the power method on an implicit matrix, 10 rounds. It stresses
+// float arithmetic over arrays. Ported from the Computer Language Benchmarks
+// Game (benchmarksgame-team.pages.debian.net/benchmarksgame, BSD-3 licence).
+
+import scarlet/float
+
+// Entry (i, j) of the infinite matrix, counting from zero.
+fn a(i Int, j Int) Float {
+	1.0 / float::from_int({ i + j } * { i + j + 1 } / 2 + i + 1)
+}
+
+fn av_row(x Array(Float), i Int, j Int, n Int, sum Float) Float {
+	if j < n {
+		av_row(x, i, j + 1, n, sum + { x[j] or 0.0 } * a(i, j))
+	} else {
+		sum
+	}
+}
+
+fn av(x Array(Float), i Int, n Int, y Array(Float)) Array(Float) {
+	if i < n {
+		av(x, i + 1, n, [..y, av_row(x, i, 0, n, 0.0)])
+	} else {
+		y
+	}
+}
+
+fn atv_row(x Array(Float), i Int, j Int, n Int, sum Float) Float {
+	if j < n {
+		atv_row(x, i, j + 1, n, sum + { x[j] or 0.0 } * a(j, i))
+	} else {
+		sum
+	}
+}
+
+fn atv(x Array(Float), i Int, n Int, y Array(Float)) Array(Float) {
+	if i < n {
+		atv(x, i + 1, n, [..y, atv_row(x, i, 0, n, 0.0)])
+	} else {
+		y
+	}
+}
+
+fn atav(x Array(Float), n Int) Array(Float) {
+	atv(av(x, 0, n, []), 0, n, [])
+}
+
+fn ones(n Int, xs Array(Float)) Array(Float) {
+	if n == 0 {
+		xs
+	} else {
+		ones(n - 1, [..xs, 1.0])
+	}
+}
+
+type Pair {
+	u Array(Float)
+	v Array(Float)
+}
+
+fn power(k Int, u Array(Float), v Array(Float), n Int) Pair {
+	if k == 0 {
+		Pair(u, v)
+	} else {
+		v2 = atav(u, n)
+		power(k - 1, atav(v2, n), v2, n)
+	}
+}
+
+fn dot(x Array(Float), y Array(Float), i Int, n Int, sum Float) Float {
+	if i < n {
+		dot(x, y, i + 1, n, sum + { x[i] or 0.0 } * { y[i] or 0.0 })
+	} else {
+		sum
+	}
+}
+
+// There is no square root in the standard library, so every version of this
+// benchmark takes the same 30 Newton steps.
+fn sqrt(s Float, x Float, k Int) Float {
+	if k == 0 {
+		x
+	} else {
+		sqrt(s, 0.5 * { x + s / x }, k - 1)
+	}
+}
+
+// Prints the norm, scaled to an integer, and then floor(u.v). The second number
+// depends on every round, where the norm alone has converged after three.
+fn spectral_norm(n Int) {
+	p = power(10, ones(n, []), [], n)
+	vbv = dot(p.u, p.v, 0, n, 0.0)
+	vv = dot(p.v, p.v, 0, n, 0.0)
+	println(float::floor(sqrt(vbv / vv, 1.0, 30) * 1000000000.0 + 0.5))
+	println(float::floor(vbv))
+}
+
+pub fn main() {
+	spectral_norm(100)
+	spectral_norm(700)
+}

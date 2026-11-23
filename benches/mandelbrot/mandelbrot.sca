@@ -1,0 +1,67 @@
+// Mandelbrot: the bit-packed mandelbrot checksum. It stresses float arithmetic
+// and integer bit operations in nested loops.
+// Ported from Are We Fast Yet (github.com/smarr/are-we-fast-yet, MIT licence),
+// which took it from the Computer Language Benchmarks Game (revised BSD).
+
+import scarlet/float
+import scarlet/int
+
+// 1 when the point leaves the circle of radius 2 within 50 steps, 0 otherwise.
+fn escape(z Int, zrzr Float, zizi Float, zi Float, cr Float, ci Float) Int {
+	if z < 50 {
+		zr = zrzr - zizi + cr
+		zi2 = 2.0 * zr * zi + ci
+		zrzr2 = zr * zr
+		zizi2 = zi2 * zi2
+		if zrzr2 + zizi2 > 4.0 {
+			1
+		} else {
+			escape(z + 1, zrzr2, zizi2, zi2, cr, ci)
+		}
+	} else {
+		0
+	}
+}
+
+fn row(x Int, size Int, ci Float, sum Int, byte_acc Int, bit_num Int) Int {
+	if x < size {
+		cr = 2.0 * float::from_int(x) / float::from_int(size) - 1.5
+		acc = byte_acc * 2 + escape(0, 0.0, 0.0, 0.0, cr, ci)
+		bits = bit_num + 1
+		if bits == 8 {
+			row(x + 1, size, ci, int::bitwise_xor(sum, acc), 0, 0)
+		} else if x == size - 1 {
+			row(
+				x + 1,
+				size,
+				ci,
+				int::bitwise_xor(sum, int::bitwise_shift_left(acc, 8 - bits)),
+				0,
+				0,
+			)
+		} else {
+			row(x + 1, size, ci, sum, acc, bits)
+		}
+	} else {
+		sum
+	}
+}
+
+fn rows(y Int, size Int, sum Int) Int {
+	if y < size {
+		ci = 2.0 * float::from_int(y) / float::from_int(size) - 1.0
+		rows(y + 1, size, row(0, size, ci, sum, 0, 0))
+	} else {
+		sum
+	}
+}
+
+fn mandelbrot(size Int) Int {
+	rows(0, size, 0)
+}
+
+pub fn main() {
+	println(mandelbrot(1))
+	println(mandelbrot(500))
+	println(mandelbrot(750))
+}
