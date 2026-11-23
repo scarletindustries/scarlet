@@ -20,5 +20,22 @@ it stresses and where it came from.
   written here.
 
 Ratios are against LuaJIT with its JIT off, the fastest interpreter we know
-of. Read the instruction counts before the times: they repeat to several
-digits, and time on a busy machine does not.
+of.
+
+Judge a change by the instruction counts, which `run.py` prints first. They
+repeat to about one part in a thousand from run to run, so a change smaller
+than that is not a change. `sieve` wanders most, by up to 0.15%, because it
+copies large arrays and the cost of a copy moves with where the memory
+happens to sit. Cycles are printed beside the instructions, and time last: on
+a busy machine time is noise.
+
+To judge a change to the VM, save a run before it and compare after it:
+
+    benches/run.py --runtimes scarlet --json before.json
+    benches/run.py --runtimes scarlet --baseline before.json
+
+The second prints how far each benchmark's instruction count moved. It also
+prints the VM's own counts for each benchmark, which are exact: how many VM
+instructions ran, which kinds ran most, and how many heap cells were made and
+reused. They come from `scarlet run --counters FILE`, and
+`scarlet dis --instrs FILE` shows the instructions they count.

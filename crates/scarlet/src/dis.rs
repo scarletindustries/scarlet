@@ -3,9 +3,16 @@
 //! The stdlib compiles into the same [`Program`] as the user's code, so a listing always picks
 //! one of two sets: the entry file's own functions, or every function from any module whose name
 //! matches.
+//!
+//! `scarlet dis --instrs` also prints, after each function's Core IR, the register instructions
+//! the VM loads it as. Those are what the VM runs and what `scarlet run --counters` counts. A
+//! counted run also counts each imported module's toplevel, which a listing does not show: it
+//! has the entry file's toplevel only.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
+
+use scarlet_vm::Listing;
 
 use crate::core_ir::{CoreExpr, Program};
 use crate::module::ModuleKey;
@@ -24,7 +31,10 @@ pub enum Filter<'a> {
 /// Each function is preceded by its `fn#N`, the number a `call fn#N` or
 /// `closure fn#N` elsewhere in the listing refers to. The listing ends with
 /// the names of the constructors it shows, so `ctor 512.0(%1)` can be read.
-pub fn listing(program: &Program, filter: Filter<'_>) -> Option<String> {
+///
+/// With `loaded`, each function's Core IR is followed by the instructions the
+/// VM loaded it as.
+pub fn listing(program: &Program, filter: Filter<'_>, loaded: Option<&Listing>) -> Option<String> {
     let entry = ModuleKey::main();
     let mut out = summary(program, &entry);
     let mut shown: Vec<&CoreExpr> = Vec::new();
@@ -35,11 +45,17 @@ pub fn listing(program: &Program, filter: Filter<'_>) -> Option<String> {
         };
         if keep {
             let _ = write!(out, "\n; fn#{i}\n{f}");
+            if let Some(instrs) = loaded.and_then(|l| l.function(i)) {
+                out.push_str(instrs);
+            }
             shown.push(&f.core.body);
         }
     }
     if let Filter::Entry = filter {
         let _ = write!(out, "\n; toplevel\n{}", program.toplevel);
+        if let Some(loaded) = loaded {
+            out.push_str(loaded.toplevel());
+        }
         shown.push(&program.toplevel.core.body);
     }
     if shown.is_empty() {
@@ -118,7 +134,7 @@ mod tests {
 
     #[test]
     fn the_entry_listing_is_this_files_functions_and_its_toplevel() {
-        let text = listing(&program(SQUARE), Filter::Entry).expect("main has functions");
+        let text = listing(&program(SQUARE), Filter::Entry, None).expect("main has functions");
         assert!(text.contains("fn main.square(%0:"), "{text}");
         assert!(text.contains("IntMul(%0, %0)"), "{text}");
         assert!(text.contains("\n; toplevel\nfn main.__main__("), "{text}");
@@ -134,7 +150,7 @@ mod tests {
                    pub fn main() {\n\
                    \tprintln(string::replace('a', 'a', 'b'))\n\
                    }\n";
-        let text = listing(&program(src), Filter::Named("replace")).expect("replace exists");
+        let text = listing(&program(src), Filter::Named("replace"), None).expect("replace exists");
         assert!(text.contains("fn scarlet/string.replace("), "{text}");
         assert!(!text.contains("; toplevel"), "{text}");
     }
@@ -156,7 +172,7 @@ mod tests {
                    pub fn main() {\n\
                    \tprintln(area(Circle(radius: 2)))\n\
                    }\n";
-        let text = listing(&program(src), Filter::Entry).expect("main has functions");
+        let text = listing(&program(src), Filter::Entry, None).expect("main has functions");
         let (_, types) = text.split_once("\n; types\n").expect("a types section");
         let lines: Vec<&str> = types.lines().collect();
         assert_eq!(lines.len(), 1, "{types}");
@@ -168,14 +184,14 @@ mod tests {
 
     #[test]
     fn a_name_nothing_has_lists_nothing() {
-        assert!(listing(&program(SQUARE), Filter::Named("nope")).is_none());
+        assert!(listing(&program(SQUARE), Filter::Named("nope"), None).is_none());
     }
 
     /// The header counts what the listing was taken from, so a filtered
     /// listing still says how big the program is and where it starts.
     #[test]
     fn the_summary_names_where_the_program_starts() {
-        let text = listing(&program(SQUARE), Filter::Named("square")).expect("square exists");
+        let text = listing(&program(SQUARE), Filter::Named("square"), None).expect("square exists");
         let first = text.lines().next().unwrap_or_default();
         assert!(first.starts_with("; "), "{first}");
         assert!(first.contains("2 from this file"), "{first}");

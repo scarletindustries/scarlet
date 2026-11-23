@@ -1,7 +1,7 @@
 //! These tests run programs end to end. Each is compiled from Scarlet source
 //! and run by the VM, and the test checks exactly what it prints.
 
-use scarlet_vm::{OsHost, Stop};
+use scarlet_vm::{AtExit, OsHost, Stop};
 
 fn compile(src: &str) -> scarlet_core::core_ir::Program {
     let result = scarlet_core::compile::compile_text(src, None);
@@ -11,7 +11,7 @@ fn compile(src: &str) -> scarlet_core::core_ir::Program {
 
 fn run(src: &str) -> Result<String, Stop> {
     let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
-    scarlet_vm::run(&compile(src), &mut host)?;
+    scarlet_vm::run(&compile(src), &mut host, AtExit::Audit)?;
     Ok(String::from_utf8(std::mem::take(host.out())).expect("println writes UTF-8"))
 }
 
@@ -22,7 +22,7 @@ fn prints(src: &str, want: &str) {
 /// Run `src` in a world with `argv` and `env`.
 fn prints_in(argv: Vec<String>, env: Vec<(String, String)>, src: &str, want: &str) {
     let mut host = OsHost::new(argv, env, Vec::new());
-    let ran = scarlet_vm::run(&compile(src), &mut host);
+    let ran = scarlet_vm::run(&compile(src), &mut host, AtExit::Audit);
     assert_eq!(ran, Ok(()), "{src}");
     let out = std::mem::take(host.out());
     assert_eq!(String::from_utf8(out).expect("UTF-8"), want, "{src}");
@@ -422,7 +422,11 @@ impl std::io::Write for Closed {
 fn a_closed_output_stops_the_run_quietly() {
     let program = compile("pub fn main() {\n\tprintln(1)\n}\n");
     assert_eq!(
-        scarlet_vm::run(&program, &mut OsHost::new(Vec::new(), Vec::new(), Closed)),
+        scarlet_vm::run(
+            &program,
+            &mut OsHost::new(Vec::new(), Vec::new(), Closed),
+            AtExit::Audit
+        ),
         Err(Stop::OutputClosed)
     );
 }
@@ -1624,4 +1628,118 @@ fn a_dropped_connection_is_closed() {
         &format!("connected to 127.0.0.1:{port}\nOk(::1)\nErr(Nil)\n"),
     );
     assert_eq!(peer.join().expect("peer"), 0);
+}
+
+const FIB: &str = "fn fib(n Int) Int {\n\
+                   \tif n < 2 { n } else { fib(n - 1) + fib(n - 2) }\n\
+                   }\n\
+                   pub fn main() {\n\
+                   \tprintln(fib(10))\n\
+                   }\n";
+
+fn counted(src: &str) -> (String, scarlet_vm::Counts) {
+    let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+    let counts = scarlet_vm::run_counted(&compile(src), &mut host, AtExit::Audit);
+    let out = String::from_utf8(std::mem::take(host.out())).expect("UTF-8");
+    (out, counts.expect("the program runs to its end"))
+}
+
+fn ran(counts: &scarlet_vm::Counts, op: &str) -> u64 {
+    let found = counts.ops.iter().find(|(name, _)| *name == op);
+    found
+        .unwrap_or_else(|| panic!("no instruction called {op}"))
+        .1
+}
+
+/// A counted run prints what an ordinary one does, and counts each
+/// instruction under its kind. `fib(10)` is entered 177 times, once from
+/// `main` and 176 times from itself, and 89 of those return `n` as it is.
+#[test]
+fn a_counted_run_counts_each_instruction_by_its_kind() {
+    let (out, counts) = counted(FIB);
+    assert_eq!(out, "55\n");
+    assert_eq!(ran(&counts, "CallSelf"), 176);
+    assert_eq!(ran(&counts, "Call"), 1);
+    assert_eq!(ran(&counts, "JumpUnlessCmpImm"), 177);
+    assert_eq!(ran(&counts, "Int"), 88);
+    assert_eq!(ran(&counts, "Print"), 1);
+    assert_eq!(ran(&counts, "Bad"), 0);
+    assert_eq!(counts.cells_live, 0);
+}
+
+/// The counts are a property of the program, so a second run gives the same
+/// ones.
+#[test]
+fn a_counted_run_counts_the_same_every_time() {
+    let src = "type L {\n\tCons(h Int, t L)\n\tEnd\n}\n\
+               fn build(n Int, acc L) L {\n\
+               \tif n == 0 { acc } else { build(n - 1, Cons(n, acc)) }\n\
+               }\n\
+               pub fn main() {\n\
+               \tprintln(build(3, End))\n\
+               }\n";
+    let (out, first) = counted(src);
+    assert_eq!(
+        out,
+        "Cons(\n  1,\n  Cons(\n    2,\n    Cons(3, End)\n  )\n)\n"
+    );
+    assert_eq!(counted(src).1, first);
+    assert_eq!(ran(&first, "Ctor"), 3);
+    assert!(first.cells_made >= 3, "{}", first.cells_made);
+    assert_eq!(first.cells_reused, 0);
+}
+
+/// Counting is by whole blocks of instructions, and a stop leaves some of
+/// them half run, so a run that stops has its stop and no counts.
+#[test]
+fn a_counted_run_that_stops_has_no_counts() {
+    let src = "import scarlet/internal\n\
+               fn later() Int { internal::live_subjects() }\n\
+               pub fn main() {\n\
+               \tprintln('before')\n\
+               \tprintln(later())\n\
+               }\n";
+    let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+    let stopped = scarlet_vm::run_counted(&compile(src), &mut host, AtExit::Audit);
+    assert!(matches!(stopped, Err(Stop::NotBuiltYet(_))), "{stopped:?}");
+    assert_eq!(std::mem::take(host.out()), b"before\n");
+}
+
+/// The listing shows each function as the VM loaded it, under the names a
+/// counted run counts by.
+#[test]
+fn the_listing_shows_the_loaded_instructions() {
+    let listing = scarlet_vm::listing(&compile(FIB)).expect("the program loads");
+    let fib = listing.function(0).expect("fib is the first function");
+    assert!(
+        fib.starts_with("; loaded: 2 registers, parameters in r0\n"),
+        "{fib}"
+    );
+    assert!(
+        fib.contains("    0  JumpUnlessCmpImm Lt(r0, 2) -> 2\n"),
+        "{fib}"
+    );
+    assert!(fib.contains("= CallSelf(move r"), "{fib}");
+    assert!(fib.contains("= Int Add(r"), "{fib}");
+    let main = listing.function(1).expect("main is the second");
+    assert!(main.contains("r0 = Call fn#0(move r0)\n"), "{main}");
+    assert!(main.contains("r0 = Print r0 and a newline\n"), "{main}");
+    assert!(listing.function(2).is_none());
+    assert!(listing.toplevel().starts_with("; loaded: 1 register\n"));
+}
+
+/// A function that needs something the VM does not run yet has no
+/// instructions, and its listing says what it is waiting for.
+#[test]
+fn the_listing_says_why_a_function_did_not_load() {
+    let src = "import scarlet/internal\n\
+               pub fn main() {\n\
+               \tprintln(internal::live_subjects())\n\
+               }\n";
+    let listing = scarlet_vm::listing(&compile(src)).expect("the program loads");
+    let main = listing.function(0).expect("main");
+    assert_eq!(
+        main,
+        "; not loaded: the VM does not run the built-in InternalLiveSubjects yet\n"
+    );
 }

@@ -78,16 +78,37 @@ impl Drop for ChildGuard {
     }
 }
 
+/// `scarlet run <path>`, audited: when the program ends, the VM gives up
+/// everything it still holds and fails the run if a heap cell is left. So
+/// every program a test runs to its end is also a test that no reference
+/// count went wrong.
+///
+/// Every test that runs a program starts from this command, and the caller
+/// adds its own pipes, environment and directory. `run_counters.rs`, which
+/// tests the flags themselves, is the one place that spells out a `run`
+/// without it, and it has the test that keeps that so.
+pub fn scarlet_run(path: &Path) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_scarlet"));
+    cmd.arg("run").arg("--audit").arg(path);
+    cmd
+}
+
 /// Runs `al <subcommand> <path>` and kills it after [`CHILD_TIMEOUT_SECS`].
 ///
 /// It doesn't use `Command::output()`, which waits forever, so a program that blocks (a
 /// server example, a `net.connect` to a listener a miscompile never accepted)
 /// would wedge the whole test binary.
+///
+/// A `run` is audited, as [`scarlet_run`] says.
 pub fn run_al(subcommand: &str, path: &Path) -> AlOutput {
-    let bin = env!("CARGO_BIN_EXE_scarlet");
-    let child = Command::new(bin)
-        .arg(subcommand)
-        .arg(path)
+    let mut cmd = if subcommand == "run" {
+        scarlet_run(path)
+    } else {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_scarlet"));
+        cmd.arg(subcommand).arg(path);
+        cmd
+    };
+    let child = cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

@@ -14,7 +14,12 @@
 //! kind and its size in words. A cell is freed when its count reaches zero,
 //! and its space is kept on a free list for the next cell of the same size.
 //! Freeing a cell also gives up the references it holds, like a constructor's
-//! fields or an array node's children, and so on down.
+//! fields or an array node's children, and so on down. Freeing a cell zeroes
+//! its header, so a holder that gives up its reference and finds a zeroed
+//! header has found a count that went wrong, and gets [`DeadCell`] instead
+//! of a second free. That holds until the space is handed out again as a new
+//! cell. From then on the stale holder's cell is the new one, and nothing
+//! here can tell.
 //!
 //! Chunks are words, not bytes, and cells are named by chunk and word rather
 //! than by address, so the heap needs no `unsafe` and moves with its process
@@ -114,10 +119,32 @@ pub(crate) enum Kind {
     Handle = 15,
 }
 
-/// A heap that has run out of the cells a [`Cell`] can name. It is a limit of
-/// the machine, not a bug in the program.
+/// A freed cell found where a holder gives its reference up or asks whether
+/// it is the only one. Something still held the cell after its last
+/// reference went. The heap stops there instead of freeing the cell a second
+/// time.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Full;
+pub(crate) struct DeadCell;
+
+/// Why the heap could not do what it was asked.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Fault {
+    /// It has run out of the cells a [`Cell`] can name. This is a limit of
+    /// the machine, not a bug in the program.
+    Full,
+    /// See [`DeadCell`]. This one is a bug, in the VM or in the compiler.
+    DeadCell,
+}
+
+impl From<DeadCell> for Fault {
+    // No correct program takes this path. Saying so keeps the optimizer
+    // from weighing each check for it as a likely way out of a loop.
+    #[cold]
+    #[inline(never)]
+    fn from(_: DeadCell) -> Fault {
+        Fault::DeadCell
+    }
+}
 
 /// Sizes below this, in words, have their free list in a plain array. Almost
 /// every cell is one of these: constructors, tuples, closures, array nodes
@@ -177,6 +204,10 @@ pub(crate) struct Heap {
     next_chunk: usize,
     /// Freed small cells, by size in words, ready to be reused.
     free: FreeLists,
+    /// Cells made and not yet freed. Every cell made adds one and every
+    /// cell freed takes one off. A cell is only freed while its header is
+    /// not the zeroed one freeing leaves ([`freed`]), which is once each time
+    /// it is made, so this is exact and never goes below zero.
     live: usize,
     /// Cells taken from a chunk or a free list over this heap's life, and
     /// cells a constructor overwrote in place instead (`internal.sca`).
@@ -193,12 +224,12 @@ pub(crate) struct Heap {
 impl Heap {
     /// A new cell of `kind` with `fixed` and then `n` words after its header.
     /// Its count is 1, and the caller holds that one reference.
-    fn alloc(&mut self, kind: Kind, fixed: usize, n: usize) -> Result<Cell, Full> {
+    fn alloc(&mut self, kind: Kind, fixed: usize, n: usize) -> Result<Cell, Fault> {
         let size = n
             .checked_add(fixed)
             .and_then(|data| data.checked_add(1))
             .filter(|size| *size <= MAX_CELL_WORDS)
-            .ok_or(Full)?;
+            .ok_or(Fault::Full)?;
         let cell = if let Some(cell) = self.free.pop(size) {
             cell
         } else if size > self.chunk_size() {
@@ -207,7 +238,7 @@ impl Heap {
             self.carve(size)?
         };
         self.set_word(cell, 0, header(1, kind, size));
-        self.live = self.live.saturating_add(1);
+        self.live = self.live.wrapping_add(1);
         self.made = self.made.saturating_add(1);
         Ok(cell)
     }
@@ -216,19 +247,19 @@ impl Heap {
         self.next_chunk.max(FIRST_CHUNK_WORDS)
     }
 
-    fn own_chunk(&mut self, size: usize) -> Result<Cell, Full> {
+    fn own_chunk(&mut self, size: usize) -> Result<Cell, Fault> {
         let chunk = self.new_chunk(size, true)?;
         Ok(Cell { chunk, word: 0 })
     }
 
     /// `size` words from the current chunk, starting a new, bigger one when
     /// it has no room.
-    fn carve(&mut self, size: usize) -> Result<Cell, Full> {
+    fn carve(&mut self, size: usize) -> Result<Cell, Fault> {
         if let Some(i) = self.current
             && let Some(Some(c)) = self.chunks.get_mut(i as usize)
             && let Some(end) = c.used.checked_add(size).filter(|end| *end <= c.words.len())
         {
-            let word = u32::try_from(c.used).map_err(|_| Full)?;
+            let word = u32::try_from(c.used).map_err(|_| Fault::Full)?;
             c.used = end;
             return Ok(Cell { chunk: i, word });
         }
@@ -241,9 +272,9 @@ impl Heap {
         self.carve(size)
     }
 
-    fn new_chunk(&mut self, words: usize, own: bool) -> Result<u32, Full> {
+    fn new_chunk(&mut self, words: usize, own: bool) -> Result<u32, Fault> {
         if words > 1 << WORD_BITS {
-            return Err(Full);
+            return Err(Fault::Full);
         }
         let chunk = Chunk {
             words: vec![0; words].into_boxed_slice(),
@@ -257,9 +288,9 @@ impl Heap {
             return Ok(i);
         }
         if self.chunks.len() >= 1 << CHUNK_BITS {
-            return Err(Full);
+            return Err(Fault::Full);
         }
-        let i = u32::try_from(self.chunks.len()).map_err(|_| Full)?;
+        let i = u32::try_from(self.chunks.len()).map_err(|_| Fault::Full)?;
         self.chunks.push(Some(chunk));
         Ok(i)
     }
@@ -278,7 +309,12 @@ impl Heap {
     /// A freed cell's fields each lose a reference in turn. We keep them on a
     /// list instead of releasing them by recursion, so freeing a very long
     /// list takes no more stack than freeing one cell.
-    pub(crate) fn release(&mut self, cell: Cell) {
+    ///
+    /// A freed cell, whether it is `cell` or something a dying cell held, is
+    /// [`DeadCell`], and so is a cell the heap does not have. One whose
+    /// space has been handed out again is not found: this takes a reference
+    /// from the new cell there.
+    pub(crate) fn release(&mut self, cell: Cell) -> Result<(), DeadCell> {
         // Most releases leave the cell alive, and need no list of the dying.
         let h = self.word(cell, 0);
         let c = count(h);
@@ -286,7 +322,7 @@ impl Heap {
             if c < STICKY {
                 self.set_word(cell, 0, with_count(h, c.saturating_sub(1)));
             }
-            return;
+            return Ok(());
         }
         let mut dying = std::mem::take(&mut self.dying);
         dying.push(cell);
@@ -299,6 +335,9 @@ impl Heap {
                 }
                 continue;
             }
+            if freed(h) {
+                return Err(DeadCell);
+            }
             for i in held(kind_bits(h), size(h)) {
                 if let Some(held) = Value::from_bits(self.word(cell, i)).as_cell() {
                     dying.push(held);
@@ -307,32 +346,36 @@ impl Heap {
             self.free_cell(cell, h);
         }
         self.dying = dying;
+        Ok(())
     }
 
     /// Perceus's drop of a last reference. When nothing else holds `cell`,
     /// this gives up everything it holds and keeps the allocation, header and
     /// all, for a constructor of the same size to overwrite. It returns
     /// `false` when something else holds `cell`, which leaves it to an
-    /// ordinary `release`.
+    /// ordinary `release`, and [`DeadCell`] when nothing holds it at all.
     ///
     /// Each field is emptied before it is released, so a hollowed cell holds
     /// nothing and is safe to release again. Emptying here instead of at the
     /// constructor is what carries reuse down a chain. A callee sees its
     /// argument as the last reference only because its caller gave up its own
     /// first.
-    pub(crate) fn hollow(&mut self, cell: Cell) -> bool {
+    pub(crate) fn hollow(&mut self, cell: Cell) -> Result<bool, DeadCell> {
         let h = self.word(cell, 0);
+        if freed(h) {
+            return Err(DeadCell);
+        }
         if count(h) != 1 {
-            return false;
+            return Ok(false);
         }
         for i in held(kind_bits(h), size(h)) {
             let held = Value::from_bits(self.word(cell, i));
             self.set_word(cell, i, Value::NIL.bits());
             if let Some(c) = held.as_cell() {
-                self.release(c);
+                self.release(c)?;
             }
         }
-        true
+        Ok(true)
     }
 
     /// Whether a constructor with `fields` fields may be written over `cell`.
@@ -340,7 +383,8 @@ impl Heap {
     /// may hold it. Both are true of every cell [`Self::hollow`] kept. We read
     /// the count again here anyway, because a register holds its cell until
     /// something overwrites it. So the cell a constructor finds there might
-    /// not be the one that was kept for it.
+    /// not be the one that was kept for it. A freed cell does not fit, and
+    /// the release its register then gets is what reports it.
     pub(crate) fn fits_ctor(&self, cell: Cell, fields: usize) -> bool {
         let h = self.word(cell, 0);
         count(h) == 1 && kind_bits(h) == Kind::Ctor as u64 && size(h).checked_sub(2) == Some(fields)
@@ -351,11 +395,13 @@ impl Heap {
         std::mem::take(&mut self.released)
     }
 
+    /// Give back the space of `cell`, whose header is `h`, which the caller
+    /// has checked is not a freed cell's.
     fn free_cell(&mut self, cell: Cell, h: u64) {
         if kind_bits(h) == Kind::Handle as u64 {
             self.released.push(self.word(cell, 1));
         }
-        self.live = self.live.saturating_sub(1);
+        self.live = self.live.wrapping_sub(1);
         let own = matches!(self.chunks.get(cell.chunk as usize), Some(Some(c)) if c.own);
         if own {
             if let Some(slot) = self.chunks.get_mut(cell.chunk as usize) {
@@ -381,7 +427,7 @@ impl Heap {
     }
 
     /// A new string cell holding `text`.
-    pub(crate) fn string(&mut self, text: &[u8]) -> Result<Cell, Full> {
+    pub(crate) fn string(&mut self, text: &[u8]) -> Result<Cell, Fault> {
         let cell = self.alloc(Kind::String, 1, text.len().div_ceil(8))?;
         self.set_word(cell, 1, text.len() as u64);
         for (slot, bytes) in self.words_mut(cell, 2).iter_mut().zip(text.chunks(8)) {
@@ -418,7 +464,7 @@ impl Heap {
     }
 
     /// A new big-int cell holding `n`.
-    pub(crate) fn big_int(&mut self, n: &BigInt) -> Result<Cell, Full> {
+    pub(crate) fn big_int(&mut self, n: &BigInt) -> Result<Cell, Fault> {
         let (sign, digits) = n.to_u64_digits();
         let cell = self.alloc(Kind::BigInt, 1, digits.len())?;
         let negative = u64::from(sign == Sign::Minus) << 63;
@@ -446,7 +492,7 @@ impl Heap {
 
     /// A big Int cell for `n`, laid out as [`Self::big_int`] lays it out.
     /// `n` is past what a small Int holds, so it is never 0.
-    pub(crate) fn big_int_i128(&mut self, n: i128) -> Result<Cell, Full> {
+    pub(crate) fn big_int_i128(&mut self, n: i128) -> Result<Cell, Fault> {
         let m = n.unsigned_abs();
         let lo = u64::try_from(m & u128::from(u64::MAX)).unwrap_or(0);
         let hi = u64::try_from(m >> 64).unwrap_or(0);
@@ -479,7 +525,7 @@ impl Heap {
 
     /// A new cell for constructor `v`, holding `fields`. Each field's
     /// reference passes to the cell.
-    pub(crate) fn ctor(&mut self, v: VariantRef, fields: &[Value]) -> Result<Cell, Full> {
+    pub(crate) fn ctor(&mut self, v: VariantRef, fields: &[Value]) -> Result<Cell, Fault> {
         let cell = self.alloc(Kind::Ctor, 1, fields.len())?;
         self.write_ctor(cell, v, fields);
         Ok(cell)
@@ -519,7 +565,7 @@ impl Heap {
 
     /// A new cell for function `func` over `captures`. Each capture's
     /// reference passes to the cell.
-    pub(crate) fn closure(&mut self, func: FuncIdx, captures: &[Value]) -> Result<Cell, Full> {
+    pub(crate) fn closure(&mut self, func: FuncIdx, captures: &[Value]) -> Result<Cell, Fault> {
         let cell = self.alloc(Kind::Closure, 1, captures.len())?;
         self.set_word(cell, 1, u64::from(func.0));
         for (slot, c) in self.words_mut(cell, 2).iter_mut().zip(captures) {
@@ -543,7 +589,11 @@ impl Heap {
     /// reference, which is the caller's. Any reference in `data` passes to the
     /// cell. This is for kinds whose layout lives outside the heap, like an
     /// array's nodes.
-    pub(crate) fn make(&mut self, kind: Kind, data: &[u64]) -> Result<Cell, Full> {
+    // The optimizer put this inside every caller until the error type grew a
+    // second case, which took it just past the size it will do that for.
+    // Left out of line, every array and map node made pays for a call.
+    #[inline(always)]
+    pub(crate) fn make(&mut self, kind: Kind, data: &[u64]) -> Result<Cell, Fault> {
         let cell = self.alloc(kind, 0, data.len())?;
         for (slot, w) in self.words_mut(cell, 1).iter_mut().zip(data) {
             *slot = *w;
@@ -553,13 +603,19 @@ impl Heap {
 
     /// The words of `cell` after its header. They are empty for a cell the
     /// heap does not have.
+    #[inline]
     pub(crate) fn data(&self, cell: Cell) -> &[u64] {
         self.words(cell, 1)
     }
 
     /// Whether `cell` has one holder, who may then change it in place.
-    pub(crate) fn unique(&self, cell: Cell) -> bool {
-        count(self.word(cell, 0)) == 1
+    /// Asking about a freed cell is [`DeadCell`].
+    pub(crate) fn unique(&self, cell: Cell) -> Result<bool, DeadCell> {
+        let h = self.word(cell, 0);
+        if freed(h) {
+            return Err(DeadCell);
+        }
+        Ok(count(h) == 1)
     }
 
     /// The words of `cell` after its header, for its one holder to change.
@@ -580,7 +636,7 @@ impl Heap {
         n: usize,
         edit: Edit<'_>,
         room: usize,
-    ) -> Result<Cell, Full> {
+    ) -> Result<Cell, Fault> {
         let Edit { cut, at, put } = edit;
         let n = n.min(self.data(old).len());
         let cut = cut.start.min(n)..cut.end.min(n).max(cut.start.min(n));
@@ -616,7 +672,7 @@ impl Heap {
         if let Some(slot) = self.data_mut(new).get_mut(at..at.saturating_add(put.len())) {
             slot.copy_from_slice(put);
         }
-        self.discard(old);
+        self.discard(old)?;
         Ok(new)
     }
 
@@ -653,15 +709,23 @@ impl Heap {
     }
 
     /// Free `cell`, whose one holder has moved what it held somewhere else,
-    /// so nothing it holds is released.
-    pub(crate) fn discard(&mut self, cell: Cell) {
+    /// so nothing it holds is released. A cell freed already is
+    /// [`DeadCell`].
+    // This is one test in front of `free_cell`, so it goes inside the caller,
+    // which then makes one call and not two.
+    #[inline]
+    pub(crate) fn discard(&mut self, cell: Cell) -> Result<(), DeadCell> {
         let h = self.word(cell, 0);
+        if freed(h) {
+            return Err(DeadCell);
+        }
         self.free_cell(cell, h);
+        Ok(())
     }
 
     /// A new tuple cell holding `elements`. Each element's reference passes
     /// to the cell.
-    pub(crate) fn tuple(&mut self, elements: &[Value]) -> Result<Cell, Full> {
+    pub(crate) fn tuple(&mut self, elements: &[Value]) -> Result<Cell, Fault> {
         let cell = self.alloc(Kind::Tuple, 0, elements.len())?;
         for (slot, e) in self.words_mut(cell, 1).iter_mut().zip(elements) {
             *slot = e.bits();
@@ -692,7 +756,6 @@ impl Heap {
     }
 
     /// Cells not yet freed.
-    #[cfg(test)]
     pub(crate) fn live(&self) -> usize {
         self.live
     }
@@ -724,12 +787,18 @@ impl Heap {
     }
 
     /// Words `from` to the end of `cell`, counting its header as word 0.
+    // This and `words_mut` are a few instructions each. They go inside their
+    // callers, so that a node `make` writes, or one an array reads to copy,
+    // costs no call. Left to the optimizer, each array node made paid for
+    // two.
+    #[inline(always)]
     fn words(&self, cell: Cell, from: usize) -> &[u64] {
         let words = self.onward(cell);
         let size = words.first().map_or(0, |h| size(*h));
         words.get(from..size).unwrap_or(&[])
     }
 
+    #[inline(always)]
     fn words_mut(&mut self, cell: Cell, from: usize) -> &mut [u64] {
         let words = self.onward_mut(cell);
         let size = words.first().map_or(0, |h| size(*h));
@@ -764,6 +833,14 @@ fn with_count(h: u64, c: u64) -> u64 {
 
 fn kind_bits(h: u64) -> u64 {
     h >> 32 & 0xF
+}
+
+/// Whether `h` is the header of a freed cell, or of a cell the heap does not
+/// have. Freeing zeroes the whole header and every live cell has a kind, so
+/// the bits above the count say which it is. The count alone does not: a
+/// share of a freed cell makes its count 1 again.
+fn freed(h: u64) -> bool {
+    h >> 32 == 0
 }
 
 /// The words of a cell of this kind and size that hold a value, and so a
@@ -873,7 +950,7 @@ mod tests {
     fn a_freed_cell_is_reused_by_the_next_of_its_size() {
         let mut heap = Heap::default();
         let a = heap.string(b"one").expect("room");
-        heap.release(a);
+        heap.release(a).expect("a live cell");
         assert_eq!(heap.live(), 0);
         let b = heap.string(b"two").expect("room");
         assert_eq!(a, b);
@@ -884,10 +961,10 @@ mod tests {
         let mut heap = Heap::default();
         let a = heap.string(b"kept").expect("room");
         heap.share(a);
-        heap.release(a);
+        heap.release(a).expect("a live cell");
         assert_eq!(heap.live(), 1);
         assert_eq!(text(&heap, a), "kept");
-        heap.release(a);
+        heap.release(a).expect("a live cell");
         assert_eq!(heap.live(), 0);
     }
 
@@ -918,7 +995,7 @@ mod tests {
         assert!(own.own);
         assert_eq!(own.words.len(), 2 + 10_000usize.div_ceil(8));
         assert_eq!(text(&heap, cell).len(), 10_000);
-        heap.release(cell);
+        heap.release(cell).expect("a live cell");
         assert!(heap.chunks[cell.chunk as usize].is_none());
         let again = heap.string(&big).expect("room");
         assert_eq!(again.chunk, cell.chunk);
@@ -985,9 +1062,9 @@ mod tests {
         heap.share(shared);
         let head = heap.ctor(v, &[tail, Value::cell(shared)]).expect("room");
         assert_eq!(heap.live(), 1_000_002);
-        heap.release(head);
+        heap.release(head).expect("a live cell");
         assert_eq!(heap.live(), 1, "only the string the test still holds");
-        heap.release(shared);
+        heap.release(shared).expect("a live cell");
         assert_eq!(heap.live(), 0);
     }
 
@@ -1008,7 +1085,7 @@ mod tests {
         );
         assert!(heap.capture(cell, 2).is_none());
         assert_eq!(heap.live(), 2);
-        heap.release(cell);
+        heap.release(cell).expect("a live cell");
         assert_eq!(heap.live(), 0);
     }
 
@@ -1024,9 +1101,172 @@ mod tests {
         assert_eq!(heap.elements(cell).count(), 2);
         let empty = heap.tuple(&[]).expect("room");
         assert_eq!(heap.elements(empty).count(), 0);
-        heap.release(empty);
-        heap.release(cell);
+        heap.release(empty).expect("a live cell");
+        heap.release(cell).expect("a live cell");
         assert_eq!(heap.live(), 0);
+    }
+
+    /// A cell given up once more than it was held is found at the second
+    /// release, which frees nothing and changes no count.
+    #[test]
+    fn a_second_release_of_a_freed_cell_is_a_dead_cell() {
+        let mut heap = Heap::default();
+        let kept = heap.string(b"kept").expect("room");
+        let a = heap.string(b"a longer string than kept").expect("room");
+        assert_eq!(heap.release(a), Ok(()));
+        assert_eq!(heap.live(), 1);
+        assert_eq!(heap.release(a), Err(DeadCell));
+        assert_eq!(heap.release(a), Err(DeadCell));
+        assert_eq!(heap.live(), 1, "only the first release freed anything");
+        // The cell went on its free list once, so the next two strings of
+        // its size are two different cells.
+        let b = heap.string(b"a longer string than kept").expect("room");
+        let c = heap.string(b"a longer string than kept").expect("room");
+        assert_eq!(a, b);
+        assert_ne!(b, c);
+        assert_eq!(text(&heap, kept), "kept");
+    }
+
+    /// A second release takes nothing off the live count, so one cell that
+    /// is never freed and one that is released twice do not look like a heap
+    /// with nothing left in it. This holds while the freed space has not
+    /// been handed out again.
+    #[test]
+    fn a_doubled_release_leaves_the_live_count_alone() {
+        let mut heap = Heap::default();
+        let _leaked = heap.string(b"leaked").expect("room");
+        let twice = heap.tuple(&[]).expect("room");
+        assert_eq!(heap.release(twice), Ok(()));
+        assert_eq!(heap.release(twice), Err(DeadCell));
+        assert_eq!(heap.live(), 1);
+    }
+
+    /// A share of a freed cell does not bring it back. Its count reads 1
+    /// again, but its header still says it was freed, so the unique test
+    /// and the release that pairs with the share both stop, and nothing is
+    /// freed a second time.
+    #[test]
+    fn a_freed_cell_that_is_shared_is_still_a_dead_cell() {
+        let mut heap = Heap::default();
+        let cell = heap.tuple(&[Value::NIL, Value::NIL]).expect("room");
+        heap.release(cell).expect("a live cell");
+        assert_eq!(heap.live(), 0);
+        heap.share(cell);
+        assert_eq!(heap.unique(cell), Err(DeadCell));
+        assert_eq!(heap.hollow(cell), Err(DeadCell));
+        assert_eq!(heap.discard(cell), Err(DeadCell));
+        assert_eq!(heap.release(cell), Err(DeadCell));
+        assert_eq!(heap.live(), 0, "the count did not go below zero");
+        // The space went on its free list once.
+        let b = heap.tuple(&[Value::NIL, Value::NIL]).expect("room");
+        let c = heap.tuple(&[Value::NIL, Value::NIL]).expect("room");
+        assert_eq!(cell, b);
+        assert_ne!(b, c);
+    }
+
+    /// Shared twice, a freed cell passes its first release, which only
+    /// counts down, and stops the second.
+    #[test]
+    fn a_freed_cell_shared_twice_is_found_at_its_last_release() {
+        let mut heap = Heap::default();
+        let cell = heap.string(b"gone").expect("room");
+        heap.release(cell).expect("a live cell");
+        heap.share(cell);
+        heap.share(cell);
+        assert_eq!(heap.release(cell), Ok(()));
+        assert_eq!(heap.release(cell), Err(DeadCell));
+        assert_eq!(heap.live(), 0);
+    }
+
+    /// The limit of the dead-cell test. Once the freed space is a new cell,
+    /// a stale holder's release takes that cell's reference and frees it,
+    /// and nothing is reported. If the new cell's own holder then never
+    /// gives it up, the live count reads 0 with a leak and a doubled
+    /// release behind it. `docs/vm-design.md` says what closes this.
+    #[test]
+    fn a_doubled_release_of_space_handed_out_again_is_not_found() {
+        let mut heap = Heap::default();
+        let twice = heap.tuple(&[]).expect("room");
+        assert_eq!(heap.release(twice), Ok(()));
+        let leaked = heap.tuple(&[]).expect("room");
+        assert_eq!(leaked, twice, "the new cell is in the freed one's space");
+        assert_eq!(heap.release(twice), Ok(()));
+        assert_eq!(heap.live(), 0);
+        // The new cell's holder does find it, if it ever lets go.
+        assert_eq!(heap.release(leaked), Err(DeadCell));
+    }
+
+    /// A big cell's chunk goes back to the system when it is freed, and a
+    /// second release finds no chunk, which reads as a freed cell's header.
+    #[test]
+    fn a_second_release_of_a_big_cell_is_a_dead_cell() {
+        let mut heap = Heap::default();
+        let cell = heap.string(&vec![b'x'; 10_000]).expect("room");
+        assert_eq!(heap.release(cell), Ok(()));
+        assert_eq!(heap.release(cell), Err(DeadCell));
+        assert_eq!(heap.live(), 0);
+    }
+
+    /// Freeing a cell gives up what it holds, and a freed cell among those
+    /// stops the release.
+    #[test]
+    fn freeing_a_cell_that_holds_a_freed_cell_is_a_dead_cell() {
+        let mut heap = Heap::default();
+        let inner = heap.string(b"inner").expect("room");
+        let outer = heap.tuple(&[Value::cell(inner)]).expect("room");
+        // The tuple holds the string's one reference, and this gives it up
+        // behind the tuple's back.
+        assert_eq!(heap.release(inner), Ok(()));
+        assert_eq!(heap.release(outer), Err(DeadCell));
+    }
+
+    #[test]
+    fn asking_whether_a_freed_cell_is_unique_is_a_dead_cell() {
+        let mut heap = Heap::default();
+        let cell = heap.string(b"one").expect("room");
+        assert_eq!(heap.unique(cell), Ok(true));
+        heap.share(cell);
+        assert_eq!(heap.unique(cell), Ok(false));
+        heap.release(cell).expect("a live cell");
+        heap.release(cell).expect("a live cell");
+        assert_eq!(heap.unique(cell), Err(DeadCell));
+    }
+
+    #[test]
+    fn discarding_or_hollowing_a_freed_cell_is_a_dead_cell() {
+        let mut heap = Heap::default();
+        let v = VariantRef {
+            type_id: TypeId(1),
+            variant_idx: 0,
+        };
+        let cell = heap.ctor(v, &[Value::NIL]).expect("room");
+        heap.share(cell);
+        assert_eq!(heap.hollow(cell), Ok(false), "something else holds it");
+        heap.release(cell).expect("a live cell");
+        assert_eq!(heap.hollow(cell), Ok(true));
+        assert_eq!(heap.discard(cell), Ok(()));
+        assert_eq!(heap.live(), 0);
+        assert_eq!(heap.hollow(cell), Err(DeadCell));
+        assert_eq!(heap.discard(cell), Err(DeadCell));
+        assert_eq!(heap.live(), 0);
+    }
+
+    /// A splice frees the cell it moves the words out of, so one of a freed
+    /// cell is refused, and it reports that instead of a full heap.
+    #[test]
+    fn splicing_a_freed_cell_is_a_dead_cell() {
+        let mut heap = Heap::default();
+        let old = heap.make(Kind::MapNode, &[0, 1, 2]).expect("room");
+        heap.release(old).expect("a live cell");
+        let edit = Edit {
+            cut: 0..0,
+            at: 0,
+            put: &[],
+        };
+        assert_eq!(
+            heap.splice(Kind::MapNode, old, 3, edit, 0),
+            Err(Fault::DeadCell)
+        );
     }
 
     #[test]

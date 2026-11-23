@@ -31,7 +31,7 @@ A body is already in A-normal form: every operand is a local, and nested express
 - **Memory hints from Perceus**: `Drop x` at the last use of `x`, and `Ctor { reuse: Some(x) }` when a new constructor may overwrite `x`'s cell in place.
 - **Bool and Nil are never constructors.** In the source, `True`, `False` and `Nil` are the prelude's constructors. A compiler pass (`crates/scarlet_lower/src/immediates.rs`) turns each one into the `bool` or `nil` value and turns a `match` on a Bool into an `If`, so the VM never needs to know which type is the prelude's `Bool`.
 
-`scarlet dis FILE` prints all of this for any program.
+`scarlet dis FILE` prints all of this for any program. `scarlet dis --instrs FILE` also prints, after each function, the register instructions the VM loads it as ("Running code").
 
 ## The rule the VM keeps
 
@@ -88,6 +88,11 @@ This matters because Perceus decides what to drop by type, and it leaves some ty
 
 **Built:** a read may *move* a reference instead of copying it when it's a local's last use as a call argument. That's an optimisation, but it's also what lets reuse fire in the callee. Step 6 says how it works.
 
+**Built: a count that goes wrong stops the run.** A wrong count is a bug in the VM or the compiler, never in the program, and there are two ways for one to be wrong.
+
+- *Too low:* a cell is freed while something still holds it. Freeing a cell zeroes its header, so the heap finds it when that holder gives its reference up, or asks whether it is the only holder before changing the cell in place. `release`, `unique`, `hollow` and `discard` return `DeadCell` then, in every build, and the run stops at that instruction with `Broken::DeadCell` instead of freeing the cell a second time. The test reads the header's kind and not its count, so a *share* of a freed cell does not hide it. The share itself is still silent, but the unique test and the last release after it both stop. What this does not catch is a freed cell whose space was handed out again before its old holder touched it. That holder's release then takes a reference from the new cell and may free it early, and the fault shows only when the new cell's own holder gives it up. Stopping at the share, and finding the reused case, go with the audit of `docs/perf-plan.md`, step 7.
+- *Too high:* a cell is never freed. The heap counts its live cells: one more for each cell made and one fewer for each freed. A cell is only freed while its header says it is live, so the count is exact and a second release takes nothing off it. `scarlet run --audit` uses it: when the program ends, the run gives up its result, every global and `os.env`'s map, and stops with `Broken::CellsLeft` if a cell is still live. So a doubled release cannot make up for a leak, with one exception, which is the reused case above: when the cell freed early is one the program then never gives up, the count reads 0. The driver's tests start every program through one audited `scarlet run` (`common::scarlet_run` in its tests), and every program the VM's own tests run is audited too.
+
 **Proposed: constants are frozen.** They live in an area that is never freed, and they're shared across threads with no counting, as in the old VM.
 
 **Proposed: freeing a big value is a loop, and can be paused.** Dropping a million-item list must not freeze a scheduler thread. The audit found a large `==` froze one for seconds.
@@ -129,7 +134,9 @@ This matters because Perceus decides what to drop by type, and it leaves some ty
 
 **Decided: a flat list of register instructions per function, made once when the program loads.** Each Core construct becomes one instruction, or a few. A local is a register: `Let x = IntAdd(a, b)` becomes `x = add a, b`. `If` and `Match` become branches, `LetCont`/`Goto` become labels and jumps, and a `Tail` call reuses the frame.
 
-A frame is then just "which function, which instruction, where its registers start". That keeps tail calls, the preemption check, and "no Rust recursion" simple. `dis` can print the instructions next to the Core IR, so nothing is hidden.
+A frame is then just "which function, which instruction, where its registers start". That keeps tail calls, the preemption check, and "no Rust recursion" simple. `scarlet dis --instrs` prints the instructions next to the Core IR, so nothing is hidden.
+
+**Built: a run can count itself.** `scarlet run --counters FILE` writes how many times each kind of instruction ran, and how many heap cells were made and reused. The counts are exact, and the same on every run of the same program with the same input, so they can judge a change where time cannot, and `benches/run.py` prints them for every benchmark. The interpreter's loop does not count each instruction, which would slow every run. Instead a counted run loads the program with one `Count` instruction at the head of each basic block, and an ordinary run loads none. A block is only entered at its first instruction and only left at its last, so once the program has run to its end, each instruction ran as often as its block did. A run that stops early has no counts.
 
 It is not the old bytecode: there's no stack machine, no fused super-instructions and no peephole pass.
 

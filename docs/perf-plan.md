@@ -20,7 +20,7 @@ For comparison, the diagnosis estimated 2.3 to 2.5 for all twenty causes, CPytho
 
 By the clock expect about half of this in logs, because most of what goes is cheap instructions: about 2.0 after the first third, 1.7 after the second and 1.5 at the end, each give or take 0.2. The array write and the string copies are real memory work, so those rows gain more by the clock than the call and dispatch rows do.
 
-Where it will still be bad at the end: sieve (about 4 to 6), permute and queens (about 4 to 5), fannkuch (about 3 with its rewrite, about 9 without), and bounce, closures and richards (about 3 to 4). Rows that read below 1.0 by this arithmetic (json, cfold, mandelbrot) should not be trusted, and the diagnosis notes that LuaJIT's own number is inflated on spectral_norm, map_churn, cfold and closures. The run.py column added in step 1 (claimed so far against measured) is what will show which of these estimates was wrong, one step at a time.
+Where it will still be bad at the end: sieve (about 4 to 6), permute and queens (about 4 to 5), fannkuch (about 3 with its rewrite, about 9 without), and bounce, closures and richards (about 3 to 4). Rows that read below 1.0 by this arithmetic (json, cfold, mandelbrot) should not be trusted, and the diagnosis notes that LuaJIT's own number is inflated on spectral_norm, map_churn, cfold and closures. `benches/run.py --baseline`, added in step 1, is what will show which of these estimates was wrong, one step at a time: it prints how far each benchmark moved from a saved run, in machine instructions, VM instructions and cells made.
 
 ## Decisions
 
@@ -121,13 +121,17 @@ Recommended: Option A, with each row's old and new source measured on the same b
 
 ## The order
 
-### Step 1. Instruments and a heap that notices a dead cell. `scarlet dis --instrs` prints the loaded instructions, a per-opcode run counter is added, benches/run.py prints cycles beside instructions and a column for what has been claimed so far per benchmark, the live-cell count stops saturating, the golden harness asserts no cell is live at exit, and `release` and the unique test return a typed `Broken::DeadCell` on a count of 0.
+### Step 1. Instruments and a heap that notices a dead cell. `scarlet dis --instrs` prints the loaded instructions, a per-opcode run counter is added, benches/run.py prints cycles beside instructions and, with `--baseline`, how far each benchmark moved from a saved run, the live-cell count is exact, the golden harness asserts no cell is live at exit, and `release` and the unique test return a typed `Broken::DeadCell` on a freed cell.
 
 From: compiler 0, core 6a, core 1 (scoreboard only).
 
 **Why here.** Every later step is judged on these numbers, and every later step that touches counts relies on a doubled release being loud. It may also turn up a bug that exists today, which is better found before anything changes.
 
 **Expected gain.** None. The scoreboard must not move, and that is the acceptance test.
+
+**What happened.** The board moved. Every benchmark but sieve got cheaper, by 1.7% on the geomean (6.17 to 6.06), and sieve read +0.1%, which is inside its own run-to-run spread. None of the gain is the step's work. The compiler laid `Machine::call` out differently, and each VM instruction lost about 3.5 machine instructions: one turn of a bare loop went from 346 to 332. The step's real cost sits under that. It is about one instruction for each release call, two for each cell freed, and a few on each owned array or map edit, and it is why sieve, which runs the fewest VM instructions, shows no gain. The next edit to `Machine::call` can lose the 1.7% again for no better reason.
+
+So until step 9 replaces the loop, the board's net change does not judge a step that claims under about 2%. Such a step is judged by the exact counts from `scarlet run --counters` (VM instructions, cells made and cells reused), and by probes: small loops that each run one path, measured as the slope between two sizes, with the change in a bare loop taken off. The probes are in the perf scratch directory under `step1/answer`, with the script that counts one loop turn by function under lldb and the ones that compare call sites and function sizes between two builds.
 
 ### Step 2. `Move` takes its source at a last use: `Instr::Move { dst, src, moved }`, set by `moves_on_last_use`, with the test that two spellings of the same function make the same number of cells.
 

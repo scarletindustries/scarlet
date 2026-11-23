@@ -19,7 +19,7 @@
 
 use num_bigint::{BigInt, Sign};
 
-use crate::heap::{Cell, Full, Heap, Kind};
+use crate::heap::{Cell, Fault, Heap, Kind};
 use crate::value::Value;
 use crate::word::{low_byte, to_usize};
 
@@ -72,9 +72,9 @@ pub(crate) fn bits(heap: &Heap, cell: Cell) -> Option<Bits> {
 
 /// A new owner holding the first `len` bits of `bytes`. The bits past `len`
 /// in the last byte are cleared.
-pub(crate) fn make(heap: &mut Heap, bytes: &[u8], len: u64) -> Result<Cell, Full> {
+pub(crate) fn make(heap: &mut Heap, bytes: &[u8], len: u64) -> Result<Cell, Fault> {
     if len > MAX_BITS {
-        return Err(Full);
+        return Err(Fault::Full);
     }
     let n = to_usize(len.div_ceil(8));
     let mut buf: Vec<u8> = bytes.iter().copied().take(n).collect();
@@ -103,14 +103,14 @@ pub(crate) fn bit_len(n: usize) -> Option<u64> {
 }
 
 /// A new owner holding all of `bytes`.
-pub(crate) fn from_bytes(heap: &mut Heap, bytes: &[u8]) -> Result<Cell, Full> {
-    make(heap, bytes, bit_len(bytes.len()).ok_or(Full)?)
+pub(crate) fn from_bytes(heap: &mut Heap, bytes: &[u8]) -> Result<Cell, Fault> {
+    make(heap, bytes, bit_len(bytes.len()).ok_or(Fault::Full)?)
 }
 
 /// Bits `from .. from + len` of `b`, sharing its owner. The caller has
 /// checked that they are inside it.
-pub(crate) fn slice(heap: &mut Heap, b: Bits, from: u64, len: u64) -> Result<Cell, Full> {
-    let at = b.at.checked_add(from).ok_or(Full)?;
+pub(crate) fn slice(heap: &mut Heap, b: Bits, from: u64, len: u64) -> Result<Cell, Fault> {
+    let at = b.at.checked_add(from).ok_or(Fault::Full)?;
     heap.share(b.owner);
     heap.make(Kind::BinarySlice, &[Value::cell(b.owner).bits(), at, len])
 }
@@ -277,12 +277,12 @@ pub(crate) fn has_at(heap: &Heap, b: Bits, at: u64, prefix: Bits) -> bool {
 }
 
 /// All of `parts`, one after another, as a new owner.
-pub(crate) fn join(heap: &mut Heap, parts: &[Bits]) -> Result<Cell, Full> {
+pub(crate) fn join(heap: &mut Heap, parts: &[Bits]) -> Result<Cell, Fault> {
     let len = parts
         .iter()
         .try_fold(0u64, |len, p| len.checked_add(p.len))
         .filter(|len| *len <= MAX_BITS)
-        .ok_or(Full)?;
+        .ok_or(Fault::Full)?;
     let mut out = vec![0u8; to_usize(len.div_ceil(8))];
     // Every position below is inside `len`, which fits, so the sums are
     // exact.

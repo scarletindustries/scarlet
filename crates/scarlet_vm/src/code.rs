@@ -66,6 +66,11 @@ impl Arg {
 /// One instruction. `dst` is the register it writes.
 #[derive(Debug, Clone)]
 pub(crate) enum Instr {
+    /// Count one more run of basic block `block`. Only a counted load has
+    /// these, one at the head of each block ([`count_blocks`]).
+    Count {
+        block: u32,
+    },
     Const {
         dst: Reg,
         value: Value,
@@ -448,7 +453,7 @@ impl Instr {
             args.iter_mut().for_each(|a| f(&mut a.reg));
         };
         match self {
-            Instr::Bad { .. } | Instr::Jump { .. } => {}
+            Instr::Bad { .. } | Instr::Jump { .. } | Instr::Count { .. } => {}
             Instr::Const { dst, .. }
             | Instr::Str { dst, .. }
             | Instr::BinaryConst { dst, .. }
@@ -628,6 +633,7 @@ impl Instr {
             | Instr::GetSelf { .. }
             | Instr::Drop { .. }
             | Instr::Jump { .. }
+            | Instr::Count { .. }
             | Instr::Bad { .. } => {}
             Instr::Bits { args, .. }
             | Instr::Concat { parts: args, .. }
@@ -794,6 +800,7 @@ impl Instr {
             | Instr::JumpUnlessFloat { .. }
             | Instr::JumpUnlessStr { .. }
             | Instr::JumpUnlessBinary { .. }
+            | Instr::Count { .. }
             | Instr::Bad { .. } => None,
         }
     }
@@ -817,7 +824,8 @@ impl Instr {
             | Instr::TailCallValue { .. }
             | Instr::Ret { .. }
             | Instr::Bad { .. } => (None, None),
-            Instr::Const { .. }
+            Instr::Count { .. }
+            | Instr::Const { .. }
             | Instr::Str { .. }
             | Instr::BinaryConst { .. }
             | Instr::Bits { .. }
@@ -881,7 +889,8 @@ impl Instr {
             | Instr::JumpUnlessFloat { to, .. }
             | Instr::JumpUnlessStr { to, .. }
             | Instr::JumpUnlessBinary { to, .. } => Some(to),
-            Instr::Const { .. }
+            Instr::Count { .. }
+            | Instr::Const { .. }
             | Instr::Str { .. }
             | Instr::BinaryConst { .. }
             | Instr::Bits { .. }
@@ -935,6 +944,107 @@ impl Instr {
             | Instr::Bad { .. } => None,
         }
     }
+}
+
+/// Declares [`Op`] with one variant per kind of instruction, and
+/// [`Instr::op`]. Every [`Instr`] variant must be named here: the `match`
+/// this writes does not compile without it.
+macro_rules! ops {
+    ($($name:ident),* $(,)?) => {
+        /// Which kind of instruction an [`Instr`] is, without its operands.
+        /// The listing names an instruction by it and a counted run counts
+        /// by it, so the two use the same words.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub(crate) enum Op {
+            $($name),*
+        }
+
+        impl Op {
+            /// Every kind, in the order they are declared, which is also
+            /// each one's number.
+            pub(crate) const ALL: &[Op] = &[$(Op::$name),*];
+
+            pub(crate) fn name(self) -> &'static str {
+                match self {
+                    $(Op::$name => stringify!($name)),*
+                }
+            }
+        }
+
+        impl Instr {
+            pub(crate) fn op(&self) -> Op {
+                match self {
+                    $(Instr::$name { .. } => Op::$name),*
+                }
+            }
+        }
+    };
+}
+
+ops! {
+    Count,
+    Const,
+    Str,
+    BinaryConst,
+    Bits,
+    BigInt,
+    Move,
+    GetGlobal,
+    SetGlobal,
+    Int,
+    IntImm,
+    IntNeg,
+    Float,
+    FloatNeg,
+    Num,
+    Neg,
+    Print,
+    ToString,
+    Concat,
+    Ctor,
+    Drop,
+    DropReuse,
+    Call,
+    TailCall,
+    CallSelf,
+    TailCallSelf,
+    CallValue,
+    TailCallValue,
+    Closure,
+    GetCapture,
+    GetSelf,
+    Ret,
+    Jump,
+    JumpIfFalse,
+    JumpUnlessCmp,
+    MapSetOwned,
+    MapFind,
+    MapDeleteOwned,
+    JumpUnlessCmpImm,
+    JumpUnlessVariant,
+    JumpUnlessInt,
+    JumpUnlessFloat,
+    JumpUnlessStr,
+    JumpUnlessBinary,
+    Tuple,
+    Element,
+    Builtin,
+    Equal,
+    NotEqual,
+    Not,
+    Range,
+    Array,
+    ArrayLen,
+    ArrayElem,
+    ArrayDrop,
+    ArrayPrepend,
+    ArrayAppend,
+    ArrayConcat,
+    ArraySlice,
+    ArrayIndex,
+    ArrayIndexOr,
+    Field,
+    Bad,
 }
 
 /// Where a Core IR expression's value goes.
@@ -1054,23 +1164,50 @@ pub(crate) struct Code {
     pub(crate) abi: Abi,
 }
 
+/// A program loaded so that a run of it can say how often each instruction
+/// ran ([`load_counted`]).
+pub(crate) struct Counted {
+    /// The program, with an [`Instr::Count`] at the head of every basic
+    /// block.
+    pub(crate) code: Code,
+    /// The kinds of the instructions in each block, by the number the
+    /// block's `Count` holds.
+    pub(crate) blocks: Vec<Box<[Op]>>,
+}
+
 pub(crate) fn load(program: &Program) -> Result<Code, Stop> {
+    load_as(program, Counting::No)
+}
+
+/// [`load`], with an [`Instr::Count`] at the head of every basic block.
+pub(crate) fn load_counted(program: &Program) -> Result<Counted, Stop> {
+    let mut blocks = Vec::new();
+    let code = load_as(program, Counting::Blocks(&mut blocks))?;
+    Ok(Counted { code, blocks })
+}
+
+/// Whether a load puts in the instructions that count, and where it lists
+/// the blocks it has numbered so far when it does.
+enum Counting<'a> {
+    No,
+    Blocks(&'a mut Vec<Box<[Op]>>),
+}
+
+fn load_as(program: &Program, mut counting: Counting<'_>) -> Result<Code, Stop> {
     let full = |_| Stop::broken(Broken::TooManyFunctions);
     let consts = &program.consts;
     let mut fns = TiVec::new();
     let mut names = TiVec::new();
     for f in &program.fns {
         let this = fns.next_idx().map_err(full)?;
-        fns.push(load_fn(f, consts, &program.abi, Some(this))?)
+        fns.push(load_fn(f, consts, &program.abi, Some(this), &mut counting)?)
             .map_err(full)?;
         names.push(f.name.clone()).map_err(full)?;
     }
-    let toplevels = program
-        .inits
-        .iter()
-        .chain([&program.toplevel])
-        .map(|f| load_fn(f, consts, &program.abi, None))
-        .collect::<Result<_, _>>()?;
+    let mut toplevels = Vec::new();
+    for f in program.inits.iter().chain([&program.toplevel]) {
+        toplevels.push(load_fn(f, consts, &program.abi, None, &mut counting)?);
+    }
     Ok(Code {
         fns,
         toplevels,
@@ -1108,25 +1245,32 @@ fn load_fn(
     consts: &[Const],
     abi: &Abi,
     this: Option<FuncIdx>,
+    counting: &mut Counting<'_>,
 ) -> Result<Func, Stop> {
     let name = || format!("{}.{}", f.module, f.name);
-    let loaded = Loader::new(consts, abi, &f.core, this).and_then(|l| l.body(&f.core));
-    Ok(match loaded {
-        Ok((regs, mut instrs)) => {
+    let loaded = Loader::new(consts, abi, &f.core, this)
+        .and_then(|l| l.body(&f.core))
+        .and_then(|(regs, mut instrs)| {
             let mut params: Box<[Reg]> = f.core.params.iter().map(|p| Reg::of(p.id)).collect();
             let mut carried: Box<[Reg]> = reused_locals(&f.core.body)
                 .into_iter()
                 .map(Reg::of)
                 .collect();
             let regs = allocate(&mut instrs, &mut params, &mut carried, regs);
-            Func::Ready(Body {
-                name: name(),
-                regs,
-                params,
-                carried,
-                instrs: instrs.into_boxed_slice(),
-            })
-        }
+            let instrs = match counting {
+                Counting::No => instrs,
+                Counting::Blocks(blocks) => count_blocks(instrs, blocks)?,
+            };
+            Ok((regs, params, carried, instrs))
+        });
+    Ok(match loaded {
+        Ok((regs, params, carried, instrs)) => Func::Ready(Body {
+            name: name(),
+            regs,
+            params,
+            carried,
+            instrs: instrs.into_boxed_slice(),
+        }),
         Err(Unloadable::Missing(what)) => Func::NotBuiltYet(what),
         Err(Unloadable::TooLong) => return Err(Stop::FunctionTooLong { name: name() }),
         Err(Unloadable::TooManyRegisters) => {
@@ -2101,6 +2245,70 @@ fn moves_on_last_use(instrs: &mut [Instr], regs: u32) {
     }
 }
 
+/// `instrs` with an [`Instr::Count`] put in at the head of each basic block,
+/// and every jump moved to follow. The kinds of each block's instructions
+/// are added to `blocks`, at the number its `Count` holds.
+///
+/// A block starts at the function's first instruction, at every instruction
+/// a jump names, and after every instruction that may continue anywhere but
+/// at the next one. So an instruction runs only when its block's head has,
+/// and when it has run, the rest of the block does, unless the run stops.
+fn count_blocks(instrs: Vec<Instr>, blocks: &mut Vec<Box<[Op]>>) -> Result<Vec<Instr>, Unloadable> {
+    let mut heads = vec![false; instrs.len()];
+    let mut head = |i: usize| {
+        if let Some(h) = heads.get_mut(i) {
+            *h = true;
+        }
+    };
+    head(0);
+    for (i, instr) in instrs.iter().enumerate() {
+        let next = i.saturating_add(1);
+        let mut falls_through = false;
+        let mut leaves = false;
+        for to in instr.successors(i) {
+            if to == next {
+                falls_through = true;
+            } else {
+                leaves = true;
+                head(to);
+            }
+        }
+        if leaves || !falls_through {
+            head(next);
+        }
+    }
+    // Where each instruction lands, or its block's `Count` when it has one,
+    // which is where a jump to it must now go.
+    let mut lands = Vec::with_capacity(instrs.len());
+    let mut out = Vec::with_capacity(instrs.len());
+    let mut block: Vec<Op> = Vec::new();
+    let close = |block: &mut Vec<Op>, blocks: &mut Vec<Box<[Op]>>| {
+        if !block.is_empty() {
+            blocks.push(std::mem::take(block).into_boxed_slice());
+        }
+    };
+    for (instr, is_head) in instrs.into_iter().zip(heads) {
+        lands.push(u32::try_from(out.len()).map_err(|_| Unloadable::TooLong)?);
+        if is_head {
+            close(&mut block, blocks);
+            let number = u32::try_from(blocks.len()).map_err(|_| Unloadable::TooLong)?;
+            out.push(Instr::Count { block: number });
+        }
+        block.push(instr.op());
+        out.push(instr);
+    }
+    close(&mut block, blocks);
+    u32::try_from(out.len()).map_err(|_| Unloadable::TooLong)?;
+    for instr in &mut out {
+        if let Some(to) = instr.target()
+            && let Some(moved) = lands.get(*to as usize)
+        {
+            *to = *moved;
+        }
+    }
+    Ok(out)
+}
+
 /// Give the function's values registers, two values sharing one whenever
 /// they are never live at once, and say how many registers that takes.
 /// Every frame clears its registers when it returns and every loop when it
@@ -2471,4 +2679,120 @@ fn highest_local(e: &CoreExpr) -> Option<u32> {
         }
     }
     top
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A program with calls, a loop by tail call, a `match` with several
+    /// arms, an `if` and a map lookup that jumps, so its functions have
+    /// blocks of every shape.
+    const SHAPES: &str = "import scarlet/map\n\
+        type L {\n\tCons(h Int, t L)\n\tEnd\n}\n\
+        fn build(n Int, acc L) L {\n\
+        \tif n == 0 { acc } else { build(n - 1, Cons(n, acc)) }\n\
+        }\n\
+        fn sum(l L, acc Int) Int {\n\
+        \tmatch l {\n\
+        \t\tCons(h, t) -> sum(t, acc + h)\n\
+        \t\tEnd -> acc\n\
+        \t}\n\
+        }\n\
+        fn name(n Int) String {\n\
+        \tmatch n {\n\
+        \t\t0 -> 'none'\n\
+        \t\t1 -> 'one'\n\
+        \t\t_ -> if n < 0 { 'fewer' } else { 'more' }\n\
+        \t}\n\
+        }\n\
+        fn found(m map::Map(Int, Int), k Int) Int {\n\
+        \tmatch map::get(m, k) {\n\
+        \t\tSome(v) -> v\n\
+        \t\tNone -> 0\n\
+        \t}\n\
+        }\n\
+        pub fn main() {\n\
+        \tprintln(sum(build(10, End), 0))\n\
+        \tprintln(name(3))\n\
+        \tprintln(found(map::set(map::new(), 1, 2), 1))\n\
+        }\n";
+
+    fn bodies(code: &Code) -> Vec<&Body> {
+        let mut out = Vec::new();
+        for f in (&code.fns).into_iter().chain(&code.toplevels) {
+            match f {
+                Func::Ready(body) => out.push(body),
+                Func::NotBuiltYet(_) => {}
+            }
+        }
+        out
+    }
+
+    fn is_count(instr: &Instr) -> bool {
+        matches!(instr, Instr::Count { .. })
+    }
+
+    /// A counted load is the ordinary load with a `Count` put in at the head
+    /// of each block and nothing else changed: the same instructions in the
+    /// same order, and every jump going where it went before.
+    #[test]
+    fn a_counted_load_is_the_same_program_with_a_count_at_each_block_head() {
+        let result = scarlet_core::compile::compile_text(SHAPES, None);
+        assert!(result.success(), "{:?}", result.diagnostics());
+        let program = result.into_runnable().expect("a clean compile is runnable");
+        let plain = load(&program).expect("the program loads");
+        let counted = load_counted(&program).expect("the program loads");
+        assert!(
+            bodies(&plain)
+                .iter()
+                .all(|b| !b.instrs.iter().any(is_count))
+        );
+
+        let mut numbered = 0;
+        let mut jumps = 0;
+        for (was, now) in bodies(&plain).into_iter().zip(bodies(&counted.code)) {
+            assert!(now.instrs.first().is_some_and(is_count), "{}", now.name);
+            let kept: Vec<&Instr> = now.instrs.iter().filter(|i| !is_count(i)).collect();
+            let kinds = |instrs: &[&Instr]| instrs.iter().map(|i| i.op()).collect::<Vec<_>>();
+            assert_eq!(kinds(&kept), kinds(&was.instrs.iter().collect::<Vec<_>>()));
+            // Where each instruction of the ordinary load sits in this one.
+            let sits: Vec<usize> = (0..now.instrs.len())
+                .filter(|i| !is_count(&now.instrs[*i]))
+                .collect();
+            for (i, instr) in now.instrs.iter().enumerate() {
+                match instr {
+                    Instr::Count { block } => {
+                        assert_eq!(*block, numbered, "blocks are numbered in order");
+                        let kinds: Vec<Op> = now.instrs[i + 1..]
+                            .iter()
+                            .take_while(|i| !is_count(i))
+                            .map(Instr::op)
+                            .collect();
+                        assert_eq!(*counted.blocks[numbered as usize], kinds);
+                        numbered += 1;
+                    }
+                    _ => {
+                        // Anything that may not fall through ends its block.
+                        let next = i + 1;
+                        let falls_only = instr.successors(i).eq([next]);
+                        if !falls_only && next < now.instrs.len() {
+                            assert!(is_count(&now.instrs[next]), "{} at {i}", now.name);
+                        }
+                    }
+                }
+            }
+            for (old, new) in was.instrs.iter().zip(kept) {
+                let (mut old, mut new) = (old.clone(), new.clone());
+                if let (Some(old), Some(new)) = (old.target(), new.target()) {
+                    let lands = *new as usize;
+                    assert!(is_count(&now.instrs[lands]), "a jump lands on a count");
+                    assert_eq!(sits[*old as usize], lands + 1, "and on the same block");
+                    jumps += 1;
+                }
+            }
+        }
+        assert_eq!(numbered as usize, counted.blocks.len());
+        assert!(jumps > 5, "the program has jumps to check: {jumps}");
+    }
 }

@@ -6,6 +6,7 @@ use std::fmt;
 use scarlet_ir::core_ir::{FuncIdx, PrimOp};
 use scarlet_ir::intrinsic::Intrinsic;
 
+use crate::heap::DeadCell;
 use crate::value::View;
 
 /// Why a run ended before the program did.
@@ -26,14 +27,15 @@ pub enum Stop {
     /// name. This is a limit of the machine too.
     TooManyRegisters { name: String },
     /// The program broke a promise the compiler makes about every program,
-    /// like a `match` having an arm for every value. Only a compiler bug
-    /// causes this, so the VM stops and says what broke instead of guessing.
+    /// like a `match` having an arm for every value, or the VM found a
+    /// reference count wrong. Only a bug in the compiler or the VM causes
+    /// this, so the VM stops and says what broke instead of guessing.
     BadProgram(BadProgram),
 }
 
 impl Stop {
     pub(crate) fn missing(what: Missing) -> Stop {
-        Stop::NotBuiltYet(NotBuilt(what))
+        Stop::NotBuiltYet(what.into())
     }
 
     pub(crate) fn broken(why: Broken) -> Stop {
@@ -41,9 +43,25 @@ impl Stop {
     }
 }
 
+impl From<DeadCell> for Stop {
+    // No correct program takes this path. Saying so keeps the optimizer
+    // from weighing each check for it as a likely way out of the loop.
+    #[cold]
+    #[inline(never)]
+    fn from(_: DeadCell) -> Stop {
+        Stop::broken(Broken::DeadCell)
+    }
+}
+
 /// What the VM does not run yet. Its `Display` names it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NotBuilt(Missing);
+
+impl From<Missing> for NotBuilt {
+    fn from(what: Missing) -> NotBuilt {
+        NotBuilt(what)
+    }
+}
 
 /// Which promise a program broke. Its `Display` says what happened.
 #[derive(Debug, Clone, PartialEq)]
@@ -153,6 +171,15 @@ pub(crate) enum Broken {
     BinaryCell,
     TreePiece,
     RangeCell,
+    /// A reference was given up, or asked whether it was the only one, on a
+    /// cell that had already been freed. Some count went down once too often.
+    DeadCell,
+    /// A run that was asked to check its heap ended, gave up everything it
+    /// held, and this many cells were still not freed. Some count went up
+    /// once too often.
+    CellsLeft {
+        cells: usize,
+    },
 }
 
 impl fmt::Display for NotBuilt {
@@ -266,6 +293,36 @@ impl fmt::Display for BadProgram {
                 f.write_str("a piece of an array's or a map's tree held as a value")
             }
             Broken::RangeCell => f.write_str("a range cell that is not a range"),
+            Broken::DeadCell => f.write_str("a reference to a cell that was already freed"),
+            Broken::CellsLeft { cells } => write!(
+                f,
+                "{cells} cells were still held after the run gave up everything it had"
+            ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a wrong reference count is reported as, which `scarlet run`
+    /// prints after "internal error:".
+    #[test]
+    fn a_wrong_count_says_which_way_it_went_wrong() {
+        let Stop::BadProgram(low) = Stop::from(DeadCell) else {
+            unreachable!("a dead cell is a bad program")
+        };
+        assert_eq!(
+            low.to_string(),
+            "a reference to a cell that was already freed"
+        );
+        let Stop::BadProgram(high) = Stop::broken(Broken::CellsLeft { cells: 3 }) else {
+            unreachable!("cells left are a bad program")
+        };
+        assert_eq!(
+            high.to_string(),
+            "3 cells were still held after the run gave up everything it had"
+        );
     }
 }

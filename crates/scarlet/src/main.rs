@@ -26,7 +26,7 @@ use std::process;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
 use scarlet::cli::{help, man};
-use scarlet::{build, compile, diagnostic, dis, formatter, lint, lsp, scanner};
+use scarlet::{build, compile, counters, diagnostic, dis, formatter, lint, lsp, scanner};
 
 const VERSION: &str = env!("SCARLET_VERSION");
 
@@ -74,6 +74,9 @@ struct DisArgs {
     /// file's functions and toplevel are printed.
     #[arg(long = "fn", value_name = "NAME")]
     only: Option<String>,
+    /// After each function's Core IR, print the register instructions the VM loads it as.
+    #[arg(long)]
+    instrs: bool,
 }
 
 #[derive(Args)]
@@ -82,6 +85,15 @@ struct RunArgs {
     /// Print the parsed program before execution starts
     #[arg(long = "debug-printer")]
     debug_printer: bool,
+    /// When the program ends, give up everything it still holds and fail if a heap cell is
+    /// left.
+    #[arg(long)]
+    audit: bool,
+    /// Count each instruction the VM runs and each heap cell it makes, and write the counts
+    /// to FILE as JSON when the program ends. FILE is emptied first, and stays empty if the
+    /// program stops before its end.
+    #[arg(long, value_name = "FILE")]
+    counters: Option<PathBuf>,
     /// Arguments passed through to the program, readable via `os.argv`.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
@@ -402,7 +414,11 @@ fn main() -> process::ExitCode {
                 Some(name) => dis::Filter::Named(name),
                 None => dis::Filter::Entry,
             };
-            match dis::listing(&program, filter) {
+            let loaded = args.instrs.then(|| match scarlet_vm::listing(&program) {
+                Ok(loaded) => loaded,
+                Err(stop) => die(scarlet::stop::message(&stop).unwrap_or_default()),
+            });
+            match dis::listing(&program, filter, loaded.as_ref()) {
                 Some(text) => print!("{text}"),
                 None => die(format!(
                     "no function matching '{}'",
@@ -457,6 +473,15 @@ fn cmd_lint(args: LintArgs) {
 }
 
 fn cmd_run(args: RunArgs) {
+    // The counters file is opened before anything runs. A path that cannot be written is then
+    // found out first, and a run that ends without counts leaves an empty file, never the
+    // counts of an earlier run.
+    let unwritable =
+        |path: &Path, e: io::Error| format!("cannot write the counters to {}: {e}", path.display());
+    let counters = args.counters.map(|path| match fs::File::create(&path) {
+        Ok(file) => (path, file),
+        Err(e) => die(unwritable(&path, e)),
+    });
     let file = read_file_or_die(&args.entrypoint);
     let parsed = parse_source(&file, &args.entrypoint);
 
@@ -478,14 +503,31 @@ fn cmd_run(args: RunArgs) {
         .chain(args.args)
         .collect();
     let mut host = scarlet_vm::OsHost::of_this_process(argv, scarlet::output::ProgramOut::stdout());
-    let outcome = scarlet_vm::run(&program, &mut host);
+    let at_exit = if args.audit {
+        scarlet_vm::AtExit::Audit
+    } else {
+        scarlet_vm::AtExit::Leave
+    };
+    let outcome = match counters {
+        Some((path, file)) => scarlet_vm::run_counted(&program, &mut host, at_exit)
+            .map(|counts| Some((path, file, counts))),
+        None => scarlet_vm::run(&program, &mut host, at_exit).map(|()| None),
+    };
     // Flush before printing any message, so the program's own output comes first. A failed flush
     // means the reader has left, like a pipe into `head`, and the program hasn't failed.
     let _ = host.out().flush();
-    if let Err(stop) = outcome
-        && let Some(why) = scarlet::stop::message(&stop)
-    {
-        die(why);
+    match outcome {
+        Ok(Some((path, mut file, counts))) => {
+            if let Err(e) = file.write_all(counters::json(&counts).as_bytes()) {
+                die(unwritable(&path, e));
+            }
+        }
+        Ok(None) => {}
+        Err(stop) => {
+            if let Some(why) = scarlet::stop::message(&stop) {
+                die(why);
+            }
+        }
     }
 }
 

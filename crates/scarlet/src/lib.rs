@@ -21,6 +21,7 @@
 pub use scarlet_core::*;
 
 pub mod cli;
+pub mod counters;
 pub mod dis;
 pub mod lsp;
 pub mod output;

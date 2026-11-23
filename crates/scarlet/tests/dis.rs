@@ -43,3 +43,36 @@ fn dis_reports_a_compile_error_instead_of_a_listing() {
     assert!(out.stderr.contains("Type mismatch"), "{}", out.stderr);
     assert!(out.stdout.is_empty(), "{}", out.stdout);
 }
+
+/// `--instrs` adds, after each function's Core IR, the instructions the VM
+/// loads it as. Without it the listing is the Core IR alone.
+#[test]
+fn dis_instrs_adds_the_loaded_instructions() {
+    let p = Project::new("dis_instrs");
+    p.write("sq.sca", SQUARE);
+    let plain = run_al("dis", &p.dir.join("sq.sca"));
+    assert!(plain.success, "{}", plain.combined());
+    assert!(!plain.stdout.contains("; loaded"), "{}", plain.stdout);
+
+    let out = Command::new(env!("CARGO_BIN_EXE_scarlet"))
+        .arg("dis")
+        .arg("--instrs")
+        .arg(p.dir.join("sq.sca"))
+        .output()
+        .expect("spawn scarlet");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let square = stdout
+        .split("\n; fn#")
+        .find(|f| f.contains("fn main.square("))
+        .expect("square is listed");
+    assert!(square.contains("IntMul(%0, %0)"), "{square}");
+    assert!(
+        square.contains("; loaded: 1 register, parameters in r0\n"),
+        "{square}"
+    );
+    assert!(square.contains("    0  r0 = Int Mul(r0, r0)\n"), "{square}");
+    assert!(square.contains("    1  Ret r0\n"), "{square}");
+    let (_, toplevel) = stdout.split_once("\n; toplevel\n").expect("a toplevel");
+    assert!(toplevel.contains("; loaded: "), "{toplevel}");
+}

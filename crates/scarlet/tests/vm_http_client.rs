@@ -9,12 +9,12 @@
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::thread;
 use std::time::Duration;
 
 mod common;
-use common::wait_or_kill;
+use common::{scarlet_run, wait_or_kill};
 
 fn spawn_silent_peer(hold: Duration) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -93,9 +93,7 @@ fn run_bounded(tag: &str, src: &str, secs: u64) -> (Option<i32>, String) {
     std::fs::write(&entry, src).expect("write program");
     std::fs::write(dir.join("package.sca"), "name = 'http_client_test'\n").expect("write package");
     let out = wait_or_kill(
-        Command::new(env!("CARGO_BIN_EXE_scarlet"))
-            .arg("run")
-            .arg(&entry)
+        scarlet_run(&entry)
             .current_dir(&dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

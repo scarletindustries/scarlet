@@ -352,7 +352,7 @@ impl Session {
         let Some(program) = result.into_runnable() else {
             return;
         };
-        match crate::dis::listing(&program, crate::dis::Filter::Named(needle)) {
+        match crate::dis::listing(&program, crate::dis::Filter::Named(needle), None) {
             Some(text) => print!("{text}"),
             None => eprintln!("no function matching '{needle}'"),
         }

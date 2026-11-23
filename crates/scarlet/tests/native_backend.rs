@@ -12,15 +12,13 @@
 
 mod common;
 
-use common::{AlOutput, Project, wait_or_kill};
+use common::{AlOutput, Project, scarlet_run, wait_or_kill};
 
-/// Run `al <args..>` with explicit env overrides and a time limit, like
-/// `common::run_al`.
-fn run_al_env(args: &[&str], envs: &[(&str, &str)]) -> AlOutput {
-    let bin = env!("CARGO_BIN_EXE_scarlet");
-    let mut cmd = std::process::Command::new(bin);
-    cmd.args(args)
-        .stdin(std::process::Stdio::null())
+/// Run the program at `path` with explicit env overrides and a time limit,
+/// like `common::run_al`.
+fn run_al_env(path: &str, envs: &[(&str, &str)]) -> AlOutput {
+    let mut cmd = scarlet_run(std::path::Path::new(path));
+    cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     for (k, v) in envs {
@@ -30,7 +28,7 @@ fn run_al_env(args: &[&str], envs: &[(&str, &str)]) -> AlOutput {
     let out = wait_or_kill(child, common::CHILD_TIMEOUT_SECS);
     assert!(
         out.status.code().is_some(),
-        "`al {args:?}` died by signal (wedged or crashed)\nstdout: {}\nstderr: {}",
+        "`al run {path}` died by signal (wedged or crashed)\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
@@ -53,7 +51,7 @@ fn run(proj: &Project, name: &str, src: &str, schedulers: Option<u32>) -> AlOutp
     if let Some(s) = scheds.as_deref() {
         envs.push(("SCARLET_SCHEDULERS", s));
     }
-    run_al_env(&["run", &path], &envs)
+    run_al_env(&path, &envs)
 }
 
 /// One run must succeed, keep stderr empty, and print exactly `expected`.
@@ -194,7 +192,7 @@ pub fn main() {
     let path = proj.dir.join("prog.sca");
     std::fs::write(&path, src).unwrap();
     let path = path.to_string_lossy().into_owned();
-    let out = run_al_env(&["run", &path], &[("SCARLET_NATIVE_DEBUG", "1")]);
+    let out = run_al_env(&path, &[("SCARLET_NATIVE_DEBUG", "1")]);
     assert!(out.success, "run failed:\n{}", out.stderr);
     assert_eq!(out.stdout, "3000000\n");
     assert!(
@@ -250,7 +248,7 @@ pub fn main() {
     let path = proj.dir.join("prog.sca");
     std::fs::write(&path, src).unwrap();
     let path = path.to_string_lossy().into_owned();
-    let out = run_al_env(&["run", &path], &[("SCARLET_NATIVE_DEBUG", "1")]);
+    let out = run_al_env(&path, &[("SCARLET_NATIVE_DEBUG", "1")]);
     assert!(out.success, "run failed:\n{}", out.stderr);
     // 10,000 odd `i` in 1..=20,000, so every `Green` and no `Red`.
     assert_eq!(
@@ -424,7 +422,7 @@ pub fn main() {
     let path = proj.dir.join("prog.sca");
     std::fs::write(&path, src).unwrap();
     let path = path.to_string_lossy().into_owned();
-    let out = run_al_env(&["run", &path], &[("SCARLET_NATIVE_DEBUG", "1")]);
+    let out = run_al_env(&path, &[("SCARLET_NATIVE_DEBUG", "1")]);
     assert!(out.success, "run failed:\n{}", out.stderr);
     assert_eq!(out.stdout, expected, "stderr:\n{}", out.stderr);
     assert_warmed(&out.stderr, "rotor");
@@ -492,7 +490,7 @@ pub fn main() {
     let path = proj.dir.join("prog.sca");
     std::fs::write(&path, src).unwrap();
     let path = path.to_string_lossy().into_owned();
-    let out = run_al_env(&["run", &path], &[("SCARLET_NATIVE_DEBUG", "1")]);
+    let out = run_al_env(&path, &[("SCARLET_NATIVE_DEBUG", "1")]);
     assert!(out.success, "run failed:\n{}", out.stderr);
     assert_eq!(
         out.stdout, "0\n1\n16\n64\nTrue\n",
@@ -1172,7 +1170,7 @@ pub fn main() {
     let path = proj.dir.join("prog.sca");
     std::fs::write(&path, src).unwrap();
     let path = path.to_string_lossy().into_owned();
-    let out = run_al_env(&["run", &path], &[("SCARLET_NATIVE_DEBUG", "1")]);
+    let out = run_al_env(&path, &[("SCARLET_NATIVE_DEBUG", "1")]);
     assert!(out.success, "run failed:\n{}", out.stderr);
     assert_eq!(out.stdout, expected, "stderr:\n{}", out.stderr);
     assert_warmed(&out.stderr, "churn");
@@ -1224,7 +1222,7 @@ pub fn main() {
     let path = proj.dir.join("prog.sca");
     std::fs::write(&path, src).unwrap();
     let path = path.to_string_lossy().into_owned();
-    let out = run_al_env(&["run", &path], &[("SCARLET_NATIVE_DEBUG", "1")]);
+    let out = run_al_env(&path, &[("SCARLET_NATIVE_DEBUG", "1")]);
     assert!(
         out.success,
         "a decode refusal aborted or unwound instead of returning a value:\n{}",

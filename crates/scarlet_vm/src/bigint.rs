@@ -12,7 +12,7 @@ use num_bigint::BigInt;
 use num_traits::{ToPrimitive, Zero};
 
 use crate::code::IntOp;
-use crate::heap::{Full, Heap};
+use crate::heap::{Fault, Heap};
 use crate::value::Value;
 
 /// The most bits one Int can have, because a cell is at most 2^28 words of
@@ -46,7 +46,7 @@ impl Int {
 
 /// `a op b`, following `docs/semantics.md`: `/` truncates toward zero and
 /// `x / 0` is 0; `%` takes the dividend's sign and `x % 0` is `x`.
-pub(crate) fn op(heap: &mut Heap, op: IntOp, a: Int, b: Int) -> Result<Value, Full> {
+pub(crate) fn op(heap: &mut Heap, op: IntOp, a: Int, b: Int) -> Result<Value, Fault> {
     if let (Int::Small(x), Int::Small(y)) = (&a, &b)
         && let Some(v) = small_op(op, *x, *y)
     {
@@ -76,7 +76,7 @@ pub(crate) fn op(heap: &mut Heap, op: IntOp, a: Int, b: Int) -> Result<Value, Fu
     value(heap, n)
 }
 
-pub(crate) fn neg(heap: &mut Heap, a: Int) -> Result<Value, Full> {
+pub(crate) fn neg(heap: &mut Heap, a: Int) -> Result<Value, Fault> {
     if let Int::Small(x) = a
         && let Some(v) = x.checked_neg().and_then(Value::int)
     {
@@ -105,7 +105,12 @@ pub(crate) fn wide(heap: &Heap, v: Value) -> Option<i128> {
 
 /// `a op b` on two operands [`wide`] read, or `None` when the answer does
 /// not fit an `i128`. The rules are [`op`]'s.
-pub(crate) fn wide_op(heap: &mut Heap, op: IntOp, a: i128, b: i128) -> Option<Result<Value, Full>> {
+pub(crate) fn wide_op(
+    heap: &mut Heap,
+    op: IntOp,
+    a: i128,
+    b: i128,
+) -> Option<Result<Value, Fault>> {
     let n = match op {
         IntOp::Add => a.checked_add(b)?,
         IntOp::Sub => a.checked_sub(b)?,
@@ -151,17 +156,26 @@ pub(crate) fn small_op(op: IntOp, a: i64, b: i64) -> Option<Value> {
 /// `n` in its one form: small when it fits, a heap cell when it does not.
 /// A machine integer as an Int. One that fits in a small Int never touches
 /// `num-bigint`, so it costs no allocation.
-pub(crate) fn int<N>(heap: &mut Heap, n: N) -> Result<Value, Full>
+// The small case is a test and a tag, and goes inside the caller. Called out
+// of line, its result comes back through memory, which costs more than the
+// work does.
+#[inline(always)]
+pub(crate) fn int<N>(heap: &mut Heap, n: N) -> Result<Value, Fault>
 where
     N: TryInto<i64> + Into<BigInt> + Copy,
 {
     if let Some(v) = n.try_into().ok().and_then(Value::int) {
         return Ok(v);
     }
-    Ok(Value::cell(heap.big_int(&n.into())?))
+    big(heap, n.into())
 }
 
-pub(crate) fn value(heap: &mut Heap, n: BigInt) -> Result<Value, Full> {
+#[inline(never)]
+fn big(heap: &mut Heap, n: BigInt) -> Result<Value, Fault> {
+    Ok(Value::cell(heap.big_int(&n)?))
+}
+
+pub(crate) fn value(heap: &mut Heap, n: BigInt) -> Result<Value, Fault> {
     if let Some(v) = n.to_i64().and_then(Value::int) {
         return Ok(v);
     }

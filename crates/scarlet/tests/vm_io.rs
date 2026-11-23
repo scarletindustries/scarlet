@@ -9,7 +9,7 @@ mod common;
 use common::net::{
     CONNECT_DEADLINE_MS, KERNEL_LOOPBACK_FLOOR_MS, full_accept_queue, spawn_al_server,
 };
-use common::{Project, run_outputs, wait_or_kill};
+use common::{Project, run_outputs, scarlet_run, wait_or_kill};
 
 /// A Scarlet program whose `main` binds `127.0.0.1:0`, prints the `listening
 /// <addr>` line `spawn_al_server` waits for, then runs `body` with `server`
@@ -822,9 +822,7 @@ fn run_with_schedulers(tag: &str, src: &str, schedulers: u32, secs: u64) -> (Opt
     let proj = Project::new(tag);
     let prog = proj.dir.join("prog.sca");
     std::fs::write(&prog, src).unwrap();
-    let child = std::process::Command::new(env!("CARGO_BIN_EXE_scarlet"))
-        .arg("run")
-        .arg(&prog)
+    let child = scarlet_run(&prog)
         .env("SCARLET_SCHEDULERS", schedulers.to_string())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

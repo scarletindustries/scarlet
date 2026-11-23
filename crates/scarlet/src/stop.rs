@@ -17,7 +17,7 @@ pub fn message(stop: &Stop) -> Option<String> {
             "the function {name} needs more registers than the VM can name"
         )),
         Stop::BadProgram(what) => Some(format!(
-            "internal error: {what}. This is a bug in the compiler, not in the program"
+            "internal error: {what}. This is a bug in Scarlet, not in the program"
         )),
     }
 }

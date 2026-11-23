@@ -23,7 +23,7 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::thread;
 
@@ -35,7 +35,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 mod common;
 use common::net::{CONNECT_DEADLINE_MS, KERNEL_LOOPBACK_FLOOR_MS, full_accept_queue};
-use common::{CHILD_TIMEOUT_SECS, wait_or_kill};
+use common::{CHILD_TIMEOUT_SECS, scarlet_run, wait_or_kill};
 
 // ---------------------------------------------------------------------------
 // Certificate authority and leaves
@@ -343,10 +343,8 @@ fn run_bounded(tag: &str, src: &str, trust: Option<&str>, secs: u64) -> (Option<
     std::fs::write(&entry, src).expect("write program");
     std::fs::write(dir.join("package.sca"), "name = 'tls_test'\n").expect("write package");
 
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_scarlet"));
-    cmd.arg("run")
-        .arg(&entry)
-        .current_dir(&dir)
+    let mut cmd = scarlet_run(&entry);
+    cmd.current_dir(&dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

@@ -33,6 +33,7 @@ mod array;
 mod bigint;
 mod binary;
 mod code;
+mod counts;
 mod eq;
 mod exec;
 mod float;
@@ -41,6 +42,7 @@ mod heap;
 mod host;
 mod http;
 mod json;
+mod listing;
 mod map;
 mod os_host;
 mod show;
@@ -50,18 +52,50 @@ mod word;
 
 use scarlet_ir::core_ir::Program;
 
+pub use counts::Counts;
 pub use host::{
     Deadline, Handle, Host, IoError, IpAddr, NetError, NoRandomness, OutputClosed, Received,
     SocketAddr, TlsError,
 };
+pub use listing::{Listing, listing};
 pub use os_host::OsHost;
 pub use stop::Stop;
 
+/// What a run does once its program has ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtExit {
+    /// Nothing. The heap goes with the run, as it does when a process ends.
+    Leave,
+    /// Give up everything the run still holds, and stop with a bad-program
+    /// [`Stop`] if any cell is left, because then some reference count was
+    /// wrong.
+    Audit,
+}
+
 /// Run `program` in `host`'s world.
-pub fn run(program: &Program, host: &mut dyn Host) -> Result<(), Stop> {
+pub fn run(program: &Program, host: &mut dyn Host, at_exit: AtExit) -> Result<(), Stop> {
     let code = code::load(program)?;
-    exec::Machine::new(&code, host).run()?;
-    Ok(())
+    let mut machine = exec::Machine::new(&code, host);
+    let ended = machine.run()?;
+    machine.finish(ended, at_exit)
+}
+
+/// Run `program` as [`run`] does, and say what the run counted: how often
+/// each kind of instruction ran, and how many heap cells were made and
+/// reused. A run that stops early has no counts, because the counting is by
+/// whole blocks of instructions and a stop leaves some of them half run.
+pub fn run_counted(
+    program: &Program,
+    host: &mut dyn Host,
+    at_exit: AtExit,
+) -> Result<Counts, Stop> {
+    let counted = code::load_counted(program)?;
+    let mut machine = exec::Machine::counting(&counted, host);
+    let ended = machine.run()?;
+    // Counted before the audit, which frees what the program still held.
+    let counts = machine.counts(&counted, &ended);
+    machine.finish(ended, at_exit)?;
+    Ok(counts)
 }
 
 /// Run `program` as [`run`] does, and return its last value as `println`
@@ -70,6 +104,6 @@ pub fn run(program: &Program, host: &mut dyn Host) -> Result<(), Stop> {
 pub fn run_showing(program: &Program, host: &mut dyn Host) -> Result<Option<String>, Stop> {
     let code = code::load(program)?;
     let mut machine = exec::Machine::new(&code, host);
-    let last = machine.run()?;
-    machine.shown(last)
+    let ended = machine.run()?;
+    machine.shown(ended)
 }

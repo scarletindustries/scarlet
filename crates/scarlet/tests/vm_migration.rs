@@ -3,11 +3,11 @@
 // other scheduler, so a worker is moved whole (stack, frames, captures, heap)
 // while it runs. The assertions check exact output lines, never timing.
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 mod common;
 use common::Project;
-use common::wait_or_kill;
+use common::{scarlet_run, wait_or_kill};
 
 /// Runs `al run <prog>` with `SCARLET_SCHEDULERS=<schedulers>` and captures its output.
 /// The wall-clock cap only turns a scheduler deadlock into a failure instead
@@ -16,9 +16,7 @@ fn run_al_with_schedulers(proj: &Project, src: &str, schedulers: u32) -> String 
     let prog = proj.dir.join("prog.sca");
     std::fs::write(&prog, src).unwrap();
 
-    let child = Command::new(env!("CARGO_BIN_EXE_scarlet"))
-        .arg("run")
-        .arg(&prog)
+    let child = scarlet_run(&prog)
         .env("SCARLET_SCHEDULERS", schedulers.to_string())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

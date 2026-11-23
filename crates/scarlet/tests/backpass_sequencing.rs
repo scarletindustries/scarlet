@@ -19,10 +19,10 @@
 //! We watched these fail before the fix; see T-211.
 
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 mod common;
-use common::wait_or_kill;
+use common::{scarlet_run, wait_or_kill};
 
 /// Long enough that a loaded machine doesn't look like a wedge, and short enough
 /// that a real wedge is one slow failing test rather than a two-minute one.
@@ -104,9 +104,7 @@ fn run_bounded(tag: &str, src: &str) -> (Option<i32>, String) {
     std::fs::write(&entry, src).expect("write program");
     std::fs::write(dir.join("package.sca"), "name = 'backpass_test'\n").expect("write package");
 
-    let child = Command::new(env!("CARGO_BIN_EXE_scarlet"))
-        .arg("run")
-        .arg(&entry)
+    let child = scarlet_run(&entry)
         .current_dir(&dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

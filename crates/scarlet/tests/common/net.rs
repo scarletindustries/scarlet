@@ -5,10 +5,10 @@
 
 use std::io::{ErrorKind, Read};
 use std::net::TcpStream;
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, Output, Stdio};
 use std::time::Duration;
 
-use super::{Project, wait_or_kill};
+use super::{Project, scarlet_run, wait_or_kill};
 
 /// A spawned `scarlet` server subprocess plus the port it announced. `Drop` kills
 /// and reaps the child so a panicking test leaks no server. Consuming methods
@@ -133,9 +133,7 @@ pub fn spawn_al_server(proj: &Project, src: &str) -> AlServer {
     let prog = proj.dir.join("server.sca");
     std::fs::write(&prog, src).unwrap();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_scarlet"))
-        .arg("run")
-        .arg(&prog)
+    let mut child = scarlet_run(&prog)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

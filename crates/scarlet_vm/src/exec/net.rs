@@ -7,7 +7,7 @@
 use scarlet_ir::core_ir::{AddressTypes, NetTypes, TlsTypes};
 use scarlet_ir::intrinsic::Intrinsic;
 
-use super::{Machine, full};
+use super::{Machine, fault};
 use crate::Stop;
 use crate::array;
 use crate::bigint::{self, Int};
@@ -181,7 +181,7 @@ impl Machine<'_, '_> {
                         let cell = self
                             .heap
                             .ctor(tls.tls_socket, &[session, peer, name])
-                            .map_err(full)?;
+                            .map_err(fault)?;
                         self.ok(Value::cell(cell))
                     }
                     Err(e) => self.tls_err(e),
@@ -208,7 +208,7 @@ impl Machine<'_, '_> {
                     let unaligned = self.net_types()?.unaligned_binary;
                     let cause = Value::nullary(unaligned);
                     let transport = self.tls_types()?.transport;
-                    let e = self.heap.ctor(transport, &[cause]).map_err(full)?;
+                    let e = self.heap.ctor(transport, &[cause]).map_err(fault)?;
                     return self.err(Value::cell(e));
                 };
                 match self.host.tls_write(conn, &bytes) {
@@ -251,7 +251,7 @@ impl Machine<'_, '_> {
 
     fn handle_value(&mut self, h: Handle) -> Result<Value, Stop> {
         Ok(Value::cell(
-            self.heap.make(Kind::Handle, &[h.0]).map_err(full)?,
+            self.heap.make(Kind::Handle, &[h.0]).map_err(fault)?,
         ))
     }
 
@@ -281,7 +281,7 @@ impl Machine<'_, '_> {
     fn socket_value(&mut self, conn: Handle, peer: Value) -> Result<Value, Stop> {
         let socket = self.net_types()?.socket;
         let conn = self.handle_value(conn)?;
-        let cell = self.heap.ctor(socket, &[conn, peer]).map_err(full)?;
+        let cell = self.heap.ctor(socket, &[conn, peer]).map_err(fault)?;
         Ok(Value::cell(cell))
     }
 
@@ -291,18 +291,18 @@ impl Machine<'_, '_> {
             IpAddr::V4(_) => types.v4,
             IpAddr::V6(_) => types.v6,
         };
-        let text = Value::cell(self.heap.string(ip.to_string().as_bytes()).map_err(full)?);
-        Ok(Value::cell(self.heap.ctor(form, &[text]).map_err(full)?))
+        let text = Value::cell(self.heap.string(ip.to_string().as_bytes()).map_err(fault)?);
+        Ok(Value::cell(self.heap.ctor(form, &[text]).map_err(fault)?))
     }
 
     fn socket_addr_value(&mut self, addr: SocketAddr) -> Result<Value, Stop> {
         let types = self.address_types()?;
         let ip = self.ip_value(addr.ip())?;
-        let port = bigint::int(&mut self.heap, addr.port()).map_err(full)?;
+        let port = bigint::int(&mut self.heap, addr.port()).map_err(fault)?;
         let cell = self
             .heap
             .ctor(types.socket_address, &[ip, port])
-            .map_err(full)?;
+            .map_err(fault)?;
         Ok(Value::cell(cell))
     }
 
@@ -349,8 +349,10 @@ impl Machine<'_, '_> {
                 if bytes.len() > binary::MAX_BYTES {
                     return Err(Stop::HeapFull);
                 }
-                let b = Value::cell(binary::from_bytes(&mut self.heap, &bytes).map_err(full)?);
-                Ok(Value::cell(self.heap.ctor(types.data, &[b]).map_err(full)?))
+                let b = Value::cell(binary::from_bytes(&mut self.heap, &bytes).map_err(fault)?);
+                Ok(Value::cell(
+                    self.heap.ctor(types.data, &[b]).map_err(fault)?,
+                ))
             }
             Received::Closed => Ok(Value::nullary(types.closed)),
         }
@@ -379,8 +381,10 @@ impl Machine<'_, '_> {
             NetError::PermissionDenied => t.permission_denied,
             NetError::UnexpectedEof => t.unexpected_eof,
             NetError::Errno(code) => {
-                let code = bigint::int(&mut self.heap, code).map_err(full)?;
-                return Ok(Value::cell(self.heap.ctor(t.errno, &[code]).map_err(full)?));
+                let code = bigint::int(&mut self.heap, code).map_err(fault)?;
+                return Ok(Value::cell(
+                    self.heap.ctor(t.errno, &[code]).map_err(fault)?,
+                ));
             }
         };
         Ok(Value::nullary(variant))
@@ -405,7 +409,7 @@ impl Machine<'_, '_> {
             TlsError::InvalidServerName => t.invalid_server_name,
             TlsError::Transport(cause) => {
                 let cause = self.net_error(cause)?;
-                let e = self.heap.ctor(t.transport, &[cause]).map_err(full)?;
+                let e = self.heap.ctor(t.transport, &[cause]).map_err(fault)?;
                 return self.err(Value::cell(e));
             }
         };

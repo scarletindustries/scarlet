@@ -10,20 +10,22 @@
 //! a reference, and overwriting a register, or leaving a frame, gives one up.
 //! Perceus's `Drop` gives one up early. This alone keeps every count right,
 //! whatever Perceus did or did not insert (`docs/vm-design.md`, "Memory").
+//! If a count is wrong all the same, the instruction that gives up a
+//! reference to a cell already freed stops the run with `Broken::DeadCell`.
 
 use num_bigint::Sign;
 use num_traits::{FromPrimitive, ToPrimitive};
 use scarlet_ir::core_ir::{FuncIdx, HttpTypes, IoErrors, JsonTypes, VariantRef};
 use scarlet_ir::intrinsic::Intrinsic;
 
-use crate::Stop;
 use crate::array::{self, End, Seq};
 use crate::bigint::{self, Int};
 use crate::binary::{self, Bits};
-use crate::code::{Arg, BitsOp, Body, Code, Func, Instr, IntOp, Reg};
+use crate::code::{Arg, BitsOp, Body, Code, Counted, Func, Instr, IntOp, Op, Reg};
+use crate::counts::Counts;
 use crate::eq;
 use crate::float::{self, NumOp};
-use crate::heap::{Cell, Full, Heap, Kind};
+use crate::heap::{Cell, DeadCell, Fault, Heap, Kind};
 use crate::host::{Host, IoError};
 use crate::http;
 use crate::json;
@@ -32,6 +34,7 @@ use crate::show;
 use crate::stop::{Broken, Missing};
 use crate::value::{Value, View};
 use crate::word::to_usize;
+use crate::{AtExit, Stop};
 
 mod net;
 
@@ -64,6 +67,17 @@ pub(crate) struct Machine<'c, 'h> {
     /// environment cannot change while the program runs, so every call after
     /// shares this one.
     env: Option<Cell>,
+    /// How many times each block of a counted load has run, by the number
+    /// its `Count` instruction holds. It is empty for an ordinary load,
+    /// which has no such instruction.
+    ran: Vec<u64>,
+}
+
+/// A run that reached its program's end, holding the value of the last thing
+/// it ran and that value's reference. Only [`Machine::run`] makes one, so
+/// whatever takes one knows the run did not stop part way.
+pub(crate) struct Ended {
+    last: Value,
 }
 
 impl<'c, 'h> Machine<'c, 'h> {
@@ -77,26 +91,34 @@ impl<'c, 'h> Machine<'c, 'h> {
             top: 0,
             passing: Vec::new(),
             env: None,
+            ran: Vec::new(),
         }
     }
 
+    /// A machine for a counted load, which counts each run of each block.
+    pub(crate) fn counting(counted: &'c Counted, host: &'h mut dyn Host) -> Self {
+        let mut machine = Machine::new(&counted.code, host);
+        machine.ran = vec![0; counted.blocks.len()];
+        machine
+    }
+
     /// Run every module's toplevel in order, then `main` if the program has
-    /// one. The result is the value of the last thing run, which is `main`'s,
-    /// or the entry toplevel's for a script. The caller holds its reference.
-    pub(crate) fn run(&mut self) -> Result<Value, Stop> {
+    /// one. The result holds the value of the last thing run, which is
+    /// `main`'s, or the entry toplevel's for a script.
+    pub(crate) fn run(&mut self) -> Result<Ended, Stop> {
         let mut last = Value::NIL;
         for top in &self.code.toplevels {
             let v = self.call(ready(top)?, &[])?;
-            self.release(last);
+            self.release(last)?;
             last = v;
         }
         if let Some(main) = self.code.main {
             let v = self.call(self.body(main)?, &[])?;
-            self.release(last);
+            self.release(last)?;
             last = v;
         }
         self.let_go_of_handles();
-        Ok(last)
+        Ok(Ended { last })
     }
 
     fn body(&self, f: FuncIdx) -> Result<&'c Body, Stop> {
@@ -110,7 +132,7 @@ impl<'c, 'h> Machine<'c, 'h> {
     /// references pass to the callee, and the result's passes to the caller.
     fn call(&mut self, body: &'c Body, args: &[Value]) -> Result<Value, Stop> {
         let base = self.top;
-        self.enter(body, base, args);
+        self.enter(body, base, args)?;
         // The frame running is kept apart from the ones waiting on it, so an
         // instruction reaches it without going through the stack.
         let mut frame = Frame {
@@ -132,26 +154,31 @@ impl<'c, 'h> Machine<'c, 'h> {
             frame.pc = frame.pc.saturating_add(1);
             let base = frame.base;
             match instr {
-                Instr::Const { dst, value } => self.set(base, *dst, *value),
+                Instr::Count { block } => {
+                    if let Some(n) = self.ran.get_mut(*block as usize) {
+                        *n = n.saturating_add(1);
+                    }
+                }
+                Instr::Const { dst, value } => self.set(base, *dst, *value)?,
                 Instr::Str { dst, text } => {
-                    let cell = self.heap.string(text).map_err(full)?;
-                    self.set(base, *dst, Value::cell(cell));
+                    let cell = self.heap.string(text).map_err(fault)?;
+                    self.set(base, *dst, Value::cell(cell))?;
                 }
                 Instr::BinaryConst { dst, bytes, len } => {
-                    let cell = binary::make(&mut self.heap, bytes, *len).map_err(full)?;
-                    self.set(base, *dst, Value::cell(cell));
+                    let cell = binary::make(&mut self.heap, bytes, *len).map_err(fault)?;
+                    self.set(base, *dst, Value::cell(cell))?;
                 }
                 Instr::Bits { dst, op, args } => {
                     let v = self.bits_op(*op, base, args)?;
-                    self.set(base, *dst, v);
+                    self.set(base, *dst, v)?;
                 }
                 Instr::BigInt { dst, n } => {
-                    let v = bigint::int(&mut self.heap, *n).map_err(full)?;
-                    self.set(base, *dst, v);
+                    let v = bigint::int(&mut self.heap, *n).map_err(fault)?;
+                    self.set(base, *dst, v)?;
                 }
                 Instr::Move { dst, src } => {
                     let v = self.share(self.get(base, *src));
-                    self.set(base, *dst, v);
+                    self.set(base, *dst, v)?;
                 }
                 Instr::GetGlobal { dst, slot } => {
                     let v = usize::try_from(slot.0)
@@ -160,7 +187,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                         .copied()
                         .unwrap_or(Value::NIL);
                     let v = self.share(v);
-                    self.set(base, *dst, v);
+                    self.set(base, *dst, v)?;
                 }
                 Instr::SetGlobal { slot, src } => {
                     let v = self.share(self.get(base, *src));
@@ -169,7 +196,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                         .and_then(|i| self.globals.get_mut(i))
                     {
                         let old = std::mem::replace(g, v);
-                        self.release(old);
+                        self.release(old)?;
                     }
                 }
                 Instr::Int { dst, op, a, b } => {
@@ -184,7 +211,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                         Some(v) => v,
                         None => self.int_op(*op, x, y)?,
                     };
-                    self.set(base, *dst, v);
+                    self.set(base, *dst, v)?;
                 }
                 Instr::IntImm { dst, op, a, b } => {
                     let x = self.get(base, *a);
@@ -192,24 +219,24 @@ impl<'c, 'h> Machine<'c, 'h> {
                         Some(v) => v,
                         None => self.int_op(*op, x, Value::int(*b).unwrap_or(Value::NIL))?,
                     };
-                    self.set(base, *dst, v);
+                    self.set(base, *dst, v)?;
                 }
                 Instr::IntNeg { dst, a } => {
                     let a = self.int(base, *a)?;
-                    let v = bigint::neg(&mut self.heap, a).map_err(full)?;
-                    self.set(base, *dst, v);
+                    let v = bigint::neg(&mut self.heap, a).map_err(fault)?;
+                    self.set(base, *dst, v)?;
                 }
                 Instr::Float { dst, op, a, b } => {
                     let (a, b) = (self.float(base, *a)?, self.float(base, *b)?);
-                    self.set(base, *dst, float::op(*op, a, b));
+                    self.set(base, *dst, float::op(*op, a, b))?;
                 }
                 Instr::FloatNeg { dst, a } => {
                     let a = self.float(base, *a)?;
-                    self.set(base, *dst, Value::float(-a));
+                    self.set(base, *dst, Value::float(-a))?;
                 }
                 Instr::Num { dst, op, a, b } => {
                     let v = self.num(*op, self.get(base, *a), self.get(base, *b))?;
-                    self.set(base, *dst, v);
+                    self.set(base, *dst, v)?;
                 }
                 Instr::Neg { dst, a } => {
                     let a = self.get(base, *a);
@@ -222,10 +249,10 @@ impl<'c, 'h> Machine<'c, 'h> {
                         | View::Cell(_)
                         | View::Nullary(_) => {
                             let a = self.int_of(a)?;
-                            bigint::neg(&mut self.heap, a).map_err(full)?
+                            bigint::neg(&mut self.heap, a).map_err(fault)?
                         }
                     };
-                    self.set(base, *dst, v);
+                    self.set(base, *dst, v)?;
                 }
                 Instr::Print { dst, arg, newline } => {
                     let mut text = Vec::new();
@@ -236,7 +263,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                     if self.host.print(&text).is_err() {
                         return Err(Stop::OutputClosed);
                     }
-                    self.set(base, *dst, Value::NIL);
+                    self.set(base, *dst, Value::NIL)?;
                 }
                 Instr::ToString { dst, a } => {
                     let v = self.get(base, *a);
@@ -245,9 +272,9 @@ impl<'c, 'h> Machine<'c, 'h> {
                     } else {
                         let mut text = Vec::new();
                         self.show(v, &mut text)?;
-                        Value::cell(self.heap.string(&text).map_err(full)?)
+                        Value::cell(self.heap.string(&text).map_err(fault)?)
                     };
-                    self.set(base, *dst, s);
+                    self.set(base, *dst, s)?;
                 }
                 Instr::Concat { dst, parts } => {
                     let mut text = Vec::new();
@@ -260,8 +287,8 @@ impl<'c, 'h> Machine<'c, 'h> {
                             _ => return Err(Stop::missing(Missing::Join(v.view()))),
                         }
                     }
-                    let s = Value::cell(self.heap.string(&text).map_err(full)?);
-                    self.set(base, *dst, s);
+                    let s = Value::cell(self.heap.string(&text).map_err(fault)?);
+                    self.set(base, *dst, s)?;
                 }
                 Instr::Ctor {
                     dst,
@@ -294,28 +321,28 @@ impl<'c, 'h> Machine<'c, 'h> {
                         }
                         None => {
                             if let Some(v) = parked {
-                                self.release(v);
+                                self.release(v)?;
                             }
-                            self.heap.ctor(*variant, &values).map_err(full)?
+                            self.heap.ctor(*variant, &values).map_err(fault)?
                         }
                     };
                     self.passed(values);
-                    self.set(base, *dst, Value::cell(cell));
+                    self.set(base, *dst, Value::cell(cell))?;
                 }
-                Instr::Drop { reg } => self.set(base, *reg, Value::NIL),
+                Instr::Drop { reg } => self.set(base, *reg, Value::NIL)?,
                 Instr::DropReuse { reg } => {
                     // The register keeps the hollowed cell and its one
                     // reference. If no constructor takes it, it is freed with
                     // the frame, like any other register.
                     match self.get(base, *reg).as_cell() {
-                        Some(cell) if self.heap.hollow(cell) => {}
-                        _ => self.set(base, *reg, Value::NIL),
+                        Some(cell) if self.heap.hollow(cell)? => {}
+                        _ => self.set(base, *reg, Value::NIL)?,
                     }
                 }
                 Instr::Call { dst, func, args } => {
                     let callee = self.body(*func)?;
                     let new_base = frame_end(base, frame.body);
-                    self.enter_above(base, args, callee, new_base);
+                    self.enter_above(base, args, callee, new_base)?;
                     callers.push(std::mem::replace(
                         &mut frame,
                         Frame {
@@ -331,7 +358,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                     let body = frame.body;
                     let env = self.share(frame.env);
                     let new_base = frame_end(base, body);
-                    self.enter_above(base, args, body, new_base);
+                    self.enter_above(base, args, body, new_base)?;
                     callers.push(std::mem::replace(
                         &mut frame,
                         Frame {
@@ -346,7 +373,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                 Instr::CallValue { dst, callee, args } => {
                     let (body, env) = self.callee(self.get(base, *callee), args.len())?;
                     let new_base = frame_end(base, frame.body);
-                    self.enter_above(base, args, body, new_base);
+                    self.enter_above(base, args, body, new_base)?;
                     callers.push(std::mem::replace(
                         &mut frame,
                         Frame {
@@ -363,16 +390,16 @@ impl<'c, 'h> Machine<'c, 'h> {
                 Instr::TailCall { func, args } => {
                     let callee = self.body(*func)?;
                     let values = self.call_args(base, args);
-                    self.enter(callee, base, &values);
+                    self.enter(callee, base, &values)?;
                     self.passed(values);
                     let old = std::mem::replace(&mut frame.env, Value::NIL);
-                    self.release(old);
+                    self.release(old)?;
                     frame.body = callee;
                     frame.pc = 0;
                 }
                 Instr::TailCallSelf { args } => {
                     let values = self.call_args(base, args);
-                    self.again(frame.body, base, &values);
+                    self.again(frame.body, base, &values)?;
                     self.passed(values);
                     frame.pc = 0;
                 }
@@ -382,10 +409,10 @@ impl<'c, 'h> Machine<'c, 'h> {
                 Instr::TailCallValue { callee, args } => {
                     let (body, env) = self.callee(self.get(base, *callee), args.len())?;
                     let values = self.call_args(base, args);
-                    self.enter(body, base, &values);
+                    self.enter(body, base, &values)?;
                     self.passed(values);
                     let old = std::mem::replace(&mut frame.env, env);
-                    self.release(old);
+                    self.release(old)?;
                     frame.body = body;
                     frame.pc = 0;
                 }
@@ -395,8 +422,8 @@ impl<'c, 'h> Machine<'c, 'h> {
                     captures,
                 } => {
                     let values = self.args(base, captures);
-                    let cell = self.heap.closure(*func, &values).map_err(full)?;
-                    self.set(base, *dst, Value::cell(cell));
+                    let cell = self.heap.closure(*func, &values).map_err(fault)?;
+                    self.set(base, *dst, Value::cell(cell))?;
                 }
                 Instr::GetCapture { dst, index } => {
                     let capture = match frame.env.as_cell() {
@@ -412,7 +439,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                         }));
                     };
                     let v = self.share(v);
-                    self.set(base, *dst, v);
+                    self.set(base, *dst, v)?;
                 }
                 Instr::GetSelf { dst, this } => {
                     let v = match frame.env.view() {
@@ -424,7 +451,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                         | View::Cell(_)
                         | View::Nullary(_) => self.share(frame.env),
                     };
-                    self.set(base, *dst, v);
+                    self.set(base, *dst, v)?;
                 }
                 Instr::Jump { to } => frame.pc = *to as usize,
                 Instr::JumpUnlessVariant { src, variant, to } => {
@@ -478,12 +505,12 @@ impl<'c, 'h> Machine<'c, 'h> {
                         return Err(Stop::broken(Broken::NoField { index: *index }));
                     };
                     let field = self.share(field);
-                    self.set(base, *dst, field);
+                    self.set(base, *dst, field)?;
                 }
                 Instr::Tuple { dst, elements } => {
                     let values = self.args(base, elements);
-                    let cell = self.heap.tuple(&values).map_err(full)?;
-                    self.set(base, *dst, Value::cell(cell));
+                    let cell = self.heap.tuple(&values).map_err(fault)?;
+                    self.set(base, *dst, Value::cell(cell))?;
                 }
                 Instr::Element { dst, src, index } => {
                     let element = match self.get(base, *src).as_cell() {
@@ -496,12 +523,12 @@ impl<'c, 'h> Machine<'c, 'h> {
                         return Err(Stop::broken(Broken::NoElement { index: *index }));
                     };
                     let element = self.share(element);
-                    self.set(base, *dst, element);
+                    self.set(base, *dst, element)?;
                 }
                 Instr::Array { dst, elements } => {
                     let values = self.args(base, elements);
-                    let cell = array::from_values(&mut self.heap, &values).map_err(full)?;
-                    self.set(base, *dst, Value::cell(cell));
+                    let cell = array::from_values(&mut self.heap, &values).map_err(fault)?;
+                    self.set(base, *dst, Value::cell(cell))?;
                 }
                 Instr::Builtin {
                     dst,
@@ -515,29 +542,29 @@ impl<'c, 'h> Machine<'c, 'h> {
                     let v = match intrinsic {
                         Intrinsic::InternalStackDepth => {
                             bigint::int(&mut self.heap, callers.len().saturating_add(1))
-                                .map_err(full)?
+                                .map_err(fault)?
                         }
                         // Read the count before making this call's own answer,
                         // so asking does not change what it says.
                         Intrinsic::InternalCellsMade => {
                             let n = self.heap.made();
-                            bigint::int(&mut self.heap, n).map_err(full)?
+                            bigint::int(&mut self.heap, n).map_err(fault)?
                         }
                         Intrinsic::InternalCellsReused => {
                             let n = self.heap.reused();
-                            bigint::int(&mut self.heap, n).map_err(full)?
+                            bigint::int(&mut self.heap, n).map_err(fault)?
                         }
                         _ => self.builtin(*intrinsic, base, args)?,
                     };
-                    self.set(base, *dst, v);
+                    self.set(base, *dst, v)?;
                 }
                 Instr::Equal { dst, a, b } => {
                     let same = eq::equal(&self.heap, self.get(base, *a), self.get(base, *b));
-                    self.set(base, *dst, Value::bool(same));
+                    self.set(base, *dst, Value::bool(same))?;
                 }
                 Instr::NotEqual { dst, a, b } => {
                     let same = eq::equal(&self.heap, self.get(base, *a), self.get(base, *b));
-                    self.set(base, *dst, Value::bool(!same));
+                    self.set(base, *dst, Value::bool(!same))?;
                 }
                 Instr::Not { dst, a } => {
                     let b = match self.get(base, *a).view() {
@@ -551,25 +578,25 @@ impl<'c, 'h> Machine<'c, 'h> {
                             return Err(Stop::broken(Broken::NotOnNonBool(v)));
                         }
                     };
-                    self.set(base, *dst, Value::bool(!b));
+                    self.set(base, *dst, Value::bool(!b))?;
                 }
                 Instr::Range { dst, start, end } => {
                     let start = self.range_end(self.get(base, *start))?;
                     let end = self.range_end(self.get(base, *end))?;
-                    let cell = array::range(&mut self.heap, start, end).map_err(full)?;
-                    self.set(base, *dst, Value::cell(cell));
+                    let cell = array::range(&mut self.heap, start, end).map_err(fault)?;
+                    self.set(base, *dst, Value::cell(cell))?;
                 }
                 Instr::ArrayLen { dst, src } => {
                     let n = self.seq(self.get(base, *src))?.len(&self.heap);
-                    let v = bigint::int(&mut self.heap, n).map_err(full)?;
-                    self.set(base, *dst, v);
+                    let v = bigint::int(&mut self.heap, n).map_err(fault)?;
+                    self.set(base, *dst, v)?;
                 }
                 Instr::ArrayElem { dst, src, index } => {
                     let s = self.seq(self.get(base, *src))?;
                     let Some(v) = self.element(s, usize::from(*index))? else {
                         return Err(Stop::broken(Broken::NoArrayElement { index: *index }));
                     };
-                    self.set(base, *dst, v);
+                    self.set(base, *dst, v)?;
                 }
                 Instr::ArrayDrop { dst, src, n, moved } => {
                     let s = self.seq(self.get(base, *src))?;
@@ -599,7 +626,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                             array::range(&mut self.heap, start.wrapping_add_unsigned(n), end)
                         }
                     };
-                    self.set(base, *dst, Value::cell(cell.map_err(full)?));
+                    self.set(base, *dst, Value::cell(cell.map_err(fault)?))?;
                 }
                 Instr::ArrayPrepend {
                     dst,
@@ -612,10 +639,10 @@ impl<'c, 'h> Machine<'c, 'h> {
                     let items = self.items(base, front);
                     if *moved {
                         let held = self.take(base, *rest);
-                        self.release(held);
+                        self.release(held)?;
                     }
                     let cell = self.push_all(a, items.into_iter().rev(), End::Front)?;
-                    self.set(base, *dst, Value::cell(cell));
+                    self.set(base, *dst, Value::cell(cell))?;
                 }
                 Instr::ArrayAppend {
                     dst,
@@ -628,18 +655,18 @@ impl<'c, 'h> Machine<'c, 'h> {
                     let items = self.items(base, back);
                     if *moved {
                         let held = self.take(base, *rest);
-                        self.release(held);
+                        self.release(held)?;
                     }
                     let cell = self.push_all(a, items.into_iter(), End::Back)?;
-                    self.set(base, *dst, Value::cell(cell));
+                    self.set(base, *dst, Value::cell(cell))?;
                 }
                 Instr::ArrayConcat { dst, a, b } => {
                     let (a, b) = (self.seq(self.get(base, *a))?, self.seq(self.get(base, *b))?);
                     let (a, b) = (self.tree(a)?, self.tree(b)?);
-                    let cell = array::concat(&mut self.heap, a, b).map_err(full);
-                    self.heap.release(a);
-                    self.heap.release(b);
-                    self.set(base, *dst, Value::cell(cell?));
+                    let cell = array::concat(&mut self.heap, a, b).map_err(fault);
+                    self.heap.release(a)?;
+                    self.heap.release(b)?;
+                    self.set(base, *dst, Value::cell(cell?))?;
                 }
                 Instr::ArraySlice {
                     dst,
@@ -654,7 +681,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                     );
                     let cut = match (s, bounds) {
                         (Seq::Tree(a), (Some(from), Some(to))) => {
-                            array::slice(&mut self.heap, a, from, to).map_err(full)?
+                            array::slice(&mut self.heap, a, from, to).map_err(fault)?
                         }
                         (Seq::Range { start, end }, (Some(from), Some(to)))
                             if from <= to && to as u64 <= array::range_len(start, end) =>
@@ -665,7 +692,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                                 start.wrapping_add_unsigned(from as u64),
                                 start.wrapping_add_unsigned(to as u64),
                             );
-                            Some(array::range(&mut self.heap, from, to).map_err(full)?)
+                            Some(array::range(&mut self.heap, from, to).map_err(fault)?)
                         }
                         (Seq::Tree(_) | Seq::Range { .. }, _) => None,
                     };
@@ -673,19 +700,19 @@ impl<'c, 'h> Machine<'c, 'h> {
                         Some(cut) => self.heap.ctor(self.code.abi.ok, &[Value::cell(cut)]),
                         None => self.heap.ctor(self.code.abi.err, &[Value::NIL]),
                     };
-                    let v = Value::cell(v.map_err(full)?);
-                    self.set(base, *dst, v);
+                    let v = Value::cell(v.map_err(fault)?);
+                    self.set(base, *dst, v)?;
                 }
                 Instr::ArrayIndex { dst, src, index } => {
                     let found = self.index(self.get(base, *src), self.get(base, *index))?;
                     let v = match found {
                         Some(v) => {
-                            let cell = self.heap.ctor(self.code.abi.some, &[v]).map_err(full)?;
+                            let cell = self.heap.ctor(self.code.abi.some, &[v]).map_err(fault)?;
                             Value::cell(cell)
                         }
                         None => Value::nullary(self.code.abi.none),
                     };
-                    self.set(base, *dst, v);
+                    self.set(base, *dst, v)?;
                 }
                 Instr::ArrayIndexOr {
                     dst,
@@ -698,7 +725,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                         Some(v) => v,
                         None => self.share(self.get(base, *default)),
                     };
-                    self.set(base, *dst, v);
+                    self.set(base, *dst, v)?;
                 }
                 Instr::Bad { why } => return Err(Stop::broken(why.clone())),
                 Instr::JumpIfFalse { cond, to } => match self.get(base, *cond).view() {
@@ -723,15 +750,15 @@ impl<'c, 'h> Machine<'c, 'h> {
                     let (k, v) = (self.get(base, *key), self.get(base, *value));
                     // The register's reference passes to the set.
                     self.take(base, *map);
-                    let cell = map::set_owned(&mut self.heap, m, k, v).map_err(full)?;
-                    self.set(base, *dst, Value::cell(cell));
+                    let cell = map::set_owned(&mut self.heap, m, k, v).map_err(fault)?;
+                    self.set(base, *dst, Value::cell(cell))?;
                 }
                 Instr::MapFind { dst, map, key, to } => {
                     let m = self.map(self.get(base, *map))?;
                     match map::get(&self.heap, m, self.get(base, *key)) {
                         Some(v) => {
                             let v = self.share(v);
-                            self.set(base, *dst, v);
+                            self.set(base, *dst, v)?;
                         }
                         None => frame.pc = *to as usize,
                     }
@@ -741,8 +768,8 @@ impl<'c, 'h> Machine<'c, 'h> {
                     let k = self.get(base, *key);
                     // The register's reference passes to the delete.
                     self.take(base, *map);
-                    let cell = map::delete_owned(&mut self.heap, m, k).map_err(full)?;
-                    self.set(base, *dst, Value::cell(cell));
+                    let cell = map::delete_owned(&mut self.heap, m, k).map_err(fault)?;
+                    self.set(base, *dst, Value::cell(cell))?;
                 }
                 Instr::JumpUnlessCmp { op, a, b, to } => {
                     let (x, y) = (self.get(base, *a), self.get(base, *b));
@@ -774,11 +801,11 @@ impl<'c, 'h> Machine<'c, 'h> {
                     let v = self.take(base, *src);
                     let ret_to = frame.ret_to;
                     let env = frame.env;
-                    self.leave(base);
-                    self.release(env);
+                    self.leave(base)?;
+                    self.release(env)?;
                     match (ret_to, callers.pop()) {
                         (Some(dst), Some(caller)) => {
-                            self.set(caller.base, dst, v);
+                            self.set(caller.base, dst, v)?;
                             frame = caller;
                         }
                         _ => return Ok(v),
@@ -798,14 +825,14 @@ impl<'c, 'h> Machine<'c, 'h> {
             Intrinsic::BinaryFromString => {
                 let text = self.text_of(v)?;
                 let cell = binary::from_bytes(&mut self.heap, &text);
-                Ok(Value::cell(cell.map_err(full)?))
+                Ok(Value::cell(cell.map_err(fault)?))
             }
             Intrinsic::BinaryToString => {
                 let b = self.binary(v)?;
                 let text = binary::bytes(&self.heap, b);
                 match std::str::from_utf8(&text) {
                     Ok(_) if b.len % 8 == 0 => {
-                        let s = Value::cell(self.heap.string(&text).map_err(full)?);
+                        let s = Value::cell(self.heap.string(&text).map_err(fault)?);
                         self.ok(s)
                     }
                     _ => self.err_nil(),
@@ -813,15 +840,15 @@ impl<'c, 'h> Machine<'c, 'h> {
             }
             Intrinsic::BinaryBitSize => {
                 let n = self.binary(v)?.len;
-                bigint::int(&mut self.heap, n).map_err(full)
+                bigint::int(&mut self.heap, n).map_err(fault)
             }
             Intrinsic::BinaryByteSize => {
                 let n = self.binary(v)?.len.div_ceil(8);
-                bigint::int(&mut self.heap, n).map_err(full)
+                bigint::int(&mut self.heap, n).map_err(fault)
             }
             Intrinsic::BinaryAppend => {
                 let (a, b) = (self.binary(v)?, self.binary(arg(self, 1))?);
-                let cell = binary::join(&mut self.heap, &[a, b]).map_err(full)?;
+                let cell = binary::join(&mut self.heap, &[a, b]).map_err(fault)?;
                 Ok(Value::cell(cell))
             }
             // The ASCII built-ins read whole bytes only, as the old VM's did.
@@ -835,7 +862,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                     Int::Big(_) => None,
                 };
                 let n = found.map_or(-1, i64::from);
-                bigint::int(&mut self.heap, n).map_err(full)
+                bigint::int(&mut self.heap, n).map_err(fault)
             }
             // The search starts at `from`, clamped to the binary. An empty
             // needle is found where the search starts.
@@ -856,7 +883,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                 };
                 match found {
                     Some(at) => {
-                        let at = bigint::int(&mut self.heap, at).map_err(full)?;
+                        let at = bigint::int(&mut self.heap, at).map_err(fault)?;
                         self.some(at)
                     }
                     None => Ok(Value::nullary(self.code.abi.none)),
@@ -877,7 +904,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                 };
                 match n {
                     Some(n) => {
-                        let n = bigint::value(&mut self.heap, n).map_err(full)?;
+                        let n = bigint::value(&mut self.heap, n).map_err(fault)?;
                         self.some(n)
                     }
                     None => Ok(Value::nullary(self.code.abi.none)),
@@ -892,7 +919,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                 let mut bytes = binary::whole_bytes(&self.heap, self.binary(v)?);
                 bytes.make_ascii_lowercase();
                 Ok(Value::cell(
-                    binary::from_bytes(&mut self.heap, &bytes).map_err(full)?,
+                    binary::from_bytes(&mut self.heap, &bytes).map_err(fault)?,
                 ))
             }
             // This writes lowercase hex, with a `-` before a negative
@@ -904,7 +931,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                 };
                 let text = n.to_str_radix(self.radix(arg(self, 1))?);
                 let cell = binary::from_bytes(&mut self.heap, text.as_bytes());
-                Ok(Value::cell(cell.map_err(full)?))
+                Ok(Value::cell(cell.map_err(fault)?))
             }
             // A negative bound, or one past the end, is `Err(Nil)`, never a
             // short read (`binary.sca`).
@@ -921,7 +948,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                 };
                 match window {
                     Some((at, take)) => {
-                        let cut = binary::slice(&mut self.heap, b, at, take).map_err(full)?;
+                        let cut = binary::slice(&mut self.heap, b, at, take).map_err(fault)?;
                         self.ok(Value::cell(cut))
                     }
                     None => self.err_nil(),
@@ -930,7 +957,7 @@ impl<'c, 'h> Machine<'c, 'h> {
             Intrinsic::StringInspect => {
                 let mut text = Vec::new();
                 self.show(v, &mut text)?;
-                Ok(Value::cell(self.heap.string(&text).map_err(full)?))
+                Ok(Value::cell(self.heap.string(&text).map_err(fault)?))
             }
             // Adjacent delimiters give empty pieces, and an empty `on` gives
             // one piece per Unicode scalar value (`string.sca`).
@@ -951,7 +978,7 @@ impl<'c, 'h> Machine<'c, 'h> {
             Intrinsic::StringTrim => {
                 let s = self.utf8_of(v)?;
                 Ok(Value::cell(
-                    self.heap.string(s.trim().as_bytes()).map_err(full)?,
+                    self.heap.string(s.trim().as_bytes()).map_err(fault)?,
                 ))
             }
             Intrinsic::StringToGraphemes => {
@@ -976,7 +1003,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                 };
                 match n {
                     Some(n) => {
-                        let n = bigint::value(&mut self.heap, n).map_err(full)?;
+                        let n = bigint::value(&mut self.heap, n).map_err(fault)?;
                         self.some(n)
                     }
                     None => Ok(Value::nullary(self.code.abi.none)),
@@ -993,7 +1020,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                         Intrinsic::IntBitwiseOr => a | b,
                         _ => a ^ b,
                     };
-                    return bigint::int(&mut self.heap, n).map_err(full);
+                    return bigint::int(&mut self.heap, n).map_err(fault);
                 }
                 let (a, b) = (a.big(), b.big());
                 let n = match i {
@@ -1001,11 +1028,11 @@ impl<'c, 'h> Machine<'c, 'h> {
                     Intrinsic::IntBitwiseOr => a | b,
                     _ => a ^ b,
                 };
-                bigint::value(&mut self.heap, n).map_err(full)
+                bigint::value(&mut self.heap, n).map_err(fault)
             }
             Intrinsic::IntBitwiseNot => match self.int_of(v)? {
-                Int::Small(n) => bigint::int(&mut self.heap, !n).map_err(full),
-                Int::Big(n) => bigint::value(&mut self.heap, !n).map_err(full),
+                Int::Small(n) => bigint::int(&mut self.heap, !n).map_err(fault),
+                Int::Big(n) => bigint::value(&mut self.heap, !n).map_err(fault),
             },
             // A negative count shifts the other way.
             Intrinsic::IntBitwiseShiftLeft | Intrinsic::IntBitwiseShiftRight => {
@@ -1013,7 +1040,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                 let count = self.int_of(arg(self, 1))?.big();
                 let left = (i == Intrinsic::IntBitwiseShiftLeft) != (count.sign() == Sign::Minus);
                 let n = shift(x, left, &count.magnitude().clone().into())?;
-                bigint::value(&mut self.heap, n).map_err(full)
+                bigint::value(&mut self.heap, n).map_err(fault)
             }
             Intrinsic::StringLength => {
                 let Some(cell) = v.as_cell().filter(|_| self.is_string(v)) else {
@@ -1027,11 +1054,11 @@ impl<'c, 'h> Machine<'c, 'h> {
                         return Err(Stop::broken(Broken::NotUtf8));
                     }
                 };
-                bigint::int(&mut self.heap, n).map_err(full)
+                bigint::int(&mut self.heap, n).map_err(fault)
             }
             Intrinsic::ArrayLength => {
                 let n = self.seq(v)?.len(&self.heap);
-                bigint::int(&mut self.heap, n).map_err(full)
+                bigint::int(&mut self.heap, n).map_err(fault)
             }
             // A wait too long for a `u64` of milliseconds is still one nobody
             // outlives, so it waits that long instead.
@@ -1048,11 +1075,11 @@ impl<'c, 'h> Machine<'c, 'h> {
             }
             Intrinsic::TimeMonotonic => {
                 let ms = self.host.monotonic_ms();
-                bigint::int(&mut self.heap, ms).map_err(full)
+                bigint::int(&mut self.heap, ms).map_err(fault)
             }
             Intrinsic::TimeEpochMs => {
                 let ms = self.host.epoch_ms();
-                bigint::int(&mut self.heap, ms).map_err(full)
+                bigint::int(&mut self.heap, ms).map_err(fault)
             }
             // We never give zeros or anything else in place of bytes the host
             // did not give.
@@ -1071,7 +1098,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                 if self.host.random_bytes(&mut bytes).is_err() {
                     return self.err_nil();
                 }
-                let cell = binary::from_bytes(&mut self.heap, &bytes).map_err(full)?;
+                let cell = binary::from_bytes(&mut self.heap, &bytes).map_err(fault)?;
                 self.ok(Value::cell(cell))
             }
             // The digests and the tag are over bytes. A binary that is not
@@ -1148,23 +1175,23 @@ impl<'c, 'h> Machine<'c, 'h> {
                 match parsed {
                     Ok((tape, arena)) => {
                         let arena = binary::from_bytes(&mut self.heap, &arena);
-                        let arena = Value::cell(arena.map_err(full)?);
+                        let arena = Value::cell(arena.map_err(fault)?);
                         let tape = binary::from_bytes(&mut self.heap, &tape);
-                        let tape = Value::cell(tape.map_err(full)?);
+                        let tape = Value::cell(tape.map_err(fault)?);
                         let root = Value::int(0).unwrap_or(Value::NIL);
                         let doc = self
                             .heap
                             .ctor(types.doc, &[arena, tape, root])
-                            .map_err(full)?;
+                            .map_err(fault)?;
                         self.ok(Value::cell(doc))
                     }
                     Err(e) => {
-                        let offset = bigint::int(&mut self.heap, e.offset).map_err(full)?;
+                        let offset = bigint::int(&mut self.heap, e.offset).map_err(fault)?;
                         let reason = Value::nullary(e.reason.variant(&types.reasons));
                         let error = self
                             .heap
                             .ctor(types.parse_error, &[offset, reason])
-                            .map_err(full)?;
+                            .map_err(fault)?;
                         self.err(Value::cell(error))
                     }
                 }
@@ -1178,7 +1205,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                     Intrinsic::JsonKind => t.kind(d.idx),
                     _ => t.len(d.idx).and_then(|n| i64::try_from(n).ok()),
                 };
-                bigint::int(&mut self.heap, n.unwrap_or(-1)).map_err(full)
+                bigint::int(&mut self.heap, n.unwrap_or(-1)).map_err(fault)
             }
             Intrinsic::JsonField | Intrinsic::JsonIndex => {
                 let d = self.doc(v)?;
@@ -1208,12 +1235,12 @@ impl<'c, 'h> Machine<'c, 'h> {
                 let members = self.tape(&d)?.members(d.idx).unwrap_or_default();
                 let mut items = Vec::with_capacity(members.len());
                 for (key, at) in members {
-                    let key = Value::cell(self.heap.string(&key).map_err(full)?);
+                    let key = Value::cell(self.heap.string(&key).map_err(fault)?);
                     let doc = self.doc_at(&d, at)?;
-                    items.push(Value::cell(self.heap.tuple(&[key, doc]).map_err(full)?));
+                    items.push(Value::cell(self.heap.tuple(&[key, doc]).map_err(fault)?));
                 }
                 Ok(Value::cell(
-                    array::from_values(&mut self.heap, &items).map_err(full)?,
+                    array::from_values(&mut self.heap, &items).map_err(fault)?,
                 ))
             }
             Intrinsic::JsonElements => {
@@ -1224,7 +1251,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                     items.push(self.doc_at(&d, at)?);
                 }
                 Ok(Value::cell(
-                    array::from_values(&mut self.heap, &items).map_err(full)?,
+                    array::from_values(&mut self.heap, &items).map_err(fault)?,
                 ))
             }
             Intrinsic::JsonString => {
@@ -1232,7 +1259,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                 let text = self.tape(&d)?.string(d.idx);
                 match text.filter(|t| std::str::from_utf8(t).is_ok()) {
                     Some(t) => {
-                        let s = Value::cell(self.heap.string(&t).map_err(full)?);
+                        let s = Value::cell(self.heap.string(&t).map_err(fault)?);
                         self.some(s)
                     }
                     None => Ok(Value::nullary(self.code.abi.none)),
@@ -1243,9 +1270,11 @@ impl<'c, 'h> Machine<'c, 'h> {
                 match self.tape(&d)?.int(d.idx) {
                     Some(n) => {
                         let found = match i {
-                            Intrinsic::JsonInt => bigint::value(&mut self.heap, n).map_err(full)?,
+                            Intrinsic::JsonInt => {
+                                bigint::value(&mut self.heap, n).map_err(fault)?
+                            }
                             _ => Value::cell(
-                                self.heap.string(n.to_string().as_bytes()).map_err(full)?,
+                                self.heap.string(n.to_string().as_bytes()).map_err(fault)?,
                             ),
                         };
                         self.some(found)
@@ -1269,7 +1298,7 @@ impl<'c, 'h> Machine<'c, 'h> {
             }
             Intrinsic::JsonEncode => {
                 let text = self.encode_json(v)?;
-                Ok(Value::cell(self.heap.string(&text).map_err(full)?))
+                Ok(Value::cell(self.heap.string(&text).map_err(fault)?))
             }
             Intrinsic::HttpParseHead | Intrinsic::HttpParseResponseHead => {
                 let buf = self.binary(v)?;
@@ -1311,9 +1340,9 @@ impl<'c, 'h> Machine<'c, 'h> {
                     http::Framing::NoBody => Ok(Value::nullary(types.no_body)),
                     http::Framing::Chunked => Ok(Value::nullary(types.chunked)),
                     http::Framing::Length(n) => {
-                        let n = bigint::int(&mut self.heap, n).map_err(full)?;
+                        let n = bigint::int(&mut self.heap, n).map_err(fault)?;
                         Ok(Value::cell(
-                            self.heap.ctor(types.length, &[n]).map_err(full)?,
+                            self.heap.ctor(types.length, &[n]).map_err(fault)?,
                         ))
                     }
                     http::Framing::Invalid(r) => self.with_status(types.framing_invalid, r),
@@ -1365,7 +1394,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                     out.extend_from_slice(b"\r\n");
                 }
                 out.extend_from_slice(b"\r\n");
-                let cell = binary::from_bytes(&mut self.heap, &out).map_err(full)?;
+                let cell = binary::from_bytes(&mut self.heap, &out).map_err(fault)?;
                 Ok(Value::cell(cell))
             }
             Intrinsic::IoReadFile => {
@@ -1373,7 +1402,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                 match self.host.read_file(&path) {
                     Ok(bytes) if bytes.len() > binary::MAX_BYTES => Err(Stop::HeapFull),
                     Ok(bytes) => {
-                        let cell = binary::from_bytes(&mut self.heap, &bytes).map_err(full)?;
+                        let cell = binary::from_bytes(&mut self.heap, &bytes).map_err(fault)?;
                         self.ok(Value::cell(cell))
                     }
                     Err(e) => self.io_error(e, &path),
@@ -1395,17 +1424,17 @@ impl<'c, 'h> Machine<'c, 'h> {
             Intrinsic::OsArgv => {
                 let mut items = Vec::with_capacity(self.host.argv().len());
                 for a in self.host.argv() {
-                    items.push(Value::cell(self.heap.string(a.as_bytes()).map_err(full)?));
+                    items.push(Value::cell(self.heap.string(a.as_bytes()).map_err(fault)?));
                 }
                 Ok(Value::cell(
-                    array::from_values(&mut self.heap, &items).map_err(full)?,
+                    array::from_values(&mut self.heap, &items).map_err(fault)?,
                 ))
             }
             Intrinsic::OsEnv => {
                 let env = match self.env {
                     Some(env) => env,
                     None => {
-                        let env = self.env_map().map_err(full)?;
+                        let env = self.env_map().map_err(fault)?;
                         self.env = Some(env);
                         env
                     }
@@ -1415,23 +1444,23 @@ impl<'c, 'h> Machine<'c, 'h> {
             }
             Intrinsic::OsTerminalSize => match self.host.terminal_size() {
                 Some((cols, rows)) => {
-                    let cols = bigint::int(&mut self.heap, cols).map_err(full)?;
-                    let rows = bigint::int(&mut self.heap, rows).map_err(full)?;
-                    let size = self.heap.tuple(&[cols, rows]).map_err(full)?;
+                    let cols = bigint::int(&mut self.heap, cols).map_err(fault)?;
+                    let rows = bigint::int(&mut self.heap, rows).map_err(fault)?;
+                    let size = self.heap.tuple(&[cols, rows]).map_err(fault)?;
                     self.ok(Value::cell(size))
                 }
                 None => self.err_nil(),
             },
-            Intrinsic::MapNew => Ok(Value::cell(map::empty(&mut self.heap).map_err(full)?)),
+            Intrinsic::MapNew => Ok(Value::cell(map::empty(&mut self.heap).map_err(fault)?)),
             Intrinsic::MapSet => {
                 let m = self.map(v)?;
                 let (key, value) = (arg(self, 1), arg(self, 2));
-                let cell = map::set(&mut self.heap, m, key, value).map_err(full)?;
+                let cell = map::set(&mut self.heap, m, key, value).map_err(fault)?;
                 Ok(Value::cell(cell))
             }
             Intrinsic::MapDelete => {
                 let (m, key) = (self.map(v)?, arg(self, 1));
-                let cell = map::delete(&mut self.heap, m, key).map_err(full)?;
+                let cell = map::delete(&mut self.heap, m, key).map_err(fault)?;
                 Ok(Value::cell(cell))
             }
             Intrinsic::MapGet => {
@@ -1450,7 +1479,7 @@ impl<'c, 'h> Machine<'c, 'h> {
             }
             Intrinsic::MapSize => {
                 let n = map::size(&self.heap, self.map(v)?);
-                bigint::int(&mut self.heap, n).map_err(full)
+                bigint::int(&mut self.heap, n).map_err(fault)
             }
             Intrinsic::MapKeys | Intrinsic::MapValues | Intrinsic::MapToList => {
                 let entries = map::entries(&self.heap, self.map(v)?);
@@ -1461,13 +1490,13 @@ impl<'c, 'h> Machine<'c, 'h> {
                         Intrinsic::MapValues => self.share(v),
                         _ => {
                             let pair = [self.share(k), self.share(v)];
-                            Value::cell(self.heap.tuple(&pair).map_err(full)?)
+                            Value::cell(self.heap.tuple(&pair).map_err(fault)?)
                         }
                     };
                     items.push(item);
                 }
                 Ok(Value::cell(
-                    array::from_values(&mut self.heap, &items).map_err(full)?,
+                    array::from_values(&mut self.heap, &items).map_err(fault)?,
                 ))
             }
             Intrinsic::FloatFloor
@@ -1488,10 +1517,10 @@ impl<'c, 'h> Machine<'c, 'h> {
                         reason = "`whole` is a whole number inside i64's range, so it converts exactly"
                     )]
                     let exact = whole as i64;
-                    return bigint::int(&mut self.heap, exact).map_err(full);
+                    return bigint::int(&mut self.heap, exact).map_err(fault);
                 }
                 let n = num_bigint::BigInt::from_f64(whole).unwrap_or_default();
-                bigint::value(&mut self.heap, n).map_err(full)
+                bigint::value(&mut self.heap, n).map_err(fault)
             }
             Intrinsic::FloatFromInt => {
                 let f = match self.int_of(v)? {
@@ -1520,13 +1549,13 @@ impl<'c, 'h> Machine<'c, 'h> {
             Intrinsic::FloatToString => {
                 let text = float::text(self.float_of(v)?);
                 Ok(Value::cell(
-                    self.heap.string(text.as_bytes()).map_err(full)?,
+                    self.heap.string(text.as_bytes()).map_err(fault)?,
                 ))
             }
             Intrinsic::IntToString => {
                 let text = self.int_of(v)?.to_string();
                 Ok(Value::cell(
-                    self.heap.string(text.as_bytes()).map_err(full)?,
+                    self.heap.string(text.as_bytes()).map_err(fault)?,
                 ))
             }
             Intrinsic::AddressParse
@@ -1571,32 +1600,32 @@ impl<'c, 'h> Machine<'c, 'h> {
                 }
                 let bytes = binary::from_int(&n, width);
                 Ok(Value::cell(
-                    binary::make(&mut self.heap, &bytes, width).map_err(full)?,
+                    binary::make(&mut self.heap, &bytes, width).map_err(fault)?,
                 ))
             }
             BitsOp::Take => {
                 let b = self.binary(arg(self, 0))?;
                 let take = self.width(arg(self, 1))?.min(b.len);
                 Ok(Value::cell(
-                    binary::slice(&mut self.heap, b, 0, take).map_err(full)?,
+                    binary::slice(&mut self.heap, b, 0, take).map_err(fault)?,
                 ))
             }
             BitsOp::FromString => {
                 let text = self.text_of(arg(self, 0))?;
                 let cell = binary::from_bytes(&mut self.heap, &text);
-                Ok(Value::cell(cell.map_err(full)?))
+                Ok(Value::cell(cell.map_err(fault)?))
             }
             BitsOp::Concat => {
                 let parts = (0..args.len())
                     .map(|k| self.binary(arg(self, k)))
                     .collect::<Result<Vec<Bits>, Stop>>()?;
                 Ok(Value::cell(
-                    binary::join(&mut self.heap, &parts).map_err(full)?,
+                    binary::join(&mut self.heap, &parts).map_err(fault)?,
                 ))
             }
             BitsOp::BitSize => {
                 let n = self.binary(arg(self, 0))?.len;
-                bigint::int(&mut self.heap, n).map_err(full)
+                bigint::int(&mut self.heap, n).map_err(fault)
             }
             BitsOp::View => {
                 let b = self.binary(arg(self, 0))?;
@@ -1609,7 +1638,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                     }));
                 }
                 Ok(Value::cell(
-                    binary::slice(&mut self.heap, b, at, len).map_err(full)?,
+                    binary::slice(&mut self.heap, b, at, len).map_err(fault)?,
                 ))
             }
             BitsOp::MatchPrefix => {
@@ -1628,7 +1657,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                 let [Some(cp), Some(took)] = pair else {
                     return Err(Stop::broken(Broken::CodePointTooBig));
                 };
-                Ok(Value::cell(self.heap.tuple(&[cp, took]).map_err(full)?))
+                Ok(Value::cell(self.heap.tuple(&[cp, took]).map_err(fault)?))
             }
             BitsOp::ReadInt => {
                 let b = self.binary(arg(self, 0))?;
@@ -1641,7 +1670,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                     }));
                 }
                 let n = binary::read_uint(&self.heap, b, at, width);
-                bigint::value(&mut self.heap, n).map_err(full)
+                bigint::value(&mut self.heap, n).map_err(fault)
             }
         }
     }
@@ -1673,10 +1702,10 @@ impl<'c, 'h> Machine<'c, 'h> {
     fn strings(&mut self, pieces: &[String]) -> Result<Value, Stop> {
         let mut items = Vec::with_capacity(pieces.len());
         for p in pieces {
-            items.push(Value::cell(self.heap.string(p.as_bytes()).map_err(full)?));
+            items.push(Value::cell(self.heap.string(p.as_bytes()).map_err(fault)?));
         }
         Ok(Value::cell(
-            array::from_values(&mut self.heap, &items).map_err(full)?,
+            array::from_values(&mut self.heap, &items).map_err(fault)?,
         ))
     }
 
@@ -1704,19 +1733,19 @@ impl<'c, 'h> Machine<'c, 'h> {
 
     /// `Some(v)`, holding `v`'s reference.
     fn some(&mut self, v: Value) -> Result<Value, Stop> {
-        let cell = self.heap.ctor(self.code.abi.some, &[v]).map_err(full)?;
+        let cell = self.heap.ctor(self.code.abi.some, &[v]).map_err(fault)?;
         Ok(Value::cell(cell))
     }
 
     /// `Ok(v)`, holding `v`'s reference.
     fn ok(&mut self, v: Value) -> Result<Value, Stop> {
-        let cell = self.heap.ctor(self.code.abi.ok, &[v]).map_err(full)?;
+        let cell = self.heap.ctor(self.code.abi.ok, &[v]).map_err(fault)?;
         Ok(Value::cell(cell))
     }
 
     /// `Err(v)`, holding `v`'s reference.
     fn err(&mut self, v: Value) -> Result<Value, Stop> {
-        let cell = self.heap.ctor(self.code.abi.err, &[v]).map_err(full)?;
+        let cell = self.heap.ctor(self.code.abi.err, &[v]).map_err(fault)?;
         Ok(Value::cell(cell))
     }
 
@@ -1724,13 +1753,13 @@ impl<'c, 'h> Machine<'c, 'h> {
         let cell = self
             .heap
             .ctor(self.code.abi.err, &[Value::NIL])
-            .map_err(full)?;
+            .map_err(fault)?;
         Ok(Value::cell(cell))
     }
 
     /// The environment as a map. When a name is listed twice, the first
     /// wins, as it does for the OS's own `getenv`.
-    fn env_map(&mut self) -> Result<Cell, Full> {
+    fn env_map(&mut self) -> Result<Cell, Fault> {
         let heap = &mut self.heap;
         let mut env = map::empty(heap)?;
         for (name, value) in self.host.env() {
@@ -1740,12 +1769,12 @@ impl<'c, 'h> Machine<'c, 'h> {
             } else {
                 let v = heap.string(value.as_bytes())?;
                 let next = map::set(heap, env, Value::cell(k), Value::cell(v))?;
-                heap.release(v);
+                heap.release(v)?;
                 Some(next)
             };
-            heap.release(k);
+            heap.release(k)?;
             if let Some(next) = next {
-                heap.release(env);
+                heap.release(env)?;
                 env = next;
             }
         }
@@ -1771,13 +1800,13 @@ impl<'c, 'h> Machine<'c, 'h> {
             IoError::StorageFull => return self.err(Value::nullary(io.storage_full)),
             IoError::QuotaExceeded => return self.err(Value::nullary(io.quota_exceeded)),
             IoError::Errno(code) => {
-                let code = bigint::int(&mut self.heap, code).map_err(full)?;
-                let error = Value::cell(self.heap.ctor(io.errno, &[code]).map_err(full)?);
+                let code = bigint::int(&mut self.heap, code).map_err(fault)?;
+                let error = Value::cell(self.heap.ctor(io.errno, &[code]).map_err(fault)?);
                 return self.err(error);
             }
         };
-        let path = Value::cell(self.heap.string(path).map_err(full)?);
-        let error = Value::cell(self.heap.ctor(about_path, &[path]).map_err(full)?);
+        let path = Value::cell(self.heap.string(path).map_err(fault)?);
+        let error = Value::cell(self.heap.ctor(about_path, &[path]).map_err(fault)?);
         self.err(error)
     }
 
@@ -1816,12 +1845,12 @@ impl<'c, 'h> Machine<'c, 'h> {
     /// A `Doc` over the same document as `d`, at node `idx`.
     fn doc_at(&mut self, d: &Doc, idx: usize) -> Result<Value, Stop> {
         let types = self.json_types()?;
-        let idx = bigint::int(&mut self.heap, idx).map_err(full)?;
+        let idx = bigint::int(&mut self.heap, idx).map_err(fault)?;
         let (arena, tape) = (self.share(d.arena), self.share(d.tape));
         let cell = self
             .heap
             .ctor(types.doc, &[arena, tape, idx])
-            .map_err(full)?;
+            .map_err(fault)?;
         Ok(Value::cell(cell))
     }
 
@@ -1978,7 +2007,7 @@ impl<'c, 'h> Machine<'c, 'h> {
         let bits = |n: Option<usize>| n.and_then(binary::bit_len).ok_or(Stop::HeapFull);
         let from = bits(off.checked_add(range.start))?;
         let len = bits(Some(range.len()))?;
-        let cell = binary::slice(&mut self.heap, buf, from, len).map_err(full)?;
+        let cell = binary::slice(&mut self.heap, buf, from, len).map_err(fault)?;
         Ok(Value::cell(cell))
     }
 
@@ -1990,11 +2019,13 @@ impl<'c, 'h> Machine<'c, 'h> {
             let name = self.view(buf, off, &f.name)?;
             let value = self.view(buf, off, &f.value)?;
             items.push(Value::cell(
-                self.heap.ctor(types.header, &[name, value]).map_err(full)?,
+                self.heap
+                    .ctor(types.header, &[name, value])
+                    .map_err(fault)?,
             ));
         }
         Ok(Value::cell(
-            array::from_values(&mut self.heap, &items).map_err(full)?,
+            array::from_values(&mut self.heap, &items).map_err(fault)?,
         ))
     }
 
@@ -2009,7 +2040,7 @@ impl<'c, 'h> Machine<'c, 'h> {
         };
         let fields = [Value::nullary(conn), Value::bool(flags.expect_100_continue)];
         Ok(Value::cell(
-            self.heap.ctor(types.head_flags, &fields).map_err(full)?,
+            self.heap.ctor(types.head_flags, &fields).map_err(fault)?,
         ))
     }
 
@@ -2018,14 +2049,14 @@ impl<'c, 'h> Machine<'c, 'h> {
     fn with_status(&mut self, variant: VariantRef, r: http::Reject) -> Result<Value, Stop> {
         let status = Value::int(r as i64).unwrap_or(Value::NIL);
         Ok(Value::cell(
-            self.heap.ctor(variant, &[status]).map_err(full)?,
+            self.heap.ctor(variant, &[status]).map_err(fault)?,
         ))
     }
 
     /// The offset `off + n` into `buf`, as an Int.
     fn consumed(&mut self, off: usize, n: usize) -> Result<Value, Stop> {
         // Both are offsets into one buffer, so their sum is exact.
-        bigint::int(&mut self.heap, off.saturating_add(n)).map_err(full)
+        bigint::int(&mut self.heap, off.saturating_add(n)).map_err(fault)
     }
 
     /// `h1.Parsed`, for the request head at byte `off` of `buf`, whose bytes
@@ -2049,7 +2080,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                 let consumed = self.consumed(off, head.end)?;
                 let fields = [method, target, version, headers, flags, consumed];
                 Ok(Value::cell(
-                    self.heap.ctor(types.parsed_done, &fields).map_err(full)?,
+                    self.heap.ctor(types.parsed_done, &fields).map_err(fault)?,
                 ))
             }
         }
@@ -2069,7 +2100,7 @@ impl<'c, 'h> Machine<'c, 'h> {
             http::Response::Bad(why) => {
                 let why = Value::nullary(bad(why));
                 Ok(Value::cell(
-                    self.heap.ctor(types.response_bad, &[why]).map_err(full)?,
+                    self.heap.ctor(types.response_bad, &[why]).map_err(fault)?,
                 ))
             }
             http::Response::Done {
@@ -2086,7 +2117,9 @@ impl<'c, 'h> Machine<'c, 'h> {
                 let consumed = self.consumed(off, head.end)?;
                 let fields = [version, code, reason, headers, flags, consumed];
                 Ok(Value::cell(
-                    self.heap.ctor(types.response_done, &fields).map_err(full)?,
+                    self.heap
+                        .ctor(types.response_done, &fields)
+                        .map_err(fault)?,
                 ))
             }
         }
@@ -2106,12 +2139,12 @@ impl<'c, 'h> Machine<'c, 'h> {
                     body.extend_from_slice(bytes.get(p.clone()).unwrap_or(&[]));
                 }
                 let body = binary::from_bytes(&mut self.heap, &body);
-                let body = Value::cell(body.map_err(full)?);
+                let body = Value::cell(body.map_err(fault)?);
                 let trailer_fields = self.fields(buf, off, &trailers)?;
                 let consumed = self.consumed(off, trailers.end)?;
                 let fields = [body, trailer_fields, consumed];
                 Ok(Value::cell(
-                    self.heap.ctor(types.chunked_done, &fields).map_err(full)?,
+                    self.heap.ctor(types.chunked_done, &fields).map_err(fault)?,
                 ))
             }
         }
@@ -2125,7 +2158,7 @@ impl<'c, 'h> Machine<'c, 'h> {
 
     /// `Ok` of a new binary holding `bytes`.
     fn ok_bytes(&mut self, bytes: &[u8]) -> Result<Value, Stop> {
-        let cell = binary::from_bytes(&mut self.heap, bytes).map_err(full)?;
+        let cell = binary::from_bytes(&mut self.heap, bytes).map_err(fault)?;
         self.ok(Value::cell(cell))
     }
 
@@ -2153,7 +2186,7 @@ impl<'c, 'h> Machine<'c, 'h> {
             Seq::Range { start, end } if (i as u64) < array::range_len(start, end) => {
                 // An i128 holds any i64 plus any index, so this is exact.
                 let n = i128::from(start).saturating_add(i as i128);
-                Ok(Some(bigint::int(&mut self.heap, n).map_err(full)?))
+                Ok(Some(bigint::int(&mut self.heap, n).map_err(fault)?))
             }
             Seq::Range { .. } => Ok(None),
         }
@@ -2171,9 +2204,9 @@ impl<'c, 'h> Machine<'c, 'h> {
             Seq::Range { start, end } => {
                 let mut items = Vec::new();
                 for n in start..end.max(start) {
-                    items.push(bigint::int(&mut self.heap, n).map_err(full)?);
+                    items.push(bigint::int(&mut self.heap, n).map_err(fault)?);
                 }
-                array::from_values(&mut self.heap, &items).map_err(full)
+                array::from_values(&mut self.heap, &items).map_err(fault)
             }
         }
     }
@@ -2237,7 +2270,7 @@ impl<'c, 'h> Machine<'c, 'h> {
     ) -> Result<crate::heap::Cell, Stop> {
         let mut cur = a;
         for x in items {
-            cur = array::push_owned(&mut self.heap, cur, x, end).map_err(full)?;
+            cur = array::push_owned(&mut self.heap, cur, x, end).map_err(fault)?;
         }
         Ok(cur)
     }
@@ -2319,8 +2352,14 @@ impl<'c, 'h> Machine<'c, 'h> {
     /// `base`, and pass it `args` from the caller's registers. The frames do
     /// not overlap, so each argument goes straight into its parameter, read
     /// in order as [`Self::call_args`] reads them.
-    fn enter_above(&mut self, base: usize, args: &[Arg], body: &Body, new_base: usize) {
-        self.leave(new_base);
+    fn enter_above(
+        &mut self,
+        base: usize,
+        args: &[Arg],
+        body: &Body,
+        new_base: usize,
+    ) -> Result<(), DeadCell> {
+        self.leave(new_base)?;
         self.open(frame_end(new_base, body));
         for (param, a) in body.params.iter().zip(args) {
             let v = if a.moved {
@@ -2328,32 +2367,35 @@ impl<'c, 'h> Machine<'c, 'h> {
             } else {
                 self.share(self.get(base, a.reg))
             };
-            self.set(new_base, *param, v);
+            self.set(new_base, *param, v)?;
         }
+        Ok(())
     }
 
     /// Give `body` a fresh frame at `base`, with `args` in its parameters.
     /// Whatever held registers from `base` on is released first.
-    fn enter(&mut self, body: &Body, base: usize, args: &[Value]) {
-        self.leave(base);
+    fn enter(&mut self, body: &Body, base: usize, args: &[Value]) -> Result<(), DeadCell> {
+        self.leave(base)?;
         self.open(frame_end(base, body));
         for (param, arg) in body.params.iter().zip(args) {
-            self.set(base, *param, *arg);
+            self.set(base, *param, *arg)?;
         }
+        Ok(())
     }
 
     /// Release every live register from `base` on, leaving each `Nil`.
     /// They are released from the top down, the order frames end in.
-    fn leave(&mut self, base: usize) {
+    fn leave(&mut self, base: usize) -> Result<(), DeadCell> {
         if let Some(live) = self.regs.get_mut(base..self.top) {
             for slot in live.iter_mut().rev() {
                 let old = std::mem::replace(slot, Value::NIL);
                 if let Some(cell) = old.as_cell() {
-                    self.heap.release(cell);
+                    self.heap.release(cell)?;
                 }
             }
         }
         self.top = self.top.min(base);
+        Ok(())
     }
 
     /// Make the registers up to `end` live. Every register past `top` is
@@ -2372,10 +2414,10 @@ impl<'c, 'h> Machine<'c, 'h> {
     /// gave up. Each is the only reference to a cell holding nothing, and the
     /// register still owns it. So a cell the loop never takes is freed when
     /// the frame really ends.
-    fn again(&mut self, body: &Body, base: usize, args: &[Value]) {
+    fn again(&mut self, body: &Body, base: usize, args: &[Value]) -> Result<(), DeadCell> {
         let end = frame_end(base, body);
         if self.top != end {
-            self.leave(end);
+            self.leave(end)?;
             self.open(end);
         }
         let frame = self.regs.get_mut(base..end).unwrap_or_default();
@@ -2385,7 +2427,7 @@ impl<'c, 'h> Machine<'c, 'h> {
             for slot in frame.iter_mut() {
                 let old = std::mem::replace(slot, Value::NIL);
                 if let Some(cell) = old.as_cell() {
-                    self.heap.release(cell);
+                    self.heap.release(cell)?;
                 }
             }
             for (param, arg) in body.params.iter().zip(args) {
@@ -2393,19 +2435,20 @@ impl<'c, 'h> Machine<'c, 'h> {
                     *slot = *arg;
                 }
             }
-            return;
+            return Ok(());
         }
         for (r, slot) in (0..).map(Reg).zip(frame.iter_mut()) {
             if !body.carried.contains(&r) {
                 let old = std::mem::replace(slot, Value::NIL);
                 if let Some(cell) = old.as_cell() {
-                    self.heap.release(cell);
+                    self.heap.release(cell)?;
                 }
             }
         }
         for (param, arg) in body.params.iter().zip(args) {
-            self.set(base, *param, *arg);
+            self.set(base, *param, *arg)?;
         }
+        Ok(())
     }
 
     fn get(&self, base: usize, r: Reg) -> Value {
@@ -2414,10 +2457,13 @@ impl<'c, 'h> Machine<'c, 'h> {
 
     /// Put `v` in register `r`, whose old value is released. `v`'s reference
     /// passes to the register.
-    fn set(&mut self, base: usize, r: Reg, v: Value) {
-        if let Some(slot) = self.regs.get_mut(at(base, r)) {
-            let old = std::mem::replace(slot, v);
-            self.release(old);
+    fn set(&mut self, base: usize, r: Reg, v: Value) -> Result<(), DeadCell> {
+        match self.regs.get_mut(at(base, r)) {
+            Some(slot) => {
+                let old = std::mem::replace(slot, v);
+                self.release(old)
+            }
+            None => Ok(()),
         }
     }
 
@@ -2438,9 +2484,10 @@ impl<'c, 'h> Machine<'c, 'h> {
         v
     }
 
-    fn release(&mut self, v: Value) {
-        if let Some(cell) = v.as_cell() {
-            self.heap.release(cell);
+    fn release(&mut self, v: Value) -> Result<(), DeadCell> {
+        match v.as_cell() {
+            Some(cell) => self.heap.release(cell),
+            None => Ok(()),
         }
     }
 
@@ -2506,7 +2553,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                     self.heap.read_string(cell, &mut text);
                 }
             }
-            return Ok(Value::cell(self.heap.string(&text).map_err(full)?));
+            return Ok(Value::cell(self.heap.string(&text).map_err(fault)?));
         }
         let int = match op {
             NumOp::Add => IntOp::Add,
@@ -2533,10 +2580,10 @@ impl<'c, 'h> Machine<'c, 'h> {
         if let (Some(a), Some(b)) = (bigint::wide(&self.heap, x), bigint::wide(&self.heap, y))
             && let Some(v) = bigint::wide_op(&mut self.heap, op, a, b)
         {
-            return v.map_err(full);
+            return v.map_err(fault);
         }
         let (a, b) = (self.int_of(x)?, self.int_of(y)?);
-        bigint::op(&mut self.heap, op, a, b).map_err(full)
+        bigint::op(&mut self.heap, op, a, b).map_err(fault)
     }
 
     fn int_of(&self, v: Value) -> Result<Int, Stop> {
@@ -2560,34 +2607,70 @@ impl<'c, 'h> Machine<'c, 'h> {
         show::show(&self.heap, self.code, v, out)
     }
 
-    /// `v` as `println` shows it, or `None` for `Nil`. Gives up `v`'s
-    /// reference.
-    pub(crate) fn shown(&mut self, v: Value) -> Result<Option<String>, Stop> {
+    /// A finished run's last value as `println` shows it, or `None` for
+    /// `Nil`. Gives up the value's reference.
+    pub(crate) fn shown(&mut self, ended: Ended) -> Result<Option<String>, Stop> {
+        let v = ended.last;
         if v.bits() == Value::NIL.bits() {
             return Ok(None);
         }
         let mut text = Vec::new();
         let shown = self.show(v, &mut text);
-        self.release(v);
+        self.release(v)?;
         shown?;
         Ok(Some(String::from_utf8_lossy(&text).into_owned()))
     }
 
-    /// Cells not yet freed.
-    #[cfg(test)]
-    fn live(&self) -> usize {
-        self.heap.live()
-    }
-
-    /// Release every global, and `os.env`'s map, so a test can see that
-    /// nothing else is left.
-    #[cfg(test)]
-    fn release_globals(&mut self) {
+    /// Give up everything a finished run still holds: its result, every
+    /// global and `os.env`'s map. Nothing can run after this.
+    fn let_go(&mut self, ended: Ended) -> Result<(), DeadCell> {
+        self.release(ended.last)?;
         for v in std::mem::take(&mut self.globals) {
-            self.release(v);
+            self.release(v)?;
         }
         if let Some(env) = self.env.take() {
-            self.heap.release(env);
+            self.heap.release(env)?;
+        }
+        Ok(())
+    }
+
+    /// What a finished run of `counted` counted. This is the machine
+    /// [`Self::counting`] made for it. The run reached its end, so every
+    /// block that was entered ran to its last instruction, and each
+    /// instruction in it ran as often as the block did.
+    pub(crate) fn counts(&self, counted: &Counted, _: &Ended) -> Counts {
+        let mut ran = [0u64; Op::ALL.len()];
+        for (block, times) in counted.blocks.iter().zip(&self.ran) {
+            for op in block {
+                if let Some(n) = ran.get_mut(*op as usize) {
+                    *n = n.saturating_add(*times);
+                }
+            }
+        }
+        // A `Count` is the counting itself, and no part of the program.
+        let ops = Op::ALL.iter().zip(ran).filter(|(op, _)| **op != Op::Count);
+        Counts {
+            ops: ops.map(|(op, n)| (op.name(), n)).collect(),
+            cells_made: self.heap.made(),
+            cells_reused: self.heap.reused(),
+            cells_live: self.heap.live(),
+        }
+    }
+
+    /// End a finished run as `at_exit` asks. An audit lets go of everything
+    /// the run still holds. A cell still live after that is one reference
+    /// counting lost, and the run stops saying how many there are.
+    pub(crate) fn finish(&mut self, ended: Ended, at_exit: AtExit) -> Result<(), Stop> {
+        match at_exit {
+            AtExit::Leave => Ok(()),
+            AtExit::Audit => {
+                self.let_go(ended)?;
+                self.let_go_of_handles();
+                match self.heap.live() {
+                    0 => Ok(()),
+                    cells => Err(Stop::broken(Broken::CellsLeft { cells })),
+                }
+            }
         }
     }
 }
@@ -2665,8 +2748,11 @@ fn frame_end(base: usize, body: &Body) -> usize {
     base.saturating_add(body.regs as usize)
 }
 
-fn full(_: Full) -> Stop {
-    Stop::HeapFull
+fn fault(fault: Fault) -> Stop {
+    match fault {
+        Fault::Full => Stop::HeapFull,
+        Fault::DeadCell => Stop::broken(Broken::DeadCell),
+    }
 }
 
 #[cfg(test)]
@@ -2692,14 +2778,13 @@ mod tests {
         let code = crate::code::load(&program).expect("the program loads");
         let mut host = OsHost::new(argv, env, Vec::new());
         let mut m = Machine::new(&code, &mut host);
-        let last = m.run().expect("the program runs");
-        m.release(last);
-        m.release_globals();
+        let ended = m.run().expect("the program runs");
+        m.let_go(ended).expect("every count is right");
         assert!(
             m.top == 0 && m.regs.iter().all(|v| v.bits() == Value::NIL.bits()),
             "a frame's registers outlived it"
         );
-        let left = m.live();
+        let left = m.heap.live();
         drop(m);
         let out = std::mem::take(host.out());
         (String::from_utf8(out).expect("UTF-8"), left)
@@ -3108,5 +3193,109 @@ mod tests {
         );
         assert_eq!(out, "bee/x\nbee/x\naye/x\n");
         assert_eq!(left, 0);
+    }
+
+    /// Load `src`, run it, and hand the machine and the finished run to
+    /// `check`.
+    fn after_running(src: &str, check: impl FnOnce(&mut Machine<'_, '_>, Ended)) {
+        let result = scarlet_core::compile::compile_text(src, None);
+        assert!(result.success(), "{:?}", result.diagnostics());
+        let program = result.into_runnable().expect("a clean compile is runnable");
+        let code = crate::code::load(&program).expect("the program loads");
+        let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+        let mut m = Machine::new(&code, &mut host);
+        let ended = m.run().expect("the program runs");
+        check(&mut m, ended);
+    }
+
+    /// A program whose one global holds a cell when it ends.
+    const HOLDS_A_CELL: &str = "const kept = ['a', 'b']\npub fn main() {\n\tprintln(kept)\n}\n";
+
+    fn held_by_a_global(m: &Machine<'_, '_>) -> Cell {
+        m.globals
+            .iter()
+            .find_map(|v| v.as_cell())
+            .expect("a global holding a cell")
+    }
+
+    #[test]
+    fn an_audit_of_a_run_with_every_count_right_finds_nothing() {
+        after_running(HOLDS_A_CELL, |m, ended| {
+            assert!(m.heap.live() > 0, "the global still holds its array");
+            assert_eq!(m.finish(ended, AtExit::Audit), Ok(()));
+            assert_eq!(m.heap.live(), 0);
+        });
+    }
+
+    /// A run that is not audited ends well whatever its heap holds, and
+    /// lets go of nothing.
+    #[test]
+    fn a_run_that_is_not_audited_leaves_its_heap_alone() {
+        after_running(HOLDS_A_CELL, |m, ended| {
+            let cell = held_by_a_global(m);
+            m.heap.share(cell);
+            let live = m.heap.live();
+            assert_eq!(m.finish(ended, AtExit::Leave), Ok(()));
+            assert_eq!(m.heap.live(), live);
+        });
+    }
+
+    /// A count one too high means a cell nothing will ever free. The audit
+    /// says how many cells that left behind: the array, its leaf and the two
+    /// strings in it.
+    #[test]
+    fn an_audit_counts_the_cells_a_lost_release_left() {
+        after_running(HOLDS_A_CELL, |m, ended| {
+            let cell = held_by_a_global(m);
+            m.heap.share(cell);
+            assert_eq!(
+                m.finish(ended, AtExit::Audit),
+                Err(Stop::broken(Broken::CellsLeft { cells: 4 }))
+            );
+        });
+    }
+
+    /// A count one too low means a cell freed while something still holds
+    /// it. The audit stops at the holder that gives it up next.
+    #[test]
+    fn an_audit_stops_at_a_cell_released_once_too_often() {
+        after_running(HOLDS_A_CELL, |m, ended| {
+            let cell = held_by_a_global(m);
+            m.heap.release(cell).expect("the global's reference");
+            assert_eq!(
+                m.finish(ended, AtExit::Audit),
+                Err(Stop::broken(Broken::DeadCell))
+            );
+        });
+    }
+
+    /// A register that still names a cell after the cell was freed is found
+    /// when the register is written over, and when its frame ends.
+    #[test]
+    fn a_register_holding_a_freed_cell_stops_the_instruction_that_gives_it_up() {
+        after_running(HOLDS_A_CELL, |m, _| {
+            let cell = held_by_a_global(m);
+            m.heap.release(cell).expect("the global's reference");
+            let stale = Value::cell(cell);
+            m.open(1);
+            m.regs[0] = stale;
+            assert_eq!(m.set(0, Reg(0), Value::NIL), Err(DeadCell));
+            m.regs[0] = stale;
+            assert_eq!(m.leave(0), Err(DeadCell));
+            assert_eq!(Stop::from(DeadCell), Stop::broken(Broken::DeadCell));
+        });
+    }
+
+    /// The array and map code reports a freed cell as a heap fault, and
+    /// the run stops with it as a wrong count, not as a full heap.
+    #[test]
+    fn an_owned_push_onto_a_freed_array_stops_the_run_as_a_dead_cell() {
+        after_running(HOLDS_A_CELL, |m, _| {
+            let cell = held_by_a_global(m);
+            m.heap.release(cell).expect("the global's reference");
+            let pushed = array::push_owned(&mut m.heap, cell, Value::NIL, End::Back);
+            assert_eq!(pushed.map_err(fault), Err(Stop::broken(Broken::DeadCell)));
+            assert_eq!(fault(Fault::Full), Stop::HeapFull);
+        });
     }
 }
