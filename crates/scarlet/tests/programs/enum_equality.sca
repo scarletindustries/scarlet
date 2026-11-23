@@ -51,12 +51,12 @@ pub fn main() {
 	check('Int gte', True, 2 >= 2)
 	check('Float gt', True, 2.5 > 2.0)
 
-	// An Int has no bounds. Values past the 48-bit small-int range spill to a
+	// An Int has no bounds. Values past the 51-bit small-int range spill to a
 	// boxed representation, and past 64 bits to a bigger one; equality must see
 	// through both.
-	spilled = 140737488355327 + 1
-	check('boxed int equals literal', True, spilled == 140737488355328)
-	check('boxed int ne', True, spilled != 140737488355327)
+	spilled = 1125899906842623 + 1
+	check('boxed int equals literal', True, spilled == 1125899906842624)
+	check('boxed int ne', True, spilled != 1125899906842623)
 	past = 9223372036854775807 + 1
 	check('past 64 bits keeps counting', True, past > 9223372036854775807)
 	check('past 64 bits is exact', True, past - 1 == 9223372036854775807)

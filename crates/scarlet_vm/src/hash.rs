@@ -23,6 +23,8 @@
 //! Like `==`, the walk keeps a list of values still to hash instead of
 //! recursing, so a very long list hashes without overflowing the stack.
 
+use scarlet_ir::core_ir::VariantRef;
+
 use crate::array::{self, Seq};
 use crate::binary;
 use crate::heap::{Cell, Heap, Kind};
@@ -88,10 +90,10 @@ fn one(heap: &Heap, v: Value, s: &mut Sip<1, 3>, todo: &mut Vec<Value>) {
             s.tag(Tag::Float);
             s.word(if f == 0.0 { 0 } else { f.to_bits() });
         }
-        View::Nil | View::Bool(_) | View::Func(_) | View::Nullary(_) => {
-            s.tag(Tag::Word);
-            s.word(v.bits());
-        }
+        View::Nil => plain(s, PLAIN_IMMEDIATE),
+        View::Bool(b) => plain(s, PLAIN_IMMEDIATE | if b { 2 } else { 1 }),
+        View::Func(f) => plain(s, PLAIN_FUNC | u64::from(f.0)),
+        View::Nullary(v) => plain(s, PLAIN_NULLARY | variant_word(v)),
         View::Cell(cell) => self::cell(heap, cell, s, todo),
     }
 }
@@ -131,7 +133,7 @@ fn cell(heap: &Heap, cell: Cell, s: &mut Sip<1, 3>, todo: &mut Vec<Value>) {
         Kind::Ctor => {
             s.tag(Tag::Ctor);
             let v = heap.variant(cell);
-            s.word(u64::from(v.variant_idx) << 32 | u64::from(v.type_id.0.cast_unsigned()));
+            s.word(variant_word(v));
             counted(s, todo, heap.fields(cell).collect());
         }
         Kind::Closure => {
@@ -186,6 +188,26 @@ fn cell(heap: &Heap, cell: Cell, s: &mut Sip<1, 3>, todo: &mut Vec<Value>) {
         | Kind::MapNode
         | Kind::MapCollision => {}
     }
+}
+
+/// What kind of plain value a [`Tag::Word`] word is, in its top 16 bits.
+/// These numbers are the hash's own and not the tags in `value.rs`. They are
+/// fixed, because changing one reorders every map keyed by that kind.
+const PLAIN_IMMEDIATE: u64 = 0xFFFA << 48;
+const PLAIN_FUNC: u64 = 0xFFFB << 48;
+const PLAIN_NULLARY: u64 = 0xFFFD << 48;
+
+/// A value that is all in one word and holds nothing: its kind, with what
+/// it is below. `Nil` is 0, `False` 1 and `True` 2.
+#[inline]
+fn plain(s: &mut Sip<1, 3>, word: u64) {
+    s.tag(Tag::Word);
+    s.word(word);
+}
+
+/// A constructor as one word: its variant above its type.
+fn variant_word(v: VariantRef) -> u64 {
+    u64::from(v.variant_idx) << 32 | u64::from(v.type_id.0.cast_unsigned())
 }
 
 /// An Int, small or big, by its number: its sign, then its magnitude as
@@ -341,6 +363,77 @@ mod tests {
         assert_eq!(run(0), 0x726f_db47_dd0e_0e31);
         assert_eq!(run(1), 0x74f8_39c5_93dc_67fd);
         assert_eq!(run(15), 0xa129_ca61_49be_45e5);
+    }
+
+    /// A map's order comes from these hashes, and a program can see it. So
+    /// each is pinned, and no change to how a value is stored may move one.
+    #[test]
+    fn the_hash_of_a_plain_value_does_not_depend_on_its_word() {
+        let mut heap = Heap::default();
+        let nullary = |t, v| {
+            Value::nullary(VariantRef {
+                type_id: scarlet_ir::TypeId(t),
+                variant_idx: v,
+            })
+        };
+        let func = |f| Value::func(scarlet_ir::core_ir::FuncIdx(f));
+        let int = |n| Value::int(n).expect("small");
+        let pinned = [
+            (Value::NIL, 0xd85b_9296_886d_def0),
+            (Value::bool(false), 0x6994_423c_a56f_4da0),
+            (Value::bool(true), 0x40d9_1fce_6a74_595d),
+            (func(0), 0xb1a9_9d9e_d09c_0185),
+            (func(7), 0x86bf_fefa_4fbe_9b58),
+            (func(u32::MAX), 0x72a7_391d_e862_ae42),
+            (nullary(0, 0), 0x5b0a_b266_62e7_7842),
+            (nullary(263, 1), 0xa235_c7dd_2d07_de50),
+            (nullary(-1, 7), 0x0cdd_652c_2674_8da6),
+            (nullary(i32::MAX, u16::MAX), 0x78b0_7bfb_c87a_b9b6),
+            (int(0), 0x6c85_978d_e7cc_c2e3),
+            (int(-1), 0xd551_7ece_616f_fee6),
+            (int(42), 0x45c9_0af3_9aaa_7d08),
+            (Value::float(1.5), 0xe92d_7e62_b635_5bcb),
+        ];
+        for (v, want) in pinned {
+            assert_eq!(hash(&heap, v), want, "{v:?}");
+        }
+        let pair = heap
+            .tuple(&[Value::bool(true), nullary(263, 1)])
+            .expect("room");
+        assert_eq!(hash(&heap, Value::cell(pair)), 0x80b5_8fd6_9cae_65c5);
+    }
+
+    /// An Int hashes by its number and not by its form, so the width of the
+    /// small Int moves no Int key. The numbers are well inside the small
+    /// range, at both of its ends, a step past each, and far past it.
+    #[test]
+    fn an_int_hashes_the_same_small_or_big() {
+        let mut heap = Heap::default();
+        let pinned: [(i64, u64); 7] = [
+            (1 << 47, 0x3628_f273_d695_c247),
+            ((1 << 47) - 1, 0xf1a5_6322_1915_85dc),
+            (1 << 50, 0xb8e5_c728_bdba_d507),
+            ((1 << 50) - 1, 0x8385_3df3_d9c9_7b44),
+            (-(1 << 50), 0x4b27_7203_7923_0f26),
+            (-(1 << 50) - 1, 0x69a9_7e22_4284_8c91),
+            (1 << 62, 0xedde_a07f_b473_9d65),
+        ];
+        for (n, want) in pinned {
+            let v = crate::bigint::int(&mut heap, n).expect("room");
+            assert_eq!(hash(&heap, v), want, "{n}");
+            // Inside another value an Int is hashed by `int` when it is small
+            // and by `big` when it is a cell. This cell holds a number that
+            // may be small, which no Int operation makes.
+            let as_cell = heap.big_int(&num_bigint::BigInt::from(n)).expect("room");
+            assert_eq!(hash(&heap, Value::cell(as_cell)), want, "{n}");
+            let held = heap.tuple(&[v]).expect("room");
+            let held_as_cell = heap.tuple(&[Value::cell(as_cell)]).expect("room");
+            assert_eq!(
+                hash(&heap, Value::cell(held)),
+                hash(&heap, Value::cell(held_as_cell)),
+                "{n}"
+            );
+        }
     }
 
     /// A word fed whole hashes as its eight bytes fed one at a time.

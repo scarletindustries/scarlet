@@ -457,19 +457,158 @@ fn strings_print_join_and_interpolate() {
     );
 }
 
-/// An Int is exact however big it gets. Past 48 bits it moves to the heap,
-/// and past 64 it keeps going.
+/// An Int is exact however big it gets. Past 51 bits it moves to the heap,
+/// and past 64 it keeps going. The first line is a number well inside the
+/// small range.
 #[test]
-fn ints_are_exact_past_48_and_64_bits() {
+fn ints_are_exact_past_51_and_64_bits() {
     prints(
         "fn fact(n Int) Int { if n == 0 { 1 } else { n * fact(n - 1) } }\n\
          pub fn main() {\n\
          \tprintln(140737488355327 + 1)\n\
+         \tprintln(1125899906842623 + 1)\n\
+         \tprintln(0 - 1125899906842623 - 2)\n\
          \tprintln(9223372036854775807 + 1)\n\
          \tprintln(fact(25))\n\
          \tprintln(0 - 9223372036854775807 - 1)\n\
          }\n",
-        "140737488355328\n9223372036854775808\n15511210043330985984000000\n-9223372036854775808\n",
+        "140737488355328\n1125899906842624\n-1125899906842625\n9223372036854775808\n\
+         15511210043330985984000000\n-9223372036854775808\n",
+    );
+}
+
+/// A small Int holds -2^50 to 2^50 - 1 and costs no cell. One step past
+/// either end is a heap cell, and one step back is no cell again. A program
+/// cannot see the difference, so this counts cells to find it.
+#[test]
+fn a_small_int_holds_51_bits_and_the_next_one_is_a_cell() {
+    prints(
+        "import scarlet/internal\n\
+         fn step(x Int, by Int, n Int) Int { if n == 0 { x } else { step(x + by, by, n - 1) } }\n\
+         fn cells(from Int, by Int, n Int) Int {\n\
+         \tmade = internal::cells_made()\n\
+         \t_ = step(from, by, n)\n\
+         \tinternal::cells_made() - made\n\
+         }\n\
+         pub fn main() {\n\
+         \ttop = 1125899906842623\n\
+         \tbottom = 0 - top - 1\n\
+         \tprintln(cells(top - 10, 1, 10))\n\
+         \tprintln(cells(top - 10, 1, 11))\n\
+         \tprintln(cells(top - 10, 1, 13))\n\
+         \tprintln(cells(bottom + 10, -1, 10))\n\
+         \tprintln(cells(bottom + 10, -1, 11))\n\
+         \tprintln(cells(bottom + 10, -1, 13))\n\
+         \tprintln(cells(step(top, 1, 3), -1, 3))\n\
+         \tprintln(cells(step(bottom, -1, 3), 1, 3))\n\
+         \tprintln(step(top - 10, 1, 13))\n\
+         \tprintln(step(bottom + 10, -1, 13))\n\
+         \tprintln(step(step(top, 1, 3), -1, 3) == top)\n\
+         \tprintln(step(step(bottom, -1, 3), 1, 3) == bottom)\n\
+         }\n",
+        "0\n1\n3\n0\n1\n3\n2\n2\n1125899906842626\n-1125899906842627\nTrue\nTrue\n",
+    );
+}
+
+/// The small Int range holds its lowest number and not that number negated,
+/// so `min / -1` and `-min` leave it though both fit 64 bits, and come back
+/// into it the other way. Nothing at the top end leaves.
+#[test]
+fn divide_and_negate_are_right_at_both_ends_of_the_small_range() {
+    prints(
+        "import scarlet/internal\n\
+         fn div(a Int, b Int) Int { a / b }\n\
+         fn rem(a Int, b Int) Int { a % b }\n\
+         fn neg(a Int) Int { -a }\n\
+         fn cells(f fn(Int, Int) Int, a Int, b Int) Int {\n\
+         \tmade = internal::cells_made()\n\
+         \t_ = f(a, b)\n\
+         \tinternal::cells_made() - made\n\
+         }\n\
+         pub fn main() {\n\
+         \tmax = 1125899906842623\n\
+         \tmin = 0 - max - 1\n\
+         \tprintln(div(min, -1))\n\
+         \tprintln(neg(min))\n\
+         \tprintln(neg(neg(min)) == min)\n\
+         \tprintln(div(div(min, -1), -1) == min)\n\
+         \tprintln(div(max, -1))\n\
+         \tprintln(neg(max))\n\
+         \tprintln(neg(neg(max)) == max)\n\
+         \tprintln(div(min, 1) == min)\n\
+         \tprintln(div(min, 0))\n\
+         \tprintln(rem(min, 0) == min)\n\
+         \tprintln(rem(min, -1))\n\
+         \tprintln(rem(max, 0) == max)\n\
+         \tprintln(div(min, 2))\n\
+         \tprintln(div(max, 2))\n\
+         \tprintln(cells(div, min, -1))\n\
+         \tprintln(cells(div, max, -1))\n\
+         \tprintln(cells(div, min, 1))\n\
+         \tprintln(cells(fn(a, _b) neg(a), min, 0))\n\
+         \tprintln(cells(fn(a, _b) neg(a), max, 0))\n\
+         \tprintln(cells(fn(a, _b) neg(neg(a)), min, 0))\n\
+         \tprintln(cells(fn(a, b) a * b, 33554432, 33554432))\n\
+         \tprintln(cells(fn(a, b) a * b, 33554432, -33554432))\n\
+         \tprintln(33554432 * -33554432 == min)\n\
+         }\n",
+        "1125899906842624\n1125899906842624\nTrue\nTrue\n-1125899906842623\n-1125899906842623\n\
+         True\nTrue\n0\nTrue\n0\nTrue\n-562949953421312\n562949953421311\n\
+         1\n0\n0\n1\n0\n1\n1\n0\nTrue\n",
+    );
+}
+
+/// A 32-bit number times a small constant stays a small Int. This is
+/// `map_churn`'s key generator, whose products reach about 2^48.1, so it
+/// makes no heap cell.
+#[test]
+fn a_32_bit_generator_makes_no_cell() {
+    prints(
+        "import scarlet/internal\n\
+         fn next(x Int) Int { { x * 69069 + 1 } % 4294967296 }\n\
+         fn run(x Int, n Int) Int { if n == 0 { x } else { run(next(x), n - 1) } }\n\
+         pub fn main() {\n\
+         \tmade = internal::cells_made()\n\
+         \tx = run(42, 10000)\n\
+         \tprintln(internal::cells_made() - made)\n\
+         \tprintln(x)\n\
+         \tprintln(4294967295 * 69069 + 1)\n\
+         }\n",
+        "0\n1722027866\n296649096098356\n",
+    );
+}
+
+/// A map's order comes from its keys' hashes, and a program can see it. The
+/// hash reads a key by what it is and not by the word it is stored as, so
+/// these orders are pinned and no change to the value word may move one.
+/// The Int keys sit inside the small range, at its edge and past it.
+#[test]
+fn a_maps_order_does_not_depend_on_how_its_keys_are_stored() {
+    prints(
+        "import scarlet/map\n\
+         type Light {\n\
+         \tRed\n\
+         \tAmber\n\
+         \tGreen\n\
+         \tBlue\n\
+         \tWhite\n\
+         }\n\
+         pub fn main() {\n\
+         \tlights = map::new() |> map::set(Red, 1) |> map::set(Amber, 2) |> map::set(Green, 3) |> map::set(Blue, 4) |> map::set(White, 5)\n\
+         \tprintln(map::keys(lights) == [Red, Green, White, Blue, Amber])\n\
+         \tbools = map::new() |> map::set(True, 1) |> map::set(False, 2)\n\
+         \tprintln(map::keys(bools) == [False, True])\n\
+         \tpairs = map::new() |> map::set((True, Red), 1) |> map::set((False, Green), 2) |> map::set((True, Blue), 3) |> map::set((False, White), 4)\n\
+         \tprintln(map::keys(pairs) == [(False, Green), (True, Blue), (True, Red), (False, White)])\n\
+         \topts = map::new() |> map::set(Some(Red), 1) |> map::set(None, 2) |> map::set(Some(White), 3) |> map::set(Some(Amber), 4)\n\
+         \tprintln(map::keys(opts) == [Some(Amber), None, Some(Red), Some(White)])\n\
+         \tints = map::new() |> map::set(140737488355328, 1) |> map::set(1125899906842623, 2) |> map::set(1125899906842624, 3) |> map::set(7, 4) |> map::set(281474976710656, 5) |> map::set(-140737488355329, 6)\n\
+         \tprintln(map::keys(ints) == [1125899906842623, -140737488355329, 281474976710656, 7, 1125899906842624, 140737488355328])\n\
+         \ttuples = map::new() |> map::set((140737488355328, 1), 1) |> map::set((1125899906842624, 3), 3) |> map::set((281474976710656, 5), 5) |> map::set((7, 4), 4) |> map::set((1125899906842623, 2), 2)\n\
+         \tprintln(map::keys(tuples) == [(140737488355328, 1), (1125899906842624, 3), (281474976710656, 5), (7, 4), (1125899906842623, 2)])\n\
+         \tprintln(lights)\n\
+         }\n",
+        "True\nTrue\nTrue\nTrue\nTrue\nTrue\n{Red: 1, Green: 3, White: 5, Blue: 4, Amber: 2}\n",
     );
 }
 

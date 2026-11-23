@@ -58,12 +58,16 @@ The old VM broke this in these ways. The new one must not:
 
 **Proposed: NaN boxing, like the old VM.** A float's NaN bit patterns hold every other kind of value: small ints, `nil`, bools, and pointers to heap objects. Scarlet has no NaN (below), so every NaN pattern is free for this. The old VM had to tidy stray NaNs first; the new one never meets one.
 
+**Built: the tags.** The table at the top of `crates/scarlet_vm/src/value.rs` is the only place a tag is given out. A small int is `0xFFF8` and up in the top 16 bits. `Nil` and the Bools are under `0x7FF8`, a function with no captures under `0x7FF9`, a cell under `0x7FFC` and a constructor with no fields under `0x7FFD`. `0x7FFE` is kept for a literal frozen in the loaded program, and immediate 3 for the empty array. Every one of these is a quiet NaN, so a float operation handed the wrong kind of word gives a NaN, and one test of its answer catches that. The layout leans on the no-NaN rule harder than the old one did: the NaN an ARM chip makes is the word for `Nil` and the one an x86 chip makes is the word for the Int 0. So `Value::finite`, which refuses a NaN or an infinity, and `Value::float`, which turns one into a Float by the rules below, are the only two ways to make a value from an `f64`.
+
+A map's order does not depend on any of this. The hash reads a value by what it is (`hash.rs`), with its own fixed words for `Nil`, a Bool, a function and a constructor with no fields, so moving a tag moves no key.
+
 **Decided: Int is arbitrary precision.** Small ints live in the word, and big ones are heap objects.
 
 - **Proposed:** the fast path is a checked add on two small ints. On overflow, the result becomes a big int.
 - **Proposed:** a result that fits in the word is always stored in the word. So each number has exactly one representation, and `==` and map keys can't disagree about it.
 - **Proposed:** use the `num-bigint` crate, behind our own small `BigInt` module, so the choice can change in one place later.
-- **Built:** a small int gets 48 bits, two's complement, as in the old VM, so it holds ±2^47.
+- **Built:** a small int gets 51 bits, two's complement, so it holds -2^50 to 2^50 - 1. Its word is the one kind with the sign bit set: the 13 top bits are all ones and the number is below them.
 
 **Decided: floats have no NaN and no infinity.** After each float op:
 

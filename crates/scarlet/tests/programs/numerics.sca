@@ -6,7 +6,7 @@
 //   Int   has no bounds: every result is exact. Division and modulo by zero
 //         are defined (`x / 0 == 0`, `x % 0 == x`); division truncates toward
 //         zero and the remainder takes the dividend's sign. Values outside the
-//         48-bit NaN-boxed small-int range are boxed, which must be invisible.
+//         51-bit NaN-boxed small-int range are boxed, which must be invisible.
 //   Float is never NaN or infinite: division by zero is 0.0, and a result too
 //         large stops at the largest float (docs/semantics.md, "Floats").
 //   Decimal is exact scaled-integer arithmetic; its `eq` compares *numbers*
@@ -48,13 +48,13 @@ pub fn main() {
 	println('big mul: ${1000000000000000 * 1000000}')
 	println('neg min: ${0 - int::min_value}')
 
-	// 2^47 - 1 is the largest small (unboxed) Int; crossing it boxes the value on
+	// 2^50 - 1 is the largest small (unboxed) Int; crossing it boxes the value on
 	// the heap, which arithmetic, equality and printing must not notice.
-	small_max = 140737488355327
+	small_max = 1125899906842623
 	boxed = small_max + 1
 	println('boxing: ${small_max} ${boxed} ${boxed - 1 == small_max}')
 	println('boxed round trip: ${9223372036854775807} ${9223372036854775807 - 1 + 1}')
-	println('boxed equality: ${boxed * 2 == 281474976710656}')
+	println('boxed equality: ${boxed * 2 == 2251799813685248}')
 
 	// abs is exact, `min_value` included.
 	println('abs: ${int::abs(-7)} ${int::abs(7)} ${int::abs(int::min_value)}')

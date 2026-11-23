@@ -34,9 +34,9 @@ pub fn main() {
 		)} ${ok(0x7FFF_FFFF_FFFF_FFFF == 9223372036854775807)}',
 	)
 
-	// 2^47 is the first boxed Int; a hex spelling must not notice.
-	boxed = 0x800000000000
-	println('boxed: ${boxed} ${ok(boxed == 140737488355328)} ${ok(boxed - 1 == 0x7FFFFFFFFFFF)}')
+	// 2^50 is the first boxed Int; a hex spelling must not notice.
+	boxed = 0x4000000000000
+	println('boxed: ${boxed} ${ok(boxed == 1125899906842624)} ${ok(boxed - 1 == 0x3FFFFFFFFFFFF)}')
 
 	println(
 		'match: ${match 255 {

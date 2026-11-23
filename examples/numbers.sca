@@ -28,7 +28,7 @@ pub fn main() {
 	println('past max  ${int::max_value + 1}')
 	println('abs(min)  ${int::abs(int::min_value)}')
 
-	println('boxed     ${140737488355327 + 1}')
+	println('boxed     ${1125899906842623 + 1}')
 	println('boxed     ${9223372036854775807 - 1}')
 	println('')
 

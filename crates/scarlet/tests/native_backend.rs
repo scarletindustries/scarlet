@@ -259,7 +259,7 @@ pub fn main() {
     assert_warmed(&out.stderr, "hit");
 }
 
-/// (d) Ints spill past ±2^47, where they leave the NaN-box payload, and past
+/// (d) Ints spill past ±2^50, where they leave the NaN-box payload, and past
 /// 64 bits, where they stay exact. The recursion warms both functions mid-run,
 /// so the expected values must hold across the switch to native.
 #[test]
@@ -277,8 +277,8 @@ pub fn main() {
 \tprintln(fact(30, 1))
 \tprintln(fib_iter(90, 0, 1))
 \tprintln(fib_iter(100, 0, 1))
-\tprintln(140737488355327 + 1)
-\tprintln({0 - 140737488355328} - 1)
+\tprintln(1125899906842623 + 1)
+\tprintln({0 - 1125899906842624} - 1)
 \tprintln(12345678901 * 987654321)
 }
 ";
@@ -290,8 +290,8 @@ pub fn main() {
          265252859812191058636308480000000\n\
          2880067194370816120\n\
          354224848179261915075\n\
-         140737488355328\n\
-         -140737488355329\n\
+         1125899906842624\n\
+         -1125899906842625\n\
          12193263112251181221\n",
     );
 }
@@ -564,10 +564,10 @@ impl Rng {
 /// Constants straddling the NaN-box payload boundary and the i64 wrap, so
 /// generated programs hit the spill and overflow paths.
 const BOUNDARY: [i64; 8] = [
-    140737488355327,
-    140737488355328,
-    -140737488355328,
-    -140737488355329,
+    1125899906842623,
+    1125899906842624,
+    -1125899906842624,
+    -1125899906842625,
     4611686018427387905,
     2432902008176640000,
     -2432902008176640000,

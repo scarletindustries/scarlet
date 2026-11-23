@@ -72,8 +72,8 @@ diff <(norm a.txt) <(norm b.txt)
   error must not turn into an internal compiler error.
 - **A constructor as a value** (`array::map(xs, W)`) inside a branch, with
   both arms taken. It makes lowering build an eta wrapper partway through.
-- **Ints either side of the small-Int edge.** A small Int is 48 bits, so try
-  values around `140737488355327` (2^47 - 1), not just `1` and `2^64`.
+- **Ints either side of the small-Int edge.** A small Int is 51 bits, so try
+  values around `1125899906842623` (2^50 - 1), not just `1` and `2^64`.
 - **Output to a terminal and to a pipe.** `scarlet run` flushes every write
   to a terminal and buffers writes to a pipe (`crates/scarlet/src/output.rs`).
   A pipe is `$B run prog.sca | cat`. For a terminal, run it under a pty and

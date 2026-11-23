@@ -27,9 +27,9 @@ fn ok(b Bool) String {
 }
 
 pub fn main() {
-	// 2^47 - 1 is the largest unboxed small Int. Crossing it boxes the value, and
+	// 2^50 - 1 is the largest unboxed small Int. Crossing it boxes the value, and
 	// no bitwise op may notice.
-	small_max = 140737488355327
+	small_max = 1125899906842623
 
 	// --- The basics -----------------------------------------------------------
 
@@ -240,8 +240,8 @@ pub fn main() {
 		)} ${ok(
 			int::bitwise_xor(boxed, boxed) == 0,
 		)} ${ok(
-			int::bitwise_shift_right(boxed, 1) == 70368744177664,
-		)} ${ok(int::bitwise_shift_left(small_max, 1) == 281474976710654)}',
+			int::bitwise_shift_right(boxed, 1) == 562949953421312,
+		)} ${ok(int::bitwise_shift_left(small_max, 1) == 2251799813685246)}',
 	)
 	println(
 		'boxed not: ${ok(
