@@ -1,6 +1,6 @@
 /**
- * Immutable arrays. Every operation returns a new array and leaves its input
- * as it was.
+ * Immutable arrays. Every operation returns a new array, and any other holder
+ * of its input still sees the input as it was.
  */
 
 pub fn map(xs Array(a), f fn(a) b) Array(b) {
@@ -42,6 +42,32 @@ pub fn reverse(xs Array(a)) Array(a) {
 // Takes O(1) time.
 @vm(array__length)
 pub fn length(xs Array(a)) Int
+
+// `Ok` of the array with `x` at index `i`, or `Err(Nil)` when `i` is outside
+// the array. When nothing else holds `xs` and nothing reads `xs` after the
+// call, it is changed in place and nothing is copied. An `Err` arm that
+// gives `xs` back is such a read, so that write copies. `put` is the write
+// to use for it.
+@vm(array__set)
+pub fn set(xs Array(a), i Int, x a) Result(Array(a), Nil)
+
+// The array with `x` at index `i`. An index outside the array changes
+// nothing. When nothing else holds `xs` and nothing reads `xs` after the
+// call, it is changed in place and nothing is copied.
+@vm(array__put)
+pub fn put(xs Array(a), i Int, x a) Array(a)
+
+// The array with the elements at `i` and `j` changed over. An index outside
+// the array changes nothing.
+pub fn swap(xs Array(a), i Int, j Int) Array(a) {
+	match xs[i] {
+		None -> xs
+		Some(x) -> match xs[j] {
+			None -> xs
+			Some(y) -> xs |> put(i, y) |> put(j, x)
+		}
+	}
+}
 
 pub fn contains(xs Array(a), target a) Bool {
 	match xs {

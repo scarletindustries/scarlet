@@ -420,6 +420,19 @@ pub(crate) enum Instr {
         start: Reg,
         end: Reg,
     },
+    /// The array in `src` with `value` at `index`, for `array::put` and
+    /// `array::set`. When the array has no such index, nothing is written
+    /// and nothing is taken, and the run continues at `miss`. `moved` says
+    /// nothing reads `src` after a write, so the write takes the register's
+    /// reference and may change the array in place.
+    ArraySet {
+        dst: Reg,
+        src: Reg,
+        index: Reg,
+        value: Arg,
+        moved: bool,
+        miss: u32,
+    },
     /// `xs[i]`. It gives `Some` of element `index` of the array in `src`, or
     /// `None` when it has no such element.
     ArrayIndex {
@@ -542,6 +555,17 @@ impl Instr {
                 default,
             } => {
                 for r in [dst, src, index, default] {
+                    f(r);
+                }
+            }
+            Instr::ArraySet {
+                dst,
+                src,
+                index,
+                value,
+                ..
+            } => {
+                for r in [dst, src, index, &mut value.reg] {
                     f(r);
                 }
             }
@@ -700,6 +724,13 @@ impl Instr {
                 f(*index);
                 f(*default);
             }
+            Instr::ArraySet {
+                src, index, value, ..
+            } => {
+                f(*src);
+                f(*index);
+                f(value.reg);
+            }
             Instr::MapSetOwned {
                 map, key, value, ..
             } => {
@@ -738,10 +769,19 @@ impl Instr {
         }
     }
 
-    /// The register this instruction writes, if any. A `Drop` empties its
-    /// register, which ends what it held as surely as a write.
-    fn writes(&self) -> Option<Reg> {
-        match self {
+    /// The register this instruction writes, if any, and whether it writes
+    /// it every time. A `Drop` empties its register, which ends what it held
+    /// as surely as a write.
+    fn writes(&self) -> Option<Write> {
+        let dst = match self {
+            // A lookup of a key the map does not have, or a write at an index
+            // the array does not have, has no answer to write.
+            Instr::MapFind { dst, to, .. } | Instr::ArraySet { dst, miss: to, .. } => {
+                return Some(Write::OnHit {
+                    reg: *dst,
+                    miss: *to,
+                });
+            }
             Instr::Const { dst, .. }
             | Instr::Str { dst, .. }
             | Instr::BinaryConst { dst, .. }
@@ -768,7 +808,6 @@ impl Instr {
             | Instr::GetSelf { dst, .. }
             | Instr::MapSetOwned { dst, .. }
             | Instr::MapDeleteOwned { dst, .. }
-            | Instr::MapFind { dst, .. }
             | Instr::Tuple { dst, .. }
             | Instr::Element { dst, .. }
             | Instr::Builtin { dst, .. }
@@ -787,7 +826,7 @@ impl Instr {
             | Instr::ArrayIndex { dst, .. }
             | Instr::ArrayIndexOr { dst, .. }
             | Instr::Field { dst, .. }
-            | Instr::Drop { reg: dst } => Some(*dst),
+            | Instr::Drop { reg: dst } => *dst,
             Instr::SetGlobal { .. }
             | Instr::DropReuse { .. }
             | Instr::TailCall { .. }
@@ -804,8 +843,9 @@ impl Instr {
             | Instr::JumpUnlessStr { .. }
             | Instr::JumpUnlessBinary { .. }
             | Instr::Count { .. }
-            | Instr::Bad { .. } => None,
-        }
+            | Instr::Bad { .. } => return None,
+        };
+        Some(Write::Always(dst))
     }
 
     /// The instructions that may run after this one, which is at `i`.
@@ -817,6 +857,7 @@ impl Instr {
             | Instr::JumpUnlessCmp { to, .. }
             | Instr::JumpUnlessCmpImm { to, .. }
             | Instr::MapFind { to, .. }
+            | Instr::ArraySet { miss: to, .. }
             | Instr::JumpUnlessVariant { to, .. }
             | Instr::JumpUnlessInt { to, .. }
             | Instr::JumpUnlessFloat { to, .. }
@@ -887,6 +928,7 @@ impl Instr {
             | Instr::JumpUnlessCmp { to, .. }
             | Instr::JumpUnlessCmpImm { to, .. }
             | Instr::MapFind { to, .. }
+            | Instr::ArraySet { miss: to, .. }
             | Instr::JumpUnlessVariant { to, .. }
             | Instr::JumpUnlessInt { to, .. }
             | Instr::JumpUnlessFloat { to, .. }
@@ -945,6 +987,26 @@ impl Instr {
             | Instr::ArrayIndex { .. }
             | Instr::ArrayIndexOr { .. }
             | Instr::Bad { .. } => None,
+        }
+    }
+}
+
+/// What an instruction writes, and when. Liveness needs both: a register
+/// that is only written on one way out still holds its old value on the
+/// other.
+#[derive(Clone, Copy)]
+enum Write {
+    /// The register is written every time the instruction runs.
+    Always(Reg),
+    /// The register is written only when the instruction has an answer. When
+    /// it has none it writes nothing and continues at `miss`.
+    OnHit { reg: Reg, miss: u32 },
+}
+
+impl Write {
+    fn reg(self) -> Reg {
+        match self {
+            Write::Always(reg) | Write::OnHit { reg, .. } => reg,
         }
     }
 }
@@ -1044,6 +1106,7 @@ ops! {
     ArrayAppend,
     ArrayConcat,
     ArraySlice,
+    ArraySet,
     ArrayIndex,
     ArrayIndexOr,
     Field,
@@ -1805,6 +1868,52 @@ impl<'c> Loader<'c> {
                 },
                 _ => return Err(Missing::PrintArity(*intrinsic).into()),
             },
+            // `array::put` gives the array back as it was when it has no
+            // such index.
+            Atom::Intrinsic {
+                intrinsic: Intrinsic::ArrayPut,
+                args,
+            } if let [xs, i, x] = args.as_slice() => {
+                let (miss, after) = (self.label(), self.label());
+                self.array_set(dst, [*xs, *i, *x], miss);
+                self.jump(after, |to| Instr::Jump { to });
+                self.place(miss)?;
+                self.instrs.push(Instr::Move {
+                    dst,
+                    src: Reg::of(*xs),
+                    moved: false,
+                });
+                return self.place(after);
+            }
+            // `array::set` says which it was: `Ok` of the new array, or
+            // `Err(Nil)`.
+            Atom::Intrinsic {
+                intrinsic: Intrinsic::ArraySet,
+                args,
+            } if let [xs, i, x] = args.as_slice() => {
+                let (miss, after) = (self.label(), self.label());
+                let (made, nil) = (self.scratch()?, self.scratch()?);
+                self.array_set(made, [*xs, *i, *x], miss);
+                self.instrs.push(Instr::Ctor {
+                    dst,
+                    variant: self.abi.ok,
+                    fields: Box::new([Arg::shared(made)]),
+                    reuse: None,
+                });
+                self.jump(after, |to| Instr::Jump { to });
+                self.place(miss)?;
+                self.instrs.push(Instr::Const {
+                    dst: nil,
+                    value: Value::NIL,
+                });
+                self.instrs.push(Instr::Ctor {
+                    dst,
+                    variant: self.abi.err,
+                    fields: Box::new([Arg::shared(nil)]),
+                    reuse: None,
+                });
+                return self.place(after);
+            }
             Atom::Intrinsic { intrinsic, args } if built(*intrinsic, args.len()) => {
                 Instr::Builtin {
                     dst,
@@ -1838,6 +1947,21 @@ impl<'c> Loader<'c> {
         };
         self.instrs.push(instr);
         Ok(())
+    }
+
+    /// The write that `array::put` and `array::set` both are: `xs` with `x`
+    /// at index `i` goes to `dst`, and an `i` that `xs` does not have
+    /// continues at `miss`.
+    fn array_set(&mut self, dst: Reg, [xs, i, x]: [LocalId; 3], miss: Label) {
+        let (src, index, value) = (Reg::of(xs), Reg::of(i), Arg::shared(Reg::of(x)));
+        self.jump(miss, |to| Instr::ArraySet {
+            dst,
+            src,
+            index,
+            value,
+            moved: false,
+            miss: to,
+        });
     }
 
     fn prim(&mut self, dst: Reg, op: PrimOp, args: &[LocalId]) -> Result<Instr, Missing> {
@@ -2190,7 +2314,8 @@ fn built(i: Intrinsic, argc: usize) -> bool {
 /// A call hands the callee the reference an argument's register holds,
 /// instead of adding one, when nothing the frame runs later reads that
 /// register. A constructor takes its fields' references the same way, an
-/// array push or drop takes its array's, and a `Move` takes its source's.
+/// array push or drop takes its array's, a write at an index takes its
+/// array's and its value's, and a `Move` takes its source's.
 /// Whatever receives the value then holds the reference the register held,
 /// so a value nothing else holds still has a count of 1, which is what lets
 /// it be changed in place or its cell overwritten.
@@ -2202,8 +2327,28 @@ fn built(i: Intrinsic, argc: usize) -> bool {
 /// and releases it. A `DropReuse` does count, so a cell this frame has
 /// already paired with a constructor of its own stays here.
 fn moves_on_last_use(instrs: &mut [Instr], regs: u32) {
-    let live = live_after(instrs, regs);
-    for (instr, after) in instrs.iter_mut().zip(&live) {
+    let (before, live) = liveness(instrs, regs, false);
+    for (i, (instr, after)) in instrs.iter_mut().zip(&live).enumerate() {
+        // A write at an index takes its array and its value only when it
+        // does not miss, and then the next instruction runs. So what counts
+        // is what is read from there on, and a read on the way from a miss
+        // keeps neither register. The array is read before the value is
+        // taken, so the value may name its register too, and then only the
+        // value takes it.
+        if let Instr::ArraySet {
+            src,
+            index,
+            value,
+            moved,
+            ..
+        } = instr
+        {
+            if let Some(hit) = before.get(i.saturating_add(1)) {
+                *moved = !hit.has(*src) && value.reg != *src && index != src;
+                value.moved = !hit.has(value.reg);
+            }
+            continue;
+        }
         // A push whose array is read by nothing later takes it over. Its own
         // items are read before the array is, so they may name it too.
         if let Instr::ArrayPrepend {
@@ -2349,7 +2494,7 @@ fn allocate(instrs: &mut [Instr], params: &mut [Reg], carried: &mut [Reg], regs:
     for (instr, out) in instrs.iter().zip(&after) {
         if let Some(w) = instr.writes() {
             for r in out.iter() {
-                edge(&mut clash, w, r);
+                edge(&mut clash, w.reg(), r);
             }
         }
     }
@@ -2449,13 +2594,8 @@ impl Regs {
     }
 }
 
-/// For each instruction, the registers some later instruction may read
-/// before anything writes them again.
-fn live_after(instrs: &[Instr], regs: u32) -> Vec<Regs> {
-    liveness(instrs, regs, false).1
-}
-
-/// The registers live before and after each instruction. With
+/// The registers live before and after each instruction: the ones some
+/// later instruction may read before anything writes them again. With
 /// `drops_read`, a plain `Drop` counts as a read, so a register stays its
 /// value's until the `Drop` that names it.
 fn liveness(instrs: &[Instr], regs: u32, drops_read: bool) -> (Vec<Regs>, Vec<Regs>) {
@@ -2475,8 +2615,17 @@ fn liveness(instrs: &[Instr], regs: u32, drops_read: bool) -> (Vec<Regs>, Vec<Re
                 }
             }
             let mut live = out.clone();
-            if let Some(w) = instr.writes() {
-                live.remove(w);
+            match instr.writes() {
+                Some(Write::Always(reg)) => live.remove(reg),
+                // A miss writes nothing, so a register live where it lands is
+                // live here too, even the one a hit writes.
+                Some(Write::OnHit { reg, miss }) => {
+                    live.remove(reg);
+                    if let Some(b) = before.get(miss as usize) {
+                        live.union(b);
+                    }
+                }
+                None => {}
             }
             instr.reads(|r| live.add(r));
             if drops_read && let Instr::Drop { reg } = instr {
@@ -2901,6 +3050,147 @@ mod tests {
             ret(0),
         ];
         assert_eq!(takes(other_path, 3), [true]);
+    }
+
+    /// `r2` gets the array in `r0` with the value in `value` at the index
+    /// in `r1`, or the run continues at `miss`.
+    fn write(value: u32, miss: u32) -> Instr {
+        Instr::ArraySet {
+            dst: Reg(2),
+            src: Reg(0),
+            index: Reg(1),
+            value: Arg::shared(Reg(value)),
+            moved: false,
+            miss,
+        }
+    }
+
+    /// Whether each write in `instrs` takes its array and its value, once
+    /// `moves_on_last_use` has been over them.
+    fn write_takes(mut instrs: Vec<Instr>, regs: u32) -> Vec<(bool, bool)> {
+        moves_on_last_use(&mut instrs, regs);
+        let taken = |i: &Instr| {
+            if let Instr::ArraySet { value, moved, .. } = i {
+                Some((*moved, value.moved))
+            } else {
+                None
+            }
+        };
+        instrs.iter().filter_map(taken).collect()
+    }
+
+    /// A write that misses takes nothing, so its array and its value are
+    /// still in their registers for whatever runs after the miss. Reading
+    /// them there does not stop the write taking them when it does not miss.
+    #[test]
+    fn a_write_takes_what_nothing_reads_after_it_does_not_miss() {
+        let after_a_miss = |r: u32| vec![write(3, 2), ret(2), mv(2, r), ret(2)];
+        assert_eq!(write_takes(after_a_miss(0), 4), [(true, true)]);
+        assert_eq!(write_takes(after_a_miss(3), 4), [(true, true)]);
+    }
+
+    #[test]
+    fn a_write_shares_what_is_read_after_it_does_not_miss() {
+        let len = |src: u32| Instr::ArrayLen {
+            dst: Reg(1),
+            src: Reg(src),
+        };
+        let then = |read: Instr| vec![write(3, 3), read, ret(2), ret(0)];
+        assert_eq!(write_takes(then(len(0)), 4), [(false, true)]);
+        assert_eq!(write_takes(then(len(3)), 4), [(true, false)]);
+    }
+
+    /// The array is read before the value is taken. When one register is
+    /// both, only the value takes it, or two holders would share one
+    /// reference.
+    #[test]
+    fn a_write_of_its_own_array_takes_the_register_once() {
+        let instrs = vec![write(0, 2), ret(2), ret(1)];
+        assert_eq!(write_takes(instrs, 3), [(false, true)]);
+    }
+
+    /// A write that misses has written nothing. So a register it would
+    /// have written is still live before it, when what runs after a miss
+    /// reads the value the register held.
+    #[test]
+    fn a_register_read_after_a_miss_is_live_before_the_write() {
+        let live_before = |instrs: Vec<Instr>| liveness(&instrs, 4, false).0[0].has(Reg(2));
+        assert!(live_before(vec![write(3, 2), ret(2), ret(2)]));
+        assert!(!live_before(vec![write(3, 2), ret(2), ret(0)]));
+        // The lookup that jumps on a missing key is the same.
+        let find = Instr::MapFind {
+            dst: Reg(2),
+            map: Reg(0),
+            key: Reg(1),
+            to: 2,
+        };
+        assert!(live_before(vec![find.clone(), ret(2), ret(2)]));
+        assert!(!live_before(vec![find, ret(2), ret(0)]));
+    }
+
+    /// `array::put` and `array::set` load as one write each. `put` gives
+    /// the array back on a miss, and `set` builds `Ok` or `Err(Nil)`. The
+    /// write takes an array that is not read again, and shares one that is.
+    #[test]
+    fn the_loader_makes_one_write_of_a_put_and_of_a_set() {
+        let src = "import scarlet/array\n\
+                   fn last_use(xs Array(Int), i Int) Array(Int) {\n\
+                   \tarray::put(xs, i, 7)\n\
+                   }\n\
+                   fn read_again(xs Array(Int), i Int) Array(Int) {\n\
+                   \tys = array::put(xs, i, 7)\n\
+                   \t[..ys, ..xs]\n\
+                   }\n\
+                   fn checked(xs Array(Int), i Int) Result(Array(Int), Nil) {\n\
+                   \tarray::set(xs, i, 7)\n\
+                   }\n\
+                   pub fn main() {\n\
+                   \tprintln(last_use([1], 0))\n\
+                   \tprintln(read_again([1], 0))\n\
+                   \tprintln(checked([1], 0))\n\
+                   }\n";
+        let result = scarlet_core::compile::compile_text(src, None);
+        assert!(result.success(), "{:?}", result.diagnostics());
+        let program = result.into_runnable().expect("a clean compile is runnable");
+        let code = load(&program).expect("the program loads");
+        let body = |name: &str| -> &Body {
+            bodies(&code)
+                .into_iter()
+                .find(|b| b.name.ends_with(name))
+                .unwrap_or_else(|| panic!("no function called {name}"))
+        };
+        let ops = |name: &str| -> Vec<Op> { body(name).instrs.iter().map(Instr::op).collect() };
+        let taken = |name: &str| -> Vec<bool> {
+            let taken = |i: &Instr| {
+                if let Instr::ArraySet { moved, .. } = i {
+                    Some(*moved)
+                } else {
+                    None
+                }
+            };
+            body(name).instrs.iter().filter_map(taken).collect()
+        };
+        assert_eq!(
+            ops(".last_use"),
+            [Op::Const, Op::ArraySet, Op::Jump, Op::Move, Op::Ret]
+        );
+        assert_eq!(taken(".last_use"), [true]);
+        // The copy a miss makes takes the array too.
+        assert_eq!(marks(&body(".last_use").instrs), [true]);
+        assert_eq!(taken(".read_again"), [false]);
+        assert_eq!(
+            ops(".checked"),
+            [
+                Op::Const,
+                Op::ArraySet,
+                Op::Ctor,
+                Op::Jump,
+                Op::Const,
+                Op::Ctor,
+                Op::Ret
+            ]
+        );
+        assert_eq!(taken(".checked"), [true]);
     }
 
     /// A value copied to a new name and never read again under the old one

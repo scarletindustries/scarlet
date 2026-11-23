@@ -2,27 +2,18 @@
 // It stresses array reads and writes and deep recursion.
 // Ported from Are We Fast Yet (github.com/smarr/are-we-fast-yet), MIT licence.
 
+import scarlet/array
+
 type State {
 	v Array(Int)
 	count Int
 	check Int
 }
 
-fn set(xs Array(Int), i Int, x Int) Array(Int) {
-	match xs {
-		[] -> []
-		[h, ..t] -> if i == 0 {
-			[x, ..t]
-		} else {
-			[h, ..set(t, i - 1, x)]
-		}
-	}
-}
-
 fn swap(v Array(Int), i Int, j Int) Array(Int) {
 	a = v[i] or 0
 	b = v[j] or 0
-	v |> set(i, b) |> set(j, a)
+	v |> array::put(i, b) |> array::put(j, a)
 }
 
 fn swaps(s State, n1 Int, i Int) State {

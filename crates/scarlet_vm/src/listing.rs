@@ -307,6 +307,18 @@ impl fmt::Display for Instr {
                 index,
                 default,
             } => write!(f, "{dst} = {name}({src}, {index}, {default})"),
+            Instr::ArraySet {
+                dst,
+                src,
+                index,
+                value,
+                moved,
+                miss,
+            } => write!(
+                f,
+                "{dst} = {name}({}, {index}, {value}) -> {miss}",
+                taken(*src, *moved)
+            ),
             Instr::Bad { why } => write!(f, "{name} {why:?}"),
         }
     }

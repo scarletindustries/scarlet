@@ -2,6 +2,8 @@
 // It stresses array writes in a tight loop. Ported from the Are We Fast Yet
 // suite (https://github.com/smarr/are-we-fast-yet, MIT licence).
 
+import scarlet/array
+
 fn make_flags(n Int, flags Array(Bool)) Array(Bool) {
 	if n == 0 {
 		flags
@@ -10,17 +12,9 @@ fn make_flags(n Int, flags Array(Bool)) Array(Bool) {
 	}
 }
 
-// Arrays have no write at an index, so this cuts the array around the slot
-// and joins the two sides back around the new value.
-fn clear(flags Array(Bool), at Int, size Int) Array(Bool) {
-	before = flags[0..at] or []
-	after = flags[at + 1..size] or []
-	[..before, False, ..after]
-}
-
 fn strike(flags Array(Bool), k Int, step Int, size Int) Array(Bool) {
 	if k <= size {
-		strike(clear(flags, k - 1, size), k + step, step, size)
+		strike(array::put(flags, k - 1, False), k + step, step, size)
 	} else {
 		flags
 	}

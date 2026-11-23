@@ -211,6 +211,24 @@ fn stdlib_array() {
          }\n",
         "[]\n[]\n0\n0\n[]\nFalse\n",
     );
+    // A write at an index. `set` says when the index is outside the array,
+    // and `put` and `swap` leave the array as it was.
+    run_outputs(
+        "import scarlet/array\n\
+         pub fn main() {\n\
+         \txs = ['a', 'b', 'c']\n\
+         \tprintln(array::set(xs, 2, 'z'))\n\
+         \tprintln(array::set(xs, 3, 'z'))\n\
+         \tprintln(array::put(xs, 0, 'z'))\n\
+         \tprintln(array::put(xs, -1, 'z'))\n\
+         \tprintln(array::swap(xs, 0, 2))\n\
+         \tprintln(array::swap(xs, 0, 3))\n\
+         \tprintln(xs |> array::put(1, 'y') |> array::swap(1, 2))\n\
+         \tprintln(xs)\n\
+         }\n",
+        "Ok(\n  [a, b, z]\n)\nErr(Nil)\n[z, b, c]\n[a, b, c]\n[c, b, a]\n[a, b, c]\n\
+         [a, c, y]\n[a, b, c]\n",
+    );
     // `length` wraps a @vm builtin in a plain pub fn, so it can still be used as
     // a value.
     run_outputs(

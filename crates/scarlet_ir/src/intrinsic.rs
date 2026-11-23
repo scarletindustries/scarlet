@@ -81,6 +81,8 @@ intrinsics! {
     IntBitwiseShiftLeft = "int__bitwise_shift_left",
     IntBitwiseShiftRight = "int__bitwise_shift_right",
     ArrayLength = "array__length",
+    ArraySet = "array__set",
+    ArrayPut = "array__put",
     BinaryFromString = "binary__from_string",
     BinaryToString = "binary__to_string",
     BinaryBitSize = "binary__bit_size",

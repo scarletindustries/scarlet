@@ -714,6 +714,17 @@ impl<'c, 'h> Machine<'c, 'h> {
                     let v = Value::cell(v.map_err(fault)?);
                     self.set(base, *dst, v)?;
                 }
+                Instr::ArraySet {
+                    dst,
+                    src,
+                    index,
+                    value,
+                    moved,
+                    miss,
+                } => match self.array_set(base, *src, *index, *value, *moved)? {
+                    Some(array) => self.set(base, *dst, array)?,
+                    None => frame.pc = *miss as usize,
+                },
                 Instr::ArrayIndex { dst, src, index } => {
                     let found = self.index(self.get(base, *src), self.get(base, *index))?;
                     let v = match found {
@@ -2222,6 +2233,55 @@ impl<'c, 'h> Machine<'c, 'h> {
         }
     }
 
+    /// The array in `src` with the value in `value` at the index in `index`,
+    /// holding its own reference, or `None` when the array has no such
+    /// index. A `None` has read the registers and changed nothing. Otherwise
+    /// the write holds one reference to the array, which is the register's
+    /// when `moved` says to take it, and so finds an array nothing else
+    /// holds with a count of 1.
+    #[inline(never)]
+    fn array_set(
+        &mut self,
+        base: usize,
+        src: Reg,
+        index: Reg,
+        value: Arg,
+        moved: bool,
+    ) -> Result<Option<Value>, Stop> {
+        let s = self.seq(self.get(base, src))?;
+        let at = self.position(self.get(base, index))?;
+        let Some(i) = at.filter(|i| (*i as u64) < s.len(&self.heap)) else {
+            return Ok(None);
+        };
+        let x = if value.moved {
+            self.take(base, value.reg)
+        } else {
+            self.share(self.get(base, value.reg))
+        };
+        let array = match s {
+            Seq::Tree(a) => {
+                if moved {
+                    self.take(base, src);
+                } else {
+                    self.heap.share(a);
+                }
+                a
+            }
+            // A range stores no elements to write over, so it is built as a
+            // tree first, which nothing else holds.
+            Seq::Range { .. } => {
+                let a = self.tree(s)?;
+                if moved {
+                    let range = self.take(base, src);
+                    self.release(range)?;
+                }
+                a
+            }
+        };
+        let cell = array::set(&mut self.heap, array, i, x).map_err(fault)?;
+        Ok(Some(Value::cell(cell)))
+    }
+
     /// Element `index` of the array `a`, holding its own reference, or `None`
     /// when it has none.
     #[inline(never)]
@@ -3304,20 +3364,32 @@ mod tests {
         instrs: Vec<Instr>,
         check: impl FnOnce(&mut Machine<'_, '_>, Result<Value, Stop>),
     ) {
+        after_instrs_given(regs, instrs, |_| None, check);
+    }
+
+    /// [`after_instrs`], for a function that takes in `r0` what `given`
+    /// makes in the machine's heap, when it makes something.
+    fn after_instrs_given(
+        regs: u32,
+        instrs: Vec<Instr>,
+        given: impl FnOnce(&mut Heap) -> Option<Value>,
+        check: impl FnOnce(&mut Machine<'_, '_>, Result<Value, Stop>),
+    ) {
         let result = scarlet_core::compile::compile_text("pub fn main() {\n\tNil\n}\n", None);
         assert!(result.success(), "{:?}", result.diagnostics());
         let program = result.into_runnable().expect("a clean compile is runnable");
         let code = crate::code::load(&program).expect("the program loads");
+        let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+        let mut m = Machine::new(&code, &mut host);
+        let args: Vec<Value> = given(&mut m.heap).into_iter().collect();
         let body = Body {
             name: "test.body".to_string(),
             regs,
-            params: Box::new([]),
+            params: args.iter().map(|_| Reg(0)).collect(),
             instrs: instrs.into_boxed_slice(),
             carried: Box::new([]),
         };
-        let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
-        let mut m = Machine::new(&code, &mut host);
-        let got = m.call(&body, &[]);
+        let got = m.call(&body, &args);
         check(&mut m, got);
     }
 
@@ -3451,6 +3523,301 @@ mod tests {
             instrs.extend([mv(1, 1, moved), Instr::Ret { src: Reg(1) }]);
             after_instrs(2, instrs, the_only_cell_left);
         }
+    }
+
+    /// A function that writes the string `new` into the one-element array
+    /// in `r1` at `index`. It returns the array the write made, from `r2`.
+    /// When the write misses it returns `after_miss` instead, and `r2` then
+    /// still holds the 7 it started with.
+    fn a_write(index: i64, moved: bool, value_moved: bool, after_miss: u32) -> Vec<Instr> {
+        let int = |dst: u32, n: i64| Instr::Const {
+            dst: Reg(dst),
+            value: Value::int(n).expect("small"),
+        };
+        let mut instrs = an_array_in_r1().to_vec();
+        instrs.extend([
+            int(2, 7),
+            int(3, index),
+            Instr::Str {
+                dst: Reg(4),
+                text: Box::from(*b"new"),
+            },
+            Instr::ArraySet {
+                dst: Reg(2),
+                src: Reg(1),
+                index: Reg(3),
+                value: Arg {
+                    reg: Reg(4),
+                    moved: value_moved,
+                },
+                moved,
+                miss: 7,
+            },
+            Instr::Ret { src: Reg(2) },
+            Instr::Ret {
+                src: Reg(after_miss),
+            },
+        ]);
+        instrs
+    }
+
+    /// Element 0 of the array `v`, as text when it is a string.
+    fn first_text(m: &Machine<'_, '_>, v: Value) -> Option<String> {
+        let first = array::get(&m.heap, v.as_cell()?, 0)?.as_cell()?;
+        let mut out = Vec::new();
+        m.heap.read_string(first, &mut out);
+        String::from_utf8(out).ok()
+    }
+
+    /// A write that takes the register of an array nothing else holds
+    /// changes it in place: the only cells made are the array's two and the
+    /// string, whether the value is taken or shared.
+    #[test]
+    fn a_write_that_takes_an_array_with_one_holder_makes_no_cell() {
+        for value_moved in [true, false] {
+            after_instrs(5, a_write(0, true, value_moved, 0), |m, got| {
+                assert_eq!(m.heap.made(), 3);
+                let v = *got.as_ref().expect("the function returns");
+                assert_eq!(first_text(m, v).as_deref(), Some("new"));
+                the_only_cell_left(m, got);
+            });
+        }
+    }
+
+    /// A write that shares its array's register finds two holders and
+    /// copies the root and the leaf. The register's array is as it was.
+    #[test]
+    fn a_write_that_shares_its_array_copies_and_leaves_the_old_one_alone() {
+        after_instrs(5, a_write(0, false, true, 0), |m, got| {
+            assert_eq!(m.heap.made(), 5);
+            let v = *got.as_ref().expect("the function returns");
+            assert_eq!(first_text(m, v).as_deref(), Some("new"));
+            the_only_cell_left(m, got);
+        });
+        // The same write, with the old array kept to look at afterwards.
+        let mut kept = a_write(0, false, true, 0);
+        kept[6] = Instr::Ret { src: Reg(1) };
+        after_instrs(5, kept, |m, got| {
+            let v = *got.as_ref().expect("the function returns");
+            let first = v.as_cell().and_then(|a| array::get(&m.heap, a, 0));
+            assert_eq!(first.map(|x| x.bits()), Some(Value::NIL.bits()));
+            the_only_cell_left(m, got);
+        });
+    }
+
+    /// A write at an index the array does not have continues at its miss
+    /// target. It has written nothing and taken nothing, however its
+    /// operands are marked: the array and the value are still in their
+    /// registers with one holder each, and the destination holds what it
+    /// held.
+    #[test]
+    fn a_write_that_misses_takes_nothing_and_writes_nothing() {
+        for index in [1, -1, 1 << 40] {
+            for moved in [true, false] {
+                after_instrs(5, a_write(index, moved, moved, 1), |m, got| {
+                    assert_eq!(m.heap.made(), 3, "index {index}");
+                    let v = *got.as_ref().expect("the function returns");
+                    let first = v.as_cell().and_then(|a| array::get(&m.heap, a, 0));
+                    assert_eq!(first.map(|x| x.bits()), Some(Value::NIL.bits()));
+                    the_only_cell_left(m, got);
+                });
+                after_instrs(5, a_write(index, moved, moved, 4), |m, got| {
+                    let v = *got.as_ref().expect("the function returns");
+                    assert!(v.as_cell().is_some_and(|c| m.heap.string_is(c, b"new")));
+                    the_only_cell_left(m, got);
+                });
+                after_instrs(5, a_write(index, moved, moved, 2), |m, got| {
+                    let bits = got.map(|v| v.bits());
+                    assert_eq!(bits, Ok(Value::int(7).expect("small").bits()));
+                    assert_eq!(m.heap.live(), 0);
+                });
+            }
+        }
+    }
+
+    /// The value may sit in the array's own register. The array is read
+    /// before the value is taken, so the write shares the array, finds two
+    /// holders, and puts the old array in a copy.
+    #[test]
+    fn a_write_of_the_array_into_itself_holds_the_old_array() {
+        let mut instrs = an_array_in_r1().to_vec();
+        instrs.extend([
+            Instr::Const {
+                dst: Reg(3),
+                value: Value::int(0).expect("small"),
+            },
+            Instr::ArraySet {
+                dst: Reg(2),
+                src: Reg(1),
+                index: Reg(3),
+                value: Arg {
+                    reg: Reg(1),
+                    moved: true,
+                },
+                moved: false,
+                miss: 5,
+            },
+            Instr::Ret { src: Reg(2) },
+            Instr::Bad { why: Broken::NoArm },
+        ]);
+        after_instrs(4, instrs, |m, got| {
+            let v = *got.as_ref().expect("the function returns");
+            let outer = v.as_cell().expect("an array");
+            let inner = array::get(&m.heap, outer, 0).and_then(|x| x.as_cell());
+            let inner = inner.expect("the old array, as the element");
+            assert_ne!(inner, outer);
+            assert_eq!(m.heap.unique(inner), Ok(true));
+            let first = array::get(&m.heap, inner, 0).map(|x| x.bits());
+            assert_eq!(first, Some(Value::NIL.bits()));
+            the_only_cell_left(m, got);
+        });
+    }
+
+    /// A function that writes -1 into the range `2..6` in `r1` at `index`,
+    /// and returns what is in `ret`: `r2` for the array the write made, or
+    /// `r1` for the range. A miss returns the range.
+    fn a_write_to_a_range(index: i64, moved: bool, ret: u32) -> Vec<Instr> {
+        let int = |dst: u32, n: i64| Instr::Const {
+            dst: Reg(dst),
+            value: Value::int(n).expect("small"),
+        };
+        vec![
+            int(0, 2),
+            int(4, 6),
+            Instr::Range {
+                dst: Reg(1),
+                start: Reg(0),
+                end: Reg(4),
+            },
+            int(3, index),
+            int(4, -1),
+            Instr::ArraySet {
+                dst: Reg(2),
+                src: Reg(1),
+                index: Reg(3),
+                value: Arg {
+                    reg: Reg(4),
+                    moved: false,
+                },
+                moved,
+                miss: 7,
+            },
+            Instr::Ret { src: Reg(ret) },
+            Instr::Ret { src: Reg(1) },
+        ]
+    }
+
+    /// The Ints in the array `v`, or none when it is not a tree.
+    fn tree_ints(m: &Machine<'_, '_>, v: Value) -> Option<Vec<i64>> {
+        let Ok(Seq::Tree(a)) = m.seq(v) else {
+            return None;
+        };
+        let int = |x: Value| match x.view() {
+            View::Int(n) => Some(n),
+            _ => None,
+        };
+        array::elements(&m.heap, a).into_iter().map(int).collect()
+    }
+
+    /// The two ends of the range `v`, or none when it is not a range.
+    fn range_ends(m: &Machine<'_, '_>, v: Value) -> Option<(i64, i64)> {
+        match m.seq(v) {
+            Ok(Seq::Range { start, end }) => Some((start, end)),
+            Ok(Seq::Tree(_)) | Err(_) => None,
+        }
+    }
+
+    /// A range stores no elements, so a write that does not miss builds its
+    /// elements as a tree and writes into that: a root and a leaf beside the
+    /// range's own cell. The range is given up when the write takes its
+    /// register, and is still the range it was when the write shares it. A
+    /// miss builds nothing.
+    #[test]
+    fn a_write_to_a_range_builds_a_tree_and_leaves_the_range_alone() {
+        for moved in [true, false] {
+            after_instrs(5, a_write_to_a_range(1, moved, 2), |m, got| {
+                assert_eq!(m.heap.made(), 3, "moved {moved}");
+                let v = *got.as_ref().expect("the function returns");
+                assert_eq!(tree_ints(m, v), Some(vec![2, -1, 4, 5]));
+                the_only_cell_left(m, got);
+            });
+            for index in [4, -1] {
+                after_instrs(5, a_write_to_a_range(index, moved, 2), |m, got| {
+                    assert_eq!(m.heap.made(), 1, "index {index}");
+                    let v = *got.as_ref().expect("the function returns");
+                    assert_eq!(range_ends(m, v), Some((2, 6)));
+                    the_only_cell_left(m, got);
+                });
+            }
+        }
+        after_instrs(5, a_write_to_a_range(1, false, 1), |m, got| {
+            let v = *got.as_ref().expect("the function returns");
+            assert_eq!(range_ends(m, v), Some((2, 6)));
+            the_only_cell_left(m, got);
+        });
+    }
+
+    /// A write to something that is not an array, or at something that is
+    /// not an Int, stops the run and says what it found.
+    #[test]
+    fn a_write_to_what_is_not_an_array_or_at_what_is_not_an_int_stops() {
+        let mut not_an_array = a_write(0, true, true, 0);
+        not_an_array[1] = Instr::Const {
+            dst: Reg(1),
+            value: Value::bool(true),
+        };
+        after_instrs(5, not_an_array, |_, got| {
+            let stopped = got.map(|v| v.bits());
+            let want = Broken::NotAnArray(View::Bool(true));
+            assert_eq!(stopped, Err(Stop::broken(want)));
+        });
+        let mut not_an_int = a_write(0, true, true, 0);
+        not_an_int[3] = Instr::Const {
+            dst: Reg(3),
+            value: Value::bool(false),
+        };
+        after_instrs(5, not_an_int, |_, got| {
+            let stopped = got.map(|v| v.bits());
+            let want = Broken::Position(View::Bool(false));
+            assert_eq!(stopped, Err(Stop::broken(want)));
+        });
+    }
+
+    /// A write through a node that was freed while the array still pointed
+    /// at it stops the run as a wrong count, at the write.
+    #[test]
+    fn a_write_through_a_freed_node_stops_the_run_as_a_dead_cell() {
+        let instrs = vec![
+            Instr::Const {
+                dst: Reg(1),
+                value: Value::int(0).expect("small"),
+            },
+            Instr::ArraySet {
+                dst: Reg(2),
+                src: Reg(0),
+                index: Reg(1),
+                value: Arg {
+                    reg: Reg(1),
+                    moved: false,
+                },
+                moved: true,
+                miss: 3,
+            },
+            Instr::Ret { src: Reg(2) },
+            Instr::Ret { src: Reg(0) },
+        ];
+        let with_a_freed_leaf = |heap: &mut Heap| {
+            let array = array::from_values(heap, &[Value::NIL, Value::NIL]).expect("room");
+            // The tail leaf is the last of the root's words.
+            let tail = heap.data(array).last().copied().map(Value::from_bits);
+            let leaf = tail.and_then(Value::as_cell).expect("a tail leaf");
+            heap.release(leaf).expect("a live cell");
+            Some(Value::cell(array))
+        };
+        after_instrs_given(3, instrs, with_a_freed_leaf, |_, got| {
+            let stopped = got.map(|v| v.bits());
+            assert_eq!(stopped, Err(Stop::broken(Broken::DeadCell)));
+        });
     }
 
     /// The array and map code reports a freed cell as a heap fault, and

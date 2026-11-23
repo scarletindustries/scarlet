@@ -70,6 +70,16 @@ Erlang crashes in these cases, and Scarlet gives a harmless value instead.
 
 A slice is a `Result` rather than a shorter array, because a range that misses the array is a failure the caller should see, not one to hide by clamping. `binary::slice_bits` follows the same rule. The old VM crashed on an out-of-range slice instead.
 
+**Built: a write at an index never crashes, and comes in two forms.**
+
+- `array::set(xs, i, x)` is `Result(Array(a), Nil)`: `Ok` of the array with `x` at index `i`, and `Err(Nil)` when `i` is negative or past the end. It is the form that says when the write did not happen, by the stdlib rule that an operation that can fail returns a `Result`.
+- `array::put(xs, i, x)` is `Array(a)`: the same write, and the array as it was when `i` is negative or past the end. It is for a caller that knows the index is inside, or does not mind. Elm's `Array.set` has the same rule.
+- `array::swap(xs, i, j)` changes two elements over, and gives the array as it was when either index is outside it.
+
+None of them changes an array anything else can see. `xs` after `ys = array::put(xs, 0, 9)` is what it was. What differs is the cost. When the write is the last thing to read `xs` and nothing else holds that array, the VM writes the one slot in place and copies nothing. Otherwise it copies the nodes on the way to the slot, at most one a level, and shares the rest. An index outside the array costs a length check and nothing else.
+
+One spelling reads `xs` after the write without looking as if it does. In `match array::set(xs, i, x) { Ok(ys) -> ys  Err(Nil) -> xs }`, and in `array::set(xs, i, x) or xs`, the fallback reads `xs`. The VM builds the `Result` before it matches on it, so it cannot yet tell that the fallback runs only when nothing was written, and the write copies. `array::put(xs, i, x)` means the same and writes in place. This limit goes when a match on the call is compiled as the write's own two ways out (step 19 of `docs/perf-plan.md`).
+
 ## Fields
 
 **Built: a field is found by its name.**

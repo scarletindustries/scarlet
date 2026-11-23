@@ -2,23 +2,13 @@
 // boolean arrays of free rows and diagonals. Stresses array reads and writes.
 // Ported from https://github.com/smarr/are-we-fast-yet (MIT licence).
 
+import scarlet/array
+
 type Board {
 	rows Array(Bool)
 	maxs Array(Bool)
 	mins Array(Bool)
 	queens Array(Int)
-}
-
-// The array with `v` at index `i`. An index past the end changes nothing.
-fn set(xs Array(a), i Int, v a) Array(a) {
-	match xs {
-		[] -> []
-		[h, ..t] -> if i == 0 {
-			[v, ..t]
-		} else {
-			[h, ..set(t, i - 1, v)]
-		}
-	}
 }
 
 fn filled(n Int, v a) Array(a) {
@@ -35,10 +25,10 @@ fn is_free(b Board, r Int, c Int) Bool {
 
 fn take(b Board, r Int, c Int) Board {
 	Board(
-		rows: set(b.rows, r, False),
-		maxs: set(b.maxs, c + r, False),
-		mins: set(b.mins, c - r + 7, False),
-		queens: set(b.queens, r, c),
+		rows: array::put(b.rows, r, False),
+		maxs: array::put(b.maxs, c + r, False),
+		mins: array::put(b.mins, c - r + 7, False),
+		queens: array::put(b.queens, r, c),
 	)
 }
 

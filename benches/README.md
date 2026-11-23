@@ -24,10 +24,8 @@ of.
 
 Judge a change by the instruction counts, which `run.py` prints first. They
 repeat to about one part in a thousand from run to run, so a change smaller
-than that is not a change. `sieve` wanders most, by up to 0.15%, because it
-copies large arrays and the cost of a copy moves with where the memory
-happens to sit. Cycles are printed beside the instructions, and time last: on
-a busy machine time is noise.
+than that is not a change. Cycles are printed beside the instructions, and
+time last: on a busy machine time is noise.
 
 To judge a change to the VM, save a run before it and compare after it:
 

@@ -708,6 +708,26 @@ impl Heap {
         }
     }
 
+    /// A new cell with the kind and words of `cell` and one reference, which
+    /// is the caller's. Everything `cell` holds gets one more reference, for
+    /// the copy. A freed cell has nothing to copy and is [`Fault::DeadCell`].
+    /// This is for an array's nodes, which a write copies when something
+    /// else holds them. It is not for a handle, whose number the host would
+    /// then be asked to let go of twice.
+    pub(crate) fn copy(&mut self, cell: Cell) -> Result<Cell, Fault> {
+        let h = self.word(cell, 0);
+        let kind = kind_of(h).ok_or(Fault::DeadCell)?;
+        let words = size(h).saturating_sub(1);
+        let new = self.alloc(kind, 0, words)?;
+        self.copy_words(cell, 0..words, new, 0);
+        for i in held(kind_bits(h), size(h)) {
+            if let Some(held) = Value::from_bits(self.word(new, i)).as_cell() {
+                self.share(held);
+            }
+        }
+        Ok(new)
+    }
+
     /// Free `cell`, whose one holder has moved what it held somewhere else,
     /// so nothing it holds is released. A cell freed already is
     /// [`DeadCell`].
@@ -1103,6 +1123,62 @@ mod tests {
         assert_eq!(heap.elements(empty).count(), 0);
         heap.release(empty).expect("a live cell");
         heap.release(cell).expect("a live cell");
+        assert_eq!(heap.live(), 0);
+    }
+
+    /// A copy of an array node is a new cell with the same kind and words
+    /// and one holder. It adds one reference to each cell the node holds and
+    /// to nothing else: a root's length and a branch's size table are plain
+    /// numbers, even when one has the bits of a cell.
+    #[test]
+    fn a_copy_of_a_node_shares_what_the_node_holds_and_nothing_else() {
+        let mut heap = Heap::default();
+        let held = heap.string(b"held").expect("room");
+        let number = heap.string(b"only a number's bits").expect("room");
+        let (h, n) = (Value::cell(held).bits(), Value::cell(number).bits());
+        let nil = Value::NIL.bits();
+        for (kind, data) in [
+            (Kind::ArrayLeaf, vec![nil, h, nil]),
+            // Its height, two sizes, then two children.
+            (Kind::ArrayBranch, vec![n, n, n, h, nil]),
+            // Its length, height and offset, then the head, tree and tail.
+            (Kind::ArrayRoot, vec![n, n, n, nil, h, nil]),
+        ] {
+            let node = heap.make(kind, &data).expect("room");
+            heap.share(held);
+            let made = heap.made();
+            let copy = heap.copy(node).expect("room");
+            assert_ne!(copy, node);
+            assert_eq!(heap.made() - made, 1);
+            assert_eq!(heap.kind(copy), Some(kind));
+            assert_eq!(heap.data(copy), data.as_slice());
+            assert_eq!(heap.unique(copy), Ok(true));
+            assert_eq!(heap.unique(node), Ok(true));
+            // The string has its first holder and the node's. Giving up
+            // both nodes leaves just the first, so the copy held it once.
+            heap.release(node).expect("a live cell");
+            assert_eq!(heap.unique(held), Ok(false), "{kind:?}");
+            heap.release(copy).expect("a live cell");
+            assert_eq!(heap.unique(held), Ok(true), "{kind:?}");
+            assert_eq!(heap.unique(number), Ok(true), "{kind:?}");
+            assert_eq!(heap.live(), 2);
+        }
+        heap.release(held).expect("a live cell");
+        heap.release(number).expect("a live cell");
+        assert_eq!(heap.live(), 0);
+    }
+
+    /// A freed cell has nothing to copy. Asking makes no cell.
+    #[test]
+    fn a_copy_of_a_freed_cell_is_a_dead_cell() {
+        let mut heap = Heap::default();
+        let leaf = heap
+            .make(Kind::ArrayLeaf, &[Value::NIL.bits()])
+            .expect("room");
+        heap.release(leaf).expect("a live cell");
+        let made = heap.made();
+        assert_eq!(heap.copy(leaf), Err(Fault::DeadCell));
+        assert_eq!(heap.made(), made);
         assert_eq!(heap.live(), 0);
     }
 

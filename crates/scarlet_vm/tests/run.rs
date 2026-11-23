@@ -970,6 +970,285 @@ fn a_slice_is_a_result() {
     );
 }
 
+/// `array::put` gives the array with one element changed, and the array it
+/// was given is as it was for anything that still holds it. An index the
+/// array does not have changes nothing. `array::set` is the same write, and
+/// says whether the index was there.
+#[test]
+fn a_write_at_an_index_gives_a_new_array_and_leaves_the_old_one() {
+    prints(
+        "import scarlet/array\n\
+         const kept = ['a', 'b', 'c']\n\
+         pub fn main() {\n\
+         \txs = [1, 2, 3]\n\
+         \tprintln(array::put(xs, 1, 9))\n\
+         \tprintln(array::put(xs, 3, 9))\n\
+         \tprintln(array::put(xs, -1, 9))\n\
+         \tprintln(array::put(xs, 9223372036854775807 * 1000, 9))\n\
+         \tprintln(array::put([], 0, 9))\n\
+         \tprintln(array::set(xs, 0, 7))\n\
+         \tprintln(array::set(xs, 3, 7))\n\
+         \tprintln(array::set(xs, -1, 7))\n\
+         \tprintln(xs)\n\
+         \tprintln(array::put(kept, 2, 'z'))\n\
+         \tprintln(kept)\n\
+         \tprintln(array::put(0..5, 2, 40))\n\
+         \tprintln(array::put(0..5, 5, 40))\n\
+         \tprintln(array::put([[1], [2]], 0, [3, 4]))\n\
+         \tput = array::put\n\
+         \tset = array::set\n\
+         \tprintln(put(xs, 2, 0))\n\
+         \tprintln(set(xs, 9, 0))\n\
+         \tmatch array::set(xs, 1, 5) {\n\
+         \t\tOk(ys) -> println('wrote ${ys}, kept ${xs}')\n\
+         \t\tErr(Nil) -> println('missed')\n\
+         \t}\n\
+         \tmatch array::set(xs, 5, 5) {\n\
+         \t\tOk(ys) -> println(ys)\n\
+         \t\tErr(Nil) -> println('missed, kept ${xs}')\n\
+         \t}\n\
+         \tr = 0..6\n\
+         \tw = array::put(r, 2, 100)\n\
+         \tprintln(w)\n\
+         \tprintln(r)\n\
+         \tprintln(array::put(w, 3, 200))\n\
+         \tprintln(array::set(r, 6, 0))\n\
+         \tprintln(array::length(r))\n\
+         }\n",
+        "[1, 9, 3]\n[1, 2, 3]\n[1, 2, 3]\n[1, 2, 3]\n[]\n\
+         Ok(\n  [7, 2, 3]\n)\nErr(Nil)\nErr(Nil)\n[1, 2, 3]\n\
+         [a, b, z]\n[a, b, c]\n[0, 1, 40, 3, 4]\n[0, 1, 2, 3, 4]\n\
+         [\n  [3, 4],\n  [2]\n]\n[1, 2, 0]\nErr(Nil)\n\
+         wrote [1, 5, 3], kept [1, 2, 3]\nmissed, kept [1, 2, 3]\n\
+         [0, 1, 100, 3, 4, 5]\n[0, 1, 2, 3, 4, 5]\n[0, 1, 100, 200, 4, 5]\nErr(Nil)\n6\n",
+    );
+}
+
+/// A write to an array nothing else holds changes it in place. Filling a
+/// 5,000-element array one slot at a time makes no cell at all, and the
+/// same loop over an array something else holds copies a path each time.
+#[test]
+fn a_write_to_an_array_with_one_holder_changes_it_in_place() {
+    prints(
+        "import scarlet/array\n\
+         import scarlet/internal\n\
+         fn build(n Int, acc Array(Int)) Array(Int) {\n\
+         \tif n == 0 { acc } else { build(n - 1, [..acc, 0]) }\n\
+         }\n\
+         fn fill(xs Array(Int), i Int, n Int) Array(Int) {\n\
+         \tif i == n { xs } else { fill(array::put(xs, i, i * 2), i + 1, n) }\n\
+         }\n\
+         fn checked(xs Array(Int), i Int, n Int) Array(Int) {\n\
+         \tif i == n {\n\
+         \t\txs\n\
+         \t} else {\n\
+         \t\tmatch array::set(xs, i, i * 3) {\n\
+         \t\t\tOk(ys) -> checked(ys, i + 1, n)\n\
+         \t\t\tErr(Nil) -> []\n\
+         \t\t}\n\
+         \t}\n\
+         }\n\
+         fn sum(xs Array(Int), acc Int) Int {\n\
+         \tmatch xs {\n\
+         \t\t[] -> acc\n\
+         \t\t[h, ..t] -> sum(t, acc + h)\n\
+         \t}\n\
+         }\n\
+         fn held(xs Array(Int), i Int, n Int, acc Int) Int {\n\
+         \tif i == n {\n\
+         \t\tacc\n\
+         \t} else {\n\
+         \t\tys = array::put(xs, i, 1)\n\
+         \t\theld(xs, i + 1, n, acc + { ys[i] or 0 } + { xs[i] or 0 })\n\
+         \t}\n\
+         }\n\
+         pub fn main() {\n\
+         \txs = build(5000, [])\n\
+         \tmade = internal::cells_made()\n\
+         \tys = fill(xs, 0, 5000)\n\
+         \tprintln(internal::cells_made() - made)\n\
+         \tprintln(sum(ys, 0))\n\
+         \tzs = build(5000, [])\n\
+         \tmade = internal::cells_made()\n\
+         \tzs = checked(zs, 0, 5000)\n\
+         \tprintln(internal::cells_made() - made)\n\
+         \tprintln(sum(zs, 0))\n\
+         \tws = build(100, [])\n\
+         \tmade = internal::cells_made()\n\
+         \tprintln(held(ws, 0, 100, 0))\n\
+         \tprintln(internal::cells_made() - made)\n\
+         }\n",
+        // `checked` makes one `Ok` a turn, and no array cell, because its
+        // `Err` arm does not read `xs`. `held` copies the root and the
+        // nodes down to the slot: a branch and a leaf for the 96 elements in
+        // the tree, and the tail leaf for the last 4.
+        "0\n24995000\n5000\n37492500\n100\n296\n",
+    );
+}
+
+/// A checked write is in place only when nothing reads the array after the
+/// call, and an `Err` arm that gives the array back is such a read: the
+/// `Result` is built before it is matched, so the loader cannot tell that
+/// the arm runs only after a miss. Each write then copies the root and the
+/// nodes down to the slot, whether the fallback is spelled as an arm or
+/// with `or`. `array::put` is the same fallback inside the write, and
+/// copies nothing.
+///
+/// The 24,984 is a limit to remove, not a rule to keep. Once a match on
+/// the call loads as the write's two edges, it is the 5,000 `Ok` cells or
+/// fewer.
+#[test]
+fn a_checked_write_copies_when_its_err_arm_reads_the_array() {
+    prints(
+        "import scarlet/array\n\
+         import scarlet/internal\n\
+         fn build(n Int, acc Array(Int)) Array(Int) {\n\
+         \tif n == 0 { acc } else { build(n - 1, [..acc, 0]) }\n\
+         }\n\
+         fn arm(xs Array(Int), i Int, n Int) Array(Int) {\n\
+         \tif i == n {\n\
+         \t\txs\n\
+         \t} else {\n\
+         \t\tmatch array::set(xs, i, i * 3) {\n\
+         \t\t\tOk(ys) -> arm(ys, i + 1, n)\n\
+         \t\t\tErr(Nil) -> xs\n\
+         \t\t}\n\
+         \t}\n\
+         }\n\
+         fn or_else(xs Array(Int), i Int, n Int) Array(Int) {\n\
+         \tif i == n { xs } else { or_else(array::set(xs, i, i * 3) or xs, i + 1, n) }\n\
+         }\n\
+         fn total(xs Array(Int), i Int, n Int) Array(Int) {\n\
+         \tif i == n { xs } else { total(array::put(xs, i, i * 3), i + 1, n) }\n\
+         }\n\
+         fn sum(xs Array(Int), acc Int) Int {\n\
+         \tmatch xs {\n\
+         \t\t[] -> acc\n\
+         \t\t[h, ..t] -> sum(t, acc + h)\n\
+         \t}\n\
+         }\n\
+         pub fn main() {\n\
+         \ta = build(5000, [])\n\
+         \tmade = internal::cells_made()\n\
+         \ta = arm(a, 0, 5000)\n\
+         \tprintln(internal::cells_made() - made)\n\
+         \tprintln(sum(a, 0))\n\
+         \tb = build(5000, [])\n\
+         \tmade = internal::cells_made()\n\
+         \tb = or_else(b, 0, 5000)\n\
+         \tprintln(internal::cells_made() - made)\n\
+         \tprintln(sum(b, 0))\n\
+         \tc = build(5000, [])\n\
+         \tmade = internal::cells_made()\n\
+         \tc = total(c, 0, 5000)\n\
+         \tprintln(internal::cells_made() - made)\n\
+         \tprintln(sum(c, 0))\n\
+         }\n",
+        // An `Ok` a turn, and beside it the root, two branches and a leaf
+        // for the 4,992 elements in the tree, and the root and the tail
+        // leaf for the last 8.
+        "24984\n37492500\n24984\n37492500\n0\n37492500\n",
+    );
+}
+
+/// `array::swap` on an array nothing else holds changes it in place. The
+/// only cells 500 swaps make are the two `Some` each one reads its
+/// elements through, and the 1,000-element array is never copied.
+#[test]
+fn a_swap_of_an_array_with_one_holder_changes_it_in_place() {
+    prints(
+        "import scarlet/array\n\
+         import scarlet/internal\n\
+         fn build(n Int, acc Array(Int)) Array(Int) {\n\
+         \tif n == 0 { acc } else { build(n - 1, [..acc, n]) }\n\
+         }\n\
+         fn turn(xs Array(Int), i Int, j Int) Array(Int) {\n\
+         \tif i >= j { xs } else { turn(array::swap(xs, i, j), i + 1, j - 1) }\n\
+         }\n\
+         pub fn main() {\n\
+         \txs = build(1000, [])\n\
+         \tmade = internal::cells_made()\n\
+         \tys = turn(xs, 0, 999)\n\
+         \tprintln(internal::cells_made() - made)\n\
+         \tprintln(ys[0..3])\n\
+         \tprintln(ys[997..1000])\n\
+         }\n",
+        "1000\nOk(\n  [1, 2, 3]\n)\nOk(\n  [998, 999, 1000]\n)\n",
+    );
+}
+
+/// Elements that are cells: the one a write replaces is given up, the one it
+/// puts in is held, and an array kept beside its changed copy shares the
+/// rest. The audit at the end of the run finds every count right.
+#[test]
+fn a_write_keeps_every_element_counted() {
+    prints(
+        "import scarlet/array\n\
+         type Board {\n\
+         \trows Array(String)\n\
+         \tturn Int\n\
+         }\n\
+         fn names(n Int, acc Array(String)) Array(String) {\n\
+         \tif n == 0 { acc } else { names(n - 1, ['n${n}', ..acc]) }\n\
+         }\n\
+         fn mark(b Board, i Int) Board {\n\
+         \tBoard(..b, rows: array::put(b.rows, i, 'x${i}'), turn: b.turn + 1)\n\
+         }\n\
+         fn play(b Board, i Int) Board {\n\
+         \tif i >= 40 { b } else { play(mark(b, i), i + 3) }\n\
+         }\n\
+         pub fn main() {\n\
+         \tstart = Board(names(40, []), 0)\n\
+         \tdone = play(start, 0)\n\
+         \tprintln(done.turn)\n\
+         \tprintln(done.rows[0..7])\n\
+         \tprintln(start.rows[0..7])\n\
+         \tswapped = array::swap(done.rows, 0, 39)\n\
+         \tprintln(swapped[0])\n\
+         \tprintln(swapped[39])\n\
+         \tprintln(done.rows[39])\n\
+         \tprintln(array::swap(['a', 'b', 'c'], 0, 2))\n\
+         \tprintln(array::swap(['a', 'b', 'c'], 1, 1))\n\
+         \tprintln(array::swap(['a', 'b', 'c'], 0, 3))\n\
+         \tprintln(array::swap(['a', 'b', 'c'], -1, 0))\n\
+         \tkeep = fn(i) array::put(start.rows, i, 'kept')\n\
+         \tprintln(keep(1)[0..3])\n\
+         \tprintln(start.rows[0..3])\n\
+         \tjoined = if done.turn > 3 { array::put(done.rows, 0, 'first') } else { done.rows }\n\
+         \tprintln(joined[0])\n\
+         }\n",
+        "14\nOk(\n  [x0, n2, n3, x3, n5, n6, x6]\n)\nOk(\n  [n1, n2, n3, n4, n5, n6, n7]\n)\n\
+         Some(x39)\nSome(x0)\nSome(x39)\n[c, b, a]\n[a, b, c]\n[a, b, c]\n[a, b, c]\n\
+         Ok(\n  [n1, kept, n3]\n)\nOk(\n  [n1, n2, n3]\n)\nSome(first)\n",
+    );
+}
+
+/// The listing shows a write with the array it takes marked, as it marks an
+/// argument a call takes, and where the write continues when it misses.
+#[test]
+fn the_listing_shows_a_write_and_where_a_miss_goes() {
+    let src = "import scarlet/array\n\
+               fn strike(flags Array(Bool), k Int) Array(Bool) {\n\
+               \tarray::put(flags, k - 1, False)\n\
+               }\n\
+               pub fn main() {\n\
+               \tprintln(strike([True, True], 2))\n\
+               }\n";
+    let listing = scarlet_vm::listing(&compile(src)).expect("the program loads");
+    // `array::swap` has two writes of its own, and comes first.
+    let strike = (0..)
+        .map_while(|i| listing.function(i))
+        .filter(|f| f.contains("ArraySet"))
+        .last()
+        .expect("strike is listed");
+    assert!(
+        strike.contains("= ArraySet(move r0, r1, move r2) -> 4\n"),
+        "{strike}"
+    );
+    assert!(strike.contains("    4  r"), "{strike}");
+    assert!(strike.contains(" = Move move r0\n"), "{strike}");
+}
+
 /// A range stores only its two ends, and is an array of Ints in every way a
 /// program can see. It can be shown, indexed, walked, sliced, spread and
 /// joined.
