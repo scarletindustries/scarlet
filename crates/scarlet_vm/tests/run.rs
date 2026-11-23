@@ -1223,6 +1223,454 @@ fn a_write_keeps_every_element_counted() {
     );
 }
 
+/// A record update reads the fields it keeps as soon as its base has run,
+/// before any field written after it. So in
+/// `State(..s, v: array::put(s.v, i, x))` the read of `s.v` is the last use
+/// of `s`, the record is given up before the write, and the write finds the
+/// array with one holder. Each turn then makes the new `State` and no array
+/// cell. Where the `..s` is written makes no difference, and neither does an
+/// argument before the write that reads `s`, or reading the array into a
+/// name of its own before the update. Taking the record apart with a `match`
+/// makes no cell at all, because the pattern proves the shape and the new
+/// `State` takes the old one's cell.
+///
+/// Two spellings still copy the root and the nodes down to the slot at
+/// every write, 24,984 cells with the 5,000 records. The first is a rule:
+/// an argument written after the write reads `s`, so `s` has to live past
+/// the write. The second is a limit to remove, not a rule to keep: an
+/// update inside an `if` used as a value copies because no drop is placed
+/// inside a branch that gives a value. Step 17 of docs/perf-plan.md should
+/// bring it to 5,000.
+///
+/// A third spelling copies each node of the tree once, 164 cells on top of
+/// the 5,000 records, and is a limit too. A record `main` built itself is
+/// kept across the call, so that a later `State` can take its cell, and it
+/// holds the array until the call returns. Step 13 should bring it to
+/// 5,000.
+#[test]
+fn a_record_update_gives_up_the_record_before_it_runs_the_new_fields() {
+    prints(
+        "import scarlet/array\n\
+         import scarlet/internal\n\
+         type State {\n\
+         \tv Array(Int)\n\
+         \tcount Int\n\
+         \tcheck Int\n\
+         }\n\
+         fn build(n Int, acc Array(Int)) Array(Int) {\n\
+         \tif n == 0 { acc } else { build(n - 1, [..acc, 0]) }\n\
+         }\n\
+         fn fresh(n Int) State { State(build(n, []), 0, 0) }\n\
+         fn first(s State, i Int, n Int) State {\n\
+         \tif i == n { s } else { first(State(..s, v: array::put(s.v, i, i * 3)), i + 1, n) }\n\
+         }\n\
+         fn last(s State, i Int, n Int) State {\n\
+         \tif i == n { s } else { last(State(v: array::put(s.v, i, i * 3), ..s), i + 1, n) }\n\
+         }\n\
+         fn matched(s State, i Int, n Int) State {\n\
+         \tif i == n {\n\
+         \t\ts\n\
+         \t} else {\n\
+         \t\tmatch s {\n\
+         \t\t\tState(v, count, check) -> matched(State(array::put(v, i, i * 3), count, check), i + 1, n)\n\
+         \t\t}\n\
+         \t}\n\
+         }\n\
+         fn earlier(s State, i Int, n Int) State {\n\
+         \tif i == n { s } else { earlier(State(..s, count: s.count + 1, v: array::put(s.v, i, i * 3)), i + 1, n) }\n\
+         }\n\
+         fn named(s State, i Int, n Int) State {\n\
+         \tif i == n {\n\
+         \t\ts\n\
+         \t} else {\n\
+         \t\tv = s.v\n\
+         \t\tnamed(State(..s, v: array::put(v, i, i * 3)), i + 1, n)\n\
+         \t}\n\
+         }\n\
+         fn later(s State, i Int, n Int) State {\n\
+         \tif i == n { s } else { later(State(..s, v: array::put(s.v, i, i * 3), count: s.count + 1), i + 1, n) }\n\
+         }\n\
+         fn joined(s State, i Int, n Int) State {\n\
+         \tif i == n {\n\
+         \t\ts\n\
+         \t} else {\n\
+         \t\tt = if i >= 0 { State(..s, v: array::put(s.v, i, i * 3)) } else { s }\n\
+         \t\tjoined(t, i + 1, n)\n\
+         \t}\n\
+         }\n\
+         fn sum(xs Array(Int), acc Int) Int {\n\
+         \tmatch xs {\n\
+         \t\t[] -> acc\n\
+         \t\t[h, ..t] -> sum(t, acc + h)\n\
+         \t}\n\
+         }\n\
+         fn cells(run fn(State, Int, Int) State) Int {\n\
+         \ts = fresh(5000)\n\
+         \tmade = internal::cells_made()\n\
+         \ts = run(s, 0, 5000)\n\
+         \tmade = internal::cells_made() - made\n\
+         \tprintln(sum(s.v, 0) + s.count)\n\
+         \tmade\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(cells(first))\n\
+         \tprintln(cells(last))\n\
+         \tprintln(cells(matched))\n\
+         \tprintln(cells(earlier))\n\
+         \tprintln(cells(named))\n\
+         \tprintln(cells(later))\n\
+         \tprintln(cells(joined))\n\
+         \tkept = State(build(5000, []), 0, 0)\n\
+         \tmade = internal::cells_made()\n\
+         \tdone = first(kept, 0, 5000)\n\
+         \tprintln(internal::cells_made() - made)\n\
+         \tprintln(sum(done.v, 0))\n\
+         \tprintln(State(..done, check: 1).check)\n\
+         }\n",
+        "37492500\n5000\n37492500\n5000\n37492500\n0\n37497500\n5000\n37492500\n5000\n\
+         37497500\n24984\n37492500\n24984\n5164\n37492500\n1\n",
+    );
+}
+
+/// A record update never changes a record something else still holds. Here
+/// `p`, `q` and `w` are each read after an update of them, so the write
+/// under the update copies, and each keeps what it held. The kept fields
+/// are cells too, and the audit at the end of the run finds every count
+/// right. The last type holds `xs` in a different slot in each variant, so
+/// the update reads it through a `match` on the variant.
+#[test]
+fn a_record_update_leaves_a_record_that_is_still_held_alone() {
+    prints(
+        "import scarlet/array\n\
+         type Page {\n\
+         \ttitle String\n\
+         \tlines Array(String)\n\
+         \ttags Array(String)\n\
+         }\n\
+         type Shape {\n\
+         \tWide(pad Int, xs Array(Int), n Int)\n\
+         \tThin(xs Array(Int), n Int)\n\
+         }\n\
+         fn retitle(p Page, i Int) Page {\n\
+         \tPage(..p, title: 'page ${i}', lines: array::put(p.lines, 0, 'line ${i}'))\n\
+         }\n\
+         fn thin(s Shape) Shape { Thin(..s, n: array::length(s.xs)) }\n\
+         pub fn main() {\n\
+         \tp = Page('first', ['a', 'b'], ['x', 'y'])\n\
+         \tq = retitle(p, 2)\n\
+         \tr = Page(lines: [..q.lines, 'c'], ..q)\n\
+         \tprintln(p)\n\
+         \tprintln(q)\n\
+         \tprintln(r)\n\
+         \tprintln(retitle(retitle(Page('t', ['l'], []), 3), 4))\n\
+         \tw = Wide(0, [1, 2, 3], 0)\n\
+         \tprintln(thin(w))\n\
+         \tprintln(thin(Thin([4, 5], 0)))\n\
+         \tprintln(w)\n\
+         }\n",
+        "Page {\n  title: first,\n  lines: [a, b],\n  tags: [x, y]\n}\n\
+         Page {\n  title: page 2,\n  lines: [line 2, b],\n  tags: [x, y]\n}\n\
+         Page {\n  title: page 2,\n  lines: [line 2, b, c],\n  tags: [x, y]\n}\n\
+         Page {\n  title: page 4,\n  lines: [line 4],\n  tags: []\n}\n\
+         Thin(\n  [1, 2, 3],\n  3\n)\nThin(\n  [4, 5],\n  2\n)\nWide(\n  0,\n  [1, 2, 3],\n  0\n)\n",
+    );
+}
+
+/// The base of a record update and the fields it is given run in the order
+/// they are written, whichever slot each one fills, so what they print comes
+/// out in that order. A base that is only a name has nothing to run.
+#[test]
+fn a_record_update_runs_its_parts_in_the_order_written() {
+    prints(
+        "type P {\n\
+         \ta Int\n\
+         \tb Int\n\
+         \tc Int\n\
+         }\n\
+         fn say(name String, x Int) Int {\n\
+         \tprintln(name)\n\
+         \tx\n\
+         }\n\
+         fn base(name String) P {\n\
+         \tprintln(name)\n\
+         \tP(10, 20, 30)\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(P(a: say('a', 1), ..base('base'), c: say('c', 3)))\n\
+         \tprintln(P(c: say('c', 3), a: say('a', 1), ..base('base')))\n\
+         \tprintln(P(..base('base'), c: say('c', 3), a: say('a', 1)))\n\
+         \tp = base('p')\n\
+         \tprintln(P(c: say('c', 3), ..p, a: say('a', p.b)))\n\
+         }\n",
+        "a\nbase\nc\nP{ a: 1, b: 20, c: 3 }\n\
+         c\na\nbase\nP{ a: 1, b: 20, c: 3 }\n\
+         base\nc\na\nP{ a: 1, b: 20, c: 3 }\n\
+         p\nc\na\nP{ a: 20, b: 20, c: 3 }\n",
+    );
+}
+
+/// A field or a tuple element read off a name has nothing to run, as a name
+/// has not, so a base such as `..o.inner` may be written anywhere. Each turn
+/// makes the two records, or the tuple and the record, and no array cell,
+/// where it made 29,984 cells when the kept fields were read last.
+#[test]
+fn a_nested_record_update_writes_in_place_wherever_its_spread_is() {
+    prints(
+        "import scarlet/array\n\
+         import scarlet/internal\n\
+         type Inner {\n\
+         \tv Array(Int)\n\
+         \ttag Int\n\
+         }\n\
+         type Outer {\n\
+         \tinner Inner\n\
+         \tcount Int\n\
+         }\n\
+         fn build(n Int, acc Array(Int)) Array(Int) {\n\
+         \tif n == 0 { acc } else { build(n - 1, [..acc, 0]) }\n\
+         }\n\
+         fn fresh(n Int) Outer { Outer(Inner(build(n, []), 1), 0) }\n\
+         fn start(n Int) (Int, Inner) { (0, Inner(build(n, []), 1)) }\n\
+         fn first(o Outer, i Int, n Int) Outer {\n\
+         \tif i == n {\n\
+         \t\to\n\
+         \t} else {\n\
+         \t\tfirst(Outer(..o, inner: Inner(..o.inner, v: array::put(o.inner.v, i, i * 3))), i + 1, n)\n\
+         \t}\n\
+         }\n\
+         fn last(o Outer, i Int, n Int) Outer {\n\
+         \tif i == n {\n\
+         \t\to\n\
+         \t} else {\n\
+         \t\tlast(Outer(inner: Inner(v: array::put(o.inner.v, i, i * 3), ..o.inner), ..o), i + 1, n)\n\
+         \t}\n\
+         }\n\
+         fn pair(t (Int, Inner), i Int, n Int) (Int, Inner) {\n\
+         \tif i == n { t } else { pair((t.0 + 1, Inner(v: array::put(t.1.v, i, i * 3), ..t.1)), i + 1, n) }\n\
+         }\n\
+         fn sum(xs Array(Int), acc Int) Int {\n\
+         \tmatch xs {\n\
+         \t\t[] -> acc\n\
+         \t\t[h, ..t] -> sum(t, acc + h)\n\
+         \t}\n\
+         }\n\
+         fn cells(run fn(Outer, Int, Int) Outer) Int {\n\
+         \to = fresh(5000)\n\
+         \tmade = internal::cells_made()\n\
+         \to = run(o, 0, 5000)\n\
+         \tmade = internal::cells_made() - made\n\
+         \tprintln(sum(o.inner.v, 0) + o.inner.tag + o.count)\n\
+         \tmade\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(cells(first))\n\
+         \tprintln(cells(last))\n\
+         \tt = start(5000)\n\
+         \tmade = internal::cells_made()\n\
+         \tt = pair(t, 0, 5000)\n\
+         \tprintln(internal::cells_made() - made)\n\
+         \tprintln(sum(t.1.v, 0) + t.0)\n\
+         }\n",
+        "37492501\n10000\n37492501\n10000\n10000\n37497500\n",
+    );
+}
+
+/// A map held in a record is set in place the same way. In `by_key` the
+/// record is given up before the set, and the set finds the map with one
+/// holder: 1,000 sets of keys the map already has make the 1,000 records,
+/// the 1,000 tasks and their 1,000 empty arrays, and no map cell.
+///
+/// `by_task` is a limit to remove, not a rule to keep. It is the same
+/// update, and the record is given up before the set there too, but the
+/// set still copies, 5,436 cells. The value is a cell bound before the
+/// update, so its drop comes after the set and before the map's, and the
+/// loader only lets a set take its map when the map's drop is the first
+/// thing after it. Step 33 of docs/perf-plan.md sets that from liveness and
+/// should bring the second number to 3,000.
+#[test]
+fn a_record_update_sets_a_map_it_holds_in_place() {
+    prints(
+        "import scarlet/internal\n\
+         import scarlet/map\n\
+         type Task {\n\
+         \tidentity Int\n\
+         \tnames Array(String)\n\
+         }\n\
+         type Sched {\n\
+         \ttasks map::Map(Int, Task)\n\
+         \theld Int\n\
+         }\n\
+         fn by_key(s Sched, k Int) Sched {\n\
+         \tSched(..s, tasks: map::set(s.tasks, k, Task(k, [])))\n\
+         }\n\
+         fn by_task(s Sched, t Task) Sched {\n\
+         \tSched(..s, tasks: map::set(s.tasks, t.identity, t))\n\
+         }\n\
+         fn keyed(s Sched, i Int, n Int) Sched {\n\
+         \tif i == n { s } else { keyed(by_key(s, i % 16), i + 1, n) }\n\
+         }\n\
+         fn tasked(s Sched, i Int, n Int) Sched {\n\
+         \tif i == n { s } else { tasked(by_task(s, Task(i % 16, [])), i + 1, n) }\n\
+         }\n\
+         fn cells(run fn(Sched, Int, Int) Sched) Int {\n\
+         \ts = run(Sched(map::new(), 0), 0, 16)\n\
+         \tmade = internal::cells_made()\n\
+         \ts = run(s, 16, 1016)\n\
+         \tmade = internal::cells_made() - made\n\
+         \tprintln(s.held + map::size(s.tasks))\n\
+         \tmade\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(cells(keyed))\n\
+         \tprintln(cells(tasked))\n\
+         }\n",
+        "16\n3000\n16\n5436\n",
+    );
+}
+
+/// Giving the record up early has a cost in one shape, pinned here as a
+/// limit to remove. `t` is built in the same function, so its drop leaves
+/// its cell for the next `P` to take. That drop used to sit straight before
+/// the new `P`. It now comes before the new field, and when that field is
+/// an `if` used as a value the cell is not carried past it: the old cell is
+/// freed and the new record is made fresh, 20,001 cells and none reused
+/// where it was 10,001 and 10,000. A field that is a call keeps the cell.
+/// Step 13 of docs/perf-plan.md takes reuse away and step 16 updates such a
+/// record where it is, so the second pair of numbers changes at both.
+#[test]
+fn a_record_update_loses_its_cell_to_a_branch_in_a_later_field() {
+    prints(
+        "import scarlet/internal\n\
+         type P {\n\
+         \ta Int\n\
+         \tb Int\n\
+         \tc Int\n\
+         }\n\
+         fn pick(i Int) Int {\n\
+         \tif i > 5 { 1 } else { 2 }\n\
+         }\n\
+         fn called(i Int, acc Int) Int {\n\
+         \tif i == 0 {\n\
+         \t\tacc\n\
+         \t} else {\n\
+         \t\tt = P(i, i, i)\n\
+         \t\tu = P(..t, c: pick(i))\n\
+         \t\tcalled(i - 1, acc + u.c + u.a)\n\
+         \t}\n\
+         }\n\
+         fn joined(i Int, acc Int) Int {\n\
+         \tif i == 0 {\n\
+         \t\tacc\n\
+         \t} else {\n\
+         \t\tt = P(i, i, i)\n\
+         \t\tu = P(..t, c: if i > 5 { 1 } else { 2 })\n\
+         \t\tjoined(i - 1, acc + u.c + u.a)\n\
+         \t}\n\
+         }\n\
+         fn report(made Int, reused Int) {\n\
+         \tprintln('made ${internal::cells_made() - made}, reused ${internal::cells_reused() - reused}')\n\
+         }\n\
+         pub fn main() {\n\
+         \tmade = internal::cells_made()\n\
+         \treused = internal::cells_reused()\n\
+         \tprintln(called(10000, 0))\n\
+         \treport(made, reused)\n\
+         \tmade = internal::cells_made()\n\
+         \treused = internal::cells_reused()\n\
+         \tprintln(joined(10000, 0))\n\
+         \treport(made, reused)\n\
+         }\n",
+        "50015005\nmade 10002, reused 9999\n50015005\nmade 20001, reused 0\n",
+    );
+}
+
+/// Runs a program that connects to a listener here, holds the connection in
+/// a record, and updates that record with `update`. The new field connects
+/// again and waits for a byte before it returns. Says whether the first
+/// connection had ended when the second arrived, waiting up to `wait` for
+/// its end.
+fn first_connection_ends_before_the_new_field_runs(
+    update: &str,
+    wait: std::time::Duration,
+) -> bool {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let peer = std::thread::spawn(move || {
+        let (mut first, _) = listener.accept().expect("accept");
+        let (mut second, _) = listener.accept().expect("accept");
+        first.set_read_timeout(Some(wait)).expect("timeout");
+        let ended = matches!(first.read(&mut [0u8; 1]), Ok(0));
+        second.write_all(b"x").expect("write");
+        ended
+    });
+    let src = format!(
+        "import scarlet/net\n\
+         import scarlet/net/socket\n\
+         type Held {{\n\
+         \tconn Option(socket::Socket)\n\
+         \tport Int\n\
+         }}\n\
+         fn dial(port Int) Option(socket::Socket) {{\n\
+         \tmatch net::connect('127.0.0.1', port) {{\n\
+         \t\tOk(sock) -> Some(sock)\n\
+         \t\tErr(_) -> None\n\
+         \t}}\n\
+         }}\n\
+         fn redial(port Int) Option(socket::Socket) {{\n\
+         \tmatch dial(port) {{\n\
+         \t\tSome(sock) -> match socket::read(sock, 1) {{\n\
+         \t\t\tOk(_) -> Some(sock)\n\
+         \t\t\tErr(_) -> None\n\
+         \t\t}}\n\
+         \t\tNone -> None\n\
+         \t}}\n\
+         }}\n\
+         fn start(port Int) Held {{ Held(dial(port), port) }}\n\
+         fn swap(h Held) Held {{\n\
+         \t{update}\n\
+         }}\n\
+         pub fn main() {{\n\
+         \tmatch swap(start({port})).conn {{\n\
+         \t\tSome(_) -> println('open')\n\
+         \t\tNone -> println('failed')\n\
+         \t}}\n\
+         }}\n"
+    );
+    prints(&src, "open\n");
+    peer.join().expect("peer")
+}
+
+/// A record update gives the old record up at its last read, and a program
+/// can see that when the record held the last reference to a handle. In
+/// `Held(..h, conn: redial(h.port))` the read of `h.port` is the last use
+/// of `h`, so the connection `h` held is closed before `redial` runs, and
+/// the peer reads its end before the second connection sends anything. A
+/// base that is only a name may be written last and the same happens.
+#[test]
+fn a_record_update_closes_a_handle_only_the_old_record_held_before_the_new_field_runs() {
+    let wait = std::time::Duration::from_secs(10);
+    assert!(first_connection_ends_before_the_new_field_runs(
+        "Held(..h, conn: redial(h.port))",
+        wait
+    ));
+    assert!(first_connection_ends_before_the_new_field_runs(
+        "Held(conn: redial(h.port), ..h)",
+        wait
+    ));
+}
+
+/// A field written after the new one that reads the old record keeps it,
+/// and what it holds, until then. So the first connection is still open
+/// while `redial` runs, and the peer's read of it runs out of time.
+#[test]
+fn a_record_update_keeps_a_handle_a_later_field_still_reads() {
+    assert!(!first_connection_ends_before_the_new_field_runs(
+        "Held(..h, conn: redial(h.port), port: h.port + 1)",
+        std::time::Duration::from_millis(200),
+    ));
+}
+
 /// The listing shows a write with the array it takes marked, as it marks an
 /// argument a call takes, and where the write continues when it misses.
 #[test]

@@ -1,0 +1,26 @@
+fn main.push(%0:t0, %1:t1) -> :t0
+  let %2:t1 = Field(1)(%0)
+  let %3:t1 = Field(2)(%0)
+  let %4:t2 = Field(0)(%0)
+  drop %0
+  let %5:t2 = ArrayAppend(%4, %1)
+  drop %4
+  ret ctor 10.0(%5, %2, %3)
+
+fn main.main() -> :t1
+  let %0:t2 = MakeArray()
+  let %1:t1 = c0
+  let %2:t1 = c0
+  let %3:t0 = ctor 10.0(%0, %1, %2)
+  drop %0
+  let %4:t1 = c1
+  let %5:t0 = call fn#0(%3, %4)
+  drop %3 [ctor:3]
+  ret Field(1)(%5)
+
+toplevel:
+fn main.__main__() -> :t3
+  ret nil
+where
+  c0 = Int(0)
+  c1 = Int(1)

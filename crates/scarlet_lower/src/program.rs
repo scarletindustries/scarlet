@@ -108,6 +108,8 @@ pub enum InternalLinkError {
     ErrorNode,
     /// A spread fills a field slot its constructor doesn't have.
     NoFieldSlot { ctor: CtorName, slot: usize },
+    /// A spread sits after more arguments than its constructor was given.
+    NoSpreadPlace { ctor: CtorName, at: usize },
     /// A field is read from a value whose type isn't a named type.
     FieldOfUnnamed(Type),
     /// A named type has no variant at this index.
@@ -179,6 +181,12 @@ impl fmt::Display for InternalLinkError {
             E::NoFieldSlot { ctor, slot } => write!(
                 f,
                 "a spread fills field {slot} of variant {} of `{}`, which has no such field",
+                ctor.variant,
+                ctor.type_name.name()
+            ),
+            E::NoSpreadPlace { ctor, at } => write!(
+                f,
+                "a spread sits after {at} arguments of variant {} of `{}`, which was given fewer",
                 ctor.variant,
                 ctor.type_name.name()
             ),

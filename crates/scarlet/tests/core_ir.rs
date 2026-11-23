@@ -284,6 +284,108 @@ core_golden!(
      }\n"
 );
 
+// A record update reads the fields it keeps as soon as its base has run. The
+// read of `s.v` is then the last use of `s`, so `s` is dropped before the
+// append, which finds the array with one holder.
+core_golden!(
+    record_update_reads_kept_fields_first,
+    "type State {\n\tv Array(Int)\n\tcount Int\n\tcheck Int\n}\n\
+     fn push(s State, n Int) State {\n\
+     \tState(..s, v: [..s.v, n])\n\
+     }\n\
+     pub fn main() {\n\
+     \tpush(State([], 0, 0), 1).count\n\
+     }\n"
+);
+
+// A base that has to run keeps its place among the arguments: `n + 1`, then
+// `make(n)` and the reads of the fields it keeps, then `n + 2`.
+core_golden!(
+    record_update_base_runs_in_its_place,
+    "type P {\n\ta Int\n\tb Int\n\tc Int\n\td Int\n}\n\
+     fn make(n Int) P { P(n, n, n, n) }\n\
+     fn f(n Int) P {\n\
+     \tP(a: n + 1, ..make(n), c: n + 2)\n\
+     }\n\
+     pub fn main() {\n\
+     \tf(1).b\n\
+     }\n"
+);
+
+/// A base that is only a name has nothing to run, so where its `..s` is
+/// written changes nothing: all three spellings lower to the same code.
+#[test]
+fn record_update_of_a_name_lowers_the_same_wherever_the_spread_is() {
+    let mk = |update: &str| {
+        let core = lower(&format!(
+            "type State {{\n\tv Array(Int)\n\tcount Int\n\tcheck Int\n}}\n\
+             fn push(s State, n Int) State {{\n\
+             \t{update}\n\
+             }}\n\
+             pub fn main() {{\n\
+             \tpush(State([], 0, 0), 1).count\n\
+             }}\n"
+        ));
+        fn_body(&core, 0)
+    };
+    let first = mk("State(..s, v: [..s.v, n], count: n)");
+    assert_eq!(first, mk("State(v: [..s.v, n], ..s, count: n)"));
+    assert_eq!(first, mk("State(v: [..s.v, n], count: n, ..s)"));
+    let lines: Vec<&str> = first.lines().map(str::trim_start).collect();
+    let at = |what: &str| {
+        lines
+            .iter()
+            .position(|l| l.contains(what))
+            .unwrap_or_else(|| panic!("no `{what}` in:\n{first}"))
+    };
+    assert!(
+        at("Field(2)") < at("Field(0)")
+            && at("Field(0)") < at("drop %0")
+            && at("drop %0") < at("ArrayAppend"),
+        "the kept field is read first, and the record is dropped before the append:\n{first}"
+    );
+}
+
+/// A field or a tuple element read off a name has nothing to run either, so
+/// a base such as `..o.inner` or `..t.0` may sit anywhere too. A base that
+/// calls something may not: moving its spread moves the call.
+#[test]
+fn record_update_of_a_path_lowers_the_same_wherever_the_spread_is() {
+    let mk = |param: &str, arg: &str, update: &str| {
+        let core = lower(&format!(
+            "type Inner {{\n\tv Array(Int)\n\ttag Int\n\tcheck Int\n}}\n\
+             type Outer {{\n\tinner Inner\n\tcount Int\n}}\n\
+             fn id(i Inner) Inner {{ i }}\n\
+             fn push({param}, n Int) Inner {{\n\
+             \t{update}\n\
+             }}\n\
+             pub fn main() {{\n\
+             \tpush({arg}, 1).tag\n\
+             }}\n"
+        ));
+        fn_body(&core, 1)
+    };
+    let field = |update: &str| mk("o Outer", "Outer(Inner([], 0, 0), 0)", update);
+    let first = field("Inner(..o.inner, v: [..o.inner.v, n], tag: n)");
+    assert_eq!(
+        first,
+        field("Inner(v: [..o.inner.v, n], ..o.inner, tag: n)")
+    );
+    assert_eq!(
+        first,
+        field("Inner(v: [..o.inner.v, n], tag: n, ..o.inner)")
+    );
+    assert_ne!(
+        field("Inner(..id(o.inner), v: [..o.inner.v, n])"),
+        field("Inner(v: [..o.inner.v, n], ..id(o.inner))")
+    );
+    let element = |update: &str| mk("t (Int, Inner)", "(0, Inner([], 0, 0))", update);
+    assert_eq!(
+        element("Inner(..t.1, v: [..t.1.v, n], tag: n)"),
+        element("Inner(v: [..t.1.v, n], tag: n, ..t.1)")
+    );
+}
+
 // Irrefutable ctor destructuring projects in *declared* field order, and each
 // heap-typed projection gets its own `drop`. A type var is never heap-shaped,
 // so a bind typed from a `fresh_var()` would silently get no `Drop`.

@@ -151,6 +151,39 @@ fn wrap(lets: Vec<(TypedBind, TypedExpr)>, tail: TypedExpr) -> TypedExpr {
     )
 }
 
+/// Whether `e` is a name, or a field or tuple element read off one. Such an
+/// expression runs nothing, so it gives the same value wherever among its
+/// neighbours it is read.
+fn runs_nothing(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Var(_) => true,
+        ExprKind::Field { record, .. } => runs_nothing(record),
+        ExprKind::TupleIndex { tuple, .. } => runs_nothing(tuple),
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::String(_)
+        | ExprKind::Interp(_)
+        | ExprKind::Binary(_)
+        | ExprKind::Lambda(_)
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Tuple(_)
+        | ExprKind::Array(_)
+        | ExprKind::Index { .. }
+        | ExprKind::Slice { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::BinOp { .. }
+        | ExprKind::And(..)
+        | ExprKind::Or(..)
+        | ExprKind::Unary { .. }
+        | ExprKind::If { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::OrElse { .. }
+        | ExprKind::Block(_)
+        | ExprKind::Error => false,
+    }
+}
+
 /// The function being made.
 struct Fx {
     /// Each binder this function binds, numbered before its body is made: its
@@ -664,24 +697,35 @@ impl Tx<'_, '_, '_, '_> {
                 },
             ));
         };
-        // Everything runs in the order it was written, the spread among the
-        // arguments.
+        // Whatever has to run does so in the order it was written, the base
+        // among the arguments. The fields the base keeps are read as soon as
+        // it has run, which makes those reads the base's last use unless a
+        // later argument names it. So in `State(..s, v: push(s.v, x))` the
+        // record is given up before the push, which then finds `s.v` with
+        // one holder and writes in place. Giving the record up is something
+        // a program can see when it held the last reference to a handle:
+        // the handle is closed before the later arguments run.
+        //
+        // A base with nothing to run counts as written first, so where its
+        // `..s` sits changes nothing.
         let result = self.final_ty(e.ty)?;
-        let mut lets = Vec::with_capacity(args.len().saturating_add(1));
-        let mut fields: Vec<(usize, TypedExpr)> = Vec::new();
-        let mut base_bind = None;
-        for (i, a) in args.iter().enumerate() {
-            if i == spread.at {
-                base_bind = Some(self.spill(fx, &spread.base, &mut lets)?);
-            }
+        let (before, after) = if runs_nothing(&spread.base) {
+            (&[][..], args)
+        } else {
+            args.split_at_checked(spread.at)
+                .ok_or_else(|| InternalLinkError::NoSpreadPlace {
+                    ctor: ctor.clone(),
+                    at: spread.at,
+                })?
+        };
+        let field_tys = self.field_tys(&result, usize::from(ctor.variant))?;
+        let mut lets = Vec::with_capacity(field_tys.len().saturating_add(1));
+        let mut fields: Vec<(usize, TypedExpr)> = Vec::with_capacity(field_tys.len());
+        for a in before {
             let b = self.spill(fx, &a.value, &mut lets)?;
             fields.push((a.slot, self.var(&b)));
         }
-        let base_bind = match base_bind {
-            Some(b) => b,
-            None => self.spill(fx, &spread.base, &mut lets)?,
-        };
-        let field_tys = self.field_tys(&result, usize::from(ctor.variant))?;
+        let base_bind = self.spill(fx, &spread.base, &mut lets)?;
         for (slot, at) in &spread.fills {
             let fty = *field_tys
                 .get(*slot)
@@ -691,7 +735,13 @@ impl Tx<'_, '_, '_, '_> {
                 })?;
             let recv = self.var(&base_bind);
             let read = self.field(fx, recv, &result, at, fty)?;
-            fields.push((*slot, read));
+            let kept = self.temp(fx, fty);
+            lets.push((kept, read));
+            fields.push((*slot, self.var(&kept)));
+        }
+        for a in after {
+            let b = self.spill(fx, &a.value, &mut lets)?;
+            fields.push((a.slot, self.var(&b)));
         }
         fields.sort_by_key(|(s, _)| *s);
         let ctor = TypedExpr::Ctor {
