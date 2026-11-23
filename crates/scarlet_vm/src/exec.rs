@@ -8,6 +8,8 @@
 //! Reference counting follows one rule. Every register, global and argument
 //! holds one reference to its value. So copying a value into a register adds
 //! a reference, and overwriting a register, or leaving a frame, gives one up.
+//! Where the loader saw that nothing reads a register again, the copy takes
+//! the register's reference instead of adding one (`moves_on_last_use`).
 //! Perceus's `Drop` gives one up early. This alone keeps every count right,
 //! whatever Perceus did or did not insert (`docs/vm-design.md`, "Memory").
 //! If a count is wrong all the same, the instruction that gives up a
@@ -176,8 +178,17 @@ impl<'c, 'h> Machine<'c, 'h> {
                     let v = bigint::int(&mut self.heap, *n).map_err(fault)?;
                     self.set(base, *dst, v)?;
                 }
-                Instr::Move { dst, src } => {
-                    let v = self.share(self.get(base, *src));
+                // Only a cell has a reference to hand over or to add, so
+                // any other value is copied and its register left alone.
+                Instr::Move { dst, src, moved } => {
+                    let v = self.get(base, *src);
+                    if let Some(cell) = v.as_cell() {
+                        if *moved {
+                            self.take(base, *src);
+                        } else {
+                            self.heap.share(cell);
+                        }
+                    }
                     self.set(base, *dst, v)?;
                 }
                 Instr::GetGlobal { dst, slot } => {
@@ -3284,6 +3295,162 @@ mod tests {
             assert_eq!(m.leave(0), Err(DeadCell));
             assert_eq!(Stop::from(DeadCell), Stop::broken(Broken::DeadCell));
         });
+    }
+
+    /// Run `instrs` as a function of `regs` registers that takes nothing,
+    /// and hand the machine and what the call gave to `check`.
+    fn after_instrs(
+        regs: u32,
+        instrs: Vec<Instr>,
+        check: impl FnOnce(&mut Machine<'_, '_>, Result<Value, Stop>),
+    ) {
+        let result = scarlet_core::compile::compile_text("pub fn main() {\n\tNil\n}\n", None);
+        assert!(result.success(), "{:?}", result.diagnostics());
+        let program = result.into_runnable().expect("a clean compile is runnable");
+        let code = crate::code::load(&program).expect("the program loads");
+        let body = Body {
+            name: "test.body".to_string(),
+            regs,
+            params: Box::new([]),
+            instrs: instrs.into_boxed_slice(),
+            carried: Box::new([]),
+        };
+        let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+        let mut m = Machine::new(&code, &mut host);
+        let got = m.call(&body, &[]);
+        check(&mut m, got);
+    }
+
+    /// `r1` gets a new array of one element.
+    fn an_array_in_r1() -> [Instr; 2] {
+        [
+            Instr::Const {
+                dst: Reg(0),
+                value: Value::NIL,
+            },
+            Instr::Array {
+                dst: Reg(1),
+                elements: Box::new([Reg(0)]),
+            },
+        ]
+    }
+
+    fn mv(dst: u32, src: u32, moved: bool) -> Instr {
+        Instr::Move {
+            dst: Reg(dst),
+            src: Reg(src),
+            moved,
+        }
+    }
+
+    /// The cell a finished call returned, after checking that the frame left
+    /// nothing behind and that giving the result up empties the heap.
+    fn the_only_cell_left(m: &mut Machine<'_, '_>, got: Result<Value, Stop>) {
+        let v = got.expect("the function returns");
+        let cell = v.as_cell().expect("an array");
+        assert_eq!(m.heap.unique(cell), Ok(true));
+        assert!(m.regs.iter().all(|v| v.bits() == Value::NIL.bits()));
+        assert_eq!(m.release(v), Ok(()));
+        assert_eq!(m.heap.live(), 0);
+    }
+
+    /// A `Move` that takes its source hands over the register's reference,
+    /// so a push after it finds one holder and writes in place. One that
+    /// shares leaves two holders, and the push copies.
+    #[test]
+    fn a_move_that_takes_leaves_one_holder_and_one_that_shares_leaves_two() {
+        let made = |moved: bool| {
+            let mut instrs = an_array_in_r1().to_vec();
+            instrs.extend([
+                mv(2, 1, moved),
+                Instr::ArrayAppend {
+                    dst: Reg(3),
+                    rest: Reg(2),
+                    back: Box::new([Reg(0)]),
+                    moved: true,
+                },
+                Instr::Ret { src: Reg(3) },
+            ]);
+            let mut made = 0;
+            after_instrs(4, instrs, |m, got| {
+                made = m.heap.made();
+                the_only_cell_left(m, got);
+            });
+            made
+        };
+        assert!(made(true) < made(false), "{} {}", made(true), made(false));
+    }
+
+    /// The register a `Move` took from is empty: a `Drop` of it gives up
+    /// nothing, and a read of it finds `Nil` and not the value.
+    #[test]
+    fn a_register_a_move_took_from_is_empty() {
+        let mut dropped = an_array_in_r1().to_vec();
+        dropped.extend([
+            mv(2, 1, true),
+            Instr::Drop { reg: Reg(1) },
+            Instr::Ret { src: Reg(2) },
+        ]);
+        after_instrs(3, dropped, the_only_cell_left);
+
+        let mut read = an_array_in_r1().to_vec();
+        read.extend([
+            mv(2, 1, true),
+            Instr::ArrayLen {
+                dst: Reg(0),
+                src: Reg(1),
+            },
+            Instr::Ret { src: Reg(0) },
+        ]);
+        after_instrs(3, read, |_, got| {
+            let stopped = got.map(|v| v.bits());
+            assert_eq!(stopped, Err(Stop::broken(Broken::NotAnArray(View::Nil))));
+        });
+    }
+
+    /// The same value shared, then dropped under its old name, ends with the
+    /// same one holder, by a share and a release.
+    #[test]
+    fn a_move_that_shares_then_a_drop_leaves_one_holder() {
+        let mut instrs = an_array_in_r1().to_vec();
+        instrs.extend([
+            mv(2, 1, false),
+            Instr::Drop { reg: Reg(1) },
+            Instr::Ret { src: Reg(2) },
+        ]);
+        after_instrs(3, instrs, the_only_cell_left);
+    }
+
+    /// A value that is not a cell has no reference to hand over, so a `Move`
+    /// of one copies it whichever way it is marked.
+    #[test]
+    fn a_move_of_a_value_that_is_not_a_cell_copies_it() {
+        for moved in [true, false] {
+            let instrs = vec![
+                Instr::Const {
+                    dst: Reg(0),
+                    value: Value::bool(true),
+                },
+                mv(1, 0, moved),
+                Instr::Ret { src: Reg(1) },
+            ];
+            after_instrs(2, instrs, |m, got| {
+                let bits = got.map(|v| v.bits());
+                assert_eq!(bits, Ok(Value::bool(true).bits()));
+                assert_eq!(m.heap.made(), 0);
+            });
+        }
+    }
+
+    /// Two values that are never live at once may share a register, so a
+    /// `Move` can name one register twice. Either way the value stays.
+    #[test]
+    fn a_move_onto_its_own_register_keeps_the_value() {
+        for moved in [true, false] {
+            let mut instrs = an_array_in_r1().to_vec();
+            instrs.extend([mv(1, 1, moved), Instr::Ret { src: Reg(1) }]);
+            after_instrs(2, instrs, the_only_cell_left);
+        }
     }
 
     /// The array and map code reports a freed cell as a heap fault, and

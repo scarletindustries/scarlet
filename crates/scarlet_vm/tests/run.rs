@@ -122,6 +122,108 @@ fn a_value_passed_on_is_still_there_for_what_reads_it_later() {
     );
 }
 
+/// A branch that ends in a name and one that ends in the call itself are the
+/// same function, and they make the same number of cells. The name's
+/// register hands its reference to the branch's result, so the push after
+/// it finds one holder and writes in place both times. Before a copy could
+/// take its source, the first spelling left the array held twice and the
+/// push copied it: 4 cells against 3.
+#[test]
+fn two_spellings_of_a_branch_make_the_same_number_of_cells() {
+    prints(
+        "import scarlet/internal\n\
+         fn fresh(n Int) Array(Int) { [n, n + 1, n + 2] }\n\
+         fn named(c Bool, n Int) Array(Int) {\n\
+         \tys = if c {\n\
+         \t\tt = fresh(n)\n\
+         \t\tprintln(n)\n\
+         \t\tt\n\
+         \t} else {\n\
+         \t\tfresh(0)\n\
+         \t}\n\
+         \t[..ys, 9]\n\
+         }\n\
+         fn direct(c Bool, n Int) Array(Int) {\n\
+         \tys = if c {\n\
+         \t\tprintln(n)\n\
+         \t\tfresh(n)\n\
+         \t} else {\n\
+         \t\tfresh(0)\n\
+         \t}\n\
+         \t[..ys, 9]\n\
+         }\n\
+         pub fn main() {\n\
+         \tstart = internal::cells_made()\n\
+         \ta = named(True, 1)\n\
+         \tmiddle = internal::cells_made()\n\
+         \tb = direct(True, 1)\n\
+         \tend = internal::cells_made()\n\
+         \tprintln(middle - start)\n\
+         \tprintln(end - middle)\n\
+         \tprintln(a == b)\n\
+         \tprintln(a)\n\
+         }\n",
+        "1\n1\n3\n3\nTrue\n[1, 2, 3, 9]\n",
+    );
+}
+
+/// A copy takes its source only when nothing reads the source later. Here
+/// `t` is read again after `ys` is made from it, so both names hold the
+/// array, the push onto `ys` copies, and `t` still reads as it was built.
+#[test]
+fn a_value_copied_to_a_new_name_is_still_there_under_the_old_one() {
+    prints(
+        "fn fresh(n Int) Array(Int) { [n, n + 1, n + 2] }\n\
+         fn joined(c Bool, n Int) {\n\
+         \tt = fresh(n)\n\
+         \tys = if c { t } else { fresh(0) }\n\
+         \tprintln([..ys, 9])\n\
+         \tprintln(t)\n\
+         }\n\
+         fn bound(n Int) {\n\
+         \tt = fresh(n)\n\
+         \tmatch t {\n\
+         \t\tys -> println([..ys, 9])\n\
+         \t}\n\
+         \tprintln(t)\n\
+         }\n\
+         pub fn main() {\n\
+         \tjoined(True, 1)\n\
+         \tjoined(False, 1)\n\
+         \tbound(1)\n\
+         }\n",
+        "[1, 2, 3, 9]\n[1, 2, 3]\n[0, 1, 2, 9]\n[1, 2, 3]\n[1, 2, 3, 9]\n[1, 2, 3]\n",
+    );
+}
+
+/// One path copies `t` to the branch's result and takes it, and the other
+/// drops it. Each path gives the array up exactly once, which the audit at
+/// the end of the run checks, and the path that keeps it pushes in place.
+#[test]
+fn a_value_taken_on_one_path_and_dropped_on_the_other_is_freed_once() {
+    prints(
+        "import scarlet/internal\n\
+         fn fresh(n Int) Array(Int) { [n, n + 1, n + 2] }\n\
+         fn pick(c Bool, n Int) Array(Int) {\n\
+         \tt = fresh(n)\n\
+         \tys = if c { t } else { fresh(0) }\n\
+         \t[..ys, 9]\n\
+         }\n\
+         pub fn main() {\n\
+         \tstart = internal::cells_made()\n\
+         \ta = pick(True, 1)\n\
+         \tmiddle = internal::cells_made()\n\
+         \tb = pick(False, 1)\n\
+         \tend = internal::cells_made()\n\
+         \tprintln(a)\n\
+         \tprintln(b)\n\
+         \tprintln(middle - start)\n\
+         \tprintln(end - middle)\n\
+         }\n",
+        "[1, 2, 3, 9]\n[0, 1, 2, 9]\n3\n5\n",
+    );
+}
+
 /// `docs/semantics.md`'s rules for `/` and `%`.
 #[test]
 fn division_follows_the_rules() {
@@ -1726,6 +1828,32 @@ fn the_listing_shows_the_loaded_instructions() {
     assert!(main.contains("r0 = Print r0 and a newline\n"), "{main}");
     assert!(listing.function(2).is_none());
     assert!(listing.toplevel().starts_with("; loaded: 1 register\n"));
+}
+
+/// The listing marks the source a `Move` takes as it marks an argument a
+/// call takes, and leaves a source that is read again unmarked.
+#[test]
+fn the_listing_marks_a_move_that_takes_its_source() {
+    let src = "fn fresh(n Int) Array(Int) { [n, n + 1] }\n\
+               fn twice(n Int) Array(Int) {\n\
+               \tt = fresh(n)\n\
+               \tys = t\n\
+               \t[..ys, ..t]\n\
+               }\n\
+               fn once(n Int) Array(Int) {\n\
+               \tmatch fresh(n) {\n\
+               \t\tys -> [..ys, 9]\n\
+               \t}\n\
+               }\n\
+               pub fn main() {\n\
+               \tprintln(twice(1))\n\
+               \tprintln(once(1))\n\
+               }\n";
+    let listing = scarlet_vm::listing(&compile(src)).expect("the program loads");
+    let twice = listing.function(1).expect("twice is the second function");
+    assert!(twice.contains("    1  r1 = Move r0\n"), "{twice}");
+    let once = listing.function(2).expect("once is the third");
+    assert!(once.contains("    1  r1 = Move move r0\n"), "{once}");
 }
 
 /// A function that needs something the VM does not run yet has no

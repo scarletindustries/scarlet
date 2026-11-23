@@ -100,9 +100,12 @@ pub(crate) enum Instr {
         dst: Reg,
         n: i64,
     },
+    /// `dst` gets what `src` holds. `moved` says nothing reads `src` after
+    /// this, so `dst` takes its reference and no count changes.
     Move {
         dst: Reg,
         src: Reg,
+        moved: bool,
     },
     GetGlobal {
         dst: Reg,
@@ -472,7 +475,7 @@ impl Instr {
             | Instr::JumpUnlessFloat { src: dst, .. }
             | Instr::JumpUnlessStr { src: dst, .. }
             | Instr::JumpUnlessBinary { src: dst, .. } => f(dst),
-            Instr::Move { dst, src: a }
+            Instr::Move { dst, src: a, .. }
             | Instr::IntImm { dst, a, .. }
             | Instr::IntNeg { dst, a }
             | Instr::FloatNeg { dst, a }
@@ -1692,6 +1695,7 @@ impl<'c> Loader<'c> {
             CorePat::Bind(b) => self.instrs.push(Instr::Move {
                 dst: Reg::of(b.id),
                 src,
+                moved: false,
             }),
             CorePat::Ctor { variant, fields } => {
                 let variant = *variant;
@@ -1740,6 +1744,7 @@ impl<'c> Loader<'c> {
             Atom::Local(src) => Instr::Move {
                 dst,
                 src: Reg::of(*src),
+                moved: false,
             },
             Atom::Const(c) => match self.consts.get(c.index()) {
                 Some(Const::String(text)) => Instr::Str {
@@ -2184,15 +2189,18 @@ fn built(i: Intrinsic, argc: usize) -> bool {
 
 /// A call hands the callee the reference an argument's register holds,
 /// instead of adding one, when nothing the frame runs later reads that
-/// register. A constructor takes its fields' references the same way. The callee then sees a value nothing else holds, which is what
-/// lets it change the value in place or overwrite its cell.
+/// register. A constructor takes its fields' references the same way, an
+/// array push or drop takes its array's, and a `Move` takes its source's.
+/// Whatever receives the value then holds the reference the register held,
+/// so a value nothing else holds still has a count of 1, which is what lets
+/// it be changed in place or its cell overwritten.
 ///
 /// Which registers are read later comes from liveness over the function's
 /// instructions, jumps and all. A plain `Drop` does not count as a read: by
-/// the time it runs on a register a call emptied, it does nothing, and on a
-/// path where the call never ran it still finds the value and releases it.
-/// A `DropReuse` does count, so a cell this frame has already paired with a
-/// constructor of its own stays here.
+/// the time it runs on a register an instruction emptied, it does nothing,
+/// and on a path where that instruction never ran it still finds the value
+/// and releases it. A `DropReuse` does count, so a cell this frame has
+/// already paired with a constructor of its own stays here.
 fn moves_on_last_use(instrs: &mut [Instr], regs: u32) {
     let live = live_after(instrs, regs);
     for (instr, after) in instrs.iter_mut().zip(&live) {
@@ -2216,6 +2224,10 @@ fn moves_on_last_use(instrs: &mut [Instr], regs: u32) {
         }
         if let Instr::ArrayDrop { src, n, moved, .. } = instr {
             *moved = !after.has(*src) && n != src;
+            continue;
+        }
+        if let Instr::Move { src, moved, .. } = instr {
+            *moved = !after.has(*src);
             continue;
         }
         let args = match instr {
@@ -2794,5 +2806,147 @@ mod tests {
         }
         assert_eq!(numbered as usize, counted.blocks.len());
         assert!(jumps > 5, "the program has jumps to check: {jumps}");
+    }
+
+    fn mv(dst: u32, src: u32) -> Instr {
+        Instr::Move {
+            dst: Reg(dst),
+            src: Reg(src),
+            moved: false,
+        }
+    }
+
+    fn ret(src: u32) -> Instr {
+        Instr::Ret { src: Reg(src) }
+    }
+
+    /// Whether each `Move` in `instrs` takes its source, in order.
+    fn marks(instrs: &[Instr]) -> Vec<bool> {
+        let moved = |i: &Instr| {
+            if let Instr::Move { moved, .. } = i {
+                Some(*moved)
+            } else {
+                None
+            }
+        };
+        instrs.iter().filter_map(moved).collect()
+    }
+
+    /// [`marks`] of `instrs` once `moves_on_last_use` has been over them.
+    fn takes(mut instrs: Vec<Instr>, regs: u32) -> Vec<bool> {
+        moves_on_last_use(&mut instrs, regs);
+        marks(&instrs)
+    }
+
+    #[test]
+    fn a_move_takes_a_source_nothing_reads_later() {
+        assert_eq!(takes(vec![mv(1, 0), ret(1)], 2), [true]);
+    }
+
+    /// The `Drop` Perceus puts after a copy does not read the register: it
+    /// finds it empty and does nothing.
+    #[test]
+    fn a_move_takes_a_source_that_is_only_dropped_later() {
+        let drop = Instr::Drop { reg: Reg(0) };
+        assert_eq!(takes(vec![mv(1, 0), drop, ret(1)], 2), [true]);
+    }
+
+    #[test]
+    fn a_move_shares_a_source_something_reads_later() {
+        let len = Instr::ArrayLen {
+            dst: Reg(2),
+            src: Reg(0),
+        };
+        assert_eq!(takes(vec![mv(1, 0), len, ret(1)], 3), [false]);
+        // The first of two copies shares, and the second takes.
+        assert_eq!(takes(vec![mv(1, 0), mv(2, 0), ret(1)], 3), [false, true]);
+    }
+
+    /// A cell this frame parks for a constructor of its own has to still be
+    /// in its register when the `DropReuse` runs, so a copy before it shares.
+    #[test]
+    fn a_move_shares_a_source_whose_cell_is_kept_for_reuse() {
+        let park = Instr::DropReuse { reg: Reg(0) };
+        assert_eq!(takes(vec![mv(1, 0), park, ret(1)], 2), [false]);
+    }
+
+    /// Liveness follows the jumps. A read on the path a `Move` is on keeps
+    /// its source, and a read on some other path does not.
+    #[test]
+    fn a_move_looks_only_at_what_runs_after_it() {
+        let branch = |after_join: u32| {
+            vec![
+                Instr::JumpIfFalse {
+                    cond: Reg(2),
+                    to: 3,
+                },
+                mv(1, 0),
+                Instr::Jump { to: 4 },
+                Instr::Const {
+                    dst: Reg(1),
+                    value: Value::NIL,
+                },
+                ret(after_join),
+            ]
+        };
+        assert_eq!(takes(branch(0), 3), [false]);
+        assert_eq!(takes(branch(1), 3), [true]);
+        let other_path = vec![
+            Instr::JumpIfFalse {
+                cond: Reg(2),
+                to: 3,
+            },
+            mv(1, 0),
+            ret(1),
+            ret(0),
+        ];
+        assert_eq!(takes(other_path, 3), [true]);
+    }
+
+    /// A value copied to a new name and never read again under the old one
+    /// is taken: at the end of a branch, in a binding, and in a pattern that
+    /// binds the whole value. One that is read again is shared.
+    #[test]
+    fn the_loader_marks_the_moves_of_a_compiled_program() {
+        let src = "fn fresh(n Int) Array(Int) { [n, n + 1] }\n\
+                   fn joined(c Bool, n Int) Array(Int) {\n\
+                   \tys = if c {\n\
+                   \t\tt = fresh(n)\n\
+                   \t\tprintln(n)\n\
+                   \t\tt\n\
+                   \t} else {\n\
+                   \t\tfresh(0)\n\
+                   \t}\n\
+                   \t[..ys, 9]\n\
+                   }\n\
+                   fn bound(n Int) Array(Int) {\n\
+                   \tmatch fresh(n) {\n\
+                   \t\tys -> [..ys, 9]\n\
+                   \t}\n\
+                   }\n\
+                   fn kept(n Int) Array(Int) {\n\
+                   \tt = fresh(n)\n\
+                   \tys = t\n\
+                   \t[..ys, ..t]\n\
+                   }\n\
+                   pub fn main() {\n\
+                   \tprintln(joined(True, 1))\n\
+                   \tprintln(bound(1))\n\
+                   \tprintln(kept(1))\n\
+                   }\n";
+        let result = scarlet_core::compile::compile_text(src, None);
+        assert!(result.success(), "{:?}", result.diagnostics());
+        let program = result.into_runnable().expect("a clean compile is runnable");
+        let code = load(&program).expect("the program loads");
+        let moves = |name: &str| -> Vec<bool> {
+            let body = bodies(&code)
+                .into_iter()
+                .find(|b| b.name.ends_with(name))
+                .unwrap_or_else(|| panic!("no function called {name}"));
+            marks(&body.instrs)
+        };
+        assert_eq!(moves(".joined"), [true, true]);
+        assert_eq!(moves(".bound"), [true]);
+        assert_eq!(moves(".kept"), [false]);
     }
 }

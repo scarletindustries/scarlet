@@ -167,7 +167,9 @@ impl fmt::Display for Instr {
             Instr::BinaryConst { dst, len, .. } => write!(f, "{dst} = {name} of {len} bits"),
             Instr::Bits { dst, op, args } => write!(f, "{dst} = {name} {op:?}({})", List(args)),
             Instr::BigInt { dst, n } => write!(f, "{dst} = {name} {n}"),
-            Instr::Move { dst, src } => write!(f, "{dst} = {name} {src}"),
+            Instr::Move { dst, src, moved } => {
+                write!(f, "{dst} = {name} {}", taken(*src, *moved))
+            }
             Instr::GetGlobal { dst, slot } => write!(f, "{dst} = {name} @g{}", slot.0),
             Instr::SetGlobal { slot, src } => write!(f, "{name} @g{} = {src}", slot.0),
             Instr::Int { dst, op, a, b } => write!(f, "{dst} = {name} {op:?}({a}, {b})"),

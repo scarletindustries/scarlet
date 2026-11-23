@@ -141,6 +141,12 @@ From: arrays 0 (and the Move half of text 6). Needs: 1.
 
 **Expected gain.** No scoreboard claim. It removes a share and a release per joined heap value (about 70 instructions each).
 
+**What happened.** The VM's own counts did not move on any benchmark. The same instructions ran and the same cells were made and reused, because no benchmark has the shape the test pins. In that test a branch that ends in a name made 4 cells and now makes 3, the same as the branch that ends in the call. On the board the geomean moved by 0.06%. The rows whose Moves carry cells got cheaper: fannkuch by 0.73%, sieve by 0.47%, json by 0.10%, richards by 0.06% and strings by 0.05%. Every other row is inside 0.05% either way, which is what the rows that run no Move at all show too.
+
+Probes give the cost of one Move exactly, as the slope between two sizes with a bare loop beside them, which did not move. A Move that takes a cell is 74 machine instructions cheaper than one that shares it and leaves the old register for a later `Drop` to release. A Move of a cell that is read again is 3 dearer, which is the test of the flag. A Move of an Int or a Bool is 1 dearer. The handler looks at the value before the flag to get that last number: only a cell has a reference to hand over, so any other value is copied and its register left alone. The first version emptied the register whatever it held, which cost 4 on every Int and Bool, and bounce, permute and queens read 0.05% to 0.13% worse with it.
+
+Not built here: a Move the register allocator gave one register for both ends (`r3 = Move move r3`) does nothing, and every Move that permute, queens, map_churn and string_keys run is one, 1.8 to 4.2 million times each. Step 9's loader should not emit them. The owning-register set that text's step 6 passes to `moves_on_last_use` is not built either. Every register owns its reference today, so the set would be all of them, and it belongs with the borrowing that first makes it smaller.
+
 ### Step 3. A write at an index on today's tree: the `ArraySet` instruction with a miss edge, `array::set`, `array::put` and `array::swap`, and the four array benchmarks changed to call `array::put`.
 
 From: arrays 1. Needs: 2, the owner's answer on the two names.
@@ -192,6 +198,8 @@ From: core 2. Needs: 5, the owner's answer on fused forms.
 ### Step 9. One 16-byte `Ins<R>` enum in one code array, matched in place, with `Ins::operands` as the single list of each instruction's registers and roles (including several written registers and writes on the hit edge only), cold state behind one `&mut Rest`, and the loader split into translate, live, alloc and emit.
 
 From: core 3. Needs: 8.
+
+**Carried from step 2.** The emit pass leaves out a `Move` whose two ends got the same register. It does nothing, and it is most of the Moves that sieve, fannkuch, permute, queens, map_churn and string_keys run.
 
 **Why here.** This is the instruction format. Doing it now means every instruction the other four areas add is written once, in the final enum.
 
