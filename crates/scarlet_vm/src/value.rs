@@ -143,6 +143,9 @@ pub(crate) enum View {
 
 impl Value {
     pub(crate) const NIL: Value = Value(TAG_IMMEDIATE);
+    /// What fills room for values before they are there. It is the Float 0.0,
+    /// and all of its bits are 0.
+    pub(crate) const UNSET: Value = Value(0);
     const FALSE: Value = Value(TAG_IMMEDIATE | 1);
     const TRUE: Value = Value(TAG_IMMEDIATE | 2);
 

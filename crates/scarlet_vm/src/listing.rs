@@ -1,20 +1,28 @@
 //! The loaded instructions as text, for `scarlet dis --instrs`.
 //!
-//! One line per instruction: its number, which a jump names, then the
-//! register it writes, its kind, and its operands. A register is `r3`. An
-//! operand written `move r3` gives up the register's reference instead of
-//! adding one. `-> 7` is where the instruction may continue instead of at
-//! the next one. Each kind is spelt as a counted run spells it
+//! One line per instruction: its number in its function, which a jump names,
+//! then the register it writes, its kind, and the rest of it in the order its
+//! fields are declared. A register is `r3`. An operand written `move r3` gives
+//! up the register's reference instead of adding one. `over r3` is the register
+//! whose cell a constructor may be written over, and `keep r3` one whose cell a
+//! loop carries round. `-> 7` is where the instruction may continue instead of
+//! at the next one. Each kind is spelt as a counted run spells it
 //! (`counts.rs`), so a count can be read against a listing.
 
 use std::fmt::{self, Write as _};
 
-use scarlet_ir::core_ir::{Program, VariantRef};
+use scarlet_ir::core_ir::{ConstId, FuncIdx, GlobalSlot, Program};
+use scarlet_ir::intrinsic::Intrinsic;
 
-use crate::code::{self, Arg, Body, Func, Instr, JumpPair, JumpWithK, Pair, Reg, WithK};
+use crate::code::{self, Code, Entry, Ins, Reg};
+use crate::code::{
+    Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, Dst, EntryPc, Hit, KeepList, Kept,
+    LookList, Looks, Newline, Over, Pc, Room, ShareList, Shared, Shares, Src, Taken, TextId,
+    Variant, Why, WhyId,
+};
 use crate::ops::NumOp;
 use crate::stop::NotBuilt;
-use crate::value::{Value, View};
+use crate::value::{Float, SmallInt, Value, View};
 use crate::{Audit, Stop};
 
 /// Every function of a program as the VM loaded it.
@@ -39,43 +47,84 @@ impl Listing {
 /// Load `program` as a run would, and list what was loaded.
 pub fn listing(program: &Program) -> Result<Listing, Stop> {
     let code = code::load(program, Audit::Never)?;
+    let function = |entry| function(&code, entry);
     Ok(Listing {
-        fns: (&code.fns).into_iter().map(function).collect(),
+        fns: (&code.funcs).into_iter().map(function).collect(),
         toplevel: code.toplevels.last().map(function).unwrap_or_default(),
     })
 }
 
-fn function(f: &Func) -> String {
+fn function(code: &Code, entry: &Entry) -> String {
+    let body = code.ins.get(entry.pc.index()..entry.end.index());
+    let body = body.unwrap_or_default();
+    // A function that did not load is one instruction, which says why.
+    if let [Ins::Bad { why }] = body
+        && let Some(Why::Missing(what)) = code.whys.get(why.0 as usize)
+    {
+        let what = NotBuilt::from(what.clone());
+        return format!("; not loaded: the VM does not run {what} yet\n");
+    }
     let mut out = String::new();
     // Writing to a `String` cannot fail.
-    let _ = match f {
-        Func::Ready(body) => write_body(&mut out, body),
-        Func::NotBuiltYet(what) => {
-            let what = NotBuilt::from(what.clone());
-            writeln!(out, "; not loaded: the VM does not run {what} yet")
-        }
-    };
+    let _ = write_body(&mut out, code, entry, body);
     out
 }
 
-fn write_body(out: &mut String, body: &Body) -> fmt::Result {
-    let registers = if body.regs == 1 {
-        "register"
-    } else {
-        "registers"
-    };
-    write!(out, "; loaded: {} {registers}", body.regs)?;
-    if !body.params.is_empty() {
-        write!(out, ", parameters in {}", List(&body.params))?;
-    }
-    if !body.carried.is_empty() {
-        write!(out, ", cells kept for reuse in {}", List(&body.carried))?;
+fn write_body(out: &mut String, code: &Code, entry: &Entry, body: &[Ins<Reg>]) -> fmt::Result {
+    let (regs, params) = (entry.needs.len(), entry.params);
+    let s = |n| if n == 1 { "" } else { "s" };
+    write!(out, "; loaded: {regs} register{}", s(regs))?;
+    if let Some(last) = params.checked_sub(1) {
+        write!(out, ", parameter{} in r0", s(params))?;
+        if last > 0 {
+            write!(out, " to r{last}")?;
+        }
     }
     out.push('\n');
-    for (pc, instr) in body.instrs.iter().enumerate() {
-        writeln!(out, "{pc:>5}  {instr}")?;
+    for (i, ins) in body.iter().enumerate() {
+        let mut line = Line {
+            code,
+            entry,
+            dst: None,
+            parts: Vec::new(),
+            to: None,
+        };
+        ins.show(&mut line);
+        write!(out, "{i:>5}  ")?;
+        if let Some(dst) = line.dst {
+            write!(out, "{dst} = ")?;
+        }
+        out.push_str(ins.op().name());
+        if !line.parts.is_empty() {
+            write!(out, "({})", line.parts.join(", "))?;
+        }
+        if let Some(to) = line.to {
+            write!(out, " -> {to}")?;
+        }
+        out.push('\n');
     }
     Ok(())
+}
+
+/// One instruction's line, as its fields add themselves to it.
+pub(crate) struct Line<'a> {
+    code: &'a Code,
+    entry: &'a Entry,
+    dst: Option<Reg>,
+    parts: Vec<String>,
+    /// The number, in its function, of the instruction it may jump to.
+    to: Option<usize>,
+}
+
+impl Line<'_> {
+    fn part(&mut self, part: impl fmt::Display) {
+        self.parts.push(part.to_string());
+    }
+}
+
+/// A field of an instruction, which adds itself to a listing's line.
+pub(crate) trait Show {
+    fn show(self, line: &mut Line<'_>);
 }
 
 impl fmt::Display for Reg {
@@ -84,41 +133,12 @@ impl fmt::Display for Reg {
     }
 }
 
-impl fmt::Display for Arg {
+impl fmt::Display for Arg<Reg> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.moved {
             f.write_str("move ")?;
         }
         self.reg.fmt(f)
-    }
-}
-
-/// Operands, separated by commas.
-struct List<'a, T>(&'a [T]);
-
-impl<T: fmt::Display> fmt::Display for List<'_, T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, item) in self.0.iter().enumerate() {
-            if i > 0 {
-                f.write_str(", ")?;
-            }
-            item.fmt(f)?;
-        }
-        Ok(())
-    }
-}
-
-/// A register a `moved` flag says the instruction takes over.
-fn taken(reg: Reg, moved: bool) -> Arg {
-    Arg { reg, moved }
-}
-
-/// A constructor as a Core IR listing writes it: its type, then its variant.
-struct Variant(VariantRef);
-
-impl fmt::Display for Variant {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.{}", self.0.type_id.0, self.0.variant_idx)
     }
 }
 
@@ -133,7 +153,7 @@ impl fmt::Display for Literal {
             View::Nil => f.write_str("nil"),
             View::Bool(b) => write!(f, "{b}"),
             View::Func(func) => write!(f, "{func}"),
-            View::Nullary(v) => Variant(v).fmt(f),
+            View::Nullary(v) => write!(f, "{}.{}", v.type_id.0, v.variant_idx),
             // The loader makes no constant that is a cell.
             View::Cell(_) => f.write_str("a cell"),
         }
@@ -141,209 +161,236 @@ impl fmt::Display for Literal {
 }
 
 /// Bytes as the text they spell, quoted.
-struct Text<'a>(&'a [u8]);
+fn text(code: &Code, id: TextId) -> String {
+    let bytes: &[u8] = code.texts.get(id.0 as usize).map_or(&[], |t| t);
+    format!("{:?}", String::from_utf8_lossy(bytes))
+}
 
-impl fmt::Display for Text<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", String::from_utf8_lossy(self.0))
+impl Show for Dst<Reg> {
+    fn show(self, line: &mut Line<'_>) {
+        line.dst = Some(self.0);
     }
 }
 
-/// A call's callee and arguments: `fn#3(r1, move r2)`.
-struct Called<'a, C>(C, &'a [Arg]);
-
-impl<C: fmt::Display> fmt::Display for Called<'_, C> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}({})", self.0, List(self.1))
+impl Show for Hit<Reg> {
+    fn show(self, line: &mut Line<'_>) {
+        line.dst = Some(self.0);
     }
 }
 
-impl fmt::Display for Instr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = self.op().name();
-        match self {
-            Instr::Count { block } => write!(f, "{name} block {block}"),
-            Instr::Audit => f.write_str(name),
-            Instr::Const { dst, value } => write!(f, "{dst} = {name} {}", Literal(*value)),
-            Instr::Str { dst, text } => write!(f, "{dst} = {name} {}", Text(text)),
-            Instr::BinaryConst { dst, len, .. } => write!(f, "{dst} = {name} of {len} bits"),
-            Instr::Bits { dst, op, args } => write!(f, "{dst} = {name} {op:?}({})", List(args)),
-            Instr::BigInt { dst, n, .. } => write!(f, "{dst} = {name} {n}"),
-            Instr::Move { dst, src, moved } => {
-                write!(f, "{dst} = {name} {}", taken(*src, *moved))
+impl Show for Taken<Reg> {
+    fn show(self, line: &mut Line<'_>) {
+        line.part(Arg {
+            reg: self.0,
+            moved: true,
+        });
+    }
+}
+
+impl Show for Over<Reg> {
+    fn show(self, line: &mut Line<'_>) {
+        line.part(format_args!("over {}", self.0));
+    }
+}
+
+/// The fields that are one register an instruction does not write.
+macro_rules! registers {
+    ($($ty:ty),*) => {$(
+        impl Show for $ty {
+            fn show(self, line: &mut Line<'_>) {
+                line.part(self.0);
             }
-            Instr::GetGlobal { dst, slot } => write!(f, "{dst} = {name} @g{}", slot.0),
-            Instr::SetGlobal { slot, src } => write!(f, "{name} @g{} = {src}", slot.0),
-            int_arith!(Pair { dst, a, b })
-            | int_compare!(Pair { dst, a, b })
-            | float_arith!(Pair { dst, a, b })
-            | float_compare!(Pair { dst, a, b }) => write!(f, "{dst} = {name}({a}, {b})"),
-            int_arith_k!(WithK { dst, a, k }) | int_compare_k!(WithK { dst, a, k }) => {
-                write!(f, "{dst} = {name}({a}, {})", k.get())
-            }
-            int_arith_k_first!(WithK { dst, a, k }) => {
-                write!(f, "{dst} = {name}({}, {a})", k.get())
-            }
-            float_arith_k!(WithK { dst, a, k }) | float_compare_k!(WithK { dst, a, k }) => {
-                write!(f, "{dst} = {name}({a}, {})", Literal(k.value()))
-            }
-            float_arith_k_first!(WithK { dst, a, k }) => {
-                write!(f, "{dst} = {name}({}, {a})", Literal(k.value()))
-            }
-            Instr::Num { dst, op, a, b } => {
-                let op: &dyn fmt::Debug = match op {
-                    NumOp::Arith(op) => op,
-                    NumOp::Order(op) => op,
-                };
-                write!(f, "{dst} = {name} {op:?}({a}, {b})")
-            }
-            Instr::IntNeg { dst, a }
-            | Instr::FloatNeg { dst, a }
-            | Instr::FloatFromInt { dst, a }
-            | Instr::Neg { dst, a }
-            | Instr::ToString { dst, a }
-            | Instr::Not { dst, a } => write!(f, "{dst} = {name} {a}"),
-            Instr::Print { dst, arg, newline } => {
-                let end = if *newline { " and a newline" } else { "" };
-                write!(f, "{dst} = {name} {arg}{end}")
-            }
-            Instr::Concat { dst, parts } => write!(f, "{dst} = {name}({})", List(parts)),
-            Instr::Ctor {
-                dst,
-                variant,
-                fields,
-                reuse,
-            } => {
-                write!(f, "{dst} = {name} {}", Called(Variant(*variant), fields))?;
-                match reuse {
-                    Some(cell) => write!(f, " over the cell in {cell}"),
-                    None => Ok(()),
-                }
-            }
-            Instr::Drop { reg } | Instr::DropReuse { reg } => write!(f, "{name} {reg}"),
-            Instr::Call { dst, func, args } => write!(f, "{dst} = {name} {}", Called(func, args)),
-            Instr::TailCall { func, args } => write!(f, "{name} {}", Called(func, args)),
-            Instr::CallSelf { dst, args } => write!(f, "{dst} = {name}({})", List(args)),
-            Instr::TailCallSelf { args } => write!(f, "{name}({})", List(args)),
-            Instr::CallValue { dst, callee, args } => {
-                write!(f, "{dst} = {name} {}", Called(callee, args))
-            }
-            Instr::TailCallValue { callee, args } => write!(f, "{name} {}", Called(callee, args)),
-            Instr::Closure {
-                dst,
-                func,
-                captures,
-            } => write!(f, "{dst} = {name} {func}({})", List(captures)),
-            Instr::GetCapture { dst, index } => write!(f, "{dst} = {name} {index}"),
-            Instr::GetSelf { dst, this } => write!(f, "{dst} = {name} {this}"),
-            Instr::Ret { src } => write!(f, "{name} {src}"),
-            Instr::Jump { to } => write!(f, "{name} -> {to}"),
-            Instr::JumpIfFalse { cond, to } => write!(f, "{name} {cond} -> {to}"),
-            int_jump!(JumpPair { a, b, to }) | float_jump!(JumpPair { a, b, to }) => {
-                write!(f, "{name}({a}, {b}) -> {to}")
-            }
-            int_jump_k!(JumpWithK { a, k, to }) => write!(f, "{name}({a}, {}) -> {to}", k.get()),
-            float_jump_k!(JumpWithK { a, k, to }) => {
-                write!(f, "{name}({a}, {}) -> {to}", Literal(k.value()))
-            }
-            Instr::MapSetOwned {
-                dst,
-                map,
-                key,
-                value,
-            } => write!(f, "{dst} = {name}(move {map}, {key}, {value})"),
-            Instr::MapFind { dst, map, key, to } => {
-                write!(f, "{dst} = {name}({map}, {key}) -> {to}")
-            }
-            Instr::MapDeleteOwned { dst, map, key } => {
-                write!(f, "{dst} = {name}(move {map}, {key})")
-            }
-            Instr::JumpUnlessVariant { src, variant, to } => {
-                write!(f, "{name} {src} is {} -> {to}", Variant(*variant))
-            }
-            Instr::JumpUnlessInt { src, n, to } => write!(f, "{name} {src} is {n} -> {to}"),
-            Instr::JumpUnlessFloat { src, x, to } => write!(f, "{name} {src} is {x:?} -> {to}"),
-            Instr::JumpUnlessStr { src, text, to } => {
-                write!(f, "{name} {src} is {} -> {to}", Text(text))
-            }
-            Instr::JumpUnlessBinary { src, len, to, .. } => {
-                write!(f, "{name} {src} is a constant of {len} bits -> {to}")
-            }
-            Instr::Tuple { dst, elements } | Instr::Array { dst, elements } => {
-                write!(f, "{dst} = {name}({})", List(elements))
-            }
-            Instr::Element { dst, src, index }
-            | Instr::ArrayElem { dst, src, index }
-            | Instr::Field { dst, src, index } => write!(f, "{dst} = {name} {index} of {src}"),
-            Instr::Builtin {
-                dst,
-                intrinsic,
-                args,
-            } => write!(f, "{dst} = {name} {intrinsic:?}({})", List(args)),
-            Instr::Equal { dst, a, b }
-            | Instr::NotEqual { dst, a, b }
-            | Instr::ArrayConcat { dst, a, b }
-            | Instr::Range {
-                dst,
-                start: a,
-                end: b,
-            }
-            | Instr::ArrayIndex {
-                dst,
-                src: a,
-                index: b,
-            } => write!(f, "{dst} = {name}({a}, {b})"),
-            Instr::ArrayLen { dst, src } => write!(f, "{dst} = {name} {src}"),
-            Instr::ArrayDrop { dst, src, n, moved } => {
-                write!(f, "{dst} = {name}({}, {n})", taken(*src, *moved))
-            }
-            Instr::ArrayPrepend {
-                dst,
-                front,
-                rest,
-                moved,
-            } => write!(
-                f,
-                "{dst} = {name}({}, ..{})",
-                List(front),
-                taken(*rest, *moved)
-            ),
-            Instr::ArrayAppend {
-                dst,
-                rest,
-                back,
-                moved,
-            } => write!(
-                f,
-                "{dst} = {name}(..{}, {})",
-                taken(*rest, *moved),
-                List(back)
-            ),
-            Instr::ArraySlice {
-                dst,
-                src,
-                start,
-                end,
-            } => write!(f, "{dst} = {name}({src}, {start}, {end})"),
-            Instr::ArrayIndexOr {
-                dst,
-                src,
-                index,
-                default,
-            } => write!(f, "{dst} = {name}({src}, {index}, {default})"),
-            Instr::ArraySet {
-                dst,
-                src,
-                index,
-                value,
-                moved,
-                miss,
-            } => write!(
-                f,
-                "{dst} = {name}({}, {index}, {value}) -> {miss}",
-                taken(*src, *moved)
-            ),
-            Instr::Bad { why } => write!(f, "{name} {why:?}"),
+        }
+    )*};
+}
+
+registers!(Src<Reg>, Shared<Reg>, Kept<Reg>, Dead<Reg>);
+
+impl Show for Arg<Reg> {
+    fn show(self, line: &mut Line<'_>) {
+        line.part(self);
+    }
+}
+
+impl<const N: usize> Show for Args<Reg, N> {
+    fn show(self, line: &mut Line<'_>) {
+        self.iter().for_each(|a| line.part(a));
+    }
+}
+
+impl Show for ArgList {
+    fn show(self, line: &mut Line<'_>) {
+        let code = line.code;
+        self.args(&code.lists).iter().for_each(|a| line.part(a));
+    }
+}
+
+impl<const N: usize> Show for Looks<Reg, N> {
+    fn show(self, line: &mut Line<'_>) {
+        self.regs().iter().for_each(|r| line.part(r));
+    }
+}
+
+impl<const N: usize> Show for Shares<Reg, N> {
+    fn show(self, line: &mut Line<'_>) {
+        self.regs().iter().for_each(|r| line.part(r));
+    }
+}
+
+impl Show for LookList {
+    fn show(self, line: &mut Line<'_>) {
+        let code = line.code;
+        self.regs(&code.lists).iter().for_each(|r| line.part(r));
+    }
+}
+
+impl Show for ShareList {
+    fn show(self, line: &mut Line<'_>) {
+        let code = line.code;
+        self.regs(&code.lists).iter().for_each(|r| line.part(r));
+    }
+}
+
+impl Show for KeepList {
+    fn show(self, line: &mut Line<'_>) {
+        let code = line.code;
+        for r in self.regs(&code.lists) {
+            line.part(format_args!("keep {r}"));
         }
     }
 }
+
+impl Show for Pc {
+    fn show(self, line: &mut Line<'_>) {
+        line.to = self.index().checked_sub(line.entry.pc.index());
+    }
+}
+
+impl Show for EntryPc {
+    fn show(self, line: &mut Line<'_>) {
+        let mut funcs = (0..).map(FuncIdx).zip(&line.code.funcs);
+        match funcs.find(|(_, e)| e.pc.index() == self.index()) {
+            Some((func, _)) => line.part(func),
+            None => line.part(format_args!("@{}", self.index())),
+        }
+    }
+}
+
+/// How many registers a frame has is in the listing once, at its top.
+impl Show for Room {
+    fn show(self, _: &mut Line<'_>) {}
+}
+
+impl Show for Value {
+    fn show(self, line: &mut Line<'_>) {
+        line.part(Literal(self));
+    }
+}
+
+impl Show for Float {
+    fn show(self, line: &mut Line<'_>) {
+        line.part(Literal(self.value()));
+    }
+}
+
+impl Show for SmallInt {
+    fn show(self, line: &mut Line<'_>) {
+        line.part(self.get());
+    }
+}
+
+impl Show for f64 {
+    fn show(self, line: &mut Line<'_>) {
+        line.part(format_args!("{self:?}"));
+    }
+}
+
+impl Show for Variant {
+    fn show(self, line: &mut Line<'_>) {
+        let v = self.get();
+        line.part(format_args!("{}.{}", v.type_id.0, v.variant_idx));
+    }
+}
+
+impl Show for TextId {
+    fn show(self, line: &mut Line<'_>) {
+        line.part(text(line.code, self));
+    }
+}
+
+impl Show for BinaryId {
+    fn show(self, line: &mut Line<'_>) {
+        let len = line.code.binaries.get(self.0 as usize).map(|b| b.len);
+        line.part(format_args!("{} bits", len.unwrap_or(0)));
+    }
+}
+
+impl Show for WhyId {
+    fn show(self, line: &mut Line<'_>) {
+        match line.code.whys.get(self.0 as usize) {
+            Some(Why::Broken(why)) => line.part(format_args!("{why:?}")),
+            Some(Why::Missing(what)) => line.part(format_args!("{what:?}")),
+            None => {}
+        }
+    }
+}
+
+impl Show for GlobalSlot {
+    fn show(self, line: &mut Line<'_>) {
+        line.part(format_args!("@g{}", self.0));
+    }
+}
+
+impl Show for NumOp {
+    fn show(self, line: &mut Line<'_>) {
+        match self {
+            NumOp::Arith(op) => line.part(format_args!("{op:?}")),
+            NumOp::Order(op) => line.part(format_args!("{op:?}")),
+        }
+    }
+}
+
+/// A constant is shown by what it is, beside this.
+impl Show for ConstId {
+    fn show(self, _: &mut Line<'_>) {}
+}
+
+impl Show for BlockId {
+    fn show(self, line: &mut Line<'_>) {
+        line.part(format_args!("block {}", self.0));
+    }
+}
+
+impl Show for Newline {
+    fn show(self, line: &mut Line<'_>) {
+        if self.0 {
+            line.part("newline");
+        }
+    }
+}
+
+/// The fields whose `Display` is what the listing shows.
+macro_rules! displayed {
+    ($($ty:ty),*) => {$(
+        impl Show for $ty {
+            fn show(self, line: &mut Line<'_>) {
+                line.part(self);
+            }
+        }
+    )*};
+}
+
+displayed!(u16, u32, i64, FuncIdx);
+
+/// The fields whose `Debug` is.
+macro_rules! debugged {
+    ($($ty:ty),*) => {$(
+        impl Show for $ty {
+            fn show(self, line: &mut Line<'_>) {
+                line.part(format_args!("{self:?}"));
+            }
+        }
+    )*};
+}
+
+debugged!(BitsOp, Intrinsic);

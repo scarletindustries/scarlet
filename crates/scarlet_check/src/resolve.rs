@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use petgraph::Directed;
 use petgraph::algo::tarjan_scc;
 use petgraph::stable_graph::{NodeIndex, StableGraph};
+use scarlet_ir::core_ir::MAX_PARAMS;
 use scarlet_syntax::ast;
 use scarlet_syntax::span::Span;
 use scarlet_types::interface::ValueKind;
@@ -157,12 +158,7 @@ impl<'r, 'a> Resolver<'r, 'a> {
                 let body_span = type_defining_span(body);
                 let (params, body) = self
                     .in_frame(None, |r| {
-                        let params: Vec<_> = fd
-                            .params
-                            .iter()
-                            .zip(param_tys)
-                            .map(|(p, ty)| (r.bind_param(p), ty))
-                            .collect();
+                        let params = r.bind_params(&fd.params, param_tys);
                         (params, r.expr(body, &w))
                     })
                     .0;
@@ -258,8 +254,21 @@ impl<'r, 'a> Resolver<'r, 'a> {
         b
     }
 
-    fn bind_param(&mut self, p: &ast::FunctionParameter) -> BinderId {
-        self.bind(&p.identifier, false)
+    /// Bind a function's parameters, each beside what `tys` has for it.
+    fn bind_params<T>(
+        &mut self,
+        params: &[ast::FunctionParameter],
+        tys: Vec<T>,
+    ) -> Vec<(BinderId, T)> {
+        if let Some(p) = params.get(MAX_PARAMS) {
+            self.report
+                .add(p.identifier.span, CheckError::TooManyParameters);
+        }
+        params
+            .iter()
+            .zip(tys)
+            .map(|(p, ty)| (self.bind(&p.identifier, false), ty))
+            .collect()
     }
 
     /// Report the bindings nothing read, in source order. A name starting
@@ -435,20 +444,14 @@ impl<'r, 'a> Resolver<'r, 'a> {
                     .collect(),
             ),
             E::Identifier(id) => match self.value(id, w) {
-                Some(found) => RKind::Ref {
-                    r: found.r,
-                    at: id.span,
-                },
+                Some(found) => self.read(found, id.span),
                 None => {
                     self.unknown_identifier(id);
                     RKind::Error
                 }
             },
             E::ModuleAccessExpression(ma) => match self.member(ma, w) {
-                Some(found) => RKind::Ref {
-                    r: found.r,
-                    at: ma.member.span,
-                },
+                Some(found) => self.read(found, ma.member.span),
                 None => RKind::Error,
             },
             E::BlockExpression(b) => self.block(b, w),
@@ -577,12 +580,7 @@ impl<'r, 'a> Resolver<'r, 'a> {
                 tys.push(read.read_opt(&mut vars, p.typ.as_ref(), &mut r.report));
             }
             let ret = read.read_opt(&mut vars, fe.return_type.as_ref(), &mut r.report);
-            let params: Vec<_> = fe
-                .params
-                .iter()
-                .zip(tys)
-                .map(|(p, ty)| (r.bind_param(p), ty))
-                .collect();
+            let params = r.bind_params(&fe.params, tys);
             (params, ret, r.expr(&fe.body, w))
         });
         RKind::Lambda(Box::new(RLambda {
@@ -597,6 +595,17 @@ impl<'r, 'a> Resolver<'r, 'a> {
     }
 
     // --- Names ---
+
+    /// A name read as a value. One of a constructor is a function that takes
+    /// the constructor's fields, when it has any.
+    fn read(&mut self, found: Found, at: Span) -> RKind {
+        if let Some(ctor) = &found.ctor
+            && ctor.labels.len() > MAX_PARAMS
+        {
+            self.report.add(at, CheckError::TooManyParameters);
+        }
+        RKind::Ref { r: found.r, at }
+    }
 
     /// What a bare name means: a local, then one of the module's own values
     /// or constructors, then the prelude's. Records the use.
@@ -812,6 +821,9 @@ impl<'r, 'a> Resolver<'r, 'a> {
             }
             None => (self.expr(&fc.callee, w), None),
         };
+        if fc.arguments.len() > MAX_PARAMS {
+            self.report.add(fc.span, CheckError::TooManyArguments);
+        }
         let args = self.args(&fc.arguments, labels.as_deref(), w);
         RKind::Call {
             callee: Box::new(callee),

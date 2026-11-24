@@ -5,6 +5,7 @@
 use std::fmt;
 
 use petgraph::graph::GraphError;
+use scarlet_ir::core_ir::MAX_PARAMS;
 
 use scarlet_syntax::diagnostic::{DiagnosticCode, Problem, Severity};
 use scarlet_syntax::module_path::ModulePath;
@@ -173,6 +174,11 @@ pub enum CheckError {
     RecursiveAlias(Name),
     /// A type with more variants than a 16-bit index can name.
     TooManyVariants(Name),
+    /// A function, or a function type, with more parameters than a call can
+    /// pass.
+    TooManyParameters,
+    /// A call that passes more arguments than a function can take.
+    TooManyArguments,
     /// A public value whose type still holds a variable nothing generalised.
     NotFullyKnown {
         name: Name,
@@ -468,6 +474,14 @@ impl fmt::Display for CheckError {
             E::TooManyVariants(ty) => write!(
                 f,
                 "Type '{ty}' has more than 65536 variants, which is more than a program can tell apart"
+            ),
+            E::TooManyParameters => write!(
+                f,
+                "A function takes at most {MAX_PARAMS} parameters. Put some of them in a record"
+            ),
+            E::TooManyArguments => write!(
+                f,
+                "A call passes at most {MAX_PARAMS} arguments. Put some of them in a record"
             ),
             E::TypeArity {
                 qualifier,

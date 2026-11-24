@@ -3,9 +3,10 @@
 
 use std::fmt;
 
-use scarlet_ir::core_ir::{FuncIdx, PrimOp};
+use scarlet_ir::core_ir::{FuncIdx, MAX_PARAMS, PrimOp};
 use scarlet_ir::intrinsic::Intrinsic;
 
+use crate::code::MAX_REGS;
 use crate::heap::{AuditFailure, AuditFault, DeadCell, Fault};
 use crate::value::View;
 
@@ -25,12 +26,10 @@ pub enum Stop {
     /// it with. Like `HeapFull`, this is a limit of the machine. The
     /// program's own heap had room.
     NoRoomToAudit,
-    /// The function `name` has more instructions than the VM's jumps can
-    /// reach. Like `HeapFull`, this is a limit of the machine.
-    FunctionTooLong { name: String },
-    /// The function `name` needs more registers than a register number can
-    /// name. This is a limit of the machine too.
-    TooManyRegisters { name: String },
+    /// The program has more instructions, or more of something they name,
+    /// than the VM can number. Like `HeapFull`, this is a limit of the
+    /// machine.
+    ProgramTooLong,
     /// The program broke a promise the compiler makes about every program,
     /// like a `match` having an arm for every value, or the VM found a
     /// reference count wrong. Only a bug in the compiler or the VM causes
@@ -98,19 +97,45 @@ pub struct BadProgram(Broken);
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Missing {
     Intrinsic(Intrinsic),
-    Arity { op: PrimOp, want: Arity },
+    Arity {
+        op: PrimOp,
+        want: Arity,
+    },
     PrintArity(Intrinsic),
     TooManyFields,
+    /// A function past one of the VM's limits.
+    TooMany {
+        func: String,
+        of: Limit,
+    },
     NoConst(usize),
-    BigConst(i64),
-    StringConst,
-    BinaryConst,
     NoFunc(FuncIdx),
     Join(View),
     Branch(View),
     BigRangeEnd,
     IntOperation(View),
     Printing,
+}
+
+/// What a function may only have so much of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Limit {
+    /// It holds more than [`MAX_REGS`] values at once.
+    Values,
+    /// It has more than [`MAX_PARAMS`] parameters.
+    Parameters,
+    /// It makes a call with more than [`MAX_PARAMS`] arguments.
+    Arguments,
+}
+
+impl fmt::Display for Limit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Limit::Values => write!(f, "holds more than {MAX_REGS} values at once"),
+            Limit::Parameters => write!(f, "has more than {MAX_PARAMS} parameters"),
+            Limit::Arguments => write!(f, "makes a call with more than {MAX_PARAMS} arguments"),
+        }
+    }
 }
 
 /// How many arguments an operation takes.
@@ -139,6 +164,17 @@ pub(crate) enum Broken {
     TooManyFunctions,
     NoArm,
     UndeclaredCase,
+    /// A function reads a value that nothing on some path to the read wrote.
+    ReadBeforeWritten,
+    /// A function jumps to an instruction before the jump.
+    JumpsBack,
+    /// A function goes on past its last instruction, or jumps there.
+    RunsOff,
+    /// An instruction names a register, a label or a function that was given
+    /// no place.
+    NoPlace,
+    /// A frame that returns to nothing.
+    NoCaller,
     NegativeCapture,
     ToplevelSelf,
     ToplevelCallsSelf,
@@ -221,9 +257,7 @@ impl fmt::Display for NotBuilt {
             Missing::PrintArity(i) => write!(f, "{i:?} with {}", Arity::One),
             Missing::TooManyFields => f.write_str("a constructor with more than 65535 fields"),
             Missing::NoConst(i) => write!(f, "constant c{i}, which the program does not have"),
-            Missing::BigConst(n) => write!(f, "the constant {n} as a small Int"),
-            Missing::StringConst => f.write_str("String"),
-            Missing::BinaryConst => f.write_str("a Binary as a plain value"),
+            Missing::TooMany { func, of } => write!(f, "{func}, which {of},"),
             Missing::NoFunc(func) => write!(f, "a call to {func}, which the program does not have"),
             Missing::Join(v) => write!(f, "joining {v:?}"),
             Missing::Branch(v) => write!(f, "a branch on {v:?}"),
@@ -253,6 +287,11 @@ impl fmt::Display for BadProgram {
             }
             Broken::NoArm => f.write_str("a match found no arm for its value"),
             Broken::UndeclaredCase => f.write_str("a jump to a case that no match declares"),
+            Broken::ReadBeforeWritten => f.write_str("a value read before anything wrote it"),
+            Broken::JumpsBack => f.write_str("a jump to an instruction before it"),
+            Broken::RunsOff => f.write_str("a function that goes on past its last instruction"),
+            Broken::NoPlace => f.write_str("an instruction that names something with no place"),
+            Broken::NoCaller => f.write_str("a frame that returns to nothing"),
             Broken::NegativeCapture => f.write_str("a capture with a negative index"),
             Broken::ToplevelSelf => f.write_str("a toplevel reads itself as a closure"),
             Broken::ToplevelCallsSelf => f.write_str("a toplevel calls itself"),

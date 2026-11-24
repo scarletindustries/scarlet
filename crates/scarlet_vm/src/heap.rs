@@ -472,21 +472,24 @@ impl Heap {
     /// [`DeadCell`], and so is a cell the heap does not have. One whose
     /// space has been handed out again is not found: this takes a reference
     /// from the new cell there.
-    // The interpreter releases the old value of every register it writes, and
-    // most are not cells. Inside its loop this took registers the loop needs,
-    // and cost more at every instruction than the call costs here. Marked
-    // cold, the call takes no register from the paths that do not make it.
+    #[inline(always)]
+    pub(crate) fn release(&mut self, cell: Cell) -> Result<(), DeadCell> {
+        let h = match self.arena.get_mut(cell.index()) {
+            Some(h) if count(*h) > 1 => {
+                *h = h.wrapping_sub(1);
+                return Ok(());
+            }
+            Some(h) => *h,
+            None => 0,
+        };
+        self.release_last(cell, h)
+    }
+
+    /// [`Self::release`] of a cell whose header is `h` and whose count is not
+    /// above 1.
     #[cold]
     #[inline(never)]
-    pub(crate) fn release(&mut self, cell: Cell) -> Result<(), DeadCell> {
-        let Some(slot) = self.arena.get_mut(cell.index()) else {
-            return Err(DeadCell);
-        };
-        let h = *slot;
-        if count(h) > 1 {
-            *slot = h.wrapping_sub(1);
-            return Ok(());
-        }
+    fn release_last(&mut self, cell: Cell, h: u64) -> Result<(), DeadCell> {
         if count(h) != 1 {
             return self.uncounted(cell);
         }

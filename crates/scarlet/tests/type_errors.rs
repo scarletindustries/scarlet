@@ -874,3 +874,66 @@ fn a_stdlib_type_is_unknown_without_its_import() {
         out.combined()
     );
 }
+
+/// A function takes at most 250 parameters, and so does a lambda.
+#[test]
+fn a_function_of_251_parameters_is_refused() {
+    let params = |n: usize| {
+        let each: Vec<String> = (0..n).map(|i| format!("_p{i} Int")).collect();
+        each.join(", ")
+    };
+    let message = "A function takes at most 250 parameters";
+    let named = |n| {
+        format!(
+            "fn many({}) Int {{ 1 }}\npub fn main() {{ println(many) }}\n",
+            params(n)
+        )
+    };
+    let lambda = |n| {
+        format!(
+            "pub fn main() {{\n\tf = fn({}) {{ 1 }}\n\tprintln(f)\n}}\n",
+            params(n)
+        )
+    };
+    check_rejects(&named(251), message);
+    check_rejects(&lambda(251), message);
+    common::check_ok(&named(250));
+    common::check_ok(&lambda(250));
+}
+
+/// A constructor may have more fields than that, and be built and taken apart,
+/// but a function made of it may not.
+/// No function type has more parameters either, and no call more arguments, even
+/// of something whose type is not known yet.
+#[test]
+fn nothing_called_takes_more_than_250_arguments() {
+    let list = |n: usize, each: &dyn Fn(usize) -> String| -> String {
+        (0..n).map(each).collect::<Vec<_>>().join(", ")
+    };
+    let wide = |n: usize, main: &str| {
+        let fields = (0..n).map(|i| format!("\tf{i} Int\n")).collect::<String>();
+        format!("type W {{\n{fields}}}\npub fn main() {{\n{main}}}\n")
+    };
+    let parameters = "A function takes at most 250 parameters";
+    let arguments = "A call passes at most 250 arguments";
+
+    check_rejects(&wide(251, "\tprintln(W)\n"), parameters);
+    common::check_ok(&wide(250, "\tprintln(W)\n"));
+    let values = list(251, &|i| i.to_string());
+    let built = format!("\tw = W({values})\n\tprintln(w.f250)\n");
+    common::check_ok(&wide(251, &built));
+
+    let of_type = |n: usize| {
+        let ints = list(n, &|_| "Int".to_string());
+        format!("fn g(_k fn({ints}) Int) Int {{ 1 }}\npub fn main() {{ println(g) }}\n")
+    };
+    check_rejects(&of_type(251), parameters);
+    common::check_ok(&of_type(250));
+
+    let call = |n: usize| {
+        let values = list(n, &|i| i.to_string());
+        format!("pub fn main() {{\n\tf = fn(k) {{ k({values}) }}\n\tprintln(f)\n}}\n")
+    };
+    check_rejects(&call(251), arguments);
+    common::check_ok(&call(250));
+}

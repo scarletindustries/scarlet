@@ -2,134 +2,131 @@
 //!
 //! Frames live on a stack the VM owns, not on Rust's, so a deep recursion in
 //! a Scarlet program uses memory and never overflows anything. All frames'
-//! registers sit in one vector. A frame is a function, where it has got to in
-//! that function, and where its registers start.
+//! registers sit in one vector. A frame is where its registers start, and
+//! beside them a record of where it returns to ([`Frame`]). The loop holds
+//! only the running frame's place in the registers and in the code.
 //!
 //! Reference counting follows one rule. Every register, global and argument
 //! holds one reference to its value. So copying a value into a register adds
 //! a reference, and overwriting a register, or leaving a frame, gives one up.
 //! Where the loader saw that nothing reads a register again, the copy takes
-//! the register's reference instead of adding one (`moves_on_last_use`).
+//! the register's reference instead of adding one (`code::live`).
 //! Perceus's `Drop` gives one up early. This alone keeps every count right,
 //! whatever Perceus did or did not insert (`docs/vm-design.md`, "Memory").
 //! If a count is wrong all the same, the instruction that takes or gives up
 //! a reference to a cell already freed stops the run with `Broken::DeadCell`.
 
-use num_bigint::Sign;
-use num_traits::{FromPrimitive, ToPrimitive};
-use scarlet_ir::core_ir::{ConstId, FuncIdx, HttpTypes, IoErrors, JsonTypes, VariantRef};
-use scarlet_ir::intrinsic::Intrinsic;
+use scarlet_ir::core_ir::{FuncIdx, GlobalSlot};
 
 use crate::array::{self, End, Seq};
-use crate::bigint::{self, Int};
-use crate::binary::{self, Bits};
-use crate::code::{Arg, BitsOp, Body, Code, Counted, Func, Instr, Op, Reg};
+use crate::code::{
+    Arg, Args, BitsOp, Code, Counted, Dead, Dst, Entry, Hit, Ins, Kept, Op, Over, Reg, Room,
+    Shared, Src, Taken, Variant,
+};
 use crate::counts::Counts;
 use crate::eq;
 use crate::float;
-use crate::heap::{Cell, DeadCell, Fault, Heap, Kind};
-use crate::host::{Host, IoError};
-use crate::http;
+use crate::heap::{DeadCell, Heap, Kind};
+use crate::host::Host;
 use crate::int;
-use crate::json;
 use crate::map;
-use crate::ops::{Arith, Compare, NumOp, Order};
-use crate::show;
+use crate::ops::{Arith, Compare, Order};
 use crate::stop::{Broken, Missing, fault};
 use crate::value::{Value, View};
-use crate::word::to_usize;
 use crate::{Audit, Stop};
 
-mod net;
+mod rest;
 
-// The handlers of the operator instructions. Each takes the operands `i` out
-// of the registers, does its operator in place when it can, and asks the one
-// slow path of its kind when it cannot. The operator is a constant in every
-// use, so nothing looks at it as a program runs.
+use rest::Rest;
+
+// The handlers of the operator instructions. Each takes its operands out of
+// the registers, does its operator in place when it can, and asks the one slow
+// path of its kind when it cannot. The operator is a constant in every use, so
+// nothing looks at it as a program runs.
 
 macro_rules! int {
-    ($vm:ident, $base:ident, $i:ident, $op:expr) => {{
-        let (x, y) = ($vm.get($base, $i.a), $vm.get($base, $i.b));
+    ($vm:ident, $base:ident, $dst:ident, $a:ident, $b:ident, $op:expr) => {{
+        let (x, y) = ($vm.look($base, $a), $vm.look($base, $b));
         match x.both_small(y).and_then(|(x, y)| int::fast($op, x, y)) {
-            Some(v) => $vm.set($base, $i.dst, v)?,
-            None => $vm.int_slow($base, $i.dst, $op, x, y)?,
+            Some(v) => $vm.put($base, $dst, v)?,
+            None => $vm.int_slow($base, $dst, $op, x, y)?,
         }
     }};
 }
 
 macro_rules! int_k {
-    ($vm:ident, $base:ident, $i:ident, $op:expr) => {{
-        let x = $vm.get($base, $i.a);
-        match x.as_small().and_then(|x| int::fast($op, x, $i.k)) {
-            Some(v) => $vm.set($base, $i.dst, v)?,
-            None => $vm.int_slow($base, $i.dst, $op, x, $i.k.value())?,
+    ($vm:ident, $base:ident, $dst:ident, $a:ident, $k:ident, $op:expr) => {{
+        let x = $vm.look($base, $a);
+        match x.as_small().and_then(|x| int::fast($op, x, $k)) {
+            Some(v) => $vm.put($base, $dst, v)?,
+            None => $vm.int_slow($base, $dst, $op, x, $k.value())?,
         }
     }};
 }
 
 macro_rules! int_k_first {
-    ($vm:ident, $base:ident, $i:ident, $op:expr) => {{
-        let y = $vm.get($base, $i.a);
-        match y.as_small().and_then(|y| int::fast($op, $i.k, y)) {
-            Some(v) => $vm.set($base, $i.dst, v)?,
-            None => $vm.int_slow($base, $i.dst, $op, $i.k.value(), y)?,
+    ($vm:ident, $base:ident, $dst:ident, $k:ident, $a:ident, $op:expr) => {{
+        let y = $vm.look($base, $a);
+        match y.as_small().and_then(|y| int::fast($op, $k, y)) {
+            Some(v) => $vm.put($base, $dst, v)?,
+            None => $vm.int_slow($base, $dst, $op, $k.value(), y)?,
         }
     }};
 }
 
 macro_rules! int_holds {
-    ($vm:ident, $base:ident, $i:ident, $op:expr) => {{
-        let (x, y) = ($vm.get($base, $i.a), $vm.get($base, $i.b));
+    ($vm:ident, $base:ident, $a:ident, $b:ident, $op:expr) => {{
+        let (x, y) = ($vm.look($base, $a), $vm.look($base, $b));
         match x.both_small(y) {
             Some((x, y)) => $op.holds(x.cmp(&y)),
-            None => int::compare(&$vm.heap, $op, x, y)?,
+            None => int::compare(&$vm.rest.heap, $op, x, y)?,
         }
     }};
 }
 
 macro_rules! int_holds_k {
-    ($vm:ident, $base:ident, $i:ident, $op:expr) => {{
-        let x = $vm.get($base, $i.a);
+    ($vm:ident, $base:ident, $a:ident, $k:ident, $op:expr) => {{
+        let x = $vm.look($base, $a);
         match x.as_small() {
-            Some(x) => $op.holds(x.cmp(&$i.k)),
-            None => int::compare(&$vm.heap, $op, x, $i.k.value())?,
+            Some(x) => $op.holds(x.cmp(&$k)),
+            None => int::compare(&$vm.rest.heap, $op, x, $k.value())?,
         }
     }};
 }
 
 macro_rules! float {
-    ($vm:ident, $base:ident, $i:ident, $op:expr) => {{
-        let (x, y) = ($vm.get($base, $i.a), $vm.get($base, $i.b));
+    ($vm:ident, $base:ident, $dst:ident, $a:ident, $b:ident, $op:expr) => {{
+        let (x, y) = ($vm.look($base, $a), $vm.look($base, $b));
         match float::fast($op, x, y) {
-            Some(v) => $vm.set($base, $i.dst, v)?,
-            None => $vm.float_slow($base, $i.dst, $op, x, y)?,
+            Some(v) => $vm.put($base, $dst, v)?,
+            None => $vm.float_slow($base, $dst, $op, x, y)?,
         }
     }};
 }
 
 macro_rules! float_k {
-    ($vm:ident, $base:ident, $i:ident, $op:expr) => {{
-        let x = $vm.get($base, $i.a);
-        match float::fast($op, x, $i.k.value()) {
-            Some(v) => $vm.set($base, $i.dst, v)?,
-            None => $vm.float_slow($base, $i.dst, $op, x, $i.k.value())?,
+    ($vm:ident, $base:ident, $dst:ident, $a:ident, $k:ident, $op:expr) => {{
+        let x = $vm.look($base, $a);
+        match float::fast($op, x, $k.value()) {
+            Some(v) => $vm.put($base, $dst, v)?,
+            None => $vm.float_slow($base, $dst, $op, x, $k.value())?,
         }
     }};
 }
 
 macro_rules! float_k_first {
-    ($vm:ident, $base:ident, $i:ident, $op:expr) => {{
-        let y = $vm.get($base, $i.a);
-        match float::fast($op, $i.k.value(), y) {
-            Some(v) => $vm.set($base, $i.dst, v)?,
-            None => $vm.float_slow($base, $i.dst, $op, $i.k.value(), y)?,
+    ($vm:ident, $base:ident, $dst:ident, $k:ident, $a:ident, $op:expr) => {{
+        let y = $vm.look($base, $a);
+        match float::fast($op, $k.value(), y) {
+            Some(v) => $vm.put($base, $dst, v)?,
+            None => $vm.float_slow($base, $dst, $op, $k.value(), y)?,
         }
     }};
 }
 
 macro_rules! float_holds {
-    ($vm:ident, $base:ident, $i:ident, $op:expr) => {{
-        let (x, y) = ($vm.get($base, $i.a), $vm.get($base, $i.b));
+    ($vm:ident, $base:ident, $a:ident, $b:ident, $op:expr) => {{
+        let (x, y) = ($vm.look($base, $a), $vm.look($base, $b));
         match float::fast_compare($op, x, y) {
             Some(holds) => holds,
             None => float::slow_compare($op, x, y)?,
@@ -138,68 +135,60 @@ macro_rules! float_holds {
 }
 
 macro_rules! float_holds_k {
-    ($vm:ident, $base:ident, $i:ident, $op:expr) => {{
-        let x = $vm.get($base, $i.a);
-        match float::fast_compare($op, x, $i.k.value()) {
+    ($vm:ident, $base:ident, $a:ident, $k:ident, $op:expr) => {{
+        let x = $vm.look($base, $a);
+        match float::fast_compare($op, x, $k.value()) {
             Some(holds) => holds,
-            None => float::slow_compare($op, x, $i.k.value())?,
+            None => float::slow_compare($op, x, $k.value())?,
         }
     }};
 }
 
 macro_rules! store_bool {
-    ($vm:ident, $base:ident, $i:ident, $holds:ident, $op:expr) => {
-        $vm.set($base, $i.dst, Value::bool($holds!($vm, $base, $i, $op)))?
+    ($vm:ident, $base:ident, $dst:ident, $holds:ident($a:ident, $b:ident), $op:expr) => {
+        $vm.put($base, $dst, Value::bool($holds!($vm, $base, $a, $b, $op)))?
     };
 }
 
 macro_rules! jump {
-    ($vm:ident, $frame:ident, $i:ident, $holds:ident, $op:expr) => {{
-        let base = $frame.base;
-        if !$holds!($vm, base, $i, $op) {
-            $frame.pc = $i.to as usize;
+    ($vm:ident, $base:ident, $pc:ident, $to:ident, $holds:ident($a:ident, $b:ident), $op:expr) => {
+        if !$holds!($vm, $base, $a, $b, $op) {
+            $pc = $to.index();
         }
-    }};
+    };
 }
 
-struct Frame<'c> {
-    body: &'c Body,
-    pc: usize,
-    base: usize,
-    /// The caller's register the result goes to. `None` for the frame a run
-    /// started with.
-    ret_to: Option<Reg>,
-    /// The closure this frame runs as, holding one reference. It is a closure
-    /// cell, a function value, or `NIL` for a call by name. Its captures are
-    /// what `GetCapture` reads.
+/// One call that has not returned: where it goes on when it does, and what it
+/// runs as.
+struct Frame {
+    /// The instruction it returns to.
+    pc: u32,
+    /// How far below it its caller's registers start, which is how many the
+    /// caller has.
+    below: Room,
+    /// The caller's register the result goes to.
+    dst: Reg,
+    /// The closure it runs as, holding one reference. It is a closure cell, a
+    /// function value, or `NIL` for a call by name. Its captures are what
+    /// `GetCapture` reads.
     env: Value,
 }
 
 // The fields keep this order, the ones the loop reads first and the heap
-// last, so that a change to the heap's size cannot move them. A call moves
-// `passing` with one 16-byte load and one store, and each takes an
-// instruction more when its offset is past 255 and not a multiple of 16.
+// last, so that a change to the heap's size cannot move them. An offset past
+// what a load can hold takes an instruction more at each use.
 #[repr(C)]
 pub(crate) struct Machine<'c, 'h> {
-    code: &'c Code,
-    host: &'h mut dyn Host,
-    regs: Vec<Value>,
-    /// Where the live registers end. Every register from here on is `Nil`.
-    top: usize,
+    /// Every frame's registers. Each past the running frame's is `Nil`.
+    stack: Vec<Value>,
+    /// The running frame's record, last, and those of the frames waiting on
+    /// it.
+    frames: Vec<Frame>,
     /// The values on their way into a frame or a cell, which are a call's
     /// arguments or a constructor's fields. It is kept between uses so that
     /// neither allocates.
     passing: Vec<Value>,
-    globals: Vec<Value>,
-    /// `os.env` as a map, made the first time it is asked for. The
-    /// environment cannot change while the program runs, so every call after
-    /// shares this one.
-    env: Option<Cell>,
-    /// How many times each block of a counted load has run, by the number
-    /// its `Count` instruction holds. It is empty for an ordinary load,
-    /// which has no such instruction.
-    ran: Vec<u64>,
-    heap: Heap,
+    rest: Rest<'c, 'h>,
 }
 
 /// A run that reached its program's end, holding the value of the last thing
@@ -212,22 +201,24 @@ pub(crate) struct Ended {
 impl<'c, 'h> Machine<'c, 'h> {
     pub(crate) fn new(code: &'c Code, host: &'h mut dyn Host) -> Self {
         Machine {
-            code,
-            host,
-            heap: Heap::default(),
-            globals: vec![Value::NIL; code.globals as usize],
-            regs: Vec::new(),
-            top: 0,
+            stack: Vec::new(),
+            frames: Vec::new(),
             passing: Vec::new(),
-            env: None,
-            ran: Vec::new(),
+            rest: Rest {
+                code,
+                host,
+                globals: vec![Value::NIL; code.globals as usize],
+                env: None,
+                ran: Vec::new(),
+                heap: Heap::default(),
+            },
         }
     }
 
     /// A machine for a counted load, which counts each run of each block.
     pub(crate) fn counting(counted: &'c Counted, host: &'h mut dyn Host) -> Self {
         let mut machine = Machine::new(&counted.code, host);
-        machine.ran = vec![0; counted.blocks.len()];
+        machine.rest.ran = vec![0; counted.blocks.len()];
         machine
     }
 
@@ -235,490 +226,548 @@ impl<'c, 'h> Machine<'c, 'h> {
     /// one. The result holds the value of the last thing run, which is
     /// `main`'s, or the entry toplevel's for a script.
     pub(crate) fn run(&mut self) -> Result<Ended, Stop> {
+        let code = self.rest.code;
         let mut last = Value::NIL;
-        for top in &self.code.toplevels {
+        for top in &code.toplevels {
             // Given up first, so that while a call runs every reference the
             // run holds is one an audit is told of.
-            self.release(last)?;
-            last = self.call(ready(top)?, &[])?;
+            self.rest.release(last)?;
+            last = self.call(top, &[])?;
         }
-        if let Some(main) = self.code.main {
-            self.release(last)?;
-            last = self.call(self.body(main)?, &[])?;
+        if let Some(main) = code.main {
+            self.rest.release(last)?;
+            let main = code.funcs.get(main).ok_or(Missing::NoFunc(main));
+            last = self.call(main.map_err(Stop::missing)?, &[])?;
         }
-        self.let_go_of_handles();
+        self.rest.let_go_of_handles();
         Ok(Ended { last })
     }
 
-    fn body(&self, f: FuncIdx) -> Result<&'c Body, Stop> {
-        match self.code.fns.get(f) {
-            Some(func) => ready(func),
-            None => Err(Stop::missing(Missing::NoFunc(f))),
+    /// Call `entry` with `args` and run until it returns. The arguments'
+    /// references pass to the callee, and the result's passes to the caller.
+    fn call(&mut self, entry: &Entry, args: &[Value]) -> Result<Value, Stop> {
+        // It returns to the code's first instruction, the `Halt`, which takes
+        // the result from the first register. So there is always one.
+        self.open(entry.needs.len().max(1));
+        for (slot, arg) in self.stack.iter_mut().zip(args) {
+            *slot = *arg;
         }
+        self.open_frame(Frame {
+            pc: 0,
+            below: Room(0),
+            dst: Reg(0),
+            env: Value::NIL,
+        });
+        self.steps(entry.pc.index())
     }
 
-    /// Call `body` with `args` and run until it returns. The arguments'
-    /// references pass to the callee, and the result's passes to the caller.
-    fn call(&mut self, body: &'c Body, args: &[Value]) -> Result<Value, Stop> {
-        let base = self.top;
-        self.enter(body, base, args)?;
-        // The frame running is kept apart from the ones waiting on it, so an
-        // instruction reaches it without going through the stack.
-        let mut frame = Frame {
-            body,
-            pc: 0,
-            base,
-            ret_to: None,
-            env: Value::NIL,
-        };
-        let mut callers: Vec<Frame<'c>> = Vec::new();
+    /// Run from instruction `pc`, in the frame at the stack's start.
+    fn steps(&mut self, start: usize) -> Result<Value, Stop> {
+        let code = self.rest.code;
+        let ins = code.ins.as_slice();
+        let mut pc = start;
+        let mut base = 0usize;
         loop {
-            let body = frame.body;
-            let Some(instr) = body.instrs.get(frame.pc) else {
-                return Err(Stop::broken(Broken::RanPastEnd {
-                    func: frame.body.name.clone(),
-                }));
+            let Some(i) = ins.get(pc) else {
+                return Err(self.ran_past_end(pc));
             };
             // `pc` names an instruction, so one past it is exact.
-            frame.pc = frame.pc.saturating_add(1);
-            let base = frame.base;
-            match instr {
-                Instr::Count { block } => {
-                    if let Some(n) = self.ran.get_mut(*block as usize) {
-                        *n = n.saturating_add(1);
+            pc = pc.wrapping_add(1);
+            // Matched in place: a copy of the instruction would have every
+            // field of it read before the jump that finds its handler.
+            match *i {
+                Ins::Halt { src } => return Ok(self.take(base, src)),
+                Ins::Count { block } => {
+                    if let Some(n) = self.rest.ran.get_mut(block.0 as usize) {
+                        *n = n.wrapping_add(1);
                     }
                 }
-                Instr::Audit => self.audit(frame.env, &callers)?,
-                Instr::Const { dst, value } => self.set(base, *dst, *value)?,
-                Instr::Str { dst, text } => {
-                    let cell = self.heap.string(text).map_err(fault)?;
-                    self.set(base, *dst, Value::cell(cell))?;
+                Ins::Audit => self.audit(Value::NIL)?,
+                Ins::Const { dst, value } => self.put(base, dst, value)?,
+                Ins::Str { dst, text } => {
+                    let v = self.rest.text_const(text)?;
+                    self.put(base, dst, v)?;
                 }
-                Instr::BinaryConst { dst, bytes, len } => {
-                    let cell = binary::make(&mut self.heap, bytes, *len).map_err(fault)?;
-                    self.set(base, *dst, Value::cell(cell))?;
+                Ins::BinaryConst { dst, bits } => {
+                    let v = self.rest.binary_const(bits)?;
+                    self.put(base, dst, v)?;
                 }
-                Instr::Bits { dst, op, args } => {
-                    let v = self.bits_op(*op, base, args)?;
-                    self.set(base, *dst, v)?;
+                Ins::Bits { dst, op, args } => self.bits(base, dst, op, args.regs())?,
+                Ins::BitsWide { dst, op, args } => {
+                    self.bits(base, dst, op, args.regs(&code.lists))?;
                 }
-                Instr::BigInt { dst, n, id } => {
-                    let v = self.big_const(*id, *n)?;
-                    self.set(base, *dst, v)?;
+                Ins::BigInt { dst, n, id } => {
+                    let v = self.rest.big_const(id, n)?;
+                    self.put(base, dst, v)?;
                 }
                 // Only a cell has a reference to hand over or to add, so
                 // any other value is copied and its register left alone.
-                Instr::Move { dst, src, moved } => {
-                    let v = self.get(base, *src);
+                Ins::Move { dst, src } => {
+                    let v = self.get(base, src.reg);
                     if let Some(cell) = v.as_cell() {
-                        if *moved {
-                            self.take(base, *src);
+                        if src.moved {
+                            self.empty(base, src.reg);
                         } else {
-                            self.heap.share(cell)?;
+                            self.rest.heap.share(cell)?;
                         }
                     }
-                    self.set(base, *dst, v)?;
+                    self.put(base, dst, v)?;
                 }
-                Instr::GetGlobal { dst, slot } => {
-                    let v = usize::try_from(slot.0)
-                        .ok()
-                        .and_then(|i| self.globals.get(i))
+                Ins::GetGlobal { dst, slot } => {
+                    let v = global(slot)
+                        .and_then(|i| self.rest.globals.get(i))
                         .copied()
                         .unwrap_or(Value::NIL);
-                    let v = self.share(v)?;
-                    self.set(base, *dst, v)?;
+                    let v = self.rest.share(v)?;
+                    self.put(base, dst, v)?;
                 }
-                Instr::SetGlobal { slot, src } => {
-                    let v = self.share(self.get(base, *src))?;
-                    if let Some(g) = usize::try_from(slot.0)
-                        .ok()
-                        .and_then(|i| self.globals.get_mut(i))
-                    {
+                Ins::SetGlobal { slot, src } => {
+                    let v = self.share(base, src)?;
+                    if let Some(g) = global(slot).and_then(|i| self.rest.globals.get_mut(i)) {
                         let old = std::mem::replace(g, v);
-                        self.release(old)?;
+                        self.rest.release(old)?;
                     }
                 }
-                Instr::IntAdd(i) => int!(self, base, i, Arith::Add),
-                Instr::IntSub(i) => int!(self, base, i, Arith::Sub),
-                Instr::IntMul(i) => int!(self, base, i, Arith::Mul),
-                Instr::IntDiv(i) => int!(self, base, i, Arith::Div),
-                Instr::IntRem(i) => int!(self, base, i, Arith::Rem),
-                Instr::IntAddK(i) => int_k!(self, base, i, Arith::Add),
-                Instr::IntSubK(i) => int_k!(self, base, i, Arith::Sub),
-                Instr::IntMulK(i) => int_k!(self, base, i, Arith::Mul),
-                Instr::IntDivK(i) => int_k!(self, base, i, Arith::Div),
-                Instr::IntRemK(i) => int_k!(self, base, i, Arith::Rem),
-                Instr::IntRSubK(i) => int_k_first!(self, base, i, Arith::Sub),
-                Instr::IntEq(i) => store_bool!(self, base, i, int_holds, Compare::Eq),
-                Instr::IntNe(i) => store_bool!(self, base, i, int_holds, Compare::Ne),
-                Instr::IntLt(i) => store_bool!(self, base, i, int_holds, Compare::LT),
-                Instr::IntLe(i) => store_bool!(self, base, i, int_holds, Compare::LE),
-                Instr::IntEqK(i) => store_bool!(self, base, i, int_holds_k, Compare::Eq),
-                Instr::IntNeK(i) => store_bool!(self, base, i, int_holds_k, Compare::Ne),
-                Instr::IntLtK(i) => store_bool!(self, base, i, int_holds_k, Compare::LT),
-                Instr::IntLeK(i) => store_bool!(self, base, i, int_holds_k, Compare::LE),
-                Instr::IntGtK(i) => store_bool!(self, base, i, int_holds_k, Compare::GT),
-                Instr::IntGeK(i) => store_bool!(self, base, i, int_holds_k, Compare::GE),
-                Instr::IntNeg { dst, a } => {
-                    let x = self.get(base, *a);
+                Ins::IntAdd { dst, a, b } => int!(self, base, dst, a, b, Arith::Add),
+                Ins::IntSub { dst, a, b } => int!(self, base, dst, a, b, Arith::Sub),
+                Ins::IntMul { dst, a, b } => int!(self, base, dst, a, b, Arith::Mul),
+                Ins::IntDiv { dst, a, b } => int!(self, base, dst, a, b, Arith::Div),
+                Ins::IntRem { dst, a, b } => int!(self, base, dst, a, b, Arith::Rem),
+                Ins::IntAddK { dst, a, k } => int_k!(self, base, dst, a, k, Arith::Add),
+                Ins::IntSubK { dst, a, k } => int_k!(self, base, dst, a, k, Arith::Sub),
+                Ins::IntMulK { dst, a, k } => int_k!(self, base, dst, a, k, Arith::Mul),
+                Ins::IntDivK { dst, a, k } => int_k!(self, base, dst, a, k, Arith::Div),
+                Ins::IntRemK { dst, a, k } => int_k!(self, base, dst, a, k, Arith::Rem),
+                Ins::IntRSubK { dst, k, a } => int_k_first!(self, base, dst, k, a, Arith::Sub),
+                Ins::IntEq { dst, a, b } => {
+                    store_bool!(self, base, dst, int_holds(a, b), Compare::Eq);
+                }
+                Ins::IntNe { dst, a, b } => {
+                    store_bool!(self, base, dst, int_holds(a, b), Compare::Ne);
+                }
+                Ins::IntLt { dst, a, b } => {
+                    store_bool!(self, base, dst, int_holds(a, b), Compare::LT);
+                }
+                Ins::IntLe { dst, a, b } => {
+                    store_bool!(self, base, dst, int_holds(a, b), Compare::LE);
+                }
+                Ins::IntEqK { dst, a, k } => {
+                    store_bool!(self, base, dst, int_holds_k(a, k), Compare::Eq);
+                }
+                Ins::IntNeK { dst, a, k } => {
+                    store_bool!(self, base, dst, int_holds_k(a, k), Compare::Ne);
+                }
+                Ins::IntLtK { dst, a, k } => {
+                    store_bool!(self, base, dst, int_holds_k(a, k), Compare::LT);
+                }
+                Ins::IntLeK { dst, a, k } => {
+                    store_bool!(self, base, dst, int_holds_k(a, k), Compare::LE);
+                }
+                Ins::IntGtK { dst, a, k } => {
+                    store_bool!(self, base, dst, int_holds_k(a, k), Compare::GT);
+                }
+                Ins::IntGeK { dst, a, k } => {
+                    store_bool!(self, base, dst, int_holds_k(a, k), Compare::GE);
+                }
+                Ins::IntNeg { dst, a } => {
+                    let x = self.look(base, a);
                     match x.as_small().and_then(int::fast_neg) {
-                        Some(v) => self.set(base, *dst, v)?,
-                        None => self.int_neg_slow(base, *dst, x)?,
+                        Some(v) => self.put(base, dst, v)?,
+                        None => self.int_neg_slow(base, dst, x)?,
                     }
                 }
-                Instr::FloatAdd(i) => float!(self, base, i, Arith::Add),
-                Instr::FloatSub(i) => float!(self, base, i, Arith::Sub),
-                Instr::FloatMul(i) => float!(self, base, i, Arith::Mul),
-                Instr::FloatDiv(i) => float!(self, base, i, Arith::Div),
-                Instr::FloatRem(i) => float!(self, base, i, Arith::Rem),
-                Instr::FloatAddK(i) => float_k!(self, base, i, Arith::Add),
-                Instr::FloatSubK(i) => float_k!(self, base, i, Arith::Sub),
-                Instr::FloatMulK(i) => float_k!(self, base, i, Arith::Mul),
-                Instr::FloatDivK(i) => float_k!(self, base, i, Arith::Div),
-                Instr::FloatRSubK(i) => float_k_first!(self, base, i, Arith::Sub),
-                Instr::FloatRDivK(i) => float_k_first!(self, base, i, Arith::Div),
-                Instr::FloatLt(i) => store_bool!(self, base, i, float_holds, Order::Lt),
-                Instr::FloatLe(i) => store_bool!(self, base, i, float_holds, Order::Le),
-                Instr::FloatLtK(i) => store_bool!(self, base, i, float_holds_k, Order::Lt),
-                Instr::FloatLeK(i) => store_bool!(self, base, i, float_holds_k, Order::Le),
-                Instr::FloatGtK(i) => store_bool!(self, base, i, float_holds_k, Order::Gt),
-                Instr::FloatGeK(i) => store_bool!(self, base, i, float_holds_k, Order::Ge),
-                Instr::FloatNeg { dst, a } => {
-                    let x = self.get(base, *a);
+                Ins::FloatAdd { dst, a, b } => float!(self, base, dst, a, b, Arith::Add),
+                Ins::FloatSub { dst, a, b } => float!(self, base, dst, a, b, Arith::Sub),
+                Ins::FloatMul { dst, a, b } => float!(self, base, dst, a, b, Arith::Mul),
+                Ins::FloatDiv { dst, a, b } => float!(self, base, dst, a, b, Arith::Div),
+                Ins::FloatRem { dst, a, b } => float!(self, base, dst, a, b, Arith::Rem),
+                Ins::FloatAddK { dst, a, k } => float_k!(self, base, dst, a, k, Arith::Add),
+                Ins::FloatSubK { dst, a, k } => float_k!(self, base, dst, a, k, Arith::Sub),
+                Ins::FloatMulK { dst, a, k } => float_k!(self, base, dst, a, k, Arith::Mul),
+                Ins::FloatDivK { dst, a, k } => float_k!(self, base, dst, a, k, Arith::Div),
+                Ins::FloatRSubK { dst, k, a } => {
+                    float_k_first!(self, base, dst, k, a, Arith::Sub);
+                }
+                Ins::FloatRDivK { dst, k, a } => {
+                    float_k_first!(self, base, dst, k, a, Arith::Div);
+                }
+                Ins::FloatLt { dst, a, b } => {
+                    store_bool!(self, base, dst, float_holds(a, b), Order::Lt);
+                }
+                Ins::FloatLe { dst, a, b } => {
+                    store_bool!(self, base, dst, float_holds(a, b), Order::Le);
+                }
+                Ins::FloatLtK { dst, a, k } => {
+                    store_bool!(self, base, dst, float_holds_k(a, k), Order::Lt);
+                }
+                Ins::FloatLeK { dst, a, k } => {
+                    store_bool!(self, base, dst, float_holds_k(a, k), Order::Le);
+                }
+                Ins::FloatGtK { dst, a, k } => {
+                    store_bool!(self, base, dst, float_holds_k(a, k), Order::Gt);
+                }
+                Ins::FloatGeK { dst, a, k } => {
+                    store_bool!(self, base, dst, float_holds_k(a, k), Order::Ge);
+                }
+                Ins::FloatNeg { dst, a } => {
+                    let x = self.look(base, a);
                     match float::fast_neg(x) {
-                        Some(v) => self.set(base, *dst, v)?,
-                        None => self.float_neg_slow(base, *dst, x)?,
+                        Some(v) => self.put(base, dst, v)?,
+                        None => self.float_neg_slow(base, dst, x)?,
                     }
                 }
-                Instr::FloatFromInt { dst, a } => {
-                    let x = self.get(base, *a);
+                Ins::FloatFromInt { dst, a } => {
+                    let x = self.look(base, a);
                     match x.small_int() {
-                        Some(n) => self.set(base, *dst, Value::float(n as f64))?,
-                        None => self.float_from_int_slow(base, *dst, x)?,
+                        Some(n) => self.put(base, dst, Value::float(n as f64))?,
+                        None => self.float_from_int_slow(base, dst, x)?,
                     }
                 }
-                Instr::Num { dst, op, a, b } => {
-                    let v = self.num(*op, self.get(base, *a), self.get(base, *b))?;
-                    self.set(base, *dst, v)?;
+                Ins::Num { dst, op, a, b } => {
+                    let (a, b) = (self.look(base, a), self.look(base, b));
+                    let v = self.rest.num(op, a, b)?;
+                    self.put(base, dst, v)?;
                 }
-                Instr::Neg { dst, a } => {
-                    let v = self.neg(self.get(base, *a))?;
-                    self.set(base, *dst, v)?;
+                Ins::Neg { dst, a } => {
+                    let a = self.look(base, a);
+                    let v = self.rest.neg(a)?;
+                    self.put(base, dst, v)?;
                 }
-                Instr::Print { dst, arg, newline } => {
-                    let mut text = Vec::new();
-                    self.show(self.get(base, *arg), &mut text)?;
-                    if *newline {
-                        text.push(b'\n');
-                    }
-                    if self.host.print(&text).is_err() {
-                        return Err(Stop::OutputClosed);
-                    }
-                    self.set(base, *dst, Value::NIL)?;
+                Ins::Print { dst, a, newline } => {
+                    self.rest.print(self.look(base, a), newline.0)?;
+                    self.put(base, dst, Value::NIL)?;
                 }
-                Instr::ToString { dst, a } => {
-                    let v = self.get(base, *a);
-                    let s = if self.is_string(v) {
-                        self.share(v)?
+                Ins::ToString { dst, a } => {
+                    let v = self.get(base, a.0);
+                    if self.rest.is_string(v) {
+                        let v = self.rest.share(v)?;
+                        self.put(base, dst, v)?;
                     } else {
-                        let mut text = Vec::new();
-                        self.show(v, &mut text)?;
-                        Value::cell(self.heap.string(&text).map_err(fault)?)
-                    };
-                    self.set(base, *dst, s)?;
-                }
-                Instr::Concat { dst, parts } => {
-                    let mut text = Vec::new();
-                    for part in parts {
-                        let v = self.get(base, *part);
-                        match v.as_cell() {
-                            Some(cell) if self.is_string(v) => {
-                                self.heap.read_string(cell, &mut text);
-                            }
-                            _ => return Err(Stop::missing(Missing::Join(v.view()))),
-                        }
+                        self.make_text(base, dst, v)?;
                     }
-                    let s = Value::cell(self.heap.string(&text).map_err(fault)?);
-                    self.set(base, *dst, s)?;
                 }
-                Instr::Ctor {
+                Ins::Concat { dst, parts } => self.concat(base, dst, parts.regs())?,
+                Ins::ConcatWide { dst, parts } => {
+                    self.concat(base, dst, parts.regs(&code.lists))?;
+                }
+                Ins::Ctor {
+                    dst,
+                    variant,
+                    ref fields,
+                } => self.ctor(base, dst, variant, fields)?,
+                Ins::CtorWide {
+                    dst,
+                    variant,
+                    fields,
+                } => self.ctor_wide(base, dst, variant, fields.args(&code.lists))?,
+                Ins::CtorOver {
+                    dst,
+                    variant,
+                    ref fields,
+                    reuse,
+                } => self.over_few(base, dst, variant, fields, reuse)?,
+                Ins::CtorOverWide {
                     dst,
                     variant,
                     fields,
                     reuse,
+                } => self.over_wide(base, dst, variant, fields.args(&code.lists), reuse)?,
+                Ins::Drop { reg } => self.drop(base, reg)?,
+                Ins::DropReuse { reg } => self.keep(base, reg)?,
+                Ins::Call {
+                    dst,
+                    to,
+                    ref args,
+                    needs,
+                    own,
                 } => {
-                    let mut values = std::mem::take(&mut self.passing);
-                    values.clear();
-                    for a in fields {
-                        let v = if a.moved {
-                            self.take(base, a.reg)
-                        } else {
-                            self.share(self.get(base, a.reg))?
-                        };
-                        values.push(v);
-                    }
-                    // Perceus reuse. Move out the cell a `DropReuse` above
-                    // hollowed and left in `reuse`, so the register no longer
-                    // holds it. Anything else there is a value this frame is
-                    // done with, so release it as the register would have.
-                    let parked = reuse.map(|r| self.take(base, r));
-                    let fits = parked
-                        .and_then(|v| v.as_cell())
-                        .filter(|c| self.heap.fits_ctor(*c, values.len()));
-                    let cell = match fits {
-                        Some(cell) => {
-                            self.heap.ctor_in(cell, *variant, &values);
-                            cell
-                        }
-                        None => {
-                            if let Some(v) = parked {
-                                self.release(v)?;
-                            }
-                            self.heap.ctor(*variant, &values).map_err(fault)?
-                        }
-                    };
-                    self.passed(values);
-                    self.set(base, *dst, Value::cell(cell))?;
+                    let up = base.wrapping_add(own.len());
+                    self.enter(base, args.iter(), up, needs)?;
+                    self.open_frame(Frame {
+                        pc: low(pc),
+                        below: own,
+                        dst: dst.0,
+                        env: Value::NIL,
+                    });
+                    base = up;
+                    pc = to.index();
                 }
-                Instr::Drop { reg } => self.set(base, *reg, Value::NIL)?,
-                Instr::DropReuse { reg } => {
-                    // The register keeps the hollowed cell and its one
-                    // reference. If no constructor takes it, it is freed with
-                    // the frame, like any other register.
-                    match self.get(base, *reg).as_cell() {
-                        Some(cell) if self.heap.hollow(cell)? => {}
-                        _ => self.set(base, *reg, Value::NIL)?,
-                    }
+                Ins::CallWide {
+                    dst,
+                    to,
+                    args,
+                    needs,
+                    own,
+                } => {
+                    let up = base.wrapping_add(own.len());
+                    self.enter_wide(base, args.args(&code.lists), up, needs)?;
+                    self.open_frame(Frame {
+                        pc: low(pc),
+                        below: own,
+                        dst: dst.0,
+                        env: Value::NIL,
+                    });
+                    base = up;
+                    pc = to.index();
                 }
-                Instr::Call { dst, func, args } => {
-                    let callee = self.body(*func)?;
-                    let new_base = frame_end(base, frame.body);
-                    self.enter_above(base, args, callee, new_base)?;
-                    callers.push(std::mem::replace(
-                        &mut frame,
-                        Frame {
-                            body: callee,
-                            pc: 0,
-                            base: new_base,
-                            ret_to: Some(*dst),
-                            env: Value::NIL,
-                        },
-                    ));
+                Ins::CallSelf {
+                    dst,
+                    to,
+                    ref args,
+                    own,
+                } => {
+                    let env = self.env();
+                    let env = self.rest.share(env)?;
+                    let up = base.wrapping_add(own.len());
+                    self.enter(base, args.iter(), up, own)?;
+                    self.open_frame(Frame {
+                        pc: low(pc),
+                        below: own,
+                        dst: dst.0,
+                        env,
+                    });
+                    base = up;
+                    pc = to.index();
                 }
-                Instr::CallSelf { dst, args } => {
-                    let body = frame.body;
-                    let env = self.share(frame.env)?;
-                    let new_base = frame_end(base, body);
-                    self.enter_above(base, args, body, new_base)?;
-                    callers.push(std::mem::replace(
-                        &mut frame,
-                        Frame {
-                            body,
-                            pc: 0,
-                            base: new_base,
-                            ret_to: Some(*dst),
-                            env,
-                        },
-                    ));
+                Ins::CallSelfWide { dst, to, args, own } => {
+                    let env = self.env();
+                    let env = self.rest.share(env)?;
+                    let up = base.wrapping_add(own.len());
+                    self.enter_wide(base, args.args(&code.lists), up, own)?;
+                    self.open_frame(Frame {
+                        pc: low(pc),
+                        below: own,
+                        dst: dst.0,
+                        env,
+                    });
+                    base = up;
+                    pc = to.index();
                 }
-                Instr::CallValue { dst, callee, args } => {
-                    let (body, env) = self.callee(self.get(base, *callee), args.len())?;
-                    let new_base = frame_end(base, frame.body);
-                    self.enter_above(base, args, body, new_base)?;
-                    callers.push(std::mem::replace(
-                        &mut frame,
-                        Frame {
-                            body,
-                            pc: 0,
-                            base: new_base,
-                            ret_to: Some(*dst),
-                            env,
-                        },
-                    ));
+                Ins::CallValue {
+                    dst,
+                    callee,
+                    ref args,
+                    own,
+                } => {
+                    let (f, argc) = (self.get(base, callee.0), args.len());
+                    let (entry, env) = self.rest.callee(f, argc)?;
+                    let up = base.wrapping_add(own.len());
+                    self.enter(base, args.iter(), up, entry.needs)?;
+                    self.open_frame(Frame {
+                        pc: low(pc),
+                        below: own,
+                        dst: dst.0,
+                        env,
+                    });
+                    base = up;
+                    pc = entry.pc.index();
+                }
+                Ins::CallValueWide {
+                    dst,
+                    callee,
+                    args,
+                    own,
+                } => {
+                    let args = args.args(&code.lists);
+                    let (entry, env) = self.rest.callee(self.get(base, callee.0), args.len())?;
+                    let up = base.wrapping_add(own.len());
+                    self.enter_wide(base, args, up, entry.needs)?;
+                    self.open_frame(Frame {
+                        pc: low(pc),
+                        below: own,
+                        dst: dst.0,
+                        env,
+                    });
+                    base = up;
+                    pc = entry.pc.index();
                 }
                 // A tail call's callee takes over this frame, so a loop
                 // written as tail recursion runs in constant space.
-                Instr::TailCall { func, args } => {
-                    let callee = self.body(*func)?;
-                    let values = self.call_args(base, args)?;
-                    self.enter(callee, base, &values)?;
-                    self.passed(values);
-                    let old = std::mem::replace(&mut frame.env, Value::NIL);
-                    self.release(old)?;
-                    frame.body = callee;
-                    frame.pc = 0;
+                Ins::TailCall {
+                    to,
+                    ref args,
+                    needs,
+                    own,
+                } => {
+                    let mut values = UNSET;
+                    let values = self.pass_few(base, args, &mut values)?;
+                    self.replace(base, own, needs, values)?;
+                    self.run_as(Value::NIL)?;
+                    pc = to.index();
                 }
-                Instr::TailCallSelf { args } => {
-                    let values = self.call_args(base, args)?;
-                    self.again(frame.body, base, &values)?;
-                    self.passed(values);
-                    frame.pc = 0;
+                Ins::TailCallWide {
+                    to,
+                    args,
+                    needs,
+                    own,
+                } => {
+                    self.replace_wide(base, args.args(&code.lists), own, needs)?;
+                    self.run_as(Value::NIL)?;
+                    pc = to.index();
                 }
-                // The callee's closure gets its own reference before `enter`
-                // releases this frame's registers, one of which may be the
+                Ins::TailCallSelf { to, ref args, own } => {
+                    let mut values = UNSET;
+                    let values = self.pass_few(base, args, &mut values)?;
+                    self.rewrite(base, own, values)?;
+                    pc = to.index();
+                }
+                Ins::TailCallSelfWide { to, args, own } => {
+                    self.replace_wide(base, args.args(&code.lists), own, own)?;
+                    pc = to.index();
+                }
+                Ins::TailCallSelfKeep {
+                    to,
+                    args,
+                    keep,
+                    own,
+                } => {
+                    let (args, keep) = (args.args(&code.lists), keep.regs(&code.lists));
+                    self.again(base, args, own, keep)?;
+                    pc = to.index();
+                }
+                // The callee's closure gets its own reference before this
+                // frame's registers are released, one of which may be the
                 // only other holder.
-                Instr::TailCallValue { callee, args } => {
-                    let (body, env) = self.callee(self.get(base, *callee), args.len())?;
-                    let values = self.call_args(base, args)?;
-                    self.enter(body, base, &values)?;
-                    self.passed(values);
-                    let old = std::mem::replace(&mut frame.env, env);
-                    self.release(old)?;
-                    frame.body = body;
-                    frame.pc = 0;
+                Ins::TailCallValue {
+                    callee,
+                    ref args,
+                    own,
+                } => {
+                    let (f, argc) = (self.get(base, callee.0), args.len());
+                    let (entry, env) = self.rest.callee(f, argc)?;
+                    let mut values = UNSET;
+                    let values = self.pass_few(base, args, &mut values)?;
+                    self.replace(base, own, entry.needs, values)?;
+                    self.run_as(env)?;
+                    pc = entry.pc.index();
                 }
-                Instr::Closure {
+                Ins::TailCallValueWide { callee, args, own } => {
+                    let args = args.args(&code.lists);
+                    let (entry, env) = self.rest.callee(self.get(base, callee.0), args.len())?;
+                    self.replace_wide(base, args, own, entry.needs)?;
+                    self.run_as(env)?;
+                    pc = entry.pc.index();
+                }
+                Ins::Closure {
+                    dst,
+                    func,
+                    ref captures,
+                } => self.closure(base, dst, func, captures.regs())?,
+                Ins::ClosureWide {
                     dst,
                     func,
                     captures,
-                } => {
-                    let values = self.args(base, captures)?;
-                    let cell = self.heap.closure(*func, &values).map_err(fault)?;
-                    self.set(base, *dst, Value::cell(cell))?;
-                }
-                Instr::GetCapture { dst, index } => {
-                    let capture = match frame.env.as_cell() {
-                        Some(cell) if self.heap.kind(cell) == Some(Kind::Closure) => {
-                            self.heap.capture(cell, *index as usize)
+                } => self.closure(base, dst, func, captures.regs(&code.lists))?,
+                Ins::GetCapture { dst, index } => {
+                    let heap = &self.rest.heap;
+                    let capture = match self.env().as_cell() {
+                        Some(cell) if heap.kind(cell) == Some(Kind::Closure) => {
+                            heap.capture(cell, index as usize)
                         }
                         _ => None,
                     };
                     let Some(v) = capture else {
-                        return Err(Stop::broken(Broken::NoCapture {
-                            func: frame.body.name.clone(),
-                            index: *index,
-                        }));
+                        return Err(self.no_capture(pc, index));
                     };
-                    let v = self.share(v)?;
-                    self.set(base, *dst, v)?;
+                    let v = self.rest.share(v)?;
+                    self.put(base, dst, v)?;
                 }
-                Instr::GetSelf { dst, this } => {
-                    let v = match frame.env.view() {
-                        View::Nil => Value::func(*this),
+                Ins::GetSelf { dst, this } => {
+                    let env = self.env();
+                    let v = match env.view() {
+                        View::Nil => Value::func(this),
                         View::Float(_)
                         | View::Int(_)
                         | View::Bool(_)
                         | View::Func(_)
                         | View::Cell(_)
-                        | View::Nullary(_) => self.share(frame.env)?,
+                        | View::Nullary(_) => self.rest.share(env)?,
                     };
-                    self.set(base, *dst, v)?;
+                    self.put(base, dst, v)?;
                 }
-                Instr::Jump { to } => frame.pc = *to as usize,
-                Instr::JumpUnlessVariant { src, variant, to } => {
-                    if !self.is_variant(self.get(base, *src), *variant) {
-                        frame.pc = *to as usize;
+                Ins::Jump { to } => pc = to.index(),
+                Ins::JumpUnlessVariant { src, variant, to } => {
+                    if !self.rest.is_variant(self.look(base, src), variant.get()) {
+                        pc = to.index();
                     }
                 }
-                Instr::JumpUnlessInt { src, n, to } => {
-                    if !self.is_int(self.get(base, *src), *n) {
-                        frame.pc = *to as usize;
+                Ins::JumpUnlessInt { src, n, to } => {
+                    if !self.rest.is_int(self.look(base, src), n) {
+                        pc = to.index();
                     }
                 }
-                Instr::JumpUnlessFloat { src, x, to } => {
-                    if !matches!(self.get(base, *src).view(), View::Float(f) if f == *x) {
-                        frame.pc = *to as usize;
+                Ins::JumpUnlessFloat { src, x, to } => {
+                    if !matches!(self.look(base, src).view(), View::Float(f) if f == x) {
+                        pc = to.index();
                     }
                 }
-                Instr::JumpUnlessStr { src, text, to } => {
-                    let v = self.get(base, *src);
-                    let is = match v.as_cell() {
-                        Some(cell) if self.is_string(v) => self.heap.string_is(cell, text),
-                        _ => false,
-                    };
-                    if !is {
-                        frame.pc = *to as usize;
+                Ins::JumpUnlessStr { src, text, to } => {
+                    if !self.rest.is_text(self.look(base, src), text)? {
+                        pc = to.index();
                     }
                 }
-                Instr::JumpUnlessBinary {
-                    src,
-                    bytes,
-                    len,
-                    to,
-                } => {
-                    let v = self.get(base, *src);
-                    let is = match v.as_cell().and_then(|c| binary::bits(&self.heap, c)) {
-                        Some(b) => b.len == *len && binary::bytes(&self.heap, b) == bytes.as_ref(),
-                        None => false,
-                    };
-                    if !is {
-                        frame.pc = *to as usize;
+                Ins::JumpUnlessBinary { src, bits, to } => {
+                    if !self.rest.is_binary(self.look(base, src), bits)? {
+                        pc = to.index();
                     }
                 }
-                Instr::Field { dst, src, index } => {
-                    let field = match self.get(base, *src).as_cell() {
-                        Some(cell) if self.heap.kind(cell) == Some(Kind::Ctor) => {
-                            self.heap.field(cell, usize::from(*index))
+                Ins::Field { dst, src, index } => {
+                    let heap = &self.rest.heap;
+                    let field = match self.look(base, src).as_cell() {
+                        Some(cell) if heap.kind(cell) == Some(Kind::Ctor) => {
+                            heap.field(cell, usize::from(index))
                         }
                         _ => None,
                     };
                     let Some(field) = field else {
-                        return Err(Stop::broken(Broken::NoField { index: *index }));
+                        return Err(Stop::broken(Broken::NoField { index }));
                     };
-                    let field = self.share(field)?;
-                    self.set(base, *dst, field)?;
+                    let field = self.rest.share(field)?;
+                    self.put(base, dst, field)?;
                 }
-                Instr::Tuple { dst, elements } => {
-                    let values = self.args(base, elements)?;
-                    let cell = self.heap.tuple(&values).map_err(fault)?;
-                    self.set(base, *dst, Value::cell(cell))?;
+                Ins::Tuple { dst, elements } => self.tuple(base, dst, elements.regs())?,
+                Ins::TupleWide { dst, elements } => {
+                    self.tuple(base, dst, elements.regs(&code.lists))?;
                 }
-                Instr::Element { dst, src, index } => {
-                    let element = match self.get(base, *src).as_cell() {
-                        Some(cell) if self.heap.kind(cell) == Some(Kind::Tuple) => {
-                            self.heap.element(cell, usize::from(*index))
+                Ins::Element { dst, src, index } => {
+                    let heap = &self.rest.heap;
+                    let element = match self.look(base, src).as_cell() {
+                        Some(cell) if heap.kind(cell) == Some(Kind::Tuple) => {
+                            heap.element(cell, usize::from(index))
                         }
                         _ => None,
                     };
                     let Some(element) = element else {
-                        return Err(Stop::broken(Broken::NoElement { index: *index }));
+                        return Err(Stop::broken(Broken::NoElement { index }));
                     };
-                    let element = self.share(element)?;
-                    self.set(base, *dst, element)?;
+                    let element = self.rest.share(element)?;
+                    self.put(base, dst, element)?;
                 }
-                Instr::Array { dst, elements } => {
-                    let values = self.args(base, elements)?;
-                    let cell = array::from_values(&mut self.heap, &values).map_err(fault)?;
-                    self.set(base, *dst, Value::cell(cell))?;
+                Ins::Array { dst, elements } => self.array(base, dst, elements.regs())?,
+                Ins::ArrayWide { dst, elements } => {
+                    self.array(base, dst, elements.regs(&code.lists))?;
                 }
-                Instr::Builtin {
+                Ins::Builtin {
                     dst,
                     intrinsic,
-                    args,
+                    ref args,
                 } => {
-                    // `InternalStackDepth` is the one built-in that asks about
-                    // the run instead of its arguments. It wants how many
-                    // frames are live, which only this loop knows. A tail call
-                    // reuses its frame, so a million of them still count one.
-                    let v = match intrinsic {
-                        Intrinsic::InternalStackDepth => {
-                            bigint::int(&mut self.heap, callers.len().saturating_add(1))
-                                .map_err(fault)?
-                        }
-                        // Read the count before making this call's own answer,
-                        // so asking does not change what it says.
-                        Intrinsic::InternalCellsMade => {
-                            let n = self.heap.made();
-                            bigint::int(&mut self.heap, n).map_err(fault)?
-                        }
-                        Intrinsic::InternalCellsReused => {
-                            let n = self.heap.reused();
-                            bigint::int(&mut self.heap, n).map_err(fault)?
-                        }
-                        _ => self.builtin(*intrinsic, base, args)?,
-                    };
-                    self.set(base, *dst, v)?;
+                    let (frame, depth) = (frame(&self.stack, base), self.frames.len());
+                    let v = self.rest.builtin(intrinsic, frame, args.regs(), depth)?;
+                    self.put(base, dst, v)?;
                 }
-                Instr::Equal { dst, a, b } => {
-                    let same = eq::equal(&self.heap, self.get(base, *a), self.get(base, *b));
-                    self.set(base, *dst, Value::bool(same))?;
+                Ins::Equal { dst, a, b } => {
+                    let (a, b) = (self.look(base, a), self.look(base, b));
+                    let same = eq::equal(&self.rest.heap, a, b);
+                    self.put(base, dst, Value::bool(same))?;
                 }
-                Instr::NotEqual { dst, a, b } => {
-                    let same = eq::equal(&self.heap, self.get(base, *a), self.get(base, *b));
-                    self.set(base, *dst, Value::bool(!same))?;
+                Ins::NotEqual { dst, a, b } => {
+                    let (a, b) = (self.look(base, a), self.look(base, b));
+                    let same = eq::equal(&self.rest.heap, a, b);
+                    self.put(base, dst, Value::bool(!same))?;
                 }
-                Instr::Not { dst, a } => {
-                    let b = match self.get(base, *a).view() {
+                Ins::Not { dst, a } => {
+                    let b = match self.look(base, a).view() {
                         View::Bool(b) => b,
                         v @ (View::Float(_)
                         | View::Int(_)
@@ -729,170 +778,97 @@ impl<'c, 'h> Machine<'c, 'h> {
                             return Err(Stop::broken(Broken::NotOnNonBool(v)));
                         }
                     };
-                    self.set(base, *dst, Value::bool(!b))?;
+                    self.put(base, dst, Value::bool(!b))?;
                 }
-                Instr::Range { dst, start, end } => {
-                    let start = self.range_end(self.get(base, *start))?;
-                    let end = self.range_end(self.get(base, *end))?;
-                    let cell = array::range(&mut self.heap, start, end).map_err(fault)?;
-                    self.set(base, *dst, Value::cell(cell))?;
+                Ins::Range { dst, start, end } => {
+                    let v = self
+                        .rest
+                        .range(self.look(base, start), self.look(base, end))?;
+                    self.put(base, dst, v)?;
                 }
-                Instr::ArrayLen { dst, src } => {
-                    let n = self.seq(self.get(base, *src))?.len(&self.heap);
-                    let v = bigint::int(&mut self.heap, n).map_err(fault)?;
-                    self.set(base, *dst, v)?;
+                Ins::ArrayLen { dst, src } => {
+                    let v = self.rest.array_len(self.look(base, src))?;
+                    self.put(base, dst, v)?;
                 }
-                Instr::ArrayElem { dst, src, index } => {
-                    let s = self.seq(self.get(base, *src))?;
-                    let Some(v) = self.element(s, usize::from(*index))? else {
-                        return Err(Stop::broken(Broken::NoArrayElement { index: *index }));
+                Ins::ArrayElem { dst, src, index } => {
+                    let s = self.rest.seq(self.look(base, src))?;
+                    let Some(v) = self.rest.element(s, usize::from(index))? else {
+                        return Err(Stop::broken(Broken::NoArrayElement { index }));
                     };
-                    self.set(base, *dst, v)?;
+                    self.put(base, dst, v)?;
                 }
-                Instr::ArrayDrop { dst, src, n, moved } => {
-                    let s = self.seq(self.get(base, *src))?;
-                    let n = match self.get(base, *n).view() {
-                        View::Int(n) if n >= 0 => to_usize(n.unsigned_abs()),
-                        v @ (View::Int(_)
-                        | View::Float(_)
-                        | View::Nil
-                        | View::Bool(_)
-                        | View::Func(_)
-                        | View::Cell(_)
-                        | View::Nullary(_)) => {
-                            return Err(Stop::broken(Broken::DropCount(v)));
-                        }
-                    };
-                    let cell = match s {
-                        // The register's reference passes to the skip.
-                        Seq::Tree(a) if *moved => {
-                            self.take(base, *src);
-                            array::skip_owned(&mut self.heap, a, n)
-                        }
-                        Seq::Tree(a) => array::skip(&mut self.heap, a, n),
-                        Seq::Range { start, end } => {
-                            let n = (n as u64).min(array::range_len(start, end));
-                            // `n` is at most `end - start`, so `start + n` is
-                            // within `start..=end` and the add is exact.
-                            array::range(&mut self.heap, start.wrapping_add_unsigned(n), end)
-                        }
-                    };
-                    self.set(base, *dst, Value::cell(cell.map_err(fault)?))?;
+                Ins::ArrayDrop { dst, src, n } => self.array_drop(base, dst, src, n)?,
+                Ins::ArrayPrepend { dst, rest, front } => {
+                    self.array_push(base, dst, rest, front.regs(), End::Front)?;
                 }
-                Instr::ArrayPrepend {
-                    dst,
-                    front,
-                    rest,
-                    moved,
-                } => {
-                    let s = self.seq(self.get(base, *rest))?;
-                    let a = self.tree(s)?;
-                    let items = self.items(base, front)?;
-                    if *moved {
-                        let held = self.take(base, *rest);
-                        self.release(held)?;
-                    }
-                    let cell = self.push_all(a, items.into_iter().rev(), End::Front)?;
-                    self.set(base, *dst, Value::cell(cell))?;
+                Ins::ArrayPrependWide { dst, rest, front } => {
+                    let front = front.regs(&code.lists);
+                    self.array_push(base, dst, rest, front, End::Front)?;
                 }
-                Instr::ArrayAppend {
-                    dst,
-                    rest,
-                    back,
-                    moved,
-                } => {
-                    let s = self.seq(self.get(base, *rest))?;
-                    let a = self.tree(s)?;
-                    let items = self.items(base, back)?;
-                    if *moved {
-                        let held = self.take(base, *rest);
-                        self.release(held)?;
-                    }
-                    let cell = self.push_all(a, items.into_iter(), End::Back)?;
-                    self.set(base, *dst, Value::cell(cell))?;
+                Ins::ArrayAppend { dst, rest, back } => {
+                    self.array_push(base, dst, rest, back.regs(), End::Back)?;
                 }
-                Instr::ArrayConcat { dst, a, b } => {
-                    let (a, b) = (self.seq(self.get(base, *a))?, self.seq(self.get(base, *b))?);
-                    let (a, b) = (self.tree(a)?, self.tree(b)?);
-                    let cell = array::concat(&mut self.heap, a, b).map_err(fault);
-                    self.heap.release(a)?;
-                    self.heap.release(b)?;
-                    self.set(base, *dst, Value::cell(cell?))?;
+                Ins::ArrayAppendWide { dst, rest, back } => {
+                    let back = back.regs(&code.lists);
+                    self.array_push(base, dst, rest, back, End::Back)?;
                 }
-                Instr::ArraySlice {
+                Ins::ArrayConcat { dst, a, b } => {
+                    let v = self
+                        .rest
+                        .array_concat(self.look(base, a), self.look(base, b))?;
+                    self.put(base, dst, v)?;
+                }
+                Ins::ArraySlice {
                     dst,
                     src,
                     start,
                     end,
                 } => {
-                    let s = self.seq(self.get(base, *src))?;
-                    let bounds = (
-                        self.position(self.get(base, *start))?,
-                        self.position(self.get(base, *end))?,
-                    );
-                    let cut = match (s, bounds) {
-                        (Seq::Tree(a), (Some(from), Some(to))) => {
-                            array::slice(&mut self.heap, a, from, to).map_err(fault)?
-                        }
-                        (Seq::Range { start, end }, (Some(from), Some(to)))
-                            if from <= to && to as u64 <= array::range_len(start, end) =>
-                        {
-                            // Both are at most the range's length, so each sum
-                            // lands within `start..=end` and the add is exact.
-                            let (from, to) = (
-                                start.wrapping_add_unsigned(from as u64),
-                                start.wrapping_add_unsigned(to as u64),
-                            );
-                            Some(array::range(&mut self.heap, from, to).map_err(fault)?)
-                        }
-                        (Seq::Tree(_) | Seq::Range { .. }, _) => None,
-                    };
-                    let v = match cut {
-                        Some(cut) => self.heap.ctor(self.code.abi.ok, &[Value::cell(cut)]),
-                        None => self.heap.ctor(self.code.abi.err, &[Value::NIL]),
-                    };
-                    let v = Value::cell(v.map_err(fault)?);
-                    self.set(base, *dst, v)?;
+                    let of = self.look(base, src);
+                    let v =
+                        self.rest
+                            .array_slice(of, self.look(base, start), self.look(base, end))?;
+                    self.put(base, dst, v)?;
                 }
-                Instr::ArraySet {
+                Ins::ArraySet {
                     dst,
                     src,
                     index,
                     value,
-                    moved,
                     miss,
-                } => match self.array_set(base, *src, *index, *value, *moved)? {
-                    Some(array) => self.set(base, *dst, array)?,
-                    None => frame.pc = *miss as usize,
+                } => match self.array_set(base, src, index, value)? {
+                    Some(array) => self.hit(base, dst, array)?,
+                    None => pc = miss.index(),
                 },
-                Instr::ArrayIndex { dst, src, index } => {
-                    let found = self.index(self.get(base, *src), self.get(base, *index))?;
+                Ins::ArrayIndex { dst, src, index } => {
+                    let found = self
+                        .rest
+                        .index(self.look(base, src), self.look(base, index))?;
                     let v = match found {
-                        Some(v) => {
-                            let cell = self.heap.ctor(self.code.abi.some, &[v]).map_err(fault)?;
-                            Value::cell(cell)
-                        }
-                        None => Value::nullary(self.code.abi.none),
+                        Some(v) => self.rest.some(v)?,
+                        None => Value::nullary(code.abi.none),
                     };
-                    self.set(base, *dst, v)?;
+                    self.put(base, dst, v)?;
                 }
-                Instr::ArrayIndexOr {
+                Ins::ArrayIndexOr {
                     dst,
                     src,
                     index,
                     default,
                 } => {
-                    let found = self.index(self.get(base, *src), self.get(base, *index))?;
+                    let found = self
+                        .rest
+                        .index(self.look(base, src), self.look(base, index))?;
                     let v = match found {
                         Some(v) => v,
-                        None => self.share(self.get(base, *default))?,
+                        None => self.share(base, default)?,
                     };
-                    self.set(base, *dst, v)?;
+                    self.put(base, dst, v)?;
                 }
-                Instr::Bad { why } => return Err(Stop::broken(why.clone())),
-                Instr::JumpIfFalse { cond, to } => match self.get(base, *cond).view() {
+                Ins::Bad { why } => return Err(code.why(why)),
+                Ins::JumpIfFalse { cond, to } => match self.look(base, cond).view() {
                     View::Bool(true) => {}
-                    View::Bool(false) => frame.pc = *to as usize,
+                    View::Bool(false) => pc = to.index(),
                     v @ (View::Float(_)
                     | View::Int(_)
                     | View::Nil
@@ -902,1870 +878,650 @@ impl<'c, 'h> Machine<'c, 'h> {
                         return Err(Stop::missing(Missing::Branch(v)));
                     }
                 },
-                Instr::MapSetOwned {
+                Ins::MapSetOwned {
                     dst,
                     map,
                     key,
                     value,
                 } => {
-                    let m = self.map(self.get(base, *map))?;
-                    let (k, v) = (self.get(base, *key), self.get(base, *value));
+                    let m = self.rest.map(self.get(base, map.0))?;
+                    let (k, v) = (self.look(base, key), self.look(base, value));
                     // The register's reference passes to the set.
-                    self.take(base, *map);
-                    let cell = map::set_owned(&mut self.heap, m, k, v).map_err(fault)?;
-                    self.set(base, *dst, Value::cell(cell))?;
+                    self.take(base, map);
+                    let cell = map::set_owned(&mut self.rest.heap, m, k, v).map_err(fault)?;
+                    self.put(base, dst, Value::cell(cell))?;
                 }
-                Instr::MapFind { dst, map, key, to } => {
-                    let m = self.map(self.get(base, *map))?;
-                    match map::get(&self.heap, m, self.get(base, *key)) {
+                Ins::MapFind { dst, map, key, to } => {
+                    let m = self.rest.map(self.look(base, map))?;
+                    match map::get(&self.rest.heap, m, self.look(base, key)) {
                         Some(v) => {
-                            let v = self.share(v)?;
-                            self.set(base, *dst, v)?;
+                            let v = self.rest.share(v)?;
+                            self.hit(base, dst, v)?;
                         }
-                        None => frame.pc = *to as usize,
+                        None => pc = to.index(),
                     }
                 }
-                Instr::MapDeleteOwned { dst, map, key } => {
-                    let m = self.map(self.get(base, *map))?;
-                    let k = self.get(base, *key);
+                Ins::MapDeleteOwned { dst, map, key } => {
+                    let m = self.rest.map(self.get(base, map.0))?;
+                    let k = self.look(base, key);
                     // The register's reference passes to the delete.
-                    self.take(base, *map);
-                    let cell = map::delete_owned(&mut self.heap, m, k).map_err(fault)?;
-                    self.set(base, *dst, Value::cell(cell))?;
+                    self.take(base, map);
+                    let cell = map::delete_owned(&mut self.rest.heap, m, k).map_err(fault)?;
+                    self.put(base, dst, Value::cell(cell))?;
                 }
-                Instr::JumpUnlessIntEq(i) => jump!(self, frame, i, int_holds, Compare::Eq),
-                Instr::JumpUnlessIntNe(i) => jump!(self, frame, i, int_holds, Compare::Ne),
-                Instr::JumpUnlessIntLt(i) => jump!(self, frame, i, int_holds, Compare::LT),
-                Instr::JumpUnlessIntLe(i) => jump!(self, frame, i, int_holds, Compare::LE),
-                Instr::JumpUnlessIntEqK(i) => jump!(self, frame, i, int_holds_k, Compare::Eq),
-                Instr::JumpUnlessIntNeK(i) => jump!(self, frame, i, int_holds_k, Compare::Ne),
-                Instr::JumpUnlessIntLtK(i) => jump!(self, frame, i, int_holds_k, Compare::LT),
-                Instr::JumpUnlessIntLeK(i) => jump!(self, frame, i, int_holds_k, Compare::LE),
-                Instr::JumpUnlessIntGtK(i) => jump!(self, frame, i, int_holds_k, Compare::GT),
-                Instr::JumpUnlessIntGeK(i) => jump!(self, frame, i, int_holds_k, Compare::GE),
-                Instr::JumpUnlessFloatLt(i) => jump!(self, frame, i, float_holds, Order::Lt),
-                Instr::JumpUnlessFloatLe(i) => jump!(self, frame, i, float_holds, Order::Le),
-                Instr::JumpUnlessFloatLtK(i) => jump!(self, frame, i, float_holds_k, Order::Lt),
-                Instr::JumpUnlessFloatLeK(i) => jump!(self, frame, i, float_holds_k, Order::Le),
-                Instr::JumpUnlessFloatGtK(i) => jump!(self, frame, i, float_holds_k, Order::Gt),
-                Instr::JumpUnlessFloatGeK(i) => jump!(self, frame, i, float_holds_k, Order::Ge),
+                Ins::JumpUnlessIntEq { a, b, to } => {
+                    jump!(self, base, pc, to, int_holds(a, b), Compare::Eq);
+                }
+                Ins::JumpUnlessIntNe { a, b, to } => {
+                    jump!(self, base, pc, to, int_holds(a, b), Compare::Ne);
+                }
+                Ins::JumpUnlessIntLt { a, b, to } => {
+                    jump!(self, base, pc, to, int_holds(a, b), Compare::LT);
+                }
+                Ins::JumpUnlessIntLe { a, b, to } => {
+                    jump!(self, base, pc, to, int_holds(a, b), Compare::LE);
+                }
+                Ins::JumpUnlessIntEqK { a, k, to } => {
+                    jump!(self, base, pc, to, int_holds_k(a, k), Compare::Eq);
+                }
+                Ins::JumpUnlessIntNeK { a, k, to } => {
+                    jump!(self, base, pc, to, int_holds_k(a, k), Compare::Ne);
+                }
+                Ins::JumpUnlessIntLtK { a, k, to } => {
+                    jump!(self, base, pc, to, int_holds_k(a, k), Compare::LT);
+                }
+                Ins::JumpUnlessIntLeK { a, k, to } => {
+                    jump!(self, base, pc, to, int_holds_k(a, k), Compare::LE);
+                }
+                Ins::JumpUnlessIntGtK { a, k, to } => {
+                    jump!(self, base, pc, to, int_holds_k(a, k), Compare::GT);
+                }
+                Ins::JumpUnlessIntGeK { a, k, to } => {
+                    jump!(self, base, pc, to, int_holds_k(a, k), Compare::GE);
+                }
+                Ins::JumpUnlessFloatLt { a, b, to } => {
+                    jump!(self, base, pc, to, float_holds(a, b), Order::Lt);
+                }
+                Ins::JumpUnlessFloatLe { a, b, to } => {
+                    jump!(self, base, pc, to, float_holds(a, b), Order::Le);
+                }
+                Ins::JumpUnlessFloatLtK { a, k, to } => {
+                    jump!(self, base, pc, to, float_holds_k(a, k), Order::Lt);
+                }
+                Ins::JumpUnlessFloatLeK { a, k, to } => {
+                    jump!(self, base, pc, to, float_holds_k(a, k), Order::Le);
+                }
+                Ins::JumpUnlessFloatGtK { a, k, to } => {
+                    jump!(self, base, pc, to, float_holds_k(a, k), Order::Gt);
+                }
+                Ins::JumpUnlessFloatGeK { a, k, to } => {
+                    jump!(self, base, pc, to, float_holds_k(a, k), Order::Ge);
+                }
                 // The frame is ending, so the result's register gives its
                 // reference up instead of sharing it.
-                Instr::Ret { src } => {
-                    let v = self.take(base, *src);
-                    let ret_to = frame.ret_to;
-                    let env = frame.env;
-                    self.leave(base)?;
-                    self.release(env)?;
-                    match (ret_to, callers.pop()) {
-                        (Some(dst), Some(caller)) => {
-                            self.set(caller.base, dst, v)?;
-                            frame = caller;
-                        }
-                        _ => return Ok(v),
-                    }
-                }
-            }
-        }
-    }
-
-    /// What built-in `i` gives for the values in `args`, which it only reads.
-    /// The loader checked how many there are (`code::built`). The result
-    /// holds its own reference.
-    fn builtin(&mut self, i: Intrinsic, base: usize, args: &[Reg]) -> Result<Value, Stop> {
-        let arg = |m: &Self, k: usize| args.get(k).map_or(Value::NIL, |r| m.get(base, *r));
-        let v = arg(self, 0);
-        match i {
-            Intrinsic::BinaryFromString => {
-                let text = self.text_of(v)?;
-                let cell = binary::from_bytes(&mut self.heap, &text);
-                Ok(Value::cell(cell.map_err(fault)?))
-            }
-            Intrinsic::BinaryToString => {
-                let b = self.binary(v)?;
-                let text = binary::bytes(&self.heap, b);
-                match std::str::from_utf8(&text) {
-                    Ok(_) if b.len % 8 == 0 => {
-                        let s = Value::cell(self.heap.string(&text).map_err(fault)?);
-                        self.ok(s)
-                    }
-                    _ => self.err_nil(),
-                }
-            }
-            Intrinsic::BinaryBitSize => {
-                let n = self.binary(v)?.len;
-                bigint::int(&mut self.heap, n).map_err(fault)
-            }
-            Intrinsic::BinaryByteSize => {
-                let n = self.binary(v)?.len.div_ceil(8);
-                bigint::int(&mut self.heap, n).map_err(fault)
-            }
-            Intrinsic::BinaryAppend => {
-                let (a, b) = (self.binary(v)?, self.binary(arg(self, 1))?);
-                let cell = binary::join(&mut self.heap, &[a, b]).map_err(fault)?;
-                Ok(Value::cell(cell))
-            }
-            // The ASCII built-ins read whole bytes only, as the old VM's did.
-            // A last byte that is not whole is left out.
-            Intrinsic::BinaryByteAt => {
-                let b = self.binary(v)?;
-                let found = match self.int_of(arg(self, 1))? {
-                    Int::Small(i) => u64::try_from(i)
-                        .ok()
-                        .and_then(|i| binary::whole_byte(&self.heap, b, i)),
-                    Int::Big(_) => None,
-                };
-                let n = found.map_or(-1, i64::from);
-                bigint::int(&mut self.heap, n).map_err(fault)
-            }
-            // The search starts at `from`, clamped to the binary. An empty
-            // needle is found where the search starts.
-            Intrinsic::BinaryIndexOf => {
-                let hay = binary::whole_bytes(&self.heap, self.binary(v)?);
-                let needle = binary::whole_bytes(&self.heap, self.binary(arg(self, 1))?);
-                let from = match self.int_of(arg(self, 2))? {
-                    Int::Small(n) => usize::try_from(n).unwrap_or(0).min(hay.len()),
-                    Int::Big(n) if n.sign() == num_bigint::Sign::Minus => 0,
-                    Int::Big(_) => hay.len(),
-                };
-                let found = if needle.is_empty() {
-                    Some(from)
-                } else {
-                    hay.get(from..)
-                        .and_then(|rest| rest.windows(needle.len()).position(|w| w == needle))
-                        .map(|at| from.saturating_add(at))
-                };
-                match found {
-                    Some(at) => {
-                        let at = bigint::int(&mut self.heap, at).map_err(fault)?;
-                        self.some(at)
-                    }
-                    None => Ok(Value::nullary(self.code.abi.none)),
-                }
-            }
-            // This takes digits only, with no sign. Empty input or any other
-            // byte gives `None`. An Int has no bounds, so no number is too
-            // large.
-            Intrinsic::BinaryParseInt => {
-                let digits = binary::whole_bytes(&self.heap, self.binary(v)?);
-                let base = self.radix(arg(self, 1))?;
-                let valid =
-                    !digits.is_empty() && digits.iter().all(|c| char::from(*c).is_digit(base));
-                let n = if valid {
-                    num_bigint::BigInt::parse_bytes(&digits, base)
-                } else {
-                    None
-                };
-                match n {
-                    Some(n) => {
-                        let n = bigint::value(&mut self.heap, n).map_err(fault)?;
-                        self.some(n)
-                    }
-                    None => Ok(Value::nullary(self.code.abi.none)),
-                }
-            }
-            Intrinsic::BinaryEqIgnoreAsciiCase => {
-                let a = binary::whole_bytes(&self.heap, self.binary(v)?);
-                let b = binary::whole_bytes(&self.heap, self.binary(arg(self, 1))?);
-                Ok(Value::bool(a.eq_ignore_ascii_case(&b)))
-            }
-            Intrinsic::BinaryToAsciiLower => {
-                let mut bytes = binary::whole_bytes(&self.heap, self.binary(v)?);
-                bytes.make_ascii_lowercase();
-                Ok(Value::cell(
-                    binary::from_bytes(&mut self.heap, &bytes).map_err(fault)?,
-                ))
-            }
-            // This writes lowercase hex, with a `-` before a negative
-            // number's digits.
-            Intrinsic::BinaryFromIntAscii => {
-                let n = match self.int_of(v)? {
-                    Int::Small(n) => num_bigint::BigInt::from(n),
-                    Int::Big(n) => n,
-                };
-                let text = n.to_str_radix(self.radix(arg(self, 1))?);
-                let cell = binary::from_bytes(&mut self.heap, text.as_bytes());
-                Ok(Value::cell(cell.map_err(fault)?))
-            }
-            // A negative bound, or one past the end, is `Err(Nil)`, never a
-            // short read (`binary.sca`).
-            Intrinsic::BinarySliceBits => {
-                let b = self.binary(v)?;
-                let (at, take) = (self.int_of(arg(self, 1))?, self.int_of(arg(self, 2))?);
-                let window = match (at, take) {
-                    (Int::Small(at), Int::Small(take)) if at >= 0 && take >= 0 => {
-                        let (at, take) = (at.unsigned_abs(), take.unsigned_abs());
-                        let fits = at.checked_add(take).is_some_and(|end| end <= b.len);
-                        fits.then_some((at, take))
-                    }
-                    _ => None,
-                };
-                match window {
-                    Some((at, take)) => {
-                        let cut = binary::slice(&mut self.heap, b, at, take).map_err(fault)?;
-                        self.ok(Value::cell(cut))
-                    }
-                    None => self.err_nil(),
-                }
-            }
-            Intrinsic::StringInspect => {
-                let mut text = Vec::new();
-                self.show(v, &mut text)?;
-                Ok(Value::cell(self.heap.string(&text).map_err(fault)?))
-            }
-            // Adjacent delimiters give empty pieces, and an empty `on` gives
-            // one piece per Unicode scalar value (`string.sca`).
-            Intrinsic::StringSplit => {
-                let s = self.utf8_of(v)?;
-                let on = self.utf8_of(arg(self, 1))?;
-                let pieces: Vec<String> = if on.is_empty() {
-                    s.chars().map(String::from).collect()
-                } else {
-                    s.split(on.as_str()).map(String::from).collect()
-                };
-                self.strings(&pieces)
-            }
-            Intrinsic::StringContains => {
-                let (s, needle) = (self.utf8_of(v)?, self.utf8_of(arg(self, 1))?);
-                Ok(Value::bool(s.contains(needle.as_str())))
-            }
-            Intrinsic::StringTrim => {
-                let s = self.utf8_of(v)?;
-                Ok(Value::cell(
-                    self.heap.string(s.trim().as_bytes()).map_err(fault)?,
-                ))
-            }
-            Intrinsic::StringToGraphemes => {
-                let s = self.utf8_of(v)?;
-                let pieces: Vec<String> =
-                    unicode_segmentation::UnicodeSegmentation::graphemes(s.as_str(), true)
-                        .map(String::from)
-                        .collect();
-                self.strings(&pieces)
-            }
-            // This takes an optional sign, then one or more ASCII digits, and
-            // nothing else. An Int has no bounds, so no number of digits is
-            // too many.
-            Intrinsic::IntFromString => {
-                let s = self.utf8_of(v)?;
-                let digits = s.strip_prefix(['+', '-']).unwrap_or(&s);
-                let valid = !digits.is_empty() && digits.bytes().all(|c| c.is_ascii_digit());
-                let n = if valid {
-                    num_bigint::BigInt::parse_bytes(s.as_bytes(), 10)
-                } else {
-                    None
-                };
-                match n {
-                    Some(n) => {
-                        let n = bigint::value(&mut self.heap, n).map_err(fault)?;
-                        self.some(n)
-                    }
-                    None => Ok(Value::nullary(self.code.abi.none)),
-                }
-            }
-            // These treat an Int as an endless row of two's-complement bits
-            // (`int.sca`).
-            Intrinsic::IntBitwiseAnd | Intrinsic::IntBitwiseOr | Intrinsic::IntBitwiseXor => {
-                let (a, b) = (self.int_of(v)?, self.int_of(arg(self, 1))?);
-                // Two small Ints give a small answer, since these never widen.
-                if let (Int::Small(a), Int::Small(b)) = (&a, &b) {
-                    let n = match i {
-                        Intrinsic::IntBitwiseAnd => a & b,
-                        Intrinsic::IntBitwiseOr => a | b,
-                        _ => a ^ b,
+                Ins::Ret { src, own } => {
+                    let v = self.take(base, src);
+                    self.leave(base, own)?;
+                    let Some(frame) = self.frames.pop() else {
+                        return Err(Stop::broken(Broken::NoCaller));
                     };
-                    return bigint::int(&mut self.heap, n).map_err(fault);
-                }
-                let (a, b) = (a.big(), b.big());
-                let n = match i {
-                    Intrinsic::IntBitwiseAnd => a & b,
-                    Intrinsic::IntBitwiseOr => a | b,
-                    _ => a ^ b,
-                };
-                bigint::value(&mut self.heap, n).map_err(fault)
-            }
-            Intrinsic::IntBitwiseNot => match self.int_of(v)? {
-                Int::Small(n) => bigint::int(&mut self.heap, !n).map_err(fault),
-                Int::Big(n) => bigint::value(&mut self.heap, !n).map_err(fault),
-            },
-            // A negative count shifts the other way.
-            Intrinsic::IntBitwiseShiftLeft | Intrinsic::IntBitwiseShiftRight => {
-                let x = self.int_of(v)?.big();
-                let count = self.int_of(arg(self, 1))?.big();
-                let left = (i == Intrinsic::IntBitwiseShiftLeft) != (count.sign() == Sign::Minus);
-                let n = shift(x, left, &count.magnitude().clone().into())?;
-                bigint::value(&mut self.heap, n).map_err(fault)
-            }
-            Intrinsic::StringLength => {
-                let Some(cell) = v.as_cell().filter(|_| self.is_string(v)) else {
-                    return Err(Stop::broken(Broken::StringLength(v.view())));
-                };
-                let mut bytes = Vec::with_capacity(self.heap.string_len(cell));
-                self.heap.read_string(cell, &mut bytes);
-                let n = match std::str::from_utf8(&bytes) {
-                    Ok(s) => s.chars().count(),
-                    Err(_) => {
-                        return Err(Stop::broken(Broken::NotUtf8));
-                    }
-                };
-                bigint::int(&mut self.heap, n).map_err(fault)
-            }
-            Intrinsic::ArrayLength => {
-                let n = self.seq(v)?.len(&self.heap);
-                bigint::int(&mut self.heap, n).map_err(fault)
-            }
-            // A wait too long for a `u64` of milliseconds is still one nobody
-            // outlives, so it waits that long instead.
-            Intrinsic::ProcessSleep => {
-                let ms = match self.int_of(v)? {
-                    Int::Small(n) => u64::try_from(n).unwrap_or(0),
-                    Int::Big(n) if n.sign() == Sign::Minus => 0,
-                    Int::Big(_) => u64::MAX,
-                };
-                if ms > 0 {
-                    self.host.sleep_ms(ms);
-                }
-                Ok(Value::NIL)
-            }
-            Intrinsic::TimeMonotonic => {
-                let ms = self.host.monotonic_ms();
-                bigint::int(&mut self.heap, ms).map_err(fault)
-            }
-            Intrinsic::TimeEpochMs => {
-                let ms = self.host.epoch_ms();
-                bigint::int(&mut self.heap, ms).map_err(fault)
-            }
-            // We never give zeros or anything else in place of bytes the host
-            // did not give.
-            Intrinsic::CryptoRandomBytes => {
-                let n = match self.int_of(v)? {
-                    Int::Small(n) => usize::try_from(n).ok(),
-                    Int::Big(_) => None,
-                };
-                let Some(n) = n else {
-                    return self.err_nil();
-                };
-                if n > binary::MAX_BYTES {
-                    return Err(Stop::HeapFull);
-                }
-                let mut bytes = vec![0u8; n];
-                if self.host.random_bytes(&mut bytes).is_err() {
-                    return self.err_nil();
-                }
-                let cell = binary::from_bytes(&mut self.heap, &bytes).map_err(fault)?;
-                self.ok(Value::cell(cell))
-            }
-            // The digests and the tag are over bytes. A binary that is not
-            // whole bytes has none, instead of the digest of some bytes near
-            // it, which another binary would share.
-            Intrinsic::CryptoSha1 | Intrinsic::CryptoSha256 | Intrinsic::CryptoSha512 => {
-                let Some(m) = self.whole_bytes(v)? else {
-                    return self.err_nil();
-                };
-                let alg = match i {
-                    Intrinsic::CryptoSha1 => &aws_lc_rs::digest::SHA1_FOR_LEGACY_USE_ONLY,
-                    Intrinsic::CryptoSha256 => &aws_lc_rs::digest::SHA256,
-                    _ => &aws_lc_rs::digest::SHA512,
-                };
-                let digest = aws_lc_rs::digest::digest(alg, &m);
-                self.ok_bytes(digest.as_ref())
-            }
-            Intrinsic::CryptoHmacSha256 => {
-                let (Some(key), Some(msg)) =
-                    (self.whole_bytes(v)?, self.whole_bytes(arg(self, 1))?)
-                else {
-                    return self.err_nil();
-                };
-                let key = aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, &key);
-                let tag = aws_lc_rs::hmac::sign(&key, &msg);
-                self.ok_bytes(tag.as_ref())
-            }
-            // This checks for the same bits, in time that depends on the
-            // lengths alone. The last byte of each is padded with zeros the
-            // same way, so equal lengths and equal bytes mean equal bits.
-            Intrinsic::CryptoConstEq => {
-                let (a, b) = (self.binary(v)?, self.binary(arg(self, 1))?);
-                let same = a.len == b.len
-                    && aws_lc_rs::constant_time::verify_slices_are_equal(
-                        &binary::bytes(&self.heap, a),
-                        &binary::bytes(&self.heap, b),
-                    )
-                    .is_ok();
-                Ok(Value::bool(same))
-            }
-            // A key, message or signature of the wrong shape, whole bytes or
-            // not, is a signature that does not check out.
-            Intrinsic::CryptoP256Verify | Intrinsic::CryptoEd25519Verify => {
-                let alg: &'static dyn aws_lc_rs::signature::VerificationAlgorithm = match i {
-                    Intrinsic::CryptoP256Verify => &aws_lc_rs::signature::ECDSA_P256_SHA256_ASN1,
-                    _ => &aws_lc_rs::signature::ED25519,
-                };
-                let parts = (
-                    self.whole_bytes(v)?,
-                    self.whole_bytes(arg(self, 1))?,
-                    self.whole_bytes(arg(self, 2))?,
-                );
-                let valid = match parts {
-                    (Some(key), Some(message), Some(sig)) => {
-                        aws_lc_rs::signature::UnparsedPublicKey::new(alg, key)
-                            .verify(&message, &sig)
-                            .is_ok()
-                    }
-                    _ => false,
-                };
-                Ok(Value::bool(valid))
-            }
-            Intrinsic::JsonParseBinary => {
-                let src = self.binary(v)?;
-                let parsed = if src.len % 8 == 0 {
-                    json::parse(&binary::bytes(&self.heap, src))
-                } else {
-                    Err(json::ParseError {
-                        offset: (src.len / 8) as usize,
-                        reason: json::Reason::NotWholeBytes,
-                    })
-                };
-                let types = self.json_types()?;
-                match parsed {
-                    Ok((tape, arena)) => {
-                        let arena = binary::from_bytes(&mut self.heap, &arena);
-                        let arena = Value::cell(arena.map_err(fault)?);
-                        let tape = binary::from_bytes(&mut self.heap, &tape);
-                        let tape = Value::cell(tape.map_err(fault)?);
-                        let root = Value::int(0).unwrap_or(Value::NIL);
-                        let doc = self
-                            .heap
-                            .ctor(types.doc, &[arena, tape, root])
-                            .map_err(fault)?;
-                        self.ok(Value::cell(doc))
-                    }
-                    Err(e) => {
-                        let offset = bigint::int(&mut self.heap, e.offset).map_err(fault)?;
-                        let reason = Value::nullary(e.reason.variant(&types.reasons));
-                        let error = self
-                            .heap
-                            .ctor(types.parse_error, &[offset, reason])
-                            .map_err(fault)?;
-                        self.err(Value::cell(error))
-                    }
+                    self.rest.release(frame.env)?;
+                    base = base.wrapping_sub(frame.below.len());
+                    pc = frame.pc as usize;
+                    self.set(base, frame.dst, v)?;
                 }
             }
-            // This gives -1 for a node the tape does not have, which
-            // `scarlet/json` checks for.
-            Intrinsic::JsonKind | Intrinsic::JsonLen => {
-                let d = self.doc(v)?;
-                let t = self.tape(&d)?;
-                let n = match i {
-                    Intrinsic::JsonKind => t.kind(d.idx),
-                    _ => t.len(d.idx).and_then(|n| i64::try_from(n).ok()),
-                };
-                bigint::int(&mut self.heap, n.unwrap_or(-1)).map_err(fault)
-            }
-            Intrinsic::JsonField | Intrinsic::JsonIndex => {
-                let d = self.doc(v)?;
-                let key = arg(self, 1);
-                let found = match i {
-                    Intrinsic::JsonField => {
-                        let name = self.text_of(key)?;
-                        self.tape(&d)?.field(d.idx, &name)
-                    }
-                    _ => match self.int_of(key)? {
-                        Int::Small(n) => usize::try_from(n)
-                            .ok()
-                            .and_then(|n| self.tape(&d).ok()?.element(d.idx, n)),
-                        Int::Big(_) => None,
-                    },
-                };
-                match found {
-                    Some(at) => {
-                        let doc = self.doc_at(&d, at)?;
-                        self.some(doc)
-                    }
-                    None => Ok(Value::nullary(self.code.abi.none)),
-                }
-            }
-            Intrinsic::JsonEntries => {
-                let d = self.doc(v)?;
-                let members = self.tape(&d)?.members(d.idx).unwrap_or_default();
-                let mut items = Vec::with_capacity(members.len());
-                for (key, at) in members {
-                    let key = Value::cell(self.heap.string(&key).map_err(fault)?);
-                    let doc = self.doc_at(&d, at)?;
-                    items.push(Value::cell(self.heap.tuple(&[key, doc]).map_err(fault)?));
-                }
-                Ok(Value::cell(
-                    array::from_values(&mut self.heap, &items).map_err(fault)?,
-                ))
-            }
-            Intrinsic::JsonElements => {
-                let d = self.doc(v)?;
-                let ats = self.tape(&d)?.elements(d.idx).unwrap_or_default();
-                let mut items = Vec::with_capacity(ats.len());
-                for at in ats {
-                    items.push(self.doc_at(&d, at)?);
-                }
-                Ok(Value::cell(
-                    array::from_values(&mut self.heap, &items).map_err(fault)?,
-                ))
-            }
-            Intrinsic::JsonString => {
-                let d = self.doc(v)?;
-                let text = self.tape(&d)?.string(d.idx);
-                match text.filter(|t| std::str::from_utf8(t).is_ok()) {
-                    Some(t) => {
-                        let s = Value::cell(self.heap.string(&t).map_err(fault)?);
-                        self.some(s)
-                    }
-                    None => Ok(Value::nullary(self.code.abi.none)),
-                }
-            }
-            Intrinsic::JsonInt | Intrinsic::JsonIntText => {
-                let d = self.doc(v)?;
-                match self.tape(&d)?.int(d.idx) {
-                    Some(n) => {
-                        let found = match i {
-                            Intrinsic::JsonInt => {
-                                bigint::value(&mut self.heap, n).map_err(fault)?
-                            }
-                            _ => Value::cell(
-                                self.heap.string(n.to_string().as_bytes()).map_err(fault)?,
-                            ),
-                        };
-                        self.some(found)
-                    }
-                    None => Ok(Value::nullary(self.code.abi.none)),
-                }
-            }
-            Intrinsic::JsonFloat => {
-                let d = self.doc(v)?;
-                match self.tape(&d)?.float(d.idx) {
-                    Some(f) => self.some(Value::float(f)),
-                    None => Ok(Value::nullary(self.code.abi.none)),
-                }
-            }
-            Intrinsic::JsonBool => {
-                let d = self.doc(v)?;
-                match self.tape(&d)?.bool(d.idx) {
-                    Some(b) => self.some(Value::bool(b)),
-                    None => Ok(Value::nullary(self.code.abi.none)),
-                }
-            }
-            Intrinsic::JsonEncode => {
-                let text = self.encode_json(v)?;
-                Ok(Value::cell(self.heap.string(&text).map_err(fault)?))
-            }
-            Intrinsic::HttpParseHead | Intrinsic::HttpParseResponseHead => {
-                let buf = self.binary(v)?;
-                let off = self.offset(arg(self, 1), buf)?;
-                // Take enough to reach past the longest head there could be,
-                // and its empty lines.
-                const WINDOW: u64 = http::MAX_HEAD as u64 + 16;
-                let window = binary::bytes_from(&self.heap, buf, off as u64, WINDOW);
-                match i {
-                    Intrinsic::HttpParseHead => self.parsed_request(buf, off, &window),
-                    _ => self.parsed_response(buf, off, &window),
-                }
-            }
-            Intrinsic::HttpChunkDecode => {
-                let buf = self.binary(v)?;
-                let off = self.offset(arg(self, 1), buf)?;
-                let max = match self.int_of(arg(self, 2))? {
-                    Int::Small(n) => u64::try_from(n).unwrap_or(0),
-                    Int::Big(n) if n.sign() == Sign::Minus => 0,
-                    Int::Big(_) => u64::MAX,
-                };
-                let bytes = binary::bytes_from(&self.heap, buf, off as u64, u64::MAX);
-                self.chunk_body(buf, off, &bytes, max)
-            }
-            Intrinsic::HttpFraming => {
-                let types = self.http_types()?;
-                let (mut te, mut cl) = (Vec::new(), Vec::new());
-                for (name, value) in self.headers(v)? {
-                    let name = self.bytes_of(name)?;
-                    if name.eq_ignore_ascii_case(b"transfer-encoding") {
-                        te.push(self.bytes_of(value)?);
-                    } else if name.eq_ignore_ascii_case(b"content-length") {
-                        cl.push(self.bytes_of(value)?);
-                    }
-                }
-                let te: Vec<&[u8]> = te.iter().map(Vec::as_slice).collect();
-                let cl: Vec<&[u8]> = cl.iter().map(Vec::as_slice).collect();
-                match http::framing(&te, &cl) {
-                    http::Framing::NoBody => Ok(Value::nullary(types.no_body)),
-                    http::Framing::Chunked => Ok(Value::nullary(types.chunked)),
-                    http::Framing::Length(n) => {
-                        let n = bigint::int(&mut self.heap, n).map_err(fault)?;
-                        Ok(Value::cell(
-                            self.heap.ctor(types.length, &[n]).map_err(fault)?,
-                        ))
-                    }
-                    http::Framing::Invalid(r) => self.with_status(types.framing_invalid, r),
-                }
-            }
-            Intrinsic::HttpHeaderGet | Intrinsic::HttpHeaderHas => {
-                let name = self.bytes_of(arg(self, 1))?;
-                let mut found = None;
-                for (n, value) in self.headers(v)? {
-                    if self.bytes_of(n)?.eq_ignore_ascii_case(&name) {
-                        found = Some(value);
-                        break;
-                    }
-                }
-                match (i, found) {
-                    (Intrinsic::HttpHeaderHas, found) => Ok(Value::bool(found.is_some())),
-                    (_, Some(value)) => {
-                        let value = self.share(value)?;
-                        self.some(value)
-                    }
-                    (_, None) => Ok(Value::nullary(self.code.abi.none)),
-                }
-            }
-            Intrinsic::HttpHeadersValid => {
-                let mut valid = true;
-                for (name, value) in self.headers(v)? {
-                    let (name, value) = (self.binary(name)?, self.binary(value)?);
-                    valid &= name.len % 8 == 0
-                        && value.len % 8 == 0
-                        && http::is_token(&binary::bytes(&self.heap, name))
-                        && http::is_safe_value(&binary::bytes(&self.heap, value));
-                }
-                Ok(Value::bool(valid))
-            }
-            Intrinsic::HttpSerializeHead => {
-                let code = self.int_of(v)?.to_string();
-                let reason = self.bytes_of(arg(self, 1))?;
-                let fields = self.headers(arg(self, 2))?;
-                let mut out = Vec::new();
-                out.extend_from_slice(b"HTTP/1.1 ");
-                out.extend_from_slice(code.as_bytes());
-                out.push(b' ');
-                out.extend_from_slice(&reason);
-                out.extend_from_slice(b"\r\n");
-                for (name, value) in fields {
-                    out.extend_from_slice(&self.bytes_of(name)?);
-                    out.extend_from_slice(b": ");
-                    out.extend_from_slice(&self.bytes_of(value)?);
-                    out.extend_from_slice(b"\r\n");
-                }
-                out.extend_from_slice(b"\r\n");
-                let cell = binary::from_bytes(&mut self.heap, &out).map_err(fault)?;
-                Ok(Value::cell(cell))
-            }
-            Intrinsic::IoReadFile => {
-                let path = self.text_of(v)?;
-                match self.host.read_file(&path) {
-                    Ok(bytes) if bytes.len() > binary::MAX_BYTES => Err(Stop::HeapFull),
-                    Ok(bytes) => {
-                        let cell = binary::from_bytes(&mut self.heap, &bytes).map_err(fault)?;
-                        self.ok(Value::cell(cell))
-                    }
-                    Err(e) => self.io_error(e, &path),
-                }
-            }
-            Intrinsic::IoWriteFile => {
-                let path = self.text_of(v)?;
-                let data = self.binary(arg(self, 1))?;
-                if data.len % 8 != 0 {
-                    let unaligned = self.io_errors()?.unaligned_binary;
-                    return self.err(Value::nullary(unaligned));
-                }
-                let bytes = binary::bytes(&self.heap, data);
-                match self.host.write_file(&path, &bytes) {
-                    Ok(()) => self.ok(Value::NIL),
-                    Err(e) => self.io_error(e, &path),
-                }
-            }
-            Intrinsic::OsArgv => {
-                let mut items = Vec::with_capacity(self.host.argv().len());
-                for a in self.host.argv() {
-                    items.push(Value::cell(self.heap.string(a.as_bytes()).map_err(fault)?));
-                }
-                Ok(Value::cell(
-                    array::from_values(&mut self.heap, &items).map_err(fault)?,
-                ))
-            }
-            Intrinsic::OsEnv => {
-                let env = match self.env {
-                    Some(env) => env,
-                    None => {
-                        let env = self.env_map().map_err(fault)?;
-                        self.env = Some(env);
-                        env
-                    }
-                };
-                self.heap.share(env)?;
-                Ok(Value::cell(env))
-            }
-            Intrinsic::OsTerminalSize => match self.host.terminal_size() {
-                Some((cols, rows)) => {
-                    let cols = bigint::int(&mut self.heap, cols).map_err(fault)?;
-                    let rows = bigint::int(&mut self.heap, rows).map_err(fault)?;
-                    let size = self.heap.tuple(&[cols, rows]).map_err(fault)?;
-                    self.ok(Value::cell(size))
-                }
-                None => self.err_nil(),
-            },
-            Intrinsic::MapNew => Ok(Value::cell(map::empty(&mut self.heap).map_err(fault)?)),
-            Intrinsic::MapSet => {
-                let m = self.map(v)?;
-                let (key, value) = (arg(self, 1), arg(self, 2));
-                let cell = map::set(&mut self.heap, m, key, value).map_err(fault)?;
-                Ok(Value::cell(cell))
-            }
-            Intrinsic::MapDelete => {
-                let (m, key) = (self.map(v)?, arg(self, 1));
-                let cell = map::delete(&mut self.heap, m, key).map_err(fault)?;
-                Ok(Value::cell(cell))
-            }
-            Intrinsic::MapGet => {
-                let m = self.map(v)?;
-                match map::get(&self.heap, m, arg(self, 1)) {
-                    Some(found) => {
-                        let found = self.share(found)?;
-                        self.some(found)
-                    }
-                    None => Ok(Value::nullary(self.code.abi.none)),
-                }
-            }
-            Intrinsic::MapHas => {
-                let m = self.map(v)?;
-                Ok(Value::bool(map::get(&self.heap, m, arg(self, 1)).is_some()))
-            }
-            Intrinsic::MapSize => {
-                let n = map::size(&self.heap, self.map(v)?);
-                bigint::int(&mut self.heap, n).map_err(fault)
-            }
-            Intrinsic::MapKeys | Intrinsic::MapValues | Intrinsic::MapToList => {
-                let entries = map::entries(&self.heap, self.map(v)?);
-                let mut items = Vec::with_capacity(entries.len());
-                for (k, v) in entries {
-                    let item = match i {
-                        Intrinsic::MapKeys => self.share(k)?,
-                        Intrinsic::MapValues => self.share(v)?,
-                        _ => {
-                            let pair = [self.share(k)?, self.share(v)?];
-                            Value::cell(self.heap.tuple(&pair).map_err(fault)?)
-                        }
-                    };
-                    items.push(item);
-                }
-                Ok(Value::cell(
-                    array::from_values(&mut self.heap, &items).map_err(fault)?,
-                ))
-            }
-            Intrinsic::FloatFloor
-            | Intrinsic::FloatCeil
-            | Intrinsic::FloatRound
-            | Intrinsic::FloatTruncate => {
-                let f = float::read(v)?;
-                let whole = match i {
-                    Intrinsic::FloatFloor => f.floor(),
-                    Intrinsic::FloatCeil => f.ceil(),
-                    Intrinsic::FloatRound => f.round(),
-                    _ => f.trunc(),
-                };
-                // A Float is finite, so every whole one is an exact Int.
-                if (i64::MIN as f64..i64::MAX as f64).contains(&whole) {
-                    #[expect(
-                        clippy::cast_possible_truncation,
-                        reason = "`whole` is a whole number inside i64's range, so it converts exactly"
-                    )]
-                    let exact = whole as i64;
-                    return bigint::int(&mut self.heap, exact).map_err(fault);
-                }
-                let n = num_bigint::BigInt::from_f64(whole).unwrap_or_default();
-                bigint::value(&mut self.heap, n).map_err(fault)
-            }
-            // `units * 10^-scale`, rounded once. Rust's parser rounds to the
-            // nearest Float, subnormals included, and `Value::float` stops one
-            // too large at the largest Float.
-            Intrinsic::FloatFromDecimal => {
-                let units = self.int_of(v)?.big();
-                let scale = self.int_of(arg(self, 1))?.big();
-                #[expect(
-                    clippy::arithmetic_side_effects,
-                    reason = "an Int grows instead of overflowing"
-                )]
-                let exponent = -scale;
-                let text = format!("{units}e{exponent}");
-                let f = text
-                    .parse::<f64>()
-                    .map_err(|_| Stop::broken(Broken::NotAFloat { text }))?;
-                Ok(Value::float(f))
-            }
-            Intrinsic::FloatToString => {
-                let text = float::text(float::read(v)?);
-                Ok(Value::cell(
-                    self.heap.string(text.as_bytes()).map_err(fault)?,
-                ))
-            }
-            Intrinsic::IntToString => {
-                let text = self.int_of(v)?.to_string();
-                Ok(Value::cell(
-                    self.heap.string(text.as_bytes()).map_err(fault)?,
-                ))
-            }
-            Intrinsic::AddressParse
-            | Intrinsic::NetResolve
-            | Intrinsic::NetResolveUntil
-            | Intrinsic::NetListen
-            | Intrinsic::NetAccept
-            | Intrinsic::NetConnect
-            | Intrinsic::NetConnectUntil
-            | Intrinsic::NetLocalAddr
-            | Intrinsic::NetClose
-            | Intrinsic::SocketRead
-            | Intrinsic::SocketReadUntil
-            | Intrinsic::SocketWrite
-            | Intrinsic::SocketWriteParts
-            | Intrinsic::SocketClose
-            | Intrinsic::TlsHandshake
-            | Intrinsic::TlsHandshakeUntil
-            | Intrinsic::TlsRead
-            | Intrinsic::TlsReadUntil
-            | Intrinsic::TlsWrite
-            | Intrinsic::TlsClose => self.net_builtin(i, base, args),
-            other => Err(Stop::missing(Missing::Intrinsic(other))),
         }
     }
 
-    /// A binary operation, with its arguments in the `PrimOp`'s order. A width
-    /// or position below zero counts as 0, and a segment wider than the binary
-    /// it takes from takes all of it, as in the old VM.
+    // How a handler reaches a register. Each takes the operand as its
+    // instruction declares it, so what a handler does to a register is what
+    // `Ins::operands` says.
+
+    #[inline(always)]
+    fn look(&self, base: usize, r: Src<Reg>) -> Value {
+        self.get(base, r.0)
+    }
+
+    /// The value in `r`, with one more reference.
+    #[inline(always)]
+    fn share(&mut self, base: usize, r: Shared<Reg>) -> Result<Value, DeadCell> {
+        let v = self.get(base, r.0);
+        self.rest.share(v)
+    }
+
+    /// The value in `r`, moved out. The register is emptied and gives up
+    /// nothing, so its one reference passes to the caller.
+    #[inline(always)]
+    fn take(&mut self, base: usize, r: Taken<Reg>) -> Value {
+        self.empty(base, r.0)
+    }
+
+    /// The value an argument passes, with the register's reference when the
+    /// argument takes it and with one more otherwise.
+    #[inline(always)]
+    fn pass(&mut self, base: usize, a: Arg<Reg>) -> Result<Value, DeadCell> {
+        if a.moved {
+            Ok(self.empty(base, a.reg))
+        } else {
+            let v = self.get(base, a.reg);
+            self.rest.share(v)
+        }
+    }
+
+    /// Put `v` in `r`, whose old value is released. `v`'s reference passes to
+    /// the register.
+    #[inline(always)]
+    fn put(&mut self, base: usize, r: Dst<Reg>, v: Value) -> Result<(), DeadCell> {
+        self.set(base, r.0, v)
+    }
+
+    /// [`Self::put`], for an instruction that did not jump.
+    #[inline(always)]
+    fn hit(&mut self, base: usize, r: Hit<Reg>, v: Value) -> Result<(), DeadCell> {
+        self.set(base, r.0, v)
+    }
+
+    #[inline(always)]
+    fn drop(&mut self, base: usize, r: Dead<Reg>) -> Result<(), DeadCell> {
+        self.set(base, r.0, Value::NIL)
+    }
+
+    /// Hollow the cell in `r` and leave it there with its one reference. If
+    /// no constructor takes it, it is freed with the frame, like any other
+    /// register. One that something else holds is given up.
+    #[inline(always)]
+    fn keep(&mut self, base: usize, r: Kept<Reg>) -> Result<(), DeadCell> {
+        match self.get(base, r.0).as_cell() {
+            Some(cell) if self.rest.heap.hollow(cell)? => Ok(()),
+            _ => self.set(base, r.0, Value::NIL),
+        }
+    }
+
+    #[inline(always)]
+    fn get(&self, base: usize, r: Reg) -> Value {
+        self.stack.get(at(base, r)).copied().unwrap_or(Value::NIL)
+    }
+
+    #[inline(always)]
+    fn set(&mut self, base: usize, r: Reg, v: Value) -> Result<(), DeadCell> {
+        match self.stack.get_mut(at(base, r)) {
+            Some(slot) => {
+                let old = std::mem::replace(slot, v);
+                self.rest.release(old)
+            }
+            None => Ok(()),
+        }
+    }
+
+    #[inline(always)]
+    fn empty(&mut self, base: usize, r: Reg) -> Value {
+        match self.stack.get_mut(at(base, r)) {
+            Some(slot) => std::mem::replace(slot, Value::NIL),
+            None => Value::NIL,
+        }
+    }
+
+    /// Keep `frame` above the others.
+    #[inline(always)]
+    fn open_frame(&mut self, frame: Frame) {
+        if self.frames.len() == self.frames.capacity() {
+            self.more_frames();
+        }
+        self.frames.push(frame);
+    }
+
+    #[cold]
     #[inline(never)]
-    fn bits_op(&mut self, op: BitsOp, base: usize, args: &[Reg]) -> Result<Value, Stop> {
-        let arg = |m: &Self, k: usize| args.get(k).map_or(Value::NIL, |r| m.get(base, *r));
-        match op {
-            BitsOp::FromInt => {
-                let n = match self.int_of(arg(self, 0))? {
-                    Int::Small(n) => num_bigint::BigInt::from(n),
-                    Int::Big(n) => n,
-                };
-                let width = self.width(arg(self, 1))?;
-                if width > binary::MAX_BITS {
-                    return Err(Stop::HeapFull);
-                }
-                let bytes = binary::from_int(&n, width);
-                Ok(Value::cell(
-                    binary::make(&mut self.heap, &bytes, width).map_err(fault)?,
-                ))
+    fn more_frames(&mut self) {
+        self.frames.reserve(1);
+    }
+
+    /// The closure the running frame runs as.
+    #[inline(always)]
+    fn env(&self) -> Value {
+        self.frames.last().map_or(Value::NIL, |f| f.env)
+    }
+
+    /// Run as `env` from here on, and give up what the frame ran as.
+    #[inline(always)]
+    fn run_as(&mut self, env: Value) -> Result<(), DeadCell> {
+        match self.frames.last_mut() {
+            Some(frame) => {
+                let old = std::mem::replace(&mut frame.env, env);
+                self.rest.release(old)
             }
-            BitsOp::Take => {
-                let b = self.binary(arg(self, 0))?;
-                let take = self.width(arg(self, 1))?.min(b.len);
-                Ok(Value::cell(
-                    binary::slice(&mut self.heap, b, 0, take).map_err(fault)?,
-                ))
-            }
-            BitsOp::FromString => {
-                let text = self.text_of(arg(self, 0))?;
-                let cell = binary::from_bytes(&mut self.heap, &text);
-                Ok(Value::cell(cell.map_err(fault)?))
-            }
-            BitsOp::Concat => {
-                let parts = (0..args.len())
-                    .map(|k| self.binary(arg(self, k)))
-                    .collect::<Result<Vec<Bits>, Stop>>()?;
-                Ok(Value::cell(
-                    binary::join(&mut self.heap, &parts).map_err(fault)?,
-                ))
-            }
-            BitsOp::BitSize => {
-                let n = self.binary(arg(self, 0))?.len;
-                bigint::int(&mut self.heap, n).map_err(fault)
-            }
-            BitsOp::View => {
-                let b = self.binary(arg(self, 0))?;
-                let (at, len) = (self.width(arg(self, 1))?, self.width(arg(self, 2))?);
-                if at.checked_add(len).is_none_or(|end| end > b.len) {
-                    return Err(Stop::broken(Broken::ReadPastEnd {
-                        at,
-                        len,
-                        bits: b.len,
-                    }));
-                }
-                Ok(Value::cell(
-                    binary::slice(&mut self.heap, b, at, len).map_err(fault)?,
-                ))
-            }
-            BitsOp::MatchPrefix => {
-                let b = self.binary(arg(self, 0))?;
-                let at = self.width(arg(self, 1))?;
-                let prefix = self.binary(arg(self, 2))?;
-                Ok(Value::bool(binary::has_at(&self.heap, b, at, prefix)))
-            }
-            BitsOp::ReadUtf8 => {
-                let b = self.binary(arg(self, 0))?;
-                let at = self.width(arg(self, 1))?;
-                let (cp, took) = binary::read_utf8(&self.heap, b, at).unwrap_or((0, 0));
-                let cp = Value::int(i64::from(cp));
-                let took = i64::try_from(took).ok().and_then(Value::int);
-                let pair = [cp, took];
-                let [Some(cp), Some(took)] = pair else {
-                    return Err(Stop::broken(Broken::CodePointTooBig));
-                };
-                Ok(Value::cell(self.heap.tuple(&[cp, took]).map_err(fault)?))
-            }
-            BitsOp::ReadInt => {
-                let b = self.binary(arg(self, 0))?;
-                let (at, width) = (self.width(arg(self, 1))?, self.width(arg(self, 2))?);
-                if at.checked_add(width).is_none_or(|end| end > b.len) {
-                    return Err(Stop::broken(Broken::ReadPastEnd {
-                        at,
-                        len: width,
-                        bits: b.len,
-                    }));
-                }
-                let n = binary::read_uint(&self.heap, b, at, width);
-                bigint::value(&mut self.heap, n).map_err(fault)
-            }
+            None => self.rest.release(env),
         }
     }
 
-    /// The binary `v` holds.
-    fn binary(&self, v: Value) -> Result<Bits, Stop> {
-        v.as_cell()
-            .and_then(|cell| binary::bits(&self.heap, cell))
-            .ok_or_else(|| Stop::broken(Broken::NotBinary(v.view())))
-    }
-
-    /// The Int `v` as a width or position in bits. It is 0 below zero, as in
-    /// the old VM, and past the end of any binary when it does not fit in 64
-    /// bits.
-    fn width(&self, v: Value) -> Result<u64, Stop> {
-        Ok(match self.int_of(v)? {
-            Int::Small(n) => u64::try_from(n).unwrap_or(0),
-            Int::Big(n) if n.sign() == num_bigint::Sign::Minus => 0,
-            Int::Big(_) => u64::MAX,
-        })
-    }
-
-    /// The string `v`, as text. Every string the VM makes is UTF-8.
-    fn utf8_of(&self, v: Value) -> Result<String, Stop> {
-        String::from_utf8(self.text_of(v)?).map_err(|_| Stop::broken(Broken::NotUtf8))
-    }
-
-    /// A new array of new strings holding `pieces`.
-    fn strings(&mut self, pieces: &[String]) -> Result<Value, Stop> {
-        let mut items = Vec::with_capacity(pieces.len());
-        for p in pieces {
-            items.push(Value::cell(self.heap.string(p.as_bytes()).map_err(fault)?));
-        }
-        Ok(Value::cell(
-            array::from_values(&mut self.heap, &items).map_err(fault)?,
-        ))
-    }
-
-    /// The bytes of the string `v`.
-    #[inline(never)]
-    fn text_of(&self, v: Value) -> Result<Vec<u8>, Stop> {
-        match v.as_cell() {
-            Some(cell) if self.is_string(v) => {
-                let mut text = Vec::with_capacity(self.heap.string_len(cell));
-                self.heap.read_string(cell, &mut text);
-                Ok(text)
-            }
-            _ => Err(Stop::broken(Broken::NotString(v.view()))),
-        }
-    }
-
-    /// The base a `scarlet/binary.Radix` stands for.
-    fn radix(&self, v: Value) -> Result<u32, Stop> {
-        match (v.view(), self.code.abi.radix) {
-            (View::Nullary(r), Some(radix)) if r == radix.dec => Ok(10),
-            (View::Nullary(r), Some(radix)) if r == radix.hex => Ok(16),
-            _ => Err(Stop::broken(Broken::NotRadix(v.view()))),
-        }
-    }
-
-    /// `Some(v)`, holding `v`'s reference.
-    fn some(&mut self, v: Value) -> Result<Value, Stop> {
-        let cell = self.heap.ctor(self.code.abi.some, &[v]).map_err(fault)?;
-        Ok(Value::cell(cell))
-    }
-
-    /// `Ok(v)`, holding `v`'s reference.
-    fn ok(&mut self, v: Value) -> Result<Value, Stop> {
-        let cell = self.heap.ctor(self.code.abi.ok, &[v]).map_err(fault)?;
-        Ok(Value::cell(cell))
-    }
-
-    /// `Err(v)`, holding `v`'s reference.
-    fn err(&mut self, v: Value) -> Result<Value, Stop> {
-        let cell = self.heap.ctor(self.code.abi.err, &[v]).map_err(fault)?;
-        Ok(Value::cell(cell))
-    }
-
-    fn err_nil(&mut self) -> Result<Value, Stop> {
-        let cell = self
-            .heap
-            .ctor(self.code.abi.err, &[Value::NIL])
-            .map_err(fault)?;
-        Ok(Value::cell(cell))
-    }
-
-    /// The environment as a map. When a name is listed twice, the first
-    /// wins, as it does for the OS's own `getenv`.
-    fn env_map(&mut self) -> Result<Cell, Fault> {
-        let heap = &mut self.heap;
-        let mut env = map::empty(heap)?;
-        for (name, value) in self.host.env() {
-            let k = heap.string(name.as_bytes())?;
-            let next = if map::get(heap, env, Value::cell(k)).is_some() {
-                None
-            } else {
-                let v = heap.string(value.as_bytes())?;
-                let next = map::set(heap, env, Value::cell(k), Value::cell(v))?;
-                heap.release(v)?;
-                Some(next)
-            };
-            heap.release(k)?;
-            if let Some(next) = next {
-                heap.release(env)?;
-                env = next;
-            }
-        }
-        Ok(env)
-    }
-
-    fn io_errors(&self) -> Result<IoErrors, Stop> {
-        self.code.abi.io.ok_or(Stop::broken(Broken::NoIoTypes))
-    }
-
-    /// `Err` of the `IoError` `e` stands for, about `path`.
-    fn io_error(&mut self, e: IoError, path: &[u8]) -> Result<Value, Stop> {
-        let io = self.io_errors()?;
-        let about_path = match e {
-            IoError::NotFound => io.not_found,
-            IoError::PermissionDenied => io.permission_denied,
-            IoError::AlreadyExists => io.already_exists,
-            IoError::NotADirectory => io.not_a_directory,
-            IoError::IsADirectory => io.is_a_directory,
-            IoError::ReadOnlyFilesystem => io.read_only_filesystem,
-            IoError::FilesystemLoop => io.filesystem_loop,
-            IoError::FileTooLarge => io.file_too_large,
-            IoError::StorageFull => return self.err(Value::nullary(io.storage_full)),
-            IoError::QuotaExceeded => return self.err(Value::nullary(io.quota_exceeded)),
-            IoError::Errno(code) => {
-                let code = bigint::int(&mut self.heap, code).map_err(fault)?;
-                let error = Value::cell(self.heap.ctor(io.errno, &[code]).map_err(fault)?);
-                return self.err(error);
-            }
-        };
-        let path = Value::cell(self.heap.string(path).map_err(fault)?);
-        let error = Value::cell(self.heap.ctor(about_path, &[path]).map_err(fault)?);
-        self.err(error)
-    }
-
-    fn json_types(&self) -> Result<JsonTypes, Stop> {
-        self.code.abi.json.ok_or(Stop::broken(Broken::NoJsonTypes))
-    }
-
-    /// The parts of the `Doc` `v`. Only `json.parse` makes one, so anything
-    /// else is a program the compiler should not have let through.
-    fn doc(&self, v: Value) -> Result<Doc, Stop> {
-        let types = self.json_types()?;
-        let not_a_doc = || Stop::broken(Broken::NotADoc(v.view()));
-        let cell = v.as_cell().ok_or_else(not_a_doc)?;
-        if self.heap.kind(cell) != Some(Kind::Ctor) || self.heap.variant(cell) != types.doc {
-            return Err(not_a_doc());
-        }
-        let field = |i| self.heap.field(cell, i).ok_or_else(not_a_doc);
-        let (arena, tape) = (field(0)?, field(1)?);
-        // An index no tape has becomes a node past any tape, so every read of
-        // it is `None`.
-        let idx = match self.int_of(field(2)?)? {
-            Int::Small(n) => usize::try_from(n).unwrap_or(usize::MAX),
-            Int::Big(_) => usize::MAX,
-        };
-        Ok(Doc { arena, tape, idx })
-    }
-
-    fn tape(&self, d: &Doc) -> Result<json::Tape<'_>, Stop> {
-        Ok(json::Tape {
-            heap: &self.heap,
-            tape: self.binary(d.tape)?,
-            arena: self.binary(d.arena)?,
-        })
-    }
-
-    /// A `Doc` over the same document as `d`, at node `idx`.
-    fn doc_at(&mut self, d: &Doc, idx: usize) -> Result<Value, Stop> {
-        let types = self.json_types()?;
-        let idx = bigint::int(&mut self.heap, idx).map_err(fault)?;
-        let (arena, tape) = (self.share(d.arena)?, self.share(d.tape)?);
-        let cell = self
-            .heap
-            .ctor(types.doc, &[arena, tape, idx])
-            .map_err(fault)?;
-        Ok(Value::cell(cell))
-    }
-
-    /// The `scarlet/json.Json` tree `root`, as JSON text. The walk keeps a
-    /// list of what is still to write instead of recursing, so a very deeply
-    /// nested tree encodes without overflowing the stack.
-    fn encode_json(&self, root: Value) -> Result<Vec<u8>, Stop> {
-        enum Step {
-            Value(Value),
-            Key(Value),
-            Text(&'static [u8]),
-        }
-        let types = self.json_types()?;
-        let mut out = Vec::new();
-        let mut todo = vec![Step::Value(root)];
-        while let Some(step) = todo.pop() {
-            let v = match step {
-                Step::Text(t) => {
-                    out.extend_from_slice(t);
-                    continue;
-                }
-                Step::Key(k) => {
-                    json::write_string(&mut out, &String::from_utf8_lossy(&self.text_of(k)?));
-                    continue;
-                }
-                Step::Value(v) => v,
-            };
-            let not_json = || Stop::broken(Broken::NotJson(v.view()));
-            let cell = match v.view() {
-                View::Nullary(n) if n == types.null => {
-                    out.extend_from_slice(b"null");
-                    continue;
-                }
-                View::Cell(cell) if self.heap.kind(cell) == Some(Kind::Ctor) => cell,
-                View::Nullary(_)
-                | View::Cell(_)
-                | View::Int(_)
-                | View::Float(_)
-                | View::Nil
-                | View::Bool(_)
-                | View::Func(_) => return Err(not_json()),
-            };
-            let variant = self.heap.variant(cell);
-            let inner = self.heap.field(cell, 0).ok_or_else(not_json)?;
-            if variant == types.boolean {
-                let yes = matches!(inner.view(), View::Bool(true));
-                out.extend_from_slice(if yes { b"true" } else { b"false" });
-            } else if variant == types.integer {
-                let n = self.int_of(inner)?.to_string();
-                out.extend_from_slice(n.as_bytes());
-            } else if variant == types.real {
-                json::write_float(&mut out, float::read(inner)?);
-            } else if variant == types.str {
-                json::write_string(&mut out, &String::from_utf8_lossy(&self.text_of(inner)?));
-            } else if variant == types.number {
-                // Text that is not a JSON number becomes `null`, instead of
-                // bytes that stop the whole document parsing at the far end.
-                let digits = self.text_of(inner)?;
-                if json::is_number(&digits) {
-                    out.extend_from_slice(&digits);
-                } else {
-                    out.extend_from_slice(b"null");
-                }
-            } else if variant == types.list || variant == types.object {
-                let Seq::Tree(items) = self.seq(inner)? else {
-                    return Err(not_json());
-                };
-                let items = array::elements(&self.heap, items);
-                let object = variant == types.object;
-                out.push(if object { b'{' } else { b'[' });
-                todo.push(Step::Text(if object { b"}" } else { b"]" }));
-                // Pushed last to first, so they come off in order, each
-                // after the comma before it.
-                for (i, item) in items.into_iter().enumerate().rev() {
-                    if object {
-                        let pair = item
-                            .as_cell()
-                            .filter(|&c| self.heap.kind(c) == Some(Kind::Tuple));
-                        let pair = pair.ok_or_else(not_json)?;
-                        let (Some(k), Some(value)) =
-                            (self.heap.element(pair, 0), self.heap.element(pair, 1))
-                        else {
-                            return Err(not_json());
-                        };
-                        todo.push(Step::Value(value));
-                        todo.push(Step::Text(b":"));
-                        todo.push(Step::Key(k));
-                    } else {
-                        todo.push(Step::Value(item));
-                    }
-                    if i > 0 {
-                        todo.push(Step::Text(b","));
-                    }
-                }
-            } else {
-                return Err(not_json());
-            }
-        }
-        Ok(out)
-    }
-
-    fn http_types(&self) -> Result<HttpTypes, Stop> {
-        self.code.abi.http.ok_or(Stop::broken(Broken::NoHttpTypes))
-    }
-
-    /// The bytes of the binary `v`, the last one padded with zero bits.
-    fn bytes_of(&self, v: Value) -> Result<Vec<u8>, Stop> {
-        Ok(binary::bytes(&self.heap, self.binary(v)?))
-    }
-
-    /// The byte offset `v` into `buf`, clamped to the buffer as `h1`'s
-    /// offsets are.
-    fn offset(&self, v: Value, buf: Bits) -> Result<usize, Stop> {
-        let whole = usize::try_from(buf.len / 8).unwrap_or(usize::MAX);
-        Ok(match self.int_of(v)? {
-            Int::Small(n) => usize::try_from(n).unwrap_or(0).min(whole),
-            Int::Big(n) if n.sign() == Sign::Minus => 0,
-            Int::Big(_) => whole,
-        })
-    }
-
-    /// The name and value of each `Header` in the `Headers` array `v`.
-    fn headers(&self, v: Value) -> Result<Vec<(Value, Value)>, Stop> {
-        let types = self.http_types()?;
-        let not_headers = || Stop::broken(Broken::NotHeaders(v.view()));
-        let items = match self.seq(v)? {
-            Seq::Tree(t) => array::elements(&self.heap, t),
-            Seq::Range { start, end } if start >= end => Vec::new(),
-            Seq::Range { .. } => return Err(not_headers()),
-        };
-        let mut out = Vec::with_capacity(items.len());
-        for h in items {
-            let cell = h.as_cell().ok_or_else(not_headers)?;
-            if self.heap.kind(cell) != Some(Kind::Ctor) || self.heap.variant(cell) != types.header {
-                return Err(not_headers());
-            }
-            let (Some(name), Some(value)) = (self.heap.field(cell, 0), self.heap.field(cell, 1))
-            else {
-                return Err(not_headers());
-            };
-            out.push((name, value));
-        }
-        Ok(out)
-    }
-
-    /// Bytes `range` of the head at byte `off` of `buf`, as a slice of it.
-    fn view(
+    /// Give a callee that needs `needs` registers a fresh frame at `up`, above
+    /// the caller's frame at `base`, and pass it `args`. The frames do not
+    /// overlap, so each argument goes straight into its parameter. They are
+    /// read in order, because a register a later argument moves may be one an
+    /// earlier one still reads.
+    #[inline(always)]
+    fn enter(
         &mut self,
-        buf: Bits,
-        off: usize,
-        range: &std::ops::Range<usize>,
-    ) -> Result<Value, Stop> {
-        // A position past what a word counts in bits is past any binary.
-        let bits = |n: Option<usize>| n.and_then(binary::bit_len).ok_or(Stop::HeapFull);
-        let from = bits(off.checked_add(range.start))?;
-        let len = bits(Some(range.len()))?;
-        let cell = binary::slice(&mut self.heap, buf, from, len).map_err(fault)?;
-        Ok(Value::cell(cell))
-    }
-
-    /// A header block's fields, as `Headers` of slices of `buf`.
-    fn fields(&mut self, buf: Bits, off: usize, block: &http::Block) -> Result<Value, Stop> {
-        let types = self.http_types()?;
-        let mut items = Vec::with_capacity(block.fields.len());
-        for f in &block.fields {
-            let name = self.view(buf, off, &f.name)?;
-            let value = self.view(buf, off, &f.value)?;
-            items.push(Value::cell(
-                self.heap
-                    .ctor(types.header, &[name, value])
-                    .map_err(fault)?,
-            ));
-        }
-        Ok(Value::cell(
-            array::from_values(&mut self.heap, &items).map_err(fault)?,
-        ))
-    }
-
-    /// The `HeadFlags` a block's tokens make.
-    fn head_flags(&mut self, flags: http::HeadFlags) -> Result<Value, Stop> {
-        let types = self.http_types()?;
-        let conn = match flags.conn {
-            http::ConnTokens::Neither => types.conn_neither,
-            http::ConnTokens::Close => types.conn_close,
-            http::ConnTokens::KeepAlive => types.conn_keep_alive,
-            http::ConnTokens::Both => types.conn_both,
-        };
-        let fields = [Value::nullary(conn), Value::bool(flags.expect_100_continue)];
-        Ok(Value::cell(
-            self.heap.ctor(types.head_flags, &fields).map_err(fault)?,
-        ))
-    }
-
-    /// `variant(status)`, which is a refusal carrying the HTTP status it
-    /// answers with.
-    fn with_status(&mut self, variant: VariantRef, r: http::Reject) -> Result<Value, Stop> {
-        let status = Value::int(r as i64).unwrap_or(Value::NIL);
-        Ok(Value::cell(
-            self.heap.ctor(variant, &[status]).map_err(fault)?,
-        ))
-    }
-
-    /// The offset `off + n` into `buf`, as an Int.
-    fn consumed(&mut self, off: usize, n: usize) -> Result<Value, Stop> {
-        // Both are offsets into one buffer, so their sum is exact.
-        bigint::int(&mut self.heap, off.saturating_add(n)).map_err(fault)
-    }
-
-    /// `h1.Parsed`, for the request head at byte `off` of `buf`, whose bytes
-    /// from there are `window`.
-    fn parsed_request(&mut self, buf: Bits, off: usize, window: &[u8]) -> Result<Value, Stop> {
-        let types = self.http_types()?;
-        match http::request(window) {
-            http::Request::NeedMore => Ok(Value::nullary(types.parsed_need_more)),
-            http::Request::Bad(r) => self.with_status(types.parsed_bad, r),
-            http::Request::Done {
-                method,
-                target,
-                http11,
-                head,
-            } => {
-                let method = self.view(buf, off, &method)?;
-                let target = self.view(buf, off, &target)?;
-                let version = Value::nullary(if http11 { types.http11 } else { types.http10 });
-                let headers = self.fields(buf, off, &head)?;
-                let flags = self.head_flags(head.flags)?;
-                let consumed = self.consumed(off, head.end)?;
-                let fields = [method, target, version, headers, flags, consumed];
-                Ok(Value::cell(
-                    self.heap.ctor(types.parsed_done, &fields).map_err(fault)?,
-                ))
+        base: usize,
+        args: impl Iterator<Item = Arg<Reg>>,
+        up: usize,
+        needs: Room,
+    ) -> Result<(), DeadCell> {
+        self.open(up.wrapping_add(needs.len()));
+        let mut param = up;
+        for a in args {
+            let v = self.pass(base, a)?;
+            // Every register above the caller's is `Nil`, so there is nothing
+            // here to release.
+            if let Some(slot) = self.stack.get_mut(param) {
+                *slot = v;
             }
+            param = param.wrapping_add(1);
         }
+        Ok(())
     }
 
-    /// `h1.ParsedResponse`, as [`Self::parsed_request`].
-    fn parsed_response(&mut self, buf: Bits, off: usize, window: &[u8]) -> Result<Value, Stop> {
-        let types = self.http_types()?;
-        let bad = |why: http::BadResponse| match why {
-            http::BadResponse::StatusLine => types.bad_status_line,
-            http::BadResponse::Version => types.bad_version,
-            http::BadResponse::Field => types.bad_field,
-            http::BadResponse::TooLarge => types.head_too_large,
-        };
-        match http::response(window) {
-            http::Response::NeedMore => Ok(Value::nullary(types.response_need_more)),
-            http::Response::Bad(why) => {
-                let why = Value::nullary(bad(why));
-                Ok(Value::cell(
-                    self.heap.ctor(types.response_bad, &[why]).map_err(fault)?,
-                ))
-            }
-            http::Response::Done {
-                http11,
-                code,
-                reason,
-                head,
-            } => {
-                let version = Value::nullary(if http11 { types.http11 } else { types.http10 });
-                let code = Value::int(i64::from(code)).unwrap_or(Value::NIL);
-                let reason = self.view(buf, off, &reason)?;
-                let headers = self.fields(buf, off, &head)?;
-                let flags = self.head_flags(head.flags)?;
-                let consumed = self.consumed(off, head.end)?;
-                let fields = [version, code, reason, headers, flags, consumed];
-                Ok(Value::cell(
-                    self.heap
-                        .ctor(types.response_done, &fields)
-                        .map_err(fault)?,
-                ))
-            }
-        }
+    #[cold]
+    #[inline(never)]
+    fn enter_wide(
+        &mut self,
+        base: usize,
+        args: &[Arg<Reg>],
+        up: usize,
+        needs: Room,
+    ) -> Result<(), DeadCell> {
+        self.enter(base, args.iter().copied(), up, needs)
     }
 
-    /// `h1.ChunkBody`, for the chunked body at byte `off` of `buf`, whose
-    /// bytes from there are `bytes`. The body is copied out once, when all of
-    /// it has arrived.
-    fn chunk_body(&mut self, buf: Bits, off: usize, bytes: &[u8], max: u64) -> Result<Value, Stop> {
-        let types = self.http_types()?;
-        match http::chunked(bytes, max) {
-            http::Chunked::NeedMore => Ok(Value::nullary(types.chunked_need_more)),
-            http::Chunked::Bad(r) => self.with_status(types.chunked_bad, r),
-            http::Chunked::Done { pieces, trailers } => {
-                let mut body = Vec::with_capacity(pieces.iter().map(|p| p.len()).sum());
-                for p in &pieces {
-                    body.extend_from_slice(bytes.get(p.clone()).unwrap_or(&[]));
+    /// Put what `args` pass at the start of `values`, and give that much of it.
+    #[inline(always)]
+    fn pass_few<'v, const N: usize>(
+        &mut self,
+        base: usize,
+        args: &Args<Reg, N>,
+        values: &'v mut [Value; N],
+    ) -> Result<&'v [Value], DeadCell> {
+        for (slot, a) in values.iter_mut().zip(args.iter()) {
+            *slot = self.pass(base, a)?;
+        }
+        Ok(values.get(..args.len()).unwrap_or_default())
+    }
+
+    /// Put what `args` pass in `passing`, where the frame a tail call replaces
+    /// does not reach.
+    fn pass_all(&mut self, base: usize, args: &[Arg<Reg>]) -> Result<(), DeadCell> {
+        self.passing.clear();
+        for a in args {
+            let v = self.pass(base, *a)?;
+            self.passing.push(v);
+        }
+        Ok(())
+    }
+
+    /// End the frame of `own` registers at `base` and start one of `needs`
+    /// there, with `values` in its first.
+    #[inline(always)]
+    fn replace(
+        &mut self,
+        base: usize,
+        own: Room,
+        needs: Room,
+        values: &[Value],
+    ) -> Result<(), DeadCell> {
+        self.open(base.wrapping_add(needs.len()));
+        self.rewrite(base, own.max(needs), values)
+    }
+
+    /// Release the `n` registers from `base` on, from the top down, leaving
+    /// `values` in the first of them and `Nil` in the rest.
+    // One loop for both. The compiler makes a call to `memcpy` of a loop that
+    // only puts the values in, which costs more than the values.
+    #[inline(always)]
+    fn rewrite(&mut self, base: usize, n: Room, values: &[Value]) -> Result<(), DeadCell> {
+        let mut k = n.len();
+        if let Some(frame) = self.stack.get_mut(base..base.wrapping_add(k)) {
+            for slot in frame.iter_mut().rev() {
+                k = k.wrapping_sub(1);
+                let v = values.get(k).copied().unwrap_or(Value::NIL);
+                let old = std::mem::replace(slot, v);
+                if let Some(cell) = old.as_cell() {
+                    self.rest.heap.release(cell)?;
                 }
-                let body = binary::from_bytes(&mut self.heap, &body);
-                let body = Value::cell(body.map_err(fault)?);
-                let trailer_fields = self.fields(buf, off, &trailers)?;
-                let consumed = self.consumed(off, trailers.end)?;
-                let fields = [body, trailer_fields, consumed];
-                Ok(Value::cell(
-                    self.heap.ctor(types.chunked_done, &fields).map_err(fault)?,
-                ))
             }
+        }
+        Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn replace_wide(
+        &mut self,
+        base: usize,
+        args: &[Arg<Reg>],
+        own: Room,
+        needs: Room,
+    ) -> Result<(), DeadCell> {
+        self.pass_all(base, args)?;
+        let values = std::mem::take(&mut self.passing);
+        self.replace(base, own, needs, &values)?;
+        self.passing = values;
+        self.passing.clear();
+        Ok(())
+    }
+
+    /// [`Self::replace`] of a frame by one of the same function, except that
+    /// the registers in `keep` stay, so a loop overwrites the cell its last
+    /// turn gave up. Each is the only reference to a cell holding nothing, and
+    /// the register still owns it. So a cell the loop never takes is freed
+    /// when the frame really ends.
+    #[inline(never)]
+    fn again(
+        &mut self,
+        base: usize,
+        args: &[Arg<Reg>],
+        own: Room,
+        keep: &[Reg],
+    ) -> Result<(), DeadCell> {
+        self.pass_all(base, args)?;
+        for r in (0..own.0).map(Reg) {
+            if !keep.contains(&r) {
+                self.set(base, r, Value::NIL)?;
+            }
+        }
+        let passing = std::mem::take(&mut self.passing);
+        for (r, v) in (0..).map(Reg).zip(&passing) {
+            self.set(base, r, *v)?;
+        }
+        self.passing = passing;
+        self.passing.clear();
+        Ok(())
+    }
+
+    /// Release the `own` registers from `base` on, leaving each `Nil`. They
+    /// are released from the top down, the order frames end in.
+    #[inline(always)]
+    fn leave(&mut self, base: usize, own: Room) -> Result<(), DeadCell> {
+        if let Some(live) = self.stack.get_mut(base..base.wrapping_add(own.len())) {
+            for slot in live.iter_mut().rev() {
+                let old = std::mem::replace(slot, Value::NIL);
+                if let Some(cell) = old.as_cell() {
+                    self.rest.heap.release(cell)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Make the registers up to `end` there to use. The stack only grows the
+    /// first time a frame reaches this far, and never shrinks.
+    #[inline(always)]
+    fn open(&mut self, end: usize) {
+        if self.stack.len() < end {
+            self.grow(end);
         }
     }
 
-    /// The bytes of the binary `v`, or `None` when it is not whole bytes.
-    fn whole_bytes(&self, v: Value) -> Result<Option<Vec<u8>>, Stop> {
-        let b = self.binary(v)?;
-        Ok((b.len % 8 == 0).then(|| binary::bytes(&self.heap, b)))
-    }
-
-    /// `Ok` of a new binary holding `bytes`.
-    fn ok_bytes(&mut self, bytes: &[u8]) -> Result<Value, Stop> {
-        let cell = binary::from_bytes(&mut self.heap, bytes).map_err(fault)?;
-        self.ok(Value::cell(cell))
-    }
-
-    /// The map `v` is.
-    fn map(&self, v: Value) -> Result<Cell, Stop> {
-        v.as_cell()
-            .filter(|&cell| self.heap.kind(cell) == Some(Kind::Map))
-            .ok_or_else(|| Stop::broken(Broken::NotAMap(v.view())))
-    }
-
-    /// The array `v` holds, as a tree or a range.
+    #[cold]
     #[inline(never)]
-    fn seq(&self, v: Value) -> Result<Seq, Stop> {
-        v.as_cell()
-            .and_then(|cell| array::seq(&self.heap, cell))
-            .ok_or_else(|| Stop::broken(Broken::NotAnArray(v.view())))
+    fn grow(&mut self, end: usize) {
+        self.stack.resize(end, Value::NIL);
     }
 
-    /// Element `i` of `s`, holding its own reference, or `None` past the end.
-    /// A range's element is made from its start.
+    // What an instruction does that is more than a few lines, out of line so
+    // that the loop keeps what it holds in the machine's registers.
+
+    /// A new cell for `variant`.
+    #[inline(always)]
+    fn ctor(
+        &mut self,
+        base: usize,
+        dst: Dst<Reg>,
+        variant: Variant,
+        fields: &Args<Reg, 6>,
+    ) -> Result<(), Stop> {
+        let mut values = UNSET;
+        let values = self.pass_few(base, fields, &mut values)?;
+        let cell = self.rest.heap.ctor(variant.get(), values).map_err(fault)?;
+        Ok(self.put(base, dst, Value::cell(cell))?)
+    }
+
     #[inline(never)]
-    fn element(&mut self, s: Seq, i: usize) -> Result<Option<Value>, Stop> {
-        match s {
-            Seq::Tree(a) => match array::get(&self.heap, a, i) {
-                Some(v) => Ok(Some(self.share(v)?)),
-                None => Ok(None),
-            },
-            Seq::Range { start, end } if (i as u64) < array::range_len(start, end) => {
-                // An i128 holds any i64 plus any index, so this is exact.
-                let n = i128::from(start).saturating_add(i as i128);
-                Ok(Some(bigint::int(&mut self.heap, n).map_err(fault)?))
+    fn ctor_wide(
+        &mut self,
+        base: usize,
+        dst: Dst<Reg>,
+        variant: Variant,
+        fields: &[Arg<Reg>],
+    ) -> Result<(), Stop> {
+        self.pass_all(base, fields)?;
+        let cell = self.rest.heap.ctor(variant.get(), &self.passing);
+        self.passing.clear();
+        Ok(self.put(base, dst, Value::cell(cell.map_err(fault)?))?)
+    }
+
+    /// A new constructor holding `values`, over the cell in `reuse` when one
+    /// fits there.
+    #[inline(always)]
+    fn over(
+        &mut self,
+        base: usize,
+        dst: Dst<Reg>,
+        variant: Variant,
+        values: &[Value],
+        reuse: Over<Reg>,
+    ) -> Result<(), Stop> {
+        // Move out the cell a `DropReuse` above hollowed and left in `reuse`,
+        // so the register no longer holds it. Anything else there is a value
+        // this frame is done with, so release it as the register would have.
+        let parked = self.empty(base, reuse.0);
+        let heap = &mut self.rest.heap;
+        let fits = parked.as_cell();
+        let cell = match fits.filter(|c| heap.fits_ctor(*c, values.len())) {
+            Some(cell) => {
+                heap.ctor_in(cell, variant.get(), values);
+                cell
             }
-            Seq::Range { .. } => Ok(None),
+            None => {
+                self.rest.release(parked)?;
+                let made = self.rest.heap.ctor(variant.get(), values);
+                made.map_err(fault)?
+            }
+        };
+        Ok(self.put(base, dst, Value::cell(cell))?)
+    }
+
+    #[inline(always)]
+    fn over_few(
+        &mut self,
+        base: usize,
+        dst: Dst<Reg>,
+        variant: Variant,
+        fields: &Args<Reg, 5>,
+        reuse: Over<Reg>,
+    ) -> Result<(), Stop> {
+        let mut values = [Value::UNSET; 5];
+        let values = self.pass_few(base, fields, &mut values)?;
+        self.over(base, dst, variant, values, reuse)
+    }
+
+    #[inline(never)]
+    fn over_wide(
+        &mut self,
+        base: usize,
+        dst: Dst<Reg>,
+        variant: Variant,
+        fields: &[Arg<Reg>],
+        reuse: Over<Reg>,
+    ) -> Result<(), Stop> {
+        self.pass_all(base, fields)?;
+        let values = std::mem::take(&mut self.passing);
+        self.over(base, dst, variant, &values, reuse)?;
+        self.passing = values;
+        self.passing.clear();
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn bits(&mut self, base: usize, dst: Dst<Reg>, op: BitsOp, regs: &[Reg]) -> Result<(), Stop> {
+        let v = self.rest.bits_op(op, frame(&self.stack, base), regs)?;
+        Ok(self.put(base, dst, v)?)
+    }
+
+    /// A new string of what `${v}` shows, for a `v` that is none.
+    #[inline(never)]
+    fn make_text(&mut self, base: usize, dst: Dst<Reg>, v: Value) -> Result<(), Stop> {
+        let v = self.rest.text_shown(v)?;
+        Ok(self.put(base, dst, v)?)
+    }
+
+    #[inline(never)]
+    fn concat(&mut self, base: usize, dst: Dst<Reg>, parts: &[Reg]) -> Result<(), Stop> {
+        let v = self.rest.concat(frame(&self.stack, base), parts)?;
+        Ok(self.put(base, dst, v)?)
+    }
+
+    #[inline(never)]
+    fn closure(
+        &mut self,
+        base: usize,
+        dst: Dst<Reg>,
+        func: FuncIdx,
+        captures: &[Reg],
+    ) -> Result<(), Stop> {
+        let values = self.shared(base, captures)?;
+        let cell = self.rest.heap.closure(func, &values).map_err(fault)?;
+        Ok(self.put(base, dst, Value::cell(cell))?)
+    }
+
+    #[inline(never)]
+    fn tuple(&mut self, base: usize, dst: Dst<Reg>, elements: &[Reg]) -> Result<(), Stop> {
+        let values = self.shared(base, elements)?;
+        let cell = self.rest.heap.tuple(&values).map_err(fault)?;
+        Ok(self.put(base, dst, Value::cell(cell))?)
+    }
+
+    #[inline(never)]
+    fn array(&mut self, base: usize, dst: Dst<Reg>, elements: &[Reg]) -> Result<(), Stop> {
+        let values = self.shared(base, elements)?;
+        let cell = array::from_values(&mut self.rest.heap, &values).map_err(fault)?;
+        Ok(self.put(base, dst, Value::cell(cell))?)
+    }
+
+    /// The values in `regs`, each with one more reference, for passing on.
+    fn shared(&mut self, base: usize, regs: &[Reg]) -> Result<Vec<Value>, DeadCell> {
+        let mut values = Vec::with_capacity(regs.len());
+        for r in regs {
+            values.push(self.share(base, Shared(*r))?);
         }
+        Ok(values)
     }
 
-    /// `s` as a tree, holding one reference. That is the tree itself, or a
-    /// range's elements built into one.
     #[inline(never)]
-    fn tree(&mut self, s: Seq) -> Result<crate::heap::Cell, Stop> {
-        match s {
-            Seq::Tree(a) => {
-                self.heap.share(a)?;
-                Ok(a)
+    fn array_drop(
+        &mut self,
+        base: usize,
+        dst: Dst<Reg>,
+        src: Arg<Reg>,
+        n: Src<Reg>,
+    ) -> Result<(), Stop> {
+        let s = self.rest.seq(self.get(base, src.reg))?;
+        let n = match self.look(base, n).view() {
+            View::Int(n) if n >= 0 => crate::word::to_usize(n.unsigned_abs()),
+            v @ (View::Int(_)
+            | View::Float(_)
+            | View::Nil
+            | View::Bool(_)
+            | View::Func(_)
+            | View::Cell(_)
+            | View::Nullary(_)) => {
+                return Err(Stop::broken(Broken::DropCount(v)));
             }
+        };
+        let cell = match s {
+            // The register's reference passes to the skip.
+            Seq::Tree(a) if src.moved => {
+                self.empty(base, src.reg);
+                array::skip_owned(&mut self.rest.heap, a, n)
+            }
+            Seq::Tree(a) => array::skip(&mut self.rest.heap, a, n),
             Seq::Range { start, end } => {
-                let mut items = Vec::new();
-                for n in start..end.max(start) {
-                    items.push(bigint::int(&mut self.heap, n).map_err(fault)?);
-                }
-                array::from_values(&mut self.heap, &items).map_err(fault)
+                let n = (n as u64).min(array::range_len(start, end));
+                // `n` is at most `end - start`, so `start + n` is
+                // within `start..=end` and the add is exact.
+                array::range(&mut self.rest.heap, start.wrapping_add_unsigned(n), end)
             }
+        };
+        Ok(self.put(base, dst, Value::cell(cell.map_err(fault)?))?)
+    }
+
+    /// The array in `rest` with the values in `items` at `end` of it.
+    #[inline(never)]
+    fn array_push(
+        &mut self,
+        base: usize,
+        dst: Dst<Reg>,
+        rest: Arg<Reg>,
+        items: &[Reg],
+        end: End,
+    ) -> Result<(), Stop> {
+        let s = self.rest.seq(self.get(base, rest.reg))?;
+        let a = self.rest.tree(s)?;
+        let mut values: smallvec::SmallVec<[Value; 4]> =
+            smallvec::SmallVec::with_capacity(items.len());
+        for r in items {
+            values.push(self.share(base, Shared(*r))?);
         }
+        if rest.moved {
+            let held = self.empty(base, rest.reg);
+            self.rest.release(held)?;
+        }
+        let cell = self.rest.push_all(a, &values, end)?;
+        Ok(self.put(base, dst, Value::cell(cell))?)
     }
 
     /// The array in `src` with the value in `value` at the index in `index`,
     /// holding its own reference, or `None` when the array has no such
     /// index. A `None` has read the registers and changed nothing. Otherwise
     /// the write holds one reference to the array, which is the register's
-    /// when `moved` says to take it, and so finds an array nothing else
-    /// holds with a count of 1.
+    /// when `src` gives it up, and so finds an array nothing else holds with
+    /// a count of 1.
     #[inline(never)]
     fn array_set(
         &mut self,
         base: usize,
-        src: Reg,
-        index: Reg,
-        value: Arg,
-        moved: bool,
+        src: Arg<Reg>,
+        index: Src<Reg>,
+        value: Arg<Reg>,
     ) -> Result<Option<Value>, Stop> {
-        let s = self.seq(self.get(base, src))?;
-        let at = self.position(self.get(base, index))?;
-        let Some(i) = at.filter(|i| (*i as u64) < s.len(&self.heap)) else {
+        let s = self.rest.seq(self.get(base, src.reg))?;
+        let at = self.rest.position(self.look(base, index))?;
+        let Some(i) = at.filter(|i| (*i as u64) < s.len(&self.rest.heap)) else {
             return Ok(None);
         };
-        let x = if value.moved {
-            self.take(base, value.reg)
-        } else {
-            self.share(self.get(base, value.reg))?
-        };
+        let x = self.pass(base, value)?;
         let array = match s {
             Seq::Tree(a) => {
-                if moved {
-                    self.take(base, src);
+                if src.moved {
+                    self.empty(base, src.reg);
                 } else {
-                    self.heap.share(a)?;
+                    self.rest.heap.share(a)?;
                 }
                 a
             }
             // A range stores no elements to write over, so it is built as a
             // tree first, which nothing else holds.
             Seq::Range { .. } => {
-                let a = self.tree(s)?;
-                if moved {
-                    let range = self.take(base, src);
-                    self.release(range)?;
+                let a = self.rest.tree(s)?;
+                if src.moved {
+                    let range = self.empty(base, src.reg);
+                    self.rest.release(range)?;
                 }
                 a
             }
         };
-        let cell = array::set(&mut self.heap, array, i, x).map_err(fault)?;
+        let cell = array::set(&mut self.rest.heap, array, i, x).map_err(fault)?;
         Ok(Some(Value::cell(cell)))
-    }
-
-    /// Element `index` of the array `a`, holding its own reference, or `None`
-    /// when it has none.
-    #[inline(never)]
-    fn index(&mut self, a: Value, index: Value) -> Result<Option<Value>, Stop> {
-        let s = self.seq(a)?;
-        match self.position(index)? {
-            Some(i) => self.element(s, i),
-            None => Ok(None),
-        }
-    }
-
-    /// A range's end as an `i64`. A range past 64 bits could not be walked in
-    /// any time a program has.
-    #[inline(never)]
-    fn range_end(&self, v: Value) -> Result<i64, Stop> {
-        match v.view() {
-            View::Int(n) => Ok(n),
-            View::Cell(cell) if self.heap.kind(cell) == Some(Kind::BigInt) => {
-                num_traits::ToPrimitive::to_i64(&self.heap.read_big_int(cell))
-                    .ok_or(Stop::missing(Missing::BigRangeEnd))
-            }
-            v @ (View::Float(_)
-            | View::Nil
-            | View::Bool(_)
-            | View::Func(_)
-            | View::Cell(_)
-            | View::Nullary(_)) => Err(Stop::broken(Broken::RangeEnd(v))),
-        }
-    }
-
-    /// The Int `v` as a position in an array, or `None` when it names none.
-    /// That is when it is negative, or a big int, which is past the end of
-    /// any array.
-    #[inline(never)]
-    fn position(&self, v: Value) -> Result<Option<usize>, Stop> {
-        match v.view() {
-            View::Int(i) => Ok(usize::try_from(i).ok()),
-            View::Cell(cell) if self.heap.kind(cell) == Some(Kind::BigInt) => Ok(None),
-            v @ (View::Float(_)
-            | View::Nil
-            | View::Bool(_)
-            | View::Func(_)
-            | View::Cell(_)
-            | View::Nullary(_)) => Err(Stop::broken(Broken::Position(v))),
-        }
-    }
-
-    /// `a` with each of `items` pushed at `end`, in turn. The references of
-    /// `a` and of each item pass to the result, so a push can change an
-    /// array nothing else holds in place.
-    #[inline(never)]
-    fn push_all(
-        &mut self,
-        a: crate::heap::Cell,
-        items: impl Iterator<Item = Value>,
-        end: End,
-    ) -> Result<crate::heap::Cell, Stop> {
-        let mut cur = a;
-        for x in items {
-            cur = array::push_owned(&mut self.heap, cur, x, end).map_err(fault)?;
-        }
-        Ok(cur)
-    }
-
-    /// [`Self::args`] for the few items a push adds, kept off the heap.
-    #[inline(never)]
-    fn items(
-        &mut self,
-        base: usize,
-        regs: &[Reg],
-    ) -> Result<smallvec::SmallVec<[Value; 4]>, DeadCell> {
-        let mut values = smallvec::SmallVec::new();
-        for r in regs {
-            values.push(self.share(self.get(base, *r))?);
-        }
-        Ok(values)
-    }
-
-    /// The values in `regs`, each with one more reference, for passing on.
-    #[inline(never)]
-    fn args(&mut self, base: usize, regs: &[Reg]) -> Result<Vec<Value>, DeadCell> {
-        let mut values = Vec::with_capacity(regs.len());
-        for r in regs {
-            values.push(self.share(self.get(base, *r))?);
-        }
-        Ok(values)
-    }
-
-    /// The values a call passes. A moved argument hands over the reference its
-    /// register holds and leaves it empty, so the callee is the only holder.
-    /// Every other one is shared. They are read in order, because a register
-    /// a later argument moves may be one an earlier one still reads.
-    ///
-    /// They go in the buffer [`Self::passed`] gives back, so a call allocates
-    /// nothing for them.
-    fn call_args(&mut self, base: usize, args: &[Arg]) -> Result<Vec<Value>, DeadCell> {
-        let mut values = std::mem::take(&mut self.passing);
-        values.clear();
-        for a in args {
-            let v = if a.moved {
-                self.take(base, a.reg)
-            } else {
-                self.share(self.get(base, a.reg))?
-            };
-            values.push(v);
-        }
-        Ok(values)
-    }
-
-    /// Keep the buffer [`Self::call_args`] filled for the next call. Its
-    /// values' references have passed to the callee's registers.
-    fn passed(&mut self, mut values: Vec<Value>) {
-        values.clear();
-        self.passing = values;
-    }
-
-    /// The body function value `f` runs, and `f` with one more reference, for
-    /// the frame that runs it as its closure.
-    #[inline(never)]
-    fn callee(&mut self, f: Value, argc: usize) -> Result<(&'c Body, Value), Stop> {
-        let func = match f.view() {
-            View::Func(func) => func,
-            View::Cell(cell) if self.heap.kind(cell) == Some(Kind::Closure) => {
-                self.heap.closure_func(cell)
-            }
-            v @ (View::Float(_)
-            | View::Int(_)
-            | View::Nil
-            | View::Bool(_)
-            | View::Cell(_)
-            | View::Nullary(_)) => {
-                return Err(Stop::broken(Broken::NotAFunction(v)));
-            }
-        };
-        let body = self.body(func)?;
-        if body.params.len() != argc {
-            return Err(Stop::broken(Broken::CallArity {
-                func: body.name.clone(),
-                got: argc,
-                want: body.params.len(),
-            }));
-        }
-        Ok((body, self.share(f)?))
-    }
-
-    /// Give `body` a fresh frame at `new_base`, above the caller's frame at
-    /// `base`, and pass it `args` from the caller's registers. The frames do
-    /// not overlap, so each argument goes straight into its parameter, read
-    /// in order as [`Self::call_args`] reads them.
-    fn enter_above(
-        &mut self,
-        base: usize,
-        args: &[Arg],
-        body: &Body,
-        new_base: usize,
-    ) -> Result<(), DeadCell> {
-        self.leave(new_base)?;
-        self.open(frame_end(new_base, body));
-        for (param, a) in body.params.iter().zip(args) {
-            let v = if a.moved {
-                self.take(base, a.reg)
-            } else {
-                self.share(self.get(base, a.reg))?
-            };
-            self.set(new_base, *param, v)?;
-        }
-        Ok(())
-    }
-
-    /// Give `body` a fresh frame at `base`, with `args` in its parameters.
-    /// Whatever held registers from `base` on is released first.
-    fn enter(&mut self, body: &Body, base: usize, args: &[Value]) -> Result<(), DeadCell> {
-        self.leave(base)?;
-        self.open(frame_end(base, body));
-        for (param, arg) in body.params.iter().zip(args) {
-            self.set(base, *param, *arg)?;
-        }
-        Ok(())
-    }
-
-    /// Release every live register from `base` on, leaving each `Nil`.
-    /// They are released from the top down, the order frames end in.
-    fn leave(&mut self, base: usize) -> Result<(), DeadCell> {
-        if let Some(live) = self.regs.get_mut(base..self.top) {
-            for slot in live.iter_mut().rev() {
-                let old = std::mem::replace(slot, Value::NIL);
-                if let Some(cell) = old.as_cell() {
-                    self.heap.release(cell)?;
-                }
-            }
-        }
-        self.top = self.top.min(base);
-        Ok(())
-    }
-
-    /// Make the registers up to `end` live. Every register past `top` is
-    /// already `Nil`, so the stack only grows the first time a frame
-    /// reaches this far, and never shrinks.
-    fn open(&mut self, end: usize) {
-        if self.regs.len() < end {
-            self.regs.resize(end, Value::NIL);
-        }
-        self.top = end;
-    }
-
-    /// Run `body` again in the same frame, for a call to self in tail
-    /// position. Like [`Self::enter`], except that the cells Perceus parked
-    /// for a constructor stay, so a loop overwrites the cell its last turn
-    /// gave up. Each is the only reference to a cell holding nothing, and the
-    /// register still owns it. So a cell the loop never takes is freed when
-    /// the frame really ends.
-    fn again(&mut self, body: &Body, base: usize, args: &[Value]) -> Result<(), DeadCell> {
-        let end = frame_end(base, body);
-        if self.top != end {
-            self.leave(end)?;
-            self.open(end);
-        }
-        let frame = self.regs.get_mut(base..end).unwrap_or_default();
-        // Most loops park no cell for reuse, and then every register goes,
-        // and each parameter lands in a register just emptied.
-        if body.carried.is_empty() {
-            for slot in frame.iter_mut() {
-                let old = std::mem::replace(slot, Value::NIL);
-                if let Some(cell) = old.as_cell() {
-                    self.heap.release(cell)?;
-                }
-            }
-            for (param, arg) in body.params.iter().zip(args) {
-                if let Some(slot) = frame.get_mut(param.0 as usize) {
-                    *slot = *arg;
-                }
-            }
-            return Ok(());
-        }
-        for (r, slot) in (0..).map(Reg).zip(frame.iter_mut()) {
-            if !body.carried.contains(&r) {
-                let old = std::mem::replace(slot, Value::NIL);
-                if let Some(cell) = old.as_cell() {
-                    self.heap.release(cell)?;
-                }
-            }
-        }
-        for (param, arg) in body.params.iter().zip(args) {
-            self.set(base, *param, *arg)?;
-        }
-        Ok(())
-    }
-
-    fn get(&self, base: usize, r: Reg) -> Value {
-        self.regs.get(at(base, r)).copied().unwrap_or(Value::NIL)
-    }
-
-    /// Put `v` in register `r`, whose old value is released. `v`'s reference
-    /// passes to the register.
-    fn set(&mut self, base: usize, r: Reg, v: Value) -> Result<(), DeadCell> {
-        match self.regs.get_mut(at(base, r)) {
-            Some(slot) => {
-                let old = std::mem::replace(slot, v);
-                self.release(old)
-            }
-            None => Ok(()),
-        }
-    }
-
-    /// The value in `r`, moved out. The register is emptied and gives up
-    /// nothing, so its one reference passes to the caller.
-    fn take(&mut self, base: usize, r: Reg) -> Value {
-        match self.regs.get_mut(at(base, r)) {
-            Some(slot) => std::mem::replace(slot, Value::NIL),
-            None => Value::NIL,
-        }
-    }
-
-    /// `v` with one more reference, for when it goes somewhere new.
-    fn share(&mut self, v: Value) -> Result<Value, DeadCell> {
-        self.heap.own(v)
-    }
-
-    fn release(&mut self, v: Value) -> Result<(), DeadCell> {
-        match v.as_cell() {
-            Some(cell) => self.heap.release(cell),
-            None => Ok(()),
-        }
-    }
-
-    #[inline(never)]
-    fn is_string(&self, v: Value) -> bool {
-        v.as_cell()
-            .is_some_and(|c| self.heap.kind(c) == Some(Kind::String))
-    }
-
-    fn is_variant(&self, v: Value, variant: VariantRef) -> bool {
-        match v.view() {
-            View::Nullary(n) => n == variant,
-            View::Cell(cell) => {
-                self.heap.kind(cell) == Some(Kind::Ctor) && self.heap.variant(cell) == variant
-            }
-            View::Float(_) | View::Int(_) | View::Nil | View::Bool(_) | View::Func(_) => false,
-        }
-    }
-
-    fn is_int(&self, v: Value, n: i64) -> bool {
-        match v.view() {
-            View::Int(m) => m == n,
-            View::Cell(cell) if self.heap.kind(cell) == Some(Kind::BigInt) => {
-                self.heap.read_big_int(cell) == n.into()
-            }
-            View::Float(_)
-            | View::Nil
-            | View::Bool(_)
-            | View::Func(_)
-            | View::Cell(_)
-            | View::Nullary(_) => false,
-        }
-    }
-
-    /// `a op b` for an operator whose operands are both Ints, both Floats, or,
-    /// for `+`, both strings.
-    #[inline(never)]
-    fn num(&mut self, op: NumOp, a: Value, b: Value) -> Result<Value, Stop> {
-        if let (View::Float(x), View::Float(y)) = (a.view(), b.view()) {
-            return Ok(match op {
-                NumOp::Arith(op) => float::op(op, x, y),
-                NumOp::Order(op) => Value::bool(float::compare(op, x, y)),
-            });
-        }
-        if op == NumOp::Arith(Arith::Add) && self.is_string(a) && self.is_string(b) {
-            let mut text = Vec::new();
-            for s in [a, b] {
-                if let Some(cell) = s.as_cell() {
-                    self.heap.read_string(cell, &mut text);
-                }
-            }
-            return Ok(Value::cell(self.heap.string(&text).map_err(fault)?));
-        }
-        match op {
-            NumOp::Arith(op) => int::op(&mut self.heap, op, a, b),
-            NumOp::Order(op) => {
-                let holds = int::compare(&self.heap, Compare::Order(op), a, b)?;
-                Ok(Value::bool(holds))
-            }
-        }
-    }
-
-    /// `-a`, for an Int or a Float.
-    #[inline(never)]
-    fn neg(&mut self, a: Value) -> Result<Value, Stop> {
-        match a.view() {
-            View::Float(f) => Ok(Value::float(-f)),
-            View::Int(_)
-            | View::Nil
-            | View::Bool(_)
-            | View::Func(_)
-            | View::Cell(_)
-            | View::Nullary(_) => int::neg(&mut self.heap, a),
-        }
     }
 
     // What an operator instruction does when it cannot answer in place. Each
@@ -2780,21 +1536,21 @@ impl<'c, 'h> Machine<'c, 'h> {
     fn int_slow(
         &mut self,
         base: usize,
-        dst: Reg,
+        dst: Dst<Reg>,
         op: Arith,
         x: Value,
         y: Value,
     ) -> Result<(), Stop> {
-        let v = int::op(&mut self.heap, op, x, y)?;
-        Ok(self.set(base, dst, v)?)
+        let v = int::op(&mut self.rest.heap, op, x, y)?;
+        Ok(self.put(base, dst, v)?)
     }
 
     /// `-x` into `dst`, for an `x` that is no small Int or is the lowest one.
     #[cold]
     #[inline(never)]
-    fn int_neg_slow(&mut self, base: usize, dst: Reg, x: Value) -> Result<(), Stop> {
-        let v = int::neg(&mut self.heap, x)?;
-        Ok(self.set(base, dst, v)?)
+    fn int_neg_slow(&mut self, base: usize, dst: Dst<Reg>, x: Value) -> Result<(), Stop> {
+        let v = int::neg(&mut self.rest.heap, x)?;
+        Ok(self.put(base, dst, v)?)
     }
 
     /// `x op y` into `dst`, for a Float instruction whose plain answer is no
@@ -2804,39 +1560,54 @@ impl<'c, 'h> Machine<'c, 'h> {
     fn float_slow(
         &mut self,
         base: usize,
-        dst: Reg,
+        dst: Dst<Reg>,
         op: Arith,
         x: Value,
         y: Value,
     ) -> Result<(), Stop> {
         let v = float::op(op, float::read(x)?, float::read(y)?);
-        Ok(self.set(base, dst, v)?)
+        Ok(self.put(base, dst, v)?)
     }
 
     /// `-x` into `dst`. Minus a Float is always one, so `x` is not.
     #[cold]
     #[inline(never)]
-    fn float_neg_slow(&mut self, base: usize, dst: Reg, x: Value) -> Result<(), Stop> {
+    fn float_neg_slow(&mut self, base: usize, dst: Dst<Reg>, x: Value) -> Result<(), Stop> {
         let v = Value::float(-float::read(x)?);
-        Ok(self.set(base, dst, v)?)
+        Ok(self.put(base, dst, v)?)
     }
 
     /// The Float nearest `x`, which is no small Int, into `dst`.
     #[cold]
     #[inline(never)]
-    fn float_from_int_slow(&mut self, base: usize, dst: Reg, x: Value) -> Result<(), Stop> {
-        let v = int::to_float(&self.heap, x)?;
-        Ok(self.set(base, dst, v)?)
+    fn float_from_int_slow(&mut self, base: usize, dst: Dst<Reg>, x: Value) -> Result<(), Stop> {
+        let v = int::to_float(&self.rest.heap, x)?;
+        Ok(self.put(base, dst, v)?)
     }
 
-    fn int_of(&self, v: Value) -> Result<Int, Stop> {
-        int::read(&self.heap, v)
-    }
-
-    /// How `println` and `${x}` show a value.
+    /// The stop for a run that went past the code's end at `pc`.
+    #[cold]
     #[inline(never)]
-    fn show(&self, v: Value, out: &mut Vec<u8>) -> Result<(), Stop> {
-        show::show(&self.heap, self.code, v, out)
+    fn ran_past_end(&self, pc: usize) -> Stop {
+        Stop::broken(Broken::RanPastEnd {
+            func: self.name_before(pc),
+        })
+    }
+
+    /// The stop for a read of capture `index`, by the instruction before `pc`.
+    #[cold]
+    #[inline(never)]
+    fn no_capture(&self, pc: usize, index: u32) -> Stop {
+        Stop::broken(Broken::NoCapture {
+            func: self.name_before(pc),
+            index,
+        })
+    }
+
+    /// The name of the function that the instruction before `pc` is in.
+    fn name_before(&self, pc: usize) -> String {
+        let entry = self.rest.code.function_at(pc.saturating_sub(1));
+        entry.map(|e| e.name.clone()).unwrap_or_default()
     }
 
     /// A finished run's last value as `println` shows it, or `None` for
@@ -2847,8 +1618,8 @@ impl<'c, 'h> Machine<'c, 'h> {
             return Ok(None);
         }
         let mut text = Vec::new();
-        let shown = self.show(v, &mut text);
-        self.release(v)?;
+        let shown = self.rest.show(v, &mut text);
+        self.rest.release(v)?;
         shown?;
         Ok(Some(String::from_utf8_lossy(&text).into_owned()))
     }
@@ -2857,42 +1628,31 @@ impl<'c, 'h> Machine<'c, 'h> {
     /// global, `os.env`'s map and the constants made. Nothing can run after
     /// this.
     fn let_go(&mut self, ended: Ended) -> Result<(), DeadCell> {
-        self.release(ended.last)?;
-        for v in std::mem::take(&mut self.globals) {
-            self.release(v)?;
+        let rest = &mut self.rest;
+        rest.release(ended.last)?;
+        for v in std::mem::take(&mut rest.globals) {
+            rest.release(v)?;
         }
-        if let Some(env) = self.env.take() {
-            self.heap.release(env)?;
+        if let Some(env) = rest.env.take() {
+            rest.heap.release(env)?;
         }
-        self.heap.let_go_of_constants()
-    }
-
-    /// The big Int constant `id`, which is `n`.
-    #[inline(never)]
-    fn big_const(&mut self, id: ConstId, n: i64) -> Result<Value, Stop> {
-        if let Some(cell) = self.heap.constant(id) {
-            return Ok(Value::cell(cell));
-        }
-        let v = bigint::int(&mut self.heap, n).map_err(fault)?;
-        if let Some(cell) = v.as_cell() {
-            self.heap.keep_constant(id, cell).map_err(fault)?;
-        }
-        Ok(v)
+        rest.heap.let_go_of_constants()
     }
 
     /// Check the heap against every reference the run holds between two
-    /// instructions: the registers, the globals, `os.env`'s map, and the
-    /// closures of the running frame and of `callers`.
+    /// instructions: the registers, the globals, `os.env`'s map and the
+    /// closure each frame runs as. `last` is a finished run's result.
     #[cold]
     #[inline(never)]
-    fn audit(&self, env: Value, callers: &[Frame<'c>]) -> Result<(), Stop> {
-        let held = self.regs.iter().chain(&self.passing).chain(&self.globals);
+    fn audit(&self, last: Value) -> Result<(), Stop> {
+        let held = self.stack.iter().chain(&self.passing);
         let roots = held
+            .chain(&self.rest.globals)
             .copied()
-            .chain(std::iter::once(env))
-            .chain(callers.iter().map(|f| f.env))
-            .chain(self.env.map(Value::cell));
-        Ok(self.heap.audit(roots)?)
+            .chain(self.frames.iter().map(|f| f.env))
+            .chain(std::iter::once(last))
+            .chain(self.rest.env.map(Value::cell));
+        Ok(self.rest.heap.audit(roots)?)
     }
 
     /// What a finished run of `counted` counted. This is the machine
@@ -2901,24 +1661,25 @@ impl<'c, 'h> Machine<'c, 'h> {
     /// instruction in it ran as often as the block did.
     pub(crate) fn counts(&self, counted: &Counted, _: &Ended) -> Result<Counts, Stop> {
         let mut ran = [0u64; Op::ALL.len()];
-        for (block, times) in counted.blocks.iter().zip(&self.ran) {
+        for (block, times) in counted.blocks.iter().zip(&self.rest.ran) {
             for op in block {
                 if let Some(n) = ran.get_mut(*op as usize) {
                     *n = n.saturating_add(*times);
                 }
             }
         }
-        // A `Count` is the counting itself, and no part of the program. An
-        // `Audit` is in no block.
+        // These are no part of the program. A `Count` is the counting itself,
+        // and an `Audit` and the `Halt` are in no block.
         let ops = Op::ALL
             .iter()
             .zip(ran)
-            .filter(|(op, _)| !matches!(op, Op::Count | Op::Audit));
+            .filter(|(op, _)| !matches!(op, Op::Count | Op::Audit | Op::Halt));
+        let heap = &self.rest.heap;
         Ok(Counts {
             ops: ops.map(|(op, n)| (op.name(), n)).collect(),
-            cells_made: self.heap.made(),
-            cells_reused: self.heap.reused(),
-            cells_live: self.heap.live_cells()?,
+            cells_made: heap.made(),
+            cells_reused: heap.reused(),
+            cells_live: heap.live_cells()?,
         })
     }
 
@@ -2930,11 +1691,11 @@ impl<'c, 'h> Machine<'c, 'h> {
         match audit {
             Audit::Never => Ok(()),
             Audit::AtEnd | Audit::EachInstruction => {
-                self.audit(ended.last, &[])?;
+                self.audit(ended.last)?;
                 self.let_go(ended)?;
-                self.let_go_of_handles();
-                self.audit(Value::NIL, &[])?;
-                match self.heap.live_cells()? {
+                self.rest.let_go_of_handles();
+                self.audit(Value::NIL)?;
+                match self.rest.heap.live_cells()? {
                     0 => Ok(()),
                     cells => Err(Stop::broken(Broken::CellsLeft { cells })),
                 }
@@ -2943,75 +1704,33 @@ impl<'c, 'h> Machine<'c, 'h> {
     }
 }
 
-/// `x` shifted `count` bits, left (times 2^count, exactly) or right (divided
-/// by 2^count, rounded down). A left shift past what an Int can hold is a
-/// full heap. A right shift past every bit leaves 0 or -1, by `x`'s sign.
-#[expect(
-    clippy::arithmetic_side_effects,
-    reason = "an Int grows instead of overflowing, and its size is checked first"
-)]
-fn shift(
-    x: num_bigint::BigInt,
-    left: bool,
-    count: &num_bigint::BigInt,
-) -> Result<num_bigint::BigInt, Stop> {
-    if x.sign() == Sign::NoSign {
-        return Ok(x);
-    }
-    let Some(count) = count.to_u64() else {
-        return if left {
-            Err(Stop::HeapFull)
-        } else {
-            Ok(if x.sign() == Sign::Minus {
-                (-1).into()
-            } else {
-                0.into()
-            })
-        };
-    };
-    if left {
-        if x.bits().saturating_add(count) > bigint::MAX_BITS {
-            return Err(Stop::HeapFull);
-        }
-        Ok(x << count)
-    } else if count > x.bits() {
-        Ok(if x.sign() == Sign::Minus {
-            (-1).into()
-        } else {
-            0.into()
-        })
-    } else {
-        Ok(x >> count)
-    }
+/// Room for what an instruction passes, before any of it is there. It is all
+/// zero bits, which is cheaper to write than `Nil`s.
+const UNSET: [Value; 6] = [Value::UNSET; 6];
+
+/// The registers of the frame at `base`, and whatever is above them.
+#[inline(always)]
+fn frame(stack: &[Value], base: usize) -> &[Value] {
+    stack.get(base..).unwrap_or_default()
 }
 
-fn ready(f: &Func) -> Result<&Body, Stop> {
-    match f {
-        Func::Ready(body) => Ok(body),
-        Func::NotBuiltYet(what) => Err(Stop::missing(what.clone())),
-    }
-}
-
-/// A `scarlet/json.Doc` taken apart into the binaries it holds, borrowed, and
-/// the node it points at.
-struct Doc {
-    arena: Value,
-    tape: Value,
-    idx: usize,
+/// Where a global is, when it has a place.
+fn global(slot: GlobalSlot) -> Option<usize> {
+    usize::try_from(slot.0).ok()
 }
 
 /// Where register `r` of the frame at `base` sits on the stack. `base` is no
-/// more than the stack's length, as `frame_end` says, so the sum is exact.
-#[inline]
+/// more than the stack's length, so the sum is exact.
+#[inline(always)]
 fn at(base: usize, r: Reg) -> usize {
-    base.wrapping_add(r.0 as usize)
+    base.wrapping_add(usize::from(r.0))
 }
 
-/// Where the registers of a frame of `body` at `base` end. `base` is no more
-/// than the register stack's length, which a `Vec` keeps under `isize::MAX`,
-/// and a frame has at most `u32::MAX` registers, so this is exact.
-fn frame_end(base: usize, body: &Body) -> usize {
-    base.saturating_add(body.regs as usize)
+/// `pc` as a frame keeps it. The loader gives every instruction a number of 32
+/// bits (`code::emit`), so this is exact.
+#[inline(always)]
+fn low(pc: usize) -> u32 {
+    crate::word::low_u32(pc as u64)
 }
 
 #[cfg(test)]

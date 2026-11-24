@@ -1,6 +1,7 @@
 //! Type annotations, read into finished types. Nothing here needs inference:
 //! an annotation names types, and a lowercase name in it is a variable.
 
+use scarlet_ir::core_ir::MAX_PARAMS;
 use scarlet_syntax::ast;
 use scarlet_syntax::span::Span;
 use scarlet_syntax::token::is_type_name;
@@ -165,6 +166,9 @@ impl<O: OwnTypes> Annotations<'_, '_, O> {
                 Ok(Type::tuple(elems))
             }
             ast::TypeKind::FunctionType(ft) => {
+                if ft.params.len() > MAX_PARAMS {
+                    return Err((t.span, CheckError::TooManyParameters));
+                }
                 let mut params = Vec::with_capacity(ft.params.len());
                 for p in &ft.params {
                     params.push(self.type_of(vars, p, report)?);

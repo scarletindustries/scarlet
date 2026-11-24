@@ -95,6 +95,10 @@ newtype_index!(
     pub struct FuncIdx("fn#")
 );
 
+/// The most parameters a function takes. The VM names a frame's registers by
+/// a byte, and the arguments arrive in the first of them.
+pub const MAX_PARAMS: usize = 250;
+
 /// A typed local binding. Its [`RTy`] indexes the elaborator's `ResolvedPool`,
 /// which can't hold an unsolved inference variable. So Perceus can never get a
 /// type that answers `is_heap` with `false` only because inference lost it.

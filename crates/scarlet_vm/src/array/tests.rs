@@ -338,6 +338,143 @@ fn concat_keeps_the_tree_balanced() {
     assert_eq!(heap.live(), 0);
 }
 
+/// Where everything in `array` sits: its root's numbers, and each node's own
+/// slots and totals.
+fn shape(heap: &Heap, array: Cell) -> String {
+    fn of(heap: &Heap, v: Value) -> String {
+        match node(heap, v) {
+            None => "-".to_string(),
+            Some(Node::Leaf(items)) => format!("{}", items.len()),
+            Some(Node::Branch {
+                shift,
+                sizes,
+                children,
+            }) => {
+                let each: Vec<String> = children.iter().map(|c| of(heap, *c)).collect();
+                format!("{shift}{sizes:?}({})", each.join(" "))
+            }
+        }
+    }
+    let r = root(heap, array);
+    let [head, tree, tail] = [r.head, r.tree, r.tail].map(|v| of(heap, v));
+    format!("{} {} {}: {head} {tree} {tail}", r.len, r.shift, r.offset)
+}
+
+/// Adding a run of items at either end makes the array that pushing them one
+/// at a time does, with the same nodes, whatever the array was, how many holders
+/// it has and how many items there are. The array something else holds is left
+/// as it was.
+#[test]
+fn a_run_of_items_is_added_as_they_are_one_at_a_time() {
+    for end in [End::Front, End::Back] {
+        for n in [
+            0, 1, 20, 31, 32, 33, 64, 65, 300, 1023, 1024, 1025, 1056, 1057,
+        ] {
+            for more in [0, 1, 2, 11, 12, 13, 31, 32, 33, 63, 64, 65, 200, 1100] {
+                for shared in [false, true] {
+                    let mut heap = Heap::default();
+                    // Everything the array is of is a cell, so that a
+                    // reference lost or kept too long shows.
+                    let strings = |heap: &mut Heap, from: &str, n: usize| -> Vec<Value> {
+                        (0..n)
+                            .map(|i| string(heap, &format!("{from}{i}")))
+                            .collect()
+                    };
+                    let items = strings(&mut heap, "a", n);
+                    let a = from_values(&mut heap, &items).expect("room");
+                    let items = strings(&mut heap, "b", n);
+                    let b = from_values(&mut heap, &items).expect("room");
+                    let before = (shape(&heap, a), texts(&heap, a));
+                    if shared {
+                        heap.share(a).expect("a live cell");
+                        heap.share(b).expect("a live cell");
+                    }
+                    let items = strings(&mut heap, "x", more);
+                    let run = extend_owned(&mut heap, a, &items, end).expect("room");
+                    let mut each = b;
+                    let items = strings(&mut heap, "x", more);
+                    let in_turn: Vec<Value> = match end {
+                        End::Front => items.into_iter().rev().collect(),
+                        End::Back => items,
+                    };
+                    for x in in_turn {
+                        each = push_owned(&mut heap, each, x, end).expect("room");
+                    }
+                    let what = format!("{n} and {more}");
+                    check(&heap, run);
+                    assert_eq!(shape(&heap, run), shape(&heap, each), "{what}");
+                    let named = |v: Vec<String>| -> Vec<String> {
+                        v.into_iter().map(|s| s.replace('b', "a")).collect()
+                    };
+                    assert_eq!(texts(&heap, run), named(texts(&heap, each)), "{what}");
+                    if shared {
+                        assert_eq!((shape(&heap, a), texts(&heap, a)), before, "{what}");
+                        heap.release(a).expect("a live cell");
+                        heap.release(b).expect("a live cell");
+                    } else if more > 0 {
+                        assert_eq!(run, a, "{what}: the root changes in place");
+                    }
+                    heap.release(run).expect("a live cell");
+                    heap.release(each).expect("a live cell");
+                    assert_eq!(heap.live(), 0, "{what}, shared {shared}");
+                }
+            }
+        }
+    }
+}
+
+/// A literal made in pieces adds 32 items at a time to an array that is full
+/// to its last leaf. Each run makes one leaf and at most one branch a level,
+/// where a push of each made a leaf for each.
+#[test]
+fn a_run_of_32_items_makes_one_leaf() {
+    let mut heap = Heap::default();
+    let items: Vec<Value> = (0..32).map(small).collect();
+    let mut a = from_values(&mut heap, &items).expect("room");
+    let made = heap.made();
+    for _ in 1..40 {
+        a = extend_owned(&mut heap, a, &items, End::Back).expect("room");
+    }
+    check(&heap, a);
+    assert_eq!(len(&heap, a), 1280);
+    let made = heap.made() - made;
+    assert!(made <= 39 * 2 + 1, "{made} cells for 39 runs");
+    // The one leaf that a run adds to is in a branch of its own by then, and
+    // nothing above it is copied.
+    let before = heap.made();
+    a = extend_owned(&mut heap, a, &items, End::Front).expect("room");
+    assert_eq!(heap.made() - before, 1);
+    heap.release(a).expect("a live cell");
+    assert_eq!(heap.live(), 0);
+}
+
+/// A run added in front of items left behind is added in front of the live
+/// ones only, and one added at the back leaves them where they are.
+#[test]
+fn a_run_is_added_past_the_items_left_behind() {
+    for end in [End::Front, End::Back] {
+        for dropped in [1, 5, 31] {
+            for more in [2, 40, 100] {
+                let mut heap = Heap::default();
+                let mut a = array_of(&mut heap, 0..100);
+                a = skip_owned(&mut heap, a, dropped).expect("room");
+                let items: Vec<Value> = (0..more).map(|i| small(1000 + i)).collect();
+                a = extend_owned(&mut heap, a, &items, end).expect("room");
+                check(&heap, a);
+                let old = (dropped as i64)..100;
+                let new = 1000..1000 + more;
+                let want: Vec<i64> = match end {
+                    End::Front => new.chain(old).collect(),
+                    End::Back => old.chain(new).collect(),
+                };
+                assert_eq!(ints(&heap, a), want);
+                heap.release(a).expect("a live cell");
+                assert_eq!(heap.live(), 0);
+            }
+        }
+    }
+}
+
 /// The owned forms give up the caller's reference, so on an array that
 /// was already freed they stop instead of freeing it again.
 #[test]
@@ -349,6 +486,8 @@ fn an_owned_push_or_skip_of_a_freed_array_is_a_dead_cell() {
     let x = Value::int(7).expect("small");
     assert_eq!(push_owned(&mut heap, a, x, End::Back), Err(Fault::DeadCell));
     assert_eq!(skip_owned(&mut heap, a, 1), Err(Fault::DeadCell));
+    let run = extend_owned(&mut heap, a, &[x, x], End::Back);
+    assert_eq!(run, Err(Fault::DeadCell));
 }
 
 /// A freed array cannot be shared back to life, so an owned push does not
@@ -610,6 +749,15 @@ fn writes_among_other_edits_leave_every_kept_version_alone() {
                     heap.release(piece).expect("a live cell");
                     a = joined;
                     want.extend(more);
+                }
+                4 | 7 if next(8) == 0 => {
+                    let names: Vec<String> =
+                        (0..next(90)).map(|k| format!("r{step}.{k}")).collect();
+                    let run: Vec<Value> = names.iter().map(|s| string(&mut heap, s)).collect();
+                    let end = if next(2) == 0 { End::Front } else { End::Back };
+                    a = extend_owned(&mut heap, a, &run, end).expect("room");
+                    let at = if end == End::Front { 0 } else { want.len() };
+                    want.splice(at..at, names);
                 }
                 5 if next(20) == 0 => {
                     heap.share(a).expect("a live cell");

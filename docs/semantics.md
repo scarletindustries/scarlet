@@ -103,6 +103,10 @@ The old compiler accepted any spread whose base had the same type, and the old V
 
 **Built:** any value can be a key, and a key is found by any value `==` to it: `0..3` finds `[0, 1, 2]`, and a map finds an equal map built in another order.
 
+## Functions
+
+A function takes at most 250 parameters and a call passes at most 250 arguments. The compiler refuses a function or a lambda with more, a function type with more, a call with more, and a constructor of more than 250 fields read as a function. Building such a constructor is not a call, and is allowed. The VM cannot yet run a function that holds more than 254 values at once, counting its parameters: a run stops when one is called (step 48 of `docs/perf-plan.md`). Building or updating a record of more than 253 fields needs that many. A long array, interpolation or binary literal does not, nor does an array literal with a spread in it.
+
 ## Memory
 
 **Decided: reference counting, with Perceus.** There is no tracing garbage collector.

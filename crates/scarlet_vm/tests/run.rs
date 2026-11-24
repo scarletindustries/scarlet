@@ -1833,7 +1833,7 @@ fn the_listing_shows_a_write_and_where_a_miss_goes() {
         "{strike}"
     );
     assert!(strike.contains("    4  r"), "{strike}");
-    assert!(strike.contains(" = Move move r0\n"), "{strike}");
+    assert!(strike.contains(" = Move(move r0)\n"), "{strike}");
 }
 
 /// A range stores only its two ends, and is an array of Ints in every way a
@@ -2966,18 +2966,18 @@ fn the_listing_shows_the_loaded_instructions() {
     let listing = scarlet_vm::listing(&compile(FIB)).expect("the program loads");
     let fib = listing.function(0).expect("fib is the first function");
     assert!(
-        fib.starts_with("; loaded: 2 registers, parameters in r0\n"),
+        fib.starts_with("; loaded: 2 registers, parameter in r0\n"),
         "{fib}"
     );
     assert!(
         fib.contains("    0  JumpUnlessIntLtK(r0, 2) -> 2\n"),
         "{fib}"
     );
-    assert!(fib.contains("= CallSelf(move r"), "{fib}");
+    assert!(fib.contains("= CallSelf(fn#0, move r"), "{fib}");
     assert!(fib.contains("= IntAdd(r"), "{fib}");
     let main = listing.function(1).expect("main is the second");
-    assert!(main.contains("r0 = Call fn#0(move r0)\n"), "{main}");
-    assert!(main.contains("r0 = Print r0 and a newline\n"), "{main}");
+    assert!(main.contains("r0 = Call(fn#0, move r0)\n"), "{main}");
+    assert!(main.contains("r0 = Print(r0, newline)\n"), "{main}");
     assert!(listing.function(2).is_none());
     assert!(listing.toplevel().starts_with("; loaded: 1 register\n"));
 }
@@ -3003,9 +3003,9 @@ fn the_listing_marks_a_move_that_takes_its_source() {
                }\n";
     let listing = scarlet_vm::listing(&compile(src)).expect("the program loads");
     let twice = listing.function(1).expect("twice is the second function");
-    assert!(twice.contains("    1  r1 = Move r0\n"), "{twice}");
+    assert!(twice.contains("    1  r1 = Move(r0)\n"), "{twice}");
     let once = listing.function(2).expect("once is the third");
-    assert!(once.contains("    1  r1 = Move move r0\n"), "{once}");
+    assert!(once.contains("    1  r1 = Move(move r0)\n"), "{once}");
 }
 
 /// A function that needs something the VM does not run yet has no
@@ -3024,22 +3024,384 @@ fn the_listing_says_why_a_function_did_not_load() {
     );
 }
 
-/// A record of 300 fields is longer than a cell the heap's arena holds, so
+/// Long literals do not need a register for each element: a table of numbers
+/// in a constant and in a function, tuples that hold a string and an array, an
+/// interpolation, a binary, and arrays inside one another. Each has more
+/// elements than a frame has registers, and is what it would be if it were
+/// made at once.
+#[test]
+fn a_literal_may_be_longer_than_a_frame() {
+    let ints = |n: usize| each_of(n, |i| (i * 7919 % 1000).to_string()).join(", ");
+    let pairs = each_of(400, |i| format!("({i}, 'n{i}', [{i}, k])")).join(", ");
+    let parts = each_of(600, |i| format!("${{k + {i}}}")).join(" ");
+    let bytes = each_of(300, |i| format!("k:size(8), {}:size(8)", i % 256)).join(", ");
+    let rows = each_of(290, |i| format!("[..ys, '{i}']")).join(", ");
+    let texts = each_of(300, |i| format!("'${{k}}{i}'")).join(", ");
+    let src = format!(
+        "import scarlet/array\n\
+         import scarlet/binary\n\
+         import scarlet/string\n\
+         const table = [{table}]\n\
+         fn ints(k Int) Array(Int) {{ [k, {table}, k] }}\n\
+         fn pairs(k Int) Array((Int, String, Array(Int))) {{\n\
+         \txs = [{pairs}]\n\
+         \tprintln(k)\n\
+         \txs\n\
+         }}\n\
+         fn text(k Int) String {{ '{parts}' }}\n\
+         fn bytes(k Int) Binary {{ <<{bytes}>> }}\n\
+         fn rows(c Bool, k Int) Array(Array(String)) {{\n\
+         \tys = if c {{ [{texts}] }} else {{ [] }}\n\
+         \t[{rows}]\n\
+         }}\n\
+         fn same(x String) Array(String) {{ [{same}] }}\n\
+         fn count(xs Array(Array(String)), acc Int) Int {{\n\
+         \tmatch xs {{\n\
+         \t\t[] -> acc\n\
+         \t\t[y, ..ys] -> count(ys, acc + array::length(y))\n\
+         \t}}\n\
+         }}\n\
+         pub fn main() {{\n\
+         \tprintln(array::length(table))\n\
+         \tprintln(table[999])\n\
+         \tprintln([..table, 5] == array::reverse(array::reverse([..table, 5])))\n\
+         \tprintln(array::length(ints(3)))\n\
+         \tprintln(ints(4) == [4, ..[..table, 4]])\n\
+         \tprintln(pairs(7)[399])\n\
+         \tprintln(string::length(text(1)))\n\
+         \tprintln(string::trim(text(1)) == text(1))\n\
+         \tprintln(binary::byte_size(bytes(9)))\n\
+         \tprintln(binary::byte_at(bytes(9), 599))\n\
+         \tprintln(count(rows(True, 2), 0))\n\
+         \tprintln(count(rows(False, 2), 0))\n\
+         \tprintln(array::length(same('x')))\n\
+         }}\n",
+        table = ints(1000),
+        same = "x, ".repeat(2999) + "x",
+    );
+    let want = "1000\nSome(81)\nTrue\n1002\nTrue\n7\nSome(\n  (\n    399,\n    n399,\n    [399, 7]\n  )\n)\n\
+                2291\nTrue\n600\n43\n87290\n290\n3000\n";
+    prints(&src, want);
+    // A short run of it, with the heap checked before every instruction.
+    let src = format!(
+        "fn ints(k Int) Array(Int) {{ [k, {}] }}\n\
+         fn text(k Int) String {{ '{}' }}\n\
+         pub fn main() {{\n\
+         \tprintln(ints(3)[260])\n\
+         \tprintln(text(0) == text(1))\n\
+         }}\n",
+        ints(300),
+        each_of(260, |i| format!("${{k + {i}}}")).join(" "),
+    );
+    let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+    let ran = scarlet_vm::run(&compile(&src), &mut host, Audit::EachInstruction);
+    assert_eq!(ran, Ok(()));
+    assert_eq!(std::mem::take(host.out()), b"Some(21)\nFalse\n");
+}
+
+/// So may one with a spread in it, at either end, in the middle, or in both
+/// places. The array that is spread stays as it was.
+#[test]
+fn a_literal_with_a_spread_may_be_longer_than_a_frame() {
+    let texts = |from: usize, n: usize| each_of(n, |i| format!("'${{k + {}}}'", from + i));
+    let src = |n: usize| {
+        let (a, b) = (texts(0, n).join(", "), texts(1000, n).join(", "));
+        format!(
+            "import scarlet/array\n\
+             fn back(xs Array(String), k Int) Array(String) {{ [..xs, {a}] }}\n\
+             fn front(xs Array(String), k Int) Array(String) {{ [{a}, ..xs] }}\n\
+             fn middle(xs Array(String), k Int) Array(String) {{ [{a}, ..xs, {b}] }}\n\
+             fn both(xs Array(String), k Int) Array(String) {{ [..xs, {a}, ..xs] }}\n\
+             fn lengths(xs Array(Int), k Int) Array(Int) {{\n\
+             \t[..xs, {}, array::length(xs) * k, {}]\n\
+             }}\n\
+             fn row(k Int, xs Array(String)) Array(String) {{\n\
+             \t[..array::map(xs, fn(x) {{ '${{x}}${{k}}' }}), {a}]\n\
+             }}\n\
+             fn shown(xs Array(String)) {{\n\
+             \tprintln('${{array::length(xs)}} ${{array::reverse(xs)[0]}} ${{xs[0]}} ${{xs[1]}} ${{xs[2]}} ${{xs[250]}} ${{xs[258]}}')\n\
+             }}\n\
+             pub fn main() {{\n\
+             \tt = 't'\n\
+             \txs = ['s${{t}}', t]\n\
+             \tshown(back(xs, 1))\n\
+             \tshown(front(xs, 1))\n\
+             \tshown(middle(xs, 1))\n\
+             \tshown(both(xs, 1))\n\
+             \tshown(row(5, xs))\n\
+             \tshown(back([], 1))\n\
+             \tshown(front([], 1))\n\
+             \tprintln(lengths(0..5, 1)[255])\n\
+             \tprintln(xs)\n\
+             }}\n",
+            each_of(250, |i| i.to_string()).join(", "),
+            each_of(250, |i| i.to_string()).join(", "),
+        )
+    };
+    let want = "302 Some(300) Some(st) Some(t) Some(1) Some(249) Some(257)\n\
+                302 Some(t) Some(1) Some(2) Some(3) Some(251) Some(259)\n\
+                602 Some(1300) Some(1) Some(2) Some(3) Some(251) Some(259)\n\
+                304 Some(t) Some(st) Some(t) Some(1) Some(249) Some(257)\n\
+                302 Some(304) Some(st5) Some(t5) Some(5) Some(253) Some(261)\n\
+                300 Some(300) Some(1) Some(2) Some(3) Some(251) Some(259)\n\
+                300 Some(300) Some(1) Some(2) Some(3) Some(251) Some(259)\n\
+                Some(5)\n[st, t]\n";
+    prints(&src(300), want);
+    // A short run of it, with the heap checked before every instruction.
+    let elements = texts(0, 256).join(", ");
+    let src = format!(
+        "fn back(xs Array(String), k Int) Array(String) {{ [..xs, {elements}] }}\n\
+         fn front(xs Array(String), k Int) Array(String) {{ [{elements}, ..xs] }}\n\
+         pub fn main() {{\n\
+         \txs = ['${{1}}']\n\
+         \tprintln(back(xs, 1)[256])\n\
+         \tprintln(front(xs, 1)[256])\n\
+         }}\n"
+    );
+    let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+    let ran = scarlet_vm::run(&compile(&src), &mut host, Audit::EachInstruction);
+    assert_eq!(ran, Ok(()));
+    assert_eq!(std::mem::take(host.out()), b"Some(256)\nSome(1)\n");
+}
+
+/// A long literal is made in pieces of one leaf each, so it costs a cell for
+/// each leaf and at most one more for where it hangs, and not one for each
+/// element.
+#[test]
+fn a_long_literal_makes_a_few_cells_for_each_leaf() {
+    let src = format!(
+        "import scarlet/array\n\
+         import scarlet/internal\n\
+         fn table(k Int) Array(Int) {{ [k, {}] }}\n\
+         pub fn main() {{\n\
+         \tbefore = internal::cells_made()\n\
+         \txs = table(1)\n\
+         \tmade = internal::cells_made() - before\n\
+         \tprintln(array::length(xs))\n\
+         \tprintln(made)\n\
+         }}\n",
+        each_of(999, |i| i.to_string()).join(", ")
+    );
+    // 32 leaves, the root, and the branch made anew for each leaf hung but the
+    // first.
+    prints(&src, "1000\n63\n");
+}
+
+/// The forms that take their operands from a list do what those that hold them
+/// do: a tuple and a prepend and an append of 8 strings, and of 9 and 10.
+#[test]
+fn a_wide_tuple_and_a_wide_push_hold_every_operand_in_order() {
+    let program = |n: usize| {
+        let parts = each_of(n, |i| format!("s{i}")).join(", ");
+        let lets = each_of(n, |i| format!("\ts{i} = '${{k + {i}}}'\n")).concat();
+        format!(
+            "fn tuple(k Int) ({types}) {{\n{lets}\t({parts})\n}}\n\
+             fn front(k Int, xs Array(String)) Array(String) {{\n{lets}\t[{parts}, ..xs]\n}}\n\
+             fn back(k Int, xs Array(String)) Array(String) {{\n{lets}\t[..xs, {parts}]\n}}\n\
+             pub fn main() {{\n\
+             \txs = ['${{0}}']\n\
+             \tprintln('${{tuple(10)}}')\n\
+             \tprintln('${{front(10, xs)}}')\n\
+             \tprintln('${{back(10, xs)}}')\n\
+             \tprintln('${{front(10, [])}} ${{xs}}')\n\
+             }}\n",
+            types = each_of(n, |_| "String".to_string()).join(", "),
+        )
+    };
+    let words = |out: &[u8]| -> String {
+        let text = String::from_utf8(out.to_vec()).expect("UTF-8");
+        text.split(['\n', ' ', ',', '(', ')', '[', ']'])
+            .filter(|w| !w.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    for n in [8, 9, 10] {
+        let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+        let ran = scarlet_vm::run(&compile(&program(n)), &mut host, Audit::EachInstruction);
+        assert_eq!(ran, Ok(()));
+        let all = each_of(n, |i| (10 + i).to_string()).join(" ");
+        let want = format!("{all} {all} 0 0 {all} {all} 0");
+        assert_eq!(words(&std::mem::take(host.out())), want, "{n}");
+    }
+}
+
+fn each_of(n: usize, f: impl Fn(usize) -> String) -> Vec<String> {
+    (0..n).map(f).collect()
+}
+
+/// A function of thousands of locals runs when few of them are held at once. One
+/// that holds more than a frame has registers loads, and stops the run when it
+/// is called and not before, naming itself.
+#[test]
+fn a_function_may_hold_254_values_at_once() {
+    let long = each_of(4000, |i| match i {
+        0 => "\tx0 = a\n\tt0 = '${x0}'\n".to_string(),
+        i => format!(
+            "\tx{i} = x{} + string::length(t{})\n\tt{i} = '${{x{i}}}'\n",
+            i - 1,
+            i - 1
+        ),
+    });
+    let src = format!(
+        "import scarlet/string\n\
+         fn long(a Int) Int {{\n{}\tx3999 + string::length(t3999)\n}}\n\
+         pub fn main() {{ println(long(1)) }}\n",
+        long.concat()
+    );
+    prints(&src, "16980\n");
+
+    let holds = |n: usize| {
+        let lets = each_of(n, |i| format!("\tx{i} = a * {i}\n")).concat();
+        let sums = each_of(n, |i| format!("\ts{} = s{i} + x{i}\n", i + 1)).concat();
+        format!(
+            "fn wide(a Int) Int {{\n{lets}\ts0 = 0\n{sums}\ts{n}\n}}\n\
+             pub fn main() {{\n\
+             \tprintln('before')\n\
+             \tprintln(wide(2))\n\
+             }}\n"
+        )
+    };
+    prints(&holds(254), "before\n64262\n");
+    let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+    let stopped = scarlet_vm::run(&compile(&holds(255)), &mut host, Audit::AtEnd);
+    let Err(Stop::NotBuiltYet(what)) = stopped else {
+        panic!("{stopped:?}");
+    };
+    let says = "main.wide, which holds more than 254 values at once,";
+    assert_eq!(what.to_string(), says);
+    assert_eq!(std::mem::take(host.out()), b"before\n");
+    // Uncalled, it stops nothing.
+    let uncalled = holds(255).replace("println(wide(2))", "println(wide)");
+    let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+    let ran = scarlet_vm::run(&compile(&uncalled), &mut host, Audit::AtEnd);
+    assert_eq!(ran, Ok(()));
+}
+
+/// A tail call to a function of fewer registers gives up what the others hold,
+/// and one to a function of more finds the rest of them empty.
+#[test]
+fn a_tail_call_fits_the_frame_to_its_callee() {
+    prints(
+        "import scarlet/string\n\
+         fn narrow(k Int) Int { k }\n\
+         fn wide(n Int) Int {\n\
+         \ta = '${n}a'\n\
+         \tb = '${n}b'\n\
+         \tc = '${n}c'\n\
+         \tk = string::length('${a}${b}${c}${a}')\n\
+         \tnarrow(k)\n\
+         }\n\
+         fn up(n Int) Int { if n == 0 { narrow(1) } else { wide(n) } }\n\
+         fn down(n Int, acc Int) Int {\n\
+         \tif n == 0 { acc } else { down(n - 1, acc + up(n)) }\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(wide(5))\n\
+         \tprintln(down(100, 0))\n\
+         }\n",
+        "8\n1168\n",
+    );
+}
+
+/// Calls and loops of up to 250 arguments, by name, to self and through a
+/// value, pass every one to its parameter.
+#[test]
+fn a_call_may_pass_250_arguments() {
+    for n in [6, 7, 100, 250] {
+        let params = each_of(n, |i| format!("p{i} Int")).join(", ");
+        let all = each_of(n, |i| format!("p{i}")).join(", ");
+        let weighted = format!("weigh([{all}], 1, 0)");
+        let turned = each_of(n, |i| format!("p{}", (i + 1) % n)).join(", ");
+        let args = each_of(n, |i| format!("{}", i * i % 11)).join(", ");
+        let same = vec!["a"; n].join(", ");
+        let rest: usize = n - 1;
+        let src = format!(
+            "fn weigh(xs Array(Int), i Int, acc Int) Int {{\n\
+             \tmatch xs {{\n\
+             \t\t[] -> acc\n\
+             \t\t[x, ..rest] -> weigh(rest, i + 1, acc + x * i)\n\
+             \t}}\n\
+             }}\n\
+             fn sum({params}) Int {{ {weighted} }}\n\
+             fn turn({params}) Int {{\n\
+             \tif p{rest} > 100 {{ {weighted} }} else {{ turn({turned_up}) }}\n\
+             }}\n\
+             fn twice({params}) Int {{\n\
+             \tif p0 == 99 {{ {weighted} }} else {{ twice(99, {tail}) + p0 }}\n\
+             }}\n\
+             fn all_same(a Int) Int {{ sum({same}) }}\n\
+             fn through(f fn({types}) Int, {params}) Int {{ f({turned}) }}\n\
+             pub fn main() {{\n\
+             \tprintln(sum({args}))\n\
+             \tprintln(turn({args}))\n\
+             \tprintln(twice({args}))\n\
+             \tprintln(all_same(3))\n\
+             {through}\
+             }}\n",
+            turned_up = each_of(n, |i| match i {
+                0 => format!("p{rest} + 7"),
+                i => format!("p{}", i - 1),
+            })
+            .join(", "),
+            tail = each_of(n - 1, |i| format!("p{}", i + 1)).join(", "),
+            types = vec!["Int"; n].join(", "),
+            // A function of one more parameter is one too many at 250.
+            through = if n < 250 {
+                format!("\tprintln(through(sum, {args}))\n")
+            } else {
+                "\tf = sum\n\tprintln(f(".to_string() + &args + "))\n"
+            },
+        );
+        let src = if n < 250 { src } else { without_through(&src) };
+        let v: Vec<i64> = (0..n).map(|i| (i * i % 11) as i64).collect();
+        let weigh = |v: &[i64]| -> i64 { v.iter().zip(1..).map(|(p, i)| p * i).sum() };
+        let mut turned = v.clone();
+        while turned[rest] <= 100 {
+            let last = turned.pop().expect("a parameter") + 7;
+            turned.insert(0, last);
+        }
+        let mut second = v.clone();
+        second[0] = 99;
+        let mut rotated = v.clone();
+        rotated.rotate_left(1);
+        let through = if n < 250 { &rotated } else { &v };
+        let want = format!(
+            "{}\n{}\n{}\n{}\n{}\n",
+            weigh(&v),
+            weigh(&turned),
+            weigh(&second) + v[0],
+            weigh(&vec![3; n]),
+            weigh(through),
+        );
+        prints(&src, &want);
+    }
+}
+
+/// `src` without its function `through`.
+fn without_through(src: &str) -> String {
+    let kept = src.lines().filter(|l| !l.starts_with("fn through("));
+    kept.map(|l| format!("{l}\n")).collect()
+}
+
+/// A record of 253 fields is longer than a cell the heap's arena holds, so
 /// its fields live in a box of their own. It is read, updated, compared,
 /// hashed and freed like any other record. Each update in the loop makes one
 /// cell and frees the one before, and the audit finds none left at the end.
+/// An update holds every field at once, and beside them the record and the
+/// number, which is every register there is.
 #[test]
 fn a_record_too_wide_for_the_arena_is_a_record() {
-    let fields: String = (0..300).map(|i| format!("\tf{i} Int\n")).collect();
-    let args: Vec<String> = (0..300).map(|i| i.to_string()).collect();
+    let fields: String = (0..253).map(|i| format!("\tf{i} Int\n")).collect();
+    let args: Vec<String> = (0..253).map(|i| i.to_string()).collect();
     let src = format!(
         "import scarlet/internal\n\
          import scarlet/map\n\
          type Wide {{\n{fields}}}\n\
+         fn with(w Wide, n Int) Wide {{ Wide(..w, f0: n) }}\n\
          fn bump(w Wide, n Int) Wide {{\n\
-         \tif n == 0 {{ w }} else {{ bump(Wide(..w, f150: w.f150 + n, f299: w.f299 - 1), n - 1) }}\n\
+         \tif n == 0 {{ w }} else {{ bump(with(w, n), n - 1) }}\n\
          }}\n\
-         fn total(w Wide) Int {{ w.f0 + w.f1 + w.f149 + w.f150 + w.f298 + w.f299 }}\n\
+         fn total(w Wide) Int {{ w.f0 + w.f1 + w.f149 + w.f150 + w.f251 + w.f252 }}\n\
          pub fn main() {{\n\
          \tw = Wide({args})\n\
          \tprintln(total(w))\n\
@@ -3048,26 +3410,28 @@ fn a_record_too_wide_for_the_arena_is_a_record() {
          \tprintln(internal::cells_made() - made)\n\
          \tprintln(total(v))\n\
          \tprintln(w == v)\n\
-         \tprintln(w == Wide(..v, f150: 150, f299: 299))\n\
+         \tprintln(w == with(v, 0))\n\
          \tm = map::set(map::set(map::new(), w, 'first'), v, 'second')\n\
-         \tprintln(map::get(m, Wide(..w, f7: 7)))\n\
-         \tprintln(map::get(m, Wide(..w, f7: 8)))\n\
+         \tprintln(map::get(m, with(v, 0)))\n\
+         \tprintln(map::get(m, with(w, 1)))\n\
+         \tprintln(map::get(m, with(w, 8)))\n\
          \tprintln(map::size(m))\n\
          }}\n",
         args = args.join(", "),
     );
-    prints(&src, "897\n100\n5847\nFalse\nTrue\nSome(first)\nNone\n2\n");
+    let want = "803\n100\n804\nFalse\nTrue\nSome(first)\nSome(second)\nNone\n2\n";
+    prints(&src, want);
 }
 
-/// A constructor of 300 fields that is matched and built again is written
+/// A constructor of 253 fields that is matched and built again is written
 /// over where it is, in its box, as a narrow one is. A thousand turns make
 /// no cell and reuse one a thousand times. While something else still holds
 /// it, the same turn makes a new cell and leaves the old one as it was.
 #[test]
 fn a_constructor_too_wide_for_the_arena_is_rebuilt_in_place() {
-    let fields: String = (0..299).map(|i| format!("\t\ta{i} Int,\n")).collect();
-    let pattern = format!("a0, {}s", "_, ".repeat(298));
-    let zeros = "0, ".repeat(298);
+    let fields: String = (0..252).map(|i| format!("\t\ta{i} Int,\n")).collect();
+    let pattern = format!("a0, {}s", "_, ".repeat(251));
+    let zeros = "0, ".repeat(251);
     let src = format!(
         "import scarlet/internal\n\
          import scarlet/string\n\

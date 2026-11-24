@@ -23,8 +23,8 @@
 //! builds new nodes along the one path it touches and shares every other
 //! node with the array it came from, which stays as it was. A node shared
 //! this way holds one more reference. An operation whose caller gives up its
-//! reference ([`set`], [`push_owned`], [`skip_owned`]) changes a node in
-//! place when its count says nothing else holds it.
+//! reference ([`set`], [`push_owned`], [`extend_owned`], [`skip_owned`])
+//! changes a node in place when its count says nothing else holds it.
 //!
 //! This is the layout, in words after each cell's header:
 //!
@@ -120,6 +120,17 @@ pub(crate) enum End {
     Back,
 }
 
+impl End {
+    /// A head and a tail as the buffer at this end and the one at the other,
+    /// or those two as a head and a tail.
+    fn turn(self, a: Value, b: Value) -> (Value, Value) {
+        match self {
+            End::Front => (a, b),
+            End::Back => (b, a),
+        }
+    }
+}
+
 /// Where a root keeps its head, tree and tail, in words after its header.
 const ROOT_HEAD: usize = 3;
 const ROOT_TREE: usize = 4;
@@ -157,6 +168,10 @@ enum Node {
 /// A node's slots, taken out to build a new node from. A node has at most
 /// `B`, so they stay on the stack.
 type Slots = smallvec::SmallVec<[Value; B]>;
+
+/// A branch's words after its header: its height, and the total and the
+/// reference of each child.
+type Words = smallvec::SmallVec<[u64; 2 * B + 1]>;
 
 /// A node read in place. A lookup goes through this, so it copies nothing and
 /// allocates nothing.
@@ -295,11 +310,12 @@ fn node(heap: &Heap, v: Value) -> Option<Node> {
 }
 
 /// `slots` with `x` added at `end`.
-fn at_end(slots: Slots, x: Value, end: End) -> Slots {
+fn at_end(mut slots: Slots, x: Value, end: End) -> Slots {
     match end {
-        End::Front => std::iter::once(x).chain(slots).collect(),
-        End::Back => slots.into_iter().chain(std::iter::once(x)).collect(),
+        End::Front => slots.insert(0, x),
+        End::Back => slots.push(x),
     }
+    slots
 }
 
 fn own_all(heap: &mut Heap, vs: &[Value]) -> Result<Slots, DeadCell> {
@@ -369,10 +385,10 @@ fn branch(heap: &mut Heap, shift: usize, children: &[Value]) -> Result<Value, Fa
             .ok_or(Fault::Full)?;
         totals.push(total);
     }
-    let data: smallvec::SmallVec<[u64; 65]> = std::iter::once(shift as u64)
-        .chain(totals)
-        .chain(children.iter().map(|c| c.bits()))
-        .collect();
+    let mut data = Words::new();
+    data.push(shift as u64);
+    data.extend_from_slice(&totals);
+    data.extend(children.iter().map(|c| c.bits()));
     Ok(Value::cell(heap.make(Kind::ArrayBranch, &data)?))
 }
 
@@ -647,17 +663,15 @@ fn push(heap: &mut Heap, array: Cell, x: Value, end: End) -> Result<Cell, Fault>
         let items = at_end(kept, x, end);
         (heap.own(r.tree)?, r.shift, leaf(heap, &items)?)
     } else {
-        let (tree, shift) = tree_push_leaf(heap, r.tree, r.shift, this, end)?;
+        let (tree, this) = (heap.own(r.tree)?, heap.own(this)?);
+        let (tree, shift) = tree_push_leaf(heap, tree, r.shift, this, end)?;
         (tree, shift, leaf(heap, &[x])?)
     };
     let other = heap.own(other)?;
     // `settled` is the head's own leaf when nothing was left behind, and the
     // branches above each took their own reference to what they kept.
     release(heap, settled)?;
-    let (head, tail) = match end {
-        End::Front => (new, other),
-        End::Back => (other, new),
-    };
+    let (head, tail) = end.turn(new, other);
     new_root(heap, len, shift, head, tree, tail)
 }
 
@@ -714,8 +728,100 @@ pub(crate) fn push_owned(heap: &mut Heap, array: Cell, x: Value, end: End) -> Re
     Ok(array)
 }
 
+/// `array` with `items`, in their order, at `end`. The caller gives up its
+/// reference to `array` and one to each item.
+///
+/// It makes the array that pushing them one at a time does, with a leaf for
+/// each run of them where that makes one for each item. The buffer at that end
+/// takes as many as it has room for, and a full one goes into the tree before
+/// the next is begun.
+pub(crate) fn extend_owned(
+    heap: &mut Heap,
+    array: Cell,
+    items: &[Value],
+    end: End,
+) -> Result<Cell, Fault> {
+    let r = root(heap, array);
+    let len = r.len.checked_add(items.len()).ok_or(Fault::Full)?;
+    // This holds a reference to each part of the root from here on. They are
+    // the root's own when nothing else holds it.
+    let alone = heap.unique(array)?;
+    if !alone {
+        for part in [r.head, r.tree, r.tail] {
+            heap.own(part)?;
+        }
+    }
+    // As in `push`, a head that is added to holds only live items.
+    let (head, offset) = if end == End::Front && r.offset > 0 {
+        let settled = own_head(heap, &r)?;
+        release(heap, r.head)?;
+        (settled, 0)
+    } else {
+        (r.head, r.offset)
+    };
+    let (mut edge, other) = end.turn(head, r.tail);
+    let (mut tree, mut shift) = (r.tree, r.shift);
+    let mut left = items;
+    while !left.is_empty() {
+        if slot_count(heap, edge) >= B {
+            (tree, shift) = tree_push_leaf(heap, tree, shift, edge, end)?;
+            edge = Value::NIL;
+        }
+        let room = B.saturating_sub(slot_count(heap, edge)).min(left.len());
+        let (near, rest) = match end {
+            End::Back => left.split_at_checked(room),
+            End::Front => {
+                let split = left.split_at_checked(left.len().saturating_sub(room));
+                split.map(|(rest, near)| (near, rest))
+            }
+        }
+        .unwrap_or((left, &[]));
+        edge = longer_leaf(heap, edge, near, end)?;
+        left = rest;
+    }
+    let (head, tail) = end.turn(edge, other);
+    if !alone {
+        heap.release(array)?;
+        return root_at(heap, len, shift, offset, head, tree, tail);
+    }
+    if let [l, s, o, h, t, e] = heap.data_mut(array) {
+        (*l, *s, *o) = (len as u64, shift as u64, offset as u64);
+        (*h, *t, *e) = (head.bits(), tree.bits(), tail.bits());
+    }
+    Ok(array)
+}
+
+/// A leaf of the items of the leaf `old`, or of none when it is `Nil`, with
+/// `items` at `end` of them. The caller gives up its reference to `old` and
+/// one to each item.
+fn longer_leaf(heap: &mut Heap, old: Value, items: &[Value], end: End) -> Result<Value, Fault> {
+    let Some(cell) = old.as_cell() else {
+        return leaf(heap, items);
+    };
+    let kept = slots(heap, old);
+    let alone = heap.unique(cell)?;
+    if !alone {
+        own_all(heap, &kept)?;
+    }
+    let mut all = Slots::new();
+    let (first, second) = match end {
+        End::Back => (kept.as_slice(), items),
+        End::Front => (items, kept.as_slice()),
+    };
+    all.extend_from_slice(first);
+    all.extend_from_slice(second);
+    let made = leaf(heap, &all)?;
+    // What a leaf that was this array's alone held is in the new one now.
+    if alone {
+        heap.discard(cell)?;
+    } else {
+        heap.release(cell)?;
+    }
+    Ok(made)
+}
+
 /// `tree` with the full leaf `leaf` hung under its edge at `end`, growing a
-/// level when that edge is full. Both are borrowed, and the result is owned.
+/// level when that edge is full. The caller gives up its reference to each.
 fn tree_push_leaf(
     heap: &mut Heap,
     tree: Value,
@@ -724,14 +830,12 @@ fn tree_push_leaf(
     end: End,
 ) -> Result<(Value, usize), Fault> {
     if tree.as_cell().is_none() {
-        return Ok((heap.own(leaf)?, 0));
+        return Ok((leaf, 0));
     }
     if let Some(n) = try_push(heap, tree, shift, leaf, end)? {
         return Ok((n, shift));
     }
-    let leaf = heap.own(leaf)?;
     let spine = spine(heap, leaf, shift)?;
-    let tree = heap.own(tree)?;
     let pair = match end {
         End::Front => [spine, tree],
         End::Back => [tree, spine],
@@ -750,7 +854,9 @@ fn spine(heap: &mut Heap, leaf: Value, shift: usize) -> Result<Value, Fault> {
 }
 
 /// `n` with `leaf` hung under its edge at `end` without growing taller, or
-/// `None` when every level on that edge is full.
+/// `None` when every level on that edge is full. The caller gives up its
+/// reference to each, unless the answer is `None`. A branch nothing else holds
+/// is changed in place, or its children move to one a child wider.
 fn try_push(
     heap: &mut Heap,
     n: Value,
@@ -758,34 +864,115 @@ fn try_push(
     leaf: Value,
     end: End,
 ) -> Result<Option<Value>, Fault> {
-    if shift == 0 {
+    let (Some(cell), Some(View::Branch { children, .. })) = (n.as_cell(), view(heap, n)) else {
         return Ok(None);
+    };
+    let edge = match end {
+        End::Front => 0,
+        End::Back => children.len().saturating_sub(1),
+    };
+    let Some(child) = children.get(edge).copied().map(Value::from_bits) else {
+        return Ok(None);
+    };
+    let more = node_len(heap, leaf) as u64;
+    let alone = heap.unique(cell)?;
+    if !alone {
+        heap.own(child)?;
     }
-    let children = slots(heap, n);
-    let Some(edge) = (match end {
-        End::Front => Some(0),
-        End::Back => children.len().checked_sub(1),
-    }) else {
-        return Ok(None);
-    };
-    let Some(&edge_child) = children.get(edge) else {
-        return Ok(None);
-    };
-    if let Some(sub) = try_push(heap, edge_child, down(shift), leaf, end)? {
-        let mut kept = Slots::new();
-        for (i, c) in children.iter().enumerate() {
-            kept.push(if i == edge { sub } else { heap.own(*c)? });
+    if let Some(sub) = try_push(heap, child, down(shift), leaf, end)? {
+        if alone {
+            lengthen(heap, cell, edge, sub, more)?;
+            return Ok(Some(n));
         }
-        return Ok(Some(branch(heap, shift, &kept)?));
+        let mut kept = Slots::new();
+        for (i, c) in slots(heap, n).into_iter().enumerate() {
+            kept.push(if i == edge { sub } else { heap.own(c)? });
+        }
+        let made = branch(heap, shift, &kept)?;
+        heap.release(cell)?;
+        return Ok(Some(made));
     }
-    if children.len() < B {
-        let leaf = heap.own(leaf)?;
-        let s = spine(heap, leaf, down(shift))?;
-        let kept = own_all(heap, &children)?;
-        let all = at_end(kept, s, end);
-        return Ok(Some(branch(heap, shift, &all)?));
+    if !alone {
+        release(heap, child)?;
     }
-    Ok(None)
+    let Some(View::Branch {
+        sizes, children, ..
+    }) = view(heap, n)
+    else {
+        return Ok(None);
+    };
+    if children.len() >= B {
+        return Ok(None);
+    }
+    let (mut data, slot) = wider(shift, sizes, children, more, end)?;
+    let new = spine(heap, leaf, down(shift))?;
+    if let Some(w) = data.get_mut(slot) {
+        *w = new.bits();
+    }
+    if !alone {
+        let shared = slots(heap, n);
+        own_all(heap, &shared)?;
+    }
+    let made = heap.make(Kind::ArrayBranch, &data)?;
+    if alone {
+        heap.discard(cell)?;
+    } else {
+        heap.release(cell)?;
+    }
+    Ok(Some(Value::cell(made)))
+}
+
+/// Put `sub` in slot `edge` of the branch in `cell`, for a child that has
+/// `more` fewer elements. The child's reference was the caller's to give up.
+fn lengthen(heap: &mut Heap, cell: Cell, edge: usize, sub: Value, more: u64) -> Result<(), Fault> {
+    let data = heap.data_mut(cell);
+    let n = data.len().saturating_sub(1) / 2;
+    // Every total from the child's on counts its elements.
+    let totals = data.get_mut(1..).and_then(|d| d.get_mut(..n));
+    for total in totals.into_iter().flatten().skip(edge) {
+        *total = total.checked_add(more).ok_or(Fault::Full)?;
+    }
+    let slot = n.saturating_add(1).saturating_add(edge);
+    if let Some(w) = data.get_mut(slot) {
+        *w = sub.bits();
+    }
+    Ok(())
+}
+
+/// The words of a branch at height `shift` over `children`, whose totals are
+/// `sizes`, and a child of `more` elements at `end` of them. Also the place in
+/// it of that child, which is `Nil` so far.
+fn wider(
+    shift: usize,
+    sizes: &[u64],
+    children: &[u64],
+    more: u64,
+    end: End,
+) -> Result<(Words, usize), Fault> {
+    let sum = |total: u64| total.checked_add(more).ok_or(Fault::Full);
+    let mut data = Words::new();
+    data.push(shift as u64);
+    let slot = match end {
+        End::Back => {
+            data.extend_from_slice(sizes);
+            data.push(sum(sizes.last().copied().unwrap_or(0))?);
+            data.extend_from_slice(children);
+            let slot = data.len();
+            data.push(Value::NIL.bits());
+            slot
+        }
+        End::Front => {
+            data.push(more);
+            for total in sizes {
+                data.push(sum(*total)?);
+            }
+            let slot = data.len();
+            data.push(Value::NIL.bits());
+            data.extend_from_slice(children);
+            slot
+        }
+    };
+    Ok((data, slot))
 }
 
 /// The owned `n` without the one-child levels at its top.
@@ -1034,15 +1221,16 @@ pub(crate) fn concat(heap: &mut Heap, l: Cell, r: Cell) -> Result<Cell, Fault> {
     let (ltree, lshift) = if lr.tail.as_cell().is_none() {
         (heap.own(lr.tree)?, lr.shift)
     } else {
-        tree_push_leaf(heap, lr.tree, lr.shift, lr.tail, End::Back)?
+        let (tree, tail) = (heap.own(lr.tree)?, heap.own(lr.tail)?);
+        tree_push_leaf(heap, tree, lr.shift, tail, End::Back)?
     };
     let rhead = own_head(heap, &rr)?;
     let (rtree, rshift) = if rhead.as_cell().is_none() {
         (heap.own(rr.tree)?, rr.shift)
     } else {
-        tree_push_leaf(heap, rr.tree, rr.shift, rhead, End::Front)?
+        let tree = heap.own(rr.tree)?;
+        tree_push_leaf(heap, tree, rr.shift, rhead, End::Front)?
     };
-    release(heap, rhead)?;
     let (tree, shift) = if ltree.as_cell().is_none() {
         (rtree, rshift)
     } else if rtree.as_cell().is_none() {

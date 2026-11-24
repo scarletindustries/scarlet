@@ -7,28 +7,21 @@
 use scarlet_ir::core_ir::{AddressTypes, NetTypes, TlsTypes};
 use scarlet_ir::intrinsic::Intrinsic;
 
-use super::Machine;
+use super::{Operands, Rest};
 use crate::Stop;
 use crate::array;
 use crate::bigint::{self, Int};
 use crate::binary;
-use crate::code::Reg;
 use crate::heap::Kind;
 use crate::host::{Deadline, Handle, IpAddr, NetError, Received, SocketAddr, TlsError};
 use crate::stop::{Broken, Missing, fault};
 use crate::value::Value;
 
-impl Machine<'_, '_> {
+impl Rest<'_, '_> {
     /// What network built-in `i` gives for the values in `args`.
-    pub(super) fn net_builtin(
-        &mut self,
-        i: Intrinsic,
-        base: usize,
-        args: &[Reg],
-    ) -> Result<Value, Stop> {
+    pub(super) fn net_builtin(&mut self, i: Intrinsic, args: Operands<'_>) -> Result<Value, Stop> {
         self.let_go_of_handles();
-        let arg = |m: &Self, k: usize| args.get(k).map_or(Value::NIL, |r| m.get(base, *r));
-        let v = arg(self, 0);
+        let v = args.get(0);
         match i {
             Intrinsic::AddressParse => match self.utf8_of(v)?.parse::<IpAddr>() {
                 Ok(ip) => {
@@ -40,7 +33,7 @@ impl Machine<'_, '_> {
             Intrinsic::NetResolve | Intrinsic::NetResolveUntil => {
                 let name = self.utf8_of(v)?;
                 let deadline = match i {
-                    Intrinsic::NetResolveUntil => Some(self.deadline(arg(self, 1))?),
+                    Intrinsic::NetResolveUntil => Some(self.deadline(args.get(1))?),
                     _ => None,
                 };
                 match self.host.resolve(&name, deadline) {
@@ -81,7 +74,7 @@ impl Machine<'_, '_> {
                     return self.invalid_port();
                 };
                 let deadline = match i {
-                    Intrinsic::NetConnectUntil => Some(self.deadline(arg(self, 1))?),
+                    Intrinsic::NetConnectUntil => Some(self.deadline(args.get(1))?),
                     _ => None,
                 };
                 match self.host.connect(addr, deadline) {
@@ -112,9 +105,9 @@ impl Machine<'_, '_> {
             }
             Intrinsic::SocketRead | Intrinsic::SocketReadUntil => {
                 let conn = self.conn_of(v)?;
-                let max = self.read_max(arg(self, 1))?;
+                let max = self.read_max(args.get(1))?;
                 let deadline = match i {
-                    Intrinsic::SocketReadUntil => Some(self.deadline(arg(self, 2))?),
+                    Intrinsic::SocketReadUntil => Some(self.deadline(args.get(2))?),
                     _ => None,
                 };
                 match self.host.read(conn, max, deadline) {
@@ -127,7 +120,7 @@ impl Machine<'_, '_> {
             }
             Intrinsic::SocketWrite => {
                 let conn = self.conn_of(v)?;
-                let Some(bytes) = self.whole_bytes(arg(self, 1))? else {
+                let Some(bytes) = self.whole_bytes(args.get(1))? else {
                     let unaligned = self.net_types()?.unaligned_binary;
                     return self.err(Value::nullary(unaligned));
                 };
@@ -138,7 +131,7 @@ impl Machine<'_, '_> {
             }
             Intrinsic::SocketWriteParts => {
                 let conn = self.conn_of(v)?;
-                let parts = arg(self, 1);
+                let parts = args.get(1);
                 let mut bytes = Vec::new();
                 let Some(cell) = parts.as_cell() else {
                     return Err(Stop::broken(Broken::NotAnArray(parts.view())));
@@ -165,10 +158,10 @@ impl Machine<'_, '_> {
             }
             Intrinsic::TlsHandshake | Intrinsic::TlsHandshakeUntil => {
                 let conn = self.conn_of(v)?;
-                let name = arg(self, 1);
+                let name = args.get(1);
                 let server_name = self.utf8_of(name)?;
                 let deadline = match i {
-                    Intrinsic::TlsHandshakeUntil => Some(self.deadline(arg(self, 2))?),
+                    Intrinsic::TlsHandshakeUntil => Some(self.deadline(args.get(2))?),
                     _ => None,
                 };
                 match self.host.tls_handshake(conn, &server_name, deadline) {
@@ -189,9 +182,9 @@ impl Machine<'_, '_> {
             }
             Intrinsic::TlsRead | Intrinsic::TlsReadUntil => {
                 let conn = self.conn_of(v)?;
-                let max = self.read_max(arg(self, 1))?;
+                let max = self.read_max(args.get(1))?;
                 let deadline = match i {
-                    Intrinsic::TlsReadUntil => Some(self.deadline(arg(self, 2))?),
+                    Intrinsic::TlsReadUntil => Some(self.deadline(args.get(2))?),
                     _ => None,
                 };
                 match self.host.tls_read(conn, max, deadline) {
@@ -204,7 +197,7 @@ impl Machine<'_, '_> {
             }
             Intrinsic::TlsWrite => {
                 let conn = self.conn_of(v)?;
-                let Some(bytes) = self.whole_bytes(arg(self, 1))? else {
+                let Some(bytes) = self.whole_bytes(args.get(1))? else {
                     let unaligned = self.net_types()?.unaligned_binary;
                     let cause = Value::nullary(unaligned);
                     let transport = self.tls_types()?.transport;
@@ -228,7 +221,7 @@ impl Machine<'_, '_> {
     }
 
     /// Tell the host about every handle nothing holds any more.
-    pub(super) fn let_go_of_handles(&mut self) {
+    pub(in crate::exec) fn let_go_of_handles(&mut self) {
         for h in self.heap.take_released() {
             self.host.release(Handle(h));
         }

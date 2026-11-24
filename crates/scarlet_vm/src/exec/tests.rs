@@ -1,18 +1,30 @@
 use super::*;
 use crate::OsHost;
-use crate::code::{JumpPair, JumpWithK, Pair, WithK};
-use crate::heap::AuditFault;
+use crate::bigint;
+use crate::code::{BinaryId, EntryPc, Lists, Pc, Shares, TextId, Why, WhyId};
+use crate::heap::{AuditFault, Cell, Fault};
 use crate::value::{Float, SmallInt};
 use num_bigint::BigInt;
+use num_traits::ToPrimitive as _;
+use scarlet_ir::core_ir::VariantRef;
+use scarlet_ir::tivec::TiVec;
 
-/// `passing` sits where a 16-byte load reaches it in one instruction,
-/// and the heap comes after it, so the heap's size cannot move it.
+/// The fields the loop reads at every turn come first, where one load reaches
+/// them, and the heap comes after everything else, so that its size cannot
+/// move them.
 #[test]
-fn the_heap_is_behind_the_fields_a_call_moves() {
+fn the_heap_is_behind_the_fields_the_loop_reads() {
+    let stack = std::mem::offset_of!(Machine<'_, '_>, stack);
+    let frames = std::mem::offset_of!(Machine<'_, '_>, frames);
     let passing = std::mem::offset_of!(Machine<'_, '_>, passing);
-    assert!(passing <= 255 || passing.is_multiple_of(16), "{passing}");
-    assert!(passing < std::mem::offset_of!(Machine<'_, '_>, heap));
-    assert!(std::mem::offset_of!(Machine<'_, '_>, regs) < passing);
+    let rest = std::mem::offset_of!(Machine<'_, '_>, rest);
+    assert!(stack < frames && frames < passing && passing < rest);
+    assert!(rest < 256, "{rest}");
+    let heap = rest + std::mem::offset_of!(Rest<'_, '_>, heap);
+    assert!(
+        heap + size_of::<Heap>() == size_of::<Machine<'_, '_>>(),
+        "{heap}"
+    );
 }
 
 /// Run `src`, then release everything a finished run still holds, which
@@ -36,10 +48,10 @@ fn cells_left_after_in(
     let ended = m.run().expect("the program runs");
     m.let_go(ended).expect("every count is right");
     assert!(
-        m.top == 0 && m.regs.iter().all(|v| v.bits() == Value::NIL.bits()),
+        m.frames.is_empty() && m.stack.iter().all(|v| v.bits() == Value::NIL.bits()),
         "a frame's registers outlived it"
     );
-    let left = m.heap.live();
+    let left = m.rest.heap.live();
     drop(m);
     let out = std::mem::take(host.out());
     (String::from_utf8(out).expect("UTF-8"), left)
@@ -467,7 +479,8 @@ fn after_running(src: &str, check: impl FnOnce(&mut Machine<'_, '_>, Ended)) {
 const HOLDS_A_CELL: &str = "const kept = ['a', 'b']\npub fn main() {\n\tprintln(kept)\n}\n";
 
 fn held_by_a_global(m: &Machine<'_, '_>) -> Cell {
-    m.globals
+    m.rest
+        .globals
         .iter()
         .find_map(|v| v.as_cell())
         .expect("a global holding a cell")
@@ -476,9 +489,9 @@ fn held_by_a_global(m: &Machine<'_, '_>) -> Cell {
 #[test]
 fn an_audit_of_a_run_with_every_count_right_finds_nothing() {
     after_running(HOLDS_A_CELL, |m, ended| {
-        assert!(m.heap.live() > 0, "the global still holds its array");
+        assert!(m.rest.heap.live() > 0, "the global still holds its array");
         assert_eq!(m.finish(ended, Audit::AtEnd), Ok(()));
-        assert_eq!(m.heap.live(), 0);
+        assert_eq!(m.rest.heap.live(), 0);
     });
 }
 
@@ -488,10 +501,10 @@ fn an_audit_of_a_run_with_every_count_right_finds_nothing() {
 fn a_run_that_is_not_audited_leaves_its_heap_alone() {
     after_running(HOLDS_A_CELL, |m, ended| {
         let cell = held_by_a_global(m);
-        m.heap.share(cell).expect("a live cell");
-        let live = m.heap.live();
+        m.rest.heap.share(cell).expect("a live cell");
+        let live = m.rest.heap.live();
         assert_eq!(m.finish(ended, Audit::Never), Ok(()));
-        assert_eq!(m.heap.live(), live);
+        assert_eq!(m.rest.heap.live(), live);
     });
 }
 
@@ -501,7 +514,7 @@ fn a_run_that_is_not_audited_leaves_its_heap_alone() {
 fn an_audit_names_the_cell_a_lost_release_left() {
     after_running(HOLDS_A_CELL, |m, ended| {
         let cell = held_by_a_global(m);
-        m.heap.share(cell).expect("a live cell");
+        m.rest.heap.share(cell).expect("a live cell");
         let fault = AuditFault::Miscounted {
             cell,
             count: 2,
@@ -519,7 +532,7 @@ fn an_audit_names_the_cell_a_lost_release_left() {
 fn an_audit_finds_a_reference_to_a_freed_cell() {
     after_running(HOLDS_A_CELL, |m, ended| {
         let cell = held_by_a_global(m);
-        m.heap.release(cell).expect("the global's reference");
+        m.rest.heap.release(cell).expect("the global's reference");
         let fault = AuditFault::Dangling {
             holder: None,
             to: cell,
@@ -537,12 +550,12 @@ fn an_audit_finds_a_reference_to_a_freed_cell() {
 fn an_audit_finds_a_freed_cell_handed_out_again() {
     after_running(HOLDS_A_CELL, |m, ended| {
         let cell = held_by_a_global(m);
-        m.heap.release(cell).expect("the global's reference");
+        m.rest.heap.release(cell).expect("the global's reference");
         let data = vec![Value::NIL.bits(); 6];
-        let again = m.heap.make(Kind::Binary, &data).expect("room");
+        let again = m.rest.heap.make(Kind::Binary, &data).expect("room");
         assert_eq!(again, cell);
-        assert_eq!(m.heap.audit(m.globals.iter().copied()), Ok(()));
-        m.globals.push(Value::cell(again));
+        assert_eq!(m.rest.heap.audit(m.rest.globals.iter().copied()), Ok(()));
+        m.rest.globals.push(Value::cell(again));
         let fault = AuditFault::Miscounted {
             cell,
             count: 1,
@@ -561,9 +574,9 @@ fn an_audit_finds_a_freed_cell_handed_out_again() {
 #[test]
 fn an_audit_finds_cells_that_hold_each_other() {
     after_running(HOLDS_A_CELL, |m, ended| {
-        let a = m.heap.tuple(&[Value::NIL]).expect("room");
-        let b = m.heap.tuple(&[Value::cell(a)]).expect("room");
-        m.heap.data_mut(a)[0] = Value::cell(b).bits();
+        let a = m.rest.heap.tuple(&[Value::NIL]).expect("room");
+        let b = m.rest.heap.tuple(&[Value::cell(a)]).expect("room");
+        m.rest.heap.data_mut(a)[0] = Value::cell(b).bits();
         assert_eq!(
             m.finish(ended, Audit::AtEnd),
             Err(Stop::broken(Broken::CellsLeft { cells: 2 }))
@@ -577,13 +590,12 @@ fn an_audit_finds_cells_that_hold_each_other() {
 #[test]
 fn an_audit_is_told_of_every_reference_a_run_holds() {
     after_running("pub fn main() {\n\tNil\n}\n", |m, _| {
-        let cells: Vec<Cell> = (0..5)
-            .map(|_| m.heap.tuple(&[Value::NIL]).expect("room"))
+        let cells: Vec<Cell> = (0..6)
+            .map(|_| m.rest.heap.tuple(&[Value::NIL]).expect("room"))
             .collect();
-        let [reg, global, env, running, waiting] = cells[..] else {
-            panic!("five cells");
+        let [reg, passed, global, env, running, waiting] = cells[..] else {
+            panic!("six cells");
         };
-        let mut callers = Vec::new();
         let miscounted = |cell| {
             Err(Stop::broken(Broken::Audit(AuditFault::Miscounted {
                 cell,
@@ -591,26 +603,26 @@ fn an_audit_is_told_of_every_reference_a_run_holds() {
                 holders: 0,
             })))
         };
-        assert_eq!(m.audit(Value::NIL, &callers), miscounted(reg));
+        assert_eq!(m.audit(Value::NIL), miscounted(reg));
         m.open(1);
-        m.regs[0] = Value::cell(reg);
-        assert_eq!(m.audit(Value::NIL, &callers), miscounted(global));
-        m.globals.push(Value::cell(global));
-        assert_eq!(m.audit(Value::NIL, &callers), miscounted(env));
-        m.env = Some(env);
-        assert_eq!(m.audit(Value::NIL, &callers), miscounted(running));
-        assert_eq!(m.audit(Value::cell(running), &callers), miscounted(waiting));
-        let Some(Func::Ready(body)) = m.code.toplevels.first() else {
-            panic!("a toplevel");
-        };
-        callers.push(Frame {
-            body,
-            pc: 0,
-            base: 0,
-            ret_to: None,
-            env: Value::cell(waiting),
-        });
-        assert_eq!(m.audit(Value::cell(running), &callers), Ok(()));
+        m.stack[0] = Value::cell(reg);
+        assert_eq!(m.audit(Value::NIL), miscounted(passed));
+        m.passing.push(Value::cell(passed));
+        assert_eq!(m.audit(Value::NIL), miscounted(global));
+        m.rest.globals.push(Value::cell(global));
+        assert_eq!(m.audit(Value::NIL), miscounted(env));
+        m.rest.env = Some(env);
+        for (cell, next) in [(running, miscounted(waiting)), (waiting, Ok(()))] {
+            assert_eq!(m.audit(Value::NIL), miscounted(cell));
+            assert_eq!(m.audit(Value::cell(cell)), next, "as the result");
+            m.open_frame(Frame {
+                pc: 0,
+                below: Room(0),
+                dst: Reg(0),
+                env: Value::cell(cell),
+            });
+            assert_eq!(m.audit(Value::NIL), next, "as a frame's closure");
+        }
     });
 }
 
@@ -618,32 +630,36 @@ fn an_audit_is_told_of_every_reference_a_run_holds() {
 /// right, and stops the run at the first that finds one wrong.
 #[test]
 fn an_audit_instruction_stops_where_a_count_is_wrong() {
-    let mut instrs = an_array_in_r1().to_vec();
-    instrs.extend([
-        Instr::Audit,
+    let mut ins = an_array_in_r1().to_vec();
+    ins.extend([
+        Ins::Audit,
         mv(2, 1, false),
-        Instr::Audit,
-        Instr::Drop { reg: Reg(2) },
-        Instr::Audit,
-        Instr::Ret { src: Reg(1) },
+        Ins::Audit,
+        drop_of(2),
+        Ins::Audit,
+        ret(1),
     ]);
-    after_instrs(3, instrs, the_only_cell_left);
+    after(3, ins, the_only_cell_left);
 
     let shared_once_too_often = |heap: &mut Heap| {
         let cell = heap.tuple(&[Value::NIL]).expect("room");
         heap.share(cell).expect("a live cell");
         Some(Value::cell(cell))
     };
-    let body = vec![Instr::Audit, Instr::Ret { src: Reg(0) }];
-    after_instrs_given(1, body, shared_once_too_often, |_, got| {
-        let Err(Stop::BadProgram(why)) = got else {
-            panic!("the audit finds the count");
-        };
-        assert!(
-            why.to_string().ends_with("has a count of 2 and 1 holders"),
-            "{why}"
-        );
-    });
+    after_given(
+        1,
+        vec![Ins::Audit, ret(0)],
+        shared_once_too_often,
+        |_, got| {
+            let Err(Stop::BadProgram(why)) = got else {
+                panic!("the audit finds the count");
+            };
+            assert!(
+                why.to_string().ends_with("has a count of 2 and 1 holders"),
+                "{why}"
+            );
+        },
+    );
 }
 
 /// An instruction that takes another reference to a freed cell stops there,
@@ -655,37 +671,52 @@ fn a_share_of_a_freed_cell_stops_the_instruction() {
         heap.release(cell).expect("a live cell");
         Some(Value::cell(cell))
     };
+    let one = || Args::new(&[Reg(0)]).expect("room for one");
+    let held = || Shares::new(&[Reg(0)]).expect("room for one");
     let shares = [
         mv(1, 0, false),
-        Instr::Tuple {
-            dst: Reg(1),
-            elements: Box::new([Reg(0)]),
+        Ins::Tuple {
+            dst: Dst(Reg(1)),
+            elements: held(),
         },
-        Instr::Array {
-            dst: Reg(1),
-            elements: Box::new([Reg(0)]),
+        array_of(1, &[0]),
+        Ins::SetGlobal {
+            slot: GlobalSlot(0),
+            src: Shared(Reg(0)),
         },
-        Instr::SetGlobal {
-            slot: scarlet_ir::core_ir::GlobalSlot(0),
-            src: Reg(0),
+        Ins::Ctor {
+            dst: Dst(Reg(1)),
+            variant: Variant::new(SOME_VARIANT),
+            fields: Args::new(&[Reg(0)]).expect("room for one"),
         },
-        Instr::TailCallSelf {
-            args: Box::new([Arg {
-                reg: Reg(0),
-                moved: false,
-            }]),
+        Ins::Call {
+            dst: Dst(Reg(1)),
+            to: EntryPc(START),
+            args: one(),
+            needs: Room(2),
+            own: Room(2),
+        },
+        Ins::TailCall {
+            to: EntryPc(START),
+            args: one(),
+            needs: Room(2),
+            own: Room(2),
+        },
+        Ins::TailCallSelf {
+            to: EntryPc(START),
+            args: one(),
+            own: Room(2),
         },
     ];
     for share in shares {
         let what = format!("{share:?}");
-        let body = vec![share, Instr::Ret { src: Reg(1) }];
-        after_instrs_given(2, body, freed, |m, got| {
+        after_given(2, vec![share, ret(1)], freed, |m, got| {
             assert!(
                 matches!(got, Err(ref stop) if *stop == Stop::broken(Broken::DeadCell)),
                 "{what}"
             );
-            assert_eq!(m.heap.live(), 0, "{what}");
-            let written = m.regs.iter().skip(1).chain(&m.globals);
+            assert_eq!(m.rest.heap.live(), 0, "{what}");
+            let written = m.stack.iter().skip(1).chain(&m.rest.globals);
             let all_nil = written.copied().all(|v| v.bits() == Value::NIL.bits());
             assert!(all_nil, "{what} wrote the freed cell somewhere");
         });
@@ -696,25 +727,22 @@ fn a_share_of_a_freed_cell_stops_the_instruction() {
 /// and the end of the run frees it.
 #[test]
 fn a_big_int_constant_is_made_once() {
-    let big = |dst| Instr::BigInt {
-        dst: Reg(dst),
+    let big = |dst| Ins::BigInt {
+        dst: Dst(Reg(dst)),
         n: i64::MAX,
         id: scarlet_ir::core_ir::ConstId(3),
     };
-    let body = vec![
-        big(0),
-        big(1),
-        big(0),
-        Instr::Audit,
-        Instr::Ret { src: Reg(1) },
-    ];
-    after_instrs(2, body, |m, got| {
+    let body = vec![big(0), big(1), big(0), Ins::Audit, ret(1)];
+    after(2, body, |m, got| {
         let v = got.expect("the function returns");
-        assert_eq!(m.heap.made(), 1);
-        assert_eq!(m.heap.live(), 1);
-        assert_eq!(m.int_of(v).map(Int::big), Ok(i64::MAX.into()));
+        assert_eq!(m.rest.heap.made(), 1);
+        assert_eq!(m.rest.heap.live(), 1);
+        assert_eq!(
+            m.rest.int_of(v).map(crate::bigint::Int::big),
+            Ok(i64::MAX.into())
+        );
         assert_eq!(m.finish(Ended { last: v }, Audit::AtEnd), Ok(()));
-        assert_eq!(m.heap.live(), 0);
+        assert_eq!(m.rest.heap.live(), 0);
     });
 }
 
@@ -724,75 +752,148 @@ fn a_big_int_constant_is_made_once() {
 fn a_register_holding_a_freed_cell_stops_the_instruction_that_gives_it_up() {
     after_running(HOLDS_A_CELL, |m, _| {
         let cell = held_by_a_global(m);
-        m.heap.release(cell).expect("the global's reference");
+        m.rest.heap.release(cell).expect("the global's reference");
         let stale = Value::cell(cell);
         m.open(1);
-        m.regs[0] = stale;
+        m.stack[0] = stale;
         assert_eq!(m.set(0, Reg(0), Value::NIL), Err(DeadCell));
-        m.regs[0] = stale;
-        assert_eq!(m.leave(0), Err(DeadCell));
+        m.stack[0] = stale;
+        assert_eq!(m.leave(0, Room(1)), Err(DeadCell));
         assert_eq!(Stop::from(DeadCell), Stop::broken(Broken::DeadCell));
     });
 }
 
-/// Run `instrs` as a function of `regs` registers that takes nothing,
-/// and hand the machine and what the call gave to `check`.
-fn after_instrs(
-    regs: u32,
-    instrs: Vec<Instr>,
-    check: impl FnOnce(&mut Machine<'_, '_>, Result<Value, Stop>),
-) {
-    after_instrs_given(regs, instrs, |_| None, check);
+/// Where the functions these tests run start: past the `Halt`.
+const START: u32 = 1;
+
+/// Instruction `i` of the function a test runs.
+fn pc(i: u32) -> Pc {
+    Pc(START + i)
 }
 
-/// [`after_instrs`], for a function that takes in `r0` what `given`
-/// makes in the machine's heap, when it makes something. The machine has one
-/// global, which holds `Nil`.
-fn after_instrs_given(
-    regs: u32,
-    instrs: Vec<Instr>,
-    given: impl FnOnce(&mut Heap) -> Option<Value>,
-    check: impl FnOnce(&mut Machine<'_, '_>, Result<Value, Stop>),
-) {
+/// A constructor of no type in particular.
+const SOME_VARIANT: VariantRef = VariantRef {
+    type_id: scarlet_ir::TypeId(263),
+    variant_idx: 1,
+};
+
+/// A program of one function of `params` parameters and `needs` registers. It
+/// lives as long as the tests do, so that any machine may run it.
+fn function(params: usize, needs: u8, body: Vec<Ins<Reg>>) -> &'static Code {
     let result = scarlet_core::compile::compile_text("pub fn main() {\n\tNil\n}\n", None);
     assert!(result.success(), "{:?}", result.diagnostics());
     let program = result.into_runnable().expect("a clean compile is runnable");
-    let code = crate::code::load(&program, Audit::Never).expect("the program loads");
-    let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
-    let mut m = Machine::new(&code, &mut host);
-    m.globals.push(Value::NIL);
-    let args: Vec<Value> = given(&mut m.heap).into_iter().collect();
-    let body = Body {
-        name: "test.body".to_string(),
-        regs,
-        params: args.iter().map(|_| Reg(0)).collect(),
-        instrs: instrs.into_boxed_slice(),
-        carried: Box::new([]),
+    let halt = Ins::Halt { src: Taken(Reg(0)) };
+    let ins: Vec<_> = std::iter::once(halt).chain(body).collect();
+    let entry = || Entry {
+        name: "test.function".to_string(),
+        pc: EntryPc(START),
+        end: Pc(u32::try_from(ins.len()).expect("a short function")),
+        params,
+        needs: Room(needs),
     };
-    let got = m.call(&body, &args);
+    let funcs = std::iter::once(entry()).collect();
+    let toplevels = vec![entry()];
+    let wide = vec![Arg {
+        reg: Reg(0),
+        moved: true,
+    }];
+    Box::leak(Box::new(Code {
+        ins,
+        lists: Lists {
+            regs: Vec::new(),
+            args: vec![wide.into_boxed_slice()],
+        },
+        texts: vec![Box::from(*b"new")],
+        binaries: Vec::new(),
+        whys: vec![Why::Broken(Broken::NoArm)],
+        funcs,
+        toplevels,
+        main: None,
+        globals: 1,
+        types: program.types.clone(),
+        names: TiVec::new(),
+        abi: program.abi,
+    }))
+}
+
+/// Run `body` as a function of `needs` registers that takes nothing,
+/// and hand the machine and what the call gave to `check`.
+fn after(
+    needs: u8,
+    body: Vec<Ins<Reg>>,
+    check: impl FnOnce(&mut Machine<'_, '_>, Result<Value, Stop>),
+) {
+    after_given(needs, body, |_| None, check);
+}
+
+/// [`after`], for a function that takes in `r0` what `given` makes in the
+/// machine's heap, when it makes something. The machine has one global, which
+/// holds `Nil`.
+fn after_given(
+    needs: u8,
+    body: Vec<Ins<Reg>>,
+    given: impl FnOnce(&mut Heap) -> Option<Value>,
+    check: impl FnOnce(&mut Machine<'_, '_>, Result<Value, Stop>),
+) {
+    let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+    let code = function(1, needs, body);
+    let mut m = Machine::new(code, &mut host);
+    let args: Vec<Value> = given(&mut m.rest.heap).into_iter().collect();
+    let got = m.call(&code.toplevels[0], &args);
     check(&mut m, got);
 }
 
-/// `r1` gets a new array of one element.
-fn an_array_in_r1() -> [Instr; 2] {
-    [
-        Instr::Const {
-            dst: Reg(0),
-            value: Value::NIL,
-        },
-        Instr::Array {
-            dst: Reg(1),
-            elements: Box::new([Reg(0)]),
-        },
-    ]
+fn constant(dst: u8, value: Value) -> Ins<Reg> {
+    Ins::Const {
+        dst: Dst(Reg(dst)),
+        value,
+    }
 }
 
-fn mv(dst: u32, src: u32, moved: bool) -> Instr {
-    Instr::Move {
-        dst: Reg(dst),
-        src: Reg(src),
-        moved,
+fn int(dst: u8, n: i64) -> Ins<Reg> {
+    constant(dst, Value::int(n).expect("small"))
+}
+
+fn ret(src: u8) -> Ins<Reg> {
+    Ins::Ret {
+        src: Taken(Reg(src)),
+        own: Room(5),
     }
+}
+
+fn drop_of(r: u8) -> Ins<Reg> {
+    Ins::Drop { reg: Dead(Reg(r)) }
+}
+
+fn mv(dst: u8, src: u8, moved: bool) -> Ins<Reg> {
+    Ins::Move {
+        dst: Dst(Reg(dst)),
+        src: Arg {
+            reg: Reg(src),
+            moved,
+        },
+    }
+}
+
+fn array_of(dst: u8, elements: &[u8]) -> Ins<Reg> {
+    let elements: Vec<Reg> = elements.iter().copied().map(Reg).collect();
+    Ins::Array {
+        dst: Dst(Reg(dst)),
+        elements: Shares::new(&elements).expect("a few elements"),
+    }
+}
+
+fn len_of(dst: u8, src: u8) -> Ins<Reg> {
+    Ins::ArrayLen {
+        dst: Dst(Reg(dst)),
+        src: Src(Reg(src)),
+    }
+}
+
+/// `r1` gets a new array of one element.
+fn an_array_in_r1() -> [Ins<Reg>; 2] {
+    [constant(0, Value::NIL), array_of(1, &[0])]
 }
 
 /// The cell a finished call returned, after checking that the frame left
@@ -800,10 +901,11 @@ fn mv(dst: u32, src: u32, moved: bool) -> Instr {
 fn the_only_cell_left(m: &mut Machine<'_, '_>, got: Result<Value, Stop>) {
     let v = got.expect("the function returns");
     let cell = v.as_cell().expect("an array");
-    assert_eq!(m.heap.unique(cell), Ok(true));
-    assert!(m.regs.iter().all(|v| v.bits() == Value::NIL.bits()));
-    assert_eq!(m.release(v), Ok(()));
-    assert_eq!(m.heap.live(), 0);
+    assert_eq!(m.rest.heap.unique(cell), Ok(true));
+    assert!(m.stack.iter().all(|v| v.bits() == Value::NIL.bits()));
+    assert!(m.frames.is_empty());
+    assert_eq!(m.rest.release(v), Ok(()));
+    assert_eq!(m.rest.heap.live(), 0);
 }
 
 /// A `Move` that takes its source hands over the register's reference,
@@ -812,20 +914,22 @@ fn the_only_cell_left(m: &mut Machine<'_, '_>, got: Result<Value, Stop>) {
 #[test]
 fn a_move_that_takes_leaves_one_holder_and_one_that_shares_leaves_two() {
     let made = |moved: bool| {
-        let mut instrs = an_array_in_r1().to_vec();
-        instrs.extend([
+        let mut ins = an_array_in_r1().to_vec();
+        ins.extend([
             mv(2, 1, moved),
-            Instr::ArrayAppend {
-                dst: Reg(3),
-                rest: Reg(2),
-                back: Box::new([Reg(0)]),
-                moved: true,
+            Ins::ArrayAppend {
+                dst: Dst(Reg(3)),
+                rest: Arg {
+                    reg: Reg(2),
+                    moved: true,
+                },
+                back: Shares::new(&[Reg(0)]).expect("room for one"),
             },
-            Instr::Ret { src: Reg(3) },
+            ret(3),
         ]);
         let mut made = 0;
-        after_instrs(4, instrs, |m, got| {
-            made = m.heap.made();
+        after(5, ins, |m, got| {
+            made = m.rest.heap.made();
             the_only_cell_left(m, got);
         });
         made
@@ -838,23 +942,12 @@ fn a_move_that_takes_leaves_one_holder_and_one_that_shares_leaves_two() {
 #[test]
 fn a_register_a_move_took_from_is_empty() {
     let mut dropped = an_array_in_r1().to_vec();
-    dropped.extend([
-        mv(2, 1, true),
-        Instr::Drop { reg: Reg(1) },
-        Instr::Ret { src: Reg(2) },
-    ]);
-    after_instrs(3, dropped, the_only_cell_left);
+    dropped.extend([mv(2, 1, true), drop_of(1), ret(2)]);
+    after(5, dropped, the_only_cell_left);
 
     let mut read = an_array_in_r1().to_vec();
-    read.extend([
-        mv(2, 1, true),
-        Instr::ArrayLen {
-            dst: Reg(0),
-            src: Reg(1),
-        },
-        Instr::Ret { src: Reg(0) },
-    ]);
-    after_instrs(3, read, |_, got| {
+    read.extend([mv(2, 1, true), len_of(0, 1), ret(0)]);
+    after(5, read, |_, got| {
         let stopped = got.map(|v| v.bits());
         assert_eq!(stopped, Err(Stop::broken(Broken::NotAnArray(View::Nil))));
     });
@@ -864,13 +957,9 @@ fn a_register_a_move_took_from_is_empty() {
 /// same one holder, by a share and a release.
 #[test]
 fn a_move_that_shares_then_a_drop_leaves_one_holder() {
-    let mut instrs = an_array_in_r1().to_vec();
-    instrs.extend([
-        mv(2, 1, false),
-        Instr::Drop { reg: Reg(1) },
-        Instr::Ret { src: Reg(2) },
-    ]);
-    after_instrs(3, instrs, the_only_cell_left);
+    let mut ins = an_array_in_r1().to_vec();
+    ins.extend([mv(2, 1, false), drop_of(1), ret(2)]);
+    after(5, ins, the_only_cell_left);
 }
 
 /// A value that is not a cell has no reference to hand over, so a `Move`
@@ -878,30 +967,340 @@ fn a_move_that_shares_then_a_drop_leaves_one_holder() {
 #[test]
 fn a_move_of_a_value_that_is_not_a_cell_copies_it() {
     for moved in [true, false] {
-        let instrs = vec![
-            Instr::Const {
-                dst: Reg(0),
-                value: Value::bool(true),
-            },
-            mv(1, 0, moved),
-            Instr::Ret { src: Reg(1) },
-        ];
-        after_instrs(2, instrs, |m, got| {
+        let ins = vec![constant(0, Value::bool(true)), mv(1, 0, moved), ret(1)];
+        after(5, ins, |m, got| {
             let bits = got.map(|v| v.bits());
             assert_eq!(bits, Ok(Value::bool(true).bits()));
-            assert_eq!(m.heap.made(), 0);
+            assert_eq!(m.rest.heap.made(), 0);
         });
     }
 }
 
-/// Two values that are never live at once may share a register, so a
-/// `Move` can name one register twice. Either way the value stays.
+/// The loader leaves out a `Move` from a register to itself. One that is run
+/// all the same leaves the value where it is, whichever way it is marked.
 #[test]
 fn a_move_onto_its_own_register_keeps_the_value() {
     for moved in [true, false] {
-        let mut instrs = an_array_in_r1().to_vec();
-        instrs.extend([mv(1, 1, moved), Instr::Ret { src: Reg(1) }]);
-        after_instrs(2, instrs, the_only_cell_left);
+        let mut ins = an_array_in_r1().to_vec();
+        ins.extend([mv(1, 1, moved), ret(1)]);
+        after(5, ins, the_only_cell_left);
+    }
+}
+
+/// An instruction that names a string or a binary the program does not have
+/// stops the run. It does not take the one for empty, or a test of it for one
+/// that does not match.
+#[test]
+fn a_constant_that_is_not_there_stops_the_run() {
+    let (src, to) = (Src(Reg(0)), Pc(START));
+    let (text, bits) = (TextId(1), BinaryId(0));
+    let named = [
+        Ins::Str {
+            dst: Dst(Reg(0)),
+            text,
+        },
+        Ins::BinaryConst {
+            dst: Dst(Reg(0)),
+            bits,
+        },
+        Ins::JumpUnlessStr { src, text, to },
+        Ins::JumpUnlessBinary { src, bits, to },
+    ];
+    for ins in named {
+        after(5, vec![int(0, 1), ins, ret(0)], |_, got| {
+            assert_eq!(got.err(), Some(Stop::broken(Broken::NoPlace)), "{ins:?}");
+        });
+    }
+}
+
+/// A constructor over a cell kept for it takes that cell when it has the right
+/// number of fields, whether it holds them itself or in a list. Over anything
+/// else it makes a new one and gives up what was there.
+#[test]
+fn a_constructor_takes_a_kept_cell_that_fits() {
+    let variant = Variant::new(SOME_VARIANT);
+    let few = Ins::CtorOver {
+        dst: Dst(Reg(1)),
+        variant,
+        fields: Args::new(&[Reg(2)]).expect("room for one"),
+        reuse: Over(Reg(0)),
+    };
+    let wide = Ins::CtorOverWide {
+        dst: Dst(Reg(1)),
+        variant,
+        fields: crate::code::ArgList(0),
+        reuse: Over(Reg(3)),
+    };
+    let holding = |fields: usize| {
+        move |heap: &mut Heap| {
+            let fields = vec![Value::bool(true); fields];
+            Some(Value::cell(heap.ctor(SOME_VARIANT, &fields).expect("room")))
+        }
+    };
+    for (fields, reused) in [(1, 1), (2, 0)] {
+        let keep = Ins::DropReuse { reg: Kept(Reg(0)) };
+        let body = vec![int(2, 7), keep, few, Ins::Audit, ret(1)];
+        after_given(5, body, holding(fields), |m, got| {
+            assert_eq!(m.rest.heap.reused(), reused, "{fields} fields");
+            the_only_cell_left(m, got);
+        });
+        // The list names `r0`, so the kept cell is moved out of the way.
+        let keep = Ins::DropReuse { reg: Kept(Reg(3)) };
+        let body = vec![mv(3, 0, true), int(0, 7), keep, wide, Ins::Audit, ret(1)];
+        after_given(5, body, holding(fields), |m, got| {
+            assert_eq!(m.rest.heap.reused(), reused, "{fields} fields");
+            the_only_cell_left(m, got);
+        });
+    }
+}
+
+/// The wide forms of the calls do what the others do, with their arguments in
+/// a list. Here a function calls itself, or goes round, once, passing the
+/// array it was given, and returns what it was passed the second time.
+#[test]
+fn a_call_with_its_arguments_in_a_list_passes_them() {
+    let list = crate::code::ArgList(0);
+    let (to, own) = (EntryPc(START), Room(5));
+    // A first run has `Nil` in `r1`, and a second has been told apart by the
+    // global it finds set.
+    let first = [
+        Ins::GetGlobal {
+            dst: Dst(Reg(1)),
+            slot: GlobalSlot(0),
+        },
+        Ins::JumpUnlessInt {
+            src: Src(Reg(1)),
+            n: 1,
+            to: pc(3),
+        },
+        ret(0),
+        int(1, 1),
+        Ins::SetGlobal {
+            slot: GlobalSlot(0),
+            src: Shared(Reg(1)),
+        },
+    ];
+    let calls = [
+        Ins::CallWide {
+            dst: Dst(Reg(2)),
+            to,
+            args: list,
+            needs: own,
+            own,
+        },
+        Ins::CallSelfWide {
+            dst: Dst(Reg(2)),
+            to,
+            args: list,
+            own,
+        },
+        Ins::TailCallWide {
+            to,
+            args: list,
+            needs: own,
+            own,
+        },
+        Ins::TailCallSelfWide {
+            to,
+            args: list,
+            own,
+        },
+    ];
+    for call in calls {
+        let body: Vec<_> = first
+            .iter()
+            .copied()
+            .chain([call, Ins::Audit, ret(2)])
+            .collect();
+        let array = |heap: &mut Heap| {
+            let array = array::from_values(heap, &[Value::NIL]).expect("room");
+            Some(Value::cell(array))
+        };
+        after_given(5, body, array, the_only_cell_left);
+    }
+}
+
+/// A call of a value that is not a function, is one the program does not have,
+/// or takes another number of arguments stops and says so.
+#[test]
+fn a_call_of_a_value_that_cannot_be_called_so_stops() {
+    let (dst, callee, own) = (Dst(Reg(2)), Shared(Reg(1)), Room(5));
+    let args = |n: u8| Args::new(&vec![Reg(0); usize::from(n)]).expect("a few");
+    let call = |f: Value, n: u8| {
+        let calls = [
+            Ins::CallValue {
+                dst,
+                callee,
+                args: args(n),
+                own,
+            },
+            Ins::TailCallValue {
+                callee,
+                args: args(n),
+                own,
+            },
+        ];
+        let stops = calls.map(|call| {
+            let mut stopped = None;
+            after(5, vec![constant(1, f), call, ret(2)], |_, got| {
+                stopped = got.map(|v| v.bits()).err();
+            });
+            stopped.expect("the call stops")
+        });
+        let [by_call, by_tail_call] = stops;
+        assert_eq!(by_call, by_tail_call);
+        by_call
+    };
+    let arity = |got| {
+        Stop::broken(Broken::CallArity {
+            func: "test.function".to_string(),
+            got,
+            want: 1,
+        })
+    };
+    let this = Value::func(FuncIdx(0));
+    assert_eq!(call(this, 0), arity(0));
+    assert_eq!(call(this, 3), arity(3));
+    let missing = FuncIdx(9);
+    let stop = Stop::missing(Missing::NoFunc(missing));
+    assert_eq!(call(Value::func(missing), 1), stop);
+    let stop = Stop::broken(Broken::NotAFunction(View::Bool(true)));
+    assert_eq!(call(Value::bool(true), 1), stop);
+}
+
+/// A tail call to another function gives up the closure the frame ran as, and
+/// one to the same function goes on as it.
+#[test]
+fn a_tail_call_by_name_gives_up_the_closure() {
+    let (to, own) = (EntryPc(START), Room(5));
+    let args = Args::new(&[]).expect("none");
+    let list = crate::code::ArgList(1);
+    let calls = [
+        (
+            Ins::TailCall {
+                to,
+                args,
+                needs: own,
+                own,
+            },
+            false,
+        ),
+        (
+            Ins::TailCallWide {
+                to,
+                args: list,
+                needs: own,
+                own,
+            },
+            false,
+        ),
+        (Ins::TailCallSelf { to, args, own }, true),
+        (
+            Ins::TailCallSelfWide {
+                to,
+                args: list,
+                own,
+            },
+            true,
+        ),
+    ];
+    for (call, keeps) in calls {
+        let body = vec![
+            Ins::GetGlobal {
+                dst: Dst(Reg(1)),
+                slot: GlobalSlot(0),
+            },
+            Ins::JumpUnlessInt {
+                src: Src(Reg(1)),
+                n: 1,
+                to: pc(4),
+            },
+            Ins::GetSelf {
+                dst: Dst(Reg(2)),
+                this: FuncIdx(0),
+            },
+            ret(2),
+            int(1, 1),
+            Ins::SetGlobal {
+                slot: GlobalSlot(0),
+                src: Shared(Reg(1)),
+            },
+            call,
+        ];
+        let code = function(0, 5, body);
+        let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+        let mut m = Machine::new(code, &mut host);
+        let captured = [Value::NIL];
+        let closure = m.rest.heap.closure(FuncIdx(0), &captured).expect("room");
+        m.open(5);
+        m.open_frame(Frame {
+            pc: 0,
+            below: Room(0),
+            dst: Reg(0),
+            env: Value::cell(closure),
+        });
+        let v = m.steps(START as usize).expect("it returns");
+        assert_eq!(v.as_cell(), keeps.then_some(closure), "{call:?}");
+        assert_eq!(m.rest.heap.live(), usize::from(keeps), "{call:?}");
+        assert_eq!(m.rest.release(v), Ok(()));
+        assert_eq!(m.rest.heap.live(), 0);
+    }
+}
+
+/// A tail call leaves nothing in the frame's registers but what it passes: a
+/// register the function wrote before it reads as `Nil` after.
+#[test]
+fn a_tail_call_empties_the_registers_it_does_not_pass() {
+    let (to, own) = (EntryPc(START), Room(5));
+    let none = || Args::new(&[]).expect("none");
+    let one = || Args::new(&[Reg(0)]).expect("room for one");
+    let calls = [
+        Ins::TailCallSelf {
+            to,
+            args: one(),
+            own,
+        },
+        Ins::TailCallSelf {
+            to,
+            args: none(),
+            own,
+        },
+        Ins::TailCall {
+            to,
+            args: one(),
+            needs: own,
+            own,
+        },
+        Ins::TailCallSelfWide {
+            to,
+            args: crate::code::ArgList(0),
+            own,
+        },
+    ];
+    for call in calls {
+        let body = vec![
+            Ins::GetGlobal {
+                dst: Dst(Reg(1)),
+                slot: GlobalSlot(0),
+            },
+            Ins::JumpUnlessInt {
+                src: Src(Reg(1)),
+                n: 1,
+                to: pc(3),
+            },
+            ret(4),
+            int(1, 1),
+            Ins::SetGlobal {
+                slot: GlobalSlot(0),
+                src: Shared(Reg(1)),
+            },
+            int(4, 9),
+            call,
+        ];
+        after(5, body, |m, got| {
+            assert_eq!(got.map(|v| v.bits()), Ok(Value::NIL.bits()), "{call:?}");
+            assert!(m.stack.iter().all(|v| v.bits() == Value::NIL.bits()));
+        });
     }
 }
 
@@ -909,43 +1308,42 @@ fn a_move_onto_its_own_register_keeps_the_value() {
 /// in `r1` at `index`. It returns the array the write made, from `r2`.
 /// When the write misses it returns `after_miss` instead, and `r2` then
 /// still holds the 7 it started with.
-fn a_write(index: i64, moved: bool, value_moved: bool, after_miss: u32) -> Vec<Instr> {
-    let int = |dst: u32, n: i64| Instr::Const {
-        dst: Reg(dst),
-        value: Value::int(n).expect("small"),
-    };
-    let mut instrs = an_array_in_r1().to_vec();
-    instrs.extend([
+fn a_write(index: i64, moved: bool, value_moved: bool, after_miss: u8) -> Vec<Ins<Reg>> {
+    let mut ins = an_array_in_r1().to_vec();
+    ins.extend([
         int(2, 7),
         int(3, index),
-        Instr::Str {
-            dst: Reg(4),
-            text: Box::from(*b"new"),
+        Ins::Str {
+            dst: Dst(Reg(4)),
+            text: TextId(0),
         },
-        Instr::ArraySet {
-            dst: Reg(2),
-            src: Reg(1),
-            index: Reg(3),
-            value: Arg {
-                reg: Reg(4),
-                moved: value_moved,
-            },
-            moved,
-            miss: 7,
-        },
-        Instr::Ret { src: Reg(2) },
-        Instr::Ret {
-            src: Reg(after_miss),
-        },
+        write(3, 4, moved, value_moved, 7),
+        ret(2),
+        ret(after_miss),
     ]);
-    instrs
+    ins
+}
+
+/// `r2` gets the array in `r1` with the value in `value` at the index in
+/// `index`, or the run continues at `miss`.
+fn write(index: u8, value: u8, moved: bool, value_moved: bool, miss: u32) -> Ins<Reg> {
+    Ins::ArraySet {
+        dst: Hit(Reg(2)),
+        src: Arg { reg: Reg(1), moved },
+        index: Src(Reg(index)),
+        value: Arg {
+            reg: Reg(value),
+            moved: value_moved,
+        },
+        miss: pc(miss),
+    }
 }
 
 /// Element 0 of the array `v`, as text when it is a string.
 fn first_text(m: &Machine<'_, '_>, v: Value) -> Option<String> {
-    let first = array::get(&m.heap, v.as_cell()?, 0)?.as_cell()?;
+    let first = array::get(&m.rest.heap, v.as_cell()?, 0)?.as_cell()?;
     let mut out = Vec::new();
-    m.heap.read_string(first, &mut out);
+    m.rest.heap.read_string(first, &mut out);
     String::from_utf8(out).ok()
 }
 
@@ -955,8 +1353,8 @@ fn first_text(m: &Machine<'_, '_>, v: Value) -> Option<String> {
 #[test]
 fn a_write_that_takes_an_array_with_one_holder_makes_no_cell() {
     for value_moved in [true, false] {
-        after_instrs(5, a_write(0, true, value_moved, 0), |m, got| {
-            assert_eq!(m.heap.made(), 3);
+        after(5, a_write(0, true, value_moved, 0), |m, got| {
+            assert_eq!(m.rest.heap.made(), 3);
             let v = *got.as_ref().expect("the function returns");
             assert_eq!(first_text(m, v).as_deref(), Some("new"));
             the_only_cell_left(m, got);
@@ -968,18 +1366,18 @@ fn a_write_that_takes_an_array_with_one_holder_makes_no_cell() {
 /// copies the root and the leaf. The register's array is as it was.
 #[test]
 fn a_write_that_shares_its_array_copies_and_leaves_the_old_one_alone() {
-    after_instrs(5, a_write(0, false, true, 0), |m, got| {
-        assert_eq!(m.heap.made(), 5);
+    after(5, a_write(0, false, true, 0), |m, got| {
+        assert_eq!(m.rest.heap.made(), 5);
         let v = *got.as_ref().expect("the function returns");
         assert_eq!(first_text(m, v).as_deref(), Some("new"));
         the_only_cell_left(m, got);
     });
     // The same write, with the old array kept to look at afterwards.
     let mut kept = a_write(0, false, true, 0);
-    kept[6] = Instr::Ret { src: Reg(1) };
-    after_instrs(5, kept, |m, got| {
+    kept[6] = ret(1);
+    after(5, kept, |m, got| {
         let v = *got.as_ref().expect("the function returns");
-        let first = v.as_cell().and_then(|a| array::get(&m.heap, a, 0));
+        let first = v.as_cell().and_then(|a| array::get(&m.rest.heap, a, 0));
         assert_eq!(first.map(|x| x.bits()), Some(Value::NIL.bits()));
         the_only_cell_left(m, got);
     });
@@ -994,22 +1392,23 @@ fn a_write_that_shares_its_array_copies_and_leaves_the_old_one_alone() {
 fn a_write_that_misses_takes_nothing_and_writes_nothing() {
     for index in [1, -1, 1 << 40] {
         for moved in [true, false] {
-            after_instrs(5, a_write(index, moved, moved, 1), |m, got| {
-                assert_eq!(m.heap.made(), 3, "index {index}");
+            after(5, a_write(index, moved, moved, 1), |m, got| {
+                assert_eq!(m.rest.heap.made(), 3, "index {index}");
                 let v = *got.as_ref().expect("the function returns");
-                let first = v.as_cell().and_then(|a| array::get(&m.heap, a, 0));
+                let first = v.as_cell().and_then(|a| array::get(&m.rest.heap, a, 0));
                 assert_eq!(first.map(|x| x.bits()), Some(Value::NIL.bits()));
                 the_only_cell_left(m, got);
             });
-            after_instrs(5, a_write(index, moved, moved, 4), |m, got| {
+            after(5, a_write(index, moved, moved, 4), |m, got| {
                 let v = *got.as_ref().expect("the function returns");
-                assert!(v.as_cell().is_some_and(|c| m.heap.string_is(c, b"new")));
+                let is_new = |c| m.rest.heap.string_is(c, b"new");
+                assert!(v.as_cell().is_some_and(is_new));
                 the_only_cell_left(m, got);
             });
-            after_instrs(5, a_write(index, moved, moved, 2), |m, got| {
+            after(5, a_write(index, moved, moved, 2), |m, got| {
                 let bits = got.map(|v| v.bits());
                 assert_eq!(bits, Ok(Value::int(7).expect("small").bits()));
-                assert_eq!(m.heap.live(), 0);
+                assert_eq!(m.rest.heap.live(), 0);
             });
         }
     }
@@ -1020,88 +1419,64 @@ fn a_write_that_misses_takes_nothing_and_writes_nothing() {
 /// holders, and puts the old array in a copy.
 #[test]
 fn a_write_of_the_array_into_itself_holds_the_old_array() {
-    let mut instrs = an_array_in_r1().to_vec();
-    instrs.extend([
-        Instr::Const {
-            dst: Reg(3),
-            value: Value::int(0).expect("small"),
-        },
-        Instr::ArraySet {
-            dst: Reg(2),
-            src: Reg(1),
-            index: Reg(3),
-            value: Arg {
-                reg: Reg(1),
-                moved: true,
-            },
-            moved: false,
-            miss: 5,
-        },
-        Instr::Ret { src: Reg(2) },
-        Instr::Bad { why: Broken::NoArm },
+    let mut ins = an_array_in_r1().to_vec();
+    ins.extend([
+        int(3, 0),
+        write(3, 1, false, true, 5),
+        ret(2),
+        Ins::Bad { why: WhyId(0) },
     ]);
-    after_instrs(4, instrs, |m, got| {
+    after(5, ins, |m, got| {
         let v = *got.as_ref().expect("the function returns");
         let outer = v.as_cell().expect("an array");
-        let inner = array::get(&m.heap, outer, 0).and_then(|x| x.as_cell());
+        let inner = array::get(&m.rest.heap, outer, 0).and_then(|x| x.as_cell());
         let inner = inner.expect("the old array, as the element");
         assert_ne!(inner, outer);
-        assert_eq!(m.heap.unique(inner), Ok(true));
-        let first = array::get(&m.heap, inner, 0).map(|x| x.bits());
+        assert_eq!(m.rest.heap.unique(inner), Ok(true));
+        let first = array::get(&m.rest.heap, inner, 0).map(|x| x.bits());
         assert_eq!(first, Some(Value::NIL.bits()));
         the_only_cell_left(m, got);
     });
 }
 
 /// A function that writes -1 into the range `2..6` in `r1` at `index`,
-/// and returns what is in `ret`: `r2` for the array the write made, or
+/// and returns what is in `from`: `r2` for the array the write made, or
 /// `r1` for the range. A miss returns the range.
-fn a_write_to_a_range(index: i64, moved: bool, ret: u32) -> Vec<Instr> {
-    let int = |dst: u32, n: i64| Instr::Const {
-        dst: Reg(dst),
-        value: Value::int(n).expect("small"),
-    };
+fn a_write_to_a_range(index: i64, moved: bool, from: u8) -> Vec<Ins<Reg>> {
     vec![
         int(0, 2),
         int(4, 6),
-        Instr::Range {
-            dst: Reg(1),
-            start: Reg(0),
-            end: Reg(4),
+        Ins::Range {
+            dst: Dst(Reg(1)),
+            start: Src(Reg(0)),
+            end: Src(Reg(4)),
         },
         int(3, index),
         int(4, -1),
-        Instr::ArraySet {
-            dst: Reg(2),
-            src: Reg(1),
-            index: Reg(3),
-            value: Arg {
-                reg: Reg(4),
-                moved: false,
-            },
-            moved,
-            miss: 7,
-        },
-        Instr::Ret { src: Reg(ret) },
-        Instr::Ret { src: Reg(1) },
+        write(3, 4, moved, false, 7),
+        ret(from),
+        ret(1),
     ]
 }
 
 /// The Ints in the array `v`, or none when it is not a tree.
 fn tree_ints(m: &Machine<'_, '_>, v: Value) -> Option<Vec<i64>> {
-    let Ok(Seq::Tree(a)) = m.seq(v) else {
+    let Ok(Seq::Tree(a)) = m.rest.seq(v) else {
         return None;
     };
     let int = |x: Value| match x.view() {
         View::Int(n) => Some(n),
         _ => None,
     };
-    array::elements(&m.heap, a).into_iter().map(int).collect()
+    array::elements(&m.rest.heap, a)
+        .into_iter()
+        .map(int)
+        .collect()
 }
 
 /// The two ends of the range `v`, or none when it is not a range.
 fn range_ends(m: &Machine<'_, '_>, v: Value) -> Option<(i64, i64)> {
-    match m.seq(v) {
+    match m.rest.seq(v) {
         Ok(Seq::Range { start, end }) => Some((start, end)),
         Ok(Seq::Tree(_)) | Err(_) => None,
     }
@@ -1115,22 +1490,22 @@ fn range_ends(m: &Machine<'_, '_>, v: Value) -> Option<(i64, i64)> {
 #[test]
 fn a_write_to_a_range_builds_a_tree_and_leaves_the_range_alone() {
     for moved in [true, false] {
-        after_instrs(5, a_write_to_a_range(1, moved, 2), |m, got| {
-            assert_eq!(m.heap.made(), 3, "moved {moved}");
+        after(5, a_write_to_a_range(1, moved, 2), |m, got| {
+            assert_eq!(m.rest.heap.made(), 3, "moved {moved}");
             let v = *got.as_ref().expect("the function returns");
             assert_eq!(tree_ints(m, v), Some(vec![2, -1, 4, 5]));
             the_only_cell_left(m, got);
         });
         for index in [4, -1] {
-            after_instrs(5, a_write_to_a_range(index, moved, 2), |m, got| {
-                assert_eq!(m.heap.made(), 1, "index {index}");
+            after(5, a_write_to_a_range(index, moved, 2), |m, got| {
+                assert_eq!(m.rest.heap.made(), 1, "index {index}");
                 let v = *got.as_ref().expect("the function returns");
                 assert_eq!(range_ends(m, v), Some((2, 6)));
                 the_only_cell_left(m, got);
             });
         }
     }
-    after_instrs(5, a_write_to_a_range(1, false, 1), |m, got| {
+    after(5, a_write_to_a_range(1, false, 1), |m, got| {
         let v = *got.as_ref().expect("the function returns");
         assert_eq!(range_ends(m, v), Some((2, 6)));
         the_only_cell_left(m, got);
@@ -1142,21 +1517,15 @@ fn a_write_to_a_range_builds_a_tree_and_leaves_the_range_alone() {
 #[test]
 fn a_write_to_what_is_not_an_array_or_at_what_is_not_an_int_stops() {
     let mut not_an_array = a_write(0, true, true, 0);
-    not_an_array[1] = Instr::Const {
-        dst: Reg(1),
-        value: Value::bool(true),
-    };
-    after_instrs(5, not_an_array, |_, got| {
+    not_an_array[1] = constant(1, Value::bool(true));
+    after(5, not_an_array, |_, got| {
         let stopped = got.map(|v| v.bits());
         let want = Broken::NotAnArray(View::Bool(true));
         assert_eq!(stopped, Err(Stop::broken(want)));
     });
     let mut not_an_int = a_write(0, true, true, 0);
-    not_an_int[3] = Instr::Const {
-        dst: Reg(3),
-        value: Value::bool(false),
-    };
-    after_instrs(5, not_an_int, |_, got| {
+    not_an_int[3] = constant(3, Value::bool(false));
+    after(5, not_an_int, |_, got| {
         let stopped = got.map(|v| v.bits());
         let want = Broken::Position(View::Bool(false));
         assert_eq!(stopped, Err(Stop::broken(want)));
@@ -1167,24 +1536,12 @@ fn a_write_to_what_is_not_an_array_or_at_what_is_not_an_int_stops() {
 /// at it stops the run as a wrong count, at the write.
 #[test]
 fn a_write_through_a_freed_node_stops_the_run_as_a_dead_cell() {
-    let instrs = vec![
-        Instr::Const {
-            dst: Reg(1),
-            value: Value::int(0).expect("small"),
-        },
-        Instr::ArraySet {
-            dst: Reg(2),
-            src: Reg(0),
-            index: Reg(1),
-            value: Arg {
-                reg: Reg(1),
-                moved: false,
-            },
-            moved: true,
-            miss: 3,
-        },
-        Instr::Ret { src: Reg(2) },
-        Instr::Ret { src: Reg(0) },
+    let ins = vec![
+        mv(1, 0, true),
+        int(3, 0),
+        write(3, 3, true, false, 4),
+        ret(2),
+        ret(1),
     ];
     let with_a_freed_leaf = |heap: &mut Heap| {
         let array = array::from_values(heap, &[Value::NIL, Value::NIL]).expect("room");
@@ -1194,7 +1551,7 @@ fn a_write_through_a_freed_node_stops_the_run_as_a_dead_cell() {
         heap.release(leaf).expect("a live cell");
         Some(Value::cell(array))
     };
-    after_instrs_given(3, instrs, with_a_freed_leaf, |_, got| {
+    after_given(5, ins, with_a_freed_leaf, |_, got| {
         let stopped = got.map(|v| v.bits());
         assert_eq!(stopped, Err(Stop::broken(Broken::DeadCell)));
     });
@@ -1206,56 +1563,57 @@ fn a_write_through_a_freed_node_stops_the_run_as_a_dead_cell() {
 fn an_owned_push_onto_a_freed_array_stops_the_run_as_a_dead_cell() {
     after_running(HOLDS_A_CELL, |m, _| {
         let cell = held_by_a_global(m);
-        m.heap.release(cell).expect("the global's reference");
-        let pushed = array::push_owned(&mut m.heap, cell, Value::NIL, End::Back);
+        m.rest.heap.release(cell).expect("the global's reference");
+        let pushed = array::push_owned(&mut m.rest.heap, cell, Value::NIL, End::Back);
         assert_eq!(pushed.map_err(fault), Err(Stop::broken(Broken::DeadCell)));
         assert_eq!(fault(Fault::Full), Stop::HeapFull);
+    });
+}
+
+/// A run that goes past the code's end, or whose last frame returns to
+/// nothing, stops and says so.
+#[test]
+fn a_run_that_leaves_the_code_stops() {
+    let body = vec![Ins::Jump { to: pc(1) }];
+    after(5, body, |_, got| {
+        let stopped = got.map(|v| v.bits());
+        let func = "test.function".to_string();
+        assert_eq!(stopped, Err(Stop::broken(Broken::RanPastEnd { func })));
+    });
+    on_a_machine(|m| {
+        let got = m.steps(START as usize).map(|v| v.bits());
+        assert_eq!(got, Err(Stop::broken(Broken::NoCaller)));
     });
 }
 
 /// Run `check` on a machine that has run nothing, to call small functions on
 /// by hand.
 fn on_a_machine(check: impl FnOnce(&mut Machine<'_, '_>)) {
-    after_instrs(1, vec![Instr::Ret { src: Reg(0) }], |m, got| {
+    after(5, vec![ret(0)], |m, got| {
         assert_eq!(got.map(|v| v.bits()), Ok(Value::NIL.bits()));
         check(m);
     });
 }
 
-/// `instrs` as a function that takes its arguments in `r0` and `r1` and has
-/// `r2` besides. It lives as long as the test does, so that any machine may
-/// call it.
-fn function(instrs: Vec<Instr>) -> &'static Body {
-    Box::leak(Box::new(Body {
-        name: "test.operator".to_string(),
-        regs: 3,
-        params: Box::new([Reg(0), Reg(1)]),
-        instrs: instrs.into_boxed_slice(),
-        carried: Box::new([]),
-    }))
+/// A function that does `ins` and returns what it left in `dst`.
+fn stores(ins: Ins<Reg>, dst: u8) -> &'static Code {
+    function(2, 5, vec![ins, ret(dst)])
 }
 
-/// A function that does `instr` and returns what it left in `dst`.
-fn stores(instr: Instr, dst: u32) -> &'static Body {
-    function(vec![instr, Instr::Ret { src: Reg(dst) }])
-}
-
-/// A function that returns whether `instr` fell through, for an instruction
+/// A function that returns whether `ins` fell through, for an instruction
 /// that jumps to 3 or does not.
-fn falls_through(instr: Instr) -> &'static Body {
-    let answer = |b: bool| Instr::Const {
-        dst: Reg(2),
-        value: Value::bool(b),
-    };
-    let ret = || Instr::Ret { src: Reg(2) };
-    function(vec![instr, answer(true), ret(), answer(false), ret()])
+fn falls_through(ins: Ins<Reg>) -> &'static Code {
+    let answer = |b: bool| constant(2, Value::bool(b));
+    function(2, 5, vec![ins, answer(true), ret(2), answer(false), ret(2)])
 }
 
-/// Call `body` and empty the registers again. A run that stops leaves its
-/// frame where it was.
-fn call(m: &mut Machine<'_, '_>, body: &'static Body, args: &[Value]) -> Result<Value, Stop> {
-    let got = m.call(body, args);
-    assert_eq!(m.leave(0), Ok(()));
+/// Call `code`'s function and empty the registers again. A run that stops
+/// leaves its frames where they were.
+fn call(m: &mut Machine<'_, '_>, code: &'static Code, args: &[Value]) -> Result<Value, Stop> {
+    m.rest.code = code;
+    let got = m.call(&code.toplevels[0], args);
+    m.frames.clear();
+    assert_eq!(m.leave(0, Room(5)), Ok(()));
     got
 }
 
@@ -1273,44 +1631,47 @@ fn is(m: &mut Machine<'_, '_>, got: Result<Value, Stop>, want: &Answer, what: &d
         Answer::Int(n) => {
             let small = n.to_i64().and_then(Value::int).is_some();
             assert_eq!(v.small_int().is_some(), small, "{}: its form", what());
-            let number = int::read(&m.heap, v).expect("an Int").big();
+            let number = int::read(&m.rest.heap, v).expect("an Int").big();
             assert_eq!(number, *n, "{}", what());
         }
         Answer::Bits(bits) => assert_eq!(v.bits(), *bits, "{}: {v:?}", what()),
     }
-    assert_eq!(m.release(v), Ok(()));
-    assert_eq!(m.heap.live(), 0, "{}: cells left", what());
+    assert_eq!(m.rest.release(v), Ok(()));
+    assert_eq!(m.rest.heap.live(), 0, "{}: cells left", what());
 }
 
 /// Every instruction in the list of a family that writes the register `dst`,
 /// with its operator. A comparison comes with the jump it becomes too.
 macro_rules! of_pairs {
     ([] $($name:ident $op:path),*) => {
-        |dst: u32| vec![$((
-            Instr::$name(Pair { dst: Reg(dst), a: Reg(0), b: Reg(1) }),
+        |dst: u8| vec![$((
+            Ins::$name { dst: Dst(Reg(dst)), a: Src(Reg(0)), b: Src(Reg(1)) },
             $op,
         )),*]
     };
 }
 macro_rules! with_constant {
     ([] $($name:ident $op:path),*) => {
-        |k, dst: u32| vec![$((Instr::$name(WithK { dst: Reg(dst), a: Reg(0), k }), $op)),*]
+        |k, dst: u8| vec![$((
+            Ins::$name { dst: Dst(Reg(dst)), a: Src(Reg(0)), k },
+            $op,
+        )),*]
     };
 }
 macro_rules! compare_pairs {
     ([] $($name:ident $jump:ident $op:path),*) => {
-        |dst: u32| vec![$((
-            Instr::$name(Pair { dst: Reg(dst), a: Reg(0), b: Reg(1) }),
-            Instr::$jump(JumpPair { a: Reg(0), b: Reg(1), to: 3 }),
+        |dst: u8| vec![$((
+            Ins::$name { dst: Dst(Reg(dst)), a: Src(Reg(0)), b: Src(Reg(1)) },
+            Ins::$jump { a: Src(Reg(0)), b: Src(Reg(1)), to: pc(3) },
             $op,
         )),*]
     };
 }
 macro_rules! compare_with_constant {
     ([] $($name:ident $jump:ident $op:path),*) => {
-        |k, dst: u32| vec![$((
-            Instr::$name(WithK { dst: Reg(dst), a: Reg(0), k }),
-            Instr::$jump(JumpWithK { a: Reg(0), k, to: 3 }),
+        |k, dst: u8| vec![$((
+            Ins::$name { dst: Dst(Reg(dst)), a: Src(Reg(0)), k },
+            Ins::$jump { a: Src(Reg(0)), k, to: pc(3) },
             $op,
         )),*]
     };
@@ -1318,8 +1679,8 @@ macro_rules! compare_with_constant {
 
 /// The registers an instruction may write: both its operands' and another,
 /// or its one operand's and another.
-const OVER_TWO: [u32; 3] = [0, 1, 2];
-const OVER_ONE: [u32; 2] = [0, 2];
+const OVER_TWO: [u8; 3] = [0, 1, 2];
+const OVER_ONE: [u8; 2] = [0, 2];
 
 /// Ints at every edge there is: both ends of the small range and just past
 /// them, one word and past it, two words and past those.
@@ -1393,18 +1754,18 @@ fn truth(b: bool) -> Answer {
 fn int_instructions_agree(xs: &[BigInt], pairs: &[(BigInt, BigInt)]) {
     on_a_machine(|m| {
         let value = |m: &mut Machine<'_, '_>, n: &BigInt| {
-            bigint::value(&mut m.heap, n.clone()).expect("room")
+            bigint::value(&mut m.rest.heap, n.clone()).expect("room")
         };
         let mut two = Vec::new();
         for dst in OVER_TWO {
-            for (instr, op) in int_arith!(rows of_pairs)(dst) {
-                two.push((stores(instr, dst), format!("{op:?} into r{dst}"), Ok(op)));
+            for (ins, op) in int_arith!(of_pairs)(dst) {
+                two.push((stores(ins, dst), format!("{op:?} into r{dst}"), Ok(op)));
             }
-            for (stored, _, op) in int_compare!(rows compare_pairs)(dst) {
+            for (stored, _, op) in int_compare!(compare_pairs)(dst) {
                 two.push((stores(stored, dst), format!("{op:?} into r{dst}"), Err(op)));
             }
         }
-        for (_, jump, op) in int_compare!(rows compare_pairs)(2) {
+        for (_, jump, op) in int_compare!(compare_pairs)(2) {
             two.push((falls_through(jump), format!("jump unless {op:?}"), Err(op)));
         }
         for (a, b) in pairs {
@@ -1422,13 +1783,13 @@ fn int_instructions_agree(xs: &[BigInt], pairs: &[(BigInt, BigInt)]) {
             let mut one = Vec::new();
             let mut compares = Vec::new();
             for dst in OVER_ONE {
-                for (instr, op) in int_arith_k!(rows with_constant)(k, dst) {
-                    one.push((stores(instr, dst), dst, op, false));
+                for (ins, op) in int_arith_k!(with_constant)(k, dst) {
+                    one.push((stores(ins, dst), dst, op, false));
                 }
-                for (instr, op) in int_arith_k_first!(rows with_constant)(k, dst) {
-                    one.push((stores(instr, dst), dst, op, true));
+                for (ins, op) in int_arith_k_first!(with_constant)(k, dst) {
+                    one.push((stores(ins, dst), dst, op, true));
                 }
-                for (stored, jump, op) in int_compare_k!(rows compare_with_constant)(k, dst) {
+                for (stored, jump, op) in int_compare_k!(compare_with_constant)(k, dst) {
                     compares.push((stores(stored, dst), falls_through(jump), dst, op));
                 }
             }
@@ -1452,9 +1813,9 @@ fn int_instructions_agree(xs: &[BigInt], pairs: &[(BigInt, BigInt)]) {
             }
         }
         for dst in OVER_ONE {
-            let neg = Instr::IntNeg {
-                dst: Reg(dst),
-                a: Reg(0),
+            let neg = Ins::IntNeg {
+                dst: Dst(Reg(dst)),
+                a: Src(Reg(0)),
             };
             let body = stores(neg, dst);
             for x in xs {
@@ -1524,14 +1885,14 @@ fn float_instructions_are_right_at_every_edge() {
         let xs = edge_floats();
         let mut two = Vec::new();
         for dst in OVER_TWO {
-            for (instr, op) in float_arith!(rows of_pairs)(dst) {
-                two.push((stores(instr, dst), format!("{op:?} into r{dst}"), Ok(op)));
+            for (ins, op) in float_arith!(of_pairs)(dst) {
+                two.push((stores(ins, dst), format!("{op:?} into r{dst}"), Ok(op)));
             }
-            for (stored, _, op) in float_compare!(rows compare_pairs)(dst) {
+            for (stored, _, op) in float_compare!(compare_pairs)(dst) {
                 two.push((stores(stored, dst), format!("{op:?} into r{dst}"), Err(op)));
             }
         }
-        for (_, jump, op) in float_compare!(rows compare_pairs)(2) {
+        for (_, jump, op) in float_compare!(compare_pairs)(2) {
             two.push((falls_through(jump), format!("jump unless {op:?}"), Err(op)));
         }
         let holds = |op: Order, a: f64, b: f64| {
@@ -1560,13 +1921,13 @@ fn float_instructions_are_right_at_every_edge() {
             let mut one = Vec::new();
             let mut compares = Vec::new();
             for dst in OVER_ONE {
-                for (instr, op) in float_arith_k!(rows with_constant)(k, dst) {
-                    one.push((stores(instr, dst), dst, op, false));
+                for (ins, op) in float_arith_k!(with_constant)(k, dst) {
+                    one.push((stores(ins, dst), dst, op, false));
                 }
-                for (instr, op) in float_arith_k_first!(rows with_constant)(k, dst) {
-                    one.push((stores(instr, dst), dst, op, true));
+                for (ins, op) in float_arith_k_first!(with_constant)(k, dst) {
+                    one.push((stores(ins, dst), dst, op, true));
                 }
-                for (stored, jump, op) in float_compare_k!(rows compare_with_constant)(k, dst) {
+                for (stored, jump, op) in float_compare_k!(compare_with_constant)(k, dst) {
                     compares.push((stores(stored, dst), falls_through(jump), dst, op));
                 }
             }
@@ -1590,9 +1951,9 @@ fn float_instructions_are_right_at_every_edge() {
             }
         }
         for dst in OVER_ONE {
-            let neg = Instr::FloatNeg {
-                dst: Reg(dst),
-                a: Reg(0),
+            let neg = Ins::FloatNeg {
+                dst: Dst(Reg(dst)),
+                a: Src(Reg(0)),
             };
             let body = stores(neg, dst);
             for &x in &xs {
@@ -1608,23 +1969,23 @@ fn float_instructions_are_right_at_every_edge() {
 #[test]
 fn an_int_of_any_size_becomes_a_float() {
     on_a_machine(|m| {
-        let into = |dst: u32| {
-            let from_int = Instr::FloatFromInt {
-                dst: Reg(dst),
-                a: Reg(0),
+        let into = |dst: u8| {
+            let from_int = Ins::FloatFromInt {
+                dst: Dst(Reg(dst)),
+                a: Src(Reg(0)),
             };
             stores(from_int, dst)
         };
         for body in OVER_ONE.map(into) {
             for n in edge_ints() {
-                let v = bigint::value(&mut m.heap, n.clone()).expect("room");
+                let v = bigint::value(&mut m.rest.heap, n.clone()).expect("room");
                 let want = n.to_f64().expect("a Float");
                 let got = call(m, body, &[v, Value::NIL]);
                 is(m, got, &Answer::Bits(want.to_bits()), &|| format!("{n}"));
             }
         }
         let huge: BigInt = BigInt::from(1) << 2000;
-        let v = bigint::value(&mut m.heap, huge).expect("room");
+        let v = bigint::value(&mut m.rest.heap, huge).expect("room");
         let got = call(m, into(0), &[v, Value::NIL]);
         is(m, got, &Answer::Bits(f64::MAX.to_bits()), &|| {
             "2^2000".into()
@@ -1635,16 +1996,12 @@ fn an_int_of_any_size_becomes_a_float() {
 /// A value of every kind, as an operand of the wrong kind can be. The string,
 /// the tuple and the big Int are cells with one reference.
 fn one_of_each_kind(heap: &mut Heap) -> Vec<Value> {
-    let variant = VariantRef {
-        type_id: scarlet_ir::TypeId(263),
-        variant_idx: 1,
-    };
     vec![
         Value::NIL,
         Value::bool(false),
         Value::bool(true),
         Value::func(FuncIdx(7)),
-        Value::nullary(variant),
+        Value::nullary(SOME_VARIANT),
         Value::float(1.5),
         Value::float(-0.0),
         Value::int(0).expect("small"),
@@ -1661,31 +2018,31 @@ fn one_of_each_kind(heap: &mut Heap) -> Vec<Value> {
 /// one holder. `operands` is how many the instruction reads.
 fn stops_on_the_wrong_kind(
     m: &mut Machine<'_, '_>,
-    body: &'static Body,
+    body: &'static Code,
     operands: usize,
     with: Value,
     takes: fn(&Heap, Value) -> bool,
     stop: fn(View) -> Stop,
 ) {
-    let kinds = one_of_each_kind(&mut m.heap).len();
-    m.heap = Heap::default();
+    let kinds = one_of_each_kind(&mut m.rest.heap).len();
+    m.rest.heap = Heap::default();
     for kind in 0..kinds {
         for wrong in 0..operands {
-            let all = one_of_each_kind(&mut m.heap);
+            let all = one_of_each_kind(&mut m.rest.heap);
             let v = all[kind];
             for other in all.iter().filter(|o| o.bits() != v.bits()) {
-                assert_eq!(m.release(*other), Ok(()));
+                assert_eq!(m.rest.release(*other), Ok(()));
             }
-            if takes(&m.heap, v) {
-                assert_eq!(m.release(v), Ok(()));
+            if takes(&m.rest.heap, v) {
+                assert_eq!(m.rest.release(v), Ok(()));
                 continue;
             }
             let mut args = [with, with];
             args[wrong] = v;
             let view = v.view();
             let got = call(m, body, &args).map(|v| v.bits());
-            assert_eq!(got, Err(stop(view)), "{:?} on {view:?}", body.instrs[0]);
-            assert_eq!(m.heap.live(), 0, "{:?} on {view:?}", body.instrs[0]);
+            assert_eq!(got, Err(stop(view)), "{:?} on {view:?}", body.ins[1]);
+            assert_eq!(m.rest.heap.live(), 0, "{:?} on {view:?}", body.ins[1]);
         }
     }
 }
@@ -1708,59 +2065,59 @@ fn every_operator_instruction_stops_on_an_operand_of_the_wrong_kind() {
         let (seven, half) = (Value::int(7).expect("small"), Value::float(0.5));
         let (small, held) = (SmallInt::new(7).expect("small"), Float::new(0.5));
 
-        let mut ints: Vec<(&'static Body, usize)> = Vec::new();
+        let mut ints: Vec<(&'static Code, usize)> = Vec::new();
         ints.extend(
-            int_arith!(rows of_pairs)(2)
+            int_arith!(of_pairs)(2)
                 .into_iter()
                 .map(|(i, _)| (stores(i, 2), 2)),
         );
         ints.extend(
-            int_arith_k!(rows with_constant)(small, 2)
+            int_arith_k!(with_constant)(small, 2)
                 .into_iter()
                 .map(|(i, _)| (stores(i, 2), 1)),
         );
         ints.extend(
-            int_arith_k_first!(rows with_constant)(small, 2)
+            int_arith_k_first!(with_constant)(small, 2)
                 .into_iter()
                 .map(|(i, _)| (stores(i, 2), 1)),
         );
-        for (stored, jump, _) in int_compare!(rows compare_pairs)(2) {
+        for (stored, jump, _) in int_compare!(compare_pairs)(2) {
             ints.extend([(stores(stored, 2), 2), (falls_through(jump), 2)]);
         }
-        for (stored, jump, _) in int_compare_k!(rows compare_with_constant)(small, 2) {
+        for (stored, jump, _) in int_compare_k!(compare_with_constant)(small, 2) {
             ints.extend([(stores(stored, 2), 1), (falls_through(jump), 1)]);
         }
-        let (dst, a) = (Reg(2), Reg(0));
-        ints.push((stores(Instr::IntNeg { dst, a }, 2), 1));
-        ints.push((stores(Instr::FloatFromInt { dst, a }, 2), 1));
+        let (dst, a) = (Dst(Reg(2)), Src(Reg(0)));
+        ints.push((stores(Ins::IntNeg { dst, a }, 2), 1));
+        ints.push((stores(Ins::FloatFromInt { dst, a }, 2), 1));
         assert_eq!(ints.len(), 5 + 5 + 1 + 8 + 12 + 2);
         for (body, operands) in ints {
             stops_on_the_wrong_kind(m, body, operands, seven, is_int, no_int);
         }
 
-        let mut floats: Vec<(&'static Body, usize)> = Vec::new();
+        let mut floats: Vec<(&'static Code, usize)> = Vec::new();
         floats.extend(
-            float_arith!(rows of_pairs)(2)
+            float_arith!(of_pairs)(2)
                 .into_iter()
                 .map(|(i, _)| (stores(i, 2), 2)),
         );
         floats.extend(
-            float_arith_k!(rows with_constant)(held, 2)
+            float_arith_k!(with_constant)(held, 2)
                 .into_iter()
                 .map(|(i, _)| (stores(i, 2), 1)),
         );
         floats.extend(
-            float_arith_k_first!(rows with_constant)(held, 2)
+            float_arith_k_first!(with_constant)(held, 2)
                 .into_iter()
                 .map(|(i, _)| (stores(i, 2), 1)),
         );
-        for (stored, jump, _) in float_compare!(rows compare_pairs)(2) {
+        for (stored, jump, _) in float_compare!(compare_pairs)(2) {
             floats.extend([(stores(stored, 2), 2), (falls_through(jump), 2)]);
         }
-        for (stored, jump, _) in float_compare_k!(rows compare_with_constant)(held, 2) {
+        for (stored, jump, _) in float_compare_k!(compare_with_constant)(held, 2) {
             floats.extend([(stores(stored, 2), 1), (falls_through(jump), 1)]);
         }
-        floats.push((stores(Instr::FloatNeg { dst, a }, 2), 1));
+        floats.push((stores(Ins::FloatNeg { dst, a }, 2), 1));
         assert_eq!(floats.len(), 5 + 4 + 2 + 4 + 8 + 1);
         for (body, operands) in floats {
             stops_on_the_wrong_kind(m, body, operands, half, is_float, no_float);
@@ -1771,20 +2128,22 @@ fn every_operator_instruction_stops_on_an_operand_of_the_wrong_kind() {
 /// Call `instr` with `args` on a heap that is full once it holds them, for an
 /// answer that needs a cell. It must stop with `HeapFull` and leave each
 /// operand with one holder.
-fn finds_the_heap_full(m: &mut Machine<'_, '_>, instr: Instr, dst: u32, args: [&BigInt; 2]) {
-    let what = format!("{instr} on {args:?}");
+fn finds_the_heap_full(m: &mut Machine<'_, '_>, ins: Ins<Reg>, dst: u8, args: [&BigInt; 2]) {
+    let what = format!("{ins:?} on {args:?}");
     let mut room = Heap::default();
     let hold = |heap: &mut Heap| args.map(|n| bigint::value(heap, n.clone()).expect("room"));
     hold(&mut room);
-    m.heap = Heap::limited(room.words_used());
-    let args = hold(&mut m.heap);
-    let held = m.heap.live();
-    let body = stores(instr, dst);
-    let got = m.call(body, &args).map(|v| v.bits());
+    m.rest.heap = Heap::limited(room.words_used());
+    let args = hold(&mut m.rest.heap);
+    let held = m.rest.heap.live();
+    let code = stores(ins, dst);
+    m.rest.code = code;
+    let got = m.call(&code.toplevels[0], &args).map(|v| v.bits());
+    m.frames.clear();
     assert_eq!(got, Err(Stop::HeapFull), "{what}");
-    assert_eq!(m.heap.live(), held, "{what}");
-    assert_eq!(m.leave(0), Ok(()), "{what}");
-    assert_eq!(m.heap.live(), 0, "{what}");
+    assert_eq!(m.rest.heap.live(), held, "{what}");
+    assert_eq!(m.leave(0, Room(5)), Ok(()), "{what}");
+    assert_eq!(m.rest.heap.live(), 0, "{what}");
 }
 
 /// An Int instruction whose answer needs a cell, on a heap with no room for
@@ -1797,26 +2156,20 @@ fn an_int_answer_with_no_room_stops_and_keeps_its_operands() {
         let bottom = BigInt::from(-(1_i64 << 50));
         let (one, big) = (BigInt::from(1), BigInt::from(3) << 200);
         let k = SmallInt::new(1).expect("small");
-        for dst in OVER_TWO {
-            let pair = Pair {
-                dst: Reg(dst),
-                a: Reg(0),
-                b: Reg(1),
-            };
-            finds_the_heap_full(m, Instr::IntAdd(pair), dst, [&top, &one]);
-            finds_the_heap_full(m, Instr::IntAdd(pair), dst, [&big, &big]);
-            finds_the_heap_full(m, Instr::IntMul(pair), dst, [&big, &top]);
+        for over in OVER_TWO {
+            let (dst, a, b) = (Dst(Reg(over)), Src(Reg(0)), Src(Reg(1)));
+            finds_the_heap_full(m, Ins::IntAdd { dst, a, b }, over, [&top, &one]);
+            finds_the_heap_full(m, Ins::IntAdd { dst, a, b }, over, [&big, &big]);
+            finds_the_heap_full(m, Ins::IntMul { dst, a, b }, over, [&big, &top]);
         }
-        for dst in OVER_ONE {
-            let (dst_reg, a) = (Reg(dst), Reg(0));
-            let held = WithK { dst: dst_reg, a, k };
-            let neg = Instr::IntNeg { dst: dst_reg, a };
+        for over in OVER_ONE {
+            let (dst, a) = (Dst(Reg(over)), Src(Reg(0)));
             for n in [&top, &big] {
-                finds_the_heap_full(m, Instr::IntAddK(held), dst, [n, &one]);
+                finds_the_heap_full(m, Ins::IntAddK { dst, a, k }, over, [n, &one]);
             }
-            finds_the_heap_full(m, Instr::IntRSubK(held), dst, [&bottom, &one]);
+            finds_the_heap_full(m, Ins::IntRSubK { dst, k, a }, over, [&bottom, &one]);
             for n in [&bottom, &big] {
-                finds_the_heap_full(m, neg.clone(), dst, [n, &one]);
+                finds_the_heap_full(m, Ins::IntNeg { dst, a }, over, [n, &one]);
             }
         }
     });
