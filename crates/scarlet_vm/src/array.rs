@@ -236,13 +236,13 @@ fn head_items(heap: &Heap, r: &Root) -> Slots {
 /// instead of copied.
 fn own_head(heap: &mut Heap, r: &Root) -> Result<Value, Fault> {
     if r.offset == 0 {
-        return Ok(own(heap, r.head));
+        return Ok(heap.own(r.head)?);
     }
     let items = head_items(heap, r);
     if items.is_empty() {
         return Ok(Value::NIL);
     }
-    let kept = own_all(heap, &items);
+    let kept = own_all(heap, &items)?;
     leaf(heap, &kept)
 }
 
@@ -294,14 +294,6 @@ fn node(heap: &Heap, v: Value) -> Option<Node> {
     })
 }
 
-/// `v` with one more reference, for keeping it in a new node.
-fn own(heap: &mut Heap, v: Value) -> Value {
-    if let Some(cell) = v.as_cell() {
-        heap.share(cell);
-    }
-    v
-}
-
 /// `slots` with `x` added at `end`.
 fn at_end(slots: Slots, x: Value, end: End) -> Slots {
     match end {
@@ -310,8 +302,11 @@ fn at_end(slots: Slots, x: Value, end: End) -> Slots {
     }
 }
 
-fn own_all(heap: &mut Heap, vs: &[Value]) -> Slots {
-    vs.iter().map(|v| own(heap, *v)).collect()
+fn own_all(heap: &mut Heap, vs: &[Value]) -> Result<Slots, DeadCell> {
+    for v in vs {
+        heap.own(*v)?;
+    }
+    Ok(Slots::from_slice(vs))
 }
 
 fn release(heap: &mut Heap, v: Value) -> Result<(), DeadCell> {
@@ -646,16 +641,16 @@ fn push(heap: &mut Heap, array: Cell, x: Value, end: End) -> Result<Cell, Fault>
         End::Back => (r.tail, slots(heap, r.tail), settled),
     };
     let (tree, shift, new) = if this_items.is_empty() {
-        (own(heap, r.tree), r.shift, leaf(heap, &[x])?)
+        (heap.own(r.tree)?, r.shift, leaf(heap, &[x])?)
     } else if this_items.len() < B {
-        let kept = own_all(heap, &this_items);
+        let kept = own_all(heap, &this_items)?;
         let items = at_end(kept, x, end);
-        (own(heap, r.tree), r.shift, leaf(heap, &items)?)
+        (heap.own(r.tree)?, r.shift, leaf(heap, &items)?)
     } else {
         let (tree, shift) = tree_push_leaf(heap, r.tree, r.shift, this, end)?;
         (tree, shift, leaf(heap, &[x])?)
     };
-    let other = own(heap, other);
+    let other = heap.own(other)?;
     // `settled` is the head's own leaf when nothing was left behind, and the
     // branches above each took their own reference to what they kept.
     release(heap, settled)?;
@@ -729,14 +724,14 @@ fn tree_push_leaf(
     end: End,
 ) -> Result<(Value, usize), Fault> {
     if tree.as_cell().is_none() {
-        return Ok((own(heap, leaf), 0));
+        return Ok((heap.own(leaf)?, 0));
     }
     if let Some(n) = try_push(heap, tree, shift, leaf, end)? {
         return Ok((n, shift));
     }
-    let leaf = own(heap, leaf);
+    let leaf = heap.own(leaf)?;
     let spine = spine(heap, leaf, shift)?;
-    let tree = own(heap, tree);
+    let tree = heap.own(tree)?;
     let pair = match end {
         End::Front => [spine, tree],
         End::Back => [tree, spine],
@@ -779,14 +774,14 @@ fn try_push(
     if let Some(sub) = try_push(heap, edge_child, down(shift), leaf, end)? {
         let mut kept = Slots::new();
         for (i, c) in children.iter().enumerate() {
-            kept.push(if i == edge { sub } else { own(heap, *c) });
+            kept.push(if i == edge { sub } else { heap.own(*c)? });
         }
         return Ok(Some(branch(heap, shift, &kept)?));
     }
     if children.len() < B {
-        let leaf = own(heap, leaf);
+        let leaf = heap.own(leaf)?;
         let s = spine(heap, leaf, down(shift))?;
-        let kept = own_all(heap, &children);
+        let kept = own_all(heap, &children)?;
         let all = at_end(kept, s, end);
         return Ok(Some(branch(heap, shift, &all)?));
     }
@@ -800,7 +795,7 @@ fn collapse(heap: &mut Heap, mut n: Value, mut shift: usize) -> Result<(Value, u
         let [only] = children.as_slice() else {
             break;
         };
-        let only = own(heap, *only);
+        let only = heap.own(*only)?;
         release(heap, n)?;
         n = only;
         shift = down(shift);
@@ -815,26 +810,26 @@ fn take(heap: &mut Heap, array: Cell, n: usize) -> Result<Cell, Fault> {
         return empty(heap);
     }
     if n >= r.len {
-        heap.share(array);
+        heap.share(array)?;
         return Ok(array);
     }
     let front = head_items(heap, &r);
     let Some(m) = n.checked_sub(front.len()).filter(|m| *m > 0) else {
-        let kept = own_all(heap, front.get(..n).unwrap_or(&[]));
+        let kept = own_all(heap, front.get(..n).unwrap_or(&[]))?;
         let tail = leaf(heap, &kept)?;
         return new_root(heap, n, 0, Value::NIL, Value::NIL, tail);
     };
     let Some(in_tail) = m.checked_sub(node_len(heap, r.tree)).filter(|k| *k > 0) else {
         let cut = tree_take(heap, r.tree, m)?;
         let (tree, shift) = collapse(heap, cut, r.shift)?;
-        let head = own(heap, r.head);
+        let head = heap.own(r.head)?;
         return root_at(heap, n, shift, r.offset, head, tree, Value::NIL);
     };
     let tail_items = slots(heap, r.tail);
-    let kept = own_all(heap, tail_items.get(..in_tail).unwrap_or(&[]));
+    let kept = own_all(heap, tail_items.get(..in_tail).unwrap_or(&[]))?;
     let tail = leaf(heap, &kept)?;
-    let head = own(heap, r.head);
-    let tree = own(heap, r.tree);
+    let head = heap.own(r.head)?;
+    let tree = heap.own(r.tree)?;
     root_at(heap, n, r.shift, r.offset, head, tree, tail)
 }
 
@@ -859,7 +854,7 @@ pub(crate) fn slice(
 pub(crate) fn skip(heap: &mut Heap, array: Cell, n: usize) -> Result<Cell, Fault> {
     let r = root(heap, array);
     if n == 0 {
-        heap.share(array);
+        heap.share(array)?;
         return Ok(array);
     }
     let Some(left) = r.len.checked_sub(n).filter(|left| *left > 0) else {
@@ -870,9 +865,9 @@ pub(crate) fn skip(heap: &mut Heap, array: Cell, n: usize) -> Result<Cell, Fault
         // tail, with `n` more items left behind, so nothing is copied. The
         // head is one leaf, so the offset stays below `B`.
         let offset = r.offset.saturating_add(n);
-        let head = own(heap, r.head);
-        let tree = own(heap, r.tree);
-        let tail = own(heap, r.tail);
+        let head = heap.own(r.head)?;
+        let tree = heap.own(r.tree)?;
+        let tail = heap.own(r.tail)?;
         return root_at(heap, left, r.shift, offset, head, tree, tail);
     };
     // The head is spent, so the rest comes out of the tree. Move the tree's
@@ -892,21 +887,21 @@ pub(crate) fn skip(heap: &mut Heap, array: Cell, n: usize) -> Result<Cell, Fault
             let cut = tree_drop(heap, r.tree, taken)?;
             collapse(heap, cut, r.shift)?
         };
-        let head = own(heap, first);
-        let tail = own(heap, r.tail);
+        let head = heap.own(first)?;
+        let tail = heap.own(r.tail)?;
         return root_at(heap, left, shift, m, head, tree, tail);
     }
     let Some(k) = m.checked_sub(node_len(heap, r.tree)) else {
         let cut = tree_drop(heap, r.tree, m)?;
         let (tree, shift) = collapse(heap, cut, r.shift)?;
-        let tail = own(heap, r.tail);
+        let tail = heap.own(r.tail)?;
         return new_root(heap, left, shift, Value::NIL, tree, tail);
     };
     let tail = if k == 0 {
-        own(heap, r.tail)
+        heap.own(r.tail)?
     } else {
         let tail_items = slots(heap, r.tail);
-        let kept = own_all(heap, tail_items.get(k..).unwrap_or(&[]));
+        let kept = own_all(heap, tail_items.get(k..).unwrap_or(&[]))?;
         leaf(heap, &kept)?
     };
     new_root(heap, left, 0, Value::NIL, Value::NIL, tail)
@@ -947,9 +942,9 @@ fn first_leaf(heap: &Heap, n: Value) -> Option<Value> {
 fn tree_take(heap: &mut Heap, n: Value, m: usize) -> Result<Value, Fault> {
     match node(heap, n) {
         None => Ok(Value::NIL),
-        Some(Node::Leaf(items)) if m >= items.len() => Ok(own(heap, n)),
+        Some(Node::Leaf(items)) if m >= items.len() => Ok(heap.own(n)?),
         Some(Node::Leaf(items)) => {
-            let kept = own_all(heap, items.get(..m).unwrap_or(&[]));
+            let kept = own_all(heap, items.get(..m).unwrap_or(&[]))?;
             leaf(heap, &kept)
         }
         Some(Node::Branch {
@@ -958,7 +953,7 @@ fn tree_take(heap: &mut Heap, n: Value, m: usize) -> Result<Value, Fault> {
             children,
         }) => {
             if m >= to_usize(sizes.last().copied().unwrap_or(0)) {
-                return Ok(own(heap, n));
+                return Ok(heap.own(n)?);
             }
             // The slot of the last element kept, so `within` is one less
             // than what that child keeps.
@@ -969,10 +964,10 @@ fn tree_take(heap: &mut Heap, n: Value, m: usize) -> Result<Value, Fault> {
                 return Ok(Value::NIL);
             };
             let Some(&child) = children.get(slot.child) else {
-                return Ok(own(heap, n));
+                return Ok(heap.own(n)?);
             };
             let cut = tree_take(heap, child, slot.within.saturating_add(1))?;
-            let mut kept = own_all(heap, children.get(..slot.child).unwrap_or(&[]));
+            let mut kept = own_all(heap, children.get(..slot.child).unwrap_or(&[]))?;
             kept.push(cut);
             branch(heap, shift, &kept)
         }
@@ -982,12 +977,12 @@ fn tree_take(heap: &mut Heap, n: Value, m: usize) -> Result<Value, Fault> {
 /// A tree node without its first `m` elements, `m` below its length.
 fn tree_drop(heap: &mut Heap, n: Value, m: usize) -> Result<Value, Fault> {
     if m == 0 {
-        return Ok(own(heap, n));
+        return Ok(heap.own(n)?);
     }
     match node(heap, n) {
         None => Ok(Value::NIL),
         Some(Node::Leaf(items)) => {
-            let kept = own_all(heap, items.get(m..).unwrap_or(&[]));
+            let kept = own_all(heap, items.get(m..).unwrap_or(&[]))?;
             leaf(heap, &kept)
         }
         Some(Node::Branch {
@@ -1003,7 +998,7 @@ fn tree_drop(heap: &mut Heap, n: Value, m: usize) -> Result<Value, Fault> {
             };
             let cut = tree_drop(heap, child, slot.within)?;
             let mut kept: Slots = smallvec::smallvec![cut];
-            kept.extend(own_all(heap, after(&children, slot.child)));
+            kept.extend(own_all(heap, after(&children, slot.child))?);
             branch(heap, shift, &kept)
         }
     }
@@ -1017,11 +1012,11 @@ pub(crate) fn concat(heap: &mut Heap, l: Cell, r: Cell) -> Result<Cell, Fault> {
     let lr = root(heap, l);
     let rr = root(heap, r);
     if lr.len == 0 {
-        heap.share(r);
+        heap.share(r)?;
         return Ok(r);
     }
     if rr.len == 0 {
-        heap.share(l);
+        heap.share(l)?;
         return Ok(l);
     }
     // Two arrays that share their nodes can be longer together than a word
@@ -1030,13 +1025,13 @@ pub(crate) fn concat(heap: &mut Heap, l: Cell, r: Cell) -> Result<Cell, Fault> {
     // The buffers at the seam go into their trees, so the merge sees two
     // trees. The left array keeps its head, and the right one its tail.
     let (ltree, lshift) = if lr.tail.as_cell().is_none() {
-        (own(heap, lr.tree), lr.shift)
+        (heap.own(lr.tree)?, lr.shift)
     } else {
         tree_push_leaf(heap, lr.tree, lr.shift, lr.tail, End::Back)?
     };
     let rhead = own_head(heap, &rr)?;
     let (rtree, rshift) = if rhead.as_cell().is_none() {
-        (own(heap, rr.tree), rr.shift)
+        (heap.own(rr.tree)?, rr.shift)
     } else {
         tree_push_leaf(heap, rr.tree, rr.shift, rhead, End::Front)?
     };
@@ -1058,8 +1053,8 @@ pub(crate) fn concat(heap: &mut Heap, l: Cell, r: Cell) -> Result<Cell, Fault> {
             }
         }
     };
-    let head = own(heap, lr.head);
-    let tail = own(heap, rr.tail);
+    let head = heap.own(lr.head)?;
+    let tail = heap.own(rr.tail)?;
     root_at(heap, len, shift, lr.offset, head, tree, tail)
 }
 
@@ -1076,7 +1071,7 @@ fn merge(
     let rc = slots(heap, r);
     let (left, right) = match (lc.split_last(), rc.split_first()) {
         (Some((last, left)), Some((first, right))) => ((left, *last), (*first, right)),
-        _ => return Ok(own_all(heap, &[l, r]).into_vec()),
+        _ => return Ok(own_all(heap, &[l, r])?.into_vec()),
     };
     if lshift > rshift {
         let mid = merge(heap, left.1, down(lshift), r, rshift)?;
@@ -1086,10 +1081,10 @@ fn merge(
         rebalance(heap, &[], mid, right.1, rshift)
     } else if lshift == 0 {
         if lc.len().checked_add(rc.len()).is_some_and(|n| n <= B) {
-            let items = own_all(heap, &[lc, rc].concat());
+            let items = own_all(heap, &[lc, rc].concat())?;
             Ok(vec![leaf(heap, &items)?])
         } else {
-            Ok(own_all(heap, &[l, r]).into_vec())
+            Ok(own_all(heap, &[l, r])?.into_vec())
         }
     } else {
         let mid = merge(heap, left.1, down(lshift), right.0, down(rshift))?;
@@ -1108,9 +1103,9 @@ fn rebalance(
     right: &[Value],
     shift: usize,
 ) -> Result<Vec<Value>, Fault> {
-    let mut all = own_all(heap, left).into_vec();
+    let mut all = own_all(heap, left)?.into_vec();
     all.extend(mid);
-    all.extend(own_all(heap, right));
+    all.extend(own_all(heap, right)?);
     let counts: Vec<usize> = all.iter().map(|n| slot_count(heap, *n)).collect();
     let total: usize = counts.iter().sum();
     let optimal = total.div_ceil(B);
@@ -1191,7 +1186,7 @@ fn repack(
                 .saturating_sub(buf.len())
                 .min(items.len().saturating_sub(off));
             let taking = items.get(off..).and_then(|rest| rest.get(..take));
-            buf.extend(own_all(heap, taking.unwrap_or(&[])));
+            buf.extend(own_all(heap, taking.unwrap_or(&[]))?);
             off = off.saturating_add(take);
             if off == items.len() {
                 if let Some(n) = old.get_mut(src).and_then(Option::take) {

@@ -47,11 +47,35 @@ fn is_managed_flag(a: &Arg) -> bool {
     )
 }
 
+/// The values an option takes when it only takes some, like `end|each`, and
+/// otherwise the name its declaration gives a value.
 fn value_name(a: &Arg) -> String {
+    let only: Vec<String> = a
+        .get_possible_values()
+        .iter()
+        .filter(|v| !v.is_hide_set())
+        .map(|v| v.get_name().to_string())
+        .collect();
+    if !only.is_empty() {
+        return only.join("|");
+    }
     a.get_value_names()
         .and_then(|v| v.first())
         .map(|s| s.to_string())
         .unwrap_or_else(|| a.get_id().as_str().to_uppercase())
+}
+
+/// How an option's value is written after it: after an `=` when it has to be,
+/// and in brackets when it may be left out.
+fn value_token(a: &Arg) -> String {
+    let value = value_name(a);
+    let optional = a.get_num_args().is_some_and(|n| n.min_values() == 0);
+    match (optional, a.is_require_equals_set()) {
+        (true, true) => format!("[=<{value}>]"),
+        (true, false) => format!(" [<{value}>]"),
+        (false, true) => format!("=<{value}>"),
+        (false, false) => format!(" <{value}>"),
+    }
 }
 
 fn positional_token(a: &Arg) -> String {
@@ -90,7 +114,7 @@ fn opt_label(a: &Arg) -> String {
         let _ = write!(s, "--{l}");
     }
     if takes_value(a) {
-        let _ = write!(s, " <{}>", value_name(a));
+        s.push_str(&value_token(a));
     }
     s
 }

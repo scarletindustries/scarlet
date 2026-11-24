@@ -56,8 +56,8 @@ fn a_counted_load_is_the_same_program_with_a_count_at_each_block_head() {
     let result = scarlet_core::compile::compile_text(SHAPES, None);
     assert!(result.success(), "{:?}", result.diagnostics());
     let program = result.into_runnable().expect("a clean compile is runnable");
-    let plain = load(&program).expect("the program loads");
-    let counted = load_counted(&program).expect("the program loads");
+    let plain = load(&program, Audit::Never).expect("the program loads");
+    let counted = load_counted(&program, Audit::Never).expect("the program loads");
     assert!(
         bodies(&plain)
             .iter()
@@ -108,6 +108,47 @@ fn a_counted_load_is_the_same_program_with_a_count_at_each_block_head() {
         }
     }
     assert_eq!(numbered as usize, counted.blocks.len());
+    assert!(jumps > 5, "the program has jumps to check: {jumps}");
+}
+
+/// An audited load is the ordinary load with an `Audit` in front of every
+/// instruction, a counted load's `Count`s among them, and every jump going to
+/// the audit in front of where it went. The blocks counted hold no audits.
+#[test]
+fn an_audited_load_is_the_same_program_with_an_audit_before_each_instruction() {
+    let result = scarlet_core::compile::compile_text(SHAPES, None);
+    assert!(result.success(), "{:?}", result.diagnostics());
+    let program = result.into_runnable().expect("a clean compile is runnable");
+    let plain = load(&program, Audit::Never).expect("the program loads");
+    let audited = load(&program, Audit::EachInstruction).expect("the program loads");
+    let counted = load_counted(&program, Audit::Never).expect("the program loads");
+    let both = load_counted(&program, Audit::EachInstruction).expect("the program loads");
+    assert_eq!(counted.blocks, both.blocks);
+    // Only a run that audits before each instruction has audits to run.
+    let at_end = load(&program, Audit::AtEnd).expect("the program loads");
+    let counted_at_end = load_counted(&program, Audit::AtEnd).expect("the program loads");
+    for code in [&plain, &at_end, &counted.code, &counted_at_end.code] {
+        let mut instrs = bodies(code).into_iter().flat_map(|body| &body.instrs);
+        assert!(!instrs.any(|instr| matches!(instr, Instr::Audit)));
+    }
+    let mut jumps = 0;
+    for (was, now) in [(&plain, &audited), (&counted.code, &both.code)] {
+        assert!(!bodies(was).is_empty());
+        for (was, now) in bodies(was).into_iter().zip(bodies(now)) {
+            assert_eq!(now.instrs.len(), 2 * was.instrs.len(), "{}", now.name);
+            for (old, new) in was.instrs.iter().zip(now.instrs.chunks(2)) {
+                let [Instr::Audit, new] = new else {
+                    panic!("{}: an audit and then the instruction", now.name);
+                };
+                assert_eq!(old.op(), new.op());
+                let (mut old, mut new) = (old.clone(), new.clone());
+                if let (Some(old), Some(new)) = (old.target(), new.target()) {
+                    assert_eq!(*new, 2 * *old);
+                    jumps += 1;
+                }
+            }
+        }
+    }
     assert!(jumps > 5, "the program has jumps to check: {jumps}");
 }
 
@@ -306,7 +347,7 @@ fn the_loader_makes_one_write_of_a_put_and_of_a_set() {
     let result = scarlet_core::compile::compile_text(src, None);
     assert!(result.success(), "{:?}", result.diagnostics());
     let program = result.into_runnable().expect("a clean compile is runnable");
-    let code = load(&program).expect("the program loads");
+    let code = load(&program, Audit::Never).expect("the program loads");
     let body = |name: &str| -> &Body {
         bodies(&code)
             .into_iter()
@@ -381,7 +422,7 @@ fn the_loader_marks_the_moves_of_a_compiled_program() {
     let result = scarlet_core::compile::compile_text(src, None);
     assert!(result.success(), "{:?}", result.diagnostics());
     let program = result.into_runnable().expect("a clean compile is runnable");
-    let code = load(&program).expect("the program loads");
+    let code = load(&program, Audit::Never).expect("the program loads");
     let moves = |name: &str| -> Vec<bool> {
         let body = bodies(&code)
             .into_iter()

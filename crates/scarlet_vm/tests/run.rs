@@ -1,7 +1,7 @@
 //! These tests run programs end to end. Each is compiled from Scarlet source
 //! and run by the VM, and the test checks exactly what it prints.
 
-use scarlet_vm::{AtExit, OsHost, Stop};
+use scarlet_vm::{Audit, OsHost, Stop};
 
 fn compile(src: &str) -> scarlet_core::core_ir::Program {
     let result = scarlet_core::compile::compile_text(src, None);
@@ -11,7 +11,7 @@ fn compile(src: &str) -> scarlet_core::core_ir::Program {
 
 fn run(src: &str) -> Result<String, Stop> {
     let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
-    scarlet_vm::run(&compile(src), &mut host, AtExit::Audit)?;
+    scarlet_vm::run(&compile(src), &mut host, Audit::AtEnd)?;
     Ok(String::from_utf8(std::mem::take(host.out())).expect("println writes UTF-8"))
 }
 
@@ -22,7 +22,7 @@ fn prints(src: &str, want: &str) {
 /// Run `src` in a world with `argv` and `env`.
 fn prints_in(argv: Vec<String>, env: Vec<(String, String)>, src: &str, want: &str) {
     let mut host = OsHost::new(argv, env, Vec::new());
-    let ran = scarlet_vm::run(&compile(src), &mut host, AtExit::Audit);
+    let ran = scarlet_vm::run(&compile(src), &mut host, Audit::AtEnd);
     assert_eq!(ran, Ok(()), "{src}");
     let out = std::mem::take(host.out());
     assert_eq!(String::from_utf8(out).expect("UTF-8"), want, "{src}");
@@ -666,7 +666,7 @@ fn a_closed_output_stops_the_run_quietly() {
         scarlet_vm::run(
             &program,
             &mut OsHost::new(Vec::new(), Vec::new(), Closed),
-            AtExit::Audit
+            Audit::AtEnd
         ),
         Err(Stop::OutputClosed)
     );
@@ -2607,7 +2607,7 @@ const FIB: &str = "fn fib(n Int) Int {\n\
 
 fn counted(src: &str) -> (String, scarlet_vm::Counts) {
     let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
-    let counts = scarlet_vm::run_counted(&compile(src), &mut host, AtExit::Audit);
+    let counts = scarlet_vm::run_counted(&compile(src), &mut host, Audit::AtEnd);
     let out = String::from_utf8(std::mem::take(host.out())).expect("UTF-8");
     (out, counts.expect("the program runs to its end"))
 }
@@ -2657,6 +2657,109 @@ fn a_counted_run_counts_the_same_every_time() {
     assert_eq!(first.cells_reused, 0);
 }
 
+/// A program that makes, shares, changes and frees a cell of every kind it
+/// can without the network or two keys with one hash, in loops, calls,
+/// closures and matches.
+const EVERY_KIND: &str = "import scarlet/array\n\
+    import scarlet/map\n\
+    type L {\n\tCons(h String, t L)\n\tEnd\n}\n\
+    type P {\n\tP(name String, xs Array(Int), n Int)\n}\n\
+    const big = 9223372036854775807\n\
+    const kept = ['a', 'b']\n\
+    fn build(n Int, acc L) L {\n\
+    \tif n == 0 { acc } else { build(n - 1, Cons('${n}', acc)) }\n\
+    }\n\
+    fn flip(l L, acc L) L {\n\
+    \tmatch l {\n\t\tCons(h, t) -> flip(t, Cons(h, acc))\n\t\tEnd -> acc\n\t}\n\
+    }\n\
+    fn push(n Int, xs Array(Int)) Array(Int) {\n\
+    \tif n == 0 { xs } else { push(n - 1, [..xs, n]) }\n\
+    }\n\
+    fn walk(xs Array(Int), acc Int) Int {\n\
+    \tmatch xs {\n\t\t[h, ..t] -> walk(t, acc + h)\n\t\t[] -> acc\n\t}\n\
+    }\n\
+    fn fill(n Int, m map::Map(String, Int)) map::Map(String, Int) {\n\
+    \tif n == 0 { m } else { fill(n - 1, map::set(m, 'k${n}', n)) }\n\
+    }\n\
+    fn drain(n Int, m map::Map(String, Int)) map::Map(String, Int) {\n\
+    \tif n == 0 { m } else { drain(n - 1, map::delete(m, 'k${n}')) }\n\
+    }\n\
+    fn bump(p P, n Int) P {\n\
+    \tif n == 0 { p } else { bump(P(..p, xs: array::put(p.xs, n, n), n: p.n + n), n - 1) }\n\
+    }\n\
+    fn adder(s String) fn(Int) String {\n\tfn(n) { '${s}${n}' }\n}\n\
+    fn over(n Int, acc Int) Int {\n\
+    \tif n == 0 { acc } else { over(n - 1, { acc + big } - big) }\n\
+    }\n\
+    fn tail(b Binary) Binary {\n\
+    \tmatch b {\n\t\t<<1, rest:binary>> -> rest\n\t\t_ -> b\n\t}\n\
+    }\n\
+    pub fn main() {\n\
+    \tl = build(5, End)\n\
+    \tprintln(flip(l, End))\n\
+    \tprintln(l == build(5, End))\n\
+    \txs = push(40, [])\n\
+    \tprintln(walk(xs, 0))\n\
+    \tprintln(walk([..xs, ..xs], 0))\n\
+    \tprintln(xs[2..4])\n\
+    \tm = fill(20, map::new())\n\
+    \tprintln(map::size(drain(15, m)))\n\
+    \tprintln(map::get(m, 'k3'))\n\
+    \tprintln(bump(P('p', [0, 0, 0, 0], 0), 3))\n\
+    \tf = adder('n')\n\
+    \tprintln((f(1), f(2)))\n\
+    \tprintln(over(3, 7))\n\
+    \tb = tail(<<1, 2, 'x'>>)\n\
+    \tprintln((b, b == <<2, 'x'>>))\n\
+    \tprintln(kept)\n\
+    }\n";
+
+/// A run audited before every instruction prints what an ordinary run
+/// prints, and counts what a counted run counts: the audits are not part of
+/// the program.
+#[test]
+fn a_run_audited_before_every_instruction_is_the_same_run() {
+    let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+    let program = compile(EVERY_KIND);
+    assert_eq!(
+        scarlet_vm::run(&program, &mut host, Audit::EachInstruction),
+        Ok(())
+    );
+    let out = String::from_utf8(std::mem::take(host.out())).expect("UTF-8");
+    let (plain, counts) = counted(EVERY_KIND);
+    assert_eq!(out, plain);
+    assert!(out.starts_with("Cons(\n"), "{out}");
+    assert!(out.ends_with("(<<2, 120>>, True)\n[a, b]\n"), "{out}");
+    let each = scarlet_vm::run_counted(&program, &mut host, Audit::EachInstruction);
+    assert_eq!(each, Ok(counts.clone()));
+    assert!(!counts.ops.iter().any(|(name, _)| *name == "Audit"));
+}
+
+/// A big Int constant's cell is made the first time the program reads it and
+/// is the same cell every time after, so a loop that reads one makes it once.
+#[test]
+fn a_big_int_constant_is_made_once_however_often_it_is_read() {
+    let src = |n: u32| {
+        format!(
+            "fn go(n Int, hits Int) Int {{\n\
+             \tif n == 0 {{ hits }} else {{\n\
+             \t\tgo(n - 1, if n < 9007199254740993 {{ hits + 1 }} else {{ hits }})\n\
+             \t}}\n\
+             }}\n\
+             pub fn main() {{\n\tprintln(go({n}, 0))\n}}\n"
+        )
+    };
+    let (out, few) = counted(&src(10));
+    assert_eq!(out, "10\n");
+    let (out, many) = counted(&src(1000));
+    assert_eq!(out, "1000\n");
+    assert_eq!(ran(&few, "BigInt"), 10);
+    assert_eq!(ran(&many, "BigInt"), 1000);
+    assert_eq!((few.cells_made, many.cells_made), (1, 1));
+    // The constant is kept, and the audit at the end gives it up.
+    assert_eq!(many.cells_live, 1);
+}
+
 /// Counting is by whole blocks of instructions, and a stop leaves some of
 /// them half run, so a run that stops has its stop and no counts.
 #[test]
@@ -2668,7 +2771,7 @@ fn a_counted_run_that_stops_has_no_counts() {
                \tprintln(later())\n\
                }\n";
     let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
-    let stopped = scarlet_vm::run_counted(&compile(src), &mut host, AtExit::Audit);
+    let stopped = scarlet_vm::run_counted(&compile(src), &mut host, Audit::AtEnd);
     assert!(matches!(stopped, Err(Stop::NotBuiltYet(_))), "{stopped:?}");
     assert_eq!(std::mem::take(host.out()), b"before\n");
 }

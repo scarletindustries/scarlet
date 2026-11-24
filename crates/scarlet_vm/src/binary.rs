@@ -111,7 +111,7 @@ pub(crate) fn from_bytes(heap: &mut Heap, bytes: &[u8]) -> Result<Cell, Fault> {
 /// checked that they are inside it.
 pub(crate) fn slice(heap: &mut Heap, b: Bits, from: u64, len: u64) -> Result<Cell, Fault> {
     let at = b.at.checked_add(from).ok_or(Fault::Full)?;
-    heap.share(b.owner);
+    heap.share(b.owner)?;
     heap.make(Kind::BinarySlice, &[Value::cell(b.owner).bits(), at, len])
 }
 

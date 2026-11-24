@@ -86,7 +86,7 @@ impl Machine<'_, '_> {
                 };
                 match self.host.connect(addr, deadline) {
                     Ok(conn) => {
-                        let peer = self.share(v);
+                        let peer = self.share(v)?;
                         let sock = self.socket_value(conn, peer)?;
                         self.ok(sock)
                     }
@@ -176,8 +176,8 @@ impl Machine<'_, '_> {
                         let tls = self.tls_types()?;
                         let session = self.handle_value(session)?;
                         let peer = self.field_of(v, 1)?;
-                        let peer = self.share(peer);
-                        let name = self.share(name);
+                        let peer = self.share(peer)?;
+                        let name = self.share(name)?;
                         let cell = self
                             .heap
                             .ctor(tls.tls_socket, &[session, peer, name])

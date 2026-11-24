@@ -7,7 +7,10 @@
 //! one. `scarlet_vm`'s own tests make the audit fail on a heap they have
 //! tampered with (`exec::tests`), for an audited run and an unaudited one.
 //! So if `scarlet run` stopped passing `--audit` on to the VM, no test would
-//! notice.
+//! notice, and the same goes for what `--audit=each` adds to it. From the VM
+//! down that is tested: what each kind of audited load puts in the program
+//! (`code::tests`), and that an `Audit` stops where a count is wrong
+//! (`exec::tests`).
 
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -173,6 +176,121 @@ fn audit_passes_a_program_that_frees_everything() {
     let out = scarlet_run(&p, &both);
     assert!(out.status.success(), "{out:?}");
     assert!(file.is_file());
+}
+
+/// `--audit=each` checks the heap before every instruction, and changes
+/// nothing else about the run. `--audit` alone is `--audit=end`, and any other
+/// value is refused.
+#[test]
+fn audit_takes_when_to_audit() {
+    let p = Project::new("audit-when");
+    for flag in ["--audit", "--audit=end", "--audit=each"] {
+        let out = scarlet_run(&p, &[flag]);
+        assert!(out.status.success(), "{flag}: {out:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "5050\n", "{flag}");
+        assert!(out.stderr.is_empty(), "{flag}: {out:?}");
+    }
+    let out = scarlet_run(&p, &["--audit=never"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+}
+
+/// The help shows the form `--audit` takes. Its value has to follow an `=`,
+/// because after a space it would be the program to run.
+#[test]
+fn help_shows_how_audit_is_written() {
+    let out = Command::new(env!("CARGO_BIN_EXE_scarlet"))
+        .args(["run", "--help"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run scarlet");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("--audit[=<end|each>]  "), "{text}");
+    assert!(text.contains("--counters <FILE>  "), "{text}");
+}
+
+/// The most instructions a golden program may run and still be audited
+/// before each of them. The audit walks the whole heap, so a longer program
+/// takes too long.
+const SHORT: u64 = 40_000;
+
+/// The golden programs that run for longer than [`SHORT`].
+const LONG_PROGRAMS: [&str; 3] = ["bench", "tco", "tco_and_closures"];
+
+/// The golden programs that stop at something the VM does not run yet.
+const NOT_RUN_YET: [&str; 11] = [
+    "effects",
+    "exits",
+    "http_client",
+    "http_response",
+    "messages",
+    "monitors",
+    "ports",
+    "sockets",
+    "subject_pool_restart",
+    "subject_pool_rounds",
+    "supervisors",
+];
+
+/// Every golden program that is short enough prints the same with its heap
+/// audited before every instruction, so no instruction in any of them leaves
+/// a reference count wrong. The ones left out are the two lists above and no
+/// others.
+#[test]
+fn golden_programs_audited_before_every_instruction_print_the_same() {
+    let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let sets = [
+        (tests.join("../../../examples"), tests.join("golden")),
+        (tests.join("programs"), tests.join("golden/programs")),
+    ];
+    let p = Project::new("audit-each");
+    let counts = p.dir.join("counts.json");
+    let run = |flags: &[&str], source: &Path| {
+        Command::new(env!("CARGO_BIN_EXE_scarlet"))
+            .arg("run")
+            .args(flags)
+            .arg(source)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run scarlet")
+    };
+    let (mut audited, mut long, mut not_run) = (0, Vec::new(), Vec::new());
+    for (sources, goldens) in sets {
+        for entry in std::fs::read_dir(goldens).expect("the golden directory") {
+            let golden = entry.expect("a directory entry").path();
+            if golden.extension().is_none_or(|e| e != "stdout") {
+                continue;
+            }
+            let stem = golden.file_stem().and_then(|s| s.to_str()).expect("a name");
+            let source = sources.join(stem).with_extension("sca");
+            let name = source.display();
+            let file = counts.to_str().expect("a UTF-8 path");
+            let counted = run(&["--counters", file], &source);
+            if !counted.status.success() {
+                let why = String::from_utf8_lossy(&counted.stderr);
+                assert!(why.contains("the new VM does not run"), "{name}: {why}");
+                not_run.push(stem.to_owned());
+                continue;
+            }
+            let text = std::fs::read_to_string(&counts).expect("the counts");
+            let counts: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+            if counts["instructions"].as_u64().expect("a count") > SHORT {
+                long.push(stem.to_owned());
+                continue;
+            }
+            let out = run(&["--audit=each"], &source);
+            assert!(out.status.success(), "{name}: {out:?}");
+            assert!(out.stderr.is_empty(), "{name}: {out:?}");
+            let want = std::fs::read(&golden).expect("the golden");
+            assert!(out.stdout == want, "{name} prints something else");
+            audited += 1;
+        }
+    }
+    long.sort();
+    not_run.sort();
+    assert_eq!(long, LONG_PROGRAMS);
+    assert_eq!(not_run, NOT_RUN_YET);
+    assert!(audited > 0, "no golden program was found");
 }
 
 /// Every other test that runs a program starts from `common::scarlet_run`,

@@ -61,40 +61,39 @@ pub use listing::{Listing, listing};
 pub use os_host::OsHost;
 pub use stop::Stop;
 
-/// What a run does once its program has ended.
+/// When a run checks its heap. Whatever a check finds is a bug in the VM or
+/// the compiler, and stops the run with [`Stop::BadProgram`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AtExit {
-    /// Nothing. The heap goes with the run, as it does when a process ends.
-    Leave,
-    /// Give up everything the run still holds, and stop with a bad-program
-    /// [`Stop`] if any cell is left, because then some reference count was
-    /// wrong.
-    Audit,
+pub enum Audit {
+    /// Never. The heap goes with the run, as it does when a process ends.
+    Never,
+    /// Once the program has ended: check the heap, give up everything the run
+    /// still holds, and see that no cell is left.
+    AtEnd,
+    /// Before every instruction, and then as [`Audit::AtEnd`] does. Each
+    /// check walks the whole heap, so this is for short runs.
+    EachInstruction,
 }
 
 /// Run `program` in `host`'s world.
-pub fn run(program: &Program, host: &mut dyn Host, at_exit: AtExit) -> Result<(), Stop> {
-    let code = code::load(program)?;
+pub fn run(program: &Program, host: &mut dyn Host, audit: Audit) -> Result<(), Stop> {
+    let code = code::load(program, audit)?;
     let mut machine = exec::Machine::new(&code, host);
     let ended = machine.run()?;
-    machine.finish(ended, at_exit)
+    machine.finish(ended, audit)
 }
 
 /// Run `program` as [`run`] does, and say what the run counted: how often
 /// each kind of instruction ran, and how many heap cells were made and
 /// reused. A run that stops early has no counts, because the counting is by
 /// whole blocks of instructions and a stop leaves some of them half run.
-pub fn run_counted(
-    program: &Program,
-    host: &mut dyn Host,
-    at_exit: AtExit,
-) -> Result<Counts, Stop> {
-    let counted = code::load_counted(program)?;
+pub fn run_counted(program: &Program, host: &mut dyn Host, audit: Audit) -> Result<Counts, Stop> {
+    let counted = code::load_counted(program, audit)?;
     let mut machine = exec::Machine::counting(&counted, host);
     let ended = machine.run()?;
     // Counted before the audit, which frees what the program still held.
-    let counts = machine.counts(&counted, &ended);
-    machine.finish(ended, at_exit)?;
+    let counts = machine.counts(&counted, &ended)?;
+    machine.finish(ended, audit)?;
     Ok(counts)
 }
 
@@ -102,7 +101,7 @@ pub fn run_counted(
 /// shows it, or `None` when that value is `Nil`. The REPL runs each entry this
 /// way, because an entry's last expression is the program's last value.
 pub fn run_showing(program: &Program, host: &mut dyn Host) -> Result<Option<String>, Stop> {
-    let code = code::load(program)?;
+    let code = code::load(program, Audit::Never)?;
     let mut machine = exec::Machine::new(&code, host);
     let ended = machine.run()?;
     machine.shown(ended)

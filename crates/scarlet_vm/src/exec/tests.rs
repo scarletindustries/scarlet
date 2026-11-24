@@ -1,5 +1,6 @@
 use super::*;
 use crate::OsHost;
+use crate::heap::AuditFault;
 
 /// `passing` sits where a 16-byte load reaches it in one instruction,
 /// and the heap comes after it, so the heap's size cannot move it.
@@ -26,7 +27,7 @@ fn cells_left_after_in(
     let result = scarlet_core::compile::compile_text(src, None);
     assert!(result.success(), "{:?}", result.diagnostics());
     let program = result.into_runnable().expect("a clean compile is runnable");
-    let code = crate::code::load(&program).expect("the program loads");
+    let code = crate::code::load(&program, Audit::Never).expect("the program loads");
     let mut host = OsHost::new(argv, env, Vec::new());
     let mut m = Machine::new(&code, &mut host);
     let ended = m.run().expect("the program runs");
@@ -452,7 +453,7 @@ fn after_running(src: &str, check: impl FnOnce(&mut Machine<'_, '_>, Ended)) {
     let result = scarlet_core::compile::compile_text(src, None);
     assert!(result.success(), "{:?}", result.diagnostics());
     let program = result.into_runnable().expect("a clean compile is runnable");
-    let code = crate::code::load(&program).expect("the program loads");
+    let code = crate::code::load(&program, Audit::Never).expect("the program loads");
     let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
     let mut m = Machine::new(&code, &mut host);
     let ended = m.run().expect("the program runs");
@@ -473,7 +474,7 @@ fn held_by_a_global(m: &Machine<'_, '_>) -> Cell {
 fn an_audit_of_a_run_with_every_count_right_finds_nothing() {
     after_running(HOLDS_A_CELL, |m, ended| {
         assert!(m.heap.live() > 0, "the global still holds its array");
-        assert_eq!(m.finish(ended, AtExit::Audit), Ok(()));
+        assert_eq!(m.finish(ended, Audit::AtEnd), Ok(()));
         assert_eq!(m.heap.live(), 0);
     });
 }
@@ -484,39 +485,233 @@ fn an_audit_of_a_run_with_every_count_right_finds_nothing() {
 fn a_run_that_is_not_audited_leaves_its_heap_alone() {
     after_running(HOLDS_A_CELL, |m, ended| {
         let cell = held_by_a_global(m);
-        m.heap.share(cell);
+        m.heap.share(cell).expect("a live cell");
         let live = m.heap.live();
-        assert_eq!(m.finish(ended, AtExit::Leave), Ok(()));
+        assert_eq!(m.finish(ended, Audit::Never), Ok(()));
         assert_eq!(m.heap.live(), live);
     });
 }
 
-/// A count one too high means a cell nothing will ever free. The audit
-/// says how many cells that left behind: the array, its leaf and the two
-/// strings in it.
+/// A count one too high means a cell nothing will ever free. The audit says
+/// which cell, what its count is and how many hold it.
 #[test]
-fn an_audit_counts_the_cells_a_lost_release_left() {
+fn an_audit_names_the_cell_a_lost_release_left() {
     after_running(HOLDS_A_CELL, |m, ended| {
         let cell = held_by_a_global(m);
-        m.heap.share(cell);
+        m.heap.share(cell).expect("a live cell");
+        let fault = AuditFault::Miscounted {
+            cell,
+            count: 2,
+            holders: 1,
+        };
         assert_eq!(
-            m.finish(ended, AtExit::Audit),
-            Err(Stop::broken(Broken::CellsLeft { cells: 4 }))
+            m.finish(ended, Audit::AtEnd),
+            Err(Stop::broken(Broken::Audit(fault)))
         );
     });
 }
 
-/// A count one too low means a cell freed while something still holds
-/// it. The audit stops at the holder that gives it up next.
+/// A count one too low means a cell freed while something still holds it.
 #[test]
-fn an_audit_stops_at_a_cell_released_once_too_often() {
+fn an_audit_finds_a_reference_to_a_freed_cell() {
     after_running(HOLDS_A_CELL, |m, ended| {
         let cell = held_by_a_global(m);
         m.heap.release(cell).expect("the global's reference");
+        let fault = AuditFault::Dangling {
+            holder: None,
+            to: cell,
+        };
         assert_eq!(
-            m.finish(ended, AtExit::Audit),
-            Err(Stop::broken(Broken::DeadCell))
+            m.finish(ended, Audit::AtEnd),
+            Err(Stop::broken(Broken::Audit(fault)))
         );
+    });
+}
+
+/// The case no release can find: the freed space is a new cell, so the old
+/// holder and the new one hold the same cell and its count is 1.
+#[test]
+fn an_audit_finds_a_freed_cell_handed_out_again() {
+    after_running(HOLDS_A_CELL, |m, ended| {
+        let cell = held_by_a_global(m);
+        m.heap.release(cell).expect("the global's reference");
+        let data = vec![Value::NIL.bits(); 6];
+        let again = m.heap.make(Kind::Binary, &data).expect("room");
+        assert_eq!(again, cell);
+        assert_eq!(m.heap.audit(m.globals.iter().copied()), Ok(()));
+        m.globals.push(Value::cell(again));
+        let fault = AuditFault::Miscounted {
+            cell,
+            count: 1,
+            holders: 2,
+        };
+        assert_eq!(
+            m.finish(ended, Audit::AtEnd),
+            Err(Stop::broken(Broken::Audit(fault)))
+        );
+    });
+}
+
+/// Cells that hold each other have the counts they should, so it takes the
+/// end of the run, when nothing outside the heap is left, to see them. No
+/// Scarlet program can make them.
+#[test]
+fn an_audit_finds_cells_that_hold_each_other() {
+    after_running(HOLDS_A_CELL, |m, ended| {
+        let a = m.heap.tuple(&[Value::NIL]).expect("room");
+        let b = m.heap.tuple(&[Value::cell(a)]).expect("room");
+        m.heap.data_mut(a)[0] = Value::cell(b).bits();
+        assert_eq!(
+            m.finish(ended, Audit::AtEnd),
+            Err(Stop::broken(Broken::CellsLeft { cells: 2 }))
+        );
+    });
+}
+
+/// A run's roots are its registers, its globals, `os.env`'s map and the
+/// closure each frame runs as. With any one of them left out, the cell it
+/// holds would look as if its count were too high.
+#[test]
+fn an_audit_is_told_of_every_reference_a_run_holds() {
+    after_running("pub fn main() {\n\tNil\n}\n", |m, _| {
+        let cells: Vec<Cell> = (0..5)
+            .map(|_| m.heap.tuple(&[Value::NIL]).expect("room"))
+            .collect();
+        let [reg, global, env, running, waiting] = cells[..] else {
+            panic!("five cells");
+        };
+        let mut callers = Vec::new();
+        let miscounted = |cell| {
+            Err(Stop::broken(Broken::Audit(AuditFault::Miscounted {
+                cell,
+                count: 1,
+                holders: 0,
+            })))
+        };
+        assert_eq!(m.audit(Value::NIL, &callers), miscounted(reg));
+        m.open(1);
+        m.regs[0] = Value::cell(reg);
+        assert_eq!(m.audit(Value::NIL, &callers), miscounted(global));
+        m.globals.push(Value::cell(global));
+        assert_eq!(m.audit(Value::NIL, &callers), miscounted(env));
+        m.env = Some(env);
+        assert_eq!(m.audit(Value::NIL, &callers), miscounted(running));
+        assert_eq!(m.audit(Value::cell(running), &callers), miscounted(waiting));
+        let Some(Func::Ready(body)) = m.code.toplevels.first() else {
+            panic!("a toplevel");
+        };
+        callers.push(Frame {
+            body,
+            pc: 0,
+            base: 0,
+            ret_to: None,
+            env: Value::cell(waiting),
+        });
+        assert_eq!(m.audit(Value::cell(running), &callers), Ok(()));
+    });
+}
+
+/// An `Audit` passes between any two instructions that leave every count
+/// right, and stops the run at the first that finds one wrong.
+#[test]
+fn an_audit_instruction_stops_where_a_count_is_wrong() {
+    let mut instrs = an_array_in_r1().to_vec();
+    instrs.extend([
+        Instr::Audit,
+        mv(2, 1, false),
+        Instr::Audit,
+        Instr::Drop { reg: Reg(2) },
+        Instr::Audit,
+        Instr::Ret { src: Reg(1) },
+    ]);
+    after_instrs(3, instrs, the_only_cell_left);
+
+    let shared_once_too_often = |heap: &mut Heap| {
+        let cell = heap.tuple(&[Value::NIL]).expect("room");
+        heap.share(cell).expect("a live cell");
+        Some(Value::cell(cell))
+    };
+    let body = vec![Instr::Audit, Instr::Ret { src: Reg(0) }];
+    after_instrs_given(1, body, shared_once_too_often, |_, got| {
+        let Err(Stop::BadProgram(why)) = got else {
+            panic!("the audit finds the count");
+        };
+        assert!(
+            why.to_string().ends_with("has a count of 2 and 1 holders"),
+            "{why}"
+        );
+    });
+}
+
+/// An instruction that takes another reference to a freed cell stops there,
+/// before it writes the value anywhere.
+#[test]
+fn a_share_of_a_freed_cell_stops_the_instruction() {
+    let freed = |heap: &mut Heap| {
+        let cell = heap.tuple(&[Value::NIL]).expect("room");
+        heap.release(cell).expect("a live cell");
+        Some(Value::cell(cell))
+    };
+    let shares = [
+        mv(1, 0, false),
+        Instr::Tuple {
+            dst: Reg(1),
+            elements: Box::new([Reg(0)]),
+        },
+        Instr::Array {
+            dst: Reg(1),
+            elements: Box::new([Reg(0)]),
+        },
+        Instr::SetGlobal {
+            slot: scarlet_ir::core_ir::GlobalSlot(0),
+            src: Reg(0),
+        },
+        Instr::TailCallSelf {
+            args: Box::new([Arg {
+                reg: Reg(0),
+                moved: false,
+            }]),
+        },
+    ];
+    for share in shares {
+        let what = format!("{share:?}");
+        let body = vec![share, Instr::Ret { src: Reg(1) }];
+        after_instrs_given(2, body, freed, |m, got| {
+            assert!(
+                matches!(got, Err(ref stop) if *stop == Stop::broken(Broken::DeadCell)),
+                "{what}"
+            );
+            assert_eq!(m.heap.live(), 0, "{what}");
+            let written = m.regs.iter().skip(1).chain(&m.globals);
+            let all_nil = written.copied().all(|v| v.bits() == Value::NIL.bits());
+            assert!(all_nil, "{what} wrote the freed cell somewhere");
+        });
+    }
+}
+
+/// The second read of a big Int constant finds the cell the first one made,
+/// and the end of the run frees it.
+#[test]
+fn a_big_int_constant_is_made_once() {
+    let big = |dst| Instr::BigInt {
+        dst: Reg(dst),
+        n: i64::MAX,
+        id: scarlet_ir::core_ir::ConstId(3),
+    };
+    let body = vec![
+        big(0),
+        big(1),
+        big(0),
+        Instr::Audit,
+        Instr::Ret { src: Reg(1) },
+    ];
+    after_instrs(2, body, |m, got| {
+        let v = got.expect("the function returns");
+        assert_eq!(m.heap.made(), 1);
+        assert_eq!(m.heap.live(), 1);
+        assert_eq!(m.int_of(v).map(Int::big), Ok(i64::MAX.into()));
+        assert_eq!(m.finish(Ended { last: v }, Audit::AtEnd), Ok(()));
+        assert_eq!(m.heap.live(), 0);
     });
 }
 
@@ -548,7 +743,8 @@ fn after_instrs(
 }
 
 /// [`after_instrs`], for a function that takes in `r0` what `given`
-/// makes in the machine's heap, when it makes something.
+/// makes in the machine's heap, when it makes something. The machine has one
+/// global, which holds `Nil`.
 fn after_instrs_given(
     regs: u32,
     instrs: Vec<Instr>,
@@ -558,9 +754,10 @@ fn after_instrs_given(
     let result = scarlet_core::compile::compile_text("pub fn main() {\n\tNil\n}\n", None);
     assert!(result.success(), "{:?}", result.diagnostics());
     let program = result.into_runnable().expect("a clean compile is runnable");
-    let code = crate::code::load(&program).expect("the program loads");
+    let code = crate::code::load(&program, Audit::Never).expect("the program loads");
     let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
     let mut m = Machine::new(&code, &mut host);
+    m.globals.push(Value::NIL);
     let args: Vec<Value> = given(&mut m.heap).into_iter().collect();
     let body = Body {
         name: "test.body".to_string(),

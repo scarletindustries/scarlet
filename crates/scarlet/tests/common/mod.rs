@@ -78,8 +78,9 @@ impl Drop for ChildGuard {
     }
 }
 
-/// `scarlet run <path>`, audited: when the program ends, the VM gives up
-/// everything it still holds and fails the run if a heap cell is left. So
+/// `scarlet run <path>`, audited: when the program ends, the VM checks the
+/// whole heap, gives up everything the run still holds, and checks again that
+/// nothing is left. A check that finds something wrong fails the run. So
 /// every program a test runs to its end is also a test that no reference
 /// count went wrong.
 ///

@@ -13,33 +13,49 @@
 //!   The box is freed when the cell is.
 //!
 //! Every cell starts with one header word holding its reference count, its
-//! kind and its size in words. A cell is freed when its count reaches zero,
-//! and its space is kept on a free list for the next cell of the same size.
-//! Freeing a cell also gives up the references it holds, like a constructor's
-//! fields or an array node's children, and so on down. Freeing a cell zeroes
-//! its header, so a holder that gives up its reference and finds a zeroed
-//! header has found a count that went wrong, and gets [`DeadCell`] instead
-//! of a second free. That holds until the space is handed out again as a new
-//! cell. From then on the stale holder's cell is the new one, and nothing
-//! here can tell. An index past the arena's end, and index 0, read as a
-//! freed cell too.
+//! kind and its size in words. A cell is freed when its last reference goes,
+//! and its space is kept for the next cell of the same size, on a list that
+//! runs through the freed cells themselves: each keeps the next one's index
+//! in its second word, so no cell takes less than [`LEAST_WORDS`]. Freeing a
+//! cell also gives up the references it holds, like a constructor's fields or
+//! an array node's children, and so on down.
+//!
+//! A count is a signed number, and its sign says what it means:
+//!
+//! | count            | the cell                                            |
+//! |------------------|-----------------------------------------------------|
+//! | 1 and up         | has that many holders                               |
+//! | 0                | is free, or is not one the heap has                 |
+//! | [`UNCOUNTED`]    | is never freed, whoever holds it                    |
+//! | any other below 0| is waiting to be freed, and names the next that is  |
+//!
+//! A share adds one to a count above 0, and a release takes one from a count
+//! above 1 and frees at 1. Any other count is looked at apart, so finding a
+//! freed cell costs those paths nothing: a holder of one gets [`DeadCell`],
+//! whether it shares the cell, gives it up or asks if it is the only holder.
+//! That holds until the space is handed out again as a new cell. From then on
+//! the stale holder's cell is the new one, and only [`audit`] can tell. An
+//! index past the arena's end, and index 0, read as a freed cell too.
 //!
 //! The arena is words, not bytes, and cells are named by index rather than
 //! by address, so the heap needs no `unsafe`, a cell's name stays good when
 //! the arena grows, and the heap moves with its process as plain data.
 
-use std::collections::HashMap;
-
 use num_bigint::{BigInt, Sign};
 use scarlet_ir::TypeId;
-use scarlet_ir::core_ir::{FuncIdx, VariantRef};
+use scarlet_ir::core_ir::{ConstId, FuncIdx, VariantRef};
+use scarlet_ir::tivec::Idx;
 
 use crate::value::Value;
 use crate::word::{low_u16, low_u32, to_usize};
 
+mod audit;
+
+pub(crate) use audit::{AuditFailure, AuditFault};
+
 /// The most words a heap holds: the arena's and the boxes' together, which
-/// is 16 GiB. A cell's index then fits in 31 bits.
-const LIMIT_WORDS: usize = 1 << 31;
+/// is 16 GiB. A cell's index then fits in the 31 bits below [`DYING`].
+const LIMIT_WORDS: usize = DYING as usize;
 
 /// The most words a cell takes in the arena, its header's among them. A
 /// longer cell lives in a box.
@@ -49,6 +65,14 @@ const ARENA_CELL_WORDS: usize = 254;
 /// its box.
 const STUB_WORDS: usize = 2;
 
+/// The fewest words a cell takes in the arena, whatever its size: room for a
+/// header and, once it is freed, the index of the next free cell.
+const LEAST_WORDS: usize = 2;
+
+/// How many words of a dying cell the free loop looks up at once, when there
+/// are that many.
+const STRIDE: usize = 8;
+
 /// A header holds a cell's size in this many bits.
 const SIZE_BITS: u32 = 28;
 
@@ -56,11 +80,24 @@ const SIZE_BITS: u32 = 28;
 /// or in a box.
 pub(crate) const MAX_CELL_WORDS: usize = (1 << SIZE_BITS) - 1;
 
-/// A reference count that has reached this stays there, and its cell is never
-/// freed. A count cannot grow past the 32 bits its header has for it, and a
-/// count that wrapped would free a cell still in use. This is what Koka and
-/// Lean do with a count that overflows.
-const STICKY: u64 = 0xFFFF_FFFF;
+/// The bits of a header that hold its count.
+const COUNT: u64 = 0xFFFF_FFFF;
+
+/// The count of a cell that is never freed and whose count never changes. A
+/// constant's cell is made so ([`Heap::keep_constant`]). A count that
+/// overflows lands here too, and stays, because a count that wrapped would
+/// free a cell still in use. This is what Koka and Lean do with one that
+/// overflows.
+const UNCOUNTED: i32 = i32::MIN;
+
+/// Set in the count of a cell waiting to be freed. The bits below are the
+/// index of the next cell waiting, or [`NO_MORE`].
+const DYING: u32 = 1 << 31;
+
+/// The end of the list of cells waiting to be freed. It is the last index
+/// the arena can have, and no cell is there: a cell takes two words. So the
+/// count of a cell waiting is never [`UNCOUNTED`], which would name word 0.
+const NO_MORE: u32 = DYING - 1;
 
 /// A cell, named by the index of its header word in the heap's arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,10 +169,10 @@ pub(crate) enum Kind {
     Handle = 15,
 }
 
-/// A freed cell found where a holder gives its reference up or asks whether
-/// it is the only one. Something still held the cell after its last
-/// reference went. The heap stops there instead of freeing the cell a second
-/// time.
+/// A freed cell found where a holder takes another reference to it, gives its
+/// reference up or asks whether it is the only holder. Something still held
+/// the cell after its last reference went. The heap stops there instead of
+/// counting in a cell that is gone, or freeing it a second time.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct DeadCell;
 
@@ -160,43 +197,6 @@ impl From<DeadCell> for Fault {
     }
 }
 
-/// Sizes below this, in words, have their free list in a plain array. Almost
-/// every cell is one of these: constructors, tuples, closures, array nodes
-/// and short strings.
-const DENSE_SIZES: usize = 64;
-
-/// Freed cells, one list per size in words. The size is the key for both
-/// halves. Small sizes index an array, so the alloc and free on every hot path
-/// do no hashing, and the rare large size goes in a map.
-#[derive(Default)]
-struct FreeLists {
-    dense: Vec<Vec<Cell>>,
-    sparse: HashMap<usize, Vec<Cell>>,
-}
-
-impl FreeLists {
-    fn pop(&mut self, size: usize) -> Option<Cell> {
-        if size < DENSE_SIZES {
-            self.dense.get_mut(size)?.pop()
-        } else {
-            self.sparse.get_mut(&size)?.pop()
-        }
-    }
-
-    fn push(&mut self, size: usize, cell: Cell) {
-        if size < DENSE_SIZES {
-            if self.dense.len() <= size {
-                self.dense.resize_with(DENSE_SIZES, Vec::new);
-            }
-            if let Some(list) = self.dense.get_mut(size) {
-                list.push(cell);
-            }
-        } else {
-            self.sparse.entry(size).or_default().push(cell);
-        }
-    }
-}
-
 pub(crate) struct Heap {
     /// Every cell's header, and after it the cell's other words, or for a
     /// long cell the number of its box. Its length is how much has been
@@ -211,21 +211,17 @@ pub(crate) struct Heap {
     boxed: usize,
     /// The most words the arena and the boxes may hold between them.
     limit: usize,
-    /// Freed cells, by the words they take in the arena, ready to be reused.
-    free: FreeLists,
-    /// Cells made and not yet freed. Every cell made adds one and every
-    /// cell freed takes one off. A cell is only freed while its header is
-    /// not the zeroed one freeing leaves ([`freed`]), which is once each time
-    /// it is made, so this is exact and never goes below zero.
-    live: usize,
+    /// The first free cell of each size, by the words it takes in the arena,
+    /// or 0 when there is none. It grows when a size is first freed.
+    free: Vec<u32>,
+    /// The cell of each big Int constant this heap has been asked for, by the
+    /// constant's number in the program, or 0.
+    constants: Vec<u32>,
     /// Cells taken from the arena's end or a free list over this heap's
     /// life, and cells a constructor overwrote in place instead
     /// (`internal.sca`).
     made: usize,
     reused: usize,
-    /// The cells a [`Heap::release`] still has to give a reference up for.
-    /// Kept between calls so a release does not allocate.
-    dying: Vec<Cell>,
     /// The numbers of handle cells freed since the last
     /// [`Heap::take_released`].
     released: Vec<u64>,
@@ -239,60 +235,114 @@ impl Default for Heap {
             spare: Vec::new(),
             boxed: 0,
             limit: LIMIT_WORDS,
-            free: FreeLists::default(),
-            live: 0,
+            free: Vec::new(),
+            constants: Vec::new(),
             made: 0,
             reused: 0,
-            dying: Vec::new(),
             released: Vec::new(),
         }
     }
 }
 
 impl Heap {
-    /// A new cell of `kind` with `fixed` and then `n` words after its header.
+    /// A new cell of `kind` with `first` and then `rest` after its header.
     /// Its count is 1, and the caller holds that one reference.
-    fn alloc(&mut self, kind: Kind, fixed: usize, n: usize) -> Result<Cell, Fault> {
-        let size = n
-            .checked_add(fixed)
-            .and_then(|data| data.checked_add(1))
-            .filter(|size| *size <= MAX_CELL_WORDS)
-            .ok_or(Fault::Full)?;
-        // No free list has a long cell: its stub is freed as two words.
-        let cell = if size > ARENA_CELL_WORDS {
-            self.long(kind, size)?
-        } else {
-            let cell = match self.free.pop(size) {
-                Some(cell) => cell,
-                None => self.carve(size)?,
-            };
-            self.set_header(cell, header(1, kind, size));
-            cell
+    // The way off a free list goes inside every maker of cells, so that a
+    // cell made where one was freed costs no call.
+    #[inline(always)]
+    fn cell<const N: usize>(
+        &mut self,
+        kind: Kind,
+        first: [u64; N],
+        rest: impl ExactSizeIterator<Item = u64>,
+    ) -> Result<Cell, Fault> {
+        let n = N.saturating_add(rest.len());
+        let Some((cell, words)) = self.pop(space(n.saturating_add(1))) else {
+            return self.append(kind, first, rest);
         };
-        self.live = self.live.wrapping_add(1);
-        self.made = self.made.saturating_add(1);
+        if let Some((h, words)) = words.split_first_mut()
+            && let Some((slots, words)) = words.split_first_chunk_mut::<N>()
+        {
+            *h = header(kind, n.saturating_add(1));
+            *slots = first;
+            for (slot, w) in words.iter_mut().zip(rest) {
+                *slot = w;
+            }
+        }
+        self.made = self.made.wrapping_add(1);
         Ok(cell)
     }
 
-    /// `size` new words at the arena's end.
-    fn carve(&mut self, size: usize) -> Result<Cell, Fault> {
-        let at = self.arena.len();
-        let end = at.saturating_add(size);
-        if end > self.arena.capacity() || end.saturating_add(self.boxed) > self.limit {
-            return self.grow(size);
+    /// [`Self::cell`] for a maker that writes the `n` words itself. Until it
+    /// does they hold whatever was there.
+    fn blank(&mut self, kind: Kind, n: usize) -> Result<Cell, Fault> {
+        let size = n.saturating_add(1);
+        let Some((cell, words)) = self.pop(space(size)) else {
+            return self.append(kind, [], std::iter::repeat_n(0, n));
+        };
+        if let Some(h) = words.first_mut() {
+            *h = header(kind, size);
         }
-        self.arena.resize(end, 0);
-        Cell::at(at).ok_or(Fault::Full)
+        self.made = self.made.wrapping_add(1);
+        Ok(cell)
     }
 
-    /// [`Self::carve`] when the arena has to ask the system for room first,
-    /// or has reached the limit. The first cell of all comes here, because
-    /// an empty arena has no room, and is put after word 0.
+    /// The first free cell of `space` words, taken off its list, and those
+    /// words, when there is one.
+    #[inline(always)]
+    fn pop(&mut self, space: usize) -> Option<(Cell, &mut [u64])> {
+        let head = self.free.get_mut(space).filter(|head| **head != 0)?;
+        let cell = Cell(*head);
+        let words = self
+            .arena
+            .get_mut(cell.index()..cell.index().wrapping_add(space))?;
+        *head = low_u32(*words.get(1)?);
+        Some((cell, words))
+    }
+
+    /// [`Self::cell`] when no freed cell has the size. The cell goes at the
+    /// arena's end, and each of its words is written once.
+    #[inline(never)]
+    fn append<const N: usize>(
+        &mut self,
+        kind: Kind,
+        first: [u64; N],
+        rest: impl ExactSizeIterator<Item = u64>,
+    ) -> Result<Cell, Fault> {
+        let size = N.saturating_add(rest.len()).saturating_add(1);
+        if size > ARENA_CELL_WORDS {
+            let words = self.gather(first, rest)?;
+            return self.long(kind, words);
+        }
+        let at = self.room(space(size))?;
+        let cell = Cell::at(at).ok_or(Fault::Full)?;
+        let words = std::iter::once(header(kind, size)).chain(first);
+        self.arena.extend(words.chain(rest));
+        if size < LEAST_WORDS {
+            self.arena.push(0);
+        }
+        self.made = self.made.wrapping_add(1);
+        Ok(cell)
+    }
+
+    /// The index of the arena's end, where there is room for `space` words.
+    fn room(&mut self, space: usize) -> Result<usize, Fault> {
+        let at = self.arena.len();
+        let end = at.saturating_add(space);
+        if end > self.arena.capacity() || end.saturating_add(self.boxed) > self.limit {
+            return self.grow(space);
+        }
+        Ok(at)
+    }
+
+    /// [`Self::room`] when the arena has to ask the system for it, or has
+    /// reached the limit. The first cell of all comes here, because an empty
+    /// arena has no room, and is put after word 0.
     #[cold]
     #[inline(never)]
-    fn grow(&mut self, size: usize) -> Result<Cell, Fault> {
+    fn grow(&mut self, space: usize) -> Result<usize, Fault> {
         let len = self.arena.len();
-        let more = size.saturating_add(usize::from(len == 0));
+        let more = space.saturating_add(usize::from(len == 0));
         let end = len.saturating_add(more);
         if end.saturating_add(self.boxed) > self.limit {
             return Err(Fault::Full);
@@ -304,48 +354,62 @@ impl Heap {
         {
             return Err(Fault::Full);
         }
-        let at = end.saturating_sub(size);
-        self.arena.resize(end, 0);
-        Cell::at(at).ok_or(Fault::Full)
+        if len == 0 {
+            self.arena.push(0);
+        }
+        Ok(end.saturating_sub(space))
     }
 
-    /// A new cell of `size` words, which is too many for the arena. Its
-    /// words after the header go in a box, zeroed, and the arena gets a stub:
-    /// a header that gives the size as 0, then the box's number.
+    /// The words of a cell too long for the arena, in an allocation of
+    /// exactly their size.
     #[cold]
     #[inline(never)]
-    fn long(&mut self, kind: Kind, size: usize) -> Result<Cell, Fault> {
-        let n = size.saturating_sub(1);
+    fn gather<const N: usize>(
+        &self,
+        first: [u64; N],
+        rest: impl ExactSizeIterator<Item = u64>,
+    ) -> Result<Vec<u64>, Fault> {
+        let n = N.saturating_add(rest.len());
         let held = self.arena.len().saturating_add(self.boxed);
-        if held.saturating_add(n) > self.limit {
+        if n >= MAX_CELL_WORDS || held.saturating_add(n) > self.limit {
             return Err(Fault::Full);
         }
         let mut words = Vec::new();
         words.try_reserve_exact(n).map_err(|_| Fault::Full)?;
-        words.resize(n, 0);
+        words.extend_from_slice(&first);
+        words.extend(rest);
+        Ok(words)
+    }
+
+    /// [`Self::cell`] for one too long for the arena, with `words` after its
+    /// header. They go in a box, and the arena gets a stub: a header that
+    /// gives the size as 0, then the box's number.
+    #[cold]
+    #[inline(never)]
+    fn long(&mut self, kind: Kind, words: Vec<u64>) -> Result<Cell, Fault> {
         // The box is kept first, so that the stub's two words are tested
         // against the limit with it. A stub that is refused gives the box
         // back, and no cell is left half made.
         let number = self.keep(words.into_boxed_slice())?;
-        let stub = match self.free.pop(STUB_WORDS) {
-            Some(stub) => stub,
-            None => match self.carve(STUB_WORDS) {
-                Ok(stub) => stub,
+        let stub = [header(kind, 0), u64::from(number)];
+        let cell = match self.pop(STUB_WORDS) {
+            Some((cell, words)) => {
+                words.copy_from_slice(&stub);
+                cell
+            }
+            None => match self.room(STUB_WORDS) {
+                Ok(at) => {
+                    self.arena.extend_from_slice(&stub);
+                    Cell::at(at).ok_or(Fault::Full)?
+                }
                 Err(full) => {
-                    self.let_go(number as usize);
+                    self.unbox(number);
                     return Err(full);
                 }
             },
         };
-        if let Some([h, second]) = self
-            .arena
-            .get_mut(stub.index()..)
-            .and_then(|w| w.get_mut(..2))
-        {
-            *h = header(1, kind, 0);
-            *second = u64::from(number);
-        }
-        Ok(stub)
+        self.made = self.made.wrapping_add(1);
+        Ok(cell)
     }
 
     /// Put `words` in the table of boxes, in a place a freed box left or in
@@ -367,71 +431,206 @@ impl Heap {
         Ok(number)
     }
 
-    /// Free the box in place `slot`, and keep the place's number for the
-    /// next box.
-    fn let_go(&mut self, slot: usize) {
-        let (Some(words), Ok(number)) = (
-            self.outside.get_mut(slot).and_then(Option::take),
-            u32::try_from(slot),
-        ) else {
-            return;
-        };
+    /// Take box `number` out of the table, and keep its place for the next
+    /// box.
+    fn unbox(&mut self, number: u32) -> Option<Box<[u64]>> {
+        let words = self
+            .outside
+            .get_mut(number as usize)
+            .and_then(Option::take)?;
         self.boxed = self.boxed.saturating_sub(words.len());
         self.spare.push(number);
+        Some(words)
     }
 
-    /// Add one reference to `cell`.
-    pub(crate) fn share(&mut self, cell: Cell) {
-        let h = self.header(cell);
-        let c = count(h);
-        if c < STICKY {
-            self.set_header(cell, with_count(h, c.saturating_add(1)));
+    /// Add one reference to `cell`. A freed cell, and a cell the heap does
+    /// not have, is [`DeadCell`].
+    #[inline(always)]
+    pub(crate) fn share(&mut self, cell: Cell) -> Result<(), DeadCell> {
+        if let Some(h) = self.arena.get_mut(cell.index())
+            && count(*h) > 0
+        {
+            // The count is the header's low bits, and one past the most it
+            // can be is `UNCOUNTED`, so this carries into nothing else.
+            *h = h.wrapping_add(1);
+            return Ok(());
         }
+        self.uncounted(cell)
+    }
+
+    /// `v` with one more reference, for keeping it somewhere new.
+    pub(crate) fn own(&mut self, v: Value) -> Result<Value, DeadCell> {
+        if let Some(cell) = v.as_cell() {
+            self.share(cell)?;
+        }
+        Ok(v)
     }
 
     /// Drop one reference to `cell`, freeing it when that was the last.
-    ///
-    /// A freed cell's fields each lose a reference in turn. We keep them on a
-    /// list instead of releasing them by recursion, so freeing a very long
-    /// list takes no more stack than freeing one cell.
     ///
     /// A freed cell, whether it is `cell` or something a dying cell held, is
     /// [`DeadCell`], and so is a cell the heap does not have. One whose
     /// space has been handed out again is not found: this takes a reference
     /// from the new cell there.
+    // The interpreter releases the old value of every register it writes, and
+    // most are not cells. Inside its loop this took registers the loop needs,
+    // and cost more at every instruction than the call costs here. Marked
+    // cold, the call takes no register from the paths that do not make it.
+    #[cold]
+    #[inline(never)]
     pub(crate) fn release(&mut self, cell: Cell) -> Result<(), DeadCell> {
-        // Most releases leave the cell alive, and need no list of the dying.
-        let h = self.header(cell);
-        let c = count(h);
-        if c > 1 {
-            if c < STICKY {
-                self.set_header(cell, with_count(h, c.saturating_sub(1)));
-            }
+        let Some(slot) = self.arena.get_mut(cell.index()) else {
+            return Err(DeadCell);
+        };
+        let h = *slot;
+        if count(h) > 1 {
+            *slot = h.wrapping_sub(1);
             return Ok(());
         }
-        let mut dying = std::mem::take(&mut self.dying);
-        dying.push(cell);
-        while let Some(cell) = dying.pop() {
-            let h = self.header(cell);
-            let c = count(h);
-            if c > 1 {
-                if c < STICKY {
-                    self.set_header(cell, with_count(h, c.saturating_sub(1)));
+        if count(h) != 1 {
+            return self.uncounted(cell);
+        }
+        // A string, a binary or a big Int holds nothing, and freeing one is
+        // only putting it on a list.
+        if RAW >> kind_bits(h) & 1 == 1 && size(h) != 0 {
+            self.shelve(cell, space(size(h)));
+            return Ok(());
+        }
+        self.free(cell, h)
+    }
+
+    /// What a share or a release comes to when `cell`'s count is not above 0:
+    /// nothing for a cell that is never counted, and [`DeadCell`] for any
+    /// other.
+    #[cold]
+    #[inline(never)]
+    fn uncounted(&self, cell: Cell) -> Result<(), DeadCell> {
+        if count(self.header(cell)) == UNCOUNTED {
+            Ok(())
+        } else {
+            Err(DeadCell)
+        }
+    }
+
+    /// Free `cell`, whose header is `h` and whose last reference is given up,
+    /// and every cell that then has no holder.
+    ///
+    /// A cell whose last reference goes on the way waits on a list that runs
+    /// through the waiting cells' own counts. So freeing a list of a million
+    /// cells takes no more stack than freeing one, and no storage at all.
+    /// This is Lean's `lean_del_core`.
+    #[inline(never)]
+    fn free(&mut self, cell: Cell, h: u64) -> Result<(), DeadCell> {
+        let (mut cell, mut h, mut todo) = (cell, h, NO_MORE);
+        loop {
+            match size(h).checked_sub(1) {
+                Some(len) => {
+                    let held = held(kind_bits(h), len);
+                    if held.is_empty() && kind_bits(h) == Kind::Handle as u64 {
+                        self.released.push(self.word(cell, 1));
+                    }
+                    let first = cell.index().wrapping_add(1);
+                    let mut at = first.wrapping_add(held.start);
+                    let end = first.wrapping_add(held.end);
+                    // Giving one word up may write anywhere in the arena, so
+                    // each lookup has to be made again after it. A wide cell
+                    // is copied out a stride at a time to make fewer.
+                    while let Some(words) = self
+                        .arena
+                        .get(at..end)
+                        .and_then(|rest| rest.first_chunk::<STRIDE>().copied())
+                    {
+                        for w in words {
+                            todo = self.let_go(w, todo)?;
+                        }
+                        at = at.wrapping_add(STRIDE);
+                    }
+                    while at < end
+                        && let Some(w) = self.arena.get(at)
+                    {
+                        todo = self.let_go(*w, todo)?;
+                        at = at.wrapping_add(1);
+                    }
                 }
-                continue;
+                None => todo = self.empty_box(cell, h, todo)?,
             }
-            if freed(h) {
+            self.shelve(cell, space(size(h)));
+            if todo == NO_MORE {
+                return Ok(());
+            }
+            cell = Cell(todo);
+            h = self.header(cell);
+            // Only a cell that holds itself is here and freed already.
+            if count(h) >= 0 {
                 return Err(DeadCell);
             }
-            for w in self.held_words(cell, h) {
-                if let Some(held) = Value::from_bits(*w).as_cell() {
-                    dying.push(held);
-                }
-            }
-            self.free_cell(cell, h);
+            todo = low_u32(h) & !DYING;
         }
-        self.dying = dying;
-        Ok(())
+    }
+
+    /// Give up the reference in `w`, a word a dying cell held, if it has one.
+    /// When that was the last to its cell, the cell goes on the list of the
+    /// dying, whose first is `todo`. Gives the list's first cell.
+    #[inline(always)]
+    fn let_go(&mut self, w: u64, todo: u32) -> Result<u32, DeadCell> {
+        let Some(child) = Value::from_bits(w).as_cell() else {
+            return Ok(todo);
+        };
+        if let Some(h) = self.arena.get_mut(child.index()) {
+            let c = count(*h);
+            if c > 1 {
+                *h = h.wrapping_sub(1);
+                return Ok(todo);
+            }
+            if c == 1 {
+                *h = *h & !COUNT | u64::from(DYING | todo);
+                return Ok(child.0);
+            }
+        }
+        self.uncounted(child)?;
+        Ok(todo)
+    }
+
+    /// [`Self::free`]'s part for the long cell `cell`, whose header is `h`:
+    /// give up what is in its box, and the box.
+    #[cold]
+    #[inline(never)]
+    fn empty_box(&mut self, cell: Cell, h: u64, todo: u32) -> Result<u32, DeadCell> {
+        let words = self.slot(cell, h).and_then(|number| self.unbox(number));
+        let words = words.unwrap_or_default();
+        let held = held(kind_bits(h), words.len());
+        let mut todo = todo;
+        for w in words.get(held).unwrap_or(&[]) {
+            todo = self.let_go(*w, todo)?;
+        }
+        Ok(todo)
+    }
+
+    /// Put the freed cell `cell`, which takes `space` words, at the front of
+    /// its free list.
+    #[inline(always)]
+    fn shelve(&mut self, cell: Cell, space: usize) {
+        let words = cell.index()..cell.index().wrapping_add(LEAST_WORDS);
+        if let Some(head) = self.free.get_mut(space)
+            && let Some([h, next]) = self.arena.get_mut(words)
+        {
+            *h = 0;
+            *next = free_link(space, *head);
+            *head = cell.0;
+        } else {
+            self.shelve_first(cell, space);
+        }
+    }
+
+    /// [`Self::shelve`] for a size the table of free lists does not reach
+    /// yet.
+    #[cold]
+    #[inline(never)]
+    fn shelve_first(&mut self, cell: Cell, space: usize) {
+        if self.free.len() <= space && self.arena.len() > cell.index() {
+            self.free.resize(space.saturating_add(1), 0);
+            self.shelve(cell, space);
+        }
     }
 
     /// Perceus's drop of a last reference. When nothing else holds `cell`,
@@ -446,13 +645,10 @@ impl Heap {
     /// argument as the last reference only because its caller gave up its own
     /// first.
     pub(crate) fn hollow(&mut self, cell: Cell) -> Result<bool, DeadCell> {
-        let h = self.header(cell);
-        if freed(h) {
-            return Err(DeadCell);
-        }
-        if count(h) != 1 {
+        if !self.unique(cell)? {
             return Ok(false);
         }
+        let h = self.header(cell);
         for i in held(kind_bits(h), self.data_len(cell, h)) {
             let Some(slot) = self.words_mut(cell, 1).get_mut(i) else {
                 break;
@@ -479,36 +675,52 @@ impl Heap {
             && self.data_len(cell, h).checked_sub(1) == Some(fields)
     }
 
+    /// The cell of big Int constant `id`, when [`Self::keep_constant`] has
+    /// been given one.
+    pub(crate) fn constant(&self, id: ConstId) -> Option<Cell> {
+        let cell = self.constants.get(id.index()).copied()?;
+        (cell != 0).then_some(Cell(cell))
+    }
+
+    /// Keep `cell` as the cell of big Int constant `id`. The heap takes the
+    /// caller's one reference, and from here on `cell` is never freed, so any
+    /// number of holders may come and go without a count.
+    pub(crate) fn keep_constant(&mut self, id: ConstId, cell: Cell) -> Result<(), Fault> {
+        let len = id.index().saturating_add(1);
+        if self.constants.len() < len {
+            let more = len.saturating_sub(self.constants.len());
+            self.constants.try_reserve(more).map_err(|_| Fault::Full)?;
+            self.constants.resize(len, 0);
+        }
+        if let Some(kept) = self.constants.get_mut(id.index()) {
+            *kept = cell.0;
+        }
+        self.recount(cell, UNCOUNTED);
+        Ok(())
+    }
+
+    /// Give up the heap's reference to each constant it kept. The run is
+    /// over, so nothing else holds one.
+    pub(crate) fn let_go_of_constants(&mut self) -> Result<(), DeadCell> {
+        for cell in std::mem::take(&mut self.constants) {
+            if cell != 0 {
+                self.recount(Cell(cell), 1);
+                self.release(Cell(cell))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Make `cell`'s count `c`.
+    fn recount(&mut self, cell: Cell, c: i32) {
+        if let Some(h) = self.arena.get_mut(cell.index()) {
+            *h = *h & !COUNT | u64::from(c.cast_unsigned());
+        }
+    }
+
     /// The handle numbers freed since this was last asked.
     pub(crate) fn take_released(&mut self) -> Vec<u64> {
         std::mem::take(&mut self.released)
-    }
-
-    /// Give back the space of `cell`, whose header is `h`, which the caller
-    /// has checked is not a freed cell's.
-    fn free_cell(&mut self, cell: Cell, h: u64) {
-        if kind_bits(h) == Kind::Handle as u64 {
-            self.released.push(self.word(cell, 1));
-        }
-        self.live = self.live.wrapping_sub(1);
-        let size = match size(h) {
-            0 => {
-                self.unbox(cell, h);
-                STUB_WORDS
-            }
-            size => size,
-        };
-        self.set_header(cell, 0);
-        self.free.push(size, cell);
-    }
-
-    /// Give back the box of the long cell `cell`, whose header is `h`.
-    #[cold]
-    #[inline(never)]
-    fn unbox(&mut self, cell: Cell, h: u64) {
-        if let Some(slot) = self.slot(cell, h) {
-            self.let_go(slot);
-        }
     }
 
     pub(crate) fn kind(&self, cell: Cell) -> Option<Kind> {
@@ -523,12 +735,8 @@ impl Heap {
 
     /// A new string cell holding `text`.
     pub(crate) fn string(&mut self, text: &[u8]) -> Result<Cell, Fault> {
-        let cell = self.alloc(Kind::String, 1, text.len().div_ceil(8))?;
-        self.set_word(cell, 1, text.len() as u64);
-        for (slot, bytes) in self.words_mut(cell, 2).iter_mut().zip(text.chunks(8)) {
-            *slot = padded_word(bytes);
-        }
-        Ok(cell)
+        let words = text.chunks(8).map(padded_word);
+        self.cell(Kind::String, [text.len() as u64], words)
     }
 
     /// A string cell's length in bytes.
@@ -561,13 +769,9 @@ impl Heap {
     /// A new big-int cell holding `n`.
     pub(crate) fn big_int(&mut self, n: &BigInt) -> Result<Cell, Fault> {
         let (sign, digits) = n.to_u64_digits();
-        let cell = self.alloc(Kind::BigInt, 1, digits.len())?;
         let negative = u64::from(sign == Sign::Minus) << 63;
-        self.set_word(cell, 1, negative | digits.len() as u64);
-        for (slot, d) in self.words_mut(cell, 2).iter_mut().zip(&digits) {
-            *slot = *d;
-        }
-        Ok(cell)
+        let first = [negative | digits.len() as u64];
+        self.cell(Kind::BigInt, first, digits.into_iter())
     }
 
     /// The Int in big Int cell `cell`, when it is one word long, as an
@@ -592,13 +796,9 @@ impl Heap {
         let lo = u64::try_from(m & u128::from(u64::MAX)).unwrap_or(0);
         let hi = u64::try_from(m >> 64).unwrap_or(0);
         let digits: &[u64] = if hi == 0 { &[lo] } else { &[lo, hi] };
-        let cell = self.alloc(Kind::BigInt, 1, digits.len())?;
         let negative = u64::from(n < 0) << 63;
-        self.set_word(cell, 1, negative | digits.len() as u64);
-        for (slot, d) in self.words_mut(cell, 2).iter_mut().zip(digits) {
-            *slot = *d;
-        }
-        Ok(cell)
+        let first = [negative | digits.len() as u64];
+        self.cell(Kind::BigInt, first, digits.iter().copied())
     }
 
     pub(crate) fn read_big_int(&self, cell: Cell) -> BigInt {
@@ -621,9 +821,7 @@ impl Heap {
     /// A new cell for constructor `v`, holding `fields`. Each field's
     /// reference passes to the cell.
     pub(crate) fn ctor(&mut self, v: VariantRef, fields: &[Value]) -> Result<Cell, Fault> {
-        let cell = self.alloc(Kind::Ctor, 1, fields.len())?;
-        self.write_ctor(cell, v, fields);
-        Ok(cell)
+        self.cell(Kind::Ctor, ctor_tag(v), words_of(fields))
     }
 
     /// Perceus reuse. This writes the constructor `ctor` would build over a
@@ -632,14 +830,10 @@ impl Heap {
     /// constructor's.
     pub(crate) fn ctor_in(&mut self, cell: Cell, v: VariantRef, fields: &[Value]) {
         self.reused = self.reused.saturating_add(1);
-        self.write_ctor(cell, v, fields);
-    }
-
-    fn write_ctor(&mut self, cell: Cell, v: VariantRef, fields: &[Value]) {
-        let tag = u64::from(v.variant_idx) << 32 | u64::from(v.type_id.0.cast_unsigned());
+        let [tag] = ctor_tag(v);
         self.set_word(cell, 1, tag);
-        for (slot, f) in self.words_mut(cell, 2).iter_mut().zip(fields) {
-            *slot = f.bits();
+        for (slot, w) in self.words_mut(cell, 2).iter_mut().zip(words_of(fields)) {
+            *slot = w;
         }
     }
 
@@ -661,12 +855,7 @@ impl Heap {
     /// A new cell for function `func` over `captures`. Each capture's
     /// reference passes to the cell.
     pub(crate) fn closure(&mut self, func: FuncIdx, captures: &[Value]) -> Result<Cell, Fault> {
-        let cell = self.alloc(Kind::Closure, 1, captures.len())?;
-        self.set_word(cell, 1, u64::from(func.0));
-        for (slot, c) in self.words_mut(cell, 2).iter_mut().zip(captures) {
-            *slot = c.bits();
-        }
-        Ok(cell)
+        self.cell(Kind::Closure, [u64::from(func.0)], words_of(captures))
     }
 
     /// The function a closure cell runs.
@@ -689,11 +878,7 @@ impl Heap {
     // Left out of line, every array and map node made pays for a call.
     #[inline(always)]
     pub(crate) fn make(&mut self, kind: Kind, data: &[u64]) -> Result<Cell, Fault> {
-        let cell = self.alloc(kind, 0, data.len())?;
-        for (slot, w) in self.words_mut(cell, 1).iter_mut().zip(data) {
-            *slot = *w;
-        }
-        Ok(cell)
+        self.cell(kind, [], data.iter().copied())
     }
 
     /// The words of `cell` after its header. They are empty for a cell the
@@ -721,11 +906,11 @@ impl Heap {
     /// Whether `cell` has one holder, who may then change it in place.
     /// Asking about a freed cell is [`DeadCell`].
     pub(crate) fn unique(&self, cell: Cell) -> Result<bool, DeadCell> {
-        let h = self.header(cell);
-        if freed(h) {
-            return Err(DeadCell);
+        let c = count(self.header(cell));
+        if c <= 0 {
+            self.uncounted(cell)?;
         }
-        Ok(count(h) == 1)
+        Ok(c == 1)
     }
 
     /// The words of `cell` after its header, for its one holder to change.
@@ -753,7 +938,7 @@ impl Heap {
         let kept = n.saturating_sub(cut.len());
         let at = at.min(kept);
         let len = kept.saturating_add(put.len());
-        let new = self.alloc(kind, 0, len.saturating_add(room))?;
+        let new = self.blank(kind, len.saturating_add(room))?;
         if let Some(spare) = self.data_mut(new).get_mut(len..) {
             spare.fill(Value::NIL.bits());
         }
@@ -808,7 +993,8 @@ impl Heap {
     fn copy_long_words(&mut self, from: Cell, src: std::ops::Range<usize>, to: Cell, dst: usize) {
         let len = src.len();
         if let Some(slot) = self.slot(to, self.header(to)) {
-            let Some(mut target) = self.outside.get_mut(slot).and_then(Option::take) else {
+            let Some(mut target) = self.outside.get_mut(slot as usize).and_then(Option::take)
+            else {
                 return;
             };
             if let Some(source) = self.words(from, 1).get(src)
@@ -816,11 +1002,11 @@ impl Heap {
             {
                 room.copy_from_slice(source);
             }
-            if let Some(place) = self.outside.get_mut(slot) {
+            if let Some(place) = self.outside.get_mut(slot as usize) {
                 *place = Some(target);
             }
         } else if let Some(slot) = self.slot(from, self.header(from)) {
-            let Some(source) = self.outside.get_mut(slot).and_then(Option::take) else {
+            let Some(source) = self.outside.get_mut(slot as usize).and_then(Option::take) else {
                 return;
             };
             if let Some(source) = source.get(src)
@@ -828,7 +1014,7 @@ impl Heap {
             {
                 room.copy_from_slice(source);
             }
-            if let Some(place) = self.outside.get_mut(slot) {
+            if let Some(place) = self.outside.get_mut(slot as usize) {
                 *place = Some(source);
             }
         }
@@ -844,14 +1030,14 @@ impl Heap {
         let h = self.header(cell);
         let kind = kind_of(h).ok_or(Fault::DeadCell)?;
         let words = self.data_len(cell, h);
-        let new = self.alloc(kind, 0, words)?;
+        let new = self.blank(kind, words)?;
         self.copy_words(cell, 0..words, new, 0);
         for i in held(kind_bits(h), words) {
             let Some(w) = self.words(new, 1).get(i) else {
                 break;
             };
             if let Some(held) = Value::from_bits(*w).as_cell() {
-                self.share(held);
+                self.share(held)?;
             }
         }
         Ok(new)
@@ -859,27 +1045,26 @@ impl Heap {
 
     /// Free `cell`, whose one holder has moved what it held somewhere else,
     /// so nothing it holds is released. A cell freed already is
-    /// [`DeadCell`].
-    // This is one test in front of `free_cell`, so it goes inside the caller,
-    // which then makes one call and not two.
-    #[inline]
+    /// [`DeadCell`], and so is one waiting to be freed or never counted,
+    /// which has no one holder.
     pub(crate) fn discard(&mut self, cell: Cell) -> Result<(), DeadCell> {
         let h = self.header(cell);
-        if freed(h) {
+        if count(h) <= 0 {
             return Err(DeadCell);
         }
-        self.free_cell(cell, h);
+        if size(h) == 0
+            && let Some(number) = self.slot(cell, h)
+        {
+            self.unbox(number);
+        }
+        self.shelve(cell, space(size(h)));
         Ok(())
     }
 
     /// A new tuple cell holding `elements`. Each element's reference passes
     /// to the cell.
     pub(crate) fn tuple(&mut self, elements: &[Value]) -> Result<Cell, Fault> {
-        let cell = self.alloc(Kind::Tuple, 0, elements.len())?;
-        for (slot, e) in self.words_mut(cell, 1).iter_mut().zip(elements) {
-            *slot = e.bits();
-        }
-        Ok(cell)
+        self.cell(Kind::Tuple, [], words_of(elements))
     }
 
     /// Element `i` of a tuple cell, or `None` past its last. Reading it adds
@@ -904,11 +1089,6 @@ impl Heap {
         self.words(cell, 2).iter().map(|w| Value::from_bits(*w))
     }
 
-    /// Cells not yet freed.
-    pub(crate) fn live(&self) -> usize {
-        self.live
-    }
-
     /// Cells this heap has allocated, and cells Perceus reuse saved it from
     /// allocating. Both count over the heap's whole life.
     pub(crate) fn made(&self) -> usize {
@@ -925,43 +1105,12 @@ impl Heap {
         self.arena.get(cell.index()).copied().unwrap_or(0)
     }
 
-    fn set_header(&mut self, cell: Cell, h: u64) {
-        if let Some(slot) = self.arena.get_mut(cell.index()) {
-            *slot = h;
-        }
-    }
-
     /// How many words follow the header `h` of `cell`.
     fn data_len(&self, cell: Cell, h: u64) -> usize {
         match size(h).checked_sub(1) {
             Some(n) => n,
             None => self.long_words(cell, h, 1).len(),
         }
-    }
-
-    /// The words of `cell`, whose header is `h`, that hold values. Which
-    /// they are comes from the header alone, so a cell that holds none, like
-    /// a string, has none of its words looked up.
-    #[inline(always)]
-    fn held_words(&self, cell: Cell, h: u64) -> &[u64] {
-        let Some(len) = size(h).checked_sub(1) else {
-            return self.long_held_words(cell, h);
-        };
-        let held = held(kind_bits(h), len);
-        if held.is_empty() {
-            return &[];
-        }
-        let first = cell.index().saturating_add(1);
-        self.arena
-            .get(first.saturating_add(held.start)..first.saturating_add(held.end))
-            .unwrap_or(&[])
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn long_held_words(&self, cell: Cell, h: u64) -> &[u64] {
-        let data = self.boxed(cell, h);
-        data.get(held(kind_bits(h), data.len())).unwrap_or(&[])
     }
 
     /// Words `from` to the end of `cell`, counting its header as word 0.
@@ -1020,12 +1169,12 @@ impl Heap {
 
     /// The number of the box that holds the words of `cell`, whose header
     /// is `h`, when it is a long cell.
-    fn slot(&self, cell: Cell, h: u64) -> Option<usize> {
+    fn slot(&self, cell: Cell, h: u64) -> Option<u32> {
         if size(h) != 0 || freed(h) {
             return None;
         }
         let number = self.arena.get(cell.index().saturating_add(1))?;
-        Some(to_usize(*number))
+        Some(low_u32(*number))
     }
 
     /// [`Self::words`] for a cell whose header `h` gives it no such words in
@@ -1043,7 +1192,7 @@ impl Heap {
     /// is not a long cell.
     fn boxed(&self, cell: Cell, h: u64) -> &[u64] {
         self.slot(cell, h)
-            .and_then(|slot| self.outside.get(slot)?.as_deref())
+            .and_then(|slot| self.outside.get(slot as usize)?.as_deref())
             .unwrap_or(&[])
     }
 
@@ -1051,26 +1200,42 @@ impl Heap {
     #[inline(never)]
     fn long_words_mut(&mut self, cell: Cell, h: u64, from: usize) -> &mut [u64] {
         self.slot(cell, h)
-            .and_then(|slot| self.outside.get_mut(slot)?.as_deref_mut())
+            .and_then(|slot| self.outside.get_mut(slot as usize)?.as_deref_mut())
             .and_then(|words| words.get_mut(from.saturating_sub(1)..))
             .unwrap_or(&mut [])
     }
 }
 
-/// A header word. It holds the count in the low 32 bits, then the kind in 4
-/// bits, then in the top [`SIZE_BITS`] the cell's size in words, or 0 for a
-/// long cell, whose size is its box's.
-fn header(count: u32, kind: Kind, size: usize) -> u64 {
-    u64::from(count) | (kind as u64) << 32 | (size as u64) << 36
+/// The header of a new cell, whose count is 1. A header holds the count in
+/// the low 32 bits, then the kind in 4 bits, then in the top [`SIZE_BITS`]
+/// the cell's size in words, or 0 for a long cell, whose size is its box's.
+fn header(kind: Kind, size: usize) -> u64 {
+    1 | (kind as u64) << 32 | (size as u64) << 36
 }
 
-fn count(h: u64) -> u64 {
-    h & STICKY
+fn count(h: u64) -> i32 {
+    low_u32(h).cast_signed()
 }
 
-/// `h` with its count replaced by `c`, which is at most [`STICKY`].
-fn with_count(h: u64, c: u64) -> u64 {
-    h & !STICKY | c & STICKY
+/// The words a cell of `size` words takes in the arena, 0 being a long
+/// cell's.
+fn space(size: usize) -> usize {
+    size.max(LEAST_WORDS)
+}
+
+/// The second word of a free cell of `space` words, when `next` is the next
+/// one of that size. Nothing but an audit reads the size.
+fn free_link(space: usize, next: u32) -> u64 {
+    (space as u64) << 32 | u64::from(next)
+}
+
+/// What a constructor's cell holds before its fields.
+fn ctor_tag(v: VariantRef) -> [u64; 1] {
+    [u64::from(v.variant_idx) << 32 | u64::from(v.type_id.0.cast_unsigned())]
+}
+
+fn words_of(values: &[Value]) -> impl ExactSizeIterator<Item = u64> + '_ {
+    values.iter().map(|v| v.bits())
 }
 
 fn kind_bits(h: u64) -> u64 {
@@ -1078,11 +1243,9 @@ fn kind_bits(h: u64) -> u64 {
 }
 
 /// Whether `h` is the header of a freed cell, or of a cell the heap does not
-/// have. Freeing zeroes the whole header and every live cell has a kind, so
-/// the bits above the count say which it is. The count alone does not: a
-/// share of a freed cell makes its count 1 again.
+/// have. Freeing zeroes the whole header, and a live cell's count is not 0.
 fn freed(h: u64) -> bool {
-    h >> 32 == 0
+    h & COUNT == 0
 }
 
 /// Which of the `len` words after the header of a cell of this kind hold a
@@ -1115,6 +1278,12 @@ fn held(kind: u64, len: usize) -> std::ops::Range<usize> {
     }
 }
 
+/// The kinds that hold no references and are no handle, a bit each.
+const RAW: u64 = 1 << Kind::String as u64
+    | 1 << Kind::BigInt as u64
+    | 1 << Kind::Range as u64
+    | 1 << Kind::Binary as u64;
+
 fn size(h: u64) -> usize {
     (h >> 36) as usize
 }
@@ -1141,6 +1310,9 @@ fn growth(len: usize, room: usize, more: usize, limit: usize) -> impl Iterator<I
 
 /// Up to eight bytes of a string, little-endian, zero-padded to a whole word.
 fn padded_word(bytes: &[u8]) -> u64 {
+    if let Ok(word) = bytes.try_into() {
+        return u64::from_le_bytes(word);
+    }
     let mut word = [0u8; 8];
     for (w, b) in word.iter_mut().zip(bytes) {
         *w = *b;

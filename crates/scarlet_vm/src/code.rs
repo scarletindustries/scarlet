@@ -26,12 +26,13 @@
 use std::collections::{BTreeSet, HashMap};
 
 use scarlet_ir::core_ir::{
-    Abi, Atom, Callee, Const, CoreBind, CoreExpr, CoreFn, CorePat, FuncIdx, GlobalSlot, JoinId,
-    Load, LocalId, LoweredFn, PrimOp, Program, VariantRef,
+    Abi, Atom, Callee, Const, ConstId, CoreBind, CoreExpr, CoreFn, CorePat, FuncIdx, GlobalSlot,
+    JoinId, Load, LocalId, LoweredFn, PrimOp, Program, VariantRef,
 };
 use scarlet_ir::intrinsic::Intrinsic;
 use scarlet_ir::tivec::{Idx, TiVec};
 
+use crate::Audit;
 use crate::float::NumOp;
 use crate::show::Types;
 use crate::stop::{Arity, Broken, Missing, Stop};
@@ -71,6 +72,10 @@ pub(crate) enum Instr {
     Count {
         block: u32,
     },
+    /// Check the whole heap ([`Heap::audit`](crate::heap::Heap::audit)). Only
+    /// an audited load has these, one in front of every instruction
+    /// ([`audit_each`]).
+    Audit,
     Const {
         dst: Reg,
         value: Value,
@@ -94,11 +99,12 @@ pub(crate) enum Instr {
         op: BitsOp,
         args: Box<[Reg]>,
     },
-    /// A new big int holding `n`, for a constant past a small Int's range.
-    /// It is made each time it runs, like [`Instr::Str`].
+    /// The big int `n`, for a constant past a small Int's range. Its cell is
+    /// made the first time the constant is asked for and kept.
     BigInt {
         dst: Reg,
         n: i64,
+        id: ConstId,
     },
     /// `dst` gets what `src` holds. `moved` says nothing reads `src` after
     /// this, so `dst` takes its reference and no count changes.
@@ -469,7 +475,7 @@ impl Instr {
             args.iter_mut().for_each(|a| f(&mut a.reg));
         };
         match self {
-            Instr::Bad { .. } | Instr::Jump { .. } | Instr::Count { .. } => {}
+            Instr::Bad { .. } | Instr::Jump { .. } | Instr::Count { .. } | Instr::Audit => {}
             Instr::Const { dst, .. }
             | Instr::Str { dst, .. }
             | Instr::BinaryConst { dst, .. }
@@ -661,6 +667,7 @@ impl Instr {
             | Instr::Drop { .. }
             | Instr::Jump { .. }
             | Instr::Count { .. }
+            | Instr::Audit
             | Instr::Bad { .. } => {}
             Instr::Bits { args, .. }
             | Instr::Concat { parts: args, .. }
@@ -843,6 +850,7 @@ impl Instr {
             | Instr::JumpUnlessStr { .. }
             | Instr::JumpUnlessBinary { .. }
             | Instr::Count { .. }
+            | Instr::Audit
             | Instr::Bad { .. } => return None,
         };
         Some(Write::Always(dst))
@@ -869,6 +877,7 @@ impl Instr {
             | Instr::Ret { .. }
             | Instr::Bad { .. } => (None, None),
             Instr::Count { .. }
+            | Instr::Audit
             | Instr::Const { .. }
             | Instr::Str { .. }
             | Instr::BinaryConst { .. }
@@ -935,6 +944,7 @@ impl Instr {
             | Instr::JumpUnlessStr { to, .. }
             | Instr::JumpUnlessBinary { to, .. } => Some(to),
             Instr::Count { .. }
+            | Instr::Audit
             | Instr::Const { .. }
             | Instr::Str { .. }
             | Instr::BinaryConst { .. }
@@ -1048,6 +1058,7 @@ macro_rules! ops {
 
 ops! {
     Count,
+    Audit,
     Const,
     Str,
     BinaryConst,
@@ -1241,38 +1252,47 @@ pub(crate) struct Counted {
     pub(crate) blocks: Vec<Box<[Op]>>,
 }
 
-pub(crate) fn load(program: &Program) -> Result<Code, Stop> {
-    load_as(program, Counting::No)
+/// Load `program` for a run that checks its heap when `audit` says. One that
+/// is to check before every instruction gets an [`Instr::Audit`] in front of
+/// each, and any other gets none.
+pub(crate) fn load(program: &Program, audit: Audit) -> Result<Code, Stop> {
+    load_as(program, Extra { count: None, audit })
 }
 
-/// [`load`], with an [`Instr::Count`] at the head of every basic block.
-pub(crate) fn load_counted(program: &Program) -> Result<Counted, Stop> {
+/// [`load`], with an [`Instr::Count`] at the head of every basic block. The
+/// counts leave the audits out.
+pub(crate) fn load_counted(program: &Program, audit: Audit) -> Result<Counted, Stop> {
     let mut blocks = Vec::new();
-    let code = load_as(program, Counting::Blocks(&mut blocks))?;
+    let extra = Extra {
+        count: Some(&mut blocks),
+        audit,
+    };
+    let code = load_as(program, extra)?;
     Ok(Counted { code, blocks })
 }
 
-/// Whether a load puts in the instructions that count, and where it lists
-/// the blocks it has numbered so far when it does.
-enum Counting<'a> {
-    No,
-    Blocks(&'a mut Vec<Box<[Op]>>),
+/// The instructions a load puts in that the program does not have.
+struct Extra<'a> {
+    /// Where to list the blocks numbered so far, for a load that counts them.
+    count: Option<&'a mut Vec<Box<[Op]>>>,
+    /// When the run is to audit its heap.
+    audit: Audit,
 }
 
-fn load_as(program: &Program, mut counting: Counting<'_>) -> Result<Code, Stop> {
+fn load_as(program: &Program, mut extra: Extra<'_>) -> Result<Code, Stop> {
     let full = |_| Stop::broken(Broken::TooManyFunctions);
     let consts = &program.consts;
     let mut fns = TiVec::new();
     let mut names = TiVec::new();
     for f in &program.fns {
         let this = fns.next_idx().map_err(full)?;
-        fns.push(load_fn(f, consts, &program.abi, Some(this), &mut counting)?)
+        fns.push(load_fn(f, consts, &program.abi, Some(this), &mut extra)?)
             .map_err(full)?;
         names.push(f.name.clone()).map_err(full)?;
     }
     let mut toplevels = Vec::new();
     for f in program.inits.iter().chain([&program.toplevel]) {
-        toplevels.push(load_fn(f, consts, &program.abi, None, &mut counting)?);
+        toplevels.push(load_fn(f, consts, &program.abi, None, &mut extra)?);
     }
     Ok(Code {
         fns,
@@ -1311,7 +1331,7 @@ fn load_fn(
     consts: &[Const],
     abi: &Abi,
     this: Option<FuncIdx>,
-    counting: &mut Counting<'_>,
+    extra: &mut Extra<'_>,
 ) -> Result<Func, Stop> {
     let name = || format!("{}.{}", f.module, f.name);
     let loaded = Loader::new(consts, abi, &f.core, this)
@@ -1323,9 +1343,13 @@ fn load_fn(
                 .map(Reg::of)
                 .collect();
             let regs = allocate(&mut instrs, &mut params, &mut carried, regs);
-            let instrs = match counting {
-                Counting::No => instrs,
-                Counting::Blocks(blocks) => count_blocks(instrs, blocks)?,
+            let instrs = match &mut extra.count {
+                Some(blocks) => count_blocks(instrs, blocks)?,
+                None => instrs,
+            };
+            let instrs = match extra.audit {
+                Audit::EachInstruction => audit_each(instrs)?,
+                Audit::Never | Audit::AtEnd => instrs,
             };
             Ok((regs, params, carried, instrs))
         });
@@ -1814,7 +1838,9 @@ impl<'c> Loader<'c> {
                     dst,
                     text: text.as_bytes().into(),
                 },
-                Some(Const::Int(n)) if Value::int(*n).is_none() => Instr::BigInt { dst, n: *n },
+                Some(Const::Int(n)) if Value::int(*n).is_none() => {
+                    Instr::BigInt { dst, n: *n, id: *c }
+                }
                 Some(Const::Binary { bytes, bit_len }) => Instr::BinaryConst {
                     dst,
                     bytes: bytes.as_slice().into(),
@@ -2434,27 +2460,47 @@ fn count_blocks(instrs: Vec<Instr>, blocks: &mut Vec<Box<[Op]>>) -> Result<Vec<I
             head(next);
         }
     }
-    // Where each instruction lands, or its block's `Count` when it has one,
-    // which is where a jump to it must now go.
-    let mut lands = Vec::with_capacity(instrs.len());
-    let mut out = Vec::with_capacity(instrs.len());
     let mut block: Vec<Op> = Vec::new();
     let close = |block: &mut Vec<Op>, blocks: &mut Vec<Box<[Op]>>| {
         if !block.is_empty() {
             blocks.push(std::mem::take(block).into_boxed_slice());
         }
     };
-    for (instr, is_head) in instrs.into_iter().zip(heads) {
-        lands.push(u32::try_from(out.len()).map_err(|_| Unloadable::TooLong)?);
-        if is_head {
+    let mut heads = heads.into_iter();
+    let out = put_before(instrs, |instr| {
+        let count = if heads.next().unwrap_or(false) {
             close(&mut block, blocks);
             let number = u32::try_from(blocks.len()).map_err(|_| Unloadable::TooLong)?;
-            out.push(Instr::Count { block: number });
-        }
+            Some(Instr::Count { block: number })
+        } else {
+            None
+        };
         block.push(instr.op());
+        Ok(count)
+    })?;
+    close(&mut block, blocks);
+    Ok(out)
+}
+
+/// `instrs` with an [`Instr::Audit`] put in front of each.
+fn audit_each(instrs: Vec<Instr>) -> Result<Vec<Instr>, Unloadable> {
+    put_before(instrs, |_| Ok(Some(Instr::Audit)))
+}
+
+/// `instrs` with what `extra` gives for each put in front of it, and every
+/// jump moved to follow. A jump to an instruction goes to what was put in
+/// front of it.
+fn put_before(
+    instrs: Vec<Instr>,
+    mut extra: impl FnMut(&Instr) -> Result<Option<Instr>, Unloadable>,
+) -> Result<Vec<Instr>, Unloadable> {
+    let mut lands = Vec::with_capacity(instrs.len());
+    let mut out = Vec::with_capacity(instrs.len());
+    for instr in instrs {
+        lands.push(u32::try_from(out.len()).map_err(|_| Unloadable::TooLong)?);
+        out.extend(extra(&instr)?);
         out.push(instr);
     }
-    close(&mut block, blocks);
     u32::try_from(out.len()).map_err(|_| Unloadable::TooLong)?;
     for instr in &mut out {
         if let Some(to) = instr.target()

@@ -85,10 +85,17 @@ struct RunArgs {
     /// Print the parsed program before execution starts
     #[arg(long = "debug-printer")]
     debug_printer: bool,
-    /// When the program ends, give up everything it still holds and fail if a heap cell is
-    /// left.
-    #[arg(long)]
-    audit: bool,
+    /// Check the heap when the program ends, and fail if a reference count is wrong or a heap
+    /// cell is left once the program has given up everything it held. With `--audit=each`, check
+    /// it before every instruction too, which is slow.
+    #[arg(
+        long,
+        value_name = "WHEN",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "end",
+    )]
+    audit: Option<AuditWhen>,
     /// Count each instruction the VM runs and each heap cell it makes, and write the counts
     /// to FILE as JSON when the program ends. FILE is emptied first, and stays empty if the
     /// program stops before its end.
@@ -97,6 +104,15 @@ struct RunArgs {
     /// Arguments passed through to the program, readable via `os.argv`.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
+}
+
+/// When `scarlet run --audit` checks the heap.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum AuditWhen {
+    /// When the program ends
+    End,
+    /// Before every instruction, and when the program ends
+    Each,
 }
 
 #[derive(Args)]
@@ -503,15 +519,15 @@ fn cmd_run(args: RunArgs) {
         .chain(args.args)
         .collect();
     let mut host = scarlet_vm::OsHost::of_this_process(argv, scarlet::output::ProgramOut::stdout());
-    let at_exit = if args.audit {
-        scarlet_vm::AtExit::Audit
-    } else {
-        scarlet_vm::AtExit::Leave
+    let audit = match args.audit {
+        None => scarlet_vm::Audit::Never,
+        Some(AuditWhen::End) => scarlet_vm::Audit::AtEnd,
+        Some(AuditWhen::Each) => scarlet_vm::Audit::EachInstruction,
     };
     let outcome = match counters {
-        Some((path, file)) => scarlet_vm::run_counted(&program, &mut host, at_exit)
+        Some((path, file)) => scarlet_vm::run_counted(&program, &mut host, audit)
             .map(|counts| Some((path, file, counts))),
-        None => scarlet_vm::run(&program, &mut host, at_exit).map(|()| None),
+        None => scarlet_vm::run(&program, &mut host, audit).map(|()| None),
     };
     // Flush before printing any message, so the program's own output comes first. A failed flush
     // means the reader has left, like a pipe into `head`, and the program hasn't failed.

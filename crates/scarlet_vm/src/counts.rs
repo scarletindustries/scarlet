@@ -22,6 +22,7 @@ pub struct Counts {
     pub cells_made: usize,
     /// Cells a constructor wrote over in place instead of taking a new one.
     pub cells_reused: usize,
-    /// Cells not yet freed when the program ended.
+    /// Cells not yet freed when the program ended, big Int constants' among
+    /// them.
     pub cells_live: usize,
 }

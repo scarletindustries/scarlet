@@ -12,12 +12,12 @@
 //! the register's reference instead of adding one (`moves_on_last_use`).
 //! Perceus's `Drop` gives one up early. This alone keeps every count right,
 //! whatever Perceus did or did not insert (`docs/vm-design.md`, "Memory").
-//! If a count is wrong all the same, the instruction that gives up a
-//! reference to a cell already freed stops the run with `Broken::DeadCell`.
+//! If a count is wrong all the same, the instruction that takes or gives up
+//! a reference to a cell already freed stops the run with `Broken::DeadCell`.
 
 use num_bigint::Sign;
 use num_traits::{FromPrimitive, ToPrimitive};
-use scarlet_ir::core_ir::{FuncIdx, HttpTypes, IoErrors, JsonTypes, VariantRef};
+use scarlet_ir::core_ir::{ConstId, FuncIdx, HttpTypes, IoErrors, JsonTypes, VariantRef};
 use scarlet_ir::intrinsic::Intrinsic;
 
 use crate::array::{self, End, Seq};
@@ -36,7 +36,7 @@ use crate::show;
 use crate::stop::{Broken, Missing};
 use crate::value::{Value, View};
 use crate::word::to_usize;
-use crate::{AtExit, Stop};
+use crate::{Audit, Stop};
 
 mod net;
 
@@ -115,14 +115,14 @@ impl<'c, 'h> Machine<'c, 'h> {
     pub(crate) fn run(&mut self) -> Result<Ended, Stop> {
         let mut last = Value::NIL;
         for top in &self.code.toplevels {
-            let v = self.call(ready(top)?, &[])?;
+            // Given up first, so that while a call runs every reference the
+            // run holds is one an audit is told of.
             self.release(last)?;
-            last = v;
+            last = self.call(ready(top)?, &[])?;
         }
         if let Some(main) = self.code.main {
-            let v = self.call(self.body(main)?, &[])?;
             self.release(last)?;
-            last = v;
+            last = self.call(self.body(main)?, &[])?;
         }
         self.let_go_of_handles();
         Ok(Ended { last })
@@ -166,6 +166,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                         *n = n.saturating_add(1);
                     }
                 }
+                Instr::Audit => self.audit(frame.env, &callers)?,
                 Instr::Const { dst, value } => self.set(base, *dst, *value)?,
                 Instr::Str { dst, text } => {
                     let cell = self.heap.string(text).map_err(fault)?;
@@ -179,8 +180,8 @@ impl<'c, 'h> Machine<'c, 'h> {
                     let v = self.bits_op(*op, base, args)?;
                     self.set(base, *dst, v)?;
                 }
-                Instr::BigInt { dst, n } => {
-                    let v = bigint::int(&mut self.heap, *n).map_err(fault)?;
+                Instr::BigInt { dst, n, id } => {
+                    let v = self.big_const(*id, *n)?;
                     self.set(base, *dst, v)?;
                 }
                 // Only a cell has a reference to hand over or to add, so
@@ -191,7 +192,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                         if *moved {
                             self.take(base, *src);
                         } else {
-                            self.heap.share(cell);
+                            self.heap.share(cell)?;
                         }
                     }
                     self.set(base, *dst, v)?;
@@ -202,11 +203,11 @@ impl<'c, 'h> Machine<'c, 'h> {
                         .and_then(|i| self.globals.get(i))
                         .copied()
                         .unwrap_or(Value::NIL);
-                    let v = self.share(v);
+                    let v = self.share(v)?;
                     self.set(base, *dst, v)?;
                 }
                 Instr::SetGlobal { slot, src } => {
-                    let v = self.share(self.get(base, *src));
+                    let v = self.share(self.get(base, *src))?;
                     if let Some(g) = usize::try_from(slot.0)
                         .ok()
                         .and_then(|i| self.globals.get_mut(i))
@@ -284,7 +285,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                 Instr::ToString { dst, a } => {
                     let v = self.get(base, *a);
                     let s = if self.is_string(v) {
-                        self.share(v)
+                        self.share(v)?
                     } else {
                         let mut text = Vec::new();
                         self.show(v, &mut text)?;
@@ -318,7 +319,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                         let v = if a.moved {
                             self.take(base, a.reg)
                         } else {
-                            self.share(self.get(base, a.reg))
+                            self.share(self.get(base, a.reg))?
                         };
                         values.push(v);
                     }
@@ -372,7 +373,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                 }
                 Instr::CallSelf { dst, args } => {
                     let body = frame.body;
-                    let env = self.share(frame.env);
+                    let env = self.share(frame.env)?;
                     let new_base = frame_end(base, body);
                     self.enter_above(base, args, body, new_base)?;
                     callers.push(std::mem::replace(
@@ -405,7 +406,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                 // written as tail recursion runs in constant space.
                 Instr::TailCall { func, args } => {
                     let callee = self.body(*func)?;
-                    let values = self.call_args(base, args);
+                    let values = self.call_args(base, args)?;
                     self.enter(callee, base, &values)?;
                     self.passed(values);
                     let old = std::mem::replace(&mut frame.env, Value::NIL);
@@ -414,7 +415,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                     frame.pc = 0;
                 }
                 Instr::TailCallSelf { args } => {
-                    let values = self.call_args(base, args);
+                    let values = self.call_args(base, args)?;
                     self.again(frame.body, base, &values)?;
                     self.passed(values);
                     frame.pc = 0;
@@ -424,7 +425,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                 // only other holder.
                 Instr::TailCallValue { callee, args } => {
                     let (body, env) = self.callee(self.get(base, *callee), args.len())?;
-                    let values = self.call_args(base, args);
+                    let values = self.call_args(base, args)?;
                     self.enter(body, base, &values)?;
                     self.passed(values);
                     let old = std::mem::replace(&mut frame.env, env);
@@ -437,7 +438,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                     func,
                     captures,
                 } => {
-                    let values = self.args(base, captures);
+                    let values = self.args(base, captures)?;
                     let cell = self.heap.closure(*func, &values).map_err(fault)?;
                     self.set(base, *dst, Value::cell(cell))?;
                 }
@@ -454,7 +455,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                             index: *index,
                         }));
                     };
-                    let v = self.share(v);
+                    let v = self.share(v)?;
                     self.set(base, *dst, v)?;
                 }
                 Instr::GetSelf { dst, this } => {
@@ -465,7 +466,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                         | View::Bool(_)
                         | View::Func(_)
                         | View::Cell(_)
-                        | View::Nullary(_) => self.share(frame.env),
+                        | View::Nullary(_) => self.share(frame.env)?,
                     };
                     self.set(base, *dst, v)?;
                 }
@@ -520,11 +521,11 @@ impl<'c, 'h> Machine<'c, 'h> {
                     let Some(field) = field else {
                         return Err(Stop::broken(Broken::NoField { index: *index }));
                     };
-                    let field = self.share(field);
+                    let field = self.share(field)?;
                     self.set(base, *dst, field)?;
                 }
                 Instr::Tuple { dst, elements } => {
-                    let values = self.args(base, elements);
+                    let values = self.args(base, elements)?;
                     let cell = self.heap.tuple(&values).map_err(fault)?;
                     self.set(base, *dst, Value::cell(cell))?;
                 }
@@ -538,11 +539,11 @@ impl<'c, 'h> Machine<'c, 'h> {
                     let Some(element) = element else {
                         return Err(Stop::broken(Broken::NoElement { index: *index }));
                     };
-                    let element = self.share(element);
+                    let element = self.share(element)?;
                     self.set(base, *dst, element)?;
                 }
                 Instr::Array { dst, elements } => {
-                    let values = self.args(base, elements);
+                    let values = self.args(base, elements)?;
                     let cell = array::from_values(&mut self.heap, &values).map_err(fault)?;
                     self.set(base, *dst, Value::cell(cell))?;
                 }
@@ -652,7 +653,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                 } => {
                     let s = self.seq(self.get(base, *rest))?;
                     let a = self.tree(s)?;
-                    let items = self.items(base, front);
+                    let items = self.items(base, front)?;
                     if *moved {
                         let held = self.take(base, *rest);
                         self.release(held)?;
@@ -668,7 +669,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                 } => {
                     let s = self.seq(self.get(base, *rest))?;
                     let a = self.tree(s)?;
-                    let items = self.items(base, back);
+                    let items = self.items(base, back)?;
                     if *moved {
                         let held = self.take(base, *rest);
                         self.release(held)?;
@@ -750,7 +751,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                     let found = self.index(self.get(base, *src), self.get(base, *index))?;
                     let v = match found {
                         Some(v) => v,
-                        None => self.share(self.get(base, *default)),
+                        None => self.share(self.get(base, *default))?,
                     };
                     self.set(base, *dst, v)?;
                 }
@@ -784,7 +785,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                     let m = self.map(self.get(base, *map))?;
                     match map::get(&self.heap, m, self.get(base, *key)) {
                         Some(v) => {
-                            let v = self.share(v);
+                            let v = self.share(v)?;
                             self.set(base, *dst, v)?;
                         }
                         None => frame.pc = *to as usize,
@@ -1387,7 +1388,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                 match (i, found) {
                     (Intrinsic::HttpHeaderHas, found) => Ok(Value::bool(found.is_some())),
                     (_, Some(value)) => {
-                        let value = self.share(value);
+                        let value = self.share(value)?;
                         self.some(value)
                     }
                     (_, None) => Ok(Value::nullary(self.code.abi.none)),
@@ -1466,7 +1467,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                         env
                     }
                 };
-                self.heap.share(env);
+                self.heap.share(env)?;
                 Ok(Value::cell(env))
             }
             Intrinsic::OsTerminalSize => match self.host.terminal_size() {
@@ -1494,7 +1495,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                 let m = self.map(v)?;
                 match map::get(&self.heap, m, arg(self, 1)) {
                     Some(found) => {
-                        let found = self.share(found);
+                        let found = self.share(found)?;
                         self.some(found)
                     }
                     None => Ok(Value::nullary(self.code.abi.none)),
@@ -1513,10 +1514,10 @@ impl<'c, 'h> Machine<'c, 'h> {
                 let mut items = Vec::with_capacity(entries.len());
                 for (k, v) in entries {
                     let item = match i {
-                        Intrinsic::MapKeys => self.share(k),
-                        Intrinsic::MapValues => self.share(v),
+                        Intrinsic::MapKeys => self.share(k)?,
+                        Intrinsic::MapValues => self.share(v)?,
                         _ => {
-                            let pair = [self.share(k), self.share(v)];
+                            let pair = [self.share(k)?, self.share(v)?];
                             Value::cell(self.heap.tuple(&pair).map_err(fault)?)
                         }
                     };
@@ -1873,7 +1874,7 @@ impl<'c, 'h> Machine<'c, 'h> {
     fn doc_at(&mut self, d: &Doc, idx: usize) -> Result<Value, Stop> {
         let types = self.json_types()?;
         let idx = bigint::int(&mut self.heap, idx).map_err(fault)?;
-        let (arena, tape) = (self.share(d.arena), self.share(d.tape));
+        let (arena, tape) = (self.share(d.arena)?, self.share(d.tape)?);
         let cell = self
             .heap
             .ctor(types.doc, &[arena, tape, idx])
@@ -2209,7 +2210,10 @@ impl<'c, 'h> Machine<'c, 'h> {
     #[inline(never)]
     fn element(&mut self, s: Seq, i: usize) -> Result<Option<Value>, Stop> {
         match s {
-            Seq::Tree(a) => Ok(array::get(&self.heap, a, i).map(|v| self.share(v))),
+            Seq::Tree(a) => match array::get(&self.heap, a, i) {
+                Some(v) => Ok(Some(self.share(v)?)),
+                None => Ok(None),
+            },
             Seq::Range { start, end } if (i as u64) < array::range_len(start, end) => {
                 // An i128 holds any i64 plus any index, so this is exact.
                 let n = i128::from(start).saturating_add(i as i128);
@@ -2225,7 +2229,7 @@ impl<'c, 'h> Machine<'c, 'h> {
     fn tree(&mut self, s: Seq) -> Result<crate::heap::Cell, Stop> {
         match s {
             Seq::Tree(a) => {
-                self.heap.share(a);
+                self.heap.share(a)?;
                 Ok(a)
             }
             Seq::Range { start, end } => {
@@ -2261,14 +2265,14 @@ impl<'c, 'h> Machine<'c, 'h> {
         let x = if value.moved {
             self.take(base, value.reg)
         } else {
-            self.share(self.get(base, value.reg))
+            self.share(self.get(base, value.reg))?
         };
         let array = match s {
             Seq::Tree(a) => {
                 if moved {
                     self.take(base, src);
                 } else {
-                    self.heap.share(a);
+                    self.heap.share(a)?;
                 }
                 a
             }
@@ -2353,18 +2357,26 @@ impl<'c, 'h> Machine<'c, 'h> {
 
     /// [`Self::args`] for the few items a push adds, kept off the heap.
     #[inline(never)]
-    fn items(&mut self, base: usize, regs: &[Reg]) -> smallvec::SmallVec<[Value; 4]> {
-        regs.iter()
-            .map(|r| self.share(self.get(base, *r)))
-            .collect()
+    fn items(
+        &mut self,
+        base: usize,
+        regs: &[Reg],
+    ) -> Result<smallvec::SmallVec<[Value; 4]>, DeadCell> {
+        let mut values = smallvec::SmallVec::new();
+        for r in regs {
+            values.push(self.share(self.get(base, *r))?);
+        }
+        Ok(values)
     }
 
     /// The values in `regs`, each with one more reference, for passing on.
     #[inline(never)]
-    fn args(&mut self, base: usize, regs: &[Reg]) -> Vec<Value> {
-        regs.iter()
-            .map(|r| self.share(self.get(base, *r)))
-            .collect()
+    fn args(&mut self, base: usize, regs: &[Reg]) -> Result<Vec<Value>, DeadCell> {
+        let mut values = Vec::with_capacity(regs.len());
+        for r in regs {
+            values.push(self.share(self.get(base, *r))?);
+        }
+        Ok(values)
     }
 
     /// The values a call passes. A moved argument hands over the reference its
@@ -2374,18 +2386,18 @@ impl<'c, 'h> Machine<'c, 'h> {
     ///
     /// They go in the buffer [`Self::passed`] gives back, so a call allocates
     /// nothing for them.
-    fn call_args(&mut self, base: usize, args: &[Arg]) -> Vec<Value> {
+    fn call_args(&mut self, base: usize, args: &[Arg]) -> Result<Vec<Value>, DeadCell> {
         let mut values = std::mem::take(&mut self.passing);
         values.clear();
         for a in args {
             let v = if a.moved {
                 self.take(base, a.reg)
             } else {
-                self.share(self.get(base, a.reg))
+                self.share(self.get(base, a.reg))?
             };
             values.push(v);
         }
-        values
+        Ok(values)
     }
 
     /// Keep the buffer [`Self::call_args`] filled for the next call. Its
@@ -2421,7 +2433,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                 want: body.params.len(),
             }));
         }
-        Ok((body, self.share(f)))
+        Ok((body, self.share(f)?))
     }
 
     /// Give `body` a fresh frame at `new_base`, above the caller's frame at
@@ -2441,7 +2453,7 @@ impl<'c, 'h> Machine<'c, 'h> {
             let v = if a.moved {
                 self.take(base, a.reg)
             } else {
-                self.share(self.get(base, a.reg))
+                self.share(self.get(base, a.reg))?
             };
             self.set(new_base, *param, v)?;
         }
@@ -2553,11 +2565,8 @@ impl<'c, 'h> Machine<'c, 'h> {
     }
 
     /// `v` with one more reference, for when it goes somewhere new.
-    fn share(&mut self, v: Value) -> Value {
-        if let Some(cell) = v.as_cell() {
-            self.heap.share(cell);
-        }
-        v
+    fn share(&mut self, v: Value) -> Result<Value, DeadCell> {
+        self.heap.own(v)
     }
 
     fn release(&mut self, v: Value) -> Result<(), DeadCell> {
@@ -2702,7 +2711,8 @@ impl<'c, 'h> Machine<'c, 'h> {
     }
 
     /// Give up everything a finished run still holds: its result, every
-    /// global and `os.env`'s map. Nothing can run after this.
+    /// global, `os.env`'s map and the constants made. Nothing can run after
+    /// this.
     fn let_go(&mut self, ended: Ended) -> Result<(), DeadCell> {
         self.release(ended.last)?;
         for v in std::mem::take(&mut self.globals) {
@@ -2711,14 +2721,42 @@ impl<'c, 'h> Machine<'c, 'h> {
         if let Some(env) = self.env.take() {
             self.heap.release(env)?;
         }
-        Ok(())
+        self.heap.let_go_of_constants()
+    }
+
+    /// The big Int constant `id`, which is `n`.
+    #[inline(never)]
+    fn big_const(&mut self, id: ConstId, n: i64) -> Result<Value, Stop> {
+        if let Some(cell) = self.heap.constant(id) {
+            return Ok(Value::cell(cell));
+        }
+        let v = bigint::int(&mut self.heap, n).map_err(fault)?;
+        if let Some(cell) = v.as_cell() {
+            self.heap.keep_constant(id, cell).map_err(fault)?;
+        }
+        Ok(v)
+    }
+
+    /// Check the heap against every reference the run holds between two
+    /// instructions: the registers, the globals, `os.env`'s map, and the
+    /// closures of the running frame and of `callers`.
+    #[cold]
+    #[inline(never)]
+    fn audit(&self, env: Value, callers: &[Frame<'c>]) -> Result<(), Stop> {
+        let held = self.regs.iter().chain(&self.passing).chain(&self.globals);
+        let roots = held
+            .copied()
+            .chain(std::iter::once(env))
+            .chain(callers.iter().map(|f| f.env))
+            .chain(self.env.map(Value::cell));
+        Ok(self.heap.audit(roots)?)
     }
 
     /// What a finished run of `counted` counted. This is the machine
     /// [`Self::counting`] made for it. The run reached its end, so every
     /// block that was entered ran to its last instruction, and each
     /// instruction in it ran as often as the block did.
-    pub(crate) fn counts(&self, counted: &Counted, _: &Ended) -> Counts {
+    pub(crate) fn counts(&self, counted: &Counted, _: &Ended) -> Result<Counts, Stop> {
         let mut ran = [0u64; Op::ALL.len()];
         for (block, times) in counted.blocks.iter().zip(&self.ran) {
             for op in block {
@@ -2727,26 +2765,33 @@ impl<'c, 'h> Machine<'c, 'h> {
                 }
             }
         }
-        // A `Count` is the counting itself, and no part of the program.
-        let ops = Op::ALL.iter().zip(ran).filter(|(op, _)| **op != Op::Count);
-        Counts {
+        // A `Count` is the counting itself, and no part of the program. An
+        // `Audit` is in no block.
+        let ops = Op::ALL
+            .iter()
+            .zip(ran)
+            .filter(|(op, _)| !matches!(op, Op::Count | Op::Audit));
+        Ok(Counts {
             ops: ops.map(|(op, n)| (op.name(), n)).collect(),
             cells_made: self.heap.made(),
             cells_reused: self.heap.reused(),
-            cells_live: self.heap.live(),
-        }
+            cells_live: self.heap.live_cells()?,
+        })
     }
 
-    /// End a finished run as `at_exit` asks. An audit lets go of everything
-    /// the run still holds. A cell still live after that is one reference
-    /// counting lost, and the run stops saying how many there are.
-    pub(crate) fn finish(&mut self, ended: Ended, at_exit: AtExit) -> Result<(), Stop> {
-        match at_exit {
-            AtExit::Leave => Ok(()),
-            AtExit::Audit => {
+    /// End a finished run as `audit` asks. An audited run checks its heap,
+    /// lets go of everything it still holds, and checks again. A cell still
+    /// live after that has a count that is right and nothing outside the heap
+    /// that leads to it.
+    pub(crate) fn finish(&mut self, ended: Ended, audit: Audit) -> Result<(), Stop> {
+        match audit {
+            Audit::Never => Ok(()),
+            Audit::AtEnd | Audit::EachInstruction => {
+                self.audit(ended.last, &[])?;
                 self.let_go(ended)?;
                 self.let_go_of_handles();
-                match self.heap.live() {
+                self.audit(Value::NIL, &[])?;
+                match self.heap.live_cells()? {
                     0 => Ok(()),
                     cells => Err(Stop::broken(Broken::CellsLeft { cells })),
                 }
@@ -2812,18 +2857,16 @@ struct Doc {
     idx: usize,
 }
 
-/// The path a string names. A Scarlet string is always UTF-8, so nothing is
-/// lost on the way.
+/// Where register `r` of the frame at `base` sits on the stack. `base` is no
+/// more than the stack's length, as `frame_end` says, so the sum is exact.
+#[inline]
+fn at(base: usize, r: Reg) -> usize {
+    base.wrapping_add(r.0 as usize)
+}
+
 /// Where the registers of a frame of `body` at `base` end. `base` is no more
 /// than the register stack's length, which a `Vec` keeps under `isize::MAX`,
 /// and a frame has at most `u32::MAX` registers, so this is exact.
-/// Where register `r` of the frame at `base` sits on the stack. A sum past
-/// what a `usize` holds is past the stack too, so it reads as nothing.
-#[inline]
-fn at(base: usize, r: Reg) -> usize {
-    base.saturating_add(r.0 as usize)
-}
-
 fn frame_end(base: usize, body: &Body) -> usize {
     base.saturating_add(body.regs as usize)
 }

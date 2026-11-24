@@ -103,7 +103,7 @@ fn pushing_at_either_end_leaves_the_old_array_alone() {
     let mut heap = Heap::default();
     let first = array_of(&mut heap, 0..10);
     let mut a = first;
-    heap.share(a);
+    heap.share(a).expect("a live cell");
     let mut want: std::collections::VecDeque<i64> = (0..10).collect();
     for i in 0..3000 {
         let (end, x) = if i % 3 == 0 {
@@ -152,7 +152,7 @@ fn an_owned_push_leaves_every_kept_version_alone() {
     let mut kept: Vec<(Cell, Vec<String>)> = Vec::new();
     for i in 0..2500 {
         if i % 41 == 0 {
-            heap.share(a);
+            heap.share(a).expect("a live cell");
             kept.push((a, want.iter().cloned().collect()));
         }
         if i % 17 == 0 && !want.is_empty() {
@@ -223,7 +223,7 @@ fn walking_an_array_from_the_front_copies_no_leaf() {
     let n = 1000;
     let a = array_of(&mut heap, 0..n);
     let mut cur = a;
-    heap.share(cur);
+    heap.share(cur).expect("a live cell");
     // Every leaf the walk reads from. A leaf it copied would be a cell of
     // its own, so counting them is counting the copies.
     let mut heads: Vec<Option<Cell>> = Vec::new();
@@ -351,14 +351,14 @@ fn an_owned_push_or_skip_of_a_freed_array_is_a_dead_cell() {
     assert_eq!(skip_owned(&mut heap, a, 1), Err(Fault::DeadCell));
 }
 
-/// A share does not bring a freed array back, so an owned push does not
+/// A freed array cannot be shared back to life, so an owned push does not
 /// take it for one it may change in place.
 #[test]
-fn an_owned_push_onto_a_freed_array_that_was_shared_is_a_dead_cell() {
+fn an_owned_push_onto_a_freed_array_is_a_dead_cell_after_a_share_is_refused() {
     let mut heap = Heap::default();
     let a = array_of(&mut heap, 0..3);
     heap.release(a).expect("a live cell");
-    heap.share(a);
+    assert_eq!(heap.share(a), Err(DeadCell));
     let x = Value::int(7).expect("small");
     assert_eq!(push_owned(&mut heap, a, x, End::Back), Err(Fault::DeadCell));
     assert_eq!(heap.live(), 0);
@@ -435,7 +435,7 @@ fn a_write_to_a_held_array_copies_one_node_a_level() {
         (40_000, 39_999, 2),
     ] {
         let a = array_of(&mut heap, 0..n);
-        heap.share(a);
+        heap.share(a).expect("a live cell");
         let made = heap.made();
         let b = set(&mut heap, a, i as usize, small(-1)).expect("room");
         assert_ne!(b, a, "size {n} at {i}");
@@ -488,7 +488,7 @@ fn a_write_at_an_index_the_array_does_not_have_changes_nothing() {
         let a = array_of(&mut heap, 0..n);
         for held in [false, true] {
             if held {
-                heap.share(a);
+                heap.share(a).expect("a live cell");
             }
             let live = heap.live();
             let made = heap.made();
@@ -554,7 +554,7 @@ fn a_write_gives_up_the_element_it_replaces() {
     assert_eq!(heap.live(), live, "one string in, one out");
     assert_eq!(text(&heap, get(&heap, a, 7).expect("an element")), "new");
     // Held, the old array keeps the old string and both keep the rest.
-    heap.share(a);
+    heap.share(a).expect("a live cell");
     let y = string(&mut heap, "newer");
     let b = set(&mut heap, a, 7, y).expect("room");
     assert_eq!(text(&heap, get(&heap, a, 7).expect("an element")), "new");
@@ -612,7 +612,7 @@ fn writes_among_other_edits_leave_every_kept_version_alone() {
                     want.extend(more);
                 }
                 5 if next(20) == 0 => {
-                    heap.share(a);
+                    heap.share(a).expect("a live cell");
                     kept.push((a, want.clone()));
                 }
                 6 if next(20) == 0 && !kept.is_empty() => {
@@ -670,8 +670,7 @@ fn a_write_to_a_freed_array_or_through_a_freed_node_is_a_dead_cell() {
     let c = array_of(&mut heap, 0..3);
     let tail = root(&heap, c).tail.as_cell().expect("a tail leaf");
     heap.release(tail).expect("a live cell");
-    heap.share(tail);
-    heap.share(tail);
+    assert_eq!(heap.share(tail), Err(DeadCell));
     assert_eq!(set(&mut heap, c, 1, small(7)), Err(Fault::DeadCell));
 }
 

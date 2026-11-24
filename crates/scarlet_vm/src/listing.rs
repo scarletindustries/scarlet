@@ -11,10 +11,10 @@ use std::fmt::{self, Write as _};
 
 use scarlet_ir::core_ir::{Program, VariantRef};
 
-use crate::Stop;
 use crate::code::{self, Arg, Body, Func, Instr, Reg};
 use crate::stop::NotBuilt;
 use crate::value::{Value, View};
+use crate::{Audit, Stop};
 
 /// Every function of a program as the VM loaded it.
 pub struct Listing {
@@ -37,7 +37,7 @@ impl Listing {
 
 /// Load `program` as a run would, and list what was loaded.
 pub fn listing(program: &Program) -> Result<Listing, Stop> {
-    let code = code::load(program)?;
+    let code = code::load(program, Audit::Never)?;
     Ok(Listing {
         fns: (&code.fns).into_iter().map(function).collect(),
         toplevel: code.toplevels.last().map(function).unwrap_or_default(),
@@ -162,11 +162,12 @@ impl fmt::Display for Instr {
         let name = self.op().name();
         match self {
             Instr::Count { block } => write!(f, "{name} block {block}"),
+            Instr::Audit => f.write_str(name),
             Instr::Const { dst, value } => write!(f, "{dst} = {name} {}", Literal(*value)),
             Instr::Str { dst, text } => write!(f, "{dst} = {name} {}", Text(text)),
             Instr::BinaryConst { dst, len, .. } => write!(f, "{dst} = {name} of {len} bits"),
             Instr::Bits { dst, op, args } => write!(f, "{dst} = {name} {op:?}({})", List(args)),
-            Instr::BigInt { dst, n } => write!(f, "{dst} = {name} {n}"),
+            Instr::BigInt { dst, n, .. } => write!(f, "{dst} = {name} {n}"),
             Instr::Move { dst, src, moved } => {
                 write!(f, "{dst} = {name} {}", taken(*src, *moved))
             }

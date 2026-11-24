@@ -19,3 +19,15 @@ fn a_wrong_count_says_which_way_it_went_wrong() {
         "3 cells were still held after the run gave up everything it had"
     );
 }
+
+/// A fault an audit finds is a bug. No memory to look for one is not, and is
+/// not the program's heap running out either.
+#[test]
+fn an_audit_that_could_not_finish_is_not_a_fault() {
+    assert_eq!(Stop::from(AuditFailure::NoRoom), Stop::NoRoomToAudit);
+    let found = AuditFailure::Found(AuditFault::Boxes);
+    assert_eq!(
+        Stop::from(found),
+        Stop::broken(Broken::Audit(AuditFault::Boxes))
+    );
+}

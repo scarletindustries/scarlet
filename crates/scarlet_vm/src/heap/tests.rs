@@ -8,6 +8,11 @@ impl Heap {
             ..Heap::default()
         }
     }
+
+    /// How many cells are not yet freed.
+    pub(crate) fn live(&self) -> usize {
+        self.live_cells().expect("an arena of whole cells")
+    }
 }
 
 fn text(heap: &Heap, cell: Cell) -> String {
@@ -65,7 +70,7 @@ fn a_freed_cell_is_reused_by_the_next_of_its_size() {
 fn a_shared_cell_lives_until_its_last_reference_goes() {
     let mut heap = Heap::default();
     let a = heap.string(b"kept").expect("room");
-    heap.share(a);
+    heap.share(a).expect("a live cell");
     heap.release(a).expect("a live cell");
     assert_eq!(heap.live(), 1);
     assert_eq!(text(&heap, a), "kept");
@@ -113,9 +118,8 @@ fn a_cell_keeps_its_name_when_the_arena_grows() {
     assert_eq!(heap.unique(first), Ok(true));
 }
 
-/// A cell of up to [`ARENA_CELL_WORDS`] words is in the arena, whichever
-/// half of the free lists its size is in. One word more and it is a
-/// stub and a box.
+/// A cell of up to [`ARENA_CELL_WORDS`] words is in the arena. One word
+/// more and it is a stub and a box.
 #[test]
 fn the_longest_arena_cell_is_254_words() {
     let mut heap = Heap::default();
@@ -158,7 +162,7 @@ fn a_long_cell_keeps_its_words_in_a_box_of_its_own() {
     assert_eq!(heap.string_len(cell), 10_000);
     assert!(heap.string_is(cell, &big));
     assert_eq!(text(&heap, cell).len(), 10_000);
-    heap.share(cell);
+    heap.share(cell).expect("a live cell");
     assert_eq!(heap.unique(cell), Ok(false));
     heap.release(cell).expect("a live cell");
     assert_eq!(heap.unique(cell), Ok(true));
@@ -233,7 +237,7 @@ fn a_long_constructor_is_a_constructor() {
 fn a_long_tuple_and_a_long_closure_hold_what_they_were_given() {
     let mut heap = Heap::default();
     let held = heap.string(b"held").expect("room");
-    heap.share(held);
+    heap.share(held).expect("a live cell");
     let mut values: Vec<Value> = (0..400).map(int).collect();
     values[0] = Value::cell(held);
     let tuple = heap.tuple(&values).expect("room");
@@ -526,20 +530,15 @@ fn the_arena_asks_for_less_when_the_system_refuses() {
 #[test]
 fn a_cell_past_the_longest_is_full() {
     let mut heap = Heap::default();
-    assert_eq!(
-        heap.alloc(Kind::Binary, 0, MAX_CELL_WORDS),
-        Err(Fault::Full)
-    );
-    assert_eq!(heap.alloc(Kind::Binary, 1, usize::MAX), Err(Fault::Full));
+    assert_eq!(heap.blank(Kind::Binary, MAX_CELL_WORDS), Err(Fault::Full));
+    assert_eq!(heap.blank(Kind::Binary, usize::MAX), Err(Fault::Full));
     assert!(heap.arena.is_empty());
     assert_eq!((heap.live(), heap.made()), (0, 0));
 }
 
 /// A name the heap never gave out reads as a freed cell: index 0, an
 /// index past the arena's end, and the largest index a value word
-/// holds. Nothing panics, and no cell changes. A share of word 0 counts
-/// in it, as a share of any freed cell does, and it still reads as
-/// freed.
+/// holds. Nothing panics, and no word of the arena changes.
 #[test]
 fn a_cell_the_arena_does_not_have_is_a_dead_cell() {
     let mut heap = Heap::default();
@@ -555,15 +554,14 @@ fn a_cell_the_arena_does_not_have_is_a_dead_cell() {
         assert!(heap.field(cell, 0).is_none());
         assert_eq!(heap.string_len(cell), 0);
         assert_eq!(heap.unique(cell), Err(DeadCell));
-        heap.share(cell);
+        assert_eq!(heap.share(cell), Err(DeadCell));
         assert_eq!(heap.release(cell), Err(DeadCell));
         assert_eq!(heap.hollow(cell), Err(DeadCell));
         assert_eq!(heap.discard(cell), Err(DeadCell));
         assert_eq!(heap.copy(cell), Err(Fault::DeadCell));
         assert!(!heap.fits_ctor(cell, 0));
     }
-    assert_eq!(heap.arena[1..], arena[1..]);
-    assert!(freed(heap.arena[0]));
+    assert_eq!(heap.arena, arena);
     assert_eq!(heap.live(), 1);
     assert_eq!(heap.unique(real), Ok(true));
 }
@@ -640,7 +638,7 @@ fn freeing_a_constructor_frees_what_it_holds() {
         tail = Value::cell(heap.ctor(v, &[tail]).expect("room"));
     }
     let shared = heap.string(b"shared").expect("room");
-    heap.share(shared);
+    heap.share(shared).expect("a live cell");
     let head = heap.ctor(v, &[tail, Value::cell(shared)]).expect("room");
     assert_eq!(heap.live(), 1_000_002);
     heap.release(head).expect("a live cell");
@@ -706,7 +704,7 @@ fn a_copy_of_a_node_shares_what_the_node_holds_and_nothing_else() {
         (Kind::ArrayRoot, vec![n, n, n, nil, h, nil]),
     ] {
         let node = heap.make(kind, &data).expect("room");
-        heap.share(held);
+        heap.share(held).expect("a live cell");
         let made = heap.made();
         let copy = heap.copy(node).expect("room");
         assert_ne!(copy, node);
@@ -764,36 +762,22 @@ fn a_second_release_of_a_freed_cell_is_a_dead_cell() {
     assert_eq!(text(&heap, kept), "kept");
 }
 
-/// A second release takes nothing off the live count, so one cell that
-/// is never freed and one that is released twice do not look like a heap
-/// with nothing left in it. This holds while the freed space has not
-/// been handed out again.
+/// A share of a freed cell is refused and changes nothing, however often it
+/// is tried, so the cell stays on its free list as it was.
 #[test]
-fn a_doubled_release_leaves_the_live_count_alone() {
-    let mut heap = Heap::default();
-    let _leaked = heap.string(b"leaked").expect("room");
-    let twice = heap.tuple(&[]).expect("room");
-    assert_eq!(heap.release(twice), Ok(()));
-    assert_eq!(heap.release(twice), Err(DeadCell));
-    assert_eq!(heap.live(), 1);
-}
-
-/// A share of a freed cell does not bring it back. Its count reads 1
-/// again, but its header still says it was freed, so the unique test
-/// and the release that pairs with the share both stop, and nothing is
-/// freed a second time.
-#[test]
-fn a_freed_cell_that_is_shared_is_still_a_dead_cell() {
+fn a_share_of_a_freed_cell_is_a_dead_cell() {
     let mut heap = Heap::default();
     let cell = heap.tuple(&[Value::NIL, Value::NIL]).expect("room");
     heap.release(cell).expect("a live cell");
-    assert_eq!(heap.live(), 0);
-    heap.share(cell);
-    assert_eq!(heap.unique(cell), Err(DeadCell));
-    assert_eq!(heap.hollow(cell), Err(DeadCell));
-    assert_eq!(heap.discard(cell), Err(DeadCell));
-    assert_eq!(heap.release(cell), Err(DeadCell));
-    assert_eq!(heap.live(), 0, "the count did not go below zero");
+    let arena = heap.arena.clone();
+    for _ in 0..3 {
+        assert_eq!(heap.share(cell), Err(DeadCell));
+        assert_eq!(heap.unique(cell), Err(DeadCell));
+        assert_eq!(heap.hollow(cell), Err(DeadCell));
+        assert_eq!(heap.discard(cell), Err(DeadCell));
+        assert_eq!(heap.release(cell), Err(DeadCell));
+    }
+    assert_eq!(heap.arena, arena);
     // The space went on its free list once.
     let b = heap.tuple(&[Value::NIL, Value::NIL]).expect("room");
     let c = heap.tuple(&[Value::NIL, Value::NIL]).expect("room");
@@ -801,36 +785,320 @@ fn a_freed_cell_that_is_shared_is_still_a_dead_cell() {
     assert_ne!(b, c);
 }
 
-/// Shared twice, a freed cell passes its first release, which only
-/// counts down, and stops the second.
+/// A copy shares what the node holds, and stops when one of those cells has
+/// been freed behind the node's back.
 #[test]
-fn a_freed_cell_shared_twice_is_found_at_its_last_release() {
+fn a_copy_of_a_node_that_holds_a_freed_cell_is_a_dead_cell() {
     let mut heap = Heap::default();
-    let cell = heap.string(b"gone").expect("room");
-    heap.release(cell).expect("a live cell");
-    heap.share(cell);
-    heap.share(cell);
-    assert_eq!(heap.release(cell), Ok(()));
+    let held = heap.string(b"held").expect("room");
+    let leaf = heap
+        .make(Kind::ArrayLeaf, &[Value::cell(held).bits()])
+        .expect("room");
+    heap.release(held).expect("a live cell");
+    assert_eq!(heap.copy(leaf), Err(Fault::DeadCell));
+}
+
+/// A cell whose count is too low is met twice while its holder is freed. The
+/// second meeting finds it waiting to be freed and stops.
+#[test]
+fn a_dying_cell_met_again_is_a_dead_cell() {
+    let mut heap = Heap::default();
+    let twice = heap.string(b"held twice, counted once").expect("room");
+    let v = Value::cell(twice);
+    let outer = heap.tuple(&[v, v]).expect("room");
+    assert_eq!(heap.release(outer), Err(DeadCell));
+}
+
+/// The same when it waits at the end of a longer list, where its count holds
+/// the list's end and not another cell's index.
+#[test]
+fn the_last_of_the_dying_met_again_is_a_dead_cell() {
+    let mut heap = Heap::default();
+    let twice = heap.tuple(&[Value::NIL]).expect("room");
+    let other = heap.tuple(&[Value::NIL]).expect("room");
+    let v = Value::cell(twice);
+    let outer = heap.tuple(&[v, Value::cell(other), v]).expect("room");
+    assert_eq!(heap.release(outer), Err(DeadCell));
+}
+
+/// A cell that holds itself, which nothing can make, is freed and then found
+/// on the list of the dying. The release stops there and does not free it
+/// again.
+#[test]
+fn freeing_a_cell_that_holds_itself_is_a_dead_cell() {
+    let mut heap = Heap::default();
+    let cell = heap.tuple(&[Value::NIL, Value::NIL]).expect("room");
+    heap.data_mut(cell)[1] = Value::cell(cell).bits();
     assert_eq!(heap.release(cell), Err(DeadCell));
+    assert_eq!(heap.release(cell), Err(DeadCell));
+    let b = heap.tuple(&[Value::NIL, Value::NIL]).expect("room");
+    let c = heap.tuple(&[Value::NIL, Value::NIL]).expect("room");
+    assert_ne!(b, c, "the space went on its list once");
+    // Two that hold each other are found the same way.
+    heap.data_mut(b)[0] = Value::cell(c).bits();
+    heap.data_mut(c)[0] = Value::cell(b).bits();
+    assert_eq!(heap.release(b), Err(DeadCell));
+}
+
+/// Freed cells of one size are a list that runs through the cells: each
+/// has a zero header, and its second word names the next. The last freed is
+/// the first taken.
+#[test]
+fn a_free_list_runs_through_the_freed_cells() {
+    let mut heap = Heap::default();
+    let cells: Vec<Cell> = (0..3)
+        .map(|i| heap.tuple(&[int(i), int(i)]).expect("room"))
+        .collect();
+    assert!(heap.free.is_empty(), "nothing has been freed");
+    for cell in &cells {
+        heap.release(*cell).expect("a live cell");
+    }
+    assert_eq!(heap.free, [0, 0, 0, cells[2].0]);
+    let word = |cell: Cell, i: usize| heap.arena[cell.index() + i];
+    for (cell, next) in [
+        (cells[2], cells[1].0),
+        (cells[1], cells[0].0),
+        (cells[0], 0),
+    ] {
+        assert_eq!(word(cell, 0), 0);
+        assert_eq!(word(cell, 1), 3 << 32 | u64::from(next));
+    }
+    for cell in cells.iter().rev() {
+        assert_eq!(heap.tuple(&[Value::NIL, Value::NIL]), Ok(*cell));
+    }
+    assert_eq!(heap.free, [0, 0, 0, 0]);
+    assert_eq!((heap.live(), heap.made()), (3, 6));
+}
+
+/// A cell of one word takes two in the arena, so that a freed one has
+/// somewhere to keep the next one's index.
+#[test]
+fn a_one_word_cell_takes_two_words() {
+    let mut heap = Heap::default();
+    let a = heap.tuple(&[]).expect("room");
+    let b = heap.tuple(&[]).expect("room");
+    assert_eq!((a, b), (Cell(1), Cell(3)));
+    assert_eq!(heap.arena.len(), 1 + 2 + 2);
+    assert_eq!(heap.elements(a).count(), 0);
+    heap.release(a).expect("a live cell");
+    heap.release(b).expect("a live cell");
+    assert_eq!(heap.tuple(&[]), Ok(b));
+    assert_eq!(heap.tuple(&[]), Ok(a));
+    // A tuple of one element is two words too, and shares the list.
+    heap.release(a).expect("a live cell");
+    assert_eq!(heap.tuple(&[int(7)]), Ok(a));
+    assert_eq!(heap.element(a, 0).map(Value::view), Some(int(7).view()));
+}
+
+/// A cell made where one was freed has the words it was given and none of
+/// the last one's, whatever the two kinds.
+#[test]
+fn a_cell_made_in_freed_space_holds_only_its_own_words() {
+    let mut heap = Heap::default();
+    for (first, second) in [
+        (vec![1; 7], vec![2; 7]),
+        (vec![3; 253], vec![4; 253]),
+        (vec![5; 300], vec![6; 300]),
+    ] {
+        let a = heap.make(Kind::Binary, &first).expect("room");
+        heap.release(a).expect("a live cell");
+        let b = heap.make(Kind::ArrayLeaf, &second).expect("room");
+        assert_eq!(a, b);
+        assert_eq!(heap.kind(b), Some(Kind::ArrayLeaf));
+        assert_eq!(heap.data(b), second.as_slice());
+        assert_eq!(heap.unique(b), Ok(true));
+    }
+}
+
+/// The most holders a count can say. One more and the cell is never freed,
+/// and its count never changes again.
+#[test]
+fn a_count_that_overflows_stays_where_it_is() {
+    let mut heap = Heap::default();
+    let cell = heap.string(b"held by very many").expect("room");
+    heap.recount(cell, i32::MAX);
+    heap.release(cell).expect("a live cell");
+    heap.share(cell).expect("a live cell");
+    assert_eq!(count(heap.header(cell)), i32::MAX);
+    heap.share(cell).expect("a live cell");
+    assert_eq!(count(heap.header(cell)), UNCOUNTED);
+    // The kind and the size are what they were.
+    assert_eq!(text(&heap, cell), "held by very many");
+    for _ in 0..3 {
+        assert_eq!(heap.share(cell), Ok(()));
+        assert_eq!(heap.release(cell), Ok(()));
+        assert_eq!(heap.release(cell), Ok(()));
+        assert_eq!(heap.unique(cell), Ok(false));
+        assert_eq!(heap.hollow(cell), Ok(false));
+    }
+    assert_eq!(count(heap.header(cell)), UNCOUNTED);
+    let holder = heap.tuple(&[Value::cell(cell)]).expect("room");
+    heap.release(holder).expect("a live cell");
+    assert_eq!(heap.live(), 1);
+    assert_eq!(text(&heap, cell), "held by very many");
+}
+
+/// A constant's cell is found by its number, and no share or release
+/// changes it. The heap gives it up at the end of a run.
+#[test]
+fn a_constants_cell_is_never_counted() {
+    let mut heap = Heap::default();
+    let (two, five) = (ConstId(2), ConstId(5));
+    assert_eq!(heap.constant(five), None);
+    let big: BigInt = BigInt::from(1) << 70usize;
+    let cell = heap.big_int(&big).expect("room");
+    assert_eq!(heap.keep_constant(five, cell), Ok(()));
+    assert_eq!(heap.constant(five), Some(cell));
+    assert_eq!(heap.constant(two), None);
+    for _ in 0..10 {
+        assert_eq!(heap.release(cell), Ok(()));
+    }
+    heap.share(cell).expect("a live cell");
+    assert_eq!(heap.unique(cell), Ok(false));
+    let holder = heap.tuple(&[Value::cell(cell)]).expect("room");
+    heap.release(holder).expect("a live cell");
+    assert_eq!(heap.read_big_int(cell), big);
+    let other = heap.big_int(&-big).expect("room");
+    assert_eq!(heap.keep_constant(two, other), Ok(()));
+    assert_eq!(heap.live(), 2);
+    assert_eq!(heap.let_go_of_constants(), Ok(()));
+    assert_eq!(heap.live(), 0);
+    assert_eq!(heap.constant(five), None);
+}
+
+/// The numbers of handles come back in the order their cells were freed,
+/// when one release frees several.
+#[test]
+fn handles_freed_together_come_back_in_order() {
+    let mut heap = Heap::default();
+    let handles: Vec<Value> = [7, 8, 9]
+        .map(|n| Value::cell(heap.make(Kind::Handle, &[n]).expect("room")))
+        .to_vec();
+    let inner = heap.tuple(&handles[1..]).expect("room");
+    let outer = heap.tuple(&[handles[0], Value::cell(inner)]).expect("room");
+    heap.release(outer).expect("a live cell");
+    // The last cell met is the first freed.
+    assert_eq!(heap.take_released(), [9, 8, 7]);
+    assert!(heap.take_released().is_empty());
     assert_eq!(heap.live(), 0);
 }
 
-/// The limit of the dead-cell test. Once the freed space is a new cell,
-/// a stale holder's release takes that cell's reference and frees it,
-/// and nothing is reported. If the new cell's own holder then never
-/// gives it up, the live count reads 0 with a leak and a doubled
-/// release behind it. `docs/vm-design.md` says what closes this.
+/// The limit of the dead-cell test. Once the freed space is a new cell, a
+/// stale holder's release takes that cell's reference and frees it, and
+/// nothing is reported. Until then an audit that is told of both holders
+/// finds them.
 #[test]
-fn a_doubled_release_of_space_handed_out_again_is_not_found() {
+fn only_an_audit_finds_a_doubled_release_of_space_handed_out_again() {
     let mut heap = Heap::default();
     let twice = heap.tuple(&[]).expect("room");
     assert_eq!(heap.release(twice), Ok(()));
-    let leaked = heap.tuple(&[]).expect("room");
-    assert_eq!(leaked, twice, "the new cell is in the freed one's space");
+    let new = heap.tuple(&[]).expect("room");
+    assert_eq!(new, twice, "the new cell is in the freed one's space");
+    let held = [twice, new].map(Value::cell);
+    let fault = AuditFault::Miscounted {
+        cell: new,
+        count: 1,
+        holders: 2,
+    };
+    assert_eq!(
+        heap.audit(held.into_iter()),
+        Err(AuditFailure::Found(fault))
+    );
     assert_eq!(heap.release(twice), Ok(()));
     assert_eq!(heap.live(), 0);
     // The new cell's holder does find it, if it ever lets go.
-    assert_eq!(heap.release(leaked), Err(DeadCell));
+    assert_eq!(heap.release(new), Err(DeadCell));
+}
+
+/// A cell waiting to be freed has no holder, whatever is asked of it. A stop
+/// in the middle of a release leaves such cells, and a run ends there.
+#[test]
+fn a_cell_waiting_to_be_freed_is_a_dead_cell() {
+    let mut heap = Heap::default();
+    let cell = heap.ctor(v(), &[Value::NIL]).expect("room");
+    for count in [-1, -5, i32::MIN + 1] {
+        heap.recount(cell, count);
+        let arena = heap.arena.clone();
+        assert_eq!(heap.share(cell), Err(DeadCell), "{count}");
+        assert_eq!(heap.release(cell), Err(DeadCell), "{count}");
+        assert_eq!(heap.unique(cell), Err(DeadCell), "{count}");
+        assert_eq!(heap.hollow(cell), Err(DeadCell), "{count}");
+        assert_eq!(heap.discard(cell), Err(DeadCell), "{count}");
+        assert!(!heap.fits_ctor(cell, 1), "{count}");
+        assert_eq!(heap.arena, arena, "{count}");
+    }
+}
+
+/// A cell that is never counted is never freed either, so nobody is the one
+/// holder who may discard it.
+#[test]
+fn a_cell_never_counted_cannot_be_discarded() {
+    let mut heap = Heap::default();
+    let cell = heap.string(b"kept").expect("room");
+    heap.recount(cell, UNCOUNTED);
+    assert_eq!(heap.discard(cell), Err(DeadCell));
+    assert_eq!(text(&heap, cell), "kept");
+}
+
+/// Freeing a cell gives up each word it holds once, wherever the word is in
+/// the cell and however many there are.
+#[test]
+fn freeing_a_cell_of_any_width_gives_up_every_word() {
+    for n in (0..40).chain([253, 254, 300]) {
+        // Every word holds a string, or only some of them do.
+        for step in [1, 3, 7, 11] {
+            let mut heap = Heap::default();
+            let mut held = Vec::new();
+            let mut values = Vec::new();
+            for i in 0..n {
+                if i % step == 0 {
+                    let cell = heap.string(b"held").expect("room");
+                    heap.share(cell).expect("a live cell");
+                    held.push(cell);
+                    values.push(Value::cell(cell));
+                } else {
+                    values.push(int(i));
+                }
+            }
+            let outer = heap.ctor(v(), &values).expect("room");
+            heap.release(outer).expect("a live cell");
+            for cell in held {
+                assert_eq!(heap.unique(cell), Ok(true), "{n} {step} {cell:?}");
+                heap.release(cell).expect("a live cell");
+            }
+            assert_eq!(heap.live(), 0, "{n} {step}");
+        }
+    }
+}
+
+/// A freed cell stops the release from any word of any width.
+#[test]
+fn freeing_a_cell_that_holds_a_freed_cell_in_any_word_is_a_dead_cell() {
+    for n in [1, 7, 8, 9, 15, 16, 17, 33, 300] {
+        for i in 0..n {
+            let mut heap = Heap::default();
+            let gone = heap.string(b"gone").expect("room");
+            let mut values = vec![Value::NIL; n];
+            values[i] = Value::cell(gone);
+            let outer = heap.tuple(&values).expect("room");
+            assert_eq!(heap.release(gone), Ok(()));
+            assert_eq!(heap.release(outer), Err(DeadCell), "{n} {i}");
+        }
+    }
+}
+
+/// `release` frees a kind on the `RAW` list without looking at its words, so
+/// the list is the kinds that hold no value, and never a handle, whose number
+/// the host has to be given.
+#[test]
+fn the_raw_kinds_are_the_ones_with_nothing_to_give_up() {
+    for bits in 0..16 {
+        let raw = match kind_of(bits << 32) {
+            None | Some(Kind::Handle) => false,
+            Some(_) => held(bits, 10).is_empty(),
+        };
+        assert_eq!(RAW >> bits & 1 == 1, raw, "{bits}");
+    }
 }
 
 /// A long cell's box is freed when the cell is. Its stub's header is
@@ -844,8 +1112,7 @@ fn a_second_release_of_a_long_cell_is_a_dead_cell() {
     assert_eq!(heap.release(cell), Err(DeadCell));
     assert_eq!(heap.unique(cell), Err(DeadCell));
     assert_eq!(heap.copy(cell), Err(Fault::DeadCell));
-    heap.share(cell);
-    assert_eq!(heap.release(cell), Err(DeadCell));
+    assert_eq!(heap.share(cell), Err(DeadCell));
     assert_eq!((heap.live(), heap.boxed), (0, 0));
     // The stub went on its free list once, and the box number on its
     // list once.
@@ -887,7 +1154,7 @@ fn asking_whether_a_freed_cell_is_unique_is_a_dead_cell() {
     let mut heap = Heap::default();
     let cell = heap.string(b"one").expect("room");
     assert_eq!(heap.unique(cell), Ok(true));
-    heap.share(cell);
+    heap.share(cell).expect("a live cell");
     assert_eq!(heap.unique(cell), Ok(false));
     heap.release(cell).expect("a live cell");
     heap.release(cell).expect("a live cell");
@@ -902,7 +1169,7 @@ fn discarding_or_hollowing_a_freed_cell_is_a_dead_cell() {
         variant_idx: 0,
     };
     let cell = heap.ctor(v, &[Value::NIL]).expect("room");
-    heap.share(cell);
+    heap.share(cell).expect("a live cell");
     assert_eq!(heap.hollow(cell), Ok(false), "something else holds it");
     heap.release(cell).expect("a live cell");
     assert_eq!(heap.hollow(cell), Ok(true));

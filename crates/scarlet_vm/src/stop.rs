@@ -6,7 +6,7 @@ use std::fmt;
 use scarlet_ir::core_ir::{FuncIdx, PrimOp};
 use scarlet_ir::intrinsic::Intrinsic;
 
-use crate::heap::DeadCell;
+use crate::heap::{AuditFailure, AuditFault, DeadCell};
 use crate::value::View;
 
 /// Why a run ended before the program did.
@@ -21,6 +21,10 @@ pub enum Stop {
     /// to give it, or one value is longer than a value can be. This is a
     /// limit of the machine, not a bug in the program.
     HeapFull,
+    /// A run that was asked to check its heap could not get the memory to do
+    /// it with. Like `HeapFull`, this is a limit of the machine. The
+    /// program's own heap had room.
+    NoRoomToAudit,
     /// The function `name` has more instructions than the VM's jumps can
     /// reach. Like `HeapFull`, this is a limit of the machine.
     FunctionTooLong { name: String },
@@ -51,6 +55,21 @@ impl From<DeadCell> for Stop {
     #[inline(never)]
     fn from(_: DeadCell) -> Stop {
         Stop::broken(Broken::DeadCell)
+    }
+}
+
+impl From<AuditFault> for Stop {
+    fn from(fault: AuditFault) -> Stop {
+        Stop::broken(Broken::Audit(fault))
+    }
+}
+
+impl From<AuditFailure> for Stop {
+    fn from(failure: AuditFailure) -> Stop {
+        match failure {
+            AuditFailure::Found(fault) => fault.into(),
+            AuditFailure::NoRoom => Stop::NoRoomToAudit,
+        }
     }
 }
 
@@ -172,12 +191,15 @@ pub(crate) enum Broken {
     BinaryCell,
     TreePiece,
     RangeCell,
-    /// A reference was given up, or asked whether it was the only one, on a
-    /// cell that had already been freed. Some count went down once too often.
-    DeadCell,
-    /// A run that was asked to check its heap ended, gave up everything it
-    /// held, and this many cells were still not freed. Some count went up
+    /// A reference was taken to, given up on, or asked whether it was the
+    /// only one to a cell that had already been freed. Some count went down
     /// once too often.
+    DeadCell,
+    /// A run that was asked to check its heap found something wrong with it.
+    Audit(AuditFault),
+    /// A run that was asked to check its heap ended, gave up everything it
+    /// held, and this many cells were still not freed. Their counts are
+    /// right, so they hold each other.
     CellsLeft {
         cells: usize,
     },
@@ -295,6 +317,7 @@ impl fmt::Display for BadProgram {
             }
             Broken::RangeCell => f.write_str("a range cell that is not a range"),
             Broken::DeadCell => f.write_str("a reference to a cell that was already freed"),
+            Broken::Audit(fault) => write!(f, "{fault}"),
             Broken::CellsLeft { cells } => write!(
                 f,
                 "{cells} cells were still held after the run gave up everything it had"

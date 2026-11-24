@@ -186,14 +186,6 @@ fn same_key(heap: &Heap, a: Value, b: Value) -> bool {
     a.bits() == b.bits() || ((deep(a) || deep(b)) && eq::equal(heap, a, b))
 }
 
-/// `v` with one more reference, for keeping it in a new cell.
-fn own(heap: &mut Heap, v: Value) -> Value {
-    if let Some(cell) = v.as_cell() {
-        heap.share(cell);
-    }
-    v
-}
-
 fn release(heap: &mut Heap, w: u64) -> Result<(), DeadCell> {
     match Value::from_bits(w).as_cell() {
         Some(cell) => heap.release(cell),
@@ -204,12 +196,12 @@ fn release(heap: &mut Heap, w: u64) -> Result<(), DeadCell> {
 /// The words of node or collision `at`, for a new cell to start from. Each
 /// value in them gets one more reference, which the copy holds. An edit that
 /// takes a word out gives its reference back.
-fn copy(heap: &mut Heap, at: Cell) -> Words {
+fn copy(heap: &mut Heap, at: Cell) -> Result<Words, DeadCell> {
     let words = Words::from_slice(heap.data(at));
     for &w in words.iter().skip(1) {
-        own(heap, Value::from_bits(w));
+        heap.own(Value::from_bits(w))?;
     }
-    words
+    Ok(words)
 }
 
 /// Take words `range` out of `words`, giving back their references.
@@ -324,7 +316,7 @@ fn set_by(
     let (top, added) = match top(heap, map).as_cell() {
         Some(t) => insert(heap, t, (key, value, h), 0, hash)?,
         None => {
-            let entry = (own(heap, key), own(heap, value));
+            let entry = (heap.own(key)?, heap.own(value)?);
             let used = Used {
                 entries: bit(h, 0),
                 children: 0,
@@ -368,7 +360,7 @@ fn set_owned_by(
     let (top, added) = match top(heap, map).as_cell() {
         Some(t) => insert_owned(heap, t, (key, value, h), 0, hash)?,
         None => {
-            let entry = (own(heap, key), own(heap, value));
+            let entry = (heap.own(key)?, heap.own(value)?);
             let used = Used {
                 entries: bit(h, 0),
                 children: 0,
@@ -406,13 +398,13 @@ fn insert_owned(
         let found = (0..d.len() / 2).find(|&i| same_key(heap, word(d, key_at(i)), key));
         return match found {
             Some(i) => {
-                let v = own(heap, value).bits();
+                let v = heap.own(value)?.bits();
                 put_in(heap, at, value_at(i), v)?;
                 Ok((Value::cell(at), false))
             }
             None => {
                 let n = d.len();
-                let entry = [own(heap, key).bits(), own(heap, value).bits()];
+                let entry = [heap.own(key)?.bits(), heap.own(value)?.bits()];
                 let made = heap.splice(
                     Kind::MapCollision,
                     at,
@@ -435,14 +427,14 @@ fn insert_owned(
         let i = index(used.entries, b);
         let (k, v) = (word(d, key_at(i)), word(d, value_at(i)));
         if same_key(heap, k, key) {
-            let v = own(heap, value).bits();
+            let v = heap.own(value)?.bits();
             put_in(heap, at, value_at(i), v)?;
             return Ok((Value::cell(at), false));
         }
         // The entry already here moves down into the new child with ours,
         // taking its references with it.
         let theirs = (k, v, hash(heap, k));
-        let ours = (own(heap, key), own(heap, value), h);
+        let ours = (heap.own(key)?, heap.own(value)?, h);
         let child = pair(heap, theirs, ours, deeper(shift))?;
         let to = child_at(n.saturating_sub(1), index(used.children, b));
         let after = Used {
@@ -476,7 +468,7 @@ fn insert_owned(
         return Ok((Value::cell(at), added));
     }
     let i = key_at(index(used.entries, b));
-    let entry = [own(heap, key).bits(), own(heap, value).bits()];
+    let entry = [heap.own(key)?.bits(), heap.own(value)?.bits()];
     let after = Used {
         entries: used.entries | b,
         ..used
@@ -521,11 +513,11 @@ fn insert(
     let d = heap.data(at);
     if is_collision(heap, at) {
         let found = (0..d.len() / 2).find(|&i| same_key(heap, word(d, key_at(i)), key));
-        let mut words = copy(heap, at);
-        let v = own(heap, value).bits();
+        let mut words = copy(heap, at)?;
+        let v = heap.own(value)?.bits();
         match found {
             Some(i) => put(heap, &mut words, value_at(i), v)?,
-            None => words.extend([own(heap, key).bits(), v]),
+            None => words.extend([heap.own(key)?.bits(), v]),
         }
         let made = heap.make(Kind::MapCollision, &words)?;
         return Ok((Value::cell(made), found.is_none()));
@@ -537,17 +529,17 @@ fn insert(
         let i = index(used.entries, b);
         let (k, v) = (word(d, key_at(i)), word(d, value_at(i)));
         if same_key(heap, k, key) {
-            let mut words = copy(heap, at);
-            let v = own(heap, value).bits();
+            let mut words = copy(heap, at)?;
+            let v = heap.own(value)?.bits();
             put(heap, &mut words, value_at(i), v)?;
             return Ok((Value::cell(heap.make(Kind::MapNode, &words)?), false));
         }
         // Two keys want one slot, so both go one level down into a node of
         // their own, and the slot holds that node instead.
-        let theirs = (own(heap, k), own(heap, v), hash(heap, k));
-        let ours = (own(heap, key), own(heap, value), h);
+        let theirs = (heap.own(k)?, heap.own(v)?, hash(heap, k));
+        let ours = (heap.own(key)?, heap.own(value)?, h);
         let child = pair(heap, theirs, ours, deeper(shift))?;
-        let mut words = copy(heap, at);
+        let mut words = copy(heap, at)?;
         cut(heap, &mut words, entry_words(i))?;
         place(
             &mut words,
@@ -569,13 +561,13 @@ fn insert(
             return Ok((Value::NIL, false));
         };
         let (child, added) = insert(heap, child, (key, value, h), deeper(shift), hash)?;
-        let mut words = copy(heap, at);
+        let mut words = copy(heap, at)?;
         put(heap, &mut words, j, child.bits())?;
         return Ok((Value::cell(heap.make(Kind::MapNode, &words)?), added));
     }
     let i = key_at(index(used.entries, b));
-    let mut words = copy(heap, at);
-    let entry = [own(heap, key).bits(), own(heap, value).bits()];
+    let mut words = copy(heap, at)?;
+    let entry = [heap.own(key)?.bits(), heap.own(value)?.bits()];
     place(&mut words, i, &entry);
     set_used(
         &mut words,
@@ -636,13 +628,13 @@ pub(crate) fn delete(heap: &mut Heap, map: Cell, key: Value) -> Result<Cell, Fau
 
 fn delete_by(heap: &mut Heap, map: Cell, key: Value, hash: Hasher) -> Result<Cell, Fault> {
     let Some(t) = top(heap, map).as_cell() else {
-        heap.share(map);
+        heap.share(map)?;
         return Ok(map);
     };
     let h = hash(heap, key);
     let top = match remove(heap, t, key, h, 0)? {
         Gone::Missing => {
-            heap.share(map);
+            heap.share(map)?;
             return Ok(map);
         }
         Gone::Node(n) => n,
@@ -911,7 +903,7 @@ fn remove(heap: &mut Heap, at: Cell, key: Value, h: u64, shift: u32) -> Result<G
         let Some(i) = (0..d.len() / 2).find(|&i| same_key(heap, word(d, key_at(i)), key)) else {
             return Ok(Gone::Missing);
         };
-        let mut words = copy(heap, at);
+        let mut words = copy(heap, at)?;
         cut(heap, &mut words, entry_words(i))?;
         return Ok(match words.len() {
             0 | 1 => Gone::Empty,
@@ -927,7 +919,7 @@ fn remove(heap: &mut Heap, at: Cell, key: Value, h: u64, shift: u32) -> Result<G
         if !same_key(heap, word(d, key_at(i)), key) {
             return Ok(Gone::Missing);
         }
-        let mut words = copy(heap, at);
+        let mut words = copy(heap, at)?;
         cut(heap, &mut words, entry_words(i))?;
         set_used(
             &mut words,
@@ -948,7 +940,7 @@ fn remove(heap: &mut Heap, at: Cell, key: Value, h: u64, shift: u32) -> Result<G
     let gone = remove(heap, child, key, h, deeper(shift))?;
     let mut words = match gone {
         Gone::Missing => return Ok(Gone::Missing),
-        Gone::Node(_) | Gone::Lone(..) | Gone::Empty => copy(heap, at),
+        Gone::Node(_) | Gone::Lone(..) | Gone::Empty => copy(heap, at)?,
     };
     match gone {
         Gone::Missing => {}
