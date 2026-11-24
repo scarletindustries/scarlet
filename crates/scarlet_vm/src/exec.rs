@@ -53,11 +53,14 @@ struct Frame<'c> {
     env: Value,
 }
 
+// The fields keep this order, the ones the loop reads first and the heap
+// last, so that a change to the heap's size cannot move them. A call moves
+// `passing` with one 16-byte load and one store, and each takes an
+// instruction more when its offset is past 255 and not a multiple of 16.
+#[repr(C)]
 pub(crate) struct Machine<'c, 'h> {
     code: &'c Code,
     host: &'h mut dyn Host,
-    heap: Heap,
-    globals: Vec<Value>,
     regs: Vec<Value>,
     /// Where the live registers end. Every register from here on is `Nil`.
     top: usize,
@@ -65,6 +68,7 @@ pub(crate) struct Machine<'c, 'h> {
     /// arguments or a constructor's fields. It is kept between uses so that
     /// neither allocates.
     passing: Vec<Value>,
+    globals: Vec<Value>,
     /// `os.env` as a map, made the first time it is asked for. The
     /// environment cannot change while the program runs, so every call after
     /// shares this one.
@@ -73,6 +77,7 @@ pub(crate) struct Machine<'c, 'h> {
     /// its `Count` instruction holds. It is empty for an ordinary load,
     /// which has no such instruction.
     ran: Vec<u64>,
+    heap: Heap,
 }
 
 /// A run that reached its program's end, holding the value of the last thing
@@ -2657,6 +2662,10 @@ impl<'c, 'h> Machine<'c, 'h> {
         bigint::op(&mut self.heap, op, a, b).map_err(fault)
     }
 
+    // Kept out of line. With this inside `call`, the loop keeps `base` on
+    // the stack and reads it back at every use, which costs a bare loop 4
+    // machine instructions a turn.
+    #[inline(never)]
     fn int_of(&self, v: Value) -> Result<Int, Stop> {
         match v.view() {
             View::Int(n) => Ok(Int::Small(n)),
@@ -2830,6 +2839,16 @@ fn fault(fault: Fault) -> Stop {
 mod tests {
     use super::*;
     use crate::OsHost;
+
+    /// `passing` sits where a 16-byte load reaches it in one instruction,
+    /// and the heap comes after it, so the heap's size cannot move it.
+    #[test]
+    fn the_heap_is_behind_the_fields_a_call_moves() {
+        let passing = std::mem::offset_of!(Machine<'_, '_>, passing);
+        assert!(passing <= 255 || passing.is_multiple_of(16), "{passing}");
+        assert!(passing < std::mem::offset_of!(Machine<'_, '_>, heap));
+        assert!(std::mem::offset_of!(Machine<'_, '_>, regs) < passing);
+    }
 
     /// Run `src`, then release everything a finished run still holds, which
     /// is the result and the globals. What is left is what reference counting

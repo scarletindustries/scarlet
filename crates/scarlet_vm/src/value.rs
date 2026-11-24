@@ -14,10 +14,12 @@
 //! | `0x7FFE`        | kept for a literal frozen in the loaded program     |
 //!
 //! Immediate 3 is kept for the empty array. This table is the only place a
-//! tag is given out, so a new kind of word is added here first. A
-//! constructor with no fields holds its variant in bits 32 to 47 and its
-//! type in bits 0 to 31. A small Int is the 13 top bits set, so two words
-//! are both small Ints when their `&` is at least `0xFFF8` shifted to the top.
+//! tag is given out, so a new kind of word is added here first. A cell's
+//! word holds the index of the cell's header in the heap's arena, in bits 0
+//! to 30, and nothing above them. A constructor with no fields holds its
+//! variant in bits 32 to 47 and its type in bits 0 to 31. A small Int is the
+//! 13 top bits set, so two words are both small Ints when their `&` is at
+//! least `0xFFF8` shifted to the top.
 //!
 //! Scarlet has no NaN and no infinity (`docs/semantics.md`), and the layout
 //! needs that. The NaN an ARM chip gives for `0.0 / 0.0` is
@@ -235,7 +237,7 @@ mod tests {
     fn tagged() -> Vec<Value> {
         let ints = [0, 1, -1, 42, -42, SMALL_INT_MIN, SMALL_INT_MAX];
         let funcs = [0, 7, u32::MAX];
-        let cells = [0, 1, 1 << 28, PAYLOAD];
+        let cells = [0, 1, 1 << 30, u64::from(u32::MAX)];
         let nullaries = [
             (0, 0),
             (263, 1),
@@ -290,7 +292,7 @@ mod tests {
 
     #[test]
     fn a_cell_is_itself() {
-        for bits in [0, 1, 1 << 28, PAYLOAD] {
+        for bits in [0, 1, 1 << 30, u64::from(u32::MAX)] {
             let cell = Cell::from_bits(bits);
             let v = Value::cell(cell);
             assert_eq!(v.view(), View::Cell(cell));

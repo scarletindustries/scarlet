@@ -94,7 +94,7 @@ This matters because Perceus decides what to drop by type, and it leaves some ty
 
 **Built: a count that goes wrong stops the run.** A wrong count is a bug in the VM or the compiler, never in the program, and there are two ways for one to be wrong.
 
-- *Too low:* a cell is freed while something still holds it. Freeing a cell zeroes its header, so the heap finds it when that holder gives its reference up, or asks whether it is the only holder before changing the cell in place. `release`, `unique`, `hollow` and `discard` return `DeadCell` then, in every build, and the run stops at that instruction with `Broken::DeadCell` instead of freeing the cell a second time. The test reads the header's kind and not its count, so a *share* of a freed cell does not hide it. The share itself is still silent, but the unique test and the last release after it both stop. What this does not catch is a freed cell whose space was handed out again before its old holder touched it. That holder's release then takes a reference from the new cell and may free it early, and the fault shows only when the new cell's own holder gives it up. Stopping at the share, and finding the reused case, go with the audit of `docs/perf-plan.md`, step 7.
+- *Too low:* a cell is freed while something still holds it. Freeing a cell zeroes its header, so the heap finds it when that holder gives its reference up, or asks whether it is the only holder before changing the cell in place. `release`, `unique`, `hollow` and `discard` return `DeadCell` then, in every build, and the run stops at that instruction with `Broken::DeadCell` instead of freeing the cell a second time. The test reads the header's kind and not its count, so a *share* of a freed cell does not hide it. A long cell's two words in the arena are freed the same way, and a name the arena has no cell for, index 0 or one past its end, reads as a freed cell too. The share itself is still silent, but the unique test and the last release after it both stop. What this does not catch is a freed cell whose space was handed out again before its old holder touched it. That holder's release then takes a reference from the new cell and may free it early, and the fault shows only when the new cell's own holder gives it up. Stopping at the share, and finding the reused case, go with the audit of `docs/perf-plan.md`, step 7.
 - *Too high:* a cell is never freed. The heap counts its live cells: one more for each cell made and one fewer for each freed. A cell is only freed while its header says it is live, so the count is exact and a second release takes nothing off it. `scarlet run --audit` uses it: when the program ends, the run gives up its result, every global and `os.env`'s map, and stops with `Broken::CellsLeft` if a cell is still live. So a doubled release cannot make up for a leak, with one exception, which is the reused case above: when the cell freed early is one the program then never gives up, the count reads 0. The driver's tests start every program through one audited `scarlet run` (`common::scarlet_run` in its tests), and every program the VM's own tests run is audited too.
 
 **Proposed: constants are frozen.** They live in an area that is never freed, and they're shared across threads with no counting, as in the old VM.
@@ -105,34 +105,36 @@ This matters because Perceus decides what to drop by type, and it leaves some ty
 
 - **Why it works:** messages are copied when sent, so every object in a process's heap is reachable only from that process. Only the owner ever allocates or frees in it, so it needs no locks and no atomic counts.
 - **A limit is just the heap's size.** A process that passes its limit stops, and that's a resource death, not a bug. Its links hear about it like any other death, as with BEAM's `max_heap_size`.
-- **Death frees everything at once:** the heap's memory is returned in whole chunks, with no walk over the objects in it.
+- **Death frees everything at once:** the heap's arena is returned in one piece, and each long cell's box after it, with no walk over the objects in it.
 
 **Proposed: how.**
 
-- The heap is plain data owned by the process: chunks of memory, carved into cells by size, with a free list per size. So it moves with the process when the process moves to another scheduler thread. The old concern, that allocators like mimalloc tie a heap to one thread, doesn't apply to a heap we own.
+- The heap is plain data owned by the process: one arena of words, carved into cells, with a free list per size and a box for each long cell. So it moves with the process when the process moves to another scheduler thread. The old concern, that allocators like mimalloc tie a heap to one thread, doesn't apply to a heap we own.
 - A few things must live outside any one process's heap, because more than one process can hold them:
   - constants, in the frozen area;
   - big binaries, which are shared on send rather than copied, as in the old VM, and counted with atomic counts;
   - handles to OS resources, like sockets and files.
-- A process keeps a list of the outside things its heap points to. When it dies, it releases each of them before returning its chunks. This is BEAM's "off-heap" list.
+- A process keeps a list of the outside things its heap points to. When it dies, it releases each of them before returning its memory. This is BEAM's "off-heap" list.
 
-**Proposed: how a heap grows.**
+**Built: how a heap grows.** This is step 6 of `docs/perf-plan.md`.
 
-- **No heap until it's needed.** A process gets no chunk until it makes its first heap value. One that only does Int maths or waits on messages costs nothing here.
-- **Small values fill chunks.** The first chunk is about 2 KB, and each new chunk is about 1.6 times the last. Growing in steps, rather than by exactly each value's size, keeps the number of chunks small: a 1 MB list of 24-byte cells fits in about 13 chunks instead of about 43,000. Allocation stays cheap, and a death returns a handful of chunks, not thousands.
-- **A value bigger than the current chunk size gets a chunk of exactly its size.**
-- **A chunk that empties goes back to the system.**
+- **No heap until it's needed.** A process has no arena until it makes its first heap value. One that only does Int maths or waits on messages costs nothing here.
+- **One arena.** A heap is one run of 8-byte words, and a cell is named by the index of its header word in it. Reaching a cell is then one bounds check, where a list of chunks took two lookups. A new cell is taken from the free list for its size, and when that list is empty it goes at the arena's end. The arena is a `Vec`. The first cell makes room for itself and word 0, which is 4 words at least, and each time the room runs out it doubles, up to the limit and no further. So a heap that grows to N words has moved about log2(N) times and copied under 2N words in all. When the system refuses a doubling, the heap asks for half as much, and then half of that, down to an eighth of the arena. If that is refused too the heap is full, because smaller steps would move the whole arena once every few cells.
+- **A name outlives a move.** Growing can move the arena to a new address. A cell's name is an index and not an address, so it is still good afterwards, and no holder has to be told.
+- **A long cell lives outside the arena.** A cell of more than 254 words keeps two words in the arena: its header, and the number of a box of exactly its size that holds the rest. The box is freed when the cell is, and whether the process then gets smaller is up to the system's allocator. 254 is the longest cell the header of step 11 has room to describe.
+- **The arena only grows.** A freed cell's space waits on its size's free list for the next cell of that size, and goes back to the system when the process dies.
+- **The limit is 2^31 words, which is 16 GiB,** counting the arena and the boxes together, so a cell's index fits in 31 bits. A heap that would pass it stops the run with `HeapFull`, as running out of memory does. One cell is at most 2^28 words less one, which is 2 GiB.
 
-**Where the numbers come from: BEAM.** Checked against Erlang/OTP `master` at `bf52b4d716` (2026-09-21):
+**What BEAM does.** Checked against Erlang/OTP `master` at `bf52b4d716` (2026-09-21):
 
 - A new process's heap starts at 233 words (`H_DEFAULT_SIZE`, `erts/emulator/beam/erl_vm.h`). A whole fresh process is 327 words, about 2.6 KB on a 64-bit machine (`system/doc/efficiency_guide/eff_guide_processes.md`).
 - Heap sizes follow Fibonacci plus one word: 12, 38, 51, 90, 142, 233, 376, 610, and so on. That's about 1.6 times per step, up to 833,026 words (about 6.4 MB). After that, each step adds 20% (`erts_init_gc` in `erts/emulator/beam/erl_gc.c`).
 - When a heap has no room, BEAM allocates a separate heap fragment of exactly the size needed (`erts_heap_alloc`, `erts/emulator/beam/utils.c`). A message that can't go straight into the receiver's heap goes into one too (`erts_try_alloc_message_on_heap`, `erl_message.c`).
 - The Fibonacci table only sizes the main heap at the next collection, which copies everything alive into one block. At that point a heap grows to the next size that fits, and shrinks when it's using under 25% (`erl_gc.c`).
 
-**Why we differ.** BEAM's copying GC moves values, so it can put a heap back into one block, and it rounds up then to keep copies rare. Reference counting never moves a value, so our heap stays a list of chunks. We need BEAM's first mechanism (exact-size space when short), but not its second (copying into a table-sized block).
+**Why we differ.** BEAM's copying GC moves each value, so it can put a heap back into one block of a size it chooses, and shrink it. Reference counting never moves one value past another, but the whole arena can move, because nothing holds an address into it. So our heap is one block too, grown by doubling where BEAM steps by about 1.6 and then by 20%. We keep an exact-size block only for a long cell, which is BEAM's fragment. What we give up is shrinking: our arena gives nothing back until the process dies.
 
-**Open: fragmentation.** Freed cells leave gaps that a copying GC would squeeze out, and we can't. BEAM hit its own version of this: shrinking hibernated heaps in place "caused serious fragmentation problems when large amounts of processes were hibernated", so `hibernate` now copies what's alive into a new heap of exact size (`garbage_collect_hibernate` in `erl_gc.c`). We should measure the gaps once processes exist.
+**Open: fragmentation.** Freed cells leave gaps that a copying GC would squeeze out, and we can't. A gap is only filled by a cell of its own size, and the arena never gets shorter. BEAM hit its own version of this: shrinking hibernated heaps in place "caused serious fragmentation problems when large amounts of processes were hibernated", so `hibernate` now copies what's alive into a new heap of exact size (`garbage_collect_hibernate` in `erl_gc.c`). We should measure the gaps once processes exist.
 
 ## Running code
 

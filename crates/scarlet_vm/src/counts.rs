@@ -18,7 +18,7 @@ pub struct Counts {
     /// Every kind of instruction the VM has, by name, and how many times the
     /// run ran it. A kind that never ran is listed with 0.
     pub ops: Vec<(&'static str, u64)>,
-    /// Cells the heap handed out, from a chunk or from a free list.
+    /// Cells the heap handed out, from the arena's end or from a free list.
     pub cells_made: usize,
     /// Cells a constructor wrote over in place instead of taking a new one.
     pub cells_reused: usize,

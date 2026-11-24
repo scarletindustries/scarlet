@@ -1,14 +1,16 @@
 //! A process's heap, which is where values too big for one word live.
 //!
-//! The heap is a list of chunks, and a chunk is one block of memory carved
-//! into cells, one value per cell. `docs/vm-design.md` ("how a heap grows")
-//! has the rules and where they come from:
+//! The heap is one run of words, the arena, carved into cells, one value per
+//! cell. A cell is named by the index of its header word in the arena, so
+//! reaching one is a single bounds check. `docs/vm-design.md` ("how a heap
+//! grows") has the rules and where they come from:
 //!
-//! - There is no chunk until the first cell is needed.
-//! - Small cells fill chunks that start at 2 KB, and each new chunk is about
-//!   1.6 times the one before.
-//! - A cell bigger than the current chunk size gets a chunk of exactly its
-//!   size, which goes back to the system when the cell is freed.
+//! - There is no arena until the first cell is needed.
+//! - A new cell is taken from the free list for its size, and when that is
+//!   empty it is added at the arena's end. The arena only grows.
+//! - A cell of more than [`ARENA_CELL_WORDS`] words keeps two words in the
+//!   arena, a header and the number of a box of its own that holds the rest.
+//!   The box is freed when the cell is.
 //!
 //! Every cell starts with one header word holding its reference count, its
 //! kind and its size in words. A cell is freed when its count reaches zero,
@@ -19,11 +21,12 @@
 //! header has found a count that went wrong, and gets [`DeadCell`] instead
 //! of a second free. That holds until the space is handed out again as a new
 //! cell. From then on the stale holder's cell is the new one, and nothing
-//! here can tell.
+//! here can tell. An index past the arena's end, and index 0, read as a
+//! freed cell too.
 //!
-//! Chunks are words, not bytes, and cells are named by chunk and word rather
-//! than by address, so the heap needs no `unsafe` and moves with its process
-//! as plain data.
+//! The arena is words, not bytes, and cells are named by index rather than
+//! by address, so the heap needs no `unsafe`, a cell's name stays good when
+//! the arena grows, and the heap moves with its process as plain data.
 
 use std::collections::HashMap;
 
@@ -34,17 +37,24 @@ use scarlet_ir::core_ir::{FuncIdx, VariantRef};
 use crate::value::Value;
 use crate::word::{low_u16, low_u32, to_usize};
 
-/// Words in the first chunk, which makes it 2 KB.
-const FIRST_CHUNK_WORDS: usize = 256;
+/// The most words a heap holds: the arena's and the boxes' together, which
+/// is 16 GiB. A cell's index then fits in 31 bits.
+const LIMIT_WORDS: usize = 1 << 31;
 
-/// How many chunks and words a [`Cell`] can name. It has 20 bits of chunk and
-/// 28 of word, so it fits in the 48 bits a value word has for it.
-const CHUNK_BITS: u32 = 20;
-const WORD_BITS: u32 = 28;
+/// The most words a cell takes in the arena, its header's among them. A
+/// longer cell lives in a box.
+const ARENA_CELL_WORDS: usize = 254;
 
-/// The most words one cell can take, its header's among them. A header holds
-/// the size in [`WORD_BITS`] bits, so this is the largest size they can hold.
-pub(crate) const MAX_CELL_WORDS: usize = (1 << WORD_BITS) - 1;
+/// The words a long cell takes in the arena: its header, then the number of
+/// its box.
+const STUB_WORDS: usize = 2;
+
+/// A header holds a cell's size in this many bits.
+const SIZE_BITS: u32 = 28;
+
+/// The most words one cell can take, its header's among them, in the arena
+/// or in a box.
+pub(crate) const MAX_CELL_WORDS: usize = (1 << SIZE_BITS) - 1;
 
 /// A reference count that has reached this stays there, and its cell is never
 /// freed. A count cannot grow past the 32 bits its header has for it, and a
@@ -52,24 +62,27 @@ pub(crate) const MAX_CELL_WORDS: usize = (1 << WORD_BITS) - 1;
 /// Lean do with a count that overflows.
 const STICKY: u64 = 0xFFFF_FFFF;
 
-/// A cell, named by its chunk and the word its header is at.
+/// A cell, named by the index of its header word in the heap's arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Cell {
-    chunk: u32,
-    word: u32,
-}
+pub(crate) struct Cell(u32);
 
 impl Cell {
-    /// The cell as 48 bits, for a value word's payload.
+    /// The cell as the low bits of a value word's payload.
     pub(crate) fn bits(self) -> u64 {
-        u64::from(self.chunk) << WORD_BITS | u64::from(self.word)
+        u64::from(self.0)
     }
 
     pub(crate) fn from_bits(bits: u64) -> Cell {
-        Cell {
-            chunk: low_u32(bits >> WORD_BITS) & ((1 << CHUNK_BITS) - 1),
-            word: low_u32(bits) & ((1 << WORD_BITS) - 1),
-        }
+        Cell(low_u32(bits))
+    }
+
+    /// The cell whose header is word `index` of the arena.
+    fn at(index: usize) -> Option<Cell> {
+        u32::try_from(index).ok().map(Cell)
+    }
+
+    fn index(self) -> usize {
+        self.0 as usize
     }
 }
 
@@ -129,8 +142,9 @@ pub(crate) struct DeadCell;
 /// Why the heap could not do what it was asked.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Fault {
-    /// It has run out of the cells a [`Cell`] can name. This is a limit of
-    /// the machine, not a bug in the program.
+    /// It has no room. The heap is at its limit, or the system has no more
+    /// memory to give it, or the cell asked for is longer than a cell can
+    /// be. This is a limit of the machine, not a bug in the program.
     Full,
     /// See [`DeadCell`]. This one is a bug, in the VM or in the compiler.
     DeadCell,
@@ -183,34 +197,30 @@ impl FreeLists {
     }
 }
 
-struct Chunk {
-    words: Box<[u64]>,
-    /// Words handed out so far, from the front.
-    used: usize,
-    /// Whether this chunk was made for one big cell. If so, it goes back to
-    /// the system when that cell is freed.
-    own: bool,
-}
-
-#[derive(Default)]
 pub(crate) struct Heap {
-    /// Indexed by [`Cell::chunk`]. A chunk given back leaves `None`, and its
-    /// index is reused by the next chunk made.
-    chunks: Vec<Option<Chunk>>,
+    /// Every cell's header, and after it the cell's other words, or for a
+    /// long cell the number of its box. Its length is how much has been
+    /// handed out. Word 0 is never a cell.
+    arena: Vec<u64>,
+    /// The words after the header of each long cell, by the number its stub
+    /// holds. A box given back leaves `None`, and its number is reused by
+    /// the next long cell made.
+    outside: Vec<Option<Box<[u64]>>>,
     spare: Vec<u32>,
-    /// The chunk small cells are carved from now.
-    current: Option<u32>,
-    /// Words in the next small-cell chunk.
-    next_chunk: usize,
-    /// Freed small cells, by size in words, ready to be reused.
+    /// Words in `outside`'s boxes. They count against `limit`.
+    boxed: usize,
+    /// The most words the arena and the boxes may hold between them.
+    limit: usize,
+    /// Freed cells, by the words they take in the arena, ready to be reused.
     free: FreeLists,
     /// Cells made and not yet freed. Every cell made adds one and every
     /// cell freed takes one off. A cell is only freed while its header is
     /// not the zeroed one freeing leaves ([`freed`]), which is once each time
     /// it is made, so this is exact and never goes below zero.
     live: usize,
-    /// Cells taken from a chunk or a free list over this heap's life, and
-    /// cells a constructor overwrote in place instead (`internal.sca`).
+    /// Cells taken from the arena's end or a free list over this heap's
+    /// life, and cells a constructor overwrote in place instead
+    /// (`internal.sca`).
     made: usize,
     reused: usize,
     /// The cells a [`Heap::release`] still has to give a reference up for.
@@ -221,7 +231,34 @@ pub(crate) struct Heap {
     released: Vec<u64>,
 }
 
+impl Default for Heap {
+    fn default() -> Heap {
+        Heap {
+            arena: Vec::new(),
+            outside: Vec::new(),
+            spare: Vec::new(),
+            boxed: 0,
+            limit: LIMIT_WORDS,
+            free: FreeLists::default(),
+            live: 0,
+            made: 0,
+            reused: 0,
+            dying: Vec::new(),
+            released: Vec::new(),
+        }
+    }
+}
+
 impl Heap {
+    /// A heap that holds at most `limit` words.
+    #[cfg(test)]
+    fn limited(limit: usize) -> Heap {
+        Heap {
+            limit: limit.min(LIMIT_WORDS),
+            ..Heap::default()
+        }
+    }
+
     /// A new cell of `kind` with `fixed` and then `n` words after its header.
     /// Its count is 1, and the caller holds that one reference.
     fn alloc(&mut self, kind: Kind, fixed: usize, n: usize) -> Result<Cell, Fault> {
@@ -230,77 +267,134 @@ impl Heap {
             .and_then(|data| data.checked_add(1))
             .filter(|size| *size <= MAX_CELL_WORDS)
             .ok_or(Fault::Full)?;
-        let cell = if let Some(cell) = self.free.pop(size) {
-            cell
-        } else if size > self.chunk_size() {
-            self.own_chunk(size)?
+        // No free list has a long cell: its stub is freed as two words.
+        let cell = if size > ARENA_CELL_WORDS {
+            self.long(kind, size)?
         } else {
-            self.carve(size)?
+            let cell = match self.free.pop(size) {
+                Some(cell) => cell,
+                None => self.carve(size)?,
+            };
+            self.set_header(cell, header(1, kind, size));
+            cell
         };
-        self.set_word(cell, 0, header(1, kind, size));
         self.live = self.live.wrapping_add(1);
         self.made = self.made.saturating_add(1);
         Ok(cell)
     }
 
-    fn chunk_size(&self) -> usize {
-        self.next_chunk.max(FIRST_CHUNK_WORDS)
-    }
-
-    fn own_chunk(&mut self, size: usize) -> Result<Cell, Fault> {
-        let chunk = self.new_chunk(size, true)?;
-        Ok(Cell { chunk, word: 0 })
-    }
-
-    /// `size` words from the current chunk, starting a new, bigger one when
-    /// it has no room.
+    /// `size` new words at the arena's end.
     fn carve(&mut self, size: usize) -> Result<Cell, Fault> {
-        if let Some(i) = self.current
-            && let Some(Some(c)) = self.chunks.get_mut(i as usize)
-            && let Some(end) = c.used.checked_add(size).filter(|end| *end <= c.words.len())
-        {
-            let word = u32::try_from(c.used).map_err(|_| Fault::Full)?;
-            c.used = end;
-            return Ok(Cell { chunk: i, word });
+        let at = self.arena.len();
+        let end = at.saturating_add(size);
+        if end > self.arena.capacity() || end.saturating_add(self.boxed) > self.limit {
+            return self.grow(size);
         }
-        let words = self.chunk_size();
-        // A chunk too big for a cell to name is refused by `new_chunk`, so
-        // the size can stop growing at the most a `usize` holds.
-        self.next_chunk = words.saturating_mul(8) / 5;
-        let i = self.new_chunk(words, false)?;
-        self.current = Some(i);
-        self.carve(size)
+        self.arena.resize(end, 0);
+        Cell::at(at).ok_or(Fault::Full)
     }
 
-    fn new_chunk(&mut self, words: usize, own: bool) -> Result<u32, Fault> {
-        if words > 1 << WORD_BITS {
+    /// [`Self::carve`] when the arena has to ask the system for room first,
+    /// or has reached the limit. The first cell of all comes here, because
+    /// an empty arena has no room, and is put after word 0.
+    #[cold]
+    #[inline(never)]
+    fn grow(&mut self, size: usize) -> Result<Cell, Fault> {
+        let len = self.arena.len();
+        let more = size.saturating_add(usize::from(len == 0));
+        let end = len.saturating_add(more);
+        if end.saturating_add(self.boxed) > self.limit {
             return Err(Fault::Full);
         }
-        let chunk = Chunk {
-            words: vec![0; words].into_boxed_slice(),
-            used: if own { words } else { 0 },
-            own,
+        let room = self.arena.capacity();
+        if end > room
+            && !growth(len, room, more, self.limit)
+                .any(|extra| self.arena.try_reserve_exact(extra).is_ok())
+        {
+            return Err(Fault::Full);
+        }
+        let at = end.saturating_sub(size);
+        self.arena.resize(end, 0);
+        Cell::at(at).ok_or(Fault::Full)
+    }
+
+    /// A new cell of `size` words, which is too many for the arena. Its
+    /// words after the header go in a box, zeroed, and the arena gets a stub:
+    /// a header that gives the size as 0, then the box's number.
+    #[cold]
+    #[inline(never)]
+    fn long(&mut self, kind: Kind, size: usize) -> Result<Cell, Fault> {
+        let n = size.saturating_sub(1);
+        let held = self.arena.len().saturating_add(self.boxed);
+        if held.saturating_add(n) > self.limit {
+            return Err(Fault::Full);
+        }
+        let mut words = Vec::new();
+        words.try_reserve_exact(n).map_err(|_| Fault::Full)?;
+        words.resize(n, 0);
+        // The box is kept first, so that the stub's two words are tested
+        // against the limit with it. A stub that is refused gives the box
+        // back, and no cell is left half made.
+        let number = self.keep(words.into_boxed_slice())?;
+        let stub = match self.free.pop(STUB_WORDS) {
+            Some(stub) => stub,
+            None => match self.carve(STUB_WORDS) {
+                Ok(stub) => stub,
+                Err(full) => {
+                    self.let_go(number as usize);
+                    return Err(full);
+                }
+            },
         };
-        if let Some(i) = self.spare.pop() {
-            if let Some(slot) = self.chunks.get_mut(i as usize) {
-                *slot = Some(chunk);
-            }
-            return Ok(i);
+        if let Some([h, second]) = self
+            .arena
+            .get_mut(stub.index()..)
+            .and_then(|w| w.get_mut(..2))
+        {
+            *h = header(1, kind, 0);
+            *second = u64::from(number);
         }
-        if self.chunks.len() >= 1 << CHUNK_BITS {
+        Ok(stub)
+    }
+
+    /// Put `words` in the table of boxes, in a place a freed box left or in
+    /// a new one, and give that place's number.
+    fn keep(&mut self, words: Box<[u64]>) -> Result<u32, Fault> {
+        self.boxed = self.boxed.saturating_add(words.len());
+        if let Some(number) = self.spare.pop()
+            && let Some(place) = self.outside.get_mut(number as usize)
+        {
+            *place = Some(words);
+            return Ok(number);
+        }
+        let room = self.outside.try_reserve(1);
+        let (Ok(number), Ok(())) = (u32::try_from(self.outside.len()), room) else {
+            self.boxed = self.boxed.saturating_sub(words.len());
             return Err(Fault::Full);
-        }
-        let i = u32::try_from(self.chunks.len()).map_err(|_| Fault::Full)?;
-        self.chunks.push(Some(chunk));
-        Ok(i)
+        };
+        self.outside.push(Some(words));
+        Ok(number)
+    }
+
+    /// Free the box in place `slot`, and keep the place's number for the
+    /// next box.
+    fn let_go(&mut self, slot: usize) {
+        let (Some(words), Ok(number)) = (
+            self.outside.get_mut(slot).and_then(Option::take),
+            u32::try_from(slot),
+        ) else {
+            return;
+        };
+        self.boxed = self.boxed.saturating_sub(words.len());
+        self.spare.push(number);
     }
 
     /// Add one reference to `cell`.
     pub(crate) fn share(&mut self, cell: Cell) {
-        let h = self.word(cell, 0);
+        let h = self.header(cell);
         let c = count(h);
         if c < STICKY {
-            self.set_word(cell, 0, with_count(h, c.saturating_add(1)));
+            self.set_header(cell, with_count(h, c.saturating_add(1)));
         }
     }
 
@@ -316,30 +410,30 @@ impl Heap {
     /// from the new cell there.
     pub(crate) fn release(&mut self, cell: Cell) -> Result<(), DeadCell> {
         // Most releases leave the cell alive, and need no list of the dying.
-        let h = self.word(cell, 0);
+        let h = self.header(cell);
         let c = count(h);
         if c > 1 {
             if c < STICKY {
-                self.set_word(cell, 0, with_count(h, c.saturating_sub(1)));
+                self.set_header(cell, with_count(h, c.saturating_sub(1)));
             }
             return Ok(());
         }
         let mut dying = std::mem::take(&mut self.dying);
         dying.push(cell);
         while let Some(cell) = dying.pop() {
-            let h = self.word(cell, 0);
+            let h = self.header(cell);
             let c = count(h);
             if c > 1 {
                 if c < STICKY {
-                    self.set_word(cell, 0, with_count(h, c.saturating_sub(1)));
+                    self.set_header(cell, with_count(h, c.saturating_sub(1)));
                 }
                 continue;
             }
             if freed(h) {
                 return Err(DeadCell);
             }
-            for i in held(kind_bits(h), size(h)) {
-                if let Some(held) = Value::from_bits(self.word(cell, i)).as_cell() {
+            for w in self.held_words(cell, h) {
+                if let Some(held) = Value::from_bits(*w).as_cell() {
                     dying.push(held);
                 }
             }
@@ -361,16 +455,18 @@ impl Heap {
     /// argument as the last reference only because its caller gave up its own
     /// first.
     pub(crate) fn hollow(&mut self, cell: Cell) -> Result<bool, DeadCell> {
-        let h = self.word(cell, 0);
+        let h = self.header(cell);
         if freed(h) {
             return Err(DeadCell);
         }
         if count(h) != 1 {
             return Ok(false);
         }
-        for i in held(kind_bits(h), size(h)) {
-            let held = Value::from_bits(self.word(cell, i));
-            self.set_word(cell, i, Value::NIL.bits());
+        for i in held(kind_bits(h), self.data_len(cell, h)) {
+            let Some(slot) = self.words_mut(cell, 1).get_mut(i) else {
+                break;
+            };
+            let held = Value::from_bits(std::mem::replace(slot, Value::NIL.bits()));
             if let Some(c) = held.as_cell() {
                 self.release(c)?;
             }
@@ -386,8 +482,10 @@ impl Heap {
     /// not be the one that was kept for it. A freed cell does not fit, and
     /// the release its register then gets is what reports it.
     pub(crate) fn fits_ctor(&self, cell: Cell, fields: usize) -> bool {
-        let h = self.word(cell, 0);
-        count(h) == 1 && kind_bits(h) == Kind::Ctor as u64 && size(h).checked_sub(2) == Some(fields)
+        let h = self.header(cell);
+        count(h) == 1
+            && kind_bits(h) == Kind::Ctor as u64
+            && self.data_len(cell, h).checked_sub(1) == Some(fields)
     }
 
     /// The handle numbers freed since this was last asked.
@@ -402,28 +500,34 @@ impl Heap {
             self.released.push(self.word(cell, 1));
         }
         self.live = self.live.wrapping_sub(1);
-        let own = matches!(self.chunks.get(cell.chunk as usize), Some(Some(c)) if c.own);
-        if own {
-            if let Some(slot) = self.chunks.get_mut(cell.chunk as usize) {
-                *slot = None;
+        let size = match size(h) {
+            0 => {
+                self.unbox(cell, h);
+                STUB_WORDS
             }
-            self.spare.push(cell.chunk);
-        } else {
-            self.set_word(cell, 0, 0);
-            self.free.push(size(h), cell);
+            size => size,
+        };
+        self.set_header(cell, 0);
+        self.free.push(size, cell);
+    }
+
+    /// Give back the box of the long cell `cell`, whose header is `h`.
+    #[cold]
+    #[inline(never)]
+    fn unbox(&mut self, cell: Cell, h: u64) {
+        if let Some(slot) = self.slot(cell, h) {
+            self.let_go(slot);
         }
     }
 
     pub(crate) fn kind(&self, cell: Cell) -> Option<Kind> {
-        kind_of(self.word(cell, 0))
+        kind_of(self.header(cell))
     }
 
-    /// `cell`'s kind and the words after its header, read with one look up
-    /// of the cell, for a walk that wants both at every step.
+    /// `cell`'s kind and the words after its header, for a walk that wants
+    /// both at every step.
     pub(crate) fn kind_and_data(&self, cell: Cell) -> (Option<Kind>, &[u64]) {
-        let words = self.onward(cell);
-        let h = words.first().copied().unwrap_or(0);
-        (kind_of(h), words.get(1..size(h)).unwrap_or(&[]))
+        (kind_of(self.header(cell)), self.words(cell, 1))
     }
 
     /// A new string cell holding `text`.
@@ -608,10 +712,25 @@ impl Heap {
         self.words(cell, 1)
     }
 
+    /// [`Self::data`] for a binary's readers.
+    // A binary is as often long as short, and a parser reads one byte of it
+    // at a time. So the way to a long cell's box is not marked cold here, as
+    // it is in `words` for every other reader. A read of a long binary costs
+    // about 25 machine instructions more through the cold one.
+    #[inline]
+    pub(crate) fn binary_data(&self, cell: Cell) -> &[u64] {
+        let onward = self.arena.get(cell.index()..).unwrap_or(&[]);
+        let h = onward.first().copied().unwrap_or(0);
+        match onward.get(1..size(h)) {
+            Some(words) => words,
+            None => self.boxed(cell, h),
+        }
+    }
+
     /// Whether `cell` has one holder, who may then change it in place.
     /// Asking about a freed cell is [`DeadCell`].
     pub(crate) fn unique(&self, cell: Cell) -> Result<bool, DeadCell> {
-        let h = self.word(cell, 0);
+        let h = self.header(cell);
         if freed(h) {
             return Err(DeadCell);
         }
@@ -679,32 +798,48 @@ impl Heap {
     /// Copy words `src` after `from`'s header to the words from `dst` after
     /// `to`'s, two different cells.
     fn copy_words(&mut self, from: Cell, src: std::ops::Range<usize>, to: Cell, dst: usize) {
-        let len = src.len();
-        let s = (from.word as usize)
-            .saturating_add(1)
-            .saturating_add(src.start);
-        let d = (to.word as usize).saturating_add(1).saturating_add(dst);
-        let (a, b) = (from.chunk as usize, to.chunk as usize);
-        if a == b {
-            if let Some(Some(c)) = self.chunks.get_mut(a)
-                && s.saturating_add(len) <= c.words.len()
-                && d.saturating_add(len) <= c.words.len()
-            {
-                c.words.copy_within(s..s.saturating_add(len), d);
-            }
-            return;
+        if size(self.header(from)) == 0 || size(self.header(to)) == 0 {
+            return self.copy_long_words(from, src, to, dst);
         }
-        let (lo, hi) = self.chunks.split_at_mut(a.max(b));
-        let (source, target) = if a < b {
-            (lo.get(a), hi.first_mut())
-        } else {
-            (hi.first(), lo.get_mut(b))
-        };
-        if let (Some(Some(source)), Some(Some(target))) = (source, target)
-            && let Some(from) = source.words.get(s..s.saturating_add(len))
-            && let Some(to) = target.words.get_mut(d..d.saturating_add(len))
-        {
-            to.copy_from_slice(from);
+        let len = src.len();
+        let s = from.index().saturating_add(1).saturating_add(src.start);
+        let d = to.index().saturating_add(1).saturating_add(dst);
+        if s.saturating_add(len) <= self.arena.len() && d.saturating_add(len) <= self.arena.len() {
+            self.arena.copy_within(s..s.saturating_add(len), d);
+        }
+    }
+
+    /// [`Self::copy_words`] when one of the cells is long, or both are. A
+    /// long cell's box is taken out of its place while it is read or
+    /// written, so that the other cell can be reached wherever it is.
+    #[cold]
+    #[inline(never)]
+    fn copy_long_words(&mut self, from: Cell, src: std::ops::Range<usize>, to: Cell, dst: usize) {
+        let len = src.len();
+        if let Some(slot) = self.slot(to, self.header(to)) {
+            let Some(mut target) = self.outside.get_mut(slot).and_then(Option::take) else {
+                return;
+            };
+            if let Some(source) = self.words(from, 1).get(src)
+                && let Some(room) = target.get_mut(dst..dst.saturating_add(len))
+            {
+                room.copy_from_slice(source);
+            }
+            if let Some(place) = self.outside.get_mut(slot) {
+                *place = Some(target);
+            }
+        } else if let Some(slot) = self.slot(from, self.header(from)) {
+            let Some(source) = self.outside.get_mut(slot).and_then(Option::take) else {
+                return;
+            };
+            if let Some(source) = source.get(src)
+                && let Some(room) = self.words_mut(to, 1).get_mut(dst..dst.saturating_add(len))
+            {
+                room.copy_from_slice(source);
+            }
+            if let Some(place) = self.outside.get_mut(slot) {
+                *place = Some(source);
+            }
         }
     }
 
@@ -715,13 +850,16 @@ impl Heap {
     /// else holds them. It is not for a handle, whose number the host would
     /// then be asked to let go of twice.
     pub(crate) fn copy(&mut self, cell: Cell) -> Result<Cell, Fault> {
-        let h = self.word(cell, 0);
+        let h = self.header(cell);
         let kind = kind_of(h).ok_or(Fault::DeadCell)?;
-        let words = size(h).saturating_sub(1);
+        let words = self.data_len(cell, h);
         let new = self.alloc(kind, 0, words)?;
         self.copy_words(cell, 0..words, new, 0);
-        for i in held(kind_bits(h), size(h)) {
-            if let Some(held) = Value::from_bits(self.word(new, i)).as_cell() {
+        for i in held(kind_bits(h), words) {
+            let Some(w) = self.words(new, 1).get(i) else {
+                break;
+            };
+            if let Some(held) = Value::from_bits(*w).as_cell() {
                 self.share(held);
             }
         }
@@ -735,7 +873,7 @@ impl Heap {
     // which then makes one call and not two.
     #[inline]
     pub(crate) fn discard(&mut self, cell: Cell) -> Result<(), DeadCell> {
-        let h = self.word(cell, 0);
+        let h = self.header(cell);
         if freed(h) {
             return Err(DeadCell);
         }
@@ -790,54 +928,147 @@ impl Heap {
         self.reused
     }
 
-    /// The chunk's words from `cell`'s header to the chunk's end, or none
-    /// for a cell the heap does not have.
-    fn onward(&self, cell: Cell) -> &[u64] {
-        match self.chunks.get(cell.chunk as usize) {
-            Some(Some(c)) => c.words.get(cell.word as usize..).unwrap_or(&[]),
-            _ => &[],
+    /// `cell`'s header, or 0, a freed cell's, when the arena has no such
+    /// word.
+    fn header(&self, cell: Cell) -> u64 {
+        self.arena.get(cell.index()).copied().unwrap_or(0)
+    }
+
+    fn set_header(&mut self, cell: Cell, h: u64) {
+        if let Some(slot) = self.arena.get_mut(cell.index()) {
+            *slot = h;
         }
     }
 
-    fn onward_mut(&mut self, cell: Cell) -> &mut [u64] {
-        match self.chunks.get_mut(cell.chunk as usize) {
-            Some(Some(c)) => c.words.get_mut(cell.word as usize..).unwrap_or(&mut []),
-            _ => &mut [],
+    /// How many words follow the header `h` of `cell`.
+    fn data_len(&self, cell: Cell, h: u64) -> usize {
+        match size(h).checked_sub(1) {
+            Some(n) => n,
+            None => self.long_words(cell, h, 1).len(),
         }
+    }
+
+    /// The words of `cell`, whose header is `h`, that hold values. Which
+    /// they are comes from the header alone, so a cell that holds none, like
+    /// a string, has none of its words looked up.
+    #[inline(always)]
+    fn held_words(&self, cell: Cell, h: u64) -> &[u64] {
+        let Some(len) = size(h).checked_sub(1) else {
+            return self.long_held_words(cell, h);
+        };
+        let held = held(kind_bits(h), len);
+        if held.is_empty() {
+            return &[];
+        }
+        let first = cell.index().saturating_add(1);
+        self.arena
+            .get(first.saturating_add(held.start)..first.saturating_add(held.end))
+            .unwrap_or(&[])
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn long_held_words(&self, cell: Cell, h: u64) -> &[u64] {
+        let data = self.boxed(cell, h);
+        data.get(held(kind_bits(h), data.len())).unwrap_or(&[])
     }
 
     /// Words `from` to the end of `cell`, counting its header as word 0.
+    /// `from` is 1 or 2: the header itself is [`Self::header`]'s to read.
     // This and `words_mut` are a few instructions each. They go inside their
     // callers, so that a node `make` writes, or one an array reads to copy,
     // costs no call. Left to the optimizer, each array node made paid for
     // two.
     #[inline(always)]
     fn words(&self, cell: Cell, from: usize) -> &[u64] {
-        let words = self.onward(cell);
-        let size = words.first().map_or(0, |h| size(*h));
-        words.get(from..size).unwrap_or(&[])
+        let onward = self.arena.get(cell.index()..).unwrap_or(&[]);
+        let h = onward.first().copied().unwrap_or(0);
+        // A long cell's header gives its size as 0, so it has no such run
+        // of words in the arena, and neither has a freed cell.
+        match onward.get(from..size(h)) {
+            Some(words) => words,
+            None => self.long_words(cell, h, from),
+        }
     }
 
     #[inline(always)]
     fn words_mut(&mut self, cell: Cell, from: usize) -> &mut [u64] {
-        let words = self.onward_mut(cell);
-        let size = words.first().map_or(0, |h| size(*h));
-        words.get_mut(from..size).unwrap_or(&mut [])
+        let h = self.header(cell);
+        if size(h) == 0 {
+            return self.long_words_mut(cell, h, from);
+        }
+        self.arena
+            .get_mut(cell.index()..)
+            .and_then(|onward| onward.get_mut(from..size(h)))
+            .unwrap_or(&mut [])
     }
 
+    /// Word `i` of `cell`, counting its header as word 0, for `i` of 1 or
+    /// more. It is 0 past the cell's last word.
     fn word(&self, cell: Cell, i: usize) -> u64 {
-        self.onward(cell).get(i).copied().unwrap_or(0)
+        let h = self.header(cell);
+        let word = if i < size(h) {
+            self.arena.get(cell.index().saturating_add(i))
+        } else {
+            self.long_words(cell, h, i).first()
+        };
+        word.copied().unwrap_or(0)
     }
 
     fn set_word(&mut self, cell: Cell, i: usize, w: u64) {
-        if let Some(slot) = self.onward_mut(cell).get_mut(i) {
+        let h = self.header(cell);
+        let slot = if i < size(h) {
+            self.arena.get_mut(cell.index().saturating_add(i))
+        } else {
+            self.long_words_mut(cell, h, i).first_mut()
+        };
+        if let Some(slot) = slot {
             *slot = w;
         }
+    }
+
+    /// The number of the box that holds the words of `cell`, whose header
+    /// is `h`, when it is a long cell.
+    fn slot(&self, cell: Cell, h: u64) -> Option<usize> {
+        if size(h) != 0 || freed(h) {
+            return None;
+        }
+        let number = self.arena.get(cell.index().saturating_add(1))?;
+        Some(to_usize(*number))
+    }
+
+    /// [`Self::words`] for a cell whose header `h` gives it no such words in
+    /// the arena. For a long cell they are in its box. A freed cell, a cell
+    /// the heap does not have and a cell shorter than `from` have none.
+    #[cold]
+    #[inline(never)]
+    fn long_words(&self, cell: Cell, h: u64, from: usize) -> &[u64] {
+        self.boxed(cell, h)
+            .get(from.saturating_sub(1)..)
+            .unwrap_or(&[])
+    }
+
+    /// The words in the box of `cell`, whose header is `h`, or none when it
+    /// is not a long cell.
+    fn boxed(&self, cell: Cell, h: u64) -> &[u64] {
+        self.slot(cell, h)
+            .and_then(|slot| self.outside.get(slot)?.as_deref())
+            .unwrap_or(&[])
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn long_words_mut(&mut self, cell: Cell, h: u64, from: usize) -> &mut [u64] {
+        self.slot(cell, h)
+            .and_then(|slot| self.outside.get_mut(slot)?.as_deref_mut())
+            .and_then(|words| words.get_mut(from.saturating_sub(1)..))
+            .unwrap_or(&mut [])
     }
 }
 
 /// A header word. It holds the count in the low 32 bits, then the kind in 4
-/// bits, then the cell's size in words in the top [`WORD_BITS`].
+/// bits, then in the top [`SIZE_BITS`] the cell's size in words, or 0 for a
+/// long cell, whose size is its box's.
 fn header(count: u32, kind: Kind, size: usize) -> u64 {
     u64::from(count) | (kind as u64) << 32 | (size as u64) << 36
 }
@@ -863,13 +1094,13 @@ fn freed(h: u64) -> bool {
     h >> 32 == 0
 }
 
-/// The words of a cell of this kind and size that hold a value, and so a
-/// reference. They are the words after a constructor's or closure's tag word,
-/// all of a tuple or an array leaf, an array root's three parts (after its
-/// length and height), an array branch's children (after its height and size
-/// table), every word of a map cell after its first, and a binary slice's
-/// first word.
-fn held(kind: u64, size: usize) -> std::ops::Range<usize> {
+/// Which of the `len` words after the header of a cell of this kind hold a
+/// value, and so a reference. They are the words after a constructor's or
+/// closure's tag word, all of a tuple or an array leaf, an array root's three
+/// parts (after its length, height and offset), an array branch's children
+/// (after its height and size table), every word of a map cell after its
+/// first, and a binary slice's first word.
+fn held(kind: u64, len: usize) -> std::ops::Range<usize> {
     let k = |want: Kind| kind == want as u64;
     if k(Kind::Ctor)
         || k(Kind::Closure)
@@ -877,18 +1108,17 @@ fn held(kind: u64, size: usize) -> std::ops::Range<usize> {
         || k(Kind::MapNode)
         || k(Kind::MapCollision)
     {
-        2..size
+        1..len
     } else if k(Kind::Tuple) || k(Kind::ArrayLeaf) {
-        1..size
+        0..len
     } else if k(Kind::ArrayRoot) {
-        4..size
+        3..len
     } else if k(Kind::ArrayBranch) {
         // A branch is its height, then a size table and the children, the
-        // same number of each. A size is at most `MAX_CELL_WORDS`, so neither
-        // step can saturate.
-        size.saturating_sub(size.saturating_sub(2) / 2)..size
+        // same number of each.
+        len.saturating_sub(len.saturating_sub(1) / 2)..len
     } else if k(Kind::BinarySlice) {
-        1..2
+        0..1
     } else {
         0..0
     }
@@ -896,6 +1126,26 @@ fn held(kind: u64, size: usize) -> std::ops::Range<usize> {
 
 fn size(h: u64) -> usize {
     (h >> 36) as usize
+}
+
+/// How many more words to ask the system for when an arena of `len` words
+/// with room for `room` needs `more`, in the order to try them. The first
+/// doubles the room, so that growing is rare, but never takes it past
+/// `limit`. The rest are for when the system refuses: each is half the one
+/// before, down to an eighth of the arena. When that is refused too the heap
+/// is full, because growing can move the whole arena, and smaller steps
+/// would move it once every few cells.
+fn growth(len: usize, room: usize, more: usize, limit: usize) -> impl Iterator<Item = usize> {
+    let most = room
+        .saturating_mul(2)
+        .max(4)
+        .min(limit)
+        .saturating_sub(len)
+        .max(more);
+    let least = (len / 8).max(more).min(most);
+    std::iter::successors(Some(most), move |last| {
+        (*last > least).then(|| (last / 2).max(least))
+    })
 }
 
 /// Up to eight bytes of a string, little-endian, zero-padded to a whole word.
@@ -947,12 +1197,28 @@ mod tests {
         String::from_utf8(out).expect("UTF-8")
     }
 
+    fn v() -> VariantRef {
+        VariantRef {
+            type_id: TypeId(1),
+            variant_idx: 0,
+        }
+    }
+
+    /// A value word that is not a cell, and is different for each `i`.
+    fn int(i: usize) -> Value {
+        Value::int(i64::try_from(i).expect("small")).expect("small")
+    }
+
+    /// A heap asks the system for nothing until it has a cell to keep. Word
+    /// 0 is kept back, so the first cell is at word 1.
     #[test]
-    fn there_is_no_chunk_until_the_first_cell() {
+    fn there_is_no_arena_until_the_first_cell() {
         let mut heap = Heap::default();
-        assert!(heap.chunks.is_empty());
-        heap.string(b"hi").expect("room");
-        assert_eq!(heap.chunks.len(), 1);
+        assert_eq!(heap.arena.capacity(), 0);
+        let cell = heap.string(b"hi").expect("room");
+        assert_eq!(cell, Cell(1));
+        // A header, the length, and one word of text.
+        assert_eq!(heap.arena.len(), 1 + 3);
     }
 
     #[test]
@@ -988,37 +1254,513 @@ mod tests {
         assert_eq!(heap.live(), 0);
     }
 
-    /// Each new small-cell chunk is 1.6 times the one before, from 2 KB.
+    /// A cell that no free list has is added at the arena's end, so the
+    /// arena is exactly as long as the cells carved from it, and a freed
+    /// cell's space is taken again before the arena grows.
     #[test]
-    fn chunks_grow_by_steps() {
+    fn the_arena_is_as_long_as_the_cells_carved_from_it() {
         let mut heap = Heap::default();
-        for _ in 0..2000 {
-            heap.string(b"a string of twenty-four!").expect("room");
-        }
-        let sizes: Vec<usize> = heap
-            .chunks
-            .iter()
-            .flatten()
-            .map(|c| c.words.len())
+        let cells: Vec<Cell> = (0..2000)
+            .map(|_| heap.string(b"a string of twenty-four!").expect("room"))
             .collect();
-        assert_eq!(sizes[..4], [256, 409, 654, 1046]);
+        // Each is a header, the length, and three words of text.
+        assert_eq!(heap.arena.len(), 1 + 2000 * 5);
+        for (i, cell) in cells.iter().enumerate() {
+            assert_eq!(cell.index(), 1 + 5 * i);
+        }
+        for cell in &cells {
+            heap.release(*cell).expect("a live cell");
+        }
+        for _ in 0..2000 {
+            heap.string(b"another one of that size").expect("room");
+        }
+        assert_eq!(heap.arena.len(), 1 + 2000 * 5);
+        assert_eq!(heap.made(), 4000);
     }
 
-    /// A cell too big for the current chunk gets its own, and the chunk goes
-    /// back when the cell does. Its index is reused.
+    /// The arena moves when it grows, and a cell's name is an index, so the
+    /// name is still good afterwards.
     #[test]
-    fn a_big_cell_gets_a_chunk_of_its_own_size() {
+    fn a_cell_keeps_its_name_when_the_arena_grows() {
+        let mut heap = Heap::default();
+        let first = heap.string(b"the first cell").expect("room");
+        let before = heap.arena.capacity();
+        let mut last = first;
+        while heap.arena.capacity() < 100 * before {
+            last = heap.string(b"more").expect("room");
+        }
+        assert_eq!(text(&heap, first), "the first cell");
+        assert_eq!(text(&heap, last), "more");
+        assert_eq!(heap.unique(first), Ok(true));
+    }
+
+    /// A cell of up to [`ARENA_CELL_WORDS`] words is in the arena, whichever
+    /// half of the free lists its size is in. One word more and it is a
+    /// stub and a box.
+    #[test]
+    fn the_longest_arena_cell_is_254_words() {
+        let mut heap = Heap::default();
+        let values: Vec<u64> = (0..ARENA_CELL_WORDS).map(|i| int(i).bits()).collect();
+        let short = heap
+            .make(Kind::ArrayLeaf, &values[..ARENA_CELL_WORDS - 1])
+            .expect("room");
+        assert_eq!(heap.arena.len(), 1 + ARENA_CELL_WORDS);
+        assert_eq!((heap.boxed, heap.outside.len()), (0, 0));
+        let long = heap.make(Kind::ArrayLeaf, &values).expect("room");
+        assert_eq!(heap.arena.len(), 1 + ARENA_CELL_WORDS + STUB_WORDS);
+        assert_eq!((heap.boxed, heap.outside.len()), (ARENA_CELL_WORDS, 1));
+        assert_eq!(heap.data(short), &values[..ARENA_CELL_WORDS - 1]);
+        assert_eq!(heap.data(long), values.as_slice());
+        // Each goes back on the list for the words it took in the arena.
+        heap.release(short).expect("a live cell");
+        heap.release(long).expect("a live cell");
+        assert_eq!(heap.live(), 0);
+        let stub = heap.tuple(&[Value::NIL]).expect("room");
+        assert_eq!(stub, long, "a tuple of one element is two words too");
+        let again = heap
+            .make(Kind::ArrayLeaf, &values[..ARENA_CELL_WORDS - 1])
+            .expect("room");
+        assert_eq!(again, short);
+        assert_eq!(heap.arena.len(), 1 + ARENA_CELL_WORDS + STUB_WORDS);
+    }
+
+    /// A long cell takes two words of the arena and keeps the rest in a box.
+    /// The box is freed when the cell is, and the stub's space and the box's
+    /// number are both used again.
+    #[test]
+    fn a_long_cell_keeps_its_words_in_a_box_of_its_own() {
         let mut heap = Heap::default();
         let big = vec![b'x'; 10_000];
         let cell = heap.string(&big).expect("room");
-        let own = heap.chunks[cell.chunk as usize].as_ref().expect("made");
-        assert!(own.own);
-        assert_eq!(own.words.len(), 2 + 10_000usize.div_ceil(8));
+        assert_eq!(heap.arena.len(), 1 + STUB_WORDS);
+        assert_eq!(heap.boxed, 1 + 10_000usize.div_ceil(8));
+        assert_eq!(heap.outside.len(), 1);
+        assert_eq!(heap.kind(cell), Some(Kind::String));
+        assert_eq!(heap.string_len(cell), 10_000);
+        assert!(heap.string_is(cell, &big));
         assert_eq!(text(&heap, cell).len(), 10_000);
+        heap.share(cell);
+        assert_eq!(heap.unique(cell), Ok(false));
         heap.release(cell).expect("a live cell");
-        assert!(heap.chunks[cell.chunk as usize].is_none());
+        assert_eq!(heap.unique(cell), Ok(true));
+        heap.release(cell).expect("a live cell");
+        assert_eq!((heap.live(), heap.boxed), (0, 0));
+        assert_eq!(heap.outside, [None]);
+        assert!(heap.data(cell).is_empty(), "a freed cell has no words");
         let again = heap.string(&big).expect("room");
-        assert_eq!(again.chunk, cell.chunk);
+        assert_eq!(again, cell);
+        assert_eq!(heap.arena.len(), 1 + STUB_WORDS);
+        assert_eq!(heap.outside.len(), 1);
+        assert!(heap.string_is(again, &big));
+    }
+
+    /// Two long cells have a box each, and freeing the first leaves the
+    /// second's words alone.
+    #[test]
+    fn each_long_cell_has_its_own_box() {
+        let mut heap = Heap::default();
+        let a = heap.string(&vec![b'a'; 5_000]).expect("room");
+        let b = heap.string(&vec![b'b'; 6_000]).expect("room");
+        assert_eq!(heap.outside.len(), 2);
+        heap.release(a).expect("a live cell");
+        assert!(heap.string_is(b, &vec![b'b'; 6_000]));
+        // The next long cell takes the first one's stub and box number.
+        let c = heap.string(&vec![b'c'; 7_000]).expect("room");
+        assert_eq!(c, a);
+        assert_eq!(heap.outside.len(), 2);
+        assert!(heap.string_is(b, &vec![b'b'; 6_000]));
+        assert!(heap.string_is(c, &vec![b'c'; 7_000]));
+        assert_eq!(heap.boxed, 2 + 6_000 / 8 + 7_000 / 8);
+    }
+
+    /// A constructor too wide for the arena reads, is reused in place, and
+    /// frees what it holds, the same as a narrow one.
+    #[test]
+    fn a_long_constructor_is_a_constructor() {
+        let mut heap = Heap::default();
+        let held = heap.string(b"held").expect("room");
+        let mut fields: Vec<Value> = (0..300).map(int).collect();
+        fields[299] = Value::cell(held);
+        let cell = heap.ctor(v(), &fields).expect("room");
+        assert_eq!(heap.arena.len(), 1 + 3 + STUB_WORDS);
+        assert_eq!(heap.kind(cell), Some(Kind::Ctor));
+        assert_eq!(heap.variant(cell), v());
+        assert_eq!(heap.fields(cell).count(), 300);
+        for (i, f) in fields.iter().enumerate() {
+            assert_eq!(heap.field(cell, i).map(Value::view), Some(f.view()));
+        }
+        assert!(heap.field(cell, 300).is_none());
+        // Hollowing gives up the string and keeps the cell, box and all.
+        assert!(heap.fits_ctor(cell, 300));
+        assert!(!heap.fits_ctor(cell, 299));
+        assert_eq!(heap.hollow(cell), Ok(true));
+        assert_eq!(heap.live(), 1);
+        assert!(heap.fields(cell).all(|f| f.view() == Value::NIL.view()));
+        let other = VariantRef {
+            type_id: TypeId(7),
+            variant_idx: 3,
+        };
+        heap.ctor_in(cell, other, &fields[..299]);
+        assert_eq!(heap.variant(cell), other);
+        assert_eq!(
+            heap.field(cell, 298).map(Value::view),
+            Some(int(298).view())
+        );
+        heap.release(cell).expect("a live cell");
+        assert_eq!((heap.live(), heap.boxed), (0, 0));
+    }
+
+    #[test]
+    fn a_long_tuple_and_a_long_closure_hold_what_they_were_given() {
+        let mut heap = Heap::default();
+        let held = heap.string(b"held").expect("room");
+        heap.share(held);
+        let mut values: Vec<Value> = (0..400).map(int).collect();
+        values[0] = Value::cell(held);
+        let tuple = heap.tuple(&values).expect("room");
+        let closure = heap.closure(FuncIdx(9), &values).expect("room");
+        assert_eq!(heap.outside.len(), 2);
+        assert_eq!(heap.elements(tuple).count(), 400);
+        assert_eq!(
+            heap.element(tuple, 399).map(Value::view),
+            Some(int(399).view())
+        );
+        assert!(heap.element(tuple, 400).is_none());
+        assert_eq!(heap.closure_func(closure), FuncIdx(9));
+        assert_eq!(
+            heap.capture(closure, 399).map(Value::view),
+            Some(int(399).view())
+        );
+        assert!(heap.capture(closure, 400).is_none());
+        // Each holds the string once, so it is freed with the second.
+        heap.release(tuple).expect("a live cell");
+        assert_eq!(heap.unique(held), Ok(true));
+        heap.release(closure).expect("a live cell");
+        assert_eq!((heap.live(), heap.boxed), (0, 0));
+    }
+
+    #[test]
+    fn a_long_big_int_reads_back() {
+        let mut heap = Heap::default();
+        let big: BigInt = -(BigInt::from(1) << 19_200usize);
+        let cell = heap.big_int(&big).expect("room");
+        assert_eq!(heap.outside.len(), 1);
+        assert_eq!(heap.read_big_int(cell), big);
+        assert_eq!(heap.big_int_word(cell), None);
+        heap.release(cell).expect("a live cell");
+        assert_eq!(heap.boxed, 0);
+    }
+
+    /// A long cell's one holder changes its words where they are.
+    #[test]
+    fn a_long_cell_is_written_in_its_box() {
+        let mut heap = Heap::default();
+        let cell = heap.make(Kind::Binary, &[0; 1000]).expect("room");
+        heap.data_mut(cell)[999] = 7;
+        heap.data_mut(cell)[0] = 5;
+        assert_eq!(heap.data(cell).len(), 1000);
+        assert_eq!((heap.data(cell)[0], heap.data(cell)[999]), (5, 7));
+        let (kind, data) = heap.kind_and_data(cell);
+        assert_eq!((kind, data.len()), (Some(Kind::Binary), 1000));
+    }
+
+    /// A binary's readers have their own way to its words, and it gives
+    /// what `data` gives for a short cell, a long one, a freed one and one
+    /// the heap does not have.
+    #[test]
+    fn binary_data_is_data() {
+        let mut heap = Heap::default();
+        let short = heap.make(Kind::Binary, &[16, 7]).expect("room");
+        let long = heap.make(Kind::Binary, &[3; 400]).expect("room");
+        let gone = heap.make(Kind::Binary, &[4; 400]).expect("room");
+        heap.release(gone).expect("a live cell");
+        for cell in [short, long, gone, Cell(0), Cell(u32::MAX)] {
+            assert_eq!(heap.binary_data(cell), heap.data(cell));
+        }
+        assert_eq!(heap.binary_data(short), &[16, 7]);
+        assert_eq!(heap.binary_data(long), &[3; 400]);
+        assert!(heap.binary_data(gone).is_empty());
+    }
+
+    /// A long node is copied word for word into a box of its own, and what
+    /// it holds gets one more reference each, as for a short one.
+    #[test]
+    fn a_copy_of_a_long_node_shares_what_it_holds() {
+        let mut heap = Heap::default();
+        let held = heap.string(b"held").expect("room");
+        let mut data: Vec<u64> = (0..500).map(|i| int(i).bits()).collect();
+        data[499] = Value::cell(held).bits();
+        let node = heap.make(Kind::ArrayLeaf, &data).expect("room");
+        let copy = heap.copy(node).expect("room");
+        assert_ne!(copy, node);
+        assert_eq!(heap.outside.len(), 2);
+        assert_eq!(heap.data(copy), data.as_slice());
+        assert_eq!(heap.unique(held), Ok(false));
+        heap.release(node).expect("a live cell");
+        assert_eq!(heap.unique(held), Ok(true));
+        assert_eq!(heap.data(copy), data.as_slice());
+        heap.release(copy).expect("a live cell");
+        assert_eq!((heap.live(), heap.boxed), (0, 0));
+    }
+
+    /// A splice moves words between a short cell and a long one, either
+    /// way, and between two long ones.
+    #[test]
+    fn a_splice_moves_words_into_and_out_of_a_box() {
+        let mut heap = Heap::default();
+        let words: Vec<u64> = (0..600).map(|i| int(i).bits()).collect();
+        let put = [int(7000).bits(), int(7001).bits()];
+        // Short to long: 200 words, two put in at 100, and 300 spare.
+        let short = heap.make(Kind::MapNode, &words[..200]).expect("room");
+        let edit = Edit {
+            cut: 0..0,
+            at: 100,
+            put: &put,
+        };
+        let long = heap
+            .splice(Kind::MapNode, short, 200, edit, 300)
+            .expect("room");
+        let mut want = words[..100].to_vec();
+        want.extend(put);
+        want.extend(&words[100..200]);
+        want.resize(502, Value::NIL.bits());
+        assert_eq!(heap.data(long), want.as_slice());
+        assert_eq!((heap.live(), heap.outside.len()), (1, 1));
+        // Long to long: the first 202 words, less two cut from the middle.
+        let edit = Edit {
+            cut: 100..102,
+            at: 0,
+            put: &[],
+        };
+        let longer = heap
+            .splice(Kind::MapNode, long, 202, edit, 400)
+            .expect("room");
+        let mut want = words[..200].to_vec();
+        want.resize(600, Value::NIL.bits());
+        assert_eq!(heap.data(longer), want.as_slice());
+        assert_eq!((heap.live(), heap.boxed), (1, 600));
+        // Long to short: its first 50 words.
+        let edit = Edit {
+            cut: 50..200,
+            at: 0,
+            put: &[],
+        };
+        let back = heap
+            .splice(Kind::MapNode, longer, 200, edit, 0)
+            .expect("room");
+        assert_eq!(heap.data(back), &words[..50]);
+        assert_eq!((heap.live(), heap.boxed), (1, 0));
+    }
+
+    /// Freeing a long cell gives up the cells it holds, long ones among
+    /// them, without a Rust call per cell.
+    #[test]
+    fn freeing_a_long_cell_frees_what_it_holds() {
+        let mut heap = Heap::default();
+        let mut tail = Value::NIL;
+        for _ in 0..1000 {
+            let mut values = vec![Value::NIL; 300];
+            values[150] = tail;
+            tail = Value::cell(heap.tuple(&values).expect("room"));
+        }
+        assert_eq!((heap.live(), heap.boxed), (1000, 300_000));
+        let head = tail.as_cell().expect("a cell");
+        heap.release(head).expect("a live cell");
+        assert_eq!((heap.live(), heap.boxed), (0, 0));
+        assert!(heap.outside.iter().all(Option::is_none));
+    }
+
+    /// The limit counts the arena's words and the boxes' together. A cell
+    /// that would pass it is refused, and the heap is left as it was.
+    #[test]
+    fn a_heap_at_its_limit_is_full() {
+        // Word 0, then room for four cells of three words.
+        let mut heap = Heap::limited(1 + 4 * 3);
+        let cells: Vec<Cell> = (0..4)
+            .map(|_| heap.string(b"three").expect("room"))
+            .collect();
+        assert_eq!(heap.string(b"three"), Err(Fault::Full));
+        assert_eq!(heap.tuple(&[]), Err(Fault::Full), "not even one word");
+        assert_eq!((heap.live(), heap.made(), heap.arena.len()), (4, 4, 13));
+        // A freed cell's space is still there to take.
+        heap.release(cells[1]).expect("a live cell");
+        assert_eq!(heap.string(b"again"), Ok(cells[1]));
+        assert_eq!(heap.string(b"three"), Err(Fault::Full));
+        assert_eq!(text(&heap, cells[0]), "three");
+    }
+
+    #[test]
+    fn a_long_cell_counts_against_the_limit() {
+        let mut heap = Heap::limited(1000);
+        let first = heap.make(Kind::Binary, &[1; 600]).expect("room");
+        let before = (heap.live(), heap.made(), heap.arena.len(), heap.boxed);
+        assert_eq!(before, (1, 1, 3, 600));
+        assert_eq!(heap.make(Kind::Binary, &[2; 600]), Err(Fault::Full));
+        assert_eq!(
+            (heap.live(), heap.made(), heap.arena.len(), heap.boxed),
+            before
+        );
+        assert_eq!(heap.outside.len(), 1);
+        // 397 more words fit beside it: a stub and 395 in a box.
+        assert_eq!(heap.make(Kind::Binary, &[2; 396]), Err(Fault::Full));
+        let second = heap.make(Kind::Binary, &[2; 395]).expect("room");
+        assert_eq!(heap.arena.len() + heap.boxed, 1000);
+        assert_eq!(heap.tuple(&[]), Err(Fault::Full));
+        // Giving the first back makes room for the cell refused before.
+        heap.release(first).expect("a live cell");
+        let third = heap.make(Kind::Binary, &[3; 600]).expect("room");
+        assert_eq!(heap.data(second), &[2; 395]);
+        assert_eq!(heap.data(third), &[3; 600]);
+    }
+
+    /// The box fits under the limit and the stub's two words do not. The
+    /// refusal leaves no box behind.
+    #[test]
+    fn a_long_cell_whose_stub_has_no_room_leaves_nothing_behind() {
+        let mut heap = Heap::limited(300 + 2);
+        assert_eq!(heap.make(Kind::Binary, &[0; 300]), Err(Fault::Full));
+        assert_eq!((heap.live(), heap.made(), heap.boxed), (0, 0, 0));
+        assert!(heap.arena.is_empty());
+        assert!(heap.outside.iter().all(Option::is_none));
+        let cell = heap.make(Kind::Binary, &[0; 299]).expect("room");
+        assert_eq!(heap.data(cell).len(), 299);
+        assert_eq!(heap.arena.len() + heap.boxed, 302);
+    }
+
+    /// A long cell is refused at its stub while a freed box's number is
+    /// waiting to be used again. The number is still waiting afterwards, and
+    /// the next long cell takes it.
+    #[test]
+    fn a_long_cell_refused_at_its_stub_gives_its_box_number_back() {
+        let mut heap = Heap::limited(400);
+        let first = heap.make(Kind::Binary, &[1; 300]).expect("room");
+        heap.release(first).expect("a live cell");
+        assert_eq!(heap.spare, [0]);
+        // A two-word cell takes the freed stub, so the next stub is carved.
+        let small = heap.tuple(&[Value::NIL]).expect("room");
+        assert_eq!(small, first);
+        // 3 words of arena and 396 of box fit under 400, and a stub does not.
+        assert_eq!(heap.make(Kind::Binary, &[2; 396]), Err(Fault::Full));
+        assert_eq!((heap.live(), heap.made(), heap.boxed), (1, 2, 0));
+        assert_eq!(heap.spare, [0]);
+        assert_eq!(heap.outside, [None]);
+        let second = heap.make(Kind::Binary, &[2; 395]).expect("room");
+        assert_eq!(heap.data(second), &[2; 395]);
+        assert_eq!(heap.outside.len(), 1);
+        assert!(heap.spare.is_empty());
+        assert_eq!(heap.arena.len() + heap.boxed, 400);
+    }
+
+    /// The arena doubles its room until twice as much would pass the limit,
+    /// and then takes room up to the limit and no further. Every word under
+    /// the limit can still be used.
+    #[test]
+    fn the_arena_has_no_room_past_the_limit() {
+        let mut heap = Heap::limited(1000);
+        let mut cells = 0;
+        // Each is a header, the length, and three words of text.
+        while heap.string(b"three words of it").is_ok() {
+            cells += 1;
+            assert!(heap.arena.capacity() <= 1000, "after {cells} cells");
+        }
+        assert_eq!(cells, 199);
+        assert_eq!(heap.arena.len(), 1 + 199 * 5);
+        assert_eq!(heap.string(b"three words of it"), Err(Fault::Full));
+    }
+
+    /// What the arena asks the system for, in order. Only the first is
+    /// asked for unless the system refuses it.
+    #[test]
+    fn the_arena_asks_for_less_when_the_system_refuses() {
+        let steps = |len, room, more, limit| growth(len, room, more, limit).collect::<Vec<_>>();
+        // The first cell gets room for itself and word 0, 4 words at least.
+        assert_eq!(steps(0, 0, 3, LIMIT_WORDS), [4, 3]);
+        assert_eq!(steps(0, 0, 4, LIMIT_WORDS), [4]);
+        assert_eq!(steps(0, 0, 255, LIMIT_WORDS), [255]);
+        // As much again, then half of that each time, down to an eighth of
+        // the arena.
+        assert_eq!(steps(1024, 1024, 5, LIMIT_WORDS), [1024, 512, 256, 128]);
+        // A cell longer than the eighth is the least that will do.
+        assert_eq!(steps(1024, 1024, 200, LIMIT_WORDS), [1024, 512, 256, 200]);
+        // The doubling stops at the limit.
+        assert_eq!(steps(1024, 1024, 5, 1500), [476, 238, 128]);
+        assert_eq!(steps(1024, 1024, 5, 1100), [76]);
+        // No step is less than what is needed now, or takes the arena past
+        // the limit.
+        for (len, more, limit) in [
+            (1, 2, 3),
+            (7, 254, 261),
+            (900, 3, 1000),
+            (1 << 20, 9, 1 << 21),
+        ] {
+            for extra in growth(len, len, more, limit) {
+                assert!(
+                    extra >= more && len + extra <= limit,
+                    "{len} {more} {limit}"
+                );
+            }
+        }
+    }
+
+    /// A cell longer than a cell can be is refused before anything is asked
+    /// of the system.
+    #[test]
+    fn a_cell_past_the_longest_is_full() {
+        let mut heap = Heap::default();
+        assert_eq!(
+            heap.alloc(Kind::Binary, 0, MAX_CELL_WORDS),
+            Err(Fault::Full)
+        );
+        assert_eq!(heap.alloc(Kind::Binary, 1, usize::MAX), Err(Fault::Full));
+        assert!(heap.arena.is_empty());
+        assert_eq!((heap.live(), heap.made()), (0, 0));
+    }
+
+    /// A name the heap never gave out reads as a freed cell: index 0, an
+    /// index past the arena's end, and the largest index a value word
+    /// holds. Nothing panics, and no cell changes. A share of word 0 counts
+    /// in it, as a share of any freed cell does, and it still reads as
+    /// freed.
+    #[test]
+    fn a_cell_the_arena_does_not_have_is_a_dead_cell() {
+        let mut heap = Heap::default();
+        let real = heap.tuple(&[Value::NIL]).expect("room");
+        let arena = heap.arena.clone();
+        let len = u64::try_from(heap.arena.len()).expect("small");
+        for bits in [0, len, len + 1, 1 << 31, u64::from(u32::MAX)] {
+            let cell = Cell::from_bits(bits);
+            assert_eq!(heap.kind(cell), None, "{bits}");
+            assert!(heap.data(cell).is_empty());
+            assert!(heap.data_mut(cell).is_empty());
+            assert_eq!(heap.elements(cell).count(), 0);
+            assert!(heap.field(cell, 0).is_none());
+            assert_eq!(heap.string_len(cell), 0);
+            assert_eq!(heap.unique(cell), Err(DeadCell));
+            heap.share(cell);
+            assert_eq!(heap.release(cell), Err(DeadCell));
+            assert_eq!(heap.hollow(cell), Err(DeadCell));
+            assert_eq!(heap.discard(cell), Err(DeadCell));
+            assert_eq!(heap.copy(cell), Err(Fault::DeadCell));
+            assert!(!heap.fits_ctor(cell, 0));
+        }
+        assert_eq!(heap.arena[1..], arena[1..]);
+        assert!(freed(heap.arena[0]));
+        assert_eq!(heap.live(), 1);
+        assert_eq!(heap.unique(real), Ok(true));
+    }
+
+    /// A stub whose box number names no box has no words, and is freed
+    /// like any other cell.
+    #[test]
+    fn a_stub_with_no_box_has_no_words() {
+        let mut heap = Heap::default();
+        let cell = heap.make(Kind::Binary, &[9; 300]).expect("room");
+        heap.arena[cell.index() + 1] = 77;
+        assert!(heap.data(cell).is_empty());
+        assert!(heap.data_mut(cell).is_empty());
+        assert_eq!(heap.release(cell), Ok(()));
+        assert_eq!(heap.live(), 0);
+        assert_eq!(heap.release(cell), Err(DeadCell));
     }
 
     #[test]
@@ -1272,15 +2014,40 @@ mod tests {
         assert_eq!(heap.release(leaked), Err(DeadCell));
     }
 
-    /// A big cell's chunk goes back to the system when it is freed, and a
-    /// second release finds no chunk, which reads as a freed cell's header.
+    /// A long cell's box is freed when the cell is. Its stub's header is
+    /// zeroed like any other cell's, so a second release, a unique test and
+    /// a copy all find it.
     #[test]
-    fn a_second_release_of_a_big_cell_is_a_dead_cell() {
+    fn a_second_release_of_a_long_cell_is_a_dead_cell() {
         let mut heap = Heap::default();
         let cell = heap.string(&vec![b'x'; 10_000]).expect("room");
         assert_eq!(heap.release(cell), Ok(()));
         assert_eq!(heap.release(cell), Err(DeadCell));
-        assert_eq!(heap.live(), 0);
+        assert_eq!(heap.unique(cell), Err(DeadCell));
+        assert_eq!(heap.copy(cell), Err(Fault::DeadCell));
+        heap.share(cell);
+        assert_eq!(heap.release(cell), Err(DeadCell));
+        assert_eq!((heap.live(), heap.boxed), (0, 0));
+        // The stub went on its free list once, and the box number on its
+        // list once.
+        let b = heap.string(&vec![b'y'; 10_000]).expect("room");
+        let c = heap.string(&vec![b'z'; 10_000]).expect("room");
+        assert_eq!(b, cell);
+        assert_ne!(c, b);
+        assert_eq!(heap.outside.len(), 2);
+    }
+
+    /// Freeing a long cell that holds a freed cell stops the release, as
+    /// it does for a short one.
+    #[test]
+    fn freeing_a_long_cell_that_holds_a_freed_cell_is_a_dead_cell() {
+        let mut heap = Heap::default();
+        let inner = heap.string(b"inner").expect("room");
+        let mut values = vec![Value::NIL; 300];
+        values[299] = Value::cell(inner);
+        let outer = heap.tuple(&values).expect("room");
+        assert_eq!(heap.release(inner), Ok(()));
+        assert_eq!(heap.release(outer), Err(DeadCell));
     }
 
     /// Freeing a cell gives up what it holds, and a freed cell among those
@@ -1345,13 +2112,17 @@ mod tests {
         );
     }
 
+    /// Every index the arena can have fits in the 31 bits a value word
+    /// keeps for it, and comes back out the same.
     #[test]
-    fn a_cell_round_trips_through_48_bits() {
-        let cell = Cell {
-            chunk: (1 << CHUNK_BITS) - 1,
-            word: (1 << WORD_BITS) - 1,
-        };
-        assert!(cell.bits() < 1 << 48);
-        assert_eq!(Cell::from_bits(cell.bits()), cell);
+    fn a_cell_round_trips_through_a_value_word() {
+        for index in [1, 2, 1 << 20, LIMIT_WORDS - 1] {
+            let cell = Cell::at(index).expect("an index");
+            assert_eq!(cell.index(), index);
+            assert!(cell.bits() < 1 << 31);
+            assert_eq!(Cell::from_bits(cell.bits()), cell);
+            assert_eq!(Value::cell(cell).as_cell(), Some(cell));
+        }
+        assert!(Cell::at(1 << 32).is_none());
     }
 }

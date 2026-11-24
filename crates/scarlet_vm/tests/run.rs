@@ -2737,3 +2737,139 @@ fn the_listing_says_why_a_function_did_not_load() {
         "; not loaded: the VM does not run the built-in InternalLiveSubjects yet\n"
     );
 }
+
+/// A record of 300 fields is longer than a cell the heap's arena holds, so
+/// its fields live in a box of their own. It is read, updated, compared,
+/// hashed and freed like any other record. Each update in the loop makes one
+/// cell and frees the one before, and the audit finds none left at the end.
+#[test]
+fn a_record_too_wide_for_the_arena_is_a_record() {
+    let fields: String = (0..300).map(|i| format!("\tf{i} Int\n")).collect();
+    let args: Vec<String> = (0..300).map(|i| i.to_string()).collect();
+    let src = format!(
+        "import scarlet/internal\n\
+         import scarlet/map\n\
+         type Wide {{\n{fields}}}\n\
+         fn bump(w Wide, n Int) Wide {{\n\
+         \tif n == 0 {{ w }} else {{ bump(Wide(..w, f150: w.f150 + n, f299: w.f299 - 1), n - 1) }}\n\
+         }}\n\
+         fn total(w Wide) Int {{ w.f0 + w.f1 + w.f149 + w.f150 + w.f298 + w.f299 }}\n\
+         pub fn main() {{\n\
+         \tw = Wide({args})\n\
+         \tprintln(total(w))\n\
+         \tmade = internal::cells_made()\n\
+         \tv = bump(w, 100)\n\
+         \tprintln(internal::cells_made() - made)\n\
+         \tprintln(total(v))\n\
+         \tprintln(w == v)\n\
+         \tprintln(w == Wide(..v, f150: 150, f299: 299))\n\
+         \tm = map::set(map::set(map::new(), w, 'first'), v, 'second')\n\
+         \tprintln(map::get(m, Wide(..w, f7: 7)))\n\
+         \tprintln(map::get(m, Wide(..w, f7: 8)))\n\
+         \tprintln(map::size(m))\n\
+         }}\n",
+        args = args.join(", "),
+    );
+    prints(&src, "897\n100\n5847\nFalse\nTrue\nSome(first)\nNone\n2\n");
+}
+
+/// A constructor of 300 fields that is matched and built again is written
+/// over where it is, in its box, as a narrow one is. A thousand turns make
+/// no cell and reuse one a thousand times. While something else still holds
+/// it, the same turn makes a new cell and leaves the old one as it was.
+#[test]
+fn a_constructor_too_wide_for_the_arena_is_rebuilt_in_place() {
+    let fields: String = (0..299).map(|i| format!("\t\ta{i} Int,\n")).collect();
+    let pattern = format!("a0, {}s", "_, ".repeat(298));
+    let zeros = "0, ".repeat(298);
+    let src = format!(
+        "import scarlet/internal\n\
+         import scarlet/string\n\
+         type T {{\n\tA(\n{fields}\t\ts String,\n\t)\n\tB(x Int)\n}}\n\
+         fn step(v T) T {{\n\
+         \tmatch v {{\n\
+         \t\tA({pattern}) -> A(a0 + 1, {zeros}s)\n\
+         \t\tB(x) -> B(x)\n\
+         \t}}\n\
+         }}\n\
+         fn spin(v T, n Int) T {{ if n == 0 {{ v }} else {{ spin(step(v), n - 1) }} }}\n\
+         fn first(v T) Int {{\n\
+         \tmatch v {{\n\
+         \t\tA({pattern}) -> a0 + string::length(s)\n\
+         \t\tB(x) -> x\n\
+         \t}}\n\
+         }}\n\
+         pub fn main() {{\n\
+         \tv = A(0, {zeros}'tail' + 'end')\n\
+         \tmade = internal::cells_made()\n\
+         \treused = internal::cells_reused()\n\
+         \tw = spin(v, 1000)\n\
+         \tprintln(internal::cells_made() - made)\n\
+         \tprintln(internal::cells_reused() - reused)\n\
+         \tprintln(first(w))\n\
+         \tkeep = spin(w, 1)\n\
+         \tprintln(first(w) + first(keep))\n\
+         \tprintln(internal::cells_made() - made)\n\
+         \tprintln(internal::cells_reused() - reused)\n\
+         }}\n",
+    );
+    prints(&src, "0\n1000\n1007\n2015\n1\n1000\n");
+}
+
+/// A string of 2,016 bytes is the longest whose cell the arena holds, and a
+/// longer one keeps its text in a box. `a` is 2,010 bytes and `b` is 2,020,
+/// and `lengths` grows a string a byte at a time from one side of the line
+/// to the other. Strings and binaries on both sides are compared, joined,
+/// searched, split, sliced and used as map keys, and print what they printed
+/// before the heap had an arena.
+#[test]
+fn a_string_or_binary_too_long_for_the_arena_reads_the_same() {
+    prints(
+        "import scarlet/array\n\
+         import scarlet/binary\n\
+         import scarlet/internal\n\
+         import scarlet/map\n\
+         import scarlet/string\n\
+         fn grow(s String, n Int) String { if n == 0 { s } else { grow(s + 'abcdefghij', n - 1) } }\n\
+         fn lengths(s String, n Int, acc Int) Int {\n\
+         \tif n == 0 { acc } else {\n\
+         \t\tt = s + 'x'\n\
+         \t\tlengths(t, n - 1, acc + string::length(t))\n\
+         \t}\n\
+         }\n\
+         pub fn main() {\n\
+         \ta = grow('', 201)\n\
+         \tb = grow('', 202)\n\
+         \tc = grow('', 1000)\n\
+         \tprintln(string::length(a))\n\
+         \tprintln(string::length(b))\n\
+         \tprintln(a == b)\n\
+         \tprintln(b == grow('', 202))\n\
+         \tprintln(string::length(a + b + c))\n\
+         \tprintln(string::contains(c, 'jabc'))\n\
+         \tprintln(string::contains(c, 'jj'))\n\
+         \tprintln(array::length(string::split(c, 'j')))\n\
+         \tmade = internal::cells_made()\n\
+         \tprintln(lengths(grow('', 195), 100, 0))\n\
+         \tprintln(internal::cells_made() - made)\n\
+         \tm = map::set(map::set(map::new(), b, 1), c, 2)\n\
+         \tprintln(map::get(m, grow('', 202)))\n\
+         \tprintln(map::get(m, grow('', 1000)))\n\
+         \tprintln(map::get(m, a))\n\
+         \tbits = binary::from_string(c)\n\
+         \tprintln(binary::byte_size(bits))\n\
+         \tprintln(binary::byte_at(bits, 9999))\n\
+         \tprintln(binary::byte_size(binary::append(bits, bits)))\n\
+         \tmatch binary::slice_bytes(bits, 5000, 5000) {\n\
+         \t\tOk(half) -> {\n\
+         \t\t\tprintln(binary::byte_size(half))\n\
+         \t\t\tprintln(binary::byte_at(half, 4999))\n\
+         \t\t\tprintln(binary::to_string(binary::drop_bytes(half, 4990)))\n\
+         \t\t}\n\
+         \t\tErr(Nil) -> println('no slice')\n\
+         \t}\n\
+         }\n",
+        "2010\n2020\nFalse\nTrue\n14030\nTrue\nFalse\n1001\n200050\n591\nSome(1)\nSome(2)\nNone\n\
+         10000\n106\n20000\n5000\n106\nOk(abcdefghij)\n",
+    );
+}

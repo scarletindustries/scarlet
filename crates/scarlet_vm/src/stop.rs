@@ -17,8 +17,9 @@ pub enum Stop {
     /// The program's output was closed, like a pipe into `head` that has
     /// read enough. Nothing is wrong with the program, so it stops quietly.
     OutputClosed,
-    /// The program's heap grew past what the VM can address. This is a limit
-    /// of the machine, like running out of memory, not a bug in the program.
+    /// The program's heap is at its limit, or the system has no more memory
+    /// to give it, or one value is longer than a value can be. This is a
+    /// limit of the machine, not a bug in the program.
     HeapFull,
     /// The function `name` has more instructions than the VM's jumps can
     /// reach. Like `HeapFull`, this is a limit of the machine.
