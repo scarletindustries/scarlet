@@ -835,6 +835,11 @@ fn take(heap: &mut Heap, array: Cell, n: usize) -> Result<Cell, Fault> {
 
 /// The elements from `start` up to but not including `end`, or `None` when
 /// that range is not inside the array.
+// Out of line, with the map's two owned edits and [`concat`]. Inside the
+// interpreter's loop these four are so long that the loop keeps fewer of its
+// own values in registers, which costs 4 machine instructions at each VM
+// instruction that tests a variant, reads a field or drops a register.
+#[inline(never)]
 pub(crate) fn slice(
     heap: &mut Heap,
     array: Cell,
@@ -1008,6 +1013,8 @@ fn tree_drop(heap: &mut Heap, n: Value, m: usize) -> Result<Value, Fault> {
 /// left edge, and each level is repacked when it would otherwise be more than
 /// `E_MAX` nodes looser than it could be, which keeps lookups a step per
 /// level however many joins built the array.
+// Out of line for the interpreter's loop, as [`slice`] is.
+#[inline(never)]
 pub(crate) fn concat(heap: &mut Heap, l: Cell, r: Cell) -> Result<Cell, Fault> {
     let lr = root(heap, l);
     let rr = root(heap, r);

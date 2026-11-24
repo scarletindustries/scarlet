@@ -43,6 +43,8 @@ pub enum PrimOp {
     FloatMul,
     /// `a / b`.
     FloatDiv,
+    /// `a % b`, the remainder, with the sign of `a`.
+    FloatRem,
     /// `-a`.
     FloatNeg,
     /// `a < b`.

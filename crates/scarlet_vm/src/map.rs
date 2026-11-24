@@ -333,6 +333,8 @@ fn set_by(
 /// [`set`] for a caller that gives up its reference to `map`. When nothing
 /// else holds the map, it changes in place, and so does each node on the path
 /// to `key` that nothing else holds either. `key` and `value` are borrowed.
+// Out of line for the interpreter's loop, as `array::slice` is.
+#[inline(never)]
 pub(crate) fn set_owned(
     heap: &mut Heap,
     map: Cell,
@@ -655,6 +657,8 @@ fn delete_by(heap: &mut Heap, map: Cell, key: Value, hash: Hasher) -> Result<Cel
 /// [`delete`] for a caller that gives up its reference to `map`. Like
 /// [`set_owned`], it changes the map and each node on the path that nothing
 /// else holds in place. `key` is borrowed.
+// Out of line for the interpreter's loop, as `array::slice` is.
+#[inline(never)]
 pub(crate) fn delete_owned(heap: &mut Heap, map: Cell, key: Value) -> Result<Cell, Fault> {
     delete_owned_by(heap, map, key, hash::hash)
 }

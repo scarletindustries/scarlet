@@ -6,7 +6,7 @@ use std::fmt;
 use scarlet_ir::core_ir::{FuncIdx, PrimOp};
 use scarlet_ir::intrinsic::Intrinsic;
 
-use crate::heap::{AuditFailure, AuditFault, DeadCell};
+use crate::heap::{AuditFailure, AuditFault, DeadCell, Fault};
 use crate::value::View;
 
 /// Why a run ended before the program did.
@@ -70,6 +70,14 @@ impl From<AuditFailure> for Stop {
             AuditFailure::Found(fault) => fault.into(),
             AuditFailure::NoRoom => Stop::NoRoomToAudit,
         }
+    }
+}
+
+/// How a run stops when the heap cannot do what it was asked.
+pub(crate) fn fault(fault: Fault) -> Stop {
+    match fault {
+        Fault::Full => Stop::HeapFull,
+        Fault::DeadCell => Stop::broken(Broken::DeadCell),
     }
 }
 

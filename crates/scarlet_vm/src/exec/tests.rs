@@ -1,6 +1,9 @@
 use super::*;
 use crate::OsHost;
+use crate::code::{JumpPair, JumpWithK, Pair, WithK};
 use crate::heap::AuditFault;
+use crate::value::{Float, SmallInt};
+use num_bigint::BigInt;
 
 /// `passing` sits where a 16-byte load reaches it in one instruction,
 /// and the heap comes after it, so the heap's size cannot move it.
@@ -1207,5 +1210,614 @@ fn an_owned_push_onto_a_freed_array_stops_the_run_as_a_dead_cell() {
         let pushed = array::push_owned(&mut m.heap, cell, Value::NIL, End::Back);
         assert_eq!(pushed.map_err(fault), Err(Stop::broken(Broken::DeadCell)));
         assert_eq!(fault(Fault::Full), Stop::HeapFull);
+    });
+}
+
+/// Run `check` on a machine that has run nothing, to call small functions on
+/// by hand.
+fn on_a_machine(check: impl FnOnce(&mut Machine<'_, '_>)) {
+    after_instrs(1, vec![Instr::Ret { src: Reg(0) }], |m, got| {
+        assert_eq!(got.map(|v| v.bits()), Ok(Value::NIL.bits()));
+        check(m);
+    });
+}
+
+/// `instrs` as a function that takes its arguments in `r0` and `r1` and has
+/// `r2` besides. It lives as long as the test does, so that any machine may
+/// call it.
+fn function(instrs: Vec<Instr>) -> &'static Body {
+    Box::leak(Box::new(Body {
+        name: "test.operator".to_string(),
+        regs: 3,
+        params: Box::new([Reg(0), Reg(1)]),
+        instrs: instrs.into_boxed_slice(),
+        carried: Box::new([]),
+    }))
+}
+
+/// A function that does `instr` and returns what it left in `dst`.
+fn stores(instr: Instr, dst: u32) -> &'static Body {
+    function(vec![instr, Instr::Ret { src: Reg(dst) }])
+}
+
+/// A function that returns whether `instr` fell through, for an instruction
+/// that jumps to 3 or does not.
+fn falls_through(instr: Instr) -> &'static Body {
+    let answer = |b: bool| Instr::Const {
+        dst: Reg(2),
+        value: Value::bool(b),
+    };
+    let ret = || Instr::Ret { src: Reg(2) };
+    function(vec![instr, answer(true), ret(), answer(false), ret()])
+}
+
+/// Call `body` and empty the registers again. A run that stops leaves its
+/// frame where it was.
+fn call(m: &mut Machine<'_, '_>, body: &'static Body, args: &[Value]) -> Result<Value, Stop> {
+    let got = m.call(body, args);
+    assert_eq!(m.leave(0), Ok(()));
+    got
+}
+
+/// What an instruction's answer should be, when the operands are numbers.
+#[derive(Debug, PartialEq)]
+enum Answer {
+    Int(BigInt),
+    Bits(u64),
+}
+
+/// Check that `got` is `want`, in the one form it has, and give it up.
+fn is(m: &mut Machine<'_, '_>, got: Result<Value, Stop>, want: &Answer, what: &dyn Fn() -> String) {
+    let v = got.unwrap_or_else(|stop| panic!("{}: {stop:?}", what()));
+    match want {
+        Answer::Int(n) => {
+            let small = n.to_i64().and_then(Value::int).is_some();
+            assert_eq!(v.small_int().is_some(), small, "{}: its form", what());
+            let number = int::read(&m.heap, v).expect("an Int").big();
+            assert_eq!(number, *n, "{}", what());
+        }
+        Answer::Bits(bits) => assert_eq!(v.bits(), *bits, "{}: {v:?}", what()),
+    }
+    assert_eq!(m.release(v), Ok(()));
+    assert_eq!(m.heap.live(), 0, "{}: cells left", what());
+}
+
+/// Every instruction in the list of a family that writes the register `dst`,
+/// with its operator. A comparison comes with the jump it becomes too.
+macro_rules! of_pairs {
+    ([] $($name:ident $op:path),*) => {
+        |dst: u32| vec![$((
+            Instr::$name(Pair { dst: Reg(dst), a: Reg(0), b: Reg(1) }),
+            $op,
+        )),*]
+    };
+}
+macro_rules! with_constant {
+    ([] $($name:ident $op:path),*) => {
+        |k, dst: u32| vec![$((Instr::$name(WithK { dst: Reg(dst), a: Reg(0), k }), $op)),*]
+    };
+}
+macro_rules! compare_pairs {
+    ([] $($name:ident $jump:ident $op:path),*) => {
+        |dst: u32| vec![$((
+            Instr::$name(Pair { dst: Reg(dst), a: Reg(0), b: Reg(1) }),
+            Instr::$jump(JumpPair { a: Reg(0), b: Reg(1), to: 3 }),
+            $op,
+        )),*]
+    };
+}
+macro_rules! compare_with_constant {
+    ([] $($name:ident $jump:ident $op:path),*) => {
+        |k, dst: u32| vec![$((
+            Instr::$name(WithK { dst: Reg(dst), a: Reg(0), k }),
+            Instr::$jump(JumpWithK { a: Reg(0), k, to: 3 }),
+            $op,
+        )),*]
+    };
+}
+
+/// The registers an instruction may write: both its operands' and another,
+/// or its one operand's and another.
+const OVER_TWO: [u32; 3] = [0, 1, 2];
+const OVER_ONE: [u32; 2] = [0, 2];
+
+/// Ints at every edge there is: both ends of the small range and just past
+/// them, one word and past it, two words and past those.
+fn edge_ints() -> Vec<BigInt> {
+    let each = [
+        BigInt::from(0),
+        BigInt::from(1),
+        BigInt::from(2),
+        BigInt::from(7),
+        BigInt::from(1 << 13),
+        BigInt::from(69_069),
+        BigInt::from(1 << 25),
+        BigInt::from(1_i64 << 49),
+        BigInt::from((1_i64 << 50) - 1),
+        BigInt::from(1_i64 << 50),
+        BigInt::from((1_i64 << 50) + 1),
+        BigInt::from(i64::MAX),
+        BigInt::from(u64::MAX),
+        BigInt::from(u64::MAX) + 1,
+        BigInt::from(i128::MAX) + 1,
+        BigInt::from(3) << 200,
+    ];
+    each.into_iter().flat_map(|n| [n.clone(), -n]).collect()
+}
+
+/// Two hundred Ints of every size from one bit to 120, from a generator that
+/// gives the same ones each time.
+fn some_ints() -> Vec<BigInt> {
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    (0..200u32)
+        .map(|i| {
+            let wide = BigInt::from(next()) << 64 | BigInt::from(next());
+            let n: BigInt = wide >> (128 - (i % 120 + 1));
+            if next() % 2 == 0 { n } else { -n }
+        })
+        .collect()
+}
+
+fn small_ints(of: &[BigInt]) -> Vec<(SmallInt, BigInt)> {
+    let small = |n: &BigInt| n.to_i64().and_then(SmallInt::new);
+    of.iter()
+        .filter_map(|n| Some((small(n)?, n.clone())))
+        .collect()
+}
+
+/// What `a op b` is, worked out on `num-bigint`'s numbers here.
+fn exact(op: Arith, a: &BigInt, b: &BigInt) -> Answer {
+    Answer::Int(match op {
+        Arith::Add => a + b,
+        Arith::Sub => a - b,
+        Arith::Mul => a * b,
+        Arith::Div => a.checked_div(b).unwrap_or_default(),
+        Arith::Rem if b.sign() == num_bigint::Sign::NoSign => a.clone(),
+        Arith::Rem => a % b,
+    })
+}
+
+fn truth(b: bool) -> Answer {
+    Answer::Bits(Value::bool(b).bits())
+}
+
+/// Each Int instruction gives what `num-bigint` gives, in the number's one
+/// form, with a small or a big Int on either side, whichever register it
+/// writes, and leaves no cell behind.
+fn int_instructions_agree(xs: &[BigInt], pairs: &[(BigInt, BigInt)]) {
+    on_a_machine(|m| {
+        let value = |m: &mut Machine<'_, '_>, n: &BigInt| {
+            bigint::value(&mut m.heap, n.clone()).expect("room")
+        };
+        let mut two = Vec::new();
+        for dst in OVER_TWO {
+            for (instr, op) in int_arith!(rows of_pairs)(dst) {
+                two.push((stores(instr, dst), format!("{op:?} into r{dst}"), Ok(op)));
+            }
+            for (stored, _, op) in int_compare!(rows compare_pairs)(dst) {
+                two.push((stores(stored, dst), format!("{op:?} into r{dst}"), Err(op)));
+            }
+        }
+        for (_, jump, op) in int_compare!(rows compare_pairs)(2) {
+            two.push((falls_through(jump), format!("jump unless {op:?}"), Err(op)));
+        }
+        for (a, b) in pairs {
+            for (body, name, op) in &two {
+                let args = [value(m, a), value(m, b)];
+                let want = match op {
+                    Ok(op) => exact(*op, a, b),
+                    Err(op) => truth(op.holds(a.cmp(b))),
+                };
+                let got = call(m, body, &args);
+                is(m, got, &want, &|| format!("{a} {name} {b}"));
+            }
+        }
+        for (k, n) in small_ints(xs) {
+            let mut one = Vec::new();
+            let mut compares = Vec::new();
+            for dst in OVER_ONE {
+                for (instr, op) in int_arith_k!(rows with_constant)(k, dst) {
+                    one.push((stores(instr, dst), dst, op, false));
+                }
+                for (instr, op) in int_arith_k_first!(rows with_constant)(k, dst) {
+                    one.push((stores(instr, dst), dst, op, true));
+                }
+                for (stored, jump, op) in int_compare_k!(rows compare_with_constant)(k, dst) {
+                    compares.push((stores(stored, dst), falls_through(jump), dst, op));
+                }
+            }
+            for x in xs {
+                for (body, dst, op, k_first) in &one {
+                    let (a, b) = if *k_first { (&n, x) } else { (x, &n) };
+                    let args = [value(m, x), Value::NIL];
+                    let got = call(m, body, &args);
+                    is(m, got, &exact(*op, a, b), &|| {
+                        format!("{a} {op:?} {b} into r{dst}")
+                    });
+                }
+                for (stored, jump, dst, op) in &compares {
+                    let want = truth(op.holds(x.cmp(&n)));
+                    for body in [stored, jump] {
+                        let args = [value(m, x), Value::NIL];
+                        let got = call(m, body, &args);
+                        is(m, got, &want, &|| format!("{x} {op:?} {n} into r{dst}"));
+                    }
+                }
+            }
+        }
+        for dst in OVER_ONE {
+            let neg = Instr::IntNeg {
+                dst: Reg(dst),
+                a: Reg(0),
+            };
+            let body = stores(neg, dst);
+            for x in xs {
+                let args = [value(m, x), Value::NIL];
+                let got = call(m, body, &args);
+                is(m, got, &Answer::Int(-x), &|| format!("-{x} into r{dst}"));
+            }
+        }
+    });
+}
+
+#[test]
+fn int_instructions_are_right_at_every_edge() {
+    let xs = edge_ints();
+    let pairs: Vec<_> = xs
+        .iter()
+        .flat_map(|a| xs.iter().map(|b| (a.clone(), b.clone())))
+        .collect();
+    int_instructions_agree(&xs, &pairs);
+}
+
+#[test]
+fn int_instructions_are_right_on_numbers_of_every_size() {
+    let xs = some_ints();
+    let pairs: Vec<_> = xs.iter().cloned().zip(xs.iter().rev().cloned()).collect();
+    int_instructions_agree(&xs[..40], &pairs);
+}
+
+/// Floats at every edge, as [`edge_ints`] is for Ints.
+fn edge_floats() -> Vec<f64> {
+    let each = [
+        0.0,
+        f64::from_bits(1),
+        f64::MIN_POSITIVE,
+        1e-300,
+        0.1,
+        1.0,
+        1.5,
+        2.0,
+        7.5,
+        1e300,
+        f64::MAX,
+    ];
+    each.into_iter().flat_map(|x| [x, -x]).collect()
+}
+
+/// What `a op b` is for two Floats, by the rules of `docs/semantics.md`.
+fn ruled(op: Arith, a: f64, b: f64) -> Answer {
+    let x = match op {
+        Arith::Add => a + b,
+        Arith::Sub => a - b,
+        Arith::Mul => a * b,
+        Arith::Div if b == 0.0 => 0.0,
+        Arith::Div => a / b,
+        Arith::Rem if b == 0.0 => a,
+        Arith::Rem => a % b,
+    };
+    Answer::Bits(x.clamp(-f64::MAX, f64::MAX).to_bits())
+}
+
+/// Each Float instruction follows the rules, bit for bit, so a divide by zero
+/// is 0.0, an answer too large is the largest Float, and a zero keeps its
+/// sign.
+#[test]
+fn float_instructions_are_right_at_every_edge() {
+    on_a_machine(|m| {
+        let xs = edge_floats();
+        let mut two = Vec::new();
+        for dst in OVER_TWO {
+            for (instr, op) in float_arith!(rows of_pairs)(dst) {
+                two.push((stores(instr, dst), format!("{op:?} into r{dst}"), Ok(op)));
+            }
+            for (stored, _, op) in float_compare!(rows compare_pairs)(dst) {
+                two.push((stores(stored, dst), format!("{op:?} into r{dst}"), Err(op)));
+            }
+        }
+        for (_, jump, op) in float_compare!(rows compare_pairs)(2) {
+            two.push((falls_through(jump), format!("jump unless {op:?}"), Err(op)));
+        }
+        let holds = |op: Order, a: f64, b: f64| {
+            truth(match op {
+                Order::Lt => a < b,
+                Order::Le => a <= b,
+                Order::Gt => a > b,
+                Order::Ge => a >= b,
+            })
+        };
+        for &a in &xs {
+            for &b in &xs {
+                let args = [Value::float(a), Value::float(b)];
+                for (body, name, op) in &two {
+                    let want = match op {
+                        Ok(op) => ruled(*op, a, b),
+                        Err(op) => holds(*op, a, b),
+                    };
+                    let got = call(m, body, &args);
+                    is(m, got, &want, &|| format!("{a:e} {name} {b:e}"));
+                }
+            }
+        }
+        for &n in &xs {
+            let k = Float::new(n);
+            let mut one = Vec::new();
+            let mut compares = Vec::new();
+            for dst in OVER_ONE {
+                for (instr, op) in float_arith_k!(rows with_constant)(k, dst) {
+                    one.push((stores(instr, dst), dst, op, false));
+                }
+                for (instr, op) in float_arith_k_first!(rows with_constant)(k, dst) {
+                    one.push((stores(instr, dst), dst, op, true));
+                }
+                for (stored, jump, op) in float_compare_k!(rows compare_with_constant)(k, dst) {
+                    compares.push((stores(stored, dst), falls_through(jump), dst, op));
+                }
+            }
+            for &x in &xs {
+                let args = [Value::float(x), Value::NIL];
+                for (body, dst, op, k_first) in &one {
+                    let (a, b) = if *k_first { (n, x) } else { (x, n) };
+                    let got = call(m, body, &args);
+                    is(m, got, &ruled(*op, a, b), &|| {
+                        format!("{a:e} {op:?} {b:e} into r{dst}")
+                    });
+                }
+                for (stored, jump, dst, op) in &compares {
+                    for body in [stored, jump] {
+                        let got = call(m, body, &args);
+                        is(m, got, &holds(*op, x, n), &|| {
+                            format!("{x:e} {op:?} {n:e} into r{dst}")
+                        });
+                    }
+                }
+            }
+        }
+        for dst in OVER_ONE {
+            let neg = Instr::FloatNeg {
+                dst: Reg(dst),
+                a: Reg(0),
+            };
+            let body = stores(neg, dst);
+            for &x in &xs {
+                let got = call(m, body, &[Value::float(x), Value::NIL]);
+                is(m, got, &Answer::Bits((-x).to_bits()), &|| {
+                    format!("-{x:e} into r{dst}")
+                });
+            }
+        }
+    });
+}
+
+#[test]
+fn an_int_of_any_size_becomes_a_float() {
+    on_a_machine(|m| {
+        let into = |dst: u32| {
+            let from_int = Instr::FloatFromInt {
+                dst: Reg(dst),
+                a: Reg(0),
+            };
+            stores(from_int, dst)
+        };
+        for body in OVER_ONE.map(into) {
+            for n in edge_ints() {
+                let v = bigint::value(&mut m.heap, n.clone()).expect("room");
+                let want = n.to_f64().expect("a Float");
+                let got = call(m, body, &[v, Value::NIL]);
+                is(m, got, &Answer::Bits(want.to_bits()), &|| format!("{n}"));
+            }
+        }
+        let huge: BigInt = BigInt::from(1) << 2000;
+        let v = bigint::value(&mut m.heap, huge).expect("room");
+        let got = call(m, into(0), &[v, Value::NIL]);
+        is(m, got, &Answer::Bits(f64::MAX.to_bits()), &|| {
+            "2^2000".into()
+        });
+    });
+}
+
+/// A value of every kind, as an operand of the wrong kind can be. The string,
+/// the tuple and the big Int are cells with one reference.
+fn one_of_each_kind(heap: &mut Heap) -> Vec<Value> {
+    let variant = VariantRef {
+        type_id: scarlet_ir::TypeId(263),
+        variant_idx: 1,
+    };
+    vec![
+        Value::NIL,
+        Value::bool(false),
+        Value::bool(true),
+        Value::func(FuncIdx(7)),
+        Value::nullary(variant),
+        Value::float(1.5),
+        Value::float(-0.0),
+        Value::int(0).expect("small"),
+        Value::int(-(1 << 50)).expect("small"),
+        Value::cell(heap.string(b"text").expect("room")),
+        Value::cell(heap.tuple(&[Value::NIL]).expect("room")),
+        Value::cell(heap.big_int(&(BigInt::from(1) << 70)).expect("room")),
+    ]
+}
+
+/// Call `body` with a value of each kind in each operand, and a number `with`
+/// in the other, for an instruction that takes only what `takes` says. It
+/// must stop with `stop`, which names the value, and leave every cell to its
+/// one holder. `operands` is how many the instruction reads.
+fn stops_on_the_wrong_kind(
+    m: &mut Machine<'_, '_>,
+    body: &'static Body,
+    operands: usize,
+    with: Value,
+    takes: fn(&Heap, Value) -> bool,
+    stop: fn(View) -> Stop,
+) {
+    let kinds = one_of_each_kind(&mut m.heap).len();
+    m.heap = Heap::default();
+    for kind in 0..kinds {
+        for wrong in 0..operands {
+            let all = one_of_each_kind(&mut m.heap);
+            let v = all[kind];
+            for other in all.iter().filter(|o| o.bits() != v.bits()) {
+                assert_eq!(m.release(*other), Ok(()));
+            }
+            if takes(&m.heap, v) {
+                assert_eq!(m.release(v), Ok(()));
+                continue;
+            }
+            let mut args = [with, with];
+            args[wrong] = v;
+            let view = v.view();
+            let got = call(m, body, &args).map(|v| v.bits());
+            assert_eq!(got, Err(stop(view)), "{:?} on {view:?}", body.instrs[0]);
+            assert_eq!(m.heap.live(), 0, "{:?} on {view:?}", body.instrs[0]);
+        }
+    }
+}
+
+/// An Int instruction stops on any operand that is no Int, and a Float one on
+/// any that is no Float, whichever side it is on. A Float instruction reads
+/// its operands' words unchecked, so this is what shows that its test of the
+/// answer catches every kind of word.
+#[test]
+fn every_operator_instruction_stops_on_an_operand_of_the_wrong_kind() {
+    on_a_machine(|m| {
+        let is_int = |heap: &Heap, v: Value| match v.view() {
+            View::Int(_) => true,
+            View::Cell(c) => heap.kind(c) == Some(Kind::BigInt),
+            View::Float(_) | View::Nil | View::Bool(_) | View::Func(_) | View::Nullary(_) => false,
+        };
+        let is_float = |_: &Heap, v: Value| matches!(v.view(), View::Float(_));
+        let no_int = |v| Stop::missing(Missing::IntOperation(v));
+        let no_float = |v| Stop::broken(Broken::FloatOperation(v));
+        let (seven, half) = (Value::int(7).expect("small"), Value::float(0.5));
+        let (small, held) = (SmallInt::new(7).expect("small"), Float::new(0.5));
+
+        let mut ints: Vec<(&'static Body, usize)> = Vec::new();
+        ints.extend(
+            int_arith!(rows of_pairs)(2)
+                .into_iter()
+                .map(|(i, _)| (stores(i, 2), 2)),
+        );
+        ints.extend(
+            int_arith_k!(rows with_constant)(small, 2)
+                .into_iter()
+                .map(|(i, _)| (stores(i, 2), 1)),
+        );
+        ints.extend(
+            int_arith_k_first!(rows with_constant)(small, 2)
+                .into_iter()
+                .map(|(i, _)| (stores(i, 2), 1)),
+        );
+        for (stored, jump, _) in int_compare!(rows compare_pairs)(2) {
+            ints.extend([(stores(stored, 2), 2), (falls_through(jump), 2)]);
+        }
+        for (stored, jump, _) in int_compare_k!(rows compare_with_constant)(small, 2) {
+            ints.extend([(stores(stored, 2), 1), (falls_through(jump), 1)]);
+        }
+        let (dst, a) = (Reg(2), Reg(0));
+        ints.push((stores(Instr::IntNeg { dst, a }, 2), 1));
+        ints.push((stores(Instr::FloatFromInt { dst, a }, 2), 1));
+        assert_eq!(ints.len(), 5 + 5 + 1 + 8 + 12 + 2);
+        for (body, operands) in ints {
+            stops_on_the_wrong_kind(m, body, operands, seven, is_int, no_int);
+        }
+
+        let mut floats: Vec<(&'static Body, usize)> = Vec::new();
+        floats.extend(
+            float_arith!(rows of_pairs)(2)
+                .into_iter()
+                .map(|(i, _)| (stores(i, 2), 2)),
+        );
+        floats.extend(
+            float_arith_k!(rows with_constant)(held, 2)
+                .into_iter()
+                .map(|(i, _)| (stores(i, 2), 1)),
+        );
+        floats.extend(
+            float_arith_k_first!(rows with_constant)(held, 2)
+                .into_iter()
+                .map(|(i, _)| (stores(i, 2), 1)),
+        );
+        for (stored, jump, _) in float_compare!(rows compare_pairs)(2) {
+            floats.extend([(stores(stored, 2), 2), (falls_through(jump), 2)]);
+        }
+        for (stored, jump, _) in float_compare_k!(rows compare_with_constant)(held, 2) {
+            floats.extend([(stores(stored, 2), 1), (falls_through(jump), 1)]);
+        }
+        floats.push((stores(Instr::FloatNeg { dst, a }, 2), 1));
+        assert_eq!(floats.len(), 5 + 4 + 2 + 4 + 8 + 1);
+        for (body, operands) in floats {
+            stops_on_the_wrong_kind(m, body, operands, half, is_float, no_float);
+        }
+    });
+}
+
+/// Call `instr` with `args` on a heap that is full once it holds them, for an
+/// answer that needs a cell. It must stop with `HeapFull` and leave each
+/// operand with one holder.
+fn finds_the_heap_full(m: &mut Machine<'_, '_>, instr: Instr, dst: u32, args: [&BigInt; 2]) {
+    let what = format!("{instr} on {args:?}");
+    let mut room = Heap::default();
+    let hold = |heap: &mut Heap| args.map(|n| bigint::value(heap, n.clone()).expect("room"));
+    hold(&mut room);
+    m.heap = Heap::limited(room.words_used());
+    let args = hold(&mut m.heap);
+    let held = m.heap.live();
+    let body = stores(instr, dst);
+    let got = m.call(body, &args).map(|v| v.bits());
+    assert_eq!(got, Err(Stop::HeapFull), "{what}");
+    assert_eq!(m.heap.live(), held, "{what}");
+    assert_eq!(m.leave(0), Ok(()), "{what}");
+    assert_eq!(m.heap.live(), 0, "{what}");
+}
+
+/// An Int instruction whose answer needs a cell, on a heap with no room for
+/// one, stops and leaves its operands as they were, whichever register it was
+/// to write.
+#[test]
+fn an_int_answer_with_no_room_stops_and_keeps_its_operands() {
+    on_a_machine(|m| {
+        let top = BigInt::from((1_i64 << 50) - 1);
+        let bottom = BigInt::from(-(1_i64 << 50));
+        let (one, big) = (BigInt::from(1), BigInt::from(3) << 200);
+        let k = SmallInt::new(1).expect("small");
+        for dst in OVER_TWO {
+            let pair = Pair {
+                dst: Reg(dst),
+                a: Reg(0),
+                b: Reg(1),
+            };
+            finds_the_heap_full(m, Instr::IntAdd(pair), dst, [&top, &one]);
+            finds_the_heap_full(m, Instr::IntAdd(pair), dst, [&big, &big]);
+            finds_the_heap_full(m, Instr::IntMul(pair), dst, [&big, &top]);
+        }
+        for dst in OVER_ONE {
+            let (dst_reg, a) = (Reg(dst), Reg(0));
+            let held = WithK { dst: dst_reg, a, k };
+            let neg = Instr::IntNeg { dst: dst_reg, a };
+            for n in [&top, &big] {
+                finds_the_heap_full(m, Instr::IntAddK(held), dst, [n, &one]);
+            }
+            finds_the_heap_full(m, Instr::IntRSubK(held), dst, [&bottom, &one]);
+            for n in [&bottom, &big] {
+                finds_the_heap_full(m, neg.clone(), dst, [n, &one]);
+            }
+        }
     });
 }

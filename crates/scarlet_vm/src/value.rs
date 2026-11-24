@@ -75,6 +75,59 @@ const SMALL_INT_MAX: i64 = (1 << 50) - 1;
 #[derive(Clone, Copy)]
 pub(crate) struct Value(u64);
 
+/// A small Int, held with its 51 bits at the top of the word and 0 below
+/// them. Adding or subtracting two of these overflows an `i64` exactly when
+/// the answer is no small Int, so the CPU's overflow flag is the range check.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SmallInt(i64);
+
+impl SmallInt {
+    /// `n`, or `None` when it is out of a small Int's range.
+    pub(crate) fn new(n: i64) -> Option<SmallInt> {
+        Value::int(n).and_then(Value::as_small)
+    }
+
+    /// The number itself.
+    #[inline]
+    pub(crate) fn get(self) -> i64 {
+        self.0 >> INT_SHIFT
+    }
+
+    /// The number times 2^13, which is how it is held.
+    #[inline]
+    pub(crate) fn raised(self) -> i64 {
+        self.0
+    }
+
+    /// The value for an answer worked out on [`Self::raised`] numbers. The
+    /// bits it has below the 51 are dropped.
+    #[inline]
+    pub(crate) fn lower(raised: i64) -> Value {
+        Value(TAG_INT | raised.cast_unsigned() >> INT_SHIFT)
+    }
+
+    #[inline]
+    pub(crate) fn value(self) -> Value {
+        SmallInt::lower(self.0)
+    }
+}
+
+/// A value that is a Float.
+#[derive(Clone, Copy)]
+pub(crate) struct Float(Value);
+
+impl Float {
+    /// `x`, as [`Value::float`] makes a Float of it.
+    pub(crate) fn new(x: f64) -> Float {
+        Float(Value::float(x))
+    }
+
+    #[inline]
+    pub(crate) fn value(self) -> Value {
+        self.0
+    }
+}
+
 /// What a [`Value`] holds.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum View {
@@ -105,7 +158,7 @@ impl Value {
     /// `x` as a Float, or `None` when it is NaN or infinite, which no Float
     /// is (`docs/semantics.md`). So no Float's word is a tagged one.
     #[inline]
-    fn finite(x: f64) -> Option<Value> {
+    pub(crate) fn finite(x: f64) -> Option<Value> {
         x.is_finite().then_some(Value(x.to_bits()))
     }
 
@@ -169,6 +222,30 @@ impl Value {
         (self.0 >= TAG_INT).then(|| Value::untag_int(self.0))
     }
 
+    /// [`Self::small_int`], in the form the Int instructions work on.
+    #[inline]
+    pub(crate) fn as_small(self) -> Option<SmallInt> {
+        (self.0 >= TAG_INT).then_some(SmallInt((self.0 << INT_SHIFT).cast_signed()))
+    }
+
+    /// Both words as small Ints, when both are. A word is one when its 13 top
+    /// bits are all set, so one test of the two words' `&` asks it of both.
+    #[inline]
+    pub(crate) fn both_small(self, other: Value) -> Option<(SmallInt, SmallInt)> {
+        (self.0 & other.0 >= TAG_INT).then_some((
+            SmallInt((self.0 << INT_SHIFT).cast_signed()),
+            SmallInt((other.0 << INT_SHIFT).cast_signed()),
+        ))
+    }
+
+    /// The word as an `f64`, whatever it holds. Every word that is not a
+    /// Float is a NaN, so this is for an operation that a NaN cannot get
+    /// through (`float.rs`).
+    #[inline]
+    pub(crate) fn unchecked_float(self) -> f64 {
+        f64::from_bits(self.0)
+    }
+
     /// The number in a small Int's word. The shift up drops the tag and the
     /// shift back down copies the number's sign into the bits it left.
     #[inline]
@@ -212,6 +289,18 @@ impl Value {
                 _ => View::Nil,
             },
         }
+    }
+}
+
+impl fmt::Debug for SmallInt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.get().fmt(f)
+    }
+}
+
+impl fmt::Debug for Float {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
     }
 }
 

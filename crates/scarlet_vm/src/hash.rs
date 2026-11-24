@@ -26,6 +26,7 @@
 use scarlet_ir::core_ir::VariantRef;
 
 use crate::array::{self, Seq};
+use crate::bigint;
 use crate::binary;
 use crate::heap::{Cell, Heap, Kind};
 use crate::map;
@@ -58,7 +59,9 @@ enum Tag {
 
 /// `v`'s hash.
 pub(crate) fn hash(heap: &Heap, v: Value) -> u64 {
-    if let Some(n) = crate::bigint::wide(heap, v).and_then(|n| i64::try_from(n).ok()) {
+    // Nearly every Int key is small, so that is asked first.
+    let big = || bigint::wide(heap, v).and_then(|n| i64::try_from(n).ok());
+    if let Some(n) = v.small_int().or_else(big) {
         return permute(n.cast_unsigned() ^ K0);
     }
     let mut s = Sip::<1, 3>::new(K0, K1);

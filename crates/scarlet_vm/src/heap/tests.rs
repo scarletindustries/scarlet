@@ -2,11 +2,16 @@ use super::*;
 
 impl Heap {
     /// A heap that holds at most `limit` words.
-    fn limited(limit: usize) -> Heap {
+    pub(crate) fn limited(limit: usize) -> Heap {
         Heap {
             limit: limit.min(LIMIT_WORDS),
             ..Heap::default()
         }
+    }
+
+    /// How many words count against the limit.
+    pub(crate) fn words_used(&self) -> usize {
+        self.arena.len() + self.boxed
     }
 
     /// How many cells are not yet freed.

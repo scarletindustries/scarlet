@@ -7,7 +7,7 @@
 use scarlet_ir::core_ir::{AddressTypes, NetTypes, TlsTypes};
 use scarlet_ir::intrinsic::Intrinsic;
 
-use super::{Machine, fault};
+use super::Machine;
 use crate::Stop;
 use crate::array;
 use crate::bigint::{self, Int};
@@ -15,7 +15,7 @@ use crate::binary;
 use crate::code::Reg;
 use crate::heap::Kind;
 use crate::host::{Deadline, Handle, IpAddr, NetError, Received, SocketAddr, TlsError};
-use crate::stop::{Broken, Missing};
+use crate::stop::{Broken, Missing, fault};
 use crate::value::Value;
 
 impl Machine<'_, '_> {

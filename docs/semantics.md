@@ -52,7 +52,7 @@ A stdlib function must never make up a value to hide a failure. It returns a `Re
 
 Erlang crashes in these cases, and Scarlet gives a harmless value instead.
 
-**Built**, all four (`scarlet_vm/src/float.rs`, and `Value::float`, which every Float goes through). `0.0 == -0.0`, as in IEEE. `float::floor`, `ceil`, `round` and `truncate` give the exact Int, however large, since an Int has no bounds.
+**Built**, all four (`scarlet_vm/src/float.rs`, and `Value::finite` and `Value::float`, one of which every Float goes through). `0.0 == -0.0`, as in IEEE. `float::floor`, `ceil`, `round` and `truncate` give the exact Int, however large, since an Int has no bounds.
 
 **Built:** there is no implicit conversion between Int and Float, so `1 + 1.5` is a type error.
 

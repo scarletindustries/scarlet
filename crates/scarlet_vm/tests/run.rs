@@ -2628,8 +2628,8 @@ fn a_counted_run_counts_each_instruction_by_its_kind() {
     assert_eq!(out, "55\n");
     assert_eq!(ran(&counts, "CallSelf"), 176);
     assert_eq!(ran(&counts, "Call"), 1);
-    assert_eq!(ran(&counts, "JumpUnlessCmpImm"), 177);
-    assert_eq!(ran(&counts, "Int"), 88);
+    assert_eq!(ran(&counts, "JumpUnlessIntLtK"), 177);
+    assert_eq!(ran(&counts, "IntAdd"), 88);
     assert_eq!(ran(&counts, "Print"), 1);
     assert_eq!(ran(&counts, "Bad"), 0);
     assert_eq!(counts.cells_live, 0);
@@ -2735,6 +2735,189 @@ fn a_run_audited_before_every_instruction_is_the_same_run() {
     assert!(!counts.ops.iter().any(|(name, _)| *name == "Audit"));
 }
 
+/// A program that does every operator on two values it is given, and on one
+/// of them with a constant on each side, stored and branched on. It does each
+/// a second time through a function that works on any kind of number, whose
+/// instruction is another one, and prints where the two are not alike. Each of
+/// `values` is paired with each.
+fn every_operator(kind: &str, constants: &[String], values: &[String]) -> String {
+    let arith = [
+        ("+", "add"),
+        ("-", "sub"),
+        ("*", "mul"),
+        ("/", "div"),
+        ("%", "rem"),
+    ];
+    let compare = [
+        ("==", "eq"),
+        ("!=", "ne"),
+        ("<", "lt"),
+        ("<=", "le"),
+        (">", "gt"),
+        (">=", "ge"),
+    ];
+    // A number is compared by how it shows, which tells the two zeros apart.
+    let alike = |a: &str, b: &str| -> Vec<String> {
+        let mut out = Vec::new();
+        for (op, name) in arith {
+            out.push(format!("'${{{a} {op} {b}}}' == '${{{name}({a}, {b})}}'"));
+        }
+        for (op, name) in compare {
+            out.push(format!("{{ {a} {op} {b} }} == {name}({a}, {b})"));
+            out.push(format!(
+                "{{ if {a} {op} {b} {{ 'y' }} else {{ 'n' }} }} == '${{yes({name}({a}, {b}))}}'"
+            ));
+        }
+        out
+    };
+    let mut src = String::from(
+        "import scarlet/float\n\
+         fn yes(b Bool) String { if b { 'y' } else { 'n' } }\n",
+    );
+    for (op, name) in arith.into_iter().chain(compare) {
+        src += &format!("fn {name}(a, b) {{ a {op} b }}\n");
+    }
+    let mut groups = vec![alike("x", "y")];
+    for k in constants {
+        groups.push(alike("x", k));
+        groups.push(alike(k, "x"));
+    }
+    let zero = if kind == "Int" { "0" } else { "-0.0" };
+    groups.push(vec![
+        format!("'${{-x}}' == '${{sub({zero}, x)}}'"),
+        String::from("float::from_int(-3) == -3.0"),
+    ]);
+    let calls: String = (0..groups.len())
+        .map(|i| format!("\tcheck('${{x}} ${{y}} {i}', f{i}(x, y), 0)\n"))
+        .collect();
+    for (i, lines) in groups.iter().enumerate() {
+        let lines = lines.join(",\n\t\t");
+        src += &format!(
+            "fn f{i}(x {kind}, y {kind}) Array(Bool) {{\n\
+             \t_y = y\n\
+             \t[\n\t\t{lines},\n\t]\n\
+             }}\n"
+        );
+    }
+    let pairs: String = values
+        .iter()
+        .flat_map(|x| values.iter().map(move |y| format!("\tall({x}, {y})\n")))
+        .collect();
+    src + &format!(
+        "fn check(at String, same Array(Bool), line Int) Nil {{\n\
+         \tmatch same {{\n\
+         \t\t[] -> Nil\n\
+         \t\t[ok, ..rest] -> {{\n\
+         \t\t\tif ok {{ Nil }} else {{ println('${{at}} ${{line}}') }}\n\
+         \t\t\tcheck(at, rest, line + 1)\n\
+         \t\t}}\n\
+         \t}}\n\
+         }}\n\
+         fn all(x {kind}, y {kind}) Nil {{\n{calls}\tNil\n}}\n\
+         pub fn main() {{\n{pairs}\tprintln('done')\n}}\n"
+    )
+}
+
+fn each(of: &[&str]) -> Vec<String> {
+    of.iter().map(|s| (*s).to_string()).collect()
+}
+
+/// `src` runs to its end and finds no operator that is not what the
+/// instruction for any number gives. It runs every operator instruction there
+/// is whose name starts as `kinds` says.
+fn every_instruction_runs(src: &str, kinds: [&str; 2]) {
+    let (out, counts) = counted(src);
+    assert_eq!(out, "done\n");
+    let ours: Vec<_> = counts
+        .ops
+        .iter()
+        .filter(|(name, _)| kinds.iter().any(|k| name.starts_with(k)))
+        .collect();
+    assert!(ours.len() > 20, "{ours:?}");
+    for (name, n) in ours {
+        // A pattern on a number is not an operator.
+        assert!(*n > 0 || name.ends_with(kinds[1]), "{name} never ran");
+    }
+}
+
+/// Every Int instruction a program can name gives what the one instruction
+/// for any number gives, with the constants and the values at both ends of
+/// the small Ints and past them.
+#[test]
+fn int_operators_and_constants_agree_with_the_operator_on_any_number() {
+    let constants = each(&["0", "1", "7", "1125899906842623", "1125899906842624"]);
+    let values = each(&[
+        "0",
+        "-1",
+        "7",
+        "1125899906842623",
+        "-1125899906842624",
+        "1125899906842624",
+        "-1125899906842625",
+        "{ 9223372036854775807 * 4 }",
+        "{ -9223372036854775807 - 1 }",
+    ]);
+    let src = every_operator("Int", &constants, &values);
+    every_instruction_runs(&src, ["Int", "JumpUnlessInt"]);
+}
+
+#[test]
+fn float_operators_and_constants_agree_with_the_operator_on_any_number() {
+    let huge = format!("{:.1}", f64::MAX);
+    let tiny = format!("{:.1074}", f64::from_bits(1));
+    let constants = [each(&["0.0", "0.1", "2.0"]), vec![huge.clone()]].concat();
+    let values = [
+        each(&["0.0", "-0.0", "0.1", "-7.5", "2.0"]),
+        vec![huge.clone(), format!("-{huge}"), tiny],
+    ]
+    .concat();
+    let src = every_operator("Float", &constants, &values);
+    every_instruction_runs(&src, ["Float", "JumpUnlessFloat"]);
+}
+
+/// The same with the heap checked before every instruction, on fewer values.
+#[test]
+fn operators_at_the_edges_keep_every_count_right() {
+    let ints = every_operator(
+        "Int",
+        &each(&["0", "1125899906842623"]),
+        &each(&["7", "-1125899906842624", "{ 9223372036854775807 * 4 }"]),
+    );
+    let floats = every_operator("Float", &each(&["0.0"]), &each(&["-0.0", "7.5"]));
+    for src in [ints, floats] {
+        let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+        let ran = scarlet_vm::run(&compile(&src), &mut host, Audit::EachInstruction);
+        assert_eq!(ran, Ok(()));
+        assert_eq!(std::mem::take(host.out()), b"done\n");
+    }
+}
+
+/// A Float answer with no value, one too large, and the remainder of a Float
+/// by zero, through each instruction that can meet them.
+#[test]
+fn float_rules_hold_in_every_instruction() {
+    let max = format!("{:.1}", f64::MAX);
+    let src = format!(
+        "fn over(x Float, y Float) Array(Float) {{ [x / y, x % y, y / x, 1.0 / y, y / 2.0] }}\n\
+         fn by_zero(x Float) Array(Float) {{ [x / 0.0, 0.0 / x, x % 0.0, x - x] }}\n\
+         fn large(x Float) Array(Bool) {{\n\
+         \t[x * 2.0 == x, x + x == x, 2.0 * x == x, -x - x == -x, 0.0 - x == -x, x * -2.0 == -x]\n\
+         }}\n\
+         pub fn main() {{\n\
+         \tprintln(over(7.5, 0.0))\n\
+         \tprintln(over(-7.5, -0.0))\n\
+         \tprintln(by_zero(3.5))\n\
+         \tprintln(by_zero(0.0))\n\
+         \tprintln(large({max}))\n\
+         }}\n"
+    );
+    prints(
+        &src,
+        "[0.0, 7.5, 0.0, 0.0, 0.0]\n[0.0, -7.5, 0.0, 0.0, -0.0]\n[0.0, 0.0, 3.5, 0.0]\n\
+         [0.0, 0.0, 0.0, 0.0]\n[True, True, True, True, True, True]\n",
+    );
+}
+
 /// A big Int constant's cell is made the first time the program reads it and
 /// is the same cell every time after, so a loop that reads one makes it once.
 #[test]
@@ -2787,11 +2970,11 @@ fn the_listing_shows_the_loaded_instructions() {
         "{fib}"
     );
     assert!(
-        fib.contains("    0  JumpUnlessCmpImm Lt(r0, 2) -> 2\n"),
+        fib.contains("    0  JumpUnlessIntLtK(r0, 2) -> 2\n"),
         "{fib}"
     );
     assert!(fib.contains("= CallSelf(move r"), "{fib}");
-    assert!(fib.contains("= Int Add(r"), "{fib}");
+    assert!(fib.contains("= IntAdd(r"), "{fib}");
     let main = listing.function(1).expect("main is the second");
     assert!(main.contains("r0 = Call fn#0(move r0)\n"), "{main}");
     assert!(main.contains("r0 = Print r0 and a newline\n"), "{main}");

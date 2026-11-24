@@ -11,7 +11,8 @@ use std::fmt::{self, Write as _};
 
 use scarlet_ir::core_ir::{Program, VariantRef};
 
-use crate::code::{self, Arg, Body, Func, Instr, Reg};
+use crate::code::{self, Arg, Body, Func, Instr, JumpPair, JumpWithK, Pair, Reg, WithK};
+use crate::ops::NumOp;
 use crate::stop::NotBuilt;
 use crate::value::{Value, View};
 use crate::{Audit, Stop};
@@ -173,13 +174,32 @@ impl fmt::Display for Instr {
             }
             Instr::GetGlobal { dst, slot } => write!(f, "{dst} = {name} @g{}", slot.0),
             Instr::SetGlobal { slot, src } => write!(f, "{name} @g{} = {src}", slot.0),
-            Instr::Int { dst, op, a, b } => write!(f, "{dst} = {name} {op:?}({a}, {b})"),
-            Instr::IntImm { dst, op, a, b } => write!(f, "{dst} = {name} {op:?}({a}, {b})"),
-            Instr::Float { dst, op, a, b } | Instr::Num { dst, op, a, b } => {
+            int_arith!(Pair { dst, a, b })
+            | int_compare!(Pair { dst, a, b })
+            | float_arith!(Pair { dst, a, b })
+            | float_compare!(Pair { dst, a, b }) => write!(f, "{dst} = {name}({a}, {b})"),
+            int_arith_k!(WithK { dst, a, k }) | int_compare_k!(WithK { dst, a, k }) => {
+                write!(f, "{dst} = {name}({a}, {})", k.get())
+            }
+            int_arith_k_first!(WithK { dst, a, k }) => {
+                write!(f, "{dst} = {name}({}, {a})", k.get())
+            }
+            float_arith_k!(WithK { dst, a, k }) | float_compare_k!(WithK { dst, a, k }) => {
+                write!(f, "{dst} = {name}({a}, {})", Literal(k.value()))
+            }
+            float_arith_k_first!(WithK { dst, a, k }) => {
+                write!(f, "{dst} = {name}({}, {a})", Literal(k.value()))
+            }
+            Instr::Num { dst, op, a, b } => {
+                let op: &dyn fmt::Debug = match op {
+                    NumOp::Arith(op) => op,
+                    NumOp::Order(op) => op,
+                };
                 write!(f, "{dst} = {name} {op:?}({a}, {b})")
             }
             Instr::IntNeg { dst, a }
             | Instr::FloatNeg { dst, a }
+            | Instr::FloatFromInt { dst, a }
             | Instr::Neg { dst, a }
             | Instr::ToString { dst, a }
             | Instr::Not { dst, a } => write!(f, "{dst} = {name} {a}"),
@@ -219,9 +239,12 @@ impl fmt::Display for Instr {
             Instr::Ret { src } => write!(f, "{name} {src}"),
             Instr::Jump { to } => write!(f, "{name} -> {to}"),
             Instr::JumpIfFalse { cond, to } => write!(f, "{name} {cond} -> {to}"),
-            Instr::JumpUnlessCmp { op, a, b, to } => write!(f, "{name} {op:?}({a}, {b}) -> {to}"),
-            Instr::JumpUnlessCmpImm { op, a, b, to } => {
-                write!(f, "{name} {op:?}({a}, {b}) -> {to}")
+            int_jump!(JumpPair { a, b, to }) | float_jump!(JumpPair { a, b, to }) => {
+                write!(f, "{name}({a}, {b}) -> {to}")
+            }
+            int_jump_k!(JumpWithK { a, k, to }) => write!(f, "{name}({a}, {}) -> {to}", k.get()),
+            float_jump_k!(JumpWithK { a, k, to }) => {
+                write!(f, "{name}({a}, {}) -> {to}", Literal(k.value()))
             }
             Instr::MapSetOwned {
                 dst,

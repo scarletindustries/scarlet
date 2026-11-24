@@ -23,22 +23,144 @@ use scarlet_ir::intrinsic::Intrinsic;
 use crate::array::{self, End, Seq};
 use crate::bigint::{self, Int};
 use crate::binary::{self, Bits};
-use crate::code::{Arg, BitsOp, Body, Code, Counted, Func, Instr, IntOp, Op, Reg};
+use crate::code::{Arg, BitsOp, Body, Code, Counted, Func, Instr, Op, Reg};
 use crate::counts::Counts;
 use crate::eq;
-use crate::float::{self, NumOp};
+use crate::float;
 use crate::heap::{Cell, DeadCell, Fault, Heap, Kind};
 use crate::host::{Host, IoError};
 use crate::http;
+use crate::int;
 use crate::json;
 use crate::map;
+use crate::ops::{Arith, Compare, NumOp, Order};
 use crate::show;
-use crate::stop::{Broken, Missing};
+use crate::stop::{Broken, Missing, fault};
 use crate::value::{Value, View};
 use crate::word::to_usize;
 use crate::{Audit, Stop};
 
 mod net;
+
+// The handlers of the operator instructions. Each takes the operands `i` out
+// of the registers, does its operator in place when it can, and asks the one
+// slow path of its kind when it cannot. The operator is a constant in every
+// use, so nothing looks at it as a program runs.
+
+macro_rules! int {
+    ($vm:ident, $base:ident, $i:ident, $op:expr) => {{
+        let (x, y) = ($vm.get($base, $i.a), $vm.get($base, $i.b));
+        match x.both_small(y).and_then(|(x, y)| int::fast($op, x, y)) {
+            Some(v) => $vm.set($base, $i.dst, v)?,
+            None => $vm.int_slow($base, $i.dst, $op, x, y)?,
+        }
+    }};
+}
+
+macro_rules! int_k {
+    ($vm:ident, $base:ident, $i:ident, $op:expr) => {{
+        let x = $vm.get($base, $i.a);
+        match x.as_small().and_then(|x| int::fast($op, x, $i.k)) {
+            Some(v) => $vm.set($base, $i.dst, v)?,
+            None => $vm.int_slow($base, $i.dst, $op, x, $i.k.value())?,
+        }
+    }};
+}
+
+macro_rules! int_k_first {
+    ($vm:ident, $base:ident, $i:ident, $op:expr) => {{
+        let y = $vm.get($base, $i.a);
+        match y.as_small().and_then(|y| int::fast($op, $i.k, y)) {
+            Some(v) => $vm.set($base, $i.dst, v)?,
+            None => $vm.int_slow($base, $i.dst, $op, $i.k.value(), y)?,
+        }
+    }};
+}
+
+macro_rules! int_holds {
+    ($vm:ident, $base:ident, $i:ident, $op:expr) => {{
+        let (x, y) = ($vm.get($base, $i.a), $vm.get($base, $i.b));
+        match x.both_small(y) {
+            Some((x, y)) => $op.holds(x.cmp(&y)),
+            None => int::compare(&$vm.heap, $op, x, y)?,
+        }
+    }};
+}
+
+macro_rules! int_holds_k {
+    ($vm:ident, $base:ident, $i:ident, $op:expr) => {{
+        let x = $vm.get($base, $i.a);
+        match x.as_small() {
+            Some(x) => $op.holds(x.cmp(&$i.k)),
+            None => int::compare(&$vm.heap, $op, x, $i.k.value())?,
+        }
+    }};
+}
+
+macro_rules! float {
+    ($vm:ident, $base:ident, $i:ident, $op:expr) => {{
+        let (x, y) = ($vm.get($base, $i.a), $vm.get($base, $i.b));
+        match float::fast($op, x, y) {
+            Some(v) => $vm.set($base, $i.dst, v)?,
+            None => $vm.float_slow($base, $i.dst, $op, x, y)?,
+        }
+    }};
+}
+
+macro_rules! float_k {
+    ($vm:ident, $base:ident, $i:ident, $op:expr) => {{
+        let x = $vm.get($base, $i.a);
+        match float::fast($op, x, $i.k.value()) {
+            Some(v) => $vm.set($base, $i.dst, v)?,
+            None => $vm.float_slow($base, $i.dst, $op, x, $i.k.value())?,
+        }
+    }};
+}
+
+macro_rules! float_k_first {
+    ($vm:ident, $base:ident, $i:ident, $op:expr) => {{
+        let y = $vm.get($base, $i.a);
+        match float::fast($op, $i.k.value(), y) {
+            Some(v) => $vm.set($base, $i.dst, v)?,
+            None => $vm.float_slow($base, $i.dst, $op, $i.k.value(), y)?,
+        }
+    }};
+}
+
+macro_rules! float_holds {
+    ($vm:ident, $base:ident, $i:ident, $op:expr) => {{
+        let (x, y) = ($vm.get($base, $i.a), $vm.get($base, $i.b));
+        match float::fast_compare($op, x, y) {
+            Some(holds) => holds,
+            None => float::slow_compare($op, x, y)?,
+        }
+    }};
+}
+
+macro_rules! float_holds_k {
+    ($vm:ident, $base:ident, $i:ident, $op:expr) => {{
+        let x = $vm.get($base, $i.a);
+        match float::fast_compare($op, x, $i.k.value()) {
+            Some(holds) => holds,
+            None => float::slow_compare($op, x, $i.k.value())?,
+        }
+    }};
+}
+
+macro_rules! store_bool {
+    ($vm:ident, $base:ident, $i:ident, $holds:ident, $op:expr) => {
+        $vm.set($base, $i.dst, Value::bool($holds!($vm, $base, $i, $op)))?
+    };
+}
+
+macro_rules! jump {
+    ($vm:ident, $frame:ident, $i:ident, $holds:ident, $op:expr) => {{
+        let base = $frame.base;
+        if !$holds!($vm, base, $i, $op) {
+            $frame.pc = $i.to as usize;
+        }
+    }};
+}
 
 struct Frame<'c> {
     body: &'c Body,
@@ -216,59 +338,71 @@ impl<'c, 'h> Machine<'c, 'h> {
                         self.release(old)?;
                     }
                 }
-                Instr::Int { dst, op, a, b } => {
-                    let (x, y) = (self.get(base, *a), self.get(base, *b));
-                    // Nearly every Int is small, and so is nearly every
-                    // answer, so that case skips building an `Int`.
-                    let v = match (x.small_int(), y.small_int()) {
-                        (Some(x), Some(y)) => bigint::small_op(*op, x, y),
-                        _ => None,
-                    };
-                    let v = match v {
-                        Some(v) => v,
-                        None => self.int_op(*op, x, y)?,
-                    };
-                    self.set(base, *dst, v)?;
-                }
-                Instr::IntImm { dst, op, a, b } => {
-                    let x = self.get(base, *a);
-                    let v = match x.small_int().and_then(|x| bigint::small_op(*op, x, *b)) {
-                        Some(v) => v,
-                        None => self.int_op(*op, x, Value::int(*b).unwrap_or(Value::NIL))?,
-                    };
-                    self.set(base, *dst, v)?;
-                }
+                Instr::IntAdd(i) => int!(self, base, i, Arith::Add),
+                Instr::IntSub(i) => int!(self, base, i, Arith::Sub),
+                Instr::IntMul(i) => int!(self, base, i, Arith::Mul),
+                Instr::IntDiv(i) => int!(self, base, i, Arith::Div),
+                Instr::IntRem(i) => int!(self, base, i, Arith::Rem),
+                Instr::IntAddK(i) => int_k!(self, base, i, Arith::Add),
+                Instr::IntSubK(i) => int_k!(self, base, i, Arith::Sub),
+                Instr::IntMulK(i) => int_k!(self, base, i, Arith::Mul),
+                Instr::IntDivK(i) => int_k!(self, base, i, Arith::Div),
+                Instr::IntRemK(i) => int_k!(self, base, i, Arith::Rem),
+                Instr::IntRSubK(i) => int_k_first!(self, base, i, Arith::Sub),
+                Instr::IntEq(i) => store_bool!(self, base, i, int_holds, Compare::Eq),
+                Instr::IntNe(i) => store_bool!(self, base, i, int_holds, Compare::Ne),
+                Instr::IntLt(i) => store_bool!(self, base, i, int_holds, Compare::LT),
+                Instr::IntLe(i) => store_bool!(self, base, i, int_holds, Compare::LE),
+                Instr::IntEqK(i) => store_bool!(self, base, i, int_holds_k, Compare::Eq),
+                Instr::IntNeK(i) => store_bool!(self, base, i, int_holds_k, Compare::Ne),
+                Instr::IntLtK(i) => store_bool!(self, base, i, int_holds_k, Compare::LT),
+                Instr::IntLeK(i) => store_bool!(self, base, i, int_holds_k, Compare::LE),
+                Instr::IntGtK(i) => store_bool!(self, base, i, int_holds_k, Compare::GT),
+                Instr::IntGeK(i) => store_bool!(self, base, i, int_holds_k, Compare::GE),
                 Instr::IntNeg { dst, a } => {
-                    let a = self.int(base, *a)?;
-                    let v = bigint::neg(&mut self.heap, a).map_err(fault)?;
-                    self.set(base, *dst, v)?;
+                    let x = self.get(base, *a);
+                    match x.as_small().and_then(int::fast_neg) {
+                        Some(v) => self.set(base, *dst, v)?,
+                        None => self.int_neg_slow(base, *dst, x)?,
+                    }
                 }
-                Instr::Float { dst, op, a, b } => {
-                    let (a, b) = (self.float(base, *a)?, self.float(base, *b)?);
-                    self.set(base, *dst, float::op(*op, a, b))?;
-                }
+                Instr::FloatAdd(i) => float!(self, base, i, Arith::Add),
+                Instr::FloatSub(i) => float!(self, base, i, Arith::Sub),
+                Instr::FloatMul(i) => float!(self, base, i, Arith::Mul),
+                Instr::FloatDiv(i) => float!(self, base, i, Arith::Div),
+                Instr::FloatRem(i) => float!(self, base, i, Arith::Rem),
+                Instr::FloatAddK(i) => float_k!(self, base, i, Arith::Add),
+                Instr::FloatSubK(i) => float_k!(self, base, i, Arith::Sub),
+                Instr::FloatMulK(i) => float_k!(self, base, i, Arith::Mul),
+                Instr::FloatDivK(i) => float_k!(self, base, i, Arith::Div),
+                Instr::FloatRSubK(i) => float_k_first!(self, base, i, Arith::Sub),
+                Instr::FloatRDivK(i) => float_k_first!(self, base, i, Arith::Div),
+                Instr::FloatLt(i) => store_bool!(self, base, i, float_holds, Order::Lt),
+                Instr::FloatLe(i) => store_bool!(self, base, i, float_holds, Order::Le),
+                Instr::FloatLtK(i) => store_bool!(self, base, i, float_holds_k, Order::Lt),
+                Instr::FloatLeK(i) => store_bool!(self, base, i, float_holds_k, Order::Le),
+                Instr::FloatGtK(i) => store_bool!(self, base, i, float_holds_k, Order::Gt),
+                Instr::FloatGeK(i) => store_bool!(self, base, i, float_holds_k, Order::Ge),
                 Instr::FloatNeg { dst, a } => {
-                    let a = self.float(base, *a)?;
-                    self.set(base, *dst, Value::float(-a))?;
+                    let x = self.get(base, *a);
+                    match float::fast_neg(x) {
+                        Some(v) => self.set(base, *dst, v)?,
+                        None => self.float_neg_slow(base, *dst, x)?,
+                    }
+                }
+                Instr::FloatFromInt { dst, a } => {
+                    let x = self.get(base, *a);
+                    match x.small_int() {
+                        Some(n) => self.set(base, *dst, Value::float(n as f64))?,
+                        None => self.float_from_int_slow(base, *dst, x)?,
+                    }
                 }
                 Instr::Num { dst, op, a, b } => {
                     let v = self.num(*op, self.get(base, *a), self.get(base, *b))?;
                     self.set(base, *dst, v)?;
                 }
                 Instr::Neg { dst, a } => {
-                    let a = self.get(base, *a);
-                    let v = match a.view() {
-                        View::Float(f) => Value::float(-f),
-                        View::Int(_)
-                        | View::Nil
-                        | View::Bool(_)
-                        | View::Func(_)
-                        | View::Cell(_)
-                        | View::Nullary(_) => {
-                            let a = self.int_of(a)?;
-                            bigint::neg(&mut self.heap, a).map_err(fault)?
-                        }
-                    };
+                    let v = self.neg(self.get(base, *a))?;
                     self.set(base, *dst, v)?;
                 }
                 Instr::Print { dst, arg, newline } => {
@@ -799,30 +933,22 @@ impl<'c, 'h> Machine<'c, 'h> {
                     let cell = map::delete_owned(&mut self.heap, m, k).map_err(fault)?;
                     self.set(base, *dst, Value::cell(cell))?;
                 }
-                Instr::JumpUnlessCmp { op, a, b, to } => {
-                    let (x, y) = (self.get(base, *a), self.get(base, *b));
-                    let holds = match (x.small_int(), y.small_int()) {
-                        (Some(x), Some(y)) => bigint::small_op(*op, x, y),
-                        _ => None,
-                    };
-                    let holds = match holds {
-                        Some(v) => v,
-                        None => self.int_op(*op, x, y)?,
-                    };
-                    if holds.bits() != Value::bool(true).bits() {
-                        frame.pc = *to as usize;
-                    }
-                }
-                Instr::JumpUnlessCmpImm { op, a, b, to } => {
-                    let x = self.get(base, *a);
-                    let holds = match x.small_int().and_then(|x| bigint::small_op(*op, x, *b)) {
-                        Some(v) => v,
-                        None => self.int_op(*op, x, Value::int(*b).unwrap_or(Value::NIL))?,
-                    };
-                    if holds.bits() != Value::bool(true).bits() {
-                        frame.pc = *to as usize;
-                    }
-                }
+                Instr::JumpUnlessIntEq(i) => jump!(self, frame, i, int_holds, Compare::Eq),
+                Instr::JumpUnlessIntNe(i) => jump!(self, frame, i, int_holds, Compare::Ne),
+                Instr::JumpUnlessIntLt(i) => jump!(self, frame, i, int_holds, Compare::LT),
+                Instr::JumpUnlessIntLe(i) => jump!(self, frame, i, int_holds, Compare::LE),
+                Instr::JumpUnlessIntEqK(i) => jump!(self, frame, i, int_holds_k, Compare::Eq),
+                Instr::JumpUnlessIntNeK(i) => jump!(self, frame, i, int_holds_k, Compare::Ne),
+                Instr::JumpUnlessIntLtK(i) => jump!(self, frame, i, int_holds_k, Compare::LT),
+                Instr::JumpUnlessIntLeK(i) => jump!(self, frame, i, int_holds_k, Compare::LE),
+                Instr::JumpUnlessIntGtK(i) => jump!(self, frame, i, int_holds_k, Compare::GT),
+                Instr::JumpUnlessIntGeK(i) => jump!(self, frame, i, int_holds_k, Compare::GE),
+                Instr::JumpUnlessFloatLt(i) => jump!(self, frame, i, float_holds, Order::Lt),
+                Instr::JumpUnlessFloatLe(i) => jump!(self, frame, i, float_holds, Order::Le),
+                Instr::JumpUnlessFloatLtK(i) => jump!(self, frame, i, float_holds_k, Order::Lt),
+                Instr::JumpUnlessFloatLeK(i) => jump!(self, frame, i, float_holds_k, Order::Le),
+                Instr::JumpUnlessFloatGtK(i) => jump!(self, frame, i, float_holds_k, Order::Gt),
+                Instr::JumpUnlessFloatGeK(i) => jump!(self, frame, i, float_holds_k, Order::Ge),
                 // The frame is ending, so the result's register gives its
                 // reference up instead of sharing it.
                 Instr::Ret { src } => {
@@ -1531,7 +1657,7 @@ impl<'c, 'h> Machine<'c, 'h> {
             | Intrinsic::FloatCeil
             | Intrinsic::FloatRound
             | Intrinsic::FloatTruncate => {
-                let f = self.float_of(v)?;
+                let f = float::read(v)?;
                 let whole = match i {
                     Intrinsic::FloatFloor => f.floor(),
                     Intrinsic::FloatCeil => f.ceil(),
@@ -1549,13 +1675,6 @@ impl<'c, 'h> Machine<'c, 'h> {
                 }
                 let n = num_bigint::BigInt::from_f64(whole).unwrap_or_default();
                 bigint::value(&mut self.heap, n).map_err(fault)
-            }
-            Intrinsic::FloatFromInt => {
-                let f = match self.int_of(v)? {
-                    Int::Small(n) => n as f64,
-                    Int::Big(n) => n.to_f64().unwrap_or(0.0),
-                };
-                Ok(Value::float(f))
             }
             // `units * 10^-scale`, rounded once. Rust's parser rounds to the
             // nearest Float, subnormals included, and `Value::float` stops one
@@ -1575,7 +1694,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                 Ok(Value::float(f))
             }
             Intrinsic::FloatToString => {
-                let text = float::text(self.float_of(v)?);
+                let text = float::text(float::read(v)?);
                 Ok(Value::cell(
                     self.heap.string(text.as_bytes()).map_err(fault)?,
                 ))
@@ -1930,7 +2049,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                 let n = self.int_of(inner)?.to_string();
                 out.extend_from_slice(n.as_bytes());
             } else if variant == types.real {
-                json::write_float(&mut out, self.float_of(inner)?);
+                json::write_float(&mut out, float::read(inner)?);
             } else if variant == types.str {
                 json::write_string(&mut out, &String::from_utf8_lossy(&self.text_of(inner)?));
             } else if variant == types.number {
@@ -2607,31 +2726,17 @@ impl<'c, 'h> Machine<'c, 'h> {
         }
     }
 
-    #[inline(never)]
-    fn float(&self, base: usize, r: Reg) -> Result<f64, Stop> {
-        self.float_of(self.get(base, r))
-    }
-
-    fn float_of(&self, v: Value) -> Result<f64, Stop> {
-        match v.view() {
-            View::Float(f) => Ok(f),
-            v @ (View::Int(_)
-            | View::Nil
-            | View::Bool(_)
-            | View::Func(_)
-            | View::Cell(_)
-            | View::Nullary(_)) => Err(Stop::broken(Broken::FloatOperation(v))),
-        }
-    }
-
     /// `a op b` for an operator whose operands are both Ints, both Floats, or,
     /// for `+`, both strings.
     #[inline(never)]
     fn num(&mut self, op: NumOp, a: Value, b: Value) -> Result<Value, Stop> {
         if let (View::Float(x), View::Float(y)) = (a.view(), b.view()) {
-            return Ok(float::op(op, x, y));
+            return Ok(match op {
+                NumOp::Arith(op) => float::op(op, x, y),
+                NumOp::Order(op) => Value::bool(float::compare(op, x, y)),
+            });
         }
-        if op == NumOp::Add && self.is_string(a) && self.is_string(b) {
+        if op == NumOp::Arith(Arith::Add) && self.is_string(a) && self.is_string(b) {
             let mut text = Vec::new();
             for s in [a, b] {
                 if let Some(cell) = s.as_cell() {
@@ -2640,54 +2745,92 @@ impl<'c, 'h> Machine<'c, 'h> {
             }
             return Ok(Value::cell(self.heap.string(&text).map_err(fault)?));
         }
-        let int = match op {
-            NumOp::Add => IntOp::Add,
-            NumOp::Sub => IntOp::Sub,
-            NumOp::Mul => IntOp::Mul,
-            NumOp::Div => IntOp::Div,
-            NumOp::Rem => IntOp::Rem,
-            NumOp::Lt => IntOp::Lt,
-            NumOp::Le => IntOp::Le,
-            NumOp::Gt => IntOp::Gt,
-            NumOp::Ge => IntOp::Ge,
-        };
-        self.int_op(int, a, b)
-    }
-
-    fn int(&self, base: usize, r: Reg) -> Result<Int, Stop> {
-        self.int_of(self.get(base, r))
-    }
-
-    /// `x op y` off the small-Int fast path: in `i128` when both fit one
-    /// word, and through `num-bigint` when not.
-    #[inline(never)]
-    fn int_op(&mut self, op: IntOp, x: Value, y: Value) -> Result<Value, Stop> {
-        if let (Some(a), Some(b)) = (bigint::wide(&self.heap, x), bigint::wide(&self.heap, y))
-            && let Some(v) = bigint::wide_op(&mut self.heap, op, a, b)
-        {
-            return v.map_err(fault);
-        }
-        let (a, b) = (self.int_of(x)?, self.int_of(y)?);
-        bigint::op(&mut self.heap, op, a, b).map_err(fault)
-    }
-
-    // Kept out of line. With this inside `call`, the loop keeps `base` on
-    // the stack and reads it back at every use, which costs a bare loop 4
-    // machine instructions a turn.
-    #[inline(never)]
-    fn int_of(&self, v: Value) -> Result<Int, Stop> {
-        match v.view() {
-            View::Int(n) => Ok(Int::Small(n)),
-            View::Cell(cell) if self.heap.kind(cell) == Some(Kind::BigInt) => {
-                Ok(Int::Big(self.heap.read_big_int(cell)))
+        match op {
+            NumOp::Arith(op) => int::op(&mut self.heap, op, a, b),
+            NumOp::Order(op) => {
+                let holds = int::compare(&self.heap, Compare::Order(op), a, b)?;
+                Ok(Value::bool(holds))
             }
-            v @ (View::Float(_)
+        }
+    }
+
+    /// `-a`, for an Int or a Float.
+    #[inline(never)]
+    fn neg(&mut self, a: Value) -> Result<Value, Stop> {
+        match a.view() {
+            View::Float(f) => Ok(Value::float(-f)),
+            View::Int(_)
             | View::Nil
             | View::Bool(_)
             | View::Func(_)
             | View::Cell(_)
-            | View::Nullary(_)) => Err(Stop::missing(Missing::IntOperation(v))),
+            | View::Nullary(_) => int::neg(&mut self.heap, a),
         }
+    }
+
+    // What an operator instruction does when it cannot answer in place. Each
+    // of these is out of line and cold, and writes its answer itself, so that
+    // the instruction's fast path is a test and a store that nothing else
+    // joins.
+
+    /// `x op y` into `dst`, for an Int instruction with an operand that is no
+    /// small Int or an answer that is none.
+    #[cold]
+    #[inline(never)]
+    fn int_slow(
+        &mut self,
+        base: usize,
+        dst: Reg,
+        op: Arith,
+        x: Value,
+        y: Value,
+    ) -> Result<(), Stop> {
+        let v = int::op(&mut self.heap, op, x, y)?;
+        Ok(self.set(base, dst, v)?)
+    }
+
+    /// `-x` into `dst`, for an `x` that is no small Int or is the lowest one.
+    #[cold]
+    #[inline(never)]
+    fn int_neg_slow(&mut self, base: usize, dst: Reg, x: Value) -> Result<(), Stop> {
+        let v = int::neg(&mut self.heap, x)?;
+        Ok(self.set(base, dst, v)?)
+    }
+
+    /// `x op y` into `dst`, for a Float instruction whose plain answer is no
+    /// Float: an operand is none, or the answer is none or too large.
+    #[cold]
+    #[inline(never)]
+    fn float_slow(
+        &mut self,
+        base: usize,
+        dst: Reg,
+        op: Arith,
+        x: Value,
+        y: Value,
+    ) -> Result<(), Stop> {
+        let v = float::op(op, float::read(x)?, float::read(y)?);
+        Ok(self.set(base, dst, v)?)
+    }
+
+    /// `-x` into `dst`. Minus a Float is always one, so `x` is not.
+    #[cold]
+    #[inline(never)]
+    fn float_neg_slow(&mut self, base: usize, dst: Reg, x: Value) -> Result<(), Stop> {
+        let v = Value::float(-float::read(x)?);
+        Ok(self.set(base, dst, v)?)
+    }
+
+    /// The Float nearest `x`, which is no small Int, into `dst`.
+    #[cold]
+    #[inline(never)]
+    fn float_from_int_slow(&mut self, base: usize, dst: Reg, x: Value) -> Result<(), Stop> {
+        let v = int::to_float(&self.heap, x)?;
+        Ok(self.set(base, dst, v)?)
+    }
+
+    fn int_of(&self, v: Value) -> Result<Int, Stop> {
+        int::read(&self.heap, v)
     }
 
     /// How `println` and `${x}` show a value.
@@ -2869,13 +3012,6 @@ fn at(base: usize, r: Reg) -> usize {
 /// and a frame has at most `u32::MAX` registers, so this is exact.
 fn frame_end(base: usize, body: &Body) -> usize {
     base.saturating_add(body.regs as usize)
-}
-
-fn fault(fault: Fault) -> Stop {
-    match fault {
-        Fault::Full => Stop::HeapFull,
-        Fault::DeadCell => Stop::broken(Broken::DeadCell),
-    }
 }
 
 #[cfg(test)]

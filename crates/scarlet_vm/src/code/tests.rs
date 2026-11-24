@@ -434,3 +434,267 @@ fn the_loader_marks_the_moves_of_a_compiled_program() {
     assert_eq!(moves(".bound"), [true]);
     assert_eq!(moves(".kept"), [false]);
 }
+
+/// The kinds of the instructions each function of `src` is loaded as, by the
+/// function's name.
+fn loaded(src: &str) -> HashMap<String, Vec<Op>> {
+    let result = scarlet_core::compile::compile_text(src, None);
+    assert!(result.success(), "{:?}", result.diagnostics());
+    let program = result.into_runnable().expect("a clean compile is runnable");
+    let code = load(&program, Audit::Never).expect("the program loads");
+    bodies(&code)
+        .into_iter()
+        .map(|b| {
+            let name = b.name.rsplit('.').next().unwrap_or_default().to_string();
+            (name, b.instrs.iter().map(Instr::op).collect())
+        })
+        .collect()
+}
+
+/// An operator's instruction holds a constant on whichever side there is an
+/// instruction for. That is in tail position too, and when other work comes
+/// between the constant and the operator.
+#[test]
+fn an_operator_holds_a_constant_it_can() {
+    let ops = loaded(
+        "import scarlet/float\n\
+         fn right(x Int) Int { x - 1 }\n\
+         fn left(x Int) Int { 1 + x }\n\
+         fn from(x Int) Int { 100 - x }\n\
+         fn over(x Int) Int { 100 / x }\n\
+         fn past(x Int) Int { x + 1125899906842624 }\n\
+         fn half(x Float) Float { x / 2.0 }\n\
+         fn inverse(x Float) Float { 1.0 / x }\n\
+         fn less(x Float) Float { 1.5 - x }\n\
+         fn rest(x Float) Float { x % 2.0 }\n\
+         fn apart(n Int) Float { 2.0 * float::from_int(n) }\n\
+         fn both(x Int) Int { { 2 - x } * { 3 - x } + 5 }\n\
+         fn stored(x Int) Bool { 3 < x }\n\
+         fn stored_float(x Float) Bool { 3.5 >= x }\n\
+         fn branch(c Bool, x Int) Int {\n\
+         \ty = if c { x * 3 } else { x }\n\
+         \ty - x\n\
+         }\n\
+         pub fn main() { Nil }\n",
+    );
+    let is = |name: &str, want: &[Op]| assert_eq!(ops[name], want, "{name}");
+    is("right", &[Op::IntSubK, Op::Ret]);
+    is("left", &[Op::IntAddK, Op::Ret]);
+    is("from", &[Op::IntRSubK, Op::Ret]);
+    // No instruction divides a constant, and none holds an Int that is not
+    // small.
+    is("over", &[Op::Const, Op::IntDiv, Op::Ret]);
+    is("past", &[Op::BigInt, Op::IntAdd, Op::Ret]);
+    is("half", &[Op::FloatDivK, Op::Ret]);
+    is("inverse", &[Op::FloatRDivK, Op::Ret]);
+    is("less", &[Op::FloatRSubK, Op::Ret]);
+    is("rest", &[Op::Const, Op::FloatRem, Op::Ret]);
+    is("apart", &[Op::FloatFromInt, Op::FloatMulK, Op::Ret]);
+    is(
+        "both",
+        &[Op::IntRSubK, Op::IntRSubK, Op::IntMul, Op::IntAddK, Op::Ret],
+    );
+    is("stored", &[Op::IntGtK, Op::Ret]);
+    is("stored_float", &[Op::FloatLeK, Op::Ret]);
+    assert_eq!(ops["branch"][..2], [Op::JumpIfFalse, Op::IntMulK]);
+}
+
+/// A constant that something reads from a register is still put in one, and
+/// an operator beside it holds it all the same.
+#[test]
+fn a_constant_something_reads_is_put_in_a_register() {
+    let ops = loaded(
+        "const kept = 7\n\
+         fn pair(x Int) (Int, Int) {\n\
+         \tk = 7\n\
+         \t(k, x + k)\n\
+         }\n\
+         fn twice(x Int) Int {\n\
+         \tk = 7\n\
+         \tx * k + k\n\
+         }\n\
+         fn alone() Int {\n\
+         \tk = 7\n\
+         \tk * k\n\
+         }\n\
+         fn global(x Int) Int { x + kept }\n\
+         pub fn main() { Nil }\n",
+    );
+    assert_eq!(ops["pair"], [Op::Const, Op::IntAddK, Op::Tuple, Op::Ret]);
+    assert_eq!(ops["twice"], [Op::IntMulK, Op::IntAddK, Op::Ret]);
+    assert_eq!(ops["alone"], [Op::Const, Op::IntMulK, Op::Ret]);
+    assert_eq!(ops["global"], [Op::GetGlobal, Op::IntAdd, Op::Ret]);
+}
+
+/// A constant that a module keeps in a global is stored there, even when only
+/// an operator that could hold it reads it. The compiler reads a global back
+/// with a load of its own, so this makes the read by hand.
+#[test]
+fn a_constant_kept_in_a_global_is_stored() {
+    let result =
+        scarlet_core::compile::compile_text("const kept = 7\npub fn main() { Nil }\n", None);
+    assert!(result.success(), "{:?}", result.diagnostics());
+    let program = result.into_runnable().expect("a clean compile is runnable");
+    let CoreExpr::Let { bind, rhs, .. } = &program.toplevel.core.body else {
+        panic!("the toplevel binds the constant first");
+    };
+    assert!(bind.global.is_some() && matches!(rhs, Atom::Const(_)));
+    let x = CoreBind {
+        id: LocalId(bind.id.0 + 1),
+        global: None,
+        ..bind.clone()
+    };
+    let loaded_with = |bind: CoreBind| -> Vec<Op> {
+        let sum = Atom::PrimOp {
+            op: PrimOp::IntAdd,
+            args: vec![x.id, bind.id],
+        };
+        let f = CoreFn {
+            params: vec![x.clone()],
+            body: CoreExpr::Let {
+                bind,
+                rhs: rhs.clone(),
+                body: Box::new(CoreExpr::Tail(sum)),
+            },
+            ret_ty: program.toplevel.core.ret_ty,
+        };
+        let loaded = Loader::new(&program.consts, &program.abi, &f, None).and_then(|l| l.body(&f));
+        let (_, instrs) = loaded.unwrap_or_else(|_| panic!("the function loads"));
+        instrs.iter().map(Instr::op).collect()
+    };
+    let stored = [Op::Const, Op::SetGlobal, Op::IntAdd, Op::Ret];
+    assert_eq!(loaded_with(bind.clone()), stored);
+    let local = CoreBind {
+        global: None,
+        ..bind.clone()
+    };
+    assert_eq!(loaded_with(local), [Op::IntAddK, Op::Ret]);
+}
+
+/// An `if` on a comparison of numbers, read nowhere else, is one jump. One
+/// whose answer is read again is stored first.
+#[test]
+fn a_branch_on_a_comparison_is_one_jump() {
+    let ops = loaded(
+        "fn lt(a Int, b Int) Int { if a < b { a } else { b } }\n\
+         fn ge(a Int, b Int) Int { if a >= b { a } else { b } }\n\
+         fn ne(a Int) Int { if a != 3 { a } else { 0 } }\n\
+         fn from(a Int) Int { if 3 < a { a } else { 0 } }\n\
+         fn gt(a Float, b Float) Float { if a > b { a } else { b } }\n\
+         fn above(a Float) Float { if a > 4.0 { a } else { 0.0 } }\n\
+         fn below(a Float) Float { if 4.0 >= a { a } else { 0.0 } }\n\
+         fn kept(a Float) (Bool, Int) {\n\
+         \tc = a > 4.0\n\
+         \t(c, if c { 1 } else { 2 })\n\
+         }\n\
+         pub fn main() { Nil }\n",
+    );
+    let first = |name: &str| ops[name][0];
+    assert_eq!(first("lt"), Op::JumpUnlessIntLt);
+    assert_eq!(first("ge"), Op::JumpUnlessIntLe);
+    assert_eq!(first("ne"), Op::JumpUnlessIntNeK);
+    assert_eq!(first("from"), Op::JumpUnlessIntGtK);
+    assert_eq!(first("gt"), Op::JumpUnlessFloatLt);
+    assert_eq!(first("above"), Op::JumpUnlessFloatGtK);
+    assert_eq!(first("below"), Op::JumpUnlessFloatLeK);
+    assert_eq!(ops["kept"][..2], [Op::FloatGtK, Op::JumpIfFalse]);
+}
+
+/// Every operator instruction names its registers everywhere the loader looks
+/// for them. Each comparison becomes the jump beside it in the list, with the
+/// same operands, when the branch is on what it writes.
+#[test]
+fn every_operator_instruction_names_its_operands() {
+    let (dst, a, b) = (Reg(5), Reg(6), Reg(7));
+    let k = SmallInt::new(-3).expect("small");
+    let x = Float::new(0.5);
+    let mut two = Vec::new();
+    let mut one = Vec::new();
+    let mut jumps = Vec::new();
+    macro_rules! pairs {
+        ([] $($name:ident $op:path),*) => { two.extend([$(Instr::$name(Pair { dst, a, b })),*]) };
+    }
+    macro_rules! ints {
+        ([] $($name:ident $op:path),*) => { one.extend([$(Instr::$name(WithK { dst, a, k })),*]) };
+    }
+    macro_rules! floats {
+        ([] $($name:ident $op:path),*) => {
+            one.extend([$(Instr::$name(WithK { dst, a, k: x })),*])
+        };
+    }
+    macro_rules! compare_pairs {
+        ([] $($name:ident $jump:ident $op:path),*) => {
+            $(
+                two.push(Instr::$name(Pair { dst, a, b }));
+                jumps.push((
+                    Instr::$name(Pair { dst, a, b }),
+                    Instr::$jump(JumpPair { a, b, to: 0 }),
+                    vec![a, b],
+                ));
+            )*
+        };
+    }
+    macro_rules! compare_with {
+        ([$k:ident] $($name:ident $jump:ident $op:path),*) => {
+            $(
+                one.push(Instr::$name(WithK { dst, a, k: $k }));
+                jumps.push((
+                    Instr::$name(WithK { dst, a, k: $k }),
+                    Instr::$jump(JumpWithK { a, k: $k, to: 0 }),
+                    vec![a],
+                ));
+            )*
+        };
+    }
+    int_arith!(rows pairs);
+    float_arith!(rows pairs);
+    int_arith_k!(rows ints);
+    int_arith_k_first!(rows ints);
+    float_arith_k!(rows floats);
+    float_arith_k_first!(rows floats);
+    int_compare!(rows compare_pairs);
+    float_compare!(rows compare_pairs);
+    int_compare_k!(rows compare_with k);
+    float_compare_k!(rows compare_with x);
+    assert_eq!((two.len(), one.len(), jumps.len()), (16, 22, 16));
+
+    let reads = |i: &Instr| {
+        let mut out = Vec::new();
+        i.reads(|r| out.push(r));
+        out
+    };
+    let named = |i: &Instr| {
+        let mut out = Vec::new();
+        i.clone().regs_mut(&mut |r| out.push(*r));
+        out
+    };
+    let stored = two.iter().map(|i| (i, vec![a, b]));
+    for (i, operands) in stored.chain(one.iter().map(|i| (i, vec![a]))) {
+        assert_eq!(reads(i), operands, "{i}");
+        assert_eq!(named(i), [vec![dst], operands].concat(), "{i}");
+        assert_eq!(i.writes().map(Write::reg), Some(dst), "{i}");
+        assert!(i.successors(4).eq([5]), "{i}");
+        assert!(i.clone().target().is_none(), "{i}");
+        let text = i.to_string();
+        let name = i.op().name();
+        assert!(text.starts_with(&format!("r5 = {name}(")), "{text}");
+    }
+    for (stored, want, operands) in &jumps {
+        let jump = stored.as_test(dst).expect("a comparison").jump(9);
+        assert_eq!(jump.op(), want.op());
+        assert!(stored.as_test(a).is_none(), "{stored}");
+        assert_eq!(&reads(&jump), operands, "{jump}");
+        assert_eq!(&named(&jump), operands, "{jump}");
+        assert!(jump.writes().is_none(), "{jump}");
+        assert_eq!(jump.clone().target(), Some(&mut 9), "{jump}");
+        assert!(jump.successors(4).eq([5, 9]), "{jump}");
+        let shown = stored.to_string();
+        let args = &shown[shown.find('(').expect("operands")..];
+        let name = stored.op().name();
+        assert_eq!(jump.to_string(), format!("JumpUnless{name}{args} -> 9"));
+    }
+    for i in two.iter().chain(&one) {
+        let jumps = jumps.iter().any(|(stored, _, _)| stored.op() == i.op());
+        assert_eq!(i.as_test(dst).is_some(), jumps, "{i}");
+    }
+}

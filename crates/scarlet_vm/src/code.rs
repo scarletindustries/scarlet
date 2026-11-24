@@ -2,9 +2,11 @@
 //!
 //! When the program loads, each function's Core IR becomes a flat list of
 //! register instructions, once. A register is a Core IR local, so
-//! `let %2 = IntAdd(%0, %1)` becomes `Int { dst: 2, op: Add, a: 0, b: 1 }`.
+//! `let %2 = IntAdd(%0, %1)` becomes `IntAdd` of registers 0 and 1 into 2.
 //! Each construct maps to one instruction or a few, so the listing reads like
-//! the Core IR it came from.
+//! the Core IR it came from. Where the loader knows something about an
+//! operand it picks an instruction for that: one that holds a constant, or
+//! one that compares and jumps.
 //!
 //! The VM is being built one feature at a time. A function that uses
 //! something not built yet still loads, marked with what it needs, and only a
@@ -33,10 +35,10 @@ use scarlet_ir::intrinsic::Intrinsic;
 use scarlet_ir::tivec::{Idx, TiVec};
 
 use crate::Audit;
-use crate::float::NumOp;
+use crate::ops::{Arith, Compare, NumOp, Order};
 use crate::show::Types;
 use crate::stop::{Arity, Broken, Missing, Stop};
-use crate::value::Value;
+use crate::value::{Float, SmallInt, Value};
 
 /// A register, which is an index into the running function's frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,31 +123,62 @@ pub(crate) enum Instr {
         slot: GlobalSlot,
         src: Reg,
     },
-    Int {
-        dst: Reg,
-        op: IntOp,
-        a: Reg,
-        b: Reg,
-    },
-    /// `a op b` for a `b` the program spells as a small Int constant, which
-    /// saves the instruction that would put it in a register.
-    IntImm {
-        dst: Reg,
-        op: IntOp,
-        a: Reg,
-        b: i64,
-    },
+    // Each operator on two Ints is an instruction of its own, and so is each
+    // on two Floats but `==` and `!=`, which are the ones for any two values
+    // ([`Instr::Equal`]). So the one jump that finds an instruction finds its
+    // operator too. A name with a `K` at its end holds the second operand,
+    // for a constant the program spells there, and one with an `R` before the
+    // operator holds the first. Not every operator has one of each. `>` and
+    // `>=` of two registers are `<` and `<=` with the registers swapped. A
+    // comparison gives a Bool.
+    IntAdd(Pair),
+    IntSub(Pair),
+    IntMul(Pair),
+    IntDiv(Pair),
+    IntRem(Pair),
+    IntAddK(WithK<SmallInt>),
+    IntSubK(WithK<SmallInt>),
+    IntMulK(WithK<SmallInt>),
+    IntDivK(WithK<SmallInt>),
+    IntRemK(WithK<SmallInt>),
+    IntRSubK(WithK<SmallInt>),
+    IntEq(Pair),
+    IntNe(Pair),
+    IntLt(Pair),
+    IntLe(Pair),
+    IntEqK(WithK<SmallInt>),
+    IntNeK(WithK<SmallInt>),
+    IntLtK(WithK<SmallInt>),
+    IntLeK(WithK<SmallInt>),
+    IntGtK(WithK<SmallInt>),
+    IntGeK(WithK<SmallInt>),
     IntNeg {
         dst: Reg,
         a: Reg,
     },
-    Float {
-        dst: Reg,
-        op: NumOp,
-        a: Reg,
-        b: Reg,
-    },
+    FloatAdd(Pair),
+    FloatSub(Pair),
+    FloatMul(Pair),
+    FloatDiv(Pair),
+    FloatRem(Pair),
+    FloatAddK(WithK<Float>),
+    FloatSubK(WithK<Float>),
+    FloatMulK(WithK<Float>),
+    FloatDivK(WithK<Float>),
+    FloatRSubK(WithK<Float>),
+    FloatRDivK(WithK<Float>),
+    FloatLt(Pair),
+    FloatLe(Pair),
+    FloatLtK(WithK<Float>),
+    FloatLeK(WithK<Float>),
+    FloatGtK(WithK<Float>),
+    FloatGeK(WithK<Float>),
     FloatNeg {
+        dst: Reg,
+        a: Reg,
+    },
+    /// The Float nearest the Int in `a`.
+    FloatFromInt {
         dst: Reg,
         a: Reg,
     },
@@ -259,14 +292,24 @@ pub(crate) enum Instr {
         cond: Reg,
         to: u32,
     },
-    /// Continue at `to` unless `a op b` holds, for an `if` on a comparison
-    /// nothing else reads.
-    JumpUnlessCmp {
-        op: IntOp,
-        a: Reg,
-        b: Reg,
-        to: u32,
-    },
+    // Continue at `to` unless a comparison holds, for an `if` on a comparison
+    // nothing else reads. Each is the comparison above with its name.
+    JumpUnlessIntEq(JumpPair),
+    JumpUnlessIntNe(JumpPair),
+    JumpUnlessIntLt(JumpPair),
+    JumpUnlessIntLe(JumpPair),
+    JumpUnlessIntEqK(JumpWithK<SmallInt>),
+    JumpUnlessIntNeK(JumpWithK<SmallInt>),
+    JumpUnlessIntLtK(JumpWithK<SmallInt>),
+    JumpUnlessIntLeK(JumpWithK<SmallInt>),
+    JumpUnlessIntGtK(JumpWithK<SmallInt>),
+    JumpUnlessIntGeK(JumpWithK<SmallInt>),
+    JumpUnlessFloatLt(JumpPair),
+    JumpUnlessFloatLe(JumpPair),
+    JumpUnlessFloatLtK(JumpWithK<Float>),
+    JumpUnlessFloatLeK(JumpWithK<Float>),
+    JumpUnlessFloatGtK(JumpWithK<Float>),
+    JumpUnlessFloatGeK(JumpWithK<Float>),
     /// `map::set` for a map whose register gives up its reference, so the map
     /// can change in place when nothing else holds it.
     MapSetOwned {
@@ -289,13 +332,6 @@ pub(crate) enum Instr {
         dst: Reg,
         map: Reg,
         key: Reg,
-    },
-    /// [`Instr::JumpUnlessCmp`] against a small Int constant.
-    JumpUnlessCmpImm {
-        op: IntOp,
-        a: Reg,
-        b: i64,
-        to: u32,
     },
     /// Continue at `to` unless `src` is constructor `variant`.
     JumpUnlessVariant {
@@ -468,6 +504,158 @@ pub(crate) enum Instr {
     },
 }
 
+/// The operands of an operator on two registers.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Pair {
+    pub(crate) dst: Reg,
+    pub(crate) a: Reg,
+    pub(crate) b: Reg,
+}
+
+/// The operands of an operator on a register and a constant.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WithK<K> {
+    pub(crate) dst: Reg,
+    pub(crate) a: Reg,
+    pub(crate) k: K,
+}
+
+/// What a jump on a comparison of two registers holds.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct JumpPair {
+    pub(crate) a: Reg,
+    pub(crate) b: Reg,
+    pub(crate) to: u32,
+}
+
+/// What a jump on a comparison of a register and a constant holds.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct JumpWithK<K> {
+    pub(crate) a: Reg,
+    pub(crate) k: K,
+    pub(crate) to: u32,
+}
+
+impl Pair {
+    fn swapped(self) -> Pair {
+        Pair {
+            a: self.b,
+            b: self.a,
+            ..self
+        }
+    }
+}
+
+// The operator instructions by family, each instruction beside the operator it
+// does. This is the one list of them. `int_arith!(i)` is the pattern that
+// matches every instruction of its family and binds its operands to `i`, so a
+// `match` that treats a family alike names the family. `int_arith!(rows then)`
+// gives the list itself to the macro `then`, in which the loader finds the
+// instruction for an operator (`instr_for!`) and the tests every instruction
+// there is. The interpreter needs an arm for each, so it names each with its
+// operator again, and the tests hold it to this list. A comparison has a second
+// name, the jump it becomes, and its family has a second pattern for the jumps.
+macro_rules! arithmetic {
+    ($d:tt $family:ident { $($name:ident $op:ident),* $(,)? }) => {
+        macro_rules! $family {
+            (rows $d then:ident $d($d with:tt)*) => {
+                $d then! { [$d($d with)*] $($name Arith::$op),* }
+            };
+            ($d i:pat) => { $(Instr::$name($d i))|* };
+        }
+    };
+}
+
+macro_rules! comparisons {
+    ($d:tt $family:ident $jumps:ident { $($name:ident $jump:ident $op:path),* $(,)? }) => {
+        macro_rules! $family {
+            (rows $d then:ident $d($d with:tt)*) => {
+                $d then! { [$d($d with)*] $($name $jump $op),* }
+            };
+            ($d i:pat) => { $(Instr::$name($d i))|* };
+        }
+        macro_rules! $jumps {
+            ($d i:pat) => { $(Instr::$jump($d i))|* };
+        }
+    };
+}
+
+/// The instruction of a family that does `op`, on the operands `i`. A family
+/// that has no instruction for some operators says what to do for those.
+macro_rules! instr_for {
+    ([$op:ident $i:ident $($rest:pat => $other:expr)?] $($name:ident $does:path),*) => {
+        match $op { $($does => Instr::$name($i),)* $($rest => $other,)? }
+    };
+    ([$op:ident $i:ident $($rest:pat => $other:expr)?] $($name:ident $jump:ident $does:path),*) => {
+        match $op { $($does => Instr::$name($i),)* $($rest => $other,)? }
+    };
+}
+
+arithmetic! { $ int_arith {
+    IntAdd Add, IntSub Sub, IntMul Mul, IntDiv Div, IntRem Rem,
+} }
+arithmetic! { $ int_arith_k {
+    IntAddK Add, IntSubK Sub, IntMulK Mul, IntDivK Div, IntRemK Rem,
+} }
+arithmetic! { $ int_arith_k_first {
+    IntRSubK Sub,
+} }
+comparisons! { $ int_compare int_jump {
+    IntEq JumpUnlessIntEq Compare::Eq,
+    IntNe JumpUnlessIntNe Compare::Ne,
+    IntLt JumpUnlessIntLt Compare::LT,
+    IntLe JumpUnlessIntLe Compare::LE,
+} }
+comparisons! { $ int_compare_k int_jump_k {
+    IntEqK JumpUnlessIntEqK Compare::Eq,
+    IntNeK JumpUnlessIntNeK Compare::Ne,
+    IntLtK JumpUnlessIntLtK Compare::LT,
+    IntLeK JumpUnlessIntLeK Compare::LE,
+    IntGtK JumpUnlessIntGtK Compare::GT,
+    IntGeK JumpUnlessIntGeK Compare::GE,
+} }
+arithmetic! { $ float_arith {
+    FloatAdd Add, FloatSub Sub, FloatMul Mul, FloatDiv Div, FloatRem Rem,
+} }
+arithmetic! { $ float_arith_k {
+    FloatAddK Add, FloatSubK Sub, FloatMulK Mul, FloatDivK Div,
+} }
+arithmetic! { $ float_arith_k_first {
+    FloatRSubK Sub, FloatRDivK Div,
+} }
+comparisons! { $ float_compare float_jump {
+    FloatLt JumpUnlessFloatLt Order::Lt,
+    FloatLe JumpUnlessFloatLe Order::Le,
+} }
+comparisons! { $ float_compare_k float_jump_k {
+    FloatLtK JumpUnlessFloatLtK Order::Lt,
+    FloatLeK JumpUnlessFloatLeK Order::Le,
+    FloatGtK JumpUnlessFloatGtK Order::Gt,
+    FloatGeK JumpUnlessFloatGeK Order::Ge,
+} }
+
+// The families again, by the operands they hold.
+macro_rules! pair {
+    ($i:pat) => {
+        int_arith!($i) | int_compare!($i) | float_arith!($i) | float_compare!($i)
+    };
+}
+macro_rules! with_int {
+    ($i:pat) => {
+        int_arith_k!($i) | int_arith_k_first!($i) | int_compare_k!($i)
+    };
+}
+macro_rules! with_float {
+    ($i:pat) => {
+        float_arith_k!($i) | float_arith_k_first!($i) | float_compare_k!($i)
+    };
+}
+macro_rules! jump_pair {
+    ($i:pat) => {
+        int_jump!($i) | float_jump!($i)
+    };
+}
+
 impl Instr {
     /// Each register this instruction names, read or written, to renumber.
     fn regs_mut(&mut self, f: &mut impl FnMut(&mut Reg)) {
@@ -488,16 +676,20 @@ impl Instr {
             | Instr::DropReuse { reg: dst }
             | Instr::Ret { src: dst }
             | Instr::JumpIfFalse { cond: dst, .. }
-            | Instr::JumpUnlessCmpImm { a: dst, .. }
+            | int_jump_k!(JumpWithK { a: dst, .. })
+            | float_jump_k!(JumpWithK { a: dst, .. })
             | Instr::JumpUnlessVariant { src: dst, .. }
             | Instr::JumpUnlessInt { src: dst, .. }
             | Instr::JumpUnlessFloat { src: dst, .. }
             | Instr::JumpUnlessStr { src: dst, .. }
             | Instr::JumpUnlessBinary { src: dst, .. } => f(dst),
             Instr::Move { dst, src: a, .. }
-            | Instr::IntImm { dst, a, .. }
+            | with_int!(WithK { dst, a, .. })
+            | with_float!(WithK { dst, a, .. })
+            | jump_pair!(JumpPair { a: dst, b: a, .. })
             | Instr::IntNeg { dst, a }
             | Instr::FloatNeg { dst, a }
+            | Instr::FloatFromInt { dst, a }
             | Instr::Neg { dst, a }
             | Instr::Print { dst, arg: a, .. }
             | Instr::ToString { dst, a }
@@ -505,13 +697,11 @@ impl Instr {
             | Instr::Not { dst, a }
             | Instr::ArrayLen { dst, src: a }
             | Instr::ArrayElem { dst, src: a, .. }
-            | Instr::Field { dst, src: a, .. }
-            | Instr::JumpUnlessCmp { a: dst, b: a, .. } => {
+            | Instr::Field { dst, src: a, .. } => {
                 f(dst);
                 f(a);
             }
-            Instr::Int { dst, a, b, .. }
-            | Instr::Float { dst, a, b, .. }
+            pair!(Pair { dst, a, b })
             | Instr::Num { dst, a, b, .. }
             | Instr::Equal { dst, a, b }
             | Instr::NotEqual { dst, a, b }
@@ -652,6 +842,30 @@ impl Instr {
         }
     }
 
+    /// The comparison this instruction stores in `cond`, as the test of a jump,
+    /// or `None` when this stores no comparison there.
+    fn as_test(&self, cond: Reg) -> Option<Test> {
+        macro_rules! of_pairs {
+            ([] $($name:ident $jump:ident $op:path),*) => {
+                $(if let Instr::$name(Pair { dst, a, b }) = *self && dst == cond {
+                    return Some(Test::Pair { jump: Instr::$jump, a, b });
+                })*
+            };
+        }
+        macro_rules! with_constants {
+            ([$test:ident] $($name:ident $jump:ident $op:path),*) => {
+                $(if let Instr::$name(WithK { dst, a, k }) = *self && dst == cond {
+                    return Some(Test::$test { jump: Instr::$jump, a, k });
+                })*
+            };
+        }
+        int_compare!(rows of_pairs);
+        int_compare_k!(rows with_constants Int);
+        float_compare!(rows of_pairs);
+        float_compare_k!(rows with_constants Float);
+        None
+    }
+
     /// Each register this instruction reads, for liveness. A plain `Drop`
     /// reads nothing, because dropping an emptied register does nothing.
     fn reads(&self, mut f: impl FnMut(Reg)) {
@@ -677,16 +891,19 @@ impl Instr {
             | Instr::Array { elements: args, .. } => args.iter().copied().for_each(f),
             Instr::Move { src: a, .. }
             | Instr::SetGlobal { src: a, .. }
-            | Instr::IntImm { a, .. }
+            | with_int!(WithK { a, .. })
+            | with_float!(WithK { a, .. })
+            | int_jump_k!(JumpWithK { a, .. })
+            | float_jump_k!(JumpWithK { a, .. })
             | Instr::IntNeg { a, .. }
             | Instr::FloatNeg { a, .. }
+            | Instr::FloatFromInt { a, .. }
             | Instr::Neg { a, .. }
             | Instr::Print { arg: a, .. }
             | Instr::ToString { a, .. }
             | Instr::DropReuse { reg: a }
             | Instr::Ret { src: a }
             | Instr::JumpIfFalse { cond: a, .. }
-            | Instr::JumpUnlessCmpImm { a, .. }
             | Instr::JumpUnlessVariant { src: a, .. }
             | Instr::JumpUnlessInt { src: a, .. }
             | Instr::JumpUnlessFloat { src: a, .. }
@@ -697,10 +914,9 @@ impl Instr {
             | Instr::ArrayLen { src: a, .. }
             | Instr::ArrayElem { src: a, .. }
             | Instr::Field { src: a, .. } => f(*a),
-            Instr::Int { a, b, .. }
-            | Instr::Float { a, b, .. }
+            pair!(Pair { a, b, .. })
+            | jump_pair!(JumpPair { a, b, .. })
             | Instr::Num { a, b, .. }
-            | Instr::JumpUnlessCmp { a, b, .. }
             | Instr::Equal { a, b, .. }
             | Instr::NotEqual { a, b, .. }
             | Instr::Range {
@@ -796,11 +1012,12 @@ impl Instr {
             | Instr::BigInt { dst, .. }
             | Instr::Move { dst, .. }
             | Instr::GetGlobal { dst, .. }
-            | Instr::Int { dst, .. }
-            | Instr::IntImm { dst, .. }
+            | pair!(Pair { dst, .. })
+            | with_int!(WithK { dst, .. })
+            | with_float!(WithK { dst, .. })
             | Instr::IntNeg { dst, .. }
-            | Instr::Float { dst, .. }
             | Instr::FloatNeg { dst, .. }
+            | Instr::FloatFromInt { dst, .. }
             | Instr::Num { dst, .. }
             | Instr::Neg { dst, .. }
             | Instr::Print { dst, .. }
@@ -842,8 +1059,9 @@ impl Instr {
             | Instr::Ret { .. }
             | Instr::Jump { .. }
             | Instr::JumpIfFalse { .. }
-            | Instr::JumpUnlessCmp { .. }
-            | Instr::JumpUnlessCmpImm { .. }
+            | jump_pair!(_)
+            | int_jump_k!(_)
+            | float_jump_k!(_)
             | Instr::JumpUnlessVariant { .. }
             | Instr::JumpUnlessInt { .. }
             | Instr::JumpUnlessFloat { .. }
@@ -862,8 +1080,9 @@ impl Instr {
         let (fall, jump) = match self {
             Instr::Jump { to } => (None, Some(*to)),
             Instr::JumpIfFalse { to, .. }
-            | Instr::JumpUnlessCmp { to, .. }
-            | Instr::JumpUnlessCmpImm { to, .. }
+            | jump_pair!(JumpPair { to, .. })
+            | int_jump_k!(JumpWithK { to, .. })
+            | float_jump_k!(JumpWithK { to, .. })
             | Instr::MapFind { to, .. }
             | Instr::ArraySet { miss: to, .. }
             | Instr::JumpUnlessVariant { to, .. }
@@ -886,11 +1105,12 @@ impl Instr {
             | Instr::Move { .. }
             | Instr::GetGlobal { .. }
             | Instr::SetGlobal { .. }
-            | Instr::Int { .. }
-            | Instr::IntImm { .. }
+            | pair!(_)
+            | with_int!(_)
+            | with_float!(_)
             | Instr::IntNeg { .. }
-            | Instr::Float { .. }
             | Instr::FloatNeg { .. }
+            | Instr::FloatFromInt { .. }
             | Instr::Num { .. }
             | Instr::Neg { .. }
             | Instr::Print { .. }
@@ -934,8 +1154,9 @@ impl Instr {
         match self {
             Instr::Jump { to }
             | Instr::JumpIfFalse { to, .. }
-            | Instr::JumpUnlessCmp { to, .. }
-            | Instr::JumpUnlessCmpImm { to, .. }
+            | jump_pair!(JumpPair { to, .. })
+            | int_jump_k!(JumpWithK { to, .. })
+            | float_jump_k!(JumpWithK { to, .. })
             | Instr::MapFind { to, .. }
             | Instr::ArraySet { miss: to, .. }
             | Instr::JumpUnlessVariant { to, .. }
@@ -953,13 +1174,14 @@ impl Instr {
             | Instr::Move { .. }
             | Instr::GetGlobal { .. }
             | Instr::SetGlobal { .. }
-            | Instr::Int { .. }
-            | Instr::IntImm { .. }
+            | pair!(_)
+            | with_int!(_)
+            | with_float!(_)
             | Instr::MapSetOwned { .. }
             | Instr::MapDeleteOwned { .. }
             | Instr::IntNeg { .. }
-            | Instr::Float { .. }
             | Instr::FloatNeg { .. }
+            | Instr::FloatFromInt { .. }
             | Instr::Num { .. }
             | Instr::Neg { .. }
             | Instr::Print { .. }
@@ -997,6 +1219,37 @@ impl Instr {
             | Instr::ArrayIndex { .. }
             | Instr::ArrayIndexOr { .. }
             | Instr::Bad { .. } => None,
+        }
+    }
+}
+
+/// A comparison a jump can do. It becomes an instruction only when it is told
+/// where to jump.
+enum Test {
+    Pair {
+        jump: fn(JumpPair) -> Instr,
+        a: Reg,
+        b: Reg,
+    },
+    Int {
+        jump: fn(JumpWithK<SmallInt>) -> Instr,
+        a: Reg,
+        k: SmallInt,
+    },
+    Float {
+        jump: fn(JumpWithK<Float>) -> Instr,
+        a: Reg,
+        k: Float,
+    },
+}
+
+impl Test {
+    /// The jump to `to` unless the comparison holds.
+    fn jump(self, to: u32) -> Instr {
+        match self {
+            Test::Pair { jump, a, b } => jump(JumpPair { a, b, to }),
+            Test::Int { jump, a, k } => jump(JumpWithK { a, k, to }),
+            Test::Float { jump, a, k } => jump(JumpWithK { a, k, to }),
         }
     }
 }
@@ -1067,11 +1320,47 @@ ops! {
     Move,
     GetGlobal,
     SetGlobal,
-    Int,
-    IntImm,
+    IntAdd,
+    IntSub,
+    IntMul,
+    IntDiv,
+    IntRem,
+    IntAddK,
+    IntSubK,
+    IntMulK,
+    IntDivK,
+    IntRemK,
+    IntRSubK,
+    IntEq,
+    IntNe,
+    IntLt,
+    IntLe,
+    IntEqK,
+    IntNeK,
+    IntLtK,
+    IntLeK,
+    IntGtK,
+    IntGeK,
     IntNeg,
-    Float,
+    FloatAdd,
+    FloatSub,
+    FloatMul,
+    FloatDiv,
+    FloatRem,
+    FloatAddK,
+    FloatSubK,
+    FloatMulK,
+    FloatDivK,
+    FloatRSubK,
+    FloatRDivK,
+    FloatLt,
+    FloatLe,
+    FloatLtK,
+    FloatLeK,
+    FloatGtK,
+    FloatGeK,
     FloatNeg,
+    FloatFromInt,
     Num,
     Neg,
     Print,
@@ -1092,11 +1381,25 @@ ops! {
     Ret,
     Jump,
     JumpIfFalse,
-    JumpUnlessCmp,
+    JumpUnlessIntEq,
+    JumpUnlessIntNe,
+    JumpUnlessIntLt,
+    JumpUnlessIntLe,
+    JumpUnlessIntEqK,
+    JumpUnlessIntNeK,
+    JumpUnlessIntLtK,
+    JumpUnlessIntLeK,
+    JumpUnlessIntGtK,
+    JumpUnlessIntGeK,
+    JumpUnlessFloatLt,
+    JumpUnlessFloatLe,
+    JumpUnlessFloatLtK,
+    JumpUnlessFloatLeK,
+    JumpUnlessFloatGtK,
+    JumpUnlessFloatGeK,
     MapSetOwned,
     MapFind,
     MapDeleteOwned,
-    JumpUnlessCmpImm,
     JumpUnlessVariant,
     JumpUnlessInt,
     JumpUnlessFloat,
@@ -1159,48 +1462,6 @@ pub(crate) enum BitsOp {
     ReadUtf8,
     /// `width` bits from bit `at` as an unsigned Int, for a pattern.
     ReadInt,
-}
-
-/// A two-operand Int operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum IntOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Rem,
-    Eq,
-    Ne,
-    Lt,
-    Le,
-    Gt,
-    Ge,
-}
-
-impl IntOp {
-    /// Whether the op gives a Bool.
-    fn compares(self) -> bool {
-        match self {
-            IntOp::Eq | IntOp::Ne | IntOp::Lt | IntOp::Le | IntOp::Gt | IntOp::Ge => true,
-            IntOp::Add | IntOp::Sub | IntOp::Mul | IntOp::Div | IntOp::Rem => false,
-        }
-    }
-
-    /// The op that gives the same answer with its operands swapped, or `None`
-    /// when there is none.
-    fn swapped(self) -> Option<IntOp> {
-        Some(match self {
-            IntOp::Add => IntOp::Add,
-            IntOp::Mul => IntOp::Mul,
-            IntOp::Eq => IntOp::Eq,
-            IntOp::Ne => IntOp::Ne,
-            IntOp::Lt => IntOp::Gt,
-            IntOp::Le => IntOp::Ge,
-            IntOp::Gt => IntOp::Lt,
-            IntOp::Ge => IntOp::Le,
-            IntOp::Sub | IntOp::Div | IntOp::Rem => return None,
-        })
-    }
 }
 
 /// One loaded function.
@@ -1385,6 +1646,11 @@ struct Loader<'c> {
     reused: BTreeSet<LocalId>,
     /// How many times each local is read.
     reads: HashMap<LocalId, u32>,
+    /// Each local that is a constant number.
+    numbers: HashMap<LocalId, Number>,
+    /// The locals in `numbers` that every instruction reading them holds, so
+    /// that none needs a register.
+    held: BTreeSet<LocalId>,
     /// The stdlib's own constructors, such as `Some` and `None`.
     abi: &'c Abi,
 }
@@ -1406,17 +1672,115 @@ impl<'c> Loader<'c> {
             None => 0,
             Some(h) => h.checked_add(1).ok_or(Unloadable::TooManyRegisters)?,
         };
-        Ok(Loader {
+        let mut loader = Loader {
             consts,
             abi,
             this,
             reused: reused_locals(&f.body),
             reads: reads(&f.body),
+            numbers: numbers(&f.body, consts),
+            held: BTreeSet::new(),
             instrs: Vec::new(),
             labels: Vec::new(),
             conts: HashMap::new(),
             next,
-        })
+        };
+        loader.held = loader.held_numbers(&f.body)?;
+        Ok(loader)
+    }
+
+    /// The numbers that no register is needed for. Each operator is loaded as
+    /// it will be, and an operand its instruction does not read is one it
+    /// holds. A number is held when that happens every time it is read.
+    fn held_numbers(&self, e: &CoreExpr) -> Result<BTreeSet<LocalId>, Missing> {
+        let mut left: HashMap<LocalId, u32> = self
+            .numbers
+            .keys()
+            .filter_map(|l| Some((*l, *self.reads.get(l)?)))
+            .collect();
+        for (_, atom) in atoms(e) {
+            let Atom::PrimOp { op, args } = atom else {
+                continue;
+            };
+            let [a, b] = args.as_slice() else { continue };
+            if !left.contains_key(a) && !left.contains_key(b) {
+                continue;
+            }
+            let mut read: Vec<Reg> = Vec::new();
+            self.prim(Reg(0), *op, args)?.reads(|r| read.push(r));
+            for arg in [a, b] {
+                match read.iter().position(|r| *r == Reg::of(*arg)) {
+                    Some(i) => {
+                        read.swap_remove(i);
+                    }
+                    None => {
+                        if let Some(n) = left.get_mut(arg) {
+                            *n = n.saturating_sub(1);
+                        }
+                    }
+                }
+            }
+        }
+        left.retain(|_, n| *n == 0);
+        Ok(left.into_keys().collect())
+    }
+
+    fn small(&self, l: LocalId) -> Option<SmallInt> {
+        match self.numbers.get(&l)? {
+            Number::Int(n) => Some(*n),
+            Number::Float(_) => None,
+        }
+    }
+
+    fn float(&self, l: LocalId) -> Option<Float> {
+        match self.numbers.get(&l)? {
+            Number::Float(x) => Some(*x),
+            Number::Int(_) => None,
+        }
+    }
+
+    /// `a op b` on two Ints into `dst`. The instruction holds `b` when it is
+    /// a constant, or else `a` when it is one, if there is an instruction that
+    /// holds that side.
+    fn int_arith(&self, dst: Reg, op: Arith, a: LocalId, b: LocalId) -> Instr {
+        let (known, (a, b)) = ((self.small(a), self.small(b)), (Reg::of(a), Reg::of(b)));
+        let held = match known {
+            (_, Some(k)) => Some(int_arith_k(op, WithK { dst, a, k })),
+            (Some(k), None) if op.commutes() => Some(int_arith_k(op, WithK { dst, a: b, k })),
+            (Some(k), None) => int_arith_k_first(op, WithK { dst, a: b, k }),
+            (None, None) => None,
+        };
+        held.unwrap_or_else(|| int_arith(op, Pair { dst, a, b }))
+    }
+
+    fn int_compare(&self, dst: Reg, op: Compare, a: LocalId, b: LocalId) -> Instr {
+        let (known, (a, b)) = ((self.small(a), self.small(b)), (Reg::of(a), Reg::of(b)));
+        match known {
+            (_, Some(k)) => int_compare_k(op, WithK { dst, a, k }),
+            (Some(k), None) => int_compare_k(op.swapped(), WithK { dst, a: b, k }),
+            (None, None) => int_compare(op, Pair { dst, a, b }),
+        }
+    }
+
+    /// [`Self::int_arith`], on two Floats.
+    fn float_arith(&self, dst: Reg, op: Arith, a: LocalId, b: LocalId) -> Instr {
+        let (known, (a, b)) = ((self.float(a), self.float(b)), (Reg::of(a), Reg::of(b)));
+        let held = match known {
+            (_, Some(k)) => float_arith_k(op, WithK { dst, a, k }),
+            (Some(k), None) if op.commutes() => float_arith_k(op, WithK { dst, a: b, k }),
+            (Some(k), None) => float_arith_k_first(op, WithK { dst, a: b, k }),
+            (None, None) => None,
+        };
+        held.unwrap_or_else(|| float_arith(op, Pair { dst, a, b }))
+    }
+
+    fn float_order(&self, dst: Reg, op: Order, a: LocalId, b: LocalId) -> Instr {
+        let (known, (a, b)) = ((self.float(a), self.float(b)), (Reg::of(a), Reg::of(b)));
+        match known {
+            (_, Some(k)) => float_order_k(op, WithK { dst, a, k }),
+            (Some(k), None) => float_order_k(op.swapped(), WithK { dst, a: b, k }),
+            (None, None) => float_order(op, Pair { dst, a, b }),
+        }
     }
 
     fn body(mut self, f: &CoreFn) -> Result<(u32, Vec<Instr>), Unloadable> {
@@ -1492,71 +1856,17 @@ impl<'c> Loader<'c> {
         }
     }
 
-    /// `let k = <small Int>` read only by the `let` right after it, which does
-    /// Int arithmetic or a comparison on it. The two load as one
-    /// [`Instr::IntImm`], and what comes after them is returned too.
-    fn immediate<'e>(
-        &self,
-        bind: &CoreBind,
-        rhs: &Atom,
-        body: &'e CoreExpr,
-    ) -> Option<(Imm, &'e CoreExpr)> {
-        let Atom::Const(c) = rhs else { return None };
-        let Some(&Const::Int(n)) = self.consts.get(c.index()) else {
-            return None;
-        };
-        let CoreExpr::Let {
-            bind: next,
-            rhs: Atom::PrimOp { op, args },
-            body: rest,
-        } = body
-        else {
-            return None;
-        };
-        if bind.global.is_some() || Value::int(n).is_none() || self.reads.get(&bind.id) != Some(&1)
-        {
-            return None;
-        }
-        let op = int_op(*op)?;
-        let (a, op) = match args.as_slice() {
-            [a, k] if *k == bind.id && *a != bind.id => (*a, op),
-            [k, a] if *k == bind.id && *a != bind.id => (*a, op.swapped()?),
-            _ => return None,
-        };
-        let instr = Instr::IntImm {
-            dst: Reg::of(next.id),
-            op,
-            a: Reg::of(a),
-            b: n,
-        };
-        Some((
-            Imm {
-                instr,
-                global: next.global,
-            },
-            rest,
-        ))
-    }
-
-    /// When the last instruction compares two Ints into `cond`, and the `if`
-    /// on `cond` is all that reads it, take that instruction back, so the
-    /// `if` can compare and jump in one. Nothing may jump to the `if` itself,
-    /// or that jump would skip the comparison.
+    /// When the last instruction compares two numbers into `cond`, and the
+    /// `if` on `cond` is all that reads it, take that instruction back and
+    /// give the jump's test. Nothing may jump to the `if` itself, or
+    /// that jump would skip the comparison.
     fn take_comparison(&mut self, cond: LocalId) -> Option<Test> {
         let here = u32::try_from(self.instrs.len()).ok()?;
         if self.reads.get(&cond) != Some(&1) || self.labels.iter().any(|(at, _)| *at == Some(here))
         {
             return None;
         }
-        let test = match self.instrs.last()? {
-            Instr::Int { dst, op, a, b } if *dst == Reg::of(cond) && op.compares() => {
-                Test::Regs(*op, *a, *b)
-            }
-            Instr::IntImm { dst, op, a, b } if *dst == Reg::of(cond) && op.compares() => {
-                Test::Imm(*op, *a, *b)
-            }
-            _ => return None,
-        };
+        let test = self.instrs.last()?.as_test(Reg::of(cond))?;
         self.instrs.pop();
         Some(test)
     }
@@ -1574,16 +1884,8 @@ impl<'c> Loader<'c> {
         let mut e = e;
         loop {
             match e {
-                CoreExpr::Let { bind, rhs, body }
-                    if let Some((imm, rest)) = self.immediate(bind, rhs, body) =>
-                {
-                    let dst = imm.dst();
-                    self.instrs.push(imm.instr);
-                    if let Some(slot) = imm.global {
-                        self.instrs.push(Instr::SetGlobal { slot, src: dst });
-                    }
-                    e = rest;
-                }
+                // Every instruction that reads it holds it.
+                CoreExpr::Let { bind, body, .. } if self.held.contains(&bind.id) => e = body,
                 // A map dropped right after it is set gives its reference to
                 // the set.
                 CoreExpr::Let {
@@ -1726,12 +2028,7 @@ impl<'c> Loader<'c> {
                 } => {
                     let otherwise = self.label();
                     match self.take_comparison(*cond) {
-                        Some(Test::Regs(op, a, b)) => {
-                            self.jump(otherwise, |to| Instr::JumpUnlessCmp { op, a, b, to });
-                        }
-                        Some(Test::Imm(op, a, b)) => {
-                            self.jump(otherwise, |to| Instr::JumpUnlessCmpImm { op, a, b, to });
-                        }
+                        Some(test) => self.jump(otherwise, |to| test.jump(to)),
                         None => {
                             let cond = Reg::of(*cond);
                             self.jump(otherwise, |to| Instr::JumpIfFalse { cond, to });
@@ -1940,6 +2237,13 @@ impl<'c> Loader<'c> {
                 });
                 return self.place(after);
             }
+            Atom::Intrinsic {
+                intrinsic: Intrinsic::FloatFromInt,
+                args,
+            } if let [a] = args.as_slice() => Instr::FloatFromInt {
+                dst,
+                a: Reg::of(*a),
+            },
             Atom::Intrinsic { intrinsic, args } if built(*intrinsic, args.len()) => {
                 Instr::Builtin {
                     dst,
@@ -1990,19 +2294,22 @@ impl<'c> Loader<'c> {
         });
     }
 
-    fn prim(&mut self, dst: Reg, op: PrimOp, args: &[LocalId]) -> Result<Instr, Missing> {
+    fn prim(&self, dst: Reg, op: PrimOp, args: &[LocalId]) -> Result<Instr, Missing> {
         let prim = op;
         let arity = |want| Missing::Arity { op: prim, want };
-        let int = |op| -> Result<Instr, Missing> {
-            match args {
-                [a, b] => Ok(Instr::Int {
-                    dst,
-                    op,
-                    a: Reg::of(*a),
-                    b: Reg::of(*b),
-                }),
-                _ => Err(arity(Arity::Two)),
-            }
+        let two = || match args {
+            [a, b] => Ok((*a, *b)),
+            _ => Err(arity(Arity::Two)),
+        };
+        let int = |op| two().map(|(a, b)| self.int_arith(dst, op, a, b));
+        let int_compare = |op| two().map(|(a, b)| self.int_compare(dst, op, a, b));
+        let float = |op| two().map(|(a, b)| self.float_arith(dst, op, a, b));
+        let float_order = |op| two().map(|(a, b)| self.float_order(dst, op, a, b));
+        let num = |op| {
+            two().map(|(a, b)| {
+                let (a, b) = (Reg::of(a), Reg::of(b));
+                Instr::Num { dst, op, a, b }
+            })
         };
         let bits = |op, want: Arity| -> Result<Instr, Missing> {
             if !want.fits(args.len()) {
@@ -2014,49 +2321,36 @@ impl<'c> Loader<'c> {
                 args: args.iter().copied().map(Reg::of).collect(),
             })
         };
-        // A Float operation (`float`), or one on either kind of number.
-        let two = |op, float| -> Result<Instr, Missing> {
-            match args {
-                [a, b] => {
-                    let (a, b) = (Reg::of(*a), Reg::of(*b));
-                    Ok(if float {
-                        Instr::Float { dst, op, a, b }
-                    } else {
-                        Instr::Num { dst, op, a, b }
-                    })
-                }
-                _ => Err(arity(Arity::Two)),
-            }
-        };
         match op {
-            PrimOp::IntAdd => int(IntOp::Add),
-            PrimOp::IntSub => int(IntOp::Sub),
-            PrimOp::IntMul => int(IntOp::Mul),
-            PrimOp::IntDiv => int(IntOp::Div),
-            PrimOp::IntRem => int(IntOp::Rem),
-            PrimOp::IntEq => int(IntOp::Eq),
-            PrimOp::IntNe => int(IntOp::Ne),
-            PrimOp::IntLt => int(IntOp::Lt),
-            PrimOp::IntLe => int(IntOp::Le),
-            PrimOp::IntGt => int(IntOp::Gt),
-            PrimOp::IntGe => int(IntOp::Ge),
-            PrimOp::FloatAdd => two(NumOp::Add, true),
-            PrimOp::FloatSub => two(NumOp::Sub, true),
-            PrimOp::FloatMul => two(NumOp::Mul, true),
-            PrimOp::FloatDiv => two(NumOp::Div, true),
-            PrimOp::FloatLt => two(NumOp::Lt, true),
-            PrimOp::FloatLe => two(NumOp::Le, true),
-            PrimOp::FloatGt => two(NumOp::Gt, true),
-            PrimOp::FloatGe => two(NumOp::Ge, true),
-            PrimOp::Add => two(NumOp::Add, false),
-            PrimOp::Sub => two(NumOp::Sub, false),
-            PrimOp::Mul => two(NumOp::Mul, false),
-            PrimOp::Div => two(NumOp::Div, false),
-            PrimOp::Rem => two(NumOp::Rem, false),
-            PrimOp::Lt => two(NumOp::Lt, false),
-            PrimOp::Le => two(NumOp::Le, false),
-            PrimOp::Gt => two(NumOp::Gt, false),
-            PrimOp::Ge => two(NumOp::Ge, false),
+            PrimOp::IntAdd => int(Arith::Add),
+            PrimOp::IntSub => int(Arith::Sub),
+            PrimOp::IntMul => int(Arith::Mul),
+            PrimOp::IntDiv => int(Arith::Div),
+            PrimOp::IntRem => int(Arith::Rem),
+            PrimOp::IntEq => int_compare(Compare::Eq),
+            PrimOp::IntNe => int_compare(Compare::Ne),
+            PrimOp::IntLt => int_compare(Compare::LT),
+            PrimOp::IntLe => int_compare(Compare::LE),
+            PrimOp::IntGt => int_compare(Compare::GT),
+            PrimOp::IntGe => int_compare(Compare::GE),
+            PrimOp::FloatAdd => float(Arith::Add),
+            PrimOp::FloatSub => float(Arith::Sub),
+            PrimOp::FloatMul => float(Arith::Mul),
+            PrimOp::FloatDiv => float(Arith::Div),
+            PrimOp::FloatRem => float(Arith::Rem),
+            PrimOp::FloatLt => float_order(Order::Lt),
+            PrimOp::FloatLe => float_order(Order::Le),
+            PrimOp::FloatGt => float_order(Order::Gt),
+            PrimOp::FloatGe => float_order(Order::Ge),
+            PrimOp::Add => num(NumOp::Arith(Arith::Add)),
+            PrimOp::Sub => num(NumOp::Arith(Arith::Sub)),
+            PrimOp::Mul => num(NumOp::Arith(Arith::Mul)),
+            PrimOp::Div => num(NumOp::Arith(Arith::Div)),
+            PrimOp::Rem => num(NumOp::Arith(Arith::Rem)),
+            PrimOp::Lt => num(NumOp::Order(Order::Lt)),
+            PrimOp::Le => num(NumOp::Order(Order::Le)),
+            PrimOp::Gt => num(NumOp::Order(Order::Gt)),
+            PrimOp::Ge => num(NumOp::Order(Order::Ge)),
             PrimOp::FloatNeg | PrimOp::Neg => match args {
                 [a] => {
                     let a = Reg::of(*a);
@@ -2289,7 +2583,6 @@ fn built(i: Intrinsic, argc: usize) -> bool {
         | Intrinsic::FloatCeil
         | Intrinsic::FloatRound
         | Intrinsic::FloatTruncate
-        | Intrinsic::FloatFromInt
         | Intrinsic::FloatToString
         | Intrinsic::BinaryFromString
         | Intrinsic::BinaryToString
@@ -2698,37 +2991,12 @@ fn liveness(instrs: &[Instr], regs: u32, drops_read: bool) -> (Vec<Regs>, Vec<Re
 /// a value read. So this reads the atoms itself.
 fn reused_locals(e: &CoreExpr) -> BTreeSet<LocalId> {
     let mut out = BTreeSet::new();
-    let mut note = |a: &Atom| {
+    for (_, atom) in atoms(e) {
         if let Atom::Ctor {
             reuse: Some(local), ..
-        } = a
+        } = atom
         {
             out.insert(*local);
-        }
-    };
-    let mut stack = vec![e];
-    while let Some(e) = stack.pop() {
-        match e {
-            CoreExpr::Let { rhs, body, .. } => {
-                note(rhs);
-                stack.push(body);
-            }
-            CoreExpr::LetJoin { join, body, .. } => {
-                stack.push(join);
-                stack.push(body);
-            }
-            CoreExpr::LetCont { cont, body, .. } => {
-                stack.push(cont);
-                stack.push(body);
-            }
-            CoreExpr::Drop { body, .. } => stack.push(body),
-            CoreExpr::Match { arms, .. } => stack.extend(arms.iter().map(|(_, arm)| arm)),
-            CoreExpr::If { then, els, .. } => {
-                stack.push(then);
-                stack.push(els);
-            }
-            CoreExpr::Tail(atom) => note(atom),
-            CoreExpr::Goto(_) => {}
         }
     }
     out
@@ -2759,43 +3027,108 @@ fn option_arms<'e>(
     }
 }
 
-/// A comparison an `if` jumps on: two registers, or one and a constant.
-enum Test {
-    Regs(IntOp, Reg, Reg),
-    Imm(IntOp, Reg, i64),
+// The instruction that does `op`, or `None` when there is none that holds the
+// constant on that side.
+
+fn int_arith(op: Arith, i: Pair) -> Instr {
+    int_arith!(rows instr_for op i)
 }
 
-/// An [`Instr::IntImm`], and the global its result is stored in, if any.
-struct Imm {
-    instr: Instr,
-    global: Option<GlobalSlot>,
+fn int_arith_k(op: Arith, i: WithK<SmallInt>) -> Instr {
+    int_arith_k!(rows instr_for op i)
 }
 
-impl Imm {
-    fn dst(&self) -> Reg {
-        match self.instr {
-            Instr::IntImm { dst, .. } => dst,
-            _ => Reg(0),
+fn int_arith_k_first(op: Arith, i: WithK<SmallInt>) -> Option<Instr> {
+    Some(int_arith_k_first!(rows instr_for op i
+        Arith::Add | Arith::Mul | Arith::Div | Arith::Rem => return None))
+}
+
+fn int_compare(op: Compare, i: Pair) -> Instr {
+    int_compare!(rows instr_for op i
+        Compare::GT | Compare::GE => int_compare(op.swapped(), i.swapped()))
+}
+
+fn int_compare_k(op: Compare, i: WithK<SmallInt>) -> Instr {
+    int_compare_k!(rows instr_for op i)
+}
+
+fn float_arith(op: Arith, i: Pair) -> Instr {
+    float_arith!(rows instr_for op i)
+}
+
+fn float_arith_k(op: Arith, i: WithK<Float>) -> Option<Instr> {
+    Some(float_arith_k!(rows instr_for op i Arith::Rem => return None))
+}
+
+fn float_arith_k_first(op: Arith, i: WithK<Float>) -> Option<Instr> {
+    Some(float_arith_k_first!(rows instr_for op i
+        Arith::Add | Arith::Mul | Arith::Rem => return None))
+}
+
+fn float_order(op: Order, i: Pair) -> Instr {
+    float_compare!(rows instr_for op i
+        Order::Gt | Order::Ge => float_order(op.swapped(), i.swapped()))
+}
+
+fn float_order_k(op: Order, i: WithK<Float>) -> Instr {
+    float_compare_k!(rows instr_for op i)
+}
+
+/// A number the program spells, which an operator's instruction can hold.
+#[derive(Clone, Copy)]
+enum Number {
+    Int(SmallInt),
+    Float(Float),
+}
+
+/// Each local of `e` that is a constant number an instruction can hold. One
+/// that is stored in a global is left out, because the store reads it.
+fn numbers(e: &CoreExpr, consts: &[Const]) -> HashMap<LocalId, Number> {
+    let mut out = HashMap::new();
+    for (bind, atom) in atoms(e) {
+        let Some(bind) = bind.filter(|b| b.global.is_none()) else {
+            continue;
+        };
+        let Atom::Const(c) = atom else { continue };
+        let number = match consts.get(c.index()) {
+            Some(Const::Int(n)) => SmallInt::new(*n).map(Number::Int),
+            Some(Const::Float(x)) => Some(Number::Float(Float::new(*x))),
+            Some(Const::String(_) | Const::Binary { .. }) | None => None,
+        };
+        out.extend(number.map(|n| (bind.id, n)));
+    }
+    out
+}
+
+/// Every atom in `e`, with the local it is bound to when it is a `let`'s.
+fn atoms(e: &CoreExpr) -> Vec<(Option<&CoreBind>, &Atom)> {
+    let mut out = Vec::new();
+    let mut stack = vec![e];
+    while let Some(e) = stack.pop() {
+        match e {
+            CoreExpr::Let { bind, rhs, body } => {
+                out.push((Some(bind), rhs));
+                stack.push(body);
+            }
+            CoreExpr::LetJoin { join, body, .. } => {
+                stack.push(join);
+                stack.push(body);
+            }
+            CoreExpr::LetCont { cont, body, .. } => {
+                stack.push(cont);
+                stack.push(body);
+            }
+            CoreExpr::Drop { body, .. } => stack.push(body),
+            CoreExpr::Match { arms, .. } => stack.extend(arms.iter().map(|(_, arm)| arm)),
+            CoreExpr::If { then, els, .. } => {
+                stack.push(then);
+                stack.push(els);
+            }
+            CoreExpr::Tail(atom) => out.push((None, atom)),
+            CoreExpr::Goto(_) => {}
         }
     }
-}
-
-/// The [`IntOp`] an Int primitive is, or `None` for any other primitive.
-fn int_op(op: PrimOp) -> Option<IntOp> {
-    Some(match op {
-        PrimOp::IntAdd => IntOp::Add,
-        PrimOp::IntSub => IntOp::Sub,
-        PrimOp::IntMul => IntOp::Mul,
-        PrimOp::IntDiv => IntOp::Div,
-        PrimOp::IntRem => IntOp::Rem,
-        PrimOp::IntEq => IntOp::Eq,
-        PrimOp::IntNe => IntOp::Ne,
-        PrimOp::IntLt => IntOp::Lt,
-        PrimOp::IntLe => IntOp::Le,
-        PrimOp::IntGt => IntOp::Gt,
-        PrimOp::IntGe => IntOp::Ge,
-        _ => return None,
-    })
+    out
 }
 
 /// How many times `e` reads each local.

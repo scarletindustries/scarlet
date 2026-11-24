@@ -287,16 +287,36 @@ fn a_stray_nan_would_be_nil_or_zero() {
 /// is the test an Int instruction makes on its two operands at once.
 #[test]
 fn two_small_ints_are_told_by_one_and() {
-    let ints = [0, 1, -1, SMALL_INT_MIN, SMALL_INT_MAX];
     let mut words: Vec<Value> = tagged();
     words.extend([0.0, -0.0, 1.5, -1.5, f64::MAX, f64::MIN].map(Value::float));
     for a in &words {
+        let alone = a.as_small().map(SmallInt::get);
+        assert_eq!(alone, a.small_int(), "{a:?}");
         for b in &words {
-            let both = a.small_int().is_some() && b.small_int().is_some();
-            assert_eq!(a.bits() & b.bits() >= TAG_INT, both, "{a:?} {b:?}");
+            let both = a.small_int().zip(b.small_int());
+            let got = a.both_small(*b).map(|(x, y)| (x.get(), y.get()));
+            assert_eq!(got, both, "{a:?} {b:?}");
         }
     }
+}
+
+/// A small Int held at the top of a word is the same number, in the same
+/// order, and goes back to the same value.
+#[test]
+fn a_raised_small_int_is_the_same_number() {
+    let ints = [SMALL_INT_MIN, -42, -1, 0, 1, 42, SMALL_INT_MAX];
     for n in ints {
-        assert!(Value::int(n).is_some_and(|v| v.bits() >= TAG_INT));
+        let held = SmallInt::new(n).expect("in range");
+        assert_eq!(held.get(), n);
+        assert_eq!(held.raised(), n << 13);
+        assert_eq!(Some(held.value().bits()), Value::int(n).map(Value::bits));
+        // The bits below the 51 are not part of the number.
+        let lowered = SmallInt::lower(held.raised() | 0x1FFF);
+        assert_eq!(lowered.bits(), held.value().bits());
+        for m in ints {
+            assert_eq!(SmallInt::new(m).expect("in range").cmp(&held), m.cmp(&n));
+        }
     }
+    assert!(SmallInt::new(SMALL_INT_MAX + 1).is_none());
+    assert!(SmallInt::new(SMALL_INT_MIN - 1).is_none());
 }

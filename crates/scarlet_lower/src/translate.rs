@@ -1208,6 +1208,7 @@ fn specialize(op: BinOp, prim: Option<Prim>) -> PrimOp {
         (B::Div, Some(Prim::Float)) => PrimOp::FloatDiv,
         (B::Div, _) => PrimOp::Div,
         (B::Mod, Some(Prim::Int)) => PrimOp::IntRem,
+        (B::Mod, Some(Prim::Float)) => PrimOp::FloatRem,
         (B::Mod, _) => PrimOp::Rem,
         (B::Eq, Some(Prim::Int)) => PrimOp::IntEq,
         (B::Eq, _) => PrimOp::Eq,
