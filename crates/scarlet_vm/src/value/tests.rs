@@ -12,7 +12,8 @@ fn nullary(t: i32, v: u16) -> VariantRef {
 fn tagged() -> Vec<Value> {
     let ints = [0, 1, -1, 42, -42, SMALL_INT_MIN, SMALL_INT_MAX];
     let funcs = [0, 7, u32::MAX];
-    let cells = [0, 1, 1 << 30, u64::from(u32::MAX)];
+    // An index, with a variant above it.
+    let cells = [0, 1, 1 << 30, u64::from(u32::MAX), 7 << 32 | 9, PAYLOAD];
     let nullaries = [
         (0, 0),
         (263, 1),
@@ -29,7 +30,7 @@ fn tagged() -> Vec<Value> {
             .iter()
             .map(|&(t, v)| Value::nullary(nullary(t, v))),
     );
-    assert_eq!(all.len(), 22);
+    assert_eq!(all.len(), 24);
     all
 }
 
@@ -134,6 +135,56 @@ fn finite_lets_in_every_float_and_nothing_else() {
     assert!(Value::finite(zero / zero).is_none());
     assert!(Value::finite(1.0 / zero).is_none());
     assert!(Value::finite(f64::MAX * std::hint::black_box(2.0)).is_none());
+}
+
+/// The top half of a word tells the variants of one type apart, with fields
+/// or without, and nothing in the bottom half has a part in it.
+#[test]
+fn a_tag_is_a_variant_with_fields_or_without() {
+    let mut seen = std::collections::BTreeSet::new();
+    for variant in 0..=u16::MAX {
+        let with = Tag::of_cell(variant);
+        assert_eq!(with.parts(), (variant, true));
+        for index in [0, 1, 1 << 30, u64::from(u32::MAX)] {
+            let cell = Cell::from_bits(u64::from(variant) << 32 | index);
+            assert_eq!(Value::cell(cell).tag(), with);
+        }
+        let without = Value::nullary(nullary(0, variant)).tag();
+        assert_eq!(without.parts(), (variant, false));
+        for t in [1, 263, -1, i32::MIN, i32::MAX] {
+            assert_eq!(Value::nullary(nullary(t, variant)).tag(), without);
+        }
+        assert!(seen.insert(with.0) && seen.insert(without.0));
+    }
+    // No other kind of value has the tag of a constructor of any variant.
+    let others = [
+        Value::NIL,
+        Value::bool(true),
+        Value::func(FuncIdx(7)),
+        Value::int(-1).expect("small"),
+        Value::int(0).expect("small"),
+        Value::float(1.5),
+        Value::float(-f64::MAX),
+    ];
+    for v in others {
+        assert!(!seen.contains(&v.tag().0), "{v:?}");
+    }
+}
+
+#[test]
+fn only_a_function_with_no_captures_is_one() {
+    for v in tagged() {
+        let want = match v.view() {
+            View::Func(f) => Some(f),
+            View::Float(_)
+            | View::Int(_)
+            | View::Nil
+            | View::Bool(_)
+            | View::Cell(_)
+            | View::Nullary(_) => None,
+        };
+        assert_eq!(v.as_func(), want, "{v:?}");
+    }
 }
 
 #[test]

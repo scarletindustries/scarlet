@@ -23,17 +23,18 @@ use std::collections::{BTreeSet, HashMap};
 
 use scarlet_ir::core_ir::{
     Atom, Callee, Const, CoreExpr, CoreFn, CorePat, FuncIdx, GlobalSlot, JoinId, Load, LocalId,
-    MAX_PARAMS, PrimOp, Program,
+    MAX_PARAMS, PrimOp,
 };
 use scarlet_ir::intrinsic::Intrinsic;
 use scarlet_ir::tivec::Idx;
 
+use super::forms::{CtorOf, Form};
 use super::ins::{
     Arg, ArgList, Args, BitsOp, Dead, Dst, Hit, Ins, KeepList, Kept, Label, LastReg, Lists,
     LookList, Looks, Newline, Over, OwnEntry, OwnRoom, ShareList, Shared, Shares, Src, Taken, VReg,
-    Variant,
 };
-use super::{ReadsClosure, Tables, Unfit, Why, add, built};
+use super::{ReadsClosure, Source, Tables, Unfit, Why, add, built};
+use crate::heap::Ctor;
 use crate::ops::{Arith, Compare, NumOp, Order};
 use crate::stop::{Arity, Broken, Limit, Missing};
 use crate::value::{Float, SmallInt, Value};
@@ -57,7 +58,7 @@ pub(super) struct Draft {
 /// The instructions for `core`. `this` is the function's own index, when it
 /// has one.
 pub(super) fn translate(
-    program: &Program,
+    source: &Source<'_>,
     core: &CoreFn,
     this: Option<FuncIdx>,
     tables: &mut Tables,
@@ -68,7 +69,7 @@ pub(super) fn translate(
         Some(h) => h.checked_add(1).ok_or(Unfit::TooMany(Limit::Values))?,
     };
     let mut t = Translator {
-        program,
+        source,
         this,
         tables,
         ins: Vec::new(),
@@ -122,7 +123,7 @@ enum Number {
 }
 
 struct Translator<'c> {
-    program: &'c Program,
+    source: &'c Source<'c>,
     this: Option<FuncIdx>,
     tables: &'c mut Tables,
     ins: Vec<Ins<VReg>>,
@@ -259,7 +260,7 @@ impl Translator<'_> {
     /// What a call of `func` with `got` arguments is instead, when the program
     /// has no such function or it takes another number of them.
     fn bad_call(&mut self, func: FuncIdx, got: usize) -> Result<Option<Ins<VReg>>, Unfit> {
-        let why = match self.program.fns.get(func) {
+        let why = match self.source.program.fns.get(func) {
             None => Why::Missing(Missing::NoFunc(func)),
             Some(f) if f.core.params.len() != got => Why::Broken(Broken::CallArity {
                 func: format!("{}.{}", f.module, f.name),
@@ -495,7 +496,7 @@ impl Translator<'_> {
                     // store reads it.
                     if let Atom::Const(c) = rhs
                         && bind.global.is_none()
-                        && let Some(n) = number(self.program.consts.get(c.index()))
+                        && let Some(n) = number(self.source.program.consts.get(c.index()))
                     {
                         self.numbers.insert(bind.id, n);
                     }
@@ -620,9 +621,10 @@ impl Translator<'_> {
                 src: Arg::shared(of(scrut)),
             }),
             CorePat::Ctor { variant, fields } => {
-                self.push(Ins::JumpUnlessVariant {
+                let form = self.source.forms.of(*variant, fields.len());
+                self.push(Ins::JumpUnlessTag {
                     src: src(scrut),
-                    variant: Variant::new(*variant),
+                    tag: form?.tag(),
                     to,
                 });
                 for (i, f) in fields.iter().enumerate() {
@@ -636,7 +638,7 @@ impl Translator<'_> {
             }
             CorePat::Lit(c) => {
                 let src = src(scrut);
-                let test = match self.program.consts.get(c.index()) {
+                let test = match self.source.program.consts.get(c.index()) {
                     Some(Const::Int(n)) => Ins::JumpUnlessInt { src, n: *n, to },
                     Some(Const::String(text)) => {
                         let text = self.tables.text(text.as_bytes())?;
@@ -663,7 +665,7 @@ impl Translator<'_> {
                 dst,
                 src: Arg::shared(of(*local)),
             },
-            Atom::Const(c) => match self.program.consts.get(c.index()) {
+            Atom::Const(c) => match self.source.program.consts.get(c.index()) {
                 Some(Const::Int(n)) => match Value::int(*n) {
                     Some(value) => constant(value),
                     None => Ins::BigInt { dst, n: *n, id: *c },
@@ -748,8 +750,8 @@ impl Translator<'_> {
                 let (miss, after) = (self.label()?, self.label()?);
                 let (made, nil) = (self.value()?, self.value()?);
                 self.array_set(made, [*xs, *i, *x], miss);
-                let abi = self.program.abi;
-                let ok = self.ctor(dst, Variant::new(abi.ok), &[made], None)?;
+                let abi = self.source.abi;
+                let ok = self.build(dst, abi.ok, [made])?;
                 self.push(ok);
                 self.push(Ins::Jump { to: after });
                 self.place(miss);
@@ -757,7 +759,7 @@ impl Translator<'_> {
                     dst: Dst(nil),
                     value: Value::NIL,
                 });
-                let err = self.ctor(dst, Variant::new(abi.err), &[nil], None)?;
+                let err = self.build(dst, abi.err, [nil])?;
                 self.push(err);
                 self.place(after);
                 return Ok(());
@@ -781,28 +783,38 @@ impl Translator<'_> {
                     _ => return Err(Missing::Intrinsic(*intrinsic).into()),
                 }
             }
-            // A constructor with no fields is a value word, so there is no
-            // allocation for Perceus to reuse.
-            Atom::Ctor {
-                variant, fields, ..
-            } if fields.is_empty() => constant(Value::nullary(*variant)),
             Atom::Ctor {
                 variant,
                 fields,
                 reuse,
-            } => {
-                let fields: Vec<VReg> = fields.iter().copied().map(of).collect();
-                self.ctor(dst, Variant::new(*variant), &fields, reuse.map(of))?
-            }
+            } => match self.source.forms.of(*variant, fields.len())? {
+                // It is a value word, so there is no allocation for Perceus
+                // to reuse.
+                Form::Plain(variant) => constant(Value::nullary(variant)),
+                Form::Fields { ctor, .. } => {
+                    let fields: Vec<VReg> = fields.iter().copied().map(of).collect();
+                    self.ctor(dst, ctor, &fields, reuse.map(of))?
+                }
+            },
         };
         self.push(ins);
         Ok(())
     }
 
+    /// A new cell for a constructor the VM builds on its own.
+    fn build<const N: usize>(
+        &mut self,
+        dst: Dst<VReg>,
+        ctor: CtorOf<N>,
+        fields: [VReg; N],
+    ) -> Result<Ins<VReg>, Unfit> {
+        self.ctor(dst, ctor.ctor(), &fields, None)
+    }
+
     fn ctor(
         &mut self,
         dst: Dst<VReg>,
-        variant: Variant,
+        ctor: Ctor,
         fields: &[VReg],
         reuse: Option<VReg>,
     ) -> Result<Ins<VReg>, Unfit> {
@@ -810,27 +822,23 @@ impl Translator<'_> {
             return Ok(match Args::new(fields) {
                 Some(fields) => Ins::CtorOver {
                     dst,
-                    variant,
+                    ctor,
                     fields,
                     reuse,
                 },
                 None => Ins::CtorOverWide {
                     dst,
-                    variant,
+                    ctor,
                     fields: self.arg_list(fields)?,
                     reuse,
                 },
             });
         }
         Ok(match Args::new(fields) {
-            Some(fields) => Ins::Ctor {
-                dst,
-                variant,
-                fields,
-            },
+            Some(fields) => Ins::Ctor { dst, ctor, fields },
             None => Ins::CtorWide {
                 dst,
-                variant,
+                ctor,
                 fields: self.arg_list(fields)?,
             },
         })
@@ -1003,8 +1011,9 @@ impl Translator<'_> {
                 Fit::Inline(elements) => Ins::Tuple { dst, elements },
                 Fit::Listed(elements) => Ins::TupleWide { dst, elements },
             }),
-            PrimOp::TupleField(index) => one().map(|src| Ins::Element { dst, src, index }),
-            PrimOp::Field(index) => one().map(|src| Ins::Field { dst, src, index }),
+            PrimOp::TupleField(index) | PrimOp::Field(index) => {
+                one().map(|src| Ins::Field { dst, src, index })
+            }
         }
     }
 
@@ -1015,7 +1024,7 @@ impl Translator<'_> {
         &self,
         arms: &'e [(CorePat, CoreExpr)],
     ) -> Option<(LocalId, &'e CoreExpr, &'e CoreExpr)> {
-        let abi = &self.program.abi;
+        let abi = &self.source.program.abi;
         let [(a, x), (b, y)] = arms else {
             return None;
         };

@@ -3488,14 +3488,13 @@ fn without_through(src: &str) -> String {
     kept.map(|l| format!("{l}\n")).collect()
 }
 
-/// A record of 253 fields is longer than a cell the heap's arena holds, so
-/// its fields live in a box of their own. It is read, updated, compared,
-/// hashed and freed like any other record. Each update in the loop makes one
-/// cell and frees the one before, and the audit finds none left at the end.
-/// An update holds every field at once, and beside them the record and the
-/// number, which is every register there is.
+/// A record of 253 fields is the longest cell the heap's arena holds. It is
+/// read, updated, compared, hashed and freed like any other record. Each update
+/// in the loop makes one cell and frees the one before, and the audit finds
+/// none left at the end. An update holds every field at once, and beside them
+/// the record and the number, which is every register there is.
 #[test]
-fn a_record_too_wide_for_the_arena_is_a_record() {
+fn the_widest_record_in_the_arena_is_a_record() {
     let fields: String = (0..253).map(|i| format!("\tf{i} Int\n")).collect();
     let args: Vec<String> = (0..253).map(|i| i.to_string()).collect();
     let src = format!(
@@ -3528,47 +3527,236 @@ fn a_record_too_wide_for_the_arena_is_a_record() {
     prints(&src, want);
 }
 
-/// A constructor of 253 fields that is matched and built again is written
-/// over where it is, in its box, as a narrow one is. A thousand turns make
-/// no cell and reuse one a thousand times. While something else still holds
-/// it, the same turn makes a new cell and leaves the old one as it was.
+/// A record wider than the widest cell in the arena has its fields in a box of
+/// their own, and is a record like any other, as one at the line is: read at
+/// both ends, shared, compared, hashed, shown, matched and freed. An update
+/// would hold more values at once than a function can, so each is built whole.
+#[test]
+fn a_record_too_wide_for_the_arena_is_a_record() {
+    for n in [252, 253, 254, 255, 300, 1000] {
+        let last = n - 1;
+        let fields: String = (0..n).map(|i| format!("\tf{i} Int\n")).collect();
+        let args = format!("a, {}b", "m, ".repeat(n - 2));
+        let shown: String = (1..last).map(|i| format!("f{i}: 0, ")).collect();
+        let src = format!(
+            "import scarlet/internal\n\
+             import scarlet/map\n\
+             type Wide {{\n{fields}}}\n\
+             type Any {{\n\tPlain\n\tW(w Wide)\n}}\n\
+             fn wide(a Int, m Int, b Int) Wide {{ Wide({args}) }}\n\
+             fn ends(w Wide) Int {{ w.f0 * 1000 + w.f1 * 100 + w.f{last} }}\n\
+             fn both(v Wide, w Wide) Int {{ ends(v) - ends(w) }}\n\
+             fn first(x Any) Int {{\n\
+             \tmatch x {{\n\
+             \t\tPlain -> 0\n\
+             \t\tW(Wide(a, ..)) -> a\n\
+             \t}}\n\
+             }}\n\
+             fn spin(w Wide, n Int) Wide {{\n\
+             \tif n == 0 {{ w }} else {{ spin(wide(w.f{last}, w.f1, w.f0), n - 1) }}\n\
+             }}\n\
+             pub fn main() {{\n\
+             \tw = wide(1, 0, 2)\n\
+             \tprintln(ends(w))\n\
+             \tprintln(both(w, w))\n\
+             \tprintln(w == wide(1, 0, 2))\n\
+             \tprintln(w == wide(1, 0, 3))\n\
+             \tprintln(w == wide(1, 1, 2))\n\
+             \tmade = internal::cells_made()\n\
+             \tv = spin(w, 101)\n\
+             \tprintln(internal::cells_made() - made)\n\
+             \tprintln(ends(v))\n\
+             \tm = map::set(map::set(map::new(), w, 'w'), v, 'v')\n\
+             \tprintln(map::get(m, wide(2, 0, 1)))\n\
+             \tprintln(map::get(m, wide(2, 0, 2)))\n\
+             \tprintln([first(W(v)), first(Plain)])\n\
+             \tprintln(w)\n\
+             }}\n",
+        );
+        let want = format!(
+            "1002\n0\nTrue\nFalse\nFalse\n101\n2001\nSome(v)\nNone\n[2, 0]\n\
+             Wide{{ f0: 1, {shown}f{last}: 2 }}\n"
+        );
+        prints(&src, &want);
+    }
+}
+
+/// A constructor as wide as the arena takes, or wider, that is matched and
+/// built again is written over where it is, as a narrow one is, and as the same
+/// variant or another. A thousand turns make no cell and reuse one a thousand
+/// times. While something else still holds it, the same turn makes a new cell
+/// and leaves the old one as it was.
 #[test]
 fn a_constructor_too_wide_for_the_arena_is_rebuilt_in_place() {
-    let fields: String = (0..252).map(|i| format!("\t\ta{i} Int,\n")).collect();
-    let pattern = format!("a0, {}s", "_, ".repeat(251));
-    let zeros = "0, ".repeat(251);
-    let src = format!(
-        "import scarlet/internal\n\
-         import scarlet/string\n\
-         type T {{\n\tA(\n{fields}\t\ts String,\n\t)\n\tB(x Int)\n}}\n\
-         fn step(v T) T {{\n\
-         \tmatch v {{\n\
-         \t\tA({pattern}) -> A(a0 + 1, {zeros}s)\n\
-         \t\tB(x) -> B(x)\n\
-         \t}}\n\
-         }}\n\
-         fn spin(v T, n Int) T {{ if n == 0 {{ v }} else {{ spin(step(v), n - 1) }} }}\n\
-         fn first(v T) Int {{\n\
-         \tmatch v {{\n\
-         \t\tA({pattern}) -> a0 + string::length(s)\n\
-         \t\tB(x) -> x\n\
-         \t}}\n\
-         }}\n\
-         pub fn main() {{\n\
-         \tv = A(0, {zeros}'tail' + 'end')\n\
-         \tmade = internal::cells_made()\n\
-         \treused = internal::cells_reused()\n\
-         \tw = spin(v, 1000)\n\
-         \tprintln(internal::cells_made() - made)\n\
-         \tprintln(internal::cells_reused() - reused)\n\
-         \tprintln(first(w))\n\
-         \tkeep = spin(w, 1)\n\
-         \tprintln(first(w) + first(keep))\n\
-         \tprintln(internal::cells_made() - made)\n\
-         \tprintln(internal::cells_reused() - reused)\n\
-         }}\n",
-    );
-    prints(&src, "0\n1000\n1007\n2015\n1\n1000\n");
+    for n in [252, 253, 254, 300] {
+        let fields: String = (0..n - 1).map(|i| format!("\t\ta{i} Int,\n")).collect();
+        let pattern = format!("a0, {}s", "_, ".repeat(n - 2));
+        let zeros = "z, ".repeat(n - 2);
+        let src = format!(
+            "import scarlet/internal\n\
+             import scarlet/string\n\
+             type T {{\n\
+             \tB(x Int)\n\
+             \tA(\n{fields}\t\ts String,\n\t)\n\
+             \tC(\n{fields}\t\ts String,\n\t)\n\
+             }}\n\
+             fn step(v T, z Int) T {{\n\
+             \tmatch v {{\n\
+             \t\tA({pattern}) -> C(a0 + 1, {zeros}s)\n\
+             \t\tC({pattern}) -> A(a0 + 1, {zeros}s)\n\
+             \t\tB(x) -> B(x)\n\
+             \t}}\n\
+             }}\n\
+             fn spin(v T, n Int) T {{\n\
+             \tif n == 0 {{ v }} else {{ spin(step(v, 0), n - 1) }}\n\
+             }}\n\
+             fn first(v T) Int {{\n\
+             \tmatch v {{\n\
+             \t\tA({pattern}) -> a0 + string::length(s)\n\
+             \t\tC({pattern}) -> -a0 - string::length(s)\n\
+             \t\tB(x) -> x\n\
+             \t}}\n\
+             }}\n\
+             fn new(z Int, s String) T {{ A(0, {zeros}s) }}\n\
+             pub fn main() {{\n\
+             \tv = new(0, 'tail' + 'end')\n\
+             \tmade = internal::cells_made()\n\
+             \treused = internal::cells_reused()\n\
+             \tw = spin(v, 999)\n\
+             \tx = spin(w, 1)\n\
+             \tprintln(internal::cells_made() - made)\n\
+             \tprintln(internal::cells_reused() - reused)\n\
+             \tprintln(first(x))\n\
+             \tkeep = spin(x, 1)\n\
+             \tprintln(first(x) + first(keep))\n\
+             \tprintln(internal::cells_made() - made)\n\
+             \tprintln(internal::cells_reused() - reused)\n\
+             }}\n",
+        );
+        prints(&src, "0\n1000\n1007\n-1\n1\n1000\n");
+    }
+}
+
+/// A match tells every variant of a type from the rest, with fields or without
+/// and however many there are, and rebuilding a value as another variant gives
+/// a value that is that one. `turn` takes each of them round to the next, in
+/// place where the two have as many fields.
+#[test]
+fn a_match_tells_every_variant_of_a_type() {
+    for n in [2usize, 5, 33, 300] {
+        // Variant `i` has `i % 3` fields.
+        let args = |i: usize, a: &str, b: &str| match i % 3 {
+            0 => String::new(),
+            1 => format!("({a})"),
+            _ => format!("({a}, {b})"),
+        };
+        let mut src = String::from("import scarlet/array\ntype E {\n");
+        for i in 0..n {
+            src += &format!("\tV{i}{}\n", args(i, "x Int", "y Array(Int)"));
+        }
+        src += "}\nfn number(e E) Int {\n\tmatch e {\n";
+        for i in 0..n {
+            src += &format!("\t\tV{i}{} -> {i}\n", args(i, "_", "_"));
+        }
+        src += "\t}\n}\nfn held(e E) Int {\n\tmatch e {\n";
+        for i in 0..n {
+            let sum = ["0", "x", "x + array::length(y)"][i % 3];
+            src += &format!("\t\tV{i}{} -> {sum}\n", args(i, "x", "y"));
+        }
+        src += "\t}\n}\nfn turn(e E) E {\n\tmatch e {\n";
+        for i in 0..n {
+            let to = (i + 1) % n;
+            // Each passes on the fields the next has too, and makes the rest.
+            let (x, y) = match i % 3 {
+                0 => ("1", "[1, 2]"),
+                1 => ("x + 1", "[x]"),
+                _ => ("x + 1", "[..y, 0]"),
+            };
+            let reads = match (i % 3, to % 3) {
+                (_, 0) => ("_", "_"),
+                (2, 1) => ("x", "_"),
+                _ => ("x", "y"),
+            };
+            let from = args(i, reads.0, reads.1);
+            src += &format!("\t\tV{i}{from} -> V{to}{}\n", args(to, x, y));
+        }
+        src += "\t}\n}\n\
+                fn go(e E, n Int, sum Int) Int {\n\
+                \tif n == 0 { sum } else { go(turn(e), n - 1, sum * 31 % 1000003 + number(e) * 7 + held(e)) }\n\
+                }\n\
+                fn at(e E, n Int) E {\n\
+                \tif n == 0 { e } else { at(turn(e), n - 1) }\n\
+                }\n\
+                fn numbers(e E, n Int) Bool {\n";
+        src += &format!(
+            "\tif n == {n} {{ True }} else {{ number(at(e, n)) == n && numbers(e, n + 1) }}\n}}\n"
+        );
+        src += &format!(
+            "pub fn main() {{\n\
+             \tprintln(numbers(V0, 0))\n\
+             \tprintln(go(V0, {}, 0))\n\
+             \tprintln(at(V0, {}) == at(at(V0, 1), {}))\n\
+             \tprintln(at(V0, 1) == V0)\n\
+             }}\n",
+            n * 3,
+            n - 1,
+            n - 2,
+        );
+        // The same sum, worked out here.
+        let (mut sum, mut x, mut y) = (0i64, 0i64, 0i64);
+        for k in 0..n * 3 {
+            let i = k % n;
+            let held = [0, x, x + y][i % 3];
+            sum = sum * 31 % 1_000_003 + i as i64 * 7 + held;
+            (x, y) = match i % 3 {
+                0 => (1, 2),
+                1 => (x + 1, 1),
+                _ => (x + 1, y + 1),
+            };
+        }
+        prints(&src, &format!("True\n{sum}\nTrue\nFalse\n"));
+    }
+}
+
+/// A closure with more captures than the arena takes a cell for reads each of
+/// them, and so does one at the line.
+#[test]
+fn a_closure_too_wide_for_the_arena_is_a_closure() {
+    for extra in [0, 1, 2, 3] {
+        let params: Vec<String> = (0..250).map(|i| format!("a{i} Int")).collect();
+        let more: String = (0..extra)
+            .map(|i| format!("\tb{i} = a0 + {}\n", i + 1000))
+            .collect();
+        let names = (0..250)
+            .map(|i| format!("a{i}"))
+            .chain((0..extra).map(|i| format!("b{i}")));
+        // A few to a line, because one sum of them all nests too deep to parse.
+        let parts: Vec<String> = names.zip(1..).map(|(a, k)| format!("{a} * {k}")).collect();
+        let mut sum = String::from("\t\ts0 = x\n");
+        for (i, few) in parts.chunks(10).enumerate() {
+            sum += &format!("\t\ts{} = s{i} + {}\n", i + 1, few.join(" + "));
+        }
+        let last = parts.chunks(10).count();
+        let args: Vec<String> = (0..250).map(|i| i.to_string()).collect();
+        let src = format!(
+            "fn made({}) fn(Int) Int {{\n{more}\tfn(x) {{\n{sum}\t\ts{last}\n\t}}\n}}\n\
+             fn twice(f fn(Int) Int) Int {{ f(f(1)) }}\n\
+             pub fn main() {{\n\
+             \tf = made({})\n\
+             \tprintln(f(1))\n\
+             \tprintln(twice(f) - f(1))\n\
+             \tprintln(f == f)\n\
+             }}\n",
+            params.join(", "),
+            args.join(", "),
+        );
+        let held: i64 = (0..250)
+            .chain(1000..1000 + extra)
+            .zip(1..)
+            .map(|(v, k): (i64, i64)| v * k)
+            .sum();
+        prints(&src, &format!("{}\n{held}\nTrue\n", held + 1));
+    }
 }
 
 /// A string of 2,016 bytes is the longest whose cell the arena holds, and a

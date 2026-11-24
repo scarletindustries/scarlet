@@ -1,6 +1,8 @@
 use super::ins::{Label, VReg};
 use super::translate::Draft;
 use super::*;
+use crate::heap::{Ctor, Numbering};
+use scarlet_ir::core_ir::VariantRef;
 use std::collections::BTreeSet;
 
 /// A program with calls, a loop by tail call, a `match` with several
@@ -40,6 +42,15 @@ pub(super) fn program(src: &str) -> Program {
     let result = scarlet_core::compile::compile_text(src, None);
     assert!(result.success(), "{:?}", result.diagnostics());
     result.into_runnable().expect("a clean compile is runnable")
+}
+
+/// A constructor of one field, for an instruction to name.
+pub(super) fn a_ctor() -> Ctor {
+    let v = VariantRef {
+        type_id: scarlet_ir::TypeId(1),
+        variant_idx: 5,
+    };
+    Numbering::default().add(v, 1).expect("the first one")
 }
 
 /// Every function and toplevel of `code`, in the order their code is.
@@ -352,4 +363,80 @@ fn a_function_takes_at_most_250_parameters() {
             of: Limit::Arguments
         })
     );
+}
+
+/// A constructor the VM builds on its own has to be one the program lists, with
+/// as many fields as the VM gives it, and the program's constructors have to
+/// fit in a header. A program that breaks either does not load at all.
+#[test]
+fn a_program_whose_constructors_are_not_as_the_vm_needs_does_not_load() {
+    let whole = program("pub fn main() { Nil }\n");
+    assert!(load(&whole, Audit::Never).is_ok());
+    let stop = |change: fn(&mut Program)| {
+        let mut broken = whole.clone();
+        change(&mut broken);
+        load(&broken, Audit::Never).err()
+    };
+    let abi = whole.abi;
+    let unlisted = stop(|p| {
+        let option = p.abi.some.type_id;
+        p.types.remove(&option);
+    });
+    assert_eq!(unlisted, Some(Stop::broken(Broken::NoCtor(abi.some))));
+    let with_fields = |v: VariantRef, want: usize| {
+        let mut other = whole.clone();
+        let of = other.types.get_mut(&v.type_id).expect("it is listed");
+        let labels = vec!["f".to_string(); want];
+        of.variants[usize::from(v.variant_idx)].fields = labels;
+        load(&other, Audit::Never).err()
+    };
+    let wrong = |ctor, got, want| Some(Stop::broken(Broken::CtorFields { ctor, got, want }));
+    for ctor in [abi.some, abi.ok, abi.err] {
+        assert_eq!(with_fields(ctor, 1), None);
+        for want in [0, 2, 3] {
+            assert_eq!(with_fields(ctor, want), wrong(ctor, 1, want));
+        }
+    }
+    assert_eq!(with_fields(abi.none, 1), wrong(abi.none, 0, 1));
+    let too_many = stop(|p| {
+        let many = p.types.get_mut(&p.abi.err.type_id).expect("Result");
+        let one = many.variants[usize::from(p.abi.err.variant_idx)].clone();
+        many.variants.resize(65_520, one);
+    });
+    assert_eq!(too_many, Some(Stop::TooManyConstructors));
+}
+
+/// The stdlib's types have the constructors the VM builds and reads, each with
+/// as many fields as `Abi` says. A program that loads the modules of all of
+/// them would not load if one did not.
+#[test]
+fn the_stdlibs_constructors_are_as_the_vm_needs() {
+    let modules = [
+        "binary",
+        "io",
+        "json",
+        "http/h1",
+        "http/headers",
+        "net/address",
+        "net/error",
+        "net/socket",
+        "net/tls",
+    ];
+    let imports: String = modules
+        .iter()
+        .map(|m| format!("import scarlet/{m}\n"))
+        .collect();
+    let program = program(&format!("{imports}pub fn main() {{ Nil }}\n"));
+    let code = load(&program, Audit::Never).expect("it loads");
+    let abi = code.abi;
+    let there = [
+        abi.radix.is_some(),
+        abi.io.is_some(),
+        abi.json.is_some(),
+        abi.http.is_some(),
+        abi.address.is_some(),
+        abi.net.is_some(),
+        abi.tls.is_some(),
+    ];
+    assert_eq!(there, [true; 7]);
 }

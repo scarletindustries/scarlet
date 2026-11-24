@@ -101,6 +101,9 @@ fn one(heap: &Heap, v: Value, s: &mut Sip<1, 3>, todo: &mut Vec<Value>) {
     }
 }
 
+/// [`one`] of a cell. Only a broken heap has a cell with no kind, a constructor
+/// that is none of the program's or a closure of no function. What such a cell
+/// lacks counts as 0 here or is left out, and an audit is what finds it.
 fn cell(heap: &Heap, cell: Cell, s: &mut Sip<1, 3>, todo: &mut Vec<Value>) {
     if let Some(seq) = array::seq(heap, cell) {
         s.tag(Tag::Array);
@@ -135,22 +138,17 @@ fn cell(heap: &Heap, cell: Cell, s: &mut Sip<1, 3>, todo: &mut Vec<Value>) {
         Kind::BigInt => big(s, heap.data(cell)),
         Kind::Ctor => {
             s.tag(Tag::Ctor);
-            let v = heap.variant(cell);
-            s.word(variant_word(v));
-            counted(s, todo, heap.fields(cell).collect());
+            s.word(heap.variant(cell).map_or(0, variant_word));
+            counted(s, todo, heap.values(cell).collect());
         }
         Kind::Closure => {
             s.tag(Tag::Closure);
-            s.word(u64::from(heap.closure_func(cell).0));
-            counted(
-                s,
-                todo,
-                (0..).map_while(|i| heap.capture(cell, i)).collect(),
-            );
+            s.word(heap.closure_func(cell).map_or(0, |f| u64::from(f.0)));
+            counted(s, todo, heap.captures(cell).collect());
         }
         Kind::Tuple => {
             s.tag(Tag::Tuple);
-            counted(s, todo, heap.elements(cell).collect());
+            counted(s, todo, heap.values(cell).collect());
         }
         Kind::Handle => {
             s.tag(Tag::Handle);

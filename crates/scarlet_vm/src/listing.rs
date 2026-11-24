@@ -6,9 +6,12 @@
 //! (`frame.rs`), so its parameters start at `r2`. An operand written `move r3`
 //! gives up the register's reference instead of adding one. `over r3` is the
 //! register whose cell a constructor may be written over, and `keep r3` one
-//! whose cell a loop carries round. `-> 7` is where the instruction may
-//! continue instead of at the next one. Each kind is spelt as a counted run
-//! spells it (`counts.rs`), so a count can be read against a listing.
+//! whose cell a loop carries round. A constructor is its type and its variant,
+//! `10.0`, and a test of one is the variant alone, because the test does not
+//! look at the type: `.1` has no fields and `.1(..)` has some. `-> 7` is where
+//! the instruction may continue instead of at the next one. Each kind is spelt
+//! as a counted run spells it (`counts.rs`), so a count can be read against a
+//! listing.
 
 use std::fmt::{self, Write as _};
 
@@ -18,13 +21,14 @@ use scarlet_ir::intrinsic::Intrinsic;
 use crate::code::{self, Code, Entry, Ins, Reg};
 use crate::code::{
     Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, Dst, EntryPc, Hit, KeepList, Kept, Last,
-    LookList, Looks, Newline, Over, Pc, Room, ShareList, Shared, Shares, Src, Taken, TextId,
-    Variant, Why, WhyId,
+    LookList, Looks, Newline, Over, Pc, Room, ShareList, Shared, Shares, Src, Taken, TextId, Why,
+    WhyId,
 };
 use crate::frame::FIRST;
+use crate::heap::Ctor;
 use crate::ops::NumOp;
 use crate::stop::NotBuilt;
-use crate::value::{Float, SmallInt, Value, View};
+use crate::value::{Float, SmallInt, Tag, Value, View};
 use crate::{Audit, Stop};
 
 /// Every function of a program as the VM loaded it.
@@ -307,10 +311,23 @@ impl Show for f64 {
     }
 }
 
-impl Show for Variant {
+impl Show for Ctor {
     fn show(self, line: &mut Line<'_>) {
-        let v = self.get();
-        line.part(format_args!("{}.{}", v.type_id.0, v.variant_idx));
+        match line.code.ctors.name(self) {
+            Some(v) => line.part(format_args!("{}.{}", v.type_id.0, v.variant_idx)),
+            None => line.part(format_args!("?.{}", self.variant())),
+        }
+    }
+}
+
+/// A variant of whatever type the value has, `.1` with no fields and `.1(..)`
+/// with some.
+impl Show for Tag {
+    fn show(self, line: &mut Line<'_>) {
+        match self.parts() {
+            (variant, true) => line.part(format_args!(".{variant}(..)")),
+            (variant, false) => line.part(format_args!(".{variant}")),
+        }
     }
 }
 

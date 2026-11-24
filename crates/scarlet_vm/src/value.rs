@@ -16,10 +16,12 @@
 //! Immediate 3 is kept for the empty array. This table is the only place a
 //! tag is given out, so a new kind of word is added here first. A cell's
 //! word holds the index of the cell's header in the heap's arena, in bits 0
-//! to 30, and nothing above them. A constructor with no fields holds its
-//! variant in bits 32 to 47 and its type in bits 0 to 31. A small Int is the
-//! 13 top bits set, so two words are both small Ints when their `&` is at
-//! least `0xFFF8` shifted to the top.
+//! to 30, and its variant in bits 32 to 47. That is which of its type's
+//! variants a constructor's cell is, and 0 for any other cell. A constructor
+//! with no fields holds its variant there too, and its type in bits 0 to 31.
+//! So the top half of a word says which variant of its type a value is
+//! ([`Tag`]). A small Int is the 13 top bits set, so two words are both small
+//! Ints when their `&` is at least `0xFFF8` shifted to the top.
 //!
 //! Scarlet has no NaN and no infinity (`docs/semantics.md`), and the layout
 //! needs that. The NaN an ARM chip gives for `0.0 / 0.0` is
@@ -35,7 +37,7 @@ use scarlet_ir::TypeId;
 use scarlet_ir::core_ir::{FuncIdx, VariantRef};
 
 use crate::heap::Cell;
-use crate::word::{low_u16, low_u32};
+use crate::word::{high_u32, low_u16, low_u32};
 
 /// Set in every word that is not a Float, and in no Float that is stored.
 const QUIET_NAN: u64 = 0x7FF8_0000_0000_0000;
@@ -125,6 +127,25 @@ impl Float {
     #[inline]
     pub(crate) fn value(self) -> Value {
         self.0
+    }
+}
+
+/// The top half of a constructor's word: whether it has fields, and which of
+/// its type's variants it is. Two values of one type are the same variant when
+/// these are the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Tag(u32);
+
+impl Tag {
+    /// The tag of variant `variant`, which has fields.
+    pub(crate) fn of_cell(variant: u16) -> Tag {
+        Tag(high_u32(TAG_CELL) | u32::from(variant))
+    }
+
+    /// Which variant this is the tag of, and whether it has fields.
+    pub(crate) fn parts(self) -> (u16, bool) {
+        let variant = low_u16(u64::from(self.0));
+        (variant, self == Tag::of_cell(variant))
     }
 }
 
@@ -219,6 +240,12 @@ impl Value {
         Value(bits)
     }
 
+    /// The word's top half, which says which variant a constructor is.
+    #[inline]
+    pub(crate) fn tag(self) -> Tag {
+        Tag(high_u32(self.0))
+    }
+
     /// The small Int this word holds, if it holds one.
     #[inline]
     pub(crate) fn small_int(self) -> Option<i64> {
@@ -259,6 +286,11 @@ impl Value {
     /// The cell this value points at, if it is one.
     pub(crate) fn as_cell(self) -> Option<Cell> {
         (self.0 & TAG == TAG_CELL).then(|| Cell::from_bits(self.0 & PAYLOAD))
+    }
+
+    /// The function this value is, if it is one that captures nothing.
+    pub(crate) fn as_func(self) -> Option<FuncIdx> {
+        (self.0 & TAG == TAG_FUNC).then(|| FuncIdx(low_u32(self.0)))
     }
 
     /// What the word holds. Past the Float test this reads one bit at a

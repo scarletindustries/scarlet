@@ -5,11 +5,12 @@ use crate::code::{
     BinaryId, EntryPc, Hit, Kept, Lists, Pc, ReadsClosure, Shares, Taken, TextId, Why, WhyId,
 };
 use crate::frame::FIRST;
-use crate::heap::{AuditFault, Cell, Fault};
-use crate::value::{Float, SmallInt};
+use crate::heap::{AuditFault, Cell, Ctors, Fault, Kind, Numbering};
+use crate::value::{Float, SmallInt, Tag};
 use num_bigint::BigInt;
 use num_traits::ToPrimitive as _;
 use scarlet_ir::core_ir::VariantRef;
+use scarlet_ir::intrinsic::Intrinsic;
 use scarlet_ir::tivec::TiVec;
 
 /// The fields the loop reads at every turn come first, where one load reaches
@@ -513,7 +514,7 @@ fn an_audit_names_the_cell_a_lost_release_left() {
         let cell = held_by_a_global(m);
         m.rest.heap.share(cell).expect("a live cell");
         let fault = AuditFault::Miscounted {
-            cell,
+            cell: cell.place(),
             count: 2,
             holders: 1,
         };
@@ -532,7 +533,7 @@ fn an_audit_finds_a_reference_to_a_freed_cell() {
         m.rest.heap.release(cell).expect("the global's reference");
         let fault = AuditFault::Dangling {
             holder: None,
-            to: cell,
+            to: cell.place(),
         };
         assert_eq!(
             m.finish(ended, Audit::AtEnd),
@@ -554,7 +555,7 @@ fn an_audit_finds_a_freed_cell_handed_out_again() {
         assert_eq!(m.rest.heap.audit(m.rest.globals.iter().copied()), Ok(()));
         m.rest.globals.push(Value::cell(again));
         let fault = AuditFault::Miscounted {
-            cell,
+            cell: cell.place(),
             count: 1,
             holders: 2,
         };
@@ -593,9 +594,9 @@ fn an_audit_is_told_of_every_reference_a_run_holds() {
         let [closure, reg, above, passed, global, env] = cells[..] else {
             panic!("six cells");
         };
-        let miscounted = |cell| {
+        let miscounted = |cell: Cell| {
             Err(Stop::broken(Broken::Audit(AuditFault::Miscounted {
-                cell,
+                cell: cell.place(),
                 count: 1,
                 holders: 0,
             })))
@@ -682,7 +683,7 @@ fn a_share_of_a_freed_cell_stops_the_instruction() {
         },
         Ins::Ctor {
             dst: Dst(r(1)),
-            variant: Variant::new(SOME_VARIANT),
+            ctor: ctors().1[0],
             fields: Args::new(&[r(0)]).expect("room for one"),
         },
         Ins::Call {
@@ -798,6 +799,19 @@ const SOME_VARIANT: VariantRef = VariantRef {
     variant_idx: 1,
 };
 
+/// A program's constructors, and the two there are: [`SOME_VARIANT`], which
+/// has one field, and the variant after it, which has two.
+fn ctors() -> (Ctors, [Ctor; 2]) {
+    let mut numbering = Numbering::default();
+    let pair = VariantRef {
+        variant_idx: 2,
+        ..SOME_VARIANT
+    };
+    let one = numbering.add(SOME_VARIANT, 1).expect("the first");
+    let two = numbering.add(pair, 2).expect("the second");
+    (numbering.finish(), [one, two])
+}
+
 /// A program of one function of `params` parameters that holds `values` values
 /// and keeps the closure it runs as. It lives as long as the tests do, so that
 /// any machine may run it.
@@ -815,6 +829,7 @@ fn function_that(
     let result = scarlet_core::compile::compile_text("pub fn main() {\n\tNil\n}\n", None);
     assert!(result.success(), "{:?}", result.diagnostics());
     let program = result.into_runnable().expect("a clean compile is runnable");
+    let loaded = crate::code::load(&program, Audit::Never).expect("it loads");
     let halt = Ins::Halt { src: Taken(RESULT) };
     let ins: Vec<_> = std::iter::once(halt).chain(body).collect();
     let entry = || Entry {
@@ -849,8 +864,9 @@ fn function_that(
         main: None,
         globals: 1,
         types: program.types.clone(),
+        ctors: ctors().0,
         names: TiVec::new(),
-        abi: program.abi,
+        abi: loaded.abi,
     }))
 }
 
@@ -939,6 +955,233 @@ fn the_only_cell_left(m: &mut Machine<'_, '_>, got: Result<Value, Stop>) {
     assert!(no_cell_on(&m.stack));
     assert_eq!(m.rest.release(v), Ok(()));
     assert_eq!(m.rest.heap.live(), 0);
+}
+
+/// A cell of every kind there is, some long, each with three words or more but
+/// the pair, and how many values it starts with.
+fn a_cell_of_each_kind(heap: &mut Heap) -> Vec<(Cell, usize)> {
+    let nil = Value::NIL;
+    let kinds = [
+        (Kind::String, 5, 0),
+        (Kind::String, 300, 0),
+        (Kind::BigInt, 5, 0),
+        (Kind::Range, 5, 0),
+        (Kind::Binary, 5, 0),
+        (Kind::Binary, 300, 0),
+        (Kind::Handle, 5, 0),
+        (Kind::BinarySlice, 3, 1),
+        (Kind::Tuple, 5, 5),
+        (Kind::Tuple, 253, 253),
+        (Kind::Tuple, 300, 300),
+        (Kind::ArrayLeaf, 5, 5),
+        (Kind::ArrayRoot, 5, 0),
+        (Kind::ArrayBranch, 5, 0),
+        (Kind::Map, 5, 0),
+        (Kind::MapNode, 5, 0),
+        (Kind::MapCollision, 5, 0),
+        (Kind::MapCollision, 300, 0),
+    ];
+    let mut all: Vec<(Cell, usize)> = kinds
+        .into_iter()
+        .map(|(kind, words, values)| {
+            let words = vec![nil.bits(); words];
+            (heap.make(kind, &words).expect("room"), values)
+        })
+        .collect();
+    let pair = ctors().1[1];
+    all.extend([
+        (heap.ctor(pair, &[nil; 2]).expect("room"), 2),
+        (heap.closure(FuncIdx(0), &[nil; 4]).expect("room"), 5),
+        (heap.closure(FuncIdx(0), &[nil; 299]).expect("room"), 300),
+    ]);
+    all
+}
+
+/// A field is read from any cell that starts with that many values. The
+/// instruction does not ask which kind it is, because the type checker has.
+/// Any other cell, whatever words it has there, and any other value stops the
+/// run.
+#[test]
+fn a_field_that_is_not_there_stops_the_run() {
+    let read = |index| {
+        let field = Ins::Field {
+            dst: Dst(r(1)),
+            src: Src(r(0)),
+            index,
+        };
+        stores(field, 1)
+    };
+    on_a_machine(|m| {
+        for index in [0, 1, 2, 4, 5, 252, 253, 254, 299, 300, u16::MAX] {
+            let code = read(index);
+            let stop = || Err(Stop::broken(Broken::NoField { index }));
+            for v in one_of_each_kind(&mut m.rest.heap) {
+                if v.as_cell().is_none() {
+                    assert_eq!(call(m, code, &[v]).map(Value::bits), stop());
+                } else {
+                    assert_eq!(m.rest.release(v), Ok(()));
+                }
+            }
+            for (cell, values) in a_cell_of_each_kind(&mut m.rest.heap) {
+                let kind = m.rest.heap.kind(cell);
+                let has = usize::from(index) < values;
+                let got = call(m, code, &[Value::cell(cell)]).map(Value::bits);
+                if has {
+                    assert!(got.is_ok(), "{kind:?} {index}");
+                } else {
+                    assert_eq!(got, stop(), "{kind:?} {index}");
+                }
+            }
+            assert_eq!(m.rest.heap.live(), 0, "{index}");
+        }
+    });
+}
+
+/// A capture is read from whatever cell is in the closure's register, at its
+/// index plus one. The instruction does not ask whether that is a closure,
+/// because a call puts nothing else there (`Rest::callee`). A cell that does
+/// not start with that many values has no such capture.
+#[test]
+fn a_capture_that_is_not_there_stops_the_run() {
+    for index in [0, 3, 4, 5, 251, 252, 253, 298, 299, 300, 70_000, u32::MAX] {
+        let read = Ins::GetCapture {
+            dst: Dst(r(0)),
+            index,
+        };
+        let code = stores(read, 0);
+        on_a_machine(|m| {
+            m.rest.code = code;
+            for (cell, values) in a_cell_of_each_kind(&mut m.rest.heap) {
+                let kind = m.rest.heap.kind(cell);
+                let has = (index as usize).saturating_add(1) < values;
+                m.stack[usize::from(CLOSURE.0)] = Value::cell(cell);
+                let got = m.call(&code.toplevels[0], &[]).map(Value::bits);
+                if has {
+                    assert!(got.is_ok(), "{kind:?} {index}");
+                } else {
+                    let func = code.toplevels[0].name.clone();
+                    let stop = Err(Stop::broken(Broken::NoCapture { func, index }));
+                    assert_eq!(got, stop, "{kind:?} {index}");
+                }
+                m.stack[usize::from(CLOSURE.0)] = Value::NIL;
+                assert_eq!(emptied(m), Ok(()));
+                assert_eq!(m.rest.heap.release(cell), Ok(()));
+            }
+            assert_eq!(m.rest.heap.live(), 0, "{index}");
+        });
+    }
+}
+
+/// A constructor the program does not list has no name to show, and a cell with
+/// no constructor of the heap's or a closure with no function is one nothing
+/// can show. Each stops the run and says which.
+#[test]
+fn a_value_with_no_name_stops_the_run() {
+    on_a_machine(|m| {
+        let nil = Value::NIL;
+        let heap = &mut m.rest.heap;
+        let one = heap.ctor(ctors().1[0], &[nil]).expect("room");
+        let closure = heap.closure(FuncIdx(0), &[nil]).expect("room");
+        heap.data_mut(closure)[0] = nil.bits();
+        let shown = |v| m.rest.show(v, &mut Vec::new());
+        let unlisted = Err(Stop::broken(Broken::NoCtor(SOME_VARIANT)));
+        assert_eq!(shown(Value::nullary(SOME_VARIANT)), unlisted);
+        assert_eq!(shown(Value::cell(one)), unlisted);
+        let no_function = Err(Stop::broken(Broken::ClosureCell));
+        assert_eq!(shown(Value::cell(closure)), no_function);
+        m.rest.heap = Heap::default();
+        let unknown = m.rest.heap.ctor(ctors().1[0], &[nil]).expect("room");
+        let got = m.rest.show(Value::cell(unknown), &mut Vec::new());
+        assert_eq!(got, Err(Stop::broken(Broken::CtorCell)));
+        assert_eq!(m.rest.heap.release(unknown), Ok(()));
+    });
+}
+
+/// The JSON built-ins know a document and a tree by which constructor each is,
+/// and not by its variant: a constructor of another type stops the run, with
+/// fields or without, whatever its number.
+#[test]
+fn a_json_built_in_on_another_constructor_stops_the_run() {
+    let src = "import scarlet/json\npub fn main() {\n\tprintln(json::parse('1'))\n}\n";
+    let result = scarlet_core::compile::compile_text(src, None);
+    let program = result.into_runnable().expect("a clean compile is runnable");
+    let code = crate::code::load(&program, Audit::Never).expect("it loads");
+    let json = code.abi.json.expect("the json types");
+    let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+    let mut m = Machine::new(&code, &mut host);
+    let mut call = |i: Intrinsic, ctor: Option<Ctor>, plain: Value| {
+        let fields = [Value::NIL; 3];
+        let v = match ctor {
+            Some(ctor) => Value::cell(m.rest.heap.ctor(ctor, &fields).expect("room")),
+            None => plain,
+        };
+        let mut frame = [Value::NIL; WINDOW];
+        frame[2] = v;
+        let got = m.rest.builtin(i, &frame, &[r(0)]).map(Value::bits);
+        (v.view(), got)
+    };
+    let (doc, error) = (json.doc.ctor(), json.parse_error.ctor());
+    let (some, err) = (code.abi.some.ctor(), code.abi.err.ctor());
+    let others = [error, json.boolean.ctor(), json.number.ctor(), some];
+    for ctor in others.map(Some).into_iter().chain([None]) {
+        let (view, got) = call(Intrinsic::JsonKind, ctor, json.null);
+        assert_eq!(got, Err(Stop::broken(Broken::NotADoc(view))), "{ctor:?}");
+    }
+    let others = [doc, error, some, err];
+    for ctor in others.map(Some).into_iter().chain([None]) {
+        let plain = json.reasons.unexpected_end;
+        assert_eq!(plain.tag(), json.null.tag(), "of the same number");
+        let (view, got) = call(Intrinsic::JsonEncode, ctor, plain);
+        assert_eq!(got, Err(Stop::broken(Broken::NotJson(view))), "{ctor:?}");
+    }
+    let (_, got) = call(Intrinsic::JsonEncode, None, json.null);
+    assert!(got.is_ok());
+}
+
+/// A jump on a tag goes on at a value of that variant, and jumps at one of any
+/// other, at one with fields where the variant has none, and at any other kind
+/// of value but a cell with no variant of its own, which counts as variant 0.
+#[test]
+fn a_jump_on_a_tag_goes_on_at_one_variant() {
+    let nullary = |variant_idx| {
+        let name = VariantRef {
+            variant_idx,
+            ..SOME_VARIANT
+        };
+        Value::nullary(name).tag()
+    };
+    let tags = [0, 1, 2, u16::MAX].map(|i| [Tag::of_cell(i), nullary(i)]);
+    for tag in tags.into_iter().flatten() {
+        let code = falls_through(Ins::JumpUnlessTag {
+            src: Src(r(0)),
+            tag,
+            to: pc(3),
+        });
+        on_a_machine(|m| {
+            let heap = &mut m.rest.heap;
+            let [one, pair] = ctors().1;
+            let cells = [
+                (heap.ctor(one, &[Value::NIL]), Tag::of_cell(1)),
+                (heap.ctor(pair, &[Value::NIL; 2]), Tag::of_cell(2)),
+                (heap.tuple(&[Value::NIL; 2]), Tag::of_cell(0)),
+                (heap.string(b"text"), Tag::of_cell(0)),
+            ];
+            let cells = cells.map(|(cell, tag)| (Value::cell(cell.expect("room")), tag));
+            let plain = [
+                (Value::nullary(SOME_VARIANT), nullary(1)),
+                (Value::NIL, Value::NIL.tag()),
+                (Value::int(-1).expect("small"), Value::float(0.0).tag()),
+                (Value::float(1.5), Value::float(1.5).tag()),
+                (Value::func(FuncIdx(1)), Value::func(FuncIdx(1)).tag()),
+            ];
+            for (v, its) in cells.into_iter().chain(plain) {
+                let got = call(m, code, &[v]).map(Value::bits);
+                let want = Value::bool(its == tag).bits();
+                assert_eq!(got, Ok(want), "{v:?} {tag:?}");
+            }
+            assert_eq!(m.rest.heap.live(), 0);
+        });
+    }
 }
 
 /// A `Move` that takes its source hands over the register's reference,
@@ -1051,23 +1294,24 @@ fn a_constant_that_is_not_there_stops_the_run() {
 /// else it makes a new one and gives up what was there.
 #[test]
 fn a_constructor_takes_a_kept_cell_that_fits() {
-    let variant = Variant::new(SOME_VARIANT);
+    let ctor = ctors().1[0];
     let few = Ins::CtorOver {
         dst: Dst(r(1)),
-        variant,
+        ctor,
         fields: Args::new(&[r(2)]).expect("room for one"),
         reuse: Over(r(0)),
     };
     let wide = Ins::CtorOverWide {
         dst: Dst(r(1)),
-        variant,
+        ctor,
         fields: crate::code::ArgList(0),
         reuse: Over(r(3)),
     };
     let holding = |fields: usize| {
         move |heap: &mut Heap| {
+            let ctor = ctors().1[fields - 1];
             let fields = vec![Value::bool(true); fields];
-            Some(Value::cell(heap.ctor(SOME_VARIANT, &fields).expect("room")))
+            Some(Value::cell(heap.ctor(ctor, &fields).expect("room")))
         }
     };
     for (fields, reused) in [(1, 1), (2, 0)] {

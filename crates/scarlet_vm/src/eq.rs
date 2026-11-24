@@ -81,14 +81,13 @@ fn cells(heap: &Heap, x: Cell, y: Cell, todo: &mut Vec<(Value, Value)>) -> bool 
         }
         Kind::BigInt => heap.read_big_int(x) == heap.read_big_int(y),
         Kind::Ctor => {
-            heap.variant(x) == heap.variant(y)
-                && queue(todo, heap.fields(x).collect(), heap.fields(y).collect())
+            heap.ctor_of(x) == heap.ctor_of(y)
+                && queue(todo, heap.values(x).collect(), heap.values(y).collect())
         }
-        Kind::Closure => {
-            heap.closure_func(x) == heap.closure_func(y)
-                && queue(todo, captures(heap, x), captures(heap, y))
+        // A closure's first value is its function.
+        Kind::Closure | Kind::Tuple => {
+            queue(todo, heap.values(x).collect(), heap.values(y).collect())
         }
-        Kind::Tuple => queue(todo, heap.elements(x).collect(), heap.elements(y).collect()),
         // A handle is the same one only when the host's number is.
         Kind::Handle => heap.data(x) == heap.data(y),
         Kind::Map | Kind::MapNode | Kind::MapCollision => match map::equal_parts(heap, x, y) {
@@ -132,9 +131,7 @@ fn arrays(heap: &Heap, a: Seq, b: Seq, todo: &mut Vec<(Value, Value)>) -> bool {
 fn is_int(heap: &Heap, v: Value, n: i128) -> bool {
     match v.view() {
         View::Int(m) => i128::from(m) == n,
-        View::Cell(cell) if heap.kind(cell) == Some(Kind::BigInt) => {
-            heap.read_big_int(cell) == n.into()
-        }
+        View::Cell(cell) if heap.is(cell, Kind::BigInt) => heap.read_big_int(cell) == n.into(),
         View::Float(_)
         | View::Nil
         | View::Bool(_)
@@ -142,10 +139,6 @@ fn is_int(heap: &Heap, v: Value, n: i128) -> bool {
         | View::Cell(_)
         | View::Nullary(_) => false,
     }
-}
-
-fn captures(heap: &Heap, closure: Cell) -> Vec<Value> {
-    (0..).map_while(|i| heap.capture(closure, i)).collect()
 }
 
 /// Queue `a` and `b` in pairs with the first pair on top. Returns false if
@@ -157,3 +150,6 @@ fn queue(todo: &mut Vec<(Value, Value)>, a: Vec<Value>, b: Vec<Value>) -> bool {
     todo.extend(a.into_iter().zip(b).rev());
     true
 }
+
+#[cfg(test)]
+mod tests;

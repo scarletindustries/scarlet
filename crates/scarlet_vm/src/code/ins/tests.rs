@@ -1,9 +1,7 @@
 use super::*;
-use crate::code::tests::{body, named, program};
+use crate::code::tests::{a_ctor, body, named, program};
 use crate::code::{Code, load};
 use crate::ops::{Arith, Compare, Order};
-use scarlet_ir::TypeId;
-use scarlet_ir::core_ir::VariantRef;
 
 /// The registers `ins` names and what it does with each, in order.
 fn operands<R: Names>(ins: &Ins<R>, lists: &Lists<R>) -> Vec<(R, Role)> {
@@ -312,24 +310,14 @@ fn placing_an_instruction_keeps_what_it_does() {
 
     let wide: Ins<VReg> = Ins::CtorOverWide {
         dst: Dst(VReg(0)),
-        variant: Variant::new(VariantRef {
-            type_id: TypeId(-5),
-            variant_idx: 65_535,
-        }),
+        ctor: a_ctor(),
         fields: ArgList(1),
         reuse: Over(VReg(2)),
     };
-    let Ok(Ins::CtorOverWide {
-        variant, fields, ..
-    }) = wide.place(&at)
-    else {
+    let Ok(Ins::CtorOverWide { ctor, fields, .. }) = wide.place(&at) else {
         panic!("a constructor");
     };
-    let want = VariantRef {
-        type_id: TypeId(-5),
-        variant_idx: 65_535,
-    };
-    assert_eq!((variant.get(), fields.0), (want, 21));
+    assert_eq!((ctor, fields.0), (a_ctor(), 21));
 
     // Nothing is placed when one thing it names has no place, and what that
     // was comes back.
@@ -391,6 +379,32 @@ fn the_listing_shows_every_operand() {
         assert_eq!(line.contains(" -> "), ins.target().is_some(), "{line}");
     }
     assert!(text.contains("= MapFind(r2, r3) -> "), "{text}");
+}
+
+/// A test of a variant says which, and whether it has fields. A field of a
+/// constructor and an element of a tuple are read by one instruction.
+#[test]
+fn the_listing_shows_a_variant_by_its_number() {
+    let src = "type P {\n\tA\n\tB(n Int, t (Int, Int))\n\tC\n}\n\
+               fn f(p P) Int {\n\
+               \tmatch p {\n\
+               \t\tA -> 1\n\
+               \t\tB(_, (_, x)) -> x\n\
+               \t\tC -> 2\n\
+               \t}\n\
+               }\n\
+               pub fn main() { println(f(B(1, (2, 3)))) }\n";
+    let listing = crate::listing(&program(src)).expect("the program loads");
+    let text = listing.function(0).expect("f");
+    for part in [
+        "JumpUnlessTag(r2, .0) ->",
+        "JumpUnlessTag(r2, .1(..)) ->",
+        "JumpUnlessTag(r2, .2) ->",
+        "= Field(r2, 1)\n",
+        "= Field(r3, 1)\n",
+    ] {
+        assert!(text.contains(part), "{part}: {text}");
+    }
 }
 
 /// The register whose cell a constructor may be written over is told apart

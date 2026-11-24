@@ -3,12 +3,12 @@
 
 use std::fmt;
 
-use scarlet_ir::TypeId;
-use scarlet_ir::core_ir::{ConstId, FuncIdx, GlobalSlot, VariantRef};
+use scarlet_ir::core_ir::{ConstId, FuncIdx, GlobalSlot};
 use scarlet_ir::intrinsic::Intrinsic;
 
+use crate::heap::Ctor;
 use crate::ops::NumOp;
-use crate::value::{Float, SmallInt, Value};
+use crate::value::{Float, SmallInt, Tag, Value};
 
 /// A register, which is a place in the running function's frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -345,7 +345,10 @@ impl<R: Names, const N: usize> Few<R, N> {
 impl<R, const N: usize> Few<R, N> {
     #[inline(always)]
     fn regs(&self) -> &[R] {
-        self.regs.get(..usize::from(self.n)).unwrap_or_default()
+        // There are never more than `N`. With that said, the compiler leaves
+        // out the test of whether the slice is there.
+        let n = usize::from(self.n).min(N);
+        self.regs.get(..n).unwrap_or_default()
     }
 }
 
@@ -578,32 +581,6 @@ impl<R> Lists<R> {
     }
 }
 
-/// A constructor, in the six bytes that leave an instruction room for its
-/// fields.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(Rust, packed(2))]
-pub(crate) struct Variant {
-    ty: TypeId,
-    index: u16,
-}
-
-impl Variant {
-    pub(crate) fn new(v: VariantRef) -> Variant {
-        Variant {
-            ty: v.type_id,
-            index: v.variant_idx,
-        }
-    }
-
-    #[inline(always)]
-    pub(crate) fn get(self) -> VariantRef {
-        VariantRef {
-            type_id: self.ty,
-            variant_idx: self.index,
-        }
-    }
-}
-
 /// Whether a newline is printed too.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Newline(pub(crate) bool);
@@ -662,6 +639,6 @@ macro_rules! plain {
 }
 
 plain! {
-    Newline, u16, u32, i64, f64, Value, SmallInt, Float, Variant, TextId, BinaryId, WhyId, BlockId,
-    BitsOp, NumOp, Intrinsic, FuncIdx, ConstId, GlobalSlot,
+    Newline, u16, u32, i64, f64, Value, SmallInt, Float, Tag, Ctor, TextId, BinaryId, WhyId,
+    BlockId, BitsOp, NumOp, Intrinsic, FuncIdx, ConstId, GlobalSlot,
 }

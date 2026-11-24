@@ -1,0 +1,140 @@
+import scarlet/array
+import scarlet/json
+import scarlet/map
+import scarlet/string
+
+type Shape {
+	Dot
+	Circle(r Int)
+	Line
+	Rect(w Int, h Int)
+	Text(s String)
+	Group(items Array(Shape))
+}
+
+type Other {
+	One(n Int)
+	Two(n Int, m Int)
+	Zero
+}
+
+// The prelude and `scarlet/json` have constructors of these names too.
+type Mine {
+	List(x Int)
+	Null
+	Number(n Int)
+}
+
+fn area(s Shape) Int {
+	match s {
+		Dot -> 0
+		Circle(r) -> r * r * 3
+		Line -> 1
+		Rect(w, h) -> w * h
+		Text(t) -> string::length(t)
+		Group(items) -> array::fold(items, 0, fn(acc, x) acc + area(x))
+	}
+}
+
+fn kind(s Shape) String {
+	match s {
+		Rect(1, _) | Rect(_, 1) -> 'thin'
+		Circle(0) | Dot -> 'point'
+		Group([]) -> 'none'
+		Group([Rect(2, h), Circle(r)]) -> 'pair ${h} ${r}'
+		Circle(_) -> 'circle'
+		Line -> 'line'
+		Rect(_, _) -> 'rect'
+		Text(_) -> 'text'
+		Group([Dot | Circle(_) | Line | Rect(_, _) | Text(_) | Group(_), ..]) -> 'group'
+	}
+}
+
+fn mine(m Mine) Int {
+	match m {
+		List(x) -> x
+		Null -> 0
+		Number(n) -> -n
+	}
+}
+
+fn other(o Other) Int {
+	match o {
+		One(n) -> n
+		Two(n, m) -> n * 100 + m
+		Zero -> -1
+	}
+}
+
+fn next(s Shape) Shape {
+	match s {
+		Dot -> Circle(1)
+		Circle(r) -> Text('r${r}')
+		Line -> Dot
+		Rect(w, h) -> Rect(h, w + 1)
+		Text(_) -> Line
+		Group(items) -> Group([..items, Dot])
+	}
+}
+
+fn spin(s Shape, n Int) Shape {
+	if n == 0 {
+		s
+	} else {
+		spin(next(s), n - 1)
+	}
+}
+
+pub fn main() {
+	all = [
+		Dot,
+		Circle(0),
+		Circle(7),
+		Line,
+		Rect(1, 5),
+		Rect(5, 2),
+		Text('word'),
+		Group([]),
+		Group([Dot, Line]),
+		Group([Rect(2, 9), Circle(4)]),
+		Group([Text('a'), Group([Circle(2)])]),
+	]
+	println(array::map(all, area))
+	println(array::map(all, kind))
+	println(array::map(all, fn(s) spin(s, 7)))
+	println(all)
+	println(array::map(all, fn(a) array::length(array::filter(all, fn(b) a == b))))
+	println([mine(List(4)), mine(Null), mine(Number(6))])
+	println([other(One(3)), other(Two(3, 4)), other(Zero)])
+	println(all[1])
+	println(all[99])
+	println([List(4), Null, Number(1)])
+	println(
+		json::encode(
+			json::List([
+				json::Null,
+				json::Number('12'),
+				json::Boolean(True),
+				json::Object([('k', json::Str('v'))]),
+			]),
+		),
+	)
+	m = array::fold(all, map::new(), fn(m, s) map::set(m, s, kind(s)))
+	println(map::size(m))
+	println(map::get(m, Group([Dot, Line])))
+	println(map::get(m, Group([Line, Dot])))
+	println(map::keys(m))
+	n = array::fold(0..12, map::new(), fn(m, i) map::set(
+		m,
+		if i % 3 == 0 {
+			One(i)
+		} else if i % 3 == 1 {
+			Two(i, 1)
+		} else {
+			Zero
+		},
+		i,
+	))
+	println(n)
+	println(map::set(map::set(map::new(), (List(1), One(2)), 'a'), (Null, Zero), 'b'))
+}

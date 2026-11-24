@@ -41,9 +41,7 @@ pub(crate) fn fast_neg(a: SmallInt) -> Option<Value> {
 pub(crate) fn read(heap: &Heap, v: Value) -> Result<Int, Stop> {
     match v.view() {
         View::Int(n) => Ok(Int::Small(n)),
-        View::Cell(cell) if heap.kind(cell) == Some(Kind::BigInt) => {
-            Ok(Int::Big(heap.read_big_int(cell)))
-        }
+        View::Cell(cell) if heap.is(cell, Kind::BigInt) => Ok(Int::Big(heap.read_big_int(cell))),
         v @ (View::Float(_)
         | View::Nil
         | View::Bool(_)

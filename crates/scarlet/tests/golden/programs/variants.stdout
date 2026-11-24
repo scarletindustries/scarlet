@@ -1,0 +1,127 @@
+[0, 0, 147, 1, 5, 10, 4, 0, 1, 66, 13]
+[point, point, circle, line, thin, rect, text, none, group, pair 9 4, group]
+[
+  Line,
+  Dot,
+  Dot,
+  Text(r1),
+  Rect(8, 5),
+  Rect(5, 9),
+  Circle(1),
+  Group(
+    [Dot, Dot, Dot, Dot, Dot, Dot, Dot]
+  ),
+  Group(
+    [Dot, Line, Dot, Dot, Dot, Dot, Dot, Dot, Dot]
+  ),
+  Group(
+    [
+      Rect(2, 9),
+      Circle(4),
+      Dot,
+      Dot,
+      Dot,
+      Dot,
+      Dot,
+      Dot,
+      Dot
+    ]
+  ),
+  Group(
+    [
+      Text(a),
+      Group(
+        [
+          Circle(2)
+        ]
+      ),
+      Dot,
+      Dot,
+      Dot,
+      Dot,
+      Dot,
+      Dot,
+      Dot
+    ]
+  )
+]
+[
+  Dot,
+  Circle(0),
+  Circle(7),
+  Line,
+  Rect(1, 5),
+  Rect(5, 2),
+  Text(word),
+  Group(
+    []
+  ),
+  Group(
+    [Dot, Line]
+  ),
+  Group(
+    [
+      Rect(2, 9),
+      Circle(4)
+    ]
+  ),
+  Group(
+    [
+      Text(a),
+      Group(
+        [
+          Circle(2)
+        ]
+      )
+    ]
+  )
+]
+[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+[4, 0, -6]
+[3, 304, -1]
+Some(
+  Circle(0)
+)
+None
+[
+  List(4),
+  Null,
+  Number(1)
+]
+[null,12,true,{"k":"v"}]
+11
+Some(group)
+None
+[
+  Circle(0),
+  Group(
+    [
+      Text(a),
+      Group(
+        [
+          Circle(2)
+        ]
+      )
+    ]
+  ),
+  Group(
+    [
+      Rect(2, 9),
+      Circle(4)
+    ]
+  ),
+  Line,
+  Rect(1, 5),
+  Group(
+    []
+  ),
+  Group(
+    [Dot, Line]
+  ),
+  Circle(7),
+  Dot,
+  Text(word),
+  Rect(5, 2)
+]
+{One(3): 3, Two(10, 1): 10, One(9): 9, Two(4, 1): 4, Zero: 11, Two(1, 1): 1, One(0): 0, Two(7, 1): 7, One(6): 6}
+{(List(1), One(2)): a, (Null, Zero): b}

@@ -1,6 +1,7 @@
+use super::super::Source;
 use super::super::ins::{Arg, ArgList, Args, KeepList, Over, OwnEntry, OwnRoom, Role};
 use super::super::live::settle;
-use super::super::tests::{SHAPES, draft, of, program};
+use super::super::tests::{SHAPES, a_ctor, draft, of, program};
 use super::super::translate::translate;
 use super::super::{Tables, literals};
 use super::*;
@@ -110,7 +111,8 @@ fn cells_kept_in_different_arms_share_a_register() {
     let program = program(&src);
     let f = (&program.fns).into_iter().find(|f| f.name == "f");
     let f = &f.expect("f").core;
-    let d = translate(&program, f, Some(FuncIdx(0)), &mut Tables::default()).expect("it loads");
+    let source = Source::new(&program).expect("a whole program");
+    let d = translate(&source, f, Some(FuncIdx(0)), &mut Tables::default()).expect("it loads");
     let kept = d.ins.iter().filter(|i| i.op().name() == "DropReuse");
     assert!(kept.count() >= 300);
     let regs = check(d, "f").expect("a function that fits");
@@ -446,17 +448,18 @@ fn check(mut d: Draft, what: &str) -> Option<usize> {
 
 /// Check every function of `program`.
 fn check_program(program: &Program, what: &str) -> usize {
+    let source = &Source::new(program).expect("a whole program");
     let mut checked = 0;
     let mut one = |f: &LoweredFn, this: Option<FuncIdx>| {
         let what = format!("{what}: {}.{}", f.module, f.name);
         let mut tables = Tables::default();
-        let Ok(d) = translate(program, &f.core, this, &mut tables) else {
+        let Ok(d) = translate(source, &f.core, this, &mut tables) else {
             return;
         };
         if check(d, &what).is_none() {
             let pieces = literals::in_pieces(&f.core);
             let core = pieces.unwrap_or_else(|| panic!("{what} does not fit"));
-            let d = translate(program, &core, this, &mut tables);
+            let d = translate(source, &core, this, &mut tables);
             check(d.expect("it loads"), &what).unwrap_or_else(|| panic!("{what} does not fit"));
         }
         checked += 1;
@@ -709,10 +712,7 @@ impl Maker {
 fn over(dst: u32, field: u32, reuse: u32) -> Ins<VReg> {
     Ins::CtorOver {
         dst: super::super::ins::Dst(VReg(dst)),
-        variant: super::super::Variant::new(scarlet_ir::core_ir::VariantRef {
-            type_id: scarlet_ir::TypeId(1),
-            variant_idx: 0,
-        }),
+        ctor: a_ctor(),
         fields: Args::new(&[VReg(field)]).expect("room for one"),
         reuse: Over(VReg(reuse)),
     }

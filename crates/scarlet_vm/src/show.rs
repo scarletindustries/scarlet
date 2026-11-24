@@ -80,10 +80,10 @@ fn value<'t>(
         View::Nil => out.extend_from_slice(b"Nil"),
         View::Bool(true) => out.extend_from_slice(b"True"),
         View::Bool(false) => out.extend_from_slice(b"False"),
-        View::Nullary(variant) => match names(&code.types, variant) {
-            Some((_, names)) => out.extend_from_slice(names.name.as_bytes()),
-            None => unnamed(variant, out),
-        },
+        View::Nullary(variant) => {
+            let (_, names) = names(&code.types, variant)?;
+            out.extend_from_slice(names.name.as_bytes());
+        }
         View::Cell(cell) => match heap.kind(cell) {
             Some(Kind::String) => heap.read_string(cell, out),
             Some(Kind::BigInt) => {
@@ -91,11 +91,19 @@ fn value<'t>(
             }
             // A `Doc` holds a whole document's tape and strings, and shows
             // as what it points at instead.
-            Some(Kind::Ctor) if code.abi.json.is_some_and(|j| heap.variant(cell) == j.doc) => {
+            Some(Kind::Ctor)
+                if code
+                    .abi
+                    .json
+                    .is_some_and(|j| heap.ctor_of(cell) == Some(j.doc.ctor())) =>
+            {
                 out.extend_from_slice(crate::json::doc_image(heap, cell).as_bytes());
             }
-            Some(Kind::Ctor) => ctor(heap, &code.types, cell, layout, out, todo),
-            Some(Kind::Closure) => function(code, heap.closure_func(cell), out),
+            Some(Kind::Ctor) => ctor(heap, &code.types, cell, layout, out, todo)?,
+            Some(Kind::Closure) => match heap.closure_func(cell) {
+                Some(func) => function(code, func, out),
+                None => return Err(Stop::broken(Broken::ClosureCell)),
+            },
             Some(Kind::Tuple) => tuple(heap, code, cell, layout, out, todo)?,
             Some(Kind::ArrayRoot) => array(heap, code, cell, layout, out, todo)?,
             Some(Kind::Range) => range(heap, cell, layout, out)?,
@@ -163,14 +171,13 @@ fn ctor<'t>(
     layout: Layout,
     out: &mut Vec<u8>,
     todo: &mut Vec<Piece<'t>>,
-) {
-    let variant = heap.variant(cell);
-    let Some((ty, names)) = names(types, variant) else {
-        return unnamed(variant, out);
+) -> Result<(), Stop> {
+    let Some(variant) = heap.variant(cell) else {
+        return Err(Stop::broken(Broken::CtorCell));
     };
-    let fields: Vec<Value> = heap.fields(cell).collect();
-    let record =
-        !names.fields.is_empty() && names.fields.len() == fields.len() && ty.name == names.name;
+    let (ty, names) = names(types, variant)?;
+    let fields: Vec<Value> = heap.values(cell).collect();
+    let record = ty.name == names.name;
     let label = |i: usize| names.fields.get(i).map_or("", String::as_str);
     out.extend_from_slice(names.name.as_bytes());
     match layout {
@@ -207,6 +214,7 @@ fn ctor<'t>(
             }
         }
     }
+    Ok(())
 }
 
 /// A tuple shows as `(1, 'a')` on one line when every element is small and
@@ -219,7 +227,7 @@ fn tuple<'t>(
     out: &mut Vec<u8>,
     todo: &mut Vec<Piece<'t>>,
 ) -> Result<(), Stop> {
-    let elements: Vec<Value> = heap.elements(cell).collect();
+    let elements: Vec<Value> = heap.values(cell).collect();
     let n = match layout {
         Layout::Flat => None,
         Layout::Open(_) if elements.is_empty() => None,
@@ -435,14 +443,11 @@ fn small(heap: &Heap, v: Value) -> bool {
     }
 }
 
-fn names(types: &Types, v: VariantRef) -> Option<(&TypeNames, &VariantNames)> {
-    let ty = types.get(&v.type_id)?;
-    Some((ty, ty.variants.get(usize::from(v.variant_idx))?))
-}
-
-/// A constructor the program has no names for. Only a compiler that broke its
-/// promise (`Program::types`) can give one. We show it by number, so the wrong
-/// answer is visible instead of stopping the run.
-fn unnamed(v: VariantRef, out: &mut Vec<u8>) {
-    out.extend_from_slice(format!("<ctor {}.{}>", v.type_id.0, v.variant_idx).as_bytes());
+/// The names of constructor `v` and its type. The loader refuses a program that
+/// does not list one it builds, so every value has them.
+fn names(types: &Types, v: VariantRef) -> Result<(&TypeNames, &VariantNames), Stop> {
+    let ty = types.get(&v.type_id);
+    let variant = ty.and_then(|ty| ty.variants.get(usize::from(v.variant_idx)));
+    ty.zip(variant)
+        .ok_or_else(|| Stop::broken(Broken::NoCtor(v)))
 }

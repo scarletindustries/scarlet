@@ -113,6 +113,31 @@ fn a_full_stack_has_a_message() {
     assert_eq!(says.as_deref(), Some("the program ran out of stack"));
 }
 
+/// A cell's header can tell 65,520 constructors apart. A program with more that
+/// have fields, the stdlib's among them, is told so before it runs, and one
+/// with nearly as many runs.
+#[test]
+fn a_program_with_too_many_constructors_stops_before_it_runs() {
+    let of = |variants: usize| {
+        let listed: String = (0..variants).map(|i| format!("\tV{i}(n Int)\n")).collect();
+        let last = variants - 1;
+        let src =
+            format!("type Wide {{\n{listed}}}\n\npub fn main() {{\n\tprintln(V{last}(0))\n}}\n");
+        run("constructors", &src)
+    };
+    let out = of(65_520);
+    assert_failed_with(
+        &out,
+        "the program has more constructors with fields than the VM can number",
+    );
+    assert_eq!((out.stdout.as_str(), out.code), ("", Some(1)));
+    let out = of(65_000);
+    assert_eq!(
+        (out.stdout.as_str(), out.stderr.as_str(), out.success),
+        ("V64999(0)\n", "", true)
+    );
+}
+
 /// A crash in a linked child kills main. The program fails promptly, even
 /// though main itself was blocked for ever and never misbehaved.
 #[test]

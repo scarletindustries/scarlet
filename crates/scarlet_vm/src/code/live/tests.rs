@@ -209,10 +209,7 @@ fn a_value_read_before_it_is_written_is_refused() {
 fn a_carried_cell_may_be_from_the_turn_before() {
     let over = Ins::CtorOver {
         dst: Dst(VReg(1)),
-        variant: super::super::Variant::new(scarlet_ir::core_ir::VariantRef {
-            type_id: scarlet_ir::TypeId(1),
-            variant_idx: 0,
-        }),
+        ctor: super::super::tests::a_ctor(),
         fields: Args::new(&[VReg(0)]).expect("room for one"),
         reuse: super::super::Over(VReg(1)),
     };

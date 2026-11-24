@@ -154,7 +154,7 @@ fn collision(heap: &Heap, cell: Cell) -> (u64, Vec<(Value, Value)>) {
 }
 
 fn is_collision(heap: &Heap, cell: Cell) -> bool {
-    heap.kind(cell) == Some(Kind::MapCollision)
+    heap.is(cell, Kind::MapCollision)
 }
 
 /// A new node. The references in `entries` and `children` pass to it.
@@ -277,8 +277,8 @@ fn get_by(heap: &Heap, map: Cell, key: Value, hash: Hasher) -> Option<Value> {
     let h = hash(heap, key);
     let mut shift = 0;
     loop {
-        let (kind, d) = heap.kind_and_data(at);
-        if kind == Some(Kind::MapCollision) {
+        let (collision, d) = heap.is_with_data(at, Kind::MapCollision);
+        if collision {
             return (0..d.len() / 2)
                 .find(|&i| same_key(heap, word(d, key_at(i)), key))
                 .map(|i| word(d, value_at(i)));

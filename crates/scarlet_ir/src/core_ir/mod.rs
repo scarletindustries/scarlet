@@ -136,359 +136,307 @@ pub struct VariantRef {
     pub variant_idx: u16,
 }
 
+/// How a set of constructors names each one. A constructor with no fields is
+/// a value by itself, and one with `N` fields has a cell to make, so the two
+/// need not be named by the same thing.
+pub trait Naming: Copy + fmt::Debug {
+    type Plain: Copy + fmt::Debug;
+    type Fields<const N: usize>: Copy + fmt::Debug;
+}
+
+/// The names the compiler gives.
+#[derive(Debug, Clone, Copy)]
+pub struct ByVariant;
+
+impl Naming for ByVariant {
+    type Plain = VariantRef;
+    type Fields<const N: usize> = VariantRef;
+}
+
+/// Finds what a backend calls each constructor, or says why it has none.
+pub trait Rename {
+    type To: Naming;
+    type Error;
+
+    /// A constructor with no fields.
+    fn plain(&mut self, v: VariantRef) -> Result<<Self::To as Naming>::Plain, Self::Error>;
+
+    /// A constructor with `N` fields.
+    fn fields<const N: usize>(
+        &mut self,
+        v: VariantRef,
+    ) -> Result<<Self::To as Naming>::Fields<N>, Self::Error>;
+}
+
+/// Declares a set of constructors the VM knows, each beside how many fields
+/// it has, and after `with` the smaller set it holds, if it holds one.
+macro_rules! constructors {
+    (@rename $r:ident Plain $v:expr) => { $r.plain($v)? };
+    (@rename $r:ident Fields $n:literal $v:expr) => { $r.fields::<$n>($v)? };
+    ($($(#[$doc:meta])* pub struct $name:ident {
+        $($(#[$field_doc:meta])* $field:ident: $form:ident $(<$n:literal>)?),* $(,)?
+    } $(with $(#[$set_doc:meta])* $set:ident: $of:ident)?)*) => {$(
+        $(#[$doc])*
+        #[derive(Debug, Clone, Copy)]
+        pub struct $name<N: Naming = ByVariant> {
+            $($(#[$field_doc])* pub $field: N::$form $(<$n>)?,)*
+            $($(#[$set_doc])* pub $set: $of<N>,)?
+        }
+
+        impl $name {
+            /// The same constructors, named as `r` names them.
+            fn rename<R: Rename>(self, r: &mut R) -> Result<$name<R::To>, R::Error> {
+                Ok($name {
+                    $($field: constructors!(@rename r $form $($n)? self.$field),)*
+                    $($set: self.$set.rename(r)?,)?
+                })
+            }
+        }
+    )*};
+}
+
 /// The stdlib constructors the VM builds on its own, like the `Some(x)` that
 /// `xs[i]` gives. The compiler says which constructor each one is; the VM
 /// knows nothing else about the stdlib's types.
 #[derive(Debug, Clone, Copy)]
-pub struct Abi {
+pub struct Abi<N: Naming = ByVariant> {
     /// `Some(value)`.
-    pub some: VariantRef,
+    pub some: N::Fields<1>,
     /// `None`.
-    pub none: VariantRef,
+    pub none: N::Plain,
     /// `Ok(value)`.
-    pub ok: VariantRef,
+    pub ok: N::Fields<1>,
     /// `Err(error)`.
-    pub err: VariantRef,
+    pub err: N::Fields<1>,
     /// `scarlet/binary.Radix`, when the program loads that module: the base
     /// `binary.parse_int` and `binary.from_int_ascii` are asked for.
-    pub radix: Option<Radix>,
+    pub radix: Option<Radix<N>>,
     /// `scarlet/io.IoError`, when the program loads that module: what a file
     /// read or write that failed says went wrong.
-    pub io: Option<IoErrors>,
+    pub io: Option<IoErrors<N>>,
     /// `scarlet/json`'s types, when the program loads that module: what
     /// `json.parse` gives and `json.encode` reads.
-    pub json: Option<JsonTypes>,
+    pub json: Option<JsonTypes<N>>,
     /// `scarlet/http/h1`'s types, when the program loads that module.
-    pub http: Option<HttpTypes>,
+    pub http: Option<HttpTypes<N>>,
     /// `scarlet/net/address`'s types, when the program loads that module.
-    pub address: Option<AddressTypes>,
+    pub address: Option<AddressTypes<N>>,
     /// `scarlet/net/error` and `scarlet/net/socket`'s types, when the program
     /// loads both.
-    pub net: Option<NetTypes>,
+    pub net: Option<NetTypes<N>>,
     /// `scarlet/net/tls`'s types, when the program loads that module.
-    pub tls: Option<TlsTypes>,
+    pub tls: Option<TlsTypes<N>>,
 }
 
-/// The constructors of `scarlet/net/address`.
-#[derive(Debug, Clone, Copy)]
-pub struct AddressTypes {
-    /// `IpAddress`'s two forms, each holding the address as text.
-    pub v4: VariantRef,
-    pub v6: VariantRef,
-    /// `SocketAddress(ip, port)`.
-    pub socket_address: VariantRef,
-}
-
-/// The constructors of `scarlet/net/error.NetError` and
-/// `scarlet/net/socket` that the VM builds.
-#[derive(Debug, Clone, Copy)]
-pub struct NetTypes {
-    pub timed_out: VariantRef,
-    pub connection_refused: VariantRef,
-    pub connection_reset: VariantRef,
-    pub connection_aborted: VariantRef,
-    pub not_connected: VariantRef,
-    pub broken_pipe: VariantRef,
-    pub addr_in_use: VariantRef,
-    pub addr_not_available: VariantRef,
-    pub network_down: VariantRef,
-    pub network_unreachable: VariantRef,
-    pub host_unreachable: VariantRef,
-    pub permission_denied: VariantRef,
-    pub unexpected_eof: VariantRef,
-    pub unaligned_binary: VariantRef,
-    pub invalid_port: VariantRef,
-    /// Any other OS error: this holds its number.
-    pub errno: VariantRef,
-    /// `socket.Socket(conn, peer)`.
-    pub socket: VariantRef,
-    /// `socket.Read`: `Data(bytes)` and `Closed`.
-    pub data: VariantRef,
-    pub closed: VariantRef,
-}
-
-/// The constructors of `scarlet/net/tls` that the VM builds.
-#[derive(Debug, Clone, Copy)]
-pub struct TlsTypes {
-    /// `TlsSocket(conn, peer, server_name)`.
-    pub tls_socket: VariantRef,
-    pub certificate_unknown_issuer: VariantRef,
-    pub certificate_expired: VariantRef,
-    pub certificate_not_yet_valid: VariantRef,
-    pub certificate_revoked: VariantRef,
-    pub hostname_mismatch: VariantRef,
-    pub bad_certificate: VariantRef,
-    pub protocol_error: VariantRef,
-    pub handshake_failed: VariantRef,
-    pub invalid_server_name: VariantRef,
-    /// `Transport(cause)`, holding a `NetError`.
-    pub transport: VariantRef,
-}
-
-/// The constructors of `scarlet/binary.Radix`.
-#[derive(Debug, Clone, Copy)]
-pub struct Radix {
-    pub dec: VariantRef,
-    pub hex: VariantRef,
-}
-
-/// The constructors of `scarlet/io.IoError` the VM builds, each named for the
-/// OS error it stands for.
-#[derive(Debug, Clone, Copy)]
-pub struct IoErrors {
-    /// These hold the path the operation was given.
-    pub not_found: VariantRef,
-    pub permission_denied: VariantRef,
-    pub already_exists: VariantRef,
-    pub not_a_directory: VariantRef,
-    pub is_a_directory: VariantRef,
-    pub read_only_filesystem: VariantRef,
-    pub filesystem_loop: VariantRef,
-    pub file_too_large: VariantRef,
-    /// These hold nothing.
-    pub storage_full: VariantRef,
-    pub quota_exceeded: VariantRef,
-    pub unaligned_binary: VariantRef,
-    /// Any other OS error: this holds its number.
-    pub errno: VariantRef,
-}
-
-/// The constructors of `scarlet/http/h1` and `scarlet/http/headers` the VM
-/// builds or reads: what a parsed head, a body's framing and a decoded chunked
-/// body are.
-#[derive(Debug, Clone, Copy)]
-pub struct HttpTypes {
-    /// `headers.Header(name, value)`.
-    pub header: VariantRef,
-    /// `h1.Version`.
-    pub http10: VariantRef,
-    pub http11: VariantRef,
-    /// `h1.HeadFlags(conn, expect_100_continue)`, and `h1.ConnTokens`.
-    pub head_flags: VariantRef,
-    pub conn_neither: VariantRef,
-    pub conn_close: VariantRef,
-    pub conn_keep_alive: VariantRef,
-    pub conn_both: VariantRef,
-    /// `h1.Parsed`: a request head.
-    pub parsed_done: VariantRef,
-    pub parsed_need_more: VariantRef,
-    pub parsed_bad: VariantRef,
-    /// `h1.ParsedResponse`, and `h1.BadResponse`'s reasons.
-    pub response_done: VariantRef,
-    pub response_need_more: VariantRef,
-    pub response_bad: VariantRef,
-    pub bad_status_line: VariantRef,
-    pub bad_version: VariantRef,
-    pub bad_field: VariantRef,
-    pub head_too_large: VariantRef,
-    pub bad_framing: VariantRef,
-    /// `h1.Framing`.
-    pub no_body: VariantRef,
-    pub length: VariantRef,
-    pub chunked: VariantRef,
-    pub framing_invalid: VariantRef,
-    /// `h1.ChunkBody`.
-    pub chunked_done: VariantRef,
-    pub chunked_need_more: VariantRef,
-    pub chunked_bad: VariantRef,
-}
-
-impl HttpTypes {
-    fn variants(&self) -> [VariantRef; 26] {
-        [
-            self.header,
-            self.http10,
-            self.http11,
-            self.head_flags,
-            self.conn_neither,
-            self.conn_close,
-            self.conn_keep_alive,
-            self.conn_both,
-            self.parsed_done,
-            self.parsed_need_more,
-            self.parsed_bad,
-            self.response_done,
-            self.response_need_more,
-            self.response_bad,
-            self.bad_status_line,
-            self.bad_version,
-            self.bad_field,
-            self.head_too_large,
-            self.bad_framing,
-            self.no_body,
-            self.length,
-            self.chunked,
-            self.framing_invalid,
-            self.chunked_done,
-            self.chunked_need_more,
-            self.chunked_bad,
-        ]
+constructors! {
+    /// The constructors of `scarlet/net/address`.
+    pub struct AddressTypes {
+        /// `IpAddress`'s two forms, each holding the address as text.
+        v4: Fields<1>,
+        v6: Fields<1>,
+        /// `SocketAddress(ip, port)`.
+        socket_address: Fields<2>,
     }
-}
 
-/// The constructors of `scarlet/json` the VM builds or reads.
-#[derive(Debug, Clone, Copy)]
-pub struct JsonTypes {
-    /// `Doc(arena, tape, idx)`: a parsed document, and every cursor into it.
-    pub doc: VariantRef,
-    /// `ParseError(offset, reason)`.
-    pub parse_error: VariantRef,
+    /// The constructors of `scarlet/net/error.NetError` and
+    /// `scarlet/net/socket` that the VM builds.
+    pub struct NetTypes {
+        timed_out: Plain,
+        connection_refused: Plain,
+        connection_reset: Plain,
+        connection_aborted: Plain,
+        not_connected: Plain,
+        broken_pipe: Plain,
+        addr_in_use: Plain,
+        addr_not_available: Plain,
+        network_down: Plain,
+        network_unreachable: Plain,
+        host_unreachable: Plain,
+        permission_denied: Plain,
+        unexpected_eof: Plain,
+        unaligned_binary: Plain,
+        invalid_port: Plain,
+        /// Any other OS error: this holds its number.
+        errno: Fields<1>,
+        /// `socket.Socket(conn, peer)`.
+        socket: Fields<2>,
+        /// `socket.Read`: `Data(bytes)` and `Closed`.
+        data: Fields<1>,
+        closed: Plain,
+    }
+
+    /// The constructors of `scarlet/net/tls` that the VM builds.
+    pub struct TlsTypes {
+        /// `TlsSocket(conn, peer, server_name)`.
+        tls_socket: Fields<3>,
+        certificate_unknown_issuer: Plain,
+        certificate_expired: Plain,
+        certificate_not_yet_valid: Plain,
+        certificate_revoked: Plain,
+        hostname_mismatch: Plain,
+        bad_certificate: Plain,
+        protocol_error: Plain,
+        handshake_failed: Plain,
+        invalid_server_name: Plain,
+        /// `Transport(cause)`, holding a `NetError`.
+        transport: Fields<1>,
+    }
+
+    /// The constructors of `scarlet/binary.Radix`.
+    pub struct Radix {
+        dec: Plain,
+        hex: Plain,
+    }
+
+    /// The constructors of `scarlet/io.IoError` the VM builds, each named for the
+    /// OS error it stands for.
+    pub struct IoErrors {
+        /// These hold the path the operation was given.
+        not_found: Fields<1>,
+        permission_denied: Fields<1>,
+        already_exists: Fields<1>,
+        not_a_directory: Fields<1>,
+        is_a_directory: Fields<1>,
+        read_only_filesystem: Fields<1>,
+        filesystem_loop: Fields<1>,
+        file_too_large: Fields<1>,
+        /// These hold nothing.
+        storage_full: Plain,
+        quota_exceeded: Plain,
+        unaligned_binary: Plain,
+        /// Any other OS error: this holds its number.
+        errno: Fields<1>,
+    }
+
+    /// The constructors of `scarlet/http/h1` and `scarlet/http/headers` the VM
+    /// builds or reads: what a parsed head, a body's framing and a decoded chunked
+    /// body are.
+    pub struct HttpTypes {
+        /// `headers.Header(name, value)`.
+        header: Fields<2>,
+        /// `h1.Version`.
+        http10: Plain,
+        http11: Plain,
+        /// `h1.HeadFlags(conn, expect_100_continue)`, and `h1.ConnTokens`.
+        head_flags: Fields<2>,
+        conn_neither: Plain,
+        conn_close: Plain,
+        conn_keep_alive: Plain,
+        conn_both: Plain,
+        /// `h1.Parsed`: a request head.
+        parsed_done: Fields<6>,
+        parsed_need_more: Plain,
+        parsed_bad: Fields<1>,
+        /// `h1.ParsedResponse`, and `h1.BadResponse`'s reasons.
+        response_done: Fields<6>,
+        response_need_more: Plain,
+        response_bad: Fields<1>,
+        bad_status_line: Plain,
+        bad_version: Plain,
+        bad_field: Plain,
+        head_too_large: Plain,
+        bad_framing: Plain,
+        /// `h1.Framing`.
+        no_body: Plain,
+        length: Fields<1>,
+        chunked: Plain,
+        framing_invalid: Fields<1>,
+        /// `h1.ChunkBody`.
+        chunked_done: Fields<3>,
+        chunked_need_more: Plain,
+        chunked_bad: Fields<1>,
+    }
+
+    /// The constructors of `scarlet/json` the VM builds or reads.
+    pub struct JsonTypes {
+        /// `Doc(arena, tape, idx)`: a parsed document, and every cursor into it.
+        doc: Fields<3>,
+        /// `ParseError(offset, reason)`.
+        parse_error: Fields<2>,
+        /// The constructors of `Json`, which `json.encode` writes out.
+        null: Plain,
+        boolean: Fields<1>,
+        integer: Fields<1>,
+        real: Fields<1>,
+        str: Fields<1>,
+        list: Fields<1>,
+        object: Fields<1>,
+        number: Fields<1>,
+    } with
     /// The constructors of `ParseReason`, which a `ParseError` carries as its `reason`.
-    pub reasons: ParseReasons,
-    /// The constructors of `Json`, which `json.encode` writes out.
-    pub null: VariantRef,
-    pub boolean: VariantRef,
-    pub integer: VariantRef,
-    pub real: VariantRef,
-    pub str: VariantRef,
-    pub list: VariantRef,
-    pub object: VariantRef,
-    pub number: VariantRef,
-}
+    reasons: ParseReasons
 
-/// The constructors of `scarlet/json.ParseReason`, which says why a document didn't parse.
-#[derive(Debug, Clone, Copy)]
-pub struct ParseReasons {
-    pub unexpected_end: VariantRef,
-    pub unexpected_byte: VariantRef,
-    pub trailing_data: VariantRef,
-    pub unterminated_string: VariantRef,
-    pub bad_escape: VariantRef,
-    pub bad_unicode: VariantRef,
-    pub bad_number: VariantRef,
-    pub not_utf8: VariantRef,
-    pub not_whole_bytes: VariantRef,
-    pub too_large: VariantRef,
-}
-
-impl JsonTypes {
-    fn variants(&self) -> [VariantRef; 20] {
-        let r = self.reasons;
-        [
-            self.doc,
-            self.parse_error,
-            r.unexpected_end,
-            r.unexpected_byte,
-            r.trailing_data,
-            r.unterminated_string,
-            r.bad_escape,
-            r.bad_unicode,
-            r.bad_number,
-            r.not_utf8,
-            r.not_whole_bytes,
-            r.too_large,
-            self.null,
-            self.boolean,
-            self.integer,
-            self.real,
-            self.str,
-            self.list,
-            self.object,
-            self.number,
-        ]
-    }
-}
-
-impl IoErrors {
-    fn variants(&self) -> [VariantRef; 12] {
-        [
-            self.not_found,
-            self.permission_denied,
-            self.already_exists,
-            self.not_a_directory,
-            self.is_a_directory,
-            self.read_only_filesystem,
-            self.filesystem_loop,
-            self.file_too_large,
-            self.storage_full,
-            self.quota_exceeded,
-            self.unaligned_binary,
-            self.errno,
-        ]
-    }
-}
-
-impl AddressTypes {
-    fn variants(&self) -> [VariantRef; 3] {
-        [self.v4, self.v6, self.socket_address]
-    }
-}
-
-impl NetTypes {
-    fn variants(&self) -> [VariantRef; 19] {
-        [
-            self.timed_out,
-            self.connection_refused,
-            self.connection_reset,
-            self.connection_aborted,
-            self.not_connected,
-            self.broken_pipe,
-            self.addr_in_use,
-            self.addr_not_available,
-            self.network_down,
-            self.network_unreachable,
-            self.host_unreachable,
-            self.permission_denied,
-            self.unexpected_eof,
-            self.unaligned_binary,
-            self.invalid_port,
-            self.errno,
-            self.socket,
-            self.data,
-            self.closed,
-        ]
-    }
-}
-
-impl TlsTypes {
-    fn variants(&self) -> [VariantRef; 11] {
-        [
-            self.tls_socket,
-            self.certificate_unknown_issuer,
-            self.certificate_expired,
-            self.certificate_not_yet_valid,
-            self.certificate_revoked,
-            self.hostname_mismatch,
-            self.bad_certificate,
-            self.protocol_error,
-            self.handshake_failed,
-            self.invalid_server_name,
-            self.transport,
-        ]
+    /// The constructors of `scarlet/json.ParseReason`, which says why a document didn't parse.
+    pub struct ParseReasons {
+        unexpected_end: Plain,
+        unexpected_byte: Plain,
+        trailing_data: Plain,
+        unterminated_string: Plain,
+        bad_escape: Plain,
+        bad_unicode: Plain,
+        bad_number: Plain,
+        not_utf8: Plain,
+        not_whole_bytes: Plain,
+        too_large: Plain,
     }
 }
 
 impl Abi {
+    /// The same constructors, named as `r` names them.
+    pub fn rename<R: Rename>(self, r: &mut R) -> Result<Abi<R::To>, R::Error> {
+        Ok(Abi {
+            some: r.fields::<1>(self.some)?,
+            none: r.plain(self.none)?,
+            ok: r.fields::<1>(self.ok)?,
+            err: r.fields::<1>(self.err)?,
+            radix: self.radix.map(|t| t.rename(r)).transpose()?,
+            io: self.io.map(|t| t.rename(r)).transpose()?,
+            json: self.json.map(|t| t.rename(r)).transpose()?,
+            http: self.http.map(|t| t.rename(r)).transpose()?,
+            address: self.address.map(|t| t.rename(r)).transpose()?,
+            net: self.net.map(|t| t.rename(r)).transpose()?,
+            tls: self.tls.map(|t| t.rename(r)).transpose()?,
+        })
+    }
+
     /// Every constructor here, so their types' names can travel with them.
-    pub fn variants(&self) -> Vec<VariantRef> {
-        let mut all = vec![self.some, self.none, self.ok, self.err];
-        if let Some(r) = self.radix {
-            all.extend([r.dec, r.hex]);
+    pub fn variants(self) -> Vec<VariantRef> {
+        let mut all = Listed(Vec::new());
+        match self.rename(&mut all) {
+            Ok(_) => all.0,
         }
-        if let Some(io) = self.io {
-            all.extend(io.variants());
-        }
-        if let Some(json) = self.json {
-            all.extend(json.variants());
-        }
-        if let Some(http) = self.http {
-            all.extend(http.variants());
-        }
-        if let Some(address) = self.address {
-            all.extend(address.variants());
-        }
-        if let Some(net) = self.net {
-            all.extend(net.variants());
-        }
-        if let Some(tls) = self.tls {
-            all.extend(tls.variants());
-        }
-        all
+    }
+}
+
+/// Lists the constructors it is asked to name, and names none.
+struct Listed(Vec<VariantRef>);
+
+#[derive(Debug, Clone, Copy)]
+struct Unnamed;
+
+impl Naming for Unnamed {
+    type Plain = ();
+    type Fields<const N: usize> = ();
+}
+
+impl Rename for Listed {
+    type To = Unnamed;
+    type Error = std::convert::Infallible;
+
+    fn plain(&mut self, v: VariantRef) -> Result<(), Self::Error> {
+        self.0.push(v);
+        Ok(())
+    }
+
+    fn fields<const N: usize>(&mut self, v: VariantRef) -> Result<(), Self::Error> {
+        self.0.push(v);
+        Ok(())
     }
 }
 
 /// What a type and its constructors are called, for anything that shows a
-/// value of it to a person: `Some(1)`, `Point{ x: 1, y: 2 }`.
+/// value of it to a person: `Some(1)`, `Point{ x: 1, y: 2 }`. The VM also reads
+/// here how many fields each constructor has.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeNames {
     /// As declared, which is not always how an importer spells it.
@@ -500,7 +448,7 @@ pub struct TypeNames {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VariantNames {
     pub name: String,
-    /// Each field's label, in the order the constructor holds its fields.
+    /// The label of every field, in the order the constructor holds them.
     pub fields: Vec<String>,
 }
 
@@ -794,9 +742,12 @@ pub struct Program {
     /// How many global slots module-scope bindings occupy. Every `GlobalSlot`
     /// is below this.
     pub globals: u32,
-    /// The names of every type the program builds or matches a constructor
-    /// of, or that the VM builds one of ([`Self::abi`]). Every [`VariantRef`]
-    /// in the program has its type here.
+    /// Every type the program builds or matches a constructor of, or that the
+    /// VM builds one of ([`Self::abi`]). Every [`VariantRef`] in the program
+    /// has its type here, with every variant of it. A backend makes a
+    /// constructor's cell by what this says of its fields, so it refuses a
+    /// [`VariantRef`] that is not here, and a constructor or a pattern with
+    /// another number of fields.
     pub types: BTreeMap<TypeId, TypeNames>,
     pub abi: Abi,
     /// What every `RTy` in every body indexes.

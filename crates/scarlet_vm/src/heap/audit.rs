@@ -9,7 +9,8 @@
 use std::fmt;
 
 use super::{
-    Cell, Heap, LEAST_WORDS, UNCOUNTED, count, freed, held, kind_bits, kind_of, size, space,
+    ARENA_CELL_WORDS, Cell, FREED, Heap, Index, Kind, LEAST_WORDS, UNCOUNTED, class, count, freed,
+    held, scan, size, space,
 };
 use crate::value::Value;
 use crate::word::{high_u32, low_u32, to_usize};
@@ -22,10 +23,23 @@ pub(crate) enum AuditFault {
     NoCell { at: usize },
     /// A reference to something that is not a live cell. It is held by
     /// `holder`, or by the run itself.
-    Dangling { holder: Option<Cell>, to: Cell },
+    Dangling { holder: Option<Index>, to: Index },
+    /// A reference that does not carry the variant of the cell it is to. It is
+    /// held by `holder`, or by the run itself.
+    WrongVariant {
+        holder: Option<Index>,
+        to: Index,
+        variant: u16,
+    },
+    /// A cell's class is none, or the rest of its header does not go with its
+    /// class: its scan, how many fields its constructor has, or whether its
+    /// words are in a box.
+    Misshapen { cell: Index },
+    /// A closure's cell does not start with a function.
+    NoFunction { cell: Index },
     /// A cell's count is not the number of references to it.
     Miscounted {
-        cell: Cell,
+        cell: Index,
         count: i32,
         holders: u32,
     },
@@ -33,17 +47,17 @@ pub(crate) enum AuditFault {
     /// free one of that size, or names one twice.
     BadLink { space: usize, to: u32 },
     /// A free cell is on no list, so nothing would ever take its space.
-    Unlisted { cell: Cell },
+    Unlisted { cell: Index },
     /// A long cell's stub names a box that is not there, or that another
     /// stub names.
-    NoBox { cell: Cell },
+    NoBox { cell: Index },
     /// The boxes do not add up: one has no stub, or a place is not empty and
     /// spare, or the words counted are not the words there are.
     Boxes,
     /// A constant's cell can be freed.
-    CountedConstant { cell: Cell },
+    CountedConstant { cell: Index },
     /// A cell that is no constant's can never be freed.
-    NeverCounted { cell: Cell },
+    NeverCounted { cell: Index },
 }
 
 /// Why an audit did not pass a heap.
@@ -69,9 +83,10 @@ const FREE: u32 = u32::MAX - 1;
 const CONSTANT: u32 = u32::MAX - 2;
 
 impl Heap {
-    /// Check that the arena is made of whole cells, that every reference is
-    /// to a live one, that every count is the number of references to its
-    /// cell, and that the free lists and the boxes hold exactly what they
+    /// Check that the arena is made of whole cells, that each header says
+    /// what a cell of its class is, that every reference is to a live cell and
+    /// carries its variant, that every count is the number of references to
+    /// its cell, and that the free lists and the boxes hold exactly what they
     /// should. `roots` is every reference held outside the heap.
     ///
     /// A constant's cell is never counted, and nothing else may be. That
@@ -86,31 +101,37 @@ impl Heap {
             at = end;
         }
 
-        for constant in self.constants.iter().filter(|c| **c != 0) {
-            let to = Cell(*constant);
-            match seen.get_mut(to.index()) {
+        for cell in self.cells() {
+            self.audit_header(cell)?;
+        }
+
+        for constant in self.constants.iter().flatten() {
+            let to = constant.index();
+            match seen.get_mut(to.at()) {
                 Some(n) if *n < FREE => *n = CONSTANT,
                 _ => return Err(AuditFault::Dangling { holder: None, to }.into()),
             }
+            self.audit_variant(None, *constant)?;
         }
 
-        let mut holds = |holder, value: Value| match value.as_cell() {
-            None => Ok(()),
-            Some(to) => match seen.get_mut(to.index()) {
-                Some(n) if *n < CONSTANT => {
-                    *n = n.saturating_add(1);
-                    Ok(())
-                }
-                Some(n) if *n == CONSTANT => Ok(()),
-                _ => Err(AuditFault::Dangling { holder, to }),
-            },
+        let mut holds = |holder, value: Value| {
+            let Some(cell) = value.as_cell() else {
+                return Ok(());
+            };
+            let to = cell.index();
+            match seen.get_mut(to.at()) {
+                Some(n) if *n < CONSTANT => *n = n.saturating_add(1),
+                Some(n) if *n == CONSTANT => {}
+                _ => return Err(AuditFault::Dangling { holder, to }),
+            }
+            self.audit_variant(holder, cell)
         };
         for root in roots {
             holds(None, root)?;
         }
         for cell in self.cells() {
-            let data = self.data(cell);
-            let values = data.get(held(kind_bits(self.header(cell)), data.len()));
+            let data = self.words(cell, 1);
+            let values = data.get(held(class(self.header(cell)), data.len()));
             for w in values.unwrap_or(&[]) {
                 holds(Some(cell), Value::from_bits(*w))?;
             }
@@ -118,7 +139,7 @@ impl Heap {
 
         for cell in self.cells() {
             let count = count(self.header(cell));
-            let holders = seen.get(cell.index()).copied().unwrap_or(0);
+            let holders = seen.get(cell.at()).copied().unwrap_or(0);
             let fault = match (holders, count) {
                 (CONSTANT, UNCOUNTED) => continue,
                 (CONSTANT, _) => AuditFault::CountedConstant { cell },
@@ -134,6 +155,65 @@ impl Heap {
         }
         self.audit_lists(seen)?;
         self.audit_boxes()
+    }
+
+    /// The header of `cell`, which is live, says what its class says. A long
+    /// cell whose box is missing is left for [`Self::audit_boxes`].
+    fn audit_header(&self, cell: Index) -> Result<(), AuditFault> {
+        let h = self.header(cell);
+        let misshapen = AuditFault::Misshapen { cell };
+        let kind = class(h).kind().ok_or(misshapen)?;
+        let words = self.words(cell, 1);
+        let fits = match self.slot(cell, h) {
+            None => scan(h) == kind.scan().of(words.len()),
+            Some(number) if !self.has_box(number) => return Ok(()),
+            Some(_) => scan(h) == 0 && words.len() >= ARENA_CELL_WORDS,
+        };
+        let fields = match kind {
+            Kind::Ctor => self.ctors.shape(class(h)).map(|(fields, _)| fields),
+            Kind::String
+            | Kind::BigInt
+            | Kind::Range
+            | Kind::Binary
+            | Kind::Handle
+            | Kind::BinarySlice
+            | Kind::Tuple
+            | Kind::Closure
+            | Kind::ArrayLeaf
+            | Kind::ArrayRoot
+            | Kind::ArrayBranch
+            | Kind::Map
+            | Kind::MapNode
+            | Kind::MapCollision => Some(words.len()),
+        };
+        if !fits || fields != Some(words.len()) {
+            return Err(misshapen);
+        }
+        if kind == Kind::Closure && self.closure_func(Cell::new(cell, 0)).is_none() {
+            return Err(AuditFault::NoFunction { cell });
+        }
+        Ok(())
+    }
+
+    /// Whether place `number` of the table of boxes holds one.
+    fn has_box(&self, number: u32) -> bool {
+        matches!(self.outside.get(number as usize), Some(Some(_)))
+    }
+
+    /// `cell`, which `holder` holds, carries the variant its class says.
+    fn audit_variant(&self, holder: Option<Index>, cell: Cell) -> Result<(), AuditFault> {
+        let (to, variant) = (cell.index(), cell.variant());
+        let shape = self.ctors.shape(class(self.header(to)));
+        if variant == shape.map_or(0, |(_, variant)| variant) {
+            Ok(())
+        } else {
+            let wrong = AuditFault::WrongVariant {
+                holder,
+                to,
+                variant,
+            };
+            Err(wrong)
+        }
     }
 
     /// Each free cell is on the list for its size, once.
@@ -155,13 +235,10 @@ impl Heap {
             }
         }
         match seen.iter().position(|slot| *slot == FREE) {
-            Some(at) => {
-                Err(
-                    Cell::at(at).map_or(AuditFault::NoCell { at }, |cell| AuditFault::Unlisted {
-                        cell,
-                    }),
-                )
-            }
+            Some(at) => Err(match Index::new(at) {
+                Some(cell) => AuditFault::Unlisted { cell },
+                None => AuditFault::NoCell { at },
+            }),
             None => Ok(()),
         }
     }
@@ -209,11 +286,11 @@ impl Heap {
     /// Each cell not yet freed, in the arena's order. It stops at the first
     /// word that should be a cell and is not, so ask only once the arena is
     /// known to be whole.
-    fn cells(&self) -> impl Iterator<Item = Cell> + '_ {
+    fn cells(&self) -> impl Iterator<Item = Index> + '_ {
         std::iter::successors(Some(1), |at| self.end_of(*at))
             .take_while(|at| *at < self.arena.len())
             .filter(|at| !self.is_free(*at))
-            .filter_map(Cell::at)
+            .filter_map(Index::new)
     }
 
     /// Whether the cell whose header is word `at` is free.
@@ -225,13 +302,13 @@ impl Heap {
     /// no whole cell there.
     fn end_of(&self, at: usize) -> Option<usize> {
         let h = *self.arena.get(at)?;
-        let words = match kind_of(h) {
-            Some(_) if !freed(h) => space(size(h)),
-            None if h == 0 => {
-                let link = self.arena.get(at.checked_add(1)?)?;
-                to_usize(high_u32(*link).into())
-            }
-            _ => return None,
+        let words = if h == FREED {
+            let link = self.arena.get(at.checked_add(1)?)?;
+            to_usize(high_u32(*link).into())
+        } else if freed(h) || size(h) > ARENA_CELL_WORDS {
+            return None;
+        } else {
+            space(size(h))
         };
         let end = at.checked_add(words)?;
         (words >= LEAST_WORDS && end <= self.arena.len()).then_some(end)
@@ -243,15 +320,33 @@ impl fmt::Display for AuditFault {
         match *self {
             AuditFault::NoCell { at } => write!(f, "the heap has no whole cell at word {at}"),
             AuditFault::Dangling {
-                holder: Some(Cell(holder)),
-                to: Cell(to),
-            } => write!(f, "cell {holder} holds cell {to}, which is not a live cell"),
-            AuditFault::Dangling {
-                holder: None,
-                to: Cell(to),
-            } => write!(f, "the run holds cell {to}, which is not a live cell"),
+                holder,
+                to: Index(to),
+            } => write!(
+                f,
+                "{} holds cell {to}, which is not a live cell",
+                Holder(holder)
+            ),
+            AuditFault::WrongVariant {
+                holder,
+                to: Index(to),
+                variant,
+            } => write!(
+                f,
+                "{} holds cell {to} as variant {variant}, which it is not",
+                Holder(holder)
+            ),
+            AuditFault::Misshapen { cell: Index(cell) } => {
+                write!(
+                    f,
+                    "the header of cell {cell} is none a cell of its class has"
+                )
+            }
+            AuditFault::NoFunction { cell: Index(cell) } => {
+                write!(f, "the closure cell {cell} has no function")
+            }
             AuditFault::Miscounted {
-                cell: Cell(cell),
+                cell: Index(cell),
                 count,
                 holders,
             } => write!(
@@ -262,19 +357,31 @@ impl fmt::Display for AuditFault {
                 f,
                 "the free list for {space} words names cell {to}, which is not a free cell of that size, or names it twice"
             ),
-            AuditFault::Unlisted { cell: Cell(cell) } => {
+            AuditFault::Unlisted { cell: Index(cell) } => {
                 write!(f, "the free cell {cell} is on no free list")
             }
-            AuditFault::NoBox { cell: Cell(cell) } => {
+            AuditFault::NoBox { cell: Index(cell) } => {
                 write!(f, "the long cell {cell} has no box of its own")
             }
             AuditFault::Boxes => f.write_str("the boxes of long cells do not add up"),
-            AuditFault::CountedConstant { cell: Cell(cell) } => {
+            AuditFault::CountedConstant { cell: Index(cell) } => {
                 write!(f, "cell {cell} is a constant's and can be freed")
             }
-            AuditFault::NeverCounted { cell: Cell(cell) } => {
+            AuditFault::NeverCounted { cell: Index(cell) } => {
                 write!(f, "cell {cell} can never be freed and is not a constant's")
             }
+        }
+    }
+}
+
+/// What holds a reference, as a fault names it.
+struct Holder(Option<Index>);
+
+impl fmt::Display for Holder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Some(Index(cell)) => write!(f, "cell {cell}"),
+            None => f.write_str("the run"),
         }
     }
 }

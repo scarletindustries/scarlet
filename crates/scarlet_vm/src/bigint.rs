@@ -86,7 +86,7 @@ pub(crate) fn wide(heap: &Heap, v: Value) -> Option<i128> {
         Some(n) => Some(i128::from(n)),
         None => v
             .as_cell()
-            .filter(|c| heap.kind(*c) == Some(crate::heap::Kind::BigInt))
+            .filter(|c| heap.is(*c, crate::heap::Kind::BigInt))
             .and_then(|c| heap.big_int_word(c)),
     }
 }

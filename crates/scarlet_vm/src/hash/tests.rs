@@ -54,6 +54,56 @@ fn the_hash_of_a_plain_value_does_not_depend_on_its_word() {
     assert_eq!(hash(&heap, Value::cell(pair)), 0x80b5_8fd6_9cae_65c5);
 }
 
+/// A constructor hashes by its type and variant and a closure by its function,
+/// whatever class its cell has and wherever it comes in the program's table.
+#[test]
+fn the_hash_of_a_constructor_does_not_depend_on_its_class() {
+    let name = |t, variant_idx| VariantRef {
+        type_id: scarlet_ir::TypeId(t),
+        variant_idx,
+    };
+    let int = |n| Value::int(n).expect("small");
+    let pinned: [(i32, u16, u64, u64); 5] = [
+        (263, 0, 0x734a_bf89_c28e_6c48, 0xd766_eb53_495b_a84f),
+        (263, 1, 0x2524_36fa_db40_f0fb, 0x3888_b980_e343_6820),
+        (264, 1, 0x8a82_d212_7222_adff, 0xb0b9_48b5_6ef1_c1c5),
+        (-1, 7, 0xf7cc_4904_b0ba_2132, 0x2466_61cd_022d_9075),
+        (
+            i32::MAX,
+            u16::MAX,
+            0x7d24_9483_a509_66a8,
+            0x7ef0_1472_87e7_9bf8,
+        ),
+    ];
+    let mut names: Vec<(VariantRef, usize)> = pinned
+        .iter()
+        .flat_map(|(t, v, ..)| [(name(*t, *v), 1), (name(*t, *v), 3)])
+        .collect();
+    for _ in 0..2 {
+        let (mut heap, ctors) = Heap::knowing(&names);
+        for (t, v, one, three) in pinned {
+            let ctor = |fields: usize| {
+                let at = names.iter().position(|n| *n == (name(t, v), fields));
+                ctors[at.expect("in the table")]
+            };
+            let inner = heap.ctor(ctor(1), &[int(7)]).expect("room");
+            assert_eq!(hash(&heap, Value::cell(inner)), one, "{t}.{v}");
+            let fields = [int(1), Value::cell(inner), Value::NIL];
+            let outer = heap.ctor(ctor(3), &fields).expect("room");
+            assert_eq!(hash(&heap, Value::cell(outer)), three, "{t}.{v}");
+        }
+        // The same names in another order have other classes.
+        names.reverse();
+    }
+    let mut heap = Heap::default();
+    let func = scarlet_ir::core_ir::FuncIdx(9);
+    let closure = heap.closure(func, &[int(1), Value::NIL]).expect("room");
+    let closure = Value::cell(closure);
+    assert_eq!(hash(&heap, closure), 0xc475_4c72_fc79_d1d8);
+    let pair = heap.tuple(&[closure; 2]).expect("room");
+    assert_eq!(hash(&heap, Value::cell(pair)), 0x3155_43af_dd95_f3c1);
+}
+
 /// An Int hashes by its number and not by its form, so the width of the
 /// small Int moves no Int key. The numbers are well inside the small
 /// range, at both of its ends, a step past each, and far past it.

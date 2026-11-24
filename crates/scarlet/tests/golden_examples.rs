@@ -296,6 +296,11 @@ suite! {
         // in-memory transport. Reaching that path is why `Io` has the shape it has.
         #[ignore = "needs the VM"]
         http_response,
+        // Constructors with fields and without, of types that spell some of them
+        // the same as the stdlib's: matched by every arm, rebuilt as another
+        // variant in place, shown, compared, hashed, and keyed by in maps whose
+        // order this pins.
+        variants,
         // Backpassing: `x <- f(args)` desugars to a trailing callback.
         backpassing,
         // The pipe operator: `x |> f(args)` desugars to `f(x, args)`.

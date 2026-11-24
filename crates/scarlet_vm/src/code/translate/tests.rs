@@ -3,7 +3,8 @@ use super::super::tests::{body, entries, named, program};
 use super::super::{Code, Op, Reg, load};
 use super::*;
 use crate::Audit;
-use scarlet_ir::core_ir::{CoreBind, LoweredFn, VariantRef};
+use scarlet_ir::TypeId;
+use scarlet_ir::core_ir::{CoreBind, LoweredFn, Program, TypeNames, VariantNames, VariantRef};
 use scarlet_ir::rty::RTy;
 
 fn code(src: &str) -> Code {
@@ -246,10 +247,120 @@ fn empty_program() -> Program {
     program("pub fn main() { Nil }\n")
 }
 
+/// The type of [`program_with_fields`] that its other types cannot be.
+const WITH_FIELDS: TypeId = TypeId(-1);
+
+/// [`empty_program`], with a type whose variant `n` has `n` fields, up to ten.
+fn program_with_fields() -> Program {
+    let mut program = empty_program();
+    let variants = (0..=10)
+        .map(|n| VariantNames {
+            name: format!("With{n}"),
+            fields: (0..n).map(|i| format!("f{i}")).collect(),
+        })
+        .collect();
+    let name = "WithFields".to_string();
+    program
+        .types
+        .insert(WITH_FIELDS, TypeNames { name, variants });
+    program
+}
+
+/// The variant of [`WITH_FIELDS`] that has `n` fields.
+fn with_fields(n: usize) -> VariantRef {
+    VariantRef {
+        type_id: WITH_FIELDS,
+        variant_idx: u16::try_from(n).expect("a few fields"),
+    }
+}
+
+/// A constructor or a pattern with another number of fields than the program
+/// lists, or of a constructor it does not list, is in a function that does not
+/// load. One it lists is told by the top of its word.
+#[test]
+fn a_constructor_the_program_does_not_list_does_not_load() {
+    let program = program_with_fields();
+    let source = Source::new(&program).expect("a whole program");
+    let load = |core: &CoreFn| {
+        let draft = translate(&source, core, Some(FuncIdx(0)), &mut Tables::default());
+        draft.map(|d| d.ins)
+    };
+    let builds = |variant, n: u32| {
+        function(
+            n,
+            CoreExpr::Tail(Atom::Ctor {
+                variant,
+                fields: (0..n).map(LocalId).collect(),
+                reuse: None,
+            }),
+        )
+    };
+    let matches = |variant, n: u32| {
+        let pat = CorePat::Ctor {
+            variant,
+            fields: (1..=n).map(bind).collect(),
+        };
+        let arm = CoreExpr::Tail(Atom::Local(LocalId(0)));
+        function(
+            1,
+            CoreExpr::Match {
+                scrut: LocalId(0),
+                arms: vec![(pat, arm)],
+                ty: RTy(0),
+            },
+        )
+    };
+    let wrong = |ctor, got, want| Some(Unfit::Broken(Broken::CtorFields { ctor, got, want }));
+    for (variant, got, want) in [(2, 1, 2), (2, 3, 2), (2, 0, 2), (0, 1, 0)] {
+        let ctor = with_fields(variant);
+        let core = builds(ctor, got);
+        assert_eq!(load(&core).err(), wrong(ctor, got as usize, want));
+        let core = matches(ctor, got);
+        assert_eq!(load(&core).err(), wrong(ctor, got as usize, want));
+    }
+    let past = with_fields(11);
+    let no_type = VariantRef {
+        type_id: TypeId(-2),
+        variant_idx: 0,
+    };
+    for ctor in [past, no_type] {
+        let unlisted = || Some(Unfit::Broken(Broken::NoCtor(ctor)));
+        assert_eq!(load(&builds(ctor, 1)).err(), unlisted());
+        assert_eq!(load(&builds(ctor, 0)).err(), unlisted());
+        assert_eq!(load(&matches(ctor, 1)).err(), unlisted());
+    }
+    let ins = load(&matches(with_fields(3), 3)).expect("it loads");
+    let [
+        Ins::JumpUnlessTag { tag, .. },
+        Ins::Field { index: 0, .. },
+        ..,
+    ] = ins[..]
+    else {
+        panic!("{ins:?}");
+    };
+    assert_eq!(tag.parts(), (3, true));
+    let ins = load(&matches(with_fields(0), 0)).expect("it loads");
+    let [Ins::JumpUnlessTag { tag, .. }, ..] = ins[..] else {
+        panic!("{ins:?}");
+    };
+    assert_eq!(tag.parts(), (0, false));
+    let ins = load(&builds(with_fields(0), 0)).expect("it loads");
+    let [Ins::Const { value, .. }, ..] = ins[..] else {
+        panic!("{ins:?}");
+    };
+    assert_eq!(value.bits(), Value::nullary(with_fields(0)).bits());
+    let ins = load(&builds(with_fields(4), 4)).expect("it loads");
+    let [Ins::Ctor { ctor, .. }, ..] = ins[..] else {
+        panic!("{ins:?}");
+    };
+    assert_eq!(source.ctors.name(ctor), Some(with_fields(4)));
+}
+
 /// `core` translated, as function 0 of a program with nothing in it but `main`.
 fn translated(core: &CoreFn) -> Result<Vec<Op>, Unfit> {
     let program = empty_program();
-    let draft = translate(&program, core, Some(FuncIdx(0)), &mut Tables::default());
+    let source = Source::new(&program).expect("a whole program");
+    let draft = translate(&source, core, Some(FuncIdx(0)), &mut Tables::default());
     draft.map(|d| d.ins.iter().map(Ins::op).collect())
 }
 
@@ -378,9 +489,10 @@ fn a_branch_on_what_a_branch_gives_reads_it() {
 #[test]
 fn a_comparison_something_jumps_past_is_kept() {
     let program = empty_program();
+    let source = Source::new(&program).expect("a whole program");
     let mut tables = Tables::default();
     let mut t = Translator {
-        program: &program,
+        source: &source,
         this: None,
         tables: &mut tables,
         ins: Vec::new(),
@@ -455,12 +567,8 @@ fn a_comparison_something_jumps_past_is_kept() {
 fn operands_that_do_not_fit_are_in_a_list() {
     let list = |n: usize| (0..n).map(|i| LocalId(i as u32 % 5)).collect::<Vec<_>>();
     let prim = |op: PrimOp, n: usize| Atom::prim(op, list(n));
-    let variant = VariantRef {
-        type_id: scarlet_ir::TypeId(1),
-        variant_idx: 0,
-    };
     let ctor = |n: usize, reuse: Option<u32>| Atom::Ctor {
-        variant,
+        variant: with_fields(n),
         fields: list(n),
         reuse: reuse.map(LocalId),
     };
@@ -510,8 +618,9 @@ fn operands_that_do_not_fit_are_in_a_list() {
                 body: Box::new(CoreExpr::Tail(Atom::Local(LocalId(5)))),
             },
         );
-        let program = empty_program();
-        let draft = translate(&program, &core, Some(FuncIdx(0)), &mut Tables::default())
+        let program = program_with_fields();
+        let source = Source::new(&program).expect("a whole program");
+        let draft = translate(&source, &core, Some(FuncIdx(0)), &mut Tables::default())
             .expect("it translates");
         assert_eq!(draft.ins[0].op(), want);
         let mut named = Vec::new();
@@ -534,10 +643,11 @@ fn operands_that_do_not_fit_are_in_a_list() {
 #[test]
 fn a_call_that_cannot_be_right_stops_the_run() {
     let program = empty_program();
+    let source = Source::new(&program).expect("a whole program");
     let main = program.main.expect("a main");
     let why = |core: &CoreFn, this| {
         let mut tables = Tables::default();
-        let draft = translate(&program, core, this, &mut tables).expect("it translates");
+        let draft = translate(&source, core, this, &mut tables).expect("it translates");
         assert_eq!(draft.ins.first().map(Ins::op), Some(Op::Bad));
         tables.whys.remove(0)
     };
@@ -583,7 +693,7 @@ fn a_call_that_cannot_be_right_stops_the_run() {
         },
     );
     let mut tables = Tables::default();
-    translate(&program, &goes_back, None, &mut tables).expect("it translates");
+    translate(&source, &goes_back, None, &mut tables).expect("it translates");
     assert_eq!(tables.whys, [Why::Broken(Broken::UndeclaredCase)]);
 }
 

@@ -23,13 +23,12 @@ use crate::array::{self, End, Seq};
 use crate::bigint;
 use crate::code::{
     Arg, Args, BitsOp, Code, Counted, Dead, Dst, Entry, Ins, Op, Over, Reg, Room, Shared, Src,
-    Variant,
 };
 use crate::counts::Counts;
 use crate::eq;
 use crate::float;
 use crate::frame::{self, CLOSURE, Link, RESULT, WINDOW, Window, window};
-use crate::heap::{DeadCell, Heap, Kind};
+use crate::heap::{Ctor, DeadCell, Heap};
 use crate::host::Host;
 use crate::int;
 use crate::map;
@@ -220,7 +219,7 @@ impl<'c, 'h> Machine<'c, 'h> {
                 env: None,
                 ran: Vec::new(),
                 passing: Vec::new(),
-                heap: Heap::default(),
+                heap: Heap::new(code.ctors.clone()),
             },
         }
     }
@@ -619,33 +618,27 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
             }
             Ins::Ctor {
                 dst,
-                variant,
+                ctor,
                 ref fields,
-            } => ctor(win.lend(), rest, dst, variant, fields)?,
-            Ins::CtorWide {
-                dst,
-                variant,
-                fields,
-            } => ctor_wide(win.lend(), rest, dst, variant, fields.args(&code.lists))?,
+            } => make(win.lend(), rest, dst, ctor, fields)?,
+            Ins::CtorWide { dst, ctor, fields } => {
+                make_wide(win.lend(), rest, dst, ctor, fields.args(&code.lists))?;
+            }
             Ins::CtorOver {
                 dst,
-                variant,
+                ctor,
                 ref fields,
                 reuse,
-            } => over_few(win.lend(), rest, dst, variant, fields, reuse)?,
+            } => over_few(win.lend(), rest, dst, ctor, fields, reuse)?,
             Ins::CtorOverWide {
                 dst,
-                variant,
+                ctor,
                 fields,
                 reuse,
-            } => over_wide(
-                win.lend(),
-                rest,
-                dst,
-                variant,
-                fields.args(&code.lists),
-                reuse,
-            )?,
+            } => {
+                let fields = fields.args(&code.lists);
+                over_wide(win.lend(), rest, dst, ctor, fields, reuse)?;
+            }
             Ins::Drop { reg } => win.drop(&mut rest.heap, reg)?,
             Ins::DropReuse { reg } => win.keep(&mut rest.heap, reg)?,
             Ins::Call0 { dst, own, to } => {
@@ -856,18 +849,14 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
                 captures,
             } => closure(win.lend(), rest, dst, func, captures.regs(&code.lists))?,
             Ins::GetCapture { dst, index } => {
-                let heap = &rest.heap;
-                let capture = match win.closure().as_cell() {
-                    Some(cell) if heap.kind(cell) == Some(Kind::Closure) => {
-                        heap.capture(cell, index as usize)
+                let closure = win.closure().as_cell();
+                match closure.and_then(|c| rest.heap.near_capture(c, index)) {
+                    Some(v) => {
+                        let v = rest.share(v)?;
+                        win.put(&mut rest.heap, dst, v)?;
                     }
-                    _ => None,
-                };
-                let Some(v) = capture else {
-                    return Err(no_capture(code, pc, index));
-                };
-                let v = rest.share(v)?;
-                win.put(&mut rest.heap, dst, v)?;
+                    None => far_capture(win.lend(), rest, dst, index, pc)?,
+                }
             }
             // A frame that runs as a plain function has no closure cell.
             Ins::GetSelf { dst, this } => {
@@ -878,62 +867,46 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
                 win.put(&mut rest.heap, dst, v)?;
             }
             Ins::Jump { to } => pc = to.index(),
-            Ins::JumpUnlessVariant { src, variant, to } => {
-                if !rest.is_variant(win.look(src), variant.get()) {
+            // A test reads where it jumps to only when it jumps. Read before
+            // the test, it would be one more load for a test that goes on.
+            Ins::JumpUnlessTag { src, tag, ref to } => {
+                if win.look(src).tag() != tag {
                     pc = to.index();
                 }
             }
-            Ins::JumpUnlessInt { src, n, to } => {
+            Ins::JumpUnlessInt { src, n, ref to } => {
                 if !rest.is_int(win.look(src), n) {
                     pc = to.index();
                 }
             }
-            Ins::JumpUnlessFloat { src, x, to } => {
+            Ins::JumpUnlessFloat { src, x, ref to } => {
                 if !matches!(win.look(src).view(), View::Float(f) if f == x) {
                     pc = to.index();
                 }
             }
-            Ins::JumpUnlessStr { src, text, to } => {
+            Ins::JumpUnlessStr { src, text, ref to } => {
                 if !rest.is_text(win.look(src), text)? {
                     pc = to.index();
                 }
             }
-            Ins::JumpUnlessBinary { src, bits, to } => {
+            Ins::JumpUnlessBinary { src, bits, ref to } => {
                 if !rest.is_binary(win.look(src), bits)? {
                     pc = to.index();
                 }
             }
             Ins::Field { dst, src, index } => {
-                let heap = &rest.heap;
-                let field = match win.look(src).as_cell() {
-                    Some(cell) if heap.kind(cell) == Some(Kind::Ctor) => {
-                        heap.field(cell, usize::from(index))
+                let cell = win.look(src).as_cell();
+                match cell.and_then(|c| rest.heap.near_field(c, usize::from(index))) {
+                    Some(v) => {
+                        let v = rest.share(v)?;
+                        win.put(&mut rest.heap, dst, v)?;
                     }
-                    _ => None,
-                };
-                let Some(field) = field else {
-                    return Err(Stop::broken(Broken::NoField { index }));
-                };
-                let field = rest.share(field)?;
-                win.put(&mut rest.heap, dst, field)?;
+                    None => far_field(win.lend(), rest, dst, src, index)?,
+                }
             }
             Ins::Tuple { dst, elements } => tuple(win.lend(), rest, dst, elements.regs())?,
             Ins::TupleWide { dst, elements } => {
                 tuple(win.lend(), rest, dst, elements.regs(&code.lists))?;
-            }
-            Ins::Element { dst, src, index } => {
-                let heap = &rest.heap;
-                let element = match win.look(src).as_cell() {
-                    Some(cell) if heap.kind(cell) == Some(Kind::Tuple) => {
-                        heap.element(cell, usize::from(index))
-                    }
-                    _ => None,
-                };
-                let Some(element) = element else {
-                    return Err(Stop::broken(Broken::NoElement { index }));
-                };
-                let element = rest.share(element)?;
-                win.put(&mut rest.heap, dst, element)?;
             }
             Ins::Array { dst, elements } => array(win.lend(), rest, dst, elements.regs())?,
             Ins::ArrayWide { dst, elements } => {
@@ -1050,7 +1023,7 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
                 let found = rest.index(win.look(src), win.look(index))?;
                 let v = match found {
                     Some(v) => rest.some(v)?,
-                    None => Value::nullary(code.abi.none),
+                    None => code.abi.none,
                 };
                 win.put(&mut rest.heap, dst, v)?;
             }
@@ -1068,7 +1041,7 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
                 win.put(&mut rest.heap, dst, v)?;
             }
             Ins::Bad { why } => return Err(code.why(why)),
-            Ins::JumpIfFalse { cond, to } => match win.look(cond).view() {
+            Ins::JumpIfFalse { cond, ref to } => match win.look(cond).view() {
                 View::Bool(true) => {}
                 View::Bool(false) => pc = to.index(),
                 v @ (View::Float(_)
@@ -1111,52 +1084,52 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
                 let cell = map::delete_owned(&mut rest.heap, m, k).map_err(fault)?;
                 win.put(&mut rest.heap, dst, Value::cell(cell))?;
             }
-            Ins::JumpUnlessIntEq { a, b, to } => {
+            Ins::JumpUnlessIntEq { a, b, ref to } => {
                 jump!(win, rest, pc, to, int_holds(a, b), Compare::Eq);
             }
-            Ins::JumpUnlessIntNe { a, b, to } => {
+            Ins::JumpUnlessIntNe { a, b, ref to } => {
                 jump!(win, rest, pc, to, int_holds(a, b), Compare::Ne);
             }
-            Ins::JumpUnlessIntLt { a, b, to } => {
+            Ins::JumpUnlessIntLt { a, b, ref to } => {
                 jump!(win, rest, pc, to, int_holds(a, b), Compare::LT);
             }
-            Ins::JumpUnlessIntLe { a, b, to } => {
+            Ins::JumpUnlessIntLe { a, b, ref to } => {
                 jump!(win, rest, pc, to, int_holds(a, b), Compare::LE);
             }
-            Ins::JumpUnlessIntEqK { a, k, to } => {
+            Ins::JumpUnlessIntEqK { a, k, ref to } => {
                 jump!(win, rest, pc, to, int_holds_k(a, k), Compare::Eq);
             }
-            Ins::JumpUnlessIntNeK { a, k, to } => {
+            Ins::JumpUnlessIntNeK { a, k, ref to } => {
                 jump!(win, rest, pc, to, int_holds_k(a, k), Compare::Ne);
             }
-            Ins::JumpUnlessIntLtK { a, k, to } => {
+            Ins::JumpUnlessIntLtK { a, k, ref to } => {
                 jump!(win, rest, pc, to, int_holds_k(a, k), Compare::LT);
             }
-            Ins::JumpUnlessIntLeK { a, k, to } => {
+            Ins::JumpUnlessIntLeK { a, k, ref to } => {
                 jump!(win, rest, pc, to, int_holds_k(a, k), Compare::LE);
             }
-            Ins::JumpUnlessIntGtK { a, k, to } => {
+            Ins::JumpUnlessIntGtK { a, k, ref to } => {
                 jump!(win, rest, pc, to, int_holds_k(a, k), Compare::GT);
             }
-            Ins::JumpUnlessIntGeK { a, k, to } => {
+            Ins::JumpUnlessIntGeK { a, k, ref to } => {
                 jump!(win, rest, pc, to, int_holds_k(a, k), Compare::GE);
             }
-            Ins::JumpUnlessFloatLt { a, b, to } => {
+            Ins::JumpUnlessFloatLt { a, b, ref to } => {
                 jump!(win, rest, pc, to, float_holds(a, b), Order::Lt);
             }
-            Ins::JumpUnlessFloatLe { a, b, to } => {
+            Ins::JumpUnlessFloatLe { a, b, ref to } => {
                 jump!(win, rest, pc, to, float_holds(a, b), Order::Le);
             }
-            Ins::JumpUnlessFloatLtK { a, k, to } => {
+            Ins::JumpUnlessFloatLtK { a, k, ref to } => {
                 jump!(win, rest, pc, to, float_holds_k(a, k), Order::Lt);
             }
-            Ins::JumpUnlessFloatLeK { a, k, to } => {
+            Ins::JumpUnlessFloatLeK { a, k, ref to } => {
                 jump!(win, rest, pc, to, float_holds_k(a, k), Order::Le);
             }
-            Ins::JumpUnlessFloatGtK { a, k, to } => {
+            Ins::JumpUnlessFloatGtK { a, k, ref to } => {
                 jump!(win, rest, pc, to, float_holds_k(a, k), Order::Gt);
             }
-            Ins::JumpUnlessFloatGeK { a, k, to } => {
+            Ins::JumpUnlessFloatGeK { a, k, ref to } => {
                 jump!(win, rest, pc, to, float_holds_k(a, k), Order::Ge);
             }
             // The frame is ending, so the result's register gives its
@@ -1276,31 +1249,37 @@ fn lost_window() -> Stop {
 // What an instruction does that is more than a few lines, out of line so
 // that the loop keeps what it holds in the machine's registers.
 
-/// A new cell for `variant`.
+/// A new cell for `ctor`.
 #[inline(always)]
-fn ctor(
+fn make(
     mut win: Window<'_>,
     rest: &mut Rest<'_, '_>,
     dst: Dst<Reg>,
-    variant: Variant,
+    ctor: Ctor,
     fields: &Args<Reg, 6>,
 ) -> Result<(), Stop> {
     let mut values = UNSET;
     let values = pass_few(win.lend(), rest, fields, &mut values)?;
-    let cell = rest.heap.ctor(variant.get(), values).map_err(fault)?;
-    Ok(win.put(&mut rest.heap, dst, Value::cell(cell))?)
+    // The two ways do not join, so taking a freed cell is one straight line.
+    match rest.heap.ctor_in_freed(ctor, values) {
+        Some(cell) => Ok(win.put(&mut rest.heap, dst, Value::cell(cell))?),
+        None => {
+            let cell = rest.heap.ctor_at_end(ctor, values).map_err(fault)?;
+            Ok(win.put(&mut rest.heap, dst, Value::cell(cell))?)
+        }
+    }
 }
 
 #[inline(never)]
-fn ctor_wide(
+fn make_wide(
     mut win: Window<'_>,
     rest: &mut Rest<'_, '_>,
     dst: Dst<Reg>,
-    variant: Variant,
+    ctor: Ctor,
     fields: &[Arg<Reg>],
 ) -> Result<(), Stop> {
     pass_all(win.lend(), rest, fields)?;
-    let cell = rest.heap.ctor(variant.get(), &rest.passing);
+    let cell = rest.heap.ctor(ctor, &rest.passing);
     rest.passing.clear();
     Ok(win.put(&mut rest.heap, dst, Value::cell(cell.map_err(fault)?))?)
 }
@@ -1312,7 +1291,7 @@ fn over(
     mut win: Window<'_>,
     rest: &mut Rest<'_, '_>,
     dst: Dst<Reg>,
-    variant: Variant,
+    ctor: Ctor,
     values: &[Value],
     reuse: Over<Reg>,
 ) -> Result<(), Stop> {
@@ -1323,13 +1302,10 @@ fn over(
     let heap = &mut rest.heap;
     let fits = parked.as_cell();
     let cell = match fits.filter(|c| heap.fits_ctor(*c, values.len())) {
-        Some(cell) => {
-            heap.ctor_in(cell, variant.get(), values);
-            cell
-        }
+        Some(cell) => heap.ctor_in(cell, ctor, values),
         None => {
             rest.release(parked)?;
-            let made = rest.heap.ctor(variant.get(), values);
+            let made = rest.heap.ctor(ctor, values);
             made.map_err(fault)?
         }
     };
@@ -1341,13 +1317,13 @@ fn over_few(
     mut win: Window<'_>,
     rest: &mut Rest<'_, '_>,
     dst: Dst<Reg>,
-    variant: Variant,
+    ctor: Ctor,
     fields: &Args<Reg, 5>,
     reuse: Over<Reg>,
 ) -> Result<(), Stop> {
     let mut values = [Value::UNSET; 5];
     let values = pass_few(win.lend(), rest, fields, &mut values)?;
-    over(win.lend(), rest, dst, variant, values, reuse)
+    over(win.lend(), rest, dst, ctor, values, reuse)
 }
 
 #[inline(never)]
@@ -1355,13 +1331,13 @@ fn over_wide(
     mut win: Window<'_>,
     rest: &mut Rest<'_, '_>,
     dst: Dst<Reg>,
-    variant: Variant,
+    ctor: Ctor,
     fields: &[Arg<Reg>],
     reuse: Over<Reg>,
 ) -> Result<(), Stop> {
     pass_all(win.lend(), rest, fields)?;
     let values = std::mem::take(&mut rest.passing);
-    over(win.lend(), rest, dst, variant, &values, reuse)?;
+    over(win.lend(), rest, dst, ctor, &values, reuse)?;
     rest.passing = values;
     rest.passing.clear();
     Ok(())
@@ -1637,6 +1613,40 @@ fn ran_past_end(code: &Code, pc: usize) -> Stop {
     Stop::broken(Broken::RanPastEnd {
         func: name_before(code, pc),
     })
+}
+
+/// Field `index` of the value in `src` into `dst`, for a cell too long for the
+/// arena. Any other that comes here has no such field.
+#[inline(never)]
+fn far_field(
+    mut win: Window<'_>,
+    rest: &mut Rest<'_, '_>,
+    dst: Dst<Reg>,
+    src: Src<Reg>,
+    index: u16,
+) -> Result<(), Stop> {
+    let cell = win.look(src).as_cell();
+    let field = cell.and_then(|c| rest.heap.boxed_field(c, usize::from(index)));
+    let v = field.ok_or_else(|| Stop::broken(Broken::NoField { index }))?;
+    let v = rest.share(v)?;
+    Ok(win.put(&mut rest.heap, dst, v)?)
+}
+
+/// [`far_field`], of a capture of the closure the frame runs as, for the
+/// instruction before `pc`.
+#[inline(never)]
+fn far_capture(
+    mut win: Window<'_>,
+    rest: &mut Rest<'_, '_>,
+    dst: Dst<Reg>,
+    index: u32,
+    pc: usize,
+) -> Result<(), Stop> {
+    let cell = win.closure().as_cell();
+    let capture = cell.and_then(|c| rest.heap.boxed_capture(c, index));
+    let v = capture.ok_or_else(|| no_capture(rest.code, pc, index))?;
+    let v = rest.share(v)?;
+    Ok(win.put(&mut rest.heap, dst, v)?)
 }
 
 /// The stop for a read of capture `index`, by the instruction before `pc`.

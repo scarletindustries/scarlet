@@ -39,11 +39,12 @@
 //! is not there `None` rather than a wrong read.
 
 use num_bigint::BigInt;
-use scarlet_ir::core_ir::{ParseReasons, VariantRef};
+use scarlet_ir::core_ir::ParseReasons;
 use simd_json::StaticNode;
 use simd_json::value::tape::Node;
 
 use crate::binary::{self, Bits};
+use crate::code::Built;
 use crate::heap::{Cell, Heap};
 use crate::value::{Value, View};
 use crate::word::low_byte;
@@ -321,8 +322,8 @@ pub(crate) enum TooLarge {
 }
 
 impl Reason {
-    /// Returns the `scarlet/json.ParseReason` constructor for this reason.
-    pub(crate) fn variant(&self, r: &ParseReasons) -> VariantRef {
+    /// The `scarlet/json.ParseReason` this reason is.
+    pub(crate) fn value(&self, r: &ParseReasons<Built>) -> Value {
         use simd_json::ErrorType as E;
         match self {
             Reason::Syntax(e) => match e.error() {

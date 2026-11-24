@@ -22,15 +22,16 @@
 use scarlet_ir::core_ir::{ConstId, FuncIdx, GlobalSlot};
 use scarlet_ir::intrinsic::Intrinsic;
 
+use crate::heap::Ctor;
 use crate::ops::NumOp;
-use crate::value::{Float, SmallInt, Value};
+use crate::value::{Float, SmallInt, Tag, Value};
 
 mod fields;
 
 pub(crate) use fields::{
     Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, Dst, EntryPc, Hit, KeepList, Kept, Last,
     Lists, LookList, Looks, Names, Newline, Over, Part, Pc, Place, Places, Reg, Role, Room,
-    ShareList, Shared, Shares, Src, Taken, TextId, Unplaced, VReg, Variant, WhyId,
+    ShareList, Shared, Shares, Src, Taken, TextId, Unplaced, VReg, WhyId,
 };
 pub(super) use fields::{Callee, Label, LastReg, OwnEntry, OwnRoom};
 
@@ -234,15 +235,15 @@ instructions! {
     /// Every string in `parts`, joined in order.
     Concat { dst: Dst<R>, parts: Looks<R, 8> },
     ConcatWide { dst: Dst<R>, parts: LookList },
-    /// A new cell for constructor `variant`, holding `fields`. A constructor
-    /// with no fields needs no cell, so it is an [`Ins::Const`] instead.
-    Ctor { dst: Dst<R>, variant: Variant, fields: Args<R, 6> },
-    CtorWide { dst: Dst<R>, variant: Variant, fields: ArgList },
+    /// A new cell for constructor `ctor`, holding `fields`. A constructor with
+    /// no fields needs no cell, so it is an [`Ins::Const`] instead.
+    Ctor { dst: Dst<R>, ctor: Ctor, fields: Args<R, 6> },
+    CtorWide { dst: Dst<R>, ctor: Ctor, fields: ArgList },
     /// [`Ins::Ctor`], over the cell that an [`Ins::DropReuse`] above left in
     /// `reuse`. If the register holds anything else, it is given up and the
     /// constructor makes a new cell.
-    CtorOver { dst: Dst<R>, variant: Variant, fields: Args<R, 5>, reuse: Over<R> },
-    CtorOverWide { dst: Dst<R>, variant: Variant, fields: ArgList, reuse: Over<R> },
+    CtorOver { dst: Dst<R>, ctor: Ctor, fields: Args<R, 5>, reuse: Over<R> },
+    CtorOverWide { dst: Dst<R>, ctor: Ctor, fields: ArgList, reuse: Over<R> },
     /// Perceus's last use of `reg`. It gives up the reference now instead of
     /// at the frame's end.
     Drop { reg: Dead<R> },
@@ -325,8 +326,9 @@ instructions! {
     MapFind { dst: Hit<R>, map: Src<R>, key: Src<R>, to: R::To },
     /// `map::delete`, as [`Ins::MapSetOwned`] is `map::set`.
     MapDeleteOwned { dst: Dst<R>, map: Taken<R>, key: Src<R> },
-    /// Continue at `to` unless `src` is constructor `variant`.
-    JumpUnlessVariant { src: Src<R>, variant: Variant, to: R::To },
+    /// Continue at `to` unless the top half of the word in `src` is `tag`,
+    /// which says which variant of its type the value is. No cell is looked at.
+    JumpUnlessTag { src: Src<R>, tag: Tag, to: R::To },
     /// Continue at `to` unless `src` is the Int `n`.
     JumpUnlessInt { src: Src<R>, n: i64, to: R::To },
     /// Continue at `to` unless `src` is the Float `x`, compared as `==` does,
@@ -339,8 +341,6 @@ instructions! {
     /// A new tuple holding `elements`.
     Tuple { dst: Dst<R>, elements: Shares<R, 8> },
     TupleWide { dst: Dst<R>, elements: ShareList },
-    /// Element `index` of the tuple in `src`.
-    Element { dst: Dst<R>, src: Src<R>, index: u16 },
     /// A call to a `@vm` built-in the VM runs ([`super::built`]).
     Builtin { dst: Dst<R>, intrinsic: Intrinsic, args: Looks<R, 3> },
     /// How many frames there are. A tail call reuses its frame, so a million
@@ -388,7 +388,8 @@ instructions! {
     /// `xs[i] or d`. It gives element `index` of the array in `src`, or
     /// `default` when it has no such element.
     ArrayIndexOr { dst: Dst<R>, src: Src<R>, index: Src<R>, default: Shared<R> },
-    /// Field `index` of the constructor in `src`.
+    /// Field `index` of the constructor in `src`, or element `index` of the
+    /// tuple there.
     Field { dst: Dst<R>, src: Src<R>, index: u16 },
     /// Stop the run, because the program broke a promise the compiler makes,
     /// or reached something the VM does not run yet. `why` says which. A

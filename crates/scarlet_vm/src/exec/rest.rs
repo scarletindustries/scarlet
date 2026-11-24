@@ -6,14 +6,14 @@
 
 use num_bigint::Sign;
 use num_traits::{FromPrimitive, ToPrimitive};
-use scarlet_ir::core_ir::{ConstId, FuncIdx, HttpTypes, IoErrors, JsonTypes, VariantRef};
+use scarlet_ir::core_ir::{ConstId, FuncIdx, HttpTypes, IoErrors, JsonTypes};
 use scarlet_ir::intrinsic::Intrinsic;
 
 use crate::Stop;
 use crate::array::{self, End, Seq};
 use crate::bigint::{self, Int};
 use crate::binary::{self, Bits};
-use crate::code::{BinaryId, BitsOp, Code, Entry, Reg, TextId};
+use crate::code::{BinaryId, BitsOp, Built, Code, CtorOf, Entry, Reg, TextId};
 use crate::float;
 use crate::frame::WINDOW;
 use crate::heap::{Cell, DeadCell, Fault, Heap, Kind};
@@ -158,7 +158,7 @@ impl<'c> Rest<'c, '_> {
                         let at = bigint::int(&mut self.heap, at).map_err(fault)?;
                         self.some(at)
                     }
-                    None => Ok(Value::nullary(self.code.abi.none)),
+                    None => Ok(self.code.abi.none),
                 }
             }
             // This takes digits only, with no sign. Empty input or any other
@@ -179,7 +179,7 @@ impl<'c> Rest<'c, '_> {
                         let n = bigint::value(&mut self.heap, n).map_err(fault)?;
                         self.some(n)
                     }
-                    None => Ok(Value::nullary(self.code.abi.none)),
+                    None => Ok(self.code.abi.none),
                 }
             }
             Intrinsic::BinaryEqIgnoreAsciiCase => {
@@ -278,7 +278,7 @@ impl<'c> Rest<'c, '_> {
                         let n = bigint::value(&mut self.heap, n).map_err(fault)?;
                         self.some(n)
                     }
-                    None => Ok(Value::nullary(self.code.abi.none)),
+                    None => Ok(self.code.abi.none),
                 }
             }
             // These treat an Int as an endless row of two's-complement bits
@@ -450,20 +450,14 @@ impl<'c> Rest<'c, '_> {
                         let tape = binary::from_bytes(&mut self.heap, &tape);
                         let tape = Value::cell(tape.map_err(fault)?);
                         let root = Value::int(0).unwrap_or(Value::NIL);
-                        let doc = self
-                            .heap
-                            .ctor(types.doc, &[arena, tape, root])
-                            .map_err(fault)?;
-                        self.ok(Value::cell(doc))
+                        let doc = self.build(types.doc, [arena, tape, root])?;
+                        self.ok(doc)
                     }
                     Err(e) => {
                         let offset = bigint::int(&mut self.heap, e.offset).map_err(fault)?;
-                        let reason = Value::nullary(e.reason.variant(&types.reasons));
-                        let error = self
-                            .heap
-                            .ctor(types.parse_error, &[offset, reason])
-                            .map_err(fault)?;
-                        self.err(Value::cell(error))
+                        let reason = e.reason.value(&types.reasons);
+                        let error = self.build(types.parse_error, [offset, reason])?;
+                        self.err(error)
                     }
                 }
             }
@@ -498,7 +492,7 @@ impl<'c> Rest<'c, '_> {
                         let doc = self.doc_at(&d, at)?;
                         self.some(doc)
                     }
-                    None => Ok(Value::nullary(self.code.abi.none)),
+                    None => Ok(self.code.abi.none),
                 }
             }
             Intrinsic::JsonEntries => {
@@ -533,7 +527,7 @@ impl<'c> Rest<'c, '_> {
                         let s = Value::cell(self.heap.string(&t).map_err(fault)?);
                         self.some(s)
                     }
-                    None => Ok(Value::nullary(self.code.abi.none)),
+                    None => Ok(self.code.abi.none),
                 }
             }
             Intrinsic::JsonInt | Intrinsic::JsonIntText => {
@@ -550,21 +544,21 @@ impl<'c> Rest<'c, '_> {
                         };
                         self.some(found)
                     }
-                    None => Ok(Value::nullary(self.code.abi.none)),
+                    None => Ok(self.code.abi.none),
                 }
             }
             Intrinsic::JsonFloat => {
                 let d = self.doc(v)?;
                 match self.tape(&d)?.float(d.idx) {
                     Some(f) => self.some(Value::float(f)),
-                    None => Ok(Value::nullary(self.code.abi.none)),
+                    None => Ok(self.code.abi.none),
                 }
             }
             Intrinsic::JsonBool => {
                 let d = self.doc(v)?;
                 match self.tape(&d)?.bool(d.idx) {
                     Some(b) => self.some(Value::bool(b)),
-                    None => Ok(Value::nullary(self.code.abi.none)),
+                    None => Ok(self.code.abi.none),
                 }
             }
             Intrinsic::JsonEncode => {
@@ -608,13 +602,11 @@ impl<'c> Rest<'c, '_> {
                 let te: Vec<&[u8]> = te.iter().map(Vec::as_slice).collect();
                 let cl: Vec<&[u8]> = cl.iter().map(Vec::as_slice).collect();
                 match http::framing(&te, &cl) {
-                    http::Framing::NoBody => Ok(Value::nullary(types.no_body)),
-                    http::Framing::Chunked => Ok(Value::nullary(types.chunked)),
+                    http::Framing::NoBody => Ok(types.no_body),
+                    http::Framing::Chunked => Ok(types.chunked),
                     http::Framing::Length(n) => {
                         let n = bigint::int(&mut self.heap, n).map_err(fault)?;
-                        Ok(Value::cell(
-                            self.heap.ctor(types.length, &[n]).map_err(fault)?,
-                        ))
+                        self.build(types.length, [n])
                     }
                     http::Framing::Invalid(r) => self.with_status(types.framing_invalid, r),
                 }
@@ -634,7 +626,7 @@ impl<'c> Rest<'c, '_> {
                         let value = self.share(value)?;
                         self.some(value)
                     }
-                    (_, None) => Ok(Value::nullary(self.code.abi.none)),
+                    (_, None) => Ok(self.code.abi.none),
                 }
             }
             Intrinsic::HttpHeadersValid => {
@@ -684,7 +676,7 @@ impl<'c> Rest<'c, '_> {
                 let data = self.binary(args.get(1))?;
                 if data.len % 8 != 0 {
                     let unaligned = self.io_errors()?.unaligned_binary;
-                    return self.err(Value::nullary(unaligned));
+                    return self.err(unaligned);
                 }
                 let bytes = binary::bytes(&self.heap, data);
                 match self.host.write_file(&path, &bytes) {
@@ -741,7 +733,7 @@ impl<'c> Rest<'c, '_> {
                         let found = self.share(found)?;
                         self.some(found)
                     }
-                    None => Ok(Value::nullary(self.code.abi.none)),
+                    None => Ok(self.code.abi.none),
                 }
             }
             Intrinsic::MapHas => {
@@ -994,37 +986,41 @@ impl<'c> Rest<'c, '_> {
 
     /// The base a `scarlet/binary.Radix` stands for.
     fn radix(&self, v: Value) -> Result<u32, Stop> {
-        match (v.view(), self.code.abi.radix) {
-            (View::Nullary(r), Some(radix)) if r == radix.dec => Ok(10),
-            (View::Nullary(r), Some(radix)) if r == radix.hex => Ok(16),
+        match self.code.abi.radix {
+            Some(radix) if v.bits() == radix.dec.bits() => Ok(10),
+            Some(radix) if v.bits() == radix.hex.bits() => Ok(16),
             _ => Err(Stop::broken(Broken::NotRadix(v.view()))),
         }
     }
 
+    /// A new cell for `ctor`, holding the references of `fields`.
+    #[inline]
+    fn build<const N: usize>(
+        &mut self,
+        ctor: CtorOf<N>,
+        fields: [Value; N],
+    ) -> Result<Value, Stop> {
+        let cell = self.heap.ctor(ctor.ctor(), &fields);
+        Ok(Value::cell(cell.map_err(fault)?))
+    }
+
     /// `Some(v)`, holding `v`'s reference.
     pub(super) fn some(&mut self, v: Value) -> Result<Value, Stop> {
-        let cell = self.heap.ctor(self.code.abi.some, &[v]).map_err(fault)?;
-        Ok(Value::cell(cell))
+        self.build(self.code.abi.some, [v])
     }
 
     /// `Ok(v)`, holding `v`'s reference.
     fn ok(&mut self, v: Value) -> Result<Value, Stop> {
-        let cell = self.heap.ctor(self.code.abi.ok, &[v]).map_err(fault)?;
-        Ok(Value::cell(cell))
+        self.build(self.code.abi.ok, [v])
     }
 
     /// `Err(v)`, holding `v`'s reference.
     fn err(&mut self, v: Value) -> Result<Value, Stop> {
-        let cell = self.heap.ctor(self.code.abi.err, &[v]).map_err(fault)?;
-        Ok(Value::cell(cell))
+        self.build(self.code.abi.err, [v])
     }
 
     fn err_nil(&mut self) -> Result<Value, Stop> {
-        let cell = self
-            .heap
-            .ctor(self.code.abi.err, &[Value::NIL])
-            .map_err(fault)?;
-        Ok(Value::cell(cell))
+        self.build(self.code.abi.err, [Value::NIL])
     }
 
     /// The environment as a map. When a name is listed twice, the first
@@ -1051,7 +1047,7 @@ impl<'c> Rest<'c, '_> {
         Ok(env)
     }
 
-    fn io_errors(&self) -> Result<IoErrors, Stop> {
+    fn io_errors(&self) -> Result<IoErrors<Built>, Stop> {
         self.code.abi.io.ok_or(Stop::broken(Broken::NoIoTypes))
     }
 
@@ -1067,20 +1063,20 @@ impl<'c> Rest<'c, '_> {
             IoError::ReadOnlyFilesystem => io.read_only_filesystem,
             IoError::FilesystemLoop => io.filesystem_loop,
             IoError::FileTooLarge => io.file_too_large,
-            IoError::StorageFull => return self.err(Value::nullary(io.storage_full)),
-            IoError::QuotaExceeded => return self.err(Value::nullary(io.quota_exceeded)),
+            IoError::StorageFull => return self.err(io.storage_full),
+            IoError::QuotaExceeded => return self.err(io.quota_exceeded),
             IoError::Errno(code) => {
                 let code = bigint::int(&mut self.heap, code).map_err(fault)?;
-                let error = Value::cell(self.heap.ctor(io.errno, &[code]).map_err(fault)?);
+                let error = self.build(io.errno, [code])?;
                 return self.err(error);
             }
         };
         let path = Value::cell(self.heap.string(path).map_err(fault)?);
-        let error = Value::cell(self.heap.ctor(about_path, &[path]).map_err(fault)?);
+        let error = self.build(about_path, [path])?;
         self.err(error)
     }
 
-    fn json_types(&self) -> Result<JsonTypes, Stop> {
+    fn json_types(&self) -> Result<JsonTypes<Built>, Stop> {
         self.code.abi.json.ok_or(Stop::broken(Broken::NoJsonTypes))
     }
 
@@ -1090,7 +1086,7 @@ impl<'c> Rest<'c, '_> {
         let types = self.json_types()?;
         let not_a_doc = || Stop::broken(Broken::NotADoc(v.view()));
         let cell = v.as_cell().ok_or_else(not_a_doc)?;
-        if self.heap.kind(cell) != Some(Kind::Ctor) || self.heap.variant(cell) != types.doc {
+        if self.heap.ctor_of(cell) != Some(types.doc.ctor()) {
             return Err(not_a_doc());
         }
         let field = |i| self.heap.field(cell, i).ok_or_else(not_a_doc);
@@ -1117,11 +1113,7 @@ impl<'c> Rest<'c, '_> {
         let types = self.json_types()?;
         let idx = bigint::int(&mut self.heap, idx).map_err(fault)?;
         let (arena, tape) = (self.share(d.arena)?, self.share(d.tape)?);
-        let cell = self
-            .heap
-            .ctor(types.doc, &[arena, tape, idx])
-            .map_err(fault)?;
-        Ok(Value::cell(cell))
+        self.build(types.doc, [arena, tape, idx])
     }
 
     /// The `scarlet/json.Json` tree `root`, as JSON text. The walk keeps a
@@ -1149,33 +1141,24 @@ impl<'c> Rest<'c, '_> {
                 Step::Value(v) => v,
             };
             let not_json = || Stop::broken(Broken::NotJson(v.view()));
-            let cell = match v.view() {
-                View::Nullary(n) if n == types.null => {
-                    out.extend_from_slice(b"null");
-                    continue;
-                }
-                View::Cell(cell) if self.heap.kind(cell) == Some(Kind::Ctor) => cell,
-                View::Nullary(_)
-                | View::Cell(_)
-                | View::Int(_)
-                | View::Float(_)
-                | View::Nil
-                | View::Bool(_)
-                | View::Func(_) => return Err(not_json()),
-            };
-            let variant = self.heap.variant(cell);
+            if v.bits() == types.null.bits() {
+                out.extend_from_slice(b"null");
+                continue;
+            }
+            let cell = v.as_cell().ok_or_else(not_json)?;
+            let variant = self.heap.ctor_of(cell).ok_or_else(not_json)?;
             let inner = self.heap.field(cell, 0).ok_or_else(not_json)?;
-            if variant == types.boolean {
+            if variant == types.boolean.ctor() {
                 let yes = matches!(inner.view(), View::Bool(true));
                 out.extend_from_slice(if yes { b"true" } else { b"false" });
-            } else if variant == types.integer {
+            } else if variant == types.integer.ctor() {
                 let n = self.int_of(inner)?.to_string();
                 out.extend_from_slice(n.as_bytes());
-            } else if variant == types.real {
+            } else if variant == types.real.ctor() {
                 json::write_float(&mut out, float::read(inner)?);
-            } else if variant == types.str {
+            } else if variant == types.str.ctor() {
                 json::write_string(&mut out, &String::from_utf8_lossy(&self.text_of(inner)?));
-            } else if variant == types.number {
+            } else if variant == types.number.ctor() {
                 // Text that is not a JSON number becomes `null`, instead of
                 // bytes that stop the whole document parsing at the far end.
                 let digits = self.text_of(inner)?;
@@ -1184,24 +1167,22 @@ impl<'c> Rest<'c, '_> {
                 } else {
                     out.extend_from_slice(b"null");
                 }
-            } else if variant == types.list || variant == types.object {
+            } else if variant == types.list.ctor() || variant == types.object.ctor() {
                 let Seq::Tree(items) = self.seq(inner)? else {
                     return Err(not_json());
                 };
                 let items = array::elements(&self.heap, items);
-                let object = variant == types.object;
+                let object = variant == types.object.ctor();
                 out.push(if object { b'{' } else { b'[' });
                 todo.push(Step::Text(if object { b"}" } else { b"]" }));
                 // Pushed last to first, so they come off in order, each
                 // after the comma before it.
                 for (i, item) in items.into_iter().enumerate().rev() {
                     if object {
-                        let pair = item
-                            .as_cell()
-                            .filter(|&c| self.heap.kind(c) == Some(Kind::Tuple));
+                        let pair = item.as_cell().filter(|&c| self.heap.is(c, Kind::Tuple));
                         let pair = pair.ok_or_else(not_json)?;
                         let (Some(k), Some(value)) =
-                            (self.heap.element(pair, 0), self.heap.element(pair, 1))
+                            (self.heap.field(pair, 0), self.heap.field(pair, 1))
                         else {
                             return Err(not_json());
                         };
@@ -1222,7 +1203,7 @@ impl<'c> Rest<'c, '_> {
         Ok(out)
     }
 
-    fn http_types(&self) -> Result<HttpTypes, Stop> {
+    fn http_types(&self) -> Result<HttpTypes<Built>, Stop> {
         self.code.abi.http.ok_or(Stop::broken(Broken::NoHttpTypes))
     }
 
@@ -1254,7 +1235,7 @@ impl<'c> Rest<'c, '_> {
         let mut out = Vec::with_capacity(items.len());
         for h in items {
             let cell = h.as_cell().ok_or_else(not_headers)?;
-            if self.heap.kind(cell) != Some(Kind::Ctor) || self.heap.variant(cell) != types.header {
+            if self.heap.ctor_of(cell) != Some(types.header.ctor()) {
                 return Err(not_headers());
             }
             let (Some(name), Some(value)) = (self.heap.field(cell, 0), self.heap.field(cell, 1))
@@ -1288,11 +1269,7 @@ impl<'c> Rest<'c, '_> {
         for f in &block.fields {
             let name = self.view(buf, off, &f.name)?;
             let value = self.view(buf, off, &f.value)?;
-            items.push(Value::cell(
-                self.heap
-                    .ctor(types.header, &[name, value])
-                    .map_err(fault)?,
-            ));
+            items.push(self.build(types.header, [name, value])?);
         }
         Ok(Value::cell(
             array::from_values(&mut self.heap, &items).map_err(fault)?,
@@ -1308,19 +1285,15 @@ impl<'c> Rest<'c, '_> {
             http::ConnTokens::KeepAlive => types.conn_keep_alive,
             http::ConnTokens::Both => types.conn_both,
         };
-        let fields = [Value::nullary(conn), Value::bool(flags.expect_100_continue)];
-        Ok(Value::cell(
-            self.heap.ctor(types.head_flags, &fields).map_err(fault)?,
-        ))
+        let fields = [conn, Value::bool(flags.expect_100_continue)];
+        self.build(types.head_flags, fields)
     }
 
-    /// `variant(status)`, which is a refusal carrying the HTTP status it
+    /// `ctor(status)`, which is a refusal carrying the HTTP status it
     /// answers with.
-    fn with_status(&mut self, variant: VariantRef, r: http::Reject) -> Result<Value, Stop> {
+    fn with_status(&mut self, ctor: CtorOf<1>, r: http::Reject) -> Result<Value, Stop> {
         let status = Value::int(r as i64).unwrap_or(Value::NIL);
-        Ok(Value::cell(
-            self.heap.ctor(variant, &[status]).map_err(fault)?,
-        ))
+        self.build(ctor, [status])
     }
 
     /// The offset `off + n` into `buf`, as an Int.
@@ -1334,7 +1307,7 @@ impl<'c> Rest<'c, '_> {
     fn parsed_request(&mut self, buf: Bits, off: usize, window: &[u8]) -> Result<Value, Stop> {
         let types = self.http_types()?;
         match http::request(window) {
-            http::Request::NeedMore => Ok(Value::nullary(types.parsed_need_more)),
+            http::Request::NeedMore => Ok(types.parsed_need_more),
             http::Request::Bad(r) => self.with_status(types.parsed_bad, r),
             http::Request::Done {
                 method,
@@ -1344,14 +1317,12 @@ impl<'c> Rest<'c, '_> {
             } => {
                 let method = self.view(buf, off, &method)?;
                 let target = self.view(buf, off, &target)?;
-                let version = Value::nullary(if http11 { types.http11 } else { types.http10 });
+                let version = if http11 { types.http11 } else { types.http10 };
                 let headers = self.fields(buf, off, &head)?;
                 let flags = self.head_flags(head.flags)?;
                 let consumed = self.consumed(off, head.end)?;
                 let fields = [method, target, version, headers, flags, consumed];
-                Ok(Value::cell(
-                    self.heap.ctor(types.parsed_done, &fields).map_err(fault)?,
-                ))
+                self.build(types.parsed_done, fields)
             }
         }
     }
@@ -1366,12 +1337,10 @@ impl<'c> Rest<'c, '_> {
             http::BadResponse::TooLarge => types.head_too_large,
         };
         match http::response(window) {
-            http::Response::NeedMore => Ok(Value::nullary(types.response_need_more)),
+            http::Response::NeedMore => Ok(types.response_need_more),
             http::Response::Bad(why) => {
-                let why = Value::nullary(bad(why));
-                Ok(Value::cell(
-                    self.heap.ctor(types.response_bad, &[why]).map_err(fault)?,
-                ))
+                let why = bad(why);
+                self.build(types.response_bad, [why])
             }
             http::Response::Done {
                 http11,
@@ -1379,18 +1348,14 @@ impl<'c> Rest<'c, '_> {
                 reason,
                 head,
             } => {
-                let version = Value::nullary(if http11 { types.http11 } else { types.http10 });
+                let version = if http11 { types.http11 } else { types.http10 };
                 let code = Value::int(i64::from(code)).unwrap_or(Value::NIL);
                 let reason = self.view(buf, off, &reason)?;
                 let headers = self.fields(buf, off, &head)?;
                 let flags = self.head_flags(head.flags)?;
                 let consumed = self.consumed(off, head.end)?;
                 let fields = [version, code, reason, headers, flags, consumed];
-                Ok(Value::cell(
-                    self.heap
-                        .ctor(types.response_done, &fields)
-                        .map_err(fault)?,
-                ))
+                self.build(types.response_done, fields)
             }
         }
     }
@@ -1401,7 +1366,7 @@ impl<'c> Rest<'c, '_> {
     fn chunk_body(&mut self, buf: Bits, off: usize, bytes: &[u8], max: u64) -> Result<Value, Stop> {
         let types = self.http_types()?;
         match http::chunked(bytes, max) {
-            http::Chunked::NeedMore => Ok(Value::nullary(types.chunked_need_more)),
+            http::Chunked::NeedMore => Ok(types.chunked_need_more),
             http::Chunked::Bad(r) => self.with_status(types.chunked_bad, r),
             http::Chunked::Done { pieces, trailers } => {
                 let mut body = Vec::with_capacity(pieces.iter().map(|p| p.len()).sum());
@@ -1413,9 +1378,7 @@ impl<'c> Rest<'c, '_> {
                 let trailer_fields = self.fields(buf, off, &trailers)?;
                 let consumed = self.consumed(off, trailers.end)?;
                 let fields = [body, trailer_fields, consumed];
-                Ok(Value::cell(
-                    self.heap.ctor(types.chunked_done, &fields).map_err(fault)?,
-                ))
+                self.build(types.chunked_done, fields)
             }
         }
     }
@@ -1435,7 +1398,7 @@ impl<'c> Rest<'c, '_> {
     /// The map `v` is.
     pub(super) fn map(&self, v: Value) -> Result<Cell, Stop> {
         v.as_cell()
-            .filter(|&cell| self.heap.kind(cell) == Some(Kind::Map))
+            .filter(|&cell| self.heap.is(cell, Kind::Map))
             .ok_or_else(|| Stop::broken(Broken::NotAMap(v.view())))
     }
 
@@ -1501,7 +1464,7 @@ impl<'c> Rest<'c, '_> {
     fn range_end(&self, v: Value) -> Result<i64, Stop> {
         match v.view() {
             View::Int(n) => Ok(n),
-            View::Cell(cell) if self.heap.kind(cell) == Some(Kind::BigInt) => {
+            View::Cell(cell) if self.heap.is(cell, Kind::BigInt) => {
                 num_traits::ToPrimitive::to_i64(&self.heap.read_big_int(cell))
                     .ok_or(Stop::missing(Missing::BigRangeEnd))
             }
@@ -1521,7 +1484,7 @@ impl<'c> Rest<'c, '_> {
     pub(super) fn position(&self, v: Value) -> Result<Option<usize>, Stop> {
         match v.view() {
             View::Int(i) => Ok(usize::try_from(i).ok()),
-            View::Cell(cell) if self.heap.kind(cell) == Some(Kind::BigInt) => Ok(None),
+            View::Cell(cell) if self.heap.is(cell, Kind::BigInt) => Ok(None),
             v @ (View::Float(_)
             | View::Nil
             | View::Bool(_)
@@ -1550,18 +1513,7 @@ impl<'c> Rest<'c, '_> {
 
     #[inline]
     pub(super) fn is_string(&self, v: Value) -> bool {
-        v.as_cell()
-            .is_some_and(|c| self.heap.kind(c) == Some(Kind::String))
-    }
-
-    pub(super) fn is_variant(&self, v: Value, variant: VariantRef) -> bool {
-        match v.view() {
-            View::Nullary(n) => n == variant,
-            View::Cell(cell) => {
-                self.heap.kind(cell) == Some(Kind::Ctor) && self.heap.variant(cell) == variant
-            }
-            View::Float(_) | View::Int(_) | View::Nil | View::Bool(_) | View::Func(_) => false,
-        }
+        v.as_cell().is_some_and(|c| self.heap.is(c, Kind::String))
     }
 
     pub(super) fn is_int(&self, v: Value, n: i64) -> bool {
@@ -1574,7 +1526,7 @@ impl<'c> Rest<'c, '_> {
     #[inline(never)]
     fn is_big_int(&self, v: Value, n: i64) -> bool {
         match v.as_cell() {
-            Some(cell) if self.heap.kind(cell) == Some(Kind::BigInt) => {
+            Some(cell) if self.heap.is(cell, Kind::BigInt) => {
                 self.heap.read_big_int(cell) == n.into()
             }
             _ => false,
@@ -1721,7 +1673,7 @@ impl<'c> Rest<'c, '_> {
             let v = frame.get(usize::from(r.0));
             let v = v.copied().unwrap_or(Value::NIL);
             match v.as_cell() {
-                Some(cell) if self.heap.kind(cell) == Some(Kind::String) => {
+                Some(cell) if self.heap.is(cell, Kind::String) => {
                     self.heap.read_string(cell, &mut text);
                 }
                 _ => return Err(Stop::missing(Missing::Join(v.view()))),
@@ -1737,15 +1689,11 @@ impl<'c> Rest<'c, '_> {
     pub(super) fn callee(&mut self, f: Value, argc: usize) -> Result<(&'c Entry, Value), Stop> {
         let func = match f.view() {
             View::Func(func) => func,
-            View::Cell(cell) if self.heap.kind(cell) == Some(Kind::Closure) => {
-                self.heap.closure_func(cell)
-            }
-            v @ (View::Float(_)
-            | View::Int(_)
-            | View::Nil
-            | View::Bool(_)
-            | View::Cell(_)
-            | View::Nullary(_)) => {
+            View::Cell(cell) => match self.heap.closure_func(cell) {
+                Some(func) => func,
+                None => return Err(Stop::broken(Broken::NotAFunction(f.view()))),
+            },
+            v @ (View::Float(_) | View::Int(_) | View::Nil | View::Bool(_) | View::Nullary(_)) => {
                 return Err(Stop::broken(Broken::NotAFunction(v)));
             }
         };

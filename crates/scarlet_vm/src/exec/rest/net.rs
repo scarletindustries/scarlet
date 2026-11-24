@@ -7,7 +7,7 @@
 use scarlet_ir::core_ir::{AddressTypes, NetTypes, TlsTypes};
 use scarlet_ir::intrinsic::Intrinsic;
 
-use super::{Operands, Rest};
+use super::{Built, Operands, Rest};
 use crate::Stop;
 use crate::array;
 use crate::bigint::{self, Int};
@@ -28,7 +28,7 @@ impl Rest<'_, '_> {
                     let ip = self.ip_value(ip)?;
                     self.some(ip)
                 }
-                Err(_) => Ok(Value::nullary(self.code.abi.none)),
+                Err(_) => Ok(self.code.abi.none),
             },
             Intrinsic::NetResolve | Intrinsic::NetResolveUntil => {
                 let name = self.utf8_of(v)?;
@@ -65,7 +65,7 @@ impl Rest<'_, '_> {
                         let some = self.some(sock)?;
                         self.ok(some)
                     }
-                    Ok(None) => self.ok(Value::nullary(self.code.abi.none)),
+                    Ok(None) => self.ok(self.code.abi.none),
                     Err(e) => self.net_err(e),
                 }
             }
@@ -122,7 +122,7 @@ impl Rest<'_, '_> {
                 let conn = self.conn_of(v)?;
                 let Some(bytes) = self.whole_bytes(args.get(1))? else {
                     let unaligned = self.net_types()?.unaligned_binary;
-                    return self.err(Value::nullary(unaligned));
+                    return self.err(unaligned);
                 };
                 match self.host.write(conn, &[&bytes]) {
                     Ok(()) => self.ok(Value::NIL),
@@ -139,7 +139,7 @@ impl Rest<'_, '_> {
                 for part in array::elements(&self.heap, cell) {
                     let Some(b) = self.whole_bytes(part)? else {
                         let unaligned = self.net_types()?.unaligned_binary;
-                        return self.err(Value::nullary(unaligned));
+                        return self.err(unaligned);
                     };
                     bytes.push(b);
                 }
@@ -171,11 +171,8 @@ impl Rest<'_, '_> {
                         let peer = self.field_of(v, 1)?;
                         let peer = self.share(peer)?;
                         let name = self.share(name)?;
-                        let cell = self
-                            .heap
-                            .ctor(tls.tls_socket, &[session, peer, name])
-                            .map_err(fault)?;
-                        self.ok(Value::cell(cell))
+                        let socket = self.build(tls.tls_socket, [session, peer, name])?;
+                        self.ok(socket)
                     }
                     Err(e) => self.tls_err(e),
                 }
@@ -199,10 +196,9 @@ impl Rest<'_, '_> {
                 let conn = self.conn_of(v)?;
                 let Some(bytes) = self.whole_bytes(args.get(1))? else {
                     let unaligned = self.net_types()?.unaligned_binary;
-                    let cause = Value::nullary(unaligned);
                     let transport = self.tls_types()?.transport;
-                    let e = self.heap.ctor(transport, &[cause]).map_err(fault)?;
-                    return self.err(Value::cell(e));
+                    let e = self.build(transport, [unaligned])?;
+                    return self.err(e);
                 };
                 match self.host.tls_write(conn, &bytes) {
                     Ok(()) => self.ok(Value::NIL),
@@ -227,18 +223,18 @@ impl Rest<'_, '_> {
         }
     }
 
-    fn address_types(&self) -> Result<AddressTypes, Stop> {
+    fn address_types(&self) -> Result<AddressTypes<Built>, Stop> {
         self.code
             .abi
             .address
             .ok_or(Stop::broken(Broken::NoAddressTypes))
     }
 
-    fn net_types(&self) -> Result<NetTypes, Stop> {
+    fn net_types(&self) -> Result<NetTypes<Built>, Stop> {
         self.code.abi.net.ok_or(Stop::broken(Broken::NoNetTypes))
     }
 
-    fn tls_types(&self) -> Result<TlsTypes, Stop> {
+    fn tls_types(&self) -> Result<TlsTypes<Built>, Stop> {
         self.code.abi.tls.ok_or(Stop::broken(Broken::NoTlsTypes))
     }
 
@@ -251,7 +247,7 @@ impl Rest<'_, '_> {
     /// The handle `v` is: a `Server`, a `Connection` or a `TlsConnection`.
     fn handle_of(&self, v: Value) -> Result<Handle, Stop> {
         v.as_cell()
-            .filter(|c| self.heap.kind(*c) == Some(Kind::Handle))
+            .filter(|c| self.heap.is(*c, Kind::Handle))
             .and_then(|c| self.heap.data(c).first().copied())
             .map(Handle)
             .ok_or_else(|| Stop::broken(Broken::NotAHandle(v.view())))
@@ -260,7 +256,7 @@ impl Rest<'_, '_> {
     /// Field `i` of the constructor `v`.
     fn field_of(&self, v: Value, i: usize) -> Result<Value, Stop> {
         v.as_cell()
-            .filter(|c| self.heap.kind(*c) == Some(Kind::Ctor))
+            .filter(|c| self.heap.is(*c, Kind::Ctor))
             .and_then(|c| self.heap.field(c, i))
             .ok_or_else(|| Stop::broken(Broken::NotAHandle(v.view())))
     }
@@ -274,8 +270,7 @@ impl Rest<'_, '_> {
     fn socket_value(&mut self, conn: Handle, peer: Value) -> Result<Value, Stop> {
         let socket = self.net_types()?.socket;
         let conn = self.handle_value(conn)?;
-        let cell = self.heap.ctor(socket, &[conn, peer]).map_err(fault)?;
-        Ok(Value::cell(cell))
+        self.build(socket, [conn, peer])
     }
 
     fn ip_value(&mut self, ip: IpAddr) -> Result<Value, Stop> {
@@ -285,18 +280,14 @@ impl Rest<'_, '_> {
             IpAddr::V6(_) => types.v6,
         };
         let text = Value::cell(self.heap.string(ip.to_string().as_bytes()).map_err(fault)?);
-        Ok(Value::cell(self.heap.ctor(form, &[text]).map_err(fault)?))
+        self.build(form, [text])
     }
 
     fn socket_addr_value(&mut self, addr: SocketAddr) -> Result<Value, Stop> {
         let types = self.address_types()?;
         let ip = self.ip_value(addr.ip())?;
         let port = bigint::int(&mut self.heap, addr.port()).map_err(fault)?;
-        let cell = self
-            .heap
-            .ctor(types.socket_address, &[ip, port])
-            .map_err(fault)?;
-        Ok(Value::cell(cell))
+        self.build(types.socket_address, [ip, port])
     }
 
     /// The address the `SocketAddress` `v` names, or `None` when its port is
@@ -343,23 +334,21 @@ impl Rest<'_, '_> {
                     return Err(Stop::HeapFull);
                 }
                 let b = Value::cell(binary::from_bytes(&mut self.heap, &bytes).map_err(fault)?);
-                Ok(Value::cell(
-                    self.heap.ctor(types.data, &[b]).map_err(fault)?,
-                ))
+                self.build(types.data, [b])
             }
-            Received::Closed => Ok(Value::nullary(types.closed)),
+            Received::Closed => Ok(types.closed),
         }
     }
 
     fn invalid_port(&mut self) -> Result<Value, Stop> {
         let invalid = self.net_types()?.invalid_port;
-        self.err(Value::nullary(invalid))
+        self.err(invalid)
     }
 
     /// The `NetError` `e` stands for.
     fn net_error(&mut self, e: NetError) -> Result<Value, Stop> {
         let t = self.net_types()?;
-        let variant = match e {
+        Ok(match e {
             NetError::TimedOut => t.timed_out,
             NetError::ConnectionRefused => t.connection_refused,
             NetError::ConnectionReset => t.connection_reset,
@@ -375,12 +364,9 @@ impl Rest<'_, '_> {
             NetError::UnexpectedEof => t.unexpected_eof,
             NetError::Errno(code) => {
                 let code = bigint::int(&mut self.heap, code).map_err(fault)?;
-                return Ok(Value::cell(
-                    self.heap.ctor(t.errno, &[code]).map_err(fault)?,
-                ));
+                self.build(t.errno, [code])?
             }
-        };
-        Ok(Value::nullary(variant))
+        })
     }
 
     fn net_err(&mut self, e: NetError) -> Result<Value, Stop> {
@@ -390,7 +376,7 @@ impl Rest<'_, '_> {
 
     fn tls_err(&mut self, e: TlsError) -> Result<Value, Stop> {
         let t = self.tls_types()?;
-        let variant = match e {
+        let error = match e {
             TlsError::CertificateUnknownIssuer => t.certificate_unknown_issuer,
             TlsError::CertificateExpired => t.certificate_expired,
             TlsError::CertificateNotYetValid => t.certificate_not_yet_valid,
@@ -402,10 +388,9 @@ impl Rest<'_, '_> {
             TlsError::InvalidServerName => t.invalid_server_name,
             TlsError::Transport(cause) => {
                 let cause = self.net_error(cause)?;
-                let e = self.heap.ctor(t.transport, &[cause]).map_err(fault)?;
-                return self.err(Value::cell(e));
+                self.build(t.transport, [cause])?
             }
         };
-        self.err(Value::nullary(variant))
+        self.err(error)
     }
 }

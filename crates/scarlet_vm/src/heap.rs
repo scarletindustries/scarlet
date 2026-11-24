@@ -12,13 +12,28 @@
 //!   arena, a header and the number of a box of its own that holds the rest.
 //!   The box is freed when the cell is.
 //!
-//! Every cell starts with one header word holding its reference count, its
-//! kind and its size in words. A cell is freed when its last reference goes,
-//! and its space is kept for the next cell of the same size, on a list that
-//! runs through the freed cells themselves: each keeps the next one's index
-//! in its second word, so no cell takes less than [`LEAST_WORDS`]. Freeing a
-//! cell also gives up the references it holds, like a constructor's fields or
-//! an array node's children, and so on down.
+//! Every cell starts with one header word:
+//!
+//! | bits     | what it is                                                  |
+//! |----------|-------------------------------------------------------------|
+//! | 0 to 31  | the cell's count                                            |
+//! | 32 to 39 | its scan: how many of the words after the header are values |
+//! | 40 to 47 | its size in words, the header's among them, or 0 for a cell |
+//! |          | whose words are in a box                                    |
+//! | 48 to 63 | its class: one of the kinds ([`Kind`]), or one of the       |
+//! |          | program's constructors ([`Ctors`])                          |
+//!
+//! Where the scan is above 0, that many of the cell's words are values and the
+//! rest are not. Where it is 0 the kind says which are ([`held`]): the cell
+//! holds none, or they come after words that are no values, or they are in a
+//! box.
+//!
+//! A cell is freed when its last reference goes, and its space is kept for the
+//! next cell of the same size, on a list that runs through the freed cells
+//! themselves: each keeps the next one's index in its second word, so no cell
+//! takes less than [`LEAST_WORDS`]. Freeing a cell also gives up the references
+//! it holds, like a constructor's fields or an array node's children, and so
+//! on down.
 //!
 //! A count is a signed number, and its sign says what it means:
 //!
@@ -42,16 +57,18 @@
 //! the arena grows, and the heap moves with its process as plain data.
 
 use num_bigint::{BigInt, Sign};
-use scarlet_ir::TypeId;
 use scarlet_ir::core_ir::{ConstId, FuncIdx, VariantRef};
 use scarlet_ir::tivec::Idx;
 
 use crate::value::Value;
-use crate::word::{low_u16, low_u32, to_usize};
+use crate::word::{low_byte, low_u16, low_u32, to_usize};
 
 mod audit;
+mod ctors;
 
 pub(crate) use audit::{AuditFailure, AuditFault};
+use ctors::Class;
+pub(crate) use ctors::{Ctor, Ctors, Numbering, TooManyCtors};
 
 /// The most words a heap holds: the arena's and the boxes' together, which
 /// is 16 GiB. A cell's index then fits in the 31 bits below [`DYING`].
@@ -73,12 +90,11 @@ const LEAST_WORDS: usize = 2;
 /// are that many.
 const STRIDE: usize = 8;
 
-/// A header holds a cell's size in this many bits.
-const SIZE_BITS: u32 = 28;
-
 /// The most words one cell can take, its header's among them, in the arena
-/// or in a box.
-pub(crate) const MAX_CELL_WORDS: usize = (1 << SIZE_BITS) - 1;
+/// or in a box. That is 2 GiB, an eighth of what a heap holds. It is how long
+/// an Int and a binary can be ([`crate::bigint::MAX_BITS`],
+/// [`crate::binary::MAX_BITS`]), so it says which programs stop.
+pub(crate) const MAX_CELL_WORDS: usize = (1 << 28) - 1;
 
 /// The bits of a header that hold its count.
 const COUNT: u64 = 0xFFFF_FFFF;
@@ -99,74 +115,195 @@ const DYING: u32 = 1 << 31;
 /// count of a cell waiting is never [`UNCOUNTED`], which would name word 0.
 const NO_MORE: u32 = DYING - 1;
 
-/// A cell, named by the index of its header word in the heap's arena.
+/// Where a cell's header is in the arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Cell(u32);
+pub(crate) struct Index(u32);
+
+impl Index {
+    /// Word `at` of the arena.
+    fn new(at: usize) -> Option<Index> {
+        u32::try_from(at).ok().map(Index)
+    }
+
+    fn at(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// A cell, named by where its header is in the arena, and by its variant when
+/// it is a constructor's. So which variant a value is can be told from the
+/// word that holds it, with no look at the cell.
+///
+/// A cell that is no constructor's is named with variant 0. Only the heap makes
+/// one of these, when it makes the cell or reads the word that holds it, so
+/// the variant is always the one the cell was made with. Two that name one
+/// cell are therefore the same.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Cell(u64);
 
 impl Cell {
-    /// The cell as the low bits of a value word's payload.
+    fn new(index: Index, variant: u16) -> Cell {
+        Cell(u64::from(variant) << 32 | u64::from(index.0))
+    }
+
+    /// The cell as a value word's payload, in 48 bits.
     pub(crate) fn bits(self) -> u64 {
-        u64::from(self.0)
+        self.0
     }
 
+    /// The payload [`Self::bits`] gave.
     pub(crate) fn from_bits(bits: u64) -> Cell {
-        Cell(low_u32(bits))
+        Cell(bits)
     }
 
-    /// The cell whose header is word `index` of the arena.
-    fn at(index: usize) -> Option<Cell> {
-        u32::try_from(index).ok().map(Cell)
+    fn index(self) -> Index {
+        Index(low_u32(self.0))
     }
 
-    fn index(self) -> usize {
-        self.0 as usize
+    fn variant(self) -> u16 {
+        low_u16(self.0 >> 32)
+    }
+}
+
+impl std::fmt::Debug for Cell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Cell").field(&self.index().0).finish()
     }
 }
 
 /// What a cell holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
+    // The first four hold no values and nothing of the host's, so freeing one
+    // is only putting it on a list ([`Kind::RAW`]).
     /// UTF-8 text: a word holding its length in bytes, then the bytes.
     String = 1,
     /// An Int too big for a value word: a word holding its sign (bit 63) and
     /// how many 64-bit digits follow, then the digits, least significant
     /// first.
     BigInt = 2,
-    /// A constructor with fields: a word holding its type (bits 0 to 31) and
-    /// variant (bits 32 to 47), then each field's value word, in order. Each
-    /// field holds one reference.
-    Ctor = 3,
-    /// A function with captures: a word holding its `FuncIdx`, then each
+    /// A range `start..end` of Ints: its two ends, as two's complement
+    /// words.
+    Range = 3,
+    /// A binary's bits ([`crate::binary`]).
+    Binary = 4,
+    /// Something the host holds for the program, like a socket: one word,
+    /// the host's number for it. When the cell is freed, the number goes on
+    /// [`Heap::take_released`]'s list, for the host to let go of.
+    Handle = 5,
+    /// A slice of another binary ([`crate::binary`]). It holds a reference to
+    /// the binary it is a slice of, in its first word.
+    BinarySlice = 6,
+    /// A tuple: each element's value word, in order. Each element holds one
+    /// reference.
+    Tuple = 7,
+    /// A function with captures: the function as a value word, then each
     /// capture's value word, in order. Each capture holds one reference. A
     /// function with none is a value word of its own, and needs no cell.
-    Closure = 4,
-    /// A tuple: each element's value word, in order, straight after the
-    /// header. Each element holds one reference.
-    Tuple = 5,
+    Closure = 8,
     /// An array's root, one of its leaves, or one of its branches.
     /// [`crate::array`] has their layout; the heap only knows which of their
     /// words hold references.
-    ArrayRoot = 6,
-    ArrayLeaf = 7,
-    ArrayBranch = 8,
-    /// A range `start..end` of Ints: its two ends, as two's complement
-    /// words. It holds no references.
-    Range = 9,
-    /// A binary's bits, or a slice of another binary's
-    /// ([`crate::binary`]). A slice holds a reference to the binary it is a
-    /// slice of, in its first word.
-    Binary = 10,
-    BinarySlice = 11,
+    ArrayLeaf = 9,
+    ArrayRoot = 10,
+    ArrayBranch = 11,
     /// A map's root, one of its nodes, or a list of keys whose whole hashes
     /// are equal. [`crate::map`] has their layout. Each holds references in
     /// every word after its first.
     Map = 12,
     MapNode = 13,
     MapCollision = 14,
-    /// Something the host holds for the program, like a socket: one word,
-    /// the host's number for it. When the cell is freed, the number goes on
-    /// [`Heap::take_released`]'s list, for the host to let go of.
-    Handle = 15,
+    /// A constructor with fields: each field's value word, in order. Each field
+    /// holds one reference. Which constructor it is, is the header's class.
+    Ctor = 16,
+}
+
+impl Kind {
+    /// The classes of the kinds that hold no references and are no handle are
+    /// this many, from 1 up.
+    const RAW: u16 = 4;
+
+    /// What a cell of this kind says of its values in its header.
+    const fn scan(self) -> Scan {
+        match self {
+            Kind::Ctor | Kind::Tuple | Kind::Closure | Kind::ArrayLeaf => Scan::All,
+            Kind::BinarySlice => Scan::First,
+            Kind::String
+            | Kind::BigInt
+            | Kind::Range
+            | Kind::Binary
+            | Kind::Handle
+            | Kind::ArrayRoot
+            | Kind::ArrayBranch
+            | Kind::Map
+            | Kind::MapNode
+            | Kind::MapCollision => Scan::Ask,
+        }
+    }
+}
+
+/// Which of the words after a cell's header its scan says are values.
+#[derive(Clone, Copy)]
+enum Scan {
+    All,
+    First,
+    /// None, so the kind is asked.
+    Ask,
+}
+
+impl Scan {
+    /// The scan of a cell with `n` words after its header.
+    #[inline(always)]
+    fn of(self, n: usize) -> usize {
+        match self {
+            Scan::All => n,
+            Scan::First => n.min(1),
+            Scan::Ask => 0,
+        }
+    }
+}
+
+/// What a new cell's header says, but for its length.
+#[derive(Clone, Copy)]
+struct Make {
+    class: Class,
+    scan: Scan,
+    /// The variant its name carries.
+    variant: u16,
+}
+
+impl Make {
+    #[inline(always)]
+    const fn of(kind: Kind) -> Make {
+        Make {
+            class: Class::of(kind),
+            scan: kind.scan(),
+            variant: 0,
+        }
+    }
+
+    #[inline(always)]
+    fn ctor(ctor: Ctor) -> Make {
+        Make {
+            class: ctor.class(),
+            scan: Kind::Ctor.scan(),
+            variant: ctor.variant(),
+        }
+    }
+
+    /// The header of a new cell, whose count is 1, with `n` words after it in
+    /// the arena.
+    #[inline(always)]
+    fn header(self, n: usize) -> u64 {
+        let size = n.saturating_add(1) as u64;
+        self.stub() | (self.scan.of(n) as u64) << 32 | size << 40
+    }
+
+    /// The header of a new cell whose words are in a box.
+    #[inline(always)]
+    fn stub(self) -> u64 {
+        with_class(1, self.class)
+    }
 }
 
 /// A freed cell found where a holder takes another reference to it, gives its
@@ -177,6 +314,9 @@ pub(crate) enum Kind {
 pub(crate) struct DeadCell;
 
 /// Why the heap could not do what it was asked.
+// It is as wide as a cell's name and a value, so that a `Result` of either and
+// this comes back in two registers. A narrower one puts it in memory.
+#[repr(u64)]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Fault {
     /// It has no room. The heap is at its limit, or the system has no more
@@ -215,8 +355,8 @@ pub(crate) struct Heap {
     /// or 0 when there is none. It grows when a size is first freed.
     free: Vec<u32>,
     /// The cell of each big Int constant this heap has been asked for, by the
-    /// constant's number in the program, or 0.
-    constants: Vec<u32>,
+    /// constant's number in the program.
+    constants: Vec<Option<Cell>>,
     /// Cells taken from the arena's end or a free list over this heap's
     /// life, and cells a constructor overwrote in place instead
     /// (`internal.sca`).
@@ -225,10 +365,13 @@ pub(crate) struct Heap {
     /// The numbers of handle cells freed since the last
     /// [`Heap::take_released`].
     released: Vec<u64>,
+    /// The program's constructors, by class.
+    ctors: Ctors,
 }
 
-impl Default for Heap {
-    fn default() -> Heap {
+impl Heap {
+    /// An empty heap for a program with these constructors.
+    pub(crate) fn new(ctors: Ctors) -> Heap {
         Heap {
             arena: Vec::new(),
             outside: Vec::new(),
@@ -240,64 +383,54 @@ impl Default for Heap {
             made: 0,
             reused: 0,
             released: Vec::new(),
+            ctors,
         }
     }
-}
 
-impl Heap {
-    /// A new cell of `kind` with `first` and then `rest` after its header.
-    /// Its count is 1, and the caller holds that one reference.
+    /// A new cell with `first` and then `rest` after its header. Its count is
+    /// 1, and the caller holds that one reference.
     // The way off a free list goes inside every maker of cells, so that a
     // cell made where one was freed costs no call.
     #[inline(always)]
     fn cell<const N: usize>(
         &mut self,
-        kind: Kind,
+        make: Make,
         first: [u64; N],
         rest: impl ExactSizeIterator<Item = u64>,
     ) -> Result<Cell, Fault> {
         let n = N.saturating_add(rest.len());
-        let Some((cell, words)) = self.pop(space(n.saturating_add(1))) else {
-            return self.append(kind, first, rest);
+        let Some((index, words)) = self.pop(space(n.saturating_add(1))) else {
+            return self.append(make, first, rest);
         };
-        if let Some((h, words)) = words.split_first_mut()
-            && let Some((slots, words)) = words.split_first_chunk_mut::<N>()
-        {
-            *h = header(kind, n.saturating_add(1));
-            *slots = first;
-            for (slot, w) in words.iter_mut().zip(rest) {
-                *slot = w;
-            }
-        }
+        write(words, make.header(n), first, rest);
         self.made = self.made.wrapping_add(1);
-        Ok(cell)
+        Ok(Cell::new(index, make.variant))
     }
 
     /// [`Self::cell`] for a maker that writes the `n` words itself. Until it
     /// does they hold whatever was there.
-    fn blank(&mut self, kind: Kind, n: usize) -> Result<Cell, Fault> {
-        let size = n.saturating_add(1);
-        let Some((cell, words)) = self.pop(space(size)) else {
-            return self.append(kind, [], std::iter::repeat_n(0, n));
+    fn blank(&mut self, make: Make, n: usize) -> Result<Cell, Fault> {
+        let Some((index, words)) = self.pop(space(n.saturating_add(1))) else {
+            return self.append(make, [], std::iter::repeat_n(0, n));
         };
         if let Some(h) = words.first_mut() {
-            *h = header(kind, size);
+            *h = make.header(n);
         }
         self.made = self.made.wrapping_add(1);
-        Ok(cell)
+        Ok(Cell::new(index, make.variant))
     }
 
     /// The first free cell of `space` words, taken off its list, and those
     /// words, when there is one.
     #[inline(always)]
-    fn pop(&mut self, space: usize) -> Option<(Cell, &mut [u64])> {
+    fn pop(&mut self, space: usize) -> Option<(Index, &mut [u64])> {
         let head = self.free.get_mut(space).filter(|head| **head != 0)?;
-        let cell = Cell(*head);
+        let index = Index(*head);
         let words = self
             .arena
-            .get_mut(cell.index()..cell.index().wrapping_add(space))?;
+            .get_mut(index.at()..index.at().wrapping_add(space))?;
         *head = low_u32(*words.get(1)?);
-        Some((cell, words))
+        Some((index, words))
     }
 
     /// [`Self::cell`] when no freed cell has the size. The cell goes at the
@@ -305,24 +438,25 @@ impl Heap {
     #[inline(never)]
     fn append<const N: usize>(
         &mut self,
-        kind: Kind,
+        make: Make,
         first: [u64; N],
         rest: impl ExactSizeIterator<Item = u64>,
     ) -> Result<Cell, Fault> {
-        let size = N.saturating_add(rest.len()).saturating_add(1);
+        let n = N.saturating_add(rest.len());
+        let size = n.saturating_add(1);
         if size > ARENA_CELL_WORDS {
             let words = self.gather(first, rest)?;
-            return self.long(kind, words);
+            return self.long(make, words);
         }
         let at = self.room(space(size))?;
-        let cell = Cell::at(at).ok_or(Fault::Full)?;
-        let words = std::iter::once(header(kind, size)).chain(first);
+        let index = Index::new(at).ok_or(Fault::Full)?;
+        let words = std::iter::once(make.header(n)).chain(first);
         self.arena.extend(words.chain(rest));
         if size < LEAST_WORDS {
             self.arena.push(0);
         }
         self.made = self.made.wrapping_add(1);
-        Ok(cell)
+        Ok(Cell::new(index, make.variant))
     }
 
     /// The index of the arena's end, where there is room for `space` words.
@@ -386,21 +520,21 @@ impl Heap {
     /// gives the size as 0, then the box's number.
     #[cold]
     #[inline(never)]
-    fn long(&mut self, kind: Kind, words: Vec<u64>) -> Result<Cell, Fault> {
+    fn long(&mut self, make: Make, words: Vec<u64>) -> Result<Cell, Fault> {
         // The box is kept first, so that the stub's two words are tested
         // against the limit with it. A stub that is refused gives the box
         // back, and no cell is left half made.
         let number = self.keep(words.into_boxed_slice())?;
-        let stub = [header(kind, 0), u64::from(number)];
-        let cell = match self.pop(STUB_WORDS) {
-            Some((cell, words)) => {
+        let stub = [make.stub(), u64::from(number)];
+        let index = match self.pop(STUB_WORDS) {
+            Some((index, words)) => {
                 words.copy_from_slice(&stub);
-                cell
+                index
             }
             None => match self.room(STUB_WORDS) {
                 Ok(at) => {
                     self.arena.extend_from_slice(&stub);
-                    Cell::at(at).ok_or(Fault::Full)?
+                    Index::new(at).ok_or(Fault::Full)?
                 }
                 Err(full) => {
                     self.unbox(number);
@@ -409,7 +543,7 @@ impl Heap {
             },
         };
         self.made = self.made.wrapping_add(1);
-        Ok(cell)
+        Ok(Cell::new(index, make.variant))
     }
 
     /// Put `words` in the table of boxes, in a place a freed box left or in
@@ -447,7 +581,7 @@ impl Heap {
     /// not have, is [`DeadCell`].
     #[inline(always)]
     pub(crate) fn share(&mut self, cell: Cell) -> Result<(), DeadCell> {
-        if let Some(h) = self.arena.get_mut(cell.index())
+        if let Some(h) = self.arena.get_mut(cell.index().at())
             && count(*h) > 0
         {
             // The count is the header's low bits, and one past the most it
@@ -455,7 +589,7 @@ impl Heap {
             *h = h.wrapping_add(1);
             return Ok(());
         }
-        self.uncounted(cell)
+        self.uncounted(cell.index())
     }
 
     /// `v` with one more reference, for keeping it somewhere new.
@@ -474,7 +608,7 @@ impl Heap {
     /// from the new cell there.
     #[inline(always)]
     pub(crate) fn release(&mut self, cell: Cell) -> Result<(), DeadCell> {
-        let h = match self.arena.get_mut(cell.index()) {
+        let h = match self.arena.get_mut(cell.index().at()) {
             Some(h) if count(*h) > 1 => {
                 *h = h.wrapping_sub(1);
                 return Ok(());
@@ -482,87 +616,92 @@ impl Heap {
             Some(h) => *h,
             None => 0,
         };
-        self.release_last(cell, h)
+        self.release_last(cell.index(), h)
     }
 
-    /// [`Self::release`] of a cell whose header is `h` and whose count is not
-    /// above 1.
+    /// [`Self::release`] of the cell at `index`, whose header is `h` and whose
+    /// count is not above 1.
     #[cold]
     #[inline(never)]
-    fn release_last(&mut self, cell: Cell, h: u64) -> Result<(), DeadCell> {
+    fn release_last(&mut self, index: Index, h: u64) -> Result<(), DeadCell> {
         if count(h) != 1 {
-            return self.uncounted(cell);
+            return self.uncounted(index);
         }
         // A string, a binary or a big Int holds nothing, and freeing one is
         // only putting it on a list.
-        if RAW >> kind_bits(h) & 1 == 1 && size(h) != 0 {
-            self.shelve(cell, space(size(h)));
+        if raw(h) {
+            self.shelve(index, space(size(h)));
             return Ok(());
         }
-        self.free(cell, h)
+        self.free(index, h)
     }
 
-    /// What a share or a release comes to when `cell`'s count is not above 0:
-    /// nothing for a cell that is never counted, and [`DeadCell`] for any
-    /// other.
+    /// What a share or a release comes to when the count of the cell at `index`
+    /// is not above 0: nothing for a cell that is never counted, and
+    /// [`DeadCell`] for any other.
     #[cold]
     #[inline(never)]
-    fn uncounted(&self, cell: Cell) -> Result<(), DeadCell> {
-        if count(self.header(cell)) == UNCOUNTED {
+    fn uncounted(&self, index: Index) -> Result<(), DeadCell> {
+        if count(self.header(index)) == UNCOUNTED {
             Ok(())
         } else {
             Err(DeadCell)
         }
     }
 
-    /// Free `cell`, whose header is `h` and whose last reference is given up,
-    /// and every cell that then has no holder.
+    /// Free the cell at `index`, whose header is `h` and whose last reference
+    /// is given up, and every cell that then has no holder.
     ///
     /// A cell whose last reference goes on the way waits on a list that runs
     /// through the waiting cells' own counts. So freeing a list of a million
     /// cells takes no more stack than freeing one, and no storage at all.
     /// This is Lean's `lean_del_core`.
     #[inline(never)]
-    fn free(&mut self, cell: Cell, h: u64) -> Result<(), DeadCell> {
-        let (mut cell, mut h, mut todo) = (cell, h, NO_MORE);
+    fn free(&mut self, index: Index, h: u64) -> Result<(), DeadCell> {
+        let (mut index, mut h, mut todo) = (index, h, NO_MORE);
         loop {
-            match size(h).checked_sub(1) {
-                Some(len) => {
-                    let held = held(kind_bits(h), len);
-                    if held.is_empty() && kind_bits(h) == Kind::Handle as u64 {
-                        self.released.push(self.word(cell, 1));
-                    }
-                    let first = cell.index().wrapping_add(1);
-                    let mut at = first.wrapping_add(held.start);
-                    let end = first.wrapping_add(held.end);
-                    // Giving one word up may write anywhere in the arena, so
-                    // each lookup has to be made again after it. A wide cell
-                    // is copied out a stride at a time to make fewer.
-                    while let Some(words) = self
-                        .arena
-                        .get(at..end)
-                        .and_then(|rest| rest.first_chunk::<STRIDE>().copied())
-                    {
-                        for w in words {
-                            todo = self.let_go(w, todo)?;
-                        }
-                        at = at.wrapping_add(STRIDE);
-                    }
-                    while at < end
-                        && let Some(w) = self.arena.get(at)
-                    {
-                        todo = self.let_go(*w, todo)?;
-                        at = at.wrapping_add(1);
-                    }
+            let scan = scan(h);
+            let held = if scan > 0 {
+                0..scan
+            } else if raw(h) {
+                0..0
+            } else if let Some(len) = size(h).checked_sub(1) {
+                if class(h).is(Kind::Handle) {
+                    self.released.push(self.word(index, 1));
                 }
-                None => todo = self.empty_box(cell, h, todo)?,
+                held(class(h), len)
+            } else {
+                todo = self.empty_box(index, h, todo)?;
+                0..0
+            };
+            let first = index.at().wrapping_add(1);
+            let mut at = first.wrapping_add(held.start);
+            let end = first.wrapping_add(held.end);
+            // Giving one word up may write anywhere in the arena, so each
+            // lookup has to be made again after it. A wide cell is copied out
+            // a stride at a time to make fewer.
+            while let Some(words) = self
+                .arena
+                .get(at..end)
+                .and_then(|rest| rest.first_chunk::<STRIDE>().copied())
+            {
+                for w in words {
+                    todo = self.let_go(w, todo)?;
+                }
+                at = at.wrapping_add(STRIDE);
             }
-            self.shelve(cell, space(size(h)));
+            while at < end
+                && let Some(w) = self.arena.get(at)
+            {
+                todo = self.let_go(*w, todo)?;
+                at = at.wrapping_add(1);
+            }
+            self.shelve(index, space(size(h)));
             if todo == NO_MORE {
                 return Ok(());
             }
-            cell = Cell(todo);
-            h = self.header(cell);
+            index = Index(todo);
+            h = self.header(index);
             // Only a cell that holds itself is here and freed already.
             if count(h) >= 0 {
                 return Err(DeadCell);
@@ -579,7 +718,8 @@ impl Heap {
         let Some(child) = Value::from_bits(w).as_cell() else {
             return Ok(todo);
         };
-        if let Some(h) = self.arena.get_mut(child.index()) {
+        let child = child.index();
+        if let Some(h) = self.arena.get_mut(child.at()) {
             let c = count(*h);
             if c > 1 {
                 *h = h.wrapping_sub(1);
@@ -594,14 +734,14 @@ impl Heap {
         Ok(todo)
     }
 
-    /// [`Self::free`]'s part for the long cell `cell`, whose header is `h`:
+    /// [`Self::free`]'s part for the long cell at `index`, whose header is `h`:
     /// give up what is in its box, and the box.
     #[cold]
     #[inline(never)]
-    fn empty_box(&mut self, cell: Cell, h: u64, todo: u32) -> Result<u32, DeadCell> {
-        let words = self.slot(cell, h).and_then(|number| self.unbox(number));
+    fn empty_box(&mut self, index: Index, h: u64, todo: u32) -> Result<u32, DeadCell> {
+        let words = self.slot(index, h).and_then(|number| self.unbox(number));
         let words = words.unwrap_or_default();
-        let held = held(kind_bits(h), words.len());
+        let held = held(class(h), words.len());
         let mut todo = todo;
         for w in words.get(held).unwrap_or(&[]) {
             todo = self.let_go(*w, todo)?;
@@ -609,19 +749,19 @@ impl Heap {
         Ok(todo)
     }
 
-    /// Put the freed cell `cell`, which takes `space` words, at the front of
-    /// its free list.
+    /// Put the freed cell at `index`, which takes `space` words, at the front
+    /// of its free list.
     #[inline(always)]
-    fn shelve(&mut self, cell: Cell, space: usize) {
-        let words = cell.index()..cell.index().wrapping_add(LEAST_WORDS);
+    fn shelve(&mut self, index: Index, space: usize) {
+        let words = index.at()..index.at().wrapping_add(LEAST_WORDS);
         if let Some(head) = self.free.get_mut(space)
             && let Some([h, next]) = self.arena.get_mut(words)
         {
-            *h = 0;
+            *h = FREED;
             *next = free_link(space, *head);
-            *head = cell.0;
+            *head = index.0;
         } else {
-            self.shelve_first(cell, space);
+            self.shelve_first(index, space);
         }
     }
 
@@ -629,18 +769,19 @@ impl Heap {
     /// yet.
     #[cold]
     #[inline(never)]
-    fn shelve_first(&mut self, cell: Cell, space: usize) {
-        if self.free.len() <= space && self.arena.len() > cell.index() {
+    fn shelve_first(&mut self, index: Index, space: usize) {
+        if self.free.len() <= space && self.arena.len() > index.at() {
             self.free.resize(space.saturating_add(1), 0);
-            self.shelve(cell, space);
+            self.shelve(index, space);
         }
     }
 
     /// Perceus's drop of a last reference. When nothing else holds `cell`,
     /// this gives up everything it holds and keeps the allocation, header and
     /// all, for a constructor of the same size to overwrite. It returns
-    /// `false` when something else holds `cell`, which leaves it to an
-    /// ordinary `release`, and [`DeadCell`] when nothing holds it at all.
+    /// `false` when something else holds `cell`, or it is no constructor's,
+    /// which leaves it to an ordinary `release`, and [`DeadCell`] when nothing
+    /// holds it at all.
     ///
     /// Each field is emptied before it is released, so a hollowed cell holds
     /// nothing and is safe to release again. Emptying here instead of at the
@@ -648,18 +789,18 @@ impl Heap {
     /// argument as the last reference only because its caller gave up its own
     /// first.
     pub(crate) fn hollow(&mut self, cell: Cell) -> Result<bool, DeadCell> {
-        if !self.unique(cell)? {
+        let index = cell.index();
+        if !self.unique(cell)? || !class(self.header(index)).is_ctor() {
             return Ok(false);
         }
-        let h = self.header(cell);
-        for i in held(kind_bits(h), self.data_len(cell, h)) {
-            let Some(slot) = self.words_mut(cell, 1).get_mut(i) else {
-                break;
-            };
+        // All of a constructor's words are its fields.
+        let mut i = 0;
+        while let Some(slot) = self.words_mut(index, 1).get_mut(i) {
             let held = Value::from_bits(std::mem::replace(slot, Value::NIL.bits()));
             if let Some(c) = held.as_cell() {
                 self.release(c)?;
             }
+            i = i.wrapping_add(1);
         }
         Ok(true)
     }
@@ -672,17 +813,15 @@ impl Heap {
     /// not be the one that was kept for it. A freed cell does not fit, and
     /// the release its register then gets is what reports it.
     pub(crate) fn fits_ctor(&self, cell: Cell, fields: usize) -> bool {
-        let h = self.header(cell);
-        count(h) == 1
-            && kind_bits(h) == Kind::Ctor as u64
-            && self.data_len(cell, h).checked_sub(1) == Some(fields)
+        let index = cell.index();
+        let h = self.header(index);
+        count(h) == 1 && class(h).is_ctor() && self.data_len(index, h) == fields
     }
 
     /// The cell of big Int constant `id`, when [`Self::keep_constant`] has
     /// been given one.
     pub(crate) fn constant(&self, id: ConstId) -> Option<Cell> {
-        let cell = self.constants.get(id.index()).copied()?;
-        (cell != 0).then_some(Cell(cell))
+        self.constants.get(id.index()).copied()?
     }
 
     /// Keep `cell` as the cell of big Int constant `id`. The heap takes the
@@ -693,10 +832,10 @@ impl Heap {
         if self.constants.len() < len {
             let more = len.saturating_sub(self.constants.len());
             self.constants.try_reserve(more).map_err(|_| Fault::Full)?;
-            self.constants.resize(len, 0);
+            self.constants.resize(len, None);
         }
         if let Some(kept) = self.constants.get_mut(id.index()) {
-            *kept = cell.0;
+            *kept = Some(cell);
         }
         self.recount(cell, UNCOUNTED);
         Ok(())
@@ -705,18 +844,16 @@ impl Heap {
     /// Give up the heap's reference to each constant it kept. The run is
     /// over, so nothing else holds one.
     pub(crate) fn let_go_of_constants(&mut self) -> Result<(), DeadCell> {
-        for cell in std::mem::take(&mut self.constants) {
-            if cell != 0 {
-                self.recount(Cell(cell), 1);
-                self.release(Cell(cell))?;
-            }
+        for cell in std::mem::take(&mut self.constants).into_iter().flatten() {
+            self.recount(cell, 1);
+            self.release(cell)?;
         }
         Ok(())
     }
 
     /// Make `cell`'s count `c`.
     fn recount(&mut self, cell: Cell, c: i32) {
-        if let Some(h) = self.arena.get_mut(cell.index()) {
+        if let Some(h) = self.arena.get_mut(cell.index().at()) {
             *h = *h & !COUNT | u64::from(c.cast_unsigned());
         }
     }
@@ -727,29 +864,37 @@ impl Heap {
     }
 
     pub(crate) fn kind(&self, cell: Cell) -> Option<Kind> {
-        kind_of(self.header(cell))
+        class(self.header(cell.index())).kind()
     }
 
-    /// `cell`'s kind and the words after its header, for a walk that wants
-    /// both at every step.
-    pub(crate) fn kind_and_data(&self, cell: Cell) -> (Option<Kind>, &[u64]) {
-        (kind_of(self.header(cell)), self.words(cell, 1))
+    /// Whether `cell` is a cell of `kind`. It is [`Self::kind`] for a caller
+    /// that has one in mind.
+    #[inline(always)]
+    pub(crate) fn is(&self, cell: Cell, kind: Kind) -> bool {
+        class(self.header(cell.index())).is(kind)
+    }
+
+    /// [`Self::is`], and the words after `cell`'s header, for a walk that
+    /// wants both at every step.
+    #[inline(always)]
+    pub(crate) fn is_with_data(&self, cell: Cell, kind: Kind) -> (bool, &[u64]) {
+        (self.is(cell, kind), self.data(cell))
     }
 
     /// A new string cell holding `text`.
     pub(crate) fn string(&mut self, text: &[u8]) -> Result<Cell, Fault> {
         let words = text.chunks(8).map(padded_word);
-        self.cell(Kind::String, [text.len() as u64], words)
+        self.cell(Make::of(Kind::String), [text.len() as u64], words)
     }
 
     /// A string cell's length in bytes.
     pub(crate) fn string_len(&self, cell: Cell) -> usize {
-        to_usize(self.word(cell, 1))
+        to_usize(self.word(cell.index(), 1))
     }
 
     /// Whether a string cell holds exactly `text`.
     pub(crate) fn string_is(&self, cell: Cell, text: &[u8]) -> bool {
-        let words = self.words(cell, 2);
+        let words = self.words(cell.index(), 2);
         self.string_len(cell) == text.len()
             && words.len() == text.len().div_ceil(8)
             && words
@@ -760,9 +905,9 @@ impl Heap {
 
     /// A string cell's bytes, appended to `out`.
     pub(crate) fn read_string(&self, cell: Cell, out: &mut Vec<u8>) {
-        let len = to_usize(self.word(cell, 1));
+        let len = to_usize(self.word(cell.index(), 1));
         out.extend(
-            self.words(cell, 2)
+            self.words(cell.index(), 2)
                 .iter()
                 .flat_map(|w| w.to_le_bytes())
                 .take(len),
@@ -774,17 +919,17 @@ impl Heap {
         let (sign, digits) = n.to_u64_digits();
         let negative = u64::from(sign == Sign::Minus) << 63;
         let first = [negative | digits.len() as u64];
-        self.cell(Kind::BigInt, first, digits.into_iter())
+        self.cell(Make::of(Kind::BigInt), first, digits.into_iter())
     }
 
     /// The Int in big Int cell `cell`, when it is one word long, as an
     /// `i128`. A wider one is `None`.
     pub(crate) fn big_int_word(&self, cell: Cell) -> Option<i128> {
-        let w = self.word(cell, 1);
+        let w = self.word(cell.index(), 1);
         if w & 0xFFFF_FFFF != 1 {
             return None;
         }
-        let d = i128::from(self.word(cell, 2));
+        let d = i128::from(self.word(cell.index(), 2));
         if w >> 63 == 1 {
             d.checked_neg()
         } else {
@@ -801,11 +946,11 @@ impl Heap {
         let digits: &[u64] = if hi == 0 { &[lo] } else { &[lo, hi] };
         let negative = u64::from(n < 0) << 63;
         let first = [negative | digits.len() as u64];
-        self.cell(Kind::BigInt, first, digits.iter().copied())
+        self.cell(Make::of(Kind::BigInt), first, digits.iter().copied())
     }
 
     pub(crate) fn read_big_int(&self, cell: Cell) -> BigInt {
-        let w = self.word(cell, 1);
+        let w = self.word(cell.index(), 1);
         let sign = if w >> 63 == 1 {
             Sign::Minus
         } else {
@@ -813,7 +958,7 @@ impl Heap {
         };
         let len = (w & 0xFFFF_FFFF) as usize;
         let bytes: Vec<u8> = self
-            .words(cell, 2)
+            .words(cell.index(), 2)
             .iter()
             .take(len)
             .flat_map(|d| d.to_le_bytes())
@@ -821,55 +966,145 @@ impl Heap {
         BigInt::from_bytes_le(sign, &bytes)
     }
 
-    /// A new cell for constructor `v`, holding `fields`. Each field's
+    /// A new cell for constructor `ctor`, holding `fields`. Each field's
     /// reference passes to the cell.
-    pub(crate) fn ctor(&mut self, v: VariantRef, fields: &[Value]) -> Result<Cell, Fault> {
-        self.cell(Kind::Ctor, ctor_tag(v), words_of(fields))
+    pub(crate) fn ctor(&mut self, ctor: Ctor, fields: &[Value]) -> Result<Cell, Fault> {
+        match self.ctor_in_freed(ctor, fields) {
+            Some(cell) => Ok(cell),
+            None => self.ctor_at_end(ctor, fields),
+        }
+    }
+
+    /// [`Self::ctor`] in the space of a freed cell, or `None` when there is
+    /// none of the size.
+    #[inline(always)]
+    pub(crate) fn ctor_in_freed(&mut self, ctor: Ctor, fields: &[Value]) -> Option<Cell> {
+        let make = Make::ctor(ctor);
+        let (index, words) = self.pop(space(fields.len().saturating_add(1)))?;
+        write(words, make.header(fields.len()), [], words_of(fields));
+        self.made = self.made.wrapping_add(1);
+        Some(Cell::new(index, make.variant))
+    }
+
+    /// [`Self::ctor`] at the arena's end, or in a box.
+    pub(crate) fn ctor_at_end(&mut self, ctor: Ctor, fields: &[Value]) -> Result<Cell, Fault> {
+        self.append(Make::ctor(ctor), [], words_of(fields))
     }
 
     /// Perceus reuse. This writes the constructor `ctor` would build over a
     /// cell that [`Self::hollow`] emptied and [`Self::fits_ctor`] says is the
     /// right size. The cell's one reference stays and becomes the new
-    /// constructor's.
-    pub(crate) fn ctor_in(&mut self, cell: Cell, v: VariantRef, fields: &[Value]) {
+    /// constructor's. What comes back names the new constructor, and `cell`
+    /// names one that is gone.
+    pub(crate) fn ctor_in(&mut self, cell: Cell, ctor: Ctor, fields: &[Value]) -> Cell {
         self.reused = self.reused.saturating_add(1);
-        let [tag] = ctor_tag(v);
-        self.set_word(cell, 1, tag);
-        for (slot, w) in self.words_mut(cell, 2).iter_mut().zip(words_of(fields)) {
+        let index = cell.index();
+        if let Some(h) = self.arena.get_mut(index.at()) {
+            *h = with_class(*h, ctor.class());
+        }
+        for (slot, w) in self.words_mut(index, 1).iter_mut().zip(words_of(fields)) {
             *slot = w;
         }
+        Cell::new(index, ctor.variant())
     }
 
-    /// Which constructor a constructor cell is.
-    pub(crate) fn variant(&self, cell: Cell) -> VariantRef {
-        let tag = self.word(cell, 1);
-        VariantRef {
-            type_id: TypeId(low_u32(tag).cast_signed()),
-            variant_idx: low_u16(tag >> 32),
+    /// Which constructor a cell is, to tell it from others. It is `None` for
+    /// a cell that is no constructor's.
+    pub(crate) fn ctor_of(&self, cell: Cell) -> Option<Ctor> {
+        class(self.header(cell.index())).ctor(cell.variant())
+    }
+
+    /// The name the program knows a constructor cell by. It is `None` for a
+    /// cell that is no constructor's, and for one that is none of the
+    /// program's.
+    pub(crate) fn variant(&self, cell: Cell) -> Option<VariantRef> {
+        self.ctors.variant(class(self.header(cell.index())))
+    }
+
+    /// Value `i` of a cell whose values come first, or `None` past its last: a
+    /// constructor's field, a tuple's element, an array leaf's item, the binary
+    /// a slice is of, or a closure's function and then its captures. Reading it
+    /// adds no reference.
+    pub(crate) fn field(&self, cell: Cell, i: usize) -> Option<Value> {
+        self.near_field(cell, i)
+            .or_else(|| self.boxed_field(cell, i))
+    }
+
+    /// [`Self::field`] of a cell in the arena. It is `None` for a long cell.
+    #[inline(always)]
+    pub(crate) fn near_field(&self, cell: Cell, i: usize) -> Option<Value> {
+        let at = cell.index().at();
+        if i >= scan(*self.arena.get(at)?) {
+            return None;
+        }
+        // A scan is less than a cell's size, so the index is exact.
+        let field = self.arena.get(at.wrapping_add(1).wrapping_add(i))?;
+        Some(Value::from_bits(*field))
+    }
+
+    /// [`Self::field`] of a long cell, which has one only when all of its words
+    /// are values. It is `None` for a cell in the arena.
+    #[inline]
+    pub(crate) fn boxed_field(&self, cell: Cell, i: usize) -> Option<Value> {
+        let index = cell.index();
+        let h = self.header(index);
+        let field = self.boxed(index, h).get(i)?;
+        match class(h).scan() {
+            Scan::All => Some(Value::from_bits(*field)),
+            Scan::First | Scan::Ask => None,
         }
     }
 
-    /// Field `i` of a constructor cell, or `None` past its last. Reading it
-    /// adds no reference.
-    pub(crate) fn field(&self, cell: Cell, i: usize) -> Option<Value> {
-        self.held(cell, i)
+    /// Every word of a cell that holds only values, as [`Self::field`] numbers
+    /// them, and nothing of any other cell. Reading one adds no reference.
+    pub(crate) fn values(&self, cell: Cell) -> impl Iterator<Item = Value> + '_ {
+        let index = cell.index();
+        let words: &[u64] = match class(self.header(index)).scan() {
+            Scan::All => self.words(index, 1),
+            Scan::First | Scan::Ask => &[],
+        };
+        words.iter().map(|w| Value::from_bits(*w))
     }
 
     /// A new cell for function `func` over `captures`. Each capture's
     /// reference passes to the cell.
     pub(crate) fn closure(&mut self, func: FuncIdx, captures: &[Value]) -> Result<Cell, Fault> {
-        self.cell(Kind::Closure, [u64::from(func.0)], words_of(captures))
+        let first = [Value::func(func).bits()];
+        self.cell(Make::of(Kind::Closure), first, words_of(captures))
     }
 
-    /// The function a closure cell runs.
-    pub(crate) fn closure_func(&self, cell: Cell) -> FuncIdx {
-        FuncIdx(low_u32(self.word(cell, 1)))
+    /// The function a closure cell runs, or `None` for a cell that is no
+    /// closure.
+    pub(crate) fn closure_func(&self, cell: Cell) -> Option<FuncIdx> {
+        let index = cell.index();
+        let h = self.header(index);
+        if !class(h).is(Kind::Closure) {
+            return None;
+        }
+        let func = if scan(h) > 0 {
+            self.arena.get(index.at().wrapping_add(1))
+        } else {
+            self.boxed(index, h).first()
+        };
+        Value::from_bits(*func?).as_func()
     }
 
-    /// Capture `i` of a closure cell, or `None` past its last. Reading it adds
-    /// no reference.
-    pub(crate) fn capture(&self, cell: Cell, i: usize) -> Option<Value> {
-        self.held(cell, i)
+    /// Capture `i` of a closure cell in the arena, or `None` past its last.
+    /// Reading it adds no reference.
+    #[inline(always)]
+    pub(crate) fn near_capture(&self, cell: Cell, i: u32) -> Option<Value> {
+        self.near_field(cell, capture_at(i))
+    }
+
+    /// [`Self::near_capture`] of a long closure.
+    pub(crate) fn boxed_capture(&self, cell: Cell, i: u32) -> Option<Value> {
+        self.boxed_field(cell, capture_at(i))
+    }
+
+    /// Every capture of a closure cell, in order. Reading one adds no
+    /// reference.
+    pub(crate) fn captures(&self, cell: Cell) -> impl Iterator<Item = Value> + '_ {
+        self.values(cell).skip(1)
     }
 
     /// A new cell of `kind` holding `data` after its header, with one
@@ -881,14 +1116,14 @@ impl Heap {
     // Left out of line, every array and map node made pays for a call.
     #[inline(always)]
     pub(crate) fn make(&mut self, kind: Kind, data: &[u64]) -> Result<Cell, Fault> {
-        self.cell(kind, [], data.iter().copied())
+        self.cell(Make::of(kind), [], data.iter().copied())
     }
 
     /// The words of `cell` after its header. They are empty for a cell the
     /// heap does not have.
     #[inline]
     pub(crate) fn data(&self, cell: Cell) -> &[u64] {
-        self.words(cell, 1)
+        self.words(cell.index(), 1)
     }
 
     /// [`Self::data`] for a binary's readers.
@@ -898,27 +1133,28 @@ impl Heap {
     // about 25 machine instructions more through the cold one.
     #[inline]
     pub(crate) fn binary_data(&self, cell: Cell) -> &[u64] {
-        let onward = self.arena.get(cell.index()..).unwrap_or(&[]);
-        let h = onward.first().copied().unwrap_or(0);
+        let index = cell.index();
+        let onward = self.arena.get(index.at()..).unwrap_or(&[]);
+        let h = onward.first().copied().unwrap_or(FREED);
         match onward.get(1..size(h)) {
             Some(words) => words,
-            None => self.boxed(cell, h),
+            None => self.boxed(index, h),
         }
     }
 
     /// Whether `cell` has one holder, who may then change it in place.
     /// Asking about a freed cell is [`DeadCell`].
     pub(crate) fn unique(&self, cell: Cell) -> Result<bool, DeadCell> {
-        let c = count(self.header(cell));
+        let c = count(self.header(cell.index()));
         if c <= 0 {
-            self.uncounted(cell)?;
+            self.uncounted(cell.index())?;
         }
         Ok(c == 1)
     }
 
     /// The words of `cell` after its header, for its one holder to change.
     pub(crate) fn data_mut(&mut self, cell: Cell) -> &mut [u64] {
-        self.words_mut(cell, 1)
+        self.words_mut(cell.index(), 1)
     }
 
     /// A new cell of `kind` made from the first `n` words after `old`'s
@@ -941,7 +1177,7 @@ impl Heap {
         let kept = n.saturating_sub(cut.len());
         let at = at.min(kept);
         let len = kept.saturating_add(put.len());
-        let new = self.blank(kind, len.saturating_add(room))?;
+        let new = self.blank(Make::of(kind), len.saturating_add(room))?;
         if let Some(spare) = self.data_mut(new).get_mut(len..) {
             spare.fill(Value::NIL.bits());
         }
@@ -977,12 +1213,13 @@ impl Heap {
     /// Copy words `src` after `from`'s header to the words from `dst` after
     /// `to`'s, two different cells.
     fn copy_words(&mut self, from: Cell, src: std::ops::Range<usize>, to: Cell, dst: usize) {
+        let (from, to) = (from.index(), to.index());
         if size(self.header(from)) == 0 || size(self.header(to)) == 0 {
             return self.copy_long_words(from, src, to, dst);
         }
         let len = src.len();
-        let s = from.index().saturating_add(1).saturating_add(src.start);
-        let d = to.index().saturating_add(1).saturating_add(dst);
+        let s = from.at().saturating_add(1).saturating_add(src.start);
+        let d = to.at().saturating_add(1).saturating_add(dst);
         if s.saturating_add(len) <= self.arena.len() && d.saturating_add(len) <= self.arena.len() {
             self.arena.copy_within(s..s.saturating_add(len), d);
         }
@@ -993,7 +1230,7 @@ impl Heap {
     /// written, so that the other cell can be reached wherever it is.
     #[cold]
     #[inline(never)]
-    fn copy_long_words(&mut self, from: Cell, src: std::ops::Range<usize>, to: Cell, dst: usize) {
+    fn copy_long_words(&mut self, from: Index, src: std::ops::Range<usize>, to: Index, dst: usize) {
         let len = src.len();
         if let Some(slot) = self.slot(to, self.header(to)) {
             let Some(mut target) = self.outside.get_mut(slot as usize).and_then(Option::take)
@@ -1030,13 +1267,19 @@ impl Heap {
     /// else holds them. It is not for a handle, whose number the host would
     /// then be asked to let go of twice.
     pub(crate) fn copy(&mut self, cell: Cell) -> Result<Cell, Fault> {
-        let h = self.header(cell);
-        let kind = kind_of(h).ok_or(Fault::DeadCell)?;
-        let words = self.data_len(cell, h);
-        let new = self.blank(kind, words)?;
+        let index = cell.index();
+        let h = self.header(index);
+        let kind = class(h).kind().ok_or(Fault::DeadCell)?;
+        let words = self.data_len(index, h);
+        let make = Make {
+            class: class(h),
+            scan: kind.scan(),
+            variant: cell.variant(),
+        };
+        let new = self.blank(make, words)?;
         self.copy_words(cell, 0..words, new, 0);
-        for i in held(kind_bits(h), words) {
-            let Some(w) = self.words(new, 1).get(i) else {
+        for i in held(class(h), words) {
+            let Some(w) = self.data(new).get(i) else {
                 break;
             };
             if let Some(held) = Value::from_bits(*w).as_cell() {
@@ -1051,45 +1294,24 @@ impl Heap {
     /// [`DeadCell`], and so is one waiting to be freed or never counted,
     /// which has no one holder.
     pub(crate) fn discard(&mut self, cell: Cell) -> Result<(), DeadCell> {
-        let h = self.header(cell);
+        let index = cell.index();
+        let h = self.header(index);
         if count(h) <= 0 {
             return Err(DeadCell);
         }
         if size(h) == 0
-            && let Some(number) = self.slot(cell, h)
+            && let Some(number) = self.slot(index, h)
         {
             self.unbox(number);
         }
-        self.shelve(cell, space(size(h)));
+        self.shelve(index, space(size(h)));
         Ok(())
     }
 
     /// A new tuple cell holding `elements`. Each element's reference passes
     /// to the cell.
     pub(crate) fn tuple(&mut self, elements: &[Value]) -> Result<Cell, Fault> {
-        self.cell(Kind::Tuple, [], words_of(elements))
-    }
-
-    /// Element `i` of a tuple cell, or `None` past its last. Reading it adds
-    /// no reference.
-    pub(crate) fn element(&self, cell: Cell, i: usize) -> Option<Value> {
-        self.words(cell, 1).get(i).map(|w| Value::from_bits(*w))
-    }
-
-    /// A tuple cell's elements, in order. Reading one adds no reference.
-    pub(crate) fn elements(&self, cell: Cell) -> impl Iterator<Item = Value> + '_ {
-        self.words(cell, 1).iter().map(|w| Value::from_bits(*w))
-    }
-
-    /// Value `i` of the ones a constructor or closure cell holds after its
-    /// tag word.
-    fn held(&self, cell: Cell, i: usize) -> Option<Value> {
-        self.words(cell, 2).get(i).map(|w| Value::from_bits(*w))
-    }
-
-    /// A constructor cell's fields, in order. Reading one adds no reference.
-    pub(crate) fn fields(&self, cell: Cell) -> impl Iterator<Item = Value> + '_ {
-        self.words(cell, 2).iter().map(|w| Value::from_bits(*w))
+        self.cell(Make::of(Kind::Tuple), [], words_of(elements))
     }
 
     /// Cells this heap has allocated, and cells Perceus reuse saved it from
@@ -1102,81 +1324,70 @@ impl Heap {
         self.reused
     }
 
-    /// `cell`'s header, or 0, a freed cell's, when the arena has no such
+    /// The header at `index`, or a freed cell's when the arena has no such
     /// word.
-    fn header(&self, cell: Cell) -> u64 {
-        self.arena.get(cell.index()).copied().unwrap_or(0)
+    fn header(&self, index: Index) -> u64 {
+        self.arena.get(index.at()).copied().unwrap_or(FREED)
     }
 
-    /// How many words follow the header `h` of `cell`.
-    fn data_len(&self, cell: Cell, h: u64) -> usize {
+    /// How many words follow the header `h` of the cell at `index`.
+    fn data_len(&self, index: Index, h: u64) -> usize {
         match size(h).checked_sub(1) {
             Some(n) => n,
-            None => self.long_words(cell, h, 1).len(),
+            None => self.long_words(index, h, 1).len(),
         }
     }
 
-    /// Words `from` to the end of `cell`, counting its header as word 0.
-    /// `from` is 1 or 2: the header itself is [`Self::header`]'s to read.
+    /// Words `from` to the end of the cell at `index`, counting its header as
+    /// word 0. `from` is 1 or 2: the header itself is [`Self::header`]'s to
+    /// read.
     // This and `words_mut` are a few instructions each. They go inside their
     // callers, so that a node `make` writes, or one an array reads to copy,
     // costs no call. Left to the optimizer, each array node made paid for
     // two.
     #[inline(always)]
-    fn words(&self, cell: Cell, from: usize) -> &[u64] {
-        let onward = self.arena.get(cell.index()..).unwrap_or(&[]);
-        let h = onward.first().copied().unwrap_or(0);
+    fn words(&self, index: Index, from: usize) -> &[u64] {
+        let onward = self.arena.get(index.at()..).unwrap_or(&[]);
+        let h = onward.first().copied().unwrap_or(FREED);
         // A long cell's header gives its size as 0, so it has no such run
         // of words in the arena, and neither has a freed cell.
         match onward.get(from..size(h)) {
             Some(words) => words,
-            None => self.long_words(cell, h, from),
+            None => self.long_words(index, h, from),
         }
     }
 
     #[inline(always)]
-    fn words_mut(&mut self, cell: Cell, from: usize) -> &mut [u64] {
-        let h = self.header(cell);
+    fn words_mut(&mut self, index: Index, from: usize) -> &mut [u64] {
+        let h = self.header(index);
         if size(h) == 0 {
-            return self.long_words_mut(cell, h, from);
+            return self.long_words_mut(index, h, from);
         }
         self.arena
-            .get_mut(cell.index()..)
+            .get_mut(index.at()..)
             .and_then(|onward| onward.get_mut(from..size(h)))
             .unwrap_or(&mut [])
     }
 
-    /// Word `i` of `cell`, counting its header as word 0, for `i` of 1 or
-    /// more. It is 0 past the cell's last word.
-    fn word(&self, cell: Cell, i: usize) -> u64 {
-        let h = self.header(cell);
+    /// Word `i` of the cell at `index`, counting its header as word 0, for `i`
+    /// of 1 or more. It is 0 past the cell's last word.
+    fn word(&self, index: Index, i: usize) -> u64 {
+        let h = self.header(index);
         let word = if i < size(h) {
-            self.arena.get(cell.index().saturating_add(i))
+            self.arena.get(index.at().saturating_add(i))
         } else {
-            self.long_words(cell, h, i).first()
+            self.long_words(index, h, i).first()
         };
         word.copied().unwrap_or(0)
     }
 
-    fn set_word(&mut self, cell: Cell, i: usize, w: u64) {
-        let h = self.header(cell);
-        let slot = if i < size(h) {
-            self.arena.get_mut(cell.index().saturating_add(i))
-        } else {
-            self.long_words_mut(cell, h, i).first_mut()
-        };
-        if let Some(slot) = slot {
-            *slot = w;
-        }
-    }
-
-    /// The number of the box that holds the words of `cell`, whose header
-    /// is `h`, when it is a long cell.
-    fn slot(&self, cell: Cell, h: u64) -> Option<u32> {
+    /// The number of the box that holds the words of the cell at `index`, whose
+    /// header is `h`, when it is a long cell.
+    fn slot(&self, index: Index, h: u64) -> Option<u32> {
         if size(h) != 0 || freed(h) {
             return None;
         }
-        let number = self.arena.get(cell.index().saturating_add(1))?;
+        let number = self.arena.get(index.at().saturating_add(1))?;
         Some(low_u32(*number))
     }
 
@@ -1185,39 +1396,64 @@ impl Heap {
     /// the heap does not have and a cell shorter than `from` have none.
     #[cold]
     #[inline(never)]
-    fn long_words(&self, cell: Cell, h: u64, from: usize) -> &[u64] {
-        self.boxed(cell, h)
+    fn long_words(&self, index: Index, h: u64, from: usize) -> &[u64] {
+        self.boxed(index, h)
             .get(from.saturating_sub(1)..)
             .unwrap_or(&[])
     }
 
-    /// The words in the box of `cell`, whose header is `h`, or none when it
-    /// is not a long cell.
-    fn boxed(&self, cell: Cell, h: u64) -> &[u64] {
-        self.slot(cell, h)
+    /// The words in the box of the cell at `index`, whose header is `h`, or
+    /// none when it is not a long cell.
+    fn boxed(&self, index: Index, h: u64) -> &[u64] {
+        self.slot(index, h)
             .and_then(|slot| self.outside.get(slot as usize)?.as_deref())
             .unwrap_or(&[])
     }
 
     #[cold]
     #[inline(never)]
-    fn long_words_mut(&mut self, cell: Cell, h: u64, from: usize) -> &mut [u64] {
-        self.slot(cell, h)
+    fn long_words_mut(&mut self, index: Index, h: u64, from: usize) -> &mut [u64] {
+        self.slot(index, h)
             .and_then(|slot| self.outside.get_mut(slot as usize)?.as_deref_mut())
             .and_then(|words| words.get_mut(from.saturating_sub(1)..))
             .unwrap_or(&mut [])
     }
 }
 
-/// The header of a new cell, whose count is 1. A header holds the count in
-/// the low 32 bits, then the kind in 4 bits, then in the top [`SIZE_BITS`]
-/// the cell's size in words, or 0 for a long cell, whose size is its box's.
-fn header(kind: Kind, size: usize) -> u64 {
-    1 | (kind as u64) << 32 | (size as u64) << 36
-}
+/// The header of a freed cell. Every reader of a cell's words finds their
+/// number there, so a freed cell reads as one with none.
+const FREED: u64 = 0;
 
 fn count(h: u64) -> i32 {
     low_u32(h).cast_signed()
+}
+
+/// How far up a header its class is.
+const CLASS_SHIFT: u32 = 48;
+
+fn scan(h: u64) -> usize {
+    usize::from(low_byte(h >> 32))
+}
+
+/// A cell's words in the arena, or 0 for a long cell and a freed one.
+fn size(h: u64) -> usize {
+    usize::from(low_byte(h >> 40))
+}
+
+fn class(h: u64) -> Class {
+    Class(low_u16(h >> CLASS_SHIFT))
+}
+
+/// The header `h`, of a cell of `class` instead.
+fn with_class(h: u64, class: Class) -> u64 {
+    h & !(0xFFFF << CLASS_SHIFT) | u64::from(class.0) << CLASS_SHIFT
+}
+
+/// Whether `h` is the header of a cell in the arena that holds no values and
+/// nothing of the host's.
+#[inline(always)]
+fn raw(h: u64) -> bool {
+    class(h).0.wrapping_sub(1) < Kind::RAW && size(h) != 0
 }
 
 /// The words a cell of `size` words takes in the arena, 0 being a long
@@ -1232,17 +1468,32 @@ fn free_link(space: usize, next: u32) -> u64 {
     (space as u64) << 32 | u64::from(next)
 }
 
-/// What a constructor's cell holds before its fields.
-fn ctor_tag(v: VariantRef) -> [u64; 1] {
-    [u64::from(v.variant_idx) << 32 | u64::from(v.type_id.0.cast_unsigned())]
+/// Which of a closure cell's values capture `i` is. The first is its function.
+fn capture_at(i: u32) -> usize {
+    (i as usize).wrapping_add(1)
+}
+
+/// Write the new cell that takes `words`: its header, then `first` and `rest`.
+#[inline(always)]
+fn write<const N: usize>(
+    words: &mut [u64],
+    header: u64,
+    first: [u64; N],
+    rest: impl Iterator<Item = u64>,
+) {
+    if let Some((h, words)) = words.split_first_mut()
+        && let Some((slots, words)) = words.split_first_chunk_mut::<N>()
+    {
+        *h = header;
+        *slots = first;
+        for (slot, w) in words.iter_mut().zip(rest) {
+            *slot = w;
+        }
+    }
 }
 
 fn words_of(values: &[Value]) -> impl ExactSizeIterator<Item = u64> + '_ {
     values.iter().map(|v| v.bits())
-}
-
-fn kind_bits(h: u64) -> u64 {
-    h >> 32 & 0xF
 }
 
 /// Whether `h` is the header of a freed cell, or of a cell the heap does not
@@ -1251,44 +1502,33 @@ fn freed(h: u64) -> bool {
     h & COUNT == 0
 }
 
-/// Which of the `len` words after the header of a cell of this kind hold a
-/// value, and so a reference. They are the words after a constructor's or
-/// closure's tag word, all of a tuple or an array leaf, an array root's three
-/// parts (after its length, height and offset), an array branch's children
-/// (after its height and size table), every word of a map cell after its
-/// first, and a binary slice's first word.
-fn held(kind: u64, len: usize) -> std::ops::Range<usize> {
-    let k = |want: Kind| kind == want as u64;
-    if k(Kind::Ctor)
-        || k(Kind::Closure)
-        || k(Kind::Map)
-        || k(Kind::MapNode)
-        || k(Kind::MapCollision)
-    {
-        1..len
-    } else if k(Kind::Tuple) || k(Kind::ArrayLeaf) {
-        0..len
-    } else if k(Kind::ArrayRoot) {
-        3..len
-    } else if k(Kind::ArrayBranch) {
+/// Which of the `len` words after the header of a cell of this class hold a
+/// value, and so a reference. The header of a cell in the arena says it of most
+/// kinds, as its scan. This says it of the rest, which are an array root's
+/// three parts (after its length, height and offset), an array branch's
+/// children (after its height and size table) and every word of a map cell
+/// after its first. It says it of a long cell of any class too.
+fn held(class: Class, len: usize) -> std::ops::Range<usize> {
+    match class.kind() {
+        Some(Kind::Map | Kind::MapNode | Kind::MapCollision) => 1..len,
+        Some(Kind::ArrayRoot) => 3..len,
         // A branch is its height, then a size table and the children, the
         // same number of each.
-        len.saturating_sub(len.saturating_sub(1) / 2)..len
-    } else if k(Kind::BinarySlice) {
-        0..1
-    } else {
-        0..0
+        Some(Kind::ArrayBranch) => len.saturating_sub(len.saturating_sub(1) / 2)..len,
+        Some(
+            kind @ (Kind::Ctor
+            | Kind::Closure
+            | Kind::Tuple
+            | Kind::ArrayLeaf
+            | Kind::BinarySlice
+            | Kind::String
+            | Kind::BigInt
+            | Kind::Range
+            | Kind::Binary
+            | Kind::Handle),
+        ) => 0..kind.scan().of(len),
+        None => 0..0,
     }
-}
-
-/// The kinds that hold no references and are no handle, a bit each.
-const RAW: u64 = 1 << Kind::String as u64
-    | 1 << Kind::BigInt as u64
-    | 1 << Kind::Range as u64
-    | 1 << Kind::Binary as u64;
-
-fn size(h: u64) -> usize {
-    (h >> 36) as usize
 }
 
 /// How many more words to ask the system for when an arena of `len` words
@@ -1329,28 +1569,6 @@ pub(crate) struct Edit<'a> {
     pub(crate) cut: std::ops::Range<usize>,
     pub(crate) at: usize,
     pub(crate) put: &'a [u64],
-}
-
-/// The kind header `h` names, or `None` for a header no cell has.
-fn kind_of(h: u64) -> Option<Kind> {
-    match kind_bits(h) {
-        1 => Some(Kind::String),
-        2 => Some(Kind::BigInt),
-        3 => Some(Kind::Ctor),
-        4 => Some(Kind::Closure),
-        5 => Some(Kind::Tuple),
-        6 => Some(Kind::ArrayRoot),
-        7 => Some(Kind::ArrayLeaf),
-        8 => Some(Kind::ArrayBranch),
-        9 => Some(Kind::Range),
-        10 => Some(Kind::Binary),
-        11 => Some(Kind::BinarySlice),
-        12 => Some(Kind::Map),
-        13 => Some(Kind::MapNode),
-        14 => Some(Kind::MapCollision),
-        15 => Some(Kind::Handle),
-        _ => None,
-    }
 }
 
 #[cfg(test)]

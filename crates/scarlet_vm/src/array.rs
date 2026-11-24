@@ -689,7 +689,7 @@ pub(crate) fn push_owned(heap: &mut Heap, array: Cell, x: Value, end: End) -> Re
     let fits = heap.unique(array)?
         && (end == End::Back || r.offset == 0)
         && match edge.as_cell() {
-            Some(leaf) => heap.unique(leaf)? && heap.kind(leaf) == Some(Kind::ArrayLeaf),
+            Some(leaf) => heap.unique(leaf)? && heap.is(leaf, Kind::ArrayLeaf),
             None => false,
         }
         && (1..B).contains(&slot_count(heap, edge));

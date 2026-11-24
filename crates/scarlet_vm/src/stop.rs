@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use scarlet_ir::core_ir::{FuncIdx, MAX_PARAMS, PrimOp};
+use scarlet_ir::core_ir::{FuncIdx, MAX_PARAMS, PrimOp, VariantRef};
 use scarlet_ir::intrinsic::Intrinsic;
 
 use crate::frame::MAX_VALUES;
@@ -34,6 +34,10 @@ pub enum Stop {
     /// than the VM can number. Like `HeapFull`, this is a limit of the
     /// machine.
     ProgramTooLong,
+    /// The program has more constructors with fields than a cell's header can
+    /// number, among the types it uses. Like `HeapFull`, this is a limit of
+    /// the machine.
+    TooManyConstructors,
     /// The program broke a promise the compiler makes about every program,
     /// like a `match` having an arm for every value, or the VM found a
     /// reference count wrong. Only a bug in the compiler or the VM causes
@@ -197,8 +201,14 @@ pub(crate) enum Broken {
     NoField {
         index: u16,
     },
-    NoElement {
-        index: u16,
+    /// The program names a constructor it does not list.
+    NoCtor(VariantRef),
+    /// The program builds or matches a constructor with another number of
+    /// fields than it lists, or the VM builds one so.
+    CtorFields {
+        ctor: VariantRef,
+        got: usize,
+        want: usize,
     },
     NoArrayElement {
         index: u16,
@@ -242,6 +252,10 @@ pub(crate) enum Broken {
     },
     FloatOperation(View),
     BinaryCell,
+    /// A constructor's cell that is none of the program's constructors.
+    CtorCell,
+    /// A closure's cell that names no function.
+    ClosureCell,
     TreePiece,
     RangeCell,
     /// A reference was taken to, given up on, or asked whether it was the
@@ -316,8 +330,9 @@ impl fmt::Display for BadProgram {
             Broken::NoField { index } => {
                 write!(f, "field {index} read from a value with no such field")
             }
-            Broken::NoElement { index } => {
-                write!(f, "element {index} read from a value with no such element")
+            Broken::NoCtor(v) => write!(f, "{}, which the program does not list", name(*v)),
+            Broken::CtorFields { ctor, got, want } => {
+                write!(f, "{} with {got} fields, not {want}", name(*ctor))
             }
             Broken::NoArrayElement { index } => {
                 write!(f, "element {index} read from an array with no such element")
@@ -372,6 +387,8 @@ impl fmt::Display for BadProgram {
             }
             Broken::FloatOperation(v) => write!(f, "a Float operation on {v:?}"),
             Broken::BinaryCell => f.write_str("a binary cell that is not a binary"),
+            Broken::CtorCell => f.write_str("a constructor cell of no constructor"),
+            Broken::ClosureCell => f.write_str("a closure cell with no function"),
             Broken::TreePiece => {
                 f.write_str("a piece of an array's or a map's tree held as a value")
             }
@@ -384,6 +401,11 @@ impl fmt::Display for BadProgram {
             ),
         }
     }
+}
+
+/// A constructor by its number, for a program that may have no name for it.
+fn name(v: VariantRef) -> String {
+    format!("constructor {}.{}", v.type_id.0, v.variant_idx)
 }
 
 #[cfg(test)]

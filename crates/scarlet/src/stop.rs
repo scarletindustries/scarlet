@@ -13,6 +13,9 @@ pub fn message(stop: &Stop) -> Option<String> {
         Stop::StackFull => Some("the program ran out of stack".into()),
         Stop::NoRoomToAudit => Some("there is no memory to audit the heap with".into()),
         Stop::ProgramTooLong => Some("the program is longer than the VM can number".into()),
+        Stop::TooManyConstructors => {
+            Some("the program has more constructors with fields than the VM can number".into())
+        }
         Stop::BadProgram(what) => Some(format!(
             "internal error: {what}. This is a bug in Scarlet, not in the program"
         )),

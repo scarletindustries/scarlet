@@ -18,6 +18,9 @@
 //! 4. [`emit`] puts every function's instructions in one array, where a jump
 //!    and a call name a place in it.
 //!
+//! Before that, every constructor the program names is given what it is to the
+//! VM: a value of one word, or the class of its cells ([`forms`]).
+//!
 //! A function's registers are numbered in a byte, and one that needs more than
 //! there are is taken through again with its long literals made a piece at a
 //! time ([`literals`]).
@@ -32,24 +35,28 @@ use scarlet_ir::intrinsic::Intrinsic;
 use scarlet_ir::tivec::TiVec;
 
 use crate::Audit;
+use crate::heap::Ctors;
 use crate::show::Types;
 use crate::stop::{Broken, Limit, Missing, Stop};
 
 mod alloc;
 mod emit;
+mod forms;
 #[macro_use]
 mod ins;
 mod literals;
 mod live;
 mod translate;
 
+pub(crate) use forms::{Built, CtorOf};
 pub(crate) use ins::{
     Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, Dst, EntryPc, Hit, Ins, KeepList, Kept,
     Last, Lists, LookList, Looks, Newline, Op, Over, Pc, Reg, Room, ShareList, Shared, Shares, Src,
-    Taken, TextId, Variant, WhyId,
+    Taken, TextId, WhyId,
 };
 
 use alloc::Fitted;
+use forms::Forms;
 
 /// A whole loaded program.
 pub(crate) struct Code {
@@ -67,10 +74,12 @@ pub(crate) struct Code {
     pub(crate) main: Option<FuncIdx>,
     pub(crate) globals: u32,
     pub(crate) types: Types,
+    /// The constructors that have fields, for a heap to name cells by.
+    pub(crate) ctors: Ctors,
     /// Each function's source name, for showing a function value.
     pub(crate) names: TiVec<FuncIdx, String>,
     /// The stdlib constructors the VM builds on its own.
-    pub(crate) abi: Abi,
+    pub(crate) abi: Abi<Built>,
 }
 
 impl Code {
@@ -199,18 +208,19 @@ pub(crate) fn load_counted(program: &Program, audit: Audit) -> Result<Counted, S
 
 fn load_as(program: &Program, extra: emit::Extra<'_>) -> Result<Code, Stop> {
     let full = |_| Stop::broken(Broken::TooManyFunctions);
+    let source = &Source::new(program)?;
     let mut tables = Tables::default();
     let mut funcs = TiVec::new();
     let mut names = TiVec::new();
     for f in &program.fns {
         let this = funcs.next_idx().map_err(full)?;
-        let fitted = fit(program, f, Some(this), &mut tables)?;
+        let fitted = fit(source, f, Some(this), &mut tables)?;
         funcs.push(fitted).map_err(full)?;
         names.push(f.name.clone()).map_err(full)?;
     }
     let mut toplevels = Vec::new();
     for f in program.inits.iter().chain([&program.toplevel]) {
-        toplevels.push(fit(program, f, None, &mut tables)?);
+        toplevels.push(fit(source, f, None, &mut tables)?);
     }
     if let Some(main) = program.main.and_then(|main| funcs.get(main))
         && main.body.closure.needs_one()
@@ -229,9 +239,31 @@ fn load_as(program: &Program, extra: emit::Extra<'_>) -> Result<Code, Stop> {
         main: program.main,
         globals: program.globals,
         types: program.types.clone(),
+        ctors: source.ctors.clone(),
         names,
-        abi: program.abi,
+        abi: source.abi,
     })
+}
+
+/// The program being loaded, and what its constructors are to the VM.
+struct Source<'p> {
+    program: &'p Program,
+    forms: Forms,
+    ctors: Ctors,
+    abi: Abi<Built>,
+}
+
+impl Source<'_> {
+    fn new(program: &Program) -> Result<Source<'_>, Stop> {
+        let (forms, ctors) = Forms::new(&program.types)?;
+        let abi = program.abi.rename(&mut &forms).map_err(Stop::broken)?;
+        Ok(Source {
+            program,
+            forms,
+            ctors,
+            abi,
+        })
+    }
 }
 
 /// What the program's instructions name by a number, because an instruction
@@ -292,6 +324,12 @@ enum Unfit {
     TooLong,
 }
 
+impl From<Broken> for Unfit {
+    fn from(why: Broken) -> Self {
+        Unfit::Broken(why)
+    }
+}
+
 impl From<Missing> for Unfit {
     fn from(m: Missing) -> Self {
         Unfit::Missing(m)
@@ -301,14 +339,14 @@ impl From<Missing> for Unfit {
 /// Take `f` as far as registers. `this` is the function's own index, which a
 /// call to `self` means. A toplevel has none, and cannot call itself.
 fn fit(
-    program: &Program,
+    source: &Source<'_>,
     f: &LoweredFn,
     this: Option<FuncIdx>,
     tables: &mut Tables,
 ) -> Result<Fitted, Stop> {
     let name = format!("{}.{}", f.module, f.name);
     let before = tables.lens();
-    let mut fitted = fit_core(program, &f.core, this, tables);
+    let mut fitted = fit_core(source, &f.core, this, tables);
     // A long literal is built a piece at a time only here, so that a function
     // with room for its literals makes the cells it always did.
     if fitted.as_ref().err() == Some(&Unfit::TooMany(Limit::Values))
@@ -316,7 +354,7 @@ fn fit(
     {
         // Nothing names what the first try put in the tables.
         tables.cut(before);
-        fitted = fit_core(program, &core, this, tables);
+        fitted = fit_core(source, &core, this, tables);
     }
     let why = match fitted {
         Ok(body) => return Ok(Fitted::new(name, f.core.params.len(), body)),
@@ -333,7 +371,7 @@ fn fit(
 }
 
 fn fit_core(
-    program: &Program,
+    source: &Source<'_>,
     core: &CoreFn,
     this: Option<FuncIdx>,
     tables: &mut Tables,
@@ -341,7 +379,7 @@ fn fit_core(
     if core.params.len() > MAX_PARAMS {
         return Err(Unfit::TooMany(Limit::Parameters));
     }
-    let mut draft = translate::translate(program, core, this, tables)?;
+    let mut draft = translate::translate(source, core, this, tables)?;
     let held = live::settle(&mut draft)?;
     alloc::allocate(draft, &held)
 }
