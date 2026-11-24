@@ -286,6 +286,39 @@ registers! {
     Dead Role::Drop;
 }
 
+/// Declares the field that is `N` registers with one role, where a new cell's
+/// instruction has one for each operand.
+macro_rules! registers_of_a_cell {
+    ($($name:ident $role:expr;)*) => {$(
+        impl<R: Names, const N: usize> Part<R> for [$name<R>; N] {
+            fn operands(self, _: &Lists<R>, f: &mut impl FnMut(R, Role)) {
+                self.iter().for_each(|r| f(r.0, $role));
+            }
+        }
+
+        impl<const N: usize> Place for [$name<VReg>; N] {
+            type Placed = [$name<Reg>; N];
+            fn place(self, at: &impl Places) -> Result<[$name<Reg>; N], Unplaced> {
+                place_each(self.map(|r| r.0), at).map(|regs| regs.map($name))
+            }
+        }
+    )*};
+}
+
+registers_of_a_cell! {
+    Shared Role::Share;
+    Taken Role::Take;
+}
+
+/// Each of `regs` as the register it was given.
+fn place_each<const N: usize>(regs: [VReg; N], at: &impl Places) -> Result<[Reg; N], Unplaced> {
+    let mut placed = [Reg::UNUSED; N];
+    for (to, from) in placed.iter_mut().zip(regs) {
+        *to = at.reg(from)?;
+    }
+    Ok(placed)
+}
+
 /// A register whose value the instruction hands on, to a callee, a cell or
 /// another register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -452,6 +485,12 @@ impl<R: Names, const N: usize> Args<R, N> {
 }
 
 impl<R: Copy, const N: usize> Args<R, N> {
+    /// The registers, when there are `K` of them and the instruction takes each.
+    pub(super) fn taken<const K: usize>(&self) -> Option<[Taken<R>; K]> {
+        let regs: &[R; K] = self.regs.regs().try_into().ok()?;
+        self.iter().all(|a| a.moved).then(|| regs.map(Taken))
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.regs.regs().len()
     }
@@ -497,6 +536,49 @@ impl<const N: usize> Place for Args<VReg, N> {
             regs: self.regs.place(at)?,
             moved: self.moved,
         })
+    }
+}
+
+/// The operands an instruction hands to a new cell, in order.
+pub(crate) trait Hands {
+    fn hands(&self) -> impl ExactSizeIterator<Item = Arg<Reg>>;
+}
+
+impl<const N: usize> Hands for [Taken<Reg>; N] {
+    #[inline(always)]
+    fn hands(&self) -> impl ExactSizeIterator<Item = Arg<Reg>> {
+        self.iter().map(|r| Arg {
+            reg: r.0,
+            moved: true,
+        })
+    }
+}
+
+impl<const N: usize> Hands for [Shared<Reg>; N] {
+    #[inline(always)]
+    fn hands(&self) -> impl ExactSizeIterator<Item = Arg<Reg>> {
+        self.iter().map(|r| Arg::shared(r.0))
+    }
+}
+
+impl<const N: usize> Hands for Args<Reg, N> {
+    #[inline(always)]
+    fn hands(&self) -> impl ExactSizeIterator<Item = Arg<Reg>> {
+        self.iter()
+    }
+}
+
+impl Hands for [Arg<Reg>] {
+    #[inline(always)]
+    fn hands(&self) -> impl ExactSizeIterator<Item = Arg<Reg>> {
+        self.iter().copied()
+    }
+}
+
+impl Hands for [Reg] {
+    #[inline(always)]
+    fn hands(&self) -> impl ExactSizeIterator<Item = Arg<Reg>> {
+        self.iter().map(|r| Arg::shared(*r))
     }
 }
 

@@ -29,8 +29,8 @@ use crate::value::{Float, SmallInt, Tag, Value};
 mod fields;
 
 pub(crate) use fields::{
-    Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, Dst, EntryPc, Hit, KeepList, Kept, Last,
-    Lists, LookList, Looks, Names, Newline, Over, Part, Pc, Place, Places, Reg, Role, Room,
+    Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, Dst, EntryPc, Hands, Hit, KeepList, Kept,
+    Last, Lists, LookList, Looks, Names, Newline, Over, Part, Pc, Place, Places, Reg, Role, Room,
     ShareList, Shared, Shares, Src, Taken, TextId, Unplaced, VReg, WhyId,
 };
 pub(super) use fields::{Callee, Label, LastReg, OwnEntry, OwnRoom};
@@ -236,8 +236,19 @@ instructions! {
     Concat { dst: Dst<R>, parts: Looks<R, 8> },
     ConcatWide { dst: Dst<R>, parts: LookList },
     /// A new cell for constructor `ctor`, holding `fields`. A constructor with
-    /// no fields needs no cell, so it is an [`Ins::Const`] instead.
-    Ctor { dst: Dst<R>, ctor: Ctor, fields: Args<R, 6> },
+    /// no fields needs no cell, so it is an [`Ins::Const`] instead. One with a
+    /// number at its end has that many fields and takes each of them, so it has
+    /// nothing to share ([`Ins::taking`]).
+    Ctor1 { dst: Dst<R>, ctor: Ctor, fields: [Taken<R>; 1] },
+    Ctor2 { dst: Dst<R>, ctor: Ctor, fields: [Taken<R>; 2] },
+    Ctor3 { dst: Dst<R>, ctor: Ctor, fields: [Taken<R>; 3] },
+    Ctor4 { dst: Dst<R>, ctor: Ctor, fields: [Taken<R>; 4] },
+    Ctor5 { dst: Dst<R>, ctor: Ctor, fields: [Taken<R>; 5] },
+    Ctor6 { dst: Dst<R>, ctor: Ctor, fields: [Taken<R>; 6] },
+    Ctor7 { dst: Dst<R>, ctor: Ctor, fields: [Taken<R>; 7] },
+    Ctor8 { dst: Dst<R>, ctor: Ctor, fields: [Taken<R>; 8] },
+    /// The same, for a constructor that shares a field.
+    Ctor { dst: Dst<R>, ctor: Ctor, fields: Args<R, 8> },
     CtorWide { dst: Dst<R>, ctor: Ctor, fields: ArgList },
     /// [`Ins::Ctor`], over the cell that an [`Ins::DropReuse`] above left in
     /// `reuse`. If the register holds anything else, it is given up and the
@@ -338,7 +349,10 @@ instructions! {
     JumpUnlessStr { src: Src<R>, text: TextId, to: R::To },
     /// Continue at `to` unless `src` is the binary `bits`.
     JumpUnlessBinary { src: Src<R>, bits: BinaryId, to: R::To },
-    /// A new tuple holding `elements`.
+    /// A new tuple holding `elements`. One with a number at its end has that
+    /// many.
+    Tuple2 { dst: Dst<R>, elements: [Shared<R>; 2] },
+    Tuple3 { dst: Dst<R>, elements: [Shared<R>; 3] },
     Tuple { dst: Dst<R>, elements: Shares<R, 8> },
     TupleWide { dst: Dst<R>, elements: ShareList },
     /// A call to a `@vm` built-in the VM runs ([`super::built`]).
@@ -401,9 +415,21 @@ instructions! {
 const _: () = assert!(size_of::<Ins<Reg>>() == 16);
 
 impl<R: Names> Ins<R> {
-    /// The call that does the same as this one and has nothing in it to share
-    /// with, when this is a call of a few arguments and takes them all.
+    /// The call or the constructor that does the same as this one and has
+    /// nothing in it to share with, when this one has few operands to hand on
+    /// and takes them all.
     pub(super) fn taking(&self) -> Option<Ins<R>> {
+        if let Ins::Ctor { dst, ctor, fields } = *self {
+            // The one of these with as many fields.
+            macro_rules! one_of {
+                ($($name:ident)*) => {
+                    None$(.or_else(|| {
+                        fields.taken().map(|fields| Ins::$name { dst, ctor, fields })
+                    }))*
+                };
+            }
+            return one_of!(Ctor1 Ctor2 Ctor3 Ctor4 Ctor5 Ctor6 Ctor7 Ctor8);
+        }
         let took = |a: Arg<R>| a.moved.then_some(Taken(a.reg));
         if let Ins::Call1Share { dst, own, to, a } = *self {
             let a = took(a)?;

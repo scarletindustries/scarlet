@@ -152,6 +152,37 @@ impl Window<'_> {
         }
     }
 
+    // What handing `a` on does, for a handler that has something to ask for in
+    // between: the reference first, and the value after.
+
+    /// Add the reference that handing `a` on needs, unless the register's own
+    /// goes.
+    #[inline(always)]
+    pub(crate) fn add(&self, heap: &mut Heap, a: Arg<Reg>) -> Result<(), DeadCell> {
+        if !a.moved {
+            heap.own(self.get(a.reg))?;
+        }
+        Ok(())
+    }
+
+    /// The value `a` hands on, after [`Self::add`].
+    #[inline(always)]
+    pub(crate) fn hand(&mut self, a: Arg<Reg>) -> Value {
+        if a.moved {
+            self.empty(a.reg)
+        } else {
+            self.get(a.reg)
+        }
+    }
+
+    /// Give up what [`Self::add`] added, when `a` is not handed on after all.
+    pub(crate) fn take_back(&self, heap: &mut Heap, a: Arg<Reg>) -> Result<(), DeadCell> {
+        if a.moved {
+            return Ok(());
+        }
+        give_up(heap, self.get(a.reg))
+    }
+
     /// Put `v` in `r`, whose old value is released. `v`'s reference passes to
     /// the register.
     #[inline(always)]

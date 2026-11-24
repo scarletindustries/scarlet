@@ -50,9 +50,9 @@ mod translate;
 
 pub(crate) use forms::{Built, CtorOf};
 pub(crate) use ins::{
-    Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, Dst, EntryPc, Hit, Ins, KeepList, Kept,
-    Last, Lists, LookList, Looks, Newline, Op, Over, Pc, Reg, Room, ShareList, Shared, Shares, Src,
-    Taken, TextId, WhyId,
+    Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, Dst, EntryPc, Hands, Hit, Ins, KeepList,
+    Kept, Last, Lists, LookList, Looks, Newline, Op, Over, Pc, Reg, Room, ShareList, Shared,
+    Shares, Src, Taken, TextId, WhyId,
 };
 
 use alloc::Fitted;

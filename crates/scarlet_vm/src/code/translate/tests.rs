@@ -68,10 +68,10 @@ fn the_loader_makes_one_write_of_a_put_and_of_a_set() {
         [
             Op::Const,
             Op::ArraySet,
-            Op::Ctor,
+            Op::Ctor1,
             Op::Jump,
             Op::Const,
-            Op::Ctor,
+            Op::Ctor1,
             Op::Ret
         ]
     );
@@ -206,7 +206,7 @@ fn a_constant_something_reads_is_put_in_a_register() {
          fn global(x Int) Int { x + kept }\n\
          pub fn main() { Nil }\n",
     );
-    assert_eq!(ops["pair"], [Op::Const, Op::IntAddK, Op::Tuple, Op::Ret]);
+    assert_eq!(ops["pair"], [Op::Const, Op::IntAddK, Op::Tuple2, Op::Ret]);
     assert_eq!(ops["twice"], [Op::IntMulK, Op::IntAddK, Op::Ret]);
     assert_eq!(ops["alone"], [Op::Const, Op::IntMulK, Op::Ret]);
     assert_eq!(ops["global"], [Op::GetGlobal, Op::IntAdd, Op::Ret]);
@@ -581,6 +581,11 @@ fn operands_that_do_not_fit_are_in_a_list() {
         captures: list(n),
     };
     let cases = [
+        (prim(PrimOp::MakeTuple, 0), Op::Tuple),
+        (prim(PrimOp::MakeTuple, 1), Op::Tuple),
+        (prim(PrimOp::MakeTuple, 2), Op::Tuple2),
+        (prim(PrimOp::MakeTuple, 3), Op::Tuple3),
+        (prim(PrimOp::MakeTuple, 4), Op::Tuple),
         (prim(PrimOp::MakeTuple, 8), Op::Tuple),
         (prim(PrimOp::MakeTuple, 9), Op::TupleWide),
         (prim(PrimOp::MakeArray, 8), Op::Array),
@@ -593,8 +598,8 @@ fn operands_that_do_not_fit_are_in_a_list() {
         (prim(PrimOp::ArrayPrepend, 10), Op::ArrayPrependWide),
         (prim(PrimOp::ArrayAppend, 9), Op::ArrayAppend),
         (prim(PrimOp::ArrayAppend, 10), Op::ArrayAppendWide),
-        (ctor(6, None), Op::Ctor),
-        (ctor(7, None), Op::CtorWide),
+        (ctor(8, None), Op::Ctor),
+        (ctor(9, None), Op::CtorWide),
         (ctor(5, Some(0)), Op::CtorOver),
         (ctor(6, Some(0)), Op::CtorOverWide),
         (closure(8), Op::Closure),
@@ -809,5 +814,94 @@ fn a_call_is_the_one_for_its_arguments() {
     for (name, op, roles) in calls {
         let want = (op.to_string(), roles);
         assert_eq!(first(&format!(".{name}")), want, "{name}");
+    }
+}
+
+/// A constructor is loaded as the one for its number of fields when it takes
+/// them all, as the one that counts through them when it shares one, and as the
+/// one with a list past eight. A tuple is loaded by its number of elements, and
+/// it and a closure share everything they are given.
+#[test]
+fn a_new_cell_has_an_instruction_for_what_it_is_given() {
+    let widths = 1..=9usize;
+    let each = |n: usize, f: &dyn Fn(usize) -> String| -> String {
+        (0..n).map(f).collect::<Vec<_>>().join(", ")
+    };
+    let mut src = String::new();
+    let mut main = String::new();
+    for n in widths.clone() {
+        let params = each(n, &|i| format!("a{i} Int"));
+        let fields = each(n, &|i| format!("f{i} Int"));
+        let args = each(n, &|i| format!("a{i}"));
+        let types = each(n, &|_| "Int".to_string());
+        src += &format!(
+            "type T{n} {{\n\tT{n}({fields})\n}}\n\
+             fn take{n}({params}) T{n} {{ T{n}({args}) }}\n\
+             fn share{n}({params}) T{n} {{\n\
+             \tt = T{n}({args})\n\
+             \tprintln(a0)\n\
+             \tt\n\
+             }}\n\
+             fn same{n}(a Int) T{n} {{ T{n}({}) }}\n\
+             fn over{n}({params}) fn(Int) Int {{ fn(x) x + {} }}\n",
+            each(n, &|_| "a".to_string()),
+            args.replace(", ", " + "),
+        );
+        let ints = each(n, &|i| format!("{i}"));
+        main += &format!(
+            "\tprintln(take{n}({ints}))\n\
+             \tprintln(share{n}({ints}))\n\
+             \tprintln(same{n}(1))\n\
+             \tprintln(over{n}({ints})(1))\n"
+        );
+        if n > 1 {
+            src += &format!("fn pair{n}({params}) ({types}) {{ ({args}) }}\n");
+            main += &format!("\tprintln(pair{n}({ints}))\n");
+        }
+    }
+    let code = code(&format!("{src}pub fn main() {{\n{main}}}\n"));
+    let made = |name: String| -> (String, Vec<Role>) {
+        let ins = body(&code, named(&code, &format!(".{name}")));
+        let makes = ["Ctor", "Tuple", "Closure"];
+        let kind = |i: &&Ins<Reg>| makes.iter().any(|m| i.op().name().starts_with(m));
+        let ins = ins.iter().find(kind).expect("a cell is made");
+        let mut roles = Vec::new();
+        ins.operands(&code.lists, &mut |_, role| roles.push(role));
+        (ins.op().name().to_string(), roles[1..].to_vec())
+    };
+    let (share, pass) = (Role::Pass { moved: false }, Role::Pass { moved: true });
+    for n in widths {
+        let taking = if n > 8 {
+            ("CtorWide".to_string(), vec![pass; n])
+        } else {
+            (format!("Ctor{n}"), vec![Role::Take; n])
+        };
+        assert_eq!(made(format!("take{n}")), taking);
+        let sharing = if n > 8 { "CtorWide" } else { "Ctor" };
+        let mut roles = vec![pass; n];
+        roles[0] = share;
+        assert_eq!(made(format!("share{n}")), (sharing.to_string(), roles));
+        // Of one register's operands the last takes it.
+        let mut roles = vec![share; n];
+        roles[n - 1] = pass;
+        let same = if n == 1 {
+            ("Ctor1".to_string(), vec![Role::Take])
+        } else {
+            (sharing.to_string(), roles)
+        };
+        assert_eq!(made(format!("same{n}")), same);
+        let closure = if n > 8 { "ClosureWide" } else { "Closure" };
+        let shared = vec![Role::Share; n];
+        let over = (closure.to_string(), shared.clone());
+        assert_eq!(made(format!("over{n}")), over);
+        if n > 1 {
+            let tuple = match n {
+                2 => "Tuple2",
+                3 => "Tuple3",
+                9 => "TupleWide",
+                _ => "Tuple",
+            };
+            assert_eq!(made(format!("pair{n}")), (tuple.to_string(), shared));
+        }
     }
 }

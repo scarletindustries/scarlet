@@ -92,6 +92,52 @@ fn each_way_to_a_register_counts_what_it_does() {
     assert_eq!(heap.live(), 0);
 }
 
+/// Handing a value on in two parts does what passing it does: the reference is
+/// there before the value has left, and the register is emptied only when its
+/// own reference goes. What was added can be taken back, and then nothing has
+/// changed.
+#[test]
+fn a_value_is_handed_on_in_two_parts() {
+    let mut stack = nil_stack(WINDOW);
+    let heap = &mut Heap::default();
+    let mut win = window(&mut stack, 0).expect("a window");
+    let (a, plain) = (tuple(heap), int(4));
+    assert_eq!(win.put(heap, Dst(Reg(2)), Value::cell(a)), Ok(()));
+    assert_eq!(win.put(heap, Dst(Reg(3)), plain), Ok(()));
+    let arg = |n, moved| Arg { reg: Reg(n), moved };
+    let unchanged = |win: &Window<'_>, heap: &Heap| {
+        assert_eq!(heap.unique(a), Ok(true));
+        assert_eq!(win.get(Reg(2)).as_cell(), Some(a));
+        assert_eq!(win.get(Reg(3)).bits(), plain.bits());
+    };
+    for n in [2, 3] {
+        for moved in [false, true] {
+            assert_eq!(win.add(heap, arg(n, moved)), Ok(()));
+            let added = n == 2 && !moved;
+            assert_eq!(heap.unique(a), Ok(!added));
+            assert_eq!(win.take_back(heap, arg(n, moved)), Ok(()));
+            unchanged(&win, heap);
+        }
+        assert_eq!(win.add(heap, arg(n, false)), Ok(()));
+        let v = win.hand(arg(n, false));
+        assert_eq!(v.bits(), win.get(Reg(n)).bits(), "it is still there");
+        assert_eq!(give_up(heap, v), Ok(()));
+        unchanged(&win, heap);
+    }
+    assert_eq!(win.hand(arg(3, true)).bits(), plain.bits());
+    assert_eq!(win.hand(arg(2, true)).as_cell(), Some(a));
+    for n in [2, 3] {
+        assert_eq!(win.get(Reg(n)).bits(), Value::NIL.bits());
+    }
+    assert_eq!(heap.unique(a), Ok(true));
+    // A freed cell has no reference to add or to take back.
+    assert_eq!(win.put(heap, Dst(Reg(2)), Value::cell(a)), Ok(()));
+    assert_eq!(heap.release(a), Ok(()));
+    assert_eq!(win.add(heap, arg(2, false)), Err(DeadCell));
+    assert_eq!(win.take_back(heap, arg(2, false)), Err(DeadCell));
+    assert_eq!(win.add(heap, arg(2, true)), Ok(()));
+}
+
 /// What `leave` and `rewrite` hold here: a cell in every register from 1 up,
 /// for a frame of `own` registers.
 fn filled(stack: &mut [Value], heap: &mut Heap, own: u16) -> Vec<Cell> {

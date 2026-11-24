@@ -301,6 +301,11 @@ suite! {
         // variant in place, shown, compared, hashed, and keyed by in maps whose
         // order this pins.
         variants,
+        // New cells of every width an instruction has a form for and past it:
+        // constructors, tuples and closures given values that are taken,
+        // shared, both, the program's own and the same one over and over, and
+        // records updated alone and while something else holds them.
+        new_cells,
         // Backpassing: `x <- f(args)` desugars to a trailing callback.
         backpassing,
         // The pipe operator: `x |> f(args)` desugars to `f(x, args)`.

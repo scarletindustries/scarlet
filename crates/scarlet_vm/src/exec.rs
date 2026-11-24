@@ -17,18 +17,19 @@
 //! If a count is wrong all the same, the instruction that takes or gives up
 //! a reference to a cell already freed stops the run with `Broken::DeadCell`.
 
-use scarlet_ir::core_ir::{FuncIdx, GlobalSlot};
+use scarlet_ir::core_ir::GlobalSlot;
 
 use crate::array::{self, End, Seq};
 use crate::bigint;
 use crate::code::{
-    Arg, Args, BitsOp, Code, Counted, Dead, Dst, Entry, Ins, Op, Over, Reg, Room, Shared, Src,
+    Arg, Args, BitsOp, Code, Counted, Dead, Dst, Entry, Hands, Ins, Op, Over, Reg, Room, Shared,
+    Src,
 };
 use crate::counts::Counts;
 use crate::eq;
 use crate::float;
 use crate::frame::{self, CLOSURE, Link, RESULT, WINDOW, Window, window};
-use crate::heap::{Ctor, DeadCell, Heap};
+use crate::heap::{Ctor, DeadCell, Heap, Shape};
 use crate::host::Host;
 use crate::int;
 use crate::map;
@@ -616,20 +617,66 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
             Ins::ConcatWide { dst, parts } => {
                 concat(win.lend(), rest, dst, parts.regs(&code.lists))?;
             }
+            Ins::Ctor1 {
+                dst,
+                ctor,
+                ref fields,
+            } => new_cell(win.lend(), rest, dst, Shape::ctor(ctor), fields)?,
+            Ins::Ctor2 {
+                dst,
+                ctor,
+                ref fields,
+            } => new_cell(win.lend(), rest, dst, Shape::ctor(ctor), fields)?,
+            Ins::Ctor3 {
+                dst,
+                ctor,
+                ref fields,
+            } => new_cell(win.lend(), rest, dst, Shape::ctor(ctor), fields)?,
+            Ins::Ctor4 {
+                dst,
+                ctor,
+                ref fields,
+            } => new_cell(win.lend(), rest, dst, Shape::ctor(ctor), fields)?,
+            Ins::Ctor5 {
+                dst,
+                ctor,
+                ref fields,
+            } => new_cell(win.lend(), rest, dst, Shape::ctor(ctor), fields)?,
+            Ins::Ctor6 {
+                dst,
+                ctor,
+                ref fields,
+            } => new_cell(win.lend(), rest, dst, Shape::ctor(ctor), fields)?,
+            Ins::Ctor7 {
+                dst,
+                ctor,
+                ref fields,
+            } => new_cell(win.lend(), rest, dst, Shape::ctor(ctor), fields)?,
+            Ins::Ctor8 {
+                dst,
+                ctor,
+                ref fields,
+            } => new_cell(win.lend(), rest, dst, Shape::ctor(ctor), fields)?,
             Ins::Ctor {
                 dst,
                 ctor,
                 ref fields,
-            } => make(win.lend(), rest, dst, ctor, fields)?,
+            } => new_cell(win.lend(), rest, dst, Shape::ctor(ctor), fields)?,
             Ins::CtorWide { dst, ctor, fields } => {
-                make_wide(win.lend(), rest, dst, ctor, fields.args(&code.lists))?;
+                new_cell_apart(
+                    win.lend(),
+                    rest,
+                    dst,
+                    Shape::ctor(ctor),
+                    fields.args(&code.lists),
+                )?;
             }
             Ins::CtorOver {
                 dst,
                 ctor,
                 ref fields,
                 reuse,
-            } => over_few(win.lend(), rest, dst, ctor, fields, reuse)?,
+            } => over(win.lend(), rest, dst, ctor, fields, reuse)?,
             Ins::CtorOverWide {
                 dst,
                 ctor,
@@ -842,12 +889,18 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
                 dst,
                 func,
                 ref captures,
-            } => closure(win.lend(), rest, dst, func, captures.regs())?,
+            } => new_cell_apart(win.lend(), rest, dst, Shape::closure(func), captures.regs())?,
             Ins::ClosureWide {
                 dst,
                 func,
                 captures,
-            } => closure(win.lend(), rest, dst, func, captures.regs(&code.lists))?,
+            } => new_cell_apart(
+                win.lend(),
+                rest,
+                dst,
+                Shape::closure(func),
+                captures.regs(&code.lists),
+            )?,
             Ins::GetCapture { dst, index } => {
                 let closure = win.closure().as_cell();
                 match closure.and_then(|c| rest.heap.near_capture(c, index)) {
@@ -904,9 +957,23 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
                     None => far_field(win.lend(), rest, dst, src, index)?,
                 }
             }
-            Ins::Tuple { dst, elements } => tuple(win.lend(), rest, dst, elements.regs())?,
+            Ins::Tuple2 { dst, ref elements } => {
+                new_cell(win.lend(), rest, dst, Shape::TUPLE, elements)?
+            }
+            Ins::Tuple3 { dst, ref elements } => {
+                new_cell(win.lend(), rest, dst, Shape::TUPLE, elements)?
+            }
+            Ins::Tuple { dst, ref elements } => {
+                new_cell_apart(win.lend(), rest, dst, Shape::TUPLE, elements.regs())?
+            }
             Ins::TupleWide { dst, elements } => {
-                tuple(win.lend(), rest, dst, elements.regs(&code.lists))?;
+                new_cell_apart(
+                    win.lend(),
+                    rest,
+                    dst,
+                    Shape::TUPLE,
+                    elements.regs(&code.lists),
+                )?;
             }
             Ins::Array { dst, elements } => array(win.lend(), rest, dst, elements.regs())?,
             Ins::ArrayWide { dst, elements } => {
@@ -1249,98 +1316,120 @@ fn lost_window() -> Stop {
 // What an instruction does that is more than a few lines, out of line so
 // that the loop keeps what it holds in the machine's registers.
 
-/// A new cell for `ctor`.
+/// A new cell of `shape` in `dst`, given what `given` hands on.
+///
+/// The operands are gone over twice. First each value that is shared gets its
+/// reference. Then the values go from the registers to the cell, once there is
+/// one, so a cell that is refused has taken nothing.
 #[inline(always)]
-fn make(
+fn new_cell<const N: usize, G: Hands + ?Sized>(
+    win: Window<'_>,
+    rest: &mut Rest<'_, '_>,
+    dst: Dst<Reg>,
+    shape: Shape<N>,
+    given: &G,
+) -> Result<(), Stop> {
+    for a in given.hands() {
+        win.add(&mut rest.heap, a)?;
+    }
+    new_cell_of_shared(win, rest, dst, shape, given)
+}
+
+/// [`new_cell`], for an instruction that is a call out of the loop.
+#[inline(never)]
+fn new_cell_apart<const N: usize, G: Hands + ?Sized>(
+    win: Window<'_>,
+    rest: &mut Rest<'_, '_>,
+    dst: Dst<Reg>,
+    shape: Shape<N>,
+    given: &G,
+) -> Result<(), Stop> {
+    new_cell(win, rest, dst, shape, given)
+}
+
+/// The rest of [`new_cell`] once every value that is shared has its reference.
+#[inline(always)]
+fn new_cell_of_shared<const N: usize, G: Hands + ?Sized>(
     mut win: Window<'_>,
     rest: &mut Rest<'_, '_>,
     dst: Dst<Reg>,
-    ctor: Ctor,
-    fields: &Args<Reg, 6>,
+    shape: Shape<N>,
+    given: &G,
 ) -> Result<(), Stop> {
-    let mut values = UNSET;
-    let values = pass_few(win.lend(), rest, fields, &mut values)?;
     // The two ways do not join, so taking a freed cell is one straight line.
-    match rest.heap.ctor_in_freed(ctor, values) {
+    let values = given.hands().map(|a| win.hand(a));
+    match rest.heap.in_freed(shape, values) {
         Some(cell) => Ok(win.put(&mut rest.heap, dst, Value::cell(cell))?),
-        None => {
-            let cell = rest.heap.ctor_at_end(ctor, values).map_err(fault)?;
-            Ok(win.put(&mut rest.heap, dst, Value::cell(cell))?)
+        None => new_cell_at_end(win, rest, dst, shape, given),
+    }
+}
+
+/// The rest of [`new_cell`] when no freed cell has the size.
+#[inline(never)]
+fn new_cell_at_end<const N: usize, G: Hands + ?Sized>(
+    mut win: Window<'_>,
+    rest: &mut Rest<'_, '_>,
+    dst: Dst<Reg>,
+    shape: Shape<N>,
+    given: &G,
+) -> Result<(), Stop> {
+    // Each value is read through the window itself and not through a reference
+    // to it, which is a load fewer.
+    let mut from = win.lend();
+    let values = given.hands().map(move |a| from.hand(a));
+    match rest.heap.at_end(shape, values) {
+        Ok(cell) => Ok(win.put(&mut rest.heap, dst, Value::cell(cell))?),
+        Err(refused) => {
+            for a in given.hands() {
+                win.take_back(&mut rest.heap, a)?;
+            }
+            Err(fault(refused))
         }
     }
 }
 
-#[inline(never)]
-fn make_wide(
-    mut win: Window<'_>,
-    rest: &mut Rest<'_, '_>,
-    dst: Dst<Reg>,
-    ctor: Ctor,
-    fields: &[Arg<Reg>],
-) -> Result<(), Stop> {
-    pass_all(win.lend(), rest, fields)?;
-    let cell = rest.heap.ctor(ctor, &rest.passing);
-    rest.passing.clear();
-    Ok(win.put(&mut rest.heap, dst, Value::cell(cell.map_err(fault)?))?)
-}
-
-/// A new constructor holding `values`, over the cell in `reuse` when one
-/// fits there.
+/// A new constructor given what `given` hands on, over the cell in `reuse` when
+/// one fits there.
 #[inline(always)]
-fn over(
+fn over<G: Hands + ?Sized>(
     mut win: Window<'_>,
     rest: &mut Rest<'_, '_>,
     dst: Dst<Reg>,
     ctor: Ctor,
-    values: &[Value],
+    given: &G,
     reuse: Over<Reg>,
 ) -> Result<(), Stop> {
+    for a in given.hands() {
+        win.add(&mut rest.heap, a)?;
+    }
     // Move out the cell a `DropReuse` above hollowed and left in `reuse`,
     // so the register no longer holds it. Anything else there is a value
     // this frame is done with, so release it as the register would have.
     let parked = win.empty(reuse.0);
     let heap = &mut rest.heap;
     let fits = parked.as_cell();
-    let cell = match fits.filter(|c| heap.fits_ctor(*c, values.len())) {
-        Some(cell) => heap.ctor_in(cell, ctor, values),
+    match fits.filter(|c| heap.fits_ctor(*c, given.hands().len())) {
+        Some(cell) => {
+            let cell = heap.ctor_in(cell, ctor, given.hands().map(|a| win.hand(a)));
+            Ok(win.put(heap, dst, Value::cell(cell))?)
+        }
         None => {
             rest.release(parked)?;
-            let made = rest.heap.ctor(ctor, values);
-            made.map_err(fault)?
+            new_cell_of_shared(win, rest, dst, Shape::ctor(ctor), given)
         }
-    };
-    Ok(win.put(&mut rest.heap, dst, Value::cell(cell))?)
-}
-
-#[inline(always)]
-fn over_few(
-    mut win: Window<'_>,
-    rest: &mut Rest<'_, '_>,
-    dst: Dst<Reg>,
-    ctor: Ctor,
-    fields: &Args<Reg, 5>,
-    reuse: Over<Reg>,
-) -> Result<(), Stop> {
-    let mut values = [Value::UNSET; 5];
-    let values = pass_few(win.lend(), rest, fields, &mut values)?;
-    over(win.lend(), rest, dst, ctor, values, reuse)
+    }
 }
 
 #[inline(never)]
 fn over_wide(
-    mut win: Window<'_>,
+    win: Window<'_>,
     rest: &mut Rest<'_, '_>,
     dst: Dst<Reg>,
     ctor: Ctor,
     fields: &[Arg<Reg>],
     reuse: Over<Reg>,
 ) -> Result<(), Stop> {
-    pass_all(win.lend(), rest, fields)?;
-    let values = std::mem::take(&mut rest.passing);
-    over(win.lend(), rest, dst, ctor, &values, reuse)?;
-    rest.passing = values;
-    rest.passing.clear();
-    Ok(())
+    over(win, rest, dst, ctor, fields, reuse)
 }
 
 #[inline(never)]
@@ -1379,49 +1468,18 @@ fn concat(
 }
 
 #[inline(never)]
-fn closure(
-    mut win: Window<'_>,
-    rest: &mut Rest<'_, '_>,
-    dst: Dst<Reg>,
-    func: FuncIdx,
-    captures: &[Reg],
-) -> Result<(), Stop> {
-    let values = shared(win.lend(), rest, captures)?;
-    let cell = rest.heap.closure(func, &values).map_err(fault)?;
-    Ok(win.put(&mut rest.heap, dst, Value::cell(cell))?)
-}
-
-#[inline(never)]
-fn tuple(
-    mut win: Window<'_>,
-    rest: &mut Rest<'_, '_>,
-    dst: Dst<Reg>,
-    elements: &[Reg],
-) -> Result<(), Stop> {
-    let values = shared(win.lend(), rest, elements)?;
-    let cell = rest.heap.tuple(&values).map_err(fault)?;
-    Ok(win.put(&mut rest.heap, dst, Value::cell(cell))?)
-}
-
-#[inline(never)]
 fn array(
     mut win: Window<'_>,
     rest: &mut Rest<'_, '_>,
     dst: Dst<Reg>,
     elements: &[Reg],
 ) -> Result<(), Stop> {
-    let values = shared(win.lend(), rest, elements)?;
-    let cell = array::from_values(&mut rest.heap, &values).map_err(fault)?;
-    Ok(win.put(&mut rest.heap, dst, Value::cell(cell))?)
-}
-
-/// The values in `regs`, each with one more reference, for passing on.
-fn shared(win: Window<'_>, rest: &mut Rest<'_, '_>, regs: &[Reg]) -> Result<Vec<Value>, DeadCell> {
-    let mut values = Vec::with_capacity(regs.len());
-    for r in regs {
+    let mut values = Vec::with_capacity(elements.len());
+    for r in elements {
         values.push(win.share(&mut rest.heap, Shared(*r))?);
     }
-    Ok(values)
+    let cell = array::from_values(&mut rest.heap, &values).map_err(fault)?;
+    Ok(win.put(&mut rest.heap, dst, Value::cell(cell))?)
 }
 
 #[inline(never)]

@@ -30,10 +30,46 @@ impl Heap {
         }
     }
 
+    /// Let this heap hold no more than it does.
+    pub(crate) fn fill_up(&mut self) {
+        self.limit = self.words_used();
+    }
+
+    /// A new cell of `shape`, given `values`, wherever there is room.
+    fn given<const N: usize>(&mut self, shape: Shape<N>, values: &[Value]) -> Result<Cell, Fault> {
+        match self.in_freed(shape, values.iter().copied()) {
+            Some(cell) => Ok(cell),
+            None => self.at_end(shape, values.iter().copied()),
+        }
+    }
+
+    pub(crate) fn ctor(&mut self, ctor: Ctor, fields: &[Value]) -> Result<Cell, Fault> {
+        self.given(Shape::ctor(ctor), fields)
+    }
+
+    pub(crate) fn tuple(&mut self, elements: &[Value]) -> Result<Cell, Fault> {
+        self.given(Shape::TUPLE, elements)
+    }
+
+    pub(crate) fn closure(&mut self, func: FuncIdx, captures: &[Value]) -> Result<Cell, Fault> {
+        self.given(Shape::closure(func), captures)
+    }
+
     /// Capture `i` of a closure cell, wherever its words are.
     fn capture(&self, cell: Cell, i: u32) -> Option<Value> {
         let near = self.near_capture(cell, i);
         near.or_else(|| self.boxed_capture(cell, i))
+    }
+
+    /// Say that `cell` has `holders` holders.
+    pub(crate) fn say_held(&mut self, cell: Cell, holders: i32) {
+        self.recount(cell, holders);
+    }
+
+    /// How many holders `cell` says it has, or `None` when it is never counted.
+    pub(crate) fn held_by(&self, cell: Cell) -> Option<i32> {
+        let c = count(self.header(cell.index()));
+        (c != UNCOUNTED).then_some(c)
     }
 
     /// How many words count against the limit.
@@ -271,7 +307,7 @@ fn a_long_constructor_is_a_constructor() {
     assert_eq!(heap.live(), 1);
     assert!(heap.values(cell).all(|f| f.view() == Value::NIL.view()));
     fields[299] = int(299);
-    let other = heap.ctor_in(cell, ctors[1], &fields);
+    let other = heap.ctor_in(cell, ctors[1], fields.iter().copied());
     assert_eq!(other.index(), cell.index());
     assert_ne!(other, cell, "it is another variant's");
     assert_eq!(heap.variant(other), Some(variant(7, 3)));
@@ -526,6 +562,34 @@ fn a_long_cell_refused_at_its_stub_gives_its_box_number_back() {
     assert_eq!(heap.outside.len(), 1);
     assert!(heap.spare.is_empty());
     assert_eq!(heap.arena.len() + heap.boxed, 400);
+}
+
+/// A refused long cell makes spare again the place it took and no other, and
+/// the next two long cells get a place each, in the order they would have.
+#[test]
+fn a_refused_long_cell_leaves_the_spare_places_in_order() {
+    let mut heap = Heap::limited(1000);
+    let cells = [1, 2, 3].map(|w| heap.make(Kind::Binary, &[w; 300]).expect("room"));
+    heap.release(cells[2]).expect("a live cell");
+    heap.release(cells[0]).expect("a live cell");
+    assert_eq!(heap.spare, [2, 0]);
+    // Two two-word cells take the freed stubs, so the next stub is carved, and
+    // the arena's 7 words leave room for a box of 693 and no stub.
+    let small = [1, 2].map(|_| heap.tuple(&[Value::NIL]).expect("room"));
+    assert_eq!(heap.arena.len() + heap.boxed, 307);
+    assert_eq!(heap.make(Kind::Binary, &[4; 693]), Err(Fault::Full));
+    assert_eq!((&heap.spare[..], heap.outside.len()), (&[2, 0][..], 3));
+    let held = [cells[1], small[0], small[1]].map(Value::cell);
+    assert_eq!(heap.audit(held.into_iter()), Ok(()));
+    let fourth = heap.make(Kind::Binary, &[4; 300]).expect("room");
+    let fifth = heap.make(Kind::Binary, &[5; 300]).expect("room");
+    assert_eq!((heap.spare.len(), heap.outside.len()), (0, 3));
+    for (cell, w, place) in [(cells[1], 2, 1), (fourth, 4, 0), (fifth, 5, 2)] {
+        assert_eq!(heap.data(cell), &[w; 300]);
+        assert_eq!(heap.outside[place].as_deref(), Some(&[w; 300][..]));
+    }
+    let held = [cells[1], small[0], small[1], fourth, fifth].map(Value::cell);
+    assert_eq!(heap.audit(held.into_iter()), Ok(()));
 }
 
 /// The arena doubles its room until twice as much would pass the limit,
@@ -1291,6 +1355,208 @@ fn a_cell_round_trips_through_a_value_word() {
     assert!(Index::new(1 << 32).is_none());
 }
 
+/// The values of `held`, and whether anything asked for one.
+struct Asked<'a> {
+    held: std::slice::Iter<'a, Value>,
+    asked: &'a std::cell::Cell<usize>,
+}
+
+impl Iterator for Asked<'_> {
+    type Item = Value;
+
+    fn next(&mut self) -> Option<Value> {
+        self.asked.set(self.asked.get() + 1);
+        self.held.next().copied()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.held.size_hint()
+    }
+}
+
+impl ExactSizeIterator for Asked<'_> {}
+
+/// Check that `cell` is a new one of `shape`, which starts with `first`, and
+/// holds `values` after that. Nothing else holds it.
+fn is_filled<const N: usize>(heap: &Heap, cell: Cell, shape: Shape<N>, values: &[Value]) {
+    let what = format!("{cell:?} of {} and {}", N, values.len());
+    let len = N + values.len();
+    let h = heap.header(cell.index());
+    assert_eq!((count(h), class(h)), (1, shape.class), "{what}");
+    assert_eq!(cell.variant(), shape.variant, "{what}");
+    let narrow = len < ARENA_CELL_WORDS;
+    let says = if narrow { (len, len + 1) } else { (0, 0) };
+    assert_eq!((scan(h), size(h)), says, "{what}");
+    let want = shape.first.iter().chain(values).map(|v| v.bits());
+    let got: Vec<u64> = heap.data(cell).to_vec();
+    assert_eq!(got, want.collect::<Vec<_>>(), "{what}");
+}
+
+/// A cell is the same wherever it is made, with the values it is given in order
+/// after those its shape starts with: at the arena's end, in the space of a
+/// freed cell, and in a box. One that is not made has asked for no value.
+#[test]
+fn a_cell_is_filled_the_same_wherever_it_is_made() {
+    fn check<const N: usize>(heap: &mut Heap, shape: Shape<N>, values: &[Value]) {
+        let len = N + values.len();
+        let asked = std::cell::Cell::new(0);
+        let given = || Asked {
+            held: values.iter(),
+            asked: &asked,
+        };
+        let made = heap.made();
+        assert_eq!(heap.in_freed(shape, given()), None, "{len}");
+        assert_eq!((asked.get(), heap.made()), (0, made), "{len}");
+        let end = heap.at_end(shape, given()).expect("room");
+        is_filled(heap, end, shape, values);
+        assert!(asked.get() >= values.len());
+        let roots = |cell| [Value::cell(cell)].into_iter();
+        assert_eq!(heap.audit(roots(end)), Ok(()), "{len}");
+        // A long cell's box goes with it, and it is made the long way again.
+        heap.release(end).expect("a live cell");
+        asked.set(0);
+        let again = if len < ARENA_CELL_WORDS {
+            heap.in_freed(shape, given()).expect("the space is there")
+        } else {
+            assert_eq!(heap.in_freed(shape, given()), None, "{len}");
+            assert_eq!(asked.get(), 0, "{len}");
+            heap.at_end(shape, given()).expect("room")
+        };
+        assert_eq!(again.index(), end.index(), "{len}");
+        is_filled(heap, again, shape, values);
+        assert_eq!(heap.audit(roots(again)), Ok(()), "{len}");
+        // Beside it, wherever there is room.
+        let third = heap.given(shape, values).expect("room");
+        is_filled(heap, third, shape, values);
+        heap.release(third).expect("a live cell");
+        let fourth = heap.given(shape, values).expect("room");
+        assert_eq!(fourth.index(), third.index(), "{len}");
+        is_filled(heap, fourth, shape, values);
+        assert_eq!(heap.made(), made + 4, "{len}");
+        let both = [again, fourth].map(Value::cell).into_iter();
+        assert_eq!(heap.audit(both), Ok(()), "{len}");
+        for cell in [again, fourth] {
+            heap.release(cell).expect("a live cell");
+        }
+        assert_eq!((heap.live(), heap.boxed), (0, 0), "{len}");
+    }
+    let widths = (0..=9).chain([20, 252, 253, 254, 255, 300]);
+    for n in widths {
+        let values: Vec<Value> = (0..n).map(|i| int(i + 1)).collect();
+        let fields = values.len();
+        let (mut heap, ctors) = Heap::knowing(&[(variant(1, 3), 1), (variant(4, 9), fields)]);
+        if fields > 0 {
+            check(&mut heap, Shape::ctor(ctors[1]), &values);
+        }
+        check(&mut Heap::default(), Shape::TUPLE, &values);
+        let closure = Shape::closure(FuncIdx(6));
+        assert_eq!(closure.first[0].as_func(), Some(FuncIdx(6)));
+        check(&mut Heap::default(), closure, &values);
+    }
+}
+
+/// A cell the heap has no room for has asked for no value and changed nothing,
+/// wherever the room ran out: at the arena's end, for a box, and for the stub
+/// beside a box that fits. A place it was given for its box is spare again.
+/// With the room it needs, it is made, and that place is the one it takes.
+#[test]
+fn a_cell_that_is_refused_has_asked_for_no_value() {
+    // How many words each needs past word 0, and the words of a long one.
+    for (n, words) in [
+        (0, 2),
+        (1, 2),
+        (2, 3),
+        (8, 9),
+        (253, 254),
+        (254, 256),
+        (300, 302),
+    ] {
+        let values: Vec<Value> = (0..n).map(int).collect();
+        for limit in [1, words, words + 1] {
+            let mut heap = Heap::limited(limit);
+            let asked = std::cell::Cell::new(0);
+            let given = || Asked {
+                held: values.iter(),
+                asked: &asked,
+            };
+            assert_eq!(heap.in_freed(Shape::TUPLE, given()), None);
+            let got = heap.at_end(Shape::TUPLE, given());
+            if limit > words {
+                is_filled(&heap, got.expect("room"), Shape::TUPLE, &values);
+                assert_eq!(heap.words_used(), words + 1, "{n}");
+                continue;
+            }
+            assert_eq!((got, asked.get()), (Err(Fault::Full), 0), "{n} in {limit}");
+            assert_eq!((heap.made(), heap.boxed, heap.live()), (0, 0, 0));
+            let places = u32::from(words > ARENA_CELL_WORDS && limit == words);
+            assert!(heap.outside.iter().all(Option::is_none));
+            assert_eq!(heap.outside.len(), places as usize, "{n} in {limit}");
+            assert_eq!(heap.spare, (0..places).collect::<Vec<_>>());
+            assert_eq!(heap.audit([].into_iter()), Ok(()));
+            heap.limit = words + 1;
+            let cell = heap.given(Shape::TUPLE, &values).expect("room");
+            is_filled(&heap, cell, Shape::TUPLE, &values);
+            let boxes = usize::from(words > ARENA_CELL_WORDS);
+            assert_eq!((heap.outside.len(), heap.spare.len()), (boxes, 0));
+            let held = [Value::cell(cell)].into_iter();
+            assert_eq!(heap.audit(held), Ok(()), "{n} in {limit}");
+        }
+    }
+    // A box whose stub is refused, with a freed box's number waiting: both are
+    // as they were, and the next long cell takes the number.
+    let mut heap = Heap::limited(400);
+    let long = |n: usize| (0..n).map(int).collect::<Vec<_>>();
+    let first = heap.tuple(&long(300)).expect("room");
+    heap.release(first).expect("a live cell");
+    let small = heap.tuple(&[int(1)]).expect("the freed stub");
+    let values = long(396);
+    let asked = std::cell::Cell::new(0);
+    let refused = heap.at_end(
+        Shape::TUPLE,
+        Asked {
+            held: values.iter(),
+            asked: &asked,
+        },
+    );
+    assert_eq!((refused, asked.get()), (Err(Fault::Full), 0));
+    assert_eq!((heap.boxed, &heap.spare[..]), (0, &[0][..]));
+    assert_eq!(heap.audit([Value::cell(small)].into_iter()), Ok(()));
+    let second = heap.tuple(&long(395)).expect("room");
+    assert_eq!((heap.boxed, heap.spare.len()), (395, 0));
+    assert_eq!(heap.outside.len(), 1);
+    assert_eq!(heap.values(second).count(), 395);
+    // A stub that a cell was freed for needs no room, and its box still does.
+    heap.release(small).expect("a live cell");
+    heap.release(second).expect("a live cell");
+    let free = heap.free[STUB_WORDS];
+    for (n, fits) in [(395, true), (396, false), (4000, false)] {
+        let made = heap.tuple(&long(n));
+        assert_eq!(made.is_ok(), fits, "{n}");
+        if let Ok(cell) = made {
+            assert_eq!((cell.index().0, heap.words_used()), (free, 400));
+            heap.release(cell).expect("a live cell");
+        }
+        assert_eq!((heap.boxed, heap.free[STUB_WORDS]), (0, free), "{n}");
+    }
+}
+
+/// A cell the VM makes of values it has at hand takes the space of a freed one.
+#[test]
+fn a_cell_of_values_at_hand_takes_freed_space() {
+    let (mut heap, ctors) = Heap::knowing(&[(variant(1, 3), 2)]);
+    for shape in [Shape::TUPLE, Shape::ctor(ctors[0])] {
+        let values = [int(7), int(8)];
+        let first = heap.holding(shape, values).expect("room");
+        is_filled(&heap, first, shape, &values);
+        heap.release(first).expect("a live cell");
+        let again = heap.holding(shape, values).expect("room");
+        is_filled(&heap, again, shape, &values);
+        assert_eq!(again.index(), first.index());
+        heap.release(again).expect("a live cell");
+        assert_eq!(heap.arena.len(), 1 + 3);
+    }
+}
+
 /// The kinds whose header says which words are values, and how many it says
 /// for each number of words. Nothing else is read as a value by the scan.
 #[test]
@@ -1393,7 +1659,7 @@ fn a_constructor_over_another_has_a_name_of_its_own() {
             assert_eq!(heap.hollow(cell), Ok(true));
             assert!(heap.fits_ctor(cell, 2));
             assert!(!heap.fits_ctor(cell, 1) && !heap.fits_ctor(cell, 3));
-            let over = heap.ctor_in(cell, *to, &pair);
+            let over = heap.ctor_in(cell, *to, pair.iter().copied());
             assert_eq!(over.index(), cell.index());
             assert_eq!(over == cell, from.variant() == to.variant());
             assert_eq!(heap.ctor_of(over), Some(*to));

@@ -705,7 +705,7 @@ fn a_heap_stays_whole_through_a_long_run_of_everything() {
                 let ctor = ctors[usize::from(fields > 2)];
                 match heap.hollow(cell) {
                     Ok(true) if heap.fits_ctor(cell, fields) => {
-                        held.push(heap.ctor_in(cell, ctor, &vec![Value::NIL; fields]));
+                        held.push(heap.ctor_in(cell, ctor, vec![Value::NIL; fields].into_iter()));
                     }
                     Ok(_) => held.push(cell),
                     Err(DeadCell) => panic!("a live cell"),

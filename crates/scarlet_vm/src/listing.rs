@@ -224,6 +224,18 @@ impl<const N: usize> Show for Args<Reg, N> {
     }
 }
 
+impl<const N: usize> Show for [Taken<Reg>; N] {
+    fn show(self, line: &mut Line<'_>) {
+        self.into_iter().for_each(|r| r.show(line));
+    }
+}
+
+impl<const N: usize> Show for [Shared<Reg>; N] {
+    fn show(self, line: &mut Line<'_>) {
+        self.into_iter().for_each(|r| r.show(line));
+    }
+}
+
 impl Show for ArgList {
     fn show(self, line: &mut Line<'_>) {
         let code = line.code;

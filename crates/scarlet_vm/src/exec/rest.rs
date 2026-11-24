@@ -16,7 +16,7 @@ use crate::binary::{self, Bits};
 use crate::code::{BinaryId, BitsOp, Built, Code, CtorOf, Entry, Reg, TextId};
 use crate::float;
 use crate::frame::WINDOW;
-use crate::heap::{Cell, DeadCell, Fault, Heap, Kind};
+use crate::heap::{Cell, DeadCell, Fault, Heap, Kind, Shape};
 use crate::host::{Host, IoError};
 use crate::http;
 use crate::int;
@@ -502,7 +502,9 @@ impl<'c> Rest<'c, '_> {
                 for (key, at) in members {
                     let key = Value::cell(self.heap.string(&key).map_err(fault)?);
                     let doc = self.doc_at(&d, at)?;
-                    items.push(Value::cell(self.heap.tuple(&[key, doc]).map_err(fault)?));
+                    items.push(Value::cell(
+                        self.heap.holding(Shape::TUPLE, [key, doc]).map_err(fault)?,
+                    ));
                 }
                 Ok(Value::cell(
                     array::from_values(&mut self.heap, &items).map_err(fault)?,
@@ -709,7 +711,10 @@ impl<'c> Rest<'c, '_> {
                 Some((cols, rows)) => {
                     let cols = bigint::int(&mut self.heap, cols).map_err(fault)?;
                     let rows = bigint::int(&mut self.heap, rows).map_err(fault)?;
-                    let size = self.heap.tuple(&[cols, rows]).map_err(fault)?;
+                    let size = self
+                        .heap
+                        .holding(Shape::TUPLE, [cols, rows])
+                        .map_err(fault)?;
                     self.ok(Value::cell(size))
                 }
                 None => self.err_nil(),
@@ -753,7 +758,7 @@ impl<'c> Rest<'c, '_> {
                         Intrinsic::MapValues => self.share(v)?,
                         _ => {
                             let pair = [self.share(k)?, self.share(v)?];
-                            Value::cell(self.heap.tuple(&pair).map_err(fault)?)
+                            Value::cell(self.heap.holding(Shape::TUPLE, pair).map_err(fault)?)
                         }
                     };
                     items.push(item);
@@ -919,7 +924,9 @@ impl<'c> Rest<'c, '_> {
                 let [Some(cp), Some(took)] = pair else {
                     return Err(Stop::broken(Broken::CodePointTooBig));
                 };
-                Ok(Value::cell(self.heap.tuple(&[cp, took]).map_err(fault)?))
+                Ok(Value::cell(
+                    self.heap.holding(Shape::TUPLE, [cp, took]).map_err(fault)?,
+                ))
             }
             BitsOp::ReadInt => {
                 let b = self.binary(args.get(0))?;
@@ -1000,7 +1007,7 @@ impl<'c> Rest<'c, '_> {
         ctor: CtorOf<N>,
         fields: [Value; N],
     ) -> Result<Value, Stop> {
-        let cell = self.heap.ctor(ctor.ctor(), &fields);
+        let cell = self.heap.holding(Shape::ctor(ctor.ctor()), fields);
         Ok(Value::cell(cell.map_err(fault)?))
     }
 

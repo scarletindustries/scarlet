@@ -234,6 +234,128 @@ fn each_argument_is_decided_on_its_own() {
     assert_eq!(operands(&ins, &Lists::default()), roles);
 }
 
+/// A constructor that takes each of its fields, of one to eight, becomes the
+/// one with that number at its end, which names the same registers and leaves
+/// each empty. One that shares any of them stays as it is.
+#[test]
+fn a_constructor_that_takes_its_fields_has_a_form_of_its_own() {
+    let forms = [
+        Op::Ctor1,
+        Op::Ctor2,
+        Op::Ctor3,
+        Op::Ctor4,
+        Op::Ctor5,
+        Op::Ctor6,
+        Op::Ctor7,
+        Op::Ctor8,
+    ];
+    let lists = &mut Lists::default();
+    let regs: Vec<VReg> = (10..18).map(VReg).collect();
+    for (n, form) in (1..).zip(forms) {
+        assert_eq!(form.name(), format!("Ctor{n}"));
+        let all = (1u32 << n) - 1;
+        for bits in 0..=all {
+            let mut ins: Ins<VReg> = Ins::Ctor {
+                dst: Dst(VReg(3)),
+                ctor: a_ctor(),
+                fields: Args::new(&regs[..n]).expect("it fits"),
+            };
+            ins.decide(lists, &mut |v| bits >> (v.0 - 10) & 1 == 1);
+            assert_eq!(ins.op(), Op::Ctor);
+            let taking = ins.taking();
+            assert_eq!(taking.is_some(), bits == all, "{n} {bits:b}");
+            let Some(taking) = taking else { continue };
+            assert_eq!(taking.op(), form);
+            assert!(taking.falls_through() && taking.target().is_none());
+            let mut want = vec![(VReg(3), Role::Write)];
+            want.extend(regs[..n].iter().map(|r| (*r, Role::Take)));
+            assert_eq!(operands(&taking, lists), want);
+            // Nothing in it is left to decide, and it has no other form.
+            let mut again = taking;
+            again.decide(lists, &mut |v| panic!("{v:?} is decided"));
+            assert!(again.taking().is_none());
+        }
+    }
+    // A wide one takes what its list says, and stays in its list.
+    lists.args.push(Box::new([Arg {
+        reg: VReg(1),
+        moved: true,
+    }]));
+    let wide: Ins<VReg> = Ins::CtorWide {
+        dst: Dst(VReg(0)),
+        ctor: a_ctor(),
+        fields: ArgList(0),
+    };
+    assert!(wide.taking().is_none());
+}
+
+/// A call that takes its one, two or three arguments becomes the call with that
+/// number at its end, and one that shares any of them stays as it is.
+#[test]
+fn a_call_that_takes_its_arguments_has_a_form_of_its_own() {
+    let (dst, own, to) = (Dst(VReg(3)), OwnRoom, Callee(FuncIdx(1)));
+    let arg = |reg: u32, bits: u32| Arg {
+        reg: VReg(reg),
+        moved: bits >> (reg - 10) & 1 == 1,
+    };
+    for bits in 0..8 {
+        let (a, b, c) = (arg(10, bits), arg(11, bits), arg(12, bits));
+        let calls: [(Ins<VReg>, u32, Op); 3] = [
+            (Ins::Call1Share { dst, own, to, a }, 1, Op::Call1),
+            (Ins::Call2Share { dst, own, to, a, b }, 3, Op::Call2),
+            (
+                Ins::Call3Share {
+                    dst,
+                    own,
+                    to,
+                    a,
+                    b,
+                    c,
+                },
+                7,
+                Op::Call3,
+            ),
+        ];
+        for (call, all, form) in calls {
+            let taking = call.taking();
+            assert_eq!(taking.is_some(), bits & all == all, "{form:?} {bits:b}");
+            let Some(taking) = taking else { continue };
+            assert_eq!(taking.op(), form);
+            let lists = &Lists::default();
+            let (was, is) = (operands(&call, lists), operands(&taking, lists));
+            let registers = |of: &[(VReg, Role)]| of.iter().map(|(r, _)| *r).collect::<Vec<_>>();
+            assert_eq!(registers(&was), registers(&is));
+            assert!(is[1..].iter().all(|(_, role)| *role == Role::Take));
+        }
+    }
+}
+
+/// What a new cell is given comes in the order of the operands, each as the
+/// instruction says.
+#[test]
+fn a_new_cell_is_given_its_operands_in_order() {
+    let regs = [Reg(7), Reg(3), Reg(7), Reg(250)];
+    let given = |hands: &[Arg<Reg>]| -> Vec<(u8, bool)> {
+        hands.iter().map(|a| (a.reg.0, a.moved)).collect()
+    };
+    let each = |moved: bool| regs.map(|r| (r.0, moved)).to_vec();
+    let taken: Vec<_> = regs.map(Taken).hands().collect();
+    assert_eq!(given(&taken), each(true));
+    let shared: Vec<_> = regs.map(Shared).hands().collect();
+    assert_eq!(given(&shared), each(false));
+    let listed: Vec<_> = regs[..].hands().collect();
+    assert_eq!(given(&listed), each(false));
+    let mut args = Args::<Reg, 8>::new(&regs).expect("it fits");
+    Part::<Reg>::decide(&mut args, &mut Lists::default(), &mut |r| r == Reg(250));
+    let want = vec![(7, false), (3, false), (7, false), (250, true)];
+    let some: Vec<_> = args.hands().collect();
+    assert_eq!(given(&some), want);
+    let listed: Vec<_> = some[..].hands().collect();
+    assert_eq!(given(&listed), want);
+    assert_eq!(some[..].hands().len(), 4);
+    assert_eq!(args.hands().len(), 4);
+}
+
 /// Places that give each value the register of its number plus one, and
 /// nothing past `fits`.
 struct Shifted {
@@ -319,9 +441,44 @@ fn placing_an_instruction_keeps_what_it_does() {
     };
     assert_eq!((ctor, fields.0), (a_ctor(), 21));
 
+    // The registers an instruction names one by one keep their order.
+    let three: Ins<VReg> = Ins::Ctor3 {
+        dst: Dst(VReg(9)),
+        ctor: a_ctor(),
+        fields: [VReg(6), VReg(4), VReg(5)].map(Taken),
+    };
+    let placed = three.place(&at).expect("a place for everything");
+    let roles = [
+        (Reg(10), Role::Write),
+        (Reg(7), Role::Take),
+        (Reg(5), Role::Take),
+        (Reg(6), Role::Take),
+    ];
+    assert_eq!(operands(&placed, &Lists::default()), roles);
+    let pair: Ins<VReg> = Ins::Tuple2 {
+        dst: Dst(VReg(9)),
+        elements: [VReg(6), VReg(4)].map(Shared),
+    };
+    let placed = pair.place(&at).expect("a place for everything");
+    let roles = [
+        (Reg(10), Role::Write),
+        (Reg(7), Role::Share),
+        (Reg(5), Role::Share),
+    ];
+    assert_eq!(operands(&placed, &Lists::default()), roles);
+
     // Nothing is placed when one thing it names has no place, and what that
     // was comes back.
-    let lost: [Ins<VReg>; 4] = [
+    let lost: [Ins<VReg>; 6] = [
+        Ins::Ctor2 {
+            dst: Dst(VReg(0)),
+            ctor: a_ctor(),
+            fields: [VReg(1), VReg(50)].map(Taken),
+        },
+        Ins::Tuple3 {
+            dst: Dst(VReg(0)),
+            elements: [VReg(50), VReg(1), VReg(2)].map(Shared),
+        },
         Ins::Jump { to: Label(4) },
         Ins::Drop {
             reg: Dead(VReg(50)),
@@ -404,6 +561,38 @@ fn the_listing_shows_a_variant_by_its_number() {
         "= Field(r3, 1)\n",
     ] {
         assert!(text.contains(part), "{part}: {text}");
+    }
+}
+
+/// A constructor and a tuple show what they are given in order, with what they
+/// take told from what they share.
+#[test]
+fn the_listing_shows_what_a_new_cell_is_given() {
+    let src = "type P {\n\tP(a Int, b Int, c Int)\n}\n\
+               fn taken(a Int, b Int, c Int) P { P(c, a, b) }\n\
+               fn shared(a Int, b Int) P { P(b, a, b) }\n\
+               fn pair(a Int, b Int) (Int, Int) { (b, a) }\n\
+               fn three(a Int, b Int) (Int, Int, Int) { (b, a, b) }\n\
+               pub fn main() {\n\
+               \tprintln(taken(1, 2, 3))\n\
+               \tprintln(shared(1, 2))\n\
+               \tprintln(pair(1, 2))\n\
+               \tprintln(three(1, 2))\n\
+               }\n";
+    let listing = crate::listing(&program(src)).expect("the program loads");
+    let code: Code = load(&program(src), crate::Audit::Never).expect("the program loads");
+    for (name, want) in [
+        (".taken", ["= Ctor3(", ".0, move r4, move r2, move r3)\n"]),
+        (".shared", ["= Ctor(", ".0, r3, move r2, move r3)\n"]),
+        (".pair", ["= Tuple2(", "(r3, r2)\n"]),
+        (".three", ["= Tuple3(", "(r3, r2, r3)\n"]),
+    ] {
+        let mut all = (&code.funcs).into_iter();
+        let index = all.position(|e| e.name.ends_with(name));
+        let text = listing.function(index.expect("a function")).expect("text");
+        for part in want {
+            assert!(text.contains(part), "{part}: {text}");
+        }
     }
 }
 

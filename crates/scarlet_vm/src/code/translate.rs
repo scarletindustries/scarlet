@@ -1007,9 +1007,19 @@ impl Translator<'_> {
                 index,
                 default: Shared(default),
             }),
-            PrimOp::MakeTuple => Ok(match self.shares(args.iter().copied())? {
-                Fit::Inline(elements) => Ins::Tuple { dst, elements },
-                Fit::Listed(elements) => Ins::TupleWide { dst, elements },
+            PrimOp::MakeTuple => Ok(match *args {
+                [a, b] => Ins::Tuple2 {
+                    dst,
+                    elements: [a, b].map(of).map(Shared),
+                },
+                [a, b, c] => Ins::Tuple3 {
+                    dst,
+                    elements: [a, b, c].map(of).map(Shared),
+                },
+                _ => match self.shares(args.iter().copied())? {
+                    Fit::Inline(elements) => Ins::Tuple { dst, elements },
+                    Fit::Listed(elements) => Ins::TupleWide { dst, elements },
+                },
             }),
             PrimOp::TupleField(index) | PrimOp::Field(index) => {
                 one().map(|src| Ins::Field { dst, src, index })

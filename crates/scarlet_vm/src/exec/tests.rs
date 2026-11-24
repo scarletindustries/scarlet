@@ -9,7 +9,7 @@ use crate::heap::{AuditFault, Cell, Ctors, Fault, Kind, Numbering};
 use crate::value::{Float, SmallInt, Tag};
 use num_bigint::BigInt;
 use num_traits::ToPrimitive as _;
-use scarlet_ir::core_ir::VariantRef;
+use scarlet_ir::core_ir::{FuncIdx, VariantRef};
 use scarlet_ir::intrinsic::Intrinsic;
 use scarlet_ir::tivec::TiVec;
 
@@ -676,6 +676,24 @@ fn a_share_of_a_freed_cell_stops_the_instruction() {
             dst: Dst(r(1)),
             elements: held(),
         },
+        Ins::Tuple2 {
+            dst: Dst(r(1)),
+            elements: [r(1), r(0)].map(Shared),
+        },
+        Ins::Tuple3 {
+            dst: Dst(r(1)),
+            elements: [r(1), r(1), r(0)].map(Shared),
+        },
+        Ins::Closure {
+            dst: Dst(r(1)),
+            func: FuncIdx(0),
+            captures: held(),
+        },
+        Ins::CtorWide {
+            dst: Dst(r(1)),
+            ctor: ctors().1[0],
+            fields: crate::code::ArgList(2),
+        },
         array_of(1, &[0]),
         Ins::SetGlobal {
             slot: GlobalSlot(0),
@@ -826,10 +844,34 @@ fn function_that(
     values: u16,
     body: Vec<Ins<Reg>>,
 ) -> &'static Code {
-    let result = scarlet_core::compile::compile_text("pub fn main() {\n\tNil\n}\n", None);
-    assert!(result.success(), "{:?}", result.diagnostics());
-    let program = result.into_runnable().expect("a clean compile is runnable");
-    let loaded = crate::code::load(&program, Audit::Never).expect("it loads");
+    let wide = vec![Arg {
+        reg: r(0),
+        moved: true,
+    }];
+    let lists = Lists {
+        regs: Vec::new(),
+        args: vec![
+            wide.into_boxed_slice(),
+            Box::new([]),
+            Box::new([Arg::shared(r(0))]),
+        ],
+    };
+    function_of(reads, params, values, body, lists, ctors().0)
+}
+
+/// [`function_that`], whose instructions name these lists, in a program with
+/// these constructors.
+fn function_of(
+    reads: ReadsClosure,
+    params: usize,
+    values: u16,
+    body: Vec<Ins<Reg>>,
+    lists: Lists<Reg>,
+    ctors: Ctors,
+) -> &'static Code {
+    // The same for every function, and slow to make.
+    static EMPTY: std::sync::OnceLock<&'static Code> = std::sync::OnceLock::new();
+    let empty = EMPTY.get_or_init(|| loaded("pub fn main() {\n\tNil\n}\n", Audit::Never));
     let halt = Ins::Halt { src: Taken(RESULT) };
     let ins: Vec<_> = std::iter::once(halt).chain(body).collect();
     let entry = || Entry {
@@ -842,20 +884,9 @@ fn function_that(
     };
     let funcs = std::iter::once(entry()).collect();
     let toplevels = vec![entry()];
-    let wide = vec![Arg {
-        reg: r(0),
-        moved: true,
-    }];
     Box::leak(Box::new(Code {
         ins,
-        lists: Lists {
-            regs: Vec::new(),
-            args: vec![
-                wide.into_boxed_slice(),
-                Box::new([]),
-                Box::new([Arg::shared(r(0))]),
-            ],
-        },
+        lists,
         texts: vec![Box::from(*b"new")],
         binaries: Vec::new(),
         whys: vec![Why::Broken(Broken::NoArm)],
@@ -863,10 +894,10 @@ fn function_that(
         toplevels,
         main: None,
         globals: 1,
-        types: program.types.clone(),
-        ctors: ctors().0,
+        types: empty.types.clone(),
+        ctors,
         names: TiVec::new(),
-        abi: loaded.abi,
+        abi: empty.abi,
     }))
 }
 
@@ -2881,4 +2912,701 @@ fn a_read_of_a_capture_that_is_not_there_stops() {
             });
         }
     }
+}
+
+/// An instruction that makes a cell, and what it is.
+struct Maker {
+    ins: Ins<Reg>,
+    /// The list it names, if it names one.
+    lists: Lists<Reg>,
+    kind: Kind,
+    /// What it hands to the cell, in order.
+    given: Vec<Arg<Reg>>,
+    /// Where it looks for a kept cell to write over.
+    reuse: Option<Reg>,
+}
+
+impl Maker {
+    /// A function that does the instruction and then stops, so that what it
+    /// left in its registers can be looked at.
+    fn code(&self) -> &'static Code {
+        let stop = Ins::Bad { why: WhyId(0) };
+        let (reads, values) = (ReadsClosure::Nothing, 254);
+        let body = vec![self.ins, stop];
+        let lists = Lists {
+            regs: self.lists.regs.clone(),
+            args: self.lists.args.clone(),
+        };
+        function_of(reads, 0, values, body, lists, as_wide_as_you_like().0)
+    }
+
+    /// How many values its cell holds.
+    fn holds(&self) -> usize {
+        self.given.len() + usize::from(self.kind == Kind::Closure)
+    }
+
+    /// The registers of its operands.
+    fn regs(&self) -> Vec<Reg> {
+        self.given.iter().map(|a| a.reg).collect()
+    }
+}
+
+/// A program's constructors, where the one of each number of fields is at that
+/// place, and its variant is its place.
+fn as_wide_as_you_like() -> (Ctors, Vec<Ctor>) {
+    let mut numbering = Numbering::default();
+    let ctors = (0..=400).map(|n| {
+        let variant = VariantRef {
+            variant_idx: u16::try_from(n).expect("a few"),
+            ..SOME_VARIANT
+        };
+        numbering.add(variant, n).expect("few constructors")
+    });
+    let ctors = ctors.collect();
+    (numbering.finish(), ctors)
+}
+
+/// Where the constructors that may write over a kept cell look for it.
+const KEPT: Reg = Reg(FIRST.0 + 251);
+
+/// Every instruction that makes a cell out of `regs`, writing `dst`. Of the
+/// operands that name one register only the last may take it, as the loader has
+/// it.
+fn makers(dst: Reg, regs: &[Reg]) -> Vec<Maker> {
+    let n = regs.len();
+    let dst = Dst(dst);
+    let func = FuncIdx(0);
+    let mut made = Vec::new();
+    let mut add = |ins: Ins<Reg>, kind, given: &[Arg<Reg>]| {
+        let args = vec![given.into()];
+        let regs = vec![given.iter().map(|a| a.reg).collect()];
+        made.push(Maker {
+            ins,
+            lists: Lists { regs, args },
+            kind,
+            given: given.to_vec(),
+            reuse: if let Ins::CtorOver { reuse, .. } | Ins::CtorOverWide { reuse, .. } = ins {
+                Some(reuse.0)
+            } else {
+                None
+            },
+        });
+    };
+    let shared: Vec<_> = regs.iter().copied().map(Arg::shared).collect();
+    if let Some(elements) = Shares::new(regs) {
+        add(Ins::Tuple { dst, elements }, Kind::Tuple, &shared);
+    }
+    if let Ok(two) = <[Reg; 2]>::try_from(regs) {
+        let elements = two.map(Shared);
+        add(Ins::Tuple2 { dst, elements }, Kind::Tuple, &shared);
+    }
+    if let Ok(three) = <[Reg; 3]>::try_from(regs) {
+        let elements = three.map(Shared);
+        add(Ins::Tuple3 { dst, elements }, Kind::Tuple, &shared);
+    }
+    let elements = crate::code::ShareList(0);
+    add(Ins::TupleWide { dst, elements }, Kind::Tuple, &shared);
+    if n == 0 {
+        return made;
+    }
+    if let Some(captures) = Shares::new(regs) {
+        let closure = Ins::Closure {
+            dst,
+            func,
+            captures,
+        };
+        add(closure, Kind::Closure, &shared);
+    }
+    let closure = Ins::ClosureWide {
+        dst,
+        func,
+        captures: crate::code::ShareList(0),
+    };
+    add(closure, Kind::Closure, &shared);
+    // The constructors, with every field taken that may be, none, and each in
+    // turn with the ones around it the other way.
+    let ctor = as_wide_as_you_like().1[n];
+    let last = |i: usize| regs.iter().rposition(|r| *r == regs[i]) == Some(i);
+    let taking = [
+        |_: usize| true,
+        |_: usize| false,
+        |i: usize| i.is_multiple_of(2),
+        |i: usize| !i.is_multiple_of(2),
+    ];
+    for takes in taking {
+        let given: Vec<_> = (0..n)
+            .map(|i| Arg {
+                reg: regs[i],
+                moved: takes(i) && last(i),
+            })
+            .collect();
+        let fields = crate::code::ArgList(0);
+        add(Ins::CtorWide { dst, ctor, fields }, Kind::Ctor, &given);
+        let reuse = Over(KEPT);
+        let over = Ins::CtorOverWide {
+            dst,
+            ctor,
+            fields,
+            reuse,
+        };
+        add(over, Kind::Ctor, &given);
+        let few = [
+            Args::new(regs).map(|fields| Ins::Ctor { dst, ctor, fields }),
+            Args::new(regs).map(|fields| Ins::CtorOver {
+                dst,
+                ctor,
+                fields,
+                reuse,
+            }),
+        ];
+        for mut ins in few.into_iter().flatten() {
+            let mut moved = given.iter().map(|a| a.moved);
+            ins.decide(&mut Lists::default(), &mut |_| {
+                moved.next().expect("as many as fields")
+            });
+            add(ins, Kind::Ctor, &given);
+        }
+        // The form that takes each, where each may be taken.
+        macro_rules! form {
+            ($($name:ident)*) => {
+                $(if let Ok(fields) = regs.try_into() && given.iter().all(|a| a.moved) {
+                    let fields = <[Reg; _]>::map(fields, Taken);
+                    add(Ins::$name { dst, ctor, fields }, Kind::Ctor, &given);
+                })*
+            };
+        }
+        form!(Ctor1 Ctor2 Ctor3 Ctor4 Ctor5 Ctor6 Ctor7 Ctor8);
+    }
+    made
+}
+
+/// The operands a test of `n` of them uses: each in a register of its own, as
+/// far as there are registers, one register for all of them, and two that come
+/// by turns.
+fn operand_registers(n: usize) -> Vec<Vec<Reg>> {
+    let mut all = vec![(0..n).map(|i| r((i % 240) as u8)).collect::<Vec<_>>()];
+    if n > 1 {
+        all.push(vec![r(0); n]);
+        all.push((0..n).map(|i| r(u8::from(i % 2 == 1))).collect());
+    }
+    all
+}
+
+/// Give registers `regs` a value each, every other one a new cell and the rest
+/// numbers, and `dst` a cell of its own when it is none of them. Gives what
+/// each register of the frame then holds.
+fn hold(m: &mut Machine<'_, '_>, regs: &[Reg], dst: Reg, cells: bool) -> Vec<Value> {
+    let heap = &mut m.rest.heap;
+    let mut registers = vec![Value::NIL; WINDOW];
+    for (i, reg) in (0..).zip(regs) {
+        let held = &mut registers[usize::from(reg.0)];
+        if held.bits() == Value::NIL.bits() {
+            *held = if cells && i % 2 == 0 {
+                Value::cell(heap.make(Kind::Binary, &[i; 12]).expect("room"))
+            } else {
+                Value::int(1000 + i64::from(reg.0)).expect("small")
+            };
+        }
+    }
+    if cells && !regs.contains(&dst) {
+        let old = heap.make(Kind::Binary, &[77; 12]).expect("room");
+        registers[usize::from(dst.0)] = Value::cell(old);
+    }
+    registers
+}
+
+/// Run `code` from its start with `registers`, until it stops, and give what
+/// it stopped with.
+fn run_with(m: &mut Machine<'_, '_>, code: &'static Code, registers: &[Value]) -> Stop {
+    m.rest.code = code;
+    let at = started(m, Link::new(0, Room(0), Dst(RESULT)));
+    let held = usize::from(FIRST.0)..WINDOW;
+    m.stack[held.clone()].copy_from_slice(&registers[held]);
+    match m.go_on(at) {
+        Ok(v) => panic!("it returned {v:?}"),
+        Err(stop) => stop,
+    }
+}
+
+/// What a run of `maker` is to leave in the registers but `dst`, which held
+/// `registers`: those that were handed on with their reference hold nothing, and
+/// nor does the one with the kept cell.
+fn left_in(maker: &Maker, registers: &[Value]) -> Vec<u64> {
+    let mut left: Vec<u64> = registers.iter().map(|v| v.bits()).collect();
+    let taken = maker.given.iter().filter(|a| a.moved).map(|a| a.reg);
+    for reg in taken.chain(maker.reuse) {
+        left[usize::from(reg.0)] = Value::NIL.bits();
+    }
+    left
+}
+
+/// Run `maker` with its operands, some of them cells if `cells`, on a heap that
+/// already holds `beside` more and has a freed cell of the size it needs if
+/// `freed`, and check everything it did. A constructor that may write over a
+/// kept cell finds none.
+fn makes(m: &mut Machine<'_, '_>, code: &'static Code, maker: &Maker, dst: Reg, at: (bool, usize)) {
+    let (cells, beside) = at;
+    for freed in [false, true] {
+        let what = format!("{:?} {cells} {freed} {beside}", maker.ins);
+        m.rest.heap = Heap::new(code.ctors.clone());
+        m.rest.globals = (0..beside)
+            .map(|_| Value::cell(m.rest.heap.tuple(&[]).expect("room")))
+            .collect();
+        let registers = hold(m, &maker.regs(), dst, cells);
+        let space = freed.then(|| a_freed_cell(&mut m.rest.heap, maker.holds()));
+        let made = m.rest.heap.made();
+        let stop = run_with(m, code, &registers);
+        assert_eq!(stop, Stop::broken(Broken::NoArm), "{what}");
+        assert_eq!(m.rest.heap.made(), made + 1, "{what}");
+        let cell = is_made(m, maker, dst, &registers, &what);
+        if let Some(space) = space {
+            assert_eq!(cell.place(), space.place(), "{what}");
+        }
+        all_given_up(m);
+    }
+}
+
+/// A cell of `size` values that has been freed.
+fn a_freed_cell(heap: &mut Heap, size: usize) -> Cell {
+    let cell = heap.tuple(&vec![Value::NIL; size]).expect("room");
+    heap.release(cell).expect("a live cell");
+    cell
+}
+
+/// Check that `maker`, run with `registers`, left in `dst` the cell it says,
+/// and what it should in every other register, with every count right. Gives
+/// the cell.
+fn is_made(m: &Machine<'_, '_>, maker: &Maker, dst: Reg, registers: &[Value], what: &str) -> Cell {
+    let heap = &m.rest.heap;
+    let regs = maker.regs();
+    let cell = m.stack[usize::from(dst.0)].as_cell().expect("a cell");
+    assert!(heap.is(cell, maker.kind), "{what}");
+    assert_eq!(heap.unique(cell), Ok(true), "{what}");
+    let want: Vec<u64> = regs
+        .iter()
+        .map(|r| registers[usize::from(r.0)].bits())
+        .collect();
+    let held: Vec<u64> = if maker.kind == Kind::Closure {
+        assert_eq!(heap.closure_func(cell), Some(FuncIdx(0)), "{what}");
+        heap.captures(cell).map(Value::bits).collect()
+    } else {
+        heap.values(cell).map(Value::bits).collect()
+    };
+    assert_eq!(held, want, "{what}");
+    let is_ctor = (maker.kind == Kind::Ctor).then(|| as_wide_as_you_like().1[regs.len()]);
+    assert_eq!(heap.ctor_of(cell), is_ctor, "{what}");
+    let left = left_in(maker, registers);
+    for (i, (got, want)) in m.stack.iter().zip(&left).enumerate().skip(2) {
+        if i != usize::from(dst.0) {
+            assert_eq!(got.bits(), *want, "{what}: register {i}");
+        }
+    }
+    assert_eq!(check(&m.stack, &m.rest, Value::NIL), Ok(()), "{what}");
+    cell
+}
+
+/// Give up everything the registers and the globals hold, which is everything
+/// there is.
+fn all_given_up(m: &mut Machine<'_, '_>) {
+    let mut win = window(&mut m.stack, 0).expect("a window");
+    win.leave(&mut m.rest.heap, Room(256).last())
+        .expect("every count is right");
+    for v in std::mem::take(&mut m.rest.globals) {
+        m.rest.release(v).expect("every count is right");
+    }
+    assert_eq!(m.rest.heap.live(), 0);
+}
+
+/// Every instruction that makes a cell makes the one it says, holding its
+/// operands in order, whatever it shares and takes and whichever register it
+/// writes: one of its own, or an operand. What it takes leaves its register,
+/// what it shares stays, the value its register held is given up, and every
+/// count is right. It is the same in the space of a freed cell, at the end of
+/// the arena, where the arena has to be made longer, and in a box.
+#[test]
+fn every_instruction_that_makes_a_cell_makes_it_of_its_operands() {
+    let forms = [
+        "Ctor1",
+        "Ctor2",
+        "Ctor3",
+        "Ctor4",
+        "Ctor5",
+        "Ctor6",
+        "Ctor7",
+        "Ctor8",
+        "Ctor",
+        "CtorWide",
+        "CtorOver",
+        "CtorOverWide",
+        "Tuple2",
+        "Tuple3",
+        "Tuple",
+        "TupleWide",
+        "Closure",
+        "ClosureWide",
+    ];
+    let mut ran: Vec<&str> = Vec::new();
+    on_a_machine(|m| {
+        for n in (0..=9).chain([20, 252, 253, 254, 300]) {
+            for regs in operand_registers(n) {
+                let ends = [regs.first(), regs.last()];
+                let dsts = ends.into_iter().flatten().copied().chain([r(250)]);
+                for dst in dsts {
+                    for maker in makers(dst, &regs) {
+                        ran.push(maker.ins.op().name());
+                        let code = maker.code();
+                        for cells in [false, true] {
+                            makes(m, code, &maker, dst, (cells, 0));
+                        }
+                        // With more and more beside it, so that the arena is
+                        // full somewhere on the way.
+                        let more = if n < 4 { 1..9 } else { 0..0 };
+                        for beside in more {
+                            makes(m, code, &maker, dst, (beside % 2 == 0, beside));
+                        }
+                    }
+                }
+            }
+        }
+    });
+    for form in forms {
+        assert!(ran.contains(&form), "{form}");
+    }
+}
+
+/// An instruction that makes a cell on a heap with no room for it stops with a
+/// full heap and has done nothing: each register holds what it held, and every
+/// count is right. It is the same where the arena is full, where a box is too
+/// long, and where a box fits and the stub beside it does not.
+#[test]
+fn a_cell_with_no_room_leaves_every_operand_as_it_was() {
+    on_a_machine(|m| {
+        for n in (0..=9).chain([20, 252, 253, 254, 300]) {
+            for regs in operand_registers(n) {
+                let ends = [regs.first(), regs.last()];
+                let dsts = ends.into_iter().flatten().copied().chain([r(250)]);
+                for dst in dsts {
+                    for maker in makers(dst, &regs) {
+                        refuses(m, &maker, dst);
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Run `maker` on a heap with less room than its cell needs, every amount of it
+/// for a short cell, and for a long one the amounts at each end, and check that
+/// it changed nothing. A constructor that may write over a kept cell finds none.
+fn refuses(m: &mut Machine<'_, '_>, maker: &Maker, dst: Reg) {
+    let regs = maker.regs();
+    let code = maker.code();
+    let needs = words_of(maker.holds());
+    m.rest.heap = Heap::default();
+    hold(m, &regs, dst, true);
+    let held = m.rest.heap.words_used().max(1);
+    let ends = |room: &usize| needs < 12 || *room < 4 || *room > needs - 5;
+    for room in (0..needs).filter(ends) {
+        let what = format!("{:?} in {room}", maker.ins);
+        m.rest.heap = Heap::limited(held + room);
+        let registers = hold(m, &regs, dst, true);
+        let before = (
+            m.rest.heap.made(),
+            m.rest.heap.live(),
+            m.rest.heap.words_used(),
+        );
+        assert_eq!(run_with(m, code, &registers), Stop::HeapFull, "{what}");
+        let heap = &m.rest.heap;
+        let after = (heap.made(), heap.live(), heap.words_used());
+        assert_eq!(after, before, "{what}");
+        is_untouched(m, &registers, &what);
+        assert_eq!(check(&m.stack, &m.rest, Value::NIL), Ok(()), "{what}");
+        all_given_up(m);
+    }
+}
+
+/// How many words a cell of `holds` values needs: a long one's, with its stub,
+/// are one more.
+fn words_of(holds: usize) -> usize {
+    let size = holds + 1;
+    if size > 254 { size + 1 } else { size.max(2) }
+}
+
+/// Check that each register holds what it did.
+fn is_untouched(m: &Machine<'_, '_>, registers: &[Value], what: &str) {
+    for (i, (got, want)) in m.stack.iter().zip(registers).enumerate().skip(2) {
+        assert_eq!(got.bits(), want.bits(), "{what}: register {i}");
+    }
+}
+
+/// What the register of a constructor that may write over a kept cell may have
+/// in it, and what then becomes of it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Parked {
+    /// A kept cell of the right size, which is written over.
+    Fits,
+    /// One of another size, which is given up.
+    OtherSize,
+    /// A cell of the right size that something else holds too, which loses this
+    /// reference.
+    Shared,
+    /// A tuple, which is given up with what it holds.
+    Tuple,
+}
+
+/// Put what `parked` says in the register where `maker` looks for a kept cell,
+/// in a frame that has `registers`. Gives the cell.
+fn park(m: &mut Machine<'_, '_>, maker: &Maker, registers: &mut [Value], parked: Parked) -> Cell {
+    let n = maker.given.len();
+    let heap = &mut m.rest.heap;
+    let cell = match parked {
+        Parked::Fits | Parked::Shared => {
+            let ctor = as_wide_as_you_like().1[n];
+            heap.ctor(ctor, &vec![Value::NIL; n])
+        }
+        Parked::OtherSize => {
+            let other = if n == 3 { 4 } else { 3 };
+            let ctor = as_wide_as_you_like().1[other];
+            heap.ctor(ctor, &vec![Value::NIL; other])
+        }
+        Parked::Tuple => {
+            let held = heap.make(Kind::Binary, &[n as u64; 12]).expect("room");
+            heap.tuple(&[Value::cell(held), Value::NIL])
+        }
+    };
+    let cell = cell.expect("room");
+    if parked == Parked::Shared {
+        heap.share(cell).expect("a live cell");
+        m.rest.globals.push(Value::cell(cell));
+    }
+    registers[usize::from(KEPT.0)] = Value::cell(cell);
+    cell
+}
+
+/// Run `check` with each constructor that may write over a kept cell, and the
+/// register it writes: its first and last operand's, one of its own, and the one
+/// the kept cell is in.
+fn each_over(widths: impl Iterator<Item = usize>, mut check: impl FnMut(&Maker, Reg)) {
+    for n in widths {
+        for regs in operand_registers(n) {
+            for dst in [regs[0], regs[n - 1], r(250), KEPT] {
+                let over = makers(dst, &regs).into_iter();
+                for maker in over.filter(|maker| maker.reuse.is_some()) {
+                    check(&maker, dst);
+                }
+            }
+        }
+    }
+}
+
+/// A constructor writes over a kept cell that has its number of fields and no
+/// other holder. Anything else in that register is given up, and the cell is a
+/// new one, in the space of a freed cell of the size when there is one.
+/// Everything else about it is the same as when nothing was kept.
+#[test]
+fn a_constructor_writes_over_a_kept_cell_or_gives_up_what_is_there() {
+    let mut ran: Vec<&str> = Vec::new();
+    on_a_machine(|m| {
+        each_over((1..=9).chain([20, 252, 253, 254, 300]), |maker, dst| {
+            ran.push(maker.ins.op().name());
+            let code = maker.code();
+            let n = maker.given.len();
+            for (parked, freed, cells) in [
+                (Parked::Fits, false, true),
+                (Parked::Fits, true, false),
+                (Parked::OtherSize, false, true),
+                (Parked::OtherSize, true, true),
+                (Parked::Shared, false, true),
+                (Parked::Shared, true, true),
+                (Parked::Tuple, false, true),
+                (Parked::Tuple, true, false),
+            ] {
+                let what = format!("{:?} {parked:?} {freed}", maker.ins);
+                m.rest.heap = Heap::new(code.ctors.clone());
+                m.rest.globals = Vec::new();
+                let mut registers = hold(m, &maker.regs(), r(250), cells);
+                let kept = park(m, maker, &mut registers, parked);
+                let space = freed.then(|| a_freed_cell(&mut m.rest.heap, n));
+                let heap = &m.rest.heap;
+                let (made, reused) = (heap.made(), heap.reused());
+                let stop = run_with(m, code, &registers);
+                assert_eq!(stop, Stop::broken(Broken::NoArm), "{what}");
+                let cell = is_made(m, maker, dst, &registers, &what);
+                let heap = &m.rest.heap;
+                let after = (heap.made() - made, heap.reused() - reused);
+                if parked == Parked::Fits {
+                    assert_eq!(after, (0, 1), "{what}");
+                    assert_eq!(cell.place(), kept.place(), "{what}");
+                } else {
+                    assert_eq!(after, (1, 0), "{what}");
+                    // A freed pair that was parked is handed out before one
+                    // that was freed earlier.
+                    let space = if parked == Parked::Tuple && n == 2 {
+                        Some(kept)
+                    } else {
+                        space
+                    };
+                    if let Some(space) = space {
+                        assert_eq!(cell.place(), space.place(), "{what}");
+                    }
+                }
+                all_given_up(m);
+            }
+        });
+    });
+    assert!(ran.contains(&"CtorOver") && ran.contains(&"CtorOverWide"));
+}
+
+/// A constructor over a kept cell needs no room when that fits, and when it
+/// does not and there is no room for a new one, it has only given up what was in
+/// that register: every operand is as it was and every count is right.
+#[test]
+fn a_constructor_with_no_room_gives_up_only_what_was_kept() {
+    on_a_machine(|m| {
+        each_over((1..=9).chain([20, 252, 253, 254, 300]), |maker, dst| {
+            let code = maker.code();
+            for parked in [Parked::Fits, Parked::OtherSize, Parked::Shared] {
+                let what = format!("{:?} {parked:?}", maker.ins);
+                m.rest.heap = Heap::new(code.ctors.clone());
+                m.rest.globals = Vec::new();
+                let mut registers = hold(m, &maker.regs(), r(250), true);
+                let kept = park(m, maker, &mut registers, parked);
+                let heap = &mut m.rest.heap;
+                heap.fill_up();
+                let (made, live) = (heap.made(), heap.live());
+                let stop = run_with(m, code, &registers);
+                assert_eq!(m.rest.heap.made(), made, "{what}");
+                if parked == Parked::Fits {
+                    assert_eq!(stop, Stop::broken(Broken::NoArm), "{what}");
+                    let cell = is_made(m, maker, dst, &registers, &what);
+                    assert_eq!(cell.place(), kept.place(), "{what}");
+                } else {
+                    assert_eq!(stop, Stop::HeapFull, "{what}");
+                    let gone = usize::from(parked == Parked::OtherSize);
+                    assert_eq!(m.rest.heap.live(), live - gone, "{what}");
+                    registers[usize::from(KEPT.0)] = Value::NIL;
+                    is_untouched(m, &registers, &what);
+                }
+                assert_eq!(check(&m.stack, &m.rest, Value::NIL), Ok(()), "{what}");
+                all_given_up(m);
+            }
+        });
+    });
+}
+
+/// A value whose count is at its end, or past it, is handed to a new cell like
+/// any other, wherever it is among the operands. A share of one at its end
+/// leaves it never counted, and a take leaves its count alone. With no room for
+/// the cell, what was added is given back and nothing else. It is the same over
+/// a kept cell.
+#[test]
+fn a_cell_is_given_a_value_whose_count_is_at_its_end() {
+    on_a_machine(|m| {
+        for n in (1..=9).chain([20, 253, 254, 300]) {
+            let regs = &operand_registers(n)[0];
+            for maker in makers(r(250), regs) {
+                let code = maker.code();
+                let places = regs
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| n < 10 || *i == 0 || *i == n - 1 || *i == 239);
+                for (_, at) in places {
+                    let shares = maker.given.iter().filter(|a| a.reg == *at && !a.moved);
+                    let shares = i32::try_from(shares.count()).expect("a few");
+                    for (held, full, kept) in [
+                        (Some(i32::MAX), false, false),
+                        (None, false, false),
+                        (Some(i32::MAX - shares), true, false),
+                        (None, true, false),
+                        (Some(i32::MAX), false, true),
+                        (None, false, true),
+                    ] {
+                        if kept && maker.reuse.is_none() {
+                            continue;
+                        }
+                        let what = format!("{:?} {at:?} {held:?} {full} {kept}", maker.ins);
+                        let mut room = Heap::default();
+                        room.tuple(&[Value::NIL]).expect("room");
+                        m.rest.heap = if full {
+                            Heap::limited(room.words_used())
+                        } else {
+                            Heap::new(code.ctors.clone())
+                        };
+                        let cell = m.rest.heap.tuple(&[Value::NIL]).expect("room");
+                        let mut registers = vec![Value::NIL; WINDOW];
+                        registers[usize::from(at.0)] = Value::cell(cell);
+                        if kept {
+                            park(m, &maker, &mut registers, Parked::Fits);
+                        }
+                        m.rest.heap.say_held(cell, held.unwrap_or(i32::MIN));
+                        let stop = run_with(m, code, &registers);
+                        let heap = &mut m.rest.heap;
+                        let holders = if full {
+                            assert_eq!(stop, Stop::HeapFull, "{what}");
+                            assert_eq!(heap.held_by(cell), held, "{what}");
+                            1
+                        } else {
+                            assert_eq!(stop, Stop::broken(Broken::NoArm), "{what}");
+                            let after = held.filter(|_| shares == 0);
+                            assert_eq!(heap.held_by(cell), after, "{what}");
+                            assert_eq!(heap.reused(), usize::from(kept), "{what}");
+                            // The register's own, which is the cell's if it was
+                            // taken, and one for each share.
+                            1 + shares
+                        };
+                        heap.say_held(cell, holders);
+                        assert_eq!(check(&m.stack, &m.rest, Value::NIL), Ok(()), "{what}");
+                        all_given_up(m);
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// A freed cell among the values that are shared stops the instruction that
+/// was to make a cell of them, wherever it is among them. Nothing is made, and
+/// nothing is written or taken, and a kept cell stays where it is.
+#[test]
+fn a_freed_value_among_the_operands_stops_the_instruction() {
+    on_a_machine(|m| {
+        for n in (1..=9).chain([20, 253, 300]) {
+            let regs = &operand_registers(n)[0];
+            for maker in makers(r(250), regs) {
+                let code = maker.code();
+                let shared = maker.given.iter().filter(|a| !a.moved).map(|a| a.reg);
+                let mut dead: Vec<Reg> = shared.collect();
+                if n > 9 {
+                    let ends = [dead.first(), dead.last()];
+                    dead = ends.into_iter().flatten().copied().collect();
+                }
+                for dead in dead {
+                    for kept in [false, true] {
+                        if kept && maker.reuse.is_none() {
+                            continue;
+                        }
+                        let what = format!("{:?} of {dead:?} {kept}", maker.ins);
+                        m.rest.heap = Heap::new(code.ctors.clone());
+                        let mut registers = vec![Value::NIL; WINDOW];
+                        for reg in regs {
+                            registers[usize::from(reg.0)] = Value::int(5).expect("small");
+                        }
+                        if kept {
+                            park(m, &maker, &mut registers, Parked::Fits);
+                        }
+                        let cell = a_freed_cell(&mut m.rest.heap, 1);
+                        let heap = &m.rest.heap;
+                        let before = (heap.made(), heap.reused(), heap.live());
+                        registers[usize::from(dead.0)] = Value::cell(cell);
+                        let stop = run_with(m, code, &registers);
+                        assert_eq!(stop, Stop::broken(Broken::DeadCell), "{what}");
+                        let heap = &m.rest.heap;
+                        let after = (heap.made(), heap.reused(), heap.live());
+                        assert_eq!(after, before, "{what}");
+                        is_untouched(m, &registers, &what);
+                    }
+                }
+            }
+        }
+    });
 }

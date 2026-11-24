@@ -2652,7 +2652,7 @@ fn a_counted_run_counts_the_same_every_time() {
         "Cons(\n  1,\n  Cons(\n    2,\n    Cons(3, End)\n  )\n)\n"
     );
     assert_eq!(counted(src).1, first);
-    assert_eq!(ran(&first, "Ctor"), 3);
+    assert_eq!(ran(&first, "Ctor2"), 3);
     assert!(first.cells_made >= 3, "{}", first.cells_made);
     assert_eq!(first.cells_reused, 0);
 }

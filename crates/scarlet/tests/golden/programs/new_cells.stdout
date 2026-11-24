@@ -1,0 +1,194 @@
+R1{ f0: t0 }
+(
+  R1{ f0: a },
+  3
+)
+R1{ f0: s }
+(
+  R1{ f0: own },
+  1
+)
+R1{ f0: changed }
+R1{ f0: changed }
+R1{ f0: k0 }
+xc0
+R2{ f0: t0, f1: t1 }
+(
+  R2{ f0: a, f1: bb },
+  3
+)
+R2{ f0: s, f1: s }
+(
+  R2{ f0: own, f1: m },
+  1
+)
+R2{ f0: u0, f1: changed }
+R2{ f0: k0, f1: changed }
+R2{ f0: k0, f1: k1 }
+R2{ f0: v1, f1: v0 }
+R2{ f0: k1, f1: k0 }
+(t0, 1)
+True
+xc0c1
+R3{ f0: t0, f1: t1, f2: t2 }
+(
+  R3{ f0: a, f1: bb, f2: a },
+  3
+)
+R3{ f0: s, f1: s, f2: s }
+(
+  R3{ f0: own, f1: m, f2: new m },
+  1
+)
+R3{ f0: u0, f1: u1, f2: changed }
+R3{ f0: k0, f1: k1, f2: changed }
+R3{ f0: k0, f1: k1, f2: k2 }
+R3{ f0: v1, f1: v2, f2: v0 }
+R3{ f0: k1, f1: k2, f2: k0 }
+(t0, 1, t2)
+True
+xc0c1c2
+R4{ f0: t0, f1: t1, f2: t2, f3: t3 }
+(
+  R4{ f0: a, f1: bb, f2: a, f3: bb },
+  3
+)
+R4{ f0: s, f1: s, f2: s, f3: s }
+(
+  R4{ f0: own, f1: m, f2: new m, f3: own },
+  1
+)
+R4{ f0: u0, f1: u1, f2: u2, f3: changed }
+R4{ f0: k0, f1: k1, f2: k2, f3: changed }
+R4{ f0: k0, f1: k1, f2: k2, f3: k3 }
+R4{ f0: v1, f1: v2, f2: v3, f3: v0 }
+R4{ f0: k1, f1: k2, f2: k3, f3: k0 }
+(t0, 1, t2, 3)
+True
+xc0c1c2c3
+R5{ f0: t0, f1: t1, f2: t2, f3: t3, f4: t4 }
+(
+  R5{ f0: a, f1: bb, f2: a, f3: bb, f4: a },
+  3
+)
+R5{ f0: s, f1: s, f2: s, f3: s, f4: s }
+(
+  R5{ f0: own, f1: m, f2: new m, f3: own, f4: m },
+  1
+)
+R5{ f0: u0, f1: u1, f2: u2, f3: u3, f4: changed }
+R5{ f0: k0, f1: k1, f2: k2, f3: k3, f4: changed }
+R5{ f0: k0, f1: k1, f2: k2, f3: k3, f4: k4 }
+R5{ f0: v1, f1: v2, f2: v3, f3: v4, f4: v0 }
+R5{ f0: k1, f1: k2, f2: k3, f3: k4, f4: k0 }
+(t0, 1, t2, 3, t4)
+True
+xc0c1c2c3c4
+R6{ f0: t0, f1: t1, f2: t2, f3: t3, f4: t4, f5: t5 }
+(
+  R6{ f0: a, f1: bb, f2: a, f3: bb, f4: a, f5: bb },
+  3
+)
+R6{ f0: s, f1: s, f2: s, f3: s, f4: s, f5: s }
+(
+  R6{ f0: own, f1: m, f2: new m, f3: own, f4: m, f5: new m },
+  1
+)
+R6{ f0: u0, f1: u1, f2: u2, f3: u3, f4: u4, f5: changed }
+R6{ f0: k0, f1: k1, f2: k2, f3: k3, f4: k4, f5: changed }
+R6{ f0: k0, f1: k1, f2: k2, f3: k3, f4: k4, f5: k5 }
+R6{ f0: v1, f1: v2, f2: v3, f3: v4, f4: v5, f5: v0 }
+R6{ f0: k1, f1: k2, f2: k3, f3: k4, f4: k5, f5: k0 }
+(t0, 1, t2, 3, t4, 5)
+True
+xc0c1c2c3c4c5
+R7{ f0: t0, f1: t1, f2: t2, f3: t3, f4: t4, f5: t5, f6: t6 }
+(
+  R7{ f0: a, f1: bb, f2: a, f3: bb, f4: a, f5: bb, f6: a },
+  3
+)
+R7{ f0: s, f1: s, f2: s, f3: s, f4: s, f5: s, f6: s }
+(
+  R7{ f0: own, f1: m, f2: new m, f3: own, f4: m, f5: new m, f6: own },
+  1
+)
+R7{ f0: u0, f1: u1, f2: u2, f3: u3, f4: u4, f5: u5, f6: changed }
+R7{ f0: k0, f1: k1, f2: k2, f3: k3, f4: k4, f5: k5, f6: changed }
+R7{ f0: k0, f1: k1, f2: k2, f3: k3, f4: k4, f5: k5, f6: k6 }
+R7{ f0: v1, f1: v2, f2: v3, f3: v4, f4: v5, f5: v6, f6: v0 }
+R7{ f0: k1, f1: k2, f2: k3, f3: k4, f4: k5, f5: k6, f6: k0 }
+(t0, 1, t2, 3, t4, 5, t6)
+True
+xc0c1c2c3c4c5c6
+R8{ f0: t0, f1: t1, f2: t2, f3: t3, f4: t4, f5: t5, f6: t6, f7: t7 }
+(
+  R8{ f0: a, f1: bb, f2: a, f3: bb, f4: a, f5: bb, f6: a, f7: bb },
+  3
+)
+R8{ f0: s, f1: s, f2: s, f3: s, f4: s, f5: s, f6: s, f7: s }
+(
+  R8{ f0: own, f1: m, f2: new m, f3: own, f4: m, f5: new m, f6: own, f7: m },
+  1
+)
+R8{ f0: u0, f1: u1, f2: u2, f3: u3, f4: u4, f5: u5, f6: u6, f7: changed }
+R8{ f0: k0, f1: k1, f2: k2, f3: k3, f4: k4, f5: k5, f6: k6, f7: changed }
+R8{ f0: k0, f1: k1, f2: k2, f3: k3, f4: k4, f5: k5, f6: k6, f7: k7 }
+R8{ f0: v1, f1: v2, f2: v3, f3: v4, f4: v5, f5: v6, f6: v7, f7: v0 }
+R8{ f0: k1, f1: k2, f2: k3, f3: k4, f4: k5, f5: k6, f6: k7, f7: k0 }
+(t0, 1, t2, 3, t4, 5, t6, 7)
+True
+xc0c1c2c3c4c5c6c7
+R9{ f0: t0, f1: t1, f2: t2, f3: t3, f4: t4, f5: t5, f6: t6, f7: t7, f8: t8 }
+(
+  R9{ f0: a, f1: bb, f2: a, f3: bb, f4: a, f5: bb, f6: a, f7: bb, f8: a },
+  3
+)
+R9{ f0: s, f1: s, f2: s, f3: s, f4: s, f5: s, f6: s, f7: s, f8: s }
+(
+  R9{ f0: own, f1: m, f2: new m, f3: own, f4: m, f5: new m, f6: own, f7: m, f8: new m },
+  1
+)
+R9{ f0: u0, f1: u1, f2: u2, f3: u3, f4: u4, f5: u5, f6: u6, f7: u7, f8: changed }
+R9{ f0: k0, f1: k1, f2: k2, f3: k3, f4: k4, f5: k5, f6: k6, f7: k7, f8: changed }
+R9{ f0: k0, f1: k1, f2: k2, f3: k3, f4: k4, f5: k5, f6: k6, f7: k7, f8: k8 }
+R9{ f0: v1, f1: v2, f2: v3, f3: v4, f4: v5, f5: v6, f6: v7, f7: v8, f8: v0 }
+R9{ f0: k1, f1: k2, f2: k3, f3: k4, f4: k5, f5: k6, f6: k7, f7: k8, f8: k0 }
+(t0, 1, t2, 3, t4, 5, t6, 7, t8)
+True
+xc0c1c2c3c4c5c6c7c8
+R20{ f0: t0, f1: t1, f2: t2, f3: t3, f4: t4, f5: t5, f6: t6, f7: t7, f8: t8, f9: t9, f10: t10, f11: t11, f12: t12, f13: t13, f14: t14, f15: t15, f16: t16, f17: t17, f18: t18, f19: t19 }
+(
+  R20{ f0: a, f1: bb, f2: a, f3: bb, f4: a, f5: bb, f6: a, f7: bb, f8: a, f9: bb, f10: a, f11: bb, f12: a, f13: bb, f14: a, f15: bb, f16: a, f17: bb, f18: a, f19: bb },
+  3
+)
+R20{ f0: s, f1: s, f2: s, f3: s, f4: s, f5: s, f6: s, f7: s, f8: s, f9: s, f10: s, f11: s, f12: s, f13: s, f14: s, f15: s, f16: s, f17: s, f18: s, f19: s }
+(
+  R20{ f0: own, f1: m, f2: new m, f3: own, f4: m, f5: new m, f6: own, f7: m, f8: new m, f9: own, f10: m, f11: new m, f12: own, f13: m, f14: new m, f15: own, f16: m, f17: new m, f18: own, f19: m },
+  1
+)
+R20{ f0: u0, f1: u1, f2: u2, f3: u3, f4: u4, f5: u5, f6: u6, f7: u7, f8: u8, f9: u9, f10: u10, f11: u11, f12: u12, f13: u13, f14: u14, f15: u15, f16: u16, f17: u17, f18: u18, f19: changed }
+R20{ f0: k0, f1: k1, f2: k2, f3: k3, f4: k4, f5: k5, f6: k6, f7: k7, f8: k8, f9: k9, f10: k10, f11: k11, f12: k12, f13: k13, f14: k14, f15: k15, f16: k16, f17: k17, f18: k18, f19: changed }
+R20{ f0: k0, f1: k1, f2: k2, f3: k3, f4: k4, f5: k5, f6: k6, f7: k7, f8: k8, f9: k9, f10: k10, f11: k11, f12: k12, f13: k13, f14: k14, f15: k15, f16: k16, f17: k17, f18: k18, f19: k19 }
+R20{ f0: v1, f1: v2, f2: v3, f3: v4, f4: v5, f5: v6, f6: v7, f7: v8, f8: v9, f9: v10, f10: v11, f11: v12, f12: v13, f13: v14, f14: v15, f15: v16, f16: v17, f17: v18, f18: v19, f19: v0 }
+R20{ f0: k1, f1: k2, f2: k3, f3: k4, f4: k5, f5: k6, f6: k7, f7: k8, f8: k9, f9: k10, f10: k11, f11: k12, f12: k13, f13: k14, f14: k15, f15: k16, f16: k17, f17: k18, f18: k19, f19: k0 }
+(t0, 1, t2, 3, t4, 5, t6, 7, t8, 9, t10, 11, t12, 13, t14, 15, t16, 17, t18, 19)
+True
+xc0c1c2c3c4c5c6c7c8c9c10c11c12c13c14c15c16c17c18c19
+57
+60
+111
+79
+[
+  (
+    1,
+    R2{ f0: 1, f1: z }
+  ),
+  (
+    2,
+    R2{ f0: 2, f1: z }
+  ),
+  (
+    3,
+    R2{ f0: 3, f1: z }
+  )
+]

@@ -83,7 +83,7 @@ fn counters_writes_what_the_run_counted() {
     let total: u64 = ops.values().map(|n| n.as_u64().expect("a count")).sum();
     assert_eq!(counts["instructions"].as_u64(), Some(total));
     assert!(total > 100, "{total}");
-    assert_eq!(ops["Ctor"].as_u64(), Some(100), "one cell for each Cons");
+    assert_eq!(ops["Ctor2"].as_u64(), Some(100), "one cell for each Cons");
     assert_eq!(
         ops["Bad"].as_u64(),
         Some(0),
