@@ -88,18 +88,6 @@ impl Palette {
         self.enabled
     }
 
-    /// The two palettes, for tests that must not depend on whether the test
-    /// binary's stdout happens to be a terminal.
-    #[cfg(test)]
-    pub(crate) const fn ansi_for_test() -> Self {
-        ON
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn plain_for_test() -> Self {
-        OFF
-    }
-
     /// Renders `text` as an OSC 8 terminal hyperlink to `url`, or returns
     /// `text` as it is when colour is off.
     pub fn hyperlink(&self, url: &str, text: &str) -> String {
@@ -113,3 +101,6 @@ impl Palette {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

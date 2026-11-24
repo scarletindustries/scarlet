@@ -55,13 +55,4 @@ pub fn match_keyword(s: &str) -> Option<Kind> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::Keyword;
-
-    #[test]
-    fn keyword_roundtrip() {
-        for kw in Keyword::ALL {
-            assert_eq!(Keyword::parse(kw.text()), Some(kw), "{kw:?}");
-        }
-    }
-}
+mod tests;
