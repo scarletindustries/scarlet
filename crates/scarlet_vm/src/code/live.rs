@@ -18,9 +18,10 @@
 //! The other is which values are held at once and so need a register each.
 //! For that a `Drop` is a read, because it names the register.
 
+use super::Unfit;
 use super::ins::{Dst, Ins, Label, Lists, Role, VReg};
 use super::translate::Draft;
-use super::{MAX_REGS, Unfit};
+use crate::frame::MAX_VALUES;
 use crate::stop::{Broken, Limit};
 
 /// What [`settle`] found out about a function's values.
@@ -204,7 +205,7 @@ impl Walk {
                 Role::Write | Role::WriteOnHit | Role::Drop => {}
             }
         }
-        if self.held.items.len() > MAX_REGS {
+        if self.held.items.len() > MAX_VALUES {
             return Err(Unfit::TooMany(Limit::Values));
         }
         Ok(())
@@ -243,6 +244,9 @@ impl Walk {
         }
         if !self.taken.is_empty() {
             ins.decide(lists, &mut |_| self.taken.pop().unwrap_or(false));
+            if let Some(taking) = ins.taking() {
+                *ins = taking;
+            }
         }
     }
 }

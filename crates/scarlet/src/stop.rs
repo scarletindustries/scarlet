@@ -10,6 +10,7 @@ pub fn message(stop: &Stop) -> Option<String> {
         Stop::OutputClosed => None,
         Stop::NotBuiltYet(what) => Some(format!("cannot run: the new VM does not run {what} yet")),
         Stop::HeapFull => Some("the program ran out of heap".into()),
+        Stop::StackFull => Some("the program ran out of stack".into()),
         Stop::NoRoomToAudit => Some("there is no memory to audit the heap with".into()),
         Stop::ProgramTooLong => Some("the program is longer than the VM can number".into()),
         Stop::BadProgram(what) => Some(format!(

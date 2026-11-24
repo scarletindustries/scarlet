@@ -6,7 +6,7 @@ use std::fmt;
 use scarlet_ir::core_ir::{FuncIdx, MAX_PARAMS, PrimOp};
 use scarlet_ir::intrinsic::Intrinsic;
 
-use crate::code::MAX_REGS;
+use crate::frame::MAX_VALUES;
 use crate::heap::{AuditFailure, AuditFault, DeadCell, Fault};
 use crate::value::View;
 
@@ -22,6 +22,10 @@ pub enum Stop {
     /// to give it, or one value is longer than a value can be. This is a
     /// limit of the machine, not a bug in the program.
     HeapFull,
+    /// The program calls so deep that its stack is at its limit, or the system
+    /// has no more memory to give it. Like `HeapFull`, this is a limit of the
+    /// machine.
+    StackFull,
     /// A run that was asked to check its heap could not get the memory to do
     /// it with. Like `HeapFull`, this is a limit of the machine. The
     /// program's own heap had room.
@@ -120,7 +124,7 @@ pub(crate) enum Missing {
 /// What a function may only have so much of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Limit {
-    /// It holds more than [`MAX_REGS`] values at once.
+    /// It holds more than [`MAX_VALUES`] values at once.
     Values,
     /// It has more than [`MAX_PARAMS`] parameters.
     Parameters,
@@ -131,7 +135,7 @@ pub(crate) enum Limit {
 impl fmt::Display for Limit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Limit::Values => write!(f, "holds more than {MAX_REGS} values at once"),
+            Limit::Values => write!(f, "holds more than {MAX_VALUES} values at once"),
             Limit::Parameters => write!(f, "has more than {MAX_PARAMS} parameters"),
             Limit::Arguments => write!(f, "makes a call with more than {MAX_PARAMS} arguments"),
         }
@@ -173,9 +177,10 @@ pub(crate) enum Broken {
     /// An instruction names a register, a label or a function that was given
     /// no place.
     NoPlace,
-    /// A frame that returns to nothing.
-    NoCaller,
+    /// A frame the stack does not have, like the one a wrong link returns to.
+    NoWindow,
     NegativeCapture,
+    ToplevelCapture,
     ToplevelSelf,
     ToplevelCallsSelf,
     RanPastEnd {
@@ -184,6 +189,10 @@ pub(crate) enum Broken {
     NoCapture {
         func: String,
         index: u32,
+    },
+    /// A function that reads captures is called with no closure to have them.
+    CalledByName {
+        func: String,
     },
     NoField {
         index: u16,
@@ -291,8 +300,9 @@ impl fmt::Display for BadProgram {
             Broken::JumpsBack => f.write_str("a jump to an instruction before it"),
             Broken::RunsOff => f.write_str("a function that goes on past its last instruction"),
             Broken::NoPlace => f.write_str("an instruction that names something with no place"),
-            Broken::NoCaller => f.write_str("a frame that returns to nothing"),
+            Broken::NoWindow => f.write_str("a frame that the stack does not have"),
             Broken::NegativeCapture => f.write_str("a capture with a negative index"),
+            Broken::ToplevelCapture => f.write_str("a toplevel reads a capture"),
             Broken::ToplevelSelf => f.write_str("a toplevel reads itself as a closure"),
             Broken::ToplevelCallsSelf => f.write_str("a toplevel calls itself"),
             Broken::RanPastEnd { func } => write!(f, "{func} ran past its last instruction"),
@@ -300,6 +310,9 @@ impl fmt::Display for BadProgram {
                 f,
                 "{func} read capture {index}, which the closure it runs as does not have"
             ),
+            Broken::CalledByName { func } => {
+                write!(f, "{func}, which reads captures, is called with no closure")
+            }
             Broken::NoField { index } => {
                 write!(f, "field {index} read from a value with no such field")
             }

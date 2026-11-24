@@ -24,12 +24,14 @@ pub(crate) struct VReg(pub(crate) u32);
 pub(crate) trait Names: Copy + PartialEq + fmt::Debug {
     /// Where a jump goes.
     type To: Part<Self> + fmt::Debug;
-    /// The function a call runs.
+    /// The function a call by name runs.
     type Entry: Part<Self> + fmt::Debug;
-    /// How many registers that function needs.
-    type Needs: Part<Self> + fmt::Debug;
+    /// The running function, where a call to itself runs it again.
+    type OwnEntry: Part<Self> + fmt::Debug;
     /// How many registers the running function has.
     type Own: Part<Self> + fmt::Debug;
+    /// The last of them.
+    type Last: Part<Self> + fmt::Debug;
     /// What fills a place for an operand that an instruction does not use.
     const UNUSED: Self;
 }
@@ -37,16 +39,18 @@ pub(crate) trait Names: Copy + PartialEq + fmt::Debug {
 impl Names for VReg {
     type To = Label;
     type Entry = Callee;
-    type Needs = CalleeRoom;
+    type OwnEntry = OwnEntry;
     type Own = OwnRoom;
+    type Last = LastReg;
     const UNUSED: VReg = VReg(0);
 }
 
 impl Names for Reg {
     type To = Pc;
     type Entry = EntryPc;
-    type Needs = Room;
+    type OwnEntry = EntryPc;
     type Own = Room;
+    type Last = Last;
     const UNUSED: Reg = Reg(0);
 }
 
@@ -64,7 +68,7 @@ impl Pc {
     }
 }
 
-/// The function a call names, before its code has a place.
+/// The function a call by name runs, before its code has a place.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Callee(pub(crate) FuncIdx);
 
@@ -78,19 +82,41 @@ impl EntryPc {
     }
 }
 
-/// How many registers the function a call names needs, before that is known.
+/// This function's first instruction, before that is known.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct CalleeRoom(pub(crate) FuncIdx);
+pub(crate) struct OwnEntry;
 
 /// How many registers this function has, before that is known.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct OwnRoom;
 
-/// How many registers a frame has.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct Room(pub(crate) u8);
+/// This function's last register, before that is known.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LastReg;
+
+/// A frame's last register.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Last(pub(crate) Reg);
+
+/// How many registers a frame has, the two that are for its link and its
+/// closure among them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Room(pub(crate) u16);
 
 impl Room {
+    /// The last of them. A frame has no more than a window of them
+    /// (`super::alloc`).
+    pub(crate) fn last(self) -> Last {
+        let [last, _] = self.0.wrapping_sub(1).to_le_bytes();
+        Last(Reg(last))
+    }
+
+    /// How far above a frame of this size its callee's starts.
+    #[inline(always)]
+    pub(crate) fn below(self) -> u32 {
+        u32::from(self.0)
+    }
+
     pub(crate) fn len(self) -> usize {
         usize::from(self.0)
     }
@@ -137,20 +163,30 @@ pub(crate) trait Part<R: Names>: Copy {
 /// labels and the functions have their places.
 pub(crate) trait Place {
     type Placed;
-    fn place(self, at: &impl Places) -> Option<Self::Placed>;
+    fn place(self, at: &impl Places) -> Result<Self::Placed, Unplaced>;
+}
+
+/// Why an instruction gets no place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unplaced {
+    /// It names a register, a label, a list or a function that has none.
+    NoPlace,
+    /// It calls this function by name, which can run only as a closure.
+    NeedsClosure(FuncIdx),
 }
 
 /// Where everything an instruction names ended up.
 pub(crate) trait Places {
-    fn reg(&self, r: VReg) -> Option<Reg>;
-    fn label(&self, l: Label) -> Option<Pc>;
-    fn entry(&self, f: FuncIdx) -> Option<EntryPc>;
-    fn needs(&self, f: FuncIdx) -> Option<Room>;
+    fn reg(&self, r: VReg) -> Result<Reg, Unplaced>;
+    fn label(&self, l: Label) -> Result<Pc, Unplaced>;
+    /// Where a call by name to `f` goes.
+    fn entry(&self, f: FuncIdx) -> Result<EntryPc, Unplaced>;
+    /// Where a function's call to itself goes.
+    fn own_entry(&self) -> EntryPc;
     fn own(&self) -> Room;
-    /// Where the function's own list `i` is among the program's, when it has
-    /// one.
-    fn reg_list(&self, i: u32) -> Option<u32>;
-    fn arg_list(&self, i: u32) -> Option<u32>;
+    /// Where the function's own list `i` is among the program's.
+    fn reg_list(&self, i: u32) -> Result<u32, Unplaced>;
+    fn arg_list(&self, i: u32) -> Result<u32, Unplaced>;
 }
 
 impl Part<VReg> for Label {
@@ -166,36 +202,45 @@ impl Part<Reg> for Pc {
 }
 
 impl Part<VReg> for Callee {}
-impl Part<VReg> for CalleeRoom {}
+impl Part<VReg> for OwnEntry {}
 impl Part<VReg> for OwnRoom {}
+impl Part<VReg> for LastReg {}
+impl Part<Reg> for Last {}
 impl Part<Reg> for EntryPc {}
 impl Part<Reg> for Room {}
 
 impl Place for Label {
     type Placed = Pc;
-    fn place(self, at: &impl Places) -> Option<Pc> {
+    fn place(self, at: &impl Places) -> Result<Pc, Unplaced> {
         at.label(self)
     }
 }
 
 impl Place for Callee {
     type Placed = EntryPc;
-    fn place(self, at: &impl Places) -> Option<EntryPc> {
+    fn place(self, at: &impl Places) -> Result<EntryPc, Unplaced> {
         at.entry(self.0)
     }
 }
 
-impl Place for CalleeRoom {
-    type Placed = Room;
-    fn place(self, at: &impl Places) -> Option<Room> {
-        at.needs(self.0)
+impl Place for OwnEntry {
+    type Placed = EntryPc;
+    fn place(self, at: &impl Places) -> Result<EntryPc, Unplaced> {
+        Ok(at.own_entry())
     }
 }
 
 impl Place for OwnRoom {
     type Placed = Room;
-    fn place(self, at: &impl Places) -> Option<Room> {
-        Some(at.own())
+    fn place(self, at: &impl Places) -> Result<Room, Unplaced> {
+        Ok(at.own())
+    }
+}
+
+impl Place for LastReg {
+    type Placed = Last;
+    fn place(self, at: &impl Places) -> Result<Last, Unplaced> {
+        Ok(at.own().last())
     }
 }
 
@@ -214,7 +259,7 @@ macro_rules! registers {
 
         impl Place for $name<VReg> {
             type Placed = $name<Reg>;
-            fn place(self, at: &impl Places) -> Option<$name<Reg>> {
+            fn place(self, at: &impl Places) -> Result<$name<Reg>, Unplaced> {
                 at.reg(self.0).map($name)
             }
         }
@@ -270,8 +315,8 @@ impl<R: Names> Part<R> for Arg<R> {
 
 impl Place for Arg<VReg> {
     type Placed = Arg<Reg>;
-    fn place(self, at: &impl Places) -> Option<Arg<Reg>> {
-        Some(Arg {
+    fn place(self, at: &impl Places) -> Result<Arg<Reg>, Unplaced> {
+        Ok(Arg {
             reg: at.reg(self.reg)?,
             moved: self.moved,
         })
@@ -305,12 +350,12 @@ impl<R, const N: usize> Few<R, N> {
 }
 
 impl<const N: usize> Few<VReg, N> {
-    fn place(self, at: &impl Places) -> Option<Few<Reg, N>> {
+    fn place(self, at: &impl Places) -> Result<Few<Reg, N>, Unplaced> {
         let mut regs = [Reg::UNUSED; N];
         for (to, from) in regs.iter_mut().zip(self.regs()) {
             *to = at.reg(*from)?;
         }
-        Some(Few { n: self.n, regs })
+        Ok(Few { n: self.n, regs })
     }
 }
 
@@ -347,7 +392,7 @@ macro_rules! several {
 
         impl<const N: usize> Place for $few<VReg, N> {
             type Placed = $few<Reg, N>;
-            fn place(self, at: &impl Places) -> Option<$few<Reg, N>> {
+            fn place(self, at: &impl Places) -> Result<$few<Reg, N>, Unplaced> {
                 self.0.place(at).map($few)
             }
         }
@@ -366,7 +411,7 @@ macro_rules! several {
 
         impl Place for $list {
             type Placed = $list;
-            fn place(self, at: &impl Places) -> Option<$list> {
+            fn place(self, at: &impl Places) -> Result<$list, Unplaced> {
                 at.reg_list(self.0).map($list)
             }
         }
@@ -444,8 +489,8 @@ impl<R: Names, const N: usize> Part<R> for Args<R, N> {
 
 impl<const N: usize> Place for Args<VReg, N> {
     type Placed = Args<Reg, N>;
-    fn place(self, at: &impl Places) -> Option<Args<Reg, N>> {
-        Some(Args {
+    fn place(self, at: &impl Places) -> Result<Args<Reg, N>, Unplaced> {
+        Ok(Args {
             regs: self.regs.place(at)?,
             moved: self.moved,
         })
@@ -480,7 +525,7 @@ impl<R: Names> Part<R> for ArgList {
 
 impl Place for ArgList {
     type Placed = ArgList;
-    fn place(self, at: &impl Places) -> Option<ArgList> {
+    fn place(self, at: &impl Places) -> Result<ArgList, Unplaced> {
         at.arg_list(self.0).map(ArgList)
     }
 }
@@ -501,7 +546,7 @@ impl<R: Names> Part<R> for KeepList {}
 
 impl Place for KeepList {
     type Placed = KeepList;
-    fn place(self, at: &impl Places) -> Option<KeepList> {
+    fn place(self, at: &impl Places) -> Result<KeepList, Unplaced> {
         at.reg_list(self.0).map(KeepList)
     }
 }
@@ -609,8 +654,8 @@ macro_rules! plain {
 
         impl Place for $ty {
             type Placed = $ty;
-            fn place(self, _: &impl Places) -> Option<$ty> {
-                Some(self)
+            fn place(self, _: &impl Places) -> Result<$ty, Unplaced> {
+                Ok(self)
             }
         }
     )*};

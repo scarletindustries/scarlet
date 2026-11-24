@@ -10,12 +10,14 @@
 //! `LetCont`'s continuation is placed after its body, and a `Goto` is a jump
 //! to it. So every jump goes forward.
 //!
-//! A call names its callee in one of three ways, and each has its own
-//! instruction. `Call` is for a function known when the program loads.
-//! `CallSelf` is for the function running now, and keeps the closure it runs
-//! as, so a lambda calling itself still sees its captures. `CallValue` is for
-//! a function value in a register. Each has a tail form that replaces the
-//! frame.
+//! A call names its callee in one of three ways. A function known when the
+//! program loads is called by name, and that has an instruction for each number
+//! of arguments up to three (`Call0` to `Call3`) and `Call` for more.
+//! `CallSelf` is for a function that keeps the closure it runs as, and passes
+//! it on, so a lambda calling itself still sees its captures. Any other
+//! function calls itself by name. `CallValue` is for a function value in a
+//! register. A call in tail position is one of three instructions that replace
+//! the frame: `TailCall`, `TailCallSelf` and `TailCallValue`.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -27,10 +29,11 @@ use scarlet_ir::intrinsic::Intrinsic;
 use scarlet_ir::tivec::Idx;
 
 use super::ins::{
-    Arg, ArgList, Args, BitsOp, CalleeRoom, Dead, Dst, Hit, Ins, KeepList, Kept, Label, Lists,
-    LookList, Looks, Newline, Over, OwnRoom, ShareList, Shared, Shares, Src, Taken, VReg, Variant,
+    Arg, ArgList, Args, BitsOp, Dead, Dst, Hit, Ins, KeepList, Kept, Label, LastReg, Lists,
+    LookList, Looks, Newline, Over, OwnEntry, OwnRoom, ShareList, Shared, Shares, Src, Taken, VReg,
+    Variant,
 };
-use super::{Tables, Unfit, Why, add, built};
+use super::{ReadsClosure, Tables, Unfit, Why, add, built};
 use crate::ops::{Arith, Compare, NumOp, Order};
 use crate::stop::{Arity, Broken, Limit, Missing};
 use crate::value::{Float, SmallInt, Value};
@@ -47,6 +50,8 @@ pub(super) struct Draft {
     /// The values whose cell the loop's next turn overwrites. A call to self
     /// in tail position leaves them in their registers.
     pub(super) carried: BTreeSet<VReg>,
+    /// What it reads of the closure it runs as.
+    pub(super) closure: ReadsClosure,
 }
 
 /// The instructions for `core`. `this` is the function's own index, when it
@@ -74,6 +79,7 @@ pub(super) fn translate(
         values,
         kept: survey.reused,
         carried: survey.carried.into_iter().map(of).collect(),
+        closure: survey.closure,
         reads: survey.reads,
         numbers: HashMap::new(),
     };
@@ -86,6 +92,7 @@ pub(super) fn translate(
         values: t.values,
         params: core.params.iter().map(|p| of(p.id)).collect(),
         carried: t.carried,
+        closure: t.closure,
     })
 }
 
@@ -133,6 +140,8 @@ struct Translator<'c> {
     kept: BTreeSet<LocalId>,
     /// [`Draft::carried`].
     carried: BTreeSet<VReg>,
+    /// [`Draft::closure`].
+    closure: ReadsClosure,
     /// How many times each local is read.
     reads: HashMap<LocalId, u32>,
     /// Each local met so far that is a constant number.
@@ -278,34 +287,13 @@ impl Translator<'_> {
                 if let Some(bad) = self.bad_call(func, args.len())? {
                     return Ok(bad);
                 }
-                let (to, needs) = (super::ins::Callee(func), CalleeRoom(func));
-                Ok(match (dst.map(Dst), self.args(args)?) {
-                    (Some(dst), Fit::Inline(args)) => Ins::Call {
-                        dst,
-                        to,
-                        args,
-                        needs,
-                        own,
-                    },
-                    (Some(dst), Fit::Listed(args)) => Ins::CallWide {
-                        dst,
-                        to,
-                        args,
-                        needs,
-                        own,
-                    },
-                    (None, Fit::Inline(args)) => Ins::TailCall {
-                        to,
-                        args,
-                        needs,
-                        own,
-                    },
-                    (None, Fit::Listed(args)) => Ins::TailCallWide {
-                        to,
-                        args,
-                        needs,
-                        own,
-                    },
+                if let Some(dst) = dst {
+                    return self.call_by_name(Dst(dst), func, args);
+                }
+                let to = super::ins::Callee(func);
+                Ok(match self.args(args)? {
+                    Fit::Inline(args) => Ins::TailCall { to, args, own },
+                    Fit::Listed(args) => Ins::TailCallWide { to, args, own },
                 })
             }
             Callee::Self_ => {
@@ -315,7 +303,12 @@ impl Translator<'_> {
                 if let Some(bad) = self.bad_call(this, args.len())? {
                     return Ok(bad);
                 }
-                let to = super::ins::Callee(this);
+                if let Some(dst) = dst
+                    && !self.closure.keeps()
+                {
+                    return self.call_by_name(Dst(dst), this, args);
+                }
+                let to = OwnEntry;
                 if dst.is_none() && !self.carried.is_empty() {
                     let args: Vec<VReg> = args.iter().copied().map(of).collect();
                     let keep: Vec<VReg> = self.carried.iter().copied().collect();
@@ -327,8 +320,8 @@ impl Translator<'_> {
                     });
                 }
                 Ok(match (dst.map(Dst), self.args(args)?) {
-                    (Some(dst), Fit::Inline(args)) => Ins::CallSelf { dst, to, args, own },
-                    (Some(dst), Fit::Listed(args)) => Ins::CallSelfWide { dst, to, args, own },
+                    (Some(dst), Fit::Inline(args)) => Ins::CallSelf { dst, own, to, args },
+                    (Some(dst), Fit::Listed(args)) => Ins::CallSelfWide { dst, own, to, args },
                     (None, Fit::Inline(args)) => Ins::TailCallSelf { to, args, own },
                     (None, Fit::Listed(args)) => Ins::TailCallSelfWide { to, args, own },
                 })
@@ -353,6 +346,43 @@ impl Translator<'_> {
                 })
             }
         }
+    }
+
+    /// The call to `func` that puts its result in `dst`.
+    fn call_by_name(
+        &mut self,
+        dst: Dst<VReg>,
+        func: FuncIdx,
+        args: &[LocalId],
+    ) -> Result<Ins<VReg>, Unfit> {
+        let (own, to) = (OwnRoom, super::ins::Callee(func));
+        let arg = |l: LocalId| Arg::shared(of(l));
+        Ok(match *args {
+            [] => Ins::Call0 { dst, own, to },
+            [a] => {
+                let a = arg(a);
+                Ins::Call1Share { dst, own, to, a }
+            }
+            [a, b] => {
+                let (a, b) = (arg(a), arg(b));
+                Ins::Call2Share { dst, own, to, a, b }
+            }
+            [a, b, c] => {
+                let (a, b, c) = (arg(a), arg(b), arg(c));
+                Ins::Call3Share {
+                    dst,
+                    own,
+                    to,
+                    a,
+                    b,
+                    c,
+                }
+            }
+            _ => match self.args(args)? {
+                Fit::Inline(args) => Ins::Call { dst, own, to, args },
+                Fit::Listed(args) => Ins::CallWide { dst, own, to, args },
+            },
+        })
     }
 
     /// When the last instruction compares two numbers into `cond`, and the
@@ -552,9 +582,14 @@ impl Translator<'_> {
     }
 
     fn tail(&mut self, atom: &Atom, dest: Dest) -> Result<(), Unfit> {
-        let ret = |src| Ins::Ret {
-            src: Taken(src),
-            own: OwnRoom,
+        let keeps = self.closure.keeps();
+        let ret = |src| {
+            let (src, last) = (Taken(src), LastReg);
+            if keeps {
+                Ins::RetClosure { src, last }
+            } else {
+                Ins::Ret { src, last }
+            }
         };
         match (dest, atom) {
             (Dest::Return, Atom::Call { callee, args }) => {
@@ -647,9 +682,10 @@ impl Translator<'_> {
             Atom::Nil => constant(Value::NIL),
             Atom::Bool(b) => constant(Value::bool(*b)),
             Atom::Load(Load::Global(slot)) => Ins::GetGlobal { dst, slot: *slot },
-            Atom::Load(Load::Capture(i)) => match u32::try_from(i.0) {
-                Ok(index) => Ins::GetCapture { dst, index },
-                Err(_) => self.broken(Broken::NegativeCapture)?,
+            Atom::Load(Load::Capture(i)) => match (self.this, u32::try_from(i.0)) {
+                (Some(_), Ok(index)) => Ins::GetCapture { dst, index },
+                (Some(_), Err(_)) => self.broken(Broken::NegativeCapture)?,
+                (None, _) => self.broken(Broken::ToplevelCapture)?,
             },
             Atom::Load(Load::SelfClosure) => match self.this {
                 Some(this) => Ins::GetSelf { dst, this },
@@ -730,6 +766,10 @@ impl Translator<'_> {
                 intrinsic: Intrinsic::FloatFromInt,
                 args,
             } if let [a] = args.as_slice() => Ins::FloatFromInt { dst, a: src(*a) },
+            Atom::Intrinsic {
+                intrinsic: Intrinsic::InternalStackDepth,
+                args,
+            } if args.is_empty() => Ins::StackDepth { dst },
             Atom::Intrinsic { intrinsic, args } => {
                 let regs: Vec<VReg> = args.iter().copied().map(of).collect();
                 match Looks::new(&regs) {
@@ -1117,6 +1157,8 @@ struct Survey {
     carried: BTreeSet<LocalId>,
     /// The highest local bound or read.
     highest: Option<u32>,
+    /// [`Draft::closure`].
+    closure: ReadsClosure,
 }
 
 impl Survey {
@@ -1137,6 +1179,13 @@ impl Survey {
         } = atom
         {
             self.reused.insert(*local);
+        }
+        if let Atom::Load(load) = atom {
+            self.closure = self.closure.max(match load {
+                Load::Global(_) => ReadsClosure::Nothing,
+                Load::SelfClosure => ReadsClosure::Itself,
+                Load::Capture(_) => ReadsClosure::Captures,
+            });
         }
     }
 }

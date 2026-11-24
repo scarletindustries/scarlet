@@ -104,33 +104,33 @@ fn only_these_instructions_end_or_jump() {
         Op::TailCallValue,
         Op::TailCallValueWide,
         Op::Ret,
+        Op::RetClosure,
         Op::Jump,
         Op::Bad,
     ];
     let listed = |op: &Op| ends.contains(op);
     let names = Op::ALL.iter().map(|op| (op.name(), listed(op)));
     for (name, ends) in names {
-        let looks = name.starts_with("TailCall") || ["Halt", "Ret", "Jump", "Bad"].contains(&name);
+        let looks = name.starts_with("TailCall")
+            || ["Halt", "Ret", "RetClosure", "Jump", "Bad"].contains(&name);
         assert_eq!(looks, ends, "{name}");
     }
-    let own = OwnRoom;
-    let (to, why) = (Callee(FuncIdx(0)), WhyId(0));
+    let (own, last) = (OwnRoom, LastReg);
+    let (name, to, why) = (Callee(FuncIdx(0)), OwnEntry, WhyId(0));
     let args = Args::new(&[]).expect("none");
     let callee = Shared(VReg(0));
-    let ending: [Ins<VReg>; 11] = [
+    let ending: [Ins<VReg>; 12] = [
         Ins::Halt {
             src: Taken(VReg(0)),
         },
         Ins::TailCall {
-            to,
+            to: name,
             args,
-            needs: CalleeRoom(FuncIdx(0)),
             own,
         },
         Ins::TailCallWide {
-            to,
+            to: name,
             args: ArgList(0),
-            needs: CalleeRoom(FuncIdx(0)),
             own,
         },
         Ins::TailCallSelf { to, args, own },
@@ -153,7 +153,11 @@ fn only_these_instructions_end_or_jump() {
         },
         Ins::Ret {
             src: Taken(VReg(0)),
-            own,
+            last,
+        },
+        Ins::RetClosure {
+            src: Taken(VReg(0)),
+            last,
         },
         Ins::Jump { to: Label(0) },
         Ins::Bad { why },
@@ -197,7 +201,7 @@ fn each_argument_is_decided_on_its_own() {
     let regs: Vec<VReg> = (0..6).map(VReg).collect();
     for bits in 0..64u32 {
         let mut ins: Ins<VReg> = Ins::TailCallSelf {
-            to: Callee(FuncIdx(0)),
+            to: OwnEntry,
             args: Args::new(&regs).expect("it fits"),
             own: OwnRoom,
         };
@@ -239,33 +243,36 @@ struct Shifted {
 }
 
 impl Places for Shifted {
-    fn reg(&self, r: VReg) -> Option<Reg> {
-        let next = u8::try_from(r.0).ok()?.checked_add(1)?;
-        (r.0 < self.fits).then_some(Reg(next))
+    fn reg(&self, r: VReg) -> Result<Reg, Unplaced> {
+        let next = u8::try_from(r.0).ok().and_then(|r| r.checked_add(1));
+        let fits = next.filter(|_| r.0 < self.fits);
+        fits.map(Reg).ok_or(Unplaced::NoPlace)
     }
 
-    fn label(&self, l: Label) -> Option<Pc> {
-        (l.0 < 4).then_some(Pc(l.0 + 100))
+    fn label(&self, l: Label) -> Result<Pc, Unplaced> {
+        let here = (l.0 < 4).then_some(Pc(l.0 + 100));
+        here.ok_or(Unplaced::NoPlace)
     }
 
-    fn entry(&self, f: FuncIdx) -> Option<EntryPc> {
-        (f.0 < 4).then_some(EntryPc(f.0 + 200))
+    fn entry(&self, f: FuncIdx) -> Result<EntryPc, Unplaced> {
+        let here = (f.0 < 4).then_some(EntryPc(f.0 + 200));
+        here.ok_or(Unplaced::NeedsClosure(f))
     }
 
-    fn needs(&self, f: FuncIdx) -> Option<Room> {
-        (f.0 < 4).then_some(Room(7))
+    fn own_entry(&self) -> EntryPc {
+        EntryPc(300)
     }
 
     fn own(&self) -> Room {
         Room(9)
     }
 
-    fn reg_list(&self, i: u32) -> Option<u32> {
-        i.checked_add(10)
+    fn reg_list(&self, i: u32) -> Result<u32, Unplaced> {
+        Ok(i + 10)
     }
 
-    fn arg_list(&self, i: u32) -> Option<u32> {
-        i.checked_add(20)
+    fn arg_list(&self, i: u32) -> Result<u32, Unplaced> {
+        Ok(i + 20)
     }
 }
 
@@ -279,7 +286,6 @@ fn placing_an_instruction_keeps_what_it_does() {
         dst: Dst(VReg(3)),
         to: Callee(FuncIdx(1)),
         args,
-        needs: CalleeRoom(FuncIdx(1)),
         own: OwnRoom,
     };
     let placed = call.place(&at).expect("a place for everything");
@@ -289,10 +295,20 @@ fn placing_an_instruction_keeps_what_it_does() {
         (Reg(3), Role::Pass { moved: true }),
     ];
     assert_eq!(operands(&placed, &Lists::default()), roles);
-    let Ins::Call { to, needs, own, .. } = placed else {
+    let Ins::Call { to, own, .. } = placed else {
         panic!("a call");
     };
-    assert_eq!((to.index(), needs, own), (201, Room(7), Room(9)));
+    assert_eq!((to.index(), own), (201, Room(9)));
+    let call: Ins<VReg> = Ins::CallSelf {
+        dst: Dst(VReg(3)),
+        to: OwnEntry,
+        args,
+        own: OwnRoom,
+    };
+    let Ok(Ins::CallSelf { to, own, .. }) = call.place(&at) else {
+        panic!("a call to itself");
+    };
+    assert_eq!((to.index(), own), (300, Room(9)));
 
     let wide: Ins<VReg> = Ins::CtorOverWide {
         dst: Dst(VReg(0)),
@@ -303,7 +319,7 @@ fn placing_an_instruction_keeps_what_it_does() {
         fields: ArgList(1),
         reuse: Over(VReg(2)),
     };
-    let Some(Ins::CtorOverWide {
+    let Ok(Ins::CtorOverWide {
         variant, fields, ..
     }) = wide.place(&at)
     else {
@@ -315,29 +331,34 @@ fn placing_an_instruction_keeps_what_it_does() {
     };
     assert_eq!((variant.get(), fields.0), (want, 21));
 
-    // Nothing is placed when one thing it names has no place.
-    let mut lost: Vec<Ins<VReg>> = Vec::new();
-    lost.push(Ins::Jump { to: Label(4) });
-    lost.push(Ins::Drop {
-        reg: Dead(VReg(50)),
-    });
-    lost.push(Ins::Concat {
-        dst: Dst(VReg(0)),
-        parts: Looks::new(&[VReg(1), VReg(50)]).expect("it fits"),
-    });
-    lost.push(Ins::TailCallSelf {
-        to: Callee(FuncIdx(0)),
-        args: Args::new(&[VReg(50)]).expect("it fits"),
-        own: OwnRoom,
-    });
-    lost.push(Ins::TailCallSelf {
+    // Nothing is placed when one thing it names has no place, and what that
+    // was comes back.
+    let lost: [Ins<VReg>; 4] = [
+        Ins::Jump { to: Label(4) },
+        Ins::Drop {
+            reg: Dead(VReg(50)),
+        },
+        Ins::Concat {
+            dst: Dst(VReg(0)),
+            parts: Looks::new(&[VReg(1), VReg(50)]).expect("it fits"),
+        },
+        Ins::TailCallSelf {
+            to: OwnEntry,
+            args: Args::new(&[VReg(50)]).expect("it fits"),
+            own: OwnRoom,
+        },
+    ];
+    for ins in lost {
+        let why = ins.place(&at).map(|ins| ins.op()).err();
+        assert_eq!(why, Some(Unplaced::NoPlace), "{ins:?}");
+    }
+    let call: Ins<VReg> = Ins::TailCall {
         to: Callee(FuncIdx(4)),
         args: Args::new(&[]).expect("it fits"),
         own: OwnRoom,
-    });
-    for ins in lost {
-        assert!(ins.place(&at).is_none(), "{ins:?}");
-    }
+    };
+    let why = call.place(&at).map(|ins| ins.op()).err();
+    assert_eq!(why, Some(Unplaced::NeedsClosure(FuncIdx(4))));
 }
 
 /// Every instruction of a loaded program shows as its kind and its operands.
@@ -369,7 +390,7 @@ fn the_listing_shows_every_operand() {
         }
         assert_eq!(line.contains(" -> "), ins.target().is_some(), "{line}");
     }
-    assert!(text.contains("= MapFind(r0, r1) -> "), "{text}");
+    assert!(text.contains("= MapFind(r2, r3) -> "), "{text}");
 }
 
 /// The register whose cell a constructor may be written over is told apart
@@ -407,14 +428,14 @@ fn the_listing_tells_a_kept_cell_from_the_other_operands() {
     };
     assert_eq!(
         line(".turn", "CtorOver"),
-        "4  r0 = CtorOver(10.0, move r2, move r1, over r0)"
+        "4  r2 = CtorOver(10.0, move r4, move r3, over r2)"
     );
     assert_eq!(
         line(".round", "CtorOver"),
-        "0  r2 = CtorOver(10.0, move r0, move r1, over r2)"
+        "0  r4 = CtorOver(10.0, move r2, move r3, over r4)"
     );
     assert_eq!(
         line(".round", "TailCallSelfKeep"),
-        "9  TailCallSelfKeep(fn#1, move r3, move r0, keep r2)"
+        "9  TailCallSelfKeep(fn#1, move r5, move r2, keep r4)"
     );
 }

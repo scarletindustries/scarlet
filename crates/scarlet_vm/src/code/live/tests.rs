@@ -1,4 +1,4 @@
-use super::super::ins::{Arg, Args, KeepList, OwnRoom, Shared};
+use super::super::ins::{Arg, Args, KeepList, OwnEntry, OwnRoom, Shared};
 use super::super::tests::{draft, of};
 use super::super::translate::Draft;
 use super::*;
@@ -290,7 +290,7 @@ fn a_list_of_arguments_is_decided_as_the_others_are() {
     d.lists.regs.push(Box::new([VReg(2)]));
     d.carried.insert(VReg(2));
     d.ins.push(Ins::TailCallSelfKeep {
-        to: super::super::ins::Callee(scarlet_ir::core_ir::FuncIdx(0)),
+        to: OwnEntry,
         args: super::super::ArgList(0),
         keep: KeepList(0),
         own: OwnRoom,

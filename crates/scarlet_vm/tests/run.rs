@@ -1829,11 +1829,11 @@ fn the_listing_shows_a_write_and_where_a_miss_goes() {
         .last()
         .expect("strike is listed");
     assert!(
-        strike.contains("= ArraySet(move r0, r1, move r2) -> 4\n"),
+        strike.contains("= ArraySet(move r2, r3, move r4) -> 4\n"),
         "{strike}"
     );
     assert!(strike.contains("    4  r"), "{strike}");
-    assert!(strike.contains(" = Move(move r0)\n"), "{strike}");
+    assert!(strike.contains(" = Move(move r2)\n"), "{strike}");
 }
 
 /// A range stores only its two ends, and is an array of Ints in every way a
@@ -2626,8 +2626,8 @@ fn ran(counts: &scarlet_vm::Counts, op: &str) -> u64 {
 fn a_counted_run_counts_each_instruction_by_its_kind() {
     let (out, counts) = counted(FIB);
     assert_eq!(out, "55\n");
-    assert_eq!(ran(&counts, "CallSelf"), 176);
-    assert_eq!(ran(&counts, "Call"), 1);
+    assert_eq!(ran(&counts, "Call1"), 177);
+    assert_eq!(ran(&counts, "CallSelf"), 0);
     assert_eq!(ran(&counts, "JumpUnlessIntLtK"), 177);
     assert_eq!(ran(&counts, "IntAdd"), 88);
     assert_eq!(ran(&counts, "Print"), 1);
@@ -2966,20 +2966,20 @@ fn the_listing_shows_the_loaded_instructions() {
     let listing = scarlet_vm::listing(&compile(FIB)).expect("the program loads");
     let fib = listing.function(0).expect("fib is the first function");
     assert!(
-        fib.starts_with("; loaded: 2 registers, parameter in r0\n"),
+        fib.starts_with("; loaded: 4 registers, parameter in r2\n"),
         "{fib}"
     );
     assert!(
-        fib.contains("    0  JumpUnlessIntLtK(r0, 2) -> 2\n"),
+        fib.contains("    0  JumpUnlessIntLtK(r2, 2) -> 2\n"),
         "{fib}"
     );
-    assert!(fib.contains("= CallSelf(fn#0, move r"), "{fib}");
+    assert!(fib.contains("= Call1(fn#0, move r"), "{fib}");
     assert!(fib.contains("= IntAdd(r"), "{fib}");
     let main = listing.function(1).expect("main is the second");
-    assert!(main.contains("r0 = Call(fn#0, move r0)\n"), "{main}");
-    assert!(main.contains("r0 = Print(r0, newline)\n"), "{main}");
+    assert!(main.contains("r2 = Call1(fn#0, move r2)\n"), "{main}");
+    assert!(main.contains("r2 = Print(r2, newline)\n"), "{main}");
     assert!(listing.function(2).is_none());
-    assert!(listing.toplevel().starts_with("; loaded: 1 register\n"));
+    assert!(listing.toplevel().starts_with("; loaded: 3 registers\n"));
 }
 
 /// The listing marks the source a `Move` takes as it marks an argument a
@@ -3003,9 +3003,9 @@ fn the_listing_marks_a_move_that_takes_its_source() {
                }\n";
     let listing = scarlet_vm::listing(&compile(src)).expect("the program loads");
     let twice = listing.function(1).expect("twice is the second function");
-    assert!(twice.contains("    1  r1 = Move(r0)\n"), "{twice}");
+    assert!(twice.contains("    1  r3 = Move(r2)\n"), "{twice}");
     let once = listing.function(2).expect("once is the third");
-    assert!(once.contains("    1  r1 = Move(move r0)\n"), "{once}");
+    assert!(once.contains("    1  r3 = Move(move r2)\n"), "{once}");
 }
 
 /// A function that needs something the VM does not run yet has no
@@ -3230,8 +3230,8 @@ fn each_of(n: usize, f: impl Fn(usize) -> String) -> Vec<String> {
 }
 
 /// A function of thousands of locals runs when few of them are held at once. One
-/// that holds more than a frame has registers loads, and stops the run when it
-/// is called and not before, naming itself.
+/// that holds more than a frame has room for loads, and stops the run when it is
+/// called and not before, naming itself.
 #[test]
 fn a_function_may_hold_254_values_at_once() {
     let long = each_of(4000, |i| match i {
@@ -3275,6 +3275,111 @@ fn a_function_may_hold_254_values_at_once() {
     let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
     let ran = scarlet_vm::run(&compile(&uncalled), &mut host, Audit::AtEnd);
     assert_eq!(ran, Ok(()));
+}
+
+/// A closure called in tail position reads its captures, however many arguments
+/// it takes and whichever kind of function the caller is.
+#[test]
+fn a_closure_called_in_tail_position_reads_its_captures() {
+    for n in [1, 6, 7, 20] {
+        let ints = vec!["Int"; n].join(", ");
+        let names = each_of(n, |i| format!("a{i}")).join(", ");
+        let sum = each_of(n, |i| format!("a{i}")).join(" + ");
+        let args = each_of(n, |i| format!("{}", i + 1)).join(", ");
+        prints(
+            &format!(
+                "fn through(f fn({ints}) String) String {{ f({args}) }}\n\
+                 pub fn main() {{\n\
+                 \tkept = '${{40 + 2}}'\n\
+                 \tinner = fn({names}) '${{kept}}:${{{sum}}}'\n\
+                 \tprintln(through(inner))\n\
+                 \tafter = '${{kept}}!'\n\
+                 \tfrom = fn(g) if kept == '42' {{ g({args}) }} else {{ after }}\n\
+                 \tprintln(from(inner))\n\
+                 \tprintln('${{inner({args})}} ${{after}}')\n\
+                 }}\n"
+            ),
+            &{
+                let sum = n * (n + 1) / 2;
+                format!("42:{sum}\n42:{sum}\n42:{sum} 42!\n")
+            },
+        );
+    }
+}
+
+/// `internal::stack_depth` counts the frames a call is in, whatever kind of call
+/// each came by. A tail call takes over its caller's frame, so a loop adds none.
+#[test]
+fn the_stack_depth_counts_frames_and_not_turns() {
+    prints(
+        "import scarlet/internal\n\
+         fn down(n Int) Int {\n\
+         \tif n == 0 { internal::stack_depth() } else { down(n - 1) + 0 }\n\
+         }\n\
+         fn round(n Int) Int {\n\
+         \tif n == 0 { internal::stack_depth() } else { round(n - 1) }\n\
+         }\n\
+         fn through(f fn(Int) Int, n Int) Int { f(n) + 0 }\n\
+         pub fn main() {\n\
+         \tprintln(internal::stack_depth())\n\
+         \tprintln(down(0))\n\
+         \tprintln(down(9))\n\
+         \tprintln(down(5000))\n\
+         \tprintln(round(5000))\n\
+         \tk = 2\n\
+         \tgo = fn(n) { if n == 0 { internal::stack_depth() } else { go(n - 1) + k - 2 } }\n\
+         \tprintln(go(7))\n\
+         \tprintln(through(go, 7))\n\
+         \tprintln(through(round, 7))\n\
+         \tprintln(through(fn(n) { internal::stack_depth() + n }, 0))\n\
+         }\n",
+        "1\n2\n11\n5002\n2\n9\n10\n3\n3\n",
+    );
+}
+
+/// A frame as wide as there are registers is called from one as wide, hundreds
+/// deep, by name, and through a closure that reads as many captures.
+#[test]
+fn frames_of_every_register_call_each_other() {
+    // One value added at a time, so that the others are all held.
+    let sum = |n: usize, from: &str| {
+        let adds = each_of(n, |i| {
+            format!("\t\ts{} = s{i} + string::length(x{i})\n", i + 1)
+        });
+        format!("\t\ts0 = {from}\n{}\t\ts{n}\n", adds.concat())
+    };
+    // The result of a call is a value beside those held across it, so the most
+    // that the caller in the middle of one has is one fewer.
+    for (n, m, wide) in [(200, 200, 0), (253, 254, 2)] {
+        let lets = each_of(n, |i| format!("\t\tx{i} = '${{n + {i}}}'\n")).concat();
+        let captured = each_of(m, |i| format!("\tx{i} = '${{{i}}}'\n")).concat();
+        let src = format!(
+            "import scarlet/string\n\
+             fn down(n Int) Int {{\n\
+             \tif n == 0 {{ 0 }} else {{\n{lets}\t\tr = down(n - 1)\n{}\t}}\n\
+             }}\n\
+             fn held(f fn(Int) Int, n Int) Int {{\n\
+             \tif n == 0 {{ f(0) }} else {{ held(f, n - 1) + f(n) }}\n\
+             }}\n\
+             fn holder() fn(Int) Int {{\n{captured}\tfn(k) {{\n{}\t}}\n}}\n\
+             pub fn main() {{\n\
+             \tprintln(down(300))\n\
+             \tprintln(held(holder(), 100))\n\
+             }}\n",
+            sum(n, "r"),
+            sum(m, "k"),
+        );
+        let listing = scarlet_vm::listing(&compile(&src)).expect("the program loads");
+        let all = (0..).map_while(|i| listing.function(i));
+        let whole = all.filter(|f| f.starts_with("; loaded: 256 registers"));
+        assert_eq!(whole.count(), wide, "{n}");
+        let digits = |from: usize, n: usize| -> usize {
+            (from..from + n).map(|i| i.to_string().len()).sum()
+        };
+        let down: usize = (1..=300).map(|from| digits(from, n)).sum();
+        let want = format!("{down}\n{}\n", 5050 + 101 * digits(0, m));
+        prints(&src, &want);
+    }
 }
 
 /// A tail call to a function of fewer registers gives up what the others hold,

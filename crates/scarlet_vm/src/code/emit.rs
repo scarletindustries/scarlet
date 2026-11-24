@@ -2,15 +2,18 @@
 //!
 //! A jump and a call by name hold the place they go to, so the interpreter
 //! looks no function up to run one it knows. Places are given out in a first
-//! pass, because a function may call one that comes after it.
+//! pass, because a function may call one that comes after it. A function that
+//! reads captures finds them only when it runs as a closure, so a call by name
+//! to one is refused here, where what every callee reads is known.
 
 use scarlet_ir::core_ir::FuncIdx;
 use scarlet_ir::tivec::TiVec;
 
 use super::alloc::{Body, Fitted};
-use super::ins::{Ins, Label, Lists, Places, Taken, VReg};
+use super::ins::{Ins, Label, Lists, Places, Taken, Unplaced, VReg};
 use super::{BlockId, Entry, EntryPc, Op, Pc, Reg, Room};
 use crate::Audit;
+use crate::frame::RESULT;
 use crate::stop::{Broken, Stop};
 
 /// The instructions a load puts in that the program does not have.
@@ -31,10 +34,6 @@ pub(super) struct Placed {
     pub(super) funcs: TiVec<FuncIdx, Entry>,
     pub(super) toplevels: Vec<Entry>,
 }
-
-/// Where a function's result goes when nothing called it: the first register,
-/// where the [`Ins::Halt`] it returns to looks.
-const RESULT: Reg = Reg(0);
 
 pub(super) fn emit(
     funcs: &TiVec<FuncIdx, Fitted>,
@@ -79,7 +78,8 @@ pub(super) fn emit(
             pc: EntryPc(position(plan.start)?),
             end: Pc(position(plan.end)?),
             params: f.params,
-            needs: f.body.needs,
+            own: f.body.own,
+            closure: f.body.closure,
         })
     };
     Ok(Placed {
@@ -189,18 +189,19 @@ impl Out<'_, '_> {
             plans: self.plans,
             body,
             plan,
+            start: EntryPc(position(plan.start)?),
             regs: position(self.lists.regs.len())?,
             args: position(self.lists.args.len())?,
         };
-        let lost = || Stop::broken(Broken::NoPlace);
+        let stop = |why| unplaced(at.funcs, why);
         for list in &body.lists.regs {
-            let regs: Option<Box<[Reg]>> = list.iter().map(|r| at.reg(*r)).collect();
-            self.lists.regs.push(regs.ok_or_else(lost)?);
+            let regs: Result<Box<[Reg]>, _> = list.iter().map(|r| at.reg(*r)).collect();
+            self.lists.regs.push(regs.map_err(stop)?);
         }
         for list in &body.lists.args {
             let args = list.iter().map(|a| super::ins::Place::place(*a, &at));
-            let args: Option<Box<[_]>> = args.collect();
-            self.lists.args.push(args.ok_or_else(lost)?);
+            let args: Result<Box<[_]>, _> = args.collect();
+            self.lists.args.push(args.map_err(stop)?);
         }
         let audit = match self.extra.audit {
             Audit::EachInstruction => Some(Ins::Audit),
@@ -217,7 +218,7 @@ impl Out<'_, '_> {
                 block.push(ins.op());
             }
             out.extend(audit);
-            out.push(ins.place(&at).ok_or_else(lost)?);
+            out.push(ins.place(&at).map_err(stop)?);
         }
         self.close(&mut block);
         Ok(())
@@ -233,48 +234,74 @@ impl Out<'_, '_> {
     }
 }
 
+/// How the load stops for an instruction that gets no place.
+fn unplaced(funcs: &TiVec<FuncIdx, Fitted>, why: Unplaced) -> Stop {
+    match why {
+        Unplaced::NoPlace => Stop::broken(Broken::NoPlace),
+        Unplaced::NeedsClosure(func) => match funcs.get(func) {
+            Some(f) => f.called_by_name(),
+            None => Stop::broken(Broken::NoPlace),
+        },
+    }
+}
+
 /// What the names in one function's instructions mean.
 struct At<'a> {
     funcs: &'a TiVec<FuncIdx, Fitted>,
     plans: &'a TiVec<FuncIdx, Plan>,
     body: &'a Body,
     plan: &'a Plan,
+    start: EntryPc,
     /// How many lists the functions before this one have.
     regs: u32,
     args: u32,
 }
 
 impl Places for At<'_> {
-    fn reg(&self, r: VReg) -> Option<Reg> {
-        self.body.regs.get(r.0 as usize).copied().flatten()
+    fn reg(&self, r: VReg) -> Result<Reg, Unplaced> {
+        let reg = self.body.regs.get(r.0 as usize).copied().flatten();
+        reg.ok_or(Unplaced::NoPlace)
     }
 
-    fn label(&self, l: Label) -> Option<Pc> {
-        let i = self.body.labels.get(l.0 as usize)?;
-        self.plan.places.get(*i).copied().map(Pc)
+    fn label(&self, l: Label) -> Result<Pc, Unplaced> {
+        let i = self.body.labels.get(l.0 as usize);
+        let place = i.and_then(|i| self.plan.places.get(*i));
+        place.copied().map(Pc).ok_or(Unplaced::NoPlace)
     }
 
-    fn entry(&self, f: FuncIdx) -> Option<EntryPc> {
-        u32::try_from(self.plans.get(f)?.start).ok().map(EntryPc)
+    fn entry(&self, f: FuncIdx) -> Result<EntryPc, Unplaced> {
+        let (Some(callee), Some(plan)) = (self.funcs.get(f), self.plans.get(f)) else {
+            return Err(Unplaced::NoPlace);
+        };
+        if callee.body.closure.needs_one() {
+            return Err(Unplaced::NeedsClosure(f));
+        }
+        let start = u32::try_from(plan.start);
+        start.map(EntryPc).map_err(|_| Unplaced::NoPlace)
     }
 
-    fn needs(&self, f: FuncIdx) -> Option<Room> {
-        Some(self.funcs.get(f)?.body.needs)
+    fn own_entry(&self) -> EntryPc {
+        self.start
     }
 
     fn own(&self) -> Room {
-        self.body.needs
+        self.body.own
     }
 
-    fn reg_list(&self, i: u32) -> Option<u32> {
-        self.body.lists.regs.get(i as usize)?;
-        self.regs.checked_add(i)
+    fn reg_list(&self, i: u32) -> Result<u32, Unplaced> {
+        list(self.body.lists.regs.get(i as usize), self.regs, i)
     }
 
-    fn arg_list(&self, i: u32) -> Option<u32> {
-        self.body.lists.args.get(i as usize)?;
-        self.args.checked_add(i)
+    fn arg_list(&self, i: u32) -> Result<u32, Unplaced> {
+        list(self.body.lists.args.get(i as usize), self.args, i)
     }
+}
+
+/// The number in the whole program of a function's own list `i`, which is
+/// `found`, with `before` of them in the functions before it.
+fn list<L>(found: Option<&L>, before: u32, i: u32) -> Result<u32, Unplaced> {
+    let number = found.and_then(|_| before.checked_add(i));
+    number.ok_or(Unplaced::NoPlace)
 }
 
 #[cfg(test)]

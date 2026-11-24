@@ -45,16 +45,11 @@ mod translate;
 
 pub(crate) use ins::{
     Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, Dst, EntryPc, Hit, Ins, KeepList, Kept,
-    Lists, LookList, Looks, Newline, Op, Over, Pc, Reg, Room, ShareList, Shared, Shares, Src,
+    Last, Lists, LookList, Looks, Newline, Op, Over, Pc, Reg, Room, ShareList, Shared, Shares, Src,
     Taken, TextId, Variant, WhyId,
 };
 
 use alloc::Fitted;
-
-/// The most registers a frame has. A register is named by a byte, and two of
-/// its 256 numbers are kept back for a frame's link to its caller and the
-/// closure it runs as, which are not in registers yet.
-pub(crate) const MAX_REGS: usize = 254;
 
 /// A whole loaded program.
 pub(crate) struct Code {
@@ -132,6 +127,31 @@ pub(crate) enum Why {
     Missing(Missing),
 }
 
+/// What a function reads of the closure it runs as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub(crate) enum ReadsClosure {
+    #[default]
+    Nothing,
+    /// The closure as a value. One that runs as none is its function's value.
+    Itself,
+    /// A capture, so it has to run as a closure, and a call by name to it is
+    /// refused ([`emit`]).
+    Captures,
+}
+
+impl ReadsClosure {
+    /// Whether the function's frame keeps the closure in a register.
+    #[inline(always)]
+    pub(crate) fn keeps(self) -> bool {
+        self != ReadsClosure::Nothing
+    }
+
+    /// Whether the function can run only as a closure.
+    fn needs_one(self) -> bool {
+        self == ReadsClosure::Captures
+    }
+}
+
 /// Where a loaded function starts, and what a call to it has to know.
 #[derive(Debug)]
 pub(crate) struct Entry {
@@ -139,10 +159,13 @@ pub(crate) struct Entry {
     pub(crate) pc: EntryPc,
     /// One past its last instruction.
     pub(crate) end: Pc,
-    /// How many arguments it takes. They arrive in its first registers.
+    /// How many arguments it takes. They arrive in the registers from
+    /// [`FIRST`](crate::frame::FIRST) on.
     pub(crate) params: usize,
-    /// Registers a frame for this function needs.
-    pub(crate) needs: Room,
+    /// How many registers a frame for it has.
+    pub(crate) own: Room,
+    /// What it reads of the closure it runs as.
+    pub(crate) closure: ReadsClosure,
 }
 
 /// A program loaded so that a run of it can say how often each instruction
@@ -188,6 +211,11 @@ fn load_as(program: &Program, extra: emit::Extra<'_>) -> Result<Code, Stop> {
     let mut toplevels = Vec::new();
     for f in program.inits.iter().chain([&program.toplevel]) {
         toplevels.push(fit(program, f, None, &mut tables)?);
+    }
+    if let Some(main) = program.main.and_then(|main| funcs.get(main))
+        && main.body.closure.needs_one()
+    {
+        return Err(main.called_by_name());
     }
     let placed = emit::emit(&funcs, &toplevels, extra)?;
     Ok(Code {
@@ -323,7 +351,6 @@ fn fit_core(
 fn built(i: Intrinsic, argc: usize) -> bool {
     let arity = match i {
         Intrinsic::MapNew
-        | Intrinsic::InternalStackDepth
         | Intrinsic::InternalCellsMade
         | Intrinsic::InternalCellsReused
         | Intrinsic::TimeMonotonic

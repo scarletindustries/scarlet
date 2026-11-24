@@ -68,11 +68,11 @@ fn dis_instrs_adds_the_loaded_instructions() {
         .expect("square is listed");
     assert!(square.contains("IntMul(%0, %0)"), "{square}");
     assert!(
-        square.contains("; loaded: 1 register, parameter in r0\n"),
+        square.contains("; loaded: 3 registers, parameter in r2\n"),
         "{square}"
     );
-    assert!(square.contains("    0  r0 = IntMul(r0, r0)\n"), "{square}");
-    assert!(square.contains("    1  Ret(move r0)\n"), "{square}");
+    assert!(square.contains("    0  r2 = IntMul(r2, r2)\n"), "{square}");
+    assert!(square.contains("    1  Ret(move r2)\n"), "{square}");
     let (_, toplevel) = stdout.split_once("\n; toplevel\n").expect("a toplevel");
     assert!(toplevel.contains("; loaded: "), "{toplevel}");
 }

@@ -1,6 +1,6 @@
-//! Everything a run holds but its registers and its frames, and what reaches
-//! none of those: the built-ins, and the work of every instruction that is
-//! more than a few lines.
+//! Everything a run holds but its registers, and what reaches none of those:
+//! the built-ins, and the work of every instruction that is more than a few
+//! lines.
 //!
 //! The interpreter's loop reaches it through one reference ([`Rest`]).
 
@@ -15,6 +15,7 @@ use crate::bigint::{self, Int};
 use crate::binary::{self, Bits};
 use crate::code::{BinaryId, BitsOp, Code, Entry, Reg, TextId};
 use crate::float;
+use crate::frame::WINDOW;
 use crate::heap::{Cell, DeadCell, Fault, Heap, Kind};
 use crate::host::{Host, IoError};
 use crate::http;
@@ -28,7 +29,9 @@ use crate::value::{Value, View};
 
 mod net;
 
-// The heap is last, so that a change to its size moves none of the others.
+// The fields keep this order, with the heap last, so that a change to the
+// heap's size cannot move the others. An offset past what a load can hold takes
+// an instruction more at each use.
 #[repr(C)]
 pub(super) struct Rest<'c, 'h> {
     pub(super) code: &'c Code,
@@ -42,13 +45,17 @@ pub(super) struct Rest<'c, 'h> {
     /// its `Count` instruction holds. It is empty for an ordinary load,
     /// which has no such instruction.
     pub(super) ran: Vec<u64>,
+    /// The values on their way into a frame or a cell, which are the arguments
+    /// of a call or the fields of a constructor that has too many to hold. It
+    /// is kept between uses so that neither allocates.
+    pub(super) passing: Vec<Value>,
     pub(super) heap: Heap,
 }
 
 /// The values in the registers an instruction names, which it only looks at.
 #[derive(Clone, Copy)]
 struct Operands<'a> {
-    frame: &'a [Value],
+    frame: &'a [Value; WINDOW],
     regs: &'a [Reg],
 }
 
@@ -71,16 +78,12 @@ impl<'c> Rest<'c, '_> {
     pub(super) fn builtin(
         &mut self,
         i: Intrinsic,
-        frame: &[Value],
+        frame: &[Value; WINDOW],
         regs: &[Reg],
-        depth: usize,
     ) -> Result<Value, Stop> {
         let args = Operands { frame, regs };
         let v = args.get(0);
         match i {
-            // How many frames are live. A tail call reuses its frame, so a
-            // million of them still count one.
-            Intrinsic::InternalStackDepth => bigint::int(&mut self.heap, depth).map_err(fault),
             // Read the count before making this call's own answer, so asking
             // does not change what it says.
             Intrinsic::InternalCellsMade => {
@@ -850,7 +853,7 @@ impl<'c> Rest<'c, '_> {
     pub(super) fn bits_op(
         &mut self,
         op: BitsOp,
-        frame: &[Value],
+        frame: &[Value; WINDOW],
         regs: &[Reg],
     ) -> Result<Value, Stop> {
         let args = Operands { frame, regs };
@@ -1712,7 +1715,7 @@ impl<'c> Rest<'c, '_> {
 
     /// The strings in `parts` of `frame`, joined in order.
     #[inline(always)]
-    pub(super) fn concat(&mut self, frame: &[Value], parts: &[Reg]) -> Result<Value, Stop> {
+    pub(super) fn concat(&mut self, frame: &[Value; WINDOW], parts: &[Reg]) -> Result<Value, Stop> {
         let mut text = Vec::new();
         for r in parts {
             let v = frame.get(usize::from(r.0));
@@ -1727,8 +1730,9 @@ impl<'c> Rest<'c, '_> {
         Ok(Value::cell(self.heap.string(&text).map_err(fault)?))
     }
 
-    /// The function value `f` runs, and `f` with one more reference, for the
-    /// frame that runs it as its closure.
+    /// The function value `f` runs, and what a frame for it has in its closure
+    /// register: `f`, with one more reference, when the function keeps the
+    /// closure it runs as.
     #[inline(never)]
     pub(super) fn callee(&mut self, f: Value, argc: usize) -> Result<(&'c Entry, Value), Stop> {
         let func = match f.view() {
@@ -1750,7 +1754,12 @@ impl<'c> Rest<'c, '_> {
         if entry.params != argc {
             return Err(wrong_arity(entry, argc));
         }
-        Ok((entry, self.share(f)?))
+        let closure = if entry.closure.keeps() {
+            self.share(f)?
+        } else {
+            Value::NIL
+        };
+        Ok((entry, closure))
     }
 
     /// `start..end`.

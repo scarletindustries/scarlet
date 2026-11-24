@@ -1,4 +1,4 @@
-use super::super::ins::{Arg, ArgList, Args, Callee, KeepList, Over, OwnRoom, Role};
+use super::super::ins::{Arg, ArgList, Args, KeepList, Over, OwnEntry, OwnRoom, Role};
 use super::super::live::settle;
 use super::super::tests::{SHAPES, draft, of, program};
 use super::super::translate::translate;
@@ -18,15 +18,15 @@ fn regs(d: Draft) -> Vec<Option<u8>> {
     body.regs.iter().map(|r| r.map(|r| r.0)).collect()
 }
 
-/// The arguments arrive in order in the first registers, whatever else the
-/// function does with its values.
+/// The arguments arrive in order in the registers from the first that is not
+/// the frame's own, whatever else the function does with its values.
 #[test]
 fn parameters_have_the_first_registers() {
     let d = draft(4, 3, vec![of::add(3, 2, 1), of::ret(3)], &[]);
     let regs = regs(d);
-    assert_eq!(regs[..3], [Some(0), Some(1), Some(2)]);
+    assert_eq!(regs[..3], [Some(2), Some(3), Some(4)]);
     // The sum may go where nothing is read again.
-    assert_eq!(regs[3], Some(0));
+    assert_eq!(regs[3], Some(2));
 }
 
 /// Two values held at once have two registers, and one that is held no more
@@ -42,10 +42,10 @@ fn values_share_a_register_when_they_are_not_held_at_once() {
     ];
     assert_eq!(
         regs(draft(4, 0, ins, &[])),
-        [Some(0), Some(1), Some(0), Some(0)]
+        [Some(2), Some(3), Some(2), Some(2)]
     );
     let ins = vec![of::constant(0), of::len(1, 0), of::drop(0), of::ret(1)];
-    assert_eq!(regs(draft(2, 0, ins, &[])), [Some(0), Some(1)]);
+    assert_eq!(regs(draft(2, 0, ins, &[])), [Some(2), Some(3)]);
 }
 
 /// A value written while one with a higher number is held does not take its
@@ -58,7 +58,7 @@ fn a_value_keeps_clear_of_one_with_a_higher_number() {
         of::add(2, 0, 1),
         of::ret(2),
     ];
-    assert_eq!(regs(draft(3, 0, ins, &[])), [Some(0), Some(1), Some(0)]);
+    assert_eq!(regs(draft(3, 0, ins, &[])), [Some(2), Some(3), Some(2)]);
 }
 
 /// A cell that a loop carries round has a register no other value has, even
@@ -76,7 +76,7 @@ fn a_carried_cell_has_a_register_of_its_own() {
     let mut d = draft(6, 2, ins.clone(), &[]);
     d.carried.insert(VReg(2));
     let alone = regs(d);
-    assert_eq!(alone[2], Some(2));
+    assert_eq!(alone[2], Some(4));
     for other in [0, 1, 3, 4, 5] {
         assert_ne!(alone[other], alone[2], "{alone:?}");
     }
@@ -125,7 +125,7 @@ fn a_function_that_needs_too_many_registers_does_not_fit() {
         ins.push(of::ret(0));
         draft(n, 1, ins, &[])
     };
-    assert_eq!(fitted(holding(254)).map(|b| b.needs), Ok(Room(254)));
+    assert_eq!(fitted(holding(254)).map(|b| b.own), Ok(Room(256)));
     assert_eq!(
         fitted(holding(255)).err(),
         Some(Unfit::TooMany(Limit::Values))
@@ -137,7 +137,7 @@ fn a_function_that_needs_too_many_registers_does_not_fit() {
 
 impl PartialEq for Body {
     fn eq(&self, other: &Body) -> bool {
-        self.needs == other.needs && format!("{:?}", self.ins) == format!("{:?}", other.ins)
+        self.own == other.own && format!("{:?}", self.ins) == format!("{:?}", other.ins)
     }
 }
 
@@ -267,12 +267,21 @@ fn wrong_register(d: &Draft, body: &Body) -> Option<String> {
         at_label[l] = Some(met);
     };
     let mut state: Option<State> = Some(State::new());
-    for (i, p) in d.params.iter().enumerate() {
-        if reg(*p) != u8::try_from(i).ok() {
-            return Some(format!("parameter {i} is in {:?}", reg(*p)));
+    for v in (0..d.values).map(VReg) {
+        // The first two are the frame's link and closure, and its callee's
+        // are past its last.
+        if let Some(r) = reg(v)
+            && !(2..body.own.0).contains(&u16::from(r))
+        {
+            return Some(format!("{v:?} is in r{r} of {:?}", body.own));
+        }
+    }
+    for (p, r) in d.params.iter().zip(2..=u8::MAX) {
+        if reg(*p) != Some(r) {
+            return Some(format!("{p:?} is in {:?} and arrives in r{r}", reg(*p)));
         }
         let first = state.as_mut().expect("the start");
-        first.insert(u8::try_from(i).expect("few"), Holds::Value(*p));
+        first.insert(r, Holds::Value(*p));
     }
     for k in &d.carried {
         // A loop leaves what it carries in its register, so nothing else may
@@ -408,6 +417,7 @@ fn copy_of(d: &Draft) -> Draft {
         values: d.values,
         params: d.params.clone(),
         carried: d.carried.clone(),
+        closure: d.closure,
     }
 }
 
@@ -431,7 +441,7 @@ fn check(mut d: Draft, what: &str) -> Option<usize> {
     if let Some(wrong) = wrong_jump(&before, &body) {
         panic!("{what}: {wrong}");
     }
-    Some(body.needs.len())
+    Some(body.own.len())
 }
 
 /// Check every function of `program`.
@@ -744,7 +754,7 @@ fn random_function(seed: u64, steps: usize) -> Draft {
         lists.args.push(args.collect());
         lists.regs.push(carried.iter().copied().map(VReg).collect());
         m.ins.push(Ins::TailCallSelfKeep {
-            to: Callee(FuncIdx(0)),
+            to: OwnEntry,
             args: ArgList(0),
             keep: KeepList(0),
             own: OwnRoom,

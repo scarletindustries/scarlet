@@ -38,6 +38,7 @@ mod counts;
 mod eq;
 mod exec;
 mod float;
+mod frame;
 mod hash;
 mod heap;
 mod host;

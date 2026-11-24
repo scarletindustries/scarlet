@@ -28,11 +28,11 @@ use crate::value::{Float, SmallInt, Value};
 mod fields;
 
 pub(crate) use fields::{
-    Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, Dst, EntryPc, Hit, KeepList, Kept, Lists,
-    LookList, Looks, Names, Newline, Over, Part, Pc, Place, Places, Reg, Role, Room, ShareList,
-    Shared, Shares, Src, Taken, TextId, VReg, Variant, WhyId,
+    Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, Dst, EntryPc, Hit, KeepList, Kept, Last,
+    Lists, LookList, Looks, Names, Newline, Over, Part, Pc, Place, Places, Reg, Role, Room,
+    ShareList, Shared, Shares, Src, Taken, TextId, Unplaced, VReg, Variant, WhyId,
 };
-pub(super) use fields::{Callee, CalleeRoom, Label, OwnRoom};
+pub(super) use fields::{Callee, Label, LastReg, OwnEntry, OwnRoom};
 
 /// Declares [`Ins`] and everything that is one case for each of its kinds. An
 /// instruction is added here and in the interpreter's `match`, and nowhere
@@ -121,10 +121,9 @@ macro_rules! instructions {
         }
 
         impl Ins<VReg> {
-            /// The instruction with everything it names in its place, or
-            /// `None` when something it names has none.
-            pub(crate) fn place(&self, at: &impl Places) -> Option<Ins<Reg>> {
-                Some(match *self {
+            /// The instruction with everything it names in its place.
+            pub(crate) fn place(&self, at: &impl Places) -> Result<Ins<Reg>, Unplaced> {
+                Ok(match *self {
                     $(Ins::$name $({ $($field),* })? => {
                         Ins::$name $({ $($field: $field.place(at)?),* })?
                     })*
@@ -251,24 +250,34 @@ instructions! {
     /// When this is the last reference, the allocation stays in `reg` to be
     /// overwritten instead of freed.
     DropReuse { reg: Kept<R> },
-    /// A call to the function at `to`, which needs `needs` registers. `own`
-    /// is this frame's size, which is how far above it the callee's frame
-    /// starts.
-    Call { dst: Dst<R>, to: R::Entry, args: Args<R, 6>, needs: R::Needs, own: R::Own },
-    CallWide { dst: Dst<R>, to: R::Entry, args: ArgList, needs: R::Needs, own: R::Own },
-    TailCall { to: R::Entry, args: Args<R, 6>, needs: R::Needs, own: R::Own } => ends,
-    TailCallWide { to: R::Entry, args: ArgList, needs: R::Needs, own: R::Own } => ends,
-    /// A call to the function running now, as the same closure.
-    CallSelf { dst: Dst<R>, to: R::Entry, args: Args<R, 6>, own: R::Own },
-    CallSelfWide { dst: Dst<R>, to: R::Entry, args: ArgList, own: R::Own },
-    TailCallSelf { to: R::Entry, args: Args<R, 6>, own: R::Own } => ends,
-    TailCallSelfWide { to: R::Entry, args: ArgList, own: R::Own } => ends,
+    /// A call to the function at `to`. `own` is this frame's size, which is
+    /// how far above it the callee's frame starts. One with a number at its
+    /// end has that many arguments and takes each of them, so it has nothing to
+    /// share ([`Ins::taking`]).
+    Call0 { dst: Dst<R>, own: R::Own, to: R::Entry },
+    Call1 { dst: Dst<R>, own: R::Own, to: R::Entry, a: Taken<R> },
+    Call2 { dst: Dst<R>, own: R::Own, to: R::Entry, a: Taken<R>, b: Taken<R> },
+    Call3 { dst: Dst<R>, own: R::Own, to: R::Entry, a: Taken<R>, b: Taken<R>, c: Taken<R> },
+    /// The same, for a call that shares an argument.
+    Call1Share { dst: Dst<R>, own: R::Own, to: R::Entry, a: Arg<R> },
+    Call2Share { dst: Dst<R>, own: R::Own, to: R::Entry, a: Arg<R>, b: Arg<R> },
+    Call3Share { dst: Dst<R>, own: R::Own, to: R::Entry, a: Arg<R>, b: Arg<R>, c: Arg<R> },
+    Call { dst: Dst<R>, own: R::Own, to: R::Entry, args: Args<R, 6> },
+    CallWide { dst: Dst<R>, own: R::Own, to: R::Entry, args: ArgList },
+    TailCall { to: R::Entry, args: Args<R, 6>, own: R::Own } => ends,
+    TailCallWide { to: R::Entry, args: ArgList, own: R::Own } => ends,
+    /// A call to the function running now, as the same closure. One that keeps
+    /// no closure is called by name.
+    CallSelf { dst: Dst<R>, own: R::Own, to: R::OwnEntry, args: Args<R, 6> },
+    CallSelfWide { dst: Dst<R>, own: R::Own, to: R::OwnEntry, args: ArgList },
+    TailCallSelf { to: R::OwnEntry, args: Args<R, 6>, own: R::Own } => ends,
+    TailCallSelfWide { to: R::OwnEntry, args: ArgList, own: R::Own } => ends,
     /// [`Ins::TailCallSelf`], for a function whose loop carries cells kept
     /// for a constructor round it. The registers in `keep` stay as they are.
-    TailCallSelfKeep { to: R::Entry, args: ArgList, keep: KeepList, own: R::Own } => ends,
+    TailCallSelfKeep { to: R::OwnEntry, args: ArgList, keep: KeepList, own: R::Own } => ends,
     /// A call to the function value in `callee`, with or without captures.
-    CallValue { dst: Dst<R>, callee: Shared<R>, args: Args<R, 6>, own: R::Own },
-    CallValueWide { dst: Dst<R>, callee: Shared<R>, args: ArgList, own: R::Own },
+    CallValue { dst: Dst<R>, callee: Shared<R>, own: R::Own, args: Args<R, 6> },
+    CallValueWide { dst: Dst<R>, callee: Shared<R>, own: R::Own, args: ArgList },
     TailCallValue { callee: Shared<R>, args: Args<R, 6>, own: R::Own } => ends,
     TailCallValueWide { callee: Shared<R>, args: ArgList, own: R::Own } => ends,
     /// A new closure cell running `func` over `captures`. A function with no
@@ -280,8 +289,12 @@ instructions! {
     /// The closure running now, as a value. `this` is its function, for when
     /// it runs as a plain function, with no closure cell.
     GetSelf { dst: Dst<R>, this: FuncIdx },
-    /// `own` is this frame's size, every register of which is given up.
-    Ret { src: Taken<R>, own: R::Own } => ends,
+    /// The value in `src`, for the caller. The registers from the first
+    /// parameter to `last` are given up.
+    Ret { src: Taken<R>, last: R::Last } => ends,
+    /// [`Ins::Ret`], for a function that keeps the closure it runs as, which is
+    /// given up after the rest.
+    RetClosure { src: Taken<R>, last: R::Last } => ends,
     Jump { to: R::To } => ends,
     /// Continue at `to` when `cond` is `False`, else at the next instruction.
     JumpIfFalse { cond: Src<R>, to: R::To },
@@ -330,6 +343,9 @@ instructions! {
     Element { dst: Dst<R>, src: Src<R>, index: u16 },
     /// A call to a `@vm` built-in the VM runs ([`super::built`]).
     Builtin { dst: Dst<R>, intrinsic: Intrinsic, args: Looks<R, 3> },
+    /// How many frames there are. A tail call reuses its frame, so a million
+    /// of them still count one.
+    StackDepth { dst: Dst<R> },
     /// `a == b`, structurally ([`crate::eq`]).
     Equal { dst: Dst<R>, a: Src<R>, b: Src<R> },
     /// `a != b`.
@@ -382,6 +398,42 @@ instructions! {
 }
 
 const _: () = assert!(size_of::<Ins<Reg>>() == 16);
+
+impl<R: Names> Ins<R> {
+    /// The call that does the same as this one and has nothing in it to share
+    /// with, when this is a call of a few arguments and takes them all.
+    pub(super) fn taking(&self) -> Option<Ins<R>> {
+        let took = |a: Arg<R>| a.moved.then_some(Taken(a.reg));
+        if let Ins::Call1Share { dst, own, to, a } = *self {
+            let a = took(a)?;
+            return Some(Ins::Call1 { dst, own, to, a });
+        }
+        if let Ins::Call2Share { dst, own, to, a, b } = *self {
+            let (a, b) = (took(a)?, took(b)?);
+            return Some(Ins::Call2 { dst, own, to, a, b });
+        }
+        if let Ins::Call3Share {
+            dst,
+            own,
+            to,
+            a,
+            b,
+            c,
+        } = *self
+        {
+            let (a, b, c) = (took(a)?, took(b)?, took(c)?);
+            return Some(Ins::Call3 {
+                dst,
+                own,
+                to,
+                a,
+                b,
+                c,
+            });
+        }
+        None
+    }
+}
 
 // The operator instructions by family, each beside the operator it does. This
 // is the one list of them. `int_arith!(then)` hands the list to the macro

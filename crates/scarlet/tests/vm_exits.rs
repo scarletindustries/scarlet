@@ -105,6 +105,14 @@ pub fn main() {
     );
 }
 
+/// A recursion too deep for a stack is told so. No test can fill one, so this
+/// asks for the words alone, and the VM's own tests stop runs with it.
+#[test]
+fn a_full_stack_has_a_message() {
+    let says = scarlet::stop::message(&scarlet_vm::Stop::StackFull);
+    assert_eq!(says.as_deref(), Some("the program ran out of stack"));
+}
+
 /// A crash in a linked child kills main. The program fails promptly, even
 /// though main itself was blocked for ever and never misbehaved.
 #[test]

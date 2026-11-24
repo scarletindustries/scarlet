@@ -391,6 +391,7 @@ fn a_comparison_something_jumps_past_is_kept() {
         values: 3,
         kept: BTreeSet::new(),
         carried: BTreeSet::new(),
+        closure: ReadsClosure::Nothing,
         reads: HashMap::from([(LocalId(2), 1)]),
         numbers: HashMap::new(),
     };
@@ -562,6 +563,14 @@ fn a_call_that_cannot_be_right_stops_the_run() {
         why(&call(Callee::Self_, 0), None),
         Why::Broken(Broken::ToplevelCallsSelf)
     );
+    let load = |load| function(0, CoreExpr::Tail(Atom::Load(load)));
+    let capture = |i| load(Load::Capture(scarlet_ir::core_ir::CaptureIdx(i)));
+    let toplevel = Why::Broken(Broken::ToplevelCapture);
+    assert_eq!(why(&capture(0), None), toplevel);
+    let negative = Why::Broken(Broken::NegativeCapture);
+    assert_eq!(why(&capture(-1), Some(main)), negative);
+    let itself = Why::Broken(Broken::ToplevelSelf);
+    assert_eq!(why(&load(Load::SelfClosure), None), itself);
     let wild = function(0, CoreExpr::Goto(JoinId(3)));
     assert_eq!(why(&wild, Some(main)), Why::Broken(Broken::UndeclaredCase));
     // A case is gone once its own code has been reached.
@@ -595,4 +604,100 @@ fn a_built_in_with_the_wrong_arguments_is_missing() {
     assert_eq!(call(Intrinsic::MapSize, 9), missing(Intrinsic::MapSize));
     let subjects = Intrinsic::InternalLiveSubjects;
     assert_eq!(call(subjects, 0), missing(subjects));
+}
+
+/// A function that reads its captures, or itself, keeps the closure it runs as:
+/// it gives the closure up when it returns, and passes it on when it calls
+/// itself. Any other is called by name from itself too, and has none to give
+/// up.
+#[test]
+fn a_function_keeps_the_closure_it_reads() {
+    let code = code(
+        "fn applied(f fn(Int) Int, n Int) Int { f(n) }\n\
+         fn plain(n Int) Int { if n == 0 { 0 } else { plain(n - 1) + 1 } }\n\
+         pub fn main() {\n\
+         \tkept = 7\n\
+         \treads = fn(n) { if n == 0 { kept } else { reads(n - 1) + 1 } }\n\
+         \treads_not = fn(n) { if n == 0 { 0 } else { reads_not(n - 1) + 1 } }\n\
+         \titself = fn(n) { if n == 0 { 0 } else { applied(itself, n - 1) + itself(0) } }\n\
+         \tprintln(plain(reads(3) + reads_not(4) + itself(2)))\n\
+         }\n",
+    );
+    let mut seen = Vec::new();
+    for e in entries(&code) {
+        let ops: Vec<Op> = body(&code, e).iter().map(Ins::op).collect();
+        let has = |of: &[Op]| ops.iter().any(|op| of.contains(op));
+        let reads = match (has(&[Op::GetCapture]), has(&[Op::GetSelf])) {
+            (true, _) => ReadsClosure::Captures,
+            (false, true) => ReadsClosure::Itself,
+            (false, false) => ReadsClosure::Nothing,
+        };
+        assert_eq!(e.closure, reads, "{}", e.name);
+        let keeps = reads != ReadsClosure::Nothing;
+        assert_eq!(reads.keeps(), keeps);
+        assert_eq!(has(&[Op::RetClosure]), keeps, "{}", e.name);
+        assert!(!(keeps && has(&[Op::Ret])), "{}", e.name);
+        if has(&[Op::CallSelf, Op::Call1]) && !e.name.ends_with(".main") {
+            seen.push((keeps, has(&[Op::CallSelf]), has(&[Op::Call1])));
+        }
+    }
+    seen.sort_unstable();
+    let by_name = (false, false, true);
+    let as_itself = (true, true, false);
+    assert_eq!(seen, [by_name, by_name, as_itself, as_itself]);
+}
+
+/// A call by name of up to three arguments has an instruction of its own, and
+/// another when it shares one of them. The same argument twice is shared once.
+#[test]
+fn a_call_is_the_one_for_its_arguments() {
+    let code = code(
+        "fn f0() Int { 1 }\n\
+         fn f1(a Int) Int { a }\n\
+         fn f2(a Int, b Int) Int { a + b }\n\
+         fn f3(a Int, b Int, c Int) Int { a + b + c }\n\
+         fn f4(a Int, b Int, c Int, d Int) Int { a + b + c + d }\n\
+         fn f7(a Int, b Int, c Int, d Int, e Int, f Int, g Int) Int {\n\
+         \ta + b + c + d + e + f + g\n\
+         }\n\
+         fn take0() Int { f0() + 1 }\n\
+         fn take1(a Int) Int { f1(a) + 1 }\n\
+         fn take2(a Int, b Int) Int { f2(a, b) + 1 }\n\
+         fn take3(a Int, b Int, c Int) Int { f3(a, b, c) + 1 }\n\
+         fn take4(a Int, b Int, c Int, d Int) Int { f4(a, b, c, d) + 1 }\n\
+         fn take7(a Int) Int { f7(1, 2, 3, 4, 5, 6, a) + 1 }\n\
+         fn share1(a Int) Int { f1(a) + a }\n\
+         fn share2(a Int, b Int) Int { f2(a, b) + b }\n\
+         fn share3(a Int, b Int, c Int) Int { f3(a, b, c) + a }\n\
+         fn twice(a Int) Int { f2(a, a) + 1 }\n\
+         pub fn main() {\n\
+         \tprintln(take0() + take1(1) + take2(1, 2) + take3(1, 2, 3) + take4(1, 2, 3, 4))\n\
+         \tprintln(take7(7) + share1(1) + share2(1, 2) + share3(1, 2, 3) + twice(1))\n\
+         }\n",
+    );
+    let first = |name: &str| -> (String, Vec<Role>) {
+        let ins = body(&code, named(&code, name));
+        let call = ins.iter().find(|i| i.op().name().starts_with("Call"));
+        let call = call.expect("a call");
+        let mut roles = Vec::new();
+        call.operands(&code.lists, &mut |_, role| roles.push(role));
+        (call.op().name().to_string(), roles[1..].to_vec())
+    };
+    let (share, pass) = (Role::Pass { moved: false }, Role::Pass { moved: true });
+    let calls = [
+        ("take0", "Call0", vec![]),
+        ("take1", "Call1", vec![Role::Take]),
+        ("take2", "Call2", vec![Role::Take; 2]),
+        ("take3", "Call3", vec![Role::Take; 3]),
+        ("take4", "Call", vec![pass; 4]),
+        ("take7", "CallWide", vec![pass; 7]),
+        ("share1", "Call1Share", vec![share]),
+        ("share2", "Call2Share", vec![pass, share]),
+        ("share3", "Call3Share", vec![share, pass, pass]),
+        ("twice", "Call2Share", vec![share, pass]),
+    ];
+    for (name, op, roles) in calls {
+        let want = (op.to_string(), roles);
+        assert_eq!(first(&format!(".{name}")), want, "{name}");
+    }
 }

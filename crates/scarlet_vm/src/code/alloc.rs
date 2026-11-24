@@ -1,8 +1,8 @@
 //! Which register each value has.
 //!
 //! Two values share a register whenever neither is written while the other is
-//! held. Every frame clears its registers when it returns and every loop when
-//! it goes round, so fewer of them is less work at each.
+//! held. A frame gives up what its registers hold when it returns, and a loop
+//! when it goes round, so fewer of them is less work at each.
 //!
 //! Sharing a register changes when a value is released, never whether: the
 //! value a register held is released when the next one is written over it,
@@ -12,8 +12,9 @@
 use super::ins::{Ins, Lists, VReg};
 use super::live::Held;
 use super::translate::Draft;
-use super::{MAX_REGS, Reg, Room, Unfit, WhyId};
-use crate::stop::Limit;
+use super::{ReadsClosure, Reg, Room, Unfit, WhyId};
+use crate::frame::{CLOSURE, FIRST, LINK, WINDOW};
+use crate::stop::{Broken, Limit, Stop};
 
 /// A function whose values have registers.
 pub(super) struct Body {
@@ -23,8 +24,10 @@ pub(super) struct Body {
     pub(super) labels: Vec<usize>,
     /// The register of each value, by its number, when it has one.
     pub(super) regs: Vec<Option<Reg>>,
-    /// How many registers there are.
-    pub(super) needs: Room,
+    /// How many registers its frame has.
+    pub(super) own: Room,
+    /// What it reads of the closure it runs as.
+    pub(super) closure: ReadsClosure,
 }
 
 /// A function ready to be given its place among the others.
@@ -48,43 +51,54 @@ impl Fitted {
             lists: Lists::default(),
             labels: Vec::new(),
             regs: Vec::new(),
-            needs: room(params),
+            own: room(params.saturating_add(usize::from(FIRST.0))),
+            closure: ReadsClosure::Nothing,
         };
         Fitted { name, params, body }
     }
+
+    /// The stop for a call by name to this function, which needs a closure.
+    pub(super) fn called_by_name(&self) -> Stop {
+        let func = self.name.clone();
+        Stop::broken(Broken::CalledByName { func })
+    }
 }
 
-/// Room for `regs` registers, or for as many as a frame has.
-fn room(regs: usize) -> Room {
-    Room(u8::try_from(regs.min(MAX_REGS)).unwrap_or(u8::MAX))
+/// Room for the registers before `end`, or for as many as a frame has.
+fn room(end: usize) -> Room {
+    Room(u16::try_from(end.min(WINDOW)).unwrap_or(u16::MAX))
 }
 
 /// Give each value of `draft` a register, and take out the instructions that
 /// then do nothing.
 ///
-/// A function's arguments arrive in its first registers, in order. A cell that
-/// a loop carries round stays in its register all the way, so no other value
-/// has that one. Each other value takes the lowest register none of the values
-/// it clashes with has.
+/// A function's arguments arrive in the registers from [`FIRST`] on, in order.
+/// A cell that a loop carries round stays in its register all the way, so no
+/// other value has that one. Each other value takes the lowest register none of
+/// the values it clashes with has.
 pub(super) fn allocate(draft: Draft, held: &Held) -> Result<Body, Unfit> {
     let values = draft.values as usize;
     let mut regs: Vec<Option<Reg>> = vec![None; values];
+    // No value is in the registers that a frame's link and closure have.
     let mut alone = RegSet::default();
-    let mut needs = draft.params.len();
+    alone.add(LINK);
+    alone.add(CLOSURE);
+    let mut end = usize::from(FIRST.0);
     let give = |regs: &mut Vec<Option<Reg>>, v: VReg, r: usize| {
-        let reg = u8::try_from(r).ok().filter(|_| r < MAX_REGS).map(Reg);
-        let reg = reg.ok_or(Unfit::TooMany(Limit::Values))?;
+        let reg = u8::try_from(r).map(Reg);
+        let reg = reg.map_err(|_| Unfit::TooMany(Limit::Values))?;
         if let Some(of) = regs.get_mut(v.0 as usize) {
             *of = Some(reg);
         }
         Ok::<Reg, Unfit>(reg)
     };
-    for (r, param) in draft.params.iter().enumerate() {
-        give(&mut regs, *param, r)?;
+    for param in &draft.params {
+        give(&mut regs, *param, end)?;
+        end = end.saturating_add(1);
     }
     for carried in &draft.carried {
-        alone.add(give(&mut regs, *carried, needs)?);
-        needs = needs.saturating_add(1);
+        alone.add(give(&mut regs, *carried, end)?);
+        end = end.saturating_add(1);
     }
     let clashes = Clashes::new(values, &held.clashes);
     for (v, named) in (0u32..).map(VReg).zip(&held.named) {
@@ -100,14 +114,15 @@ pub(super) fn allocate(draft: Draft, held: &Held) -> Result<Body, Unfit> {
         }
         let r = taken.lowest_free();
         give(&mut regs, v, r)?;
-        needs = needs.max(r.saturating_add(1));
+        end = end.max(r.saturating_add(1));
     }
     let mut body = Body {
         ins: draft.ins,
         lists: draft.lists,
         labels: draft.labels,
         regs,
-        needs: room(needs),
+        own: room(end),
+        closure: draft.closure,
     };
     tidy(&mut body, &held.unread);
     Ok(body)

@@ -1,7 +1,10 @@
 use super::*;
 use crate::OsHost;
 use crate::bigint;
-use crate::code::{BinaryId, EntryPc, Lists, Pc, Shares, TextId, Why, WhyId};
+use crate::code::{
+    BinaryId, EntryPc, Hit, Kept, Lists, Pc, ReadsClosure, Shares, Taken, TextId, Why, WhyId,
+};
+use crate::frame::FIRST;
 use crate::heap::{AuditFault, Cell, Fault};
 use crate::value::{Float, SmallInt};
 use num_bigint::BigInt;
@@ -14,17 +17,14 @@ use scarlet_ir::tivec::TiVec;
 /// move them.
 #[test]
 fn the_heap_is_behind_the_fields_the_loop_reads() {
-    let stack = std::mem::offset_of!(Machine<'_, '_>, stack);
-    let frames = std::mem::offset_of!(Machine<'_, '_>, frames);
-    let passing = std::mem::offset_of!(Machine<'_, '_>, passing);
-    let rest = std::mem::offset_of!(Machine<'_, '_>, rest);
-    assert!(stack < frames && frames < passing && passing < rest);
-    assert!(rest < 256, "{rest}");
-    let heap = rest + std::mem::offset_of!(Rest<'_, '_>, heap);
-    assert!(
-        heap + size_of::<Heap>() == size_of::<Machine<'_, '_>>(),
-        "{heap}"
-    );
+    let heap = std::mem::offset_of!(Rest<'_, '_>, heap);
+    assert!(heap < 256, "{heap}");
+    assert_eq!(heap + size_of::<Heap>(), size_of::<Rest<'_, '_>>());
+}
+
+/// Whether none of `stack` is a cell, as when every frame on it has ended.
+fn no_cell_on(stack: &[Value]) -> bool {
+    stack.iter().all(|v| v.as_cell().is_none())
 }
 
 /// Run `src`, then release everything a finished run still holds, which
@@ -47,10 +47,7 @@ fn cells_left_after_in(
     let mut m = Machine::new(&code, &mut host);
     let ended = m.run().expect("the program runs");
     m.let_go(ended).expect("every count is right");
-    assert!(
-        m.frames.is_empty() && m.stack.iter().all(|v| v.bits() == Value::NIL.bits()),
-        "a frame's registers outlived it"
-    );
+    assert!(no_cell_on(&m.stack), "a frame's registers outlived it");
     let left = m.rest.heap.live();
     drop(m);
     let out = std::mem::take(host.out());
@@ -584,8 +581,8 @@ fn an_audit_finds_cells_that_hold_each_other() {
     });
 }
 
-/// A run's roots are its registers, its globals, `os.env`'s map and the
-/// closure each frame runs as. With any one of them left out, the cell it
+/// A run's roots are its registers, what is on its way between two, its
+/// globals and `os.env`'s map. With any one of them left out, the cell it
 /// holds would look as if its count were too high.
 #[test]
 fn an_audit_is_told_of_every_reference_a_run_holds() {
@@ -593,7 +590,7 @@ fn an_audit_is_told_of_every_reference_a_run_holds() {
         let cells: Vec<Cell> = (0..6)
             .map(|_| m.rest.heap.tuple(&[Value::NIL]).expect("room"))
             .collect();
-        let [reg, passed, global, env, running, waiting] = cells[..] else {
+        let [closure, reg, above, passed, global, env] = cells[..] else {
             panic!("six cells");
         };
         let miscounted = |cell| {
@@ -603,26 +600,25 @@ fn an_audit_is_told_of_every_reference_a_run_holds() {
                 holders: 0,
             })))
         };
-        assert_eq!(m.audit(Value::NIL), miscounted(reg));
-        m.open(1);
-        m.stack[0] = Value::cell(reg);
-        assert_eq!(m.audit(Value::NIL), miscounted(passed));
-        m.passing.push(Value::cell(passed));
-        assert_eq!(m.audit(Value::NIL), miscounted(global));
-        m.rest.globals.push(Value::cell(global));
-        assert_eq!(m.audit(Value::NIL), miscounted(env));
-        m.rest.env = Some(env);
-        for (cell, next) in [(running, miscounted(waiting)), (waiting, Ok(()))] {
-            assert_eq!(m.audit(Value::NIL), miscounted(cell));
-            assert_eq!(m.audit(Value::cell(cell)), next, "as the result");
-            m.open_frame(Frame {
-                pc: 0,
-                below: Room(0),
-                dst: Reg(0),
-                env: Value::cell(cell),
-            });
-            assert_eq!(m.audit(Value::NIL), next, "as a frame's closure");
+        let audit = |m: &Machine<'_, '_>, last| check(&m.stack, &m.rest, last);
+        let last = m.stack.len() - 1;
+        let held = [(1, closure, reg), (2, reg, above), (last, above, passed)];
+        for (at, cell, next) in held {
+            assert_eq!(audit(m, Value::NIL), miscounted(cell));
+            assert_eq!(
+                audit(m, Value::cell(cell)),
+                miscounted(next),
+                "as the result"
+            );
+            m.stack[at] = Value::cell(cell);
+            assert_eq!(audit(m, Value::NIL), miscounted(next), "in register {at}");
         }
+        m.rest.passing.push(Value::cell(passed));
+        assert_eq!(audit(m, Value::NIL), miscounted(global));
+        m.rest.globals.push(Value::cell(global));
+        assert_eq!(audit(m, Value::NIL), miscounted(env));
+        m.rest.env = Some(env);
+        assert_eq!(audit(m, Value::NIL), Ok(()));
     });
 }
 
@@ -671,41 +667,51 @@ fn a_share_of_a_freed_cell_stops_the_instruction() {
         heap.release(cell).expect("a live cell");
         Some(Value::cell(cell))
     };
-    let one = || Args::new(&[Reg(0)]).expect("room for one");
-    let held = || Shares::new(&[Reg(0)]).expect("room for one");
+    let one = || Args::new(&[r(0)]).expect("room for one");
+    let held = || Shares::new(&[r(0)]).expect("room for one");
     let shares = [
         mv(1, 0, false),
         Ins::Tuple {
-            dst: Dst(Reg(1)),
+            dst: Dst(r(1)),
             elements: held(),
         },
         array_of(1, &[0]),
         Ins::SetGlobal {
             slot: GlobalSlot(0),
-            src: Shared(Reg(0)),
+            src: Shared(r(0)),
         },
         Ins::Ctor {
-            dst: Dst(Reg(1)),
+            dst: Dst(r(1)),
             variant: Variant::new(SOME_VARIANT),
-            fields: Args::new(&[Reg(0)]).expect("room for one"),
+            fields: Args::new(&[r(0)]).expect("room for one"),
         },
         Ins::Call {
-            dst: Dst(Reg(1)),
+            dst: Dst(r(1)),
+            own: Room(4),
             to: EntryPc(START),
             args: one(),
-            needs: Room(2),
-            own: Room(2),
+        },
+        Ins::Call1Share {
+            dst: Dst(r(1)),
+            own: Room(4),
+            to: EntryPc(START),
+            a: Arg::shared(r(0)),
+        },
+        Ins::CallWide {
+            dst: Dst(r(1)),
+            own: Room(4),
+            to: EntryPc(START),
+            args: crate::code::ArgList(2),
         },
         Ins::TailCall {
             to: EntryPc(START),
             args: one(),
-            needs: Room(2),
-            own: Room(2),
+            own: Room(4),
         },
         Ins::TailCallSelf {
             to: EntryPc(START),
             args: one(),
-            own: Room(2),
+            own: Room(4),
         },
     ];
     for share in shares {
@@ -716,9 +722,11 @@ fn a_share_of_a_freed_cell_stops_the_instruction() {
                 "{what}"
             );
             assert_eq!(m.rest.heap.live(), 0, "{what}");
-            let written = m.stack.iter().skip(1).chain(&m.rest.globals);
-            let all_nil = written.copied().all(|v| v.bits() == Value::NIL.bits());
-            assert!(all_nil, "{what} wrote the freed cell somewhere");
+            let given = usize::from(r(0).0);
+            let (below, above) = m.stack.split_at(given);
+            let written = no_cell_on(below) && no_cell_on(&above[1..]);
+            assert!(written, "{what} wrote the freed cell somewhere");
+            assert!(no_cell_on(&m.rest.globals), "{what} wrote the freed cell");
         });
     }
 }
@@ -728,7 +736,7 @@ fn a_share_of_a_freed_cell_stops_the_instruction() {
 #[test]
 fn a_big_int_constant_is_made_once() {
     let big = |dst| Ins::BigInt {
-        dst: Dst(Reg(dst)),
+        dst: Dst(r(dst)),
         n: i64::MAX,
         id: scarlet_ir::core_ir::ConstId(3),
     };
@@ -754,13 +762,26 @@ fn a_register_holding_a_freed_cell_stops_the_instruction_that_gives_it_up() {
         let cell = held_by_a_global(m);
         m.rest.heap.release(cell).expect("the global's reference");
         let stale = Value::cell(cell);
-        m.open(1);
-        m.stack[0] = stale;
-        assert_eq!(m.set(0, Reg(0), Value::NIL), Err(DeadCell));
-        m.stack[0] = stale;
-        assert_eq!(m.leave(0, Room(1)), Err(DeadCell));
+        let mut win = window(&mut m.stack, 0).expect("a window");
+        let heap = &mut m.rest.heap;
+        win.run_as(stale);
+        assert_eq!(win.set(heap, CLOSURE, Value::NIL), Err(DeadCell));
+        win.receive(&[stale]);
+        assert_eq!(win.set(heap, r(0), Value::NIL), Err(DeadCell));
+        win.receive(&[stale]);
+        assert_eq!(win.leave(heap, Room(3).last()), Err(DeadCell));
+        win.receive(&[stale]);
+        assert_eq!(win.rewrite(heap, Room(3), &[]), Err(DeadCell));
+        win.receive(&[stale]);
+        assert_eq!(win.rewrite(heap, Room(3), &[Value::NIL]), Err(DeadCell));
         assert_eq!(Stop::from(DeadCell), Stop::broken(Broken::DeadCell));
     });
+}
+
+/// The register a test calls `r<n>`, which is the one for value `n` of a
+/// function that takes its arguments in `r0` and up.
+fn r(n: u8) -> Reg {
+    Reg(FIRST.0 + n)
 }
 
 /// Where the functions these tests run start: past the `Halt`.
@@ -777,32 +798,48 @@ const SOME_VARIANT: VariantRef = VariantRef {
     variant_idx: 1,
 };
 
-/// A program of one function of `params` parameters and `needs` registers. It
-/// lives as long as the tests do, so that any machine may run it.
-fn function(params: usize, needs: u8, body: Vec<Ins<Reg>>) -> &'static Code {
+/// A program of one function of `params` parameters that holds `values` values
+/// and keeps the closure it runs as. It lives as long as the tests do, so that
+/// any machine may run it.
+fn function(params: usize, values: u16, body: Vec<Ins<Reg>>) -> &'static Code {
+    function_that(ReadsClosure::Captures, params, values, body)
+}
+
+/// [`function`], of a function that reads `reads` of its closure.
+fn function_that(
+    reads: ReadsClosure,
+    params: usize,
+    values: u16,
+    body: Vec<Ins<Reg>>,
+) -> &'static Code {
     let result = scarlet_core::compile::compile_text("pub fn main() {\n\tNil\n}\n", None);
     assert!(result.success(), "{:?}", result.diagnostics());
     let program = result.into_runnable().expect("a clean compile is runnable");
-    let halt = Ins::Halt { src: Taken(Reg(0)) };
+    let halt = Ins::Halt { src: Taken(RESULT) };
     let ins: Vec<_> = std::iter::once(halt).chain(body).collect();
     let entry = || Entry {
         name: "test.function".to_string(),
         pc: EntryPc(START),
         end: Pc(u32::try_from(ins.len()).expect("a short function")),
         params,
-        needs: Room(needs),
+        own: Room(values + 2),
+        closure: reads,
     };
     let funcs = std::iter::once(entry()).collect();
     let toplevels = vec![entry()];
     let wide = vec![Arg {
-        reg: Reg(0),
+        reg: r(0),
         moved: true,
     }];
     Box::leak(Box::new(Code {
         ins,
         lists: Lists {
             regs: Vec::new(),
-            args: vec![wide.into_boxed_slice()],
+            args: vec![
+                wide.into_boxed_slice(),
+                Box::new([]),
+                Box::new([Arg::shared(r(0))]),
+            ],
         },
         texts: vec![Box::from(*b"new")],
         binaries: Vec::new(),
@@ -817,27 +854,27 @@ fn function(params: usize, needs: u8, body: Vec<Ins<Reg>>) -> &'static Code {
     }))
 }
 
-/// Run `body` as a function of `needs` registers that takes nothing,
+/// Run `body` as a function that holds `values` values and takes nothing,
 /// and hand the machine and what the call gave to `check`.
 fn after(
-    needs: u8,
+    values: u16,
     body: Vec<Ins<Reg>>,
     check: impl FnOnce(&mut Machine<'_, '_>, Result<Value, Stop>),
 ) {
-    after_given(needs, body, |_| None, check);
+    after_given(values, body, |_| None, check);
 }
 
 /// [`after`], for a function that takes in `r0` what `given` makes in the
 /// machine's heap, when it makes something. The machine has one global, which
 /// holds `Nil`.
 fn after_given(
-    needs: u8,
+    values: u16,
     body: Vec<Ins<Reg>>,
     given: impl FnOnce(&mut Heap) -> Option<Value>,
     check: impl FnOnce(&mut Machine<'_, '_>, Result<Value, Stop>),
 ) {
     let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
-    let code = function(1, needs, body);
+    let code = function(1, values, body);
     let mut m = Machine::new(code, &mut host);
     let args: Vec<Value> = given(&mut m.rest.heap).into_iter().collect();
     let got = m.call(&code.toplevels[0], &args);
@@ -846,7 +883,7 @@ fn after_given(
 
 fn constant(dst: u8, value: Value) -> Ins<Reg> {
     Ins::Const {
-        dst: Dst(Reg(dst)),
+        dst: Dst(r(dst)),
         value,
     }
 }
@@ -857,37 +894,34 @@ fn int(dst: u8, n: i64) -> Ins<Reg> {
 
 fn ret(src: u8) -> Ins<Reg> {
     Ins::Ret {
-        src: Taken(Reg(src)),
-        own: Room(5),
+        src: Taken(r(src)),
+        last: Room(7).last(),
     }
 }
 
-fn drop_of(r: u8) -> Ins<Reg> {
-    Ins::Drop { reg: Dead(Reg(r)) }
+fn drop_of(n: u8) -> Ins<Reg> {
+    Ins::Drop { reg: Dead(r(n)) }
 }
 
 fn mv(dst: u8, src: u8, moved: bool) -> Ins<Reg> {
     Ins::Move {
-        dst: Dst(Reg(dst)),
-        src: Arg {
-            reg: Reg(src),
-            moved,
-        },
+        dst: Dst(r(dst)),
+        src: Arg { reg: r(src), moved },
     }
 }
 
 fn array_of(dst: u8, elements: &[u8]) -> Ins<Reg> {
-    let elements: Vec<Reg> = elements.iter().copied().map(Reg).collect();
+    let elements: Vec<Reg> = elements.iter().copied().map(r).collect();
     Ins::Array {
-        dst: Dst(Reg(dst)),
+        dst: Dst(r(dst)),
         elements: Shares::new(&elements).expect("a few elements"),
     }
 }
 
 fn len_of(dst: u8, src: u8) -> Ins<Reg> {
     Ins::ArrayLen {
-        dst: Dst(Reg(dst)),
-        src: Src(Reg(src)),
+        dst: Dst(r(dst)),
+        src: Src(r(src)),
     }
 }
 
@@ -902,8 +936,7 @@ fn the_only_cell_left(m: &mut Machine<'_, '_>, got: Result<Value, Stop>) {
     let v = got.expect("the function returns");
     let cell = v.as_cell().expect("an array");
     assert_eq!(m.rest.heap.unique(cell), Ok(true));
-    assert!(m.stack.iter().all(|v| v.bits() == Value::NIL.bits()));
-    assert!(m.frames.is_empty());
+    assert!(no_cell_on(&m.stack));
     assert_eq!(m.rest.release(v), Ok(()));
     assert_eq!(m.rest.heap.live(), 0);
 }
@@ -918,12 +951,12 @@ fn a_move_that_takes_leaves_one_holder_and_one_that_shares_leaves_two() {
         ins.extend([
             mv(2, 1, moved),
             Ins::ArrayAppend {
-                dst: Dst(Reg(3)),
+                dst: Dst(r(3)),
                 rest: Arg {
-                    reg: Reg(2),
+                    reg: r(2),
                     moved: true,
                 },
-                back: Shares::new(&[Reg(0)]).expect("room for one"),
+                back: Shares::new(&[r(0)]).expect("room for one"),
             },
             ret(3),
         ]);
@@ -992,15 +1025,15 @@ fn a_move_onto_its_own_register_keeps_the_value() {
 /// that does not match.
 #[test]
 fn a_constant_that_is_not_there_stops_the_run() {
-    let (src, to) = (Src(Reg(0)), Pc(START));
+    let (src, to) = (Src(r(0)), Pc(START));
     let (text, bits) = (TextId(1), BinaryId(0));
     let named = [
         Ins::Str {
-            dst: Dst(Reg(0)),
+            dst: Dst(r(0)),
             text,
         },
         Ins::BinaryConst {
-            dst: Dst(Reg(0)),
+            dst: Dst(r(0)),
             bits,
         },
         Ins::JumpUnlessStr { src, text, to },
@@ -1020,16 +1053,16 @@ fn a_constant_that_is_not_there_stops_the_run() {
 fn a_constructor_takes_a_kept_cell_that_fits() {
     let variant = Variant::new(SOME_VARIANT);
     let few = Ins::CtorOver {
-        dst: Dst(Reg(1)),
+        dst: Dst(r(1)),
         variant,
-        fields: Args::new(&[Reg(2)]).expect("room for one"),
-        reuse: Over(Reg(0)),
+        fields: Args::new(&[r(2)]).expect("room for one"),
+        reuse: Over(r(0)),
     };
     let wide = Ins::CtorOverWide {
-        dst: Dst(Reg(1)),
+        dst: Dst(r(1)),
         variant,
         fields: crate::code::ArgList(0),
-        reuse: Over(Reg(3)),
+        reuse: Over(r(3)),
     };
     let holding = |fields: usize| {
         move |heap: &mut Heap| {
@@ -1038,14 +1071,14 @@ fn a_constructor_takes_a_kept_cell_that_fits() {
         }
     };
     for (fields, reused) in [(1, 1), (2, 0)] {
-        let keep = Ins::DropReuse { reg: Kept(Reg(0)) };
+        let keep = Ins::DropReuse { reg: Kept(r(0)) };
         let body = vec![int(2, 7), keep, few, Ins::Audit, ret(1)];
         after_given(5, body, holding(fields), |m, got| {
             assert_eq!(m.rest.heap.reused(), reused, "{fields} fields");
             the_only_cell_left(m, got);
         });
         // The list names `r0`, so the kept cell is moved out of the way.
-        let keep = Ins::DropReuse { reg: Kept(Reg(3)) };
+        let keep = Ins::DropReuse { reg: Kept(r(3)) };
         let body = vec![mv(3, 0, true), int(0, 7), keep, wide, Ins::Audit, ret(1)];
         after_given(5, body, holding(fields), |m, got| {
             assert_eq!(m.rest.heap.reused(), reused, "{fields} fields");
@@ -1060,16 +1093,16 @@ fn a_constructor_takes_a_kept_cell_that_fits() {
 #[test]
 fn a_call_with_its_arguments_in_a_list_passes_them() {
     let list = crate::code::ArgList(0);
-    let (to, own) = (EntryPc(START), Room(5));
+    let (to, own) = (EntryPc(START), Room(7));
     // A first run has `Nil` in `r1`, and a second has been told apart by the
     // global it finds set.
     let first = [
         Ins::GetGlobal {
-            dst: Dst(Reg(1)),
+            dst: Dst(r(1)),
             slot: GlobalSlot(0),
         },
         Ins::JumpUnlessInt {
-            src: Src(Reg(1)),
+            src: Src(r(1)),
             n: 1,
             to: pc(3),
         },
@@ -1077,19 +1110,18 @@ fn a_call_with_its_arguments_in_a_list_passes_them() {
         int(1, 1),
         Ins::SetGlobal {
             slot: GlobalSlot(0),
-            src: Shared(Reg(1)),
+            src: Shared(r(1)),
         },
     ];
     let calls = [
         Ins::CallWide {
-            dst: Dst(Reg(2)),
+            dst: Dst(r(2)),
             to,
             args: list,
-            needs: own,
             own,
         },
         Ins::CallSelfWide {
-            dst: Dst(Reg(2)),
+            dst: Dst(r(2)),
             to,
             args: list,
             own,
@@ -1097,7 +1129,6 @@ fn a_call_with_its_arguments_in_a_list_passes_them() {
         Ins::TailCallWide {
             to,
             args: list,
-            needs: own,
             own,
         },
         Ins::TailCallSelfWide {
@@ -1124,8 +1155,8 @@ fn a_call_with_its_arguments_in_a_list_passes_them() {
 /// or takes another number of arguments stops and says so.
 #[test]
 fn a_call_of_a_value_that_cannot_be_called_so_stops() {
-    let (dst, callee, own) = (Dst(Reg(2)), Shared(Reg(1)), Room(5));
-    let args = |n: u8| Args::new(&vec![Reg(0); usize::from(n)]).expect("a few");
+    let (dst, callee, own) = (Dst(r(2)), Shared(r(1)), Room(7));
+    let args = |n: u8| Args::new(&vec![r(0); usize::from(n)]).expect("a few");
     let call = |f: Value, n: u8| {
         let calls = [
             Ins::CallValue {
@@ -1172,24 +1203,15 @@ fn a_call_of_a_value_that_cannot_be_called_so_stops() {
 /// one to the same function goes on as it.
 #[test]
 fn a_tail_call_by_name_gives_up_the_closure() {
-    let (to, own) = (EntryPc(START), Room(5));
+    let (to, own) = (EntryPc(START), Room(7));
     let args = Args::new(&[]).expect("none");
     let list = crate::code::ArgList(1);
     let calls = [
-        (
-            Ins::TailCall {
-                to,
-                args,
-                needs: own,
-                own,
-            },
-            false,
-        ),
+        (Ins::TailCall { to, args, own }, false),
         (
             Ins::TailCallWide {
                 to,
                 args: list,
-                needs: own,
                 own,
             },
             false,
@@ -1207,23 +1229,26 @@ fn a_tail_call_by_name_gives_up_the_closure() {
     for (call, keeps) in calls {
         let body = vec![
             Ins::GetGlobal {
-                dst: Dst(Reg(1)),
+                dst: Dst(r(1)),
                 slot: GlobalSlot(0),
             },
             Ins::JumpUnlessInt {
-                src: Src(Reg(1)),
+                src: Src(r(1)),
                 n: 1,
                 to: pc(4),
             },
             Ins::GetSelf {
-                dst: Dst(Reg(2)),
+                dst: Dst(r(2)),
                 this: FuncIdx(0),
             },
-            ret(2),
+            Ins::RetClosure {
+                src: Taken(r(2)),
+                last: Room(7).last(),
+            },
             int(1, 1),
             Ins::SetGlobal {
                 slot: GlobalSlot(0),
-                src: Shared(Reg(1)),
+                src: Shared(r(1)),
             },
             call,
         ];
@@ -1232,14 +1257,10 @@ fn a_tail_call_by_name_gives_up_the_closure() {
         let mut m = Machine::new(code, &mut host);
         let captured = [Value::NIL];
         let closure = m.rest.heap.closure(FuncIdx(0), &captured).expect("room");
-        m.open(5);
-        m.open_frame(Frame {
-            pc: 0,
-            below: Room(0),
-            dst: Reg(0),
-            env: Value::cell(closure),
-        });
-        let v = m.steps(START as usize).expect("it returns");
+        let at = started(&mut m, Link::new(0, Room(0), Dst(RESULT)));
+        let mut win = window(&mut m.stack, 0).expect("a window");
+        win.run_as(Value::cell(closure));
+        let v = m.go_on(at).expect("it returns");
         assert_eq!(v.as_cell(), keeps.then_some(closure), "{call:?}");
         assert_eq!(m.rest.heap.live(), usize::from(keeps), "{call:?}");
         assert_eq!(m.rest.release(v), Ok(()));
@@ -1247,13 +1268,13 @@ fn a_tail_call_by_name_gives_up_the_closure() {
     }
 }
 
-/// A tail call leaves nothing in the frame's registers but what it passes: a
-/// register the function wrote before it reads as `Nil` after.
+/// A tail call leaves no cell in the frame's registers but those it passes: a
+/// register the function put one in before it reads as `Nil` after.
 #[test]
 fn a_tail_call_empties_the_registers_it_does_not_pass() {
-    let (to, own) = (EntryPc(START), Room(5));
+    let (to, own) = (EntryPc(START), Room(7));
     let none = || Args::new(&[]).expect("none");
-    let one = || Args::new(&[Reg(0)]).expect("room for one");
+    let one = || Args::new(&[r(0)]).expect("room for one");
     let calls = [
         Ins::TailCallSelf {
             to,
@@ -1268,7 +1289,6 @@ fn a_tail_call_empties_the_registers_it_does_not_pass() {
         Ins::TailCall {
             to,
             args: one(),
-            needs: own,
             own,
         },
         Ins::TailCallSelfWide {
@@ -1280,11 +1300,11 @@ fn a_tail_call_empties_the_registers_it_does_not_pass() {
     for call in calls {
         let body = vec![
             Ins::GetGlobal {
-                dst: Dst(Reg(1)),
+                dst: Dst(r(1)),
                 slot: GlobalSlot(0),
             },
             Ins::JumpUnlessInt {
-                src: Src(Reg(1)),
+                src: Src(r(1)),
                 n: 1,
                 to: pc(3),
             },
@@ -1292,14 +1312,18 @@ fn a_tail_call_empties_the_registers_it_does_not_pass() {
             int(1, 1),
             Ins::SetGlobal {
                 slot: GlobalSlot(0),
-                src: Shared(Reg(1)),
+                src: Shared(r(1)),
             },
-            int(4, 9),
+            Ins::Str {
+                dst: Dst(r(4)),
+                text: TextId(0),
+            },
             call,
         ];
         after(5, body, |m, got| {
             assert_eq!(got.map(|v| v.bits()), Ok(Value::NIL.bits()), "{call:?}");
-            assert!(m.stack.iter().all(|v| v.bits() == Value::NIL.bits()));
+            assert!(no_cell_on(&m.stack));
+            assert_eq!(m.rest.heap.live(), 0);
         });
     }
 }
@@ -1314,7 +1338,7 @@ fn a_write(index: i64, moved: bool, value_moved: bool, after_miss: u8) -> Vec<In
         int(2, 7),
         int(3, index),
         Ins::Str {
-            dst: Dst(Reg(4)),
+            dst: Dst(r(4)),
             text: TextId(0),
         },
         write(3, 4, moved, value_moved, 7),
@@ -1328,11 +1352,11 @@ fn a_write(index: i64, moved: bool, value_moved: bool, after_miss: u8) -> Vec<In
 /// `index`, or the run continues at `miss`.
 fn write(index: u8, value: u8, moved: bool, value_moved: bool, miss: u32) -> Ins<Reg> {
     Ins::ArraySet {
-        dst: Hit(Reg(2)),
-        src: Arg { reg: Reg(1), moved },
-        index: Src(Reg(index)),
+        dst: Hit(r(2)),
+        src: Arg { reg: r(1), moved },
+        index: Src(r(index)),
         value: Arg {
-            reg: Reg(value),
+            reg: r(value),
             moved: value_moved,
         },
         miss: pc(miss),
@@ -1447,9 +1471,9 @@ fn a_write_to_a_range(index: i64, moved: bool, from: u8) -> Vec<Ins<Reg>> {
         int(0, 2),
         int(4, 6),
         Ins::Range {
-            dst: Dst(Reg(1)),
-            start: Src(Reg(0)),
-            end: Src(Reg(4)),
+            dst: Dst(r(1)),
+            start: Src(r(0)),
+            end: Src(r(4)),
         },
         int(3, index),
         int(4, -1),
@@ -1571,7 +1595,8 @@ fn an_owned_push_onto_a_freed_array_stops_the_run_as_a_dead_cell() {
 }
 
 /// A run that goes past the code's end, or whose last frame returns to
-/// nothing, stops and says so.
+/// nothing, stops and says so. So does one that counts its frames past a link
+/// that leads to none.
 #[test]
 fn a_run_that_leaves_the_code_stops() {
     let body = vec![Ins::Jump { to: pc(1) }];
@@ -1581,9 +1606,33 @@ fn a_run_that_leaves_the_code_stops() {
         assert_eq!(stopped, Err(Stop::broken(Broken::RanPastEnd { func })));
     });
     on_a_machine(|m| {
-        let got = m.steps(START as usize).map(|v| v.bits());
-        assert_eq!(got, Err(Stop::broken(Broken::NoCaller)));
+        let at = started(m, Link::new(0, Room(9), Dst(RESULT)));
+        let got = m.go_on(at).map(|v| v.bits());
+        assert_eq!(got, Err(Stop::broken(Broken::NoWindow)));
     });
+    let depth = Ins::StackDepth { dst: Dst(r(1)) };
+    let halt = Ins::Halt { src: Taken(r(1)) };
+    let code = function(0, 5, vec![depth, halt]);
+    for (below, want) in [
+        (0, Ok(Value::int(1).expect("small").bits())),
+        (9, Err(Stop::broken(Broken::NoWindow))),
+    ] {
+        let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+        let mut m = Machine::new(code, &mut host);
+        let at = started(&mut m, Link::new(0, Room(below), Dst(RESULT)));
+        assert_eq!(m.go_on(at).map(|v| v.bits()), want, "{below}");
+    }
+}
+
+/// Start a frame at the bottom of `m`'s stack, which returns where `link`
+/// says, and give where to run it from.
+fn started(m: &mut Machine<'_, '_>, link: Link) -> At {
+    m.grow(0).expect("room");
+    window(&mut m.stack, 0).expect("a window").start(link);
+    At {
+        pc: START as usize,
+        base: 0,
+    }
 }
 
 /// Run `check` on a machine that has run nothing, to call small functions on
@@ -1608,13 +1657,18 @@ fn falls_through(ins: Ins<Reg>) -> &'static Code {
 }
 
 /// Call `code`'s function and empty the registers again. A run that stops
-/// leaves its frames where they were.
+/// leaves what they held.
 fn call(m: &mut Machine<'_, '_>, code: &'static Code, args: &[Value]) -> Result<Value, Stop> {
     m.rest.code = code;
     let got = m.call(&code.toplevels[0], args);
-    m.frames.clear();
-    assert_eq!(m.leave(0, Room(5)), Ok(()));
+    assert_eq!(emptied(m), Ok(()));
     got
+}
+
+/// Give up what the frame at the bottom of the stack holds.
+fn emptied(m: &mut Machine<'_, '_>) -> Result<(), DeadCell> {
+    let mut win = window(&mut m.stack, 0).expect("a window");
+    win.leave(&mut m.rest.heap, Room(7).last())
 }
 
 /// What an instruction's answer should be, when the operands are numbers.
@@ -1645,7 +1699,7 @@ fn is(m: &mut Machine<'_, '_>, got: Result<Value, Stop>, want: &Answer, what: &d
 macro_rules! of_pairs {
     ([] $($name:ident $op:path),*) => {
         |dst: u8| vec![$((
-            Ins::$name { dst: Dst(Reg(dst)), a: Src(Reg(0)), b: Src(Reg(1)) },
+            Ins::$name { dst: Dst(r(dst)), a: Src(r(0)), b: Src(r(1)) },
             $op,
         )),*]
     };
@@ -1653,7 +1707,7 @@ macro_rules! of_pairs {
 macro_rules! with_constant {
     ([] $($name:ident $op:path),*) => {
         |k, dst: u8| vec![$((
-            Ins::$name { dst: Dst(Reg(dst)), a: Src(Reg(0)), k },
+            Ins::$name { dst: Dst(r(dst)), a: Src(r(0)), k },
             $op,
         )),*]
     };
@@ -1661,8 +1715,8 @@ macro_rules! with_constant {
 macro_rules! compare_pairs {
     ([] $($name:ident $jump:ident $op:path),*) => {
         |dst: u8| vec![$((
-            Ins::$name { dst: Dst(Reg(dst)), a: Src(Reg(0)), b: Src(Reg(1)) },
-            Ins::$jump { a: Src(Reg(0)), b: Src(Reg(1)), to: pc(3) },
+            Ins::$name { dst: Dst(r(dst)), a: Src(r(0)), b: Src(r(1)) },
+            Ins::$jump { a: Src(r(0)), b: Src(r(1)), to: pc(3) },
             $op,
         )),*]
     };
@@ -1670,8 +1724,8 @@ macro_rules! compare_pairs {
 macro_rules! compare_with_constant {
     ([] $($name:ident $jump:ident $op:path),*) => {
         |k, dst: u8| vec![$((
-            Ins::$name { dst: Dst(Reg(dst)), a: Src(Reg(0)), k },
-            Ins::$jump { a: Src(Reg(0)), k, to: pc(3) },
+            Ins::$name { dst: Dst(r(dst)), a: Src(r(0)), k },
+            Ins::$jump { a: Src(r(0)), k, to: pc(3) },
             $op,
         )),*]
     };
@@ -1814,8 +1868,8 @@ fn int_instructions_agree(xs: &[BigInt], pairs: &[(BigInt, BigInt)]) {
         }
         for dst in OVER_ONE {
             let neg = Ins::IntNeg {
-                dst: Dst(Reg(dst)),
-                a: Src(Reg(0)),
+                dst: Dst(r(dst)),
+                a: Src(r(0)),
             };
             let body = stores(neg, dst);
             for x in xs {
@@ -1952,8 +2006,8 @@ fn float_instructions_are_right_at_every_edge() {
         }
         for dst in OVER_ONE {
             let neg = Ins::FloatNeg {
-                dst: Dst(Reg(dst)),
-                a: Src(Reg(0)),
+                dst: Dst(r(dst)),
+                a: Src(r(0)),
             };
             let body = stores(neg, dst);
             for &x in &xs {
@@ -1971,8 +2025,8 @@ fn an_int_of_any_size_becomes_a_float() {
     on_a_machine(|m| {
         let into = |dst: u8| {
             let from_int = Ins::FloatFromInt {
-                dst: Dst(Reg(dst)),
-                a: Src(Reg(0)),
+                dst: Dst(r(dst)),
+                a: Src(r(0)),
             };
             stores(from_int, dst)
         };
@@ -2087,7 +2141,7 @@ fn every_operator_instruction_stops_on_an_operand_of_the_wrong_kind() {
         for (stored, jump, _) in int_compare_k!(compare_with_constant)(small, 2) {
             ints.extend([(stores(stored, 2), 1), (falls_through(jump), 1)]);
         }
-        let (dst, a) = (Dst(Reg(2)), Src(Reg(0)));
+        let (dst, a) = (Dst(r(2)), Src(r(0)));
         ints.push((stores(Ins::IntNeg { dst, a }, 2), 1));
         ints.push((stores(Ins::FloatFromInt { dst, a }, 2), 1));
         assert_eq!(ints.len(), 5 + 5 + 1 + 8 + 12 + 2);
@@ -2139,10 +2193,9 @@ fn finds_the_heap_full(m: &mut Machine<'_, '_>, ins: Ins<Reg>, dst: u8, args: [&
     let code = stores(ins, dst);
     m.rest.code = code;
     let got = m.call(&code.toplevels[0], &args).map(|v| v.bits());
-    m.frames.clear();
     assert_eq!(got, Err(Stop::HeapFull), "{what}");
     assert_eq!(m.rest.heap.live(), held, "{what}");
-    assert_eq!(m.leave(0, Room(5)), Ok(()), "{what}");
+    assert_eq!(emptied(m), Ok(()), "{what}");
     assert_eq!(m.rest.heap.live(), 0, "{what}");
 }
 
@@ -2157,13 +2210,13 @@ fn an_int_answer_with_no_room_stops_and_keeps_its_operands() {
         let (one, big) = (BigInt::from(1), BigInt::from(3) << 200);
         let k = SmallInt::new(1).expect("small");
         for over in OVER_TWO {
-            let (dst, a, b) = (Dst(Reg(over)), Src(Reg(0)), Src(Reg(1)));
+            let (dst, a, b) = (Dst(r(over)), Src(r(0)), Src(r(1)));
             finds_the_heap_full(m, Ins::IntAdd { dst, a, b }, over, [&top, &one]);
             finds_the_heap_full(m, Ins::IntAdd { dst, a, b }, over, [&big, &big]);
             finds_the_heap_full(m, Ins::IntMul { dst, a, b }, over, [&big, &top]);
         }
         for over in OVER_ONE {
-            let (dst, a) = (Dst(Reg(over)), Src(Reg(0)));
+            let (dst, a) = (Dst(r(over)), Src(r(0)));
             for n in [&top, &big] {
                 finds_the_heap_full(m, Ins::IntAddK { dst, a, k }, over, [n, &one]);
             }
@@ -2173,4 +2226,415 @@ fn an_int_answer_with_no_room_stops_and_keeps_its_operands() {
             }
         }
     });
+}
+
+/// A recursion through each kind of call there is, with the kinds it is to be
+/// loaded as and what it prints for `N` of 30. Each holds a string or an array
+/// through it, so that a call that counted twice, or not at all, shows.
+const DEEP: [(&[&str], &str, &str); 12] = [
+    (
+        &["Call1", "Call0"],
+        "fn leaf() String { '${N}' }\n\
+         fn down(n Int) String { if n == 0 { '${leaf()}' } else { '${down(n - 1)}.' } }\n\
+         pub fn main() { println(string::length(down(N))) }\n",
+        "32\n",
+    ),
+    (
+        &["Call1Share"],
+        "fn down(xs Array(Int)) Int {\n\
+         \tmatch xs {\n\t\t[] -> 0\n\t\t[_, ..t] -> part(t) + array::length(xs)\n\t}\n}\n\
+         fn part(xs Array(Int)) Int { down(xs) + array::length(xs) }\n\
+         pub fn main() { println(down([..{ 0..N }, 1])) }\n",
+        "961\n",
+    ),
+    (
+        &["Call2"],
+        "fn down(s String, n Int) Int {\n\
+         \tif n == 0 { string::length(s) } else { down('${s}x', n - 1) + 1 }\n}\n\
+         pub fn main() { println(down('', N)) }\n",
+        "60\n",
+    ),
+    (
+        &["Call2Share"],
+        "fn down(s String, n Int) Int {\n\
+         \tif n == 0 { 0 } else { down(s, n - 1) + string::length(s) }\n}\n\
+         pub fn main() { println(down('ab', N)) }\n",
+        "60\n",
+    ),
+    (
+        &["Call3", "Call3Share"],
+        "fn down(s String, t String, n Int) Int {\n\
+         \tif n == 0 { 0 } else { down(t, s, n - 1) + last(s, n, n) }\n}\n\
+         fn last(s String, a Int, b Int) Int {\n\
+         \tif a == 0 { string::length(s) + b } else { last('${s}y', 0, 0) + 1 }\n}\n\
+         pub fn main() { println(down('ab', 'c', N)) }\n",
+        "105\n",
+    ),
+    (
+        &["Call"],
+        "fn down(s String, n Int, a Int, b Int, t String) Int {\n\
+         \tif n == 0 { a + b + string::length(t) } else { down(s, n - 1, b, a, '${t}z') + string::length(s) }\n}\n\
+         pub fn main() { println(down('ab', N, 1, 2, '')) }\n",
+        "93\n",
+    ),
+    (
+        &["CallWide"],
+        "fn down(s String, n Int, a Int, b Int, t String, c Int, d Int) Int {\n\
+         \tif n == 0 { a + b + c + d + string::length(t) } else { down(s, n - 1, b, a, '${t}z', d, c) + string::length(s) }\n}\n\
+         pub fn main() { println(down('ab', N, 1, 2, '', 3, 4)) }\n",
+        "100\n",
+    ),
+    (
+        &["CallSelf", "RetClosure", "GetCapture"],
+        "pub fn main() {\n\
+         \tkept = '${N}'\n\
+         \tdown = fn(s, n) { if n == 0 { '${s}${kept}' } else { '${down(s, n - 1)}${s}' } }\n\
+         \tprintln(string::length(down('ab', N)))\n}\n",
+        "64\n",
+    ),
+    (
+        &["CallSelfWide"],
+        "pub fn main() {\n\
+         \tkept = '${N}'\n\
+         \tdown = fn(s, n, a, b, c, d, e) {\n\
+         \t\tif n == 0 { '${s}${kept}' } else { '${down(s, n - 1, b, c, d, e, a)}${s}' }\n\t}\n\
+         \tprintln(string::length(down('ab', N, 1, 2, 3, 4, 5)))\n}\n",
+        "64\n",
+    ),
+    (
+        &["CallValue"],
+        "fn down(f fn(String) String, n Int) Int {\n\
+         \tif n == 0 { 0 } else { down(fn(s) f('${s}.'), n - 1) + string::length(f('')) }\n}\n\
+         pub fn main() {\n\tkept = 'ab'\n\tprintln(down(fn(s) '${s}${kept}', N))\n}\n",
+        "495\n",
+    ),
+    (
+        &["CallValueWide"],
+        "fn down(f fn(Int, Int, Int, Int, Int, Int, String) String, n Int) String {\n\
+         \tif n == 0 { '${f(1, 2, 3, 4, 5, 6, 'x')}' } else {\n\t\tdown(fn(a, b, c, d, e, g, s) '${f(b, c, d, e, g, a, '${s}.')}', n - 1)\n\t}\n}\n\
+         pub fn main() {\n\tkept = 'ab'\n\
+         \tprintln(string::length(down(fn(a, b, c, d, e, g, s) '${s}${kept}${a + b + c + d + e + g}', N)))\n}\n",
+        "35\n",
+    ),
+    (
+        &["CallValue"],
+        "fn down(n Int) Array(String) {\n\
+         \tif n == 0 { ['a'] } else {\n\
+         \t\tarray::map(['${n}'], fn(s) '${array::length(down(n - 1))}${folded(n)}${s}')\n\t}\n}\n\
+         fn folded(n Int) Int {\n\
+         \tmap::fold(map::set(map::new(), 'k${n}', n), 0, fn(acc, _k, v) acc + v)\n}\n\
+         pub fn main() { println(down(N)) }\n",
+        "[13030]\n",
+    ),
+];
+
+fn deep_source(body: &str, n: usize) -> String {
+    let imports = "import scarlet/array\nimport scarlet/map\nimport scarlet/string\n";
+    format!("{imports}{}", body.replace('N', &n.to_string()))
+}
+
+/// What a run of `src` on a stack of no more than `limit` registers came to,
+/// with how many it had at its end and what it printed. Whether it ends or
+/// stops, every reference count is right then.
+fn on_a_stack_of(code: &'static Code, limit: usize) -> (Result<(), Stop>, usize, String) {
+    let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+    let mut m = Machine::new(code, &mut host);
+    m.stack_limit = limit;
+    let ended = m.run();
+    let len = m.stack.len();
+    let ended = match ended {
+        Ok(ended) => {
+            assert!(no_cell_on(&m.stack), "a frame's registers outlived it");
+            m.finish(ended, Audit::AtEnd)
+        }
+        Err(stop) => {
+            assert_eq!(check(&m.stack, &m.rest, Value::NIL), Ok(()), "{stop:?}");
+            assert!(m.rest.passing.is_empty());
+            Err(stop)
+        }
+    };
+    drop(m);
+    let out = String::from_utf8(std::mem::take(host.out())).expect("UTF-8");
+    (ended, len, out)
+}
+
+fn loaded(src: &str, audit: Audit) -> &'static Code {
+    let result = scarlet_core::compile::compile_text(src, None);
+    assert!(result.success(), "{src}: {:?}", result.diagnostics());
+    let program = result.into_runnable().expect("a clean compile is runnable");
+    Box::leak(Box::new(
+        crate::code::load(&program, audit).expect("the program loads"),
+    ))
+}
+
+/// A recursion that goes deeper than the stack it starts with has room made
+/// for it, in front of every kind of call, and nothing about it changes: it
+/// prints what it would, and no cell is left. The stack is made longer a
+/// little at a time, so any of its calls may be the one that asks.
+#[test]
+fn a_recursion_through_any_kind_of_call_makes_the_stack_longer() {
+    for (kinds, body, out) in DEEP {
+        let code = loaded(&deep_source(body, 30), Audit::Never);
+        for kind in kinds {
+            let loaded = code.ins.iter().any(|ins| ins.op().name() == *kind);
+            assert!(loaded, "{kind}: {body}");
+        }
+        let (ended, _, printed) = on_a_stack_of(code, MAX_STACK);
+        assert_eq!((ended, printed.as_str()), (Ok(()), out), "{body}");
+
+        let code = loaded(&deep_source(body, 1000), Audit::Never);
+        let (ended, len, _) = on_a_stack_of(code, MAX_STACK);
+        assert_eq!(ended, Ok(()), "{body}");
+        assert!(len > 3000, "{len}: {body}");
+    }
+}
+
+/// A call that finds no room stops the run as a full stack, having shared and
+/// written nothing: every count is right, whichever call it was and whatever it
+/// was to pass. With one register more it goes one call further, until the run
+/// has the room it needs.
+#[test]
+fn a_call_with_no_room_stops_with_every_count_right() {
+    for (_, body, out) in DEEP {
+        let code = loaded(&deep_source(body, 30), Audit::Never);
+        let (mut stopped, mut limit) = (0, WINDOW);
+        loop {
+            let (ended, len, printed) = on_a_stack_of(code, limit);
+            assert!(len <= limit, "{len} of {limit}");
+            match ended {
+                Ok(()) => {
+                    assert_eq!(printed, out, "{limit}: {body}");
+                    break;
+                }
+                Err(stop) => assert_eq!(stop, Stop::StackFull, "{limit}: {body}"),
+            }
+            stopped += 1;
+            limit += 1;
+        }
+        // Each of 30 frames has a link, a closure and a value at least.
+        assert!(stopped > 90, "{stopped}: {body}");
+    }
+    // Below a window not even the first frame is opened.
+    let code = loaded("pub fn main() { println(1) }\n", Audit::Never);
+    let (ended, len, _) = on_a_stack_of(code, WINDOW - 1);
+    assert_eq!((ended, len), (Err(Stop::StackFull), 0));
+}
+
+/// The same recursions, with the heap checked in front of every instruction.
+#[test]
+fn a_recursion_is_right_at_every_instruction() {
+    for (_, body, _) in DEEP {
+        let src = deep_source(body, 12);
+        let plain = on_a_stack_of(loaded(&src, Audit::Never), MAX_STACK);
+        let checked = on_a_stack_of(loaded(&src, Audit::EachInstruction), MAX_STACK);
+        assert_eq!(plain.0, Ok(()), "{body}");
+        assert_eq!(plain, checked, "{body}");
+    }
+}
+
+/// A stack longer than its limit is a full stack, and so is one past what a
+/// frame's place can be numbered in. What was there is as it was. What the stack
+/// does when the system has no memory to give is not tested here.
+#[test]
+fn a_stack_past_its_limit_is_full() {
+    on_a_machine(|m| {
+        let len = m.stack.len();
+        for base in [u32::MAX, u32::MAX - 254] {
+            assert_eq!(m.grow(base), Err(Stop::StackFull), "{base}");
+        }
+        assert_eq!(m.stack.len(), len);
+        // A stack is longer by a sixteenth than was asked for, but never past
+        // its limit, and a window that fits is not asked for again.
+        m.stack_limit = 1000;
+        assert_eq!(m.grow(100), Ok(Grown::Longer));
+        assert_eq!(m.stack.len(), 356 + 356 / 16);
+        assert_eq!(m.grow(744), Ok(Grown::Longer));
+        assert_eq!(m.stack.len(), 1000);
+        assert_eq!(m.grow(745), Err(Stop::StackFull));
+        for base in [0, 100, 744] {
+            assert_eq!(m.grow(base), Ok(Grown::HadRoom), "{base}");
+        }
+        assert_eq!(m.stack.len(), 1000);
+        assert!(no_cell_on(&m.stack));
+    });
+}
+
+/// A function that does `first` in its first run and `second` in its second,
+/// which is told apart by the global it finds set.
+fn runs_twice(reads: ReadsClosure, first: &[Ins<Reg>], second: &[Ins<Reg>]) -> &'static Code {
+    let until = u32::try_from(second.len()).expect("a short function");
+    let told_apart = [
+        Ins::GetGlobal {
+            dst: Dst(r(1)),
+            slot: GlobalSlot(0),
+        },
+        Ins::JumpUnlessInt {
+            src: Src(r(1)),
+            n: 1,
+            to: pc(2 + until),
+        },
+    ];
+    let set = [
+        int(1, 1),
+        Ins::SetGlobal {
+            slot: GlobalSlot(0),
+            src: Shared(r(1)),
+        },
+    ];
+    let body = [&told_apart[..], second, &set, first].concat();
+    function_that(reads, 1, 5, body)
+}
+
+/// The calls of the value in `r0`, each of which passes it to itself and leaves
+/// its result in `r2`, when it is one that comes back.
+fn calls_of_a_value() -> [Ins<Reg>; 4] {
+    let (dst, callee, own) = (Dst(r(2)), Shared(r(0)), Room(7));
+    let (args, list) = (Args::new(&[r(0)]).expect("one"), crate::code::ArgList(2));
+    [
+        Ins::CallValue {
+            dst,
+            callee,
+            own,
+            args,
+        },
+        Ins::CallValueWide {
+            dst,
+            callee,
+            own,
+            args: list,
+        },
+        Ins::TailCallValue { callee, args, own },
+        Ins::TailCallValueWide {
+            callee,
+            args: list,
+            own,
+        },
+    ]
+}
+
+/// The return of a function that reads `reads` of its closure.
+fn back(reads: ReadsClosure, src: u8) -> Ins<Reg> {
+    let (src, last) = (Taken(r(src)), Room(7).last());
+    if reads.keeps() {
+        Ins::RetClosure { src, last }
+    } else {
+        Ins::Ret { src, last }
+    }
+}
+
+/// Run `code`'s function on a new machine, with what `given` makes in its heap.
+fn on_a_new_machine(
+    code: &'static Code,
+    given: impl FnOnce(&mut Heap) -> Value,
+    check: impl FnOnce(&mut Machine<'_, '_>, Value, Result<Value, Stop>),
+) {
+    let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+    let mut m = Machine::new(code, &mut host);
+    let given = given(&mut m.rest.heap);
+    let got = m.call(&code.toplevels[0], &[given]);
+    check(&mut m, given, got);
+}
+
+/// A closure of the function these tests run, over `captures`.
+fn closure_over(heap: &mut Heap, captures: &[Value]) -> Value {
+    Value::cell(heap.closure(FuncIdx(0), captures).expect("room"))
+}
+
+/// A call of a closure whose function reads none of it passes no closure on, so
+/// the frame has none to give up, and is the plain function if it asks. One
+/// whose function keeps it holds a reference to it for as long as the frame
+/// runs, and is that closure.
+#[test]
+fn a_frame_holds_its_closure_when_its_function_keeps_it() {
+    let all = [
+        ReadsClosure::Nothing,
+        ReadsClosure::Itself,
+        ReadsClosure::Captures,
+    ];
+    for reads in all {
+        for call in calls_of_a_value() {
+            let itself = Ins::GetSelf {
+                dst: Dst(r(3)),
+                this: FuncIdx(0),
+            };
+            let second = [Ins::Audit, itself, Ins::Audit, back(reads, 3)];
+            let first = [call, Ins::Audit, back(reads, 2)];
+            let code = runs_twice(reads, &first, &second);
+            let closure = |heap: &mut Heap| closure_over(heap, &[Value::NIL]);
+            on_a_new_machine(code, closure, |m, closure, got| {
+                let v = got.expect("it returns");
+                let want = if reads.keeps() {
+                    closure
+                } else {
+                    Value::func(FuncIdx(0))
+                };
+                assert_eq!(v.bits(), want.bits(), "{call:?} {reads:?}");
+                assert!(no_cell_on(&m.stack));
+                assert_eq!(m.rest.release(v), Ok(()));
+                assert_eq!(m.rest.heap.live(), 0, "{call:?} {reads:?}");
+            });
+        }
+    }
+}
+
+/// A function called by name runs as no closure, whatever the frame that was
+/// there before left in the closure's register.
+#[test]
+fn a_function_called_by_name_is_no_closure() {
+    let reads = ReadsClosure::Itself;
+    let call = Ins::Call0 {
+        dst: Dst(r(2)),
+        own: Room(7),
+        to: EntryPc(START),
+    };
+    let itself = Ins::GetSelf {
+        dst: Dst(r(3)),
+        this: FuncIdx(0),
+    };
+    for left in [Value::func(FuncIdx(5)), Value::float(1.5), Value::NIL] {
+        let code = runs_twice(reads, &[call, back(reads, 2)], &[itself, back(reads, 3)]);
+        let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+        let mut m = Machine::new(code, &mut host);
+        m.grow(0).expect("room");
+        window(&mut m.stack, 7).expect("a window").run_as(left);
+        let got = m.call(&code.toplevels[0], &[Value::NIL]).map(|v| v.bits());
+        assert_eq!(got, Ok(Value::func(FuncIdx(0)).bits()), "{left:?}");
+    }
+}
+
+/// A read of a capture that the closure does not have stops the run and names
+/// the function, and so does one in a function that runs as no closure. Every
+/// count is right then.
+#[test]
+fn a_read_of_a_capture_that_is_not_there_stops() {
+    let reads = ReadsClosure::Captures;
+    for (closure, index, there) in [
+        (true, 0, true),
+        (true, 1, false),
+        (true, u32::MAX, false),
+        (false, 0, false),
+        (false, 1, false),
+    ] {
+        let make = |heap: &mut Heap| match closure {
+            true => closure_over(heap, &[Value::bool(true)]),
+            false => Value::func(FuncIdx(0)),
+        };
+        for call in calls_of_a_value() {
+            let read = Ins::GetCapture {
+                dst: Dst(r(3)),
+                index,
+            };
+            let code = runs_twice(reads, &[call, back(reads, 2)], &[read, back(reads, 3)]);
+            on_a_new_machine(code, make, |m, _, got| {
+                let want = if there {
+                    Ok(Value::bool(true).bits())
+                } else {
+                    let func = "test.function".to_string();
+                    Err(Stop::broken(Broken::NoCapture { func, index }))
+                };
+                assert_eq!(got.map(|v| v.bits()), want, "{call:?} {index}");
+                assert_eq!(check(&m.stack, &m.rest, Value::NIL), Ok(()));
+            });
+        }
+    }
 }

@@ -2,12 +2,13 @@
 //!
 //! One line per instruction: its number in its function, which a jump names,
 //! then the register it writes, its kind, and the rest of it in the order its
-//! fields are declared. A register is `r3`. An operand written `move r3` gives
-//! up the register's reference instead of adding one. `over r3` is the register
-//! whose cell a constructor may be written over, and `keep r3` one whose cell a
-//! loop carries round. `-> 7` is where the instruction may continue instead of
-//! at the next one. Each kind is spelt as a counted run spells it
-//! (`counts.rs`), so a count can be read against a listing.
+//! fields are declared. A register is `r3`. A frame's first two are its own
+//! (`frame.rs`), so its parameters start at `r2`. An operand written `move r3`
+//! gives up the register's reference instead of adding one. `over r3` is the
+//! register whose cell a constructor may be written over, and `keep r3` one
+//! whose cell a loop carries round. `-> 7` is where the instruction may
+//! continue instead of at the next one. Each kind is spelt as a counted run
+//! spells it (`counts.rs`), so a count can be read against a listing.
 
 use std::fmt::{self, Write as _};
 
@@ -16,10 +17,11 @@ use scarlet_ir::intrinsic::Intrinsic;
 
 use crate::code::{self, Code, Entry, Ins, Reg};
 use crate::code::{
-    Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, Dst, EntryPc, Hit, KeepList, Kept,
+    Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, Dst, EntryPc, Hit, KeepList, Kept, Last,
     LookList, Looks, Newline, Over, Pc, Room, ShareList, Shared, Shares, Src, Taken, TextId,
     Variant, Why, WhyId,
 };
+use crate::frame::FIRST;
 use crate::ops::NumOp;
 use crate::stop::NotBuilt;
 use crate::value::{Float, SmallInt, Value, View};
@@ -71,13 +73,13 @@ fn function(code: &Code, entry: &Entry) -> String {
 }
 
 fn write_body(out: &mut String, code: &Code, entry: &Entry, body: &[Ins<Reg>]) -> fmt::Result {
-    let (regs, params) = (entry.needs.len(), entry.params);
-    let s = |n| if n == 1 { "" } else { "s" };
-    write!(out, "; loaded: {regs} register{}", s(regs))?;
+    let (regs, params) = (entry.own.len(), entry.params);
+    write!(out, "; loaded: {regs} registers")?;
     if let Some(last) = params.checked_sub(1) {
-        write!(out, ", parameter{} in r0", s(params))?;
+        let s = if last == 0 { "" } else { "s" };
+        write!(out, ", parameter{s} in {FIRST}")?;
         if last > 0 {
-            write!(out, " to r{last}")?;
+            write!(out, " to r{}", last.saturating_add(usize::from(FIRST.0)))?;
         }
     }
     out.push('\n');
@@ -348,6 +350,10 @@ impl Show for NumOp {
             NumOp::Order(op) => line.part(format_args!("{op:?}")),
         }
     }
+}
+
+impl Show for Last {
+    fn show(self, _: &mut Line<'_>) {}
 }
 
 /// A constant is shown by what it is, beside this.

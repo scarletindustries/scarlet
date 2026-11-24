@@ -69,12 +69,13 @@ pub(super) fn draft(values: u32, params: u32, ins: Vec<Ins<VReg>>, labels: &[usi
         values,
         params: (0..params).map(VReg).collect(),
         carried: BTreeSet::new(),
+        closure: ReadsClosure::Nothing,
     }
 }
 
 /// The instructions a draft is written out with.
 pub(super) mod of {
-    use super::super::ins::OwnRoom;
+    use super::super::ins::{LastReg, OwnEntry, OwnRoom};
     use super::*;
     use crate::value::Value;
 
@@ -95,7 +96,7 @@ pub(super) mod of {
     pub(crate) fn ret(src: u32) -> Ins<VReg> {
         Ins::Ret {
             src: Taken(VReg(src)),
-            own: OwnRoom,
+            last: LastReg,
         }
     }
 
@@ -169,7 +170,7 @@ pub(super) mod of {
     pub(crate) fn again(args: &[u32]) -> Ins<VReg> {
         let args: Vec<VReg> = args.iter().copied().map(VReg).collect();
         Ins::TailCallSelf {
-            to: super::super::ins::Callee(FuncIdx(0)),
+            to: OwnEntry,
             args: Args::new(&args).expect("a few arguments"),
             own: OwnRoom,
         }
@@ -181,7 +182,6 @@ pub(super) mod of {
             dst: Dst(VReg(dst)),
             to: super::super::ins::Callee(FuncIdx(0)),
             args: Args::new(&args).expect("a few arguments"),
-            needs: super::super::ins::CalleeRoom(FuncIdx(0)),
             own: OwnRoom,
         }
     }
@@ -203,7 +203,7 @@ fn a_function_that_does_not_load_is_one_instruction() {
     let missing = Missing::Intrinsic(Intrinsic::InternalLiveSubjects);
     assert_eq!(code.why(*why), Stop::missing(missing));
     // Its arguments still arrive.
-    assert_eq!((later.params, later.needs), (2, Room(2)));
+    assert_eq!((later.params, later.own), (2, Room(4)));
     let main = named(&code, "main.main");
     assert!(body(&code, main).len() > 1);
     let lost = Stop::broken(Broken::NoPlace);
@@ -231,6 +231,33 @@ fn a_string_is_in_the_table_once() {
         let same = code.texts.iter().filter(|t| ***t == *name.as_bytes());
         assert_eq!(same.count(), 1, "{name}");
     }
+}
+
+/// The program's `main` is run as no closure, so one that reads captures is
+/// refused before anything runs. One that only reads itself is not.
+#[test]
+fn a_main_that_reads_captures_is_refused() {
+    let src = "fn through(f fn(Int) Int, n Int) Int { if n > 0 { f(n - 1) } else { n } }\n\
+               pub fn main() {\n\
+               \tkept = 7\n\
+               \titself = fn(n) { through(itself, n) }\n\
+               \tprintln(through(fn(n) n + kept, itself(3)))\n\
+               }\n";
+    let mut program = program(src);
+    let code = load(&program, Audit::Never).expect("the program loads");
+    let mut seen = Vec::new();
+    for (func, entry) in (0..).map(FuncIdx).zip(&code.funcs) {
+        program.main = Some(func);
+        let stop = load(&program, Audit::Never).err();
+        let func = entry.name.clone();
+        let refused = Stop::broken(Broken::CalledByName { func });
+        let reads = entry.closure == ReadsClosure::Captures;
+        assert_eq!(stop, reads.then_some(refused), "{}", entry.name);
+        seen.push(entry.closure);
+    }
+    seen.sort();
+    let (nothing, itself) = (ReadsClosure::Nothing, ReadsClosure::Itself);
+    assert_eq!(seen, [nothing, nothing, itself, ReadsClosure::Captures]);
 }
 
 /// Every instruction but the first is some function's, and knows which.

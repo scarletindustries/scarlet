@@ -4,7 +4,7 @@ This is the build order for making the interpreter fast on one core, written on 
 
 How it was made: for each area three designers each wrote a design from a different starting point, a judge merged them, three sceptics attacked the result, and the design was revised to answer them. One more pass put every step into the order below and found where the designs disagree.
 
-Each step is built alone, measured with `benches/run.py`, and reverted if it does not pay. The owner took the recommended answer to every decision below on 23 November 2026.
+Each step is built alone, measured with `benches/run.py`, and reverted if it does not pay. The owner took the recommended answer to decisions 1 to 10 below on 23 November 2026. 11 and 12 came up when step 10 was built and are open.
 
 ## What to expect
 
@@ -24,7 +24,7 @@ Where it will still be bad at the end: sieve (about 4 to 6), permute and queens 
 
 ## Decisions
 
-Each was settled as its recommended answer.
+1 to 10 were each settled as the recommended answer. 11 and 12 are open.
 
 ### 1. docs/vm-design.md proposes that the VM counts references itself and that this is always right whatever Perceus did. Steps 39 to 41 end that: the compiler states every count, two checkers verify it, and the VM stops sweeping frames and testing registers on write. Do you want that?
 
@@ -95,6 +95,20 @@ Recommended: Option A. Appending in place cannot be seen in the source, so the s
 - **B.** Only the step 3 change. fannkuch then ends near 11 times LuaJIT instead of about 4.
 
 Recommended: Option A, with each row's old and new source measured on the same binary on the day it changes, so the source change and the VM change are never read as one number.
+
+### 11. Open. Step 10 gives a stack a limit that question 5 does not name: 32 GiB, because where a frame starts is a 32-bit number. Past it a run stops with "the program ran out of stack". Is that acceptable?
+
+- **A.** Yes. It is 1,073 million levels of the plainest recursion, which is past what a machine with 32 GiB of memory can hold anyway.
+- **B.** No. Make the number 64 bits and the test for room one that checks for overflow. The stack's limit is then the machine's memory.
+
+Recommended: Option A. The 32-bit number is part of what took the board from 0.901 to 0.856 at step 10, and B's cost was not measured by itself.
+
+### 12. Open. A run that stops says what went wrong and not where. Step 10 has what it takes to say more: the place in the code, and the links down the stack. Should a stopped run print the functions it was in?
+
+- **A.** No. What a stopped program says stays as it is, and `fail`, the cold function every failing arm would return through, is never built.
+- **B.** Yes, on standard error after the message. `fail` stores the place, and the trace is a walk down the links.
+
+Recommended: Option B, at step 40, which writes the call-site maps that a trace reads its callers from. Step 40 builds whichever is chosen.
 
 ## Where the designs disagreed, and how each is settled
 
@@ -367,6 +381,26 @@ Step 9 took part of this step's forecast. fib is 218 a call (6,510M over 29.86 m
 
 **Expected gain.** About 0.88: fib 355 to about 165 a call with steps 8 and 9, tak about 29%, measured in the probe build that keeps the sweeps.
 
+**What happened.** The board moved further than forecast, and every row got cheaper. The geomean went from 2.98 to 2.47, a factor of 0.828 against the 0.88 expected, and against the less than that the notes above leave once step 9's part is off. fib runs 36.7% fewer machine instructions, tak 36.0%, mandelbrot 28.7%, spectral_norm 23.0%, binary_trees 22.6%, cfold 21.2%, towers 21.0%, deriv 19.7%, rbtree 19.7%, list 17.5%, nbody 15.7%, permute 13.9%, richards 13.0%, queens 12.6%, json 11.9%, map_churn 11.3%, sieve 10.9%, bounce 10.4%, storage 10.3%, closures 9.2%, string_keys 8.1%, fannkuch 7.5% and strings 3.3%. fib is 138 a call where it was 218 and the forecast was 165, and tak is 155 where it was 243. The VM's counts are the same on all 23 rows and on `startup`: the same number of instructions, kind for kind once the new names of calls and returns are read as the old ones, and the same cells made, reused and live. Peak memory is the same on all 23 rows to within 3%. objdump shows the dispatch block of `steps` is still 9 machine instructions with one indirect branch. `steps` is 6,660 machine instructions long where it was 8,641, and the binary is 17 KB smaller. Startup is level (36.3M both) and so is the loader: 12 programs of long or many functions load and run within 0.33% either way.
+
+Most of the gain is the window itself. Reading a register is two machine instructions where it was seven, and writing one is six with the release of what was there. That is 13 off every instruction of three registers: an Int operator on two registers is 28 to 32 of a turn where it was 41 to 45, one on a constant 25 to 30 where it was 33 to 38, a Float one 26 to 27 where it was 36 to 40, a compare and jump 21, 18 or 19 where it was 31, 24 or 28, and a stored comparison 43 to 47 where it was 57 to 64. The rest came from how a call is written, and the order of the builds says how much. The window with the link in register 0, and every call through the same small array as before, was 0.901. `Call1`, `Call2` and `Call3`, which hold their arguments in fields of their own, and `base` as a 32-bit number, so that the test for room cannot overflow, made it 0.856. Three things made it 0.837. One is that a call with no room hands back the place after the call and not the call's own place, which the loop had kept in a register through every dispatch to be able to say. Dispatch was 10 with it and is 9 without. The others are a return of its own for the functions that have a closure to give up, and a sweep that counts down in a byte, which the types prove is in the window. Forms of the three calls that take every argument (`Call0` to `Call3`) beside forms that share some (`Call1Share` to `Call3Share`) made it 0.829. The share in the arm, which fib's calls never ran, had cost each of them 9 machine instructions. That is the design's split, and it is chosen from the argument flags that `live` decides, in one function (`Ins::taking`).
+
+Probes, old binary against new, as machine instructions a turn. A bare turn is 201 to 160, of one argument 122 to 101, of six 257 to 186 and of seven, through a list, 745 to 621. A call and its return are 55 of a turn where they were 105, and a turn that calls with 0, 2, 3, 4, 6 and 7 arguments is 327 to 241, 353 to 240, 421 to 294, 407 to 337, 461 to 377 and 505 to 453. One level of a deep recursion, growing the stack included, is 281 to 156, of six arguments 530 to 320, through a function value 779 to 489, and of a closure through itself 300 to 228. A tail call to another function is 198 to 149 a turn, through a function value 165 to 124, and a closure's to itself 122 to 101. A closure made and called is 1,140 to 1,020, one called 531 to 455, with two captures 627 to 527, and a plain function called as a value 424 to 354. A field read is 282 to 222, a match on an Int 328 to 260, on an enum 682 to 545, a list walk 404 to 335, an array shared and given up 390 to 328, a pair passed twice 433 to 315, an array literal 1,317 to 1,229, a slice 2,859 to 2,729, an interpolation of eight parts 6,609 to 6,463, a map update 783 to 717 and a delete 2,054 to 1,897, a built-in 324 to 280, and a turn that folds an array of eight with a closure 17,092 to 15,941. Of the 93 loop probes and the 49 of the operators, read again on the last build, all are cheaper but one, which is `internal::stack_depth`. It walks the links, as the design has it, where it took the length of a list. It was 294 a turn at any depth, and is 230 two frames deep and 15,231 a thousand deep, which is 15 a frame. A recursion that asks at each level goes from linear to quadratic. Only tests and `examples/tco.sca` ask, so the walk stays. In cycles, which are noisy, the board's factor is 0.94 to 0.96. mandelbrot runs 28.7% fewer instructions in 4% to 7% more cycles, on every build of the step, and that is more than its runs differ by. sieve and nbody read level to 5% more. mandelbrot's `escape` is a chain of dependent Float operations that goes round through `TailCallSelf`, which copies six arguments through an array on the Rust stack, so latency may bound it and not the number of instructions. I did not prove that. Two rows have two states in cycles: storage and bounce each read 17% to 25% dearer on some boards, and 1% to 6% cheaper on others and run by themselves.
+
+What a frame is now is in `frame.rs`, which is the one place that knows: the window, the link, and what a call, a return and a tail call do to a frame. The link holds the place to return to in 32 bits, the caller's size in 16 and its register in 8. Its word is a small Float to anything that asks, and not a small Int as the design has it, which is one `orr` a call less. A frame's own size can be 256, so a function still holds 254 values and the limit and its message did not move. `Machine::frames`, `Frame`, `needs`, `open`, `enter` and `run_as` are gone, and a call's callee opens a whole window, so a call by name no longer holds its callee's size. The loop is a function and not a method of the machine, which owns the stack and the rest. It borrows the stack as a slice, and when a call has no room it comes back with `Pause::NeedStack`, the machine makes the stack longer and the loop starts again at the call. A call asks before it shares or writes anything. A frame that ends takes only the cells out of its registers. A number or a `Nil` stays where it was, which saves a store a register, and nothing reads one, because the loader refuses a function that reads a value no path wrote. A value is released at the same instruction as before and in the same order, from the top register down and the closure last.
+
+A function keeps its closure in register 1 when its body reads a capture or itself, which the survey of its Core IR sees (`ReadsClosure`), and then it returns with `RetClosure` and calls itself with `CallSelf`. Any other calls itself by name, which is what fib's 29 million calls now are. Only a call through a value writes register 1, and only for a function that keeps its closure. The compiler makes no closure over something its body does not read: of the 640 closures over captures in the repository's programs, every one whose function loads at all reads a capture. So today that is every closure, and a frame holds it for as long as it did. `internal::stack_depth` is an instruction of its own (`StackDepth`), because it walks the links and the loop is the only place that has the whole stack. A link on the way that leads to no frame stops the run with `Broken::NoWindow`, as a return to one does.
+
+A function that reads captures is entered only through a function value, or by itself. `emit` is where the design upholds that and is where it is upheld: a call by name to one has no place (`Unplaced::NeedsClosure`), and the load stops with `Broken::CalledByName`. So does a program whose `main` is one, and a toplevel that reads a capture stops when it runs. What is refused is a reader of captures and not every function that owns register 1, because one that reads only itself may run as a plain function, whose value `GetSelf` gives. A call to itself no longer names a function, so it can only be its own (`OwnEntry`). `Broken::NoCapture` is left for a function value with no closure cell, and for an index past the captures.
+
+Three things differ from the design or the notes. `fail` is not built. The step-9 note asked for it here, with a place in `Rest` that every failing arm writes. The place is built (`At`), and `NeedStack` carries it, but nothing prints where a run stopped. So nothing would read what `fail` stores, the compiler refuses that, and printing it would change what a stopped program says. Whether it should is question 12 above, and step 40 builds the answer. The stack grows by a sixteenth more than a call asks for and not by half, because every register made is written with `Nil`, so the spare ones are real memory. And the stack has a limit: where a frame starts is a 32-bit number, so a stack is at most 32 GiB. Past it, or when the system refuses the memory, the run stops with the new `Stop::StackFull`, "the program ran out of stack". That limit is not among those of question 5, and is question 11 above. When the system refuses to double the stack it is asked for the sixteenth alone before the run stops. No test makes the system refuse, because an allocator that does takes `unsafe`. With the first request made to fail by hand every test passes. Before, there was no limit and no message. A recursion took memory until the system killed the process, or crashed when the system said no. 32 GiB is 1,073 million levels of the plainest recursion, which takes 32 bytes a level on both binaries. Peak memory of a recursion of 10 million levels is 245 MiB where it was 239, of six arguments 629 where it was 618, through a function value 395 where it was 390, and of a million levels 28 where it was 33. What is more is the spare sixteenth.
+
+The tests are in `frame/tests.rs`, exec's and the loader's. Twelve recursions, one or more through each kind of call there is, from `array::map` and `map::fold` among them, run from a stack of one window. Each then runs again on every stack from 256 registers up to what it needs, one register at a time, and stops with a full stack at each call in turn, and the audit of the stopped run finds every count right each time. They also run with the audit in front of every instruction. 874 random programs of calls printed the same on the old binary and the new one under `--audit`, with the same VM instructions and the same cells made, reused and live, and so did 93 of recursions up to 20,000 levels deep, and 250 printed the same under `--audit=each`. Each has recursions by name, through closures of up to 60 captures, through built-ins, and mutual and self tail calls, with functions of 1 to 250 parameters and frames of up to 254 values. 600 programs of step 9's kind printed the same too, and 60 under `--audit=each`. 310 more of these programs printed the same on the last build. 71 wrong changes, to the link, the window, the sweeps, the room a call asks for, what a closure's register holds, the share and the take of each argument, the registers given out, the frame's size, the walk down the links and the refusal of a call by name, were each caught by the VM's tests, two of them only after a test was added or changed for it.
+
+The loop's code moves for reasons that have nothing to do with a change. Reading a wrong link as `None` in `StackDepth`'s arm cost tak 0.3%, because one pair of loads in every call arm became two. The arm's work is a cold function now (`stack_depth`), which gave the board 0.8283 where the build before it had 0.8285, with fib 1 a call dearer and list, rbtree and towers cheaper.
+
+The binary, the boards, the probes, the builds, the fuzzers and the mutations are in the perf scratch directory under `step10`, in `notes.txt`. What answers the reviews is under `step10/fix`.
+
 ### Step 11. The new cell header (count, scan, size, class), constructor, tuple and closure layouts without the tag word, the variant carried in the reference, the constructor table built from `Program::types`, and `JumpUnlessTag` on the top 32 bits of the value.
 
 From: heap 3. Needs: 5, 7, 10.
@@ -378,6 +412,8 @@ From: heap 3. Needs: 5, 7, 10.
 **Carried from step 7.** A freed cell's header is 0 and not `size << 40`, because every reader takes a cell's length from its header, and 0 makes a freed cell read as empty. The size of a free cell is in the top half of its second word, for the audit (`free_link`, `end_of`). When readers test `scan` the header can hold the size again, but `scan` is 0 in a string too, so `data` would still need the class. `release` frees a cell that holds nothing without the loop, by a test of its kind against `RAW`. With the new header that is `scan == 0` and not a handle or a stub. The free loop copies the words that may hold a value out eight at a time (`STRIDE`), with one bounds check for the eight, and looks the rest up one by one at about 9 each. Keep that when `scan` replaces `held`: without it a wide cell of plain values is dearer to free than at step 6. A cell takes two words at least already (`LEAST_WORDS`), so the new closure and `()` layouts change nothing there. `UNCOUNTED`, `DYING` and `NO_MORE` are the count's three meanings below 1, and the audit's test of a variant against its class is still to add.
 
 **Carried from step 9.** The two tests of a constructor too wide for the arena (`a_record_too_wide_for_the_arena_is_a_record` and its neighbour in crates/scarlet_vm/tests/run.rs) use 253 fields, which is the widest a function can hold beside what it needs to update one, and 255 words is just past the line. Without the tag word the same constructor is 254 words and fits, and a longer one can only be made by a function that holds 254 values and nothing else. Keep one test at that size, or move the line for the tests. A constructor sits in an instruction as `Variant`, six bytes packed, so that six fields fit beside it. `JumpUnlessTag`'s 32-bit operand is smaller, and `Ctor`'s inline shape can be too.
+
+**Carried from step 10.** `GetCapture` reads the closure in register 1 (`Window::closure`) and asks the heap for its kind before the capture, as it did. With the new closure layout it is a field read at the capture's index plus one. A field read is 222 a turn of a loop that is 160, and a match on an enum 545, where this step's forecast starts from 282 and 682.
 
 **Why here.** It is the cell format. It goes after the instruction format so its instructions are written once, and before the array cells, the frozen literals and `Switch`, which all depend on it.
 
@@ -391,6 +427,8 @@ From: heap 4. Needs: 11.
 
 **Carried from step 9.** `Ctor` holds six fields in the instruction and `CtorOver` five, and a wider one takes a list (`CtorWide`). richards makes 3.6 million of its 10.1 million constructors through the list and nbody all of its 2.5 million, because they have seven. The fields go through an array on the Rust stack (`pass_few`) and are copied again into the cell, so filling the cell straight from the registers takes that away for the inline forms. `Tuple` and `Closure` still gather a `Vec` (`Machine::shared`), and are calls now.
 
+**Carried from step 10.** What fills a cell are functions of their own in exec.rs now (`ctor`, `ctor_wide`, `shared`, `pass_few`), which take the window and `Rest`, and `passing` is a field of `Rest`. A handler that shares pays for the share even when it has none to make: a call that takes all its arguments is 9 machine instructions cheaper without it in the arm. So give a constructor that takes all its fields a form of its own, chosen as a call's is (`Ins::taking`), and measure that first.
+
 **Why here.** It follows the layout it fills, and it removes the temporary Vec that the next steps would otherwise carry.
 
 **Expected gain.** Measured 0.992 for the list form (bounce 13%, json 5.5%), and about 0.995 more for the fixed forms by toy arithmetic.
@@ -400,6 +438,8 @@ From: heap 4. Needs: 11.
 From: heap 5. Needs: 12.
 
 **Carried from step 9.** What goes with the tokens: `CtorOver`, `CtorOverWide`, `DropReuse`, `TailCallSelfKeep`, `KeepList`, `Role::Keep`, the `Kept` and `Over` fields, `Translator::kept`, `Draft::carried`, `Survey::reused` and `carried`, the registers of their own in `alloc::allocate`, and `Machine::keep`, `over`, `again` and `passing`'s use in them. `Open` writes several registers: a field list of `Dst`s is enough, and `live::clash` already makes a clash between every two registers one instruction writes, which `values_written_together_clash` tests on operands made by hand because no instruction has two yet.
+
+**Carried from step 10.** `Machine::keep` is `Window::keep`, `over` is a function in exec.rs, and `again` is `rewrite_keeping` there and in frame.rs.
 
 **Why here.** It is measured on the real VM, including that retiring tokens is itself a gain. It goes before core's tail-call step so that step never has to carry tokens round a loop or split a function's entry in two.
 
@@ -416,6 +456,8 @@ From: core 5. Needs: 10, 13.
 **Carried from step 5.** `call_args` goes here with `passing`. A tail call has cost 2 machine instructions more since step 5 (the cell tag kept in a register in `call_args`), so 2 of what a loop turn gains here is that loss coming back, unless step 10 already took it.
 
 **Carried from step 9.** A bare turn's `TailCallSelf` is 100 of its 201 machine instructions, where this step's forecast starts from a bare turn of 346: take the 145 already gained off it. A self tail call of up to six arguments goes through a small array, and one more takes it through the cold `replace_wide` and `passing`: a turn of 5 arguments is 230, of 6 is 258, of 7 is 363 and of 8 is 394, so the seventh costs 106 and each after it about 31. Moves and a `Jump` take that step away. `live` goes over a function once because every jump goes forward, and refuses one that goes back (`Broken::JumpsBack`). So keep the tail call an instruction through `live` and `alloc`, as the design has it, and make it moves and a `Jump` after. A `Move` whose ends share a register and a `Jump` to the next instruction are left out by `alloc::tidy`, which runs before that.
+
+**Carried from step 10.** A bare turn is 160 and its `TailCallSelf` 88 of that, so that is what moves and a `Jump` replace, and this step's forecast starts there and not at 346. `call_args` went at step 9, with the 2 of step 5's note. A turn of six arguments is 186 a turn and of seven, through `passing`, 621 with what makes the arguments. A tail call still goes through the small array and `Window::rewrite`, whose loops test the frame's size against the window. Parameters are in registers 2 and up, and register 1 has to be given up by a tail call to another function only when the running one keeps its closure, which the loader knows (`Draft::closure`). Today every `TailCall` tests it. A frame's end takes out only the cells, so `Clear` need not write `Nil` over anything else. Read mandelbrot's cycles again here: step 10 took 28.7% of its instructions and added 4% to 7% to its cycles, and the copy of `escape`'s six arguments through the Rust stack is a likely cause.
 
 **Why here.** It finishes the interpreter core while ownership is still the VM's. With tokens gone it needs one entry label per function and no carried scan.
 
@@ -647,6 +689,8 @@ From: compiler 7. Needs: 36, the owner's answer on inlining across modules.
 
 **Expected gain.** Compiler measured 0.956 by hand rewrites on today's VM (json 29%, bounce 21%, spectral_norm, towers, map_churn about 12%). These are deleted calls and closures, which cost half as much after steps 10 and 12, so expect about 0.97.
 
+**Carried from step 10.** A call and its return are 54 of a turn where they were 105, and 198 after step 8, so a deleted call is worth less than half of what this step's figures had, as that line expected. A closure call is 76 cheaper a turn and is still the dear one, at 295 of a turn.
+
 ### Step 38. A self-recursive function is specialised on a known lambda, with clones keyed by the function and the lambda's shape and no clone past the second generation.
 
 From: compiler 8. Needs: 37.
@@ -671,6 +715,8 @@ From: core 6c and the VM half of compiler 9. Needs: 39.
 
 **Carried from step 7.** The audit run is built: `scarlet run --audit=each` loads an `Audit` instruction in front of every other and `Machine::audit` gives `Heap::audit` its roots. Today the roots are every register, because every register owns its value. When a register can hold a borrowed value, the roots have to come from the verifier's maps, or the audit finds more holders than the counts say.
 
+**Carried from step 10.** The audit's roots are the whole stack of registers, the link words among them, which are no cells (`check` in exec.rs). Register 1 is an owned parameter of a function that keeps its closure (`ReadsClosure::keeps`, from the survey in translate.rs) and empty in any other. A function that reads captures is never entered by name, because `emit` refuses it (`Unplaced::NeedsClosure`), so it always finds its closure there. One that reads only itself may be entered by name, and then nothing writes register 1: it holds whatever number the last frame there left, and `GetSelf` takes anything that is no cell for no closure. That is sound only while a frame that ends leaves no cell behind. When the sweeps go, a call by name to such a function has to write `Nil` there, or be refused too, which the compiler would never notice: no program in the repository makes one, since a top-level function names itself as a constant and a lambda is called as a value. A register may hold a stale number, never a stale cell. A call's share bits are the `Arg`s of `Call1Share` to `Call3Share` and the `moved` bits of the wider forms, and `Ins::taking` is what picks the form with none. `fail`, the cold door that stores where a run stopped, is not built, because nothing reads that place. This step owns it: build it, or say it is never built, as question 12 is answered. `At` and the links are there.
+
 **Carried from step 8.** No operator instruction takes a reference: each reads its registers, and `int_slow` builds a fresh answer and gives up nothing. Its kill bits have to be handed to it and acted on after the answer is made, as the design says.
 
 **Carried from step 9.** `moves_on_last_use` is `Walk::decide` in code/live.rs. The walk also refuses a function that reads a value some path did not write, and the tests of code/alloc.rs run the registers along every path and check each read, which is the first half of the verifier's walk (`wrong_register`). `Ins::operands` gives the registers in the order the handler reads them, after the ones it writes.
@@ -687,6 +733,8 @@ From: core 6d and compiler 10. Needs: 40.
 
 **Expected gain.** Core measured it as the difference of two probe builds: fib about 165 to 112 a call, tak about 193 to 104, a geomean factor of 0.90 to 0.91 on core's table. With calls already removed by inlining, expect about 0.92.
 
+**Carried from step 10.** fib is 137 a call with the sweeps kept, not 165, and tak 155, not 193, so there are 25 and 51 left for this step on them. What it takes away: 4 machine instructions on every register written (the old value read, its test and a branch), 2 on every argument taken (the `Nil`), and in a `Ret` 6 to 8 for each register of the frame and 3 to start. Half a sweep is gone already, since only a cell is written over. Read step 40's note on register 1 first: a call by name leaves it unwritten, and only the sweep makes sure that what is there is no cell.
+
 ### Step 42. `Open` placed by the rc pass wherever an owned local of proved shape is only read in parts and then dies, not just at an arm's head. Decide from the scoreboard after step 41.
 
 From: compiler 11. Needs: 41.
@@ -702,6 +750,8 @@ From: compiler 12. Needs: 41.
 **Why here.** It needs the verified contract, it adds a state to both checkers, and it is the least certain gain in the compiler work.
 
 **Expected gain.** About 0.985 (list 16%, deriv 6%). Only 76 of 429 parameters are borrowed in the census.
+
+**Carried from step 10.** A shared argument is cheaper than it was: a turn that passes a pair twice and reads it is 433 to 315. Read the forecast again from there.
 
 ### Step 44. An update that takes a field, done in rc. Most of it is already in the lowering rule of steps 4 and 16, so this step is to check that rule against rc's wider view and delete whichever is redundant.
 
@@ -745,6 +795,8 @@ From: core 7. Needs: 41.
 
 **Carried from step 9.** A function that does not fit is `Unfit::TooWide` in code.rs, which `live` finds when more than 254 values are held at once and `alloc` when the colouring needs more. It is tried once more with its long literals in pieces (code/literals.rs) and then becomes one `Bad`. Both go when values can be spilled, unless pieces are still wanted for what they save in registers. The note about 133 registers no longer holds for the tests: two use all 254.
 
+**Carried from step 10.** The limit is `MAX_VALUES` in frame.rs, 254, from a window of 256 less the link and the closure. The link has room for a frame of 65,535 registers, but a callee's window starts where the frame ends, so a frame wider than a window would need its spilled values somewhere else, as the design has it.
+
 **Why here.** No program in the repository needs it, so it is built once, after the ownership rules it must follow have stopped changing. Move it up if a real program stops for it.
 
 **Expected gain.** None for speed. It removes a stop.
@@ -762,6 +814,8 @@ From: compiler 14. Needs: 43.
 From: core 8. Needs: 41.
 
 **Why here.** The owner has put processes on hold. The earlier steps keep it possible: a call that cannot go ahead has written nothing and runs again.
+
+**Carried from step 10.** The door is built: `steps` returns a `Pause`, `Done` or `NeedStack`, and the machine's loop around it starts it again at an `At`. A variant that carries one more value that the arm does not already have in a register cost 2.7% of the board, through registers the loop then lost, where one that carries a field of the instruction cost nothing. Measure `OutOfFuel` for that. A process's stack starts at 272 registers, 2.1 KB, and a call from its first frame makes it longer by what it needs and a sixteenth. `Stop::StackFull` should become the process's own death.
 
 **Expected gain.** A cost: fib 112 to about 116 to 125 a call, the bare loop 87 to about 91 to 94.
 
