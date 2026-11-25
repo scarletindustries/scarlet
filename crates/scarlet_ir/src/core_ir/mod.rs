@@ -495,6 +495,15 @@ pub enum Atom {
         variant: VariantRef,
         fields: Vec<LocalId>,
     },
+    /// `base`, which is a `variant`, with the fields in `sets` in place of its
+    /// own. A backend may write them where `base` is when nothing else holds
+    /// it, and `base` is held until this runs. Each field is there once, by its
+    /// index, in order, and there is at least one.
+    Update {
+        base: LocalId,
+        variant: VariantRef,
+        sets: Vec<(u16, LocalId)>,
+    },
     /// A primitive operation on `args`. See [`PrimOp`] for each one's operands.
     PrimOp {
         op: PrimOp,
@@ -522,24 +531,43 @@ impl Atom {
         Atom::PrimOp { op, args }
     }
 
-    /// The locals this atom reads, in push order.
-    fn operands(&self) -> impl Iterator<Item = LocalId> + '_ {
-        let (pushed, trailing): (&[LocalId], Option<LocalId>) = match self {
-            Atom::Local(x) => (&[], Some(*x)),
-            Atom::Const(_) | Atom::Load(_) | Atom::Nil | Atom::Bool(_) => (&[], None),
-            Atom::Ctor { fields, .. } => (fields, None),
-            Atom::PrimOp { args, .. } | Atom::Intrinsic { args, .. } => (args, None),
-            Atom::Closure { captures, .. } => (captures, None),
-            Atom::Call { callee, args } => match callee {
-                Callee::Local(id) => (args, Some(*id)),
-                Callee::Known(_) | Callee::Self_ => (args, None),
-            },
-        };
-        pushed.iter().copied().chain(trailing)
+    /// The constructor this atom builds, when it builds one.
+    fn builds(&self) -> Option<VariantRef> {
+        match self {
+            Atom::Ctor { variant, .. } | Atom::Update { variant, .. } => Some(*variant),
+            Atom::Local(_)
+            | Atom::Const(_)
+            | Atom::Load(_)
+            | Atom::Nil
+            | Atom::Bool(_)
+            | Atom::PrimOp { .. }
+            | Atom::Intrinsic { .. }
+            | Atom::Closure { .. }
+            | Atom::Call { .. } => None,
+        }
     }
 
-    pub fn for_each_operand(&self, f: impl FnMut(LocalId)) {
-        self.operands().for_each(f);
+    /// Call `f` with each local this atom reads, in push order.
+    pub fn for_each_operand(&self, mut f: impl FnMut(LocalId)) {
+        match self {
+            Atom::Local(x) => f(*x),
+            Atom::Const(_) | Atom::Load(_) | Atom::Nil | Atom::Bool(_) => {}
+            Atom::Ctor { fields: all, .. }
+            | Atom::PrimOp { args: all, .. }
+            | Atom::Intrinsic { args: all, .. }
+            | Atom::Closure { captures: all, .. } => all.iter().for_each(|x| f(*x)),
+            Atom::Update { base, sets, .. } => {
+                f(*base);
+                sets.iter().for_each(|(_, x)| f(*x));
+            }
+            Atom::Call { callee, args } => {
+                args.iter().for_each(|x| f(*x));
+                match callee {
+                    Callee::Local(x) => f(*x),
+                    Callee::Known(_) | Callee::Self_ => {}
+                }
+            }
+        }
     }
 }
 
@@ -627,13 +655,11 @@ impl CoreExpr {
         while let Some(e) = work.pop() {
             match e {
                 CoreExpr::Let { rhs, body, .. } => {
-                    if let Atom::Ctor { variant, .. } = rhs {
-                        f(*variant);
-                    }
+                    rhs.builds().into_iter().for_each(&mut f);
                     work.push(body);
                 }
-                CoreExpr::Tail(Atom::Ctor { variant, .. }) => f(*variant),
-                CoreExpr::Tail(_) | CoreExpr::Goto(_) => {}
+                CoreExpr::Tail(atom) => atom.builds().into_iter().for_each(&mut f),
+                CoreExpr::Goto(_) => {}
                 CoreExpr::LetJoin { join, body, .. }
                 | CoreExpr::LetCont {
                     cont: join, body, ..
@@ -783,6 +809,21 @@ impl fmt::Display for Atom {
             Atom::Ctor { variant, fields } => {
                 write!(f, "ctor {}.{}(", variant.type_id.0, variant.variant_idx)?;
                 write_locals(f, fields)?;
+                f.write_str(")")
+            }
+            Atom::Update {
+                base,
+                variant,
+                sets,
+            } => {
+                let VariantRef {
+                    type_id,
+                    variant_idx,
+                } = variant;
+                write!(f, "update {}.{}(..{base}", type_id.0, variant_idx)?;
+                for (field, local) in sets {
+                    write!(f, ", {field}: {local}")?;
+                }
                 f.write_str(")")
             }
             Atom::PrimOp { op, args } => {

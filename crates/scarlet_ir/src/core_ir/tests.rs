@@ -52,6 +52,15 @@ fn atom_forms() {
         "ctor 7.1(%2, %3)"
     );
     assert_eq!(
+        Atom::Update {
+            base: LocalId(2),
+            variant: vref(7, 1),
+            sets: vec![(0, LocalId(3)), (4, LocalId(5))],
+        }
+        .to_string(),
+        "update 7.1(..%2, 0: %3, 4: %5)"
+    );
+    assert_eq!(
         Atom::Call {
             callee: Callee::Known(FuncIdx(9)),
             args: vec![LocalId(0)],
@@ -174,4 +183,27 @@ fn(%0:1, %1:1) -> :3
   ret IntLt(%0, %1)
 "
     );
+}
+
+/// An update reads its base and then what it sets, and builds the constructor it
+/// updates, wherever it is.
+#[test]
+fn an_update_reads_its_base_and_builds_its_constructor() {
+    let update = |idx| Atom::Update {
+        base: LocalId(2),
+        variant: vref(7, idx),
+        sets: vec![(0, LocalId(3)), (4, LocalId(2))],
+    };
+    let mut reads = Vec::new();
+    update(1).for_each_operand(|l| reads.push(l.0));
+    assert_eq!(reads, [2, 3, 2]);
+    let e = CoreExpr::Let {
+        bind: bind(4, RTy(0)),
+        rhs: update(1),
+        body: Box::new(CoreExpr::Tail(update(2))),
+    };
+    let mut built = Vec::new();
+    e.for_each_variant(|v| built.push(v));
+    built.sort_by_key(|v| v.variant_idx);
+    assert_eq!(built, [vref(7, 1), vref(7, 2)]);
 }

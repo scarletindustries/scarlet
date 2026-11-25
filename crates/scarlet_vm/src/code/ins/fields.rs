@@ -7,7 +7,7 @@ use scarlet_ir::core_ir::{ConstId, FuncIdx, GlobalSlot};
 use scarlet_ir::intrinsic::Intrinsic;
 
 use super::Makes;
-use crate::heap::Ctor;
+use crate::heap::{Ctor, Layout};
 use crate::ops::NumOp;
 use crate::value::{Float, SmallInt, Tag, Value};
 
@@ -192,6 +192,7 @@ pub(crate) trait Places {
     fn reg_list(&self, i: u32) -> Result<u32, Unplaced>;
     fn arg_list(&self, i: u32) -> Result<u32, Unplaced>;
     fn dst_list(&self, i: u32) -> Result<u32, Unplaced>;
+    fn set_list(&self, i: u32) -> Result<u32, Unplaced>;
 }
 
 impl Part<VReg> for Label {
@@ -609,6 +610,114 @@ impl<const N: usize> Place for Args<VReg, N> {
     }
 }
 
+/// A constructor that an instruction updates, and what `N` of its fields are
+/// set to.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Sets<R, const N: usize> {
+    base: R,
+    /// Bit 0 is the base's [`Arg::moved`], and bit `i + 1` is value `i`'s.
+    moved: u8,
+    pub(crate) layout: Layout,
+    /// Which field each of the values is for, in order.
+    pub(crate) at: [u8; N],
+    values: [R; N],
+}
+
+impl<R: Names, const N: usize> Sets<R, N> {
+    /// `sets` of `base`, when there are `N` of them and the instruction can name
+    /// their fields. Each is shared.
+    pub(crate) fn new(base: R, layout: Layout, sets: &[Assign<R>]) -> Option<Self> {
+        let () = Self::FITS;
+        let sets: &[Assign<R>; N] = sets.try_into().ok()?;
+        let (mut at, mut values) = ([0; N], [R::UNUSED; N]);
+        for ((at, value), set) in at.iter_mut().zip(&mut values).zip(sets) {
+            *at = u8::try_from(set.field).ok()?;
+            *value = set.value.reg;
+        }
+        (!layout.is_long()).then_some(Sets {
+            base,
+            moved: 0,
+            layout,
+            at,
+            values,
+        })
+    }
+
+    const FITS: () = assert!(N < 8);
+}
+
+impl<R: Copy, const N: usize> Sets<R, N> {
+    /// Every operand, when the instruction takes them all.
+    #[inline(always)]
+    pub(crate) fn taken(&self) -> Option<(Taken<R>, [Taken<R>; N])> {
+        let all = (1u8 << N << 1).wrapping_sub(1);
+        (self.moved == all).then(|| (Taken(self.base), self.values.map(Taken)))
+    }
+
+    #[inline(always)]
+    pub(crate) fn base(&self) -> Arg<R> {
+        Arg {
+            reg: self.base,
+            moved: self.moved & 1 == 1,
+        }
+    }
+
+    /// Each field, with what it is set to.
+    #[inline(always)]
+    pub(crate) fn each(&self) -> impl Iterator<Item = (u8, Arg<R>)> + Clone {
+        let moved = self.moved;
+        let fields = self
+            .at
+            .iter()
+            .zip(&self.values)
+            .zip([1u8, 2, 3, 4, 5, 6, 7]);
+        fields.map(move |((at, reg), bit)| {
+            let moved = moved >> bit & 1 == 1;
+            (*at, Arg { reg: *reg, moved })
+        })
+    }
+
+    /// The registers of the values.
+    #[inline(always)]
+    pub(crate) fn values(&self) -> [R; N] {
+        self.values
+    }
+}
+
+impl<R: Names, const N: usize> Part<R> for Sets<R, N> {
+    fn operands(self, lists: &Lists<R>, f: &mut impl FnMut(R, Role)) {
+        self.base().operands(lists, f);
+        for (_, value) in self.each() {
+            value.operands(lists, f);
+        }
+    }
+
+    fn decide(&mut self, _: &mut Lists<R>, moved: &mut impl FnMut(R) -> bool) {
+        let mut bits = u8::from(moved(self.base));
+        let mut bit = 1u8;
+        for reg in self.values {
+            bit = bit.wrapping_shl(1);
+            if moved(reg) {
+                bits |= bit;
+            }
+        }
+        self.moved = bits;
+    }
+}
+
+impl<const N: usize> Place for Sets<VReg, N> {
+    type Placed = Sets<Reg, N>;
+    fn place(self, at: &impl Places) -> Result<Sets<Reg, N>, Unplaced> {
+        Ok(Sets {
+            base: at.reg(self.base)?,
+            moved: self.moved,
+            layout: self.layout,
+            at: self.at,
+            values: place_each(self.values, at)?,
+        })
+    }
+}
+
 /// The operands an instruction hands to a new cell, in order.
 pub(crate) trait Hands {
     fn hands(&self) -> impl ExactSizeIterator<Item = Arg<Reg>>;
@@ -711,6 +820,47 @@ impl Place for DstList {
     }
 }
 
+/// A field of a constructor, and what it is set to.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Assign<R> {
+    pub(crate) field: u16,
+    pub(crate) value: Arg<R>,
+}
+
+/// The fields that an instruction sets, in order, in a list kept beside the
+/// code.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AssignList(pub(crate) u32);
+
+impl AssignList {
+    pub(crate) fn sets<R>(self, lists: &Lists<R>) -> &[Assign<R>] {
+        lists.sets.get(self.0 as usize).map_or(&[], |l| l)
+    }
+}
+
+impl<R: Names> Part<R> for AssignList {
+    fn operands(self, lists: &Lists<R>, f: &mut impl FnMut(R, Role)) {
+        for set in self.sets(lists) {
+            set.value.operands(lists, f);
+        }
+    }
+
+    fn decide(&mut self, lists: &mut Lists<R>, moved: &mut impl FnMut(R) -> bool) {
+        if let Some(sets) = lists.sets.get_mut(self.0 as usize) {
+            for set in sets {
+                set.value.moved = moved(set.value.reg);
+            }
+        }
+    }
+}
+
+impl Place for AssignList {
+    type Placed = AssignList;
+    fn place(self, at: &impl Places) -> Result<AssignList, Unplaced> {
+        at.set_list(self.0).map(AssignList)
+    }
+}
+
 /// The operands of the instructions that have too many to hold. An instruction
 /// is given its place only when the list it names is here ([`super::emit`]).
 #[derive(Debug)]
@@ -718,6 +868,7 @@ pub(crate) struct Lists<R> {
     pub(crate) regs: Vec<Box<[R]>>,
     pub(crate) args: Vec<Box<[Arg<R>]>>,
     pub(crate) dsts: Vec<Box<[MaybeDst<R>]>>,
+    pub(crate) sets: Vec<Box<[Assign<R>]>>,
 }
 
 impl<R> Default for Lists<R> {
@@ -726,6 +877,7 @@ impl<R> Default for Lists<R> {
             regs: Vec::new(),
             args: Vec::new(),
             dsts: Vec::new(),
+            sets: Vec::new(),
         }
     }
 }
@@ -798,6 +950,6 @@ macro_rules! plain {
 }
 
 plain! {
-    Newline, u16, u32, i64, f64, Value, SmallInt, Float, Tag, Ctor, TextId, BinaryId, WhyId,
+    Newline, u16, u32, i64, f64, Value, SmallInt, Float, Tag, Ctor, Layout, TextId, BinaryId, WhyId,
     BlockId, BitsOp, Makes, NumOp, Intrinsic, FuncIdx, ConstId, GlobalSlot,
 }

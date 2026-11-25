@@ -21,16 +21,17 @@
 use scarlet_ir::core_ir::{ConstId, FuncIdx, GlobalSlot};
 use scarlet_ir::intrinsic::Intrinsic;
 
-use crate::heap::Ctor;
+use crate::heap::{Ctor, Layout};
 use crate::ops::NumOp;
 use crate::value::{Float, SmallInt, Tag, Value};
 
 mod fields;
 
 pub(crate) use fields::{
-    Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, DeadList, Dst, DstList, EntryPc, Hands,
-    Hit, Last, Lists, LookList, Looks, MaybeDst, Names, Newline, Part, Pc, Place, Places, Reg,
-    Role, Room, ShareList, Shared, Shares, Src, Taken, TextId, Unplaced, VReg, WhyId,
+    Arg, ArgList, Args, Assign, AssignList, BinaryId, BitsOp, BlockId, Dead, DeadList, Dst,
+    DstList, EntryPc, Hands, Hit, Last, Lists, LookList, Looks, MaybeDst, Names, Newline, Part, Pc,
+    Place, Places, Reg, Role, Room, Sets, ShareList, Shared, Shares, Src, Taken, TextId, Unplaced,
+    VReg, WhyId,
 };
 pub(super) use fields::{Callee, Label, LastReg, OwnEntry, OwnRoom};
 
@@ -258,6 +259,15 @@ instructions! {
     /// The same, for a constructor that shares a field.
     Ctor { dst: Dst<R>, ctor: Ctor, fields: Args<R, 8> },
     CtorWide { dst: Dst<R>, ctor: Ctor, fields: ArgList },
+    /// A constructor with other values at some of its fields, as `sets` says.
+    /// When it is taken and nothing else holds its cell, the values are written
+    /// there. One with a number at its end sets that many fields.
+    Update1 { dst: Dst<R>, sets: Sets<R, 1> },
+    Update2 { dst: Dst<R>, sets: Sets<R, 2> },
+    Update3 { dst: Dst<R>, sets: Sets<R, 3> },
+    /// The same, of the constructor in `base`, laid out as `layout` says, for
+    /// more fields and for a long constructor.
+    UpdateWide { dst: Dst<R>, base: Arg<R>, layout: Layout, sets: AssignList },
     /// Take the constructor in `src` apart. `src` gives up its reference to the
     /// cell, and each field goes to its register with a reference of its own.
     /// When `src` held the only one, the fields' references move and the cell

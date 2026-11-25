@@ -466,6 +466,10 @@ impl Places for Shifted {
     fn dst_list(&self, i: u32) -> Result<u32, Unplaced> {
         Ok(i + 30)
     }
+
+    fn set_list(&self, i: u32) -> Result<u32, Unplaced> {
+        Ok(i + 40)
+    }
 }
 
 /// Giving an instruction its registers keeps everything else about it.
@@ -761,4 +765,149 @@ fn the_listing_shows_where_the_fields_of_a_cell_go() {
         ]
     );
     assert_eq!(lines(".second"), ["1  _, r2 = Open2(move r2, 10.0)"]);
+}
+
+/// The layout of a constructor of `fields` fields.
+fn a_layout(fields: usize) -> Layout {
+    Layout::new(a_ctor(), fields)
+}
+
+fn assign(field: u16, value: Arg<VReg>) -> Assign<VReg> {
+    Assign { field, value }
+}
+
+/// An update reads its base and then its values, each with a mark of its own,
+/// and placing it changes nothing else. One in a list reads the same.
+#[test]
+fn an_update_names_its_base_and_then_its_values() {
+    let at = Shifted { fits: 50 };
+    let listed = [1, 4, 7].map(|field: u16| assign(field, Arg::shared(VReg(u32::from(field)))));
+    for taken in 0..16u32 {
+        let takes = |v: VReg| match v.0 {
+            9 => taken & 1 != 0,
+            1 => taken & 2 != 0,
+            4 => taken & 4 != 0,
+            _ => taken & 8 != 0,
+        };
+        let role = |v: u32| Role::Pass {
+            moved: takes(VReg(v)),
+        };
+        let mut sets = Sets::<VReg, 3>::new(VReg(9), a_layout(8), &listed).expect("three");
+        Part::<VReg>::decide(&mut sets, &mut Lists::default(), &mut |v| takes(v));
+        let dst = Dst(VReg(2));
+        let update: Ins<VReg> = Ins::Update3 { dst, sets };
+        let want = [(VReg(2), Role::Write), (VReg(9), role(9))];
+        let values = [1, 4, 7].map(|v| (VReg(v), role(v)));
+        let want: Vec<_> = want.into_iter().chain(values).collect();
+        assert_eq!(operands(&update, &Lists::default()), want);
+
+        let placed = update.place(&at).expect("a place for everything");
+        let moved: Vec<_> = want
+            .iter()
+            .map(|(v, role)| (Reg(v.0 as u8 + 1), *role))
+            .collect();
+        assert_eq!(operands(&placed, &Lists::default()), moved);
+        let Ins::Update3 { sets, .. } = placed else {
+            panic!("{placed:?}");
+        };
+        let fields: Vec<u8> = sets.each().map(|(field, _)| field).collect();
+        assert_eq!((fields, sets.layout), (vec![1, 4, 7], a_layout(8)));
+        let all = sets
+            .taken()
+            .map(|(base, values)| (base.0, values.map(|r| r.0)));
+        let want = (taken == 15).then_some((Reg(10), [Reg(2), Reg(5), Reg(8)]));
+        assert_eq!(all, want);
+
+        let mut lists = Lists::default();
+        lists.sets.push(Box::new([]));
+        lists.sets.push(Box::new(listed));
+        let (base, layout) = (Arg::shared(VReg(9)), a_layout(300));
+        let sets = AssignList(1);
+        let mut wide: Ins<VReg> = Ins::UpdateWide {
+            dst,
+            base,
+            layout,
+            sets,
+        };
+        wide.decide(&mut lists, &mut |v| takes(v));
+        let names: Vec<_> = operands(&wide, &lists);
+        assert_eq!(names, operands(&update, &Lists::default()));
+        let Ok(Ins::UpdateWide { sets, layout, .. }) = wide.place(&at) else {
+            panic!("an update");
+        };
+        assert_eq!((sets.0, layout), (41, a_layout(300)));
+    }
+    // It takes the fields of no long constructor, and no more than it has room
+    // for, nor one past what it can name.
+    let new = |layout, sets: &[Assign<VReg>]| Sets::<VReg, 3>::new(VReg(9), layout, sets);
+    assert!(new(a_layout(300), &listed).is_none());
+    assert!(new(a_layout(8), &listed[..2]).is_none());
+    let past = [1, 2, 256].map(|field| assign(field, Arg::shared(VReg(0))));
+    assert!(new(a_layout(8), &past).is_none());
+    for bad in [VReg(50), VReg(3)] {
+        let mut listed = listed;
+        listed[2].value.reg = bad;
+        let sets = new(a_layout(8), &listed).expect("three");
+        let placed = Ins::Update3 {
+            dst: Dst(VReg(0)),
+            sets,
+        }
+        .place(&at);
+        assert_eq!(placed.is_ok(), bad == VReg(3));
+        let sets = Sets::<VReg, 3>::new(bad, a_layout(8), &listed).expect("three");
+        let placed = Ins::Update3 {
+            dst: Dst(VReg(0)),
+            sets,
+        }
+        .place(&at);
+        assert_eq!(placed.is_ok(), bad == VReg(3));
+    }
+}
+
+/// An update shows its base, the constructor, and each field with what it is set
+/// to.
+#[test]
+fn the_listing_shows_what_an_update_sets() {
+    let fields: Vec<String> = (0..14).map(|i| format!("f{i} Int")).collect();
+    let ones = vec!["1"; 14].join(", ");
+    let src = format!(
+        "type P {{\n\tP(a Int, b Int, c Int, d Int)\n}}\n\
+         type W {{\n\tW({})\n}}\n\
+         fn one(p P, n Int) P {{ P(..p, b: n) }}\n\
+         fn two(p P, n Int) P {{ P(..p, d: n, a: n) }}\n\
+         fn kept(p P, n Int) (P, P) {{ (P(..p, a: n, c: n + 1, d: 5), p) }}\n\
+         fn many(w W, n Int) W {{ W(..w, f9: n, f1: 5, f2: 6, f3: 7) }}\n\
+         pub fn main() {{\n\
+         \tp = P(1, 2, 3, 4)\n\
+         \tprintln(one(p, 1))\n\
+         \tprintln(two(p, 1))\n\
+         \tprintln(kept(p, 1))\n\
+         \tprintln(many(W({ones}), 1))\n\
+         }}\n",
+        fields.join(", ")
+    );
+    let listing = crate::listing(&program(&src)).expect("the program loads");
+    let code: Code = load(&program(&src), crate::Audit::Never).expect("the program loads");
+    let line = |name: &str| -> String {
+        let mut all = (&code.funcs).into_iter();
+        let index = all.position(|e| e.name.ends_with(name));
+        let text = listing.function(index.expect("a function")).expect("text");
+        let update = text.lines().find(|l| l.contains("Update"));
+        update.expect("an update")[7..].to_string()
+    };
+    assert_eq!(line(".one"), "r2 = Update1(move r2, 10.0, .1: move r3)");
+    assert_eq!(
+        line(".two"),
+        "r2 = Update2(move r2, 10.0, .0: r3, .3: move r3)"
+    );
+    let kept = line(".kept");
+    assert!(
+        kept.contains("Update3(r2, 10.0, .0: move r") && kept.contains(", .2: move r"),
+        "{kept}"
+    );
+    let many = line(".many");
+    assert!(
+        many.contains("UpdateWide(move r2, 11.0, .1: move r") && many.contains(", .9: move r3)"),
+        "{many}"
+    );
 }

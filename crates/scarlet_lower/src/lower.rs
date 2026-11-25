@@ -38,6 +38,7 @@ use std::collections::{BTreeSet, VecDeque};
 
 use super::{
     Atom, Callee, ConstId, CoreBind, CoreExpr, CoreFn, CorePat, JoinId, Load, LocalId, PrimOp,
+    VariantRef,
 };
 use crate::program::{InternalLinkError, LinkError, Table};
 use crate::typed_ir::{
@@ -58,12 +59,24 @@ fn idx16(i: usize) -> R<u16> {
 pub(crate) struct Lowered {
     pub core: CoreFn,
     pub locals: TiVec<LocalId, RTy>,
+    /// Whether it has an [`Atom::Update`].
+    pub updates: bool,
+}
+
+/// What a [`TypedExpr::Update`] becomes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Updates {
+    /// An [`Atom::Update`].
+    Whole,
+    /// A read of each field that is kept, straight after the base, and a new
+    /// constructor.
+    Rebuilt,
 }
 
 /// Lower one function. Each param is bound under the [`BindingId`] its
 /// [`TypedBind`] carries.
-pub(crate) fn lower_fn(temps: TempTys, f: &TypedFn) -> R<Lowered> {
-    let mut lo = Lower::new(temps, f.binds);
+pub(crate) fn lower_fn(temps: TempTys, updates: Updates, f: &TypedFn) -> R<Lowered> {
+    let mut lo = Lower::new(temps, updates, f.binds);
     let params: Vec<CoreBind> = f
         .params
         .iter()
@@ -81,6 +94,7 @@ pub(crate) fn lower_fn(temps: TempTys, f: &TypedFn) -> R<Lowered> {
             ret_ty: f.ret,
         },
         locals: lo.tys,
+        updates: lo.updated,
     })
 }
 
@@ -218,6 +232,9 @@ enum SpinePos {
 
 struct Lower {
     temps: TempTys,
+    updates: Updates,
+    /// Whether an [`Atom::Update`] was made.
+    updated: bool,
     /// The [`RTy`] of every minted [`LocalId`].
     tys: TiVec<LocalId, RTy>,
     /// Maps `BindingId → LocalId`, densely over `TypedFn::binds`. Different
@@ -235,9 +252,11 @@ struct Lower {
 }
 
 impl Lower {
-    fn new(temps: TempTys, binds: usize) -> Self {
+    fn new(temps: TempTys, updates: Updates, binds: usize) -> Self {
         Lower {
             temps,
+            updates,
+            updated: false,
             tys: TiVec::new(),
             binds: vec![None; binds],
             undo: Vec::new(),
@@ -610,6 +629,13 @@ impl Lower {
                     fields,
                 }
             }
+            TypedExpr::Update {
+                variant,
+                base,
+                kept,
+                sets,
+                ..
+            } => self.update(*variant, base, kept, sets)?,
             TypedExpr::Array { elems, .. } => return Ok((self.array(elems, ty)?, ty)),
             TypedExpr::Index { recv, index, .. } => {
                 let r = self.operand(recv)?;
@@ -651,6 +677,41 @@ impl Lower {
             out.push(self.operand(e)?);
         }
         Ok(out)
+    }
+
+    /// A [`TypedExpr::Update`], as [`Self::updates`] says.
+    fn update(
+        &mut self,
+        variant: VariantRef,
+        base: &TypedExpr,
+        kept: &[(u16, TypedExpr)],
+        sets: &[(u16, TypedExpr)],
+    ) -> R<Atom> {
+        let base = self.operand(base)?;
+        let mut fields = Vec::with_capacity(kept.len().saturating_add(sets.len()));
+        if self.updates == Updates::Rebuilt {
+            for (field, read) in kept {
+                fields.push((*field, self.operand(read)?));
+            }
+        }
+        for (field, value) in sets {
+            fields.push((*field, self.operand(value)?));
+        }
+        fields.sort_by_key(|(field, _)| *field);
+        Ok(match self.updates {
+            Updates::Whole => {
+                self.updated = true;
+                Atom::Update {
+                    base,
+                    variant,
+                    sets: fields,
+                }
+            }
+            Updates::Rebuilt => Atom::Ctor {
+                variant,
+                fields: fields.into_iter().map(|(_, local)| local).collect(),
+            },
+        })
     }
 
     /// A dynamic callee is evaluated first, then the arguments, left to right.

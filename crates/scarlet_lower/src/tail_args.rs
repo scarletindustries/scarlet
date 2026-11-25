@@ -629,24 +629,25 @@ impl Reads {
         out
     }
 
-    /// Whether line `at` makes a constructor and is the last to read each of its
-    /// fields. The VM then moves them all into the cell, with an instruction
+    /// Whether line `at` makes a constructor, or updates one, and is the last to
+    /// read each of its operands. The VM then moves them all, with an instruction
     /// that has nothing to share. One more that is read again would cost more
     /// than the move it saves.
     fn takes_all(&self, lines: &[Line<'_>], at: usize) -> bool {
-        match lines.get(at) {
-            Some(Line::Let {
-                rhs: Atom::Ctor { fields, .. },
-                ..
-            }) => {
-                let mut again = fields.iter().any(|f| self.passes(*f));
-                for line in lines.iter().skip(at.saturating_add(1)) {
-                    line.for_each_read(|l| again |= fields.contains(&l));
-                }
-                !again
-            }
-            Some(Line::Let { .. } | Line::Join { .. } | Line::Drop) | None => false,
+        let Some(Line::Let {
+            rhs: rhs @ (Atom::Ctor { .. } | Atom::Update { .. }),
+            ..
+        }) = lines.get(at)
+        else {
+            return false;
+        };
+        let mut operands = Vec::new();
+        rhs.for_each_operand(|l| operands.push(l));
+        let mut again = operands.iter().any(|l| self.passes(*l));
+        for line in lines.iter().skip(at.saturating_add(1)) {
+            line.for_each_read(|l| again |= operands.contains(&l));
         }
+        !again
     }
 
     /// What moving `v`, which line `at` makes, takes, when it can move.
@@ -715,6 +716,7 @@ fn computes(atom: &Atom) -> bool {
         ),
         Atom::Local(_)
         | Atom::Load(_)
+        | Atom::Update { .. }
         | Atom::Call { .. }
         | Atom::Intrinsic { .. }
         | Atom::Closure { .. } => false,

@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 
 use scarlet_ir::core_ir::{
     Atom, Callee, Const, CoreBind, CoreExpr, CoreFn, CorePat, FuncIdx, GlobalSlot, JoinId, Load,
-    LocalId, MAX_PARAMS, PrimOp,
+    LocalId, MAX_PARAMS, PrimOp, VariantRef,
 };
 use scarlet_ir::intrinsic::Intrinsic;
 use scarlet_ir::rty::{ForeignRTy, Prim, RTy, Repr, ResolvedPool};
@@ -33,12 +33,12 @@ use scarlet_ir::tivec::Idx;
 
 use super::forms::{CtorOf, Form};
 use super::ins::{
-    Arg, ArgList, Args, BitsOp, Dead, Dst, DstList, Hit, Ins, Label, LastReg, Lists, LookList,
-    Looks, Makes, MaybeDst, Newline, OwnEntry, OwnRoom, Role, ShareList, Shared, Shares, Src,
-    Taken, VReg,
+    Arg, ArgList, Args, Assign, AssignList, BitsOp, Dead, Dst, DstList, Hit, Ins, Label, LastReg,
+    Lists, LookList, Looks, Makes, MaybeDst, Newline, OwnEntry, OwnRoom, Role, Sets, ShareList,
+    Shared, Shares, Src, Taken, VReg,
 };
 use super::{ReadsClosure, Source, Tables, Unfit, Why, add, built};
-use crate::heap::Ctor;
+use crate::heap::{Ctor, Layout};
 use crate::ops::{Arith, Compare, NumOp, Order};
 use crate::stop::{Arity, Broken, Limit, Missing};
 use crate::value::{Float, SmallInt, Value};
@@ -945,6 +945,11 @@ impl Translator<'_> {
                     }
                 }
             }
+            Atom::Update {
+                base,
+                variant,
+                sets,
+            } => self.update(dst, *base, *variant, sets)?,
         };
         self.push(ins);
         Ok(())
@@ -967,6 +972,48 @@ impl Translator<'_> {
                 dst,
                 ctor,
                 fields: self.arg_list(fields)?,
+            },
+        })
+    }
+
+    fn update(
+        &mut self,
+        dst: Dst<VReg>,
+        base: LocalId,
+        variant: VariantRef,
+        sets: &[(u16, LocalId)],
+    ) -> Result<Ins<VReg>, Unfit> {
+        let odd = || Unfit::Broken(Broken::UpdateFields(variant));
+        let Form::Fields { ctor, fields } = self.source.forms.get(variant)? else {
+            return Err(odd());
+        };
+        let in_order = sets.is_sorted_by(|(a, _), (b, _)| a < b);
+        let last = sets.last().ok_or_else(odd)?;
+        if !in_order || usize::from(last.0) >= fields {
+            return Err(odd());
+        }
+        let sets = sets.iter().map(|(field, local)| Assign {
+            field: *field,
+            value: Arg::shared(of(*local)),
+        });
+        let sets: Box<[_]> = sets.collect();
+        let (base, layout) = (of(base), Layout::new(ctor, fields));
+        // The form with as many fields.
+        macro_rules! one_of {
+            ($($name:ident)*) => {
+                None$(.or_else(|| {
+                    let sets = Sets::new(base, layout, &sets)?;
+                    Some(Ins::$name { dst, sets })
+                }))*
+            };
+        }
+        Ok(match one_of!(Update1 Update2 Update3) {
+            Some(update) => update,
+            None => Ins::UpdateWide {
+                dst,
+                base: Arg::shared(base),
+                layout,
+                sets: add(&mut self.lists.sets, sets).map(AssignList)?,
             },
         })
     }

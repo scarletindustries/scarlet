@@ -43,6 +43,7 @@ pub enum Atom {
     Nil,
     Bool(bool),
     Ctor { variant: VariantRef, fields: Vec<LocalId> },
+    Update { base: LocalId, variant: VariantRef, sets: Vec<(u16, LocalId)> },
     PrimOp { op: PrimOp, args: Vec<LocalId> },
     Intrinsic { intrinsic: Intrinsic, args: Vec<LocalId> },
     Closure { func_idx: FuncIdx, captures: Vec<LocalId> },
@@ -51,6 +52,8 @@ pub enum Atom {
 
 pub enum Callee { Known(FuncIdx), Self_, Local(LocalId) }
 ```
+
+`Update` is `base`, a `variant`, with other values at the fields in `sets`. It is what a record update `R(..base, f: x)` becomes when holding `base` until `x` is computed cannot be seen and the variant of `base` is known (`scarlet_lower/src/update.rs`). Any other record update reads each field it keeps, straight after the base, and makes a new `Ctor`. `lower` makes an update that too in a function that Perceus leaves something undropped in, which is lowered a second time for it: the reads have registers there, and which registers are used says when the undropped value is released.
 
 Every operand is a `LocalId`, every intermediate value is bound by a `Let`, and every bind has a type. A type is an `RTy`, an index into `Program::pool`, and `ResolvedPool::repr` says whether its values can be heap cells (`Repr`): a Float and a type whose constructors have no fields are a `Word`, and every other type is `Counted`. The compiler gives each named type its `Repr` when it gives it a `TypeId`, so no type in the pool is without one. A function's name travels next to it on `LoweredFn`, not on `CoreFn`.
 

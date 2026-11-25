@@ -24,9 +24,14 @@ impl Heap {
 
     /// A heap that holds at most `limit` words.
     pub(crate) fn limited(limit: usize) -> Heap {
+        Heap::limited_for(limit, Numbering::default().finish())
+    }
+
+    /// The same, for a program with these constructors.
+    pub(crate) fn limited_for(limit: usize, ctors: Ctors) -> Heap {
         Heap {
             limit: limit.min(LIMIT_WORDS),
-            ..Heap::default()
+            ..Heap::new(ctors)
         }
     }
 
@@ -1755,4 +1760,119 @@ fn a_cell_in_freed_space_is_named_by_what_it_is_now() {
     let copy = heap.copy(stub).expect("room");
     assert_eq!(copy.variant(), 8);
     assert_eq!(heap.ctor_of(copy), heap.ctor_of(stub));
+}
+
+/// A layout says of a cell what its header does, with any count, and of no cell
+/// of another constructor. A cell has the fields that its constructor has.
+#[test]
+fn a_layout_says_what_the_header_of_a_cell_says() {
+    for n in [1, 2, 8, 9, 252, 253, 254, 300, 1000] {
+        let named = |variant_idx| VariantRef {
+            type_id: TypeId(3),
+            variant_idx,
+        };
+        let (mut heap, ctors) = Heap::knowing(&[(named(0), n), (named(1), n)]);
+        let layout = Layout::new(ctors[1], n);
+        let other = Layout::new(ctors[0], n);
+        assert_ne!(layout, other);
+        assert_eq!(layout.is_long(), n > 253, "{n}");
+        let cell = heap.ctor(ctors[1], &vec![Value::NIL; n]).expect("room");
+        for holders in [1, 2, i32::MAX, i32::MIN] {
+            heap.say_held(cell, holders);
+            for (field, has) in [(0, true), (n - 1, true), (n, false), (n + 1, false)] {
+                assert_eq!(heap.has_field(cell, layout, field), has, "{n} {field}");
+                assert!(!heap.has_field(cell, other, field), "{n} {field}");
+            }
+            let set = heap.set_alone(cell, layout, [0], [Value::bool(true)]);
+            assert_eq!(set.is_some(), holders == 1 && n < 254, "{n} {holders}");
+            assert!(heap.set_alone(cell, other, [0], [Value::NIL]).is_none());
+        }
+        heap.say_held(cell, 1);
+        assert_eq!(heap.ctors.laid_out(layout), Some(named(1)));
+        assert_eq!(heap.set_field(cell, n, Value::NIL).map(Value::bits), None);
+        heap.release(cell).expect("live");
+        assert!(!heap.has_field(cell, layout, 0), "{n}");
+    }
+}
+
+/// A field that is never counted is not counted after a copy that kept it was
+/// refused either.
+#[test]
+fn a_refused_copy_leaves_a_field_that_is_never_counted() {
+    for n in [2, 8, 9, 17, 253, 254] {
+        for wide in [false, true] {
+            let named = VariantRef {
+                type_id: TypeId(3),
+                variant_idx: 0,
+            };
+            let (mut heap, ctors) = Heap::knowing(&[(named, n)]);
+            let field = heap.make(Kind::Binary, &[9]).expect("room");
+            let mut fields = vec![Value::NIL; n];
+            fields[n - 1] = Value::cell(field);
+            let cell = heap.ctor(ctors[0], &fields).expect("room");
+            heap.say_held(field, i32::MIN);
+            let layout = Layout::new(ctors[0], n);
+            heap.limit = heap.words_used();
+            let refused = if wide {
+                heap.copy_set_wide(cell, layout, &[(0, Value::NIL)])
+            } else {
+                heap.copy_set(cell, layout, [0], [Value::NIL])
+            };
+            assert_eq!(refused, Err(NotCopied::Refused(Fault::Full)), "{n} {wide}");
+            assert_eq!(heap.held_by(field), None, "{n} {wide}");
+            heap.say_held(field, 1);
+            heap.release(cell).expect("live");
+            assert_eq!(heap.live(), 0);
+        }
+    }
+}
+
+/// A copy goes in a freed cell's space, and at the end of the arena when there is
+/// none. It has the variant of what it is a copy of.
+#[test]
+fn a_copy_goes_where_there_is_room() {
+    for n in [1, 2, 3, 4, 5, 6, 7, 8, 9, 16, 17, 253, 254] {
+        let named = VariantRef {
+            type_id: TypeId(3),
+            variant_idx: 7,
+        };
+        let fields: Vec<Value> = (0..n as i64)
+            .map(|i| Value::int(i).expect("small"))
+            .collect();
+        let new = Value::bool(true);
+        let last = u8::try_from(n - 1).expect("a few");
+        let mut want: Vec<u64> = fields.iter().map(|v| v.bits()).collect();
+        want[n - 1] = new.bits();
+        for wide in [false, true] {
+            let (mut heap, ctors) = Heap::knowing(&[(named, n)]);
+            let layout = Layout::new(ctors[0], n);
+            let cell = heap.ctor(ctors[0], &fields).expect("room");
+            let copy = |heap: &mut Heap| {
+                let copy = if wide {
+                    heap.copy_set_wide(cell, layout, &[(u16::from(last), new)])
+                } else {
+                    heap.copy_set(cell, layout, [last], [new])
+                };
+                let copy = copy.expect("there is room");
+                let have: Vec<u64> = heap.values(copy).map(Value::bits).collect();
+                assert_eq!(have, want, "{n} {wide}");
+                assert_eq!(heap.ctor_of(copy), Some(ctors[0]), "{n} {wide}");
+                assert_eq!(heap.variant(copy), Some(named));
+                copy
+            };
+            let first = copy(&mut heap);
+            let carved = heap.words_carved();
+            heap.release(first).expect("live");
+            let second = copy(&mut heap);
+            assert_eq!(second.place(), first.place(), "{n} {wide}");
+            assert_eq!(heap.words_carved(), carved, "{n} {wide}");
+            let third = copy(&mut heap);
+            assert!(heap.words_carved() > carved, "{n} {wide}");
+            assert_eq!((heap.made(), heap.live()), (4, 3), "{n} {wide}");
+            for cell in [second, third, cell] {
+                heap.release(cell).expect("live");
+            }
+            assert_eq!(heap.live(), 0);
+        }
+    }
 }

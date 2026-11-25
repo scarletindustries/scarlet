@@ -22,14 +22,14 @@ use scarlet_ir::core_ir::{GlobalSlot, MAX_PARAMS};
 use crate::array::{self, End, Seq};
 use crate::bigint;
 use crate::code::{
-    Arg, BitsOp, Code, Counted, Dead, Dst, Entry, Hands, Ins, Makes, MaybeDst, Op, Reg, Room,
-    Shared, Src, Taken,
+    Arg, AssignList, BitsOp, Code, Counted, Dead, Dst, Entry, Hands, Ins, Makes, MaybeDst, Op, Reg,
+    Room, Sets, Shared, Src, Taken,
 };
 use crate::counts::Counts;
 use crate::eq;
 use crate::float;
 use crate::frame::{self, CLOSURE, FIRST, Link, RESULT, WINDOW, Window, window};
-use crate::heap::{Cell, Ctor, DeadCell, Heap, Kind, Opened, STRIDE, Shape};
+use crate::heap::{Cell, Ctor, DeadCell, Heap, Kind, Layout, NotCopied, Opened, STRIDE, Shape};
 use crate::host::Host;
 use crate::int;
 use crate::map;
@@ -673,6 +673,15 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
                     fields.args(&code.lists),
                 )?;
             }
+            Ins::Update1 { dst, ref sets } => update(win.lend(), rest, dst, sets)?,
+            Ins::Update2 { dst, ref sets } => update_out(win.lend(), rest, dst, sets)?,
+            Ins::Update3 { dst, ref sets } => update_out(win.lend(), rest, dst, sets)?,
+            Ins::UpdateWide {
+                dst,
+                base,
+                layout,
+                sets,
+            } => update_apart(win.lend(), rest, dst, base, layout, sets)?,
             Ins::Open1 {
                 ref dsts,
                 src,
@@ -1417,6 +1426,227 @@ fn new_cell_at_end<const N: usize, G: Hands + ?Sized>(
             }
             Err(fault(refused))
         }
+    }
+}
+
+/// The constructor that `sets` updates, with its values, in `dst`.
+///
+/// A cell that nothing else holds is written there, when every operand is
+/// taken. The old values are given up once all of it is done, so a stop at one
+/// that is freed leaves nothing half done. The rest is [`update_held`]'s.
+#[inline(always)]
+fn update<const N: usize>(
+    mut win: Window<'_>,
+    rest: &mut Rest<'_, '_>,
+    dst: Dst<Reg>,
+    sets: &Sets<Reg, N>,
+) -> Result<(), Stop> {
+    let Some((base, values)) = sets.taken() else {
+        return update_held(win, rest, dst, sets);
+    };
+    let heap = &mut rest.heap;
+    let v = win.get(base.0);
+    let new = values.map(|r| win.get(r.0));
+    let alone = |cell| heap.set_alone(cell, sets.layout, sets.at, new);
+    let Some(old) = v.as_cell().and_then(alone) else {
+        return update_held(win, rest, dst, sets);
+    };
+    for r in values {
+        win.take(r);
+    }
+    let mut dead = false;
+    for old in old {
+        if let Some(old) = old.as_cell() {
+            dead |= heap.release_apart(old).is_err();
+        }
+    }
+    // It is nearly always the same register, which then holds its own word.
+    if dst.0 != base.0 {
+        win.take(base);
+        win.put(heap, dst, v)?;
+    }
+    unless(dead)
+}
+
+/// [`update`], out of the loop.
+#[inline(never)]
+fn update_out<const N: usize>(
+    win: Window<'_>,
+    rest: &mut Rest<'_, '_>,
+    dst: Dst<Reg>,
+    sets: &Sets<Reg, N>,
+) -> Result<(), Stop> {
+    update(win, rest, dst, sets)
+}
+
+/// [`update`] of a cell that something else holds, or that this does not take,
+/// and with a value that this does not take.
+///
+/// The values get their references first. So a cell that is to hold itself has
+/// two holders, and is copied. A copy that is refused has taken nothing.
+#[inline(never)]
+fn update_held<const N: usize>(
+    mut win: Window<'_>,
+    rest: &mut Rest<'_, '_>,
+    dst: Dst<Reg>,
+    sets: &Sets<Reg, N>,
+) -> Result<(), Stop> {
+    let heap = &mut rest.heap;
+    add_each(&win, heap, sets.each().map(|(_, a)| a))?;
+    let base = sets.base();
+    let v = win.get(base.reg);
+    let new = sets.values().map(|r| win.get(r));
+    if base.moved && sets.taken().is_none() {
+        let alone = |cell| heap.set_alone(cell, sets.layout, sets.at, new);
+        if let Some(old) = v.as_cell().and_then(alone) {
+            return update_alone(win, rest, dst, sets, v, old);
+        }
+    }
+    let copied = match v.as_cell() {
+        Some(cell) => heap.copy_set(cell, sets.layout, sets.at, new),
+        None => Err(NotCopied::Other),
+    };
+    let copy = match copied {
+        Ok(copy) => copy,
+        Err(why) => {
+            let why = not_copied(heap, v, why);
+            take_back_each(&win, heap, sets.each().map(|(_, a)| a))?;
+            return Err(why);
+        }
+    };
+    for (_, a) in sets.each() {
+        win.hand(a);
+    }
+    let mut dead = false;
+    if base.moved {
+        dead = win.drop(heap, Dead(base.reg)).is_err();
+    }
+    win.put(heap, dst, Value::cell(copy))?;
+    unless(dead)
+}
+
+/// The end of an update that wrote to `v`, whose cell nothing else holds, and had
+/// `old` there.
+#[inline(never)]
+fn update_alone<const N: usize>(
+    mut win: Window<'_>,
+    rest: &mut Rest<'_, '_>,
+    dst: Dst<Reg>,
+    sets: &Sets<Reg, N>,
+    v: Value,
+    old: [Value; N],
+) -> Result<(), Stop> {
+    for (_, a) in sets.each() {
+        win.hand(a);
+    }
+    win.empty(sets.base().reg);
+    let mut dead = false;
+    for old in old.into_iter().chain([win.swap(dst, v)]) {
+        if let Some(old) = old.as_cell() {
+            dead |= rest.heap.release(old).is_err();
+        }
+    }
+    unless(dead)
+}
+
+/// [`Window::add`] each of `args`, or at a freed cell none of them.
+#[inline(always)]
+fn add_each(
+    win: &Window<'_>,
+    heap: &mut Heap,
+    args: impl Iterator<Item = Arg<Reg>> + Clone,
+) -> Result<(), DeadCell> {
+    for (n, a) in args.clone().enumerate() {
+        if let Err(dead) = win.add(heap, a) {
+            take_back_each(win, heap, args.take(n))?;
+            return Err(dead);
+        }
+    }
+    Ok(())
+}
+
+/// [`Window::take_back`] each of `args`.
+#[cold]
+#[inline(never)]
+fn take_back_each(
+    win: &Window<'_>,
+    heap: &mut Heap,
+    args: impl Iterator<Item = Arg<Reg>>,
+) -> Result<(), DeadCell> {
+    for a in args {
+        win.take_back(heap, a)?;
+    }
+    Ok(())
+}
+
+/// [`update`] of more fields, or of a long constructor.
+#[inline(never)]
+fn update_apart(
+    mut win: Window<'_>,
+    rest: &mut Rest<'_, '_>,
+    dst: Dst<Reg>,
+    base: Arg<Reg>,
+    layout: Layout,
+    sets: AssignList,
+) -> Result<(), Stop> {
+    let sets = sets.sets(&rest.code.lists);
+    let heap = &mut rest.heap;
+    add_each(&win, heap, sets.iter().map(|set| set.value))?;
+    let v = win.get(base.reg);
+    let last = sets.last().map_or(0, |set| usize::from(set.field));
+    let cell = v.as_cell().filter(|_| base.moved);
+    let cell = cell.filter(|c| heap.has_field(*c, layout, last));
+    let mut dead = false;
+    let made = match cell.filter(|c| heap.unique(*c) == Ok(true)) {
+        Some(cell) => {
+            for set in sets {
+                let v = win.hand(set.value);
+                let old = heap.set_field(cell, usize::from(set.field), v);
+                if let Some(old) = old.and_then(Value::as_cell) {
+                    dead |= heap.release(old).is_err();
+                }
+            }
+            win.empty(base.reg);
+            cell
+        }
+        None => {
+            let each = sets.iter().map(|s| (s.field, win.get(s.value.reg)));
+            let each: smallvec::SmallVec<[(u16, Value); STRIDE]> = each.collect();
+            let copied = match v.as_cell() {
+                Some(cell) => heap.copy_set_wide(cell, layout, &each),
+                None => Err(NotCopied::Other),
+            };
+            let copy = match copied {
+                Ok(copy) => copy,
+                Err(why) => {
+                    let why = not_copied(heap, v, why);
+                    take_back_each(&win, heap, sets.iter().map(|set| set.value))?;
+                    return Err(why);
+                }
+            };
+            for set in sets {
+                win.hand(set.value);
+            }
+            if base.moved {
+                dead = win.drop(heap, Dead(base.reg)).is_err();
+            }
+            copy
+        }
+    };
+    win.put(heap, dst, Value::cell(made))?;
+    unless(dead)
+}
+
+/// The stop for an update of `v` that made no copy.
+#[cold]
+#[inline(never)]
+fn not_copied(heap: &Heap, v: Value, why: NotCopied) -> Stop {
+    match why {
+        NotCopied::Refused(why) => fault(why),
+        NotCopied::Other => match v.as_cell().map(|cell| heap.unique(cell)) {
+            Some(Err(dead)) => dead.into(),
+            Some(Ok(_)) | None => Stop::broken(Broken::UpdatedOther(v.view())),
+        },
     }
 }
 

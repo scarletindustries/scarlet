@@ -14,8 +14,9 @@ use scarlet_check::typed::{
     ExprKind, FieldAt, InterpPart, OrShape, Pattern, PatternKind, Rest, Stmt, TypedModule, Var,
 };
 use scarlet_ir::core_ir::{CaptureIdx, Const, ConstId, PrimOp};
-use scarlet_ir::rty::{Prim, RTy, ResolvedPool};
+use scarlet_ir::rty::{Prim, RTy, Repr, ResolvedPool};
 use scarlet_syntax::ast::UnaryOp;
+use scarlet_types::def::TypeDef;
 use scarlet_types::name::{CtorName, ValueName};
 use scarlet_types::ty::Type;
 
@@ -26,6 +27,7 @@ use crate::typed_ir::{
     BindingId, PatRest, TypedArm, TypedArrayElem, TypedBinPatSeg, TypedBinSeg, TypedBind,
     TypedCallee, TypedExpr, TypedFn, TypedInterpPart, TypedPat, ValueRef,
 };
+use crate::update;
 
 type R<T> = Result<T, LinkError>;
 
@@ -44,7 +46,11 @@ pub(crate) fn function(cx: &mut Cx<'_, '_>, site: &Site<'_>) -> R<Named> {
         function: f,
         body,
     } = *site;
-    let mut tx = Tx { cx, m };
+    let mut tx = Tx {
+        cx,
+        m,
+        matched: Vec::new(),
+    };
     let ty = tx.ty(f.ty)?;
     let ret = tx.ret_of(ty)?;
     let mut fx = Fx::new(&f.params, |out| body.for_each_bound(&mut |b| out(b)));
@@ -72,7 +78,11 @@ pub(crate) fn function(cx: &mut Cx<'_, '_>, site: &Site<'_>) -> R<Named> {
 
 /// The top level of `m`: its consts and statements, in the order they run.
 pub(crate) fn toplevel(cx: &mut Cx<'_, '_>, m: &TypedModule) -> R<TypedFn> {
-    let mut tx = Tx { cx, m };
+    let mut tx = Tx {
+        cx,
+        m,
+        matched: Vec::new(),
+    };
     let mut fx = Fx::new(&[], |out| {
         for c in &m.consts {
             c.value.for_each_bound(&mut |b| out(b));
@@ -149,6 +159,15 @@ fn wrap(lets: Vec<(TypedBind, TypedExpr)>, tail: TypedExpr) -> TypedExpr {
         lets.into_iter().map(|(b, e)| Frame::Let(b, e)).collect(),
         tail,
     )
+}
+
+/// `fields` with each index as Core IR has it.
+fn by_index(fields: Vec<(usize, TypedExpr)>) -> R<Vec<(u16, TypedExpr)>> {
+    let index = |i| u16::try_from(i).map_err(|_| InternalLinkError::IndexTooWide(i));
+    fields
+        .into_iter()
+        .map(|(i, value)| Ok((index(i)?, value)))
+        .collect()
 }
 
 /// Whether `e` is a name, or a field or tuple element read off one. Such an
@@ -229,6 +248,9 @@ impl Fx {
 struct Tx<'t, 'x, 'd, 'm> {
     cx: &'t mut Cx<'x, 'd>,
     m: &'m TypedModule,
+    /// The variant of each local that an arm around the expression being made has
+    /// matched, the innermost last.
+    matched: Vec<(BinderId, u16)>,
 }
 
 impl Tx<'_, '_, '_, '_> {
@@ -480,13 +502,7 @@ impl Tx<'_, '_, '_, '_> {
                 let scrut = self.boxed(fx, subject)?;
                 let arms = arms
                     .iter()
-                    .map(|a| {
-                        Ok(TypedArm {
-                            pat: self.pattern(fx, &a.pattern)?,
-                            guard: a.guard.as_ref().map(|g| self.expr(fx, g)).transpose()?,
-                            body: self.expr(fx, &a.body)?,
-                        })
-                    })
+                    .map(|a| self.arm(fx, subject, a))
                     .collect::<R<_>>()?;
                 TypedExpr::Match { ty, scrut, arms }
             }
@@ -499,6 +515,21 @@ impl Tx<'_, '_, '_, '_> {
             ExprKind::Block(block) => self.block(fx, block, ty)?,
             ExprKind::Error => return Err(InternalLinkError::ErrorNode.into()),
         })
+    }
+
+    /// An arm of a match on `subject`.
+    fn arm(&mut self, fx: &mut Fx, subject: &Expr, arm: &t::Arm) -> R<TypedArm> {
+        let pat = self.pattern(fx, &arm.pattern)?;
+        let outer = self.matched.len();
+        if let ExprKind::Var(Var::Local(b)) = &subject.kind
+            && let PatternKind::Ctor { ctor, .. } = &arm.pattern.kind
+        {
+            self.matched.push((*b, ctor.variant));
+        }
+        let guard = arm.guard.as_ref().map(|g| self.expr(fx, g)).transpose()?;
+        let body = self.expr(fx, &arm.body)?;
+        self.matched.truncate(outer);
+        Ok(TypedArm { pat, guard, body })
     }
 
     fn var_value(&mut self, fx: &mut Fx, v: &Var, e: &Expr, ty: RTy) -> R<TypedExpr> {
@@ -698,16 +729,17 @@ impl Tx<'_, '_, '_, '_> {
             ));
         };
         // Whatever has to run does so in the order it was written, the base
-        // among the arguments. The fields the base keeps are read as soon as
-        // it has run, which makes those reads the base's last use unless a
-        // later argument names it. So in `State(..s, v: push(s.v, x))` the
-        // record is given up before the push, which then finds `s.v` with
-        // one holder and writes in place. Giving the record up is something
-        // a program can see when it held the last reference to a handle:
-        // the handle is closed before the later arguments run.
+        // among the arguments. A base with nothing to run counts as written
+        // first, so where its `..s` sits changes nothing.
         //
-        // A base with nothing to run counts as written first, so where its
-        // `..s` sits changes nothing.
+        // The fields the base keeps are read as soon as it has run, which makes
+        // those reads the base's last use unless a later argument names it. So
+        // in `State(..s, v: push(s.v, x))` the record is given up before the
+        // push, which then finds `s.v` with one holder and writes in place.
+        // Giving the record up is something a program can see when it held the
+        // last reference to a handle: the handle is closed before the later
+        // arguments run. Where nothing can tell when the base is given up, it is
+        // one update and no reads.
         let result = self.final_ty(e.ty)?;
         let (before, after) = if runs_nothing(&spread.base) {
             (&[][..], args)
@@ -719,29 +751,53 @@ impl Tx<'_, '_, '_, '_> {
                 })?
         };
         let field_tys = self.field_tys(&result, usize::from(ctor.variant))?;
+        let field_ty = |slot: usize| {
+            field_tys
+                .get(slot)
+                .copied()
+                .ok_or_else(|| InternalLinkError::NoFieldSlot {
+                    ctor: ctor.clone(),
+                    slot,
+                })
+        };
         let mut lets = Vec::with_capacity(field_tys.len().saturating_add(1));
         let mut fields: Vec<(usize, TypedExpr)> = Vec::with_capacity(field_tys.len());
         for a in before {
             let b = self.spill(fx, &a.value, &mut lets)?;
             fields.push((a.slot, self.var(&b)));
         }
-        let base_bind = self.spill(fx, &spread.base, &mut lets)?;
+        let base = self.spill(fx, &spread.base, &mut lets)?;
+        let mut kept = Vec::with_capacity(spread.fills.len());
         for (slot, at) in &spread.fills {
-            let fty = *field_tys
-                .get(*slot)
-                .ok_or_else(|| InternalLinkError::NoFieldSlot {
-                    ctor: ctor.clone(),
-                    slot: *slot,
-                })?;
-            let recv = self.var(&base_bind);
-            let read = self.field(fx, recv, &result, at, fty)?;
-            let kept = self.temp(fx, fty);
-            lets.push((kept, read));
-            fields.push((*slot, self.var(&kept)));
+            let recv = self.var(&base);
+            kept.push((*slot, self.field(fx, recv, &result, at, field_ty(*slot)?)?));
         }
+        let mut given = Vec::with_capacity(after.len());
         for a in after {
-            let b = self.spill(fx, &a.value, &mut lets)?;
-            fields.push((a.slot, self.var(&b)));
+            given.push((a.slot, self.expr(fx, &a.value)?));
+        }
+        let mut numbers = true;
+        for a in args {
+            numbers &= self.is_number(field_ty(a.slot)?)?;
+        }
+        if update::pays(args.len(), kept.len())
+            && self.is_variant(&spread.base, &result, ctor.variant)?
+            && (numbers || given.iter().all(|(_, value)| update::brief(value)))
+        {
+            fields.extend(given);
+            let update = TypedExpr::Update {
+                ty,
+                variant,
+                base: Box::new(self.var(&base)),
+                kept: by_index(kept)?,
+                sets: by_index(fields)?,
+            };
+            return Ok(wrap(lets, update));
+        }
+        for (slot, value) in kept.into_iter().chain(given) {
+            let b = self.temp(fx, value.ty());
+            lets.push((b, value));
+            fields.push((slot, self.var(&b)));
         }
         fields.sort_by_key(|(s, _)| *s);
         let ctor = TypedExpr::Ctor {
@@ -750,6 +806,31 @@ impl Tx<'_, '_, '_, '_> {
             args: fields.into_iter().map(|(_, v)| v).collect(),
         };
         Ok(wrap(lets, ctor))
+    }
+
+    /// Whether a value of type `ty` holds nothing but a number, if it holds
+    /// anything.
+    fn is_number(&self, ty: RTy) -> R<bool> {
+        let pool = self.pool();
+        let word = pool.repr(ty).map_err(InternalLinkError::from)? == Repr::Word;
+        let int = pool.prim_of(ty).map_err(InternalLinkError::from)? == Some(Prim::Int);
+        Ok(word || int)
+    }
+
+    /// Whether `base`, of type `t`, is always variant `v` of it: the type has no
+    /// other, or an arm the expression is in has matched it.
+    fn is_variant(&self, base: &Expr, t: &Type, v: u16) -> R<bool> {
+        if let ExprKind::Var(Var::Local(b)) = &base.kind
+            && let Some((_, matched)) = self.matched.iter().rev().find(|(of, _)| of == b)
+            && *matched == v
+        {
+            return Ok(true);
+        }
+        let (name, _) = t
+            .as_named()
+            .ok_or_else(|| InternalLinkError::FieldOfUnnamed(t.clone()))?;
+        let variants = self.cx.ids.defs.type_def(name).and_then(TypeDef::variants);
+        Ok(variants.is_some_and(|all| all.len() == 1))
     }
 
     /// Run `e` into a new `let`, returning its binding.

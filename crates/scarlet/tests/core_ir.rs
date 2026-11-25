@@ -298,7 +298,8 @@ core_golden!(
 );
 
 // A base that has to run keeps its place among the arguments: `n + 1`, then
-// `make(n)` and the reads of the fields it keeps, then `n + 2`.
+// `make(n)`, then `n + 2`. The fields that are set hold numbers, so it is one
+// update.
 core_golden!(
     record_update_base_runs_in_its_place,
     "type P {\n\ta Int\n\tb Int\n\tc Int\n\td Int\n}\n\
@@ -310,6 +311,338 @@ core_golden!(
      \tf(1).b\n\
      }\n"
 );
+
+// The same where a field that is set holds an array: `[n]`, then `make(n)` and
+// the reads of the fields it keeps, then `[..xs, n]`.
+core_golden!(
+    record_update_reads_where_its_base_runs,
+    "type P {\n\ta Array(Int)\n\tb Int\n\tc Array(Int)\n\td Int\n}\n\
+     fn make(n Int) P { P([], n, [], n) }\n\
+     fn f(n Int, xs Array(Int)) P {\n\
+     \tP(a: [n], ..make(n), c: [..xs, n])\n\
+     }\n\
+     pub fn main() {\n\
+     \tf(1, []).b\n\
+     }\n"
+);
+
+/// What the function `f` of `src` is in Core IR.
+fn f_of(src: &str) -> String {
+    let core = lower(src);
+    let functions = core.split("\n\n");
+    let of_f = |f: &&str| {
+        f.lines()
+            .next()
+            .is_some_and(|head| head.contains("main.f("))
+    };
+    let f = functions.into_iter().find(of_f);
+    f.unwrap_or_else(|| panic!("no `f` in:\n{core}"))
+        .to_string()
+}
+
+/// The words of `text` that are names.
+fn names(text: &str) -> Vec<&str> {
+    let part = |c: char| !c.is_ascii_alphanumeric() && c != '_';
+    text.split(part).collect()
+}
+
+/// `f` in Core IR, with those of these parameters that `body` names.
+fn f_with(params: &[(&str, &str)], ty: &str, body: &str) -> String {
+    f_of(&program_with(params, ty, body))
+}
+
+/// A program whose `f` is `body`, with those of these parameters that it names.
+fn program_with(params: &[(&str, &str)], ty: &str, body: &str) -> String {
+    let named = names(body);
+    let params = params.iter().filter(|(name, _)| named.contains(name));
+    let params: Vec<String> = params.map(|(name, ty)| format!("{name} {ty}")).collect();
+    let import = |m: &str| named.contains(&m).then(|| format!("import scarlet/{m}\n"));
+    let imports: String = ["array", "string"].into_iter().filter_map(import).collect();
+    format!(
+        "import scarlet/net/socket\n\
+         import scarlet/map\n\
+         {imports}\
+         pub type Color {{\n\tRed\n\tBlue\n}}\n\
+         pub type Q {{\n\tQ(n Int, s String, t String)\n}}\n\
+         pub type Tree {{\n\tLeaf\n\tNode(l Tree, r Tree)\n}}\n\
+         pub type V {{\n\tA(n Int, xs Array(Int), k Int)\n\tB(xs Array(Int), n Int, k Int)\n}}\n\
+         pub type U {{\n\tC(n Int, x Int, k Int)\n\tD(x Int, n Int, k Int)\n}}\n\
+         pub type Two {{\n\tTwo(n Int, m Int)\n}}\n\
+         pub type G(a) {{\n\tG(v a, n Int, k Int)\n}}\n\
+         pub type P {{\n\
+         \tn Int\n\tx Float\n\tb Bool\n\tc Color\n\ts String\n\txs Array(Int)\n\
+         \tm map::Map(Int, Int)\n\tq Q\n\tt Tree\n\tconn Option(socket::Socket)\n\
+         \tg fn(Int) Int\n\to Option(Int)\n}}\n\
+         pub fn work(n Int) Int {{ n * n }}\n\
+         pub fn list(n Int) Array(Int) {{ [n] }}\n\
+         pub fn make(n Int) Two {{ Two(n, n) }}\n\
+         pub fn copy(p P) P {{ p }}\n\
+         pub fn f({}) {ty} {{\n\t{body}\n}}\n\
+         pub fn main() {{ println('') }}\n",
+        params.join(", ")
+    )
+}
+
+/// How many updates there are in `f`.
+fn updates(f: &str) -> usize {
+    f.matches(" update ").count()
+}
+
+/// A record update is one update when nothing can tell that it holds its base
+/// until the new fields are computed. Otherwise it reads the fields it keeps and
+/// makes a new constructor.
+#[test]
+fn a_record_update_is_one_where_holding_its_base_cannot_be_seen() {
+    let of_p = |body: &str| {
+        let params = [
+            ("p", "P"),
+            ("r", "P"),
+            ("i", "Int"),
+            ("j", "Int"),
+            ("y", "Float"),
+            ("ys", "Array(Int)"),
+            ("f2", "fn(Int) Int"),
+            ("z", "Option(Int)"),
+        ];
+        f_with(&params, "P", body)
+    };
+    for body in [
+        // Fields that hold numbers are set to anything.
+        "P(..p, n: 1)",
+        "P(..p, n: p.n + 1)",
+        "P(..p, n: work(p.n))",
+        "P(..p, n: f2(i))",
+        "P(..p, n: work(p.n), x: p.x * 2.0, b: !p.b)",
+        "P(..p, c: if i > j { Red } else { p.c })",
+        "P(..p, b: p.s == r.s)",
+        "P(..p, n: array::length(array::put(p.xs, 0, 1)))",
+        "P(..p, n: string::length('${i}'))",
+        "P(..p, n: match ys { [] -> 0\n [h, ..] -> h + 1\n })",
+        "P(n: work(1), ..p)",
+        "P(..p, n: Q(..p.q, s: 'x').n)",
+        // Fields that hold anything are set to what takes a few steps.
+        "P(..p, s: 'x')",
+        "P(..p, s: r.s)",
+        "P(..p, xs: [])",
+        "P(..p, xs: [i, j])",
+        "P(..p, xs: p.xs)",
+        "P(..p, xs: ys)",
+        "P(..p, conn: None)",
+        "P(..p, conn: r.conn)",
+        "P(..p, conn: r.conn, xs: ys, s: 'x')",
+        "P(..p, g: f2)",
+        "P(..p, g: fn(k) k + i)",
+        "P(..p, t: Node(p.t, Leaf))",
+        "P(..p, q: Q(i, 's', p.s))",
+        "P(..p, q: r.q)",
+        "P(..p, m: r.m)",
+        "P(..p, o: Some(i))",
+        "P(..p, o: p.xs[0])",
+        "P(..p, xs: match z { Some(_) -> ys\n None -> p.xs\n })",
+        "P(..p, xs: match ys { [] -> p.xs\n [_, _, ..] -> ys\n [_] -> [1]\n })",
+        "P(..p, xs: match z { Some(1..4 | 7) -> ys\n Some(_) | None -> p.xs\n })",
+        "P(..p, xs: if p.b && r.b || !r.b { ys } else { p.xs })",
+        "P(..p, x: y * 2.0, xs: { k = ys\n k })",
+        "P(..p, xs: 0..5)",
+    ] {
+        let f = of_p(body);
+        assert!(updates(&f) > 0, "{body}:\n{f}");
+        // It reads no field that it only keeps.
+        assert!(!f.contains("= Field(6)(%0)"), "{body}:\n{f}");
+    }
+    for body in [
+        // Computing what is set calls, writes, or takes as long as it is big.
+        "P(..p, xs: list(i))",
+        "P(..p, xs: array::put(p.xs, 0, 1))",
+        "P(..p, xs: [..p.xs, 1])",
+        "P(..p, xs: [1, ..ys])",
+        "P(..p, xs: match p.xs { [] -> ys\n [_, ..t] -> t\n })",
+        "P(..p, xs: match work(i) { 0 -> ys\n _ -> p.xs\n })",
+        "P(..p, xs: match z { Some(_) if i > 2 -> ys\n Some(_) | None -> p.xs\n })",
+        "P(..p, xs: match z { Some(_) -> list(1)\n None -> p.xs\n })",
+        "P(..p, xs: if i > j { ys } else { p.xs })",
+        "P(..p, xs: ys[0..1] or [])",
+        "P(..p, n: 1, xs: list(i))",
+        "P(..p, xs: ys, n: work(i))",
+        "P(..p, s: p.s + 'x')",
+        "P(..p, s: '${i}')",
+        "P(..p, m: map::set(p.m, 1, 2))",
+        "P(..p, conn: match f2(i) { 0 -> None\n _ -> p.conn\n })",
+        "P(..p, conn: None, n: i * j)",
+        "P(..p, conn: None, n: -i)",
+        "P(..p, conn: None, b: i == j)",
+        "P(..p, conn: None, b: p.s == r.s)",
+        "P(..p, t: Node(p.t, Leaf), n: i + 1)",
+        "P(..p, o: Some(i + 1))",
+        "P(..p, o: Some(f2(i)))",
+        "P(..p, g: fn(k) k + i, n: work(1))",
+        "P(..p, t: { println('')\n Leaf })",
+        "P(..p, o: p.xs[i + 1])",
+        // What is set before the base runs is of a field of it too.
+        "P(conn: r.conn, ..copy(p), n: work(i))",
+        // Nothing is set.
+        "P(..p)",
+    ] {
+        let f = of_p(body);
+        assert_eq!(updates(&f), 0, "{body}:\n{f}");
+        assert!(f.contains("ctor"), "{body}:\n{f}");
+    }
+    // An update that a field is set to may write in place, so it is not brief.
+    let nested = of_p("P(..p, q: Q(..p.q, s: 'x'))");
+    assert_eq!(updates(&nested), 1, "{nested}");
+    let of_g = |ty: &str, body: &str| {
+        let params = [("g", ty), ("val", "a"), ("i", "Int")];
+        updates(&f_with(&params, ty, body))
+    };
+    // A value of a type variable may be anything.
+    assert_eq!(of_g("G(a)", "G(..g, v: val)"), 1);
+    assert_eq!(of_g("G(a)", "G(..g, n: work(i))"), 1);
+    assert_eq!(of_g("G(a)", "G(..g, v: val, n: i + 1)"), 0);
+    assert_eq!(of_g("G(Int)", "G(..g, v: work(i))"), 1);
+    assert_eq!(of_g("G(Array(Int))", "G(..g, v: list(i))"), 0);
+    // Every field is set.
+    let all = f_with(&[("i", "Int")], "Two", "Two(..make(i), n: 1, m: 2)");
+    assert_eq!(updates(&all), 0, "{all}");
+    // The base has to be the variant that is made.
+    let of_v = |body: &str| {
+        let params = [("v", "V"), ("w", "V"), ("i", "Int")];
+        updates(&f_with(&params, "V", body))
+    };
+    for (body, want) in [
+        ("A(..v, n: i)", 0),
+        (
+            "match v { A(..) -> A(..v, n: i)\n B(..) -> B(..v, n: i) }",
+            2,
+        ),
+        (
+            "match v { A(..) -> B(..v, n: i)\n B(..) -> A(..v, n: i) }",
+            0,
+        ),
+        ("match v { A(..) -> A(..w, n: i)\n B(..) -> w }", 0),
+        (
+            "match v { A(..) -> match w { A(..) -> A(..v, n: 1)\n B(..) -> B(..w, n: 2) }\n B(..) -> w }",
+            2,
+        ),
+        (
+            "match v { A(..) -> match v { A(..) -> A(..v, n: 1)\n B(..) -> B(..v, n: 2) }\n B(..) -> w }",
+            2,
+        ),
+        (
+            "match v { A(n, ..) if n > 0 -> A(..v, n: i)\n A(..) | B(..) -> v }",
+            1,
+        ),
+        ("match v { A(..) | B(..) -> A(..v, n: i) }", 0),
+        ("match v { u -> A(..u, n: i) }", 0),
+        (
+            "match v { A(..) -> { v = w\n A(..v, n: i) }\n B(..) -> v }",
+            0,
+        ),
+    ] {
+        assert_eq!(of_v(body), want, "{body}");
+    }
+    // An arm says nothing past its end.
+    let of_u = |body: &str| updates(&f_with(&[("u", "U"), ("i", "Int")], "U", body));
+    for (body, want) in [
+        ("C(..u, n: i)", 0),
+        (
+            "j = match u { C(..) -> 1\n D(..) -> 2 }\n C(..u, n: i + j)",
+            0,
+        ),
+        (
+            "j = match u { C(..) -> 1\n D(..) -> 2 }\n D(..u, n: i + j)",
+            0,
+        ),
+        (
+            "match u { C(..) -> { j = match u { C(..) -> 1\n D(..) -> 2 }\n C(..u, n: i + j) }\n D(..) -> u }",
+            1,
+        ),
+        (
+            "match u { C(..) -> { j = match u { C(..) -> 1\n D(..) -> 2 }\n D(..u, n: i + j) }\n D(..) -> u }",
+            0,
+        ),
+    ] {
+        assert_eq!(of_u(body), want, "{body}");
+    }
+    // It is known in a function made in the arm too.
+    let params = [("v", "V")];
+    let body = "match v {\n A(..) -> fn(i) A(..v, n: i)\n B(..) -> fn(_) v\n}";
+    let source = program_with(&params, "fn(Int) V", body);
+    let core = lower(&source);
+    let made: Vec<&str> = core
+        .split("\n\n")
+        .filter(|f| f.contains(" update "))
+        .collect();
+    assert_eq!(made.len(), 1, "{core}");
+    assert!(
+        !made[0].contains("main.f(") && !made[0].contains(" ctor "),
+        "{core}"
+    );
+}
+
+/// An update of few fields is one whatever it keeps, and one of more when it keeps
+/// twice as many.
+#[test]
+fn a_record_update_of_many_fields_is_one_when_it_keeps_more() {
+    for n in 1..=14usize {
+        for sets in 1..=n {
+            let fields: String = (0..n).map(|i| format!("\tf{i} Int\n")).collect();
+            let set: String = (0..sets).map(|i| format!(", f{i}: i")).collect();
+            let core = f_of(&format!(
+                "type P {{\n{fields}}}\nfn f(p P, i Int) P {{ P(..p{set}) }}\npub fn main() {{ println('') }}\n"
+            ));
+            let kept = n - sets;
+            let want = kept > 0 && (sets <= 3 || kept >= 2 * sets);
+            assert_eq!(core.contains("update "), want, "{sets} of {n}:\n{core}");
+        }
+    }
+}
+
+/// A function that holds a value that may be a handle and that nothing drops
+/// keeps every register it had, so its updates read and rebuild as they did.
+#[test]
+fn a_function_that_leaves_a_handle_undropped_rebuilds() {
+    let src = |update: &str| {
+        format!(
+            "import scarlet/net/socket\n\
+             type P {{\n\tn Int\n\tm Int\n\tconn Option(socket::Socket)\n}}\n\
+             fn open(i Int) Option(socket::Socket) {{ if i > 0 {{ None }} else {{ open(i + 1) }} }}\n\
+             fn f(p P, i Int) P {{\n\
+             \tn = if i > 0 {{\n\t\to = open(i)\n\
+             \t\tmatch o {{ Some(_) -> 1\n None -> 2 }}\n\t}} else {{ 3 }}\n\
+             \t{update}\n\
+             }}\n\
+             pub fn main() {{ println('') }}\n"
+        )
+    };
+    let left = f_of(&src("P(..p, n: n)"));
+    assert_eq!(updates(&left), 0, "{left}");
+    assert!(
+        left.contains("Field(1)") && left.contains(" ctor "),
+        "{left}"
+    );
+    // An update may hold a handle too, and here nothing else does.
+    let one = |inside: &str| {
+        f_of(&format!(
+            "import scarlet/net/socket\n\
+             type P {{\n\tn Int\n\tm Int\n\tconn Option(socket::Socket)\n}}\n\
+             fn f(p P, i Int) P {{\n\
+             \ta = if i > 0 {{\n\t\t{inside}\n\t}} else {{ 3 }}\n\
+             \tP(..p, n: a)\n\
+             }}\n\
+             pub fn main() {{ println('') }}\n"
+        ))
+    };
+    let made = one("q = P(..p, n: i)\n\t\tq.n + q.m");
+    assert_eq!(updates(&made), 0, "{made}");
+    assert_eq!(made.matches(" ctor ").count(), 2, "{made}");
+    let read = one("p.n + p.m");
+    assert_eq!(updates(&read), 1, "{read}");
+    let held = src("P(..p, n: n)");
+    let start = held.find("if i > 0 {\n").expect("the join");
+    let end = held.find("else { 3 }").expect("its end");
+    let none = f_of(&held.replace(&held[start..end], "if i > 0 { i * 2 } "));
+    assert_eq!(updates(&none), 1, "{none}");
+}
 
 /// A base that is only a name has nothing to run, so where its `..s` is
 /// written changes nothing: all three spellings lower to the same code.

@@ -293,12 +293,26 @@ pub enum TypedExpr {
         idx: usize,
     },
     /// `args` is exactly the variant's arity, in declared-field order. The
-    /// elaborator has reordered labels and expanded `..base` spreads into
-    /// [`TypedExpr::Field`] projections.
+    /// elaborator has reordered labels, and expanded a `..base` spread that is
+    /// no [`TypedExpr::Update`] into [`TypedExpr::Field`] projections.
     Ctor {
         ty: RTy,
         variant: VariantRef,
         args: Vec<TypedExpr>,
+    },
+    /// `base`, which is a `variant`, with some of its fields set to others.
+    /// The lowering may hold `base` until the fields in `sets` are computed
+    /// (`update.rs`).
+    Update {
+        ty: RTy,
+        variant: VariantRef,
+        base: Box<TypedExpr>,
+        /// Each field that `base` keeps, by its index, as a read of it from
+        /// `base`, which is a local here.
+        kept: Vec<(u16, TypedExpr)>,
+        /// Each other field, in the order they are written. There is
+        /// at least one.
+        sets: Vec<(u16, TypedExpr)>,
     },
     Array {
         ty: RTy,
@@ -378,6 +392,7 @@ impl TypedExpr {
             | TypedExpr::TupleIndex { ty, .. }
             | TypedExpr::Field { ty, .. }
             | TypedExpr::Ctor { ty, .. }
+            | TypedExpr::Update { ty, .. }
             | TypedExpr::Array { ty, .. }
             | TypedExpr::Index { ty, .. }
             | TypedExpr::Slice { ty, .. }

@@ -311,6 +311,10 @@ suite! {
         // else, with fields left out, rebuilt the same, larger and smaller,
         // nested, guarded, and round a loop.
         open_cells,
+        // Record updates of every shape: of a record alone and of one that is
+        // shared, of one field and of many, set to numbers, to cells and to the
+        // record itself, and of a variant that an arm has matched.
+        record_updates,
         // Tail calls of every shape: to self, to other functions and through
         // values, with arguments kept, traded, turned round, made, constant and
         // given to several parameters, over accumulators of every kind.

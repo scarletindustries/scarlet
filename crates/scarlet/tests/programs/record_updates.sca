@@ -1,0 +1,208 @@
+// Record updates of every shape: of a record that nothing else holds and of one
+// that is shared, of one field and of many, set to numbers, to cells and to the
+// record itself, and of a variant that an arm has matched. `shift` sets two
+// numbers where they are, `three` sets three and `four` sets four. `fill`, `many`
+// and `few` set a field to something that takes work, so each of their records is
+// made again from the fields it keeps.
+
+import scarlet/array
+import scarlet/map
+
+type Point {
+	x Int
+	y Int
+	name String
+}
+
+type Line {
+	from Point
+	to Point
+	seen Array(Int)
+	tags map::Map(String, Int)
+}
+
+type Chain {
+	inner Option(Chain)
+	depth Int
+}
+
+type Shape {
+	Circle(id Int, r Float, tags Array(String))
+	Square(r Float, id Int, tags Array(String))
+}
+
+type Box(a) {
+	value a
+	times Int
+	note String
+}
+
+type Wide {
+	a Int
+	b Float
+	c String
+	d Array(Int)
+	e Bool
+	f Option(Int)
+	g Int
+	h Int
+	i String
+	j Int
+	k Int
+	l Int
+	m Int
+}
+
+fn twice(n Int) Int {
+	println('twice ${n}')
+	n * 2
+}
+
+fn shift(p Point, by Int) Point {
+	Point(..p, x: p.x + by, y: p.y - by)
+}
+
+fn walk(p Point, n Int) Point {
+	if n == 0 {
+		p
+	} else {
+		walk(shift(p, n), n - 1)
+	}
+}
+
+fn fill(l Line, n Int) Line {
+	if n == 0 {
+		l
+	} else {
+		fill(Line(..l, seen: [..l.seen, n], tags: map::set(l.tags, '${n % 5}', n)), n - 1)
+	}
+}
+
+fn wrap(c Chain, n Int) Chain {
+	if n == 0 {
+		c
+	} else {
+		wrap(Chain(..c, inner: Some(c), depth: n), n - 1)
+	}
+}
+
+fn depth(c Chain, acc Int) Int {
+	match c.inner {
+		Some(inner) -> depth(inner, acc + 1)
+		None -> acc
+	}
+}
+
+fn rename(s Shape, id Int) Shape {
+	match s {
+		Circle(..) -> Circle(..s, id: id)
+		Square(r, ..) -> Square(..s, id: id, r: r * 2.0)
+	}
+}
+
+// Which variant `s` is, is not known, so it is always made a circle.
+fn rounded(s Shape) Shape {
+	Circle(..s, r: 1.0)
+}
+
+fn put(b Box(a), value a) Box(a) {
+	Box(..b, value: value, times: b.times + 1)
+}
+
+fn many(w Wide, n Int) Wide {
+	Wide(..w, g: n, a: n + 1, c: 'c${n}', m: twice(n))
+}
+
+fn few(w Wide, n Int) Wide {
+	Wide(..w, e: !w.e, f: Some(n), j: w.j + n)
+}
+
+fn three(w Wide, n Int) Wide {
+	Wide(..w, a: n, g: w.g + twice(n), e: !w.e)
+}
+
+fn four(w Wide, n Int) Wide {
+	Wide(..w, a: w.a + n, b: w.b * 0.5, h: twice(n), m: w.a)
+}
+
+fn rolled(w Wide, n Int) Wide {
+	if n == 0 {
+		w
+	} else {
+		rolled(four(three(w, n), n), n - 1)
+	}
+}
+
+fn after(w Wide) (Int, Int, Int) {
+	v = Wide(..w, a: 100)
+	u = Wide(..v, a: v.a + w.a, l: 7)
+	(w.a, v.a, u.a + u.l)
+}
+
+fn last(xs Array(Int)) Int {
+	xs[array::length(xs) - 1] or 0
+}
+
+pub fn main() {
+	p = Point(1, 2, 'start')
+	println(shift(p, 10))
+	println(p)
+	println(walk(p, 1000))
+	println(Point(..shift(p, 1), name: p.name))
+	println(Point(x: twice(1), ..shift(p, twice(2)), y: twice(3)))
+	println(Point(..p))
+
+	big = 4611686018427387904
+	println(walk(Point(..p, x: big * big), 3))
+	println(Point(..p, x: big + big, y: p.x))
+
+	line = Line(p, Point(..p, x: 5), [], map::new())
+	full = fill(line, 100)
+	println(array::length(full.seen) + last(full.seen) + map::size(full.tags))
+	println(Line(..full, from: full.to, to: full.from, seen: []))
+	println(Line(..line, from: Point(..line.from, name: 'moved')))
+	println(line.from)
+
+	c = wrap(Chain(None, 0), 50)
+	println(depth(c, 0))
+	println(depth(Chain(..c, inner: None), 0))
+	println(depth(c, 0))
+
+	circle = Circle(1, 2.5, ['round'])
+	square = Square(3.0, 2, ['flat'])
+	println(rename(circle, 7))
+	println(rename(rename(square, 8), 9))
+	println(rounded(square))
+	println(rounded(rename(circle, 10)))
+	println(circle)
+
+	println(put(put(Box(1, 0, 'n'), 2), 3))
+	println(put(Box([1], 0, 'xs'), [..[2], 3]))
+	println(put(Box(p, 0, 'p'), Point(..p, y: 0)))
+
+	w = Wide(1, 1.5, 'c', [1, 2], True, None, 2, 3, 'i', 4, 5, 6, 7)
+	println(many(w, 20))
+	println(few(few(w, 1), 2))
+	println(few(many(few(w, 3), 4), 5))
+	println(three(w, 8))
+	println(three(three(w, 9), 10))
+	println(four(w, 11))
+	println(four(four(w, 12), 13))
+	println(rolled(w, 4))
+	println(after(w))
+	println(w)
+
+	move = fn(by) Point(..p, x: p.x + by)
+	println(move(1))
+	println(move(2))
+	println(array::map([p, shift(p, 5)], fn(q) Point(..q, x: q.x * 2, y: q.y * 2)))
+	println(if p.x > 0 {
+		Point(..p, name: 'if')
+	} else {
+		p
+	})
+	println(match Some(p) {
+		Some(q) -> Point(..q, name: 'match')
+		None -> p
+	})
+}

@@ -1,0 +1,224 @@
+Point{ x: 11, y: -8, name: start }
+Point{ x: 1, y: 2, name: start }
+Point{ x: 500501, y: -500498, name: start }
+Point{ x: 2, y: 1, name: start }
+twice 1
+twice 2
+twice 3
+Point{ x: 2, y: 6, name: start }
+Point{ x: 1, y: 2, name: start }
+Point{ x: 21267647932558653966460912964485513222, y: -4, name: start }
+Point{ x: 9223372036854775808, y: 1, name: start }
+106
+Line {
+  from: Point{ x: 5, y: 2, name: start },
+  to: Point{ x: 1, y: 2, name: start },
+  seen: [],
+  tags: {2: 2, 3: 3, 4: 4, 0: 5, 1: 1}
+}
+Line {
+  from: Point{ x: 1, y: 2, name: moved },
+  to: Point{ x: 5, y: 2, name: start },
+  seen: [],
+  tags: {}
+}
+Point{ x: 1, y: 2, name: start }
+50
+0
+50
+Circle(
+  7,
+  2.5,
+  [round]
+)
+Square(
+  12.0,
+  9,
+  [flat]
+)
+Circle(
+  2,
+  1.0,
+  [flat]
+)
+Circle(
+  10,
+  1.0,
+  [round]
+)
+Circle(
+  1,
+  2.5,
+  [round]
+)
+Box{ value: 3, times: 2, note: n }
+Box {
+  value: [2, 3],
+  times: 1,
+  note: xs
+}
+Box {
+  value: Point{ x: 1, y: 0, name: start },
+  times: 1,
+  note: p
+}
+twice 20
+Wide {
+  a: 21,
+  b: 1.5,
+  c: c20,
+  d: [1, 2],
+  e: True,
+  f: None,
+  g: 20,
+  h: 3,
+  i: i,
+  j: 4,
+  k: 5,
+  l: 6,
+  m: 40
+}
+Wide {
+  a: 1,
+  b: 1.5,
+  c: c,
+  d: [1, 2],
+  e: True,
+  f: Some(2),
+  g: 2,
+  h: 3,
+  i: i,
+  j: 7,
+  k: 5,
+  l: 6,
+  m: 7
+}
+twice 4
+Wide {
+  a: 5,
+  b: 1.5,
+  c: c4,
+  d: [1, 2],
+  e: True,
+  f: Some(5),
+  g: 4,
+  h: 3,
+  i: i,
+  j: 12,
+  k: 5,
+  l: 6,
+  m: 8
+}
+twice 8
+Wide {
+  a: 8,
+  b: 1.5,
+  c: c,
+  d: [1, 2],
+  e: False,
+  f: None,
+  g: 18,
+  h: 3,
+  i: i,
+  j: 4,
+  k: 5,
+  l: 6,
+  m: 7
+}
+twice 9
+twice 10
+Wide {
+  a: 10,
+  b: 1.5,
+  c: c,
+  d: [1, 2],
+  e: True,
+  f: None,
+  g: 40,
+  h: 3,
+  i: i,
+  j: 4,
+  k: 5,
+  l: 6,
+  m: 7
+}
+twice 11
+Wide {
+  a: 12,
+  b: 0.75,
+  c: c,
+  d: [1, 2],
+  e: True,
+  f: None,
+  g: 2,
+  h: 22,
+  i: i,
+  j: 4,
+  k: 5,
+  l: 6,
+  m: 1
+}
+twice 12
+twice 13
+Wide {
+  a: 26,
+  b: 0.375,
+  c: c,
+  d: [1, 2],
+  e: True,
+  f: None,
+  g: 2,
+  h: 26,
+  i: i,
+  j: 4,
+  k: 5,
+  l: 6,
+  m: 13
+}
+twice 4
+twice 4
+twice 3
+twice 3
+twice 2
+twice 2
+twice 1
+twice 1
+Wide {
+  a: 2,
+  b: 0.09375,
+  c: c,
+  d: [1, 2],
+  e: True,
+  f: None,
+  g: 22,
+  h: 2,
+  i: i,
+  j: 4,
+  k: 5,
+  l: 6,
+  m: 1
+}
+(1, 100, 108)
+Wide {
+  a: 1,
+  b: 1.5,
+  c: c,
+  d: [1, 2],
+  e: True,
+  f: None,
+  g: 2,
+  h: 3,
+  i: i,
+  j: 4,
+  k: 5,
+  l: 6,
+  m: 7
+}
+Point{ x: 2, y: 2, name: start }
+Point{ x: 3, y: 2, name: start }
+[
+  Point{ x: 2, y: 4, name: start },
+  Point{ x: 12, y: -6, name: start }
+]
+Point{ x: 1, y: 2, name: if }
+Point{ x: 1, y: 2, name: match }

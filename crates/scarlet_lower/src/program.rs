@@ -33,6 +33,7 @@ use scarlet_types::name::{CtorName, ModuleKey, Name, TypeName, ValueName};
 use scarlet_types::ty::Type;
 
 use crate::immediates::Immediates;
+use crate::lower::Updates;
 use crate::perceus::Dropped;
 use crate::typed_ir::{BindingId, TempTys, TypedFn};
 use crate::{immediates, lower, perceus, tail_args};
@@ -712,16 +713,24 @@ pub fn build_program(
 /// `perceus`, then `tail_args`. This is the only place they run, so they can't
 /// run out of order. It comes with whether `perceus` left something undropped.
 /// The order of a function's `Let`s then says when that is given up, so
-/// `tail_args` leaves it as it is.
+/// `tail_args` leaves it as it is, and its updates are lowered to the reads they
+/// stand for, which have registers of their own.
 fn core_fn(
     temps: TempTys,
     im: &Immediates,
     pool: &ResolvedPool,
     f: &TypedFn,
 ) -> Result<Dropped, LinkError> {
-    let lower::Lowered { core, locals } = lower::lower_fn(temps, f)?;
-    let core = immediates::rewrite(core, im);
-    let Dropped { core, undropped } = perceus::perceus(pool, &locals, core)?;
+    let drops = |updates| {
+        let lowered = lower::lower_fn(temps, updates, f)?;
+        let core = immediates::rewrite(lowered.core, im);
+        let dropped = perceus::perceus(pool, &lowered.locals, core)?;
+        Ok::<_, LinkError>((dropped, lowered.updates))
+    };
+    let Dropped { core, undropped } = match drops(Updates::Whole)? {
+        (dropped, true) if dropped.undropped => drops(Updates::Rebuilt)?.0,
+        (dropped, _) => dropped,
+    };
     let core = if undropped {
         core
     } else {

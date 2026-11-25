@@ -19,12 +19,12 @@ use scarlet_ir::intrinsic::Intrinsic;
 
 use crate::code::{self, Code, Entry, Ins, Reg};
 use crate::code::{
-    Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, DeadList, Dst, DstList, EntryPc, Hit,
-    Last, LookList, Looks, Makes, MaybeDst, Newline, Pc, Room, ShareList, Shared, Shares, Src,
-    Taken, TextId, Why, WhyId,
+    Arg, ArgList, Args, Assign, AssignList, BinaryId, BitsOp, BlockId, Dead, DeadList, Dst,
+    DstList, EntryPc, Hit, Last, LookList, Looks, Makes, MaybeDst, Newline, Pc, Room, Sets,
+    ShareList, Shared, Shares, Src, Taken, TextId, Why, WhyId,
 };
 use crate::frame::FIRST;
-use crate::heap::Ctor;
+use crate::heap::{Ctor, Layout};
 use crate::ops::NumOp;
 use crate::stop::NotBuilt;
 use crate::value::{Float, SmallInt, Tag, Value, View};
@@ -267,6 +267,25 @@ impl Show for ArgList {
     }
 }
 
+impl<const N: usize> Show for Sets<Reg, N> {
+    fn show(self, line: &mut Line<'_>) {
+        self.base().show(line);
+        self.layout.show(line);
+        for (at, value) in self.each() {
+            line.part(format_args!(".{at}: {value}"));
+        }
+    }
+}
+
+impl Show for AssignList {
+    fn show(self, line: &mut Line<'_>) {
+        let code = line.code;
+        for Assign { field, value } in self.sets(&code.lists) {
+            line.part(format_args!(".{field}: {value}"));
+        }
+    }
+}
+
 impl<const N: usize> Show for Looks<Reg, N> {
     fn show(self, line: &mut Line<'_>) {
         self.regs().iter().for_each(|r| line.part(r));
@@ -350,6 +369,15 @@ impl Show for Ctor {
         match line.code.ctors.name(self) {
             Some(v) => line.part(format_args!("{}.{}", v.type_id.0, v.variant_idx)),
             None => line.part(format_args!("?.{}", self.variant())),
+        }
+    }
+}
+
+impl Show for Layout {
+    fn show(self, line: &mut Line<'_>) {
+        match line.code.ctors.laid_out(self) {
+            Some(v) => line.part(format_args!("{}.{}", v.type_id.0, v.variant_idx)),
+            None => line.part("?"),
         }
     }
 }

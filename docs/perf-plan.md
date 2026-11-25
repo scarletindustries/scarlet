@@ -110,6 +110,13 @@ Recommended: Option A. The 32-bit number is part of what took the board from 0.9
 
 Recommended: Option B, at step 40, which writes the call-site maps that a trace reads its callers from. Step 40 builds whichever is chosen.
 
+### 13. Open. Does a record update keep a handle that its base holds open until the new fields are computed? Step 4 closes it before them, and step 16 keeps that.
+
+- **A.** No, as built. `Held(..h, conn: redial(h.port))` closes the old connection before `redial` runs, as every other value goes at its last use. The compiler holds the base for longer only where nobody can tell.
+- **B.** Yes. A base is held until its record is made, so a failed `redial` could still use it, and every update may be one instruction unless a write in place needs the base gone.
+
+Recommended: Option A. On the board B is worth 0.0002 of the geomean (richards 0.3%), and it would leave an array in the base to be copied by the writes that step 4 put in place, unless the rule kept telling the two apart.
+
 ## Where the designs disagreed, and how each is settled
 
 - The value word. Core moves every tag (small Int is the 13 top ones, so 0xFFF8 and up; immediates 0x7FF8, function 0x7FF9, cell 0x7FFC, nullary 0x7FFD). Heap still writes references as 0xFFFC and nullary as 0xFFFD, and builds JumpUnlessTag constants from them. Text takes 0xFFFE for a frozen literal, and heap also reserves 0xFFFE for a shared constant arena. Under core's layout 0xFFFC to 0xFFFE are all small Ints. Settle it in step 5 with one table in value.rs that every area uses: core's five tags, plus 0x7FFE for a frozen literal, plus the empty array as immediate 0x7FF8 | 3. Heap's reference becomes 0x7FFC | variant (bits 32 to 47) | index (bits 0 to 30), and its tag-test constants become 0x7FFC_0000 | k and 0x7FFD_0000 | k. Text's map position gets 50 bits of small Int instead of 47, which only helps.
@@ -617,6 +624,22 @@ From: compiler 2 and the Update half of heap 6. Needs: 4, 11, 13.
 
 **Carried from step 14.** A record updated alone is 468 of a turn that is 56, and the turn's loop has no more to give. An `Update` that takes its base empties the register, and `moves` counts on every `Taken` and every `Arg` that is taken doing so (`Walk::pass`).
 
+**What happened.** The geomean moved by a factor of 0.9749, from 1.89 to 1.84, where 0.975 was expected: towers runs 39.3% fewer machine instructions, richards 6.0% and nbody 2.5%. permute, which was to gain, does not move, for a reason below. cfold is 0.26% dearer and binary_trees 0.20%, the other rows are within 0.2% with the same VM counts, and `startup` is level. dispatch is still 9 machine instructions with one indirect branch.
+
+The VM's counts moved on five rows. towers makes 14,752,200 fewer cells, which is every record it updates, and runs 26.5% fewer VM instructions: an `Update1` for a `Ctor5`, four `Field`s and a `Drop`. richards makes 2,182,750 fewer and runs 10.8% fewer (3,312,850 `Update1`, 368,975 `Update2` and 58,175 `Update3`), nbody 800,001 fewer and 6.8% fewer (2,500,001 `Update3`), json 3,990 fewer and permute 1. No row makes more, the cells live and the arena's words are the same on all 24, and peak memory is level.
+
+The rule (`scarlet_lower/src/update.rs`). A record update is one `Update` when its base is known to be the variant it makes, it pays, and holding the base until the new fields are computed cannot be seen. The plan's 'no given argument reads the base' is not what that needs, as step 4's note says, and is too strict as well: towers sets `errors: t.errors + 1`. What an `Update` holds for longer than step 4's order is the base's own values of the fields it sets, since the kept fields are held either way. So it cannot be seen when the types of those fields say they hold no more than a number (`Repr` is a `Word`, or it is an Int), and then the new fields may be anything. And it cannot be seen when computing the new fields takes a few steps however large the values are, calls nothing and writes nothing in place (`brief`): then a handle closes at the update and not a few steps before it. An Int may be big, so its arithmetic is not brief, and neither is an update in a new field, which writes in place. The lowering asks once and the node is the answer (`TypedExpr::Update`). It pays up to three fields, and past that when twice as many are kept, because four are in a list. The variant is known for a type with one, and inside an arm that has matched the base. A function that leaves something undropped is lowered again with the reads and the constructor it had (`Updates::Rebuilt`), because the registers of the kept fields say there when a handle closes.
+
+What the rule costs on the board was measured by loosening it. Step 4's order for an update whose new field reads the base and an `Update` for every other, which is the plan's rule, is 0.984 by itself and 0.9745 beside this one, where this one is 0.9747 in the same build: richards gains 0.3% more. Every update an `Update` is 0.983, with richards at -9.9% and permute 27% dearer, since its writes then copy. With an accessor for types that can reach no handle, so that Int arithmetic is brief for those, it was under 0.0001 better, and it is not built. So the language question is worth nothing on the board, and the rule was kept as strict as step 15 is (question 13). The other limit is worth more: with updates in functions that leave something undropped, the board is 0.968, permute 13.3% cheaper and richards 0.3%. That is step 17's.
+
+What is built. `Update1` to `Update3` hold their operands and a bit for each that is taken (`Sets`), and `UpdateWide` has a list and serves a long cell. Each holds the top half of the header its cell must have (`Layout`), so whether the base is the constructor and alone is one compare with a number the loader made. In place, the values are written, the register keeps its word when the result has the same one, as it nearly always does, and the old values are given up last. `Update1` in place is in the loop; `Update2` and `Update3` are calls, because in the loop they cost the arms around them more. A copy of up to eight fields reads them at once, gives the kept ones their references and writes them at once (`Heap::copy_set`), in a freed cell's space or at the arena's end. A wider one counts eight at a time and then copies the whole cell (`copy_set_wide`). Both count before there is a cell, so that a kept field which is freed stops the run and is never handed out as the copy. The first copy built went field by field and was dearer than the reads and the constructor up to eight fields. The second wrote a freed cell's space only, and began again when there was none, which made a copy that is kept 15% to 63% dearer than before.
+
+Probes, a turn. One field of a record that nothing else holds, computed: 317 to 169 with two fields, 468 to 169 with five, 590 to 169 with eight, 798 to 169 with nine and 1,442 to 169 with twenty; a constant 422 to 123, its own value 443 to 144 and a cell 556 to 217 of five. Two fields 493 to 277 and three 518 to 366 of five. One of 250 fields 14,560 to 129, and one of 254 or 300, which no function could update, 323. A record that is read again, one field: 418 to 404 with four, 468 to 417 with five, 590 to 436 with eight, 798 to 617 with nine and 1,442 to 781 with twenty. One that something else holds and the update takes: 626 to 561 with five and 769 to 580 with eight. One whose copy is kept in a list, so that each goes at the arena's end: 598 to 596 with three, 654 to 619 with four, 708 to 636 with five, 825 to 650 with eight, 1,037 to 801 with nine and 1,728 to 999 with twenty. Five fields that are cells, kept the same way, 766 to 702. Two updates one after the other 794 to 196, one in a nested record 727 to 435, a captured record 814 to 748, one out of a call 832 to 533, one whose field is a call 506 to 207 or an `if` 451 to 152, a record set in itself 537 to 417, a matched variant 1,139 to 524 and a record out of a match 590 to 322. A bare turn (56), a call and return (127), a match (317), a field read (121), a constructor and a tail call are as they were.
+
+What got dearer, and why. A copy of a record that keeps few fields, read again, taken from another holder or kept in a list: one kept of two 317 to 371, 454 to 515 and 555 to 582; two of three 368 to 386, 512 to 530 and 598 to 596; one of three 393 to 481, 484 to 588 and 578 to 647; two of four 443 to 498 and 632 to 668; one of four 468 to 584 and 612 to 709; two of five 518 to 599, 577 to 672 and 667 to 729. So a two-field accumulator that its caller keeps is 540 to 601, a list of ten two-field records that stays alive is 61 dearer for each record mapped, and a history of four-Float states that sets two of them is 823 to 879. The copy is a call, and each further field that is set adds 50 to 100 to it, where it adds at most 25 to the reads and the constructor. The same update in place is 100 to 150 cheaper, and which it will be is not known when the program loads. A constructor is 1 dearer, which is cfold's and binary_trees' loss and 10 of a tree of 31 nodes: the loop gives that arm one register less. An array walk reads 5 dearer or 5 cheaper from one run to another. Compiling and loading: 44 programs run between 0.8% fewer and 1.4% more machine instructions, most of them a little more, and those with many updates 18% to 35% fewer. A program of 300 functions that each update a record and leave something undropped is 6.3% dearer, because each is lowered twice. The binary is 67 KB larger.
+
+The tests are in the `tests.rs` of update, perceus, tail_args, core_ir, ins, emit, translate and heap, in exec/tests/update.rs and in run.rs and core_ir.rs. Each instruction is run on 1 to 9, 16, 17, 20, 252, 253, 254 and 300 fields, with the base and each value taken or shared, every value in one register, the base among them, and the base held by a global, by the register that is written, by a value, never counted and at the end of its count, with a freed cell of the size and without. Copies are refused at every edge of the room, and freed cells are put at the base, at each value, among the kept fields and among those given up. The tests that pin a handle are as they were, and the `named` case is still 5,000. The test that pinned two cells a turn for a lone record is `a_record_that_nothing_else_holds_is_updated_where_it_is`, and pins one. `record_updates.sca` is a new golden program, which the old binary prints the same. 3,600 random programs of updates whose records hold listeners, arrays and strings, with joins and without, closed nothing later than at step 15 and made no more cells. 35 of them seemed to close something earlier, and every one of those had been given a port that another program on the machine listens on. 800 more on ports that were free closed everything when step 15 does. 2,000 loops of updates of every width, 4,800 programs of handles and 2,800 of the other kinds printed the same with no more cells, under `--audit` and `--audit=each`. Some 60 that held more than 254 values to update a record now run. Of 98 wrong changes the tests catch 98, ten of them by tests written for it and one by never ending. The copy was then written again, and of 27 wrong changes to it and around it they catch 27, one by a test written for it.
+
 ### Step 17. The Core IR's control flow in its final form: one `Join` with parameters and `Jump`, `Ret` and `TailCall` in place of `Tail`, and `SetGlobal` in place of a pinned bind. The scheduling pass of step 14 is ported.
 
 From: compiler 3. Needs: 14.
@@ -632,6 +655,8 @@ From: compiler 3. Needs: 14.
 **Carried from step 14.** The pass to port is scarlet_lower's `tail_args`, which orders only what an Int or a Float operation or a constant computes. When Perceus walks into joins, `LoweredFn::undropped` and what Perceus notes for it (`Dead::Left`, `leave_inside`) go, and with them the three places that read it: `live` keeps a `Drop` that does nothing holding its value's register, `alloc` gives a tail call's arguments no register of their own, and `tail_args` does not run. That is worth 0.15% of the board, 1.3% of closures and 0.6% each of permute and richards. A value whose type is a variable needs a drop too. `fuzzl.py` and `fuzzm.py` under `step14` are `fuzzh.py` with loops, and they run a program that differs eight times more, because a port that is opened again can fail. `Step::TailCall` in the loader is what a `TailCall` node becomes.
 
 **Carried from step 15.** Perceus runs a second time on a function that is undropped, to put back the drops of values that are no cell, because they hold registers there (`Words` in perceus.rs). That goes with `undropped`.
+
+**Carried from step 16.** A function that leaves something undropped is lowered twice when it has an update in it (`Updates::Rebuilt`, `Lowered::updates` and the reads in `TypedExpr::Update::kept`), so that its registers stay. All of that goes with `undropped`, and with it 6% of compiling such functions. The step is then worth about 0.994 of the board and not nothing: in a test build that made those updates `Update`s permute was 13.3% cheaper and richards 0.3%. `fz/fuzzu.py` under `step16` says when the handles in updated records close and whether an update makes more cells.
 
 ### Step 18. A match is a decision tree (matching.rs) that reads a field where it is used, with `Switch` as a table jump on bits 32 to 47 of the value, `SwitchInt` with a big-Int path, and literal cases keyed by `LitKey`. `Match` and `CorePat` go. The old Perceus emits `CoreExpr::Open` at an arm where the scrutinee is dead on entry, and step 13's loader pattern is deleted. It lands with the differential test over both lowerings.
 
@@ -650,6 +675,8 @@ From: compiler 4. Needs: 11, 13, 17.
 **Carried from step 14.** A `Switch` is a jump with many targets, and two walks need them: `live`'s, from the end, and `moves`', from the start, which carries what may hold a cell to each. Both take one target from `Ins::target` today. An arm that ends in a loop's next turn ends in a `Jump`.
 
 **Carried from step 15.** Past a `JumpUnlessTag` for a variant with no fields, `moves` takes the register it tested for empty (`Walk::pass`), so a tail call in that arm drops nothing. A `Switch` has to say the same of each target that is for such a variant, and nothing of a target that several variants share. Perceus leaves out the drop of such an arm's scrutinee (`Perceus::in_arm`), and that is for the tree to say once it knows the variant in every arm. An arm after all the variants with fields proves the rest have none, which nothing sees today.
+
+**Carried from step 16.** The lowering knows which variant a local is inside an arm that matched it by a constructor pattern (`Tx::matched` in translate.rs), from the source and before any tree, so a tree changes nothing there. An update of a local that an arm has matched keeps the local, and the arm then does not drop it at its start.
 
 ### Step 19. One `Probe` node with several binds, a hit arm and a miss arm that takes nothing, for the union of the three designs' ops (array get, slice and set, map get, and later map next and the partial string and binary built-ins). The tree emits a bare probe for a match directly on the call, and any other use builds the Option or Result in the arms. `array::put` and `array::set` are lowered through it, and `option_arms`, `index_or` and the loader's MapGet recognition go.
 
@@ -789,6 +816,8 @@ From: text 6. Needs: 2, 29.
 
 **Expected gain.** About 0.999 (string_keys 2% to 3%).
 
+**Carried from step 16.** `P(..p, s: p.s + x)` is never an `Update`, because a concatenation and an interpolation are not brief and a String is not a number, so `p` is given up before the append as step 4 has it and the string may have one holder. Keep it so in `brief` (scarlet_lower's update.rs) if either becomes an instruction that looks cheap.
+
 ### Step 31. `string::replace`, `string::join`, `string::concat` and `binary::concat` as linear two-pass built-ins, and `int::from_string` as the built-in itself.
 
 From: text 7. Needs: 27, the owner's answer on the new stdlib names.
@@ -818,6 +847,8 @@ From: text 9. Needs: 19.
 **Expected gain.** About 0.997: richards 7.2%, measured at step 4 on a test build whose loader finds the map's drop behind other drops (20,586,083 cells against 23,910,908). richards' 4.5% from the lookup went to step 19. Off the scoreboard, `from_list`, `merge` and `filter` stop copying a path per entry.
 
 **Carried from step 4.** Step 4 gives the record up before the set in `put_task`, `release` and `create_task`, so the map has one holder there, but the set is still loaded as the plain built-in because the task's drop sits between it and the map's. This step is what puts those sets in place, about two thirds of richards' 2,476,025. It also ends the 0.22% to 0.25% step 4 cost richards, which is the old map being freed in a pass of its own while the set copies. `a_record_update_sets_a_map_it_holds_in_place` in crates/scarlet_vm/tests/run.rs pins the `put_task` shape at 5,436 cells and should read 3,000, and the sentence on it in docs/semantics.md goes.
+
+**Carried from step 16.** richards starts from 13,800 million machine instructions and 21,728,157 cells. Its updates with a `map::set` in them are rebuilt as before, so what this step books is still there to take.
 
 ### Step 34. The map walk rewritten on today's layout: an attempt to finish inside one unique node, then one path down and up with every count change from one ledger. The probe's random test, its four hashers and its audit move into the VM's tests.
 
@@ -850,6 +881,8 @@ From: compiler 6. Needs: 19.
 **Carried from step 12.** bounce's tuples are cheaper than this step's forecast has them: a tuple of three made and read is 618 a turn where it was 974, and bounce runs 24.4% fewer machine instructions with the same 15 million tuples. What the simplifier takes away of its 15.6% has to be read again from there.
 
 **Carried from step 14.** `tail_args` has to run after this, because it reads which value is computed where. A `Move` of a shared value costs a loop 22, a `Move2` 29 and a `Move3` 39, and `sqrt_from` in nbody, tak and towers have most of them.
+
+**Carried from step 16.** `Atom::Update` is a known constructor of which some fields are known and the rest are its base's, so a field read of one is either what was set or a read of the base. Two updates in a row of which nothing reads the first are one (196 a turn for two, 169 for one).
 
 ### Step 37. Inlining over the call graph: a small callee, a callee with one reference, a known lambda, and a lambda made once and called once even inside a cycle, with `same_unit` as the one policy function.
 
@@ -891,6 +924,8 @@ From: compiler 9 (first half) and core 6b. Needs: 38, the owner's yes on ownersh
 
 **Carried from step 15.** The accessor is `ResolvedPool::repr`, on `Program::pool`. `ResolvedPool::is_heap` still says what Perceus drops, an Int, a String and a type variable left out, and goes here. That a local is an Int is its type's `prim_of`, and the loader turns the two into one answer in `kind_of` (code/translate.rs). The drops of values that are no cell are gone from Core IR, but for a function that is undropped, so cfold's and deriv's are what is left for this step.
 
+**Carried from step 16.** `Update`'s base and each value it sets are keeping operands. The base comes first and the values after it in the order of the fields, and of the operands that name one local only the last may be given: a base that is one of its own new values is copied. `Update` and `Ctor` are told apart by `brief` and not by rc, which has to leave an `Update`'s base alive across the new fields.
+
 ### Step 40. The loader encodes the marks as `dups` bits, kill bits and `Drop`, and `moves_on_last_use` goes. The VM verifier walks the emitted instructions, returns `Checked` and writes the call-site maps. The table test of every handler against its role, the role check behind look and take, and the audit run land with it. The VM still stores Nil on a move and still sweeps, and counts what the sweeps release.
 
 From: core 6c and the VM half of compiler 9. Needs: 39.
@@ -922,6 +957,8 @@ From: core 6d and compiler 10. Needs: 40.
 **Carried from step 10.** fib is 137 a call with the sweeps kept, not 165, and tak 155, not 193, so there are 25 and 51 left for this step on them. What it takes away: 4 machine instructions on every register written (the old value read, its test and a branch), 2 on every argument taken (the `Nil`), and in a `Ret` 6 to 8 for each register of the frame and 3 to start. Half a sweep is gone already, since only a cell is written over. Read step 40's note on register 1 first: a call by name leaves it unwritten, and only the sweep makes sure that what is there is no cell.
 
 **Carried from step 14.** The design's `Clear {from, n}` was never built: there are `Drop`s of the registers that may hold a cell, or one `DropWide` of a list of them when there are more than two, and no sweep at a tail call, but for `TailCallValue`, which sweeps the frame in `Window::rewrite`. A tail call costs its moves, its drops and one instruction.
+
+**Carried from step 16.** An `Update` in place stores `Nil` in the registers of the values it takes and leaves the base's word where it is, so there is one store a value to take away. `Sets::taken` is the test for the bits.
 
 ### Step 42. `Open` placed by the rc pass wherever an owned local of proved shape is only read in parts and then dies, not just at an arm's head. Decide from the scoreboard after step 41.
 
@@ -955,6 +992,8 @@ From: compiler 13. Needs: 42.
 
 **Carried from step 4.** What is left for this step in richards is `hold_self` and `queue_packet`. Each reads `s.hold_count` or `s.queue_count` in an argument written after the `map::set`, so the record lives past the set and the set copies, at about a third of the 2,476,025 sets. Reading those two fields before the set is the whole change, and a hand-edited source with the test loader of step 33 makes 18,958,933 cells against 20,586,083. docs/semantics.md tells a user to write such a field before the write, and that sentence goes if rc does it for them.
 
+**Carried from step 16.** The lowering's rule is `update.rs`, and it took 3,740,000 of richards' 7,130,000 updates. The 3,390,000 left are those with a `map::set`, a call or an array's push in a new field, or a field that is no number: step 4's order is right for them, and an `Open` at the reads in front is what is left to gain. A build that made every one an `Update` ran richards 9.9% cheaper than step 15, where the rule's is 6.2%, and permute 27% dearer. One shape the board has little of is rebuilt too and is as dear as it was: a field that is a cell beside an Int worked out from the base, as a queue's `Q(..q, back: C(x, q.back), n: q.n + 1)` is (1,095 a turn for a push and a pop).
+
 ### Step 45. `Take` and reuse specialisation of ordinary rebuilds, with the loader's hole check. Gated: build it only if the scoreboard after step 44 still shows rebuilds that keep most of their fields.
 
 From: heap 6 (the Take half). Needs: 44.
@@ -964,6 +1003,8 @@ From: heap 6 (the Take half). Needs: 44.
 **Expected gain.** About 0.995 at most (rbtree's `ins` arms, cfold under 1%).
 
 **Carried from step 13.** Rebuilds start lower than this step's design has them. A match that takes apart and makes the same constructor is 378 a turn with one field round a loop, 409 with two, 470 with five and 559 with eight, where a token made it 468, 565, 795 and 1,114. The fields that stay where they are save one load and one store each of that.
+
+**Carried from step 16.** An `Update1` in place is 113 of a turn however many fields are kept, and a copy of five fields into a freed cell's space about 290, so a rebuild that keeps most of its fields is to be held against 113 and a `Take`. A record of two fields is dearer as an `Update` when it has to copy (317 to 371, and 555 to 582 where the copy is kept).
 
 ### Step 46. Grow a string or binary in place by reallocating to a power-of-two size, with a new `string_build` benchmark and its twins to show it.
 
@@ -996,6 +1037,8 @@ From: core 7. Needs: 41.
 **Expected gain.** None for speed. It removes a stop.
 
 **Carried from step 14.** The moves of a tail call are between registers and need none to spare, and a callee of more parameters than this frame has registers writes above it. A parameter that spills would be a move to the spill stack in the same set.
+
+**Carried from step 16.** An update no longer needs a register for each field it keeps when it is an `Update`, so a record of any width may be updated. Building one, and an update that has to read its fields, still need them.
 
 ### Step 49. Four optional pieces, each on its own measurement: several results in registers, reuse tokens, borrows rooted in a local, and kept-field masks.
 

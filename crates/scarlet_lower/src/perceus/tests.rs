@@ -568,9 +568,15 @@ fn what_is_left_undropped_is_in_a_join_or_of_no_known_type() {
             op: PrimOp::MakeTuple,
             args: vec![a, b],
         },
+        Atom::Update {
+            base: a,
+            variant: variant(),
+            sets: vec![(0, b)],
+        },
     ];
     for rhs in holding {
         assert!(in_join(rhs.clone()), "{rhs:?}");
+        assert!(leaves(int, made(any, rhs.clone())), "{rhs:?}");
     }
 }
 
@@ -708,9 +714,14 @@ impl Maker {
 
     fn atom(&mut self, scope: &[u32]) -> Atom {
         let (a, b) = (self.any(scope), self.any(scope));
-        match self.below(6) {
+        match self.below(7) {
             0 => Atom::Local(local(a)),
             1 => ctor(&[a, b]),
+            6 => Atom::Update {
+                base: local(a),
+                variant: variant(),
+                sets: vec![(1, local(b))],
+            },
             2 => Atom::Load(Load::Capture(CaptureIdx(0))),
             3 => Atom::Nil,
             _ => Atom::Call {
@@ -913,4 +924,46 @@ fn what_can_be_no_cell_gets_no_drop() {
         }
     });
     assert!(fewer > 1000 && same > 1000, "{fewer} {same}");
+}
+
+/// An update reads its base and its values, so each that is read last there is
+/// dropped behind it, and the VM then takes it.
+#[test]
+fn an_update_drops_what_it_is_the_last_to_read() {
+    let mut p = pool();
+    let t = con(&mut p, 1);
+    let update = Atom::Update {
+        base: local(0),
+        variant: variant(),
+        sets: vec![(0, local(1)), (2, local(2))],
+    };
+    let body = CoreExpr::Let {
+        bind: bind(3, t),
+        rhs: update,
+        body: Box::new(CoreExpr::Let {
+            bind: bind(4, t),
+            rhs: ctor(&[2, 3]),
+            body: Box::new(CoreExpr::Tail(Atom::Local(local(4)))),
+        }),
+    };
+    let params = (0..3).map(|i| bind(i, t)).collect();
+    let out = dropped(&p, func(params, body, t));
+    assert!(!out.undropped);
+    let lines: Vec<String> = out
+        .core
+        .body
+        .to_string()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        lines[..5],
+        [
+            "let %3:0 = update 0.0(..%0, 0: %1, 2: %2)",
+            "drop %0",
+            "drop %1",
+            "let %4:0 = ctor 0.0(%2, %3)",
+            "drop %2",
+        ]
+    );
 }

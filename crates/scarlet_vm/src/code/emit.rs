@@ -9,7 +9,7 @@
 use scarlet_ir::core_ir::FuncIdx;
 use scarlet_ir::tivec::TiVec;
 
-use super::ins::{Ins, Label, Lists, Makes, Places, Role, Src, Taken, Unplaced, VReg};
+use super::ins::{Assign, Ins, Label, Lists, Makes, Places, Role, Src, Taken, Unplaced, VReg};
 use super::moves::{Body, Fitted};
 use super::{BlockId, Entry, EntryPc, Op, Pc, Reg, Room};
 use crate::Audit;
@@ -206,6 +206,7 @@ impl Out<'_, '_> {
             regs: position(self.lists.regs.len())?,
             args: position(self.lists.args.len())?,
             dsts: position(self.lists.dsts.len())?,
+            sets: position(self.lists.sets.len())?,
         };
         let stop = |why| unplaced(at.funcs, why);
         for list in &body.lists.regs {
@@ -221,6 +222,16 @@ impl Out<'_, '_> {
             let dsts = list.iter().map(|d| super::ins::Place::place(*d, &at));
             let dsts: Result<Box<[_]>, _> = dsts.collect();
             self.lists.dsts.push(dsts.map_err(stop)?);
+        }
+        for list in &body.lists.sets {
+            let sets = list.iter().map(|s| {
+                Ok(Assign {
+                    field: s.field,
+                    value: super::ins::Place::place(s.value, &at)?,
+                })
+            });
+            let sets: Result<Box<[_]>, _> = sets.collect();
+            self.lists.sets.push(sets.map_err(stop)?);
         }
         let each = self.extra.audits_each();
         let audit = each.then_some(Ins::Audit);
@@ -304,6 +315,7 @@ struct At<'a> {
     regs: u32,
     args: u32,
     dsts: u32,
+    sets: u32,
 }
 
 impl Places for At<'_> {
@@ -347,6 +359,10 @@ impl Places for At<'_> {
 
     fn dst_list(&self, i: u32) -> Result<u32, Unplaced> {
         list(self.body.lists.dsts.get(i as usize), self.dsts, i)
+    }
+
+    fn set_list(&self, i: u32) -> Result<u32, Unplaced> {
+        list(self.body.lists.sets.get(i as usize), self.sets, i)
     }
 }
 

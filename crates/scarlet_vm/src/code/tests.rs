@@ -124,6 +124,7 @@ pub(super) fn copy_of(d: &Draft) -> Draft {
             regs: d.lists.regs.clone(),
             args: d.lists.args.clone(),
             dsts: d.lists.dsts.clone(),
+            sets: d.lists.sets.clone(),
         },
         labels: d.labels.clone(),
         values: d.values,

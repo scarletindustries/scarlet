@@ -13,6 +13,8 @@ use scarlet_ir::core_ir::{FuncIdx, VariantRef};
 use scarlet_ir::intrinsic::Intrinsic;
 use scarlet_ir::tivec::TiVec;
 
+mod update;
+
 /// The fields the loop reads at every turn come first, where one load reaches
 /// them, and the heap comes after everything else, so that its size cannot
 /// move them.
@@ -899,6 +901,7 @@ fn function_that(
             Box::new([Arg::shared(r(0))]),
         ],
         dsts: Vec::new(),
+        sets: Vec::new(),
     };
     function_of(reads, params, values, body, lists, ctors().0)
 }
@@ -1489,6 +1492,7 @@ fn a_list_of_registers_is_given_up() {
         regs: vec![regs.clone().into()],
         args: Vec::new(),
         dsts: Vec::new(),
+        sets: Vec::new(),
     };
     let body = vec![drop, Ins::Bad { why: WhyId(0) }];
     let code = function_of(ReadsClosure::Nothing, 0, 254, body, lists, ctors().0);
@@ -1656,6 +1660,7 @@ fn what_an_instruction_takes_leaves_its_register() {
         regs: vec![Box::new([r(3)])],
         args: vec![Box::new(all_moved)],
         dsts: Vec::new(),
+        sets: Vec::new(),
     };
     let (mut ran, mut took, mut jumped) = (0, 0, 0);
     on_a_machine(|m| {
@@ -1762,6 +1767,7 @@ fn a_tail_call_with_too_many_arguments_stops() {
             regs: Vec::new(),
             args: vec![vec![Arg::shared(r(0)); n].into()],
             dsts: Vec::new(),
+            sets: Vec::new(),
         };
         // The callee finds its second argument to be a number and returns.
         let body = vec![
@@ -3424,6 +3430,7 @@ impl Maker {
             regs: self.lists.regs.clone(),
             args: self.lists.args.clone(),
             dsts: Vec::new(),
+            sets: self.lists.sets.clone(),
         };
         function_of(reads, 0, values, body, lists, as_wide_as_you_like().0)
     }
@@ -3471,6 +3478,7 @@ fn makers(dst: Reg, regs: &[Reg]) -> Vec<Maker> {
                 regs,
                 args,
                 dsts: Vec::new(),
+                sets: Vec::new(),
             },
             kind,
             given: given.to_vec(),
@@ -3923,6 +3931,7 @@ fn openers(dsts: &[Option<Reg>]) -> Vec<Opener> {
             regs: Vec::new(),
             args: Vec::new(),
             dsts: vec![fields.clone().into()],
+            sets: Vec::new(),
         };
         let body = vec![ins, Ins::Bad { why: WhyId(0) }];
         let ctors = as_wide_as_you_like().0;

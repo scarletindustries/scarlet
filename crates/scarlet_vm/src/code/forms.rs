@@ -99,7 +99,7 @@ impl Forms {
         }
     }
 
-    fn get(&self, v: VariantRef) -> Result<Form, Broken> {
+    pub(super) fn get(&self, v: VariantRef) -> Result<Form, Broken> {
         let of_type = self.types.get(&v.type_id);
         let form = of_type.and_then(|forms| forms.get(usize::from(v.variant_idx)));
         form.copied().ok_or(Broken::NoCtor(v))

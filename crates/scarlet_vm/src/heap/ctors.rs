@@ -12,7 +12,8 @@ use std::sync::Arc;
 
 use scarlet_ir::core_ir::VariantRef;
 
-use super::{Kind, Scan};
+use super::{ARENA_CELL_WORDS, Kind, Make, Scan, Shape, class, scan};
+use crate::word::low_u32;
 
 /// What a cell is, as its header holds it: 0 for a freed cell, then the kinds
 /// ([`Kind`]), then the program's constructors.
@@ -100,6 +101,61 @@ impl Ctor {
     }
 }
 
+/// What the header of a constructor's cell says, but for its count: its class,
+/// how many words it takes and how many of them are values. A long cell's says
+/// the class alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Layout(u32);
+
+impl Layout {
+    /// The layout of a `ctor` of `fields` fields.
+    pub(crate) fn new(ctor: Ctor, fields: usize) -> Layout {
+        let make = Shape::ctor(ctor).make();
+        let header = if fields < ARENA_CELL_WORDS {
+            make.header(fields)
+        } else {
+            make.stub()
+        };
+        Layout(low_u32(header >> 32))
+    }
+
+    /// The header of a cell laid out so that has one holder.
+    #[inline(always)]
+    pub(super) fn alone(self) -> u64 {
+        u64::from(self.0) << 32 | 1
+    }
+
+    /// Whether `h` is the header of a cell laid out so.
+    #[inline(always)]
+    pub(super) fn is_of(self, h: u64) -> bool {
+        h >> 32 == u64::from(self.0)
+    }
+
+    /// How many fields the cell has in the arena.
+    #[inline(always)]
+    pub(super) fn scan(self) -> usize {
+        scan(self.alone())
+    }
+
+    /// Whether the cell is a long one.
+    pub(crate) fn is_long(self) -> bool {
+        self.scan() == 0
+    }
+
+    pub(super) fn class(self) -> Class {
+        class(self.alone())
+    }
+
+    /// What a new cell laid out so is, and named with `variant`.
+    pub(super) fn make(self, variant: u16) -> Make {
+        Make {
+            class: self.class(),
+            scan: Scan::All,
+            variant,
+        }
+    }
+}
+
 /// What the program says of a constructor.
 #[derive(Debug, Clone, Copy)]
 struct Row {
@@ -119,6 +175,11 @@ impl Ctors {
     /// The name the program knows `ctor` by.
     pub(crate) fn name(&self, ctor: Ctor) -> Option<VariantRef> {
         self.variant(ctor.class)
+    }
+
+    /// The name the program knows the constructor laid out as `layout` by.
+    pub(crate) fn laid_out(&self, layout: Layout) -> Option<VariantRef> {
+        self.variant(layout.class())
     }
 
     /// The name the program knows the constructor of `class` by.

@@ -421,6 +421,24 @@ fn a_constructor_goes_on_taking_its_fields() {
     assert_eq!(order(2, &shared, &[2, 3]), [3, 2, 4]);
 }
 
+/// So is an update that takes its base and what it sets.
+#[test]
+fn an_update_goes_on_taking_its_operands() {
+    let update = |base: u32, value: u32| {
+        let update = Atom::Update {
+            base: local(base),
+            variant: crate::testkit::variant(),
+            sets: vec![(1, local(value))],
+        };
+        [add(2, 0, 0), (3, CELL, update)]
+    };
+    assert_eq!(order(2, &update(1, 0), &[2, 3]), [2, 3]);
+    assert_eq!(order(2, &update(0, 1), &[2, 3]), [2, 3]);
+    // One that shares its base, or a value, anyway does not matter.
+    assert_eq!(order(3, &update(1, 0), &[2, 1, 3]), [3, 2]);
+    assert_eq!(order(3, &update(0, 1), &[2, 1, 3]), [3, 2]);
+}
+
 /// The calls in the branches of a function are each put in order, and what is
 /// before the branch is not touched. A call of a function value is not.
 #[test]

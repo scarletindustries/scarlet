@@ -69,7 +69,11 @@ fn holds_nothing(atom: &Atom) -> bool {
         Atom::Const(_) | Atom::Nil | Atom::Bool(_) | Atom::Load(_) => true,
         Atom::Ctor { fields, .. } => fields.is_empty(),
         Atom::Closure { captures, .. } => captures.is_empty(),
-        Atom::Local(_) | Atom::PrimOp { .. } | Atom::Call { .. } | Atom::Intrinsic { .. } => false,
+        Atom::Local(_)
+        | Atom::Update { .. }
+        | Atom::PrimOp { .. }
+        | Atom::Call { .. }
+        | Atom::Intrinsic { .. } => false,
     }
 }
 

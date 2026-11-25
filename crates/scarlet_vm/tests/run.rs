@@ -1657,12 +1657,10 @@ fn a_record_update_sets_a_map_it_holds_in_place() {
     );
 }
 
-/// A record that nothing else holds is updated by making a new one out of its
-/// fields, which takes its space. So each turn here makes two cells, whatever the
-/// new field is, and the heap grows by none. Step 16 of docs/perf-plan.md updates
-/// such a record where it is, so it will be one.
+/// A record that nothing else holds is updated where it is, whatever the new
+/// field is. So each turn here makes one cell, and the heap grows by none.
 #[test]
-fn a_record_update_makes_a_record_in_the_space_of_the_old_one() {
+fn a_record_that_nothing_else_holds_is_updated_where_it_is() {
     let src = |field: &str| {
         format!(
             "type P {{\n\
@@ -1692,9 +1690,154 @@ fn a_record_update_makes_a_record_in_the_space_of_the_old_one() {
         let (made, words) = cells_and_words(&src, 1, "3\n");
         assert_eq!(
             cells_and_words(&src, 10000, "50015005\n"),
-            (made + 2 * 9999, words),
+            (made + 9999, words),
             "{field}"
         );
+    }
+}
+
+/// What an update makes and writes, for each way that a record is held: cells
+/// for a thousand updates. One that nothing else holds is written where it is,
+/// and so is one out of a call, out of a match that took apart what held it, and
+/// one that an arm has shown to be its variant. Any other is copied, and what was
+/// copied is as it was. Of two records, one in the other, the outer is made again
+/// in the space of the old one and the inner is written where it is.
+#[test]
+fn an_update_writes_a_record_in_place_when_nothing_else_holds_it() {
+    let src = |step: &str| {
+        format!(
+            "import scarlet/internal\n\
+             type P {{\n\ta Int\n\tb String\n\tc Array(Int)\n\td Float\n}}\n\
+             type O {{\n\tp P\n\tn Int\n}}\n\
+             fn made(n Int) P {{ P(n, 'b', [n], 0.5) }}\n\
+             fn step(n Int, o O) O {{\n\t{step}\n}}\n\
+             fn out(n Int, o O) O {{ if n == 0 {{ o }} else {{ out(n - 1, step(n, o)) }} }}\n\
+             pub fn main() {{\n\
+             \to = out(1, O(made(0), 0))\n\
+             \tcells = internal::cells_made()\n\
+             \tq = out(1000, o)\n\
+             \tprintln(internal::cells_made() - cells)\n\
+             \tprintln('${{q.p.a}} ${{q.p.b}} ${{q.p.c}} ${{q.p.d}} ${{q.n}}')\n\
+             }}\n"
+        )
+    };
+    for (step, cells, shown) in [
+        ("O(..o, n: n)", 0, "0 b [0] 0.5 1"),
+        ("O(..o, n: o.n + o.p.a + n)", 0, "0 b [0] 0.5 500501"),
+        ("O(..o, p: P(..o.p, a: n))", 1000, "1 b [0] 0.5 0"),
+        (
+            "match o {\n O(p, k) -> O(P(..p, a: n, d: 1.5), k + 1)\n }",
+            1000,
+            "1 b [0] 1.5 1001",
+        ),
+        ("O(P(..made(n), a: 7), o.n + 1)", 5000, "7 b [1] 0.5 1001"),
+        ("O(P(..o.p, a: n), o.n)", 2000, "1 b [0] 0.5 0"),
+    ] {
+        prints(&src(step), &format!("{cells}\n{shown}\n"));
+    }
+    // A record that something else holds is copied and left alone.
+    prints(
+        "import scarlet/internal\n\
+         type P {\n\ta Int\n\tb String\n\tc Array(Int)\n}\n\
+         fn go(n Int, p P, acc Int) Int {\n\
+         \tif n == 0 {\n\t\tacc\n\t} else {\n\
+         \t\tq = P(..p, a: n)\n\
+         \t\tgo(n - 1, p, acc + q.a + p.a)\n\t}\n\
+         }\n\
+         pub fn main() {\n\
+         \tp = P(1, 'b', [2])\n\
+         \tcells = internal::cells_made()\n\
+         \tprintln(go(1000, p, 0))\n\
+         \tprintln(internal::cells_made() - cells)\n\
+         \tprintln(p.a)\n\
+         }\n",
+        "501500\n1000\n1\n",
+    );
+    // A variant that an arm has shown.
+    prints(
+        "import scarlet/internal\n\
+         type V {\n\tA(x Int, xs Array(Int), k Int)\n\tB(xs Array(Int), x Int, k Int)\n}\n\
+         fn go(n Int, v V) V {\n\
+         \tif n == 0 {\n\t\tv\n\t} else {\n\
+         \t\tmatch v {\n\
+         \t\t\tA(x, ..) -> go(n - 1, A(..v, x: x + 1))\n\
+         \t\t\tB(_, x, _) -> go(n - 1, B(..v, x: x + 2))\n\t\t}\n\t}\n\
+         }\n\
+         pub fn main() {\n\
+         \tv = go(1, A(0, [5], 3))\n\
+         \tw = go(1, B([6], 0, 3))\n\
+         \tcells = internal::cells_made()\n\
+         \tx = go(1000, v)\n\
+         \ty = go(1000, w)\n\
+         \tprintln(internal::cells_made() - cells)\n\
+         \tprintln(x)\n\
+         \tprintln(y)\n\
+         }\n",
+        "0\nA(\n  1001,\n  [5],\n  3\n)\nB(\n  [6],\n  2002,\n  3\n)\n",
+    );
+}
+
+/// A record may be set in one of its own fields. It is copied, so nothing holds
+/// itself, and the audit at the end of the run finds every cell freed.
+#[test]
+fn a_record_set_in_itself_holds_the_old_one() {
+    prints(
+        "type W {\n\tinner Option(W)\n\tn Int\n\tm Int\n}\n\
+         fn wrap(w W) W { W(..w, inner: Some(w)) }\n\
+         fn over(w W, n Int) W { if n == 0 { w } else { over(W(..w, inner: Some(w), n: n), n - 1) } }\n\
+         fn depth(w W, acc Int) Int {\n\
+         \tmatch w.inner {\n\
+         \t\tSome(i) -> depth(i, acc + 1)\n\
+         \t\tNone -> acc\n\t}\n\
+         }\n\
+         pub fn main() {\n\
+         \tw = W(None, 1, 2)\n\
+         \tprintln(depth(wrap(wrap(w)), 0))\n\
+         \tprintln(depth(over(w, 100), 0))\n\
+         \tprintln(depth(w, 0))\n\
+         }\n",
+        "2\n100\n0\n",
+    );
+}
+
+/// A record too wide for a function to read whole is updated all the same, in the
+/// arena, at its end and in a box, where nothing else holds it and where something
+/// does. The audit before each instruction finds every count right.
+#[test]
+fn a_record_of_any_width_is_updated() {
+    for n in [200, 253, 254, 300, 1000] {
+        let last = n - 1;
+        let fields: String = (0..n).map(|i| format!("\tf{i} Int\n")).collect();
+        let args = format!("a, {}b", "m, ".repeat(n - 2));
+        let many: String = (1..60).map(|i| format!(", f{i}: x")).collect();
+        let src = format!(
+            "import scarlet/internal\n\
+             type Wide {{\n{fields}}}\n\
+             fn wide(a Int, m Int, b Int) Wide {{ Wide({args}) }}\n\
+             fn ends(w Wide) Int {{ w.f0 * 1000 + w.f1 * 100 + w.f{last} }}\n\
+             fn one(w Wide, x Int) Wide {{ Wide(..w, f0: x) }}\n\
+             fn two(w Wide, x Int) Wide {{ Wide(..w, f{last}: x, f0: x + 1) }}\n\
+             fn many(w Wide, x Int) Wide {{ Wide(..w{many}) }}\n\
+             fn spin(w Wide, n Int) Wide {{\n\
+             \tif n == 0 {{ w }} else {{ spin(many(two(one(w, 3), 5), 8), n - 1) }}\n\
+             }}\n\
+             pub fn main() {{\n\
+             \tw = wide(1, 0, 2)\n\
+             \tmade = internal::cells_made()\n\
+             \tv = spin(w, 50)\n\
+             \tprintln(internal::cells_made() - made)\n\
+             \tprintln(ends(w))\n\
+             \tprintln(ends(v))\n\
+             \tmade = internal::cells_made()\n\
+             \tprintln(ends(many(w, 4)) + ends(two(w, 4)) + ends(w))\n\
+             \tprintln(internal::cells_made() - made)\n\
+             }}\n"
+        );
+        let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+        let ran = scarlet_vm::run(&compile(&src), &mut host, Audit::EachInstruction);
+        assert_eq!(ran, Ok(()), "{n}");
+        let out = String::from_utf8(std::mem::take(host.out())).expect("UTF-8");
+        assert_eq!(out, "1\n1002\n6805\n7408\n2\n", "{n}");
     }
 }
 
@@ -1808,6 +1951,37 @@ fn a_record_update_closes_a_handle_only_the_old_record_held_before_the_new_field
     assert!(first_connection_ends_before_the_new_field_runs(
         "Held(conn: redial(h.port), ..h)",
         wait
+    ));
+}
+
+/// An update that holds its base closes a connection in a field it sets as it
+/// sets it, and leaves open one in a field it keeps, whatever the new fields are.
+/// A connection that something else holds stays open.
+#[test]
+fn an_update_closes_a_handle_in_a_field_it_sets() {
+    let ends = |update: &str, wait: u64| {
+        first_connection_ends_before_the_new_field_runs(
+            update,
+            std::time::Duration::from_millis(wait),
+        )
+    };
+    assert!(ends(
+        "gone = Held(..h, conn: None)\n\tHeld(redial(gone.port), 1)",
+        10_000
+    ));
+    assert!(ends(
+        "gone = Held(..Held(..h, conn: None), port: h.port)\n\tHeld(redial(gone.port), 1)",
+        10_000
+    ));
+    assert!(!ends(
+        "kept = Held(..h, port: h.port + 0)\n\tnew = redial(kept.port)\n\
+         \tmatch kept.conn {\n\t\tSome(_) -> Held(new, 1)\n\t\tNone -> kept\n\t}",
+        200
+    ));
+    assert!(!ends(
+        "gone = Held(..h, conn: None)\n\tnew = redial(gone.port)\n\
+         \tmatch h.conn {\n\t\tSome(_) -> Held(new, 1)\n\t\tNone -> gone\n\t}",
+        200
     ));
 }
 
@@ -3869,10 +4043,9 @@ fn without_through(src: &str) -> String {
 }
 
 /// A record of 253 fields is the longest cell the heap's arena holds. It is
-/// read, updated, compared, hashed and freed like any other record. Each update
-/// in the loop makes one cell and frees the one before, and the audit finds
-/// none left at the end. An update holds every field at once, and beside them
-/// the record and the number, which is every register there is.
+/// read, updated, compared, hashed and freed like any other record. The first
+/// update in the loop makes a cell, since something else holds the record, and
+/// the rest write to that one. The audit finds none left at the end.
 #[test]
 fn the_widest_record_in_the_arena_is_a_record() {
     let fields: String = (0..253).map(|i| format!("\tf{i} Int\n")).collect();
@@ -3903,14 +4076,13 @@ fn the_widest_record_in_the_arena_is_a_record() {
          }}\n",
         args = args.join(", "),
     );
-    let want = "803\n100\n804\nFalse\nTrue\nSome(first)\nSome(second)\nNone\n2\n";
+    let want = "803\n1\n804\nFalse\nTrue\nSome(first)\nSome(second)\nNone\n2\n";
     prints(&src, want);
 }
 
 /// A record wider than the widest cell in the arena has its fields in a box of
 /// their own, and is a record like any other, as one at the line is: read at
-/// both ends, shared, compared, hashed, shown, matched and freed. An update
-/// would hold more values at once than a function can, so each is built whole.
+/// both ends, shared, compared, hashed, shown, matched and freed.
 #[test]
 fn a_record_too_wide_for_the_arena_is_a_record() {
     for n in [252, 253, 254, 255, 300, 1000] {

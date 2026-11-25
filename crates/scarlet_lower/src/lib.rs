@@ -37,6 +37,7 @@ mod spine;
 mod tail_args;
 mod translate;
 pub mod typed_ir;
+mod update;
 
 pub use scarlet_ir::core_ir::*;
 

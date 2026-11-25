@@ -68,7 +68,7 @@ mod ctors;
 
 pub(crate) use audit::{AuditFailure, AuditFault};
 use ctors::Class;
-pub(crate) use ctors::{Ctor, Ctors, Numbering, TooManyCtors};
+pub(crate) use ctors::{Ctor, Ctors, Layout, Numbering, TooManyCtors};
 
 /// The most words a heap holds: the arena's and the boxes' together, which
 /// is 16 GiB. A cell's index then fits in the 31 bits below [`DYING`].
@@ -380,6 +380,26 @@ pub(crate) enum Fault {
     Full,
     /// See [`DeadCell`]. This one is a bug, in the VM or in the compiler.
     DeadCell,
+}
+
+/// Why [`Heap::copy_set`] made no copy.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NotCopied {
+    /// The cell is not laid out as it was said to be, or has no such field.
+    Other,
+    Refused(Fault),
+}
+
+impl From<Fault> for NotCopied {
+    fn from(why: Fault) -> NotCopied {
+        NotCopied::Refused(why)
+    }
+}
+
+impl From<DeadCell> for NotCopied {
+    fn from(dead: DeadCell) -> NotCopied {
+        NotCopied::Refused(dead.into())
+    }
 }
 
 impl From<DeadCell> for Fault {
@@ -912,6 +932,316 @@ impl Heap {
             _ => self.shelve_first(index, space(size)),
         }
         Some(Opened::Alone(fields))
+    }
+
+    /// Put `values` at the fields `at` of `cell`, when it is laid out as `layout`
+    /// says and has one holder. The caller gives their references, and gets
+    /// those of what was there. It is `None` for any other cell, and nothing has
+    /// then changed.
+    #[inline(always)]
+    pub(crate) fn set_alone<const N: usize>(
+        &mut self,
+        cell: Cell,
+        layout: Layout,
+        at: [u8; N],
+        values: [Value; N],
+    ) -> Option<[Value; N]> {
+        let from = cell.index().at();
+        let to = from.wrapping_add(layout.scan()).wrapping_add(1);
+        let (h, words) = self.arena.get_mut(from..to)?.split_first_mut()?;
+        if *h != layout.alone() || at.iter().any(|at| usize::from(*at) >= words.len()) {
+            return None;
+        }
+        let mut old = values;
+        for (old, at) in old.iter_mut().zip(at) {
+            if let Some(word) = words.get_mut(usize::from(at)) {
+                *old = Value::from_bits(std::mem::replace(word, old.bits()));
+            }
+        }
+        Some(old)
+    }
+
+    /// A new cell like `cell`, but with `values` at the fields `at`. The caller
+    /// gives the references of those, and everything else the new cell holds
+    /// gets one more. Nothing has changed when there is no copy.
+    #[inline(always)]
+    pub(crate) fn copy_set<const N: usize>(
+        &mut self,
+        cell: Cell,
+        layout: Layout,
+        at: [u8; N],
+        values: [Value; N],
+    ) -> Result<Cell, NotCopied> {
+        match layout.scan() {
+            1 => self.copy_of::<1, N>(cell, layout, at, values),
+            2 => self.copy_of::<2, N>(cell, layout, at, values),
+            3 => self.copy_of::<3, N>(cell, layout, at, values),
+            4 => self.copy_of::<4, N>(cell, layout, at, values),
+            5 => self.copy_of::<5, N>(cell, layout, at, values),
+            6 => self.copy_of::<6, N>(cell, layout, at, values),
+            7 => self.copy_of::<7, N>(cell, layout, at, values),
+            8 => self.copy_of::<8, N>(cell, layout, at, values),
+            _ => {
+                let mut sets = [(0, Value::NIL); N];
+                for ((set, at), v) in sets.iter_mut().zip(at).zip(values) {
+                    *set = (u16::from(at), v);
+                }
+                self.copy_set_wide(cell, layout, &sets)
+            }
+        }
+    }
+
+    /// [`Self::copy_set`] of a cell of `K` fields, which are read once and
+    /// written once.
+    #[inline(always)]
+    fn copy_of<const K: usize, const N: usize>(
+        &mut self,
+        cell: Cell,
+        layout: Layout,
+        at: [u8; N],
+        values: [Value; N],
+    ) -> Result<Cell, NotCopied> {
+        let of = self.fields_of::<K>(cell, layout);
+        let mut fields = of.ok_or(NotCopied::Other)?;
+        for at in at {
+            let set = fields.get_mut(usize::from(at)).ok_or(NotCopied::Other)?;
+            *set = Value::NIL.bits();
+        }
+        // This comes before there is a cell, so that the space of a freed field
+        // is not the one it gets.
+        self.count_all(&fields)?;
+        for (at, v) in at.into_iter().zip(values) {
+            let set = fields.get_mut(usize::from(at)).ok_or(NotCopied::Other)?;
+            *set = v.bits();
+        }
+        let make = layout.make(cell.variant());
+        let copy = self.cell(make, fields, std::iter::empty());
+        Ok(copy.inspect_err(|_| self.count_down_but(fields, at))?)
+    }
+
+    /// The `K` fields of `cell`, which is in the arena and laid out as `layout`
+    /// says.
+    #[inline(always)]
+    fn fields_of<const K: usize>(&self, cell: Cell, layout: Layout) -> Option<[u64; K]> {
+        let from = cell.index().at();
+        let to = from.wrapping_add(K).wrapping_add(1);
+        let (h, fields) = self.arena.get(from..to)?.split_first()?;
+        if layout.is_of(*h) {
+            fields.first_chunk().copied()
+        } else {
+            None
+        }
+    }
+
+    /// [`Self::copy_set`] of a cell of any width, with `sets`, which are fields
+    /// in order and what each is to be.
+    #[inline(never)]
+    pub(crate) fn copy_set_wide(
+        &mut self,
+        cell: Cell,
+        layout: Layout,
+        sets: &[(u16, Value)],
+    ) -> Result<Cell, NotCopied> {
+        let last = sets.last().map_or(0, |(at, _)| usize::from(*at));
+        if !self.has_field(cell, layout, last) {
+            return Err(NotCopied::Other);
+        }
+        let new = if layout.is_long() {
+            self.copy_long(cell, layout, sets)?
+        } else {
+            self.copy_near(cell, layout, sets)?
+        };
+        for (at, v) in sets {
+            self.set_field(new, usize::from(*at), *v);
+        }
+        Ok(new)
+    }
+
+    /// The copy of [`Self::copy_set_wide`], of a cell in the arena, with `sets`
+    /// still to be written.
+    #[inline(always)]
+    fn copy_near(
+        &mut self,
+        cell: Cell,
+        layout: Layout,
+        sets: &[(u16, Value)],
+    ) -> Result<Cell, Fault> {
+        let n = layout.scan();
+        let mut done = 0usize;
+        while done < n {
+            let counted = match n.wrapping_sub(done) {
+                1 => self.count_run::<1>(cell, done, sets),
+                2 => self.count_run::<2>(cell, done, sets),
+                3 => self.count_run::<3>(cell, done, sets),
+                4 => self.count_run::<4>(cell, done, sets),
+                5 => self.count_run::<5>(cell, done, sets),
+                6 => self.count_run::<6>(cell, done, sets),
+                7 => self.count_run::<7>(cell, done, sets),
+                _ => self.count_run::<STRIDE>(cell, done, sets),
+            };
+            if let Err(dead) = counted {
+                self.count_back(cell, done, sets);
+                return Err(dead.into());
+            }
+            done = done.wrapping_add(STRIDE);
+        }
+        self.twin(cell, layout.make(cell.variant()), n)
+            .inspect_err(|_| self.count_back(cell, n, sets))
+    }
+
+    /// Add a reference to each of the `N` fields of `cell` from `done` on that
+    /// `sets` leaves out, or at a freed cell to none of them.
+    #[inline(always)]
+    fn count_run<const N: usize>(
+        &mut self,
+        cell: Cell,
+        done: usize,
+        sets: &[(u16, Value)],
+    ) -> Result<(), DeadCell> {
+        let first = cell.index().at().wrapping_add(1).wrapping_add(done);
+        let words = self.arena.get(first..first.wrapping_add(N));
+        let mut words: [u64; N] = *words.and_then(|w| w.first_chunk()).ok_or(DeadCell)?;
+        for (at, _) in sets {
+            if let Some(word) = words.get_mut(usize::from(*at).wrapping_sub(done)) {
+                *word = Value::NIL.bits();
+            }
+        }
+        self.count_all(&words)
+    }
+
+    /// Take back the references of the first `done` fields, which
+    /// [`Self::count_run`] added.
+    #[cold]
+    #[inline(never)]
+    fn count_back(&mut self, cell: Cell, done: usize, sets: &[(u16, Value)]) {
+        for (run, start) in (0..done).step_by(STRIDE).enumerate() {
+            let mut kept = self.run_of_values(cell, run);
+            for (at, _) in sets {
+                if let Some(v) = kept.get_mut(usize::from(*at).wrapping_sub(start)) {
+                    *v = Value::NIL;
+                }
+            }
+            self.count_down(&kept.map(Value::bits));
+        }
+    }
+
+    /// A new cell with the `n` words of `cell`, which is in the arena. The
+    /// caller gives the references of what they hold.
+    #[inline(always)]
+    fn twin(&mut self, cell: Cell, make: Make, n: usize) -> Result<Cell, Fault> {
+        if let Some((new, _)) = self.freed(make, n) {
+            self.copy_words(cell, 0..n, new, 0);
+            return Ok(new);
+        }
+        let from = cell.index().at().wrapping_add(1);
+        let words = from..from.wrapping_add(n);
+        if words.end > self.arena.len() {
+            return Err(Fault::DeadCell);
+        }
+        let at = self.room(space(n.wrapping_add(1)))?;
+        let index = Index::new(at).ok_or(Fault::Full)?;
+        self.arena.push(make.header(n));
+        self.arena.extend_from_within(words);
+        self.made = self.made.wrapping_add(1);
+        Ok(Cell::new(index, make.variant))
+    }
+
+    /// Add a reference to each of `words`, or at a freed cell to none of them.
+    #[inline(always)]
+    fn count_all(&mut self, words: &[u64]) -> Result<(), DeadCell> {
+        let mut counted = true;
+        for w in words {
+            if let Some(child) = Value::from_bits(*w).as_cell() {
+                counted &= self.count_up(child);
+            }
+        }
+        if counted {
+            Ok(())
+        } else {
+            self.counted_but_frozen(words)
+        }
+    }
+
+    /// The end of a [`Self::count_all`] of `words`, one of which is not counted.
+    #[cold]
+    #[inline(never)]
+    fn counted_but_frozen(&mut self, words: &[u64]) -> Result<(), DeadCell> {
+        if words.iter().any(|w| self.is_freed(*w)) {
+            self.count_down(words);
+            return Err(DeadCell);
+        }
+        Ok(())
+    }
+
+    /// [`Self::count_down`] of `words` but for those at `at`.
+    #[cold]
+    #[inline(never)]
+    fn count_down_but<const K: usize, const N: usize>(&mut self, words: [u64; K], at: [u8; N]) {
+        for (i, w) in words.iter().enumerate() {
+            if at.iter().all(|at| usize::from(*at) != i) {
+                self.count_down(std::slice::from_ref(w));
+            }
+        }
+    }
+
+    /// Take back the references [`Self::count_all`] added.
+    #[cold]
+    #[inline(never)]
+    fn count_down(&mut self, words: &[u64]) {
+        for w in words {
+            if let Some(child) = Value::from_bits(*w).as_cell()
+                && let Some(h) = self.arena.get_mut(child.index().at())
+                && count(*h) > 0
+            {
+                *h = h.wrapping_sub(1);
+            }
+        }
+    }
+
+    /// [`Self::copy_near`] of a long cell.
+    #[cold]
+    #[inline(never)]
+    fn copy_long(
+        &mut self,
+        cell: Cell,
+        layout: Layout,
+        sets: &[(u16, Value)],
+    ) -> Result<Cell, Fault> {
+        let mut words: Vec<u64> = Vec::new();
+        let n = self.data(cell).len();
+        words.try_reserve_exact(n).map_err(|_| Fault::Full)?;
+        words.extend_from_slice(self.data(cell));
+        for (at, _) in sets {
+            if let Some(word) = words.get_mut(usize::from(*at)) {
+                *word = Value::NIL.bits();
+            }
+        }
+        self.count_all(&words)?;
+        let make = layout.make(cell.variant());
+        self.cell(make, [], words.iter().copied())
+            .inspect_err(|_| self.count_down(&words))
+    }
+
+    /// Whether `w` is a freed cell.
+    fn is_freed(&self, w: u64) -> bool {
+        let cell = Value::from_bits(w).as_cell();
+        cell.is_some_and(|cell| freed(self.header(cell.index())))
+    }
+
+    /// Whether `cell` is laid out as `layout` says, and has field `i`. A long
+    /// cell's layout does not say how many it has, so its constructor does.
+    pub(crate) fn has_field(&self, cell: Cell, layout: Layout, i: usize) -> bool {
+        let n = self.data(cell).len();
+        let whole = || self.ctors.shape(layout.class()).map(|(fields, _)| fields) == Some(n);
+        i < n && layout.is_of(self.header(cell.index())) && (!layout.is_long() || whole())
+    }
+
+    /// Put `v` at field `i` of `cell`, which one holder holds, and give what was
+    /// there. Both references are the caller's. It is `None`, and nothing
+    /// changes, when the cell has no such field.
+    pub(crate) fn set_field(&mut self, cell: Cell, i: usize, v: Value) -> Option<Value> {
+        let word = self.data_mut(cell).get_mut(i)?;
+        Some(Value::from_bits(std::mem::replace(word, v.bits())))
     }
 
     /// The cell of big Int constant `id`, when [`Self::keep_constant`] has

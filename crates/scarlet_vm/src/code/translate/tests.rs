@@ -927,6 +927,11 @@ fn operands_that_do_not_fit_are_in_a_list() {
         variant: with_fields(n),
         fields: list(n),
     };
+    let update = |n: usize| Atom::Update {
+        base: LocalId(4),
+        variant: with_fields(10),
+        sets: (0..).zip(list(n)).collect(),
+    };
     let call = |callee: Callee, n: usize| Atom::Call {
         callee,
         args: list(n),
@@ -955,6 +960,11 @@ fn operands_that_do_not_fit_are_in_a_list() {
         (prim(PrimOp::ArrayAppend, 10), Op::ArrayAppendWide),
         (ctor(8), Op::Ctor),
         (ctor(9), Op::CtorWide),
+        (update(1), Op::Update1),
+        (update(2), Op::Update2),
+        (update(3), Op::Update3),
+        (update(4), Op::UpdateWide),
+        (update(10), Op::UpdateWide),
         (closure(8), Op::Closure),
         (closure(9), Op::ClosureWide),
         (call(Callee::Local(LocalId(0)), 6), Op::CallValue),
@@ -1260,4 +1270,136 @@ fn a_new_cell_has_an_instruction_for_what_it_is_given() {
             assert_eq!(made(format!("pair{n}")), (tuple.to_string(), shared));
         }
     }
+}
+
+/// An update of a constructor that the program does not list, at a field that it
+/// does not have, at none, or at fields that are not in order, is in a function
+/// that does not load.
+#[test]
+fn an_update_that_names_no_field_does_not_load() {
+    let program = program_with_fields();
+    let source = Source::new(&program).expect("a whole program");
+    let load = |variant, sets: &[u16]| {
+        let sets = sets.iter().map(|field| (*field, LocalId(1))).collect();
+        let core = function(
+            2,
+            CoreExpr::Tail(Atom::Update {
+                base: LocalId(0),
+                variant,
+                sets,
+            }),
+        );
+        let this = Some(FuncIdx(0));
+        translate(&source, &core, false, this, &mut Tables::default()).err()
+    };
+    let three = with_fields(3);
+    for sets in [&[0][..], &[2], &[0, 1], &[0, 2], &[0, 1, 2]] {
+        assert_eq!(load(three, sets), None, "{sets:?}");
+    }
+    let wrong = |variant| Some(Unfit::Broken(Broken::UpdateFields(variant)));
+    for sets in [
+        &[][..],
+        &[3],
+        &[0, 3],
+        &[1, 0],
+        &[1, 1],
+        &[0, 2, 1],
+        &[u16::MAX],
+    ] {
+        assert_eq!(load(three, sets), wrong(three), "{sets:?}");
+    }
+    let plain = with_fields(0);
+    assert_eq!(load(plain, &[0]), wrong(plain));
+    let past = with_fields(11);
+    assert_eq!(load(past, &[0]), Some(Unfit::Broken(Broken::NoCtor(past))));
+}
+
+/// An update takes its base and its values where nothing reads them again, and
+/// its result has the register of the base. A base that is set in one of its own
+/// fields is not taken, and of two fields set to one value the last takes it.
+#[test]
+fn an_update_takes_what_is_not_read_again() {
+    let code = code(
+        "type P {\n\tP(a Int, b Int, c Int)\n}\n\
+         type W {\n\tW(next Option(W), n Int)\n}\n\
+         fn taken(p P, x Int) P { P(..p, b: x) }\n\
+         fn kept(p P, x Int) (P, P) { (P(..p, b: x), p) }\n\
+         fn shared(p P, x Int) (P, Int) { (P(..p, b: x), x) }\n\
+         fn twice(p P, x Int) P { P(..p, a: x, c: x) }\n\
+         fn own(p P) P { P(..p, b: p.b) }\n\
+         fn chain(p P) P {\n\
+         \tq = P(..p, a: 1)\n\
+         \tP(..q, b: 2)\n\
+         }\n\
+         fn branch(p P, x Int) P {\n\
+         \tif x > 1 { P(..p, b: x) } else { p }\n\
+         }\n\
+         fn loops(p P, n Int) P {\n\
+         \tif n == 0 { p } else { loops(P(..p, b: p.a + 1), n - 1) }\n\
+         }\n\
+         pub fn main() {\n\
+         \tp = P(1, 2, 3)\n\
+         \tprintln(taken(p, 1))\n\
+         \tprintln(kept(p, 1))\n\
+         \tprintln(shared(p, 1))\n\
+         \tprintln(twice(p, 1))\n\
+         \tprintln(own(p))\n\
+         \tprintln(chain(p))\n\
+         \tprintln(branch(p, 1))\n\
+         \tprintln(loops(p, 1))\n\
+         \tprintln(W(None, 1))\n\
+         }\n",
+    );
+    // For each update: whether it takes its base and each value, and whether it
+    // writes the register of the base.
+    let updates = |name: &str| -> Vec<(Vec<bool>, bool)> {
+        let ins = body(&code, named(&code, name)).iter();
+        let updates = ins.filter(|i| i.op().name().starts_with("Update"));
+        updates
+            .map(|i| {
+                let mut all = Vec::new();
+                i.operands(&code.lists, &mut |reg, role| all.push((reg, role)));
+                let passed = all[1..].iter();
+                let moved = passed.map(|(_, role)| *role == Role::Pass { moved: true });
+                (moved.collect(), all[0].0 == all[1].0)
+            })
+            .collect()
+    };
+    let all = |n: usize| (vec![true; n], true);
+    assert_eq!(updates(".taken"), [all(2)]);
+    assert_eq!(updates(".kept"), [(vec![false, true], false)]);
+    assert_eq!(updates(".shared"), [(vec![true, false], true)]);
+    assert_eq!(updates(".twice"), [(vec![true, false, true], true)]);
+    assert_eq!(updates(".own"), [all(2)]);
+    assert_eq!(updates(".chain"), [all(2), all(2)]);
+    assert_eq!(updates(".branch"), [all(2)]);
+    assert_eq!(updates(".loops"), [all(2)]);
+}
+
+/// A base that is one of its own new fields is not taken, so it is copied and
+/// never made to hold itself.
+#[test]
+fn a_base_that_is_set_in_itself_is_not_taken() {
+    let program = program_with_fields();
+    let source = Source::new(&program).expect("a whole program");
+    let mut core = function(
+        2,
+        CoreExpr::Tail(Atom::Update {
+            base: LocalId(0),
+            variant: with_fields(3),
+            sets: vec![(0, LocalId(0)), (2, LocalId(0))],
+        }),
+    );
+    core.ret_ty = RTy(0);
+    let this = Some(FuncIdx(0));
+    let mut draft =
+        translate(&source, &core, false, this, &mut Tables::default()).expect("it translates");
+    super::super::live::settle(&mut draft).expect("a function that loads");
+    let mut passed = Vec::new();
+    instructions(&draft)[0].operands(&draft.lists, &mut |v, role| passed.push((v.0, role)));
+    let pass = |moved| Role::Pass { moved };
+    assert_eq!(
+        passed[1..],
+        [(0, pass(false)), (0, pass(false)), (0, pass(true))]
+    );
 }

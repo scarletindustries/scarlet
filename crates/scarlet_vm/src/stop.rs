@@ -205,8 +205,13 @@ pub(crate) enum Broken {
     },
     /// A value is taken apart as a constructor it is not.
     OpenedOther(View),
+    /// A value is updated as a constructor it is not.
+    UpdatedOther(View),
     /// The program names a constructor it does not list.
     NoCtor(VariantRef),
+    /// The program updates a constructor at no field, at one that it does not
+    /// list, or at fields out of order.
+    UpdateFields(VariantRef),
     /// The program builds or matches a constructor with another number of
     /// fields than it lists, or the VM builds one so.
     CtorFields {
@@ -343,6 +348,14 @@ impl fmt::Display for BadProgram {
             Broken::OpenedOther(v) => {
                 write!(f, "{v:?} taken apart as a constructor it is not")
             }
+            Broken::UpdatedOther(v) => {
+                write!(f, "{v:?} updated as a constructor it is not")
+            }
+            Broken::UpdateFields(v) => write!(
+                f,
+                "{} updated at fields that it does not have, or that are not in order",
+                name(*v)
+            ),
             Broken::NoCtor(v) => write!(f, "{}, which the program does not list", name(*v)),
             Broken::CtorFields { ctor, got, want } => {
                 write!(f, "{} with {got} fields, not {want}", name(*ctor))

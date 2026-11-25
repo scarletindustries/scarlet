@@ -1,7 +1,8 @@
-use super::super::ins::{ArgList, Callee, OwnEntry, OwnRoom, Shared};
-use super::super::tests::{SHAPES, body, entries, named, of, program};
+use super::super::ins::{ArgList, Assign, AssignList, Callee, OwnEntry, OwnRoom, Shared};
+use super::super::tests::{SHAPES, a_ctor, body, entries, named, of, program};
 use super::super::{Arg, Args, Code, Dst, Entry, ReadsClosure, load, load_counted};
 use super::*;
+use crate::heap::Layout;
 
 fn is_count(ins: &Ins<Reg>) -> bool {
     matches!(ins, Ins::Count { .. })
@@ -347,6 +348,43 @@ fn each_functions_lists_are_its_own() {
     }
     assert_eq!(parts, [[Reg(1), Reg(0)], [Reg(2), Reg(0)]]);
     assert_eq!(args, [Reg(1), Reg(2)]);
+}
+
+/// The same of the lists of fields that are set.
+#[test]
+fn each_functions_updates_are_its_own() {
+    let layout = Layout::new(a_ctor(), 300);
+    let update = |list: u32, values: &[u32]| {
+        let mut f = fitted(
+            vec![Ins::UpdateWide {
+                dst: super::super::Dst(VReg(0)),
+                base: Arg::moved(VReg(0)),
+                layout,
+                sets: AssignList(list),
+            }],
+            vec![Some(Reg(5)), Some(Reg(1)), Some(Reg(2))],
+        );
+        for v in values {
+            let value = Arg::moved(VReg(*v));
+            let field = u16::try_from(100 + v).expect("a few");
+            f.body.lists.sets.push(Box::new([Assign { field, value }]));
+        }
+        f.body.ins.push(of::jump(0));
+        f.body.labels.push(0);
+        f
+    };
+    let placed = ran(vec![update(1, &[1, 2]), update(0, &[2, 0])]).expect("it fits");
+    let mut sets = Vec::new();
+    for ins in &placed.ins {
+        if let Ins::UpdateWide { sets: list, .. } = ins {
+            let each = list.sets(&placed.lists).iter();
+            sets.extend(each.map(|s| (s.field, s.value.reg, s.value.moved)));
+        }
+    }
+    assert_eq!(sets, [(102, Reg(2), true), (102, Reg(2), true)]);
+    let lost = Some(Stop::broken(Broken::NoPlace));
+    assert_eq!(ran(vec![update(2, &[1, 2])]).err(), lost);
+    assert_eq!(ran(vec![update(0, &[3])]).err(), lost);
 }
 
 /// An instruction that names what was given no place is not written.

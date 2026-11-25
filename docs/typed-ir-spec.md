@@ -44,6 +44,7 @@ parse → ast::Expression
 - `ty: Ty` is a **field on every node**, already resolved with `find()`, not something to look up.
 - `Field { recv, idx: FieldIdx, ty }`: the elaborator worked out `idx`, so `lower` has no `ctor_field` call.
 - `Ctor { variant: VariantIdx, args }`: the labelled arguments are already in declared order.
+- `Update { variant, base, kept, sets }`: a record update whose base may be held until the new fields are computed. Translation has asked, so the node is the answer. `kept` has the reads that a function with something undropped does instead.
 - `Call { callee: Callee, args }`, where `Callee = Known(FuncIdx) | SelfRec | Local(LocalId) | Builtin(Op)`: names are already resolved.
 - `Match { scrut, arms }`: variant indices are resolved and exhaustiveness is already proven.
 - Each name is resolved to a `VarLoad`, so `lower` has no `resolve_name`.
