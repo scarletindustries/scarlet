@@ -1,17 +1,16 @@
 //! The loaded instructions as text, for `scarlet dis --instrs`.
 //!
 //! One line per instruction: its number in its function, which a jump names,
-//! then the register it writes, its kind, and the rest of it in the order its
+//! then the registers it writes, its kind, and the rest of it in the order its
 //! fields are declared. A register is `r3`. A frame's first two are its own
 //! (`frame.rs`), so its parameters start at `r2`. An operand written `move r3`
-//! gives up the register's reference instead of adding one. `over r3` is the
-//! register whose cell a constructor may be written over, and `keep r3` one
-//! whose cell a loop carries round. A constructor is its type and its variant,
-//! `10.0`, and a test of one is the variant alone, because the test does not
-//! look at the type: `.1` has no fields and `.1(..)` has some. `-> 7` is where
-//! the instruction may continue instead of at the next one. Each kind is spelt
-//! as a counted run spells it (`counts.rs`), so a count can be read against a
-//! listing.
+//! gives up the register's reference instead of adding one. `_` is a field
+//! taken out of a cell that goes to no register. A constructor is its type and
+//! its variant, `10.0`, and a test of one is the variant alone, because the test
+//! does not look at the type: `.1` has no fields and `.1(..)` has some. `-> 7`
+//! is where the instruction may continue instead of at the next one. Each kind
+//! is spelt as a counted run spells it (`counts.rs`), so a count can be read
+//! against a listing.
 
 use std::fmt::{self, Write as _};
 
@@ -20,9 +19,9 @@ use scarlet_ir::intrinsic::Intrinsic;
 
 use crate::code::{self, Code, Entry, Ins, Reg};
 use crate::code::{
-    Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, Dst, EntryPc, Hit, KeepList, Kept, Last,
-    LookList, Looks, Newline, Over, Pc, Room, ShareList, Shared, Shares, Src, Taken, TextId, Why,
-    WhyId,
+    Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, Dst, DstList, EntryPc, Hit, Last,
+    LookList, Looks, MaybeDst, Newline, Pc, Room, ShareList, Shared, Shares, Src, Taken, TextId,
+    Why, WhyId,
 };
 use crate::frame::FIRST;
 use crate::heap::Ctor;
@@ -91,14 +90,14 @@ fn write_body(out: &mut String, code: &Code, entry: &Entry, body: &[Ins<Reg>]) -
         let mut line = Line {
             code,
             entry,
-            dst: None,
+            dsts: Vec::new(),
             parts: Vec::new(),
             to: None,
         };
         ins.show(&mut line);
         write!(out, "{i:>5}  ")?;
-        if let Some(dst) = line.dst {
-            write!(out, "{dst} = ")?;
+        if !line.dsts.is_empty() {
+            write!(out, "{} = ", line.dsts.join(", "))?;
         }
         out.push_str(ins.op().name());
         if !line.parts.is_empty() {
@@ -116,7 +115,7 @@ fn write_body(out: &mut String, code: &Code, entry: &Entry, body: &[Ins<Reg>]) -
 pub(crate) struct Line<'a> {
     code: &'a Code,
     entry: &'a Entry,
-    dst: Option<Reg>,
+    dsts: Vec<String>,
     parts: Vec<String>,
     /// The number, in its function, of the instruction it may jump to.
     to: Option<usize>,
@@ -125,6 +124,12 @@ pub(crate) struct Line<'a> {
 impl Line<'_> {
     fn part(&mut self, part: impl fmt::Display) {
         self.parts.push(part.to_string());
+    }
+
+    /// `dst` as one more of the registers written, or as none of them.
+    fn writes(&mut self, dst: Option<Reg>) {
+        let shown = dst.map_or_else(|| "_".to_string(), |r| r.to_string());
+        self.dsts.push(shown);
     }
 }
 
@@ -174,13 +179,32 @@ fn text(code: &Code, id: TextId) -> String {
 
 impl Show for Dst<Reg> {
     fn show(self, line: &mut Line<'_>) {
-        line.dst = Some(self.0);
+        line.writes(Some(self.0));
+    }
+}
+
+impl Show for MaybeDst<Reg> {
+    fn show(self, line: &mut Line<'_>) {
+        line.writes(self.dst().map(|dst| dst.0));
+    }
+}
+
+impl<const N: usize> Show for [MaybeDst<Reg>; N] {
+    fn show(self, line: &mut Line<'_>) {
+        self.into_iter().for_each(|dst| dst.show(line));
+    }
+}
+
+impl Show for DstList {
+    fn show(self, line: &mut Line<'_>) {
+        let code = line.code;
+        self.dsts(&code.lists).iter().for_each(|d| d.show(line));
     }
 }
 
 impl Show for Hit<Reg> {
     fn show(self, line: &mut Line<'_>) {
-        line.dst = Some(self.0);
+        line.writes(Some(self.0));
     }
 }
 
@@ -190,12 +214,6 @@ impl Show for Taken<Reg> {
             reg: self.0,
             moved: true,
         });
-    }
-}
-
-impl Show for Over<Reg> {
-    fn show(self, line: &mut Line<'_>) {
-        line.part(format_args!("over {}", self.0));
     }
 }
 
@@ -210,7 +228,7 @@ macro_rules! registers {
     )*};
 }
 
-registers!(Src<Reg>, Shared<Reg>, Kept<Reg>, Dead<Reg>);
+registers!(Src<Reg>, Shared<Reg>, Dead<Reg>);
 
 impl Show for Arg<Reg> {
     fn show(self, line: &mut Line<'_>) {
@@ -266,15 +284,6 @@ impl Show for ShareList {
     fn show(self, line: &mut Line<'_>) {
         let code = line.code;
         self.regs(&code.lists).iter().for_each(|r| line.part(r));
-    }
-}
-
-impl Show for KeepList {
-    fn show(self, line: &mut Line<'_>) {
-        let code = line.code;
-        for r in self.regs(&code.lists) {
-            line.part(format_args!("keep {r}"));
-        }
     }
 }
 

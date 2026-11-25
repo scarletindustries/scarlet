@@ -15,7 +15,7 @@ fn main.main() -> :t1
   drop %0
   let %4:t1 = c1
   let %5:t0 = call fn#0(%3, %4)
-  drop %3 [ctor:3]
+  drop %3
   ret Field(1)(%5)
 
 toplevel:

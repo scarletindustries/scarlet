@@ -1,11 +1,11 @@
 fn main.g(%0:t0) -> :t1
   match %0 :t1
     | 10.0(%1, %2) ->
-      drop %0 [ctor:2]
+      drop %0
       drop %2
       ret %1
     | 10.1() ->
-      drop %0 [ctor:0]
+      drop %0
       ret c0
 
 fn main.f(%0:t2) -> :t1

@@ -20,9 +20,11 @@ pub struct Counts {
     pub ops: Vec<(&'static str, u64)>,
     /// Cells the heap handed out, from the arena's end or from a free list.
     pub cells_made: usize,
-    /// Cells a constructor wrote over in place instead of taking a new one.
-    pub cells_reused: usize,
     /// Cells not yet freed when the program ended, big Int constants' among
     /// them.
     pub cells_live: usize,
+    /// Words the heap's arena grew to, which is the most it ever had in use at
+    /// once and what was free between. The words of cells too long for the arena
+    /// are not among them.
+    pub heap_words: usize,
 }

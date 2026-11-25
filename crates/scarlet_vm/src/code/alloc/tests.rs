@@ -1,7 +1,7 @@
 use super::super::Source;
-use super::super::ins::{Arg, ArgList, Args, KeepList, Over, OwnEntry, OwnRoom, Role};
+use super::super::ins::{Arg, Role};
 use super::super::live::settle;
-use super::super::tests::{SHAPES, a_ctor, draft, of, program};
+use super::super::tests::{SHAPES, draft, of, program};
 use super::super::translate::translate;
 use super::super::{Tables, literals};
 use super::*;
@@ -62,35 +62,34 @@ fn a_value_keeps_clear_of_one_with_a_higher_number() {
     assert_eq!(regs(draft(3, 0, ins, &[])), [Some(2), Some(3), Some(2)]);
 }
 
-/// A cell that a loop carries round has a register no other value has, even
-/// one that is never held at the same time, because the loop leaves it there.
+/// The registers an instruction writes at once are different ones, whether or
+/// not anything reads them, and one may be the register of the value it takes.
+/// A field with no register has none.
 #[test]
-fn a_carried_cell_has_a_register_of_its_own() {
+fn fields_of_one_cell_have_registers_of_their_own() {
+    let ins = vec![of::open([Some(1), Some(2)], 0), of::len(3, 2), of::ret(3)];
+    assert_eq!(
+        regs(draft(4, 1, ins, &[])),
+        [Some(2), Some(2), Some(3), Some(2)]
+    );
+    let ins = vec![of::open([None, Some(2)], 0), of::ret(2)];
+    assert_eq!(regs(draft(3, 1, ins, &[])), [Some(2), None, Some(2)]);
+    // A value that is read again has another.
     let ins = vec![
-        of::constant(2),
-        of::len(3, 2),
-        of::park(2),
-        of::constant(4),
-        of::add(5, 3, 4),
-        of::again(&[5, 0]),
+        of::open([Some(1), Some(2)], 0),
+        of::add(3, 1, 2),
+        of::add(4, 3, 5),
+        of::ret(4),
     ];
-    let mut d = draft(6, 2, ins.clone(), &[]);
-    d.carried.insert(VReg(2));
-    let alone = regs(d);
-    assert_eq!(alone[2], Some(4));
-    for other in [0, 1, 3, 4, 5] {
-        assert_ne!(alone[other], alone[2], "{alone:?}");
-    }
-    // One that is only kept for a constructor of this turn is a value like
-    // any other, and the next takes its register.
-    let shared = regs(draft(6, 2, ins, &[]));
-    assert!(shared[3..].contains(&shared[2]), "{shared:?}");
+    let regs = regs(draft(6, 1, [vec![of::constant(5)], ins].concat(), &[]));
+    assert_eq!(regs[..3], [Some(2), Some(2), Some(3)]);
+    assert_eq!(regs[5], Some(4));
 }
 
-/// Each arm here overwrites the cell it took apart, and holds a few values
-/// while it does, so any number of them fit.
+/// Each arm here takes cells apart and holds a few values while it does, so any
+/// number of them fit.
 #[test]
-fn cells_kept_in_different_arms_share_a_register() {
+fn fields_in_different_arms_share_registers() {
     let arm = |i: usize| {
         format!(
             "\t\t{i} -> match e {{\n\
@@ -113,8 +112,8 @@ fn cells_kept_in_different_arms_share_a_register() {
     let f = &f.expect("f").core;
     let source = Source::new(&program).expect("a whole program");
     let d = translate(&source, f, Some(FuncIdx(0)), &mut Tables::default()).expect("it loads");
-    let kept = d.ins.iter().filter(|i| i.op().name() == "DropReuse");
-    assert!(kept.count() >= 300);
+    let opened = d.ins.iter().filter(|i| i.op().name() == "Open2");
+    assert!(opened.count() >= 300);
     let regs = check(d, "f").expect("a function that fits");
     assert!(regs < 20, "{regs} registers");
 }
@@ -285,18 +284,6 @@ fn wrong_register(d: &Draft, body: &Body) -> Option<String> {
         let first = state.as_mut().expect("the start");
         first.insert(r, Holds::Value(*p));
     }
-    for k in &d.carried {
-        // A loop leaves what it carries in its register, so nothing else may
-        // be there at any time.
-        let others = (0..d.values).map(VReg).filter(|v| v != k);
-        if let Some(v) = others.into_iter().find(|v| reg(*v) == reg(*k)) {
-            return Some(format!("{v:?} shares the register of a carried cell"));
-        }
-        if let Some(r) = reg(*k) {
-            let first = state.as_mut().expect("the start");
-            first.entry(r).or_insert(Holds::Value(*k));
-        }
-    }
     for (i, ins) in d.ins.iter().enumerate() {
         for (l, at) in d.labels.iter().enumerate() {
             if *at == i
@@ -328,7 +315,7 @@ fn wrong_register(d: &Draft, body: &Body) -> Option<String> {
                     }
                     taken.push((r, v));
                 }
-                Role::Look | Role::Share | Role::Pass { .. } | Role::Take | Role::Keep => {
+                Role::Look | Role::Share | Role::Pass { .. } | Role::Take => {
                     if now.get(&r) != Some(&Holds::Value(v)) {
                         wrong = Some(format!("{i}: {ins:?} reads {v:?} in r{r}: {now:?}"));
                     }
@@ -341,13 +328,11 @@ fn wrong_register(d: &Draft, body: &Body) -> Option<String> {
         if wrong.is_some() {
             return wrong;
         }
-        if let Ins::TailCallSelfKeep { keep, .. } = ins {
-            for v in keep.regs(&d.lists) {
-                let r = reg(*v);
-                if r.and_then(|r| now.get(&r)) != Some(&Holds::Value(*v)) {
-                    return Some(format!("{i}: the loop carries {v:?} in {r:?}: {now:?}"));
-                }
-            }
+        let mut regs: Vec<u8> = written.iter().map(|(r, _)| *r).collect();
+        regs.sort_unstable();
+        regs.dedup();
+        if regs.len() < written.len() {
+            return Some(format!("{i}: {ins:?} writes a register twice: {written:?}"));
         }
         // A jump takes nothing and writes nothing.
         if let Some(l) = jumps {
@@ -414,11 +399,11 @@ fn copy_of(d: &Draft) -> Draft {
         lists: Lists {
             regs: d.lists.regs.clone(),
             args: d.lists.args.clone(),
+            dsts: d.lists.dsts.clone(),
         },
         labels: d.labels.clone(),
         values: d.values,
         params: d.params.clone(),
-        carried: d.carried.clone(),
         closure: d.closure,
     }
 }
@@ -536,7 +521,6 @@ struct Maker {
     /// The numbers no value has yet, in no order, so that a value written late
     /// may have a lower number than one that is held then.
     numbers: Vec<u32>,
-    kept: Vec<u32>,
 }
 
 impl Maker {
@@ -590,19 +574,16 @@ impl Maker {
                 7 | 8 if scope.len() > theirs.max(1) => {
                     let i = theirs + self.random.below(scope.len() - theirs);
                     let v = scope.remove(i);
-                    if !self.kept.contains(&v) {
-                        self.ins.push(of::drop(v));
-                    }
+                    self.ins.push(of::drop(v));
                 }
-                // A cell that is kept, and a constructor that takes it.
-                9 if scope.len() > 2 && depth == 0 => {
-                    let v = self.value();
-                    self.ins.push(of::len(v, a));
-                    self.ins.push(of::park(v));
-                    self.kept.push(v);
-                    let made = self.value();
-                    self.ins.push(over(made, b, v));
-                    scope.push(made);
+                // A cell taken apart, with a register for some of its fields.
+                9 if scope.len() > theirs => {
+                    let i = theirs + self.random.below(scope.len() - theirs);
+                    let v = scope.remove(i);
+                    let wanted = 1 + self.random.below(3);
+                    let dsts = [wanted & 1, wanted & 2].map(|w| (w > 0).then(|| self.value()));
+                    self.ins.push(of::open(dsts, v));
+                    scope.extend(dsts.into_iter().flatten());
                 }
                 10 | 11 if depth < 4 => self.branch(depth, scope),
                 12 if depth < 4 => self.find(depth, scope),
@@ -709,15 +690,6 @@ impl Maker {
     }
 }
 
-fn over(dst: u32, field: u32, reuse: u32) -> Ins<VReg> {
-    Ins::CtorOver {
-        dst: super::super::ins::Dst(VReg(dst)),
-        ctor: a_ctor(),
-        fields: Args::new(&[VReg(field)]).expect("room for one"),
-        reuse: Over(VReg(reuse)),
-    }
-}
-
 fn random_function(seed: u64, steps: usize) -> Draft {
     let mut random = Random(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
     let values = u32::try_from(20_000.min(3 + steps * 100)).expect("few");
@@ -730,45 +702,15 @@ fn random_function(seed: u64, steps: usize) -> Draft {
         ins: Vec::new(),
         labels: Vec::new(),
         numbers,
-        kept: Vec::new(),
     };
     let mut scope = vec![0, 1, 2];
-    // Some are loops that carry cells round: each is taken at the top of the
-    // turn by the constructor that binds it again, and given up at its end.
-    let mut carried = Vec::new();
-    for _ in 0..seed % 3 {
-        let v = m.value();
-        let field = m.random.of(&scope);
-        m.ins.push(over(v, field, v));
-        m.kept.push(v);
-        carried.push(v);
-        scope.push(v);
-    }
     m.steps(steps, 0, &mut scope, 0);
-    m.ins.extend(carried.iter().map(|v| of::park(*v)));
-    let mut lists = Lists::default();
-    if carried.is_empty() {
-        m.end(&scope);
-    } else {
-        let args = (0..3).map(|_| Arg::shared(VReg(m.random.of(&scope))));
-        lists.args.push(args.collect());
-        lists.regs.push(carried.iter().copied().map(VReg).collect());
-        m.ins.push(Ins::TailCallSelfKeep {
-            to: OwnEntry,
-            args: ArgList(0),
-            keep: KeepList(0),
-            own: OwnRoom,
-        });
-    }
-    let mut d = draft(values, 3, m.ins, &m.labels);
-    d.lists = lists;
-    d.carried = carried.into_iter().map(VReg).collect();
-    d
+    m.end(&scope);
+    draft(values, 3, m.ins, &m.labels)
 }
 
 /// The same for functions made at random: straight code, branches, lookups
-/// and writes that miss, cells kept for this turn and for the next, and paths
-/// that leave early.
+/// and writes that miss, cells taken apart, and paths that leave early.
 #[test]
 fn every_register_read_holds_its_value_in_random_functions() {
     let mut fitted = 0;
@@ -800,6 +742,15 @@ fn a_register_shared_by_mistake_is_found() {
     let mut body = allocate(d, &held).expect("a function that fits");
     assert_eq!(wrong_register(&before, &body), None);
     body.regs[1] = body.regs[0];
+    assert!(wrong_register(&before, &body).is_some());
+    // And one given to two values that are written at once.
+    let ins = vec![of::open([Some(1), Some(2)], 0), of::ret(1)];
+    let mut d = draft(3, 1, ins, &[]);
+    let held = settle(&mut d).expect("a function that loads");
+    let before = copy_of(&d);
+    let mut body = allocate(d, &held).expect("a function that fits");
+    assert_eq!(wrong_register(&before, &body), None);
+    body.regs[2] = body.regs[1];
     assert!(wrong_register(&before, &body).is_some());
     // And a value read after it was taken.
     let mut d = draft(3, 1, vec![of::mv(1, 0), of::len(2, 0), of::ret(1)], &[]);

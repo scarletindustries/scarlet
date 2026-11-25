@@ -2,7 +2,7 @@ use scarlet_ir::TypeId;
 use scarlet_ir::core_ir::{FuncIdx, VariantRef};
 
 use super::*;
-use crate::heap::{Class, Ctor, DeadCell, Edit, Kind, STUB_WORDS};
+use crate::heap::{Class, Ctor, Edit, Kind, Opened, STUB_WORDS};
 
 fn tuple(heap: &mut Heap, values: &[Value]) -> Cell {
     heap.tuple(values).expect("room")
@@ -142,11 +142,6 @@ fn a_heap_whose_counts_are_right_passes() {
     let unit = tuple(&mut heap, &[]);
     let mut roots = vec![pair, unit];
     roots.extend(one_of_each(&mut heap, ctors, text, 7));
-    assert_eq!(audit(&heap, &roots), Ok(()));
-    // A hollowed constructor is one whose fields are all `Nil`.
-    let hollow = heap.ctor(ctors[0], &[Value::NIL; 2]).expect("room");
-    assert_eq!(heap.hollow(hollow), Ok(true));
-    roots.push(hollow);
     assert_eq!(audit(&heap, &roots), Ok(()));
     for root in roots {
         heap.release(root).expect("a live cell");
@@ -663,6 +658,7 @@ fn a_heap_stays_whole_through_a_long_run_of_everything() {
     };
     let (mut heap, ctors) = heap();
     let mut held: Vec<Cell> = Vec::new();
+    let mut opened = 0;
     for step in 0..2000 {
         match below(10) {
             0 => held.push(heap.string(&vec![b's'; below(60)]).expect("room")),
@@ -698,17 +694,18 @@ fn a_heap_stays_whole_through_a_long_run_of_everything() {
                 }
                 held.push(heap.ctor(ctors[usize::from(wide)], &values).expect("room"));
             }
-            // One written over another, when nothing else holds it.
+            // One taken apart, when it is the narrow one. It stays when
+            // something else holds it.
             9 if !held.is_empty() => {
                 let cell = held.swap_remove(below(held.len()));
-                let fields = heap.values(cell).count();
-                let ctor = ctors[usize::from(fields > 2)];
-                match heap.hollow(cell) {
-                    Ok(true) if heap.fits_ctor(cell, fields) => {
-                        held.push(heap.ctor_in(cell, ctor, vec![Value::NIL; fields].into_iter()));
+                match heap.open::<2>(cell, ctors[0]) {
+                    Some(Opened::Alone(fields)) => {
+                        opened += 1;
+                        held.extend(fields.iter().filter_map(|v| v.as_cell()));
                     }
-                    Ok(_) => held.push(cell),
-                    Err(DeadCell) => panic!("a live cell"),
+                    // It has lost this holder, who now has none.
+                    Some(Opened::Held(..)) => {}
+                    None => held.push(cell),
                 }
             }
             // A node that grows or shrinks by moving to another cell.
@@ -741,7 +738,7 @@ fn a_heap_stays_whole_through_a_long_run_of_everything() {
         assert_eq!(audit(&heap, &held), Ok(()), "step {step}");
     }
     assert!(heap.made() > 800, "{}", heap.made());
-    assert!(heap.reused() > 10, "{}", heap.reused());
+    assert!(opened > 10, "{opened}");
     for cell in held {
         heap.release(cell).expect("a live cell");
     }

@@ -22,14 +22,14 @@ use scarlet_ir::core_ir::GlobalSlot;
 use crate::array::{self, End, Seq};
 use crate::bigint;
 use crate::code::{
-    Arg, Args, BitsOp, Code, Counted, Dead, Dst, Entry, Hands, Ins, Op, Over, Reg, Room, Shared,
-    Src,
+    Arg, Args, BitsOp, Code, Counted, Dead, Dst, Entry, Hands, Ins, MaybeDst, Op, Reg, Room,
+    Shared, Src, Taken,
 };
 use crate::counts::Counts;
 use crate::eq;
 use crate::float;
 use crate::frame::{self, CLOSURE, Link, RESULT, WINDOW, Window, window};
-use crate::heap::{Ctor, DeadCell, Heap, Shape};
+use crate::heap::{Cell, Ctor, DeadCell, Heap, Opened, STRIDE, Shape};
 use crate::host::Host;
 use crate::int;
 use crate::map;
@@ -367,8 +367,8 @@ impl<'c, 'h> Machine<'c, 'h> {
         Ok(Counts {
             ops: ops.map(|(op, n)| (op.name(), n)).collect(),
             cells_made: heap.made(),
-            cells_reused: heap.reused(),
             cells_live: heap.live_cells()?,
+            heap_words: heap.words_carved(),
         })
     }
 
@@ -671,23 +671,50 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
                     fields.args(&code.lists),
                 )?;
             }
-            Ins::CtorOver {
-                dst,
+            Ins::Open1 {
+                ref dsts,
+                src,
                 ctor,
-                ref fields,
-                reuse,
-            } => over(win.lend(), rest, dst, ctor, fields, reuse)?,
-            Ins::CtorOverWide {
-                dst,
+            } => open(win.lend(), rest, dsts, src, ctor)?,
+            Ins::Open2 {
+                ref dsts,
+                src,
                 ctor,
-                fields,
-                reuse,
-            } => {
-                let fields = fields.args(&code.lists);
-                over_wide(win.lend(), rest, dst, ctor, fields, reuse)?;
+            } => open(win.lend(), rest, dsts, src, ctor)?,
+            Ins::Open3 {
+                ref dsts,
+                src,
+                ctor,
+            } => open(win.lend(), rest, dsts, src, ctor)?,
+            Ins::Open4 {
+                ref dsts,
+                src,
+                ctor,
+            } => open(win.lend(), rest, dsts, src, ctor)?,
+            Ins::Open5 {
+                ref dsts,
+                src,
+                ctor,
+            } => open(win.lend(), rest, dsts, src, ctor)?,
+            Ins::Open6 {
+                ref dsts,
+                src,
+                ctor,
+            } => open_out(win.lend(), rest, dsts, src, ctor)?,
+            Ins::Open7 {
+                ref dsts,
+                src,
+                ctor,
+            } => open_out(win.lend(), rest, dsts, src, ctor)?,
+            Ins::Open8 {
+                ref dsts,
+                src,
+                ctor,
+            } => open_out(win.lend(), rest, dsts, src, ctor)?,
+            Ins::OpenWide { dsts, src, ctor } => {
+                open_apart(win.lend(), rest, dsts.dsts(&code.lists), src, ctor)?;
             }
             Ins::Drop { reg } => win.drop(&mut rest.heap, reg)?,
-            Ins::DropReuse { reg } => win.keep(&mut rest.heap, reg)?,
             Ins::Call0 { dst, own, to } => {
                 let up = room!(own);
                 open!(up, own, dst);
@@ -853,16 +880,6 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
                 rewrite_wide(win.lend(), rest, own, args.args(&code.lists))?;
                 pc = to.index();
             }
-            Ins::TailCallSelfKeep {
-                to,
-                args,
-                keep,
-                own,
-            } => {
-                let (args, keep) = (args.args(&code.lists), keep.regs(&code.lists));
-                rewrite_keeping(win.lend(), rest, own, args, keep)?;
-                pc = to.index();
-            }
             // The callee's closure gets its own reference before this
             // frame's registers are released, one of which may be the
             // only other holder.
@@ -904,11 +921,10 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
             Ins::GetCapture { dst, index } => {
                 let closure = win.closure().as_cell();
                 match closure.and_then(|c| rest.heap.near_capture(c, index)) {
-                    Some(v) => {
-                        let v = rest.share(v)?;
+                    Some(v) if v.as_cell().is_none_or(|c| rest.heap.count_up(c)) => {
                         win.put(&mut rest.heap, dst, v)?;
                     }
-                    None => far_capture(win.lend(), rest, dst, index, pc)?,
+                    Some(_) | None => far_capture(win.lend(), rest, dst, index, pc)?,
                 }
             }
             // A frame that runs as a plain function has no closure cell.
@@ -950,11 +966,10 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
             Ins::Field { dst, src, index } => {
                 let cell = win.look(src).as_cell();
                 match cell.and_then(|c| rest.heap.near_field(c, usize::from(index))) {
-                    Some(v) => {
-                        let v = rest.share(v)?;
+                    Some(v) if v.as_cell().is_none_or(|c| rest.heap.count_up(c)) => {
                         win.put(&mut rest.heap, dst, v)?;
                     }
-                    None => far_field(win.lend(), rest, dst, src, index)?,
+                    Some(_) | None => far_field(win.lend(), rest, dst, src, index)?,
                 }
             }
             Ins::Tuple2 { dst, ref elements } => {
@@ -1273,24 +1288,6 @@ fn rewrite_wide(
     Ok(())
 }
 
-/// [`rewrite_wide`], except that the registers in `keep` stay, so a loop
-/// overwrites the cell its last turn gave up. Each is the only reference to a
-/// cell holding nothing, and the register still owns it. So a cell the loop
-/// never takes is freed when the frame really ends.
-#[inline(never)]
-fn rewrite_keeping(
-    mut win: Window<'_>,
-    rest: &mut Rest<'_, '_>,
-    own: Room,
-    args: &[Arg<Reg>],
-    keep: &[Reg],
-) -> Result<(), DeadCell> {
-    pass_all(win.lend(), rest, args)?;
-    win.rewrite_keeping(&mut rest.heap, own, &rest.passing, keep)?;
-    rest.passing.clear();
-    Ok(())
-}
-
 /// How many frames there are, the one at `base` the last. Only a built-in for
 /// debugging asks, so the walk is kept out of the loop's way.
 #[cold]
@@ -1323,7 +1320,7 @@ fn lost_window() -> Stop {
 /// one, so a cell that is refused has taken nothing.
 #[inline(always)]
 fn new_cell<const N: usize, G: Hands + ?Sized>(
-    win: Window<'_>,
+    mut win: Window<'_>,
     rest: &mut Rest<'_, '_>,
     dst: Dst<Reg>,
     shape: Shape<N>,
@@ -1332,7 +1329,12 @@ fn new_cell<const N: usize, G: Hands + ?Sized>(
     for a in given.hands() {
         win.add(&mut rest.heap, a)?;
     }
-    new_cell_of_shared(win, rest, dst, shape, given)
+    // The two ways do not join, so taking a freed cell is one straight line.
+    let values = given.hands().map(|a| win.hand(a));
+    match rest.heap.in_freed(shape, values) {
+        Some(cell) => Ok(win.put(&mut rest.heap, dst, Value::cell(cell))?),
+        None => new_cell_at_end(win, rest, dst, shape, given),
+    }
 }
 
 /// [`new_cell`], for an instruction that is a call out of the loop.
@@ -1345,23 +1347,6 @@ fn new_cell_apart<const N: usize, G: Hands + ?Sized>(
     given: &G,
 ) -> Result<(), Stop> {
     new_cell(win, rest, dst, shape, given)
-}
-
-/// The rest of [`new_cell`] once every value that is shared has its reference.
-#[inline(always)]
-fn new_cell_of_shared<const N: usize, G: Hands + ?Sized>(
-    mut win: Window<'_>,
-    rest: &mut Rest<'_, '_>,
-    dst: Dst<Reg>,
-    shape: Shape<N>,
-    given: &G,
-) -> Result<(), Stop> {
-    // The two ways do not join, so taking a freed cell is one straight line.
-    let values = given.hands().map(|a| win.hand(a));
-    match rest.heap.in_freed(shape, values) {
-        Some(cell) => Ok(win.put(&mut rest.heap, dst, Value::cell(cell))?),
-        None => new_cell_at_end(win, rest, dst, shape, given),
-    }
 }
 
 /// The rest of [`new_cell`] when no freed cell has the size.
@@ -1388,48 +1373,187 @@ fn new_cell_at_end<const N: usize, G: Hands + ?Sized>(
     }
 }
 
-/// A new constructor given what `given` hands on, over the cell in `reuse` when
-/// one fits there.
+/// Take the `ctor` in `src` apart. Each field goes to its register in `dsts`.
+///
+/// First the fields have their references: the cell's own when nothing else held
+/// it, and then it is freed, and one more for each that goes to a register when
+/// something did. Then `src` is emptied, and only then is a register written,
+/// and what it held given up. So one of the registers may be `src`, and one may
+/// hold what else held the cell.
+///
+/// What stops this is a freed cell. When it is a field that another reference was
+/// to be added to, nothing has changed, and when it is something to give up,
+/// everything else is done. A field that only moves is not looked at.
+///
+/// A cell that `Heap::open` does not take goes to [`open_apart`], which keeps
+/// another order.
 #[inline(always)]
-fn over<G: Hands + ?Sized>(
+fn open<const N: usize>(
     mut win: Window<'_>,
     rest: &mut Rest<'_, '_>,
-    dst: Dst<Reg>,
+    dsts: &[MaybeDst<Reg>; N],
+    src: Taken<Reg>,
     ctor: Ctor,
-    given: &G,
-    reuse: Over<Reg>,
 ) -> Result<(), Stop> {
-    for a in given.hands() {
-        win.add(&mut rest.heap, a)?;
-    }
-    // Move out the cell a `DropReuse` above hollowed and left in `reuse`,
-    // so the register no longer holds it. Anything else there is a value
-    // this frame is done with, so release it as the register would have.
-    let parked = win.empty(reuse.0);
     let heap = &mut rest.heap;
-    let fits = parked.as_cell();
-    match fits.filter(|c| heap.fits_ctor(*c, given.hands().len())) {
-        Some(cell) => {
-            let cell = heap.ctor_in(cell, ctor, given.hands().map(|a| win.hand(a)));
-            Ok(win.put(heap, dst, Value::cell(cell))?)
+    let cell = win.get(src.0).as_cell();
+    match cell.and_then(|cell| heap.open::<N>(cell, ctor)) {
+        Some(Opened::Alone(fields)) => {
+            win.take(src);
+            let mut dead = false;
+            for (dst, v) in dsts.iter().zip(fields) {
+                let old = match dst.dst() {
+                    Some(dst) => win.swap(dst, v),
+                    None => v,
+                };
+                if let Some(old) = old.as_cell() {
+                    dead |= heap.release_apart(old).is_err();
+                }
+            }
+            unless(dead)
         }
-        None => {
-            rest.release(parked)?;
-            new_cell_of_shared(win, rest, dst, Shape::ctor(ctor), given)
-        }
+        // Inside the loop a wider one costs what is around it more than the
+        // call it saves.
+        Some(Opened::Held(cell, fields)) if N <= 2 => open_held(win, rest, dsts, src, cell, fields),
+        Some(Opened::Held(cell, fields)) => open_held_apart(win, rest, dsts, src, cell, fields),
+        None => open_apart(win, rest, dsts, src, ctor),
     }
 }
 
+/// [`open`], out of the loop.
 #[inline(never)]
-fn over_wide(
+fn open_out<const N: usize>(
     win: Window<'_>,
     rest: &mut Rest<'_, '_>,
-    dst: Dst<Reg>,
+    dsts: &[MaybeDst<Reg>; N],
+    src: Taken<Reg>,
     ctor: Ctor,
-    fields: &[Arg<Reg>],
-    reuse: Over<Reg>,
 ) -> Result<(), Stop> {
-    over(win, rest, dst, ctor, fields, reuse)
+    open(win, rest, dsts, src, ctor)
+}
+
+/// The rest of [`open`] for `cell`, which something else holds and which has
+/// lost a holder.
+#[inline(always)]
+fn open_held<const N: usize>(
+    mut win: Window<'_>,
+    rest: &mut Rest<'_, '_>,
+    dsts: &[MaybeDst<Reg>; N],
+    src: Taken<Reg>,
+    cell: Cell,
+    fields: [Value; N],
+) -> Result<(), Stop> {
+    let heap = &mut rest.heap;
+    for (n, (dst, v)) in dsts.iter().zip(fields).enumerate() {
+        if dst.dst().is_some() && heap.own(v).is_err() {
+            return Err(unshare(heap, dsts, cell, n));
+        }
+    }
+    win.take(src);
+    let mut dead = false;
+    for (dst, v) in dsts.iter().zip(fields) {
+        if let Some(dst) = dst.dst()
+            && let Some(old) = win.swap(dst, v).as_cell()
+        {
+            dead |= heap.release_apart(old).is_err();
+        }
+    }
+    unless(dead)
+}
+
+/// [`open_held`], out of the loop.
+#[inline(never)]
+fn open_held_apart<const N: usize>(
+    win: Window<'_>,
+    rest: &mut Rest<'_, '_>,
+    dsts: &[MaybeDst<Reg>; N],
+    src: Taken<Reg>,
+    cell: Cell,
+    fields: [Value; N],
+) -> Result<(), Stop> {
+    open_held(win, rest, dsts, src, cell, fields)
+}
+
+/// Give `cell` its holder back, and take back the references added to its first
+/// `n` fields, because the one after them is a freed cell.
+#[cold]
+#[inline(never)]
+fn unshare(heap: &mut Heap, dsts: &[MaybeDst<Reg>], cell: Cell, n: usize) -> Stop {
+    let mut undone = heap.share(cell);
+    for (i, dst) in dsts.iter().enumerate().take(n) {
+        if dst.dst().is_some()
+            && let Some(field) = heap.field(cell, i).and_then(Value::as_cell)
+        {
+            undone = undone.and(heap.release(field));
+        }
+    }
+    undone.err().unwrap_or(DeadCell).into()
+}
+
+/// [`open`] of any cell: one whose fields are in a list, a long one, one that is
+/// never counted, and one that cannot be taken apart.
+///
+/// It goes field by field: each has its reference, then its register is written,
+/// and then what that held is given up. The cell is given up last, so until then
+/// its fields are there, whatever held it besides. At a freed field that another
+/// reference was to be added to, the fields before it are in their registers and
+/// `src` has the cell back.
+#[cold]
+#[inline(never)]
+fn open_apart(
+    mut win: Window<'_>,
+    rest: &mut Rest<'_, '_>,
+    dsts: &[MaybeDst<Reg>],
+    src: Taken<Reg>,
+    ctor: Ctor,
+) -> Result<(), Stop> {
+    let v = win.get(src.0);
+    let heap = &mut rest.heap;
+    let cell = v.as_cell().ok_or_else(|| opened_other(v))?;
+    let alone = heap.unique(cell)?;
+    if !heap.is_ctor(cell, ctor, dsts.len()) {
+        return Err(opened_other(v));
+    }
+    win.take(src);
+    let mut dead = false;
+    for (run, dsts) in dsts.chunks(STRIDE).enumerate() {
+        let fields = heap.run_of_values(cell, run);
+        for (dst, v) in dsts.iter().zip(fields) {
+            let old = match dst.dst() {
+                Some(dst) => {
+                    if !alone && heap.own(v).is_err() {
+                        win.set(heap, src.0, Value::cell(cell))?;
+                        return Err(DeadCell.into());
+                    }
+                    win.swap(dst, v)
+                }
+                None if alone => v,
+                None => Value::NIL,
+            };
+            if let Some(old) = old.as_cell() {
+                dead |= heap.release_apart(old).is_err();
+            }
+        }
+    }
+    if alone {
+        heap.discard(cell)?;
+    } else {
+        heap.release(cell)?;
+    }
+    unless(dead)
+}
+
+/// The stop for a freed cell, when `dead` says there was one.
+#[inline(always)]
+fn unless(dead: bool) -> Result<(), Stop> {
+    if dead { Err(DeadCell.into()) } else { Ok(()) }
+}
+
+/// The stop for taking `v` apart as a constructor it is not.
+#[cold]
+#[inline(never)]
+fn opened_other(v: Value) -> Stop {
+    Stop::broken(Broken::OpenedOther(v.view()))
 }
 
 #[inline(never)]
@@ -1674,7 +1798,8 @@ fn ran_past_end(code: &Code, pc: usize) -> Stop {
 }
 
 /// Field `index` of the value in `src` into `dst`, for a cell too long for the
-/// arena. Any other that comes here has no such field.
+/// arena and for a field that is a cell and is not counted. Any other that comes
+/// here has no such field.
 #[inline(never)]
 fn far_field(
     mut win: Window<'_>,
@@ -1684,7 +1809,7 @@ fn far_field(
     index: u16,
 ) -> Result<(), Stop> {
     let cell = win.look(src).as_cell();
-    let field = cell.and_then(|c| rest.heap.boxed_field(c, usize::from(index)));
+    let field = cell.and_then(|c| rest.heap.field(c, usize::from(index)));
     let v = field.ok_or_else(|| Stop::broken(Broken::NoField { index }))?;
     let v = rest.share(v)?;
     Ok(win.put(&mut rest.heap, dst, v)?)
@@ -1701,7 +1826,7 @@ fn far_capture(
     pc: usize,
 ) -> Result<(), Stop> {
     let cell = win.closure().as_cell();
-    let capture = cell.and_then(|c| rest.heap.boxed_capture(c, index));
+    let capture = cell.and_then(|c| rest.heap.capture(c, index));
     let v = capture.ok_or_else(|| no_capture(rest.code, pc, index))?;
     let v = rest.share(v)?;
     Ok(win.put(&mut rest.heap, dst, v)?)

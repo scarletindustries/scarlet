@@ -34,6 +34,9 @@ pub(crate) trait Names: Copy + PartialEq + fmt::Debug {
     type Last: Part<Self> + fmt::Debug;
     /// What fills a place for an operand that an instruction does not use.
     const UNUSED: Self;
+    /// What is no register an instruction writes. The loader gives no value
+    /// this number, and no value's register is a frame's link.
+    const NONE: Self;
 }
 
 impl Names for VReg {
@@ -43,6 +46,7 @@ impl Names for VReg {
     type Own = OwnRoom;
     type Last = LastReg;
     const UNUSED: VReg = VReg(0);
+    const NONE: VReg = VReg(u32::MAX);
 }
 
 impl Names for Reg {
@@ -52,6 +56,7 @@ impl Names for Reg {
     type Own = Room;
     type Last = Last;
     const UNUSED: Reg = Reg(0);
+    const NONE: Reg = Reg(0);
 }
 
 /// A place in a function the loader is still making.
@@ -134,8 +139,6 @@ pub(crate) enum Role {
     Pass { moved: bool },
     /// Takes what it holds and leaves it empty.
     Take,
-    /// Empties the cell it holds and keeps the cell there.
-    Keep,
     /// Gives up the reference it holds and leaves it empty.
     Drop,
     /// Writes it.
@@ -187,6 +190,7 @@ pub(crate) trait Places {
     /// Where the function's own list `i` is among the program's.
     fn reg_list(&self, i: u32) -> Result<u32, Unplaced>;
     fn arg_list(&self, i: u32) -> Result<u32, Unplaced>;
+    fn dst_list(&self, i: u32) -> Result<u32, Unplaced>;
 }
 
 impl Part<VReg> for Label {
@@ -277,11 +281,6 @@ registers! {
     Shared Role::Share;
     /// A register the instruction takes from.
     Taken Role::Take;
-    /// A register whose cell the instruction may write over
-    /// ([`Ins::CtorOver`]).
-    Over Role::Take;
-    /// A register whose cell is emptied and kept ([`Ins::DropReuse`]).
-    Kept Role::Keep;
     /// A register given up ([`Ins::Drop`]).
     Dead Role::Drop;
 }
@@ -317,6 +316,56 @@ fn place_each<const N: usize>(regs: [VReg; N], at: &impl Places) -> Result<[Reg;
         *to = at.reg(from)?;
     }
     Ok(placed)
+}
+
+/// A register the instruction writes, or none, for what it has nowhere to put.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MaybeDst<R>(R);
+
+impl<R: Names> MaybeDst<R> {
+    pub(crate) fn new(dst: Option<R>) -> MaybeDst<R> {
+        MaybeDst(dst.unwrap_or(R::NONE))
+    }
+
+    #[inline(always)]
+    pub(crate) fn dst(self) -> Option<Dst<R>> {
+        (self.0 != R::NONE).then_some(Dst(self.0))
+    }
+}
+
+impl<R: Names> Part<R> for MaybeDst<R> {
+    fn operands(self, lists: &Lists<R>, f: &mut impl FnMut(R, Role)) {
+        if let Some(dst) = self.dst() {
+            dst.operands(lists, f);
+        }
+    }
+}
+
+impl Place for MaybeDst<VReg> {
+    type Placed = MaybeDst<Reg>;
+    fn place(self, at: &impl Places) -> Result<MaybeDst<Reg>, Unplaced> {
+        let dst = self.dst().map(|dst| at.reg(dst.0)).transpose()?;
+        Ok(MaybeDst::new(dst))
+    }
+}
+
+impl<R: Names, const N: usize> Part<R> for [MaybeDst<R>; N] {
+    fn operands(self, lists: &Lists<R>, f: &mut impl FnMut(R, Role)) {
+        for dst in self {
+            dst.operands(lists, f);
+        }
+    }
+}
+
+impl<const N: usize> Place for [MaybeDst<VReg>; N] {
+    type Placed = [MaybeDst<Reg>; N];
+    fn place(self, at: &impl Places) -> Result<[MaybeDst<Reg>; N], Unplaced> {
+        let mut placed = [MaybeDst(Reg::NONE); N];
+        for (to, from) in placed.iter_mut().zip(self) {
+            *to = from.place(at)?;
+        }
+        Ok(placed)
+    }
 }
 
 /// A register whose value the instruction hands on, to a callee, a cell or
@@ -615,24 +664,29 @@ impl Place for ArgList {
     }
 }
 
-/// The registers a loop carries round ([`Ins::TailCallSelfKeep`]), in a list
-/// kept beside the code. The instruction leaves each as it is, so these are no
-/// operands of it: no other value is ever in one of them ([`super::alloc`]).
+/// The registers the fields of a constructor go to, in order, in a list kept
+/// beside the code.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct KeepList(pub(crate) u32);
+pub(crate) struct DstList(pub(crate) u32);
 
-impl KeepList {
-    pub(crate) fn regs<R>(self, lists: &Lists<R>) -> &[R] {
-        lists.regs(self.0)
+impl DstList {
+    pub(crate) fn dsts<R>(self, lists: &Lists<R>) -> &[MaybeDst<R>] {
+        lists.dsts.get(self.0 as usize).map_or(&[], |l| l)
     }
 }
 
-impl<R: Names> Part<R> for KeepList {}
+impl<R: Names> Part<R> for DstList {
+    fn operands(self, lists: &Lists<R>, f: &mut impl FnMut(R, Role)) {
+        for dst in self.dsts(lists) {
+            dst.operands(lists, f);
+        }
+    }
+}
 
-impl Place for KeepList {
-    type Placed = KeepList;
-    fn place(self, at: &impl Places) -> Result<KeepList, Unplaced> {
-        at.reg_list(self.0).map(KeepList)
+impl Place for DstList {
+    type Placed = DstList;
+    fn place(self, at: &impl Places) -> Result<DstList, Unplaced> {
+        at.dst_list(self.0).map(DstList)
     }
 }
 
@@ -642,6 +696,7 @@ impl Place for KeepList {
 pub(crate) struct Lists<R> {
     pub(crate) regs: Vec<Box<[R]>>,
     pub(crate) args: Vec<Box<[Arg<R>]>>,
+    pub(crate) dsts: Vec<Box<[MaybeDst<R>]>>,
 }
 
 impl<R> Default for Lists<R> {
@@ -649,6 +704,7 @@ impl<R> Default for Lists<R> {
         Lists {
             regs: Vec::new(),
             args: Vec::new(),
+            dsts: Vec::new(),
         }
     }
 }

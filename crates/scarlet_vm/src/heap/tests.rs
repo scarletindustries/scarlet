@@ -30,11 +30,6 @@ impl Heap {
         }
     }
 
-    /// Let this heap hold no more than it does.
-    pub(crate) fn fill_up(&mut self) {
-        self.limit = self.words_used();
-    }
-
     /// A new cell of `shape`, given `values`, wherever there is room.
     fn given<const N: usize>(&mut self, shape: Shape<N>, values: &[Value]) -> Result<Cell, Fault> {
         match self.in_freed(shape, values.iter().copied()) {
@@ -53,12 +48,6 @@ impl Heap {
 
     pub(crate) fn closure(&mut self, func: FuncIdx, captures: &[Value]) -> Result<Cell, Fault> {
         self.given(Shape::closure(func), captures)
-    }
-
-    /// Capture `i` of a closure cell, wherever its words are.
-    fn capture(&self, cell: Cell, i: u32) -> Option<Value> {
-        let near = self.near_capture(cell, i);
-        near.or_else(|| self.boxed_capture(cell, i))
     }
 
     /// Say that `cell` has `holders` holders.
@@ -172,7 +161,7 @@ fn the_arena_is_as_long_as_the_cells_carved_from_it() {
         .map(|_| heap.string(b"a string of twenty-four!").expect("room"))
         .collect();
     // Each is a header, the length, and three words of text.
-    assert_eq!(heap.arena.len(), 1 + 2000 * 5);
+    assert_eq!(heap.words_carved(), 1 + 2000 * 5);
     for (i, cell) in cells.iter().enumerate() {
         assert_eq!(cell.index().at(), 1 + 5 * i);
     }
@@ -280,16 +269,16 @@ fn each_long_cell_has_its_own_box() {
     assert_eq!(heap.boxed, 2 + 6_000 / 8 + 7_000 / 8);
 }
 
-/// A constructor too wide for the arena reads, is reused in place, and
-/// frees what it holds, the same as a narrow one.
+/// A constructor too wide for the arena reads and frees what it holds, the same
+/// as a narrow one.
 #[test]
 fn a_long_constructor_is_a_constructor() {
-    let (mut heap, ctors) = Heap::knowing(&[(variant(1, 2), 300), (variant(7, 3), 300)]);
+    let (mut heap, ctors) = Heap::knowing(&[(variant(1, 2), 300)]);
     let held = heap.string(b"held").expect("room");
     let mut fields: Vec<Value> = (0..300).map(int).collect();
     fields[299] = Value::cell(held);
     let cell = heap.ctor(ctors[0], &fields).expect("room");
-    assert_eq!(heap.arena.len(), 1 + 3 + STUB_WORDS);
+    assert_eq!(heap.words_carved(), 1 + 3 + STUB_WORDS);
     assert_eq!(heap.kind(cell), Some(Kind::Ctor));
     assert_eq!(heap.ctor_of(cell), Some(ctors[0]));
     assert_eq!(heap.variant(cell), Some(variant(1, 2)));
@@ -300,25 +289,40 @@ fn a_long_constructor_is_a_constructor() {
         assert!(heap.near_field(cell, i).is_none());
     }
     assert!(heap.field(cell, 300).is_none());
-    // Hollowing gives up the string and keeps the cell, box and all.
-    assert!(heap.fits_ctor(cell, 300));
-    assert!(!heap.fits_ctor(cell, 299));
-    assert_eq!(heap.hollow(cell), Ok(true));
-    assert_eq!(heap.live(), 1);
-    assert!(heap.values(cell).all(|f| f.view() == Value::NIL.view()));
-    fields[299] = int(299);
-    let other = heap.ctor_in(cell, ctors[1], fields.iter().copied());
-    assert_eq!(other.index(), cell.index());
-    assert_ne!(other, cell, "it is another variant's");
-    assert_eq!(heap.variant(other), Some(variant(7, 3)));
-    assert_eq!(heap.outside.len(), 1, "in the same box");
-    assert_eq!(
-        heap.field(other, 299).map(Value::view),
-        Some(int(299).view())
-    );
-    assert_eq!(heap.audit([Value::cell(other)].into_iter()), Ok(()));
-    heap.release(other).expect("a live cell");
+    assert_eq!(heap.audit([Value::cell(cell)].into_iter()), Ok(()));
+    heap.release(cell).expect("a live cell");
     assert_eq!((heap.live(), heap.boxed), (0, 0));
+}
+
+/// A long constructor that is freed, or that gives its fields up, leaves its box's
+/// place and its two words of the arena to the next. So a thousand made one after
+/// another need no more room than one, and nothing is left when the last is gone.
+#[test]
+fn a_long_constructor_takes_the_space_of_the_last() {
+    let (mut heap, ctors) = Heap::knowing(&[(variant(1, 2), 254), (variant(1, 3), 300)]);
+    let mut words = None;
+    for turn in 0..1000 {
+        let n = [254, 300][turn % 2];
+        let cell = heap.ctor(ctors[turn % 2], &vec![int(7); n]).expect("room");
+        assert_eq!(
+            heap.field(cell, n - 1).map(Value::view),
+            Some(int(7).view())
+        );
+        assert_eq!(heap.boxed, n);
+        assert_eq!((heap.outside.len(), heap.spare.len()), (1, 0));
+        assert_eq!(
+            *words.get_or_insert(heap.words_carved()),
+            heap.words_carved()
+        );
+        let gone = if turn / 2 % 2 == 0 {
+            heap.release(cell)
+        } else {
+            heap.discard(cell)
+        };
+        gone.expect("a live cell");
+        assert_eq!((heap.live(), heap.boxed), (0, 0));
+        assert_eq!((heap.outside.len(), heap.spare.len()), (1, 1));
+    }
 }
 
 #[test]
@@ -660,7 +664,7 @@ fn a_cell_past_the_longest_is_full() {
 /// holds. Nothing panics, and no word of the arena changes.
 #[test]
 fn a_cell_the_arena_does_not_have_is_a_dead_cell() {
-    let mut heap = Heap::default();
+    let (mut heap, ctors) = Heap::knowing(&[(variant(1, 0), 1)]);
     let real = heap.tuple(&[Value::NIL]).expect("room");
     let arena = heap.arena.clone();
     let len = u64::try_from(heap.arena.len()).expect("small");
@@ -678,10 +682,9 @@ fn a_cell_the_arena_does_not_have_is_a_dead_cell() {
         assert_eq!(heap.unique(cell), Err(DeadCell));
         assert_eq!(heap.share(cell), Err(DeadCell));
         assert_eq!(heap.release(cell), Err(DeadCell));
-        assert_eq!(heap.hollow(cell), Err(DeadCell));
         assert_eq!(heap.discard(cell), Err(DeadCell));
         assert_eq!(heap.copy(cell), Err(Fault::DeadCell));
-        assert!(!heap.fits_ctor(cell, 0));
+        assert!(heap.open::<1>(cell, ctors[0]).is_none());
     }
     assert_eq!(heap.arena, arena);
     assert_eq!(heap.live(), 1);
@@ -904,7 +907,6 @@ fn a_share_of_a_freed_cell_is_a_dead_cell() {
     for _ in 0..3 {
         assert_eq!(heap.share(cell), Err(DeadCell));
         assert_eq!(heap.unique(cell), Err(DeadCell));
-        assert_eq!(heap.hollow(cell), Err(DeadCell));
         assert_eq!(heap.discard(cell), Err(DeadCell));
         assert_eq!(heap.release(cell), Err(DeadCell));
     }
@@ -1059,14 +1061,13 @@ fn a_count_that_overflows_stays_where_it_is() {
     full.share(pair).expect("a live cell");
     let h = full.header(pair.index());
     assert_eq!((count(h), h >> 32), (UNCOUNTED, rest));
-    assert_eq!(full.hollow(pair), Ok(false));
-    assert!(!full.fits_ctor(pair, 2));
+    assert!(full.open::<2>(pair, ctors[0]).is_none());
+    assert_eq!(full.header(pair.index()), h);
     for _ in 0..3 {
         assert_eq!(heap.share(cell), Ok(()));
         assert_eq!(heap.release(cell), Ok(()));
         assert_eq!(heap.release(cell), Ok(()));
         assert_eq!(heap.unique(cell), Ok(false));
-        assert_eq!(heap.hollow(cell), Ok(false));
     }
     assert_eq!(count(heap.header(cell.index())), UNCOUNTED);
     let holder = heap.tuple(&[Value::cell(cell)]).expect("room");
@@ -1159,9 +1160,8 @@ fn a_cell_waiting_to_be_freed_is_a_dead_cell() {
         assert_eq!(heap.share(cell), Err(DeadCell), "{count}");
         assert_eq!(heap.release(cell), Err(DeadCell), "{count}");
         assert_eq!(heap.unique(cell), Err(DeadCell), "{count}");
-        assert_eq!(heap.hollow(cell), Err(DeadCell), "{count}");
         assert_eq!(heap.discard(cell), Err(DeadCell), "{count}");
-        assert!(!heap.fits_ctor(cell, 1), "{count}");
+        assert!(heap.open::<1>(cell, ctors[0]).is_none(), "{count}");
         assert_eq!(heap.arena, arena, "{count}");
     }
 }
@@ -1301,16 +1301,11 @@ fn asking_whether_a_freed_cell_is_unique_is_a_dead_cell() {
 }
 
 #[test]
-fn discarding_or_hollowing_a_freed_cell_is_a_dead_cell() {
+fn discarding_a_freed_cell_is_a_dead_cell() {
     let (mut heap, ctors) = Heap::knowing(&[(variant(1, 0), 1)]);
     let cell = heap.ctor(ctors[0], &[Value::NIL]).expect("room");
-    heap.share(cell).expect("a live cell");
-    assert_eq!(heap.hollow(cell), Ok(false), "something else holds it");
-    heap.release(cell).expect("a live cell");
-    assert_eq!(heap.hollow(cell), Ok(true));
     assert_eq!(heap.discard(cell), Ok(()));
     assert_eq!(heap.live(), 0);
-    assert_eq!(heap.hollow(cell), Err(DeadCell));
     assert_eq!(heap.discard(cell), Err(DeadCell));
     assert_eq!(heap.live(), 0);
 }
@@ -1640,45 +1635,99 @@ fn a_cell_that_is_not_all_values_has_no_fields() {
     }
 }
 
-/// A constructor written over a hollowed one is another constructor of the
-/// same size, so the name of the cell changes with it, whichever the two are.
-/// One of another size, a tuple or a closure never takes its place.
+/// Take apart a constructor of `N` fields, each a cell of its own, that has one
+/// holder, then two, then one that is never counted.
+fn opens<const N: usize>() {
+    let what = format!("{N} fields");
+    let (mut heap, ctors) = Heap::knowing(&[(variant(1, 0), 1), (variant(1, 7), N)]);
+    let values: Vec<Value> = (0..N)
+        .map(|i| Value::cell(heap.string(&[b'a'; 30][..i]).expect("room")))
+        .collect();
+    let bits = |of: &[Value]| of.iter().map(|v| v.bits()).collect::<Vec<_>>();
+    for round in 0..2 {
+        let cell = heap.ctor(ctors[1], &values).expect("room");
+        heap.share(cell).expect("a live cell");
+        for held in [2, 3, i32::MAX] {
+            heap.recount(cell, held);
+            let arena = heap.arena.clone();
+            let Some(Opened::Held(same, fields)) = heap.open::<N>(cell, ctors[1]) else {
+                panic!("{what}: it is held");
+            };
+            assert!(same == cell && bits(&fields) == bits(&values), "{what}");
+            // One holder fewer, and nothing else.
+            heap.share(cell).expect("a live cell");
+            assert_eq!(heap.arena, arena, "{what}");
+        }
+        for not_counted in [UNCOUNTED, -3, 0] {
+            heap.recount(cell, not_counted);
+            let arena = heap.arena.clone();
+            assert!(heap.open::<N>(cell, ctors[1]).is_none(), "{what}");
+            assert_eq!(heap.arena, arena, "{what}");
+        }
+        heap.recount(cell, 1);
+        // The first cell of the size to be freed, and then not the first.
+        let Some(Opened::Alone(fields)) = heap.open::<N>(cell, ctors[1]) else {
+            panic!("{what}: nothing else holds it");
+        };
+        assert_eq!(bits(&fields), bits(&values), "{what}");
+        assert_eq!(heap.live(), N, "{what}");
+        assert_eq!(heap.audit(values.iter().copied()), Ok(()), "{what} {round}");
+        assert!(heap.open::<N>(cell, ctors[1]).is_none(), "it is freed");
+    }
+    // The space is the next cell's of the size, whatever that is.
+    let words = heap.words_carved();
+    heap.tuple(&vec![Value::NIL; N]).expect("room");
+    assert_eq!(heap.words_carved(), words, "{what}");
+}
+
 #[test]
-fn a_constructor_over_another_has_a_name_of_its_own() {
-    let names = [
-        (variant(1, 0), 2),
-        (variant(1, 9), 2),
-        (variant(2, 9), 2),
-        (variant(2, 3), 3),
-    ];
+fn a_constructor_taken_apart_gives_its_fields_and_is_freed() {
+    opens::<1>();
+    opens::<2>();
+    opens::<3>();
+    opens::<4>();
+    opens::<5>();
+}
+
+/// Nothing but the constructor that was asked for is taken apart: not another
+/// of as many fields, not one of another number, not a cell of another kind that
+/// is as long, not a long one and not a freed one. Each is left as it was. It is
+/// the same for one that something else holds.
+#[test]
+fn nothing_else_is_taken_apart() {
+    let names = [(variant(1, 0), 2), (variant(1, 1), 2), (variant(1, 2), 3)];
     let (mut heap, ctors) = Heap::knowing(&names);
     let pair = [int(1), int(2)];
-    for from in &ctors[..3] {
-        for (to, (name, _)) in ctors[..3].iter().zip(names) {
-            let cell = heap.ctor(*from, &pair).expect("room");
-            assert_eq!(heap.hollow(cell), Ok(true));
-            assert!(heap.fits_ctor(cell, 2));
-            assert!(!heap.fits_ctor(cell, 1) && !heap.fits_ctor(cell, 3));
-            let over = heap.ctor_in(cell, *to, pair.iter().copied());
-            assert_eq!(over.index(), cell.index());
-            assert_eq!(over == cell, from.variant() == to.variant());
-            assert_eq!(heap.ctor_of(over), Some(*to));
-            assert_eq!(heap.variant(over), Some(name));
-            assert_eq!(Value::cell(over).tag(), Tag::of_cell(to.variant()));
-            assert_eq!(fields(&heap, over), pair.map(Value::view));
-            assert_eq!(heap.unique(over), Ok(true));
-            assert_eq!(heap.audit([Value::cell(over)].into_iter()), Ok(()));
-            heap.release(over).expect("a live cell");
+    let words = pair.map(Value::bits);
+    let freed = heap.ctor(ctors[0], &pair).expect("room");
+    let kept = heap.ctor(ctors[0], &pair).expect("room");
+    let others = [
+        heap.ctor(ctors[1], &pair),
+        heap.ctor(ctors[2], &[int(3); 3]),
+        heap.tuple(&pair),
+        heap.closure(FuncIdx(3), &pair[..1]),
+        heap.string(b"eight by"),
+        heap.make(Kind::ArrayLeaf, &words),
+        heap.make(Kind::BinarySlice, &words),
+        heap.make(Kind::Handle, &[7]),
+        heap.ctor(ctors[0], &[int(3); 300]),
+        heap.ctor(ctors[0], &[int(3); 1]),
+    ];
+    let cells: Vec<Cell> = others.map(|cell| cell.expect("room")).into();
+    heap.release(freed).expect("a live cell");
+    for holders in [1, 2] {
+        for cell in cells.iter().chain([&kept]) {
+            heap.say_held(*cell, holders);
         }
+        let arena = heap.arena.clone();
+        for cell in cells.iter().chain([&freed]) {
+            assert!(heap.open::<2>(*cell, ctors[0]).is_none(), "{cell:?}");
+        }
+        assert!(heap.open::<1>(kept, ctors[0]).is_none());
+        assert!(heap.open::<3>(kept, ctors[0]).is_none());
+        assert_eq!(heap.arena, arena);
     }
-    for cell in [heap.tuple(&pair), heap.closure(FuncIdx(3), &pair[..1])] {
-        let cell = cell.expect("room");
-        assert_eq!(heap.hollow(cell), Ok(false));
-        assert!(!heap.fits_ctor(cell, 2));
-        assert_eq!(heap.values(cell).count(), 2, "nothing was emptied");
-        heap.release(cell).expect("a live cell");
-    }
-    assert_eq!(heap.live(), 0);
+    assert!(heap.open::<2>(kept, ctors[0]).is_some());
 }
 
 /// A cell taken off a free list is named by what it is now. It had another

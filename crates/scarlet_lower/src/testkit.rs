@@ -17,7 +17,7 @@ pub(crate) fn vref(tid: i32, idx: u16) -> VariantRef {
     }
 }
 
-/// The one anonymous variant most reuse and drop tests match on.
+/// The one anonymous variant most drop tests match on.
 pub(crate) fn variant() -> VariantRef {
     vref(0, 0)
 }
@@ -26,7 +26,6 @@ pub(crate) fn ctor(fields: &[u32]) -> Atom {
     Atom::Ctor {
         variant: variant(),
         fields: fields.iter().copied().map(LocalId).collect(),
-        reuse: None,
     }
 }
 

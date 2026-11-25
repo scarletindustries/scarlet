@@ -1,6 +1,7 @@
-use super::super::ins::{Arg, Args, KeepList, OwnEntry, OwnRoom, Shared};
+use super::super::ins::{Arg, Args, MaybeDst, OwnEntry, OwnRoom, Shared, Taken};
 use super::super::tests::{draft, of};
 use super::super::translate::Draft;
+use super::super::{DstList, tests::a_ctor};
 use super::*;
 
 /// Whether each operand `d`'s instructions hand on is taken, in order, once
@@ -46,11 +47,12 @@ fn a_move_shares_a_source_something_reads_later() {
     assert_eq!(takes(d), [false, true]);
 }
 
-/// A cell this frame parks for a constructor of its own has to still be
-/// in its register when the `DropReuse` runs, so a copy before it shares.
+/// Taking a cell apart reads its register, where a `Drop` would not, so a copy
+/// before it shares.
 #[test]
-fn a_move_shares_a_source_whose_cell_is_kept_for_reuse() {
-    let d = draft(2, 1, vec![of::mv(1, 0), of::park(0), of::ret(1)], &[]);
+fn a_move_shares_a_source_that_is_taken_apart_later() {
+    let open = of::open([Some(2), None], 0);
+    let d = draft(3, 1, vec![of::mv(1, 0), open, of::ret(1)], &[]);
     assert_eq!(takes(d), [false]);
 }
 
@@ -203,25 +205,6 @@ fn a_value_read_before_it_is_written_is_refused() {
     assert_eq!(fails(draft(3, 1, ins, &[3, 4])), None);
 }
 
-/// A cell a loop carries round may be one from its last turn, so its register
-/// may be read before this turn writes it.
-#[test]
-fn a_carried_cell_may_be_from_the_turn_before() {
-    let over = Ins::CtorOver {
-        dst: Dst(VReg(1)),
-        ctor: super::super::tests::a_ctor(),
-        fields: Args::new(&[VReg(0)]).expect("room for one"),
-        reuse: super::super::Over(VReg(1)),
-    };
-    let mut d = draft(2, 1, vec![over, of::ret(1)], &[]);
-    assert_eq!(
-        fails(draft(2, 1, vec![over, of::ret(1)], &[])),
-        Some(Unfit::Broken(Broken::ReadBeforeWritten))
-    );
-    d.carried.insert(VReg(1));
-    assert_eq!(fails(d), None);
-}
-
 #[test]
 fn a_jump_back_is_refused() {
     let ins = vec![of::constant(1), of::unless(0, 0), of::ret(1)];
@@ -278,30 +261,61 @@ fn a_function_may_hold_as_many_values_as_there_are_registers() {
 }
 
 /// The lists beside the code are gone over as the operands in an instruction
-/// are, and what a loop keeps is not an operand.
+/// are.
 #[test]
 fn a_list_of_arguments_is_decided_as_the_others_are() {
     let mut d = draft(3, 3, Vec::new(), &[]);
     let arg = |v| Arg::shared(VReg(v));
     d.lists.args.push(Box::new([arg(0), arg(1), arg(0)]));
-    d.lists.regs.push(Box::new([VReg(2)]));
-    d.carried.insert(VReg(2));
-    d.ins.push(Ins::TailCallSelfKeep {
+    d.ins.push(Ins::TailCallSelfWide {
         to: OwnEntry,
         args: super::super::ArgList(0),
-        keep: KeepList(0),
         own: OwnRoom,
     });
     let held = settle(&mut d).expect("a function that loads");
     let moved: Vec<bool> = d.lists.args[0].iter().map(|a| a.moved).collect();
     assert_eq!(moved, [false, true, true]);
     assert_eq!(held.named, [true, true, false]);
-    assert_eq!(d.lists.regs[0][0], VReg(2));
+}
+
+/// The fields of a cell taken apart are written at once, whether they are in the
+/// instruction or in a list, so each clashes with the others and with what is
+/// held after, and with the cell only if that is read again. One with no
+/// register is no value.
+#[test]
+fn the_fields_of_a_cell_clash_with_each_other() {
+    let listed = || Ins::OpenWide {
+        dsts: DstList(0),
+        src: Taken(VReg(0)),
+        ctor: a_ctor(),
+    };
+    for (ins, again) in [
+        (of::open([Some(2), Some(3)], 0), false),
+        (of::open([Some(2), Some(3)], 0), true),
+        (listed(), false),
+        (listed(), true),
+    ] {
+        let end = if again { of::len(4, 0) } else { of::len(4, 1) };
+        let mut d = draft(5, 2, vec![ins, end, of::ret(1)], &[]);
+        let dsts = [Some(2), None, Some(3)].map(|v| MaybeDst::new(v.map(VReg)));
+        d.lists.dsts.push(Box::new(dsts));
+        let held = settle(&mut d).expect("a function that loads");
+        let pairs = held
+            .clashes
+            .iter()
+            .map(|(a, b)| (a.0.min(b.0), a.0.max(b.0)));
+        let mut pairs: Vec<_> = pairs.filter(|(_, b)| *b < 4).collect();
+        pairs.sort_unstable();
+        let want = [(0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
+        assert_eq!(pairs, want[if again { 0 } else { 2 }..], "{ins:?} {again}");
+        assert_eq!(held.named, [true; 5]);
+    }
 }
 
 /// An instruction that writes several registers needs one for each, even for
-/// one that nothing reads. No instruction does yet, so this makes the operands
-/// of one by hand.
+/// one that nothing reads, and for one that it writes only when it does not
+/// jump. No instruction writes some of each, so this makes the operands of one
+/// by hand.
 #[test]
 fn values_written_together_clash() {
     let mut walk = Walk::new(6, 0, 0);

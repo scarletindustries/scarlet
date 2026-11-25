@@ -73,16 +73,15 @@ fn room(end: usize) -> Room {
 /// then do nothing.
 ///
 /// A function's arguments arrive in the registers from [`FIRST`] on, in order.
-/// A cell that a loop carries round stays in its register all the way, so no
-/// other value has that one. Each other value takes the lowest register none of
-/// the values it clashes with has.
+/// Each other value takes the lowest register none of the values it clashes
+/// with has.
 pub(super) fn allocate(draft: Draft, held: &Held) -> Result<Body, Unfit> {
     let values = draft.values as usize;
     let mut regs: Vec<Option<Reg>> = vec![None; values];
     // No value is in the registers that a frame's link and closure have.
-    let mut alone = RegSet::default();
-    alone.add(LINK);
-    alone.add(CLOSURE);
+    let mut frames = RegSet::default();
+    frames.add(LINK);
+    frames.add(CLOSURE);
     let mut end = usize::from(FIRST.0);
     let give = |regs: &mut Vec<Option<Reg>>, v: VReg, r: usize| {
         let reg = u8::try_from(r).map(Reg);
@@ -90,14 +89,10 @@ pub(super) fn allocate(draft: Draft, held: &Held) -> Result<Body, Unfit> {
         if let Some(of) = regs.get_mut(v.0 as usize) {
             *of = Some(reg);
         }
-        Ok::<Reg, Unfit>(reg)
+        Ok::<(), Unfit>(())
     };
     for param in &draft.params {
         give(&mut regs, *param, end)?;
-        end = end.saturating_add(1);
-    }
-    for carried in &draft.carried {
-        alone.add(give(&mut regs, *carried, end)?);
         end = end.saturating_add(1);
     }
     let clashes = Clashes::new(values, &held.clashes);
@@ -106,7 +101,7 @@ pub(super) fn allocate(draft: Draft, held: &Held) -> Result<Body, Unfit> {
         if !named || regs.get(i).is_none_or(Option::is_some) {
             continue;
         }
-        let mut taken = alone.clone();
+        let mut taken = frames.clone();
         for other in clashes.of(i) {
             if let Some(Some(reg)) = regs.get(other.0 as usize) {
                 taken.add(*reg);

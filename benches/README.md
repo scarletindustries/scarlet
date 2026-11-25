@@ -34,6 +34,6 @@ To judge a change to the VM, save a run before it and compare after it:
 
 The second prints how far each benchmark's instruction count moved. It also
 prints the VM's own counts for each benchmark, which are exact: how many VM
-instructions ran, which kinds ran most, and how many heap cells were made and
-reused. They come from `scarlet run --counters FILE`, and
+instructions ran, which kinds ran most, how many heap cells were made, and how
+many words the heap grew to. They come from `scarlet run --counters FILE`, and
 `scarlet dis --instrs FILE` shows the instructions they count.

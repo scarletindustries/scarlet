@@ -202,22 +202,19 @@ fn a_frame_taken_over_holds_what_was_passed() {
     }
 }
 
-/// The same, but for the registers a loop keeps, which stay as they were.
+/// A register swapped gives what it held with its reference, and has the new
+/// value with its own.
 #[test]
-fn a_frame_taken_over_keeps_the_registers_it_is_told_to() {
+fn a_swapped_register_gives_what_it_held() {
     let mut stack = nil_stack(WINDOW);
     let heap = &mut Heap::default();
     let cells = filled(&mut stack, heap, 8);
-    let passed = [int(1), int(2)];
     let mut win = window(&mut stack, 0).expect("a window");
-    let kept = win.rewrite_keeping(heap, Room(8), &passed, &[Reg(5), Reg(7)]);
-    assert_eq!(kept, Ok(()));
-    let regs = win.regs();
-    assert_eq!(regs[2].small_int(), Some(1));
-    assert_eq!(regs[3].small_int(), Some(2));
-    let held: Vec<Option<Cell>> = regs[4..8].iter().map(|v| v.as_cell()).collect();
-    assert_eq!(held, [None, Some(cells[4]), None, Some(cells[6])]);
-    assert_eq!(heap.live(), 3);
+    let new = Value::cell(tuple(heap));
+    let old = win.swap(Dst(Reg(4)), new);
+    assert_eq!(old.as_cell(), Some(cells[3]));
+    assert_eq!(win.get(Reg(4)).bits(), new.bits());
+    assert_eq!(heap.live(), cells.len() + 1);
 }
 
 /// The frames are counted down the links to the one nothing called. There is no

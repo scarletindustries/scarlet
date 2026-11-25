@@ -4,7 +4,7 @@
 # The refactor changes more than compile time, and assuming it didn't is why nobody
 # measured it. Jump operands became function-relative, `Op::IndexOr` replaced a
 # deleted fused path, and `lower` stopped inventing types, so `compile_binary`
-# recovers typed opcodes (`AddInt` over `Add`) and `perceus` recovers `Drop`/`Reuse`.
+# recovers typed opcodes (`AddInt` over `Add`) and `perceus` recovers `Drop`.
 # Any slowdown here needs explaining before the commit lands.
 #
 #   scripts/bench.sh                        # measure, print one line per program
@@ -36,7 +36,7 @@ done
 
 # The spec's interpreter-speed set: the heavy mixed workload, the monomorphic
 # arithmetic loops that typed-opcode recovery should speed up, and the map
-# workload that exercises the Perceus `Drop`/`Reuse` paths.
+# workload that exercises the Perceus `Drop` paths.
 if [[ ${#PROGRAMS[@]} -eq 0 ]]; then
   PROGRAMS=(examples/bench_heavy.sca examples/bench_typed.sca examples/bench_map.sca)
 fi

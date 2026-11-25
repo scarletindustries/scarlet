@@ -291,7 +291,6 @@ fn a_constructor_the_program_does_not_list_does_not_load() {
             CoreExpr::Tail(Atom::Ctor {
                 variant,
                 fields: (0..n).map(LocalId).collect(),
-                reuse: None,
             }),
         )
     };
@@ -484,6 +483,29 @@ fn a_branch_on_what_a_branch_gives_reads_it() {
     assert_eq!(jumps.count(), 2, "{:?}", ops["either"]);
 }
 
+/// A translator that has made nothing, of a function that names values up to 2 and
+/// reads its locals as `reads` says.
+fn translator<'c>(
+    source: &'c Source<'c>,
+    tables: &'c mut Tables,
+    reads: HashMap<LocalId, u32>,
+) -> Translator<'c> {
+    Translator {
+        source,
+        this: None,
+        tables,
+        ins: Vec::new(),
+        lists: Lists::default(),
+        labels: Vec::new(),
+        landed: None,
+        conts: HashMap::new(),
+        values: 3,
+        closure: ReadsClosure::Nothing,
+        reads,
+        numbers: HashMap::new(),
+    }
+}
+
 /// A comparison is not taken back when something jumps to the `if` after it,
 /// because the jump would then go past the test.
 #[test]
@@ -491,22 +513,7 @@ fn a_comparison_something_jumps_past_is_kept() {
     let program = empty_program();
     let source = Source::new(&program).expect("a whole program");
     let mut tables = Tables::default();
-    let mut t = Translator {
-        source: &source,
-        this: None,
-        tables: &mut tables,
-        ins: Vec::new(),
-        lists: Lists::default(),
-        labels: Vec::new(),
-        landed: None,
-        conts: HashMap::new(),
-        values: 3,
-        kept: BTreeSet::new(),
-        carried: BTreeSet::new(),
-        closure: ReadsClosure::Nothing,
-        reads: HashMap::from([(LocalId(2), 1)]),
-        numbers: HashMap::new(),
-    };
+    let mut t = translator(&source, &mut tables, HashMap::from([(LocalId(2), 1)]));
     let compare = |t: &mut Translator<'_>| {
         let (a, b) = (src(LocalId(0)), src(LocalId(1)));
         t.push(int_compare(Compare::LT, Dst(VReg(2)), a, b));
@@ -561,16 +568,265 @@ fn a_comparison_something_jumps_past_is_kept() {
     assert!(t.take_comparison(LocalId(2), to).is_some());
 }
 
+/// `match %0 { C(%1, .., %n) -> arm }`, in a function that is given `%0` and
+/// `%20`, as the instructions before the last: the one that says no arm fits.
+fn matched(n: u32, arm: CoreExpr) -> Vec<String> {
+    let variant = with_fields(n as usize);
+    let fields = (1..=n).map(bind).collect();
+    in_arm(CorePat::Ctor { variant, fields }, arm)
+}
+
+/// The same, of an arm with any pattern.
+fn in_arm(pat: CorePat, arm: CoreExpr) -> Vec<String> {
+    let mut core = function(
+        1,
+        CoreExpr::Match {
+            scrut: LocalId(0),
+            arms: vec![(pat, arm)],
+            ty: RTy(0),
+        },
+    );
+    core.params.push(bind(20));
+    let program = program_with_fields();
+    let source = Source::new(&program).expect("a whole program");
+    let draft = translate(&source, &core, Some(FuncIdx(0)), &mut Tables::default());
+    let draft = draft.expect("it translates");
+    // Nothing may jump between a test and what is read out after it.
+    for (at, ins) in draft.ins.iter().enumerate() {
+        if ins.op().name().starts_with("Open") {
+            assert!(!draft.labels.contains(&at), "{:?}", draft.ins);
+        }
+    }
+    let ins = &draft.ins[..draft.ins.len() - 1];
+    ins.iter().map(|i| shown(i, &draft.lists)).collect()
+}
+
+/// An instruction as its kind, what it writes and what it reads. A field that
+/// goes to no register is `_`.
+fn shown(ins: &Ins<VReg>, lists: &Lists<VReg>) -> String {
+    let wide = match ins {
+        Ins::OpenWide { dsts, .. } => dsts.dsts(lists).to_vec(),
+        Ins::Open1 { dsts, .. } => dsts.to_vec(),
+        Ins::Open2 { dsts, .. } => dsts.to_vec(),
+        Ins::Open3 { dsts, .. } => dsts.to_vec(),
+        Ins::Open4 { dsts, .. } => dsts.to_vec(),
+        Ins::Open5 { dsts, .. } => dsts.to_vec(),
+        Ins::Open6 { dsts, .. } => dsts.to_vec(),
+        Ins::Open7 { dsts, .. } => dsts.to_vec(),
+        Ins::Open8 { dsts, .. } => dsts.to_vec(),
+        _ => Vec::new(),
+    };
+    let reg = |v: VReg| v.0.to_string();
+    let mut dsts: Vec<String> = wide
+        .iter()
+        .map(|dst| dst.dst().map_or("_".to_string(), |dst| reg(dst.0)))
+        .collect();
+    let mut reads = Vec::new();
+    ins.operands(lists, &mut |v, role| match role {
+        Role::Write | Role::WriteOnHit if wide.is_empty() => dsts.push(reg(v)),
+        Role::Write | Role::WriteOnHit => {}
+        Role::Look | Role::Share | Role::Pass { .. } | Role::Take | Role::Drop => {
+            reads.push(reg(v));
+        }
+    });
+    let name = ins.op().name();
+    format!("{} {name} {}", dsts.join(" "), reads.join(" "))
+        .trim()
+        .to_string()
+}
+
+fn dropping(locals: &[u32], rest: CoreExpr) -> CoreExpr {
+    locals.iter().rev().fold(rest, |body, l| CoreExpr::Drop {
+        local: LocalId(*l),
+        body: Box::new(body),
+    })
+}
+
+fn gives(l: u32) -> CoreExpr {
+    CoreExpr::Tail(Atom::Local(LocalId(l)))
+}
+
+/// An arm that begins by dropping what it matched takes the cell apart where
+/// its drop stands among those the arm begins with. A field that nothing reads
+/// has no register, whether or not it is dropped there, and neither it nor the
+/// cell is dropped besides.
+#[test]
+fn an_arm_that_drops_its_scrutinee_takes_it_apart() {
+    let test = "JumpUnlessTag 0";
+    let tuple = |of: &[u32]| {
+        let args = of.iter().copied().map(LocalId).collect();
+        CoreExpr::Tail(Atom::prim(PrimOp::MakeTuple, args))
+    };
+    let both = || tuple(&[1, 2]);
+    for (drops, rest, want) in [
+        (&[0][..], both(), &["1 2 Open2 0"][..]),
+        (&[0], gives(2), &["_ 2 Open2 0"]),
+        (&[0, 1], gives(2), &["_ 2 Open2 0"]),
+        (&[0, 2], gives(1), &["1 _ Open2 0"]),
+        // Others' drops stay on the side they were on, in their order.
+        (&[20, 0], both(), &["Drop 20", "1 2 Open2 0"]),
+        (&[0, 20], both(), &["1 2 Open2 0", "Drop 20"]),
+        (&[20, 0, 2], gives(1), &["Drop 20", "1 _ Open2 0"]),
+        (&[0, 1, 20], gives(2), &["_ 2 Open2 0", "Drop 20"]),
+        // With nothing to keep there is nothing to take apart.
+        (&[0], gives(20), &["Drop 0"]),
+        (&[0, 1, 2], gives(20), &["Drop 0"]),
+        (&[20, 0, 2], tuple(&[]), &["Drop 20", "Drop 0"]),
+    ] {
+        let got = matched(2, dropping(drops, rest));
+        assert_eq!(got[0], test);
+        assert_eq!(got[1..=want.len()], *want, "{drops:?}: {got:?}");
+        let more = got[want.len() + 1..].iter();
+        let again = more.filter(|i| i.contains("Drop") || i.contains("Field"));
+        assert_eq!(again.count(), 0, "{got:?}");
+    }
+}
+
+/// Every number of fields is taken apart, those that do not fit in the
+/// instruction through a list. One with no fields is only dropped.
+#[test]
+fn a_constructor_of_any_number_of_fields_is_taken_apart() {
+    for n in 0..=10u32 {
+        let fields: Vec<_> = (1..=n).map(LocalId).collect();
+        let rest = CoreExpr::Tail(Atom::prim(PrimOp::MakeTuple, fields));
+        let got = matched(n, dropping(&[0], rest));
+        let dsts: Vec<_> = (1..=n).map(|i| i.to_string()).collect();
+        let want = match n {
+            0 => "Drop 0".to_string(),
+            1..=8 => format!("{} Open{n} 0", dsts.join(" ")),
+            _ => format!("{} OpenWide 0", dsts.join(" ")),
+        };
+        assert_eq!(got[1], want);
+    }
+}
+
+/// Anything else reads each field out, and drops what the arm says where it
+/// says it: an arm that does not begin with drops, that drops a field before the
+/// value it is a field of, or that does not drop the value at all, and one whose
+/// pattern is no constructor's.
+#[test]
+fn an_arm_that_does_not_begin_so_reads_the_fields_out() {
+    let fields = ["1 Field 0", "2 Field 0"];
+    let make = |dst: u32, body: CoreExpr| CoreExpr::Let {
+        bind: bind(dst),
+        rhs: Atom::Nil,
+        body: Box::new(body),
+    };
+    let in_a_case = |body: CoreExpr| CoreExpr::LetCont {
+        id: JoinId(1),
+        cont: Box::new(gives(20)),
+        body: Box::new(body),
+    };
+    let in_a_join = |body: CoreExpr| CoreExpr::LetJoin {
+        bind: bind(9),
+        join: Box::new(body),
+        body: Box::new(gives(9)),
+    };
+    for (arm, want) in [
+        (gives(1), &["Ret 1"][..]),
+        (
+            dropping(&[20, 2], gives(1)),
+            &["Drop 20", "Drop 2", "Ret 1"],
+        ),
+        (dropping(&[2, 0], gives(1)), &["Drop 2", "Drop 0", "Ret 1"]),
+        (
+            dropping(&[20, 1, 0], gives(2)),
+            &["Drop 20", "Drop 1", "Drop 0", "Ret 2"],
+        ),
+        (
+            make(8, dropping(&[0], gives(1))),
+            &["8 Const", "Drop 0", "Ret 1"],
+        ),
+        (
+            dropping(&[20], make(8, dropping(&[0], gives(1)))),
+            &["Drop 20", "8 Const", "Drop 0", "Ret 1"],
+        ),
+        (
+            in_a_case(dropping(&[0], gives(1))),
+            &["Drop 0", "Ret 1", "Ret 20"],
+        ),
+        (
+            in_a_join(dropping(&[0], gives(1))),
+            &["Drop 0", "9 Move 1", "Jump", "Ret 9"],
+        ),
+    ] {
+        let got = matched(2, arm);
+        assert_eq!(got[1..3], fields, "{got:?}");
+        assert_eq!(got[3..], *want);
+    }
+    // A field with the scrutinee's own number is no field of a program's.
+    let variant = with_fields(2);
+    let fields = vec![bind(0), bind(2)];
+    let got = in_arm(CorePat::Ctor { variant, fields }, dropping(&[0], gives(2)));
+    assert_eq!(got[1..], ["0 Field 0", "2 Field 0", "Drop 0", "Ret 2"]);
+    let got = in_arm(CorePat::Bind(bind(1)), dropping(&[0], gives(1)));
+    assert_eq!(got, ["1 Move 0", "Drop 0", "Ret 1"]);
+    let got = in_arm(CorePat::Wild, dropping(&[0], gives(20)));
+    assert_eq!(got, ["Drop 0", "Ret 20"]);
+}
+
+/// A pattern with very many fields and very many drops is gone over a fixed number
+/// of times. Here 30,000 fields are read, 30,000 are only dropped, and 60,000 other
+/// values are dropped on both sides of the scrutinee. Going over the drops for each
+/// field, or over the fields for each drop, is billions of compares, which nobody
+/// waits for twice: each such scan makes this test take eight seconds and not a
+/// third of one.
+#[test]
+fn a_pattern_of_many_fields_is_gone_over_a_few_times() {
+    const N: u32 = 60_000;
+    let fields: Vec<_> = (1..=N).map(bind).collect();
+    let others = |from: u32| from..from + N / 2;
+    let unread = || (1..=N).filter(|l| l % 2 == 0);
+    let kept: Vec<_> = (1..=N).filter(|l| l % 2 == 1).map(LocalId).collect();
+    let mut arm = CoreExpr::Tail(Atom::prim(PrimOp::MakeTuple, kept.clone()));
+    let drops = others(N + 1)
+        .chain([0])
+        .chain(unread())
+        .chain(others(2 * N));
+    for l in drops.collect::<Vec<_>>().into_iter().rev() {
+        arm = dropping(&[l], arm);
+    }
+    let reads = unread()
+        .chain(others(N + 1))
+        .chain(others(2 * N))
+        .chain(kept.iter().map(|l| l.0));
+    let program = empty_program();
+    let source = Source::new(&program).expect("a whole program");
+    let mut tables = Tables::default();
+    let reads = reads.map(|l| (LocalId(l), 1)).collect();
+    let t = translator(&source, &mut tables, reads);
+    let opened = t.opened(LocalId(0), &fields, &arm);
+    let opened = opened.map(|o| (o.before, o.dsts, o.after));
+    // Freed from the outside in, because as a tree it is deeper than the stack.
+    while let CoreExpr::Drop { body, .. } = arm {
+        arm = *body;
+    }
+    let (before, dsts, after) = opened.expect("it begins so");
+    let locals = |of: Vec<LocalId>| of.iter().map(|l| l.0).collect::<Vec<_>>();
+    assert_eq!(locals(before), others(N + 1).collect::<Vec<_>>());
+    assert_eq!(locals(after), others(2 * N).collect::<Vec<_>>());
+    assert_eq!(dsts.len(), fields.len());
+    let dsts: Vec<_> = dsts.iter().filter_map(|d| d.dst()).collect();
+    assert_eq!(dsts, kept.iter().map(|l| Dst(of(*l))).collect::<Vec<_>>());
+}
+
+/// A field that is dropped where the arm begins and read besides, which no
+/// compiler makes, still has a register and its drop.
+#[test]
+fn a_field_read_after_its_drop_keeps_both() {
+    let got = matched(2, dropping(&[0, 1], gives(1)));
+    assert_eq!(got[1..], ["1 _ Open2 0", "Drop 1", "Ret 1"]);
+}
+
 /// An instruction with more operands than it has room for takes them from a
 /// list, and reads the same ones.
 #[test]
 fn operands_that_do_not_fit_are_in_a_list() {
     let list = |n: usize| (0..n).map(|i| LocalId(i as u32 % 5)).collect::<Vec<_>>();
     let prim = |op: PrimOp, n: usize| Atom::prim(op, list(n));
-    let ctor = |n: usize, reuse: Option<u32>| Atom::Ctor {
+    let ctor = |n: usize| Atom::Ctor {
         variant: with_fields(n),
         fields: list(n),
-        reuse: reuse.map(LocalId),
     };
     let call = |callee: Callee, n: usize| Atom::Call {
         callee,
@@ -598,10 +854,8 @@ fn operands_that_do_not_fit_are_in_a_list() {
         (prim(PrimOp::ArrayPrepend, 10), Op::ArrayPrependWide),
         (prim(PrimOp::ArrayAppend, 9), Op::ArrayAppend),
         (prim(PrimOp::ArrayAppend, 10), Op::ArrayAppendWide),
-        (ctor(8, None), Op::Ctor),
-        (ctor(9, None), Op::CtorWide),
-        (ctor(5, Some(0)), Op::CtorOver),
-        (ctor(6, Some(0)), Op::CtorOverWide),
+        (ctor(8), Op::Ctor),
+        (ctor(9), Op::CtorWide),
         (closure(8), Op::Closure),
         (closure(9), Op::ClosureWide),
         (call(Callee::Local(LocalId(0)), 6), Op::CallValue),
@@ -610,10 +864,6 @@ fn operands_that_do_not_fit_are_in_a_list() {
     for (atom, want) in cases {
         let mut reads = Vec::new();
         atom.for_each_operand(|l| reads.push(of(l)));
-        reads.extend(match &atom {
-            Atom::Ctor { reuse, .. } => reuse.map(of),
-            _ => None,
-        });
         reads.sort();
         let core = function(
             5,

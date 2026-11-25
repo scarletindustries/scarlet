@@ -31,7 +31,7 @@ impl Class {
     }
 
     #[inline(always)]
-    pub(super) fn is_ctor(self) -> bool {
+    fn is_ctor(self) -> bool {
         self.0 >= FIRST
     }
 

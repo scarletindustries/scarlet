@@ -39,7 +39,6 @@ fn atom_forms() {
         Atom::Ctor {
             variant: vref(7, 1),
             fields: vec![LocalId(2)],
-            reuse: None,
         }
         .to_string(),
         "ctor 7.1(%2)"
@@ -48,10 +47,9 @@ fn atom_forms() {
         Atom::Ctor {
             variant: vref(7, 1),
             fields: vec![LocalId(2), LocalId(3)],
-            reuse: Some(LocalId(9)),
         }
         .to_string(),
-        "ctor 7.1(%2, %3) reuse %9"
+        "ctor 7.1(%2, %3)"
     );
     assert_eq!(
         Atom::Call {
@@ -101,13 +99,11 @@ fn let_drop_spine_is_flat() {
         rhs: Atom::prim(PrimOp::IntAdd, vec![LocalId(0), LocalId(1)]),
         body: Box::new(CoreExpr::Drop {
             local: LocalId(0),
-            shape: ReuseShape::ctor(3),
             body: Box::new(CoreExpr::Let {
                 bind: bind(3, RTy(11)),
                 rhs: Atom::Ctor {
                     variant: vref(7, 1),
                     fields: vec![LocalId(2)],
-                    reuse: Some(LocalId(0)),
                 },
                 body: Box::new(CoreExpr::Tail(Atom::Local(LocalId(3)))),
             }),
@@ -117,8 +113,8 @@ fn let_drop_spine_is_flat() {
         e.to_string(),
         "\
 let %2:10 = IntAdd(%0, %1)
-drop %0 [ctor:3]
-let %3:11 = ctor 7.1(%2) reuse %0
+drop %0
+let %3:11 = ctor 7.1(%2)
 ret %3
 "
     );

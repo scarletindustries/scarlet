@@ -50,9 +50,9 @@ mod translate;
 
 pub(crate) use forms::{Built, CtorOf};
 pub(crate) use ins::{
-    Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, Dst, EntryPc, Hands, Hit, Ins, KeepList,
-    Kept, Last, Lists, LookList, Looks, Newline, Op, Over, Pc, Reg, Room, ShareList, Shared,
-    Shares, Src, Taken, TextId, WhyId,
+    Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, Dst, DstList, EntryPc, Hands, Hit, Ins,
+    Last, Lists, LookList, Looks, MaybeDst, Newline, Op, Pc, Reg, Room, ShareList, Shared, Shares,
+    Src, Taken, TextId, WhyId,
 };
 
 use alloc::Fitted;
@@ -390,7 +390,6 @@ fn built(i: Intrinsic, argc: usize) -> bool {
     let arity = match i {
         Intrinsic::MapNew
         | Intrinsic::InternalCellsMade
-        | Intrinsic::InternalCellsReused
         | Intrinsic::TimeMonotonic
         | Intrinsic::TimeEpochMs
         | Intrinsic::OsArgv

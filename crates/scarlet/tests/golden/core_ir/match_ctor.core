@@ -1,12 +1,12 @@
 fn main.area(%0:t0) -> :t1
   match %0 :t1
     | 10.0(%1) ->
-      drop %0 [ctor:1]
+      drop %0
       let %2:t1 = IntMul(%1, %1)
       let %3:t1 = c0
       ret IntMul(%2, %3)
     | 10.1(%4, %5) ->
-      drop %0 [ctor:2]
+      drop %0
       ret IntMul(%4, %5)
 
 fn main.main() -> :t1

@@ -32,7 +32,6 @@ fn true_false_and_nil_become_atoms() {
         rhs: Atom::Ctor {
             variant: v,
             fields: Vec::new(),
-            reuse: None,
         },
         body: Box::new(ret(1)),
     };

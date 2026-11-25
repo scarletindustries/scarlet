@@ -10,10 +10,9 @@
 //! written, a [`Src`] is only looked at, and a [`Taken`] is emptied. So there
 //! is one list of the registers an instruction names and of what happens to
 //! each, which is the fields themselves ([`Ins::operands`]). Liveness, register
-//! allocation and the listing all read it. The one field left out of it is a
-//! [`KeepList`], whose registers the instruction leaves as they are. The
-//! interpreter has a method for each of these types (`exec.rs`). A handler that
-//! looks at a register before it takes or shares it reads the number inside.
+//! allocation and the listing all read it. The interpreter has a method for
+//! each of these types (`exec.rs`). A handler that looks at a register before
+//! it takes or shares it reads the number inside.
 //!
 //! An instruction is 16 bytes. Operands sit in it, and the few forms whose
 //! operands may not fit have a second instruction with `Wide` at the end of
@@ -29,8 +28,8 @@ use crate::value::{Float, SmallInt, Tag, Value};
 mod fields;
 
 pub(crate) use fields::{
-    Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, Dst, EntryPc, Hands, Hit, KeepList, Kept,
-    Last, Lists, LookList, Looks, Names, Newline, Over, Part, Pc, Place, Places, Reg, Role, Room,
+    Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, Dst, DstList, EntryPc, Hands, Hit, Last,
+    Lists, LookList, Looks, MaybeDst, Names, Newline, Part, Pc, Place, Places, Reg, Role, Room,
     ShareList, Shared, Shares, Src, Taken, TextId, Unplaced, VReg, WhyId,
 };
 pub(super) use fields::{Callee, Label, LastReg, OwnEntry, OwnRoom};
@@ -45,7 +44,7 @@ macro_rules! instructions {
         $(#[$doc:meta])* $name:ident $({ $($field:ident: $ty:ty),* $(,)? })? $(=> $end:ident)?
     ),* $(,)?) => {
         /// One instruction. Its fields are in the order its handler reads
-        /// them, after the register it writes.
+        /// them, after the registers it writes.
         #[derive(Debug, Clone, Copy)]
         pub(crate) enum Ins<R: Names> {
             $($(#[$doc])* $name $({ $($field: $ty),* })?),*
@@ -87,7 +86,7 @@ macro_rules! instructions {
 
             /// Call `f` with every register the instruction names and what it
             /// does with it. The registers it reads come in the order it
-            /// reads them, after the one it writes.
+            /// reads them, after the ones it writes.
             pub(crate) fn operands(&self, lists: &Lists<R>, f: &mut impl FnMut(R, Role)) {
                 match *self {
                     $(Ins::$name $({ $($field),* })? => {
@@ -250,18 +249,24 @@ instructions! {
     /// The same, for a constructor that shares a field.
     Ctor { dst: Dst<R>, ctor: Ctor, fields: Args<R, 8> },
     CtorWide { dst: Dst<R>, ctor: Ctor, fields: ArgList },
-    /// [`Ins::Ctor`], over the cell that an [`Ins::DropReuse`] above left in
-    /// `reuse`. If the register holds anything else, it is given up and the
-    /// constructor makes a new cell.
-    CtorOver { dst: Dst<R>, ctor: Ctor, fields: Args<R, 5>, reuse: Over<R> },
-    CtorOverWide { dst: Dst<R>, ctor: Ctor, fields: ArgList, reuse: Over<R> },
+    /// Take the constructor in `src` apart. `src` gives up its reference to the
+    /// cell, and each field goes to its register with a reference of its own.
+    /// When `src` held the only one, the fields' references move and the cell
+    /// is freed, and a field that nothing reads, which has no register, is given
+    /// up. The constructor is `ctor`, as the [`Ins::JumpUnlessTag`] in front
+    /// found. One with a number at its end has that many fields.
+    Open1 { dsts: [MaybeDst<R>; 1], src: Taken<R>, ctor: Ctor },
+    Open2 { dsts: [MaybeDst<R>; 2], src: Taken<R>, ctor: Ctor },
+    Open3 { dsts: [MaybeDst<R>; 3], src: Taken<R>, ctor: Ctor },
+    Open4 { dsts: [MaybeDst<R>; 4], src: Taken<R>, ctor: Ctor },
+    Open5 { dsts: [MaybeDst<R>; 5], src: Taken<R>, ctor: Ctor },
+    Open6 { dsts: [MaybeDst<R>; 6], src: Taken<R>, ctor: Ctor },
+    Open7 { dsts: [MaybeDst<R>; 7], src: Taken<R>, ctor: Ctor },
+    Open8 { dsts: [MaybeDst<R>; 8], src: Taken<R>, ctor: Ctor },
+    OpenWide { dsts: DstList, src: Taken<R>, ctor: Ctor },
     /// Perceus's last use of `reg`. It gives up the reference now instead of
     /// at the frame's end.
     Drop { reg: Dead<R> },
-    /// An [`Ins::Drop`] of a cell that a constructor below is paired with.
-    /// When this is the last reference, the allocation stays in `reg` to be
-    /// overwritten instead of freed.
-    DropReuse { reg: Kept<R> },
     /// A call to the function at `to`. `own` is this frame's size, which is
     /// how far above it the callee's frame starts. One with a number at its
     /// end has that many arguments and takes each of them, so it has nothing to
@@ -284,9 +289,6 @@ instructions! {
     CallSelfWide { dst: Dst<R>, own: R::Own, to: R::OwnEntry, args: ArgList },
     TailCallSelf { to: R::OwnEntry, args: Args<R, 6>, own: R::Own } => ends,
     TailCallSelfWide { to: R::OwnEntry, args: ArgList, own: R::Own } => ends,
-    /// [`Ins::TailCallSelf`], for a function whose loop carries cells kept
-    /// for a constructor round it. The registers in `keep` stay as they are.
-    TailCallSelfKeep { to: R::OwnEntry, args: ArgList, keep: KeepList, own: R::Own } => ends,
     /// A call to the function value in `callee`, with or without captures.
     CallValue { dst: Dst<R>, callee: Shared<R>, own: R::Own, args: Args<R, 6> },
     CallValueWide { dst: Dst<R>, callee: Shared<R>, own: R::Own, args: ArgList },

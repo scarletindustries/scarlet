@@ -1,0 +1,553 @@
+import scarlet/string
+
+type W1 {
+	A1(f0 String)
+	B1(f0 String)
+	C1(only String, n Int)
+	None1
+}
+
+type W2 {
+	A2(f0 String, f1 String)
+	B2(f0 String, f1 String)
+	C2(only String, n Int)
+	None2
+}
+
+type W3 {
+	A3(f0 String, f1 String, f2 String)
+	B3(f0 String, f1 String, f2 String)
+	C3(only String, n Int)
+	None3
+}
+
+type W4 {
+	A4(
+		f0 String,
+		f1 String,
+		f2 String,
+		f3 String,
+	)
+	B4(
+		f0 String,
+		f1 String,
+		f2 String,
+		f3 String,
+	)
+	C4(only String, n Int)
+	None4
+}
+
+type W5 {
+	A5(
+		f0 String,
+		f1 String,
+		f2 String,
+		f3 String,
+		f4 String,
+	)
+	B5(
+		f0 String,
+		f1 String,
+		f2 String,
+		f3 String,
+		f4 String,
+	)
+	C5(only String, n Int)
+	None5
+}
+
+type W6 {
+	A6(
+		f0 String,
+		f1 String,
+		f2 String,
+		f3 String,
+		f4 String,
+		f5 String,
+	)
+	B6(
+		f0 String,
+		f1 String,
+		f2 String,
+		f3 String,
+		f4 String,
+		f5 String,
+	)
+	C6(only String, n Int)
+	None6
+}
+
+type W7 {
+	A7(
+		f0 String,
+		f1 String,
+		f2 String,
+		f3 String,
+		f4 String,
+		f5 String,
+		f6 String,
+	)
+	B7(
+		f0 String,
+		f1 String,
+		f2 String,
+		f3 String,
+		f4 String,
+		f5 String,
+		f6 String,
+	)
+	C7(only String, n Int)
+	None7
+}
+
+type W8 {
+	A8(
+		f0 String,
+		f1 String,
+		f2 String,
+		f3 String,
+		f4 String,
+		f5 String,
+		f6 String,
+		f7 String,
+	)
+	B8(
+		f0 String,
+		f1 String,
+		f2 String,
+		f3 String,
+		f4 String,
+		f5 String,
+		f6 String,
+		f7 String,
+	)
+	C8(only String, n Int)
+	None8
+}
+
+type W9 {
+	A9(
+		f0 String,
+		f1 String,
+		f2 String,
+		f3 String,
+		f4 String,
+		f5 String,
+		f6 String,
+		f7 String,
+		f8 String,
+	)
+	B9(
+		f0 String,
+		f1 String,
+		f2 String,
+		f3 String,
+		f4 String,
+		f5 String,
+		f6 String,
+		f7 String,
+		f8 String,
+	)
+	C9(only String, n Int)
+	None9
+}
+
+type W20 {
+	A20(
+		f0 String,
+		f1 String,
+		f2 String,
+		f3 String,
+		f4 String,
+		f5 String,
+		f6 String,
+		f7 String,
+		f8 String,
+		f9 String,
+		f10 String,
+		f11 String,
+		f12 String,
+		f13 String,
+		f14 String,
+		f15 String,
+		f16 String,
+		f17 String,
+		f18 String,
+		f19 String,
+	)
+	B20(
+		f0 String,
+		f1 String,
+		f2 String,
+		f3 String,
+		f4 String,
+		f5 String,
+		f6 String,
+		f7 String,
+		f8 String,
+		f9 String,
+		f10 String,
+		f11 String,
+		f12 String,
+		f13 String,
+		f14 String,
+		f15 String,
+		f16 String,
+		f17 String,
+		f18 String,
+		f19 String,
+	)
+	C20(only String, n Int)
+	None20
+}
+
+type Tree {
+	Node(
+		l Tree,
+		n Int,
+		s String,
+		r Tree,
+	)
+	Leaf
+}
+
+type Rec {
+	id Int
+	name String
+	items Array(Int)
+}
+
+// The same fields the other way round, another size, and the value as it was.
+fn turn1(w W1) W1 {
+	match w {
+		A1(x0) -> B1(x0)
+		B1(x0) -> C1(x0, 1)
+		C1(s, _) -> A1(s)
+		None1 -> None1
+	}
+}
+
+// The same fields the other way round, another size, and the value as it was.
+fn turn2(w W2) W2 {
+	match w {
+		A2(x0, x1) -> B2(x1, x0)
+		B2(x0, _) -> C2(x0, 2)
+		C2(s, _) -> A2(s, s)
+		None2 -> None2
+	}
+}
+
+// The same fields the other way round, another size, and the value as it was.
+fn turn3(w W3) W3 {
+	match w {
+		A3(x0, x1, x2) -> B3(x2, x1, x0)
+		B3(x0, _, x2) -> C3(x0 + x2, 3)
+		C3(s, _) -> A3(s, s, s)
+		None3 -> None3
+	}
+}
+
+// The same fields the other way round, another size, and the value as it was.
+fn turn4(w W4) W4 {
+	match w {
+		A4(x0, x1, x2, x3) -> B4(x3, x2, x1, x0)
+		B4(x0, _, x2, _) -> C4(x0 + x2, 4)
+		C4(s, _) -> A4(s, s, s, s)
+		None4 -> None4
+	}
+}
+
+// The same fields the other way round, another size, and the value as it was.
+fn turn5(w W5) W5 {
+	match w {
+		A5(x0, x1, x2, x3, x4) -> B5(x4, x3, x2, x1, x0)
+		B5(x0, _, x2, _, x4) -> C5(x0 + x2 + x4, 5)
+		C5(s, _) -> A5(s, s, s, s, s)
+		None5 -> None5
+	}
+}
+
+// The same fields the other way round, another size, and the value as it was.
+fn turn6(w W6) W6 {
+	match w {
+		A6(x0, x1, x2, x3, x4, x5) -> B6(x5, x4, x3, x2, x1, x0)
+		B6(x0, _, x2, _, x4, _) -> C6(x0 + x2 + x4, 6)
+		C6(s, _) -> A6(s, s, s, s, s, s)
+		None6 -> None6
+	}
+}
+
+// The same fields the other way round, another size, and the value as it was.
+fn turn7(w W7) W7 {
+	match w {
+		A7(x0, x1, x2, x3, x4, x5, x6) -> B7(x6, x5, x4, x3, x2, x1, x0)
+		B7(x0, _, x2, _, x4, _, x6) -> C7(x0 + x2 + x4 + x6, 7)
+		C7(s, _) -> A7(s, s, s, s, s, s, s)
+		None7 -> None7
+	}
+}
+
+// The same fields the other way round, another size, and the value as it was.
+fn turn8(w W8) W8 {
+	match w {
+		A8(x0, x1, x2, x3, x4, x5, x6, x7) -> B8(x7, x6, x5, x4, x3, x2, x1, x0)
+		B8(x0, _, x2, _, x4, _, x6, _) -> C8(x0 + x2 + x4 + x6, 8)
+		C8(s, _) -> A8(s, s, s, s, s, s, s, s)
+		None8 -> None8
+	}
+}
+
+// The same fields the other way round, another size, and the value as it was.
+fn turn9(w W9) W9 {
+	match w {
+		A9(x0, x1, x2, x3, x4, x5, x6, x7, x8) -> B9(x8, x7, x6, x5, x4, x3, x2, x1, x0)
+		B9(x0, _, x2, _, x4, _, x6, _, x8) -> C9(x0 + x2 + x4 + x6 + x8, 9)
+		C9(s, _) -> A9(s, s, s, s, s, s, s, s, s)
+		None9 -> None9
+	}
+}
+
+// The same fields the other way round, another size, and the value as it was.
+fn turn20(w W20) W20 {
+	match w {
+		A20(
+			x0,
+			x1,
+			x2,
+			x3,
+			x4,
+			x5,
+			x6,
+			x7,
+			x8,
+			x9,
+			x10,
+			x11,
+			x12,
+			x13,
+			x14,
+			x15,
+			x16,
+			x17,
+			x18,
+			x19,
+		) ->
+			B20(
+				x19,
+				x18,
+				x17,
+				x16,
+				x15,
+				x14,
+				x13,
+				x12,
+				x11,
+				x10,
+				x9,
+				x8,
+				x7,
+				x6,
+				x5,
+				x4,
+				x3,
+				x2,
+				x1,
+				x0,
+			)
+		B20(x0, _, x2, _, x4, _, x6, _, x8, _, x10, _, x12, _, x14, _, x16, _, x18, _) ->
+			C20(x0 + x2 + x4 + x6 + x8 + x10 + x12 + x14 + x16 + x18, 20)
+		C20(s, _) -> A20(s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s, s)
+		None20 -> None20
+	}
+}
+
+fn rebuild(t Tree) Tree {
+	match t {
+		Node(l, n, s, r) -> Node(rebuild(r), n + 1, s + '.', rebuild(l))
+		Leaf -> Leaf
+	}
+}
+
+fn grow(depth Int) Tree {
+	if depth == 0 {
+		Leaf
+	} else {
+		Node(grow(depth - 1), depth, '${depth}', grow(depth - 1))
+	}
+}
+
+fn sum(t Tree) Int {
+	match t {
+		Node(l, n, _, r) -> sum(l) + n + sum(r)
+		Leaf -> 0
+	}
+}
+
+fn rotate(t Tree) Tree {
+	match t {
+		Node(Node(a, x, s, b), y, u, c) -> Node(a, x, s, Node(b, y, u, c))
+		Node(Leaf, y, u, c) -> Node(c, y, u, Leaf)
+		Leaf -> Leaf
+	}
+}
+
+// The value itself is wanted again, and a field of it.
+fn twice(t Tree) (Tree, Tree) {
+	match t {
+		Node(l, n, _, _) if n > 2 -> (t, l)
+		Node(_, n, s, r) -> (Node(r, n, s, t), r)
+		Leaf -> (t, t)
+	}
+}
+
+fn bump(r Rec, n Int) Rec {
+	if n == 0 {
+		r
+	} else {
+		bump(Rec(..r, items: [..r.items, n], id: r.id + 1), n - 1)
+	}
+}
+
+fn name(r Rec) String {
+	match r {
+		Rec(_, name, items) -> name + string::inspect(items)
+	}
+}
+
+// A value made of itself, so the registers the fields go to hold what it is.
+fn around(a Tree, b Tree, n Int) Tree {
+	if n == 0 {
+		a
+	} else {
+		match a {
+			Node(l, _, _, r) -> around(b, Node(r, n, 'around', l), n - 1)
+			Leaf -> around(b, a, n - 1)
+		}
+	}
+}
+
+pub fn main() {
+	w1 = A1('v0')
+	println(string::inspect(turn1(w1)))
+	println(string::inspect(turn1(turn1(w1))))
+	println(string::inspect(turn1(turn1(turn1(A1('v0'))))))
+	println(string::inspect((turn1(None1), w1)))
+	w2 = A2('v0', 'v1')
+	println(string::inspect(turn2(w2)))
+	println(string::inspect(turn2(turn2(w2))))
+	println(string::inspect(turn2(turn2(turn2(A2('v0', 'v1'))))))
+	println(string::inspect((turn2(None2), w2)))
+	w3 = A3('v0', 'v1', 'v2')
+	println(string::inspect(turn3(w3)))
+	println(string::inspect(turn3(turn3(w3))))
+	println(string::inspect(turn3(turn3(turn3(A3('v0', 'v1', 'v2'))))))
+	println(string::inspect((turn3(None3), w3)))
+	w4 = A4('v0', 'v1', 'v2', 'v3')
+	println(string::inspect(turn4(w4)))
+	println(string::inspect(turn4(turn4(w4))))
+	println(string::inspect(turn4(turn4(turn4(A4('v0', 'v1', 'v2', 'v3'))))))
+	println(string::inspect((turn4(None4), w4)))
+	w5 = A5('v0', 'v1', 'v2', 'v3', 'v4')
+	println(string::inspect(turn5(w5)))
+	println(string::inspect(turn5(turn5(w5))))
+	println(string::inspect(turn5(turn5(turn5(A5('v0', 'v1', 'v2', 'v3', 'v4'))))))
+	println(string::inspect((turn5(None5), w5)))
+	w6 = A6('v0', 'v1', 'v2', 'v3', 'v4', 'v5')
+	println(string::inspect(turn6(w6)))
+	println(string::inspect(turn6(turn6(w6))))
+	println(string::inspect(turn6(turn6(turn6(A6('v0', 'v1', 'v2', 'v3', 'v4', 'v5'))))))
+	println(string::inspect((turn6(None6), w6)))
+	w7 = A7('v0', 'v1', 'v2', 'v3', 'v4', 'v5', 'v6')
+	println(string::inspect(turn7(w7)))
+	println(string::inspect(turn7(turn7(w7))))
+	println(string::inspect(turn7(turn7(turn7(A7('v0', 'v1', 'v2', 'v3', 'v4', 'v5', 'v6'))))))
+	println(string::inspect((turn7(None7), w7)))
+	w8 = A8('v0', 'v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7')
+	println(string::inspect(turn8(w8)))
+	println(string::inspect(turn8(turn8(w8))))
+	println(
+		string::inspect(turn8(turn8(turn8(A8('v0', 'v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7'))))),
+	)
+	println(string::inspect((turn8(None8), w8)))
+	w9 = A9('v0', 'v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7', 'v8')
+	println(string::inspect(turn9(w9)))
+	println(string::inspect(turn9(turn9(w9))))
+	println(
+		string::inspect(
+			turn9(turn9(turn9(A9('v0', 'v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7', 'v8')))),
+		),
+	)
+	println(string::inspect((turn9(None9), w9)))
+	w20 = A20(
+		'v0',
+		'v1',
+		'v2',
+		'v3',
+		'v4',
+		'v5',
+		'v6',
+		'v7',
+		'v8',
+		'v9',
+		'v10',
+		'v11',
+		'v12',
+		'v13',
+		'v14',
+		'v15',
+		'v16',
+		'v17',
+		'v18',
+		'v19',
+	)
+	println(string::inspect(turn20(w20)))
+	println(string::inspect(turn20(turn20(w20))))
+	println(
+		string::inspect(
+			turn20(
+				turn20(
+					turn20(
+						A20(
+							'v0',
+							'v1',
+							'v2',
+							'v3',
+							'v4',
+							'v5',
+							'v6',
+							'v7',
+							'v8',
+							'v9',
+							'v10',
+							'v11',
+							'v12',
+							'v13',
+							'v14',
+							'v15',
+							'v16',
+							'v17',
+							'v18',
+							'v19',
+						),
+					),
+				),
+			),
+		),
+	)
+	println(string::inspect((turn20(None20), w20)))
+	t = grow(4)
+	println(sum(rebuild(t)))
+	println(sum(t))
+	println(sum(rebuild(rebuild(grow(4)))))
+	println(string::inspect(rotate(grow(2))))
+	println(string::inspect(rotate(rotate(t)) == t))
+	println(string::inspect(twice(grow(3))))
+	println(string::inspect(twice(grow(2))))
+	r = Rec(1, 'r', [])
+	println(name(bump(r, 5)))
+	println(name(bump(Rec(1, 'r', []), 5)))
+	println(name(r))
+	println(string::inspect(around(grow(2), grow(2), 5)))
+	println(sum(around(t, t, 9)))
+}

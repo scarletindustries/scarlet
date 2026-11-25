@@ -192,6 +192,7 @@ impl Out<'_, '_> {
             start: EntryPc(position(plan.start)?),
             regs: position(self.lists.regs.len())?,
             args: position(self.lists.args.len())?,
+            dsts: position(self.lists.dsts.len())?,
         };
         let stop = |why| unplaced(at.funcs, why);
         for list in &body.lists.regs {
@@ -202,6 +203,11 @@ impl Out<'_, '_> {
             let args = list.iter().map(|a| super::ins::Place::place(*a, &at));
             let args: Result<Box<[_]>, _> = args.collect();
             self.lists.args.push(args.map_err(stop)?);
+        }
+        for list in &body.lists.dsts {
+            let dsts = list.iter().map(|d| super::ins::Place::place(*d, &at));
+            let dsts: Result<Box<[_]>, _> = dsts.collect();
+            self.lists.dsts.push(dsts.map_err(stop)?);
         }
         let audit = match self.extra.audit {
             Audit::EachInstruction => Some(Ins::Audit),
@@ -255,6 +261,7 @@ struct At<'a> {
     /// How many lists the functions before this one have.
     regs: u32,
     args: u32,
+    dsts: u32,
 }
 
 impl Places for At<'_> {
@@ -294,6 +301,10 @@ impl Places for At<'_> {
 
     fn arg_list(&self, i: u32) -> Result<u32, Unplaced> {
         list(self.body.lists.args.get(i as usize), self.args, i)
+    }
+
+    fn dst_list(&self, i: u32) -> Result<u32, Unplaced> {
+        list(self.body.lists.dsts.get(i as usize), self.dsts, i)
     }
 }
 

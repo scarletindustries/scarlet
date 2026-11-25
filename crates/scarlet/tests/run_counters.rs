@@ -90,8 +90,12 @@ fn counters_writes_what_the_run_counted() {
         "a kind that never ran is listed"
     );
     assert!(counts["cells_made"].as_u64() >= Some(100), "{text}");
-    assert!(counts["cells_reused"].is_u64(), "{text}");
     assert!(counts["cells_live"].is_u64(), "{text}");
+    let words = counts["heap_words"].as_u64();
+    assert!(
+        words >= Some(300),
+        "a list of 100, three words each: {text}"
+    );
 }
 
 /// Two runs of one program count the same, to the last instruction.

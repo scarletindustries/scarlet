@@ -12,9 +12,7 @@
 
 use std::collections::HashMap;
 
-use scarlet_ir::core_ir::{
-    Atom, CoreBind, CoreExpr, CoreFn, CorePat, JoinId, LocalId, PrimOp, ReuseShape,
-};
+use scarlet_ir::core_ir::{Atom, CoreBind, CoreExpr, CoreFn, CorePat, JoinId, LocalId, PrimOp};
 use scarlet_ir::rty::RTy;
 
 /// How many elements a piece has. It is what one leaf of an array holds.
@@ -104,7 +102,7 @@ impl<'a> Literal<'a> {
 #[derive(Default)]
 struct Locals {
     highest: u32,
-    /// How often each is read, dropped or overwritten in place.
+    /// How often each is read or dropped.
     times: HashMap<LocalId, u32>,
 }
 
@@ -120,9 +118,6 @@ impl Locals {
 
     fn atom(&mut self, atom: &Atom) {
         atom.for_each_operand(|l| self.read(l));
-        if let Atom::Ctor { reuse: Some(l), .. } = atom {
-            self.read(*l);
-        }
     }
 
     fn walk(&mut self, e: &CoreExpr) {
@@ -168,7 +163,7 @@ enum Step {
     Let(CoreBind, Atom),
     Join(CoreBind, CoreExpr),
     Cont(JoinId, CoreExpr),
-    Drop(LocalId, Option<ReuseShape>),
+    Drop(LocalId),
 }
 
 impl Step {
@@ -186,7 +181,7 @@ impl Step {
                 cont: Box::new(cont),
                 body,
             },
-            Step::Drop(local, shape) => CoreExpr::Drop { local, shape, body },
+            Step::Drop(local) => CoreExpr::Drop { local, body },
         }
     }
 
@@ -194,7 +189,7 @@ impl Step {
     fn binds(&self) -> Option<LocalId> {
         match self {
             Step::Let(bind, _) | Step::Join(bind, _) => Some(bind.id),
-            Step::Cont(..) | Step::Drop(..) => None,
+            Step::Cont(..) | Step::Drop(_) => None,
         }
     }
 }
@@ -233,8 +228,8 @@ impl Cut {
                     steps.push(Step::Cont(*id, self.expr(cont, ty)));
                     e = body;
                 }
-                CoreExpr::Drop { local, shape, body } => {
-                    steps.push(Step::Drop(*local, *shape));
+                CoreExpr::Drop { local, body } => {
+                    steps.push(Step::Drop(*local));
                     e = body;
                 }
                 // A literal that is returned is given a name, and what is
@@ -285,7 +280,7 @@ impl Cut {
         let mut dropped = HashMap::new();
         for (i, step) in steps.iter().enumerate() {
             bound.extend(step.binds().map(|l| (l, i)));
-            if let Step::Drop(l, _) = step {
+            if let Step::Drop(l) = step {
                 dropped.insert(*l, i);
             }
         }
@@ -308,7 +303,7 @@ impl Cut {
             let mut spent: Option<LocalId> = None;
             while let Some(piece) = pieces.next() {
                 let made = literal.piece(so_far, piece);
-                let dead = spent.map(|l| Step::Drop(l, None));
+                let dead = spent.map(Step::Drop);
                 // The last piece is the literal, unless something comes after
                 // its elements.
                 if pieces.peek().is_none() && literal.before.is_none() {
@@ -336,12 +331,12 @@ impl Cut {
                 for l in piece {
                     if self.names.times.get(l) == Some(&2)
                         && let Some(d) = dropped.get(l).filter(|d| **d > i)
-                        && let Some(Step::Drop(l, shape)) = steps.get(*d)
+                        && let Some(Step::Drop(l)) = steps.get(*d)
                         && let Some(moved) = moved.get_mut(*d)
                         && !*moved
                     {
                         *moved = true;
-                        here.push(Step::Drop(*l, *shape));
+                        here.push(Step::Drop(*l));
                     }
                 }
                 self.pieces = self.pieces.saturating_add(1);
@@ -350,7 +345,7 @@ impl Cut {
             if let (Some(front), Some(back)) = (so_far, literal.before) {
                 became.insert(i, Atom::prim(PrimOp::ArrayConcat, vec![front, back]));
                 if let Some(here) = after.get_mut(i.saturating_add(1)) {
-                    here.push(Step::Drop(front, None));
+                    here.push(Step::Drop(front));
                 }
             }
         }

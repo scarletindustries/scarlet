@@ -9,9 +9,9 @@
 //! the prelude's `Bool`, and a Bool only ever looks one way.
 //!
 //! It runs between `lower` and `perceus`, so Perceus never sees a Bool as a
-//! constructor and never marks one's drop as a cell to reuse.
+//! constructor.
 
-use super::{Atom, CoreBind, CoreExpr, CoreFn, CorePat, JoinId, LocalId, ReuseShape, VariantRef};
+use super::{Atom, CoreBind, CoreExpr, CoreFn, CorePat, JoinId, LocalId, VariantRef};
 use crate::typed_ir::RTy;
 
 /// The prelude's constructors that are immediates.
@@ -87,22 +87,10 @@ pub(crate) fn rewrite(f: CoreFn, im: &Immediates) -> CoreFn {
 
 /// One node peeled off a spine, waiting for its rewritten body.
 enum Frame {
-    Let {
-        bind: CoreBind,
-        rhs: Atom,
-    },
-    Join {
-        bind: CoreBind,
-        join: CoreExpr,
-    },
-    Cont {
-        id: JoinId,
-        cont: CoreExpr,
-    },
-    Drop {
-        local: LocalId,
-        shape: Option<ReuseShape>,
-    },
+    Let { bind: CoreBind, rhs: Atom },
+    Join { bind: CoreBind, join: CoreExpr },
+    Cont { id: JoinId, cont: CoreExpr },
+    Drop { local: LocalId },
 }
 
 impl Frame {
@@ -120,7 +108,7 @@ impl Frame {
                 cont: Box::new(cont),
                 body,
             },
-            Frame::Drop { local, shape } => CoreExpr::Drop { local, shape, body },
+            Frame::Drop { local } => CoreExpr::Drop { local, body },
         }
     }
 }
@@ -152,8 +140,8 @@ impl Immediates {
                     });
                     *body
                 }
-                CoreExpr::Drop { local, shape, body } => {
-                    spine.push(Frame::Drop { local, shape });
+                CoreExpr::Drop { local, body } => {
+                    spine.push(Frame::Drop { local });
                     *body
                 }
                 // A match on a Bool or Nil becomes the expression that

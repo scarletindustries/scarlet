@@ -1,8 +1,8 @@
 //! Core IR is what the compiler hands a backend. It's typed A-normal form
 //! (ANF), which means every subexpression is bound to a `LocalId` by a `Let`.
-//! That way last use, drops and reuse all fall out of one backward scan
-//! (Perceus, ICFP '22, frame-limited). The passes over it live in the
-//! compiler, and `docs/vm-design.md` says what running it means.
+//! That way last use and drops fall out of one backward scan (Perceus). The
+//! passes over it live in the compiler, and `docs/vm-design.md` says what
+//! running it means.
 
 mod prim;
 
@@ -128,8 +128,7 @@ impl CoreBind {
 }
 
 /// A constructor's resolved identity, captured during lowering so a backend
-/// doesn't need the type environment to dispatch on it. Perceus doesn't pair
-/// drops by this: it pairs them by field count alone (see [`ReuseShape`]).
+/// doesn't need the type environment to dispatch on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VariantRef {
     pub type_id: TypeId,
@@ -452,23 +451,6 @@ pub struct VariantNames {
     pub fields: Vec<String>,
 }
 
-/// The shape of a heap cell, for Perceus reuse pairing: a constructor cell with
-/// this many fields. A `Drop` may only hand its cell to a `Ctor` of the same
-/// shape, so overwriting it needs no resize.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReuseShape {
-    pub fields: u16,
-}
-
-impl ReuseShape {
-    /// The shape of a constructor cell with `arity` fields, when a shape can
-    /// say that many.
-    pub fn ctor(arity: usize) -> Option<Self> {
-        let fields = u16::try_from(arity).ok()?;
-        Some(ReuseShape { fields })
-    }
-}
-
 /// What a call calls, once resolved: a function known at compile time, the
 /// current function itself, or a closure held in a local.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -512,10 +494,6 @@ pub enum Atom {
     Ctor {
         variant: VariantRef,
         fields: Vec<LocalId>,
-        /// Set by `perceus`: the local whose dropped cell this constructor
-        /// overwrites in place, when that cell turned out to be uniquely owned.
-        /// `None` allocates fresh.
-        reuse: Option<LocalId>,
     },
     /// A primitive operation on `args`. See [`PrimOp`] for each one's operands.
     PrimOp {
@@ -544,8 +522,7 @@ impl Atom {
         Atom::PrimOp { op, args }
     }
 
-    /// The locals this atom reads, in push order. `Ctor`'s `reuse` is not one:
-    /// it names a slot to overwrite, not a value pushed on the stack.
+    /// The locals this atom reads, in push order.
     fn operands(&self) -> impl Iterator<Item = LocalId> + '_ {
         let (pushed, trailing): (&[LocalId], Option<LocalId>) = match self {
             Atom::Local(x) => (&[], Some(*x)),
@@ -621,15 +598,8 @@ pub enum CoreExpr {
         body: Box<CoreExpr>,
     },
     /// `perceus` inserts this at the last use of `local`. It releases the
-    /// frame's reference and, when nothing else owns the cell, keeps the
-    /// emptied allocation for a paired `Ctor{reuse}`. `shape` is `Some` only
-    /// when the allocation's size is known at compile time. With `None` it
-    /// still drops, so reference counts stay right, but it never pairs.
-    Drop {
-        local: LocalId,
-        shape: Option<ReuseShape>,
-        body: Box<CoreExpr>,
-    },
+    /// frame's reference.
+    Drop { local: LocalId, body: Box<CoreExpr> },
     Match {
         scrut: LocalId,
         arms: Vec<(CorePat, CoreExpr)>,
@@ -801,18 +771,10 @@ impl fmt::Display for Atom {
             Atom::Load(Load::SelfClosure) => f.write_str("self"),
             Atom::Nil => f.write_str("nil"),
             Atom::Bool(b) => write!(f, "{b}"),
-            Atom::Ctor {
-                variant,
-                fields,
-                reuse,
-            } => {
+            Atom::Ctor { variant, fields } => {
                 write!(f, "ctor {}.{}(", variant.type_id.0, variant.variant_idx)?;
                 write_locals(f, fields)?;
-                f.write_str(")")?;
-                if let Some(r) = reuse {
-                    write!(f, " reuse {r}")?;
-                }
-                Ok(())
+                f.write_str(")")
             }
             Atom::PrimOp { op, args } => {
                 write!(f, "{op:?}(")?;
@@ -890,11 +852,8 @@ impl fmt::Display for Indented<'_> {
                     Indented(cont, depth.saturating_add(1)).fmt(f)?;
                     cur = body;
                 }
-                CoreExpr::Drop { local, shape, body } => {
-                    match shape {
-                        Some(s) => writeln!(f, "drop {local} [ctor:{}]", s.fields)?,
-                        None => writeln!(f, "drop {local}")?,
-                    }
+                CoreExpr::Drop { local, body } => {
+                    writeln!(f, "drop {local}")?;
                     cur = body;
                 }
                 CoreExpr::Tail(a) => {

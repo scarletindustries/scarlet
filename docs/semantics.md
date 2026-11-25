@@ -111,7 +111,7 @@ A function takes at most 250 parameters and a call passes at most 250 arguments.
 
 **Decided: reference counting, with Perceus.** There is no tracing garbage collector.
 
-- Perceus inserts drops and in-place reuse at compile time (`scarlet_lower/src/perceus.rs`).
+- Perceus inserts drops at compile time (`scarlet_lower/src/perceus.rs`).
 - Values are immutable and closures copy what they capture, so values cannot form cycles. That lets reference counting free everything with no cycle collector.
 
 A per-process copying GC was added in `a6bc2aa` (2026-06-02) and replaced by reference counting in `7cf43d7` (2026-06-19), because it was hard to reason about.

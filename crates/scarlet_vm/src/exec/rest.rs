@@ -90,10 +90,6 @@ impl<'c> Rest<'c, '_> {
                 let n = self.heap.made();
                 bigint::int(&mut self.heap, n).map_err(fault)
             }
-            Intrinsic::InternalCellsReused => {
-                let n = self.heap.reused();
-                bigint::int(&mut self.heap, n).map_err(fault)
-            }
             Intrinsic::BinaryFromString => {
                 let text = self.text_of(v)?;
                 let cell = binary::from_bytes(&mut self.heap, &text);

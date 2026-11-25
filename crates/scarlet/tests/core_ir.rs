@@ -125,8 +125,7 @@ fn apply_renumber(
 }
 
 /// The byte ranges of the `<sig><digits>` tokens in `s`, paired with the parsed
-/// number. The sigil must start a fresh token. The `c` of `proc` isn't an id,
-/// and a `:` after a letter is a `ReuseShape`'s `[Enum:2]` rather than a `Ty`.
+/// number. The sigil must start a fresh token: the `c` of `proc` isn't an id.
 fn id_spans(s: &str, sig: u8) -> Vec<((usize, usize), usize)> {
     let b = s.as_bytes();
     let ident_sigil = sig.is_ascii_alphanumeric();
@@ -250,7 +249,7 @@ core_golden!(
      }\n"
 );
 
-// Callee::Self_ in tail position, the shape loop-carried reuse targets.
+// Callee::Self_ in tail position.
 core_golden!(
     self_tail,
     "fn count(n Int, acc Int) Int {\n\
@@ -449,8 +448,7 @@ core_golden!(
 
 // `True`, `False` and `Nil` are immediates, never the prelude's
 // constructors, and a match on a Bool is an `if`. A match on Nil is its arm,
-// and a lone arm that binds the value binds it. Perceus runs after, so no drop
-// of a Bool is marked as a cell to reuse.
+// and a lone arm that binds the value binds it.
 core_golden!(
     bool_match_is_if,
     "fn pick(b Bool) Int {\n\
@@ -481,8 +479,8 @@ core_golden!(
 );
 
 // Perceus inserts no drops inside a join body, so `t` lives to the end of
-// `f`'s frame. That's sound, but it gives up a `Reuse` token. This snapshot
-// pins the gap, and sinking drops into joins should change it.
+// `f`'s frame. That's sound, but `t` holds its cell for longer than it has to.
+// This snapshot pins the gap, and sinking drops into joins should change it.
 core_golden!(
     join_body_defers_drop,
     "type L {\n\tCons(h Int, t L)\n\tLNil\n}\n\

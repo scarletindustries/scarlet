@@ -17,7 +17,7 @@
 //! the running frame's never hold one, and neither does register 1 of a frame
 //! that keeps no closure.
 
-use crate::code::{Arg, Dead, Dst, Hit, Kept, Last, Reg, Room, Shared, Src, Taken};
+use crate::code::{Arg, Dead, Dst, Hit, Last, Reg, Room, Shared, Src, Taken};
 use crate::heap::{DeadCell, Heap};
 use crate::value::Value;
 use crate::word::{low_byte, low_u16, low_u32};
@@ -201,17 +201,6 @@ impl Window<'_> {
         self.set(heap, r.0, Value::NIL)
     }
 
-    /// Hollow the cell in `r` and leave it there with its one reference. If
-    /// no constructor takes it, it is freed with the frame, like any other
-    /// register. One that something else holds is given up.
-    #[inline(always)]
-    pub(crate) fn keep(&mut self, heap: &mut Heap, r: Kept<Reg>) -> Result<(), DeadCell> {
-        match self.get(r.0).as_cell() {
-            Some(cell) if heap.hollow(cell)? => Ok(()),
-            _ => self.set(heap, r.0, Value::NIL),
-        }
-    }
-
     // A register's number is less than the window's length, so none of these
     // ever finds its register missing, and the compiler leaves the test out.
 
@@ -225,6 +214,15 @@ impl Window<'_> {
         match self.0.get_mut(usize::from(r.0)) {
             Some(slot) => give_up(heap, std::mem::replace(slot, v)),
             None => Ok(()),
+        }
+    }
+
+    /// Put `v` in `r`, and give what was there.
+    #[inline(always)]
+    pub(crate) fn swap(&mut self, r: Dst<Reg>, v: Value) -> Value {
+        match self.0.get_mut(usize::from(r.0.0)) {
+            Some(slot) => std::mem::replace(slot, v),
+            None => v,
         }
     }
 
@@ -314,29 +312,6 @@ impl Window<'_> {
             for (slot, v) in params.iter_mut().zip(values).rev() {
                 give_up(heap, std::mem::replace(slot, *v))?;
             }
-        }
-        Ok(())
-    }
-
-    /// [`Self::rewrite`], except that the registers in `keep` stay as they
-    /// are.
-    pub(crate) fn rewrite_keeping(
-        &mut self,
-        heap: &mut Heap,
-        own: Room,
-        values: &[Value],
-        keep: &[Reg],
-    ) -> Result<(), DeadCell> {
-        for r in (FIRST.0..=u8::MAX)
-            .take(own.len().saturating_sub(usize::from(FIRST.0)))
-            .map(Reg)
-        {
-            if !keep.contains(&r) {
-                self.set(heap, r, Value::NIL)?;
-            }
-        }
-        for (r, v) in (FIRST.0..=u8::MAX).map(Reg).zip(values) {
-            self.set(heap, r, *v)?;
         }
         Ok(())
     }

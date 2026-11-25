@@ -1,7 +1,7 @@
 use super::*;
 use crate::PrimOp;
 use crate::testkit::{bind, ctor, func, local, variant};
-use crate::{ConstId, FuncIdx};
+use crate::{Callee, ConstId, FuncIdx};
 use scarlet_ir::TypeId;
 use scarlet_ir::rty::PrimIds;
 
@@ -33,42 +33,6 @@ fn count_drops(e: &CoreExpr) -> usize {
         CoreExpr::Match { arms, .. } => arms.iter().map(|(_, b)| count_drops(b)).sum(),
         CoreExpr::Tail(_) | CoreExpr::Goto(_) => 0,
     }
-}
-
-fn ctor_reuses(e: &CoreExpr) -> Vec<Option<LocalId>> {
-    fn go(e: &CoreExpr, out: &mut Vec<Option<LocalId>>) {
-        match e {
-            CoreExpr::Let { rhs, body, .. } => {
-                if let Atom::Ctor { reuse, .. } = rhs {
-                    out.push(*reuse);
-                }
-                go(body, out);
-            }
-            CoreExpr::LetJoin { join, body, .. } => {
-                go(join, out);
-                go(body, out);
-            }
-            CoreExpr::LetCont { cont, body, .. } => {
-                go(cont, out);
-                go(body, out);
-            }
-            CoreExpr::Drop { body, .. } => go(body, out),
-            CoreExpr::If { then, els, .. } => {
-                go(then, out);
-                go(els, out);
-            }
-            CoreExpr::Match { arms, .. } => {
-                for (_, b) in arms {
-                    go(b, out);
-                }
-            }
-            CoreExpr::Tail(Atom::Ctor { reuse, .. }) => out.push(*reuse),
-            CoreExpr::Tail(_) | CoreExpr::Goto(_) => {}
-        }
-    }
-    let mut out = Vec::new();
-    go(e, &mut out);
-    out
 }
 
 fn find_drop(mut e: &CoreExpr, id: LocalId) -> bool {
@@ -137,11 +101,10 @@ fn perceus(pool: &ResolvedPool, f: CoreFn) -> CoreFn {
     super::perceus(pool, &locals, f).expect("every local is typed")
 }
 
-/// A toplevel keeps every value it pins to a global. Perceus never drops
-/// one, so no constructor reuses its cell, but a plain temporary still
-/// drops and is reused.
+/// A toplevel keeps every value it pins to a global, so Perceus never drops
+/// one. A plain temporary still drops.
 #[test]
-fn pinned_globals_are_never_dropped_or_reused() {
+fn pinned_globals_are_never_dropped() {
     let mut pool = pool();
     let obj = con(&mut pool, 7);
     let int = int_ty(&mut pool);
@@ -167,110 +130,67 @@ fn pinned_globals_are_never_dropped_or_reused() {
     let kept = perceus(&pool, top);
     assert!(!find_drop(&kept.body, local(0)), "{}", kept);
     assert!(find_drop(&kept.body, local(1)), "{}", kept);
-    assert_eq!(
-        ctor_reuses(&kept.body),
-        vec![None, None, Some(local(1))],
-        "only the temporary's cell is reused:\n{kept}"
-    );
 }
 
-/// The shape of `map`:
-/// `match xs { Cons(h,t) -> Cons(h+h, self t) | Nil -> Nil }`. The Cons
-/// arm's tail Cons reuses `%0` across the recursive call, and the Nil arm's
-/// constructor has no fields, so it doesn't pair.
+/// What an arm begins by dropping, in order.
+fn drops_first(mut e: &CoreExpr) -> Vec<LocalId> {
+    let mut first = Vec::new();
+    while let CoreExpr::Drop { local, body } = e {
+        first.push(*local);
+        e = body;
+    }
+    first
+}
+
+/// An arm with no more use for the value it matched begins by dropping it,
+/// whatever it does after. A value that another arm reads and this one does not
+/// goes before it, and the fields this one does not read go after it. The VM
+/// looks for the drop among those (`code::translate` in scarlet_vm).
 #[test]
-fn map_reuse_across_call_and_arm_shape() {
+fn an_arm_drops_its_scrutinee_before_the_fields_it_does_not_read() {
     let mut pool = pool();
     let list = con(&mut pool, 99);
-    let int = int_ty(&mut pool);
-    let cons_body = CoreExpr::Let {
-        bind: bind(3, int),
-        rhs: Atom::prim(PrimOp::IntAdd, vec![local(1), local(1)]),
-        body: Box::new(CoreExpr::Let {
-            bind: bind(4, list),
-            rhs: Atom::Call {
-                callee: Callee::Self_,
-                args: vec![local(2)],
-            },
-            body: Box::new(CoreExpr::Tail(ctor(&[3, 4]))),
-        }),
+    let arm = |fields: Vec<CoreBind>, body| {
+        let variant = variant();
+        (CorePat::Ctor { variant, fields }, body)
+    };
+    let fields = || vec![bind(4, list), bind(5, list)];
+    let calls_itself = CoreExpr::Let {
+        bind: bind(6, list),
+        rhs: Atom::Call {
+            callee: Callee::Self_,
+            args: vec![local(5)],
+        },
+        body: Box::new(CoreExpr::Tail(ctor(&[6]))),
     };
     let f = func(
-        vec![bind(0, list)],
+        vec![bind(0, list), bind(1, list)],
         CoreExpr::Match {
-            scrut: local(0),
+            scrut: local(1),
             arms: vec![
-                (
-                    CorePat::Ctor {
-                        variant: variant(),
-                        fields: vec![bind(1, int), bind(2, list)],
-                    },
-                    cons_body,
-                ),
-                (
-                    CorePat::Ctor {
-                        variant: variant(),
-                        fields: vec![],
-                    },
-                    CoreExpr::Tail(ctor(&[])),
-                ),
+                arm(fields(), calls_itself),
+                arm(Vec::new(), CoreExpr::Tail(Atom::Local(local(0)))),
+                arm(fields(), CoreExpr::Tail(ctor(&[0, 1, 4]))),
             ],
             ty: list,
         },
         list,
     );
     let f = perceus(&pool, f);
-    let reuses = ctor_reuses(&f.body);
-    assert_eq!(reuses.len(), 2);
-    assert_eq!(
-        reuses[0],
-        Some(local(0)),
-        "Cons-arm tail ctor reuses %0 across the call (canonical map reuse):\n{}",
-        f.body
-    );
-    assert_eq!(
-        reuses[1], None,
-        "Nil-arm arity-0 ctor does not pair (0-payload reuse is a no-op):\n{}",
-        f.body
-    );
     let CoreExpr::Match { arms, .. } = &f.body else {
-        panic!()
+        panic!("{f}")
     };
-    assert!(find_drop(&arms[0].1, local(0)));
-    assert!(find_drop(&arms[1].1, local(0)));
+    let first: Vec<_> = arms.iter().map(|(_, arm)| drops_first(arm)).collect();
+    let locals = |ids: &[u32]| ids.iter().copied().map(local).collect::<Vec<_>>();
+    assert_eq!(first[0], locals(&[0, 1, 4]), "{f}");
+    assert_eq!(first[1], locals(&[1]), "{f}");
+    assert_eq!(first[2], locals(&[5]), "the arm reads %1:\n{f}");
 }
 
-/// Straight-line `match xs { Cons(h,t) -> Cons(h,t) }`. The two-field Cons
-/// at the tail reuses the scrutinee dropped at the arm head.
+/// The shape of `dot_loop`: two constructors used by a call, then a tail call
+/// to self. Each turn drops both once the call has read them.
 #[test]
-fn match_scrutinee_reused_in_arm() {
-    let mut pool = pool();
-    let list = con(&mut pool, 99);
-    let int = int_ty(&mut pool);
-    let f = func(
-        vec![bind(0, list)],
-        CoreExpr::Match {
-            scrut: local(0),
-            arms: vec![(
-                CorePat::Ctor {
-                    variant: variant(),
-                    fields: vec![bind(1, int), bind(2, list)],
-                },
-                CoreExpr::Tail(ctor(&[1, 2])),
-            )],
-            ty: list,
-        },
-        list,
-    );
-    let f = perceus(&pool, f);
-    assert_eq!(ctor_reuses(&f.body), vec![Some(local(0))], "{}", f.body);
-}
-
-/// The shape of `dot_loop`: two constructors with three fields each, used by
-/// a Call, then a tail call to self. Reuse carried round the loop pairs
-/// each constructor with the cell the previous turn dropped.
-#[test]
-fn loop_carried_reuse_across_tail_self() {
+fn a_loop_drops_what_a_turn_made() {
     let mut pool = pool();
     let point = con(&mut pool, 99);
     let int = int_ty(&mut pool);
@@ -299,15 +219,9 @@ fn loop_carried_reuse_across_tail_self() {
         }),
     };
     let f = perceus(&pool, func(vec![bind(0, int), bind(1, int)], body, int));
-    let reuses = ctor_reuses(&f.body);
-    assert_eq!(
-        reuses,
-        vec![Some(local(2)), Some(local(3))],
-        "each Ctor reuses its OWN slot (self-pairing); cross-pairing would read a live slot:\n{}",
-        f.body
-    );
-    assert!(find_drop(&f.body, local(2)));
-    assert!(find_drop(&f.body, local(3)));
+    assert!(find_drop(&f.body, local(2)), "{}", f.body);
+    assert!(find_drop(&f.body, local(3)), "{}", f.body);
+    assert_eq!(count_drops(&f.body), 2, "{}", f.body);
 }
 
 /// A tail call reads its arguments before its frame's references go, so
@@ -332,26 +246,6 @@ fn a_tail_call_argument_is_not_dropped_before_the_call() {
     }
 }
 
-/// Without a tail call to self, nothing is carried round a loop.
-#[test]
-fn no_loop_carry_without_tail_self() {
-    let mut pool = pool();
-    let t = con(&mut pool, 99);
-    let int = int_ty(&mut pool);
-    let body = CoreExpr::Let {
-        bind: bind(1, t),
-        rhs: ctor(&[0, 0]),
-        body: Box::new(CoreExpr::Let {
-            bind: bind(2, int),
-            rhs: Atom::prim(PrimOp::IntAdd, vec![local(1)]),
-            body: Box::new(CoreExpr::Tail(Atom::Local(local(2)))),
-        }),
-    };
-    let f = perceus(&pool, func(vec![bind(0, int)], body, int));
-    assert_eq!(ctor_reuses(&f.body), vec![None], "{}", f.body);
-    assert!(find_drop(&f.body, local(1)), "%1 dropped after last use");
-}
-
 #[test]
 fn no_drop_for_unboxed_prims() {
     let mut pool = pool();
@@ -367,10 +261,10 @@ fn no_drop_for_unboxed_prims() {
     assert_eq!(count_drops(&f.body), 0);
 }
 
-/// A heap local bound to a `Call` result still drops, but with
-/// `shape: None` because its arity is unknown, so it never pairs.
+/// A heap local bound to a call's result that nothing reads is dropped where it
+/// is bound.
 #[test]
-fn call_result_drops_without_shape() {
+fn a_call_result_nothing_reads_is_dropped() {
     let mut pool = pool();
     let t = con(&mut pool, 99);
     let f = perceus(
@@ -391,16 +285,7 @@ fn call_result_drops_without_shape() {
     let CoreExpr::Let { body, .. } = &f.body else {
         panic!()
     };
-    let CoreExpr::Drop { local, shape, .. } = &**body else {
-        panic!("expected Drop for dead %0:\n{}", f.body)
-    };
-    assert_eq!(*local, LocalId(0));
-    assert_eq!(*shape, None, "Call result has no known arity");
-    assert_eq!(
-        ctor_reuses(&f.body),
-        vec![None],
-        "shape-less drop never pairs"
-    );
+    assert_eq!(drops_first(body), vec![local(0)], "{}", f.body);
 }
 
 /// A local live into one `If` branch only drops at the head of the other,
@@ -462,34 +347,6 @@ fn bound_is_not_heap_but_a_nominal_is() {
         ),
     );
     assert_eq!(count_drops(&f.body), 1, "dead heap param drops at head");
-}
-
-#[test]
-fn shape_mismatch_does_not_pair() {
-    let mut pool = pool();
-    let t = con(&mut pool, 99);
-    let f = perceus(
-        &pool,
-        func(
-            vec![bind(0, t)],
-            CoreExpr::Let {
-                bind: bind(1, t),
-                rhs: ctor(&[0, 0]),
-                body: Box::new(CoreExpr::Let {
-                    bind: bind(2, t),
-                    rhs: Atom::prim(PrimOp::IntAdd, vec![local(1)]),
-                    body: Box::new(CoreExpr::Tail(ctor(&[2, 2, 2]))),
-                }),
-            },
-            t,
-        ),
-    );
-    assert_eq!(
-        ctor_reuses(&f.body),
-        vec![None, None],
-        "arity-2 drop cannot feed arity-3 ctor:\n{}",
-        f.body
-    );
 }
 
 /// Ownership evens out across `Goto` edges. `%0` is live into the shared
@@ -583,47 +440,6 @@ fn drop_inside_shared_cont_not_on_edges() {
     assert!(
         find_drop(cont, local(0)),
         "%0's last use is in the cont, so it drops there:\n{}",
-        f.body
-    );
-}
-
-/// A token parked before the `LetCont` pairs on the fallthrough path but
-/// never inside the continuation, whose token stack starts empty.
-#[test]
-fn cont_enters_with_empty_reuse_stack() {
-    let mut pool = pool();
-    let t = con(&mut pool, 99);
-    let int = int_ty(&mut pool);
-    let f = perceus(
-        &pool,
-        func(
-            vec![bind(0, int)],
-            CoreExpr::Let {
-                bind: bind(1, t),
-                rhs: ctor(&[0, 0]),
-                body: Box::new(CoreExpr::Let {
-                    bind: bind(2, int),
-                    rhs: Atom::prim(PrimOp::IntAdd, vec![local(1)]),
-                    // Drop %1 [Enum:2] lands here, ahead of the LetCont.
-                    body: Box::new(CoreExpr::LetCont {
-                        id: JoinId(0),
-                        cont: Box::new(CoreExpr::Tail(ctor(&[0, 0]))),
-                        body: Box::new(CoreExpr::If {
-                            cond: local(2),
-                            then: Box::new(CoreExpr::Goto(JoinId(0))),
-                            els: Box::new(CoreExpr::Tail(ctor(&[0, 0]))),
-                            ty: t,
-                        }),
-                    }),
-                }),
-            },
-            t,
-        ),
-    );
-    assert_eq!(
-        ctor_reuses(&f.body),
-        vec![None, None, Some(local(1))],
-        "the cont's ctor must not claim %1's token; the body-path ctor may:\n{}",
         f.body
     );
 }

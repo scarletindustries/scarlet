@@ -86,9 +86,9 @@ const STUB_WORDS: usize = 2;
 /// header and, once it is freed, the index of the next free cell.
 const LEAST_WORDS: usize = 2;
 
-/// How many words of a dying cell the free loop looks up at once, when there
-/// are that many.
-const STRIDE: usize = 8;
+/// How many words of a cell that is freed or taken apart are looked up at once,
+/// when there are that many.
+pub(crate) const STRIDE: usize = 8;
 
 /// The most words one cell can take, its header's among them, in the arena
 /// or in a box. That is 2 GiB, an eighth of what a heap holds. It is how long
@@ -351,6 +351,16 @@ impl<const N: usize> Shape<N> {
     }
 }
 
+/// What [`Heap::open`] found.
+pub(crate) enum Opened<const N: usize> {
+    /// The fields of a cell that nothing else held. It is freed, and their
+    /// references are the caller's.
+    Alone([Value; N]),
+    /// The fields of a cell that something else holds too. It has lost a holder,
+    /// and the references of its fields are its own still.
+    Held(Cell, [Value; N]),
+}
+
 /// A freed cell found where a holder takes another reference to it, gives its
 /// reference up or asks whether it is the only holder. Something still held
 /// the cell after its last reference went. The heap stops there instead of
@@ -405,11 +415,9 @@ pub(crate) struct Heap {
     /// The cell of each big Int constant this heap has been asked for, by the
     /// constant's number in the program.
     constants: Vec<Option<Cell>>,
-    /// Cells taken from the arena's end or a free list over this heap's
-    /// life, and cells a constructor overwrote in place instead
+    /// Cells taken from the arena's end or a free list over this heap's life
     /// (`internal.sca`).
     made: usize,
-    reused: usize,
     /// The numbers of handle cells freed since the last
     /// [`Heap::take_released`].
     released: Vec<u64>,
@@ -429,7 +437,6 @@ impl Heap {
             free: Vec::new(),
             constants: Vec::new(),
             made: 0,
-            reused: 0,
             released: Vec::new(),
             ctors,
         }
@@ -668,15 +675,29 @@ impl Heap {
     /// not have, is [`DeadCell`].
     #[inline(always)]
     pub(crate) fn share(&mut self, cell: Cell) -> Result<(), DeadCell> {
-        if let Some(h) = self.arena.get_mut(cell.index().at())
-            && count(*h) > 0
-        {
-            // The count is the header's low bits, and one past the most it
-            // can be is `UNCOUNTED`, so this carries into nothing else.
-            *h = h.wrapping_add(1);
-            return Ok(());
+        if self.count_up(cell) {
+            Ok(())
+        } else {
+            self.uncounted(cell.index())
         }
-        self.uncounted(cell.index())
+    }
+
+    /// [`Self::share`], when `cell` is counted. Nothing changes when it is not,
+    /// and it is `false`.
+    // A share has a call in it, for a cell that is not counted, and goes on
+    // after the call. So what comes after is kept where a call leaves it. An
+    // instruction that goes somewhere else when this is `false` need not.
+    #[inline(always)]
+    pub(crate) fn count_up(&mut self, cell: Cell) -> bool {
+        match self.arena.get_mut(cell.index().at()) {
+            Some(h) if count(*h) > 0 => {
+                // The count is the header's low bits, and one past the most it
+                // can be is `UNCOUNTED`, so this carries into nothing else.
+                *h = h.wrapping_add(1);
+                true
+            }
+            Some(_) | None => false,
+        }
     }
 
     /// `v` with one more reference, for keeping it somewhere new.
@@ -704,6 +725,12 @@ impl Heap {
             None => 0,
         };
         self.release_last(cell.index(), h)
+    }
+
+    /// [`Self::release`] out of line, for where there is seldom a cell.
+    #[inline(never)]
+    pub(crate) fn release_apart(&mut self, cell: Cell) -> Result<(), DeadCell> {
+        self.release(cell)
     }
 
     /// [`Self::release`] of the cell at `index`, whose header is `h` and whose
@@ -844,9 +871,7 @@ impl Heap {
         if let Some(head) = self.free.get_mut(space)
             && let Some([h, next]) = self.arena.get_mut(words)
         {
-            *h = FREED;
-            *next = free_link(space, *head);
-            *head = index.0;
+            shelve(head, h, next, index, space);
         } else {
             self.shelve_first(index, space);
         }
@@ -863,46 +888,30 @@ impl Heap {
         }
     }
 
-    /// Perceus's drop of a last reference. When nothing else holds `cell`,
-    /// this gives up everything it holds and keeps the allocation, header and
-    /// all, for a constructor of the same size to overwrite. It returns
-    /// `false` when something else holds `cell`, or it is no constructor's,
-    /// which leaves it to an ordinary `release`, and [`DeadCell`] when nothing
-    /// holds it at all.
-    ///
-    /// Each field is emptied before it is released, so a hollowed cell holds
-    /// nothing and is safe to release again. Emptying here instead of at the
-    /// constructor is what carries reuse down a chain. A callee sees its
-    /// argument as the last reference only because its caller gave up its own
-    /// first.
-    pub(crate) fn hollow(&mut self, cell: Cell) -> Result<bool, DeadCell> {
+    /// The `N` fields of `cell`, when it is a `ctor` in the arena and is counted.
+    /// The caller gives up its reference to it. One that has no other is freed,
+    /// and the caller has the references of its fields. It is `None` for any other
+    /// cell, and nothing has then changed.
+    #[inline(always)]
+    pub(crate) fn open<const N: usize>(&mut self, cell: Cell, ctor: Ctor) -> Option<Opened<N>> {
         let index = cell.index();
-        if !self.unique(cell)? || !class(self.header(index)).is_ctor() {
-            return Ok(false);
-        }
-        // All of a constructor's words are its fields.
-        let mut i = 0;
-        while let Some(slot) = self.words_mut(index, 1).get_mut(i) {
-            let held = Value::from_bits(std::mem::replace(slot, Value::NIL.bits()));
-            if let Some(c) = held.as_cell() {
-                self.release(c)?;
+        let size = N.saturating_add(1);
+        let words = index.at()..index.at().wrapping_add(size);
+        let (h, words) = self.arena.get_mut(words)?.split_first_mut()?;
+        let fields = words.first_chunk::<N>()?.map(Value::from_bits);
+        let like = Shape::ctor(ctor).make().header(N);
+        if *h != like {
+            if *h >> 32 != like >> 32 || count(*h) <= 1 {
+                return None;
             }
-            i = i.wrapping_add(1);
+            *h = h.wrapping_sub(1);
+            return Some(Opened::Held(cell, fields));
         }
-        Ok(true)
-    }
-
-    /// Whether a constructor with `fields` fields may be written over `cell`.
-    /// It must be a constructor cell of exactly that size, and nothing else
-    /// may hold it. Both are true of every cell [`Self::hollow`] kept. We read
-    /// the count again here anyway, because a register holds its cell until
-    /// something overwrites it. So the cell a constructor finds there might
-    /// not be the one that was kept for it. A freed cell does not fit, and
-    /// the release its register then gets is what reports it.
-    pub(crate) fn fits_ctor(&self, cell: Cell, fields: usize) -> bool {
-        let index = cell.index();
-        let h = self.header(index);
-        count(h) == 1 && class(h).is_ctor() && self.data_len(index, h) == fields
+        match (self.free.get_mut(space(size)), words.first_mut()) {
+            (Some(head), Some(next)) => shelve(head, h, next, index, space(size)),
+            _ => self.shelve_first(index, space(size)),
+        }
+        Some(Opened::Alone(fields))
     }
 
     /// The cell of big Int constant `id`, when [`Self::keep_constant`] has
@@ -1053,33 +1062,17 @@ impl Heap {
         BigInt::from_bytes_le(sign, &bytes)
     }
 
-    /// Perceus reuse. This writes the constructor `ctor` would build over a
-    /// cell that [`Self::hollow`] emptied and [`Self::fits_ctor`] says is the
-    /// right size. The cell's one reference stays and becomes the new
-    /// constructor's. What comes back names the new constructor, and `cell`
-    /// names one that is gone.
-    #[inline(always)]
-    pub(crate) fn ctor_in(
-        &mut self,
-        cell: Cell,
-        ctor: Ctor,
-        fields: impl Iterator<Item = Value>,
-    ) -> Cell {
-        self.reused = self.reused.saturating_add(1);
-        let index = cell.index();
-        if let Some(h) = self.arena.get_mut(index.at()) {
-            *h = with_class(*h, ctor.class());
-        }
-        for (slot, w) in self.words_mut(index, 1).iter_mut().zip(fields) {
-            *slot = w.bits();
-        }
-        Cell::new(index, ctor.variant())
-    }
-
     /// Which constructor a cell is, to tell it from others. It is `None` for
     /// a cell that is no constructor's.
     pub(crate) fn ctor_of(&self, cell: Cell) -> Option<Ctor> {
         class(self.header(cell.index())).ctor(cell.variant())
+    }
+
+    /// Whether `cell` is a `ctor` of `n` fields.
+    pub(crate) fn is_ctor(&self, cell: Cell, ctor: Ctor, n: usize) -> bool {
+        let index = cell.index();
+        let h = self.header(index);
+        class(h) == ctor.class() && self.data_len(index, h) == n
     }
 
     /// The name the program knows a constructor cell by. It is `None` for a
@@ -1113,7 +1106,7 @@ impl Heap {
     /// [`Self::field`] of a long cell, which has one only when all of its words
     /// are values. It is `None` for a cell in the arena.
     #[inline]
-    pub(crate) fn boxed_field(&self, cell: Cell, i: usize) -> Option<Value> {
+    fn boxed_field(&self, cell: Cell, i: usize) -> Option<Value> {
         let index = cell.index();
         let h = self.header(index);
         let field = self.boxed(index, h).get(i)?;
@@ -1134,6 +1127,22 @@ impl Heap {
         words.iter().map(|w| Value::from_bits(*w))
     }
 
+    /// The values of `cell` that [`Self::values`] gives from the `run`th run of
+    /// [`STRIDE`] on, with `Nil` past its last.
+    #[inline]
+    pub(crate) fn run_of_values(&self, cell: Cell, run: usize) -> [Value; STRIDE] {
+        let from = run.wrapping_mul(STRIDE);
+        let words = self.words(cell.index(), 1).get(from..).unwrap_or(&[]);
+        if let Some(whole) = words.first_chunk() {
+            return whole.map(Value::from_bits);
+        }
+        let mut values = [Value::NIL; STRIDE];
+        for (v, w) in values.iter_mut().zip(words) {
+            *v = Value::from_bits(*w);
+        }
+        values
+    }
+
     /// The function a closure cell runs, or `None` for a cell that is no
     /// closure.
     pub(crate) fn closure_func(&self, cell: Cell) -> Option<FuncIdx> {
@@ -1150,16 +1159,16 @@ impl Heap {
         Value::from_bits(*func?).as_func()
     }
 
-    /// Capture `i` of a closure cell in the arena, or `None` past its last.
-    /// Reading it adds no reference.
+    /// Capture `i` of a closure cell, or `None` past its last. Reading it adds
+    /// no reference.
+    pub(crate) fn capture(&self, cell: Cell, i: u32) -> Option<Value> {
+        self.field(cell, capture_at(i))
+    }
+
+    /// [`Self::capture`] of a cell in the arena. It is `None` for a long cell.
     #[inline(always)]
     pub(crate) fn near_capture(&self, cell: Cell, i: u32) -> Option<Value> {
         self.near_field(cell, capture_at(i))
-    }
-
-    /// [`Self::near_capture`] of a long closure.
-    pub(crate) fn boxed_capture(&self, cell: Cell, i: u32) -> Option<Value> {
-        self.boxed_field(cell, capture_at(i))
     }
 
     /// Every capture of a closure cell, in order. Reading one adds no
@@ -1205,6 +1214,7 @@ impl Heap {
 
     /// Whether `cell` has one holder, who may then change it in place.
     /// Asking about a freed cell is [`DeadCell`].
+    #[inline]
     pub(crate) fn unique(&self, cell: Cell) -> Result<bool, DeadCell> {
         let c = count(self.header(cell.index()));
         if c <= 0 {
@@ -1369,14 +1379,14 @@ impl Heap {
         Ok(())
     }
 
-    /// Cells this heap has allocated, and cells Perceus reuse saved it from
-    /// allocating. Both count over the heap's whole life.
+    /// Cells this heap has made over its whole life.
     pub(crate) fn made(&self) -> usize {
         self.made
     }
 
-    pub(crate) fn reused(&self) -> usize {
-        self.reused
+    /// The words of the arena, which only grows.
+    pub(crate) fn words_carved(&self) -> usize {
+        self.arena.len()
     }
 
     /// The header at `index`, or a freed cell's when the arena has no such
@@ -1521,6 +1531,15 @@ fn space(size: usize) -> usize {
 /// one of that size. Nothing but an audit reads the size.
 fn free_link(space: usize, next: u32) -> u64 {
     (space as u64) << 32 | u64::from(next)
+}
+
+/// Put the freed cell at `index`, whose first two words are `h` and `next`, in
+/// front of the cell at `head`, the first on the free list of its `space`.
+#[inline(always)]
+fn shelve(head: &mut u32, h: &mut u64, next: &mut u64, index: Index, space: usize) {
+    *h = FREED;
+    *next = free_link(space, *head);
+    *head = index.0;
 }
 
 /// Which of a closure cell's values capture `i` is. The first is its function.

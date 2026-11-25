@@ -1,9 +1,8 @@
-use super::ins::{Label, VReg};
+use super::ins::{Label, MaybeDst, VReg};
 use super::translate::Draft;
 use super::*;
 use crate::heap::{Ctor, Numbering};
 use scarlet_ir::core_ir::VariantRef;
-use std::collections::BTreeSet;
 
 /// A program with calls, a loop by tail call, a `match` with several
 /// arms, an `if` and a map lookup that jumps, so its functions have
@@ -79,7 +78,6 @@ pub(super) fn draft(values: u32, params: u32, ins: Vec<Ins<VReg>>, labels: &[usi
         labels: labels.to_vec(),
         values,
         params: (0..params).map(VReg).collect(),
-        carried: BTreeSet::new(),
         closure: ReadsClosure::Nothing,
     }
 }
@@ -117,9 +115,13 @@ pub(super) mod of {
         }
     }
 
-    pub(crate) fn park(reg: u32) -> Ins<VReg> {
-        Ins::DropReuse {
-            reg: Kept(VReg(reg)),
+    /// Take a constructor of two fields in `src` apart, with a register for
+    /// each that is to have one.
+    pub(crate) fn open(dsts: [Option<u32>; 2], src: u32) -> Ins<VReg> {
+        Ins::Open2 {
+            dsts: dsts.map(|dst| MaybeDst::new(dst.map(VReg))),
+            src: Taken(VReg(src)),
+            ctor: a_ctor(),
         }
     }
 

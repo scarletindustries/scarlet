@@ -133,7 +133,6 @@ build_program(imports: &[&CleanModule], entry: &CleanModule, defs)
   - A fall-through target is made the first time something can fail, which removes the three "is this fallible" predictors.
 - **`perceus`:**
   - It is told which binds are pinned globals, so `keep_globals` stops undoing its work.
-  - Its two reuse walks each compute a plan, applied once.
   - It reads each local's type from a table `lower` returns, so a local can't be left unrecorded.
 - **`immediates`** rewrites by value. The Core pipeline is one function, so the passes can't run out of order.
 

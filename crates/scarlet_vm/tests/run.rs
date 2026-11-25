@@ -285,16 +285,21 @@ fn a_tail_recursive_loop_of_a_million_steps_finishes() {
     );
 }
 
-/// Perceus reuse. A constructor whose cell nothing else holds any more is
-/// overwritten in place instead of allocated. Here the loop gives its pair up
-/// at the `match` and builds another on the way round, so one cell serves
-/// every turn. `scarlet/internal` counts both, so the test pins the saving
-/// and not just the answer.
+/// How many cells `src` makes and how many words its heap grows to, when its
+/// `N` is `n`. It prints `want`.
+fn cells_and_words(src: &str, n: usize, want: &str) -> (usize, usize) {
+    let (out, counts) = counted(&src.replace('N', &n.to_string()));
+    assert_eq!(out, want, "{n}");
+    (counts.cells_made, counts.heap_words)
+}
+
+/// A match that has no more use for a cell nothing else holds frees it, and the
+/// next constructor of its size takes its space. Here each turn makes a pair and
+/// takes the last one apart, so a thousand turns make a thousand cells and the
+/// heap is no larger than for one.
 #[test]
-fn a_loop_overwrites_the_cell_it_just_gave_up() {
-    prints(
-        "import scarlet/internal\n\
-         type Pair {\n\
+fn a_loop_takes_the_space_of_the_cell_it_just_gave_up() {
+    let src = "type Pair {\n\
          \tPair(a Int, b Int)\n\
          }\n\
          fn spin(n Int, p Pair) Int {\n\
@@ -303,63 +308,54 @@ fn a_loop_overwrites_the_cell_it_just_gave_up() {
          \t}\n\
          }\n\
          pub fn main() {\n\
-         \tmade = internal::cells_made()\n\
-         \treused = internal::cells_reused()\n\
-         \tprintln(spin(1000, Pair(0, 0)))\n\
-         \tprintln(internal::cells_made() - made)\n\
-         \tprintln(internal::cells_reused() - reused)\n\
-         }\n",
-        "1000\n1\n1000\n",
-    );
+         \tprintln(spin(N, Pair(0, 0)))\n\
+         }\n";
+    let (made, words) = cells_and_words(src, 1, "1\n");
+    assert_eq!(cells_and_words(src, 1000, "1000\n"), (made + 999, words));
 }
 
-/// Reuse across a call, which needs the call to be a move. The caller hands
-/// over its own reference, so the callee is the only holder and may overwrite
-/// the cell. Every `Cons` of the new list is the matching one of the old,
-/// written over, so the walk allocates nothing at all.
+/// The same across a call, which needs the call to be a move. The caller hands
+/// over its own reference, so the callee is the only holder and may take the
+/// cell apart. Every `Cons` of the new list goes where one of the old was, so a
+/// walk that builds a list needs no more room than one that only reads it.
 #[test]
-fn a_walk_over_a_list_overwrites_the_list_it_reads() {
-    prints(
-        "import scarlet/internal\n\
-         type List {\n\
-         \tCons(head Int, tail List)\n\
-         \tEmpty\n\
-         }\n\
-         fn build(n Int, acc List) List {\n\
-         \tif n <= 0 then acc else build(n - 1, Cons(n, acc))\n\
-         }\n\
-         fn add_one(xs List) List {\n\
-         \tmatch xs {\n\
-         \t\tCons(h, t) -> Cons(h + 1, add_one(t))\n\
-         \t\tEmpty -> Empty\n\
-         \t}\n\
-         }\n\
-         fn sum(xs List, acc Int) Int {\n\
-         \tmatch xs {\n\
-         \t\tCons(h, t) -> sum(t, acc + h)\n\
-         \t\tEmpty -> acc\n\
-         \t}\n\
-         }\n\
-         pub fn main() {\n\
-         \txs = build(1000, Empty)\n\
-         \tmade = internal::cells_made()\n\
-         \treused = internal::cells_reused()\n\
-         \tprintln(sum(add_one(xs), 0))\n\
-         \tprintln(internal::cells_made() - made)\n\
-         \tprintln(internal::cells_reused() - reused)\n\
-         }\n",
-        "501500\n0\n1000\n",
-    );
+fn a_walk_over_a_list_takes_the_space_of_the_list_it_reads() {
+    let src = |main: &str| {
+        format!(
+            "type List {{\n\
+             \tCons(head Int, tail List)\n\
+             \tEmpty\n\
+             }}\n\
+             fn build(n Int, acc List) List {{\n\
+             \tif n <= 0 then acc else build(n - 1, Cons(n, acc))\n\
+             }}\n\
+             fn add_one(xs List) List {{\n\
+             \tmatch xs {{\n\
+             \t\tCons(h, t) -> Cons(h + 1, add_one(t))\n\
+             \t\tEmpty -> Empty\n\
+             \t}}\n\
+             }}\n\
+             fn sum(xs List, acc Int) Int {{\n\
+             \tmatch xs {{\n\
+             \t\tCons(h, t) -> sum(t, acc + h)\n\
+             \t\tEmpty -> acc\n\
+             \t}}\n\
+             }}\n\
+             pub fn main() {{\n\
+             \tprintln(sum({main}, 0))\n\
+             }}\n"
+        )
+    };
+    let read = cells_and_words(&src("build(N, Empty)"), 1000, "500500\n");
+    let rebuilt = cells_and_words(&src("add_one(build(N, Empty))"), 1000, "501500\n");
+    assert_eq!(rebuilt, (read.0 + 1000, read.1));
 }
 
-/// The cell is given up *after* the constructor here, so the only turn that
-/// can take it is the next one. That needs the cell to survive the call to
-/// self in tail position, which reuses the frame.
+/// The cell here is given up once the match that reads it has given its value, so
+/// the turn after has its space.
 #[test]
-fn a_loop_carries_its_cell_across_the_call_that_ends_it() {
-    prints(
-        "import scarlet/internal\n\
-         type Pair {\n\
+fn a_loop_has_the_space_of_the_cell_its_last_turn_made() {
+    let src = "type Pair {\n\
          \tPair(a Int, b Int)\n\
          }\n\
          fn go(n Int, acc Int) Int {\n\
@@ -370,21 +366,17 @@ fn a_loop_carries_its_cell_across_the_call_that_ends_it() {
          \tif n <= 0 then acc + s else go(n - 1, acc + s)\n\
          }\n\
          pub fn main() {\n\
-         \tmade = internal::cells_made()\n\
-         \treused = internal::cells_reused()\n\
-         \tprintln(go(1000, 0))\n\
-         \tprintln(internal::cells_made() - made)\n\
-         \tprintln(internal::cells_reused() - reused)\n\
-         }\n",
-        "1002001\n1\n1000\n",
-    );
+         \tprintln(go(N, 0))\n\
+         }\n";
+    let (made, words) = cells_and_words(src, 1, "4\n");
+    assert_eq!(cells_and_words(src, 1000, "1002001\n"), (made + 999, words));
 }
 
-/// Reuse waits on the last reference. The same loop with the pair kept in a
-/// list allocates every turn, and every pair still reads back as it was
-/// written. Overwriting a cell something else holds would show up here.
+/// The same loop with the pair kept in a list makes one every turn, and every
+/// pair still reads back as it was written. Taking apart a cell something else
+/// holds would show up here.
 #[test]
-fn a_cell_something_else_holds_is_not_overwritten() {
+fn a_cell_something_else_holds_is_left_as_it_was() {
     prints(
         "import scarlet/array\n\
          import scarlet/internal\n\
@@ -1369,9 +1361,8 @@ fn a_write_keeps_every_element_counted() {
 /// array with one holder. Each turn then makes the new `State` and no array
 /// cell. Where the `..s` is written makes no difference, and neither does an
 /// argument before the write that reads `s`, or reading the array into a
-/// name of its own before the update. Taking the record apart with a `match`
-/// makes no cell at all, because the pattern proves the shape and the new
-/// `State` takes the old one's cell.
+/// name of its own before the update, or taking the record apart with a
+/// `match`.
 ///
 /// Two spellings still copy the root and the nodes down to the slot at
 /// every write, 24,984 cells with the 5,000 records. The first is a rule:
@@ -1381,11 +1372,8 @@ fn a_write_keeps_every_element_counted() {
 /// inside a branch that gives a value. Step 17 of docs/perf-plan.md should
 /// bring it to 5,000.
 ///
-/// A third spelling copies each node of the tree once, 164 cells on top of
-/// the 5,000 records, and is a limit too. A record `main` built itself is
-/// kept across the call, so that a later `State` can take its cell, and it
-/// holds the array until the call returns. Step 13 should bring it to
-/// 5,000.
+/// A record `main` built itself and has no more use for is the callee's once it
+/// is passed, as any other is, and its array is written in place.
 #[test]
 fn a_record_update_gives_up_the_record_before_it_runs_the_new_fields() {
     prints(
@@ -1466,8 +1454,8 @@ fn a_record_update_gives_up_the_record_before_it_runs_the_new_fields() {
          \tprintln(sum(done.v, 0))\n\
          \tprintln(State(..done, check: 1).check)\n\
          }\n",
-        "37492500\n5000\n37492500\n5000\n37492500\n0\n37497500\n5000\n37492500\n5000\n\
-         37497500\n24984\n37492500\n24984\n5164\n37492500\n1\n",
+        "37492500\n5000\n37492500\n5000\n37492500\n5000\n37497500\n5000\n37492500\n5000\n\
+         37497500\n24984\n37492500\n24984\n5000\n37492500\n1\n",
     );
 }
 
@@ -1667,60 +1655,45 @@ fn a_record_update_sets_a_map_it_holds_in_place() {
     );
 }
 
-/// Giving the record up early has a cost in one shape, pinned here as a
-/// limit to remove. `t` is built in the same function, so its drop leaves
-/// its cell for the next `P` to take. That drop used to sit straight before
-/// the new `P`. It now comes before the new field, and when that field is
-/// an `if` used as a value the cell is not carried past it: the old cell is
-/// freed and the new record is made fresh, 20,001 cells and none reused
-/// where it was 10,001 and 10,000. A field that is a call keeps the cell.
-/// Step 13 of docs/perf-plan.md takes reuse away and step 16 updates such a
-/// record where it is, so the second pair of numbers changes at both.
+/// A record that nothing else holds is updated by making a new one out of its
+/// fields, which takes its space. So each turn here makes two cells, whatever the
+/// new field is, and the heap grows by none. Step 16 of docs/perf-plan.md updates
+/// such a record where it is, so it will be one.
 #[test]
-fn a_record_update_loses_its_cell_to_a_branch_in_a_later_field() {
-    prints(
-        "import scarlet/internal\n\
-         type P {\n\
-         \ta Int\n\
-         \tb Int\n\
-         \tc Int\n\
-         }\n\
-         fn pick(i Int) Int {\n\
-         \tif i > 5 { 1 } else { 2 }\n\
-         }\n\
-         fn called(i Int, acc Int) Int {\n\
-         \tif i == 0 {\n\
-         \t\tacc\n\
-         \t} else {\n\
-         \t\tt = P(i, i, i)\n\
-         \t\tu = P(..t, c: pick(i))\n\
-         \t\tcalled(i - 1, acc + u.c + u.a)\n\
-         \t}\n\
-         }\n\
-         fn joined(i Int, acc Int) Int {\n\
-         \tif i == 0 {\n\
-         \t\tacc\n\
-         \t} else {\n\
-         \t\tt = P(i, i, i)\n\
-         \t\tu = P(..t, c: if i > 5 { 1 } else { 2 })\n\
-         \t\tjoined(i - 1, acc + u.c + u.a)\n\
-         \t}\n\
-         }\n\
-         fn report(made Int, reused Int) {\n\
-         \tprintln('made ${internal::cells_made() - made}, reused ${internal::cells_reused() - reused}')\n\
-         }\n\
-         pub fn main() {\n\
-         \tmade = internal::cells_made()\n\
-         \treused = internal::cells_reused()\n\
-         \tprintln(called(10000, 0))\n\
-         \treport(made, reused)\n\
-         \tmade = internal::cells_made()\n\
-         \treused = internal::cells_reused()\n\
-         \tprintln(joined(10000, 0))\n\
-         \treport(made, reused)\n\
-         }\n",
-        "50015005\nmade 10002, reused 9999\n50015005\nmade 20001, reused 0\n",
-    );
+fn a_record_update_makes_a_record_in_the_space_of_the_old_one() {
+    let src = |field: &str| {
+        format!(
+            "type P {{\n\
+             \ta Int\n\
+             \tb Int\n\
+             \tc Int\n\
+             }}\n\
+             fn pick(i Int) Int {{\n\
+             \tif i > 5 {{ 1 }} else {{ 2 }}\n\
+             }}\n\
+             fn spin(i Int, acc Int) Int {{\n\
+             \tif i == 0 {{\n\
+             \t\tacc\n\
+             \t}} else {{\n\
+             \t\tt = P(i, i, i)\n\
+             \t\tu = P(..t, c: {field})\n\
+             \t\tspin(i - 1, acc + u.c + u.a)\n\
+             \t}}\n\
+             }}\n\
+             pub fn main() {{\n\
+             \tprintln(spin(N, 0))\n\
+             }}\n"
+        )
+    };
+    for field in ["pick(i)", "if i > 5 { 1 } else { 2 }"] {
+        let src = src(field);
+        let (made, words) = cells_and_words(&src, 1, "3\n");
+        assert_eq!(
+            cells_and_words(&src, 10000, "50015005\n"),
+            (made + 2 * 9999, words),
+            "{field}"
+        );
+    }
 }
 
 /// Runs a program that connects to a listener here, holds the connection in
@@ -1750,6 +1723,9 @@ fn first_connection_ends_before_the_new_field_runs(
          \tconn Option(socket::Socket)\n\
          \tport Int\n\
          }}\n\
+         type Both(a, b) {{\n\
+         \tBoth(x a, y b)\n\
+         }}\n\
          fn dial(port Int) Option(socket::Socket) {{\n\
          \tmatch net::connect('127.0.0.1', port) {{\n\
          \t\tOk(sock) -> Some(sock)\n\
@@ -1766,6 +1742,12 @@ fn first_connection_ends_before_the_new_field_runs(
          \t}}\n\
          }}\n\
          fn start(port Int) Held {{ Held(dial(port), port) }}\n\
+         fn second(both Both(a, Int)) Held {{\n\
+         \tmatch both {{\n\
+         \t\tBoth(_, port) -> Held(redial(port), port)\n\
+         \t}}\n\
+         }}\n\
+         fn within(h Held) Option(socket::Socket) {{ redial(h.port) }}\n\
          fn swap(h Held) Held {{\n\
          \t{update}\n\
          }}\n\
@@ -1807,6 +1789,55 @@ fn a_record_update_keeps_a_handle_a_later_field_still_reads() {
     assert!(!first_connection_ends_before_the_new_field_runs(
         "Held(..h, conn: redial(h.port), port: h.port + 1)",
         std::time::Duration::from_millis(200),
+    ));
+}
+
+/// A match that has no more use for what it matched gives up the fields it
+/// leaves out there and then, so a connection in one is closed before the arm
+/// runs. It is the same where the function does not know what type the field
+/// has.
+#[test]
+fn a_match_closes_a_handle_in_a_field_it_leaves_out_before_the_arm_runs() {
+    let wait = std::time::Duration::from_secs(10);
+    assert!(first_connection_ends_before_the_new_field_runs(
+        "match h {\n\t\tHeld(_, port) -> Held(redial(port), port)\n\t}",
+        wait
+    ));
+    assert!(first_connection_ends_before_the_new_field_runs(
+        "second(Both(h.conn, h.port))",
+        wait
+    ));
+}
+
+/// A field a match binds and reads stays open until that read, and so does one
+/// that something else still holds.
+#[test]
+fn a_match_keeps_a_handle_that_is_read_or_held_after() {
+    let wait = std::time::Duration::from_millis(200);
+    assert!(!first_connection_ends_before_the_new_field_runs(
+        "match h {\n\t\tHeld(conn, port) -> {\n\
+         \t\t\tnew = redial(port)\n\
+         \t\t\tmatch conn {\n\
+         \t\t\t\tSome(_) -> Held(new, port)\n\
+         \t\t\t\tNone -> Held(None, 0)\n\
+         \t\t\t}\n\t\t}\n\t}",
+        wait
+    ));
+    assert!(!first_connection_ends_before_the_new_field_runs(
+        "new = match h {\n\t\tHeld(_, port) -> redial(port)\n\t}\n\
+         \tHeld(..h, conn: new)",
+        wait
+    ));
+}
+
+/// A value that a function made and has no more use for is the callee's once it
+/// is passed, so a connection in it is closed when the callee has no more use
+/// for it.
+#[test]
+fn a_call_closes_a_handle_in_a_value_its_caller_is_done_with() {
+    assert!(first_connection_ends_before_the_new_field_runs(
+        "held = Held(h.conn, h.port)\n\tnew = within(held)\n\tHeld(new, 1)",
+        std::time::Duration::from_secs(10),
     ));
 }
 
@@ -2654,7 +2685,8 @@ fn a_counted_run_counts_the_same_every_time() {
     assert_eq!(counted(src).1, first);
     assert_eq!(ran(&first, "Ctor2"), 3);
     assert!(first.cells_made >= 3, "{}", first.cells_made);
-    assert_eq!(first.cells_reused, 0);
+    // Word 0 and the three cells.
+    assert!(first.heap_words > 3 * 3, "{}", first.heap_words);
 }
 
 /// A program that makes, shares, changes and frees a cell of every kind it
@@ -3582,12 +3614,13 @@ fn a_record_too_wide_for_the_arena_is_a_record() {
 }
 
 /// A constructor as wide as the arena takes, or wider, that is matched and
-/// built again is written over where it is, as a narrow one is, and as the same
-/// variant or another. A thousand turns make no cell and reuse one a thousand
-/// times. While something else still holds it, the same turn makes a new cell
-/// and leaves the old one as it was.
+/// built again takes the words that the one it was had in the arena, as a narrow
+/// one does, and as the same variant or another. So a thousand turns grow the
+/// arena no more than one. While something else still holds it, the same turn
+/// leaves it as it was. What a wider one has in a box is not among those words:
+/// `a_long_constructor_takes_the_space_of_the_last` in the heap's tests counts it.
 #[test]
-fn a_constructor_too_wide_for_the_arena_is_rebuilt_in_place() {
+fn a_constructor_too_wide_for_the_arena_is_rebuilt_in_the_same_words() {
     for n in [252, 253, 254, 300] {
         let fields: String = (0..n - 1).map(|i| format!("\t\ta{i} Int,\n")).collect();
         let pattern = format!("a0, {}s", "_, ".repeat(n - 2));
@@ -3621,19 +3654,21 @@ fn a_constructor_too_wide_for_the_arena_is_rebuilt_in_place() {
              pub fn main() {{\n\
              \tv = new(0, 'tail' + 'end')\n\
              \tmade = internal::cells_made()\n\
-             \treused = internal::cells_reused()\n\
-             \tw = spin(v, 999)\n\
+             \tw = spin(v, N - 1)\n\
              \tx = spin(w, 1)\n\
              \tprintln(internal::cells_made() - made)\n\
-             \tprintln(internal::cells_reused() - reused)\n\
              \tprintln(first(x))\n\
              \tkeep = spin(x, 1)\n\
              \tprintln(first(x) + first(keep))\n\
              \tprintln(internal::cells_made() - made)\n\
-             \tprintln(internal::cells_reused() - reused)\n\
              }}\n",
         );
-        prints(&src, "0\n1000\n1007\n-1\n1\n1000\n");
+        let (made, words) = cells_and_words(&src, 2, "2\n9\n-1\n3\n");
+        assert_eq!(
+            cells_and_words(&src, 1000, "1000\n1007\n-1\n1001\n"),
+            (made + 998, words),
+            "{n} fields"
+        );
     }
 }
 

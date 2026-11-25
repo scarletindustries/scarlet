@@ -605,7 +605,7 @@ fn lit(v: i64) -> String {
 
 /// One generated expression. It covers enough of the language to exercise
 /// arithmetic at the boundary constants, control flow, enum construction and
-/// dispatch, closures, reuse loops and cross-function calls. [`Expr::eval`]
+/// dispatch, closures, loops that rebuild and cross-function calls. [`Expr::eval`]
 /// gives its intended value.
 enum Expr {
     Lit(i64),
@@ -634,8 +634,8 @@ enum Expr {
         a1: Box<Expr>,
         a2: Box<Expr>,
     },
-    /// `spin_reuse(n, acc, s)`. See the preamble.
-    SpinReuse {
+    /// `spin_build(n, acc, s)`. See the preamble.
+    SpinBuild {
         n: u64,
         acc: Box<Expr>,
         s: Box<Expr>,
@@ -714,8 +714,8 @@ impl Expr {
                 a1.render(),
                 a2.render()
             ),
-            Expr::SpinReuse { n, acc, s } => {
-                format!("spin_reuse({n}, {}, {})", acc.render(), s.render())
+            Expr::SpinBuild { n, acc, s } => {
+                format!("spin_build({n}, {}, {})", acc.render(), s.render())
             }
             Expr::ChainPipe { n, x, m, c } => format!(
                 "chain_sum(chain_map(chain_build({n}, {}), fn(x Int) x * {m} + {{ {} }}))",
@@ -785,7 +785,7 @@ impl Expr {
                 let g = |x: i64| wadd(wmul(x, m), *c);
                 wadd(g(ev(a1)), g(ev(a2)))
             }
-            Expr::SpinReuse { n, acc, s } => {
+            Expr::SpinBuild { n, acc, s } => {
                 let s = ev(s);
                 let mut acc = ev(acc);
                 let mut i = *n as i64;
@@ -860,8 +860,8 @@ fn eval_fn(fns: &[Vec<Expr>], idx: usize, a: i64, b: i64) -> i64 {
 /// The preamble every fuzz program shares. Its helpers cover the heap shapes
 /// the generated bodies call into. They are enum construction and variant
 /// dispatch with payload binds, closure parameters called dynamically, and two
-/// reuse loops. `spin_reuse` carries its reuse slot across a self-tail
-/// back-edge, and `spin_step` puts `Reuse` right before `TailCallSelf`.
+/// loops that rebuild. `spin_build` builds a value each turn and drops it, and
+/// `spin_step` takes one apart and passes another to its next turn.
 const PREAMBLE: &str = "\
 type Pick {\n\
 \tOne(x Int)\n\
@@ -908,12 +908,12 @@ fn chain_sum(xs Chain) Int {\n\
 \t}\n\
 }\n\
 \n\
-fn spin_reuse(n Int, acc Int, s Int) Int {\n\
+fn spin_build(n Int, acc Int, s Int) Int {\n\
 \tif n <= 0 {\n\
 \t\tacc\n\
 \t} else {\n\
 \t\tp = Two(n + s, n * 3)\n\
-\t\tspin_reuse(n - 1, acc + pick_val(p, s), s)\n\
+\t\tspin_build(n - 1, acc + pick_val(p, s), s)\n\
 \t}\n\
 }\n\
 \n\
@@ -978,21 +978,20 @@ fn gen_fn(r: &mut Rng, idx: usize) -> Vec<Expr> {
                 a1: o(r),
                 a2: o(r),
             },
-            // Reuse carried across spin_reuse's self-tail back-edge.
-            8 => Expr::SpinReuse {
+            // A value built and dropped by each turn of spin_build.
+            8 => Expr::SpinBuild {
                 n: small_count(r),
                 acc: o(r),
                 s: o(r),
             },
-            // Reuse one Cons for another in chain_map, folded back to an Int.
+            // A list rebuilt by chain_map, folded back to an Int.
             9 => Expr::ChainPipe {
                 n: small_count(r),
                 x: o(r),
                 m: 1 + r.below(9),
                 c: o(r),
             },
-            // Reuse a matched value to rebuild it, with Reuse right before
-            // TailCallSelf.
+            // A matched value rebuilt for the next turn.
             10 => Expr::SpinStep {
                 k: o(r),
                 x: o(r),
@@ -1046,7 +1045,7 @@ fn gen_program(r: &mut Rng) -> (String, String) {
         x: Box::new(Expr::Lit(small_lit(r))),
         y: Box::new(Expr::Lit(small_lit(r))),
         n: small_count(r),
-        acc: Box::new(Expr::SpinReuse {
+        acc: Box::new(Expr::SpinBuild {
             n: small_count(r),
             acc: Box::new(Expr::ChainPipe {
                 n: small_count(r),

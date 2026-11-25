@@ -23,11 +23,11 @@ with whatever else the machine is doing. Time is printed last, and on a busy
 machine it is noise.
 
 A Scarlet binary that takes `scarlet run --counters` is also run once more
-for the VM's own counts: how many VM instructions ran, of which kinds, and
-how many heap cells were made and reused. Those are exact. They are the same
-on every run of the same program with the same input, on any machine. That
-run is made with `--audit` too, so a benchmark whose reference counts go wrong
-fails the whole race.
+for the VM's own counts: how many VM instructions ran, of which kinds, how
+many heap cells were made, and how many words the heap grew to. Those are
+exact. They are the same on every run of the same program with the same input,
+on any machine. That run is made with `--audit` too, so a benchmark whose
+reference counts go wrong fails the whole race.
 
 Runs are taken in turn across runtimes and the smallest of each measure is
 kept, because noise only ever adds.
@@ -52,7 +52,8 @@ REFERENCE = "luajit-interp"
 # The measures taken off by the startup program's own. Peak memory is not one.
 LESS_STARTUP = ("seconds", "instructions", "cycles")
 # The VM's counts that are plain numbers. `ops` is a count per kind beside them.
-COUNTERS = ("instructions", "cells_made", "cells_reused", "cells_live")
+# A binary from before one of them does not give it.
+COUNTERS = ("instructions", "cells_made", "cells_live", "heap_words")
 
 
 class Runtime:
@@ -197,7 +198,7 @@ def without_startup(result, startup):
             cleaned[name][what] = less(got[what], base[what])
         if "counters" in got and "counters" in base:
             ours, theirs = got["counters"], base["counters"]
-            cleaned[name]["counters"] = {what: less(ours[what], theirs[what]) for what in COUNTERS}
+            cleaned[name]["counters"] = {what: less(ours.get(what), theirs.get(what)) for what in COUNTERS}
             cleaned[name]["counters"]["ops"] = {
                 op: less(n, theirs["ops"].get(op, 0)) for op, n in ours["ops"].items()
             }
@@ -361,7 +362,7 @@ def vm_counters(name, results):
     lines = [
         f"\nVM counters less startup: {name}",
         "| benchmark | VM instructions, millions | machine instructions for each | "
-        "cells made, thousands | cells reused, thousands | ran most |",
+        "cells made, thousands | heap words, thousands | ran most |",
         "|---|---:|---:|---:|---:|---|",
     ]
     for bench, result in results.items():
@@ -371,9 +372,11 @@ def vm_counters(name, results):
             continue
         ran = counted["instructions"]
         each = f"{got['instructions'] / ran:.1f}" if ran and got.get("instructions") else ""
+        words = counted.get("heap_words")
+        grew = "" if words is None else f"{words / 1e3:.1f}"
         lines.append(
             f"| {bench} | {ran / 1e6:.1f} | {each} | {counted['cells_made'] / 1e3:.1f} | "
-            f"{counted['cells_reused'] / 1e3:.1f} | {most_run(counted['ops'], ran)} |"
+            f"{grew} | {most_run(counted['ops'], ran)} |"
         )
     return lines
 

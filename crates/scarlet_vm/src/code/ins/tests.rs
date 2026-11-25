@@ -98,7 +98,6 @@ fn only_these_instructions_end_or_jump() {
         Op::TailCallWide,
         Op::TailCallSelf,
         Op::TailCallSelfWide,
-        Op::TailCallSelfKeep,
         Op::TailCallValue,
         Op::TailCallValueWide,
         Op::Ret,
@@ -117,7 +116,7 @@ fn only_these_instructions_end_or_jump() {
     let (name, to, why) = (Callee(FuncIdx(0)), OwnEntry, WhyId(0));
     let args = Args::new(&[]).expect("none");
     let callee = Shared(VReg(0));
-    let ending: [Ins<VReg>; 12] = [
+    let ending: [Ins<VReg>; 11] = [
         Ins::Halt {
             src: Taken(VReg(0)),
         },
@@ -135,12 +134,6 @@ fn only_these_instructions_end_or_jump() {
         Ins::TailCallSelfWide {
             to,
             args: ArgList(0),
-            own,
-        },
-        Ins::TailCallSelfKeep {
-            to,
-            args: ArgList(0),
-            keep: KeepList(0),
             own,
         },
         Ins::TailCallValue { callee, args, own },
@@ -394,6 +387,10 @@ impl Places for Shifted {
     fn arg_list(&self, i: u32) -> Result<u32, Unplaced> {
         Ok(i + 20)
     }
+
+    fn dst_list(&self, i: u32) -> Result<u32, Unplaced> {
+        Ok(i + 30)
+    }
 }
 
 /// Giving an instruction its registers keeps everything else about it.
@@ -430,16 +427,41 @@ fn placing_an_instruction_keeps_what_it_does() {
     };
     assert_eq!((to.index(), own), (300, Room(9)));
 
-    let wide: Ins<VReg> = Ins::CtorOverWide {
+    let wide: Ins<VReg> = Ins::CtorWide {
         dst: Dst(VReg(0)),
         ctor: a_ctor(),
         fields: ArgList(1),
-        reuse: Over(VReg(2)),
     };
-    let Ok(Ins::CtorOverWide { ctor, fields, .. }) = wide.place(&at) else {
+    let Ok(Ins::CtorWide { ctor, fields, .. }) = wide.place(&at) else {
         panic!("a constructor");
     };
     assert_eq!((ctor, fields.0), (a_ctor(), 21));
+
+    // A field with nowhere to go has nowhere still, also where the value it
+    // is read as by a mistake has a register.
+    let dsts = [Some(VReg(7)), None, Some(VReg(0))].map(MaybeDst::new);
+    let src = Taken(VReg(4));
+    let ctor = a_ctor();
+    let open: Ins<VReg> = Ins::Open3 { dsts, src, ctor };
+    let placed = open.place(&at).expect("a place for everything");
+    let roles = [
+        (Reg(8), Role::Write),
+        (Reg(1), Role::Write),
+        (Reg(5), Role::Take),
+    ];
+    assert_eq!(operands(&placed, &Lists::default()), roles);
+    let Ins::Open3 { dsts, ctor, .. } = placed else {
+        panic!("{placed:?}");
+    };
+    let regs = dsts.map(|dst| dst.dst().map(|dst| dst.0));
+    assert_eq!(regs, [Some(Reg(8)), None, Some(Reg(1))]);
+    assert_eq!(ctor, a_ctor());
+    let dsts = DstList(1);
+    let open: Ins<VReg> = Ins::OpenWide { dsts, src, ctor };
+    let Ok(Ins::OpenWide { dsts, .. }) = open.place(&at) else {
+        panic!("a cell taken apart");
+    };
+    assert_eq!(dsts.0, 31);
 
     // The registers an instruction names one by one keep their order.
     let three: Ins<VReg> = Ins::Ctor3 {
@@ -469,7 +491,12 @@ fn placing_an_instruction_keeps_what_it_does() {
 
     // Nothing is placed when one thing it names has no place, and what that
     // was comes back.
-    let lost: [Ins<VReg>; 6] = [
+    let lost: [Ins<VReg>; 7] = [
+        Ins::Open2 {
+            dsts: [None, Some(VReg(50))].map(MaybeDst::new),
+            src,
+            ctor,
+        },
         Ins::Ctor2 {
             dst: Dst(VReg(0)),
             ctor: a_ctor(),
@@ -543,6 +570,7 @@ fn the_listing_shows_every_operand() {
 #[test]
 fn the_listing_shows_a_variant_by_its_number() {
     let src = "type P {\n\tA\n\tB(n Int, t (Int, Int))\n\tC\n}\n\
+               type Q {\n\tQ(a Int, b Int)\n}\n\
                fn f(p P) Int {\n\
                \tmatch p {\n\
                \t\tA -> 1\n\
@@ -550,18 +578,21 @@ fn the_listing_shows_a_variant_by_its_number() {
                \t\tC -> 2\n\
                \t}\n\
                }\n\
-               pub fn main() { println(f(B(1, (2, 3)))) }\n";
+               fn g(q Q) Int { q.b }\n\
+               pub fn main() { println(f(B(1, (2, 3))) + g(Q(1, 2))) }\n";
     let listing = crate::listing(&program(src)).expect("the program loads");
     let text = listing.function(0).expect("f");
     for part in [
         "JumpUnlessTag(r2, .0) ->",
         "JumpUnlessTag(r2, .1(..)) ->",
         "JumpUnlessTag(r2, .2) ->",
+        "_, r2 = Open2(move r2, ",
         "= Field(r2, 1)\n",
-        "= Field(r3, 1)\n",
     ] {
         assert!(text.contains(part), "{part}: {text}");
     }
+    let text = listing.function(1).expect("g");
+    assert!(text.contains("= Field(r2, 1)\n"), "{text}");
 }
 
 /// A constructor and a tuple show what they are given in order, with what they
@@ -596,49 +627,40 @@ fn the_listing_shows_what_a_new_cell_is_given() {
     }
 }
 
-/// The register whose cell a constructor may be written over is told apart
-/// from its fields, and so are the registers whose cells a loop carries round
-/// from what it passes.
+/// A constructor taken apart shows the register of each field that has one, and
+/// what it takes them out of.
 #[test]
-fn the_listing_tells_a_kept_cell_from_the_other_operands() {
-    let src = "type P {\n\tP(a Int, b Int)\n}\n\
-               fn turn(p P) P {\n\
-               \tmatch p {\n\
-               \t\tP(a, b) -> P(b, a)\n\
-               \t}\n\
-               }\n\
-               fn round(n Int, acc Int) Int {\n\
-               \tp = P(n, acc)\n\
-               \tmatch p {\n\
-               \t\tP(a, b) -> if a == 0 { b } else { round(a - 1, b + a) }\n\
-               \t}\n\
-               }\n\
-               pub fn main() {\n\
-               \tprintln(turn(P(1, 2)))\n\
-               \tprintln(round(3, 0))\n\
-               }\n";
-    let listing = crate::listing(&program(src)).expect("the program loads");
-    let code: Code = load(&program(src), crate::Audit::Never).expect("the program loads");
-    let line = |name: &str, kind: &str| -> String {
+fn the_listing_shows_where_the_fields_of_a_cell_go() {
+    let fields: Vec<String> = (0..9).map(|i| format!("f{i} Int")).collect();
+    let fields = fields.join(", ");
+    let src = format!(
+        "type P {{\n\tP(a Int, b Int)\n\tW({fields})\n}}\n\
+         fn turn(p P) P {{\n\tmatch p {{\n\
+         \t\tP(a, b) -> P(b, a)\n\
+         \t\tW(x, _, _, _, _, _, _, _, y) -> P(y, x)\n\t}}\n}}\n\
+         fn second(p P) Int {{\n\tmatch p {{\n\
+         \t\tP(_, b) -> b\n\
+         \t\tW(_, _, _, _, _, _, _, _, _) -> 0\n\t}}\n}}\n\
+         pub fn main() {{\n\
+         \tprintln(turn(P(1, 2)))\n\
+         \tprintln(second(P(1, 2)))\n\
+         }}\n"
+    );
+    let listing = crate::listing(&program(&src)).expect("the program loads");
+    let code: Code = load(&program(&src), crate::Audit::Never).expect("the program loads");
+    let lines = |name: &str| -> Vec<String> {
         let mut all = (&code.funcs).into_iter();
         let index = all.position(|e| e.name.ends_with(name));
         let text = listing.function(index.expect("a function")).expect("text");
-        let found: Vec<_> = text.lines().filter(|l| l.contains(kind)).collect();
-        let [line] = found[..] else {
-            panic!("one {kind}: {text}");
-        };
-        line.trim_start().to_string()
+        let opens = text.lines().filter(|l| l.contains("Open"));
+        opens.map(|l| l.trim_start().to_string()).collect()
     };
     assert_eq!(
-        line(".turn", "CtorOver"),
-        "4  r2 = CtorOver(10.0, move r4, move r3, over r2)"
+        lines(".turn"),
+        [
+            "1  r2, r3 = Open2(move r2, 10.0)",
+            "5  r2, _, _, _, _, _, _, _, r3 = OpenWide(move r2, 10.1)",
+        ]
     );
-    assert_eq!(
-        line(".round", "CtorOver"),
-        "0  r4 = CtorOver(10.0, move r2, move r3, over r4)"
-    );
-    assert_eq!(
-        line(".round", "TailCallSelfKeep"),
-        "9  TailCallSelfKeep(fn#1, move r5, move r2, keep r4)"
-    );
+    assert_eq!(lines(".second"), ["1  _, r2 = Open2(move r2, 10.0)"]);
 }

@@ -19,19 +19,19 @@
 //! register. A call in tail position is one of three instructions that replace
 //! the frame: `TailCall`, `TailCallSelf` and `TailCallValue`.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{HashMap, HashSet};
 
 use scarlet_ir::core_ir::{
-    Atom, Callee, Const, CoreExpr, CoreFn, CorePat, FuncIdx, GlobalSlot, JoinId, Load, LocalId,
-    MAX_PARAMS, PrimOp,
+    Atom, Callee, Const, CoreBind, CoreExpr, CoreFn, CorePat, FuncIdx, GlobalSlot, JoinId, Load,
+    LocalId, MAX_PARAMS, PrimOp,
 };
 use scarlet_ir::intrinsic::Intrinsic;
 use scarlet_ir::tivec::Idx;
 
 use super::forms::{CtorOf, Form};
 use super::ins::{
-    Arg, ArgList, Args, BitsOp, Dead, Dst, Hit, Ins, KeepList, Kept, Label, LastReg, Lists,
-    LookList, Looks, Newline, Over, OwnEntry, OwnRoom, ShareList, Shared, Shares, Src, Taken, VReg,
+    Arg, ArgList, Args, BitsOp, Dead, Dst, DstList, Hit, Ins, Label, LastReg, Lists, LookList,
+    Looks, MaybeDst, Newline, OwnEntry, OwnRoom, ShareList, Shared, Shares, Src, Taken, VReg,
 };
 use super::{ReadsClosure, Source, Tables, Unfit, Why, add, built};
 use crate::heap::Ctor;
@@ -48,9 +48,6 @@ pub(super) struct Draft {
     /// One past the highest value the function names.
     pub(super) values: u32,
     pub(super) params: Vec<VReg>,
-    /// The values whose cell the loop's next turn overwrites. A call to self
-    /// in tail position leaves them in their registers.
-    pub(super) carried: BTreeSet<VReg>,
     /// What it reads of the closure it runs as.
     pub(super) closure: ReadsClosure,
 }
@@ -78,8 +75,6 @@ pub(super) fn translate(
         landed: None,
         conts: HashMap::new(),
         values,
-        kept: survey.reused,
-        carried: survey.carried.into_iter().map(of).collect(),
         closure: survey.closure,
         reads: survey.reads,
         numbers: HashMap::new(),
@@ -92,7 +87,6 @@ pub(super) fn translate(
         labels: labels.ok_or(Unfit::Broken(Broken::NoPlace))?,
         values: t.values,
         params: core.params.iter().map(|p| of(p.id)).collect(),
-        carried: t.carried,
         closure: t.closure,
     })
 }
@@ -137,10 +131,6 @@ struct Translator<'c> {
     /// One past the highest value the function names. A value that no local
     /// holds, like a tail expression's, gets a number from here.
     values: u32,
-    /// Locals a constructor reuses, so their `Drop` hollows instead of frees.
-    kept: BTreeSet<LocalId>,
-    /// [`Draft::carried`].
-    carried: BTreeSet<VReg>,
     /// [`Draft::closure`].
     closure: ReadsClosure,
     /// How many times each local is read.
@@ -310,16 +300,6 @@ impl Translator<'_> {
                     return self.call_by_name(Dst(dst), this, args);
                 }
                 let to = OwnEntry;
-                if dst.is_none() && !self.carried.is_empty() {
-                    let args: Vec<VReg> = args.iter().copied().map(of).collect();
-                    let keep: Vec<VReg> = self.carried.iter().copied().collect();
-                    return Ok(Ins::TailCallSelfKeep {
-                        to,
-                        args: self.arg_list(&args)?,
-                        keep: KeepList(self.reg_list(&keep)?),
-                        own,
-                    });
-                }
                 Ok(match (dst.map(Dst), self.args(args)?) {
                     (Some(dst), Fit::Inline(args)) => Ins::CallSelf { dst, own, to, args },
                     (Some(dst), Fit::Listed(args)) => Ins::CallSelfWide { dst, own, to, args },
@@ -429,8 +409,7 @@ impl Translator<'_> {
                     && let CoreExpr::Drop {
                         local, body: rest, ..
                     } = &**body
-                    && local == m
-                    && !self.kept.contains(m) =>
+                    && local == m =>
                 {
                     self.push(Ins::MapSetOwned {
                         dst: Dst(of(bind.id)),
@@ -480,8 +459,7 @@ impl Translator<'_> {
                     && let CoreExpr::Drop {
                         local, body: rest, ..
                     } = &**body
-                    && local == m
-                    && !self.kept.contains(m) =>
+                    && local == m =>
                 {
                     self.push(Ins::MapDeleteOwned {
                         dst: Dst(of(bind.id)),
@@ -505,12 +483,7 @@ impl Translator<'_> {
                     e = body;
                 }
                 CoreExpr::Drop { local, body, .. } => {
-                    let reg = of(*local);
-                    self.push(if self.kept.contains(local) {
-                        Ins::DropReuse { reg: Kept(reg) }
-                    } else {
-                        Ins::Drop { reg: Dead(reg) }
-                    });
+                    self.give_up(*local);
                     e = body;
                 }
                 CoreExpr::Tail(atom) => return self.tail(atom, dest),
@@ -543,7 +516,7 @@ impl Translator<'_> {
                 CoreExpr::Match { scrut, arms, .. } => {
                     for (pat, arm) in arms {
                         let next = self.label()?;
-                        self.pattern(*scrut, pat, next)?;
+                        let arm = self.pattern(*scrut, pat, arm, next)?;
                         self.expr(arm, dest)?;
                         self.place(next);
                     }
@@ -611,9 +584,21 @@ impl Translator<'_> {
         Ok(())
     }
 
+    fn give_up(&mut self, local: LocalId) {
+        let reg = Dead(of(local));
+        self.push(Ins::Drop { reg });
+    }
+
     /// Test `scrut` against `pat`, jumping to `to` when it does not fit, and
-    /// read out what the pattern binds when it does.
-    fn pattern(&mut self, scrut: LocalId, pat: &CorePat, to: Label) -> Result<(), Unfit> {
+    /// read out what the pattern binds when it does. Gives what is left of
+    /// `arm`, which runs next.
+    fn pattern<'e>(
+        &mut self,
+        scrut: LocalId,
+        pat: &CorePat,
+        arm: &'e CoreExpr,
+        to: Label,
+    ) -> Result<&'e CoreExpr, Unfit> {
         match pat {
             CorePat::Wild => {}
             CorePat::Bind(b) => self.push(Ins::Move {
@@ -621,12 +606,20 @@ impl Translator<'_> {
                 src: Arg::shared(of(scrut)),
             }),
             CorePat::Ctor { variant, fields } => {
-                let form = self.source.forms.of(*variant, fields.len());
+                let form = self.source.forms.of(*variant, fields.len())?;
                 self.push(Ins::JumpUnlessTag {
                     src: src(scrut),
-                    tag: form?.tag(),
+                    tag: form.tag(),
                     to,
                 });
+                if let Form::Fields { ctor, .. } = form
+                    && let Some(opened) = self.opened(scrut, fields, arm)
+                {
+                    opened.before.iter().for_each(|l| self.give_up(*l));
+                    self.open(scrut, ctor, &opened.dsts)?;
+                    opened.after.iter().for_each(|l| self.give_up(*l));
+                    return Ok(opened.rest);
+                }
                 for (i, f) in fields.iter().enumerate() {
                     let index = u16::try_from(i).map_err(|_| Missing::TooManyFields)?;
                     self.push(Ins::Field {
@@ -654,6 +647,95 @@ impl Translator<'_> {
                 self.push(test);
             }
         }
+        Ok(arm)
+    }
+
+    /// What an arm begins with when it begins by giving up its scrutinee, a
+    /// constructor whose fields the pattern binds to `fields`.
+    ///
+    /// Perceus puts what an arm has no use for at its start, so an arm that
+    /// does not need the value it matched begins with a run of drops and the
+    /// value's is one of them. The cell can then be taken apart there
+    /// ([`Ins::Open`]), where otherwise each field is read out with a reference
+    /// of its own and the cell is freed after. Nothing jumps into the run,
+    /// because a `Goto` only goes to the start of a continuation. A drop in
+    /// front of the value's stays in front, so it may be of no field. A field
+    /// that is dropped after it and read nowhere else is one nothing reads.
+    fn opened<'e>(
+        &self,
+        scrut: LocalId,
+        fields: &[CoreBind],
+        arm: &'e CoreExpr,
+    ) -> Option<Opened<'e>> {
+        let (mut before, mut after) = (Vec::new(), Vec::new());
+        let mut found = false;
+        let mut rest = arm;
+        while let CoreExpr::Drop { local, body } = rest {
+            if *local == scrut {
+                found = true;
+            } else if found {
+                after.push(*local);
+            } else {
+                before.push(*local);
+            }
+            rest = body;
+        }
+        let in_front: HashSet<LocalId> = before.iter().copied().collect();
+        if !found
+            || fields
+                .iter()
+                .any(|f| f.id == scrut || in_front.contains(&f.id))
+        {
+            return None;
+        }
+        let dropped: HashSet<LocalId> = after.iter().copied().collect();
+        let mut unread = HashSet::new();
+        let mut dsts = Vec::with_capacity(fields.len());
+        for f in fields {
+            let read = match self.reads.get(&f.id) {
+                None => false,
+                Some(times) => *times > 1 || !dropped.contains(&f.id),
+            };
+            if !read {
+                unread.insert(f.id);
+            }
+            dsts.push(MaybeDst::new(read.then(|| of(f.id))));
+        }
+        after.retain(|l| !unread.contains(l));
+        Some(Opened {
+            before,
+            dsts,
+            after,
+            rest,
+        })
+    }
+
+    /// Take the `ctor` in `scrut` apart, each field to its place in `dsts`. One
+    /// with nothing to keep is only given up.
+    fn open(&mut self, scrut: LocalId, ctor: Ctor, dsts: &[MaybeDst<VReg>]) -> Result<(), Unfit> {
+        if dsts.iter().all(|dst| dst.dst().is_none()) {
+            self.give_up(scrut);
+            return Ok(());
+        }
+        let src = Taken(of(scrut));
+        // The form with as many fields.
+        macro_rules! one_of {
+            ($($name:ident)*) => {
+                None$(.or_else(|| {
+                    let dsts = dsts.try_into().ok()?;
+                    Some(Ins::$name { dsts, src, ctor })
+                }))*
+            };
+        }
+        let open = match one_of!(Open1 Open2 Open3 Open4 Open5 Open6 Open7 Open8) {
+            Some(open) => open,
+            None => Ins::OpenWide {
+                dsts: add(&mut self.lists.dsts, dsts.into()).map(DstList)?,
+                src,
+                ctor,
+            },
+        };
+        self.push(open);
         Ok(())
     }
 
@@ -783,19 +865,15 @@ impl Translator<'_> {
                     _ => return Err(Missing::Intrinsic(*intrinsic).into()),
                 }
             }
-            Atom::Ctor {
-                variant,
-                fields,
-                reuse,
-            } => match self.source.forms.of(*variant, fields.len())? {
-                // It is a value word, so there is no allocation for Perceus
-                // to reuse.
-                Form::Plain(variant) => constant(Value::nullary(variant)),
-                Form::Fields { ctor, .. } => {
-                    let fields: Vec<VReg> = fields.iter().copied().map(of).collect();
-                    self.ctor(dst, ctor, &fields, reuse.map(of))?
+            Atom::Ctor { variant, fields } => {
+                match self.source.forms.of(*variant, fields.len())? {
+                    Form::Plain(variant) => constant(Value::nullary(variant)),
+                    Form::Fields { ctor, .. } => {
+                        let fields: Vec<VReg> = fields.iter().copied().map(of).collect();
+                        self.ctor(dst, ctor, &fields)?
+                    }
                 }
-            },
+            }
         };
         self.push(ins);
         Ok(())
@@ -808,32 +886,10 @@ impl Translator<'_> {
         ctor: CtorOf<N>,
         fields: [VReg; N],
     ) -> Result<Ins<VReg>, Unfit> {
-        self.ctor(dst, ctor.ctor(), &fields, None)
+        self.ctor(dst, ctor.ctor(), &fields)
     }
 
-    fn ctor(
-        &mut self,
-        dst: Dst<VReg>,
-        ctor: Ctor,
-        fields: &[VReg],
-        reuse: Option<VReg>,
-    ) -> Result<Ins<VReg>, Unfit> {
-        if let Some(reuse) = reuse.map(Over) {
-            return Ok(match Args::new(fields) {
-                Some(fields) => Ins::CtorOver {
-                    dst,
-                    ctor,
-                    fields,
-                    reuse,
-                },
-                None => Ins::CtorOverWide {
-                    dst,
-                    ctor,
-                    fields: self.arg_list(fields)?,
-                    reuse,
-                },
-            });
-        }
+    fn ctor(&mut self, dst: Dst<VReg>, ctor: Ctor, fields: &[VReg]) -> Result<Ins<VReg>, Unfit> {
         Ok(match Args::new(fields) {
             Some(fields) => Ins::Ctor { dst, ctor, fields },
             None => Ins::CtorWide {
@@ -1161,19 +1217,22 @@ fn jump_unless(ins: &Ins<VReg>, cond: VReg, to: Label) -> Option<Ins<VReg>> {
     None
 }
 
+/// What [`Translator::opened`] found at the start of an arm.
+struct Opened<'e> {
+    /// What is given up before the scrutinee is.
+    before: Vec<LocalId>,
+    /// Where each field goes, when something reads it.
+    dsts: Vec<MaybeDst<VReg>>,
+    /// What is given up after the scrutinee.
+    after: Vec<LocalId>,
+    rest: &'e CoreExpr,
+}
+
 /// What one walk over a function's body finds out.
 #[derive(Default)]
 struct Survey {
     /// How many times each local is read. A `Drop` counts as a read.
     reads: HashMap<LocalId, u32>,
-    /// Every local a constructor overwrites in place. `Atom`'s operand walk
-    /// leaves `reuse` out on purpose, because it names a cell to write over,
-    /// not a value read.
-    reused: BTreeSet<LocalId>,
-    /// Those of them that are overwritten by the constructor that binds them
-    /// again, which is how a loop takes the cell its last turn gave up
-    /// (`scarlet_lower::perceus`). Every other is bound earlier in the turn.
-    carried: BTreeSet<LocalId>,
     /// The highest local bound or read.
     highest: Option<u32>,
     /// [`Draft::closure`].
@@ -1193,12 +1252,6 @@ impl Survey {
 
     fn atom(&mut self, atom: &Atom) {
         atom.for_each_operand(|l| self.read(l));
-        if let Atom::Ctor {
-            reuse: Some(local), ..
-        } = atom
-        {
-            self.reused.insert(*local);
-        }
         if let Atom::Load(load) = atom {
             self.closure = self.closure.max(match load {
                 Load::Global(_) => ReadsClosure::Nothing,
@@ -1218,11 +1271,6 @@ fn survey(f: &CoreFn) -> Survey {
             CoreExpr::Let { bind, rhs, body } => {
                 out.name(bind.id);
                 out.atom(rhs);
-                if let Atom::Ctor { reuse, .. } = rhs
-                    && *reuse == Some(bind.id)
-                {
-                    out.carried.insert(bind.id);
-                }
                 stack.push(body);
             }
             CoreExpr::LetJoin { bind, join, body } => {

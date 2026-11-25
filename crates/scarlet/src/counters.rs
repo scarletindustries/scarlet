@@ -13,9 +13,10 @@ use serde_json::{Map, Value, json};
 /// - `ops`: the same count split by kind of instruction. Every kind is
 ///   listed, with 0 for one that never ran. `scarlet dis --instrs` prints
 ///   instructions under the same names.
-/// - `cells_made`, `cells_reused`: heap cells handed out, and cells a
-///   constructor wrote over in place instead.
+/// - `cells_made`: heap cells handed out.
 /// - `cells_live`: cells not yet freed when the program ended.
+/// - `heap_words`: the words of 8 bytes the heap grew to, less those of cells too
+///   long to be in it.
 pub fn json(counts: &Counts) -> String {
     let total = counts
         .ops
@@ -30,8 +31,8 @@ pub fn json(counts: &Counts) -> String {
         "instructions": total,
         "ops": ops,
         "cells_made": counts.cells_made,
-        "cells_reused": counts.cells_reused,
         "cells_live": counts.cells_live,
+        "heap_words": counts.heap_words,
     });
     format!("{all:#}\n")
 }

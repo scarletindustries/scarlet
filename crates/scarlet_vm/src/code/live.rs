@@ -10,10 +10,9 @@
 //! frame runs later reads the register. A callee, a cell or another register
 //! then holds the reference the register held, so a value nothing else holds
 //! still has a count of 1, which is what lets it be changed in place or its
-//! cell overwritten. A plain `Drop` is not a read here: by the time it runs on
-//! a register that was taken it does nothing, and on a path where nothing took
-//! it, it still finds the value and releases it. A `DropReuse` is a read, so a
-//! cell this frame has paired with a constructor of its own stays here.
+//! cell be taken apart with no count changed. A plain `Drop` is not a read
+//! here: by the time it runs on a register that was taken it does nothing, and
+//! on a path where nothing took it, it still finds the value and releases it.
 //!
 //! The other is which values are held at once and so need a register each.
 //! For that a `Drop` is a read, because it names the register.
@@ -62,10 +61,8 @@ pub(super) fn settle(draft: &mut Draft) -> Result<Held, Unfit> {
         walk.step(at, ins, &mut draft.lists)?;
         walk.stand(&mut labels, at);
     }
-    // Where the function starts, its parameters have values, and so does a
-    // cell a loop's last turn left for this one.
-    let written = |v: &VReg| draft.params.contains(v) || draft.carried.contains(v);
-    if !walk.held.items.iter().all(written) {
+    // Where the function starts, only its parameters have values.
+    if !walk.held.items.iter().all(|v| draft.params.contains(v)) {
         return Err(Unfit::Broken(Broken::ReadBeforeWritten));
     }
     Ok(walk.out)
@@ -193,12 +190,12 @@ impl Walk {
                     }
                 }
                 Role::Drop => self.held.add(*v),
-                Role::Look | Role::Share | Role::Pass { .. } | Role::Take | Role::Keep => {}
+                Role::Look | Role::Share | Role::Pass { .. } | Role::Take => {}
             }
         }
         for (v, role) in &self.operands {
             match role {
-                Role::Look | Role::Share | Role::Pass { .. } | Role::Take | Role::Keep => {
+                Role::Look | Role::Share | Role::Pass { .. } | Role::Take => {
                     self.read.add(*v);
                     self.held.add(*v);
                 }
@@ -238,7 +235,7 @@ impl Walk {
                     self.taken.push(!self.read.has(*v) && !self.handed.has(*v));
                     self.handed.add(*v);
                 }
-                Role::Look | Role::Share | Role::Take | Role::Keep => self.handed.add(*v),
+                Role::Look | Role::Share | Role::Take => self.handed.add(*v),
                 Role::Write | Role::WriteOnHit | Role::Drop => {}
             }
         }
@@ -255,9 +252,7 @@ impl Walk {
 fn writes(role: Role) -> bool {
     match role {
         Role::Write | Role::WriteOnHit => true,
-        Role::Look | Role::Share | Role::Pass { .. } | Role::Take | Role::Keep | Role::Drop => {
-            false
-        }
+        Role::Look | Role::Share | Role::Pass { .. } | Role::Take | Role::Drop => false,
     }
 }
 

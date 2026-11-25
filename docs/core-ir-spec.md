@@ -29,7 +29,7 @@ pub enum CoreExpr {
     Let { bind: CoreBind, rhs: Atom, body: Box<CoreExpr> },
     LetJoin { bind: CoreBind, join: Box<CoreExpr>, body: Box<CoreExpr> },
     LetCont { id: JoinId, cont: Box<CoreExpr>, body: Box<CoreExpr> },
-    Drop { local: LocalId, shape: Option<ReuseShape>, body: Box<CoreExpr> },
+    Drop { local: LocalId, body: Box<CoreExpr> },
     Match { scrut: LocalId, arms: Vec<(CorePat, CoreExpr)>, ty: RTy },
     If { cond: LocalId, then: Box<CoreExpr>, els: Box<CoreExpr>, ty: RTy },
     Tail(Atom),                       // return a value, or tail-call
@@ -42,7 +42,7 @@ pub enum Atom {
     Load(Load),
     Nil,
     Bool(bool),
-    Ctor { variant: VariantRef, fields: Vec<LocalId>, reuse: Option<LocalId> },
+    Ctor { variant: VariantRef, fields: Vec<LocalId> },
     PrimOp { op: PrimOp, args: Vec<LocalId> },
     Intrinsic { intrinsic: Intrinsic, args: Vec<LocalId> },
     Closure { func_idx: FuncIdx, captures: Vec<LocalId> },
@@ -54,13 +54,13 @@ pub enum Callee { Known(FuncIdx), Self_, Local(LocalId) }
 
 Every operand is a `LocalId`, every intermediate value is bound by a `Let`, and every bind has a type. A function's name travels next to it on `LoweredFn`, not on `CoreFn`.
 
-The plan also gave each bind a `region` (frame, process or immortal) for mode inference and an `alias` (unique or shared) for Perceus. Neither was built. Perceus records what it decides in the IR instead, as `Drop` nodes and as the `reuse` on a `Ctor`.
+The plan also gave each bind a `region` (frame, process or immortal) for mode inference and an `alias` (unique or shared) for Perceus. Neither was built. Perceus records what it decides in the IR instead, as `Drop` nodes.
 
 ## Pipeline
 
 1. **`lower(&TypedProgram) → CoreProgram`** (`crates/scarlet_lower/src/lower.rs`). This walks the elaborator's typed IR and builds ANF. Each subexpression becomes a `Let`, so the evaluation order that was implicit in the tree becomes explicit `Let` nesting. The plan had `lower` walk the typechecked AST and resolve each type through the inference engine. `docs/typed-ir-spec.md` explains why it takes the typed IR instead, with every type already resolved.
 2. **`immediates::rewrite`** turns the prelude's `True`, `False` and `Nil` constructors into `Atom::Bool` and `Atom::Nil`, and a `match` on a Bool into an `If`. This pass wasn't in the plan.
-3. **`perceus(pool, f) → CoreFn`** (`crates/scarlet_lower/src/perceus.rs`) runs Koka's algorithm on Core. A backward linear scan finds each last use and puts a `Drop` there. Then it pairs each drop with a later constructor of the same shape, so the constructor can reuse the cell. It is frame-limited, as in the ICFP'22 paper, so a pairing never crosses a `Call`.
+3. **`perceus(pool, f) → CoreFn`** (`crates/scarlet_lower/src/perceus.rs`) runs Koka's algorithm on Core. A backward linear scan finds each last use and puts a `Drop` there. It also paired each drop with a later constructor of the same shape, so the constructor could reuse the cell, until step 13 of `docs/perf-plan.md`. The VM takes a cell apart in one instruction instead, and the next constructor of its size gets the space (`docs/vm-design.md`, "Running code").
 4. **The VM** loads the result and turns each function into register instructions once, when the program loads. The plan had an `emit` step to stack bytecode here instead.
 
 Later passes can slot in between `lower` and the backend: mode inference to set regions, a `simplify` pass for constant folding and dead-code removal, and so on.
@@ -70,13 +70,12 @@ Later passes can slot in between `lower` and the backend: mode inference to set 
 - **Keep behaviour first.** `lower` and `emit` without Perceus had to reproduce the old bytecode's behaviour, with every test passing and `bench_typed` no slower than Phase 1. Only then would the Perceus pass go in.
 - Phase 2's VM opcodes (`Op::Drop`, `Op::Reuse`, `is_unique`, `reuse_or_alloc` and the reuse path in `MakeEnum`) were the target, so they stayed. Phase 2's analysis in the AST compiler (`last_use`, `reuse_candidates`, `slot_tys` and the `Nop` holes) was deleted.
 - Core is per function. A `CoreProgram` holds the functions and the module's toplevel.
-- Reuse can carry across loop turns. On a tail-recursive function, Perceus may pair a `Drop` at the end of the body with a `Ctor` at the start, because a self tail call keeps the same frame. So the VM must not free those cells on a self tail call.
 - Core has a printer (`impl Display for CoreExpr`) for debugging and for golden tests (`crates/scarlet/tests/core_ir.rs`, which snapshots Core for a few programs).
-- Once Perceus was on, `examples/bench_typed.sca` had to be no slower than Phase 1, and `dot_loop` had to show real reuse, with far fewer allocations than its two million.
+- Once Perceus was on, `examples/bench_typed.sca` had to be no slower than Phase 1, and `dot_loop` had to show real reuse, with far fewer allocations than its two million. The second no longer holds, because nothing is reused in place.
 
 ## Prior art to read
 
-Koka's `core/core.kk` and `backend/c/perceus.kk`, Lean's `Lean/Compiler/LCNF/*`, and the algorithm in Fig. 5 of the ICFP'22 frame-limited reuse paper.
+Koka's `core/core.kk` and `backend/c/perceus.kk`, Lean's `Lean/Compiler/LCNF/*`, and Fig. 5 of the ICFP'22 frame-limited reuse paper, for where drops go.
 
 ## Out of scope
 

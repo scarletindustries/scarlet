@@ -6,13 +6,9 @@
 @vm(internal__stack_depth)
 pub fn stack_depth() Int
 
-// How many cells this process has allocated over its whole life, and how many
-// a constructor overwrote in place instead because nothing else held them.
+// How many cells this process has allocated over its whole life.
 @vm(internal__cells_made)
 pub fn cells_made() Int
-
-@vm(internal__cells_reused)
-pub fn cells_reused() Int
 
 // The number of mailboxes open across the program. That is every subject
 // still held, plus every supervised worker's address.

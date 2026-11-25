@@ -201,6 +201,8 @@ pub(crate) enum Broken {
     NoField {
         index: u16,
     },
+    /// A value is taken apart as a constructor it is not.
+    OpenedOther(View),
     /// The program names a constructor it does not list.
     NoCtor(VariantRef),
     /// The program builds or matches a constructor with another number of
@@ -329,6 +331,9 @@ impl fmt::Display for BadProgram {
             }
             Broken::NoField { index } => {
                 write!(f, "field {index} read from a value with no such field")
+            }
+            Broken::OpenedOther(v) => {
+                write!(f, "{v:?} taken apart as a constructor it is not")
             }
             Broken::NoCtor(v) => write!(f, "{}, which the program does not list", name(*v)),
             Broken::CtorFields { ctor, got, want } => {

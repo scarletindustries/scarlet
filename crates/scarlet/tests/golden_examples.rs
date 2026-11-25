@@ -306,6 +306,11 @@ suite! {
         // shared, both, the program's own and the same one over and over, and
         // records updated alone and while something else holds them.
         new_cells,
+        // Matches that are done with the value they matched, of every width an
+        // instruction has a form for and past it: alone and held by something
+        // else, with fields left out, rebuilt the same, larger and smaller,
+        // nested, guarded, and round a loop.
+        open_cells,
         // Backpassing: `x <- f(args)` desugars to a trailing callback.
         backpassing,
         // The pipe operator: `x |> f(args)` desugars to `f(x, args)`.

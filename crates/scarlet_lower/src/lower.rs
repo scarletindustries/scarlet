@@ -25,9 +25,7 @@
 //!
 //! A `Let`/`Seq` spine is not one of those. It is straight-line code, so
 //! [`Lower::atom`] splices its bindings onto the enclosing spine. Sealing it as
-//! a join would bind the value twice and hand Perceus the join's type instead
-//! of the value's, which turns a `Drop` that knows the value's shape into a
-//! generic one.
+//! a join would bind the value twice, and Perceus puts no drop inside a join.
 //!
 //! ## The constant pool is already final
 //!
@@ -532,8 +530,7 @@ impl Lower {
     ///
     /// A `Let`/`Seq` spine here is straight-line code, so its bindings splice
     /// onto the current spine and its tail becomes the atom. Sealing it as a
-    /// join would bind the value twice and hide its type behind the join's,
-    /// which turns a `Drop` that knows the value's shape into a generic one.
+    /// join would bind the value twice, and Perceus puts no drop inside a join.
     fn atom(&mut self, e: &TypedExpr) -> R<(Atom, RTy)> {
         let mut e = e;
         loop {
@@ -611,7 +608,6 @@ impl Lower {
                 Atom::Ctor {
                     variant: *variant,
                     fields,
-                    reuse: None,
                 }
             }
             TypedExpr::Array { elems, .. } => return Ok((self.array(elems, ty)?, ty)),

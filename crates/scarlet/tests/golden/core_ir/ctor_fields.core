@@ -4,7 +4,7 @@ fn main.main() -> :t0
   let %2:t1 = ctor 10.0(%0, %1)
   let %3:t0 = Field(0)(%2)
   let %4:t0 = Field(1)(%2)
-  drop %2 [ctor:2]
+  drop %2
   ret IntAdd(%3, %4)
 
 toplevel:

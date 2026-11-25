@@ -1,6 +1,6 @@
 # Type-directed memory and code generation for Scarlet
 
-**Status**: this was the design for the old bytecode VM, and the results below were measured on it. The old VM is gone. Perceus (tiers 2 and 4) carries on in `crates/scarlet_lower/src/perceus.rs` and the new VM, but the opcodes, `MiHeap`, `heap/space.rs` and the file and line references here are the old VM's. `docs/vm-design.md` has the plan for memory in the new VM.
+**Status**: this was the design for the old bytecode VM, and the results below were measured on it. The old VM is gone. Perceus's drops carry on in `crates/scarlet_lower/src/perceus.rs` and the new VM. Its reuse of a cell in place (tier 2) did too, until step 13 of `docs/perf-plan.md`. The opcodes, `MiHeap`, `heap/space.rs` and the file and line references here are the old VM's. `docs/vm-design.md` has the plan for memory in the new VM.
 
 Each tier comes from a peer-reviewed primary source. Putting them together follows Cyclone's proven template, fitted to Scarlet's constraints.
 

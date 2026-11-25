@@ -1,0 +1,157 @@
+B1(v0)
+C1(v0, 1)
+A1(v0)
+(
+  None1,
+  A1(v0)
+)
+B2(v1, v0)
+C2(v1, 2)
+A2(v1, v1)
+(
+  None2,
+  A2(v0, v1)
+)
+B3(v2, v1, v0)
+C3(v2v0, 3)
+A3(v2v0, v2v0, v2v0)
+(
+  None3,
+  A3(v0, v1, v2)
+)
+B4(v3, v2, v1, v0)
+C4(v3v1, 4)
+A4(v3v1, v3v1, v3v1, v3v1)
+(
+  None4,
+  A4(v0, v1, v2, v3)
+)
+B5(v4, v3, v2, v1, v0)
+C5(v4v2v0, 5)
+A5(v4v2v0, v4v2v0, v4v2v0, v4v2v0, v4v2v0)
+(
+  None5,
+  A5(v0, v1, v2, v3, v4)
+)
+B6(v5, v4, v3, v2, v1, v0)
+C6(v5v3v1, 6)
+A6(v5v3v1, v5v3v1, v5v3v1, v5v3v1, v5v3v1, v5v3v1)
+(
+  None6,
+  A6(v0, v1, v2, v3, v4, v5)
+)
+B7(v6, v5, v4, v3, v2, v1, v0)
+C7(v6v4v2v0, 7)
+A7(v6v4v2v0, v6v4v2v0, v6v4v2v0, v6v4v2v0, v6v4v2v0, v6v4v2v0, v6v4v2v0)
+(
+  None7,
+  A7(v0, v1, v2, v3, v4, v5, v6)
+)
+B8(v7, v6, v5, v4, v3, v2, v1, v0)
+C8(v7v5v3v1, 8)
+A8(v7v5v3v1, v7v5v3v1, v7v5v3v1, v7v5v3v1, v7v5v3v1, v7v5v3v1, v7v5v3v1, v7v5v3v1)
+(
+  None8,
+  A8(v0, v1, v2, v3, v4, v5, v6, v7)
+)
+B9(v8, v7, v6, v5, v4, v3, v2, v1, v0)
+C9(v8v6v4v2v0, 9)
+A9(v8v6v4v2v0, v8v6v4v2v0, v8v6v4v2v0, v8v6v4v2v0, v8v6v4v2v0, v8v6v4v2v0, v8v6v4v2v0, v8v6v4v2v0, v8v6v4v2v0)
+(
+  None9,
+  A9(v0, v1, v2, v3, v4, v5, v6, v7, v8)
+)
+B20(v19, v18, v17, v16, v15, v14, v13, v12, v11, v10, v9, v8, v7, v6, v5, v4, v3, v2, v1, v0)
+C20(
+  v19v17v15v13v11v9v7v5v3v1,
+  20
+)
+A20(
+  v19v17v15v13v11v9v7v5v3v1,
+  v19v17v15v13v11v9v7v5v3v1,
+  v19v17v15v13v11v9v7v5v3v1,
+  v19v17v15v13v11v9v7v5v3v1,
+  v19v17v15v13v11v9v7v5v3v1,
+  v19v17v15v13v11v9v7v5v3v1,
+  v19v17v15v13v11v9v7v5v3v1,
+  v19v17v15v13v11v9v7v5v3v1,
+  v19v17v15v13v11v9v7v5v3v1,
+  v19v17v15v13v11v9v7v5v3v1,
+  v19v17v15v13v11v9v7v5v3v1,
+  v19v17v15v13v11v9v7v5v3v1,
+  v19v17v15v13v11v9v7v5v3v1,
+  v19v17v15v13v11v9v7v5v3v1,
+  v19v17v15v13v11v9v7v5v3v1,
+  v19v17v15v13v11v9v7v5v3v1,
+  v19v17v15v13v11v9v7v5v3v1,
+  v19v17v15v13v11v9v7v5v3v1,
+  v19v17v15v13v11v9v7v5v3v1,
+  v19v17v15v13v11v9v7v5v3v1
+)
+(
+  None20,
+  A20(v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19)
+)
+41
+26
+56
+Node(
+  Leaf,
+  1,
+  1,
+  Node(
+    Leaf,
+    2,
+    2,
+    Node(Leaf, 1, 1, Leaf)
+  )
+)
+False
+(
+  Node(
+    Node(
+      Node(Leaf, 1, 1, Leaf),
+      2,
+      2,
+      Node(Leaf, 1, 1, Leaf)
+    ),
+    3,
+    3,
+    Node(
+      Node(Leaf, 1, 1, Leaf),
+      2,
+      2,
+      Node(Leaf, 1, 1, Leaf)
+    )
+  ),
+  Node(
+    Node(Leaf, 1, 1, Leaf),
+    2,
+    2,
+    Node(Leaf, 1, 1, Leaf)
+  )
+)
+(
+  Node(
+    Node(Leaf, 1, 1, Leaf),
+    2,
+    2,
+    Node(
+      Node(Leaf, 1, 1, Leaf),
+      2,
+      2,
+      Node(Leaf, 1, 1, Leaf)
+    )
+  ),
+  Node(Leaf, 1, 1, Leaf)
+)
+r[5, 4, 3, 2, 1]
+r[5, 4, 3, 2, 1]
+r[]
+Node(
+  Node(Leaf, 1, 1, Leaf),
+  2,
+  around,
+  Node(Leaf, 1, 1, Leaf)
+)
+24

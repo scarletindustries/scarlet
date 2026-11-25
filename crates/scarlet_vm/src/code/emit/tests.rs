@@ -102,8 +102,7 @@ fn an_audited_load_is_the_same_program_with_an_audit_before_each_instruction() {
 /// an instruction of each kind that holds one.
 #[test]
 fn a_call_holds_where_its_callee_starts() {
-    let src = "type P {\n\tP(a Int, b Int)\n}\n\
-        fn none() Int { 1 }\n\
+    let src = "fn none() Int { 1 }\n\
         fn early(n Int) Int { if n == 0 { none() + 0 } else { late(n - 1, 2, 3) } }\n\
         fn late(a Int, b Int, c Int) Int { early(a) + late(b, c, b) + two(a, b) + two(a, a) }\n\
         fn two(a Int, b Int) Int { early(a) + three(b, 1, 2) + a }\n\
@@ -115,9 +114,6 @@ fn a_call_holds_where_its_callee_starts() {
         fn over(a Int, b Int, c Int, d Int, e Int, f Int, g Int) Int {\n\
         \tmany(b, a, c, d, e, f, g) + 1\n}\n\
         fn round(n Int) Int { if n == 0 { 0 } else { round(n - 1) } }\n\
-        fn kept(n Int, acc Int) Int {\n\
-        \tp = P(n, acc)\n\
-        \tmatch p {\n\t\tP(a, b) -> if a == 0 { b } else { kept(a - 1, b + a) }\n\t}\n}\n\
         fn value(f fn(Int) Int, n Int) Int { if n == 0 { f(n) } else { f(n) + 1 } }\n\
         fn wide(f fn(Int, Int, Int, Int, Int, Int, Int) Int, n Int) Int {\n\
         \tif n == 0 { f(n, 1, 2, 3, 4, 5, 6) } else { f(1, 2, 3, 4, 5, 6, n) + 1 }\n}\n\
@@ -126,7 +122,7 @@ fn a_call_holds_where_its_callee_starts() {
         \tsmall = fn(n) { if n == 0 { k } else { small(n - 1) + 1 } }\n\
         \tlong = fn(a, b, c, d, e, f, g) {\n\
         \t\tif a == 0 { k + b + c + d + e + f + g } else { long(a - 1, b, c, d, e, f, g) + 1 }\n\t}\n\
-        \tprintln(early(3) + round(2) + kept(1, 2) + value(small, 1) + wide(long, 2))\n\
+        \tprintln(early(3) + round(2) + value(small, 1) + wide(long, 2))\n\
         }\n";
     let code = load(&program(src), Audit::Never).expect("the program loads");
     let mut seen = std::collections::BTreeSet::new();
@@ -149,8 +145,7 @@ fn a_call_holds_where_its_callee_starts() {
                 Ins::CallSelf { to, own, .. }
                 | Ins::CallSelfWide { to, own, .. }
                 | Ins::TailCallSelf { to, own, .. }
-                | Ins::TailCallSelfWide { to, own, .. }
-                | Ins::TailCallSelfKeep { to, own, .. } => Some((own, Some((to, false)))),
+                | Ins::TailCallSelfWide { to, own, .. } => Some((own, Some((to, false)))),
                 Ins::CallValue { own, .. }
                 | Ins::CallValueWide { own, .. }
                 | Ins::TailCallValue { own, .. }

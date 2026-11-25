@@ -88,9 +88,9 @@ pub fn run(program: &Program, host: &mut dyn Host, audit: Audit) -> Result<(), S
 }
 
 /// Run `program` as [`run`] does, and say what the run counted: how often
-/// each kind of instruction ran, and how many heap cells were made and
-/// reused. A run that stops early has no counts, because the counting is by
-/// whole blocks of instructions and a stop leaves some of them half run.
+/// each kind of instruction ran, how many heap cells were made, and how large
+/// the heap grew. A run that stops early has no counts, because the counting is
+/// by whole blocks of instructions and a stop leaves some of them half run.
 pub fn run_counted(program: &Program, host: &mut dyn Host, audit: Audit) -> Result<Counts, Stop> {
     let counted = code::load_counted(program, audit)?;
     let mut machine = exec::Machine::counting(&counted, host);
