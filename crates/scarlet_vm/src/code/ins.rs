@@ -155,6 +155,10 @@ instructions! {
     /// Check the whole heap ([`Heap::audit`](crate::heap::Heap::audit)). Only
     /// an audited load has these, one in front of every instruction.
     Audit,
+    /// Check that what `src` holds is what `may` says it may be. Only an
+    /// audited load has these, after an instruction that writes a value whose
+    /// type says something of it, and where a function starts.
+    AuditMade { src: Src<R>, may: Makes },
     Const { dst: Dst<R>, value: Value },
     /// A new string. It is made each time the instruction runs, until
     /// constants get a shared area of their own.
@@ -472,9 +476,10 @@ impl<R: Names> Ins<R> {
     }
 }
 
-/// What the registers an instruction writes may then hold.
+/// What the registers an instruction writes may then hold, and what a value may
+/// be by its type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum Makes {
+pub(crate) enum Makes {
     /// Nothing that has a count.
     NoCell,
     /// A number, which is a cell when it is a big Int.

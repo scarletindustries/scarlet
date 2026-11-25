@@ -2,7 +2,7 @@ use super::*;
 use crate::testkit::{bind, ctor, func, local};
 use crate::{ConstId, FuncIdx, GlobalSlot, JoinId};
 use scarlet_ir::TypeId;
-use scarlet_ir::rty::{PrimIds, RTy};
+use scarlet_ir::rty::{PrimIds, RTy, Repr};
 
 /// The types the tests' locals have: `Int`, `String`, and a type that is on the
 /// heap.
@@ -14,7 +14,7 @@ fn pool() -> ResolvedPool {
     let mut pool = ResolvedPool::new(PrimIds::default());
     let prims = pool.prims();
     for id in [prims.int, prims.string, TypeId(40)] {
-        pool.mk_con(id, &[]).unwrap();
+        pool.mk_con(id, Repr::Counted, &[]).unwrap();
     }
     pool
 }

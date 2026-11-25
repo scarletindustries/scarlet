@@ -181,7 +181,7 @@ pub(crate) enum Broken {
     /// An instruction names a register, a label or a function that was given
     /// no place.
     NoPlace,
-    /// A value whose type is not one of the program's.
+    /// A value that has no type, or whose type is not one of the program's.
     NoType,
     /// A frame the stack does not have, like the one a wrong link returns to.
     NoWindow,
@@ -266,6 +266,9 @@ pub(crate) enum Broken {
     /// only one to a cell that had already been freed. Some count went down
     /// once too often.
     DeadCell,
+    /// A run that was asked to check each value found a cell where the value's
+    /// type, or the instruction that wrote it, says there is no such cell.
+    UnexpectedCell(View),
     /// A run that was asked to check its heap found something wrong with it.
     Audit(AuditFault),
     /// A run that was asked to check its heap ended, gave up everything it
@@ -318,7 +321,9 @@ impl fmt::Display for BadProgram {
             Broken::JumpsBack => f.write_str("a jump to an instruction before it"),
             Broken::RunsOff => f.write_str("a function that goes on past its last instruction"),
             Broken::NoPlace => f.write_str("an instruction that names something with no place"),
-            Broken::NoType => f.write_str("a value whose type the program does not have"),
+            Broken::NoType => {
+                f.write_str("a value with no type, or with one that the program does not have")
+            }
             Broken::NoWindow => f.write_str("a frame that the stack does not have"),
             Broken::NegativeCapture => f.write_str("a capture with a negative index"),
             Broken::ToplevelCapture => f.write_str("a toplevel reads a capture"),
@@ -402,6 +407,10 @@ impl fmt::Display for BadProgram {
             }
             Broken::RangeCell => f.write_str("a range cell that is not a range"),
             Broken::DeadCell => f.write_str("a reference to a cell that was already freed"),
+            Broken::UnexpectedCell(v) => write!(
+                f,
+                "{v:?} where the value's type, or the instruction that wrote it, says there is no such cell"
+            ),
             Broken::Audit(fault) => write!(f, "{fault}"),
             Broken::CellsLeft { cells } => write!(
                 f,

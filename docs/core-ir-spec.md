@@ -52,7 +52,7 @@ pub enum Atom {
 pub enum Callee { Known(FuncIdx), Self_, Local(LocalId) }
 ```
 
-Every operand is a `LocalId`, every intermediate value is bound by a `Let`, and every bind has a type. A function's name travels next to it on `LoweredFn`, not on `CoreFn`.
+Every operand is a `LocalId`, every intermediate value is bound by a `Let`, and every bind has a type. A type is an `RTy`, an index into `Program::pool`, and `ResolvedPool::repr` says whether its values can be heap cells (`Repr`): a Float and a type whose constructors have no fields are a `Word`, and every other type is `Counted`. The compiler gives each named type its `Repr` when it gives it a `TypeId`, so no type in the pool is without one. A function's name travels next to it on `LoweredFn`, not on `CoreFn`.
 
 The plan also gave each bind a `region` (frame, process or immortal) for mode inference and an `alias` (unique or shared) for Perceus. Neither was built. Perceus records what it decides in the IR instead, as `Drop` nodes.
 
@@ -60,7 +60,7 @@ The plan also gave each bind a `region` (frame, process or immortal) for mode in
 
 1. **`lower(&TypedProgram) → CoreProgram`** (`crates/scarlet_lower/src/lower.rs`). This walks the elaborator's typed IR and builds ANF. Each subexpression becomes a `Let`, so the evaluation order that was implicit in the tree becomes explicit `Let` nesting. The plan had `lower` walk the typechecked AST and resolve each type through the inference engine. `docs/typed-ir-spec.md` explains why it takes the typed IR instead, with every type already resolved.
 2. **`immediates::rewrite`** turns the prelude's `True`, `False` and `Nil` constructors into `Atom::Bool` and `Atom::Nil`, and a `match` on a Bool into an `If`. This pass wasn't in the plan.
-3. **`perceus(pool, locals, f)`** (`crates/scarlet_lower/src/perceus.rs`) runs Koka's algorithm on Core. A backward linear scan finds each last use and puts a `Drop` there. It also paired each drop with a later constructor of the same shape, so the constructor could reuse the cell, until step 13 of `docs/perf-plan.md`. The VM takes a cell apart in one instruction instead, and the next constructor of its size gets the space (`docs/vm-design.md`, "Running code").
+3. **`perceus(pool, locals, f)`** (`crates/scarlet_lower/src/perceus.rs`) runs Koka's algorithm on Core. A backward linear scan finds each last use and puts a `Drop` there. A value whose type is a `Repr::Word` gets none, and neither does what a `match` arm found to be a constructor with no fields, because neither can be a heap cell. A function that holds a value which may be a handle and which no `Drop` gives up (`LoweredFn::undropped`) keeps those `Drop`s, until Perceus walks into joins: how long each register is held there decides when that value is released. It also paired each drop with a later constructor of the same shape, so the constructor could reuse the cell, until step 13 of `docs/perf-plan.md`. The VM takes a cell apart in one instruction instead, and the next constructor of its size gets the space (`docs/vm-design.md`, "Running code").
 4. **`tail_args::schedule`** computes the arguments of each tail call in the order that lets each take the place of the parameter it replaces. It moves only constants and Int and Float operations. This pass wasn't in the plan.
 5. **The VM** loads the result and turns each function into register instructions once, when the program loads. The plan had an `emit` step to stack bytecode here instead.
 

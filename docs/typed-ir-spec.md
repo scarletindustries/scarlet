@@ -92,6 +92,8 @@ fn is_heap(t: RTy) -> bool {
 }
 ```
 
+That is the function as it was planned. `is_heap` still answers this, for Perceus. Whether a value can be a heap cell at all is a second question, and `ResolvedPool::repr` answers it from what the node itself holds (`docs/core-ir-spec.md`).
+
 This codebase has done it before. `types: phantom-tag ArenaSlice by pool so cross-pool index is a type error` made `ArenaSlice<P>` carry which pool it indexes. `Ty` was the index that never got the same treatment, and it was the one that mattered.
 
 ### `lower`'s signature enforces it

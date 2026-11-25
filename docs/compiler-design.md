@@ -113,7 +113,7 @@ A public value whose type still holds a variable nothing generalised, like a `co
 fn build_program(modules: &[&CleanModule], defs: &dyn TypeDefs, main: Option<&ValueName>) -> Result<Program, LinkError>
 ```
 
-Lowering runs once per program, over every clean module in dependency order. It hands out the program-wide ids: `FuncIdx`, global slots, `TypeId`s and the constant pool. For each module it:
+Lowering runs once per program, over every clean module in dependency order. It hands out the program-wide ids: `FuncIdx`, global slots, `TypeId`s and the constant pool. A `TypeId` comes with the type's `Repr`, read from its definition, which says whether its values can be heap cells. A named type that has no definition is a `LinkError`. For each module it:
 
 - turns each function, lambda and constructor or builtin used as a value into a `TypedFn` of typed IR
 - runs arguments into `let`s in the order they were written, when that isn't their parameters' order

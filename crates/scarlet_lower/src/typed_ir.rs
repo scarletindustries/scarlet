@@ -416,9 +416,8 @@ pub struct TypedFn {
 ///
 /// Those locals have no [`TypedExpr`] to read a type from, and the pool can't
 /// change by the time `lower` runs, so the elaborator interns them up front.
-/// They must be the *real* prelude nodes, because `perceus` asks `is_heap`
-/// about them, and `Bool` is a nominal type rather than a primitive, so it
-/// counts as a heap type.
+/// They must be the *real* prelude nodes, because what is dropped is decided by
+/// what the pool says of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TempTys {
     pub(crate) int: RTy,

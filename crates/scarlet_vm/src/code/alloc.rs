@@ -14,9 +14,7 @@
 //! names its register, so a value keeps it until its `Drop`, unless that `Drop`
 //! does nothing.
 
-use scarlet_ir::rty::Prim;
-
-use super::ins::{Ins, Lists, VReg};
+use super::ins::{Ins, Lists, Makes, VReg};
 use super::live::Held;
 use super::translate::{Draft, Step};
 use super::{ReadsClosure, Reg, Room, Unfit};
@@ -31,10 +29,9 @@ pub(super) struct Assigned {
     pub(super) labels: Vec<usize>,
     /// The register of each value, by its number, when it has one.
     pub(super) regs: Vec<Option<Reg>>,
-    /// [`Draft::prims`].
-    pub(super) prims: Vec<Option<Prim>>,
-    /// How many parameters it has.
-    pub(super) params: usize,
+    /// [`Draft::kinds`].
+    pub(super) kinds: Vec<Option<Makes>>,
+    pub(super) params: Vec<VReg>,
     /// How many registers its frame has.
     pub(super) own: Room,
     /// What it reads of the closure it runs as.
@@ -71,8 +68,8 @@ pub(super) fn allocate(draft: Draft, held: &Held) -> Result<Assigned, Unfit> {
         lists: draft.lists,
         labels: draft.labels,
         regs,
-        prims: draft.prims,
-        params: draft.params.len(),
+        kinds: draft.kinds,
+        params: draft.params,
         own: room(end),
         closure: draft.closure,
     };

@@ -9,9 +9,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{Atom, CoreBind, CoreExpr, CoreFn, CorePat, JoinId, LocalId, PrimOp};
+use super::{Atom, CoreBind, CoreExpr, CoreFn, CorePat, JoinId, LocalId};
 use crate::program::InternalLinkError;
 use crate::typed_ir::{RTy, ResolvedPool};
+use scarlet_ir::rty::Repr;
 use scarlet_ir::tivec::TiVec;
 
 /// A function with its drops.
@@ -22,75 +23,53 @@ pub(crate) struct Dropped {
 }
 
 /// Run Perceus on one lowered function. `locals` is the type of every local
-/// `lower` made for it, and `pool` says which of those types live on the heap.
-/// Its types are always resolved, so no unsolved variable can get here and
-/// make `is_heap` answer `false` by accident.
+/// `lower` made for it, and `pool` says which of those types can be cells. Its
+/// types are always resolved, so no unsolved variable can get here and make
+/// `is_heap` answer `false` by accident.
 ///
 /// A bind pinned to a global slot is never released here, because function
 /// bodies read the global for as long as the program runs, long after the
 /// toplevel's last read of it.
+///
+/// A value that can be no cell gets no drop, unless the function holds one that
+/// may be a handle and that no drop gives up. Which registers the VM gives out
+/// there says when that one is released, and a drop says how long a register is
+/// held. So there each value keeps its drop, and the VM leaves out those of
+/// values that are no cell.
 pub(crate) fn perceus(
     pool: &ResolvedPool,
     locals: &TiVec<LocalId, RTy>,
     f: CoreFn,
 ) -> Result<Dropped, InternalLinkError> {
-    let CoreFn {
-        params,
-        body,
-        ret_ty,
-    } = f;
-    let mut cx = Perceus::new(pool, locals);
-    for p in &params {
-        cx.record_bind(p);
-    }
-    let (body, live) = cx.drop_pass(body)?;
-    // Params are owned on entry. Any the body doesn't read drop at its head,
-    // so the frame still releases everything it owns.
-    let dead_params: Vec<LocalId> = params
-        .iter()
-        .map(|p| p.id)
-        .filter(|id| !live.contains(id))
-        .collect();
-    let body = cx.wrap_drops(&dead_params, body)?;
+    let mut cx = Perceus::new(pool, locals, Words::Bare);
+    let core = cx.function(f)?;
+    let core = if cx.undropped && cx.left_bare {
+        Perceus::new(pool, locals, Words::Dropped).function(core)?
+    } else {
+        core
+    };
     Ok(Dropped {
-        core: CoreFn {
-            params,
-            body,
-            ret_ty,
-        },
+        core,
         undropped: cx.undropped,
     })
 }
 
-/// Whether what `atom` gives holds nothing, as a constant and a Bool do not, or
-/// only what something else goes on holding: a global, or the closure that the
-/// frame runs as.
+/// Whether a value that can be no cell gets a drop.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Words {
+    Bare,
+    Dropped,
+}
+
+/// Whether what `atom` gives holds nothing, as a constant does not, or only what
+/// something else goes on holding: a global, or the closure that the frame runs
+/// as.
 fn holds_nothing(atom: &Atom) -> bool {
     match atom {
         Atom::Const(_) | Atom::Nil | Atom::Bool(_) | Atom::Load(_) => true,
         Atom::Ctor { fields, .. } => fields.is_empty(),
         Atom::Closure { captures, .. } => captures.is_empty(),
-        Atom::PrimOp { op, .. } => matches!(
-            op,
-            PrimOp::IntEq
-                | PrimOp::IntNe
-                | PrimOp::IntLt
-                | PrimOp::IntLe
-                | PrimOp::IntGt
-                | PrimOp::IntGe
-                | PrimOp::FloatLt
-                | PrimOp::FloatLe
-                | PrimOp::FloatGt
-                | PrimOp::FloatGe
-                | PrimOp::Lt
-                | PrimOp::Le
-                | PrimOp::Gt
-                | PrimOp::Ge
-                | PrimOp::Eq
-                | PrimOp::Ne
-                | PrimOp::Not
-        ),
-        Atom::Local(_) | Atom::Call { .. } | Atom::Intrinsic { .. } => false,
+        Atom::Local(_) | Atom::PrimOp { .. } | Atom::Call { .. } | Atom::Intrinsic { .. } => false,
     }
 }
 
@@ -109,6 +88,12 @@ struct Perceus<'p> {
     cont_live: BTreeMap<JoinId, Live>,
     /// The locals whose type is a variable and whose value holds nothing.
     nothing: BTreeSet<LocalId>,
+    /// The locals that are a constructor with no fields in the arm being walked,
+    /// because its pattern says so.
+    plain: BTreeSet<LocalId>,
+    words: Words,
+    /// Whether a value got no drop so far because it can be no cell.
+    left_bare: bool,
     /// Whether a value that may be a handle, or hold one, got no drop so far.
     undropped: bool,
 }
@@ -117,6 +102,8 @@ struct Perceus<'p> {
 enum Dead {
     /// It gets a drop.
     Drops,
+    /// It needs none, because it can be no cell.
+    Bare,
     /// It needs none: it holds nothing, or something else goes on holding it.
     Nothing,
     /// It needs one and gets none, because its type does not say what it is.
@@ -156,15 +143,43 @@ enum SpineRhs {
 }
 
 impl<'p> Perceus<'p> {
-    fn new(pool: &'p ResolvedPool, locals: &'p TiVec<LocalId, RTy>) -> Self {
+    fn new(pool: &'p ResolvedPool, locals: &'p TiVec<LocalId, RTy>, words: Words) -> Self {
         Perceus {
             pool,
             locals,
             pinned: BTreeSet::new(),
             cont_live: BTreeMap::new(),
             nothing: BTreeSet::new(),
+            plain: BTreeSet::new(),
+            words,
+            left_bare: false,
             undropped: false,
         }
+    }
+
+    fn function(&mut self, f: CoreFn) -> Result<CoreFn, InternalLinkError> {
+        let CoreFn {
+            params,
+            body,
+            ret_ty,
+        } = f;
+        for p in &params {
+            self.record_bind(p);
+        }
+        let (body, live) = self.drop_pass(body)?;
+        // Params are owned on entry. Any the body doesn't read drop at its head,
+        // so the frame still releases everything it owns.
+        let dead_params: Vec<LocalId> = params
+            .iter()
+            .map(|p| p.id)
+            .filter(|id| !live.contains(id))
+            .collect();
+        let body = self.wrap_drops(&dead_params, body)?;
+        Ok(CoreFn {
+            params,
+            body,
+            ret_ty,
+        })
     }
 
     fn record_bind(&mut self, b: &CoreBind) {
@@ -183,7 +198,11 @@ impl<'p> Perceus<'p> {
         Ok(if self.pinned.contains(&id) {
             Dead::Nothing
         } else if self.pool.is_heap(ty)? {
-            Dead::Drops
+            let bare = self.pool.repr(ty)? == Repr::Word || self.plain.contains(&id);
+            match self.words {
+                Words::Bare if bare => Dead::Bare,
+                Words::Bare | Words::Dropped => Dead::Drops,
+            }
         } else if self.pool.prim_of(ty)?.is_some() || self.nothing.contains(&id) {
             Dead::Nothing
         } else {
@@ -239,10 +258,10 @@ impl<'p> Perceus<'p> {
         Ok(())
     }
 
-    /// Whether a value of `b`'s type may be a handle or hold one. A number and a
-    /// string hold nothing.
+    /// Whether a value of `b`'s type may be a handle or hold one. One that is no
+    /// cell holds nothing, and neither does a number or a string.
     fn may_hold(&self, b: &CoreBind) -> Result<bool, InternalLinkError> {
-        Ok(self.pool.prim_of(b.ty)?.is_none())
+        Ok(self.pool.repr(b.ty)? == Repr::Counted && self.pool.prim_of(b.ty)?.is_none())
     }
 
     /// Transform `e` and return `(e', live)`, where `live` is the locals from
@@ -401,7 +420,7 @@ impl<'p> Perceus<'p> {
         let mut lowered: Vec<Arm> = Vec::with_capacity(arms.len());
         for (pat, body) in arms {
             pat.binds().for_each(|b| self.record_bind(b));
-            let (body, mut live) = self.drop_pass(body)?;
+            let (body, mut live) = self.in_arm(scrut, &pat, |cx| cx.drop_pass(body))?;
             let bound = || pat.binds().map(|b| b.id);
             let dead_binders = bound().filter(|b| !live.contains(b)).collect();
             for b in bound() {
@@ -424,7 +443,7 @@ impl<'p> Perceus<'p> {
                     drops.push(scrut);
                 }
                 drops.extend(a.dead_binders);
-                let body = self.wrap_drops(&drops, a.body)?;
+                let body = self.in_arm(scrut, &a.pat, |cx| cx.wrap_drops(&drops, a.body))?;
                 Ok::<_, InternalLinkError>((a.pat, body))
             })
             .collect::<Result<_, _>>()?;
@@ -433,9 +452,19 @@ impl<'p> Perceus<'p> {
         Ok((CoreExpr::Match { scrut, arms, ty }, live))
     }
 
+    /// Run `f` in an arm for values of `scrut` that fit `pat`.
+    fn in_arm<T>(&mut self, scrut: LocalId, pat: &CorePat, f: impl FnOnce(&mut Self) -> T) -> T {
+        let plain = matches!(pat, CorePat::Ctor { fields, .. } if fields.is_empty());
+        let first = plain && self.plain.insert(scrut);
+        let out = f(self);
+        if first {
+            self.plain.remove(&scrut);
+        }
+        out
+    }
+
     /// Put `Drop{x}` in front of `body` for each `x` in `dead` that gets one,
-    /// going in reverse so the printed order matches `dead`. A number gets none,
-    /// because dropping one does nothing but still costs an instruction.
+    /// going in reverse so the printed order matches `dead`.
     fn wrap_drops(
         &mut self,
         dead: &[LocalId],
@@ -449,6 +478,7 @@ impl<'p> Perceus<'p> {
                         body: Box::new(body),
                     };
                 }
+                Dead::Bare => self.left_bare = true,
                 Dead::Nothing => {}
                 Dead::Left => self.undropped = true,
             }

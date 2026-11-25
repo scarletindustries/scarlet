@@ -656,6 +656,62 @@ fn an_audit_instruction_stops_where_a_count_is_wrong() {
     );
 }
 
+/// A check of what was written passes for what it says may be there and stops
+/// the run for a cell that may not. A big Int is a cell that an Int may be.
+#[test]
+fn a_check_stops_where_a_cell_is_not_what_its_type_says() {
+    let check = |may| Ins::AuditMade {
+        src: Src(r(0)),
+        may,
+    };
+    let kinds = [Makes::NoCell, Makes::Int, Makes::Any];
+    // For each of the kinds, whether the run stops.
+    let stops = |given: fn(&mut Heap) -> Value| {
+        kinds.map(|may| {
+            let (mut view, mut stopped) = (None, None);
+            let body = vec![check(may), ret(0)];
+            after_given(
+                1,
+                body,
+                |heap| {
+                    let v = given(heap);
+                    view = Some(v.view());
+                    Some(v)
+                },
+                |m, got| match got {
+                    Ok(v) => m.rest.release(v).expect("a live value"),
+                    Err(why) => stopped = Some(why),
+                },
+            );
+            if stopped.is_some() {
+                let why = view.map(|v| Stop::broken(Broken::UnexpectedCell(v)));
+                assert_eq!(stopped, why);
+            }
+            stopped.is_some()
+        })
+    };
+    let big = |heap: &mut Heap| {
+        let n = int::op(
+            heap,
+            Arith::Mul,
+            Value::int(1 << 49).expect("small"),
+            Value::int(8).expect("small"),
+        );
+        n.expect("room")
+    };
+    for fine in [
+        |_: &mut Heap| Value::NIL,
+        |_: &mut Heap| Value::bool(true),
+        |_: &mut Heap| Value::float(1.5),
+        |_: &mut Heap| Value::int(7).expect("small"),
+    ] {
+        assert_eq!(stops(fine), [false, false, false]);
+    }
+    assert_eq!(stops(big), [true, false, false]);
+    let tuple = |heap: &mut Heap| Value::cell(heap.tuple(&[Value::NIL]).expect("room"));
+    assert_eq!(stops(tuple), [true, true, false]);
+}
+
 /// An instruction that takes another reference to a freed cell stops there,
 /// before it writes the value anywhere.
 #[test]

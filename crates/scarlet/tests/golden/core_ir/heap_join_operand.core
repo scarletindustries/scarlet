@@ -5,7 +5,6 @@ fn main.g(%0:t0) -> :t1
       drop %2
       ret %1
     | 10.1() ->
-      drop %0
       ret c0
 
 fn main.f(%0:t2) -> :t1
@@ -16,7 +15,6 @@ fn main.f(%0:t2) -> :t1
       ret ctor 10.0(%1, %2)
     else
       ret ctor 10.1()
-  drop %0
   ret call fn#0(%3)
 
 fn main.main() -> :t1

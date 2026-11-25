@@ -33,9 +33,9 @@ fn rty_prints_the_bare_pool_index() {
 #[test]
 fn primitives_are_not_heap() {
     let mut p = pool();
-    let int = p.mk_con(TypeId(1), &[]).unwrap();
-    let float = p.mk_con(TypeId(2), &[]).unwrap();
-    let string = p.mk_con(TypeId(3), &[]).unwrap();
+    let int = p.mk_con(TypeId(1), Repr::Counted, &[]).unwrap();
+    let float = p.mk_con(TypeId(2), Repr::Word, &[]).unwrap();
+    let string = p.mk_con(TypeId(3), Repr::Counted, &[]).unwrap();
     assert_eq!(p.prim_of(int).unwrap(), Some(Prim::Int));
     assert_eq!(p.prim_of(float).unwrap(), Some(Prim::Float));
     assert_eq!(p.prim_of(string).unwrap(), Some(Prim::String));
@@ -48,8 +48,8 @@ fn primitives_are_not_heap() {
 #[test]
 fn user_types_tuples_and_functions_are_heap() {
     let mut p = pool();
-    let int = p.mk_con(TypeId(1), &[]).unwrap();
-    let user = p.mk_con(TypeId(9), &[]).unwrap();
+    let int = p.mk_con(TypeId(1), Repr::Counted, &[]).unwrap();
+    let user = p.mk_con(TypeId(9), Repr::Counted, &[]).unwrap();
     let tup = p.mk_tuple(&[int, int]).unwrap();
     let fun = p.mk_fun(&[int], int).unwrap();
     assert!(p.is_heap(user).unwrap());
@@ -67,11 +67,36 @@ fn a_bound_variable_is_polymorphic_not_missing() {
     assert_eq!(p.node(b).unwrap(), ResolvedNode::Bound(0));
 }
 
+/// Every kind of type says whether its values can be cells. A named one says
+/// what it was made with, whatever its arguments, and nothing else is ever a
+/// word. A type from another pool has no answer.
+#[test]
+fn every_type_says_whether_its_values_can_be_cells() {
+    let mut p = pool();
+    let int = p.mk_con(TypeId(1), Repr::Counted, &[]).unwrap();
+    let float = p.mk_con(TypeId(2), Repr::Word, &[]).unwrap();
+    let bool_ = p.mk_con(TypeId(5), Repr::Word, &[]).unwrap();
+    let any = p.mk_bound(0).unwrap();
+    let tag_of_int = p.mk_con(TypeId(6), Repr::Word, &[int]).unwrap();
+    let box_of_bool = p.mk_con(TypeId(7), Repr::Counted, &[bool_]).unwrap();
+    let pair = p.mk_tuple(&[bool_, float]).unwrap();
+    let unit = p.mk_tuple(&[]).unwrap();
+    let test = p.mk_fun(&[bool_], bool_).unwrap();
+    for word in [float, bool_, tag_of_int] {
+        assert_eq!(p.repr(word), Ok(Repr::Word), "{word}");
+    }
+    for counted in [int, any, box_of_bool, pair, unit, test] {
+        assert_eq!(p.repr(counted), Ok(Repr::Counted), "{counted}");
+    }
+    let foreign = RTy(9);
+    assert_eq!(p.repr(foreign), Err(ForeignRTy(foreign)));
+}
+
 #[test]
 fn children_slices_do_not_alias() {
     let mut p = pool();
-    let int = p.mk_con(TypeId(1), &[]).unwrap();
-    let str_ = p.mk_con(TypeId(3), &[]).unwrap();
+    let int = p.mk_con(TypeId(1), Repr::Counted, &[]).unwrap();
+    let str_ = p.mk_con(TypeId(3), Repr::Counted, &[]).unwrap();
     let a = p.mk_tuple(&[int, str_]).unwrap();
     let b = p.mk_tuple(&[str_, int]).unwrap();
     assert_eq!(p.tuple_elems(a).unwrap(), &[int, str_]);
@@ -85,9 +110,9 @@ fn children_slices_do_not_alias() {
 #[test]
 fn con_args_and_fun_shape() {
     let mut p = pool();
-    let int = p.mk_con(TypeId(1), &[]).unwrap();
-    let nil = p.mk_con(TypeId(7), &[]).unwrap();
-    let res = p.mk_con(TypeId(8), &[int, nil]).unwrap();
+    let int = p.mk_con(TypeId(1), Repr::Counted, &[]).unwrap();
+    let nil = p.mk_con(TypeId(7), Repr::Counted, &[]).unwrap();
+    let res = p.mk_con(TypeId(8), Repr::Counted, &[int, nil]).unwrap();
     assert_eq!(p.con_arg(res, 0).unwrap(), Some(int));
     assert_eq!(p.con_arg(res, 1).unwrap(), Some(nil));
     assert_eq!(p.con_arg(res, 2).unwrap(), None);

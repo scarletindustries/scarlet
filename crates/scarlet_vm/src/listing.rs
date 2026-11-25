@@ -20,8 +20,8 @@ use scarlet_ir::intrinsic::Intrinsic;
 use crate::code::{self, Code, Entry, Ins, Reg};
 use crate::code::{
     Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, DeadList, Dst, DstList, EntryPc, Hit,
-    Last, LookList, Looks, MaybeDst, Newline, Pc, Room, ShareList, Shared, Shares, Src, Taken,
-    TextId, Why, WhyId,
+    Last, LookList, Looks, Makes, MaybeDst, Newline, Pc, Room, ShareList, Shared, Shares, Src,
+    Taken, TextId, Why, WhyId,
 };
 use crate::frame::FIRST;
 use crate::heap::Ctor;
@@ -450,4 +450,4 @@ macro_rules! debugged {
     )*};
 }
 
-debugged!(BitsOp, Intrinsic);
+debugged!(BitsOp, Intrinsic, Makes);

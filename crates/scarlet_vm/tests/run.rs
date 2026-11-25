@@ -1,6 +1,8 @@
 //! These tests run programs end to end. Each is compiled from Scarlet source
 //! and run by the VM, and the test checks exactly what it prints.
 
+use scarlet_core::core_ir::{Atom, CoreExpr};
+use scarlet_ir::rty::RTy;
 use scarlet_vm::{Audit, OsHost, Stop};
 
 fn compile(src: &str) -> scarlet_core::core_ir::Program {
@@ -1762,6 +1764,11 @@ fn first_connection_ends_before_the_new_field_runs(
          \tz = kept(x)\n\
          \tif z == z {{ redial(port) }} else {{ None }}\n\
          }}\n\
+         fn chosen(b Bool, _x a, port Int) Option(socket::Socket) {{\n\
+         \tc = kept(b)\n\
+         \tnew = redial(port)\n\
+         \tif c {{ new }} else {{ None }}\n\
+         }}\n\
          fn replace(_x a, y a, n Int, port Int) Option(socket::Socket) {{\n\
          \tif n == 0 {{ redial(port) }} else {{ replace(y, y, n - 1, port) }}\n\
          }}\n\
@@ -1881,6 +1888,19 @@ fn a_tail_call_closes_a_handle_the_turn_is_done_with() {
     assert!(ends("replace(held, None, 1, port)", 10_000));
     assert!(ends("replace(held, None, 2, port)", 10_000));
     assert!(!ends("trade(held, None, 3, port)", 200));
+}
+
+/// A value that nothing drops goes when its register is next written, and a
+/// Bool's drop says how long the Bool holds a register of its own. So a function
+/// that holds a handle in such a value keeps that drop. Here the Bool that is
+/// made from the parameter gets the register of the handle, and the connection
+/// is closed before `redial` runs.
+#[test]
+fn a_bool_keeps_its_register_where_nothing_drops_a_handle() {
+    assert!(first_connection_ends_before_the_new_field_runs(
+        "held = h.conn\n\tport = h.port\n\tHeld(chosen(True, held, port), 1)",
+        std::time::Duration::from_secs(10),
+    ));
 }
 
 /// The listing shows a write with the array it takes marked, as it marks an
@@ -2809,7 +2829,189 @@ fn a_run_audited_before_every_instruction_is_the_same_run() {
     assert!(out.ends_with("(<<2, 120>>, True)\n[a, b]\n"), "{out}");
     let each = scarlet_vm::run_counted(&program, &mut host, Audit::EachInstruction);
     assert_eq!(each, Ok(counts.clone()));
-    assert!(!counts.ops.iter().any(|(name, _)| *name == "Audit"));
+    assert!(!counts.ops.iter().any(|(name, _)| name.starts_with("Audit")));
+}
+
+/// Values of every kind of type, each read out of a cell, an array, a map and a
+/// tuple, given by a call, passed through a function value, and made in a join:
+/// enums with no fields and with some, Floats, Bools, `Nil`, Ints small and big,
+/// recursive and generic types and one that holds itself at another type,
+/// functions, and generic code given each.
+const EVERY_TYPE: &str = "import scarlet/array\n\
+    import scarlet/map\n\
+    type Shade {\n\tDark\n\tLight\n}\n\
+    pub opaque type One {\n\tOne\n}\n\
+    type Mixed {\n\tPlain\n\tHeld(n Int)\n\tOther\n}\n\
+    type Tree {\n\tLeaf\n\tNode(l Tree, shade Shade, n Int, r Tree)\n}\n\
+    type Proxy(a) {\n\tProxy\n\tLost\n}\n\
+    type Box(a) {\n\tBox(value a)\n}\n\
+    type Nest(a) {\n\tFlat(x a)\n\tDeep(inner Nest((a, a)))\n}\n\
+    type All {\n\tAll(a Shade, b One, c Mixed, d Float, e Bool, f Nil, g Int, h Option(Shade), i Proxy(Int), j fn(Shade) Shade)\n}\n\
+    fn same(x a) a { x }\n\
+    fn twice(f fn(a) a, x a) a { f(f(x)) }\n\
+    fn pick(c Bool, x a, y a) a {\n\
+    \tz = if c { x } else { same(y) }\n\
+    \tw = if c && twice(fn(b) { !b }, c) { z } else { if c { y } else { z } }\n\
+    \tsame(w)\n}\n\
+    fn out(b Box(a)) a { b.value }\n\
+    fn first(xs Array(a), or_else a) a { xs[0] or or_else }\n\
+    fn depth(n Nest(a)) Int {\n\
+    \tmatch n {\n\t\tFlat(_) -> 0\n\t\tDeep(Flat(_)) -> 1\n\t\tDeep(Deep(_)) -> 2\n\t}\n}\n\
+    fn deepen(x a) Nest(a) { Deep(Deep(Flat(((x, x), (x, x))))) }\n\
+    fn through(x a, n Int) a {\n\
+    \tif n == 0 { x } else { out(Box(pick(n % 2 == 0, through(x, n - 1), first([x, x], x)))) }\n}\n\
+    fn flip(s Shade) Shade {\n\tmatch s {\n\t\tDark -> Light\n\t\tLight -> Dark\n\t}\n}\n\
+    fn add(t Tree, n Int) Tree {\n\
+    \tmatch t {\n\
+    \t\tLeaf -> Node(Leaf, if n % 2 == 0 { Dark } else { Light }, n, Leaf)\n\
+    \t\tNode(l, s, m, r) -> if n < m { Node(add(l, n), flip(s), m, r) } else { Node(l, s, m, add(r, n)) }\n\
+    \t}\n}\n\
+    fn shades(t Tree, acc Array(Shade)) Array(Shade) {\n\
+    \tmatch t {\n\t\tLeaf -> acc\n\t\tNode(l, s, _, r) -> shades(r, [..shades(l, acc), s])\n\t}\n}\n\
+    fn mixed(m Mixed, s Shade) Int {\n\
+    \tmatch m {\n\
+    \t\tPlain -> leave(s, 1, 'x')\n\
+    \t\tHeld(n) -> leave(flip(s), n, 'y')\n\
+    \t\tOther -> {\n\t\t\tagain = same(m)\n\t\t\tif again == m { 3 } else { 4 }\n\t\t}\n\
+    \t}\n}\n\
+    fn leave(s Shade, n Int, name String) Int { if s == Dark { n } else { n + 10 * array::length([name]) } }\n\
+    fn turns(n Int, s Shade, x Float, ok Bool, big Int, kept Array(Float)) (Shade, Float, Bool, Int) {\n\
+    \tif n == 0 { (s, x, ok, big) } else {\n\
+    \t\ty = kept[n % 2] or 0.5\n\
+    \t\tf = if ok { flip } else { same }\n\
+    \t\tturns(n - 1, f(s), x + y, !ok, big * 3, kept)\n\t}\n}\n\
+    fn away(n Int, s Shade, x Float) Int { mixed(if x > 2.0 { Held(n) } else { Plain }, s) }\n\
+    pub fn main() {\n\
+    \ta = All(Dark, One, Other, 1.5, True, Nil, 7, Some(Light), Lost, flip)\n\
+    \tprintln((a.a, a.b, a.c, a.d, a.e, a.f, a.g, a.h, a.i, a.j(a.a)))\n\
+    \tbig = 1125899906842624 * 1125899906842624\n\
+    \tprintln((through(Dark, 5), through(One, 4), through(2.5, 3), through(True, 5), through(Nil, 4)))\n\
+    \tprintln((through(big, 5), through('s', 4), through([1, 2], 3), through(Held(3), 5), through(Plain, 4)))\n\
+    \tprintln((twice(flip, Dark), twice(fn(n) { n * big }, 1), twice(fn(x) { x * 2.0 }, 1.5)))\n\
+    \tprintln((depth(deepen(Dark)), depth(deepen([1])), depth(Deep(Flat((1.5, 2.5))))))\n\
+    \tt = add(add(add(add(Leaf, 5), 2), 9), 4)\n\
+    \tprintln(shades(t, []))\n\
+    \tprintln([mixed(Plain, Dark), mixed(Plain, Light), mixed(Held(5), Dark), mixed(Other, Dark)])\n\
+    \tprintln(turns(9, Dark, 0.0, True, big, [1.25, 2.5]))\n\
+    \tprintln((away(1, Light, 1.0), away(2, Dark, 3.0)))\n\
+    \tm = map::set(map::set(map::new(), Dark, 1.5), Light, 2.5)\n\
+    \tprintln((map::get(m, Dark) or 0.0, map::get(m, flip(Dark)), map::set(m, Dark, 0.0)))\n\
+    \tprintln(array::map([Dark, Light], flip))\n\
+    \tprintln(array::fold([1.5, 2.5], 0.0, fn(x, y) { x + y }))\n\
+    \tprintln(array::any([True, False], same))\n\
+    \tprintln([array::length([Proxy, Lost]), if same(Proxy) == Lost { 1 } else { 2 }])\n\
+    }\n";
+
+/// What a value's type says it may be is what it is, in a run that checks each
+/// value after the instruction that gave it.
+#[test]
+fn a_value_is_what_its_type_says_at_run_time() {
+    let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+    let program = compile(EVERY_TYPE);
+    let ran = scarlet_vm::run(&program, &mut host, Audit::EachInstruction);
+    assert_eq!(ran, Ok(()));
+    let out = String::from_utf8(std::mem::take(host.out())).expect("UTF-8");
+    let want = "(\n\
+        \x20\x20Dark,\n\
+        \x20\x20One,\n\
+        \x20\x20Other,\n\
+        \x20\x201.5,\n\
+        \x20\x20True,\n\
+        \x20\x20Nil,\n\
+        \x20\x207,\n\
+        \x20\x20Some(Light),\n\
+        \x20\x20Lost,\n\
+        \x20\x20Light\n\
+        )\n\
+        (Dark, One, 2.5, True, Nil)\n\
+        (\n\
+        \x20\x201267650600228229401496703205376,\n\
+        \x20\x20s,\n\
+        \x20\x20[1, 2],\n\
+        \x20\x20Held(3),\n\
+        \x20\x20Plain\n\
+        )\n\
+        (Dark, 1606938044258990275541962092341162602522202993782792835301376, 6.0)\n\
+        (2, 2, 1)\n\
+        [Dark, Dark, Light, Light]\n\
+        [1, 11, 15, 3]\n\
+        (Light, 17.5, False, 24951166764292239309659609191415808)\n\
+        (11, 12)\n\
+        (\n\
+        \x20\x201.5,\n\
+        \x20\x20Some(2.5),\n\
+        \x20\x20{Light: 2.5, Dark: 0.0}\n\
+        )\n\
+        [Light, Dark]\n\
+        4.0\n\
+        True\n\
+        [2, 2]\n";
+    assert_eq!(out, want);
+}
+
+/// A type that says a value is no cell when it is one is found where the value
+/// is written, and where a function starts with it.
+#[test]
+fn a_type_that_says_what_is_not_so_is_found() {
+    let src = "type Shade {\n\tDark\n\tLight\n}\n\
+        fn make(n Int) Option(Int) { Some(n) }\n\
+        fn take(o Option(Int), s Shade, n Int) Int {\n\
+        \tmatch o {\n\t\tSome(m) -> if s == Dark { m } else { n }\n\t\tNone -> n\n\t}\n}\n\
+        pub fn main() {\n\
+        \tmade = make(1)\n\
+        \tprintln(take(made, Light, 2))\n\
+        }\n";
+    let ran = |program: &scarlet_core::core_ir::Program| {
+        let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+        scarlet_vm::run(program, &mut host, Audit::EachInstruction)
+    };
+    let program = compile(src);
+    assert_eq!(ran(&program), Ok(()));
+    let params = |name: &str| {
+        let f = (&program.fns).into_iter().find(|f| f.name == name);
+        let params = f.expect("a function").core.params.iter();
+        params.map(|p| p.ty).collect::<Vec<_>>()
+    };
+    let [_, shade, int] = params("take")[..] else {
+        panic!("three parameters");
+    };
+    for lie in [shade, int] {
+        // What `make` gives, where `main` binds it.
+        let mut bound = program.clone();
+        // What `take` is given.
+        let mut given = program.clone();
+        for (program, name) in [(&mut bound, "main"), (&mut given, "take")] {
+            let fns = std::mem::take(&mut program.fns);
+            let changed = fns.into_iter().map(|mut f| {
+                if f.name == name && name == "take" {
+                    f.core.params[0].ty = lie;
+                } else if f.name == name {
+                    retype_calls(&mut f.core.body, lie);
+                }
+                f
+            });
+            program.fns = changed.collect();
+        }
+        for program in [bound, given] {
+            let Err(Stop::BadProgram(why)) = ran(&program) else {
+                panic!("the check finds it");
+            };
+            let why = why.to_string();
+            assert!(why.contains("says there is no such cell"), "{why}");
+        }
+    }
+}
+
+/// Say that the first call in `e` gives a `ty`.
+fn retype_calls(mut e: &mut CoreExpr, ty: RTy) {
+    while let CoreExpr::Let { bind, rhs, body } = e {
+        if matches!(rhs, Atom::Call { .. }) {
+            bind.ty = ty;
+            return;
+        }
+        e = body;
+    }
+    panic!("no call");
 }
 
 /// A program that does every operator on two values it is given, and on one

@@ -5,7 +5,6 @@ fn main.f() -> :t0
   drop %1
   match %2 :t0
     | 7.1() ->
-      drop %2
       ret c1
     | 7.0(%3) ->
       drop %2

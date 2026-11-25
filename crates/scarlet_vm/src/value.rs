@@ -147,6 +147,11 @@ impl Tag {
         let variant = low_u16(u64::from(self.0));
         (variant, self == Tag::of_cell(variant))
     }
+
+    /// Whether a value with this tag is a cell.
+    pub(crate) fn is_cell(self) -> bool {
+        self.parts().1
+    }
 }
 
 /// What a [`Value`] holds.

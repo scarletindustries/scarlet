@@ -1,5 +1,6 @@
 use super::super::Op;
 use super::super::alloc::allocate;
+use super::super::ins::Src;
 use super::super::live::settle;
 use super::super::tests::programs::every_draft;
 use super::super::tests::random::{Random, random_function};
@@ -7,13 +8,18 @@ use super::super::tests::{copy_of, draft, of, same_step};
 use super::super::translate::Draft;
 use super::*;
 use crate::stop::Limit;
+use crate::value::{Tag, Value};
+use scarlet_ir::TypeId;
+use scarlet_ir::core_ir::VariantRef;
+
+fn expand_it(mut d: Draft) -> Result<Body, Unfit> {
+    let held = settle(&mut d)?;
+    expand(allocate(d, &held)?)
+}
 
 /// `d` as far as instructions, or `None` when it holds too much.
-fn expanded(mut d: Draft) -> Option<Body> {
-    let body = settle(&mut d)
-        .and_then(|held| allocate(d, &held))
-        .and_then(expand);
-    match body {
+fn expanded(d: Draft) -> Option<Body> {
+    match expand_it(d) {
         Ok(body) => Some(body),
         Err(Unfit::TooMany(Limit::Values)) => None,
         Err(why) => panic!("{why:?}"),
@@ -49,8 +55,8 @@ fn tail_call(params: u32, values: u32, step: Step) -> Body {
         lists: Lists::default(),
         labels: Vec::new(),
         regs: (0..values).map(|v| param(v as usize)).collect(),
-        prims: Vec::new(),
-        params: params as usize,
+        kinds: vec![Some(Makes::Any); values as usize],
+        params: (0..params).map(VReg).collect(),
         own: room(values as usize + 2),
         closure: ReadsClosure::Nothing,
     };
@@ -356,8 +362,8 @@ fn a_tail_call_with_an_argument_that_has_no_place_is_refused() {
             lists: Lists::default(),
             labels: Vec::new(),
             regs,
-            prims: Vec::new(),
-            params: 2,
+            kinds: vec![Some(Makes::Any); 2],
+            params: vec![VReg(0), VReg(1)],
             own: room(4),
             closure: ReadsClosure::Nothing,
         };
@@ -376,37 +382,118 @@ fn a_tail_call_with_an_argument_that_has_no_place_is_refused() {
     }
 }
 
-/// A value that is a number by its type is treated as one whatever made it.
+/// What a value may be by its type counts whatever made it, and what made it
+/// counts whatever its type.
 #[test]
-fn a_value_is_a_number_by_its_type() {
-    let left = |prim: Option<Prim>, end: Step| {
-        let steps = vec![
-            of::call(2, &[0]).into(),
-            of::unless(2, 0).into(),
-            of::ret(0).into(),
-            end,
-        ];
+fn a_value_is_what_its_type_says() {
+    let left = |made: Ins<VReg>, kind: Makes, end: Step| {
+        let steps = vec![made.into(), of::unless(2, 0).into(), of::ret(0).into(), end];
         let mut d = draft(3, 2, steps, &[3]);
-        d.prims = vec![None, None, prim];
+        d.kinds[2] = Some(kind);
         shown(&expanded(d).expect("it fits")).split_off(3)
     };
-    let given_up = ["Drop 4", "Jump -> 0"];
-    for prim in [Some(Prim::Int), Some(Prim::Float)] {
-        assert_eq!(left(prim, of::again(&[0, 1])), ["Jump -> 0"]);
-        assert_eq!(left(prim, of::enter(1, &[0, 1])), ["Drop 4", "Enter"]);
+    let given_up = |made, kind| {
+        let turn = left(made, kind, of::again(&[0, 1]));
+        let leaves = left(made, kind, of::enter(1, &[0, 1]));
+        assert_eq!(turn.last().map(String::as_str), Some("Jump -> 0"));
+        assert_eq!(leaves.last().map(String::as_str), Some("Enter"));
+        (turn.len() > 1, leaves.len() > 1)
+    };
+    let call = || of::call(2, &[0]);
+    assert_eq!(given_up(call(), Makes::NoCell), (false, false));
+    assert_eq!(given_up(call(), Makes::Int), (false, true));
+    assert_eq!(given_up(call(), Makes::Any), (true, true));
+    let drop = ["Drop 4", "Jump -> 0"];
+    assert_eq!(left(call(), Makes::Any, of::again(&[0, 1])), drop);
+    for kind in [Makes::NoCell, Makes::Int, Makes::Any] {
+        assert_eq!(given_up(of::constant(2), kind), (false, false));
     }
-    assert_eq!(left(None, of::again(&[0, 1])), given_up);
-    assert_eq!(left(Some(Prim::String), of::again(&[0, 1])), given_up);
-    // One that is in its word whatever its type says it could be.
-    let steps = vec![
-        of::constant(2).into(),
-        of::unless(2, 0).into(),
-        of::ret(0).into(),
-        of::enter(1, &[0, 1]),
-    ];
-    let mut d = draft(3, 2, steps, &[3]);
-    d.prims = vec![None, None, Some(Prim::Int)];
-    assert_eq!(shown(&expanded(d).expect("it fits"))[3..], ["Enter"]);
+    assert_eq!(given_up(of::add(2, 0, 0), Makes::Any), (false, true));
+    // A copy is what it is of, when its type says no more.
+    let drops = |from: Makes, to: Makes| {
+        let steps = vec![
+            of::call(2, &[0]).into(),
+            of::mv(3, 2).into(),
+            of::unless(2, 0).into(),
+            of::unless(3, 0).into(),
+            of::enter(1, &[0, 1]),
+        ];
+        let mut d = draft(4, 2, steps, &[4]);
+        (d.kinds[2], d.kinds[3]) = (Some(from), Some(to));
+        let ins = shown(&expanded(d).expect("it fits"));
+        ins.iter().filter(|i| i.starts_with("Drop")).count()
+    };
+    assert_eq!(drops(Makes::Any, Makes::Any), 2);
+    assert_eq!(drops(Makes::Any, Makes::NoCell), 1);
+    assert_eq!(drops(Makes::NoCell, Makes::Any), 0);
+}
+
+/// A parameter that the next function has no register for is given up when by
+/// its type it may be a cell.
+#[test]
+fn a_parameter_is_what_its_type_says() {
+    let out = |kind: Makes, end: Step| {
+        let mut d = draft(2, 2, [end], &[]);
+        d.kinds[1] = Some(kind);
+        shown(&expanded(d).expect("it fits"))
+    };
+    let leaves = || of::enter(1, &[0]);
+    assert_eq!(out(Makes::NoCell, leaves()), ["Enter"]);
+    assert_eq!(out(Makes::Int, leaves()), ["Drop 3", "Enter"]);
+    assert_eq!(out(Makes::Any, leaves()), ["Drop 3", "Enter"]);
+    // An argument is passed whatever it is.
+    for kind in [Makes::NoCell, Makes::Int, Makes::Any] {
+        let turned = ["Move2 2 3 3! 2!", "Jump -> 0"];
+        assert_eq!(out(kind, of::again(&[1, 0])), turned);
+    }
+}
+
+/// Where a test has found a constructor with no fields, its register holds no
+/// cell. Where it has found one with fields it may, and so it may where the test
+/// has jumped, whichever it was for.
+#[test]
+fn a_constructor_with_no_fields_is_no_cell() {
+    let plain = Value::nullary(VariantRef {
+        type_id: TypeId(7),
+        variant_idx: 1,
+    });
+    let found = |tag: Tag| {
+        let test = Ins::JumpUnlessTag {
+            src: Src(VReg(1)),
+            tag,
+            to: Label(0),
+        };
+        let steps = vec![
+            test.into(),
+            of::drop(1).into(),
+            of::ret(0).into(),
+            of::enter(1, &[0]),
+        ];
+        let body = expanded(draft(2, 2, steps, &[3])).expect("it fits");
+        let ins = shown(&body);
+        let (here, there) = ins.split_at(body.labels[0]);
+        let first = |ins: &[String]| ins[0].clone();
+        [first(&here[1..]), first(there)]
+    };
+    assert_eq!(found(plain.tag()), ["Ret 2!", "Drop 3"]);
+    assert_eq!(found(Tag::of_cell(1)), ["Drop 3", "Drop 3"]);
+}
+
+/// A value that has no type is refused, whether it is written or a parameter.
+#[test]
+fn a_value_with_no_type_is_refused() {
+    let no_type = Some(Unfit::Broken(Broken::NoType));
+    for end in [of::again(&[0, 1]), of::enter(1, &[0, 1])] {
+        for v in 0..3 {
+            let steps = vec![of::call(2, &[0]).into(), same_step(&end)];
+            let mut d = draft(3, 2, steps, &[]);
+            d.kinds[v] = None;
+            assert_eq!(expand_it(d).err(), no_type);
+        }
+        let mut short = draft(3, 2, vec![of::call(2, &[0]).into(), end], &[]);
+        short.kinds.truncate(2);
+        assert_eq!(expand_it(short).err(), no_type);
+    }
 }
 
 /// A drop of a register that can hold no cell is left out, and the labels go on
@@ -664,6 +751,25 @@ fn gives(ins: &Ins<VReg>, read: &[u64], dst: u64) -> u64 {
     mix(read.iter().copied().chain([kind, dst]))
 }
 
+/// Whether `ins` jumps, when it read `read`.
+fn jumps(ins: &Ins<VReg>, read: &[u64]) -> bool {
+    match ins {
+        Ins::Jump { .. } => true,
+        Ins::JumpUnlessTag { tag, .. } if !tag.is_cell() => read[0] % 4 != 1,
+        ins => gives(ins, read, 99).is_multiple_of(3),
+    }
+}
+
+/// Whether a value that may be what `may` says is in a cell. Where a test can
+/// find that it has no fields it is not.
+fn in_a_cell(may: Makes, by: u64) -> bool {
+    match may {
+        Makes::NoCell => false,
+        Makes::Int => by % 4 == 3,
+        Makes::Any => by % 4 != 1,
+    }
+}
+
 /// A run's tail calls and how it ended, each with the values it passed.
 type Trace = Vec<(char, Vec<u64>)>;
 
@@ -709,7 +815,7 @@ fn run_values(d: &Draft) -> Trace {
             return trace;
         }
         if let Some(to) = ins.target()
-            && (matches!(ins, Ins::Jump { .. }) || gives(ins, &read, 99).is_multiple_of(3))
+            && jumps(ins, &read)
         {
             at = d.labels[to.0 as usize];
             continue;
@@ -741,19 +847,20 @@ impl Regs {
 /// Run `body` over registers, as the machine would, and say what is wrong: a
 /// register read that is empty, or at the end of a frame a cell where nothing
 /// will look for it.
-fn run_regs(body: &Body, params: usize) -> Result<Trace, String> {
+fn run_regs(body: &Body) -> Result<Trace, String> {
+    let params = body.params.len();
     let mut trace = Trace::new();
     let mut f = Regs {
         regs: vec![None; WINDOW],
         made: 0,
     };
     let at_reg = |v: VReg| usize::from(body.regs[v.0 as usize].expect("a register").0);
-    for (i, r) in (1..).zip(0..params) {
+    let may = |v: VReg| body.kinds.get(v.0 as usize).copied().flatten();
+    for (i, p) in (1..).zip(&body.params) {
         f.made += 1;
-        f.regs[r + 2] = Some(Made {
-            by: mix([i]),
-            cell: Some(f.made),
-        });
+        let by = mix([i]);
+        let cell = in_a_cell(may(*p).expect("a type"), by).then_some(f.made);
+        f.regs[at_reg(*p)] = Some(Made { by, cell });
     }
     let own = body.own.len();
     let mut at = 0;
@@ -768,7 +875,7 @@ fn run_regs(body: &Body, params: usize) -> Result<Trace, String> {
         ins.operands(&body.lists, &mut |v, role| {
             let r = at_reg(v);
             match role {
-                Role::Write | Role::WriteOnHit => writes.push(r),
+                Role::Write | Role::WriteOnHit => writes.push((v, r)),
                 Role::Drop => takes.push(r),
                 Role::Look | Role::Share | Role::Pass { .. } | Role::Take => {
                     match f.regs[r] {
@@ -817,7 +924,7 @@ fn run_regs(body: &Body, params: usize) -> Result<Trace, String> {
             return Ok(trace);
         }
         if let Some(to) = ins.target()
-            && gives(ins, &by, 99).is_multiple_of(3)
+            && jumps(ins, &by)
         {
             at = body.labels[to.0 as usize];
             continue;
@@ -837,15 +944,13 @@ fn run_regs(body: &Body, params: usize) -> Result<Trace, String> {
         let written: Vec<Made> = match ins {
             Ins::Move { src, .. } => vec![moved(read[0], src.moved, &mut f.made)],
             Ins::Move2 { .. } | Ins::Move3 { .. } => read,
-            ins => (0..writes.len() as u64)
-                .map(|i| {
+            ins => (0..)
+                .zip(&writes)
+                .map(|(i, (v, _))| {
                     let by = gives(ins, &by, i);
                     f.made += 1;
-                    let cell = match ins.makes() {
-                        Makes::NoCell => None,
-                        Makes::Int => (by % 4 == 1).then_some(f.made),
-                        Makes::Any => (by % 4 != 1).then_some(f.made),
-                    };
+                    let may = ins.makes().min(may(*v).expect("a type"));
+                    let cell = in_a_cell(may, by).then_some(f.made);
                     Made { by, cell }
                 })
                 .collect(),
@@ -853,7 +958,7 @@ fn run_regs(body: &Body, params: usize) -> Result<Trace, String> {
         for r in takes {
             f.regs[r] = None;
         }
-        for (r, m) in writes.into_iter().zip(written) {
+        for ((_, r), m) in writes.into_iter().zip(written) {
             f.regs[r] = Some(m);
         }
         let mut cells: Vec<u64> = f
@@ -874,7 +979,6 @@ fn run_regs(body: &Body, params: usize) -> Result<Trace, String> {
 /// Check that `d` does over registers what it does over values. Gives whether
 /// it fits.
 fn check(mut d: Draft, what: &str) -> bool {
-    let params = d.params.len();
     let Ok(held) = settle(&mut d) else {
         return false;
     };
@@ -882,7 +986,7 @@ fn check(mut d: Draft, what: &str) -> bool {
     let body = allocate(d, &held).and_then(expand);
     let body = body.unwrap_or_else(|why| panic!("{what}: {why:?}"));
     let mut want = run_values(&before);
-    let got = run_regs(&body, params).unwrap_or_else(|wrong| panic!("{what}: {wrong}"));
+    let got = run_regs(&body).unwrap_or_else(|wrong| panic!("{what}: {wrong}"));
     // A callee's arguments are not told from the number that follow it.
     for (w, g) in want.iter_mut().zip(&got) {
         if w.0 == 't' && g.1.len() > w.1.len() && g.1.starts_with(&w.1) {
@@ -917,10 +1021,10 @@ fn the_run_over_registers_finds_what_is_wrong() {
         let d = || draft(3, 2, steps.iter().map(same_step), &[]);
         let want = run_values(&d());
         let mut body = expanded(d()).expect("it fits");
-        assert_eq!(run_regs(&body, 2).as_ref(), Ok(&want));
+        assert_eq!(run_regs(&body).as_ref(), Ok(&want));
         let found = body.ins.iter_mut().find(|i| i.op() == kind);
         change(found.expect("one of these"));
-        run_regs(&body, 2).map_or(true, |got| got != want)
+        run_regs(&body).map_or(true, |got| got != want)
     };
     let swap = || vec![of::again(&[1, 0])];
     assert!(wrong(swap(), Op::Move2, |ins| *ins = of::mv(0, 0)));

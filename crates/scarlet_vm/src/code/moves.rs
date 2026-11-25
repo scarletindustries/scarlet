@@ -22,8 +22,6 @@
 
 use std::collections::BTreeMap;
 
-use scarlet_ir::rty::Prim;
-
 use super::alloc::{Assigned, RegSet, param, room};
 use super::ins::{Arg, Callee, Dead, DeadList, Dst, Ins, Label, Lists, Makes, Role, Taken, VReg};
 use super::translate::{Step, TailTo};
@@ -39,6 +37,9 @@ pub(super) struct Body {
     pub(super) labels: Vec<usize>,
     /// The register of each value, by its number, when it has one.
     pub(super) regs: Vec<Option<Reg>>,
+    /// [`Draft::kinds`](super::translate::Draft::kinds).
+    pub(super) kinds: Vec<Option<Makes>>,
+    pub(super) params: Vec<VReg>,
     /// How many registers its frame has.
     pub(super) own: Room,
     /// What it reads of the closure it runs as.
@@ -66,6 +67,8 @@ impl Fitted {
             lists: Lists::default(),
             labels: Vec::new(),
             regs: Vec::new(),
+            kinds: Vec::new(),
+            params: Vec::new(),
             own: room(params.saturating_add(usize::from(FIRST.0))),
             closure: ReadsClosure::Nothing,
         };
@@ -81,8 +84,8 @@ impl Fitted {
 
 /// Make every tail call in `f` the instructions that do it.
 pub(super) fn expand(f: Assigned) -> Result<Body, Unfit> {
-    let mut at = Walk::new(&f);
-    at.held.ints = left_by_turns(&f);
+    let mut at = Walk::new(&f)?;
+    at.held.ints.add_all(&left_by_turns(&f)?);
     let mut out = Out {
         ins: Vec::with_capacity(f.steps.len()),
         lists: f.lists,
@@ -103,7 +106,7 @@ pub(super) fn expand(f: Assigned) -> Result<Body, Unfit> {
         let (to, args) = match step {
             Step::Ins(Ins::Drop { reg }) if at.empty(reg.0, &out.regs) => continue,
             Step::Ins(ins) => {
-                at.pass(&ins, &out.lists, &out.regs, &f.prims);
+                at.pass(&ins, &out.lists, &out.regs, &f.kinds)?;
                 out.ins.push(ins);
                 continue;
             }
@@ -138,6 +141,8 @@ pub(super) fn expand(f: Assigned) -> Result<Body, Unfit> {
         lists: out.lists,
         labels,
         regs: out.regs,
+        kinds: f.kinds,
+        params: f.params,
         own: f.own,
         closure: f.closure,
     })
@@ -151,7 +156,7 @@ pub(super) fn expand(f: Assigned) -> Result<Body, Unfit> {
 /// fewer for each number a turn works out and drops. But a frame that another
 /// function takes over gives up no more than that function's registers, so every
 /// way out to one gives up what any turn left.
-fn left_by_turns(f: &Assigned) -> RegSet {
+fn left_by_turns(f: &Assigned) -> Result<RegSet, Unfit> {
     let (mut turns, mut leaves) = (false, false);
     for step in &f.steps {
         match step {
@@ -167,15 +172,15 @@ fn left_by_turns(f: &Assigned) -> RegSet {
     }
     let mut left = RegSet::default();
     if !turns || !leaves {
-        return left;
+        return Ok(left);
     }
     // What an earlier turn left is among what those turns left, so one walk
     // from a start where nothing is left finds it all.
-    let mut at = Walk::new(f);
+    let mut at = Walk::new(f)?;
     for (i, step) in f.steps.iter().enumerate() {
         at.arrive(i);
         match step {
-            Step::Ins(ins) => at.pass(ins, &f.lists, &f.regs, &f.prims),
+            Step::Ins(ins) => at.pass(ins, &f.lists, &f.regs, &f.kinds)?,
             Step::TailCall { to, args } => {
                 if *to == TailTo::Own {
                     let mut ints = at.held.ints;
@@ -191,7 +196,7 @@ fn left_by_turns(f: &Assigned) -> RegSet {
             }
         }
     }
-    left
+    Ok(left)
 }
 
 /// Every label of `labels` with where it stands, the last first.
@@ -247,16 +252,18 @@ struct Walk {
 }
 
 impl Walk {
-    fn new(f: &Assigned) -> Walk {
+    fn new(f: &Assigned) -> Result<Walk, Unfit> {
         let mut held = Held::default();
-        for r in (0..f.params).filter_map(param) {
-            held.cells.add(r);
+        for (i, v) in f.params.iter().enumerate() {
+            if let Some(r) = param(i) {
+                held.set(r, kind(&f.kinds, *v)?);
+            }
         }
-        Walk {
+        Ok(Walk {
             held,
             brought: vec![Held::default(); f.labels.len()],
             labels: labels_by_place(&f.labels),
-        }
+        })
     }
 
     /// Come to step `i`. Gives the labels that stand there.
@@ -283,8 +290,8 @@ impl Walk {
         ins: &Ins<VReg>,
         lists: &Lists<VReg>,
         regs: &[Option<Reg>],
-        prims: &[Option<Prim>],
-    ) {
+        kinds: &[Option<Makes>],
+    ) -> Result<(), Unfit> {
         let reg = |v: VReg| regs.get(v.0 as usize).copied().flatten();
         // A jump takes nothing and writes nothing.
         if let Some(Label(l)) = ins.target()
@@ -294,7 +301,14 @@ impl Walk {
         }
         if !ins.falls_through() {
             self.held = Held::default();
-            return;
+            return Ok(());
+        }
+        // Going on from here, the value is the constructor the test is for.
+        if let Ins::JumpUnlessTag { src, tag, .. } = ins
+            && !tag.is_cell()
+            && let Some(r) = reg(src.0)
+        {
+            self.held.set(r, Makes::NoCell);
         }
         let makes = match ins {
             Ins::Move { src, .. } => reg(src.reg).map_or(Makes::Any, |r| self.held.makes(r)),
@@ -313,19 +327,23 @@ impl Walk {
             | Role::Write
             | Role::WriteOnHit => {}
         });
+        let mut typed = Ok(());
         ins.operands(lists, &mut |v, role| match role {
-            Role::Write | Role::WriteOnHit => {
-                if let Some(r) = reg(v) {
-                    let makes = match prims.get(v.0 as usize) {
-                        Some(Some(Prim::Int | Prim::Float)) => makes.min(Makes::Int),
-                        Some(Some(Prim::String) | None) | None => makes,
-                    };
-                    self.held.set(r, makes);
-                }
-            }
+            Role::Write | Role::WriteOnHit => match (reg(v), kind(kinds, v)) {
+                (Some(r), Ok(kind)) => self.held.set(r, makes.min(kind)),
+                (None, Ok(_)) => {}
+                (_, Err(why)) => typed = Err(why),
+            },
             Role::Look | Role::Share | Role::Pass { .. } | Role::Take | Role::Drop => {}
         });
+        typed
     }
+}
+
+/// What `v` may be by its type.
+fn kind(kinds: &[Option<Makes>], v: VReg) -> Result<Makes, Unfit> {
+    let kind = kinds.get(v.0 as usize).copied().flatten();
+    kind.ok_or(Unfit::Broken(Broken::NoType))
 }
 
 /// The instructions made so far.

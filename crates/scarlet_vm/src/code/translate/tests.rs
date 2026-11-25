@@ -496,8 +496,8 @@ fn a_branch_on_what_a_branch_gives_reads_it() {
     assert_eq!(jumps.count(), 2, "{:?}", ops["either"]);
 }
 
-/// The loader is told which values are numbers and strings by their types, and
-/// passes on what Perceus left undropped.
+/// A draft says of each value what its type does, and passes on what Perceus left
+/// undropped.
 #[test]
 fn a_draft_says_what_its_values_types_say() {
     let program = program(
@@ -517,14 +517,16 @@ fn a_draft_says_what_its_values_types_say() {
         let this = Some(FuncIdx(0));
         let d = translate(&source, &f.core, f.undropped, this, &mut Tables::default());
         let d = d.expect("it translates");
-        let prim = |p: &VReg| d.prims.get(p.0 as usize).copied().flatten();
-        (d.params.iter().map(prim).collect::<Vec<_>>(), d.undropped)
+        assert_eq!(d.kinds.len(), d.values as usize);
+        let kind = |p: &VReg| d.kinds.get(p.0 as usize).copied().flatten();
+        (d.params.iter().map(kind).collect::<Vec<_>>(), d.undropped)
     };
-    let (int, float, string) = (Some(Prim::Int), Some(Prim::Float), Some(Prim::String));
-    let plain = vec![int, float, string, None, None];
+    let (word, int) = (Some(Makes::NoCell), Some(Makes::Int));
+    let any = Some(Makes::Any);
+    let plain = vec![int, word, any, word, any];
     assert_eq!(draft("plain"), (plain, false));
-    assert_eq!(draft("any"), (vec![None, int], false));
-    assert_eq!(draft("lost"), (vec![None, int], true));
+    assert_eq!(draft("any"), (vec![any, int], false));
+    assert_eq!(draft("lost"), (vec![any, int], true));
 }
 
 /// A value whose type the program does not have is an error and not a guess,
@@ -589,6 +591,7 @@ fn translator<'c>(
         landed: None,
         conts: HashMap::new(),
         values: 3,
+        kinds: vec![Some(Makes::Any); 3],
         closure: ReadsClosure::Nothing,
         reads,
         numbers: HashMap::new(),

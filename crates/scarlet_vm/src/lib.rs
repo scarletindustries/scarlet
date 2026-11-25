@@ -65,7 +65,7 @@ pub use listing::{Listing, listing};
 pub use os_host::OsHost;
 pub use stop::Stop;
 
-/// When a run checks its heap. Whatever a check finds is a bug in the VM or
+/// When a run checks its heap, and its values. Whatever a check finds is a bug in the VM or
 /// the compiler, and stops the run with [`Stop::BadProgram`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Audit {
@@ -75,7 +75,9 @@ pub enum Audit {
     /// still holds, and see that no cell is left.
     AtEnd,
     /// Before every instruction, and then as [`Audit::AtEnd`] does. Each
-    /// check walks the whole heap, so this is for short runs.
+    /// check walks the whole heap, so this is for short runs. Each value is
+    /// also checked against its type once it is written, and each parameter
+    /// where its function starts.
     EachInstruction,
 }
 

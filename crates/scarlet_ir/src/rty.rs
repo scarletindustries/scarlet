@@ -18,6 +18,16 @@ pub enum Prim {
     String,
 }
 
+/// Whether a value of a type can be a heap cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Repr {
+    /// Never. It is a Float, or a type whose constructors have no fields.
+    Word,
+    /// It can: an Int can be a big one, and nothing is known of a type
+    /// variable's values or of a type that has no constructors.
+    Counted,
+}
+
 /// The nominal ids of the primitives the inference engine knows directly. Int,
 /// float and string literals get these types, and `Array` is here so arrays
 /// can resolve structurally.
@@ -107,7 +117,11 @@ pub enum ResolvedNode {
     Bound(u32),
     /// `Name(args...)`, identified by `id` alone: a user's `type Parsed` is
     /// not `scarlet/http/h1.Parsed`.
-    Con { id: TypeId, args: RSlice },
+    Con {
+        id: TypeId,
+        repr: Repr,
+        args: RSlice,
+    },
     /// `fn(params...) ret`.
     Fun { params: RSlice, ret: RTy },
     /// `(elems...)`.
@@ -160,9 +174,9 @@ impl ResolvedPool {
         self.alloc(ResolvedNode::Bound(idx))
     }
 
-    pub fn mk_con(&mut self, id: TypeId, args: &[RTy]) -> Result<RTy, TableFull> {
+    pub fn mk_con(&mut self, id: TypeId, repr: Repr, args: &[RTy]) -> Result<RTy, TableFull> {
         let args = self.push_children(args)?;
-        self.alloc(ResolvedNode::Con { id, args })
+        self.alloc(ResolvedNode::Con { id, repr, args })
     }
 
     pub fn mk_fun(&mut self, params: &[RTy], ret: RTy) -> Result<RTy, TableFull> {
@@ -234,10 +248,21 @@ impl ResolvedPool {
         })
     }
 
-    /// Whether a value of type `t` occupies a Perceus-managed heap cell.
+    /// Whether a value of type `t` can be a heap cell. Every type in the pool
+    /// has an answer, which the compiler gave it when it made the type.
+    pub fn repr(&self, t: RTy) -> Result<Repr, ForeignRTy> {
+        Ok(match self.node(t)? {
+            ResolvedNode::Con { repr, .. } => repr,
+            ResolvedNode::Bound(_) | ResolvedNode::Fun { .. } | ResolvedNode::Tuple { .. } => {
+                Repr::Counted
+            }
+        })
+    }
+
+    /// Whether Perceus gives up a value of type `t` that can be a cell.
     ///
-    /// `Bound` answers `false`, because its representation isn't known here,
-    /// so the value is handled at run time.
+    /// It leaves an Int, a String and a value whose type is a variable to the
+    /// frame that holds it.
     pub fn is_heap(&self, t: RTy) -> Result<bool, ForeignRTy> {
         Ok(match self.node(t)? {
             ResolvedNode::Con { id, .. } => self.as_prim(id).is_none(),

@@ -92,7 +92,7 @@ pub(super) fn draft(
         labels: labels.to_vec(),
         values,
         params: (0..params).map(VReg).collect(),
-        prims: Vec::new(),
+        kinds: vec![Some(Makes::Any); values as usize],
         undropped: false,
         closure: ReadsClosure::Nothing,
     }
@@ -128,7 +128,7 @@ pub(super) fn copy_of(d: &Draft) -> Draft {
         labels: d.labels.clone(),
         values: d.values,
         params: d.params.clone(),
-        prims: d.prims.clone(),
+        kinds: d.kinds.clone(),
         undropped: d.undropped,
         closure: d.closure,
     }

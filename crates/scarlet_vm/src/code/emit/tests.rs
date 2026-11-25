@@ -61,7 +61,8 @@ fn a_counted_load_is_the_same_program_with_a_count_at_each_block_head() {
 
 /// An audited load is the ordinary load with an `Audit` in front of every
 /// instruction, a counted load's `Count`s among them, and every jump going to
-/// the audit in front of where it went. The blocks counted hold no audits.
+/// the audit in front of where it went. Beside those it has only the checks of
+/// what was written. The blocks counted hold no audits.
 #[test]
 fn an_audited_load_is_the_same_program_with_an_audit_before_each_instruction() {
     let program = program(SHAPES);
@@ -73,27 +74,124 @@ fn an_audited_load_is_the_same_program_with_an_audit_before_each_instruction() {
     // Only a run that audits before each instruction has audits to run.
     let at_end = load(&program, Audit::AtEnd).expect("the program loads");
     let counted_at_end = load_counted(&program, Audit::AtEnd).expect("the program loads");
+    let is_audit = |op| matches!(op, Op::Audit | Op::AuditMade);
     for code in [&plain, &at_end, &counted.code, &counted_at_end.code] {
-        assert!(!code.ins.iter().any(|ins| matches!(ins, Ins::Audit)));
+        assert!(!code.ins.iter().any(|ins| is_audit(ins.op())));
+    }
+    for block in &both.blocks {
+        assert!(!block.iter().any(|op| is_audit(*op)));
     }
     let mut jumps = 0;
     for (a, b) in [(&plain, &audited), (&counted.code, &both.code)] {
         for (was, now) in entries(a).into_iter().zip(entries(b)) {
             let (old, new) = (body(a, was), body(b, now));
-            assert_eq!(new.len(), 2 * old.len(), "{}", now.name);
-            for (old, new) in old.iter().zip(new.chunks(2)) {
-                let [Ins::Audit, new] = new else {
-                    panic!("{}: an audit and then the instruction", now.name);
-                };
+            // Where each of the old is, and where a jump to it goes.
+            let at: Vec<usize> = (0..new.len()).filter(|i| !is_audit(new[*i].op())).collect();
+            assert_eq!(at.len(), old.len(), "{}", now.name);
+            let before = |i: usize| new[i - 1].op();
+            for (old, at_old) in old.iter().zip(&at) {
+                let new = &new[*at_old];
+                assert_eq!(before(*at_old), Op::Audit, "{}", now.name);
                 assert_eq!(old.op(), new.op());
                 if let (Some(old), Some(new)) = (old.target(), new.target()) {
-                    assert_eq!(within(now, new), 2 * within(was, old));
+                    // The audit is right in front of the instruction, and in
+                    // front of that, at the start, are the parameters' checks.
+                    let (from, to) = (within(was, old), within(now, new));
+                    let start = if from == 0 { 0 } else { at[from] - 1 };
+                    assert_eq!(to, start, "{}", now.name);
                     jumps += 1;
                 }
             }
         }
     }
     assert!(jumps > 5, "the program has jumps to check: {jumps}");
+}
+
+/// In an audited load each value whose type says what it may be is checked right
+/// after the instruction that writes it, where a jump to the next one does not
+/// go, and each parameter where the function starts, where a jump back does.
+#[test]
+fn an_audited_load_checks_what_is_written() {
+    let src = "import scarlet/map\n\
+        type Shade {\n\tDark\n\tLight\n}\n\
+        type Dot {\n\tDot(shade Shade, at Float, n Int, next Option(Int))\n}\n\
+        fn shade(d Dot) Shade { d.shade }\n\
+        fn at(d Dot) Float { d.at }\n\
+        fn n(d Dot) Int { d.n }\n\
+        fn next(d Dot) Option(Int) { d.next }\n\
+        fn same(x a) a { x }\n\
+        fn more(d Dot) Int { d.n + 1 }\n\
+        fn looked(m map::Map(Int, Shade), k Int) Shade {\n\
+        \tfound = match map::get(m, k) {\n\t\tSome(s) -> flip(s)\n\t\tNone -> Dark\n\t}\n\
+        \tflip(found)\n}\n\
+        fn flip(s Shade) Shade { if s == Dark { Light } else { Dark } }\n\
+        fn go(n Int, s Shade, x Float, name String) Float {\n\
+        \tif n == 0 { x } else { go(n - 1, s, x, name) }\n}\n\
+        pub fn main() {\n\
+        \td = Dot(Light, 1.5, 3, None)\n\
+        \ts = same(shade(d))\n\
+        \tkept = [s, s]\n\
+        \tprintln(go(n(d), s, at(d), ''))\n\
+        \tprintln(kept)\n\
+        \tprintln((next(d), more(d), looked(map::set(map::new(), 1, s), 1)))\n\
+        }\n";
+    let code = load(&program(src), Audit::EachInstruction).expect("the program loads");
+    let checks = |name: &str| -> Vec<(Reg, Makes)> {
+        let check = |ins: &Ins<Reg>| match ins {
+            Ins::AuditMade { src, may } => Some((src.0, *may)),
+            _ => None,
+        };
+        body(&code, named(&code, name))
+            .iter()
+            .filter_map(check)
+            .collect()
+    };
+    let params = |name: &str| {
+        let ins = body(&code, named(&code, name)).iter();
+        ins.take_while(|i| i.op() == Op::AuditMade).count()
+    };
+    let (r2, r3, r4) = (Reg(2), Reg(3), Reg(4));
+    let (word, int) = (Makes::NoCell, Makes::Int);
+    // A parameter that may be any cell is not checked.
+    assert_eq!([params("shade"), params("same"), params("go")], [0, 0, 3]);
+    assert_eq!(checks("same"), []);
+    assert_eq!(checks("go")[..3], [(r2, int), (r3, word), (r4, word)]);
+    // What a tail expression gives has no local, so no type.
+    for name in [".shade", ".at", ".n", ".next"] {
+        assert_eq!(checks(name), [], "{name}");
+    }
+    // But what makes it may say.
+    assert_eq!(checks(".more").len(), 2);
+    assert!(checks(".more").iter().all(|(_, may)| *may == int));
+    // What a lookup finds is checked too.
+    let looked = body(&code, named(&code, ".looked"));
+    let at = looked.iter().position(|i| i.op() == Op::MapFind);
+    let after = &looked[at.expect("a lookup") + 1];
+    assert!(matches!(after, Ins::AuditMade { may, .. } if *may == word));
+    let main = checks("main");
+    assert!(main.iter().filter(|(_, may)| *may == word).count() >= 4);
+    assert!(main.iter().any(|(_, may)| *may == int), "{main:?}");
+    // A check is of what the instruction before it writes.
+    let main = body(&code, named(&code, "main"));
+    for (i, ins) in main.iter().enumerate() {
+        let Ins::AuditMade { src, .. } = ins else {
+            continue;
+        };
+        let mut written = Vec::new();
+        let wrote = main[..i].iter().rfind(|i| i.op() != Op::AuditMade);
+        wrote
+            .expect("one that writes")
+            .operands(&code.lists, &mut |r, role| {
+                if matches!(role, Role::Write | Role::WriteOnHit) {
+                    written.push(r);
+                }
+            });
+        assert!(written.contains(&src.0), "{ins:?} {written:?}");
+    }
+    // A loop goes back to its parameters' checks.
+    let go = named(&code, "go");
+    let back = body(&code, go).iter().filter_map(Ins::target);
+    assert!(back.into_iter().any(|to| within(go, to) == 0));
 }
 
 /// A call by name holds where its callee starts, whether the callee is before
@@ -197,6 +295,8 @@ fn fitted(ins: Vec<Ins<VReg>>, regs: Vec<Option<Reg>>) -> Fitted {
         ins,
         lists: Lists::default(),
         labels: Vec::new(),
+        kinds: vec![Some(Makes::Any); regs.len()],
+        params: Vec::new(),
         regs,
         own: Room(5),
         closure: ReadsClosure::Nothing,

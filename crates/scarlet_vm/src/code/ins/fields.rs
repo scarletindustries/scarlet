@@ -6,6 +6,7 @@ use std::fmt;
 use scarlet_ir::core_ir::{ConstId, FuncIdx, GlobalSlot};
 use scarlet_ir::intrinsic::Intrinsic;
 
+use super::Makes;
 use crate::heap::Ctor;
 use crate::ops::NumOp;
 use crate::value::{Float, SmallInt, Tag, Value};
@@ -798,5 +799,5 @@ macro_rules! plain {
 
 plain! {
     Newline, u16, u32, i64, f64, Value, SmallInt, Float, Tag, Ctor, TextId, BinaryId, WhyId,
-    BlockId, BitsOp, NumOp, Intrinsic, FuncIdx, ConstId, GlobalSlot,
+    BlockId, BitsOp, Makes, NumOp, Intrinsic, FuncIdx, ConstId, GlobalSlot,
 }

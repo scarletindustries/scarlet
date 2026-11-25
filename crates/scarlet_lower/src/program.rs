@@ -24,9 +24,9 @@ use scarlet_ir::core_ir::{
     LocalId, LoweredFn, NetTypes, ParseReasons, Program, Radix, TlsTypes, TypeNames, VariantNames,
     VariantRef,
 };
-use scarlet_ir::rty::{ForeignRTy, PrimIds, RTy, ResolvedPool};
+use scarlet_ir::rty::{ForeignRTy, PrimIds, RTy, Repr, ResolvedPool};
 use scarlet_ir::tivec::TiVec;
-use scarlet_types::def::TypeDef;
+use scarlet_types::def::{TypeBody, TypeDef};
 use scarlet_types::engine::NotInEngine;
 use scarlet_types::known::Known;
 use scarlet_types::name::{CtorName, ModuleKey, Name, TypeName, ValueName};
@@ -111,6 +111,9 @@ pub enum InternalLinkError {
     NoFieldSlot { ctor: CtorName, slot: usize },
     /// A spread sits after more arguments than its constructor was given.
     NoSpreadPlace { ctor: CtorName, at: usize },
+    /// A named type that no module of the program defines, or that is only
+    /// another name for a type. Nothing says what its values are.
+    NoRepr(TypeName),
     /// A field is read from a value whose type isn't a named type.
     FieldOfUnnamed(Type),
     /// A named type has no variant at this index.
@@ -191,6 +194,7 @@ impl fmt::Display for InternalLinkError {
                 ctor.variant,
                 ctor.type_name.name()
             ),
+            E::NoRepr(t) => write!(f, "nothing says what a value of `{}` is", t.name()),
             E::FieldOfUnnamed(t) => write!(f, "a field read from a value of type `{t}`"),
             E::NoVariant { ty, variant } => {
                 write!(f, "`{}` has no variant {variant}", ty.name())
@@ -219,7 +223,8 @@ impl fmt::Display for InternalLinkError {
 pub(crate) struct Ids<'a> {
     pub defs: &'a dyn TypeDefs,
     pool: ResolvedPool,
-    type_ids: HashMap<TypeName, TypeId>,
+    /// Each named type's id, and what its values are.
+    type_ids: HashMap<TypeName, (TypeId, Repr)>,
     /// Each type's name, by `TypeId`, from 1.
     type_names: Vec<TypeName>,
     rtys: HashMap<Type, RTy>,
@@ -239,14 +244,14 @@ impl<'a> Ids<'a> {
             string: TypeId(3),
             array: TypeId(4),
         };
-        for (n, id) in [
-            (&known.int, prims.int),
-            (&known.float, prims.float),
-            (&known.string, prims.string),
-            (&known.array, prims.array),
+        for (n, id, repr) in [
+            (&known.int, prims.int, Repr::Counted),
+            (&known.float, prims.float, Repr::Word),
+            (&known.string, prims.string, Repr::Counted),
+            (&known.array, prims.array, Repr::Counted),
         ] {
             type_names.push(n.clone());
-            type_ids.insert(n.clone(), id);
+            type_ids.insert(n.clone(), (id, repr));
         }
         Ids {
             defs,
@@ -264,19 +269,27 @@ impl<'a> Ids<'a> {
         &self.pool
     }
 
-    /// Ids count from 1, so the next one is the table's length plus one.
     pub fn type_id(&mut self, n: &TypeName) -> Result<TypeId, LinkError> {
-        if let Some(&id) = self.type_ids.get(n) {
-            return Ok(id);
+        Ok(self.named(n)?.0)
+    }
+
+    /// Ids count from 1, so the next one is the table's length plus one.
+    fn named(&mut self, n: &TypeName) -> Result<(TypeId, Repr), LinkError> {
+        if let Some(&named) = self.type_ids.get(n) {
+            return Ok(named);
         }
         let id = i32::try_from(self.type_names.len())
             .ok()
             .and_then(|len| len.checked_add(1))
             .map(TypeId)
             .ok_or(LinkError::TooMany(Table::TypeNames))?;
+        let def = self.defs.type_def(n);
+        let repr = def
+            .and_then(repr_of)
+            .ok_or_else(|| InternalLinkError::NoRepr(n.clone()))?;
         self.type_names.push(n.clone());
-        self.type_ids.insert(n.clone(), id);
-        Ok(id)
+        self.type_ids.insert(n.clone(), (id, repr));
+        Ok((id, repr))
     }
 
     /// The constructor of `t` named `variant`, or `None` when `t` has none.
@@ -320,8 +333,8 @@ impl<'a> Ids<'a> {
             }
             Type::Named { name, args } => {
                 let args = self.rtys_of(args)?;
-                let id = self.type_id(name)?;
-                self.pool.mk_con(id, &args)
+                let (id, repr) = self.named(name)?;
+                self.pool.mk_con(id, repr, &args)
             }
             Type::Fn { params, ret } => {
                 let params = self.rtys_of(params)?;
@@ -368,6 +381,19 @@ impl<'a> Ids<'a> {
             type_names: self.type_names,
             consts: self.consts,
         }
+    }
+}
+
+/// What a value of `def` is. A constructor with no fields is a word and one
+/// with any is a cell. The host's values may be cells. An alias has no values.
+fn repr_of(def: &TypeDef) -> Option<Repr> {
+    match &def.body {
+        TypeBody::Variants { variants, .. } => {
+            let plain = !variants.is_empty() && variants.iter().all(|v| v.fields.is_empty());
+            Some(if plain { Repr::Word } else { Repr::Counted })
+        }
+        TypeBody::External { .. } => Some(Repr::Counted),
+        TypeBody::Alias(_) => None,
     }
 }
 
@@ -940,3 +966,6 @@ fn http_types(b: &mut Ids<'_>) -> Result<HttpTypes, Absent> {
         chunked_bad,
     })
 }
+
+#[cfg(test)]
+mod tests;

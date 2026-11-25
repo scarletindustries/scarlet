@@ -604,3 +604,47 @@ fn a_bad_qualified_pattern_is_a_diagnostic_not_a_crash() {
         &["has no constructor"],
     );
 }
+
+/// What a value of another module's type is in the VM is the same for a module
+/// that cannot see its constructors: an opaque type's, with fields and with
+/// none, and a private one's that a closure holds. Two modules' types with one
+/// name, one with fields and one with none, are each what they are.
+#[test]
+fn values_of_another_modules_types() {
+    let proj = Project::new("reprs");
+    proj.write(
+        "lib.sca",
+        "pub opaque type Mode {\n\tOn\n\tOff\n}\n\
+         pub opaque type Held {\n\tHeld(n Int)\n\tNone_\n}\n\
+         pub type Same {\n\tA\n\tB\n}\n\
+         type Hidden {\n\tX\n\tY\n}\n\
+         pub fn mode(n Int) Mode { if n % 2 == 0 { On } else { Off } }\n\
+         pub fn flip(m Mode) Mode {\n\tmatch m {\n\t\tOn -> Off\n\t\tOff -> On\n\t}\n}\n\
+         pub fn held(n Int) Held { if n > 2 { Held(n) } else { None_ } }\n\
+         pub fn count(h Held) Int {\n\tmatch h {\n\t\tHeld(n) -> n\n\t\tNone_ -> 0\n\t}\n}\n\
+         pub fn hidden(n Int) Option(fn() Int) {\n\
+         \tx = if n == 1 { X } else { Y }\n\
+         \tSome(fn() { if x == X { 1 } else { 2 } })\n}\n",
+    );
+    proj.write(
+        "main.sca",
+        "import ./lib\n\
+         type Same {\n\tA\n\tB(n Int)\n}\n\
+         type R {\n\tR(m lib::Mode, h lib::Held, s lib::Same, t Same)\n}\n\
+         fn same(x a) a { x }\n\
+         fn go(n Int, r R, acc Int) Int {\n\
+         \tif n == 0 { acc } else {\n\
+         \t\tm = lib::flip(r.m)\n\
+         \t\th = same(lib::held(n))\n\
+         \t\tt = if m == lib::mode(0) { B(n) } else { A }\n\
+         \t\tturn(n, R(m, h, same(lib::B), t), acc + lib::count(r.h))\n\
+         \t}\n}\n\
+         fn turn(n Int, r R, acc Int) Int {\n\
+         \tmatch r.t {\n\t\tA -> go(n - 1, r, acc)\n\t\tB(m) -> go(n - 1, r, acc + m)\n\t}\n}\n\
+         pub fn main() {\n\
+         \tprintln(go(6, R(lib::mode(1), lib::held(9), lib::A, A), 0))\n\
+         \tprintln(match lib::hidden(1) {\n\t\tSome(f) -> f()\n\t\tNone -> 0\n\t})\n\
+         }\n",
+    );
+    run_project_outputs(&proj, "run", "main.sca", "39\n1\n");
+}

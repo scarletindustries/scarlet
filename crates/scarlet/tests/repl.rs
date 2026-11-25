@@ -259,3 +259,26 @@ fn a_stopped_entry_says_why_and_the_session_goes_on() {
     assert!(err.contains("ran out of heap"), "{err}");
     assert!(out.lines().any(|l| l.trim() == "2"), "{out}");
 }
+
+/// Each entry is compiled with the types of those before it, so a value of a
+/// type an earlier entry added is what it is there, whether or not its
+/// constructors have fields.
+#[test]
+fn entries_that_add_types_agree_on_what_their_values_are() {
+    let out = repl(
+        "type Shade {\n\tDark\n\tLight\n}\n\
+         s = Dark\n\
+         fn same(x a) a { x }\n\
+         type Held {\n\tHeld(s Shade, n Int)\n\tNot\n}\n\
+         h = same(Held(same(s), 7))\n\
+         println((same(s), same(h), if same(s) == Dark { 1 } else { 2 }))\n\
+         println([same(Not), h])\n\
+         type Box(a) {\n\tBox(value a)\n}\n\
+         println((Box(s), Box(h), Box(2.5), same(Box(Not)).value))\n",
+    );
+    let words = out.replace([' ', '\n'], "");
+    let held = "Held{s:Dark,n:7}";
+    let first = format!("(Dark,{held},1)[Not,{held}]");
+    let boxes = format!("(Box{{value:Dark}},Box{{value:{held}}},Box{{value:2.5}},Not)");
+    assert_eq!(words, first + &boxes);
+}

@@ -9,7 +9,7 @@
 use scarlet_ir::core_ir::FuncIdx;
 use scarlet_ir::tivec::TiVec;
 
-use super::ins::{Ins, Label, Lists, Places, Taken, Unplaced, VReg};
+use super::ins::{Ins, Label, Lists, Makes, Places, Role, Src, Taken, Unplaced, VReg};
 use super::moves::{Body, Fitted};
 use super::{BlockId, Entry, EntryPc, Op, Pc, Reg, Room};
 use crate::Audit;
@@ -23,8 +23,19 @@ pub(super) struct Extra<'a> {
     pub(super) count: Option<&'a mut Vec<Box<[Op]>>>,
     /// When the run is to audit its heap. A load for one that is to do it
     /// before every instruction has an [`Ins::Audit`] in front of each, the
-    /// `Count`s among them.
+    /// `Count`s among them, and an [`Ins::AuditMade`] for each value whose type
+    /// says what it may be: after the instruction that writes it, and where
+    /// the function starts for a parameter.
     pub(super) audit: Audit,
+}
+
+impl Extra<'_> {
+    fn audits_each(&self) -> bool {
+        match self.audit {
+            Audit::EachInstruction => true,
+            Audit::Never | Audit::AtEnd => false,
+        }
+    }
 }
 
 /// The program's instructions, and where each function's are.
@@ -127,15 +138,17 @@ impl Plan {
             }
         }
         // An audit goes in front of a count as well as of the instruction.
-        let (each, with_count) = match extra.audit {
-            Audit::EachInstruction => (2, 4),
-            Audit::Never | Audit::AtEnd => (1, 2),
-        };
+        let (each, with_count) = if extra.audits_each() { (2, 4) } else { (1, 2) };
         let mut end = start;
         let mut places = Vec::with_capacity(body.ins.len());
-        for head in &heads {
+        for (i, (ins, head)) in body.ins.iter().zip(&heads).enumerate() {
             places.push(position(end)?);
             end = end.saturating_add(if head.is_some() { with_count } else { each });
+            if extra.audits_each() {
+                let params = if i == 0 { audits(body, None).len() } else { 0 };
+                end = end.saturating_add(params);
+                end = end.saturating_add(audits(body, Some(ins)).len());
+            }
         }
         position(end)?;
         Ok(Plan {
@@ -209,10 +222,17 @@ impl Out<'_, '_> {
             let dsts: Result<Box<[_]>, _> = dsts.collect();
             self.lists.dsts.push(dsts.map_err(stop)?);
         }
-        let audit = match self.extra.audit {
-            Audit::EachInstruction => Some(Ins::Audit),
-            Audit::Never | Audit::AtEnd => None,
+        let each = self.extra.audits_each();
+        let audit = each.then_some(Ins::Audit);
+        let made = |out: &mut Vec<Ins<Reg>>, ins| {
+            if each {
+                for check in audits(body, ins) {
+                    out.push(check.place(&at).map_err(stop)?);
+                }
+            }
+            Ok::<(), Stop>(())
         };
+        made(out, None)?;
         let mut block: Vec<Op> = Vec::new();
         for (ins, head) in body.ins.iter().zip(&plan.heads) {
             if let Some(number) = head {
@@ -225,6 +245,7 @@ impl Out<'_, '_> {
             }
             out.extend(audit);
             out.push(ins.place(&at).map_err(stop)?);
+            made(out, Some(ins))?;
         }
         self.close(&mut block);
         Ok(())
@@ -238,6 +259,27 @@ impl Out<'_, '_> {
             blocks.push(std::mem::take(block).into_boxed_slice());
         }
     }
+}
+
+/// The checks of what `ins` writes, or of the parameters of `body`.
+fn audits(body: &Body, ins: Option<&Ins<VReg>>) -> Vec<Ins<VReg>> {
+    let mut checks = Vec::new();
+    let mut check = |v: VReg, made: Makes| {
+        // A register that a tail call moves to has a number no value has.
+        let kind = body.kinds.get(v.0 as usize).copied().flatten();
+        let may = made.min(kind.unwrap_or(Makes::Any));
+        if may != Makes::Any {
+            checks.push(Ins::AuditMade { src: Src(v), may });
+        }
+    };
+    match ins {
+        None => body.params.iter().for_each(|p| check(*p, Makes::Any)),
+        Some(ins) => ins.operands(&body.lists, &mut |v, role| match role {
+            Role::Write | Role::WriteOnHit => check(v, ins.makes()),
+            Role::Look | Role::Share | Role::Pass { .. } | Role::Take | Role::Drop => {}
+        }),
+    }
+    checks
 }
 
 /// How the load stops for an instruction that gets no place.

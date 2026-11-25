@@ -87,7 +87,8 @@ struct RunArgs {
     debug_printer: bool,
     /// Check the heap when the program ends, and fail if a reference count is wrong or a heap
     /// cell is left once the program has given up everything it held. With `--audit=each`, check
-    /// it before every instruction too, which is slow.
+    /// it before every instruction too, and each value against its type once it is written, which
+    /// is slow.
     #[arg(
         long,
         value_name = "WHEN",
@@ -111,7 +112,7 @@ struct RunArgs {
 enum AuditWhen {
     /// When the program ends
     End,
-    /// Before every instruction, and when the program ends
+    /// Before every instruction, and when the program ends. Check each value against its type too
     Each,
 }
 

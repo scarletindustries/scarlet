@@ -28,13 +28,14 @@ use scarlet_ir::core_ir::{
     LocalId, MAX_PARAMS, PrimOp,
 };
 use scarlet_ir::intrinsic::Intrinsic;
-use scarlet_ir::rty::{Prim, ResolvedPool};
+use scarlet_ir::rty::{ForeignRTy, Prim, RTy, Repr, ResolvedPool};
 use scarlet_ir::tivec::Idx;
 
 use super::forms::{CtorOf, Form};
 use super::ins::{
     Arg, ArgList, Args, BitsOp, Dead, Dst, DstList, Hit, Ins, Label, LastReg, Lists, LookList,
-    Looks, MaybeDst, Newline, OwnEntry, OwnRoom, Role, ShareList, Shared, Shares, Src, Taken, VReg,
+    Looks, Makes, MaybeDst, Newline, OwnEntry, OwnRoom, Role, ShareList, Shared, Shares, Src,
+    Taken, VReg,
 };
 use super::{ReadsClosure, Source, Tables, Unfit, Why, add, built};
 use crate::heap::Ctor;
@@ -98,9 +99,9 @@ pub(super) struct Draft {
     /// One past the highest value the function names.
     pub(super) values: u32,
     pub(super) params: Vec<VReg>,
-    /// What each value is by its type, by the value's number, when it is a
-    /// number or a string. One past the end is not said to be.
-    pub(super) prims: Vec<Option<Prim>>,
+    /// What each value may be by its type, by the value's number. A number
+    /// that no value has says nothing.
+    pub(super) kinds: Vec<Option<Makes>>,
     /// [`scarlet_ir::core_ir::LoweredFn::undropped`].
     pub(super) undropped: bool,
     /// What it reads of the closure it runs as.
@@ -122,7 +123,7 @@ pub(super) fn translate(
         None => 0,
         Some(h) => h.checked_add(1).ok_or(Unfit::TooMany(Limit::Values))?,
     };
-    let prims = survey.prims(&source.program.pool)?;
+    let kinds = survey.kinds(&source.program.pool, values)?;
     let mut t = Translator {
         source,
         this,
@@ -133,6 +134,7 @@ pub(super) fn translate(
         landed: None,
         conts: HashMap::new(),
         values,
+        kinds,
         closure: survey.closure,
         reads: survey.reads,
         numbers: HashMap::new(),
@@ -145,7 +147,7 @@ pub(super) fn translate(
         labels: labels.ok_or(Unfit::Broken(Broken::NoPlace))?,
         values: t.values,
         params: core.params.iter().map(|p| of(p.id)).collect(),
-        prims,
+        kinds: t.kinds,
         undropped,
         closure: t.closure,
     })
@@ -191,6 +193,8 @@ struct Translator<'c> {
     /// One past the highest value the function names. A value that no local
     /// holds, like a tail expression's, gets a number from here.
     values: u32,
+    /// [`Draft::kinds`].
+    kinds: Vec<Option<Makes>>,
     /// [`Draft::closure`].
     closure: ReadsClosure,
     /// How many times each local is read.
@@ -273,6 +277,8 @@ impl Translator<'_> {
             .values
             .checked_add(1)
             .ok_or(Unfit::TooMany(Limit::Values))?;
+        // It has no type.
+        self.kinds.push(Some(Makes::Any));
         Ok(v)
     }
 
@@ -1305,6 +1311,15 @@ struct Opened<'e> {
     rest: &'e CoreExpr,
 }
 
+/// What a value of type `ty` may be.
+fn kind_of(pool: &ResolvedPool, ty: RTy) -> Result<Makes, ForeignRTy> {
+    Ok(match (pool.repr(ty)?, pool.prim_of(ty)?) {
+        (Repr::Word, _) => Makes::NoCell,
+        (Repr::Counted, Some(Prim::Int)) => Makes::Int,
+        (Repr::Counted, Some(Prim::Float | Prim::String) | None) => Makes::Any,
+    })
+}
+
 /// What one walk over a function's body finds out.
 #[derive(Default)]
 struct Survey<'e> {
@@ -1328,21 +1343,15 @@ impl<'e> Survey<'e> {
         self.binds.push(b);
     }
 
-    /// [`Draft::prims`].
-    fn prims(&self, pool: &ResolvedPool) -> Result<Vec<Option<Prim>>, Unfit> {
-        let mut prims = Vec::new();
+    /// [`Draft::kinds`] of a function whose locals are below `values`.
+    fn kinds(&self, pool: &ResolvedPool, values: u32) -> Result<Vec<Option<Makes>>, Unfit> {
+        let mut kinds = vec![None; values as usize];
         for b in &self.binds {
-            if let prim @ Some(_) = pool.prim_of(b.ty).map_err(|_| Broken::NoType)? {
-                let at = b.id.0 as usize;
-                if prims.len() <= at {
-                    prims.resize(at.saturating_add(1), None);
-                }
-                if let Some(of) = prims.get_mut(at) {
-                    *of = prim;
-                }
+            if let Some(kind) = kinds.get_mut(b.id.0 as usize) {
+                *kind = Some(kind_of(pool, b.ty).map_err(|_| Broken::NoType)?);
             }
         }
-        Ok(prims)
+        Ok(kinds)
     }
 
     fn read(&mut self, l: LocalId) {

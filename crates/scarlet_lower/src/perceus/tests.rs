@@ -1,9 +1,9 @@
 use super::*;
 use crate::PrimOp;
-use crate::testkit::{bind, ctor, func, local, variant};
+use crate::testkit::{bind, ctor, func, local, variant, vref};
 use crate::{Callee, CaptureIdx, ConstId, FuncIdx, GlobalSlot, Load};
 use scarlet_ir::TypeId;
-use scarlet_ir::rty::PrimIds;
+use scarlet_ir::rty::{PrimIds, Repr};
 
 /// The same kind of arena the elaborator hands `perceus` in the real
 /// pipeline.
@@ -11,16 +11,20 @@ fn pool() -> ResolvedPool {
     ResolvedPool::new(PrimIds::default())
 }
 
-/// A nominal type that isn't a primitive, so it lives on the heap and its
-/// allocation width is unknown.
+/// A nominal type that isn't a primitive and whose values may be cells.
 fn con(p: &mut ResolvedPool, id: i32) -> RTy {
-    p.mk_con(TypeId(id), &[]).unwrap()
+    p.mk_con(TypeId(id), Repr::Counted, &[]).unwrap()
+}
+
+/// A type whose constructors have no fields.
+fn word(p: &mut ResolvedPool, id: i32) -> RTy {
+    p.mk_con(TypeId(id), Repr::Word, &[]).unwrap()
 }
 
 /// The unboxed `Int`. It isn't on the heap, so it gets no `Drop`.
 fn int_ty(p: &mut ResolvedPool) -> RTy {
     let int = p.prims().int;
-    p.mk_con(int, &[]).unwrap()
+    p.mk_con(int, Repr::Counted, &[]).unwrap()
 }
 
 fn count_drops(e: &CoreExpr) -> usize {
@@ -57,13 +61,18 @@ fn find_drop(mut e: &CoreExpr, id: LocalId) -> bool {
 }
 
 /// Run the pass with every bind's type in the table, the way `lower`
-/// hands it over. An id no bind uses gets the return type, which nothing
-/// reads.
+/// hands it over.
 fn perceus(pool: &ResolvedPool, f: CoreFn) -> CoreFn {
     dropped(pool, f).core
 }
 
 fn dropped(pool: &ResolvedPool, f: CoreFn) -> Dropped {
+    super::perceus(pool, &types_of(&f), f).expect("every local is typed")
+}
+
+/// The type of each local of `f`. An id no bind uses gets the return type, which
+/// nothing reads.
+fn types_of(f: &CoreFn) -> TiVec<LocalId, RTy> {
     fn binds(e: &CoreExpr, out: &mut Vec<CoreBind>) {
         match e {
             CoreExpr::Let { bind, body, .. } => {
@@ -102,7 +111,7 @@ fn dropped(pool: &ResolvedPool, f: CoreFn) -> Dropped {
             *slot = b.ty;
         }
     }
-    super::perceus(pool, &locals, f).expect("every local is typed")
+    locals
 }
 
 /// A toplevel keeps every value it pins to a global, so Perceus never drops
@@ -187,7 +196,7 @@ fn an_arm_drops_its_scrutinee_before_the_fields_it_does_not_read() {
     let first: Vec<_> = arms.iter().map(|(_, arm)| drops_first(arm)).collect();
     let locals = |ids: &[u32]| ids.iter().copied().map(local).collect::<Vec<_>>();
     assert_eq!(first[0], locals(&[0, 1, 4]), "{f}");
-    assert_eq!(first[1], locals(&[1]), "{f}");
+    assert_eq!(first[1], locals(&[]), "nothing is in a cell there:\n{f}");
     assert_eq!(first[2], locals(&[5]), "the arm reads %1:\n{f}");
 }
 
@@ -454,9 +463,9 @@ fn drop_inside_shared_cont_not_on_edges() {
 #[test]
 fn what_is_left_undropped_is_in_a_join_or_of_no_known_type() {
     let mut p = pool();
-    let (heap, int) = (con(&mut p, 7), int_ty(&mut p));
+    let (heap, int, flag) = (con(&mut p, 7), int_ty(&mut p), word(&mut p, 8));
     let string = p.prims().string;
-    let string = p.mk_con(string, &[]).unwrap();
+    let string = p.mk_con(string, Repr::Counted, &[]).unwrap();
     let any = p.mk_bound(0).unwrap();
     let call = || Atom::Call {
         callee: Callee::Known(FuncIdx(1)),
@@ -527,6 +536,9 @@ fn what_is_left_undropped_is_in_a_join_or_of_no_known_type() {
     };
     assert!(!leaves(int, gives(heap)));
     assert!(leaves(int, join(gives(heap))));
+    // A value of a type that is no cell does not count, whatever gives it.
+    assert!(!leaves(int, join(made(flag, call()))));
+    assert!(!leaves(int, join(gives(flag))) && !leaves(flag, nothing()));
     // A constant, a Bool and what something else goes on holding do not count.
     let in_join = |rhs: Atom| leaves(int, join(made(heap, rhs)));
     let (a, b) = (local(0), local(0));
@@ -540,10 +552,6 @@ fn what_is_left_undropped_is_in_a_join_or_of_no_known_type() {
         Atom::Closure {
             func_idx: FuncIdx(0),
             captures: Vec::new(),
-        },
-        Atom::PrimOp {
-            op: PrimOp::Eq,
-            args: vec![a, b],
         },
     ];
     for rhs in plain {
@@ -579,8 +587,13 @@ struct Ways<'p> {
 }
 
 impl Ways<'_> {
+    /// Whether a value of `b`'s type may be a handle or hold one.
+    fn may(&self, b: &CoreBind) -> bool {
+        self.pool.prim_of(b.ty).unwrap().is_none() && self.pool.repr(b.ty).unwrap() == Repr::Counted
+    }
+
     fn own(&self, b: &CoreBind, owned: &mut Live) {
-        if b.global.is_none() && self.pool.prim_of(b.ty).unwrap().is_none() {
+        if b.global.is_none() && self.may(b) {
             owned.insert(b.id);
         }
     }
@@ -610,9 +623,12 @@ impl Ways<'_> {
                 owned.remove(local);
                 self.go(body, owned);
             }
-            CoreExpr::Match { arms, .. } => {
+            CoreExpr::Match { scrut, arms, .. } => {
                 for (pat, arm) in arms {
                     let mut owned = owned.clone();
+                    if has_no_fields(pat) {
+                        owned.remove(scrut);
+                    }
                     pat.binds().for_each(|b| self.own(b, &mut owned));
                     self.go(arm, owned);
                 }
@@ -633,7 +649,7 @@ impl Ways<'_> {
 
     /// Whether anything in `e`, which is in a join, may be a handle.
     fn binds_one(&self, e: &CoreExpr) -> bool {
-        let may = |b: &CoreBind| self.pool.prim_of(b.ty).unwrap().is_none();
+        let may = |b: &CoreBind| self.may(b);
         match e {
             CoreExpr::Let { bind, rhs, body } => {
                 (may(bind) && !holds_nothing(rhs)) || self.binds_one(body)
@@ -654,12 +670,18 @@ impl Ways<'_> {
     }
 }
 
+fn has_no_fields(pat: &CorePat) -> bool {
+    matches!(pat, CorePat::Ctor { fields, .. } if fields.is_empty())
+}
+
 /// Makes a function at random.
 struct Maker {
     x: u64,
     next: u32,
     conts: u32,
-    types: [RTy; 4],
+    types: [RTy; 5],
+    /// The locals whose type has constructors.
+    cons: BTreeSet<u32>,
 }
 
 impl Maker {
@@ -672,8 +694,11 @@ impl Maker {
 
     /// A bind of one of the types, most often the variable.
     fn bind(&mut self) -> CoreBind {
-        let at = self.below(6).min(3) as usize;
+        let at = self.below(7).min(4) as usize;
         self.next += 1;
+        if (1..=3).contains(&at) {
+            self.cons.insert(self.next);
+        }
         bind(self.next, self.types[at])
     }
 
@@ -737,9 +762,19 @@ impl Maker {
                     variant: variant(),
                     fields: vec![bound],
                 };
+                let scrut = self.any(scope);
+                // One that is only ever a constructor with no fields in the
+                // second arm.
+                let second = match self.cons.contains(&scrut) {
+                    true => CorePat::Ctor {
+                        variant: vref(0, 1),
+                        fields: Vec::new(),
+                    },
+                    false => CorePat::Wild,
+                };
                 CoreExpr::Match {
-                    scrut: local(self.any(scope)),
-                    arms: vec![(pat, arm), (CorePat::Wild, self.expr(half, scope, conts))],
+                    scrut: local(scrut),
+                    arms: vec![(pat, arm), (second, self.expr(half, scope, conts))],
                     ty: self.types[0],
                 }
             }
@@ -753,20 +788,18 @@ impl Maker {
     }
 }
 
-/// What Perceus says it left undropped is what it did leave, whatever the
-/// function.
-#[test]
-fn what_is_said_to_be_left_undropped_is() {
+/// Some functions made at random, with the pool their types are in.
+fn functions(mut each: impl FnMut(u64, &ResolvedPool, &CoreFn)) {
     let mut p = pool();
-    let (heap, int) = (con(&mut p, 7), int_ty(&mut p));
+    let (heap, int, flag) = (con(&mut p, 7), int_ty(&mut p), word(&mut p, 8));
     let any = p.mk_bound(0).unwrap();
-    let (mut left, mut kept) = (0, 0);
     for seed in 1..=30_000u64 {
         let mut of = Maker {
             x: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1,
             next: 0,
             conts: 0,
-            types: [int, heap, heap, any],
+            types: [int, heap, heap, flag, any],
+            cons: BTreeSet::new(),
         };
         of.below(9);
         let mut params = vec![bind(0, int)];
@@ -774,15 +807,25 @@ fn what_is_said_to_be_left_undropped_is() {
         let scope: Vec<u32> = params.iter().map(|b| b.id.0).collect();
         let size = of.below(14);
         let body = of.expr(size, &scope, &[]);
-        let got = dropped(&p, func(params.clone(), body, int));
+        each(seed, &p, &func(params, body, int));
+    }
+}
+
+/// What Perceus says it left undropped is what it did leave, whatever the
+/// function.
+#[test]
+fn what_is_said_to_be_left_undropped_is() {
+    let (mut left, mut kept) = (0, 0);
+    functions(|seed, p, f| {
+        let got = dropped(p, f.clone());
         let mut ways = Ways {
-            pool: &p,
+            pool: p,
             brought: BTreeMap::new(),
             left: false,
             unreached: false,
         };
         let mut owned = Live::new();
-        params.iter().for_each(|b| ways.own(b, &mut owned));
+        f.params.iter().for_each(|b| ways.own(b, &mut owned));
         ways.go(&got.core.body, owned);
         // Perceus looks at what no way goes through too.
         if !(ways.unreached && got.undropped) {
@@ -790,6 +833,84 @@ fn what_is_said_to_be_left_undropped_is() {
         }
         left += usize::from(got.undropped);
         kept += usize::from(!got.undropped);
-    }
+    });
     assert!(left > 5000 && kept > 5000, "{left} {kept}");
+}
+
+/// `e` without the drops of what can be no cell: a local in `bare`, and what an
+/// arm matched when its pattern has no fields.
+fn without(e: &CoreExpr, bare: &Live) -> CoreExpr {
+    let boxed = |e: &CoreExpr| Box::new(without(e, bare));
+    match e {
+        CoreExpr::Drop { local, body } if bare.contains(local) => without(body, bare),
+        CoreExpr::Drop { local, body } => CoreExpr::Drop {
+            local: *local,
+            body: boxed(body),
+        },
+        CoreExpr::Let { bind, rhs, body } => CoreExpr::Let {
+            bind: bind.clone(),
+            rhs: rhs.clone(),
+            body: boxed(body),
+        },
+        CoreExpr::LetJoin { bind, join, body } => CoreExpr::LetJoin {
+            bind: bind.clone(),
+            join: boxed(join),
+            body: boxed(body),
+        },
+        CoreExpr::LetCont { id, cont, body } => CoreExpr::LetCont {
+            id: *id,
+            cont: boxed(cont),
+            body: boxed(body),
+        },
+        CoreExpr::If {
+            cond,
+            then,
+            els,
+            ty,
+        } => CoreExpr::If {
+            cond: *cond,
+            then: boxed(then),
+            els: boxed(els),
+            ty: *ty,
+        },
+        CoreExpr::Match { scrut, arms, ty } => CoreExpr::Match {
+            scrut: *scrut,
+            arms: arms
+                .iter()
+                .map(|(pat, arm)| {
+                    let mut bare = bare.clone();
+                    if has_no_fields(pat) {
+                        bare.insert(*scrut);
+                    }
+                    (pat.clone(), without(arm, &bare))
+                })
+                .collect(),
+            ty: *ty,
+        },
+        CoreExpr::Tail(_) | CoreExpr::Goto(_) => e.clone(),
+    }
+}
+
+/// A function that gives up everything it holds has the drops it would have if
+/// every type could be a cell, less those of what can be none. One that leaves
+/// something undropped has them all.
+#[test]
+fn what_can_be_no_cell_gets_no_drop() {
+    let (mut fewer, mut same) = (0, 0);
+    functions(|seed, p, f| {
+        let types = types_of(f);
+        let every = Perceus::new(p, &types, Words::Dropped).function(f.clone());
+        let every = every.expect("every local is typed").body;
+        let words = (0..).map(LocalId).zip(&types);
+        let words = words.filter(|(_, ty)| p.repr(**ty) == Ok(Repr::Word));
+        let bare = without(&every, &words.map(|(l, _)| l).collect());
+        let got = dropped(p, f.clone());
+        let want = if got.undropped { &every } else { &bare };
+        assert_eq!(got.core.body.to_string(), want.to_string(), "{seed}");
+        if count_drops(&every) > count_drops(&bare) {
+            let count = if got.undropped { &mut same } else { &mut fewer };
+            *count += 1;
+        }
+    });
+    assert!(fewer > 1000 && same > 1000, "{fewer} {same}");
 }

@@ -22,14 +22,14 @@ use scarlet_ir::core_ir::{GlobalSlot, MAX_PARAMS};
 use crate::array::{self, End, Seq};
 use crate::bigint;
 use crate::code::{
-    Arg, BitsOp, Code, Counted, Dead, Dst, Entry, Hands, Ins, MaybeDst, Op, Reg, Room, Shared, Src,
-    Taken,
+    Arg, BitsOp, Code, Counted, Dead, Dst, Entry, Hands, Ins, Makes, MaybeDst, Op, Reg, Room,
+    Shared, Src, Taken,
 };
 use crate::counts::Counts;
 use crate::eq;
 use crate::float;
 use crate::frame::{self, CLOSURE, FIRST, Link, RESULT, WINDOW, Window, window};
-use crate::heap::{Cell, Ctor, DeadCell, Heap, Opened, STRIDE, Shape};
+use crate::heap::{Cell, Ctor, DeadCell, Heap, Kind, Opened, STRIDE, Shape};
 use crate::host::Host;
 use crate::int;
 use crate::map;
@@ -357,11 +357,11 @@ impl<'c, 'h> Machine<'c, 'h> {
             }
         }
         // These are no part of the program. A `Count` is the counting itself,
-        // and an `Audit` and the `Halt` are in no block.
+        // and the audits and the `Halt` are in no block.
         let ops = Op::ALL
             .iter()
             .zip(ran)
-            .filter(|(op, _)| !matches!(op, Op::Count | Op::Audit | Op::Halt));
+            .filter(|(op, _)| !matches!(op, Op::Count | Op::Audit | Op::AuditMade | Op::Halt));
         let heap = &self.rest.heap;
         Ok(Counts {
             ops: ops.map(|(op, n)| (op.name(), n)).collect(),
@@ -449,6 +449,7 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
                 check(stack, rest, Value::NIL)?;
                 win = window(stack, base).ok_or_else(lost_window)?;
             }
+            Ins::AuditMade { src, may } => check_made(&rest.heap, win.look(src), may)?,
             Ins::Const { dst, value } => win.put(&mut rest.heap, dst, value)?,
             Ins::Str { dst, text } => {
                 let v = rest.text_const(text)?;
@@ -1900,6 +1901,23 @@ fn check(stack: &[Value], rest: &Rest<'_, '_>, last: Value) -> Result<(), Stop> 
         .chain(std::iter::once(last))
         .chain(rest.env.map(Value::cell));
     Ok(rest.heap.audit(roots)?)
+}
+
+/// Check that `v` is what `may` says.
+#[cold]
+#[inline(never)]
+fn check_made(heap: &Heap, v: Value, may: Makes) -> Result<(), Stop> {
+    let cell = v.as_cell();
+    let fits = match may {
+        Makes::NoCell => cell.is_none(),
+        Makes::Int => cell.is_none_or(|c| heap.is(c, Kind::BigInt)),
+        Makes::Any => true,
+    };
+    if fits {
+        Ok(())
+    } else {
+        Err(Stop::broken(Broken::UnexpectedCell(v.view())))
+    }
 }
 
 /// Room for what an instruction passes, before any of it is there. It is all
