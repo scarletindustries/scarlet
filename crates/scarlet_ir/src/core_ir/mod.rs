@@ -23,8 +23,8 @@ use crate::tivec::TiVec;
 
 newtype_index!(
     /// A dense local index, scoped to one function. `lower` hands these out in
-    /// evaluation order, so a backward scan over the `Let` spine sees the ids
-    /// only go down.
+    /// evaluation order. A later pass may move a `Let`, so the order of the
+    /// spine is what says when a local is bound, and not its number.
     pub struct LocalId("%")
 );
 
@@ -682,11 +682,20 @@ pub struct LoweredFn {
     /// `scarlet/array` and `scarlet/option` both have a `map`.
     pub name: String,
     pub core: CoreFn,
+    /// Whether the body holds a value that may be a handle, or hold one, and
+    /// that no `Drop` gives up. It is then given up when a backend next uses the
+    /// place it keeps it in, so a backend that shares places says when that is.
+    pub undropped: bool,
 }
 
 impl LoweredFn {
-    pub fn new(module: String, name: String, core: CoreFn) -> Self {
-        LoweredFn { module, name, core }
+    pub fn new(module: String, name: String, core: CoreFn, undropped: bool) -> Self {
+        LoweredFn {
+            module,
+            name,
+            core,
+            undropped,
+        }
     }
 }
 

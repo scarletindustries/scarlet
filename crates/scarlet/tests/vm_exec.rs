@@ -539,8 +539,8 @@ run_case! {
         "7\n-2\n",
     ),
 
-    // `Op::TailCallKnown`. At n = 200_000 a lowering that pushes frames
-    // overflows the stack, so the test passes just by finishing.
+    // A tail call to another function. At n = 200_000 a lowering that pushes
+    // frames overflows the stack, so the test passes just by finishing.
     mutual_tail_recursion_between_known_fns: (
         "fn even(n Int) Bool { if n == 0 { True } else { odd(n - 1) } }\n\
          fn odd(n Int) Bool { if n == 0 { False } else { even(n - 1) } }\n\
@@ -566,8 +566,8 @@ run_case! {
         "6\n10\n",
     ),
 
-    // `count` alternates `hop` (`TailCallKnown`) with `f` (dynamic
-    // `TailCall`). At n = 200_000 both halves must reuse the frame.
+    // `count` alternates `hop`, a known function, with `f`, a function value.
+    // At n = 200_000 both halves must reuse the frame.
     indirect_tail_call_through_value_reuses_frame: (
         "fn hop(f fn(Int, Int) Int, acc Int, n Int) Int {\n\
          \tif n == 0 { acc } else { f(acc + 1, n - 1) }\n\

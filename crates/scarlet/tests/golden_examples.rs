@@ -311,6 +311,10 @@ suite! {
         // else, with fields left out, rebuilt the same, larger and smaller,
         // nested, guarded, and round a loop.
         open_cells,
+        // Tail calls of every shape: to self, to other functions and through
+        // values, with arguments kept, traded, turned round, made, constant and
+        // given to several parameters, over accumulators of every kind.
+        tail_calls,
         // Backpassing: `x <- f(args)` desugars to a trailing callback.
         backpassing,
         // The pipe operator: `x |> f(args)` desugars to `f(x, args)`.

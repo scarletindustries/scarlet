@@ -181,6 +181,8 @@ pub(crate) enum Broken {
     /// An instruction names a register, a label or a function that was given
     /// no place.
     NoPlace,
+    /// A value whose type is not one of the program's.
+    NoType,
     /// A frame the stack does not have, like the one a wrong link returns to.
     NoWindow,
     NegativeCapture,
@@ -316,6 +318,7 @@ impl fmt::Display for BadProgram {
             Broken::JumpsBack => f.write_str("a jump to an instruction before it"),
             Broken::RunsOff => f.write_str("a function that goes on past its last instruction"),
             Broken::NoPlace => f.write_str("an instruction that names something with no place"),
+            Broken::NoType => f.write_str("a value whose type the program does not have"),
             Broken::NoWindow => f.write_str("a frame that the stack does not have"),
             Broken::NegativeCapture => f.write_str("a capture with a negative index"),
             Broken::ToplevelCapture => f.write_str("a toplevel reads a capture"),

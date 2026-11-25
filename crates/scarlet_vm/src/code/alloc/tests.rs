@@ -1,22 +1,23 @@
-use super::super::Source;
 use super::super::ins::{Arg, Role};
 use super::super::live::settle;
-use super::super::tests::{SHAPES, draft, of, program};
+use super::super::tests::programs::every_draft;
+use super::super::tests::random::random_function;
+use super::super::tests::{copy_of, draft, of, program};
 use super::super::translate::translate;
-use super::super::{Tables, literals};
+use super::super::{Source, Tables};
 use super::*;
-use scarlet_ir::core_ir::{FuncIdx, LoweredFn, Program};
+use scarlet_ir::core_ir::FuncIdx;
 use std::collections::BTreeMap;
 
-fn fitted(mut d: Draft) -> Result<Body, Unfit> {
+fn fitted(mut d: Draft) -> Result<Assigned, Unfit> {
     let held = settle(&mut d)?;
     allocate(d, &held)
 }
 
 /// The register each value of `d` gets.
 fn regs(d: Draft) -> Vec<Option<u8>> {
-    let body = fitted(d).expect("a function that fits");
-    body.regs.iter().map(|r| r.map(|r| r.0)).collect()
+    let f = fitted(d).expect("a function that fits");
+    f.regs.iter().map(|r| r.map(|r| r.0)).collect()
 }
 
 /// The arguments arrive in order in the registers from the first that is not
@@ -86,6 +87,199 @@ fn fields_of_one_cell_have_registers_of_their_own() {
     assert_eq!(regs[5], Some(4));
 }
 
+/// A value that a tail call passes has the register of the parameter it is for,
+/// when nothing that clashes with it has, whatever other register is free.
+#[test]
+fn a_value_a_tail_call_passes_has_its_parameters_register() {
+    // Value 3 is for the third parameter, and reads the second.
+    let steps = vec![of::add(3, 1, 1).into(), of::again(&[0, 1, 3])];
+    assert_eq!(regs(draft(4, 3, steps, &[]))[3], Some(4));
+    // The parameter is read again after value 3 is made, so each has the
+    // other's: to have its own, one would need a register more.
+    let steps = vec![
+        of::add(3, 1, 1).into(),
+        of::len(4, 2).into(),
+        of::again(&[0, 4, 3]),
+    ];
+    assert_eq!(regs(draft(5, 3, steps, &[]))[3..], [Some(3), Some(4)]);
+    // A parameter that some callee has and this function does not, when its
+    // frame is that large anyway.
+    let to = || of::enter(1, &[0, 0, 0, 1]);
+    let steps = vec![of::add(1, 0, 0).into(), to()];
+    assert_eq!(regs(draft(2, 1, steps, &[]))[1], Some(3));
+    let mut steps: Vec<Step> = (2..6).map(|v| of::constant(v).into()).collect();
+    steps.extend((2..6).map(|v| of::len(0, v).into()));
+    steps.extend([of::add(1, 0, 0).into(), to()]);
+    assert_eq!(regs(draft(6, 1, steps, &[]))[1], Some(5));
+    // That one value's register is past the frame does not keep another from
+    // its own.
+    let steps = vec![
+        of::add(2, 0, 0).into(),
+        of::add(3, 0, 0).into(),
+        of::add(4, 0, 0).into(),
+        of::enter(1, &[0, 3, 4, 0, 0, 0, 2]),
+    ];
+    let given = regs(draft(5, 2, steps, &[]));
+    assert_eq!(given[2..], [Some(5), Some(3), Some(4)]);
+    // A value passed for two has the first it can.
+    let steps = vec![of::add(2, 0, 0).into(), of::again(&[0, 2])];
+    assert_eq!(regs(draft(3, 2, steps, &[]))[2], Some(3));
+    let steps = vec![of::add(3, 0, 0).into(), of::again(&[0, 3, 3])];
+    assert_eq!(regs(draft(4, 3, steps, &[]))[3], Some(3));
+    let steps = vec![
+        of::add(3, 0, 0).into(),
+        of::again(&[0, 1, 3]),
+        of::again(&[3, 1, 3]),
+    ];
+    assert_eq!(regs(draft(4, 3, steps, &[]))[3], Some(4));
+    // The first parameter is read after value 4 is made, so it has the fourth's.
+    let steps = vec![
+        of::add(4, 1, 1).into(),
+        of::len(5, 0).into(),
+        of::again(&[4, 5, 5, 4]),
+    ];
+    assert_eq!(regs(draft(6, 4, steps, &[]))[4], Some(5));
+    // Two values held at once want one register. The one with the lower number
+    // has it, though the other's call is first.
+    let steps = vec![
+        of::constant(1).into(),
+        of::constant(2).into(),
+        of::unless(1, 0).into(),
+        of::again(&[2]),
+        of::again(&[1]),
+    ];
+    assert_eq!(regs(draft(3, 1, steps, &[4]))[1..], [Some(2), Some(3)]);
+}
+
+/// What a tail call would like makes no frame larger: every call above it would
+/// start that much higher, and every return give up that much more.
+#[test]
+fn what_a_tail_call_wants_makes_no_frame_larger() {
+    // Counts down by a call that is no tail call, and has at its end a tail call
+    // with many arguments.
+    for (params, want) in [(4, 4), (8, 4), (201, 4)] {
+        let args = [vec!["n"; params - 1], vec!["n + 1"]].concat().join(", ");
+        let names = (0..params).map(|i| format!("_a{i} Int"));
+        let src = format!(
+            "fn wide({}) Int {{ 1 }}\n\
+             fn depth(n Int) Int {{ if n == 0 {{ wide({args}) }} else {{ 1 + depth(n - 1) }} }}\n\
+             pub fn main() {{ println(depth(3)) }}\n",
+            names.collect::<Vec<_>>().join(", ")
+        );
+        let program = program(&src);
+        let f = (&program.fns).into_iter().find(|f| f.name == "depth");
+        let f = f.expect("depth");
+        let source = Source::new(&program).expect("a whole program");
+        let d = translate(&source, &f.core, false, None, &mut Tables::default());
+        let f = fitted(d.expect("it loads")).expect("it fits");
+        assert_eq!(f.own, Room(want), "{params}");
+    }
+    // No function of the repository's, and none made at random, has more
+    // registers than the lowest one for every value comes to.
+    let mut smaller = |mut d: Draft, what: &str| {
+        let Ok(held) = settle(&mut d) else {
+            return false;
+        };
+        let clashes = Clashes::new(d.values as usize, &held.clashes);
+        let (_, end) = colour(&d, &held, &clashes, &[]).expect("it fits");
+        let f = allocate(d, &held).expect("it fits");
+        assert!(f.own.len() <= end, "{what}");
+        let highest = f.regs.iter().flatten().map(|r| usize::from(r.0) + 1);
+        assert_eq!(f.own, room(highest.max().unwrap_or(2)), "{what}");
+        true
+    };
+    every_draft(&mut smaller);
+    for seed in 0..3000u64 {
+        let steps = 3 + usize::try_from(seed % 50).expect("small");
+        let params = 1 + u32::try_from(seed % 9).expect("small");
+        let d = random_function(seed + 900_000, params, steps);
+        smaller(d, &format!("seed {seed}"));
+    }
+}
+
+/// The fields of a cell taken apart go to the registers of what they are passed
+/// for, also when one is the cell's own.
+#[test]
+fn fields_go_to_the_registers_they_are_passed_in() {
+    let steps = vec![of::open([Some(2), Some(3)], 0).into(), of::again(&[3, 2])];
+    assert_eq!(
+        regs(draft(4, 2, steps, &[])),
+        [Some(2), Some(3), Some(3), Some(2)]
+    );
+    // A `Drop` that does nothing does not hold the array past the push.
+    let steps = vec![
+        of::append(2, 0, 1).into(),
+        of::drop(0).into(),
+        of::again(&[2, 1]),
+    ];
+    assert_eq!(regs(draft(3, 2, steps, &[]))[2], Some(2));
+    // One that does holds it.
+    let steps = vec![of::len(2, 0).into(), of::drop(0).into(), of::again(&[2, 1])];
+    assert_eq!(regs(draft(3, 2, steps, &[]))[2], Some(4));
+}
+
+/// Where a function holds a value that nothing drops, every value has the register
+/// it would have if each `Drop` did something and no tail call wanted any.
+#[test]
+fn a_function_that_holds_what_nothing_drops_wants_nothing() {
+    let pushed = |undropped: bool, end: Step| {
+        let steps = vec![
+            of::append(2, 0, 1).into(),
+            of::drop(0).into(),
+            of::len(3, 2).into(),
+            end,
+        ];
+        let mut d = draft(4, 2, steps, &[]);
+        d.undropped = undropped;
+        regs(d)[2..].to_vec()
+    };
+    for end in [0, 1, 2] {
+        let end = || match end {
+            0 => of::ret(3).into(),
+            1 => of::again(&[2, 3]),
+            _ => of::enter(1, &[2, 3]),
+        };
+        let returned = matches!(end(), Step::Ins(_));
+        let own = if returned { 2 } else { 3 };
+        assert_eq!(pushed(false, end()), [Some(2), Some(own)]);
+        assert_eq!(pushed(true, end()), [Some(3), Some(2)]);
+    }
+}
+
+/// A function that fits when each value takes the lowest register still fits: the
+/// registers its tail calls would like are then not looked at.
+#[test]
+fn a_function_that_fits_with_the_lowest_registers_fits() {
+    // Two values that are held together, and a third with each of them in turn,
+    // where the registers the tail calls like leave no room for the rest.
+    let holding = |n: u32| {
+        let mut steps: Vec<Step> = (2..n).map(|v| of::constant(v).into()).collect();
+        steps.extend((2..n).map(|v| of::add(0, 0, v).into()));
+        steps.push(of::add(n, 1, 0).into());
+        steps.push(of::enter(0, &vec![n; 250]));
+        draft(n + 1, 2, steps, &[])
+    };
+    for n in [3, 100, 252, 253, 254] {
+        let f = fitted(holding(n)).unwrap_or_else(|why| panic!("{n}: {why:?}"));
+        assert!(f.own.len() <= 256, "{n}");
+    }
+    assert_eq!(
+        fitted(holding(255)).err(),
+        Some(Unfit::TooMany(Limit::Values))
+    );
+    // The last value is for the register of a 250th parameter, and all but five
+    // of the 254 held before it are held with it. With that register set aside
+    // there is one too few for them.
+    let last = 254;
+    let mut steps: Vec<Step> = (0..last).map(|v| of::constant(v).into()).collect();
+    steps.extend((1..5).map(|v| of::add(0, 0, v).into()));
+    steps.push(of::add(last, 0, 0).into());
+    steps.extend((5..last).map(|v| of::add(last, last, v).into()));
+    steps.push(of::enter(0, &[vec![0; 249], vec![last]].concat()));
+    let d = draft(last + 1, 0, steps, &[]);
+    assert_eq!(check(d, "one set aside"), Some(256));
+}
+
 /// Each arm here takes cells apart and holds a few values while it does, so any
 /// number of them fit.
 #[test]
@@ -111,9 +305,10 @@ fn fields_in_different_arms_share_registers() {
     let f = (&program.fns).into_iter().find(|f| f.name == "f");
     let f = &f.expect("f").core;
     let source = Source::new(&program).expect("a whole program");
-    let d = translate(&source, f, Some(FuncIdx(0)), &mut Tables::default()).expect("it loads");
-    let opened = d.ins.iter().filter(|i| i.op().name() == "Open2");
-    assert!(opened.count() >= 300);
+    let d =
+        translate(&source, f, false, Some(FuncIdx(0)), &mut Tables::default()).expect("it loads");
+    let opened = |step: &&Step| matches!(step, Step::Ins(Ins::Open2 { .. }));
+    assert!(d.steps.iter().filter(opened).count() >= 300);
     let regs = check(d, "f").expect("a function that fits");
     assert!(regs < 20, "{regs} registers");
 }
@@ -136,23 +331,23 @@ fn a_function_that_needs_too_many_registers_does_not_fit() {
     assert_eq!(fitted(many).err(), Some(Unfit::TooMany(Limit::Values)));
 }
 
-impl PartialEq for Body {
-    fn eq(&self, other: &Body) -> bool {
-        self.own == other.own && format!("{:?}", self.ins) == format!("{:?}", other.ins)
+impl std::fmt::Debug for Assigned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.regs)
     }
 }
 
-impl std::fmt::Debug for Body {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self.ins)
+fn kind(step: &Step) -> &'static str {
+    match step {
+        Step::Ins(ins) => ins.op().name(),
+        Step::TailCall { .. } => "tail call",
     }
 }
 
 /// The kinds of what is left of `d`, and where its labels stand.
-fn left(d: Draft) -> (Vec<String>, Vec<usize>) {
-    let body = fitted(d).expect("a function that fits");
-    let kinds = body.ins.iter().map(|i| i.op().name().to_string());
-    (kinds.collect(), body.labels)
+fn left(d: Draft) -> (Vec<&'static str>, Vec<usize>) {
+    let f = fitted(d).expect("a function that fits");
+    (f.steps.iter().map(kind).collect(), f.labels)
 }
 
 /// A `Move` from a register to itself does nothing and is left out, and so is
@@ -211,6 +406,29 @@ fn a_jump_over_nothing_is_left_out() {
     assert_eq!(labels, [2]);
 }
 
+/// A set of registers knows what is in it, and gives them from the highest down.
+#[test]
+fn a_set_of_registers_gives_the_highest_first() {
+    let mut set = RegSet::default();
+    let regs = [255u8, 192, 191, 128, 127, 64, 63, 1, 0];
+    for r in regs {
+        assert!(!set.has(Reg(r)));
+        set.add(Reg(r));
+        assert!(set.has(Reg(r)));
+    }
+    set.remove(Reg(64));
+    set.remove(Reg(65));
+    let mut more = RegSet::default();
+    more.add(Reg(70));
+    set.add_all(&more);
+    let mut down = Vec::new();
+    while let Some(Reg(r)) = set.take_highest() {
+        down.push(r);
+    }
+    assert_eq!(down, [255, 192, 191, 128, 127, 70, 63, 1, 0]);
+    assert!((0..=u8::MAX).all(|r| !set.has(Reg(r))));
+}
+
 #[test]
 fn the_lowest_free_register_is_found_at_every_word() {
     for n in [0u8, 1, 63, 64, 127, 128, 191, 192, 254] {
@@ -232,6 +450,16 @@ enum Holds {
     Value(VReg),
     /// This value, or nothing once an instruction took it.
     MaybeTaken(VReg),
+    /// Nothing, since an instruction took this value.
+    Taken(VReg),
+}
+
+impl Holds {
+    fn value(self) -> VReg {
+        match self {
+            Holds::Value(v) | Holds::MaybeTaken(v) | Holds::Taken(v) => v,
+        }
+    }
 }
 
 /// What every register holds. One that is not here holds nothing a path may
@@ -241,12 +469,9 @@ type State = BTreeMap<u8, Holds>;
 fn meet(a: &State, b: &State) -> State {
     let mut out = State::new();
     for (r, x) in a {
-        let held = match (x, b.get(r)) {
-            (x, Some(y)) if x == y => Some(*x),
-            (
-                Holds::Value(v) | Holds::MaybeTaken(v),
-                Some(Holds::Value(w) | Holds::MaybeTaken(w)),
-            ) if v == w => Some(Holds::MaybeTaken(*v)),
+        let held = match b.get(r) {
+            Some(y) if x == y => Some(*x),
+            Some(y) if x.value() == y.value() => Some(Holds::MaybeTaken(x.value())),
             _ => None,
         };
         out.extend(held.map(|h| (*r, h)));
@@ -254,11 +479,12 @@ fn meet(a: &State, b: &State) -> State {
     out
 }
 
-/// Run the registers `body` gave `d`'s values along every path of `d`, and say
-/// what is wrong when a register does not hold the value an instruction reads
-/// there. `d` is the function before anything was left out of it.
-fn wrong_register(d: &Draft, body: &Body) -> Option<String> {
-    let reg = |v: VReg| body.regs[v.0 as usize].map(|r| r.0);
+/// Run the registers `f` gave `d`'s values along every path of `d`, and say
+/// what is wrong when a register does not hold the value a step reads there.
+/// `d` is the function before anything was left out of it, and `idle` says which
+/// of its steps are to be.
+fn wrong_register(d: &Draft, f: &Assigned, idle: &[bool]) -> Option<String> {
+    let reg = |v: VReg| f.regs[v.0 as usize].map(|r| r.0);
     let mut at_label: Vec<Option<State>> = vec![None; d.labels.len()];
     let arrive = |at_label: &mut Vec<Option<State>>, l: usize, s: &State| {
         let met = match &at_label[l] {
@@ -272,9 +498,9 @@ fn wrong_register(d: &Draft, body: &Body) -> Option<String> {
         // The first two are the frame's link and closure, and its callee's
         // are past its last.
         if let Some(r) = reg(v)
-            && !(2..body.own.0).contains(&u16::from(r))
+            && !(2..f.own.0).contains(&u16::from(r))
         {
-            return Some(format!("{v:?} is in r{r} of {:?}", body.own));
+            return Some(format!("{v:?} is in r{r} of {:?}", f.own));
         }
     }
     for (p, r) in d.params.iter().zip(2..=u8::MAX) {
@@ -284,7 +510,7 @@ fn wrong_register(d: &Draft, body: &Body) -> Option<String> {
         let first = state.as_mut().expect("the start");
         first.insert(r, Holds::Value(*p));
     }
-    for (i, ins) in d.ins.iter().enumerate() {
+    for (i, step) in d.steps.iter().enumerate() {
         for (l, at) in d.labels.iter().enumerate() {
             if *at == i
                 && let Some(s) = &at_label[l]
@@ -297,27 +523,35 @@ fn wrong_register(d: &Draft, body: &Body) -> Option<String> {
         let mut wrong = None;
         let mut taken = Vec::new();
         let mut written = Vec::new();
-        let jumps = ins.target().map(|l| l.0 as usize);
-        let unread = matches!(ins, Ins::Const { dst, .. } if reg(dst.0).is_none());
-        ins.operands(&d.lists, &mut |v, role| {
+        let jumps = step.target().map(|l| l.0 as usize);
+        step.operands(&d.lists, &mut |v, role| {
             let Some(r) = reg(v) else {
-                if !unread {
-                    wrong = Some(format!("{ins:?} names {v:?}, which has no register"));
+                if !idle[i] {
+                    wrong = Some(format!("{i} names {v:?}, which has no register"));
                 }
                 return;
             };
+            // A drop that is left out does nothing, and the register may be
+            // another value's by then.
+            if role == Role::Drop && idle[i] {
+                for (r, held) in now.iter() {
+                    if held.value() == v && *held != Holds::Taken(v) {
+                        wrong = Some(format!("{i} drops {v:?}, which is in r{r}: {now:?}"));
+                    }
+                }
+                return;
+            }
             match role {
                 Role::Write | Role::WriteOnHit => written.push((r, v)),
                 Role::Drop => {
-                    let ok = [Holds::Value(v), Holds::MaybeTaken(v)];
-                    if !now.get(&r).is_some_and(|h| ok.contains(h)) {
-                        wrong = Some(format!("{i}: {ins:?} drops {v:?} in r{r}: {now:?}"));
+                    if now.get(&r).is_none_or(|h| h.value() != v) {
+                        wrong = Some(format!("{i} drops {v:?} in r{r}: {now:?}"));
                     }
                     taken.push((r, v));
                 }
                 Role::Look | Role::Share | Role::Pass { .. } | Role::Take => {
                     if now.get(&r) != Some(&Holds::Value(v)) {
-                        wrong = Some(format!("{i}: {ins:?} reads {v:?} in r{r}: {now:?}"));
+                        wrong = Some(format!("{i} reads {v:?} in r{r}: {now:?}"));
                     }
                     if matches!(role, Role::Take | Role::Pass { moved: true }) {
                         taken.push((r, v));
@@ -332,80 +566,61 @@ fn wrong_register(d: &Draft, body: &Body) -> Option<String> {
         regs.sort_unstable();
         regs.dedup();
         if regs.len() < written.len() {
-            return Some(format!("{i}: {ins:?} writes a register twice: {written:?}"));
+            return Some(format!("{i} writes a register twice: {written:?}"));
         }
         // A jump takes nothing and writes nothing.
         if let Some(l) = jumps {
             arrive(&mut at_label, l, now);
         }
         for (r, v) in taken {
-            now.insert(r, Holds::MaybeTaken(v));
+            now.insert(r, Holds::Taken(v));
         }
         for (r, v) in written {
             now.insert(r, Holds::Value(v));
         }
-        if !ins.falls_through() {
+        if !step.falls_through() {
             state = None;
         }
     }
     None
 }
 
-/// Where the code left in `body` and its labels put each jump, check that it
-/// goes to what ran there before anything was left out.
-fn wrong_jump(d: &Draft, body: &Body) -> Option<String> {
-    let reg = |v: VReg| body.regs[v.0 as usize];
-    let goes = |ins: &Ins<VReg>| match ins {
-        Ins::Move { dst, src } => reg(dst.0) == reg(src.reg),
-        Ins::Const { dst, .. } => reg(dst.0).is_none(),
-        _ => false,
-    };
+/// Where the steps left in `f` and its labels put each jump, check that it goes
+/// to what ran there before anything was left out.
+fn wrong_jump(d: &Draft, f: &Assigned, idle: &[bool]) -> Option<String> {
+    let reg = |v: VReg| f.regs[v.0 as usize];
     // The kinds each label leads to, with what does nothing passed over.
-    let follow = |ins: &[Ins<VReg>], labels: &[usize], from: usize| {
+    let follow = |steps: &[Step], idle: &dyn Fn(usize) -> bool, labels: &[usize], from: usize| {
         let mut out = Vec::new();
         let mut at = from;
         while out.len() < 12 {
-            let Some(i) = ins.get(at) else { break };
-            match i {
-                Ins::Jump { to } => {
+            let Some(step) = steps.get(at) else { break };
+            match step {
+                Step::Ins(Ins::Jump { to }) => {
                     at = labels[to.0 as usize];
                     continue;
                 }
-                _ if goes(i) => {}
-                _ => out.push(i.op()),
+                Step::Ins(Ins::Move { dst, src }) if reg(dst.0) == reg(src.reg) => {}
+                _ if idle(at) => {}
+                step => out.push(kind(step)),
             }
             at += 1;
-            if !i.falls_through() {
+            if !step.falls_through() {
                 break;
             }
         }
         out
     };
     for l in 0..d.labels.len() {
-        let before = follow(&d.ins, &d.labels, d.labels[l]);
-        let now = follow(&body.ins, &body.labels, body.labels[l]);
+        let before = follow(&d.steps, &|i| idle[i], &d.labels, d.labels[l]);
+        let now = follow(&f.steps, &|_| false, &f.labels, f.labels[l]);
         if before != now {
             return Some(format!("label {l} led to {before:?} and leads to {now:?}"));
         }
     }
-    let before = follow(&d.ins, &d.labels, 0);
-    let now = follow(&body.ins, &body.labels, 0);
+    let before = follow(&d.steps, &|i| idle[i], &d.labels, 0);
+    let now = follow(&f.steps, &|_| false, &f.labels, 0);
     (before != now).then(|| format!("the start led to {before:?} and leads to {now:?}"))
-}
-
-fn copy_of(d: &Draft) -> Draft {
-    Draft {
-        ins: d.ins.clone(),
-        lists: Lists {
-            regs: d.lists.regs.clone(),
-            args: d.lists.args.clone(),
-            dsts: d.lists.dsts.clone(),
-        },
-        labels: d.labels.clone(),
-        values: d.values,
-        params: d.params.clone(),
-        closure: d.closure,
-    }
 }
 
 /// Check every register given to `d`. Gives how many registers that is, or
@@ -417,296 +632,26 @@ fn check(mut d: Draft, what: &str) -> Option<usize> {
         Err(why) => panic!("{what}: {why:?}"),
     };
     let before = copy_of(&d);
-    let body = match allocate(d, &held) {
-        Ok(body) => body,
+    let f = match allocate(d, &held) {
+        Ok(f) => f,
         Err(Unfit::TooMany(Limit::Values)) => return None,
         Err(why) => panic!("{what}: {why:?}"),
     };
-    if let Some(wrong) = wrong_register(&before, &body) {
+    if let Some(wrong) = wrong_register(&before, &f, &held.idle) {
         panic!("{what}: {wrong}");
     }
-    if let Some(wrong) = wrong_jump(&before, &body) {
+    if let Some(wrong) = wrong_jump(&before, &f, &held.idle) {
         panic!("{what}: {wrong}");
     }
-    Some(body.own.len())
-}
-
-/// Check every function of `program`.
-fn check_program(program: &Program, what: &str) -> usize {
-    let source = &Source::new(program).expect("a whole program");
-    let mut checked = 0;
-    let mut one = |f: &LoweredFn, this: Option<FuncIdx>| {
-        let what = format!("{what}: {}.{}", f.module, f.name);
-        let mut tables = Tables::default();
-        let Ok(d) = translate(source, &f.core, this, &mut tables) else {
-            return;
-        };
-        if check(d, &what).is_none() {
-            let pieces = literals::in_pieces(&f.core);
-            let core = pieces.unwrap_or_else(|| panic!("{what} does not fit"));
-            let d = translate(source, &core, this, &mut tables);
-            check(d.expect("it loads"), &what).unwrap_or_else(|| panic!("{what} does not fit"));
-        }
-        checked += 1;
-    };
-    for (f, i) in (&program.fns).into_iter().zip(0..) {
-        one(f, Some(FuncIdx(i)));
-    }
-    for f in program.inits.iter().chain([&program.toplevel]) {
-        one(f, None);
-    }
-    checked
+    Some(f.own.len())
 }
 
 /// Every function of every program in the repository that is one file, and of
-/// the stdlib modules they import: each register an instruction reads holds
-/// the value it is to read, on every path that reaches it.
+/// the stdlib modules they import: each register a step reads holds the value it
+/// is to read, on every path that reaches it.
 #[test]
 fn every_register_read_holds_its_value_in_every_program() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut files = Vec::new();
-    for dir in ["examples", "crates/scarlet/tests/programs"] {
-        let all = std::fs::read_dir(root.join(dir)).expect("a directory");
-        files.extend(all.map(|f| f.expect("a file").path()));
-    }
-    let benches = std::fs::read_dir(root.join("benches")).expect("a directory");
-    for dir in benches.map(|f| f.expect("a file").path()) {
-        if let Some(name) = dir.file_name() {
-            files.push(dir.join(name).with_extension("sca"));
-        }
-    }
-    let (mut programs, mut functions) = (0, 0);
-    for path in files {
-        if path.extension().is_none_or(|e| e != "sca") {
-            continue;
-        }
-        let Ok(src) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let result = scarlet_core::compile::compile_text(&src, None);
-        let Some(program) = result.into_runnable() else {
-            continue;
-        };
-        programs += 1;
-        functions += check_program(&program, &path.display().to_string());
-    }
-    assert!(programs > 60, "{programs} programs");
-    assert!(functions > 3000, "{functions} functions");
-    assert!(check_program(&program(SHAPES), "shapes") > 4);
-}
-
-/// Numbers from a generator that gives the same ones each time.
-struct Random(u64);
-
-impl Random {
-    fn below(&mut self, n: usize) -> usize {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        usize::try_from(self.0 >> 20).expect("64 bits") % n
-    }
-
-    fn of<T: Copy>(&mut self, from: &[T]) -> T {
-        from[self.below(from.len())]
-    }
-}
-
-/// Makes a function at random, as `translate` would: every value is written
-/// before it is read on each path, every jump goes forward, and a value may be
-/// dropped once and not read after.
-struct Maker {
-    random: Random,
-    ins: Vec<Ins<VReg>>,
-    labels: Vec<usize>,
-    /// The numbers no value has yet, in no order, so that a value written late
-    /// may have a lower number than one that is held then.
-    numbers: Vec<u32>,
-}
-
-impl Maker {
-    fn value(&mut self) -> u32 {
-        self.numbers.pop().expect("enough numbers")
-    }
-
-    fn label(&mut self) -> u32 {
-        self.labels.push(usize::MAX);
-        u32::try_from(self.labels.len() - 1).expect("few")
-    }
-
-    fn place(&mut self, l: u32) {
-        self.labels[l as usize] = self.ins.len();
-    }
-
-    /// `n` steps of straight code over the values in `scope`, which it adds
-    /// to. It may drop those past the first `theirs`, which are the ones no
-    /// code after it reads.
-    fn steps(&mut self, n: usize, depth: usize, scope: &mut Vec<u32>, theirs: usize) {
-        for _ in 0..n {
-            let a = self.random.of(scope);
-            let b = self.random.of(scope);
-            let c = self.random.of(scope);
-            match self.random.below(16) {
-                0 | 1 => {
-                    let v = self.value();
-                    self.ins.push(of::constant(v));
-                    scope.push(v);
-                }
-                2 => {
-                    let v = self.value();
-                    self.ins.push(of::mv(v, a));
-                    scope.push(v);
-                }
-                3 | 4 => {
-                    let v = self.value();
-                    self.ins.push(of::add(v, a, b));
-                    scope.push(v);
-                }
-                5 => {
-                    let v = self.value();
-                    self.ins.push(of::append(v, a, b));
-                    scope.push(v);
-                }
-                6 => {
-                    let v = self.value();
-                    self.ins.push(of::call(v, &[a, b, c]));
-                    scope.push(v);
-                }
-                7 | 8 if scope.len() > theirs.max(1) => {
-                    let i = theirs + self.random.below(scope.len() - theirs);
-                    let v = scope.remove(i);
-                    self.ins.push(of::drop(v));
-                }
-                // A cell taken apart, with a register for some of its fields.
-                9 if scope.len() > theirs => {
-                    let i = theirs + self.random.below(scope.len() - theirs);
-                    let v = scope.remove(i);
-                    let wanted = 1 + self.random.below(3);
-                    let dsts = [wanted & 1, wanted & 2].map(|w| (w > 0).then(|| self.value()));
-                    self.ins.push(of::open(dsts, v));
-                    scope.extend(dsts.into_iter().flatten());
-                }
-                10 | 11 if depth < 4 => self.branch(depth, scope),
-                12 if depth < 4 => self.find(depth, scope),
-                13 => self.write(scope),
-                14 if depth < 4 => self.tail(depth, scope),
-                _ => {
-                    let v = self.value();
-                    self.ins.push(of::len(v, a));
-                    scope.push(v);
-                }
-            }
-        }
-    }
-
-    /// An `if` whose two sides give one value, or leave the function.
-    fn branch(&mut self, depth: usize, scope: &mut Vec<u32>) {
-        let cond = self.random.of(scope);
-        let joined = self.value();
-        let (other, after) = (self.label(), self.label());
-        self.ins.push(of::unless(cond, other));
-        for side in 0..2 {
-            let mut inner = scope.clone();
-            let n = self.random.below(6);
-            self.steps(n, depth + 1, &mut inner, scope.len());
-            let from = self.random.of(&inner);
-            match self.random.below(3) {
-                0 => self.ins.push(of::constant(joined)),
-                _ => self.ins.push(of::mv(joined, from)),
-            }
-            self.ins.push(of::jump(after));
-            if side == 0 {
-                self.place(other);
-            }
-        }
-        self.place(after);
-        scope.push(joined);
-        self.ins.push(of::len(joined, joined));
-    }
-
-    /// A lookup with a side of its own for a key that is not there.
-    fn find(&mut self, depth: usize, scope: &mut Vec<u32>) {
-        let (m, k) = (self.random.of(scope), self.random.of(scope));
-        let found = self.value();
-        let joined = self.value();
-        let (miss, after) = (self.label(), self.label());
-        self.ins.push(of::find(found, [m, k], miss));
-        let mut inner = scope.clone();
-        inner.push(found);
-        let n = self.random.below(5);
-        self.steps(n, depth + 1, &mut inner, scope.len());
-        let from = self.random.of(&inner);
-        self.ins.push(of::mv(joined, from));
-        self.ins.push(of::jump(after));
-        self.place(miss);
-        let mut inner = scope.clone();
-        let n = self.random.below(5);
-        self.steps(n, depth + 1, &mut inner, scope.len());
-        let from = self.random.of(&inner);
-        self.ins.push(of::mv(joined, from));
-        self.place(after);
-        scope.push(joined);
-    }
-
-    /// A write that gives the array back when it misses.
-    fn write(&mut self, scope: &mut Vec<u32>) {
-        let operands = [
-            self.random.of(scope),
-            self.random.of(scope),
-            self.random.of(scope),
-        ];
-        let v = self.value();
-        let (miss, after) = (self.label(), self.label());
-        self.ins.push(of::write(v, operands, miss));
-        self.ins.push(of::jump(after));
-        self.place(miss);
-        self.ins.push(of::mv(v, operands[0]));
-        self.place(after);
-        scope.push(v);
-    }
-
-    /// A path that leaves the function.
-    fn tail(&mut self, depth: usize, scope: &[u32]) {
-        let cond = self.random.of(scope);
-        let on = self.label();
-        self.ins.push(of::unless(cond, on));
-        let mut inner = scope.to_vec();
-        let n = self.random.below(5);
-        self.steps(n, depth + 1, &mut inner, 0);
-        self.end(&inner);
-        self.place(on);
-    }
-
-    fn end(&mut self, scope: &[u32]) {
-        let args = [
-            self.random.of(scope),
-            self.random.of(scope),
-            self.random.of(scope),
-        ];
-        if self.random.below(2) == 0 {
-            self.ins.push(of::again(&args));
-        } else {
-            self.ins.push(of::ret(args[0]));
-        }
-    }
-}
-
-fn random_function(seed: u64, steps: usize) -> Draft {
-    let mut random = Random(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
-    let values = u32::try_from(20_000.min(3 + steps * 100)).expect("few");
-    let mut numbers: Vec<u32> = (3..values).collect();
-    for i in (1..numbers.len()).rev() {
-        numbers.swap(i, random.below(i + 1));
-    }
-    let mut m = Maker {
-        random,
-        ins: Vec::new(),
-        labels: Vec::new(),
-        numbers,
-    };
-    let mut scope = vec![0, 1, 2];
-    m.steps(steps, 0, &mut scope, 0);
-    m.end(&scope);
-    draft(values, 3, m.ins, &m.labels)
+    every_draft(&mut |d, what| check(d, what).is_some());
 }
 
 /// The same for functions made at random: straight code, branches, lookups
@@ -716,13 +661,14 @@ fn every_register_read_holds_its_value_in_random_functions() {
     let mut fitted = 0;
     for seed in 0..3000u64 {
         let steps = 5 + usize::try_from(seed % 60).expect("small");
-        let d = random_function(seed, steps);
+        let params = 1 + u32::try_from(seed % 7).expect("small");
+        let d = random_function(seed, params, steps);
         fitted += usize::from(check(d, &format!("seed {seed}")).is_some());
     }
     assert!(fitted > 2900, "{fitted} fit");
     // Long ones, most of which hold too much at once.
     for seed in 0..40u64 {
-        check(random_function(seed, 600), &format!("long seed {seed}"));
+        check(random_function(seed, 3, 600), &format!("long seed {seed}"));
     }
 }
 
@@ -730,40 +676,42 @@ fn every_register_read_holds_its_value_in_random_functions() {
 /// mistake it is for.
 #[test]
 fn a_register_shared_by_mistake_is_found() {
-    let ins = vec![
-        of::constant(0),
-        of::constant(1),
-        of::add(2, 0, 1),
-        of::ret(2),
-    ];
-    let mut d = draft(3, 0, ins, &[]);
-    let held = settle(&mut d).expect("a function that loads");
-    let before = copy_of(&d);
-    let mut body = allocate(d, &held).expect("a function that fits");
-    assert_eq!(wrong_register(&before, &body), None);
-    body.regs[1] = body.regs[0];
-    assert!(wrong_register(&before, &body).is_some());
+    type Wrong = fn(&mut Assigned, &mut Vec<bool>);
+    let wrong = |mut d: Draft, wrong: Wrong| {
+        let mut held = settle(&mut d).expect("a function that loads");
+        let before = copy_of(&d);
+        let mut f = allocate(d, &held).expect("a function that fits");
+        assert_eq!(wrong_register(&before, &f, &held.idle), None);
+        wrong(&mut f, &mut held.idle);
+        assert!(wrong_register(&before, &f, &held.idle).is_some());
+    };
+    let sum = || {
+        vec![
+            of::constant(0),
+            of::constant(1),
+            of::add(2, 0, 1),
+            of::ret(2),
+        ]
+    };
+    wrong(draft(3, 0, sum(), &[]), |f, _| f.regs[1] = f.regs[0]);
     // And one given to two values that are written at once.
     let ins = vec![of::open([Some(1), Some(2)], 0), of::ret(1)];
-    let mut d = draft(3, 1, ins, &[]);
-    let held = settle(&mut d).expect("a function that loads");
-    let before = copy_of(&d);
-    let mut body = allocate(d, &held).expect("a function that fits");
-    assert_eq!(wrong_register(&before, &body), None);
-    body.regs[2] = body.regs[1];
-    assert!(wrong_register(&before, &body).is_some());
+    wrong(draft(3, 1, ins, &[]), |f, _| f.regs[2] = f.regs[1]);
+    // And one of two arguments of a tail call.
+    let steps = vec![of::len(1, 0).into(), of::again(&[0, 1])];
+    wrong(draft(2, 1, steps, &[]), |f, _| f.regs[1] = f.regs[0]);
+    // And a drop left out that still finds its value.
+    let ins = vec![of::len(1, 0), of::drop(0), of::ret(1)];
+    wrong(draft(2, 1, ins, &[]), |_, idle| idle[1] = true);
     // And a value read after it was taken.
     let mut d = draft(3, 1, vec![of::mv(1, 0), of::len(2, 0), of::ret(1)], &[]);
     let held = settle(&mut d).expect("a function that loads");
-    if let Ins::Move { src, .. } = &mut d.ins[0] {
-        *src = Arg {
-            moved: true,
-            ..*src
-        };
+    if let Step::Ins(Ins::Move { src, .. }) = &mut d.steps[0] {
+        *src = Arg::moved(src.reg);
     }
     let before = copy_of(&d);
-    let body = allocate(d, &held).expect("a function that fits");
-    assert!(wrong_register(&before, &body).is_some());
+    let f = allocate(d, &held).expect("a function that fits");
+    assert!(wrong_register(&before, &f, &held.idle).is_some());
 }
 
 /// A function's instructions, values and labels are each gone over a fixed

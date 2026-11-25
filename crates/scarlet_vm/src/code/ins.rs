@@ -28,9 +28,9 @@ use crate::value::{Float, SmallInt, Tag, Value};
 mod fields;
 
 pub(crate) use fields::{
-    Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, Dst, DstList, EntryPc, Hands, Hit, Last,
-    Lists, LookList, Looks, MaybeDst, Names, Newline, Part, Pc, Place, Places, Reg, Role, Room,
-    ShareList, Shared, Shares, Src, Taken, TextId, Unplaced, VReg, WhyId,
+    Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, DeadList, Dst, DstList, EntryPc, Hands,
+    Hit, Last, Lists, LookList, Looks, MaybeDst, Names, Newline, Part, Pc, Place, Places, Reg,
+    Role, Room, ShareList, Shared, Shares, Src, Taken, TextId, Unplaced, VReg, WhyId,
 };
 pub(super) use fields::{Callee, Label, LastReg, OwnEntry, OwnRoom};
 
@@ -169,6 +169,11 @@ instructions! {
     BigInt { dst: Dst<R>, n: i64, id: ConstId },
     /// `dst` gets what `src` holds.
     Move { dst: Dst<R>, src: Arg<R> },
+    /// Each of `dsts` gets what its `srcs` held before any of them is written.
+    /// So a register may be among both, and two that trade places are one
+    /// `Move2`. Only the moves of a tail call are these ([`super::moves`]).
+    Move2 { dsts: [Dst<R>; 2], srcs: [Taken<R>; 2] },
+    Move3 { dsts: [Dst<R>; 3], srcs: [Taken<R>; 3] },
     GetGlobal { dst: Dst<R>, slot: GlobalSlot },
     SetGlobal { slot: GlobalSlot, src: Shared<R> },
     // Each operator on two Ints is an instruction of its own, and so is each
@@ -267,6 +272,9 @@ instructions! {
     /// Perceus's last use of `reg`. It gives up the reference now instead of
     /// at the frame's end.
     Drop { reg: Dead<R> },
+    /// The same for each of `regs`, which a tail call does not pass
+    /// ([`super::moves`]).
+    DropWide { regs: DeadList },
     /// A call to the function at `to`. `own` is this frame's size, which is
     /// how far above it the callee's frame starts. One with a number at its
     /// end has that many arguments and takes each of them, so it has nothing to
@@ -281,14 +289,10 @@ instructions! {
     Call3Share { dst: Dst<R>, own: R::Own, to: R::Entry, a: Arg<R>, b: Arg<R>, c: Arg<R> },
     Call { dst: Dst<R>, own: R::Own, to: R::Entry, args: Args<R, 6> },
     CallWide { dst: Dst<R>, own: R::Own, to: R::Entry, args: ArgList },
-    TailCall { to: R::Entry, args: Args<R, 6>, own: R::Own } => ends,
-    TailCallWide { to: R::Entry, args: ArgList, own: R::Own } => ends,
     /// A call to the function running now, as the same closure. One that keeps
     /// no closure is called by name.
     CallSelf { dst: Dst<R>, own: R::Own, to: R::OwnEntry, args: Args<R, 6> },
     CallSelfWide { dst: Dst<R>, own: R::Own, to: R::OwnEntry, args: ArgList },
-    TailCallSelf { to: R::OwnEntry, args: Args<R, 6>, own: R::Own } => ends,
-    TailCallSelfWide { to: R::OwnEntry, args: ArgList, own: R::Own } => ends,
     /// A call to the function value in `callee`, with or without captures.
     CallValue { dst: Dst<R>, callee: Shared<R>, own: R::Own, args: Args<R, 6> },
     CallValueWide { dst: Dst<R>, callee: Shared<R>, own: R::Own, args: ArgList },
@@ -310,6 +314,10 @@ instructions! {
     /// given up after the rest.
     RetClosure { src: Taken<R>, last: R::Last } => ends,
     Jump { to: R::To } => ends,
+    /// Go on as the function at `to`, in this frame. Its arguments are in its
+    /// parameters, and no other register holds a cell. It is how a tail call to
+    /// another function ends ([`super::moves`]).
+    Enter { to: R::Entry } => ends,
     /// Continue at `to` when `cond` is `False`, else at the next instruction.
     JumpIfFalse { cond: Src<R>, to: R::To },
     // Continue at `to` unless a comparison holds, for an `if` on a comparison
@@ -464,6 +472,16 @@ impl<R: Names> Ins<R> {
     }
 }
 
+/// What the registers an instruction writes may then hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum Makes {
+    /// Nothing that has a count.
+    NoCell,
+    /// A number, which is a cell when it is a big Int.
+    Int,
+    Any,
+}
+
 // The operator instructions by family, each beside the operator it does. This
 // is the one list of them. `int_arith!(then)` hands the list to the macro
 // `then`, in which the loader finds the instruction for an operator
@@ -514,6 +532,49 @@ families! { $
     float_compare_k {
         FloatLtK JumpUnlessFloatLtK Order::Lt, FloatLeK JumpUnlessFloatLeK Order::Le,
         FloatGtK JumpUnlessFloatGtK Order::Gt, FloatGeK JumpUnlessFloatGeK Order::Ge
+    }
+}
+
+impl<R: Names> Ins<R> {
+    /// What the instruction makes, or [`Makes::Any`] when it does not say. A
+    /// `Move` makes what its source holds, so it says nothing.
+    pub(super) fn makes(&self) -> Makes {
+        macro_rules! any_of {
+            ([] $($name:ident $op:path),*) => { $(Ins::$name { .. })|* };
+            ([] $($name:ident $jump:ident $op:path),*) => { $(Ins::$name { .. })|* };
+        }
+        if matches!(
+            self,
+            int_compare!(any_of)
+                | int_compare_k!(any_of)
+                | float_arith!(any_of)
+                | float_arith_k!(any_of)
+                | float_arith_k_first!(any_of)
+                | float_compare!(any_of)
+                | float_compare_k!(any_of)
+                | Ins::Const { .. }
+                | Ins::FloatNeg { .. }
+                | Ins::FloatFromInt { .. }
+                | Ins::Print { .. }
+                | Ins::Equal { .. }
+                | Ins::NotEqual { .. }
+                | Ins::Not { .. }
+        ) {
+            Makes::NoCell
+        } else if matches!(
+            self,
+            int_arith!(any_of)
+                | int_arith_k!(any_of)
+                | int_arith_k_first!(any_of)
+                | Ins::IntNeg { .. }
+                | Ins::BigInt { .. }
+                | Ins::ArrayLen { .. }
+                | Ins::StackDepth { .. }
+        ) {
+            Makes::Int
+        } else {
+            Makes::Any
+        }
     }
 }
 

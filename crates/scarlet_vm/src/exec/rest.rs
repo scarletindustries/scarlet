@@ -45,10 +45,6 @@ pub(super) struct Rest<'c, 'h> {
     /// its `Count` instruction holds. It is empty for an ordinary load,
     /// which has no such instruction.
     pub(super) ran: Vec<u64>,
-    /// The values on their way into a frame or a cell, which are the arguments
-    /// of a call or the fields of a constructor that has too many to hold. It
-    /// is kept between uses so that neither allocates.
-    pub(super) passing: Vec<Value>,
     pub(super) heap: Heap,
 }
 

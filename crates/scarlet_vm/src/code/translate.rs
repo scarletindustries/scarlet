@@ -16,8 +16,10 @@
 //! `CallSelf` is for a function that keeps the closure it runs as, and passes
 //! it on, so a lambda calling itself still sees its captures. Any other
 //! function calls itself by name. `CallValue` is for a function value in a
-//! register. A call in tail position is one of three instructions that replace
-//! the frame: `TailCall`, `TailCallSelf` and `TailCallValue`.
+//! register. A call in tail position replaces the frame. One of a function
+//! value is `TailCallValue`, and any other is [`Step::TailCall`], which is no
+//! instruction: what it takes to make it depends on where its arguments are
+//! ([`super::moves`]).
 
 use std::collections::{HashMap, HashSet};
 
@@ -26,12 +28,13 @@ use scarlet_ir::core_ir::{
     LocalId, MAX_PARAMS, PrimOp,
 };
 use scarlet_ir::intrinsic::Intrinsic;
+use scarlet_ir::rty::{Prim, ResolvedPool};
 use scarlet_ir::tivec::Idx;
 
 use super::forms::{CtorOf, Form};
 use super::ins::{
     Arg, ArgList, Args, BitsOp, Dead, Dst, DstList, Hit, Ins, Label, LastReg, Lists, LookList,
-    Looks, MaybeDst, Newline, OwnEntry, OwnRoom, ShareList, Shared, Shares, Src, Taken, VReg,
+    Looks, MaybeDst, Newline, OwnEntry, OwnRoom, Role, ShareList, Shared, Shares, Src, Taken, VReg,
 };
 use super::{ReadsClosure, Source, Tables, Unfit, Why, add, built};
 use crate::heap::Ctor;
@@ -39,24 +42,78 @@ use crate::ops::{Arith, Compare, NumOp, Order};
 use crate::stop::{Arity, Broken, Limit, Missing};
 use crate::value::{Float, SmallInt, Value};
 
-/// A function's instructions before its values have registers.
+/// One thing a function does, before its values have registers.
+#[derive(Debug)]
+pub(super) enum Step {
+    Ins(Ins<VReg>),
+    /// A call in tail position to a function known when the program loads. It
+    /// takes its arguments and runs nothing after it.
+    TailCall {
+        to: TailTo,
+        args: Box<[VReg]>,
+    },
+}
+
+/// The function that a [`Step::TailCall`] calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TailTo {
+    /// The running one, as the same closure.
+    Own,
+    /// This one, by name.
+    Func(FuncIdx),
+}
+
+impl Step {
+    /// [`Ins::falls_through`].
+    pub(super) fn falls_through(&self) -> bool {
+        match self {
+            Step::Ins(ins) => ins.falls_through(),
+            Step::TailCall { .. } => false,
+        }
+    }
+
+    /// [`Ins::operands`].
+    pub(super) fn operands(&self, lists: &Lists<VReg>, f: &mut impl FnMut(VReg, Role)) {
+        match self {
+            Step::Ins(ins) => ins.operands(lists, f),
+            Step::TailCall { args, .. } => args.iter().for_each(|a| f(*a, Role::Take)),
+        }
+    }
+
+    /// [`Ins::target`].
+    pub(super) fn target(&self) -> Option<Label> {
+        match self {
+            Step::Ins(ins) => ins.target(),
+            Step::TailCall { .. } => None,
+        }
+    }
+}
+
+/// What a function does before its values have registers.
 pub(super) struct Draft {
-    pub(super) ins: Vec<Ins<VReg>>,
+    pub(super) steps: Vec<Step>,
     pub(super) lists: Lists<VReg>,
-    /// Where each label is, as the number of the instruction it stands at.
+    /// Where each label is, as the number of the step it stands at.
     pub(super) labels: Vec<usize>,
     /// One past the highest value the function names.
     pub(super) values: u32,
     pub(super) params: Vec<VReg>,
+    /// What each value is by its type, by the value's number, when it is a
+    /// number or a string. One past the end is not said to be.
+    pub(super) prims: Vec<Option<Prim>>,
+    /// [`scarlet_ir::core_ir::LoweredFn::undropped`].
+    pub(super) undropped: bool,
     /// What it reads of the closure it runs as.
     pub(super) closure: ReadsClosure,
 }
 
-/// The instructions for `core`. `this` is the function's own index, when it
+/// The instructions for `core`, of a function that is `undropped` as
+/// [`Draft::undropped`] says. `this` is the function's own index, when it
 /// has one.
 pub(super) fn translate(
     source: &Source<'_>,
     core: &CoreFn,
+    undropped: bool,
     this: Option<FuncIdx>,
     tables: &mut Tables,
 ) -> Result<Draft, Unfit> {
@@ -65,11 +122,12 @@ pub(super) fn translate(
         None => 0,
         Some(h) => h.checked_add(1).ok_or(Unfit::TooMany(Limit::Values))?,
     };
+    let prims = survey.prims(&source.program.pool)?;
     let mut t = Translator {
         source,
         this,
         tables,
-        ins: Vec::new(),
+        steps: Vec::new(),
         lists: Lists::default(),
         labels: Vec::new(),
         landed: None,
@@ -82,11 +140,13 @@ pub(super) fn translate(
     t.expr(&core.body, Dest::Return)?;
     let labels: Option<Vec<usize>> = t.labels.into_iter().collect();
     Ok(Draft {
-        ins: t.ins,
+        steps: t.steps,
         lists: t.lists,
         labels: labels.ok_or(Unfit::Broken(Broken::NoPlace))?,
         values: t.values,
         params: core.params.iter().map(|p| of(p.id)).collect(),
+        prims,
+        undropped,
         closure: t.closure,
     })
 }
@@ -120,7 +180,7 @@ struct Translator<'c> {
     source: &'c Source<'c>,
     this: Option<FuncIdx>,
     tables: &'c mut Tables,
-    ins: Vec<Ins<VReg>>,
+    steps: Vec<Step>,
     lists: Lists<VReg>,
     /// Where each label is, once it is placed.
     labels: Vec<Option<usize>>,
@@ -198,9 +258,9 @@ impl Translator<'_> {
         add(&mut self.labels, None).map(Label)
     }
 
-    /// Put `l` at the next instruction.
+    /// Put `l` at the next step.
     fn place(&mut self, l: Label) {
-        let here = self.ins.len();
+        let here = self.steps.len();
         if let Some(at) = self.labels.get_mut(l.0 as usize) {
             *at = Some(here);
         }
@@ -217,7 +277,7 @@ impl Translator<'_> {
     }
 
     fn push(&mut self, ins: Ins<VReg>) {
-        self.ins.push(ins);
+        self.steps.push(Step::Ins(ins));
     }
 
     fn bad(&mut self, why: Why) -> Result<Ins<VReg>, Unfit> {
@@ -262,71 +322,75 @@ impl Translator<'_> {
         self.bad(why).map(Some)
     }
 
-    /// The call instruction for `callee`, in tail position or not.
+    /// The call of `callee` that puts its result in `dst`.
     fn call(
         &mut self,
-        dst: Option<VReg>,
+        dst: Dst<VReg>,
         callee: &Callee,
         args: &[LocalId],
     ) -> Result<Ins<VReg>, Unfit> {
-        if args.len() > MAX_PARAMS {
+        let own = OwnRoom;
+        Ok(match self.calls(callee, args.len())? {
+            Calls::Func(func) => self.call_by_name(dst, func, args)?,
+            Calls::Own(this) if !self.closure.keeps() => self.call_by_name(dst, this, args)?,
+            Calls::Own(_) => {
+                let to = OwnEntry;
+                match self.args(args)? {
+                    Fit::Inline(args) => Ins::CallSelf { dst, own, to, args },
+                    Fit::Listed(args) => Ins::CallSelfWide { dst, own, to, args },
+                }
+            }
+            Calls::Value(callee) => match self.args(args)? {
+                Fit::Inline(args) => Ins::CallValue {
+                    dst,
+                    callee,
+                    args,
+                    own,
+                },
+                Fit::Listed(args) => Ins::CallValueWide {
+                    dst,
+                    callee,
+                    args,
+                    own,
+                },
+            },
+            Calls::Bad(bad) => bad,
+        })
+    }
+
+    /// The call of `callee` that takes over the frame.
+    fn tail_call(&mut self, callee: &Callee, args: &[LocalId]) -> Result<Step, Unfit> {
+        let own = OwnRoom;
+        let to = match self.calls(callee, args.len())? {
+            Calls::Func(func) => TailTo::Func(func),
+            Calls::Own(_) => TailTo::Own,
+            Calls::Value(callee) => {
+                return Ok(Step::Ins(match self.args(args)? {
+                    Fit::Inline(args) => Ins::TailCallValue { callee, args, own },
+                    Fit::Listed(args) => Ins::TailCallValueWide { callee, args, own },
+                }));
+            }
+            Calls::Bad(bad) => return Ok(Step::Ins(bad)),
+        };
+        let args = args.iter().copied().map(of).collect();
+        Ok(Step::TailCall { to, args })
+    }
+
+    /// What a call of `callee` with `got` arguments calls.
+    fn calls(&mut self, callee: &Callee, got: usize) -> Result<Calls, Unfit> {
+        if got > MAX_PARAMS {
             return Err(Unfit::TooMany(Limit::Arguments));
         }
-        let own = OwnRoom;
-        match *callee {
-            Callee::Known(func) => {
-                if let Some(bad) = self.bad_call(func, args.len())? {
-                    return Ok(bad);
-                }
-                if let Some(dst) = dst {
-                    return self.call_by_name(Dst(dst), func, args);
-                }
-                let to = super::ins::Callee(func);
-                Ok(match self.args(args)? {
-                    Fit::Inline(args) => Ins::TailCall { to, args, own },
-                    Fit::Listed(args) => Ins::TailCallWide { to, args, own },
-                })
+        let (func, calls) = match (*callee, self.this) {
+            (Callee::Known(func), _) => (func, Calls::Func(func)),
+            (Callee::Self_, Some(this)) => (this, Calls::Own(this)),
+            (Callee::Self_, None) => {
+                return self.broken(Broken::ToplevelCallsSelf).map(Calls::Bad);
             }
-            Callee::Self_ => {
-                let Some(this) = self.this else {
-                    return self.broken(Broken::ToplevelCallsSelf);
-                };
-                if let Some(bad) = self.bad_call(this, args.len())? {
-                    return Ok(bad);
-                }
-                if let Some(dst) = dst
-                    && !self.closure.keeps()
-                {
-                    return self.call_by_name(Dst(dst), this, args);
-                }
-                let to = OwnEntry;
-                Ok(match (dst.map(Dst), self.args(args)?) {
-                    (Some(dst), Fit::Inline(args)) => Ins::CallSelf { dst, own, to, args },
-                    (Some(dst), Fit::Listed(args)) => Ins::CallSelfWide { dst, own, to, args },
-                    (None, Fit::Inline(args)) => Ins::TailCallSelf { to, args, own },
-                    (None, Fit::Listed(args)) => Ins::TailCallSelfWide { to, args, own },
-                })
-            }
-            Callee::Local(f) => {
-                let callee = Shared(of(f));
-                Ok(match (dst.map(Dst), self.args(args)?) {
-                    (Some(dst), Fit::Inline(args)) => Ins::CallValue {
-                        dst,
-                        callee,
-                        args,
-                        own,
-                    },
-                    (Some(dst), Fit::Listed(args)) => Ins::CallValueWide {
-                        dst,
-                        callee,
-                        args,
-                        own,
-                    },
-                    (None, Fit::Inline(args)) => Ins::TailCallValue { callee, args, own },
-                    (None, Fit::Listed(args)) => Ins::TailCallValueWide { callee, args, own },
-                })
-            }
-        }
+            (Callee::Local(f), _) => return Ok(Calls::Value(Shared(of(f)))),
+        };
+        let bad = self.bad_call(func, got)?;
+        Ok(bad.map_or(calls, Calls::Bad))
     }
 
     /// The call to `func` that puts its result in `dst`.
@@ -375,17 +439,18 @@ impl Translator<'_> {
         if self.reads.get(&cond) != Some(&1) {
             return None;
         }
-        let between = || self.ins.pop_if(|ins| matches!(ins, Ins::Const { .. }));
-        let constants: Vec<Ins<VReg>> = std::iter::from_fn(between).collect();
-        let jumped_past = self.landed.is_some_and(|at| at >= self.ins.len());
-        let jump = match self.ins.last() {
-            Some(compare) if !jumped_past => jump_unless(compare, of(cond), to),
-            _ => None,
+        let constant = |step: &mut Step| matches!(step, Step::Ins(Ins::Const { .. }));
+        let between = || self.steps.pop_if(constant);
+        let constants: Vec<Step> = std::iter::from_fn(between).collect();
+        let jumped_past = self.landed.is_some_and(|at| at >= self.steps.len());
+        let jump = match self.steps.last() {
+            Some(Step::Ins(compare)) if !jumped_past => jump_unless(compare, of(cond), to),
+            Some(Step::Ins(_) | Step::TailCall { .. }) | None => None,
         };
         if jump.is_some() {
-            self.ins.pop();
+            self.steps.pop();
         }
-        self.ins.extend(constants.into_iter().rev());
+        self.steps.extend(constants.into_iter().rev());
         jump
     }
 
@@ -567,8 +632,8 @@ impl Translator<'_> {
         };
         match (dest, atom) {
             (Dest::Return, Atom::Call { callee, args }) => {
-                let call = self.call(None, callee, args)?;
-                self.push(call);
+                let call = self.tail_call(callee, args)?;
+                self.steps.push(call);
             }
             (Dest::Return, Atom::Local(local)) => self.push(ret(of(*local))),
             (Dest::Return, atom) => {
@@ -793,7 +858,7 @@ impl Translator<'_> {
                     },
                 }
             }
-            Atom::Call { callee, args } => self.call(Some(reg), callee, args)?,
+            Atom::Call { callee, args } => self.call(dst, callee, args)?,
             Atom::PrimOp { op, args } => self.prim(dst, *op, args)?,
             Atom::Intrinsic {
                 intrinsic: intrinsic @ (Intrinsic::Print | Intrinsic::Println),
@@ -1110,6 +1175,18 @@ impl Translator<'_> {
     }
 }
 
+/// What a call calls.
+enum Calls {
+    /// This function, by name.
+    Func(FuncIdx),
+    /// The running function, which is this one, as the same closure.
+    Own(FuncIdx),
+    /// The function value here.
+    Value(Shared<VReg>),
+    /// Nothing. The call cannot be right, and this stops the run in its place.
+    Bad(Ins<VReg>),
+}
+
 /// Operands that sit in the instruction, or a list of them.
 enum Fit<I, L> {
     Inline(I),
@@ -1230,18 +1307,42 @@ struct Opened<'e> {
 
 /// What one walk over a function's body finds out.
 #[derive(Default)]
-struct Survey {
+struct Survey<'e> {
     /// How many times each local is read. A `Drop` counts as a read.
     reads: HashMap<LocalId, u32>,
     /// The highest local bound or read.
     highest: Option<u32>,
+    /// Every place that binds a local.
+    binds: Vec<&'e CoreBind>,
     /// [`Draft::closure`].
     closure: ReadsClosure,
 }
 
-impl Survey {
+impl<'e> Survey<'e> {
     fn name(&mut self, l: LocalId) {
         self.highest = self.highest.max(Some(l.0));
+    }
+
+    fn bind(&mut self, b: &'e CoreBind) {
+        self.name(b.id);
+        self.binds.push(b);
+    }
+
+    /// [`Draft::prims`].
+    fn prims(&self, pool: &ResolvedPool) -> Result<Vec<Option<Prim>>, Unfit> {
+        let mut prims = Vec::new();
+        for b in &self.binds {
+            if let prim @ Some(_) = pool.prim_of(b.ty).map_err(|_| Broken::NoType)? {
+                let at = b.id.0 as usize;
+                if prims.len() <= at {
+                    prims.resize(at.saturating_add(1), None);
+                }
+                if let Some(of) = prims.get_mut(at) {
+                    *of = prim;
+                }
+            }
+        }
+        Ok(prims)
     }
 
     fn read(&mut self, l: LocalId) {
@@ -1262,19 +1363,19 @@ impl Survey {
     }
 }
 
-fn survey(f: &CoreFn) -> Survey {
+fn survey(f: &CoreFn) -> Survey<'_> {
     let mut out = Survey::default();
-    f.params.iter().for_each(|p| out.name(p.id));
+    f.params.iter().for_each(|p| out.bind(p));
     let mut stack = vec![&f.body];
     while let Some(e) = stack.pop() {
         match e {
             CoreExpr::Let { bind, rhs, body } => {
-                out.name(bind.id);
+                out.bind(bind);
                 out.atom(rhs);
                 stack.push(body);
             }
             CoreExpr::LetJoin { bind, join, body } => {
-                out.name(bind.id);
+                out.bind(bind);
                 stack.push(join);
                 stack.push(body);
             }
@@ -1289,7 +1390,7 @@ fn survey(f: &CoreFn) -> Survey {
             CoreExpr::Match { scrut, arms, .. } => {
                 out.read(*scrut);
                 for (pat, arm) in arms {
-                    pat.binds().for_each(|b| out.name(b.id));
+                    pat.binds().for_each(|b| out.bind(b));
                     stack.push(arm);
                 }
             }

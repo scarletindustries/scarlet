@@ -1,11 +1,11 @@
 // This tests tail-call elimination and closure capture adversarially.
 //
-// Three tail ops come out of core_ir::emit — TailCallSelf (a function calling
-// itself), TailCallKnown (a known non-self function: mutual recursion), and
-// TailCall (an indirect call through a closure value). All three must run in
-// constant stack space, so every loop here recurses deep enough to blow a
-// frame-per-call stack and then reports `internal::stack_depth()` at the bottom:
-// two frames (main, and the single live frame) no matter how deep.
+// There are three kinds of tail call: a function calling itself, a call to
+// another known function (mutual recursion), and an indirect call through a
+// closure value. All three must run in constant stack space, so every loop here
+// recurses deep enough to blow a frame-per-call stack and then reports
+// `internal::stack_depth()` at the bottom: two frames (main, and the single live
+// frame) no matter how deep.
 //
 // The closure half pins capture-by-value at creation time, capture of bindings
 // born inside a branch, closures returned from functions, closures held in
@@ -16,7 +16,7 @@ import scarlet/internal
 import scarlet/option
 import scarlet/string
 
-// --- TailCallSelf --------------------------------------------------------
+// --- A function calling itself -------------------------------------------
 
 fn sum_to(n Int, acc Int) Int {
 	if n == 0 {
@@ -34,7 +34,7 @@ fn self_depth(n Int) Int {
 	}
 }
 
-// --- TailCallKnown (mutual recursion) ------------------------------------
+// --- Mutual recursion ----------------------------------------------------
 
 fn ping(n Int, acc Int) Int {
 	if n == 0 {
@@ -68,11 +68,11 @@ fn mutual_depth_b(n Int) Int {
 	}
 }
 
-// --- TailCall (indirect, through a closure value) ------------------------
+// --- Indirect, through a closure value -----------------------------------
 
 // A closure cannot name itself, so the recursion is routed through a record
-// that carries it: `run` tail-calls the field (an indirect TailCall) and the
-// closure tail-calls `run` back (a TailCallKnown). Neither may grow the stack.
+// that carries it: `run` tail-calls the field (an indirect tail call) and the
+// closure tail-calls `run` back (a known one). Neither may grow the stack.
 type Stepper {
 	step fn(Stepper, Int, Int) Int
 }

@@ -1,8 +1,11 @@
 use super::ins::{Label, MaybeDst, VReg};
-use super::translate::Draft;
+use super::translate::{Draft, Step, TailTo};
 use super::*;
 use crate::heap::{Ctor, Numbering};
 use scarlet_ir::core_ir::VariantRef;
+
+pub(super) mod programs;
+pub(super) mod random;
 
 /// A program with calls, a loop by tail call, a `match` with several
 /// arms, an `if` and a map lookup that jumps, so its functions have
@@ -69,22 +72,71 @@ pub(super) fn named<'c>(code: &'c Code, name: &str) -> &'c Entry {
         .unwrap_or_else(|| panic!("no function called {name}"))
 }
 
-/// A function's instructions before its values have registers, for a test
-/// that writes them out. `labels` are where each label stands.
-pub(super) fn draft(values: u32, params: u32, ins: Vec<Ins<VReg>>, labels: &[usize]) -> Draft {
+impl From<Ins<VReg>> for Step {
+    fn from(ins: Ins<VReg>) -> Step {
+        Step::Ins(ins)
+    }
+}
+
+/// A function's steps before its values have registers, for a test that writes
+/// them out. `labels` are where each label stands.
+pub(super) fn draft(
+    values: u32,
+    params: u32,
+    steps: impl IntoIterator<Item: Into<Step>>,
+    labels: &[usize],
+) -> Draft {
     Draft {
-        ins,
+        steps: steps.into_iter().map(Into::into).collect(),
         lists: Lists::default(),
         labels: labels.to_vec(),
         values,
         params: (0..params).map(VReg).collect(),
+        prims: Vec::new(),
+        undropped: false,
         closure: ReadsClosure::Nothing,
+    }
+}
+
+/// The instructions of a draft that makes no tail call.
+pub(super) fn instructions(d: &Draft) -> Vec<Ins<VReg>> {
+    let ins = |step: &Step| match step {
+        Step::Ins(ins) => *ins,
+        Step::TailCall { .. } => panic!("{step:?}"),
+    };
+    d.steps.iter().map(ins).collect()
+}
+
+pub(super) fn same_step(step: &Step) -> Step {
+    match step {
+        Step::Ins(ins) => Step::Ins(*ins),
+        Step::TailCall { to, args } => Step::TailCall {
+            to: *to,
+            args: args.clone(),
+        },
+    }
+}
+
+pub(super) fn copy_of(d: &Draft) -> Draft {
+    Draft {
+        steps: d.steps.iter().map(same_step).collect(),
+        lists: Lists {
+            regs: d.lists.regs.clone(),
+            args: d.lists.args.clone(),
+            dsts: d.lists.dsts.clone(),
+        },
+        labels: d.labels.clone(),
+        values: d.values,
+        params: d.params.clone(),
+        prims: d.prims.clone(),
+        undropped: d.undropped,
+        closure: d.closure,
     }
 }
 
 /// The instructions a draft is written out with.
 pub(super) mod of {
-    use super::super::ins::{LastReg, OwnEntry, OwnRoom};
+    use super::super::ins::{LastReg, OwnRoom};
     use super::*;
     use crate::value::Value;
 
@@ -180,13 +232,18 @@ pub(super) mod of {
         }
     }
 
-    pub(crate) fn again(args: &[u32]) -> Ins<VReg> {
-        let args: Vec<VReg> = args.iter().copied().map(VReg).collect();
-        Ins::TailCallSelf {
-            to: OwnEntry,
-            args: Args::new(&args).expect("a few arguments"),
-            own: OwnRoom,
-        }
+    /// A tail call of the function to itself.
+    pub(crate) fn again(args: &[u32]) -> Step {
+        let args = args.iter().copied().map(VReg).collect();
+        let to = TailTo::Own;
+        Step::TailCall { to, args }
+    }
+
+    /// A tail call of function `f`.
+    pub(crate) fn enter(f: u32, args: &[u32]) -> Step {
+        let args = args.iter().copied().map(VReg).collect();
+        let to = TailTo::Func(FuncIdx(f));
+        Step::TailCall { to, args }
     }
 
     pub(crate) fn call(dst: u32, args: &[u32]) -> Ins<VReg> {

@@ -94,47 +94,28 @@ fn every_operator_instruction_names_its_operands() {
 fn only_these_instructions_end_or_jump() {
     let ends = [
         Op::Halt,
-        Op::TailCall,
-        Op::TailCallWide,
-        Op::TailCallSelf,
-        Op::TailCallSelfWide,
         Op::TailCallValue,
         Op::TailCallValueWide,
         Op::Ret,
         Op::RetClosure,
         Op::Jump,
+        Op::Enter,
         Op::Bad,
     ];
     let listed = |op: &Op| ends.contains(op);
     let names = Op::ALL.iter().map(|op| (op.name(), listed(op)));
     for (name, ends) in names {
         let looks = name.starts_with("TailCall")
-            || ["Halt", "Ret", "RetClosure", "Jump", "Bad"].contains(&name);
+            || ["Halt", "Ret", "RetClosure", "Jump", "Enter", "Bad"].contains(&name);
         assert_eq!(looks, ends, "{name}");
     }
     let (own, last) = (OwnRoom, LastReg);
-    let (name, to, why) = (Callee(FuncIdx(0)), OwnEntry, WhyId(0));
+    let (to, why) = (Callee(FuncIdx(0)), WhyId(0));
     let args = Args::new(&[]).expect("none");
     let callee = Shared(VReg(0));
-    let ending: [Ins<VReg>; 11] = [
+    let ending: [Ins<VReg>; 8] = [
         Ins::Halt {
             src: Taken(VReg(0)),
-        },
-        Ins::TailCall {
-            to: name,
-            args,
-            own,
-        },
-        Ins::TailCallWide {
-            to: name,
-            args: ArgList(0),
-            own,
-        },
-        Ins::TailCallSelf { to, args, own },
-        Ins::TailCallSelfWide {
-            to,
-            args: ArgList(0),
-            own,
         },
         Ins::TailCallValue { callee, args, own },
         Ins::TailCallValueWide {
@@ -151,6 +132,7 @@ fn only_these_instructions_end_or_jump() {
             last,
         },
         Ins::Jump { to: Label(0) },
+        Ins::Enter { to },
         Ins::Bad { why },
     ];
     for (ins, op) in ending.iter().zip(ends) {
@@ -165,6 +147,95 @@ fn only_these_instructions_end_or_jump() {
         to: Label(4),
     };
     assert!(hit.falls_through() && hit.target() == Some(Label(4)));
+}
+
+/// What an instruction says it makes: a number or a Bool is no cell but a big
+/// Int, and one that says nothing may make anything.
+#[test]
+fn an_instruction_says_when_it_makes_no_cell() {
+    let (dst, a, b) = (Dst(VReg(0)), Src(VReg(1)), Src(VReg(2)));
+    let (k, x) = (SmallInt::new(1).expect("small"), Float::new(0.5));
+    let mut made = Vec::new();
+    macro_rules! makes {
+        ([$makes:ident $fields:tt] $($name:ident $op:path),*) => {
+            $(made.push((Ins::$name $fields, Makes::$makes));)*
+        };
+        ([$makes:ident $fields:tt] $($name:ident $jump:ident $op:path),*) => {
+            $(made.push((Ins::$name $fields, Makes::$makes));)*
+        };
+    }
+    int_arith!(makes Int { dst, a, b });
+    int_arith_k!(makes Int { dst, a, k });
+    int_arith_k_first!(makes Int { dst, a, k });
+    float_arith!(makes NoCell { dst, a, b });
+    float_arith_k!(makes NoCell { dst, a, k: x });
+    float_arith_k_first!(makes NoCell { dst, a, k: x });
+    int_compare!(makes NoCell { dst, a, b });
+    int_compare_k!(makes NoCell { dst, a, k });
+    float_compare!(makes NoCell { dst, a, b });
+    float_compare_k!(makes NoCell { dst, a, k: x });
+    assert_eq!(made.len(), 38);
+    let (src, newline) = (Src(VReg(1)), Newline(true));
+    let one: Ins<VReg> = Ins::Const {
+        dst,
+        value: Value::NIL,
+    };
+    let big = Ins::BigInt {
+        dst,
+        n: i64::MAX,
+        id: ConstId(0),
+    };
+    made.extend([
+        (one, Makes::NoCell),
+        (Ins::FloatNeg { dst, a }, Makes::NoCell),
+        (Ins::FloatFromInt { dst, a }, Makes::NoCell),
+        (Ins::Print { dst, a, newline }, Makes::NoCell),
+        (Ins::Equal { dst, a, b }, Makes::NoCell),
+        (Ins::NotEqual { dst, a, b }, Makes::NoCell),
+        (Ins::Not { dst, a }, Makes::NoCell),
+        (Ins::IntNeg { dst, a }, Makes::Int),
+        (big, Makes::Int),
+        (Ins::ArrayLen { dst, src }, Makes::Int),
+        (Ins::StackDepth { dst }, Makes::Int),
+        (Ins::Neg { dst, a }, Makes::Any),
+        (Ins::Field { dst, src, index: 0 }, Makes::Any),
+        (
+            Ins::Concat {
+                dst,
+                parts: Looks::new(&[]).expect("none"),
+            },
+            Makes::Any,
+        ),
+        (Ins::GetCapture { dst, index: 0 }, Makes::Any),
+        (
+            Ins::Num {
+                dst,
+                op: NumOp::Arith(Arith::Add),
+                a,
+                b,
+            },
+            Makes::Any,
+        ),
+        (
+            Ins::ToString {
+                dst,
+                a: Shared(VReg(1)),
+            },
+            Makes::Any,
+        ),
+        (
+            Ins::Range {
+                dst,
+                start: a,
+                end: b,
+            },
+            Makes::Any,
+        ),
+    ]);
+    for (ins, makes) in made {
+        assert_eq!(ins.makes(), makes, "{ins:?}");
+    }
+    assert!(Makes::NoCell < Makes::Int && Makes::Int < Makes::Any);
 }
 
 /// Operands held in an instruction are as many as were put there, and more
@@ -191,7 +262,8 @@ fn an_instruction_holds_as_many_operands_as_fit() {
 fn each_argument_is_decided_on_its_own() {
     let regs: Vec<VReg> = (0..6).map(VReg).collect();
     for bits in 0..64u32 {
-        let mut ins: Ins<VReg> = Ins::TailCallSelf {
+        let mut ins: Ins<VReg> = Ins::CallSelf {
+            dst: Dst(VReg(9)),
             to: OwnEntry,
             args: Args::new(&regs).expect("it fits"),
             own: OwnRoom,
@@ -201,7 +273,10 @@ fn each_argument_is_decided_on_its_own() {
         let moved = |v: u32| Role::Pass {
             moved: bits >> v & 1 == 1,
         };
-        let want: Vec<_> = (0..6).map(|v| (VReg(v), moved(v))).collect();
+        let passed = (0..6).map(|v| (VReg(v), moved(v)));
+        let want: Vec<_> = std::iter::once((VReg(9), Role::Write))
+            .chain(passed)
+            .collect();
         assert_eq!(operands(&ins, &lists), want);
     }
     // An instruction's own operands that it only looks at are not asked about.
@@ -489,9 +564,25 @@ fn placing_an_instruction_keeps_what_it_does() {
     ];
     assert_eq!(operands(&placed, &Lists::default()), roles);
 
+    // What is moved comes after where to, and each keeps its order.
+    let moves: Ins<VReg> = Ins::Move3 {
+        dsts: [VReg(9), VReg(7), VReg(8)].map(Dst),
+        srcs: [VReg(7), VReg(8), VReg(9)].map(Taken),
+    };
+    let placed = moves.place(&at).expect("a place for everything");
+    let roles = [
+        (Reg(10), Role::Write),
+        (Reg(8), Role::Write),
+        (Reg(9), Role::Write),
+        (Reg(8), Role::Take),
+        (Reg(9), Role::Take),
+        (Reg(10), Role::Take),
+    ];
+    assert_eq!(operands(&placed, &Lists::default()), roles);
+
     // Nothing is placed when one thing it names has no place, and what that
     // was comes back.
-    let lost: [Ins<VReg>; 7] = [
+    let lost: [Ins<VReg>; 9] = [
         Ins::Open2 {
             dsts: [None, Some(VReg(50))].map(MaybeDst::new),
             src,
@@ -514,7 +605,16 @@ fn placing_an_instruction_keeps_what_it_does() {
             dst: Dst(VReg(0)),
             parts: Looks::new(&[VReg(1), VReg(50)]).expect("it fits"),
         },
-        Ins::TailCallSelf {
+        Ins::Move3 {
+            dsts: [VReg(1), VReg(50), VReg(2)].map(Dst),
+            srcs: [VReg(1), VReg(2), VReg(3)].map(Taken),
+        },
+        Ins::Move2 {
+            dsts: [VReg(1), VReg(2)].map(Dst),
+            srcs: [VReg(1), VReg(50)].map(Taken),
+        },
+        Ins::CallSelf {
+            dst: Dst(VReg(1)),
             to: OwnEntry,
             args: Args::new(&[VReg(50)]).expect("it fits"),
             own: OwnRoom,
@@ -524,12 +624,10 @@ fn placing_an_instruction_keeps_what_it_does() {
         let why = ins.place(&at).map(|ins| ins.op()).err();
         assert_eq!(why, Some(Unplaced::NoPlace), "{ins:?}");
     }
-    let call: Ins<VReg> = Ins::TailCall {
+    let enter: Ins<VReg> = Ins::Enter {
         to: Callee(FuncIdx(4)),
-        args: Args::new(&[]).expect("it fits"),
-        own: OwnRoom,
     };
-    let why = call.place(&at).map(|ins| ins.op()).err();
+    let why = enter.place(&at).map(|ins| ins.op()).err();
     assert_eq!(why, Some(Unplaced::NeedsClosure(FuncIdx(4))));
 }
 

@@ -1,7 +1,9 @@
 use super::*;
 use crate::OsHost;
 use crate::bigint;
-use crate::code::{BinaryId, EntryPc, Hit, Lists, Pc, ReadsClosure, Shares, TextId, Why, WhyId};
+use crate::code::{
+    Args, BinaryId, EntryPc, Hit, Lists, Pc, ReadsClosure, Shares, TextId, Why, WhyId,
+};
 use crate::frame::FIRST;
 use crate::heap::{AuditFault, Cell, Ctors, Fault, Kind, Numbering};
 use crate::value::{Float, SmallInt, Tag};
@@ -580,17 +582,16 @@ fn an_audit_finds_cells_that_hold_each_other() {
     });
 }
 
-/// A run's roots are its registers, what is on its way between two, its
-/// globals and `os.env`'s map. With any one of them left out, the cell it
-/// holds would look as if its count were too high.
+/// A run's roots are its registers, its globals and `os.env`'s map. With any one
+/// of them left out, the cell it holds would look as if its count were too high.
 #[test]
 fn an_audit_is_told_of_every_reference_a_run_holds() {
     after_running("pub fn main() {\n\tNil\n}\n", |m, _| {
-        let cells: Vec<Cell> = (0..6)
+        let cells: Vec<Cell> = (0..5)
             .map(|_| m.rest.heap.tuple(&[Value::NIL]).expect("room"))
             .collect();
-        let [closure, reg, above, passed, global, env] = cells[..] else {
-            panic!("six cells");
+        let [closure, reg, above, global, env] = cells[..] else {
+            panic!("five cells");
         };
         let miscounted = |cell: Cell| {
             Err(Stop::broken(Broken::Audit(AuditFault::Miscounted {
@@ -601,7 +602,7 @@ fn an_audit_is_told_of_every_reference_a_run_holds() {
         };
         let audit = |m: &Machine<'_, '_>, last| check(&m.stack, &m.rest, last);
         let last = m.stack.len() - 1;
-        let held = [(1, closure, reg), (2, reg, above), (last, above, passed)];
+        let held = [(1, closure, reg), (2, reg, above), (last, above, global)];
         for (at, cell, next) in held {
             assert_eq!(audit(m, Value::NIL), miscounted(cell));
             assert_eq!(
@@ -612,8 +613,6 @@ fn an_audit_is_told_of_every_reference_a_run_holds() {
             m.stack[at] = Value::cell(cell);
             assert_eq!(audit(m, Value::NIL), miscounted(next), "in register {at}");
         }
-        m.rest.passing.push(Value::cell(passed));
-        assert_eq!(audit(m, Value::NIL), miscounted(global));
         m.rest.globals.push(Value::cell(global));
         assert_eq!(audit(m, Value::NIL), miscounted(env));
         m.rest.env = Some(env);
@@ -719,16 +718,6 @@ fn a_share_of_a_freed_cell_stops_the_instruction() {
             own: Room(4),
             to: EntryPc(START),
             args: crate::code::ArgList(2),
-        },
-        Ins::TailCall {
-            to: EntryPc(START),
-            args: one(),
-            own: Room(4),
-        },
-        Ins::TailCallSelf {
-            to: EntryPc(START),
-            args: one(),
-            own: Room(4),
         },
     ];
     for share in shares {
@@ -1293,6 +1282,491 @@ fn a_move_onto_its_own_register_keeps_the_value() {
     }
 }
 
+/// The moves of `srcs` to `dsts`, which are two or three, as one instruction.
+fn move_all_of(dsts: &[u8], srcs: &[u8]) -> Ins<Reg> {
+    let pair = |n: usize| (Dst(r(dsts[n])), Taken(r(srcs[n])));
+    let [(d0, s0), (d1, s1)] = [0, 1].map(pair);
+    match dsts.len() {
+        2 => Ins::Move2 {
+            dsts: [d0, d1],
+            srcs: [s0, s1],
+        },
+        _ => {
+            let (d2, s2) = pair(2);
+            Ins::Move3 {
+                dsts: [d0, d1, d2],
+                srcs: [s0, s1, s2],
+            }
+        }
+    }
+}
+
+/// Several moves in one read every register before one is written, whichever
+/// registers are among both: each holds what its own source did, what it held is
+/// given up unless it was moved too, and no register else is changed. It is so
+/// of cells and of other values.
+#[test]
+fn several_moves_at_once_read_before_they_write() {
+    let mut ran = 0;
+    for n in [2usize, 3] {
+        // Every way to pick the registers from six, with none written twice or
+        // taken twice.
+        let picks = 6usize.pow(u32::try_from(2 * n).expect("few"));
+        for pick in 0..picks {
+            let digit = |i: usize| u8::try_from(pick / 6usize.pow(i as u32) % 6).expect("small");
+            let all: Vec<u8> = (0..2 * n).map(digit).collect();
+            let (dsts, srcs) = all.split_at(n);
+            let twice = |of: &[u8]| (1..n).any(|i| of[..i].contains(&of[i]));
+            if twice(dsts) || twice(srcs) {
+                continue;
+            }
+            ran += 1;
+            if n == 3 && ran % 7 != 0 {
+                continue;
+            }
+            for cells in [true, false] {
+                several_moves(dsts, srcs, cells);
+            }
+        }
+    }
+    assert!(ran > 14_000, "{ran}");
+}
+
+fn several_moves(dsts: &[u8], srcs: &[u8], cells: bool) {
+    let code = function(6, 8, vec![move_all_of(dsts, srcs), ret(7)]);
+    let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+    let mut m = Machine::new(code, &mut host);
+    let values: Vec<Value> = (0..6i64)
+        .map(|n| match cells {
+            true => Value::cell(m.rest.heap.tuple(&[Value::NIL]).expect("room")),
+            false => Value::int(n).expect("small"),
+        })
+        .collect();
+    let at = started(&mut m, Link::new(0, Room(0), Dst(RESULT)));
+    let mut win = window(&mut m.stack, 0).expect("a window");
+    win.receive(&values);
+    move_all_in(&mut m, code, at);
+    let what = format!("{dsts:?} {srcs:?} {cells}");
+    let mut kept = 0;
+    for n in 0..6u8 {
+        let want = match dsts.iter().position(|d| *d == n) {
+            Some(i) => values[usize::from(srcs[i])],
+            None if srcs.contains(&n) => Value::NIL,
+            None => values[usize::from(n)],
+        };
+        kept += usize::from(want.as_cell().is_some());
+        let win = window(&mut m.stack, 0).expect("a window");
+        assert_eq!(win.get(r(n)).bits(), want.bits(), "r{n}: {what}");
+    }
+    assert_eq!(m.rest.heap.live(), kept, "{what}");
+    assert_eq!(check(&m.stack, &m.rest, Value::NIL), Ok(()), "{what}");
+}
+
+/// Run the one instruction at `at` in front of a `Ret`, and leave its frame as
+/// it was then.
+fn move_all_in(m: &mut Machine<'_, '_>, code: &Code, at: At) {
+    let mut win = window(&mut m.stack, at.base).expect("a window");
+    let moved = match &code.ins[at.pc] {
+        Ins::Move2 { dsts, srcs } => move_all(win.lend(), &mut m.rest, dsts, srcs),
+        Ins::Move3 { dsts, srcs } => move_all(win.lend(), &mut m.rest, dsts, srcs),
+        ins => panic!("{ins:?}"),
+    };
+    assert_eq!(moved, Ok(()));
+}
+
+/// A freed cell that several moves write over stops the run, as it does one.
+#[test]
+fn a_move_over_a_freed_cell_stops() {
+    for moves in [
+        move_all_of(&[0, 1], &[1, 2]),
+        move_all_of(&[2, 0], &[1, 3]),
+        move_all_of(&[1, 2, 0], &[3, 4, 5]),
+    ] {
+        after_given(
+            6,
+            vec![moves, ret(5)],
+            |heap| Some(Value::cell(a_freed_cell(heap, 2))),
+            |_, got| {
+                let got = got.map(Value::bits);
+                assert_eq!(got, Err(Stop::broken(Broken::DeadCell)), "{moves:?}");
+            },
+        );
+    }
+}
+
+/// `Enter` goes on at a function's first instruction with every register as it
+/// is, the closure and the link among them, and in the same frame.
+#[test]
+fn entering_a_function_changes_no_register() {
+    let depth = Ins::StackDepth { dst: Dst(r(250)) };
+    let stop = Ins::Bad { why: WhyId(0) };
+    let to = EntryPc(START + 2);
+    let code = function(0, 254, vec![Ins::Enter { to }, stop, depth, stop]);
+    on_a_machine(|m| {
+        let regs: Vec<Reg> = (0..250).map(r).collect();
+        let mut registers = hold(m, &regs, r(251), true);
+        registers[usize::from(CLOSURE.0)] = closure_over(&mut m.rest.heap, &[Value::NIL]);
+        let closure = registers[usize::from(CLOSURE.0)];
+        window(&mut m.stack, 0).expect("a window").run_as(closure);
+        assert_eq!(
+            run_with(m, code, &registers),
+            Stop::broken(Broken::NoArm),
+            "it entered"
+        );
+        registers[usize::from(r(250).0)] = Value::int(1).expect("small");
+        for (i, want) in registers.iter().enumerate().skip(1) {
+            assert_eq!(m.stack[i].bits(), want.bits(), "register {i}");
+        }
+        assert_eq!(check(&m.stack, &m.rest, Value::NIL), Ok(()));
+    });
+}
+
+/// Each register of a list is given up, in order, and no other is touched. A
+/// number in one of them may stay there.
+#[test]
+fn a_list_of_registers_is_given_up() {
+    let regs: Vec<Reg> = [9, 4, 3, 0].map(r).to_vec();
+    let drop = Ins::DropWide {
+        regs: crate::code::DeadList(0),
+    };
+    let lists = Lists {
+        regs: vec![regs.clone().into()],
+        args: Vec::new(),
+        dsts: Vec::new(),
+    };
+    let body = vec![drop, Ins::Bad { why: WhyId(0) }];
+    let code = function_of(ReadsClosure::Nothing, 0, 254, body, lists, ctors().0);
+    on_a_machine(|m| {
+        let all: Vec<Reg> = (0..12).map(r).collect();
+        for number in [false, true] {
+            let mut registers = hold(m, &[], r(20), false);
+            for reg in &all {
+                let cell = m.rest.heap.tuple(&[Value::NIL]).expect("room");
+                registers[usize::from(reg.0)] = Value::cell(cell);
+            }
+            if number {
+                m.rest
+                    .release(registers[usize::from(r(3).0)])
+                    .expect("live");
+                registers[usize::from(r(3).0)] = Value::int(7).expect("small");
+            }
+            assert_eq!(run_with(m, code, &registers), Stop::broken(Broken::NoArm));
+            for reg in &all {
+                let left = m.stack[usize::from(reg.0)];
+                assert_eq!(left.as_cell().is_none(), regs.contains(reg), "{reg:?}");
+            }
+            assert_eq!(m.rest.heap.live(), 8);
+            assert_eq!(check(&m.stack, &m.rest, Value::NIL), Ok(()));
+            all_given_up(m);
+        }
+        // A freed cell in one of them stops the run.
+        let mut registers = hold(m, &[], r(20), false);
+        registers[usize::from(r(4).0)] = Value::cell(a_freed_cell(&mut m.rest.heap, 2));
+        assert_eq!(
+            run_with(m, code, &registers),
+            Stop::broken(Broken::DeadCell)
+        );
+    });
+}
+
+/// A register that an instruction takes from holds no cell after it, whatever it
+/// held: the loader gives up nothing there again (`code::moves`). When an
+/// instruction that may jump does, it has taken nothing.
+#[test]
+fn what_an_instruction_takes_leaves_its_register() {
+    let (dst, own, to) = (Dst(r(5)), Room(40), EntryPc(START));
+    let (whole, value, n) = (Arg::moved(r(0)), Arg::moved(r(2)), Src(r(1)));
+    let back = || Shares::new(&[r(3)]).expect("one");
+    let (shares, args) = (crate::code::ShareList(0), crate::code::ArgList(0));
+    let (a, b, c) = (Taken(r(0)), Taken(r(2)), Taken(r(3)));
+    let all_moved = [whole, value, Arg::moved(r(3))];
+    let three = Args::new(&[r(0), r(2), r(3)]).expect("three");
+    let callee = Shared(r(6));
+    let mut takers: Vec<Ins<Reg>> = vec![
+        Ins::Move { dst, src: whole },
+        move_all_of(&[5, 7], &[0, 2]),
+        move_all_of(&[5, 7, 8], &[3, 0, 2]),
+        Ins::ArrayDrop { dst, src: whole, n },
+        Ins::ArrayPrepend {
+            dst,
+            rest: whole,
+            front: back(),
+        },
+        Ins::ArrayPrependWide {
+            dst,
+            rest: whole,
+            front: shares,
+        },
+        Ins::ArrayAppend {
+            dst,
+            rest: whole,
+            back: back(),
+        },
+        Ins::ArrayAppendWide {
+            dst,
+            rest: whole,
+            back: shares,
+        },
+        Ins::ArraySet {
+            dst: Hit(dst.0),
+            src: whole,
+            index: n,
+            value,
+            miss: pc(3),
+        },
+        Ins::ArraySet {
+            dst: Hit(dst.0),
+            src: whole,
+            index: n,
+            value: Arg::shared(r(2)),
+            miss: pc(3),
+        },
+        Ins::ArraySet {
+            dst: Hit(dst.0),
+            src: Arg::shared(r(0)),
+            index: n,
+            value,
+            miss: pc(3),
+        },
+        Ins::MapSetOwned {
+            dst,
+            map: a,
+            key: n,
+            value: Src(r(2)),
+        },
+        Ins::MapDeleteOwned {
+            dst,
+            map: a,
+            key: n,
+        },
+        Ins::Call1 { dst, own, to, a },
+        Ins::Call2 { dst, own, to, a, b },
+        Ins::Call3 {
+            dst,
+            own,
+            to,
+            a,
+            b,
+            c,
+        },
+        Ins::Call1Share {
+            dst,
+            own,
+            to,
+            a: whole,
+        },
+        Ins::CallWide { dst, own, to, args },
+        Ins::CallSelfWide { dst, own, to, args },
+        Ins::CallValueWide {
+            dst,
+            callee,
+            own,
+            args,
+        },
+    ];
+    for bits in 0..8u8 {
+        let moved = [0, 1, 2].map(|i| bits & (1 << i) != 0);
+        let [a, b, c] = [(0, r(0)), (1, r(2)), (2, r(3))].map(|(i, reg)| Arg {
+            reg,
+            moved: moved[i],
+        });
+        let args = three;
+        let mut calls = [
+            Ins::Call2Share { dst, own, to, a, b },
+            Ins::Call3Share {
+                dst,
+                own,
+                to,
+                a,
+                b,
+                c,
+            },
+            Ins::Call { dst, own, to, args },
+            Ins::CallSelf { dst, own, to, args },
+            Ins::CallValue {
+                dst,
+                callee,
+                own,
+                args,
+            },
+        ];
+        for call in &mut calls {
+            let mut each = moved.into_iter();
+            call.decide(&mut Lists::default(), &mut |_| each.next().unwrap_or(false));
+        }
+        takers.extend(calls);
+    }
+    let lists = || Lists {
+        regs: vec![Box::new([r(3)])],
+        args: vec![Box::new(all_moved)],
+        dsts: Vec::new(),
+    };
+    let (mut ran, mut took, mut jumped) = (0, 0, 0);
+    on_a_machine(|m| {
+        for ins in takers {
+            let of_map = ins.op().name().starts_with("Map");
+            // The caller goes on to the instruction, and a callee stops.
+            let body = vec![
+                Ins::JumpUnlessInt {
+                    src: Src(r(4)),
+                    n: 1,
+                    to: pc(2),
+                },
+                ins,
+                Ins::Bad { why: WhyId(0) },
+                Ins::Bad { why: WhyId(9) },
+            ];
+            let code = function_of(ReadsClosure::Nothing, 3, 38, body, lists(), ctors().0);
+            for (kind, shared, index) in (0..24).map(|i| (i % 4, i / 4 % 2 == 1, i / 8)) {
+                m.rest.heap = Heap::new(code.ctors.clone());
+                let heap = &mut m.rest.heap;
+                let mut cell = || Value::cell(heap.tuple(&[Value::NIL]).expect("room"));
+                let (value, third, element) = (cell(), cell(), cell());
+                let int = |n: i64| Value::int(n).expect("small");
+                let whole = match kind {
+                    _ if of_map => {
+                        let empty = crate::map::empty(heap).expect("room");
+                        let set = crate::map::set(heap, empty, int(1), element).expect("room");
+                        heap.release(empty).expect("live");
+                        set
+                    }
+                    0 => array::from_values(heap, &[int(1), element]).expect("room"),
+                    1 => array::from_values(heap, &[element; 1]).expect("room"),
+                    2 => array::range(heap, 3, 7).expect("room"),
+                    _ => array::from_values(heap, &[]).expect("room"),
+                };
+                m.rest.globals = Vec::new();
+                if shared {
+                    let whole = m.rest.heap.own(Value::cell(whole)).expect("live");
+                    m.rest.globals.push(whole);
+                }
+                if kind > 1 || of_map {
+                    m.rest.globals.push(element);
+                }
+                let mut registers = vec![Value::NIL; WINDOW];
+                let func = Value::func(FuncIdx(0));
+                let given = [
+                    Value::cell(whole),
+                    int(index),
+                    value,
+                    third,
+                    int(1),
+                    Value::NIL,
+                    func,
+                ];
+                for (n, v) in (0..).zip(given) {
+                    registers[usize::from(r(n).0)] = v;
+                }
+                let what = format!("{ins:?} {kind} {shared} {index}");
+                let stop = run_with(m, code, &registers);
+                let missed = stop == code.why(WhyId(9));
+                assert!(
+                    missed || stop == Stop::broken(Broken::NoArm),
+                    "{what}: {stop:?}"
+                );
+                ins.operands(&code.lists, &mut |reg, role| {
+                    let left = m.stack[usize::from(reg.0)];
+                    let role = format!("{role:?}");
+                    if role == "Take" || role == "Pass { moved: true }" {
+                        took += 1;
+                        assert_eq!(left.as_cell().is_some(), missed, "{what}: {reg:?}");
+                    }
+                });
+                ran += 1;
+                jumped += usize::from(missed);
+                assert_eq!(check(&m.stack, &m.rest, Value::NIL), Ok(()), "{what}");
+                let frames = m.stack.len().min(WINDOW);
+                for v in &mut m.stack[2..frames] {
+                    let v = std::mem::replace(v, Value::NIL);
+                    m.rest.release(v).expect("every count is right");
+                }
+                for v in std::mem::take(&mut m.rest.globals) {
+                    m.rest.release(v).expect("every count is right");
+                }
+                assert_eq!(m.rest.heap.live(), 0, "{what}");
+            }
+        }
+    });
+    assert!(ran > 1400 && took > ran, "{ran} {took}");
+    assert!((10..100).contains(&jumped), "{jumped}");
+}
+
+/// A tail call with more arguments than a function can have stops. It does not
+/// enter the callee with fewer, or with none.
+#[test]
+fn a_tail_call_with_too_many_arguments_stops() {
+    let (callee, own) = (Shared(r(1)), Room(7));
+    let call = Ins::TailCallValueWide {
+        callee,
+        args: crate::code::ArgList(0),
+        own,
+    };
+    for (n, stops) in [(MAX_PARAMS, false), (MAX_PARAMS + 1, true)] {
+        let lists = Lists {
+            regs: Vec::new(),
+            args: vec![vec![Arg::shared(r(0)); n].into()],
+            dsts: Vec::new(),
+        };
+        // The callee finds its second argument to be a number and returns.
+        let body = vec![
+            Ins::JumpUnlessInt {
+                src: Src(r(1)),
+                n: 8,
+                to: pc(2),
+            },
+            ret(2),
+            call,
+        ];
+        let code = function_of(ReadsClosure::Nothing, n, 254, body, lists, ctors().0);
+        on_a_machine(|m| {
+            let mut registers = vec![Value::NIL; WINDOW];
+            registers[usize::from(r(0).0)] = Value::int(8).expect("small");
+            registers[usize::from(r(1).0)] = Value::func(FuncIdx(0));
+            m.rest.code = code;
+            let at = started(m, Link::new(0, Room(0), Dst(RESULT)));
+            m.stack[2..WINDOW].copy_from_slice(&registers[2..]);
+            let got = m.go_on(at).map(Value::bits);
+            let want = if stops {
+                Err(Stop::broken(Broken::NoPlace))
+            } else {
+                Ok(Value::int(8).expect("small").bits())
+            };
+            assert_eq!(got, want, "{n}");
+        });
+    }
+}
+
+/// A range that is cut short and not read again leaves its register, as an
+/// array does: what is done with the register after counts on it.
+#[test]
+fn a_range_that_is_taken_leaves_its_register() {
+    for moved in [true, false] {
+        let body = vec![
+            int(0, 1),
+            int(1, 9),
+            Ins::Range {
+                dst: Dst(r(2)),
+                start: Src(r(0)),
+                end: Src(r(1)),
+            },
+            Ins::ArrayDrop {
+                dst: Dst(r(3)),
+                src: Arg { reg: r(2), moved },
+                n: Src(r(0)),
+            },
+            Ins::Audit,
+            ret(2),
+        ];
+        after(5, body, |m, got| {
+            let left = got.expect("it returns");
+            let range = range_ends(m, left);
+            assert_eq!(range, (!moved).then_some((1, 9)));
+            assert_eq!(m.rest.release(left), Ok(()));
+            assert_eq!(m.rest.heap.live(), 0);
+        });
+    }
+}
+
 /// An instruction that names a string or a binary the program does not have
 /// stops the run. It does not take the one for empty, or a test of it for one
 /// that does not match.
@@ -1320,8 +1794,8 @@ fn a_constant_that_is_not_there_stops_the_run() {
 }
 
 /// The wide forms of the calls do what the others do, with their arguments in
-/// a list. Here a function calls itself, or goes round, once, passing the
-/// array it was given, and returns what it was passed the second time.
+/// a list. Here a function calls itself once, passing the array it was given,
+/// and returns what it was passed the second time.
 #[test]
 fn a_call_with_its_arguments_in_a_list_passes_them() {
     let list = crate::code::ArgList(0);
@@ -1354,16 +1828,6 @@ fn a_call_with_its_arguments_in_a_list_passes_them() {
         },
         Ins::CallSelfWide {
             dst: Dst(r(2)),
-            to,
-            args: list,
-            own,
-        },
-        Ins::TailCallWide {
-            to,
-            args: list,
-            own,
-        },
-        Ins::TailCallSelfWide {
             to,
             args: list,
             own,
@@ -1429,135 +1893,6 @@ fn a_call_of_a_value_that_cannot_be_called_so_stops() {
     assert_eq!(call(Value::func(missing), 1), stop);
     let stop = Stop::broken(Broken::NotAFunction(View::Bool(true)));
     assert_eq!(call(Value::bool(true), 1), stop);
-}
-
-/// A tail call to another function gives up the closure the frame ran as, and
-/// one to the same function goes on as it.
-#[test]
-fn a_tail_call_by_name_gives_up_the_closure() {
-    let (to, own) = (EntryPc(START), Room(7));
-    let args = Args::new(&[]).expect("none");
-    let list = crate::code::ArgList(1);
-    let calls = [
-        (Ins::TailCall { to, args, own }, false),
-        (
-            Ins::TailCallWide {
-                to,
-                args: list,
-                own,
-            },
-            false,
-        ),
-        (Ins::TailCallSelf { to, args, own }, true),
-        (
-            Ins::TailCallSelfWide {
-                to,
-                args: list,
-                own,
-            },
-            true,
-        ),
-    ];
-    for (call, keeps) in calls {
-        let body = vec![
-            Ins::GetGlobal {
-                dst: Dst(r(1)),
-                slot: GlobalSlot(0),
-            },
-            Ins::JumpUnlessInt {
-                src: Src(r(1)),
-                n: 1,
-                to: pc(4),
-            },
-            Ins::GetSelf {
-                dst: Dst(r(2)),
-                this: FuncIdx(0),
-            },
-            Ins::RetClosure {
-                src: Taken(r(2)),
-                last: Room(7).last(),
-            },
-            int(1, 1),
-            Ins::SetGlobal {
-                slot: GlobalSlot(0),
-                src: Shared(r(1)),
-            },
-            call,
-        ];
-        let code = function(0, 5, body);
-        let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
-        let mut m = Machine::new(code, &mut host);
-        let captured = [Value::NIL];
-        let closure = m.rest.heap.closure(FuncIdx(0), &captured).expect("room");
-        let at = started(&mut m, Link::new(0, Room(0), Dst(RESULT)));
-        let mut win = window(&mut m.stack, 0).expect("a window");
-        win.run_as(Value::cell(closure));
-        let v = m.go_on(at).expect("it returns");
-        assert_eq!(v.as_cell(), keeps.then_some(closure), "{call:?}");
-        assert_eq!(m.rest.heap.live(), usize::from(keeps), "{call:?}");
-        assert_eq!(m.rest.release(v), Ok(()));
-        assert_eq!(m.rest.heap.live(), 0);
-    }
-}
-
-/// A tail call leaves no cell in the frame's registers but those it passes: a
-/// register the function put one in before it reads as `Nil` after.
-#[test]
-fn a_tail_call_empties_the_registers_it_does_not_pass() {
-    let (to, own) = (EntryPc(START), Room(7));
-    let none = || Args::new(&[]).expect("none");
-    let one = || Args::new(&[r(0)]).expect("room for one");
-    let calls = [
-        Ins::TailCallSelf {
-            to,
-            args: one(),
-            own,
-        },
-        Ins::TailCallSelf {
-            to,
-            args: none(),
-            own,
-        },
-        Ins::TailCall {
-            to,
-            args: one(),
-            own,
-        },
-        Ins::TailCallSelfWide {
-            to,
-            args: crate::code::ArgList(0),
-            own,
-        },
-    ];
-    for call in calls {
-        let body = vec![
-            Ins::GetGlobal {
-                dst: Dst(r(1)),
-                slot: GlobalSlot(0),
-            },
-            Ins::JumpUnlessInt {
-                src: Src(r(1)),
-                n: 1,
-                to: pc(3),
-            },
-            ret(4),
-            int(1, 1),
-            Ins::SetGlobal {
-                slot: GlobalSlot(0),
-                src: Shared(r(1)),
-            },
-            Ins::Str {
-                dst: Dst(r(4)),
-                text: TextId(0),
-            },
-            call,
-        ];
-        after(5, body, |m, got| {
-            assert_eq!(got.map(|v| v.bits()), Ok(Value::NIL.bits()), "{call:?}");
-            assert!(no_cell_on(&m.stack));
-            assert_eq!(m.rest.heap.live(), 0);
-        });
-    }
 }
 
 /// A function that writes the string `new` into the one-element array
@@ -2581,7 +2916,6 @@ fn on_a_stack_of(code: &'static Code, limit: usize) -> (Result<(), Stop>, usize,
         }
         Err(stop) => {
             assert_eq!(check(&m.stack, &m.rest, Value::NIL), Ok(()), "{stop:?}");
-            assert!(m.rest.passing.is_empty());
             Err(stop)
         }
     };
@@ -2689,6 +3023,148 @@ fn a_stack_past_its_limit_is_full() {
         assert_eq!(m.stack.len(), 1000);
         assert!(no_cell_on(&m.stack));
     });
+}
+
+/// A loop of every kind of tail call, with what it prints. Each is also given
+/// something of its own to hold in a turn.
+const LOOPS: &[(&str, &str)] = &[
+    // Nothing moves, and the turn leaves a big Int behind.
+    (
+        "fn go(n Int, acc Int) Int {\n\
+         \tif n == 0 { acc } else { go(n - 1, { acc + n * 9223372036854775807 } % 1000) }\n}\n\
+         pub fn main() { println(go(N, 0) < 1000) }\n",
+        "True\n",
+    ),
+    // The same, of a loop that ends in a call of a narrower function.
+    (
+        "fn go(n Int, a Int, b Int, acc Int) Int {\n\
+         \tif n == 0 { done(acc) } else {\n\
+         \t\tx = n * 9223372036854775807\n\
+         \t\ty = x + a\n\
+         \t\tif x > y { go(n - 1, b, a, acc) } else { go(n - 1, a, b, acc + 1) }\n\t}\n}\n\
+         fn done(acc Int) Int { if acc > 0 { 1 } else { 0 } }\n\
+         pub fn main() { println(go(N, 1, 2, 0)) }\n",
+        "1\n",
+    ),
+    // Two functions that go round, each of which leaves big Ints in a loop of
+    // its own and in as many registers as one instruction gives up.
+    (
+        "fn go(n Int, k Int, acc Int) Int {\n\
+         \tif n == 0 { acc } else {\n\
+         \t\tif k == 0 { back(n - 1, acc) } else {\n\
+         \t\t\tu = n * 9223372036854775807\n\
+         \t\t\tv = u + k\n\
+         \t\t\tw = v + n\n\
+         \t\t\tx = w * 3\n\
+         \t\t\tif u < v + w + x { go(n, k - 1, acc + 1) } else { go(n, k - 2, acc) }\n\t\t}\n\t}\n}\n\
+         fn back(n Int, acc Int) Int {\n\
+         \tu = n * 9223372036854775807\n\
+         \tv = u + acc\n\
+         \tw = v * 5\n\
+         \tif u + v < w { go(n, 3, acc) } else { go(n, 2, acc) }\n}\n\
+         pub fn main() { println(go(N / 4, 3, 0) > 0) }\n",
+        "True\n",
+    ),
+    // Every kind of move, of values made each turn.
+    (
+        "fn go(n Int, a String, b String, c Array(Int), d Array(Int)) Int {\n\
+         \tif n == 0 { string::length(a) + array::length(c) } else { go(n - 1, b, '${n % 10}', d, [n]) }\n}\n\
+         pub fn main() { println(go(N, 'x', 'y', [], [])) }\n",
+        "2\n",
+    ),
+    (
+        "fn go(n Int, a String, b String, c String, d String, e String) String {\n\
+         \tif n == 0 { '${a}${a}' } else { go(n - 1, b, c, d, e, '${n % 10}') }\n}\n\
+         pub fn main() { println(string::length(go(N, 'a', 'b', 'c', 'd', 'e'))) }\n",
+        "2\n",
+    ),
+    (
+        "fn go(n Int, a String, b String) String {\n\
+         \tif n == 0 { a } else { if n % 3 == 0 { go(n - 1, b, a) } else { go(n - 1, '${n % 10}', a) } }\n}\n\
+         pub fn main() { println(string::length(go(N, 'a', 'b'))) }\n",
+        "1\n",
+    ),
+    // A value to several parameters.
+    (
+        "fn go(n Int, a String, b String, c String) Int {\n\
+         \tif n == 0 { string::length('${a}${b}') } else { go(n - 1, c, c, '${n % 10}') }\n}\n\
+         pub fn main() { println(go(N, 'a', 'b', 'c')) }\n",
+        "2\n",
+    ),
+    // Two functions and three, of other widths.
+    (
+        "fn a(n Int, s String) Int { if n == 0 { string::length(s) } else { b(n - 1, s, '${n % 10}') } }\n\
+         fn b(n Int, s String, t String) Int {\n\
+         \tif n == 0 { string::length(s) } else { c(n - 1, t, s, [n, n], '${s}') }\n}\n\
+         fn c(n Int, s String, t String, xs Array(Int), u String) Int {\n\
+         \tif n == 0 { array::length(xs) + string::length('${s}${t}${u}') } else { a(n - 1, s) }\n}\n\
+         pub fn main() { println(a(N, 'x') > 0) }\n",
+        "True\n",
+    ),
+    // A closure's to itself, and one through a value that keeps its closure and
+    // one that does not.
+    (
+        "pub fn main() {\n\
+         \tkept = '${N}'\n\
+         \tgo = fn(n, s) { if n == 0 { string::length('${s}${kept}') > 0 } else { go(n - 1, '${n % 10}') } }\n\
+         \tprintln(go(N, ''))\n}\n",
+        "True\n",
+    ),
+    (
+        "fn go(f fn(fn(Int) Int, Int) Int, n Int) Int { f(fn(x) x + n, n - 1) }\n\
+         pub fn main() {\n\
+         \tkept = [1]\n\
+         \tkeeper = fn(g, n) { if n <= 0 { g(1) + array::length(kept) } else { go(keeper, n) } }\n\
+         \tprintln(go(keeper, N))\n\
+         \tprintln(go(plain, N))\n}\n\
+         fn plain(g fn(Int) Int, n Int) Int { if n <= 0 { g(1) } else { go(plain, n) } }\n",
+        "3\n2\n",
+    ),
+    (
+        "fn wide(f fn(Int, Int, Int, Int, Int, Int, String) Int, n Int, s String) Int {\n\
+         \tif n == 0 { string::length(s) } else { f(n - 1, 1, 2, 3, 4, 5, '${n % 10}') }\n}\n\
+         fn back(n Int, _a Int, _b Int, _c Int, _d Int, _e Int, s String) Int { wide(back, n, s) }\n\
+         pub fn main() { println(wide(back, N, 'x')) }\n",
+        "1\n",
+    ),
+    // What a match took apart.
+    (
+        "type L {\n\tCons(h String, t L)\n\tEnd\n}\n\
+         fn go(n Int, l L, acc L) Int {\n\
+         \tmatch l {\n\
+         \t\tCons(h, t) -> go(n, t, Cons(h, acc))\n\
+         \t\tEnd -> if n == 0 { 1 } else { go(n - 1, acc, End) }\n\t}\n}\n\
+         pub fn main() { println(go(N / 4, Cons('a', Cons('b', End)), End)) }\n",
+        "1\n",
+    ),
+];
+
+/// A loop of any kind of tail call takes one frame and no more heap for more
+/// turns.
+#[test]
+fn a_loop_of_any_kind_takes_no_more_for_more_turns() {
+    for (body, want) in LOOPS {
+        let room = |turns: usize| {
+            let code = loaded(&deep_source(body, turns), Audit::AtEnd);
+            let (ended, len, out) = on_a_stack_of(code, MAX_STACK);
+            assert_eq!((ended, out.as_str()), (Ok(()), *want), "{body}");
+            let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+            let mut m = Machine::new(code, &mut host);
+            m.run().expect("it runs to its end");
+            (len, m.rest.heap.words_carved())
+        };
+        assert_eq!(room(2_000), room(60_000), "{body}");
+    }
+}
+
+/// The same loops with every count checked before each instruction.
+#[test]
+fn a_loop_of_any_kind_is_right_at_every_instruction() {
+    for (body, want) in LOOPS {
+        let code = loaded(&deep_source(body, 24), Audit::EachInstruction);
+        let (ended, _, out) = on_a_stack_of(code, MAX_STACK);
+        assert_eq!((ended, out.as_str()), (Ok(()), *want), "{body}");
+    }
 }
 
 /// A function that does `first` in its first run and `second` in its second,

@@ -141,7 +141,7 @@ pub fn main() {
 /// (c) Scheduling fairness, with one scheduler running a self-tail spinner and
 /// a printer. `kick` warms `spin` past the threshold with plain calls, so the
 /// 20M-step loop runs native. Its compiled back-edge must checkpoint reductions
-/// like the interpreter's TailCallSelf. Otherwise the spinner starves the
+/// like the interpreter's loops. Otherwise the spinner starves the
 /// sibling and the output order flips.
 #[test]
 #[ignore = "needs the JIT and processes"]

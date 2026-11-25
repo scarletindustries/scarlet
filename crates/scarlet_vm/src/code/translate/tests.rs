@@ -1,5 +1,5 @@
 use super::super::ins::{Ins, Role};
-use super::super::tests::{body, entries, named, program};
+use super::super::tests::{body, entries, instructions, named, program};
 use super::super::{Code, Op, Reg, load};
 use super::*;
 use crate::Audit;
@@ -120,7 +120,8 @@ fn the_loader_marks_the_moves_of_a_compiled_program() {
         "{:?}",
         moves(".joined")
     );
-    assert_eq!(moves(".bound"), [true]);
+    // Here the copy is dropped after, and takes the register over.
+    assert_eq!(moves(".bound"), [false; 0]);
     assert_eq!(moves(".kept"), [false]);
 }
 
@@ -282,8 +283,14 @@ fn a_constructor_the_program_does_not_list_does_not_load() {
     let program = program_with_fields();
     let source = Source::new(&program).expect("a whole program");
     let load = |core: &CoreFn| {
-        let draft = translate(&source, core, Some(FuncIdx(0)), &mut Tables::default());
-        draft.map(|d| d.ins)
+        let draft = translate(
+            &source,
+            core,
+            false,
+            Some(FuncIdx(0)),
+            &mut Tables::default(),
+        );
+        draft.map(|d| instructions(&d))
     };
     let builds = |variant, n: u32| {
         function(
@@ -359,8 +366,14 @@ fn a_constructor_the_program_does_not_list_does_not_load() {
 fn translated(core: &CoreFn) -> Result<Vec<Op>, Unfit> {
     let program = empty_program();
     let source = Source::new(&program).expect("a whole program");
-    let draft = translate(&source, core, Some(FuncIdx(0)), &mut Tables::default());
-    draft.map(|d| d.ins.iter().map(Ins::op).collect())
+    let draft = translate(
+        &source,
+        core,
+        false,
+        Some(FuncIdx(0)),
+        &mut Tables::default(),
+    );
+    draft.map(|d| instructions(&d).iter().map(Ins::op).collect())
 }
 
 /// A constant that a module keeps in a global is stored there, even when only
@@ -393,7 +406,7 @@ fn a_constant_kept_in_a_global_is_stored() {
             ret_ty: program.toplevel.core.ret_ty,
         };
         let mut with = program.clone();
-        with.toplevel = LoweredFn::new("main".into(), "toplevel".into(), core);
+        with.toplevel = LoweredFn::new("main".into(), "toplevel".into(), core, false);
         let code = load(&with, Audit::Never).expect("the program loads");
         let top = code.toplevels.last().expect("a toplevel");
         body(&code, top).iter().map(Ins::op).collect()
@@ -483,6 +496,82 @@ fn a_branch_on_what_a_branch_gives_reads_it() {
     assert_eq!(jumps.count(), 2, "{:?}", ops["either"]);
 }
 
+/// The loader is told which values are numbers and strings by their types, and
+/// passes on what Perceus left undropped.
+#[test]
+fn a_draft_says_what_its_values_types_say() {
+    let program = program(
+        "fn plain(n Int, x Float, s String, b Bool, xs Array(Int)) Int {\n\
+         \tif b { plain(n, x, s, b, xs) } else { n }\n}\n\
+         fn any(x a, n Int) a { if n > 0 { any(x, n - 1) } else { x } }\n\
+         fn lost(x a, n Int) Int { if n > 0 { lost(x, n - 1) } else { n } }\n\
+         pub fn main() {\n\
+         \tprintln(plain(1, 2.0, '', False, []))\n\
+         \tprintln(any(1, 1) + lost(1, 1))\n\
+         }\n",
+    );
+    let source = Source::new(&program).expect("a whole program");
+    let draft = |name: &str| {
+        let mut all = (&program.fns).into_iter();
+        let f = all.find(|f| f.name == name).expect("the function");
+        let this = Some(FuncIdx(0));
+        let d = translate(&source, &f.core, f.undropped, this, &mut Tables::default());
+        let d = d.expect("it translates");
+        let prim = |p: &VReg| d.prims.get(p.0 as usize).copied().flatten();
+        (d.params.iter().map(prim).collect::<Vec<_>>(), d.undropped)
+    };
+    let (int, float, string) = (Some(Prim::Int), Some(Prim::Float), Some(Prim::String));
+    let plain = vec![int, float, string, None, None];
+    assert_eq!(draft("plain"), (plain, false));
+    assert_eq!(draft("any"), (vec![None, int], false));
+    assert_eq!(draft("lost"), (vec![None, int], true));
+}
+
+/// A value whose type the program does not have is an error and not a guess,
+/// wherever it is bound, and a local with the highest number there can be is
+/// refused before anything is made for it.
+#[test]
+fn a_type_the_program_does_not_have_is_refused() {
+    let mut program = program("fn f(n Int) Int { n + n + n }\npub fn main() { println(f(1)) }\n");
+    let f = (&program.fns).into_iter().find(|f| f.name == "f");
+    let core = f.expect("f").core.clone();
+    let why = |program: &Program, core: &CoreFn| {
+        let source = Source::new(program).expect("a whole program");
+        translate(&source, core, false, None, &mut Tables::default()).err()
+    };
+    assert_eq!(why(&program, &core), None);
+    let foreign = RTy(1_000_000);
+    let mut param = core.clone();
+    param.params[0].ty = foreign;
+    assert_eq!(why(&program, &param), Some(Unfit::Broken(Broken::NoType)));
+    let mut bound = core.clone();
+    let CoreExpr::Let { bind, .. } = &mut bound.body else {
+        panic!("{}", bound.body);
+    };
+    bind.ty = foreign;
+    assert_eq!(why(&program, &bound), Some(Unfit::Broken(Broken::NoType)));
+    let mut last = core;
+    last.params[0].id = LocalId(u32::MAX);
+    assert_eq!(why(&program, &last), Some(Unfit::TooMany(Limit::Values)));
+    // The function stops with it when it is called, and the rest loads.
+    let fns = std::mem::take(&mut program.fns);
+    program.fns = fns
+        .into_iter()
+        .map(|mut f| {
+            if f.name == "f" {
+                f.core = param.clone();
+            }
+            f
+        })
+        .collect();
+    let code = load(&program, Audit::Never).expect("the program loads");
+    let f = named(&code, ".f");
+    let [Ins::Bad { why }] = body(&code, f) else {
+        panic!("one instruction");
+    };
+    assert_eq!(code.why(*why), crate::Stop::broken(Broken::NoType));
+}
+
 /// A translator that has made nothing, of a function that names values up to 2 and
 /// reads its locals as `reads` says.
 fn translator<'c>(
@@ -494,7 +583,7 @@ fn translator<'c>(
         source,
         this: None,
         tables,
-        ins: Vec::new(),
+        steps: Vec::new(),
         lists: Lists::default(),
         labels: Vec::new(),
         landed: None,
@@ -522,12 +611,12 @@ fn a_comparison_something_jumps_past_is_kept() {
     compare(&mut t);
     let jump = t.take_comparison(LocalId(2), to);
     assert_eq!(jump.map(|j| j.op()), Some(Op::JumpUnlessIntLt));
-    assert!(t.ins.is_empty());
+    assert!(t.steps.is_empty());
     compare(&mut t);
     let here = t.label().expect("a label");
     t.place(here);
     assert!(t.take_comparison(LocalId(2), to).is_none());
-    assert_eq!(t.ins.len(), 1);
+    assert_eq!(t.steps.len(), 1);
     // Nor when the label has constants before it, after it or around it, and
     // those are left as they were.
     let constant = |t: &mut Translator<'_>, n: u32| {
@@ -538,30 +627,30 @@ fn a_comparison_something_jumps_past_is_kept() {
     };
     for before in 0..3 {
         for after in 0..3 {
-            t.ins.clear();
+            t.steps.clear();
             compare(&mut t);
             (0..before).for_each(|n| constant(&mut t, 10 + n));
             let here = t.label().expect("a label");
             t.place(here);
             (0..after).for_each(|n| constant(&mut t, 20 + n));
-            let was = format!("{:?}", t.ins);
+            let was = format!("{:?}", t.steps);
             assert!(t.take_comparison(LocalId(2), to).is_none());
-            assert_eq!(format!("{:?}", t.ins), was);
+            assert_eq!(format!("{:?}", t.steps), was);
         }
     }
     // With no label there, what is between the two stays in its order.
-    t.ins.clear();
+    t.steps.clear();
     t.landed = None;
     (0..2).for_each(|n| constant(&mut t, 30 + n));
-    let was = format!("{:?}", t.ins);
-    t.ins.clear();
+    let was = format!("{:?}", t.steps);
+    t.steps.clear();
     compare(&mut t);
     (0..2).for_each(|n| constant(&mut t, 30 + n));
     let jump = t.take_comparison(LocalId(2), to);
     assert_eq!(jump.map(|j| j.op()), Some(Op::JumpUnlessIntLt));
-    assert_eq!(format!("{:?}", t.ins), was);
+    assert_eq!(format!("{:?}", t.steps), was);
     // A label before the comparison does not matter.
-    t.ins.clear();
+    t.steps.clear();
     let before = t.label().expect("a label");
     t.place(before);
     compare(&mut t);
@@ -589,15 +678,22 @@ fn in_arm(pat: CorePat, arm: CoreExpr) -> Vec<String> {
     core.params.push(bind(20));
     let program = program_with_fields();
     let source = Source::new(&program).expect("a whole program");
-    let draft = translate(&source, &core, Some(FuncIdx(0)), &mut Tables::default());
+    let draft = translate(
+        &source,
+        &core,
+        false,
+        Some(FuncIdx(0)),
+        &mut Tables::default(),
+    );
     let draft = draft.expect("it translates");
     // Nothing may jump between a test and what is read out after it.
-    for (at, ins) in draft.ins.iter().enumerate() {
+    let all = instructions(&draft);
+    for (at, ins) in all.iter().enumerate() {
         if ins.op().name().starts_with("Open") {
-            assert!(!draft.labels.contains(&at), "{:?}", draft.ins);
+            assert!(!draft.labels.contains(&at), "{all:?}");
         }
     }
-    let ins = &draft.ins[..draft.ins.len() - 1];
+    let ins = &all[..all.len() - 1];
     ins.iter().map(|i| shown(i, &draft.lists)).collect()
 }
 
@@ -875,11 +971,18 @@ fn operands_that_do_not_fit_are_in_a_list() {
         );
         let program = program_with_fields();
         let source = Source::new(&program).expect("a whole program");
-        let draft = translate(&source, &core, Some(FuncIdx(0)), &mut Tables::default())
-            .expect("it translates");
-        assert_eq!(draft.ins[0].op(), want);
+        let draft = translate(
+            &source,
+            &core,
+            false,
+            Some(FuncIdx(0)),
+            &mut Tables::default(),
+        )
+        .expect("it translates");
+        let first = instructions(&draft)[0];
+        assert_eq!(first.op(), want);
         let mut named = Vec::new();
-        draft.ins[0].operands(&draft.lists, &mut |v, role| {
+        first.operands(&draft.lists, &mut |v, role| {
             if role != Role::Write {
                 named.push(v);
             }
@@ -902,8 +1005,8 @@ fn a_call_that_cannot_be_right_stops_the_run() {
     let main = program.main.expect("a main");
     let why = |core: &CoreFn, this| {
         let mut tables = Tables::default();
-        let draft = translate(&source, core, this, &mut tables).expect("it translates");
-        assert_eq!(draft.ins.first().map(Ins::op), Some(Op::Bad));
+        let draft = translate(&source, core, false, this, &mut tables).expect("it translates");
+        assert_eq!(instructions(&draft).first().map(Ins::op), Some(Op::Bad));
         tables.whys.remove(0)
     };
     let call = |callee, n: u32| {
@@ -948,7 +1051,7 @@ fn a_call_that_cannot_be_right_stops_the_run() {
         },
     );
     let mut tables = Tables::default();
-    translate(&source, &goes_back, None, &mut tables).expect("it translates");
+    translate(&source, &goes_back, false, None, &mut tables).expect("it translates");
     assert_eq!(tables.whys, [Why::Broken(Broken::UndeclaredCase)]);
 }
 

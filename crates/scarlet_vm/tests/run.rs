@@ -1748,6 +1748,29 @@ fn first_connection_ends_before_the_new_field_runs(
          \t}}\n\
          }}\n\
          fn within(h Held) Option(socket::Socket) {{ redial(h.port) }}\n\
+         fn kept(v a) a {{ v }}\n\
+         fn turn(x Option(a), port Int) Option(socket::Socket) {{\n\
+         \tmatch x {{\n\
+         \t\tNone -> redial(port)\n\
+         \t\tSome(y) -> {{\n\
+         \t\t\tz = kept(y)\n\
+         \t\t\tif z == z {{ turn(None, port) }} else {{ None }}\n\
+         \t\t}}\n\
+         \t}}\n\
+         }}\n\
+         fn leave(x a, port Int) Option(socket::Socket) {{\n\
+         \tz = kept(x)\n\
+         \tif z == z {{ redial(port) }} else {{ None }}\n\
+         }}\n\
+         fn replace(_x a, y a, n Int, port Int) Option(socket::Socket) {{\n\
+         \tif n == 0 {{ redial(port) }} else {{ replace(y, y, n - 1, port) }}\n\
+         }}\n\
+         fn trade(x a, y a, n Int, port Int) Option(socket::Socket) {{\n\
+         \tif n == 0 {{\n\
+         \t\tnew = redial(port)\n\
+         \t\tif x == y {{ None }} else {{ new }}\n\
+         \t}} else {{ trade(y, x, n - 1, port) }}\n\
+         }}\n\
          fn swap(h Held) Held {{\n\
          \t{update}\n\
          }}\n\
@@ -1839,6 +1862,25 @@ fn a_call_closes_a_handle_in_a_value_its_caller_is_done_with() {
         "held = Held(h.conn, h.port)\n\tnew = within(held)\n\tHeld(new, 1)",
         std::time::Duration::from_secs(10),
     ));
+}
+
+/// A tail call gives up what its turn is done with: a value that a name of its
+/// own held, of a type the function does not know, a parameter that it writes
+/// over, and what it does not pass to another function. A connection in one is
+/// closed before the next turn, or the callee, runs. What is passed on is not.
+#[test]
+fn a_tail_call_closes_a_handle_the_turn_is_done_with() {
+    let ends = |call: &str, wait: u64| {
+        first_connection_ends_before_the_new_field_runs(
+            &format!("held = h.conn\n\tport = h.port\n\tHeld({call}, 1)"),
+            std::time::Duration::from_millis(wait),
+        )
+    };
+    assert!(ends("turn(held, port)", 10_000));
+    assert!(ends("leave(held, port)", 10_000));
+    assert!(ends("replace(held, None, 1, port)", 10_000));
+    assert!(ends("replace(held, None, 2, port)", 10_000));
+    assert!(!ends("trade(held, None, 3, port)", 200));
 }
 
 /// The listing shows a write with the array it takes marked, as it marks an
@@ -2684,6 +2726,9 @@ fn a_counted_run_counts_the_same_every_time() {
     );
     assert_eq!(counted(src).1, first);
     assert_eq!(ran(&first, "Ctor2"), 3);
+    // Each turn but the last ends in a jump back to the first.
+    assert_eq!(ran(&first, "Jump"), 3);
+    assert_eq!(ran(&first, "JumpUnlessIntEqK"), 4);
     assert!(first.cells_made >= 3, "{}", first.cells_made);
     // Word 0 and the three cells.
     assert!(first.heap_words > 3 * 3, "{}", first.heap_words);
@@ -3018,26 +3063,94 @@ fn the_listing_shows_the_loaded_instructions() {
 /// call takes, and leaves a source that is read again unmarked.
 #[test]
 fn the_listing_marks_a_move_that_takes_its_source() {
-    let src = "fn fresh(n Int) Array(Int) { [n, n + 1] }\n\
+    let src = "import scarlet/array\n\
+               fn fresh(n Int) Array(Int) { [n, n + 1] }\n\
                fn twice(n Int) Array(Int) {\n\
                \tt = fresh(n)\n\
                \tys = t\n\
                \t[..ys, ..t]\n\
                }\n\
-               fn once(n Int) Array(Int) {\n\
-               \tmatch fresh(n) {\n\
-               \t\tys -> [..ys, 9]\n\
-               \t}\n\
-               }\n\
+               fn once(xs Array(Int)) Array(Int) { array::put(xs, 0, 9) }\n\
                pub fn main() {\n\
                \tprintln(twice(1))\n\
-               \tprintln(once(1))\n\
+               \tprintln(once([1]))\n\
                }\n";
     let listing = scarlet_vm::listing(&compile(src)).expect("the program loads");
-    let twice = listing.function(1).expect("twice is the second function");
+    let mut all = (0..).map_while(|i| listing.function(i));
+    let twice = all.find(|f| f.contains("r3 = Move(r2)"));
+    let twice = twice.expect("twice");
     assert!(twice.contains("    1  r3 = Move(r2)\n"), "{twice}");
-    let once = listing.function(2).expect("once is the third");
-    assert!(once.contains("    1  r3 = Move(move r2)\n"), "{once}");
+    let once = all.find(|f| f.contains("ArraySet")).expect("once");
+    assert!(once.contains(" = Move(move r2)\n"), "{once}");
+}
+
+/// The listing shows a loop as a jump to its first instruction, after the moves
+/// that put the arguments in place, and a tail call to another function as the
+/// function it enters.
+#[test]
+fn the_listing_shows_a_tail_call_as_moves_and_a_jump() {
+    let src = "fn down(n Int, a Int, b Int, c Int) Int {\n\
+               \tif n == 0 { up(b, a) } else { down(n - 1, b, c, a) }\n\
+               }\n\
+               fn up(a Int, b Int) Int { if a > 9 { b } else { up(a + b, b + 1) } }\n\
+               fn turn(a Int, b Int) Int { if a == b { turn(b, a) } else { a } }\n\
+               pub fn main() {\n\
+               \tprintln(down(7, 1, 2, 3))\n\
+               \tprintln(turn(1, 2))\n\
+               }\n";
+    let listing = scarlet_vm::listing(&compile(src)).expect("the program loads");
+    let down = listing.function(0).expect("down is the first function");
+    assert_eq!(
+        down,
+        "; loaded: 6 registers, parameters in r2 to r5\n    \
+         0  JumpUnlessIntEqK(r2, 0) -> 4\n    \
+         1  Drop(r5)\n    \
+         2  r2 = Move(move r4)\n    \
+         3  Enter(fn#1)\n    \
+         4  r2 = IntSubK(r2, 1)\n    \
+         5  r3, r4, r5 = Move3(move r4, move r5, move r3)\n    \
+         6  Jump -> 0\n"
+    );
+    let up = listing.function(1).expect("up is the second");
+    assert!(
+        up.ends_with("2  r2 = IntAdd(r2, r3)\n    3  r3 = IntAddK(r3, 1)\n    4  Jump -> 0\n"),
+        "{up}"
+    );
+    let turn = listing.function(2).expect("turn is the third");
+    assert!(
+        turn.contains("1  r2, r3 = Move2(move r3, move r2)\n    2  Jump -> 0\n"),
+        "{turn}"
+    );
+}
+
+/// A loop's arguments are computed in the order that leaves nothing to move,
+/// but as written where something is held that nothing drops: their order says
+/// when that is given up.
+#[test]
+fn the_listing_shows_the_order_of_a_loops_arguments() {
+    let listed = |ty: &str| {
+        let src = format!(
+            "fn same(x {ty}) {ty} {{ x }}\n\
+             fn go(x {ty}, n Int, acc Int) Int {{\n\
+             \tif n == 0 {{ acc }} else {{\n\
+             \t\ty = same(x)\n\
+             \t\tgo(y, n - 1, acc + n)\n\
+             \t}}\n\
+             }}\n\
+             pub fn main() {{ println(go([1], 3, 0)) }}\n"
+        );
+        let listing = scarlet_vm::listing(&compile(&src)).expect("the program loads");
+        let all = (0..).map_while(|i| listing.function(i));
+        let go = all.filter(|f| f.contains("IntSubK(")).collect::<Vec<_>>();
+        let [go] = &go[..] else {
+            panic!("one function counts down: {go:?}")
+        };
+        (go.find("IntSubK("), go.find("IntAdd("), go.contains("Move"))
+    };
+    let (sub, add, moves) = listed("Array(Int)");
+    assert!(add < sub && !moves, "{add:?} {sub:?} {moves}");
+    let (sub, add, moves) = listed("a");
+    assert!(sub < add && moves, "{add:?} {sub:?} {moves}");
 }
 
 /// A function that needs something the VM does not run yet has no
@@ -3511,6 +3624,39 @@ fn a_call_may_pass_250_arguments() {
             weigh(through),
         );
         prints(&src, &want);
+    }
+}
+
+/// A function with a join that holds nearly as many values as there are
+/// registers still loads, and its arguments stay in the order they are written
+/// in when another would hold one more past the join.
+#[test]
+fn a_loop_past_a_full_join_loads() {
+    for args in 1..=3 {
+        let all = each_of(args, |i| format!("x{i} Int, y{i} Int, w{i} Int")).join(", ");
+        let sums = each_of(args, |i| format!("\t\ts{i} = x{i} + y{i}\n")).concat();
+        let next = each_of(args, |i| format!("s{i}, n, w{i}")).join(", ");
+        // The most the join may hold besides: each sum, the parameters that the
+        // call passes on, `p`, and the value being added up are held too.
+        let many = 253 - 2 * args;
+        let made = each_of(many, |i| format!("\t\t\tv{i} = p * {}\n", i + 2)).concat();
+        let added = each_of(many - 1, |i| match i {
+            0 => "\t\t\tt0 = v0 + v1\n".to_string(),
+            i => format!("\t\t\tt{i} = t{} + v{}\n", i - 1, i + 1),
+        });
+        let (added, last) = (added.concat(), many - 2);
+        let of = each_of(args, |i| format!("x{i} * y{i}")).join(" + ");
+        let src = format!(
+            "fn f(n Int, {all}) Int {{\n\
+             \tif n == 0 {{ x0 + w0 }} else {{\n\
+             {sums}\
+             \t\tj = if n > 3 {{\n\t\t\tp = {of}\n{made}{added}\t\t\tt{last}\n\t\t}} else {{ 0 }}\n\
+             \t\tf(n - 1 + j * 0, {next})\n\t}}\n}}\n\
+             pub fn main() {{ println(f(5, {})) }}\n",
+            vec!["1, 2, 3"; args].join(", "),
+        );
+        // `x0` goes 1, 3, 8, 12, 15, 17, with `n` in `y0`.
+        prints(&src, "20\n");
     }
 }
 

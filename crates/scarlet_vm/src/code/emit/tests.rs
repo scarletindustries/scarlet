@@ -1,5 +1,5 @@
-use super::super::ins::{ArgList, Callee, OwnEntry, OwnRoom};
-use super::super::tests::{SHAPES, body, entries, of, program};
+use super::super::ins::{ArgList, Callee, OwnEntry, OwnRoom, Shared};
+use super::super::tests::{SHAPES, body, entries, named, of, program};
 use super::super::{Arg, Args, Code, Dst, Entry, ReadsClosure, load, load_counted};
 use super::*;
 
@@ -139,13 +139,11 @@ fn a_call_holds_where_its_callee_starts() {
                 | Ins::Call2Share { to, own, .. }
                 | Ins::Call3Share { to, own, .. }
                 | Ins::Call { to, own, .. }
-                | Ins::CallWide { to, own, .. }
-                | Ins::TailCall { to, own, .. }
-                | Ins::TailCallWide { to, own, .. } => Some((own, Some((to, true)))),
-                Ins::CallSelf { to, own, .. }
-                | Ins::CallSelfWide { to, own, .. }
-                | Ins::TailCallSelf { to, own, .. }
-                | Ins::TailCallSelfWide { to, own, .. } => Some((own, Some((to, false)))),
+                | Ins::CallWide { to, own, .. } => Some((own, Some((to, true)))),
+                Ins::CallSelf { to, own, .. } | Ins::CallSelfWide { to, own, .. } => {
+                    Some((own, Some((to, false))))
+                }
+                Ins::Enter { to } => Some((entry.own, Some((to, true)))),
                 Ins::CallValue { own, .. }
                 | Ins::CallValueWide { own, .. }
                 | Ins::TailCallValue { own, .. }
@@ -160,7 +158,9 @@ fn a_call_holds_where_its_callee_starts() {
             let Some((own, to)) = goes else {
                 continue;
             };
-            kinds.insert(ins.op().name());
+            if !matches!(ins, Ins::Enter { .. }) {
+                kinds.insert(ins.op().name());
+            }
             assert_eq!(own, entry.own, "{}", entry.name);
             if let Some((to, by_name)) = to {
                 let mut all = entries(&code).into_iter();
@@ -185,7 +185,10 @@ fn a_call_holds_where_its_callee_starts() {
     calls("early", "late");
     calls("late", "early");
     calls("late", "late");
-    calls("round", "round");
+    // One that goes round does it with a jump to its own start.
+    let round = named(&code, ".round");
+    let back = |ins: &&Ins<Reg>| matches!(ins, Ins::Jump { to } if to.index() == round.pc.index());
+    assert_eq!(body(&code, round).iter().filter(back).count(), 1);
     calls("main", "round");
 }
 
@@ -223,8 +226,8 @@ fn each_functions_lists_are_its_own() {
         );
         f.body.lists.regs.push(Box::new([VReg(v), VReg(0)]));
         f.body.lists.args.push(Box::new([Arg::shared(VReg(v))]));
-        f.body.ins.push(Ins::TailCallSelfWide {
-            to: OwnEntry,
+        f.body.ins.push(Ins::TailCallValueWide {
+            callee: Shared(VReg(0)),
             args: ArgList(0),
             own: OwnRoom,
         });
@@ -236,7 +239,7 @@ fn each_functions_lists_are_its_own() {
     for ins in &placed.ins {
         match ins {
             Ins::ConcatWide { parts: list, .. } => parts.push(list.regs(&placed.lists)),
-            Ins::TailCallSelfWide { args: list, .. } => {
+            Ins::TailCallValueWide { args: list, .. } => {
                 args.push(list.args(&placed.lists)[0].reg);
             }
             _ => {}
@@ -260,10 +263,8 @@ fn what_has_no_place_is_refused() {
     let mut f = fitted(vec![of::jump(0)], Vec::new());
     f.body.labels.push(1);
     assert_eq!(fails(f), lost, "a label past the last instruction");
-    let call = |to: u32| Ins::TailCall {
+    let call = |to: u32| Ins::Enter {
         to: Callee(FuncIdx(to)),
-        args: Args::new(&[]).expect("none"),
-        own: OwnRoom,
     };
     assert_eq!(fails(fitted(vec![call(0)], Vec::new())), None);
     assert_eq!(fails(fitted(vec![call(1)], Vec::new())), lost);
@@ -278,8 +279,8 @@ fn what_has_no_place_is_refused() {
                     dst: super::super::Dst(VReg(0)),
                     parts: super::super::LookList(regs),
                 },
-                Ins::TailCallSelfWide {
-                    to: OwnEntry,
+                Ins::TailCallValueWide {
+                    callee: Shared(VReg(0)),
                     args: ArgList(args),
                     own: OwnRoom,
                 },
@@ -304,7 +305,7 @@ fn a_call_by_name_to_a_function_that_reads_captures_is_refused() {
     let (a, b, c) = (Taken(VReg(0)), Taken(VReg(0)), Taken(VReg(0)));
     let shared = Arg::shared(VReg(0));
     let (few, wide) = (Args::new(&[VReg(0)]).expect("room for one"), ArgList(0));
-    let by_name: [Ins<VReg>; 11] = [
+    let by_name: [Ins<VReg>; 10] = [
         Ins::Call0 { dst, own, to },
         Ins::Call1 { dst, own, to, a },
         Ins::Call2 { dst, own, to, a, b },
@@ -349,15 +350,10 @@ fn a_call_by_name_to_a_function_that_reads_captures_is_refused() {
             to,
             args: wide,
         },
-        Ins::TailCall { to, args: few, own },
-        Ins::TailCallWide {
-            to,
-            args: wide,
-            own,
-        },
+        Ins::Enter { to },
     ];
     let to = OwnEntry;
-    let to_itself: [Ins<VReg>; 4] = [
+    let to_itself: [Ins<VReg>; 2] = [
         Ins::CallSelf {
             dst,
             own,
@@ -369,12 +365,6 @@ fn a_call_by_name_to_a_function_that_reads_captures_is_refused() {
             own,
             to,
             args: wide,
-        },
-        Ins::TailCallSelf { to, args: few, own },
-        Ins::TailCallSelfWide {
-            to,
-            args: wide,
-            own,
         },
     ];
     let of = |ins: Ins<VReg>, closure| {

@@ -285,9 +285,8 @@ registers! {
     Dead Role::Drop;
 }
 
-/// Declares the field that is `N` registers with one role, where a new cell's
-/// instruction has one for each operand.
-macro_rules! registers_of_a_cell {
+/// Declares the field that is `N` registers with one role.
+macro_rules! registers_of_one_role {
     ($($name:ident $role:expr;)*) => {$(
         impl<R: Names, const N: usize> Part<R> for [$name<R>; N] {
             fn operands(self, _: &Lists<R>, f: &mut impl FnMut(R, Role)) {
@@ -304,7 +303,8 @@ macro_rules! registers_of_a_cell {
     )*};
 }
 
-registers_of_a_cell! {
+registers_of_one_role! {
+    Dst Role::Write;
     Shared Role::Share;
     Taken Role::Take;
 }
@@ -383,6 +383,10 @@ impl<R> Arg<R> {
     pub(crate) fn shared(reg: R) -> Arg<R> {
         Arg { reg, moved: false }
     }
+
+    pub(crate) fn moved(reg: R) -> Arg<R> {
+        Arg { reg, moved: true }
+    }
 }
 
 impl<R: Names> Part<R> for Arg<R> {
@@ -444,6 +448,39 @@ impl<const N: usize> Few<VReg, N> {
     }
 }
 
+/// Declares the field that names a list of registers with one role.
+macro_rules! lists {
+    ($($(#[$doc:meta])* $list:ident $role:expr;)*) => {$(
+        $(#[$doc])*
+        #[derive(Debug, Clone, Copy)]
+        pub(crate) struct $list(pub(crate) u32);
+
+        impl $list {
+            pub(crate) fn regs<R>(self, lists: &Lists<R>) -> &[R] {
+                lists.regs(self.0)
+            }
+        }
+
+        impl<R: Names> Part<R> for $list {
+            fn operands(self, lists: &Lists<R>, f: &mut impl FnMut(R, Role)) {
+                self.regs(lists).iter().for_each(|r| f(*r, $role));
+            }
+        }
+
+        impl Place for $list {
+            type Placed = $list;
+            fn place(self, at: &impl Places) -> Result<$list, Unplaced> {
+                at.reg_list(self.0).map($list)
+            }
+        }
+    )*};
+}
+
+lists! {
+    /// Registers given up ([`Ins::DropWide`]).
+    DeadList Role::Drop;
+}
+
 /// Declares the two fields that are several registers with one role: one that
 /// holds them, and one that names the list that does.
 macro_rules! several {
@@ -452,9 +489,10 @@ macro_rules! several {
         #[derive(Debug, Clone, Copy)]
         pub(crate) struct $few<R, const N: usize>(Few<R, N>);
 
-        /// The same, in a list of registers kept beside the code.
-        #[derive(Debug, Clone, Copy)]
-        pub(crate) struct $list(pub(crate) u32);
+        lists! {
+            /// The same, in a list of registers kept beside the code.
+            $list $role;
+        }
 
         impl<R: Names, const N: usize> $few<R, N> {
             pub(crate) fn new(of: &[R]) -> Option<Self> {
@@ -482,24 +520,6 @@ macro_rules! several {
             }
         }
 
-        impl $list {
-            pub(crate) fn regs<R>(self, lists: &Lists<R>) -> &[R] {
-                lists.regs(self.0)
-            }
-        }
-
-        impl<R: Names> Part<R> for $list {
-            fn operands(self, lists: &Lists<R>, f: &mut impl FnMut(R, Role)) {
-                self.regs(lists).iter().for_each(|r| f(*r, $role));
-            }
-        }
-
-        impl Place for $list {
-            type Placed = $list;
-            fn place(self, at: &impl Places) -> Result<$list, Unplaced> {
-                at.reg_list(self.0).map($list)
-            }
-        }
     )*};
 }
 

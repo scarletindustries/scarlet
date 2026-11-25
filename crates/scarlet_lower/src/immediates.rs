@@ -11,7 +11,8 @@
 //! It runs between `lower` and `perceus`, so Perceus never sees a Bool as a
 //! constructor.
 
-use super::{Atom, CoreBind, CoreExpr, CoreFn, CorePat, JoinId, LocalId, VariantRef};
+use super::spine::Frame;
+use super::{Atom, CoreExpr, CoreFn, CorePat, LocalId, VariantRef};
 use crate::typed_ir::RTy;
 
 /// The prelude's constructors that are immediates.
@@ -82,34 +83,6 @@ pub(crate) fn rewrite(f: CoreFn, im: &Immediates) -> CoreFn {
     CoreFn {
         body: im.expr(f.body),
         ..f
-    }
-}
-
-/// One node peeled off a spine, waiting for its rewritten body.
-enum Frame {
-    Let { bind: CoreBind, rhs: Atom },
-    Join { bind: CoreBind, join: CoreExpr },
-    Cont { id: JoinId, cont: CoreExpr },
-    Drop { local: LocalId },
-}
-
-impl Frame {
-    fn wrap(self, body: CoreExpr) -> CoreExpr {
-        let body = Box::new(body);
-        match self {
-            Frame::Let { bind, rhs } => CoreExpr::Let { bind, rhs, body },
-            Frame::Join { bind, join } => CoreExpr::LetJoin {
-                bind,
-                join: Box::new(join),
-                body,
-            },
-            Frame::Cont { id, cont } => CoreExpr::LetCont {
-                id,
-                cont: Box::new(cont),
-                body,
-            },
-            Frame::Drop { local } => CoreExpr::Drop { local, body },
-        }
     }
 }
 

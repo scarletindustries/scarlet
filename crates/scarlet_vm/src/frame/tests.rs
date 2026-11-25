@@ -202,6 +202,23 @@ fn a_frame_taken_over_holds_what_was_passed() {
     }
 }
 
+/// A parameter of a frame that is starting gets its argument, and nothing else
+/// changes.
+#[test]
+fn a_parameter_is_received_by_its_register() {
+    let mut stack = nil_stack(WINDOW);
+    let heap = &mut Heap::default();
+    let cells = filled(&mut stack, heap, 8);
+    let mut win = window(&mut stack, 0).expect("a window");
+    for n in [8u8, 254, 255] {
+        let v = Value::int(i64::from(n)).expect("small");
+        win.receive_one(Reg(n), v);
+        assert_eq!(win.get(Reg(n)).bits(), v.bits());
+    }
+    assert_eq!(heap.live(), cells.len());
+    assert_eq!(win.get(Reg(9)).bits(), Value::NIL.bits());
+}
+
 /// A register swapped gives what it held with its reference, and has the new
 /// value with its own.
 #[test]

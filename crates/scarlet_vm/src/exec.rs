@@ -17,18 +17,18 @@
 //! If a count is wrong all the same, the instruction that takes or gives up
 //! a reference to a cell already freed stops the run with `Broken::DeadCell`.
 
-use scarlet_ir::core_ir::GlobalSlot;
+use scarlet_ir::core_ir::{GlobalSlot, MAX_PARAMS};
 
 use crate::array::{self, End, Seq};
 use crate::bigint;
 use crate::code::{
-    Arg, Args, BitsOp, Code, Counted, Dead, Dst, Entry, Hands, Ins, MaybeDst, Op, Reg, Room,
-    Shared, Src, Taken,
+    Arg, BitsOp, Code, Counted, Dead, Dst, Entry, Hands, Ins, MaybeDst, Op, Reg, Room, Shared, Src,
+    Taken,
 };
 use crate::counts::Counts;
 use crate::eq;
 use crate::float;
-use crate::frame::{self, CLOSURE, Link, RESULT, WINDOW, Window, window};
+use crate::frame::{self, CLOSURE, FIRST, Link, RESULT, WINDOW, Window, window};
 use crate::heap::{Cell, Ctor, DeadCell, Heap, Opened, STRIDE, Shape};
 use crate::host::Host;
 use crate::int;
@@ -219,7 +219,6 @@ impl<'c, 'h> Machine<'c, 'h> {
                 globals: vec![Value::NIL; code.globals as usize],
                 env: None,
                 ran: Vec::new(),
-                passing: Vec::new(),
                 heap: Heap::new(code.ctors.clone()),
             },
         }
@@ -480,6 +479,8 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
                 }
                 win.put(&mut rest.heap, dst, v)?;
             }
+            Ins::Move2 { ref dsts, ref srcs } => move_all(win.lend(), rest, dsts, srcs)?,
+            Ins::Move3 { ref dsts, ref srcs } => move_all(win.lend(), rest, dsts, srcs)?,
             Ins::GetGlobal { dst, slot } => {
                 let v = global(slot)
                     .and_then(|i| rest.globals.get(i))
@@ -700,34 +701,48 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
                 ref dsts,
                 src,
                 ctor,
-            } => open_out(win.lend(), rest, dsts, src, ctor)?,
+            } => open(win.lend(), rest, dsts, src, ctor)?,
             Ins::Open7 {
                 ref dsts,
                 src,
                 ctor,
-            } => open_out(win.lend(), rest, dsts, src, ctor)?,
+            } => open(win.lend(), rest, dsts, src, ctor)?,
             Ins::Open8 {
                 ref dsts,
                 src,
                 ctor,
-            } => open_out(win.lend(), rest, dsts, src, ctor)?,
+            } => open(win.lend(), rest, dsts, src, ctor)?,
             Ins::OpenWide { dsts, src, ctor } => {
                 open_apart(win.lend(), rest, dsts.dsts(&code.lists), src, ctor)?;
             }
             Ins::Drop { reg } => win.drop(&mut rest.heap, reg)?,
-            Ins::Call0 { dst, own, to } => {
+            Ins::DropWide { regs } => {
+                win.drop_each(&mut rest.heap, regs.regs(&code.lists))?;
+            }
+            Ins::Call0 { dst, own, ref to } => {
                 let up = room!(own);
                 open!(up, own, dst);
                 pc = to.index();
             }
-            Ins::Call1 { dst, own, to, a } => {
+            Ins::Call1 {
+                dst,
+                own,
+                ref to,
+                a,
+            } => {
                 let up = room!(own);
                 let a = win.take(a);
                 open!(up, own, dst);
                 win.receive(&[a]);
                 pc = to.index();
             }
-            Ins::Call2 { dst, own, to, a, b } => {
+            Ins::Call2 {
+                dst,
+                own,
+                ref to,
+                a,
+                b,
+            } => {
                 let up = room!(own);
                 let a = win.take(a);
                 let b = win.take(b);
@@ -738,7 +753,7 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
             Ins::Call3 {
                 dst,
                 own,
-                to,
+                ref to,
                 a,
                 b,
                 c,
@@ -751,14 +766,25 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
                 win.receive(&[a, b, c]);
                 pc = to.index();
             }
-            Ins::Call1Share { dst, own, to, a } => {
+            Ins::Call1Share {
+                dst,
+                own,
+                ref to,
+                a,
+            } => {
                 let up = room!(own);
                 let a = win.pass(&mut rest.heap, a)?;
                 open!(up, own, dst);
                 win.receive(&[a]);
                 pc = to.index();
             }
-            Ins::Call2Share { dst, own, to, a, b } => {
+            Ins::Call2Share {
+                dst,
+                own,
+                ref to,
+                a,
+                b,
+            } => {
                 let up = room!(own);
                 let a = win.pass(&mut rest.heap, a)?;
                 let b = win.pass(&mut rest.heap, b)?;
@@ -769,7 +795,7 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
             Ins::Call3Share {
                 dst,
                 own,
-                to,
+                ref to,
                 a,
                 b,
                 c,
@@ -785,45 +811,53 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
             Ins::Call {
                 dst,
                 own,
-                to,
+                ref to,
                 ref args,
             } => {
                 let up = room!(own);
                 let mut values = UNSET;
-                let values = pass_few(win.lend(), rest, args, &mut values)?;
+                let values = pass_few(win.lend(), rest, args.iter(), &mut values)?;
                 open!(up, own, dst);
                 win.receive(values);
                 pc = to.index();
             }
-            Ins::CallWide { dst, own, to, args } => {
+            Ins::CallWide {
+                dst,
+                own,
+                ref to,
+                args,
+            } => {
                 let up = room!(own);
-                pass_all(win.lend(), rest, args.args(&code.lists))?;
+                pass_all(stack, rest, base, up, args.args(&code.lists))?;
                 open!(up, own, dst);
-                receive_all(win.lend(), rest);
                 pc = to.index();
             }
             Ins::CallSelf {
                 dst,
                 own,
-                to,
+                ref to,
                 ref args,
             } => {
                 let up = room!(own);
                 let closure = rest.share(win.closure())?;
                 let mut values = UNSET;
-                let values = pass_few(win.lend(), rest, args, &mut values)?;
+                let values = pass_few(win.lend(), rest, args.iter(), &mut values)?;
                 open!(up, own, dst);
                 win.run_as(closure);
                 win.receive(values);
                 pc = to.index();
             }
-            Ins::CallSelfWide { dst, own, to, args } => {
+            Ins::CallSelfWide {
+                dst,
+                own,
+                ref to,
+                args,
+            } => {
                 let up = room!(own);
                 let closure = rest.share(win.closure())?;
-                pass_all(win.lend(), rest, args.args(&code.lists))?;
+                pass_all(stack, rest, base, up, args.args(&code.lists))?;
                 open!(up, own, dst);
                 win.run_as(closure);
-                receive_all(win.lend(), rest);
                 pc = to.index();
             }
             Ins::CallValue {
@@ -835,7 +869,7 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
                 let up = room!(own);
                 let (entry, closure) = rest.callee(win.get(callee.0), args.len())?;
                 let mut values = UNSET;
-                let values = pass_few(win.lend(), rest, args, &mut values)?;
+                let values = pass_few(win.lend(), rest, args.iter(), &mut values)?;
                 open!(up, own, dst);
                 win.run_as(closure);
                 win.receive(values);
@@ -850,36 +884,16 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
                 let up = room!(own);
                 let args = args.args(&code.lists);
                 let (entry, closure) = rest.callee(win.get(callee.0), args.len())?;
-                pass_all(win.lend(), rest, args)?;
+                pass_all(stack, rest, base, up, args)?;
                 open!(up, own, dst);
                 win.run_as(closure);
-                receive_all(win.lend(), rest);
                 pc = entry.pc.index();
             }
-            // A tail call's callee takes over this frame, so a loop
-            // written as tail recursion runs in constant space.
-            Ins::TailCall { to, ref args, own } => {
-                let mut values = UNSET;
-                let values = pass_few(win.lend(), rest, args, &mut values)?;
-                win.rewrite(&mut rest.heap, own, values)?;
-                win.drop(&mut rest.heap, Dead(CLOSURE))?;
-                pc = to.index();
-            }
-            Ins::TailCallWide { to, args, own } => {
-                rewrite_wide(win.lend(), rest, own, args.args(&code.lists))?;
-                win.drop(&mut rest.heap, Dead(CLOSURE))?;
-                pc = to.index();
-            }
-            Ins::TailCallSelf { to, ref args, own } => {
-                let mut values = UNSET;
-                let values = pass_few(win.lend(), rest, args, &mut values)?;
-                win.rewrite(&mut rest.heap, own, values)?;
-                pc = to.index();
-            }
-            Ins::TailCallSelfWide { to, args, own } => {
-                rewrite_wide(win.lend(), rest, own, args.args(&code.lists))?;
-                pc = to.index();
-            }
+            // A tail call's callee takes over this frame, so a loop written as
+            // tail recursion runs in constant space. A function known when the
+            // program loaded is entered by a jump, once its arguments are in
+            // its parameters.
+            Ins::Enter { to } => pc = to.index(),
             // The callee's closure gets its own reference before this
             // frame's registers are released, one of which may be the
             // only other holder.
@@ -890,7 +904,7 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
             } => {
                 let (entry, closure) = rest.callee(win.get(callee.0), args.len())?;
                 let mut values = UNSET;
-                let values = pass_few(win.lend(), rest, args, &mut values)?;
+                let values = pass_few(win.lend(), rest, args.iter(), &mut values)?;
                 win.rewrite(&mut rest.heap, own, values)?;
                 win.set(&mut rest.heap, CLOSURE, closure)?;
                 pc = entry.pc.index();
@@ -1239,53 +1253,85 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
     }
 }
 
+/// Give each of `dsts` what its one of `srcs` held.
+#[inline(always)]
+fn move_all<const N: usize>(
+    mut win: Window<'_>,
+    rest: &mut Rest<'_, '_>,
+    dsts: &[Dst<Reg>; N],
+    srcs: &[Taken<Reg>; N],
+) -> Result<(), DeadCell> {
+    let values = srcs.map(|src| win.take(src));
+    for (dst, v) in dsts.iter().zip(values) {
+        win.put(&mut rest.heap, *dst, v)?;
+    }
+    Ok(())
+}
+
 /// Put what `args` pass at the start of `values`, and give that much of it.
 #[inline(always)]
 fn pass_few<'v, const N: usize>(
     mut win: Window<'_>,
     rest: &mut Rest<'_, '_>,
-    args: &Args<Reg, N>,
+    args: impl ExactSizeIterator<Item = Arg<Reg>>,
     values: &'v mut [Value; N],
 ) -> Result<&'v [Value], DeadCell> {
-    for (slot, a) in values.iter_mut().zip(args.iter()) {
+    let len = args.len();
+    for (slot, a) in values.iter_mut().zip(args) {
         *slot = win.pass(&mut rest.heap, a)?;
     }
-    Ok(values.get(..args.len()).unwrap_or_default())
+    Ok(values.get(..len).unwrap_or_default())
 }
 
-/// Put what `args` pass in `passing`.
+/// Put what `args` pass from the frame at `base` in the parameters of the one
+/// at `up`, which is starting and is above it.
+#[inline(never)]
 fn pass_all(
-    mut win: Window<'_>,
+    stack: &mut [Value],
     rest: &mut Rest<'_, '_>,
+    base: u32,
+    up: u32,
     args: &[Arg<Reg>],
-) -> Result<(), DeadCell> {
-    rest.passing.clear();
-    for a in args {
-        let v = win.pass(&mut rest.heap, *a)?;
-        rest.passing.push(v);
+) -> Result<(), Stop> {
+    for (a, param) in args.iter().zip(FIRST.0..) {
+        let mut from = window(stack, base).ok_or_else(lost_window)?;
+        let v = from.pass(&mut rest.heap, *a)?;
+        let mut to = window(stack, up).ok_or_else(lost_window)?;
+        to.receive_one(Reg(param), v);
     }
     Ok(())
 }
 
-/// Hand what [`pass_all`] gathered to the frame that is starting.
-fn receive_all(mut win: Window<'_>, rest: &mut Rest<'_, '_>) {
-    win.receive(&rest.passing);
-    rest.passing.clear();
-}
-
 /// [`Window::rewrite`], with what `args` pass.
-#[cold]
 #[inline(never)]
 fn rewrite_wide(
+    win: Window<'_>,
+    rest: &mut Rest<'_, '_>,
+    own: Room,
+    args: &[Arg<Reg>],
+) -> Result<(), Stop> {
+    // Room that is not used costs a store for each value all the same.
+    if args.len() <= 12 {
+        rewrite_up_to::<12>(win, rest, own, args)
+    } else {
+        rewrite_up_to::<MAX_PARAMS>(win, rest, own, args)
+    }
+}
+
+/// [`rewrite_wide`], of `N` arguments at most. No call has more than
+/// [`MAX_PARAMS`].
+fn rewrite_up_to<const N: usize>(
     mut win: Window<'_>,
     rest: &mut Rest<'_, '_>,
     own: Room,
     args: &[Arg<Reg>],
-) -> Result<(), DeadCell> {
-    pass_all(win.lend(), rest, args)?;
-    win.rewrite(&mut rest.heap, own, &rest.passing)?;
-    rest.passing.clear();
-    Ok(())
+) -> Result<(), Stop> {
+    if args.len() > N {
+        return Err(Stop::broken(Broken::NoPlace));
+    }
+    let mut values = [Value::UNSET; N];
+    let values = pass_few(win.lend(), rest, args.iter().copied(), &mut values)?;
+    Ok(win.rewrite(&mut rest.heap, own, values)?)
 }
 
 /// How many frames there are, the one at `base` the last. Only a built-in for
@@ -1418,18 +1464,6 @@ fn open<const N: usize>(
         Some(Opened::Held(cell, fields)) => open_held_apart(win, rest, dsts, src, cell, fields),
         None => open_apart(win, rest, dsts, src, ctor),
     }
-}
-
-/// [`open`], out of the loop.
-#[inline(never)]
-fn open_out<const N: usize>(
-    win: Window<'_>,
-    rest: &mut Rest<'_, '_>,
-    dsts: &[MaybeDst<Reg>; N],
-    src: Taken<Reg>,
-    ctor: Ctor,
-) -> Result<(), Stop> {
-    open(win, rest, dsts, src, ctor)
 }
 
 /// The rest of [`open`] for `cell`, which something else holds and which has
@@ -1638,7 +1672,12 @@ fn array_drop(
             let n = (n as u64).min(array::range_len(start, end));
             // `n` is at most `end - start`, so `start + n` is
             // within `start..=end` and the add is exact.
-            array::range(&mut rest.heap, start.wrapping_add_unsigned(n), end)
+            let left = array::range(&mut rest.heap, start.wrapping_add_unsigned(n), end);
+            if src.moved && left.is_ok() {
+                let range = win.empty(src.reg);
+                rest.release(range)?;
+            }
+            left
         }
     };
     Ok(win.put(&mut rest.heap, dst, Value::cell(cell.map_err(fault)?))?)
@@ -1854,8 +1893,8 @@ fn name_before(code: &Code, pc: usize) -> String {
 #[cold]
 #[inline(never)]
 fn check(stack: &[Value], rest: &Rest<'_, '_>, last: Value) -> Result<(), Stop> {
-    let held = stack.iter().chain(&rest.passing);
-    let roots = held
+    let roots = stack
+        .iter()
         .chain(&rest.globals)
         .copied()
         .chain(std::iter::once(last))

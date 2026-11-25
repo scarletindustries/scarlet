@@ -9,8 +9,8 @@
 use scarlet_ir::core_ir::FuncIdx;
 use scarlet_ir::tivec::TiVec;
 
-use super::alloc::{Body, Fitted};
 use super::ins::{Ins, Label, Lists, Places, Taken, Unplaced, VReg};
+use super::moves::{Body, Fitted};
 use super::{BlockId, Entry, EntryPc, Op, Pc, Reg, Room};
 use crate::Audit;
 use crate::frame::RESULT;

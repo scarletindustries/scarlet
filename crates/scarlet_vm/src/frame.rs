@@ -201,6 +201,17 @@ impl Window<'_> {
         self.set(heap, r.0, Value::NIL)
     }
 
+    /// Give up what each of `regs` holds, in order.
+    #[inline(always)]
+    pub(crate) fn drop_each(&mut self, heap: &mut Heap, regs: &[Reg]) -> Result<(), DeadCell> {
+        for r in regs {
+            if let Some(slot) = self.0.get_mut(usize::from(r.0)) {
+                empty(heap, slot)?;
+            }
+        }
+        Ok(())
+    }
+
     // A register's number is less than the window's length, so none of these
     // ever finds its register missing, and the compiler leaves the test out.
 
@@ -259,6 +270,13 @@ impl Window<'_> {
             for (slot, arg) in params.iter_mut().zip(args) {
                 *slot = *arg;
             }
+        }
+    }
+
+    /// Put `v` in `param`, a parameter of a frame that is starting.
+    pub(crate) fn receive_one(&mut self, param: Reg, v: Value) {
+        if let Some(slot) = self.0.get_mut(usize::from(param.0)) {
+            *slot = v;
         }
     }
 

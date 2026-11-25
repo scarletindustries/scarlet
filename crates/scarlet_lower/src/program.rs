@@ -20,9 +20,9 @@ use scarlet_check::CleanModule;
 use scarlet_check::typed::{BinderId, Expr, FnBody, Function, TypedModule};
 use scarlet_ir::TypeId;
 use scarlet_ir::core_ir::{
-    Abi, AddressTypes, Const, ConstId, CoreFn, FuncIdx, GlobalSlot, HttpTypes, IoErrors, JoinId,
-    JsonTypes, LocalId, LoweredFn, NetTypes, ParseReasons, Program, Radix, TlsTypes, TypeNames,
-    VariantNames, VariantRef,
+    Abi, AddressTypes, Const, ConstId, FuncIdx, GlobalSlot, HttpTypes, IoErrors, JoinId, JsonTypes,
+    LocalId, LoweredFn, NetTypes, ParseReasons, Program, Radix, TlsTypes, TypeNames, VariantNames,
+    VariantRef,
 };
 use scarlet_ir::rty::{ForeignRTy, PrimIds, RTy, ResolvedPool};
 use scarlet_ir::tivec::TiVec;
@@ -33,8 +33,9 @@ use scarlet_types::name::{CtorName, ModuleKey, Name, TypeName, ValueName};
 use scarlet_types::ty::Type;
 
 use crate::immediates::Immediates;
+use crate::perceus::Dropped;
 use crate::typed_ir::{BindingId, TempTys, TypedFn};
-use crate::{immediates, lower, perceus};
+use crate::{immediates, lower, perceus, tail_args};
 
 /// Where lowering reads a type's definition.
 pub trait TypeDefs {
@@ -635,14 +636,14 @@ pub fn build_program(
         false_: prelude.ctors.false_,
         nil: prelude.ctors.nil,
     };
-    let finish = |f: &TypedFn| core_fn(prelude.temps, &im, &frozen.pool, f);
+    let finish = |f: &TypedFn, module: String, name: String| {
+        let Dropped { core, undropped } = core_fn(prelude.temps, &im, &frozen.pool, f)?;
+        Ok(LoweredFn::new(module, name, core, undropped))
+    };
     let fns: TiVec<FuncIdx, LoweredFn> = declared
         .iter()
         .chain(&minted.fns)
-        .map(|n| {
-            let core = finish(&n.body)?;
-            Ok(LoweredFn::new(n.module.clone(), n.name.clone(), core))
-        })
+        .map(|n| finish(&n.body, n.module.clone(), n.name.clone()))
         .collect::<Result<_, LinkError>>()?;
     // The entry's top level is named for what it is; each import's, for its
     // module.
@@ -651,7 +652,7 @@ pub fn build_program(
         .zip(&tops)
         .map(|(m, f)| {
             let key = m.key.as_str();
-            Ok(LoweredFn::new(key.to_string(), key.to_string(), finish(f)?))
+            finish(f, key.to_string(), key.to_string())
         })
         .collect::<Result<_, LinkError>>()?;
     let mut toplevel = inits.pop().ok_or(InternalLinkError::NoEntryModule)?;
@@ -682,16 +683,25 @@ pub fn build_program(
 }
 
 /// Typed IR to the Core IR a backend runs: `lower`, then `immediates`, then
-/// `perceus`. This is the only place they run, so they can't run out of order.
+/// `perceus`, then `tail_args`. This is the only place they run, so they can't
+/// run out of order. It comes with whether `perceus` left something undropped.
+/// The order of a function's `Let`s then says when that is given up, so
+/// `tail_args` leaves it as it is.
 fn core_fn(
     temps: TempTys,
     im: &Immediates,
     pool: &ResolvedPool,
     f: &TypedFn,
-) -> Result<CoreFn, LinkError> {
+) -> Result<Dropped, LinkError> {
     let lower::Lowered { core, locals } = lower::lower_fn(temps, f)?;
     let core = immediates::rewrite(core, im);
-    Ok(perceus::perceus(pool, &locals, core)?)
+    let Dropped { core, undropped } = perceus::perceus(pool, &locals, core)?;
+    let core = if undropped {
+        core
+    } else {
+        tail_args::schedule(pool, core)?
+    };
+    Ok(Dropped { core, undropped })
 }
 
 /// Why a stdlib type's constructors can't be listed.

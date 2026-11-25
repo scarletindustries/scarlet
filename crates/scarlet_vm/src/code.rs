@@ -6,7 +6,7 @@
 //! something about an operand it picks an instruction for that: one that
 //! holds a constant, or one that compares and jumps.
 //!
-//! A function goes through four passes, and each hands the next a value:
+//! A function goes through five passes, and each hands the next a value:
 //!
 //! 1. [`translate`] makes its instructions, over values that have no register
 //!    yet ([`Draft`]).
@@ -14,8 +14,10 @@
 //!    instruction may take from its register, and which values are ever held
 //!    at once.
 //! 3. [`alloc`] gives each value a register, and leaves out what that has made
-//!    do nothing ([`Fitted`]).
-//! 4. [`emit`] puts every function's instructions in one array, where a jump
+//!    do nothing ([`alloc::Assigned`]).
+//! 4. [`moves`] makes each tail call to a function it knows moves and a jump
+//!    ([`Fitted`]).
+//! 5. [`emit`] puts every function's instructions in one array, where a jump
 //!    and a call name a place in it.
 //!
 //! Before that, every constructor the program names is given what it is to the
@@ -46,17 +48,18 @@ mod forms;
 mod ins;
 mod literals;
 mod live;
+mod moves;
 mod translate;
 
 pub(crate) use forms::{Built, CtorOf};
 pub(crate) use ins::{
-    Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, Dst, DstList, EntryPc, Hands, Hit, Ins,
-    Last, Lists, LookList, Looks, MaybeDst, Newline, Op, Pc, Reg, Room, ShareList, Shared, Shares,
-    Src, Taken, TextId, WhyId,
+    Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, DeadList, Dst, DstList, EntryPc, Hands,
+    Hit, Ins, Last, Lists, LookList, Looks, MaybeDst, Newline, Op, Pc, Reg, Room, ShareList,
+    Shared, Shares, Src, Taken, TextId, WhyId,
 };
 
-use alloc::Fitted;
 use forms::Forms;
+use moves::{Body, Fitted};
 
 /// A whole loaded program.
 pub(crate) struct Code {
@@ -346,7 +349,7 @@ fn fit(
 ) -> Result<Fitted, Stop> {
     let name = format!("{}.{}", f.module, f.name);
     let before = tables.lens();
-    let mut fitted = fit_core(source, &f.core, this, tables);
+    let mut fitted = fit_core(source, &f.core, f.undropped, this, tables);
     // A long literal is built a piece at a time only here, so that a function
     // with room for its literals makes the cells it always did.
     if fitted.as_ref().err() == Some(&Unfit::TooMany(Limit::Values))
@@ -354,7 +357,7 @@ fn fit(
     {
         // Nothing names what the first try put in the tables.
         tables.cut(before);
-        fitted = fit_core(source, &core, this, tables);
+        fitted = fit_core(source, &core, f.undropped, this, tables);
     }
     let why = match fitted {
         Ok(body) => return Ok(Fitted::new(name, f.core.params.len(), body)),
@@ -373,15 +376,16 @@ fn fit(
 fn fit_core(
     source: &Source<'_>,
     core: &CoreFn,
+    undropped: bool,
     this: Option<FuncIdx>,
     tables: &mut Tables,
-) -> Result<alloc::Body, Unfit> {
+) -> Result<Body, Unfit> {
     if core.params.len() > MAX_PARAMS {
         return Err(Unfit::TooMany(Limit::Parameters));
     }
-    let mut draft = translate::translate(source, core, this, tables)?;
+    let mut draft = translate::translate(source, core, undropped, this, tables)?;
     let held = live::settle(&mut draft)?;
-    alloc::allocate(draft, &held)
+    moves::expand(alloc::allocate(draft, &held)?)
 }
 
 /// Whether the VM runs built-in `i` when called with `argc` arguments. A

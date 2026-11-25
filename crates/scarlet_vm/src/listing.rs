@@ -19,9 +19,9 @@ use scarlet_ir::intrinsic::Intrinsic;
 
 use crate::code::{self, Code, Entry, Ins, Reg};
 use crate::code::{
-    Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, Dst, DstList, EntryPc, Hit, Last,
-    LookList, Looks, MaybeDst, Newline, Pc, Room, ShareList, Shared, Shares, Src, Taken, TextId,
-    Why, WhyId,
+    Arg, ArgList, Args, BinaryId, BitsOp, BlockId, Dead, DeadList, Dst, DstList, EntryPc, Hit,
+    Last, LookList, Looks, MaybeDst, Newline, Pc, Room, ShareList, Shared, Shares, Src, Taken,
+    TextId, Why, WhyId,
 };
 use crate::frame::FIRST;
 use crate::heap::Ctor;
@@ -242,6 +242,12 @@ impl<const N: usize> Show for Args<Reg, N> {
     }
 }
 
+impl<const N: usize> Show for [Dst<Reg>; N] {
+    fn show(self, line: &mut Line<'_>) {
+        self.into_iter().for_each(|dst| dst.show(line));
+    }
+}
+
 impl<const N: usize> Show for [Taken<Reg>; N] {
     fn show(self, line: &mut Line<'_>) {
         self.into_iter().for_each(|r| r.show(line));
@@ -270,6 +276,13 @@ impl<const N: usize> Show for Looks<Reg, N> {
 impl<const N: usize> Show for Shares<Reg, N> {
     fn show(self, line: &mut Line<'_>) {
         self.regs().iter().for_each(|r| line.part(r));
+    }
+}
+
+impl Show for DeadList {
+    fn show(self, line: &mut Line<'_>) {
+        let code = line.code;
+        self.regs(&code.lists).iter().for_each(|r| line.part(r));
     }
 }
 

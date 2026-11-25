@@ -9,10 +9,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{Atom, CoreBind, CoreExpr, CoreFn, CorePat, JoinId, LocalId};
+use super::{Atom, CoreBind, CoreExpr, CoreFn, CorePat, JoinId, LocalId, PrimOp};
 use crate::program::InternalLinkError;
 use crate::typed_ir::{RTy, ResolvedPool};
 use scarlet_ir::tivec::TiVec;
+
+/// A function with its drops.
+pub(crate) struct Dropped {
+    pub(crate) core: CoreFn,
+    /// [`LoweredFn::undropped`](super::LoweredFn::undropped).
+    pub(crate) undropped: bool,
+}
 
 /// Run Perceus on one lowered function. `locals` is the type of every local
 /// `lower` made for it, and `pool` says which of those types live on the heap.
@@ -26,7 +33,7 @@ pub(crate) fn perceus(
     pool: &ResolvedPool,
     locals: &TiVec<LocalId, RTy>,
     f: CoreFn,
-) -> Result<CoreFn, InternalLinkError> {
+) -> Result<Dropped, InternalLinkError> {
     let CoreFn {
         params,
         body,
@@ -45,11 +52,46 @@ pub(crate) fn perceus(
         .filter(|id| !live.contains(id))
         .collect();
     let body = cx.wrap_drops(&dead_params, body)?;
-    Ok(CoreFn {
-        params,
-        body,
-        ret_ty,
+    Ok(Dropped {
+        core: CoreFn {
+            params,
+            body,
+            ret_ty,
+        },
+        undropped: cx.undropped,
     })
+}
+
+/// Whether what `atom` gives holds nothing, as a constant and a Bool do not, or
+/// only what something else goes on holding: a global, or the closure that the
+/// frame runs as.
+fn holds_nothing(atom: &Atom) -> bool {
+    match atom {
+        Atom::Const(_) | Atom::Nil | Atom::Bool(_) | Atom::Load(_) => true,
+        Atom::Ctor { fields, .. } => fields.is_empty(),
+        Atom::Closure { captures, .. } => captures.is_empty(),
+        Atom::PrimOp { op, .. } => matches!(
+            op,
+            PrimOp::IntEq
+                | PrimOp::IntNe
+                | PrimOp::IntLt
+                | PrimOp::IntLe
+                | PrimOp::IntGt
+                | PrimOp::IntGe
+                | PrimOp::FloatLt
+                | PrimOp::FloatLe
+                | PrimOp::FloatGt
+                | PrimOp::FloatGe
+                | PrimOp::Lt
+                | PrimOp::Le
+                | PrimOp::Gt
+                | PrimOp::Ge
+                | PrimOp::Eq
+                | PrimOp::Ne
+                | PrimOp::Not
+        ),
+        Atom::Local(_) | Atom::Call { .. } | Atom::Intrinsic { .. } => false,
+    }
 }
 
 /// The locals live at a program point. It's a `BTreeSet` so the order drops
@@ -65,6 +107,20 @@ struct Perceus<'p> {
     /// recorded when the `LetCont` is peeled, which is before its body, where
     /// every `Goto` to it is. So a `Goto` can always look its target up here.
     cont_live: BTreeMap<JoinId, Live>,
+    /// The locals whose type is a variable and whose value holds nothing.
+    nothing: BTreeSet<LocalId>,
+    /// Whether a value that may be a handle, or hold one, got no drop so far.
+    undropped: bool,
+}
+
+/// What becomes of a local's value where nothing reads it any more.
+enum Dead {
+    /// It gets a drop.
+    Drops,
+    /// It needs none: it holds nothing, or something else goes on holding it.
+    Nothing,
+    /// It needs one and gets none, because its type does not say what it is.
+    Left,
 }
 
 /// One `Let` or `LetJoin` peeled off the spine. It waits for its body's live
@@ -106,6 +162,8 @@ impl<'p> Perceus<'p> {
             locals,
             pinned: BTreeSet::new(),
             cont_live: BTreeMap::new(),
+            nothing: BTreeSet::new(),
+            undropped: false,
         }
     }
 
@@ -115,14 +173,76 @@ impl<'p> Perceus<'p> {
         }
     }
 
-    /// Whether this function owns a heap cell through the local, so must
-    /// release it. A pinned global is owned by the program instead.
-    fn owns_cell(&self, id: LocalId) -> Result<bool, InternalLinkError> {
-        let ty = self
+    /// What becomes of the local's value where it dies. A pinned global is owned
+    /// by the program, so this function never releases it.
+    fn dead(&self, id: LocalId) -> Result<Dead, InternalLinkError> {
+        let ty = *self
             .locals
             .get(id)
             .ok_or(InternalLinkError::UntypedLocal(id))?;
-        Ok(self.pool.is_heap(*ty)? && !self.pinned.contains(&id))
+        Ok(if self.pinned.contains(&id) {
+            Dead::Nothing
+        } else if self.pool.is_heap(ty)? {
+            Dead::Drops
+        } else if self.pool.prim_of(ty)?.is_some() || self.nothing.contains(&id) {
+            Dead::Nothing
+        } else {
+            Dead::Left
+        })
+    }
+
+    /// Note the bind of a peeled `Let`.
+    fn record_let(&mut self, b: &CoreBind, rhs: &Atom) -> Result<(), InternalLinkError> {
+        self.record_bind(b);
+        if holds_nothing(rhs) && !self.pool.is_heap(b.ty)? && self.pool.prim_of(b.ty)?.is_none() {
+            self.nothing.insert(b.id);
+        }
+        Ok(())
+    }
+
+    /// Note that nothing bound inside `join` gets a drop there.
+    fn leave_inside(&mut self, join: &CoreExpr) -> Result<(), InternalLinkError> {
+        let mut stack = vec![join];
+        while let Some(e) = stack.pop()
+            && !self.undropped
+        {
+            match e {
+                CoreExpr::Let { bind, rhs, body } => {
+                    self.undropped |= !holds_nothing(rhs) && self.may_hold(bind)?;
+                    stack.push(body);
+                }
+                CoreExpr::LetJoin { bind, join, body } => {
+                    self.undropped |= self.may_hold(bind)?;
+                    stack.push(join);
+                    stack.push(body);
+                }
+                CoreExpr::LetCont { cont, body, .. } => {
+                    stack.push(cont);
+                    stack.push(body);
+                }
+                CoreExpr::Drop { body, .. } => stack.push(body),
+                CoreExpr::Match { arms, .. } => {
+                    for (pat, arm) in arms {
+                        for b in pat.binds() {
+                            self.undropped |= self.may_hold(b)?;
+                        }
+                        stack.push(arm);
+                    }
+                }
+                CoreExpr::If { then, els, .. } => {
+                    stack.push(then);
+                    stack.push(els);
+                }
+                CoreExpr::Tail(_) | CoreExpr::Goto(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether a value of `b`'s type may be a handle or hold one. A number and a
+    /// string hold nothing.
+    fn may_hold(&self, b: &CoreBind) -> Result<bool, InternalLinkError> {
+        Ok(self.pool.prim_of(b.ty)?.is_none())
     }
 
     /// Transform `e` and return `(e', live)`, where `live` is the locals from
@@ -136,7 +256,7 @@ impl<'p> Perceus<'p> {
             match e {
                 CoreExpr::Let { bind, rhs, body } => {
                     let rhs_live = atom_live(&rhs);
-                    self.record_bind(&bind);
+                    self.record_let(&bind, &rhs)?;
                     spine.push(SpineFrame::Let(SpineLet {
                         bind,
                         rhs_live,
@@ -147,6 +267,7 @@ impl<'p> Perceus<'p> {
                 CoreExpr::LetJoin { bind, join, body } => {
                     let rhs_live = join_live(&join);
                     self.record_bind(&bind);
+                    self.leave_inside(&join)?;
                     spine.push(SpineFrame::Let(SpineLet {
                         bind,
                         rhs_live,
@@ -312,23 +433,25 @@ impl<'p> Perceus<'p> {
         Ok((CoreExpr::Match { scrut, arms, ty }, live))
     }
 
-    /// Put `Drop{x}` in front of `body` for each `x` in `dead` that owns a
-    /// cell, going in reverse so the printed order matches `dead`. Locals that
-    /// aren't on the heap are skipped, because dropping an unboxed primitive
-    /// does nothing but still costs an instruction.
+    /// Put `Drop{x}` in front of `body` for each `x` in `dead` that gets one,
+    /// going in reverse so the printed order matches `dead`. A number gets none,
+    /// because dropping one does nothing but still costs an instruction.
     fn wrap_drops(
-        &self,
+        &mut self,
         dead: &[LocalId],
         mut body: CoreExpr,
     ) -> Result<CoreExpr, InternalLinkError> {
         for &x in dead.iter().rev() {
-            if !self.owns_cell(x)? {
-                continue;
+            match self.dead(x)? {
+                Dead::Drops => {
+                    body = CoreExpr::Drop {
+                        local: x,
+                        body: Box::new(body),
+                    };
+                }
+                Dead::Nothing => {}
+                Dead::Left => self.undropped = true,
             }
-            body = CoreExpr::Drop {
-                local: x,
-                body: Box::new(body),
-            };
         }
         Ok(body)
     }
@@ -348,7 +471,7 @@ fn atom_live(a: &Atom) -> Live {
 /// The free locals of a `LetJoin`'s right-hand side, so `drop_pass` can treat
 /// the join as a black box for liveness. Drops go around a join, never inside
 /// it.
-fn join_live(e: &CoreExpr) -> Live {
+pub(crate) fn join_live(e: &CoreExpr) -> Live {
     /// The spine is walked in a loop, so recursion only goes as deep as the
     /// branches nest, never as long as the spine. Ids bound on this spine
     /// collect in `scope` and are removed before returning, so a sibling
