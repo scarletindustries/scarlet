@@ -118,10 +118,10 @@ Lowering runs once per program, over every clean module in dependency order. It 
 - turns each function, lambda and constructor or builtin used as a value into a `TypedFn` of typed IR
 - runs arguments into `let`s in the order they were written, when that isn't their parameters' order
 - reads a field each variant holds in its own place with a `match`
-- turns an `or` into its two-arm `match`, and a record-update spread into field reads, made as soon as the base has run so the base can be given up before the fields written after it are computed. A base with nothing to run (a name, or a field or tuple element read off one) counts as written first
+- turns an `or` into its two-arm `match`, and a record-update spread into an `Update` where `update.rs` says its base may be held until the new fields are computed, and into field reads elsewhere, made as soon as the base has run so the base can be given up before the fields written after it are computed. A base with nothing to run (a name, or a field or tuple element read off one) counts as written first
 - makes the module's top level: its consts, then its statements
 
-Then every `TypedFn` goes through `lower`, `immediates`, `perceus` and `tail_args`, and the `Program` is assembled: `types`, `inits`, `main`, and the `Abi`, found by `TypeName` in the stdlib's interfaces. The checks on `main` (it must be `pub` and take no parameters) happen in the driver, on the entry, for every caller.
+Then every `TypedFn` goes through `lower`, `immediates`, `perceus` and `tail_args`, each once, and the `Program` is assembled: `types`, `inits`, `main`, and the `Abi`, found by `TypeName` in the stdlib's interfaces. The checks on `main` (it must be `pub` and take no parameters) happen in the driver, on the entry, for every caller.
 
 ### The prelude
 

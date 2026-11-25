@@ -26,13 +26,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use scarlet_ir::rty::{Prim, ResolvedPool};
 
-use super::perceus::join_live;
-use super::spine::Frame;
-use super::{Atom, Callee, CoreBind, CoreExpr, CoreFn, LocalId, PrimOp};
+use super::spine::{Frame, peel};
+use super::{Atom, Callee, CoreBind, CoreExpr, CoreFn, JoinId, LocalId, PrimOp};
 use crate::program::InternalLinkError;
 
 /// Put the arguments of each of `f`'s tail calls in order.
-pub(crate) fn schedule(pool: &ResolvedPool, mut f: CoreFn) -> Result<CoreFn, InternalLinkError> {
+/// `reached` says which joins are [always reached](CoreExpr::always_reached).
+pub(crate) fn schedule(
+    pool: &ResolvedPool,
+    reached: &BTreeSet<JoinId>,
+    mut f: CoreFn,
+) -> Result<CoreFn, InternalLinkError> {
     let params: Vec<LocalId> = f.params.iter().map(|p| p.id).collect();
     if params.is_empty() {
         return Ok(f);
@@ -42,6 +46,7 @@ pub(crate) fn schedule(pool: &ResolvedPool, mut f: CoreFn) -> Result<CoreFn, Int
         pool,
         params,
         places,
+        reached,
     };
     scheduler.expr(&mut f.body)?;
     Ok(f)
@@ -52,27 +57,31 @@ struct Scheduler<'p> {
     params: Vec<LocalId>,
     /// Which parameter each local is, of those that are one.
     places: BTreeMap<LocalId, usize>,
+    /// The joins that every way through their body comes to.
+    reached: &'p BTreeSet<JoinId>,
 }
 
-/// One node of a spine that runs straight to its end.
+/// One node of a spine that always goes on.
 #[derive(Clone, Copy)]
 enum Line<'e> {
     Let {
         bind: &'e CoreBind,
         rhs: &'e Atom,
     },
+    /// A join that every way through its body comes to.
     Join {
-        bind: &'e CoreBind,
-        join: &'e CoreExpr,
+        params: &'e [CoreBind],
+        body: &'e CoreExpr,
     },
     Drop,
 }
 
 impl<'e> Line<'e> {
-    fn makes(self) -> Option<&'e CoreBind> {
+    fn makes(self) -> &'e [CoreBind] {
         match self {
-            Line::Let { bind, .. } | Line::Join { bind, .. } => Some(bind),
-            Line::Drop => None,
+            Line::Let { bind, .. } => std::slice::from_ref(bind),
+            Line::Join { params, .. } => params,
+            Line::Drop => &[],
         }
     }
 
@@ -81,58 +90,119 @@ impl<'e> Line<'e> {
     fn for_each_read(self, f: impl FnMut(LocalId)) {
         match self {
             Line::Let { rhs, .. } => rhs.for_each_operand(f),
-            Line::Join { join, .. } => join_live(join).into_iter().for_each(f),
+            Line::Join { body, .. } => reads(body).into_iter().for_each(f),
             Line::Drop => {}
         }
     }
 }
 
-/// The node `e` is and what comes after it, when it is one of those.
-fn line(e: &CoreExpr) -> Option<(Line<'_>, &CoreExpr)> {
-    match e {
-        CoreExpr::Let { bind, rhs, body } => Some((Line::Let { bind, rhs }, body)),
-        CoreExpr::LetJoin { bind, join, body } => Some((Line::Join { bind, join }, body)),
-        CoreExpr::Drop { body, .. } => Some((Line::Drop, body)),
-        CoreExpr::LetCont { .. }
-        | CoreExpr::Match { .. }
-        | CoreExpr::If { .. }
-        | CoreExpr::Tail(_)
-        | CoreExpr::Goto(_) => None,
+/// What `e` reads of the locals bound outside it.
+fn reads(e: &CoreExpr) -> BTreeSet<LocalId> {
+    let (mut read, mut bound) = (BTreeSet::new(), BTreeSet::new());
+    let mut work = vec![e];
+    while let Some(e) = work.pop() {
+        match e {
+            CoreExpr::Let { bind, rhs, body } => {
+                bound.insert(bind.id);
+                rhs.for_each_operand(|l| {
+                    read.insert(l);
+                });
+                work.push(body);
+            }
+            CoreExpr::SetGlobal { value, body, .. } => {
+                read.insert(*value);
+                work.push(body);
+            }
+            CoreExpr::Join {
+                params, cont, body, ..
+            } => {
+                bound.extend(params.iter().map(|p| p.id));
+                work.push(cont);
+                work.push(body);
+            }
+            CoreExpr::Drop { body, .. } => work.push(body),
+            CoreExpr::Match { scrut, arms } => {
+                read.insert(*scrut);
+                for (pat, arm) in arms {
+                    bound.extend(pat.binds().map(|b| b.id));
+                    work.push(arm);
+                }
+            }
+            CoreExpr::If { cond, then, els } => {
+                read.insert(*cond);
+                work.push(then);
+                work.push(els);
+            }
+            CoreExpr::Ret(value) => {
+                read.insert(*value);
+            }
+            CoreExpr::TailCall { callee, args } => {
+                read.extend(callee.local());
+                read.extend(args);
+            }
+            CoreExpr::Jump { args, .. } => read.extend(args),
+        }
     }
+    // Each local is bound in one place.
+    read.retain(|l| !bound.contains(l));
+    read
 }
 
-/// What comes after the first `n` lines of `e`.
+/// What comes after the first `n` nodes of the spine `e`.
 fn after(mut e: &mut CoreExpr, n: usize) -> &mut CoreExpr {
     for _ in 0..n {
         e = match e {
             CoreExpr::Let { body, .. }
-            | CoreExpr::LetJoin { body, .. }
+            | CoreExpr::SetGlobal { body, .. }
+            | CoreExpr::Join { cont: body, .. }
             | CoreExpr::Drop { body, .. } => body,
-            CoreExpr::LetCont { .. }
-            | CoreExpr::Match { .. }
+            CoreExpr::Match { .. }
             | CoreExpr::If { .. }
-            | CoreExpr::Tail(_)
-            | CoreExpr::Goto(_) => e,
+            | CoreExpr::Ret(_)
+            | CoreExpr::TailCall { .. }
+            | CoreExpr::Jump { .. } => e,
         };
     }
     e
 }
 
 impl Scheduler<'_> {
+    /// The node `e` is and what comes after it, when it is a line.
+    fn line<'e>(&self, e: &'e CoreExpr) -> Option<(Line<'e>, &'e CoreExpr)> {
+        match e {
+            CoreExpr::Let { bind, rhs, body } => Some((Line::Let { bind, rhs }, body)),
+            CoreExpr::Join {
+                id,
+                params,
+                cont,
+                body,
+            } if self.reached.contains(id) => Some((Line::Join { params, body }, cont)),
+            CoreExpr::Drop { body, .. } => Some((Line::Drop, body)),
+            CoreExpr::SetGlobal { .. }
+            | CoreExpr::Join { .. }
+            | CoreExpr::Match { .. }
+            | CoreExpr::If { .. }
+            | CoreExpr::Ret(_)
+            | CoreExpr::TailCall { .. }
+            | CoreExpr::Jump { .. } => None,
+        }
+    }
+
     /// The spine is walked in a loop, so a long body costs no stack depth. The
-    /// inside of a join is left alone, because no call in it is a tail call.
+    /// body of a join that it always comes to is left alone, because no call in
+    /// it is a tail call.
     fn expr(&self, mut e: &mut CoreExpr) -> Result<(), InternalLinkError> {
         loop {
             let mut end: &CoreExpr = e;
             let mut lines = 0usize;
-            while let Some((_, body)) = line(end) {
+            while let Some((_, rest)) = self.line(end) {
                 lines = lines.saturating_add(1);
-                end = body;
+                end = rest;
             }
-            if let CoreExpr::Tail(Atom::Call {
+            if let CoreExpr::TailCall {
                 callee: Callee::Known(_) | Callee::Self_,
                 args,
-            }) = end
+            } = end
             {
                 if let Some(order) = self.order(e, args)? {
                     put_in_order(e, &order);
@@ -140,10 +210,11 @@ impl Scheduler<'_> {
                 return Ok(());
             }
             e = match after(e, lines) {
-                CoreExpr::LetCont { cont, body, .. } => {
-                    self.expr(cont)?;
-                    body
+                CoreExpr::Join { cont, body, .. } => {
+                    self.expr(body)?;
+                    cont
                 }
+                CoreExpr::SetGlobal { body, .. } => body,
                 CoreExpr::Match { arms, .. } => {
                     for (_, arm) in arms {
                         self.expr(arm)?;
@@ -156,10 +227,10 @@ impl Scheduler<'_> {
                     return Ok(());
                 }
                 CoreExpr::Let { .. }
-                | CoreExpr::LetJoin { .. }
                 | CoreExpr::Drop { .. }
-                | CoreExpr::Tail(_)
-                | CoreExpr::Goto(_) => return Ok(()),
+                | CoreExpr::Ret(_)
+                | CoreExpr::TailCall { .. }
+                | CoreExpr::Jump { .. } => return Ok(()),
             };
         }
     }
@@ -171,7 +242,7 @@ impl Scheduler<'_> {
         e: &CoreExpr,
         args: &[LocalId],
     ) -> Result<Option<Vec<usize>>, InternalLinkError> {
-        let all = std::iter::successors(line(e), |(_, body)| line(body));
+        let all = std::iter::successors(self.line(e), |(_, rest)| self.line(rest));
         let lines: Vec<Line<'_>> = all.map(|(line, _)| line).collect();
         let mut passed: Vec<(LocalId, usize)> = args.iter().copied().zip(0..).collect();
         passed.sort_unstable();
@@ -215,7 +286,7 @@ impl Scheduler<'_> {
 
     /// Whether `bind` is a constant number.
     fn is_number(&self, bind: &CoreBind, rhs: &Atom) -> Result<bool, InternalLinkError> {
-        if !matches!(rhs, Atom::Const(_)) || bind.global.is_some() {
+        if !matches!(rhs, Atom::Const(_)) {
             return Ok(false);
         }
         Ok(match self.pool.prim_of(bind.ty)? {
@@ -244,27 +315,15 @@ fn put_in_order(e: &mut CoreExpr, order: &[usize]) {
     let e = after(e, first);
     let order = order.get(first..).unwrap_or_default();
     // Something has to be there while it is taken apart.
-    let mut rest = std::mem::replace(e, CoreExpr::Tail(Atom::Nil));
+    let mut rest = std::mem::replace(e, CoreExpr::Ret(LocalId(0)));
     let mut lines: Vec<Option<Frame>> = Vec::with_capacity(order.len());
     for _ in order {
-        rest = match rest {
-            CoreExpr::Let { bind, rhs, body } => {
-                lines.push(Some(Frame::Let { bind, rhs }));
-                *body
+        rest = match peel(rest) {
+            Ok((line, rest)) => {
+                lines.push(Some(line));
+                rest
             }
-            CoreExpr::LetJoin { bind, join, body } => {
-                lines.push(Some(Frame::Join { bind, join: *join }));
-                *body
-            }
-            CoreExpr::Drop { local, body } => {
-                lines.push(Some(Frame::Drop { local }));
-                *body
-            }
-            end @ (CoreExpr::LetCont { .. }
-            | CoreExpr::Match { .. }
-            | CoreExpr::If { .. }
-            | CoreExpr::Tail(_)
-            | CoreExpr::Goto(_)) => end,
+            Err(end) => end.expr(),
         };
     }
     for at in order.iter().rev() {
@@ -529,12 +588,12 @@ impl Reads {
                 }
                 out.count(l);
             });
-            if let Some(bind) = line.makes()
-                && let Some(local) = out.local_mut(bind.id)
-            {
-                local.made = Some(at);
-                if let Line::Let { bind, rhs } = line {
-                    local.number = of.is_number(bind, rhs)?;
+            for bind in line.makes() {
+                if let Some(local) = out.local_mut(bind.id) {
+                    local.made = Some(at);
+                    if let Line::Let { rhs, .. } = line {
+                        local.number = of.is_number(bind, rhs)?;
+                    }
                 }
             }
         }
@@ -605,12 +664,12 @@ impl Reads {
             let Some(line) = lines.get(*at) else {
                 continue;
             };
-            let makes = line.makes().map(|bind| bind.id);
-            held.extend(makes);
+            let makes = || line.makes().iter().map(|bind| bind.id);
+            held.extend(makes());
             let after = held.len();
-            if let Some(l) = makes {
+            makes().for_each(|l| {
                 held.remove(&l);
-            }
+            });
             let past = held.len();
             let mut again = BTreeSet::new();
             line.for_each_read(|l| {
@@ -658,12 +717,12 @@ impl Reads {
         v: LocalId,
         at: usize,
     ) -> Option<Movable> {
-        let Some(Line::Let { bind, rhs }) = lines.get(at) else {
+        let Some(Line::Let { rhs, .. }) = lines.get(at) else {
             return None;
         };
         let made = self.local(v)?;
         let constant = matches!(rhs, Atom::Const(_)) && !made.number;
-        if constant || !computes(rhs) || bind.global.is_some() || made.times != 1 {
+        if constant || !computes(rhs) || made.times != 1 {
             return None;
         }
         let (mut with, mut reads) = ([None; 2], [None; 2]);

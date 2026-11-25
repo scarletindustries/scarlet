@@ -349,7 +349,7 @@ fn fit(
 ) -> Result<Fitted, Stop> {
     let name = format!("{}.{}", f.module, f.name);
     let before = tables.lens();
-    let mut fitted = fit_core(source, &f.core, f.undropped, this, tables);
+    let mut fitted = fit_core(source, &f.core, this, tables);
     // A long literal is built a piece at a time only here, so that a function
     // with room for its literals makes the cells it always did.
     if fitted.as_ref().err() == Some(&Unfit::TooMany(Limit::Values))
@@ -357,7 +357,7 @@ fn fit(
     {
         // Nothing names what the first try put in the tables.
         tables.cut(before);
-        fitted = fit_core(source, &core, f.undropped, this, tables);
+        fitted = fit_core(source, &core, this, tables);
     }
     let why = match fitted {
         Ok(body) => return Ok(Fitted::new(name, f.core.params.len(), body)),
@@ -376,14 +376,13 @@ fn fit(
 fn fit_core(
     source: &Source<'_>,
     core: &CoreFn,
-    undropped: bool,
     this: Option<FuncIdx>,
     tables: &mut Tables,
 ) -> Result<Body, Unfit> {
     if core.params.len() > MAX_PARAMS {
         return Err(Unfit::TooMany(Limit::Parameters));
     }
-    let mut draft = translate::translate(source, core, undropped, this, tables)?;
+    let mut draft = translate::translate(source, core, this, tables)?;
     let held = live::settle(&mut draft)?;
     moves::expand(alloc::allocate(draft, &held)?)
 }

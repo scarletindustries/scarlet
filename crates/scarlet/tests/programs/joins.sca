@@ -1,0 +1,234 @@
+// Branches whose values are used further on. Each way through one comes to the
+// same place, with what it gives, and what it holds is given up on the way.
+
+import scarlet/array
+import scarlet/map
+
+type Tree {
+	Leaf(n Int)
+	Node(l Tree, r Tree)
+	Empty
+}
+
+type Flat {
+	A(n Int)
+	B(n Int)
+	C
+}
+
+type Pair(a, b) {
+	x a
+	y b
+}
+
+const base = 4
+const steps = [base, base * 2, base * 3]
+const top = match steps {
+	[] -> 0
+	[h, ..t] -> if h > 3 {
+		h + array::length(t)
+	} else {
+		h
+	}
+}
+const table = map::set(map::new(), top, if base == 4 { 'four' } else { 'other' })
+
+fn id(v a) a {
+	v
+}
+
+fn sum(t Tree) Int {
+	match t {
+		Leaf(n) -> n
+		Node(l, r) -> {
+			left = match l {
+				Leaf(n) -> n
+				Node(_, _) -> sum(l)
+				Empty -> 0
+			}
+			right = match r {
+				Empty -> 0
+				Leaf(n) | Node(Leaf(n), Empty) | Node(Empty, Leaf(n)) -> n
+				Node(Leaf(_) | Node(_, _) | Empty, Leaf(_) | Node(_, _) | Empty) -> sum(r)
+			}
+			left + right
+		}
+		Empty -> 0
+	}
+}
+
+// A branch in a branch, and one in what another is on.
+fn nested(a Int, b Int, c Bool) String {
+	x = if {
+		if c {
+			a > b
+		} else {
+			a < b
+		}
+	} {
+		y = if a > 10 {
+			if b > 10 { 'both' } else { 'a' }
+		} else {
+			'neither'
+		}
+		'${y}, ${a}'
+	} else {
+		match { if c { b } else { a } } {
+			0 -> 'none'
+			n if n > { if c { 5 } else { 1 } } -> 'many ${n}'
+			n -> 'few ${n}'
+		}
+	}
+	x + '.'
+}
+
+// What one branch reads and the other does not, and what both read after.
+fn chosen(xs Array(Int), ys Array(Int), c Bool) Array(Int) {
+	picked = if c {
+		[..xs, 1]
+	} else {
+		array::map(xs, fn(x) x + 1)
+	}
+	more = if array::length(picked) > 2 {
+		[..picked, ..ys]
+	} else {
+		ys
+	}
+	[..more, array::length(xs)]
+}
+
+// A call inside a branch is no tail call, though it is the last thing there.
+fn count(n Int, acc Array(Int)) Array(Int) {
+	rest = if n == 0 {
+		acc
+	} else {
+		count(n - 1, [..acc, n])
+	}
+	if array::length(rest) > 3 {
+		rest
+	} else {
+		[..rest, 0 - n]
+	}
+}
+
+// A closure made in a branch, and one that a branch calls.
+fn made(k Int, c Bool) fn(Int) Int {
+	f = if c {
+		inner = k * 2
+		fn(x) x + inner
+	} else {
+		fn(x) x * k
+	}
+	g = if k > 2 {
+		fn(x) f(f(x))
+	} else {
+		f
+	}
+	g
+}
+
+// A miss after one alternative of an or-pattern tries the next, whose names may
+// pass where the first one's did not.
+fn either(a Flat, b Flat, k Int) Int {
+	match (a, b) {
+		(A(n), _) | (_, A(n)) if n > k -> n
+		(A(n) | B(n), A(m) | B(m)) if n < m -> n * 100 + m
+		(A(_) | B(_) | C, A(_) | B(_) | C) -> 0
+	}
+}
+
+fn loose(p Pair(a, b), q a, c Bool) Pair(a, Array(b)) {
+	r = if c {
+		Pair(p.x, [p.y])
+	} else {
+		Pair(q, [])
+	}
+	s = match r {
+		Pair(x, [y, ..]) -> Pair(id(x), [y, y])
+		Pair(x, []) -> Pair(x, [])
+	}
+	if c { s } else { r }
+}
+
+// Both sides of `&&` and `||`, where each may be a branch.
+fn logic(a Int, b Int, m map::Map(Int, String)) Bool {
+	p = a > 1 && { b > 1 || map::has(m, a) } && { if a == b { False } else { True } }
+	q = p ||
+		match map::get(m, b) {
+			Some(s) -> s == 'four'
+			None -> a == 0
+		}
+	q && { p || b < 100 }
+}
+
+// A lookup that is matched on as a value, in a loop that sets the map.
+fn tally(words Array(String), m map::Map(String, Int)) map::Map(String, Int) {
+	match words {
+		[] -> m
+		[w, ..rest] -> {
+			n = match map::get(m, w) {
+				Some(n) -> n + 1
+				None -> 1
+			}
+			tally(rest, map::set(m, w, n + { map::get(m, '') or 0 }))
+		}
+	}
+}
+
+// A join that a loop's turns all come to, with a record set in each branch.
+type State {
+	seen Array(Int)
+	odd Int
+	even Int
+}
+
+fn turn(s State, n Int) State {
+	if n == 0 {
+		s
+	} else {
+		t = if n % 2 == 0 {
+			State(..s, even: s.even + 1, seen: [..s.seen, n])
+		} else {
+			State(..s, odd: s.odd + n)
+		}
+		turn(
+			if t.odd > 8 {
+				State(..t, odd: 0)
+			} else {
+				t
+			},
+			n - 1,
+		)
+	}
+}
+
+pub fn main() {
+	println(steps)
+	println(top)
+	println(table)
+	println(sum(Node(Node(Leaf(1), Leaf(2)), Node(Empty, Leaf(5)))))
+	println(sum(Node(Leaf(3), Node(Node(Leaf(1), Empty), Leaf(9)))))
+	println(nested(11, 12, False))
+	println(nested(11, 2, True))
+	println(nested(1, 7, True))
+	println(nested(3, 0, False))
+	println(nested(0, 0, False))
+	println(chosen([1, 2], [9], True))
+	println(chosen([1, 2], [9], False))
+	println(count(2, []))
+	println(count(5, []))
+	println(made(3, True)(10))
+	println(made(3, False)(10))
+	println(made(1, True)(10))
+	println(either(A(1), A(5), 3))
+	println(either(A(1), A(2), 3))
+	println(either(B(1), B(2), 3))
+	println(either(B(2), A(2), 1))
+	println(either(C, A(2), 3))
+	println(loose(Pair('a', 1), 'b', True))
+	println(loose(Pair(Leaf(1), Empty), Empty, False))
+	m = map::set(map::set(map::new(), 2, 'two'), 4, 'four')
+	println([logic(2, 1, m), logic(1, 4, m), logic(0, 5, m), logic(3, 3, m), logic(9, 200, m)])
+	println(tally(['a', 'b', 'a', 'c', 'b', 'a'], map::new()))
+	println(turn(State([], 0, 0), 9))
+}

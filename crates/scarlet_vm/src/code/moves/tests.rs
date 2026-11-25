@@ -466,7 +466,7 @@ fn a_constructor_with_no_fields_is_no_cell() {
         let steps = vec![
             test.into(),
             of::drop(1).into(),
-            of::ret(0).into(),
+            of::halt(0).into(),
             of::enter(1, &[0]),
         ];
         let body = expanded(draft(2, 2, steps, &[3])).expect("it fits");
@@ -475,7 +475,7 @@ fn a_constructor_with_no_fields_is_no_cell() {
         let first = |ins: &[String]| ins[0].clone();
         [first(&here[1..]), first(there)]
     };
-    assert_eq!(found(plain.tag()), ["Ret 2!", "Drop 3"]);
+    assert_eq!(found(plain.tag()), ["Halt 2!", "Drop 3"]);
     assert_eq!(found(Tag::of_cell(1)), ["Drop 3", "Drop 3"]);
 }
 
@@ -501,7 +501,7 @@ fn a_value_with_no_type_is_refused() {
 #[test]
 fn a_drop_of_what_is_no_cell_is_left_out() {
     let dropped = |ins: Ins<VReg>| {
-        let ins = vec![of::unless(1, 0), ins, of::drop(2), of::drop(0), of::ret(1)];
+        let ins = vec![of::unless(1, 0), ins, of::drop(2), of::drop(0), of::halt(1)];
         shown(&expanded(draft(3, 2, ins, &[3])).expect("it fits"))
     };
     let kept = dropped(of::append(2, 1, 1));
@@ -510,7 +510,7 @@ fn a_drop_of_what_is_no_cell_is_left_out() {
     assert_eq!(dropped(of::add(2, 1, 1))[2], "Drop 4");
     let out = dropped(of::constant(2));
     assert_eq!(out[0], "JumpIfFalse 3 -> 2");
-    assert_eq!(out[2..], ["Drop 2", "Ret 3!"]);
+    assert_eq!(out[2..], ["Drop 2", "Halt 3!"]);
 }
 
 /// The labels of a function whose tail calls are longer than they were lead to

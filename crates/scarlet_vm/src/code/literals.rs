@@ -10,9 +10,11 @@
 //! an array of their own, which is then joined to it. An interpolation and a
 //! binary literal are joined a piece at a time in the same way.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
-use scarlet_ir::core_ir::{Atom, CoreBind, CoreExpr, CoreFn, CorePat, JoinId, LocalId, PrimOp};
+use scarlet_ir::core_ir::{
+    Atom, CoreBind, CoreExpr, CoreFn, CorePat, GlobalSlot, JoinId, LocalId, PrimOp,
+};
 use scarlet_ir::rty::RTy;
 
 /// How many elements a piece has. It is what one leaf of an array holds.
@@ -24,8 +26,12 @@ pub(super) fn in_pieces(f: &CoreFn) -> Option<CoreFn> {
     let mut names = Locals::default();
     f.params.iter().for_each(|p| names.name(p.id));
     names.walk(&f.body);
-    let mut cut = Cut { names, pieces: 0 };
-    let body = cut.expr(&f.body, f.ret_ty);
+    let mut cut = Cut {
+        names,
+        reached: f.body.always_reached(),
+        pieces: 0,
+    };
+    let body = cut.expr(&f.body);
     (cut.pieces > 0).then(|| CoreFn {
         params: f.params.clone(),
         body,
@@ -80,12 +86,6 @@ impl<'a> Literal<'a> {
         (literal.elements.len() > PIECE).then_some(literal)
     }
 
-    /// Whether putting a piece on the end copies those before it. An array's
-    /// become the new one instead.
-    fn copies(&self) -> bool {
-        self.next != PrimOp::ArrayAppend
-    }
-
     /// What makes `piece`, on the end of `so_far`.
     fn piece(&self, so_far: Option<LocalId>, piece: &[LocalId]) -> Atom {
         match so_far {
@@ -129,73 +129,89 @@ impl Locals {
                     self.atom(rhs);
                     todo.push(body);
                 }
-                CoreExpr::LetJoin { bind, join, body } => {
-                    self.name(bind.id);
-                    todo.extend([&**join, &**body]);
+                CoreExpr::SetGlobal { value, body, .. } => {
+                    self.read(*value);
+                    todo.push(body);
                 }
-                CoreExpr::LetCont { cont, body, .. } => todo.extend([&**cont, &**body]),
-                CoreExpr::Drop { local, body, .. } => {
+                CoreExpr::Join {
+                    params, cont, body, ..
+                } => {
+                    params.iter().for_each(|p| self.name(p.id));
+                    todo.extend([&**cont, &**body]);
+                }
+                CoreExpr::Drop { local, body } => {
                     self.read(*local);
                     todo.push(body);
                 }
-                CoreExpr::Match { scrut, arms, .. } => {
+                CoreExpr::Match { scrut, arms } => {
                     self.read(*scrut);
                     for (pat, arm) in arms {
                         pat.binds().for_each(|b| self.name(b.id));
                         todo.push(arm);
                     }
                 }
-                CoreExpr::If {
-                    cond, then, els, ..
-                } => {
+                CoreExpr::If { cond, then, els } => {
                     self.read(*cond);
                     todo.extend([&**then, &**els]);
                 }
-                CoreExpr::Tail(atom) => self.atom(atom),
-                CoreExpr::Goto(_) => {}
+                CoreExpr::Ret(value) => self.read(*value),
+                CoreExpr::TailCall { callee, args } => {
+                    callee.local().into_iter().for_each(|f| self.read(f));
+                    args.iter().for_each(|l| self.read(*l));
+                }
+                CoreExpr::Jump { args, .. } => args.iter().for_each(|l| self.read(*l)),
             }
         }
     }
 }
 
-/// One step of a straight run of code.
+/// One node of a spine.
 enum Step {
     Let(CoreBind, Atom),
-    Join(CoreBind, CoreExpr),
-    Cont(JoinId, CoreExpr),
+    SetGlobal(GlobalSlot, LocalId),
+    Join(JoinId, Vec<CoreBind>, CoreExpr),
     Drop(LocalId),
 }
 
 impl Step {
-    fn before(self, body: CoreExpr) -> CoreExpr {
-        let body = Box::new(body);
+    /// The node, in front of `rest`.
+    fn before(self, rest: CoreExpr) -> CoreExpr {
+        let rest = Box::new(rest);
         match self {
-            Step::Let(bind, rhs) => CoreExpr::Let { bind, rhs, body },
-            Step::Join(bind, join) => CoreExpr::LetJoin {
+            Step::Let(bind, rhs) => CoreExpr::Let {
                 bind,
-                join: Box::new(join),
-                body,
+                rhs,
+                body: rest,
             },
-            Step::Cont(id, cont) => CoreExpr::LetCont {
+            Step::SetGlobal(slot, value) => CoreExpr::SetGlobal {
+                slot,
+                value,
+                body: rest,
+            },
+            Step::Join(id, params, body) => CoreExpr::Join {
                 id,
-                cont: Box::new(cont),
-                body,
+                params,
+                cont: rest,
+                body: Box::new(body),
             },
-            Step::Drop(local) => CoreExpr::Drop { local, body },
+            Step::Drop(local) => CoreExpr::Drop { local, body: rest },
         }
     }
 
-    /// The local this gives a value.
-    fn binds(&self) -> Option<LocalId> {
+    /// The locals this gives a value.
+    fn binds(&self) -> &[CoreBind] {
         match self {
-            Step::Let(bind, _) | Step::Join(bind, _) => Some(bind.id),
-            Step::Cont(..) | Step::Drop(_) => None,
+            Step::Let(bind, _) => std::slice::from_ref(bind),
+            Step::Join(_, params, _) => params,
+            Step::SetGlobal(..) | Step::Drop(_) => &[],
         }
     }
 }
 
 struct Cut {
     names: Locals,
+    /// The joins that every way through their body comes to.
+    reached: BTreeSet<JoinId>,
     /// How many pieces were made.
     pieces: usize,
 }
@@ -203,73 +219,60 @@ struct Cut {
 impl Cut {
     fn fresh(&mut self, ty: RTy) -> Option<CoreBind> {
         self.names.highest = self.names.highest.checked_add(1)?;
-        Some(CoreBind {
-            id: LocalId(self.names.highest),
-            ty,
-            global: None,
-        })
+        Some(CoreBind::new(LocalId(self.names.highest), ty))
     }
 
-    /// `e`, whose value has type `ty`, with its literals in pieces.
-    fn expr(&mut self, e: &CoreExpr, ty: RTy) -> CoreExpr {
-        let mut steps = Vec::new();
-        let mut e = e;
+    /// `e` with its literals in pieces.
+    fn expr(&mut self, mut e: &CoreExpr) -> CoreExpr {
+        let mut runs = vec![Vec::new()];
         let end = loop {
-            match e {
-                CoreExpr::Let { bind, rhs, body } => {
-                    steps.push(Step::Let(bind.clone(), rhs.clone()));
-                    e = body;
-                }
-                CoreExpr::LetJoin { bind, join, body } => {
-                    steps.push(Step::Join(bind.clone(), self.expr(join, bind.ty)));
-                    e = body;
-                }
-                CoreExpr::LetCont { id, cont, body } => {
-                    steps.push(Step::Cont(*id, self.expr(cont, ty)));
-                    e = body;
-                }
-                CoreExpr::Drop { local, body } => {
-                    steps.push(Step::Drop(*local));
-                    e = body;
-                }
-                // A literal that is returned is given a name, and what is
-                // returned is the name.
-                CoreExpr::Tail(atom) => {
-                    if Literal::of(atom).is_some()
-                        && let Some(bind) = self.fresh(ty)
-                    {
-                        let named = Atom::Local(bind.id);
-                        steps.push(Step::Let(bind, atom.clone()));
-                        break CoreExpr::Tail(named);
-                    }
-                    break CoreExpr::Tail(atom.clone());
-                }
-                CoreExpr::If {
-                    cond,
-                    then,
-                    els,
-                    ty: t,
+            // Some ways do not come past this, so nothing that is needed past it
+            // goes in front.
+            let parts = matches!(e, CoreExpr::Join { id, .. } if !self.reached.contains(id));
+            let (step, rest) = match e {
+                CoreExpr::Let { bind, rhs, body } => (Step::Let(*bind, rhs.clone()), body),
+                CoreExpr::SetGlobal { slot, value, body } => (Step::SetGlobal(*slot, *value), body),
+                CoreExpr::Join {
+                    id,
+                    params,
+                    cont,
+                    body,
                 } => {
+                    let body = self.expr(body);
+                    (Step::Join(*id, params.clone(), body), cont)
+                }
+                CoreExpr::Drop { local, body } => (Step::Drop(*local), body),
+                CoreExpr::If { cond, then, els } => {
                     break CoreExpr::If {
                         cond: *cond,
-                        then: Box::new(self.expr(then, ty)),
-                        els: Box::new(self.expr(els, ty)),
-                        ty: *t,
+                        then: Box::new(self.expr(then)),
+                        els: Box::new(self.expr(els)),
                     };
                 }
-                CoreExpr::Match { scrut, arms, ty: t } => {
-                    let arm = |(pat, arm): &(CorePat, CoreExpr)| (pat.clone(), self.expr(arm, ty));
+                CoreExpr::Match { scrut, arms } => {
+                    let arm = |(pat, arm): &(CorePat, CoreExpr)| (pat.clone(), self.expr(arm));
                     break CoreExpr::Match {
                         scrut: *scrut,
                         arms: arms.iter().map(arm).collect(),
-                        ty: *t,
                     };
                 }
-                CoreExpr::Goto(id) => break CoreExpr::Goto(*id),
+                CoreExpr::Ret(_) | CoreExpr::TailCall { .. } | CoreExpr::Jump { .. } => {
+                    break e.clone();
+                }
+            };
+            if let Some(run) = runs.last_mut() {
+                run.push(step);
             }
+            if parts {
+                runs.push(Vec::new());
+            }
+            e = rest;
         };
-        let steps = self.run(steps);
-        steps.into_iter().rev().fold(end, |body, s| s.before(body))
+        let runs = runs.into_iter().rev();
+        runs.fold(end, |end, run| {
+            let steps = self.run(run);
+            steps.into_iter().rev().fold(end, |rest, s| s.before(rest))
+        })
     }
 
     /// A straight run of code with its literals in pieces. Each piece goes as
@@ -279,7 +282,7 @@ impl Cut {
         let mut bound = HashMap::new();
         let mut dropped = HashMap::new();
         for (i, step) in steps.iter().enumerate() {
-            bound.extend(step.binds().map(|l| (l, i)));
+            bound.extend(step.binds().iter().map(|b| (b.id, i)));
             if let Step::Drop(l) = step {
                 dropped.insert(*l, i);
             }
@@ -298,8 +301,7 @@ impl Cut {
             let mut pieces = literal.elements.chunks(PIECE).peekable();
             let mut place = 0;
             let mut so_far = literal.onto;
-            // The piece before, when it is copied into this one and is then not
-            // needed.
+            // The piece before, which is not needed once it is in this one.
             let mut spent: Option<LocalId> = None;
             while let Some(piece) = pieces.next() {
                 let made = literal.piece(so_far, piece);
@@ -323,7 +325,7 @@ impl Cut {
                     return steps;
                 };
                 so_far = Some(part.id);
-                spent = so_far.filter(|_| literal.copies());
+                spent = so_far;
                 here.push(Step::Let(part, made));
                 here.extend(dead);
                 // An element that is only here and then dropped can be given

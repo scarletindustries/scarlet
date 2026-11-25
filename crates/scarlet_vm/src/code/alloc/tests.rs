@@ -2,10 +2,11 @@ use super::super::ins::{Arg, Role};
 use super::super::live::settle;
 use super::super::tests::programs::every_draft;
 use super::super::tests::random::random_function;
-use super::super::tests::{copy_of, draft, of, program};
+use super::super::tests::{body, copy_of, draft, named, of, program};
 use super::super::translate::translate;
-use super::super::{Source, Tables};
+use super::super::{Source, Tables, load};
 use super::*;
+use crate::Audit;
 use scarlet_ir::core_ir::FuncIdx;
 use std::collections::BTreeMap;
 
@@ -46,8 +47,16 @@ fn values_share_a_register_when_they_are_not_held_at_once() {
         regs(draft(4, 0, ins, &[])),
         [Some(2), Some(3), Some(2), Some(2)]
     );
-    let ins = vec![of::constant(0), of::len(1, 0), of::drop(0), of::ret(1)];
-    assert_eq!(regs(draft(2, 0, ins, &[])), [Some(2), Some(3)]);
+    let ins = vec![
+        of::constant(0),
+        of::len(1, 0),
+        of::len(2, 0),
+        of::drop(0),
+        of::add(3, 1, 2),
+        of::ret(3),
+    ];
+    let held = [Some(2), Some(3), Some(2), Some(2)];
+    assert_eq!(regs(draft(4, 0, ins, &[])), held);
 }
 
 /// A value written while one with a higher number is held does not take its
@@ -151,6 +160,195 @@ fn a_value_a_tail_call_passes_has_its_parameters_register() {
     assert_eq!(regs(draft(3, 1, steps, &[4]))[1..], [Some(2), Some(3)]);
 }
 
+/// What a tail call passes has the register of its parameter before it has that of
+/// what it is made from, so a loop that keeps the best so far moves only what is
+/// better, whichever branch comes first.
+#[test]
+fn what_a_tail_call_passes_goes_before_a_jumps_moves() {
+    // The parameters are 0 and 1, and 2 is what may be better.
+    for (one, other) in [(2, 1), (1, 2)] {
+        let steps = vec![
+            of::add(2, 0, 0).into(),
+            of::unless(0, 0).into(),
+            of::mv(3, one).into(),
+            of::jump(1).into(),
+            of::mv(3, other).into(),
+            of::again(&[0, 3]),
+        ];
+        let regs = regs(draft(4, 2, steps, &[4, 5]));
+        assert_eq!(regs[2..], [Some(4), Some(3)]);
+    }
+    // That holds when the parameter is given by neither, too.
+    let steps = vec![
+        of::add(2, 0, 1).into(),
+        of::add(3, 0, 1).into(),
+        of::unless(0, 0).into(),
+        of::mv(4, 2).into(),
+        of::jump(1).into(),
+        of::mv(4, 3).into(),
+        of::add(0, 2, 3).into(),
+        of::again(&[0, 4]),
+    ];
+    assert_eq!(regs(draft(5, 2, steps, &[5, 6]))[4], Some(3));
+    // A call to the function itself goes before one to another.
+    let steps = vec![
+        of::add(2, 0, 1).into(),
+        of::unless(2, 0).into(),
+        of::constant(3).into(),
+        of::enter(9, &[2, 3]),
+        of::constant(4).into(),
+        of::again(&[4, 2]),
+    ];
+    assert_eq!(regs(draft(5, 2, steps, &[4]))[2], Some(3));
+}
+
+/// The instructions of a loop that keeps a best, a least and a most, or a count,
+/// with the branches either way round.
+#[test]
+fn a_loop_that_keeps_a_value_in_one_branch_moves_nothing_in_the_other() {
+    let ops = |kept: &str| {
+        let src = format!(
+            "fn go(n Int, a Int, b Int) Int {{\n\
+             \tif n == 0 {{ a + b }} else {{\n\
+             \t\tx = n * 7 % 1000\n{kept}\
+             \t}}\n\
+             }}\n\
+             pub fn main() {{ println(go(9, 0, 0)) }}\n"
+        );
+        let code = load(&program(&src), Audit::Never).expect("it loads");
+        let ins = body(&code, named(&code, ".go"));
+        let after = |op: &str| !matches!(op, "IntMulK" | "IntRemK");
+        let ops: Vec<&str> = ins.iter().map(|i| i.op().name()).collect();
+        // What comes before the branch is no part of it.
+        let first = ops.iter().rposition(|op| !after(op)).expect("it is there");
+        ops[first + 1..].join(" ")
+    };
+    let best = |c: &str| format!("\t\tc = {c}\n\t\tgo(n - 1, c, b)\n");
+    assert_eq!(
+        ops(&best("if x > a { x } else { a }")),
+        "JumpUnlessIntLt Move IntSubK Jump"
+    );
+    assert_eq!(
+        ops(&best("if a >= x { a } else { x }")),
+        "JumpUnlessIntLe Jump Move IntSubK Jump"
+    );
+    assert_eq!(
+        ops(&best("if x > a { a + 1 } else { a }")),
+        "JumpUnlessIntLt IntAddK IntSubK Jump"
+    );
+    assert_eq!(
+        ops(&best("if x > a { a } else { a + 1 }")),
+        "JumpUnlessIntLt Jump IntAddK IntSubK Jump"
+    );
+    let both = "\t\tc = if x < a { x } else { a }\n\
+                \t\td = if x > b { x } else { b }\n\
+                \t\tgo(n - 1, c, d)\n";
+    assert_eq!(
+        ops(both),
+        "JumpUnlessIntLt Move JumpUnlessIntLt Move IntSubK Jump"
+    );
+}
+
+/// How many clashes are gone over to put the values of `d`'s moves together, and
+/// how many it has.
+fn gone_over(mut d: Draft) -> (usize, usize) {
+    let held = settle(&mut d).expect("a function that loads");
+    let clashes = Clashes::new(d.values as usize, &held.clashes);
+    let seen = std::cell::Cell::new(0);
+    let of = |v: VReg| {
+        let of = clashes.of(v);
+        seen.set(seen.get() + of.len());
+        of
+    };
+    Groups::joined(&d, &of, moves(&d));
+    (seen.get(), clashes.all.len())
+}
+
+/// A value that many branches give is moved into many parameters and clashes with
+/// each, and a group of many values has many clashes. Neither is gone over for each
+/// value that may be put with it, so a function with a great many joins is loaded
+/// in time.
+#[test]
+fn what_clashes_with_much_is_not_gone_over_for_each_move() {
+    // In each join one branch gives value 1 and the other a value of its own.
+    let (mut ins, mut labels) = (Vec::new(), Vec::new());
+    for i in 0..5_000 {
+        let (param, made) = (2 + 2 * i, 3 + 2 * i);
+        let (els, after) = (2 * i, 2 * i + 1);
+        ins.extend([of::unless(0, els), of::mv(param, 1), of::jump(after)]);
+        labels.push(ins.len());
+        ins.extend([of::constant(made), of::mv(param, made)]);
+        labels.push(ins.len());
+        ins.push(of::len(made, param));
+    }
+    ins.push(of::ret(1));
+    let (seen, all) = gone_over(draft(2 + 10_000, 2, ins, &labels));
+    assert!(all > 20_000 && seen < 4 * all, "{seen} {all}");
+    // One join, with as many jumps to it, all with the same value.
+    let (mut ins, mut labels) = (Vec::new(), vec![0]);
+    for i in 1..5_000 {
+        ins.extend([of::unless(0, i), of::mv(2, 1), of::jump(0)]);
+        labels.push(ins.len());
+    }
+    ins.push(of::constant(2));
+    labels[0] = ins.len();
+    ins.extend([of::len(3, 2), of::len(3, 1), of::ret(3)]);
+    let (seen, all) = gone_over(draft(4, 2, ins, &labels));
+    assert!(all > 5_000 && seen < 4 * all, "{seen} {all}");
+    // Each value of a chain of moves is held with one value more than the last.
+    let chain = 200;
+    let held = |k: u32| 2 + chain + k;
+    let mut ins = vec![of::constant(2)];
+    for k in 1..chain {
+        ins.extend([of::mv(2 + k, 1 + k), of::constant(held(k))]);
+    }
+    ins.extend((1..chain).map(|k| of::len(1, held(k))));
+    ins.extend([of::len(1, 1 + chain), of::ret(1)]);
+    let (seen, all) = gone_over(draft(2 + 2 * chain, 2, ins, &[]));
+    assert!(all > 20_000 && seen < 4 * all, "{seen} {all}");
+}
+
+/// The values of a pair go to the group that has more, so a group that grows by one
+/// at a time is not gone over each time.
+#[test]
+fn the_smaller_group_goes_to_the_larger() {
+    let ins = vec![
+        of::mv(1, 0),
+        of::mv(2, 1),
+        of::mv(3, 2),
+        of::len(4, 3),
+        of::ret(4),
+    ];
+    let mut d = draft(5, 1, ins, &[]);
+    let held = settle(&mut d).expect("a function that loads");
+    let clashes = Clashes::new(5, &held.clashes);
+    let pairs = [(1, 0), (2, 1), (3, 2)].map(|(a, b)| (VReg(a), VReg(b)));
+    for order in [[0, 1, 2], [2, 1, 0], [2, 0, 1]] {
+        let pairs = order.map(|i| pairs[i]);
+        let groups = Groups::joined(&d, &|v| clashes.of(v), pairs.into_iter());
+        let of = |v: u32| groups.group(VReg(v));
+        assert!((0..4).all(|v| of(v) == of(0)) && of(4) == 4);
+        // It is the number that the first pair's group has.
+        assert_eq!(of(0), pairs[0].0.0);
+    }
+}
+
+/// A move that no tail call's argument is in goes with its values all the same.
+#[test]
+fn a_move_beside_a_tail_call_is_left_out() {
+    // The register of value 2 is free where value 4 is written, and lower.
+    let steps = vec![
+        of::constant(2).into(),
+        of::len(3, 1).into(),
+        of::unless(2, 0).into(),
+        of::mv(4, 3).into(),
+        of::add(5, 4, 4).into(),
+        of::again(&[5, 1]),
+    ];
+    let regs = regs(draft(6, 2, steps, &[3]));
+    assert_eq!(regs[2..], [Some(2), Some(4), Some(4), Some(2)]);
+}
+
 /// What a tail call would like makes no frame larger: every call above it would
 /// start that much higher, and every return give up that much more.
 #[test]
@@ -170,7 +368,7 @@ fn what_a_tail_call_wants_makes_no_frame_larger() {
         let f = (&program.fns).into_iter().find(|f| f.name == "depth");
         let f = f.expect("depth");
         let source = Source::new(&program).expect("a whole program");
-        let d = translate(&source, &f.core, false, None, &mut Tables::default());
+        let d = translate(&source, &f.core, None, &mut Tables::default());
         let f = fitted(d.expect("it loads")).expect("it fits");
         assert_eq!(f.own, Room(want), "{params}");
     }
@@ -181,7 +379,8 @@ fn what_a_tail_call_wants_makes_no_frame_larger() {
             return false;
         };
         let clashes = Clashes::new(d.values as usize, &held.clashes);
-        let (_, end) = colour(&d, &held, &clashes, &[]).expect("it fits");
+        let groups = Groups::joined(&d, &|v| clashes.of(v), moves(&d));
+        let (_, end) = colour(&d, &held, &clashes, &groups, &[]).expect("it fits");
         let f = allocate(d, &held).expect("it fits");
         assert!(f.own.len() <= end, "{what}");
         let highest = f.regs.iter().flatten().map(|r| usize::from(r.0) + 1);
@@ -213,37 +412,16 @@ fn fields_go_to_the_registers_they_are_passed_in() {
         of::again(&[2, 1]),
     ];
     assert_eq!(regs(draft(3, 2, steps, &[]))[2], Some(2));
-    // One that does holds it.
+    // One that does holds it, but not from what is written straight before it.
+    let steps = vec![
+        of::len(2, 0).into(),
+        of::len(3, 1).into(),
+        of::drop(0).into(),
+        of::again(&[2, 3]),
+    ];
+    assert_eq!(regs(draft(4, 2, steps, &[]))[2..], [Some(4), Some(3)]);
     let steps = vec![of::len(2, 0).into(), of::drop(0).into(), of::again(&[2, 1])];
-    assert_eq!(regs(draft(3, 2, steps, &[]))[2], Some(4));
-}
-
-/// Where a function holds a value that nothing drops, every value has the register
-/// it would have if each `Drop` did something and no tail call wanted any.
-#[test]
-fn a_function_that_holds_what_nothing_drops_wants_nothing() {
-    let pushed = |undropped: bool, end: Step| {
-        let steps = vec![
-            of::append(2, 0, 1).into(),
-            of::drop(0).into(),
-            of::len(3, 2).into(),
-            end,
-        ];
-        let mut d = draft(4, 2, steps, &[]);
-        d.undropped = undropped;
-        regs(d)[2..].to_vec()
-    };
-    for end in [0, 1, 2] {
-        let end = || match end {
-            0 => of::ret(3).into(),
-            1 => of::again(&[2, 3]),
-            _ => of::enter(1, &[2, 3]),
-        };
-        let returned = matches!(end(), Step::Ins(_));
-        let own = if returned { 2 } else { 3 };
-        assert_eq!(pushed(false, end()), [Some(2), Some(own)]);
-        assert_eq!(pushed(true, end()), [Some(3), Some(2)]);
-    }
+    assert_eq!(regs(draft(3, 2, steps, &[]))[2], Some(2));
 }
 
 /// A function that fits when each value takes the lowest register still fits: the
@@ -280,6 +458,28 @@ fn a_function_that_fits_with_the_lowest_registers_fits() {
     assert_eq!(check(d, "one set aside"), Some(256));
 }
 
+/// Two values of a `Move` that could share a register still fit when no register is
+/// free for both: one is held with all the rest but the first, and the other with
+/// all but the last.
+#[test]
+fn a_function_fits_whose_moves_cannot_share() {
+    let (one, two) = (507, 508);
+    let mut ins: Vec<_> = (1..254).map(of::constant).collect();
+    ins.push(of::len(one, 0));
+    ins.extend((1..254).map(|v| of::add(one, one, v)));
+    ins.push(of::mv(two, one));
+    ins.extend((254..507).map(of::constant));
+    ins.extend((254..507).map(|v| of::add(two, two, v)));
+    ins.push(of::ret(two));
+    let d = || draft(509, 1, ins.clone(), &[]);
+    let regs = regs(d());
+    assert_eq!(
+        (regs[one as usize], regs[two as usize]),
+        (Some(2), Some(255))
+    );
+    assert_eq!(check(d(), "two that cannot share"), Some(256));
+}
+
 /// Each arm here takes cells apart and holds a few values while it does, so any
 /// number of them fit.
 #[test]
@@ -305,8 +505,7 @@ fn fields_in_different_arms_share_registers() {
     let f = (&program.fns).into_iter().find(|f| f.name == "f");
     let f = &f.expect("f").core;
     let source = Source::new(&program).expect("a whole program");
-    let d =
-        translate(&source, f, false, Some(FuncIdx(0)), &mut Tables::default()).expect("it loads");
+    let d = translate(&source, f, Some(FuncIdx(0)), &mut Tables::default()).expect("it loads");
     let opened = |step: &&Step| matches!(step, Step::Ins(Ins::Open2 { .. }));
     assert!(d.steps.iter().filter(opened).count() >= 300);
     let regs = check(d, "f").expect("a function that fits");
@@ -479,6 +678,40 @@ fn meet(a: &State, b: &State) -> State {
     out
 }
 
+/// Whether every way from step `at` of `d` comes to a return, or to a tail call of
+/// a function value, past nothing but steps that make no cell and call nothing.
+/// Those that `idle` says do nothing do not count.
+fn returns_soon(d: &Draft, idle: &[bool], at: usize) -> bool {
+    let brief = |name: &str| {
+        let plain = ["Const", "Move", "Not", "Field", "Jump", "JumpIfFalse"];
+        let families = ["Open", "Float", "JumpUnlessInt", "JumpUnlessFloat"];
+        let int = ["IntEq", "IntNe", "IntLt", "IntLe", "IntGt", "IntGe"];
+        let int = int.iter().any(|op| name == *op || name == format!("{op}K"));
+        let one = plain.contains(&name) || name == "JumpUnlessTag" || int;
+        one || families.iter().any(|family| name.starts_with(family))
+    };
+    let mut work = vec![at];
+    let mut seen = vec![false; d.steps.len()];
+    while let Some(at) = work.pop() {
+        if std::mem::replace(&mut seen[at], true) {
+            continue;
+        }
+        let step = &d.steps[at];
+        if !idle[at] {
+            let name = kind(step);
+            if name.starts_with("Ret") || name.starts_with("TailCallValue") {
+                continue;
+            }
+            if !brief(name) {
+                return false;
+            }
+        }
+        work.extend(step.target().map(|l| d.labels[l.0 as usize]));
+        work.extend(step.falls_through().then_some(at + 1));
+    }
+    true
+}
+
 /// Run the registers `f` gave `d`'s values along every path of `d`, and say
 /// what is wrong when a register does not hold the value a step reads there.
 /// `d` is the function before anything was left out of it, and `idle` says which
@@ -532,8 +765,11 @@ fn wrong_register(d: &Draft, f: &Assigned, idle: &[bool]) -> Option<String> {
                 return;
             };
             // A drop that is left out does nothing, and the register may be
-            // another value's by then.
+            // another value's by then. A return gives up every register.
             if role == Role::Drop && idle[i] {
+                if returns_soon(d, idle, i) {
+                    return;
+                }
                 for (r, held) in now.iter() {
                     if held.value() == v && *held != Holds::Taken(v) {
                         wrong = Some(format!("{i} drops {v:?}, which is in r{r}: {now:?}"));
@@ -637,10 +873,11 @@ fn check(mut d: Draft, what: &str) -> Option<usize> {
         Err(Unfit::TooMany(Limit::Values)) => return None,
         Err(why) => panic!("{what}: {why:?}"),
     };
-    if let Some(wrong) = wrong_register(&before, &f, &held.idle) {
+    let idle = idle(&held, &f.regs);
+    if let Some(wrong) = wrong_register(&before, &f, &idle) {
         panic!("{what}: {wrong}");
     }
-    if let Some(wrong) = wrong_jump(&before, &f, &held.idle) {
+    if let Some(wrong) = wrong_jump(&before, &f, &idle) {
         panic!("{what}: {wrong}");
     }
     Some(f.own.len())
@@ -678,12 +915,13 @@ fn every_register_read_holds_its_value_in_random_functions() {
 fn a_register_shared_by_mistake_is_found() {
     type Wrong = fn(&mut Assigned, &mut Vec<bool>);
     let wrong = |mut d: Draft, wrong: Wrong| {
-        let mut held = settle(&mut d).expect("a function that loads");
+        let held = settle(&mut d).expect("a function that loads");
         let before = copy_of(&d);
         let mut f = allocate(d, &held).expect("a function that fits");
-        assert_eq!(wrong_register(&before, &f, &held.idle), None);
-        wrong(&mut f, &mut held.idle);
-        assert!(wrong_register(&before, &f, &held.idle).is_some());
+        let mut idle = idle(&held, &f.regs);
+        assert_eq!(wrong_register(&before, &f, &idle), None);
+        wrong(&mut f, &mut idle);
+        assert!(wrong_register(&before, &f, &idle).is_some());
     };
     let sum = || {
         vec![
@@ -701,8 +939,17 @@ fn a_register_shared_by_mistake_is_found() {
     let steps = vec![of::len(1, 0).into(), of::again(&[0, 1])];
     wrong(draft(2, 1, steps, &[]), |f, _| f.regs[1] = f.regs[0]);
     // And a drop left out that still finds its value.
-    let ins = vec![of::len(1, 0), of::drop(0), of::ret(1)];
-    wrong(draft(2, 1, ins, &[]), |_, idle| idle[1] = true);
+    let ins = vec![
+        of::len(1, 0),
+        of::constant(2),
+        of::drop(0),
+        of::add(3, 1, 2),
+        of::ret(3),
+    ];
+    wrong(draft(4, 1, ins, &[]), |f, idle| {
+        idle[2] = true;
+        f.regs[2] = Some(Reg(9));
+    });
     // And a value read after it was taken.
     let mut d = draft(3, 1, vec![of::mv(1, 0), of::len(2, 0), of::ret(1)], &[]);
     let held = settle(&mut d).expect("a function that loads");

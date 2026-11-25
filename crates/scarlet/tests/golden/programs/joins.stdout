@@ -1,0 +1,37 @@
+[4, 8, 12]
+6
+{6: four}
+8
+13
+both, 11.
+a, 11.
+many 7.
+many 3.
+none.
+[1, 2, 1, 9, 2]
+[9, 2]
+[2, 1, 0, -1]
+[5, 4, 3, 2, 1]
+22
+90
+12
+5
+102
+102
+2
+0
+Pair {
+  x: a,
+  y: [1, 1]
+}
+Pair {
+  x: Empty,
+  y: []
+}
+[True, True, True, False, True]
+{c: 1, a: 3, b: 2}
+State {
+  seen: [8, 6, 4, 2],
+  odd: 4,
+  even: 4
+}

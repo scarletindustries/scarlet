@@ -1,35 +1,40 @@
 fn main.g(%0:t0) -> :t1
-  match %0 :t1
+  match %0
     | 10.0(%1, %2) ->
       drop %0
       drop %2
       ret %1
     | 10.1() ->
-      ret c0
+      let %3:t1 = c0
+      ret %3
 
 fn main.f(%0:t2) -> :t1
-  letj %6:t1 =
-    if %0 :t1
+  join j0(%8:t1) after
+    if %0
       let %1:t1 = c1
       let %2:t0 = ctor 10.1()
       let %3:t0 = ctor 10.0(%1, %2)
+      drop %2
       let %4:t1 = call fn#0(%3)
       let %5:t1 = call fn#0(%3)
-      ret IntAdd(%4, %5)
+      drop %3
+      let %6:t1 = IntAdd(%4, %5)
+      jump j0(%6)
     else
-      ret c0
-  drop %0
-  let %7:t1 = %6
-  let %8:t1 = c1
-  ret IntAdd(%8, %7)
+      let %7:t1 = c0
+      jump j0(%7)
+  let %9:t1 = c1
+  let %10:t1 = IntAdd(%9, %8)
+  ret %10
 
 fn main.main() -> :t1
   let %0:t2 = true
-  ret call fn#1(%0)
+  tail call fn#1(%0)
 
 toplevel:
 fn main.__main__() -> :t3
-  ret nil
+  let %0:t3 = nil
+  ret %0
 where
   c0 = Int(0)
   c1 = Int(1)

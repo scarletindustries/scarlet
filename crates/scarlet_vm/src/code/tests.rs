@@ -93,7 +93,6 @@ pub(super) fn draft(
         values,
         params: (0..params).map(VReg).collect(),
         kinds: vec![Some(Makes::Any); values as usize],
-        undropped: false,
         closure: ReadsClosure::Nothing,
     }
 }
@@ -130,7 +129,6 @@ pub(super) fn copy_of(d: &Draft) -> Draft {
         values: d.values,
         params: d.params.clone(),
         kinds: d.kinds.clone(),
-        undropped: d.undropped,
         closure: d.closure,
     }
 }
@@ -159,6 +157,22 @@ pub(super) mod of {
         Ins::Ret {
             src: Taken(VReg(src)),
             last: LastReg,
+        }
+    }
+
+    /// End with what `src` holds. It gives up nothing that a drop in front of it
+    /// would.
+    pub(crate) fn halt(src: u32) -> Ins<VReg> {
+        let src = Taken(VReg(src));
+        Ins::Halt { src }
+    }
+
+    /// Leave for the function that `f` holds. It gives up every register.
+    pub(crate) fn leave(f: u32) -> Ins<VReg> {
+        Ins::TailCallValue {
+            callee: Shared(VReg(f)),
+            args: Args::new(&[]).expect("room for none"),
+            own: OwnRoom,
         }
     }
 
@@ -387,7 +401,7 @@ fn a_function_takes_at_most_250_parameters() {
 
     let (many, calls) = (FuncIdx(0), FuncIdx(1));
     let f = program.fns.get_mut(many).expect("many");
-    let mut last = f.core.params[249].clone();
+    let mut last = f.core.params[249];
     last.id = scarlet_ir::core_ir::LocalId(10_000);
     f.core.params.push(last);
     let code = load(&program, Audit::Never).expect("the program loads");
@@ -410,8 +424,7 @@ fn a_function_takes_at_most_250_parameters() {
     while let scarlet_ir::core_ir::CoreExpr::Let { body, .. } = e {
         e = body;
     }
-    let scarlet_ir::core_ir::CoreExpr::Tail(scarlet_ir::core_ir::Atom::Call { args, .. }) = e
-    else {
+    let scarlet_ir::core_ir::CoreExpr::TailCall { args, .. } = e else {
         panic!("a call: {e}");
     };
     args.push(args[0]);

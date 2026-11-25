@@ -1364,15 +1364,11 @@ fn a_write_keeps_every_element_counted() {
 /// cell. Where the `..s` is written makes no difference, and neither does an
 /// argument before the write that reads `s`, or reading the array into a
 /// name of its own before the update, or taking the record apart with a
-/// `match`.
+/// `match`. Neither does an update inside an `if` whose value is used.
 ///
-/// Two spellings still copy the root and the nodes down to the slot at
-/// every write, 24,984 cells with the 5,000 records. The first is a rule:
-/// an argument written after the write reads `s`, so `s` has to live past
-/// the write. The second is a limit to remove, not a rule to keep: an
-/// update inside an `if` used as a value copies because no drop is placed
-/// inside a branch that gives a value. Step 17 of docs/perf-plan.md should
-/// bring it to 5,000.
+/// One spelling copies the root and the nodes down to the slot at every write,
+/// 24,984 cells with the 5,000 records. That is a rule: an argument written after
+/// the write reads `s`, so `s` has to live past the write.
 ///
 /// A record `main` built itself and has no more use for is the callee's once it
 /// is passed, as any other is, and its array is written in place.
@@ -1457,7 +1453,7 @@ fn a_record_update_gives_up_the_record_before_it_runs_the_new_fields() {
          \tprintln(State(..done, check: 1).check)\n\
          }\n",
         "37492500\n5000\n37492500\n5000\n37492500\n5000\n37497500\n5000\n37492500\n5000\n\
-         37497500\n24984\n37492500\n24984\n5000\n37492500\n1\n",
+         37497500\n24984\n37492500\n5000\n5000\n37492500\n1\n",
     );
 }
 
@@ -1609,13 +1605,8 @@ fn a_nested_record_update_writes_in_place_wherever_its_spread_is() {
 /// holder: 1,000 sets of keys the map already has make the 1,000 records,
 /// the 1,000 tasks and their 1,000 empty arrays, and no map cell.
 ///
-/// `by_task` is a limit to remove, not a rule to keep. It is the same
-/// update, and the record is given up before the set there too, but the
-/// set still copies, 5,436 cells. The value is a cell bound before the
-/// update, so its drop comes after the set and before the map's, and the
-/// loader only lets a set take its map when the map's drop is the first
-/// thing after it. Step 33 of docs/perf-plan.md sets that from liveness and
-/// should bring the second number to 3,000.
+/// `by_task` is the same, with a value that is a cell bound before the update.
+/// Its drop comes after the set and before the map's.
 #[test]
 fn a_record_update_sets_a_map_it_holds_in_place() {
     prints(
@@ -1653,7 +1644,7 @@ fn a_record_update_sets_a_map_it_holds_in_place() {
          \tprintln(cells(keyed))\n\
          \tprintln(cells(tasked))\n\
          }\n",
-        "16\n3000\n16\n5436\n",
+        "16\n3000\n16\n3000\n",
     );
 }
 
@@ -1912,6 +1903,12 @@ fn first_connection_ends_before_the_new_field_runs(
          \tnew = redial(port)\n\
          \tif c {{ new }} else {{ None }}\n\
          }}\n\
+         fn loose(x a, port Int) Option(socket::Socket) {{\n\
+         \ty = kept(x)\n\
+         \tc = if y == y {{ 1 }} else {{ 2 }}\n\
+         \tnew = redial(port)\n\
+         \tif c == 1 {{ new }} else {{ None }}\n\
+         }}\n\
          fn replace(_x a, y a, n Int, port Int) Option(socket::Socket) {{\n\
          \tif n == 0 {{ redial(port) }} else {{ replace(y, y, n - 1, port) }}\n\
          }}\n\
@@ -2064,17 +2061,41 @@ fn a_tail_call_closes_a_handle_the_turn_is_done_with() {
     assert!(!ends("trade(held, None, 3, port)", 200));
 }
 
-/// A value that nothing drops goes when its register is next written, and a
-/// Bool's drop says how long the Bool holds a register of its own. So a function
-/// that holds a handle in such a value keeps that drop. Here the Bool that is
-/// made from the parameter gets the register of the handle, and the connection
-/// is closed before `redial` runs.
+/// A handle is closed at its last use where that is inside a branch whose value is
+/// used, and where what holds it has a type the function does not know: in a name
+/// that the branch makes, in one from outside that only the branch reads, in one
+/// that only the other branch reads, in what a match in a branch takes apart and in
+/// the parameter of a join. What is read after the branch stays open.
 #[test]
-fn a_bool_keeps_its_register_where_nothing_drops_a_handle() {
-    assert!(first_connection_ends_before_the_new_field_runs(
-        "held = h.conn\n\tport = h.port\n\tHeld(chosen(True, held, port), 1)",
-        std::time::Duration::from_secs(10),
-    ));
+fn a_handle_is_closed_at_its_last_use_inside_a_branch() {
+    let ends = |new: &str, wait: u64| {
+        first_connection_ends_before_the_new_field_runs(
+            &format!("held = h.conn\n\tport = h.port\n\tnew = {new}\n\tHeld(new, 1)"),
+            std::time::Duration::from_millis(wait),
+        )
+    };
+    let closed = [
+        "chosen(True, held, port)",
+        "loose(held, port)",
+        "if port > 0 {\n\t\tx = kept(held)\n\t\tif x == x { redial(port) } else { None }\n\t\
+         } else { None }",
+        "if port > 0 && held != None { redial(port) } else { None }",
+        "if port < 0 { held } else { redial(port) }",
+        "match held {\n\t\tSome(_) -> redial(port)\n\t\tNone -> None\n\t}",
+        "match Both(held, port) {\n\t\tBoth(Some(_), p) if p > 0 -> redial(p)\n\t\t\
+         Both(Some(_), _) | Both(None, _) -> None\n\t}",
+        "if held != None { redial(port) } else { held }",
+        "match { if port > 0 { held } else { None } } {\n\t\tSome(_) -> redial(port)\n\t\t\
+         None -> None\n\t}",
+        "{\n\t\ty = if port > 0 { kept(held) } else { None }\n\t\t\
+         if y == y { redial(port) } else { None }\n\t}",
+    ];
+    for new in closed {
+        assert!(ends(new, 10_000), "{new}");
+    }
+    let open = "{\n\t\tn = if port > 0 { redial(port) } else { held }\n\t\t\
+                if held == None { held } else { n }\n\t}";
+    assert!(!ends(open, 200));
 }
 
 /// The listing shows a write with the array it takes marked, as it marks an
@@ -3500,8 +3521,7 @@ fn the_listing_shows_a_tail_call_as_moves_and_a_jump() {
 }
 
 /// A loop's arguments are computed in the order that leaves nothing to move,
-/// but as written where something is held that nothing drops: their order says
-/// when that is given up.
+/// whatever else it passes.
 #[test]
 fn the_listing_shows_the_order_of_a_loops_arguments() {
     let listed = |ty: &str| {
@@ -3523,10 +3543,10 @@ fn the_listing_shows_the_order_of_a_loops_arguments() {
         };
         (go.find("IntSubK("), go.find("IntAdd("), go.contains("Move"))
     };
-    let (sub, add, moves) = listed("Array(Int)");
-    assert!(add < sub && !moves, "{add:?} {sub:?} {moves}");
-    let (sub, add, moves) = listed("a");
-    assert!(sub < add && moves, "{add:?} {sub:?} {moves}");
+    for ty in ["Array(Int)", "a"] {
+        let (sub, add, moves) = listed(ty);
+        assert!(add < sub && !moves, "{ty}: {add:?} {sub:?} {moves}");
+    }
 }
 
 /// A function that needs something the VM does not run yet has no

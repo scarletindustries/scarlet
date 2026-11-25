@@ -5,11 +5,13 @@ fn main.main() -> :t0
   let %3:t0 = Field(0)(%2)
   let %4:t0 = Field(1)(%2)
   drop %2
-  ret IntAdd(%3, %4)
+  let %5:t0 = IntAdd(%3, %4)
+  ret %5
 
 toplevel:
 fn main.__main__() -> :t2
-  ret nil
+  let %0:t2 = nil
+  ret %0
 where
   c0 = Int(1)
   c1 = Int(2)

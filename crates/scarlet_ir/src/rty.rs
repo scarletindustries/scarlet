@@ -259,16 +259,10 @@ impl ResolvedPool {
         })
     }
 
-    /// Whether Perceus gives up a value of type `t` that can be a cell.
-    ///
-    /// It leaves an Int, a String and a value whose type is a variable to the
-    /// frame that holds it.
-    pub fn is_heap(&self, t: RTy) -> Result<bool, ForeignRTy> {
-        Ok(match self.node(t)? {
-            ResolvedNode::Con { id, .. } => self.as_prim(id).is_none(),
-            ResolvedNode::Tuple { .. } | ResolvedNode::Fun { .. } => true,
-            ResolvedNode::Bound(_) => false,
-        })
+    /// Whether a value of type `t` gets a `Drop` where it dies: one that can be a
+    /// cell does. An Int and a String are left to the frame that holds them.
+    pub fn gets_drop(&self, t: RTy) -> Result<bool, ForeignRTy> {
+        Ok(self.repr(t)? == Repr::Counted && self.prim_of(t)?.is_none())
     }
 }
 

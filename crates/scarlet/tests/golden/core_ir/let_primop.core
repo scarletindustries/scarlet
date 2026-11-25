@@ -4,11 +4,13 @@ fn main.main() -> :t0
   let %2:t0 = IntAdd(%0, %1)
   let %3:t0 = c2
   let %4:t0 = IntMul(%2, %3)
-  ret IntSub(%4, %2)
+  let %5:t0 = IntSub(%4, %2)
+  ret %5
 
 toplevel:
 fn main.__main__() -> :t1
-  ret nil
+  let %0:t1 = nil
+  ret %0
 where
   c0 = Int(1)
   c1 = Int(2)

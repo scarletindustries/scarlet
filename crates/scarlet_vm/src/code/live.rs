@@ -16,11 +16,16 @@
 //!
 //! The other is which values are held at once and so need a register each.
 //! For that a `Drop` is a read, because it names the register. But one whose
-//! value every way there has taken does nothing. It is left out, and holds
-//! nothing.
+//! value every way there has taken does nothing, and neither does one that a
+//! return comes soon after, which gives up every register. What runs in between
+//! makes no cell and calls nothing ([`Ins::brief`]). These are left out, and hold
+//! nothing. One straight after an instruction that writes a register does
+//! nothing either when that register is the dropped value's, because the write
+//! gives up what the register held. So such a value does not keep its register
+//! from what is written there.
 
 use super::Unfit;
-use super::ins::{Dst, Ins, Label, Lists, Role, VReg};
+use super::ins::{Dead, Dst, Ins, Label, Lists, Role, Src, VReg};
 use super::moves::labels_by_place;
 use super::translate::{Draft, Step};
 use crate::frame::MAX_VALUES;
@@ -30,24 +35,51 @@ use crate::stop::{Broken, Limit};
 pub(super) struct Held {
     /// Each pair of values that a register cannot hold both of: one was
     /// written while the other was still held. One that was held only for
-    /// `Drop`s that do nothing does not count, unless the function holds
-    /// something that nothing drops ([`Draft::undropped`]): when that is
-    /// released depends on which values share registers, so there it counts.
+    /// `Drop`s that do nothing does not count.
     pub(super) clashes: Vec<(VReg, VReg)>,
     /// Whether the instructions name each value, by its number.
     pub(super) named: Vec<bool>,
-    /// Whether each step does nothing: a constant that nothing names, or a
-    /// `Drop` of what was taken on every way to it.
+    /// Whether each step does nothing: a constant that nothing names, a `Drop`
+    /// of what was taken on every way to it, or one that a return comes soon after.
     pub(super) idle: Vec<bool>,
+    /// The `Drop`s that do nothing when the value they are of shares its register
+    /// with one that the instruction in front writes.
+    pub(super) overwritten: Vec<Overwritten>,
+}
+
+/// A `Drop` straight after an instruction that writes a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Overwritten {
+    /// The step that the `Drop` is.
+    pub(super) step: usize,
+    pub(super) dropped: VReg,
+    pub(super) written: VReg,
 }
 
 /// The values held where a label stands.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct AtLabel {
     held: Box<[VReg]>,
     read: Box<[VReg]>,
     /// Those that are held and not read, with the `Drop`s each is held for.
     dropped: Box<[(VReg, Drops)]>,
+    /// [`Walk::end`].
+    end: End,
+}
+
+/// What every way from a point comes to, past nothing but [`Ins::brief`]
+/// instructions and `Drop`s that do nothing. Of two ways the later one here counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum End {
+    /// A return, or a tail call of a function value, either of which gives up
+    /// every register.
+    Return,
+    /// The same, and a cell is taken apart on the way there. A value that holds
+    /// that cell is better dropped before it, because then the cell has one holder
+    /// and its fields move out.
+    Open,
+    /// Something else.
+    Other,
 }
 
 /// Some of the `Drop`s of one value, by one of them. Either each finds the
@@ -70,6 +102,14 @@ pub(super) fn settle(draft: &mut Draft) -> Result<Held, Unfit> {
     }
     let values = draft.values as usize;
     let mut walk = Walk::new(values, draft.labels.len(), draft.steps.len());
+    for step in &draft.steps {
+        if let Step::Ins(ins) = step
+            && let Some(Src(v)) = ins.reads_part_of()
+            && let Some(part) = walk.parts.get_mut(v.0 as usize)
+        {
+            *part = true;
+        }
+    }
     let mut labels = labels_by_place(&draft.labels).into_iter().peekable();
     for (at, step) in draft.steps.iter_mut().enumerate().rev() {
         walk.step(at, step, &mut draft.lists)?;
@@ -79,7 +119,7 @@ pub(super) fn settle(draft: &mut Draft) -> Result<Held, Unfit> {
     if !walk.held.items.iter().all(|v| draft.params.contains(v)) {
         return Err(Unfit::Broken(Broken::ReadBeforeWritten));
     }
-    Ok(walk.done(draft.undropped))
+    Ok(walk.done())
 }
 
 /// The walk, at the point it has reached.
@@ -97,6 +137,12 @@ struct Walk {
     /// alone.
     while_pending: Vec<(VReg, VReg, Drops)>,
     drops: AllDrops,
+    end: End,
+    /// The values that something is read out of.
+    parts: Vec<bool>,
+    /// The `Drop`s that run straight after here, as their steps and what they are
+    /// of, when nothing jumps to one of them.
+    next: Vec<(usize, VReg)>,
     out: Held,
     // Space for one instruction's operands, kept between instructions.
     operands: Vec<(VReg, Role)>,
@@ -120,24 +166,28 @@ impl Walk {
             pending: vec![Drops(0); values],
             while_pending: Vec::new(),
             drops: AllDrops::default(),
+            end: End::Other,
+            parts: vec![false; values],
+            next: Vec::new(),
             out: Held {
                 clashes: Vec::new(),
                 named: vec![false; values],
                 idle: vec![false; steps],
+                overwritten: Vec::new(),
             },
         }
     }
 
     /// What the walk found, once it is at the start. A value that is held there
     /// to be dropped was not taken.
-    fn done(mut self, undropped: bool) -> Held {
+    fn done(mut self) -> Held {
         for v in &self.held.items {
             if !self.read.has(*v) {
                 self.drops.find(pending(&self.pending, *v));
             }
         }
         for (v, h, drops) in self.while_pending {
-            if undropped || self.drops.find_it(drops) {
+            if self.drops.find_it(drops) {
                 self.out.clashes.push((v, h));
             }
         }
@@ -167,6 +217,7 @@ impl Walk {
         at: usize,
     ) {
         while let Some((_, label)) = labels.next_if(|(place, _)| *place == at) {
+            self.next.clear();
             let held = &self.held.items;
             let mut dropped = Vec::new();
             if self.any_pending() {
@@ -177,6 +228,7 @@ impl Walk {
                 held: held.as_slice().into(),
                 read: self.read.items.as_slice().into(),
                 dropped: dropped.into(),
+                end: self.end,
             };
             if let Some(kept) = self.labels.get_mut(label.0 as usize) {
                 *kept = Some(here);
@@ -199,6 +251,24 @@ impl Walk {
             }
             return Ok(());
         }
+        if let Step::Ins(Ins::Drop { reg: Dead(v) }) = step {
+            let given_up = match self.end {
+                End::Return => true,
+                End::Open => self.parts.get(v.0 as usize) == Some(&false),
+                End::Other => false,
+            };
+            if given_up {
+                if let Some(idle) = self.out.idle.get_mut(at) {
+                    *idle = true;
+                }
+                return Ok(());
+            }
+            self.next.push((at, *v));
+        }
+        self.end = match step {
+            Step::Ins(ins) => self.end_from(ins),
+            Step::TailCall { .. } => End::Other,
+        };
         if !step.falls_through() {
             self.held.clear();
             self.read.clear();
@@ -290,10 +360,31 @@ impl Walk {
                 Role::Write | Role::WriteOnHit | Role::Drop => {}
             }
         }
+        if !matches!(step, Step::Ins(Ins::Drop { .. })) {
+            self.next.clear();
+        }
         if self.held.items.len() > MAX_VALUES {
             return Err(Unfit::TooMany(Limit::Values));
         }
         Ok(())
+    }
+
+    /// What every way from `ins` on comes to.
+    fn end_from(&self, ins: &Ins<VReg>) -> End {
+        if ins.gives_up_all() {
+            return End::Return;
+        }
+        if !ins.brief() {
+            return End::Other;
+        }
+        let there = ins.target().map(|Label(l)| {
+            let kept = self.labels.get(l as usize).and_then(Option::as_ref);
+            kept.map_or(End::Other, |landing| landing.end)
+        });
+        let next = ins.falls_through().then_some(self.end);
+        let opens = ins.opens().then_some(End::Open);
+        let all = [there, next, opens].into_iter().flatten();
+        all.max().unwrap_or(End::Other)
     }
 
     /// Note what the instruction's written values clash with: everything held
@@ -304,7 +395,16 @@ impl Walk {
             written = rest;
             if writes(*role) {
                 for h in self.held.items.iter().filter(|h| *h != v) {
-                    if self.read.has(*h) {
+                    let next = self.next.iter().find(|(_, of)| of == h);
+                    if *role == Role::Write
+                        && let Some((step, dropped)) = next.copied()
+                    {
+                        self.out.overwritten.push(Overwritten {
+                            step,
+                            dropped,
+                            written: *v,
+                        });
+                    } else if self.read.has(*h) {
                         self.out.clashes.push((*v, *h));
                     } else {
                         let drops = pending(&self.pending, *h);

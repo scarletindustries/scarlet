@@ -44,10 +44,10 @@ fn lower(source: &str) -> String {
     // share a type, rather than an interner offset.
     let mut out = apply_renumber(&raw, b':', ":t", &renumber(&raw, b':'));
     out = apply_renumber(&out, b'c', "c", &const_map);
-    // `fn#N` and `@gN` are absolute program offsets shared with the stdlib, so
-    // we renumber them densely like the rest.
+    // `fn#N` and `globalN` are absolute program offsets shared with the stdlib,
+    // so we renumber them densely like the rest.
     out = renumber_prefixed(&out, "fn#");
-    out = renumber_prefixed(&out, "@g");
+    out = renumber_prefixed(&out, "global");
     if !const_map.is_empty() {
         let mut rows: Vec<(usize, usize)> = const_map.iter().map(|(&o, &n)| (n, o)).collect();
         rows.sort_unstable();
@@ -206,7 +206,7 @@ core_golden!(
      }\n"
 );
 
-// An if whose arms both Tail a local.
+// An if whose arms both return a local.
 core_golden!(
     if_branch,
     "fn abs(n Int) Int {\n\
@@ -597,51 +597,27 @@ fn a_record_update_of_many_fields_is_one_when_it_keeps_more() {
     }
 }
 
-/// A function that holds a value that may be a handle and that nothing drops
-/// keeps every register it had, so its updates read and rebuild as they did.
+/// An update is one wherever it is: in a branch whose value is used, and after one
+/// that holds a handle.
 #[test]
-fn a_function_that_leaves_a_handle_undropped_rebuilds() {
-    let src = |update: &str| {
-        format!(
+fn a_record_update_is_one_beside_a_branch_and_in_one() {
+    let f = |inside: &str| {
+        f_of(&format!(
             "import scarlet/net/socket\n\
              type P {{\n\tn Int\n\tm Int\n\tconn Option(socket::Socket)\n}}\n\
              fn open(i Int) Option(socket::Socket) {{ if i > 0 {{ None }} else {{ open(i + 1) }} }}\n\
              fn f(p P, i Int) P {{\n\
-             \tn = if i > 0 {{\n\t\to = open(i)\n\
-             \t\tmatch o {{ Some(_) -> 1\n None -> 2 }}\n\t}} else {{ 3 }}\n\
-             \t{update}\n\
-             }}\n\
-             pub fn main() {{ println('') }}\n"
-        )
-    };
-    let left = f_of(&src("P(..p, n: n)"));
-    assert_eq!(updates(&left), 0, "{left}");
-    assert!(
-        left.contains("Field(1)") && left.contains(" ctor "),
-        "{left}"
-    );
-    // An update may hold a handle too, and here nothing else does.
-    let one = |inside: &str| {
-        f_of(&format!(
-            "import scarlet/net/socket\n\
-             type P {{\n\tn Int\n\tm Int\n\tconn Option(socket::Socket)\n}}\n\
-             fn f(p P, i Int) P {{\n\
              \ta = if i > 0 {{\n\t\t{inside}\n\t}} else {{ 3 }}\n\
              \tP(..p, n: a)\n\
              }}\n\
-             pub fn main() {{ println('') }}\n"
+             pub fn main() {{ println(open(0)) }}\n"
         ))
     };
-    let made = one("q = P(..p, n: i)\n\t\tq.n + q.m");
-    assert_eq!(updates(&made), 0, "{made}");
-    assert_eq!(made.matches(" ctor ").count(), 2, "{made}");
-    let read = one("p.n + p.m");
-    assert_eq!(updates(&read), 1, "{read}");
-    let held = src("P(..p, n: n)");
-    let start = held.find("if i > 0 {\n").expect("the join");
-    let end = held.find("else { 3 }").expect("its end");
-    let none = f_of(&held.replace(&held[start..end], "if i > 0 { i * 2 } "));
-    assert_eq!(updates(&none), 1, "{none}");
+    let held = f("o = open(i)\n\t\tmatch o {\n\t\t\tSome(_) -> 1\n\t\t\tNone -> 2\n\t\t}");
+    assert_eq!(updates(&held), 1, "{held}");
+    let made = f("q = P(..p, n: i)\n\t\tq.n + q.m");
+    assert_eq!(updates(&made), 2, "{made}");
+    assert_eq!(updates(&f("p.n + p.m")), 1);
 }
 
 /// A base that is only a name has nothing to run, so where its `..s` is
@@ -760,8 +736,8 @@ core_golden!(
      }\n"
 );
 
-// An `If` in operand position becomes a `LetJoin` whose value is heap-typed,
-// not the Int/Bool the join machinery once assumed.
+// An `If` in operand position is the body of a join, whose parameter is of a
+// type that gets a drop.
 core_golden!(
     heap_join_operand,
     "type L {\n\tCons(h Int, t L)\n\tLNil\n}\n\
@@ -776,6 +752,36 @@ core_golden!(
      }\n\
      pub fn main() {\n\
      \tf(True)\n\
+     }\n"
+);
+
+// The arm of an or-pattern that binds names is a join that takes them. The guard
+// is at each alternative, because a miss there tries the next.
+core_golden!(
+    or_pattern_binds,
+    "type L {\n\tCons(h Int, t L)\n\tLNil\n}\n\
+     fn f(a L, b L, k Int) L {\n\
+     \tmatch (a, b) {\n\
+     \t\t(Cons(n, t), _) | (_, Cons(n, t)) if n > k -> Cons(n + k, t)\n\
+     \t\t(Cons(_, _) | LNil, Cons(_, t)) -> t\n\
+     \t\t(Cons(_, _) | LNil, LNil) -> LNil\n\
+     \t}\n\
+     }\n\
+     pub fn main() {\n\
+     \tf(LNil, Cons(1, LNil), 0)\n\
+     }\n"
+);
+
+// A module's constants are each set as soon as they are worked out, so one may
+// read another, and the toplevel gives up its own reference after.
+core_golden!(
+    module_constants,
+    "const base = 4\n\
+     const pair = (base, [base, base + 1])\n\
+     const picked = if base > 3 { pair.1 } else { [] }\n\
+     fn f(i Int) Int { picked[i] or base }\n\
+     pub fn main() {\n\
+     \tf(1)\n\
      }\n"
 );
 
@@ -811,11 +817,9 @@ core_golden!(
      }\n"
 );
 
-// Perceus inserts no drops inside a join body, so `t` lives to the end of
-// `f`'s frame. That's sound, but `t` holds its cell for longer than it has to.
-// This snapshot pins the gap, and sinking drops into joins should change it.
+// What a branch made and reads last is dropped in the branch.
 core_golden!(
-    join_body_defers_drop,
+    join_body_drops_its_own,
     "type L {\n\tCons(h Int, t L)\n\tLNil\n}\n\
      fn g(l L) Int {\n\
      \tmatch l {\n\
@@ -1123,6 +1127,141 @@ fn guarded_match_arm_bodies_lowered_once() {
     );
 }
 
+/// The body of an arm is lowered once when an or-pattern in it binds names, and
+/// so the arm may be matched in several places: with one or-pattern, with two, one
+/// inside the other, one inside a tuple, a guard, and a `<<>>` pattern before it.
+/// The rest of the pattern and the guard are lowered at each.
+#[test]
+fn an_or_pattern_that_binds_shares_its_arm_body() {
+    let body = |arms: &str| {
+        let source = format!(
+            "type T {{\n\tA(x Int)\n\tB(x Int)\n\tC(t T, x Int)\n}}\n\
+             fn f(t T, u T, b Binary) Int {{\n\tmatch (t, u, b) {{\n{arms}\t}}\n}}\n\
+             pub fn main() {{ println(f(A(1), B(2), <<>>)) }}\n"
+        );
+        assert_arm_bodies_once(&source, &[101, 909]);
+        fn_body(&lower(&source), 0)
+    };
+    let any = "A(_) | B(_) | C(_, _)";
+    for (pattern, rest, adds, takes, guards) in [
+        ("(A(n) | B(n), _, _)", "(C(_, _), _, _)", "n", 1, 0),
+        (
+            "(A(n) | B(n), A(m) | B(m), _)",
+            "(A(_) | B(_) | C(_, _), A(_) | B(_) | C(_, _), _)",
+            "n + m",
+            2,
+            0,
+        ),
+        (
+            "(C(A(n) | B(n), m) | C(C(_, n), m), _, _)",
+            "(A(_) | B(_), _, _)",
+            "n + m",
+            2,
+            0,
+        ),
+        ("(A(n) | B(n), _, _) if n > 7", any, "n", 1, 2),
+        (
+            "(A(n) | B(n), A(m) | B(m), _) if n > m",
+            "(A(_) | B(_) | C(_, _), A(_) | B(_) | C(_, _), _)",
+            "n",
+            2,
+            4,
+        ),
+        ("(A(n) | B(n), _, <<k>>)", any, "n + k", 2, 0),
+        (
+            "(_, A(n) | B(n), <<k, _:binary>>) if k > n",
+            "(_, A(_) | B(_) | C(_, _), _)",
+            "n + k",
+            2,
+            2,
+        ),
+    ] {
+        let rest = match rest == any {
+            true => format!("({any}, _, _)"),
+            false => rest.to_string(),
+        };
+        let arms = format!("\t\t{pattern} -> {adds} + 101\n\t\t{rest} -> 909\n");
+        // The body is the continuation of the one join that takes anything.
+        let body = body(&arms);
+        let joins = body.lines().filter(|l| l.contains("join j"));
+        let taking: Vec<&str> = joins.filter(|l| !l.contains("()")).collect();
+        let [join] = taking[..] else {
+            panic!("one join takes names:\n{body}");
+        };
+        assert_eq!(join.matches('%').count(), takes, "{join}\n{body}");
+        let tests = body.matches("IntGt(").count();
+        assert_eq!(tests, guards, "{body}");
+    }
+}
+
+/// An arm whose pattern binds names and matches in one place takes them as they are,
+/// whatever kinds of pattern are in it. So does an or-pattern that binds none.
+#[test]
+fn an_arm_that_matches_in_one_place_takes_no_names() {
+    let core = lower(
+        "type T {\n\tA(x Int)\n\tB(x Int)\n}\n\
+         fn f(t T, xs Array(T), b Binary) Int {\n\
+         \tmatch (t, xs, b) {\n\
+         \t\t(A(1) | B(_), [A(n), ..rest], <<k, m:utf8, v:binary>>) -> {\n\
+         \t\t\tif rest == [] && v == b { n + k + m } else { k }\n\
+         \t\t}\n\
+         \t\t(A(_) | B(_), _, <<_:8, w:binary>>) -> if w == b { 1 } else { 2 }\n\
+         \t\t(A(_) | B(_), _, _) -> 0\n\
+         \t}\n\
+         }\n\
+         pub fn main() {\n\
+         \tf(A(1), [], <<>>)\n\
+         }\n",
+    );
+    let body = fn_body(&core, 0);
+    let joins = body.lines().filter(|l| l.contains("join j"));
+    // The one is the value of the `&&`.
+    let taking = joins.filter(|l| !l.contains("()")).count();
+    assert_eq!(taking, 1, "{body}");
+}
+
+/// A chain of `&&` or `||` is joins one after another and not one in the next, so
+/// its length is no depth. What a branch is on is worked out in the body of its
+/// join, beside it.
+#[test]
+fn a_chain_of_short_circuits_is_no_nest() {
+    for op in ["&&", "||"] {
+        let f = f_of(&format!(
+            "fn f(a Int, b Int, c Int, d Int) Int {{\n\
+             \tx = a < 1 {op} b < 2 {op} c < 3 {op} d < 4\n\
+             \tif x {{ 1 }} else {{ 2 }}\n\
+             }}\n\
+             pub fn main() {{ println(f(1, 2, 3, 4)) }}\n"
+        ));
+        let joins = f.lines().filter(|l| l.contains("join j"));
+        let depths: Vec<usize> = joins.map(|l| l.len() - l.trim_start().len()).collect();
+        assert_eq!(depths, [2, 2, 2], "{f}");
+        let body = f.lines().skip_while(|l| !l.contains("join j")).nth(2);
+        assert!(body.is_some_and(|l| l.contains("IntLt(")), "{f}");
+    }
+    // Where it is returned there is a join for each but the last.
+    let f = f_of(
+        "fn f(a Int, b Int, c Int) Bool { a < 1 && b < 2 && c < 3 }\n\
+         pub fn main() { println(f(1, 2, 3)) }\n",
+    );
+    assert_eq!(f.matches("join j").count(), 1, "{f}");
+}
+
+/// `xs[i] or d` is one read with no branch, where its value is used as where it is
+/// returned.
+#[test]
+fn an_index_with_a_default_needs_no_join() {
+    let f = f_of(
+        "fn f(xs Array(Int), i Int) Int {\n\
+         \ta = xs[i] or 0\n\
+         \ta + { xs[a] or i }\n\
+         }\n\
+         pub fn main() { println(f([1], 0)) }\n",
+    );
+    assert_eq!(f.matches("ArrayIndexOr").count(), 2, "{f}");
+    assert!(!f.contains("join") && !f.contains("match"), "{f}");
+}
+
 /// Every alternative of an or-pattern shares one lowered arm body, and an
 /// exhausted alternative list shares the next arm's continuation.
 #[test]
@@ -1144,8 +1283,8 @@ fn or_pattern_arm_bodies_lowered_once() {
 
 /// An alternative in the middle of the chain that always matches makes the
 /// ones after it dead. We lower those and then discard them, and the discard
-/// must take back their `goto` counts. Otherwise a join nothing jumps to still
-/// becomes a `letc`.
+/// must take back their jumps. Otherwise a join nothing jumps to is still
+/// declared.
 #[test]
 fn discarded_alternative_leaves_no_unreachable_continuation() {
     let core = lower(
@@ -1163,9 +1302,12 @@ fn discarded_alternative_leaves_no_unreachable_continuation() {
     let mut targeted = Vec::new();
     for line in body.lines() {
         let t = line.trim();
-        if let Some(label) = t.strip_prefix("letc ").and_then(|r| r.strip_suffix(" =")) {
+        if let Some(label) = t
+            .strip_prefix("join ")
+            .and_then(|r| r.strip_suffix("() after"))
+        {
             declared.push(label);
-        } else if let Some(label) = t.strip_prefix("goto ") {
+        } else if let Some(label) = t.strip_prefix("jump ").and_then(|r| r.strip_suffix("()")) {
             targeted.push(label);
         }
     }
@@ -1173,22 +1315,20 @@ fn discarded_alternative_leaves_no_unreachable_continuation() {
     for label in declared {
         assert!(
             targeted.contains(&label),
-            "letc {label} is declared but no goto targets it:\n{body}"
+            "{label} is declared but nothing jumps to it:\n{body}"
         );
     }
 }
 
-// A match with no failure edge must lower to a single flat `Match`. `emit`'s
-// `SwitchTag` fast path looks for that shape, so a needless `LetCont` would
-// demote an exhaustive enum match to the `MatchEnum` ladder. The bytecode
-// version of this test is `dis::an_infallible_match_keeps_the_flat_lowering`.
+// A match with no failure edge must lower to a single flat `Match`, with no
+// needless jump.
 
-/// Asserts there's no `letc` or `goto` in the printed IR of a fn whose matches
+/// Asserts there's no `join` or `jump` in the printed IR of a fn whose matches
 /// can't fail.
 fn assert_no_continuations(source: &str, fn_idx: usize) {
     let core = lower(source);
     let body = fn_body(&core, fn_idx);
-    for needle in ["letc ", "goto "] {
+    for needle in ["join ", "jump "] {
         assert!(
             !body.contains(needle),
             "infallible match lowered a `{}` continuation:\n{body}",

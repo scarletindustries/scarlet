@@ -8,7 +8,7 @@ mod prim;
 
 pub use prim::PrimOp;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::TypeId;
@@ -84,8 +84,8 @@ impl std::hash::Hash for Const {
 }
 
 newtype_index!(
-    /// A labelled continuation, scoped to one lowered body.
-    /// [`CoreExpr::LetCont`] declares it and [`CoreExpr::Goto`] jumps to it. It
+    /// A place control comes together, scoped to one function.
+    /// [`CoreExpr::Join`] declares it and [`CoreExpr::Jump`] goes to it. It
     /// names code, never a value.
     pub struct JoinId("j")
 );
@@ -99,31 +99,18 @@ newtype_index!(
 /// a byte, and the arguments arrive in the first of them.
 pub const MAX_PARAMS: usize = 250;
 
-/// A typed local binding. Its [`RTy`] indexes the elaborator's `ResolvedPool`,
-/// which can't hold an unsolved inference variable. So Perceus can never get a
-/// type that answers `is_heap` with `false` only because inference lost it.
-#[derive(Debug, Clone)]
+/// A typed local binding. Its [`RTy`] indexes the program's `ResolvedPool`,
+/// which can't hold an unsolved inference variable, so what it says of a value
+/// is never a guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoreBind {
     pub id: LocalId,
     pub ty: RTy,
-    /// `Some(slot)` when this bind is a module's top-level declaration that
-    /// must land in that global slot. Function bodies read it with
-    /// `Load::Global(slot)`, so the top level has to write the same slot.
-    ///
-    /// It lives on the bind, not in a side table keyed by `LocalId`, because
-    /// that table would fall out of step as soon as a pass renumbers or drops
-    /// a bind.
-    pub global: Option<GlobalSlot>,
 }
 
 impl CoreBind {
-    /// A fresh bind, pinned to no slot. `lower` sets [`Self::global`] later.
     pub fn new(id: LocalId, ty: RTy) -> Self {
-        CoreBind {
-            id,
-            ty,
-            global: None,
-        }
+        CoreBind { id, ty }
     }
 }
 
@@ -460,6 +447,16 @@ pub enum Callee {
     Local(LocalId),
 }
 
+impl Callee {
+    /// The local it reads, when it reads one.
+    pub fn local(self) -> Option<LocalId> {
+        match self {
+            Callee::Local(f) => Some(f),
+            Callee::Known(_) | Callee::Self_ => None,
+        }
+    }
+}
+
 /// A slot in the entry (module) frame, where a module-scope binding lives. A
 /// module-scope name can be bound more than once, such as an import shadowed
 /// by a later `let`, so each binding carries the slot it lands in.
@@ -481,9 +478,8 @@ pub enum Load {
     SelfClosure,
 }
 
-/// The right-hand side of a `Let`, or the payload of a `Tail`. Every compound
-/// operand is a `LocalId`, because nested evaluation has already been
-/// flattened into the enclosing `Let` spine.
+/// The right-hand side of a `Let`. Every operand is a `LocalId`, because nested
+/// evaluation has already been flattened into the enclosing spine.
 #[derive(Debug, Clone)]
 pub enum Atom {
     Local(LocalId),
@@ -562,10 +558,7 @@ impl Atom {
             }
             Atom::Call { callee, args } => {
                 args.iter().for_each(|x| f(*x));
-                match callee {
-                    Callee::Local(x) => f(*x),
-                    Callee::Known(_) | Callee::Self_ => {}
-                }
+                callee.local().into_iter().for_each(f);
             }
         }
     }
@@ -595,9 +588,10 @@ impl CorePat {
     }
 }
 
-/// An ANF expression tree. The spine is a right-nested chain of `Let`s that
-/// ends in a `Tail`. `Match` and `If` are the only places control flow splits
-/// and joins.
+/// What a function does from some point on. It is a spine, a chain of nodes that
+/// each do one thing and go on, which ends in a branch or in what is done last.
+///
+/// Each local is bound in one place, and each join declared in one.
 #[derive(Debug, Clone)]
 pub enum CoreExpr {
     Let {
@@ -605,46 +599,42 @@ pub enum CoreExpr {
         rhs: Atom,
         body: Box<CoreExpr>,
     },
-    /// `let bind = <join>; body`, where `join` is a control-flow tree in
-    /// operand position. Every `Tail` inside `join` is a value, not a return.
-    /// It's separate from `Let` so `rhs: Atom` only ever holds operands, which
-    /// Perceus's linear scan depends on.
-    LetJoin {
-        bind: CoreBind,
-        join: Box<CoreExpr>,
+    /// Put `value` in a module-level slot. It is only in a toplevel, and there is
+    /// one for each slot.
+    SetGlobal {
+        slot: GlobalSlot,
+        value: LocalId,
         body: Box<CoreExpr>,
     },
-    /// Declares the continuation `cont`, which takes no arguments and is in
-    /// scope for every `Goto(id)` in `body`. Unlike `LetJoin`, it runs only when
-    /// a failure edge fires, many edges can enter it, and it sits in tail
-    /// position. It needs no arguments because `cont` only reads locals bound
-    /// before this node, and this node dominates every `Goto` to `id`: every
-    /// path to one of them passes through here.
-    LetCont {
+    /// The one place control comes together. `body` runs, and each jump in it to
+    /// `id` gives `params` their values and goes on with `cont`. `cont` can read
+    /// what was bound before this node, but nothing bound in `body`, and cannot
+    /// jump to `id`.
+    Join {
         id: JoinId,
+        params: Vec<CoreBind>,
         cont: Box<CoreExpr>,
         body: Box<CoreExpr>,
     },
-    /// `perceus` inserts this at the last use of `local`. It releases the
+    /// `perceus` inserts this after the last use of `local`. It releases the
     /// frame's reference.
     Drop { local: LocalId, body: Box<CoreExpr> },
     Match {
         scrut: LocalId,
         arms: Vec<(CorePat, CoreExpr)>,
-        ty: RTy,
     },
     If {
         cond: LocalId,
         then: Box<CoreExpr>,
         els: Box<CoreExpr>,
-        ty: RTy,
     },
-    /// Tail position: a return value or a tail call.
-    Tail(Atom),
-    /// Jump to the continuation an enclosing [`CoreExpr::LetCont`] declared for
-    /// this `JoinId`. It's only allowed in tail position, so it carries no
-    /// value. Many `Goto`s can share one label.
-    Goto(JoinId),
+    /// Return this from the function.
+    Ret(LocalId),
+    /// Call this with the frame, and return what it returns.
+    TailCall { callee: Callee, args: Vec<LocalId> },
+    /// Go on with the continuation of the enclosing [`CoreExpr::Join`] that
+    /// declares `to`, with an argument for each of its parameters.
+    Jump { to: JoinId, args: Vec<LocalId> },
 }
 
 impl CoreExpr {
@@ -658,16 +648,11 @@ impl CoreExpr {
                     rhs.builds().into_iter().for_each(&mut f);
                     work.push(body);
                 }
-                CoreExpr::Tail(atom) => atom.builds().into_iter().for_each(&mut f),
-                CoreExpr::Goto(_) => {}
-                CoreExpr::LetJoin { join, body, .. }
-                | CoreExpr::LetCont {
-                    cont: join, body, ..
-                } => {
-                    work.push(join);
+                CoreExpr::Join { cont, body, .. } => {
+                    work.push(cont);
                     work.push(body);
                 }
-                CoreExpr::Drop { body, .. } => work.push(body),
+                CoreExpr::SetGlobal { body, .. } | CoreExpr::Drop { body, .. } => work.push(body),
                 CoreExpr::Match { arms, .. } => {
                     for (pat, arm) in arms {
                         if let CorePat::Ctor { variant, .. } = pat {
@@ -680,8 +665,66 @@ impl CoreExpr {
                     work.push(then);
                     work.push(els);
                 }
+                CoreExpr::Ret(_) | CoreExpr::TailCall { .. } | CoreExpr::Jump { .. } => {}
             }
         }
+    }
+
+    /// The joins that every way through their body comes to. The continuation of
+    /// any other can be left out, by a way that returns or jumps further.
+    pub fn always_reached(&self) -> BTreeSet<JoinId> {
+        let mut walk = Exits::default();
+        walk.outermost(self, 0);
+        walk.reached
+    }
+}
+
+/// The walk of [`CoreExpr::always_reached`].
+#[derive(Default)]
+struct Exits {
+    /// How many joins each join in scope is in, itself among them.
+    depths: BTreeMap<JoinId, u32>,
+    reached: BTreeSet<JoinId>,
+}
+
+impl Exits {
+    /// The outermost place that a way through `e` ends at, as the depth of the join
+    /// it jumps to, or 0 when it leaves the function. `e` is in `depth` joins. It
+    /// is `u32::MAX` when no way ends.
+    ///
+    /// The spine is walked in a loop, so recursion goes as deep as bodies nest.
+    fn outermost(&mut self, mut e: &CoreExpr, depth: u32) -> u32 {
+        let mut least = u32::MAX;
+        let end = loop {
+            match e {
+                CoreExpr::Let { body, .. }
+                | CoreExpr::SetGlobal { body, .. }
+                | CoreExpr::Drop { body, .. } => e = body,
+                CoreExpr::Join { id, cont, body, .. } => {
+                    let own = depth.saturating_add(1);
+                    self.depths.insert(*id, own);
+                    let to = self.outermost(body, own);
+                    self.depths.remove(id);
+                    if to == own {
+                        self.reached.insert(*id);
+                    } else {
+                        least = least.min(to);
+                    }
+                    e = cont;
+                }
+                CoreExpr::Match { arms, .. } => {
+                    let all = arms.iter().map(|(_, arm)| self.outermost(arm, depth));
+                    break all.min().unwrap_or(u32::MAX);
+                }
+                CoreExpr::If { then, els, .. } => {
+                    let then = self.outermost(then, depth);
+                    break then.min(self.outermost(els, depth));
+                }
+                CoreExpr::Ret(_) | CoreExpr::TailCall { .. } => break 0,
+                CoreExpr::Jump { to, .. } => break self.depths.get(to).copied().unwrap_or(0),
+            }
+        };
+        least.min(end)
     }
 }
 
@@ -708,21 +751,6 @@ pub struct LoweredFn {
     /// `scarlet/array` and `scarlet/option` both have a `map`.
     pub name: String,
     pub core: CoreFn,
-    /// Whether the body holds a value that may be a handle, or hold one, and
-    /// that no `Drop` gives up. It is then given up when a backend next uses the
-    /// place it keeps it in, so a backend that shares places says when that is.
-    pub undropped: bool,
-}
-
-impl LoweredFn {
-    pub fn new(module: String, name: String, core: CoreFn, undropped: bool) -> Self {
-        LoweredFn {
-            module,
-            name,
-            core,
-            undropped,
-        }
-    }
 }
 
 /// A whole compiled program in core IR: what a backend runs.
@@ -768,11 +796,7 @@ pub struct Program {
 
 impl fmt::Display for CoreBind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.id, self.ty)?;
-        match self.global {
-            Some(GlobalSlot(slot)) => write!(f, "@g{slot}"),
-            None => Ok(()),
-        }
+        write!(f, "{}:{}", self.id, self.ty)
     }
 }
 
@@ -786,7 +810,7 @@ impl fmt::Display for Callee {
     }
 }
 
-fn write_locals(f: &mut fmt::Formatter<'_>, xs: &[LocalId]) -> fmt::Result {
+fn write_list(f: &mut fmt::Formatter<'_>, xs: &[impl fmt::Display]) -> fmt::Result {
     for (i, x) in xs.iter().enumerate() {
         if i > 0 {
             f.write_str(", ")?;
@@ -808,7 +832,7 @@ impl fmt::Display for Atom {
             Atom::Bool(b) => write!(f, "{b}"),
             Atom::Ctor { variant, fields } => {
                 write!(f, "ctor {}.{}(", variant.type_id.0, variant.variant_idx)?;
-                write_locals(f, fields)?;
+                write_list(f, fields)?;
                 f.write_str(")")
             }
             Atom::Update {
@@ -828,22 +852,22 @@ impl fmt::Display for Atom {
             }
             Atom::PrimOp { op, args } => {
                 write!(f, "{op:?}(")?;
-                write_locals(f, args)?;
+                write_list(f, args)?;
                 f.write_str(")")
             }
             Atom::Intrinsic { intrinsic, args } => {
                 write!(f, "{intrinsic:?}(")?;
-                write_locals(f, args)?;
+                write_list(f, args)?;
                 f.write_str(")")
             }
             Atom::Closure { func_idx, captures } => {
                 write!(f, "closure {func_idx}(")?;
-                write_locals(f, captures)?;
+                write_list(f, captures)?;
                 f.write_str(")")
             }
             Atom::Call { callee, args } => {
                 write!(f, "call {callee}(")?;
-                write_locals(f, args)?;
+                write_list(f, args)?;
                 f.write_str(")")
             }
         }
@@ -892,40 +916,49 @@ impl fmt::Display for Indented<'_> {
                     writeln!(f, "let {bind} = {rhs}")?;
                     cur = body;
                 }
-                CoreExpr::LetJoin { bind, join, body } => {
-                    writeln!(f, "letj {bind} =")?;
-                    Indented(join, depth.saturating_add(1)).fmt(f)?;
+                CoreExpr::SetGlobal { slot, value, body } => {
+                    writeln!(f, "set global{} = {value}", slot.0)?;
                     cur = body;
                 }
-                CoreExpr::LetCont { id, cont, body } => {
-                    writeln!(f, "letc {id} =")?;
-                    Indented(cont, depth.saturating_add(1)).fmt(f)?;
-                    cur = body;
+                // The body comes first, as it runs first.
+                CoreExpr::Join {
+                    id,
+                    params,
+                    cont,
+                    body,
+                } => {
+                    write!(f, "join {id}(")?;
+                    write_list(f, params)?;
+                    writeln!(f, ") after")?;
+                    Indented(body, depth.saturating_add(1)).fmt(f)?;
+                    cur = cont;
                 }
                 CoreExpr::Drop { local, body } => {
                     writeln!(f, "drop {local}")?;
                     cur = body;
                 }
-                CoreExpr::Tail(a) => {
-                    return writeln!(f, "ret {a}");
+                CoreExpr::Ret(value) => {
+                    return writeln!(f, "ret {value}");
                 }
-                CoreExpr::Goto(id) => {
-                    return writeln!(f, "goto {id}");
+                CoreExpr::TailCall { callee, args } => {
+                    write!(f, "tail call {callee}(")?;
+                    write_list(f, args)?;
+                    return writeln!(f, ")");
                 }
-                CoreExpr::If {
-                    cond,
-                    then,
-                    els,
-                    ty,
-                } => {
-                    writeln!(f, "if {cond} :{ty}")?;
+                CoreExpr::Jump { to, args } => {
+                    write!(f, "jump {to}(")?;
+                    write_list(f, args)?;
+                    return writeln!(f, ")");
+                }
+                CoreExpr::If { cond, then, els } => {
+                    writeln!(f, "if {cond}")?;
                     Indented(then, depth.saturating_add(1)).fmt(f)?;
                     pad(f, depth)?;
                     writeln!(f, "else")?;
                     return Indented(els, depth.saturating_add(1)).fmt(f);
                 }
-                CoreExpr::Match { scrut, arms, ty } => {
-                    writeln!(f, "match {scrut} :{ty}")?;
+                CoreExpr::Match { scrut, arms } => {
+                    writeln!(f, "match {scrut}")?;
                     for (pat, body) in arms {
                         pad(f, depth.saturating_add(1))?;
                         writeln!(f, "| {pat} ->")?;
@@ -947,12 +980,7 @@ impl fmt::Display for CoreExpr {
 /// A function under `head`, then its parameters, return type and body.
 fn write_fn(f: &mut fmt::Formatter<'_>, head: fmt::Arguments<'_>, core: &CoreFn) -> fmt::Result {
     write!(f, "{head}(")?;
-    for (i, p) in core.params.iter().enumerate() {
-        if i > 0 {
-            f.write_str(", ")?;
-        }
-        write!(f, "{p}")?;
-    }
+    write_list(f, &core.params)?;
     writeln!(f, ") -> :{}", core.ret_ty)?;
     write!(f, "{}", Indented(&core.body, 1))
 }

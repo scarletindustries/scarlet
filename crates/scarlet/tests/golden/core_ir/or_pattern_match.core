@@ -1,56 +1,60 @@
 fn main.small(%0:t0) -> :t0
-  letc j0 =
-    letc j3 =
-      match %0 :t0
-        | _ ->
-          ret c0
-    match %0 :t0
+  join j0() after
+    match %0
       | _ ->
-        letc j4 =
-          ret c1
-        letc j5 =
-          letc j6 =
-            match %0 :t0
-              | c2 ->
-                goto j4
+        join j1() after
+          join j2() after
+            match %0
+              | c0 ->
+                jump j1()
               | _ ->
-                goto j3
-          match %0 :t0
-            | c3 ->
-              goto j4
+                jump j2()
+          match %0
+            | c1 ->
+              jump j1()
             | _ ->
-              goto j6
-        match %0 :t0
-          | c1 ->
-            goto j4
-          | _ ->
-            goto j5
-  match %0 :t0
+              jump j0()
+        let %1:t0 = c1
+        ret %1
+  join j3() after
+    match %0
+      | _ ->
+        join j4() after
+          join j5() after
+            match %0
+              | c2 ->
+                jump j4()
+              | _ ->
+                jump j5()
+          join j6() after
+            match %0
+              | c3 ->
+                jump j4()
+              | _ ->
+                jump j6()
+          match %0
+            | c4 ->
+              jump j4()
+            | _ ->
+              jump j3()
+        let %2:t0 = c2
+        ret %2
+  match %0
     | _ ->
-      letc j1 =
-        ret c4
-      letc j2 =
-        match %0 :t0
-          | c4 ->
-            goto j1
-          | _ ->
-            goto j0
-      match %0 :t0
-        | c0 ->
-          goto j1
-        | _ ->
-          goto j2
+      let %3:t0 = c0
+      ret %3
 
 fn main.main() -> :t0
   let %0:t0 = c3
-  ret call fn#0(%0)
+  tail call fn#0(%0)
 
 toplevel:
 fn main.__main__() -> :t1
-  ret nil
+  let %0:t1 = nil
+  ret %0
 where
   c0 = Int(0)
-  c1 = Int(2)
-  c2 = Int(4)
+  c1 = Int(1)
+  c2 = Int(2)
   c3 = Int(3)
-  c4 = Int(1)
+  c4 = Int(4)

@@ -1,9 +1,10 @@
 fn main.abs(%0:t0) -> :t0
   let %1:t0 = c0
   let %2:t1 = IntLt(%0, %1)
-  if %2 :t0
+  if %2
     let %3:t0 = c0
-    ret IntSub(%3, %0)
+    let %4:t0 = IntSub(%3, %0)
+    ret %4
   else
     ret %0
 
@@ -11,11 +12,12 @@ fn main.main() -> :t0
   let %0:t0 = c0
   let %1:t0 = c1
   let %2:t0 = IntSub(%0, %1)
-  ret call fn#0(%2)
+  tail call fn#0(%2)
 
 toplevel:
 fn main.__main__() -> :t2
-  ret nil
+  let %0:t2 = nil
+  ret %0
 where
   c0 = Int(0)
   c1 = Int(5)

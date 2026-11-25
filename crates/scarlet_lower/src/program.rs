@@ -20,9 +20,9 @@ use scarlet_check::CleanModule;
 use scarlet_check::typed::{BinderId, Expr, FnBody, Function, TypedModule};
 use scarlet_ir::TypeId;
 use scarlet_ir::core_ir::{
-    Abi, AddressTypes, Const, ConstId, FuncIdx, GlobalSlot, HttpTypes, IoErrors, JoinId, JsonTypes,
-    LocalId, LoweredFn, NetTypes, ParseReasons, Program, Radix, TlsTypes, TypeNames, VariantNames,
-    VariantRef,
+    Abi, AddressTypes, Const, ConstId, CoreFn, FuncIdx, GlobalSlot, HttpTypes, IoErrors, JoinId,
+    JsonTypes, LocalId, LoweredFn, NetTypes, ParseReasons, Program, Radix, TlsTypes, TypeNames,
+    VariantNames, VariantRef,
 };
 use scarlet_ir::rty::{ForeignRTy, PrimIds, RTy, Repr, ResolvedPool};
 use scarlet_ir::tivec::TiVec;
@@ -33,8 +33,7 @@ use scarlet_types::name::{CtorName, ModuleKey, Name, TypeName, ValueName};
 use scarlet_types::ty::Type;
 
 use crate::immediates::Immediates;
-use crate::lower::Updates;
-use crate::perceus::Dropped;
+use crate::lower::Lowered;
 use crate::typed_ir::{BindingId, TempTys, TypedFn};
 use crate::{immediates, lower, perceus, tail_args};
 
@@ -125,8 +124,12 @@ pub enum InternalLinkError {
     NotAnArray(RTy),
     /// Core IR reads a local `lower` never gave a type.
     UntypedLocal(LocalId),
-    /// A `Goto` jumps to a join no enclosing `LetCont` declares.
+    /// A jump goes to a join that nothing around it declares.
     UnboundJoin(JoinId),
+    /// Perceus came out of a join's body that it had not gone into.
+    NotAround(JoinId),
+    /// Perceus was given a function that already has drops.
+    DropsGiven(LocalId),
     /// A body reads a binding where no binding of it is in scope.
     UnboundBinding(BindingId),
     /// A body names a binding past the end of its function's binder table.
@@ -207,7 +210,9 @@ impl fmt::Display for InternalLinkError {
                 write!(f, "an array pattern on type :{}, which isn't an array", t.0)
             }
             E::UntypedLocal(l) => write!(f, "local {l} has no type"),
-            E::UnboundJoin(j) => write!(f, "a goto to join {j}, which nothing declares"),
+            E::UnboundJoin(j) => write!(f, "a jump to join {j}, which nothing declares"),
+            E::NotAround(j) => write!(f, "the body of join {j} ended and never began"),
+            E::DropsGiven(l) => write!(f, "a drop of local {l}, before any is worked out"),
             E::UnboundBinding(b) => write!(f, "{b} is read where it isn't bound"),
             E::BindingOutOfRange(b) => {
                 write!(f, "{b} is past the end of its function's binder table")
@@ -664,8 +669,8 @@ pub fn build_program(
         nil: prelude.ctors.nil,
     };
     let finish = |f: &TypedFn, module: String, name: String| {
-        let Dropped { core, undropped } = core_fn(prelude.temps, &im, &frozen.pool, f)?;
-        Ok(LoweredFn::new(module, name, core, undropped))
+        let core = core_fn(prelude.temps, &im, &frozen.pool, f)?;
+        Ok(LoweredFn { module, name, core })
     };
     let fns: TiVec<FuncIdx, LoweredFn> = declared
         .iter()
@@ -711,32 +716,18 @@ pub fn build_program(
 
 /// Typed IR to the Core IR a backend runs: `lower`, then `immediates`, then
 /// `perceus`, then `tail_args`. This is the only place they run, so they can't
-/// run out of order. It comes with whether `perceus` left something undropped.
-/// The order of a function's `Let`s then says when that is given up, so
-/// `tail_args` leaves it as it is, and its updates are lowered to the reads they
-/// stand for, which have registers of their own.
+/// run out of order.
 fn core_fn(
     temps: TempTys,
     im: &Immediates,
     pool: &ResolvedPool,
     f: &TypedFn,
-) -> Result<Dropped, LinkError> {
-    let drops = |updates| {
-        let lowered = lower::lower_fn(temps, updates, f)?;
-        let core = immediates::rewrite(lowered.core, im);
-        let dropped = perceus::perceus(pool, &lowered.locals, core)?;
-        Ok::<_, LinkError>((dropped, lowered.updates))
-    };
-    let Dropped { core, undropped } = match drops(Updates::Whole)? {
-        (dropped, true) if dropped.undropped => drops(Updates::Rebuilt)?.0,
-        (dropped, _) => dropped,
-    };
-    let core = if undropped {
-        core
-    } else {
-        tail_args::schedule(pool, core)?
-    };
-    Ok(Dropped { core, undropped })
+) -> Result<CoreFn, LinkError> {
+    let Lowered { mut core, locals } = lower::lower_fn(temps, f)?;
+    immediates::rewrite(&mut core, im);
+    let reached = core.body.always_reached();
+    let core = perceus::perceus(pool, &locals, &reached, core)?;
+    Ok(tail_args::schedule(pool, &reached, core)?)
 }
 
 /// Why a stdlib type's constructors can't be listed.

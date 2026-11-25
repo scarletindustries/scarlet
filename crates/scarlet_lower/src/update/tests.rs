@@ -284,7 +284,6 @@ fn what_takes_long_or_writes_is_not_brief() {
         ty: TY,
         variant: variant(),
         base: boxed(&var()),
-        kept: Vec::new(),
         sets: vec![(0, var())],
     };
     let slice = TypedExpr::Slice {

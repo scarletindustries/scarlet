@@ -31,7 +31,7 @@ fn rty_prints_the_bare_pool_index() {
 }
 
 #[test]
-fn primitives_are_not_heap() {
+fn primitives_get_no_drop() {
     let mut p = pool();
     let int = p.mk_con(TypeId(1), Repr::Counted, &[]).unwrap();
     let float = p.mk_con(TypeId(2), Repr::Word, &[]).unwrap();
@@ -39,30 +39,34 @@ fn primitives_are_not_heap() {
     assert_eq!(p.prim_of(int).unwrap(), Some(Prim::Int));
     assert_eq!(p.prim_of(float).unwrap(), Some(Prim::Float));
     assert_eq!(p.prim_of(string).unwrap(), Some(Prim::String));
-    assert!(!p.is_heap(int).unwrap());
-    assert!(!p.is_heap(float).unwrap());
-    // Strings live on the heap at run time, but they aren't Perceus cells.
-    assert!(!p.is_heap(string).unwrap());
+    assert!(!p.gets_drop(int).unwrap());
+    assert!(!p.gets_drop(float).unwrap());
+    // A String and a big Int are cells, and the frame that holds them gives them
+    // up.
+    assert!(!p.gets_drop(string).unwrap());
 }
 
 #[test]
-fn user_types_tuples_and_functions_are_heap() {
+fn user_types_tuples_and_functions_get_a_drop() {
     let mut p = pool();
     let int = p.mk_con(TypeId(1), Repr::Counted, &[]).unwrap();
     let user = p.mk_con(TypeId(9), Repr::Counted, &[]).unwrap();
     let tup = p.mk_tuple(&[int, int]).unwrap();
     let fun = p.mk_fun(&[int], int).unwrap();
-    assert!(p.is_heap(user).unwrap());
-    assert!(p.is_heap(tup).unwrap());
-    assert!(p.is_heap(fun).unwrap());
+    assert!(p.gets_drop(user).unwrap());
+    assert!(p.gets_drop(tup).unwrap());
+    assert!(p.gets_drop(fun).unwrap());
     assert_eq!(p.prim_of(user).unwrap(), None);
+    // One whose values are never cells gets none.
+    let plain = p.mk_con(TypeId(10), Repr::Word, &[]).unwrap();
+    assert!(!p.gets_drop(plain).unwrap());
 }
 
 #[test]
 fn a_bound_variable_is_polymorphic_not_missing() {
     let mut p = pool();
     let b = p.mk_bound(0).unwrap();
-    assert!(!p.is_heap(b).unwrap());
+    assert!(p.gets_drop(b).unwrap());
     assert_eq!(p.prim_of(b).unwrap(), None);
     assert_eq!(p.node(b).unwrap(), ResolvedNode::Bound(0));
 }

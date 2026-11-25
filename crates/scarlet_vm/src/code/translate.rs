@@ -6,9 +6,9 @@
 //!
 //! A `match` becomes one test per arm, in order. Each test jumps to the next
 //! arm's test when the value does not fit the arm's pattern. Otherwise it
-//! falls into the arm, which reads out the fields the pattern binds. A
-//! `LetCont`'s continuation is placed after its body, and a `Goto` is a jump
-//! to it. So every jump goes forward.
+//! falls into the arm, which reads out the fields the pattern binds. A join's
+//! continuation is placed after its body, and a jump to it is a `Move` for each
+//! parameter and a `Jump`. So every jump goes forward.
 //!
 //! A call names its callee in one of three ways. A function known when the
 //! program loads is called by name, and that has an instruction for each number
@@ -24,8 +24,8 @@
 use std::collections::{HashMap, HashSet};
 
 use scarlet_ir::core_ir::{
-    Atom, Callee, Const, CoreBind, CoreExpr, CoreFn, CorePat, FuncIdx, GlobalSlot, JoinId, Load,
-    LocalId, MAX_PARAMS, PrimOp, VariantRef,
+    Atom, Callee, Const, CoreBind, CoreExpr, CoreFn, CorePat, FuncIdx, JoinId, Load, LocalId,
+    MAX_PARAMS, PrimOp, VariantRef,
 };
 use scarlet_ir::intrinsic::Intrinsic;
 use scarlet_ir::rty::{ForeignRTy, Prim, RTy, Repr, ResolvedPool};
@@ -102,21 +102,17 @@ pub(super) struct Draft {
     /// What each value may be by its type, by the value's number. A number
     /// that no value has says nothing.
     pub(super) kinds: Vec<Option<Makes>>,
-    /// [`scarlet_ir::core_ir::LoweredFn::undropped`].
-    pub(super) undropped: bool,
     /// What it reads of the closure it runs as.
     pub(super) closure: ReadsClosure,
 }
 
-/// The instructions for `core`, of a function that is `undropped` as
-/// [`Draft::undropped`] says. `this` is the function's own index, when it
+/// The instructions for `core`. `this` is the function's own index, when it
 /// has one.
-pub(super) fn translate(
-    source: &Source<'_>,
-    core: &CoreFn,
-    undropped: bool,
+pub(super) fn translate<'c>(
+    source: &'c Source<'_>,
+    core: &'c CoreFn,
     this: Option<FuncIdx>,
-    tables: &mut Tables,
+    tables: &'c mut Tables,
 ) -> Result<Draft, Unfit> {
     let survey = survey(core);
     let values = match survey.highest {
@@ -132,14 +128,14 @@ pub(super) fn translate(
         lists: Lists::default(),
         labels: Vec::new(),
         landed: None,
-        conts: HashMap::new(),
+        joins: HashMap::new(),
         values,
         kinds,
         closure: survey.closure,
         reads: survey.reads,
         numbers: HashMap::new(),
     };
-    t.expr(&core.body, Dest::Return)?;
+    t.expr(&core.body)?;
     let labels: Option<Vec<usize>> = t.labels.into_iter().collect();
     Ok(Draft {
         steps: t.steps,
@@ -148,7 +144,6 @@ pub(super) fn translate(
         values: t.values,
         params: core.params.iter().map(|p| of(p.id)).collect(),
         kinds: t.kinds,
-        undropped,
         closure: t.closure,
     })
 }
@@ -161,21 +156,19 @@ fn src(local: LocalId) -> Src<VReg> {
     Src(of(local))
 }
 
-/// Where a Core IR expression's value goes.
-#[derive(Clone, Copy)]
-enum Dest {
-    /// Returned from the function, so a `Tail` is a return or a tail call.
-    Return,
-    /// Written to `reg`, then on to the code after a `LetJoin`. A `Tail` here
-    /// is a value, and a call in it is an ordinary call.
-    Join { reg: VReg, after: Label },
-}
-
 /// A number the program spells, which an operator's instruction can hold.
 #[derive(Clone, Copy)]
 enum Number {
     Int(SmallInt),
     Float(Float),
+}
+
+/// A join, for the jumps to it.
+#[derive(Clone, Copy)]
+struct Join<'c> {
+    /// Where its continuation is.
+    to: Label,
+    params: &'c [CoreBind],
 }
 
 struct Translator<'c> {
@@ -188,10 +181,10 @@ struct Translator<'c> {
     labels: Vec<Option<usize>>,
     /// Where the last label was placed.
     landed: Option<usize>,
-    /// The label of each `LetCont`'s continuation, for the `Goto`s to it.
-    conts: HashMap<JoinId, Label>,
+    /// The joins in scope, for the jumps to them.
+    joins: HashMap<JoinId, Join<'c>>,
     /// One past the highest value the function names. A value that no local
-    /// holds, like a tail expression's, gets a number from here.
+    /// holds gets a number from here.
     values: u32,
     /// [`Draft::kinds`].
     kinds: Vec<Option<Makes>>,
@@ -203,7 +196,7 @@ struct Translator<'c> {
     numbers: HashMap<LocalId, Number>,
 }
 
-impl Translator<'_> {
+impl<'c> Translator<'c> {
     fn small(&self, l: LocalId) -> Option<SmallInt> {
         match self.numbers.get(&l)? {
             Number::Int(n) => Some(*n),
@@ -460,12 +453,12 @@ impl Translator<'_> {
         jump
     }
 
-    fn expr(&mut self, e: &CoreExpr, dest: Dest) -> Result<(), Unfit> {
+    fn expr(&mut self, e: &'c CoreExpr) -> Result<(), Unfit> {
         let mut e = e;
         loop {
             match e {
-                // A map dropped right after it is set gives its reference to
-                // the set.
+                // A map given up right after it is set gives its reference to
+                // the set. What else is given up there goes after it.
                 CoreExpr::Let {
                     bind,
                     rhs:
@@ -477,10 +470,7 @@ impl Translator<'_> {
                 } if let [m, k, v] = args.as_slice()
                     && k != m
                     && v != m
-                    && let CoreExpr::Drop {
-                        local, body: rest, ..
-                    } = &**body
-                    && local == m =>
+                    && let Some(after) = giving_up(*m, body) =>
                 {
                     self.push(Ins::MapSetOwned {
                         dst: Dst(of(bind.id)),
@@ -488,8 +478,8 @@ impl Translator<'_> {
                         key: src(*k),
                         value: src(*v),
                     });
-                    self.store(bind.id, bind.global);
-                    e = rest;
+                    self.give_up_all(&after.drops);
+                    e = after.rest;
                 }
                 CoreExpr::Let {
                     bind,
@@ -500,22 +490,15 @@ impl Translator<'_> {
                         },
                     body,
                 } if let [m, k] = args.as_slice()
-                    && bind.global.is_none()
-                    && self.reads.get(&bind.id) == Some(&1)
-                    && let CoreExpr::Match { scrut, arms, .. } = &**body
-                    && *scrut == bind.id
-                    && let Some((value, found, missing)) = self.option_arms(arms) =>
+                    && let Some(arms) = self.only_matched(bind.id, body) =>
                 {
-                    let to = self.label()?;
-                    self.push(Ins::MapFind {
-                        dst: Hit(of(value)),
+                    let lookup = Lookup {
                         map: src(*m),
                         key: src(*k),
-                        to,
-                    });
-                    self.expr(found, dest)?;
-                    self.place(to);
-                    e = missing;
+                        result: bind.id,
+                        drops: head(body).drops,
+                    };
+                    e = self.find(&lookup, arms)?;
                 }
                 CoreExpr::Let {
                     bind,
@@ -527,50 +510,51 @@ impl Translator<'_> {
                     body,
                 } if let [m, k] = args.as_slice()
                     && k != m
-                    && let CoreExpr::Drop {
-                        local, body: rest, ..
-                    } = &**body
-                    && local == m =>
+                    && let Some(after) = giving_up(*m, body) =>
                 {
                     self.push(Ins::MapDeleteOwned {
                         dst: Dst(of(bind.id)),
                         map: Taken(of(*m)),
                         key: src(*k),
                     });
-                    self.store(bind.id, bind.global);
-                    e = rest;
+                    self.give_up_all(&after.drops);
+                    e = after.rest;
                 }
                 CoreExpr::Let { bind, rhs, body } => {
-                    // One that is stored in a global is not held, because the
-                    // store reads it.
                     if let Atom::Const(c) = rhs
-                        && bind.global.is_none()
                         && let Some(n) = number(self.source.program.consts.get(c.index()))
                     {
                         self.numbers.insert(bind.id, n);
                     }
                     self.atom(of(bind.id), rhs)?;
-                    self.store(bind.id, bind.global);
                     e = body;
                 }
-                CoreExpr::Drop { local, body, .. } => {
+                CoreExpr::SetGlobal { slot, value, body } => {
+                    let src = Shared(of(*value));
+                    self.push(Ins::SetGlobal { slot: *slot, src });
+                    e = body;
+                }
+                CoreExpr::Drop { local, body } => {
                     self.give_up(*local);
                     e = body;
                 }
-                CoreExpr::Tail(atom) => return self.tail(atom, dest),
-                // The branch's value lands in `bind`, and every path through
-                // it jumps to the code after it.
-                CoreExpr::LetJoin { bind, join, body } => {
-                    let after = self.label()?;
-                    let reg = of(bind.id);
-                    self.expr(join, Dest::Join { reg, after })?;
-                    self.place(after);
-                    self.store(bind.id, bind.global);
-                    e = body;
-                }
-                CoreExpr::If {
-                    cond, then, els, ..
+                // Every path through `body` ends in a return or a jump, so
+                // the continuation after it is reached only by the jumps to it.
+                CoreExpr::Join {
+                    id,
+                    params,
+                    cont,
+                    body,
                 } => {
+                    let to = self.label()?;
+                    self.joins.insert(*id, Join { to, params });
+                    self.expr(body)?;
+                    self.place(to);
+                    // It is in scope only in the body.
+                    self.joins.remove(id);
+                    e = cont;
+                }
+                CoreExpr::If { cond, then, els } => {
                     let to = self.label()?;
                     let jump = match self.take_comparison(*cond, to) {
                         Some(jump) => jump,
@@ -580,79 +564,66 @@ impl Translator<'_> {
                         },
                     };
                     self.push(jump);
-                    self.expr(then, dest)?;
+                    self.expr(then)?;
                     self.place(to);
                     e = els;
                 }
-                CoreExpr::Match { scrut, arms, .. } => {
+                CoreExpr::Match { scrut, arms } => {
                     for (pat, arm) in arms {
                         let next = self.label()?;
                         let arm = self.pattern(*scrut, pat, arm, next)?;
-                        self.expr(arm, dest)?;
+                        self.expr(arm)?;
                         self.place(next);
                     }
                     let no_arm = self.broken(Broken::NoArm)?;
                     self.push(no_arm);
                     return Ok(());
                 }
-                // Every path through `body` ends in a return or a jump, so
-                // the continuation after it is reached only by its `Goto`s.
-                CoreExpr::LetCont { id, cont, body } => {
-                    let l = self.label()?;
-                    self.conts.insert(*id, l);
-                    self.expr(body, dest)?;
-                    self.place(l);
-                    // No `Goto` past here is in the continuation's scope.
-                    self.conts.remove(id);
-                    e = cont;
-                }
-                CoreExpr::Goto(id) => {
-                    let jump = match self.conts.get(id) {
-                        Some(&to) => Ins::Jump { to },
-                        None => self.broken(Broken::UndeclaredCase)?,
-                    };
-                    self.push(jump);
+                CoreExpr::Ret(value) => {
+                    let (src, last) = (Taken(of(*value)), LastReg);
+                    self.push(if self.closure.keeps() {
+                        Ins::RetClosure { src, last }
+                    } else {
+                        Ins::Ret { src, last }
+                    });
                     return Ok(());
                 }
+                CoreExpr::TailCall { callee, args } => {
+                    let call = self.tail_call(callee, args)?;
+                    self.steps.push(call);
+                    return Ok(());
+                }
+                CoreExpr::Jump { to, args } => return self.jump(*to, args),
             }
         }
     }
 
-    /// Store `local` in the global it is bound to, if it is bound to one.
-    fn store(&mut self, local: LocalId, global: Option<GlobalSlot>) {
-        if let Some(slot) = global {
-            let src = Shared(of(local));
-            self.push(Ins::SetGlobal { slot, src });
-        }
-    }
-
-    fn tail(&mut self, atom: &Atom, dest: Dest) -> Result<(), Unfit> {
-        let keeps = self.closure.keeps();
-        let ret = |src| {
-            let (src, last) = (Taken(src), LastReg);
-            if keeps {
-                Ins::RetClosure { src, last }
-            } else {
-                Ins::Ret { src, last }
-            }
+    /// Give a join's parameters their values and go on with it. No parameter is
+    /// among `args`, because a join's own are not in scope where it is jumped to.
+    fn jump(&mut self, to: JoinId, args: &[LocalId]) -> Result<(), Unfit> {
+        let Some(Join { to, params }) = self.joins.get(&to).copied() else {
+            let bad = self.broken(Broken::UndeclaredJoin)?;
+            self.push(bad);
+            return Ok(());
         };
-        match (dest, atom) {
-            (Dest::Return, Atom::Call { callee, args }) => {
-                let call = self.tail_call(callee, args)?;
-                self.steps.push(call);
-            }
-            (Dest::Return, Atom::Local(local)) => self.push(ret(of(*local))),
-            (Dest::Return, atom) => {
-                let value = self.value()?;
-                self.atom(value, atom)?;
-                self.push(ret(value));
-            }
-            (Dest::Join { reg, after }, atom) => {
-                self.atom(reg, atom)?;
-                self.push(Ins::Jump { to: after });
-            }
+        if params.len() != args.len() {
+            let (got, want) = (args.len(), params.len());
+            let bad = self.broken(Broken::JumpArity { got, want })?;
+            self.push(bad);
+            return Ok(());
         }
+        for (param, arg) in params.iter().zip(args) {
+            self.push(Ins::Move {
+                dst: Dst(of(param.id)),
+                src: Arg::shared(of(*arg)),
+            });
+        }
+        self.push(Ins::Jump { to });
         Ok(())
+    }
+
+    fn give_up_all(&mut self, locals: &[LocalId]) {
+        locals.iter().for_each(|l| self.give_up(*l));
     }
 
     fn give_up(&mut self, local: LocalId) {
@@ -686,9 +657,9 @@ impl Translator<'_> {
                 if let Form::Fields { ctor, .. } = form
                     && let Some(opened) = self.opened(scrut, fields, arm)
                 {
-                    opened.before.iter().for_each(|l| self.give_up(*l));
+                    self.give_up_all(&opened.before);
                     self.open(scrut, ctor, &opened.dsts)?;
-                    opened.after.iter().for_each(|l| self.give_up(*l));
+                    self.give_up_all(&opened.after);
                     return Ok(opened.rest);
                 }
                 for (i, f) in fields.iter().enumerate() {
@@ -729,7 +700,7 @@ impl Translator<'_> {
     /// value's is one of them. The cell can then be taken apart there
     /// ([`Ins::Open`]), where otherwise each field is read out with a reference
     /// of its own and the cell is freed after. Nothing jumps into the run,
-    /// because a `Goto` only goes to the start of a continuation. A drop in
+    /// because a jump only goes to the start of a continuation. A drop in
     /// front of the value's stays in front, so it may be of no field. A field
     /// that is dropped after it and read nowhere else is one nothing reads.
     fn opened<'e>(
@@ -740,16 +711,15 @@ impl Translator<'_> {
     ) -> Option<Opened<'e>> {
         let (mut before, mut after) = (Vec::new(), Vec::new());
         let mut found = false;
-        let mut rest = arm;
-        while let CoreExpr::Drop { local, body } = rest {
-            if *local == scrut {
+        let Head { drops, rest } = head(arm);
+        for local in drops {
+            if local == scrut {
                 found = true;
             } else if found {
-                after.push(*local);
+                after.push(local);
             } else {
-                before.push(*local);
+                before.push(local);
             }
-            rest = body;
         }
         let in_front: HashSet<LocalId> = before.iter().copied().collect();
         if !found
@@ -1201,28 +1171,75 @@ impl Translator<'_> {
         }
     }
 
+    /// The arms of the match that what a lookup in a map gives goes straight into,
+    /// when nothing else reads that and the match takes `Some` apart into a plain
+    /// name. `looked` is what it gives and `e` what comes after the lookup. Then no
+    /// `Option` need be made. The match may give it up at the start of an arm.
+    fn only_matched<'e>(&self, looked: LocalId, e: &'e CoreExpr) -> Option<OptionArms<'e>> {
+        let CoreExpr::Match { scrut, arms } = head(e).rest else {
+            return None;
+        };
+        let drops = arms.iter().flat_map(|(_, arm)| head(arm).drops);
+        let drops = drops.filter(|l| *l == looked).count();
+        let reads = self.reads.get(&looked).copied().unwrap_or(0);
+        let only = *scrut == looked && reads as usize == drops.saturating_add(1);
+        only.then(|| self.option_arms(arms)).flatten()
+    }
+
+    /// The lookup and the match on what it gives. Gives what is left of the arm
+    /// for a key that is not there, which runs next.
+    fn find(&mut self, lookup: &Lookup, arms: OptionArms<'c>) -> Result<&'c CoreExpr, Unfit> {
+        let to = self.label()?;
+        self.push(Ins::MapFind {
+            dst: Hit(of(arms.value)),
+            map: lookup.map,
+            key: lookup.key,
+            to,
+        });
+        let found = self.after_find(lookup, arms.some);
+        self.expr(found)?;
+        self.place(to);
+        Ok(self.after_find(lookup, arms.none))
+    }
+
+    /// What is left of `arm`, once what it starts by giving up is given up, and
+    /// what was before it.
+    fn after_find(&mut self, lookup: &Lookup, arm: &'c CoreExpr) -> &'c CoreExpr {
+        let Head { drops, rest } = head(arm);
+        for local in lookup.drops.iter().chain(&drops) {
+            if *local != lookup.result {
+                self.give_up(*local);
+            }
+        }
+        rest
+    }
+
     /// The arms of a `match` on an `Option` that names both variants and binds
-    /// `Some`'s value to a plain name: that name, the `Some` arm and the `None`
-    /// arm.
-    fn option_arms<'e>(
-        &self,
-        arms: &'e [(CorePat, CoreExpr)],
-    ) -> Option<(LocalId, &'e CoreExpr, &'e CoreExpr)> {
+    /// `Some`'s value to a plain name.
+    fn option_arms<'e>(&self, arms: &'e [(CorePat, CoreExpr)]) -> Option<OptionArms<'e>> {
         let abi = &self.source.program.abi;
         let [(a, x), (b, y)] = arms else {
             return None;
         };
         let some = |p: &CorePat| match p {
             CorePat::Ctor { variant, fields } if *variant == abi.some => match fields.as_slice() {
-                [v] if v.global.is_none() => Some(v.id),
+                [v] => Some(v.id),
                 _ => None,
             },
             CorePat::Wild | CorePat::Bind(_) | CorePat::Lit(_) | CorePat::Ctor { .. } => None,
         };
         let none = |p: &CorePat| matches!(p, CorePat::Ctor { variant, fields } if *variant == abi.none && fields.is_empty());
         match (some(a), some(b)) {
-            (Some(v), _) if none(b) => Some((v, x, y)),
-            (_, Some(v)) if none(a) => Some((v, y, x)),
+            (Some(value), _) if none(b) => Some(OptionArms {
+                value,
+                some: x,
+                none: y,
+            }),
+            (_, Some(value)) if none(a) => Some(OptionArms {
+                value,
+                some: y,
+                none: x,
+            }),
             _ => None,
         }
     }
@@ -1347,6 +1364,47 @@ fn jump_unless(ins: &Ins<VReg>, cond: VReg, to: Label) -> Option<Ins<VReg>> {
     None
 }
 
+/// The drops that `e` starts with, and what comes after them.
+struct Head<'e> {
+    drops: Vec<LocalId>,
+    rest: &'e CoreExpr,
+}
+
+fn head(mut e: &CoreExpr) -> Head<'_> {
+    let mut drops = Vec::new();
+    while let CoreExpr::Drop { local, body } = e {
+        drops.push(*local);
+        e = body;
+    }
+    Head { drops, rest: e }
+}
+
+/// What `e` starts with beside a drop of `local`, when it has one there.
+fn giving_up(local: LocalId, e: &CoreExpr) -> Option<Head<'_>> {
+    let Head { mut drops, rest } = head(e);
+    let all = drops.len();
+    drops.retain(|l| *l != local);
+    (drops.len() < all).then_some(Head { drops, rest })
+}
+
+/// What [`Translator::option_arms`] found.
+struct OptionArms<'e> {
+    /// The name that `Some`'s value has.
+    value: LocalId,
+    some: &'e CoreExpr,
+    none: &'e CoreExpr,
+}
+
+/// A lookup in a map that goes into the match on what it gives.
+struct Lookup {
+    map: Src<VReg>,
+    key: Src<VReg>,
+    /// What it gives.
+    result: LocalId,
+    /// What is given up between the two.
+    drops: Vec<LocalId>,
+}
+
 /// What [`Translator::opened`] found at the start of an arm.
 struct Opened<'e> {
     /// What is given up before the scrutinee is.
@@ -1430,35 +1488,39 @@ fn survey(f: &CoreFn) -> Survey<'_> {
                 out.atom(rhs);
                 stack.push(body);
             }
-            CoreExpr::LetJoin { bind, join, body } => {
-                out.bind(bind);
-                stack.push(join);
+            CoreExpr::SetGlobal { value, body, .. } => {
+                out.read(*value);
                 stack.push(body);
             }
-            CoreExpr::LetCont { cont, body, .. } => {
+            CoreExpr::Join {
+                params, cont, body, ..
+            } => {
+                params.iter().for_each(|p| out.bind(p));
                 stack.push(cont);
                 stack.push(body);
             }
-            CoreExpr::Drop { local, body, .. } => {
+            CoreExpr::Drop { local, body } => {
                 out.read(*local);
                 stack.push(body);
             }
-            CoreExpr::Match { scrut, arms, .. } => {
+            CoreExpr::Match { scrut, arms } => {
                 out.read(*scrut);
                 for (pat, arm) in arms {
                     pat.binds().for_each(|b| out.bind(b));
                     stack.push(arm);
                 }
             }
-            CoreExpr::If {
-                cond, then, els, ..
-            } => {
+            CoreExpr::If { cond, then, els } => {
                 out.read(*cond);
                 stack.push(then);
                 stack.push(els);
             }
-            CoreExpr::Tail(atom) => out.atom(atom),
-            CoreExpr::Goto(_) => {}
+            CoreExpr::Ret(value) => out.read(*value),
+            CoreExpr::TailCall { callee, args } => {
+                callee.local().into_iter().for_each(|f| out.read(f));
+                args.iter().for_each(|x| out.read(*x));
+            }
+            CoreExpr::Jump { args, .. } => args.iter().for_each(|x| out.read(*x)),
         }
     }
     out

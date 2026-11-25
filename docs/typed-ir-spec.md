@@ -44,7 +44,7 @@ parse → ast::Expression
 - `ty: Ty` is a **field on every node**, already resolved with `find()`, not something to look up.
 - `Field { recv, idx: FieldIdx, ty }`: the elaborator worked out `idx`, so `lower` has no `ctor_field` call.
 - `Ctor { variant: VariantIdx, args }`: the labelled arguments are already in declared order.
-- `Update { variant, base, kept, sets }`: a record update whose base may be held until the new fields are computed. Translation has asked, so the node is the answer. `kept` has the reads that a function with something undropped does instead.
+- `Update { variant, base, sets }`: a record update whose base may be held until the new fields are computed. Translation has asked, so the node is the answer.
 - `Call { callee: Callee, args }`, where `Callee = Known(FuncIdx) | SelfRec | Local(LocalId) | Builtin(Op)`: names are already resolved.
 - `Match { scrut, arms }`: variant indices are resolved and exhaustiveness is already proven.
 - Each name is resolved to a `VarLoad`, so `lower` has no `resolve_name`.
@@ -93,7 +93,7 @@ fn is_heap(t: RTy) -> bool {
 }
 ```
 
-That is the function as it was planned. `is_heap` still answers this, for Perceus. Whether a value can be a heap cell at all is a second question, and `ResolvedPool::repr` answers it from what the node itself holds (`docs/core-ir-spec.md`).
+That is the function as it was planned. Whether a value can be a heap cell is now `ResolvedPool::repr`, which answers it from what the node itself holds and says yes of a type variable (`docs/core-ir-spec.md`). `ResolvedPool::gets_drop` is what Perceus asks: the same, but for an Int and a String, which are left to the frame that holds them.
 
 This codebase has done it before. `types: phantom-tag ArenaSlice by pool so cross-pool index is a type error` made `ArenaSlice<P>` carry which pool it indexes. `Ty` was the index that never got the same treatment, and it was the one that mattered.
 
@@ -126,7 +126,7 @@ So it becomes `ip = instr.operand;`. Four subtractions leave the interpreter's h
 
 This is stronger than resolving addresses carefully in one place, because an absolute address is never *written* at all.
 
-It's safe because `CoreExpr`'s control flow is structured (`If`, `Match`, `Tail`), so every jump `emit` produces stays inside its function. Calls take a `FuncIdx`, not an address.
+It's safe because `CoreExpr`'s control flow is structured (`If`, `Match`, `Join`), so every jump `emit` produces stays inside its function. Calls take a `FuncIdx`, not an address.
 
 Two things to verify rather than assume:
 1. `Function.code_start` must still be recorded, because it's how the VM enters a function. The appender writes it, since it knows where the code went.

@@ -1,4 +1,4 @@
-use super::super::ins::{Arg, ArgList, Args, MaybeDst, OwnRoom, Shared, Taken};
+use super::super::ins::{Arg, ArgList, Args, LastReg, MaybeDst, OwnRoom, Shared, Taken};
 use super::super::tests::{draft, of};
 use super::super::translate::Draft;
 use super::super::{DstList, tests::a_ctor};
@@ -186,7 +186,7 @@ fn a_value_read_before_it_is_written_is_refused() {
             of::constant(2),
             of::len(1, 2),
             last,
-            of::ret(0),
+            of::halt(0),
         ];
         draft(3, 1, ins, &[3])
     };
@@ -236,7 +236,7 @@ fn a_constant_nothing_names_is_unread() {
         of::constant(2),
         of::constant(3),
         of::drop(3),
-        of::ret(2),
+        of::halt(2),
     ];
     let mut d = draft(4, 1, ins, &[]);
     let held = settle(&mut d).expect("a function that loads");
@@ -357,22 +357,22 @@ fn a_drop_of_what_was_taken_does_nothing() {
     // Taken, then dropped: by a copy, an array, a call, or a cell taken apart.
     let open = of::open([Some(1), None], 0);
     for taking in [of::mv(1, 0), of::append(1, 0, 2), of::call(1, &[0]), open] {
-        let d = draft(3, 3, vec![taking, of::drop(0), of::ret(1)], &[]);
+        let d = draft(3, 3, vec![taking, of::drop(0), of::halt(1)], &[]);
         assert_eq!(idle(d), [1], "{taking:?}");
     }
     // Only looked at, shared, or read again later on the way.
-    let d = draft(2, 1, vec![of::len(1, 0), of::drop(0), of::ret(1)], &[]);
+    let d = draft(2, 1, vec![of::len(1, 0), of::drop(0), of::halt(1)], &[]);
     assert_eq!(idle(d), [0; 0]);
-    let ins = vec![of::mv(1, 0), of::len(2, 0), of::drop(0), of::ret(1)];
+    let ins = vec![of::mv(1, 0), of::len(2, 0), of::drop(0), of::halt(1)];
     assert_eq!(idle(draft(3, 1, ins, &[])), [0; 0]);
-    let ins = vec![of::append(1, 2, 0), of::drop(0), of::ret(1)];
+    let ins = vec![of::append(1, 2, 0), of::drop(0), of::halt(1)];
     assert_eq!(idle(draft(3, 3, ins, &[])), [0; 0]);
     // Never read at all, whether it came in or was made.
     assert_eq!(
-        idle(draft(1, 1, vec![of::drop(0), of::ret(0)], &[])),
+        idle(draft(1, 1, vec![of::drop(0), of::halt(0)], &[])),
         [0; 0]
     );
-    let ins = vec![of::len(1, 0), of::drop(1), of::ret(0)];
+    let ins = vec![of::len(1, 0), of::drop(1), of::halt(0)];
     assert_eq!(idle(draft(2, 1, ins, &[])), [0; 0]);
 }
 
@@ -390,9 +390,9 @@ fn what_a_miss_drops_is_held_until_then() {
         of::write(2, [0, 3, 1], 0),
         of::mv(5, 2),
         of::drop(2),
-        of::ret(5),
+        of::halt(5),
         of::drop(2),
-        of::ret(1),
+        of::halt(1),
     ];
     let mut d = draft(6, 2, ins, &[6]);
     let held = settle(&mut d).expect("a function that loads");
@@ -411,10 +411,10 @@ fn a_drop_on_each_way_is_decided_by_the_ways_to_it() {
             of::unless(1, 0),
             of::mv(2, 0),
             of::drop(0),
-            of::ret(2),
+            of::halt(2),
             other,
             of::drop(0),
-            of::ret(2),
+            of::halt(2),
         ];
         draft(3, 2, ins, &[4])
     };
@@ -428,7 +428,7 @@ fn a_drop_on_each_way_is_decided_by_the_ways_to_it() {
             of::jump(1),
             other,
             of::drop(0),
-            of::ret(2),
+            of::halt(2),
         ];
         draft(3, 2, ins, &[3, 4])
     };
@@ -440,9 +440,9 @@ fn a_drop_on_each_way_is_decided_by_the_ways_to_it() {
         of::mv(2, 0),
         of::unless(1, 0),
         of::drop(0),
-        of::ret(2),
+        of::halt(2),
         of::drop(0),
-        of::ret(1),
+        of::halt(1),
     ];
     assert_eq!(idle(draft(3, 2, ins, &[4])), [2, 4]);
     // Read on one way and dropped on the other, so not taken before.
@@ -450,17 +450,17 @@ fn a_drop_on_each_way_is_decided_by_the_ways_to_it() {
         of::mv(2, 0),
         of::unless(1, 0),
         of::drop(0),
-        of::ret(2),
-        of::ret(0),
+        of::halt(2),
+        of::halt(0),
     ];
     assert_eq!(idle(draft(3, 2, ins.clone(), &[4])), [0; 0]);
     // The other way round: read by what follows, dropped where it jumps.
     let ins = vec![
         of::mv(2, 0),
         of::unless(1, 0),
-        of::ret(0),
+        of::halt(0),
         of::drop(0),
-        of::ret(2),
+        of::halt(2),
     ];
     assert_eq!(idle(draft(3, 2, ins, &[3])), [0; 0]);
 }
@@ -470,12 +470,12 @@ fn a_drop_on_each_way_is_decided_by_the_ways_to_it() {
 #[test]
 fn a_drop_after_a_miss_finds_what_the_write_left() {
     let after = |after_a_miss: Vec<Ins<VReg>>| {
-        let mut ins = vec![of::write(3, [0, 1, 2], 0), of::drop(0), of::ret(3)];
+        let mut ins = vec![of::write(3, [0, 1, 2], 0), of::drop(0), of::halt(3)];
         ins.extend(after_a_miss);
         draft(5, 3, ins, &[3])
     };
-    assert_eq!(idle(after(vec![of::drop(0), of::ret(1)])), [1]);
-    assert_eq!(idle(after(vec![of::ret(0)])), [1]);
+    assert_eq!(idle(after(vec![of::drop(0), of::halt(1)])), [1]);
+    assert_eq!(idle(after(vec![of::halt(0)])), [1]);
     // Both go on to one drop, and only the one that missed leaves it the array.
     let meet = |on_a_miss: Ins<VReg>| {
         let ins = vec![
@@ -483,7 +483,7 @@ fn a_drop_after_a_miss_finds_what_the_write_left() {
             of::jump(1),
             on_a_miss,
             of::drop(0),
-            of::ret(3),
+            of::halt(3),
         ];
         draft(4, 3, ins, &[2, 3])
     };
@@ -496,20 +496,261 @@ fn a_drop_after_a_miss_finds_what_the_write_left() {
 /// held for a drop that finds it clashes with what is written before it.
 #[test]
 fn a_value_held_for_a_drop_that_does_nothing_clashes_with_nothing() {
-    let clashes = |first: Ins<VReg>, undropped: bool| {
-        let mut d = draft(3, 1, vec![first, of::drop(0), of::ret(1)], &[]);
-        d.undropped = undropped;
+    let clashes = |first: Ins<VReg>| {
+        let ins = vec![
+            first,
+            of::constant(2),
+            of::drop(0),
+            of::add(3, 1, 2),
+            of::ret(3),
+        ];
+        let mut d = draft(4, 1, ins, &[]);
         let held = settle(&mut d).expect("a function that loads");
-        assert_eq!(held.idle[1], first.op().name() == "Move");
+        assert_eq!(held.idle[2], first.op().name() == "Move");
         held.clashes
     };
-    let pair = [(VReg(1), VReg(0))];
-    assert_eq!(clashes(of::mv(1, 0), false), []);
-    assert_eq!(clashes(of::len(1, 0), false), pair);
-    // Where the function holds a value that nothing drops, the two clash all the
-    // same, though the drop goes.
-    assert_eq!(clashes(of::mv(1, 0), true), pair);
-    assert_eq!(clashes(of::len(1, 0), true), pair);
+    let (zero, one, two) = (VReg(0), VReg(1), VReg(2));
+    assert_eq!(clashes(of::mv(1, 0)), [(two, one)]);
+    // The constant is straight in front of the drop, so it may take the place of
+    // what is dropped.
+    assert_eq!(clashes(of::len(1, 0)), [(two, one), (one, zero)]);
+}
+
+/// What an instruction writes may take the place of a value that is dropped
+/// straight after it. Then the drop goes, because the write gives the value up.
+#[test]
+fn a_write_gives_up_what_is_dropped_straight_after() {
+    let settled = |ins: Vec<Ins<VReg>>, labels: &[usize]| {
+        let mut d = draft(8, 3, ins, labels);
+        settle(&mut d).expect("a function that loads")
+    };
+    let over = |step, dropped, written| Overwritten {
+        step,
+        dropped: VReg(dropped),
+        written: VReg(written),
+    };
+    let after = |drops: &[u32]| {
+        let drops = drops.iter().map(|v| of::drop(*v));
+        let ends = [of::add(5, 4, 4), of::ret(5)];
+        let ins = [of::len(4, 0)].into_iter().chain(drops).chain(ends);
+        settled(ins.collect(), &[])
+    };
+    let held = after(&[0]);
+    assert_eq!(held.overwritten, [over(1, 0, 4)]);
+    assert!(held.clashes.is_empty());
+    // Any of several, and whatever else they are of.
+    let held = after(&[0, 1, 2]);
+    let mut found = held.overwritten.clone();
+    found.sort_by_key(|o| o.step);
+    assert_eq!(found, [over(1, 0, 4), over(2, 1, 4), over(3, 2, 4)]);
+    assert!(held.clashes.is_empty());
+    // Not what it wrote itself.
+    let held = settled(
+        vec![of::len(4, 0), of::drop(4), of::len(5, 1), of::ret(5)],
+        &[],
+    );
+    assert_eq!(held.overwritten, []);
+    // Nor one behind another instruction, or that something jumps to.
+    let ins = vec![
+        of::len(4, 0),
+        of::constant(6),
+        of::drop(0),
+        of::add(5, 4, 6),
+        of::ret(5),
+    ];
+    let held = settled(ins, &[]);
+    assert_eq!(held.overwritten, [over(2, 0, 6)]);
+    assert!(held.clashes.contains(&(VReg(4), VReg(0))));
+    let ins = vec![
+        of::constant(4),
+        of::unless(1, 0),
+        of::len(4, 2),
+        of::drop(0),
+        of::add(5, 4, 4),
+        of::ret(5),
+    ];
+    let held = settled(ins.clone(), &[3]);
+    assert_eq!(held.overwritten, []);
+    assert!(held.clashes.contains(&(VReg(4), VReg(0))));
+    assert_eq!(settled(ins, &[4]).overwritten, [over(3, 0, 4)]);
+    // A write that may miss writes nothing then, so it gives up nothing.
+    let ins = vec![
+        of::write(4, [0, 1, 2], 0),
+        of::drop(1),
+        of::len(5, 4),
+        of::ret(5),
+        of::drop(0),
+        of::ret(1),
+    ];
+    assert_eq!(settled(ins, &[4]).overwritten, []);
+    // Each of two written at once may.
+    let ins = vec![
+        of::open([Some(4), Some(6)], 0),
+        of::drop(1),
+        of::add(5, 4, 6),
+        of::ret(5),
+    ];
+    assert_eq!(
+        settled(ins, &[]).overwritten,
+        [over(1, 1, 4), over(1, 1, 6)]
+    );
+}
+
+/// The steps of `ins` that do nothing, and what clashes.
+fn idle_steps(ins: Vec<Ins<VReg>>, labels: &[usize]) -> (Vec<usize>, Vec<(VReg, VReg)>) {
+    let mut d = draft(6, 3, ins, labels);
+    let held = settle(&mut d).expect("a function that loads");
+    let idle = (0..held.idle.len()).filter(|i| held.idle[*i]);
+    (idle.collect(), held.clashes)
+}
+
+/// A drop straight in front of a return does nothing, and holds nothing, and
+/// neither does one in front of it.
+#[test]
+fn a_drop_in_front_of_a_return_does_nothing() {
+    let idle = idle_steps;
+    let two = vec![of::len(4, 0), of::drop(0), of::drop(1), of::ret(4)];
+    assert_eq!(idle(two, &[]), (vec![1, 2], Vec::new()));
+    let closure = Ins::RetClosure {
+        src: Taken(VReg(4)),
+        last: LastReg,
+    };
+    let ins = vec![of::len(4, 0), of::drop(0), closure];
+    assert_eq!(idle(ins, &[]).0, [1]);
+    // A constant that nothing names goes too, so it does not stand between.
+    let ins = vec![of::drop(0), of::constant(5), of::ret(1)];
+    assert_eq!(idle(ins, &[]).0, [0, 1]);
+    let ins = vec![of::len(4, 0), of::drop(0), of::len(5, 4), of::ret(5)];
+    assert_eq!(idle(ins, &[]).0, [0; 0]);
+    // A tail call of a function value gives up every register too.
+    let ins = vec![of::len(4, 0), of::drop(0), of::drop(4), of::leave(1)];
+    assert_eq!(idle(ins, &[]), (vec![1, 2], vec![(VReg(4), VReg(1))]));
+    // One that a jump goes to from elsewhere is in front of a return all the
+    // same.
+    let ins = vec![of::unless(1, 0), of::len(4, 2), of::drop(0), of::ret(1)];
+    assert_eq!(idle(ins, &[2]).0, [2]);
+}
+
+/// What makes no cell and calls nothing may come between a drop and the return,
+/// a jump among it. Anything else may not.
+#[test]
+fn a_drop_with_little_between_it_and_a_return_does_nothing() {
+    let idle = |ins: Vec<Ins<VReg>>, labels: &[usize]| idle_steps(ins, labels).0;
+    let none: [usize; 0] = [];
+    let field = |dst: u32, src: u32| Ins::Field {
+        dst: Dst(VReg(dst)),
+        src: Src(VReg(src)),
+        index: 0,
+    };
+    let lt = |dst: u32, a: u32, b: u32| Ins::IntLt {
+        dst: Dst(VReg(dst)),
+        a: Src(VReg(a)),
+        b: Src(VReg(b)),
+    };
+    let ins = vec![
+        of::drop(0),
+        of::mv(3, 1),
+        of::constant(4),
+        lt(5, 3, 4),
+        of::ret(5),
+    ];
+    assert_eq!(idle(ins, &[]), [0]);
+    let ins = vec![of::drop(0), field(3, 1), of::leave(3)];
+    assert_eq!(idle(ins, &[]), [0]);
+    // It holds nothing then, so what is written may have its register.
+    let ins = vec![of::drop(0), field(3, 1), of::ret(3)];
+    assert_eq!(idle_steps(ins, &[]), (vec![0], Vec::new()));
+    for other in [
+        of::add(3, 1, 2),
+        of::len(3, 1),
+        of::append(3, 1, 2),
+        of::call(3, &[1]),
+    ] {
+        let ins = vec![of::drop(0), of::mv(4, 1), other, of::ret(3)];
+        assert_eq!(idle(ins, &[]), none);
+    }
+    // Past a jump, when what it goes to is so too.
+    let ins = vec![of::drop(0), of::jump(0), of::len(4, 1), of::ret(1)];
+    assert_eq!(idle(ins, &[3]), [0]);
+    let ins = vec![
+        of::drop(0),
+        of::jump(0),
+        of::ret(1),
+        of::len(4, 1),
+        of::ret(1),
+    ];
+    assert_eq!(idle(ins, &[3]), none);
+    let branch = |one: Ins<VReg>, other: Ins<VReg>| {
+        let ins = vec![
+            of::drop(0),
+            of::unless(1, 0),
+            one,
+            of::ret(3),
+            other,
+            of::ret(3),
+        ];
+        idle(ins, &[4])
+    };
+    assert_eq!(branch(of::mv(3, 1), of::mv(3, 2)), [0]);
+    assert_eq!(branch(of::len(3, 1), of::mv(3, 2)), none);
+    assert_eq!(branch(of::mv(3, 1), of::len(3, 2)), none);
+    // A tail call to a function that is known gives up what it does not pass, but
+    // by then it may have been written over.
+    let steps = vec![of::drop(0).into(), of::enter(1, &[1])];
+    let mut d = draft(2, 2, steps, &[]);
+    let held = settle(&mut d).expect("a function that loads");
+    assert_eq!(held.idle, [false, false]);
+}
+
+/// A drop in front of where a cell is taken apart is left out only when nothing
+/// was read out of what it is of. That may hold the cell, and then its fields
+/// would not move out.
+#[test]
+fn a_drop_of_what_may_hold_the_cell_stays_in_front_of_taking_it_apart() {
+    let idle = |ins: Vec<Ins<VReg>>, labels: &[usize]| idle_steps(ins, labels).0;
+    let none: [usize; 0] = [];
+    let index = |dst: u32, src: u32, at: u32| Ins::ArrayIndex {
+        dst: Dst(VReg(dst)),
+        src: Src(VReg(src)),
+        index: Src(VReg(at)),
+    };
+    let or = |dst: u32, src: u32, at: u32| Ins::ArrayIndexOr {
+        dst: Dst(VReg(dst)),
+        src: Src(VReg(src)),
+        index: Src(VReg(at)),
+        default: Shared(VReg(at)),
+    };
+    let element = |dst: u32, src: u32| Ins::ArrayElem {
+        dst: Dst(VReg(dst)),
+        src: Src(VReg(src)),
+        index: 0,
+    };
+    let field = |dst: u32, src: u32| Ins::Field {
+        dst: Dst(VReg(dst)),
+        src: Src(VReg(src)),
+        index: 0,
+    };
+    let opened = || of::open([Some(4), None], 3);
+    let ins = vec![of::mv(3, 1), of::drop(0), opened(), of::ret(4)];
+    assert_eq!(idle(ins, &[]), [1]);
+    for read in [field(3, 0), element(3, 0), index(3, 0, 1), or(3, 0, 1)] {
+        let ins = vec![read, of::drop(0), opened(), of::ret(4)];
+        assert_eq!(idle(ins, &[]), none);
+        // What is dropped after it is in front of the return alone.
+        let ins = vec![read, opened(), of::drop(0), of::ret(4)];
+        assert_eq!(idle(ins, &[]), [2]);
+        // It may be where a jump goes.
+        let ins = vec![read, of::drop(0), of::jump(0), opened(), of::ret(4)];
+        assert_eq!(idle(ins, &[3]), none);
+    }
+    let ins = vec![
+        of::find(3, [0, 1], 0),
+        of::drop(0),
+        opened(),
+        of::ret(4),
+        of::ret(1),
+    ];
+    assert_eq!(idle(ins, &[4]), none);
 }
 
 /// Groups of drops that meet are found together, whichever of them is, and

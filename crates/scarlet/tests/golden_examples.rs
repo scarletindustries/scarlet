@@ -315,6 +315,10 @@ suite! {
         // shared, of one field and of many, set to numbers, to cells and to the
         // record itself, and of a variant that an arm has matched.
         record_updates,
+        // Branches whose values are used further on, one in another and one in what
+        // another is on, with what each holds read in it, in its other branch or
+        // after it, and module constants that read each other.
+        joins,
         // Tail calls of every shape: to self, to other functions and through
         // values, with arguments kept, traded, turned round, made, constant and
         // given to several parameters, over accumulators of every kind.

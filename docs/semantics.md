@@ -95,7 +95,9 @@ Where nobody can tell the difference, the compiler holds the old record until th
 
 A program can see the old record being given up in one case, which is when it held the last reference to a handle such as a listener or a connection. The handle is then closed before the later fields run. In `Held(..h, conn: redial(h.port))` the connection `h` held is closed before `redial` runs. To keep it open until the new one is made, make the new one first: `next = redial(h.port)` and then `Held(..h, conn: next)`.
 
-Some spellings still copy. A field written after the write that reads the base, as `count: s.count + 1` does, keeps the base until then, so put such a field before the write. A base that has to run and is written after the write, as in `State(v: array::put(s.v, i, x), ..f(s))`, runs after it, so the write finds `s` still held. Those two are the order you wrote. Three more are limits of the compiler today, which `docs/perf-plan.md` removes. An update inside an `if` or `match` used as a value keeps its base until that value is made (step 17). A record a function builds itself and then passes to a call can be kept across that call, for a later constructor to take its cell, and the array it holds stays shared until the call returns (step 13). And `map::set(s.tasks, k, t)` still copies when `t` is a cell bound before the update, as a parameter is, because its drop then comes between the set and the map's (step 33).
+It is the same wherever the update is, in a branch of an `if` or `match` too.
+
+Some spellings still copy. A field written after the write that reads the base, as `count: s.count + 1` does, keeps the base until then, so put such a field before the write. A base that has to run and is written after the write, as in `State(v: array::put(s.v, i, x), ..f(s))`, runs after it, so the write finds `s` still held. Those two are the order you wrote.
 
 The old compiler accepted any spread whose base had the same type, and the old VM read the fields by position, so `Circle(..square, r: 1)` could fill a Circle's `x` with the Square's `side`. And `s.x` was refused when the variants held `x` in different slots.
 

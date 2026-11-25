@@ -307,11 +307,8 @@ pub enum TypedExpr {
         ty: RTy,
         variant: VariantRef,
         base: Box<TypedExpr>,
-        /// Each field that `base` keeps, by its index, as a read of it from
-        /// `base`, which is a local here.
-        kept: Vec<(u16, TypedExpr)>,
-        /// Each other field, in the order they are written. There is
-        /// at least one.
+        /// Each field that is set, by its index, in the order they are written.
+        /// There is at least one.
         sets: Vec<(u16, TypedExpr)>,
     },
     Array {
@@ -449,6 +446,26 @@ pub(crate) fn pat_binds(p: &TypedPat) -> Vec<TypedBind> {
     let mut out = Vec::new();
     collect_binds(p, &mut out);
     out
+}
+
+/// Whether an or-pattern in `p` binds names.
+pub(crate) fn or_binds(p: &TypedPat) -> bool {
+    match p {
+        TypedPat::Wild { .. }
+        | TypedPat::Bind(_)
+        | TypedPat::Lit { .. }
+        | TypedPat::Range { .. } => false,
+        TypedPat::Or { alts, .. } => alts.iter().any(|alt| !pat_binds(alt).is_empty()),
+        TypedPat::Ctor { fields: ps, .. }
+        | TypedPat::Tuple { elems: ps, .. }
+        | TypedPat::Array { prefix: ps, .. } => ps.iter().any(or_binds),
+        TypedPat::Bin { segs, .. } => segs.iter().any(|s| match s {
+            TypedBinPatSeg::Utf8Literal { .. } => false,
+            TypedBinPatSeg::Utf8 { value }
+            | TypedBinPatSeg::Int { value, .. }
+            | TypedBinPatSeg::Binary { value, .. } => or_binds(value),
+        }),
+    }
 }
 
 fn push_bind(out: &mut Vec<TypedBind>, b: TypedBind) {

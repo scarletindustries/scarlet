@@ -4,9 +4,13 @@
 //! held. A frame gives up what its registers hold when it returns, so fewer of
 //! them is less work there.
 //!
-//! A value that a tail call passes takes the register of the parameter it is
-//! for, when it can and the frame is no larger for it: the call then has nothing
-//! to move.
+//! A value that a tail call passes takes the register of the parameter it is for,
+//! when it can and the frame is no larger for it. The two values of a `Move` are
+//! given one register when they can have it, so that a jump to a join has nothing
+//! to move. The tail call comes first. `b = if x > best { x } else { best }` and
+//! then `go(n - 1, b)` is one move when `b` has the register of `best`, and that
+//! is on the way that gives `x`. With `b` in the register of `x` every way has
+//! one for the call, and the way that gives `best` one more.
 //!
 //! Sharing a register changes when a value is released, never whether: the
 //! value a register held is released when the next one is written over it,
@@ -14,9 +18,11 @@
 //! names its register, so a value keeps it until its `Drop`, unless that `Drop`
 //! does nothing.
 
+use std::collections::HashSet;
+
 use super::ins::{Ins, Lists, Makes, VReg};
 use super::live::Held;
-use super::translate::{Draft, Step};
+use super::translate::{Draft, Step, TailTo};
 use super::{ReadsClosure, Reg, Room, Unfit};
 use crate::frame::{CLOSURE, FIRST, LINK, WINDOW};
 use crate::stop::Limit;
@@ -53,16 +59,15 @@ pub(super) fn param(i: usize) -> Option<Reg> {
 /// then do nothing.
 pub(super) fn allocate(draft: Draft, held: &Held) -> Result<Assigned, Unfit> {
     let clashes = Clashes::new(draft.values as usize, &held.clashes);
-    let (regs, end) = colour(&draft, held, &clashes, &[])?;
-    let wanted = wanted(&draft, end);
-    let (regs, end) = if wanted.is_empty() {
-        (regs, end)
-    } else {
-        match colour(&draft, held, &clashes, &wanted) {
-            Ok(better) if better.1 <= end => better,
-            Ok(_) | Err(_) => (regs, end),
+    let mut groups = Groups::joined(&draft, &|v| clashes.of(v), moves(&draft));
+    let plain = match colour(&draft, held, &clashes, &groups, &[]) {
+        Ok(coloured) => coloured,
+        Err(_) => {
+            groups = Groups::default();
+            colour(&draft, held, &clashes, &groups, &[])?
         }
     };
+    let (regs, end) = passing(&draft, held, &clashes, &groups, plain.1).unwrap_or(plain);
     let mut assigned = Assigned {
         steps: draft.steps,
         lists: draft.lists,
@@ -73,51 +78,114 @@ pub(super) fn allocate(draft: Draft, held: &Held) -> Result<Assigned, Unfit> {
         own: room(end),
         closure: draft.closure,
     };
-    tidy(&mut assigned, &held.idle);
+    let idle = idle(held, &assigned.regs);
+    tidy(&mut assigned, &idle);
     Ok(assigned)
 }
 
-/// Each value a tail call passes, with the register of the parameter it is
-/// passed for, by the values' numbers. A value passed for several is here with
-/// each, in the order of the calls. A function that holds something nothing
-/// drops wants nothing: the registers say when that is released, and a loop is
-/// not to hold it longer.
+/// The registers with those that the tail calls would like, in a frame that ends
+/// at `end` or before. `groups` is what to keep together when the frame is larger
+/// with a tail call's arguments first.
+fn passing(
+    draft: &Draft,
+    held: &Held,
+    clashes: &Clashes,
+    groups: &Groups,
+    end: usize,
+) -> Option<Coloured> {
+    let passed = passed(draft);
+    let wanted = wanted(&passed, end);
+    if wanted.is_empty() {
+        return None;
+    }
+    let with = |groups: &Groups| {
+        let coloured = colour(draft, held, clashes, groups, &wanted).ok();
+        coloured.filter(|(_, larger)| *larger <= end)
+    };
+    // With no move there is nothing for an argument to go before.
+    let first = || {
+        moves(draft).next()?;
+        let pair = |(v, i): &(VReg, usize)| Some((*draft.params.get(*i)?, *v));
+        let pairs = passed.iter().filter_map(pair);
+        let pairs = pairs.chain(moves(draft));
+        with(&Groups::joined(draft, &|v| clashes.of(v), pairs))
+    };
+    first().or_else(|| with(groups))
+}
+
+/// The two values of each `Move`.
+fn moves(draft: &Draft) -> impl Iterator<Item = (VReg, VReg)> {
+    draft.steps.iter().filter_map(|step| match step {
+        Step::Ins(Ins::Move { dst, src }) => Some((dst.0, src.reg)),
+        Step::Ins(_) | Step::TailCall { .. } => None,
+    })
+}
+
+/// Each value a tail call passes, with its place among the arguments. Those of
+/// calls to the running function come first, because they make a loop.
+fn passed(draft: &Draft) -> Vec<(VReg, usize)> {
+    let (mut own, mut others) = (Vec::new(), Vec::new());
+    for step in &draft.steps {
+        if let Step::TailCall { to, args } = step {
+            let args = args.iter().copied().zip(0..);
+            match to {
+                TailTo::Own => own.extend(args),
+                TailTo::Func(_) => others.extend(args),
+            }
+        }
+    }
+    own.extend(others);
+    own
+}
+
+/// The register of each value that has one, and one past the highest.
+type Coloured = (Vec<Option<Reg>>, usize);
+
+/// Whether each step does nothing, once the values have registers.
+fn idle(held: &Held, regs: &[Option<Reg>]) -> Vec<bool> {
+    let mut idle = held.idle.clone();
+    let reg = |v: VReg| regs.get(v.0 as usize).copied().flatten();
+    for drop in &held.overwritten {
+        if reg(drop.dropped) == reg(drop.written)
+            && let Some(idle) = idle.get_mut(drop.step)
+        {
+            *idle = true;
+        }
+    }
+    idle
+}
+
+/// The register of the parameter that each of `passed` is for. A value passed for
+/// several is here with each, in the order of `passed`.
 ///
 /// None is wanted from `end` on, where the registers of the frame end without
 /// this. A frame's calls start above its registers and its return gives them up,
 /// so a larger one costs more than a move.
-fn wanted(draft: &Draft, end: usize) -> Vec<(VReg, Reg)> {
-    let mut all = Vec::new();
-    if draft.undropped {
-        return all;
-    }
-    for step in &draft.steps {
-        if let Step::TailCall { args, .. } = step {
-            let each = args.iter().enumerate();
-            let each = each.filter_map(|(i, v)| Some((*v, param(i)?)));
-            all.extend(each.filter(|(_, reg)| usize::from(reg.0) < end));
-        }
-    }
-    all.sort_by_key(|(v, _)| *v);
-    all
+fn wanted(passed: &[(VReg, usize)], end: usize) -> Vec<(VReg, Reg)> {
+    let each = passed.iter().filter_map(|(v, i)| Some((*v, param(*i)?)));
+    each.filter(|(_, reg)| usize::from(reg.0) < end).collect()
 }
 
 /// A register for each value, and one past the highest.
 ///
 /// A function's arguments arrive in the registers from [`FIRST`] on, in order.
 /// Each value in `wanted` takes the first register it has there that none of
-/// the values it clashes with has, and each value left over the lowest.
+/// the values it clashes with has, and each value left over the lowest. The
+/// values of a group take theirs together, out of what each of them has there.
 fn colour(
     draft: &Draft,
     held: &Held,
     clashes: &Clashes,
+    groups: &Groups,
     wanted: &[(VReg, Reg)],
-) -> Result<(Vec<Option<Reg>>, usize), Unfit> {
+) -> Result<Coloured, Unfit> {
     let mut regs: Vec<Option<Reg>> = vec![None; draft.values as usize];
     let mut end = usize::from(FIRST.0);
     let mut give = |regs: &mut Vec<Option<Reg>>, v: VReg, reg: Reg| {
-        if let Some(of) = regs.get_mut(v.0 as usize) {
-            *of = Some(reg);
+        for member in groups.members(v) {
+            if let Some(of) = regs.get_mut(member.0 as usize) {
+                *of = Some(reg);
+            }
         }
         end = end.max(usize::from(reg.0).saturating_add(1));
     };
@@ -125,10 +193,12 @@ fn colour(
         give(&mut regs, *v, param(i).ok_or(TOO_MANY)?);
     }
     let free = |regs: &[Option<Reg>], v: VReg| {
-        let i = v.0 as usize;
-        (regs.get(i) == Some(&None)).then(|| clashes.taken(i, regs))
+        let unset = regs.get(v.0 as usize) == Some(&None);
+        unset.then(|| clashes.taken(groups.members(v), regs))
     };
-    for want in wanted.chunk_by(|(v, _), (w, _)| v == w) {
+    let mut wanted = wanted.to_vec();
+    wanted.sort_by_key(|(v, _)| groups.group(*v));
+    for want in wanted.chunk_by(|(v, _), (w, _)| groups.group(*v) == groups.group(*w)) {
         if let Some((v, _)) = want.first()
             && let Some(taken) = free(&regs, *v)
             && let Some((_, reg)) = want.iter().find(|(_, reg)| !taken.has(*reg))
@@ -143,6 +213,128 @@ fn colour(
         }
     }
     Ok((regs, end))
+}
+
+/// The values that are to share a register, in groups. A value that is not here is
+/// in a group of its own.
+#[derive(Default)]
+struct Groups {
+    /// The group of each value.
+    of: Vec<u32>,
+    /// The next value of the same group, round to the first again.
+    next: Vec<VReg>,
+}
+
+impl Groups {
+    /// The values of each of `pairs` in one group, where that has no two values
+    /// that clash and is of one parameter at most. Parameters never clash, because
+    /// nothing writes them. A pair earlier in `pairs` goes before a later one.
+    /// `clashes` gives what each value clashes with.
+    fn joined<'c>(
+        draft: &Draft,
+        clashes: &impl Fn(VReg) -> &'c [VReg],
+        pairs: impl Iterator<Item = (VReg, VReg)>,
+    ) -> Groups {
+        let mut pairs = pairs.peekable();
+        if pairs.peek().is_none() {
+            return Groups::default();
+        }
+        let mut groups = Groups {
+            of: (0..draft.values).collect(),
+            next: (0..draft.values).map(VReg).collect(),
+        };
+        let one = |v: VReg| Whole {
+            values: 1,
+            clashes: clashes(v).len(),
+            arrives: false,
+        };
+        let mut wholes: Vec<Whole> = (0..draft.values).map(VReg).map(one).collect();
+        for v in &draft.params {
+            if let Some(whole) = wholes.get_mut(v.0 as usize) {
+                whole.arrives = true;
+            }
+        }
+        // Those that may not be one, so that each two are looked at once.
+        let mut refused = HashSet::new();
+        for (a, b) in pairs {
+            let (a, b) = (groups.group(a), groups.group(b));
+            if a == b || refused.contains(&(a.min(b), a.max(b))) {
+                continue;
+            }
+            let whole = |group: u32| wholes.get(group as usize).copied().unwrap_or_default();
+            let (of_a, of_b) = (whole(a), whole(b));
+            // The one with fewer clashes is gone over, so that one value in many
+            // pairs is not gone over for each of them.
+            let clash = || {
+                if of_a.clashes <= of_b.clashes {
+                    groups.clash(a, b, clashes)
+                } else {
+                    groups.clash(b, a, clashes)
+                }
+            };
+            if (of_a.arrives && of_b.arrives) || clash() {
+                refused.insert((a.min(b), a.max(b)));
+                continue;
+            }
+            let (to, from) = if of_b.values > of_a.values {
+                (b, a)
+            } else {
+                (a, b)
+            };
+            if let Some(whole) = wholes.get_mut(to as usize) {
+                *whole = Whole {
+                    values: of_a.values.saturating_add(of_b.values),
+                    clashes: of_a.clashes.saturating_add(of_b.clashes),
+                    arrives: of_a.arrives || of_b.arrives,
+                };
+            }
+            groups.join(to, from);
+        }
+        groups
+    }
+
+    fn group(&self, v: VReg) -> u32 {
+        self.of.get(v.0 as usize).copied().unwrap_or(v.0)
+    }
+
+    /// Every value of the group of `v`, which has the number of one of them.
+    fn members(&self, v: VReg) -> impl Iterator<Item = VReg> {
+        let next = move |at: &VReg| self.next.get(at.0 as usize).copied();
+        std::iter::successors(Some(v), move |at| next(at).filter(|next| *next != v))
+    }
+
+    /// Whether a value of `from` clashes with one of `to`.
+    fn clash<'c>(&self, from: u32, to: u32, clashes: &impl Fn(VReg) -> &'c [VReg]) -> bool {
+        self.members(VReg(from)).any(|v| {
+            let mut others = clashes(v).iter();
+            others.any(|other| self.group(*other) == to)
+        })
+    }
+
+    /// Put the values of `from` in `to`.
+    fn join(&mut self, to: u32, from: u32) {
+        let moving: Vec<VReg> = self.members(VReg(from)).collect();
+        for v in moving {
+            if let Some(of) = self.of.get_mut(v.0 as usize) {
+                *of = to;
+            }
+        }
+        // Two rings become one when one value of each gives its next to the other.
+        let (to, from) = (to as usize, from as usize);
+        if to != from && to.max(from) < self.next.len() {
+            self.next.swap(to, from);
+        }
+    }
+}
+
+/// What [`Groups::joined`] keeps of a group.
+#[derive(Clone, Copy, Default)]
+struct Whole {
+    values: u32,
+    /// How many clashes its values have.
+    clashes: usize,
+    /// Whether one of them is a parameter.
+    arrives: bool,
 }
 
 const TOO_MANY: Unfit = Unfit::TooMany(Limit::Values);
@@ -239,19 +431,20 @@ impl Clashes {
         Clashes { starts, all }
     }
 
-    fn of(&self, v: usize) -> &[VReg] {
+    fn of(&self, v: VReg) -> &[VReg] {
+        let v = v.0 as usize;
         let start = self.starts.get(v).copied().unwrap_or(0);
         let end = self.starts.get(v.saturating_add(1)).copied().unwrap_or(0);
         self.all.get(start..end).unwrap_or_default()
     }
 
-    /// The registers value `v` may not have: those of the values it clashes
-    /// with, and the two that a frame's link and closure have.
-    fn taken(&self, v: usize, regs: &[Option<Reg>]) -> RegSet {
+    /// The registers that none of `values` may have: those of the values they
+    /// clash with, and the two that a frame's link and closure have.
+    fn taken(&self, values: impl Iterator<Item = VReg>, regs: &[Option<Reg>]) -> RegSet {
         let mut taken = RegSet::default();
         taken.add(LINK);
         taken.add(CLOSURE);
-        for other in self.of(v) {
+        for other in values.flat_map(|v| self.of(v)) {
             if let Some(Some(reg)) = regs.get(other.0 as usize) {
                 taken.add(*reg);
             }

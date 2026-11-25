@@ -157,11 +157,11 @@ fn an_audited_load_checks_what_is_written() {
     assert_eq!([params("shade"), params("same"), params("go")], [0, 0, 3]);
     assert_eq!(checks("same"), []);
     assert_eq!(checks("go")[..3], [(r2, int), (r3, word), (r4, word)]);
-    // What a tail expression gives has no local, so no type.
-    for name in [".shade", ".at", ".n", ".next"] {
-        assert_eq!(checks(name), [], "{name}");
+    // So is what a tail expression gives, when its type says anything.
+    for (name, makes) in [(".shade", word), (".at", word), (".n", int)] {
+        assert_eq!(checks(name), [(r2, makes)], "{name}");
     }
-    // But what makes it may say.
+    assert_eq!(checks(".next"), []);
     assert_eq!(checks(".more").len(), 2);
     assert!(checks(".more").iter().all(|(_, may)| *may == int));
     // What a lookup finds is checked too.

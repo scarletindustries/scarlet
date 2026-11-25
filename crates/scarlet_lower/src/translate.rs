@@ -767,11 +767,6 @@ impl Tx<'_, '_, '_, '_> {
             fields.push((a.slot, self.var(&b)));
         }
         let base = self.spill(fx, &spread.base, &mut lets)?;
-        let mut kept = Vec::with_capacity(spread.fills.len());
-        for (slot, at) in &spread.fills {
-            let recv = self.var(&base);
-            kept.push((*slot, self.field(fx, recv, &result, at, field_ty(*slot)?)?));
-        }
         let mut given = Vec::with_capacity(after.len());
         for a in after {
             given.push((a.slot, self.expr(fx, &a.value)?));
@@ -780,7 +775,7 @@ impl Tx<'_, '_, '_, '_> {
         for a in args {
             numbers &= self.is_number(field_ty(a.slot)?)?;
         }
-        if update::pays(args.len(), kept.len())
+        if update::pays(args.len(), spread.fills.len())
             && self.is_variant(&spread.base, &result, ctor.variant)?
             && (numbers || given.iter().all(|(_, value)| update::brief(value)))
         {
@@ -789,10 +784,14 @@ impl Tx<'_, '_, '_, '_> {
                 ty,
                 variant,
                 base: Box::new(self.var(&base)),
-                kept: by_index(kept)?,
                 sets: by_index(fields)?,
             };
             return Ok(wrap(lets, update));
+        }
+        let mut kept = Vec::with_capacity(spread.fills.len());
+        for (slot, at) in &spread.fills {
+            let recv = self.var(&base);
+            kept.push((*slot, self.field(fx, recv, &result, at, field_ty(*slot)?)?));
         }
         for (slot, value) in kept.into_iter().chain(given) {
             let b = self.temp(fx, value.ty());

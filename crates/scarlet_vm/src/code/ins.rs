@@ -591,6 +591,80 @@ impl<R: Names> Ins<R> {
             Makes::Any
         }
     }
+
+    /// Whether the instruction ends the frame, or makes it another function's, and
+    /// gives up every register it had.
+    pub(super) fn gives_up_all(&self) -> bool {
+        matches!(
+            self,
+            Ins::Ret { .. }
+                | Ins::RetClosure { .. }
+                | Ins::TailCallValue { .. }
+                | Ins::TailCallValueWide { .. }
+        )
+    }
+
+    /// Whether the instruction takes a cell apart.
+    pub(super) fn opens(&self) -> bool {
+        matches!(
+            self,
+            Ins::Open1 { .. }
+                | Ins::Open2 { .. }
+                | Ins::Open3 { .. }
+                | Ins::Open4 { .. }
+                | Ins::Open5 { .. }
+                | Ins::Open6 { .. }
+                | Ins::Open7 { .. }
+                | Ins::Open8 { .. }
+                | Ins::OpenWide { .. }
+        )
+    }
+
+    /// The value the instruction reads something out of that the value goes on
+    /// holding.
+    pub(super) fn reads_part_of(&self) -> Option<Src<R>> {
+        if let Ins::Field { src, .. }
+        | Ins::ArrayElem { src, .. }
+        | Ins::ArrayIndex { src, .. }
+        | Ins::ArrayIndexOr { src, .. }
+        | Ins::MapFind { map: src, .. } = *self
+        {
+            Some(src)
+        } else {
+            None
+        }
+    }
+
+    /// Whether the instruction makes no cell and runs nothing but itself. So a
+    /// value given up after a few of these, and not before them, is gone before
+    /// anything could see that it is or have its place.
+    pub(super) fn brief(&self) -> bool {
+        macro_rules! any_of {
+            ([] $($name:ident $op:path),*) => { $(Ins::$name { .. })|* };
+            ([] $($name:ident $jump:ident $op:path),*) => {
+                $(Ins::$name { .. } | Ins::$jump { .. })|*
+            };
+        }
+        self.opens()
+            || matches!(
+                self,
+                int_compare!(any_of)
+                    | int_compare_k!(any_of)
+                    | float_arith!(any_of)
+                    | float_arith_k!(any_of)
+                    | float_arith_k_first!(any_of)
+                    | float_compare!(any_of)
+                    | float_compare_k!(any_of)
+                    | Ins::Const { .. }
+                    | Ins::Move { .. }
+                    | Ins::FloatNeg { .. }
+                    | Ins::Not { .. }
+                    | Ins::Field { .. }
+                    | Ins::Jump { .. }
+                    | Ins::JumpIfFalse { .. }
+                    | Ins::JumpUnlessTag { .. }
+            )
+    }
 }
 
 #[cfg(test)]

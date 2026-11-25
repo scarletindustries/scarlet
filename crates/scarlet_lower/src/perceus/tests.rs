@@ -1,9 +1,12 @@
 use super::*;
-use crate::PrimOp;
-use crate::testkit::{bind, ctor, func, local, variant, vref};
-use crate::{Callee, CaptureIdx, ConstId, FuncIdx, GlobalSlot, Load};
+use crate::testkit::{
+    bind, bound, ctor, func, iff, join, jump, local, matches, ret, tail_call, variant, vref,
+};
+use crate::{Callee, CaptureIdx, ConstId, CoreBind, FuncIdx, GlobalSlot, Load};
 use scarlet_ir::TypeId;
 use scarlet_ir::rty::{PrimIds, Repr};
+
+mod ownership;
 
 /// The same kind of arena the elaborator hands `perceus` in the real
 /// pipeline.
@@ -21,89 +24,106 @@ fn word(p: &mut ResolvedPool, id: i32) -> RTy {
     p.mk_con(TypeId(id), Repr::Word, &[]).unwrap()
 }
 
-/// The unboxed `Int`. It isn't on the heap, so it gets no `Drop`.
+/// `Int`, which gets no `Drop`.
 fn int_ty(p: &mut ResolvedPool) -> RTy {
     let int = p.prims().int;
     p.mk_con(int, Repr::Counted, &[]).unwrap()
 }
 
-fn count_drops(e: &CoreExpr) -> usize {
-    match e {
-        CoreExpr::Drop { body, .. } => 1 + count_drops(body),
-        CoreExpr::Let { body, .. } => count_drops(body),
-        CoreExpr::LetJoin { join, body, .. } => count_drops(join) + count_drops(body),
-        CoreExpr::LetCont { cont, body, .. } => count_drops(cont) + count_drops(body),
-        CoreExpr::If { then, els, .. } => count_drops(then) + count_drops(els),
-        CoreExpr::Match { arms, .. } => arms.iter().map(|(_, b)| count_drops(b)).sum(),
-        CoreExpr::Tail(_) | CoreExpr::Goto(_) => 0,
-    }
-}
-
-fn find_drop(mut e: &CoreExpr, id: LocalId) -> bool {
-    loop {
+/// Every drop in `e`.
+fn drops(e: &CoreExpr) -> Vec<LocalId> {
+    let mut out = Vec::new();
+    let mut work = vec![e];
+    while let Some(e) = work.pop() {
         match e {
-            CoreExpr::Drop { local, .. } if *local == id => return true,
-            CoreExpr::Drop { body, .. }
-            | CoreExpr::Let { body, .. }
-            | CoreExpr::LetJoin { body, .. } => e = body,
-            CoreExpr::LetCont { cont, body, .. } => {
-                return find_drop(cont, id) || find_drop(body, id);
+            CoreExpr::Drop { local, body } => {
+                out.push(*local);
+                work.push(body);
             }
-            CoreExpr::Tail(_) | CoreExpr::Goto(_) => return false,
-            CoreExpr::If { then, els, .. } => {
-                return find_drop(then, id) || find_drop(els, id);
-            }
-            CoreExpr::Match { arms, .. } => {
-                return arms.iter().any(|(_, b)| find_drop(b, id));
-            }
+            CoreExpr::Let { body, .. } | CoreExpr::SetGlobal { body, .. } => work.push(body),
+            CoreExpr::Join { cont, body, .. } => work.extend([&**cont, &**body]),
+            CoreExpr::If { then, els, .. } => work.extend([&**then, &**els]),
+            CoreExpr::Match { arms, .. } => work.extend(arms.iter().map(|(_, arm)| arm)),
+            CoreExpr::Ret(_) | CoreExpr::TailCall { .. } | CoreExpr::Jump { .. } => {}
         }
     }
+    out
+}
+
+fn count_drops(e: &CoreExpr) -> usize {
+    drops(e).len()
+}
+
+fn find_drop(e: &CoreExpr, id: LocalId) -> bool {
+    drops(e).contains(&id)
+}
+
+fn run(
+    pool: &ResolvedPool,
+    locals: &TiVec<LocalId, RTy>,
+    f: CoreFn,
+) -> Result<CoreFn, InternalLinkError> {
+    super::perceus(pool, locals, &f.body.always_reached(), f)
 }
 
 /// Run the pass with every bind's type in the table, the way `lower`
 /// hands it over.
 fn perceus(pool: &ResolvedPool, f: CoreFn) -> CoreFn {
-    dropped(pool, f).core
+    run(pool, &types_of(&f), f).expect("every local is typed")
 }
 
-fn dropped(pool: &ResolvedPool, f: CoreFn) -> Dropped {
-    super::perceus(pool, &types_of(&f), f).expect("every local is typed")
+/// The checker finds nothing wrong with `f`.
+fn checked(pool: &ResolvedPool, f: &CoreFn, body: ownership::Body) {
+    ownership::check(pool, f, body).unwrap_or_else(|why| panic!("{why}\n{f}"));
+}
+
+/// What `perceus` makes of `f`, as the lines it prints, without the types. It
+/// has to pass the checker.
+fn lines(pool: &ResolvedPool, f: CoreFn) -> Vec<String> {
+    let f = perceus(pool, f);
+    checked(pool, &f, ownership::Body::Function);
+    let text = f.body.to_string();
+    let untyped = |l: &str| {
+        let words = l.split(' ').map(|word| match word.split_once(':') {
+            Some((head, ty)) if ty.chars().next().is_some_and(char::is_numeric) => {
+                let rest = ty.trim_start_matches(char::is_numeric);
+                format!("{head}{rest}")
+            }
+            _ => word.to_string(),
+        });
+        words.collect::<Vec<_>>().join(" ")
+    };
+    text.lines().map(untyped).collect()
 }
 
 /// The type of each local of `f`. An id no bind uses gets the return type, which
 /// nothing reads.
 fn types_of(f: &CoreFn) -> TiVec<LocalId, RTy> {
-    fn binds(e: &CoreExpr, out: &mut Vec<CoreBind>) {
+    let mut all = f.params.clone();
+    let mut work = vec![&f.body];
+    while let Some(e) = work.pop() {
         match e {
             CoreExpr::Let { bind, body, .. } => {
-                out.push(bind.clone());
-                binds(body, out);
+                all.push(*bind);
+                work.push(body);
             }
-            CoreExpr::LetJoin { bind, join, body } => {
-                out.push(bind.clone());
-                binds(join, out);
-                binds(body, out);
+            CoreExpr::Join {
+                params, cont, body, ..
+            } => {
+                all.extend(params);
+                work.extend([&**cont, &**body]);
             }
-            CoreExpr::LetCont { cont, body, .. } => {
-                binds(cont, out);
-                binds(body, out);
-            }
-            CoreExpr::Drop { body, .. } => binds(body, out),
-            CoreExpr::If { then, els, .. } => {
-                binds(then, out);
-                binds(els, out);
-            }
+            CoreExpr::SetGlobal { body, .. } | CoreExpr::Drop { body, .. } => work.push(body),
+            CoreExpr::If { then, els, .. } => work.extend([&**then, &**els]),
             CoreExpr::Match { arms, .. } => {
-                for (pat, body) in arms {
-                    out.extend(pat.binds().cloned());
-                    binds(body, out);
+                for (pat, arm) in arms {
+                    all.extend(pat.binds());
+                    work.push(arm);
                 }
             }
-            CoreExpr::Tail(_) | CoreExpr::Goto(_) => {}
+            CoreExpr::Ret(_) | CoreExpr::TailCall { .. } | CoreExpr::Jump { .. } => {}
         }
     }
-    let mut all = f.params.clone();
-    binds(&f.body, &mut all);
     let len = all.iter().map(|b| b.id.0 + 1).max().unwrap_or(0);
     let mut locals: TiVec<LocalId, RTy> = (0..len).map(|_| f.ret_ty).collect();
     for b in all {
@@ -114,35 +134,46 @@ fn types_of(f: &CoreFn) -> TiVec<LocalId, RTy> {
     locals
 }
 
-/// A toplevel keeps every value it pins to a global, so Perceus never drops
-/// one. A plain temporary still drops.
+/// A call of another function.
+fn call(args: &[u32]) -> Atom {
+    Atom::Call {
+        callee: Callee::Known(FuncIdx(0)),
+        args: args.iter().copied().map(local).collect(),
+    }
+}
+
+/// A toplevel gives up its own reference to what it stores in a global, at its
+/// last use. The slot has another.
 #[test]
-fn pinned_globals_are_never_dropped() {
+fn a_stored_value_is_dropped_where_the_toplevel_last_reads_it() {
     let mut pool = pool();
     let obj = con(&mut pool, 7);
-    let int = int_ty(&mut pool);
-    let mut global = bind(0, obj);
-    global.global = Some(crate::typed_ir::GlobalSlot(0));
-    let top = func(
-        Vec::new(),
-        CoreExpr::Let {
-            bind: bind(5, int),
-            rhs: Atom::Const(ConstId(0)),
-            body: Box::new(CoreExpr::Let {
-                bind: global,
-                rhs: ctor(&[5]),
-                body: Box::new(CoreExpr::Let {
-                    bind: bind(1, obj),
-                    rhs: ctor(&[5]),
-                    body: Box::new(CoreExpr::Tail(ctor(&[5]))),
-                }),
-            }),
-        },
-        obj,
+    let store = |slot, value, rest| CoreExpr::SetGlobal {
+        slot: GlobalSlot(slot),
+        value: local(value),
+        body: Box::new(rest),
+    };
+    let body = store(0, 0, store(1, 1, bound(bind(2, obj), ctor(&[1]), ret(2))));
+    let body = bound(
+        bind(0, obj),
+        call(&[]),
+        bound(bind(1, obj), call(&[]), body),
     );
-    let kept = perceus(&pool, top);
-    assert!(!find_drop(&kept.body, local(0)), "{}", kept);
-    assert!(find_drop(&kept.body, local(1)), "{}", kept);
+    let f = perceus(&pool, func(Vec::new(), body, obj));
+    checked(&pool, &f, ownership::Body::Toplevel);
+    let text = f.body.to_string();
+    let lines: Vec<&str> = text.lines().skip(2).collect();
+    assert_eq!(
+        lines,
+        [
+            "set global0 = %0",
+            "drop %0",
+            "set global1 = %1",
+            "let %2:0 = ctor 0.0(%1)",
+            "drop %1",
+            "ret %2",
+        ]
+    );
 }
 
 /// What an arm begins by dropping, in order.
@@ -155,6 +186,11 @@ fn drops_first(mut e: &CoreExpr) -> Vec<LocalId> {
     first
 }
 
+fn arm(fields: Vec<CoreBind>, body: CoreExpr) -> (CorePat, CoreExpr) {
+    let variant = variant();
+    (CorePat::Ctor { variant, fields }, body)
+}
+
 /// An arm with no more use for the value it matched begins by dropping it,
 /// whatever it does after. A value that another arm reads and this one does not
 /// goes before it, and the fields this one does not read go after it. The VM
@@ -163,30 +199,24 @@ fn drops_first(mut e: &CoreExpr) -> Vec<LocalId> {
 fn an_arm_drops_its_scrutinee_before_the_fields_it_does_not_read() {
     let mut pool = pool();
     let list = con(&mut pool, 99);
-    let arm = |fields: Vec<CoreBind>, body| {
-        let variant = variant();
-        (CorePat::Ctor { variant, fields }, body)
-    };
     let fields = || vec![bind(4, list), bind(5, list)];
-    let calls_itself = CoreExpr::Let {
-        bind: bind(6, list),
-        rhs: Atom::Call {
-            callee: Callee::Self_,
-            args: vec![local(5)],
-        },
-        body: Box::new(CoreExpr::Tail(ctor(&[6]))),
+    let others = || vec![bind(14, list), bind(15, list)];
+    let own = Atom::Call {
+        callee: Callee::Self_,
+        args: vec![local(5)],
     };
+    let calls_itself = bound(bind(6, list), own, bound(bind(7, list), ctor(&[6]), ret(7)));
+    let reads_it = bound(bind(16, list), ctor(&[0, 1, 14]), ret(16));
     let f = func(
         vec![bind(0, list), bind(1, list)],
-        CoreExpr::Match {
-            scrut: local(1),
-            arms: vec![
+        matches(
+            1,
+            vec![
                 arm(fields(), calls_itself),
-                arm(Vec::new(), CoreExpr::Tail(Atom::Local(local(0)))),
-                arm(fields(), CoreExpr::Tail(ctor(&[0, 1, 4]))),
+                arm(Vec::new(), ret(0)),
+                arm(others(), reads_it),
             ],
-            ty: list,
-        },
+        ),
         list,
     );
     let f = perceus(&pool, f);
@@ -197,7 +227,7 @@ fn an_arm_drops_its_scrutinee_before_the_fields_it_does_not_read() {
     let locals = |ids: &[u32]| ids.iter().copied().map(local).collect::<Vec<_>>();
     assert_eq!(first[0], locals(&[0, 1, 4]), "{f}");
     assert_eq!(first[1], locals(&[]), "nothing is in a cell there:\n{f}");
-    assert_eq!(first[2], locals(&[5]), "the arm reads %1:\n{f}");
+    assert_eq!(first[2], locals(&[15]), "the arm reads %1:\n{f}");
 }
 
 /// The shape of `dot_loop`: two constructors used by a call, then a tail call
@@ -207,34 +237,17 @@ fn a_loop_drops_what_a_turn_made() {
     let mut pool = pool();
     let point = con(&mut pool, 99);
     let int = int_ty(&mut pool);
-    let body = CoreExpr::Let {
-        bind: bind(2, point),
-        rhs: ctor(&[0, 0, 0]),
-        body: Box::new(CoreExpr::Let {
-            bind: bind(3, point),
-            rhs: ctor(&[0, 0, 0]),
-            body: Box::new(CoreExpr::Let {
-                bind: bind(4, int),
-                rhs: Atom::Call {
-                    callee: Callee::Known(FuncIdx(7)),
-                    args: vec![local(2), local(3)],
-                },
-                body: Box::new(CoreExpr::If {
-                    cond: local(0),
-                    then: Box::new(CoreExpr::Tail(Atom::Local(local(1)))),
-                    els: Box::new(CoreExpr::Tail(Atom::Call {
-                        callee: Callee::Self_,
-                        args: vec![local(0), local(4)],
-                    })),
-                    ty: int,
-                }),
-            }),
-        }),
-    };
-    let f = perceus(&pool, func(vec![bind(0, int), bind(1, int)], body, int));
-    assert!(find_drop(&f.body, local(2)), "{}", f.body);
-    assert!(find_drop(&f.body, local(3)), "{}", f.body);
-    assert_eq!(count_drops(&f.body), 2, "{}", f.body);
+    let turn = tail_call(Callee::Self_, &[0, 4]);
+    let body = bound(bind(4, int), call(&[2, 3]), iff(0, ret(1), turn));
+    let body = bound(bind(3, point), ctor(&[0, 0, 0]), body);
+    let body = bound(bind(2, point), ctor(&[0, 0, 0]), body);
+    let f = func(vec![bind(0, int), bind(1, int)], body, int);
+    let got = lines(&pool, f);
+    assert_eq!(
+        got[2..5],
+        ["let %4 = call fn#0(%2, %3)", "drop %2", "drop %3"]
+    );
+    assert_eq!(got.iter().filter(|l| l.contains("drop")).count(), 2);
 }
 
 /// A tail call reads its arguments before its frame's references go, so
@@ -244,18 +257,19 @@ fn a_loop_drops_what_a_turn_made() {
 fn a_tail_call_argument_is_not_dropped_before_the_call() {
     let mut pool = pool();
     let list = con(&mut pool, 99);
-    for callee in [Callee::Self_, Callee::Known(FuncIdx(3))] {
-        let body = CoreExpr::Let {
-            bind: bind(1, list),
-            rhs: ctor(&[0]),
-            body: Box::new(CoreExpr::Tail(Atom::Call {
-                callee,
-                args: vec![local(1)],
-            })),
-        };
-        let f = perceus(&pool, func(vec![bind(0, list)], body, list));
+    for callee in [
+        Callee::Self_,
+        Callee::Known(FuncIdx(3)),
+        Callee::Local(local(2)),
+    ] {
+        let body = bound(bind(1, list), ctor(&[0]), tail_call(callee, &[1]));
+        let f = func(vec![bind(0, list), bind(2, list)], body, list);
+        let f = perceus(&pool, f);
+        checked(&pool, &f, ownership::Body::Function);
         assert!(!find_drop(&f.body, local(1)), "{}", f.body);
         assert!(find_drop(&f.body, local(0)), "{}", f.body);
+        let called = callee == Callee::Local(local(2));
+        assert_eq!(find_drop(&f.body, local(2)), !called, "{}", f.body);
     }
 }
 
@@ -263,14 +277,8 @@ fn a_tail_call_argument_is_not_dropped_before_the_call() {
 fn no_drop_for_unboxed_prims() {
     let mut pool = pool();
     let int = int_ty(&mut pool);
-    let f = perceus(
-        &pool,
-        func(
-            vec![bind(0, int)],
-            CoreExpr::Tail(Atom::Const(ConstId(0))),
-            int,
-        ),
-    );
+    let body = bound(bind(1, int), Atom::Const(ConstId(0)), ret(1));
+    let f = perceus(&pool, func(vec![bind(0, int)], body, int));
     assert_eq!(count_drops(&f.body), 0);
 }
 
@@ -280,50 +288,21 @@ fn no_drop_for_unboxed_prims() {
 fn a_call_result_nothing_reads_is_dropped() {
     let mut pool = pool();
     let t = con(&mut pool, 99);
-    let f = perceus(
-        &pool,
-        func(
-            vec![],
-            CoreExpr::Let {
-                bind: bind(0, t),
-                rhs: Atom::Call {
-                    callee: Callee::Known(FuncIdx(0)),
-                    args: vec![],
-                },
-                body: Box::new(CoreExpr::Tail(ctor(&[]))),
-            },
-            t,
-        ),
-    );
-    let CoreExpr::Let { body, .. } = &f.body else {
-        panic!()
-    };
-    assert_eq!(drops_first(body), vec![local(0)], "{}", f.body);
+    let body = bound(bind(0, t), call(&[]), bound(bind(1, t), ctor(&[]), ret(1)));
+    let got = lines(&pool, func(vec![], body, t));
+    assert_eq!(got[1], "drop %0");
 }
 
 /// A local live into one `If` branch only drops at the head of the other,
 /// so both paths release it exactly once.
 #[test]
-fn if_join_equalises_ownership() {
+fn branches_equalise_ownership() {
     let mut pool = pool();
     let t = con(&mut pool, 99);
     let int = int_ty(&mut pool);
-    let f = perceus(
-        &pool,
-        func(
-            vec![bind(0, t), bind(1, int)],
-            CoreExpr::If {
-                cond: local(1),
-                then: Box::new(CoreExpr::Tail(Atom::Local(local(0)))),
-                els: Box::new(CoreExpr::Tail(Atom::Call {
-                    callee: Callee::Known(FuncIdx(0)),
-                    args: vec![],
-                })),
-                ty: t,
-            },
-            t,
-        ),
-    );
+    let params = vec![bind(0, t), bind(1, int)];
+    let els = tail_call(Callee::Known(FuncIdx(0)), &[]);
+    let f = perceus(&pool, func(params, iff(1, ret(0), els), t));
     let CoreExpr::If { then, els, .. } = &f.body else {
         panic!()
     };
@@ -331,385 +310,290 @@ fn if_join_equalises_ownership() {
     assert_eq!(count_drops(els), 1, "els drops %0 at head");
 }
 
-/// A rigid quantified variable's representation is unknown, so it is
-/// handled at runtime and gets no `Drop`. It is the only type that isn't a
-/// primitive and still counts as not on the heap. A dead nominal bind still
-/// drops.
+/// A value whose type is a variable is dropped like any other that may be a
+/// cell, and one of a type that is never a cell is not.
 #[test]
-fn bound_is_not_heap_but_a_nominal_is() {
+fn a_value_of_a_variable_type_is_dropped() {
     let mut pool = pool();
     let generic = pool.mk_bound(0).unwrap();
     let int = int_ty(&mut pool);
-    let t = con(&mut pool, 99);
-    let f = perceus(
-        &pool,
-        func(
-            vec![bind(0, generic), bind(1, int)],
-            CoreExpr::Tail(Atom::Local(local(1))),
-            int,
-        ),
-    );
-    assert_eq!(count_drops(&f.body), 0, "rigid Bound owns no cell");
-
-    let f = perceus(
-        &pool,
-        func(
-            vec![bind(0, t), bind(1, int)],
-            CoreExpr::Tail(Atom::Local(local(1))),
-            int,
-        ),
-    );
-    assert_eq!(count_drops(&f.body), 1, "dead heap param drops at head");
+    let (t, flag) = (con(&mut pool, 99), word(&mut pool, 98));
+    for (ty, want) in [(generic, 1), (t, 1), (int, 0), (flag, 0)] {
+        let params = vec![bind(0, ty), bind(1, int)];
+        let f = perceus(&pool, func(params, ret(1), int));
+        assert_eq!(count_drops(&f.body), want, "{f}");
+        // Whatever gives it.
+        for rhs in [call(&[]), Atom::Load(Load::Capture(CaptureIdx(0)))] {
+            let body = bound(bind(0, ty), rhs, ret(1));
+            let f = perceus(&pool, func(vec![bind(1, int)], body, int));
+            assert_eq!(count_drops(&f.body), want, "{f}");
+        }
+    }
 }
 
-/// Ownership evens out across `Goto` edges. `%0` is live into the shared
-/// continuation and `%2` isn't. Every owned local is released exactly once
-/// on every path, before the edge or inside the continuation, never both.
+/// Ownership evens out across jumps. `%0` is live into the continuation and `%2`
+/// isn't. Every owned local is released exactly once on every path, before the
+/// jump or after it, never both.
 #[test]
-fn goto_edges_equalise_ownership() {
+fn jumps_equalise_ownership() {
     let mut pool = pool();
     let t = con(&mut pool, 99);
     let int = int_ty(&mut pool);
-    let f = perceus(
-        &pool,
-        func(
-            vec![bind(0, t), bind(1, int), bind(2, t)],
-            CoreExpr::LetCont {
-                id: JoinId(0),
-                cont: Box::new(CoreExpr::Tail(Atom::Local(local(0)))),
-                body: Box::new(CoreExpr::If {
-                    cond: local(1),
-                    then: Box::new(CoreExpr::Goto(JoinId(0))),
-                    els: Box::new(CoreExpr::Tail(Atom::Local(local(2)))),
-                    ty: t,
-                }),
-            },
-            t,
-        ),
+    let params = vec![bind(0, t), bind(1, int), bind(2, t)];
+    let body = join(0, Vec::new(), iff(1, jump(0, &[]), ret(2)), ret(0));
+    assert_eq!(
+        lines(&pool, func(params, body, t)),
+        [
+            "join j0() after",
+            "  if %1",
+            "    drop %2",
+            "    jump j0()",
+            "  else",
+            "    drop %0",
+            "    ret %2",
+            "ret %0",
+        ]
     );
-    let CoreExpr::LetCont { cont, body, .. } = &f.body else {
-        panic!("LetCont survives the pass:\n{}", f.body)
-    };
-    assert_eq!(count_drops(cont), 0, "cont returns %0:\n{}", f.body);
-    let CoreExpr::If { then, els, .. } = &**body else {
-        panic!("{}", f.body)
-    };
-    assert!(
-        find_drop(then, local(2)),
-        "Goto edge drops the local the cont does not consume:\n{}",
-        f.body
-    );
-    assert!(
-        !find_drop(then, local(0)),
-        "Goto edge must not drop a cont live-in (the cont owns it):\n{}",
-        f.body
-    );
-    assert!(
-        find_drop(els, local(0)),
-        "non-Goto path drops %0:\n{}",
-        f.body
-    );
-    assert!(!find_drop(els, local(2)), "els returns %2:\n{}", f.body);
 }
 
-/// A local whose last use is inside the shared continuation drops there,
-/// once, and no edge drops it before its `Goto`.
+/// A local whose last use is inside the continuation drops there, once, and
+/// nothing drops it before a jump.
 #[test]
-fn drop_inside_shared_cont_not_on_edges() {
+fn a_local_the_continuation_reads_is_dropped_there() {
     let mut pool = pool();
     let t = con(&mut pool, 99);
     let int = int_ty(&mut pool);
-    let cont = CoreExpr::Let {
-        bind: bind(2, int),
-        rhs: Atom::prim(PrimOp::IntAdd, vec![local(0)]),
-        body: Box::new(CoreExpr::Tail(Atom::Local(local(2)))),
-    };
-    let f = perceus(
-        &pool,
-        func(
-            vec![bind(0, t), bind(1, int)],
-            CoreExpr::LetCont {
-                id: JoinId(0),
-                cont: Box::new(cont),
-                body: Box::new(CoreExpr::If {
-                    cond: local(1),
-                    then: Box::new(CoreExpr::Goto(JoinId(0))),
-                    els: Box::new(CoreExpr::Goto(JoinId(0))),
-                    ty: int,
-                }),
-            },
-            int,
-        ),
+    let cont = bound(bind(2, int), call(&[0]), ret(2));
+    let params = vec![bind(0, t), bind(1, int)];
+    let body = join(0, Vec::new(), iff(1, jump(0, &[]), jump(0, &[])), cont);
+    let got = lines(&pool, func(params, body, int));
+    assert_eq!(got[5..], ["let %2 = call fn#0(%0)", "drop %0", "ret %2"]);
+    assert!(!got[..5].iter().any(|l| l.contains("drop")), "{got:?}");
+}
+
+/// Inside the body of a join that gives a value, what dies there is dropped
+/// there: what a branch made, and what came from outside and only one branch
+/// reads.
+#[test]
+fn the_body_of_a_join_drops_what_dies_in_it() {
+    let mut pool = pool();
+    let t = con(&mut pool, 99);
+    let int = int_ty(&mut pool);
+    let params = vec![bind(0, t), bind(1, int), bind(2, t)];
+    let made = bound(bind(4, int), call(&[3, 0]), jump(0, &[4]));
+    let made = bound(bind(3, t), call(&[0]), made);
+    let body = iff(1, made, jump(0, &[1]));
+    let body = join(
+        0,
+        vec![bind(5, int)],
+        body,
+        bound(bind(6, int), call(&[2]), ret(5)),
     );
     assert_eq!(
-        count_drops(&f.body),
-        1,
-        "exactly one Drop, inside the cont:\n{}",
-        f.body
-    );
-    let CoreExpr::LetCont { cont, .. } = &f.body else {
-        panic!("{}", f.body)
-    };
-    assert!(
-        find_drop(cont, local(0)),
-        "%0's last use is in the cont, so it drops there:\n{}",
-        f.body
+        lines(&pool, func(params, body, int)),
+        [
+            "join j0(%5) after",
+            "  if %1",
+            "    let %3 = call fn#0(%0)",
+            "    let %4 = call fn#0(%3, %0)",
+            "    drop %0",
+            "    drop %3",
+            "    jump j0(%4)",
+            "  else",
+            "    drop %0",
+            "    jump j0(%1)",
+            "let %6 = call fn#0(%2)",
+            "drop %2",
+            "ret %5",
+        ]
     );
 }
 
-/// A value that may hold a handle is left undropped when it is made inside a
-/// join, or when its type is a variable and it dies before the function's end,
-/// and nowhere else.
+/// What a jump passes is handed over and not dropped. When the continuation
+/// reads it under its own name too, it is dropped there as well as its
+/// parameter is. A parameter that nothing reads is dropped where the
+/// continuation starts.
 #[test]
-fn what_is_left_undropped_is_in_a_join_or_of_no_known_type() {
-    let mut p = pool();
-    let (heap, int, flag) = (con(&mut p, 7), int_ty(&mut p), word(&mut p, 8));
-    let string = p.prims().string;
-    let string = p.mk_con(string, Repr::Counted, &[]).unwrap();
-    let any = p.mk_bound(0).unwrap();
-    let call = || Atom::Call {
-        callee: Callee::Known(FuncIdx(1)),
-        args: vec![local(0)],
-    };
-    let made = |ty: RTy, rhs: Atom| CoreExpr::Let {
-        bind: bind(1, ty),
-        rhs,
-        body: Box::new(CoreExpr::Tail(Atom::Local(local(0)))),
-    };
-    let join = |join: CoreExpr| CoreExpr::LetJoin {
-        bind: bind(2, int),
-        join: Box::new(join),
-        body: Box::new(CoreExpr::Tail(Atom::Local(local(2)))),
-    };
-    let leaves =
-        |param: RTy, body: CoreExpr| dropped(&p, func(vec![bind(0, param)], body, int)).undropped;
-    let nothing = || CoreExpr::Tail(Atom::Nil);
-    assert!(!leaves(heap, nothing()) && !leaves(int, nothing()));
-    assert!(leaves(any, nothing()));
-    // One that is passed on to the end is not left.
-    assert!(!leaves(any, CoreExpr::Tail(Atom::Local(local(0)))));
-    assert!(!leaves(any, CoreExpr::Tail(call())));
-    assert!(!leaves(any, CoreExpr::Tail(ctor(&[0]))));
-    // Where one way passes it on and another does not, it is.
-    let on_one_way = |cond: u32| CoreExpr::If {
-        cond: local(cond),
-        then: Box::new(nothing()),
-        els: Box::new(CoreExpr::Tail(Atom::Local(local(0)))),
-        ty: int,
-    };
-    assert!(leaves(any, on_one_way(0)) && !leaves(int, on_one_way(0)));
-    for (ty, in_join) in [(heap, true), (int, false), (string, false), (any, true)] {
-        assert_eq!(leaves(int, made(ty, call())), ty == any);
-        assert_eq!(leaves(int, join(made(ty, call()))), in_join);
-        // Wherever in the join it is.
-        let nested = CoreExpr::If {
-            cond: local(0),
-            then: Box::new(nothing()),
-            els: Box::new(CoreExpr::LetCont {
-                id: JoinId(0),
-                cont: Box::new(made(ty, call())),
-                body: Box::new(nothing()),
-            }),
-            ty: int,
-        };
-        assert_eq!(leaves(int, join(nested)), in_join);
-        let bound = |field: RTy| CoreExpr::Match {
-            scrut: local(0),
-            arms: vec![(
-                CorePat::Ctor {
-                    variant: variant(),
-                    fields: vec![bind(3, field)],
-                },
-                nothing(),
-            )],
-            ty: int,
-        };
-        assert_eq!(leaves(int, bound(ty)), ty == any);
-        assert_eq!(leaves(int, join(bound(ty))), in_join);
-        assert_eq!(leaves(int, join(join(bound(ty)))), in_join);
-    }
-    // What a join gives is dropped after it, unless that is in a join too.
-    let gives = |ty: RTy| CoreExpr::LetJoin {
-        bind: bind(4, ty),
-        join: Box::new(nothing()),
-        body: Box::new(nothing()),
-    };
-    assert!(!leaves(int, gives(heap)));
-    assert!(leaves(int, join(gives(heap))));
-    // A value of a type that is no cell does not count, whatever gives it.
-    assert!(!leaves(int, join(made(flag, call()))));
-    assert!(!leaves(int, join(gives(flag))) && !leaves(flag, nothing()));
-    // A constant, a Bool and what something else goes on holding do not count.
-    let in_join = |rhs: Atom| leaves(int, join(made(heap, rhs)));
-    let (a, b) = (local(0), local(0));
-    let plain = [
-        Atom::Nil,
-        Atom::Bool(true),
-        Atom::Const(ConstId(0)),
-        Atom::Load(Load::Global(GlobalSlot(0))),
-        Atom::Load(Load::Capture(CaptureIdx(0))),
-        ctor(&[]),
-        Atom::Closure {
-            func_idx: FuncIdx(0),
-            captures: Vec::new(),
-        },
-    ];
-    for rhs in plain {
-        assert!(!in_join(rhs.clone()), "{rhs:?}");
-    }
-    let holding = [
-        Atom::Local(a),
-        ctor(&[0]),
-        Atom::Closure {
-            func_idx: FuncIdx(0),
-            captures: vec![a],
-        },
-        Atom::PrimOp {
-            op: PrimOp::MakeTuple,
-            args: vec![a, b],
-        },
-        Atom::Update {
-            base: a,
-            variant: variant(),
-            sets: vec![(0, b)],
-        },
-    ];
-    for rhs in holding {
-        assert!(in_join(rhs.clone()), "{rhs:?}");
-        assert!(leaves(int, made(any, rhs.clone())), "{rhs:?}");
+fn a_jump_hands_over_its_arguments() {
+    let mut pool = pool();
+    let t = con(&mut pool, 99);
+    let int = int_ty(&mut pool);
+    let params = vec![bind(0, t), bind(1, int), bind(2, t)];
+    let ends = bound(bind(7, int), call(&[4, 0]), ret(7));
+    let body = iff(1, jump(0, &[0, 2, 2]), jump(0, &[2, 0, 2]));
+    let joined = vec![bind(4, t), bind(5, t), bind(6, t)];
+    let f = func(params, join(0, joined, body, ends), int);
+    assert_eq!(
+        lines(&pool, f),
+        [
+            "join j0(%4, %5, %6) after",
+            "  if %1",
+            "    jump j0(%0, %2, %2)",
+            "  else",
+            "    jump j0(%2, %0, %2)",
+            "drop %5",
+            "drop %6",
+            "let %7 = call fn#0(%4, %0)",
+            "drop %0",
+            "drop %4",
+            "ret %7",
+        ]
+    );
+}
+
+/// A jump out of a match, past a join that is around it, drops what only that
+/// join's continuation would have read.
+#[test]
+fn a_jump_past_a_join_drops_what_its_continuation_owned() {
+    let mut pool = pool();
+    let t = con(&mut pool, 99);
+    let int = int_ty(&mut pool);
+    let params = vec![bind(0, t), bind(1, int), bind(2, t), bind(3, t)];
+    let inner = matches(
+        0,
+        vec![
+            arm(vec![bind(5, t)], jump(1, &[])),
+            (CorePat::Wild, jump(0, &[1])),
+        ],
+    );
+    let inner = join(
+        1,
+        Vec::new(),
+        inner,
+        bound(bind(6, int), call(&[2]), jump(0, &[6])),
+    );
+    let body = join(
+        0,
+        vec![bind(7, int)],
+        inner,
+        bound(bind(8, int), call(&[3]), ret(8)),
+    );
+    assert_eq!(
+        lines(&pool, func(params, body, int)),
+        [
+            "join j0(%7) after",
+            "  join j1() after",
+            "    match %0",
+            "      | 0.0(%5) ->",
+            "        drop %0",
+            "        drop %5",
+            "        jump j1()",
+            "      | _ ->",
+            "        drop %2",
+            "        drop %0",
+            "        jump j0(%1)",
+            "  let %6 = call fn#0(%2)",
+            "  drop %2",
+            "  jump j0(%6)",
+            "let %8 = call fn#0(%3)",
+            "drop %3",
+            "ret %8",
+        ]
+    );
+}
+
+/// A match inside a join's body keeps its scrutinee when something after the
+/// join reads it.
+#[test]
+fn a_scrutinee_that_is_read_after_the_join_is_kept() {
+    let mut pool = pool();
+    let t = con(&mut pool, 99);
+    let int = int_ty(&mut pool);
+    let matched = matches(
+        0,
+        vec![
+            arm(vec![bind(1, t)], jump(0, &[1])),
+            arm(Vec::new(), jump(0, &[0])),
+        ],
+    );
+    let cont = bound(bind(3, int), call(&[0, 2]), ret(3));
+    let body = join(0, vec![bind(2, t)], matched, cont);
+    let got = lines(&pool, func(vec![bind(0, t)], body, int));
+    let dropped: Vec<&str> = got
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| l.contains("drop"))
+        .collect();
+    assert_eq!(dropped, ["drop %0", "drop %2"], "{got:?}");
+    assert_eq!(got[got.len() - 2], "drop %2");
+}
+
+/// A jump to a join that is not around it is refused, from a continuation and
+/// after one.
+#[test]
+fn a_jump_out_of_scope_is_refused() {
+    let mut pool = pool();
+    let int = int_ty(&mut pool);
+    for body in [
+        jump(3, &[]),
+        join(3, Vec::new(), ret(0), jump(3, &[])),
+        join(3, Vec::new(), jump(3, &[]), jump(3, &[])),
+        join(
+            4,
+            Vec::new(),
+            join(3, Vec::new(), jump(4, &[]), ret(0)),
+            jump(3, &[]),
+        ),
+        join(
+            4,
+            Vec::new(),
+            jump(3, &[]),
+            join(3, Vec::new(), jump(3, &[]), ret(0)),
+        ),
+    ] {
+        let f = func(vec![bind(0, int)], body, int);
+        let got = run(&pool, &types_of(&f), f);
+        assert_eq!(got.unwrap_err(), InternalLinkError::UnboundJoin(JoinId(3)));
     }
 }
 
-/// What [`dropped`] says of a function, found another way: by going along every
-/// way through it with the values that may be a handle, until each is dropped or
-/// the end passes it on.
-struct Ways<'p> {
-    pool: &'p ResolvedPool,
-    /// What every jump so far brings to each continuation.
-    brought: BTreeMap<JoinId, Live>,
-    left: bool,
-    /// Whether there is a continuation that nothing jumps to.
-    unreached: bool,
-}
-
-impl Ways<'_> {
-    /// Whether a value of `b`'s type may be a handle or hold one.
-    fn may(&self, b: &CoreBind) -> bool {
-        self.pool.prim_of(b.ty).unwrap().is_none() && self.pool.repr(b.ty).unwrap() == Repr::Counted
-    }
-
-    fn own(&self, b: &CoreBind, owned: &mut Live) {
-        if b.global.is_none() && self.may(b) {
-            owned.insert(b.id);
-        }
-    }
-
-    fn go(&mut self, e: &CoreExpr, mut owned: Live) {
-        match e {
-            CoreExpr::Let { bind, rhs, body } => {
-                // A value of a known type gets a drop whatever it holds.
-                if !holds_nothing(rhs) || self.pool.is_heap(bind.ty).unwrap() {
-                    self.own(bind, &mut owned);
-                }
-                self.go(body, owned);
-            }
-            CoreExpr::LetJoin { bind, join, body } => {
-                self.left |= self.binds_one(join);
-                self.own(bind, &mut owned);
-                self.go(body, owned);
-            }
-            CoreExpr::LetCont { id, cont, body } => {
-                self.go(body, owned);
-                match self.brought.remove(id) {
-                    Some(brought) => self.go(cont, brought),
-                    None => self.unreached = true,
-                }
-            }
-            CoreExpr::Drop { local, body } => {
-                owned.remove(local);
-                self.go(body, owned);
-            }
-            CoreExpr::Match { scrut, arms, .. } => {
-                for (pat, arm) in arms {
-                    let mut owned = owned.clone();
-                    if has_no_fields(pat) {
-                        owned.remove(scrut);
-                    }
-                    pat.binds().for_each(|b| self.own(b, &mut owned));
-                    self.go(arm, owned);
-                }
-            }
-            CoreExpr::If { then, els, .. } => {
-                self.go(then, owned.clone());
-                self.go(els, owned);
-            }
-            CoreExpr::Tail(atom) => {
-                atom.for_each_operand(|l| {
-                    owned.remove(&l);
-                });
-                self.left |= !owned.is_empty();
-            }
-            CoreExpr::Goto(id) => self.brought.entry(*id).or_default().extend(owned),
-        }
-    }
-
-    /// Whether anything in `e`, which is in a join, may be a handle.
-    fn binds_one(&self, e: &CoreExpr) -> bool {
-        let may = |b: &CoreBind| self.may(b);
-        match e {
-            CoreExpr::Let { bind, rhs, body } => {
-                (may(bind) && !holds_nothing(rhs)) || self.binds_one(body)
-            }
-            CoreExpr::LetJoin { bind, join, body } => {
-                may(bind) || self.binds_one(join) || self.binds_one(body)
-            }
-            CoreExpr::LetCont { cont, body, .. } => self.binds_one(cont) || self.binds_one(body),
-            CoreExpr::Drop { body, .. } => self.binds_one(body),
-            CoreExpr::Match { arms, .. } => {
-                let arm =
-                    |(pat, arm): &(CorePat, CoreExpr)| pat.binds().any(may) || self.binds_one(arm);
-                arms.iter().any(arm)
-            }
-            CoreExpr::If { then, els, .. } => self.binds_one(then) || self.binds_one(els),
-            CoreExpr::Tail(_) | CoreExpr::Goto(_) => false,
-        }
-    }
-}
-
-fn has_no_fields(pat: &CorePat) -> bool {
-    matches!(pat, CorePat::Ctor { fields, .. } if fields.is_empty())
+/// A local that nothing typed is refused.
+#[test]
+fn an_untyped_local_is_refused() {
+    let mut pool = pool();
+    let int = int_ty(&mut pool);
+    let f = func(vec![bind(0, int)], ret(0), int);
+    let got = run(&pool, &TiVec::new(), f.clone());
+    assert!(got.is_ok(), "nothing dies");
+    let f = func(vec![bind(0, int), bind(1, int)], ret(0), int);
+    let got = run(&pool, &TiVec::new(), f);
+    assert_eq!(got.unwrap_err(), InternalLinkError::UntypedLocal(local(1)));
 }
 
 /// Makes a function at random.
 struct Maker {
     x: u64,
     next: u32,
-    conts: u32,
+    joins: u32,
+    /// `Int`, two that get drops, one that is never a cell, and a variable.
     types: [RTy; 5],
-    /// The locals whose type has constructors.
-    cons: BTreeSet<u32>,
+    /// The type of each local.
+    of: BTreeMap<u32, RTy>,
+    /// What each join takes.
+    takes: BTreeMap<u32, Vec<RTy>>,
 }
 
 impl Maker {
-    fn below(&mut self, n: u32) -> u32 {
+    fn below(&mut self, n: usize) -> usize {
         self.x ^= self.x << 13;
         self.x ^= self.x >> 7;
         self.x ^= self.x << 17;
-        u32::try_from(self.x >> 33).unwrap() % n
+        usize::try_from(self.x >> 33).unwrap() % n
     }
 
-    /// A bind of one of the types, most often the variable.
-    fn bind(&mut self) -> CoreBind {
-        let at = self.below(7).min(4) as usize;
+    fn ty(&mut self) -> RTy {
+        let at = self.below(7).min(4);
+        self.types[at]
+    }
+
+    fn bind(&mut self, ty: RTy) -> CoreBind {
         self.next += 1;
-        if (1..=3).contains(&at) {
-            self.cons.insert(self.next);
-        }
-        bind(self.next, self.types[at])
+        self.of.insert(self.next, ty);
+        bind(self.next, ty)
     }
 
     fn any(&mut self, scope: &[u32]) -> u32 {
-        scope[self.below(u32::try_from(scope.len()).unwrap()) as usize]
+        scope[self.below(scope.len())]
     }
 
     fn atom(&mut self, scope: &[u32]) -> Atom {
@@ -717,83 +601,122 @@ impl Maker {
         match self.below(7) {
             0 => Atom::Local(local(a)),
             1 => ctor(&[a, b]),
-            6 => Atom::Update {
+            2 => Atom::Load(Load::Capture(CaptureIdx(0))),
+            3 => Atom::Nil,
+            4 => Atom::Update {
                 base: local(a),
                 variant: variant(),
                 sets: vec![(1, local(b))],
             },
-            2 => Atom::Load(Load::Capture(CaptureIdx(0))),
-            3 => Atom::Nil,
-            _ => Atom::Call {
-                callee: Callee::Known(FuncIdx(1)),
-                args: vec![local(a), local(b)],
-            },
+            _ => call(&[a, b]),
         }
     }
 
-    /// An expression of about `size` nodes, in which `conts` may be jumped to.
-    fn expr(&mut self, size: u32, scope: &[u32], conts: &[u32]) -> CoreExpr {
+    /// A local of `scope` with type `ty`, or a new one that `lets` gets the `let`
+    /// of.
+    fn of_type(&mut self, ty: RTy, scope: &[u32], lets: &mut Vec<(CoreBind, Atom)>) -> u32 {
+        let fit: Vec<u32> = scope.iter().copied().filter(|l| self.of[l] == ty).collect();
+        if !fit.is_empty() && self.below(4) != 0 {
+            return self.any(&fit);
+        }
+        let new = self.bind(ty);
+        let rhs = self.atom(scope);
+        lets.push((new, rhs));
+        new.id.0
+    }
+
+    /// A return, a tail call or a jump to one of `joins`.
+    fn end(&mut self, scope: &[u32], joins: &[u32]) -> CoreExpr {
+        let mut lets = Vec::new();
+        let end = if !joins.is_empty() && self.below(4) != 0 {
+            let to = self.any(joins);
+            let takes = self.takes[&to].clone();
+            let args: Vec<u32> = takes
+                .iter()
+                .map(|ty| self.of_type(*ty, scope, &mut lets))
+                .collect();
+            jump(to, &args)
+        } else if self.below(3) == 0 {
+            let (a, b, f) = (self.any(scope), self.any(scope), self.any(scope));
+            let callee = match self.below(3) {
+                0 => Callee::Self_,
+                1 => Callee::Known(FuncIdx(1)),
+                _ => Callee::Local(local(f)),
+            };
+            tail_call(callee, &[a, b])
+        } else {
+            let int = self.types[0];
+            ret(self.of_type(int, scope, &mut lets))
+        };
+        let lets = lets.into_iter().rev();
+        lets.fold(end, |rest, (bind, rhs)| bound(bind, rhs, rest))
+    }
+
+    /// An expression of about `size` nodes, in which `joins` may be jumped to.
+    fn expr(&mut self, size: usize, scope: &[u32], joins: &[u32]) -> CoreExpr {
         let half = size / 2;
-        let with = |b: &CoreBind| [scope, &[b.id.0]].concat();
+        let with = |more: &[CoreBind]| -> Vec<u32> {
+            let more = more.iter().map(|b| b.id.0);
+            scope.iter().copied().chain(more).collect()
+        };
         if size == 0 {
-            if !conts.is_empty() && self.below(2) == 0 {
-                return CoreExpr::Goto(JoinId(self.any(conts)));
-            }
-            return CoreExpr::Tail(self.atom(scope));
+            return self.end(scope, joins);
         }
         match self.below(9) {
-            0 => {
-                let bind = self.bind();
-                let join = Box::new(self.expr(half, scope, &[]));
-                let body = Box::new(self.expr(half, &with(&bind), conts));
-                CoreExpr::LetJoin { bind, join, body }
+            0 | 1 => {
+                self.joins += 1;
+                let id = self.joins;
+                let params: Vec<CoreBind> = (0..self.below(4))
+                    .map(|_| {
+                        let ty = self.ty();
+                        self.bind(ty)
+                    })
+                    .collect();
+                let takes = params.iter().map(|p| p.ty).collect();
+                self.takes.insert(id, takes);
+                let cont = self.expr(half, &with(&params), joins);
+                // Often the one it is for is all that its body may jump to.
+                let inside = match self.below(2) {
+                    0 => vec![id],
+                    _ => [joins, &[id]].concat(),
+                };
+                let body = self.expr(half, scope, &inside);
+                join(id, params, body, cont)
             }
-            1 => {
-                self.conts += 1;
-                let id = self.conts;
-                let cont = Box::new(self.expr(half, scope, conts));
-                let body = self.expr(half, scope, &[conts, &[id]].concat());
-                CoreExpr::LetCont {
-                    id: JoinId(id),
-                    cont,
-                    body: Box::new(body),
-                }
-            }
-            2 => CoreExpr::If {
+            2 => {
+                let then = self.expr(half, scope, joins);
                 // A Bool, which nothing has to drop.
-                cond: local(0),
-                then: Box::new(self.expr(half, scope, conts)),
-                els: Box::new(self.expr(half, scope, conts)),
-                ty: self.types[0],
-            },
+                iff(0, then, self.expr(half, scope, joins))
+            }
             3 => {
-                let bound = self.bind();
-                let arm = self.expr(half, &with(&bound), conts);
-                let pat = CorePat::Ctor {
-                    variant: variant(),
-                    fields: vec![bound],
-                };
+                let ty = self.ty();
+                let field = self.bind(ty);
                 let scrut = self.any(scope);
-                // One that is only ever a constructor with no fields in the
-                // second arm.
-                let second = match self.cons.contains(&scrut) {
-                    true => CorePat::Ctor {
-                        variant: vref(0, 1),
-                        fields: Vec::new(),
-                    },
-                    false => CorePat::Wild,
-                };
-                CoreExpr::Match {
-                    scrut: local(scrut),
-                    arms: vec![(pat, arm), (second, self.expr(half, scope, conts))],
-                    ty: self.types[0],
+                let first = self.expr(half, &with(&[field]), joins);
+                let second = self.expr(half, scope, joins);
+                let mut arms = vec![arm(vec![field], first)];
+                // One that is only ever a constructor with no fields there.
+                arms.push(match self.types[1..4].contains(&self.of[&scrut]) {
+                    true => {
+                        let variant = vref(0, 1);
+                        let fields = Vec::new();
+                        (CorePat::Ctor { variant, fields }, second)
+                    }
+                    false => (CorePat::Wild, second),
+                });
+                if self.below(4) == 0 {
+                    let all = self.bind(self.of[&scrut]);
+                    let third = self.expr(half, &with(&[all]), joins);
+                    arms.push((CorePat::Bind(all), third));
                 }
+                matches(scrut, arms)
             }
             _ => {
-                let bind = self.bind();
+                let ty = self.ty();
+                let new = self.bind(ty);
                 let rhs = self.atom(scope);
-                let body = Box::new(self.expr(size - 1, &with(&bind), conts));
-                CoreExpr::Let { bind, rhs, body }
+                let rest = self.expr(size - 1, &with(&[new]), joins);
+                bound(new, rhs, rest)
             }
         }
     }
@@ -808,122 +731,191 @@ fn functions(mut each: impl FnMut(u64, &ResolvedPool, &CoreFn)) {
         let mut of = Maker {
             x: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1,
             next: 0,
-            conts: 0,
+            joins: 0,
             types: [int, heap, heap, flag, any],
-            cons: BTreeSet::new(),
+            of: BTreeMap::from([(0, int)]),
+            takes: BTreeMap::new(),
         };
         of.below(9);
         let mut params = vec![bind(0, int)];
-        params.extend((0..of.below(3)).map(|_| of.bind()));
+        for _ in 0..of.below(3) {
+            let ty = of.ty();
+            params.push(of.bind(ty));
+        }
         let scope: Vec<u32> = params.iter().map(|b| b.id.0).collect();
-        let size = of.below(14);
+        let size = of.below(26);
         let body = of.expr(size, &scope, &[]);
         each(seed, &p, &func(params, body, int));
     }
 }
 
-/// What Perceus says it left undropped is what it did leave, whatever the
-/// function.
-#[test]
-fn what_is_said_to_be_left_undropped_is() {
-    let (mut left, mut kept) = (0, 0);
-    functions(|seed, p, f| {
-        let got = dropped(p, f.clone());
-        let mut ways = Ways {
-            pool: p,
-            brought: BTreeMap::new(),
-            left: false,
-            unreached: false,
-        };
-        let mut owned = Live::new();
-        f.params.iter().for_each(|b| ways.own(b, &mut owned));
-        ways.go(&got.core.body, owned);
-        // Perceus looks at what no way goes through too.
-        if !(ways.unreached && got.undropped) {
-            assert_eq!(ways.left, got.undropped, "{seed}: {}", got.core.body);
+/// Whether each drop in `e` is of something that could not have been dropped
+/// before: what the line in front of it reads or makes, or, where a branch
+/// starts, something that another branch needs, or what is matched on, or what
+/// the pattern binds. `starts` is what may die where `e` starts, when that is
+/// known.
+fn drops_are_early(mut e: &CoreExpr, starts: Option<Live>) -> bool {
+    let mut may = starts;
+    loop {
+        match e {
+            CoreExpr::Drop { local, body } => {
+                if may.as_ref().is_some_and(|may| !may.contains(local)) {
+                    return false;
+                }
+                e = body;
+            }
+            CoreExpr::Let { bind, rhs, body } => {
+                let mut here = Vec::new();
+                operands(rhs, &mut here);
+                here.push(bind.id);
+                may = Some(here.into_iter().collect());
+                e = body;
+            }
+            CoreExpr::SetGlobal { value, body, .. } => {
+                may = Some(Live::from([*value]));
+                e = body;
+            }
+            CoreExpr::Join {
+                params, cont, body, ..
+            } => {
+                if !drops_are_early(body, Some(Live::new())) {
+                    return false;
+                }
+                may = Some(params.iter().map(|p| p.id).collect());
+                e = cont;
+            }
+            CoreExpr::If { cond, then, els } => {
+                let with = |other: &CoreExpr| {
+                    let mut may = needed(other)?;
+                    may.insert(*cond);
+                    Some(may)
+                };
+                return drops_are_early(then, with(els)) && drops_are_early(els, with(then));
+            }
+            CoreExpr::Match { scrut, arms } => {
+                return (0..arms.len()).all(|i| {
+                    let (pat, arm) = &arms[i];
+                    let mut may = Live::from([*scrut]);
+                    may.extend(pat.binds().map(|b| b.id));
+                    let mut others = arms.iter().enumerate().filter(|(j, _)| *j != i);
+                    let may = others.try_fold(may, |mut may, (_, (_, other))| {
+                        may.extend(needed(other)?);
+                        Some(may)
+                    });
+                    drops_are_early(arm, may)
+                });
+            }
+            CoreExpr::Ret(_) | CoreExpr::TailCall { .. } | CoreExpr::Jump { .. } => return true,
         }
-        left += usize::from(got.undropped);
-        kept += usize::from(!got.undropped);
-    });
-    assert!(left > 5000 && kept > 5000, "{left} {kept}");
-}
-
-/// `e` without the drops of what can be no cell: a local in `bare`, and what an
-/// arm matched when its pattern has no fields.
-fn without(e: &CoreExpr, bare: &Live) -> CoreExpr {
-    let boxed = |e: &CoreExpr| Box::new(without(e, bare));
-    match e {
-        CoreExpr::Drop { local, body } if bare.contains(local) => without(body, bare),
-        CoreExpr::Drop { local, body } => CoreExpr::Drop {
-            local: *local,
-            body: boxed(body),
-        },
-        CoreExpr::Let { bind, rhs, body } => CoreExpr::Let {
-            bind: bind.clone(),
-            rhs: rhs.clone(),
-            body: boxed(body),
-        },
-        CoreExpr::LetJoin { bind, join, body } => CoreExpr::LetJoin {
-            bind: bind.clone(),
-            join: boxed(join),
-            body: boxed(body),
-        },
-        CoreExpr::LetCont { id, cont, body } => CoreExpr::LetCont {
-            id: *id,
-            cont: boxed(cont),
-            body: boxed(body),
-        },
-        CoreExpr::If {
-            cond,
-            then,
-            els,
-            ty,
-        } => CoreExpr::If {
-            cond: *cond,
-            then: boxed(then),
-            els: boxed(els),
-            ty: *ty,
-        },
-        CoreExpr::Match { scrut, arms, ty } => CoreExpr::Match {
-            scrut: *scrut,
-            arms: arms
-                .iter()
-                .map(|(pat, arm)| {
-                    let mut bare = bare.clone();
-                    if has_no_fields(pat) {
-                        bare.insert(*scrut);
-                    }
-                    (pat.clone(), without(arm, &bare))
-                })
-                .collect(),
-            ty: *ty,
-        },
-        CoreExpr::Tail(_) | CoreExpr::Goto(_) => e.clone(),
     }
 }
 
-/// A function that gives up everything it holds has the drops it would have if
-/// every type could be a cell, less those of what can be none. One that leaves
-/// something undropped has them all.
+/// What `e` reads or drops, unless it jumps out: what the continuation needs is
+/// not known here.
+fn needed(e: &CoreExpr) -> Option<Live> {
+    let free = ownership::free(e);
+    let inside = free.jumps.is_empty();
+    inside.then_some(free.named)
+}
+
+/// Whatever the function, every way through it gives up each value once and
+/// reads nothing it gave up, and each drop is as early as it can be.
 #[test]
-fn what_can_be_no_cell_gets_no_drop() {
-    let (mut fewer, mut same) = (0, 0);
+fn every_way_gives_up_each_value_once() {
+    let mut seen = [0; 4];
+    functions(|seed, p, f| {
+        let got = perceus(p, f.clone());
+        let checked = ownership::check(p, &got, ownership::Body::Function);
+        assert_eq!(checked, Ok(()), "{seed}:\n{got}");
+        assert!(
+            drops_are_early(&got.body, Some(all_params(f))),
+            "{seed}:\n{got}"
+        );
+        let text = got.body.to_string();
+        seen[0] += usize::from(text.contains("join"));
+        seen[1] += usize::from(text.contains("drop"));
+        seen[2] += usize::from(text.contains("tail call"));
+        seen[3] += usize::from(!f.body.always_reached().is_empty());
+    });
+    assert!(seen.iter().all(|n| *n > 5000), "{seen:?}");
+}
+
+fn all_params(f: &CoreFn) -> Live {
+    f.params.iter().map(|p| p.id).collect()
+}
+
+/// The pass is where drops come from, so a function that has one already is one
+/// that something else was wrong with.
+#[test]
+fn a_function_with_a_drop_is_refused() {
+    let mut p = pool();
+    let t = con(&mut p, 7);
+    let drop = |local, body| CoreExpr::Drop {
+        local: LocalId(local),
+        body: Box::new(body),
+    };
+    for body in [
+        drop(0, ret(1)),
+        bound(bind(2, t), call(&[1]), drop(0, ret(2))),
+        iff(1, ret(1), drop(0, ret(1))),
+        join(0, vec![bind(2, t)], drop(0, jump(0, &[1])), ret(2)),
+    ] {
+        let f = func(vec![bind(0, t), bind(1, t)], body, t);
+        let types = types_of(&f);
+        let got = run(&p, &types, f);
+        assert_eq!(got.unwrap_err(), InternalLinkError::DropsGiven(LocalId(0)));
+    }
+}
+
+/// That a join is always reached is only a shorter way to say what is live in its
+/// body: without it every drop is the same.
+#[test]
+fn what_is_live_around_a_join_is_found_either_way() {
+    let mut reached = 0;
     functions(|seed, p, f| {
         let types = types_of(f);
-        let every = Perceus::new(p, &types, Words::Dropped).function(f.clone());
-        let every = every.expect("every local is typed").body;
-        let words = (0..).map(LocalId).zip(&types);
-        let words = words.filter(|(_, ty)| p.repr(**ty) == Ok(Repr::Word));
-        let bare = without(&every, &words.map(|(l, _)| l).collect());
-        let got = dropped(p, f.clone());
-        let want = if got.undropped { &every } else { &bare };
-        assert_eq!(got.core.body.to_string(), want.to_string(), "{seed}");
-        if count_drops(&every) > count_drops(&bare) {
-            let count = if got.undropped { &mut same } else { &mut fewer };
-            *count += 1;
-        }
+        let mut cx = Perceus {
+            pool: p,
+            locals: &types,
+            reached: &BTreeSet::new(),
+            entered: BTreeMap::new(),
+            around: Vec::new(),
+            plain: BTreeSet::new(),
+        };
+        let (body, live) = cx.drop_pass(f.body.clone()).expect("it is well made");
+        let dead = all_params(f);
+        let body = cx
+            .wrap_drops(without(&dead, &live), body)
+            .expect("it is typed");
+        assert_eq!(
+            body.to_string(),
+            perceus(p, f.clone()).body.to_string(),
+            "{seed}"
+        );
+        reached += f.body.always_reached().len();
     });
-    assert!(fewer > 1000 && same > 1000, "{fewer} {same}");
+    assert!(reached > 5000, "{reached}");
+}
+
+/// The drops are those there would be if every value could be a cell, less those
+/// of what can be none.
+#[test]
+fn what_can_be_no_cell_gets_no_drop() {
+    let mut fewer = 0;
+    functions(|seed, p, f| {
+        let got = perceus(p, f.clone());
+        let mut q = pool();
+        let (_, _, _) = (con(&mut q, 7), int_ty(&mut q), con(&mut q, 8));
+        q.mk_bound(0).unwrap();
+        let every = perceus(&q, f.clone());
+        let words = |l: &LocalId| p.repr(*types_of(f).get(*l).unwrap()).unwrap() == Repr::Word;
+        let mut want = drops(&every.body);
+        let all = want.len();
+        want.retain(|l| !words(l));
+        assert_eq!(drops(&got.body), want, "{seed}:\n{got}\n{every}");
+        fewer += usize::from(want.len() < all);
+    });
+    assert!(fewer > 5000, "{fewer}");
 }
 
 /// An update reads its base and its values, so each that is read last there is
@@ -937,33 +929,120 @@ fn an_update_drops_what_it_is_the_last_to_read() {
         variant: variant(),
         sets: vec![(0, local(1)), (2, local(2))],
     };
-    let body = CoreExpr::Let {
-        bind: bind(3, t),
-        rhs: update,
-        body: Box::new(CoreExpr::Let {
-            bind: bind(4, t),
-            rhs: ctor(&[2, 3]),
-            body: Box::new(CoreExpr::Tail(Atom::Local(local(4)))),
-        }),
-    };
+    let body = bound(bind(3, t), update, bound(bind(4, t), ctor(&[2, 3]), ret(4)));
     let params = (0..3).map(|i| bind(i, t)).collect();
-    let out = dropped(&p, func(params, body, t));
-    assert!(!out.undropped);
-    let lines: Vec<String> = out
-        .core
-        .body
-        .to_string()
-        .lines()
-        .map(str::to_string)
-        .collect();
     assert_eq!(
-        lines[..5],
+        lines(&p, func(params, body, t)),
         [
-            "let %3:0 = update 0.0(..%0, 0: %1, 2: %2)",
+            "let %3 = update 0.0(..%0, 0: %1, 2: %2)",
             "drop %0",
             "drop %1",
-            "let %4:0 = ctor 0.0(%2, %3)",
+            "let %4 = ctor 0.0(%2, %3)",
             "drop %2",
+            "drop %3",
+            "ret %4",
         ]
     );
+}
+
+/// A branch for values with no fields drops nothing of what it matched, and past
+/// a join it may be a cell again.
+#[test]
+fn a_plain_scrutinee_is_dropped_only_past_a_join() {
+    let mut p = pool();
+    let t = con(&mut p, 1);
+    let int = int_ty(&mut p);
+    let nothing = |rest| arm(Vec::new(), rest);
+    let body = matches(
+        0,
+        vec![nothing(jump(0, &[])), (CorePat::Wild, jump(0, &[]))],
+    );
+    let cont = bound(bind(2, int), call(&[0]), ret(2));
+    let got = lines(
+        &p,
+        func(vec![bind(0, t)], join(0, Vec::new(), body, cont), int),
+    );
+    assert_eq!(got[got.len() - 2], "drop %0");
+    let plain = matches(0, vec![nothing(ret(1)), (CorePat::Wild, ret(1))]);
+    let got = lines(&p, func(vec![bind(0, t), bind(1, int)], plain, int));
+    assert_eq!(
+        got.iter().filter(|l| l.contains("drop %0")).count(),
+        1,
+        "{got:?}"
+    );
+}
+
+/// `n` joins one after another, with `values` made in front of them and read at
+/// the end, and one in each branch.
+fn chain(n: u32, values: u32, t: RTy, int: RTy) -> CoreFn {
+    let held: Vec<u32> = (1..=values).collect();
+    let mut rest = bound(bind(0, t), call(&held), ret(1_000_000));
+    for i in 0..n {
+        let at = 2_000_000 + 3 * i;
+        let made = bound(bind(at, t), call(&[]), jump(i, &[at]));
+        let body = iff(
+            1_000_000,
+            made,
+            bound(bind(at + 1, t), call(&[]), jump(i, &[at + 1])),
+        );
+        rest = join(i, vec![bind(at + 2, t)], body, rest);
+    }
+    for v in held {
+        rest = bound(bind(v, t), call(&[]), rest);
+    }
+    func(vec![bind(1_000_000, int)], rest, int)
+}
+
+/// A long chain of joins takes no stack for its length and a time that grows with
+/// it, however much is held over all of them.
+#[test]
+fn a_long_chain_of_joins_is_walked_in_a_loop() {
+    let small = std::thread::Builder::new().stack_size(512 * 1024);
+    let run = small.spawn(|| {
+        let mut p = pool();
+        let (t, int) = (con(&mut p, 7), int_ty(&mut p));
+        let f = chain(20_000, 20_000, t, int);
+        let types = types_of(&f);
+        let got = run(&p, &types, f).expect("it is well made");
+        let count = count_drops(&got.body);
+        // Taking it apart by hand, since a `Box` drops what is in it from inside.
+        take_apart(got.body);
+        count
+    });
+    let count = run.expect("a thread").join().expect("it ends");
+    assert_eq!(count, 20_000 + 20_000 + 1);
+}
+
+fn take_apart(e: CoreExpr) {
+    let mut e = e;
+    while let Ok((_, rest)) = peel(e) {
+        e = rest;
+    }
+}
+
+/// Joins in the bodies of joins take a little stack each, far less than it took to
+/// lower them.
+#[test]
+fn joins_in_joins_take_a_little_stack() {
+    let small = std::thread::Builder::new().stack_size(2 * 1024 * 1024);
+    let run = small.spawn(|| {
+        let mut p = pool();
+        let (t, int) = (con(&mut p, 7), int_ty(&mut p));
+        let mut body = bound(bind(1, int), call(&[0]), jump(0, &[1]));
+        for i in 0..100 {
+            let param = bind(100 + i, int);
+            let end = if i == 99 {
+                ret(100 + i)
+            } else {
+                jump(i + 1, &[100 + i])
+            };
+            body = join(i, vec![param], iff(2, body, jump(i, &[2])), end);
+        }
+        let f = func(vec![bind(0, t), bind(2, int)], body, int);
+        let got = perceus(&p, f);
+        checked(&p, &got, ownership::Body::Function);
+        count_drops(&got.body)
+    });
+    // It is dropped where it is read, and on each way that does not go there.
+    assert_eq!(run.expect("a thread").join().expect("it ends"), 101);
 }

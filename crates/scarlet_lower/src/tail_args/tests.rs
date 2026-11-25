@@ -1,6 +1,8 @@
 use super::*;
-use crate::testkit::{bind, ctor, func, local};
-use crate::{ConstId, FuncIdx, GlobalSlot, JoinId};
+use crate::testkit::{
+    bind, bound, ctor, func, iff, join, jump, local, matches, ret, tail_call as tail,
+};
+use crate::{ConstId, CorePat, FuncIdx};
 use scarlet_ir::TypeId;
 use scarlet_ir::rty::{PrimIds, RTy, Repr};
 
@@ -48,24 +50,18 @@ fn call(id: u32, args: &[u32]) -> Line {
 }
 
 fn spine(lines: &[Line], end: CoreExpr) -> CoreExpr {
-    lines
-        .iter()
-        .rev()
-        .fold(end, |body, (id, ty, rhs)| CoreExpr::Let {
-            bind: bind(*id, *ty),
-            rhs: rhs.clone(),
-            body: Box::new(body),
-        })
+    lines.iter().rev().fold(end, |body, (id, ty, rhs)| {
+        bound(bind(*id, *ty), rhs.clone(), body)
+    })
 }
 
-fn tail(callee: Callee, args: &[u32]) -> CoreExpr {
-    let args = args.iter().copied().map(local).collect();
-    CoreExpr::Tail(Atom::Call { callee, args })
+fn run(f: CoreFn) -> Result<CoreFn, InternalLinkError> {
+    schedule(&pool(), &f.body.always_reached(), f)
 }
 
 fn scheduled(params: u32, body: CoreExpr) -> CoreExpr {
     let params = (0..params).map(|id| bind(id, INT)).collect();
-    let f = schedule(&pool(), func(params, body, INT));
+    let f = run(func(params, body, INT));
     f.expect("every type is in the pool").body
 }
 
@@ -74,15 +70,20 @@ fn order_of(mut e: &CoreExpr) -> Vec<u32> {
     let mut out = Vec::new();
     loop {
         match e {
-            CoreExpr::Let { bind, body, .. } | CoreExpr::LetJoin { bind, body, .. } => {
+            CoreExpr::Let { bind, body, .. } => {
                 out.push(bind.id.0);
                 e = body;
             }
-            CoreExpr::LetCont { body, .. } | CoreExpr::Drop { body, .. } => e = body,
+            CoreExpr::Join { params, cont, .. } => {
+                out.extend(params.iter().map(|p| p.id.0));
+                e = cont;
+            }
+            CoreExpr::SetGlobal { body, .. } | CoreExpr::Drop { body, .. } => e = body,
             CoreExpr::If { .. }
             | CoreExpr::Match { .. }
-            | CoreExpr::Tail(_)
-            | CoreExpr::Goto(_) => return out,
+            | CoreExpr::Ret(_)
+            | CoreExpr::TailCall { .. }
+            | CoreExpr::Jump { .. } => return out,
         }
     }
 }
@@ -120,21 +121,31 @@ fn an_argument_is_made_after_the_last_read_of_what_it_replaces() {
 fn an_argument_moves_past_what_reads_its_parameter() {
     let lines = [add(2, 0, 0), call(3, &[0]), call(4, &[1])];
     assert_eq!(order(2, &lines, &[2, 1]), [3, 2, 4]);
-    let join = CoreExpr::If {
-        cond: local(1),
-        then: Box::new(CoreExpr::Tail(Atom::Local(local(0)))),
-        els: Box::new(tail(Callee::Self_, &[1, 1])),
-        ty: INT,
-    };
-    let body = spine(
-        &[add(2, 0, 0)],
-        CoreExpr::LetJoin {
-            bind: bind(3, INT),
-            join: Box::new(join),
-            body: Box::new(tail(Callee::Self_, &[2, 3])),
-        },
+    // Whatever its branches do, and one may jump from inside another join.
+    let branches = iff(
+        1,
+        jump(0, &[0]),
+        join(
+            1,
+            Vec::new(),
+            iff(1, jump(1, &[]), jump(0, &[1])),
+            bound(bind(4, INT), call(4, &[1]).2, jump(0, &[4])),
+        ),
     );
+    let go = tail(Callee::Self_, &[2, 3]);
+    let after = join(0, vec![bind(3, INT)], branches, go);
+    let body = spine(&[add(2, 0, 0)], after);
     assert_eq!(order_of(&scheduled(2, body)), [3, 2]);
+    // A join of several parameters makes them all there.
+    let go = tail(Callee::Self_, &[2, 4, 5]);
+    let body = join(0, vec![bind(4, INT), bind(5, INT)], jump(0, &[0, 1]), go);
+    let body = spine(&[add(2, 0, 0)], body);
+    assert_eq!(order_of(&scheduled(3, body)), [4, 5, 2]);
+    // One that it makes is not itself moved, and what reads it stays after it.
+    let go = tail(Callee::Self_, &[4, 6]);
+    let body = bound(bind(6, INT), prim(PrimOp::IntAdd, &[0, 4]), go);
+    let body = join(0, vec![bind(4, INT)], jump(0, &[1]), body);
+    assert_eq!(order_of(&scheduled(2, body)), [4, 6]);
 }
 
 /// Of arguments that each read what the next one replaces, the first to be made
@@ -178,6 +189,47 @@ fn an_argument_does_not_keep_a_parameter_longer() {
     assert_eq!(order(2, &lines, &[2, 3]), [3, 4, 2]);
 }
 
+/// The same where a join makes the value that stays.
+#[test]
+fn an_argument_does_not_keep_a_parameter_past_a_join_for_it() {
+    // 2 replaces 0 and reads 1; the join reads 0 and makes what replaces 1.
+    let go = tail(Callee::Self_, &[2, 3]);
+    let end = join(0, vec![bind(3, CELL)], jump(0, &[0]), go);
+    let body = spine(&[add(2, 1, 1)], end);
+    assert_eq!(order_of(&scheduled(2, body)), [2, 3]);
+}
+
+/// What an expression reads is what was bound outside it, on every way through it.
+#[test]
+fn what_a_join_reads_is_bound_outside_it() {
+    let inner = join(
+        1,
+        vec![bind(5, INT)],
+        iff(6, jump(1, &[7]), tail(Callee::Local(local(8)), &[9])),
+        bound(
+            bind(10, INT),
+            prim(PrimOp::IntAdd, &[5, 11]),
+            jump(0, &[10, 12]),
+        ),
+    );
+    let arm = |id| {
+        let pat = CorePat::Bind(bind(id, INT));
+        (pat, ret(id))
+    };
+    let first = |rest| bound(bind(1, INT), call(1, &[2]).2, rest);
+    let dropped = CoreExpr::Drop {
+        local: local(1),
+        body: Box::new(matches(3, vec![arm(13), (CorePat::Wild, inner)])),
+    };
+    let stored = CoreExpr::SetGlobal {
+        slot: crate::GlobalSlot(0),
+        value: local(14),
+        body: Box::new(first(dropped)),
+    };
+    let got: Vec<u32> = reads(&stored).into_iter().map(|l| l.0).collect();
+    assert_eq!(got, [2, 3, 6, 7, 8, 9, 11, 12, 14]);
+}
+
 /// Only what has no effect, cannot fail and reads only numbers moves.
 #[test]
 fn only_arithmetic_and_constants_move() {
@@ -217,21 +269,13 @@ fn only_arithmetic_and_constants_move() {
     assert!(!moves(CELL, call(0, &[0]).2));
 }
 
-/// A value that is read before the call, passed twice, or kept in a global stays.
+/// A value that is read before the call or passed twice stays.
 #[test]
 fn a_value_with_another_use_stays() {
     let read = [add(2, 0, 0), call(3, &[0, 2])];
     assert_eq!(order(2, &read, &[2, 3]), [2, 3]);
     let twice = [add(2, 0, 0), call(3, &[0])];
     assert_eq!(order(2, &twice, &[2, 2]), [2, 3]);
-    let mut pinned = bind(2, INT);
-    pinned.global = Some(GlobalSlot(1));
-    let body = CoreExpr::Let {
-        bind: pinned,
-        rhs: prim(PrimOp::IntAdd, &[0, 0]),
-        body: Box::new(spine(&[call(3, &[0])], tail(Callee::Self_, &[2, 3]))),
-    };
-    assert_eq!(order_of(&scheduled(2, body)), [2, 3]);
 }
 
 /// A parameter that the call passes on is read to the end, so nothing is gained.
@@ -305,11 +349,7 @@ fn an_argument_goes_behind_the_drops() {
         local: local(of),
         body: Box::new(body),
     };
-    let one = |(id, ty, rhs): Line, body: CoreExpr| CoreExpr::Let {
-        bind: bind(id, ty),
-        rhs,
-        body: Box::new(body),
-    };
+    let one = |(id, ty, rhs): Line, body: CoreExpr| bound(bind(id, ty), rhs, body);
     let text = |e: &CoreExpr| -> Vec<String> {
         let mut e = e;
         let mut out = Vec::new();
@@ -345,13 +385,13 @@ fn an_argument_goes_behind_the_drops() {
 /// one.
 #[test]
 fn nothing_more_is_held_around_a_join() {
-    let join = || CoreExpr::Tail(Atom::Local(local(0)));
     let body = |lines: &[Line]| {
-        let end = CoreExpr::LetJoin {
-            bind: bind(8, INT),
-            join: Box::new(join()),
-            body: Box::new(tail(Callee::Self_, &[5])),
-        };
+        let end = join(
+            0,
+            vec![bind(8, INT)],
+            jump(0, &[0]),
+            tail(Callee::Self_, &[5]),
+        );
         order_of(&scheduled(1, spine(lines, end)))
     };
     let calls = [call(3, &[]), call(4, &[])];
@@ -367,11 +407,8 @@ fn nothing_more_is_held_around_a_join() {
 fn nothing_more_is_held_past_a_join() {
     // A join that reads `reads`, in front of a call of itself.
     let moved = |params: u32, lines: &[Line], reads: &[u32], args: &[u32]| {
-        let end = CoreExpr::LetJoin {
-            bind: bind(90, INT),
-            join: Box::new(CoreExpr::Tail(call(0, reads).2)),
-            body: Box::new(tail(Callee::Self_, args)),
-        };
+        let made = bound(bind(80, INT), call(0, reads).2, jump(0, &[80]));
+        let end = join(0, vec![bind(90, INT)], made, tail(Callee::Self_, args));
         let order = order_of(&scheduled(params, spine(lines, end)));
         order.last() != Some(&90)
     };
@@ -445,20 +482,9 @@ fn an_update_goes_on_taking_its_operands() {
 fn every_tail_call_is_put_in_order_and_nothing_else() {
     let lines = [add(3, 0, 0), add(4, 1, 0)];
     let arm = || spine(&lines, tail(Callee::Self_, &[3, 4]));
-    let branch = CoreExpr::If {
-        cond: local(0),
-        then: Box::new(arm()),
-        els: Box::new(CoreExpr::LetCont {
-            id: JoinId(0),
-            cont: Box::new(arm()),
-            body: Box::new(CoreExpr::Match {
-                scrut: local(1),
-                arms: vec![(crate::CorePat::Wild, arm())],
-                ty: INT,
-            }),
-        }),
-        ty: INT,
-    };
+    let inner = matches(1, vec![(CorePat::Wild, arm())]);
+    let inner = iff(1, jump(0, &[]), inner);
+    let branch = iff(0, arm(), join(0, Vec::new(), inner, arm()));
     let body = scheduled(3, spine(&[add(6, 0, 0), add(7, 0, 1)], branch));
     assert_eq!(order_of(&body), [6, 7]);
     let text = body.to_string();
@@ -477,20 +503,18 @@ fn every_tail_call_is_put_in_order_and_nothing_else() {
     assert_eq!(order_of(&scheduled(3, value)), [3, 4]);
 }
 
-/// What comes before a continuation is not moved past it, where a `Goto` may
-/// have gone to it first.
+/// What comes before a join that some way leaves is not moved past it.
 #[test]
-fn nothing_moves_past_a_continuation() {
-    let after = spine(&[add(4, 1, 0)], tail(Callee::Self_, &[3, 4]));
-    let body = spine(
-        &[add(3, 0, 0)],
-        CoreExpr::LetCont {
-            id: JoinId(0),
-            cont: Box::new(CoreExpr::Tail(Atom::Nil)),
-            body: Box::new(after),
-        },
-    );
-    assert_eq!(order_of(&scheduled(2, body)), [3, 4]);
+fn nothing_moves_past_a_join_that_some_way_leaves() {
+    let moved = |body| {
+        let after = spine(&[add(4, 1, 0)], tail(Callee::Self_, &[3, 4]));
+        let body = spine(&[add(3, 0, 0)], join(0, Vec::new(), body, after));
+        order_of(&scheduled(2, body)) == [4, 3]
+    };
+    assert!(moved(jump(0, &[])));
+    assert!(moved(iff(0, jump(0, &[]), jump(0, &[]))));
+    assert!(!moved(iff(0, jump(0, &[]), ret(1))));
+    assert!(!moved(iff(0, jump(0, &[]), tail(Callee::Self_, &[0, 1]))));
 }
 
 /// A type that is not in the pool is an error and not a guess.
@@ -499,7 +523,7 @@ fn a_type_of_another_pool_is_refused() {
     let lines = [(2, RTy(77), Atom::Const(ConstId(0))), call(3, &[0])];
     let body = spine(&lines, tail(Callee::Self_, &[2, 3]));
     let params = vec![bind(0, INT), bind(1, INT)];
-    let got = schedule(&pool(), func(params, body, INT));
+    let got = run(func(params, body, INT));
     let foreign = InternalLinkError::ForeignRTy(scarlet_ir::rty::ForeignRTy(RTy(77)));
     assert_eq!(got.map(|_| ()).unwrap_err(), foreign);
 }

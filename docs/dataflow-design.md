@@ -132,9 +132,9 @@ build_program(imports: &[&CleanModule], entry: &CleanModule, defs)
   - Each subtree returns the joins it jumps to, so `join_uses` and `retract_gotos` go.
   - A fall-through target is made the first time something can fail, which removes the three "is this fallible" predictors.
 - **`perceus`:**
-  - It is told which binds are pinned globals, so `keep_globals` stops undoing its work.
+  - A module-level binding is stored by a `SetGlobal` node that reads the local, so there are no binds it may not drop.
   - It reads each local's type from a table `lower` returns, so a local can't be left unrecorded.
-- **`immediates`** rewrites by value. The Core pipeline is one function, so the passes can't run out of order.
+- **`immediates`** rewrites in place and gives nothing back to read. The Core pipeline is one function, so the passes can't run out of order.
 
 ## Order of work
 

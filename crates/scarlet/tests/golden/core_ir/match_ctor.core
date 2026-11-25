@@ -1,23 +1,26 @@
 fn main.area(%0:t0) -> :t1
-  match %0 :t1
+  match %0
     | 10.0(%1) ->
       drop %0
       let %2:t1 = IntMul(%1, %1)
       let %3:t1 = c0
-      ret IntMul(%2, %3)
-    | 10.1(%4, %5) ->
+      let %4:t1 = IntMul(%2, %3)
+      ret %4
+    | 10.1(%5, %6) ->
       drop %0
-      ret IntMul(%4, %5)
+      let %7:t1 = IntMul(%5, %6)
+      ret %7
 
 fn main.main() -> :t1
   let %0:t1 = c1
   let %1:t1 = c2
   let %2:t0 = ctor 10.1(%0, %1)
-  ret call fn#0(%2)
+  tail call fn#0(%2)
 
 toplevel:
 fn main.__main__() -> :t2
-  ret nil
+  let %0:t2 = nil
+  ret %0
 where
   c0 = Int(3)
   c1 = Int(4)

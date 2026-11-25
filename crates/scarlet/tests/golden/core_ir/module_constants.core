@@ -1,0 +1,45 @@
+fn main.f(%0:t0) -> :t0
+  let %1:t1 = global0
+  let %2:t0 = global1
+  let %3:t0 = ArrayIndexOr(%1, %0, %2)
+  drop %1
+  ret %3
+
+fn main.main() -> :t0
+  let %0:t0 = c0
+  tail call fn#0(%0)
+
+toplevel:
+fn main.__main__() -> :t2
+  let %0:t0 = c1
+  set global1 = %0
+  let %1:t0 = global1
+  let %2:t0 = global1
+  let %3:t0 = global1
+  let %4:t0 = c0
+  let %5:t0 = IntAdd(%3, %4)
+  let %6:t1 = MakeArray(%2, %5)
+  let %7:t3 = MakeTuple(%1, %6)
+  drop %6
+  set global2 = %7
+  drop %7
+  join j0(%14:t1) after
+    let %8:t0 = global1
+    let %9:t0 = c2
+    let %10:t4 = IntGt(%8, %9)
+    if %10
+      let %11:t3 = global2
+      let %12:t1 = TupleField(1)(%11)
+      drop %11
+      jump j0(%12)
+    else
+      let %13:t1 = MakeArray()
+      jump j0(%13)
+  set global0 = %14
+  drop %14
+  let %15:t2 = nil
+  ret %15
+where
+  c0 = Int(1)
+  c1 = Int(4)
+  c2 = Int(3)

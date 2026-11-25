@@ -171,7 +171,13 @@ pub(crate) enum Broken {
     /// The program has more functions than a 32-bit index can name.
     TooManyFunctions,
     NoArm,
-    UndeclaredCase,
+    /// A jump to a join that nothing around it declares.
+    UndeclaredJoin,
+    /// A jump with other than an argument for each of its join's parameters.
+    JumpArity {
+        got: usize,
+        want: usize,
+    },
     /// A function reads a value that nothing on some path to the read wrote.
     ReadBeforeWritten,
     /// A function jumps to an instruction before the jump.
@@ -321,7 +327,10 @@ impl fmt::Display for BadProgram {
                 f.write_str("the program has more functions than an index can name")
             }
             Broken::NoArm => f.write_str("a match found no arm for its value"),
-            Broken::UndeclaredCase => f.write_str("a jump to a case that no match declares"),
+            Broken::UndeclaredJoin => f.write_str("a jump to a join that nothing declares"),
+            Broken::JumpArity { got, want } => {
+                write!(f, "a jump with {got} arguments, not {want}")
+            }
             Broken::ReadBeforeWritten => f.write_str("a value read before anything wrote it"),
             Broken::JumpsBack => f.write_str("a jump to an instruction before it"),
             Broken::RunsOff => f.write_str("a function that goes on past its last instruction"),

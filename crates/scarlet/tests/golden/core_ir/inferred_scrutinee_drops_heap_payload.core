@@ -3,22 +3,25 @@ fn main.f() -> :t0
   let %1:t1 = ctor 10.0(%0)
   let %2:t2 = ctor 7.0(%1)
   drop %1
-  match %2 :t0
+  match %2
     | 7.1() ->
-      ret c1
-    | 7.0(%3) ->
+      let %3:t0 = c1
+      ret %3
+    | 7.0(%4) ->
       drop %2
-      let %4:t0 = Field(0)(%3)
-      drop %3
-      let %5:t0 = c2
-      ret IntAdd(%4, %5)
+      let %5:t0 = Field(0)(%4)
+      drop %4
+      let %6:t0 = c2
+      let %7:t0 = IntAdd(%5, %6)
+      ret %7
 
 fn main.main() -> :t0
-  ret call fn#0()
+  tail call fn#0()
 
 toplevel:
 fn main.__main__() -> :t3
-  ret nil
+  let %0:t3 = nil
+  ret %0
 where
   c0 = Int(3)
   c1 = Int(0)

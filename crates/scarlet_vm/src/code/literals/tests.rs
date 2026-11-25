@@ -24,11 +24,12 @@ fn made(e: &CoreExpr) -> Vec<String> {
                 out.push("drop".to_string());
                 e = body;
             }
-            CoreExpr::LetJoin { body, .. } | CoreExpr::LetCont { body, .. } => e = body,
-            CoreExpr::Tail(_)
+            CoreExpr::SetGlobal { body, .. } | CoreExpr::Join { cont: body, .. } => e = body,
+            CoreExpr::Ret(_)
+            | CoreExpr::TailCall { .. }
             | CoreExpr::If { .. }
             | CoreExpr::Match { .. }
-            | CoreExpr::Goto(_) => {
+            | CoreExpr::Jump { .. } => {
                 return out;
             }
         }
@@ -60,11 +61,12 @@ fn a_short_literal_is_left_alone() {
     };
     assert_eq!(pieces(&src(32), "f"), None);
     let found = pieces(&src(33), "f").expect("two pieces");
-    assert_eq!(found, ["MakeArray 32", "ArrayAppend 2"]);
+    assert_eq!(found, ["MakeArray 32", "ArrayAppend 2", "drop"]);
 }
 
 /// Every element is in exactly one piece, in order, and each piece but the
-/// last has as many as a leaf holds.
+/// last has as many as a leaf holds. What was made so far is dropped once the next
+/// piece is on its end, though that has taken it.
 #[test]
 fn a_long_array_is_made_a_piece_at_a_time() {
     let src = format!(
@@ -75,8 +77,11 @@ fn a_long_array_is_made_a_piece_at_a_time() {
     let want = [
         "MakeArray 32",
         "ArrayAppend 33",
+        "drop",
         "ArrayAppend 33",
+        "drop",
         "ArrayAppend 5",
+        "drop",
     ];
     assert_eq!(found, want);
 }
@@ -98,22 +103,22 @@ fn the_elements_beside_a_spread_are_made_a_piece_at_a_time() {
     assert_eq!(before(32), None);
     // The spread's own drop is the last thing in each.
     let found = after(33).expect("two pieces");
-    assert_eq!(found, ["ArrayAppend 33", "ArrayAppend 2", "drop"]);
+    assert_eq!(found, ["ArrayAppend 33", "ArrayAppend 2", "drop", "drop"]);
     let found = before(33).expect("two pieces");
-    let made = ["MakeArray 32", "ArrayAppend 2", "ArrayConcat 2"];
-    assert_eq!(found[..3], made);
-    assert_eq!(found[3..], ["drop", "drop"]);
+    let made = ["MakeArray 32", "ArrayAppend 2", "drop", "ArrayConcat 2"];
+    assert_eq!(found[..4], made);
+    assert_eq!(found[4..], ["drop", "drop"]);
     let found = after(96).expect("three pieces");
-    assert_eq!(found[..3], ["ArrayAppend 33"; 3]);
+    let (next, drop) = ("ArrayAppend 33", "drop");
+    assert_eq!(found, [next, next, drop, next, drop, drop]);
     let found = before(96).expect("three pieces");
-    let made = ["MakeArray 32", "ArrayAppend 33", "ArrayAppend 33"];
-    assert_eq!(found[..3], made);
-    assert_eq!(found[3..], ["ArrayConcat 2", "drop", "drop"]);
+    assert_eq!(found[..5], ["MakeArray 32", next, drop, next, drop]);
+    assert_eq!(found[5..], ["ArrayConcat 2", "drop", "drop"]);
 }
 
 /// Each element of an array of tuples dies where its piece is made, so that
-/// its register is free for the next, and is dropped nowhere else. A text's
-/// piece is copied into the next piece and dropped, and an array's is not.
+/// its register is free for the next, and is dropped nowhere else. Each piece is
+/// dropped too, once the next one is made.
 #[test]
 fn what_a_piece_holds_is_given_up_with_it() {
     let pairs: Vec<String> = (0..64).map(|i| format!("({i}, 'x')")).collect();
@@ -129,7 +134,7 @@ fn what_a_piece_holds_is_given_up_with_it() {
     let before = made(&function(&program(&src), "f").core.body);
     let found = pieces(&src, "f").expect("two pieces");
     assert!(count(&before, "drop") >= 64, "{before:?}");
-    assert_eq!(count(&found, "drop"), count(&before, "drop"));
+    assert_eq!(count(&found, "drop"), count(&before, "drop") + 1);
     assert_eq!(count(&found, "MakeTuple 2"), 64);
     // The first piece's elements are dropped before the next tuple is made.
     let first = found.iter().position(|s| s == "MakeArray 32");
@@ -204,12 +209,12 @@ fn in_order(src: &str) -> usize {
                 assert!(bound.contains(&local.0), "{local} dropped");
                 e = body;
             }
-            CoreExpr::Tail(_) => break,
-            CoreExpr::LetJoin { .. }
-            | CoreExpr::LetCont { .. }
+            CoreExpr::Ret(_) | CoreExpr::TailCall { .. } => break,
+            CoreExpr::SetGlobal { .. }
+            | CoreExpr::Join { .. }
             | CoreExpr::If { .. }
             | CoreExpr::Match { .. }
-            | CoreExpr::Goto(_) => panic!("a straight run: {e}"),
+            | CoreExpr::Jump { .. } => panic!("a straight run: {e}"),
         }
     }
     lets
@@ -237,4 +242,48 @@ fn a_literal_is_cut_wherever_it_is() {
     let mut names = Locals::default();
     names.walk(&core.body);
     assert!(names.highest > 80);
+}
+
+/// What a piece needs may have its value before a join that every way comes past,
+/// and then the piece goes in front of it. It does not go in front of one that
+/// some way leaves, where it would be made for nothing, but straight after.
+#[test]
+fn a_piece_goes_past_a_join_that_is_always_reached() {
+    let ty = RTy(0);
+    let local = LocalId;
+    let jump = || CoreExpr::Jump {
+        to: JoinId(0),
+        args: vec![local(0)],
+    };
+    let first = |other: CoreExpr| {
+        let bind = CoreBind::new(local(2), ty);
+        let literal = CoreExpr::Let {
+            bind,
+            rhs: Atom::prim(PrimOp::MakeArray, vec![local(0); 40]),
+            body: Box::new(CoreExpr::Ret(bind.id)),
+        };
+        let body = CoreExpr::If {
+            cond: local(0),
+            then: Box::new(jump()),
+            els: Box::new(other),
+        };
+        let core = CoreFn {
+            params: vec![CoreBind::new(local(0), ty)],
+            body: CoreExpr::Join {
+                id: JoinId(0),
+                params: vec![CoreBind::new(local(9), ty)],
+                cont: Box::new(literal),
+                body: Box::new(body),
+            },
+            ret_ty: ty,
+        };
+        let text = in_pieces(&core).expect("two pieces").body.to_string();
+        let at = |what: &str| text.find(what).expect("it is there");
+        assert!(at("MakeArray") < at("ArrayAppend"), "{text}");
+        // It has a number that no local has.
+        assert!(text.contains("let %10:0 = MakeArray"), "{text}");
+        at("MakeArray") < at("join")
+    };
+    assert!(first(jump()));
+    assert!(!first(CoreExpr::Ret(local(0))));
 }

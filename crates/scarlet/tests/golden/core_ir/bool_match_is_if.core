@@ -1,20 +1,25 @@
 fn main.pick(%0:t0) -> :t1
-  if %0 :t1
-    ret c0
+  if %0
+    let %2:t1 = c0
+    ret %2
   else
-    ret c1
+    let %1:t1 = c1
+    ret %1
 
 fn main.yes(%0:t0) -> :t0
-  if %0 :t0
-    ret false
+  if %0
+    let %1:t0 = false
+    ret %1
   else
-    ret true
+    let %2:t0 = true
+    ret %2
 
 fn main.unit(%0:t2) -> :t1
-  ret c2
+  let %1:t1 = c2
+  ret %1
 
 fn main.same(%0:t0) -> :t0
-  match %0 :t0
+  match %0
     | %1 ->
       ret %1
 
@@ -25,11 +30,13 @@ fn main.main() -> :t1
   let %3:t1 = call fn#2(%2)
   let %4:t2 = nil
   let %5:t1 = call fn#3(%4)
-  ret IntAdd(%3, %5)
+  let %6:t1 = IntAdd(%3, %5)
+  ret %6
 
 toplevel:
 fn main.__main__() -> :t2
-  ret nil
+  let %0:t2 = nil
+  ret %0
 where
   c0 = Int(1)
   c1 = Int(0)

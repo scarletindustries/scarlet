@@ -1,19 +1,22 @@
 fn main.sq(%0:t0) -> :t0
-  ret IntMul(%0, %0)
+  let %1:t0 = IntMul(%0, %0)
+  ret %1
 
 fn main.hyp2(%0:t0, %1:t0) -> :t0
   let %2:t0 = call fn#0(%0)
   let %3:t0 = call fn#0(%1)
-  ret IntAdd(%2, %3)
+  let %4:t0 = IntAdd(%2, %3)
+  ret %4
 
 fn main.main() -> :t0
   let %0:t0 = c0
   let %1:t0 = c1
-  ret call fn#1(%0, %1)
+  tail call fn#1(%0, %1)
 
 toplevel:
 fn main.__main__() -> :t1
-  ret nil
+  let %0:t1 = nil
+  ret %0
 where
   c0 = Int(3)
   c1 = Int(4)

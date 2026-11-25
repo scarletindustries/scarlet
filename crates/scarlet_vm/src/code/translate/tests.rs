@@ -4,7 +4,7 @@ use super::super::{Code, Op, Reg, load};
 use super::*;
 use crate::Audit;
 use scarlet_ir::TypeId;
-use scarlet_ir::core_ir::{CoreBind, LoweredFn, Program, TypeNames, VariantNames, VariantRef};
+use scarlet_ir::core_ir::{CoreBind, Program, TypeNames, VariantNames, VariantRef};
 use scarlet_ir::rty::RTy;
 
 fn code(src: &str) -> Code {
@@ -125,6 +125,125 @@ fn the_loader_marks_the_moves_of_a_compiled_program() {
     assert_eq!(moves(".kept"), [false]);
 }
 
+/// A map that is given up behind a set or a delete gives its reference to it,
+/// wherever its drop is among those there: the key's and the value's may come
+/// first, and do in generic code and for a map that is no parameter.
+#[test]
+fn a_map_given_up_behind_a_write_gives_it_its_reference() {
+    let all = loaded(
+        "import scarlet/map\n\
+         type Task {\n\
+         \tidentity Int\n\
+         \tnames Array(String)\n\
+         }\n\
+         fn put(k a, v b, m map::Map(a, b)) (map::Map(a, b), Int) {\n\
+         \tr = map::set(m, k, v)\n\
+         \tn = map::size(r)\n\
+         \t(r, n)\n\
+         }\n\
+         fn mixed(k a, m map::Map(a, b), v b) (map::Map(a, b), Int) {\n\
+         \tr = map::set(m, k, v)\n\
+         \tn = map::size(r)\n\
+         \t(r, n)\n\
+         }\n\
+         fn del(k a, m map::Map(a, b)) (map::Map(a, b), Int) {\n\
+         \tr = map::delete(m, k)\n\
+         \tn = map::size(r)\n\
+         \t(r, n)\n\
+         }\n\
+         fn both(m map::Map(a, b), j a, k a, v b) (map::Map(a, b), Int) {\n\
+         \tr = m |> map::delete(j) |> map::set(k, v)\n\
+         \tn = map::size(r)\n\
+         \t(r, n)\n\
+         }\n\
+         fn tasks(t Task, m map::Map(Int, Task)) (map::Map(Int, Task), Int) {\n\
+         \tr = map::set(m, t.identity, t)\n\
+         \tn = map::size(r)\n\
+         \t(r, n)\n\
+         }\n\
+         fn kept(k a, v b, m map::Map(a, b)) (map::Map(a, b), map::Map(a, b)) {\n\
+         \tr = map::set(m, k, v)\n\
+         \ts = map::delete(m, k)\n\
+         \t(r, s)\n\
+         }\n\
+         pub fn main() {\n\
+         \tm = map::set(map::new(), 1, 2)\n\
+         \tprintln(put(1, 2, m))\n\
+         \tprintln(mixed(1, m, 2))\n\
+         \tprintln(del(1, m))\n\
+         \tprintln(both(m, 1, 2, 3))\n\
+         \tprintln(tasks(Task(1, []), map::new()))\n\
+         \tprintln(kept(1, 2, m))\n\
+         }\n",
+    );
+    let owned = |name: &str| {
+        let ops = all[name].iter();
+        let writes =
+            ops.filter(|op| matches!(op, Op::MapSetOwned | Op::MapDeleteOwned | Op::Builtin));
+        writes.copied().collect::<Vec<Op>>()
+    };
+    // The last `Builtin` is the size.
+    let set = [Op::MapSetOwned, Op::Builtin];
+    assert_eq!(owned("put"), set);
+    assert_eq!(owned("mixed"), set);
+    assert_eq!(owned("tasks"), set);
+    assert_eq!(owned("del"), [Op::MapDeleteOwned, Op::Builtin]);
+    let both = [Op::MapDeleteOwned, Op::MapSetOwned, Op::Builtin];
+    assert_eq!(owned("both"), both);
+    assert_eq!(owned("kept"), [Op::Builtin, Op::MapDeleteOwned]);
+}
+
+/// A write's key or value that is the map itself keeps it, and everything given up
+/// behind the write is given up once.
+#[test]
+fn a_write_to_a_map_gives_up_the_rest_behind_it() {
+    let write = |intrinsic: Intrinsic, args: &[u32], drops: &[u32]| {
+        let rhs = Atom::Intrinsic {
+            intrinsic,
+            args: args.iter().copied().map(LocalId).collect(),
+        };
+        let body = Box::new(dropping(drops, gives(9)));
+        let body = CoreExpr::Let {
+            bind: bind(9),
+            rhs,
+            body,
+        };
+        let core = function(3, body);
+        let program = empty_program();
+        let source = Source::new(&program).expect("a whole program");
+        let d = translate(&source, &core, None, &mut Tables::default()).expect("it loads");
+        let ins = instructions(&d);
+        let ins = ins.iter().map(|i| shown(i, &d.lists));
+        ins.take(1 + drops.len()).collect::<Vec<String>>()
+    };
+    let set = Intrinsic::MapSet;
+    let delete = Intrinsic::MapDelete;
+    assert_eq!(
+        write(set, &[0, 1, 2], &[1, 0, 2])[..3],
+        ["9 MapSetOwned 0 1 2", "Drop 1", "Drop 2"]
+    );
+    assert_eq!(
+        write(set, &[2, 0, 1], &[0, 1, 2])[..3],
+        ["9 MapSetOwned 2 0 1", "Drop 0", "Drop 1"]
+    );
+    assert_eq!(
+        write(delete, &[1, 0], &[0, 1, 2])[..3],
+        ["9 MapDeleteOwned 1 0", "Drop 0", "Drop 2"]
+    );
+    // The map is not given up, or is one of the other two besides.
+    assert_eq!(
+        write(set, &[0, 1, 2], &[1, 2]),
+        ["9 Builtin 0 1 2", "Drop 1", "Drop 2"]
+    );
+    for args in [[0, 0, 1], [0, 1, 0]] {
+        let got = write(set, &args, &[1, 0]);
+        assert!(got[0].starts_with("9 Builtin"), "{got:?}");
+        assert_eq!(got[1..], ["Drop 1", "Drop 0"]);
+    }
+    let got = write(delete, &[0, 0], &[0]);
+    assert!(got[0].starts_with("9 Builtin"), "{got:?}");
+}
+
 /// The kinds of the instructions each function of `src` is loaded as, by the
 /// function's name.
 fn loaded(src: &str) -> HashMap<String, Vec<Op>> {
@@ -229,10 +348,36 @@ fn a_constant_nothing_reads_is_not_loaded() {
 }
 
 fn bind(id: u32) -> CoreBind {
-    CoreBind {
-        id: LocalId(id),
-        ty: RTy(0),
-        global: None,
+    CoreBind::new(LocalId(id), RTy(0))
+}
+
+fn gives(l: u32) -> CoreExpr {
+    CoreExpr::Ret(LocalId(l))
+}
+
+/// Return what `rhs` gives.
+fn returning(rhs: Atom) -> CoreExpr {
+    let bind = bind(200_000);
+    CoreExpr::Let {
+        bind,
+        rhs,
+        body: Box::new(CoreExpr::Ret(bind.id)),
+    }
+}
+
+fn jump(to: u32, args: &[u32]) -> CoreExpr {
+    CoreExpr::Jump {
+        to: JoinId(to),
+        args: args.iter().copied().map(LocalId).collect(),
+    }
+}
+
+fn join(id: u32, params: &[u32], body: CoreExpr, cont: CoreExpr) -> CoreExpr {
+    CoreExpr::Join {
+        id: JoinId(id),
+        params: params.iter().copied().map(bind).collect(),
+        cont: Box::new(cont),
+        body: Box::new(body),
     }
 }
 
@@ -283,19 +428,13 @@ fn a_constructor_the_program_does_not_list_does_not_load() {
     let program = program_with_fields();
     let source = Source::new(&program).expect("a whole program");
     let load = |core: &CoreFn| {
-        let draft = translate(
-            &source,
-            core,
-            false,
-            Some(FuncIdx(0)),
-            &mut Tables::default(),
-        );
+        let draft = translate(&source, core, Some(FuncIdx(0)), &mut Tables::default());
         draft.map(|d| instructions(&d))
     };
     let builds = |variant, n: u32| {
         function(
             n,
-            CoreExpr::Tail(Atom::Ctor {
+            returning(Atom::Ctor {
                 variant,
                 fields: (0..n).map(LocalId).collect(),
             }),
@@ -306,13 +445,12 @@ fn a_constructor_the_program_does_not_list_does_not_load() {
             variant,
             fields: (1..=n).map(bind).collect(),
         };
-        let arm = CoreExpr::Tail(Atom::Local(LocalId(0)));
+        let arm = gives(0);
         function(
             1,
             CoreExpr::Match {
                 scrut: LocalId(0),
                 arms: vec![(pat, arm)],
-                ty: RTy(0),
             },
         )
     };
@@ -366,58 +504,60 @@ fn a_constructor_the_program_does_not_list_does_not_load() {
 fn translated(core: &CoreFn) -> Result<Vec<Op>, Unfit> {
     let program = empty_program();
     let source = Source::new(&program).expect("a whole program");
-    let draft = translate(
-        &source,
-        core,
-        false,
-        Some(FuncIdx(0)),
-        &mut Tables::default(),
-    );
+    let draft = translate(&source, core, Some(FuncIdx(0)), &mut Tables::default());
     draft.map(|d| instructions(&d).iter().map(Ins::op).collect())
 }
 
-/// A constant that a module keeps in a global is stored there, even when only
-/// an operator that could hold it reads it. The compiler reads a global back
-/// with a load of its own, so this makes the read by hand.
+/// A constant that a module keeps in a global is made and stored there, also
+/// when the other operator that reads it holds it. The compiler reads a global
+/// back with a load of its own, so this makes the read by hand.
 #[test]
 fn a_constant_kept_in_a_global_is_stored() {
     let program = program("const kept = 7\npub fn main() { Nil }\n");
-    let CoreExpr::Let { bind, rhs, .. } = &program.toplevel.core.body else {
+    let CoreExpr::Let {
+        bind,
+        rhs,
+        body: stored,
+    } = &program.toplevel.core.body
+    else {
         panic!("the toplevel binds the constant first");
     };
-    assert!(bind.global.is_some() && matches!(rhs, Atom::Const(_)));
-    let x = CoreBind {
-        id: LocalId(bind.id.0 + 1),
-        global: None,
-        ..bind.clone()
+    let CoreExpr::SetGlobal { slot, value, .. } = **stored else {
+        panic!("and stores it straight after");
     };
-    let loaded_with = |bind: CoreBind| -> Vec<Op> {
+    assert!(value == bind.id && matches!(rhs, Atom::Const(_)));
+    let x = CoreBind::new(LocalId(bind.id.0 + 1), bind.ty);
+    let loaded_with = |keeps: bool| -> Vec<Op> {
         let sum = Atom::PrimOp {
             op: PrimOp::IntAdd,
             args: vec![x.id, bind.id],
         };
+        let mut rest = returning(sum);
+        if keeps {
+            rest = CoreExpr::SetGlobal {
+                slot,
+                value,
+                body: Box::new(rest),
+            };
+        }
         let core = CoreFn {
-            params: vec![x.clone()],
+            params: vec![x],
             body: CoreExpr::Let {
-                bind,
+                bind: *bind,
                 rhs: rhs.clone(),
-                body: Box::new(CoreExpr::Tail(sum)),
+                body: Box::new(rest),
             },
             ret_ty: program.toplevel.core.ret_ty,
         };
         let mut with = program.clone();
-        with.toplevel = LoweredFn::new("main".into(), "toplevel".into(), core, false);
+        with.toplevel.core = core;
         let code = load(&with, Audit::Never).expect("the program loads");
         let top = code.toplevels.last().expect("a toplevel");
         body(&code, top).iter().map(Ins::op).collect()
     };
-    let stored = [Op::Const, Op::SetGlobal, Op::IntAdd, Op::Ret];
-    assert_eq!(loaded_with(bind.clone()), stored);
-    let local = CoreBind {
-        global: None,
-        ..bind.clone()
-    };
-    assert_eq!(loaded_with(local), [Op::IntAddK, Op::Ret]);
+    let stored = [Op::Const, Op::SetGlobal, Op::IntAddK, Op::Ret];
+    assert_eq!(loaded_with(true), stored);
+    assert_eq!(loaded_with(false), [Op::IntAddK, Op::Ret]);
 }
 
 /// An `if` on a comparison of numbers, read nowhere else, is one jump. One
@@ -496,18 +636,16 @@ fn a_branch_on_what_a_branch_gives_reads_it() {
     assert_eq!(jumps.count(), 2, "{:?}", ops["either"]);
 }
 
-/// A draft says of each value what its type does, and passes on what Perceus left
-/// undropped.
+/// A draft says of each value what its type does.
 #[test]
 fn a_draft_says_what_its_values_types_say() {
     let program = program(
         "fn plain(n Int, x Float, s String, b Bool, xs Array(Int)) Int {\n\
          \tif b { plain(n, x, s, b, xs) } else { n }\n}\n\
          fn any(x a, n Int) a { if n > 0 { any(x, n - 1) } else { x } }\n\
-         fn lost(x a, n Int) Int { if n > 0 { lost(x, n - 1) } else { n } }\n\
          pub fn main() {\n\
          \tprintln(plain(1, 2.0, '', False, []))\n\
-         \tprintln(any(1, 1) + lost(1, 1))\n\
+         \tprintln(any(1, 1))\n\
          }\n",
     );
     let source = Source::new(&program).expect("a whole program");
@@ -515,18 +653,17 @@ fn a_draft_says_what_its_values_types_say() {
         let mut all = (&program.fns).into_iter();
         let f = all.find(|f| f.name == name).expect("the function");
         let this = Some(FuncIdx(0));
-        let d = translate(&source, &f.core, f.undropped, this, &mut Tables::default());
+        let d = translate(&source, &f.core, this, &mut Tables::default());
         let d = d.expect("it translates");
         assert_eq!(d.kinds.len(), d.values as usize);
         let kind = |p: &VReg| d.kinds.get(p.0 as usize).copied().flatten();
-        (d.params.iter().map(kind).collect::<Vec<_>>(), d.undropped)
+        d.params.iter().map(kind).collect::<Vec<_>>()
     };
     let (word, int) = (Some(Makes::NoCell), Some(Makes::Int));
     let any = Some(Makes::Any);
     let plain = vec![int, word, any, word, any];
-    assert_eq!(draft("plain"), (plain, false));
-    assert_eq!(draft("any"), (vec![any, int], false));
-    assert_eq!(draft("lost"), (vec![any, int], true));
+    assert_eq!(draft("plain"), plain);
+    assert_eq!(draft("any"), [any, int]);
 }
 
 /// A value whose type the program does not have is an error and not a guess,
@@ -539,7 +676,7 @@ fn a_type_the_program_does_not_have_is_refused() {
     let core = f.expect("f").core.clone();
     let why = |program: &Program, core: &CoreFn| {
         let source = Source::new(program).expect("a whole program");
-        translate(&source, core, false, None, &mut Tables::default()).err()
+        translate(&source, core, None, &mut Tables::default()).err()
     };
     assert_eq!(why(&program, &core), None);
     let foreign = RTy(1_000_000);
@@ -589,7 +726,7 @@ fn translator<'c>(
         lists: Lists::default(),
         labels: Vec::new(),
         landed: None,
-        conts: HashMap::new(),
+        joins: HashMap::new(),
         values: 3,
         kinds: vec![Some(Makes::Any); 3],
         closure: ReadsClosure::Nothing,
@@ -675,19 +812,12 @@ fn in_arm(pat: CorePat, arm: CoreExpr) -> Vec<String> {
         CoreExpr::Match {
             scrut: LocalId(0),
             arms: vec![(pat, arm)],
-            ty: RTy(0),
         },
     );
     core.params.push(bind(20));
     let program = program_with_fields();
     let source = Source::new(&program).expect("a whole program");
-    let draft = translate(
-        &source,
-        &core,
-        false,
-        Some(FuncIdx(0)),
-        &mut Tables::default(),
-    );
+    let draft = translate(&source, &core, Some(FuncIdx(0)), &mut Tables::default());
     let draft = draft.expect("it translates");
     // Nothing may jump between a test and what is read out after it.
     let all = instructions(&draft);
@@ -741,10 +871,6 @@ fn dropping(locals: &[u32], rest: CoreExpr) -> CoreExpr {
     })
 }
 
-fn gives(l: u32) -> CoreExpr {
-    CoreExpr::Tail(Atom::Local(LocalId(l)))
-}
-
 /// An arm that begins by dropping what it matched takes the cell apart where
 /// its drop stands among those the arm begins with. A field that nothing reads
 /// has no register, whether or not it is dropped there, and neither it nor the
@@ -754,7 +880,7 @@ fn an_arm_that_drops_its_scrutinee_takes_it_apart() {
     let test = "JumpUnlessTag 0";
     let tuple = |of: &[u32]| {
         let args = of.iter().copied().map(LocalId).collect();
-        CoreExpr::Tail(Atom::prim(PrimOp::MakeTuple, args))
+        returning(Atom::prim(PrimOp::MakeTuple, args))
     };
     let both = || tuple(&[1, 2]);
     for (drops, rest, want) in [
@@ -787,7 +913,7 @@ fn an_arm_that_drops_its_scrutinee_takes_it_apart() {
 fn a_constructor_of_any_number_of_fields_is_taken_apart() {
     for n in 0..=10u32 {
         let fields: Vec<_> = (1..=n).map(LocalId).collect();
-        let rest = CoreExpr::Tail(Atom::prim(PrimOp::MakeTuple, fields));
+        let rest = returning(Atom::prim(PrimOp::MakeTuple, fields));
         let got = matched(n, dropping(&[0], rest));
         let dsts: Vec<_> = (1..=n).map(|i| i.to_string()).collect();
         let want = match n {
@@ -811,16 +937,8 @@ fn an_arm_that_does_not_begin_so_reads_the_fields_out() {
         rhs: Atom::Nil,
         body: Box::new(body),
     };
-    let in_a_case = |body: CoreExpr| CoreExpr::LetCont {
-        id: JoinId(1),
-        cont: Box::new(gives(20)),
-        body: Box::new(body),
-    };
-    let in_a_join = |body: CoreExpr| CoreExpr::LetJoin {
-        bind: bind(9),
-        join: Box::new(body),
-        body: Box::new(gives(9)),
-    };
+    let in_a_case = |body: CoreExpr| join(1, &[], body, gives(20));
+    let in_a_join = |body: CoreExpr| join(1, &[9], body, gives(9));
     for (arm, want) in [
         (gives(1), &["Ret 1"][..]),
         (
@@ -845,7 +963,7 @@ fn an_arm_that_does_not_begin_so_reads_the_fields_out() {
             &["Drop 0", "Ret 1", "Ret 20"],
         ),
         (
-            in_a_join(dropping(&[0], gives(1))),
+            in_a_join(dropping(&[0], jump(1, &[1]))),
             &["Drop 0", "9 Move 1", "Jump", "Ret 9"],
         ),
     ] {
@@ -877,7 +995,7 @@ fn a_pattern_of_many_fields_is_gone_over_a_few_times() {
     let others = |from: u32| from..from + N / 2;
     let unread = || (1..=N).filter(|l| l % 2 == 0);
     let kept: Vec<_> = (1..=N).filter(|l| l % 2 == 1).map(LocalId).collect();
-    let mut arm = CoreExpr::Tail(Atom::prim(PrimOp::MakeTuple, kept.clone()));
+    let mut arm = returning(Atom::prim(PrimOp::MakeTuple, kept.clone()));
     let drops = others(N + 1)
         .chain([0])
         .chain(unread())
@@ -974,24 +1092,11 @@ fn operands_that_do_not_fit_are_in_a_list() {
         let mut reads = Vec::new();
         atom.for_each_operand(|l| reads.push(of(l)));
         reads.sort();
-        let core = function(
-            5,
-            CoreExpr::Let {
-                bind: bind(5),
-                rhs: atom,
-                body: Box::new(CoreExpr::Tail(Atom::Local(LocalId(5)))),
-            },
-        );
+        let core = function(5, returning(atom));
         let program = program_with_fields();
         let source = Source::new(&program).expect("a whole program");
-        let draft = translate(
-            &source,
-            &core,
-            false,
-            Some(FuncIdx(0)),
-            &mut Tables::default(),
-        )
-        .expect("it translates");
+        let draft = translate(&source, &core, Some(FuncIdx(0)), &mut Tables::default())
+            .expect("it translates");
         let first = instructions(&draft)[0];
         assert_eq!(first.op(), want);
         let mut named = Vec::new();
@@ -1004,7 +1109,11 @@ fn operands_that_do_not_fit_are_in_a_list() {
         assert_eq!(named, reads, "{want:?}");
     }
     // In tail position too.
-    let tail = |n| function(5, CoreExpr::Tail(call(Callee::Local(LocalId(0)), n)));
+    let tail = |n| {
+        let callee = Callee::Local(LocalId(0));
+        let args = list(n);
+        function(5, CoreExpr::TailCall { callee, args })
+    };
     assert_eq!(translated(&tail(6)), Ok(vec![Op::TailCallValue]));
     assert_eq!(translated(&tail(7)), Ok(vec![Op::TailCallValueWide]));
 }
@@ -1018,13 +1127,13 @@ fn a_call_that_cannot_be_right_stops_the_run() {
     let main = program.main.expect("a main");
     let why = |core: &CoreFn, this| {
         let mut tables = Tables::default();
-        let draft = translate(&source, core, false, this, &mut tables).expect("it translates");
+        let draft = translate(&source, core, this, &mut tables).expect("it translates");
         assert_eq!(instructions(&draft).first().map(Ins::op), Some(Op::Bad));
         tables.whys.remove(0)
     };
     let call = |callee, n: u32| {
         let args = (0..n).map(LocalId).collect();
-        function(n, CoreExpr::Tail(Atom::Call { callee, args }))
+        function(n, CoreExpr::TailCall { callee, args })
     };
     let missing = FuncIdx(10_000);
     assert_eq!(
@@ -1044,7 +1153,7 @@ fn a_call_that_cannot_be_right_stops_the_run() {
         why(&call(Callee::Self_, 0), None),
         Why::Broken(Broken::ToplevelCallsSelf)
     );
-    let load = |load| function(0, CoreExpr::Tail(Atom::Load(load)));
+    let load = |load| function(0, returning(Atom::Load(load)));
     let capture = |i| load(Load::Capture(scarlet_ir::core_ir::CaptureIdx(i)));
     let toplevel = Why::Broken(Broken::ToplevelCapture);
     assert_eq!(why(&capture(0), None), toplevel);
@@ -1052,20 +1161,23 @@ fn a_call_that_cannot_be_right_stops_the_run() {
     assert_eq!(why(&capture(-1), Some(main)), negative);
     let itself = Why::Broken(Broken::ToplevelSelf);
     assert_eq!(why(&load(Load::SelfClosure), None), itself);
-    let wild = function(0, CoreExpr::Goto(JoinId(3)));
-    assert_eq!(why(&wild, Some(main)), Why::Broken(Broken::UndeclaredCase));
-    // A case is gone once its own code has been reached.
-    let goes_back = function(
-        0,
-        CoreExpr::LetCont {
-            id: JoinId(3),
-            cont: Box::new(CoreExpr::Goto(JoinId(3))),
-            body: Box::new(CoreExpr::Goto(JoinId(3))),
-        },
-    );
+    let undeclared = || Why::Broken(Broken::UndeclaredJoin);
+    let wild = function(0, jump(3, &[]));
+    assert_eq!(why(&wild, Some(main)), undeclared());
+    // A join is gone once its own code has been reached, for its continuation
+    // too.
+    let goes_back = function(0, join(3, &[], jump(3, &[]), jump(3, &[])));
     let mut tables = Tables::default();
-    translate(&source, &goes_back, false, None, &mut tables).expect("it translates");
-    assert_eq!(tables.whys, [Why::Broken(Broken::UndeclaredCase)]);
+    translate(&source, &goes_back, None, &mut tables).expect("it translates");
+    assert_eq!(tables.whys, [undeclared()]);
+    // A jump passes a value for each parameter and no more.
+    for (got, want) in [(0, 1), (2, 1), (1, 0), (1, 3)] {
+        let (args, params) = (vec![0; got], (1..=want).collect::<Vec<_>>());
+        let body = join(3, &params, jump(3, &args), gives(0));
+        let want = want as usize;
+        let wrong = Why::Broken(Broken::JumpArity { got, want });
+        assert_eq!(why(&function(1, body), Some(main)), wrong);
+    }
 }
 
 /// A built-in the VM does not run, or is called with another number of
@@ -1074,10 +1186,7 @@ fn a_call_that_cannot_be_right_stops_the_run() {
 fn a_built_in_with_the_wrong_arguments_is_missing() {
     let call = |intrinsic, n: u32| {
         let args = (0..n).map(LocalId).collect();
-        translated(&function(
-            n,
-            CoreExpr::Tail(Atom::Intrinsic { intrinsic, args }),
-        ))
+        translated(&function(n, returning(Atom::Intrinsic { intrinsic, args })))
     };
     let missing = |i| Err(Unfit::Missing(Missing::Intrinsic(i)));
     assert_eq!(call(Intrinsic::MapSize, 1), Ok(vec![Op::Builtin, Op::Ret]));
@@ -1283,14 +1392,14 @@ fn an_update_that_names_no_field_does_not_load() {
         let sets = sets.iter().map(|field| (*field, LocalId(1))).collect();
         let core = function(
             2,
-            CoreExpr::Tail(Atom::Update {
+            returning(Atom::Update {
                 base: LocalId(0),
                 variant,
                 sets,
             }),
         );
         let this = Some(FuncIdx(0));
-        translate(&source, &core, false, this, &mut Tables::default()).err()
+        translate(&source, &core, this, &mut Tables::default()).err()
     };
     let three = with_fields(3);
     for sets in [&[0][..], &[2], &[0, 1], &[0, 2], &[0, 1, 2]] {
@@ -1384,7 +1493,7 @@ fn a_base_that_is_set_in_itself_is_not_taken() {
     let source = Source::new(&program).expect("a whole program");
     let mut core = function(
         2,
-        CoreExpr::Tail(Atom::Update {
+        returning(Atom::Update {
             base: LocalId(0),
             variant: with_fields(3),
             sets: vec![(0, LocalId(0)), (2, LocalId(0))],
@@ -1392,8 +1501,7 @@ fn a_base_that_is_set_in_itself_is_not_taken() {
     );
     core.ret_ty = RTy(0);
     let this = Some(FuncIdx(0));
-    let mut draft =
-        translate(&source, &core, false, this, &mut Tables::default()).expect("it translates");
+    let mut draft = translate(&source, &core, this, &mut Tables::default()).expect("it translates");
     super::super::live::settle(&mut draft).expect("a function that loads");
     let mut passed = Vec::new();
     instructions(&draft)[0].operands(&draft.lists, &mut |v, role| passed.push((v.0, role)));
@@ -1402,4 +1510,222 @@ fn a_base_that_is_set_in_itself_is_not_taken() {
         passed[1..],
         [(0, pass(false)), (0, pass(false)), (0, pass(true))]
     );
+}
+
+/// A long chain of joins, whose continuations are each in the last one's, takes no
+/// stack for its length, and what is found out about it grows with its length. One
+/// value is held over them all, and each branch gives a value of its own.
+#[test]
+fn a_long_chain_of_joins_is_gone_over_in_a_loop() {
+    let chain = |n: u32| -> (usize, usize, usize) {
+        let mut rest = gives(0);
+        for i in (0..n).rev() {
+            let (then, els, param) = (3 * i + 2, 3 * i + 3, 3 * i + 4);
+            let branch = |at: u32| CoreExpr::Let {
+                bind: bind(at),
+                rhs: Atom::Nil,
+                body: Box::new(jump(i, &[at])),
+            };
+            let body = CoreExpr::If {
+                cond: LocalId(1),
+                then: Box::new(branch(then)),
+                els: Box::new(branch(els)),
+            };
+            rest = join(i, &[param], body, rest);
+        }
+        let mut core = function(2, rest);
+        let program = empty_program();
+        let source = Source::new(&program).expect("a whole program");
+        let mut tables = Tables::default();
+        let mut d = translate(&source, &core, None, &mut tables).expect("it translates");
+        let steps = d.steps.len();
+        let held = crate::code::live::settle(&mut d).expect("it loads");
+        let clashes = held.clashes.len();
+        let f = crate::code::alloc::allocate(d, &held).expect("it fits");
+        // Freed from the outside in, because as a tree it is deeper than the stack.
+        let mut e = std::mem::replace(&mut core.body, gives(0));
+        while let CoreExpr::Join { cont, .. } = e {
+            e = *cont;
+        }
+        assert_eq!(
+            f.own.len(),
+            5,
+            "the value, the condition and what a join gives"
+        );
+        (steps, clashes, f.steps.len())
+    };
+    let small = std::thread::Builder::new().stack_size(512 * 1024);
+    let run = small.spawn(move || (chain(100), chain(10_000)));
+    let (short, long) = run.expect("a thread").join().expect("it ends");
+    assert!(
+        long.0 <= 100 * short.0 && long.1 <= 101 * short.1,
+        "{short:?} {long:?}"
+    );
+    // Every jump's `Move` is of one register, and goes.
+    assert!(long.2 <= 40_001, "{long:?}");
+}
+
+/// A jump is a move for each parameter, in order, and a jump, and its arguments
+/// take the parameters' registers, so that nothing is left of it but the jump. One
+/// that the continuation reads too, or that two parameters are given, is shared.
+#[test]
+fn a_jump_gives_each_parameter_its_value() {
+    let shown_of = |core: &CoreFn| -> (Vec<String>, Vec<Op>) {
+        let program = program_with_fields();
+        let source = Source::new(&program).expect("a whole program");
+        let draft = translate(&source, core, None, &mut Tables::default());
+        let mut draft = draft.expect("it translates");
+        let made = instructions(&draft)
+            .iter()
+            .map(|i| shown(i, &draft.lists))
+            .collect();
+        let held = crate::code::live::settle(&mut draft).expect("it loads");
+        let f = crate::code::alloc::allocate(draft, &held).expect("it fits");
+        let left = f.steps.iter().map(|step| match step {
+            Step::Ins(ins) => ins.op(),
+            Step::TailCall { .. } => panic!("{step:?}"),
+        });
+        (made, left.collect())
+    };
+    let tuple = |of: &[u32]| {
+        returning(Atom::prim(
+            PrimOp::MakeTuple,
+            of.iter().copied().map(LocalId).collect(),
+        ))
+    };
+    let branch = |then: CoreExpr, els: CoreExpr| CoreExpr::If {
+        cond: LocalId(2),
+        then: Box::new(then),
+        els: Box::new(els),
+    };
+    let make = |dst: u32, rest: CoreExpr| CoreExpr::Let {
+        bind: bind(dst),
+        rhs: Atom::prim(PrimOp::ToString, vec![LocalId(0)]),
+        body: Box::new(rest),
+    };
+    // Each branch makes the two values.
+    let one = make(3, make(4, jump(1, &[3, 4])));
+    let two = make(5, make(6, jump(1, &[6, 5])));
+    let core = function(3, join(1, &[7, 8], branch(one, two), tuple(&[7, 8])));
+    let (made, left) = shown_of(&core);
+    assert_eq!(made[3..6], ["7 Move 3", "8 Move 4", "Jump"], "{made:?}");
+    assert_eq!(made[8..11], ["7 Move 6", "8 Move 5", "Jump"], "{made:?}");
+    assert!(!left.contains(&Op::Move), "{left:?}");
+    // The continuation reads the argument too, so one move shares it.
+    let core = function(
+        3,
+        join(
+            1,
+            &[7],
+            branch(jump(1, &[0]), jump(1, &[1])),
+            tuple(&[7, 0]),
+        ),
+    );
+    let (_, left) = shown_of(&core);
+    assert_eq!(
+        left.iter().filter(|op| **op == Op::Move).count(),
+        1,
+        "{left:?}"
+    );
+    // One value for two parameters is in two registers.
+    let core = function(3, join(1, &[7, 8], jump(1, &[0, 0]), tuple(&[7, 8])));
+    let (_, left) = shown_of(&core);
+    assert_eq!(
+        left.iter().filter(|op| **op == Op::Move).count(),
+        1,
+        "{left:?}"
+    );
+    // Two of the function's parameters, each on one way: one of them is moved.
+    let core = function(
+        3,
+        join(1, &[7], branch(jump(1, &[0]), jump(1, &[1])), tuple(&[7])),
+    );
+    let (_, left) = shown_of(&core);
+    assert_eq!(
+        left.iter().filter(|op| **op == Op::Move).count(),
+        1,
+        "{left:?}"
+    );
+}
+
+/// A lookup in a map goes into the match on it, with no `Option` made, whether an
+/// arm gives the `Option` up or not, and with what is dropped in between dropped on
+/// both ways. Not when anything else reads it.
+#[test]
+fn a_lookup_goes_into_the_match_on_it() {
+    let program = program(
+        "import scarlet/map\npub fn main() { println(map::get(map::set(map::new(), 1, 2), 1)) }\n",
+    );
+    let source = Source::new(&program).expect("a whole program");
+    let abi = program.abi;
+    // `%0` is a map, `%1` a key and `%2` what it gives.
+    let lookup = |rest: CoreExpr| {
+        let bind = bind(2);
+        let args = vec![LocalId(0), LocalId(1)];
+        let intrinsic = Intrinsic::MapGet;
+        CoreExpr::Let {
+            bind,
+            rhs: Atom::Intrinsic { intrinsic, args },
+            body: Box::new(rest),
+        }
+    };
+    let arms = |some: CoreExpr, none: CoreExpr| CoreExpr::Match {
+        scrut: LocalId(2),
+        arms: vec![
+            (
+                CorePat::Ctor {
+                    variant: abi.none,
+                    fields: Vec::new(),
+                },
+                none,
+            ),
+            (
+                CorePat::Ctor {
+                    variant: abi.some,
+                    fields: vec![bind(3)],
+                },
+                some,
+            ),
+        ],
+    };
+    let made = |rest: CoreExpr| -> Vec<String> {
+        let core = function(2, lookup(rest));
+        let draft = translate(&source, &core, None, &mut Tables::default());
+        let draft = draft.expect("it translates");
+        crate::code::live::settle(&mut super::super::tests::copy_of(&draft)).expect("it loads");
+        let all = instructions(&draft);
+        all.iter().map(|i| shown(i, &draft.lists)).collect()
+    };
+    let plain = ["3 MapFind 0 1", "Ret 3", "Ret 0"];
+    assert_eq!(made(arms(gives(3), gives(0))), plain);
+    // The arm gives the `Option` up, among other things.
+    assert_eq!(made(arms(dropping(&[2], gives(3)), gives(0))), plain);
+    let drops = made(arms(dropping(&[0, 2], gives(3)), dropping(&[2], gives(0))));
+    assert_eq!(drops, ["3 MapFind 0 1", "Drop 0", "Ret 3", "Ret 0"]);
+    // What is dropped in between.
+    let between = made(dropping(&[0], arms(dropping(&[2], gives(3)), gives(1))));
+    let want = ["3 MapFind 0 1", "Drop 0", "Ret 3", "Drop 0", "Ret 1"];
+    assert_eq!(between, want);
+    // Read again in an arm, or after.
+    let looked = |made: &[String]| made[0] == "2 Builtin 0 1";
+    assert!(looked(&made(arms(gives(2), gives(0)))));
+    assert!(looked(&made(arms(gives(3), dropping(&[0], gives(2))))));
+    let after = join(1, &[], arms(jump(1, &[]), jump(1, &[])), gives(2));
+    assert!(made(after)[0] == "2 Builtin 0 1");
+    // When the match is on another value, and only its arm reads this one.
+    let other = CoreExpr::Match {
+        scrut: LocalId(0),
+        arms: match arms(gives(2), gives(0)) {
+            CoreExpr::Match { arms, .. } => arms,
+            e => panic!("{e}"),
+        },
+    };
+    assert!(looked(&made(other)));
+    // Or with something in front of the match.
+    let first = CoreExpr::Let {
+        bind: bind(6),
+        rhs: Atom::Nil,
+        body: Box::new(arms(gives(3), gives(0))),
+    };
+    assert!(looked(&made(first)));
 }

@@ -5,7 +5,9 @@ fn main.push(%0:t0, %1:t1) -> :t0
   drop %0
   let %5:t2 = ArrayAppend(%4, %1)
   drop %4
-  ret ctor 10.0(%5, %2, %3)
+  let %6:t0 = ctor 10.0(%5, %2, %3)
+  drop %5
+  ret %6
 
 fn main.main() -> :t1
   let %0:t2 = MakeArray()
@@ -16,11 +18,14 @@ fn main.main() -> :t1
   let %4:t1 = c1
   let %5:t0 = call fn#0(%3, %4)
   drop %3
-  ret Field(1)(%5)
+  let %6:t1 = Field(1)(%5)
+  drop %5
+  ret %6
 
 toplevel:
 fn main.__main__() -> :t3
-  ret nil
+  let %0:t3 = nil
+  ret %0
 where
   c0 = Int(0)
   c1 = Int(1)

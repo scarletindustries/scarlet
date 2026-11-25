@@ -114,7 +114,7 @@ fn let_drop_spine_is_flat() {
                     variant: vref(7, 1),
                     fields: vec![LocalId(2)],
                 },
-                body: Box::new(CoreExpr::Tail(Atom::Local(LocalId(3)))),
+                body: Box::new(CoreExpr::Ret(LocalId(3))),
             }),
         }),
     };
@@ -129,6 +129,38 @@ ret %3
     );
 }
 
+fn locals(ids: &[u32]) -> Vec<LocalId> {
+    ids.iter().copied().map(LocalId).collect()
+}
+
+fn jump(to: u32, args: &[u32]) -> CoreExpr {
+    CoreExpr::Jump {
+        to: JoinId(to),
+        args: locals(args),
+    }
+}
+
+fn join(id: u32, params: Vec<CoreBind>, body: CoreExpr, cont: CoreExpr) -> CoreExpr {
+    CoreExpr::Join {
+        id: JoinId(id),
+        params,
+        cont: Box::new(cont),
+        body: Box::new(body),
+    }
+}
+
+fn iff(then: CoreExpr, els: CoreExpr) -> CoreExpr {
+    CoreExpr::If {
+        cond: LocalId(1),
+        then: Box::new(then),
+        els: Box::new(els),
+    }
+}
+
+fn ret() -> CoreExpr {
+    CoreExpr::Ret(LocalId(0))
+}
+
 #[test]
 fn if_and_match_indent() {
     let m = CoreExpr::Match {
@@ -139,48 +171,139 @@ fn if_and_match_indent() {
                     variant: vref(4, 0),
                     fields: vec![bind(5, RTy(2))],
                 },
-                CoreExpr::Tail(Atom::Call {
+                CoreExpr::TailCall {
                     callee: Callee::Self_,
-                    args: vec![LocalId(5)],
-                }),
+                    args: locals(&[5]),
+                },
             ),
-            (CorePat::Wild, CoreExpr::Tail(Atom::Const(ConstId(0)))),
+            (CorePat::Wild, CoreExpr::Ret(LocalId(2))),
         ],
-        ty: RTy(9),
-    };
-    let e = CoreExpr::If {
-        cond: LocalId(1),
-        then: Box::new(m),
-        els: Box::new(CoreExpr::Tail(Atom::Local(LocalId(0)))),
-        ty: RTy(9),
     };
     assert_eq!(
-        e.to_string(),
+        iff(m, ret()).to_string(),
         "\
-if %1 :9
-  match %0 :9
+if %1
+  match %0
     | 4.0(%5) ->
-      ret call self(%5)
+      tail call self(%5)
     | _ ->
-      ret c0
+      ret %2
 else
   ret %0
 "
     );
 }
 
+/// A join prints its body first, as it runs first, and then its continuation
+/// level with it.
+#[test]
+fn a_join_prints_in_the_order_it_runs() {
+    let inner = join(
+        2,
+        Vec::new(),
+        iff(jump(1, &[0, 1]), jump(2, &[])),
+        jump(1, &[1, 0]),
+    );
+    let stored = CoreExpr::SetGlobal {
+        slot: GlobalSlot(7),
+        value: LocalId(3),
+        body: Box::new(ret()),
+    };
+    let e = join(1, vec![bind(3, RTy(0)), bind(4, RTy(5))], inner, stored);
+    assert_eq!(
+        e.to_string(),
+        "\
+join j1(%3:0, %4:5) after
+  join j2() after
+    if %1
+      jump j1(%0, %1)
+    else
+      jump j2()
+  jump j1(%1, %0)
+set global7 = %3
+ret %0
+"
+    );
+}
+
+/// A join is always reached when every way through its body ends in a jump to
+/// it, through as many joins inside as there are.
+#[test]
+fn a_join_is_always_reached_when_no_way_leaves_its_body() {
+    let reached = |e: CoreExpr| -> Vec<u32> {
+        let all = e.always_reached();
+        all.into_iter().map(|j| j.0).collect()
+    };
+    let one = |body| join(1, Vec::new(), body, ret());
+    assert_eq!(reached(one(jump(1, &[]))), [1]);
+    assert_eq!(reached(one(iff(jump(1, &[]), jump(1, &[])))), [1]);
+    assert!(reached(one(iff(jump(1, &[]), ret()))).is_empty());
+    let call = || CoreExpr::TailCall {
+        callee: Callee::Self_,
+        args: Vec::new(),
+    };
+    assert!(reached(one(iff(call(), jump(1, &[])))).is_empty());
+    // One that nothing jumps to is not.
+    let stops = || CoreExpr::Match {
+        scrut: LocalId(0),
+        arms: Vec::new(),
+    };
+    assert!(reached(one(stops())).is_empty());
+    // A way that stops the run leaves it nowhere.
+    assert_eq!(reached(one(iff(stops(), jump(1, &[])))), [1]);
+    // What a body jumps to inside itself goes on to the end of that.
+    let two = |inner, cont| one(join(2, Vec::new(), inner, cont));
+    assert_eq!(reached(two(jump(2, &[]), jump(1, &[]))), [1, 2]);
+    assert_eq!(
+        reached(two(iff(jump(2, &[]), jump(1, &[])), jump(1, &[]))),
+        [1]
+    );
+    assert_eq!(reached(two(jump(2, &[]), ret())), [2]);
+    assert!(reached(two(iff(jump(2, &[]), ret()), jump(1, &[]))).is_empty());
+    assert_eq!(reached(two(jump(1, &[]), ret())), [] as [u32; 0]);
+    // A chain, whose joins are each reached or not by themselves.
+    let chain = join(
+        1,
+        Vec::new(),
+        jump(1, &[]),
+        two(iff(jump(2, &[]), ret()), ret()),
+    );
+    assert!(chain.always_reached().contains(&JoinId(1)));
+    // A jump to nothing leaves.
+    assert!(reached(one(iff(jump(9, &[]), jump(1, &[])))).is_empty());
+    // A match's arms count, and lets, drops and stores are gone past.
+    let arms = |last| CoreExpr::Match {
+        scrut: LocalId(0),
+        arms: vec![(CorePat::Wild, jump(1, &[])), (CorePat::Wild, last)],
+    };
+    let past = |e| CoreExpr::Let {
+        bind: bind(9, RTy(0)),
+        rhs: Atom::Nil,
+        body: Box::new(CoreExpr::SetGlobal {
+            slot: GlobalSlot(0),
+            value: LocalId(9),
+            body: Box::new(CoreExpr::Drop {
+                local: LocalId(9),
+                body: Box::new(e),
+            }),
+        }),
+    };
+    assert_eq!(reached(one(past(arms(jump(1, &[]))))), [1]);
+    assert!(reached(one(past(arms(ret())))).is_empty());
+}
+
 #[test]
 fn core_fn_header_and_body() {
     let f = CoreFn {
         params: vec![bind(0, RTy(1)), bind(1, RTy(1))],
-        body: CoreExpr::Tail(Atom::prim(PrimOp::IntLt, vec![LocalId(0), LocalId(1)])),
+        body: CoreExpr::Ret(LocalId(1)),
         ret_ty: RTy(3),
     };
     assert_eq!(
         f.to_string(),
         "\
 fn(%0:1, %1:1) -> :3
-  ret IntLt(%0, %1)
+  ret %1
 "
     );
 }
@@ -197,11 +320,13 @@ fn an_update_reads_its_base_and_builds_its_constructor() {
     let mut reads = Vec::new();
     update(1).for_each_operand(|l| reads.push(l.0));
     assert_eq!(reads, [2, 3, 2]);
-    let e = CoreExpr::Let {
-        bind: bind(4, RTy(0)),
-        rhs: update(1),
-        body: Box::new(CoreExpr::Tail(update(2))),
+    let made = |id, idx, end| CoreExpr::Let {
+        bind: bind(id, RTy(0)),
+        rhs: update(idx),
+        body: Box::new(end),
     };
+    // On either side of a join.
+    let e = join(1, Vec::new(), made(4, 1, jump(1, &[])), made(5, 2, ret()));
     let mut built = Vec::new();
     e.for_each_variant(|v| built.push(v));
     built.sort_by_key(|v| v.variant_idx);
