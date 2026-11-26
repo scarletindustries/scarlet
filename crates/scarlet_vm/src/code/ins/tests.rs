@@ -522,6 +522,10 @@ impl Places for Shifted {
     fn place_list(&self, i: u32) -> Result<u32, Unplaced> {
         Ok(i + 60)
     }
+
+    fn split_list(&self, i: u32) -> Result<u32, Unplaced> {
+        Ok(i + 70)
+    }
 }
 
 /// Giving an instruction its registers keeps everything else about it.

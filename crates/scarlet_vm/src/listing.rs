@@ -4,8 +4,9 @@
 //! then the registers it writes, its kind, and the rest of it in the order its
 //! fields are declared. A register is `r3`. A frame's first two are its own
 //! (`frame.rs`), so its parameters start at `r2`. An operand written `move r3`
-//! gives up the register's reference instead of adding one. `_` is a field
-//! taken out of a cell that goes to no register. A constructor is its type and
+//! gives up the register's reference instead of adding one. `_` is a field of a
+//! cell or a piece of an array that goes to no register. A length is `3` for three
+//! elements and `3..` for three or more. A constructor is its type and
 //! its variant, `10.0`, and a test of one is the variant alone, because the test
 //! does not look at the type: `.1` has no fields and `.1(..)` has some. `-> 7`
 //! is where the instruction may continue instead of at the next one. A switch has one
@@ -19,11 +20,13 @@ use std::fmt::{self, Write as _};
 use scarlet_ir::core_ir::{ConstId, FuncIdx, GlobalSlot, Program};
 use scarlet_ir::intrinsic::Intrinsic;
 
+use crate::array::End;
 use crate::code::{self, Code, Entry, Ins, Reg};
 use crate::code::{
     Arg, ArgList, Args, Assign, AssignList, BinaryId, BitsOp, BlockId, Dead, DeadList, Dst,
-    DstList, EntryPc, Hit, IntTable, Last, LookList, Looks, Makes, MaybeDst, MaybeHit, Newline, Pc,
-    PlaceList, Room, Sets, ShareList, Shared, Shares, Src, Table, Taken, TextId, Why, WhyId,
+    DstList, EntryPc, Hit, HitList, Hits, IntTable, Last, Length, LookList, Looks, Makes, MaybeDst,
+    MaybeHit, Near, Newline, Pc, PlaceList, Room, Sets, ShareList, Shared, Shares, Split, Src,
+    Table, Taken, TextId, Why, WhyId,
 };
 use crate::frame::FIRST;
 use crate::heap::{Ctor, Layout};
@@ -231,6 +234,45 @@ impl Show for MaybeHit<Reg> {
 impl Show for Hit<Reg> {
     fn show(self, line: &mut Line<'_>) {
         line.writes(Some(self.0));
+    }
+}
+
+impl<const N: usize> Show for Hits<Reg, N> {
+    fn show(self, line: &mut Line<'_>) {
+        self.regs().iter().for_each(|hit| hit.show(line));
+    }
+}
+
+impl Show for HitList {
+    fn show(self, line: &mut Line<'_>) {
+        let code = line.code;
+        let Some(wide) = self.of(&code.lists) else {
+            return;
+        };
+        wide.elements.iter().for_each(|hit| hit.show(line));
+        show_split(wide.split, line);
+    }
+}
+
+/// `3` for three elements and `3..` for three or more.
+impl Show for Length {
+    fn show(self, line: &mut Line<'_>) {
+        let more = if self.more { ".." } else { "" };
+        line.part(format_args!("{}{more}", self.len));
+    }
+}
+
+impl Show for Near {
+    fn show(self, line: &mut Line<'_>) {
+        show_split(self.split(), line);
+    }
+}
+
+/// The length, and which element the first register is for when that is not the first.
+fn show_split(split: Split, line: &mut Line<'_>) {
+    split.length.show(line);
+    if split.from != 0 {
+        line.part(format_args!("from {}", split.from));
     }
 }
 
@@ -532,4 +574,4 @@ macro_rules! debugged {
     )*};
 }
 
-debugged!(BitsOp, Intrinsic, Makes);
+debugged!(BitsOp, End, Intrinsic, Makes);

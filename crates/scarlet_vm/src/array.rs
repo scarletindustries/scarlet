@@ -23,7 +23,7 @@
 //! builds new nodes along the one path it touches and shares every other
 //! node with the array it came from, which stays as it was. A node shared
 //! this way holds one more reference. An operation whose caller gives up its
-//! reference ([`set`], [`push_owned`], [`extend_owned`], [`skip_owned`])
+//! reference ([`set`], [`push_owned`], [`extend_owned`], [`uncons`], [`skip_owned`])
 //! changes a node in place when its count says nothing else holds it.
 //!
 //! This is the layout, in words after each cell's header:
@@ -43,6 +43,7 @@
 //! slices all come from those two numbers. [`Seq`] is either kind. Adding to a
 //! range, or joining one to another array, first builds it as a tree.
 
+use crate::code::{Length, Split};
 use crate::heap::{Cell, DeadCell, Fault, Heap, Kind};
 use crate::value::Value;
 use crate::word::to_usize;
@@ -85,6 +86,13 @@ pub(crate) fn range(heap: &mut Heap, start: i64, end: i64) -> Result<Cell, Fault
     heap.make(Kind::Range, &[start.cast_unsigned(), end.cast_unsigned()])
 }
 
+/// Where the range that `v` is starts and ends, or `None` when it is no range.
+#[inline(always)]
+fn ends(heap: &Heap, v: Value) -> Option<(i64, i64)> {
+    let [start, end] = heap.chunk(v.as_cell()?, Kind::Range)?;
+    Some((start.cast_signed(), end.cast_signed()))
+}
+
 /// The array `cell` holds, or `None` when it holds something else.
 pub(crate) fn seq(heap: &Heap, cell: Cell) -> Option<Seq> {
     match heap.kind(cell)? {
@@ -114,7 +122,7 @@ pub(crate) fn seq(heap: &Heap, cell: Cell) -> Option<Seq> {
 }
 
 /// Which end of an array.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum End {
     Front,
     Back,
@@ -136,7 +144,7 @@ const ROOT_HEAD: usize = 3;
 const ROOT_TREE: usize = 4;
 const ROOT_TAIL: usize = 5;
 
-struct Root {
+pub(crate) struct Root {
     len: usize,
     shift: usize,
     /// Items at the front of `head` this array has left behind. Dropping from
@@ -213,17 +221,25 @@ impl View<'_> {
     }
 }
 
-fn root(heap: &Heap, cell: Cell) -> Root {
-    let d = heap.data(cell);
-    let w = |i: usize| d.get(i).copied().unwrap_or(Value::NIL.bits());
-    Root {
-        len: to_usize(w(0)),
-        shift: to_usize(w(1)),
-        offset: to_usize(w(2)),
-        head: Value::from_bits(w(ROOT_HEAD)),
-        tree: Value::from_bits(w(ROOT_TREE)),
-        tail: Value::from_bits(w(ROOT_TAIL)),
-    }
+/// The root that `cell` is. The callers know it for a tree, so one that is none
+/// has been freed.
+#[inline(always)]
+fn root(heap: &Heap, cell: Cell) -> Result<Root, DeadCell> {
+    tree(heap, cell).ok_or(DeadCell)
+}
+
+/// The root that `cell` is, or `None` when it is something else.
+#[inline(always)]
+fn tree(heap: &Heap, cell: Cell) -> Option<Root> {
+    let [len, shift, offset, head, tree, tail] = heap.chunk(cell, Kind::ArrayRoot)?;
+    Some(Root {
+        len: to_usize(*len),
+        shift: to_usize(*shift),
+        offset: to_usize(*offset),
+        head: Value::from_bits(*head),
+        tree: Value::from_bits(*tree),
+        tail: Value::from_bits(*tail),
+    })
 }
 
 /// How many live items the head has, which is what `offset` leaves of its
@@ -253,16 +269,20 @@ fn own_head(heap: &mut Heap, r: &Root) -> Result<Value, Fault> {
     if r.offset == 0 {
         return Ok(heap.own(r.head)?);
     }
-    let items = head_items(heap, r);
-    if items.is_empty() {
+    if head_len(heap, r) == 0 {
         return Ok(Value::NIL);
     }
-    let kept = own_all(heap, &items)?;
-    leaf(heap, &kept)
+    leaf_behind(heap, r.head, r.offset)
 }
 
 /// `v` as a node read in place, or `None` for `Nil`.
 fn view(heap: &Heap, v: Value) -> Option<View<'_>> {
+    view_here(heap, v)
+}
+
+/// [`view`] inside its caller, where an array's elements are read.
+#[inline(always)]
+fn view_here(heap: &Heap, v: Value) -> Option<View<'_>> {
     let cell = v.as_cell()?;
     let d = heap.data(cell);
     match heap.kind(cell)? {
@@ -371,6 +391,22 @@ fn root_at(
 fn leaf(heap: &mut Heap, items: &[Value]) -> Result<Value, Fault> {
     let data: smallvec::SmallVec<[u64; B]> = items.iter().map(|v| v.bits()).collect();
     Ok(Value::cell(heap.make(Kind::ArrayLeaf, &data)?))
+}
+
+/// A leaf of what the leaf `v` has from its item `from` on, with a reference of its own
+/// to each.
+fn leaf_behind(heap: &mut Heap, v: Value, from: usize) -> Result<Value, Fault> {
+    let mut room = [0u64; B];
+    let items = leaf_items(heap, v).get(from..).unwrap_or_default();
+    let n = items.len().min(B);
+    for (word, item) in room.iter_mut().zip(items) {
+        *word = *item;
+    }
+    let kept = room.get(..n).unwrap_or_default();
+    for word in kept {
+        heap.own(Value::from_bits(*word))?;
+    }
+    Ok(Value::cell(heap.make(Kind::ArrayLeaf, kept)?))
 }
 
 /// A branch at height `shift` over `children`, whose references pass to it.
@@ -497,12 +533,15 @@ pub(crate) fn from_values(heap: &mut Heap, items: &[Value]) -> Result<Cell, Faul
 }
 
 fn len(heap: &Heap, array: Cell) -> usize {
-    root(heap, array).len
+    tree(heap, array).map_or(0, |r| r.len)
 }
 
 /// Element `i`, with no reference added, or `None` past the end.
+// Inside its one caller that reads element after element. Where it is called
+// from more places, the optimizer leaves it out of them all.
+#[inline(always)]
 pub(crate) fn get(heap: &Heap, array: Cell, i: usize) -> Option<Value> {
-    let r = root(heap, array);
+    let r = tree(heap, array)?;
     if i >= r.len {
         return None;
     }
@@ -563,7 +602,7 @@ fn copied(heap: &mut Heap, node: Cell) -> Result<Cell, Fault> {
 /// else holds copies the root and one node per level, and shares the rest
 /// with the array it came from, which stays as it was.
 pub(crate) fn set(heap: &mut Heap, array: Cell, i: usize, x: Value) -> Result<Cell, Fault> {
-    let r = root(heap, array);
+    let r = root(heap, array)?;
     if i >= r.len {
         release(heap, x)?;
         return Ok(array);
@@ -623,7 +662,9 @@ pub(crate) fn set(heap: &mut Heap, array: Cell, i: usize, x: Value) -> Result<Ce
 
 /// Every element, front to back, with no reference added.
 pub(crate) fn elements(heap: &Heap, array: Cell) -> Vec<Value> {
-    let r = root(heap, array);
+    let Some(r) = tree(heap, array) else {
+        return Vec::new();
+    };
     let mut out = Vec::with_capacity(r.len);
     out.extend(head_items(heap, &r));
     // A stack of nodes still to visit, last child first, so they pop in order.
@@ -647,7 +688,7 @@ pub(crate) fn elements(heap: &Heap, array: Cell) -> Vec<Value> {
 /// The buffer at that end takes it, and a full buffer first goes into the
 /// tree as a finished leaf.
 fn push(heap: &mut Heap, array: Cell, x: Value, end: End) -> Result<Cell, Fault> {
-    let r = root(heap, array);
+    let r = root(heap, array)?;
     let len = r.len.checked_add(1).ok_or(Fault::Full)?;
     // Settle a head with items left behind first. The leaf that goes into the
     // tree, or that the new item joins, must hold only live items.
@@ -681,41 +722,49 @@ fn push(heap: &mut Heap, array: Cell, x: Value, end: End) -> Result<Cell, Fault>
 /// so nothing is shared or released. `x`'s reference passes in, as for
 /// [`push`].
 pub(crate) fn push_owned(heap: &mut Heap, array: Cell, x: Value, end: End) -> Result<Cell, Fault> {
-    let r = root(heap, array);
+    if pushed(heap, array, &[x], end)? {
+        return Ok(array);
+    }
+    let made = push(heap, array, x, end);
+    heap.release(array)?;
+    made
+}
+
+/// Put `items`, in their order, at `end` of `array`, whose one holder gives up a reference
+/// to each of them, when nothing else holds the leaf there and it has room. Whether it
+/// did. The leaf's items and these then move to a longer leaf.
+#[inline(always)]
+fn pushed(heap: &mut Heap, array: Cell, items: &[Value], end: End) -> Result<bool, Fault> {
+    let r = root(heap, array)?;
     let (edge, slot) = match end {
         End::Front => (r.head, ROOT_HEAD),
         End::Back => (r.tail, ROOT_TAIL),
     };
-    let fits = heap.unique(array)?
-        && (end == End::Back || r.offset == 0)
-        && match edge.as_cell() {
-            Some(leaf) => heap.unique(leaf)? && heap.is(leaf, Kind::ArrayLeaf),
-            None => false,
-        }
-        && (1..B).contains(&slot_count(heap, edge));
-    let (Some(leaf), true) = (edge.as_cell(), fits) else {
-        let made = push(heap, array, x, end);
-        heap.release(array)?;
-        return made;
+    if !heap.unique(array)? || (end == End::Front && r.offset > 0) {
+        return Ok(false);
+    }
+    let Some(leaf) = edge.as_cell() else {
+        return Ok(false);
     };
-    let len = r.len.checked_add(1).ok_or(Fault::Full)?;
+    let alone = heap.unique(leaf)? && heap.is(leaf, Kind::ArrayLeaf);
     let old = heap.data(leaf);
+    let n = old.len().saturating_add(items.len());
+    if !alone || n > B {
+        return Ok(false);
+    }
+    let len = r.len.checked_add(items.len()).ok_or(Fault::Full)?;
     let mut words = [0u64; B];
-    let n = old.len();
-    let (at, rest) = match end {
-        End::Front => (0, 1..n.saturating_add(1)),
-        End::Back => (n, 0..n),
+    let (at, kept) = match end {
+        End::Front => (0, items.len()..n),
+        End::Back => (old.len(), 0..old.len()),
     };
-    if let Some(dst) = words.get_mut(rest) {
+    if let Some(dst) = words.get_mut(kept) {
         dst.copy_from_slice(old);
     }
-    if let Some(w) = words.get_mut(at) {
+    for (w, x) in words.iter_mut().skip(at).zip(items) {
         *w = x.bits();
     }
-    let made = heap.make(
-        Kind::ArrayLeaf,
-        words.get(..n.saturating_add(1)).unwrap_or(&[]),
-    )?;
+    let made = heap.make(Kind::ArrayLeaf, words.get(..n).unwrap_or(&[]))?;
     heap.discard(leaf)?;
     if let Some(d) = heap.data_mut(array).get_mut(..6) {
         if let Some(w) = d.get_mut(0) {
@@ -725,7 +774,7 @@ pub(crate) fn push_owned(heap: &mut Heap, array: Cell, x: Value, end: End) -> Re
             *w = Value::cell(made).bits();
         }
     }
-    Ok(array)
+    Ok(true)
 }
 
 /// `array` with `items`, in their order, at `end`. The caller gives up its
@@ -741,7 +790,11 @@ pub(crate) fn extend_owned(
     items: &[Value],
     end: End,
 ) -> Result<Cell, Fault> {
-    let r = root(heap, array);
+    // A whole leaf of them never fits in one that has any.
+    if items.len() < B && pushed(heap, array, items, end)? {
+        return Ok(array);
+    }
+    let r = root(heap, array)?;
     let len = r.len.checked_add(items.len()).ok_or(Fault::Full)?;
     // This holds a reference to each part of the root from here on. They are
     // the root's own when nothing else holds it.
@@ -992,7 +1045,7 @@ fn collapse(heap: &mut Heap, mut n: Value, mut shift: usize) -> Result<(Value, u
 
 /// The first `n` elements.
 fn take(heap: &mut Heap, array: Cell, n: usize) -> Result<Cell, Fault> {
-    let r = root(heap, array);
+    let r = root(heap, array)?;
     if n == 0 {
         return empty(heap);
     }
@@ -1036,7 +1089,7 @@ pub(crate) fn slice(heap: &mut Heap, array: Cell, start: usize, end: usize) -> R
 
 /// Every element but the first `n`.
 pub(crate) fn skip(heap: &mut Heap, array: Cell, n: usize) -> Result<Cell, Fault> {
-    let r = root(heap, array);
+    let r = root(heap, array)?;
     if n == 0 {
         heap.share(array)?;
         return Ok(array);
@@ -1084,9 +1137,7 @@ pub(crate) fn skip(heap: &mut Heap, array: Cell, n: usize) -> Result<Cell, Fault
     let tail = if k == 0 {
         heap.own(r.tail)?
     } else {
-        let tail_items = slots(heap, r.tail);
-        let kept = own_all(heap, tail_items.get(k..).unwrap_or(&[]))?;
-        leaf(heap, &kept)?
+        leaf_behind(heap, r.tail, k)?
     };
     new_root(heap, left, 0, Value::NIL, Value::NIL, tail)
 }
@@ -1096,7 +1147,7 @@ pub(crate) fn skip(heap: &mut Heap, array: Cell, n: usize) -> Result<Cell, Fault
 /// is every step of a walk but one in `B`, the root just leaves `n` more of
 /// them behind, in place.
 pub(crate) fn skip_owned(heap: &mut Heap, array: Cell, n: usize) -> Result<Cell, Fault> {
-    let r = root(heap, array);
+    let r = root(heap, array)?;
     if heap.unique(array)? && n > 0 && n < head_len(heap, &r) {
         let len = r.len.saturating_sub(n);
         let offset = r.offset.saturating_add(n);
@@ -1109,6 +1160,184 @@ pub(crate) fn skip_owned(heap: &mut Heap, array: Cell, n: usize) -> Result<Cell,
     let made = skip(heap, array, n);
     heap.release(array)?;
     made
+}
+
+/// The first element of `array` and the array of the others, or `None` when it has no
+/// element. The element holds a reference of its own, and is `Nil` unless `head` asks
+/// for it. When `taken`, the caller gives up its reference to `array` where there is an
+/// element.
+#[inline(always)]
+pub(crate) fn uncons(
+    heap: &mut Heap,
+    array: Cell,
+    head: bool,
+    taken: bool,
+) -> Result<Option<(Value, Cell)>, Fault> {
+    let r = root(heap, array)?;
+    let Some(left) = r.len.checked_sub(1) else {
+        return Ok(None);
+    };
+    let items = match view(heap, r.head) {
+        Some(View::Leaf(items)) => items.get(r.offset..).unwrap_or_default(),
+        Some(View::Branch { .. }) | None => &[],
+    };
+    let first = match (items.first(), head) {
+        (_, false) => Value::NIL,
+        (Some(first), true) => Value::from_bits(*first),
+        (None, true) => first(heap, array),
+    };
+    // Only the place in the head moves along, which is every step but one in `B`.
+    let near = items.len() > 1;
+    let alone = taken && heap.unique(array)?;
+    heap.own(first)?;
+    if alone && near {
+        let offset = r.offset.saturating_add(1);
+        if let [l, _, o, ..] = heap.data_mut(array) {
+            *l = left as u64;
+            *o = offset as u64;
+        }
+        return Ok(Some((first, array)));
+    }
+    let cut = match skip(heap, array, 1) {
+        Ok(cut) => cut,
+        Err(why) => {
+            release(heap, first)?;
+            return Err(why);
+        }
+    };
+    if taken {
+        heap.release(array)?;
+    }
+    Ok(Some((first, cut)))
+}
+
+/// Whether an array of `has` elements has the `length`.
+#[inline(always)]
+pub(crate) fn fits(has: u64, length: Length) -> bool {
+    let len = u64::from(length.len);
+    has == len || (length.more && has > len)
+}
+
+/// How many elements the tree that `v` is has, or `None` when `v` is no tree.
+#[inline(always)]
+pub(crate) fn tree_len(heap: &Heap, v: Value) -> Option<u64> {
+    let [len] = heap.chunk(v.as_cell()?, Kind::ArrayRoot)?;
+    Some(*len)
+}
+
+/// What [`split`] found.
+pub(crate) enum Found {
+    /// The array has another length.
+    Miss,
+    /// The elements, which are in the buffer.
+    All,
+    /// An array that has the length, and whose elements are not all in its first leaf.
+    Apart(Root),
+    /// A range that has the length, and where it starts.
+    Range(i64),
+    /// No array.
+    Other,
+}
+
+/// Put the elements of the array that `v` is from `split.from` on in `out`, as many as
+/// there is room for, when it has a length that `split` asks for and they are all in its
+/// first leaf. No reference is added.
+#[inline(always)]
+pub(crate) fn split(heap: &Heap, v: Value, split: Split, out: &mut [Value]) -> Found {
+    let Some(r) = v.as_cell().and_then(|cell| tree(heap, cell)) else {
+        return match ends(heap, v) {
+            Some((start, end)) if fits(range_len(start, end), split.length) => Found::Range(start),
+            Some(_) => Found::Miss,
+            None => Found::Other,
+        };
+    };
+    if !fits(r.len as u64, split.length) {
+        return Found::Miss;
+    }
+    if out.is_empty() {
+        return Found::All;
+    }
+    let head = leaf_items(heap, r.head).get(r.offset..).unwrap_or_default();
+    let items = if head.is_empty() && r.tree.as_cell().is_none() {
+        leaf_items(heap, r.tail)
+    } else {
+        head
+    };
+    let items = items.get(split.from as usize..);
+    match items.and_then(|items| items.get(..out.len())) {
+        Some(items) => {
+            for (v, word) in out.iter_mut().zip(items) {
+                *v = Value::from_bits(*word);
+            }
+            Found::All
+        }
+        None => Found::Apart(r),
+    }
+}
+
+/// Put the elements of the tree `r` from `from` on in `out`, as many as there is room
+/// for, with no reference added. Gives how many it found, which is fewer only in a tree
+/// whose totals are wrong.
+#[inline(never)]
+pub(crate) fn run(heap: &Heap, r: &Root, from: usize, out: &mut [Value]) -> usize {
+    let head = leaf_items(heap, r.head).get(r.offset..).unwrap_or_default();
+    let in_tree = view_here(heap, r.tree).map_or(0, |n| n.len());
+    let (mut at, mut left) = (from, out);
+    let mut found = 0usize;
+    while !left.is_empty() {
+        let items = match at.checked_sub(head.len()) {
+            None => head.get(at..),
+            Some(past) => match past.checked_sub(in_tree) {
+                None => leaf_from(heap, r.tree, past),
+                Some(in_tail) => leaf_items(heap, r.tail).get(in_tail..),
+            },
+        };
+        let items = items.unwrap_or_default();
+        let n = items.len().min(left.len());
+        if n == 0 {
+            break;
+        }
+        let (now, rest) = left.split_at_mut_checked(n).unwrap_or_default();
+        for (v, word) in now.iter_mut().zip(items) {
+            *v = Value::from_bits(*word);
+        }
+        (at, left, found) = (at.saturating_add(n), rest, found.saturating_add(n));
+    }
+    found
+}
+
+/// The items of the leaf `v`, which are none when it is no leaf.
+#[inline(always)]
+fn leaf_items(heap: &Heap, v: Value) -> &[u64] {
+    match v.as_cell() {
+        Some(cell) => match heap.is_with_data(cell, Kind::ArrayLeaf) {
+            (true, items) => items,
+            (false, _) => &[],
+        },
+        None => &[],
+    }
+}
+
+/// The items from `i` on of the leaf under the node `n` that element `i` of it is in.
+#[inline(always)]
+fn leaf_from(heap: &Heap, mut n: Value, mut i: usize) -> Option<&[u64]> {
+    loop {
+        let v = view_here(heap, n)?;
+        match v {
+            View::Leaf(items) => return items.get(i..),
+            View::Branch { shift, sizes, .. } => {
+                let slot = size_slot(sizes, i, shift)?;
+                i = slot.within;
+                n = v.slot(slot.child)?;
+            }
+        }
+    }
+}
+
+/// The first element of `array`, with no reference added.
+#[inline(never)]
+fn first(heap: &Heap, array: Cell) -> Value {
+    get(heap, array, 0).unwrap_or(Value::NIL)
 }
 
 /// The tree's leftmost leaf, borrowed, or `None` when there is no tree.
@@ -1195,8 +1424,8 @@ fn tree_drop(heap: &mut Heap, n: Value, m: usize) -> Result<Value, Fault> {
 // Out of line for the interpreter's loop, as [`slice`] is.
 #[inline(never)]
 pub(crate) fn concat(heap: &mut Heap, l: Cell, r: Cell) -> Result<Cell, Fault> {
-    let lr = root(heap, l);
-    let rr = root(heap, r);
+    let lr = root(heap, l)?;
+    let rr = root(heap, r)?;
     if lr.len == 0 {
         heap.share(r)?;
         return Ok(r);

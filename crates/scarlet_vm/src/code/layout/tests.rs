@@ -98,7 +98,7 @@ fn the_misses_behind_a_hit_move_together() {
         // The inner miss, and then the outer.
         of::constant(1),
         of::jump(2),
-        of::append(1, 0, 0),
+        of::push(1, 0, 0),
         of::ret(1),
     ];
     assert_eq!(
@@ -110,7 +110,7 @@ fn the_misses_behind_a_hit_move_together() {
             "Ret 1",
             "Const 1",
             "Jump -> 3",
-            "ArrayAppend 1",
+            "ArrayPush 1",
             "Jump -> 3",
         ]
     );
@@ -342,6 +342,7 @@ fn copy_of(body: &Body) -> Body {
             sets: body.lists.sets.clone(),
             tables: body.lists.tables.clone(),
             places: body.lists.places.clone(),
+            splits: body.lists.splits.clone(),
         },
         labels: body.labels.clone(),
         regs: body.regs.clone(),

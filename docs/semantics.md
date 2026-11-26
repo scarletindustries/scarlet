@@ -80,6 +80,8 @@ None of them changes an array anything else can see. `xs` after `ys = array::put
 
 A fallback that gives `xs` back is no such read. `match array::set(xs, i, x) { Ok(ys) -> ys  Err(Nil) -> xs }`, `array::set(xs, i, x) or xs` and `array::put(xs, i, x)` are the same write, and each is in place when nothing else holds the array, because the fallback runs only when nothing was written. It is the same when the `Result` has a name that nothing but the `match` straight after it reads. A `Result` that is kept, or passed to a function such as `result::then`, is made before anything looks at it, and what reads `xs` after that keeps the array.
 
+`[h, ..t]` takes over an array that nothing else holds, and does not copy it whole. It is so behind a guard that does not read `t`, and when the array was a part of a tuple that the match took apart. A guard that reads `t` has it cut off before it runs. Where a later arm reads the array as well, the array is still held then, and cutting it off makes a few new cells and shares the rest. `[x, ..xs]` and `[..xs, x]` add to an array in the same way.
+
 A `match` on `xs[i]`, on a slice, on `array::set` or on `map::get`, or an `or` after one, makes no `Option` and no `Result`, unless an arm has a name for the whole of it. One that nothing reads, such as `_ = array::set(xs, i, x)`, is not made either, and the array is not written. The default of an `or` runs only when there is nothing.
 
 ## Matches
@@ -87,6 +89,7 @@ A `match` on `xs[i]`, on a slice, on `array::set` or on `map::get`, or an `or` a
 **Built: arms are tried in the order written.** The first arm whose pattern fits, and whose guard says `True`, is the one that runs. What the compiler asks of the value first is its own business, because asking cannot be seen. What can be seen keeps its order:
 
 - A guard runs once its whole pattern has fitted, at most once for each way its pattern can fit, and before anything of a later arm runs.
+- What an arm's names are for is read before its guard runs, and what nothing in the match reads after that is given up before the guard runs too. The one thing that waits for the guard is the tail of `[h, ..t]`, when the guard does not read it and one of the next sixteen arms reads the array. Taking a tail is taking over the array, and a guard that fails leaves the array to the arms behind it.
 - An or-pattern that binds names tries its alternatives in the order written, and each one with the rest of the pattern and the guard. In `(x, _) | (_, x) if x > 5`, the guard may run twice. An or-pattern that binds none goes on with the first alternative that fits, and the guard runs once.
 - The size of a segment in a `<<>>` pattern is an expression. It runs when the segments in front of it have fitted, and what is behind it in its arm is asked after it.
 

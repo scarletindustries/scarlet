@@ -1542,6 +1542,16 @@ impl Heap {
         }
     }
 
+    /// The first `N` words of `cell` after its header, when it is a cell of `kind` in
+    /// the arena and has as many.
+    #[inline(always)]
+    pub(crate) fn chunk<const N: usize>(&self, cell: Cell, kind: Kind) -> Option<&[u64; N]> {
+        let onward = self.arena.get(cell.index().at()..)?;
+        let (h, words) = onward.split_first()?;
+        let fits = class(*h).is(kind) && size(*h) > N;
+        fits.then(|| words.first_chunk()).flatten()
+    }
+
     /// Whether `cell` has one holder, who may then change it in place.
     /// Asking about a freed cell is [`DeadCell`].
     #[inline]

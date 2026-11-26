@@ -34,9 +34,9 @@
 //! ## The constant pool is already final
 //!
 //! `lower` never interns. Every `Atom::Const` names a [`ConstId`] read from
-//! the node. Even integers no source literal writes, like an array pattern's
-//! length or a `<<>>` walk's bit cursor, are pooled when the typed IR is made,
-//! so the pool is already final when `lower` runs.
+//! the node. Even integers no source literal writes, like a `<<>>` walk's bit
+//! cursor, are pooled when the typed IR is made, so the pool is already final
+//! when `lower` runs.
 
 use super::spine::Frame;
 use super::{
@@ -123,6 +123,8 @@ enum Scrut {
         local: LocalId,
         /// Whether nothing but the match reads it.
         alone: bool,
+        /// The binding that it is of, when it is a binding's.
+        name: Option<BindingId>,
     },
     /// The value of a probe, which is not made where the match need not have it.
     Probe(Asked),
@@ -422,6 +424,7 @@ impl<'a> Lower<'a> {
             None => Scrut::Local {
                 local: self.operand(e)?,
                 alone,
+                name: named_by(e),
             },
         })
     }
@@ -810,6 +813,18 @@ fn sides(e: &TypedExpr) -> Option<(&TypedExpr, &TypedExpr, bool)> {
     }
     if let TypedExpr::Or { lhs, rhs, .. } = e {
         return Some((lhs, rhs, false));
+    }
+    None
+}
+
+/// The binding that `e` is, when it is one of this function's.
+fn named_by(e: &TypedExpr) -> Option<BindingId> {
+    if let TypedExpr::Var {
+        place: ValueRef::Local(b),
+        ..
+    } = e
+    {
+        return Some(*b);
     }
     None
 }

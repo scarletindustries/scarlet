@@ -10,7 +10,7 @@ use scarlet_ir::core_ir::FuncIdx;
 use scarlet_ir::tivec::TiVec;
 
 use super::ins::{
-    Assign, Ins, Label, Lists, Makes, Places, Role, Src, Table, Taken, Unplaced, VReg,
+    Assign, Ins, Label, Lists, Makes, Places, Role, SplitWide, Src, Table, Taken, Unplaced, VReg,
 };
 use super::moves::{Body, Fitted};
 use super::{BlockId, Entry, EntryPc, Op, Pc, Reg, Room};
@@ -214,6 +214,7 @@ impl Out<'_, '_> {
             sets: position(self.lists.sets.len())?,
             tables: position(self.lists.tables.len())?,
             places: position(self.lists.places.len())?,
+            splits: position(self.lists.splits.len())?,
         };
         let stop = |why| unplaced(at.funcs, why);
         for list in &body.lists.regs {
@@ -247,6 +248,15 @@ impl Out<'_, '_> {
             let places = list.iter().map(|(n, to)| Ok((*n, at.label(*to)?)));
             let places: Result<Box<[_]>, _> = places.collect();
             self.lists.places.push(places.map_err(stop)?);
+        }
+        for list in &body.lists.splits {
+            let elements = list.elements.iter();
+            let elements = elements.map(|hit| super::ins::Place::place(*hit, &at));
+            let elements: Result<Box<[_]>, _> = elements.collect();
+            self.lists.splits.push(SplitWide {
+                split: list.split,
+                elements: elements.map_err(stop)?,
+            });
         }
         let each = self.extra.audits_each();
         let audit = each.then_some(Ins::Audit);
@@ -333,6 +343,7 @@ struct At<'a> {
     sets: u32,
     tables: u32,
     places: u32,
+    splits: u32,
 }
 
 impl Places for At<'_> {
@@ -395,6 +406,10 @@ impl Places for At<'_> {
 
     fn place_list(&self, i: u32) -> Result<u32, Unplaced> {
         list(self.body.lists.places.get(i as usize), self.places, i)
+    }
+
+    fn split_list(&self, i: u32) -> Result<u32, Unplaced> {
+        list(self.body.lists.splits.get(i as usize), self.splits, i)
     }
 }
 

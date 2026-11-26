@@ -50,7 +50,7 @@ fn shown(body: &Body) -> Vec<String> {
 /// What a tail call of a function of `params` parameters becomes, where value
 /// `v` is in register `v + 2`. Every value may hold a cell.
 fn tail_call(params: u32, values: u32, step: Step) -> Body {
-    let made = (params..values).map(|v| of::append(v, 0, 0).into());
+    let made = (params..values).map(|v| of::push(v, 0, 0).into());
     let steps: Vec<Step> = made.chain([step]).collect();
     let f = Assigned {
         steps,
@@ -190,10 +190,7 @@ fn only_a_register_that_may_hold_a_cell_is_given_up() {
     assert_eq!(unused(of::constant(2), enter()), ["Enter"]);
     assert_eq!(unused(of::add(2, 0, 1), again()), ["Jump -> 0"]);
     assert_eq!(unused(of::add(2, 0, 1), enter()), ["Drop 4", "Enter"]);
-    assert_eq!(
-        unused(of::append(2, 0, 1), again()),
-        ["Drop 4", "Jump -> 0"]
-    );
+    assert_eq!(unused(of::push(2, 0, 1), again()), ["Drop 4", "Jump -> 0"]);
     // It stays there too when the function can leave for another, which gives
     // it up then: what a turn left would be where that one does not look.
     let both = |first: Step, second: Step| {
@@ -225,7 +222,7 @@ fn only_a_register_that_may_hold_a_cell_is_given_up() {
         ];
         shown(steps, &[3, 4, 6]).split_off(6)
     };
-    let (cell, none) = (of::append(2, 0, 1), of::constant(2));
+    let (cell, none) = (of::push(2, 0, 1), of::constant(2));
     assert_eq!(meet(none, none), ["Jump -> 0"]);
     assert_eq!(meet(cell, none), ["Drop 4", "Jump -> 0"]);
     assert_eq!(meet(none, cell), ["Drop 4", "Jump -> 0"]);
@@ -297,7 +294,7 @@ fn the_way_out_of_a_loop_gives_up_what_its_turns_left() {
             of::unless(1, 1).into(),
             of::add(2, 0, 1).into(),
             of::again(&[0, 1]),
-            of::append(3, 0, 1).into(),
+            of::push(3, 0, 1).into(),
             of::add(4, 0, 1).into(),
             of::unless(3, 2).into(),
             of::again(&[0, 1]),
@@ -564,7 +561,7 @@ fn a_drop_of_what_is_no_cell_is_left_out() {
         let ins = vec![of::unless(1, 0), ins, of::drop(2), of::drop(0), of::halt(1)];
         shown(&expanded(draft(3, 2, ins, &[3])).expect("it fits"))
     };
-    let kept = dropped(of::append(2, 1, 1));
+    let kept = dropped(of::push(2, 1, 1));
     assert_eq!(kept[0], "JumpIfFalse 3 -> 3");
     assert!(kept[2].starts_with("Drop 4"), "{kept:?}");
     assert_eq!(dropped(of::add(2, 1, 1))[2], "Drop 4");
@@ -1122,12 +1119,12 @@ fn the_run_over_registers_finds_what_is_wrong() {
             srcs[1] = srcs[0];
         }
     }));
-    let twice = || vec![of::append(2, 0, 1).into(), of::enter(3, &[2, 2])];
+    let twice = || vec![of::push(2, 0, 1).into(), of::enter(3, &[2, 2])];
     assert!(wrong(twice(), Op::Move, |ins| {
         if let Ins::Move { src, .. } = ins {
             src.moved = true;
         }
     }));
-    let left = || vec![of::append(2, 0, 1).into(), of::enter(3, &[0])];
+    let left = || vec![of::push(2, 0, 1).into(), of::enter(3, &[0])];
     assert!(wrong(left(), Op::Drop, |ins| *ins = of::mv(0, 0)));
 }

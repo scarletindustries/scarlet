@@ -11,7 +11,7 @@ const WITH: Reg = Reg(FIRST.0 + 3);
 const AWAY: Reg = Reg(FIRST.0 + 4);
 
 /// A function that does `ins` and then stops, where it says whether that jumped.
-fn asks(ins: Ins<Reg>) -> &'static Code {
+pub(super) fn asks(ins: Ins<Reg>) -> &'static Code {
     let hit = Ins::Bad { why: WhyId(0) };
     let miss = Ins::Bad { why: WhyId(9) };
     function_that(ReadsClosure::Nothing, 0, 20, vec![ins, hit, miss])
@@ -19,12 +19,12 @@ fn asks(ins: Ins<Reg>) -> &'static Code {
 
 const MISS: u32 = 2;
 
-fn miss() -> Pc {
+pub(super) fn miss() -> Pc {
     pc(MISS)
 }
 
 /// Whether a run of [`asks`] found something.
-fn found(stop: &Stop) -> bool {
+pub(super) fn found(stop: &Stop) -> bool {
     if *stop == Stop::broken(Broken::NoArm) {
         return true;
     }
@@ -32,11 +32,11 @@ fn found(stop: &Stop) -> bool {
     false
 }
 
-fn small(n: i64) -> Value {
+pub(super) fn small(n: i64) -> Value {
     Value::int(n).expect("small")
 }
 
-fn a_cell(heap: &mut Heap, n: u64) -> Value {
+pub(super) fn a_cell(heap: &mut Heap, n: u64) -> Value {
     Value::cell(heap.make(Kind::Binary, &[n; 12]).expect("room"))
 }
 
@@ -45,7 +45,7 @@ fn big(heap: &mut Heap, n: &BigInt) -> Value {
 }
 
 /// The registers, by what each is to hold. Any other holds Nil.
-fn registers(held: &[(Reg, Value)]) -> Vec<Value> {
+pub(super) fn registers(held: &[(Reg, Value)]) -> Vec<Value> {
     let mut all = vec![Value::NIL; WINDOW];
     for (reg, v) in held {
         all[usize::from(reg.0)] = *v;
@@ -54,12 +54,18 @@ fn registers(held: &[(Reg, Value)]) -> Vec<Value> {
 }
 
 /// Every reference there is, from the registers and the globals, is counted.
-fn counted(m: &Machine<'_, '_>, what: &str) {
+pub(super) fn counted(m: &Machine<'_, '_>, what: &str) {
     assert_eq!(check(&m.stack, &m.rest, Value::NIL), Ok(()), "{what}");
 }
 
 /// The registers of the frame but `dst` hold `want`, with nothing in `gone`.
-fn rest_is(m: &Machine<'_, '_>, want: &[Value], dst: Option<Reg>, gone: &[Reg], what: &str) {
+pub(super) fn rest_is(
+    m: &Machine<'_, '_>,
+    want: &[Value],
+    dst: Option<Reg>,
+    gone: &[Reg],
+    what: &str,
+) {
     for (i, v) in want.iter().enumerate().skip(usize::from(FIRST.0)) {
         if dst.is_some_and(|dst| usize::from(dst.0) == i) {
             continue;
@@ -70,12 +76,12 @@ fn rest_is(m: &Machine<'_, '_>, want: &[Value], dst: Option<Reg>, gone: &[Reg], 
     }
 }
 
-fn in_register(m: &Machine<'_, '_>, r: Reg) -> Value {
+pub(super) fn in_register(m: &Machine<'_, '_>, r: Reg) -> Value {
     m.stack[usize::from(r.0)]
 }
 
 /// Give up everything the test holds, after which the heap is empty.
-fn all_given_up(m: &mut Machine<'_, '_>, what: &str) {
+pub(super) fn all_given_up(m: &mut Machine<'_, '_>, what: &str) {
     for v in std::mem::take(&mut m.stack) {
         m.rest.release(v).expect("live");
     }
@@ -87,13 +93,13 @@ fn all_given_up(m: &mut Machine<'_, '_>, what: &str) {
 
 /// What an array is made of.
 #[derive(Debug, Clone, Copy)]
-enum Of {
+pub(super) enum Of {
     /// Numbers and cells by turns.
     Both(usize),
     Range(i64, i64),
 }
 
-const ARRAYS: [Of; 13] = [
+pub(super) const ARRAYS: [Of; 13] = [
     Of::Both(0),
     Of::Both(1),
     Of::Both(2),
@@ -110,7 +116,7 @@ const ARRAYS: [Of; 13] = [
 ];
 
 /// The array, and each of its elements, as a word it holds or the number it is.
-fn array_of_kind(heap: &mut Heap, of: Of) -> (Value, Vec<Result<Value, i64>>) {
+pub(super) fn array_of_kind(heap: &mut Heap, of: Of) -> (Value, Vec<Result<Value, i64>>) {
     match of {
         Of::Both(n) => {
             let items: Vec<Value> = (0..n as u64)
@@ -133,7 +139,7 @@ fn array_of_kind(heap: &mut Heap, of: Of) -> (Value, Vec<Result<Value, i64>>) {
 }
 
 /// Whether `v` is the element.
-fn is_element(m: &Machine<'_, '_>, v: Value, want: &Result<Value, i64>) -> bool {
+pub(super) fn is_element(m: &Machine<'_, '_>, v: Value, want: &Result<Value, i64>) -> bool {
     match want {
         Ok(word) => word.bits() == v.bits(),
         Err(n) => match v.view() {
@@ -145,7 +151,7 @@ fn is_element(m: &Machine<'_, '_>, v: Value, want: &Result<Value, i64>) -> bool 
 }
 
 /// Every element of the array `v`.
-fn elements(m: &mut Machine<'_, '_>, v: Value) -> Vec<Value> {
+pub(super) fn elements(m: &mut Machine<'_, '_>, v: Value) -> Vec<Value> {
     let s = m.rest.seq(v).expect("an array");
     let n = usize::try_from(s.len(&m.rest.heap)).expect("short");
     (0..n)
@@ -153,7 +159,7 @@ fn elements(m: &mut Machine<'_, '_>, v: Value) -> Vec<Value> {
         .collect()
 }
 
-fn is_array(m: &mut Machine<'_, '_>, v: Value, want: &[Result<Value, i64>], what: &str) {
+pub(super) fn is_array(m: &mut Machine<'_, '_>, v: Value, want: &[Result<Value, i64>], what: &str) {
     let got = elements(m, v);
     assert_eq!(got.len(), want.len(), "{what}");
     for (got, want) in got.iter().zip(want) {

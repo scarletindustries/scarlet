@@ -1,6 +1,9 @@
 //! Functions made at random, for the tests of the passes.
 
-use super::super::ins::{Ins, IntTable, Label, Lists, PlaceList, Src, Table, VReg};
+use super::super::ins::{
+    Arg, HitList, Ins, IntTable, Label, Length, Lists, MaybeHit, PlaceList, Split, SplitWide, Src,
+    Table, VReg,
+};
 use super::super::translate::{Draft, Miss, Step};
 use super::{draft, of};
 
@@ -90,7 +93,7 @@ impl Maker {
                 }
                 5 => {
                     let v = self.value();
-                    self.push(of::append(v, a, b));
+                    self.push(of::push(v, a, b));
                     scope.push(v);
                 }
                 6 => {
@@ -248,14 +251,41 @@ impl Maker {
             let i = theirs + self.random.below(scope.len() - theirs);
             dying.push((scope.remove(i), self.random.below(3)));
         }
-        let found = self.value();
         let joined = self.value();
         let (miss, after) = (self.label(), self.label());
-        let read = self.random.below(3) != 0;
-        let ins = match self.random.below(3) {
-            0 => of::write(found, operands, miss),
-            1 => of::find(found, [operands[0], operands[1]], miss),
-            _ => of::get(read.then_some(found), [operands[0], operands[1]], miss),
+        let one = |random: &mut Random, numbers: &mut Vec<u32>| {
+            (random.below(3) != 0).then(|| numbers.pop().expect("enough numbers"))
+        };
+        let mut found = Vec::new();
+        let ins = match self.random.below(6) {
+            0 | 1 => {
+                let v = self.value();
+                found.push(v);
+                match self.random.below(2) {
+                    0 => of::write(v, operands, miss),
+                    _ => of::find(v, [operands[0], operands[1]], miss),
+                }
+            }
+            2 => {
+                let v = one(&mut self.random, &mut self.numbers);
+                found.extend(v);
+                of::get(v, [operands[0], operands[1]], miss)
+            }
+            3 => {
+                let head = one(&mut self.random, &mut self.numbers);
+                let tail = self.value();
+                found.extend(head);
+                found.push(tail);
+                of::uncons(head, tail, operands[0], miss)
+            }
+            _ => {
+                let n = self.random.below(7);
+                let all = (0..n).map(|_| one(&mut self.random, &mut self.numbers));
+                let all: Vec<Option<u32>> = all.collect();
+                let tail = one(&mut self.random, &mut self.numbers);
+                found.extend(all.iter().chain([&tail]).copied().flatten());
+                self.split(&all, tail, operands[0], miss)
+            }
         };
         self.push(ins);
         for way in 0..2 {
@@ -269,8 +299,8 @@ impl Maker {
             }
             let outer = inner.len();
             inner.extend(&own);
-            if way == 0 && read {
-                inner.push(found);
+            if way == 0 {
+                inner.extend(&found);
             }
             let n = self.random.below(4);
             self.steps(n, depth + 1, &mut inner, outer);
@@ -286,6 +316,29 @@ impl Maker {
         }
         self.place(after);
         scope.push(joined);
+    }
+
+    /// An array that is split, in the form that has room.
+    fn split(&mut self, all: &[Option<u32>], tail: Option<u32>, src: u32, miss: u32) -> Ins<VReg> {
+        if all.len() <= 4 {
+            return of::split(all, tail, src, miss);
+        }
+        let hit = |v: &Option<u32>| MaybeHit::new(v.map(VReg));
+        let length = Length {
+            len: 9,
+            more: tail.is_some(),
+        };
+        self.lists.splits.push(SplitWide {
+            split: Split { length, from: 2 },
+            elements: all.iter().map(hit).collect(),
+        });
+        let last = u32::try_from(self.lists.splits.len() - 1).expect("few");
+        Ins::ArraySplitWide {
+            elements: HitList(last),
+            tail: hit(&tail),
+            src: Arg::shared(VReg(src)),
+            miss: Label(miss),
+        }
     }
 
     /// A write that gives the array back when it misses.

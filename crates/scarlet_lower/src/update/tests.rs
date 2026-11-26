@@ -352,7 +352,6 @@ fn a_pattern_that_takes_the_rest_is_not_brief() {
     let array = |prefix: Vec<TypedPat>, rest: PatRest| TypedPat::Array {
         ty: TY,
         elem_ty: TY,
-        len: ConstId(0),
         prefix,
         rest,
     };

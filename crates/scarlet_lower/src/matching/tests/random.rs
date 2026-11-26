@@ -40,6 +40,8 @@ pub(super) struct Kind {
     pub(super) sizes: usize,
     /// One in this many matches is on a probe.
     pub(super) probes: usize,
+    /// One in this many types is an array, beside those that are in any case.
+    pub(super) arrays: usize,
 }
 
 /// Types such as a probe's value is of: the first constructor holds something, and the
@@ -265,6 +267,9 @@ impl Make<'_> {
     }
 
     fn ty(&mut self, deep: usize) -> Ty {
+        if deep > 0 && self.dice.one_in(self.kind.arrays) {
+            return Ty::Array(Box::new(self.ty(deep - 1)));
+        }
         match self.dice.below(if deep == 0 { 7 } else { 14 }) {
             0 => Ty::Int,
             1 => Ty::Float,
@@ -461,13 +466,14 @@ impl Make<'_> {
                 elems: elems.iter().map(|t| self.pat(t, deep - 1, names)).collect(),
             },
             Ty::Array(elem) => {
-                let n = self.dice.below(4);
+                // Sometimes more than are read at once.
+                let most = *self.dice.pick(&[4, 4, 4, 10]);
+                let n = self.dice.below(most);
                 let prefix = (0..n).map(|_| self.pat(elem, deep - 1, names)).collect();
                 let rest = self.rest(ty, names);
                 TypedPat::Array {
                     ty: rty,
                     elem_ty: self.rty(elem),
-                    len: self.constant(Const::Int(i64::try_from(n).unwrap())),
                     prefix,
                     rest,
                 }

@@ -120,10 +120,6 @@ pub enum PrimOp {
     ArrayConcat,
     /// The length of an array.
     ArrayLen,
-    /// Element `n` of an array a pattern has already proved long enough.
-    ArrayElem(u16),
-    /// An array without its first `n` elements. Args: `xs`, `n`.
-    ArrayDrop,
 
     // --- Binaries ---
     /// `<<v:size(b)>>`: the low `b` bits of Int `v`. Args: `v`, `b`.

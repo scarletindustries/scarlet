@@ -222,8 +222,21 @@ impl Walk<'_> {
                     let want = match op {
                         ProbeOp::ArrayGet | ProbeOp::MapGet => 2,
                         ProbeOp::ArraySlice | ProbeOp::ArraySet => 3,
+                        ProbeOp::ArrayUncons | ProbeOp::ArraySplit { .. } => 1,
                     };
-                    if args.len() != want || binds.len() != 1 {
+                    let finds = match op {
+                        ProbeOp::ArrayUncons => binds.len() == 2,
+                        ProbeOp::ArraySplit { len, more, from } => {
+                            let found = u32::try_from(binds.len()).unwrap();
+                            let found = found.checked_sub(u32::from(*more));
+                            found.is_some_and(|found| from + found <= *len)
+                        }
+                        ProbeOp::ArrayGet
+                        | ProbeOp::ArraySlice
+                        | ProbeOp::ArraySet
+                        | ProbeOp::MapGet => binds.len() == 1,
+                    };
+                    if args.len() != want || !finds {
                         return Err(format!("a probe of {args:?} that finds {binds:?}"));
                     }
                     let mut found = at.clone();

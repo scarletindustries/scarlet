@@ -15,15 +15,15 @@
 use std::collections::HashMap;
 
 use crate::matching::{
-    self, Branch, Fail, Given, Goal, Key, Leaf, Node, Part, Place, Places, ROOT, Segment, Source,
-    Tree, fixed,
+    self, Branch, Cut, Fail, Given, Goal, Key, Leaf, Length, Node, On, Part, Piece, Place, Places,
+    ROOT, Segment, Source, Tree, fixed,
 };
 use crate::program::InternalLinkError;
 use crate::spine::Frame;
 use crate::typed_ir::{
     RTy, TypedArm, TypedBinPatSeg, TypedBind, TypedExpr, TypedPat, each_read, pat_binds,
 };
-use crate::{Atom, Cases, CoreBind, CoreExpr, JoinId, LocalId, PrimOp, VariantRef};
+use crate::{Atom, Cases, CoreBind, CoreExpr, JoinId, LocalId, PrimOp, ProbeOp, VariantRef};
 
 use super::probes::{Asked, Made};
 use super::{Dest, Lower, R, Scrut, SpinePos};
@@ -35,10 +35,19 @@ pub(super) fn lower(
     arms: &[TypedArm],
     dest: Dest,
 ) -> R<CoreExpr> {
-    let (ty, alone) = match &scrut {
-        Scrut::Local { local, alone } => (lo.bind_ty(*local)?, *alone),
-        Scrut::Probe(asked) => (asked.ty, true),
+    let on = match &scrut {
+        Scrut::Local { local, alone, name } => On {
+            ty: lo.bind_ty(*local)?,
+            alone: *alone,
+            name: *name,
+        },
+        Scrut::Probe(asked) => On {
+            ty: asked.ty,
+            alone: true,
+            name: None,
+        },
     };
+    let ty = on.ty;
     let given = Given {
         shapes: lo.around.shapes,
         consts: lo.around.consts,
@@ -52,7 +61,7 @@ pub(super) fn lower(
         leaves,
         rests,
         anys,
-    } = matching::tree(&given, ty, alone, arms)?;
+    } = matching::tree(&given, on, arms)?;
     let (local, probe) = match scrut {
         Scrut::Local { local, .. } => (Some(local), None),
         Scrut::Probe(asked) => match asked.outcomes(&root) {
@@ -280,7 +289,7 @@ impl<'p> Write<'_, '_, 'p> {
             return Ok(local);
         }
         let nowhere = InternalLinkError::NoPlace(p.index());
-        let (source, ty) = self.places.get(p).ok_or(nowhere.clone())?;
+        let (source, ty) = self.known(p)?;
         if let Some(whole) = self.whole {
             let local = match source {
                 Source::Given if p == ROOT => Some(self.made(whole, ty)?),
@@ -288,7 +297,7 @@ impl<'p> Write<'_, '_, 'p> {
                     let held = self.part(whole, part)?;
                     Some(held.ok_or(nowhere.clone())?)
                 }
-                Source::Given | Source::Part { .. } => None,
+                Source::Given | Source::Part { .. } | Source::Found { .. } => None,
             };
             if let Some(local) = local {
                 self.give(p, local)?;
@@ -303,11 +312,6 @@ impl<'p> Write<'_, '_, 'p> {
             Part::Field { index, .. } => Atom::prim(PrimOp::Field(index), vec![whole]),
             Part::Element(i) => Atom::prim(PrimOp::TupleField(i), vec![whole]),
             Part::Length => Atom::prim(PrimOp::ArrayLen, vec![whole]),
-            Part::Item(i) => Atom::prim(PrimOp::ArrayElem(i), vec![whole]),
-            Part::After(n) => {
-                let n = self.lo.int_const(n)?;
-                Atom::prim(PrimOp::ArrayDrop, vec![whole, n])
-            }
             Part::Bits => Atom::prim(PrimOp::BinaryBitSize, vec![whole]),
             Part::Start(zero) => Atom::Const(zero),
             Part::From { cursor, total } => {
@@ -384,19 +388,74 @@ impl<'p> Write<'_, '_, 'p> {
         })
     }
 
-    /// Bind each name to where its value is. What an array has behind its first
-    /// elements is cut off after everything else is read, because the cut takes the
-    /// array when nothing reads it any more.
+    /// Bind each name to where its value is.
     fn names(&mut self, binds: &[(TypedBind, Place)]) -> R<()> {
-        for cuts in [false, true] {
-            for (b, p) in binds {
-                if self.places.is_cut(*p) == cuts {
-                    let local = self.place(*p)?;
-                    self.lo.bind(b.id, local)?;
-                }
-            }
+        for (b, p) in binds {
+            let local = self.place(*p)?;
+            self.lo.bind(b.id, local)?;
         }
         Ok(())
+    }
+
+    /// Ask for pieces of an array, and go on with `hit` or with `miss`.
+    fn cut(
+        &mut self,
+        cut: &Cut,
+        hit: impl FnOnce(&mut Self) -> R<CoreExpr>,
+        miss: impl FnOnce(&mut Self) -> R<CoreExpr>,
+    ) -> R<CoreExpr> {
+        for p in &cut.before {
+            self.place(*p)?;
+        }
+        let xs = self.place(cut.on)?;
+        let Length { n, or_more: more } = cut.length;
+        let mut places = cut.elements.clone();
+        let op = if (n, more) == (1, true) {
+            places.resize(1, None);
+            ProbeOp::ArrayUncons
+        } else {
+            ProbeOp::ArraySplit {
+                len: n,
+                more,
+                from: cut.from,
+            }
+        };
+        if more {
+            places.push(cut.tail);
+        }
+        let mut binds = Vec::with_capacity(places.len());
+        let mut found = Vec::new();
+        for p in places {
+            let bind = match p {
+                Some(p) => {
+                    let (_, ty) = self.known(p)?;
+                    let local = self.lo.fresh(ty)?;
+                    found.push((p, local));
+                    Some(CoreBind::new(local, ty))
+                }
+                None => None,
+            };
+            binds.push(bind);
+        }
+        let hit = self.branch(|w| {
+            for (p, local) in found {
+                w.give(p, local)?;
+            }
+            hit(w)
+        })?;
+        let miss = self.branch(miss)?;
+        Ok(CoreExpr::Probe {
+            op,
+            args: vec![xs],
+            binds,
+            hit: Box::new(hit),
+            miss: Box::new(miss),
+        })
+    }
+
+    fn known(&self, p: Place) -> R<(Source, RTy)> {
+        let known = self.places.get(p);
+        Ok(known.ok_or(InternalLinkError::NoPlace(p.index()))?)
     }
 
     /// What is done where nothing fits.
@@ -425,23 +484,10 @@ impl<'p> Write<'_, '_, 'p> {
                 branches,
                 default,
             } => self.switch(*on, branches, default.as_deref()),
-            Node::Long {
-                length,
-                test,
-                yes,
-                no,
-            } => {
-                let length = self.place(*length)?;
-                let n = self.lo.int_const(test.pooled)?;
-                let op = if test.or_more {
-                    PrimOp::IntGe
-                } else {
-                    PrimOp::IntEq
-                };
-                let passes = self.bool(op, length, n)?;
-                let yes = self.branch(|w| w.node(yes))?;
-                let no = self.branch(|w| w.node(no))?;
-                Ok(check(passes, yes, no))
+            Node::Cut { cut, yes, no } => self.cut(cut, |w| w.node(yes), |w| w.node(no)),
+            Node::Measure { length, then } => {
+                self.place(*length)?;
+                self.node(then)
             }
             Node::Within {
                 on,
@@ -531,7 +577,8 @@ impl<'p> Write<'_, '_, 'p> {
                 | Node::Rest(_)
                 | Node::Leaf(_)
                 | Node::Switch { .. }
-                | Node::Long { .. }
+                | Node::Cut { .. }
+                | Node::Measure { .. }
                 | Node::Within { .. }
                 | Node::Segment(_)
                 | Node::Ends { .. }
@@ -547,9 +594,12 @@ impl<'p> Write<'_, '_, 'p> {
             match node {
                 Node::Leaf(leaf) => self.names(&leaf.binds)?,
                 Node::Switch { on: p, .. }
-                | Node::Long { length: p, .. }
-                | Node::Within { on: p, .. } => {
+                | Node::Within { on: p, .. }
+                | Node::Measure { length: p, .. } => {
                     self.place(*p)?;
+                }
+                Node::Cut { cut, .. } => {
+                    self.place(cut.on)?;
                 }
                 Node::Nothing
                 | Node::Rest(_)
@@ -592,9 +642,40 @@ impl<'p> Write<'_, '_, 'p> {
             return self.body(i, &arm.body);
         };
         let holds = self.lo.operand(guard)?;
-        let body = self.branch(|w| w.body(i, &arm.body))?;
+        let body = self.branch(|w| w.tails(&leaf.late, i, &arm.body))?;
         let no = self.fail(leaf.fail)?;
         Ok(check(holds, body, no))
+    }
+
+    /// The body of arm `i`, once the tails in `late` are taken.
+    fn tails(&mut self, late: &[(TypedBind, Place)], i: usize, body: &TypedExpr) -> R<CoreExpr> {
+        let Some(((b, p), late)) = late.split_first() else {
+            return self.body(i, body);
+        };
+        let (
+            Source::Found {
+                of,
+                piece: Piece::Tail(n),
+            },
+            _,
+        ) = self.known(*p)?
+        else {
+            return Err(InternalLinkError::NoPlace(p.index()).into());
+        };
+        let cut = Cut {
+            on: of,
+            before: Vec::new(),
+            length: Length { n, or_more: true },
+            from: 0,
+            elements: Vec::new(),
+            tail: Some(*p),
+        };
+        let hit = |w: &mut Self| {
+            let local = w.place(*p)?;
+            w.lo.bind(b.id, local)?;
+            w.tails(late, i, body)
+        };
+        self.cut(&cut, hit, |_| Ok(CoreExpr::NoArm))
     }
 
     /// The body of arm `i`, where its pattern has matched and its guard held.

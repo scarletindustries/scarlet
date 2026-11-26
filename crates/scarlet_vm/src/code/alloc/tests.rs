@@ -407,7 +407,7 @@ fn fields_go_to_the_registers_they_are_passed_in() {
     );
     // A `Drop` that does nothing does not hold the array past the push.
     let steps = vec![
-        of::append(2, 0, 1).into(),
+        of::push(2, 0, 1).into(),
         of::drop(0).into(),
         of::again(&[2, 1]),
     ];
@@ -586,13 +586,13 @@ fn what_does_nothing_is_left_out() {
     // Not when a hit reads the array too.
     let ins = vec![
         of::write(3, [0, 1, 2], 0),
-        of::append(3, 3, 0),
+        of::push(3, 3, 0),
         of::jump(1),
         of::mv(3, 0),
         of::ret(3),
     ];
     let (kinds, _) = left(draft(4, 3, ins, &[3, 4]));
-    assert_eq!(kinds, ["ArraySet", "ArrayAppend", "Jump", "Move", "Ret"]);
+    assert_eq!(kinds, ["ArraySet", "ArrayPush", "Jump", "Move", "Ret"]);
 }
 
 /// A jump over instructions that were all left out goes too, however many

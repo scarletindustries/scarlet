@@ -652,6 +652,16 @@ pub enum ProbeOp {
     /// An array with another element. Args: `xs`, `i`, `x`. It finds `xs` with `x` at
     /// index `i`, when `xs` has that index.
     ArraySet,
+    /// The first element of an array and the array of the others. Args: `xs`. An
+    /// array with no element has neither.
+    ArrayUncons,
+    /// Some of the elements of an array that has `len` of them, or `len` or more when
+    /// it may have `more`. Args: `xs`. It finds the elements from `from` on, as many
+    /// as there are places for them, none of them past `len`. When it may have more,
+    /// the last place is for the array of what is behind the first `len`.
+    ///
+    /// `[h, ..t]` is [`ProbeOp::ArrayUncons`].
+    ArraySplit { len: u32, more: bool, from: u32 },
     /// What a map has for a key. Args: `m`, `k`. It finds that value.
     MapGet,
 }

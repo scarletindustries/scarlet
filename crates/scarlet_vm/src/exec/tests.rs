@@ -2,8 +2,8 @@ use super::*;
 use crate::OsHost;
 use crate::bigint;
 use crate::code::{
-    Args, BinaryId, EntryPc, Hit, IntTable, Lists, Pc, PlaceList, ReadsClosure, Shares, Table,
-    TextId, Why, WhyId,
+    Args, BinaryId, EntryPc, Hit, HitList, IntTable, Length, Lists, MaybeHit, Pc, PlaceList,
+    ReadsClosure, Shares, Split, SplitWide, Table, TextId, Why, WhyId,
 };
 use crate::frame::FIRST;
 use crate::heap::{AuditFault, Cell, Ctors, Fault, Kind, Numbering};
@@ -14,6 +14,7 @@ use scarlet_ir::core_ir::{FuncIdx, VariantRef};
 use scarlet_ir::intrinsic::Intrinsic;
 use scarlet_ir::tivec::TiVec;
 
+mod arrays;
 mod probes;
 mod update;
 
@@ -1274,13 +1275,11 @@ fn a_move_that_takes_leaves_one_holder_and_one_that_shares_leaves_two() {
         let mut ins = an_array_in_r1().to_vec();
         ins.extend([
             mv(2, 1, moved),
-            Ins::ArrayAppend {
+            Ins::ArrayPush {
                 dst: Dst(r(3)),
-                rest: Arg {
-                    reg: r(2),
-                    moved: true,
-                },
-                back: Shares::new(&[r(0)]).expect("room for one"),
+                src: Arg::moved(r(2)),
+                item: Arg::shared(r(0)),
+                end: End::Back,
             },
             ret(3),
         ]);
@@ -1540,7 +1539,6 @@ fn a_list_of_registers_is_given_up() {
 fn what_an_instruction_takes_leaves_its_register() {
     let (dst, own, to) = (Dst(r(5)), Room(40), EntryPc(START));
     let (whole, value, n) = (Arg::moved(r(0)), Arg::moved(r(2)), Src(r(1)));
-    let back = || Shares::new(&[r(3)]).expect("one");
     let (shares, args) = (crate::code::ShareList(0), crate::code::ArgList(0));
     let (a, b, c) = (Taken(r(0)), Taken(r(2)), Taken(r(3)));
     let all_moved = [whole, value, Arg::moved(r(3))];
@@ -1550,26 +1548,41 @@ fn what_an_instruction_takes_leaves_its_register() {
         Ins::Move { dst, src: whole },
         move_all_of(&[5, 7], &[0, 2]),
         move_all_of(&[5, 7, 8], &[3, 0, 2]),
-        Ins::ArrayDrop { dst, src: whole, n },
-        Ins::ArrayPrepend {
+        Ins::ArrayPush {
             dst,
-            rest: whole,
-            front: back(),
+            src: whole,
+            item: value,
+            end: End::Front,
         },
-        Ins::ArrayPrependWide {
+        Ins::ArrayPush {
             dst,
-            rest: whole,
-            front: shares,
+            src: Arg::shared(r(0)),
+            item: value,
+            end: End::Back,
         },
-        Ins::ArrayAppend {
+        Ins::ArrayExtend {
             dst,
-            rest: whole,
-            back: back(),
+            src: whole,
+            items: shares,
+            end: End::Front,
         },
-        Ins::ArrayAppendWide {
-            dst,
-            rest: whole,
-            back: shares,
+        Ins::ArrayUncons {
+            head: MaybeHit::new(Some(r(7))),
+            tail: Hit(dst.0),
+            src: whole,
+            miss: pc(3),
+        },
+        Ins::ArrayUncons {
+            head: MaybeHit::new(None),
+            tail: Hit(dst.0),
+            src: whole,
+            miss: pc(3),
+        },
+        Ins::ArraySplitWide {
+            elements: HitList(0),
+            tail: MaybeHit::new(Some(r(9))),
+            src: whole,
+            miss: pc(3),
         },
         Ins::ArraySet {
             dst: Hit(dst.0),
@@ -1663,8 +1676,13 @@ fn what_an_instruction_takes_leaves_its_register() {
     let lists = || Lists {
         regs: vec![Box::new([r(3)])],
         args: vec![Box::new(all_moved)],
-        dsts: Vec::new(),
-        sets: Vec::new(),
+        splits: vec![SplitWide {
+            split: Split {
+                length: Length { len: 1, more: true },
+                from: 0,
+            },
+            elements: Box::new([MaybeHit::new(Some(r(7)))]),
+        }],
         ..Lists::default()
     };
     let (mut ran, mut took, mut jumped) = (0, 0, 0);
@@ -1817,10 +1835,11 @@ fn a_range_that_is_taken_leaves_its_register() {
                 start: Src(r(0)),
                 end: Src(r(1)),
             },
-            Ins::ArrayDrop {
-                dst: Dst(r(3)),
+            Ins::ArrayUncons {
+                head: MaybeHit::new(None),
+                tail: Hit(r(3)),
                 src: Arg { reg: r(2), moved },
-                n: Src(r(0)),
+                miss: pc(5),
             },
             Ins::Audit,
             ret(2),

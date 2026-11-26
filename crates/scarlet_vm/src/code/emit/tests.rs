@@ -1,4 +1,7 @@
-use super::super::ins::{ArgList, Assign, AssignList, Callee, OwnEntry, OwnRoom, Shared};
+use super::super::ins::{
+    ArgList, Assign, AssignList, Callee, HitList, Length, MaybeHit, OwnEntry, OwnRoom, Shared,
+    Split, SplitWide,
+};
 use super::super::tests::{SHAPES, a_ctor, body, entries, named, of, program, targets};
 use super::super::{Arg, Args, Code, Dst, Entry, ReadsClosure, load, load_counted};
 use super::*;
@@ -389,6 +392,49 @@ fn each_functions_updates_are_its_own() {
     let lost = Some(Stop::broken(Broken::NoPlace));
     assert_eq!(ran(vec![update(2, &[1, 2])]).err(), lost);
     assert_eq!(ran(vec![update(0, &[3])]).err(), lost);
+}
+
+/// The same of the lists of elements that a pattern finds.
+#[test]
+fn each_functions_splits_are_its_own() {
+    let wide = |list: u32, to: &[u32]| {
+        let mut f = fitted(
+            vec![Ins::ArraySplitWide {
+                elements: HitList(list),
+                tail: MaybeHit::new(None),
+                src: Arg::moved(VReg(0)),
+                miss: Label(0),
+            }],
+            vec![Some(Reg(5)), Some(Reg(1)), Some(Reg(2))],
+        );
+        for v in to {
+            let length = Length {
+                len: 9,
+                more: false,
+            };
+            f.body.lists.splits.push(SplitWide {
+                split: Split { length, from: *v },
+                elements: Box::new([MaybeHit::new(None), MaybeHit::new(Some(VReg(*v)))]),
+            });
+        }
+        f.body.ins.push(of::jump(0));
+        f.body.labels.push(0);
+        f
+    };
+    let placed = ran(vec![wide(1, &[1, 2]), wide(0, &[2, 0])]).expect("it fits");
+    let mut found = Vec::new();
+    for ins in &placed.ins {
+        if let Ins::ArraySplitWide { elements, .. } = ins {
+            let wide = elements.of(&placed.lists).expect("a list");
+            let to = wide.elements.iter().map(|e| e.hit().is_some());
+            found.push((wide.split.from, to.collect::<Vec<_>>()));
+        }
+    }
+    let to = vec![false, true];
+    assert_eq!(found, [(2, to.clone()), (2, to)]);
+    let lost = Some(Stop::broken(Broken::NoPlace));
+    assert_eq!(ran(vec![wide(2, &[1, 2])]).err(), lost);
+    assert_eq!(ran(vec![wide(0, &[3])]).err(), lost);
 }
 
 /// An instruction that names what was given no place is not written.

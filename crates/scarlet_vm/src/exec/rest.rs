@@ -10,10 +10,12 @@ use scarlet_ir::core_ir::{ConstId, FuncIdx, HttpTypes, IoErrors, JsonTypes};
 use scarlet_ir::intrinsic::Intrinsic;
 
 use crate::Stop;
-use crate::array::{self, End, Seq};
+use crate::array::{self, Root, Seq};
 use crate::bigint::{self, Int};
 use crate::binary::{self, Bits};
-use crate::code::{BinaryId, BitsOp, Built, Code, CtorOf, Entry, Pc, PlaceList, Reg, TextId};
+use crate::code::{
+    BinaryId, BitsOp, Built, Code, CtorOf, Entry, Length, MaybeHit, Pc, PlaceList, Reg, TextId,
+};
 use crate::float;
 use crate::frame::WINDOW;
 use crate::heap::{Cell, DeadCell, Fault, Heap, Kind, Shape};
@@ -1491,21 +1493,134 @@ impl<'c> Rest<'c, '_> {
         }
     }
 
-    /// `a` with `items`, in their order, at `end`. The references of `a` and
-    /// of each item pass to the result, so an array nothing else holds can
-    /// change in place.
-    #[inline(never)]
-    pub(super) fn push_all(
+    /// The first element of `s`, which `v` holds, and the array of the others, or
+    /// `None` when it has no element. The element is `Nil` when it is not asked for,
+    /// which is what `head` says. When `taken`, `v`'s reference passes in on a hit, so
+    /// an array nothing else holds can change in place.
+    #[inline(always)]
+    pub(super) fn uncons(
         &mut self,
-        a: crate::heap::Cell,
-        items: &[Value],
-        end: End,
-    ) -> Result<crate::heap::Cell, Stop> {
-        let made = match items {
-            [x] => array::push_owned(&mut self.heap, a, *x, end),
-            _ => array::extend_owned(&mut self.heap, a, items, end),
+        v: Value,
+        head: bool,
+        taken: bool,
+    ) -> Result<Option<(Value, Value)>, Stop> {
+        let s = self.seq(v)?;
+        if let Seq::Tree(a) = s {
+            let found = array::uncons(&mut self.heap, a, head, taken).map_err(fault)?;
+            return Ok(found.map(|(x, left)| (x, Value::cell(left))));
+        }
+        self.uncons_range(s, v, head, taken)
+    }
+
+    /// [`Self::uncons`] of a range.
+    #[inline(never)]
+    fn uncons_range(
+        &mut self,
+        s: Seq,
+        v: Value,
+        head: bool,
+        taken: bool,
+    ) -> Result<Option<(Value, Value)>, Stop> {
+        if s.len(&self.heap) == 0 {
+            return Ok(None);
+        }
+        let left = self.behind(v, 1, false)?;
+        let first = match head {
+            true => match self.element(s, 0) {
+                Ok(first) => first,
+                Err(stop) => return Err(self.give_back([left], stop)),
+            },
+            false => None,
         };
-        made.map_err(fault)
+        if taken {
+            self.release(v)?;
+        }
+        Ok(Some((first.unwrap_or(Value::NIL), left)))
+    }
+
+    /// `stop`, where what holds `values` has not been written yet and never will be.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn give_back(
+        &mut self,
+        values: impl IntoIterator<Item = Value>,
+        stop: Stop,
+    ) -> Stop {
+        for v in values {
+            if let Err(dead) = self.release(v) {
+                return dead.into();
+            }
+        }
+        stop
+    }
+
+    /// The array `v` without its first `n` elements. When `taken`, `v`'s reference
+    /// passes in, even where there is no room for the array.
+    pub(super) fn behind(&mut self, v: Value, n: usize, taken: bool) -> Result<Value, Stop> {
+        let cell = match self.seq(v)? {
+            Seq::Tree(a) if taken => array::skip_owned(&mut self.heap, a, n),
+            Seq::Tree(a) => array::skip(&mut self.heap, a, n),
+            Seq::Range { start, end } => {
+                let n = (n as u64).min(array::range_len(start, end));
+                // `n` is at most `end - start`, so `start + n` is
+                // within `start..=end` and the add is exact.
+                let left = array::range(&mut self.heap, start.wrapping_add_unsigned(n), end);
+                if taken {
+                    self.release(v)?;
+                }
+                left
+            }
+        };
+        Ok(Value::cell(cell.map_err(fault)?))
+    }
+
+    /// How many elements the array `v` has.
+    #[inline(never)]
+    pub(super) fn array_len(&mut self, v: Value) -> Result<Value, Stop> {
+        let n = self.seq(v)?.len(&self.heap);
+        bigint::int(&mut self.heap, n).map_err(fault)
+    }
+
+    /// Whether the array `v` has the `length`.
+    #[inline(never)]
+    pub(super) fn fits(&self, v: Value, length: Length) -> Result<bool, Stop> {
+        Ok(array::fits(self.seq(v)?.len(&self.heap), length))
+    }
+
+    /// Put the elements of the tree `r` from `from` on in `out`, with no reference added.
+    #[inline(always)]
+    pub(super) fn run(&self, r: &Root, from: usize, out: &mut [Value]) -> Result<(), Stop> {
+        let found = array::run(&self.heap, r, from, out);
+        if found < out.len() {
+            let index = from.saturating_add(found);
+            return Err(Stop::broken(Broken::NoArrayElement { index }));
+        }
+        Ok(())
+    }
+
+    /// Put the Ints from `from` on that are `wanted` in `out`, each with a reference of
+    /// its own. They are elements of a range, and so none is past its end.
+    #[inline(never)]
+    pub(super) fn run_of_range(
+        &mut self,
+        from: i64,
+        wanted: &[MaybeHit<Reg>],
+        out: &mut [Value],
+    ) -> Result<(), Stop> {
+        for (i, hit) in wanted.iter().enumerate() {
+            if hit.hit().is_none() {
+                continue;
+            }
+            let made = bigint::int(&mut self.heap, from.wrapping_add_unsigned(i as u64));
+            let made = match made {
+                Ok(made) => made,
+                Err(why) => return Err(self.give_back(out.iter().copied(), fault(why))),
+            };
+            if let Some(v) = out.get_mut(i) {
+                *v = made;
+            }
+        }
+        Ok(())
     }
 
     #[inline]
@@ -1722,13 +1837,6 @@ impl<'c> Rest<'c, '_> {
         let (start, end) = (self.range_end(start)?, self.range_end(end)?);
         let cell = array::range(&mut self.heap, start, end).map_err(fault)?;
         Ok(Value::cell(cell))
-    }
-
-    /// How many elements the array `v` has.
-    #[inline(never)]
-    pub(super) fn array_len(&mut self, v: Value) -> Result<Value, Stop> {
-        let n = self.seq(v)?.len(&self.heap);
-        bigint::int(&mut self.heap, n).map_err(fault)
     }
 
     /// `[..a, ..b]`.

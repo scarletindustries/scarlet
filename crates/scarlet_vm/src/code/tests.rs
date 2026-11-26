@@ -1,6 +1,7 @@
 use super::ins::{Label, MaybeDst, MaybeHit, VReg};
 use super::translate::{Draft, Step, TailTo};
 use super::*;
+use crate::array::End;
 use crate::heap::{Ctor, Numbering};
 use scarlet_ir::core_ir::VariantRef;
 
@@ -148,6 +149,7 @@ pub(super) fn copy_of(d: &Draft) -> Draft {
             sets: d.lists.sets.clone(),
             tables: d.lists.tables.clone(),
             places: d.lists.places.clone(),
+            splits: d.lists.splits.clone(),
         },
         labels: d.labels.clone(),
         values: d.values,
@@ -252,11 +254,46 @@ pub(super) mod of {
         }
     }
 
-    pub(crate) fn append(dst: u32, rest: u32, item: u32) -> Ins<VReg> {
-        Ins::ArrayAppend {
+    pub(crate) fn push(dst: u32, rest: u32, item: u32) -> Ins<VReg> {
+        Ins::ArrayPush {
             dst: Dst(VReg(dst)),
-            rest: Arg::shared(VReg(rest)),
-            back: Shares::new(&[VReg(item)]).expect("room for one"),
+            src: Arg::shared(VReg(rest)),
+            item: Arg::shared(VReg(item)),
+            end: End::Back,
+        }
+    }
+
+    /// The first element of the array in `src` to `head`, when something is to have it,
+    /// and the others to `tail`, or the run continues at `miss`.
+    pub(crate) fn uncons(head: Option<u32>, tail: u32, src: u32, miss: u32) -> Ins<VReg> {
+        Ins::ArrayUncons {
+            head: MaybeHit::new(head.map(VReg)),
+            tail: Hit(VReg(tail)),
+            src: Arg::shared(VReg(src)),
+            miss: Label(miss),
+        }
+    }
+
+    /// Each element of the array in `src` to one of `elements`, and to `tail` what is
+    /// behind them, or the run continues at `miss`. Without a tail it has no more.
+    pub(crate) fn split(
+        elements: &[Option<u32>],
+        tail: Option<u32>,
+        src: u32,
+        miss: u32,
+    ) -> Ins<VReg> {
+        let hit = |v: &Option<u32>| MaybeHit::new(v.map(VReg));
+        let length = Length {
+            len: u32::try_from(elements.len()).expect("a few"),
+            more: tail.is_some(),
+        };
+        let elements: Vec<_> = elements.iter().map(hit).collect();
+        Ins::ArraySplit {
+            elements: Hits::new(&elements).expect("room for a few"),
+            tail: hit(&tail),
+            src: Arg::shared(VReg(src)),
+            split: Near::new(Split { length, from: 0 }).expect("it is small"),
+            miss: Label(miss),
         }
     }
 
@@ -354,7 +391,7 @@ fn a_string_is_in_the_table_once() {
     let code = load(&program(&src), Audit::Never).expect("the program loads");
     let wide = body(&code, named(&code, ".f"))
         .iter()
-        .filter(|i| i.op() == Op::ArrayAppendWide);
+        .filter(|i| i.op() == Op::ArrayExtend);
     assert_eq!(wide.count(), 9, "the literal was made in pieces");
     for n in [0, 150, 299] {
         let name = format!("s{n}");

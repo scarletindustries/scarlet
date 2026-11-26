@@ -21,6 +21,7 @@
 use scarlet_ir::core_ir::{ConstId, FuncIdx, GlobalSlot};
 use scarlet_ir::intrinsic::Intrinsic;
 
+use crate::array::End;
 use crate::heap::{Ctor, Layout};
 use crate::ops::NumOp;
 use crate::value::{Float, SmallInt, Tag, Value};
@@ -29,9 +30,10 @@ mod fields;
 
 pub(crate) use fields::{
     Arg, ArgList, Args, Assign, AssignList, BinaryId, BitsOp, BlockId, Dead, DeadList, Dst,
-    DstList, EntryPc, Hands, Hit, IntTable, Last, Lists, LookList, Looks, MaybeDst, MaybeHit,
-    Names, Newline, Part, Pc, Place, PlaceList, Places, Reg, Role, Room, Sets, ShareList, Shared,
-    Shares, Src, Table, Taken, TextId, Unplaced, VReg, WhyId,
+    DstList, EntryPc, Hands, Hit, HitList, Hits, IntTable, Last, Length, Lists, LookList, Looks,
+    MaybeDst, MaybeHit, Names, Near, Newline, Part, Pc, Place, PlaceList, Places, Reg, Role, Room,
+    Sets, ShareList, Shared, Shares, Split, SplitWide, Src, Table, Taken, TextId, Unplaced, VReg,
+    WhyId,
 };
 pub(super) use fields::{Callee, Label, LastReg, OwnEntry, OwnRoom};
 
@@ -403,19 +405,28 @@ instructions! {
     ArrayWide { dst: Dst<R>, elements: ShareList },
     /// How many elements the array in `src` has.
     ArrayLen { dst: Dst<R>, src: Src<R> },
-    /// Element `index` of the array in `src`, which a pattern has already
-    /// proved it has.
-    ArrayElem { dst: Dst<R>, src: Src<R>, index: u16 },
-    /// The array in `src` without its first `n` elements. When it takes `src`
-    /// it may change the array in place.
-    ArrayDrop { dst: Dst<R>, src: Arg<R>, n: Src<R> },
-    /// `[x, y, ..xs]`, which is the array in `rest` with `front` before it.
-    /// When it takes `rest` it may change the array in place.
-    ArrayPrepend { dst: Dst<R>, rest: Arg<R>, front: Shares<R, 8> },
-    ArrayPrependWide { dst: Dst<R>, rest: Arg<R>, front: ShareList },
-    /// `[..xs, x, y]`, which is the array in `rest` with `back` after it.
-    ArrayAppend { dst: Dst<R>, rest: Arg<R>, back: Shares<R, 8> },
-    ArrayAppendWide { dst: Dst<R>, rest: Arg<R>, back: ShareList },
+    /// `[x, ..xs]` or `[..xs, x]`, which is the array in `src` with `item` at `end`.
+    /// When it takes `src` it may change the array in place.
+    ArrayPush { dst: Dst<R>, src: Arg<R>, item: Arg<R>, end: End },
+    /// The same with each of `items`, in their order.
+    ArrayExtend { dst: Dst<R>, src: Arg<R>, items: ShareList, end: End },
+    /// The first element of the array in `src` and the array of the others. When the
+    /// array has no element the run continues at `miss`, and nothing is written and
+    /// nothing is taken. When it takes `src` it may change the array in place.
+    ArrayUncons { head: MaybeHit<R>, tail: Hit<R>, src: Arg<R>, miss: R::To },
+    /// Continue at `to` unless the array in `src` has the `length`.
+    JumpUnlessLength { src: Src<R>, length: Length, to: R::To },
+    /// Some elements of the array in `src`, which has the length that `split` says, and
+    /// the array of what is behind those that it counts. An array of another length is
+    /// a miss, as for [`Ins::ArrayUncons`].
+    ArraySplit {
+        elements: Hits<R, 4>,
+        tail: MaybeHit<R>,
+        src: Arg<R>,
+        split: Near,
+        miss: R::To,
+    },
+    ArraySplitWide { elements: HitList, tail: MaybeHit<R>, src: Arg<R>, miss: R::To },
     /// `[..a, ..b]`.
     ArrayConcat { dst: Dst<R>, a: Src<R>, b: Src<R> },
     /// Element `index` of the array in `src`. When the array has no such index the run
@@ -625,15 +636,18 @@ impl<R: Names> Ins<R> {
     /// The value the instruction reads something out of that the value goes on
     /// holding.
     pub(super) fn reads_part_of(&self) -> Option<Src<R>> {
-        if let Ins::Field { src, .. }
-        | Ins::ArrayElem { src, .. }
-        | Ins::ArrayGet { src, .. }
-        | Ins::MapGet { map: src, .. } = *self
+        if let Ins::Field { src, .. } | Ins::ArrayGet { src, .. } | Ins::MapGet { map: src, .. } =
+            *self
         {
-            Some(src)
-        } else {
-            None
+            return Some(src);
         }
+        if let Ins::ArrayUncons { src, .. }
+        | Ins::ArraySplit { src, .. }
+        | Ins::ArraySplitWide { src, .. } = *self
+        {
+            return Some(Src(src.reg));
+        }
+        None
     }
 
     /// Whether the instruction makes no cell and runs nothing but itself. So a

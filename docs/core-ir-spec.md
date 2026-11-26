@@ -47,7 +47,14 @@ pub enum Cases {                      // each arm with the keys that lead to it
     Text(Arms<ConstId>),
 }
 
-pub enum ProbeOp { ArrayGet, ArraySlice, ArraySet, MapGet }
+pub enum ProbeOp {
+    ArrayGet,
+    ArraySlice,
+    ArraySet,
+    ArrayUncons,                      // the first element, and the array of the others
+    ArraySplit { len: u32, more: bool, from: u32 },
+    MapGet,
+}
 
 pub enum Atom {
     Local(LocalId),
@@ -87,7 +94,7 @@ join j0(%3:0) after
 
 A `Switch` goes to the arm that has the value's key, and to the default when none has. One with no default has an arm for every value there can be, because the checker saw to it that a match is exhaustive. Where a way through a tree is one no value takes, it ends in `NoArm`, which stops the run. No value's fields are read by a `Switch`: a field is a `Let` of a `Field`, on the ways that use it. `Open` reads fields out of a cell that is known to be of `variant` and gives the cell up, all in one. A field it does not name is given up with the cell.
 
-A `Probe` asks for something that may not be there: an element of an array, a slice of one, an array with another element, or what a map has for a key. Where it is there, `binds` has a place for each value that the op finds, and `hit` runs. Where it is not, `miss` runs, with nothing bound and every operand as it was. A place may be none, for a value that nothing reads. The result of `array::put(%0, %1, %2)` is
+A `Probe` asks for something that may not be there: an element of an array, a slice of one, an array with another element, some of the elements of an array of some length, or what a map has for a key. Where it is there, `binds` has a place for each value that the op finds, and `hit` runs. Where it is not, `miss` runs, with nothing bound and every operand as it was. A place may be none, for a value that nothing reads. The result of `array::put(%0, %1, %2)` is
 
 ```
 join j0(%4:0) after
@@ -99,7 +106,21 @@ join j0(%4:0) after
       jump j0(%0)
 ```
 
-Nothing else makes one of these operations: they are no `PrimOp`s, and a backend refuses an `Intrinsic` of their names. Today each op finds one value. An op that finds several, or that is another partial built-in, is one more `ProbeOp`.
+Nothing else makes one of these operations: they are no `PrimOp`s, and a backend refuses an `Intrinsic` of their names. Another partial built-in is one more `ProbeOp`.
+
+`ArrayUncons` and `ArraySplit` are what an array pattern is, and find several values. `ArrayUncons` is for `[h, ..t]`, and has a place for the first element and one for the array of the others. `ArraySplit` is for every other pattern, and for an array that has `len` elements, or `len` or more when it may have `more`. Its places are for the elements from `from` on, and, when there may be more, the last is for the array of what is behind the first `len`. A miss is an array of another length. One that cannot miss, because the length is known, has `NoArm` for its miss. `array::fold` is
+
+```
+probe ArrayUncons(%0)
+  | hit(%3:2, %4:1) ->
+    drop %0
+    let %5:3 = call %2(%1, %3)
+    tail call self(%4, %5, %2)
+  | miss ->
+    drop %0
+    drop %2
+    ret %1
+```
 
 `CoreExpr::always_reached` gives the joins that every way through their body comes to. A value's join is one, unless a branch stops the run everywhere. What comes before such a join can be moved past it, and what is live after it is live all through its body.
 
@@ -128,6 +149,10 @@ A `match` on a `Probe` is the probe, whose arms are those of the tree's first `S
 What a program can see of a match keeps its order. A guard runs when all the checks of its row hold, and the rows below are tried when it has failed. A size in a `<<>>` pattern is an expression of any kind, so what is behind it in its row waits until it has been read, unless the size is made of constants, which nothing can tell the reading of. An or-pattern that binds names tries each alternative with the rest of its row and the guard. One that binds none goes on with the first alternative that fits, so its row's guard and sizes run once. A row is never two rows with one guard or one size between them.
 
 A row that does not ask what a question answers goes on in every branch of it, and that is what can make a tree grow without bound. Each match has an allowance for such copies, in proportion to its size. Once that is spent, the rows in front of the first one that would have to be copied are a tree by themselves, and the rest is the continuation of a join, which every way that fits none of them jumps to. So a tree is larger than the match by a factor at the most, but for one thing. An or-pattern that binds names, in a row with a guard or with a size that is not made of constants, tries each alternative with everything behind it. Where it is plain that only one alternative can fit, the first that does is the only one tried, as far as the allowance does not go. Otherwise the row is a row for each alternative, with no allowance, and several such or-patterns beside each other are a row for each combination. No match in this repository comes near its allowance.
+
+An array's length is a question like any other, and the probe that asks it finds something for the first row that fits. Where nothing is left to ask for that row, it finds every element that the row names, and its tail when the array is the matched value itself. Where an element has to be asked of next, it finds that one alone, because the others are for nothing when it does not fit. Where nothing shorter is left and a row that takes anything longer comes next, the longer is asked for first, so a walk of `[]` and `[h, ..t]` is one `ArrayUncons` a turn and nothing at its end. Where several exact lengths are asked for, the length is read once (`ArrayLen`), and each is a test of that number. What else of an array is needed is found by another probe, where it is first needed, up to eight elements at a time once one has been found, so that a long pattern does not need a register for each of its elements at once. A tail that a field or an element has to be asked of first is taken by a probe of its own, once nothing is left to ask, and behind everything else that the arm names.
+
+A guard, or a size that is not made of constants, may fail, and then the rows behind it may read the array again. A tail that the guard does not read is then taken where it has held. Where nothing reads the array again it is taken in front of the guard, so that the array, and what only it holds, is given up before the guard runs. A tail that waited is taken in front of a later guard once nothing else of the array is read. And where all that is asked of an array behind a guard is its length, that is read in front of it. What is read behind a guard is looked for in the next sixteen rows. Where there are more than that, they may ask for a length.
 
 The tests hold the tree against an interpreter of the patterns as they are written (`matching/tests/oracle.rs`), over matches made at random, a third of them on a probe, and over every match of every program in the repository, and count the guards and sizes that run and what they are given.
 

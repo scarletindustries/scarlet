@@ -19,11 +19,11 @@
 
 use scarlet_ir::core_ir::{GlobalSlot, MAX_PARAMS};
 
-use crate::array::{self, End, Seq};
+use crate::array::{self, End, Found, Seq};
 use crate::bigint;
 use crate::code::{
-    Arg, AssignList, BitsOp, Code, Counted, Dead, Dst, Entry, Hands, Ins, Makes, MaybeDst,
-    MaybeHit, Op, Reg, Room, Sets, Shared, Src, Taken,
+    Arg, AssignList, BitsOp, Code, Counted, Dead, Dst, Entry, Hands, Hit, Hits, Ins, Makes,
+    MaybeDst, MaybeHit, Near, Op, Reg, Room, Sets, Shared, Split, SplitWide, Src, Taken,
 };
 use crate::counts::Counts;
 use crate::eq;
@@ -1075,46 +1075,75 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
                 win.put(&mut rest.heap, dst, v)?;
             }
             Ins::ArrayLen { dst, src } => {
-                let v = rest.array_len(win.look(src))?;
-                win.put(&mut rest.heap, dst, v)?;
-            }
-            Ins::ArrayElem { dst, src, index } => {
-                let s = rest.seq(win.look(src))?;
-                let Some(v) = rest.element(s, usize::from(index))? else {
-                    return Err(Stop::broken(Broken::NoArrayElement { index }));
+                let of = win.look(src);
+                let small = array::tree_len(&rest.heap, of);
+                let small = small.and_then(|n| Value::int(n.cast_signed()));
+                let len = match small {
+                    Some(len) => len,
+                    None => rest.array_len(of)?,
                 };
-                win.put(&mut rest.heap, dst, v)?;
+                win.put(&mut rest.heap, dst, len)?;
             }
-            Ins::ArrayDrop { dst, src, n } => array_drop(win.lend(), rest, dst, src, n)?,
-            Ins::ArrayPrepend {
+            Ins::ArrayPush {
                 dst,
-                rest: xs,
-                front,
+                src,
+                item,
+                end,
+            } => array_push(win.lend(), rest, dst, src, item, end)?,
+            Ins::ArrayExtend {
+                dst,
+                src,
+                items,
+                end,
             } => {
-                array_push(win.lend(), rest, dst, xs, front.regs(), End::Front)?;
+                let items = items.regs(&code.lists);
+                array_extend(win.lend(), rest, dst, src, items, end)?;
             }
-            Ins::ArrayPrependWide {
-                dst,
-                rest: xs,
-                front,
+            Ins::ArrayUncons {
+                head,
+                tail,
+                src,
+                ref miss,
             } => {
-                let front = front.regs(&code.lists);
-                array_push(win.lend(), rest, dst, xs, front, End::Front)?;
+                if !array_uncons(win.lend(), rest, head, tail, src)? {
+                    pc = miss.index();
+                }
             }
-            Ins::ArrayAppend {
-                dst,
-                rest: xs,
-                back,
+            Ins::ArraySplit {
+                ref elements,
+                tail,
+                src,
+                split,
+                ref miss,
             } => {
-                array_push(win.lend(), rest, dst, xs, back.regs(), End::Back)?;
+                if !array_split(win.lend(), rest, elements, tail, src, split)? {
+                    pc = miss.index();
+                }
             }
-            Ins::ArrayAppendWide {
-                dst,
-                rest: xs,
-                back,
+            Ins::JumpUnlessLength {
+                src,
+                length,
+                ref to,
             } => {
-                let back = back.regs(&code.lists);
-                array_push(win.lend(), rest, dst, xs, back, End::Back)?;
+                let of = win.look(src);
+                let fits = match array::tree_len(&rest.heap, of) {
+                    Some(len) => array::fits(len, length),
+                    None => rest.fits(of, length)?,
+                };
+                if !fits {
+                    pc = to.index();
+                }
+            }
+            Ins::ArraySplitWide {
+                elements,
+                tail,
+                src,
+                ref miss,
+            } => {
+                let wide = elements.of(&code.lists).ok_or_else(no_split)?;
+                if !split_wide(win.lend(), rest, wide, tail, src)? {
+                    pc = miss.index();
+                }
             }
             Ins::ArrayConcat { dst, a, b } => {
                 let v = rest.array_concat(win.look(a), win.look(b))?;
@@ -1891,71 +1920,202 @@ fn array(
     Ok(win.put(&mut rest.heap, dst, Value::cell(cell))?)
 }
 
-#[inline(never)]
-fn array_drop(
-    mut win: Window<'_>,
+/// The array in `src`, which is `s`, as a tree to change, holding one reference. That is
+/// the register's when `src` gives it up, so one that nothing else holds has a count
+/// of 1. A range stores no elements to change, so it is built as a tree first.
+#[inline(always)]
+fn to_change(
+    win: &mut Window<'_>,
     rest: &mut Rest<'_, '_>,
-    dst: Dst<Reg>,
     src: Arg<Reg>,
-    n: Src<Reg>,
-) -> Result<(), Stop> {
-    let s = rest.seq(win.get(src.reg))?;
-    let n = match win.look(n).view() {
-        View::Int(n) if n >= 0 => crate::word::to_usize(n.unsigned_abs()),
-        v @ (View::Int(_)
-        | View::Float(_)
-        | View::Nil
-        | View::Bool(_)
-        | View::Func(_)
-        | View::Cell(_)
-        | View::Nullary(_)) => {
-            return Err(Stop::broken(Broken::DropCount(v)));
+    s: Seq,
+) -> Result<Cell, Stop> {
+    match s {
+        Seq::Tree(a) => {
+            if src.moved {
+                win.empty(src.reg);
+            } else {
+                rest.heap.share(a)?;
+            }
+            Ok(a)
         }
-    };
-    let cell = match s {
-        // The register's reference passes to the skip.
-        Seq::Tree(a) if src.moved => {
-            win.empty(src.reg);
-            array::skip_owned(&mut rest.heap, a, n)
-        }
-        Seq::Tree(a) => array::skip(&mut rest.heap, a, n),
-        Seq::Range { start, end } => {
-            let n = (n as u64).min(array::range_len(start, end));
-            // `n` is at most `end - start`, so `start + n` is
-            // within `start..=end` and the add is exact.
-            let left = array::range(&mut rest.heap, start.wrapping_add_unsigned(n), end);
-            if src.moved && left.is_ok() {
+        Seq::Range { .. } => {
+            let a = rest.tree(s)?;
+            if src.moved {
                 let range = win.empty(src.reg);
                 rest.release(range)?;
             }
-            left
+            Ok(a)
         }
-    };
-    Ok(win.put(&mut rest.heap, dst, Value::cell(cell.map_err(fault)?))?)
+    }
 }
 
-/// The array in `xs` with the values in `items` at `end` of it.
+/// The array in `src` with the value in `item` at `end` of it.
 #[inline(never)]
 fn array_push(
     mut win: Window<'_>,
     rest: &mut Rest<'_, '_>,
     dst: Dst<Reg>,
-    xs: Arg<Reg>,
+    src: Arg<Reg>,
+    item: Arg<Reg>,
+    end: End,
+) -> Result<(), Stop> {
+    let s = rest.seq(win.get(src.reg))?;
+    let x = win.pass(&mut rest.heap, item)?;
+    let a = to_change(&mut win, rest, src, s)?;
+    let cell = array::push_owned(&mut rest.heap, a, x, end).map_err(fault)?;
+    Ok(win.put(&mut rest.heap, dst, Value::cell(cell))?)
+}
+
+/// The array in `src` with the values in `items` at `end` of it.
+#[inline(never)]
+fn array_extend(
+    mut win: Window<'_>,
+    rest: &mut Rest<'_, '_>,
+    dst: Dst<Reg>,
+    src: Arg<Reg>,
     items: &[Reg],
     end: End,
 ) -> Result<(), Stop> {
-    let s = rest.seq(win.get(xs.reg))?;
+    let s = rest.seq(win.get(src.reg))?;
     let a = rest.tree(s)?;
-    let mut values: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::with_capacity(items.len());
+    let mut values: smallvec::SmallVec<[Value; 8]> = smallvec::SmallVec::with_capacity(items.len());
     for r in items {
         values.push(win.share(&mut rest.heap, Shared(*r))?);
     }
-    if xs.moved {
-        let held = win.empty(xs.reg);
+    if src.moved {
+        let held = win.empty(src.reg);
         rest.release(held)?;
     }
-    let cell = rest.push_all(a, &values, end)?;
+    let cell = array::extend_owned(&mut rest.heap, a, &values, end).map_err(fault)?;
     Ok(win.put(&mut rest.heap, dst, Value::cell(cell))?)
+}
+
+/// The first element of the array in `src` into `head` and the array of the others into
+/// `tail`. Whether it has one.
+#[inline(never)]
+fn array_uncons(
+    mut win: Window<'_>,
+    rest: &mut Rest<'_, '_>,
+    head: MaybeHit<Reg>,
+    tail: Hit<Reg>,
+    src: Arg<Reg>,
+) -> Result<bool, Stop> {
+    let head = head.hit();
+    let found = rest.uncons(win.get(src.reg), head.is_some(), src.moved)?;
+    let Some((first, left)) = found else {
+        return Ok(false);
+    };
+    if src.moved {
+        win.empty(src.reg);
+    }
+    if let Some(head) = head {
+        win.hit(&mut rest.heap, head, first)?;
+    }
+    win.hit(&mut rest.heap, tail, left)?;
+    Ok(true)
+}
+
+/// Some elements of the array in `src` into `elements`, and what it has behind those
+/// that `split` counts into `tail`. Whether it has the length that `split` says.
+#[inline(never)]
+fn array_split(
+    win: Window<'_>,
+    rest: &mut Rest<'_, '_>,
+    elements: &Hits<Reg, 4>,
+    tail: MaybeHit<Reg>,
+    src: Arg<Reg>,
+    split: Near,
+) -> Result<bool, Stop> {
+    split_in::<4>(win, rest, elements.regs(), tail, src, split.split())
+}
+
+/// [`array_split`] of any number of elements.
+#[inline(never)]
+fn split_wide(
+    win: Window<'_>,
+    rest: &mut Rest<'_, '_>,
+    wide: &SplitWide<Reg>,
+    tail: MaybeHit<Reg>,
+    src: Arg<Reg>,
+) -> Result<bool, Stop> {
+    split_in::<16>(win, rest, &wide.elements, tail, src, wide.split)
+}
+
+/// [`array_split`] with room for `N` elements, and for more where there are more.
+#[inline(always)]
+fn split_in<const N: usize>(
+    mut win: Window<'_>,
+    rest: &mut Rest<'_, '_>,
+    elements: &[MaybeHit<Reg>],
+    tail: MaybeHit<Reg>,
+    src: Arg<Reg>,
+    split: Split,
+) -> Result<bool, Stop> {
+    let v = win.get(src.reg);
+    // All zeros, which costs the least to write.
+    let mut room = [Value::from_bits(0); N];
+    let mut more = Vec::new();
+    let found = match room.get_mut(..elements.len()) {
+        Some(room) => room,
+        None => {
+            more.resize(elements.len(), Value::NIL);
+            more.as_mut_slice()
+        }
+    };
+    let owned = match array::split(&rest.heap, v, split, found) {
+        Found::Miss => return Ok(false),
+        Found::All => false,
+        Found::Apart(r) => {
+            rest.run(&r, split.from as usize, found)?;
+            false
+        }
+        Found::Range(start) => {
+            rest.run_of_range(start.wrapping_add(i64::from(split.from)), elements, found)?;
+            true
+        }
+        Found::Other => return Err(Stop::broken(Broken::NotAnArray(v.view()))),
+    };
+    let found = &*found;
+    if !owned {
+        for (hit, v) in elements.iter().zip(found) {
+            if hit.hit().is_some() {
+                rest.heap.own(*v)?;
+            }
+        }
+    }
+    if src.moved {
+        win.empty(src.reg);
+    }
+    let left = match tail.hit() {
+        Some(tail) => match rest.behind(v, split.length.len as usize, src.moved) {
+            Ok(left) => Some((tail, left)),
+            Err(stop) => {
+                let wanted = elements.iter().zip(found);
+                let wanted = wanted.filter(|(hit, _)| hit.hit().is_some());
+                return Err(rest.give_back(wanted.map(|(_, v)| *v), stop));
+            }
+        },
+        None => None,
+    };
+    for (hit, v) in elements.iter().zip(found) {
+        if let Some(to) = hit.hit() {
+            win.hit(&mut rest.heap, to, *v)?;
+        }
+    }
+    match left {
+        Some((tail, left)) => win.hit(&mut rest.heap, tail, left)?,
+        None if src.moved => rest.release(v)?,
+        None => {}
+    }
+    Ok(true)
+}
+
+/// The stop for an instruction whose list is not there.
+#[cold]
+#[inline(never)]
+fn no_split() -> Stop {
+    Stop::broken(Broken::NoPlace)
 }
 
 /// The elements of the array in `src` from the first of `ends` up to the second,
@@ -1999,26 +2159,7 @@ fn array_set(
         return Ok(None);
     };
     let x = win.pass(&mut rest.heap, value)?;
-    let array = match s {
-        Seq::Tree(a) => {
-            if src.moved {
-                win.empty(src.reg);
-            } else {
-                rest.heap.share(a)?;
-            }
-            a
-        }
-        // A range stores no elements to write over, so it is built as a
-        // tree first, which nothing else holds.
-        Seq::Range { .. } => {
-            let a = rest.tree(s)?;
-            if src.moved {
-                let range = win.empty(src.reg);
-                rest.release(range)?;
-            }
-            a
-        }
-    };
+    let array = to_change(&mut win, rest, src, s)?;
     let cell = array::set(&mut rest.heap, array, i, x).map_err(fault)?;
     Ok(Some(Value::cell(cell)))
 }

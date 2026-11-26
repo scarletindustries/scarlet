@@ -238,10 +238,9 @@ pub(crate) enum Broken {
         want: usize,
     },
     NoArrayElement {
-        index: u16,
+        index: usize,
     },
     NotOnNonBool(View),
-    DropCount(View),
     StringLength(View),
     NotUtf8,
     NotAFloat {
@@ -394,7 +393,6 @@ impl fmt::Display for BadProgram {
                 write!(f, "element {index} read from an array with no such element")
             }
             Broken::NotOnNonBool(v) => write!(f, "`!` on {v:?}, not a Bool"),
-            Broken::DropCount(v) => write!(f, "an array's first {v:?} elements dropped"),
             Broken::StringLength(v) => write!(f, "`string.length` of {v:?}"),
             Broken::NotUtf8 => f.write_str("a string that is not UTF-8"),
             Broken::NotAFloat { text } => write!(f, "`{text}` is not a float"),

@@ -4,7 +4,9 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use crate::ConstId;
-use crate::typed_ir::{PatRest, TypedBinPatSeg, TypedBind, TypedExpr, TypedPat, each_expr};
+use crate::typed_ir::{
+    PatRest, TypedBinPatSeg, TypedBind, TypedExpr, TypedPat, each_expr, each_read, each_size,
+};
 
 use super::tree::{Goal, Key, Length, Place};
 
@@ -93,8 +95,14 @@ pub(super) struct Fact {
     /// What it is none of.
     pub(super) none_of: Option<Rc<BTreeSet<Key>>>,
     /// The least number of elements it can have, and one past the greatest.
-    pub(super) least: usize,
-    pub(super) most: Option<usize>,
+    pub(super) least: u32,
+    pub(super) most: Option<u32>,
+    /// The elements of it of which something is known, when it is an array.
+    pub(super) told: Option<Rc<BTreeSet<u32>>>,
+    /// Whether it is a piece of an array, and a cut has found it.
+    pub(super) found: bool,
+    /// Whether it is an array whose length has been read.
+    pub(super) measured: bool,
 }
 
 impl Fact {
@@ -166,16 +174,40 @@ pub(super) fn comes_first(p: &TypedPat) -> bool {
 
 /// Whether `p` itself reads a size that is not [`fixed`].
 pub(super) fn reads_size(p: &TypedPat) -> bool {
-    let reads = |seg: &TypedBinPatSeg| match seg {
+    matches!(p, TypedPat::Bin { segs, .. } if segs.iter().any(|seg| asked_size(seg).is_some()))
+}
+
+/// The size that `seg` gives, when that is not [`fixed`].
+pub(super) fn asked_size(seg: &TypedBinPatSeg) -> Option<&TypedExpr> {
+    match seg {
         TypedBinPatSeg::Int { bits, .. }
         | TypedBinPatSeg::Binary {
             bits: Some(bits), ..
-        } => !fixed(bits),
+        } => (!fixed(bits)).then_some(bits),
         TypedBinPatSeg::Utf8Literal { .. }
         | TypedBinPatSeg::Utf8 { .. }
-        | TypedBinPatSeg::Binary { bits: None, .. } => false,
+        | TypedBinPatSeg::Binary { bits: None, .. } => None,
+    }
+}
+
+/// The bindings that the sizes in `alts` read.
+pub(super) fn sizes_read(alts: &[Vec<Check<'_>>]) -> BTreeSet<usize> {
+    let mut reads = BTreeSet::new();
+    let mut size = |e: &TypedExpr| {
+        each_read(e, |b| {
+            reads.insert(b.0);
+        });
     };
-    matches!(p, TypedPat::Bin { segs, .. } if segs.iter().any(reads))
+    let mut todo: Vec<&Check<'_>> = alts.iter().flatten().collect();
+    while let Some(check) = todo.pop() {
+        match &check.what {
+            What::Pat(p) => each_size(p, &mut size),
+            What::OneOf(all) => all.iter().for_each(|p| each_size(p, &mut size)),
+            What::Bits(bits) => bits.segs.iter().filter_map(asked_size).for_each(&mut size),
+            What::Any { alts, .. } => todo.extend(alts.iter().flatten()),
+        }
+    }
+    reads
 }
 
 /// Whether a size is made of constants, so that nothing can tell when it is read.

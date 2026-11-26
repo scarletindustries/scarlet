@@ -756,6 +756,14 @@ From: arrays 4. Needs: 19.
 
 **Carried from step 19.** A probe has the shape these want: `ProbeOp` for `ArrayUncons` and `ArraySplit` with two or more binds, of which any may be none, and a miss arm that takes nothing. `Asked` in lower/probes.rs is what is asked and `Outcomes` in lower/arms.rs is what a tree does for each outcome, which is now read off a `Switch` on the root only. `layout.rs` moves a miss that `translate` has listed in `Draft::misses`, so an op that loads as a probe is moved with no more to do. Perceus drops what a probe reads at the head of each arm, live.rs gives a hit's result the register of what dies there, and a bind that nothing reads is none.
 
+**What happened.** The geomean moved by a factor of 0.9531, from 1.62 to 1.55 at luajit-interp 1, where about 0.99 was expected. storage runs 16.7% fewer machine instructions, bounce 16.4%, closures 16.3%, fannkuch 15.1%, nbody 13.3%, strings 8.6%, sieve 6.1%, richards 5.4%, queens 1.6%, spectral_norm 1.0%, permute 1.0%, json 0.9% and string_keys 0.6%. The rest are level and so is `startup`. strings runs 23.6% fewer VM instructions, closures 19.2%, bounce 12.4%, nbody 5.9%, richards 4.4%, storage 2.1%, fannkuch 0.4% and queens, string_keys and json 0.1% to 0.2%. The other rows run the VM instructions they ran, and every row makes and leaves the cells it did. dispatch is still 9 machine instructions with one indirect branch. A walk of 1,000 Ints is 379 machine instructions an element where it was 647. Five elements of an array of 600 are 677 where they were 1,537. Much of the gain is not the patterns. A push in place is written as one bounds-checked run of words (`Heap::chunk`) and is not a call to two more, and a tail leaf that is cut, or a head that is settled, is copied once where it was copied three times (`leaf_behind`).
+
+- **Several items beside a spread are one `ArrayExtend`.** One `ArrayPush` for each item was built and cost more: two items on a shared array 2,199 against 1,870, and four on one that nothing else holds 1,783 against 1,382. An array literal above 32 was about four times dearer. One item is an `ArrayPush`, and several are one instruction whose write in place is 757 to 900 where it was 1,440. Core IR still has `ArrayPrepend` and `ArrayAppend` for a run of them.
+- **The tail does not always wait for the guard.** It waits only where something behind the guard reads the array. Where nothing does, waiting would give the array, and the handles only it holds, up after the guard instead of in front of it. For the same reason `ArrayLen` is still there: where an array is held behind a guard for nothing but its length, the length is read in front of the guard. What is read behind a guard is looked for in sixteen rows, and a row that is known not to fit is not asked (`matching/behind.rs`). A length is also read where several exact ones are asked for. A test of the longer pattern first is made only where nothing shorter is left but one, so that the order of the questions is what it was.
+- **`ArraySplit` has a `from`,** for the first element that is wanted, and reads eight elements at a time at most, so a pattern of 3,200 elements needs as few registers as before. It takes a dying array's reference itself. One that binds nothing is `JumpUnlessLength`, and one of more than four elements or past 255 is `ArraySplitWide`. Elements that are not all in the first leaf are copied leaf by leaf (`array::run`), with one walk down the tree for each leaf, and those of a range are made from its start. The first build looked each of those up from the root and put them in a `Vec`, and cost up to six times what it had.
+- **The element that is asked of next is read alone.** The others that the row needs are read together behind it. Reading all of them with the length was built: three literals that fail at the first cost 69 more than before, and eight in an array of 600 five times as much. Now neither is dearer than it was, and a hit of three literals is 238 cheaper where it was 277.
+- **What costs more.** Where several arms are tried one after the other and each needs another element of one array, each asks for the length again and looks the element up by itself. For three to five arms that is up to 118 more over a tree (14%), 85 over a range (21%) and 31 on an array of one (7%). Every other pattern that was measured, on arrays of 1 to 5,000 that were built at either end, joined, walked or ranges, is level or cheaper. Compiling a match costs 1% to 4% more in most shapes of guarded arms, 6% to 9% where 40 to 160 arms with guards each name a tail, and 6% to 12% where each of 40 to 160 arms also names one element more than the one before. It does not grow with the size of the match, and memory is level. Asking for what rows behind a guard read (`matching/behind.rs`) was first a list of every place for every guard, which made those last shapes cost 1.9 times as much.
+
 ### Step 21. The empty array is an immediate word, `Seq` is the only door from a value to an array, and three private functions are the only places an array cell is made.
 
 From: arrays 5. Needs: 5, 20.
@@ -765,6 +773,8 @@ From: arrays 5. Needs: 5, 20.
 **Why here.** It is a small format point that the flat cell's code assumes, so it goes immediately before it.
 
 **Expected gain.** About 0.998 (storage 4%).
+
+**Carried from step 20.** An array is taken apart by `array::uncons` and `array::split` and grown by `push_owned` and `extend_owned`, and the length is read by `Rest::array_len` and by `Seq`. `uncons` and `uncons_range` in exec/rest.rs give the tail of a range as a range cell and that of one element as an empty tree cell, so both have to give the immediate.
 
 ### Step 22. The flat cell for 1 to 32 elements with a window and capacity classes 4, 8, 16 and 32, written values-first so the header's scan covers it, with in-place set, push at both ends and uncons, and every function consuming one reference. Array literals fill their cell directly.
 
@@ -784,6 +794,8 @@ From: arrays 6. Needs: 11, 20, 21.
 
 **Carried from step 19.** A turn with a matched slice is 2,731 for a small array and 5,614 for one of 5,000, of which about 320 is all but the cut. A turn with a matched read is 323 on a miss, 365 on a hit of a small array and 488 of one of 5,000, and one with an `array::put` is 438 and 601, with nothing left around the write. `ArraySet` reads the length again inside `set`, as step 3 says.
 
+**Carried from step 20.** The doors for this cell exist: `ArrayUncons` takes the array where it dies, `ArraySplit` is one lookup for up to four elements of one leaf (`array::split`), and `ArrayPush` and `ArrayExtend` take the array and the items (`Arg`). What is left of a walk is the tail: the head is shared out of the array rather than moved, and a tail of an array that is only a tail leaf copies that leaf. On today's tree a walk is about 380 an element, a push in place 610 to 690, a push on a shared array 1,000 to 1,900 and an uncons that takes its array 400. `get` is inlined with the lookup of what is not in the tail outlined (`array::first`), and a write in place reads the leaf through `Heap::chunk`.
+
 ### Step 23. The form above 32: a strict 32-wide trie with a head and tail leaf, and a join in bounded steps (`ArrayJoin` and `ArrayJoinStep`). If the owner says no, in-place push and uncons on today's tree instead.
 
 From: arrays 7. Needs: 22, the owner's answer on the trie.
@@ -793,6 +805,8 @@ From: arrays 7. Needs: 22, the owner's answer on the trie.
 **Why here.** It is the only array step that reverses a recorded decision, so it comes after everything that does not need the answer.
 
 **Expected gain.** Arrays say 0.966 either way (sieve about 12.5 to 8.5, closures, bounce, spectral_norm). Node visits are cheaper on the arena, so expect about 0.975.
+
+**Carried from step 20.** The walk of a range still makes a range cell each step, in `Rest::uncons_range`. A range that nothing else holds could be moved up in place there.
 
 ### Step 24. Stdlib loops (`map`, `filter` and `reverse` as their own loops, the searches as index loops), `array::repeat` over a bounded built-in, and the sieve and fannkuch sources changed to use them.
 
@@ -805,6 +819,8 @@ From: arrays 8. Needs: 23.
 **Carried from step 14.** `array::map` and the rest go through values whose type is a variable, so they kept their old registers and their old order until step 17, where that went. Loops of their own are judged from a turn of 84 for `go(n - 1, acc + n)`.
 
 **Carried from step 19.** `array::swap` makes no cells and is 231 cheaper, so fannkuch's `swap01` and `swap12` can call it. What the slices of fannkuch cost beyond the copy is already gone: it makes 1.7 million cells fewer.
+
+**Carried from step 20.** Part of the forecast is taken. `array::fold` and every walk by `[h, ..t]` in the stdlib is one `ArrayUncons` a turn with nothing at its end, which is 12% to 19% of the VM instructions of closures and bounce.
 
 ### Step 25. One door for strings and binaries (`text::of`, `Bits`), and literals as frozen values: a cell-shaped run of words in the loaded program behind the 0x7FFE tag, loaded by `Const`.
 

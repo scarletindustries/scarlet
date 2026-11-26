@@ -7,6 +7,7 @@ use scarlet_ir::core_ir::{ConstId, FuncIdx, GlobalSlot};
 use scarlet_ir::intrinsic::Intrinsic;
 
 use super::Makes;
+use crate::array::End;
 use crate::heap::{Ctor, Layout};
 use crate::ops::NumOp;
 use crate::value::{Float, SmallInt, Tag, Value};
@@ -193,6 +194,7 @@ pub(crate) trait Places {
     /// Where the function's own table is among the program's.
     fn table(&self, table: Table) -> Result<Table, Unplaced>;
     fn place_list(&self, i: u32) -> Result<u32, Unplaced>;
+    fn split_list(&self, i: u32) -> Result<u32, Unplaced>;
 }
 
 impl Part<VReg> for Label {
@@ -832,6 +834,123 @@ impl Place for DstList {
     }
 }
 
+/// The registers that elements of an array go to, up to `N` of them in order.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Hits<R, const N: usize> {
+    n: u8,
+    regs: [MaybeHit<R>; N],
+}
+
+impl<R: Names, const N: usize> Hits<R, N> {
+    /// `of`, or `None` when there is no room for it here.
+    pub(crate) fn new(of: &[MaybeHit<R>]) -> Option<Self> {
+        let mut regs = [MaybeHit(R::NONE); N];
+        regs.get_mut(..of.len())?.copy_from_slice(of);
+        let n = u8::try_from(of.len()).ok()?;
+        Some(Hits { n, regs })
+    }
+
+    #[inline(always)]
+    pub(crate) fn regs(&self) -> &[MaybeHit<R>] {
+        let n = usize::from(self.n).min(N);
+        self.regs.get(..n).unwrap_or_default()
+    }
+}
+
+impl<R: Names, const N: usize> Part<R> for Hits<R, N> {
+    fn operands(self, lists: &Lists<R>, f: &mut impl FnMut(R, Role)) {
+        self.regs().iter().for_each(|hit| hit.operands(lists, f));
+    }
+}
+
+impl<const N: usize> Place for Hits<VReg, N> {
+    type Placed = Hits<Reg, N>;
+    fn place(self, at: &impl Places) -> Result<Hits<Reg, N>, Unplaced> {
+        let mut regs = [MaybeHit(Reg::NONE); N];
+        for (to, from) in regs.iter_mut().zip(self.regs()) {
+            *to = from.place(at)?;
+        }
+        Ok(Hits { n: self.n, regs })
+    }
+}
+
+/// How many elements an array is to have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Length {
+    pub(crate) len: u32,
+    /// Whether it may have more.
+    pub(crate) more: bool,
+}
+
+/// The length that an array is to have, and the first of its elements that an
+/// instruction reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Split {
+    pub(crate) length: Length,
+    pub(crate) from: u32,
+}
+
+/// A [`Split`] that an instruction can hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Near {
+    len: u8,
+    more: bool,
+    from: u8,
+}
+
+impl Near {
+    pub(crate) fn new(split: Split) -> Option<Near> {
+        Some(Near {
+            len: u8::try_from(split.length.len).ok()?,
+            more: split.length.more,
+            from: u8::try_from(split.from).ok()?,
+        })
+    }
+
+    #[inline(always)]
+    pub(crate) fn split(self) -> Split {
+        let length = Length {
+            len: u32::from(self.len),
+            more: self.more,
+        };
+        Split {
+            length,
+            from: u32::from(self.from),
+        }
+    }
+}
+
+/// A [`Split`] and the registers that the elements go to.
+#[derive(Debug, Clone)]
+pub(crate) struct SplitWide<R> {
+    pub(crate) split: Split,
+    pub(crate) elements: Box<[MaybeHit<R>]>,
+}
+
+/// The same, kept beside the code.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct HitList(pub(crate) u32);
+
+impl HitList {
+    pub(crate) fn of<R: Names>(self, lists: &Lists<R>) -> Option<&SplitWide<R>> {
+        lists.splits.get(self.0 as usize)
+    }
+}
+
+impl<R: Names> Part<R> for HitList {
+    fn operands(self, lists: &Lists<R>, f: &mut impl FnMut(R, Role)) {
+        let elements = self.of(lists).into_iter().flat_map(|s| s.elements.iter());
+        elements.for_each(|hit| hit.operands(lists, f));
+    }
+}
+
+impl Place for HitList {
+    type Placed = HitList;
+    fn place(self, at: &impl Places) -> Result<HitList, Unplaced> {
+        at.split_list(self.0).map(HitList)
+    }
+}
+
 /// A field of a constructor, and what it is set to.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Assign<R> {
@@ -997,6 +1116,7 @@ pub(crate) struct Lists<R: Names> {
     /// Every [`Table`], one after another.
     pub(crate) tables: Vec<R::To>,
     pub(crate) places: Vec<PlacesByInt<R::To>>,
+    pub(crate) splits: Vec<SplitWide<R>>,
 }
 
 impl<R: Names> Default for Lists<R> {
@@ -1008,6 +1128,7 @@ impl<R: Names> Default for Lists<R> {
             sets: Vec::new(),
             tables: Vec::new(),
             places: Vec::new(),
+            splits: Vec::new(),
         }
     }
 }
@@ -1081,5 +1202,5 @@ macro_rules! plain {
 
 plain! {
     Newline, u16, u32, i64, f64, Value, SmallInt, Float, Tag, Ctor, Layout, TextId, BinaryId, WhyId,
-    BlockId, BitsOp, Makes, NumOp, Intrinsic, FuncIdx, ConstId, GlobalSlot,
+    BlockId, BitsOp, End, Length, Near, Makes, NumOp, Intrinsic, FuncIdx, ConstId, GlobalSlot,
 }

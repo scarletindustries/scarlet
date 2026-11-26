@@ -766,6 +766,7 @@ fn translator<'c>(
         reads,
         numbers: HashMap::new(),
         misses: Vec::new(),
+        no_arm: None,
     }
 }
 
@@ -1456,10 +1457,11 @@ fn operands_that_do_not_fit_are_in_a_list() {
         (prim(PrimOp::StringConcatMany, 9), Op::ConcatWide),
         (prim(PrimOp::BinaryConcatMany, 8), Op::Bits),
         (prim(PrimOp::BinaryConcatMany, 9), Op::BitsWide),
-        (prim(PrimOp::ArrayPrepend, 9), Op::ArrayPrepend),
-        (prim(PrimOp::ArrayPrepend, 10), Op::ArrayPrependWide),
-        (prim(PrimOp::ArrayAppend, 9), Op::ArrayAppend),
-        (prim(PrimOp::ArrayAppend, 10), Op::ArrayAppendWide),
+        (prim(PrimOp::ArrayPrepend, 2), Op::ArrayPush),
+        (prim(PrimOp::ArrayPrepend, 3), Op::ArrayExtend),
+        (prim(PrimOp::ArrayAppend, 2), Op::ArrayPush),
+        (prim(PrimOp::ArrayAppend, 3), Op::ArrayExtend),
+        (prim(PrimOp::ArrayAppend, 40), Op::ArrayExtend),
         (ctor(8), Op::Ctor),
         (ctor(9), Op::CtorWide),
         (update(1), Op::Update1),
@@ -2279,5 +2281,290 @@ fn what_a_probe_finds_has_the_register_of_what_dies() {
     assert!(
         kept.iter().any(|l| l.contains("ArraySet(r2, r3, move")),
         "{kept:?}"
+    );
+}
+
+/// The probes that take an array apart, each with how many places it has for what it
+/// finds, which is more than one or none.
+fn pieces() -> Vec<(ProbeOp, usize)> {
+    let mut all = vec![(ProbeOp::ArrayUncons, 2)];
+    for len in [0, 1, 2, 5, 300] {
+        for more in [false, true] {
+            for from in [0, 1, 3, 260] {
+                for n in 0..4u32 {
+                    let op = ProbeOp::ArraySplit { len, more, from };
+                    let cons = (len, more, from) == (1, true, 0) && n > 0;
+                    if from + n <= len && !cons {
+                        all.push((op, n as usize + usize::from(more)));
+                    }
+                }
+            }
+        }
+    }
+    all
+}
+
+/// An array is taken apart by the form that has what is asked for, and one of whose
+/// pieces nothing reads any is a test of its length alone. What nothing reads goes to no
+/// register, and those behind the last that is read are not asked for at all.
+#[test]
+fn an_array_is_taken_apart_by_one_instruction() {
+    let mut forms = std::collections::BTreeMap::new();
+    for (op, places) in pieces() {
+        for read in 0..1u32 << places.min(4) {
+            let binds: Vec<Option<u32>> = (0..u32::try_from(places).expect("few"))
+                .map(|i| (read >> i & 1 == 1).then_some(10 + i))
+                .collect();
+            let core = function(4, probe(op, &[2], &binds, gives(0), gives(1)));
+            let program = program_with_fields();
+            let source = Source::new(&program).expect("a whole program");
+            let draft = translate(&source, &core, None, &mut Tables::default());
+            let draft = draft.expect("it translates");
+            crate::code::live::settle(&mut copy_of(&draft)).expect("it loads");
+            let all = instructions(&draft);
+            let shown: Vec<String> = all.iter().map(|i| shown(i, &draft.lists)).collect();
+            assert_eq!(shown[1..], ["Ret 0", "Ret 1"], "{op:?}");
+            let mut to = Vec::new();
+            all[0].targets(&draft.lists, &mut |l| to.push(draft.labels[l.0 as usize]));
+            assert_eq!(to, [2], "{op:?}");
+            let mut want: Vec<String> = binds.iter().flatten().map(|b| b.to_string()).collect();
+            let name = all[0].op().name();
+            want.extend([name.to_string(), "2".to_string()]);
+            assert_eq!(shown[0], want.join(" "), "{op:?} {binds:?}");
+            let (elements, tail) = match op {
+                ProbeOp::ArrayUncons => (1, binds[1].is_some()),
+                ProbeOp::ArraySplit { more: true, .. } => (places - 1, binds[places - 1].is_some()),
+                _ => (places, false),
+            };
+            let used = binds[..elements].iter().rposition(Option::is_some);
+            let used = used.map_or(0, |last| last + 1);
+            let far =
+                matches!(op, ProbeOp::ArraySplit { len, from, .. } if len > 255 || from > 255);
+            let form = match (op, used, tail) {
+                (_, 0, false) => Op::JumpUnlessLength,
+                (ProbeOp::ArrayUncons, _, true) => Op::ArrayUncons,
+                _ if far || used > 4 => Op::ArraySplitWide,
+                _ => Op::ArraySplit,
+            };
+            assert_eq!(name, form.name(), "{op:?} {binds:?}");
+            *forms.entry(name).or_insert(0) += 1;
+            // Each says the length and where it reads from.
+            let (len, more, from) = match op {
+                ProbeOp::ArraySplit { len, more, from } => (len, more, from),
+                _ => (1, true, 0),
+            };
+            let length = Length { len, more };
+            match all[0] {
+                Ins::JumpUnlessLength { length: got, .. } => assert_eq!(got, length),
+                Ins::ArraySplit { split, .. } => {
+                    assert_eq!(split.split(), Split { length, from });
+                }
+                Ins::ArraySplitWide { elements, .. } => {
+                    let wide = elements.of(&draft.lists).expect("a list");
+                    assert_eq!(wide.split, Split { length, from });
+                    assert_eq!(wide.elements.len(), used);
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(
+        forms.len() == 4 && forms.values().all(|n| *n > 1),
+        "{forms:?}"
+    );
+}
+
+/// One that asks for elements an array of its length does not have, or that has no place
+/// for its tail, or another number of operands, does not load. Neither does a split that
+/// is a cons.
+#[test]
+fn an_array_taken_apart_into_other_things_does_not_load() {
+    let program = program_with_fields();
+    let source = Source::new(&program).expect("a whole program");
+    let split = |len, more, from| ProbeOp::ArraySplit { len, more, from };
+    let wrong = [
+        (ProbeOp::ArrayUncons, 1, 0),
+        (ProbeOp::ArrayUncons, 1, 1),
+        (ProbeOp::ArrayUncons, 1, 3),
+        (ProbeOp::ArrayUncons, 0, 2),
+        (ProbeOp::ArrayUncons, 2, 2),
+        (split(2, false, 0), 0, 2),
+        (split(2, false, 0), 2, 2),
+        (split(2, false, 0), 1, 3),
+        (split(2, false, 1), 1, 2),
+        (split(2, false, 3), 1, 0),
+        (split(2, true, 0), 1, 0),
+        (split(2, true, 0), 1, 4),
+        (split(2, true, 2), 1, 2),
+        (split(0, true, 0), 1, 2),
+        (split(1, true, 0), 1, 2),
+        (split(3, true, u32::MAX), 1, 2),
+    ];
+    for (op, args, binds) in wrong {
+        let all: Vec<u32> = (0..u32::try_from(args).expect("few")).collect();
+        let found: Vec<Option<u32>> = (0..binds).map(|i| Some(9 + i)).collect();
+        let binds = found.len();
+        let core = function(5, probe(op, &all, &found, gives(0), gives(1)));
+        let got = translate(&source, &core, None, &mut Tables::default());
+        let got = got.err().expect("it does not translate");
+        assert_eq!(got, Unfit::Broken(Broken::Probe { op, args, binds }));
+    }
+}
+
+/// Every probe that cannot miss goes to one place when it does, behind everything else,
+/// and none has anything to jump over.
+#[test]
+fn what_cannot_miss_has_one_place_to_go() {
+    let one = |found: u32, rest: CoreExpr| {
+        probe(
+            ProbeOp::ArrayUncons,
+            &[0],
+            &[Some(found), Some(found + 1)],
+            rest,
+            CoreExpr::NoArm,
+        )
+    };
+    let core = function(1, one(5, one(7, returning(Atom::Local(LocalId(5))))));
+    let draft = drafted(&core);
+    let all = instructions(&draft);
+    let kinds: Vec<&str> = all.iter().map(|i| i.op().name()).collect();
+    assert_eq!(kinds, ["ArrayUncons", "ArrayUncons", "Move", "Ret", "Bad"]);
+    for ins in &all[..2] {
+        let mut to = Vec::new();
+        ins.targets(&draft.lists, &mut |l| to.push(draft.labels[l.0 as usize]));
+        assert_eq!(to, [4]);
+    }
+    assert!(draft.misses.is_empty());
+    // One that can goes where its miss is, behind its hit.
+    let both = probe(
+        ProbeOp::ArrayUncons,
+        &[0],
+        &[Some(5), Some(6)],
+        one(7, gives(5)),
+        gives(0),
+    );
+    let draft = drafted(&function(1, both));
+    let all = instructions(&draft);
+    let kinds: Vec<&str> = all.iter().map(|i| i.op().name()).collect();
+    assert_eq!(kinds, ["ArrayUncons", "ArrayUncons", "Ret", "Ret", "Bad"]);
+}
+
+/// The instructions of `f` in `src`, as they are listed.
+fn listed(src: &str) -> Vec<String> {
+    let src = format!("import scarlet/array\n{src}\npub fn main() {{ Nil }}\n");
+    let program = crate::code::tests::program(&src);
+    let at = (&program.fns).into_iter().position(|f| f.name == "f");
+    let listing = crate::listing(&program).expect("it loads");
+    let f = listing.function(at.expect("f")).expect("f");
+    let lines = f.lines().skip(1).map(|l| l[5..].trim().to_string());
+    lines.collect()
+}
+
+/// A walk is one instruction for the array at each turn, which takes it, and nothing is
+/// asked at its end.
+#[test]
+fn a_walk_takes_its_array_apart_in_one_instruction() {
+    let walk = |pattern: &str, next: &str| {
+        listed(&format!(
+            "fn f(xs Array(Int), acc Int) Int {{\n\tmatch xs {{\n\t\t[] -> acc\n\
+             \t\t{pattern} -> f(t, {next})\n\t}}\n}}\n"
+        ))
+    };
+    assert_eq!(
+        walk("[h, ..t]", "acc + h"),
+        [
+            "r4, r2 = ArrayUncons(move r2) -> 3",
+            "r3 = IntAdd(r3, r4)",
+            "Jump -> 0",
+            "Ret(move r3)",
+        ]
+    );
+    // A head that nothing reads goes nowhere.
+    assert_eq!(
+        walk("[_, ..t]", "acc + 1")[0],
+        "_, r2 = ArrayUncons(move r2) -> 3"
+    );
+    let twos = listed(
+        "fn f(xs Array(Int), acc Int) Int {\n\tmatch xs {\n\
+         \t\t[a, _, c, ..t] -> f(t, acc + a * c)\n\t\t_ -> acc\n\t}\n}\n",
+    );
+    assert_eq!(
+        twos[0], "r4, _, r5, r2 = ArraySplit(move r2, 3..) -> 4",
+        "{twos:?}"
+    );
+    // The elements in front of the first that is read are not in it.
+    let third =
+        listed("fn f(xs Array(Int)) Int {\n\tmatch xs {\n\t\t[_, _, c] -> c\n\t\t_ -> 0\n\t}\n}\n");
+    assert!(
+        third[0].contains("ArraySplit(move r2, 3, from 2)"),
+        "{third:?}"
+    );
+}
+
+/// The head is looked at and the array is left alone until a guard has held, when it is
+/// taken. What a guard that fails goes on with finds it where it was.
+#[test]
+fn a_guard_looks_at_the_head_and_the_tail_is_taken_behind_it() {
+    let f = listed(
+        "fn f(xs Array(Int), p Int) Array(Int) {\n\tmatch xs {\n\
+         \t\t[h, ..t] if h > p -> t\n\t\t_ -> xs\n\t}\n}\n",
+    );
+    assert_eq!(
+        f,
+        [
+            "r4, _ = ArraySplit(r2, 1..) -> 4",
+            "JumpUnlessIntLt(r3, r4) -> 4",
+            "_, r2 = ArrayUncons(move r2) -> 5",
+            "Ret(move r2)",
+            "Ret(move r2)",
+            "Bad(NoArm)",
+        ],
+        "{f:#?}"
+    );
+}
+
+/// What one instruction finds has a register for each, and none that something held
+/// beside it has.
+#[test]
+fn what_is_found_together_is_kept_apart() {
+    let f = listed(
+        "fn f(xs Array(Int), k Int, g fn(Int) Int) Int {\n\tmatch xs {\n\
+         \t\t[a, b, c, ..t] -> g(a) + g(b) * g(c) + array::length(t) + k\n\
+         \t\t_ -> k\n\t}\n}\n",
+    );
+    let (dsts, rest) = f[0].split_once(" = ").expect("it writes");
+    assert!(rest.starts_with("ArraySplit(move r2, 3..)"), "{f:?}");
+    let mut dsts: Vec<&str> = dsts.split(", ").collect();
+    assert_eq!(dsts.len(), 4);
+    dsts.sort_unstable();
+    dsts.dedup();
+    assert_eq!(dsts.len(), 4, "{f:?}");
+    assert!(!dsts.contains(&"r3") && !dsts.contains(&"r4"), "{f:?}");
+}
+
+/// One item is pushed by an instruction that takes it, and several are put there by one.
+#[test]
+fn a_spread_pushes_what_is_beside_it() {
+    let f = |e: &str| {
+        let name = |n: &str| format!("{}{n}", if e.contains(n) { "" } else { "_" });
+        let (a, b) = (name("a"), name("b"));
+        listed(&format!(
+            "fn f(xs Array(Int), {a} Int, {b} Int) Array(Int) {{ {e} }}\n"
+        ))
+    };
+    assert_eq!(f("[a, ..xs]")[0], "r2 = ArrayPush(move r2, move r3, Front)");
+    assert_eq!(f("[..xs, b]")[0], "r2 = ArrayPush(move r2, move r4, Back)");
+    assert_eq!(
+        f("[b, a, ..xs]")[0],
+        "r2 = ArrayExtend(move r2, r4, r3, Front)"
+    );
+    let both = f("[a, ..xs, b, a]");
+    assert_eq!(
+        both[..2],
+        [
+            "r2 = ArrayPush(move r2, r3, Front)",
+            "r2 = ArrayExtend(move r2, r4, r3, Back)",
+        ],
+        "{both:?}"
     );
 }

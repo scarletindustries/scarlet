@@ -1195,13 +1195,9 @@ impl Tx<'_, '_, '_, '_> {
                     .ok_or(InternalLinkError::NotAnArray(ty))?;
                 let prefix = self.patterns(fx, prefix)?;
                 let rest = self.rest(fx, rest, ty)?;
-                let len = i64::try_from(prefix.len())
-                    .map_err(|_| InternalLinkError::IndexTooWide(prefix.len()))?;
-                let len = self.constant(Const::Int(len))?;
                 TypedPat::Array {
                     ty,
                     elem_ty,
-                    len,
                     prefix,
                     rest,
                 }

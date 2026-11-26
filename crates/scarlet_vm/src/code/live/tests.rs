@@ -111,8 +111,8 @@ fn of_the_operands_that_name_one_register_only_the_last_takes_it() {
     };
     assert_eq!(takes(write([0, 1, 0])), [false, true]);
     assert_eq!(takes(write([1, 1, 2])), [false, true]);
-    let d = draft(2, 1, vec![of::append(1, 0, 0), of::ret(1)], &[]);
-    assert_eq!(takes(d), [false]);
+    let d = draft(2, 1, vec![of::push(1, 0, 0), of::ret(1)], &[]);
+    assert_eq!(takes(d), [false, true]);
 }
 
 /// A call of a function value reads the value before it takes its arguments,
@@ -357,7 +357,7 @@ fn idle(mut d: Draft) -> Vec<usize> {
 fn a_drop_of_what_was_taken_does_nothing() {
     // Taken, then dropped: by a copy, an array, a call, or a cell taken apart.
     let open = of::open([Some(1), None], 0);
-    for taking in [of::mv(1, 0), of::append(1, 0, 2), of::call(1, &[0]), open] {
+    for taking in [of::mv(1, 0), of::push(1, 0, 2), of::call(1, &[0]), open] {
         let d = draft(3, 3, vec![taking, of::drop(0), of::halt(1)], &[]);
         assert_eq!(idle(d), [1], "{taking:?}");
     }
@@ -366,7 +366,11 @@ fn a_drop_of_what_was_taken_does_nothing() {
     assert_eq!(idle(d), [0; 0]);
     let ins = vec![of::mv(1, 0), of::len(2, 0), of::drop(0), of::halt(1)];
     assert_eq!(idle(draft(3, 1, ins, &[])), [0; 0]);
-    let ins = vec![of::append(1, 2, 0), of::drop(0), of::halt(1)];
+    let shared = Ins::Array {
+        dst: Dst(VReg(1)),
+        elements: crate::code::Shares::new(&[VReg(0)]).expect("room for one"),
+    };
+    let ins = vec![shared, of::drop(0), of::halt(1)];
     assert_eq!(idle(draft(3, 3, ins, &[])), [0; 0]);
     // Never read at all, whether it came in or was made.
     assert_eq!(
@@ -386,7 +390,7 @@ fn what_a_miss_drops_is_held_until_then() {
     // the hit it is passed on, and its drop there does nothing. On the miss the
     // first is dropped.
     let ins = vec![
-        of::append(2, 0, 1),
+        of::push(2, 0, 1),
         of::constant(3),
         of::write(2, [0, 3, 1], 0),
         of::mv(5, 2),
@@ -668,7 +672,7 @@ fn a_drop_with_little_between_it_and_a_return_does_nothing() {
     for other in [
         of::add(3, 1, 2),
         of::len(3, 1),
-        of::append(3, 1, 2),
+        of::push(3, 1, 2),
         of::call(3, &[1]),
     ] {
         let ins = vec![of::drop(0), of::mv(4, 1), other, of::ret(3)];
@@ -714,11 +718,7 @@ fn a_drop_with_little_between_it_and_a_return_does_nothing() {
 fn a_drop_of_what_may_hold_the_cell_stays_in_front_of_taking_it_apart() {
     let idle = |ins: Vec<Ins<VReg>>, labels: &[usize]| idle_steps(ins, labels).0;
     let none: [usize; 0] = [];
-    let element = |dst: u32, src: u32| Ins::ArrayElem {
-        dst: Dst(VReg(dst)),
-        src: Src(VReg(src)),
-        index: 0,
-    };
+    let element = |dst: u32, src: u32| of::split(&[Some(dst)], None, src, 0);
     let field = |dst: u32, src: u32| Ins::Field {
         dst: Dst(VReg(dst)),
         src: Src(VReg(src)),
@@ -727,19 +727,32 @@ fn a_drop_of_what_may_hold_the_cell_stays_in_front_of_taking_it_apart() {
     let opened = || of::open([Some(4), None], 3);
     let ins = vec![of::mv(3, 1), of::drop(0), opened(), of::ret(4)];
     assert_eq!(idle(ins, &[]), [1]);
-    for read in [field(3, 0), element(3, 0)] {
-        let ins = vec![read, of::drop(0), opened(), of::ret(4)];
-        assert_eq!(idle(ins, &[]), none);
-        // What is dropped after it is in front of the return alone.
-        let ins = vec![read, opened(), of::drop(0), of::ret(4)];
-        assert_eq!(idle(ins, &[]), [2]);
-        // It may be where a jump goes.
-        let ins = vec![read, of::drop(0), of::jump(0), opened(), of::ret(4)];
-        assert_eq!(idle(ins, &[3]), none);
-    }
+    let read = field(3, 0);
+    let ins = vec![read, of::drop(0), opened(), of::ret(4)];
+    assert_eq!(idle(ins, &[]), none);
+    // What is dropped after it is in front of the return alone.
+    let ins = vec![read, opened(), of::drop(0), of::ret(4)];
+    assert_eq!(idle(ins, &[]), [2]);
+    // It may be where a jump goes.
+    let ins = vec![read, of::drop(0), of::jump(0), opened(), of::ret(4)];
+    assert_eq!(idle(ins, &[3]), none);
     for read in [of::find(3, [0, 1], 0), of::get(Some(3), [0, 1], 0)] {
         let ins = vec![read, of::drop(0), opened(), of::ret(4), of::ret(1)];
         assert_eq!(idle(ins, &[4]), none);
+    }
+    // One that takes an array apart takes it, unless it is looked at again.
+    for read in [element(3, 0), of::uncons(Some(3), 2, 0, 0)] {
+        let ins = vec![read, of::drop(0), opened(), of::ret(4), of::ret(1)];
+        assert_eq!(idle(ins, &[4]), [1]);
+        let ins = vec![
+            read,
+            of::unless(0, 0),
+            of::drop(0),
+            opened(),
+            of::ret(4),
+            of::ret(1),
+        ];
+        assert_eq!(idle(ins, &[5]), none);
     }
 }
 

@@ -809,6 +809,26 @@ impl Maker {
         bind(self.next, ty)
     }
 
+    /// A probe of an array, and the places for what it finds.
+    fn pieces(&mut self) -> (ProbeOp, Vec<Option<CoreBind>>) {
+        let len = u32::try_from(self.below(4)).unwrap();
+        let more = self.below(2) == 0;
+        let (op, n) = match (len, more) {
+            (1, true) => (ProbeOp::ArrayUncons, 2),
+            _ => {
+                let from = u32::try_from(self.below(4)).unwrap().min(len);
+                let n = usize::try_from(len - from).unwrap() + usize::from(more);
+                (ProbeOp::ArraySplit { len, more, from }, n)
+            }
+        };
+        let bind = |_| {
+            let ty = self.ty();
+            let bind = self.bind(ty);
+            (self.below(4) > 0).then_some(bind)
+        };
+        (op, (0..n).map(bind).collect())
+    }
+
     fn any(&mut self, scope: &[u32]) -> u32 {
         scope[self.below(scope.len())]
     }
@@ -1011,6 +1031,20 @@ impl Maker {
                 switch(scrut, arms, default)
             }
             5 | 6 => {
+                if self.below(3) == 0 {
+                    let (op, binds) = self.pieces();
+                    let found: Vec<CoreBind> = binds.iter().copied().flatten().collect();
+                    return CoreExpr::Probe {
+                        op,
+                        args: vec![local(self.any(scope))],
+                        binds,
+                        hit: Box::new(self.expr(half, &with(&found), joins)),
+                        miss: Box::new(match self.below(3) {
+                            0 => CoreExpr::NoArm,
+                            _ => self.expr(half, scope, joins),
+                        }),
+                    };
+                }
                 let ty = self.ty();
                 let found = self.bind(ty);
                 let (op, n) = [

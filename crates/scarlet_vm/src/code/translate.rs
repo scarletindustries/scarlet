@@ -34,11 +34,13 @@ use scarlet_ir::tivec::Idx;
 
 use super::forms::Form;
 use super::ins::{
-    Arg, ArgList, Args, Assign, AssignList, BitsOp, Dead, Dst, DstList, Hit, Ins, IntTable, Label,
-    LastReg, Lists, LookList, Looks, Makes, MaybeDst, MaybeHit, Newline, OwnEntry, OwnRoom,
-    PlaceList, Role, Sets, ShareList, Shared, Shares, Src, Table, Taken, VReg,
+    Arg, ArgList, Args, Assign, AssignList, BitsOp, Dead, Dst, DstList, Hit, HitList, Hits, Ins,
+    IntTable, Label, LastReg, Length, Lists, LookList, Looks, Makes, MaybeDst, MaybeHit, Near,
+    Newline, OwnEntry, OwnRoom, PlaceList, Role, Sets, ShareList, Shared, Shares, Split, SplitWide,
+    Src, Table, Taken, VReg,
 };
 use super::{ReadsClosure, Source, Tables, Unfit, Why, add, built};
+use crate::array::End;
 use crate::heap::{Ctor, Layout};
 use crate::ops::{Arith, Compare, NumOp, Order};
 use crate::stop::{Arity, Broken, Limit, Missing};
@@ -149,8 +151,14 @@ pub(super) fn translate<'c>(
         reads: survey.reads,
         numbers: HashMap::new(),
         misses: Vec::new(),
+        no_arm: None,
     };
     t.expr(&core.body, None)?;
+    if let Some(no_arm) = t.no_arm {
+        t.place(no_arm);
+        let bad = t.broken(Broken::NoArm)?;
+        t.push(bad);
+    }
     let labels: Option<Vec<usize>> = t.labels.into_iter().collect();
     Ok(Draft {
         steps: t.steps,
@@ -210,6 +218,8 @@ struct Translator<'c> {
     numbers: HashMap<LocalId, Number>,
     /// [`Draft::misses`].
     misses: Vec<Miss>,
+    /// Where the probes that cannot miss go when they do, behind everything else.
+    no_arm: Option<Label>,
 }
 
 impl<'c> Translator<'c> {
@@ -269,6 +279,16 @@ impl<'c> Translator<'c> {
 
     fn label(&mut self) -> Result<Label, Unfit> {
         add(&mut self.labels, None).map(Label)
+    }
+
+    /// [`Self::no_arm`].
+    fn no_arm(&mut self) -> Result<Label, Unfit> {
+        if let Some(to) = self.no_arm {
+            return Ok(to);
+        }
+        let to = self.label()?;
+        self.no_arm = Some(to);
+        Ok(to)
     }
 
     /// Put `l` at the next step.
@@ -563,8 +583,16 @@ impl<'c> Translator<'c> {
                     hit,
                     miss,
                 } => {
+                    // Where it cannot miss, the hit has nothing behind it.
+                    if matches!(**miss, CoreExpr::NoArm) {
+                        let to = self.no_arm()?;
+                        let probe = self.probe(*op, args, binds, to)?;
+                        self.push(probe);
+                        e = hit;
+                        continue;
+                    }
                     let to = self.label()?;
-                    let probe = probe(*op, args, binds, to)?;
+                    let probe = self.probe(*op, args, binds, to)?;
                     self.push(probe);
                     self.expr(hit, Some(to))?;
                     self.place(to);
@@ -665,6 +693,133 @@ impl<'c> Translator<'c> {
     fn give_up(&mut self, local: LocalId) {
         let reg = Dead(of(local));
         self.push(Ins::Drop { reg });
+    }
+
+    /// The instruction that asks for `op` of `args`, and goes on at `miss` where it is
+    /// not there.
+    fn probe(
+        &mut self,
+        op: ProbeOp,
+        args: &[LocalId],
+        binds: &[Option<CoreBind>],
+        miss: Label,
+    ) -> Result<Ins<VReg>, Unfit> {
+        let odd = Broken::Probe {
+            op,
+            args: args.len(),
+            binds: binds.len(),
+        };
+        let to = |bind: &Option<CoreBind>| bind.as_ref().map(|bind| of(bind.id));
+        Ok(match (op, args, binds) {
+            (ProbeOp::ArraySlice, [xs, start, end], [bind]) => Ins::ArraySlice {
+                dst: MaybeHit::new(to(bind)),
+                src: src(*xs),
+                start: src(*start),
+                end: src(*end),
+                miss,
+            },
+            (ProbeOp::ArraySet, [xs, i, x], [Some(bind)]) => Ins::ArraySet {
+                dst: Hit(of(bind.id)),
+                src: Arg::shared(of(*xs)),
+                index: src(*i),
+                value: Arg::shared(of(*x)),
+                miss,
+            },
+            // A write that nothing reads asks whether the array has the index.
+            (ProbeOp::ArrayGet, [xs, i], [bind]) | (ProbeOp::ArraySet, [xs, i, _], [bind]) => {
+                Ins::ArrayGet {
+                    dst: MaybeHit::new(to(bind)),
+                    src: src(*xs),
+                    index: src(*i),
+                    miss,
+                }
+            }
+            (ProbeOp::MapGet, [m, k], [bind]) => Ins::MapGet {
+                dst: MaybeHit::new(to(bind)),
+                map: src(*m),
+                key: src(*k),
+                miss,
+            },
+            (ProbeOp::ArrayUncons, [xs], [head, Some(tail)]) => Ins::ArrayUncons {
+                head: MaybeHit::new(to(head)),
+                tail: Hit(of(tail.id)),
+                src: Arg::shared(of(*xs)),
+                miss,
+            },
+            (ProbeOp::ArrayUncons, [xs], [head, None]) => {
+                let length = Length { len: 1, more: true };
+                let split = Split { length, from: 0 };
+                self.split(*xs, split, std::slice::from_ref(head), None, miss)?
+            }
+            (ProbeOp::ArraySplit { len, more, from }, [xs], _) => {
+                let (tail, elements) = match (more, binds.split_last()) {
+                    (false, _) => (None, binds),
+                    (true, Some((tail, elements))) => (to(tail), elements),
+                    (true, None) => return Err(odd.into()),
+                };
+                let found = u32::try_from(elements.len()).ok();
+                let end = found.and_then(|n| from.checked_add(n));
+                let cons = (len, more, from) == (1, true, 0) && !elements.is_empty();
+                if cons || end.is_none_or(|end| end > len) {
+                    return Err(odd.into());
+                }
+                let length = Length { len, more };
+                let split = Split { length, from };
+                self.split(*xs, split, elements, tail, miss)?
+            }
+            (
+                ProbeOp::ArrayGet
+                | ProbeOp::ArraySlice
+                | ProbeOp::ArraySet
+                | ProbeOp::ArrayUncons
+                | ProbeOp::ArraySplit { .. }
+                | ProbeOp::MapGet,
+                ..,
+            ) => return Err(odd.into()),
+        })
+    }
+
+    /// The instruction that takes `xs` apart as `split` says, each of `elements` to its
+    /// local.
+    fn split(
+        &mut self,
+        xs: LocalId,
+        split: Split,
+        elements: &[Option<CoreBind>],
+        tail: Option<VReg>,
+        miss: Label,
+    ) -> Result<Ins<VReg>, Unfit> {
+        let (src_of, tail) = (src(xs), MaybeHit::new(tail));
+        let src = Arg::shared(of(xs));
+        let hit = |bind: &Option<CoreBind>| MaybeHit::new(bind.as_ref().map(|b| of(b.id)));
+        // What nothing reads is not found.
+        let used = elements.iter().rposition(Option::is_some);
+        let used = used.map_or(0, |last| last.saturating_add(1));
+        let elements = elements.iter().take(used).map(hit);
+        let elements: Box<[MaybeHit<VReg>]> = elements.collect();
+        if elements.is_empty() && tail.hit().is_none() {
+            return Ok(Ins::JumpUnlessLength {
+                src: src_of,
+                length: split.length,
+                to: miss,
+            });
+        }
+        if let (Some(split), Some(elements)) = (Near::new(split), Hits::new(&elements)) {
+            return Ok(Ins::ArraySplit {
+                elements,
+                tail,
+                src,
+                split,
+                miss,
+            });
+        }
+        let wide = SplitWide { split, elements };
+        Ok(Ins::ArraySplitWide {
+            elements: add(&mut self.lists.splits, wide).map(HitList)?,
+            tail,
+            src,
+            miss,
+        })
     }
 
     /// Take the `variant` in `cell` apart, each of `fields` to its local. Any other
@@ -1195,6 +1350,33 @@ impl<'c> Translator<'c> {
         })
     }
 
+    /// The instruction that puts `xs` with `items` at `end` in `dst`.
+    fn pushes(
+        &mut self,
+        dst: Dst<VReg>,
+        xs: LocalId,
+        items: &[LocalId],
+        end: End,
+    ) -> Result<Ins<VReg>, Unfit> {
+        let src = Arg::shared(of(xs));
+        if let [item] = items {
+            let item = Arg::shared(of(*item));
+            return Ok(Ins::ArrayPush {
+                dst,
+                src,
+                item,
+                end,
+            });
+        }
+        let items: Vec<VReg> = items.iter().copied().map(of).collect();
+        Ok(Ins::ArrayExtend {
+            dst,
+            src,
+            items: ShareList(self.reg_list(&items)?),
+            end,
+        })
+    }
+
     fn bits(&mut self, dst: Dst<VReg>, op: BitsOp, args: &[LocalId]) -> Result<Ins<VReg>, Unfit> {
         Ok(match self.looks(args)? {
             Fit::Inline(args) => Ins::Bits { dst, op, args },
@@ -1281,27 +1463,13 @@ impl<'c> Translator<'c> {
                 Fit::Listed(elements) => Ins::ArrayWide { dst, elements },
             }),
             PrimOp::ArrayLen => one().map(|src| Ins::ArrayLen { dst, src }),
-            PrimOp::ArrayElem(index) => one().map(|src| Ins::ArrayElem { dst, src, index }),
-            PrimOp::ArrayDrop => both().map(|(Src(src), n)| Ins::ArrayDrop {
-                dst,
-                src: Arg::shared(src),
-                n,
-            }),
             PrimOp::ArrayPrepend => {
-                let (rest, front) = args.split_last().ok_or(arity(Arity::AtLeastOne))?;
-                let rest = Arg::shared(of(*rest));
-                Ok(match self.shares(front.iter().copied())? {
-                    Fit::Inline(front) => Ins::ArrayPrepend { dst, rest, front },
-                    Fit::Listed(front) => Ins::ArrayPrependWide { dst, rest, front },
-                })
+                let (xs, items) = args.split_last().ok_or(arity(Arity::AtLeastOne))?;
+                self.pushes(dst, *xs, items, End::Front)
             }
             PrimOp::ArrayAppend => {
-                let (rest, back) = args.split_first().ok_or(arity(Arity::AtLeastOne))?;
-                let rest = Arg::shared(of(*rest));
-                Ok(match self.shares(back.iter().copied())? {
-                    Fit::Inline(back) => Ins::ArrayAppend { dst, rest, back },
-                    Fit::Listed(back) => Ins::ArrayAppendWide { dst, rest, back },
-                })
+                let (xs, items) = args.split_first().ok_or(arity(Arity::AtLeastOne))?;
+                self.pushes(dst, *xs, items, End::Back)
             }
             PrimOp::ArrayConcat => both().map(|(a, b)| Ins::ArrayConcat { dst, a, b }),
             PrimOp::MakeTuple => Ok(match *args {
@@ -1410,58 +1578,6 @@ fn number(c: Option<&Const>) -> Option<Number> {
         Const::Float(x) => Some(Number::Float(Float::new(*x))),
         Const::String(_) | Const::Binary { .. } => None,
     }
-}
-
-/// The instruction that asks for `op` of `args`, and goes on at `miss` where it is not
-/// there.
-fn probe(
-    op: ProbeOp,
-    args: &[LocalId],
-    binds: &[Option<CoreBind>],
-    miss: Label,
-) -> Result<Ins<VReg>, Broken> {
-    let odd = Broken::Probe {
-        op,
-        args: args.len(),
-        binds: binds.len(),
-    };
-    let [bind] = binds else {
-        return Err(odd);
-    };
-    let to = bind.as_ref().map(|bind| of(bind.id));
-    let dst = MaybeHit::new(to);
-    Ok(match (op, args) {
-        (ProbeOp::ArraySlice, [xs, start, end]) => Ins::ArraySlice {
-            dst,
-            src: src(*xs),
-            start: src(*start),
-            end: src(*end),
-            miss,
-        },
-        (ProbeOp::ArraySet, [xs, i, x]) if let Some(to) = to => Ins::ArraySet {
-            dst: Hit(to),
-            src: Arg::shared(of(*xs)),
-            index: src(*i),
-            value: Arg::shared(of(*x)),
-            miss,
-        },
-        // A write that nothing reads asks whether the array has the index.
-        (ProbeOp::ArrayGet, [xs, i]) | (ProbeOp::ArraySet, [xs, i, _]) => Ins::ArrayGet {
-            dst,
-            src: src(*xs),
-            index: src(*i),
-            miss,
-        },
-        (ProbeOp::MapGet, [m, k]) => Ins::MapGet {
-            dst,
-            map: src(*m),
-            key: src(*k),
-            miss,
-        },
-        (ProbeOp::ArrayGet | ProbeOp::ArraySlice | ProbeOp::ArraySet | ProbeOp::MapGet, _) => {
-            return Err(odd);
-        }
-    })
 }
 
 // The instruction that does `op`, or `None` when there is none that holds the

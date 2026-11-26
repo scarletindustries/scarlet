@@ -16,6 +16,25 @@
 //! alternative with the rest of the row and its guard, and one that binds none tries
 //! the rest once. So a row is never two rows with one guard or one size between them.
 //!
+//! ## Arrays
+//!
+//! The elements and the tail of an array are no parts that are there to be read: a
+//! [`Node::Cut`] finds them, with the question of the length or behind it, and takes a
+//! reference for each. So a piece has a place like anything else, and what is known of
+//! that place says whether a cut has found it on the way here. An element that is asked of
+//! next is found alone and the others that the row needs behind it, a few at a time. The
+//! tail is cut last, when nothing is left to ask of its row, because a cut that finds the
+//! tail takes the array over where nothing else holds it.
+//!
+//! A cut asks for its length again, which costs little. A [`Node::Measure`] reads the
+//! length by itself, where several exact ones are asked for, or where it would be all
+//! that an array is held for.
+//!
+//! When an array is given up can be seen too, because a handle that only it holds is
+//! closed then. Nothing between two questions shows that, but a guard or a size does. What
+//! has to be cut or measured in front of one, and what waits behind it for the rows that
+//! are tried when it fails, is in [`behind`].
+//!
 //! ## How large a tree gets
 //!
 //! A row that does not ask what a question answers goes on in every branch of it.
@@ -36,6 +55,7 @@
 //! that sees to it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::ops::Range;
 use std::rc::Rc;
 
 use smallvec::{SmallVec, smallvec};
@@ -43,21 +63,24 @@ use smallvec::{SmallVec, smallvec};
 use super::{Const, ConstId, FloatKey, VariantRef};
 use crate::program::InternalLinkError;
 use crate::typed_ir::{
-    PatRest, RTy, Shapes, TempTys, TypedArm, TypedBind, TypedPat, each_expr, pat_binds,
+    BindingId, PatRest, RTy, Shapes, TempTys, TypedArm, TypedBind, TypedPat, each_expr, each_read,
+    pat_binds,
 };
 
+mod behind;
 mod rows;
 mod tree;
 
 pub(crate) use rows::fixed;
 pub(crate) use tree::{
-    AnyId, Branch, Fail, Goal, Key, Leaf, Length, Node, Part, Place, Places, ROOT, RestId, Segment,
-    Source, Tree,
+    AnyId, Branch, Cut, Fail, Goal, Key, Leaf, Length, Node, Part, Piece, Place, Places, ROOT,
+    RestId, Segment, Source, Tree,
 };
 
+use behind::{After, Behind, Runs};
 use rows::{
-    Bits, Check, Fact, Facts, Look, Row, What, asked_of, binds, comes_first, holds, or_that_binds,
-    reads_size, size_of, value_of, visible,
+    Bits, Check, Fact, Facts, Look, Row, What, asked_of, asked_size, binds, comes_first, holds,
+    or_that_binds, reads_size, size_of, sizes_read, value_of, visible,
 };
 use tree::Ways;
 
@@ -89,6 +112,11 @@ const DEEP: usize = 24;
 /// How many rows are looked at to choose what to ask.
 const LOOKED_AT: usize = 16;
 
+/// How far from the first one that is needed now an element of an array may be that is
+/// read with it, because the row needs it too. It is few, so that a long pattern does
+/// not need a register for each of its elements at once.
+const READ_AHEAD: u32 = 8;
+
 /// What a tree is made of, beside the match.
 pub(crate) struct Given<'a> {
     pub(crate) shapes: &'a Shapes,
@@ -99,20 +127,30 @@ pub(crate) struct Given<'a> {
     pub(crate) allowance: Allowance,
 }
 
-/// The tree that finds the arm for a value of type `ty`. Nothing but the match
-/// reads that value when it is `alone`.
-pub(crate) fn tree<'p>(
-    given: &Given<'_>,
-    ty: RTy,
-    alone: bool,
-    arms: &'p [TypedArm],
-) -> R<Tree<'p>> {
+/// What is known of the value that a match is on.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct On {
+    pub(crate) ty: RTy,
+    /// Whether nothing but the match reads it.
+    pub(crate) alone: bool,
+    /// The binding that the value is of, when it is a binding's.
+    pub(crate) name: Option<BindingId>,
+}
+
+/// The tree that finds the arm for a value.
+pub(crate) fn tree<'p>(given: &Given<'_>, on: On, arms: &'p [TypedArm]) -> R<Tree<'p>> {
+    let On { ty, alone, .. } = on;
     let mut build = Build {
         given,
+        matched: arms,
         alone,
         arms: Vec::with_capacity(arms.len()),
         places: Places::default(),
         facts: Facts::default(),
+        asked: Vec::new(),
+        put_off: Vec::new(),
+        runs: Runs::of(on, arms),
+        behind: Vec::new(),
         rests: 0,
         anys: 0,
         allowance: given.allowance.any,
@@ -177,10 +215,31 @@ enum Alternative<'p> {
 enum Asked<'p> {
     /// Nothing is left to try.
     Done(Node<'p>),
-    /// What is left is tried where this goes on at the id.
-    Link(RestId, Node<'p>),
+    /// What is left is tried where this goes on at the id. The lengths are read in front
+    /// of both.
+    Link(RestId, Vec<Place>, Node<'p>),
+    /// The row, and what has to be cut out of an array for it first.
+    Cut(Row<'p>, Box<Cut>),
+    /// The row, and an array whose length has to be read first.
+    Measure(Row<'p>, Place),
     /// Nothing had to be asked yet, and this is left of the row.
     Again(Row<'p>),
+}
+
+/// What is to be done first for a row.
+enum Next {
+    /// Nothing. It takes every value.
+    Nothing,
+    Cut(Box<Cut>),
+    /// Go on by what its check at this place asks for.
+    Which(usize),
+    /// Read the length of the array there.
+    Measure(Place),
+    /// Ask for this length, for that check, and how much deeper its rows then are.
+    Long(usize, Length, usize),
+    Within(usize, Place, [ConstId; 2]),
+    /// Something that no other row shares.
+    Own,
 }
 
 /// What a row has to know, that others may share the answer to.
@@ -194,11 +253,19 @@ enum Question {
 
 struct Build<'a> {
     given: &'a Given<'a>,
+    matched: &'a [TypedArm],
     alone: bool,
     /// How large each arm's guard is, which is 0 when it has none.
     arms: Vec<usize>,
     places: Places,
     facts: Facts,
+    /// The arrays that a length was asked of.
+    asked: Vec<Place>,
+    /// The tails that rows in front left for later ([`Build::late`]).
+    put_off: Vec<(TypedBind, Place)>,
+    runs: Option<Runs>,
+    /// What is read at each [`RestId`], where [`Build::runs`] says that it matters.
+    behind: Vec<Behind>,
     rests: u32,
     anys: u32,
     /// How much may still be copied.
@@ -334,15 +401,140 @@ impl<'p> Build<'_> {
         row.checks.is_empty() && !self.guarded(row.goal)
     }
 
-    /// A place in the rows that come after others.
-    fn rest(&mut self) -> R<RestId> {
-        let id = RestId(self.rests);
-        let at = self.rests as usize;
-        self.rests = self
-            .rests
-            .checked_add(1)
-            .ok_or(InternalLinkError::IndexTooWide(at))?;
-        Ok(id)
+    /// Whether every value fits `p` and nothing reads a name in it.
+    fn asks_nothing(&self, p: &TypedPat) -> bool {
+        let rest = |rest: &PatRest| match rest {
+            PatRest::None => false,
+            PatRest::Discard => true,
+            PatRest::Bind(b) => !self.used(b),
+        };
+        match p {
+            TypedPat::Wild { .. } => true,
+            TypedPat::Bind(b) => !self.used(b),
+            TypedPat::Tuple { elems, .. } => elems.iter().all(|p| self.asks_nothing(p)),
+            TypedPat::Ctor {
+                variant, fields, ..
+            } => fields.is_empty() && self.variants(*variant) == Some(1),
+            TypedPat::Array {
+                prefix, rest: tail, ..
+            } => prefix.is_empty() && rest(tail),
+            TypedPat::Bin {
+                segs, rest: tail, ..
+            } => segs.is_empty() && rest(tail),
+            TypedPat::Or { alts, .. } => {
+                let mut nothing = alts.iter().map(|p| self.asks_nothing(p));
+                match alts.iter().any(binds) {
+                    true => nothing.all(|nothing| nothing),
+                    false => nothing.any(|nothing| nothing),
+                }
+            }
+            TypedPat::Lit { .. } | TypedPat::Range { .. } => false,
+        }
+    }
+
+    /// Whether an element of `on` has been found.
+    fn any_found(&self, on: Place) -> bool {
+        self.places.elements(on).any(|p| self.is_found(p))
+    }
+
+    /// The place of a piece of `on` that a cut has found.
+    fn found(&self, on: Place, piece: Piece) -> Option<Place> {
+        let p = self.places.found(on, piece);
+        p.filter(|p| self.is_found(*p))
+    }
+
+    /// Note something that is known of `on`, and for each array that it is in that this is
+    /// known of one of its elements.
+    fn learn(&mut self, on: Place, change: impl FnOnce(&mut Fact)) {
+        self.facts.set(on, change);
+        let mut at = on;
+        while let Some((source, _)) = self.places.get(at)
+            && let Some(of) = source.of()
+        {
+            if let Source::Found {
+                piece: Piece::Element(i),
+                ..
+            } = source
+            {
+                let mut told = match self.facts.get(of).and_then(|f| f.told.as_deref()) {
+                    Some(told) if told.contains(&i) => return,
+                    Some(told) => told.clone(),
+                    None => BTreeSet::new(),
+                };
+                told.insert(i);
+                self.facts.set(of, |f| f.told = Some(Rc::new(told)));
+            }
+            at = of;
+        }
+    }
+
+    /// Whether what is known of an element of `on` is that it does not fit what `prefix`
+    /// has for it, with no size to read in front of it.
+    fn unfit(&mut self, on: Place, prefix: &'p [TypedPat]) -> R<bool> {
+        let Some(told) = self.facts.get(on).and_then(|f| f.told.clone()) else {
+            return Ok(false);
+        };
+        for i in told.iter() {
+            let at = *i as usize;
+            let Some(p) = prefix.get(at) else {
+                break;
+            };
+            if !matches!(p, TypedPat::Wild { .. })
+                && let Some(element) = self.found(on, Piece::Element(*i))
+                && self.never(element, p)?
+            {
+                return Ok(!prefix.iter().take(at).any(|p| holds(p, &reads_size)));
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether what is at `on` is known not to fit `p`, with no size to read first.
+    fn never(&mut self, on: Place, p: &'p TypedPat) -> R<bool> {
+        Ok(match self.look(on, p)? {
+            Look::Never => true,
+            Look::Parts(parts, _) => {
+                for (i, (on, p)) in parts.iter().enumerate() {
+                    if self.never(*on, p)? {
+                        return Ok(!parts.iter().take(i).any(|(_, p)| holds(p, &reads_size)));
+                    }
+                }
+                false
+            }
+            Look::Or(alts) => alts.is_empty(),
+            Look::Open => false,
+        })
+    }
+
+    /// The place of the length of the array at `on`.
+    fn length(&mut self, on: Place) -> R<Place> {
+        self.places.part(on, Part::Length, self.given.temps.int)
+    }
+
+    /// What the guard of `goal` reads.
+    fn guard_reads(&self, goal: Goal) -> BTreeSet<usize> {
+        let mut reads = BTreeSet::new();
+        if let Goal::Arm(i) = goal
+            && let Some(guard) = self.matched.get(i).and_then(|arm| arm.guard.as_ref())
+        {
+            each_read(guard, |b| {
+                reads.insert(b.0);
+            });
+        }
+        reads
+    }
+
+    /// Settle the rows that are looked at. Gives how many that has made of them.
+    fn settle_near(&mut self, rows: &mut VecDeque<Row<'p>>) -> R<usize> {
+        let mut near = SmallVec::new();
+        for row in rows.drain(..rows.len().min(LOOKED_AT)).collect::<Vec<_>>() {
+            self.settle(row, 0, &mut near)?;
+        }
+        let n = near.len();
+        for row in near.into_iter().rev() {
+            rows.push_front(row);
+        }
+        Ok(n)
     }
 
     /// The key of a literal.
@@ -421,30 +613,30 @@ impl<'p> Build<'_> {
                     Some(Key::Variant(_) | Key::Float(_) | Key::Text(_)) | None => Look::Open,
                 }
             }
-            TypedPat::Array {
-                len, prefix, rest, ..
-            } => {
-                let n = prefix.len();
+            TypedPat::Array { prefix, rest, .. } => {
+                let n = wide(prefix.len())?;
                 let (or_more, short) = (*rest != PatRest::None, fact.most.is_some_and(|m| m <= n));
                 let exact = fact.least == n && fact.most == n.checked_add(1);
                 if short || (!or_more && fact.least > n) {
                     Look::Never
                 } else if exact || (or_more && fact.least >= n) {
-                    let mut parts = Vec::with_capacity(n);
+                    let mut parts = Vec::with_capacity(prefix.len());
                     for (i, p) in prefix.iter().enumerate() {
                         if !matches!(p, TypedPat::Wild { .. }) {
-                            let part = Part::Item(index(i)?);
-                            parts.push((self.places.part(on, part, p.ty())?, p));
+                            let piece = Piece::Element(wide(i)?);
+                            parts.push((self.places.piece(on, piece, p.ty())?, p));
                         }
                     }
                     let tail = match rest {
                         PatRest::Bind(b) if self.used(b) => Some(match n {
                             0 => (*b, on),
-                            _ => (*b, self.places.part(on, Part::After(*len), b.ty)?),
+                            _ => (*b, self.places.piece(on, Piece::Tail(n), b.ty)?),
                         }),
                         PatRest::Bind(_) | PatRest::Discard | PatRest::None => None,
                     };
                     Look::Parts(parts, tail)
+                } else if self.unfit(on, prefix)? {
+                    Look::Never
                 } else {
                     Look::Open
                 }
@@ -534,9 +726,21 @@ impl<'p> Build<'_> {
                 Look::Open => {}
                 Look::Never => return Ok(()),
                 Look::Parts(parts, bind) => {
-                    let parts = self.checks(parts, row.in_order);
-                    row.checks.splice(from..=from, parts);
                     row.binds.extend(bind.filter(|(b, _)| self.used(b)));
+                    // A long pattern's names are bound here, and not one by one out of
+                    // the checks.
+                    let mut parts = parts.into_iter().peekable();
+                    while let Some((on, TypedPat::Bind(b))) =
+                        parts.next_if(|(_, p)| matches!(p, TypedPat::Bind(_)))
+                    {
+                        row.binds.extend(self.used(b).then_some((*b, on)));
+                    }
+                    if parts.peek().is_none() {
+                        row.checks.remove(from);
+                    } else {
+                        let parts = self.checks(parts, row.in_order);
+                        row.checks.splice(from..=from, parts);
+                    }
                     continue;
                 }
                 Look::Or(alts) => match self.alternative(&row, on, &alts)? {
@@ -756,62 +960,279 @@ impl<'p> Build<'_> {
     /// The tree that tries `rows` in order, and goes on at `fail` when none fits.
     fn rows(&mut self, mut rows: VecDeque<Row<'p>>, fail: Fail) -> R<Node<'p>> {
         let mark = self.facts.mark();
+        let (asked, put_off) = (self.asked.len(), self.put_off.len());
         let mut links: Vec<(RestId, Node<'p>)> = Vec::new();
+        let mut lengths = Vec::new();
         let last = loop {
             let Some(row) = self.next(&mut rows)? else {
                 break go_on(fail);
             };
-            match self.ask(row, &mut rows, fail)? {
+            let next = self.next_question(&row, &mut rows)?;
+            match self.ask(row, next, &mut rows, fail)? {
                 Asked::Done(node) => break node,
-                Asked::Link(id, node) => links.push((id, node)),
+                Asked::Link(id, read, node) => {
+                    lengths.extend(read);
+                    links.push((id, node));
+                }
                 Asked::Again(row) => rows.push_front(row),
+                Asked::Cut(row, cut) => {
+                    rows.push_front(row);
+                    self.find(&cut);
+                    let yes = self.rows(std::mem::take(&mut rows), fail)?;
+                    break Node::Cut {
+                        cut,
+                        yes: Box::new(yes),
+                        no: Box::new(Node::Nothing),
+                    };
+                }
+                Asked::Measure(row, on) => {
+                    rows.push_front(row);
+                    self.facts.set(on, |f| f.measured = true);
+                    let length = self.length(on)?;
+                    let then = self.rows(std::mem::take(&mut rows), fail)?;
+                    break Node::Measure {
+                        length,
+                        then: Box::new(then),
+                    };
+                }
             }
         };
         self.facts.back_to(mark);
+        self.asked.truncate(asked);
+        self.put_off.truncate(put_off);
         if links.is_empty() {
             return Ok(last);
         }
-        Ok(Node::Chain {
+        let chain = Node::Chain {
             links,
             last: Box::new(last),
+        };
+        Ok(lengths
+            .into_iter()
+            .rev()
+            .fold(chain, |then, length| Node::Measure {
+                length,
+                then: Box::new(then),
+            }))
+    }
+
+    /// Ask what `row` has to know first, which is what `next` says. It is settled, and
+    /// `rows` are those behind it. What it leaves in `rows` is tried next.
+    fn ask(
+        &mut self,
+        row: Row<'p>,
+        next: Next,
+        rows: &mut VecDeque<Row<'p>>,
+        fail: Fail,
+    ) -> R<Asked<'p>> {
+        match next {
+            Next::Nothing => {
+                let Row { goal, binds, .. } = row;
+                Ok(Asked::Done(Node::Leaf(Leaf {
+                    goal,
+                    binds,
+                    late: Vec::new(),
+                    fail: None,
+                })))
+            }
+            Next::Cut(cut) => Ok(Asked::Cut(row, cut)),
+            Next::Which(at) => self.switch(row, at, rows, fail),
+            Next::Measure(on) => Ok(Asked::Measure(row, on)),
+            Next::Long(at, test, deeper) => {
+                self.depth = self.depth.saturating_add(deeper);
+                let asked = self.long(row, at, test, rows, fail);
+                self.depth = self.depth.saturating_sub(deeper);
+                asked
+            }
+            Next::Within(at, on, range) => self.within(row, at, (on, range), rows, fail),
+            Next::Own => self.first(row, rows, fail),
+        }
+    }
+
+    /// Ask whether an Int is in a range, which is check `at` of `row`.
+    #[inline(never)]
+    fn within(
+        &mut self,
+        mut row: Row<'p>,
+        at: usize,
+        (on, range): (Place, [ConstId; 2]),
+        rows: &mut VecDeque<Row<'p>>,
+        fail: Fail,
+    ) -> R<Asked<'p>> {
+        let after = self.after(&row, rows, fail)?;
+        if let Some(on) = self.unmeasured(&row.binds, rows, after)? {
+            return Ok(Asked::Measure(row, on));
+        }
+        row.checks.remove(at);
+        self.by_itself(row, rows, (fail, after), |yes, fail| Node::Within {
+            on,
+            range,
+            yes: Box::new(yes),
+            fail,
         })
     }
 
-    /// Ask what `row` has to know first. It is settled, and `rows` are those behind
-    /// it. What it leaves in `rows` is tried next.
-    fn ask(&mut self, row: Row<'p>, rows: &mut VecDeque<Row<'p>>, fail: Fail) -> R<Asked<'p>> {
-        if self.takes_all(&row) {
-            let Row { goal, binds, .. } = row;
-            return Ok(Asked::Done(Node::Leaf(Leaf {
-                goal,
-                binds,
-                fail: None,
-            })));
+    /// What `row` has to know first, with `rows` behind it.
+    // Not in `rows`, which a deep match is as deep in as it has questions.
+    #[inline(never)]
+    fn next_question(&mut self, row: &Row<'p>, rows: &mut VecDeque<Row<'p>>) -> R<Next> {
+        if self.takes_all(row) {
+            return Ok(self.missing(&row.binds).map_or(Next::Nothing, Next::Cut));
         }
-        match self.choose(&row, rows)? {
-            Some((at, Question::Which)) => self.switch(row, at, rows, fail),
-            Some((at, Question::Long(test))) => self.long(row, at, test, rows, fail),
-            Some((at, Question::Within(on, range))) => {
-                let mut row = row;
-                row.checks.remove(at);
-                self.by_itself(row, rows, fail, |yes, fail| Node::Within {
-                    on,
-                    range,
-                    yes: Box::new(yes),
-                    fail,
-                })
+        let Some((at, question)) = self.choose(row, rows)? else {
+            return Ok(Next::Own);
+        };
+        let on = row.checks.get(at).map(|check| check.on);
+        if let Some(cut) = on.and_then(|on| self.ahead(on, row)) {
+            return Ok(Next::Cut(cut));
+        }
+        Ok(match question {
+            Question::Which => Next::Which(at),
+            Question::Long(test) => {
+                if let Some(on) = self.lengths(row, at, test, rows)? {
+                    return Ok(Next::Measure(on));
+                }
+                let (test, deeper) = self.longest_first(row, at, test, rows)?;
+                Next::Long(at, test, deeper)
             }
-            None => self.first(row, rows, fail),
+            Question::Within(on, range) => Next::Within(at, on, range),
+        })
+    }
+
+    /// Whether nothing has to be cut out of an array to come by `p`, which is a piece.
+    /// Any other place is come by without.
+    fn is_found(&self, p: Place) -> bool {
+        match self.places.get(p) {
+            Some((Source::Found { .. }, _)) => self.facts.get(p).is_some_and(|f| f.found),
+            Some((Source::Given | Source::Part { .. }, _)) | None => true,
         }
+    }
+
+    /// The array that has to be cut first to come by `p`, and the piece of it.
+    fn unfound(&self, p: Place) -> Option<(Place, Piece)> {
+        let mut first = None;
+        let mut at = Some(p);
+        while let Some((source, _)) = at.and_then(|p| self.places.get(p)) {
+            if let (Source::Found { of, piece }, Some(p)) = (source, at)
+                && !self.is_found(p)
+            {
+                first = Some((of, piece));
+            }
+            at = source.of();
+        }
+        first
+    }
+
+    /// Note that `cut` finds what it asks for.
+    fn find(&mut self, cut: &Cut) {
+        let elements = cut.elements.iter().copied().flatten();
+        for p in elements.chain(cut.tail) {
+            self.facts.set(p, |f| f.found = true);
+        }
+    }
+
+    /// The elements of the array `on` that `row` needs and that are not found.
+    fn elements(&self, on: Place, row: &Row<'p>) -> BTreeSet<u32> {
+        let mut needs = Vec::new();
+        asked_of(&row.checks, &mut needs);
+        needs.extend(row.binds.iter().map(|(_, p)| *p));
+        let pieces = needs.into_iter().filter_map(|p| self.unfound(p));
+        let elements = pieces.filter_map(|(of, piece)| match piece {
+            Piece::Element(i) if of == on => Some(i),
+            Piece::Element(_) | Piece::Tail(_) => None,
+        });
+        elements.collect()
+    }
+
+    /// What to cut out of `on`, which has the length that `length` says: the elements
+    /// in `all`, and what is behind the first of them when there is a `tail`.
+    fn cut(&self, on: Place, all: &BTreeSet<u32>, length: Length, tail: bool) -> Box<Cut> {
+        let from = all.first().copied().unwrap_or(0);
+        let last = all.last().copied();
+        let place = |i| self.places.found(on, Piece::Element(i));
+        let elements = last.map_or_else(Vec::new, |last| {
+            (from..=last)
+                .map(|i| match all.contains(&i) {
+                    true => place(i),
+                    false => None,
+                })
+                .collect()
+        });
+        Box::new(Cut {
+            on,
+            before: Vec::new(),
+            length,
+            from,
+            elements,
+            tail: match tail {
+                true => self.places.found(on, Piece::Tail(length.n)),
+                false => None,
+            },
+        })
+    }
+
+    /// What has to be cut out of an array to come by `p`, with the elements near it
+    /// that `row` needs too.
+    #[inline(never)]
+    fn ahead(&self, p: Place, row: &Row<'p>) -> Option<Box<Cut>> {
+        let (on, piece) = self.unfound(p)?;
+        let first = match piece {
+            Piece::Element(i) => i,
+            // A tail is nothing that anything asks of.
+            Piece::Tail(_) => return None,
+        };
+        let many = match self.any_found(on) {
+            true => READ_AHEAD,
+            false => 1,
+        };
+        let near = first..first.saturating_add(many);
+        let all = self.elements(on, row);
+        let all: BTreeSet<u32> = all.range(near).copied().collect();
+        let n = all.last().copied().unwrap_or(first).saturating_add(1);
+        let length = Length { n, or_more: true };
+        Some(self.cut(on, &all, length, false))
+    }
+
+    /// What has to be cut out of an array first to bind `names`, with whatever else of it
+    /// they need. What else there is of them is read in front of that.
+    #[inline(never)]
+    fn missing(&self, names: &[(TypedBind, Place)]) -> Option<Box<Cut>> {
+        let (on, _) = names.iter().find_map(|(_, p)| self.unfound(*p))?;
+        let mut all = BTreeSet::new();
+        let mut tail = None;
+        let mut before = Vec::new();
+        for (_, p) in names {
+            match self.unfound(*p) {
+                Some((of, Piece::Tail(n))) if of == on => tail = tail.max(Some(n)),
+                Some((of, Piece::Element(i))) if of == on => {
+                    all.insert(i);
+                }
+                Some(_) => {}
+                None => before.push(*p),
+            }
+        }
+        let past = all.last().map_or(0, |last| last.saturating_add(1));
+        let length = Length {
+            n: tail.unwrap_or(past),
+            or_more: true,
+        };
+        let mut cut = self.cut(on, &all, length, tail.is_some());
+        cut.before = before;
+        Some(cut)
     }
 
     /// Where a question goes on when the answer is no, and the id of it when that is
     /// the rows behind, of which there are some.
-    fn behind(&mut self, rows: &VecDeque<Row<'p>>, fail: Fail) -> R<(Option<RestId>, Fail)> {
+    fn behind(
+        &mut self,
+        rows: &mut VecDeque<Row<'p>>,
+        fail: Fail,
+        after: Option<After>,
+    ) -> R<(Option<RestId>, Fail)> {
         if rows.is_empty() {
             return Ok((None, fail));
         }
-        let id = self.rest()?;
+        let id = self.rest(rows, fail, after)?;
         Ok((Some(id), Some(id)))
     }
 
@@ -820,25 +1241,60 @@ impl<'p> Build<'_> {
     fn by_itself(
         &mut self,
         row: Row<'p>,
-        rows: &VecDeque<Row<'p>>,
-        fail: Fail,
+        rows: &mut VecDeque<Row<'p>>,
+        (fail, after): (Fail, Option<After>),
         node: impl FnOnce(Node<'p>, Fail) -> Node<'p>,
     ) -> R<Asked<'p>> {
-        let (behind, fail) = self.behind(rows, fail)?;
+        let (behind, fail) = self.behind(rows, fail, after)?;
         let yes = self.rows(VecDeque::from([row]), fail)?;
-        Ok(asked(behind, node(yes, fail)))
+        Ok(asked(behind, Vec::new(), node(yes, fail)))
     }
 
     /// Do what `row` has to do first when that is no question that others may share:
     /// its guard, an or-pattern, or what it reads of a binary.
-    fn first(&mut self, mut row: Row<'p>, rows: &VecDeque<Row<'p>>, fail: Fail) -> R<Asked<'p>> {
+    #[inline(never)]
+    fn first(
+        &mut self,
+        mut row: Row<'p>,
+        rows: &mut VecDeque<Row<'p>>,
+        fail: Fail,
+    ) -> R<Asked<'p>> {
+        let after = self.after(&row, rows, fail)?;
+        if let Some(on) = self.unmeasured(&row.binds, rows, after)? {
+            return Ok(Asked::Measure(row, on));
+        }
         let Some(Check { on, what, .. }) = row.checks.first().cloned() else {
-            let (behind, fail) = self.behind(rows, fail)?;
-            let Row { goal, binds, .. } = row;
-            return Ok(asked(behind, Node::Leaf(Leaf { goal, binds, fail })));
+            let reads = self.guard_reads(row.goal);
+            let late = self.late(&row, &reads, rows, after)?;
+            let binds = but(&row.binds, &late);
+            if let Some(cut) = self.first_cut(&row, &binds, rows, after)? {
+                return Ok(Asked::Cut(row, cut));
+            }
+            for (b, p) in &late {
+                if self.put_off.iter().all(|(_, known)| known != p) {
+                    self.put_off.push((*b, *p));
+                }
+            }
+            let (behind, fail) = self.behind(rows, fail, after)?;
+            let leaf = Leaf {
+                goal: row.goal,
+                binds,
+                late,
+                fail,
+            };
+            return Ok(asked(behind, Vec::new(), Node::Leaf(leaf)));
         };
         match what {
             What::Any { alts, names } => {
+                let mut binds = Vec::new();
+                if row.sizes {
+                    let reads = sizes_read(&alts);
+                    let late = self.late(&row, &reads, rows, after)?;
+                    binds = but(&row.binds, &late);
+                }
+                if let Some(cut) = self.first_cut(&row, &binds, rows, after)? {
+                    return Ok(Asked::Cut(row, cut));
+                }
                 row.checks.remove(0);
                 let id = AnyId(self.anys);
                 let at = self.anys as usize;
@@ -846,10 +1302,6 @@ impl<'p> Build<'_> {
                     .anys
                     .checked_add(1)
                     .ok_or(InternalLinkError::IndexTooWide(at))?;
-                let binds = match row.sizes {
-                    true => row.binds.clone(),
-                    false => Vec::new(),
-                };
                 let mut given = Vec::with_capacity(names.len());
                 for b in names.iter() {
                     given.push((*b, self.places.add(Source::Given, b.ty)?));
@@ -864,7 +1316,7 @@ impl<'p> Build<'_> {
                     in_order: row.in_order,
                 });
                 let tried: VecDeque<Row<'p>> = tried.collect();
-                let (behind, fail) = self.behind(rows, fail)?;
+                let (behind, fail) = self.behind(rows, fail, after)?;
                 let first = Box::new(self.rows(tried, fail)?);
                 let then = Box::new(self.rows(VecDeque::from([row]), fail)?);
                 let node = Node::Any {
@@ -874,12 +1326,15 @@ impl<'p> Build<'_> {
                     first,
                     then,
                 };
-                Ok(asked(behind, node))
+                Ok(asked(behind, Vec::new(), node))
             }
             What::Bits(bits) => self.bits(row, on, bits, rows, fail),
             What::Pat(TypedPat::Bin {
                 zero, segs, rest, ..
             }) => {
+                if let Some(cut) = self.ahead(on, &row) {
+                    return Ok(Asked::Cut(row, cut));
+                }
                 let ty = self.given.temps.int;
                 let bits = Bits {
                     cursor: self.places.part(on, Part::Start(*zero), ty)?,
@@ -901,7 +1356,7 @@ impl<'p> Build<'_> {
         mut row: Row<'p>,
         on: Place,
         bits: Bits<'p>,
-        rows: &VecDeque<Row<'p>>,
+        rows: &mut VecDeque<Row<'p>>,
         fail: Fail,
     ) -> R<Asked<'p>> {
         let Bits {
@@ -914,7 +1369,7 @@ impl<'p> Build<'_> {
         let Some((seg, segs)) = segs.split_first() else {
             row.checks.remove(0);
             return match rest {
-                PatRest::None => self.by_itself(row, rows, fail, |yes, fail| Node::Ends {
+                PatRest::None => self.by_itself(row, rows, (fail, None), |yes, fail| Node::Ends {
                     total,
                     cursor,
                     yes: Box::new(yes),
@@ -930,6 +1385,20 @@ impl<'p> Build<'_> {
                 }
             };
         };
+        let mut binds = Vec::new();
+        let mut after = None;
+        if let Some(size) = asked_size(seg) {
+            let mut reads = BTreeSet::new();
+            each_read(size, |b| {
+                reads.insert(b.0);
+            });
+            after = self.after(&row, rows, fail)?;
+            let late = self.late(&row, &reads, rows, after)?;
+            binds = but(&row.binds, &late);
+            if let Some(cut) = self.missing(&binds) {
+                return Ok(Asked::Cut(row, cut));
+            }
+        }
         let next = self.places.add(Source::Given, self.given.temps.int)?;
         if let Some(check) = row.checks.first_mut() {
             check.what = What::Bits(Bits {
@@ -947,8 +1416,7 @@ impl<'p> Build<'_> {
             row.checks.splice(0..0, checks);
             value = Some(at);
         }
-        let binds = row.binds.clone();
-        self.by_itself(row, rows, fail, |yes, fail| {
+        self.by_itself(row, rows, (fail, after), |yes, fail| {
             Node::Segment(Box::new(Segment {
                 on,
                 cursor,
@@ -978,11 +1446,8 @@ impl<'p> Build<'_> {
                     Question::Which
                 }
                 What::Pat(TypedPat::Range { lo, hi, .. }) => Question::Within(check.on, [*lo, *hi]),
-                What::Pat(TypedPat::Array {
-                    len, prefix, rest, ..
-                }) => Question::Long(Length {
-                    n: prefix.len(),
-                    pooled: *len,
+                What::Pat(TypedPat::Array { prefix, rest, .. }) => Question::Long(Length {
+                    n: wide(prefix.len())?,
                     or_more: *rest != PatRest::None,
                 }),
                 What::Pat(
@@ -998,17 +1463,11 @@ impl<'p> Build<'_> {
             all.push((at, check.on, question));
         }
         if all.len() > 1 && !rows.is_empty() {
-            let mut near = SmallVec::new();
-            for row in rows.drain(..rows.len().min(LOOKED_AT)).collect::<Vec<_>>() {
-                self.settle(row, 0, &mut near)?;
-            }
+            let near = self.settle_near(rows)?;
             let mut asks: HashMap<Place, usize> = HashMap::new();
-            for check in near.iter().flat_map(visible) {
+            for check in rows.iter().take(near).flat_map(visible) {
                 let asks = asks.entry(check.on).or_default();
                 *asks = asks.saturating_add(1);
-            }
-            for row in near.into_iter().rev() {
-                rows.push_front(row);
             }
             // The first of those that as many ask.
             let by = |on: &Place| std::cmp::Reverse(asks.get(on).copied().unwrap_or(0));
@@ -1092,8 +1551,16 @@ impl<'p> Build<'_> {
                 rows.push_front(row);
             }
         }
+        let mut lengths = Vec::new();
         let (behind, fail) = match cut {
-            true => self.behind(rows, fail)?,
+            true => {
+                let cases = split.cases.iter().map(|(_, case)| case);
+                let cases = cases.chain([&split.default]);
+                let mut fronts = cases.flat_map(|case| &case.rows);
+                let runs = fronts.any(|row| self.may_run(row));
+                lengths = self.measure(runs, rows, fail)?;
+                self.behind(rows, fail, None)?
+            }
             false => (None, fail),
         };
         let covered = split.covered();
@@ -1116,13 +1583,13 @@ impl<'p> Build<'_> {
             let mark = self.facts.mark();
             let mut apart = Vec::new();
             if let [key] = keys.as_slice() {
-                self.facts.set(on, |f| f.key = Some(*key));
+                self.learn(on, |f| f.key = Some(*key));
                 if fail.is_none() && (on != ROOT || self.alone) {
                     apart = self.apart(on, &case.rows);
                 }
             } else {
                 let keys = Rc::new(keys.iter().copied().collect());
-                self.facts.set(on, |f| f.one_of = Some(keys));
+                self.learn(on, |f| f.one_of = Some(keys));
             }
             let node = self.rows(case.rows, fail)?;
             self.facts.back_to(mark);
@@ -1134,7 +1601,7 @@ impl<'p> Build<'_> {
             && branch.keys.len() > 1
             && let Some(Branch { node, .. }) = branches.pop()
         {
-            return Ok(asked(behind, node));
+            return Ok(asked(behind, lengths, node));
         }
         let node = |default| Node::Switch {
             on,
@@ -1142,24 +1609,25 @@ impl<'p> Build<'_> {
             default,
         };
         if covered {
-            return Ok(asked(behind, node(None)));
+            return Ok(asked(behind, lengths, node(None)));
         }
         let mark = self.facts.mark();
-        self.facts.set(on, |f| {
+        self.learn(on, |f| {
             let before = f.none_of.iter().flat_map(|keys| keys.iter().copied());
             let all = before.chain(split.of.into_keys()).collect();
             f.none_of = Some(Rc::new(all));
         });
         if self.depth >= DEEP && behind.is_none() && !split.default.rows.is_empty() {
-            let id = self.rest()?;
             *rows = split.default.rows;
-            return Ok(Asked::Link(id, node(Some(Box::new(Node::Rest(id))))));
+            let id = self.rest(rows, fail, None)?;
+            let node = node(Some(Box::new(Node::Rest(id))));
+            return Ok(asked(Some(id), lengths, node));
         }
         self.depth = self.depth.saturating_add(1);
         let default = self.rows(split.default.rows, fail)?;
         self.depth = self.depth.saturating_sub(1);
         self.facts.back_to(mark);
-        Ok(asked(behind, node(Some(Box::new(default)))))
+        Ok(asked(behind, lengths, node(Some(Box::new(default)))))
     }
 
     /// Put `row` in the cases it may be tried in. With `whatever`, that is done
@@ -1354,7 +1822,7 @@ impl<'p> Build<'_> {
             self.settle(row, 0, &mut settled)?;
             for row in settled {
                 let sides = match &cut {
-                    None => self.sides(on, test, &row),
+                    None => self.sides(on, test, &row)?,
                     Some(_) => [false; 2],
                 };
                 let [in_yes, in_no] = [sides[0] && !yes.closed, sides[1] && !no.closed];
@@ -1365,13 +1833,13 @@ impl<'p> Build<'_> {
                 }
                 if in_yes {
                     let mark = self.facts.mark();
-                    self.facts.set(on, |f| test.passed(f));
+                    self.learn(on, |f| test.passed(f));
                     self.add_settled(&mut yes, row.clone())?;
                     self.facts.back_to(mark);
                 }
                 if in_no {
                     let mark = self.facts.mark();
-                    self.facts.set(on, |f| test.failed(f));
+                    self.learn(on, |f| test.failed(f));
                     self.add_settled(&mut no, row)?;
                     self.facts.back_to(mark);
                 }
@@ -1387,44 +1855,219 @@ impl<'p> Build<'_> {
         for row in cut.into_iter().flatten().rev() {
             rows.push_front(row);
         }
-        let (behind, fail) = self.behind(rows, fail)?;
-        let length = self.places.part(on, Part::Length, self.given.temps.int)?;
-        let node = |yes, no| Node::Long {
-            length,
-            test,
-            yes: Box::new(yes),
-            no: Box::new(no),
-        };
+        if !self.asked.contains(&on) {
+            self.asked.push(on);
+        }
+        let fronts = yes.rows.iter().chain(&no.rows);
+        let runs = fronts.into_iter().any(|row| self.may_run(row));
+        let lengths = self.measure(runs, rows, fail)?;
+        let (behind, fail) = self.behind(rows, fail, None)?;
         let mark = self.facts.mark();
-        self.facts.set(on, |f| test.passed(f));
+        let known = self.facts.get(on).cloned().unwrap_or_default();
+        self.learn(on, |f| test.passed(f));
+        let cut = match known.measured {
+            true => None,
+            false => Some(self.at_once(on, test, &mut yes.rows, fail)?),
+        };
+        if let Some(cut) = &cut {
+            self.find(cut);
+        }
         let passed = self.rows(yes.rows, fail)?;
         self.facts.back_to(mark);
-        self.facts.set(on, |f| test.failed(f));
+        self.learn(on, |f| test.failed(f));
         if behind.is_some() {
             let failed = self.rows(no.rows, fail)?;
             self.facts.back_to(mark);
-            return Ok(asked(behind, node(passed, failed)));
+            let node = self.by_length(on, test, (cut, known.least), passed, failed)?;
+            return Ok(asked(behind, lengths, node));
         }
         // What is left is tried behind, where the test is known to have failed.
         *rows = no.rows;
-        let (behind, fail) = self.behind(rows, fail)?;
-        Ok(asked(behind, node(passed, go_on(fail))))
+        let (behind, fail) = self.behind(rows, fail, None)?;
+        let node = self.by_length(on, test, (cut, known.least), passed, go_on(fail))?;
+        Ok(asked(behind, lengths, node))
+    }
+
+    /// Go on by whether the length of `on` passes `test`, which `cut` asks. Without one
+    /// the length has been read, and is `least` or more.
+    fn by_length(
+        &mut self,
+        on: Place,
+        test: Length,
+        (cut, least): (Option<Box<Cut>>, u32),
+        passed: Node<'p>,
+        failed: Node<'p>,
+    ) -> R<Node<'p>> {
+        if let Some(cut) = cut {
+            return Ok(Node::Cut {
+                cut,
+                yes: Box::new(passed),
+                no: Box::new(failed),
+            });
+        }
+        let (keys, node, other) = match test.or_more {
+            true => (least..test.n, failed, passed),
+            false => (test.n..test.n.saturating_add(1), passed, failed),
+        };
+        let branch = Branch {
+            keys: keys.map(|n| Key::Int(i64::from(n))).collect(),
+            apart: Vec::new(),
+            node,
+        };
+        Ok(Node::Switch {
+            on: self.length(on)?,
+            branches: vec![branch],
+            default: Some(Box::new(other)),
+        })
+    }
+
+    /// What a test of the length of `on` finds for `rows`, which are tried when it has
+    /// passed: the elements that the first needs next, and its tail too, when nothing is
+    /// left to ask for that row and nothing that is still read holds the array.
+    #[inline(never)]
+    fn at_once(
+        &mut self,
+        on: Place,
+        test: Length,
+        rows: &mut VecDeque<Row<'p>>,
+        fail: Fail,
+    ) -> R<Box<Cut>> {
+        let Some(first) = rows.pop_front() else {
+            return Ok(self.cut(on, &BTreeSet::new(), test, false));
+        };
+        let mut all = self.elements(on, &first);
+        let mut tail = false;
+        if first.checks.is_empty() {
+            let own = self.places.found(on, Piece::Tail(test.n));
+            let own = own.filter(|_| test.or_more && on == ROOT);
+            if own.is_some_and(|own| first.binds.iter().any(|(_, p)| *p == own)) {
+                let after = self.after(&first, rows, fail)?;
+                // Its length is read before the tail is taken, where it has to be.
+                if self.unmeasured(&first.binds, rows, after)?.is_none() {
+                    let reads = self.guard_reads(first.goal);
+                    let late = self.late(&first, &reads, rows, after)?;
+                    let mut now = but(&first.binds, &late).into_iter();
+                    tail = now.any(|(_, p)| own == Some(p));
+                }
+            }
+        } else if let Some(near) = self.read_with(on, &first, rows, &all)? {
+            all = all.range(near).copied().collect();
+        }
+        rows.push_front(first);
+        Ok(self.cut(on, &all, test, tail))
+    }
+
+    /// Which of the elements in `all`, which `row` needs and of which none is found, to
+    /// read where the length of `on` is asked for. The one that is asked of next is read
+    /// alone, as the others are for nothing when it does not fit.
+    fn read_with(
+        &mut self,
+        on: Place,
+        row: &Row<'p>,
+        rows: &mut VecDeque<Row<'p>>,
+        all: &BTreeSet<u32>,
+    ) -> R<Option<Range<u32>>> {
+        let asks = match self.choose(row, rows)? {
+            Some((at, _)) => row.checks.get(at),
+            None => row.checks.first(),
+        };
+        if let Some(Check { on: p, .. }) = asks
+            && let Some((of, Piece::Element(i))) = self.unfound(*p)
+            && of == on
+        {
+            return Ok(Some(i..i.saturating_add(1)));
+        }
+        Ok(all.first().map(|i| *i..i.saturating_add(READ_AHEAD)))
+    }
+
+    /// The array that check `at` of `row` asks for a length of, when several lengths are
+    /// asked for by themselves and its own has not been read. With that in a register,
+    /// each of those is a test of a number.
+    #[inline(never)]
+    fn lengths(
+        &mut self,
+        row: &Row<'p>,
+        at: usize,
+        test: Length,
+        rows: &mut VecDeque<Row<'p>>,
+    ) -> R<Option<Place>> {
+        let Some(on) = row.checks.get(at).map(|c| c.on) else {
+            return Err(InternalLinkError::OddRow);
+        };
+        let none = Fact::default();
+        let fact = self.facts.get(on).unwrap_or(&none);
+        // Of two lengths, one question tells.
+        let two = fact
+            .most
+            .is_some_and(|most| most.saturating_sub(fact.least) <= 2);
+        if test.or_more || two || fact.measured {
+            return Ok(None);
+        }
+        let near = self.settle_near(rows)?;
+        for row in rows.iter().take(near) {
+            let check = visible(row).iter().find(|c| c.on == on);
+            if let Some(What::Pat(TypedPat::Array {
+                prefix,
+                rest: PatRest::None,
+                ..
+            })) = check.map(|c| &c.what)
+                && wide(prefix.len())? != test.n
+            {
+                return Ok(Some(on));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Whether to ask first for an array that is longer than `test` asks for, and how
+    /// much deeper the rows for one are then. That is where none is shorter, and a row
+    /// that takes any which is longer is the next that could fit one. So a walk asks
+    /// once for each element, and not whether it is at its end as well.
+    #[inline(never)]
+    fn longest_first(
+        &mut self,
+        row: &Row<'p>,
+        at: usize,
+        test: Length,
+        rows: &mut VecDeque<Row<'p>>,
+    ) -> R<(Length, usize)> {
+        let as_it_is = (test, 0);
+        let Some(on) = row.checks.get(at).map(|c| c.on) else {
+            return Err(InternalLinkError::OddRow);
+        };
+        let none = Fact::default();
+        let fact = self.facts.get(on).unwrap_or(&none);
+        let asked = !test.or_more && fact.least == test.n;
+        let longer = match test.n.checked_add(1) {
+            Some(n) if asked && self.depth < DEEP => Length { n, or_more: true },
+            Some(_) | None => return Ok(as_it_is),
+        };
+        let near = self.settle_near(rows)?;
+        for row in rows.iter().take(near) {
+            let check = visible(row).iter().find(|c| c.on == on);
+            if let Some(What::Pat(TypedPat::Array { prefix, rest, .. })) = check.map(|c| &c.what) {
+                let fits = wide(prefix.len())? == longer.n && *rest != PatRest::None;
+                return Ok(if fits { (longer, 1) } else { as_it_is });
+            }
+        }
+        Ok(as_it_is)
     }
 
     /// Whether an array that passes `test` can fit `row`, and whether one that does not
     /// can.
-    fn sides(&self, on: Place, test: Length, row: &Row<'p>) -> [bool; 2] {
+    fn sides(&self, on: Place, test: Length, row: &Row<'p>) -> R<[bool; 2]> {
         let check = visible(row).iter().find(|c| c.on == on);
         let Some(What::Pat(TypedPat::Array { prefix, rest, .. })) = check.map(|c| &c.what) else {
-            return [true; 2];
+            return Ok([true; 2]);
         };
-        let (n, or_more) = (prefix.len(), *rest != PatRest::None);
-        match (test.or_more, or_more) {
+        let n = wide(prefix.len())?;
+        let or_more = *rest != PatRest::None;
+        Ok(match (test.or_more, or_more) {
             (false, false) => [n == test.n, n != test.n],
             (false, true) => [n <= test.n, true],
             (true, false) => [n >= test.n, n < test.n],
             (true, true) => [true, n < test.n],
-        }
+        })
     }
 
     fn add_settled(&mut self, to: &mut Case<'p>, row: Row<'p>) -> R<()> {
@@ -1446,12 +2089,25 @@ fn go_on<'p>(fail: Fail) -> Node<'p> {
     }
 }
 
-/// What came of a question whose rows behind are at `behind`.
-fn asked(behind: Option<RestId>, node: Node<'_>) -> Asked<'_> {
+/// What came of a question whose rows behind are at `behind`, in front of which `lengths`
+/// are read.
+fn asked(behind: Option<RestId>, lengths: Vec<Place>, node: Node<'_>) -> Asked<'_> {
     match behind {
-        Some(id) => Asked::Link(id, node),
+        Some(id) => Asked::Link(id, lengths, node),
         None => Asked::Done(node),
     }
+}
+
+/// `names` without those in `late`.
+fn but(names: &[(TypedBind, Place)], late: &[(TypedBind, Place)]) -> Vec<(TypedBind, Place)> {
+    let mut names = names.to_vec();
+    names.retain(|(b, _)| late.iter().all(|(l, _)| l.id != b.id));
+    names
+}
+
+/// How many elements an array is to have, or which of them one is.
+fn wide(i: usize) -> R<u32> {
+    u32::try_from(i).map_err(|_| InternalLinkError::IndexTooWide(i))
 }
 
 fn index(i: usize) -> R<u16> {

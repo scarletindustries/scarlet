@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use scarlet_ir::TypeId;
 use scarlet_ir::core_ir::{
     Atom, Callee, Cases, Const, ConstId, CoreExpr, CoreFn, FuncIdx, JoinId, LocalId, PrimOp,
+    ProbeOp,
 };
 
 use crate::typed_ir::{
@@ -451,6 +452,28 @@ impl Machine<'_> {
                         false => els,
                     };
                 }
+                CoreExpr::Probe {
+                    op: op @ (ProbeOp::ArrayUncons | ProbeOp::ArraySplit { .. }),
+                    args,
+                    binds,
+                    hit,
+                    miss,
+                } => {
+                    let [Val::Array(items)] = [&env[&args[0]]] else {
+                        panic!("{op:?} of {:?}", env[&args[0]])
+                    };
+                    assert_eq!(args.len(), 1);
+                    let Some(found) = pieces(*op, items, binds.len()) else {
+                        e = miss;
+                        continue;
+                    };
+                    for (bind, v) in binds.iter().zip(found) {
+                        if let Some(bind) = bind {
+                            assert!(env.insert(bind.id, v).is_none(), "{} again", bind.id);
+                        }
+                    }
+                    e = hit;
+                }
                 // What it asks for is there when its first operand is the first
                 // constructor of its type, and is the field of that.
                 CoreExpr::Probe {
@@ -565,10 +588,6 @@ impl Machine<'_> {
             (PrimOp::ArrayLen, [Val::Array(items)]) => {
                 Val::Int(i128::try_from(items.len()).unwrap())
             }
-            (PrimOp::ArrayElem(i), [Val::Array(items)]) => items[at(i)].clone(),
-            (PrimOp::ArrayDrop, [Val::Array(items), Val::Int(n)]) => {
-                Val::Array(items[small(n)..].to_vec())
-            }
             (PrimOp::IntEq, [Val::Int(a), Val::Int(b)]) => self.world.bool(a == b),
             (PrimOp::IntGe, [Val::Int(a), Val::Int(b)]) => self.world.bool(a >= b),
             (PrimOp::IntGt, [Val::Int(a), Val::Int(b)]) => self.world.bool(a > b),
@@ -596,6 +615,29 @@ impl Machine<'_> {
             (op, args) => panic!("{op:?} of {args:?}"),
         }
     }
+}
+
+/// What a probe of an array of `items` finds, in `places` places.
+fn pieces(op: ProbeOp, items: &[Val], places: usize) -> Option<Vec<Val>> {
+    let (len, more, from) = match op {
+        ProbeOp::ArrayUncons => (1, true, 0),
+        ProbeOp::ArraySplit { len, more, from } => {
+            assert!((len, more) != (1, true), "a cons is no split");
+            let small = |n: u32| usize::try_from(n).unwrap();
+            (small(len), more, small(from))
+        }
+        other => panic!("{other:?} of an array"),
+    };
+    let elements = places - usize::from(more);
+    assert!(from + elements <= len, "{op:?} finds {places}");
+    if items.len() < len || (!more && items.len() > len) {
+        return None;
+    }
+    let mut found = items[from..from + elements].to_vec();
+    if more {
+        found.push(Val::Array(items[len..].to_vec()));
+    }
+    Some(found)
 }
 
 // ---- values

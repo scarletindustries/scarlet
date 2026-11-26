@@ -166,8 +166,6 @@ pub enum TypedPat {
         /// The element type, projected out of `ty` by the elaborator so
         /// `lower` never asks the pool for `Array(T)`'s `T`.
         elem_ty: RTy,
-        /// `prefix.len()`, pooled.
-        len: ConstId,
         prefix: Vec<TypedPat>,
         rest: PatRest,
     },
@@ -430,9 +428,8 @@ pub struct TypedFn {
     pub(crate) binds: usize,
 }
 
-/// The few [`RTy`]s `lower` needs for the temporaries it introduces, such as an
-/// array pattern's length check, a `<<>>` walk's bit cursor, or an
-/// interpolation's stringified parts.
+/// The few [`RTy`]s `lower` needs for the temporaries it introduces, such as a
+/// `<<>>` walk's bit cursor or an interpolation's stringified parts.
 ///
 /// Those locals have no [`TypedExpr`] to read a type from, and the pool can't
 /// change by the time `lower` runs, so the elaborator interns them up front.
@@ -560,7 +557,7 @@ pub(crate) fn each_expr<'e>(e: &'e TypedExpr, mut f: impl FnMut(&'e TypedExpr)) 
 }
 
 /// Call `f` with every size that a segment of a `<<>>` pattern in `p` gives.
-fn each_size<'p>(p: &'p TypedPat, f: &mut impl FnMut(&'p TypedExpr)) {
+pub(crate) fn each_size<'p>(p: &'p TypedPat, f: &mut impl FnMut(&'p TypedExpr)) {
     match p {
         TypedPat::Wild { .. }
         | TypedPat::Bind(_)
