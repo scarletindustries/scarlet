@@ -147,9 +147,15 @@ pub fn spawn_al_server(proj: &Project, src: &str) -> AlServer {
 }
 
 /// How many connections [`full_accept_queue`] will open before concluding this
-/// platform answers whatever the accept queue holds. We measured Darwin stopping
-/// after one. The rest is headroom for platforms that admit more.
-const MAX_FILL_ATTEMPTS: usize = 16;
+/// listener answers whatever its accept queue holds. Darwin mostly stops after one
+/// to three, and now and then goes on well past a hundred.
+const MAX_FILL_ATTEMPTS: usize = 64;
+
+/// How many fresh listeners it tries before concluding that this platform never
+/// fills one, and how long it waits between them. On macOS 27 every listener can
+/// answer every connect for a short while, and then they stop again.
+const MAX_LISTENERS: usize = 40;
+const LISTENER_PAUSE: Duration = Duration::from_millis(250);
 
 /// What an overflow connect to a `listen(1)` socket meant.
 #[derive(Debug, PartialEq, Eq)]
@@ -191,7 +197,39 @@ fn classify_overflow(err: &std::io::Error) -> Overflow {
 /// fillers come with it because whether a closed but still queued connection
 /// keeps its slot depends on the platform (we measured that it does on Darwin),
 /// and holding them for the life of the test removes the question.
-pub fn full_accept_queue() -> Option<(socket2::Socket, Vec<std::net::TcpStream>, u16)> {
+pub fn full_accept_queue() -> Option<FullQueue> {
+    for _ in 0..MAX_LISTENERS {
+        match fill_accept_queue() {
+            Fill::Full(queue) => return Some(queue),
+            Fill::Reset => {
+                eprintln!(
+                    "unmeasurable: kernel RST (ECONNRESET) filling a listen(1) queue \
+                     instead of a dropped SYN; no unanswered connect to bound"
+                );
+                return None;
+            }
+            Fill::AllAnswered => std::thread::sleep(LISTENER_PAUSE),
+        }
+    }
+    panic!(
+        "{MAX_FILL_ATTEMPTS} connections to a listen(1) socket all completed, on each of \
+         {MAX_LISTENERS} listeners: this platform does not drop the SYN when the accept \
+         queue is full, so there is no way here to make a connect hang"
+    );
+}
+
+/// The listener, what fills its queue, and its port.
+pub type FullQueue = (socket2::Socket, Vec<std::net::TcpStream>, u16);
+
+/// How filling one listener's accept queue ended.
+enum Fill {
+    Full(FullQueue),
+    Reset,
+    /// Every connect completed.
+    AllAnswered,
+}
+
+fn fill_accept_queue() -> Fill {
     let addr: std::net::SocketAddr = "127.0.0.1:0".parse().expect("addr");
     let listener = socket2::Socket::new(
         socket2::Domain::IPV4,
@@ -217,25 +255,15 @@ pub fn full_accept_queue() -> Option<(socket2::Socket, Vec<std::net::TcpStream>,
         match std::net::TcpStream::connect_timeout(&target, fill_timeout) {
             Ok(filler) => fillers.push(filler),
             Err(e) => match classify_overflow(&e) {
-                Overflow::DroppedSyn => return Some((listener, fillers, port)),
-                Overflow::Reset => {
-                    eprintln!(
-                        "unmeasurable: kernel RST (ECONNRESET) filling a listen(1) queue \
-                         instead of a dropped SYN; no unanswered connect to bound"
-                    );
-                    return None;
-                }
+                Overflow::DroppedSyn => return Fill::Full((listener, fillers, port)),
+                Overflow::Reset => return Fill::Reset,
                 Overflow::Unexpected => {
                     panic!("filling the accept queue failed with {e:?}, not a dropped SYN")
                 }
             },
         }
     }
-    panic!(
-        "{MAX_FILL_ATTEMPTS} connections to a listen(1) socket all completed: this platform \
-         does not drop the SYN when the accept queue is full, so there is no way here to \
-         make a connect hang"
-    );
+    Fill::AllAnswered
 }
 
 #[test]
