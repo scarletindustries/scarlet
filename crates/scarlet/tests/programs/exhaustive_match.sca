@@ -267,6 +267,15 @@ type Point {
 	y Int
 }
 
+// The same Bool again after its guard has failed.
+fn size_of(known Bool, n Int) String {
+	match known {
+		False -> 'unknown'
+		True if n > 3 -> 'big'
+		True -> 'small'
+	}
+}
+
 pub fn main() {
 	check('literal zero', 'zero', classify(0))
 	check('negative literal', 'minus five', classify(-5))
@@ -300,6 +309,10 @@ pub fn main() {
 	check('guard true branch', 'positive', sign(4))
 	check('guard second branch', 'negative', sign(-4))
 	check('guard falls through', 'zero', sign(0))
+
+	check('guard on a Bool passes', 'big', size_of(True, 4))
+	check('guard on a Bool falls through', 'small', size_of(True, 3))
+	check('guard on a Bool is not asked', 'unknown', size_of(False, 4))
 
 	check('positional ctor args', '12', '${area(Circle(radius: 2))}')
 	check('labeled ctor args', '12', '${area(Rect(width: 3, height: 4))}')

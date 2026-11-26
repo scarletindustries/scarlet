@@ -2,7 +2,8 @@ use super::*;
 use crate::OsHost;
 use crate::bigint;
 use crate::code::{
-    Args, BinaryId, EntryPc, Hit, Lists, Pc, ReadsClosure, Shares, TextId, Why, WhyId,
+    Args, BinaryId, EntryPc, Hit, IntTable, Lists, Pc, PlaceList, ReadsClosure, Shares, Table,
+    TextId, Why, WhyId,
 };
 use crate::frame::FIRST;
 use crate::heap::{AuditFault, Cell, Ctors, Fault, Kind, Numbering};
@@ -902,6 +903,7 @@ fn function_that(
         ],
         dsts: Vec::new(),
         sets: Vec::new(),
+        ..Lists::default()
     };
     function_of(reads, params, values, body, lists, ctors().0)
 }
@@ -1493,6 +1495,7 @@ fn a_list_of_registers_is_given_up() {
         args: Vec::new(),
         dsts: Vec::new(),
         sets: Vec::new(),
+        ..Lists::default()
     };
     let body = vec![drop, Ins::Bad { why: WhyId(0) }];
     let code = function_of(ReadsClosure::Nothing, 0, 254, body, lists, ctors().0);
@@ -1661,6 +1664,7 @@ fn what_an_instruction_takes_leaves_its_register() {
         args: vec![Box::new(all_moved)],
         dsts: Vec::new(),
         sets: Vec::new(),
+        ..Lists::default()
     };
     let (mut ran, mut took, mut jumped) = (0, 0, 0);
     on_a_machine(|m| {
@@ -1768,6 +1772,7 @@ fn a_tail_call_with_too_many_arguments_stops() {
             args: vec![vec![Arg::shared(r(0)); n].into()],
             dsts: Vec::new(),
             sets: Vec::new(),
+            ..Lists::default()
         };
         // The callee finds its second argument to be a number and returns.
         let body = vec![
@@ -1829,9 +1834,208 @@ fn a_range_that_is_taken_leaves_its_register() {
     }
 }
 
+/// A function of one argument that is `ins`, which is a switch, with the places that
+/// `lists` names. A switch that goes on at `pc(i)` gives `i`.
+fn switching(ins: Ins<Reg>, lists: Lists<Reg>) -> &'static Code {
+    let answers = (1..=6).flat_map(|i| [int(2, i), ret(2)]);
+    let body = std::iter::once(ins).chain(answers).collect();
+    function_of(ReadsClosure::Nothing, 1, 5, body, lists, ctors().0)
+}
+
+/// Where [`switching`] gives `i`.
+fn answer(i: u32) -> Pc {
+    pc(i * 2 - 1)
+}
+
+/// A switch goes on where its table says for the variant that a value is, whether it
+/// has fields or not, and looks at no cell. One that its table has nothing for stops
+/// the run, and so does one whose table is not there.
+#[test]
+fn a_switch_goes_on_where_its_table_says() {
+    // Two tables one after another.
+    let to = [1, 2, 3, 2, 4, 5];
+    let lists = || Lists {
+        tables: to.map(answer).to_vec(),
+        ..Lists::default()
+    };
+    for (first, last) in [
+        (0u32, 3u16),
+        (4, 1),
+        (1, 0),
+        (0, 5),
+        (4, 3),
+        (6, 0),
+        (u32::MAX, 1),
+        (0, u16::MAX),
+    ] {
+        let code = switching(
+            Ins::Switch {
+                src: Src(r(0)),
+                table: Table { first, last },
+            },
+            lists(),
+        );
+        on_a_machine(|m| {
+            let want = |variant: u16| {
+                let at = u64::from(first) + u64::from(variant);
+                let to = to.iter().zip(0u64..).find(|(_, i)| *i == at);
+                match to {
+                    Some((n, _)) if variant <= last => {
+                        Ok(Value::int(i64::from(*n)).expect("small").bits())
+                    }
+                    _ => Err(Stop::broken(Broken::NoArm)),
+                }
+            };
+            for variant_idx in (0..8u16).chain([u16::MAX]) {
+                let plain = Value::nullary(VariantRef {
+                    variant_idx,
+                    ..SOME_VARIANT
+                });
+                let got = call(m, code, &[plain]).map(Value::bits);
+                assert_eq!(got, want(variant_idx), "{first} {last} {variant_idx}");
+            }
+            let [one, pair] = ctors().1;
+            for (ctor, fields) in [(one, 1), (pair, 2)] {
+                let cell = m.rest.heap.ctor(ctor, &vec![Value::NIL; fields]);
+                let v = Value::cell(cell.expect("room"));
+                let got = call(m, code, &[v]).map(Value::bits);
+                assert_eq!(got, want(ctor.variant()));
+            }
+            assert_eq!(m.rest.heap.live(), 0);
+        });
+    }
+}
+
+/// Ints that a small Int holds and that it does not, those that no `i64` is among them.
+fn ints_around(of: &[i64]) -> Vec<i128> {
+    let near = |n: &i64| [-1, 0, 1].map(|d| i128::from(*n) + d);
+    let far = [
+        0,
+        1 << 70,
+        -(1 << 70),
+        i128::from(i64::MAX) + 1,
+        i128::from(i64::MIN) - 1,
+    ];
+    of.iter().flat_map(near).chain(far).collect()
+}
+
+/// Whether `code`, which is [`switching`], gives `want` for `n`.
+fn gives(m: &mut Machine<'_, '_>, code: &'static Code, v: Value, want: u32, what: &str) {
+    let got = call(m, code, &[v]).map(Value::bits);
+    let want = Value::int(i64::from(want)).expect("small").bits();
+    assert_eq!(got, Ok(want), "{what}");
+}
+
+/// A switch on an Int by a table goes on at the entry for how far the Int is past the
+/// first, and at the last for any other: one that is before it, one past the end, a
+/// big one, one that no `i64` is, and a value that is no Int. One whose table is not
+/// there stops the run.
+#[test]
+fn a_switch_on_an_int_goes_on_where_its_table_says() {
+    let to = [1, 2, 3, 2, 4];
+    for first in [0, 1, -2, i32::MIN, i32::MAX] {
+        let lists = Lists {
+            tables: [6].into_iter().chain(to).map(answer).collect(),
+            ..Lists::default()
+        };
+        let code = switching(
+            Ins::SwitchInt {
+                src: Src(r(0)),
+                table: IntTable {
+                    table: Table { first: 1, last: 4 },
+                    first,
+                },
+            },
+            lists,
+        );
+        on_a_machine(|m| {
+            let first = i64::from(first);
+            let near: Vec<i64> = (0..6).map(|i| first + i).collect();
+            let far = [1 << 50, -(1 << 50), i64::MAX, i64::MIN];
+            for n in ints_around(&[near, far.to_vec()].concat()) {
+                let at = usize::try_from(n - i128::from(first)).ok();
+                let want = at.and_then(|at| to.get(at)).copied().unwrap_or(4);
+                let v = bigint::value(&mut m.rest.heap, BigInt::from(n)).expect("room");
+                gives(m, code, v, want, &format!("{n} from {first}"));
+            }
+            for v in [Value::NIL, Value::float(3.0), Value::nullary(SOME_VARIANT)] {
+                gives(m, code, v, 4, &format!("{v:?}"));
+            }
+            let cell = m.rest.heap.string(b"4").expect("room");
+            gives(m, code, Value::cell(cell), 4, "a string");
+            assert_eq!(m.rest.heap.live(), 0);
+        });
+    }
+    // A table that is not there, or ends too soon.
+    for table in [
+        Table { first: 1, last: 0 },
+        Table {
+            first: u32::MAX,
+            last: 9,
+        },
+    ] {
+        let lists = || Lists {
+            tables: vec![answer(1)],
+            ..Lists::default()
+        };
+        let src = Src(r(0));
+        let table = IntTable { table, first: 0 };
+        let lost = switching(Ins::SwitchInt { src, table }, lists());
+        on_a_machine(|m| {
+            for n in [0i64, 5, 1 << 60] {
+                let v = bigint::value(&mut m.rest.heap, BigInt::from(n)).expect("room");
+                let got = call(m, lost, &[v]);
+                assert_eq!(got.err(), Some(Stop::broken(Broken::NoArm)), "{n}");
+            }
+            let got = call(m, lost, &[Value::NIL]);
+            assert_eq!(got.err(), Some(Stop::broken(Broken::NoArm)));
+        });
+    }
+}
+
+/// A switch on an Int among numbers that are far from each other goes on at its own
+/// place, and at the default for any other. A value that is no Int goes there too.
+#[test]
+fn a_switch_on_a_far_int_goes_on_at_its_place() {
+    let keys = [i64::MIN, -(1 << 50) - 1, -3, 0, 7, 1 << 50, i64::MAX];
+    for n in 0..=keys.len() {
+        let places = keys[..n]
+            .iter()
+            .copied()
+            .zip((0..).map(|i| answer(i % 5 + 1)));
+        let lists = Lists {
+            places: vec![Box::new([(0, answer(5))]), places.collect()],
+            ..Lists::default()
+        };
+        let code = switching(
+            Ins::SwitchIntFar {
+                src: Src(r(0)),
+                places: PlaceList(1),
+                to: answer(6),
+            },
+            lists,
+        );
+        on_a_machine(|m| {
+            for k in ints_around(&keys) {
+                let at = keys[..n]
+                    .iter()
+                    .zip(0u32..)
+                    .find(|(key, _)| i128::from(**key) == k);
+                let want = at.map_or(6, |(_, i)| i % 5 + 1);
+                let v = bigint::value(&mut m.rest.heap, BigInt::from(k)).expect("room");
+                gives(m, code, v, want, &format!("{k} among {n}"));
+            }
+            for v in [Value::NIL, Value::float(0.0), Value::bool(true)] {
+                gives(m, code, v, 6, &format!("{v:?}"));
+            }
+            assert_eq!(m.rest.heap.live(), 0);
+        });
+    }
+}
+
 /// An instruction that names a string or a binary the program does not have
-/// stops the run. It does not take the one for empty, or a test of it for one
-/// that does not match.
+/// stops the run. It does not take the one for empty, or a test of a string for
+/// one that does not match.
 #[test]
 fn a_constant_that_is_not_there_stops_the_run() {
     let (src, to) = (Src(r(0)), Pc(START));
@@ -1846,7 +2050,6 @@ fn a_constant_that_is_not_there_stops_the_run() {
             bits,
         },
         Ins::JumpUnlessStr { src, text, to },
-        Ins::JumpUnlessBinary { src, bits, to },
     ];
     for ins in named {
         after(5, vec![int(0, 1), ins, ret(0)], |_, got| {
@@ -3431,6 +3634,7 @@ impl Maker {
             args: self.lists.args.clone(),
             dsts: Vec::new(),
             sets: self.lists.sets.clone(),
+            ..Lists::default()
         };
         function_of(reads, 0, values, body, lists, as_wide_as_you_like().0)
     }
@@ -3479,6 +3683,7 @@ fn makers(dst: Reg, regs: &[Reg]) -> Vec<Maker> {
                 args,
                 dsts: Vec::new(),
                 sets: Vec::new(),
+                ..Lists::default()
             },
             kind,
             given: given.to_vec(),
@@ -3932,6 +4137,7 @@ fn openers(dsts: &[Option<Reg>]) -> Vec<Opener> {
             args: Vec::new(),
             dsts: vec![fields.clone().into()],
             sets: Vec::new(),
+            ..Lists::default()
         };
         let body = vec![ins, Ins::Bad { why: WhyId(0) }];
         let ctors = as_wide_as_you_like().0;

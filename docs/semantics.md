@@ -80,6 +80,14 @@ None of them changes an array anything else can see. `xs` after `ys = array::put
 
 One spelling reads `xs` after the write without looking as if it does. In `match array::set(xs, i, x) { Ok(ys) -> ys  Err(Nil) -> xs }`, and in `array::set(xs, i, x) or xs`, the fallback reads `xs`. The VM builds the `Result` before it matches on it, so it cannot yet tell that the fallback runs only when nothing was written, and the write copies. `array::put(xs, i, x)` means the same and writes in place. This limit goes when a match on the call is compiled as the write's own two ways out (step 19 of `docs/perf-plan.md`).
 
+## Matches
+
+**Built: arms are tried in the order written.** The first arm whose pattern fits, and whose guard says `True`, is the one that runs. What the compiler asks of the value first is its own business, because asking cannot be seen. What can be seen keeps its order:
+
+- A guard runs once its whole pattern has fitted, at most once for each way its pattern can fit, and before anything of a later arm runs.
+- An or-pattern that binds names tries its alternatives in the order written, and each one with the rest of the pattern and the guard. In `(x, _) | (_, x) if x > 5`, the guard may run twice. An or-pattern that binds none goes on with the first alternative that fits, and the guard runs once.
+- The size of a segment in a `<<>>` pattern is an expression. It runs when the segments in front of it have fitted, and what is behind it in its arm is asked after it.
+
 ## Fields
 
 **Built: a field is found by its name.**

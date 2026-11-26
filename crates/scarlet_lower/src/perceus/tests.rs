@@ -1,12 +1,11 @@
 use super::*;
 use crate::testkit::{
-    bind, bound, ctor, func, iff, join, jump, local, matches, ret, tail_call, variant, vref,
+    FIELDS, bind, bound, ctor, field, func, iff, join, jump, local, ownership, ret, switch,
+    switch_on, tail_call, variant,
 };
-use crate::{Callee, CaptureIdx, ConstId, CoreBind, FuncIdx, GlobalSlot, Load};
+use crate::{Callee, CaptureIdx, ConstId, FuncIdx, GlobalSlot, Load};
 use scarlet_ir::TypeId;
 use scarlet_ir::rty::{PrimIds, Repr};
-
-mod ownership;
 
 /// The same kind of arena the elaborator hands `perceus` in the real
 /// pipeline.
@@ -43,8 +42,15 @@ fn drops(e: &CoreExpr) -> Vec<LocalId> {
             CoreExpr::Let { body, .. } | CoreExpr::SetGlobal { body, .. } => work.push(body),
             CoreExpr::Join { cont, body, .. } => work.extend([&**cont, &**body]),
             CoreExpr::If { then, els, .. } => work.extend([&**then, &**els]),
-            CoreExpr::Match { arms, .. } => work.extend(arms.iter().map(|(_, arm)| arm)),
-            CoreExpr::Ret(_) | CoreExpr::TailCall { .. } | CoreExpr::Jump { .. } => {}
+            CoreExpr::Open { body, .. } => work.push(body),
+            CoreExpr::Switch { cases, default, .. } => {
+                work.extend(cases.arms());
+                work.extend(default.as_deref());
+            }
+            CoreExpr::Ret(_)
+            | CoreExpr::TailCall { .. }
+            | CoreExpr::Jump { .. }
+            | CoreExpr::NoArm => {}
         }
     }
     out
@@ -63,7 +69,19 @@ fn run(
     locals: &TiVec<LocalId, RTy>,
     f: CoreFn,
 ) -> Result<CoreFn, InternalLinkError> {
-    super::perceus(pool, locals, &f.body.always_reached(), f)
+    super::perceus(pool, &shapes(), locals, &f.body.always_reached(), f)
+}
+
+/// Type 0 is the one that the tests' constructors are of.
+fn shapes() -> Shapes {
+    Shapes::new([(TypeId(0), FIELDS.to_vec())])
+}
+
+fn fields(ty: TypeId) -> Vec<usize> {
+    match ty {
+        TypeId(0) => FIELDS.to_vec(),
+        _ => Vec::new(),
+    }
 }
 
 /// Run the pass with every bind's type in the table, the way `lower`
@@ -74,7 +92,7 @@ fn perceus(pool: &ResolvedPool, f: CoreFn) -> CoreFn {
 
 /// The checker finds nothing wrong with `f`.
 fn checked(pool: &ResolvedPool, f: &CoreFn, body: ownership::Body) {
-    ownership::check(pool, f, body).unwrap_or_else(|why| panic!("{why}\n{f}"));
+    ownership::check(pool, &fields, f, body).unwrap_or_else(|why| panic!("{why}\n{f}"));
 }
 
 /// What `perceus` makes of `f`, as the lines it prints, without the types. It
@@ -115,13 +133,18 @@ fn types_of(f: &CoreFn) -> TiVec<LocalId, RTy> {
             }
             CoreExpr::SetGlobal { body, .. } | CoreExpr::Drop { body, .. } => work.push(body),
             CoreExpr::If { then, els, .. } => work.extend([&**then, &**els]),
-            CoreExpr::Match { arms, .. } => {
-                for (pat, arm) in arms {
-                    all.extend(pat.binds());
-                    work.push(arm);
-                }
+            CoreExpr::Open { fields, body, .. } => {
+                all.extend(fields.iter().map(|(_, b)| *b));
+                work.push(body);
             }
-            CoreExpr::Ret(_) | CoreExpr::TailCall { .. } | CoreExpr::Jump { .. } => {}
+            CoreExpr::Switch { cases, default, .. } => {
+                work.extend(cases.arms());
+                work.extend(default.as_deref());
+            }
+            CoreExpr::Ret(_)
+            | CoreExpr::TailCall { .. }
+            | CoreExpr::Jump { .. }
+            | CoreExpr::NoArm => {}
         }
     }
     let len = all.iter().map(|b| b.id.0 + 1).max().unwrap_or(0);
@@ -176,58 +199,244 @@ fn a_stored_value_is_dropped_where_the_toplevel_last_reads_it() {
     );
 }
 
-/// What an arm begins by dropping, in order.
-fn drops_first(mut e: &CoreExpr) -> Vec<LocalId> {
-    let mut first = Vec::new();
-    while let CoreExpr::Drop { local, body } = e {
-        first.push(*local);
-        e = body;
-    }
-    first
-}
-
-fn arm(fields: Vec<CoreBind>, body: CoreExpr) -> (CorePat, CoreExpr) {
-    let variant = variant();
-    (CorePat::Ctor { variant, fields }, body)
-}
-
-/// An arm with no more use for the value it matched begins by dropping it,
-/// whatever it does after. A value that another arm reads and this one does not
-/// goes before it, and the fields this one does not read go after it. The VM
-/// looks for the drop among those (`code::translate` in scarlet_vm).
+/// A case that reads every field it needs of what it is for, and nothing else of it,
+/// takes it apart. A value that another case needs and this one does not is dropped in
+/// front of that, and a field that nothing reads is not there. A case that needs
+/// nothing of it drops it, unless there is nothing in a cell.
 #[test]
-fn an_arm_drops_its_scrutinee_before_the_fields_it_does_not_read() {
+fn a_case_takes_its_scrutinee_apart_where_it_dies() {
     let mut pool = pool();
     let list = con(&mut pool, 99);
-    let fields = || vec![bind(4, list), bind(5, list)];
-    let others = || vec![bind(14, list), bind(15, list)];
     let own = Atom::Call {
         callee: Callee::Self_,
         args: vec![local(5)],
     };
     let calls_itself = bound(bind(6, list), own, bound(bind(7, list), ctor(&[6]), ret(7)));
+    // It reads a field that it has no use for, the two fields in no order, and one
+    // of them twice.
+    let calls_itself = field(bind(8, list), 1, 2, calls_itself);
+    let calls_itself = field(bind(5, list), 1, 1, calls_itself);
+    let calls_itself = field(bind(4, list), 1, 0, calls_itself);
     let reads_it = bound(bind(16, list), ctor(&[0, 1, 14]), ret(16));
+    let reads_it = field(bind(14, list), 1, 1, reads_it);
+    let twice = bound(bind(23, list), ctor(&[20, 21, 22]), ret(23));
+    let twice = field(bind(22, list), 1, 0, twice);
+    let twice = field(bind(21, list), 1, 1, twice);
+    let twice = field(bind(20, list), 1, 0, twice);
+    let nothing = bound(bind(30, list), call(&[]), ret(30));
+    let arms = vec![(vec![0], calls_itself), (vec![1], ret(0)), (vec![2], twice)];
     let f = func(
         vec![bind(0, list), bind(1, list)],
-        matches(
+        switch(1, arms, Some(nothing)),
+        list,
+    );
+    assert_eq!(
+        lines(&pool, f),
+        [
+            "switch %1",
+            "  | 0.0 ->",
+            "    drop %0",
+            "    open %1 0.0(1: %5)",
+            "    let %6 = call self(%5)",
+            "    drop %5",
+            "    let %7 = ctor 0.0(%6)",
+            "    drop %6",
+            "    ret %7",
+            "  | 0.1 ->",
+            "    ret %0",
+            "  | 0.2 ->",
+            "    drop %0",
+            "    open %1 0.2(0: %20, 1: %21)",
+            "    let %22 = %20",
+            "    let %23 = ctor 0.0(%20, %21, %22)",
+            "    drop %20",
+            "    drop %21",
+            "    drop %22",
+            "    ret %23",
+            // Only the constructor without fields that no case names is left.
+            "  | _ ->",
+            "    drop %0",
+            "    let %30 = call fn#0()",
+            "    ret %30",
+        ]
+    );
+    // One that is read on is not taken apart, and one that several constructors share
+    // is not known to be one.
+    let f = func(
+        vec![bind(0, list), bind(1, list)],
+        switch(
             1,
-            vec![
-                arm(fields(), calls_itself),
-                arm(Vec::new(), ret(0)),
-                arm(others(), reads_it),
-            ],
+            vec![(vec![0, 2], field(bind(9, list), 1, 0, ret(9)))],
+            Some(reads_it),
         ),
         list,
     );
-    let f = perceus(&pool, f);
-    let CoreExpr::Match { arms, .. } = &f.body else {
-        panic!("{f}")
+    assert_eq!(
+        lines(&pool, f),
+        [
+            "switch %1",
+            "  | 0.0, 0.2 ->",
+            "    drop %0",
+            "    let %9 = Field(0)(%1)",
+            "    drop %1",
+            "    ret %9",
+            "  | _ ->",
+            "    let %14 = Field(1)(%1)",
+            "    let %16 = ctor 0.0(%0, %1, %14)",
+            "    drop %0",
+            "    drop %14",
+            "    ret %16",
+        ]
+    );
+}
+
+/// Where a cell is taken apart is where the last run of reads of it starts, in a case
+/// inside the one that says what it is, and past a guard. A read between, or of
+/// another cell, is no end of a run.
+#[test]
+fn a_cell_is_taken_apart_at_its_last_run_of_reads() {
+    let mut pool = pool();
+    let (t, int) = (con(&mut pool, 99), int_ty(&mut pool));
+    // %0 is constructor 0 and its field 0, %1, is constructor 2.
+    let ends = bound(bind(6, t), ctor(&[2, 3, 4]), ret(6));
+    let reads = field(bind(4, t), 0, 2, ends);
+    let reads = field(bind(3, t), 1, 1, reads);
+    let reads = field(bind(2, t), 0, 1, reads);
+    let inner = switch(1, vec![(vec![2], reads)], Some(ret(9)));
+    let body = field(bind(1, t), 0, 0, inner);
+    let outer = switch(0, vec![(vec![0], body)], Some(ret(9)));
+    assert_eq!(
+        lines(&pool, func(vec![bind(0, t), bind(9, t)], outer, t)),
+        [
+            "switch %0",
+            "  | 0.0 ->",
+            "    let %1 = Field(0)(%0)",
+            "    switch %1",
+            "      | 0.2 ->",
+            "        drop %9",
+            "        open %0 0.0(1: %2, 2: %4)",
+            "        open %1 0.2(1: %3)",
+            "        let %6 = ctor 0.0(%2, %3, %4)",
+            "        drop %2",
+            "        drop %3",
+            "        drop %4",
+            "        ret %6",
+            "      | _ ->",
+            "        drop %0",
+            "        drop %1",
+            "        ret %9",
+            "  | _ ->",
+            "    drop %0",
+            "    ret %9",
+        ]
+    );
+    // A call between two reads is the end of a run, and so the first is a read.
+    let ends = bound(bind(6, t), ctor(&[2, 3]), ret(6));
+    let ends = field(bind(3, t), 0, 1, ends);
+    let called = bound(bind(5, int), call(&[]), ends);
+    let reads = field(bind(2, t), 0, 0, called);
+    let f = func(
+        vec![bind(0, t)],
+        switch(0, vec![(vec![0], reads)], Some(CoreExpr::NoArm)),
+        t,
+    );
+    assert_eq!(
+        lines(&pool, f),
+        [
+            "switch %0",
+            "  | 0.0 ->",
+            "    let %2 = Field(0)(%0)",
+            "    let %5 = call fn#0()",
+            "    open %0 0.0(1: %3)",
+            "    let %6 = ctor 0.0(%2, %3)",
+            "    drop %2",
+            "    drop %3",
+            "    ret %6",
+            // Nothing is given up where the run stops.
+            "  | _ ->",
+            "    no arm",
+        ]
+    );
+    // Outside the case nothing says what it is.
+    let read = field(bind(3, t), 0, 0, ret(3));
+    let cont = join(
+        0,
+        Vec::new(),
+        switch(0, vec![(vec![0], jump(0, &[]))], Some(jump(0, &[]))),
+        read,
+    );
+    let got = lines(&pool, func(vec![bind(0, t)], cont, t));
+    assert!(!got.iter().any(|l| l.contains("open")), "{got:?}");
+    // A switch on the same value in a case for several says which of them it is, and
+    // only in its own cases.
+    let inner = switch(
+        0,
+        vec![(vec![0], field(bind(1, t), 0, 0, ret(1)))],
+        Some(field(bind(2, t), 0, 0, ret(2))),
+    );
+    let f = func(
+        vec![bind(0, t)],
+        switch(0, vec![(vec![0, 2], inner)], Some(ret(0))),
+        t,
+    );
+    let got = lines(&pool, f);
+    let opens: Vec<&String> = got.iter().filter(|l| l.contains("open")).collect();
+    assert_eq!(opens, ["        open %0 0.0(0: %1)"], "{got:?}");
+}
+
+/// A case, or a default, for constructors that all have no fields drops nothing of
+/// what it is for. One for a constructor that the tables do not know does.
+#[test]
+fn what_is_for_constructors_with_no_fields_drops_nothing() {
+    let mut pool = pool();
+    let (t, int) = (con(&mut pool, 99), int_ty(&mut pool));
+    let one = |arms: &[&[u16]], default: bool| {
+        let arms = arms.iter().map(|of| (of.to_vec(), ret(1))).collect();
+        let body = switch(0, arms, default.then(|| ret(1)));
+        let got = lines(&pool, func(vec![bind(0, t), bind(1, int)], body, int));
+        let drops = |lines: &[String]| lines.iter().any(|l| l.contains("drop"));
+        let all = got.join("\n");
+        let arms: Vec<String> = all.split("| ").skip(1).map(str::to_string).collect();
+        arms.iter()
+            .map(|arm| drops(std::slice::from_ref(arm)))
+            .collect::<Vec<_>>()
     };
-    let first: Vec<_> = arms.iter().map(|(_, arm)| drops_first(arm)).collect();
-    let locals = |ids: &[u32]| ids.iter().copied().map(local).collect::<Vec<_>>();
-    assert_eq!(first[0], locals(&[0, 1, 4]), "{f}");
-    assert_eq!(first[1], locals(&[]), "nothing is in a cell there:\n{f}");
-    assert_eq!(first[2], locals(&[15]), "the arm reads %1:\n{f}");
+    assert_eq!(
+        one(&[&[0], &[1], &[2], &[3]], false),
+        [true, false, true, false]
+    );
+    assert_eq!(one(&[&[1, 3], &[0, 2]], false), [false, true]);
+    assert_eq!(one(&[&[1, 0], &[2, 3]], false), [true, true]);
+    assert_eq!(one(&[&[0], &[2]], true), [true, true, false]);
+    assert_eq!(one(&[&[0, 2], &[1]], true), [true, false, false]);
+    assert_eq!(one(&[&[0]], true), [true, true]);
+    assert_eq!(one(&[&[1], &[3]], true), [false, false, true]);
+    // A type that the tables do not know.
+    let ty = TypeId(5);
+    let arms = vec![
+        (vec![0], ret(1)),
+        (vec![1], field(bind(2, t), 0, 0, ret(1))),
+    ];
+    let body = switch_on(0, Cases::Variant { ty, arms }, Some(ret(1)));
+    let got = perceus(&pool, func(vec![bind(0, t), bind(1, int)], body, int));
+    assert_eq!(
+        drops(&got.body),
+        [local(0), local(0), local(2), local(0)].to_vec(),
+        "{got}"
+    );
+    // Ints, Floats and texts say nothing.
+    for cases in [
+        Cases::Int(vec![(vec![1], ret(1)), (vec![2], ret(1))]),
+        Cases::Float(vec![
+            (vec![crate::FloatKey::new(1.0)], ret(1)),
+            (vec![], ret(1)),
+        ]),
+        Cases::Text(vec![(vec![ConstId(1)], ret(1)), (vec![], ret(1))]),
+    ] {
+        let body = switch_on(0, cases, Some(ret(1)));
+        let got = perceus(&pool, func(vec![bind(0, t), bind(1, int)], body, int));
+        assert_eq!(drops(&got.body), [local(0); 3].to_vec(), "{got}");
+    }
 }
 
 /// The shape of `dot_loop`: two constructors used by a call, then a tail call
@@ -441,7 +650,7 @@ fn a_jump_hands_over_its_arguments() {
     );
 }
 
-/// A jump out of a match, past a join that is around it, drops what only that
+/// A jump out of a switch, past a join that is around it, drops what only that
 /// join's continuation would have read.
 #[test]
 fn a_jump_past_a_join_drops_what_its_continuation_owned() {
@@ -449,13 +658,8 @@ fn a_jump_past_a_join_drops_what_its_continuation_owned() {
     let t = con(&mut pool, 99);
     let int = int_ty(&mut pool);
     let params = vec![bind(0, t), bind(1, int), bind(2, t), bind(3, t)];
-    let inner = matches(
-        0,
-        vec![
-            arm(vec![bind(5, t)], jump(1, &[])),
-            (CorePat::Wild, jump(0, &[1])),
-        ],
-    );
+    let first = field(bind(5, t), 0, 0, jump(1, &[]));
+    let inner = switch(0, vec![(vec![0], first)], Some(jump(0, &[1])));
     let inner = join(
         1,
         Vec::new(),
@@ -473,14 +677,13 @@ fn a_jump_past_a_join_drops_what_its_continuation_owned() {
         [
             "join j0(%7) after",
             "  join j1() after",
-            "    match %0",
-            "      | 0.0(%5) ->",
+            "    switch %0",
+            "      | 0.0 ->",
             "        drop %0",
-            "        drop %5",
             "        jump j1()",
             "      | _ ->",
-            "        drop %2",
             "        drop %0",
+            "        drop %2",
             "        jump j0(%1)",
             "  let %6 = call fn#0(%2)",
             "  drop %2",
@@ -492,19 +695,18 @@ fn a_jump_past_a_join_drops_what_its_continuation_owned() {
     );
 }
 
-/// A match inside a join's body keeps its scrutinee when something after the
+/// A switch inside a join's body keeps its scrutinee when something after the
 /// join reads it.
 #[test]
 fn a_scrutinee_that_is_read_after_the_join_is_kept() {
     let mut pool = pool();
     let t = con(&mut pool, 99);
     let int = int_ty(&mut pool);
-    let matched = matches(
+    let first = field(bind(1, t), 0, 0, jump(0, &[1]));
+    let matched = switch(
         0,
-        vec![
-            arm(vec![bind(1, t)], jump(0, &[1])),
-            arm(Vec::new(), jump(0, &[0])),
-        ],
+        vec![(vec![0], first), (vec![1, 2, 3], jump(0, &[0]))],
+        None,
     );
     let cont = bound(bind(3, int), call(&[0, 2]), ret(3));
     let body = join(0, vec![bind(2, t)], matched, cont);
@@ -571,6 +773,10 @@ struct Maker {
     of: BTreeMap<u32, RTy>,
     /// What each join takes.
     takes: BTreeMap<u32, Vec<RTy>>,
+    /// What is known to be a constructor with fields where it is, and which.
+    known: Vec<(u32, u16)>,
+    /// Which constructors a value can be where it is, the innermost switch last.
+    can_be: Vec<(u32, Vec<u16>)>,
 }
 
 impl Maker {
@@ -598,6 +804,11 @@ impl Maker {
 
     fn atom(&mut self, scope: &[u32]) -> Atom {
         let (a, b) = (self.any(scope), self.any(scope));
+        if !self.known.is_empty() && self.below(2) == 0 {
+            let at = self.below(self.known.len());
+            let (cell, variant) = self.known[at];
+            return self.part(cell, variant);
+        }
         match self.below(7) {
             0 => Atom::Local(local(a)),
             1 => ctor(&[a, b]),
@@ -610,6 +821,77 @@ impl Maker {
             },
             _ => call(&[a, b]),
         }
+    }
+
+    /// A read of a field of `cell`, which is this constructor.
+    fn part(&mut self, cell: u32, variant: u16) -> Atom {
+        let i = self.below(FIELDS[usize::from(variant)]);
+        Atom::prim(PrimOp::Field(u16::try_from(i).unwrap()), vec![local(cell)])
+    }
+
+    /// A case for `variants` of `scrut`. One for a single constructor with fields
+    /// begins by reading some, and one for what `scrut` cannot be stops.
+    fn case(
+        &mut self,
+        size: usize,
+        scrut: u32,
+        variants: &[u16],
+        scope: &[u32],
+        joins: &[u32],
+    ) -> CoreExpr {
+        let before = self.can_be.iter().rev().find(|(l, _)| *l == scrut);
+        let can_be: Vec<u16> = match before {
+            Some((_, all)) => variants
+                .iter()
+                .copied()
+                .filter(|v| all.contains(v))
+                .collect(),
+            None => variants.to_vec(),
+        };
+        if can_be.is_empty() {
+            return CoreExpr::NoArm;
+        }
+        self.can_be.push((scrut, can_be));
+        let body = self.possible_case(size, scrut, variants, scope, joins);
+        self.can_be.pop();
+        body
+    }
+
+    fn possible_case(
+        &mut self,
+        size: usize,
+        scrut: u32,
+        variants: &[u16],
+        scope: &[u32],
+        joins: &[u32],
+    ) -> CoreExpr {
+        let [v] = variants else {
+            return self.expr(size, scope, joins);
+        };
+        if FIELDS[usize::from(*v)] == 0 {
+            return self.expr(size, scope, joins);
+        }
+        self.known.push((scrut, *v));
+        let mut scope = scope.to_vec();
+        let mut reads = Vec::new();
+        for _ in 0..self.below(4) {
+            let ty = self.ty();
+            let part = match self.below(3) {
+                0 => {
+                    let at = self.below(self.known.len());
+                    let (cell, variant) = self.known[at];
+                    self.part(cell, variant)
+                }
+                _ => self.part(scrut, *v),
+            };
+            let new = self.bind(ty);
+            scope.push(new.id.0);
+            reads.push((new, part));
+        }
+        let rest = self.expr(size, &scope, joins);
+        self.known.pop();
+        let reads = reads.into_iter().rev();
+        reads.fold(rest, |rest, (bind, rhs)| bound(bind, rhs, rest))
     }
 
     /// A local of `scope` with type `ty`, or a new one that `lets` gets the `let`
@@ -662,7 +944,7 @@ impl Maker {
         if size == 0 {
             return self.end(scope, joins);
         }
-        match self.below(9) {
+        match self.below(10) {
             0 | 1 => {
                 self.joins += 1;
                 let id = self.joins;
@@ -688,28 +970,34 @@ impl Maker {
                 // A Bool, which nothing has to drop.
                 iff(0, then, self.expr(half, scope, joins))
             }
-            3 => {
-                let ty = self.ty();
-                let field = self.bind(ty);
-                let scrut = self.any(scope);
-                let first = self.expr(half, &with(&[field]), joins);
-                let second = self.expr(half, scope, joins);
-                let mut arms = vec![arm(vec![field], first)];
-                // One that is only ever a constructor with no fields there.
-                arms.push(match self.types[1..4].contains(&self.of[&scrut]) {
-                    true => {
-                        let variant = vref(0, 1);
-                        let fields = Vec::new();
-                        (CorePat::Ctor { variant, fields }, second)
-                    }
-                    false => (CorePat::Wild, second),
-                });
-                if self.below(4) == 0 {
-                    let all = self.bind(self.of[&scrut]);
-                    let third = self.expr(half, &with(&[all]), joins);
-                    arms.push((CorePat::Bind(all), third));
+            3 | 4 => {
+                // Only a type whose values may be cells has a constructor with fields.
+                let heap = self.types[1];
+                let cells: Vec<u32> = scope
+                    .iter()
+                    .copied()
+                    .filter(|l| self.of[l] == heap)
+                    .collect();
+                if cells.is_empty() {
+                    return self.end(scope, joins);
                 }
-                matches(scrut, arms)
+                let scrut = self.any(&cells);
+                let mut left: Vec<u16> = vec![0, 1, 2, 3];
+                let mut arms = Vec::new();
+                while !left.is_empty() && self.below(4) != 0 {
+                    let mut of = vec![left.swap_remove(self.below(left.len()))];
+                    if !left.is_empty() && self.below(4) == 0 {
+                        of.push(left.swap_remove(self.below(left.len())));
+                    }
+                    let body = self.case(half / 2, scrut, &of, scope, joins);
+                    arms.push((of, body));
+                }
+                let default = match left.is_empty() {
+                    true => None,
+                    false if self.below(8) == 0 => Some(CoreExpr::NoArm),
+                    false => Some(self.case(half / 2, scrut, &left, scope, joins)),
+                };
+                switch(scrut, arms, default)
             }
             _ => {
                 let ty = self.ty();
@@ -735,6 +1023,8 @@ fn functions(mut each: impl FnMut(u64, &ResolvedPool, &CoreFn)) {
             types: [int, heap, heap, flag, any],
             of: BTreeMap::from([(0, int)]),
             takes: BTreeMap::new(),
+            known: Vec::new(),
+            can_be: Vec::new(),
         };
         of.below(9);
         let mut params = vec![bind(0, int)];
@@ -751,15 +1041,16 @@ fn functions(mut each: impl FnMut(u64, &ResolvedPool, &CoreFn)) {
 
 /// Whether each drop in `e` is of something that could not have been dropped
 /// before: what the line in front of it reads or makes, or, where a branch
-/// starts, something that another branch needs, or what is matched on, or what
-/// the pattern binds. `starts` is what may die where `e` starts, when that is
-/// known.
+/// starts, something that another branch needs, or what the branch is on.
+/// `starts` is what may die where `e` starts, when that is known. Nothing in `e` reads a
+/// field that nothing reads.
 fn drops_are_early(mut e: &CoreExpr, starts: Option<Live>) -> bool {
     let mut may = starts;
     loop {
         match e {
             CoreExpr::Drop { local, body } => {
-                if may.as_ref().is_some_and(|may| !may.contains(local)) {
+                let late = may.as_ref().is_some_and(|may| !may.contains(local));
+                if late {
                     return false;
                 }
                 e = body;
@@ -792,22 +1083,236 @@ fn drops_are_early(mut e: &CoreExpr, starts: Option<Live>) -> bool {
                 };
                 return drops_are_early(then, with(els)) && drops_are_early(els, with(then));
             }
-            CoreExpr::Match { scrut, arms } => {
+            CoreExpr::Open { fields, body, .. } => {
+                may = Some(fields.iter().map(|(_, b)| b.id).collect());
+                e = body;
+            }
+            CoreExpr::Switch {
+                scrut,
+                cases,
+                default,
+            } => {
+                let arms: Vec<_> = cases.arms().into_iter().chain(default.as_deref()).collect();
                 return (0..arms.len()).all(|i| {
-                    let (pat, arm) = &arms[i];
-                    let mut may = Live::from([*scrut]);
-                    may.extend(pat.binds().map(|b| b.id));
                     let mut others = arms.iter().enumerate().filter(|(j, _)| *j != i);
-                    let may = others.try_fold(may, |mut may, (_, (_, other))| {
+                    let may = others.try_fold(Live::from([*scrut]), |mut may, (_, other)| {
                         may.extend(needed(other)?);
                         Some(may)
                     });
-                    drops_are_early(arm, may)
+                    drops_are_early(arms[i], may)
                 });
             }
-            CoreExpr::Ret(_) | CoreExpr::TailCall { .. } | CoreExpr::Jump { .. } => return true,
+            CoreExpr::Ret(_)
+            | CoreExpr::TailCall { .. }
+            | CoreExpr::Jump { .. }
+            | CoreExpr::NoArm => return true,
         }
     }
+}
+
+/// `f` without the reads of fields that nothing reads, and without what never runs. Such a
+/// read goes when its cell dies there, and then the cell's drop is after what was in front
+/// of it.
+fn without_unread(f: &CoreFn) -> CoreFn {
+    let mut f = f.clone();
+    while take_unread(&mut f.body) {}
+    f
+}
+
+/// Whether there were any in `e`, which are gone now.
+fn take_unread(e: &mut CoreExpr) -> bool {
+    let (read, never) = all_read(e);
+    let mut any = false;
+    let mut work = vec![e];
+    while let Some(e) = work.pop() {
+        while let CoreExpr::Let { bind, rhs, body } = e
+            && is_field(rhs)
+            && !read.contains(&bind.id)
+        {
+            *e = std::mem::replace(body, CoreExpr::NoArm);
+            any = true;
+        }
+        match e {
+            CoreExpr::Let { body, .. }
+            | CoreExpr::SetGlobal { body, .. }
+            | CoreExpr::Drop { body, .. }
+            | CoreExpr::Open { body, .. } => work.push(body),
+            CoreExpr::Join { id, cont, body, .. } => {
+                if never.contains(id) {
+                    **cont = CoreExpr::NoArm;
+                }
+                work.extend([&mut **cont, &mut **body]);
+            }
+            CoreExpr::If { then, els, .. } => work.extend([&mut **then, &mut **els]),
+            CoreExpr::Switch { cases, default, .. } => {
+                work.extend(cases.arms_mut());
+                work.extend(default.as_deref_mut());
+            }
+            CoreExpr::Ret(_)
+            | CoreExpr::TailCall { .. }
+            | CoreExpr::Jump { .. }
+            | CoreExpr::NoArm => {}
+        }
+    }
+    any
+}
+
+fn is_field(rhs: &Atom) -> bool {
+    matches!(
+        rhs,
+        Atom::PrimOp {
+            op: PrimOp::Field(_),
+            ..
+        }
+    )
+}
+
+/// Every local that something in `e` reads, and the joins that nothing jumps to, whose
+/// continuations do not count.
+fn all_read(e: &CoreExpr) -> (Live, BTreeSet<JoinId>) {
+    let mut read = Live::new();
+    let mut conts = BTreeMap::new();
+    let mut work = vec![e];
+    while let Some(e) = work.pop() {
+        match e {
+            CoreExpr::Let { rhs, body, .. } => {
+                rhs.for_each_operand(|l| {
+                    read.insert(l);
+                });
+                work.push(body);
+            }
+            CoreExpr::SetGlobal { value, body, .. } => {
+                read.insert(*value);
+                work.push(body);
+            }
+            CoreExpr::Drop { body, .. } | CoreExpr::Open { body, .. } => work.push(body),
+            CoreExpr::Join { id, cont, body, .. } => {
+                conts.insert(*id, &**cont);
+                work.push(body);
+            }
+            CoreExpr::If { cond, then, els } => {
+                read.insert(*cond);
+                work.extend([&**then, &**els]);
+            }
+            CoreExpr::Switch {
+                scrut,
+                cases,
+                default,
+            } => {
+                read.insert(*scrut);
+                work.extend(cases.arms());
+                work.extend(default.as_deref());
+            }
+            CoreExpr::Ret(value) => {
+                read.insert(*value);
+            }
+            CoreExpr::TailCall { callee, args } => {
+                read.extend(callee.local());
+                read.extend(args);
+            }
+            CoreExpr::Jump { to, args } => {
+                read.extend(args);
+                work.extend(conts.remove(to));
+            }
+            CoreExpr::NoArm => {}
+        }
+    }
+    (read, conts.into_keys().collect())
+}
+
+/// What [`runs`] finds of the reads of fields.
+#[derive(Default)]
+struct Runs {
+    /// The run that each local is read in.
+    of: BTreeMap<LocalId, usize>,
+    /// The run that is straight in front of the `let` of a local, and straight behind.
+    in_front: BTreeMap<LocalId, usize>,
+    behind: BTreeMap<LocalId, usize>,
+    count: usize,
+}
+
+/// The runs of reads of fields in `e`, with nothing between two of one run.
+fn runs(e: &CoreExpr) -> Runs {
+    let mut out = Runs::default();
+    let mut work = vec![e];
+    while let Some(mut e) = work.pop() {
+        // The run that is going on, and the last `let` that was no read.
+        let (mut run, mut last) = (None, None);
+        while let CoreExpr::Let { bind, rhs, body } = e {
+            if is_field(rhs) {
+                let id = *run.get_or_insert(out.count);
+                out.count = id + 1;
+                out.of.insert(bind.id, id);
+                last.take().map(|l| out.behind.insert(l, id));
+            } else {
+                run.take().map(|id| out.in_front.insert(bind.id, id));
+                last = Some(bind.id);
+            }
+            e = body;
+        }
+        match e {
+            CoreExpr::SetGlobal { body, .. }
+            | CoreExpr::Drop { body, .. }
+            | CoreExpr::Open { body, .. }
+            | CoreExpr::Let { body, .. } => work.push(body),
+            CoreExpr::Join { cont, body, .. } => work.extend([&**cont, &**body]),
+            CoreExpr::If { then, els, .. } => work.extend([&**then, &**els]),
+            CoreExpr::Switch { cases, default, .. } => {
+                work.extend(cases.arms());
+                work.extend(default.as_deref());
+            }
+            CoreExpr::Ret(_)
+            | CoreExpr::TailCall { .. }
+            | CoreExpr::Jump { .. }
+            | CoreExpr::NoArm => {}
+        }
+    }
+    out
+}
+
+/// Whether each `open` in `e` is of fields that one of `runs` read, and stands where
+/// that run stood.
+fn opens_stand_where_they_read(e: &CoreExpr, runs: &Runs) -> bool {
+    let mut work = vec![e];
+    // The runs that are over, and those that have not begun, as far as a walk that comes
+    // to the parts of `e` in any order can say. A run is on one spine.
+    let (mut over, mut begun) = (BTreeSet::<usize>::new(), BTreeSet::<usize>::new());
+    while let Some(e) = work.pop() {
+        match e {
+            CoreExpr::Open { fields, body, .. } => {
+                let of: BTreeSet<_> = fields.iter().map(|(_, b)| runs.of.get(&b.id)).collect();
+                let [Some(run)] = of.into_iter().collect::<Vec<_>>()[..] else {
+                    return false;
+                };
+                if over.contains(run) {
+                    return false;
+                }
+                begun.insert(*run);
+                work.push(body);
+            }
+            CoreExpr::Let { bind, body, .. } => {
+                if let Some(run) = runs.behind.get(&bind.id)
+                    && begun.contains(run)
+                {
+                    return false;
+                }
+                over.extend(runs.in_front.get(&bind.id));
+                work.push(body);
+            }
+            CoreExpr::SetGlobal { body, .. } | CoreExpr::Drop { body, .. } => work.push(body),
+            CoreExpr::Join { cont, body, .. } => work.extend([&**cont, &**body]),
+            CoreExpr::If { then, els, .. } => work.extend([&**then, &**els]),
+            CoreExpr::Switch { cases, default, .. } => {
+                work.extend(cases.arms());
+                work.extend(default.as_deref());
+            }
+            CoreExpr::Ret(_)
+            | CoreExpr::TailCall { .. }
+            | CoreExpr::Jump { .. }
+            | CoreExpr::NoArm => {}
+        }
+    }
+    true
 }
 
 /// What `e` reads or drops, unless it jumps out: what the continuation needs is
@@ -822,20 +1327,24 @@ fn needed(e: &CoreExpr) -> Option<Live> {
 /// reads nothing it gave up, and each drop is as early as it can be.
 #[test]
 fn every_way_gives_up_each_value_once() {
-    let mut seen = [0; 4];
+    let mut seen = [0; 6];
     functions(|seed, p, f| {
         let got = perceus(p, f.clone());
-        let checked = ownership::check(p, &got, ownership::Body::Function);
+        let checked = ownership::check(p, &fields, &got, ownership::Body::Function);
         assert_eq!(checked, Ok(()), "{seed}:\n{got}");
-        assert!(
-            drops_are_early(&got.body, Some(all_params(f))),
-            "{seed}:\n{got}"
-        );
+        let plain = without_unread(f);
+        let plain_got = perceus(p, plain.clone());
+        let early = drops_are_early(&plain_got.body, Some(all_params(f)));
+        assert!(early, "{seed}:\n{plain_got}");
+        let in_place = opens_stand_where_they_read(&plain_got.body, &runs(&plain.body));
+        assert!(in_place, "{seed}:\n{plain}\n{plain_got}");
         let text = got.body.to_string();
         seen[0] += usize::from(text.contains("join"));
         seen[1] += usize::from(text.contains("drop"));
         seen[2] += usize::from(text.contains("tail call"));
         seen[3] += usize::from(!f.body.always_reached().is_empty());
+        seen[4] += text.matches("open").count();
+        seen[5] += usize::from(text.contains("switch"));
     });
     assert!(seen.iter().all(|n| *n > 5000), "{seen:?}");
 }
@@ -873,14 +1382,21 @@ fn a_function_with_a_drop_is_refused() {
 fn what_is_live_around_a_join_is_found_either_way() {
     let mut reached = 0;
     functions(|seed, p, f| {
+        // On a way that stops the run, what is dropped does not matter.
+        if f.body.to_string().contains("no arm") {
+            return;
+        }
         let types = types_of(f);
+        let shapes = shapes();
         let mut cx = Perceus {
             pool: p,
+            shapes: &shapes,
             locals: &types,
             reached: &BTreeSet::new(),
             entered: BTreeMap::new(),
             around: Vec::new(),
             plain: BTreeSet::new(),
+            known: BTreeMap::new(),
         };
         let (body, live) = cx.drop_pass(f.body.clone()).expect("it is well made");
         let dead = all_params(f);
@@ -952,18 +1468,14 @@ fn a_plain_scrutinee_is_dropped_only_past_a_join() {
     let mut p = pool();
     let t = con(&mut p, 1);
     let int = int_ty(&mut p);
-    let nothing = |rest| arm(Vec::new(), rest);
-    let body = matches(
-        0,
-        vec![nothing(jump(0, &[])), (CorePat::Wild, jump(0, &[]))],
-    );
+    let body = switch(0, vec![(vec![1], jump(0, &[]))], Some(jump(0, &[])));
     let cont = bound(bind(2, int), call(&[0]), ret(2));
     let got = lines(
         &p,
         func(vec![bind(0, t)], join(0, Vec::new(), body, cont), int),
     );
     assert_eq!(got[got.len() - 2], "drop %0");
-    let plain = matches(0, vec![nothing(ret(1)), (CorePat::Wild, ret(1))]);
+    let plain = switch(0, vec![(vec![1], ret(1))], Some(ret(1)));
     let got = lines(&p, func(vec![bind(0, t), bind(1, int)], plain, int));
     assert_eq!(
         got.iter().filter(|l| l.contains("drop %0")).count(),

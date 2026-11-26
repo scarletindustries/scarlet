@@ -1,12 +1,11 @@
 fn main.g(%0:t0) -> :t1
-  match %0
-    | 10.0(%1, %2) ->
-      drop %0
-      drop %2
+  switch %0
+    | 10.0 ->
+      open %0 10.0(0: %1:t1)
       ret %1
-    | 10.1() ->
-      let %3:t1 = c0
-      ret %3
+    | 10.1 ->
+      let %2:t1 = c0
+      ret %2
 
 fn main.f(%0:t2) -> :t1
   join j0(%8:t1) after

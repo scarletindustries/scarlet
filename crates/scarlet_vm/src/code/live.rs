@@ -149,6 +149,7 @@ struct Walk {
     taken: Vec<bool>,
     handed: Set,
     gone: Vec<VReg>,
+    targets: Vec<Label>,
 }
 
 impl Walk {
@@ -163,6 +164,7 @@ impl Walk {
             taken: Vec::new(),
             handed: Set::new(values),
             gone: Vec::new(),
+            targets: Vec::new(),
             pending: vec![Drops(0); values],
             while_pending: Vec::new(),
             drops: AllDrops::default(),
@@ -266,7 +268,7 @@ impl Walk {
             self.next.push((at, *v));
         }
         self.end = match step {
-            Step::Ins(ins) => self.end_from(ins),
+            Step::Ins(ins) => self.end_from(ins, lists),
             Step::TailCall { .. } => End::Other,
         };
         if !step.falls_through() {
@@ -282,9 +284,13 @@ impl Walk {
         if let Step::Ins(ins) = step {
             self.decide(ins, lists);
         }
-        let target = step.target();
-        if let Some(Label(l)) = target {
-            let kept = self.labels.get(l as usize).and_then(Option::as_ref);
+        let mut targets = std::mem::take(&mut self.targets);
+        step.targets(lists, &mut |l| targets.push(l));
+        // A table names one place again and again.
+        targets.sort_unstable();
+        targets.dedup();
+        for Label(l) in &targets {
+            let kept = self.labels.get(*l as usize).and_then(Option::as_ref);
             let landing = kept.ok_or(Unfit::Broken(Broken::JumpsBack))?;
             // A value that one way reads and the other drops is not taken on
             // the way to the `Drop`, unless this takes it on that way. And one
@@ -329,7 +335,8 @@ impl Walk {
                 // A jump writes nothing, so a value held where it lands is
                 // held here too, even the one that is written otherwise.
                 Role::WriteOnHit => {
-                    let landing = target.and_then(|Label(l)| self.labels.get(l as usize)?.as_ref());
+                    let landing = targets.first();
+                    let landing = landing.and_then(|l| self.labels.get(l.0 as usize)?.as_ref());
                     if !landing.is_some_and(|l| l.held.contains(v)) {
                         self.held.remove(*v);
                     }
@@ -360,6 +367,8 @@ impl Walk {
                 Role::Write | Role::WriteOnHit | Role::Drop => {}
             }
         }
+        targets.clear();
+        self.targets = targets;
         if !matches!(step, Step::Ins(Ins::Drop { .. })) {
             self.next.clear();
         }
@@ -370,16 +379,17 @@ impl Walk {
     }
 
     /// What every way from `ins` on comes to.
-    fn end_from(&self, ins: &Ins<VReg>) -> End {
+    fn end_from(&self, ins: &Ins<VReg>, lists: &Lists<VReg>) -> End {
         if ins.gives_up_all() {
             return End::Return;
         }
         if !ins.brief() {
             return End::Other;
         }
-        let there = ins.target().map(|Label(l)| {
+        let mut there = None;
+        ins.targets(lists, &mut |Label(l)| {
             let kept = self.labels.get(l as usize).and_then(Option::as_ref);
-            kept.map_or(End::Other, |landing| landing.end)
+            there = there.max(Some(kept.map_or(End::Other, |landing| landing.end)));
         });
         let next = ins.falls_through().then_some(self.end);
         let opens = ins.opens().then_some(End::Open);

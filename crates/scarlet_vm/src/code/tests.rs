@@ -7,9 +7,9 @@ use scarlet_ir::core_ir::VariantRef;
 pub(super) mod programs;
 pub(super) mod random;
 
-/// A program with calls, a loop by tail call, a `match` with several
-/// arms, an `if` and a map lookup that jumps, so its functions have
-/// blocks of every shape.
+/// A program with calls, a loop by tail call, matches on a variant and on an Int
+/// with a few arms and with many, an `if` and a map lookup that jumps, so its
+/// functions have blocks of every shape.
 pub(super) const SHAPES: &str = "import scarlet/map\n\
         type L {\n\tCons(h Int, t L)\n\tEnd\n}\n\
         fn build(n Int, acc L) L {\n\
@@ -28,6 +28,24 @@ pub(super) const SHAPES: &str = "import scarlet/map\n\
         \t\t_ -> if n < 0 { 'fewer' } else { 'more' }\n\
         \t}\n\
         }\n\
+        type S {\n\tA\n\tB(n Int)\n\tC\n\tD(n Int, m Int)\n}\n\
+        fn pick(s S) Int {\n\
+        \tmatch s {\n\
+        \t\tA -> 1\n\
+        \t\tB(n) -> n\n\
+        \t\tC -> 3\n\
+        \t\tD(n, m) -> n + m\n\
+        \t}\n\
+        }\n\
+        fn digit(n Int) String {\n\
+        \tmatch n {\n\
+        \t\t0 | 2 -> 'even'\n\
+        \t\t1 -> 'one'\n\
+        \t\t3 -> 'three'\n\
+        \t\t1000000 -> 'many'\n\
+        \t\t_ -> 'other'\n\
+        \t}\n\
+        }\n\
         fn found(m map::Map(Int, Int), k Int) Int {\n\
         \tmatch map::get(m, k) {\n\
         \t\tSome(v) -> v\n\
@@ -37,6 +55,8 @@ pub(super) const SHAPES: &str = "import scarlet/map\n\
         pub fn main() {\n\
         \tprintln(sum(build(10, End), 0))\n\
         \tprintln(name(3))\n\
+        \tprintln(pick(D(1, pick(B(2)))))\n\
+        \tprintln(digit(2))\n\
         \tprintln(found(map::set(map::new(), 1, 2), 1))\n\
         }\n";
 
@@ -92,6 +112,7 @@ pub(super) fn draft(
         labels: labels.to_vec(),
         values,
         params: (0..params).map(VReg).collect(),
+        words: Vec::new(),
         kinds: vec![Some(Makes::Any); values as usize],
         closure: ReadsClosure::Nothing,
     }
@@ -124,13 +145,24 @@ pub(super) fn copy_of(d: &Draft) -> Draft {
             args: d.lists.args.clone(),
             dsts: d.lists.dsts.clone(),
             sets: d.lists.sets.clone(),
+            tables: d.lists.tables.clone(),
+            places: d.lists.places.clone(),
         },
         labels: d.labels.clone(),
         values: d.values,
         params: d.params.clone(),
+        words: d.words.clone(),
         kinds: d.kinds.clone(),
         closure: d.closure,
     }
+}
+
+/// Each place an instruction may continue at instead of at the next one, in the
+/// order it names them.
+pub(super) fn targets<R: super::ins::Names>(ins: &Ins<R>, lists: &Lists<R>) -> Vec<R::To> {
+    let mut all = Vec::new();
+    ins.targets(lists, &mut |to| all.push(to));
+    all
 }
 
 /// The instructions a draft is written out with.

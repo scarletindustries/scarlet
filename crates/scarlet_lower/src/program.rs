@@ -26,15 +26,16 @@ use scarlet_ir::core_ir::{
 };
 use scarlet_ir::rty::{ForeignRTy, PrimIds, RTy, Repr, ResolvedPool};
 use scarlet_ir::tivec::TiVec;
-use scarlet_types::def::{TypeBody, TypeDef};
+use scarlet_types::def::{TypeBody, TypeDef, VariantDef};
 use scarlet_types::engine::NotInEngine;
 use scarlet_types::known::Known;
 use scarlet_types::name::{CtorName, ModuleKey, Name, TypeName, ValueName};
 use scarlet_types::ty::Type;
 
 use crate::immediates::Immediates;
-use crate::lower::Lowered;
-use crate::typed_ir::{BindingId, TempTys, TypedFn};
+use crate::lower::{Around, Lowered};
+use crate::matching::Allowance;
+use crate::typed_ir::{BindingId, Shapes, TempTys, TypedFn};
 use crate::{immediates, lower, perceus, tail_args};
 
 /// Where lowering reads a type's definition.
@@ -126,6 +127,23 @@ pub enum InternalLinkError {
     UntypedLocal(LocalId),
     /// A jump goes to a join that nothing around it declares.
     UnboundJoin(JoinId),
+    /// A pattern asks for a constant that is no number and no text.
+    OddLiteral(ConstId),
+    /// A range pattern has an end that is no Int.
+    OddBound(ConstId),
+    /// The patterns that one part of a matched value has to fit are of different
+    /// kinds.
+    OddPattern,
+    /// A row of a match is not what the tree that is made from it asks for.
+    OddRow,
+    /// A match reads this part of its value, and nothing made it.
+    NoPlace(usize),
+    /// A match goes on at these rows behind others, and they are nowhere.
+    NoRest(usize),
+    /// An alternative of this or-pattern goes on where none of them comes together.
+    NoAny(usize),
+    /// A match finds this arm, which it does not have.
+    NoMatchArm(usize),
     /// Perceus came out of a join's body that it had not gone into.
     NotAround(JoinId),
     /// Perceus was given a function that already has drops.
@@ -211,6 +229,14 @@ impl fmt::Display for InternalLinkError {
             }
             E::UntypedLocal(l) => write!(f, "local {l} has no type"),
             E::UnboundJoin(j) => write!(f, "a jump to join {j}, which nothing declares"),
+            E::OddLiteral(c) => write!(f, "a pattern's literal, {c}, is no number and no text"),
+            E::OddBound(c) => write!(f, "an end of a range pattern, {c}, is no Int"),
+            E::OddPattern => write!(f, "a pattern of one kind of value among those of another"),
+            E::OddRow => write!(f, "a row of a match is not what its tree asks for"),
+            E::NoPlace(i) => write!(f, "a match reads part {i} of its value, which nothing made"),
+            E::NoRest(i) => write!(f, "a match goes on at rows {i}, which are nowhere"),
+            E::NoAny(i) => write!(f, "or-pattern {i} of a match does not come together"),
+            E::NoMatchArm(i) => write!(f, "a match finds arm {i}, which it does not have"),
             E::NotAround(j) => write!(f, "the body of join {j} ended and never began"),
             E::DropsGiven(l) => write!(f, "a drop of local {l}, before any is worked out"),
             E::UnboundBinding(b) => write!(f, "{b} is read where it isn't bound"),
@@ -412,17 +438,24 @@ struct Frozen<'a> {
 }
 
 impl Frozen<'_> {
-    fn names_of(&self, id: TypeId) -> TypeNames {
+    fn name(&self, id: TypeId) -> Option<&TypeName> {
         // Ids count from 1.
-        let name =
-            id.0.checked_sub(1)
-                .and_then(|i| usize::try_from(i).ok())
-                .and_then(|i| self.type_names.get(i));
-        let def = name.and_then(|n| self.defs.type_def(n));
+        let at = id.0.checked_sub(1).and_then(|i| usize::try_from(i).ok())?;
+        self.type_names.get(at)
+    }
+
+    /// The constructors of the type `id`.
+    fn variants(&self, id: TypeId) -> Option<&[VariantDef]> {
+        self.defs.type_def(self.name(id)?)?.variants()
+    }
+
+    fn names_of(&self, id: TypeId) -> TypeNames {
         TypeNames {
-            name: name.map_or_else(String::new, |n| n.name().to_string()),
-            variants: def
-                .and_then(|d| d.variants())
+            name: self
+                .name(id)
+                .map_or_else(String::new, |n| n.name().to_string()),
+            variants: self
+                .variants(id)
                 .unwrap_or_default()
                 .iter()
                 .map(|v| VariantNames {
@@ -431,6 +464,15 @@ impl Frozen<'_> {
                 })
                 .collect(),
         }
+    }
+
+    /// The constructors of every named type.
+    fn shapes(&self) -> Shapes {
+        let ids = (1..).map(TypeId).take(self.type_names.len());
+        Shapes::new(ids.filter_map(|id| {
+            let fields = self.variants(id)?.iter().map(|v| v.fields.len());
+            Some((id, fields.collect()))
+        }))
     }
 }
 
@@ -617,17 +659,58 @@ impl Minted {
     }
 }
 
-/// Build the program whose modules are `modules`, imports first and the
-/// entry last. `main` is the entry's function to start at, when it runs one.
-pub fn build_program(
-    modules: &[&CleanModule],
-    defs: &dyn TypeDefs,
+/// Every body of a program as typed IR, and what their ids mean.
+pub(crate) struct Typed<'a> {
+    /// Every function, in `FuncIdx` order.
+    pub fns: Vec<Named>,
+    /// Each module's top level.
+    pub tops: Vec<TypedFn>,
+    pub prelude: Prelude,
+    abi: Abi,
+    main: Option<FuncIdx>,
+    globals: u32,
+    frozen: Frozen<'a>,
+}
+
+impl Typed<'_> {
+    pub(crate) fn pool(&self) -> &ResolvedPool {
+        &self.frozen.pool
+    }
+
+    /// What the bodies are lowered with, with the constructors of every type.
+    pub(crate) fn around<'t>(&'t self, shapes: &'t Shapes) -> Around<'t> {
+        Around {
+            temps: self.prelude.temps,
+            shapes,
+            consts: &self.frozen.consts,
+            allowance: Allowance::USUAL,
+        }
+    }
+
+    pub(crate) fn shapes(&self) -> Shapes {
+        self.frozen.shapes()
+    }
+
+    pub(crate) fn immediates(&self) -> Immediates {
+        let ctors = self.prelude.ctors;
+        Immediates {
+            true_: ctors.true_,
+            false_: ctors.false_,
+            nil: ctors.nil,
+        }
+    }
+}
+
+/// Translate every body of `modules`, imports first and the entry last. `main` is the
+/// entry's function to start at, when it runs one.
+pub(crate) fn typed<'a>(
+    modules: &[&TypedModule],
+    defs: &'a dyn TypeDefs,
     main: Option<&ValueName>,
-) -> Result<Program, LinkError> {
-    let modules: Vec<&TypedModule> = modules.iter().map(|m| m.module()).collect();
+) -> Result<Typed<'a>, LinkError> {
     let mut ids = Ids::new(defs);
     let prelude = Prelude::resolve(&mut ids)?;
-    let symbols = Symbols::of(&modules)?;
+    let symbols = Symbols::of(modules)?;
     let mut minted = Minted {
         base: symbols.fn_count()?,
         fns: Vec::new(),
@@ -638,7 +721,7 @@ pub fn build_program(
         symbols: &symbols,
         minted: &mut minted,
     };
-    let declared: Vec<Named> = symbols
+    let mut fns: Vec<Named> = symbols
         .sites
         .iter()
         .map(|site| crate::translate::function(&mut cx, site))
@@ -647,6 +730,7 @@ pub fn build_program(
         .iter()
         .map(|m| crate::translate::toplevel(&mut cx, m))
         .collect::<Result<_, _>>()?;
+    fns.extend(minted.fns);
     let main = main.map(|m| symbols.func(m)).transpose()?;
     let abi = Abi {
         some: prelude.ctors.some,
@@ -661,27 +745,42 @@ pub fn build_program(
         net: present(net_types(&mut ids))?,
         tls: present(tls_types(&mut ids))?,
     };
+    Ok(Typed {
+        fns,
+        tops,
+        prelude,
+        abi,
+        main,
+        globals: symbols.globals,
+        frozen: ids.freeze(),
+    })
+}
 
-    let frozen = ids.freeze();
-    let im = Immediates {
-        true_: prelude.ctors.true_,
-        false_: prelude.ctors.false_,
-        nil: prelude.ctors.nil,
-    };
+/// Build the program whose modules are `modules`, imports first and the
+/// entry last. `main` is the entry's function to start at, when it runs one.
+pub fn build_program(
+    modules: &[&CleanModule],
+    defs: &dyn TypeDefs,
+    main: Option<&ValueName>,
+) -> Result<Program, LinkError> {
+    let modules: Vec<&TypedModule> = modules.iter().map(|m| m.module()).collect();
+    let typed = typed(&modules, defs, main)?;
+    let shapes = typed.shapes();
+    let (around, im) = (typed.around(&shapes), typed.immediates());
     let finish = |f: &TypedFn, module: String, name: String| {
-        let core = core_fn(prelude.temps, &im, &frozen.pool, f)?;
+        let core = core_fn(around, &im, typed.pool(), f)?;
         Ok(LoweredFn { module, name, core })
     };
-    let fns: TiVec<FuncIdx, LoweredFn> = declared
+    let fns: TiVec<FuncIdx, LoweredFn> = typed
+        .fns
         .iter()
-        .chain(&minted.fns)
         .map(|n| finish(&n.body, n.module.clone(), n.name.clone()))
         .collect::<Result<_, LinkError>>()?;
     // The entry's top level is named for what it is; each import's, for its
     // module.
     let mut inits: Vec<LoweredFn> = modules
         .iter()
-        .zip(&tops)
+        .zip(&typed.tops)
         .map(|(m, f)| {
             let key = m.key.as_str();
             finish(f, key.to_string(), key.to_string())
@@ -690,6 +789,13 @@ pub fn build_program(
     let mut toplevel = inits.pop().ok_or(InternalLinkError::NoEntryModule)?;
     toplevel.name = "__main__".to_string();
 
+    let Typed {
+        abi,
+        main,
+        globals,
+        frozen,
+        ..
+    } = typed;
     let mut used: BTreeSet<TypeId> = abi.variants().iter().map(|v| v.type_id).collect();
     for f in (&fns).into_iter().chain(&inits).chain([&toplevel]) {
         f.core.body.for_each_variant(|v| {
@@ -707,7 +813,7 @@ pub fn build_program(
         inits,
         toplevel,
         main,
-        globals: symbols.globals,
+        globals,
         types,
         abi,
         pool,
@@ -718,15 +824,15 @@ pub fn build_program(
 /// `perceus`, then `tail_args`. This is the only place they run, so they can't
 /// run out of order.
 fn core_fn(
-    temps: TempTys,
+    around: Around<'_>,
     im: &Immediates,
     pool: &ResolvedPool,
     f: &TypedFn,
 ) -> Result<CoreFn, LinkError> {
-    let Lowered { mut core, locals } = lower::lower_fn(temps, f)?;
+    let Lowered { mut core, locals } = lower::lower_fn(around, f)?;
     immediates::rewrite(&mut core, im);
     let reached = core.body.always_reached();
-    let core = perceus::perceus(pool, &locals, &reached, core)?;
+    let core = perceus::perceus(pool, around.shapes, &locals, &reached, core)?;
     Ok(tail_args::schedule(pool, &reached, core)?)
 }
 

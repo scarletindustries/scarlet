@@ -1,8 +1,8 @@
 use super::*;
 use crate::testkit::{
-    bind, bound, ctor, func, iff, join, jump, local, matches, ret, tail_call as tail,
+    bind, bound, ctor, func, iff, join, jump, local, ret, switch, tail_call as tail, vref,
 };
-use crate::{ConstId, CorePat, FuncIdx};
+use crate::{ConstId, FuncIdx};
 use scarlet_ir::TypeId;
 use scarlet_ir::rty::{PrimIds, RTy, Repr};
 
@@ -79,8 +79,13 @@ fn order_of(mut e: &CoreExpr) -> Vec<u32> {
                 e = cont;
             }
             CoreExpr::SetGlobal { body, .. } | CoreExpr::Drop { body, .. } => e = body,
+            CoreExpr::Open { fields, body, .. } => {
+                out.extend(fields.iter().map(|(_, b)| b.id.0));
+                e = body;
+            }
             CoreExpr::If { .. }
-            | CoreExpr::Match { .. }
+            | CoreExpr::Switch { .. }
+            | CoreExpr::NoArm
             | CoreExpr::Ret(_)
             | CoreExpr::TailCall { .. }
             | CoreExpr::Jump { .. } => return out,
@@ -212,14 +217,17 @@ fn what_a_join_reads_is_bound_outside_it() {
             jump(0, &[10, 12]),
         ),
     );
-    let arm = |id| {
-        let pat = CorePat::Bind(bind(id, INT));
-        (pat, ret(id))
+    let opened = CoreExpr::Open {
+        cell: local(15),
+        variant: vref(0, 0),
+        fields: vec![(0, bind(13, INT)), (2, bind(16, INT))],
+        body: Box::new(tail(Callee::Self_, &[13, 16, 17])),
     };
+    let arms = vec![(vec![0], opened), (vec![1, 2], CoreExpr::NoArm)];
     let first = |rest| bound(bind(1, INT), call(1, &[2]).2, rest);
     let dropped = CoreExpr::Drop {
         local: local(1),
-        body: Box::new(matches(3, vec![arm(13), (CorePat::Wild, inner)])),
+        body: Box::new(switch(3, arms, Some(inner))),
     };
     let stored = CoreExpr::SetGlobal {
         slot: crate::GlobalSlot(0),
@@ -227,7 +235,7 @@ fn what_a_join_reads_is_bound_outside_it() {
         body: Box::new(first(dropped)),
     };
     let got: Vec<u32> = reads(&stored).into_iter().map(|l| l.0).collect();
-    assert_eq!(got, [2, 3, 6, 7, 8, 9, 11, 12, 14]);
+    assert_eq!(got, [2, 3, 6, 7, 8, 9, 11, 12, 14, 15, 17]);
 }
 
 /// Only what has no effect, cannot fail and reads only numbers moves.
@@ -482,23 +490,30 @@ fn an_update_goes_on_taking_its_operands() {
 fn every_tail_call_is_put_in_order_and_nothing_else() {
     let lines = [add(3, 0, 0), add(4, 1, 0)];
     let arm = || spine(&lines, tail(Callee::Self_, &[3, 4]));
-    let inner = matches(1, vec![(CorePat::Wild, arm())]);
+    // In a case, in a default and behind a cell taken apart.
+    let opened = CoreExpr::Open {
+        cell: local(2),
+        variant: vref(0, 0),
+        fields: vec![(0, bind(8, INT))],
+        body: Box::new(arm()),
+    };
+    let inner = switch(1, vec![(vec![0], opened)], Some(arm()));
     let inner = iff(1, jump(0, &[]), inner);
     let branch = iff(0, arm(), join(0, Vec::new(), inner, arm()));
     let body = scheduled(3, spine(&[add(6, 0, 0), add(7, 0, 1)], branch));
     assert_eq!(order_of(&body), [6, 7]);
     let text = body.to_string();
     let lets = |of: &str| text.matches(&format!("let %{of}:0")).count();
-    assert_eq!((lets("3"), lets("4")), (3, 3));
+    assert_eq!((lets("3"), lets("4")), (4, 4));
     let first = |a: &str, b: &str| {
         text.split(&format!("let %{a}:0"))
             .skip(1)
             .filter(|after| after.contains(&format!("let %{b}:0")))
             .count()
     };
-    // In each of the three, 4 comes before 3.
-    assert_eq!(first("4", "3"), 3, "{text}");
-    assert_eq!(first("3", "4"), 2, "{text}");
+    // In each of the four, 4 comes before 3.
+    assert_eq!(first("4", "3"), 4, "{text}");
+    assert_eq!(first("3", "4"), 3, "{text}");
     let value = spine(&lines, tail(Callee::Local(local(2)), &[3, 4]));
     assert_eq!(order_of(&scheduled(3, value)), [3, 4]);
 }

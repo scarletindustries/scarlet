@@ -1,89 +1,79 @@
 fn main.to_method(%0:t0) -> :t1
   join j0() after
-    match %0
-      | _ ->
-        let %1:t2 = BinaryBitSize(%0)
-        let %2:t2 = c0
-        let %3:t0 = c1
-        let %4:t3 = BinaryMatchPrefix(%0, %2, %3)
-        drop %3
-        if %4
-          let %5:t2 = c2
-          let %6:t2 = IntAdd(%2, %5)
-          let %7:t3 = IntEq(%6, %1)
-          if %7
-            drop %0
-            let %8:t1 = ctor 10.0()
-            ret %8
-          else
-            jump j0()
-        else
-          jump j0()
+    let %1:t2 = c0
+    let %2:t0 = c1
+    let %3:t3 = BinaryMatchPrefix(%0, %1, %2)
+    drop %2
+    if %3
+      let %4:t2 = c2
+      let %5:t2 = IntAdd(%1, %4)
+      let %6:t2 = BinaryBitSize(%0)
+      let %7:t3 = IntEq(%5, %6)
+      if %7
+        drop %0
+        let %8:t1 = ctor 10.0()
+        ret %8
+      else
+        jump j0()
+    else
+      jump j0()
   join j1() after
-    match %0
-      | _ ->
-        let %9:t2 = BinaryBitSize(%0)
-        let %10:t2 = c0
-        let %11:t0 = c3
-        let %12:t3 = BinaryMatchPrefix(%0, %10, %11)
-        drop %11
-        if %12
-          let %13:t2 = c4
-          let %14:t2 = IntAdd(%10, %13)
-          let %15:t3 = IntEq(%14, %9)
-          if %15
-            drop %0
-            let %16:t1 = ctor 10.1()
-            ret %16
-          else
-            jump j1()
-        else
-          jump j1()
+    let %9:t2 = c0
+    let %10:t0 = c3
+    let %11:t3 = BinaryMatchPrefix(%0, %9, %10)
+    drop %10
+    if %11
+      let %12:t2 = c4
+      let %13:t2 = IntAdd(%9, %12)
+      let %14:t2 = BinaryBitSize(%0)
+      let %15:t3 = IntEq(%13, %14)
+      if %15
+        drop %0
+        let %16:t1 = ctor 10.1()
+        ret %16
+      else
+        jump j1()
+    else
+      jump j1()
   join j2() after
-    match %0
-      | _ ->
-        let %17:t2 = BinaryBitSize(%0)
-        let %18:t2 = c0
-        let %19:t0 = c5
-        let %20:t3 = BinaryMatchPrefix(%0, %18, %19)
-        drop %19
-        if %20
-          let %21:t2 = c2
-          let %22:t2 = IntAdd(%18, %21)
-          let %23:t3 = IntEq(%22, %17)
-          if %23
-            drop %0
-            let %24:t1 = ctor 10.2()
-            ret %24
-          else
-            jump j2()
-        else
-          jump j2()
+    let %17:t2 = c0
+    let %18:t0 = c5
+    let %19:t3 = BinaryMatchPrefix(%0, %17, %18)
+    drop %18
+    if %19
+      let %20:t2 = c2
+      let %21:t2 = IntAdd(%17, %20)
+      let %22:t2 = BinaryBitSize(%0)
+      let %23:t3 = IntEq(%21, %22)
+      if %23
+        drop %0
+        let %24:t1 = ctor 10.2()
+        ret %24
+      else
+        jump j2()
+    else
+      jump j2()
   join j3() after
-    match %0
-      | _ ->
-        let %25:t2 = BinaryBitSize(%0)
-        let %26:t2 = c0
-        let %27:t0 = c6
-        let %28:t3 = BinaryMatchPrefix(%0, %26, %27)
-        drop %27
-        if %28
-          let %29:t2 = c7
-          let %30:t2 = IntAdd(%26, %29)
-          let %31:t3 = IntEq(%30, %25)
-          if %31
-            drop %0
-            let %32:t1 = ctor 10.3()
-            ret %32
-          else
-            jump j3()
-        else
-          jump j3()
-  match %0
-    | _ ->
-      let %33:t1 = ctor 10.4(%0)
-      drop %0
-      ret %33
+    let %25:t2 = c0
+    let %26:t0 = c6
+    let %27:t3 = BinaryMatchPrefix(%0, %25, %26)
+    drop %26
+    if %27
+      let %28:t2 = c7
+      let %29:t2 = IntAdd(%25, %28)
+      let %30:t2 = BinaryBitSize(%0)
+      let %31:t3 = IntEq(%29, %30)
+      if %31
+        drop %0
+        let %32:t1 = ctor 10.3()
+        ret %32
+      else
+        jump j3()
+    else
+      jump j3()
+  let %33:t1 = ctor 10.4(%0)
+  drop %0
+  ret %33
 
 fn main.main() -> :t1
   let %0:t4 = c8

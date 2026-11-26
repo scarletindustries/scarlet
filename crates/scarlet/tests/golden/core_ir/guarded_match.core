@@ -1,23 +1,17 @@
 fn main.clamp(%0:t0, %1:t0, %2:t0) -> :t0
   join j0() after
-    match %0
-      | %3 ->
-        let %4:t1 = IntLt(%3, %1)
-        if %4
-          ret %1
-        else
-          jump j0()
+    let %3:t1 = IntLt(%0, %1)
+    if %3
+      ret %1
+    else
+      jump j0()
   join j1() after
-    match %0
-      | %5 ->
-        let %6:t1 = IntGt(%5, %2)
-        if %6
-          ret %2
-        else
-          jump j1()
-  match %0
-    | %7 ->
-      ret %7
+    let %4:t1 = IntGt(%0, %2)
+    if %4
+      ret %2
+    else
+      jump j1()
+  ret %0
 
 fn main.main() -> :t0
   let %0:t0 = c0

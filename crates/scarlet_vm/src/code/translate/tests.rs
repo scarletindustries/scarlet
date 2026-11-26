@@ -1,5 +1,5 @@
 use super::super::ins::{Ins, Role};
-use super::super::tests::{body, entries, instructions, named, program};
+use super::super::tests::{body, copy_of, entries, instructions, named, program, targets};
 use super::super::{Code, Op, Reg, load};
 use super::*;
 use crate::Audit;
@@ -420,9 +420,9 @@ fn with_fields(n: usize) -> VariantRef {
     }
 }
 
-/// A constructor or a pattern with another number of fields than the program
-/// lists, or of a constructor it does not list, is in a function that does not
-/// load. One it lists is told by the top of its word.
+/// A constructor with another number of fields than the program lists, or that it
+/// does not list, is in a function that does not load, whether it is built, switched
+/// on or taken apart. One it lists is told by the top of its word.
 #[test]
 fn a_constructor_the_program_does_not_list_does_not_load() {
     let program = program_with_fields();
@@ -440,17 +440,20 @@ fn a_constructor_the_program_does_not_list_does_not_load() {
             }),
         )
     };
-    let matches = |variant, n: u32| {
-        let pat = CorePat::Ctor {
-            variant,
-            fields: (1..=n).map(bind).collect(),
-        };
-        let arm = gives(0);
+    let matches = |variant: VariantRef| {
+        let arms = vec![(vec![variant.variant_idx], gives(0))];
+        let ty = variant.type_id;
+        function(1, switch(0, Cases::Variant { ty, arms }, Some(gives(0))))
+    };
+    let opens = |variant, fields: &[u16]| {
+        let fields = fields.iter().map(|i| (*i, bind(u32::from(*i) + 1)));
         function(
             1,
-            CoreExpr::Match {
-                scrut: LocalId(0),
-                arms: vec![(pat, arm)],
+            CoreExpr::Open {
+                cell: LocalId(0),
+                variant,
+                fields: fields.collect(),
+                body: Box::new(gives(1)),
             },
         )
     };
@@ -459,8 +462,25 @@ fn a_constructor_the_program_does_not_list_does_not_load() {
         let ctor = with_fields(variant);
         let core = builds(ctor, got);
         assert_eq!(load(&core).err(), wrong(ctor, got as usize, want));
-        let core = matches(ctor, got);
-        assert_eq!(load(&core).err(), wrong(ctor, got as usize, want));
+    }
+    // No field, one that it does not have, one twice and two out of order.
+    for (variant, fields) in [
+        (2, &[][..]),
+        (2, &[2]),
+        (2, &[0, 2]),
+        (2, &[0, 0]),
+        (2, &[1, 0]),
+        (0, &[0]),
+        (0, &[]),
+        (9, &[9]),
+    ] {
+        let ctor = with_fields(variant);
+        let odd = Some(Unfit::Broken(Broken::OpenFields(ctor)));
+        assert_eq!(
+            load(&opens(ctor, fields)).err(),
+            odd,
+            "{variant} {fields:?}"
+        );
     }
     let past = with_fields(11);
     let no_type = VariantRef {
@@ -471,23 +491,31 @@ fn a_constructor_the_program_does_not_list_does_not_load() {
         let unlisted = || Some(Unfit::Broken(Broken::NoCtor(ctor)));
         assert_eq!(load(&builds(ctor, 1)).err(), unlisted());
         assert_eq!(load(&builds(ctor, 0)).err(), unlisted());
-        assert_eq!(load(&matches(ctor, 1)).err(), unlisted());
+        assert_eq!(load(&matches(ctor)).err(), unlisted());
+        assert_eq!(load(&opens(ctor, &[0])).err(), unlisted());
     }
-    let ins = load(&matches(with_fields(3), 3)).expect("it loads");
-    let [
-        Ins::JumpUnlessTag { tag, .. },
-        Ins::Field { index: 0, .. },
-        ..,
-    ] = ins[..]
-    else {
+    let ins = load(&matches(with_fields(3))).expect("it loads");
+    let [Ins::JumpUnlessTag { tag, .. }, ..] = ins[..] else {
         panic!("{ins:?}");
     };
     assert_eq!(tag.parts(), (3, true));
-    let ins = load(&matches(with_fields(0), 0)).expect("it loads");
+    let ins = load(&matches(with_fields(0))).expect("it loads");
     let [Ins::JumpUnlessTag { tag, .. }, ..] = ins[..] else {
         panic!("{ins:?}");
     };
     assert_eq!(tag.parts(), (0, false));
+    let ins = load(&opens(with_fields(4), &[0, 3])).expect("it loads");
+    let [Ins::Open4 { dsts, src, ctor }, ..] = ins[..] else {
+        panic!("{ins:?}");
+    };
+    assert_eq!(
+        dsts.map(|d| d.dst()),
+        [Some(Dst(VReg(1))), None, None, Some(Dst(VReg(4)))]
+    );
+    assert_eq!(
+        (src, source.ctors.name(ctor)),
+        (Taken(VReg(0)), Some(with_fields(4)))
+    );
     let ins = load(&builds(with_fields(0), 0)).expect("it loads");
     let [Ins::Const { value, .. }, ..] = ins[..] else {
         panic!("{ins:?}");
@@ -727,6 +755,7 @@ fn translator<'c>(
         labels: Vec::new(),
         landed: None,
         joins: HashMap::new(),
+        words: Vec::new(),
         values: 3,
         kinds: vec![Some(Makes::Any); 3],
         closure: ReadsClosure::Nothing,
@@ -797,37 +826,510 @@ fn a_comparison_something_jumps_past_is_kept() {
     assert!(t.take_comparison(LocalId(2), to).is_some());
 }
 
-/// `match %0 { C(%1, .., %n) -> arm }`, in a function that is given `%0` and
-/// `%20`, as the instructions before the last: the one that says no arm fits.
-fn matched(n: u32, arm: CoreExpr) -> Vec<String> {
-    let variant = with_fields(n as usize);
-    let fields = (1..=n).map(bind).collect();
-    in_arm(CorePat::Ctor { variant, fields }, arm)
+fn switch(scrut: u32, cases: Cases, default: Option<CoreExpr>) -> CoreExpr {
+    CoreExpr::Switch {
+        scrut: LocalId(scrut),
+        cases,
+        default: default.map(Box::new),
+    }
 }
 
-/// The same, of an arm with any pattern.
-fn in_arm(pat: CorePat, arm: CoreExpr) -> Vec<String> {
-    let mut core = function(
-        1,
-        CoreExpr::Match {
-            scrut: LocalId(0),
-            arms: vec![(pat, arm)],
-        },
-    );
-    core.params.push(bind(20));
-    let program = program_with_fields();
-    let source = Source::new(&program).expect("a whole program");
-    let draft = translate(&source, &core, Some(FuncIdx(0)), &mut Tables::default());
-    let draft = draft.expect("it translates");
-    // Nothing may jump between a test and what is read out after it.
-    let all = instructions(&draft);
-    for (at, ins) in all.iter().enumerate() {
-        if ins.op().name().starts_with("Open") {
-            assert!(!draft.labels.contains(&at), "{all:?}");
-        }
+/// The draft of `core`, in a program that has the types the tests ask for.
+fn drafted(core: &CoreFn) -> Draft {
+    let mut program = program_with_fields();
+    let plain = |n: usize| VariantNames {
+        name: format!("V{n}"),
+        fields: Vec::new(),
+    };
+    for (id, n) in [(ONE, 1), (TWO, 2), (EIGHT, 8), (MANY, 40_000)] {
+        let name = format!("T{n}");
+        let mut variants: Vec<_> = (0..n).map(plain).collect();
+        // The first has a field, and nothing else does.
+        variants[0].fields.push("f".to_string());
+        program.types.insert(id, TypeNames { name, variants });
     }
-    let ins = &all[..all.len() - 1];
-    ins.iter().map(|i| shown(i, &draft.lists)).collect()
+    let source = Source::new(&program).expect("a whole program");
+    let draft = translate(&source, core, Some(FuncIdx(0)), &mut Tables::default());
+    let draft = draft.expect("it translates");
+    crate::code::live::settle(&mut copy_of(&draft)).expect("it loads");
+    draft
+}
+
+/// Types of one, two, eight and very many variants, the first of which alone has a
+/// field.
+const ONE: TypeId = TypeId(-11);
+const TWO: TypeId = TypeId(-12);
+const EIGHT: TypeId = TypeId(-13);
+const MANY: TypeId = TypeId(-14);
+
+/// `core`'s instructions, each with where it may jump as a number.
+fn jumps(core: &CoreFn) -> Vec<String> {
+    let draft = drafted(core);
+    let place = |l: &Label| draft.labels[l.0 as usize].to_string();
+    let line = |ins: &Ins<VReg>| {
+        let to: Vec<String> = targets(ins, &draft.lists).iter().map(place).collect();
+        let tag = match ins {
+            Ins::JumpUnlessTag { tag, .. } => format!(" .{}", tag.variant()),
+            Ins::JumpUnlessInt { n, .. } => format!(" {n}"),
+            Ins::JumpUnlessFloat { x, .. } => format!(" {x:?}"),
+            _ => String::new(),
+        };
+        let arrow = if to.is_empty() { "" } else { " -> " };
+        format!("{}{tag}{arrow}{}", shown(ins, &draft.lists), to.join(" "))
+    };
+    instructions(&draft).iter().map(line).collect()
+}
+
+/// A function of four parameters that switches on the first, each case of which
+/// returns what it is given.
+fn switching(ty: TypeId, arms: &[(&[u16], u32)], default: Option<u32>) -> CoreFn {
+    let arms = arms
+        .iter()
+        .map(|(of, l)| (of.to_vec(), gives(*l)))
+        .collect();
+    function(
+        4,
+        switch(0, Cases::Variant { ty, arms }, default.map(gives)),
+    )
+}
+
+/// A switch on a variant with one outcome is nothing, and one with two is a test of
+/// the one that a test can be for. With more it is a jump by a table, one entry for
+/// each variant. What has no case goes to the default, when there is one.
+#[test]
+fn a_switch_is_a_test_or_a_table() {
+    let made = |ty, arms: &[(&[u16], u32)], default| jumps(&switching(ty, arms, default));
+    // One outcome, however it is written.
+    assert_eq!(made(TWO, &[(&[0, 1], 1)], None), ["Ret 1"]);
+    assert_eq!(made(TWO, &[(&[1, 0], 1)], Some(2)), ["Ret 1"]);
+    assert_eq!(made(TWO, &[], Some(1)), ["Ret 1"]);
+    assert_eq!(made(ONE, &[(&[0], 1)], None), ["Ret 1"]);
+    // Two.
+    let two = |tag: u16, yes: u32, no: u32| {
+        [
+            format!("JumpUnlessTag 0 .{tag} -> 2"),
+            format!("Ret {yes}"),
+            format!("Ret {no}"),
+        ]
+    };
+    assert_eq!(made(TWO, &[(&[0], 1), (&[1], 2)], None), two(0, 1, 2));
+    assert_eq!(made(TWO, &[(&[1], 1), (&[0], 2)], None), two(1, 1, 2));
+    assert_eq!(made(TWO, &[(&[1], 1)], Some(2)), two(1, 1, 2));
+    assert_eq!(made(EIGHT, &[(&[5], 1)], Some(2)), two(5, 1, 2));
+    let most: &[u16] = &[0, 1, 2, 4, 5, 6, 7];
+    assert_eq!(made(EIGHT, &[(most, 1), (&[3], 2)], None), two(3, 2, 1));
+    // The one variant that no case names.
+    assert_eq!(made(EIGHT, &[(most, 1)], Some(2)), two(3, 2, 1));
+    assert_eq!(made(MANY, &[(&[39_999], 1)], Some(2)), two(39_999, 1, 2));
+    // What no case names, and nothing is for, stops the run.
+    let stops = made(TWO, &[(&[1], 1)], None);
+    assert_eq!(stops, ["JumpUnlessTag 0 .1 -> 2", "Ret 1", "Bad"]);
+    assert_eq!(made(TWO, &[], None), ["Bad"]);
+    // Two of several each, and three.
+    assert_eq!(
+        made(EIGHT, &[(&[0, 1, 2], 1), (&[3, 4], 2)], Some(2))[0],
+        "Switch 0 -> 1 1 1 2 2 3 3 3"
+    );
+    assert_eq!(
+        made(EIGHT, &[(&[0, 1, 2, 3], 1), (&[4, 5, 6, 7], 2)], None),
+        ["Switch 0 -> 1 1 1 1 2 2 2 2", "Ret 1", "Ret 2"]
+    );
+    assert_eq!(
+        made(EIGHT, &[(&[7], 1), (&[0], 2)], Some(3)),
+        ["Switch 0 -> 2 3 3 3 3 3 3 1", "Ret 1", "Ret 2", "Ret 3"]
+    );
+    assert_eq!(
+        made(EIGHT, &[(&[7], 1), (&[0], 2), (&[1], 3)], None),
+        [
+            "Switch 0 -> 2 3 4 4 4 4 4 1",
+            "Ret 1",
+            "Ret 2",
+            "Ret 3",
+            "Bad"
+        ]
+    );
+    // Of a type that has many more variants than there are cases, a test for each.
+    assert_eq!(
+        made(MANY, &[(&[7, 9, 11], 1), (&[0], 2)], Some(3)),
+        [
+            "JumpUnlessTag 0 .7 -> 2",
+            "Jump -> 5",
+            "JumpUnlessTag 0 .9 -> 4",
+            "Jump -> 5",
+            "JumpUnlessTag 0 .11 -> 6",
+            "Ret 1",
+            "JumpUnlessTag 0 .0 -> 8",
+            "Ret 2",
+            "Ret 3",
+        ]
+    );
+}
+
+/// A table is made when at least one entry in four has a case, or the type is small, so
+/// that tables take little more room than cases do. Of 40,000 that is 9,998 cases and the
+/// 8 entries there may be in any case.
+#[test]
+fn a_table_is_no_longer_than_its_cases_are_many() {
+    let first = |named: u16| {
+        let arms: Vec<(Vec<u16>, CoreExpr)> = (0..named).map(|v| (vec![v], gives(1))).collect();
+        let cases = Cases::Variant { ty: MANY, arms };
+        let core = function(4, switch(0, cases, Some(gives(2))));
+        let draft = drafted(&core);
+        (instructions(&draft)[0].op(), draft.lists.tables.len())
+    };
+    assert_eq!(first(9_997), (Op::JumpUnlessTag, 0));
+    assert_eq!(first(9_998), (Op::Switch, 40_000));
+    let small = |named: u16| {
+        let arms: Vec<(&[u16], u32)> =
+            [(&[0][..], 1), (&[1], 2), (&[2], 3)][..usize::from(named)].to_vec();
+        drafted(&switching(EIGHT, &arms, Some(0)))
+            .lists
+            .tables
+            .len()
+    };
+    assert_eq!([small(1), small(2), small(3)], [0, 8, 8]);
+}
+
+/// Where only constructors with no fields go, the value is known to be no cell.
+#[test]
+fn a_case_for_constructors_with_no_fields_is_noted() {
+    let noted = |core: &CoreFn| {
+        let draft = drafted(core);
+        let mut at: Vec<_> = draft
+            .words
+            .iter()
+            .map(|(l, v)| (draft.labels[l.0 as usize], v.0))
+            .collect();
+        at.sort_unstable();
+        at
+    };
+    // Past a test that is not for the one with a field, and not past one that is.
+    assert_eq!(noted(&switching(TWO, &[(&[0], 1)], Some(2))), [(2, 0)]);
+    assert_eq!(noted(&switching(TWO, &[(&[1], 1)], Some(2))), []);
+    assert_eq!(noted(&switching(EIGHT, &[(&[3], 1)], Some(2))), []);
+    assert_eq!(noted(&switching(EIGHT, &[(&[0], 1)], Some(2))), [(2, 0)]);
+    // In a table each case by itself, and the default.
+    let arms: &[(&[u16], u32)] = &[(&[0, 1], 1), (&[2], 2), (&[3, 4], 3)];
+    assert_eq!(
+        noted(&switching(EIGHT, arms, Some(2))),
+        [(2, 0), (3, 0), (4, 0)]
+    );
+    let arms: &[(&[u16], u32)] = &[(&[1], 1), (&[2], 2), (&[3, 4], 3)];
+    assert_eq!(
+        noted(&switching(EIGHT, arms, Some(2))),
+        [(1, 0), (2, 0), (3, 0)]
+    );
+}
+
+/// A switch on an Int with one key or two is a test for each, and so is one with a few
+/// that are far from each other. One with more is a jump by a table. Floats and texts
+/// are tested one after another.
+#[test]
+fn a_switch_on_a_literal_is_tests_or_a_table() {
+    let ints = |arms: &[(&[i64], u32)], default| {
+        let arms = arms
+            .iter()
+            .map(|(of, l)| (of.to_vec(), gives(*l)))
+            .collect();
+        jumps(&function(4, switch(0, Cases::Int(arms), default)))
+    };
+    let default = || Some(gives(3));
+    assert_eq!(
+        ints(&[(&[5], 1), (&[i64::MIN], 2)], default()),
+        [
+            "JumpUnlessInt 0 5 -> 2".to_string(),
+            "Ret 1".to_string(),
+            format!("JumpUnlessInt 0 {} -> 4", i64::MIN),
+            "Ret 2".to_string(),
+            "Ret 3".to_string(),
+        ]
+    );
+    assert_eq!(
+        ints(&[(&[5, 7], 1)], default()),
+        [
+            "JumpUnlessInt 0 5 -> 2",
+            "Jump -> 3",
+            "JumpUnlessInt 0 7 -> 4",
+            "Ret 1",
+            "Ret 3",
+        ]
+    );
+    assert_eq!(
+        ints(&[(&[5, 7], 1), (&[6], 2)], default()),
+        ["SwitchInt 0 -> 1 2 1 3", "Ret 1", "Ret 2", "Ret 3"]
+    );
+    assert_eq!(
+        ints(&[(&[5, 8], 1), (&[6], 2)], None),
+        ["SwitchInt 0 -> 1 2 3 1 3", "Ret 1", "Ret 2", "Bad"]
+    );
+    // What is far from a run of them is tested after it.
+    assert_eq!(
+        ints(&[(&[5, 700], 1), (&[6, 7], 2)], default()),
+        [
+            "SwitchInt 0 -> 4 5 5 1",
+            "JumpUnlessInt 0 700 -> 3",
+            "Jump -> 4",
+            "Jump -> 6",
+            "Ret 1",
+            "Ret 2",
+            "Ret 3",
+        ]
+    );
+    // In the order they are written, each with its arm behind it.
+    assert_eq!(
+        ints(
+            &[
+                (&[200], 1),
+                (&[404], 2),
+                (&[500], 1),
+                (&[201], 2),
+                (&[204], 1),
+                (&[301, 302], 2),
+            ],
+            default()
+        ),
+        [
+            "SwitchInt 0 -> 10 11 1 1 12 1",
+            "JumpUnlessInt 0 404 -> 3",
+            "Ret 2",
+            "JumpUnlessInt 0 500 -> 5",
+            "Ret 1",
+            "JumpUnlessInt 0 301 -> 7",
+            "Jump -> 8",
+            "JumpUnlessInt 0 302 -> 9",
+            "Ret 2",
+            "Jump -> 13",
+            "Ret 1",
+            "Ret 2",
+            "Ret 1",
+            "Ret 3",
+        ]
+    );
+    // And what is written in front of the run is tested in front of it.
+    assert_eq!(
+        ints(
+            &[
+                (&[1], 1),
+                (&[1000], 2),
+                (&[2000], 1),
+                (&[2001, 2002], 2),
+                (&[7], 1)
+            ],
+            default()
+        ),
+        [
+            "JumpUnlessInt 0 1 -> 2",
+            "Ret 1",
+            "JumpUnlessInt 0 1000 -> 4",
+            "Ret 2",
+            "SwitchInt 0 -> 8 9 9 5",
+            "JumpUnlessInt 0 7 -> 7",
+            "Ret 1",
+            "Jump -> 10",
+            "Ret 1",
+            "Ret 2",
+            "Ret 3",
+        ]
+    );
+    // Many that are far from each other are found among them.
+    let far: Vec<i64> = (0..9).map(|i| i * 1000).collect();
+    let made = ints(&[(&far, 1)], default());
+    assert_eq!(
+        made,
+        ["SwitchIntFar 0 -> 1 1 1 1 1 1 1 1 1 2", "Ret 1", "Ret 3"]
+    );
+    let made = ints(&[(&far[..8], 1)], default());
+    assert_eq!(made[..2], ["JumpUnlessInt 0 0 -> 2", "Jump -> 15"]);
+    let floats = vec![
+        (vec![FloatKey::new(-0.0), FloatKey::new(1.5)], gives(1)),
+        (vec![FloatKey::new(2.0)], gives(2)),
+    ];
+    assert_eq!(
+        jumps(&function(4, switch(0, Cases::Float(floats), default()))),
+        [
+            "JumpUnlessFloat 0 0.0 -> 2",
+            "Jump -> 3",
+            "JumpUnlessFloat 0 1.5 -> 4",
+            "Ret 1",
+            "JumpUnlessFloat 0 2.0 -> 6",
+            "Ret 2",
+            "Ret 3",
+        ]
+    );
+    // A text is told by its constant, which has to be one.
+    let mut program = empty_program();
+    program.consts = vec![Const::String("a".to_string()), Const::Int(1)];
+    let source = Source::new(&program).expect("a whole program");
+    let texts = |id| {
+        let arms = vec![(vec![ConstId(id)], gives(1))];
+        let core = function(4, switch(0, Cases::Text(arms), default()));
+        let mut tables = Tables::default();
+        let draft = translate(&source, &core, None, &mut tables);
+        let ops = draft.map(|d| instructions(&d).iter().map(Ins::op).collect::<Vec<_>>());
+        (ops, tables.texts)
+    };
+    let (ops, text) = texts(0);
+    assert_eq!(ops, Ok(vec![Op::JumpUnlessStr, Op::Ret, Op::Ret]));
+    assert_eq!(text, [b"a".to_vec().into_boxed_slice()]);
+    // One that is another kind of constant, and one that is not there.
+    let other = Unfit::Broken(Broken::TextCase(ConstId(1)));
+    assert_eq!(texts(1).0, Err(other));
+    let missing = Unfit::Missing(Missing::NoConst(2));
+    assert_eq!(texts(2).0, Err(missing));
+}
+
+/// Whatever the numbers a switch on an Int has cases for, each goes to its own and any
+/// other to the default, and the tables have few entries for nothing. Numbers that are
+/// near each other are found in one look.
+#[test]
+fn every_int_goes_to_its_own_case() {
+    let every = |n: i64, step: i64| (0..n).map(|i| i * step).collect::<Vec<_>>();
+    let all: Vec<Vec<i64>> = vec![
+        vec![],
+        vec![0],
+        every(4, 1),
+        vec![-3, -2, 0, 1],
+        vec![10, 12, 13, 1000, 1001, 1002, 1004],
+        every(6, 3),
+        every(5, 4),
+        every(5, 5),
+        vec![i64::MIN, -1, 0, 1, i64::MAX],
+        vec![i64::MIN, i64::MIN + 1, i64::MIN + 2],
+        vec![i64::MAX - 2, i64::MAX - 1, i64::MAX],
+        every(9, 100_000),
+        every(8, 100_000),
+        vec![0, 1 << 50, (1 << 50) + 1, (1 << 50) + 2, 1 << 62],
+        [every(5, 1), every(20, 1000)].concat()[..]
+            .iter()
+            .skip(1)
+            .copied()
+            .collect(),
+        vec![
+            i64::from(i32::MAX) - 1,
+            i64::from(i32::MAX),
+            i64::from(i32::MAX) + 1,
+        ],
+        every(50_000, 1),
+    ];
+    let orders = all.into_iter().flat_map(|mut keys| {
+        keys.sort_unstable();
+        keys.dedup();
+        let reversed = keys.iter().rev().copied().collect();
+        let mut turned = keys.clone();
+        turned.rotate_left(keys.len() / 2);
+        [keys, reversed, turned]
+    });
+    for keys in orders {
+        let arms = keys
+            .iter()
+            .zip(0u32..)
+            .map(|(n, i)| (vec![*n], gives(1 + i)));
+        let cases = Cases::Int(arms.collect());
+        let count = u32::try_from(keys.len()).expect("a few");
+        let core = function(1, switch(0, cases, Some(gives(0))));
+        let program = empty_program();
+        let source = Source::new(&program).expect("a whole program");
+        let draft = translate(&source, &core, None, &mut Tables::default());
+        let draft = draft.expect("it translates");
+        let ins = instructions(&draft);
+        let place = |l: Label| draft.labels[l.0 as usize];
+        // Where a run goes on from the start for `n`, and how many steps that takes.
+        let goes = |n: i64| {
+            let (mut at, mut steps) = (0, 0);
+            loop {
+                steps += 1;
+                at = match &ins[at] {
+                    Ins::Ret { src, .. } => return (src.0.0, steps),
+                    Ins::Jump { to } => place(*to),
+                    Ins::JumpUnlessInt { n: k, to, .. } if *k != n => place(*to),
+                    Ins::JumpUnlessInt { .. } => at + 1,
+                    Ins::SwitchInt { table, .. } => {
+                        let last = i128::from(table.table.last);
+                        let past = i128::from(n) - i128::from(table.first);
+                        let i = if past < 0 { last } else { past.min(last) };
+                        let first = usize::try_from(table.table.first).expect("a few");
+                        place(draft.lists.tables[first + usize::try_from(i).expect("a few")])
+                    }
+                    Ins::SwitchIntFar { places, to, .. } => {
+                        // As the VM looks for it.
+                        let all = places.places(&draft.lists);
+                        let found = all.binary_search_by_key(&n, |(k, _)| *k);
+                        place(found.map_or(*to, |at| all[at].1))
+                    }
+                    other => panic!("{other:?}"),
+                };
+            }
+        };
+        let step = (keys.len() / 50).max(1);
+        let near = |n: &i64| [n.saturating_sub(1), *n, n.saturating_add(1)];
+        let others = [i64::MIN, -5, 0, 4, 500, 5_000_000_000, i64::MAX];
+        for n in keys.iter().step_by(step).flat_map(near).chain(others) {
+            let want = keys.iter().zip(1u32..).find(|(k, _)| **k == n);
+            let (got, steps) = goes(n);
+            assert_eq!(got, want.map_or(0, |(_, i)| i), "{n} of {count}");
+            // A test of each would take one step for each written up to it, and one more.
+            let tests = want.map_or(count, |(_, i)| i) + 1;
+            assert!(steps <= tests.clamp(3, 14), "{n} of {count} takes {steps}");
+        }
+        assert!(draft.lists.tables.len() <= keys.len() * 4 + 1);
+    }
+    // Numbers in a row are found in one look, whatever is far from them.
+    let row: Vec<i64> = (100..160).chain([1 << 60]).collect();
+    assert_eq!(near(&row), 0..60);
+    assert_eq!(near(&[0, 100, 200, 201, 202]), 2..5);
+    assert_eq!(near(&every(4, 4)), 0..4);
+    assert_eq!(near(&every(4, 6)), 0..2);
+    assert_eq!(near(&[]), 0..0);
+    // A run is no longer than an instruction can say.
+    assert_eq!(near(&every(70_000, 1)), 0..60_000);
+}
+
+/// A switch that names a value twice, or has a case for none, is refused whatever it is
+/// on.
+#[test]
+fn a_switch_names_each_value_once() {
+    let made = |cases: &dyn Fn(Vec<Vec<u8>>) -> Cases| {
+        [
+            vec![vec![0, 1], vec![2]],
+            vec![vec![0], vec![1, 0]],
+            vec![vec![1, 1]],
+            vec![vec![2], vec![]],
+        ]
+        .map(|keys| {
+            let core = function(4, switch(0, cases(keys), Some(gives(3))));
+            let mut program = empty_program();
+            let text = |c: char| Const::String(c.to_string());
+            program.consts = "abc".chars().map(text).collect();
+            let variants = vec![
+                VariantNames {
+                    name: String::new(),
+                    fields: Vec::new(),
+                };
+                8
+            ];
+            let name = String::new();
+            program.types.insert(EIGHT, TypeNames { name, variants });
+            let source = Source::new(&program).expect("a whole program");
+            let draft = translate(&source, &core, None, &mut Tables::default());
+            draft.map(|_| ()).err()
+        })
+    };
+    fn arms<K>(keys: Vec<Vec<u8>>, of: impl Fn(u8) -> K) -> Arms<K> {
+        let arm = |keys: Vec<u8>| (keys.into_iter().map(&of).collect(), gives(1));
+        keys.into_iter().map(arm).collect()
+    }
+    let bad = || Some(Unfit::Broken(Broken::Cases));
+    let want = [None, bad(), bad(), bad()];
+    assert_eq!(made(&|k| Cases::Int(arms(k, i64::from))), want);
+    let float = |x| FloatKey::new(f64::from(x));
+    assert_eq!(made(&|k| Cases::Float(arms(k, float))), want);
+    let text = |c| ConstId(u32::from(c));
+    assert_eq!(made(&|k| Cases::Text(arms(k, text))), want);
+    let variants = |k| Cases::Variant {
+        ty: EIGHT,
+        arms: arms(k, u16::from),
+    };
+    assert_eq!(made(&variants), want);
 }
 
 /// An instruction as its kind, what it writes and what it reads. A field that
@@ -871,168 +1373,45 @@ fn dropping(locals: &[u32], rest: CoreExpr) -> CoreExpr {
     })
 }
 
-/// An arm that begins by dropping what it matched takes the cell apart where
-/// its drop stands among those the arm begins with. A field that nothing reads
-/// has no register, whether or not it is dropped there, and neither it nor the
-/// cell is dropped besides.
-#[test]
-fn an_arm_that_drops_its_scrutinee_takes_it_apart() {
-    let test = "JumpUnlessTag 0";
-    let tuple = |of: &[u32]| {
-        let args = of.iter().copied().map(LocalId).collect();
-        returning(Atom::prim(PrimOp::MakeTuple, args))
-    };
-    let both = || tuple(&[1, 2]);
-    for (drops, rest, want) in [
-        (&[0][..], both(), &["1 2 Open2 0"][..]),
-        (&[0], gives(2), &["_ 2 Open2 0"]),
-        (&[0, 1], gives(2), &["_ 2 Open2 0"]),
-        (&[0, 2], gives(1), &["1 _ Open2 0"]),
-        // Others' drops stay on the side they were on, in their order.
-        (&[20, 0], both(), &["Drop 20", "1 2 Open2 0"]),
-        (&[0, 20], both(), &["1 2 Open2 0", "Drop 20"]),
-        (&[20, 0, 2], gives(1), &["Drop 20", "1 _ Open2 0"]),
-        (&[0, 1, 20], gives(2), &["_ 2 Open2 0", "Drop 20"]),
-        // With nothing to keep there is nothing to take apart.
-        (&[0], gives(20), &["Drop 0"]),
-        (&[0, 1, 2], gives(20), &["Drop 0"]),
-        (&[20, 0, 2], tuple(&[]), &["Drop 20", "Drop 0"]),
-    ] {
-        let got = matched(2, dropping(drops, rest));
-        assert_eq!(got[0], test);
-        assert_eq!(got[1..=want.len()], *want, "{drops:?}: {got:?}");
-        let more = got[want.len() + 1..].iter();
-        let again = more.filter(|i| i.contains("Drop") || i.contains("Field"));
-        assert_eq!(again.count(), 0, "{got:?}");
-    }
-}
-
 /// Every number of fields is taken apart, those that do not fit in the
-/// instruction through a list. One with no fields is only dropped.
+/// instruction through a list. A field that is not read has no register.
 #[test]
 fn a_constructor_of_any_number_of_fields_is_taken_apart() {
-    for n in 0..=10u32 {
-        let fields: Vec<_> = (1..=n).map(LocalId).collect();
-        let rest = returning(Atom::prim(PrimOp::MakeTuple, fields));
-        let got = matched(n, dropping(&[0], rest));
-        let dsts: Vec<_> = (1..=n).map(|i| i.to_string()).collect();
-        let want = match n {
-            0 => "Drop 0".to_string(),
-            1..=8 => format!("{} Open{n} 0", dsts.join(" ")),
-            _ => format!("{} OpenWide 0", dsts.join(" ")),
-        };
-        assert_eq!(got[1], want);
+    for n in 1..=10u32 {
+        for skip in 0..=n {
+            let read = |i: &u32| *i != skip;
+            let fields: Vec<_> = (1..=n)
+                .filter(read)
+                .map(|i| (u16::try_from(i - 1).unwrap(), bind(i)))
+                .collect();
+            if fields.is_empty() {
+                continue;
+            }
+            let kept = fields.iter().map(|(_, b)| b.id).collect();
+            let open = CoreExpr::Open {
+                cell: LocalId(0),
+                variant: with_fields(n as usize),
+                fields,
+                body: Box::new(returning(Atom::prim(PrimOp::MakeTuple, kept))),
+            };
+            let draft = drafted(&function(1, open));
+            let got = shown(&instructions(&draft)[0], &draft.lists);
+            let dst = |i: u32| {
+                if read(&i) {
+                    i.to_string()
+                } else {
+                    "_".to_string()
+                }
+            };
+            let dsts: Vec<_> = (1..=n).map(dst).collect();
+            let name = if n <= 8 {
+                format!("Open{n}")
+            } else {
+                "OpenWide".to_string()
+            };
+            assert_eq!(got, format!("{} {name} 0", dsts.join(" ")));
+        }
     }
-}
-
-/// Anything else reads each field out, and drops what the arm says where it
-/// says it: an arm that does not begin with drops, that drops a field before the
-/// value it is a field of, or that does not drop the value at all, and one whose
-/// pattern is no constructor's.
-#[test]
-fn an_arm_that_does_not_begin_so_reads_the_fields_out() {
-    let fields = ["1 Field 0", "2 Field 0"];
-    let make = |dst: u32, body: CoreExpr| CoreExpr::Let {
-        bind: bind(dst),
-        rhs: Atom::Nil,
-        body: Box::new(body),
-    };
-    let in_a_case = |body: CoreExpr| join(1, &[], body, gives(20));
-    let in_a_join = |body: CoreExpr| join(1, &[9], body, gives(9));
-    for (arm, want) in [
-        (gives(1), &["Ret 1"][..]),
-        (
-            dropping(&[20, 2], gives(1)),
-            &["Drop 20", "Drop 2", "Ret 1"],
-        ),
-        (dropping(&[2, 0], gives(1)), &["Drop 2", "Drop 0", "Ret 1"]),
-        (
-            dropping(&[20, 1, 0], gives(2)),
-            &["Drop 20", "Drop 1", "Drop 0", "Ret 2"],
-        ),
-        (
-            make(8, dropping(&[0], gives(1))),
-            &["8 Const", "Drop 0", "Ret 1"],
-        ),
-        (
-            dropping(&[20], make(8, dropping(&[0], gives(1)))),
-            &["Drop 20", "8 Const", "Drop 0", "Ret 1"],
-        ),
-        (
-            in_a_case(dropping(&[0], gives(1))),
-            &["Drop 0", "Ret 1", "Ret 20"],
-        ),
-        (
-            in_a_join(dropping(&[0], jump(1, &[1]))),
-            &["Drop 0", "9 Move 1", "Jump", "Ret 9"],
-        ),
-    ] {
-        let got = matched(2, arm);
-        assert_eq!(got[1..3], fields, "{got:?}");
-        assert_eq!(got[3..], *want);
-    }
-    // A field with the scrutinee's own number is no field of a program's.
-    let variant = with_fields(2);
-    let fields = vec![bind(0), bind(2)];
-    let got = in_arm(CorePat::Ctor { variant, fields }, dropping(&[0], gives(2)));
-    assert_eq!(got[1..], ["0 Field 0", "2 Field 0", "Drop 0", "Ret 2"]);
-    let got = in_arm(CorePat::Bind(bind(1)), dropping(&[0], gives(1)));
-    assert_eq!(got, ["1 Move 0", "Drop 0", "Ret 1"]);
-    let got = in_arm(CorePat::Wild, dropping(&[0], gives(20)));
-    assert_eq!(got, ["Drop 0", "Ret 20"]);
-}
-
-/// A pattern with very many fields and very many drops is gone over a fixed number
-/// of times. Here 30,000 fields are read, 30,000 are only dropped, and 60,000 other
-/// values are dropped on both sides of the scrutinee. Going over the drops for each
-/// field, or over the fields for each drop, is billions of compares, which nobody
-/// waits for twice: each such scan makes this test take eight seconds and not a
-/// third of one.
-#[test]
-fn a_pattern_of_many_fields_is_gone_over_a_few_times() {
-    const N: u32 = 60_000;
-    let fields: Vec<_> = (1..=N).map(bind).collect();
-    let others = |from: u32| from..from + N / 2;
-    let unread = || (1..=N).filter(|l| l % 2 == 0);
-    let kept: Vec<_> = (1..=N).filter(|l| l % 2 == 1).map(LocalId).collect();
-    let mut arm = returning(Atom::prim(PrimOp::MakeTuple, kept.clone()));
-    let drops = others(N + 1)
-        .chain([0])
-        .chain(unread())
-        .chain(others(2 * N));
-    for l in drops.collect::<Vec<_>>().into_iter().rev() {
-        arm = dropping(&[l], arm);
-    }
-    let reads = unread()
-        .chain(others(N + 1))
-        .chain(others(2 * N))
-        .chain(kept.iter().map(|l| l.0));
-    let program = empty_program();
-    let source = Source::new(&program).expect("a whole program");
-    let mut tables = Tables::default();
-    let reads = reads.map(|l| (LocalId(l), 1)).collect();
-    let t = translator(&source, &mut tables, reads);
-    let opened = t.opened(LocalId(0), &fields, &arm);
-    let opened = opened.map(|o| (o.before, o.dsts, o.after));
-    // Freed from the outside in, because as a tree it is deeper than the stack.
-    while let CoreExpr::Drop { body, .. } = arm {
-        arm = *body;
-    }
-    let (before, dsts, after) = opened.expect("it begins so");
-    let locals = |of: Vec<LocalId>| of.iter().map(|l| l.0).collect::<Vec<_>>();
-    assert_eq!(locals(before), others(N + 1).collect::<Vec<_>>());
-    assert_eq!(locals(after), others(2 * N).collect::<Vec<_>>());
-    assert_eq!(dsts.len(), fields.len());
-    let dsts: Vec<_> = dsts.iter().filter_map(|d| d.dst()).collect();
-    assert_eq!(dsts, kept.iter().map(|l| Dst(of(*l))).collect::<Vec<_>>());
-}
-
-/// A field that is dropped where the arm begins and read besides, which no
-/// compiler makes, still has a register and its drop.
-#[test]
-fn a_field_read_after_its_drop_keeps_both() {
-    let got = matched(2, dropping(&[0, 1], gives(1)));
-    assert_eq!(got[1..], ["1 _ Open2 0", "Drop 1", "Ret 1"]);
 }
 
 /// An instruction with more operands than it has room for takes them from a
@@ -1648,9 +2027,65 @@ fn a_jump_gives_each_parameter_its_value() {
     );
 }
 
-/// A lookup in a map goes into the match on it, with no `Option` made, whether an
-/// arm gives the `Option` up or not, and with what is dropped in between dropped on
-/// both ways. Not when anything else reads it.
+/// A value that a lookup finds and nothing reads gets a drop only when one of its type
+/// gets any, and is known by its type to be a number or no cell.
+#[test]
+fn a_found_value_that_nothing_reads_is_dropped_by_its_type() {
+    let mut program = program(
+        "import scarlet/map\npub fn main() { println(map::get(map::set(map::new(), 1, 2), 1)) }\n",
+    );
+    let abi = program.abi;
+    let pool = &mut program.pool;
+    let prims = pool.prims();
+    let mut con = |id, repr| pool.mk_con(id, repr, &[]).expect("room");
+    let types = [
+        (con(prims.int, Repr::Counted), false, Makes::Int),
+        (con(prims.float, Repr::Word), false, Makes::NoCell),
+        (con(prims.string, Repr::Counted), false, Makes::Any),
+        (con(TypeId(-51), Repr::Word), false, Makes::NoCell),
+        (con(TypeId(-52), Repr::Counted), true, Makes::Any),
+        (pool.mk_bound(0).expect("room"), true, Makes::Any),
+    ];
+    let typed = types.map(|(ty, drops, kind)| {
+        let some = abi.some.type_id;
+        let option = pool.mk_con(some, Repr::Counted, &[ty]).expect("room");
+        (option, drops, kind)
+    });
+    let source = Source::new(&program).expect("a whole program");
+    for (option, drops, kind) in typed {
+        let intrinsic = Intrinsic::MapGet;
+        let args = vec![LocalId(0), LocalId(1)];
+        let arms = vec![
+            (vec![abi.some.variant_idx], dropping(&[2], gives(1))),
+            (vec![abi.none.variant_idx], gives(0)),
+        ];
+        let ty = abi.some.type_id;
+        let core = CoreExpr::Let {
+            bind: CoreBind::new(LocalId(2), option),
+            rhs: Atom::Intrinsic { intrinsic, args },
+            body: Box::new(switch(2, Cases::Variant { ty, arms }, None)),
+        };
+        let core = function(2, core);
+        let draft = translate(&source, &core, None, &mut Tables::default());
+        let draft = draft.expect("it translates");
+        crate::code::live::settle(&mut copy_of(&draft)).expect("it loads");
+        let made: Vec<String> = instructions(&draft)
+            .iter()
+            .map(|i| shown(i, &draft.lists))
+            .collect();
+        let value = made[0].split(' ').next().expect("a value").to_string();
+        let mut want = vec![format!("{value} MapFind 0 1")];
+        want.extend(drops.then(|| format!("Drop {value}")));
+        want.extend(["Ret 1", "Ret 0"].map(str::to_string));
+        assert_eq!(made, want);
+        let value: usize = value.parse().expect("a number");
+        assert_eq!(draft.kinds[value], Some(kind), "{made:?}");
+    }
+}
+
+/// A lookup in a map goes into the switch on it, with no `Option` made, whether a
+/// case reads the value or not, and with what is dropped in between dropped on both
+/// ways. Not when anything else reads it.
 #[test]
 fn a_lookup_goes_into_the_match_on_it() {
     let program = program(
@@ -1669,63 +2104,104 @@ fn a_lookup_goes_into_the_match_on_it() {
             body: Box::new(rest),
         }
     };
-    let arms = |some: CoreExpr, none: CoreExpr| CoreExpr::Match {
-        scrut: LocalId(2),
-        arms: vec![
-            (
-                CorePat::Ctor {
-                    variant: abi.none,
-                    fields: Vec::new(),
-                },
-                none,
-            ),
-            (
-                CorePat::Ctor {
-                    variant: abi.some,
-                    fields: vec![bind(3)],
-                },
-                some,
-            ),
-        ],
+    let on = |scrut: u32, some: CoreExpr, none: Option<CoreExpr>, default: Option<CoreExpr>| {
+        let mut arms = vec![(vec![abi.some.variant_idx], some)];
+        arms.extend(none.map(|e| (vec![abi.none.variant_idx], e)));
+        let ty = abi.some.type_id;
+        switch(scrut, Cases::Variant { ty, arms }, default)
+    };
+    let cases = |some: CoreExpr, none: CoreExpr| on(2, some, Some(none), None);
+    // The case for `Some` takes it apart.
+    let opened = |rest: CoreExpr| CoreExpr::Open {
+        cell: LocalId(2),
+        variant: abi.some,
+        fields: vec![(0, bind(3))],
+        body: Box::new(rest),
     };
     let made = |rest: CoreExpr| -> Vec<String> {
         let core = function(2, lookup(rest));
         let draft = translate(&source, &core, None, &mut Tables::default());
         let draft = draft.expect("it translates");
-        crate::code::live::settle(&mut super::super::tests::copy_of(&draft)).expect("it loads");
+        crate::code::live::settle(&mut copy_of(&draft)).expect("it loads");
         let all = instructions(&draft);
         all.iter().map(|i| shown(i, &draft.lists)).collect()
     };
     let plain = ["3 MapFind 0 1", "Ret 3", "Ret 0"];
-    assert_eq!(made(arms(gives(3), gives(0))), plain);
-    // The arm gives the `Option` up, among other things.
-    assert_eq!(made(arms(dropping(&[2], gives(3)), gives(0))), plain);
-    let drops = made(arms(dropping(&[0, 2], gives(3)), dropping(&[2], gives(0))));
+    assert_eq!(made(cases(opened(gives(3)), gives(0))), plain);
+    // The default may be the case for either.
+    assert_eq!(made(on(2, opened(gives(3)), None, Some(gives(0)))), plain);
+    let arms = vec![(vec![abi.none.variant_idx], gives(0))];
+    let ty = abi.some.type_id;
+    let default = switch(2, Cases::Variant { ty, arms }, Some(opened(gives(3))));
+    assert_eq!(made(default), plain);
+    // A case gives the `Option` up, among other things.
+    let drops = made(cases(
+        dropping(&[0], opened(gives(3))),
+        dropping(&[2], gives(0)),
+    ));
     assert_eq!(drops, ["3 MapFind 0 1", "Drop 0", "Ret 3", "Ret 0"]);
     // What is dropped in between.
-    let between = made(dropping(&[0], arms(dropping(&[2], gives(3)), gives(1))));
+    let between = made(dropping(&[0], cases(opened(gives(3)), gives(1))));
     let want = ["3 MapFind 0 1", "Drop 0", "Ret 3", "Drop 0", "Ret 1"];
     assert_eq!(between, want);
-    // Read again in an arm, or after.
+    // When nothing reads the value it is given up at once, in front of the rest.
+    let unread = made(cases(dropping(&[0, 2], gives(1)), gives(0)));
+    let value = unread[0].split(' ').next().expect("a value").to_string();
+    let want = [
+        format!("{value} MapFind 0 1"),
+        "Drop 0".to_string(),
+        format!("Drop {value}"),
+        "Ret 1".to_string(),
+        "Ret 0".to_string(),
+    ];
+    assert_eq!(unread, want);
+    assert!(value.parse::<u32>().is_ok_and(|v| v > 2), "{unread:?}");
+    // Read again in a case, or after.
     let looked = |made: &[String]| made[0] == "2 Builtin 0 1";
-    assert!(looked(&made(arms(gives(2), gives(0)))));
-    assert!(looked(&made(arms(gives(3), dropping(&[0], gives(2))))));
-    let after = join(1, &[], arms(jump(1, &[]), jump(1, &[])), gives(2));
-    assert!(made(after)[0] == "2 Builtin 0 1");
-    // When the match is on another value, and only its arm reads this one.
-    let other = CoreExpr::Match {
-        scrut: LocalId(0),
-        arms: match arms(gives(2), gives(0)) {
-            CoreExpr::Match { arms, .. } => arms,
-            e => panic!("{e}"),
-        },
+    let field = |rest: CoreExpr| CoreExpr::Let {
+        bind: bind(3),
+        rhs: Atom::prim(PrimOp::Field(0), vec![LocalId(2)]),
+        body: Box::new(rest),
     };
-    assert!(looked(&made(other)));
-    // Or with something in front of the match.
+    assert!(looked(&made(cases(field(gives(3)), gives(0)))));
+    assert!(looked(&made(cases(gives(2), gives(0)))));
+    assert!(looked(&made(cases(
+        opened(gives(3)),
+        dropping(&[0], gives(2))
+    ))));
+    let after = join(1, &[], cases(jump(1, &[]), jump(1, &[])), gives(2));
+    assert!(looked(&made(after)));
+    // One case for both says nothing of which it is.
+    let variants = vec![abi.some.variant_idx, abi.none.variant_idx];
+    let both = Cases::Variant {
+        ty,
+        arms: vec![(variants, gives(0))],
+    };
+    assert!(looked(&made(switch(2, both, None))));
+    let neither = Cases::Variant {
+        ty,
+        arms: Vec::new(),
+    };
+    assert!(looked(&made(switch(2, neither, Some(gives(0))))));
+    // Nor does a switch on another type's, or on an Int.
+    let other = VariantRef {
+        type_id: abi.ok.type_id,
+        ..abi.some
+    };
+    let others = Cases::Variant {
+        ty: other.type_id,
+        arms: vec![(vec![0], gives(0)), (vec![1], gives(1))],
+    };
+    assert!(looked(&made(switch(2, others, None))));
+    let ints = Cases::Int(vec![(vec![0], gives(0)), (vec![1], gives(1))]);
+    assert!(looked(&made(switch(2, ints, Some(gives(0))))));
+    // When the switch is on another value, and only its case reads this one.
+    assert!(looked(&made(on(0, opened(gives(3)), Some(gives(0)), None))));
+    // Or with something in front of the switch.
     let first = CoreExpr::Let {
         bind: bind(6),
         rhs: Atom::Nil,
-        body: Box::new(arms(gives(3), gives(0))),
+        body: Box::new(cases(opened(gives(3)), gives(0))),
     };
     assert!(looked(&made(first)));
 }

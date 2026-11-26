@@ -998,8 +998,9 @@ fn tuple_destructure_drops_each_heap_element() {
     );
 }
 
-/// The `match` spelling of the same destructure has always emitted the drops.
-/// We pin the two spellings together so they can't drift apart again.
+/// The `match` spelling of the same destructure has always given up the value, with
+/// a drop or by taking it apart. We pin the two spellings together so they can't
+/// drift apart again.
 #[test]
 fn destructure_binding_matches_match_spelling() {
     let mk = |body: &str| {
@@ -1012,7 +1013,8 @@ fn destructure_binding_matches_match_spelling() {
     let count = |c: &str| {
         fn_body(c, 1)
             .lines()
-            .filter(|l| l.trim_start().starts_with("drop "))
+            .map(str::trim_start)
+            .filter(|l| l.starts_with("drop ") || l.starts_with("open "))
             .count()
     };
     assert_eq!(
@@ -1130,7 +1132,8 @@ fn guarded_match_arm_bodies_lowered_once() {
 /// The body of an arm is lowered once when an or-pattern in it binds names, and
 /// so the arm may be matched in several places: with one or-pattern, with two, one
 /// inside the other, one inside a tuple, a guard, and a `<<>>` pattern before it.
-/// The rest of the pattern and the guard are lowered at each.
+/// The rest of the pattern and the guard are lowered at each. The body takes the
+/// names that it reads.
 #[test]
 fn an_or_pattern_that_binds_shares_its_arm_body() {
     let body = |arms: &str| {
@@ -1164,7 +1167,7 @@ fn an_or_pattern_that_binds_shares_its_arm_body() {
             "(A(n) | B(n), A(m) | B(m), _) if n > m",
             "(A(_) | B(_) | C(_, _), A(_) | B(_) | C(_, _), _)",
             "n",
-            2,
+            1,
             4,
         ),
         ("(A(n) | B(n), _, <<k>>)", any, "n + k", 2, 0),
@@ -1202,10 +1205,10 @@ fn an_arm_that_matches_in_one_place_takes_no_names() {
         "type T {\n\tA(x Int)\n\tB(x Int)\n}\n\
          fn f(t T, xs Array(T), b Binary) Int {\n\
          \tmatch (t, xs, b) {\n\
-         \t\t(A(1) | B(_), [A(n), ..rest], <<k, m:utf8, v:binary>>) -> {\n\
+         \t\t(A(_) | B(_), [A(n), ..rest], <<k, m:utf8, v:binary>>) -> {\n\
          \t\t\tif rest == [] && v == b { n + k + m } else { k }\n\
          \t\t}\n\
-         \t\t(A(_) | B(_), _, <<_:8, w:binary>>) -> if w == b { 1 } else { 2 }\n\
+         \t\t(A(_) | B(_), _, <<_:8, _:binary>>) -> 1\n\
          \t\t(A(_) | B(_), _, _) -> 0\n\
          \t}\n\
          }\n\
@@ -1281,22 +1284,27 @@ fn or_pattern_arm_bodies_lowered_once() {
     );
 }
 
-/// An alternative in the middle of the chain that always matches makes the
-/// ones after it dead. We lower those and then discard them, and the discard
-/// must take back their jumps. Otherwise a join nothing jumps to is still
-/// declared.
+/// An alternative that always fits makes those after it dead, and no join is declared
+/// that nothing jumps to. Those in front of it are tried all the same when they read a
+/// size, which may call something, and not when their sizes are constants.
 #[test]
 fn discarded_alternative_leaves_no_unreachable_continuation() {
-    let core = lower(
-        "fn g(b Binary) Int {\n\
-         \tmatch b {\n\
-         \t\t<<1>> | <<..>> | <<2>> -> 1\n\
-         \t}\n\
-         }\n\
-         pub fn main() {\n\
-         \tg(<<1>>)\n\
-         }\n",
-    );
+    let of = |first: &str| {
+        lower(&format!(
+            "fn g(b Binary, n Int) Int {{\n\
+             \tmatch b {{\n\
+             \t\t<<{first}>> | <<..>> | <<2>> -> n\n\
+             \t}}\n\
+             }}\n\
+             pub fn main() {{\n\
+             \tg(<<1>>, 8)\n\
+             }}\n"
+        ))
+    };
+    let constant = of("1");
+    let constant = fn_body(&constant, 0);
+    assert!(!constant.contains("join"), "{constant}");
+    let core = of("1:size(n)");
     let body = fn_body(&core, 0);
     let mut declared = Vec::new();
     let mut targeted = Vec::new();

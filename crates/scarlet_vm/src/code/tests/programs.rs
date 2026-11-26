@@ -89,8 +89,14 @@ fn every_program_gives_up_each_value_once() {
     let (mut functions, mut joins, mut cut) = (0, 0, 0);
     every_program(&mut |program, what| {
         let pool = &program.pool;
+        let fields = |ty| {
+            let names = program.types.get(&ty);
+            let variants = names.map_or(&[][..], |names| &names.variants);
+            variants.iter().map(|v| v.fields.len()).collect()
+        };
         let check = |f: &CoreFn, body: Body, what: &str| {
-            ownership::check(pool, f, body).unwrap_or_else(|why| panic!("{what}: {why}\n{f}"));
+            ownership::check(pool, &fields, f, body)
+                .unwrap_or_else(|why| panic!("{what}: {why}\n{f}"));
         };
         let tops = program.inits.iter().chain([&program.toplevel]);
         let tops = tops.map(|f| (f, Body::Toplevel));
@@ -107,7 +113,7 @@ fn every_program_gives_up_each_value_once() {
         }
     });
     assert!(
-        functions > 3000 && joins > 2000 && cut > 0,
+        functions > 3000 && joins > 1000 && cut > 0,
         "{functions} {joins} {cut}"
     );
 }

@@ -1,5 +1,5 @@
 use super::*;
-use crate::code::tests::{a_ctor, body, named, program};
+use crate::code::tests::{a_ctor, body, named, program, targets};
 use crate::code::{Code, load};
 use crate::ops::{Arith, Compare, Order};
 
@@ -73,7 +73,10 @@ fn every_operator_instruction_names_its_operands() {
             (VReg(7), Role::Look),
         ];
         assert_eq!(operands(ins, &lists), want[..=n], "{ins:?}");
-        assert!(ins.falls_through() && ins.target().is_none(), "{ins:?}");
+        assert!(
+            ins.falls_through() && targets(ins, &lists).is_empty(),
+            "{ins:?}"
+        );
         // An instruction is named after its operator.
         let op = op.replace("Order(", "").replace(')', "");
         assert!(ins.op().name().contains(&op), "{op} {}", ins.op().name());
@@ -82,7 +85,7 @@ fn every_operator_instruction_names_its_operands() {
         let want = [(VReg(6), Role::Look), (VReg(7), Role::Look)];
         assert_eq!(operands(jump, &lists), want[..*n], "{jump:?}");
         assert!(jump.falls_through());
-        assert_eq!(jump.target(), Some(to));
+        assert_eq!(targets(jump, &lists), [to]);
         let name = format!("JumpUnless{}", stored.op().name());
         assert_eq!(jump.op().name(), name);
     }
@@ -101,11 +104,15 @@ fn only_these_instructions_end_or_jump() {
         Op::Jump,
         Op::Enter,
         Op::Bad,
+        Op::Switch,
+        Op::SwitchInt,
+        Op::SwitchIntFar,
     ];
     let listed = |op: &Op| ends.contains(op);
     let names = Op::ALL.iter().map(|op| (op.name(), listed(op)));
     for (name, ends) in names {
         let looks = name.starts_with("TailCall")
+            || name.starts_with("Switch")
             || ["Halt", "Ret", "RetClosure", "Jump", "Enter", "Bad"].contains(&name);
         assert_eq!(looks, ends, "{name}");
     }
@@ -113,7 +120,12 @@ fn only_these_instructions_end_or_jump() {
     let (to, why) = (Callee(FuncIdx(0)), WhyId(0));
     let args = Args::new(&[]).expect("none");
     let callee = Shared(VReg(0));
-    let ending: [Ins<VReg>; 8] = [
+    let mut lists = Lists::default();
+    lists.tables.extend([Label(5), Label(3), Label(5)]);
+    let places = [(1, Label(6)), (900, Label(7))];
+    lists.places.push(Box::new(places));
+    let src = Src(VReg(0));
+    let ending: [Ins<VReg>; 11] = [
         Ins::Halt {
             src: Taken(VReg(0)),
         },
@@ -134,19 +146,50 @@ fn only_these_instructions_end_or_jump() {
         Ins::Jump { to: Label(0) },
         Ins::Enter { to },
         Ins::Bad { why },
+        Ins::Switch {
+            src,
+            table: Table { first: 1, last: 1 },
+        },
+        Ins::SwitchInt {
+            src,
+            table: IntTable {
+                table: Table { first: 0, last: 2 },
+                first: 7,
+            },
+        },
+        Ins::SwitchIntFar {
+            src,
+            places: PlaceList(0),
+            to: Label(8),
+        },
     ];
     for (ins, op) in ending.iter().zip(ends) {
         assert_eq!(ins.op(), op);
         assert!(!ins.falls_through(), "{op:?}");
-        assert_eq!(ins.target().is_some(), op == Op::Jump, "{op:?}");
+        let want = match op {
+            Op::Jump => vec![0],
+            Op::Switch => vec![3, 5],
+            Op::SwitchInt => vec![5, 3, 5],
+            Op::SwitchIntFar => vec![6, 7, 8],
+            _ => Vec::new(),
+        };
+        let to: Vec<u32> = targets(ins, &lists).iter().map(|l| l.0).collect();
+        assert_eq!(to, want, "{op:?}");
     }
+    // A table that is not there has nowhere to go.
+    let lost = Ins::Switch {
+        src,
+        table: Table { first: 2, last: 1 },
+    };
+    assert!(targets::<VReg>(&lost, &lists).is_empty());
     let hit: Ins<VReg> = Ins::MapFind {
         dst: Hit(VReg(0)),
         map: Src(VReg(1)),
         key: Src(VReg(2)),
         to: Label(4),
     };
-    assert!(hit.falls_through() && hit.target() == Some(Label(4)));
+    assert!(hit.falls_through());
+    assert_eq!(targets(&hit, &lists), [Label(4)]);
 }
 
 /// What an instruction says it makes: a number or a Bool is no cell but a big
@@ -334,7 +377,7 @@ fn a_constructor_that_takes_its_fields_has_a_form_of_its_own() {
             assert_eq!(taking.is_some(), bits == all, "{n} {bits:b}");
             let Some(taking) = taking else { continue };
             assert_eq!(taking.op(), form);
-            assert!(taking.falls_through() && taking.target().is_none());
+            assert!(taking.falls_through() && targets(&taking, lists).is_empty());
             let mut want = vec![(VReg(3), Role::Write)];
             want.extend(regs[..n].iter().map(|r| (*r, Role::Take)));
             assert_eq!(operands(&taking, lists), want);
@@ -469,6 +512,15 @@ impl Places for Shifted {
 
     fn set_list(&self, i: u32) -> Result<u32, Unplaced> {
         Ok(i + 40)
+    }
+
+    fn table(&self, table: Table) -> Result<Table, Unplaced> {
+        let first = table.first + 50;
+        Ok(Table { first, ..table })
+    }
+
+    fn place_list(&self, i: u32) -> Result<u32, Unplaced> {
+        Ok(i + 60)
     }
 }
 
@@ -662,7 +714,8 @@ fn the_listing_shows_every_operand() {
         for (r, _) in operands(ins, &code.lists) {
             assert!(line.contains(&r.to_string()), "{line} names {r}");
         }
-        assert_eq!(line.contains(" -> "), ins.target().is_some(), "{line}");
+        let jumps = !targets(ins, &code.lists).is_empty();
+        assert_eq!(line.contains(" -> "), jumps, "{line}");
     }
     assert!(text.contains("= MapFind(r2, r3) -> "), "{text}");
 }
@@ -681,13 +734,31 @@ fn the_listing_shows_a_variant_by_its_number() {
                \t}\n\
                }\n\
                fn g(q Q) Int { q.b }\n\
-               pub fn main() { println(f(B(1, (2, 3))) + g(Q(1, 2))) }\n";
+               fn h(p P) Int {\n\
+               \tmatch p {\n\
+               \t\tB(n, _) -> n\n\
+               \t\tA | C -> 0\n\
+               \t}\n\
+               }\n\
+               fn i(p P) Int {\n\
+               \tmatch p {\n\
+               \t\tA -> 1\n\
+               \t\tB(..) | C -> h(p)\n\
+               \t}\n\
+               }\n\
+               fn j(n Int) Int {\n\
+               \tmatch n {\n\
+               \t\t1 | 3 -> 5\n\
+               \t\t2 -> 6\n\
+               \t\t70 -> 7\n\
+               \t\t_ -> 8\n\
+               \t}\n\
+               }\n\
+               pub fn main() { println(f(B(1, (2, 3))) + g(Q(1, 2)) + i(C) + j(2)) }\n";
     let listing = crate::listing(&program(src)).expect("the program loads");
     let text = listing.function(0).expect("f");
     for part in [
-        "JumpUnlessTag(r2, .0) ->",
-        "JumpUnlessTag(r2, .1(..)) ->",
-        "JumpUnlessTag(r2, .2) ->",
+        "Switch(r2, .0 -> 1, .1 -> 3, .2 -> 6)\n",
         "_, r2 = Open2(move r2, ",
         "= Field(r2, 1)\n",
     ] {
@@ -695,6 +766,15 @@ fn the_listing_shows_a_variant_by_its_number() {
     }
     let text = listing.function(1).expect("g");
     assert!(text.contains("= Field(r2, 1)\n"), "{text}");
+    for (f, part) in [
+        (2, "JumpUnlessTag(r2, .1(..)) ->"),
+        (3, "JumpUnlessTag(r2, .0) ->"),
+        (4, "SwitchInt(r2, 1 3 -> 5, 2 -> 7, _ -> 1)\n"),
+        (4, "JumpUnlessInt(r2, 70) ->"),
+    ] {
+        let text = listing.function(f).expect("a function");
+        assert!(text.contains(part), "{part}: {text}");
+    }
 }
 
 /// A constructor and a tuple show what they are given in order, with what they
@@ -761,7 +841,7 @@ fn the_listing_shows_where_the_fields_of_a_cell_go() {
         lines(".turn"),
         [
             "1  r2, r3 = Open2(move r2, 10.0)",
-            "5  r2, _, _, _, _, _, _, _, r3 = OpenWide(move r2, 10.1)",
+            "4  r2, _, _, _, _, _, _, _, r3 = OpenWide(move r2, 10.1)",
         ]
     );
     assert_eq!(lines(".second"), ["1  _, r2 = Open2(move r2, 10.0)"]);

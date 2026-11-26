@@ -1,5 +1,5 @@
 use super::super::ins::{ArgList, Assign, AssignList, Callee, OwnEntry, OwnRoom, Shared};
-use super::super::tests::{SHAPES, a_ctor, body, entries, named, of, program};
+use super::super::tests::{SHAPES, a_ctor, body, entries, named, of, program, targets};
 use super::super::{Arg, Args, Code, Dst, Entry, ReadsClosure, load, load_counted};
 use super::*;
 use crate::heap::Layout;
@@ -40,7 +40,7 @@ fn a_counted_load_is_the_same_program_with_a_count_at_each_block_head() {
                 let kinds: Vec<Op> = rest.map(Ins::op).collect();
                 assert_eq!(*counted.blocks[numbered as usize], kinds);
                 numbered += 1;
-            } else if (!ins.falls_through() || ins.target().is_some())
+            } else if (!ins.falls_through() || !targets(ins, &counted.code.lists).is_empty())
                 && let Some(next) = new.get(i + 1)
             {
                 // Anything that may not fall through ends its block.
@@ -48,7 +48,9 @@ fn a_counted_load_is_the_same_program_with_a_count_at_each_block_head() {
             }
         }
         for (a, b) in old.iter().zip(&kept) {
-            if let (Some(a), Some(b)) = (a.target(), b.target()) {
+            let (a, b) = (targets(a, &plain.lists), targets(b, &counted.code.lists));
+            assert_eq!(a.len(), b.len());
+            for (a, b) in a.into_iter().zip(b) {
                 let lands = within(now, b);
                 assert!(is_count(&new[lands]), "a jump lands on a count");
                 assert_eq!(sits[within(was, a)], lands + 1, "and on the same block");
@@ -94,7 +96,9 @@ fn an_audited_load_is_the_same_program_with_an_audit_before_each_instruction() {
                 let new = &new[*at_old];
                 assert_eq!(before(*at_old), Op::Audit, "{}", now.name);
                 assert_eq!(old.op(), new.op());
-                if let (Some(old), Some(new)) = (old.target(), new.target()) {
+                let (old, new) = (targets(old, &a.lists), targets(new, &b.lists));
+                assert_eq!(old.len(), new.len());
+                for (old, new) in old.into_iter().zip(new) {
                     // The audit is right in front of the instruction, and in
                     // front of that, at the start, are the parameters' checks.
                     let (from, to) = (within(was, old), within(now, new));
@@ -191,8 +195,8 @@ fn an_audited_load_checks_what_is_written() {
     }
     // A loop goes back to its parameters' checks.
     let go = named(&code, "go");
-    let back = body(&code, go).iter().filter_map(Ins::target);
-    assert!(back.into_iter().any(|to| within(go, to) == 0));
+    let mut back = body(&code, go).iter().flat_map(|i| targets(i, &code.lists));
+    assert!(back.any(|to| within(go, to) == 0));
 }
 
 /// A call by name holds where its callee starts, whether the callee is before

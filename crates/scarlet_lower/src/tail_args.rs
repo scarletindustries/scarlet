@@ -121,13 +121,23 @@ fn reads(e: &CoreExpr) -> BTreeSet<LocalId> {
                 work.push(body);
             }
             CoreExpr::Drop { body, .. } => work.push(body),
-            CoreExpr::Match { scrut, arms } => {
-                read.insert(*scrut);
-                for (pat, arm) in arms {
-                    bound.extend(pat.binds().map(|b| b.id));
-                    work.push(arm);
-                }
+            CoreExpr::Open {
+                cell, fields, body, ..
+            } => {
+                read.insert(*cell);
+                bound.extend(fields.iter().map(|(_, b)| b.id));
+                work.push(body);
             }
+            CoreExpr::Switch {
+                scrut,
+                cases,
+                default,
+            } => {
+                read.insert(*scrut);
+                work.extend(cases.arms());
+                work.extend(default.as_deref());
+            }
+            CoreExpr::NoArm => {}
             CoreExpr::If { cond, then, els } => {
                 read.insert(*cond);
                 work.push(then);
@@ -155,8 +165,10 @@ fn after(mut e: &mut CoreExpr, n: usize) -> &mut CoreExpr {
             CoreExpr::Let { body, .. }
             | CoreExpr::SetGlobal { body, .. }
             | CoreExpr::Join { cont: body, .. }
+            | CoreExpr::Open { body, .. }
             | CoreExpr::Drop { body, .. } => body,
-            CoreExpr::Match { .. }
+            CoreExpr::Switch { .. }
+            | CoreExpr::NoArm
             | CoreExpr::If { .. }
             | CoreExpr::Ret(_)
             | CoreExpr::TailCall { .. }
@@ -180,7 +192,9 @@ impl Scheduler<'_> {
             CoreExpr::Drop { body, .. } => Some((Line::Drop, body)),
             CoreExpr::SetGlobal { .. }
             | CoreExpr::Join { .. }
-            | CoreExpr::Match { .. }
+            | CoreExpr::Open { .. }
+            | CoreExpr::Switch { .. }
+            | CoreExpr::NoArm
             | CoreExpr::If { .. }
             | CoreExpr::Ret(_)
             | CoreExpr::TailCall { .. }
@@ -214,12 +228,15 @@ impl Scheduler<'_> {
                     self.expr(body)?;
                     cont
                 }
-                CoreExpr::SetGlobal { body, .. } => body,
-                CoreExpr::Match { arms, .. } => {
-                    for (_, arm) in arms {
+                CoreExpr::SetGlobal { body, .. } | CoreExpr::Open { body, .. } => body,
+                CoreExpr::Switch { cases, default, .. } => {
+                    for arm in cases.arms_mut() {
                         self.expr(arm)?;
                     }
-                    return Ok(());
+                    match default {
+                        Some(default) => default,
+                        None => return Ok(()),
+                    }
                 }
                 CoreExpr::If { then, els, .. } => {
                     self.expr(then)?;
@@ -230,7 +247,8 @@ impl Scheduler<'_> {
                 | CoreExpr::Drop { .. }
                 | CoreExpr::Ret(_)
                 | CoreExpr::TailCall { .. }
-                | CoreExpr::Jump { .. } => return Ok(()),
+                | CoreExpr::Jump { .. }
+                | CoreExpr::NoArm => return Ok(()),
             };
         }
     }

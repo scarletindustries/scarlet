@@ -1,13 +1,13 @@
 fn main.area(%0:t0) -> :t1
-  match %0
-    | 10.0(%1) ->
-      drop %0
+  switch %0
+    | 10.0 ->
+      open %0 10.0(0: %1:t1)
       let %2:t1 = IntMul(%1, %1)
       let %3:t1 = c0
       let %4:t1 = IntMul(%2, %3)
       ret %4
-    | 10.1(%5, %6) ->
-      drop %0
+    | 10.1 ->
+      open %0 10.1(0: %5:t1, 1: %6:t1)
       let %7:t1 = IntMul(%5, %6)
       ret %7
 

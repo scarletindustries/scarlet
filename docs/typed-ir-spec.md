@@ -126,7 +126,7 @@ So it becomes `ip = instr.operand;`. Four subtractions leave the interpreter's h
 
 This is stronger than resolving addresses carefully in one place, because an absolute address is never *written* at all.
 
-It's safe because `CoreExpr`'s control flow is structured (`If`, `Match`, `Join`), so every jump `emit` produces stays inside its function. Calls take a `FuncIdx`, not an address.
+It's safe because `CoreExpr`'s control flow is structured (`If`, `Switch`, `Join`), so every jump `emit` produces stays inside its function. Calls take a `FuncIdx`, not an address.
 
 Two things to verify rather than assume:
 1. `Function.code_start` must still be recorded, because it's how the VM enters a function. The appender writes it, since it knows where the code went.

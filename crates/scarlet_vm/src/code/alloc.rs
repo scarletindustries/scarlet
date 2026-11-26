@@ -20,7 +20,7 @@
 
 use std::collections::HashSet;
 
-use super::ins::{Ins, Lists, Makes, VReg};
+use super::ins::{Ins, Label, Lists, Makes, VReg};
 use super::live::Held;
 use super::translate::{Draft, Step, TailTo};
 use super::{ReadsClosure, Reg, Room, Unfit};
@@ -38,6 +38,8 @@ pub(super) struct Assigned {
     /// [`Draft::kinds`].
     pub(super) kinds: Vec<Option<Makes>>,
     pub(super) params: Vec<VReg>,
+    /// [`Draft::words`].
+    pub(super) words: Vec<(Label, VReg)>,
     /// How many registers its frame has.
     pub(super) own: Room,
     /// What it reads of the closure it runs as.
@@ -75,6 +77,7 @@ pub(super) fn allocate(draft: Draft, held: &Held) -> Result<Assigned, Unfit> {
         regs,
         kinds: draft.kinds,
         params: draft.params,
+        words: draft.words,
         own: room(end),
         closure: draft.closure,
     };

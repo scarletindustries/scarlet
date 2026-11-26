@@ -86,19 +86,25 @@ fn atom_forms() {
     );
 }
 
+/// The two zeros are one key, and every other Float is its own.
 #[test]
-fn pat_forms() {
-    assert_eq!(CorePat::Wild.to_string(), "_");
-    assert_eq!(CorePat::Lit(ConstId(2)).to_string(), "c2");
-    assert_eq!(CorePat::Bind(bind(3, RTy(0))).to_string(), "%3");
-    assert_eq!(
-        CorePat::Ctor {
-            variant: vref(4, 0),
-            fields: vec![bind(5, RTy(2)), bind(6, RTy(2))],
-        }
-        .to_string(),
-        "4.0(%5, %6)"
-    );
+fn a_float_key_is_what_double_equals_sees() {
+    assert_eq!(FloatKey::new(-0.0), FloatKey::new(0.0));
+    assert_eq!(FloatKey::new(-0.0).get().to_bits(), 0.0f64.to_bits());
+    for x in [
+        1.0,
+        -1.0,
+        5e-324,
+        -5e-324,
+        f64::MAX,
+        f64::MIN,
+        f64::INFINITY,
+    ] {
+        assert_eq!(FloatKey::new(x).get().to_bits(), x.to_bits());
+        assert_ne!(FloatKey::new(x), FloatKey::new(0.0));
+        assert_ne!(FloatKey::new(x), FloatKey::new(-x));
+    }
+    assert_eq!(FloatKey::new(-0.5).to_string(), "-0.5");
 }
 
 #[test]
@@ -161,37 +167,122 @@ fn ret() -> CoreExpr {
     CoreExpr::Ret(LocalId(0))
 }
 
-#[test]
-fn if_and_match_indent() {
-    let m = CoreExpr::Match {
+fn switch(cases: Cases, default: Option<CoreExpr>) -> CoreExpr {
+    CoreExpr::Switch {
         scrut: LocalId(0),
-        arms: vec![
-            (
-                CorePat::Ctor {
-                    variant: vref(4, 0),
-                    fields: vec![bind(5, RTy(2))],
-                },
-                CoreExpr::TailCall {
-                    callee: Callee::Self_,
-                    args: locals(&[5]),
-                },
-            ),
-            (CorePat::Wild, CoreExpr::Ret(LocalId(2))),
-        ],
+        cases,
+        default: default.map(Box::new),
+    }
+}
+
+/// Every kind of case, with and without a default, and what a case opens.
+#[test]
+fn if_and_switch_indent() {
+    let opened = CoreExpr::Open {
+        cell: LocalId(0),
+        variant: vref(4, 1),
+        fields: vec![(0, bind(5, RTy(2))), (2, bind(6, RTy(3)))],
+        body: Box::new(CoreExpr::TailCall {
+            callee: Callee::Self_,
+            args: locals(&[5, 6]),
+        }),
     };
+    let variants = Cases::Variant {
+        ty: TypeId(4),
+        arms: vec![(vec![1], opened), (vec![0, 3], ret())],
+    };
+    let texts = Cases::Text(vec![(vec![ConstId(7)], CoreExpr::NoArm)]);
+    let floats = Cases::Float(vec![(
+        vec![FloatKey::new(-0.0), FloatKey::new(1.5)],
+        switch(texts, Some(ret())),
+    )]);
+    let ints = Cases::Int(vec![
+        (vec![-3, i64::MAX], switch(floats, Some(ret()))),
+        (vec![4], ret()),
+    ]);
     assert_eq!(
-        iff(m, ret()).to_string(),
+        iff(switch(variants, None), switch(ints, Some(ret()))).to_string(),
         "\
 if %1
-  match %0
-    | 4.0(%5) ->
-      tail call self(%5)
-    | _ ->
-      ret %2
+  switch %0
+    | 4.1 ->
+      open %0 4.1(0: %5:2, 2: %6:3)
+      tail call self(%5, %6)
+    | 4.0, 4.3 ->
+      ret %0
 else
-  ret %0
+  switch %0
+    | -3, 9223372036854775807 ->
+      switch %0
+        | 0.0, 1.5 ->
+          switch %0
+            | c7 ->
+              no arm
+            | _ ->
+              ret %0
+        | _ ->
+          ret %0
+    | 4 ->
+      ret %0
+    | _ ->
+      ret %0
 "
     );
+}
+
+/// Each variant a switch names counts, and so does one that is taken apart.
+#[test]
+fn a_switch_and_an_open_mention_their_variants() {
+    let open = |idx, body| CoreExpr::Open {
+        cell: LocalId(0),
+        variant: vref(7, idx),
+        fields: vec![(0, bind(1, RTy(0)))],
+        body: Box::new(body),
+    };
+    let inner = Cases::Variant {
+        ty: TypeId(8),
+        arms: vec![(vec![2, 5], ret()), (vec![1], open(3, ret()))],
+    };
+    let ints = Cases::Int(vec![(vec![1], switch(inner, Some(open(4, ret()))))]);
+    let mut all = Vec::new();
+    switch(ints, Some(ret())).for_each_variant(|v| all.push((v.type_id.0, v.variant_idx)));
+    all.sort_unstable();
+    assert_eq!(all, [(7, 3), (7, 4), (8, 1), (8, 2), (8, 5)]);
+}
+
+/// Every arm of every kind of case is one of `arms`, in order, and `map` and
+/// `arms_mut` go over the same.
+#[test]
+fn cases_go_over_their_arms_in_order() {
+    let numbered = |n| CoreExpr::Ret(LocalId(n));
+    let all = [
+        Cases::Variant {
+            ty: TypeId(1),
+            arms: vec![(vec![0], numbered(1)), (vec![1, 2], numbered(2))],
+        },
+        Cases::Int(vec![(vec![5], numbered(1)), (vec![6], numbered(2))]),
+        Cases::Float(vec![
+            (vec![FloatKey::new(1.0)], numbered(1)),
+            (vec![FloatKey::new(2.0)], numbered(2)),
+        ]),
+        Cases::Text(vec![
+            (vec![ConstId(0)], numbered(1)),
+            (vec![ConstId(1)], numbered(2)),
+        ]),
+    ];
+    let shown = |cases: &Cases| switch(cases.clone(), None).to_string();
+    for mut cases in all {
+        let names =
+            |cases: &Cases| -> Vec<String> { cases.arms().iter().map(|e| e.to_string()).collect() };
+        assert_eq!(names(&cases), ["ret %1\n", "ret %2\n"]);
+        assert_eq!(shown(&cases.map(Clone::clone)), shown(&cases));
+        let mapped = cases.map(|e| iff(e.clone(), e.clone()));
+        for (i, arm) in cases.arms_mut().into_iter().enumerate() {
+            assert_eq!(arm.to_string(), format!("ret %{}\n", i + 1));
+            *arm = iff(arm.clone(), arm.clone());
+        }
+        assert_eq!(shown(&mapped), shown(&cases));
+    }
 }
 
 /// A join prints its body first, as it runs first, and then its continuation
@@ -244,11 +335,9 @@ fn a_join_is_always_reached_when_no_way_leaves_its_body() {
     };
     assert!(reached(one(iff(call(), jump(1, &[])))).is_empty());
     // One that nothing jumps to is not.
-    let stops = || CoreExpr::Match {
-        scrut: LocalId(0),
-        arms: Vec::new(),
-    };
+    let stops = || CoreExpr::NoArm;
     assert!(reached(one(stops())).is_empty());
+    assert!(reached(one(switch(Cases::Int(Vec::new()), None))).is_empty());
     // A way that stops the run leaves it nowhere.
     assert_eq!(reached(one(iff(stops(), jump(1, &[])))), [1]);
     // What a body jumps to inside itself goes on to the end of that.
@@ -271,25 +360,37 @@ fn a_join_is_always_reached_when_no_way_leaves_its_body() {
     assert!(chain.always_reached().contains(&JoinId(1)));
     // A jump to nothing leaves.
     assert!(reached(one(iff(jump(9, &[]), jump(1, &[])))).is_empty());
-    // A match's arms count, and lets, drops and stores are gone past.
-    let arms = |last| CoreExpr::Match {
-        scrut: LocalId(0),
-        arms: vec![(CorePat::Wild, jump(1, &[])), (CorePat::Wild, last)],
+    // A switch's cases and its default count, and lets, drops, stores and cells
+    // taken apart are gone past.
+    let arms = |last| {
+        switch(
+            Cases::Int(vec![(vec![1], jump(1, &[])), (vec![2], last)]),
+            None,
+        )
     };
+    let default = |last| switch(Cases::Int(vec![(vec![1], jump(1, &[]))]), Some(last));
     let past = |e| CoreExpr::Let {
         bind: bind(9, RTy(0)),
         rhs: Atom::Nil,
         body: Box::new(CoreExpr::SetGlobal {
             slot: GlobalSlot(0),
             value: LocalId(9),
-            body: Box::new(CoreExpr::Drop {
-                local: LocalId(9),
-                body: Box::new(e),
+            body: Box::new(CoreExpr::Open {
+                cell: LocalId(8),
+                variant: vref(0, 0),
+                fields: Vec::new(),
+                body: Box::new(CoreExpr::Drop {
+                    local: LocalId(9),
+                    body: Box::new(e),
+                }),
             }),
         }),
     };
-    assert_eq!(reached(one(past(arms(jump(1, &[]))))), [1]);
-    assert!(reached(one(past(arms(ret())))).is_empty());
+    for of in [arms as fn(CoreExpr) -> CoreExpr, default] {
+        assert_eq!(reached(one(past(of(jump(1, &[]))))), [1]);
+        assert_eq!(reached(one(past(of(stops())))), [1]);
+        assert!(reached(one(past(of(ret())))).is_empty());
+    }
 }
 
 #[test]

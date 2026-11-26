@@ -116,7 +116,7 @@ impl CoreBind {
 
 /// A constructor's resolved identity, captured during lowering so a backend
 /// doesn't need the type environment to dispatch on it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VariantRef {
     pub type_id: TypeId,
     pub variant_idx: u16,
@@ -564,28 +564,80 @@ impl Atom {
     }
 }
 
-/// A lowered match-arm pattern. `lower` flattens nested patterns into a chain
-/// of `Match` nodes, so a `Ctor` arm binds its fields as fresh locals.
-#[derive(Debug, Clone)]
-pub enum CorePat {
-    Wild,
-    Bind(CoreBind),
-    Lit(ConstId),
-    Ctor {
-        variant: VariantRef,
-        fields: Vec<CoreBind>,
-    },
+/// A Float literal in a pattern, by its value as `==` sees it: the two zeros are
+/// one key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FloatKey(u64);
+
+impl FloatKey {
+    pub fn new(x: f64) -> Self {
+        // `-0.0 + 0.0` is `0.0`, and any other number is left as it is.
+        FloatKey((x + 0.0).to_bits())
+    }
+
+    pub fn get(self) -> f64 {
+        f64::from_bits(self.0)
+    }
 }
 
-impl CorePat {
-    /// The locals this pattern introduces, in binding order.
-    pub fn binds(&self) -> std::slice::Iter<'_, CoreBind> {
+/// The cases of a [`CoreExpr::Switch`]. Each is the values it is for and what is
+/// done for them. No value is there twice, and no case is for none.
+#[derive(Debug, Clone)]
+pub enum Cases {
+    /// By which variant of `ty` it is, as [`VariantRef::variant_idx`].
+    Variant {
+        ty: TypeId,
+        arms: Arms<u16>,
+    },
+    /// By the value of an Int, which may be a big one.
+    Int(Arms<i64>),
+    Float(Arms<FloatKey>),
+    /// By the text of a String. A constant is there once in the pool, so its id
+    /// says which text it is.
+    Text(Arms<ConstId>),
+}
+
+/// The expressions of a [`Cases`], by whatever its values are.
+macro_rules! each_arm {
+    ($cases:expr, $arms:ident => $of:expr) => {
+        match $cases {
+            Cases::Variant { arms: $arms, .. } => $of,
+            Cases::Int($arms) => $of,
+            Cases::Float($arms) => $of,
+            Cases::Text($arms) => $of,
+        }
+    };
+}
+
+impl Cases {
+    /// What is done in each case, in order.
+    pub fn arms(&self) -> Vec<&CoreExpr> {
+        each_arm!(self, arms => arms.iter().map(|(_, e)| e).collect())
+    }
+
+    pub fn arms_mut(&mut self) -> Vec<&mut CoreExpr> {
+        each_arm!(self, arms => arms.iter_mut().map(|(_, e)| e).collect())
+    }
+
+    /// The same cases, with `f` of each in place of what is done in it.
+    pub fn map(&self, mut f: impl FnMut(&CoreExpr) -> CoreExpr) -> Cases {
         match self {
-            CorePat::Wild | CorePat::Lit(_) => <&[CoreBind]>::default().iter(),
-            CorePat::Bind(b) => std::slice::from_ref(b).iter(),
-            CorePat::Ctor { fields, .. } => fields.iter(),
+            Cases::Variant { ty, arms } => Cases::Variant {
+                ty: *ty,
+                arms: map_arms(arms, &mut f),
+            },
+            Cases::Int(arms) => Cases::Int(map_arms(arms, &mut f)),
+            Cases::Float(arms) => Cases::Float(map_arms(arms, &mut f)),
+            Cases::Text(arms) => Cases::Text(map_arms(arms, &mut f)),
         }
     }
+}
+
+/// What each case is for, and what is done in it.
+pub type Arms<K> = Vec<(Vec<K>, CoreExpr)>;
+
+fn map_arms<K: Clone>(arms: &Arms<K>, f: &mut impl FnMut(&CoreExpr) -> CoreExpr) -> Arms<K> {
+    arms.iter().map(|(keys, e)| (keys.clone(), f(e))).collect()
 }
 
 /// What a function does from some point on. It is a spine, a chain of nodes that
@@ -619,10 +671,27 @@ pub enum CoreExpr {
     /// `perceus` inserts this after the last use of `local`. It releases the
     /// frame's reference.
     Drop { local: LocalId, body: Box<CoreExpr> },
-    Match {
-        scrut: LocalId,
-        arms: Vec<(CorePat, CoreExpr)>,
+    /// `perceus` makes this out of reads of `cell`, which is a `variant`, where it
+    /// dies. The frame gives up its reference to the cell, and each local in
+    /// `fields` gets the field with that index, with a reference of its own. Each
+    /// field is there once, in order, and there is at least one.
+    Open {
+        cell: LocalId,
+        variant: VariantRef,
+        fields: Vec<(u16, CoreBind)>,
+        body: Box<CoreExpr>,
     },
+    /// Go on with the case that `scrut` is, or with `default` when it is none of
+    /// them. With no `default`, it is one of them. It binds nothing, and a case
+    /// reads the fields it needs of `scrut`.
+    Switch {
+        scrut: LocalId,
+        cases: Cases,
+        default: Option<Box<CoreExpr>>,
+    },
+    /// No arm of a match takes its value. The checker has proved that every match
+    /// has one, so this never runs.
+    NoArm,
     If {
         cond: LocalId,
         then: Box<CoreExpr>,
@@ -638,7 +707,7 @@ pub enum CoreExpr {
 }
 
 impl CoreExpr {
-    /// Calls `f` for each constructor this expression builds or matches on,
+    /// Calls `f` for each constructor this expression builds, switches on or takes apart,
     /// once per mention, in no set order.
     pub fn for_each_variant(&self, mut f: impl FnMut(VariantRef)) {
         let mut work = vec![self];
@@ -653,19 +722,30 @@ impl CoreExpr {
                     work.push(body);
                 }
                 CoreExpr::SetGlobal { body, .. } | CoreExpr::Drop { body, .. } => work.push(body),
-                CoreExpr::Match { arms, .. } => {
-                    for (pat, arm) in arms {
-                        if let CorePat::Ctor { variant, .. } = pat {
-                            f(*variant);
+                CoreExpr::Open { variant, body, .. } => {
+                    f(*variant);
+                    work.push(body);
+                }
+                CoreExpr::Switch { cases, default, .. } => {
+                    if let Cases::Variant { ty, arms } = cases {
+                        for idx in arms.iter().flat_map(|(variants, _)| variants) {
+                            f(VariantRef {
+                                type_id: *ty,
+                                variant_idx: *idx,
+                            });
                         }
-                        work.push(arm);
                     }
+                    work.extend(cases.arms());
+                    work.extend(default.as_deref());
                 }
                 CoreExpr::If { then, els, .. } => {
                     work.push(then);
                     work.push(els);
                 }
-                CoreExpr::Ret(_) | CoreExpr::TailCall { .. } | CoreExpr::Jump { .. } => {}
+                CoreExpr::Ret(_)
+                | CoreExpr::TailCall { .. }
+                | CoreExpr::Jump { .. }
+                | CoreExpr::NoArm => {}
             }
         }
     }
@@ -699,7 +779,8 @@ impl Exits {
             match e {
                 CoreExpr::Let { body, .. }
                 | CoreExpr::SetGlobal { body, .. }
-                | CoreExpr::Drop { body, .. } => e = body,
+                | CoreExpr::Drop { body, .. }
+                | CoreExpr::Open { body, .. } => e = body,
                 CoreExpr::Join { id, cont, body, .. } => {
                     let own = depth.saturating_add(1);
                     self.depths.insert(*id, own);
@@ -712,8 +793,9 @@ impl Exits {
                     }
                     e = cont;
                 }
-                CoreExpr::Match { arms, .. } => {
-                    let all = arms.iter().map(|(_, arm)| self.outermost(arm, depth));
+                CoreExpr::Switch { cases, default, .. } => {
+                    let all = cases.arms().into_iter().chain(default.as_deref());
+                    let all = all.map(|arm| self.outermost(arm, depth));
                     break all.min().unwrap_or(u32::MAX);
                 }
                 CoreExpr::If { then, els, .. } => {
@@ -721,6 +803,7 @@ impl Exits {
                     break then.min(self.outermost(els, depth));
                 }
                 CoreExpr::Ret(_) | CoreExpr::TailCall { .. } => break 0,
+                CoreExpr::NoArm => break u32::MAX,
                 CoreExpr::Jump { to, .. } => break self.depths.get(to).copied().unwrap_or(0),
             }
         };
@@ -874,23 +957,9 @@ impl fmt::Display for Atom {
     }
 }
 
-impl fmt::Display for CorePat {
+impl fmt::Display for FloatKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CorePat::Wild => f.write_str("_"),
-            CorePat::Bind(b) => write!(f, "{}", b.id),
-            CorePat::Lit(c) => write!(f, "{c}"),
-            CorePat::Ctor { variant, fields } => {
-                write!(f, "{}.{}(", variant.type_id.0, variant.variant_idx)?;
-                for (i, b) in fields.iter().enumerate() {
-                    if i > 0 {
-                        f.write_str(", ")?;
-                    }
-                    write!(f, "{}", b.id)?;
-                }
-                f.write_str(")")
-            }
-        }
+        write!(f, "{:?}", self.get())
     }
 }
 
@@ -957,15 +1026,68 @@ impl fmt::Display for Indented<'_> {
                     writeln!(f, "else")?;
                     return Indented(els, depth.saturating_add(1)).fmt(f);
                 }
-                CoreExpr::Match { scrut, arms } => {
-                    writeln!(f, "match {scrut}")?;
-                    for (pat, body) in arms {
+                CoreExpr::Open {
+                    cell,
+                    variant,
+                    fields,
+                    body,
+                } => {
+                    let VariantRef {
+                        type_id,
+                        variant_idx,
+                    } = variant;
+                    write!(f, "open {cell} {}.{variant_idx}(", type_id.0)?;
+                    for (i, (field, bind)) in fields.iter().enumerate() {
+                        let comma = if i > 0 { ", " } else { "" };
+                        write!(f, "{comma}{field}: {bind}")?;
+                    }
+                    writeln!(f, ")")?;
+                    cur = body;
+                }
+                CoreExpr::Switch {
+                    scrut,
+                    cases,
+                    default,
+                } => {
+                    writeln!(f, "switch {scrut}")?;
+                    let mut arm = |keys: &dyn Fn(&mut fmt::Formatter<'_>) -> fmt::Result,
+                                   body: &CoreExpr| {
                         pad(f, depth.saturating_add(1))?;
-                        writeln!(f, "| {pat} ->")?;
-                        Indented(body, depth.saturating_add(2)).fmt(f)?;
+                        f.write_str("| ")?;
+                        keys(f)?;
+                        f.write_str(" ->\n")?;
+                        Indented(body, depth.saturating_add(2)).fmt(f)
+                    };
+                    match cases {
+                        Cases::Variant { ty, arms } => {
+                            for (variants, body) in arms {
+                                let named = variants.iter().map(|v| format!("{}.{v}", ty.0));
+                                let named: Vec<String> = named.collect();
+                                arm(&|f| write_list(f, &named), body)?;
+                            }
+                        }
+                        Cases::Int(arms) => {
+                            for (keys, body) in arms {
+                                arm(&|f| write_list(f, keys), body)?;
+                            }
+                        }
+                        Cases::Float(arms) => {
+                            for (keys, body) in arms {
+                                arm(&|f| write_list(f, keys), body)?;
+                            }
+                        }
+                        Cases::Text(arms) => {
+                            for (keys, body) in arms {
+                                arm(&|f| write_list(f, keys), body)?;
+                            }
+                        }
+                    }
+                    if let Some(body) = default {
+                        arm(&|f| f.write_str("_"), body)?;
                     }
                     return Ok(());
                 }
+                CoreExpr::NoArm => return writeln!(f, "no arm"),
             }
         }
     }

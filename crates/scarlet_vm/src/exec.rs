@@ -967,6 +967,26 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
                     pc = to.index();
                 }
             }
+            Ins::Switch { src, table } => {
+                pc = match table.at(win.look(src).tag().variant(), &code.lists) {
+                    Some(to) => to.index(),
+                    None => return Err(no_case()),
+                }
+            }
+            Ins::SwitchInt { src, table } => {
+                let to = match win.look(src).small_int() {
+                    Some(n) => table.at(n, &code.lists),
+                    None => table.other(&code.lists),
+                };
+                pc = match to {
+                    Some(to) => to.index(),
+                    None => return Err(no_case()),
+                }
+            }
+            Ins::SwitchIntFar { src, places, to } => {
+                let found = rest.far_case(places, win.look(src));
+                pc = found.unwrap_or(to).index();
+            }
             Ins::JumpUnlessInt { src, n, ref to } => {
                 if !rest.is_int(win.look(src), n) {
                     pc = to.index();
@@ -979,11 +999,6 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
             }
             Ins::JumpUnlessStr { src, text, ref to } => {
                 if !rest.is_text(win.look(src), text)? {
-                    pc = to.index();
-                }
-            }
-            Ins::JumpUnlessBinary { src, bits, ref to } => {
-                if !rest.is_binary(win.look(src), bits)? {
                     pc = to.index();
                 }
             }
@@ -2065,6 +2080,13 @@ fn ran_past_end(code: &Code, pc: usize) -> Stop {
     Stop::broken(Broken::RanPastEnd {
         func: name_before(code, pc),
     })
+}
+
+/// The stop for a switch that has nowhere to go for its value.
+#[cold]
+#[inline(never)]
+fn no_case() -> Stop {
+    Stop::broken(Broken::NoArm)
 }
 
 /// Field `index` of the value in `src` into `dst`, for a cell too long for the

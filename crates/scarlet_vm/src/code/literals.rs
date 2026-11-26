@@ -13,7 +13,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use scarlet_ir::core_ir::{
-    Atom, CoreBind, CoreExpr, CoreFn, CorePat, GlobalSlot, JoinId, LocalId, PrimOp,
+    Atom, CoreBind, CoreExpr, CoreFn, GlobalSlot, JoinId, LocalId, PrimOp, VariantRef,
 };
 use scarlet_ir::rty::RTy;
 
@@ -143,13 +143,23 @@ impl Locals {
                     self.read(*local);
                     todo.push(body);
                 }
-                CoreExpr::Match { scrut, arms } => {
-                    self.read(*scrut);
-                    for (pat, arm) in arms {
-                        pat.binds().for_each(|b| self.name(b.id));
-                        todo.push(arm);
-                    }
+                CoreExpr::Open {
+                    cell, fields, body, ..
+                } => {
+                    self.read(*cell);
+                    fields.iter().for_each(|(_, b)| self.name(b.id));
+                    todo.push(body);
                 }
+                CoreExpr::Switch {
+                    scrut,
+                    cases,
+                    default,
+                } => {
+                    self.read(*scrut);
+                    todo.extend(cases.arms());
+                    todo.extend(default.as_deref());
+                }
+                CoreExpr::NoArm => {}
                 CoreExpr::If { cond, then, els } => {
                     self.read(*cond);
                     todo.extend([&**then, &**els]);
@@ -171,6 +181,7 @@ enum Step {
     SetGlobal(GlobalSlot, LocalId),
     Join(JoinId, Vec<CoreBind>, CoreExpr),
     Drop(LocalId),
+    Open(LocalId, VariantRef, Vec<(u16, CoreBind)>),
 }
 
 impl Step {
@@ -195,15 +206,22 @@ impl Step {
                 body: Box::new(body),
             },
             Step::Drop(local) => CoreExpr::Drop { local, body: rest },
+            Step::Open(cell, variant, fields) => CoreExpr::Open {
+                cell,
+                variant,
+                fields,
+                body: rest,
+            },
         }
     }
 
     /// The locals this gives a value.
-    fn binds(&self) -> &[CoreBind] {
+    fn binds(&self) -> Vec<LocalId> {
         match self {
-            Step::Let(bind, _) => std::slice::from_ref(bind),
-            Step::Join(_, params, _) => params,
-            Step::SetGlobal(..) | Step::Drop(_) => &[],
+            Step::Let(bind, _) => vec![bind.id],
+            Step::Join(_, params, _) => params.iter().map(|b| b.id).collect(),
+            Step::Open(_, _, fields) => fields.iter().map(|(_, b)| b.id).collect(),
+            Step::SetGlobal(..) | Step::Drop(_) => Vec::new(),
         }
     }
 }
@@ -249,16 +267,29 @@ impl Cut {
                         els: Box::new(self.expr(els)),
                     };
                 }
-                CoreExpr::Match { scrut, arms } => {
-                    let arm = |(pat, arm): &(CorePat, CoreExpr)| (pat.clone(), self.expr(arm));
-                    break CoreExpr::Match {
+                CoreExpr::Open {
+                    cell,
+                    variant,
+                    fields,
+                    body,
+                } => (Step::Open(*cell, *variant, fields.clone()), body),
+                CoreExpr::Switch {
+                    scrut,
+                    cases,
+                    default,
+                } => {
+                    let cases = cases.map(|arm| self.expr(arm));
+                    let default = default.as_ref().map(|arm| Box::new(self.expr(arm)));
+                    break CoreExpr::Switch {
                         scrut: *scrut,
-                        arms: arms.iter().map(arm).collect(),
+                        cases,
+                        default,
                     };
                 }
-                CoreExpr::Ret(_) | CoreExpr::TailCall { .. } | CoreExpr::Jump { .. } => {
-                    break e.clone();
-                }
+                CoreExpr::Ret(_)
+                | CoreExpr::TailCall { .. }
+                | CoreExpr::Jump { .. }
+                | CoreExpr::NoArm => break e.clone(),
             };
             if let Some(run) = runs.last_mut() {
                 run.push(step);
@@ -282,7 +313,7 @@ impl Cut {
         let mut bound = HashMap::new();
         let mut dropped = HashMap::new();
         for (i, step) in steps.iter().enumerate() {
-            bound.extend(step.binds().iter().map(|b| (b.id, i)));
+            bound.extend(step.binds().into_iter().map(|b| (b, i)));
             if let Step::Drop(l) = step {
                 dropped.insert(*l, i);
             }

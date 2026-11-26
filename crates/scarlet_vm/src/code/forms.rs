@@ -58,8 +58,32 @@ impl Form {
 /// Every constructor of every type the program names.
 #[derive(Debug, Default)]
 pub(super) struct Forms {
+    types: BTreeMap<TypeId, OfType>,
+}
+
+/// The constructors of one type.
+#[derive(Debug, Default)]
+pub(super) struct OfType {
     /// Indexed by [`VariantRef::variant_idx`].
-    types: BTreeMap<TypeId, Vec<Form>>,
+    forms: Vec<Form>,
+    /// How many of them have fields.
+    with_fields: usize,
+}
+
+impl OfType {
+    /// How many there are.
+    pub(super) fn len(&self) -> usize {
+        self.forms.len()
+    }
+
+    /// How many of them have fields.
+    pub(super) fn with_fields(&self) -> usize {
+        self.with_fields
+    }
+
+    fn get(&self, variant_idx: u16) -> Option<Form> {
+        self.forms.get(usize::from(variant_idx)).copied()
+    }
 }
 
 impl Forms {
@@ -83,6 +107,11 @@ impl Forms {
                     },
                 });
             }
+            let with_fields = of_type.iter().filter(|form| form.fields() > 0).count();
+            let of_type = OfType {
+                forms: of_type,
+                with_fields,
+            };
             forms.types.insert(*type_id, of_type);
         }
         Ok((forms, numbering.finish()))
@@ -99,10 +128,15 @@ impl Forms {
         }
     }
 
+    /// Every constructor of `ty`.
+    pub(super) fn all(&self, ty: TypeId) -> Option<&OfType> {
+        self.types.get(&ty)
+    }
+
     pub(super) fn get(&self, v: VariantRef) -> Result<Form, Broken> {
         let of_type = self.types.get(&v.type_id);
-        let form = of_type.and_then(|forms| forms.get(usize::from(v.variant_idx)));
-        form.copied().ok_or(Broken::NoCtor(v))
+        let form = of_type.and_then(|of_type| of_type.get(v.variant_idx));
+        form.ok_or(Broken::NoCtor(v))
     }
 }
 

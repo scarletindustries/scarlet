@@ -9,7 +9,9 @@
 use scarlet_ir::core_ir::FuncIdx;
 use scarlet_ir::tivec::TiVec;
 
-use super::ins::{Assign, Ins, Label, Lists, Makes, Places, Role, Src, Taken, Unplaced, VReg};
+use super::ins::{
+    Assign, Ins, Label, Lists, Makes, Places, Role, Src, Table, Taken, Unplaced, VReg,
+};
 use super::moves::{Body, Fitted};
 use super::{BlockId, Entry, EntryPc, Op, Pc, Reg, Room};
 use crate::Audit;
@@ -175,11 +177,14 @@ fn block_heads(body: &Body) -> Vec<bool> {
     };
     head(0);
     for (i, ins) in body.ins.iter().enumerate() {
-        let to = ins.target().and_then(|l| body.labels.get(l.0 as usize));
-        if let Some(to) = to {
-            head(*to);
-        }
-        if to.is_some() || !ins.falls_through() {
+        let mut jumps = false;
+        ins.targets(&body.lists, &mut |l| {
+            jumps = true;
+            if let Some(to) = body.labels.get(l.0 as usize) {
+                head(*to);
+            }
+        });
+        if jumps || !ins.falls_through() {
             head(i.saturating_add(1));
         }
     }
@@ -207,6 +212,8 @@ impl Out<'_, '_> {
             args: position(self.lists.args.len())?,
             dsts: position(self.lists.dsts.len())?,
             sets: position(self.lists.sets.len())?,
+            tables: position(self.lists.tables.len())?,
+            places: position(self.lists.places.len())?,
         };
         let stop = |why| unplaced(at.funcs, why);
         for list in &body.lists.regs {
@@ -232,6 +239,14 @@ impl Out<'_, '_> {
             });
             let sets: Result<Box<[_]>, _> = sets.collect();
             self.lists.sets.push(sets.map_err(stop)?);
+        }
+        let tables = body.lists.tables.iter().map(|to| at.label(*to));
+        let tables: Result<Vec<_>, _> = tables.collect();
+        self.lists.tables.extend(tables.map_err(stop)?);
+        for list in &body.lists.places {
+            let places = list.iter().map(|(n, to)| Ok((*n, at.label(*to)?)));
+            let places: Result<Box<[_]>, _> = places.collect();
+            self.lists.places.push(places.map_err(stop)?);
         }
         let each = self.extra.audits_each();
         let audit = each.then_some(Ins::Audit);
@@ -316,6 +331,8 @@ struct At<'a> {
     args: u32,
     dsts: u32,
     sets: u32,
+    tables: u32,
+    places: u32,
 }
 
 impl Places for At<'_> {
@@ -363,6 +380,21 @@ impl Places for At<'_> {
 
     fn set_list(&self, i: u32) -> Result<u32, Unplaced> {
         list(self.body.lists.sets.get(i as usize), self.sets, i)
+    }
+
+    fn table(&self, table: Table) -> Result<Table, Unplaced> {
+        let last = table.first.checked_add(u32::from(table.last));
+        let last = last.ok_or(Unplaced::NoPlace)?;
+        let found = self.body.lists.tables.get(last as usize);
+        list(found, self.tables, last)?;
+        Ok(Table {
+            first: list(found, self.tables, table.first)?,
+            ..table
+        })
+    }
+
+    fn place_list(&self, i: u32) -> Result<u32, Unplaced> {
+        list(self.body.lists.places.get(i as usize), self.places, i)
     }
 }
 

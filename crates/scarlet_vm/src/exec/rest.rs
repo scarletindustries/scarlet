@@ -13,7 +13,7 @@ use crate::Stop;
 use crate::array::{self, End, Seq};
 use crate::bigint::{self, Int};
 use crate::binary::{self, Bits};
-use crate::code::{BinaryId, BitsOp, Built, Code, CtorOf, Entry, Reg, TextId};
+use crate::code::{BinaryId, BitsOp, Built, Code, CtorOf, Entry, Pc, PlaceList, Reg, TextId};
 use crate::float;
 use crate::frame::WINDOW;
 use crate::heap::{Cell, DeadCell, Fault, Heap, Kind, Shape};
@@ -1532,6 +1532,25 @@ impl<'c> Rest<'c, '_> {
         }
     }
 
+    /// `v`, when it is an Int and no bigger than a constant can be.
+    fn i64_of(&self, v: Value) -> Option<i64> {
+        v.small_int().or_else(|| match v.as_cell() {
+            Some(cell) if self.heap.is(cell, Kind::BigInt) => {
+                i64::try_from(self.heap.big_int_word(cell)?).ok()
+            }
+            Some(_) | None => None,
+        })
+    }
+
+    /// The place that `v` has of its own among `places`.
+    #[inline(never)]
+    pub(super) fn far_case(&self, places: PlaceList, v: Value) -> Option<Pc> {
+        let places = places.places(&self.code.lists);
+        let n = self.i64_of(v)?;
+        let at = places.binary_search_by_key(&n, |(n, _)| *n).ok()?;
+        places.get(at).map(|(_, to)| *to)
+    }
+
     /// `a op b` for an operator whose operands are both Ints, both Floats, or,
     /// for `+`, both strings.
     #[inline(never)]
@@ -1620,16 +1639,6 @@ impl<'c> Rest<'c, '_> {
             Some(cell) if self.is_string(v) => self.heap.string_is(cell, text),
             _ => false,
         })
-    }
-
-    /// Whether `v` is the binary constant `bits`.
-    #[inline(never)]
-    pub(super) fn is_binary(&self, v: Value, bits: BinaryId) -> Result<bool, Stop> {
-        let want = self.code.binary(bits)?;
-        let is = v.as_cell().and_then(|c| binary::bits(&self.heap, c));
-        Ok(is.is_some_and(|b| {
-            b.len == want.len && binary::bytes(&self.heap, b) == want.bytes.as_ref()
-        }))
     }
 
     /// Write what `v` shows to the output, and a newline after it if

@@ -54,8 +54,9 @@ mod translate;
 pub(crate) use forms::{Built, CtorOf};
 pub(crate) use ins::{
     Arg, ArgList, Args, Assign, AssignList, BinaryId, BitsOp, BlockId, Dead, DeadList, Dst,
-    DstList, EntryPc, Hands, Hit, Ins, Last, Lists, LookList, Looks, Makes, MaybeDst, Newline, Op,
-    Pc, Reg, Room, Sets, ShareList, Shared, Shares, Src, Taken, TextId, WhyId,
+    DstList, EntryPc, Hands, Hit, Ins, IntTable, Last, Lists, LookList, Looks, Makes, MaybeDst,
+    Newline, Op, Pc, PlaceList, Reg, Room, Sets, ShareList, Shared, Shares, Src, Table, Taken,
+    TextId, WhyId,
 };
 
 use forms::Forms;

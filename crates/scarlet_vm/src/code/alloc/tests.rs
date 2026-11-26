@@ -687,7 +687,7 @@ fn returns_soon(d: &Draft, idle: &[bool], at: usize) -> bool {
         let families = ["Open", "Float", "JumpUnlessInt", "JumpUnlessFloat"];
         let int = ["IntEq", "IntNe", "IntLt", "IntLe", "IntGt", "IntGe"];
         let int = int.iter().any(|op| name == *op || name == format!("{op}K"));
-        let one = plain.contains(&name) || name == "JumpUnlessTag" || int;
+        let one = plain.contains(&name) || ["JumpUnlessTag", "Switch"].contains(&name) || int;
         one || families.iter().any(|family| name.starts_with(family))
     };
     let mut work = vec![at];
@@ -706,7 +706,7 @@ fn returns_soon(d: &Draft, idle: &[bool], at: usize) -> bool {
                 return false;
             }
         }
-        work.extend(step.target().map(|l| d.labels[l.0 as usize]));
+        step.targets(&d.lists, &mut |l| work.push(d.labels[l.0 as usize]));
         work.extend(step.falls_through().then_some(at + 1));
     }
     true
@@ -756,7 +756,8 @@ fn wrong_register(d: &Draft, f: &Assigned, idle: &[bool]) -> Option<String> {
         let mut wrong = None;
         let mut taken = Vec::new();
         let mut written = Vec::new();
-        let jumps = step.target().map(|l| l.0 as usize);
+        let mut jumps = Vec::new();
+        step.targets(&d.lists, &mut |l| jumps.push(l.0 as usize));
         step.operands(&d.lists, &mut |v, role| {
             let Some(r) = reg(v) else {
                 if !idle[i] {
@@ -805,7 +806,7 @@ fn wrong_register(d: &Draft, f: &Assigned, idle: &[bool]) -> Option<String> {
             return Some(format!("{i} writes a register twice: {written:?}"));
         }
         // A jump takes nothing and writes nothing.
-        if let Some(l) = jumps {
+        for l in jumps {
             arrive(&mut at_label, l, now);
         }
         for (r, v) in taken {

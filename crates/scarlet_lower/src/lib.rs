@@ -2,9 +2,9 @@
 //!
 //! `program` hands out the ids the VM uses and drives the rest. `translate`
 //! turns each module's typed tree into typed IR, `lower` turns typed IR into
-//! Core IR, `immediates` turns `Bool` and `Nil` constructors into plain
-//! values, `perceus` adds reference counting, and `tail_args` puts the arguments
-//! of tail calls in order.
+//! Core IR, with what `matching` makes of each `match`, `immediates` turns `Bool`
+//! and `Nil` constructors into plain values, `perceus` adds reference counting, and
+//! `tail_args` puts the arguments of tail calls in order.
 //!
 //! Core IR is the typed ANF between typed IR and a backend. ANF (A-normal
 //! form) gives every intermediate value a name, so each operation only takes
@@ -31,6 +31,7 @@
 
 pub mod immediates;
 pub(crate) mod lower;
+mod matching;
 pub(crate) mod perceus;
 pub mod program;
 mod spine;

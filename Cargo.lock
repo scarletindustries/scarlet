@@ -980,6 +980,7 @@ name = "scarlet_lower"
 version = "0.1.0"
 dependencies = [
  "scarlet_check",
+ "scarlet_core",
  "scarlet_ir",
  "scarlet_syntax",
  "scarlet_types",

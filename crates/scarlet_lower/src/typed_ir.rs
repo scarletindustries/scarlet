@@ -12,11 +12,14 @@
 //!
 //! This is a tree, not a spine of `Let`s. Turning it into ANF (A-normal form,
 //! where every intermediate value gets a name) is still `lower`'s job, and
-//! `Match` patterns keep their nesting for `lower` to flatten into `CorePat`
-//! heads (docs/core-ir-spec.md §IR).
+//! `Match` patterns keep their nesting for `matching` to make a decision tree of
+//! (docs/core-ir-spec.md §IR).
 
 pub use scarlet_ir::rty::{RSlice, RTy, ResolvedNode, ResolvedPool};
 
+use std::collections::BTreeMap;
+
+use scarlet_ir::TypeId;
 use scarlet_ir::core_ir::{ConstId, FuncIdx, PrimOp, VariantRef};
 use scarlet_ir::intrinsic::Intrinsic;
 
@@ -440,32 +443,169 @@ pub struct TempTys {
     pub(crate) int_pair: RTy,
 }
 
+/// The constructors of each named type.
+#[derive(Debug, Default)]
+pub(crate) struct Shapes(BTreeMap<TypeId, Shape>);
+
+#[derive(Debug, Default)]
+pub(crate) struct Shape {
+    /// How many fields each constructor has, in order.
+    fields: Vec<usize>,
+    /// How many of them have any.
+    with_fields: usize,
+}
+
+impl Shapes {
+    /// The shapes of types that have constructors with so many fields each.
+    pub(crate) fn new(of: impl IntoIterator<Item = (TypeId, Vec<usize>)>) -> Self {
+        let shape = |fields: Vec<usize>| Shape {
+            with_fields: fields.iter().filter(|n| **n > 0).count(),
+            fields,
+        };
+        Shapes(of.into_iter().map(|(ty, f)| (ty, shape(f))).collect())
+    }
+
+    /// The shape of `ty`, when it is a type with constructors.
+    pub(crate) fn of(&self, ty: TypeId) -> Option<&Shape> {
+        self.0.get(&ty).filter(|shape| !shape.fields.is_empty())
+    }
+}
+
+impl Shape {
+    /// How many constructors there are.
+    pub(crate) fn variants(&self) -> usize {
+        self.fields.len()
+    }
+
+    /// How many constructors have fields.
+    pub(crate) fn with_fields(&self) -> usize {
+        self.with_fields
+    }
+
+    /// How many fields constructor `variant` has.
+    pub(crate) fn fields(&self, variant: u16) -> Option<usize> {
+        self.fields.get(usize::from(variant)).copied()
+    }
+}
+
+/// Call `f` with `e` and every expression in it, those in patterns among them, in
+/// no set order.
+pub(crate) fn each_expr<'e>(e: &'e TypedExpr, mut f: impl FnMut(&'e TypedExpr)) {
+    let mut work = vec![e];
+    while let Some(e) = work.pop() {
+        f(e);
+        match e {
+            TypedExpr::Const { .. } | TypedExpr::Nil { .. } | TypedExpr::Var { .. } => {}
+            TypedExpr::Let { init, body, .. } => work.extend([&**init, &**body]),
+            TypedExpr::Seq { effect, body, .. } => work.extend([&**effect, &**body]),
+            TypedExpr::Binary { lhs, rhs, .. }
+            | TypedExpr::And { lhs, rhs, .. }
+            | TypedExpr::Or { lhs, rhs, .. } => work.extend([&**lhs, &**rhs]),
+            TypedExpr::Unary { operand: of, .. }
+            | TypedExpr::TupleIndex { recv: of, .. }
+            | TypedExpr::Field { recv: of, .. } => work.push(of),
+            TypedExpr::Tuple { elems: all, .. }
+            | TypedExpr::Ctor { args: all, .. }
+            | TypedExpr::Closure { captures: all, .. } => work.extend(all),
+            TypedExpr::Update { base, sets, .. } => {
+                work.push(base);
+                work.extend(sets.iter().map(|(_, value)| value));
+            }
+            TypedExpr::Array { elems, .. } => work.extend(elems.iter().map(|e| match e {
+                TypedArrayElem::Elem(e) | TypedArrayElem::Spread(e) => e,
+            })),
+            TypedExpr::Index { recv, index, .. } => work.extend([&**recv, &**index]),
+            TypedExpr::Slice {
+                recv, start, end, ..
+            } => work.extend([&**recv, &**start, &**end]),
+            TypedExpr::Range { start, end, .. } => work.extend([&**start, &**end]),
+            TypedExpr::Interp { parts, .. } => work.extend(parts.iter().filter_map(|p| match p {
+                TypedInterpPart::Str(_) => None,
+                TypedInterpPart::Expr(e) => Some(e),
+            })),
+            TypedExpr::BinLit { segs, .. } => {
+                for seg in segs {
+                    match seg {
+                        TypedBinSeg::Int { value, bits } => work.extend([value, bits]),
+                        TypedBinSeg::Binary { value, bits } => {
+                            work.push(value);
+                            work.extend(bits);
+                        }
+                        TypedBinSeg::Utf8 { value } => work.push(value),
+                    }
+                }
+            }
+            TypedExpr::Call { callee, args, .. } => {
+                match callee {
+                    TypedCallee::Dynamic(callee) => work.push(callee),
+                    TypedCallee::Known(_) | TypedCallee::SelfRec | TypedCallee::Builtin { .. } => {}
+                }
+                work.extend(args);
+            }
+            TypedExpr::If {
+                cond, then, els, ..
+            } => work.extend([&**cond, &**then, &**els]),
+            TypedExpr::Match { scrut, arms, .. } => {
+                work.push(scrut);
+                for arm in arms {
+                    each_size(&arm.pat, &mut |size| work.push(size));
+                    work.extend(&arm.guard);
+                    work.push(&arm.body);
+                }
+            }
+        }
+    }
+}
+
+/// Call `f` with every size that a segment of a `<<>>` pattern in `p` gives.
+fn each_size<'p>(p: &'p TypedPat, f: &mut impl FnMut(&'p TypedExpr)) {
+    match p {
+        TypedPat::Wild { .. }
+        | TypedPat::Bind(_)
+        | TypedPat::Lit { .. }
+        | TypedPat::Range { .. } => {}
+        TypedPat::Ctor { fields: ps, .. }
+        | TypedPat::Tuple { elems: ps, .. }
+        | TypedPat::Or { alts: ps, .. }
+        | TypedPat::Array { prefix: ps, .. } => ps.iter().for_each(|p| each_size(p, f)),
+        TypedPat::Bin { segs, .. } => {
+            for seg in segs {
+                match seg {
+                    TypedBinPatSeg::Utf8Literal { .. } => {}
+                    TypedBinPatSeg::Utf8 { value } => each_size(value, f),
+                    TypedBinPatSeg::Int { bits, value } => {
+                        f(bits);
+                        each_size(value, f);
+                    }
+                    TypedBinPatSeg::Binary { bits, value } => {
+                        bits.iter().for_each(&mut *f);
+                        each_size(value, f);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Call `add` with each binding that `e` reads, once for each time it does.
+pub(crate) fn each_read(e: &TypedExpr, mut add: impl FnMut(BindingId)) {
+    each_expr(e, |e| {
+        if let TypedExpr::Var {
+            place: ValueRef::Local(b),
+            ..
+        } = e
+        {
+            add(*b);
+        }
+    });
+}
+
 /// Every [`TypedBind`] `p` introduces, in left-to-right order, each listed
 /// once however many or-alternatives mention it.
 pub(crate) fn pat_binds(p: &TypedPat) -> Vec<TypedBind> {
     let mut out = Vec::new();
     collect_binds(p, &mut out);
     out
-}
-
-/// Whether an or-pattern in `p` binds names.
-pub(crate) fn or_binds(p: &TypedPat) -> bool {
-    match p {
-        TypedPat::Wild { .. }
-        | TypedPat::Bind(_)
-        | TypedPat::Lit { .. }
-        | TypedPat::Range { .. } => false,
-        TypedPat::Or { alts, .. } => alts.iter().any(|alt| !pat_binds(alt).is_empty()),
-        TypedPat::Ctor { fields: ps, .. }
-        | TypedPat::Tuple { elems: ps, .. }
-        | TypedPat::Array { prefix: ps, .. } => ps.iter().any(or_binds),
-        TypedPat::Bin { segs, .. } => segs.iter().any(|s| match s {
-            TypedBinPatSeg::Utf8Literal { .. } => false,
-            TypedBinPatSeg::Utf8 { value }
-            | TypedBinPatSeg::Int { value, .. }
-            | TypedBinPatSeg::Binary { value, .. } => or_binds(value),
-        }),
-    }
 }
 
 fn push_bind(out: &mut Vec<TypedBind>, b: TypedBind) {

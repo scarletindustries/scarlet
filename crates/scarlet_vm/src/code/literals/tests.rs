@@ -24,11 +24,14 @@ fn made(e: &CoreExpr) -> Vec<String> {
                 out.push("drop".to_string());
                 e = body;
             }
-            CoreExpr::SetGlobal { body, .. } | CoreExpr::Join { cont: body, .. } => e = body,
+            CoreExpr::SetGlobal { body, .. }
+            | CoreExpr::Open { body, .. }
+            | CoreExpr::Join { cont: body, .. } => e = body,
             CoreExpr::Ret(_)
             | CoreExpr::TailCall { .. }
             | CoreExpr::If { .. }
-            | CoreExpr::Match { .. }
+            | CoreExpr::Switch { .. }
+            | CoreExpr::NoArm
             | CoreExpr::Jump { .. } => {
                 return out;
             }
@@ -213,7 +216,9 @@ fn in_order(src: &str) -> usize {
             CoreExpr::SetGlobal { .. }
             | CoreExpr::Join { .. }
             | CoreExpr::If { .. }
-            | CoreExpr::Match { .. }
+            | CoreExpr::Switch { .. }
+            | CoreExpr::Open { .. }
+            | CoreExpr::NoArm
             | CoreExpr::Jump { .. } => panic!("a straight run: {e}"),
         }
     }

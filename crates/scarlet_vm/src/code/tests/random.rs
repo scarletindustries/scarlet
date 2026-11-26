@@ -1,6 +1,6 @@
 //! Functions made at random, for the tests of the passes.
 
-use super::super::ins::{Ins, VReg};
+use super::super::ins::{Ins, IntTable, Label, Lists, PlaceList, Src, Table, VReg};
 use super::super::translate::{Draft, Step};
 use super::{draft, of};
 
@@ -29,6 +29,9 @@ struct Maker {
     /// How many parameters it has.
     params: u32,
     labels: Vec<usize>,
+    lists: Lists<VReg>,
+    /// [`Draft::words`].
+    words: Vec<(Label, VReg)>,
     /// The numbers no value has yet, in no order, so that a value written late
     /// may have a lower number than one that is held then.
     numbers: Vec<u32>,
@@ -100,6 +103,7 @@ impl Maker {
                     self.push(of::open(dsts, v));
                     scope.extend(dsts.into_iter().flatten());
                 }
+                10 if depth < 4 && self.random.below(2) == 0 => self.switch(depth, scope),
                 10 | 11 if depth < 4 => self.branch(depth, scope),
                 12 if depth < 4 => self.find(depth, scope),
                 13 => self.write(scope),
@@ -132,6 +136,64 @@ impl Maker {
             if side == 0 {
                 self.place(other);
             }
+        }
+        self.place(after);
+        scope.push(joined);
+        self.push(of::len(joined, joined));
+    }
+
+    /// A switch on a variant or on an Int, whose sides give one value.
+    fn switch(&mut self, depth: usize, scope: &mut Vec<u32>) {
+        let on = self.random.of(scope);
+        let joined = self.value();
+        let after = self.label();
+        let sides: Vec<Label> = (0..1 + self.random.below(4))
+            .map(|_| Label(self.label()))
+            .collect();
+        let src = Src(VReg(on));
+        if self.random.below(4) == 0 {
+            let many = self.random.below(6);
+            let keys = (0..10).map(|i| i * 3).take(many);
+            let places: Vec<_> = keys.map(|n| (n, self.random.of(&sides))).collect();
+            let to = self.random.of(&sides);
+            self.lists.places.push(places.into());
+            let last = u32::try_from(self.lists.places.len() - 1).expect("few");
+            let places = PlaceList(last);
+            self.push(Ins::SwitchIntFar { src, places, to });
+        } else {
+            let len = [4, 8][self.random.below(2)];
+            let to: Vec<Label> = (0..len).map(|_| self.random.of(&sides)).collect();
+            let first = u32::try_from(self.lists.tables.len()).expect("few");
+            let last = u16::try_from(len - 1).expect("few");
+            let table = Table { first, last };
+            self.lists.tables.extend(&to);
+            if self.random.below(3) == 0 {
+                let table = IntTable { table, first: 2 };
+                self.push(Ins::SwitchInt { src, table });
+            } else {
+                // A value that is the second of any four has no fields (`variant`).
+                for side in &sides {
+                    let mut of = (0..len).filter(|v| to[*v] == *side).peekable();
+                    if of.peek().is_some() && of.all(|v| v % 4 == 1) {
+                        self.words.push((*side, VReg(on)));
+                    }
+                }
+                self.push(Ins::Switch { src, table });
+            }
+        }
+        let last = sides.len() - 1;
+        for (i, side) in sides.into_iter().enumerate() {
+            self.place(side.0);
+            // Two of them may be at one place.
+            if i < last && self.random.below(3) == 0 {
+                continue;
+            }
+            let mut inner = scope.clone();
+            let n = self.random.below(5);
+            self.steps(n, depth + 1, &mut inner, scope.len());
+            let from = self.random.of(&inner);
+            self.push(of::mv(joined, from));
+            self.push(of::jump(after));
         }
         self.place(after);
         scope.push(joined);
@@ -230,10 +292,19 @@ pub(in super::super) fn random_function(seed: u64, params: u32, steps: usize) ->
         steps: Vec::new(),
         params,
         labels: Vec::new(),
+        lists: Lists::default(),
+        words: Vec::new(),
         numbers,
     };
     let mut scope: Vec<u32> = (0..params).collect();
     m.steps(steps, 0, &mut scope, 0);
     m.end(&scope);
-    draft(values, params, m.steps, &m.labels)
+    let mut d = draft(values, params, m.steps, &m.labels);
+    (d.lists, d.words) = (m.lists, m.words);
+    d
+}
+
+/// Which variant of its type the value `by` stands for is.
+pub(in super::super) fn variant(by: u64, table: Table) -> u64 {
+    by % (u64::from(table.last) + 1)
 }

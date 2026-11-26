@@ -2,7 +2,7 @@
 //! jump. A pass walks it in a loop, so a long one costs no stack depth, and puts
 //! it together again. What comes after a join on it is the join's continuation.
 
-use super::{Atom, Callee, CoreBind, CoreExpr, CorePat, GlobalSlot, JoinId, LocalId};
+use super::{Atom, Callee, Cases, CoreBind, CoreExpr, GlobalSlot, JoinId, LocalId, VariantRef};
 
 /// One node peeled off a spine, waiting for what comes after it.
 pub(crate) enum Frame {
@@ -21,6 +21,11 @@ pub(crate) enum Frame {
     },
     Drop {
         local: LocalId,
+    },
+    Open {
+        cell: LocalId,
+        variant: VariantRef,
+        fields: Vec<(u16, CoreBind)>,
     },
 }
 
@@ -46,6 +51,16 @@ impl Frame {
                 body,
             },
             Frame::Drop { local } => CoreExpr::Drop { local, body: rest },
+            Frame::Open {
+                cell,
+                variant,
+                fields,
+            } => CoreExpr::Open {
+                cell,
+                variant,
+                fields,
+                body: rest,
+            },
         }
     }
 
@@ -72,10 +87,12 @@ pub(crate) enum End {
         then: Box<CoreExpr>,
         els: Box<CoreExpr>,
     },
-    Match {
+    Switch {
         scrut: LocalId,
-        arms: Vec<(CorePat, CoreExpr)>,
+        cases: Cases,
+        default: Option<Box<CoreExpr>>,
     },
+    NoArm,
 }
 
 impl End {
@@ -85,7 +102,16 @@ impl End {
             End::TailCall { callee, args } => CoreExpr::TailCall { callee, args },
             End::Jump { to, args } => CoreExpr::Jump { to, args },
             End::If { cond, then, els } => CoreExpr::If { cond, then, els },
-            End::Match { scrut, arms } => CoreExpr::Match { scrut, arms },
+            End::Switch {
+                scrut,
+                cases,
+                default,
+            } => CoreExpr::Switch {
+                scrut,
+                cases,
+                default,
+            },
+            End::NoArm => CoreExpr::NoArm,
         }
     }
 }
@@ -103,10 +129,32 @@ pub(crate) fn peel(e: CoreExpr) -> Result<(Frame, CoreExpr), End> {
             body,
         } => Ok((Frame::Join { id, params, body }, *cont)),
         CoreExpr::Drop { local, body } => Ok((Frame::Drop { local }, *body)),
+        CoreExpr::Open {
+            cell,
+            variant,
+            fields,
+            body,
+        } => Ok((
+            Frame::Open {
+                cell,
+                variant,
+                fields,
+            },
+            *body,
+        )),
         CoreExpr::Ret(value) => Err(End::Ret(value)),
         CoreExpr::TailCall { callee, args } => Err(End::TailCall { callee, args }),
         CoreExpr::Jump { to, args } => Err(End::Jump { to, args }),
         CoreExpr::If { cond, then, els } => Err(End::If { cond, then, els }),
-        CoreExpr::Match { scrut, arms } => Err(End::Match { scrut, arms }),
+        CoreExpr::Switch {
+            scrut,
+            cases,
+            default,
+        } => Err(End::Switch {
+            scrut,
+            cases,
+            default,
+        }),
+        CoreExpr::NoArm => Err(End::NoArm),
     }
 }

@@ -144,8 +144,15 @@ impl Tag {
 
     /// Which variant this is the tag of, and whether it has fields.
     pub(crate) fn parts(self) -> (u16, bool) {
-        let variant = low_u16(u64::from(self.0));
+        let variant = self.variant();
         (variant, self == Tag::of_cell(variant))
+    }
+
+    /// Which of its type's variants a value with this tag is, whether it has fields
+    /// or not.
+    #[inline(always)]
+    pub(crate) fn variant(self) -> u16 {
+        low_u16(u64::from(self.0))
     }
 
     /// Whether a value with this tag is a cell.

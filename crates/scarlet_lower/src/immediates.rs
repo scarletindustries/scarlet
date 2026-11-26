@@ -4,14 +4,16 @@
 //! The source spells `True`, `False` and `Nil` as the prelude's constructors,
 //! and `lower` keeps them that way, while a comparison or `&&` already makes an
 //! [`Atom::Bool`] and an empty block an [`Atom::Nil`]. This pass removes the
-//! difference: each of those constructors becomes the atom, and a `match` on a
+//! difference: each of those constructors becomes the atom, and a `Switch` on a
 //! Bool becomes an `If`. So a backend never needs to know which `TypeId` is
 //! the prelude's `Bool`, and a Bool only ever looks one way.
 //!
 //! It runs between `lower` and `perceus`, so Perceus never sees a Bool as a
 //! constructor.
 
-use super::{Atom, CoreExpr, CoreFn, CorePat, LocalId, VariantRef};
+use scarlet_ir::TypeId;
+
+use super::{Atom, Cases, CoreExpr, CoreFn, LocalId, VariantRef};
 
 /// The prelude's constructors that are immediates.
 #[derive(Clone, Copy)]
@@ -19,15 +21,6 @@ pub struct Immediates {
     pub(crate) true_: VariantRef,
     pub(crate) false_: VariantRef,
     pub(crate) nil: VariantRef,
-}
-
-/// What a pattern tests a Bool or Nil for.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Test {
-    /// Matches every value. This is a wildcard, or `Nil`, which has only one
-    /// value.
-    Any,
-    Is(bool),
 }
 
 impl Immediates {
@@ -43,36 +36,41 @@ impl Immediates {
         }
     }
 
-    /// Returns `None` for any pattern that is not over a Bool or Nil.
-    fn test(&self, p: &CorePat) -> Option<Test> {
-        match p {
-            CorePat::Wild | CorePat::Bind(_) => Some(Test::Any),
-            CorePat::Ctor { variant, .. } if *variant == self.true_ => Some(Test::Is(true)),
-            CorePat::Ctor { variant, .. } if *variant == self.false_ => Some(Test::Is(false)),
-            CorePat::Ctor { variant, .. } if *variant == self.nil => Some(Test::Any),
-            CorePat::Ctor { .. } | CorePat::Lit(_) => None,
-        }
+    /// Whether a value of `ty` is an immediate, so that no backend switches on one.
+    fn are(&self, ty: TypeId) -> bool {
+        ty == self.true_.type_id || ty == self.nil.type_id
     }
 
-    /// For a match whose arms all test a Bool or Nil, where at least one names
-    /// `True`, `False` or `Nil`, this gives the arm that runs when the value is
-    /// `True` and the one that runs when it is `False`. For a match on Nil,
-    /// both are the arm that runs. A match of only wildcards and bindings is left to
-    /// the backend, which does not need to know what type it is over.
-    fn arms_taken(&self, arms: &[(CorePat, CoreExpr)]) -> Option<(usize, usize)> {
-        if !arms.iter().any(|(p, _)| matches!(p, CorePat::Ctor { .. })) {
-            return None;
+    /// What a switch is on the Bool or the Nil in `scrut`, whose type is `ty`: what
+    /// it goes on with, when only that can be, or else an `If`.
+    fn branch(
+        &self,
+        scrut: LocalId,
+        ty: TypeId,
+        arms: Vec<(Vec<u16>, CoreExpr)>,
+        default: Option<Box<CoreExpr>>,
+    ) -> CoreExpr {
+        let (mut on_true, mut on_false, mut always) = (None, None, default);
+        for (variants, body) in arms {
+            let is = |v: VariantRef| v.type_id == ty && variants.contains(&v.variant_idx);
+            let body = Box::new(body);
+            match (is(self.true_), is(self.false_)) {
+                (true, false) => on_true = Some(body),
+                (false, true) => on_false = Some(body),
+                (true, true) | (false, false) => always = Some(body),
+            }
         }
-        let tests: Vec<Test> = arms
-            .iter()
-            .map(|(p, _)| self.test(p))
-            .collect::<Option<_>>()?;
-        let first = |b: bool| {
-            tests
-                .iter()
-                .position(|t| *t == Test::Any || *t == Test::Is(b))
-        };
-        Some((first(true)?, first(false)?))
+        match (on_true, on_false, always) {
+            (Some(then), Some(els), _)
+            | (Some(then), None, Some(els))
+            | (None, Some(els), Some(then)) => CoreExpr::If {
+                cond: scrut,
+                then,
+                els,
+            },
+            (Some(only), None, None) | (None, Some(only), None) | (None, None, Some(only)) => *only,
+            (None, None, None) => CoreExpr::NoArm,
+        }
     }
 }
 
@@ -94,20 +92,35 @@ impl Immediates {
                     self.expr(body);
                     cont
                 }
-                CoreExpr::SetGlobal { body, .. } | CoreExpr::Drop { body, .. } => body,
-                CoreExpr::Match { scrut, arms } => match self.arms_taken(arms) {
-                    Some(taken) => {
-                        let branch = branch(*scrut, std::mem::take(arms), taken);
-                        *e = branch;
-                        e
+                CoreExpr::SetGlobal { body, .. }
+                | CoreExpr::Drop { body, .. }
+                | CoreExpr::Open { body, .. } => body,
+                CoreExpr::Switch {
+                    scrut,
+                    cases: Cases::Variant { ty, arms },
+                    default,
+                } if self.are(*ty) => {
+                    let (arms, default) = (std::mem::take(arms), default.take());
+                    *e = self.branch(*scrut, *ty, arms, default);
+                    e
+                }
+                CoreExpr::Switch { cases, default, .. } => {
+                    for arm in cases.arms_mut() {
+                        self.expr(arm);
                     }
-                    None => return arms.iter_mut().for_each(|(_, arm)| self.expr(arm)),
-                },
+                    match default {
+                        Some(default) => default,
+                        None => return,
+                    }
+                }
                 CoreExpr::If { then, els, .. } => {
                     self.expr(then);
                     els
                 }
-                CoreExpr::Ret(_) | CoreExpr::TailCall { .. } | CoreExpr::Jump { .. } => return,
+                CoreExpr::Ret(_)
+                | CoreExpr::TailCall { .. }
+                | CoreExpr::Jump { .. }
+                | CoreExpr::NoArm => return,
             };
         }
     }
@@ -118,46 +131,6 @@ impl Immediates {
         {
             *atom = immediate;
         }
-    }
-}
-
-/// What a match on `scrut` is that takes one of two of its arms: that arm when the
-/// same one runs whatever the value, or else an `If` with the `True` arm as `then`
-/// and the `False` arm as `else`. No other arm can ever run. An arm that binds the
-/// value starts by binding it.
-fn branch(
-    scrut: LocalId,
-    mut arms: Vec<(CorePat, CoreExpr)>,
-    (on_true, on_false): (usize, usize),
-) -> CoreExpr {
-    // Both indices came from `arms`, so they are in range. Taking the later one
-    // first leaves the earlier one where it was.
-    arms.truncate(on_true.max(on_false).saturating_add(1));
-    let mut take = |i: usize| {
-        let (pat, body) = arms.swap_remove(i);
-        match pat {
-            CorePat::Bind(bind) => CoreExpr::Let {
-                bind,
-                rhs: Atom::Local(scrut),
-                body: Box::new(body),
-            },
-            CorePat::Wild | CorePat::Lit(_) | CorePat::Ctor { .. } => body,
-        }
-    };
-    if on_true == on_false {
-        return take(on_true);
-    }
-    let later = Box::new(take(on_true.max(on_false)));
-    let earlier = Box::new(take(on_true.min(on_false)));
-    let (then, els) = if on_true > on_false {
-        (later, earlier)
-    } else {
-        (earlier, later)
-    };
-    CoreExpr::If {
-        cond: scrut,
-        then,
-        els,
     }
 }
 

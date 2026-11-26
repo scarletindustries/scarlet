@@ -22,6 +22,9 @@ PASS wildcard arm catches the rest
 PASS guard true branch
 PASS guard second branch
 PASS guard falls through
+PASS guard on a Bool passes
+PASS guard on a Bool falls through
+PASS guard on a Bool is not asked
 PASS positional ctor args
 PASS labeled ctor args
 PASS ctor rest pattern

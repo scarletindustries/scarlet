@@ -1,10 +1,10 @@
 use super::super::Op;
 use super::super::alloc::allocate;
-use super::super::ins::Src;
+use super::super::ins::{Src, Table};
 use super::super::live::settle;
 use super::super::tests::programs::every_draft;
-use super::super::tests::random::{Random, random_function};
-use super::super::tests::{copy_of, draft, of, same_step};
+use super::super::tests::random::{Random, random_function, variant};
+use super::super::tests::{copy_of, draft, of, same_step, targets};
 use super::super::translate::Draft;
 use super::*;
 use crate::stop::Limit;
@@ -36,8 +36,10 @@ fn shown(body: &Body) -> Vec<String> {
             let taken = matches!(role, Role::Take | Role::Pass { moved: true });
             regs.push(format!("{r}{}", if taken { "!" } else { "" }));
         });
-        let to = ins.target().map(|l| body.labels[l.0 as usize]);
-        let to = to.map(|to| format!("-> {to}"));
+        let to = targets(ins, &body.lists);
+        let to = to
+            .iter()
+            .map(|l| format!("-> {}", body.labels[l.0 as usize]));
         let kind = ins.op().name().to_string();
         let parts: Vec<String> = [kind].into_iter().chain(regs).chain(to).collect();
         parts.join(" ")
@@ -57,6 +59,7 @@ fn tail_call(params: u32, values: u32, step: Step) -> Body {
         regs: (0..values).map(|v| param(v as usize)).collect(),
         kinds: vec![Some(Makes::Any); values as usize],
         params: (0..params).map(VReg).collect(),
+        words: Vec::new(),
         own: room(values as usize + 2),
         closure: ReadsClosure::Nothing,
     };
@@ -364,6 +367,7 @@ fn a_tail_call_with_an_argument_that_has_no_place_is_refused() {
             regs,
             kinds: vec![Some(Makes::Any); 2],
             params: vec![VReg(0), VReg(1)],
+            words: Vec::new(),
             own: room(4),
             closure: ReadsClosure::Nothing,
         };
@@ -477,6 +481,62 @@ fn a_constructor_with_no_fields_is_no_cell() {
     };
     assert_eq!(found(plain.tag()), ["Halt 2!", "Drop 3"]);
     assert_eq!(found(Tag::of_cell(1)), ["Drop 3", "Drop 3"]);
+}
+
+/// Where only a switch goes, and only for constructors with no fields, its register
+/// holds no cell. A place it goes to for others too may.
+#[test]
+fn a_case_for_no_fields_is_no_cell() {
+    let lists = || Lists {
+        tables: vec![Label(0), Label(1), Label(0)],
+        ..Lists::default()
+    };
+    let switch = Ins::Switch {
+        src: Src(VReg(1)),
+        table: Table { first: 0, last: 2 },
+    };
+    let found = |words: &[u32]| {
+        let steps = vec![switch.into(), of::enter(1, &[0]), of::enter(2, &[0])];
+        let mut d = draft(2, 2, steps, &[1, 2]);
+        d.lists = lists();
+        d.words = words.iter().map(|l| (Label(*l), VReg(1))).collect();
+        let body = expanded(d).expect("it fits");
+        let ins = shown(&body);
+        assert_eq!(
+            ins[0],
+            "Switch 3 -> 1 -> 2 -> 1".replace("2", &body.labels[1].to_string())
+        );
+        let (first, second) = ins[1..].split_at(body.labels[1] - 1);
+        [first.len(), second.len()]
+    };
+    assert_eq!(found(&[]), [2, 2]);
+    assert_eq!(found(&[0]), [1, 2]);
+    assert_eq!(found(&[1]), [2, 1]);
+    assert_eq!(found(&[0, 1]), [1, 1]);
+    // Two cases at one place, which it may be in for either.
+    let here = |words: &[u32]| {
+        let steps = vec![switch.into(), of::enter(1, &[0])];
+        let mut d = draft(2, 2, steps, &[1, 1]);
+        d.lists = lists();
+        d.words = words.iter().map(|l| (Label(*l), VReg(1))).collect();
+        shown(&expanded(d).expect("it fits")).len()
+    };
+    assert_eq!(here(&[]), 3);
+    assert_eq!(here(&[0]), 3);
+    assert_eq!(here(&[1]), 3);
+    assert_eq!(here(&[0, 1]), 2);
+    // A place that the code in front of it goes on to as well.
+    let into = |words: &[u32]| {
+        let test = of::unless(0, 0);
+        let more = of::drop(0);
+        let steps = vec![test.into(), switch.into(), more.into(), of::enter(1, &[0])];
+        let mut d = draft(2, 2, steps, &[2, 3]);
+        d.lists = lists();
+        d.words = words.iter().map(|l| (Label(*l), VReg(1))).collect();
+        let ins = shown(&expanded(d).expect("it fits"));
+        ins.iter().filter(|i| *i == "Drop 3").count()
+    };
+    assert_eq!(into(&[1]), 1);
 }
 
 /// A value that has no type is refused, whether it is written or a parameter.
@@ -751,12 +811,45 @@ fn gives(ins: &Ins<VReg>, read: &[u64], dst: u64) -> u64 {
     mix(read.iter().copied().chain([kind, dst]))
 }
 
-/// Whether `ins` jumps, when it read `read`.
-fn jumps(ins: &Ins<VReg>, read: &[u64]) -> bool {
+/// Where `ins` goes instead of on to the next, when it read `read`. No value in a cell
+/// goes where `words` says that there is none.
+fn goes(
+    ins: &Ins<VReg>,
+    read: &[u64],
+    lists: &Lists<VReg>,
+    words: &[(Label, VReg)],
+) -> Option<Label> {
+    let mut to = targets(ins, lists);
+    let fits = |l: &Label| read[0] % 4 == 1 || !words.iter().any(|(word, _)| word == l);
     match ins {
-        Ins::Jump { .. } => true,
-        Ins::JumpUnlessTag { tag, .. } if !tag.is_cell() => read[0] % 4 != 1,
-        ins => gives(ins, read, 99).is_multiple_of(3),
+        Ins::Jump { .. } => to.pop(),
+        Ins::Switch { table, .. } => {
+            let from = usize::try_from(variant(read[0], *table)).expect("a few");
+            let all = to[from..].iter().chain(&to[..from]);
+            Some(all.copied().find(fits).unwrap_or(to[from]))
+        }
+        Ins::SwitchInt { table, .. } => {
+            let first = u64::try_from(table.first).expect("a few");
+            let past = (read[0] % 16).checked_sub(first);
+            let last = u64::from(table.table.last);
+            let at = past.unwrap_or(last).min(last);
+            Some(to[usize::try_from(at).expect("a few")])
+        }
+        Ins::SwitchIntFar { places, to, .. } => {
+            let n = i64::try_from(read[0] % 16).expect("a few");
+            let all = places.places(lists).iter();
+            Some(
+                all.clone()
+                    .find(|(k, _)| *k == n)
+                    .map_or(*to, |(_, to)| *to),
+            )
+        }
+        Ins::JumpUnlessTag { tag, .. } if !tag.is_cell() => to.pop().filter(|_| read[0] % 4 != 1),
+        Ins::JumpUnlessTag { .. } => {
+            let jumps = gives(ins, read, 99).is_multiple_of(3);
+            to.pop().filter(|l| jumps && fits(l))
+        }
+        ins => to.pop().filter(|_| gives(ins, read, 99).is_multiple_of(3)),
     }
 }
 
@@ -810,15 +903,13 @@ fn run_values(d: &Draft) -> Trace {
                 read.push(values[v.0 as usize]);
             }
         });
-        if !ins.falls_through() && ins.target().is_none() {
-            trace.push(('r', read));
-            return trace;
-        }
-        if let Some(to) = ins.target()
-            && jumps(ins, &read)
-        {
+        if let Some(to) = goes(ins, &read, &d.lists, &d.words) {
             at = d.labels[to.0 as usize];
             continue;
+        }
+        if !ins.falls_through() {
+            trace.push(('r', read));
+            return trace;
         }
         if let Ins::Move { dst, src } = ins {
             values[dst.0.0 as usize] = values[src.reg.0 as usize];
@@ -847,7 +938,7 @@ impl Regs {
 /// Run `body` over registers, as the machine would, and say what is wrong: a
 /// register read that is empty, or at the end of a frame a cell where nothing
 /// will look for it.
-fn run_regs(body: &Body) -> Result<Trace, String> {
+fn run_regs(body: &Body, words: &[(Label, VReg)]) -> Result<Trace, String> {
     let params = body.params.len();
     let mut trace = Trace::new();
     let mut f = Regs {
@@ -916,18 +1007,16 @@ fn run_regs(body: &Body) -> Result<Trace, String> {
             trace.push(('t', passed));
             return Ok(trace);
         }
+        if let Some(to) = goes(ins, &by, &body.lists, words) {
+            at = body.labels[to.0 as usize];
+            continue;
+        }
         if !ins.falls_through() {
             if let Some(r) = f.cells().find(|r| *r >= own) {
                 return Err(format!("{here}: r{r} has a cell above the frame"));
             }
             trace.push(('r', by));
             return Ok(trace);
-        }
-        if let Some(to) = ins.target()
-            && jumps(ins, &by)
-        {
-            at = body.labels[to.0 as usize];
-            continue;
         }
         let moved = |m: Made, taken: bool, made: &mut u64| {
             // A share is a reference more to the same cell. Here each reference
@@ -986,7 +1075,7 @@ fn check(mut d: Draft, what: &str) -> bool {
     let body = allocate(d, &held).and_then(expand);
     let body = body.unwrap_or_else(|why| panic!("{what}: {why:?}"));
     let mut want = run_values(&before);
-    let got = run_regs(&body).unwrap_or_else(|wrong| panic!("{what}: {wrong}"));
+    let got = run_regs(&body, &before.words).unwrap_or_else(|wrong| panic!("{what}: {wrong}"));
     // A callee's arguments are not told from the number that follow it.
     for (w, g) in want.iter_mut().zip(&got) {
         if w.0 == 't' && g.1.len() > w.1.len() && g.1.starts_with(&w.1) {
@@ -1021,10 +1110,10 @@ fn the_run_over_registers_finds_what_is_wrong() {
         let d = || draft(3, 2, steps.iter().map(same_step), &[]);
         let want = run_values(&d());
         let mut body = expanded(d()).expect("it fits");
-        assert_eq!(run_regs(&body).as_ref(), Ok(&want));
+        assert_eq!(run_regs(&body, &[]).as_ref(), Ok(&want));
         let found = body.ins.iter_mut().find(|i| i.op() == kind);
         change(found.expect("one of these"));
-        run_regs(&body).map_or(true, |got| got != want)
+        run_regs(&body, &[]).map_or(true, |got| got != want)
     };
     let swap = || vec![of::again(&[1, 0])];
     assert!(wrong(swap(), Op::Move2, |ins| *ins = of::mv(0, 0)));

@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use scarlet_ir::core_ir::{FuncIdx, MAX_PARAMS, PrimOp, VariantRef};
+use scarlet_ir::core_ir::{ConstId, FuncIdx, MAX_PARAMS, PrimOp, VariantRef};
 use scarlet_ir::intrinsic::Intrinsic;
 
 use crate::frame::MAX_VALUES;
@@ -110,7 +110,6 @@ pub(crate) enum Missing {
         want: Arity,
     },
     PrintArity(Intrinsic),
-    TooManyFields,
     /// A function past one of the VM's limits.
     TooMany {
         func: String,
@@ -171,6 +170,10 @@ pub(crate) enum Broken {
     /// The program has more functions than a 32-bit index can name.
     TooManyFunctions,
     NoArm,
+    /// A switch names a value in two of its cases, or has a case for none.
+    Cases,
+    /// A switch on a string has a case for this constant, which is none.
+    TextCase(ConstId),
     /// A jump to a join that nothing around it declares.
     UndeclaredJoin,
     /// A jump with other than an argument for each of its join's parameters.
@@ -218,6 +221,9 @@ pub(crate) enum Broken {
     /// The program updates a constructor at no field, at one that it does not
     /// list, or at fields out of order.
     UpdateFields(VariantRef),
+    /// The program takes a constructor apart into no field, into one that it does
+    /// not list, or into fields out of order.
+    OpenFields(VariantRef),
     /// The program builds or matches a constructor with another number of
     /// fields than it lists, or the VM builds one so.
     CtorFields {
@@ -296,7 +302,6 @@ impl fmt::Display for NotBuilt {
             Missing::Intrinsic(i) => write!(f, "the built-in {i:?}"),
             Missing::Arity { op, want } => write!(f, "{op:?} with {want}"),
             Missing::PrintArity(i) => write!(f, "{i:?} with {}", Arity::One),
-            Missing::TooManyFields => f.write_str("a constructor with more than 65535 fields"),
             Missing::NoConst(i) => write!(f, "constant c{i}, which the program does not have"),
             Missing::TooMany { func, of } => write!(f, "{func}, which {of},"),
             Missing::NoFunc(func) => write!(f, "a call to {func}, which the program does not have"),
@@ -327,6 +332,8 @@ impl fmt::Display for BadProgram {
                 f.write_str("the program has more functions than an index can name")
             }
             Broken::NoArm => f.write_str("a match found no arm for its value"),
+            Broken::Cases => f.write_str("a switch with two cases for a value, or a case for none"),
+            Broken::TextCase(c) => write!(f, "a case for a string that is {c}, which is none"),
             Broken::UndeclaredJoin => f.write_str("a jump to a join that nothing declares"),
             Broken::JumpArity { got, want } => {
                 write!(f, "a jump with {got} arguments, not {want}")
@@ -363,6 +370,11 @@ impl fmt::Display for BadProgram {
             Broken::UpdateFields(v) => write!(
                 f,
                 "{} updated at fields that it does not have, or that are not in order",
+                name(*v)
+            ),
+            Broken::OpenFields(v) => write!(
+                f,
+                "{} taken apart into fields that it does not have, or that are not in order",
                 name(*v)
             ),
             Broken::NoCtor(v) => write!(f, "{}, which the program does not list", name(*v)),

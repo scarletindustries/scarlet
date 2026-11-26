@@ -9,3 +9,8 @@ scarlet_ir = { path = "../scarlet_ir" }
 scarlet_types = { path = "../scarlet_types" }
 scarlet_check = { path = "../scarlet_check" }
 smallvec = "1.15"
+
+[dev-dependencies]
+# One test goes over every match in the repository's programs, which only the
+# driver of the passes finds and checks. Nothing else here sees it.
+scarlet_core = { path = "../scarlet_core" }

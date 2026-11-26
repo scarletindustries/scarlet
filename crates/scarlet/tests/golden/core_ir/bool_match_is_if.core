@@ -19,9 +19,7 @@ fn main.unit(%0:t2) -> :t1
   ret %1
 
 fn main.same(%0:t0) -> :t0
-  match %0
-    | %1 ->
-      ret %1
+  ret %0
 
 fn main.main() -> :t1
   let %0:t0 = true

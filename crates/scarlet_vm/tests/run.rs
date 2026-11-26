@@ -2923,6 +2923,63 @@ fn a_counted_run_counts_each_instruction_by_its_kind() {
     assert_eq!(counts.cells_live, 0);
 }
 
+/// A lookup that hits and whose value nothing reads drops it only when it is of a type
+/// that gets drops, and an Int, which may be big, is given up all the same.
+#[test]
+fn a_found_value_that_nothing_reads_is_given_up() {
+    for (values, drops) in [
+        ("n", 0),
+        ("n * 1000000 * 1000000 * 1000000", 0),
+        ("[n]", 1000),
+    ] {
+        let src = format!(
+            "import scarlet/map\n\
+             fn fill(m map::Map(Int, v), n Int, of fn(Int) v) map::Map(Int, v) {{\n\
+             \tif n == 0 {{ m }} else {{ fill(map::set(m, n, of(n)), n - 1, of) }}\n\
+             }}\n\
+             fn go(n Int, m map::Map(Int, {ty}), x Int) Int {{\n\
+             \tif n == 0 {{ x }} else {{\n\
+             \t\tgo(n - 1, m, x + match map::get(m, n) {{\n\
+             \t\t\tSome(_) -> 1\n\
+             \t\t\tNone -> 0\n\
+             \t\t}})\n\
+             \t}}\n\
+             }}\n\
+             pub fn main() {{ println(go(2000, fill(map::new(), 1000, fn(n Int) {{ {values} }}), 0)) }}\n",
+            ty = if drops == 0 { "Int" } else { "Array(Int)" },
+        );
+        let (out, counts) = counted(&src);
+        assert_eq!(out, "1000\n", "{values}");
+        assert_eq!(counts.cells_live, 0, "{values}");
+        assert_eq!(ran(&counts, "MapFind"), 2000, "{values}");
+        // `fill` gives up what `of` gave it.
+        assert_eq!(ran(&counts, "Drop"), 1000 + drops, "{values}");
+    }
+}
+
+/// Where every case of a switch goes to one place, what is there gives up what the
+/// value holds, though one of the cases is for a constructor that holds nothing.
+#[test]
+fn cases_that_come_to_one_place_give_up_the_value() {
+    let src = "type A {\n\tA0(f Option(Int))\n\tA1\n}\n\
+        type Rec {\n\tid Int\n\tname String\n}\n\
+        fn say(k Int, s String) String {\n\t'${k}${s}'\n}\n\
+        fn f(v (A, String, Int, Rec)) String {\n\
+        \tmatch v {\n\
+        \t\t(A0(_) | A1, 'a' | 'b' | 'c' | 'd', n | n, Rec(m | m | m, _)) if n > 4 -> say(m, 'big')\n\
+        \t\t(_, 'a', _, Rec(k, 'z')) -> say(k, 'one')\n\
+        \t\t(A0(_) | A1, _, _, Rec(_, _)) -> say(0, 'other')\n\
+        \t}\n}\n\
+        pub fn main() {\n\
+        \tprintln(f((A0(Some(1)), 'a', 9, Rec(7, 'y'))))\n\
+        \tprintln(f((A0(Some(1)), 'a', 3, Rec(1, 'z'))))\n\
+        \tprintln(f((A0(Some(1)), 'e', 3, Rec(7, 'y'))))\n\
+        \tprintln(f((A1, 'e', 3, Rec(7, 'y'))))\n}\n";
+    let (out, counts) = counted(src);
+    assert_eq!(out, "7big\n1one\n0other\n0other\n");
+    assert_eq!(counts.cells_live, 0);
+}
+
 /// The counts are a property of the program, so a second run gives the same
 /// ones.
 #[test]

@@ -61,7 +61,7 @@ impl Names for Reg {
 }
 
 /// A place in a function the loader is still making.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Label(pub(crate) u32);
 
 /// An instruction, by where it is in the program's code.
@@ -157,10 +157,8 @@ pub(crate) trait Part<R: Names>: Copy {
     /// says of its register.
     fn decide(&mut self, _: &mut Lists<R>, _: &mut impl FnMut(R) -> bool) {}
 
-    /// Where the instruction may jump, when this is what says so.
-    fn target(self) -> Option<R::To> {
-        None
-    }
+    /// Call `f` with each place the instruction may jump to that this says.
+    fn targets(self, _: &Lists<R>, _: &mut impl FnMut(R::To)) {}
 }
 
 /// A field of an instruction on [`VReg`]s, as it is once the registers, the
@@ -193,17 +191,20 @@ pub(crate) trait Places {
     fn arg_list(&self, i: u32) -> Result<u32, Unplaced>;
     fn dst_list(&self, i: u32) -> Result<u32, Unplaced>;
     fn set_list(&self, i: u32) -> Result<u32, Unplaced>;
+    /// Where the function's own table is among the program's.
+    fn table(&self, table: Table) -> Result<Table, Unplaced>;
+    fn place_list(&self, i: u32) -> Result<u32, Unplaced>;
 }
 
 impl Part<VReg> for Label {
-    fn target(self) -> Option<Label> {
-        Some(self)
+    fn targets(self, _: &Lists<VReg>, f: &mut impl FnMut(Label)) {
+        f(self);
     }
 }
 
 impl Part<Reg> for Pc {
-    fn target(self) -> Option<Pc> {
-        Some(self)
+    fn targets(self, _: &Lists<Reg>, f: &mut impl FnMut(Pc)) {
+        f(self);
     }
 }
 
@@ -458,7 +459,7 @@ macro_rules! lists {
         pub(crate) struct $list(pub(crate) u32);
 
         impl $list {
-            pub(crate) fn regs<R>(self, lists: &Lists<R>) -> &[R] {
+            pub(crate) fn regs<R: Names>(self, lists: &Lists<R>) -> &[R] {
                 lists.regs(self.0)
             }
         }
@@ -766,7 +767,7 @@ impl Hands for [Reg] {
 pub(crate) struct ArgList(pub(crate) u32);
 
 impl ArgList {
-    pub(crate) fn args<R>(self, lists: &Lists<R>) -> &[Arg<R>] {
+    pub(crate) fn args<R: Names>(self, lists: &Lists<R>) -> &[Arg<R>] {
         lists.args(self.0)
     }
 }
@@ -800,7 +801,7 @@ impl Place for ArgList {
 pub(crate) struct DstList(pub(crate) u32);
 
 impl DstList {
-    pub(crate) fn dsts<R>(self, lists: &Lists<R>) -> &[MaybeDst<R>] {
+    pub(crate) fn dsts<R: Names>(self, lists: &Lists<R>) -> &[MaybeDst<R>] {
         lists.dsts.get(self.0 as usize).map_or(&[], |l| l)
     }
 }
@@ -833,7 +834,7 @@ pub(crate) struct Assign<R> {
 pub(crate) struct AssignList(pub(crate) u32);
 
 impl AssignList {
-    pub(crate) fn sets<R>(self, lists: &Lists<R>) -> &[Assign<R>] {
+    pub(crate) fn sets<R: Names>(self, lists: &Lists<R>) -> &[Assign<R>] {
         lists.sets.get(self.0 as usize).map_or(&[], |l| l)
     }
 }
@@ -861,28 +862,146 @@ impl Place for AssignList {
     }
 }
 
+/// Where an [`Ins::Switch`] or an [`Ins::SwitchInt`] continues, which is a run of
+/// [`Lists::tables`] with at least one entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Table {
+    /// The last entry, as how far it is past the first.
+    pub(crate) last: u16,
+    /// Where in there the first is.
+    pub(crate) first: u32,
+}
+
+impl Table {
+    /// Where entry `i` is in [`Lists::tables`].
+    #[inline(always)]
+    fn place(self, i: usize) -> usize {
+        // Both are far from the end of what a place can be, so the sum is exact.
+        (self.first as usize).wrapping_add(i)
+    }
+
+    /// Entry `i`.
+    #[inline(always)]
+    pub(crate) fn at(self, i: u16, lists: &Lists<Reg>) -> Option<Pc> {
+        match i <= self.last {
+            true => lists.tables.get(self.place(usize::from(i))).copied(),
+            false => None,
+        }
+    }
+
+    fn of<R: Names>(self, lists: &Lists<R>) -> &[R::To] {
+        let first = self.first as usize;
+        let last = first.saturating_add(usize::from(self.last));
+        lists.tables.get(first..=last).unwrap_or_default()
+    }
+}
+
+impl<R: Names> Part<R> for Table {
+    fn targets(self, lists: &Lists<R>, f: &mut impl FnMut(R::To)) {
+        self.of(lists).iter().for_each(|to| f(*to));
+    }
+}
+
+impl Place for Table {
+    type Placed = Table;
+    fn place(self, at: &impl Places) -> Result<Table, Unplaced> {
+        at.table(self)
+    }
+}
+
+/// A table for the Ints from `first` on. Its last entry is for every other value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct IntTable {
+    pub(crate) table: Table,
+    pub(crate) first: i32,
+}
+
+impl IntTable {
+    /// The entry for `n`.
+    #[inline(always)]
+    pub(crate) fn at(self, n: i64, lists: &Lists<Reg>) -> Option<Pc> {
+        let past = n.wrapping_sub(i64::from(self.first)).cast_unsigned();
+        let i = past.min(u64::from(self.table.last));
+        let i = usize::try_from(i).unwrap_or(usize::MAX);
+        lists.tables.get(self.table.place(i)).copied()
+    }
+
+    /// The entry for what is no small Int. The table has none for a big one, because
+    /// it has fewer entries than there are small Ints past any `first`.
+    #[inline(always)]
+    pub(crate) fn other(self, lists: &Lists<Reg>) -> Option<Pc> {
+        self.table.at(self.table.last, lists)
+    }
+}
+
+impl<R: Names> Part<R> for IntTable {
+    fn targets(self, lists: &Lists<R>, f: &mut impl FnMut(R::To)) {
+        self.table.targets(lists, f);
+    }
+}
+
+impl Place for IntTable {
+    type Placed = IntTable;
+    fn place(self, at: &impl Places) -> Result<IntTable, Unplaced> {
+        let table = at.table(self.table)?;
+        Ok(IntTable { table, ..self })
+    }
+}
+
+/// Where an [`Ins::SwitchIntFar`] continues for each Int that has a place of its own,
+/// in order, in a list kept beside the code.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PlaceList(pub(crate) u32);
+
+impl PlaceList {
+    pub(crate) fn places<R: Names>(self, lists: &Lists<R>) -> &[(i64, R::To)] {
+        lists.places.get(self.0 as usize).map_or(&[], |l| l)
+    }
+}
+
+impl<R: Names> Part<R> for PlaceList {
+    fn targets(self, lists: &Lists<R>, f: &mut impl FnMut(R::To)) {
+        self.places(lists).iter().for_each(|(_, to)| f(*to));
+    }
+}
+
+impl Place for PlaceList {
+    type Placed = PlaceList;
+    fn place(self, at: &impl Places) -> Result<PlaceList, Unplaced> {
+        at.place_list(self.0).map(PlaceList)
+    }
+}
+
+/// Some Ints, from the least to the greatest, and where each goes.
+type PlacesByInt<To> = Box<[(i64, To)]>;
+
 /// The operands of the instructions that have too many to hold. An instruction
 /// is given its place only when the list it names is here ([`super::emit`]).
 #[derive(Debug)]
-pub(crate) struct Lists<R> {
+pub(crate) struct Lists<R: Names> {
     pub(crate) regs: Vec<Box<[R]>>,
     pub(crate) args: Vec<Box<[Arg<R>]>>,
     pub(crate) dsts: Vec<Box<[MaybeDst<R>]>>,
     pub(crate) sets: Vec<Box<[Assign<R>]>>,
+    /// Every [`Table`], one after another.
+    pub(crate) tables: Vec<R::To>,
+    pub(crate) places: Vec<PlacesByInt<R::To>>,
 }
 
-impl<R> Default for Lists<R> {
+impl<R: Names> Default for Lists<R> {
     fn default() -> Self {
         Lists {
             regs: Vec::new(),
             args: Vec::new(),
             dsts: Vec::new(),
             sets: Vec::new(),
+            tables: Vec::new(),
+            places: Vec::new(),
         }
     }
 }
 
-impl<R> Lists<R> {
+impl<R: Names> Lists<R> {
     fn regs(&self, i: u32) -> &[R] {
         self.regs.get(i as usize).map_or(&[], |l| l)
     }

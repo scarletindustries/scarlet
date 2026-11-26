@@ -8,10 +8,12 @@
 //! taken out of a cell that goes to no register. A constructor is its type and
 //! its variant, `10.0`, and a test of one is the variant alone, because the test
 //! does not look at the type: `.1` has no fields and `.1(..)` has some. `-> 7`
-//! is where the instruction may continue instead of at the next one. Each kind
-//! is spelt as a counted run spells it (`counts.rs`), so a count can be read
-//! against a listing.
+//! is where the instruction may continue instead of at the next one. A switch has one
+//! for each place it goes, with the variants or the Ints it goes there for, `.0 .2 -> 4`
+//! or `-1 7 -> 4`, and `_` is every other value. Each kind is spelt as a counted run
+//! spells it (`counts.rs`), so a count can be read against a listing.
 
+use std::collections::HashMap;
 use std::fmt::{self, Write as _};
 
 use scarlet_ir::core_ir::{ConstId, FuncIdx, GlobalSlot, Program};
@@ -20,8 +22,8 @@ use scarlet_ir::intrinsic::Intrinsic;
 use crate::code::{self, Code, Entry, Ins, Reg};
 use crate::code::{
     Arg, ArgList, Args, Assign, AssignList, BinaryId, BitsOp, BlockId, Dead, DeadList, Dst,
-    DstList, EntryPc, Hit, Last, LookList, Looks, Makes, MaybeDst, Newline, Pc, Room, Sets,
-    ShareList, Shared, Shares, Src, Taken, TextId, Why, WhyId,
+    DstList, EntryPc, Hit, IntTable, Last, LookList, Looks, Makes, MaybeDst, Newline, Pc,
+    PlaceList, Room, Sets, ShareList, Shared, Shares, Src, Table, Taken, TextId, Why, WhyId,
 };
 use crate::frame::FIRST;
 use crate::heap::{Ctor, Layout};
@@ -124,6 +126,24 @@ pub(crate) struct Line<'a> {
 impl Line<'_> {
     fn part(&mut self, part: impl fmt::Display) {
         self.parts.push(part.to_string());
+    }
+
+    /// Where a switch goes, each place with what it goes there for, the first first.
+    fn cases(&mut self, each: impl Iterator<Item = (Pc, String)>) {
+        let mut all: Vec<(Pc, Vec<String>)> = Vec::new();
+        let mut place: HashMap<usize, usize> = HashMap::new();
+        for (to, of) in each {
+            let at = *place.entry(to.index()).or_insert(all.len());
+            match all.get_mut(at) {
+                Some((_, entries)) => entries.push(of),
+                None => all.push((to, vec![of])),
+            }
+        }
+        for (to, of) in all {
+            if let Some(to) = to.index().checked_sub(self.entry.pc.index()) {
+                self.part(format_args!("{} -> {to}", of.join(" ")));
+            }
+        }
     }
 
     /// `dst` as one more of the registers written, or as none of them.
@@ -322,6 +342,34 @@ impl Show for ShareList {
 impl Show for Pc {
     fn show(self, line: &mut Line<'_>) {
         line.to = self.index().checked_sub(line.entry.pc.index());
+    }
+}
+
+impl Show for Table {
+    fn show(self, line: &mut Line<'_>) {
+        let entries = (0..=self.last).filter_map(|i| self.at(i, &line.code.lists));
+        line.cases(entries.zip(0..).map(|(to, i)| (to, format!(".{i}"))));
+    }
+}
+
+/// An entry that goes where the last one does is not shown by itself.
+impl Show for IntTable {
+    fn show(self, line: &mut Line<'_>) {
+        let other = self.other(&line.code.lists);
+        let ints = (0..self.table.last).zip(i64::from(self.first)..);
+        let own = ints.filter_map(|(i, n)| {
+            let to = self.table.at(i, &line.code.lists)?;
+            (Some(to) != other).then(|| (to, n.to_string()))
+        });
+        let other = other.map(|to| (to, "_".to_string()));
+        line.cases(own.chain(other));
+    }
+}
+
+impl Show for PlaceList {
+    fn show(self, line: &mut Line<'_>) {
+        let places = self.places(&line.code.lists).iter();
+        line.cases(places.map(|(n, to)| (*to, n.to_string())));
     }
 }
 

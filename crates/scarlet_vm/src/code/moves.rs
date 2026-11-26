@@ -249,6 +249,9 @@ struct Walk {
     brought: Vec<Held>,
     /// Every label with the step it stands at, the first last.
     labels: Vec<(usize, Label)>,
+    /// The register that can hold no cell where each label stands, because only a
+    /// switch jumps there, for what has no fields.
+    words: Vec<Option<Reg>>,
 }
 
 impl Walk {
@@ -259,8 +262,16 @@ impl Walk {
                 held.set(r, kind(&f.kinds, *v)?);
             }
         }
+        let mut words = vec![None; f.labels.len()];
+        for (Label(l), v) in &f.words {
+            let reg = f.regs.get(v.0 as usize).copied().flatten();
+            if let Some(word) = words.get_mut(*l as usize) {
+                *word = reg;
+            }
+        }
         Ok(Walk {
             held,
+            words,
             brought: vec![Held::default(); f.labels.len()],
             labels: labels_by_place(&f.labels),
         })
@@ -270,7 +281,11 @@ impl Walk {
     fn arrive(&mut self, i: usize) -> Vec<Label> {
         let mut here = Vec::new();
         while let Some((_, label)) = self.labels.pop_if(|(at, _)| *at <= i) {
-            if let Some(brought) = self.brought.get(label.0 as usize) {
+            if let Some(brought) = self.brought.get_mut(label.0 as usize) {
+                // Only of those who jump to this label, and not of others who come here.
+                if let Some(Some(r)) = self.words.get(label.0 as usize) {
+                    brought.set(*r, Makes::NoCell);
+                }
                 self.held.or(brought);
             }
             here.push(label);
@@ -294,11 +309,11 @@ impl Walk {
     ) -> Result<(), Unfit> {
         let reg = |v: VReg| regs.get(v.0 as usize).copied().flatten();
         // A jump takes nothing and writes nothing.
-        if let Some(Label(l)) = ins.target()
-            && let Some(brought) = self.brought.get_mut(l as usize)
-        {
-            brought.or(&self.held);
-        }
+        ins.targets(lists, &mut |Label(l)| {
+            if let Some(brought) = self.brought.get_mut(l as usize) {
+                brought.or(&self.held);
+            }
+        });
         if !ins.falls_through() {
             self.held = Held::default();
             return Ok(());

@@ -2,106 +2,57 @@ fn main.f(%0:t0, %1:t0, %2:t1) -> :t0
   let %3:t2 = MakeTuple(%0, %1)
   drop %0
   drop %1
-  join j0() after
-    match %3
-      | _ ->
-        join j1(%14:t1, %15:t0) after
-          join j2() after
-            let %4:t0 = TupleField(0)(%3)
-            let %5:t0 = TupleField(1)(%3)
-            drop %5
-            match %4
-              | 10.0(%6, %7) ->
-                drop %4
-                let %8:t3 = IntGt(%6, %2)
-                if %8
-                  drop %3
-                  jump j1(%6, %7)
-                else
-                  drop %7
-                  jump j2()
-              | _ ->
-                drop %4
-                jump j2()
-          let %9:t0 = TupleField(0)(%3)
-          drop %9
-          let %10:t0 = TupleField(1)(%3)
-          match %10
-            | 10.0(%11, %12) ->
-              drop %10
+  join j2() after
+    join j1(%8:t0) after
+      join j0(%4:t1, %5:t0) after
+        let %10:t0 = TupleField(0)(%3)
+        switch %10
+          | 10.0 ->
+            open %10 10.0(0: %11:t1, 1: %12:t0)
+            join j3() after
               let %13:t3 = IntGt(%11, %2)
               if %13
                 drop %3
-                jump j1(%11, %12)
+                jump j0(%11, %12)
               else
                 drop %12
-                jump j0()
-            | _ ->
-              drop %10
-              jump j0()
-        let %16:t1 = IntAdd(%14, %2)
-        let %17:t0 = ctor 10.0(%16, %15)
-        drop %15
-        ret %17
-  join j3() after
-    match %3
-      | _ ->
-        let %18:t0 = TupleField(0)(%3)
-        let %19:t0 = TupleField(1)(%3)
-        join j4() after
-          join j5() after
-            match %18
-              | 10.0(%20, %21) ->
-                drop %18
-                drop %21
-                jump j4()
-              | _ ->
-                jump j5()
-          match %18
-            | 10.1() ->
-              jump j4()
-            | _ ->
-              drop %19
-              drop %18
-              jump j3()
-        match %19
-          | 10.0(%22, %23) ->
+                jump j3()
+            let %14:t0 = TupleField(1)(%3)
             drop %3
-            drop %19
-            ret %23
-          | _ ->
-            drop %19
-            jump j3()
-  join j6() after
-    match %3
-      | _ ->
-        let %24:t0 = TupleField(0)(%3)
-        let %25:t0 = TupleField(1)(%3)
-        join j7() after
-          join j8() after
-            match %24
-              | 10.0(%26, %27) ->
-                drop %24
-                drop %27
-                jump j7()
-              | _ ->
-                jump j8()
-          match %24
-            | 10.1() ->
-              jump j7()
-            | _ ->
-              drop %25
-              drop %24
-              jump j6()
-        match %25
-          | 10.1() ->
+            switch %14
+              | 10.0 ->
+                open %14 10.0(0: %15:t1, 1: %16:t0)
+                join j4() after
+                  let %17:t3 = IntGt(%15, %2)
+                  if %17
+                    jump j0(%15, %16)
+                  else
+                    jump j4()
+                jump j1(%16)
+              | 10.1 ->
+                jump j2()
+          | 10.1 ->
+            let %18:t0 = TupleField(1)(%3)
             drop %3
-            let %28:t0 = ctor 10.1()
-            ret %28
-          | _ ->
-            drop %25
-            jump j6()
-  match %3
+            switch %18
+              | 10.0 ->
+                open %18 10.0(0: %19:t1, 1: %20:t0)
+                join j5() after
+                  let %21:t3 = IntGt(%19, %2)
+                  if %21
+                    jump j0(%19, %20)
+                  else
+                    jump j5()
+                jump j1(%20)
+              | 10.1 ->
+                jump j2()
+      let %6:t1 = IntAdd(%4, %2)
+      let %7:t0 = ctor 10.0(%6, %5)
+      drop %5
+      ret %7
+    ret %8
+  let %9:t0 = ctor 10.1()
+  ret %9
 
 fn main.main() -> :t0
   let %0:t0 = ctor 10.1()

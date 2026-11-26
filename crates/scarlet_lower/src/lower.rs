@@ -14,8 +14,11 @@
 //! ANF is built from the inside out. Recursing into a subexpression gives back
 //! the `LocalId` its value lands in, plus a list of nodes to put in front.
 //! [`Lower`] collects those in `spine`, and [`Lower::sealed`] folds them
-//! around what comes last once it's known. Each arm of an `If` or a `Match` is
+//! around what comes last once it's known. Each branch of an `If` or a `Switch` is
 //! sealed on its own, so no `Let` moves across a branch.
+//!
+//! What a `match` asks and in what order is [`crate::matching`]'s, and [`arms`]
+//! writes it.
 //!
 //! ## Where a value goes
 //!
@@ -33,19 +36,19 @@
 //! length or a `<<>>` walk's bit cursor, are pooled when the typed IR is made,
 //! so the pool is already final when `lower` runs.
 
-use std::collections::{BTreeSet, VecDeque};
-
 use super::spine::Frame;
 use super::{
-    Atom, Callee, ConstId, CoreBind, CoreExpr, CoreFn, CorePat, JoinId, Load, LocalId, PrimOp,
+    Atom, Callee, Const, ConstId, CoreBind, CoreExpr, CoreFn, JoinId, Load, LocalId, PrimOp,
 };
+use crate::matching::Allowance;
 use crate::program::{InternalLinkError, LinkError, Table};
 use crate::typed_ir::{
-    BindingId, PatRest, RTy, TempTys, TypedArm, TypedArrayElem, TypedBinPatSeg, TypedBinSeg,
-    TypedBind, TypedCallee, TypedExpr, TypedFn, TypedInterpPart, TypedPat, ValueRef, or_binds,
-    pat_binds,
+    BindingId, RTy, Shapes, TempTys, TypedArm, TypedArrayElem, TypedBinSeg, TypedBind, TypedCallee,
+    TypedExpr, TypedFn, TypedInterpPart, TypedPat, ValueRef, each_read,
 };
 use scarlet_ir::tivec::TiVec;
+
+mod arms;
 
 type R<T> = Result<T, LinkError>;
 
@@ -61,10 +64,24 @@ pub(crate) struct Lowered {
     pub locals: TiVec<LocalId, RTy>,
 }
 
+/// What a function's types and constants are, and how its matches are lowered.
+#[derive(Clone, Copy)]
+pub(crate) struct Around<'a> {
+    pub temps: TempTys,
+    pub shapes: &'a Shapes,
+    pub consts: &'a [Const],
+    pub allowance: Allowance,
+}
+
 /// Lower one function. Each param is bound under the [`BindingId`] its
 /// [`TypedBind`] carries.
-pub(crate) fn lower_fn(temps: TempTys, f: &TypedFn) -> R<Lowered> {
-    let mut lo = Lower::new(temps, f.binds);
+pub(crate) fn lower_fn(around: Around<'_>, f: &TypedFn) -> R<Lowered> {
+    let mut lo = Lower::new(around, f.binds);
+    each_read(&f.body, |b| {
+        if let Some(n) = lo.reads.get_mut(b.0) {
+            *n = n.saturating_add(1);
+        }
+    });
     let params: Vec<CoreBind> = f
         .params
         .iter()
@@ -94,141 +111,6 @@ enum Dest {
     Join(JoinId),
 }
 
-/// The body of an arm, for where its pattern has matched.
-#[derive(Clone, Copy)]
-enum ArmBody<'p> {
-    /// The pattern matches in one place, and the body goes there.
-    Here { body: &'p TypedExpr, dest: Dest },
-    /// It may match in several, and each jumps to the body with what it bound.
-    Shared(&'p SharedBody),
-}
-
-/// A join that is the body of an arm, and the names it takes.
-struct SharedBody {
-    id: JoinId,
-    binds: Vec<TypedBind>,
-}
-
-/// What [`Lower::nested_arm_body`] lowers once every remaining sub-pattern
-/// has been bound.
-#[derive(Clone)]
-enum ArmLeaf<'p> {
-    Body(ArmBody<'p>),
-    Guarded {
-        guard: &'p TypedExpr,
-        body: ArmBody<'p>,
-    },
-    /// Carry on reading a `<<>>` pattern's remaining segments. We get here
-    /// after the current segment's value pattern has bound its names, so those
-    /// bindings are in scope for the next segment's `size(...)` expression.
-    BinCont(Box<BinCont<'p>>),
-    /// An alternative of an or-pattern that binds names has matched. Carry on
-    /// with the sub-patterns queued after the or-pattern, then `leaf`. A failure
-    /// there tries the next alternative, because its bindings may pass a guard
-    /// this one's failed.
-    OrRest {
-        rest_nested: Vec<(LocalId, &'p TypedPat)>,
-        leaf: Box<ArmLeaf<'p>>,
-    },
-    /// An alternative of an or-pattern that binds nothing has matched. Jump to
-    /// the commit continuation, which is lowered once for all alternatives.
-    OrCommit(JoinId),
-}
-
-/// The paused state of a `<<>>` pattern walk. `segs` are the segments still
-/// to read, starting at bit offset `cursor` into `bin`, whose bit length is
-/// `total`. When `segs` runs out, the trailing `rest` or exact-length check
-/// runs, then `after` (any nested sub-patterns queued after the binary), and
-/// finally `then` (the arm body or guard).
-#[derive(Clone)]
-struct BinCont<'p> {
-    bin: LocalId,
-    total: LocalId,
-    cursor: LocalId,
-    /// The pooled `Int` `0` from the enclosing [`TypedPat::Bin`], so a `:utf8`
-    /// segment can test its decoded width without interning one.
-    zero: ConstId,
-    segs: &'p [TypedBinPatSeg],
-    rest: PatRest,
-    after: Vec<(LocalId, &'p TypedPat)>,
-    then: ArmLeaf<'p>,
-}
-
-/// The position of a `<<>>` walk at one segment boundary. The locals are
-/// bundled so [`Lower::bin_read`] can't take them, all of one type, in the
-/// wrong order.
-#[derive(Clone, Copy)]
-struct BinWalk {
-    bin: LocalId,
-    total: LocalId,
-    cursor: LocalId,
-    /// The Int constant 0.
-    zero: ConstId,
-}
-
-/// How wide a fixed-position `<<>>` segment read is. A `Sized` read gets the
-/// `end <= total` bounds check. A `Remainder` read is always `total - cursor`
-/// wide, so its check could never fail and is skipped.
-enum SegWidth<'p> {
-    /// The segment's size in bits, with the unit multiplier already folded in.
-    Sized(&'p TypedExpr),
-    /// A trailing `:binary` segment with no size, which takes the rest of the
-    /// binary.
-    Remainder,
-}
-
-/// A lowered piece of a pattern arm, with the joins of its pattern that it jumps
-/// to. A join no subtree jumps to is never declared, so an arm that can't fail
-/// stays on the flat path with no continuation.
-struct Tree {
-    expr: CoreExpr,
-    jumps: BTreeSet<JoinId>,
-}
-
-impl Tree {
-    /// A subtree that jumps to no such join.
-    fn leaf(expr: CoreExpr) -> Self {
-        Tree {
-            expr,
-            jumps: BTreeSet::new(),
-        }
-    }
-
-    /// A jump to `j` with `args`.
-    fn jump(j: JoinId, args: Vec<LocalId>) -> Self {
-        Tree {
-            expr: CoreExpr::Jump { to: j, args },
-            jumps: BTreeSet::from([j]),
-        }
-    }
-
-    /// The failure edge to `j`, which takes nothing.
-    fn fail(j: JoinId) -> Self {
-        Tree::jump(j, Vec::new())
-    }
-
-    fn jumps_to(&self, j: JoinId) -> bool {
-        self.jumps.contains(&j)
-    }
-
-    /// Declare `j` as `cont`, around this tree. `j`'s edges are all inside, so
-    /// it is jumped to from nowhere else.
-    fn with_cont(self, j: JoinId, params: Vec<CoreBind>, cont: Tree) -> Tree {
-        let mut jumps = self.jumps;
-        jumps.remove(&j);
-        jumps.extend(cont.jumps);
-        Tree {
-            expr: CoreExpr::Join {
-                id: j,
-                params,
-                cont: Box::new(cont.expr),
-                body: Box::new(self.expr),
-            },
-            jumps,
-        }
-    }
-}
-
 /// Whether a [`Lower::expr_tail`] walk is on the function's outermost
 /// `Let`/`Seq` spine or a nested one. Only bindings on the outermost spine own
 /// frame slots (see [`Lower::let_bind_at`]). [`lower_fn`] passes `Outer`, and
@@ -239,16 +121,24 @@ enum SpinePos {
     Nested,
 }
 
-struct Lower {
-    temps: TempTys,
+/// What was going on around a segment.
+struct Outer {
+    spine: Vec<Frame>,
+    undo: Vec<(BindingId, Option<LocalId>)>,
+}
+
+struct Lower<'a> {
+    around: Around<'a>,
+    /// How many times the function reads each binding.
+    reads: Vec<u32>,
     /// The [`RTy`] of every minted [`LocalId`].
     tys: TiVec<LocalId, RTy>,
     /// Maps `BindingId → LocalId`, densely over `TypedFn::binds`. Different
     /// source bindings have different `BindingId`s, so nothing is shadowed.
     binds: Vec<Option<LocalId>>,
-    /// What each binding in the current scope replaced, newest last. A scope
-    /// ([`Self::scoped`]) puts these back when it ends, so a binding made in
-    /// one arm or alternative can't be read from the next.
+    /// What each binding in the current scope replaced, newest last. A segment
+    /// puts these back when it ends ([`Self::leave`]), so a binding made in one
+    /// arm or alternative can't be read from the next.
     undo: Vec<(BindingId, Option<LocalId>)>,
     /// The nodes emitted so far in the current straight-line segment.
     /// [`Self::sealed`] folds them around what the segment ends in.
@@ -257,10 +147,11 @@ struct Lower {
     joins: u32,
 }
 
-impl Lower {
-    fn new(temps: TempTys, binds: usize) -> Self {
+impl<'a> Lower<'a> {
+    fn new(around: Around<'a>, binds: usize) -> Self {
         Lower {
-            temps,
+            around,
+            reads: vec![0; binds],
             tys: TiVec::new(),
             binds: vec![None; binds],
             undo: Vec::new(),
@@ -329,16 +220,22 @@ impl Lower {
     /// Bind an already-pooled `Int` constant to a new local. The elaborator
     /// interned every integer a lowered body uses.
     fn int_const(&mut self, c: ConstId) -> R<LocalId> {
-        let int_t = self.temps.int;
+        let int_t = self.around.temps.int;
         self.let_(int_t, Atom::Const(c))
     }
 
-    /// Run `f` in a scope of its own. Every binding it makes is undone at the
-    /// end.
-    fn scoped<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
-        let outer = std::mem::take(&mut self.undo);
-        let r = f(self);
-        let inner = std::mem::replace(&mut self.undo, outer);
+    /// Start a new spine segment, in a scope of its own.
+    fn enter(&mut self) -> Outer {
+        Outer {
+            spine: std::mem::take(&mut self.spine),
+            undo: std::mem::take(&mut self.undo),
+        }
+    }
+
+    /// End the segment that [`Self::enter`] started, which gives what was pushed in
+    /// it. Every binding made in it is undone.
+    fn leave(&mut self, outer: Outer) -> Vec<Frame> {
+        let inner = std::mem::replace(&mut self.undo, outer.undo);
         // Each entry's slot was in range when it was bound, and the table
         // never shrinks.
         for (b, old) in inner.into_iter().rev() {
@@ -346,23 +243,16 @@ impl Lower {
                 *slot = old;
             }
         }
-        r
+        std::mem::replace(&mut self.spine, outer.spine)
     }
 
     /// Run `f` in a new spine segment and scope, then fold every node it
-    /// pushed around the tree it produced, innermost first.
-    fn sealed_tree(&mut self, f: impl FnOnce(&mut Self) -> R<Tree>) -> R<Tree> {
-        let outer = std::mem::take(&mut self.spine);
-        let tree = self.scoped(f);
-        let segment = std::mem::replace(&mut self.spine, outer);
-        let Tree { expr, jumps } = tree?;
-        let expr = Frame::wrap_all(segment, expr);
-        Ok(Tree { expr, jumps })
-    }
-
-    /// [`Self::sealed_tree`] for an expression that jumps nowhere.
+    /// pushed around what it produced, innermost first.
     fn sealed(&mut self, f: impl FnOnce(&mut Self) -> R<CoreExpr>) -> R<CoreExpr> {
-        Ok(self.sealed_tree(|lo| f(lo).map(Tree::leaf))?.expr)
+        let outer = self.enter();
+        let e = f(self);
+        let segment = self.leave(outer);
+        Ok(Frame::wrap_all(segment, e?))
     }
 
     /// Lower `e` as a tree of its own, such as a branch. It opens a new spine.
@@ -405,8 +295,9 @@ impl Lower {
                     if let Some(atom) = self.index_or(scrut, arms)? {
                         return self.end(atom, *ty, dest);
                     }
+                    let alone = self.read_once(scrut);
                     let scrut = self.operand(scrut)?;
-                    return self.match_arms(scrut, arms, dest);
+                    return arms::lower(self, scrut, alone, arms, dest);
                 }
                 TypedExpr::And { lhs, rhs, .. } => {
                     return self.short_circuit(lhs, rhs, true, dest);
@@ -701,7 +592,7 @@ impl Lower {
     ) -> R<CoreExpr> {
         let cond = self.operand(lhs)?;
         let other = Box::new(self.expr_as(rhs, dest)?);
-        let bool_t = self.temps.bool;
+        let bool_t = self.around.temps.bool;
         let known = self.sealed(|lo| lo.end(Atom::Bool(!and), bool_t, dest))?;
         let known = Box::new(known);
         let (then, els) = if and { (other, known) } else { (known, other) };
@@ -773,7 +664,7 @@ impl Lower {
     /// `"a${b}c"`. Literal pieces are already pooled, and expression pieces are
     /// turned into strings.
     fn interp(&mut self, parts: &[TypedInterpPart]) -> R<Atom> {
-        let str_t = self.temps.string;
+        let str_t = self.around.temps.string;
         let mut args = Vec::with_capacity(parts.len());
         for part in parts {
             let a = match part {
@@ -793,7 +684,7 @@ impl Lower {
 
     /// `<<..>>` in value position. Every segment evaluates to a `Binary`.
     fn bin_lit(&mut self, segs: &[TypedBinSeg]) -> R<Atom> {
-        let bin_t = self.temps.binary;
+        let bin_t = self.around.temps.binary;
         let mut out = Vec::with_capacity(segs.len());
         for seg in segs {
             let id = match seg {
@@ -870,589 +761,40 @@ impl Lower {
         Ok(Some(Atom::prim(PrimOp::ArrayIndexOr, vec![r, i, d])))
     }
 
-    /// Lower `arms` against an already-bound `scrut`.
-    ///
-    /// Arms are lowered front to back so locals are minted in source order, but
-    /// the tree is assembled back to front. Every failure edge of an arm jumps
-    /// to one join with no parameters that holds the remaining arms. So each arm
-    /// body is lowered once, however many edges carry on there.
-    ///
-    /// An arm with no failure edge is put at the front of the entry `Match`
-    /// instead, so a run of arms that can't fail keeps the flat shape of a
-    /// single `Match`. The innermost starting point is a `Match` with no arms,
-    /// which the VM loads as a stop for a value no arm matched.
-    fn match_arms(&mut self, scrut: LocalId, arms: &[TypedArm], dest: Dest) -> R<CoreExpr> {
-        let mut lowered = Vec::with_capacity(arms.len());
-        for arm in arms {
-            let fall = self.fresh_join()?;
-            let (pat, body) = self.scoped(|lo| lo.arm(scrut, arm, fall, dest))?;
-            lowered.push((pat, body, fall));
-        }
-
-        // The arms after this one, kept unassembled so an arm that can't fail
-        // can join the entry match's arms instead of adding another jump.
-        let assemble = |entry_arms: VecDeque<(CorePat, CoreExpr)>,
-                        wrap: Option<(JoinId, CoreExpr)>| {
-            let entry = CoreExpr::Match {
-                scrut,
-                arms: entry_arms.into(),
-            };
-            match wrap {
-                Some((id, cont)) => CoreExpr::Join {
-                    id,
-                    params: Vec::new(),
-                    cont: Box::new(cont),
-                    body: Box::new(entry),
-                },
-                None => entry,
-            }
-        };
-        let mut entry_arms: VecDeque<(CorePat, CoreExpr)> = VecDeque::new();
-        let mut wrap: Option<(JoinId, CoreExpr)> = None;
-        for (pat, body, fall) in lowered.into_iter().rev() {
-            if body.jumps_to(fall) {
-                // With live failure edges, seal everything below as this arm's
-                // continuation. A head that can fail to match also needs a
-                // wildcard arm that sends a miss to the same join.
-                let cont = assemble(entry_arms, wrap.take());
-                let head_refutable = matches!(pat, CorePat::Lit(_) | CorePat::Ctor { .. });
-                entry_arms = VecDeque::from([(pat, body.expr)]);
-                if head_refutable {
-                    entry_arms.push_back((CorePat::Wild, Tree::fail(fall).expr));
-                }
-                wrap = Some((fall, cont));
-            } else {
-                entry_arms.push_front((pat, body.expr));
-            }
-        }
-        Ok(assemble(entry_arms, wrap))
-    }
-
-    /// One arm of a match on `scrut`, whose failure edges jump to `fall`.
-    ///
-    /// When an or-pattern in it binds names, the pattern can match in several
-    /// places, and each has locals of its own for them. The body is then a join
-    /// that takes every name the pattern binds.
-    fn arm(
-        &mut self,
-        scrut: LocalId,
-        arm: &TypedArm,
-        fall: JoinId,
-        dest: Dest,
-    ) -> R<(CorePat, Tree)> {
-        let shared = if or_binds(&arm.pat) {
-            let binds = pat_binds(&arm.pat);
-            let id = self.fresh_join()?;
-            Some(SharedBody { id, binds })
-        } else {
-            None
-        };
-        let mut nested = Vec::new();
-        let pat = self.pattern(&arm.pat, scrut, &mut nested)?;
-        let body = match &shared {
-            Some(shared) => ArmBody::Shared(shared),
-            None => ArmBody::Here {
-                body: &arm.body,
-                dest,
-            },
-        };
-        let leaf = match &arm.guard {
-            None => ArmLeaf::Body(body),
-            Some(guard) => ArmLeaf::Guarded { guard, body },
-        };
-        let tree = self.nested_arm_body(nested.into(), leaf, fall)?;
-        let tree = match shared {
-            Some(SharedBody { id, binds }) if tree.jumps_to(id) => {
-                let mut params = Vec::with_capacity(binds.len());
-                let cont = self.sealed(|lo| {
-                    for b in &binds {
-                        let param = lo.fresh(b.ty)?;
-                        lo.bind(b.id, param)?;
-                        params.push(CoreBind::new(param, b.ty));
-                    }
-                    lo.expr_tail(&arm.body, dest, SpinePos::Nested)
-                })?;
-                tree.with_cont(id, params, Tree::leaf(cont))
-            }
-            Some(_) | None => tree,
-        };
-        Ok((pat, tree))
-    }
-
-    /// The body of an arm, where its pattern has matched and its guard held.
-    fn arm_body(&mut self, body: ArmBody<'_>) -> R<Tree> {
-        Ok(match body {
-            ArmBody::Here { body, dest } => {
-                Tree::leaf(self.expr_tail(body, dest, SpinePos::Nested)?)
-            }
-            ArmBody::Shared(SharedBody { id, binds }) => {
-                let args = binds.iter().map(|b| self.local(b.id)).collect::<R<_>>()?;
-                Tree::jump(*id, args)
-            }
-        })
-    }
-
-    /// Lower `p` to a flat [`CorePat`] head. Structure `CorePat` can't carry,
-    /// such as a compound `Ctor` field or a `Tuple` or `Array` pattern, is
-    /// bound to a new local and pushed to `nested`. [`Self::nested_arm_body`]
-    /// then flattens it into `Match` and `Let` nodes inside the arm body.
-    fn pattern<'p>(
-        &mut self,
-        p: &'p TypedPat,
-        scrut: LocalId,
-        nested: &mut Vec<(LocalId, &'p TypedPat)>,
-    ) -> R<CorePat> {
-        Ok(match p {
-            TypedPat::Wild { .. } => CorePat::Wild,
-            TypedPat::Bind(b) => {
-                let id = self.fresh(b.ty)?;
-                self.bind(b.id, id)?;
-                CorePat::Bind(CoreBind::new(id, b.ty))
-            }
-            TypedPat::Lit { value, .. } => CorePat::Lit(*value),
-            TypedPat::Ctor {
-                variant, fields, ..
-            } => {
-                // `fields` is exactly the variant's arity, so the payload binds
-                // line up with the declared fields.
-                let mut binds = Vec::with_capacity(fields.len());
-                for fp in fields {
-                    let id = self.fresh(fp.ty())?;
-                    // The wildcard is on purpose. Every compound pattern kind,
-                    // now or later, goes to the nested queue.
-                    #[allow(unknown_lints, wildcard_over_own_enum)]
-                    match fp {
-                        TypedPat::Wild { .. } => {}
-                        TypedPat::Bind(b) => self.bind(b.id, id)?,
-                        inner => nested.push((id, inner)),
-                    }
-                    binds.push(CoreBind::new(id, fp.ty()));
-                }
-                CorePat::Ctor {
-                    variant: *variant,
-                    fields: binds,
-                }
-            }
-            // No `CorePat` head discriminates these, so the arm always enters
-            // and the destructure happens in the body.
-            TypedPat::Tuple { .. }
-            | TypedPat::Array { .. }
-            | TypedPat::Bin { .. }
-            | TypedPat::Or { .. }
-            | TypedPat::Range { .. } => {
-                nested.push((scrut, p));
-                CorePat::Wild
-            }
-        })
-    }
-
-    /// `if cond { then } else { <fallthrough> }`. Every check in a pattern arm
-    /// that can fail lowers to this shape.
-    fn guard_if(&mut self, cond: LocalId, then: Tree, fall: JoinId) -> Tree {
-        let mut jumps = then.jumps;
-        jumps.insert(fall);
-        Tree {
-            expr: CoreExpr::If {
-                cond,
-                then: Box::new(then.expr),
-                els: Box::new(Tree::fail(fall).expr),
-            },
-            jumps,
-        }
-    }
-
-    /// Lower an or-pattern's alternatives the same way [`Self::match_arms`]
-    /// lowers arms. The failure edges of each alternative jump to a join that
-    /// tries the next one, and the last one falls to `outer`, so none is
-    /// lowered twice.
-    ///
-    /// With no bindings, what comes after is one shared join
-    /// ([`ArmLeaf::OrCommit`]), and a miss in it falls to `outer`: every
-    /// alternative would lead to the same miss. After an or-pattern that binds
-    /// names, the rest of the pattern and the guard are lowered once per
-    /// alternative ([`ArmLeaf::OrRest`]), and a miss there tries the next
-    /// alternative, as in Gleam and Rust. Only the arm's body is shared then
-    /// ([`ArmBody::Shared`]).
-    fn or_alternatives<'p>(
-        &mut self,
-        scrut: LocalId,
-        alts: &'p [TypedPat],
-        rest_nested: Vec<(LocalId, &'p TypedPat)>,
-        leaf: ArmLeaf<'p>,
-        outer: JoinId,
-    ) -> R<Tree> {
-        let commit = if alts.iter().any(|a| !pat_binds(a).is_empty()) {
-            None
-        } else {
-            Some(self.fresh_join()?)
-        };
-
-        // Each alternative that can fail, with the join its failures go to.
-        let mut chain: Vec<(JoinId, Tree)> = Vec::with_capacity(alts.len());
-        // The alternative the chain ends with. With none at all, nothing
-        // matches.
-        let mut last = Tree::fail(outer);
-        for (i, alt) in alts.iter().enumerate() {
-            let is_last = i.saturating_add(1) == alts.len();
-            let fall = if is_last { outer } else { self.fresh_join()? };
-            let alt_leaf = match commit {
-                Some(cj) => ArmLeaf::OrCommit(cj),
-                None => ArmLeaf::OrRest {
-                    rest_nested: rest_nested.clone(),
-                    leaf: Box::new(leaf.clone()),
-                },
-            };
-            let t = self.nested_arm_body(VecDeque::from([(scrut, alt)]), alt_leaf, fall)?;
-            // An alternative that can't fail ends the chain. Anything written
-            // after it can never be reached and is never lowered.
-            if !is_last && t.jumps_to(fall) {
-                chain.push((fall, t));
-            } else {
-                last = t;
-                break;
-            }
-        }
-
-        // Assemble back to front: each alternative's join holds the ones
-        // after it.
-        let cur = chain
-            .into_iter()
-            .rev()
-            .fold(last, |cur, (fall, t)| t.with_cont(fall, Vec::new(), cur));
-        Ok(match commit {
-            Some(cj) if cur.jumps_to(cj) => {
-                let cont = self.nested_arm_body(rest_nested.into(), leaf, outer)?;
-                cur.with_cont(cj, Vec::new(), cont)
-            }
-            Some(_) | None => cur,
-        })
-    }
-
-    /// Flatten `nested` sub-patterns into `Match` and `Let` nodes around the
-    /// arm's leaf. Structure that can't fail becomes `Let` field reads on the
-    /// current spine. Structure that can fail becomes an inner `Match` or `If`
-    /// whose failure edge is `fall`, so a nested miss carries on matching the
-    /// way the source says.
-    fn nested_arm_body<'p>(
-        &mut self,
-        nested: VecDeque<(LocalId, &'p TypedPat)>,
-        leaf: ArmLeaf<'p>,
-        fall: JoinId,
-    ) -> R<Tree> {
-        self.sealed_tree(|lo| lo.nested_walk(nested, leaf, fall))
-    }
-
-    /// The body of [`Self::nested_arm_body`], inside its segment.
-    fn nested_walk<'p>(
-        &mut self,
-        mut nested: VecDeque<(LocalId, &'p TypedPat)>,
-        leaf: ArmLeaf<'p>,
-        fall: JoinId,
-    ) -> R<Tree> {
+    /// Whether nothing else reads the value of `e`, as far as names say.
+    fn read_once(&self, mut e: &TypedExpr) -> bool {
         loop {
-            let Some((v, p)) = nested.pop_front() else {
-                return Ok(match leaf {
-                    ArmLeaf::Body(body) => self.arm_body(body)?,
-                    ArmLeaf::Guarded { guard, body } => {
-                        let cond = self.operand(guard)?;
-                        let then = self.sealed_tree(|lo| lo.arm_body(body))?;
-                        self.guard_if(cond, then, fall)
-                    }
-                    ArmLeaf::BinCont(bc) => self.bin_segments(*bc, fall)?,
-                    ArmLeaf::OrRest { rest_nested, leaf } => {
-                        self.nested_arm_body(rest_nested.into(), *leaf, fall)?
-                    }
-                    ArmLeaf::OrCommit(j) => Tree::fail(j),
-                });
-            };
-            match p {
-                TypedPat::Wild { .. } => {}
-                TypedPat::Bind(b) => self.bind(b.id, v)?,
-                TypedPat::Tuple { elems, .. } => {
-                    let mut tmp = Vec::with_capacity(elems.len());
-                    for (j, elem) in elems.iter().enumerate() {
-                        let ej = self.let_(
-                            elem.ty(),
-                            Atom::prim(PrimOp::TupleField(idx16(j)?), vec![v]),
-                        )?;
-                        tmp.push((ej, elem));
-                    }
-                    for r in tmp.into_iter().rev() {
-                        nested.push_front(r);
-                    }
-                }
-                TypedPat::Ctor { .. } | TypedPat::Lit { .. } => {
-                    let mut inner = Vec::new();
-                    let sub = self.pattern(p, v, &mut inner)?;
-                    for r in inner.into_iter().rev() {
-                        nested.push_front(r);
-                    }
-                    let body = self.nested_arm_body(nested, leaf, fall)?;
-                    let mut jumps = body.jumps;
-                    jumps.insert(fall);
-                    return Ok(Tree {
-                        expr: CoreExpr::Match {
-                            scrut: v,
-                            arms: vec![(sub, body.expr), (CorePat::Wild, Tree::fail(fall).expr)],
-                        },
-                        jumps,
-                    });
-                }
-                TypedPat::Array {
-                    elem_ty,
-                    len: len_c,
-                    prefix,
-                    rest,
+            match e {
+                TypedExpr::Let { body, .. } | TypedExpr::Seq { body, .. } => e = body,
+                TypedExpr::Var {
+                    place: ValueRef::Local(b),
                     ..
-                } => {
-                    let vty = self.bind_ty(v)?;
-                    let int_t = self.temps.int;
-                    let bool_t = self.temps.bool;
-                    let len = self.let_(int_t, Atom::prim(PrimOp::ArrayLen, vec![v]))?;
-                    let n = self.int_const(*len_c)?;
-                    let cmp = match rest {
-                        PatRest::None => PrimOp::IntEq,
-                        PatRest::Discard | PatRest::Bind(_) => PrimOp::IntGe,
-                    };
-                    let ok = self.let_(bool_t, Atom::prim(cmp, vec![len, n]))?;
-                    let then = self.sealed_tree(|lo| {
-                        let mut tmp = Vec::with_capacity(prefix.len());
-                        for (j, ep) in prefix.iter().enumerate() {
-                            let ej = lo.let_(
-                                *elem_ty,
-                                Atom::prim(PrimOp::ArrayElem(idx16(j)?), vec![v]),
-                            )?;
-                            tmp.push((ej, ep));
-                        }
-                        if let PatRest::Bind(b) = rest {
-                            let n2 = lo.int_const(*len_c)?;
-                            let tail = lo.let_(vty, Atom::prim(PrimOp::ArrayDrop, vec![v, n2]))?;
-                            lo.bind(b.id, tail)?;
-                        }
-                        for r in tmp.into_iter().rev() {
-                            nested.push_front(r);
-                        }
-                        lo.nested_arm_body(nested, leaf, fall)
-                    })?;
-                    return Ok(self.guard_if(ok, then, fall));
+                } => return self.reads.get(b.0) == Some(&1),
+                TypedExpr::Var {
+                    place: ValueRef::Global(_) | ValueRef::Capture(_) | ValueRef::SelfClosure,
+                    ..
                 }
-                TypedPat::Range { lo, hi, .. } => {
-                    let int_t = self.temps.int;
-                    let bool_t = self.temps.bool;
-                    let lo_c = self.let_(int_t, Atom::Const(*lo))?;
-                    let ge = self.let_(bool_t, Atom::prim(PrimOp::IntGe, vec![v, lo_c]))?;
-                    let then = self.sealed_tree(|lo| {
-                        let hi = lo.let_(int_t, Atom::Const(*hi))?;
-                        let lt = lo.let_(bool_t, Atom::prim(PrimOp::IntLt, vec![v, hi]))?;
-                        let inner = lo.nested_arm_body(nested, leaf, fall)?;
-                        Ok(lo.guard_if(lt, inner, fall))
-                    })?;
-                    return Ok(self.guard_if(ge, then, fall));
-                }
-                TypedPat::Or { alts, .. } => {
-                    let rest_nested: Vec<_> = nested.into_iter().collect();
-                    return self.or_alternatives(v, alts, rest_nested, leaf, fall);
-                }
-                TypedPat::Bin {
-                    zero, segs, rest, ..
-                } => {
-                    let int_t = self.temps.int;
-                    let total = self.let_(int_t, Atom::prim(PrimOp::BinaryBitSize, vec![v]))?;
-                    let cursor = self.int_const(*zero)?;
-                    let after: Vec<_> = nested.into_iter().collect();
-                    return self.bin_segments(
-                        BinCont {
-                            bin: v,
-                            total,
-                            cursor,
-                            zero: *zero,
-                            segs,
-                            rest: *rest,
-                            after,
-                            then: leaf,
-                        },
-                        fall,
-                    );
-                }
-            }
-        }
-    }
-
-    /// Lower one step of a `<<>>` pattern. Check the bounds, read, match the
-    /// segment's value pattern, then recurse through a `BinCont` leaf so those
-    /// bindings are in scope for the next segment's `size(...)`. When `segs` is
-    /// empty, emit the trailing `..rest` bind or exact-length check.
-    fn bin_segments<'p>(&mut self, bc: BinCont<'p>, fall: JoinId) -> R<Tree> {
-        self.sealed_tree(|lo| lo.bin_step(bc, fall))
-    }
-
-    /// The body of [`Self::bin_segments`], inside its segment.
-    fn bin_step<'p>(&mut self, bc: BinCont<'p>, fall: JoinId) -> R<Tree> {
-        let int_t = self.temps.int;
-        let bool_t = self.temps.bool;
-        let bin_ty = self.bind_ty(bc.bin)?;
-        let BinCont {
-            bin,
-            total,
-            cursor,
-            zero,
-            segs,
-            rest,
-            after,
-            then,
-        } = bc;
-
-        let Some((seg, tail_segs)) = segs.split_first() else {
-            return Ok(match rest {
-                PatRest::Bind(b) => {
-                    let rem = self.let_(int_t, Atom::prim(PrimOp::IntSub, vec![total, cursor]))?;
-                    let rv = self.let_(
-                        bin_ty,
-                        Atom::prim(PrimOp::BinaryView, vec![bin, cursor, rem]),
-                    )?;
-                    self.bind(b.id, rv)?;
-                    self.nested_arm_body(after.into(), then, fall)?
-                }
-                PatRest::Discard => self.nested_arm_body(after.into(), then, fall)?,
-                PatRest::None => {
-                    let ok = self.let_(bool_t, Atom::prim(PrimOp::IntEq, vec![cursor, total]))?;
-                    let body = self.nested_arm_body(after.into(), then, fall)?;
-                    self.guard_if(ok, body, fall)
-                }
-            });
-        };
-
-        let cont = |cursor: LocalId| BinCont {
-            bin,
-            total,
-            cursor,
-            zero,
-            segs: tail_segs,
-            rest,
-            after: after.clone(),
-            then: then.clone(),
-        };
-
-        Ok(match seg {
-            // A `<<'literal'>>` segment matches its UTF-8 bytes as a prefix.
-            TypedBinPatSeg::Utf8Literal { bytes, bits } => {
-                let pfx = self.let_(bin_ty, Atom::Const(*bytes))?;
-                let ok = self.let_(
-                    bool_t,
-                    Atom::prim(PrimOp::BinaryMatchPrefix, vec![bin, cursor, pfx]),
-                )?;
-                let then_e = self.sealed_tree(|lo| {
-                    let w = lo.int_const(*bits)?;
-                    let cur2 = lo.let_(int_t, Atom::prim(PrimOp::IntAdd, vec![cursor, w]))?;
-                    lo.bin_segments(cont(cur2), fall)
-                })?;
-                self.guard_if(ok, then_e, fall)
-            }
-            // A `:utf8` codepoint, whose width varies. `BinaryReadUtf8` gives back
-            // `(codepoint, nbits)`, where `nbits == 0` means decoding failed.
-            TypedBinPatSeg::Utf8 { value } => {
-                let pair_ty = self.temps.int_pair;
-                let pair = self.let_(
-                    pair_ty,
-                    Atom::prim(PrimOp::BinaryReadUtf8, vec![bin, cursor]),
-                )?;
-                let cp = self.let_(int_t, Atom::prim(PrimOp::TupleField(0), vec![pair]))?;
-                let nbits = self.let_(int_t, Atom::prim(PrimOp::TupleField(1), vec![pair]))?;
-                let z = self.int_const(zero)?;
-                let ok = self.let_(bool_t, Atom::prim(PrimOp::IntGt, vec![nbits, z]))?;
-                let then_e = self.sealed_tree(|lo| {
-                    let cur2 = lo.let_(int_t, Atom::prim(PrimOp::IntAdd, vec![cursor, nbits]))?;
-                    let leaf2 = ArmLeaf::BinCont(Box::new(cont(cur2)));
-                    lo.nested_arm_body(VecDeque::from([(cp, value)]), leaf2, fall)
-                })?;
-                self.guard_if(ok, then_e, fall)
-            }
-            // An Int or Binary segment, whose width is the size expression in
-            // bits. A `:binary` segment with no size takes the rest.
-            TypedBinPatSeg::Int { bits, value } => self.bin_read(
-                BinWalk {
-                    bin,
-                    total,
-                    cursor,
-                    zero,
-                },
-                SegWidth::Sized(bits),
-                PrimOp::BinaryReadInt,
-                int_t,
-                value,
-                cont,
-                fall,
-            )?,
-            TypedBinPatSeg::Binary { bits, value } => {
-                let width = match bits {
-                    Some(bits) => SegWidth::Sized(bits),
-                    None => SegWidth::Remainder,
-                };
-                self.bin_read(
-                    BinWalk {
-                        bin,
-                        total,
-                        cursor,
-                        zero,
-                    },
-                    width,
-                    PrimOp::BinaryView,
-                    bin_ty,
-                    value,
-                    cont,
-                    fall,
-                )?
-            }
-        })
-    }
-
-    /// The shared tail of a fixed-position `<<>>` segment. Lower the width,
-    /// checking the read's bounds as [`SegWidth`] says, read the value, then
-    /// match the segment's value pattern and carry on.
-    #[allow(clippy::too_many_arguments)]
-    fn bin_read<'p>(
-        &mut self,
-        walk: BinWalk,
-        width: SegWidth<'p>,
-        read_op: PrimOp,
-        val_ty: RTy,
-        value: &'p TypedPat,
-        cont: impl Fn(LocalId) -> BinCont<'p>,
-        fall: JoinId,
-    ) -> R<Tree> {
-        let int_t = self.temps.int;
-        let bool_t = self.temps.bool;
-        let BinWalk {
-            bin,
-            total,
-            cursor,
-            zero,
-        } = walk;
-        let read = |lo: &mut Self, width: LocalId, end: LocalId| -> R<Tree> {
-            lo.sealed_tree(|lo| {
-                let sv = lo.let_(val_ty, Atom::prim(read_op, vec![bin, cursor, width]))?;
-                let leaf2 = ArmLeaf::BinCont(Box::new(cont(end)));
-                lo.nested_arm_body(VecDeque::from([(sv, value)]), leaf2, fall)
-            })
-        };
-        match width {
-            // A negative width matches nothing, like a read past the end.
-            SegWidth::Sized(bits) => {
-                let width = self.operand(bits)?;
-                let none = self.int_const(zero)?;
-                let sized = self.let_(bool_t, Atom::prim(PrimOp::IntGe, vec![width, none]))?;
-                let fits = self.sealed_tree(|lo| {
-                    let end = lo.let_(int_t, Atom::prim(PrimOp::IntAdd, vec![cursor, width]))?;
-                    let ok = lo.let_(bool_t, Atom::prim(PrimOp::IntLe, vec![end, total]))?;
-                    let then_e = read(lo, width, end)?;
-                    Ok(lo.guard_if(ok, then_e, fall))
-                })?;
-                Ok(self.guard_if(sized, fits, fall))
-            }
-            SegWidth::Remainder => {
-                let width = self.let_(int_t, Atom::prim(PrimOp::IntSub, vec![total, cursor]))?;
-                let end = self.let_(int_t, Atom::prim(PrimOp::IntAdd, vec![cursor, width]))?;
-                read(self, width, end)
+                | TypedExpr::Const { .. }
+                | TypedExpr::Nil { .. }
+                | TypedExpr::Binary { .. }
+                | TypedExpr::Unary { .. }
+                | TypedExpr::And { .. }
+                | TypedExpr::Or { .. }
+                | TypedExpr::Tuple { .. }
+                | TypedExpr::TupleIndex { .. }
+                | TypedExpr::Field { .. }
+                | TypedExpr::Ctor { .. }
+                | TypedExpr::Update { .. }
+                | TypedExpr::Array { .. }
+                | TypedExpr::Index { .. }
+                | TypedExpr::Slice { .. }
+                | TypedExpr::Range { .. }
+                | TypedExpr::Interp { .. }
+                | TypedExpr::BinLit { .. }
+                | TypedExpr::Closure { .. }
+                | TypedExpr::Call { .. }
+                | TypedExpr::If { .. }
+                | TypedExpr::Match { .. } => return true,
             }
         }
     }

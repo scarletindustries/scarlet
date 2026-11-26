@@ -4,11 +4,11 @@
 //! of values 0 and 1 into 2, and a value no local holds gets a number of its
 //! own above them.
 //!
-//! A `match` becomes one test per arm, in order. Each test jumps to the next
-//! arm's test when the value does not fit the arm's pattern. Otherwise it
-//! falls into the arm, which reads out the fields the pattern binds. A join's
-//! continuation is placed after its body, and a jump to it is a `Move` for each
-//! parameter and a `Jump`. So every jump goes forward.
+//! A `switch` with two outcomes becomes a test that jumps to the second, and one
+//! with more becomes a jump by a table when that is not much longer than the cases
+//! are many. Otherwise it is a test for each value, in order. A join's continuation
+//! is placed after its body, and a jump to it is a `Move` for each parameter and a
+//! `Jump`. So every jump goes forward.
 //!
 //! A call names its callee in one of three ways. A function known when the
 //! program loads is called by name, and that has an instruction for each number
@@ -21,11 +21,12 @@
 //! instruction: what it takes to make it depends on where its arguments are
 //! ([`super::moves`]).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
+use scarlet_ir::TypeId;
 use scarlet_ir::core_ir::{
-    Atom, Callee, Const, CoreBind, CoreExpr, CoreFn, CorePat, FuncIdx, JoinId, Load, LocalId,
-    MAX_PARAMS, PrimOp, VariantRef,
+    Arms, Atom, Callee, Cases, Const, ConstId, CoreBind, CoreExpr, CoreFn, FloatKey, FuncIdx,
+    JoinId, Load, LocalId, MAX_PARAMS, PrimOp, VariantRef,
 };
 use scarlet_ir::intrinsic::Intrinsic;
 use scarlet_ir::rty::{ForeignRTy, Prim, RTy, Repr, ResolvedPool};
@@ -33,9 +34,9 @@ use scarlet_ir::tivec::Idx;
 
 use super::forms::{CtorOf, Form};
 use super::ins::{
-    Arg, ArgList, Args, Assign, AssignList, BitsOp, Dead, Dst, DstList, Hit, Ins, Label, LastReg,
-    Lists, LookList, Looks, Makes, MaybeDst, Newline, OwnEntry, OwnRoom, Role, Sets, ShareList,
-    Shared, Shares, Src, Taken, VReg,
+    Arg, ArgList, Args, Assign, AssignList, BitsOp, Dead, Dst, DstList, Hit, Ins, IntTable, Label,
+    LastReg, Lists, LookList, Looks, Makes, MaybeDst, Newline, OwnEntry, OwnRoom, PlaceList, Role,
+    Sets, ShareList, Shared, Shares, Src, Table, Taken, VReg,
 };
 use super::{ReadsClosure, Source, Tables, Unfit, Why, add, built};
 use crate::heap::{Ctor, Layout};
@@ -81,11 +82,11 @@ impl Step {
         }
     }
 
-    /// [`Ins::target`].
-    pub(super) fn target(&self) -> Option<Label> {
+    /// [`Ins::targets`].
+    pub(super) fn targets(&self, lists: &Lists<VReg>, f: &mut impl FnMut(Label)) {
         match self {
-            Step::Ins(ins) => ins.target(),
-            Step::TailCall { .. } => None,
+            Step::Ins(ins) => ins.targets(lists, f),
+            Step::TailCall { .. } => {}
         }
     }
 }
@@ -99,6 +100,9 @@ pub(super) struct Draft {
     /// One past the highest value the function names.
     pub(super) values: u32,
     pub(super) params: Vec<VReg>,
+    /// Each label that only a switch jumps to, and only for constructors with no
+    /// fields, with the value it is on. That holds no cell there.
+    pub(super) words: Vec<(Label, VReg)>,
     /// What each value may be by its type, by the value's number. A number
     /// that no value has says nothing.
     pub(super) kinds: Vec<Option<Makes>>,
@@ -129,6 +133,7 @@ pub(super) fn translate<'c>(
         labels: Vec::new(),
         landed: None,
         joins: HashMap::new(),
+        words: Vec::new(),
         values,
         kinds,
         closure: survey.closure,
@@ -143,6 +148,7 @@ pub(super) fn translate<'c>(
         labels: labels.ok_or(Unfit::Broken(Broken::NoPlace))?,
         values: t.values,
         params: core.params.iter().map(|p| of(p.id)).collect(),
+        words: t.words,
         kinds: t.kinds,
         closure: t.closure,
     })
@@ -183,6 +189,8 @@ struct Translator<'c> {
     landed: Option<usize>,
     /// The joins in scope, for the jumps to them.
     joins: HashMap<JoinId, Join<'c>>,
+    /// [`Draft::words`].
+    words: Vec<(Label, VReg)>,
     /// One past the highest value the function names. A value that no local
     /// holds gets a number from here.
     values: u32,
@@ -264,14 +272,14 @@ impl<'c> Translator<'c> {
         self.landed = Some(here);
     }
 
-    fn value(&mut self) -> Result<VReg, Unfit> {
+    /// A value that no local holds, which may be what `kind` says.
+    fn value(&mut self, kind: Makes) -> Result<VReg, Unfit> {
         let v = VReg(self.values);
         self.values = self
             .values
             .checked_add(1)
             .ok_or(Unfit::TooMany(Limit::Values))?;
-        // It has no type.
-        self.kinds.push(Some(Makes::Any));
+        self.kinds.push(Some(kind));
         Ok(v)
     }
 
@@ -495,7 +503,7 @@ impl<'c> Translator<'c> {
                     let lookup = Lookup {
                         map: src(*m),
                         key: src(*k),
-                        result: bind.id,
+                        result: *bind,
                         drops: head(body).drops,
                     };
                     e = self.find(&lookup, arms)?;
@@ -568,13 +576,41 @@ impl<'c> Translator<'c> {
                     self.place(to);
                     e = els;
                 }
-                CoreExpr::Match { scrut, arms } => {
-                    for (pat, arm) in arms {
-                        let next = self.label()?;
-                        let arm = self.pattern(*scrut, pat, arm, next)?;
-                        self.expr(arm)?;
-                        self.place(next);
-                    }
+                CoreExpr::Open {
+                    cell,
+                    variant,
+                    fields,
+                    body,
+                } => {
+                    self.open(*cell, *variant, fields)?;
+                    e = body;
+                }
+                CoreExpr::Switch {
+                    scrut,
+                    cases,
+                    default,
+                } => {
+                    let default = default.as_deref();
+                    e = match cases {
+                        Cases::Variant { ty, arms } => {
+                            once_each(arms)?;
+                            self.by_variant(*scrut, *ty, arms, default)?
+                        }
+                        Cases::Int(arms) => {
+                            let numbers = once_each(arms)?;
+                            self.by_int(*scrut, arms, &numbers, default)?
+                        }
+                        Cases::Float(arms) => {
+                            once_each(arms)?;
+                            self.each_test(*scrut, arms, default, &mut Self::is_float)?
+                        }
+                        Cases::Text(arms) => {
+                            once_each(arms)?;
+                            self.each_test(*scrut, arms, default, &mut Self::is_text)?
+                        }
+                    };
+                }
+                CoreExpr::NoArm => {
                     let no_arm = self.broken(Broken::NoArm)?;
                     self.push(no_arm);
                     return Ok(());
@@ -631,139 +667,32 @@ impl<'c> Translator<'c> {
         self.push(Ins::Drop { reg });
     }
 
-    /// Test `scrut` against `pat`, jumping to `to` when it does not fit, and
-    /// read out what the pattern binds when it does. Gives what is left of
-    /// `arm`, which runs next.
-    fn pattern<'e>(
+    /// Take the `variant` in `cell` apart, each of `fields` to its local. Any other
+    /// field goes nowhere.
+    fn open(
         &mut self,
-        scrut: LocalId,
-        pat: &CorePat,
-        arm: &'e CoreExpr,
-        to: Label,
-    ) -> Result<&'e CoreExpr, Unfit> {
-        match pat {
-            CorePat::Wild => {}
-            CorePat::Bind(b) => self.push(Ins::Move {
-                dst: Dst(of(b.id)),
-                src: Arg::shared(of(scrut)),
-            }),
-            CorePat::Ctor { variant, fields } => {
-                let form = self.source.forms.of(*variant, fields.len())?;
-                self.push(Ins::JumpUnlessTag {
-                    src: src(scrut),
-                    tag: form.tag(),
-                    to,
-                });
-                if let Form::Fields { ctor, .. } = form
-                    && let Some(opened) = self.opened(scrut, fields, arm)
-                {
-                    self.give_up_all(&opened.before);
-                    self.open(scrut, ctor, &opened.dsts)?;
-                    self.give_up_all(&opened.after);
-                    return Ok(opened.rest);
-                }
-                for (i, f) in fields.iter().enumerate() {
-                    let index = u16::try_from(i).map_err(|_| Missing::TooManyFields)?;
-                    self.push(Ins::Field {
-                        dst: Dst(of(f.id)),
-                        src: src(scrut),
-                        index,
-                    });
-                }
-            }
-            CorePat::Lit(c) => {
-                let src = src(scrut);
-                let test = match self.source.program.consts.get(c.index()) {
-                    Some(Const::Int(n)) => Ins::JumpUnlessInt { src, n: *n, to },
-                    Some(Const::String(text)) => {
-                        let text = self.tables.text(text.as_bytes())?;
-                        Ins::JumpUnlessStr { src, text, to }
-                    }
-                    Some(Const::Float(x)) => Ins::JumpUnlessFloat { src, x: *x, to },
-                    Some(Const::Binary { bytes, bit_len }) => {
-                        let bits = self.tables.binary(bytes, *bit_len)?;
-                        Ins::JumpUnlessBinary { src, bits, to }
-                    }
-                    None => return Err(Missing::NoConst(c.index()).into()),
-                };
-                self.push(test);
-            }
+        cell: LocalId,
+        variant: VariantRef,
+        fields: &[(u16, CoreBind)],
+    ) -> Result<(), Unfit> {
+        let odd = || Unfit::Broken(Broken::OpenFields(variant));
+        let Form::Fields { ctor, fields: n } = self.source.forms.get(variant)? else {
+            return Err(odd());
+        };
+        if fields.is_empty() || !fields.is_sorted_by(|(a, _), (b, _)| a < b) {
+            return Err(odd());
         }
-        Ok(arm)
-    }
-
-    /// What an arm begins with when it begins by giving up its scrutinee, a
-    /// constructor whose fields the pattern binds to `fields`.
-    ///
-    /// Perceus puts what an arm has no use for at its start, so an arm that
-    /// does not need the value it matched begins with a run of drops and the
-    /// value's is one of them. The cell can then be taken apart there
-    /// ([`Ins::Open`]), where otherwise each field is read out with a reference
-    /// of its own and the cell is freed after. Nothing jumps into the run,
-    /// because a jump only goes to the start of a continuation. A drop in
-    /// front of the value's stays in front, so it may be of no field. A field
-    /// that is dropped after it and read nowhere else is one nothing reads.
-    fn opened<'e>(
-        &self,
-        scrut: LocalId,
-        fields: &[CoreBind],
-        arm: &'e CoreExpr,
-    ) -> Option<Opened<'e>> {
-        let (mut before, mut after) = (Vec::new(), Vec::new());
-        let mut found = false;
-        let Head { drops, rest } = head(arm);
-        for local in drops {
-            if local == scrut {
-                found = true;
-            } else if found {
-                after.push(local);
-            } else {
-                before.push(local);
-            }
+        let mut dsts = vec![MaybeDst::new(None); n];
+        for (field, bind) in fields {
+            let dst = dsts.get_mut(usize::from(*field)).ok_or_else(odd)?;
+            *dst = MaybeDst::new(Some(of(bind.id)));
         }
-        let in_front: HashSet<LocalId> = before.iter().copied().collect();
-        if !found
-            || fields
-                .iter()
-                .any(|f| f.id == scrut || in_front.contains(&f.id))
-        {
-            return None;
-        }
-        let dropped: HashSet<LocalId> = after.iter().copied().collect();
-        let mut unread = HashSet::new();
-        let mut dsts = Vec::with_capacity(fields.len());
-        for f in fields {
-            let read = match self.reads.get(&f.id) {
-                None => false,
-                Some(times) => *times > 1 || !dropped.contains(&f.id),
-            };
-            if !read {
-                unread.insert(f.id);
-            }
-            dsts.push(MaybeDst::new(read.then(|| of(f.id))));
-        }
-        after.retain(|l| !unread.contains(l));
-        Some(Opened {
-            before,
-            dsts,
-            after,
-            rest,
-        })
-    }
-
-    /// Take the `ctor` in `scrut` apart, each field to its place in `dsts`. One
-    /// with nothing to keep is only given up.
-    fn open(&mut self, scrut: LocalId, ctor: Ctor, dsts: &[MaybeDst<VReg>]) -> Result<(), Unfit> {
-        if dsts.iter().all(|dst| dst.dst().is_none()) {
-            self.give_up(scrut);
-            return Ok(());
-        }
-        let src = Taken(of(scrut));
+        let src = Taken(of(cell));
         // The form with as many fields.
         macro_rules! one_of {
             ($($name:ident)*) => {
                 None$(.or_else(|| {
-                    let dsts = dsts.try_into().ok()?;
+                    let dsts = dsts.as_slice().try_into().ok()?;
                     Some(Ins::$name { dsts, src, ctor })
                 }))*
             };
@@ -778,6 +707,310 @@ impl<'c> Translator<'c> {
         };
         self.push(open);
         Ok(())
+    }
+
+    /// Write each of `arms` but the last of them all, which it gives back, with a label
+    /// in front of each.
+    fn arms(&mut self, mut arms: Vec<(Label, &'c CoreExpr)>) -> Result<&'c CoreExpr, Unfit> {
+        let Some((to, last)) = arms.pop() else {
+            return Ok(&CoreExpr::NoArm);
+        };
+        for (to, arm) in arms {
+            self.place(to);
+            self.expr(arm)?;
+        }
+        self.place(to);
+        Ok(last)
+    }
+
+    /// Go on by which variant of `ty` `scrut` is. Gives the arm that is written last.
+    fn by_variant(
+        &mut self,
+        scrut: LocalId,
+        ty: TypeId,
+        arms: &'c Arms<u16>,
+        default: Option<&'c CoreExpr>,
+    ) -> Result<&'c CoreExpr, Unfit> {
+        let source = self.source;
+        let variant = |v| VariantRef {
+            type_id: ty,
+            variant_idx: v,
+        };
+        // Which arm each variant has, of those that a case names.
+        let mut arm_of: HashMap<u16, usize> = HashMap::new();
+        let mut outcomes: Vec<Outcome<'c>> = Vec::with_capacity(arms.len().saturating_add(1));
+        let mut with_fields = 0usize;
+        for (i, (variants, e)) in arms.iter().enumerate() {
+            let mut plain = true;
+            for v in variants {
+                let has_fields = match source.forms.get(variant(*v))? {
+                    Form::Plain(_) => false,
+                    Form::Fields { .. } => true,
+                };
+                plain &= !has_fields;
+                with_fields = with_fields.saturating_add(usize::from(has_fields));
+                arm_of.insert(*v, i);
+            }
+            let only = match variants.as_slice() {
+                [v] => Some(*v),
+                _ => None,
+            };
+            outcomes.push(Outcome { e, plain, only });
+        }
+        let (len, named) = match source.forms.all(ty) {
+            Some(all) => (all.len(), arm_of.len()),
+            None => (0, 0),
+        };
+        if named < len {
+            let mut left = (0..=u16::MAX).filter(|v| !arm_of.contains_key(v));
+            let only = match len.saturating_sub(named) {
+                1 => left.next(),
+                _ => None,
+            };
+            let plain = source.forms.all(ty);
+            outcomes.push(Outcome {
+                e: default.unwrap_or(&CoreExpr::NoArm),
+                plain: plain.is_some_and(|all| all.with_fields() == with_fields),
+                only,
+            });
+        }
+        if let [one] = outcomes.as_slice() {
+            return Ok(one.e);
+        }
+        if outcomes.is_empty() {
+            return Ok(default.unwrap_or(&CoreExpr::NoArm));
+        }
+        if let [a, b] = outcomes.as_slice() {
+            // The one that a test can be for goes first.
+            let tested = a.only.map(|v| (v, a, b));
+            if let Some((v, yes, no)) = tested.or(b.only.map(|v| (v, b, a))) {
+                let to = self.test_variant(scrut, ty, v)?;
+                self.expr(yes.e)?;
+                self.place(to);
+                if no.plain {
+                    self.words.push((to, of(scrut)));
+                }
+                return Ok(no.e);
+            }
+        }
+        let dense = named.saturating_mul(TABLE_FILL).saturating_add(TABLE_ANY);
+        if len <= dense
+            && let Some(last) = len.checked_sub(1)
+            && let Ok(last) = u16::try_from(last)
+        {
+            let mut all = Vec::with_capacity(outcomes.len());
+            for outcome in &outcomes {
+                let to = self.label()?;
+                if outcome.plain {
+                    self.words.push((to, of(scrut)));
+                }
+                all.push((to, outcome.e));
+            }
+            let first = u32::try_from(self.lists.tables.len()).map_err(|_| Unfit::TooLong)?;
+            for v in 0..=last {
+                let arm = arm_of.get(&v).copied().unwrap_or(arms.len());
+                let to = all.get(arm).map(|(to, _)| *to);
+                self.lists.tables.push(to.ok_or(Broken::NoPlace)?);
+            }
+            let (src, table) = (src(scrut), Table { first, last });
+            self.push(Ins::Switch { src, table });
+            return self.arms(all);
+        }
+        self.each_test(scrut, arms, default, &mut |t, scrut, v| {
+            t.test_variant(scrut, ty, *v)
+        })
+    }
+
+    /// A test of whether `scrut` is variant `v` of `ty`, and the label that it jumps to
+    /// when it is not.
+    fn test_variant(&mut self, scrut: LocalId, ty: TypeId, v: u16) -> Result<Label, Unfit> {
+        let form = self.source.forms.get(VariantRef {
+            type_id: ty,
+            variant_idx: v,
+        })?;
+        let to = self.label()?;
+        self.push(Ins::JumpUnlessTag {
+            src: src(scrut),
+            tag: form.tag(),
+            to,
+        });
+        Ok(to)
+    }
+
+    /// Go on by the Int in `scrut`, where `numbers` are those that `arms` name, in
+    /// order. Gives the arm that is written last.
+    fn by_int(
+        &mut self,
+        scrut: LocalId,
+        arms: &'c Arms<i64>,
+        numbers: &[i64],
+        default: Option<&'c CoreExpr>,
+    ) -> Result<&'c CoreExpr, Unfit> {
+        // Those near each other are found by a table.
+        let run = numbers.get(near(numbers)).unwrap_or_default();
+        let run = match run {
+            [first, .., last] if run.len() > FEW_INTS => {
+                let first = i32::try_from(*first).ok();
+                first.map(|first| (first, i64::from(first)..=*last, run.len()))
+            }
+            [] | [_] | [_, ..] => None,
+        };
+        let in_table = |n: &i64| run.as_ref().is_some_and(|(_, run, _)| run.contains(n));
+        let in_run = run.as_ref().map_or(0, |(_, _, len)| *len);
+        // The others are tested one by one when they are few.
+        let few = numbers.len().saturating_sub(in_run) <= FEW_FAR;
+        let mut arms = arms.as_slice();
+        // Those written in front of any in the table are tested in front of it. So an arm
+        // comes later than by a test of each only by what the table takes longer than the
+        // one test it stands for.
+        while few
+            && let [(keys, arm), rest @ ..] = arms
+            && !keys.iter().any(in_table)
+        {
+            self.tested(scrut, keys, arm, &mut Self::is_int)?;
+            arms = rest;
+        }
+        if arms.is_empty() {
+            return Ok(default.unwrap_or(&CoreExpr::NoArm));
+        }
+        let mut table: Vec<(i64, Label)> = Vec::with_capacity(in_run);
+        let mut far: Vec<(i64, Label)> = Vec::new();
+        // The label of each arm that is written behind them all.
+        let mut to: Vec<Option<Label>> = Vec::with_capacity(arms.len());
+        let mut left = Vec::with_capacity(arms.len().saturating_add(1));
+        for (keys, arm) in arms {
+            if few && !keys.iter().any(in_table) {
+                to.push(None);
+                continue;
+            }
+            let label = self.label()?;
+            for n in keys {
+                let into = if in_table(n) { &mut table } else { &mut far };
+                into.push((*n, label));
+            }
+            to.push(Some(label));
+            left.push((label, arm));
+        }
+        let other = self.label()?;
+        left.push((other, default.unwrap_or(&CoreExpr::NoArm)));
+        let any_far = arms.iter().any(|(keys, _)| !keys.iter().all(in_table));
+        if let Some((first, ..)) = run {
+            let past = if any_far { self.label()? } else { other };
+            table.sort_unstable_by_key(|(n, _)| *n);
+            let table = self.table(&table, first, past)?;
+            let (src, table) = (src(scrut), IntTable { table, first });
+            self.push(Ins::SwitchInt { src, table });
+            if any_far {
+                self.place(past);
+            }
+        }
+        if !few {
+            far.sort_unstable_by_key(|(n, _)| *n);
+            let places = add(&mut self.lists.places, far.into()).map(PlaceList)?;
+            let (src, to) = (src(scrut), other);
+            self.push(Ins::SwitchIntFar { src, places, to });
+            return self.arms(left);
+        }
+        for ((keys, arm), to) in arms.iter().zip(to) {
+            let Some(to) = to else {
+                self.tested(scrut, keys, arm, &mut Self::is_int)?;
+                continue;
+            };
+            for n in keys.iter().filter(|n| !in_table(n)) {
+                let next = self.is_int(scrut, n)?;
+                self.push(Ins::Jump { to });
+                self.place(next);
+            }
+        }
+        if any_far {
+            self.push(Ins::Jump { to: other });
+        }
+        self.arms(left)
+    }
+
+    /// A table of where each number from `first` on goes, with `past` for those that
+    /// `run` leaves out and for any other.
+    fn table(&mut self, run: &[(i64, Label)], first: i32, past: Label) -> Result<Table, Unfit> {
+        let start = u32::try_from(self.lists.tables.len()).map_err(|_| Unfit::TooLong)?;
+        let mut last = 0u16;
+        for (n, to) in run {
+            while i64::from(first).checked_add(i64::from(last)) != Some(*n) {
+                self.lists.tables.push(past);
+                last = last.checked_add(1).ok_or(Unfit::TooLong)?;
+            }
+            self.lists.tables.push(*to);
+            last = last.checked_add(1).ok_or(Unfit::TooLong)?;
+        }
+        self.lists.tables.push(past);
+        Ok(Table { first: start, last })
+    }
+
+    /// Go on by a test of `scrut` for each value that has an arm, in order. `test`
+    /// gives the label that a test jumps to when it fails.
+    fn each_test<K>(
+        &mut self,
+        scrut: LocalId,
+        arms: &'c Arms<K>,
+        default: Option<&'c CoreExpr>,
+        test: &mut impl FnMut(&mut Self, LocalId, &K) -> Result<Label, Unfit>,
+    ) -> Result<&'c CoreExpr, Unfit> {
+        for (keys, arm) in arms {
+            self.tested(scrut, keys, arm, test)?;
+        }
+        Ok(default.unwrap_or(&CoreExpr::NoArm))
+    }
+
+    /// A test of `scrut` for each of `keys`, and `arm` behind them, which they go to.
+    /// What is none of them comes to the next step.
+    fn tested<K>(
+        &mut self,
+        scrut: LocalId,
+        keys: &[K],
+        arm: &'c CoreExpr,
+        test: &mut impl FnMut(&mut Self, LocalId, &K) -> Result<Label, Unfit>,
+    ) -> Result<(), Unfit> {
+        let Some((last, others)) = keys.split_last() else {
+            return Ok(());
+        };
+        let here = self.label()?;
+        for key in others {
+            let next = test(self, scrut, key)?;
+            self.push(Ins::Jump { to: here });
+            self.place(next);
+        }
+        let next = test(self, scrut, last)?;
+        self.place(here);
+        self.expr(arm)?;
+        self.place(next);
+        Ok(())
+    }
+
+    fn is_int(&mut self, scrut: LocalId, n: &i64) -> Result<Label, Unfit> {
+        let to = self.label()?;
+        let (src, n) = (src(scrut), *n);
+        self.push(Ins::JumpUnlessInt { src, n, to });
+        Ok(to)
+    }
+
+    fn is_float(&mut self, scrut: LocalId, x: &FloatKey) -> Result<Label, Unfit> {
+        let to = self.label()?;
+        let (src, x) = (src(scrut), x.get());
+        self.push(Ins::JumpUnlessFloat { src, x, to });
+        Ok(to)
+    }
+
+    fn is_text(&mut self, scrut: LocalId, c: &ConstId) -> Result<Label, Unfit> {
+        let to = self.label()?;
+        let text = match self.source.program.consts.get(c.index()) {
+            Some(Const::String(text)) => text,
+            Some(Const::Int(_) | Const::Float(_) | Const::Binary { .. }) => {
+                return Err(Broken::TextCase(*c).into());
+            }
+            None => return Err(Missing::NoConst(c.index()).into()),
+        };
+        let (src, text) = (src(scrut), self.tables.text(text.as_bytes())?);
+        self.push(Ins::JumpUnlessStr { src, text, to });
+        Ok(to)
     }
 
     fn atom(&mut self, reg: VReg, atom: &Atom) -> Result<(), Unfit> {
@@ -871,7 +1104,7 @@ impl<'c> Translator<'c> {
                 args,
             } if let [xs, i, x] = args.as_slice() => {
                 let (miss, after) = (self.label()?, self.label()?);
-                let (made, nil) = (self.value()?, self.value()?);
+                let (made, nil) = (self.value(Makes::Any)?, self.value(Makes::Any)?);
                 self.array_set(made, [*xs, *i, *x], miss);
                 let abi = self.source.abi;
                 let ok = self.build(dst, abi.ok, [made])?;
@@ -1171,35 +1404,93 @@ impl<'c> Translator<'c> {
         }
     }
 
-    /// The arms of the match that what a lookup in a map gives goes straight into,
-    /// when nothing else reads that and the match takes `Some` apart into a plain
-    /// name. `looked` is what it gives and `e` what comes after the lookup. Then no
-    /// `Option` need be made. The match may give it up at the start of an arm.
+    /// The cases of the switch that what a lookup in a map gives goes straight into,
+    /// when nothing else reads that and the case for `Some` takes it apart or drops it.
+    /// Then no `Option` need be made. `looked` is what the lookup gives and `e` what
+    /// comes after it.
     fn only_matched<'e>(&self, looked: LocalId, e: &'e CoreExpr) -> Option<OptionArms<'e>> {
-        let CoreExpr::Match { scrut, arms } = head(e).rest else {
+        let CoreExpr::Switch {
+            scrut,
+            cases: Cases::Variant { ty, arms },
+            default,
+        } = head(e).rest
+        else {
             return None;
         };
-        let drops = arms.iter().flat_map(|(_, arm)| head(arm).drops);
-        let drops = drops.filter(|l| *l == looked).count();
-        let reads = self.reads.get(&looked).copied().unwrap_or(0);
-        let only = *scrut == looked && reads as usize == drops.saturating_add(1);
-        only.then(|| self.option_arms(arms)).flatten()
+        let abi = &self.source.program.abi;
+        let of = |v: VariantRef| {
+            let is = |(variants, _): &&(Vec<u16>, CoreExpr)| variants.contains(&v.variant_idx);
+            let arm = arms.iter().find(is).map(|(_, e)| e);
+            arm.or(default.as_deref())
+        };
+        if *scrut != looked || *ty != abi.some.type_id {
+            return None;
+        }
+        let (some, none) = (of(abi.some)?, of(abi.none)?);
+        if std::ptr::eq(some, none) {
+            return None;
+        }
+        let mut reads = 1usize;
+        for arm in [some, none] {
+            let drops = head(arm).drops.into_iter();
+            reads = reads.saturating_add(drops.filter(|l| *l == looked).count());
+        }
+        let mut value = None;
+        if let CoreExpr::Open { cell, fields, .. } = head(some).rest
+            && *cell == looked
+        {
+            let [(0, bind)] = fields.as_slice() else {
+                return None;
+            };
+            value = Some(bind.id);
+            reads = reads.saturating_add(1);
+        }
+        let all = self.reads.get(&looked).copied().unwrap_or(0);
+        (all as usize == reads).then_some(OptionArms { value, some, none })
     }
 
-    /// The lookup and the match on what it gives. Gives what is left of the arm
-    /// for a key that is not there, which runs next.
+    /// The lookup and the switch on what it gives. Gives what is left of the case for
+    /// a key that is not there, which runs next.
     fn find(&mut self, lookup: &Lookup, arms: OptionArms<'c>) -> Result<&'c CoreExpr, Unfit> {
         let to = self.label()?;
+        let (dst, drop) = match arms.value {
+            Some(value) => (of(value), false),
+            None => self.unread(lookup.result.ty)?,
+        };
         self.push(Ins::MapFind {
-            dst: Hit(of(arms.value)),
+            dst: Hit(dst),
             map: lookup.map,
             key: lookup.key,
             to,
         });
-        let found = self.after_find(lookup, arms.some);
+        let mut found = self.after_find(lookup, arms.some);
+        // The lookup has taken it apart.
+        if arms.value.is_some()
+            && let CoreExpr::Open { body, .. } = found
+        {
+            found = body;
+        }
+        if drop {
+            self.push(Ins::Drop { reg: Dead(dst) });
+        }
         self.expr(found)?;
         self.place(to);
         Ok(self.after_find(lookup, arms.none))
+    }
+
+    /// Where the value goes that a lookup finds and nothing reads, and whether it gets
+    /// a drop there. `option` is the type of what the lookup gives.
+    fn unread(&mut self, option: RTy) -> Result<(VReg, bool), Unfit> {
+        let pool = &self.source.program.pool;
+        let no_type = |_: ForeignRTy| Broken::NoType;
+        let (kind, drop) = match pool.con_arg(option, 0).map_err(no_type)? {
+            Some(ty) => (
+                kind_of(pool, ty).map_err(no_type)?,
+                pool.gets_drop(ty).map_err(no_type)?,
+            ),
+            None => (Makes::Any, true),
+        };
+        Ok((self.value(kind)?, drop))
     }
 
     /// What is left of `arm`, once what it starts by giving up is given up, and
@@ -1207,42 +1498,69 @@ impl<'c> Translator<'c> {
     fn after_find(&mut self, lookup: &Lookup, arm: &'c CoreExpr) -> &'c CoreExpr {
         let Head { drops, rest } = head(arm);
         for local in lookup.drops.iter().chain(&drops) {
-            if *local != lookup.result {
+            if *local != lookup.result.id {
                 self.give_up(*local);
             }
         }
         rest
     }
+}
 
-    /// The arms of a `match` on an `Option` that names both variants and binds
-    /// `Some`'s value to a plain name.
-    fn option_arms<'e>(&self, arms: &'e [(CorePat, CoreExpr)]) -> Option<OptionArms<'e>> {
-        let abi = &self.source.program.abi;
-        let [(a, x), (b, y)] = arms else {
-            return None;
-        };
-        let some = |p: &CorePat| match p {
-            CorePat::Ctor { variant, fields } if *variant == abi.some => match fields.as_slice() {
-                [v] => Some(v.id),
-                _ => None,
-            },
-            CorePat::Wild | CorePat::Bind(_) | CorePat::Lit(_) | CorePat::Ctor { .. } => None,
-        };
-        let none = |p: &CorePat| matches!(p, CorePat::Ctor { variant, fields } if *variant == abi.none && fields.is_empty());
-        match (some(a), some(b)) {
-            (Some(value), _) if none(b) => Some(OptionArms {
-                value,
-                some: x,
-                none: y,
-            }),
-            (_, Some(value)) if none(a) => Some(OptionArms {
-                value,
-                some: y,
-                none: x,
-            }),
-            _ => None,
+/// How many entries a table of variants may have for each one that has an arm, and
+/// how many in any case. A type may have thousands that no arm names.
+const TABLE_FILL: usize = 4;
+const TABLE_ANY: usize = 8;
+
+/// So few Ints that a test for each is no dearer than a table.
+const FEW_INTS: usize = 2;
+
+/// So few that are far from each other that a test for each is no dearer than to look
+/// for one among them.
+const FEW_FAR: usize = 8;
+
+/// Where in `numbers`, which are in order, the longest run is of those that are near
+/// each other. A table of them has a place for at least one entry in four, and for
+/// the rest of an instruction to name how long it is.
+fn near(numbers: &[i64]) -> std::ops::Range<usize> {
+    let (mut best, mut start) = (0..0, 0usize);
+    for (i, n) in numbers.iter().enumerate() {
+        let first = numbers.get(start).copied().unwrap_or(*n);
+        let len = i.saturating_sub(start).saturating_add(1);
+        let room = len.saturating_mul(TABLE_FILL).min(MAX_TABLE);
+        let room = i64::try_from(room).unwrap_or(i64::MAX);
+        if n.checked_sub(first).is_none_or(|span| span >= room) {
+            start = i;
+        }
+        let end = i.saturating_add(1);
+        if end.saturating_sub(start) > best.len() {
+            best = start..end;
         }
     }
+    best
+}
+
+/// Every value that `arms` name, in order, each of which has to be there once, and
+/// each arm has to be for one.
+fn once_each<K: Copy + Ord>(arms: &Arms<K>) -> Result<Vec<K>, Broken> {
+    let mut keys: Vec<K> = arms.iter().flat_map(|(keys, _)| keys).copied().collect();
+    keys.sort_unstable();
+    let empty = arms.iter().any(|(keys, _)| keys.is_empty());
+    match !empty && keys.is_sorted_by(|a, b| a < b) {
+        true => Ok(keys),
+        false => Err(Broken::Cases),
+    }
+}
+
+/// How many numbers a table is for at the most.
+const MAX_TABLE: usize = 60_000;
+
+/// One way a switch on a variant can go.
+struct Outcome<'c> {
+    e: &'c CoreExpr,
+    /// Whether it is for constructors with no fields.
+    plain: bool,
+    /// The one variant it is for, when there is one.
+    only: Option<u16>,
 }
 
 /// What a call calls.
@@ -1387,33 +1705,22 @@ fn giving_up(local: LocalId, e: &CoreExpr) -> Option<Head<'_>> {
     (drops.len() < all).then_some(Head { drops, rest })
 }
 
-/// What [`Translator::option_arms`] found.
+/// What [`Translator::only_matched`] found.
 struct OptionArms<'e> {
-    /// The name that `Some`'s value has.
-    value: LocalId,
+    /// The local that `Some`'s value goes to, when something reads it.
+    value: Option<LocalId>,
     some: &'e CoreExpr,
     none: &'e CoreExpr,
 }
 
-/// A lookup in a map that goes into the match on what it gives.
+/// A lookup in a map that goes into the switch on what it gives.
 struct Lookup {
     map: Src<VReg>,
     key: Src<VReg>,
     /// What it gives.
-    result: LocalId,
+    result: CoreBind,
     /// What is given up between the two.
     drops: Vec<LocalId>,
-}
-
-/// What [`Translator::opened`] found at the start of an arm.
-struct Opened<'e> {
-    /// What is given up before the scrutinee is.
-    before: Vec<LocalId>,
-    /// Where each field goes, when something reads it.
-    dsts: Vec<MaybeDst<VReg>>,
-    /// What is given up after the scrutinee.
-    after: Vec<LocalId>,
-    rest: &'e CoreExpr,
 }
 
 /// What a value of type `ty` may be.
@@ -1503,13 +1810,23 @@ fn survey(f: &CoreFn) -> Survey<'_> {
                 out.read(*local);
                 stack.push(body);
             }
-            CoreExpr::Match { scrut, arms } => {
-                out.read(*scrut);
-                for (pat, arm) in arms {
-                    pat.binds().for_each(|b| out.bind(b));
-                    stack.push(arm);
-                }
+            CoreExpr::Open {
+                cell, fields, body, ..
+            } => {
+                out.read(*cell);
+                fields.iter().for_each(|(_, b)| out.bind(b));
+                stack.push(body);
             }
+            CoreExpr::Switch {
+                scrut,
+                cases,
+                default,
+            } => {
+                out.read(*scrut);
+                stack.extend(cases.arms());
+                stack.extend(default.as_deref());
+            }
+            CoreExpr::NoArm => {}
             CoreExpr::If { cond, then, els } => {
                 out.read(*cond);
                 stack.push(then);

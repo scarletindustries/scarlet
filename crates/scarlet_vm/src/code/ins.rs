@@ -29,9 +29,9 @@ mod fields;
 
 pub(crate) use fields::{
     Arg, ArgList, Args, Assign, AssignList, BinaryId, BitsOp, BlockId, Dead, DeadList, Dst,
-    DstList, EntryPc, Hands, Hit, Last, Lists, LookList, Looks, MaybeDst, Names, Newline, Part, Pc,
-    Place, Places, Reg, Role, Room, Sets, ShareList, Shared, Shares, Src, Taken, TextId, Unplaced,
-    VReg, WhyId,
+    DstList, EntryPc, Hands, Hit, IntTable, Last, Lists, LookList, Looks, MaybeDst, Names, Newline,
+    Part, Pc, Place, PlaceList, Places, Reg, Role, Room, Sets, ShareList, Shared, Shares, Src,
+    Table, Taken, TextId, Unplaced, VReg, WhyId,
 };
 pub(super) use fields::{Callee, Label, LastReg, OwnEntry, OwnRoom};
 
@@ -111,11 +111,12 @@ macro_rules! instructions {
                 }
             }
 
-            /// Where the instruction may jump, if it may.
-            pub(crate) fn target(&self) -> Option<R::To> {
+            /// Call `f` with each place the instruction may continue at instead of
+            /// at the next one, as often as it is named.
+            pub(crate) fn targets(&self, lists: &Lists<R>, f: &mut impl FnMut(R::To)) {
                 match *self {
                     $(Ins::$name $({ $($field),* })? => {
-                        None$($(.or(Part::<R>::target($field)))*)?
+                        $($(Part::<R>::targets($field, lists, f);)*)?
                     })*
                 }
             }
@@ -272,8 +273,8 @@ instructions! {
     /// cell, and each field goes to its register with a reference of its own.
     /// When `src` held the only one, the fields' references move and the cell
     /// is freed, and a field that nothing reads, which has no register, is given
-    /// up. The constructor is `ctor`, as the [`Ins::JumpUnlessTag`] in front
-    /// found. One with a number at its end has that many fields.
+    /// up. The constructor is `ctor`, as the test in front found. One with a
+    /// number at its end has that many fields.
     Open1 { dsts: [MaybeDst<R>; 1], src: Taken<R>, ctor: Ctor },
     Open2 { dsts: [MaybeDst<R>; 2], src: Taken<R>, ctor: Ctor },
     Open3 { dsts: [MaybeDst<R>; 3], src: Taken<R>, ctor: Ctor },
@@ -364,6 +365,14 @@ instructions! {
     /// Continue at `to` unless the top half of the word in `src` is `tag`,
     /// which says which variant of its type the value is. No cell is looked at.
     JumpUnlessTag { src: Src<R>, tag: Tag, to: R::To },
+    /// Continue where `table` says for the variant of its type that `src` is. No
+    /// cell is looked at.
+    Switch { src: Src<R>, table: Table } => ends,
+    /// Continue where `table` says for the Int in `src`.
+    SwitchInt { src: Src<R>, table: IntTable } => ends,
+    /// Continue where `places` says for the Int in `src`, or at `to` for one that is
+    /// not there.
+    SwitchIntFar { src: Src<R>, places: PlaceList, to: R::To } => ends,
     /// Continue at `to` unless `src` is the Int `n`.
     JumpUnlessInt { src: Src<R>, n: i64, to: R::To },
     /// Continue at `to` unless `src` is the Float `x`, compared as `==` does,
@@ -371,8 +380,6 @@ instructions! {
     JumpUnlessFloat { src: Src<R>, x: f64, to: R::To },
     /// Continue at `to` unless `src` is the string `text`.
     JumpUnlessStr { src: Src<R>, text: TextId, to: R::To },
-    /// Continue at `to` unless `src` is the binary `bits`.
-    JumpUnlessBinary { src: Src<R>, bits: BinaryId, to: R::To },
     /// A new tuple holding `elements`. One with a number at its end has that
     /// many.
     Tuple2 { dst: Dst<R>, elements: [Shared<R>; 2] },
@@ -663,6 +670,7 @@ impl<R: Names> Ins<R> {
                     | Ins::Jump { .. }
                     | Ins::JumpIfFalse { .. }
                     | Ins::JumpUnlessTag { .. }
+                    | Ins::Switch { .. }
             )
     }
 }
