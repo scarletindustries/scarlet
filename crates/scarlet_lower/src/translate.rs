@@ -13,7 +13,8 @@ use scarlet_check::typed::{
     self as t, Arg, ArrayElem, BinOp, BinSeg, BinSegPat, BinUnit, Binder, BinderId, Block, Expr,
     ExprKind, FieldAt, InterpPart, OrShape, Pattern, PatternKind, Rest, Stmt, TypedModule, Var,
 };
-use scarlet_ir::core_ir::{CaptureIdx, Const, ConstId, PrimOp};
+use scarlet_ir::core_ir::{CaptureIdx, Const, ConstId, PrimOp, ProbeOp};
+use scarlet_ir::intrinsic::Intrinsic;
 use scarlet_ir::rty::{Prim, RTy, Repr, ResolvedPool};
 use scarlet_syntax::ast::UnaryOp;
 use scarlet_types::def::TypeDef;
@@ -24,7 +25,7 @@ use crate::program::{
     Ids, InternalLinkError, LinkError, Minted, Named, Prelude, Site, Symbols, Table,
 };
 use crate::typed_ir::{
-    BindingId, PatRest, TypedArm, TypedArrayElem, TypedBinPatSeg, TypedBinSeg, TypedBind,
+    BindingId, Gives, PatRest, TypedArm, TypedArrayElem, TypedBinPatSeg, TypedBinSeg, TypedBind,
     TypedCallee, TypedExpr, TypedFn, TypedInterpPart, TypedPat, ValueRef,
 };
 use crate::update;
@@ -168,6 +169,63 @@ fn by_index(fields: Vec<(usize, TypedExpr)>) -> R<Vec<(u16, TypedExpr)>> {
         .into_iter()
         .map(|(i, value)| Ok((index(i)?, value)))
         .collect()
+}
+
+/// A call of `intrinsic` that gives a `ty`.
+fn built_in(
+    pool: &ResolvedPool,
+    intrinsic: Intrinsic,
+    args: Vec<TypedExpr>,
+    ty: RTy,
+) -> R<TypedExpr> {
+    if intrinsic == Intrinsic::MapGet {
+        as_option(pool, ProbeOp::MapGet, args, ty)
+    } else if intrinsic == Intrinsic::ArraySet {
+        as_result(pool, ProbeOp::ArraySet, args, ty)
+    } else if intrinsic == Intrinsic::ArrayPut {
+        Ok(TypedExpr::Probe {
+            ty,
+            op: ProbeOp::ArraySet,
+            args,
+            found: ty,
+            gives: Gives::OrFirst,
+        })
+    } else {
+        Ok(TypedExpr::Call {
+            ty,
+            callee: TypedCallee::Builtin { intrinsic },
+            args,
+        })
+    }
+}
+
+/// `op` of `args`, as the `Option` that `ty` is.
+fn as_option(pool: &ResolvedPool, op: ProbeOp, args: Vec<TypedExpr>, ty: RTy) -> R<TypedExpr> {
+    Ok(TypedExpr::Probe {
+        ty,
+        op,
+        args,
+        found: arg_of(pool, op, ty, 0)?,
+        gives: Gives::Option,
+    })
+}
+
+/// `op` of `args`, as the `Result` that `ty` is.
+fn as_result(pool: &ResolvedPool, op: ProbeOp, args: Vec<TypedExpr>, ty: RTy) -> R<TypedExpr> {
+    let nil = arg_of(pool, op, ty, 1)?;
+    Ok(TypedExpr::Probe {
+        ty,
+        op,
+        args,
+        found: arg_of(pool, op, ty, 0)?,
+        gives: Gives::Result { nil },
+    })
+}
+
+/// Argument `i` of `ty`, which is the type of the value of `op`.
+fn arg_of(pool: &ResolvedPool, op: ProbeOp, ty: RTy, i: usize) -> R<RTy> {
+    let arg = pool.con_arg(ty, i).map_err(InternalLinkError::from)?;
+    Ok(arg.ok_or(InternalLinkError::ProbeType(op, ty))?)
 }
 
 /// Whether `e` is a name, or a field or tuple element read off one. Such an
@@ -432,17 +490,14 @@ impl Tx<'_, '_, '_, '_> {
                     })
                     .collect::<R<_>>()?,
             },
-            ExprKind::Index { array, index } => TypedExpr::Index {
-                ty,
-                recv: self.boxed(fx, array)?,
-                index: self.boxed(fx, index)?,
-            },
-            ExprKind::Slice { array, start, end } => TypedExpr::Slice {
-                ty,
-                recv: self.boxed(fx, array)?,
-                start: self.boxed(fx, start)?,
-                end: self.boxed(fx, end)?,
-            },
+            ExprKind::Index { array, index } => {
+                let args = self.exprs_of(fx, &[array, index])?;
+                as_option(self.pool(), ProbeOp::ArrayGet, args, ty)?
+            }
+            ExprKind::Slice { array, start, end } => {
+                let args = self.exprs_of(fx, &[array, start, end])?;
+                as_result(self.pool(), ProbeOp::ArraySlice, args, ty)?
+            }
             ExprKind::Range { start, end } => TypedExpr::Range {
                 ty,
                 start: self.boxed(fx, start)?,
@@ -546,24 +601,20 @@ impl Tx<'_, '_, '_, '_> {
             },
             Var::Builtin(intrinsic) => {
                 let intrinsic = *intrinsic;
-                self.eta(ty, &format!("{intrinsic:?}"), |params, ret| {
-                    TypedExpr::Call {
-                        ty: ret,
-                        callee: TypedCallee::Builtin { intrinsic },
-                        args: params,
-                    }
+                self.eta(ty, &format!("{intrinsic:?}"), |pool, params, ret| {
+                    built_in(pool, intrinsic, params, ret)
                 })?
             }
             Var::Ctor(ctor) => {
                 let variant = self.cx.ids.ctor_ref(&ctor.type_name, ctor.variant)?;
                 match self.final_ty(e.ty)? {
-                    Type::Fn { .. } => {
-                        self.eta(ty, "ctor", move |params, ret| TypedExpr::Ctor {
+                    Type::Fn { .. } => self.eta(ty, "ctor", move |_, params, ret| {
+                        Ok(TypedExpr::Ctor {
                             ty: ret,
                             variant,
                             args: params,
-                        })?
-                    }
+                        })
+                    })?,
                     Type::Named { .. } | Type::Tuple(_) | Type::Var(_) => TypedExpr::Ctor {
                         ty,
                         variant,
@@ -580,7 +631,7 @@ impl Tx<'_, '_, '_, '_> {
         &mut self,
         ty: RTy,
         name: &str,
-        body: impl FnOnce(Vec<TypedExpr>, RTy) -> TypedExpr,
+        body: impl FnOnce(&ResolvedPool, Vec<TypedExpr>, RTy) -> R<TypedExpr>,
     ) -> R<TypedExpr> {
         let params: Vec<RTy> = self
             .pool()
@@ -602,7 +653,7 @@ impl Tx<'_, '_, '_, '_> {
         let f = TypedFn {
             params: binds,
             ret,
-            body: body(args, ret),
+            body: body(self.pool(), args, ret)?,
             binds: fx.next,
         };
         let func_idx = self.cx.minted.push(Named {
@@ -615,6 +666,10 @@ impl Tx<'_, '_, '_, '_> {
             func_idx,
             captures: Vec::new(),
         })
+    }
+
+    fn exprs_of(&mut self, fx: &mut Fx, of: &[&Expr]) -> R<Vec<TypedExpr>> {
+        of.iter().map(|e| self.expr(fx, e)).collect()
     }
 
     fn lambda(&mut self, fx: &mut Fx, l: &t::Lambda, ty: RTy) -> R<TypedExpr> {
@@ -659,14 +714,16 @@ impl Tx<'_, '_, '_, '_> {
     }
 
     fn call(&mut self, fx: &mut Fx, callee: &Expr, args: &[Arg], ty: RTy) -> R<TypedExpr> {
+        if let ExprKind::Var(Var::Builtin(intrinsic)) = &callee.kind {
+            let (lets, args) = self.args_in_slot_order(fx, args)?;
+            let call = built_in(self.pool(), *intrinsic, args, ty)?;
+            return Ok(wrap(lets, call));
+        }
         let target = match &callee.kind {
             ExprKind::Var(Var::Fn(name)) if fx.self_fn.as_ref() == Some(name) => {
                 Some(TypedCallee::SelfRec)
             }
             ExprKind::Var(Var::Fn(name)) => Some(TypedCallee::Known(self.cx.symbols.func(name)?)),
-            ExprKind::Var(Var::Builtin(intrinsic)) => Some(TypedCallee::Builtin {
-                intrinsic: *intrinsic,
-            }),
             ExprKind::Var(Var::Local(b)) if fx.self_name == Some(*b) && !fx.own.contains_key(b) => {
                 Some(TypedCallee::SelfRec)
             }
@@ -1308,3 +1365,6 @@ fn specialize(op: BinOp, prim: Option<Prim>) -> PrimOp {
         (B::Ge, _) => PrimOp::Ge,
     }
 }
+
+#[cfg(test)]
+mod tests;

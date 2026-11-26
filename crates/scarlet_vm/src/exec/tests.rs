@@ -14,6 +14,7 @@ use scarlet_ir::core_ir::{FuncIdx, VariantRef};
 use scarlet_ir::intrinsic::Intrinsic;
 use scarlet_ir::tivec::TiVec;
 
+mod probes;
 mod update;
 
 /// The fields the loop reads at every turn come first, where one load reaches

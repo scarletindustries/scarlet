@@ -1,4 +1,4 @@
-use super::ins::{Label, MaybeDst, VReg};
+use super::ins::{Label, MaybeDst, MaybeHit, VReg};
 use super::translate::{Draft, Step, TailTo};
 use super::*;
 use crate::heap::{Ctor, Numbering};
@@ -115,6 +115,7 @@ pub(super) fn draft(
         words: Vec::new(),
         kinds: vec![Some(Makes::Any); values as usize],
         closure: ReadsClosure::Nothing,
+        misses: Vec::new(),
     }
 }
 
@@ -154,6 +155,7 @@ pub(super) fn copy_of(d: &Draft) -> Draft {
         words: d.words.clone(),
         kinds: d.kinds.clone(),
         closure: d.closure,
+        misses: d.misses.clone(),
     }
 }
 
@@ -271,11 +273,22 @@ pub(super) mod of {
     }
 
     pub(crate) fn find(dst: u32, [map, key]: [u32; 2], to: u32) -> Ins<VReg> {
-        Ins::MapFind {
-            dst: Hit(VReg(dst)),
+        Ins::MapGet {
+            dst: MaybeHit::new(Some(VReg(dst))),
             map: Src(VReg(map)),
             key: Src(VReg(key)),
-            to: Label(to),
+            miss: Label(to),
+        }
+    }
+
+    /// `dst` gets element `index` of the array in `src`, when something is to have it,
+    /// or the run continues at `miss`.
+    pub(crate) fn get(dst: Option<u32>, [src, index]: [u32; 2], miss: u32) -> Ins<VReg> {
+        Ins::ArrayGet {
+            dst: MaybeHit::new(dst.map(VReg)),
+            src: Src(VReg(src)),
+            index: Src(VReg(index)),
+            miss: Label(miss),
         }
     }
 

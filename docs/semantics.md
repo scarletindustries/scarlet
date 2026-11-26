@@ -78,7 +78,9 @@ A slice is a `Result` rather than a shorter array, because a range that misses t
 
 None of them changes an array anything else can see. `xs` after `ys = array::put(xs, 0, 9)` is what it was. What differs is the cost. When the write is the last thing to read `xs` and nothing else holds that array, the VM writes the one slot in place and copies nothing. Otherwise it copies the nodes on the way to the slot, at most one a level, and shares the rest. An index outside the array costs a length check and nothing else.
 
-One spelling reads `xs` after the write without looking as if it does. In `match array::set(xs, i, x) { Ok(ys) -> ys  Err(Nil) -> xs }`, and in `array::set(xs, i, x) or xs`, the fallback reads `xs`. The VM builds the `Result` before it matches on it, so it cannot yet tell that the fallback runs only when nothing was written, and the write copies. `array::put(xs, i, x)` means the same and writes in place. This limit goes when a match on the call is compiled as the write's own two ways out (step 19 of `docs/perf-plan.md`).
+A fallback that gives `xs` back is no such read. `match array::set(xs, i, x) { Ok(ys) -> ys  Err(Nil) -> xs }`, `array::set(xs, i, x) or xs` and `array::put(xs, i, x)` are the same write, and each is in place when nothing else holds the array, because the fallback runs only when nothing was written. It is the same when the `Result` has a name that nothing but the `match` straight after it reads. A `Result` that is kept, or passed to a function such as `result::then`, is made before anything looks at it, and what reads `xs` after that keeps the array.
+
+A `match` on `xs[i]`, on a slice, on `array::set` or on `map::get`, or an `or` after one, makes no `Option` and no `Result`, unless an arm has a name for the whole of it. One that nothing reads, such as `_ = array::set(xs, i, x)`, is not made either, and the array is not written. The default of an `or` runs only when there is nothing.
 
 ## Matches
 

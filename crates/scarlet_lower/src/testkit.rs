@@ -84,6 +84,23 @@ pub(crate) fn iff(cond: u32, then: CoreExpr, els: CoreExpr) -> CoreExpr {
     }
 }
 
+/// A probe of `args` that puts what it finds in `found`.
+pub(crate) fn probe(
+    op: ProbeOp,
+    args: &[u32],
+    found: Option<CoreBind>,
+    hit: CoreExpr,
+    miss: CoreExpr,
+) -> CoreExpr {
+    CoreExpr::Probe {
+        op,
+        args: args.iter().copied().map(LocalId).collect(),
+        binds: vec![found],
+        hit: Box::new(hit),
+        miss: Box::new(miss),
+    }
+}
+
 /// A switch on which constructor of `variant()`'s type `scrut` is.
 pub(crate) fn switch(
     scrut: u32,

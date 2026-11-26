@@ -15,8 +15,7 @@ use crate::value::{Float, SmallInt, Tag, Value};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Reg(pub(crate) u8);
 
-/// A value the loader has not given a register yet. One per Core IR local,
-/// and one for each value no local holds.
+/// A value the loader has not given a register yet. One per Core IR local.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct VReg(pub(crate) u32);
 
@@ -321,35 +320,47 @@ fn place_each<const N: usize>(regs: [VReg; N], at: &impl Places) -> Result<[Reg;
     Ok(placed)
 }
 
-/// A register the instruction writes, or none, for what it has nowhere to put.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct MaybeDst<R>(R);
+/// Declares the field that is one register with a role, or none.
+macro_rules! registers_or_none {
+    ($($(#[$doc:meta])* $name:ident $some:ident $get:ident;)*) => {$(
+        $(#[$doc])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub(crate) struct $name<R>(R);
 
-impl<R: Names> MaybeDst<R> {
-    pub(crate) fn new(dst: Option<R>) -> MaybeDst<R> {
-        MaybeDst(dst.unwrap_or(R::NONE))
-    }
+        impl<R: Names> $name<R> {
+            pub(crate) fn new(reg: Option<R>) -> $name<R> {
+                $name(reg.unwrap_or(R::NONE))
+            }
 
-    #[inline(always)]
-    pub(crate) fn dst(self) -> Option<Dst<R>> {
-        (self.0 != R::NONE).then_some(Dst(self.0))
-    }
-}
-
-impl<R: Names> Part<R> for MaybeDst<R> {
-    fn operands(self, lists: &Lists<R>, f: &mut impl FnMut(R, Role)) {
-        if let Some(dst) = self.dst() {
-            dst.operands(lists, f);
+            #[inline(always)]
+            pub(crate) fn $get(self) -> Option<$some<R>> {
+                (self.0 != R::NONE).then_some($some(self.0))
+            }
         }
-    }
+
+        impl<R: Names> Part<R> for $name<R> {
+            fn operands(self, lists: &Lists<R>, f: &mut impl FnMut(R, Role)) {
+                if let Some(reg) = self.$get() {
+                    reg.operands(lists, f);
+                }
+            }
+        }
+
+        impl Place for $name<VReg> {
+            type Placed = $name<Reg>;
+            fn place(self, at: &impl Places) -> Result<$name<Reg>, Unplaced> {
+                let reg = self.$get().map(|reg| at.reg(reg.0)).transpose()?;
+                Ok($name::new(reg))
+            }
+        }
+    )*};
 }
 
-impl Place for MaybeDst<VReg> {
-    type Placed = MaybeDst<Reg>;
-    fn place(self, at: &impl Places) -> Result<MaybeDst<Reg>, Unplaced> {
-        let dst = self.dst().map(|dst| at.reg(dst.0)).transpose()?;
-        Ok(MaybeDst::new(dst))
-    }
+registers_or_none! {
+    /// A register the instruction writes, or none, for what it has nowhere to put.
+    MaybeDst Dst dst;
+    /// A register the instruction writes unless it jumps, or none.
+    MaybeHit Hit hit;
 }
 
 impl<R: Names, const N: usize> Part<R> for [MaybeDst<R>; N] {

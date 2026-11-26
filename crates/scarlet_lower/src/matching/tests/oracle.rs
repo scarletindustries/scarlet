@@ -72,12 +72,17 @@ pub(super) const BODIES: u32 = 2000;
 pub(super) struct World<'w> {
     pub(super) consts: &'w [Const],
     pub(super) true_: crate::VariantRef,
+    pub(super) nil: crate::VariantRef,
 }
 
 impl World<'_> {
     fn bool(&self, b: bool) -> Val {
         let (t, f) = (self.true_.variant_idx, 1 - self.true_.variant_idx);
         Val::Ctor(self.true_.type_id, if b { t } else { f }, Vec::new())
+    }
+
+    pub(super) fn nil(&self) -> Val {
+        Val::Ctor(self.nil.type_id, self.nil.variant_idx, Vec::new())
     }
 
     fn is_true(&self, v: &Val) -> bool {
@@ -446,6 +451,28 @@ impl Machine<'_> {
                         false => els,
                     };
                 }
+                // What it asks for is there when its first operand is the first
+                // constructor of its type, and is the field of that.
+                CoreExpr::Probe {
+                    args,
+                    binds,
+                    hit,
+                    miss,
+                    ..
+                } => {
+                    let Val::Ctor(_, idx, parts) = &env[&args[0]] else {
+                        panic!("a probe of {:?}", env[&args[0]])
+                    };
+                    if *idx != 0 {
+                        e = miss;
+                        continue;
+                    }
+                    let found = parts[0].clone();
+                    if let [Some(bind)] = binds.as_slice() {
+                        assert!(env.insert(bind.id, found).is_none(), "{} again", bind.id);
+                    }
+                    e = hit;
+                }
                 CoreExpr::Switch {
                     scrut,
                     cases,
@@ -504,6 +531,11 @@ impl Machine<'_> {
             Atom::Local(l) => get(l).clone(),
             Atom::Const(c) => self.world.constant(*c),
             Atom::Bool(b) => self.world.bool(*b),
+            Atom::Nil => self.world.nil(),
+            Atom::Ctor { variant, fields } => {
+                let fields = fields.iter().map(|l| get(l).clone()).collect();
+                Val::Ctor(variant.type_id, variant.variant_idx, fields)
+            }
             Atom::Call {
                 callee: Callee::Known(FuncIdx(f)),
                 args,

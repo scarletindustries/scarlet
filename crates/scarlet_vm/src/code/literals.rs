@@ -160,6 +160,17 @@ impl Locals {
                     todo.extend(default.as_deref());
                 }
                 CoreExpr::NoArm => {}
+                CoreExpr::Probe {
+                    args,
+                    binds,
+                    hit,
+                    miss,
+                    ..
+                } => {
+                    args.iter().for_each(|l| self.read(*l));
+                    binds.iter().flatten().for_each(|b| self.name(b.id));
+                    todo.extend([&**hit, &**miss]);
+                }
                 CoreExpr::If { cond, then, els } => {
                     self.read(*cond);
                     todo.extend([&**then, &**els]);
@@ -265,6 +276,21 @@ impl Cut {
                         cond: *cond,
                         then: Box::new(self.expr(then)),
                         els: Box::new(self.expr(els)),
+                    };
+                }
+                CoreExpr::Probe {
+                    op,
+                    args,
+                    binds,
+                    hit,
+                    miss,
+                } => {
+                    break CoreExpr::Probe {
+                        op: *op,
+                        args: args.clone(),
+                        binds: binds.clone(),
+                        hit: Box::new(self.expr(hit)),
+                        miss: Box::new(self.expr(miss)),
                     };
                 }
                 CoreExpr::Open {

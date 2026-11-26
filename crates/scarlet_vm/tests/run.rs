@@ -1211,27 +1211,19 @@ fn a_write_to_an_array_with_one_holder_changes_it_in_place() {
          \tprintln(held(ws, 0, 100, 0))\n\
          \tprintln(internal::cells_made() - made)\n\
          }\n",
-        // `checked` makes one `Ok` a turn, and no array cell, because its
-        // `Err` arm does not read `xs`. `held` copies the root and the
-        // nodes down to the slot: a branch and a leaf for the 96 elements in
-        // the tree, and the tail leaf for the last 4.
-        "0\n24995000\n5000\n37492500\n100\n296\n",
+        // `checked` makes no `Ok`, because its `match` is on the write. `held`
+        // copies the root and the nodes down to the slot: a branch and a leaf
+        // for the 96 elements in the tree, and the tail leaf for the last 4.
+        "0\n24995000\n0\n37492500\n100\n296\n",
     );
 }
 
-/// A checked write is in place only when nothing reads the array after the
-/// call, and an `Err` arm that gives the array back is such a read: the
-/// `Result` is built before it is matched, so the loader cannot tell that
-/// the arm runs only after a miss. Each write then copies the root and the
-/// nodes down to the slot, whether the fallback is spelled as an arm or
-/// with `or`. `array::put` is the same fallback inside the write, and
-/// copies nothing.
-///
-/// The 24,984 is a limit to remove, not a rule to keep. Once a match on
-/// the call loads as the write's two edges, it is the 5,000 `Ok` cells or
-/// fewer.
+/// A match on a checked write is the write's two edges, so an arm for a miss that
+/// gives the array back is no read of it after a hit, and the write is in place. So it
+/// is with `or`, and where the `Result` has a name that only the match reads. No
+/// `Result` is made. One that is kept is made, and nothing else is.
 #[test]
-fn a_checked_write_copies_when_its_err_arm_reads_the_array() {
+fn a_checked_write_is_in_place_when_its_err_arm_gives_the_array_back() {
     prints(
         "import scarlet/array\n\
          import scarlet/internal\n\
@@ -1250,6 +1242,21 @@ fn a_checked_write_copies_when_its_err_arm_reads_the_array() {
          }\n\
          fn or_else(xs Array(Int), i Int, n Int) Array(Int) {\n\
          \tif i == n { xs } else { or_else(array::set(xs, i, i * 3) or xs, i + 1, n) }\n\
+         }\n\
+         fn named(xs Array(Int), i Int, n Int) Array(Int) {\n\
+         \tif i == n {\n\
+         \t\txs\n\
+         \t} else {\n\
+         \t\twrote = array::set(xs, i, i * 3)\n\
+         \t\tmatch wrote {\n\
+         \t\t\tErr(_) -> xs\n\
+         \t\t\tOk(ys) -> named(ys, i + 1, n)\n\
+         \t\t}\n\
+         \t}\n\
+         }\n\
+         fn one(xs Array(Int), i Int) Result(Array(Int), Nil) { array::set(xs, i, i * 3) }\n\
+         fn kept(xs Array(Int), i Int, n Int) Array(Int) {\n\
+         \tif i == n { xs } else { kept(one(xs, i) or [], i + 1, n) }\n\
          }\n\
          fn total(xs Array(Int), i Int, n Int) Array(Int) {\n\
          \tif i == n { xs } else { total(array::put(xs, i, i * 3), i + 1, n) }\n\
@@ -1276,17 +1283,23 @@ fn a_checked_write_copies_when_its_err_arm_reads_the_array() {
          \tc = total(c, 0, 5000)\n\
          \tprintln(internal::cells_made() - made)\n\
          \tprintln(sum(c, 0))\n\
+         \td = build(5000, [])\n\
+         \tmade = internal::cells_made()\n\
+         \td = named(d, 0, 5000)\n\
+         \tprintln(internal::cells_made() - made)\n\
+         \tprintln(sum(d, 0))\n\
+         \te = build(5000, [])\n\
+         \tmade = internal::cells_made()\n\
+         \te = kept(e, 0, 5000)\n\
+         \tprintln(internal::cells_made() - made)\n\
+         \tprintln(sum(e, 0))\n\
          }\n",
-        // An `Ok` a turn, and beside it the root, two branches and a leaf
-        // for the 4,992 elements in the tree, and the root and the tail
-        // leaf for the last 8.
-        "24984\n37492500\n24984\n37492500\n0\n37492500\n",
+        "0\n37492500\n0\n37492500\n0\n37492500\n0\n37492500\n5000\n37492500\n",
     );
 }
 
-/// `array::swap` on an array nothing else holds changes it in place. The
-/// only cells 500 swaps make are the two `Some` each one reads its
-/// elements through, and the 1,000-element array is never copied.
+/// `array::swap` on an array nothing else holds changes it in place, and makes no
+/// cell.
 #[test]
 fn a_swap_of_an_array_with_one_holder_changes_it_in_place() {
     prints(
@@ -1306,7 +1319,7 @@ fn a_swap_of_an_array_with_one_holder_changes_it_in_place() {
          \tprintln(ys[0..3])\n\
          \tprintln(ys[997..1000])\n\
          }\n",
-        "1000\nOk(\n  [1, 2, 3]\n)\nOk(\n  [998, 999, 1000]\n)\n",
+        "0\nOk(\n  [1, 2, 3]\n)\nOk(\n  [998, 999, 1000]\n)\n",
     );
 }
 
@@ -2116,12 +2129,9 @@ fn the_listing_shows_a_write_and_where_a_miss_goes() {
         .filter(|f| f.contains("ArraySet"))
         .last()
         .expect("strike is listed");
-    assert!(
-        strike.contains("= ArraySet(move r2, r3, move r4) -> 4\n"),
-        "{strike}"
-    );
-    assert!(strike.contains("    4  r"), "{strike}");
-    assert!(strike.contains(" = Move(move r2)\n"), "{strike}");
+    let write = "    2  r2 = ArraySet(move r2, r3, move r4) -> 4\n";
+    let ends = "    3  Ret(move r2)\n    4  Ret(move r2)\n";
+    assert!(strike.ends_with(&format!("{write}{ends}")), "{strike}");
 }
 
 /// A range stores only its two ends, and is an array of Ints in every way a
@@ -2923,14 +2933,14 @@ fn a_counted_run_counts_each_instruction_by_its_kind() {
     assert_eq!(counts.cells_live, 0);
 }
 
-/// A lookup that hits and whose value nothing reads drops it only when it is of a type
-/// that gets drops, and an Int, which may be big, is given up all the same.
+/// A lookup that hits and whose value nothing reads puts it nowhere, whatever its type,
+/// so nothing is dropped.
 #[test]
-fn a_found_value_that_nothing_reads_is_given_up() {
-    for (values, drops) in [
-        ("n", 0),
-        ("n * 1000000 * 1000000 * 1000000", 0),
-        ("[n]", 1000),
+fn a_found_value_that_nothing_reads_is_put_nowhere() {
+    for (values, ty) in [
+        ("n", "Int"),
+        ("n * 1000000 * 1000000 * 1000000", "Int"),
+        ("[n]", "Array(Int)"),
     ] {
         let src = format!(
             "import scarlet/map\n\
@@ -2946,14 +2956,13 @@ fn a_found_value_that_nothing_reads_is_given_up() {
              \t}}\n\
              }}\n\
              pub fn main() {{ println(go(2000, fill(map::new(), 1000, fn(n Int) {{ {values} }}), 0)) }}\n",
-            ty = if drops == 0 { "Int" } else { "Array(Int)" },
         );
         let (out, counts) = counted(&src);
         assert_eq!(out, "1000\n", "{values}");
         assert_eq!(counts.cells_live, 0, "{values}");
-        assert_eq!(ran(&counts, "MapFind"), 2000, "{values}");
+        assert_eq!(ran(&counts, "MapGet"), 2000, "{values}");
         // `fill` gives up what `of` gave it.
-        assert_eq!(ran(&counts, "Drop"), 1000 + drops, "{values}");
+        assert_eq!(ran(&counts, "Drop"), 1000, "{values}");
     }
 }
 
@@ -3517,25 +3526,31 @@ fn the_listing_shows_the_loaded_instructions() {
 /// call takes, and leaves a source that is read again unmarked.
 #[test]
 fn the_listing_marks_a_move_that_takes_its_source() {
-    let src = "import scarlet/array\n\
-               fn fresh(n Int) Array(Int) { [n, n + 1] }\n\
+    let src = "fn fresh(n Int) Array(Int) { [n, n + 1] }\n\
                fn twice(n Int) Array(Int) {\n\
                \tt = fresh(n)\n\
                \tys = t\n\
                \t[..ys, ..t]\n\
                }\n\
-               fn once(xs Array(Int)) Array(Int) { array::put(xs, 0, 9) }\n\
+               fn once(n Int, last Array(Int), acc Array(Int)) Array(Int) {\n\
+               \tif n == 0 {\n\
+               \t\tacc\n\
+               \t} else {\n\
+               \t\tnext = fresh(n)\n\
+               \t\tonce(n - 1, next, [..acc, ..last])\n\
+               \t}\n\
+               }\n\
                pub fn main() {\n\
                \tprintln(twice(1))\n\
-               \tprintln(once([1]))\n\
+               \tprintln(once(2, [], []))\n\
                }\n";
     let listing = scarlet_vm::listing(&compile(src)).expect("the program loads");
     let mut all = (0..).map_while(|i| listing.function(i));
     let twice = all.find(|f| f.contains("r3 = Move(r2)"));
     let twice = twice.expect("twice");
     assert!(twice.contains("    1  r3 = Move(r2)\n"), "{twice}");
-    let once = all.find(|f| f.contains("ArraySet")).expect("once");
-    assert!(once.contains(" = Move(move r2)\n"), "{once}");
+    let once = all.next().expect("once");
+    assert!(once.contains("r3 = Move(move r5)\n"), "{once}");
 }
 
 /// The listing shows a loop as a jump to its first instruction, after the moves

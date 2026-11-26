@@ -14,8 +14,8 @@ use super::oracle::{BODIES, Dice, SIZES};
 use super::{Case, agrees, usual_and_none};
 use crate::program::{TypeDefs, typed};
 use crate::typed_ir::{
-    BindingId, RTy, TypedArm, TypedBinPatSeg, TypedBind, TypedCallee, TypedExpr, TypedFn, TypedPat,
-    ValueRef, each_expr, each_read, pat_binds,
+    BindingId, Gives, RTy, TypedArm, TypedBinPatSeg, TypedBind, TypedCallee, TypedExpr, TypedFn,
+    TypedPat, ValueRef, each_expr, each_read, pat_binds,
 };
 
 struct Defs<'a>(&'a Analysis);
@@ -48,7 +48,15 @@ fn files() -> Vec<PathBuf> {
 
 /// A match by itself: a function of the matched value, with a call in place of each
 /// guard, body and size, which is given the names that were read there.
-fn by_itself(of: &TypedFn, scrut: &TypedExpr, arms: &[TypedArm], int: RTy, bool: RTy) -> TypedFn {
+///
+/// With `asked`, the match is on the probe that it is on, of the matched value.
+fn by_itself(
+    of: &TypedFn,
+    scrut: &TypedExpr,
+    arms: &[TypedArm],
+    asked: bool,
+    [int, bool]: [RTy; 2],
+) -> TypedFn {
     let param = TypedBind {
         id: BindingId(of.binds),
         named: true,
@@ -72,10 +80,27 @@ fn by_itself(of: &TypedFn, scrut: &TypedExpr, arms: &[TypedArm], int: RTy, bool:
             body: call(BODIES + i, &arm.body, &names, int),
         });
     }
-    let value = TypedExpr::Var {
+    let mut value = TypedExpr::Var {
         ty: param.ty,
         place: ValueRef::Local(param.id),
     };
+    if let TypedExpr::Probe {
+        ty,
+        op,
+        args,
+        found,
+        gives: gives @ (Gives::Option | Gives::Result { .. }),
+    } = scrut
+        && asked
+    {
+        value = TypedExpr::Probe {
+            ty: *ty,
+            op: *op,
+            args: vec![value; args.len()],
+            found: *found,
+            gives: *gives,
+        };
+    }
     TypedFn {
         params: vec![param],
         ret: int,
@@ -138,7 +163,8 @@ fn each_size(p: &mut TypedPat, f: &mut impl FnMut(&mut TypedExpr)) {
 
 #[test]
 fn every_match_in_the_repository_finds_what_its_rows_say() {
-    let (mut seen, mut matches, mut found) = (BTreeSet::new(), 0usize, 0usize);
+    let mut seen = BTreeSet::new();
+    let (mut matches, mut probes, mut found) = (0usize, 0usize, 0usize);
     for file in files() {
         let src = std::fs::read_to_string(&file).expect("a file");
         let Compiled::Runnable { analysis, .. } = compile_text(&src, None) else {
@@ -166,23 +192,31 @@ fn every_match_in_the_repository_finds_what_its_rows_say() {
                 let TypedExpr::Match { scrut, arms, .. } = e else {
                     return;
                 };
-                let f = by_itself(f, scrut, arms, temps.int, temps.bool);
-                let case = Case {
-                    f: &f,
-                    pool: typed.pool(),
-                    shapes: &shapes,
-                    consts: around.consts,
-                    temps,
-                    im: typed.immediates(),
-                };
-                let what = format!("{}: {module}.{name}", file.display());
-                let mut dice = Dice(u64::try_from(n).expect("a few") << 20);
-                for allowance in usual_and_none() {
-                    found += agrees(&mut dice, &case, allowance, 20, &what).len();
+                let on_probe = matches!(&**scrut, TypedExpr::Probe { .. });
+                probes += usize::from(on_probe);
+                for asked in [false, true] {
+                    if asked && !on_probe {
+                        continue;
+                    }
+                    let f = by_itself(f, scrut, arms, asked, [temps.int, temps.bool]);
+                    let case = Case {
+                        f: &f,
+                        pool: typed.pool(),
+                        shapes: &shapes,
+                        consts: around.consts,
+                        temps,
+                        ctors: around.ctors,
+                    };
+                    let what = format!("{}: {module}.{name}", file.display());
+                    let mut dice = Dice(u64::try_from(n).expect("a few") << 20);
+                    for allowance in usual_and_none() {
+                        found += agrees(&mut dice, &case, allowance, 20, &what).len();
+                    }
                 }
                 matches += 1;
             });
         }
     }
     assert!(matches > 700 && found > 3500, "{matches} {found}");
+    assert!(probes > 20, "{probes}");
 }

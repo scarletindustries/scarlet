@@ -640,6 +640,22 @@ fn map_arms<K: Clone>(arms: &Arms<K>, f: &mut impl FnMut(&CoreExpr) -> CoreExpr)
     arms.iter().map(|(keys, e)| (keys.clone(), f(e))).collect()
 }
 
+/// What a [`CoreExpr::Probe`] asks for. It is there or it is not, and asking changes
+/// nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeOp {
+    /// An element of an array. Args: `xs`, `i`. It finds element `i`.
+    ArrayGet,
+    /// Some elements of an array. Args: `xs`, `a`, `b`. It finds the array of those
+    /// from `a` up to but not including `b`.
+    ArraySlice,
+    /// An array with another element. Args: `xs`, `i`, `x`. It finds `xs` with `x` at
+    /// index `i`, when `xs` has that index.
+    ArraySet,
+    /// What a map has for a key. Args: `m`, `k`. It finds that value.
+    MapGet,
+}
+
 /// What a function does from some point on. It is a spine, a chain of nodes that
 /// each do one thing and go on, which ends in a branch or in what is done last.
 ///
@@ -697,6 +713,17 @@ pub enum CoreExpr {
         then: Box<CoreExpr>,
         els: Box<CoreExpr>,
     },
+    /// Ask for `op` of `args`. Where it is there, put what it finds in `binds`, which
+    /// is one place for each value that `op` finds, and go on with `hit`. A place may
+    /// be none, for a value that nothing reads. Where it is not there, go on with
+    /// `miss`, with nothing bound and every one of `args` as it was.
+    Probe {
+        op: ProbeOp,
+        args: Vec<LocalId>,
+        binds: Vec<Option<CoreBind>>,
+        hit: Box<CoreExpr>,
+        miss: Box<CoreExpr>,
+    },
     /// Return this from the function.
     Ret(LocalId),
     /// Call this with the frame, and return what it returns.
@@ -738,9 +765,14 @@ impl CoreExpr {
                     work.extend(cases.arms());
                     work.extend(default.as_deref());
                 }
-                CoreExpr::If { then, els, .. } => {
-                    work.push(then);
-                    work.push(els);
+                CoreExpr::If {
+                    then: a, els: b, ..
+                }
+                | CoreExpr::Probe {
+                    hit: a, miss: b, ..
+                } => {
+                    work.push(a);
+                    work.push(b);
                 }
                 CoreExpr::Ret(_)
                 | CoreExpr::TailCall { .. }
@@ -798,9 +830,14 @@ impl Exits {
                     let all = all.map(|arm| self.outermost(arm, depth));
                     break all.min().unwrap_or(u32::MAX);
                 }
-                CoreExpr::If { then, els, .. } => {
-                    let then = self.outermost(then, depth);
-                    break then.min(self.outermost(els, depth));
+                CoreExpr::If {
+                    then: a, els: b, ..
+                }
+                | CoreExpr::Probe {
+                    hit: a, miss: b, ..
+                } => {
+                    let a = self.outermost(a, depth);
+                    break a.min(self.outermost(b, depth));
                 }
                 CoreExpr::Ret(_) | CoreExpr::TailCall { .. } => break 0,
                 CoreExpr::NoArm => break u32::MAX,
@@ -1086,6 +1123,31 @@ impl fmt::Display for Indented<'_> {
                         arm(&|f| f.write_str("_"), body)?;
                     }
                     return Ok(());
+                }
+                CoreExpr::Probe {
+                    op,
+                    args,
+                    binds,
+                    hit,
+                    miss,
+                } => {
+                    write!(f, "probe {op:?}(")?;
+                    write_list(f, args)?;
+                    writeln!(f, ")")?;
+                    let named = binds.iter().map(|bind| match bind {
+                        Some(bind) => bind.to_string(),
+                        None => "_".to_string(),
+                    });
+                    let named: Vec<String> = named.collect();
+                    let inner = depth.saturating_add(1);
+                    pad(f, inner)?;
+                    write!(f, "| hit(")?;
+                    write_list(f, &named)?;
+                    writeln!(f, ") ->")?;
+                    Indented(hit, depth.saturating_add(2)).fmt(f)?;
+                    pad(f, inner)?;
+                    writeln!(f, "| miss ->")?;
+                    return Indented(miss, depth.saturating_add(2)).fmt(f);
                 }
                 CoreExpr::NoArm => return writeln!(f, "no arm"),
             }

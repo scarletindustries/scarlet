@@ -284,6 +284,9 @@ impl Walk {
         if let Step::Ins(ins) = step {
             self.decide(ins, lists);
         }
+        // A value that is written only when it does not jump clashes with what is held
+        // on that way alone, so this comes before what the landing holds is added.
+        self.clash(Role::WriteOnHit);
         let mut targets = std::mem::take(&mut self.targets);
         step.targets(lists, &mut |l| targets.push(l));
         // A table names one place again and again.
@@ -322,7 +325,7 @@ impl Walk {
             landing.held.iter().for_each(|v| self.held.add(*v));
             landing.read.iter().for_each(|v| self.read.add(*v));
         }
-        self.clash();
+        self.clash(Role::Write);
         for (v, role) in &self.operands {
             if let Some(named) = self.out.named.get_mut(v.0 as usize) {
                 *named = true;
@@ -397,33 +400,33 @@ impl Walk {
         all.max().unwrap_or(End::Other)
     }
 
-    /// Note what the instruction's written values clash with: everything held
-    /// after it, and each other, whether or not they are read.
-    fn clash(&mut self) {
+    /// Note what the values that the instruction writes as `writes` says clash with:
+    /// everything held where they are written, and each other written value, whether
+    /// or not they are read.
+    fn clash(&mut self, writes: Role) {
         let mut written: &[(VReg, Role)] = &self.operands;
         while let Some(((v, role), rest)) = written.split_first() {
             written = rest;
-            if writes(*role) {
-                for h in self.held.items.iter().filter(|h| *h != v) {
-                    let next = self.next.iter().find(|(_, of)| of == h);
-                    if *role == Role::Write
-                        && let Some((step, dropped)) = next.copied()
-                    {
-                        self.out.overwritten.push(Overwritten {
-                            step,
-                            dropped,
-                            written: *v,
-                        });
-                    } else if self.read.has(*h) {
-                        self.out.clashes.push((*v, *h));
-                    } else {
-                        let drops = pending(&self.pending, *h);
-                        self.while_pending.push((*v, *h, drops));
-                    }
-                }
-                let others = rest.iter().filter(|(w, role)| writes(*role) && w != v);
-                self.out.clashes.extend(others.map(|(w, _)| (*v, *w)));
+            if *role != writes {
+                continue;
             }
+            for h in self.held.items.iter().filter(|h| *h != v) {
+                let next = self.next.iter().find(|(_, of)| of == h);
+                if let Some((step, dropped)) = next.copied() {
+                    self.out.overwritten.push(Overwritten {
+                        step,
+                        dropped,
+                        written: *v,
+                    });
+                } else if self.read.has(*h) {
+                    self.out.clashes.push((*v, *h));
+                } else {
+                    let drops = pending(&self.pending, *h);
+                    self.while_pending.push((*v, *h, drops));
+                }
+            }
+            let others = rest.iter().filter(|(w, role)| is_write(*role) && w != v);
+            self.out.clashes.extend(others.map(|(w, _)| (*v, *w)));
         }
     }
 
@@ -551,7 +554,7 @@ impl AllDrops {
 }
 
 /// Whether an operand with `role` is written.
-fn writes(role: Role) -> bool {
+fn is_write(role: Role) -> bool {
     match role {
         Role::Write | Role::WriteOnHit => true,
         Role::Look | Role::Share | Role::Pass { .. } | Role::Take | Role::Drop => false,

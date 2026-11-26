@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use scarlet_ir::core_ir::{ConstId, FuncIdx, MAX_PARAMS, PrimOp, VariantRef};
+use scarlet_ir::core_ir::{ConstId, FuncIdx, MAX_PARAMS, PrimOp, ProbeOp, VariantRef};
 use scarlet_ir::intrinsic::Intrinsic;
 
 use crate::frame::MAX_VALUES;
@@ -181,6 +181,12 @@ pub(crate) enum Broken {
         got: usize,
         want: usize,
     },
+    /// A probe with other than its operands, or than a place for each value it finds.
+    Probe {
+        op: ProbeOp,
+        args: usize,
+        binds: usize,
+    },
     /// A function reads a value that nothing on some path to the read wrote.
     ReadBeforeWritten,
     /// A function jumps to an instruction before the jump.
@@ -335,6 +341,9 @@ impl fmt::Display for BadProgram {
             Broken::Cases => f.write_str("a switch with two cases for a value, or a case for none"),
             Broken::TextCase(c) => write!(f, "a case for a string that is {c}, which is none"),
             Broken::UndeclaredJoin => f.write_str("a jump to a join that nothing declares"),
+            Broken::Probe { op, args, binds } => {
+                write!(f, "{op:?} of {args} values, which finds {binds}")
+            }
             Broken::JumpArity { got, want } => {
                 write!(f, "a jump with {got} arguments, not {want}")
             }

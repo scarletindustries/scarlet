@@ -1128,6 +1128,14 @@ impl<'p> Build<'_> {
             self.facts.back_to(mark);
             branches.push(Branch { keys, apart, node });
         }
+        // Where every constructor is one case, there is nothing to ask.
+        if covered
+            && let [branch] = branches.as_slice()
+            && branch.keys.len() > 1
+            && let Some(Branch { node, .. }) = branches.pop()
+        {
+            return Ok(asked(behind, node));
+        }
         let node = |default| Node::Switch {
             on,
             branches,

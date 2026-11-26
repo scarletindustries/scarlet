@@ -121,7 +121,7 @@ Lowering runs once per program, over every clean module in dependency order. It 
 - turns an `or` into its two-arm `match`, and a record-update spread into an `Update` where `update.rs` says its base may be held until the new fields are computed, and into field reads elsewhere, made as soon as the base has run so the base can be given up before the fields written after it are computed. A base with nothing to run (a name, or a field or tuple element read off one) counts as written first
 - makes the module's top level: its consts, then its statements
 
-Then every `TypedFn` goes through `lower`, which makes each `match` a decision tree (`matching.rs`), `immediates`, `perceus` and `tail_args`, each once, and the `Program` is assembled: `types`, `inits`, `main`, and the `Abi`, found by `TypeName` in the stdlib's interfaces. The checks on `main` (it must be `pub` and take no parameters) happen in the driver, on the entry, for every caller.
+Then every `TypedFn` goes through `lower`, which makes each `match` a decision tree (`matching.rs`) and what may not be there a `Probe`, `immediates`, `perceus` and `tail_args`, each once, and the `Program` is assembled: `types`, `inits`, `main`, and the `Abi`, found by `TypeName` in the stdlib's interfaces. The checks on `main` (it must be `pub` and take no parameters) happen in the driver, on the entry, for every caller.
 
 ### The prelude
 

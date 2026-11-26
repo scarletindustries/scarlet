@@ -9,7 +9,7 @@
 //! So an update is made one when the fields it sets hold nothing but numbers, or
 //! when computing what they are set to is [`brief`].
 
-use scarlet_ir::core_ir::PrimOp;
+use scarlet_ir::core_ir::{PrimOp, ProbeOp};
 
 use crate::typed_ir::{PatRest, TypedArm, TypedArrayElem, TypedExpr, TypedPat};
 
@@ -58,7 +58,7 @@ pub(crate) fn brief(mut e: &TypedExpr) -> bool {
                 TypedArrayElem::Elem(e) => brief(e),
                 TypedArrayElem::Spread(_) => false,
             }),
-            TypedExpr::Index { recv, index, .. } => brief(recv) && brief(index),
+            TypedExpr::Probe { op, args, .. } => *op == ProbeOp::ArrayGet && args.iter().all(brief),
             TypedExpr::Range { start, end, .. } => brief(start) && brief(end),
             TypedExpr::Closure { captures, .. } => captures.iter().all(brief),
             TypedExpr::If {
@@ -66,7 +66,6 @@ pub(crate) fn brief(mut e: &TypedExpr) -> bool {
             } => brief(cond) && brief(then) && brief(els),
             TypedExpr::Match { scrut, arms, .. } => brief(scrut) && arms.iter().all(brief_arm),
             TypedExpr::Update { .. }
-            | TypedExpr::Slice { .. }
             | TypedExpr::Interp { .. }
             | TypedExpr::BinLit { .. }
             | TypedExpr::Call { .. } => false,

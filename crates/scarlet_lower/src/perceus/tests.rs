@@ -1,6 +1,6 @@
 use super::*;
 use crate::testkit::{
-    FIELDS, bind, bound, ctor, field, func, iff, join, jump, local, ownership, ret, switch,
+    FIELDS, bind, bound, ctor, field, func, iff, join, jump, local, ownership, probe, ret, switch,
     switch_on, tail_call, variant,
 };
 use crate::{Callee, CaptureIdx, ConstId, FuncIdx, GlobalSlot, Load};
@@ -41,7 +41,12 @@ fn drops(e: &CoreExpr) -> Vec<LocalId> {
             }
             CoreExpr::Let { body, .. } | CoreExpr::SetGlobal { body, .. } => work.push(body),
             CoreExpr::Join { cont, body, .. } => work.extend([&**cont, &**body]),
-            CoreExpr::If { then, els, .. } => work.extend([&**then, &**els]),
+            CoreExpr::If {
+                then: a, els: b, ..
+            }
+            | CoreExpr::Probe {
+                hit: a, miss: b, ..
+            } => work.extend([&**a, &**b]),
             CoreExpr::Open { body, .. } => work.push(body),
             CoreExpr::Switch { cases, default, .. } => {
                 work.extend(cases.arms());
@@ -133,6 +138,12 @@ fn types_of(f: &CoreFn) -> TiVec<LocalId, RTy> {
             }
             CoreExpr::SetGlobal { body, .. } | CoreExpr::Drop { body, .. } => work.push(body),
             CoreExpr::If { then, els, .. } => work.extend([&**then, &**els]),
+            CoreExpr::Probe {
+                binds, hit, miss, ..
+            } => {
+                all.extend(binds.iter().flatten());
+                work.extend([&**hit, &**miss]);
+            }
             CoreExpr::Open { fields, body, .. } => {
                 all.extend(fields.iter().map(|(_, b)| *b));
                 work.push(body);
@@ -944,7 +955,7 @@ impl Maker {
         if size == 0 {
             return self.end(scope, joins);
         }
-        match self.below(10) {
+        match self.below(12) {
             0 | 1 => {
                 self.joins += 1;
                 let id = self.joins;
@@ -998,6 +1009,19 @@ impl Maker {
                     false => Some(self.case(half / 2, scrut, &left, scope, joins)),
                 };
                 switch(scrut, arms, default)
+            }
+            5 | 6 => {
+                let ty = self.ty();
+                let found = self.bind(ty);
+                let (op, n) = [
+                    (ProbeOp::ArrayGet, 2),
+                    (ProbeOp::ArraySlice, 3),
+                    (ProbeOp::ArraySet, 3),
+                    (ProbeOp::MapGet, 2),
+                ][self.below(4)];
+                let args: Vec<u32> = (0..n).map(|_| self.any(scope)).collect();
+                let hit = self.expr(half, &with(&[found]), joins);
+                probe(op, &args, Some(found), hit, self.expr(half, scope, joins))
             }
             _ => {
                 let ty = self.ty();
@@ -1083,6 +1107,17 @@ fn drops_are_early(mut e: &CoreExpr, starts: Option<Live>) -> bool {
                 };
                 return drops_are_early(then, with(els)) && drops_are_early(els, with(then));
             }
+            // Nothing that a hit finds is dropped at once: it is put nowhere instead.
+            CoreExpr::Probe {
+                args, hit, miss, ..
+            } => {
+                let with = |other: &CoreExpr| {
+                    let mut may = needed(other)?;
+                    may.extend(args);
+                    Some(may)
+                };
+                return drops_are_early(hit, with(miss)) && drops_are_early(miss, with(hit));
+            }
             CoreExpr::Open { fields, body, .. } => {
                 may = Some(fields.iter().map(|(_, b)| b.id).collect());
                 e = body;
@@ -1143,7 +1178,12 @@ fn take_unread(e: &mut CoreExpr) -> bool {
                 }
                 work.extend([&mut **cont, &mut **body]);
             }
-            CoreExpr::If { then, els, .. } => work.extend([&mut **then, &mut **els]),
+            CoreExpr::If {
+                then: a, els: b, ..
+            }
+            | CoreExpr::Probe {
+                hit: a, miss: b, ..
+            } => work.extend([&mut **a, &mut **b]),
             CoreExpr::Switch { cases, default, .. } => {
                 work.extend(cases.arms_mut());
                 work.extend(default.as_deref_mut());
@@ -1193,6 +1233,12 @@ fn all_read(e: &CoreExpr) -> (Live, BTreeSet<JoinId>) {
             CoreExpr::If { cond, then, els } => {
                 read.insert(*cond);
                 work.extend([&**then, &**els]);
+            }
+            CoreExpr::Probe {
+                args, hit, miss, ..
+            } => {
+                read.extend(args);
+                work.extend([&**hit, &**miss]);
             }
             CoreExpr::Switch {
                 scrut,
@@ -1256,7 +1302,12 @@ fn runs(e: &CoreExpr) -> Runs {
             | CoreExpr::Open { body, .. }
             | CoreExpr::Let { body, .. } => work.push(body),
             CoreExpr::Join { cont, body, .. } => work.extend([&**cont, &**body]),
-            CoreExpr::If { then, els, .. } => work.extend([&**then, &**els]),
+            CoreExpr::If {
+                then: a, els: b, ..
+            }
+            | CoreExpr::Probe {
+                hit: a, miss: b, ..
+            } => work.extend([&**a, &**b]),
             CoreExpr::Switch { cases, default, .. } => {
                 work.extend(cases.arms());
                 work.extend(default.as_deref());
@@ -1301,7 +1352,12 @@ fn opens_stand_where_they_read(e: &CoreExpr, runs: &Runs) -> bool {
             }
             CoreExpr::SetGlobal { body, .. } | CoreExpr::Drop { body, .. } => work.push(body),
             CoreExpr::Join { cont, body, .. } => work.extend([&**cont, &**body]),
-            CoreExpr::If { then, els, .. } => work.extend([&**then, &**els]),
+            CoreExpr::If {
+                then: a, els: b, ..
+            }
+            | CoreExpr::Probe {
+                hit: a, miss: b, ..
+            } => work.extend([&**a, &**b]),
             CoreExpr::Switch { cases, default, .. } => {
                 work.extend(cases.arms());
                 work.extend(default.as_deref());
@@ -1327,7 +1383,7 @@ fn needed(e: &CoreExpr) -> Option<Live> {
 /// reads nothing it gave up, and each drop is as early as it can be.
 #[test]
 fn every_way_gives_up_each_value_once() {
-    let mut seen = [0; 6];
+    let mut seen = [0; 8];
     functions(|seed, p, f| {
         let got = perceus(p, f.clone());
         let checked = ownership::check(p, &fields, &got, ownership::Body::Function);
@@ -1345,6 +1401,8 @@ fn every_way_gives_up_each_value_once() {
         seen[3] += usize::from(!f.body.always_reached().is_empty());
         seen[4] += text.matches("open").count();
         seen[5] += usize::from(text.contains("switch"));
+        seen[6] += usize::from(text.contains("hit(%"));
+        seen[7] += usize::from(text.contains("hit(_)"));
     });
     assert!(seen.iter().all(|n| *n > 5000), "{seen:?}");
 }
@@ -1432,6 +1490,138 @@ fn what_can_be_no_cell_gets_no_drop() {
         fewer += usize::from(want.len() < all);
     });
     assert!(fewer > 5000, "{fewer}");
+}
+
+/// A probe takes nothing, so what it is the last to read is dropped where a hit goes on
+/// and where a miss does. So is what only the other of the two reads, and what a hit
+/// finds and nothing reads is put nowhere.
+#[test]
+fn a_probe_leaves_each_way_to_drop_its_own() {
+    let mut p = pool();
+    let (t, int) = (con(&mut p, 1), int_ty(&mut p));
+    let set = |found, hit, miss| {
+        let body = probe(ProbeOp::ArraySet, &[0, 1, 2], Some(found), hit, miss);
+        let params = vec![bind(0, t), bind(1, int), bind(2, t)];
+        lines(&p, func(params, body, t))
+    };
+    // The array is what a miss gives.
+    assert_eq!(
+        set(bind(4, t), ret(4), ret(0)),
+        [
+            "probe ArraySet(%0, %1, %2)",
+            "  | hit(%4) ->",
+            "    drop %0",
+            "    drop %2",
+            "    ret %4",
+            "  | miss ->",
+            "    drop %2",
+            "    ret %0",
+        ]
+    );
+    // A hit reads the array again, a miss the value, and nothing what was found.
+    let again = || bound(bind(5, t), call(&[0]), ret(5));
+    assert_eq!(
+        set(bind(4, t), again(), ret(2)),
+        [
+            "probe ArraySet(%0, %1, %2)",
+            "  | hit(_) ->",
+            "    drop %2",
+            "    let %5 = call fn#0(%0)",
+            "    drop %0",
+            "    ret %5",
+            "  | miss ->",
+            "    drop %0",
+            "    ret %2",
+        ]
+    );
+    // What is found is dropped where it dies, as anything is.
+    assert_eq!(
+        set(bind(4, t), iff(1, ret(4), ret(0)), CoreExpr::NoArm),
+        [
+            "probe ArraySet(%0, %1, %2)",
+            "  | hit(%4) ->",
+            "    drop %2",
+            "    if %1",
+            "      drop %0",
+            "      ret %4",
+            "    else",
+            "      drop %4",
+            "      ret %0",
+            "  | miss ->",
+            "    no arm",
+        ]
+    );
+    // One local may be every operand, and one that is read after the join that the
+    // probe is in is dropped by neither way.
+    let body = probe(
+        ProbeOp::ArraySlice,
+        &[0, 0, 0],
+        Some(bind(4, t)),
+        jump(0, &[4]),
+        jump(0, &[0]),
+    );
+    let after = bound(bind(6, t), call(&[3, 5]), ret(6));
+    let f = func(
+        vec![bind(0, t), bind(3, t)],
+        join(0, vec![bind(5, t)], body, after),
+        t,
+    );
+    assert_eq!(
+        lines(&p, f),
+        [
+            "join j0(%5) after",
+            "  probe ArraySlice(%0, %0, %0)",
+            "    | hit(%4) ->",
+            "      drop %0",
+            "      jump j0(%4)",
+            "    | miss ->",
+            "      jump j0(%0)",
+            "let %6 = call fn#0(%3, %5)",
+            "drop %3",
+            "drop %5",
+            "ret %6",
+        ]
+    );
+}
+
+/// The checker of finished IR finds a probe that gives up too little or too much, on
+/// either way, and one that is made of the wrong things.
+#[test]
+fn a_probe_that_is_wrong_is_found() {
+    let mut p = pool();
+    let (t, int) = (con(&mut p, 1), int_ty(&mut p));
+    let drop = |local, body| CoreExpr::Drop {
+        local: LocalId(local),
+        body: Box::new(body),
+    };
+    let is_wrong = |body: CoreExpr| {
+        let f = func(vec![bind(0, t), bind(1, int)], body, t);
+        ownership::check(&p, &fields, &f, ownership::Body::Function).is_err()
+    };
+    let get = |args: &[u32], found: Option<CoreBind>, hit, miss| {
+        probe(ProbeOp::ArrayGet, args, found, hit, miss)
+    };
+    let found = || Some(bind(2, t));
+    let right = || drop(0, ret(2));
+    assert!(!is_wrong(get(&[0, 1], found(), right(), ret(0))));
+    assert!(!is_wrong(get(&[0, 1], None, ret(0), ret(0))));
+    // The array, and what was found, left behind.
+    assert!(is_wrong(get(&[0, 1], found(), ret(2), ret(0))));
+    assert!(is_wrong(get(&[0, 1], found(), ret(0), ret(0))));
+    // What was found, read where nothing was.
+    assert!(is_wrong(get(&[0, 1], found(), right(), ret(2))));
+    // The array given up on a miss and read after.
+    assert!(is_wrong(get(&[0, 1], found(), right(), drop(0, ret(0)))));
+    // An operand that is not there, or was given up.
+    assert!(is_wrong(get(&[0, 7], found(), right(), ret(0))));
+    assert!(is_wrong(drop(0, get(&[0, 1], found(), ret(2), ret(2)))));
+    // Too few operands, and no place for what it finds.
+    assert!(is_wrong(get(&[0], found(), right(), ret(0))));
+    let mut none = get(&[0, 1], None, ret(0), ret(0));
+    if let CoreExpr::Probe { binds, .. } = &mut none {
+        binds.clear();
+    }
+    assert!(is_wrong(none));
 }
 
 /// An update reads its base and its values, so each that is read last there is

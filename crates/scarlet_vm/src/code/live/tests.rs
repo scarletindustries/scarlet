@@ -327,7 +327,8 @@ fn values_written_together_clash() {
         (VReg(3), Role::Write),
         (VReg(5), Role::Look),
     ];
-    walk.clash();
+    walk.clash(Role::WriteOnHit);
+    walk.clash(Role::Write);
     let mut clashes: Vec<_> = walk.out.clashes.iter().map(|(a, b)| (a.0, b.0)).collect();
     clashes.sort_unstable();
     let want = [
@@ -573,7 +574,8 @@ fn a_write_gives_up_what_is_dropped_straight_after() {
     assert_eq!(held.overwritten, []);
     assert!(held.clashes.contains(&(VReg(4), VReg(0))));
     assert_eq!(settled(ins, &[4]).overwritten, [over(3, 0, 4)]);
-    // A write that may miss writes nothing then, so it gives up nothing.
+    // A write that may miss gives up what is dropped straight after a hit, and where it
+    // jumps the register is as it was.
     let ins = vec![
         of::write(4, [0, 1, 2], 0),
         of::drop(1),
@@ -582,7 +584,10 @@ fn a_write_gives_up_what_is_dropped_straight_after() {
         of::drop(0),
         of::ret(1),
     ];
-    assert_eq!(settled(ins, &[4]).overwritten, []);
+    let held = settled(ins, &[4]);
+    assert_eq!(held.overwritten, [over(1, 1, 4)]);
+    // So what it writes may be in the register of any value that only the miss needs.
+    assert_eq!(held.clashes, []);
     // Each of two written at once may.
     let ins = vec![
         of::open([Some(4), Some(6)], 0),
@@ -709,17 +714,6 @@ fn a_drop_with_little_between_it_and_a_return_does_nothing() {
 fn a_drop_of_what_may_hold_the_cell_stays_in_front_of_taking_it_apart() {
     let idle = |ins: Vec<Ins<VReg>>, labels: &[usize]| idle_steps(ins, labels).0;
     let none: [usize; 0] = [];
-    let index = |dst: u32, src: u32, at: u32| Ins::ArrayIndex {
-        dst: Dst(VReg(dst)),
-        src: Src(VReg(src)),
-        index: Src(VReg(at)),
-    };
-    let or = |dst: u32, src: u32, at: u32| Ins::ArrayIndexOr {
-        dst: Dst(VReg(dst)),
-        src: Src(VReg(src)),
-        index: Src(VReg(at)),
-        default: Shared(VReg(at)),
-    };
     let element = |dst: u32, src: u32| Ins::ArrayElem {
         dst: Dst(VReg(dst)),
         src: Src(VReg(src)),
@@ -733,7 +727,7 @@ fn a_drop_of_what_may_hold_the_cell_stays_in_front_of_taking_it_apart() {
     let opened = || of::open([Some(4), None], 3);
     let ins = vec![of::mv(3, 1), of::drop(0), opened(), of::ret(4)];
     assert_eq!(idle(ins, &[]), [1]);
-    for read in [field(3, 0), element(3, 0), index(3, 0, 1), or(3, 0, 1)] {
+    for read in [field(3, 0), element(3, 0)] {
         let ins = vec![read, of::drop(0), opened(), of::ret(4)];
         assert_eq!(idle(ins, &[]), none);
         // What is dropped after it is in front of the return alone.
@@ -743,14 +737,10 @@ fn a_drop_of_what_may_hold_the_cell_stays_in_front_of_taking_it_apart() {
         let ins = vec![read, of::drop(0), of::jump(0), opened(), of::ret(4)];
         assert_eq!(idle(ins, &[3]), none);
     }
-    let ins = vec![
-        of::find(3, [0, 1], 0),
-        of::drop(0),
-        opened(),
-        of::ret(4),
-        of::ret(1),
-    ];
-    assert_eq!(idle(ins, &[4]), none);
+    for read in [of::find(3, [0, 1], 0), of::get(Some(3), [0, 1], 0)] {
+        let ins = vec![read, of::drop(0), opened(), of::ret(4), of::ret(1)];
+        assert_eq!(idle(ins, &[4]), none);
+    }
 }
 
 /// Groups of drops that meet are found together, whichever of them is, and

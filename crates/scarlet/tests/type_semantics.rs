@@ -147,8 +147,8 @@ reject_case! {
 
 #[test]
 fn index_negative_returns_none() {
-    // `Op::Index`'s own `idx >= 0` guard rejects a negative index. That's a
-    // different path from an out-of-bounds `arr.get` returning `None`.
+    // A negative index is refused before the length is asked for, so an index past the
+    // end does not cover it.
     run_outputs(
         "pub fn main() {\n\
          \txs = [10, 20, 30]\n\

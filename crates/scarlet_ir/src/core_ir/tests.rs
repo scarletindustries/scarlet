@@ -433,3 +433,27 @@ fn an_update_reads_its_base_and_builds_its_constructor() {
     built.sort_by_key(|v| v.variant_idx);
     assert_eq!(built, [vref(7, 1), vref(7, 2)]);
 }
+
+/// What either arm of a probe builds is built by the probe.
+#[test]
+fn a_probe_builds_what_its_arms_do() {
+    let made = |idx| CoreExpr::Let {
+        bind: bind(9, RTy(0)),
+        rhs: Atom::Ctor {
+            variant: vref(7, idx),
+            fields: Vec::new(),
+        },
+        body: Box::new(ret()),
+    };
+    let probe = CoreExpr::Probe {
+        op: ProbeOp::ArrayGet,
+        args: vec![LocalId(0), LocalId(1)],
+        binds: vec![None],
+        hit: Box::new(made(1)),
+        miss: Box::new(made(2)),
+    };
+    let mut built = Vec::new();
+    probe.for_each_variant(|v| built.push(v.variant_idx));
+    built.sort_unstable();
+    assert_eq!(built, [1, 2]);
+}

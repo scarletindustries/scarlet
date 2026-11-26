@@ -1,14 +1,14 @@
 //! Core IR to instructions, over values that have no register yet.
 //!
 //! A value is a Core IR local, so `let %2 = IntAdd(%0, %1)` becomes `IntAdd`
-//! of values 0 and 1 into 2, and a value no local holds gets a number of its
-//! own above them.
+//! of values 0 and 1 into 2.
 //!
 //! A `switch` with two outcomes becomes a test that jumps to the second, and one
 //! with more becomes a jump by a table when that is not much longer than the cases
-//! are many. Otherwise it is a test for each value, in order. A join's continuation
-//! is placed after its body, and a jump to it is a `Move` for each parameter and a
-//! `Jump`. So every jump goes forward.
+//! are many. Otherwise it is a test for each value, in order. A probe is one
+//! instruction that goes on with the hit or jumps to the miss behind it, which
+//! [`layout`](super::layout) may move out of the hit's way. A join's continuation is placed after its body, and a jump to it is a `Move` for each
+//! parameter and a `Jump`. So every jump goes forward.
 //!
 //! A call names its callee in one of three ways. A function known when the
 //! program loads is called by name, and that has an instruction for each number
@@ -26,17 +26,17 @@ use std::collections::HashMap;
 use scarlet_ir::TypeId;
 use scarlet_ir::core_ir::{
     Arms, Atom, Callee, Cases, Const, ConstId, CoreBind, CoreExpr, CoreFn, FloatKey, FuncIdx,
-    JoinId, Load, LocalId, MAX_PARAMS, PrimOp, VariantRef,
+    JoinId, Load, LocalId, MAX_PARAMS, PrimOp, ProbeOp, VariantRef,
 };
 use scarlet_ir::intrinsic::Intrinsic;
 use scarlet_ir::rty::{ForeignRTy, Prim, RTy, Repr, ResolvedPool};
 use scarlet_ir::tivec::Idx;
 
-use super::forms::{CtorOf, Form};
+use super::forms::Form;
 use super::ins::{
     Arg, ArgList, Args, Assign, AssignList, BitsOp, Dead, Dst, DstList, Hit, Ins, IntTable, Label,
-    LastReg, Lists, LookList, Looks, Makes, MaybeDst, Newline, OwnEntry, OwnRoom, PlaceList, Role,
-    Sets, ShareList, Shared, Shares, Src, Table, Taken, VReg,
+    LastReg, Lists, LookList, Looks, Makes, MaybeDst, MaybeHit, Newline, OwnEntry, OwnRoom,
+    PlaceList, Role, Sets, ShareList, Shared, Shares, Src, Table, Taken, VReg,
 };
 use super::{ReadsClosure, Source, Tables, Unfit, Why, add, built};
 use crate::heap::{Ctor, Layout};
@@ -108,6 +108,17 @@ pub(super) struct Draft {
     pub(super) kinds: Vec<Option<Makes>>,
     /// What it reads of the closure it runs as.
     pub(super) closure: ReadsClosure,
+    /// The misses of its probes that have the steps of a join or of another miss
+    /// behind them.
+    pub(super) misses: Vec<Miss>,
+}
+
+/// The steps of a probe's miss. Nothing but the probe goes to them.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Miss {
+    pub(super) from: Label,
+    /// The first that is not one of them.
+    pub(super) to: Label,
 }
 
 /// The instructions for `core`. `this` is the function's own index, when it
@@ -134,23 +145,23 @@ pub(super) fn translate<'c>(
         landed: None,
         joins: HashMap::new(),
         words: Vec::new(),
-        values,
-        kinds,
         closure: survey.closure,
         reads: survey.reads,
         numbers: HashMap::new(),
+        misses: Vec::new(),
     };
-    t.expr(&core.body)?;
+    t.expr(&core.body, None)?;
     let labels: Option<Vec<usize>> = t.labels.into_iter().collect();
     Ok(Draft {
         steps: t.steps,
         lists: t.lists,
         labels: labels.ok_or(Unfit::Broken(Broken::NoPlace))?,
-        values: t.values,
+        values,
         params: core.params.iter().map(|p| of(p.id)).collect(),
         words: t.words,
-        kinds: t.kinds,
+        kinds,
         closure: t.closure,
+        misses: t.misses,
     })
 }
 
@@ -191,17 +202,14 @@ struct Translator<'c> {
     joins: HashMap<JoinId, Join<'c>>,
     /// [`Draft::words`].
     words: Vec<(Label, VReg)>,
-    /// One past the highest value the function names. A value that no local
-    /// holds gets a number from here.
-    values: u32,
-    /// [`Draft::kinds`].
-    kinds: Vec<Option<Makes>>,
     /// [`Draft::closure`].
     closure: ReadsClosure,
     /// How many times each local is read.
     reads: HashMap<LocalId, u32>,
     /// Each local met so far that is a constant number.
     numbers: HashMap<LocalId, Number>,
+    /// [`Draft::misses`].
+    misses: Vec<Miss>,
 }
 
 impl<'c> Translator<'c> {
@@ -270,17 +278,6 @@ impl<'c> Translator<'c> {
             *at = Some(here);
         }
         self.landed = Some(here);
-    }
-
-    /// A value that no local holds, which may be what `kind` says.
-    fn value(&mut self, kind: Makes) -> Result<VReg, Unfit> {
-        let v = VReg(self.values);
-        self.values = self
-            .values
-            .checked_add(1)
-            .ok_or(Unfit::TooMany(Limit::Values))?;
-        self.kinds.push(Some(kind));
-        Ok(v)
     }
 
     fn push(&mut self, ins: Ins<VReg>) {
@@ -461,7 +458,9 @@ impl<'c> Translator<'c> {
         jump
     }
 
-    fn expr(&mut self, e: &'c CoreExpr) -> Result<(), Unfit> {
+    /// Write `e`. The steps of a join or of a miss come behind it, at `behind`, when it
+    /// says where.
+    fn expr(&mut self, e: &'c CoreExpr, behind: Option<Label>) -> Result<(), Unfit> {
         let mut e = e;
         loop {
             match e {
@@ -488,25 +487,6 @@ impl<'c> Translator<'c> {
                     });
                     self.give_up_all(&after.drops);
                     e = after.rest;
-                }
-                CoreExpr::Let {
-                    bind,
-                    rhs:
-                        Atom::Intrinsic {
-                            intrinsic: Intrinsic::MapGet,
-                            args,
-                        },
-                    body,
-                } if let [m, k] = args.as_slice()
-                    && let Some(arms) = self.only_matched(bind.id, body) =>
-                {
-                    let lookup = Lookup {
-                        map: src(*m),
-                        key: src(*k),
-                        result: *bind,
-                        drops: head(body).drops,
-                    };
-                    e = self.find(&lookup, arms)?;
                 }
                 CoreExpr::Let {
                     bind,
@@ -556,7 +536,7 @@ impl<'c> Translator<'c> {
                 } => {
                     let to = self.label()?;
                     self.joins.insert(*id, Join { to, params });
-                    self.expr(body)?;
+                    self.expr(body, Some(to))?;
                     self.place(to);
                     // It is in scope only in the body.
                     self.joins.remove(id);
@@ -572,9 +552,29 @@ impl<'c> Translator<'c> {
                         },
                     };
                     self.push(jump);
-                    self.expr(then)?;
+                    self.expr(then, None)?;
                     self.place(to);
                     e = els;
+                }
+                CoreExpr::Probe {
+                    op,
+                    args,
+                    binds,
+                    hit,
+                    miss,
+                } => {
+                    let to = self.label()?;
+                    let probe = probe(*op, args, binds, to)?;
+                    self.push(probe);
+                    self.expr(hit, Some(to))?;
+                    self.place(to);
+                    if let Some(behind) = behind {
+                        self.misses.push(Miss {
+                            from: to,
+                            to: behind,
+                        });
+                    }
+                    e = miss;
                 }
                 CoreExpr::Open {
                     cell,
@@ -717,7 +717,7 @@ impl<'c> Translator<'c> {
         };
         for (to, arm) in arms {
             self.place(to);
-            self.expr(arm)?;
+            self.expr(arm, None)?;
         }
         self.place(to);
         Ok(last)
@@ -785,7 +785,7 @@ impl<'c> Translator<'c> {
             let tested = a.only.map(|v| (v, a, b));
             if let Some((v, yes, no)) = tested.or(b.only.map(|v| (v, b, a))) {
                 let to = self.test_variant(scrut, ty, v)?;
-                self.expr(yes.e)?;
+                self.expr(yes.e, None)?;
                 self.place(to);
                 if no.plain {
                     self.words.push((to, of(scrut)));
@@ -980,7 +980,7 @@ impl<'c> Translator<'c> {
         }
         let next = test(self, scrut, last)?;
         self.place(here);
-        self.expr(arm)?;
+        self.expr(arm, None)?;
         self.place(next);
         Ok(())
     }
@@ -1080,46 +1080,6 @@ impl<'c> Translator<'c> {
                 },
                 _ => return Err(Missing::PrintArity(*intrinsic).into()),
             },
-            // `array::put` gives the array back as it was when it has no
-            // such index.
-            Atom::Intrinsic {
-                intrinsic: Intrinsic::ArrayPut,
-                args,
-            } if let [xs, i, x] = args.as_slice() => {
-                let (miss, after) = (self.label()?, self.label()?);
-                self.array_set(reg, [*xs, *i, *x], miss);
-                self.push(Ins::Jump { to: after });
-                self.place(miss);
-                self.push(Ins::Move {
-                    dst,
-                    src: Arg::shared(of(*xs)),
-                });
-                self.place(after);
-                return Ok(());
-            }
-            // `array::set` says which it was: `Ok` of the new array, or
-            // `Err(Nil)`.
-            Atom::Intrinsic {
-                intrinsic: Intrinsic::ArraySet,
-                args,
-            } if let [xs, i, x] = args.as_slice() => {
-                let (miss, after) = (self.label()?, self.label()?);
-                let (made, nil) = (self.value(Makes::Any)?, self.value(Makes::Any)?);
-                self.array_set(made, [*xs, *i, *x], miss);
-                let abi = self.source.abi;
-                let ok = self.build(dst, abi.ok, [made])?;
-                self.push(ok);
-                self.push(Ins::Jump { to: after });
-                self.place(miss);
-                self.push(Ins::Const {
-                    dst: Dst(nil),
-                    value: Value::NIL,
-                });
-                let err = self.build(dst, abi.err, [nil])?;
-                self.push(err);
-                self.place(after);
-                return Ok(());
-            }
             Atom::Intrinsic {
                 intrinsic: Intrinsic::FloatFromInt,
                 args,
@@ -1156,16 +1116,6 @@ impl<'c> Translator<'c> {
         };
         self.push(ins);
         Ok(())
-    }
-
-    /// A new cell for a constructor the VM builds on its own.
-    fn build<const N: usize>(
-        &mut self,
-        dst: Dst<VReg>,
-        ctor: CtorOf<N>,
-        fields: [VReg; N],
-    ) -> Result<Ins<VReg>, Unfit> {
-        self.ctor(dst, ctor.ctor(), &fields)
     }
 
     fn ctor(&mut self, dst: Dst<VReg>, ctor: Ctor, fields: &[VReg]) -> Result<Ins<VReg>, Unfit> {
@@ -1221,19 +1171,6 @@ impl<'c> Translator<'c> {
         })
     }
 
-    /// The write that `array::put` and `array::set` both are: `xs` with `x`
-    /// at index `i` goes to `dst`, and an `i` that `xs` does not have
-    /// continues at `miss`.
-    fn array_set(&mut self, dst: VReg, [xs, i, x]: [LocalId; 3], miss: Label) {
-        self.push(Ins::ArraySet {
-            dst: Hit(dst),
-            src: Arg::shared(of(xs)),
-            index: src(i),
-            value: Arg::shared(of(x)),
-            miss,
-        });
-    }
-
     /// `locals`, for an instruction that shares each.
     fn shares<const N: usize>(
         &mut self,
@@ -1276,10 +1213,6 @@ impl<'c> Translator<'c> {
             _ => Err(arity(Arity::Two)),
         };
         let both = || two().map(|(a, b)| (src(a), src(b)));
-        let three = || match args {
-            [a, b, c] => Ok((src(*a), src(*b), src(*c))),
-            _ => Err(arity(Arity::Three)),
-        };
         let int = |t: &Self, op| two().map(|(a, b)| t.int_arith(dst, op, a, b));
         let int_compare = |t: &Self, op| two().map(|(a, b)| t.int_compare(dst, op, a, b));
         let float = |t: &Self, op| two().map(|(a, b)| t.float_arith(dst, op, a, b));
@@ -1371,19 +1304,6 @@ impl<'c> Translator<'c> {
                 })
             }
             PrimOp::ArrayConcat => both().map(|(a, b)| Ins::ArrayConcat { dst, a, b }),
-            PrimOp::ArraySlice => three().map(|(src, start, end)| Ins::ArraySlice {
-                dst,
-                src,
-                start,
-                end,
-            }),
-            PrimOp::ArrayIndex => both().map(|(src, index)| Ins::ArrayIndex { dst, src, index }),
-            PrimOp::ArrayIndexOr => three().map(|(src, index, Src(default))| Ins::ArrayIndexOr {
-                dst,
-                src,
-                index,
-                default: Shared(default),
-            }),
             PrimOp::MakeTuple => Ok(match *args {
                 [a, b] => Ins::Tuple2 {
                     dst,
@@ -1402,107 +1322,6 @@ impl<'c> Translator<'c> {
                 one().map(|src| Ins::Field { dst, src, index })
             }
         }
-    }
-
-    /// The cases of the switch that what a lookup in a map gives goes straight into,
-    /// when nothing else reads that and the case for `Some` takes it apart or drops it.
-    /// Then no `Option` need be made. `looked` is what the lookup gives and `e` what
-    /// comes after it.
-    fn only_matched<'e>(&self, looked: LocalId, e: &'e CoreExpr) -> Option<OptionArms<'e>> {
-        let CoreExpr::Switch {
-            scrut,
-            cases: Cases::Variant { ty, arms },
-            default,
-        } = head(e).rest
-        else {
-            return None;
-        };
-        let abi = &self.source.program.abi;
-        let of = |v: VariantRef| {
-            let is = |(variants, _): &&(Vec<u16>, CoreExpr)| variants.contains(&v.variant_idx);
-            let arm = arms.iter().find(is).map(|(_, e)| e);
-            arm.or(default.as_deref())
-        };
-        if *scrut != looked || *ty != abi.some.type_id {
-            return None;
-        }
-        let (some, none) = (of(abi.some)?, of(abi.none)?);
-        if std::ptr::eq(some, none) {
-            return None;
-        }
-        let mut reads = 1usize;
-        for arm in [some, none] {
-            let drops = head(arm).drops.into_iter();
-            reads = reads.saturating_add(drops.filter(|l| *l == looked).count());
-        }
-        let mut value = None;
-        if let CoreExpr::Open { cell, fields, .. } = head(some).rest
-            && *cell == looked
-        {
-            let [(0, bind)] = fields.as_slice() else {
-                return None;
-            };
-            value = Some(bind.id);
-            reads = reads.saturating_add(1);
-        }
-        let all = self.reads.get(&looked).copied().unwrap_or(0);
-        (all as usize == reads).then_some(OptionArms { value, some, none })
-    }
-
-    /// The lookup and the switch on what it gives. Gives what is left of the case for
-    /// a key that is not there, which runs next.
-    fn find(&mut self, lookup: &Lookup, arms: OptionArms<'c>) -> Result<&'c CoreExpr, Unfit> {
-        let to = self.label()?;
-        let (dst, drop) = match arms.value {
-            Some(value) => (of(value), false),
-            None => self.unread(lookup.result.ty)?,
-        };
-        self.push(Ins::MapFind {
-            dst: Hit(dst),
-            map: lookup.map,
-            key: lookup.key,
-            to,
-        });
-        let mut found = self.after_find(lookup, arms.some);
-        // The lookup has taken it apart.
-        if arms.value.is_some()
-            && let CoreExpr::Open { body, .. } = found
-        {
-            found = body;
-        }
-        if drop {
-            self.push(Ins::Drop { reg: Dead(dst) });
-        }
-        self.expr(found)?;
-        self.place(to);
-        Ok(self.after_find(lookup, arms.none))
-    }
-
-    /// Where the value goes that a lookup finds and nothing reads, and whether it gets
-    /// a drop there. `option` is the type of what the lookup gives.
-    fn unread(&mut self, option: RTy) -> Result<(VReg, bool), Unfit> {
-        let pool = &self.source.program.pool;
-        let no_type = |_: ForeignRTy| Broken::NoType;
-        let (kind, drop) = match pool.con_arg(option, 0).map_err(no_type)? {
-            Some(ty) => (
-                kind_of(pool, ty).map_err(no_type)?,
-                pool.gets_drop(ty).map_err(no_type)?,
-            ),
-            None => (Makes::Any, true),
-        };
-        Ok((self.value(kind)?, drop))
-    }
-
-    /// What is left of `arm`, once what it starts by giving up is given up, and
-    /// what was before it.
-    fn after_find(&mut self, lookup: &Lookup, arm: &'c CoreExpr) -> &'c CoreExpr {
-        let Head { drops, rest } = head(arm);
-        for local in lookup.drops.iter().chain(&drops) {
-            if *local != lookup.result.id {
-                self.give_up(*local);
-            }
-        }
-        rest
     }
 }
 
@@ -1591,6 +1410,58 @@ fn number(c: Option<&Const>) -> Option<Number> {
         Const::Float(x) => Some(Number::Float(Float::new(*x))),
         Const::String(_) | Const::Binary { .. } => None,
     }
+}
+
+/// The instruction that asks for `op` of `args`, and goes on at `miss` where it is not
+/// there.
+fn probe(
+    op: ProbeOp,
+    args: &[LocalId],
+    binds: &[Option<CoreBind>],
+    miss: Label,
+) -> Result<Ins<VReg>, Broken> {
+    let odd = Broken::Probe {
+        op,
+        args: args.len(),
+        binds: binds.len(),
+    };
+    let [bind] = binds else {
+        return Err(odd);
+    };
+    let to = bind.as_ref().map(|bind| of(bind.id));
+    let dst = MaybeHit::new(to);
+    Ok(match (op, args) {
+        (ProbeOp::ArraySlice, [xs, start, end]) => Ins::ArraySlice {
+            dst,
+            src: src(*xs),
+            start: src(*start),
+            end: src(*end),
+            miss,
+        },
+        (ProbeOp::ArraySet, [xs, i, x]) if let Some(to) = to => Ins::ArraySet {
+            dst: Hit(to),
+            src: Arg::shared(of(*xs)),
+            index: src(*i),
+            value: Arg::shared(of(*x)),
+            miss,
+        },
+        // A write that nothing reads asks whether the array has the index.
+        (ProbeOp::ArrayGet, [xs, i]) | (ProbeOp::ArraySet, [xs, i, _]) => Ins::ArrayGet {
+            dst,
+            src: src(*xs),
+            index: src(*i),
+            miss,
+        },
+        (ProbeOp::MapGet, [m, k]) => Ins::MapGet {
+            dst,
+            map: src(*m),
+            key: src(*k),
+            miss,
+        },
+        (ProbeOp::ArrayGet | ProbeOp::ArraySlice | ProbeOp::ArraySet | ProbeOp::MapGet, _) => {
+            return Err(odd);
+        }
+    })
 }
 
 // The instruction that does `op`, or `None` when there is none that holds the
@@ -1705,24 +1576,6 @@ fn giving_up(local: LocalId, e: &CoreExpr) -> Option<Head<'_>> {
     (drops.len() < all).then_some(Head { drops, rest })
 }
 
-/// What [`Translator::only_matched`] found.
-struct OptionArms<'e> {
-    /// The local that `Some`'s value goes to, when something reads it.
-    value: Option<LocalId>,
-    some: &'e CoreExpr,
-    none: &'e CoreExpr,
-}
-
-/// A lookup in a map that goes into the switch on what it gives.
-struct Lookup {
-    map: Src<VReg>,
-    key: Src<VReg>,
-    /// What it gives.
-    result: CoreBind,
-    /// What is given up between the two.
-    drops: Vec<LocalId>,
-}
-
 /// What a value of type `ty` may be.
 fn kind_of(pool: &ResolvedPool, ty: RTy) -> Result<Makes, ForeignRTy> {
     Ok(match (pool.repr(ty)?, pool.prim_of(ty)?) {
@@ -1827,6 +1680,18 @@ fn survey(f: &CoreFn) -> Survey<'_> {
                 stack.extend(default.as_deref());
             }
             CoreExpr::NoArm => {}
+            CoreExpr::Probe {
+                args,
+                binds,
+                hit,
+                miss,
+                ..
+            } => {
+                args.iter().for_each(|x| out.read(*x));
+                binds.iter().flatten().for_each(|b| out.bind(b));
+                stack.push(hit);
+                stack.push(miss);
+            }
             CoreExpr::If { cond, then, els } => {
                 out.read(*cond);
                 stack.push(then);

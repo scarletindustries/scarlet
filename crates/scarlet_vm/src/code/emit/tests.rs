@@ -170,7 +170,7 @@ fn an_audited_load_checks_what_is_written() {
     assert!(checks(".more").iter().all(|(_, may)| *may == int));
     // What a lookup finds is checked too.
     let looked = body(&code, named(&code, ".looked"));
-    let at = looked.iter().position(|i| i.op() == Op::MapFind);
+    let at = looked.iter().position(|i| i.op() == Op::MapGet);
     let after = &looked[at.expect("a lookup") + 1];
     assert!(matches!(after, Ins::AuditMade { may, .. } if *may == word));
     let main = checks("main");

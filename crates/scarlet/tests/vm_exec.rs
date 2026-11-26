@@ -52,10 +52,9 @@ run_case! {
         "1000001\ngrouped\nTrue\n",
     ),
 
-    // `range[i] or default` lowers to `Op::Index` plus an Option match. The golden
-    // examples only index arrays (`numbers[0] or 0`). A lazy Range scrutinee takes
-    // a different arm inside `Op::Index` (`range_elem` instead of `Seq::get`). An
-    // index in bounds gives the element, and one out of bounds gives the default.
+    // The golden examples only index arrays (`numbers[0] or 0`), and a range has no
+    // cells to read. An index in bounds gives the element, and one out of bounds gives
+    // the default.
     range_index_or_else: (
         "pub fn main() {\n\
          \tr = 5..10\n\
@@ -65,8 +64,8 @@ run_case! {
         "7\n-1\n",
     ),
 
-    // `range[i]` (no `or`) lowers to `Op::Index`, producing an Option. The Range
-    // arm must offset from the start (`5 + 2 = 7`), and an out-of-bounds index must
+    // `range[i]` with no `or` gives an Option. A range has to
+    // offset from the start (`5 + 2 = 7`), and an out-of-bounds index must
     // read as `None`, not a wrapped value.
     range_index_option: (
         "pub fn main() {\n\
@@ -173,7 +172,7 @@ run_case! {
         "3.5\n0.0\n-3.0\n",
     ),
 
-    // `Op::Index` returns an `Option`, with `None` out of bounds, not a wrap or panic.
+    // `xs[i]` is an `Option`, which is `None` out of bounds, with no wrap and no panic.
     array_index_yields_option: (
         "pub fn main() {\n\
          \txs = [10, 20, 30]\n\
@@ -693,10 +692,9 @@ run_case! {
     ),
 }
 
-/// The fused op evaluates its default eagerly, so `lower` may only fuse a
-/// *pure* one. A call has an effect and must stay behind the lazy match.
+/// The default is on the miss arm of the probe, so it runs only on a miss.
 #[test]
-fn index_or_does_not_evaluate_an_impure_default() {
+fn an_or_on_an_index_does_not_evaluate_an_impure_default() {
     run_outputs(
         "fn side() Int {\n\
          \tprintln('evaluated')\n\
@@ -710,12 +708,10 @@ fn index_or_does_not_evaluate_an_impure_default() {
     );
 }
 
-/// This tests both encodings and every boundary: a hit, past the end,
-/// negative and empty. `False` is a nullary constructor, not a constant, so it
-/// exercises the pushed-default path that a grid walk's `row[x] or False`
-/// depends on.
+/// A hit, past the end, negative and empty, with a default that is a number and one
+/// that is a constructor with no fields.
 #[test]
-fn index_or_covers_both_encodings_and_every_boundary() {
+fn an_or_on_an_index_covers_every_boundary() {
     run_outputs(
         "fn f(a Array(Int), i Int) Int { a[i] or -1 }\n\
          pub fn main() {\n\

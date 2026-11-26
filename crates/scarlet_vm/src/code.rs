@@ -6,7 +6,7 @@
 //! something about an operand it picks an instruction for that: one that
 //! holds a constant, or one that compares and jumps.
 //!
-//! A function goes through five passes, and each hands the next a value:
+//! A function goes through six passes, and each hands the next a value:
 //!
 //! 1. [`translate`] makes its instructions, over values that have no register
 //!    yet ([`Draft`]).
@@ -16,8 +16,10 @@
 //! 3. [`alloc`] gives each value a register, and leaves out what that has made
 //!    do nothing ([`alloc::Assigned`]).
 //! 4. [`moves`] makes each tail call to a function it knows moves and a jump
-//!    ([`Fitted`]).
-//! 5. [`emit`] puts every function's instructions in one array, where a jump
+//!    ([`moves::Body`]).
+//! 5. [`layout`] puts what a probe does on a miss behind the rest, where that takes
+//!    a jump out of the hit ([`Fitted`]).
+//! 6. [`emit`] puts every function's instructions in one array, where a jump
 //!    and a call name a place in it.
 //!
 //! Before that, every constructor the program names is given what it is to the
@@ -46,6 +48,7 @@ mod emit;
 mod forms;
 #[macro_use]
 mod ins;
+mod layout;
 mod literals;
 mod live;
 mod moves;
@@ -55,8 +58,8 @@ pub(crate) use forms::{Built, CtorOf};
 pub(crate) use ins::{
     Arg, ArgList, Args, Assign, AssignList, BinaryId, BitsOp, BlockId, Dead, DeadList, Dst,
     DstList, EntryPc, Hands, Hit, Ins, IntTable, Last, Lists, LookList, Looks, Makes, MaybeDst,
-    Newline, Op, Pc, PlaceList, Reg, Room, Sets, ShareList, Shared, Shares, Src, Table, Taken,
-    TextId, WhyId,
+    MaybeHit, Newline, Op, Pc, PlaceList, Reg, Room, Sets, ShareList, Shared, Shares, Src, Table,
+    Taken, TextId, WhyId,
 };
 
 use forms::Forms;
@@ -384,8 +387,10 @@ fn fit_core(
         return Err(Unfit::TooMany(Limit::Parameters));
     }
     let mut draft = translate::translate(source, core, this, tables)?;
+    let misses = std::mem::take(&mut draft.misses);
     let held = live::settle(&mut draft)?;
-    moves::expand(alloc::allocate(draft, &held)?)
+    let body = moves::expand(alloc::allocate(draft, &held)?)?;
+    layout::lay_out(body, &misses)
 }
 
 /// Whether the VM runs built-in `i` when called with `argc` arguments. A
@@ -426,7 +431,7 @@ fn built(i: Intrinsic, argc: usize) -> bool {
         Intrinsic::IoWriteFile | Intrinsic::CryptoHmacSha256 | Intrinsic::CryptoConstEq => 2,
         Intrinsic::CryptoP256Verify | Intrinsic::CryptoEd25519Verify => 3,
         Intrinsic::MapKeys | Intrinsic::MapValues | Intrinsic::MapSize | Intrinsic::MapToList => 1,
-        Intrinsic::MapGet | Intrinsic::MapHas | Intrinsic::MapDelete => 2,
+        Intrinsic::MapHas | Intrinsic::MapDelete => 2,
         Intrinsic::MapSet => 3,
         Intrinsic::StringInspect
         | Intrinsic::StringLength

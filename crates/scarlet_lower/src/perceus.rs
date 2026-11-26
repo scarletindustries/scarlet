@@ -4,7 +4,7 @@
 //! finding a value's last use is one backward scan.
 //!
 //! A backward liveness walk inserts a `Drop` after each heap bind's last read.
-//! Where `If` and `Switch` branches split, ownership is evened out so every path
+//! Where `If`, `Switch` and `Probe` branches split, ownership is evened out so every path
 //! releases every owned slot exactly once (Fig. 5's Δ-rule). A return gives up
 //! the value it returns, a tail call its arguments, and a jump its arguments
 //! and what the continuation it goes to owns.
@@ -17,7 +17,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::spine::{End, Frame, peel};
-use super::{Atom, Cases, CoreBind, CoreExpr, CoreFn, JoinId, LocalId, PrimOp, VariantRef};
+use super::{
+    Atom, Cases, CoreBind, CoreExpr, CoreFn, JoinId, LocalId, PrimOp, ProbeOp, VariantRef,
+};
 use crate::program::InternalLinkError;
 use crate::typed_ir::{RTy, ResolvedPool, Shape, Shapes};
 use scarlet_ir::tivec::TiVec;
@@ -364,6 +366,13 @@ impl Perceus<'_> {
                 Ok((CoreExpr::Jump { to, args }, live))
             }
             End::If { cond, then, els } => self.drop_if(cond, *then, *els),
+            End::Probe {
+                op,
+                args,
+                binds,
+                hit,
+                miss,
+            } => self.drop_probe(op, args, binds, *hit, *miss),
             End::Switch {
                 scrut,
                 cases,
@@ -389,6 +398,37 @@ impl Perceus<'_> {
         self.read(&mut live, cond);
         let (then, els) = (Box::new(then), Box::new(els));
         Ok((CoreExpr::If { cond, then, els }, live))
+    }
+
+    /// A miss takes none of `args`, so each arm owns them all, and one that does not
+    /// read them again drops them at its head. What a hit finds and nothing reads is
+    /// put nowhere.
+    fn drop_probe(
+        &mut self,
+        op: ProbeOp,
+        args: Vec<LocalId>,
+        mut binds: Vec<Option<CoreBind>>,
+        hit: CoreExpr,
+        miss: CoreExpr,
+    ) -> Result<(CoreExpr, Live), InternalLinkError> {
+        let (hit, mut live_h) = self.drop_pass(hit)?;
+        for bind in &mut binds {
+            *bind = bind.filter(|b| live_h.remove(&b.id));
+        }
+        let (miss, live_m) = self.drop_pass(miss)?;
+        let mut live = live_h.clone();
+        live.extend(&live_m);
+        args.iter().for_each(|x| self.read(&mut live, *x));
+        let hit = Box::new(self.drops_at_head(without(&live, &live_h), hit)?);
+        let miss = Box::new(self.drops_at_head(without(&live, &live_m), miss)?);
+        let probe = CoreExpr::Probe {
+            op,
+            args,
+            binds,
+            hit,
+            miss,
+        };
+        Ok((probe, live))
     }
 
     fn drop_switch(

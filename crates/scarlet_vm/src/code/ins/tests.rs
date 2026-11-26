@@ -182,11 +182,11 @@ fn only_these_instructions_end_or_jump() {
         table: Table { first: 2, last: 1 },
     };
     assert!(targets::<VReg>(&lost, &lists).is_empty());
-    let hit: Ins<VReg> = Ins::MapFind {
-        dst: Hit(VReg(0)),
+    let hit: Ins<VReg> = Ins::MapGet {
+        dst: MaybeHit::new(Some(VReg(0))),
         map: Src(VReg(1)),
         key: Src(VReg(2)),
-        to: Label(4),
+        miss: Label(4),
     };
     assert!(hit.falls_through());
     assert_eq!(targets(&hit, &lists), [Label(4)]);
@@ -717,7 +717,7 @@ fn the_listing_shows_every_operand() {
         let jumps = !targets(ins, &code.lists).is_empty();
         assert_eq!(line.contains(" -> "), jumps, "{line}");
     }
-    assert!(text.contains("= MapFind(r2, r3) -> "), "{text}");
+    assert!(text.contains("= MapGet(r2, r3) -> "), "{text}");
 }
 
 /// A test of a variant says which, and whether it has fields. A field of a
@@ -769,7 +769,7 @@ fn the_listing_shows_a_variant_by_its_number() {
     for (f, part) in [
         (2, "JumpUnlessTag(r2, .1(..)) ->"),
         (3, "JumpUnlessTag(r2, .0) ->"),
-        (4, "SwitchInt(r2, 1 3 -> 5, 2 -> 7, _ -> 1)\n"),
+        (4, "SwitchInt(r2, 1 3 -> 4, 2 -> 6, _ -> 1)\n"),
         (4, "JumpUnlessInt(r2, 70) ->"),
     ] {
         let text = listing.function(f).expect("a function");

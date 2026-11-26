@@ -83,6 +83,18 @@ fn definitions_persist_across_entries() {
     assert!(out.contains('3'), "want 3, got:\n{out}");
 }
 
+/// A name of the session's is stored even where only the match straight after it seems
+/// to read it, because a lambda there reads it by its slot.
+#[test]
+fn a_probe_with_a_name_of_the_sessions_is_stored() {
+    let out = repl(
+        "fn app(f fn(Int) Int) Int { f(1) }\nxs = [4, 2]\no = xs[0]\n\
+         match o { Some(v) -> app(fn(n Int) n + v + { o or 0 })\n None -> 0 }\no\n",
+    );
+    let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(lines, ["9", "Some(4)"], "{out}");
+}
+
 /// Replaying a bare expression would repeat its effects on every later entry.
 #[test]
 fn a_bare_expression_is_not_replayed() {

@@ -1020,26 +1020,18 @@ fn take(heap: &mut Heap, array: Cell, n: usize) -> Result<Cell, Fault> {
     root_at(heap, n, r.shift, r.offset, head, tree, tail)
 }
 
-/// The elements from `start` up to but not including `end`, or `None` when
-/// that range is not inside the array.
+/// The elements from `start` up to but not including `end`. An end past the array's
+/// is the array's.
 // Out of line, with the map's two owned edits and [`concat`]. Inside the
 // interpreter's loop these four are so long that the loop keeps fewer of its
 // own values in registers, which costs 4 machine instructions at each VM
 // instruction that tests a variant, reads a field or drops a register.
 #[inline(never)]
-pub(crate) fn slice(
-    heap: &mut Heap,
-    array: Cell,
-    start: usize,
-    end: usize,
-) -> Result<Option<Cell>, Fault> {
-    if start > end || end > len(heap, array) {
-        return Ok(None);
-    }
+pub(crate) fn slice(heap: &mut Heap, array: Cell, start: usize, end: usize) -> Result<Cell, Fault> {
     let front = take(heap, array, end)?;
     let cut = skip(heap, front, start);
     heap.release(front)?;
-    Ok(Some(cut?))
+    cut
 }
 
 /// Every element but the first `n`.

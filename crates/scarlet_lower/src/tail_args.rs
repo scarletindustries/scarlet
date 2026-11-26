@@ -98,6 +98,19 @@ impl<'e> Line<'e> {
 
 /// What `e` reads of the locals bound outside it.
 fn reads(e: &CoreExpr) -> BTreeSet<LocalId> {
+    let Names { mut read, bound } = names(e);
+    // Each local is bound in one place.
+    read.retain(|l| !bound.contains(l));
+    read
+}
+
+/// The locals that an expression names.
+struct Names {
+    read: BTreeSet<LocalId>,
+    bound: BTreeSet<LocalId>,
+}
+
+fn names(e: &CoreExpr) -> Names {
     let (mut read, mut bound) = (BTreeSet::new(), BTreeSet::new());
     let mut work = vec![e];
     while let Some(e) = work.pop() {
@@ -143,6 +156,18 @@ fn reads(e: &CoreExpr) -> BTreeSet<LocalId> {
                 work.push(then);
                 work.push(els);
             }
+            CoreExpr::Probe {
+                args,
+                binds,
+                hit,
+                miss,
+                ..
+            } => {
+                read.extend(args);
+                bound.extend(binds.iter().flatten().map(|b| b.id));
+                work.push(hit);
+                work.push(miss);
+            }
             CoreExpr::Ret(value) => {
                 read.insert(*value);
             }
@@ -153,9 +178,7 @@ fn reads(e: &CoreExpr) -> BTreeSet<LocalId> {
             CoreExpr::Jump { args, .. } => read.extend(args),
         }
     }
-    // Each local is bound in one place.
-    read.retain(|l| !bound.contains(l));
-    read
+    Names { read, bound }
 }
 
 /// What comes after the first `n` nodes of the spine `e`.
@@ -170,6 +193,7 @@ fn after(mut e: &mut CoreExpr, n: usize) -> &mut CoreExpr {
             CoreExpr::Switch { .. }
             | CoreExpr::NoArm
             | CoreExpr::If { .. }
+            | CoreExpr::Probe { .. }
             | CoreExpr::Ret(_)
             | CoreExpr::TailCall { .. }
             | CoreExpr::Jump { .. } => e,
@@ -196,6 +220,7 @@ impl Scheduler<'_> {
             | CoreExpr::Switch { .. }
             | CoreExpr::NoArm
             | CoreExpr::If { .. }
+            | CoreExpr::Probe { .. }
             | CoreExpr::Ret(_)
             | CoreExpr::TailCall { .. }
             | CoreExpr::Jump { .. } => None,
@@ -238,9 +263,14 @@ impl Scheduler<'_> {
                         None => return Ok(()),
                     }
                 }
-                CoreExpr::If { then, els, .. } => {
-                    self.expr(then)?;
-                    self.expr(els)?;
+                CoreExpr::If {
+                    then: a, els: b, ..
+                }
+                | CoreExpr::Probe {
+                    hit: a, miss: b, ..
+                } => {
+                    self.expr(a)?;
+                    self.expr(b)?;
                     return Ok(());
                 }
                 CoreExpr::Let { .. }
@@ -651,13 +681,17 @@ impl Reads {
     /// Whether a function that fits the registers with `lines` as they are still
     /// does with them in `order`.
     ///
-    /// How many values are held inside a join is not known here, so no more may
-    /// be held around one at any point of it. Anywhere else there may be more,
-    /// as long as there are few. Around the lines before the first that moves
-    /// nothing changes.
+    /// How many values are held inside a join is not known here, so where there
+    /// are many no more may be held around one at any point of it. Anywhere else
+    /// there may be more, as long as there are few. Around the lines before the
+    /// first that moves nothing changes.
     fn fits(&self, params: usize, lines: &[Line<'_>], order: &[usize]) -> bool {
         let joins = lines.iter().any(|line| matches!(line, Line::Join { .. }));
-        if !joins && lines.len().saturating_add(params) <= FEW {
+        let few = match joins {
+            false => lines.len().saturating_add(params) <= FEW,
+            true => self.names_few(lines),
+        };
+        if few {
             return true;
         }
         let as_written: Vec<usize> = (0..lines.len()).collect();
@@ -672,6 +706,29 @@ impl Reads {
             Line::Let { rhs, .. } if computes(rhs) => now.most <= most,
             Line::Let { .. } | Line::Drop => now.most <= was.most.max(FEW),
         })
+    }
+
+    /// Whether the lines, with what is in their joins, and the call name few locals.
+    fn names_few(&self, lines: &[Line<'_>]) -> bool {
+        let mut all: BTreeSet<LocalId> = self.passed.iter().copied().collect();
+        for line in lines {
+            all.extend(line.makes().iter().map(|bind| bind.id));
+            match line {
+                Line::Let { rhs, .. } => rhs.for_each_operand(|l| {
+                    all.insert(l);
+                }),
+                Line::Join { body, .. } => {
+                    let Names { read, bound } = names(body);
+                    all.extend(read);
+                    all.extend(bound);
+                }
+                Line::Drop => {}
+            }
+            if all.len() > FEW {
+                return false;
+            }
+        }
+        true
     }
 
     /// What is held around each line from the `first` in `order` on.

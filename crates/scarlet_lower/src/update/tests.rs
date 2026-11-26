@@ -3,7 +3,8 @@ use scarlet_ir::core_ir::{ConstId, FuncIdx};
 
 use crate::testkit::variant;
 use crate::typed_ir::{
-    BindingId, RTy, TypedBinPatSeg, TypedBinSeg, TypedBind, TypedCallee, TypedInterpPart, ValueRef,
+    BindingId, Gives, RTy, TypedBinPatSeg, TypedBinSeg, TypedBind, TypedCallee, TypedInterpPart,
+    ValueRef,
 };
 
 const TY: RTy = RTy(0);
@@ -34,6 +35,16 @@ fn call() -> TypedExpr {
         ty: TY,
         callee: TypedCallee::Known(FuncIdx(0)),
         args: Vec::new(),
+    }
+}
+
+fn probe(op: ProbeOp, args: Vec<TypedExpr>) -> TypedExpr {
+    TypedExpr::Probe {
+        ty: TY,
+        op,
+        args,
+        found: TY,
+        gives: Gives::OrFirst,
     }
 }
 
@@ -173,19 +184,11 @@ fn around() -> Vec<(&'static str, Around)> {
         ),
         (
             "indexed",
-            Box::new(|e| TypedExpr::Index {
-                ty: TY,
-                recv: boxed(e),
-                index: boxed(&var()),
-            }),
+            Box::new(|e| probe(ProbeOp::ArrayGet, vec![e.clone(), var()])),
         ),
         (
             "index",
-            Box::new(|e| TypedExpr::Index {
-                ty: TY,
-                recv: boxed(&var()),
-                index: boxed(e),
-            }),
+            Box::new(|e| probe(ProbeOp::ArrayGet, vec![var(), e.clone()])),
         ),
         (
             "range",
@@ -286,12 +289,9 @@ fn what_takes_long_or_writes_is_not_brief() {
         base: boxed(&var()),
         sets: vec![(0, var())],
     };
-    let slice = TypedExpr::Slice {
-        ty: TY,
-        recv: boxed(&var()),
-        start: boxed(&var()),
-        end: boxed(&var()),
-    };
+    let slice = probe(ProbeOp::ArraySlice, vec![var(), var(), var()]);
+    let write = probe(ProbeOp::ArraySet, vec![var(), var(), var()]);
+    let lookup = probe(ProbeOp::MapGet, vec![var(), var()]);
     let text = TypedExpr::Interp {
         ty: TY,
         parts: vec![TypedInterpPart::Expr(var())],
@@ -309,7 +309,17 @@ fn what_takes_long_or_writes_is_not_brief() {
         callee: TypedCallee::Dynamic(boxed(&var())),
         args: vec![var()],
     };
-    for e in [update, slice, text, bits, spread, built_in, call()] {
+    for e in [
+        update,
+        slice,
+        write,
+        lookup,
+        text,
+        bits,
+        spread,
+        built_in,
+        call(),
+    ] {
         assert!(!brief(&e), "{e:?}");
     }
     for op in [

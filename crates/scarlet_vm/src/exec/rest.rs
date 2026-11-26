@@ -723,16 +723,6 @@ impl<'c> Rest<'c, '_> {
                 let cell = map::delete(&mut self.heap, m, key).map_err(fault)?;
                 Ok(Value::cell(cell))
             }
-            Intrinsic::MapGet => {
-                let m = self.map(v)?;
-                match map::get(&self.heap, m, args.get(1)) {
-                    Some(found) => {
-                        let found = self.share(found)?;
-                        self.some(found)
-                    }
-                    None => Ok(self.code.abi.none),
-                }
-            }
             Intrinsic::MapHas => {
                 let m = self.map(v)?;
                 Ok(Value::bool(map::get(&self.heap, m, args.get(1)).is_some()))
@@ -1004,7 +994,7 @@ impl<'c> Rest<'c, '_> {
     }
 
     /// `Some(v)`, holding `v`'s reference.
-    pub(super) fn some(&mut self, v: Value) -> Result<Value, Stop> {
+    fn some(&mut self, v: Value) -> Result<Value, Stop> {
         self.build(self.code.abi.some, [v])
     }
 
@@ -1457,6 +1447,14 @@ impl<'c> Rest<'c, '_> {
         }
     }
 
+    /// Whether the array `a` has an element `index`.
+    #[inline(never)]
+    pub(super) fn has_index(&self, a: Value, index: Value) -> Result<bool, Stop> {
+        let s = self.seq(a)?;
+        let at = self.position(index)?;
+        Ok(at.is_some_and(|i| (i as u64) < s.len(&self.heap)))
+    }
+
     /// A range's end as an `i64`. A range past 64 bits could not be walked in
     /// any time a program has.
     #[inline(never)]
@@ -1744,37 +1742,32 @@ impl<'c> Rest<'c, '_> {
         Ok(Value::cell(cell?))
     }
 
-    /// `of[start..end]`, as `Ok` of the elements there or `Err(Nil)`.
-    #[inline(never)]
-    pub(super) fn array_slice(
-        &mut self,
-        of: Value,
-        start: Value,
-        end: Value,
-    ) -> Result<Value, Stop> {
-        let s = self.seq(of)?;
-        let bounds = (self.position(start)?, self.position(end)?);
-        let cut = match (s, bounds) {
-            (Seq::Tree(a), (Some(from), Some(to))) => {
-                array::slice(&mut self.heap, a, from, to).map_err(fault)?
-            }
-            (Seq::Range { start, end }, (Some(from), Some(to)))
-                if from <= to && to as u64 <= array::range_len(start, end) =>
-            {
-                // Both are at most the range's length, so each sum lands
-                // within `start..=end` and the add is exact.
-                let (from, to) = (
-                    start.wrapping_add_unsigned(from as u64),
-                    start.wrapping_add_unsigned(to as u64),
-                );
-                Some(array::range(&mut self.heap, from, to).map_err(fault)?)
-            }
-            (Seq::Tree(_) | Seq::Range { .. }, _) => None,
+    /// Where `of[start..end]` is, when that range is inside the array.
+    #[inline(always)]
+    pub(super) fn span(&self, of: Value, start: Value, end: Value) -> Result<Option<Span>, Stop> {
+        let of = self.seq(of)?;
+        let (Some(from), Some(to)) = (self.position(start)?, self.position(end)?) else {
+            return Ok(None);
         };
-        match cut {
-            Some(cut) => self.ok(Value::cell(cut)),
-            None => self.err_nil(),
-        }
+        let inside = from <= to && to as u64 <= of.len(&self.heap);
+        Ok(inside.then_some(Span { of, from, to }))
+    }
+
+    /// The elements at `span`.
+    #[inline(always)]
+    pub(super) fn slice(&mut self, span: Span) -> Result<Value, Stop> {
+        let Span { of, from, to } = span;
+        let cut = match of {
+            Seq::Tree(a) => array::slice(&mut self.heap, a, from, to),
+            // Both are at most the range's length, so each sum lands within
+            // `start..=end` and the add is exact.
+            Seq::Range { start, .. } => array::range(
+                &mut self.heap,
+                start.wrapping_add_unsigned(from as u64),
+                start.wrapping_add_unsigned(to as u64),
+            ),
+        };
+        Ok(Value::cell(cut.map_err(fault)?))
     }
 
     /// `v` with one more reference, for when it goes somewhere new.
@@ -1851,6 +1844,13 @@ fn shift(
     } else {
         Ok(x >> count)
     }
+}
+
+/// Some elements that an array has: those from `from` up to `to`.
+pub(super) struct Span {
+    of: Seq,
+    from: usize,
+    to: usize,
 }
 
 /// A `scarlet/json.Doc` taken apart into the binaries it holds, borrowed, and

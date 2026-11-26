@@ -3,12 +3,12 @@
 use std::collections::{BTreeMap, HashMap};
 
 use scarlet_ir::TypeId;
-use scarlet_ir::core_ir::{Const, ConstId, FuncIdx, VariantRef};
+use scarlet_ir::core_ir::{Const, ConstId, FuncIdx, ProbeOp, VariantRef};
 use scarlet_ir::rty::{PrimIds, RTy, Repr, ResolvedPool};
 
 use super::oracle::{BODIES, Dice, SIZES};
 use crate::typed_ir::{
-    BindingId, PatRest, Shapes, TempTys, TypedArm, TypedBinPatSeg, TypedBind, TypedCallee,
+    BindingId, Gives, PatRest, Shapes, TempTys, TypedArm, TypedBinPatSeg, TypedBind, TypedCallee,
     TypedExpr, TypedFn, TypedPat, ValueRef, pat_binds,
 };
 
@@ -38,7 +38,14 @@ pub(super) struct Kind {
     pub(super) guards: usize,
     /// One in this many patterns of a binary asks for a size by a call.
     pub(super) sizes: usize,
+    /// One in this many matches is on a probe.
+    pub(super) probes: usize,
 }
+
+/// Types such as a probe's value is of: the first constructor holds something, and the
+/// second nothing or a Nil.
+pub(super) const OPTION: TypeId = TypeId(20);
+pub(super) const RESULT: TypeId = TypeId(21);
 
 /// One match, as the function that is nothing else.
 pub(super) struct Match {
@@ -115,7 +122,11 @@ pub(super) fn make(dice: &mut Dice, kind: Kind) -> Match {
         int_pair,
     };
     make.name_types();
-    let ty = make.ty(2);
+    let asked = make.dice.one_in(kind.probes).then(|| make.asked());
+    let ty = match &asked {
+        Some((ty, _)) => ty.clone(),
+        None => make.ty(2),
+    };
     let scrut = make.fresh(&ty);
     let mut arms: Vec<TypedArm> = Vec::new();
     for i in 0..u32::try_from(make.dice.below(kind.arms) + 1).unwrap() {
@@ -144,10 +155,27 @@ pub(super) fn make(dice: &mut Dice, kind: Kind) -> Match {
         ty: b.ty,
         place: ValueRef::Local(b.id),
     };
-    let body = TypedExpr::Match {
-        ty: make.int,
-        scrut: Box::new(var(&scrut)),
+    let on = match &asked {
+        Some((_, found)) => probe(&make, var(&scrut), *found),
+        None => var(&scrut),
+    };
+    let int = make.int;
+    let on_it = |scrut| TypedExpr::Match {
+        ty: int,
+        scrut: Box::new(scrut),
         arms,
+    };
+    let body = match asked.is_some() && make.dice.one_in(3) {
+        true => {
+            let bind = make.fresh(&ty);
+            TypedExpr::Let {
+                ty: make.int,
+                bind,
+                init: Box::new(on),
+                body: Box::new(on_it(var(&bind))),
+            }
+        }
+        false => on_it(on),
     };
     let shapes = make.types.iter();
     let shapes = shapes.map(|(ty, all)| (*ty, all.iter().map(Vec::len).collect()));
@@ -171,7 +199,38 @@ pub(super) fn make(dice: &mut Dice, kind: Kind) -> Match {
     }
 }
 
+/// A probe of `of`, whose value is of the same type, that finds a `found`.
+fn probe(make: &Make<'_>, of: TypedExpr, found: RTy) -> TypedExpr {
+    let gives = match make.types.contains_key(&OPTION) {
+        true => Gives::Option,
+        false => Gives::Result {
+            nil: make.rtys[&Ty::Named(NIL)],
+        },
+    };
+    TypedExpr::Probe {
+        ty: of.ty(),
+        op: ProbeOp::MapGet,
+        args: vec![of.clone(), of],
+        found,
+        gives,
+    }
+}
+
 impl Make<'_> {
+    /// The type of a probe's value, and of what it finds.
+    fn asked(&mut self) -> (Ty, RTy) {
+        let found = self.ty(2);
+        let (id, miss) = match self.dice.one_in(2) {
+            true => (OPTION, Vec::new()),
+            false => (RESULT, vec![Ty::Named(NIL)]),
+        };
+        let of = self.rty(&found);
+        let rty = self.pool.mk_con(id, Repr::Counted, &[of]).unwrap();
+        self.rtys.insert(Ty::Named(id), rty);
+        self.types.insert(id, vec![vec![found], miss]);
+        (Ty::Named(id), of)
+    }
+
     /// A few types, whose constructors hold values of each other.
     fn name_types(&mut self) {
         let ids: Vec<TypeId> = (10..14).map(TypeId).collect();

@@ -1,22 +1,28 @@
 use super::*;
 use scarlet_ir::rty::{PrimIds, Repr, ResolvedPool};
 
-use crate::immediates::{self, Immediates};
+use crate::immediates;
 use crate::lower::{Around, Lowered, lower_fn};
 use crate::perceus::perceus;
-use crate::program::LinkError;
+use crate::program::{LinkError, PreludeCtors};
 use crate::testkit::{ownership, vref};
-use crate::typed_ir::{BindingId, TypedBinPatSeg, TypedCallee, TypedExpr, TypedFn, ValueRef};
+use crate::typed_ir::{
+    BindingId, Gives, TypedBinPatSeg, TypedCallee, TypedExpr, TypedFn, ValueRef,
+};
 use crate::{CoreExpr, CoreFn, tail_args};
 use oracle::{Answers, Dice, Machine, Meaning, Val, World, value};
-use random::{BOOL, Kind, Match, NIL, make};
+use random::{BOOL, Kind, Match, NIL, OPTION, RESULT, make};
 
 mod oracle;
 mod programs;
 mod random;
 
-fn im() -> Immediates {
-    Immediates {
+fn ctors() -> PreludeCtors {
+    PreludeCtors {
+        some: vref(OPTION.0, 0),
+        none: vref(OPTION.0, 1),
+        ok: vref(RESULT.0, 0),
+        err: vref(RESULT.0, 1),
         true_: vref(BOOL.0, 0),
         false_: vref(BOOL.0, 1),
         nil: vref(NIL.0, 0),
@@ -30,7 +36,7 @@ struct Case<'a> {
     shapes: &'a Shapes,
     consts: &'a [Const],
     temps: TempTys,
-    im: Immediates,
+    ctors: PreludeCtors,
 }
 
 impl Case<'_> {
@@ -41,14 +47,35 @@ impl Case<'_> {
             shapes: &m.shapes,
             consts: &m.consts,
             temps: m.temps,
-            im: im(),
+            ctors: ctors(),
         }
     }
 
     fn arms(&self) -> &[TypedArm] {
         match &self.f.body {
             TypedExpr::Match { arms, .. } => arms,
+            TypedExpr::Let { body, .. } => match &**body {
+                TypedExpr::Match { arms, .. } => arms,
+                other => panic!("{other:?}"),
+            },
             other => panic!("{other:?}"),
+        }
+    }
+
+    /// The constructors of what the match is on, when that is a probe's value.
+    fn outcomes(&self) -> Option<[crate::VariantRef; 2]> {
+        let scrut = match &self.f.body {
+            TypedExpr::Match { scrut, .. } => scrut,
+            TypedExpr::Let { init, .. } => init,
+            other => panic!("{other:?}"),
+        };
+        let TypedExpr::Probe { gives, .. } = &**scrut else {
+            return None;
+        };
+        match gives {
+            Gives::Option => Some([self.ctors.some, self.ctors.none]),
+            Gives::Result { .. } => Some([self.ctors.ok, self.ctors.err]),
+            Gives::OrFirst => None,
         }
     }
 
@@ -57,6 +84,7 @@ impl Case<'_> {
     fn lowered(&self, allowance: Allowance) -> [CoreFn; 2] {
         let around = Around {
             temps: self.temps,
+            ctors: self.ctors,
             shapes: self.shapes,
             consts: self.consts,
             allowance,
@@ -65,7 +93,7 @@ impl Case<'_> {
         let Lowered { core, locals } = lowered.unwrap_or_else(|why| panic!("{why}: {:#?}", self.f));
         let first = core.clone();
         let mut core = core;
-        immediates::rewrite(&mut core, &self.im);
+        immediates::rewrite(&mut core, &self.ctors.immediates());
         let reached = core.body.always_reached();
         let core = perceus(self.pool, self.shapes, &locals, &reached, core);
         let core = tail_args::schedule(self.pool, &reached, core.expect("it has drops"));
@@ -100,7 +128,8 @@ fn agrees(
     let mut found = BTreeSet::new();
     let world = World {
         consts: m.consts,
-        true_: m.im.true_,
+        true_: m.ctors.true_,
+        nil: m.ctors.nil,
     };
     let [first, last] = m.lowered(allowance);
     let mut pats: Vec<&TypedPat> = m.arms().iter().map(|a| &a.pat).collect();
@@ -108,7 +137,20 @@ fn agrees(
         // The first says most about what the value is like.
         let like = dice.below(pats.len());
         pats.swap(0, like);
-        let v = value(dice, &world, m.shapes, &pats);
+        let mut v = value(dice, &world, m.shapes, &pats);
+        if let Some([hit, miss]) = m.outcomes() {
+            // What it is of has to be an outcome, whatever the patterns say of it.
+            if let Val::Any(n) = v {
+                let of = if n % 2 == 0 { hit } else { miss };
+                v = Val::Ctor(of.type_id, of.variant_idx, vec![Val::Any(n)]);
+            }
+            if let Val::Ctor(_, idx, parts) = &mut v
+                && *idx == miss.variant_idx
+            {
+                let held = usize::from(miss == m.ctors.err);
+                *parts = vec![world.nil(); held];
+            }
+        }
         let answers = Answers {
             seed: u64::try_from(dice.below(1 << 30)).unwrap(),
         };
@@ -152,6 +194,7 @@ fn a_tree_finds_what_the_rows_say() {
             ors: [2, 4, 8, 1000][dice.below(4)],
             guards: [1, 2, 4, 1000][dice.below(4)],
             sizes: [2, 4, 1000][dice.below(3)],
+            probes: 3,
         };
         let m = make(&mut dice, kind);
         let allowance = match dice.below(4) {
@@ -321,6 +364,7 @@ impl Write {
     /// What that is lowered to.
     fn tried(&self, arms: Vec<(TypedPat, bool)>) -> Result<Lowered, LinkError> {
         let around = Around {
+            ctors: ctors(),
             temps: TempTys {
                 int: INT,
                 bool: BOOL_TY,
@@ -384,7 +428,12 @@ fn nodes(e: &CoreExpr) -> usize {
             | CoreExpr::Drop { body, .. }
             | CoreExpr::Open { body, .. } => work.push(body),
             CoreExpr::Join { cont, body, .. } => work.extend([&**cont, &**body]),
-            CoreExpr::If { then, els, .. } => work.extend([&**then, &**els]),
+            CoreExpr::If {
+                then: a, els: b, ..
+            }
+            | CoreExpr::Probe {
+                hit: a, miss: b, ..
+            } => work.extend([&**a, &**b]),
             CoreExpr::Switch { cases, default, .. } => {
                 work.extend(cases.arms());
                 work.extend(default.as_deref());
@@ -729,7 +778,8 @@ fn finds(w: &Write, arms: Vec<(TypedPat, bool)>, values: &[Val]) {
     let core = w.lowered(arms);
     let world = World {
         consts: &w.consts,
-        true_: im().true_,
+        true_: ctors().true_,
+        nil: ctors().nil,
     };
     for v in values {
         for seed in 0..20 {
@@ -1019,6 +1069,31 @@ fn constructors_with_the_same_rows_are_one_case() {
         ]
     });
     assert!(core.contains("| 10.0, 10.2 ->"), "{core}");
+}
+
+/// Where every constructor is one case there is nothing to ask. The rows that there was
+/// no allowance to put in the case come after it all the same.
+#[test]
+fn a_case_for_every_constructor_is_no_question() {
+    let mut w = Write::default();
+    let many = or((0..200).map(|n| w.int(n)).collect());
+    let all = || or([A, B, C, D].map(|v| w.plain(v)).into());
+    let core = w.lowered(vec![(all(), false)]).to_string();
+    assert!(!core.contains("switch"), "{core}");
+    let three = or([A, B, C].map(|v| w.plain(v)).into());
+    let core = w.lowered(vec![(three, false), (wild(), false)]).to_string();
+    assert!(core.contains("switch"), "{core}");
+    let arms = vec![
+        (tuple(vec![all(), wild()]), true),
+        (tuple(vec![wild(), many]), true),
+        (wild(), false),
+    ];
+    let value = |v: u16, n: i128| {
+        let of = Val::Ctor(T, v, vec![Val::Int(1); usize::from(v < C)]);
+        Val::Tuple(vec![of, Val::Int(n)])
+    };
+    let values = [A, D].map(|v| [0, 199, 200].map(|n| value(v, n)));
+    finds(&w, arms, &values.concat());
 }
 
 /// A pattern that says what cannot be is an error that says so.

@@ -3,8 +3,8 @@
 //! only in its scope. Every jump names a join that is in scope, with as many
 //! arguments as it has parameters, of the same types. Every value that gets a drop
 //! is given up exactly once, and not read after. And a switch has each case once and
-//! leaves none out, and a cell is taken apart only where the case it is in says
-//! which constructor it is.
+//! leaves none out, a cell is taken apart only where the case it is in says which
+//! constructor it is, and a probe has its operands and a place for what it finds.
 //!
 //! `scarlet_vm`'s tests run it over every program in the repository, so it reads
 //! `scarlet_ir` and nothing else.
@@ -13,7 +13,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use scarlet_ir::TypeId;
 use scarlet_ir::core_ir::{
-    Atom, Cases, CoreBind, CoreExpr, CoreFn, GlobalSlot, JoinId, LocalId, PrimOp, VariantRef,
+    Atom, Cases, CoreBind, CoreExpr, CoreFn, GlobalSlot, JoinId, LocalId, PrimOp, ProbeOp,
+    VariantRef,
 };
 use scarlet_ir::rty::{RTy, ResolvedPool};
 
@@ -209,6 +210,28 @@ impl Walk<'_> {
                     at.read(*cond, self)?;
                     self.expr(then, at.clone())?;
                     e = els;
+                }
+                CoreExpr::Probe {
+                    op,
+                    args,
+                    binds,
+                    hit,
+                    miss,
+                } => {
+                    args.iter().try_for_each(|l| at.read(*l, self))?;
+                    let want = match op {
+                        ProbeOp::ArrayGet | ProbeOp::MapGet => 2,
+                        ProbeOp::ArraySlice | ProbeOp::ArraySet => 3,
+                    };
+                    if args.len() != want || binds.len() != 1 {
+                        return Err(format!("a probe of {args:?} that finds {binds:?}"));
+                    }
+                    let mut found = at.clone();
+                    for bind in binds.iter().flatten() {
+                        self.bind(bind, &mut found)?;
+                    }
+                    self.expr(hit, found)?;
+                    e = miss;
                 }
                 CoreExpr::Open {
                     cell,
@@ -427,6 +450,18 @@ impl Names {
                     self.named.insert(*cond);
                     self.walk(then);
                     e = els;
+                }
+                CoreExpr::Probe {
+                    args,
+                    binds,
+                    hit,
+                    miss,
+                    ..
+                } => {
+                    self.named.extend(args);
+                    self.bound.extend(binds.iter().flatten().map(|b| b.id));
+                    self.walk(hit);
+                    e = miss;
                 }
                 CoreExpr::Open {
                     cell, fields, body, ..

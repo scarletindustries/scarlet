@@ -6,6 +6,11 @@
 //! So what the matched value is in is never held for longer than the names are. An
 //! arm that several ways come to is a join around the tree that takes its names, and
 //! no body is lowered twice.
+//!
+//! Where the matched value is a probe's, the tree begins with the probe, and what it
+//! finds is where the tree would read a field. The value is made only on a way that
+//! reads it whole. A tree that does not ask for the constructor first has the value
+//! made in front of it, or nothing, where no way through it reads any.
 
 use std::collections::HashMap;
 
@@ -18,20 +23,22 @@ use crate::spine::Frame;
 use crate::typed_ir::{
     RTy, TypedArm, TypedBinPatSeg, TypedBind, TypedExpr, TypedPat, each_read, pat_binds,
 };
-use crate::{Atom, Cases, CoreBind, CoreExpr, JoinId, LocalId, PrimOp};
+use crate::{Atom, Cases, CoreBind, CoreExpr, JoinId, LocalId, PrimOp, VariantRef};
 
-use super::{Dest, Lower, R, SpinePos};
+use super::probes::{Asked, Made};
+use super::{Dest, Lower, R, Scrut, SpinePos};
 
-/// Lower `arms` against an already-bound `scrut`, which only they read when it is
-/// `alone`.
+/// Lower `arms` against `scrut`.
 pub(super) fn lower(
     lo: &mut Lower<'_>,
-    scrut: LocalId,
-    alone: bool,
+    scrut: Scrut,
     arms: &[TypedArm],
     dest: Dest,
 ) -> R<CoreExpr> {
-    let ty = lo.bind_ty(scrut)?;
+    let (ty, alone) = match &scrut {
+        Scrut::Local { local, alone } => (lo.bind_ty(*local)?, *alone),
+        Scrut::Probe(asked) => (asked.ty, true),
+    };
     let given = Given {
         shapes: lo.around.shapes,
         consts: lo.around.consts,
@@ -39,30 +46,43 @@ pub(super) fn lower(
         reads: &lo.reads,
         allowance: lo.around.allowance,
     };
-    let tree = matching::tree(&given, ty, alone, arms)?;
+    let Tree {
+        root,
+        places,
+        leaves,
+        rests,
+        anys,
+    } = matching::tree(&given, ty, alone, arms)?;
+    let (local, probe) = match scrut {
+        Scrut::Local { local, .. } => (Some(local), None),
+        Scrut::Probe(asked) => match asked.outcomes(&root) {
+            Some(outcomes) => (None, Some((asked, outcomes))),
+            None if root.reads() => {
+                let made = lo.joined(ty, |lo, dest| lo.value_of(&asked, dest))?;
+                (Some(made), None)
+            }
+            None => {
+                lo.only_ask(&asked)?;
+                (None, None)
+            }
+        },
+    };
     let mut shared = Vec::new();
     let mut bodies = Vec::with_capacity(arms.len());
-    for (arm, ways) in arms.iter().zip(&tree.leaves) {
+    for (arm, ways) in arms.iter().zip(&leaves) {
         bodies.push(match ways {
             0 | 1 => Body::Here,
             _ => {
-                let (names, join) = share(lo, arm, scrut, dest)?;
+                let (names, join) = share(lo, arm, local, dest)?;
                 let id = join.id;
                 shared.push(join);
                 Body::Shared(id, names)
             }
         });
     }
-    let Tree {
-        root,
-        places,
-        rests,
-        anys,
-        ..
-    } = tree;
     let mut locals = vec![None; places.len()];
     let root_local = locals.get_mut(ROOT.index());
-    *root_local.ok_or(InternalLinkError::NoPlace(ROOT.index()))? = Some(scrut);
+    *root_local.ok_or(InternalLinkError::NoPlace(ROOT.index()))? = local;
     let mut write = Write {
         lo,
         arms,
@@ -74,8 +94,12 @@ pub(super) fn lower(
         after: vec![None; rests.len()],
         ways: rests,
         anys: vec![None; anys],
+        whole: None,
     };
-    let tree = write.branch(|w| w.node(&root))?;
+    let tree = write.branch(|w| match probe {
+        None => w.node(&root),
+        Some((asked, outcomes)) => w.probe(&asked, outcomes),
+    })?;
     // Each is around all of the tree, so it is in scope wherever an arm is found.
     Ok(shared
         .into_iter()
@@ -103,10 +127,11 @@ struct Shared {
 }
 
 /// Lower the body of `arm` as a join, which takes the names that the body reads.
+/// `scrut` is the matched value, when it is in scope there.
 fn share(
     lo: &mut Lower<'_>,
     arm: &TypedArm,
-    scrut: LocalId,
+    scrut: Option<LocalId>,
     dest: Dest,
 ) -> R<(Vec<TypedBind>, Shared)> {
     let id = lo.fresh_join()?;
@@ -122,7 +147,7 @@ fn share(
     names.retain(|b| lo.reads.get(b.id.0).is_none_or(|n| *n > guarded(b)));
     // A name for the matched value itself is in scope as it is.
     let whole = match &arm.pat {
-        TypedPat::Bind(b) => Some(*b),
+        TypedPat::Bind(b) => scrut.map(|scrut| (*b, scrut)),
         TypedPat::Wild { .. }
         | TypedPat::Lit { .. }
         | TypedPat::Ctor { .. }
@@ -132,7 +157,7 @@ fn share(
         | TypedPat::Or { .. }
         | TypedPat::Range { .. } => None,
     };
-    names.retain(|b| whole.is_none_or(|w| w.id != b.id));
+    names.retain(|b| whole.is_none_or(|(w, _)| w.id != b.id));
     let mut params = Vec::with_capacity(names.len());
     let body = lo.sealed(|lo| {
         for b in &names {
@@ -140,7 +165,7 @@ fn share(
             lo.bind(b.id, param)?;
             params.push(CoreBind::new(param, b.ty));
         }
-        if let Some(b) = whole {
+        if let Some((b, scrut)) = whole {
             lo.bind(b.id, scrut)?;
         }
         lo.expr_tail(&arm.body, dest, SpinePos::Nested)
@@ -173,6 +198,55 @@ struct Write<'w, 'a, 'p> {
     /// The join where each or-pattern's alternatives come together, and the names it
     /// takes.
     anys: Vec<Option<(JoinId, Vec<TypedBind>)>>,
+    /// What the matched value is on this way, when it is a probe's and is not made.
+    whole: Option<Whole>,
+}
+
+/// A value that a probe has come out as.
+#[derive(Clone, Copy)]
+struct Whole {
+    variant: VariantRef,
+    field: Held,
+}
+
+/// The one field of a [`Whole`].
+#[derive(Clone, Copy)]
+enum Held {
+    Found(LocalId),
+    Nil(RTy),
+    Nothing,
+}
+
+/// What the tree does where a probe finds something, and where it does not.
+struct Outcomes<'t, 'p> {
+    hit: (VariantRef, Option<&'t Branch<'p>>),
+    miss: (VariantRef, Option<&'t Branch<'p>>),
+    /// Where either goes on that has no branch.
+    default: Option<&'t Node<'p>>,
+    nil: Option<RTy>,
+}
+
+impl Asked {
+    /// What `root` does for each outcome, when it goes on by which of the two it is.
+    fn outcomes<'t, 'p>(&self, root: &'t Node<'p>) -> Option<Outcomes<'t, 'p>> {
+        let Made { hit, miss, nil } = self.made?;
+        let Node::Switch {
+            on,
+            branches,
+            default,
+        } = root
+        else {
+            return None;
+        };
+        let of = |v| branches.iter().find(|b| b.keys.contains(&Key::Variant(v)));
+        let apart = branches.iter().all(|b| b.keys.len() == 1);
+        (*on == ROOT && apart).then_some(Outcomes {
+            hit: (hit, of(hit)),
+            miss: (miss, of(miss)),
+            default: default.as_deref(),
+            nil,
+        })
+    }
 }
 
 impl<'p> Write<'_, '_, 'p> {
@@ -207,6 +281,20 @@ impl<'p> Write<'_, '_, 'p> {
         }
         let nowhere = InternalLinkError::NoPlace(p.index());
         let (source, ty) = self.places.get(p).ok_or(nowhere.clone())?;
+        if let Some(whole) = self.whole {
+            let local = match source {
+                Source::Given if p == ROOT => Some(self.made(whole, ty)?),
+                Source::Part { of: ROOT, part } => {
+                    let held = self.part(whole, part)?;
+                    Some(held.ok_or(nowhere.clone())?)
+                }
+                Source::Given | Source::Part { .. } => None,
+            };
+            if let Some(local) = local {
+                self.give(p, local)?;
+                return Ok(local);
+            }
+        }
         let Source::Part { of, part } = source else {
             return Err(nowhere.into());
         };
@@ -233,6 +321,67 @@ impl<'p> Write<'_, '_, 'p> {
         let local = self.lo.let_(ty, rhs)?;
         self.give(p, local)?;
         Ok(local)
+    }
+
+    /// The value that a probe has come out as, of type `ty`.
+    fn made(&mut self, whole: Whole, ty: RTy) -> R<LocalId> {
+        let fields = self.held(whole)?.into_iter().collect();
+        let variant = whole.variant;
+        self.lo.let_(ty, Atom::Ctor { variant, fields })
+    }
+
+    /// What `part` of that value is, when it has one like that.
+    fn part(&mut self, whole: Whole, part: Part) -> R<Option<LocalId>> {
+        let field = Part::Field {
+            variant: whole.variant.variant_idx,
+            index: 0,
+        };
+        if part == field {
+            self.held(whole)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// The field of that value, when it has one.
+    fn held(&mut self, whole: Whole) -> R<Option<LocalId>> {
+        Ok(match whole.field {
+            Held::Found(found) => Some(found),
+            Held::Nil(ty) => Some(self.lo.let_(ty, Atom::Nil)?),
+            Held::Nothing => None,
+        })
+    }
+
+    /// The probe, and what comes after it in each case.
+    fn probe(&mut self, asked: &Asked, outcomes: Outcomes<'_, 'p>) -> R<CoreExpr> {
+        let Outcomes {
+            hit,
+            miss,
+            default,
+            nil,
+        } = outcomes;
+        let found = self.lo.found(asked)?;
+        let held = nil.map_or(Held::Nothing, Held::Nil);
+        let hit = self.outcome(hit, Held::Found(found), default)?;
+        let miss = self.outcome(miss, held, default)?;
+        self.whole = None;
+        Ok(asked.probe(found, hit, miss))
+    }
+
+    /// What is done where the probe has come out as `variant`, which `branch` is for,
+    /// or else `default`.
+    fn outcome(
+        &mut self,
+        (variant, branch): (VariantRef, Option<&Branch<'p>>),
+        field: Held,
+        default: Option<&Node<'p>>,
+    ) -> R<CoreExpr> {
+        self.whole = Some(Whole { variant, field });
+        self.branch(|w| match (branch, default) {
+            (Some(branch), _) => w.case(branch),
+            (None, Some(node)) => w.node(node),
+            (None, None) => Ok(CoreExpr::NoArm),
+        })
     }
 
     /// Bind each name to where its value is. What an array has behind its first
@@ -473,12 +622,7 @@ impl<'p> Write<'_, '_, 'p> {
         let scrut = self.place(on)?;
         let mut arms = Vec::with_capacity(branches.len());
         for branch in branches {
-            let body = self.branch(|w| {
-                for p in &branch.apart {
-                    w.place(*p)?;
-                }
-                w.node(&branch.node)
-            })?;
+            let body = self.branch(|w| w.case(branch))?;
             arms.push((branch.keys.as_slice(), body));
         }
         let default = match default {
@@ -490,6 +634,13 @@ impl<'p> Write<'_, '_, 'p> {
             cases: cases(arms)?,
             default,
         })
+    }
+
+    fn case(&mut self, branch: &Branch<'p>) -> R<CoreExpr> {
+        for p in &branch.apart {
+            self.place(*p)?;
+        }
+        self.node(&branch.node)
     }
 
     fn segment(&mut self, segment: &Segment<'p>) -> R<CoreExpr> {

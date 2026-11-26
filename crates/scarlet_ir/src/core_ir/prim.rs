@@ -118,15 +118,6 @@ pub enum PrimOp {
     ArrayAppend,
     /// `[..xs, ..ys]`. Args: `xs`, `ys`.
     ArrayConcat,
-    /// `xs[i]`, as an `Option`. Args: `xs`, `i`.
-    ArrayIndex,
-    /// `xs[i] or d`, without building an `Option`. Args: `xs`, `i`, `d`. `d` is
-    /// already evaluated whether it's needed or not, so it must be pure.
-    ArrayIndexOr,
-    /// `xs[a..b]`, as a `Result`: `Ok` of the elements from `a` up to but not
-    /// including `b`, or `Err(Nil)` when `a..b` is not inside the array.
-    /// Args: `xs`, `a`, `b`.
-    ArraySlice,
     /// The length of an array.
     ArrayLen,
     /// Element `n` of an array a pattern has already proved long enough.

@@ -44,10 +44,9 @@ pub fn reverse(xs Array(a)) Array(a) {
 pub fn length(xs Array(a)) Int
 
 // `Ok` of the array with `x` at index `i`, or `Err(Nil)` when `i` is outside
-// the array. When nothing else holds `xs` and nothing reads `xs` after the
-// call, it is changed in place and nothing is copied. An `Err` arm that
-// gives `xs` back is such a read, so that write copies. `put` is the write
-// to use for it.
+// the array. When nothing else holds `xs` and nothing reads `xs` after a write,
+// it is changed in place and nothing is copied. An `Err` arm of a `match` on the
+// call runs only when nothing was written, so it may give `xs` back.
 @vm(array__set)
 pub fn set(xs Array(a), i Int, x a) Result(Array(a), Nil)
 

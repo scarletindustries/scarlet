@@ -25,7 +25,8 @@ fn moves(ins: &[Ins<Reg>]) -> Vec<bool> {
 }
 
 /// `array::put` and `array::set` load as one write each. `put` gives
-/// the array back on a miss, and `set` builds `Ok` or `Err(Nil)`. The
+/// the array back on a miss, which takes no instruction but the return, because what
+/// the write makes is in the array's register. `set` builds `Ok` or `Err(Nil)`. The
 /// write takes an array that is not read again, and shares one that is.
 #[test]
 fn the_loader_makes_one_write_of_a_put_and_of_a_set() {
@@ -57,11 +58,9 @@ fn the_loader_makes_one_write_of_a_put_and_of_a_set() {
     };
     assert_eq!(
         ops(&code, ".last_use"),
-        [Op::Const, Op::ArraySet, Op::Jump, Op::Move, Op::Ret]
+        [Op::Const, Op::ArraySet, Op::Ret, Op::Ret]
     );
     assert_eq!(taken(".last_use"), [true]);
-    // The copy a miss makes takes the array too.
-    assert_eq!(moves(body(&code, named(&code, ".last_use"))), [true]);
     assert_eq!(taken(".read_again"), [false]);
     assert_eq!(
         ops(&code, ".checked"),
@@ -69,7 +68,8 @@ fn the_loader_makes_one_write_of_a_put_and_of_a_set() {
             Op::Const,
             Op::ArraySet,
             Op::Ctor1,
-            Op::Jump,
+            Op::Ret,
+            Op::Drop,
             Op::Const,
             Op::Ctor1,
             Op::Ret
@@ -593,7 +593,8 @@ fn a_constant_kept_in_a_global_is_stored() {
 #[test]
 fn a_branch_on_a_comparison_is_one_jump() {
     let ops = loaded(
-        "fn lt(a Int, b Int) Int { if a < b { a } else { b } }\n\
+        "import scarlet/array\n\
+         fn lt(a Int, b Int) Int { if a < b { a } else { b } }\n\
          fn ge(a Int, b Int) Int { if a >= b { a } else { b } }\n\
          fn ne(a Int) Int { if a != 3 { a } else { 0 } }\n\
          fn from(a Int) Int { if 3 < a { a } else { 0 } }\n\
@@ -603,6 +604,10 @@ fn a_branch_on_a_comparison_is_one_jump() {
          fn kept(a Float) (Bool, Int) {\n\
          \tc = a > 4.0\n\
          \t(c, if c { 1 } else { 2 })\n\
+         }\n\
+         fn written(a Int, xs Array(Bool)) Array(Bool) {\n\
+         \tc = a > 4\n\
+         \tif c { array::put(xs, 0, c) } else { xs }\n\
          }\n\
          fn far(a Int, b Int) Int {\n\
          \tc = a < b\n\
@@ -631,6 +636,7 @@ fn a_branch_on_a_comparison_is_one_jump() {
     assert_eq!(first("above"), Op::JumpUnlessFloatGtK);
     assert_eq!(first("below"), Op::JumpUnlessFloatLeK);
     assert_eq!(ops["kept"][..2], [Op::FloatGtK, Op::JumpIfFalse]);
+    assert_eq!(ops["written"][..2], [Op::IntGtK, Op::JumpIfFalse]);
     // A constant that stands between the two is made before the jump, when
     // anything needs it in a register.
     let far = [
@@ -739,8 +745,8 @@ fn a_type_the_program_does_not_have_is_refused() {
     assert_eq!(code.why(*why), crate::Stop::broken(Broken::NoType));
 }
 
-/// A translator that has made nothing, of a function that names values up to 2 and
-/// reads its locals as `reads` says.
+/// A translator that has made nothing, of a function that reads its locals as `reads`
+/// says.
 fn translator<'c>(
     source: &'c Source<'c>,
     tables: &'c mut Tables,
@@ -756,11 +762,10 @@ fn translator<'c>(
         landed: None,
         joins: HashMap::new(),
         words: Vec::new(),
-        values: 3,
-        kinds: vec![Some(Makes::Any); 3],
         closure: ReadsClosure::Nothing,
         reads,
         numbers: HashMap::new(),
+        misses: Vec::new(),
     }
 }
 
@@ -2027,181 +2032,252 @@ fn a_jump_gives_each_parameter_its_value() {
     );
 }
 
-/// A value that a lookup finds and nothing reads gets a drop only when one of its type
-/// gets any, and is known by its type to be a number or no cell.
-#[test]
-fn a_found_value_that_nothing_reads_is_dropped_by_its_type() {
-    let mut program = program(
-        "import scarlet/map\npub fn main() { println(map::get(map::set(map::new(), 1, 2), 1)) }\n",
-    );
-    let abi = program.abi;
-    let pool = &mut program.pool;
-    let prims = pool.prims();
-    let mut con = |id, repr| pool.mk_con(id, repr, &[]).expect("room");
-    let types = [
-        (con(prims.int, Repr::Counted), false, Makes::Int),
-        (con(prims.float, Repr::Word), false, Makes::NoCell),
-        (con(prims.string, Repr::Counted), false, Makes::Any),
-        (con(TypeId(-51), Repr::Word), false, Makes::NoCell),
-        (con(TypeId(-52), Repr::Counted), true, Makes::Any),
-        (pool.mk_bound(0).expect("room"), true, Makes::Any),
-    ];
-    let typed = types.map(|(ty, drops, kind)| {
-        let some = abi.some.type_id;
-        let option = pool.mk_con(some, Repr::Counted, &[ty]).expect("room");
-        (option, drops, kind)
-    });
-    let source = Source::new(&program).expect("a whole program");
-    for (option, drops, kind) in typed {
-        let intrinsic = Intrinsic::MapGet;
-        let args = vec![LocalId(0), LocalId(1)];
-        let arms = vec![
-            (vec![abi.some.variant_idx], dropping(&[2], gives(1))),
-            (vec![abi.none.variant_idx], gives(0)),
-        ];
-        let ty = abi.some.type_id;
-        let core = CoreExpr::Let {
-            bind: CoreBind::new(LocalId(2), option),
-            rhs: Atom::Intrinsic { intrinsic, args },
-            body: Box::new(switch(2, Cases::Variant { ty, arms }, None)),
-        };
-        let core = function(2, core);
-        let draft = translate(&source, &core, None, &mut Tables::default());
-        let draft = draft.expect("it translates");
-        crate::code::live::settle(&mut copy_of(&draft)).expect("it loads");
-        let made: Vec<String> = instructions(&draft)
-            .iter()
-            .map(|i| shown(i, &draft.lists))
-            .collect();
-        let value = made[0].split(' ').next().expect("a value").to_string();
-        let mut want = vec![format!("{value} MapFind 0 1")];
-        want.extend(drops.then(|| format!("Drop {value}")));
-        want.extend(["Ret 1", "Ret 0"].map(str::to_string));
-        assert_eq!(made, want);
-        let value: usize = value.parse().expect("a number");
-        assert_eq!(draft.kinds[value], Some(kind), "{made:?}");
+fn probe(
+    op: ProbeOp,
+    args: &[u32],
+    binds: &[Option<u32>],
+    hit: CoreExpr,
+    miss: CoreExpr,
+) -> CoreExpr {
+    CoreExpr::Probe {
+        op,
+        args: args.iter().copied().map(LocalId).collect(),
+        binds: binds.iter().map(|found| found.map(bind)).collect(),
+        hit: Box::new(hit),
+        miss: Box::new(miss),
     }
 }
 
-/// A lookup in a map goes into the switch on it, with no `Option` made, whether a
-/// case reads the value or not, and with what is dropped in between dropped on both
-/// ways. Not when anything else reads it.
+/// How many operands each probe has.
+const PROBES: [(ProbeOp, usize); 4] = [
+    (ProbeOp::ArrayGet, 2),
+    (ProbeOp::ArraySlice, 3),
+    (ProbeOp::ArraySet, 3),
+    (ProbeOp::MapGet, 2),
+];
+
+/// A probe is one instruction, with what a hit goes on with behind it and then what a
+/// miss jumps to. One whose value nothing reads writes none, and a write that nothing
+/// reads only asks whether there is the index.
 #[test]
-fn a_lookup_goes_into_the_match_on_it() {
-    let program = program(
-        "import scarlet/map\npub fn main() { println(map::get(map::set(map::new(), 1, 2), 1)) }\n",
-    );
-    let source = Source::new(&program).expect("a whole program");
-    let abi = program.abi;
-    // `%0` is a map, `%1` a key and `%2` what it gives.
-    let lookup = |rest: CoreExpr| {
-        let bind = bind(2);
-        let args = vec![LocalId(0), LocalId(1)];
-        let intrinsic = Intrinsic::MapGet;
-        CoreExpr::Let {
-            bind,
-            rhs: Atom::Intrinsic { intrinsic, args },
-            body: Box::new(rest),
-        }
-    };
-    let on = |scrut: u32, some: CoreExpr, none: Option<CoreExpr>, default: Option<CoreExpr>| {
-        let mut arms = vec![(vec![abi.some.variant_idx], some)];
-        arms.extend(none.map(|e| (vec![abi.none.variant_idx], e)));
-        let ty = abi.some.type_id;
-        switch(scrut, Cases::Variant { ty, arms }, default)
-    };
-    let cases = |some: CoreExpr, none: CoreExpr| on(2, some, Some(none), None);
-    // The case for `Some` takes it apart.
-    let opened = |rest: CoreExpr| CoreExpr::Open {
-        cell: LocalId(2),
-        variant: abi.some,
-        fields: vec![(0, bind(3))],
-        body: Box::new(rest),
-    };
-    let made = |rest: CoreExpr| -> Vec<String> {
-        let core = function(2, lookup(rest));
+fn a_probe_is_one_instruction() {
+    let made = |op, args: &[u32], found: Option<u32>| -> Vec<String> {
+        let core = function(4, probe(op, args, &[found], gives(0), gives(1)));
+        let program = program_with_fields();
+        let source = Source::new(&program).expect("a whole program");
         let draft = translate(&source, &core, None, &mut Tables::default());
         let draft = draft.expect("it translates");
+        let [get, ..] = instructions(&draft)[..] else {
+            panic!("no instruction")
+        };
+        let mut to = Vec::new();
+        get.targets(&draft.lists, &mut |l| to.push(draft.labels[l.0 as usize]));
+        assert_eq!(to, [2], "{op:?}");
+        assert!(get.falls_through());
         crate::code::live::settle(&mut copy_of(&draft)).expect("it loads");
         let all = instructions(&draft);
         all.iter().map(|i| shown(i, &draft.lists)).collect()
     };
-    let plain = ["3 MapFind 0 1", "Ret 3", "Ret 0"];
-    assert_eq!(made(cases(opened(gives(3)), gives(0))), plain);
-    // The default may be the case for either.
-    assert_eq!(made(on(2, opened(gives(3)), None, Some(gives(0)))), plain);
-    let arms = vec![(vec![abi.none.variant_idx], gives(0))];
-    let ty = abi.some.type_id;
-    let default = switch(2, Cases::Variant { ty, arms }, Some(opened(gives(3))));
-    assert_eq!(made(default), plain);
-    // A case gives the `Option` up, among other things.
-    let drops = made(cases(
-        dropping(&[0], opened(gives(3))),
-        dropping(&[2], gives(0)),
-    ));
-    assert_eq!(drops, ["3 MapFind 0 1", "Drop 0", "Ret 3", "Ret 0"]);
-    // What is dropped in between.
-    let between = made(dropping(&[0], cases(opened(gives(3)), gives(1))));
-    let want = ["3 MapFind 0 1", "Drop 0", "Ret 3", "Drop 0", "Ret 1"];
-    assert_eq!(between, want);
-    // When nothing reads the value it is given up at once, in front of the rest.
-    let unread = made(cases(dropping(&[0, 2], gives(1)), gives(0)));
-    let value = unread[0].split(' ').next().expect("a value").to_string();
-    let want = [
-        format!("{value} MapFind 0 1"),
-        "Drop 0".to_string(),
-        format!("Drop {value}"),
-        "Ret 1".to_string(),
-        "Ret 0".to_string(),
-    ];
-    assert_eq!(unread, want);
-    assert!(value.parse::<u32>().is_ok_and(|v| v > 2), "{unread:?}");
-    // Read again in a case, or after.
-    let looked = |made: &[String]| made[0] == "2 Builtin 0 1";
-    let field = |rest: CoreExpr| CoreExpr::Let {
-        bind: bind(3),
-        rhs: Atom::prim(PrimOp::Field(0), vec![LocalId(2)]),
-        body: Box::new(rest),
+    let ends = |first: &str| vec![first.to_string(), "Ret 0".into(), "Ret 1".into()];
+    for (op, args, found, want) in [
+        (ProbeOp::ArrayGet, &[0, 1][..], Some(9), "9 ArrayGet 0 1"),
+        (
+            ProbeOp::ArraySlice,
+            &[0, 1, 2],
+            Some(9),
+            "9 ArraySlice 0 1 2",
+        ),
+        (ProbeOp::ArraySet, &[0, 1, 2], Some(9), "9 ArraySet 0 1 2"),
+        (ProbeOp::MapGet, &[0, 1], Some(9), "9 MapGet 0 1"),
+        (ProbeOp::ArrayGet, &[2, 2], Some(9), "9 ArrayGet 2 2"),
+        (ProbeOp::ArrayGet, &[0, 1], None, "ArrayGet 0 1"),
+        (ProbeOp::ArraySlice, &[0, 1, 2], None, "ArraySlice 0 1 2"),
+        (ProbeOp::ArraySet, &[0, 1, 2], None, "ArrayGet 0 1"),
+        (ProbeOp::MapGet, &[0, 1], None, "MapGet 0 1"),
+    ] {
+        assert_eq!(made(op, args, found), ends(want));
+    }
+}
+
+/// A probe with other than its operands, or with other than a place for the one value it
+/// finds, does not load, and says what it was.
+#[test]
+fn a_probe_of_other_things_does_not_load() {
+    let program = program_with_fields();
+    let source = Source::new(&program).expect("a whole program");
+    for (op, want) in PROBES {
+        for args in 0..5 {
+            for binds in 0..3 {
+                for read in [false, true] {
+                    let all: Vec<u32> = (0..u32::try_from(args).expect("few")).collect();
+                    let found = vec![read.then_some(9); binds];
+                    let body = probe(op, &all, &found, gives(0), gives(1));
+                    let core = function(5, body);
+                    let got = translate(&source, &core, None, &mut Tables::default());
+                    let right = args == want && binds == 1;
+                    let why = Broken::Probe { op, args, binds };
+                    assert_eq!(got.is_ok(), right, "{op:?} {args} {binds}");
+                    if let Err(got) = got {
+                        assert_eq!(got, Unfit::Broken(why.clone()));
+                        let crate::Stop::BadProgram(why) = crate::Stop::broken(why) else {
+                            panic!("a bad program");
+                        };
+                        let want = format!("{op:?} of {args} values, which finds {binds}");
+                        assert_eq!(why.to_string(), want);
+                    }
+                }
+            }
+        }
+    }
+    // A function with one is a stop where it is called, and no other is.
+    let mut program = crate::code::tests::program(
+        "fn f(xs Array(Int)) Int { xs[0] or 1 }\npub fn main() { println(f([1])) }\n",
+    );
+    program.fns = program
+        .fns
+        .into_iter()
+        .map(|mut f| {
+            if f.name == "f" {
+                f.core.body = probe(ProbeOp::MapGet, &[0], &[None], gives(0), gives(0));
+            }
+            f
+        })
+        .collect();
+    let code = load(&program, Audit::Never).expect("the program loads");
+    let [Ins::Bad { why }] = body(&code, named(&code, ".f")) else {
+        panic!("one instruction");
     };
-    assert!(looked(&made(cases(field(gives(3)), gives(0)))));
-    assert!(looked(&made(cases(gives(2), gives(0)))));
-    assert!(looked(&made(cases(
-        opened(gives(3)),
-        dropping(&[0], gives(2))
-    ))));
-    let after = join(1, &[], cases(jump(1, &[]), jump(1, &[])), gives(2));
-    assert!(looked(&made(after)));
-    // One case for both says nothing of which it is.
-    let variants = vec![abi.some.variant_idx, abi.none.variant_idx];
-    let both = Cases::Variant {
-        ty,
-        arms: vec![(variants, gives(0))],
+    let (op, args, binds) = (ProbeOp::MapGet, 1, 1);
+    let want = crate::Stop::broken(Broken::Probe { op, args, binds });
+    assert_eq!(code.why(*why), want);
+    assert!(body(&code, named(&code, ".main")).len() > 1);
+}
+
+/// The built-ins that are probes are nothing else to the loader.
+#[test]
+fn a_built_in_that_is_a_probe_is_no_call() {
+    let program = program_with_fields();
+    let source = Source::new(&program).expect("a whole program");
+    for (intrinsic, n) in [
+        (Intrinsic::MapGet, 2),
+        (Intrinsic::ArraySet, 3),
+        (Intrinsic::ArrayPut, 3),
+    ] {
+        let args = (0..n).map(LocalId).collect();
+        let core = function(3, returning(Atom::Intrinsic { intrinsic, args }));
+        let got = translate(&source, &core, None, &mut Tables::default()).map(|_| ());
+        assert_eq!(got, Err(Unfit::Missing(Missing::Intrinsic(intrinsic))));
+    }
+}
+
+/// What a probe finds takes the register of what dies there: its array's, when a hit
+/// does not read that again, whatever a miss does with it. A drop behind the hit is then
+/// none, because the write gives up what was there. The one of a miss stays.
+#[test]
+fn what_a_probe_finds_has_the_register_of_what_dies() {
+    let text = |src: &str| {
+        let src =
+            format!("import scarlet/array\nimport scarlet/map\n{src}pub fn main() {{ Nil }}\n");
+        let program = crate::code::tests::program(&src);
+        let at = (&program.fns).into_iter().position(|f| f.name == "f");
+        let listing = crate::listing(&program).expect("it loads");
+        let f = listing.function(at.expect("f")).expect("f");
+        let lines = f.lines().skip(1).map(|l| l[5..].trim().to_string());
+        lines.collect::<Vec<_>>()
     };
-    assert!(looked(&made(switch(2, both, None))));
-    let neither = Cases::Variant {
-        ty,
-        arms: Vec::new(),
-    };
-    assert!(looked(&made(switch(2, neither, Some(gives(0))))));
-    // Nor does a switch on another type's, or on an Int.
-    let other = VariantRef {
-        type_id: abi.ok.type_id,
-        ..abi.some
-    };
-    let others = Cases::Variant {
-        ty: other.type_id,
-        arms: vec![(vec![0], gives(0)), (vec![1], gives(1))],
-    };
-    assert!(looked(&made(switch(2, others, None))));
-    let ints = Cases::Int(vec![(vec![0], gives(0)), (vec![1], gives(1))]);
-    assert!(looked(&made(switch(2, ints, Some(gives(0))))));
-    // When the switch is on another value, and only its case reads this one.
-    assert!(looked(&made(on(0, opened(gives(3)), Some(gives(0)), None))));
-    // Or with something in front of the switch.
-    let first = CoreExpr::Let {
-        bind: bind(6),
-        rhs: Atom::Nil,
-        body: Box::new(cases(opened(gives(3)), gives(0))),
-    };
-    assert!(looked(&made(first)));
+    // One write, and nothing for the miss but to go on.
+    let strike = "fn f(flags Array(Bool), k Int, step Int, size Int) Array(Bool) {\n\
+                  \tif k <= size {\n\
+                  \t\tf(array::put(flags, k - 1, False), k + step, step, size)\n\
+                  \t} else {\n\
+                  \t\tflags\n\
+                  \t}\n\
+                  }\n";
+    assert_eq!(
+        text(strike),
+        [
+            "JumpUnlessIntLe(r3, r5) -> 6",
+            "r6 = IntSubK(r3, 1)",
+            "r7 = Const(false)",
+            "r2 = ArraySet(move r2, r6, move r7) -> 4",
+            "r3 = IntAdd(r3, r4)",
+            "Jump -> 0",
+            "Ret(move r2)",
+        ]
+    );
+    // The same, when the miss has something to do. That is out of the loop.
+    let checked = strike.replace(
+        "array::put(flags, k - 1, False)",
+        "array::set(flags, k - 1, False) or [True]",
+    );
+    assert_eq!(
+        text(&checked),
+        [
+            "JumpUnlessIntLe(r3, r5) -> 6",
+            "r6 = IntSubK(r3, 1)",
+            "r7 = Const(false)",
+            "r2 = ArraySet(move r2, r6, move r7) -> 7",
+            "r3 = IntAdd(r3, r4)",
+            "Jump -> 0",
+            "Ret(move r2)",
+            "Drop(r2)",
+            "r2 = Const(true)",
+            "r2 = Array(r2)",
+            "Jump -> 4",
+        ]
+    );
+    // Reads in one another's hits, each with a miss that is out of the way, and a miss
+    // that has a read of its own.
+    let nested = "fn f(xs Array(Int), i Int) Int {\n\
+                  \ta = match xs[i] {\n\
+                  \t\tSome(x) -> match xs[x] {\n\
+                  \t\t\tSome(y) -> y\n\
+                  \t\t\tNone -> 2\n\
+                  \t\t}\n\
+                  \t\tNone -> { xs[i + 1] or 4 } * 5\n\
+                  \t}\n\
+                  \ta + 1\n\
+                  }\n";
+    let hits = text(nested);
+    let hits = hits.iter().take_while(|l| !l.starts_with("Ret"));
+    assert_eq!(hits.filter(|l| l.contains("Jump")).count(), 0);
+    let jumps = text(nested).iter().filter(|l| l.contains("Jump")).count();
+    assert_eq!(jumps, 3, "{:?}", text(nested));
+    // The array is dropped on both ways, and the read's register is the array's.
+    let read = "fn f(xs Array(Array(Int)), i Int) Array(Int) {\n\
+                \tys = xs[i] or array::reverse([i])\n\
+                \t[..ys, i]\n\
+                }\n";
+    let read = text(read);
+    assert_eq!(read[0], "r2 = ArrayGet(r2, r3) -> 3", "{read:?}");
+    assert_eq!(
+        read.iter().filter(|l| l.starts_with("Drop")).count(),
+        1,
+        "{read:?}"
+    );
+    // A lookup in a map that dies.
+    let looked = "fn f(m map::Map(Int, Array(Int)), k Int) Int {\n\
+                  \tmatch map::get(m, k) {\n\
+                  \t\tSome(xs) -> array::length(xs)\n\
+                  \t\tNone -> 0\n\
+                  \t}\n\
+                  }\n";
+    assert_eq!(text(looked)[0], "r2 = MapGet(r2, r3) -> 3");
+    // A hit that reads the array again keeps it, and a miss that does takes nothing.
+    let both = "fn f(xs Array(Int), i Int) Array(Int) {\n\
+                \tmatch xs[i] {\n\
+                \t\tSome(x) -> [..xs, x]\n\
+                \t\tNone -> [..xs, 0]\n\
+                \t}\n\
+                }\n";
+    assert_eq!(text(both)[0], "r3 = ArrayGet(r2, r3) -> 3");
+    let kept = "fn f(xs Array(Int), i Int) Array(Int) {\n\
+                \tys = array::put(xs, i, 1)\n\
+                \t[..ys, ..xs]\n\
+                }\n";
+    let kept = text(kept);
+    assert!(
+        kept.iter().any(|l| l.contains("ArraySet(r2, r3, move")),
+        "{kept:?}"
+    );
 }

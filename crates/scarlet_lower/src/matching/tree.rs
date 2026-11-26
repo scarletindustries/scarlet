@@ -229,6 +229,25 @@ pub(crate) enum Goal {
     Any(AnyId),
 }
 
+impl Node<'_> {
+    /// Whether some way through here reads something of the matched value.
+    pub(crate) fn reads(&self) -> bool {
+        match self {
+            Node::Nothing | Node::Rest(_) => false,
+            Node::Leaf(leaf) => !leaf.binds.is_empty(),
+            Node::Switch { .. }
+            | Node::Long { .. }
+            | Node::Within { .. }
+            | Node::Segment(_)
+            | Node::Ends { .. }
+            | Node::Any { .. } => true,
+            Node::Chain { links, last } => {
+                links.iter().any(|(_, node)| node.reads()) || last.reads()
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Leaf {
     pub(crate) goal: Goal,

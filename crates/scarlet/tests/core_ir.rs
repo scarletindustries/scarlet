@@ -1250,19 +1250,234 @@ fn a_chain_of_short_circuits_is_no_nest() {
     assert_eq!(f.matches("join j").count(), 1, "{f}");
 }
 
-/// `xs[i] or d` is one read with no branch, where its value is used as where it is
-/// returned.
+/// What may not be there is a probe, and a match on it, spelt as one or with `or`, is the
+/// probe's two arms, where its value is used as where it is returned. The default runs on
+/// a miss alone.
 #[test]
-fn an_index_with_a_default_needs_no_join() {
+fn a_match_on_what_may_not_be_there_is_a_probe() {
     let f = f_of(
         "fn f(xs Array(Int), i Int) Int {\n\
-         \ta = xs[i] or 0\n\
-         \ta + { xs[a] or i }\n\
+         \ta = xs[i] or { i * 2 }\n\
+         \ta + match xs[a..i] {\n\
+         \t\tOk(ys) -> ys[0] or a\n\
+         \t\tErr(Nil) -> i\n\
+         \t}\n\
          }\n\
          pub fn main() { println(f([1], 0)) }\n",
     );
-    assert_eq!(f.matches("ArrayIndexOr").count(), 2, "{f}");
-    assert!(!f.contains("join") && !f.contains("match"), "{f}");
+    assert_eq!(f.matches("probe ArrayGet(").count(), 2, "{f}");
+    assert_eq!(f.matches("probe ArraySlice(").count(), 1, "{f}");
+    assert!(!f.contains("switch") && !f.contains("ctor"), "{f}");
+    let miss = f.split("| miss ->").nth(1).expect("the first miss");
+    assert!(
+        miss.lines().nth(2).is_some_and(|l| l.contains("IntMul")),
+        "{f}"
+    );
+    // Nothing is made where the value has a name that only the match reads, which comes
+    // straight after it, or where the arms have guards and patterns in the value.
+    let f = f_of(
+        "import scarlet/map\n\
+         import scarlet/array\n\
+         fn f(m map::Map(Int, Array(Int)), k Int) Int {\n\
+         \tfound = map::get(m, k)\n\
+         \tmatch found {\n\
+         \t\tSome([x, ..]) if x > k -> x\n\
+         \t\tSome([]) | None -> match array::set([k], k, 1) {\n\
+         \t\t\tErr(_) -> 0\n\
+         \t\t\tOk([y]) -> y\n\
+         \t\t\tOk(_) -> 2\n\
+         \t\t}\n\
+         \t\tSome(_) -> 3\n\
+         \t}\n\
+         }\n\
+         pub fn main() { println(f(map::new(), 0)) }\n",
+    );
+    assert_eq!(f.matches("probe MapGet(").count(), 1, "{f}");
+    assert_eq!(f.matches("probe ArraySet(").count(), 1, "{f}");
+    assert!(!f.contains("switch") && !f.contains("ctor"), "{f}");
+}
+
+/// The match a probe's value is for may be on a block that ends in the probe, or on a
+/// name for it, in a block that gives a value or not. The arms are lowered once, and the
+/// one value has one local. Where the name is another's, or is read again, the value is
+/// made.
+#[test]
+fn a_probe_goes_into_the_match_on_it_however_it_is_spelt() {
+    let f = f_of(
+        "fn f(xs Array(Int), i Int) Int {\n\
+         \ta = match {\n\t\tj = i * 2\n\t\txs[j]\n\t} {\n\
+         \t\tSome(x) -> x\n\t\tNone -> 777\n\t}\n\
+         \tb = {\n\t\to = {\n\t\t\tk = a * 3\n\t\t\txs[k]\n\t\t}\n\
+         \t\tmatch o {\n\t\t\tSome(x) -> x\n\t\t\tNone -> 888\n\t\t}\n\t}\n\
+         \to = xs[b]\n\
+         \tmatch o {\n\t\tSome(x) -> x\n\t\tNone -> 999\n\t}\n\
+         }\n\
+         pub fn main() { println(f([1], 0)) }\n",
+    );
+    assert_eq!(f.matches("probe ArrayGet(").count(), 3, "{f}");
+    assert!(!f.contains("switch") && !f.contains("ctor"), "{f}");
+    let made = |body: &str| {
+        let f = f_of(&format!(
+            "fn g(o Option(Int)) Int {{ o or 5 }}\n\
+             fn f(xs Array(Int), i Int) Int {{\n{body}\n}}\n\
+             pub fn main() {{ println(f([1], 0)) }}\n"
+        ));
+        assert_eq!(
+            f.matches("ctor").count(),
+            2 * f.matches("probe").count(),
+            "{f}"
+        );
+        assert_eq!(f.matches("switch").count(), 1, "{f}");
+        f
+    };
+    made("\to = xs[i]\n\tmatch o {\n\t\tSome(v) -> v + g(o)\n\t\tNone -> g(o)\n\t}");
+    made("\to = xs[i]\n\tp = xs[0]\n\tmatch o {\n\t\tSome(v) -> v + g(p)\n\t\tNone -> g(p)\n\t}");
+    // A name on the outermost spine is the join's own, with no copy of it.
+    let f = f_of(
+        "fn g(o Option(Int)) Int { o or 5 }\n\
+         fn f(xs Array(Int), i Int) Int {\n\
+         \to = xs[i]\n\tg(o) + g(o)\n\
+         }\n\
+         pub fn main() { println(f([1], 0)) }\n",
+    );
+    assert!(!f.contains(" = %"), "{f}");
+    // What is in an operand is in front of the join and not in its body.
+    let f = f_of(
+        "fn f(xs Array(Int), i Int) Int { xs[xs[xs[i] or 1] or 2] or 3 }\n\
+         pub fn main() { println(f([1], 0)) }\n",
+    );
+    let joins = f.lines().filter(|l| l.contains("join j"));
+    let depths: Vec<usize> = joins.map(|l| l.len() - l.trim_start().len()).collect();
+    assert_eq!(depths, [2, 2], "{f}");
+}
+
+/// Where nothing reads the value there is the probe, which a write or a slice may stop
+/// at, and what comes after it.
+#[test]
+fn the_value_of_a_probe_that_nothing_reads_is_not_made() {
+    for body in [
+        "\tmatch xs[i] {\n\t\t_ -> 777\n\t}",
+        "\tmatch xs[i] {\n\t\tSome(_) | None -> 777\n\t}",
+        "\tmatch xs[0..i] {\n\t\tOk(_) | Err(_) -> 777\n\t}",
+        "\t_ = xs[i]\n\t777",
+        "\t_ = {\n\t\tj = i + 1\n\t\txs[j]\n\t}\n\t777",
+        "\t_ = array::set(xs, i, 5)\n\t777",
+        "\t_ = array::put(xs, i, 5)\n\t777",
+        "\t_ = xs[0..i]\n\t777",
+    ] {
+        let f = f_of(&format!(
+            "import scarlet/array\n\
+             fn f(xs Array(Int), i Int) Int {{\n{body}\n}}\n\
+             pub fn main() {{ println(f([1], 0)) }}\n"
+        ));
+        assert_eq!(f.matches("probe ").count(), 1, "{body}: {f}");
+        assert_eq!(f.matches("hit(_)").count(), 1, "{body}: {f}");
+        assert!(!f.contains("ctor") && !f.contains("switch"), "{body}: {f}");
+    }
+}
+
+/// Any other use but a match makes the value in both arms.
+#[test]
+fn the_value_of_a_probe_is_made_in_its_arms() {
+    let f = f_of(
+        "fn g(o Option(Int), p Option(Int)) Bool { o == p }\n\
+         fn f(xs Array(Int), i Int) Bool { g(xs[i], xs[i + 1]) }\n\
+         pub fn main() { println(f([1], 0)) }\n",
+    );
+    assert_eq!(f.matches("probe ArrayGet(").count(), 2, "{f}");
+    assert_eq!(f.matches("ctor").count(), 4, "{f}");
+    // The joins are beside each other, with the operands in front.
+    let joins = f.lines().filter(|l| l.contains("join j"));
+    let depths: Vec<usize> = joins.map(|l| l.len() - l.trim_start().len()).collect();
+    assert_eq!(depths, [2, 2], "{f}");
+}
+
+/// The `Nil` in an `Err` has its own type, is made once on the way that two arms read it
+/// on, and is not made where nothing reads it.
+#[test]
+fn the_nil_of_a_miss_is_made_where_it_is_read() {
+    let f = |body: &str| {
+        f_of(&format!(
+            "import scarlet/array\n\
+             fn g(n Nil, i Int) Int {{ if n == Nil {{ i }} else {{ 0 }} }}\n\
+             fn f(xs Array(Int), i Int) Int {{\n\
+             \tmatch array::set(xs, i, 1) {{\n{body}\t}}\n}}\n\
+             pub fn main() {{ println(f([1], 0)) }}\n"
+        ))
+    };
+    let read = f("\t\tErr(n) if g(n, i) > 3 -> 4\n\t\tErr(n) -> g(n, 5)\n\t\tOk(_) -> 777\n");
+    assert_eq!(read.matches("nil").count(), 1, "{read}");
+    let not = f("\t\tErr(_) -> 4\n\t\tOk(_) -> 777\n");
+    assert_eq!(not.matches("nil").count(), 0, "{not}");
+    let kept = f_of(
+        "import scarlet/array\n\
+         fn f(xs Array(Int), i Int) Result(Array(Int), Nil) { array::set(xs, i, 1) }\n\
+         pub fn main() { println(f([1], 0)) }\n",
+    );
+    let typed = |s: &str| {
+        s.split(':')
+            .nth(1)
+            .map(|t| t.trim_end_matches(')').to_string())
+    };
+    let nil = kept
+        .lines()
+        .find_map(|l| typed(l.trim().strip_suffix(" = nil")?));
+    let head = kept.lines().next().unwrap_or_default();
+    let params: Vec<_> = head
+        .split(&['(', ','][..])
+        .skip(1)
+        .take(2)
+        .map(typed)
+        .collect();
+    assert!(nil.is_some() && !params.contains(&nil), "{kept}");
+}
+
+/// `array::put` gives the array back where it has no such index, and writes made of one
+/// another are beside each other.
+#[test]
+fn a_put_is_a_probe_whose_miss_is_the_array() {
+    let f = f_of(
+        "import scarlet/array\n\
+         fn f(xs Array(Int), i Int) Array(Int) {\n\
+         \txs |> array::put(i, 1) |> array::put(i + 1, 2) |> array::put(i + 2, 3)\n\
+         }\n\
+         pub fn main() { println(f([1], 0)) }\n",
+    );
+    assert_eq!(f.matches("probe ArraySet(").count(), 3, "{f}");
+    assert!(f.contains("| miss ->\n        jump j0(%0)"), "{f}");
+    let joins = f.lines().filter(|l| l.contains("join j"));
+    let depths: Vec<usize> = joins.map(|l| l.len() - l.trim_start().len()).collect();
+    assert_eq!(depths, [2, 2], "{f}");
+}
+
+/// A built-in that asks a probe is one as a function value too, and a function of the
+/// program's own with such a name is a call.
+#[test]
+fn a_built_in_is_a_probe_by_what_it_is_and_not_by_its_name() {
+    let core = lower(
+        "import scarlet/map\n\
+         import scarlet/array\n\
+         fn get(xs Array(Int), i Int) Option(Int) { if i > 0 { xs[i] } else { None } }\n\
+         fn put(xs Array(Int), i Int, x Int) Array(Int) { [i, x, ..xs] }\n\
+         fn by(f fn(Array(Int), Int, Int) Array(Int)) Array(Int) { f([1], 0, 2) }\n\
+         fn f(xs Array(Int), m map::Map(Int, Int)) Int {\n\
+         \ta = get(xs, 1) or 0\n\
+         \tb = by(put)\n\
+         \tc = by(array::put)\n\
+         \tlook = map::get\n\
+         \td = look(m, 1) or 1\n\
+         \ta + d + array::length(b) + array::length(c)\n\
+         }\n\
+         pub fn main() { println(f([1], map::new())) }\n",
+    );
+    let all: Vec<&str> = core.split("\n\n").collect();
+    let own = all.iter().find(|f| f.contains("fn main.f(")).expect("f");
+    assert!(!own.contains("probe"), "{own}");
+    for (name, op) in [("ArrayPut", "ArraySet"), ("MapGet", "MapGet")] {
+        let wrapper = all.iter().find(|f| f.contains(&format!("fn main.{name}(")));
+        let wrapper = wrapper.unwrap_or_else(|| panic!("a wrapper for {name}"));
+        assert!(wrapper.contains(&format!("probe {op}(")), "{wrapper}");
+    }
 }
 
 /// Every alternative of an or-pattern shares one lowered arm body, and an

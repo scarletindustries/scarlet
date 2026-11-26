@@ -572,8 +572,8 @@ fn what_does_nothing_is_left_out() {
     let (kinds, labels) = branch(of::mv(2, 0));
     assert_eq!(kinds, ["JumpIfFalse", "Ret"]);
     assert_eq!(labels, [1, 1]);
-    // A write's result does not have its array's register, because the copy on
-    // a miss reads the array there.
+    // A write's result has its array's register, though the copy on a miss reads the
+    // array there, so neither way has anything to move.
     let ins = vec![
         of::write(3, [0, 1, 2], 0),
         of::jump(1),
@@ -581,8 +581,18 @@ fn what_does_nothing_is_left_out() {
         of::ret(3),
     ];
     let (kinds, labels) = left(draft(4, 3, ins, &[2, 3]));
-    assert_eq!(kinds, ["ArraySet", "Jump", "Move", "Ret"]);
-    assert_eq!(labels, [2, 3]);
+    assert_eq!(kinds, ["ArraySet", "Ret"]);
+    assert_eq!(labels, [1, 1]);
+    // Not when a hit reads the array too.
+    let ins = vec![
+        of::write(3, [0, 1, 2], 0),
+        of::append(3, 3, 0),
+        of::jump(1),
+        of::mv(3, 0),
+        of::ret(3),
+    ];
+    let (kinds, _) = left(draft(4, 3, ins, &[3, 4]));
+    assert_eq!(kinds, ["ArraySet", "ArrayAppend", "Jump", "Move", "Ret"]);
 }
 
 /// A jump over instructions that were all left out goes too, however many

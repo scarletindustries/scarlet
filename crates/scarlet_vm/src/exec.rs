@@ -22,8 +22,8 @@ use scarlet_ir::core_ir::{GlobalSlot, MAX_PARAMS};
 use crate::array::{self, End, Seq};
 use crate::bigint;
 use crate::code::{
-    Arg, AssignList, BitsOp, Code, Counted, Dead, Dst, Entry, Hands, Ins, Makes, MaybeDst, Op, Reg,
-    Room, Sets, Shared, Src, Taken,
+    Arg, AssignList, BitsOp, Code, Counted, Dead, Dst, Entry, Hands, Ins, Makes, MaybeDst,
+    MaybeHit, Op, Reg, Room, Sets, Shared, Src, Taken,
 };
 use crate::counts::Counts;
 use crate::eq;
@@ -1125,10 +1125,11 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
                 src,
                 start,
                 end,
+                miss,
             } => {
-                let of = win.look(src);
-                let v = rest.array_slice(of, win.look(start), win.look(end))?;
-                win.put(&mut rest.heap, dst, v)?;
+                if !array_slice(win.lend(), rest, dst, src, [start, end])? {
+                    pc = miss.index();
+                }
             }
             Ins::ArraySet {
                 dst,
@@ -1140,26 +1141,24 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
                 Some(array) => win.hit(&mut rest.heap, dst, array)?,
                 None => pc = miss.index(),
             },
-            Ins::ArrayIndex { dst, src, index } => {
-                let found = rest.index(win.look(src), win.look(index))?;
-                let v = match found {
-                    Some(v) => rest.some(v)?,
-                    None => code.abi.none,
-                };
-                win.put(&mut rest.heap, dst, v)?;
-            }
-            Ins::ArrayIndexOr {
+            Ins::ArrayGet {
                 dst,
                 src,
                 index,
-                default,
+                miss,
             } => {
-                let found = rest.index(win.look(src), win.look(index))?;
-                let v = match found {
-                    Some(v) => v,
-                    None => win.share(&mut rest.heap, default)?,
-                };
-                win.put(&mut rest.heap, dst, v)?;
+                let (of, index) = (win.look(src), win.look(index));
+                match dst.hit() {
+                    Some(to) => match rest.index(of, index)? {
+                        Some(v) => win.hit(&mut rest.heap, to, v)?,
+                        None => pc = miss.index(),
+                    },
+                    None => {
+                        if !rest.has_index(of, index)? {
+                            pc = miss.index();
+                        }
+                    }
+                }
             }
             Ins::Bad { why } => return Err(code.why(why)),
             Ins::JumpIfFalse { cond, ref to } => match win.look(cond).view() {
@@ -1187,14 +1186,20 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
                 let cell = map::set_owned(&mut rest.heap, m, k, v).map_err(fault)?;
                 win.put(&mut rest.heap, dst, Value::cell(cell))?;
             }
-            Ins::MapFind { dst, map, key, to } => {
+            Ins::MapGet {
+                dst,
+                map,
+                key,
+                miss,
+            } => {
                 let m = rest.map(win.look(map))?;
-                match map::get(&rest.heap, m, win.look(key)) {
-                    Some(v) => {
+                match (map::get(&rest.heap, m, win.look(key)), dst.hit()) {
+                    (Some(v), Some(to)) => {
                         let v = rest.share(v)?;
-                        win.hit(&mut rest.heap, dst, v)?;
+                        win.hit(&mut rest.heap, to, v)?;
                     }
-                    None => pc = to.index(),
+                    (Some(_), None) => {}
+                    (None, _) => pc = miss.index(),
                 }
             }
             Ins::MapDeleteOwned { dst, map, key } => {
@@ -1951,6 +1956,27 @@ fn array_push(
     }
     let cell = rest.push_all(a, &values, end)?;
     Ok(win.put(&mut rest.heap, dst, Value::cell(cell))?)
+}
+
+/// The elements of the array in `src` from the first of `ends` up to the second,
+/// into `dst`. Whether the array has them.
+#[inline(never)]
+fn array_slice(
+    mut win: Window<'_>,
+    rest: &mut Rest<'_, '_>,
+    dst: MaybeHit<Reg>,
+    src: Src<Reg>,
+    ends: [Src<Reg>; 2],
+) -> Result<bool, Stop> {
+    let [start, end] = ends.map(|r| win.look(r));
+    let Some(span) = rest.span(win.look(src), start, end)? else {
+        return Ok(false);
+    };
+    if let Some(to) = dst.hit() {
+        let cut = rest.slice(span)?;
+        win.hit(&mut rest.heap, to, cut)?;
+    }
+    Ok(true)
 }
 
 /// The array in `src` with the value in `value` at the index in `index`,

@@ -20,7 +20,7 @@ pub use scarlet_ir::rty::{RSlice, RTy, ResolvedNode, ResolvedPool};
 use std::collections::BTreeMap;
 
 use scarlet_ir::TypeId;
-use scarlet_ir::core_ir::{ConstId, FuncIdx, PrimOp, VariantRef};
+use scarlet_ir::core_ir::{ConstId, FuncIdx, PrimOp, ProbeOp, VariantRef};
 use scarlet_ir::intrinsic::Intrinsic;
 
 /// A binding introduced by a `TypedFn`'s parameter list, a `let`, or a
@@ -318,19 +318,14 @@ pub enum TypedExpr {
         ty: RTy,
         elems: Vec<TypedArrayElem>,
     },
-    /// `recv[index]`. It yields `Option(elem)`, which is what lets `xs[i] or d`
-    /// resolve.
-    Index {
+    /// What may not be there: `xs[i]`, `xs[a..b]`, and a call of a built-in that asks
+    /// a [`ProbeOp`]. A value of type `found` is what it finds.
+    Probe {
         ty: RTy,
-        recv: Box<TypedExpr>,
-        index: Box<TypedExpr>,
-    },
-    /// `recv[start..end]`.
-    Slice {
-        ty: RTy,
-        recv: Box<TypedExpr>,
-        start: Box<TypedExpr>,
-        end: Box<TypedExpr>,
+        op: ProbeOp,
+        args: Vec<TypedExpr>,
+        found: RTy,
+        gives: Gives,
     },
     /// `start..end` as a value.
     Range {
@@ -374,6 +369,17 @@ pub enum TypedExpr {
     },
 }
 
+/// What the value of a [`TypedExpr::Probe`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gives {
+    /// `Some` of what it finds, or `None`.
+    Option,
+    /// `Ok` of what it finds, or `Err` of a `Nil`, which is of type `nil`.
+    Result { nil: RTy },
+    /// What it finds, or else its first operand.
+    OrFirst,
+}
+
 impl TypedExpr {
     /// The resolved type of this expression. Every arm is a field read, so this
     /// never recurses and never walks a `Let` spine.
@@ -394,8 +400,7 @@ impl TypedExpr {
             | TypedExpr::Ctor { ty, .. }
             | TypedExpr::Update { ty, .. }
             | TypedExpr::Array { ty, .. }
-            | TypedExpr::Index { ty, .. }
-            | TypedExpr::Slice { ty, .. }
+            | TypedExpr::Probe { ty, .. }
             | TypedExpr::Range { ty, .. }
             | TypedExpr::Interp { ty, .. }
             | TypedExpr::BinLit { ty, .. }
@@ -506,6 +511,7 @@ pub(crate) fn each_expr<'e>(e: &'e TypedExpr, mut f: impl FnMut(&'e TypedExpr)) 
             | TypedExpr::Field { recv: of, .. } => work.push(of),
             TypedExpr::Tuple { elems: all, .. }
             | TypedExpr::Ctor { args: all, .. }
+            | TypedExpr::Probe { args: all, .. }
             | TypedExpr::Closure { captures: all, .. } => work.extend(all),
             TypedExpr::Update { base, sets, .. } => {
                 work.push(base);
@@ -514,10 +520,6 @@ pub(crate) fn each_expr<'e>(e: &'e TypedExpr, mut f: impl FnMut(&'e TypedExpr)) 
             TypedExpr::Array { elems, .. } => work.extend(elems.iter().map(|e| match e {
                 TypedArrayElem::Elem(e) | TypedArrayElem::Spread(e) => e,
             })),
-            TypedExpr::Index { recv, index, .. } => work.extend([&**recv, &**index]),
-            TypedExpr::Slice {
-                recv, start, end, ..
-            } => work.extend([&**recv, &**start, &**end]),
             TypedExpr::Range { start, end, .. } => work.extend([&**start, &**end]),
             TypedExpr::Interp { parts, .. } => work.extend(parts.iter().filter_map(|p| match p {
                 TypedInterpPart::Str(_) => None,

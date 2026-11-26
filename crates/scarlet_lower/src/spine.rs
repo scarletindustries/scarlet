@@ -2,7 +2,9 @@
 //! jump. A pass walks it in a loop, so a long one costs no stack depth, and puts
 //! it together again. What comes after a join on it is the join's continuation.
 
-use super::{Atom, Callee, Cases, CoreBind, CoreExpr, GlobalSlot, JoinId, LocalId, VariantRef};
+use super::{
+    Atom, Callee, Cases, CoreBind, CoreExpr, GlobalSlot, JoinId, LocalId, ProbeOp, VariantRef,
+};
 
 /// One node peeled off a spine, waiting for what comes after it.
 pub(crate) enum Frame {
@@ -87,6 +89,13 @@ pub(crate) enum End {
         then: Box<CoreExpr>,
         els: Box<CoreExpr>,
     },
+    Probe {
+        op: ProbeOp,
+        args: Vec<LocalId>,
+        binds: Vec<Option<CoreBind>>,
+        hit: Box<CoreExpr>,
+        miss: Box<CoreExpr>,
+    },
     Switch {
         scrut: LocalId,
         cases: Cases,
@@ -102,6 +111,19 @@ impl End {
             End::TailCall { callee, args } => CoreExpr::TailCall { callee, args },
             End::Jump { to, args } => CoreExpr::Jump { to, args },
             End::If { cond, then, els } => CoreExpr::If { cond, then, els },
+            End::Probe {
+                op,
+                args,
+                binds,
+                hit,
+                miss,
+            } => CoreExpr::Probe {
+                op,
+                args,
+                binds,
+                hit,
+                miss,
+            },
             End::Switch {
                 scrut,
                 cases,
@@ -146,6 +168,19 @@ pub(crate) fn peel(e: CoreExpr) -> Result<(Frame, CoreExpr), End> {
         CoreExpr::TailCall { callee, args } => Err(End::TailCall { callee, args }),
         CoreExpr::Jump { to, args } => Err(End::Jump { to, args }),
         CoreExpr::If { cond, then, els } => Err(End::If { cond, then, els }),
+        CoreExpr::Probe {
+            op,
+            args,
+            binds,
+            hit,
+            miss,
+        } => Err(End::Probe {
+            op,
+            args,
+            binds,
+            hit,
+            miss,
+        }),
         CoreExpr::Switch {
             scrut,
             cases,

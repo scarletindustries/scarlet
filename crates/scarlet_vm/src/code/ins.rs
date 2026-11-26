@@ -29,9 +29,9 @@ mod fields;
 
 pub(crate) use fields::{
     Arg, ArgList, Args, Assign, AssignList, BinaryId, BitsOp, BlockId, Dead, DeadList, Dst,
-    DstList, EntryPc, Hands, Hit, IntTable, Last, Lists, LookList, Looks, MaybeDst, Names, Newline,
-    Part, Pc, Place, PlaceList, Places, Reg, Role, Room, Sets, ShareList, Shared, Shares, Src,
-    Table, Taken, TextId, Unplaced, VReg, WhyId,
+    DstList, EntryPc, Hands, Hit, IntTable, Last, Lists, LookList, Looks, MaybeDst, MaybeHit,
+    Names, Newline, Part, Pc, Place, PlaceList, Places, Reg, Role, Room, Sets, ShareList, Shared,
+    Shares, Src, Table, Taken, TextId, Unplaced, VReg, WhyId,
 };
 pub(super) use fields::{Callee, Label, LastReg, OwnEntry, OwnRoom};
 
@@ -356,10 +356,9 @@ instructions! {
     /// `map::set` for a map whose register gives up its reference, so the map
     /// can change in place when nothing else holds it.
     MapSetOwned { dst: Dst<R>, map: Taken<R>, key: Src<R>, value: Src<R> },
-    /// `map::get` whose `Option` is only matched on: the value goes straight
-    /// to `dst`, the `Some` arm's binder, and a missing key continues at `to`,
-    /// the `None` arm. No `Some` cell is made.
-    MapFind { dst: Hit<R>, map: Src<R>, key: Src<R>, to: R::To },
+    /// What the map in `map` has for `key`. When it has nothing the run continues at
+    /// `miss`.
+    MapGet { dst: MaybeHit<R>, map: Src<R>, key: Src<R>, miss: R::To },
     /// `map::delete`, as [`Ins::MapSetOwned`] is `map::set`.
     MapDeleteOwned { dst: Dst<R>, map: Taken<R>, key: Src<R> },
     /// Continue at `to` unless the top half of the word in `src` is `tag`,
@@ -419,20 +418,16 @@ instructions! {
     ArrayAppendWide { dst: Dst<R>, rest: Arg<R>, back: ShareList },
     /// `[..a, ..b]`.
     ArrayConcat { dst: Dst<R>, a: Src<R>, b: Src<R> },
-    /// `xs[a..b]`. It gives `Ok` of the elements of the array in `src` from
-    /// `start` up to `end`, or `Err(Nil)` when that range is not inside it.
-    ArraySlice { dst: Dst<R>, src: Src<R>, start: Src<R>, end: Src<R> },
-    /// The array in `src` with `value` at `index`, for `array::put` and
-    /// `array::set`. When the array has no such index, nothing is written
-    /// and nothing is taken, and the run continues at `miss`. When it takes
-    /// `src` the write may change the array in place.
+    /// Element `index` of the array in `src`. When the array has no such index the run
+    /// continues at `miss`.
+    ArrayGet { dst: MaybeHit<R>, src: Src<R>, index: Src<R>, miss: R::To },
+    /// The elements of the array in `src` from `start` up to `end`. When that range is
+    /// not inside it the run continues at `miss`.
+    ArraySlice { dst: MaybeHit<R>, src: Src<R>, start: Src<R>, end: Src<R>, miss: R::To },
+    /// The array in `src` with `value` at `index`. When the array has no such
+    /// index, nothing is written and nothing is taken, and the run continues at
+    /// `miss`. When it takes `src` the write may change the array in place.
     ArraySet { dst: Hit<R>, src: Arg<R>, index: Src<R>, value: Arg<R>, miss: R::To },
-    /// `xs[i]`. It gives `Some` of element `index` of the array in `src`, or
-    /// `None` when it has no such element.
-    ArrayIndex { dst: Dst<R>, src: Src<R>, index: Src<R> },
-    /// `xs[i] or d`. It gives element `index` of the array in `src`, or
-    /// `default` when it has no such element.
-    ArrayIndexOr { dst: Dst<R>, src: Src<R>, index: Src<R>, default: Shared<R> },
     /// Field `index` of the constructor in `src`, or element `index` of the
     /// tuple there.
     Field { dst: Dst<R>, src: Src<R>, index: u16 },
@@ -632,9 +627,8 @@ impl<R: Names> Ins<R> {
     pub(super) fn reads_part_of(&self) -> Option<Src<R>> {
         if let Ins::Field { src, .. }
         | Ins::ArrayElem { src, .. }
-        | Ins::ArrayIndex { src, .. }
-        | Ins::ArrayIndexOr { src, .. }
-        | Ins::MapFind { map: src, .. } = *self
+        | Ins::ArrayGet { src, .. }
+        | Ins::MapGet { map: src, .. } = *self
         {
             Some(src)
         } else {

@@ -1,6 +1,6 @@
 use super::*;
 use crate::code::tests::program;
-use scarlet_ir::core_ir::{LoweredFn, Program};
+use scarlet_ir::core_ir::{LoweredFn, ProbeOp, Program};
 
 fn function<'p>(program: &'p Program, name: &str) -> &'p LoweredFn {
     let mut all = (&program.fns).into_iter();
@@ -30,6 +30,7 @@ fn made(e: &CoreExpr) -> Vec<String> {
             CoreExpr::Ret(_)
             | CoreExpr::TailCall { .. }
             | CoreExpr::If { .. }
+            | CoreExpr::Probe { .. }
             | CoreExpr::Switch { .. }
             | CoreExpr::NoArm
             | CoreExpr::Jump { .. } => {
@@ -216,6 +217,7 @@ fn in_order(src: &str) -> usize {
             CoreExpr::SetGlobal { .. }
             | CoreExpr::Join { .. }
             | CoreExpr::If { .. }
+            | CoreExpr::Probe { .. }
             | CoreExpr::Switch { .. }
             | CoreExpr::Open { .. }
             | CoreExpr::NoArm
@@ -247,6 +249,42 @@ fn a_literal_is_cut_wherever_it_is() {
     let mut names = Locals::default();
     names.walk(&core.body);
     assert!(names.highest > 80);
+}
+
+/// A literal in either arm of a probe is made in pieces there. What the probe reads and
+/// what it finds have their numbers and are counted.
+#[test]
+fn a_literal_in_the_arms_of_a_probe_is_cut() {
+    let ty = RTy(0);
+    let local = LocalId;
+    let literal = |first: u32| CoreExpr::Let {
+        bind: CoreBind::new(local(3), ty),
+        rhs: Atom::prim(
+            PrimOp::MakeArray,
+            [&[local(first)][..], &[local(0); 39]].concat(),
+        ),
+        body: Box::new(CoreExpr::Ret(local(3))),
+    };
+    let body = CoreExpr::Probe {
+        op: ProbeOp::ArrayGet,
+        args: vec![local(0), local(1)],
+        binds: vec![Some(CoreBind::new(local(90), ty))],
+        hit: Box::new(literal(90)),
+        miss: Box::new(literal(1)),
+    };
+    let mut names = Locals::default();
+    names.walk(&body);
+    assert_eq!(names.highest, 90);
+    let times = [(local(0), 79), (local(1), 2), (local(90), 1), (local(3), 2)];
+    assert_eq!(names.times, HashMap::from(times));
+    let core = CoreFn {
+        params: vec![CoreBind::new(local(0), ty), CoreBind::new(local(1), ty)],
+        body,
+        ret_ty: ty,
+    };
+    let text = in_pieces(&core).expect("some pieces").body.to_string();
+    assert_eq!(text.matches("ArrayAppend(").count(), 2, "{text}");
+    assert!(text.contains("let %91:0 = MakeArray(%90"), "{text}");
 }
 
 /// What a piece needs may have its value before a join that every way comes past,

@@ -22,7 +22,7 @@ use scarlet_ir::intrinsic::Intrinsic;
 use crate::code::{self, Code, Entry, Ins, Reg};
 use crate::code::{
     Arg, ArgList, Args, Assign, AssignList, BinaryId, BitsOp, BlockId, Dead, DeadList, Dst,
-    DstList, EntryPc, Hit, IntTable, Last, LookList, Looks, Makes, MaybeDst, Newline, Pc,
+    DstList, EntryPc, Hit, IntTable, Last, LookList, Looks, Makes, MaybeDst, MaybeHit, Newline, Pc,
     PlaceList, Room, Sets, ShareList, Shared, Shares, Src, Table, Taken, TextId, Why, WhyId,
 };
 use crate::frame::FIRST;
@@ -219,6 +219,12 @@ impl Show for DstList {
     fn show(self, line: &mut Line<'_>) {
         let code = line.code;
         self.dsts(&code.lists).iter().for_each(|d| d.show(line));
+    }
+}
+
+impl Show for MaybeHit<Reg> {
+    fn show(self, line: &mut Line<'_>) {
+        line.writes(self.hit().map(|hit| hit.0));
     }
 }
 

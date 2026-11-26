@@ -1,7 +1,7 @@
 //! Functions made at random, for the tests of the passes.
 
 use super::super::ins::{Ins, IntTable, Label, Lists, PlaceList, Src, Table, VReg};
-use super::super::translate::{Draft, Step};
+use super::super::translate::{Draft, Miss, Step};
 use super::{draft, of};
 
 /// Numbers from a generator that gives the same ones each time.
@@ -32,6 +32,8 @@ struct Maker {
     lists: Lists<VReg>,
     /// [`Draft::words`].
     words: Vec<(Label, VReg)>,
+    /// [`Draft::misses`].
+    misses: Vec<Miss>,
     /// The numbers no value has yet, in no order, so that a value written late
     /// may have a lower number than one that is held then.
     numbers: Vec<u32>,
@@ -53,6 +55,13 @@ impl Maker {
 
     fn push(&mut self, ins: Ins<VReg>) {
         self.steps.push(Step::Ins(ins));
+    }
+
+    /// Put a miss here, which ends where `to` will be.
+    fn place_miss(&mut self, from: u32, to: u32) {
+        self.place(from);
+        let (from, to) = (Label(from), Label(to));
+        self.misses.push(Miss { from, to });
     }
 
     /// `n` steps of straight code over the values in `scope`, which it adds
@@ -105,7 +114,8 @@ impl Maker {
                 }
                 10 if depth < 4 && self.random.below(2) == 0 => self.switch(depth, scope),
                 10 | 11 if depth < 4 => self.branch(depth, scope),
-                12 if depth < 4 => self.find(depth, scope),
+                12 if depth < 4 && self.random.below(2) == 0 => self.find(depth, scope),
+                12 if depth < 4 => self.probe(depth, scope, theirs),
                 13 => self.write(scope),
                 14 if depth < 4 => self.tail(depth, scope),
                 _ => {
@@ -214,12 +224,66 @@ impl Maker {
         let from = self.random.of(&inner);
         self.push(of::mv(joined, from));
         self.push(of::jump(after));
-        self.place(miss);
+        self.place_miss(miss, after);
         let mut inner = scope.clone();
         let n = self.random.below(5);
         self.steps(n, depth + 1, &mut inner, scope.len());
         let from = self.random.of(&inner);
         self.push(of::mv(joined, from));
+        self.place(after);
+        scope.push(joined);
+    }
+
+    /// A probe, as Perceus leaves one: a value that no code after it reads is given up
+    /// where a hit goes on or where a miss does, or at both, and where it is not it is
+    /// what that way gives.
+    fn probe(&mut self, depth: usize, scope: &mut Vec<u32>, theirs: usize) {
+        let operands = [
+            self.random.of(scope),
+            self.random.of(scope),
+            self.random.of(scope),
+        ];
+        let mut dying = Vec::new();
+        while scope.len() > theirs.max(1) && self.random.below(3) != 0 {
+            let i = theirs + self.random.below(scope.len() - theirs);
+            dying.push((scope.remove(i), self.random.below(3)));
+        }
+        let found = self.value();
+        let joined = self.value();
+        let (miss, after) = (self.label(), self.label());
+        let read = self.random.below(3) != 0;
+        let ins = match self.random.below(3) {
+            0 => of::write(found, operands, miss),
+            1 => of::find(found, [operands[0], operands[1]], miss),
+            _ => of::get(read.then_some(found), [operands[0], operands[1]], miss),
+        };
+        self.push(ins);
+        for way in 0..2 {
+            let mut inner = scope.clone();
+            let mut own = Vec::new();
+            for (v, mode) in &dying {
+                match *mode == way {
+                    true => own.push(*v),
+                    false => self.push(of::drop(*v)),
+                }
+            }
+            let outer = inner.len();
+            inner.extend(&own);
+            if way == 0 && read {
+                inner.push(found);
+            }
+            let n = self.random.below(4);
+            self.steps(n, depth + 1, &mut inner, outer);
+            let from = match own.iter().find(|v| inner.contains(v)) {
+                Some(v) => *v,
+                None => self.random.of(&inner),
+            };
+            self.push(of::mv(joined, from));
+            if way == 0 {
+                self.push(of::jump(after));
+                self.place_miss(miss, after);
+            }
+        }
         self.place(after);
         scope.push(joined);
     }
@@ -235,7 +299,7 @@ impl Maker {
         let (miss, after) = (self.label(), self.label());
         self.push(of::write(v, operands, miss));
         self.push(of::jump(after));
-        self.place(miss);
+        self.place_miss(miss, after);
         self.push(of::mv(v, operands[0]));
         self.place(after);
         scope.push(v);
@@ -294,13 +358,14 @@ pub(in super::super) fn random_function(seed: u64, params: u32, steps: usize) ->
         labels: Vec::new(),
         lists: Lists::default(),
         words: Vec::new(),
+        misses: Vec::new(),
         numbers,
     };
     let mut scope: Vec<u32> = (0..params).collect();
     m.steps(steps, 0, &mut scope, 0);
     m.end(&scope);
     let mut d = draft(values, params, m.steps, &m.labels);
-    (d.lists, d.words) = (m.lists, m.words);
+    (d.lists, d.words, d.misses) = (m.lists, m.words, m.misses);
     d
 }
 

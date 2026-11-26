@@ -21,8 +21,8 @@ use scarlet_check::typed::{BinderId, Expr, FnBody, Function, TypedModule};
 use scarlet_ir::TypeId;
 use scarlet_ir::core_ir::{
     Abi, AddressTypes, Const, ConstId, CoreFn, FuncIdx, GlobalSlot, HttpTypes, IoErrors, JoinId,
-    JsonTypes, LocalId, LoweredFn, NetTypes, ParseReasons, Program, Radix, TlsTypes, TypeNames,
-    VariantNames, VariantRef,
+    JsonTypes, LocalId, LoweredFn, NetTypes, ParseReasons, ProbeOp, Program, Radix, TlsTypes,
+    TypeNames, VariantNames, VariantRef,
 };
 use scarlet_ir::rty::{ForeignRTy, PrimIds, RTy, Repr, ResolvedPool};
 use scarlet_ir::tivec::TiVec;
@@ -123,6 +123,11 @@ pub enum InternalLinkError {
     ResultWithoutError(RTy),
     /// An array pattern on a value whose type isn't an array.
     NotAnArray(RTy),
+    /// What may not be there is asked for as a value of a type that does not say what
+    /// it would be.
+    ProbeType(ProbeOp, RTy),
+    /// A probe that gives back its first operand has none.
+    ProbeOperands(ProbeOp),
     /// Core IR reads a local `lower` never gave a type.
     UntypedLocal(LocalId),
     /// A jump goes to a join that nothing around it declares.
@@ -227,6 +232,10 @@ impl fmt::Display for InternalLinkError {
             E::NotAnArray(t) => {
                 write!(f, "an array pattern on type :{}, which isn't an array", t.0)
             }
+            E::ProbeType(op, t) => {
+                write!(f, "{op:?} as a value of type :{}, which holds none", t.0)
+            }
+            E::ProbeOperands(op) => write!(f, "{op:?} of nothing"),
             E::UntypedLocal(l) => write!(f, "local {l} has no type"),
             E::UnboundJoin(j) => write!(f, "a jump to join {j}, which nothing declares"),
             E::OddLiteral(c) => write!(f, "a pattern's literal, {c}, is no number and no text"),
@@ -488,6 +497,16 @@ pub(crate) struct PreludeCtors {
     pub nil: VariantRef,
 }
 
+impl PreludeCtors {
+    pub(crate) fn immediates(&self) -> Immediates {
+        Immediates {
+            true_: self.true_,
+            false_: self.false_,
+            nil: self.nil,
+        }
+    }
+}
+
 /// The prelude's types and constructors that lowering builds values of
 /// itself, each found once, before any body is translated.
 #[derive(Debug, Clone, Copy)]
@@ -681,6 +700,7 @@ impl Typed<'_> {
     pub(crate) fn around<'t>(&'t self, shapes: &'t Shapes) -> Around<'t> {
         Around {
             temps: self.prelude.temps,
+            ctors: self.prelude.ctors,
             shapes,
             consts: &self.frozen.consts,
             allowance: Allowance::USUAL,
@@ -689,15 +709,6 @@ impl Typed<'_> {
 
     pub(crate) fn shapes(&self) -> Shapes {
         self.frozen.shapes()
-    }
-
-    pub(crate) fn immediates(&self) -> Immediates {
-        let ctors = self.prelude.ctors;
-        Immediates {
-            true_: ctors.true_,
-            false_: ctors.false_,
-            nil: ctors.nil,
-        }
     }
 }
 
@@ -766,7 +777,7 @@ pub fn build_program(
     let modules: Vec<&TypedModule> = modules.iter().map(|m| m.module()).collect();
     let typed = typed(&modules, defs, main)?;
     let shapes = typed.shapes();
-    let (around, im) = (typed.around(&shapes), typed.immediates());
+    let (around, im) = (typed.around(&shapes), typed.prelude.ctors.immediates());
     let finish = |f: &TypedFn, module: String, name: String| {
         let core = core_fn(around, &im, typed.pool(), f)?;
         Ok(LoweredFn { module, name, core })

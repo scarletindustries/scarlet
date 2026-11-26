@@ -2,7 +2,7 @@ use super::*;
 use crate::testkit::{
     bind, bound, ctor, func, iff, join, jump, local, ret, switch, tail_call as tail, vref,
 };
-use crate::{ConstId, FuncIdx};
+use crate::{ConstId, FuncIdx, ProbeOp};
 use scarlet_ir::TypeId;
 use scarlet_ir::rty::{PrimIds, RTy, Repr};
 
@@ -84,6 +84,7 @@ fn order_of(mut e: &CoreExpr) -> Vec<u32> {
                 e = body;
             }
             CoreExpr::If { .. }
+            | CoreExpr::Probe { .. }
             | CoreExpr::Switch { .. }
             | CoreExpr::NoArm
             | CoreExpr::Ret(_)
@@ -389,24 +390,87 @@ fn an_argument_goes_behind_the_drops() {
     assert_eq!(text(&scheduled(2, body)), ["4", "drop 0", "5"]);
 }
 
+/// So many values in the body of a join that how many it holds is not known.
+fn many(end: CoreExpr) -> CoreExpr {
+    let lines: Vec<Line> = (100..200).map(|id| call(id, &[])).collect();
+    spine(&lines, end)
+}
+
 /// A join may hold any number of values inside, so nothing more is held around
-/// one.
+/// one, unless it names few.
 #[test]
 fn nothing_more_is_held_around_a_join() {
-    let body = |lines: &[Line]| {
-        let end = join(
-            0,
-            vec![bind(8, INT)],
-            jump(0, &[0]),
-            tail(Callee::Self_, &[5]),
-        );
+    let body = |lines: &[Line], inside: CoreExpr| {
+        let params = vec![bind(8, INT)];
+        let end = join(0, params, inside, tail(Callee::Self_, &[5]));
         order_of(&scheduled(1, spine(lines, end)))
     };
     let calls = [call(3, &[]), call(4, &[])];
     let with = |sum: Line| [&calls[..], &[sum]].concat();
-    assert_eq!(body(&with(add(5, 3, 4))), [3, 4, 5, 8]);
-    assert_eq!(body(&with(add(5, 3, 3))), [3, 4, 8, 5]);
-    assert_eq!(body(&with(add(5, 0, 0))), [3, 4, 8, 5]);
+    let end = || jump(0, &[0]);
+    assert_eq!(body(&with(add(5, 3, 4)), many(end())), [3, 4, 5, 8]);
+    assert_eq!(body(&with(add(5, 3, 3)), many(end())), [3, 4, 8, 5]);
+    assert_eq!(body(&with(add(5, 0, 0)), many(end())), [3, 4, 8, 5]);
+    assert_eq!(body(&with(add(5, 3, 4)), end()), [3, 4, 8, 5]);
+}
+
+/// What is named in a join counts: what it reads, what it binds and what its
+/// probes find, as deep as they are. So does what the lines around it name.
+#[test]
+fn a_join_names_few_when_all_of_it_does() {
+    let moved = |more: u32, inside: &dyn Fn(u32) -> CoreExpr, before: u32| {
+        let params = vec![bind(8, INT)];
+        let end = join(0, params, inside(more), tail(Callee::Self_, &[5]));
+        let mut lines: Vec<Line> = (300..300 + before).map(|id| call(id, &[])).collect();
+        lines.extend([call(3, &[]), call(4, &[]), add(5, 3, 4)]);
+        order_of(&scheduled(1, spine(&lines, end))).last() == Some(&5)
+    };
+    let end = || jump(0, &[0]);
+    let binds = |n: u32| {
+        let lines: Vec<Line> = (100..100 + n).map(|id| call(id, &[])).collect();
+        spine(&lines, end())
+    };
+    let reads = |n: u32| {
+        let all: Vec<u32> = (100..100 + n).collect();
+        spine(&[call(9, &all)], end())
+    };
+    let probe = |arg, bind, hit, miss| CoreExpr::Probe {
+        op: ProbeOp::ArrayGet,
+        args: vec![local(0), local(arg)],
+        binds: vec![bind],
+        hit: Box::new(hit),
+        miss: Box::new(miss),
+    };
+    let finds =
+        |n: u32| (100..100 + n).fold(end(), |rest, id| probe(0, Some(bind(id, INT)), rest, end()));
+    let asks = |n: u32| (100..100 + n).fold(end(), |rest, id| probe(id, None, rest, end()));
+    let misses =
+        |n: u32| (100..100 + n).fold(end(), |rest, id| probe(0, Some(bind(id, INT)), end(), rest));
+    // Beside those in the join there are 0, 3, 4, 5 and 8, and in the second 9.
+    let kinds: [(&dyn Fn(u32) -> CoreExpr, u32); 5] = [
+        (&binds, 59),
+        (&reads, 58),
+        (&finds, 59),
+        (&asks, 59),
+        (&misses, 59),
+    ];
+    for (inside, most) in kinds {
+        assert!(moved(most, inside, 0));
+        assert!(!moved(most + 1, inside, 0));
+        assert!(moved(most - 9, inside, 9));
+        assert!(!moved(most - 8, inside, 9));
+    }
+    // The call names more: 200 and what comes after it.
+    let with = |passed: u32| {
+        let args: Vec<u32> = [5].into_iter().chain(200..200 + passed).collect();
+        let end = join(0, vec![bind(8, INT)], binds(50), tail(Callee::Self_, &args));
+        order_of(&scheduled(
+            1,
+            spine(&[call(3, &[]), call(4, &[]), add(5, 3, 4)], end),
+        ))
+    };
+    assert_eq!(with(9).last(), Some(&5));
+    assert_eq!(with(10).last(), Some(&8));
 }
 
 /// No more is held at any point of a join either. Fewer held where it starts
@@ -415,7 +479,7 @@ fn nothing_more_is_held_around_a_join() {
 fn nothing_more_is_held_past_a_join() {
     // A join that reads `reads`, in front of a call of itself.
     let moved = |params: u32, lines: &[Line], reads: &[u32], args: &[u32]| {
-        let made = bound(bind(80, INT), call(0, reads).2, jump(0, &[80]));
+        let made = many(bound(bind(80, INT), call(0, reads).2, jump(0, &[80])));
         let end = join(0, vec![bind(90, INT)], made, tail(Callee::Self_, args));
         let order = order_of(&scheduled(params, spine(lines, end)));
         order.last() != Some(&90)

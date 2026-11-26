@@ -18,7 +18,9 @@
 //! sealed on its own, so no `Let` moves across a branch.
 //!
 //! What a `match` asks and in what order is [`crate::matching`]'s, and [`arms`]
-//! writes it.
+//! writes it. Where a `match` is on what may not be there, like `xs[i]`, the arms of
+//! the [`CoreExpr::Probe`] are the arms of the `match`, and no `Option` or `Result` is
+//! made. Any other use of it makes one in each arm ([`probes`]).
 //!
 //! ## Where a value goes
 //!
@@ -41,14 +43,17 @@ use super::{
     Atom, Callee, Const, ConstId, CoreBind, CoreExpr, CoreFn, JoinId, Load, LocalId, PrimOp,
 };
 use crate::matching::Allowance;
-use crate::program::{InternalLinkError, LinkError, Table};
+use crate::program::{InternalLinkError, LinkError, PreludeCtors, Table};
 use crate::typed_ir::{
     BindingId, RTy, Shapes, TempTys, TypedArm, TypedArrayElem, TypedBinSeg, TypedBind, TypedCallee,
-    TypedExpr, TypedFn, TypedInterpPart, TypedPat, ValueRef, each_read,
+    TypedExpr, TypedFn, TypedInterpPart, ValueRef, each_read,
 };
 use scarlet_ir::tivec::TiVec;
 
 mod arms;
+mod probes;
+
+use probes::{Asked, is_probes};
 
 type R<T> = Result<T, LinkError>;
 
@@ -68,6 +73,7 @@ pub(crate) struct Lowered {
 #[derive(Clone, Copy)]
 pub(crate) struct Around<'a> {
     pub temps: TempTys,
+    pub ctors: PreludeCtors,
     pub shapes: &'a Shapes,
     pub consts: &'a [Const],
     pub allowance: Allowance,
@@ -109,6 +115,17 @@ enum Dest {
     Return,
     /// It is the argument of this join.
     Join(JoinId),
+}
+
+/// What a match is on.
+enum Scrut {
+    Local {
+        local: LocalId,
+        /// Whether nothing but the match reads it.
+        alone: bool,
+    },
+    /// The value of a probe, which is not made where the match need not have it.
+    Probe(Asked),
 }
 
 /// Whether a [`Lower::expr_tail`] walk is on the function's outermost
@@ -270,11 +287,14 @@ impl<'a> Lower<'a> {
                 TypedExpr::Let {
                     bind, init, body, ..
                 } => {
+                    if let Some((scrut, arms)) = self.matched(e) {
+                        return self.match_(scrut, arms, dest);
+                    }
                     self.let_bind_at(bind, init, spine)?;
                     e = body;
                 }
                 TypedExpr::Seq { effect, body, .. } => {
-                    let _ = self.operand(effect)?;
+                    self.effect(effect)?;
                     e = body;
                 }
                 TypedExpr::If {
@@ -289,16 +309,7 @@ impl<'a> Lower<'a> {
                         els: Box::new(els),
                     });
                 }
-                TypedExpr::Match {
-                    ty, scrut, arms, ..
-                } => {
-                    if let Some(atom) = self.index_or(scrut, arms)? {
-                        return self.end(atom, *ty, dest);
-                    }
-                    let alone = self.read_once(scrut);
-                    let scrut = self.operand(scrut)?;
-                    return arms::lower(self, scrut, alone, arms, dest);
-                }
+                TypedExpr::Match { scrut, arms, .. } => return self.match_(scrut, arms, dest),
                 TypedExpr::And { lhs, rhs, .. } => {
                     return self.short_circuit(lhs, rhs, true, dest);
                 }
@@ -306,6 +317,9 @@ impl<'a> Lower<'a> {
                     return self.short_circuit(lhs, rhs, false, dest);
                 }
                 _ => {
+                    if let Some(asked) = self.asked(e)? {
+                        return self.value_of(&asked, dest);
+                    }
                     let (a, ty) = self.atom(e)?;
                     return self.end(a, ty, dest);
                 }
@@ -345,8 +359,13 @@ impl<'a> Lower<'a> {
     ///
     /// Everything else folds into its initialiser. An elaborator temporary
     /// names no source slot, and a named `let` on a nested spine is local to
-    /// that segment, where its value already has a home.
+    /// that segment, where its value already has a home. And where nothing reads it,
+    /// what a probe gives is bound to nothing.
     fn let_bind_at(&mut self, bind: &TypedBind, init: &TypedExpr, spine: SpinePos) -> R<()> {
+        let unread = bind.global.is_none() && self.reads.get(bind.id.0) == Some(&0);
+        if unread && is_probes(init) {
+            return self.effect(init);
+        }
         let owns_slot = bind.global.is_some() || (spine == SpinePos::Outer && bind.named);
         let v = if owns_slot {
             self.let_bound(bind, init)?
@@ -388,18 +407,81 @@ impl<'a> Lower<'a> {
         self.named(a, ty)
     }
 
+    /// Lower a `match` on `scrut`.
+    fn match_(&mut self, scrut: &TypedExpr, arms: &[TypedArm], dest: Dest) -> R<CoreExpr> {
+        let scrut = self.scrut(scrut)?;
+        arms::lower(self, scrut, arms, dest)
+    }
+
+    /// What a `match` on `e` is on.
+    fn scrut(&mut self, e: &TypedExpr) -> R<Scrut> {
+        let alone = self.read_once(e);
+        let e = self.flattened(e)?;
+        Ok(match self.asked(e)? {
+            Some(asked) => Scrut::Probe(asked),
+            None => Scrut::Local {
+                local: self.operand(e)?,
+                alone,
+            },
+        })
+    }
+
+    /// Put the `Let`/`Seq` spine that `e` is on the current one, and give its tail.
+    fn flattened<'e>(&mut self, mut e: &'e TypedExpr) -> R<&'e TypedExpr> {
+        loop {
+            if let TypedExpr::Let {
+                bind, init, body, ..
+            } = e
+                && self.matched(e).is_none()
+            {
+                self.let_bind_at(bind, init, SpinePos::Nested)?;
+                e = body;
+            } else if let TypedExpr::Seq { effect, body, .. } = e {
+                self.effect(effect)?;
+                e = body;
+            } else {
+                return Ok(e);
+            }
+        }
+    }
+
+    /// Lower `e`, whose value nothing reads. That of a probe is not made.
+    fn effect(&mut self, e: &TypedExpr) -> R<()> {
+        let e = self.flattened(e)?;
+        match self.asked(e)? {
+            Some(asked) => self.only_ask(&asked),
+            None => self.operand(e).map(drop),
+        }
+    }
+
     /// Lower a branch whose value is needed further on: each of its ends jumps
     /// to a join, with the value as the argument.
     ///
     /// Where the left side of a short-circuit is a branch too, its join goes in
     /// front, so that a long chain of them is a chain and not a nest.
+    /// What a probe is of goes in front too, for the same reason.
     fn join_operand(&mut self, e: &TypedExpr, ty: RTy) -> R<LocalId> {
+        if let Some(asked) = self.asked(e)? {
+            return self.joined(ty, |lo, dest| lo.value_of(&asked, dest));
+        }
+        if let Some((scrut, arms)) = self.matched(e) {
+            let scrut = self.scrut(scrut)?;
+            return self.joined(ty, |lo, dest| {
+                lo.sealed(|lo| arms::lower(lo, scrut, arms, dest))
+            });
+        }
+        match sides(e) {
+            Some((lhs, rhs, and)) if is_branch(lhs) => {
+                self.joined(ty, |lo, dest| lo.short_circuit(lhs, rhs, and, dest))
+            }
+            Some(_) | None => self.joined(ty, |lo, dest| lo.expr_as(e, dest)),
+        }
+    }
+
+    /// A new local of type `ty`, which is whatever `body` sends to where it is given.
+    fn joined(&mut self, ty: RTy, body: impl FnOnce(&mut Self, Dest) -> R<CoreExpr>) -> R<LocalId> {
         let join = self.fresh_join()?;
-        let dest = Dest::Join(join);
-        let body = match sides(e) {
-            Some((lhs, rhs, and)) if is_branch(lhs) => self.short_circuit(lhs, rhs, and, dest)?,
-            Some(_) | None => self.expr_as(e, dest)?,
-        };
+        let body = body(self, Dest::Join(join))?;
         let id = self.fresh(ty)?;
         self.spine.push(Frame::Join {
             id: join,
@@ -414,22 +496,7 @@ impl<'a> Lower<'a> {
     /// A `Let`/`Seq` spine here is straight-line code, so its bindings splice
     /// onto the current spine and its tail becomes the atom.
     fn atom(&mut self, e: &TypedExpr) -> R<(Atom, RTy)> {
-        let mut e = e;
-        loop {
-            match e {
-                TypedExpr::Let {
-                    bind, init, body, ..
-                } => {
-                    self.let_bind_at(bind, init, SpinePos::Nested)?;
-                    e = body;
-                }
-                TypedExpr::Seq { effect, body, .. } => {
-                    let _ = self.operand(effect)?;
-                    e = body;
-                }
-                _ => break,
-            }
-        }
+        let e = self.flattened(e)?;
         let ty = e.ty();
         let a = match e {
             TypedExpr::Const { value, .. } => Atom::Const(*value),
@@ -444,19 +511,14 @@ impl<'a> Lower<'a> {
                 ValueRef::Capture(idx) => Atom::Load(Load::Capture(idx)),
                 ValueRef::SelfClosure => Atom::Load(Load::SelfClosure),
             },
-            TypedExpr::Match { scrut, arms, .. }
-                if let Some(atom) = self.index_or(scrut, arms)? =>
-            {
-                atom
-            }
-            // `Let` and `Seq` never get here, but naming them keeps the match
-            // exhaustive without a wildcard.
+            // The one `Let` that gets here is a match on what it binds. No `Seq` does.
             TypedExpr::Let { .. }
             | TypedExpr::Seq { .. }
             | TypedExpr::If { .. }
             | TypedExpr::Match { .. }
             | TypedExpr::And { .. }
-            | TypedExpr::Or { .. } => Atom::Local(self.join_operand(e, ty)?),
+            | TypedExpr::Or { .. }
+            | TypedExpr::Probe { .. } => Atom::Local(self.join_operand(e, ty)?),
             // The elaborator has already specialised `Add` to `IntAdd`, say.
             TypedExpr::Binary { op, lhs, rhs, .. } => {
                 let l = self.operand(lhs)?;
@@ -505,19 +567,6 @@ impl<'a> Lower<'a> {
                 }
             }
             TypedExpr::Array { elems, .. } => return Ok((self.array(elems, ty)?, ty)),
-            TypedExpr::Index { recv, index, .. } => {
-                let r = self.operand(recv)?;
-                let i = self.operand(index)?;
-                Atom::prim(PrimOp::ArrayIndex, vec![r, i])
-            }
-            TypedExpr::Slice {
-                recv, start, end, ..
-            } => {
-                let r = self.operand(recv)?;
-                let s = self.operand(start)?;
-                let e = self.operand(end)?;
-                Atom::prim(PrimOp::ArraySlice, vec![r, s, e])
-            }
             TypedExpr::Range { start, end, .. } => {
                 let s = self.operand(start)?;
                 let e = self.operand(end)?;
@@ -716,51 +765,6 @@ impl<'a> Lower<'a> {
         })
     }
 
-    /// Lower `arr[i] or <pure atom>` to one [`PrimOp::ArrayIndexOr`], with no
-    /// `Option` cell. The ordinary lowering boxes a `Some` that the next step
-    /// takes apart and drops, which is one heap allocation per index.
-    ///
-    /// This only fuses the two when the failure arm is a pure atom. The fused
-    /// op always evaluates the default, so anything with a side effect or
-    /// control flow must keep the lazy match.
-    fn index_or(&mut self, scrut: &TypedExpr, arms: &[TypedArm]) -> R<Option<Atom>> {
-        let TypedExpr::Index { recv, index, .. } = scrut else {
-            return Ok(None);
-        };
-        let [a, b] = arms else { return Ok(None) };
-        if a.guard.is_some() || b.guard.is_some() {
-            return Ok(None);
-        }
-        // The payload arm is `Some(v) -> v`, the other `None -> <atom>`.
-        let payload = |arm: &TypedArm| match (&arm.pat, &arm.body) {
-            (
-                TypedPat::Ctor { fields, .. },
-                TypedExpr::Var {
-                    place: ValueRef::Local(read),
-                    ..
-                },
-            ) => match fields.as_slice() {
-                [TypedPat::Bind(bind)] if bind.id == *read => Some(()),
-                _ => None,
-            },
-            _ => None,
-        };
-        let empty_ctor =
-            |p: &TypedPat| matches!(p, TypedPat::Ctor { fields, .. } if fields.is_empty());
-        let pure = |e: &TypedExpr| matches!(e, TypedExpr::Const { .. } | TypedExpr::Var { .. });
-
-        let dflt = match (payload(a), payload(b)) {
-            (Some(()), None) if empty_ctor(&b.pat) && pure(&b.body) => &b.body,
-            (None, Some(())) if empty_ctor(&a.pat) && pure(&a.body) => &a.body,
-            _ => return Ok(None),
-        };
-
-        let r = self.operand(recv)?;
-        let i = self.operand(index)?;
-        let d = self.operand(dflt)?;
-        Ok(Some(Atom::prim(PrimOp::ArrayIndexOr, vec![r, i, d])))
-    }
-
     /// Whether nothing else reads the value of `e`, as far as names say.
     fn read_once(&self, mut e: &TypedExpr) -> bool {
         loop {
@@ -786,8 +790,7 @@ impl<'a> Lower<'a> {
                 | TypedExpr::Ctor { .. }
                 | TypedExpr::Update { .. }
                 | TypedExpr::Array { .. }
-                | TypedExpr::Index { .. }
-                | TypedExpr::Slice { .. }
+                | TypedExpr::Probe { .. }
                 | TypedExpr::Range { .. }
                 | TypedExpr::Interp { .. }
                 | TypedExpr::BinLit { .. }
@@ -819,5 +822,9 @@ fn is_branch(e: &TypedExpr) -> bool {
             | TypedExpr::Match { .. }
             | TypedExpr::And { .. }
             | TypedExpr::Or { .. }
+            | TypedExpr::Probe { .. }
     )
 }
+
+#[cfg(test)]
+mod tests;

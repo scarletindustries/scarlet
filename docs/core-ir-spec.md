@@ -32,6 +32,8 @@ pub enum CoreExpr {
     Open { cell: LocalId, variant: VariantRef, fields: Vec<(u16, CoreBind)>, body: Box<CoreExpr> },
     Switch { scrut: LocalId, cases: Cases, default: Option<Box<CoreExpr>> },
     If { cond: LocalId, then: Box<CoreExpr>, els: Box<CoreExpr> },
+    Probe { op: ProbeOp, args: Vec<LocalId>, binds: Vec<Option<CoreBind>>,
+            hit: Box<CoreExpr>, miss: Box<CoreExpr> },
     Ret(LocalId),
     TailCall { callee: Callee, args: Vec<LocalId> },
     Jump { to: JoinId, args: Vec<LocalId> },
@@ -44,6 +46,8 @@ pub enum Cases {                      // each arm with the keys that lead to it
     Float(Arms<FloatKey>),            // 0.0 and -0.0 are one key
     Text(Arms<ConstId>),
 }
+
+pub enum ProbeOp { ArrayGet, ArraySlice, ArraySet, MapGet }
 
 pub enum Atom {
     Local(LocalId),
@@ -83,6 +87,20 @@ join j0(%3:0) after
 
 A `Switch` goes to the arm that has the value's key, and to the default when none has. One with no default has an arm for every value there can be, because the checker saw to it that a match is exhaustive. Where a way through a tree is one no value takes, it ends in `NoArm`, which stops the run. No value's fields are read by a `Switch`: a field is a `Let` of a `Field`, on the ways that use it. `Open` reads fields out of a cell that is known to be of `variant` and gives the cell up, all in one. A field it does not name is given up with the cell.
 
+A `Probe` asks for something that may not be there: an element of an array, a slice of one, an array with another element, or what a map has for a key. Where it is there, `binds` has a place for each value that the op finds, and `hit` runs. Where it is not, `miss` runs, with nothing bound and every operand as it was. A place may be none, for a value that nothing reads. The result of `array::put(%0, %1, %2)` is
+
+```
+join j0(%4:0) after
+  probe ArraySet(%0, %1, %2)
+    | hit(%3:0) ->
+      drop %0
+      jump j0(%3)
+    | miss ->
+      jump j0(%0)
+```
+
+Nothing else makes one of these operations: they are no `PrimOp`s, and a backend refuses an `Intrinsic` of their names. Today each op finds one value. An op that finds several, or that is another partial built-in, is one more `ProbeOp`.
+
 `CoreExpr::always_reached` gives the joins that every way through their body comes to. A value's join is one, unless a branch stops the run everywhere. What comes before such a join can be moved past it, and what is live after it is live all through its body.
 
 The end of a spine is a `Ret` of a local, a `TailCall`, a `Jump` or a branch, so a constructor in tail position is a `Let` like any other. `SetGlobal` puts a value in a module-level slot, only in a toplevel and once for each slot. The slot has a reference of its own. Each local is bound in one place and each join declared in one.
@@ -95,7 +113,7 @@ The plan also gave each bind a `region` (frame, process or immortal) for mode in
 
 1. **`lower`** (`crates/scarlet_lower/src/lower.rs`). This walks the elaborator's typed IR and builds ANF. Each subexpression becomes a `Let`, so the evaluation order that was implicit in the tree becomes explicit `Let` nesting. A `match` becomes a decision tree first ("Matches" below). The plan had `lower` walk the typechecked AST and resolve each type through the inference engine. `docs/typed-ir-spec.md` explains why it takes the typed IR instead, with every type already resolved.
 2. **`immediates::rewrite`** turns the prelude's `True`, `False` and `Nil` constructors into `Atom::Bool` and `Atom::Nil`, and a `match` on a Bool into an `If`. This pass wasn't in the plan.
-3. **`perceus(pool, locals, f)`** (`crates/scarlet_lower/src/perceus.rs`) runs Koka's algorithm on Core. A backward linear scan finds each last use and puts a `Drop` there, inside the body of a join and out of it, and for a value whose type is a variable as for any other. A value whose type is a `Repr::Word` gets none, and neither does what a `Switch` found to be a constructor with no fields, because neither can be a heap cell. Where a run of `Field` reads takes apart a value whose constructor a `Switch` around it has found, and the value's drop comes straight behind them, the reads and the drop are one `Open`. An Int and a String get none either (`ResolvedPool::gets_drop`). A `Jump` hands over its arguments and what its continuation owns, so that is dropped on neither side of it, and everything else is dropped in front of it. A `Ret` gives up the value it returns and a `TailCall` what it passes, and everything else is dropped before. `scarlet_lower`'s `perceus/tests/ownership.rs` checks all of that on every way through a function, for functions made at random and for every function of every program in the repository. Perceus also paired each drop with a later constructor of the same shape, so the constructor could reuse the cell, until step 13 of `docs/perf-plan.md`. The VM takes a cell apart in one instruction instead, and the next constructor of its size gets the space (`docs/vm-design.md`, "Running code").
+3. **`perceus(pool, locals, f)`** (`crates/scarlet_lower/src/perceus.rs`) runs Koka's algorithm on Core. A backward linear scan finds each last use and puts a `Drop` there, inside the body of a join and out of it, and for a value whose type is a variable as for any other. A value whose type is a `Repr::Word` gets none, and neither does what a `Switch` found to be a constructor with no fields, because neither can be a heap cell. Where a run of `Field` reads takes apart a value whose constructor a `Switch` around it has found, and the value's drop comes straight behind them, the reads and the drop are one `Open`. An Int and a String get none either (`ResolvedPool::gets_drop`). A `Jump` hands over its arguments and what its continuation owns, so that is dropped on neither side of it, and everything else is dropped in front of it. A `Probe` takes nothing, so each of its arms owns its operands and drops those it does not read again, and a place for what nothing reads becomes none. A `Ret` gives up the value it returns and a `TailCall` what it passes, and everything else is dropped before. `scarlet_lower`'s `perceus/tests/ownership.rs` checks all of that on every way through a function, for functions made at random and for every function of every program in the repository. Perceus also paired each drop with a later constructor of the same shape, so the constructor could reuse the cell, until step 13 of `docs/perf-plan.md`. The VM takes a cell apart in one instruction instead, and the next constructor of its size gets the space (`docs/vm-design.md`, "Running code").
 4. **`tail_args::schedule`** computes the arguments of each tail call in the order that lets each take the place of the parameter it replaces. It moves only constants and Int and Float operations. This pass wasn't in the plan.
 5. **The VM** loads the result and turns each function into register instructions once, when the program loads. The plan had an `emit` step to stack bytecode here instead.
 
@@ -105,11 +123,13 @@ Later passes can slot in between `lower` and the backend: mode inference to set 
 
 `crates/scarlet_lower/src/matching.rs` makes a decision tree of a `match`, and `lower/arms.rs` writes the tree as Core IR. An arm is a row of checks, each of which is a place in the matched value and a pattern that it has to fit. The tree asks what the first row still has to know, and every row that asks it too is split by the answer, so nothing is asked twice on one way. This is the algorithm of Jules Jacobs' "How to compile pattern matching", which Gleam uses too. A place is read on the ways that use it and no other, and a name that only a guard or a body reads is read there. Where everything that is wanted of a constructor is wanted straight behind its test, its fields are read together, so that Perceus can make an `Open` of them.
 
+A `match` on a `Probe` is the probe, whose arms are those of the tree's first `Switch`, and what a hit finds is where the tree would read the field. The `Option` or the `Result` is made only on a way that reads it whole, and a tree that does not begin with a switch on it is written over a value that is made. So it is when the value has a name that only the match straight after it reads. Any other use of a probe makes the value in both arms, which jump to a join or return (`lower/probes.rs`).
+
 What a program can see of a match keeps its order. A guard runs when all the checks of its row hold, and the rows below are tried when it has failed. A size in a `<<>>` pattern is an expression of any kind, so what is behind it in its row waits until it has been read, unless the size is made of constants, which nothing can tell the reading of. An or-pattern that binds names tries each alternative with the rest of its row and the guard. One that binds none goes on with the first alternative that fits, so its row's guard and sizes run once. A row is never two rows with one guard or one size between them.
 
 A row that does not ask what a question answers goes on in every branch of it, and that is what can make a tree grow without bound. Each match has an allowance for such copies, in proportion to its size. Once that is spent, the rows in front of the first one that would have to be copied are a tree by themselves, and the rest is the continuation of a join, which every way that fits none of them jumps to. So a tree is larger than the match by a factor at the most, but for one thing. An or-pattern that binds names, in a row with a guard or with a size that is not made of constants, tries each alternative with everything behind it. Where it is plain that only one alternative can fit, the first that does is the only one tried, as far as the allowance does not go. Otherwise the row is a row for each alternative, with no allowance, and several such or-patterns beside each other are a row for each combination. No match in this repository comes near its allowance.
 
-The tests hold the tree against an interpreter of the patterns as they are written (`matching/tests/oracle.rs`), over matches made at random and over every match of every program in the repository, and count the guards and sizes that run and what they are given.
+The tests hold the tree against an interpreter of the patterns as they are written (`matching/tests/oracle.rs`), over matches made at random, a third of them on a probe, and over every match of every program in the repository, and count the guards and sizes that run and what they are given.
 
 ## Constraints the plan set
 

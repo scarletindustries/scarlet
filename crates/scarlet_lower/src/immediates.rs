@@ -113,9 +113,14 @@ impl Immediates {
                         None => return,
                     }
                 }
-                CoreExpr::If { then, els, .. } => {
-                    self.expr(then);
-                    els
+                CoreExpr::If {
+                    then: a, els: b, ..
+                }
+                | CoreExpr::Probe {
+                    hit: a, miss: b, ..
+                } => {
+                    self.expr(a);
+                    b
                 }
                 CoreExpr::Ret(_)
                 | CoreExpr::TailCall { .. }
