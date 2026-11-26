@@ -837,6 +837,62 @@ fn test_deep_nesting_does_not_overflow() {
     );
 }
 
+// Blocks take the most stack for each level, and a build with no optimisations needs
+// more for them than a test's 2 MiB. A main thread has 8.
+fn on_main_sized_stack(test: fn()) {
+    std::thread::Builder::new()
+        .stack_size(8 << 20)
+        .spawn(test)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn blocks_nested_too_deep_are_reported_once() {
+    on_main_sized_stack(reported_once);
+}
+
+fn reported_once() {
+    for n in [14, 15, 20, 64, 500] {
+        for (open, item, close) in [
+            ("x = {\nif n {\n", "y = 1\ny", "\n} else {\n2\n}\n}\nx"),
+            ("if n {\n", "if a { b } else { c }\nz", "\n} else {\n2\n}"),
+            ("f = fn() {\nx = {\n", "g(1)\nh { i: 2 }", "\n}\nx\n}\nf()"),
+        ] {
+            let n = n * 10;
+            let src = format!(
+                "fn f(n Bool) Int {{\n{}{item}{}\n}}\nfn after() Int {{\n1\n}}\n",
+                open.repeat(n),
+                close.repeat(n),
+            );
+            let result = parse(&src);
+            let messages: Vec<_> = result.diagnostics.iter().map(|d| d.message()).collect();
+            assert_eq!(messages.len(), 1, "{messages:#?}");
+            assert!(messages[0].contains("too deep"), "{messages:#?}");
+        }
+    }
+}
+
+#[test]
+fn blocks_nested_too_deep_and_not_closed_end() {
+    on_main_sized_stack(not_closed);
+}
+
+fn not_closed() {
+    for open in [
+        "x = {\n",
+        "if n {\n",
+        "x = {\nif n {\n",
+        "match n {\n_ -> {\n",
+    ] {
+        assert_has_error(
+            &format!("fn f(n Bool) Int {{\n{}y", open.repeat(500)),
+            "too deep",
+        );
+    }
+}
+
 #[test]
 fn test_reasonable_nesting_ok() {
     // Realistic nesting must never trip the limit. The worst multiplier is

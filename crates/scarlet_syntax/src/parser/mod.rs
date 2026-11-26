@@ -365,11 +365,39 @@ impl Parser {
         }
     }
 
+    // Skips what is left of the block it is in, and its `}`.
+    fn skip_block(&mut self) -> SyncOutcome {
+        let mut inner = 0usize;
+        while self.kind() != Kind::Eof {
+            match self.kind() {
+                Kind::PuncOpenBrace => inner = inner.saturating_add(1),
+                Kind::PuncCloseBrace => match inner.checked_sub(1) {
+                    Some(outer) => inner = outer,
+                    None => {
+                        self.advance();
+                        return SyncOutcome::ConsumedCloser;
+                    }
+                },
+                _ => {}
+            }
+            self.advance();
+        }
+        SyncOutcome::AtItem
+    }
+
     // Recovers from an error in a top-level or block node loop: reports it,
     // synchronises, and builds an error node for the region it couldn't parse.
     fn recover_node(&mut self, err: Box<ParseError>, span: Span) -> (ast::Node, SyncOutcome) {
         self.add_error(&err);
-        let outcome = self.synchronize();
+        // What is left of the block is as deep, so going on at its next item would
+        // fail the same way on the same token for ever.
+        let outcome = if matches!(*err, ParseError::NestingTooDeep)
+            && self.current_context() == ParseContext::Block
+        {
+            self.skip_block()
+        } else {
+            self.synchronize()
+        };
         let node = ast::Node::Expression(ast::Expression::ErrorNode(ast::ErrorNode {
             error: *err,
             span,
