@@ -33,10 +33,12 @@ pub(crate) enum AuditFault {
     },
     /// A cell's class is none, or the rest of its header does not go with its
     /// class: its scan, how many fields its constructor has, or whether its
-    /// words are in a box.
+    /// words are in a box. Or it is an array's and has not the words of one.
     Misshapen { cell: Index },
     /// A closure's cell does not start with a function.
     NoFunction { cell: Index },
+    /// An array's cell, or a node's, has no elements. The array with none is no cell.
+    EmptyArray { cell: Index },
     /// A cell's count is not the number of references to it.
     Miscounted {
         cell: Index,
@@ -84,10 +86,11 @@ const CONSTANT: u32 = u32::MAX - 2;
 
 impl Heap {
     /// Check that the arena is made of whole cells, that each header says
-    /// what a cell of its class is, that every reference is to a live cell and
-    /// carries its variant, that every count is the number of references to
-    /// its cell, and that the free lists and the boxes hold exactly what they
-    /// should. `roots` is every reference held outside the heap.
+    /// what a cell of its class is, that no array's cell is empty, that every
+    /// reference is to a live cell and carries its variant, that every count is
+    /// the number of references to its cell, and that the free lists and the
+    /// boxes hold exactly what they should. `roots` is every reference held
+    /// outside the heap.
     ///
     /// A constant's cell is never counted, and nothing else may be. That
     /// refuses a cell whose count overflowed as well, but a heap has no room
@@ -191,6 +194,36 @@ impl Heap {
         }
         if kind == Kind::Closure && self.closure_func(Cell::new(cell, 0)).is_none() {
             return Err(AuditFault::NoFunction { cell });
+        }
+        // As `crate::array` lays them out.
+        let empty = match kind {
+            Kind::ArrayRoot => match words {
+                [len, _, _, _, _, _] => *len == 0,
+                _ => return Err(misshapen),
+            },
+            Kind::ArrayLeaf => words.is_empty(),
+            Kind::ArrayBranch => match words {
+                [_, both @ ..] if both.len().is_multiple_of(2) => both.is_empty(),
+                _ => return Err(misshapen),
+            },
+            Kind::Range => match words {
+                [start, end] => start.cast_signed() >= end.cast_signed(),
+                _ => return Err(misshapen),
+            },
+            Kind::String
+            | Kind::BigInt
+            | Kind::Binary
+            | Kind::Handle
+            | Kind::BinarySlice
+            | Kind::Tuple
+            | Kind::Closure
+            | Kind::Map
+            | Kind::MapNode
+            | Kind::MapCollision
+            | Kind::Ctor => false,
+        };
+        if empty {
+            return Err(AuditFault::EmptyArray { cell });
         }
         Ok(())
     }
@@ -344,6 +377,9 @@ impl fmt::Display for AuditFault {
             }
             AuditFault::NoFunction { cell: Index(cell) } => {
                 write!(f, "the closure cell {cell} has no function")
+            }
+            AuditFault::EmptyArray { cell: Index(cell) } => {
+                write!(f, "the array's cell {cell} has no elements")
             }
             AuditFault::Miscounted {
                 cell: Index(cell),

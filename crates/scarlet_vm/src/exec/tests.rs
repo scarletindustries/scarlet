@@ -1220,6 +1220,78 @@ fn a_json_built_in_on_another_constructor_stops_the_run() {
     assert!(got.is_ok());
 }
 
+/// A cell of an array's kind that is laid out as no array is cannot be shown, compared or
+/// asked its length.
+#[test]
+fn an_arrays_cell_that_is_no_array_cannot_be_shown() {
+    on_a_machine(|m| {
+        for kind in [Kind::ArrayRoot, Kind::Range] {
+            let cells = [(); 2].map(|()| m.rest.heap.make(kind, &[1]).expect("room"));
+            let [a, b] = cells.map(Value::cell);
+            let shown = m.rest.show(a, &mut Vec::new());
+            assert_eq!(shown, Err(Stop::broken(Broken::ArrayCell)), "{kind:?}");
+            assert!(!eq::equal(&m.rest.heap, a, b), "{kind:?}");
+            let not_one = Err(Stop::broken(Broken::NotAnArray(a.view())));
+            let len = m.rest.array_len(a).map(Value::bits);
+            assert_eq!(len, not_one, "{kind:?}");
+            for cell in cells {
+                m.rest.heap.release(cell).expect("live");
+            }
+        }
+        assert_eq!(m.rest.heap.live(), 0);
+    });
+}
+
+/// A `Json` and a block of headers hold an array of cells, so they are written out of the
+/// empty array and of no range.
+#[test]
+fn json_and_headers_are_written_out_of_an_array_of_cells() {
+    let src = "import scarlet/http/h1\n\
+               import scarlet/json\n\
+               pub fn main() {\n\
+               \tprintln(json::encode(json::List([])))\n\
+               \tprintln(h1::parse_request(<<>>, 0))\n\
+               }\n";
+    let result = scarlet_core::compile::compile_text(src, None);
+    let program = result.into_runnable().expect("a clean compile is runnable");
+    let code = crate::code::load(&program, Audit::Never).expect("it loads");
+    let json = code.abi.json.expect("the json types");
+    let mut host = OsHost::new(Vec::new(), Vec::new(), Vec::new());
+    let mut m = Machine::new(&code, &mut host);
+    let range = array::range(&mut m.rest.heap, 1, 3).expect("room");
+    let mut call = |i: Intrinsic, v: Value| {
+        let mut frame = [Value::NIL; WINDOW];
+        frame[2] = v;
+        let got = m.rest.builtin(i, &frame, &[r(0)]);
+        got.map(|v| {
+            let mut out = Vec::new();
+            m.rest.show(v, &mut out).expect("it shows");
+            String::from_utf8(out).expect("UTF-8")
+        })
+    };
+    let valid = call(Intrinsic::HttpHeadersValid, Value::EMPTY_ARRAY);
+    assert_eq!(valid.as_deref(), Ok("True"));
+    let wrong = Broken::NotHeaders(range.view());
+    let refused = call(Intrinsic::HttpHeadersValid, range);
+    assert_eq!(refused, Err(Stop::broken(wrong)));
+    for (ctor, text) in [(json.list, "[]"), (json.object, "{}")] {
+        let mut with = |items| {
+            let cell = m.rest.heap.ctor(ctor.ctor(), &[items]).expect("room");
+            let mut frame = [Value::NIL; WINDOW];
+            frame[2] = Value::cell(cell);
+            let got = m.rest.builtin(Intrinsic::JsonEncode, &frame, &[r(0)]);
+            (Value::cell(cell), got)
+        };
+        let (v, refused) = with(range);
+        let wrong = Broken::NotJson(v.view());
+        assert_eq!(refused.map(Value::bits), Err(Stop::broken(wrong)));
+        let (_, written) = with(Value::EMPTY_ARRAY);
+        let written = written.expect("it is written");
+        let cell = written.as_cell().expect("a string");
+        assert!(m.rest.heap.string_is(cell, text.as_bytes()));
+    }
+}
+
 /// A jump on a tag goes on at a value of that variant, and jumps at one of any
 /// other, at one with fields where the variant has none, and at any other kind
 /// of value but a cell with no variant of its own, which counts as variant 0.
@@ -1712,16 +1784,16 @@ fn what_an_instruction_takes_leaves_its_register() {
                         let empty = crate::map::empty(heap).expect("room");
                         let set = crate::map::set(heap, empty, int(1), element).expect("room");
                         heap.release(empty).expect("live");
-                        set
+                        Value::cell(set)
                     }
                     0 => array::from_values(heap, &[int(1), element]).expect("room"),
                     1 => array::from_values(heap, &[element; 1]).expect("room"),
                     2 => array::range(heap, 3, 7).expect("room"),
-                    _ => array::from_values(heap, &[]).expect("room"),
+                    _ => Value::EMPTY_ARRAY,
                 };
                 m.rest.globals = Vec::new();
                 if shared {
-                    let whole = m.rest.heap.own(Value::cell(whole)).expect("live");
+                    let whole = m.rest.heap.own(whole).expect("live");
                     m.rest.globals.push(whole);
                 }
                 if kind > 1 || of_map {
@@ -1729,15 +1801,7 @@ fn what_an_instruction_takes_leaves_its_register() {
                 }
                 let mut registers = vec![Value::NIL; WINDOW];
                 let func = Value::func(FuncIdx(0));
-                let given = [
-                    Value::cell(whole),
-                    int(index),
-                    value,
-                    third,
-                    int(1),
-                    Value::NIL,
-                    func,
-                ];
+                let given = [whole, int(index), value, third, int(1), Value::NIL, func];
                 for (n, v) in (0..).zip(given) {
                     registers[usize::from(r(n).0)] = v;
                 }
@@ -1749,11 +1813,12 @@ fn what_an_instruction_takes_leaves_its_register() {
                     "{what}: {stop:?}"
                 );
                 ins.operands(&code.lists, &mut |reg, role| {
-                    let left = m.stack[usize::from(reg.0)];
+                    let [was, left] = [&registers, &m.stack].map(|all| all[usize::from(reg.0)]);
                     let role = format!("{role:?}");
                     if role == "Take" || role == "Pass { moved: true }" {
                         took += 1;
-                        assert_eq!(left.as_cell().is_some(), missed, "{what}: {reg:?}");
+                        let still = missed && was.as_cell().is_some();
+                        assert_eq!(left.as_cell().is_some(), still, "{what}: {reg:?}");
                     }
                 });
                 ran += 1;
@@ -2045,7 +2110,12 @@ fn a_switch_on_a_far_int_goes_on_at_its_place() {
                 let v = bigint::value(&mut m.rest.heap, BigInt::from(k)).expect("room");
                 gives(m, code, v, want, &format!("{k} among {n}"));
             }
-            for v in [Value::NIL, Value::float(0.0), Value::bool(true)] {
+            for v in [
+                Value::NIL,
+                Value::float(0.0),
+                Value::bool(true),
+                Value::EMPTY_ARRAY,
+            ] {
                 gives(m, code, v, 6, &format!("{v:?}"));
             }
             assert_eq!(m.rest.heap.live(), 0);
@@ -2124,10 +2194,7 @@ fn a_call_with_its_arguments_in_a_list_passes_them() {
             .copied()
             .chain([call, Ins::Audit, ret(2)])
             .collect();
-        let array = |heap: &mut Heap| {
-            let array = array::from_values(heap, &[Value::NIL]).expect("room");
-            Some(Value::cell(array))
-        };
+        let array = |heap: &mut Heap| Some(array::from_values(heap, &[Value::NIL]).expect("room"));
         after_given(5, body, array, the_only_cell_left);
     }
 }
@@ -2354,7 +2421,7 @@ fn tree_ints(m: &Machine<'_, '_>, v: Value) -> Option<Vec<i64>> {
 fn range_ends(m: &Machine<'_, '_>, v: Value) -> Option<(i64, i64)> {
     match m.rest.seq(v) {
         Ok(Seq::Range { start, end }) => Some((start, end)),
-        Ok(Seq::Tree(_)) | Err(_) => None,
+        Ok(Seq::Empty | Seq::Tree(_)) | Err(_) => None,
     }
 }
 
@@ -2422,10 +2489,11 @@ fn a_write_through_a_freed_node_stops_the_run_as_a_dead_cell() {
     let with_a_freed_leaf = |heap: &mut Heap| {
         let array = array::from_values(heap, &[Value::NIL, Value::NIL]).expect("room");
         // The tail leaf is the last of the root's words.
-        let tail = heap.data(array).last().copied().map(Value::from_bits);
+        let root = array.as_cell().expect("a root");
+        let tail = heap.data(root).last().copied().map(Value::from_bits);
         let leaf = tail.and_then(Value::as_cell).expect("a tail leaf");
         heap.release(leaf).expect("a live cell");
-        Some(Value::cell(array))
+        Some(array)
     };
     after_given(5, ins, with_a_freed_leaf, |_, got| {
         let stopped = got.map(|v| v.bits());
@@ -2440,8 +2508,9 @@ fn an_owned_push_onto_a_freed_array_stops_the_run_as_a_dead_cell() {
     after_running(HOLDS_A_CELL, |m, _| {
         let cell = held_by_a_global(m);
         m.rest.heap.release(cell).expect("the global's reference");
-        let pushed = array::push_owned(&mut m.rest.heap, cell, Value::NIL, End::Back);
-        assert_eq!(pushed.map_err(fault), Err(Stop::broken(Broken::DeadCell)));
+        let pushed = array::push_owned(&mut m.rest.heap, Some(cell), Value::NIL, End::Back);
+        let pushed = pushed.map(Value::bits).map_err(fault);
+        assert_eq!(pushed, Err(Stop::broken(Broken::DeadCell)));
         assert_eq!(fault(Fault::Full), Stop::HeapFull);
     });
 }
@@ -2906,6 +2975,7 @@ fn one_of_each_kind(heap: &mut Heap) -> Vec<Value> {
         Value::NIL,
         Value::bool(false),
         Value::bool(true),
+        Value::EMPTY_ARRAY,
         Value::func(FuncIdx(7)),
         Value::nullary(SOME_VARIANT),
         Value::float(1.5),
@@ -2963,7 +3033,12 @@ fn every_operator_instruction_stops_on_an_operand_of_the_wrong_kind() {
         let is_int = |heap: &Heap, v: Value| match v.view() {
             View::Int(_) => true,
             View::Cell(c) => heap.kind(c) == Some(Kind::BigInt),
-            View::Float(_) | View::Nil | View::Bool(_) | View::Func(_) | View::Nullary(_) => false,
+            View::Float(_)
+            | View::Nil
+            | View::Bool(_)
+            | View::EmptyArray
+            | View::Func(_)
+            | View::Nullary(_) => false,
         };
         let is_float = |_: &Heap, v: Value| matches!(v.view(), View::Float(_));
         let no_int = |v| Stop::missing(Missing::IntOperation(v));
@@ -3079,6 +3154,10 @@ fn an_int_answer_with_no_room_stops_and_keeps_its_operands() {
         }
     });
 }
+
+/// Registers enough for a recursion of [`DEEP`] that ends, so that one that does not
+/// stops.
+const DEEP_STACK: usize = 1 << 16;
 
 /// A recursion through each kind of call there is, with the kinds it is to be
 /// loaded as and what it prints for `N` of 30. Each holds a string or an array
@@ -3230,11 +3309,11 @@ fn a_recursion_through_any_kind_of_call_makes_the_stack_longer() {
             let loaded = code.ins.iter().any(|ins| ins.op().name() == *kind);
             assert!(loaded, "{kind}: {body}");
         }
-        let (ended, _, printed) = on_a_stack_of(code, MAX_STACK);
+        let (ended, _, printed) = on_a_stack_of(code, DEEP_STACK);
         assert_eq!((ended, printed.as_str()), (Ok(()), out), "{body}");
 
         let code = loaded(&deep_source(body, 1000), Audit::Never);
-        let (ended, len, _) = on_a_stack_of(code, MAX_STACK);
+        let (ended, len, _) = on_a_stack_of(code, DEEP_STACK);
         assert_eq!(ended, Ok(()), "{body}");
         assert!(len > 3000, "{len}: {body}");
     }
@@ -3251,7 +3330,7 @@ fn a_call_with_no_room_stops_with_every_count_right() {
         let (mut stopped, mut limit) = (0, WINDOW);
         loop {
             let (ended, len, printed) = on_a_stack_of(code, limit);
-            assert!(len <= limit, "{len} of {limit}");
+            assert!(len <= limit && limit < DEEP_STACK / 8, "{len} of {limit}");
             match ended {
                 Ok(()) => {
                     assert_eq!(printed, out, "{limit}: {body}");
@@ -3276,9 +3355,9 @@ fn a_call_with_no_room_stops_with_every_count_right() {
 fn a_recursion_is_right_at_every_instruction() {
     for (_, body, _) in DEEP {
         let src = deep_source(body, 12);
-        let plain = on_a_stack_of(loaded(&src, Audit::Never), MAX_STACK);
-        let checked = on_a_stack_of(loaded(&src, Audit::EachInstruction), MAX_STACK);
+        let plain = on_a_stack_of(loaded(&src, Audit::Never), DEEP_STACK);
         assert_eq!(plain.0, Ok(()), "{body}");
+        let checked = on_a_stack_of(loaded(&src, Audit::EachInstruction), DEEP_STACK);
         assert_eq!(plain, checked, "{body}");
     }
 }
@@ -4419,6 +4498,7 @@ fn only_the_constructor_named_is_taken_apart() {
                     Value::float(0.5),
                     Value::NIL,
                     Value::bool(true),
+                    Value::EMPTY_ARRAY,
                     Value::func(FuncIdx(0)),
                     Value::nullary(SOME_VARIANT),
                 ];

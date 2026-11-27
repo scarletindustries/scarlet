@@ -7,21 +7,21 @@
 //! | top 16 bits     | holds                                               |
 //! |-----------------|-----------------------------------------------------|
 //! | `0xFFF8` and up | a small Int: the low 51 bits, two's complement      |
-//! | `0x7FF8`        | an immediate: `Nil` (0), `False` (1) or `True` (2)  |
+//! | `0x7FF8`        | an immediate: `Nil` (0), `False` (1), `True` (2) or |
+//! |                 | the empty array (3)                                 |
 //! | `0x7FF9`        | a function with no captures, by its `FuncIdx`       |
 //! | `0x7FFC`        | a cell in the process's heap                        |
 //! | `0x7FFD`        | a constructor with no fields: variant and type      |
 //! | `0x7FFE`        | kept for a literal frozen in the loaded program     |
 //!
-//! Immediate 3 is kept for the empty array. This table is the only place a
-//! tag is given out, so a new kind of word is added here first. A cell's
-//! word holds the index of the cell's header in the heap's arena, in bits 0
-//! to 30, and its variant in bits 32 to 47. That is which of its type's
-//! variants a constructor's cell is, and 0 for any other cell. A constructor
-//! with no fields holds its variant there too, and its type in bits 0 to 31.
-//! So the top half of a word says which variant of its type a value is
-//! ([`Tag`]). A small Int is the 13 top bits set, so two words are both small
-//! Ints when their `&` is at least `0xFFF8` shifted to the top.
+//! This table is the only place a tag is given out, so a new kind of word is
+//! added here first. A cell's word holds the index of the cell's header in the
+//! heap's arena, in bits 0 to 30, and its variant in bits 32 to 47. That is
+//! which of its type's variants a constructor's cell is, and 0 for any other
+//! cell. A constructor with no fields holds its variant there too, and its type
+//! in bits 0 to 31. So the top half of a word says which variant of its type a
+//! value is ([`Tag`]). A small Int is the 13 top bits set, so two words are both
+//! small Ints when their `&` is at least `0xFFF8` shifted to the top.
 //!
 //! Scarlet has no NaN and no infinity (`docs/semantics.md`), and the layout
 //! needs that. The NaN an ARM chip gives for `0.0 / 0.0` is
@@ -168,6 +168,7 @@ pub(crate) enum View {
     Int(i64),
     Nil,
     Bool(bool),
+    EmptyArray,
     Func(FuncIdx),
     Cell(Cell),
     /// A constructor with no fields, like `None`.
@@ -181,6 +182,8 @@ impl Value {
     pub(crate) const UNSET: Value = Value(0);
     const FALSE: Value = Value(TAG_IMMEDIATE | 1);
     const TRUE: Value = Value(TAG_IMMEDIATE | 2);
+    /// The array with no elements. No cell is one ([`crate::array`]).
+    pub(crate) const EMPTY_ARRAY: Value = Value(TAG_IMMEDIATE | 3);
 
     /// `n` as a small Int, or `None` when it needs a big int.
     pub(crate) fn int(n: i64) -> Option<Value> {
@@ -319,7 +322,7 @@ impl Value {
         }
         let payload = bits & PAYLOAD;
         // No constructor makes a tag with bit 49 set, or an immediate other
-        // than these three.
+        // than these four.
         if bits & TAG_BIT_49 != 0 {
             return View::Nil;
         }
@@ -333,6 +336,7 @@ impl Value {
             (false, false) => match payload {
                 1 => View::Bool(false),
                 2 => View::Bool(true),
+                3 => View::EmptyArray,
                 _ => View::Nil,
             },
         }

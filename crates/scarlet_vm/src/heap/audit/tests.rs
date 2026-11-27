@@ -33,7 +33,7 @@ fn each_kind(n: u64, h: u64) -> [(Kind, Vec<u64>); 14] {
     [
         (Kind::String, vec![n, n]),
         (Kind::BigInt, vec![n, n]),
-        (Kind::Range, vec![n, n]),
+        (Kind::Range, vec![n.wrapping_sub(1), n]),
         (Kind::Binary, vec![n, n]),
         (Kind::Handle, vec![n]),
         // The binary it is a slice of, then where it starts and its length.
@@ -175,7 +175,7 @@ fn only_the_words_that_hold_values_are_holders() {
 fn a_header_its_class_does_not_have_is_found() {
     let (mut heap, ctors) = heap();
     let held = heap.string(b"held").expect("room");
-    let cells = one_of_each(&mut heap, ctors, held, 0);
+    let cells = one_of_each(&mut heap, ctors, held, 1);
     let roots = [cells.as_slice(), &[held]].concat();
     assert_eq!(audit(&heap, &roots), Ok(()));
     for cell in &cells {
@@ -345,6 +345,55 @@ fn a_closure_with_no_function_is_found() {
         heap.data_mut(cell)[0] = Value::NIL.bits();
         let no_function = AuditFault::NoFunction { cell: cell.index() };
         assert_eq!(audit(&heap, &[cell]), Err(no_function));
+    }
+}
+
+/// The array with no elements is no cell, so neither an array's cell nor a node of one
+/// has none.
+#[test]
+fn an_array_with_no_elements_in_a_cell_is_found() {
+    let (nil, h) = (Value::NIL.bits(), Value::bool(true).bits());
+    let (low, high) = (i64::MIN.cast_unsigned(), i64::MAX.cast_unsigned());
+    let cases: [(Kind, &[u64], bool); 11] = [
+        (Kind::ArrayRoot, &[1, 0, 0, nil, nil, nil], false),
+        (Kind::ArrayRoot, &[0, 0, 0, nil, nil, nil], true),
+        (Kind::ArrayLeaf, &[h], false),
+        (Kind::ArrayLeaf, &[], true),
+        (Kind::ArrayBranch, &[5, 1, nil], false),
+        (Kind::ArrayBranch, &[5], true),
+        (Kind::Range, &[3, 4], false),
+        (Kind::Range, &[low, high], false),
+        (Kind::Range, &[3, 3], true),
+        (Kind::Range, &[4, 3], true),
+        (Kind::Range, &[high, low], true),
+    ];
+    for (kind, words, empty) in cases {
+        let mut heap = Heap::default();
+        let cell = heap.make(kind, words).expect("room");
+        let fault = AuditFault::EmptyArray { cell: cell.index() };
+        let want = if empty { Err(fault) } else { Ok(()) };
+        assert_eq!(audit(&heap, &[cell]), want, "{kind:?} {words:?}");
+    }
+}
+
+#[test]
+fn an_array_cell_with_the_wrong_number_of_words_is_found() {
+    let nil = Value::NIL.bits();
+    let cases: [(Kind, &[u64]); 8] = [
+        (Kind::ArrayRoot, &[]),
+        (Kind::ArrayRoot, &[0, 0, 0, nil, nil]),
+        (Kind::ArrayRoot, &[1, 0, 0, nil, nil, nil, nil]),
+        (Kind::ArrayBranch, &[]),
+        (Kind::ArrayBranch, &[5, 1]),
+        (Kind::ArrayBranch, &[5, 1, 2, nil]),
+        (Kind::Range, &[3]),
+        (Kind::Range, &[3, 4, 5]),
+    ];
+    for (kind, words) in cases {
+        let mut heap = Heap::default();
+        let cell = heap.make(kind, words).expect("room");
+        let fault = AuditFault::Misshapen { cell: cell.index() };
+        assert_eq!(audit(&heap, &[cell]), Err(fault), "{kind:?} {words:?}");
     }
 }
 
@@ -602,6 +651,10 @@ fn each_fault_names_the_cell() {
         (
             AuditFault::NoFunction { cell },
             "the closure cell 12 has no function",
+        ),
+        (
+            AuditFault::EmptyArray { cell },
+            "the array's cell 12 has no elements",
         ),
         (
             AuditFault::Dangling {

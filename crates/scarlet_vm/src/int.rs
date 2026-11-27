@@ -45,6 +45,7 @@ pub(crate) fn read(heap: &Heap, v: Value) -> Result<Int, Stop> {
         v @ (View::Float(_)
         | View::Nil
         | View::Bool(_)
+        | View::EmptyArray
         | View::Func(_)
         | View::Cell(_)
         | View::Nullary(_)) => Err(Stop::missing(Missing::IntOperation(v))),

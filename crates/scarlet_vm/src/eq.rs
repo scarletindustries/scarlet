@@ -45,12 +45,14 @@ fn pair(heap: &Heap, a: Value, b: Value, todo: &mut Vec<(Value, Value)>) -> bool
         (View::Cell(x), View::Cell(y)) => cells(heap, x, y, todo),
         // Immediates, small Ints and functions with no captures are equal
         // only when they are the same word, which the check above decided.
-        // A small Int never equals a big one: a number has one form.
+        // A small Int never equals a big one: a number has one form. Neither
+        // does the empty array equal a cell, because no array's cell is empty.
         (
             View::Float(_)
             | View::Int(_)
             | View::Nil
             | View::Bool(_)
+            | View::EmptyArray
             | View::Func(_)
             | View::Nullary(_)
             | View::Cell(_),
@@ -60,14 +62,15 @@ fn pair(heap: &Heap, a: Value, b: Value, todo: &mut Vec<(Value, Value)>) -> bool
 }
 
 fn cells(heap: &Heap, x: Cell, y: Cell, todo: &mut Vec<(Value, Value)>) -> bool {
-    if let (Some(a), Some(b)) = (array::seq(heap, x), array::seq(heap, y)) {
-        return arrays(heap, a, b, todo);
+    let kx = heap.kind(x);
+    if matches!(kx, Some(Kind::ArrayRoot | Kind::Range)) {
+        return arrays(heap, Value::cell(x), Value::cell(y), todo);
     }
     // A slice equals a binary holding the same bits.
     if let (Some(a), Some(b)) = (binary::bits(heap, x), binary::bits(heap, y)) {
         return binary::equal(heap, a, b);
     }
-    let (Some(kx), Some(ky)) = (heap.kind(x), heap.kind(y)) else {
+    let (Some(kx), Some(ky)) = (kx, heap.kind(y)) else {
         return false;
     };
     if kx != ky {
@@ -108,13 +111,18 @@ fn cells(heap: &Heap, x: Cell, y: Cell, todo: &mut Vec<(Value, Value)>) -> bool 
     }
 }
 
-/// Two arrays, either of which may be a range.
-fn arrays(heap: &Heap, a: Seq, b: Seq, todo: &mut Vec<(Value, Value)>) -> bool {
+/// Two arrays, each in any form. Two values that are not both arrays differ.
+fn arrays(heap: &Heap, a: Value, b: Value, todo: &mut Vec<(Value, Value)>) -> bool {
+    let (Some(a), Some(b)) = (array::seq(heap, a), array::seq(heap, b)) else {
+        return false;
+    };
     if a.len(heap) != b.len(heap) {
         return false;
     }
     match (a, b) {
-        (Seq::Range { start: x, .. }, Seq::Range { start: y, .. }) => x == y || a.len(heap) == 0,
+        // They are the same length, so both are empty.
+        (Seq::Empty, _) | (_, Seq::Empty) => true,
+        (Seq::Range { start: x, .. }, Seq::Range { start: y, .. }) => x == y,
         (Seq::Tree(t), Seq::Range { start, end }) | (Seq::Range { start, end }, Seq::Tree(t)) => {
             array::elements(heap, t)
                 .into_iter()
@@ -135,6 +143,7 @@ fn is_int(heap: &Heap, v: Value, n: i128) -> bool {
         View::Float(_)
         | View::Nil
         | View::Bool(_)
+        | View::EmptyArray
         | View::Func(_)
         | View::Cell(_)
         | View::Nullary(_) => false,

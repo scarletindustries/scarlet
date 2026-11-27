@@ -47,6 +47,12 @@ pub(super) const SHAPES: &str = "import scarlet/map\n\
         \t\t_ -> 'other'\n\
         \t}\n\
         }\n\
+        fn none(xs Array(Int), n Int) Array(Int) {\n\
+        \tmatch xs {\n\
+        \t\t[] -> if n > 0 { none([n], n - 1) } else { [] }\n\
+        \t\t[_, ..t] -> none(t, n - 1)\n\
+        \t}\n\
+        }\n\
         fn found(m map::Map(Int, Int), k Int) Int {\n\
         \tmatch map::get(m, k) {\n\
         \t\tSome(v) -> v\n\
@@ -58,6 +64,7 @@ pub(super) const SHAPES: &str = "import scarlet/map\n\
         \tprintln(name(3))\n\
         \tprintln(pick(D(1, pick(B(2)))))\n\
         \tprintln(digit(2))\n\
+        \tprintln(none([], 4))\n\
         \tprintln(found(map::set(map::new(), 1, 2), 1))\n\
         }\n";
 

@@ -45,6 +45,26 @@ fn a_constructor_that_is_not_as_listed_is_named() {
     }
 }
 
+/// What is said of an array's cell that is laid out as none is, or has no elements, and
+/// of what is no array.
+#[test]
+fn an_array_that_is_none_is_named() {
+    for (why, says) in [
+        (Broken::ArrayCell, "an array's cell that is not an array"),
+        (Broken::EmptyCell, "an array's cell with no elements"),
+        (
+            Broken::NotAnArray(View::Nil),
+            "an array operation on Nil, which is not an array",
+        ),
+        (
+            Broken::NotAMap(View::EmptyArray),
+            "a map operation on EmptyArray, which is not a map",
+        ),
+    ] {
+        assert_eq!(BadProgram(why).to_string(), says);
+    }
+}
+
 /// A fault an audit finds is a bug. No memory to look for one is not, and is
 /// not the program's heap running out either.
 #[test]

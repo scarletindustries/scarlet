@@ -80,6 +80,7 @@ fn value<'t>(
         View::Nil => out.extend_from_slice(b"Nil"),
         View::Bool(true) => out.extend_from_slice(b"True"),
         View::Bool(false) => out.extend_from_slice(b"False"),
+        View::EmptyArray => out.extend_from_slice(b"[]"),
         View::Nullary(variant) => {
             let (_, names) = names(&code.types, variant)?;
             out.extend_from_slice(names.name.as_bytes());
@@ -105,8 +106,11 @@ fn value<'t>(
                 None => return Err(Stop::broken(Broken::ClosureCell)),
             },
             Some(Kind::Tuple) => tuple(heap, code, cell, layout, out, todo)?,
-            Some(Kind::ArrayRoot) => array(heap, code, cell, layout, out, todo)?,
-            Some(Kind::Range) => range(heap, cell, layout, out)?,
+            Some(Kind::ArrayRoot | Kind::Range) => match array::seq(heap, v) {
+                Some(Seq::Tree(cell)) => array(heap, code, cell, layout, out, todo)?,
+                Some(Seq::Range { start, end }) => range(start, end, layout, out)?,
+                Some(Seq::Empty) | None => return Err(Stop::broken(Broken::ArrayCell)),
+            },
             Some(Kind::Binary | Kind::BinarySlice) => match crate::binary::bits(heap, cell) {
                 Some(b) => out.extend_from_slice(crate::binary::text(heap, b).as_bytes()),
                 None => {
@@ -289,7 +293,6 @@ fn array<'t>(
 ) -> Result<(), Stop> {
     let elements = array::elements(heap, cell);
     match layout {
-        Layout::Open(_) if elements.is_empty() => out.extend_from_slice(b"[]"),
         Layout::Open(n) if elements.iter().all(|e| small(heap, *e)) => {
             six_to_a_line(elements.len(), n, out, |i, out| match elements.get(i) {
                 Some(e) => show(heap, code, *e, out),
@@ -324,10 +327,7 @@ fn array<'t>(
 
 /// A range like `0..3` shows as the array of its elements, `[0, 1, 2]`. Each
 /// element is worked out from the range's start, so none is built.
-fn range(heap: &Heap, cell: Cell, layout: Layout, out: &mut Vec<u8>) -> Result<(), Stop> {
-    let Some(Seq::Range { start, end }) = array::seq(heap, cell) else {
-        return Err(Stop::broken(Broken::RangeCell));
-    };
+fn range(start: i64, end: i64, layout: Layout, out: &mut Vec<u8>) -> Result<(), Stop> {
     let count = array::range_len(start, end);
     let item = |i: usize, out: &mut Vec<u8>| {
         // An i128 holds any i64 plus any index, so this is exact.
@@ -337,10 +337,6 @@ fn range(heap: &Heap, cell: Cell, layout: Layout, out: &mut Vec<u8>) -> Result<(
     };
     let count = usize::try_from(count).unwrap_or(usize::MAX);
     match layout {
-        Layout::Open(_) if count == 0 => {
-            out.extend_from_slice(b"[]");
-            Ok(())
-        }
         Layout::Open(n) => six_to_a_line(count, n, out, item),
         Layout::Flat => {
             out.push(b'[');
@@ -440,6 +436,8 @@ fn small(heap: &Heap, v: Value) -> bool {
             )
             | None => false,
         },
+        // As every other array is, so that what holds one is laid out alike.
+        View::EmptyArray => false,
     }
 }
 

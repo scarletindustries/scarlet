@@ -283,7 +283,10 @@ pub(crate) enum Broken {
     /// A closure's cell that names no function.
     ClosureCell,
     TreePiece,
-    RangeCell,
+    /// An array's cell that is laid out as no array is.
+    ArrayCell,
+    /// An array's cell with no elements. The array with none is no cell.
+    EmptyCell,
     /// A reference was taken to, given up on, or asked whether it was the
     /// only one to a cell that had already been freed. Some count went down
     /// once too often.
@@ -446,7 +449,8 @@ impl fmt::Display for BadProgram {
             Broken::TreePiece => {
                 f.write_str("a piece of an array's or a map's tree held as a value")
             }
-            Broken::RangeCell => f.write_str("a range cell that is not a range"),
+            Broken::ArrayCell => f.write_str("an array's cell that is not an array"),
+            Broken::EmptyCell => f.write_str("an array's cell with no elements"),
             Broken::DeadCell => f.write_str("a reference to a cell that was already freed"),
             Broken::UnexpectedCell(v) => write!(
                 f,

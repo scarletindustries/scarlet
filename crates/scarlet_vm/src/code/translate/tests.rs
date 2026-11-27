@@ -1451,6 +1451,8 @@ fn operands_that_do_not_fit_are_in_a_list() {
         (prim(PrimOp::MakeTuple, 4), Op::Tuple),
         (prim(PrimOp::MakeTuple, 8), Op::Tuple),
         (prim(PrimOp::MakeTuple, 9), Op::TupleWide),
+        (prim(PrimOp::MakeArray, 0), Op::Const),
+        (prim(PrimOp::MakeArray, 1), Op::Array),
         (prim(PrimOp::MakeArray, 8), Op::Array),
         (prim(PrimOp::MakeArray, 9), Op::ArrayWide),
         (prim(PrimOp::StringConcatMany, 8), Op::Concat),

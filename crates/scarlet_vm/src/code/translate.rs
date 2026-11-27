@@ -1458,6 +1458,10 @@ impl<'c> Translator<'c> {
             PrimOp::BinaryReadUtf8 => bits(self, BitsOp::ReadUtf8, Arity::Two),
             PrimOp::BinaryReadInt => bits(self, BitsOp::ReadInt, Arity::Three),
             PrimOp::MakeRange => both().map(|(start, end)| Ins::Range { dst, start, end }),
+            PrimOp::MakeArray if args.is_empty() => Ok(Ins::Const {
+                dst,
+                value: Value::EMPTY_ARRAY,
+            }),
             PrimOp::MakeArray => Ok(match self.shares(args.iter().copied())? {
                 Fit::Inline(elements) => Ins::Array { dst, elements },
                 Fit::Listed(elements) => Ins::ArrayWide { dst, elements },

@@ -186,6 +186,7 @@ impl fmt::Display for Literal {
             View::Int(n) => write!(f, "{n}"),
             View::Nil => f.write_str("nil"),
             View::Bool(b) => write!(f, "{b}"),
+            View::EmptyArray => f.write_str("[]"),
             View::Func(func) => write!(f, "{func}"),
             View::Nullary(v) => write!(f, "{}.{}", v.type_id.0, v.variant_idx),
             // The loader makes no constant that is a cell.

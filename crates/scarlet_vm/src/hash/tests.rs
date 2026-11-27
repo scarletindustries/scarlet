@@ -148,3 +148,25 @@ fn a_word_is_its_bytes() {
     b.bytes(&0x0102_0304_0506_0708u64.to_le_bytes());
     assert_eq!(a.finish(), b.finish());
 }
+
+/// The empty array hashes as the array of no elements that a cell once was, so no map
+/// that is keyed by one, or by something that holds one, has changed its order.
+#[test]
+fn the_empty_array_hashes_as_an_array_of_length_0() {
+    let mut heap = Heap::default();
+    let nil = Value::NIL.bits();
+    let words = [0, 0, 0, nil, nil, nil];
+    let tree = Value::cell(heap.make(Kind::ArrayRoot, &words).expect("room"));
+    let range = Value::cell(heap.make(Kind::Range, &[5, 5]).expect("room"));
+    let want = 0xb955_a07b_b007_5496;
+    for v in [Value::EMPTY_ARRAY, tree, range] {
+        assert_eq!(hash(&heap, v), want);
+        let held = heap.tuple(&[v, Value::bool(true)]).expect("room");
+        assert_eq!(hash(&heap, Value::cell(held)), 0x81aa_2ae2_bc07_0faf);
+    }
+    let one = heap.make(Kind::Range, &[0, 1]).expect("room");
+    assert_ne!(hash(&heap, Value::cell(one)), want);
+    for v in [Value::NIL, Value::bool(false), Value::bool(true)] {
+        assert_ne!(hash(&heap, v), want);
+    }
+}

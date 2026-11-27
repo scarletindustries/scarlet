@@ -840,11 +840,12 @@ impl Maker {
             let (cell, variant) = self.known[at];
             return self.part(cell, variant);
         }
-        match self.below(7) {
+        match self.below(8) {
             0 => Atom::Local(local(a)),
             1 => ctor(&[a, b]),
             2 => Atom::Load(Load::Capture(CaptureIdx(0))),
             3 => Atom::Nil,
+            5 => Atom::prim(PrimOp::MakeArray, Vec::new()),
             4 => Atom::Update {
                 base: local(a),
                 variant: variant(),

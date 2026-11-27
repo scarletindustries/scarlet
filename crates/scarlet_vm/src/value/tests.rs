@@ -21,7 +21,12 @@ fn tagged() -> Vec<Value> {
         (-1, 7),
         (i32::MIN, 0),
     ];
-    let mut all = vec![Value::NIL, Value::bool(false), Value::bool(true)];
+    let mut all = vec![
+        Value::NIL,
+        Value::bool(false),
+        Value::bool(true),
+        Value::EMPTY_ARRAY,
+    ];
     all.extend(ints.iter().filter_map(|&n| Value::int(n)));
     all.extend(funcs.iter().map(|&f| Value::func(FuncIdx(f))));
     all.extend(cells.iter().map(|&c| Value::cell(Cell::from_bits(c))));
@@ -30,7 +35,7 @@ fn tagged() -> Vec<Value> {
             .iter()
             .map(|&(t, v)| Value::nullary(nullary(t, v))),
     );
-    assert_eq!(all.len(), 24);
+    assert_eq!(all.len(), 25);
     all
 }
 
@@ -59,6 +64,7 @@ fn immediates_and_functions_are_themselves() {
     assert_eq!(Value::NIL.view(), View::Nil);
     assert_eq!(Value::bool(true).view(), View::Bool(true));
     assert_eq!(Value::bool(false).view(), View::Bool(false));
+    assert_eq!(Value::EMPTY_ARRAY.view(), View::EmptyArray);
     assert_eq!(Value::func(FuncIdx(7)).view(), View::Func(FuncIdx(7)));
     assert_eq!(
         Value::func(FuncIdx(u32::MAX)).view(),
@@ -160,6 +166,7 @@ fn a_tag_is_a_variant_with_fields_or_without() {
     let others = [
         Value::NIL,
         Value::bool(true),
+        Value::EMPTY_ARRAY,
         Value::func(FuncIdx(7)),
         Value::int(-1).expect("small"),
         Value::int(0).expect("small"),
@@ -180,6 +187,7 @@ fn only_a_function_with_no_captures_is_one() {
             | View::Int(_)
             | View::Nil
             | View::Bool(_)
+            | View::EmptyArray
             | View::Cell(_)
             | View::Nullary(_) => None,
         };
@@ -221,6 +229,7 @@ fn every_tagged_word_is_a_nan() {
                 tagged @ (View::Int(_)
                 | View::Nil
                 | View::Bool(_)
+                | View::EmptyArray
                 | View::Func(_)
                 | View::Cell(_)
                 | View::Nullary(_)) => assert!(x.is_nan(), "{bits:#x} is {tagged:?}"),
@@ -246,7 +255,7 @@ fn every_tagged_word_is_a_nan() {
 
 /// What the table at the top of this file says a word holds, read off
 /// its top 16 bits the long way. A tag the table gives to nothing, and an
-/// immediate past `True`, reads as `Nil`.
+/// immediate past the empty array, reads as `Nil`.
 fn by_the_table(bits: u64) -> View {
     let payload = bits & PAYLOAD;
     let low_32 = u32::try_from(payload & 0xFFFF_FFFF).expect("32 bits");
@@ -258,6 +267,7 @@ fn by_the_table(bits: u64) -> View {
         0x7FF8 => match payload {
             1 => View::Bool(false),
             2 => View::Bool(true),
+            3 => View::EmptyArray,
             _ => View::Nil,
         },
         0x7FF9 => View::Func(FuncIdx(low_32)),
@@ -284,6 +294,7 @@ fn view_reads_every_word_as_the_table_says() {
         View::Int(_)
         | View::Nil
         | View::Bool(_)
+        | View::EmptyArray
         | View::Func(_)
         | View::Cell(_)
         | View::Nullary(_) => None,
@@ -313,12 +324,10 @@ fn each_kind_has_its_own_words() {
             assert_ne!(a.view(), b.view());
         }
     }
-    // The tags the table keeps for later are in none of them.
+    // The tag the table keeps for later is in none of them.
     const FROZEN: u64 = 0x7FFE;
-    const EMPTY_ARRAY: u64 = TAG_IMMEDIATE | 3;
     for v in all {
         assert_ne!(v.bits() >> 48, FROZEN, "{v:?}");
-        assert_ne!(v.bits(), EMPTY_ARRAY, "{v:?}");
     }
 }
 

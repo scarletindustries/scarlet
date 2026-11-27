@@ -290,6 +290,7 @@ pub(crate) fn doc_image(heap: &Heap, cell: Cell) -> String {
         View::Float(_)
         | View::Nil
         | View::Bool(_)
+        | View::EmptyArray
         | View::Func(_)
         | View::Cell(_)
         | View::Nullary(_) => None,

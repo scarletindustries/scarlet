@@ -7,9 +7,8 @@
 use scarlet_ir::core_ir::{AddressTypes, NetTypes, TlsTypes};
 use scarlet_ir::intrinsic::Intrinsic;
 
-use super::{Built, Operands, Rest};
+use super::{Built, Operands, Rest, not_an_array};
 use crate::Stop;
-use crate::array::{self, Seq};
 use crate::bigint::{self, Int};
 use crate::binary;
 use crate::heap::Kind;
@@ -133,14 +132,7 @@ impl Rest<'_, '_> {
                 let conn = self.conn_of(v)?;
                 let parts = args.get(1);
                 let mut bytes = Vec::new();
-                let parts = match self.seq(parts)? {
-                    Seq::Tree(parts) => array::elements(&self.heap, parts),
-                    Seq::Range { start, end } if start >= end => Vec::new(),
-                    Seq::Range { .. } => {
-                        return Err(Stop::broken(Broken::NotAnArray(parts.view())));
-                    }
-                };
-                for part in parts {
+                for part in self.stored(parts)?.ok_or_else(|| not_an_array(parts))? {
                     let Some(b) = self.whole_bytes(part)? else {
                         let unaligned = self.net_types()?.unaligned_binary;
                         return self.err(unaligned);

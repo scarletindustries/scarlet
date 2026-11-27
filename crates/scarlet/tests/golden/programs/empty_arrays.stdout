@@ -1,0 +1,215 @@
+33
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+[] 0 none None Ok(
+  []
+) Err(Nil) [1] [2] [1, 2] [1, 2] [] [0, 1]
+33 True False False False False
+True
+{[]: 33}
+Box {
+  xs: [],
+  k: 1
+}
+Box {
+  xs: [],
+  k: 1
+}
+Box {
+  xs: [],
+  k: 1
+}
+[
+  [],
+  [1],
+  []
+]
+(
+  [],
+  1,
+  [
+    []
+  ]
+)
+Some(
+  []
+)
+Node(
+  []
+)
+Node(
+  [
+    Leaf,
+    Node(
+      []
+    ),
+    Node(
+      [Leaf]
+    )
+  ]
+)
+{[1, 2]: two, [0]: zero, [1]: one, []: empty}
+{([], 1): b, ([1], 1): c, ([], 2): d}
+{None: 2, Some([1]): 3, Some([]): 4}
+{[[]]: 5, []: 2, [[], []]: 3}
+[
+  (
+    [],
+    []
+  )
+]
+[]
+[]
+[]
+True
+[]
+[]
+[]
+[]
+[]
+{}
+[[],{"a":[]}]
+{}
+<<>>
+<<>>
+Ok()
+
+3
+False
+True
+None
+False
+True
+Err(Nil)
+Err(Nil)
+True
+True
+True
+True
+True

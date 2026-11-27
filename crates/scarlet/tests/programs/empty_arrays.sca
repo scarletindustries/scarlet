@@ -1,0 +1,191 @@
+// The empty array, however it was made: it prints, compares, hashes, grows and is taken
+// apart as one array.
+import scarlet/array
+import scarlet/binary
+import scarlet/json
+import scarlet/json/decode
+import scarlet/map
+import scarlet/string
+
+type Box {
+	xs Array(Int)
+	k Int
+}
+
+type Tree {
+	Node(kids Array(Tree))
+	Leaf
+}
+
+const global = []
+
+fn rest(xs Array(a)) Array(a) {
+	match xs {
+		[_, ..t] -> t
+		[] -> xs
+	}
+}
+
+fn same(x a) a {
+	x
+}
+
+fn every_way() Array(Array(Int)) {
+	[
+		[],
+		global,
+		same([]),
+		rest([1]),
+		rest([7]),
+		rest(rest([1, 2])),
+		rest(0..1),
+		rest(rest(0..2)),
+		rest(0..0),
+		[1, 2, 3][1..1] or [9],
+		[1, 2, 3][3..3] or [9],
+		{ 0..5 }[2..2] or [9],
+		{ 0..0 }[0..0] or [9],
+		[][0..0] or [9],
+		5..5,
+		9..2,
+		4611686018427387904..-4611686018427387904,
+		[..[], ..[]],
+		[..rest([1]), ..3..3],
+		array::filter([1, 2, 3], fn(x) x > 5),
+		array::filter([], fn(x) x > 5),
+		array::map([], fn(x) x + 1),
+		array::reverse([]),
+		array::concat([], []),
+		array::put([], 0, 1),
+		array::put(9..9, 0, 1),
+		array::swap([], 0, 1),
+		array::set([], 0, 1) or [],
+		map::keys(map::new()),
+		map::values(map::delete(map::set(map::new(), 1, 2), 1)),
+		array::map(json::elements(doc('[]')), fn(_) 1),
+		Box([], 1).xs,
+		Box(..Box([1], 2), xs: []).xs,
+	]
+}
+
+fn doc(text String) json::Doc {
+	match json::parse(text) {
+		Ok(d) -> d
+		Err(_) -> doc('null')
+	}
+}
+
+fn shape(xs Array(Int)) String {
+	match xs {
+		[] -> 'none'
+		[_] -> 'one'
+		[_, ..t] -> 'more ${array::length(t)}'
+	}
+}
+
+fn counted() map::Map(Array(Int), Int) {
+	array::fold(every_way(), map::new(), fn(m, xs) map::set(m, xs, { map::get(m, xs) or 0 } + 1))
+}
+
+pub fn main() {
+	ways = every_way()
+	println(array::length(ways))
+	array::each(ways, fn(xs) {
+		same_as = array::filter(ways, fn(ys) xs == ys)
+		println(
+			'${xs} ${array::length(
+				xs,
+			)} ${shape(
+				xs,
+			)} ${xs[0]} ${xs[0..0]} ${xs[0..1]} ${[
+				..xs,
+				1,
+			]} ${[2, ..xs]} ${[..xs, 1, 2]} ${[1, 2, ..xs]} ${[..xs, ..xs]} ${[..xs, ..0..2]}',
+		)
+		println(
+			'${array::length(
+				same_as,
+			)} ${xs == 0..0} ${xs != []} ${xs == [1]} ${[1] == xs} ${0..3 == xs}',
+		)
+	})
+	println(ways == array::reverse(ways))
+	println(counted())
+	println(Box([], 1))
+	println(Box(rest([1]), 1))
+	println(Box(3..3, 1))
+	println([[], [1], []])
+	println(([], 1, [[]]))
+	println(Some([]))
+	println(Node([]))
+	println(Node([Leaf, Node([]), Node([Leaf])]))
+	println(
+		{
+			map::new()
+			|> map::set([], 'empty')
+			|> map::set([1], 'one')
+			|> map::set([1, 2], 'two')
+			|> map::set(0..1, 'zero')
+		},
+	)
+	println(
+		{
+			map::new()
+			|> map::set(([], 1), 'a')
+			|> map::set((rest([3]), 1), 'b')
+			|> map::set(([1], 1), 'c')
+			|> map::set(([], 2), 'd')
+		},
+	)
+	println(
+		{
+			map::new()
+			|> map::set(Some([]), 1)
+			|> map::set(None, 2)
+			|> map::set(Some([1]), 3)
+			|> map::set(Some(1..1), 4)
+		},
+	)
+	println(
+		{
+			map::new()
+			|> map::set([[]], 1)
+			|> map::set([], 2)
+			|> map::set([[], []], 3)
+			|> map::set([4..4], 5)
+		},
+	)
+	println(map::to_list(map::set(map::new(), [], [])))
+	println(string::split('', ','))
+	println(string::split('', ''))
+	println(string::to_graphemes(''))
+	println(string::split('a', '') == string::to_graphemes('a'))
+	println(json::elements(doc('[]')))
+	println(json::elements(doc('{}')))
+	println(json::entries(doc('{}')))
+	println(json::entries(doc('3')))
+	println(json::encode(json::List([])))
+	println(json::encode(json::Object([])))
+	println(
+		json::encode(
+			json::List([json::List([]), json::Object([('a', json::List(rest([json::Null])))])]),
+		),
+	)
+	println(map::from_list([]))
+	println(binary::concat([]))
+	println(binary::concat(rest([<<1>>])))
+	println(string::from_code_points([]))
+	println(decode::failures_to_string([]))
+	println(array::fold([], 3, fn(a, b) a + b))
+	println(array::any([], fn(x) x == 1))
+	println(array::all([], fn(x) x == 1))
+	println(array::find([], fn(x) x == 1))
+	println(array::contains([], 1))
+	println(array::contains([[], [1]], 2..2))
+	println(array::set([], 0, 1))
+	println(array::set([], -1, 1))
+	println([[], [1]] == [0..0, 1..2])
+	println(([], 1) == (5..5, 1))
+	println(Box([], 2) == Box(rest(0..1), 2))
+	println(global == rest([1]))
+	println([] == rest(['a']))
+}

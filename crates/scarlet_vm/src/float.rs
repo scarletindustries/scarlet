@@ -76,6 +76,7 @@ pub(crate) fn read(v: Value) -> Result<f64, Stop> {
         v @ (View::Int(_)
         | View::Nil
         | View::Bool(_)
+        | View::EmptyArray
         | View::Func(_)
         | View::Cell(_)
         | View::Nullary(_)) => Err(Stop::broken(Broken::FloatOperation(v))),

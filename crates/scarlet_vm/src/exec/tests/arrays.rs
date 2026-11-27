@@ -51,16 +51,16 @@ fn grown(heap: &mut Heap, of: Of, how: Grown) -> (Value, Vec<Result<Value, i64>>
         Grown::Cut if n > 2 => {
             let left = array::skip_owned(heap, cell, 2).expect("room");
             items.drain(..2);
-            (Value::cell(left), items)
+            (left, items)
         }
         Grown::Pushed if n > 0 => {
-            let mut a = cell;
+            let mut a = whole;
             for i in 0..3 {
                 let x = a_cell(heap, 900 + i);
-                a = array::push_owned(heap, a, x, End::Front).expect("room");
+                a = array::push_owned(heap, a.as_cell(), x, End::Front).expect("room");
                 items.insert(0, Ok(x));
             }
-            (Value::cell(a), items)
+            (a, items)
         }
         Grown::Cut | Grown::Pushed => (whole, items),
     }
@@ -138,8 +138,14 @@ fn checked(
             continue;
         }
         let gone = case.moved && i == usize::from(FROM.0);
+        let left = m.stack[i].bits();
+        // The empty array has no reference to take, so it may be left where it is.
+        if gone && v.bits() == Value::EMPTY_ARRAY.bits() {
+            assert!([Value::NIL, *v].map(Value::bits).contains(&left), "{what}");
+            continue;
+        }
         let want = if gone { Value::NIL } else { *v };
-        assert_eq!(m.stack[i].bits(), want.bits(), "{what}: r{i}");
+        assert_eq!(left, want.bits(), "{what}: r{i}");
     }
     if case.held {
         let kept = m.rest.globals[0];
@@ -333,7 +339,7 @@ fn asked_of(n: usize) -> Vec<Asked> {
 /// and a register it writes may be the one it takes.
 #[test]
 fn an_array_is_split_when_it_has_the_length() {
-    let mut hits = 0;
+    let (mut hits, mut in_place) = (0, 0);
     for case in cases() {
         let n = len_of_kind(case.of);
         for (k, asked) in asked_of(n).into_iter().enumerate() {
@@ -382,12 +388,20 @@ fn an_array_is_split_when_it_has_the_length() {
                 if asked.tail {
                     let left = in_register(m, TAIL);
                     is_array(m, left, &items[asked.len..], &what);
+                    // Only the place in its head moves along in an array that nothing
+                    // else holds.
+                    let pushed = matches!(case.how, Grown::Pushed) && n > 0;
+                    let alone = case.moved && !case.held && !matches!(case.of, Of::Range(..));
+                    if alone && pushed && (1..3).contains(&asked.len) {
+                        assert_eq!(left.bits(), before[usize::from(FROM.0)].bits(), "{what}");
+                        in_place += 1;
+                    }
                 }
                 all_given_up(m, &what);
             });
         }
     }
-    assert!(hits > 5000, "{hits}");
+    assert!(hits > 5000 && in_place > 50, "{hits} {in_place}");
 }
 
 /// A test of a length goes on where it holds and jumps where it does not, and leaves
@@ -648,11 +662,11 @@ fn a_freed_element_stops_the_run() {
                     let mut whole = array::from_values(heap, &[freed; 9]).expect("room");
                     if matches!(how, Grown::Pushed) {
                         for _ in 0..9 {
-                            whole =
-                                array::push_owned(heap, whole, freed, End::Front).expect("room");
+                            whole = array::push_owned(heap, whole.as_cell(), freed, End::Front)
+                                .expect("room");
                         }
                     }
-                    let before = registers(&[(FROM, Value::cell(whole))]);
+                    let before = registers(&[(FROM, whole)]);
                     let stop = run_with(m, code, &before);
                     assert_eq!(stop, Stop::broken(Broken::DeadCell), "{ins:?} {how:?}");
                 });
@@ -705,8 +719,9 @@ fn an_element_that_is_counted_and_not_there_stops_the_run() {
             m.rest.globals = Vec::new();
             let items: Vec<Value> = (0..n).map(|i| small(i as i64)).collect();
             let whole = array::from_values(&mut m.rest.heap, &items).expect("room");
-            m.rest.heap.data_mut(whole)[0] = 50;
-            let before = registers(&[(FROM, Value::cell(whole))]);
+            let cell = whole.as_cell().expect("a tree");
+            m.rest.heap.data_mut(cell)[0] = 50;
+            let before = registers(&[(FROM, whole)]);
             let stop = run_with(m, code, &before);
             let want = Broken::NoArrayElement { index: missing };
             assert_eq!(stop, Stop::broken(want), "{ins:?}");
@@ -856,6 +871,173 @@ fn with_no_room(case: Case, ins: Ins<Reg>, lists: Lists<Reg>, item_moved: bool) 
     full
 }
 
+/// A range may have more elements than an `i64` counts, and then its length is a big Int.
+#[test]
+fn the_length_of_the_longest_range_is_a_big_int() {
+    for (start, end, want) in [
+        (i64::MIN, i64::MAX, BigInt::from(u64::MAX)),
+        (i64::MIN, 0, BigInt::from(1u64 << 63)),
+        (0, i64::MAX, BigInt::from(i64::MAX)),
+        (0, (1 << 50) - 1, BigInt::from((1i64 << 50) - 1)),
+        (0, 1 << 50, BigInt::from(1i64 << 50)),
+        (i64::MAX, i64::MIN, BigInt::from(0)),
+    ] {
+        let code = asks(Ins::ArrayLen {
+            dst: Dst(TAIL),
+            src: Src(FROM),
+        });
+        on_a_machine(|m| {
+            m.rest.heap = Heap::new(code.ctors.clone());
+            m.rest.globals = Vec::new();
+            let range = array::range(&mut m.rest.heap, start, end).expect("room");
+            run_with(m, code, &registers(&[(FROM, range)]));
+            let len = in_register(m, TAIL);
+            let got = match len.view() {
+                View::Int(n) => BigInt::from(n),
+                View::Cell(c) => m.rest.heap.read_big_int(c),
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(got, want);
+            assert_eq!(len.small_int().is_some(), want < BigInt::from(1i64 << 50));
+            counted(m, "a length");
+            all_given_up(m, "a length");
+        });
+    }
+}
+
+/// A cell of no elements, which nothing makes, is not taken for an array that has one or
+/// for one that has none: what asks for its first element stops, and leaves everything
+/// where it was. What only asks how long it is finds that it has none.
+#[test]
+fn a_cell_with_no_elements_stops_what_takes_it_apart() {
+    let nil = Value::NIL.bits();
+    let cells: [(Kind, &[u64]); 3] = [
+        (Kind::ArrayRoot, &[0, 0, 0, nil, nil, nil]),
+        (Kind::Range, &[4, 4]),
+        (Kind::Range, &[9, 2]),
+    ];
+    for (kind, words) in cells {
+        for moved in [false, true] {
+            for head in [None, Some(TO[0])] {
+                let src = Arg { reg: FROM, moved };
+                let (ins, lists) = uncons_of(head, src);
+                let code = asks_with(ins, lists);
+                on_a_machine(|m| {
+                    m.rest.heap = Heap::new(code.ctors.clone());
+                    m.rest.globals = Vec::new();
+                    let whole = Value::cell(m.rest.heap.make(kind, words).expect("room"));
+                    let before = registers(&[(FROM, whole)]);
+                    let what = format!("{kind:?} {words:?} {moved} {head:?}");
+                    let stop = run_with(m, code, &before);
+                    assert_eq!(stop, Stop::broken(Broken::EmptyCell), "{what}");
+                    rest_is(m, &before, None, &[], &what);
+                    let cell = whole.as_cell().expect("a cell");
+                    assert_eq!(m.rest.heap.unique(cell), Ok(true), "{what}");
+                    let s = m.rest.seq(whole).expect("an array");
+                    assert_eq!(s.len(&m.rest.heap), 0, "{what}");
+                    let items = elements(m, whole);
+                    assert!(items.is_empty(), "{what}");
+                    all_given_up(m, &what);
+                });
+            }
+        }
+    }
+}
+
+/// The empty array grows and is joined as any other is, takes no reference, and is left
+/// in its register. Nothing is made where the other side is a tree or empty, which is
+/// then the join. A range is built as a tree.
+#[test]
+fn the_empty_array_is_grown_and_joined() {
+    let empty = Value::EMPTY_ARRAY;
+    for moved in [false, true] {
+        let src = Arg { reg: FROM, moved };
+        for end in [End::Front, End::Back] {
+            let pushes = [
+                (push_of(src, Arg::shared(WITH), end), 1),
+                (push_of(src, Arg { reg: WITH, moved }, end), 1),
+                (extend_of(src, &[WITH, AWAY], end), 2),
+                (extend_of(src, &[], end), 0),
+            ];
+            for ((ins, lists), n) in pushes {
+                let code = asks_with(ins, lists);
+                on_a_machine(|m| {
+                    m.rest.heap = Heap::new(code.ctors.clone());
+                    m.rest.globals = Vec::new();
+                    let heap = &mut m.rest.heap;
+                    let (x, y) = (a_cell(heap, 1), a_cell(heap, 2));
+                    let made = heap.made();
+                    let before = registers(&[(FROM, empty), (WITH, x), (AWAY, y)]);
+                    let what = format!("{ins:?}");
+                    run_with(m, code, &before);
+                    counted(m, &what);
+                    assert_eq!(m.rest.heap.made() - made, n.min(1) * 2, "{what}");
+                    let items = [Ok(x), Ok(y)];
+                    let grown = in_register(m, TAIL);
+                    is_array(m, grown, &items[..n], &what);
+                    all_given_up(m, &what);
+                });
+            }
+        }
+    }
+    let join = Ins::ArrayConcat {
+        dst: Dst(TAIL),
+        a: Src(FROM),
+        b: Src(WITH),
+    };
+    let code = asks_with(join, Lists::default());
+    for of in ARRAYS {
+        for first in [false, true] {
+            on_a_machine(|m| {
+                m.rest.heap = Heap::new(code.ctors.clone());
+                m.rest.globals = Vec::new();
+                let (other, items) = array_of_kind(&mut m.rest.heap, of);
+                let made = m.rest.heap.made();
+                let (a, b) = if first {
+                    (empty, other)
+                } else {
+                    (other, empty)
+                };
+                run_with(m, code, &registers(&[(FROM, a), (WITH, b)]));
+                let what = format!("{of:?} {first}");
+                counted(m, &what);
+                let joined = in_register(m, TAIL);
+                let s = m.rest.seq(other).expect("an array");
+                if let Seq::Range { .. } = s {
+                    let s = m.rest.seq(joined).expect("an array");
+                    assert!(matches!(s, Seq::Tree(_)), "{what}");
+                } else {
+                    assert_eq!(m.rest.heap.made(), made, "{what}");
+                    assert_eq!(joined.bits(), other.bits(), "{what}");
+                }
+                is_array(m, joined, &items, &what);
+                all_given_up(m, &what);
+            });
+        }
+    }
+}
+
+/// A socket is given nothing to write where the parts are the empty array.
+#[test]
+fn the_empty_array_is_parts_to_write() {
+    on_a_machine(|m| {
+        let (ctors, by_width) = as_wide_as_you_like();
+        m.rest.heap = Heap::new(ctors);
+        m.rest.globals = Vec::new();
+        let heap = &mut m.rest.heap;
+        let handle = Value::cell(heap.make(Kind::Handle, &[41]).expect("room"));
+        let socket = heap.ctor(by_width[2], &[handle, Value::NIL]).expect("room");
+        let frame = registers(&[(FROM, Value::cell(socket)), (WITH, Value::EMPTY_ARRAY)]);
+        let frame: [Value; WINDOW] = frame.try_into().expect("a window");
+        let args = [FROM, WITH];
+        // It gets as far as the host, which has no such socket, and the program has no
+        // error to say so with.
+        let got = m.rest.builtin(Intrinsic::SocketWriteParts, &frame, &args);
+        let got = got.map(|v| v.bits());
+        assert_eq!(got, Err(Stop::broken(Broken::NoNetTypes)));
+    });
+}
+
 /// What is given to a socket to write in parts is an array, and anything else stops the
 /// run, even one that was an array and is freed.
 #[test]
@@ -868,7 +1050,7 @@ fn what_is_no_array_is_not_written_in_parts() {
         let handle = Value::cell(heap.make(Kind::Handle, &[41]).expect("room"));
         let socket = heap.ctor(by_width[2], &[handle, Value::NIL]).expect("room");
         let other = a_cell(heap, 4);
-        let range = Value::cell(array::range(heap, 1, 4).expect("room"));
+        let range = array::range(heap, 1, 4).expect("room");
         let (freed, _) = array_of_kind(heap, Of::Both(40));
         heap.release(freed.as_cell().expect("an array"))
             .expect("live");

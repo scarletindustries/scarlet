@@ -552,6 +552,51 @@ fn divide_and_negate_are_right_at_both_ends_of_the_small_range() {
     );
 }
 
+/// The join of an empty array and a range is a tree, so a push on it, or a write to it,
+/// while something else holds it costs the same however long it is. A push on a range
+/// that is held builds the range as a tree each time.
+#[test]
+fn a_range_joined_to_the_empty_array_is_built_once() {
+    prints(
+        "import scarlet/array\n\
+         import scarlet/internal\n\
+         fn none(n Int) Array(Int) { if n < 0 { [n] } else { [] } }\n\
+         fn pushes(xs Array(Int), i Int, n Int, acc Int) Int {\n\
+         \tif i == n {\n\
+         \t\tacc\n\
+         \t} else {\n\
+         \t\tpushes(xs, i + 1, n, acc + array::length([..xs, i]) + array::length([i, ..xs]))\n\
+         \t}\n\
+         }\n\
+         fn puts(xs Array(Int), i Int, n Int, acc Int) Int {\n\
+         \tif i == n { acc } else { puts(xs, i + 1, n, acc + { array::put(xs, 3, 7)[3] or 0 }) }\n\
+         }\n\
+         fn cost(xs Array(Int)) {\n\
+         \tmade = internal::cells_made()\n\
+         \ta = pushes(xs, 0, 100, 0)\n\
+         \tpushed = internal::cells_made()\n\
+         \tb = puts(xs, 0, 100, 0)\n\
+         \tput = internal::cells_made()\n\
+         \tprintln(\"${pushed - made} ${put - pushed} ${a} ${b}\")\n\
+         }\n\
+         pub fn main() {\n\
+         \tcost(array::concat(none(0), 0..100))\n\
+         \tcost(array::concat(none(0), 0..1000))\n\
+         \tcost(array::concat(0..1000, none(1)))\n\
+         \tcost([..none(0), ..0..1000])\n\
+         \tcost(array::concat(0..10000, none(1)))\n\
+         \tcost(0..1000)\n\
+         }\n",
+        // A write copies the root and a node a level, and 10,000 has one level more.
+        "400 300 20200 700\n\
+         400 300 200200 700\n\
+         400 300 200200 700\n\
+         400 300 200200 700\n\
+         400 400 2000200 700\n\
+         7100 3400 200200 700\n",
+    );
+}
+
 /// A 32-bit number times a small constant stays a small Int. This is
 /// `map_churn`'s key generator, whose products reach about 2^48.1, so it
 /// makes no heap cell.
@@ -1615,8 +1660,8 @@ fn a_nested_record_update_writes_in_place_wherever_its_spread_is() {
 
 /// A map held in a record is set in place the same way. In `by_key` the
 /// record is given up before the set, and the set finds the map with one
-/// holder: 1,000 sets of keys the map already has make the 1,000 records,
-/// the 1,000 tasks and their 1,000 empty arrays, and no map cell.
+/// holder: 1,000 sets of keys the map already has make the 1,000 records and
+/// the 1,000 tasks, and no map cell.
 ///
 /// `by_task` is the same, with a value that is a cell bound before the update.
 /// Its drop comes after the set and before the map's.
@@ -1657,7 +1702,7 @@ fn a_record_update_sets_a_map_it_holds_in_place() {
          \tprintln(cells(keyed))\n\
          \tprintln(cells(tasked))\n\
          }\n",
-        "16\n3000\n16\n3000\n",
+        "16\n2000\n16\n2000\n",
     );
 }
 
@@ -2132,6 +2177,159 @@ fn the_listing_shows_a_write_and_where_a_miss_goes() {
     let write = "    2  r2 = ArraySet(move r2, r3, move r4) -> 4\n";
     let ends = "    3  Ret(move r2)\n    4  Ret(move r2)\n";
     assert!(strike.ends_with(&format!("{write}{ends}")), "{strike}");
+}
+
+/// A range may have more elements than a 64-bit number with a sign can count.
+#[test]
+fn the_longest_range_has_its_length() {
+    prints(
+        "import scarlet/array\n\
+         fn kind(xs Array(Int)) String {\n\
+         \tmatch xs {\n\
+         \t\t[] -> 'none'\n\
+         \t\t[_] -> 'one'\n\
+         \t\t_ -> 'more'\n\
+         \t}\n\
+         }\n\
+         pub fn main() {\n\
+         \tlow = -9223372036854775807 - 1\n\
+         \thigh = 9223372036854775807\n\
+         \tprintln(array::length(low..high))\n\
+         \tprintln(array::length(low..0))\n\
+         \tprintln(array::length(0..high))\n\
+         \tprintln(array::length(high..low))\n\
+         \tprintln(kind(low..high))\n\
+         \tprintln(kind(high..low))\n\
+         \tprintln(kind({ high - 1 }..high))\n\
+         }\n",
+        "18446744073709551615\n9223372036854775808\n9223372036854775807\n0\nmore\nnone\none\n",
+    );
+}
+
+/// The empty array is a constant in an instruction, and it is listed as it is written.
+#[test]
+fn the_listing_shows_the_empty_array() {
+    let src = "fn none(n Int) Array(Int) { if n == 0 { [] } else { [n] } }\n\
+               pub fn main() {\n\
+               \tprintln(none(0))\n\
+               }\n";
+    let listing = scarlet_vm::listing(&compile(src)).expect("the program loads");
+    let none = listing.function(0).expect("none is listed");
+    assert!(none.contains("r2 = Const([])\n"), "{none}");
+    assert_eq!(none.matches("Array").count(), 1, "{none}");
+}
+
+/// Nothing that gives an empty array makes a cell for it, and what is grown from one
+/// makes its own two cells and no more.
+#[test]
+fn the_empty_array_makes_no_cell() {
+    let made = |what: &str| {
+        let src = format!(
+            "import scarlet/array\n\
+             import scarlet/internal\n\
+             import scarlet/map\n\
+             import scarlet/string\n\
+             fn rest(xs Array(Int)) Array(Int) {{\n\
+             \tmatch xs {{\n\
+             \t\t[_, ..t] -> t\n\
+             \t\t[] -> xs\n\
+             \t}}\n\
+             }}\n\
+             fn drop(xs Array(Int), n Int) Array(Int) {{\n\
+             \tif n == 0 {{ xs }} else {{ drop(rest(xs), n - 1) }}\n\
+             }}\n\
+             fn build(n Int, acc Array(Int)) Array(Int) {{\n\
+             \tif n == 0 {{ acc }} else {{ build(n - 1, [..acc, n]) }}\n\
+             }}\n\
+             fn made(xs Array(Int), five Array(Int), m map::Map(Int, Int), n Int) Int {{\n\
+             \tstart = internal::cells_made()\n\
+             \tgot = {what}\n\
+             \tend = internal::cells_made()\n\
+             \tif array::length(got) == 0 && xs == [] && array::length(five) == 5 && map::size(m) == 0 && n == 3 {{\n\
+             \t\tend - start\n\
+             \t}} else {{\n\
+             \t\t-1\n\
+             \t}}\n\
+             }}\n\
+             pub fn main() {{\n\
+             \tprintln(made([], build(5, []), map::new(), 3))\n\
+             }}\n"
+        );
+        run(&src).expect("the program runs")
+    };
+    let nothing = [
+        "[]",
+        "xs",
+        "n..n",
+        "n..2",
+        "n..n - 5",
+        "{ five[2..2] or five }",
+        "{ five[5..5] or five }",
+        "{ xs[0..0] or five }",
+        "[..xs, ..xs]",
+        "[..xs, ..n..n]",
+        "rest(xs)",
+        "array::put(xs, 0, 1)",
+        "array::swap(xs, 0, 0)",
+        "array::reverse(xs)",
+        "map::keys(m)",
+        "map::values(m)",
+    ];
+    for what in nothing {
+        assert_eq!(made(what), "0\n", "{what}");
+    }
+    // The array that is taken apart has two cells, one of two has two more for what is
+    // left of it, and a range has one. A `filter` and a `map` make a closure for their
+    // loop.
+    for (what, cells) in [
+        ("rest([n])", 2),
+        ("rest(n..n + 1)", 1),
+        ("drop([n, n], 2)", 4),
+        ("drop(build(1, []), 1)", 2),
+        ("array::filter(xs, fn(x) x > 1)", 1),
+        ("array::map(xs, fn(x) x + 1)", 1),
+    ] {
+        assert_eq!(made(what), format!("{cells}\n"), "{what}");
+    }
+}
+
+/// An array that is built from the empty one, at either end, and walked back to it makes
+/// cells in proportion to its length, whether or not something else holds it meanwhile.
+#[test]
+fn a_build_from_the_empty_array_and_a_walk_back_are_linear() {
+    let made = |n: usize, push: &str, held: bool| {
+        let src = format!(
+            "import scarlet/internal\n\
+             fn build(n Int, acc Array(Int), before Array(Int)) Array(Int) {{\n\
+             \tif n == 0 {{ if before == [0] {{ [] }} else {{ acc }} }} else {{\n\
+             \t\tbuild(n - 1, {push}, {})\n\
+             \t}}\n\
+             }}\n\
+             fn walk(xs Array(Int), whole Array(Int), n Int) Int {{\n\
+             \tmatch xs {{\n\
+             \t\t[] -> if whole == [0] {{ 0 - n }} else {{ n }}\n\
+             \t\t[_, ..t] -> walk(t, whole, n + 1)\n\
+             \t}}\n\
+             }}\n\
+             pub fn main() {{\n\
+             \tstart = internal::cells_made()\n\
+             \txs = build({n}, [], [])\n\
+             \tprintln(walk(xs, {}, 0) == {n})\n\
+             \tprintln(internal::cells_made() - start)\n\
+             }}\n",
+            if held { "acc" } else { "[]" },
+            if held { "xs" } else { "[]" },
+        );
+        let out = run(&src).expect("the program runs");
+        let cells = out.strip_prefix("True\n").expect("every element");
+        cells.trim().parse::<usize>().expect("a number")
+    };
+    for push in ["[..acc, n]", "[n, ..acc]"] {
+        for held in [false, true] {
+            let (few, many) = (made(1000, push, held), made(4000, push, held));
+            assert!(many <= few * 4 + few / 2, "{push} {held}: {few} {many}");
+        }
+    }
 }
 
 /// A range stores only its two ends, and is an array of Ints in every way a

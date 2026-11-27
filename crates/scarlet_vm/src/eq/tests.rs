@@ -66,3 +66,74 @@ fn closures_compare_by_their_function_and_captures() {
         assert!(!equal(&heap, first, other));
     }
 }
+
+/// The empty array is equal to itself and to no other value, an array with elements
+/// among them.
+#[test]
+fn the_empty_array_equals_only_itself() {
+    let mut heap = Heap::default();
+    let empty = Value::EMPTY_ARRAY;
+    assert!(equal(&heap, empty, empty));
+    let held = [(); 2].map(|()| Value::cell(heap.tuple(&[empty, Value::NIL]).expect("room")));
+    assert!(equal(&heap, held[0], held[1]));
+    let others = [
+        Value::NIL,
+        Value::bool(false),
+        Value::bool(true),
+        Value::int(0).expect("small"),
+        Value::int(3).expect("small"),
+        Value::float(0.0),
+        Value::func(FuncIdx(0)),
+        Value::nullary(name(0, 0)),
+        Value::cell(heap.string(b"").expect("room")),
+        Value::cell(heap.make(Kind::Binary, &[0]).expect("room")),
+        Value::cell(heap.tuple(&[]).expect("room")),
+        Value::cell(map::empty(&mut heap).expect("room")),
+        array::from_values(&mut heap, &[Value::NIL]).expect("room"),
+        array::from_values(&mut heap, &[empty]).expect("room"),
+        array::range(&mut heap, 0, 1).expect("room"),
+        held[0],
+    ];
+    for other in others {
+        assert!(!equal(&heap, empty, other), "{other:?}");
+        assert!(!equal(&heap, other, empty), "{other:?}");
+        let pairs = [(empty, other), (other, empty)]
+            .map(|(a, b)| [a, b].map(|v| Value::cell(heap.tuple(&[v]).expect("room"))));
+        for [a, b] in pairs {
+            assert!(!equal(&heap, a, b), "{other:?}");
+        }
+    }
+}
+
+/// Two arrays are equal when they have equal elements, in whichever form each is, and an
+/// array equals nothing that is not one.
+#[test]
+fn arrays_compare_in_every_form() {
+    let mut heap = Heap::default();
+    let ints: Vec<Value> = (3..6).map(|n| Value::int(n).expect("small")).collect();
+    let tree = array::from_values(&mut heap, &ints).expect("room");
+    let same = array::from_values(&mut heap, &ints).expect("room");
+    let range = array::range(&mut heap, 3, 6).expect("room");
+    let range_too = array::range(&mut heap, 3, 6).expect("room");
+    let equals = [tree, same, range, range_too];
+    for a in equals {
+        for b in equals {
+            assert!(equal(&heap, a, b));
+        }
+    }
+    let shorter = array::from_values(&mut heap, &ints[..2]).expect("room");
+    let others = [
+        shorter,
+        array::range(&mut heap, 3, 5).expect("room"),
+        array::range(&mut heap, 4, 7).expect("room"),
+        array::from_values(&mut heap, &[ints[0], ints[2], ints[1]]).expect("room"),
+        Value::cell(heap.tuple(&ints).expect("room")),
+        Value::cell(heap.make(Kind::Binary, &[3, 4]).expect("room")),
+        Value::NIL,
+    ];
+    for a in equals {
+        for b in others {
+            assert!(!equal(&heap, a, b) && !equal(&heap, b, a), "{a:?} {b:?}");
+        }
+    }
+}

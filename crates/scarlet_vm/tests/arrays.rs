@@ -94,6 +94,28 @@ impl Val {
         }
     }
 
+    /// What `beside` in [`START`] makes of two arrays: whether they are equal, whether
+    /// either is empty, how they are as a map's keys, and what a read and a write of the
+    /// first give.
+    fn beside(&self, other: &Val) -> i128 {
+        let (Val::Array(a), Val::Array(b)) = (self, other) else {
+            panic!("no arrays")
+        };
+        let same = a == b;
+        let is = |yes: bool| i128::from(yes);
+        let keys = if same { 1 } else { 2 };
+        let read = if a.is_empty() { 7 } else { 5 };
+        let all = [
+            is(same),
+            is(a.is_empty()),
+            is(b.is_empty()),
+            keys,
+            read,
+            (a.len() + b.len()) as i128,
+        ];
+        all.into_iter().fold(0, |acc, n| acc * 11 + n) % 9973
+    }
+
     fn source(&self) -> String {
         match self {
             Val::Int(n) => n.to_string(),
@@ -193,6 +215,8 @@ enum Body {
     Again(usize),
     /// A closure that is called and reads the names.
     Closure,
+    /// What two arrays of one type say of each other ([`Val::beside`]).
+    Beside(usize, usize),
 }
 
 #[derive(Debug, Clone)]
@@ -231,6 +255,7 @@ impl Maker<'_> {
                 let n = match self.dice.below(8) {
                     0 if long => [31, 32, 33, 64, 65, 70][self.dice.below(6)],
                     1 if long => self.dice.below(12),
+                    2 => 0,
                     _ => self.dice.below(5),
                 };
                 Val::Array((0..n).map(|_| self.value(of, false)).collect())
@@ -319,9 +344,14 @@ impl Maker<'_> {
             Pat::Array(items, Rest::Name(n)) if !items.is_empty() => Some(*n),
             _ => None,
         };
-        let body = match self.dice.below(8) {
+        let body = match self.dice.below(10) {
             0 => Body::Whole,
             1 => Body::Closure,
+            8 | 9 if !arrays.is_empty() => {
+                let (n, ty) = arrays[self.dice.below(arrays.len())].clone();
+                let all: Vec<_> = arrays.iter().filter(|(_, t)| *t == ty).collect();
+                Body::Beside(n, all[self.dice.below(all.len())].0)
+            }
             2 | 3 => match own {
                 Some(n) => Body::Again(n),
                 None => Body::Plain,
@@ -410,6 +440,7 @@ impl Func {
                 Body::Whole => format!("{names} * 5 + {}(xs)", self.ty.number()),
                 Body::Again(n) => format!("again({names}, f(v{n}, k + 1))"),
                 Body::Closure => format!("call(fn() {{ {names} }})"),
+                Body::Beside(a, b) => format!("{names} * 5 + beside(v{a}, v{b})"),
                 Body::Spread(pieces) => {
                     let pieces: Vec<String> = pieces
                         .iter()
@@ -467,6 +498,10 @@ impl Func {
                     let then = self.run(get(n), k + 1, out);
                     (names * 13 + then) % 9973
                 }
+                Body::Beside(a, b) => {
+                    all.push(get(a).beside(get(b)));
+                    joined(all, 5)
+                }
                 Body::Spread(pieces) => {
                     let mut made = Vec::new();
                     for piece in pieces {
@@ -502,12 +537,20 @@ fn pieces_type(arm: &Arm) -> Ty {
     first.expect("it has one").1.clone()
 }
 
-const START: &str = "import scarlet/array\nimport scarlet/string\n\
+const START: &str = "import scarlet/array\nimport scarlet/map\nimport scarlet/string\n\
 fn ok(i Int, v Int) Bool {\n\tprintln('${i}:${v}')\n\t{ v + i } % 2 == 0\n}\n\
 fn call(f fn() Int) Int { f() }\n\
 fn again(a Int, b Int) Int { { a * 13 + b } % 9973 }\n\
 fn small(n Int) Int { n % 9973 }\n\
-fn same(x a) a { x }\n";
+fn same(x a) a { x }\n\
+fn is(b Bool) Int { if b { 1 } else { 0 } }\n\
+fn rest(xs Array(a)) Array(a) {\n\tmatch xs {\n\t\t[_, ..t] -> t\n\t\t[] -> xs\n\t}\n}\n\
+fn read(xs Array(a)) Int {\n\tmatch xs[0] {\n\t\tSome(x) -> if array::put(xs, 0, x) == xs { 5 } else { 6 }\n\t\tNone -> 7\n\t}\n}\n\
+fn beside(a Array(a), b Array(a)) Int {\n\
+\tkeys = map::size(map::set(map::set(map::new(), a, 1), b, 2))\n\
+\tn = is(a == b) * 11 + is(a == [])\n\
+\t{ { { { n * 11 + is([] == b) } * 11 + keys } * 11 + read(a) } * 11 + array::length([..a, ..b]) } % 9973\n\
+}\n";
 
 /// The array `v`, made in one of several ways.
 fn made(dice: &mut Dice, v: &Val, ty: &Ty) -> String {
@@ -517,8 +560,35 @@ fn made(dice: &mut Dice, v: &Val, ty: &Ty) -> String {
     let of = |all: &[Val]| Val::Array(all.to_vec()).source();
     let cut = dice.below(all.len() + 1);
     let (a, b) = all.split_at(cut);
-    match dice.below(7) {
+    let Ty::Array(elem) = ty else {
+        panic!("no array")
+    };
+    let more = match &**elem {
+        Ty::Int => Some("9".to_string()),
+        Ty::Text => Some("'z'".to_string()),
+        Ty::Pair(_) | Ty::Array(_) => None,
+    };
+    let none = || match (&more, **elem == Ty::Int) {
+        (Some(more), true) if all.len().is_multiple_of(2) => format!("rest(rest([{more}]))"),
+        (_, true) => "4..4".to_string(),
+        (Some(more), false) => format!("rest([{more}])"),
+        (None, false) => "array::filter([], fn(_) True)".to_string(),
+    };
+    match dice.below(12) {
         0 => of(all),
+        7 => format!("[..{}, ..{}]", none(), of(all)),
+        8 => format!("[..{}, ..{}]", of(all), none()),
+        9 if all.is_empty() => none(),
+        9 => {
+            let items: Vec<String> = all.iter().map(Val::source).collect();
+            format!("[{}, ..{}]", items.join(", "), none())
+        }
+        10 => format!("array::filter({}, fn(_) True)", of(all)),
+        11 if more.is_some() => {
+            let items: Vec<String> = all.iter().map(Val::source).collect();
+            let inner = [more.into_iter().collect(), items].concat().join(", ");
+            format!("rest([{inner}])")
+        }
         1 => format!("[..{}, ..{}]", of(a), of(b)),
         2 if !b.is_empty() => {
             let items: Vec<String> = b.iter().map(Val::source).collect();
@@ -529,13 +599,8 @@ fn made(dice: &mut Dice, v: &Val, ty: &Ty) -> String {
             format!("[{}, ..same({})]", items.join(", "), of(b))
         }
         4 => {
-            let Ty::Array(elem) = ty else {
-                panic!("no array")
-            };
-            let more = match &**elem {
-                Ty::Int => "9".to_string(),
-                Ty::Text => "'z'".to_string(),
-                Ty::Pair(_) | Ty::Array(_) => return of(all),
+            let Some(more) = more else {
+                return of(all);
             };
             let items: Vec<String> = all.iter().map(Val::source).collect();
             let inner = [vec![more.clone()], items, vec![more]].concat().join(", ");

@@ -14,7 +14,7 @@ use crate::array::{self, Root, Seq};
 use crate::bigint::{self, Int};
 use crate::binary::{self, Bits};
 use crate::code::{
-    BinaryId, BitsOp, Built, Code, CtorOf, Entry, Length, MaybeHit, Pc, PlaceList, Reg, TextId,
+    BinaryId, BitsOp, Built, Code, CtorOf, Entry, MaybeHit, Pc, PlaceList, Reg, TextId,
 };
 use crate::float;
 use crate::frame::WINDOW;
@@ -500,9 +500,7 @@ impl<'c> Rest<'c, '_> {
                         self.heap.holding(Shape::TUPLE, [key, doc]).map_err(fault)?,
                     ));
                 }
-                Ok(Value::cell(
-                    array::from_values(&mut self.heap, &items).map_err(fault)?,
-                ))
+                array::from_values(&mut self.heap, &items).map_err(fault)
             }
             Intrinsic::JsonElements => {
                 let d = self.doc(v)?;
@@ -511,9 +509,7 @@ impl<'c> Rest<'c, '_> {
                 for at in ats {
                     items.push(self.doc_at(&d, at)?);
                 }
-                Ok(Value::cell(
-                    array::from_values(&mut self.heap, &items).map_err(fault)?,
-                ))
+                array::from_values(&mut self.heap, &items).map_err(fault)
             }
             Intrinsic::JsonString => {
                 let d = self.doc(v)?;
@@ -685,9 +681,7 @@ impl<'c> Rest<'c, '_> {
                 for a in self.host.argv() {
                     items.push(Value::cell(self.heap.string(a.as_bytes()).map_err(fault)?));
                 }
-                Ok(Value::cell(
-                    array::from_values(&mut self.heap, &items).map_err(fault)?,
-                ))
+                array::from_values(&mut self.heap, &items).map_err(fault)
             }
             Intrinsic::OsEnv => {
                 let env = match self.env {
@@ -747,9 +741,7 @@ impl<'c> Rest<'c, '_> {
                     };
                     items.push(item);
                 }
-                Ok(Value::cell(
-                    array::from_values(&mut self.heap, &items).map_err(fault)?,
-                ))
+                array::from_values(&mut self.heap, &items).map_err(fault)
             }
             Intrinsic::FloatFloor
             | Intrinsic::FloatCeil
@@ -957,9 +949,7 @@ impl<'c> Rest<'c, '_> {
         for p in pieces {
             items.push(Value::cell(self.heap.string(p.as_bytes()).map_err(fault)?));
         }
-        Ok(Value::cell(
-            array::from_values(&mut self.heap, &items).map_err(fault)?,
-        ))
+        array::from_values(&mut self.heap, &items).map_err(fault)
     }
 
     /// The bytes of the string `v`.
@@ -1159,10 +1149,7 @@ impl<'c> Rest<'c, '_> {
                     out.extend_from_slice(b"null");
                 }
             } else if variant == types.list.ctor() || variant == types.object.ctor() {
-                let Seq::Tree(items) = self.seq(inner)? else {
-                    return Err(not_json());
-                };
-                let items = array::elements(&self.heap, items);
+                let items = self.stored(inner)?.ok_or_else(not_json)?;
                 let object = variant == types.object.ctor();
                 out.push(if object { b'{' } else { b'[' });
                 todo.push(Step::Text(if object { b"}" } else { b"]" }));
@@ -1218,11 +1205,7 @@ impl<'c> Rest<'c, '_> {
     fn headers(&self, v: Value) -> Result<Vec<(Value, Value)>, Stop> {
         let types = self.http_types()?;
         let not_headers = || Stop::broken(Broken::NotHeaders(v.view()));
-        let items = match self.seq(v)? {
-            Seq::Tree(t) => array::elements(&self.heap, t),
-            Seq::Range { start, end } if start >= end => Vec::new(),
-            Seq::Range { .. } => return Err(not_headers()),
-        };
+        let items = self.stored(v)?.ok_or_else(not_headers)?;
         let mut out = Vec::with_capacity(items.len());
         for h in items {
             let cell = h.as_cell().ok_or_else(not_headers)?;
@@ -1262,9 +1245,7 @@ impl<'c> Rest<'c, '_> {
             let value = self.view(buf, off, &f.value)?;
             items.push(self.build(types.header, [name, value])?);
         }
-        Ok(Value::cell(
-            array::from_values(&mut self.heap, &items).map_err(fault)?,
-        ))
+        array::from_values(&mut self.heap, &items).map_err(fault)
     }
 
     /// The `HeadFlags` a block's tokens make.
@@ -1393,12 +1374,20 @@ impl<'c> Rest<'c, '_> {
             .ok_or_else(|| Stop::broken(Broken::NotAMap(v.view())))
     }
 
-    /// The array `v` holds, as a tree or a range.
-    #[inline(never)]
+    /// The array `v` is.
+    #[inline(always)]
     pub(super) fn seq(&self, v: Value) -> Result<Seq, Stop> {
-        v.as_cell()
-            .and_then(|cell| array::seq(&self.heap, cell))
-            .ok_or_else(|| Stop::broken(Broken::NotAnArray(v.view())))
+        array::seq(&self.heap, v).ok_or_else(|| not_an_array(v))
+    }
+
+    /// The elements of the array `v`, with no reference added, or `None` when it is a
+    /// range, which stores none.
+    fn stored(&self, v: Value) -> Result<Option<Vec<Value>>, Stop> {
+        Ok(match self.seq(v)? {
+            Seq::Empty => Some(Vec::new()),
+            Seq::Tree(a) => Some(array::elements(&self.heap, a)),
+            Seq::Range { .. } => None,
+        })
     }
 
     /// Element `i` of `s`, holding its own reference, or `None` past the end.
@@ -1406,6 +1395,7 @@ impl<'c> Rest<'c, '_> {
     #[inline(never)]
     pub(super) fn element(&mut self, s: Seq, i: usize) -> Result<Option<Value>, Stop> {
         match s {
+            Seq::Empty => Ok(None),
             Seq::Tree(a) => match array::get(&self.heap, a, i) {
                 Some(v) => Ok(Some(self.share(v)?)),
                 None => Ok(None),
@@ -1419,21 +1409,23 @@ impl<'c> Rest<'c, '_> {
         }
     }
 
-    /// `s` as a tree, holding one reference. That is the tree itself, or a
-    /// range's elements built into one.
+    /// `s` as a tree, holding one reference, or `None` when it is empty. That is
+    /// the tree itself, or a range's elements built into one.
     #[inline(never)]
-    pub(super) fn tree(&mut self, s: Seq) -> Result<crate::heap::Cell, Stop> {
+    pub(super) fn tree(&mut self, s: Seq) -> Result<Option<Cell>, Stop> {
         match s {
+            Seq::Empty => Ok(None),
             Seq::Tree(a) => {
                 self.heap.share(a)?;
-                Ok(a)
+                Ok(Some(a))
             }
             Seq::Range { start, end } => {
                 let mut items = Vec::new();
-                for n in start..end.max(start) {
+                for n in start..end {
                     items.push(bigint::int(&mut self.heap, n).map_err(fault)?);
                 }
-                array::from_values(&mut self.heap, &items).map_err(fault)
+                let built = array::from_values(&mut self.heap, &items).map_err(fault)?;
+                Ok(built.as_cell())
             }
         }
     }
@@ -1470,6 +1462,7 @@ impl<'c> Rest<'c, '_> {
             v @ (View::Float(_)
             | View::Nil
             | View::Bool(_)
+            | View::EmptyArray
             | View::Func(_)
             | View::Cell(_)
             | View::Nullary(_)) => Err(Stop::broken(Broken::RangeEnd(v))),
@@ -1487,14 +1480,15 @@ impl<'c> Rest<'c, '_> {
             v @ (View::Float(_)
             | View::Nil
             | View::Bool(_)
+            | View::EmptyArray
             | View::Func(_)
             | View::Cell(_)
             | View::Nullary(_)) => Err(Stop::broken(Broken::Position(v))),
         }
     }
 
-    /// The first element of `s`, which `v` holds, and the array of the others, or
-    /// `None` when it has no element. The element is `Nil` when it is not asked for,
+    /// The first element of the array `v` and the array of the others, or `None` when
+    /// it has no element. The element is `Nil` when it is not asked for,
     /// which is what `head` says. When `taken`, `v`'s reference passes in on a hit, so
     /// an array nothing else holds can change in place.
     #[inline(always)]
@@ -1504,12 +1498,14 @@ impl<'c> Rest<'c, '_> {
         head: bool,
         taken: bool,
     ) -> Result<Option<(Value, Value)>, Stop> {
-        let s = self.seq(v)?;
-        if let Seq::Tree(a) = s {
-            let found = array::uncons(&mut self.heap, a, head, taken).map_err(fault)?;
-            return Ok(found.map(|(x, left)| (x, Value::cell(left))));
+        match self.seq(v)? {
+            Seq::Empty => Ok(None),
+            Seq::Tree(a) => {
+                let found = array::uncons(&mut self.heap, a, head, taken).map_err(fault)?;
+                found.ok_or_else(empty_cell).map(Some)
+            }
+            s @ Seq::Range { .. } => self.uncons_range(s, v, head, taken).map(Some),
         }
-        self.uncons_range(s, v, head, taken)
     }
 
     /// [`Self::uncons`] of a range.
@@ -1520,11 +1516,11 @@ impl<'c> Rest<'c, '_> {
         v: Value,
         head: bool,
         taken: bool,
-    ) -> Result<Option<(Value, Value)>, Stop> {
+    ) -> Result<(Value, Value), Stop> {
         if s.len(&self.heap) == 0 {
-            return Ok(None);
+            return Err(empty_cell());
         }
-        let left = self.behind(v, 1, false)?;
+        let left = array::behind(&mut self.heap, s, 1).map_err(fault)?;
         let first = match head {
             true => match self.element(s, 0) {
                 Ok(first) => first,
@@ -1535,7 +1531,7 @@ impl<'c> Rest<'c, '_> {
         if taken {
             self.release(v)?;
         }
-        Ok(Some((first.unwrap_or(Value::NIL), left)))
+        Ok((first.unwrap_or(Value::NIL), left))
     }
 
     /// `stop`, where what holds `values` has not been written yet and never will be.
@@ -1557,21 +1553,17 @@ impl<'c> Rest<'c, '_> {
     /// The array `v` without its first `n` elements. When `taken`, `v`'s reference
     /// passes in, even where there is no room for the array.
     pub(super) fn behind(&mut self, v: Value, n: usize, taken: bool) -> Result<Value, Stop> {
-        let cell = match self.seq(v)? {
-            Seq::Tree(a) if taken => array::skip_owned(&mut self.heap, a, n),
-            Seq::Tree(a) => array::skip(&mut self.heap, a, n),
-            Seq::Range { start, end } => {
-                let n = (n as u64).min(array::range_len(start, end));
-                // `n` is at most `end - start`, so `start + n` is
-                // within `start..=end` and the add is exact.
-                let left = array::range(&mut self.heap, start.wrapping_add_unsigned(n), end);
-                if taken {
-                    self.release(v)?;
-                }
-                left
-            }
-        };
-        Ok(Value::cell(cell.map_err(fault)?))
+        let s = self.seq(v)?;
+        if let Seq::Tree(a) = s
+            && taken
+        {
+            return array::skip_owned(&mut self.heap, a, n).map_err(fault);
+        }
+        let left = array::behind(&mut self.heap, s, n);
+        if taken {
+            self.release(v)?;
+        }
+        left.map_err(fault)
     }
 
     /// How many elements the array `v` has.
@@ -1579,12 +1571,6 @@ impl<'c> Rest<'c, '_> {
     pub(super) fn array_len(&mut self, v: Value) -> Result<Value, Stop> {
         let n = self.seq(v)?.len(&self.heap);
         bigint::int(&mut self.heap, n).map_err(fault)
-    }
-
-    /// Whether the array `v` has the `length`.
-    #[inline(never)]
-    pub(super) fn fits(&self, v: Value, length: Length) -> Result<bool, Stop> {
-        Ok(array::fits(self.seq(v)?.len(&self.heap), length))
     }
 
     /// Put the elements of the tree `r` from `from` on in `out`, with no reference added.
@@ -1700,6 +1686,7 @@ impl<'c> Rest<'c, '_> {
             View::Int(_)
             | View::Nil
             | View::Bool(_)
+            | View::EmptyArray
             | View::Func(_)
             | View::Cell(_)
             | View::Nullary(_) => int::neg(&mut self.heap, a),
@@ -1775,6 +1762,7 @@ impl<'c> Rest<'c, '_> {
             View::Float(_)
             | View::Nil
             | View::Bool(_)
+            | View::EmptyArray
             | View::Func(_)
             | View::Cell(_)
             | View::Nullary(_) => {
@@ -1814,7 +1802,12 @@ impl<'c> Rest<'c, '_> {
                 Some(func) => func,
                 None => return Err(Stop::broken(Broken::NotAFunction(f.view()))),
             },
-            v @ (View::Float(_) | View::Int(_) | View::Nil | View::Bool(_) | View::Nullary(_)) => {
+            v @ (View::Float(_)
+            | View::Int(_)
+            | View::Nil
+            | View::Bool(_)
+            | View::EmptyArray
+            | View::Nullary(_)) => {
                 return Err(Stop::broken(Broken::NotAFunction(v)));
             }
         };
@@ -1835,19 +1828,23 @@ impl<'c> Rest<'c, '_> {
     #[inline(never)]
     pub(super) fn range(&mut self, start: Value, end: Value) -> Result<Value, Stop> {
         let (start, end) = (self.range_end(start)?, self.range_end(end)?);
-        let cell = array::range(&mut self.heap, start, end).map_err(fault)?;
-        Ok(Value::cell(cell))
+        array::range(&mut self.heap, start, end).map_err(fault)
     }
 
     /// `[..a, ..b]`.
     #[inline(never)]
     pub(super) fn array_concat(&mut self, a: Value, b: Value) -> Result<Value, Stop> {
-        let (a, b) = (self.seq(a)?, self.seq(b)?);
-        let (a, b) = (self.tree(a)?, self.tree(b)?);
-        let cell = array::concat(&mut self.heap, a, b).map_err(fault);
-        self.heap.release(a)?;
-        self.heap.release(b)?;
-        Ok(Value::cell(cell?))
+        let (l, r) = (self.seq(a)?, self.seq(b)?);
+        let (l, r) = match (self.tree(l)?, self.tree(r)?) {
+            (Some(l), Some(r)) => (l, r),
+            // A range that is all of the join is a tree by now. Kept as a range it
+            // would be built as one again by each push on it and each write to it.
+            (one, None) | (None, one) => return Ok(one.map_or(Value::EMPTY_ARRAY, Value::cell)),
+        };
+        let joined = array::concat(&mut self.heap, l, r).map_err(fault);
+        self.heap.release(l)?;
+        self.heap.release(r)?;
+        joined
     }
 
     /// Where `of[start..end]` is, when that range is inside the array.
@@ -1865,17 +1862,8 @@ impl<'c> Rest<'c, '_> {
     #[inline(always)]
     pub(super) fn slice(&mut self, span: Span) -> Result<Value, Stop> {
         let Span { of, from, to } = span;
-        let cut = match of {
-            Seq::Tree(a) => array::slice(&mut self.heap, a, from, to),
-            // Both are at most the range's length, so each sum lands within
-            // `start..=end` and the add is exact.
-            Seq::Range { start, .. } => array::range(
-                &mut self.heap,
-                start.wrapping_add_unsigned(from as u64),
-                start.wrapping_add_unsigned(to as u64),
-            ),
-        };
-        Ok(Value::cell(cut.map_err(fault)?))
+        let cut = array::slice(&mut self.heap, of, from, to);
+        cut.map_err(fault)
     }
 
     /// `v` with one more reference, for when it goes somewhere new.
@@ -1910,6 +1898,20 @@ fn wrong_arity(entry: &Entry, argc: usize) -> Stop {
 #[inline(never)]
 fn no_func(func: FuncIdx) -> Stop {
     Stop::missing(Missing::NoFunc(func))
+}
+
+/// The stop for an array operation on `v`, which is no array.
+#[cold]
+#[inline(never)]
+pub(super) fn not_an_array(v: Value) -> Stop {
+    Stop::broken(Broken::NotAnArray(v.view()))
+}
+
+/// The stop for an array's cell that has no elements.
+#[cold]
+#[inline(never)]
+fn empty_cell() -> Stop {
+    Stop::broken(Broken::EmptyCell)
 }
 
 /// `x` shifted `count` bits, left (times 2^count, exactly) or right (divided

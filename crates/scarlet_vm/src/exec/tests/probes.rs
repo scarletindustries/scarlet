@@ -125,15 +125,12 @@ pub(super) fn array_of_kind(heap: &mut Heap, of: Of) -> (Value, Vec<Result<Value
                     _ => small(i as i64),
                 })
                 .collect();
-            let cell = array::from_values(heap, &items).expect("room");
-            (Value::cell(cell), items.into_iter().map(Ok).collect())
+            let whole = array::from_values(heap, &items).expect("room");
+            (whole, items.into_iter().map(Ok).collect())
         }
         Of::Range(start, end) => {
-            let cell = array::range(heap, start, end).expect("room");
-            (
-                Value::cell(cell),
-                (start..end.max(start)).map(Err).collect(),
-            )
+            let whole = array::range(heap, start, end).expect("room");
+            (whole, (start..end.max(start)).map(Err).collect())
         }
     }
 }
@@ -162,6 +159,8 @@ pub(super) fn elements(m: &mut Machine<'_, '_>, v: Value) -> Vec<Value> {
 pub(super) fn is_array(m: &mut Machine<'_, '_>, v: Value, want: &[Result<Value, i64>], what: &str) {
     let got = elements(m, v);
     assert_eq!(got.len(), want.len(), "{what}");
+    let empty = v.bits() == Value::EMPTY_ARRAY.bits();
+    assert_eq!(empty, want.is_empty(), "{what}");
     for (got, want) in got.iter().zip(want) {
         assert!(is_element(m, *got, want), "{what}");
     }
@@ -547,12 +546,13 @@ fn a_probe_of_the_wrong_kind_stops() {
                         let stop = run_with(m, code, &regs);
                         // Any value is a key, and any Int a place.
                         let fits = match wrong == FROM {
-                            true => false,
+                            true => !is_map && v.view() == View::EmptyArray,
                             false => is_map || is_int,
                         };
                         match fits {
                             true => {
-                                found(&stop);
+                                let nothing = wrong == FROM;
+                                assert!(!(found(&stop) && nothing), "{what}");
                             }
                             false => {
                                 let want = match (wrong == FROM, is_map) {
@@ -609,7 +609,7 @@ fn a_probe_that_finds_a_freed_cell_stops() {
             let of = match is_map {
                 true => {
                     let map = map::empty(heap).expect("room");
-                    map::set_owned(heap, map, small(0), lost).expect("room")
+                    Value::cell(map::set_owned(heap, map, small(0), lost).expect("room"))
                 }
                 false => array::from_values(heap, &[lost, Value::NIL]).expect("room"),
             };
@@ -617,7 +617,7 @@ fn a_probe_that_finds_a_freed_cell_stops() {
             while heap.unique(cell) != Err(DeadCell) {
                 heap.release(cell).expect("live");
             }
-            let regs = registers(&[(FROM, Value::cell(of)), (AT, small(0)), (TO, small(1))]);
+            let regs = registers(&[(FROM, of), (AT, small(0)), (TO, small(1))]);
             let stop = run_with(m, code, &regs);
             assert_eq!(stop, Stop::broken(Broken::DeadCell));
             assert_eq!(in_register(m, AWAY).bits(), Value::NIL.bits());

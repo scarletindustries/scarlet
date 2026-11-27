@@ -97,7 +97,23 @@ fn one(heap: &Heap, v: Value, s: &mut Sip<1, 3>, todo: &mut Vec<Value>) {
         View::Bool(b) => plain(s, PLAIN_IMMEDIATE | if b { 2 } else { 1 }),
         View::Func(f) => plain(s, PLAIN_FUNC | u64::from(f.0)),
         View::Nullary(v) => plain(s, PLAIN_NULLARY | variant_word(v)),
+        View::EmptyArray => array(heap, Seq::Empty, s, todo),
         View::Cell(cell) => self::cell(heap, cell, s, todo),
+    }
+}
+
+/// [`one`] of an array.
+fn array(heap: &Heap, seq: Seq, s: &mut Sip<1, 3>, todo: &mut Vec<Value>) {
+    s.tag(Tag::Array);
+    s.word(seq.len(heap));
+    match seq {
+        Seq::Empty => {}
+        Seq::Range { start, end } => {
+            for n in start..end {
+                int(s, i128::from(n));
+            }
+        }
+        Seq::Tree(t) => queue(todo, array::elements(heap, t)),
     }
 }
 
@@ -105,19 +121,6 @@ fn one(heap: &Heap, v: Value, s: &mut Sip<1, 3>, todo: &mut Vec<Value>) {
 /// that is none of the program's or a closure of no function. What such a cell
 /// lacks counts as 0 here or is left out, and an audit is what finds it.
 fn cell(heap: &Heap, cell: Cell, s: &mut Sip<1, 3>, todo: &mut Vec<Value>) {
-    if let Some(seq) = array::seq(heap, cell) {
-        s.tag(Tag::Array);
-        s.word(seq.len(heap));
-        match seq {
-            Seq::Range { start, end } => {
-                for n in start..end {
-                    int(s, i128::from(n));
-                }
-            }
-            Seq::Tree(t) => queue(todo, array::elements(heap, t)),
-        }
-        return;
-    }
     if let Some(b) = binary::bits(heap, cell) {
         s.tag(Tag::Binary);
         s.word(b.len);
@@ -179,11 +182,14 @@ fn cell(heap: &Heap, cell: Cell, s: &mut Sip<1, 3>, todo: &mut Vec<Value>) {
             }
             queue(todo, parts);
         }
+        Kind::ArrayRoot | Kind::Range => {
+            if let Some(seq) = array::seq(heap, Value::cell(cell)) {
+                array(heap, seq, s, todo);
+            }
+        }
         // Handled above, or never a value of its own.
-        Kind::ArrayRoot
-        | Kind::ArrayLeaf
+        Kind::ArrayLeaf
         | Kind::ArrayBranch
-        | Kind::Range
         | Kind::Binary
         | Kind::BinarySlice
         | Kind::MapNode

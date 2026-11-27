@@ -40,7 +40,7 @@ use crate::{Audit, Stop};
 
 mod rest;
 
-use rest::Rest;
+use rest::{Rest, not_an_array};
 
 // The handlers of the operator instructions. Each takes its operands out of
 // the registers, does its operator in place when it can, and asks the one slow
@@ -1062,6 +1062,7 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
                     v @ (View::Float(_)
                     | View::Int(_)
                     | View::Nil
+                    | View::EmptyArray
                     | View::Func(_)
                     | View::Cell(_)
                     | View::Nullary(_)) => {
@@ -1076,9 +1077,9 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
             }
             Ins::ArrayLen { dst, src } => {
                 let of = win.look(src);
-                let small = array::tree_len(&rest.heap, of);
-                let small = small.and_then(|n| Value::int(n.cast_signed()));
-                let len = match small {
+                let len = array::seq(&rest.heap, of).map(|s| s.len(&rest.heap));
+                let small = len.and_then(|n| i64::try_from(n).ok());
+                let len = match small.and_then(Value::int) {
                     Some(len) => len,
                     None => rest.array_len(of)?,
                 };
@@ -1126,11 +1127,8 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
                 ref to,
             } => {
                 let of = win.look(src);
-                let fits = match array::tree_len(&rest.heap, of) {
-                    Some(len) => array::fits(len, length),
-                    None => rest.fits(of, length)?,
-                };
-                if !fits {
+                let s = array::seq(&rest.heap, of).ok_or_else(|| not_an_array(of))?;
+                if !array::fits(s.len(&rest.heap), length) {
                     pc = to.index();
                 }
             }
@@ -1196,6 +1194,7 @@ fn steps(stack: &mut [Value], rest: &mut Rest<'_, '_>, at: At) -> Result<Pause, 
                 v @ (View::Float(_)
                 | View::Int(_)
                 | View::Nil
+                | View::EmptyArray
                 | View::Func(_)
                 | View::Cell(_)
                 | View::Nullary(_)) => {
@@ -1916,28 +1915,31 @@ fn array(
     for r in elements {
         values.push(win.share(&mut rest.heap, Shared(*r))?);
     }
-    let cell = array::from_values(&mut rest.heap, &values).map_err(fault)?;
-    Ok(win.put(&mut rest.heap, dst, Value::cell(cell))?)
+    let made = array::from_values(&mut rest.heap, &values).map_err(fault)?;
+    Ok(win.put(&mut rest.heap, dst, made)?)
 }
 
-/// The array in `src`, which is `s`, as a tree to change, holding one reference. That is
-/// the register's when `src` gives it up, so one that nothing else holds has a count
-/// of 1. A range stores no elements to change, so it is built as a tree first.
+/// The array in `src`, which is `s`, as a tree to change, holding one reference, or
+/// `None` when it is empty. The reference is the register's when `src` gives it up, so
+/// a tree that nothing else holds has a count of 1. A range stores no elements to
+/// change, so it is built as a tree first.
 #[inline(always)]
 fn to_change(
     win: &mut Window<'_>,
     rest: &mut Rest<'_, '_>,
     src: Arg<Reg>,
     s: Seq,
-) -> Result<Cell, Stop> {
+) -> Result<Option<Cell>, Stop> {
     match s {
+        // There is no reference to take.
+        Seq::Empty => Ok(None),
         Seq::Tree(a) => {
             if src.moved {
                 win.empty(src.reg);
             } else {
                 rest.heap.share(a)?;
             }
-            Ok(a)
+            Ok(Some(a))
         }
         Seq::Range { .. } => {
             let a = rest.tree(s)?;
@@ -1963,8 +1965,8 @@ fn array_push(
     let s = rest.seq(win.get(src.reg))?;
     let x = win.pass(&mut rest.heap, item)?;
     let a = to_change(&mut win, rest, src, s)?;
-    let cell = array::push_owned(&mut rest.heap, a, x, end).map_err(fault)?;
-    Ok(win.put(&mut rest.heap, dst, Value::cell(cell))?)
+    let pushed = array::push_owned(&mut rest.heap, a, x, end).map_err(fault)?;
+    Ok(win.put(&mut rest.heap, dst, pushed)?)
 }
 
 /// The array in `src` with the values in `items` at `end` of it.
@@ -1987,8 +1989,8 @@ fn array_extend(
         let held = win.empty(src.reg);
         rest.release(held)?;
     }
-    let cell = array::extend_owned(&mut rest.heap, a, &values, end).map_err(fault)?;
-    Ok(win.put(&mut rest.heap, dst, Value::cell(cell))?)
+    let longer = array::extend_owned(&mut rest.heap, a, &values, end).map_err(fault)?;
+    Ok(win.put(&mut rest.heap, dst, longer)?)
 }
 
 /// The first element of the array in `src` into `head` and the array of the others into
@@ -2063,7 +2065,8 @@ fn split_in<const N: usize>(
             more.as_mut_slice()
         }
     };
-    let owned = match array::split(&rest.heap, v, split, found) {
+    let s = array::seq(&rest.heap, v).ok_or_else(|| not_an_array(v))?;
+    let owned = match array::split(&rest.heap, s, split, found)? {
         Found::Miss => return Ok(false),
         Found::All => false,
         Found::Apart(r) => {
@@ -2074,7 +2077,6 @@ fn split_in<const N: usize>(
             rest.run_of_range(start.wrapping_add(i64::from(split.from)), elements, found)?;
             true
         }
-        Found::Other => return Err(Stop::broken(Broken::NotAnArray(v.view()))),
     };
     let found = &*found;
     if !owned {
@@ -2160,8 +2162,8 @@ fn array_set(
     };
     let x = win.pass(&mut rest.heap, value)?;
     let array = to_change(&mut win, rest, src, s)?;
-    let cell = array::set(&mut rest.heap, array, i, x).map_err(fault)?;
-    Ok(Some(Value::cell(cell)))
+    let written = array::set(&mut rest.heap, array, i, x).map_err(fault)?;
+    Ok(Some(written))
 }
 
 // What an operator instruction does when it cannot answer in place. Each

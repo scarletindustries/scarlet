@@ -65,6 +65,22 @@ fn strip_banner(stdout: &str) -> String {
     lines.collect::<Vec<_>>().join("\n")
 }
 
+/// An empty array that an entry binds is the same one to a later entry, however each was
+/// made.
+#[test]
+fn an_empty_array_is_kept_between_entries() {
+    let out = repl(
+        "import scarlet/map\n\
+         xs = []\n\
+         m = map::set(map::new(), 3..3, 'found')\n\
+         map::get(m, xs)\n\
+         xs\n\
+         [..xs, 1, ..xs]\n\
+         xs == 5..2\n",
+    );
+    assert_eq!(out.trim(), "Some(found)\n[]\n[1]\nTrue", "{out}");
+}
+
 /// `'x' + 'y'` and `100 + 200` occupy the identical `Span` when each entry is
 /// parsed on its own, so the second must not retype the first.
 #[test]

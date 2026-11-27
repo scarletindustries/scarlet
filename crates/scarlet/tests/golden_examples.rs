@@ -315,6 +315,9 @@ suite! {
         // shared, of one field and of many, set to numbers, to cells and to the
         // record itself, and of a variant that an arm has matched.
         record_updates,
+        // The empty array from everything that can make one, and everything that
+        // reads one.
+        empty_arrays,
         // Branches whose values are used further on, one in another and one in what
         // another is on, with what each holds read in it, in its other branch or
         // after it, and module constants that read each other.
